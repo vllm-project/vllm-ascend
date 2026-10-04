@@ -7,17 +7,22 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from ..protocol.transfer import StoreCommand
 from ..runtime.batch import KVTransferBatch
-from ..runtime.evidence import LoadCompletion, StoreCompletion
+from ..runtime.evidence import LayerStoreResult, LoadCompletion, StoreCompletion
+
+LoadOperation = Callable[[KVTransferBatch, int | None], tuple[LoadCompletion, ...]]
+BulkStoreOperation = Callable[[tuple[StoreCommand, ...], Any], tuple[StoreCompletion, ...]]
+LayerwiseStoreOperation = Callable[[KVTransferBatch, Any, int | None], LayerStoreResult]
+LayerwiseStorePreparation = Callable[
+    [tuple[StoreCommand, ...]], tuple[KVTransferBatch | None, tuple[StoreCompletion, ...]]
+]
 
 
 class LoadTimelineProtocol(Protocol):
     collects_completions: bool
 
-    def bind_operation(
-        self,
-        operation: Callable[[KVTransferBatch, int | None], tuple[LoadCompletion, ...]],
-    ) -> None: ...
+    def bind_operation(self, operation: LoadOperation) -> None: ...
 
     def start(self) -> None: ...
 
@@ -32,22 +37,18 @@ class LoadTimelineProtocol(Protocol):
 
 @dataclass(slots=True)
 class StoreBatch:
-    """One accepted Store batch and its exact completion fence."""
+    """The exact completion fence for one submitted Store invocation."""
 
-    transfer: KVTransferBatch
     completed: threading.Event = field(default_factory=threading.Event)
     completions: list[StoreCompletion] = field(default_factory=list)
 
 
 class StoreTimelineProtocol(Protocol):
-    def bind_operation(
-        self,
-        operation: Callable[[KVTransferBatch, Any, int | None], tuple[StoreCompletion, ...]],
-    ) -> None: ...
+    def bind_operation(self, operation: BulkStoreOperation) -> None: ...
 
     def start(self) -> None: ...
 
-    def submit(self, batch: KVTransferBatch, source_ready_event: Any) -> StoreBatch: ...
+    def submit(self, commands: tuple[StoreCommand, ...], source_ready_event: Any) -> StoreBatch: ...
 
     def wait(self, batch: StoreBatch) -> tuple[StoreCompletion, ...]: ...
 

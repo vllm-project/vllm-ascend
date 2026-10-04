@@ -5,6 +5,7 @@ from __future__ import annotations
 from numbers import Integral
 
 from ..batch import KVTransferBatch
+from ..evidence import LayerStoreResult
 from ..evidence import TransferEvidence as RuntimeTransferEvidence
 from .arguments import materialize_rule_ranges, merge_rule_key_ranges
 from .io import BackendIO, _batch_sources, _load_completions, _store_completions
@@ -31,10 +32,7 @@ class KeyRangeBackendIO(BackendIO):
         if not arguments.keys:
             return _load_completions(batch, ())
         native_result = self._backend.batch_copy_get(
-            arguments.keys,
-            arguments.addresses,
-            arguments.sizes,
-            arguments.offsets,
+            arguments.keys, arguments.addresses, arguments.sizes, arguments.offsets
         )
         result_codes = self._require_result_codes("batch_copy_get", arguments.keys, native_result)
         codes_by_key = dict(zip(arguments.keys, result_codes, strict=True))
@@ -53,10 +51,7 @@ class KeyRangeBackendIO(BackendIO):
             )
             source_handed_off = True
             native_result = self._backend.batch_copy_put(
-                arguments.keys,
-                arguments.addresses,
-                arguments.sizes,
-                arguments.offsets,
+                arguments.keys, arguments.addresses, arguments.sizes, arguments.offsets
             )
         except Exception as error:
             evidence = tuple(
@@ -75,6 +70,27 @@ class KeyRangeBackendIO(BackendIO):
             for source in arguments.sources
         )
         return _store_completions(batch, evidence, result_error, force_failed=result_codes is None)
+
+    def store_layer(self, batch: KVTransferBatch, layer_id: int) -> LayerStoreResult:
+        """Copy one layer and defer immutable source evidence to session finalization."""
+
+        source_handed_off = False
+        keys = batch.selected_keys()
+        try:
+            ranges = materialize_rule_ranges(
+                self._bound_rules, batch, layer_id=layer_id, store=True, include_sources=False
+            )
+            arguments = merge_rule_key_ranges(ranges)
+            keys = tuple(arguments.keys)
+            source_handed_off = True
+            native_result = self._backend.batch_copy_put(
+                arguments.keys, arguments.addresses, arguments.sizes, arguments.offsets
+            )
+        except Exception as error:
+            return LayerStoreResult(keys, (None,) * len(keys), (not source_handed_off,) * len(keys), error)
+        result_codes, result_error = self._interpret_store_results(len(keys), native_result)
+        codes = (None,) * len(keys) if result_codes is None else result_codes
+        return LayerStoreResult(keys, codes, tuple(code == 0 for code in codes), result_error)
 
     def finish_load_sessions(self, keys: list[str]) -> None:
         native_result = self._backend.batch_get_end(keys)

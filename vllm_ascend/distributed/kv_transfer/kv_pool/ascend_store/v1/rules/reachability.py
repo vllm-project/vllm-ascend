@@ -1,7 +1,11 @@
-"""Select request-visible KV regions and reduce Backend availability.
+"""Select request-visible KV regions and reduce them to one reachable prefix.
 
-These rules retain only configuration-derived reachability behavior. Request
-hashes, token ranges, and observed availability remain call-time inputs.
+Selection returns cache-group-ordered masks derived from static cache geometry.
+Resolution combines the corresponding chunk rows and Backend availability with
+the locally available prefix, preserving any remote tail identities needed by
+Load. Request hashes, token ranges, and observations remain call-time inputs;
+Backend queries, object keys, memory projection, and transfer state stay outside
+this module.
 """
 
 from __future__ import annotations
@@ -10,6 +14,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TypeAlias, cast
 
+import numpy as np
+from numpy.typing import NDArray
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
@@ -33,45 +39,18 @@ from ..protocol.lookup import TailKeyBoundary
 from ..topology import KVPoolGroupTopology
 
 BlockHashes = Sequence[BlockHash | str]
+ChunkRows: TypeAlias = tuple[NDArray[np.uint64], NDArray[np.uint64], tuple[BlockHash | str, ...]]
 ChunkMask: TypeAlias = tuple[bool, ...] | None
+ChunkMasks: TypeAlias = tuple[ChunkMask, ...]
+LookupObservation: TypeAlias = tuple[ChunkRows, tuple[bool, ...]]
 
 
-@dataclass(frozen=True, slots=True)
-class GroupSelection:
-    """Logical chunks selected for one original vLLM cache group."""
-
-    group_id: int
-    chunk_mask: ChunkMask
-
-    def includes(self, start_token: int, block_size: int) -> bool:
-        chunk_index = start_token // block_size
-        return self.chunk_mask is None or (chunk_index < len(self.chunk_mask) and self.chunk_mask[chunk_index])
-
-
-@dataclass(frozen=True, slots=True)
-class KVSelection:
-    """Content-identified KV selected on the Token axis."""
-
-    token_range: TokenRange
-    block_hashes: tuple[BlockHash | str, ...]
-    groups: tuple[GroupSelection, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class ChunkAvailability:
-    """Backend availability observed for one semantic KV chunk."""
-
-    token_range: TokenRange
-    content_hash: BlockHash | str
-    available: bool
-
-
-@dataclass(frozen=True, slots=True)
-class GroupAvailability:
-    """Semantic chunk observations for one original vLLM cache group."""
-
-    group_id: int
-    chunks: tuple[ChunkAvailability, ...]
+# =============================================================================
+# Reachability Contract and Cache View
+# =============================================================================
+#
+# Represent the common-prefix result and adapt external key observations to the
+# BlockPool surface expected by vLLM's cache-manager algorithms.
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,47 +86,64 @@ class ExternalCachedBlockPool:
         return (group_index, block_hash_to_bytes(block_hash)) in self._cached_hashes
 
 
+# =============================================================================
+# Unitary Cache-Group Reachability
+# =============================================================================
+#
+# A single transferable group needs no cross-group mask reconciliation; reduce
+# its ordered observations directly to the configured transfer granularity.
+
+
 class UnitaryReachability:
     """Select reachable KV for one transferable cache group."""
 
-    def __init__(
-        self,
-        group_id: int,
-        max_model_len: int,
-        cache_transfer_granularity: int,
-    ) -> None:
+    def __init__(self, group_id: int, max_model_len: int, cache_transfer_granularity: int) -> None:
         self.group_ids: tuple[int, ...] = (group_id,)
         self._max_model_len = max_model_len
         self._cache_transfer_granularity = cache_transfer_granularity
 
-    def select_for_lookup(self, block_hashes: BlockHashes, query_range: TokenRange) -> KVSelection:
-        return KVSelection(query_range, tuple(block_hashes), (GroupSelection(self.group_ids[0], None),))
+    def select_for_lookup(self, block_hashes: BlockHashes, query_range: TokenRange) -> ChunkMasks:
+        del block_hashes, query_range
+        return (None,)
 
     def resolve_available_end(
-        self, selection: KVSelection, availability: Sequence[GroupAvailability]
+        self, query_range: TokenRange, block_hashes: BlockHashes, observations: Sequence[LookupObservation]
     ) -> ReachablePrefix:
-        if len(availability) != 1 or availability[0].group_id != self.group_ids[0]:
+        del block_hashes
+        if len(observations) != 1:
             raise ValueError(f"Expected one Lookup observation for group {self.group_ids[0]}")
 
-        query_range = selection.token_range
         max_hit_length = min(query_range.end_token, self._max_model_len)
         hit_end = min(query_range.start_token, max_hit_length)
         hit_end -= hit_end % self._cache_transfer_granularity
-        observation = availability[0]
-        for chunk in observation.chunks:
-            if chunk.token_range.end_token > max_hit_length or not chunk.available:
+        (starts, counts, _), available = observations[0]
+        if len(starts) != len(available):
+            raise ValueError("Lookup chunks and Backend availability have different lengths")
+        for start, count, hit in zip(starts, counts, available, strict=True):
+            end_token = int(start + count)
+            if end_token > max_hit_length or not hit:
                 break
-            if chunk.token_range.end_token % self._cache_transfer_granularity == 0:
-                hit_end = chunk.token_range.end_token
+            if end_token % self._cache_transfer_granularity == 0:
+                hit_end = end_token
         return ReachablePrefix(hit_end)
 
-    def select_for_load(self, block_hashes: BlockHashes, load_range: TokenRange) -> KVSelection:
-        return KVSelection(load_range, tuple(block_hashes), (GroupSelection(self.group_ids[0], None),))
+    def select_for_load(self, block_hashes: BlockHashes, load_range: TokenRange) -> ChunkMasks:
+        del block_hashes, load_range
+        return (None,)
 
     def select_for_store(
         self, block_hashes: BlockHashes, store_range: TokenRange, num_prompt_tokens: int
-    ) -> KVSelection:
-        return KVSelection(store_range, tuple(block_hashes), (GroupSelection(self.group_ids[0], None),))
+    ) -> ChunkMasks:
+        del block_hashes, store_range, num_prompt_tokens
+        return (None,)
+
+
+# =============================================================================
+# Hybrid Cache-Group Reachability
+# =============================================================================
+#
+# Reuse vLLM's per-spec reachability rules, then reconcile heterogeneous cache
+# groups to one common prefix and preserve any finer-grained remote tail keys.
 
 
 class HybridReachability:
@@ -222,10 +218,7 @@ class HybridReachability:
             else:
                 spec_groups.append((spec, [group_index], manager_cls))
 
-        self.spec_groups = sorted(
-            spec_groups,
-            key=lambda item: not isinstance(item[0], FullAttentionSpec),
-        )
+        self.spec_groups = sorted(spec_groups, key=lambda item: not isinstance(item[0], FullAttentionSpec))
         self.eagle_spec_group_indices: set[int] = {
             index
             for index, (_, group_indices, _) in enumerate(self.spec_groups)
@@ -239,30 +232,23 @@ class HybridReachability:
             for group_index in self.spec_groups[spec_group_index][1]
         }
 
-    def select_for_lookup(self, block_hashes: BlockHashes, query_range: TokenRange) -> KVSelection:
+    def select_for_lookup(self, block_hashes: BlockHashes, query_range: TokenRange) -> ChunkMasks:
+        del block_hashes
         aligned_token_len = cdiv(min(query_range.end_token, self.max_model_len), self.lcm_block_size)
         aligned_token_len *= self.lcm_block_size
-        lookup_masks = self.lookup_mask(aligned_token_len)
-        chunk_selections = tuple(
-            GroupSelection(group_id, None if mask is None else tuple(mask))
-            for group_id, mask in zip(self.group_ids, lookup_masks, strict=True)
-        )
-        return KVSelection(query_range, tuple(block_hashes), chunk_selections)
+        return self._freeze_masks(self.lookup_mask(aligned_token_len))
 
     def resolve_available_end(
-        self, selection: KVSelection, availability: Sequence[GroupAvailability]
+        self, query_range: TokenRange, block_hashes: BlockHashes, observations: Sequence[LookupObservation]
     ) -> ReachablePrefix:
-        observations_by_group = {observation.group_id: observation for observation in availability}
-        if set(observations_by_group) != set(self.group_ids):
+        if len(observations) != len(self.group_ids):
             raise ValueError(f"Lookup observations do not match configured groups {self.group_ids}")
 
-        query_range = selection.token_range
-        block_hashes = selection.block_hashes
         max_hit_length = min(query_range.end_token, self.max_model_len)
         block_hashes_to_check = block_hashes[: max_hit_length // self.hash_block_size]
         cached_hashes: set[tuple[int, bytes]] = set()
-        for group_index, (group_id, group_block_size) in enumerate(
-            zip(self.group_ids, self.effective_block_sizes, strict=True)
+        for group_index, (group_block_size, observation) in enumerate(
+            zip(self.effective_block_sizes, observations, strict=True)
         ):
             group_block_hashes = (
                 block_hashes_to_check
@@ -275,31 +261,23 @@ class HybridReachability:
             cached_hashes.update(
                 (group_index, block_hash_to_bytes(block_hash)) for block_hash in group_block_hashes[:local_hit_count]
             )
-            observation = observations_by_group[group_id]
+            (_, _, observed_hashes), available = observation
+            if len(observed_hashes) != len(available):
+                raise ValueError("Lookup chunks and Backend availability have different lengths")
             cached_hashes.update(
-                (group_index, block_hash_to_bytes(chunk.content_hash))
-                for chunk in observation.chunks
-                if chunk.available
+                (group_index, block_hash_to_bytes(block_hash))
+                for block_hash, hit in zip(observed_hashes, available, strict=True)
+                if hit
             )
 
         if not cached_hashes:
             return ReachablePrefix(0)
         cached_block_pool = ExternalCachedBlockPool(self.hash_block_size, cached_hashes)
-        _, hit_length = self.find_longest_cache_hit(
-            block_hashes,
-            max_hit_length,
-            cached_block_pool,
-        )
-        return ReachablePrefix(
-            hit_length,
-            self._tail_key_boundaries(block_hashes, hit_length, cached_block_pool),
-        )
+        _, hit_length = self.find_longest_cache_hit(block_hashes, max_hit_length, cached_block_pool)
+        return ReachablePrefix(hit_length, self._tail_key_boundaries(block_hashes, hit_length, cached_block_pool))
 
     def _tail_key_boundaries(
-        self,
-        block_hashes: BlockHashes,
-        hit_length: int,
-        cached_block_pool: ExternalCachedBlockPool,
+        self, block_hashes: BlockHashes, hit_length: int, cached_block_pool: ExternalCachedBlockPool
     ) -> tuple[TailKeyBoundary, ...]:
         if not self.partial_hash_hits or hit_length <= 0:
             return ()
@@ -314,8 +292,7 @@ class HybridReachability:
             boundary_token = hit_length
             if not cached_block_pool.contains(group_index, block_hashes[hit_hash_index]):
                 next_block_hash_index = min(
-                    cdiv(hit_length, block_size) * block_size // self.hash_block_size,
-                    len(block_hashes),
+                    cdiv(hit_length, block_size) * block_size // self.hash_block_size, len(block_hashes)
                 )
                 for hash_index in range(hit_hash_index + 1, next_block_hash_index):
                     if cached_block_pool.contains(group_index, block_hashes[hash_index]):
@@ -326,28 +303,23 @@ class HybridReachability:
             boundaries.append(TailKeyBoundary(group_id, boundary_token))
         return tuple(boundaries)
 
-    def select_for_load(self, block_hashes: BlockHashes, load_range: TokenRange) -> KVSelection:
-        selections = self._group_selections(self.load_mask(block_hashes, load_range.end_token))
-        return KVSelection(load_range, tuple(block_hashes), selections)
+    def select_for_load(self, block_hashes: BlockHashes, load_range: TokenRange) -> ChunkMasks:
+        return self._freeze_masks(self.load_mask(block_hashes, load_range.end_token))
 
     def select_for_store(
         self, block_hashes: BlockHashes, store_range: TokenRange, num_prompt_tokens: int
-    ) -> KVSelection:
+    ) -> ChunkMasks:
+        del block_hashes
         if store_range.end_token % self.lcm_block_size == 0:
-            selections = self._group_selections(self.store_mask(store_range.end_token, num_prompt_tokens))
-        else:
-            logger.debug("Use unfiltered Store chunks for unaligned end token %d", store_range.end_token)
-            selections = tuple(
-                GroupSelection(group_id, () if group_index in self.mamba_group_indices else None)
-                for group_index, group_id in enumerate(self.group_ids)
-            )
-        return KVSelection(store_range, tuple(block_hashes), selections)
-
-    def _group_selections(self, masks: Sequence[Sequence[bool] | None]) -> tuple[GroupSelection, ...]:
+            return self._freeze_masks(self.store_mask(store_range.end_token, num_prompt_tokens))
+        logger.debug("Use unfiltered Store chunks for unaligned end token %d", store_range.end_token)
         return tuple(
-            GroupSelection(group_id, None if mask is None else tuple(mask))
-            for group_id, mask in zip(self.group_ids, masks, strict=True)
+            () if group_index in self.mamba_group_indices else None for group_index in range(len(self.group_ids))
         )
+
+    @staticmethod
+    def _freeze_masks(masks: Sequence[Sequence[bool] | None]) -> ChunkMasks:
+        return tuple(None if mask is None else tuple(mask) for mask in masks)
 
     def find_longest_cache_hit(
         self,
@@ -358,10 +330,7 @@ class HybridReachability:
         apply_eagle: bool = True,
     ) -> tuple[tuple[list[bool], ...], int]:
         blocks_by_group_index, hit_length = self._find_hit_blocks(
-            block_hashes,
-            max_length,
-            cached_block_pool,
-            apply_eagle=apply_eagle,
+            block_hashes, max_length, cached_block_pool, apply_eagle=apply_eagle
         )
         masks = tuple(
             [block is not cached_block_pool.null_block for block in blocks] for blocks in blocks_by_group_index
@@ -370,18 +339,12 @@ class HybridReachability:
 
     def load_mask(self, block_hashes: BlockHashes, load_end_token: int) -> tuple[list[bool], ...]:
         masks, _ = self.find_longest_cache_hit(
-            block_hashes,
-            load_end_token,
-            ExternalCachedBlockPool(self.hash_block_size),
-            apply_eagle=False,
+            block_hashes, load_end_token, ExternalCachedBlockPool(self.hash_block_size), apply_eagle=False
         )
         return masks
 
     def _reachable_masks(
-        self,
-        aligned_token_len: int,
-        retention_interval: int | None,
-        num_prompt_tokens: int | None,
+        self, aligned_token_len: int, retention_interval: int | None, num_prompt_tokens: int | None
     ) -> list[tuple[int, list[bool] | None]]:
         assert aligned_token_len % self.lcm_block_size == 0, (
             f"aligned_token_len ({aligned_token_len}) must be a multiple of lcm_block_size ({self.lcm_block_size})"
@@ -511,10 +474,7 @@ class HybridReachability:
                 del full_blocks[num_blocks:]
                 hit_lengths_by_group_index[group_index] = hit_length
 
-        return (
-            tuple(blocks if blocks is not None else [] for blocks in hit_blocks_by_group_index),
-            hit_length,
-        )
+        return tuple(blocks if blocks is not None else [] for blocks in hit_blocks_by_group_index), hit_length
 
 
 def _unwrap_spec(spec: KVCacheSpec) -> KVCacheSpec:

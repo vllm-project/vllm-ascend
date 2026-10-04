@@ -11,6 +11,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
 
 from ...backend import BackendSpec
 from ..batch import KVGroupBatch, KVTransferBatch
+from ..evidence import LayerStoreResult
 from ..evidence import TransferEvidence as RuntimeTransferEvidence
 from .arguments import materialize_rule_gva
 from .io import BackendIO, _batch_sources, _load_completions, _store_completions
@@ -113,12 +114,7 @@ class GVABackendIO(BackendIO):
         if batch.empty:
             return _load_completions(batch, ())
         arguments = materialize_rule_gva(
-            self._bound_rules,
-            batch,
-            self._load_sessions,
-            self._rule_load_bases,
-            layer_id=layer_id,
-            store=False,
+            self._bound_rules, batch, self._load_sessions, self._rule_load_bases, layer_id=layer_id, store=False
         )
         result_code = self._store.batch_copy(
             arguments.remote_addresses.tolist(),
@@ -139,12 +135,7 @@ class GVABackendIO(BackendIO):
         source_handed_off = False
         try:
             arguments = materialize_rule_gva(
-                self._bound_rules,
-                batch,
-                self._store_sessions,
-                self._rule_store_bases,
-                layer_id=layer_id,
-                store=True,
+                self._bound_rules, batch, self._store_sessions, self._rule_store_bases, layer_id=layer_id, store=True
             )
             source_handed_off = True
             result_code = self._store.batch_copy(
@@ -162,6 +153,36 @@ class GVABackendIO(BackendIO):
         succeeded = result_code == 0
         evidence = tuple(RuntimeTransferEvidence(source, int(result_code), succeeded) for source in arguments.sources)
         return _store_completions(batch, evidence)
+
+    def store_layer(self, batch: KVTransferBatch, layer_id: int) -> LayerStoreResult:
+        """Copy one layer and defer immutable source evidence to session finalization."""
+
+        source_handed_off = False
+        keys = batch.selected_keys()
+        try:
+            arguments = materialize_rule_gva(
+                self._bound_rules,
+                batch,
+                self._store_sessions,
+                self._rule_store_bases,
+                layer_id=layer_id,
+                store=True,
+                include_sources=False,
+            )
+            keys = arguments.keys
+            source_handed_off = True
+            result_code = self._store.batch_copy(
+                arguments.remote_addresses.tolist(),
+                arguments.local_addresses.tolist(),
+                arguments.sizes.tolist(),
+                self._store_direction,
+            )
+            if isinstance(result_code, bool) or not isinstance(result_code, Integral):
+                raise RuntimeError("GVA batch_copy returned a non-integer result")
+        except Exception as error:
+            return LayerStoreResult(keys, (None,) * len(keys), (not source_handed_off,) * len(keys), error)
+        succeeded = result_code == 0
+        return LayerStoreResult(keys, (int(result_code),) * len(keys), (succeeded,) * len(keys))
 
     def commit_store_sessions(self, keys: list[str]) -> tuple[int, ...]:
         if not keys:

@@ -6,6 +6,7 @@ import threading
 from dataclasses import replace
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
@@ -51,8 +52,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.transf
     StoreCommandBatch,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.rules.reachability import (
-    ChunkAvailability,
-    GroupAvailability,
     HybridReachability,
     ReachablePrefix,
     UnitaryReachability,
@@ -128,9 +127,7 @@ def build_planner_step(planner, scheduler_output, requests=None, *, resumed_requ
     scheduler_output.num_scheduled_tokens = getattr(scheduler_output, "num_scheduled_tokens", {})
     scheduler_output.preempted_req_ids = getattr(scheduler_output, "preempted_req_ids", set())
     planning_step = vllm_adapter.adapt_scheduler_output(
-        scheduler_output,
-        requests,
-        store_enabled=planner._store_enabled,
+        scheduler_output, requests, store_enabled=planner._store_enabled
     )
     return planner.build_step(planning_step)
 
@@ -141,10 +138,7 @@ def test_small_value_and_codec_contracts_share_one_domain_smoke_test() -> None:
         with pytest.raises(ValueError):
             TokenRange(start, end)
 
-    layers = resolve_group_layers(
-        ["model.layers.1.v", "mtp.layers.0.attn", "model.layers.1.k"],
-        base_layer_count=4,
-    )
+    layers = resolve_group_layers(["model.layers.1.v", "mtp.layers.0.attn", "model.layers.1.k"], base_layer_count=4)
     assert layers == (
         KVPoolLayerTopology(1, ("model.layers.1.k", "model.layers.1.v")),
         KVPoolLayerTopology(4, ("mtp.layers.0.attn",)),
@@ -159,16 +153,16 @@ def test_small_value_and_codec_contracts_share_one_domain_smoke_test() -> None:
 
 def test_reachability_matrix_preserves_contiguous_and_partial_tail_semantics() -> None:
     unitary = UnitaryReachability(0, max_model_len=64, cache_transfer_granularity=4)
-    selection = unitary.select_for_lookup((b"a", b"b", b"c"), TokenRange(0, 12))
-    availability = GroupAvailability(
-        0,
+    block_hashes = (b"a", b"b", b"c")
+    query_range = TokenRange(0, 12)
+    observations = (
         (
-            ChunkAvailability(TokenRange(0, 4), b"a", True),
-            ChunkAvailability(TokenRange(4, 8), b"b", False),
-            ChunkAvailability(TokenRange(8, 12), b"c", True),
+            (np.asarray((0, 4, 8)), np.asarray((4, 4, 4)), block_hashes),
+            (True, False, True),
         ),
     )
-    assert unitary.resolve_available_end(selection, (availability,)) == ReachablePrefix(4)
+    assert unitary.select_for_lookup(block_hashes, query_range) == (None,)
+    assert unitary.resolve_available_end(query_range, block_hashes, observations) == ReachablePrefix(4)
 
     groups = (
         KVPoolGroupTopology(
@@ -190,19 +184,14 @@ def test_reachability_matrix_preserves_contiguous_and_partial_tail_semantics() -
         ),
     )
     hybrid = HybridReachability(groups, 16, 4, 64)
-    hybrid_selection = hybrid.select_for_lookup((b"a", b"b", b"c"), TokenRange(0, 12))
-    hybrid_availability = tuple(
-        GroupAvailability(
-            group_id,
-            (
-                ChunkAvailability(TokenRange(0, 4), b"a", False),
-                ChunkAvailability(TokenRange(0, 8), b"b", False),
-                ChunkAvailability(TokenRange(0, 12), b"c", True),
-            ),
+    hybrid_observations = tuple(
+        (
+            (np.asarray((0, 0, 0)), np.asarray((4, 8, 12)), block_hashes),
+            (False, False, True),
         )
-        for group_id in (0, 1)
+        for _group_id in (0, 1)
     )
-    assert hybrid.resolve_available_end(hybrid_selection, hybrid_availability) == ReachablePrefix(
+    assert hybrid.resolve_available_end(query_range, block_hashes, hybrid_observations) == ReachablePrefix(
         12,
         (TailKeyBoundary(0, 12), TailKeyBoundary(1, 12)),
     )
@@ -221,17 +210,35 @@ def test_bulk_runtime_store_success_and_failure_preserve_source_safety(monkeypat
     success.close()
     assert resources.closed and backend.closed is False
 
+    full_hit_events = []
+
+    def make_full_hit_event():
+        event = FakeEvent()
+        full_hit_events.append(event)
+        return event
+
+    full_hit, full_hit_resources, full_hit_backend = make_runtime(
+        requires_exists_before_put=True, source_ready_event_factory=make_full_hit_event
+    )
+
+    def reject_full_batch(*_args, **_kwargs):
+        raise AssertionError("Full-hit Store must not assemble a transfer batch")
+
+    monkeypatch.setattr(full_hit, "_assemble_batch", reject_full_batch)
+    begin_step(full_hit, store=StoreCommandBatch((command,)))
+    full_hit.finish_step()
+    full_hit_completions = full_hit.fence_previous_store()
+    assert full_hit_completions[0].evidence.succeeded
+    assert full_hit.take_released_store_job_ids() == {7}
+    assert [call[0] for call in full_hit_backend.calls].count("exists") == 1
+    assert "put" not in [call[0] for call in full_hit_backend.calls]
+    assert full_hit_events[0].recorded and not full_hit_events[0].synchronized
+    full_hit.close()
+    assert full_hit_resources.closed
+
     duplicate_backend = FakeBackend()
-    duplicate_runtime, duplicate_resources, _ = make_runtime(
-        duplicate_backend,
-        source_ready_event_factory=FakeEvent,
-    )
-    duplicate_command = replace(
-        command,
-        request_id="duplicate",
-        block_ids_by_group=((3,),),
-        store_job_id=8,
-    )
+    duplicate_runtime, duplicate_resources, _ = make_runtime(duplicate_backend, source_ready_event_factory=FakeEvent)
+    duplicate_command = replace(command, request_id="duplicate", block_ids_by_group=((3,),), store_job_id=8)
     begin_step(duplicate_runtime, store=StoreCommandBatch((command, duplicate_command)))
     duplicate_runtime.finish_step()
     duplicate_runtime.fence_previous_store()
@@ -248,9 +255,7 @@ def test_bulk_runtime_store_success_and_failure_preserve_source_safety(monkeypat
 
     monkeypatch.setattr(admission_backend, "exists", fail_admission)
     admission_failure, admission_resources, _ = make_runtime(
-        admission_backend,
-        requires_exists_before_put=True,
-        source_ready_event_factory=FakeEvent,
+        admission_backend, requires_exists_before_put=True, source_ready_event_factory=FakeEvent
     )
     begin_step(admission_failure, store=StoreCommandBatch((command,)))
     admission_failure.finish_step()
@@ -279,9 +284,7 @@ def test_bulk_runtime_store_success_and_failure_preserve_source_safety(monkeypat
 
 def test_layerwise_load_happy_path_reuses_rows_and_closes_one_session() -> None:
     runtime, resources, backend = make_runtime(
-        layerwise=True,
-        store=False,
-        start_gate_factory=lambda: FakeLoadStartGate(opened=True),
+        layerwise=True, store=False, start_gate_factory=lambda: FakeLoadStartGate(opened=True)
     )
     command = LoadCommand("request", TokenRange(0, 4), ((1,),), (b"a",))
     begin_step(runtime, load=LoadCommandBatch((command,)))
@@ -324,10 +327,7 @@ def test_layerwise_load_keeps_a_bounded_prefetch_window() -> None:
         return gate
 
     runtime, _, backend = make_runtime(
-        layerwise=True,
-        store=False,
-        physical_layers=(0, 1, 2),
-        start_gate_factory=make_gate,
+        layerwise=True, store=False, physical_layers=(0, 1, 2), start_gate_factory=make_gate
     )
     command = LoadCommand("request", TokenRange(0, 4), ((1,),), (b"a",))
     begin_step(runtime, load=LoadCommandBatch((command,)))
@@ -403,6 +403,144 @@ def test_layerwise_store_commits_only_after_all_layers_and_unknown_failure_retai
     assert not failed_resources.closed
 
 
+def test_layerwise_store_prepares_asynchronously_behind_layer_jobs(monkeypatch) -> None:
+    backend = FakeBackend()
+    admission_started = threading.Event()
+    release_admission = threading.Event()
+
+    def blocking_exists(keys):
+        backend.calls.append(("exists", tuple(keys)))
+        admission_started.set()
+        if not release_admission.wait(timeout=5):
+            raise TimeoutError("test did not release Layerwise admission")
+        return [0] * len(keys)
+
+    monkeypatch.setattr(backend, "exists", blocking_exists)
+    runtime, resources, _ = make_runtime(backend, layerwise=True, requires_exists_before_put=True)
+    command = RangeStoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4, 17)
+    begin_completed = threading.Event()
+    begin_errors = []
+
+    def begin() -> None:
+        try:
+            begin_step(runtime, store=StoreCommandBatch((command,)))
+        except BaseException as error:
+            begin_errors.append(error)
+        finally:
+            begin_completed.set()
+
+    caller = threading.Thread(target=begin)
+    caller.start()
+    try:
+        assert admission_started.wait(timeout=2)
+        returned_before_admission = begin_completed.wait(timeout=0.2)
+        assert returned_before_admission
+        runtime.save_layer("layers.0.group.0")
+    finally:
+        release_admission.set()
+        caller.join(timeout=5)
+
+    assert not begin_errors
+    runtime.save_layer("layers.1.group.0")
+    runtime.finish_step()
+    assert [
+        call[0] for call in backend.calls if call[0] in {"exists", "batch_put_start", "batch_copy_put", "batch_commit"}
+    ] == [
+        "exists",
+        "batch_put_start",
+        "batch_copy_put",
+        "batch_copy_put",
+        "batch_commit",
+    ]
+    runtime.close()
+    assert resources.closed
+
+
+def test_layerwise_store_materializes_only_missing_rows_and_skips_full_hits(monkeypatch) -> None:
+    command = RangeStoreCommand("present", TokenRange(0, 4), ((1,),), (b"a",), 4, 17)
+    missing = RangeStoreCommand("missing", TokenRange(0, 4), ((3,),), (b"b",), 4, 18)
+    backend = FakeBackend()
+    backend.presence = [1, 0]
+    events = []
+
+    def make_event():
+        event = FakeEvent()
+        events.append(event)
+        return event
+
+    runtime, resources, _ = make_runtime(
+        backend, layerwise=True, requires_exists_before_put=True, source_ready_event_factory=make_event
+    )
+    begin_step(runtime, store=StoreCommandBatch((command, missing)))
+    runtime.save_layer("layers.0.group.0")
+    runtime.save_layer("layers.1.group.0")
+    runtime.finish_step()
+
+    start = next(call for call in backend.calls if call[0] == "batch_put_start")
+    copies = [call for call in backend.calls if call[0] == "batch_copy_put"]
+    assert len(start[1]) == 1
+    assert [call[1] for call in copies] == [start[1], start[1]]
+    assert [call[2] for call in copies] == [((1192,),), ((2192,),)]
+    assert all(event.recorded and event.synchronized for event in events)
+    assert runtime.take_released_store_job_ids() == {17, 18}
+    runtime.close()
+    assert resources.closed
+
+    full_hit_backend = FakeBackend()
+    full_hit_events = []
+
+    def make_full_hit_event():
+        event = FakeEvent()
+        full_hit_events.append(event)
+        return event
+
+    full_hit, full_hit_resources, _ = make_runtime(
+        full_hit_backend,
+        layerwise=True,
+        requires_exists_before_put=True,
+        source_ready_event_factory=make_full_hit_event,
+    )
+
+    def reject_batch(*_args, **_kwargs):
+        raise AssertionError("Full-hit Layerwise Store must not assemble a transfer batch")
+
+    monkeypatch.setattr(full_hit, "_assemble_batch", reject_batch)
+    begin_step(full_hit, store=StoreCommandBatch((command,)))
+    full_hit.save_layer("layers.0.group.0")
+    full_hit.save_layer("layers.1.group.0")
+    full_hit.finish_step()
+    assert [call[0] for call in full_hit_backend.calls].count("exists") == 1
+    assert not any(call[0].startswith("batch_") for call in full_hit_backend.calls)
+    assert all(event.recorded and not event.synchronized for event in full_hit_events)
+    assert full_hit.take_released_store_job_ids() == {17}
+    full_hit.close()
+    assert full_hit_resources.closed
+
+
+def test_layerwise_store_aggregates_terminal_evidence_across_layers() -> None:
+    runtime, resources, _ = make_runtime(layerwise=True)
+    command = RangeStoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4, 17)
+    begin_step(runtime, store=StoreCommandBatch((command,)))
+    runtime.save_layer("layers.0.group.0")
+    runtime.save_layer("layers.1.group.0")
+
+    context = runtime._active_step
+    assert context is not None
+    runtime._submit_store(context)
+    completions = runtime.fence_previous_store()
+
+    assert len(completions) == 1
+    evidence = completions[0].evidence.transfer_evidence
+    assert len(evidence) == 1
+    assert evidence[0].source.physical_layer_ids == (0, 1)
+    assert evidence[0].result_code == 0
+    assert evidence[0].source_release_confirmed
+
+    runtime.end_step()
+    runtime.close()
+    assert resources.closed
+
+
 def test_runtime_close_reports_incomplete_layerwise_store_but_releases_safe_source() -> None:
     runtime, resources, backend = make_runtime(layerwise=True)
     command = RangeStoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4, 17)
@@ -452,10 +590,7 @@ def test_async_load_failure_drains_pending_work_and_rejects_overlap(monkeypatch)
     runtime.start_load()
     runtime.end_step()
 
-    begin_step(
-        runtime,
-        load=LoadCommandBatch((replace(command, request_id="other"), command)),
-    )
+    begin_step(runtime, load=LoadCommandBatch((replace(command, request_id="other"), command)))
     with pytest.raises(RuntimeError, match="already has a pending asynchronous Load"):
         runtime.start_load()
     assert runtime._pending_load_request_ids == {"request"}
@@ -575,15 +710,22 @@ def test_connector_translates_lookup_allocation_and_step_lifecycle() -> None:
     queries = []
     confirmations = []
     planning_steps = []
+
+    def lookup(query):
+        queries.append(query)
+        return ExternalPrefixPlan(4, True)
+
+    def build_step(step):
+        planning_steps.append(step)
+        return KVTransferStep()
+
     connector = AscendStoreV1Connector.__new__(AscendStoreV1Connector)
     connector._requests = {}
     connector._store_enabled = False
     connector._finished_checkpoint_stores = []
     connector._store_source_leases = SimpleNamespace(acquire=lambda command: command)
     connector.planner = SimpleNamespace(
-        lookup=lambda query: queries.append(query) or ExternalPrefixPlan(4, True),
-        confirm_allocation=lambda *args: confirmations.append(args),
-        build_step=lambda step: planning_steps.append(step) or KVTransferStep(),
+        lookup=lookup, confirm_allocation=lambda *args: confirmations.append(args), build_step=build_step
     )
     request = SimpleNamespace(
         request_id="request",

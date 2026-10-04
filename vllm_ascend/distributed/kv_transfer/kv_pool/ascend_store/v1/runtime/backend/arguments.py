@@ -26,6 +26,7 @@ class RuleRanges:
 class RuleGVA:
     """Flattened global and local ranges evaluated for one GVA copy."""
 
+    keys: tuple[str, ...]
     remote_addresses: np.ndarray
     local_addresses: np.ndarray
     sizes: np.ndarray
@@ -33,11 +34,7 @@ class RuleGVA:
 
 
 def materialize_rule_ranges(
-    rules: KVPoolRules,
-    batch: KVTransferBatch,
-    *,
-    layer_id: int | None,
-    store: bool,
+    rules: KVPoolRules, batch: KVTransferBatch, *, layer_id: int | None, store: bool, include_sources: bool = True
 ) -> RuleRanges:
     """Evaluate only the current request rows and execution fence."""
 
@@ -49,23 +46,16 @@ def materialize_rule_ranges(
     memory_rule = rules.memory.store_partial if store else rules.memory.partial
     for group in batch.groups:
         ranges = memory_rule(
-            group.group_id,
-            group.block_ids,
-            group.token_counts,
-            layer_id=layer_id,
+            group.group_id, group.block_ids, group.token_counts, layer_id=layer_id, selected_objects=group.selection
         )
-        materialized = rules.format_ranges(
-            group.key_axes,
-            ranges,
-            object_bases=None,
-            selected_objects=group.selection,
-        )
+        materialized = rules.format_ranges(group.key_axes, ranges, object_bases=None, selected_objects=group.selection)
         group_keys, group_addresses, group_sizes, *group_offsets = materialized
         keys.extend(group_keys)
         addresses.extend(group_addresses)
         sizes.extend(group_sizes)
         offsets.extend(group_offsets[0] if group_offsets else ([] for _ in group_keys))
-        sources.extend(_selected_sources(group, layer_id))
+        if include_sources:
+            sources.extend(_selected_sources(group, layer_id))
     return RuleRanges(keys, addresses, sizes, offsets, tuple(sources))
 
 
@@ -77,47 +67,46 @@ def materialize_rule_gva(
     *,
     layer_id: int,
     store: bool,
+    include_sources: bool = True,
 ) -> RuleGVA:
     """Combine dynamic GVA bases with static offsets at the Backend boundary."""
 
     remote_parts = []
     local_parts = []
     size_parts = []
+    keys: list[str] = []
     sources: list[TransferSource] = []
     memory_rule = rules.memory.store_partial if store else rules.memory.partial
     for group in batch.groups:
         ranges = memory_rule(
-            group.group_id,
-            group.block_ids,
-            group.token_counts,
-            layer_id=layer_id,
+            group.group_id, group.block_ids, group.token_counts, layer_id=layer_id, selected_objects=group.selection
         )
-        selected_sources = _selected_sources(group, layer_id)
+        selected_keys = group.selected_keys()
+        selected_sources = _selected_sources(group, layer_id) if include_sources else ()
         object_bases = resolved_bases.get(group)
         if object_bases is None:
             bases = []
-            for source in selected_sources:
-                session = sessions.get(source.key)
+            for key in selected_keys:
+                session = sessions.get(key)
                 if session is None:
-                    raise RuntimeError(f"GVA session for {source.key!r} is unavailable")
+                    raise RuntimeError(f"GVA session for {key!r} is unavailable")
                 base, object_size = session
                 if object_size != group.object_size:
-                    raise RuntimeError(f"GVA session for {source.key!r} has an unexpected object size")
+                    raise RuntimeError(f"GVA session for {key!r} has an unexpected object size")
                 bases.append(base)
             object_bases = np.asarray(bases, dtype=np.uint64)
             object_bases.flags.writeable = False
             resolved_bases[group] = object_bases
         remote, local, sizes = rules.format_ranges(
-            group.key_axes,
-            ranges,
-            object_bases=object_bases,
-            selected_objects=group.selection,
+            group.key_axes, ranges, object_bases=object_bases, selected_objects=group.selection
         )
         remote_parts.append(remote)
         local_parts.append(local)
         size_parts.append(sizes)
+        keys.extend(selected_keys)
         sources.extend(selected_sources)
     return RuleGVA(
+        tuple(keys),
         _concatenate_gva_parts(remote_parts),
         _concatenate_gva_parts(local_parts),
         _concatenate_gva_parts(size_parts),
@@ -136,11 +125,7 @@ def merge_rule_key_ranges(ranges: RuleRanges) -> RuleRanges:
     sizes: list[list[int]] = []
     offsets: list[list[int]] = []
     for key, row_addresses, row_sizes, row_offsets in zip(
-        ranges.keys,
-        ranges.addresses,
-        ranges.sizes,
-        ranges.offsets,
-        strict=True,
+        ranges.keys, ranges.addresses, ranges.sizes, ranges.offsets, strict=True
     ):
         index = key_indices.get(key)
         if index is None:

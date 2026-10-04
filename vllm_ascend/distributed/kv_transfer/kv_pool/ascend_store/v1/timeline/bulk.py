@@ -7,9 +7,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from ..protocol.transfer import StoreCommand
 from ..runtime.batch import KVTransferBatch
 from ..runtime.evidence import LoadCompletion, StoreCompletion
-from . import StoreBatch
+from . import BulkStoreOperation, LoadOperation, StoreBatch
 from .executor import TimelineExecutor
 
 _STORE_FENCE_POLL_INTERVAL_S = 1.0
@@ -21,12 +22,9 @@ class LoadTimeline:
     collects_completions = False
 
     def __init__(self) -> None:
-        self._operation: Callable[[KVTransferBatch, int | None], tuple[LoadCompletion, ...]] | None = None
+        self._operation: LoadOperation | None = None
 
-    def bind_operation(
-        self,
-        operation: Callable[[KVTransferBatch, int | None], tuple[LoadCompletion, ...]],
-    ) -> None:
+    def bind_operation(self, operation: LoadOperation) -> None:
         if self._operation is not None:
             raise RuntimeError("Load timeline operation is already bound")
         self._operation = operation
@@ -56,15 +54,12 @@ class AsyncLoadTimeline:
     collects_completions = True
 
     def __init__(self, thread_initializer: Callable[[], None]) -> None:
-        self._operation: Callable[[KVTransferBatch, int | None], tuple[LoadCompletion, ...]] | None = None
+        self._operation: LoadOperation | None = None
         self._completed_lock = threading.Lock()
         self._completed: list[LoadCompletion] = []
         self._executor = TimelineExecutor("KVPoolLoadExecutor", thread_initializer, self._execute)
 
-    def bind_operation(
-        self,
-        operation: Callable[[KVTransferBatch, int | None], tuple[LoadCompletion, ...]],
-    ) -> None:
+    def bind_operation(self, operation: LoadOperation) -> None:
         if self._operation is not None:
             raise RuntimeError("Load timeline operation is already bound")
         self._operation = operation
@@ -119,6 +114,7 @@ class AsyncLoadTimeline:
 @dataclass(frozen=True, slots=True)
 class _StoreSubmission:
     batch: StoreBatch
+    commands: tuple[StoreCommand, ...]
     source_ready_event: Any
 
 
@@ -126,13 +122,10 @@ class StoreTimeline:
     """Preserve FIFO whole-step Store submission and next-step fencing."""
 
     def __init__(self, thread_initializer: Callable[[], None]) -> None:
-        self._operation: Callable[[KVTransferBatch, Any, int | None], tuple[StoreCompletion, ...]] | None = None
+        self._operation: BulkStoreOperation | None = None
         self._executor = TimelineExecutor("KVPoolStoreExecutor", thread_initializer, self._execute, self._complete)
 
-    def bind_operation(
-        self,
-        operation: Callable[[KVTransferBatch, Any, int | None], tuple[StoreCompletion, ...]],
-    ) -> None:
+    def bind_operation(self, operation: BulkStoreOperation) -> None:
         if self._operation is not None:
             raise RuntimeError("Store timeline operation is already bound")
         self._operation = operation
@@ -143,10 +136,10 @@ class StoreTimeline:
         self._executor.start()
         self._raise_if_failed()
 
-    def submit(self, transfer: KVTransferBatch, source_ready_event: Any) -> StoreBatch:
+    def submit(self, commands: tuple[StoreCommand, ...], source_ready_event: Any) -> StoreBatch:
         self._raise_if_not_running()
-        batch = StoreBatch(transfer)
-        self._executor.submit(_StoreSubmission(batch, source_ready_event))
+        batch = StoreBatch()
+        self._executor.submit(_StoreSubmission(batch, commands, source_ready_event))
         return batch
 
     def wait(self, batch: StoreBatch) -> tuple[StoreCompletion, ...]:
@@ -164,9 +157,7 @@ class StoreTimeline:
     def _execute(self, submission: _StoreSubmission) -> None:
         if self._operation is None:
             raise RuntimeError("Store timeline has no operation")
-        submission.batch.completions.extend(
-            self._operation(submission.batch.transfer, submission.source_ready_event, None)
-        )
+        submission.batch.completions.extend(self._operation(submission.commands, submission.source_ready_event))
 
     @staticmethod
     def _complete(submission: _StoreSubmission) -> None:

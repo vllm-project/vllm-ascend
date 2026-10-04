@@ -83,19 +83,18 @@ def test_rules_bind_static_facts_once_then_share_dynamic_rows(monkeypatch) -> No
     assert phi.required_object_sizes is None
     assert KVMemoryRule.__slots__ == ("full", "partial", "store_full", "store_partial")
     assert phi.object_size(0) == 64
-    assert phi.lookup_selection(("h0",), TokenRange(0, 4)).groups[0].chunk_mask is None
+    assert phi.lookup_selection(("h0",), TokenRange(0, 4)) == (None,)
 
     hashes = ["h0", "h1", "h2"]
     load_rows = phi.load_rows(0, 12, hashes, [4, 5, 6], mask=(True, False, True))
     store_rows = phi.store_rows(0, 12, hashes, [4, 5, 6], mask=(True, False, True))
-    assert load_rows[0].tolist() == [0, 8]
-    assert load_rows[1].tolist() == [4, 4]
-    assert load_rows[2] == ("h0", "h2")
-    assert load_rows[3].tolist() == [4, 6]
+    assert load_rows[0].tolist() == [4, 4]
+    assert load_rows[1] == ("h0", "h2")
+    assert load_rows[2].tolist() == [4, 6]
     # Ownership applies to the already filtered candidate ordinal.
-    assert store_rows[0].tolist() == [8]
-    assert store_rows[2] == ("h2",)
-    assert store_rows[3].tolist() == [6]
+    assert store_rows[0].tolist() == [4]
+    assert store_rows[1] == ("h2",)
+    assert store_rows[2].tolist() == [6]
 
     lookup_axes = phi.lookup_keys(0, ("h0",))
     assert len(lookup_axes) == 8  # PP x DCP x effective head rank.
@@ -108,8 +107,8 @@ def test_rules_bind_static_facts_once_then_share_dynamic_rows(monkeypatch) -> No
         "resolve_backend_spec",
         lambda _name: (_ for _ in ()).throw(AssertionError("static configuration was read again")),
     )
-    ranges = phi.memory.partial(0, load_rows[3], load_rows[1])
-    keys = phi.load_keys(0, load_rows[2])
+    ranges = phi.memory.partial(0, load_rows[2], load_rows[0])
+    keys = phi.load_keys(0, load_rows[1])
     backend_keys, addresses, sizes = phi.format_ranges(keys, ranges)
     assert backend_keys == [axis[0] for axis in keys] + [axis[1] for axis in keys]
     assert addresses == [[1256, 2256], [1384, 2384]]
@@ -157,17 +156,12 @@ def test_memory_rules_select_only_the_backend_layout_they_consume(monkeypatch) -
         )
         block_length = 31 if name == "bulk" else 32
         phi = compile_kv_pool_rules(
-            _rule_spec(topology, layerwise=schedule.requires_layerwise_backend),
-            layerwise_full_key=full_key,
+            _rule_spec(topology, layerwise=schedule.requires_layerwise_backend), layerwise_full_key=full_key
         )(*_registration(topology, block_length=block_length))
         block_ids = np.asarray([1, 3], dtype=np.uint64)
 
         if name == "bulk":
-            local, sizes, splits = phi.memory.partial(
-                0,
-                block_ids,
-                np.asarray([3, 4], dtype=np.uint64),
-            )
+            local, sizes, splits = phi.memory.partial(0, block_ids, np.asarray([3, 4], dtype=np.uint64))
             assert local.tolist() == [1064, 2064, 1192, 2192]
             # Divide last: a 31-byte Block transfers floor(31 * 3 / 4).
             assert sizes.tolist() == [23, 23, 31, 31]
@@ -181,11 +175,7 @@ def test_memory_rules_select_only_the_backend_layout_they_consume(monkeypatch) -
             assert second[2].tolist() == [32, 32]
             assert first[4].tolist() == second[4].tolist() == [64, 64]
             assert phi.load_keys(0, ("a", "b")) == (("g0:p0:h0:a", "g0:p0:h0:b"),)
-            _, _, _, offsets = phi.format_ranges(
-                phi.load_keys(0, ("a", "b")),
-                first,
-                object_bases=None,
-            )
+            _, _, _, offsets = phi.format_ranges(phi.load_keys(0, ("a", "b")), first, object_bases=None)
             assert offsets == [[0], [0]]
         elif name == "strided":
             full = phi.memory.full(0, block_ids[:1])
@@ -239,11 +229,7 @@ def test_hybrid_checkpoint_tail_and_gva_rules_keep_their_distinct_contracts(monk
         transfer_group_ids=(0, 1),
         consumer_pipeline_partitions=None,
     )
-    monkeypatch.setattr(
-        compiler,
-        "resolve_backend_spec",
-        lambda _name: make_backend_spec(layerwise_access=None),
-    )
+    monkeypatch.setattr(compiler, "resolve_backend_spec", lambda _name: make_backend_spec(layerwise_access=None))
     phi = compile_kv_pool_rules(_rule_spec(hybrid))(*_registration(hybrid))
 
     hybrid_consumer = replace(hybrid, consumer_pipeline_partitions=(1, 1))
@@ -264,61 +250,39 @@ def test_hybrid_checkpoint_tail_and_gva_rules_keep_their_distinct_contracts(monk
 
     # A fine Lookup tail remains usable before a complete grouped hash exists.
     tail = phi.load_rows(1, 4, ("h0",), (7,), tail_boundary_token=4)
-    assert tail[0].tolist() == [0]
-    assert tail[1].tolist() == [4]
-    assert tail[2] == ("h0",)
-    assert tail[3].tolist() == [7]
-    assert "@group:1@cache_role:kv@cache_family:state@" in phi.load_keys(1, tail[2])[0][0]
+    assert tail[0].tolist() == [4]
+    assert tail[1] == ("h0",)
+    assert tail[2].tolist() == [7]
+    assert "@group:1@cache_role:kv@cache_family:state@" in phi.load_keys(1, tail[1])[0][0]
     # A suffix beginning inside the Block still maps the whole physical Block.
-    assert phi.load_rows(1, 8, ("h0", "h1"), (7,), start_token=4)[0].tolist() == [0]
+    assert phi.load_rows(1, 8, ("h0", "h1"), (7,), start_token=4)[0].tolist() == [8]
 
-    checkpoint = phi.checkpoint_rows(
-        4,
-        ("h0",),
-        {1: 7},
-        {0: (3,), 1: (99,)},
-    )
+    checkpoint = phi.checkpoint_rows(4, ("h0",), {1: 7}, {0: (3,), 1: (99,)})
     assert tuple(group_id for group_id, _ in checkpoint) == (1, 0)
-    assert checkpoint[0][1][1].tolist() == [8]
-    assert checkpoint[0][1][3].tolist() == [7]  # exact source, not the Block Table
-    assert checkpoint[1][1][1].tolist() == [8]  # companion uses full physical extent
+    assert checkpoint[0][1][0].tolist() == [8]
+    assert checkpoint[0][1][2].tolist() == [7]  # exact source, not the Block Table
+    assert checkpoint[1][1][0].tolist() == [8]  # companion uses full physical extent
     assert phi.memory.partial(1, (7,), (4,))[1].tolist() == [32]
     assert phi.checkpoint_rows(4, ("h0",), {1: 0}, {0: (3,), 1: (99,)}) == ()
 
     layerwise = replace(make_topology(), tp_rank=1, tp_size=2, put_step=2)
     monkeypatch.setattr(
-        compiler,
-        "resolve_backend_spec",
-        lambda _name: make_backend_spec(layerwise_access=LayerwiseAccessKind.GVA),
+        compiler, "resolve_backend_spec", lambda _name: make_backend_spec(layerwise_access=LayerwiseAccessKind.GVA)
     )
 
     def full_key(group: int, value: str, head: int, stage: int) -> str:
         return f"g{group}:p{stage}:h{head}:{value}"
 
-    binder = compile_kv_pool_rules(
-        _rule_spec(layerwise, layerwise=True),
-        layerwise_full_key=full_key,
-    )
+    binder = compile_kv_pool_rules(_rule_spec(layerwise, layerwise=True), layerwise_full_key=full_key)
     with pytest.raises(ValueError, match="global object sizes"):
         binder(*_registration(layerwise))
 
     parallel_layerwise = replace(make_topology(group_ids=(0, 1)), pp_size=2)
-    parallel_binder = compile_kv_pool_rules(
-        _rule_spec(parallel_layerwise, layerwise=True),
-        layerwise_full_key=full_key,
-    )
+    parallel_binder = compile_kv_pool_rules(_rule_spec(parallel_layerwise, layerwise=True), layerwise_full_key=full_key)
     with pytest.raises(ValueError, match="group 1.*global object offset"):
-        parallel_binder(
-            *_registration(parallel_layerwise),
-            object_sizes={0: 128, 1: 128},
-            object_offsets={0: 0},
-        )
+        parallel_binder(*_registration(parallel_layerwise), object_sizes={0: 128, 1: 128}, object_offsets={0: 0})
 
-    gva_phi = binder(
-        *_registration(layerwise),
-        object_sizes={0: 128},
-        object_offsets={0: 16},
-    )
+    gva_phi = binder(*_registration(layerwise), object_sizes={0: 128}, object_offsets={0: 16})
     block_ids = np.asarray([1, 3], dtype=np.uint64)
     counts = np.asarray([2, 3], dtype=np.uint64)
     second_layer = gva_phi.memory.partial(0, block_ids, counts, layer_id=1)
