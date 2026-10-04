@@ -210,11 +210,13 @@ def _range_store_candidates(
     block_ids: Sequence[int],
     *,
     start_token: int = 0,
+    mask: Sequence[bool] | None = None,
     block_size: int,
     hash_block_size: int,
+    minimum_block_id: int,
     cacheable: bool,
 ) -> StoreCandidateRows:
-    """Keep ordinary Range Store rows in their cheap pre-admission shape."""
+    """Keep legacy Range Store selection in a cheap pre-admission shape."""
 
     if not cacheable or not block_hashes or end_token <= 0:
         return [], [], []
@@ -225,14 +227,19 @@ def _range_store_candidates(
     counts: list[int] = []
     hashes: list[BlockHash | str] = []
     selected_block_ids: list[int] = []
-    for block_index in range(logical_count):
+    block_indices = (
+        range(logical_count)
+        if mask is None
+        else (block_index for block_index, keep in zip(range(logical_count), mask) if keep)
+    )
+    for block_index in block_indices:
         start = block_index * block_size
         end = min(start + block_size, end_token)
         local_index = block_index - block_offset
         if start < aligned_start_token or end <= start or local_index < 0 or local_index >= len(block_ids):
             continue
         block_id = block_ids[local_index]
-        if block_id < 0:
+        if block_id < minimum_block_id:
             continue
         counts.append(end - start)
         hashes.append(grouped_hashes[block_index])
@@ -284,9 +291,9 @@ def _checkpoint_rows(
     minimum_block_ids: Mapping[int, int],
     hash_block_size: int,
     ownership: Callable,
-) -> tuple[tuple[int, BlockRows], ...]:
+) -> tuple[tuple[int, StoreCandidateRows], ...]:
     checkpoint_hash = _boundary_hash(boundary_token, block_hashes, hash_block_size)
-    rows_by_group: list[tuple[int, BlockRows]] = []
+    rows_by_group: list[tuple[int, StoreCandidateRows]] = []
     source_groups = tuple(group_id for group_id in checkpoint_group_ids if group_id in source_block_ids)
     accepted_source_groups: list[int] = []
     for group_id in source_groups:
@@ -296,7 +303,7 @@ def _checkpoint_rows(
         if block_id < minimum_block_ids[group_id]:
             continue
         accepted_source_groups.append(group_id)
-        rows: BlockRows = (_readonly((block_size,)), (checkpoint_hash,), _readonly((block_id,)))
+        rows: StoreCandidateRows = ([block_size], [checkpoint_hash], [block_id])
         rows_by_group.append((group_id, ownership(group_id, rows)))
 
     if accepted_source_groups and any(boundary_token % block_sizes[group_id] for group_id in accepted_source_groups):
@@ -320,7 +327,7 @@ def _checkpoint_rows(
                 counts.append(block_size)
                 hashes.append(_boundary_hash(block_end, block_hashes, hash_block_size))
                 selected_ids.append(block_ids[local_index])
-            rows = (_readonly(counts), tuple(hashes), _readonly(selected_ids))
+            rows = (counts, hashes, selected_ids)
             rows_by_group.append((group_id, ownership(group_id, rows)))
     return tuple(rows_by_group)
 
@@ -341,20 +348,41 @@ def bind_store_ownership(topology: KVPoolTopology):
     return partial(_dispatch, selectors)
 
 
-def bind_store_candidate_rule(topology: KVPoolTopology):
-    """Bind the compact pre-admission row shape for one ordinary Store group."""
+def bind_store_candidate_rule(
+    topology: KVPoolTopology,
+    *,
+    use_layerwise: bool,
+    layerwise_store_leader: bool,
+):
+    """Bind each group's complete pre-admission Range Store semantics.
 
-    (group,) = topology.transfer_groups
-    candidates = partial(
-        _range_store_candidates,
-        block_size=group.block_size,
-        hash_block_size=topology.hash_block_size,
-        cacheable=group.group_id in topology.transfer_group_ids,
-    )
-    shard_rank, shard_count = _store_shard(topology, group)
-    if shard_count <= 1:
-        return candidates
-    return partial(_owned_candidate_rows, candidates, shard_rank=shard_rank, shard_count=shard_count)
+    The returned rule preserves reachability, source validity, and ownership in
+    Python lists.  Runtime freezes only admitted rows into transfer arrays.
+    """
+
+    selectors: dict[int, Callable] = {}
+    for group in topology.transfer_groups:
+        candidates: Callable = partial(
+            _range_store_candidates,
+            block_size=group.block_size,
+            hash_block_size=topology.hash_block_size,
+            minimum_block_id=(0 if topology.tp_partition.tp_mismatch or not group.uses_align_state else 1),
+            cacheable=group.group_id in topology.transfer_group_ids,
+        )
+        if use_layerwise:
+            selectors[group.group_id] = candidates if layerwise_store_leader else _discard_store_candidates
+            continue
+        shard_rank, shard_count = _store_shard(topology, group)
+        if shard_count <= 1:
+            selectors[group.group_id] = candidates
+        else:
+            selectors[group.group_id] = partial(
+                _owned_candidate_rows,
+                candidates,
+                shard_rank=shard_rank,
+                shard_count=shard_count,
+            )
+    return partial(_dispatch, selectors)
 
 
 def _store_shard(topology: KVPoolTopology, group) -> tuple[int, int]:
@@ -373,7 +401,12 @@ def _owned_candidate_rows(
     return counts[selection], hashes[selection], block_ids[selection]
 
 
-def _owned_rows(rows: BlockRows, *, shard_rank: int, shard_count: int) -> BlockRows:
+def _discard_store_candidates(*args, **kwargs) -> StoreCandidateRows:
+    del args, kwargs
+    return [], [], []
+
+
+def _owned_rows(rows: StoreCandidateRows, *, shard_rank: int, shard_count: int) -> StoreCandidateRows:
     if shard_count <= 1:
         return rows
     counts, hashes, block_ids = rows

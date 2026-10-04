@@ -304,6 +304,134 @@ def test_bulk_store_candidates_compact_partial_admission_before_materialization(
     assert resources.closed
 
 
+@pytest.mark.parametrize("layerwise", [False, True])
+def test_unified_store_candidates_compact_each_group_before_timeline_selection(layerwise: bool) -> None:
+    topology = make_topology(group_ids=(0, 1))
+    backend = FakeBackend()
+    backend.presence = [1, 0, 0, 1]
+    runtime, resources, _ = make_runtime(
+        backend,
+        topology=topology,
+        layerwise=layerwise,
+        requires_exists_before_put=True,
+    )
+    command = RangeStoreCommand(
+        "request",
+        TokenRange(0, 8),
+        ((1, 2), (3, 4)),
+        (b"a", b"b"),
+        8,
+        17,
+    )
+
+    batch = runtime._build_admitted_store_batch((command,))
+
+    assert batch is not None
+    assert [group.block_ids.tolist() for group in batch.groups] == [[2], [3]]
+    assert [group.token_counts.tolist() for group in batch.groups] == [[4], [4]]
+    assert [group.request_splits.tolist() for group in batch.groups] == [[0, 1], [0, 1]]
+    assert all(group.selection is None for group in batch.groups)
+    assert len(batch.selected_keys()) == 2
+    assert batch.selected_keys() == tuple(group.selected_keys()[0] for group in batch.groups)
+    if layerwise:
+        runtime._backend_io.store_batch(batch, layer_id=0)
+        copy_call = next(call for call in backend.calls if call[0] == "batch_copy_put")
+        assert copy_call[1] == batch.selected_keys()
+        assert copy_call[2] == ((1128,), (11192,))
+    else:
+        runtime._backend_io.store_batch(batch)
+        put_call = next(call for call in backend.calls if call[0] == "put")
+        assert put_call[1] == batch.selected_keys()
+        assert put_call[2] == ((1128, 2128), (11192, 12192))
+    runtime.close()
+    assert resources.closed
+
+
+@pytest.mark.parametrize(
+    ("topology", "presence", "expected_selection"),
+    [
+        (make_topology(tp_mismatch=True), [1, 0], [False, True]),
+        (make_topology(consumer_pipeline_partitions=(1, 1)), [0, 1], [True, False]),
+    ],
+)
+def test_unified_store_candidates_preserve_object_axis_admission(topology, presence, expected_selection) -> None:
+    backend = FakeBackend()
+    backend.presence = presence
+    runtime, resources, _ = make_runtime(
+        backend,
+        topology=topology,
+        requires_exists_before_put=True,
+    )
+    command = RangeStoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4, 17)
+
+    batch = runtime._build_admitted_store_batch((command,))
+
+    assert batch is not None
+    group = batch.groups[0]
+    assert group.block_ids.tolist() == [1]
+    assert group.selection is not None
+    assert group.selection.tolist() == expected_selection
+    assert batch.selected_keys() == group.selected_keys()
+    assert len(batch.selected_keys()) == 1
+    runtime.close()
+    assert resources.closed
+
+
+def test_unified_store_candidates_defer_hybrid_checkpoint_materialization() -> None:
+    base = make_topology(group_ids=(0, 1))
+    groups = (
+        KVPoolGroupTopology(
+            0,
+            FullAttentionSpec(block_size=8, num_kv_heads=1, head_size=1, dtype=torch.float32),
+            (KVPoolLayerTopology(0, ("layers.0.attention",)),),
+            base.groups[0].key_metadata,
+        ),
+        KVPoolGroupTopology(
+            1,
+            MambaSpec(
+                block_size=8,
+                shapes=((1,),),
+                dtypes=(torch.float32,),
+                mamba_cache_mode="align",
+            ),
+            (KVPoolLayerTopology(1, ("layers.1.state",)),),
+            base.groups[1].key_metadata,
+        ),
+    )
+    topology = replace(base, cache_transfer_granularity=8, hash_block_size=4, groups=groups)
+    backend = FakeBackend()
+    backend.presence = [1, 0]
+    runtime, resources, _ = make_runtime(
+        backend,
+        topology=topology,
+        requires_exists_before_put=True,
+    )
+    command = CheckpointStoreCommand(
+        "checkpoint",
+        ((3,), (99,)),
+        (b"a",),
+        0,
+        (StateCheckpointSource(1, 7, 4),),
+        23,
+    )
+
+    batch = runtime._build_admitted_store_batch((command,))
+
+    assert batch is not None
+    assert [group.block_ids.tolist() for group in batch.groups] == [[], [7]]
+    assert [group.request_splits.tolist() for group in batch.groups] == [[0, 0], [0, 1]]
+    assert len(batch.selected_keys()) == 1
+    assert "@group:1@" in batch.selected_keys()[0]
+    assert next(call for call in backend.calls if call[0] == "exists")[1] != batch.selected_keys()
+    runtime._backend_io.store_batch(batch)
+    put_call = next(call for call in backend.calls if call[0] == "put")
+    assert put_call[1] == batch.selected_keys()
+    assert put_call[2] == ((12448,),)
+    assert put_call[3] == ((32,),)
+    runtime.close()
+    assert resources.closed
+
+
 def test_layerwise_load_happy_path_reuses_rows_and_closes_one_session() -> None:
     runtime, resources, backend = make_runtime(
         layerwise=True, store=False, start_gate_factory=lambda: FakeLoadStartGate(opened=True)
@@ -566,9 +694,9 @@ def test_layerwise_store_materializes_only_missing_rows_and_skips_full_hits(monk
     )
 
     def reject_batch(*_args, **_kwargs):
-        raise AssertionError("Full-hit Layerwise Store must not assemble a transfer batch")
+        raise AssertionError("Full-hit Layerwise Store must not materialize a transfer batch")
 
-    monkeypatch.setattr(full_hit, "_assemble_batch", reject_batch)
+    monkeypatch.setattr(full_hit, "_materialize_store_candidates", reject_batch)
     begin_step(full_hit, store=StoreCommandBatch((command,)))
     full_hit.save_layer("layers.0.group.0")
     full_hit.save_layer("layers.1.group.0")

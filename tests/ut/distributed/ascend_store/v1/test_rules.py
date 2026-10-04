@@ -87,29 +87,17 @@ def test_rules_bind_static_facts_once_then_share_dynamic_rows(monkeypatch) -> No
 
     hashes = ["h0", "h1", "h2"]
     load_rows = phi.load_rows(0, 12, hashes, [4, 5, 6], mask=(True, False, True))
-    store_rows = phi.store_rows(0, 12, hashes, [4, 5, 6], mask=(True, False, True))
-    assert phi.store_candidate_rows is not None
-    store_candidates = phi.store_candidate_rows(12, hashes, [4, 5, 6])
-    unfiltered_store_rows = phi.store_rows(0, 12, hashes, [4, 5, 6])
+    store_candidates = phi.store_candidate_rows(0, 12, hashes, [4, 5, 6], mask=(True, False, True))
+    unfiltered_store_candidates = phi.store_candidate_rows(0, 12, hashes, [4, 5, 6])
     assert load_rows[0].tolist() == [4, 4]
     assert load_rows[1] == ("h0", "h2")
     assert load_rows[2].tolist() == [4, 6]
     # Ownership applies to the already filtered candidate ordinal.
-    assert store_rows[0].tolist() == [4]
-    assert store_rows[1] == ("h2",)
-    assert store_rows[2].tolist() == [6]
-    assert store_candidates == (
-        unfiltered_store_rows[0].tolist(),
-        list(unfiltered_store_rows[1]),
-        unfiltered_store_rows[2].tolist(),
-    )
-    shifted_candidates = phi.store_candidate_rows(12, hashes, [5, 6], start_token=4)
-    shifted_store_rows = phi.store_rows(0, 12, hashes, [5, 6], start_token=4)
-    assert shifted_candidates == (
-        shifted_store_rows[0].tolist(),
-        list(shifted_store_rows[1]),
-        shifted_store_rows[2].tolist(),
-    )
+    # Reachability filtering precedes ownership on the surviving candidate ordinal.
+    assert store_candidates == ([4], ["h2"], [6])
+    assert unfiltered_store_candidates == ([4], ["h1"], [5])
+    shifted_candidates = phi.store_candidate_rows(0, 12, hashes, [5, 6], start_token=4)
+    assert shifted_candidates == ([4], ["h2"], [6])
 
     lookup_axes = phi.lookup_keys(0, ("h0",))
     assert len(lookup_axes) == 8  # PP x DCP x effective head rank.
@@ -174,7 +162,7 @@ def test_memory_rules_select_only_the_backend_layout_they_consume(monkeypatch) -
             _rule_spec(topology, layerwise=schedule.requires_layerwise_backend), layerwise_full_key=full_key
         )(*_registration(topology, block_length=block_length))
         block_ids = np.asarray([1, 3], dtype=np.uint64)
-        assert (phi.store_candidate_rows is not None) is (name == "bulk")
+        assert callable(phi.store_candidate_rows)
 
         if name == "bulk":
             local, sizes, splits = phi.memory.partial(0, block_ids, np.asarray([3, 4], dtype=np.uint64))
@@ -275,9 +263,9 @@ def test_hybrid_checkpoint_tail_and_gva_rules_keep_their_distinct_contracts(monk
 
     checkpoint = phi.checkpoint_rows(4, ("h0",), {1: 7}, {0: (3,), 1: (99,)})
     assert tuple(group_id for group_id, _ in checkpoint) == (1, 0)
-    assert checkpoint[0][1][0].tolist() == [8]
-    assert checkpoint[0][1][2].tolist() == [7]  # exact source, not the Block Table
-    assert checkpoint[1][1][0].tolist() == [8]  # companion uses full physical extent
+    assert checkpoint[0][1][0] == [8]
+    assert checkpoint[0][1][2] == [7]  # exact source, not the Block Table
+    assert checkpoint[1][1][0] == [8]  # companion uses full physical extent
     assert phi.memory.partial(1, (7,), (4,))[1].tolist() == [32]
     assert phi.checkpoint_rows(4, ("h0",), {1: 0}, {0: (3,), 1: (99,)}) == ()
 
@@ -299,7 +287,7 @@ def test_hybrid_checkpoint_tail_and_gva_rules_keep_their_distinct_contracts(monk
         parallel_binder(*_registration(parallel_layerwise), object_sizes={0: 128, 1: 128}, object_offsets={0: 0})
 
     gva_phi = binder(*_registration(layerwise), object_sizes={0: 128}, object_offsets={0: 16})
-    assert gva_phi.store_candidate_rows is None
+    assert callable(gva_phi.store_candidate_rows)
     block_ids = np.asarray([1, 3], dtype=np.uint64)
     counts = np.asarray([2, 3], dtype=np.uint64)
     second_layer = gva_phi.memory.partial(0, block_ids, counts, layer_id=1)
@@ -318,4 +306,4 @@ def test_hybrid_checkpoint_tail_and_gva_rules_keep_their_distinct_contracts(monk
     assert local.tolist() == [2192]
     assert sizes.tolist() == [24]
     # The non-leader rule returns before request hashes are interpreted.
-    assert gva_phi.store_rows(0, 8, ("unused", "unused"), (1, 2))[0].size == 0
+    assert gva_phi.store_candidate_rows(0, 8, ("unused", "unused"), (1, 2)) == ([], [], [])
