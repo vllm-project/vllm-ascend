@@ -8,6 +8,16 @@ from .batch import TransferSource
 
 
 @dataclass(frozen=True, slots=True)
+class LayerStoreResult:
+    """One layer copy's key-aligned result without per-range evidence objects."""
+
+    keys: tuple[str, ...]
+    result_codes: tuple[int | None, ...]
+    source_release_confirmed: tuple[bool, ...]
+    error: Exception | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class TransferEvidence:
     source: TransferSource
     result_code: int | None

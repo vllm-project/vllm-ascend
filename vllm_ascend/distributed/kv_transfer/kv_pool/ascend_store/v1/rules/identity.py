@@ -36,7 +36,7 @@ from ..topology import KVPoolTopology
 
 ByteArray: TypeAlias = NDArray[np.uint64]
 ChunkRows: TypeAlias = tuple[ByteArray, ByteArray, tuple[BlockHash | str, ...]]
-BlockRows: TypeAlias = tuple[ByteArray, ByteArray, tuple[BlockHash | str, ...], ByteArray]
+BlockRows: TypeAlias = tuple[ByteArray, tuple[BlockHash | str, ...], ByteArray]
 KeyAxes: TypeAlias = tuple[tuple[str, ...], ...]
 LayerwiseFullKey = Callable[[int, str, int, int], str]
 LayerwisePartialKey = Callable[..., str]
@@ -60,10 +60,7 @@ def bind_chunk_rules(topology: KVPoolTopology):
     for group in topology.transfer_groups:
         cacheable = group.group_id in topology.transfer_group_ids
         normal[group.group_id] = partial(
-            _chunk_rows,
-            block_size=group.block_size,
-            hash_block_size=topology.hash_block_size,
-            cacheable=cacheable,
+            _chunk_rows, block_size=group.block_size, hash_block_size=topology.hash_block_size, cacheable=cacheable
         )
         if fine_grained_lookup:
             lookup[group.group_id] = cast(
@@ -84,11 +81,7 @@ def bind_chunk_rules(topology: KVPoolTopology):
             minimum_block_id=0 if topology.tp_partition.tp_mismatch or not group.uses_align_state else 1,
             cacheable=cacheable,
         )
-    return (
-        partial(_dispatch, normal),
-        partial(_dispatch, lookup),
-        partial(_dispatch, blocks),
-    )
+    return partial(_dispatch, normal), partial(_dispatch, lookup), partial(_dispatch, blocks)
 
 
 def _chunk_rows(
@@ -180,7 +173,6 @@ def _block_rows(
     )
     block_offset = max(logical_count - len(block_ids), 0)
     aligned_start_token = start_token // block_size * block_size
-    starts: list[int] = []
     counts: list[int] = []
     hashes: list[BlockHash | str] = []
     selected_block_ids: list[int] = []
@@ -206,10 +198,9 @@ def _block_rows(
             if block_index >= len(grouped_hashes):
                 continue
             hashes.append(grouped_hashes[block_index])
-        starts.append(start)
         counts.append(end - start)
         selected_block_ids.append(block_id)
-    return _readonly(starts), _readonly(counts), tuple(hashes), _readonly(selected_block_ids)
+    return _readonly(counts), tuple(hashes), _readonly(selected_block_ids)
 
 
 # =============================================================================
@@ -268,12 +259,7 @@ def _checkpoint_rows(
         if block_id < minimum_block_ids[group_id]:
             continue
         accepted_source_groups.append(group_id)
-        rows: BlockRows = (
-            _readonly((block_index * block_size,)),
-            _readonly((block_size,)),
-            (checkpoint_hash,),
-            _readonly((block_id,)),
-        )
+        rows: BlockRows = (_readonly((block_size,)), (checkpoint_hash,), _readonly((block_id,)))
         rows_by_group.append((group_id, ownership(group_id, rows)))
 
     if accepted_source_groups and any(boundary_token % block_sizes[group_id] for group_id in accepted_source_groups):
@@ -284,7 +270,7 @@ def _checkpoint_rows(
             block_ids = block_ids_by_group[group_id]
             logical_count = last_block_index + 1
             block_offset = max(logical_count - len(block_ids), 0)
-            starts: list[int] = []
+            counts: list[int] = []
             hashes: list[BlockHash | str] = []
             selected_ids: list[int] = []
             for block_index in range(first_block_index, logical_count):
@@ -294,15 +280,10 @@ def _checkpoint_rows(
                 if block_ids[local_index] < minimum_block_ids[group_id]:
                     continue
                 block_end = min((block_index + 1) * block_size, boundary_token)
-                starts.append(block_index * block_size)
+                counts.append(block_size)
                 hashes.append(_boundary_hash(block_end, block_hashes, hash_block_size))
                 selected_ids.append(block_ids[local_index])
-            rows = (
-                _readonly(starts),
-                _readonly(block_size for _ in starts),
-                tuple(hashes),
-                _readonly(selected_ids),
-            )
+            rows = (_readonly(counts), tuple(hashes), _readonly(selected_ids))
             rows_by_group.append((group_id, ownership(group_id, rows)))
     return tuple(rows_by_group)
 
@@ -323,20 +304,16 @@ def bind_store_ownership(topology: KVPoolTopology):
             replica_count = 1
         shard_rank = topology.pcp_rank * replica_count + topology.tp_rank % replica_count
         shard_count = topology.pcp_size * replica_count
-        selectors[group.group_id] = partial(
-            _owned_rows,
-            shard_rank=shard_rank,
-            shard_count=shard_count,
-        )
+        selectors[group.group_id] = partial(_owned_rows, shard_rank=shard_rank, shard_count=shard_count)
     return partial(_dispatch, selectors)
 
 
 def _owned_rows(rows: BlockRows, *, shard_rank: int, shard_count: int) -> BlockRows:
     if shard_count <= 1:
         return rows
-    starts, counts, hashes, block_ids = rows
-    selection = slice(shard_rank, len(starts), shard_count)
-    return starts[selection], counts[selection], hashes[selection], block_ids[selection]
+    counts, hashes, block_ids = rows
+    selection = slice(shard_rank, len(counts), shard_count)
+    return counts[selection], hashes[selection], block_ids[selection]
 
 
 # =============================================================================
@@ -405,12 +382,7 @@ def bind_key_rules(
             continue
 
         load_prefixes = _local_prefixes(topology, group.group_id)
-        store_prefixes = _store_prefixes(
-            topology,
-            group.group_id,
-            load_prefixes,
-            store_pipeline_ranks,
-        )
+        store_prefixes = _store_prefixes(topology, group.group_id, load_prefixes, store_pipeline_ranks)
         lookup_prefixes = _lookup_prefixes(topology, group.group_id)
         load[group.group_id] = partial(_prefixed_keys, load_prefixes)
         store[group.group_id] = partial(_prefixed_keys, store_prefixes)
@@ -430,23 +402,13 @@ def _prefixed_keys(prefixes: tuple[str, ...], hashes: Sequence[BlockHash | str])
 
 
 def _layerwise_local_keys(
-    hashes: Sequence[BlockHash | str],
-    *,
-    make_key: LayerwiseFullKey,
-    group_id: int,
-    head_rank: int,
-    pp_rank: int,
+    hashes: Sequence[BlockHash | str], *, make_key: LayerwiseFullKey, group_id: int, head_rank: int, pp_rank: int
 ) -> KeyAxes:
     return (tuple(make_key(group_id, block_hash_to_str(value), head_rank, pp_rank) for value in hashes),)
 
 
 def _layerwise_lookup_keys(
-    hashes: Sequence[BlockHash | str],
-    *,
-    make_key: LayerwiseFullKey,
-    group_id: int,
-    pp_size: int,
-    head_rank_count: int,
+    hashes: Sequence[BlockHash | str], *, make_key: LayerwiseFullKey, group_id: int, pp_size: int, head_rank_count: int
 ) -> KeyAxes:
     hash_strings = tuple(block_hash_to_str(value) for value in hashes)
     return tuple(
@@ -517,7 +479,7 @@ def _empty_chunk_rows() -> ChunkRows:
 
 def _empty_block_rows() -> BlockRows:
     empty = _readonly(())
-    return empty, empty, (), empty
+    return empty, (), empty
 
 
 def _readonly(values) -> ByteArray:
@@ -531,9 +493,7 @@ def _ceil_div(value: int, divisor: int) -> int:
 
 
 def _boundary_hash(
-    boundary_token: int,
-    block_hashes: Sequence[BlockHash | str],
-    hash_block_size: int,
+    boundary_token: int, block_hashes: Sequence[BlockHash | str], hash_block_size: int
 ) -> BlockHash | str:
     if boundary_token <= 0 or boundary_token % hash_block_size:
         raise ValueError(f"Token boundary {boundary_token} is not aligned to the hash block size")

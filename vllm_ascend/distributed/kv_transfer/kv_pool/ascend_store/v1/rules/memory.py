@@ -96,12 +96,7 @@ class KVMemoryRule:
 
             if strided_slice_count > 1:
                 full, partial_extent = _bind_strided_group(
-                    group_id,
-                    bases,
-                    lengths,
-                    strides,
-                    block_sizes[group_id],
-                    strided_slice_count,
+                    group_id, bases, lengths, strides, block_sizes[group_id], strided_slice_count
                 )
                 load_full[group_id] = store_full[group_id] = full
                 load_partial[group_id] = store_partial[group_id] = partial_extent
@@ -159,11 +154,7 @@ def _bind_contiguous_group(
     }
     all_entries = ((0, len(bases)),)
     store_entries = _pipeline_entry_slices(
-        physical_layers,
-        layer_bounds,
-        consumer_pipeline_partitions,
-        store_pipeline_ranks,
-        len(bases),
+        physical_layers, layer_bounds, consumer_pipeline_partitions, store_pipeline_ranks, len(bases)
     )
 
     load: Callable
@@ -332,6 +323,7 @@ def _bulk_contiguous_ranges(
     token_counts: Sequence[int] | ByteArray | None = None,
     *,
     layer_id: int | None = None,
+    selected_objects: Sequence[bool] | None = None,
     partial_extent: bool,
     bases: ByteArray,
     lengths: ByteArray,
@@ -346,19 +338,22 @@ def _bulk_contiguous_ranges(
     address_parts: list[ByteArray] = []
     size_parts: list[ByteArray] = []
     object_range_counts: list[int] = []
-    for start, end in entry_slices:
+    selections = _selected_rows(selected_objects, len(entry_slices), len(block_ids_array))
+    for (start, end), selected_rows in zip(entry_slices, selections, strict=True):
         selected_bases = bases[start:end]
         selected_lengths = lengths[start:end]
         selected_strides = strides[start:end]
-        addresses = selected_bases[None, :] + block_ids_array[:, None] * selected_strides[None, :]
+        selected_block_ids = block_ids_array if selected_rows is None else block_ids_array[selected_rows]
+        addresses = selected_bases[None, :] + selected_block_ids[:, None] * selected_strides[None, :]
         if not partial_extent or align_state:
             sizes = np.broadcast_to(selected_lengths, addresses.shape)
         else:
             assert counts is not None
-            sizes = selected_lengths[None, :] * counts[:, None] // np.uint64(block_size)
+            selected_counts = counts if selected_rows is None else counts[selected_rows]
+            sizes = selected_lengths[None, :] * selected_counts[:, None] // np.uint64(block_size)
         address_parts.append(addresses.ravel())
         size_parts.append(sizes.ravel())
-        object_range_counts.extend([end - start] * len(block_ids_array))
+        object_range_counts.extend(_range_counts(selected_rows, len(block_ids_array), end - start))
     return _concat(address_parts), _concat(size_parts), _splits(object_range_counts)
 
 
@@ -367,6 +362,7 @@ def _bulk_strided_ranges(
     token_counts: Sequence[int] | ByteArray | None = None,
     *,
     layer_id: int | None = None,
+    selected_objects: Sequence[bool] | None = None,
     partial_extent: bool,
     bases_by_slice: tuple[ByteArray, ...],
     strides_by_slice: tuple[ByteArray, ...],
@@ -379,18 +375,24 @@ def _bulk_strided_ranges(
     address_parts: list[ByteArray] = []
     size_parts: list[ByteArray] = []
     object_range_counts: list[int] = []
-    for bases, strides, sizes in zip(bases_by_slice, strides_by_slice, sizes_by_slice, strict=True):
-        addresses = bases[None, :] + block_ids_array[:, None] * strides[None, :]
+    selections = _selected_rows(selected_objects, len(bases_by_slice), len(block_ids_array))
+    for bases, strides, sizes, selected_rows in zip(
+        bases_by_slice, strides_by_slice, sizes_by_slice, selections, strict=True
+    ):
+        selected_block_ids = block_ids_array if selected_rows is None else block_ids_array[selected_rows]
+        addresses = bases[None, :] + selected_block_ids[:, None] * strides[None, :]
         if partial_extent:
             assert counts is not None
-            active = token_indices[None, :] < counts[:, None]
+            selected_counts = counts if selected_rows is None else counts[selected_rows]
+            active = token_indices[None, :] < selected_counts[:, None]
             address_parts.append(addresses[active])
             size_parts.append(np.broadcast_to(sizes, addresses.shape)[active])
-            object_range_counts.extend(active.sum(axis=1, dtype=np.intp).tolist())
+            selected_range_counts = active.sum(axis=1, dtype=np.intp)
         else:
             address_parts.append(addresses.ravel())
-            size_parts.append(np.tile(sizes, len(block_ids_array)))
-            object_range_counts.extend([len(bases)] * len(block_ids_array))
+            size_parts.append(np.tile(sizes, len(selected_block_ids)))
+            selected_range_counts = np.full(len(selected_block_ids), len(bases), dtype=np.intp)
+        object_range_counts.extend(_scatter_range_counts(selected_rows, len(block_ids_array), selected_range_counts))
     return _concat(address_parts), _concat(size_parts), _splits(object_range_counts)
 
 
@@ -399,6 +401,7 @@ def _object_ranges(
     token_counts: Sequence[int] | ByteArray | None = None,
     *,
     layer_id: int | None = None,
+    selected_objects: Sequence[bool] | None = None,
     partial_extent: bool,
     bases: ByteArray,
     lengths: ByteArray,
@@ -415,26 +418,27 @@ def _object_ranges(
     selected_lengths = lengths[start:end]
     selected_strides = strides[start:end]
     selected_offsets = offsets[start:end]
-    addresses = selected_bases[None, :] + block_ids_array[:, None] * selected_strides[None, :]
+    selected_rows = _selected_rows(selected_objects, 1, len(block_ids_array))[0]
+    selected_block_ids = block_ids_array if selected_rows is None else block_ids_array[selected_rows]
+    addresses = selected_bases[None, :] + selected_block_ids[:, None] * selected_strides[None, :]
     if not partial_extent or align_state:
         sizes = np.broadcast_to(selected_lengths, addresses.shape)
     else:
         assert counts is not None
-        sizes = selected_lengths[None, :] * counts[:, None] // np.uint64(block_size)
+        selected_counts = counts if selected_rows is None else counts[selected_rows]
+        sizes = selected_lengths[None, :] * selected_counts[:, None] // np.uint64(block_size)
     range_count = end - start
     return (
         addresses.ravel(),
         sizes.ravel(),
-        np.tile(selected_offsets, len(block_ids_array)),
-        _splits([range_count] * len(block_ids_array)),
+        np.tile(selected_offsets, len(selected_block_ids)),
+        _splits(_range_counts(selected_rows, len(block_ids_array), range_count)),
         np.full(len(block_ids_array), object_size, dtype=np.uint64),
     )
 
 
 def _dynamic_rows(
-    block_ids: Sequence[int] | ByteArray,
-    token_counts: Sequence[int] | ByteArray | None,
-    partial_extent: bool,
+    block_ids: Sequence[int] | ByteArray, token_counts: Sequence[int] | ByteArray | None, partial_extent: bool
 ) -> tuple[ByteArray, ByteArray | None]:
     ids = np.asarray(block_ids, dtype=np.uint64)
     counts = None if token_counts is None else np.asarray(token_counts, dtype=np.uint64)
@@ -443,6 +447,35 @@ def _dynamic_rows(
     if counts is not None and len(counts) != len(ids):
         raise ValueError("Block IDs and token counts must describe the same rows")
     return ids, counts
+
+
+def _selected_rows(
+    selected_objects: Sequence[bool] | None, axis_count: int, row_count: int
+) -> tuple[IndexArray | None, ...]:
+    if selected_objects is None:
+        return (None,) * axis_count
+    selected = np.asarray(selected_objects, dtype=np.bool_)
+    if len(selected) != axis_count * row_count:
+        raise ValueError("Object selection does not align the mapped rows")
+    return tuple(
+        np.flatnonzero(selected[axis_index * row_count : (axis_index + 1) * row_count])
+        for axis_index in range(axis_count)
+    )
+
+
+def _range_counts(selected_rows: IndexArray | None, row_count: int, range_count: int) -> list[int]:
+    if selected_rows is None:
+        return [range_count] * row_count
+    selected_counts: IndexArray = np.full(len(selected_rows), range_count, dtype=np.intp)
+    return _scatter_range_counts(selected_rows, row_count, selected_counts)
+
+
+def _scatter_range_counts(selected_rows: IndexArray | None, row_count: int, selected_counts: IndexArray) -> list[int]:
+    if selected_rows is None:
+        return selected_counts.tolist()
+    counts: IndexArray = np.zeros(row_count, dtype=np.intp)
+    counts[selected_rows] = selected_counts
+    return counts.tolist()
 
 
 # =============================================================================
@@ -454,9 +487,7 @@ def _dynamic_rows(
 
 
 def bulk_arguments(
-    key_axes: tuple[tuple[str, ...], ...],
-    ranges: BulkRangeBatch,
-    selected_objects: Sequence[bool] | None = None,
+    key_axes: tuple[tuple[str, ...], ...], ranges: BulkRangeBatch, selected_objects: Sequence[bool] | None = None
 ) -> tuple[list[str], list[list[int]], list[list[int]]]:
     """Convert Bulk ranges without constructing Layerwise-only metadata."""
 
@@ -471,9 +502,7 @@ def bulk_arguments(
 
 
 def key_range_arguments(
-    key_axes: tuple[tuple[str, ...], ...],
-    ranges: RangeBatch,
-    selected_objects: Sequence[bool] | None = None,
+    key_axes: tuple[tuple[str, ...], ...], ranges: RangeBatch, selected_objects: Sequence[bool] | None = None
 ) -> tuple[list[str], list[list[int]], list[list[int]], list[list[int]]]:
     """Convert selected range objects to the existing KeyRange Backend shape."""
 
@@ -488,53 +517,50 @@ def key_range_arguments(
     )
 
 
-def required_object_sizes(
-    ranges: RangeBatch,
-    selected_objects: Sequence[bool] | None = None,
-) -> ByteArray:
+def required_object_sizes(ranges: RangeBatch, selected_objects: Sequence[bool] | None = None) -> ByteArray:
     """Return the minimum leased extents required by the selected copies."""
 
     _, sizes, offsets, splits, _ = ranges
     object_count = len(splits) - 1
     if object_count == 0:
         return np.empty(0, dtype=np.uint64)
-    required = np.maximum.reduceat(offsets + sizes, splits[:-1])
-    selected = _selected_object_indices(object_count, splits, selected_objects)
-    return required[np.asarray(selected, dtype=np.intp)]
+    selected = np.asarray(_selected_object_indices(object_count, splits, selected_objects), dtype=np.intp)
+    if len(selected) == 0:
+        return np.empty(0, dtype=np.uint64)
+    return np.maximum.reduceat(offsets + sizes, splits[selected])
 
 
 def gva_arguments(
-    ranges: RangeBatch,
-    object_bases: Sequence[int] | ByteArray,
-    selected_objects: Sequence[bool] | None = None,
+    ranges: RangeBatch, object_bases: Sequence[int] | ByteArray, selected_objects: Sequence[bool] | None = None
 ) -> tuple[ByteArray, ByteArray, ByteArray]:
     """Evaluate GVA addresses from caller-owned, already admitted bases."""
 
     local, sizes, offsets, splits, _ = ranges
     object_count = len(splits) - 1
-    selected = _selected_object_indices(object_count, splits, selected_objects)
-    bases = np.asarray(object_bases, dtype=np.uint64)
-    if len(bases) != len(selected):
-        raise ValueError("GVA bases must contain exactly the selected remote objects")
-    range_counts = np.diff(splits)[np.asarray(selected, dtype=np.intp)]
-    if selected:
-        selected_ranges = np.concatenate(
-            [np.arange(splits[index], splits[index + 1], dtype=np.intp) for index in selected]
-        )
+    range_counts_by_object = np.diff(splits)
+    if selected_objects is None:
+        selected_count = object_count
+        range_counts = range_counts_by_object
+        selected_ranges: slice | np.ndarray = slice(None)
     else:
-        selected_ranges = np.empty(0, dtype=np.intp)
-    return (
-        np.repeat(bases, range_counts) + offsets[selected_ranges],
-        local[selected_ranges],
-        sizes[selected_ranges],
-    )
+        selected_mask = np.asarray(selected_objects, dtype=np.bool_)
+        if len(selected_mask) != object_count:
+            raise ValueError("Object selection does not align the mapped range objects")
+        selected_count = int(np.count_nonzero(selected_mask))
+        range_counts = range_counts_by_object[selected_mask]
+        selected_ranges = (
+            slice(None)
+            if selected_count == object_count
+            else np.flatnonzero(np.repeat(selected_mask, range_counts_by_object))
+        )
+    bases = np.asarray(object_bases, dtype=np.uint64)
+    if len(bases) != selected_count:
+        raise ValueError("GVA bases must contain exactly the selected remote objects")
+    remote = np.repeat(bases, range_counts) + offsets[selected_ranges]
+    return remote, local[selected_ranges], sizes[selected_ranges]
 
 
-def _selected_object_indices(
-    count: int,
-    splits: IndexArray,
-    selected: Sequence[bool] | None,
-) -> tuple[int, ...]:
+def _selected_object_indices(count: int, splits: IndexArray, selected: Sequence[bool] | None) -> tuple[int, ...]:
     if len(splits) != count + 1:
         raise ValueError("Key axes do not align the mapped range objects")
     if selected is None:
