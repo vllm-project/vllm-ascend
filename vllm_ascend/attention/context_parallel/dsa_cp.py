@@ -47,7 +47,7 @@ from vllm_ascend.ops.cv_linear import CVLinearWrapper
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.ops.rope_dsv4 import RopeDataProxy, get_cos_and_sin_dsa, get_full_cos_and_sin_dsa
 from vllm_ascend.ops.triton.dsa_cp import BUILD_LOCAL_METADATA_BLOCK_SIZE, build_local_metadata_triton
-from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
+from vllm_ascend.quantization.methods import AscendLinearScheme, AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import enable_dsa_cp_full_o_proj, enable_pcp_o_proj_weight_sharding
 from vllm_ascend.weight_switch import (
     WeightLoadPartition,
@@ -2622,26 +2622,6 @@ class AscendDSAPCPImpl(dsa_v1.AscendDSAImpl):
         for _, method, state in self._get_pcp_o_proj_weight_switches():
             method.all_gather_weight(state, self.pcp_o_proj_weight_switch_config)
 
-    def _forward_attention(
-        self,
-        layer_name,
-        hidden_states: torch.Tensor,
-        kv_cache: tuple[torch.Tensor, ...],
-        layer_metadata: dsa_v1.AscendDSALayerMetadata,
-        cache_is_prepared: bool = False,
-    ) -> torch.Tensor:
-        # Cache preparation also communicates over the PCP group. Start the
-        # asynchronous weight gather afterwards so it can overlap local Q,
-        # indexer/compressor, and sparse-attention computation instead.
-        self._maybe_all_gather_pcp_o_proj_weights()
-        return super()._forward_attention(
-            layer_name,
-            hidden_states,
-            kv_cache,
-            layer_metadata,
-            cache_is_prepared,
-        )
-
     def _forward_o_proj_with_local_weights(self, o_proj_input: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
         # Decode tokens and their KV cache updates are replicated across PCP
         # ranks, so each rank projects the same attention output locally.
@@ -2677,7 +2657,18 @@ class AscendDSAPCPImpl(dsa_v1.AscendDSAImpl):
                 perm_y=(1, 0, 2),
                 batch_split_factor=1,
             )
-        partial_output = self.wo_b(projected.reshape(num_tokens, -1))
+        projected = projected.reshape(num_tokens, -1)
+        linear_method = self._get_pcp_weight_switch_method(self.wo_b)
+        if isinstance(linear_method, AscendLinearScheme):
+            tp_group = get_tp_group()
+            # The complete O-projection bias belongs to only one TP/PCP shard.
+            bias_rank = 0 if tp_group.rank_in_group == 0 and pcp_group.rank_in_group == 0 else 1
+            bias = self.wo_b.bias if bias_rank == 0 and not self.wo_b.skip_bias_add else None
+            partial_output = linear_method.apply(self.wo_b, projected, bias=bias, tp_rank=bias_rank)
+            if self.wo_b.reduce_results and tp_group.world_size > 1:
+                partial_output = tp_group.all_reduce(partial_output)
+        else:
+            partial_output = self.wo_b(projected)
         output[...] = pcp_group.all_reduce(partial_output)
         return output
 
@@ -2840,6 +2831,13 @@ class AscendDSAPCPImpl(dsa_v1.AscendDSAImpl):
                     kv_cache,
                     indexer_metadata,
                 )
+        # Every rank must join the weight gathers, including ranks that return
+        # before local attention. Launch after the cache collectives to overlap
+        # local attention on nonempty ranks.
+        self._maybe_all_gather_pcp_o_proj_weights()
+        if self._pcp_o_proj_use_full_weight and pcp_metadata.num_actual_tokens == 0:
+            for _, method, state in self._get_pcp_o_proj_weight_switches():
+                method.wait_weight_all_gather(state)
         return True
 
     def _get_o_proj_input_shape(

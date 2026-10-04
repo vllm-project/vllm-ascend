@@ -54,6 +54,9 @@ from vllm_ascend.models.deepseek_v4.indexer import (
     AscendIndexerMetadata,
     IndexerOverlapPlan,
 )
+from vllm_ascend.ops.linear import AscendRowParallelLinear
+from vllm_ascend.quantization.method_adapters import AscendLinearMethod
+from vllm_ascend.quantization.methods.w8a8.w8a8_static import AscendW8A8LinearMethod
 from vllm_ascend.worker.device_metadata import (
     DeviceMetadataStage,
     DeviceMetadataTask,
@@ -2163,11 +2166,32 @@ def test_pcp_graph_metadata_restores_mtp_query_offsets():
 
 
 @pytest.mark.parametrize("local_num_actual_tokens", [2, 0], ids=["local_tokens", "empty_rank"])
+@pytest.mark.parametrize("shard_o_proj", [False, True])
 def test_pcp_forward_updates_global_caches_before_local_attention(
     local_num_actual_tokens: int,
+    shard_o_proj: bool,
 ):
     """Exercise batched cache preparation, local attention, and empty ranks."""
     impl = _make_impl(AscendDSAPCPImpl)
+    impl.enable_pcp_o_proj_weight_sharding = shard_o_proj
+    impl.pcp_o_proj_weight_switch_config = MagicMock()
+    weight_switches = []
+    for _ in range(2):
+        state = SimpleNamespace(handles=[])
+        method = MagicMock()
+
+        def gather(state, config):
+            assert not state.handles
+            state.handles.append(MagicMock())
+
+        def wait(state):
+            assert state.handles
+            state.handles.clear()
+
+        method.all_gather_weight.side_effect = gather
+        method.wait_weight_all_gather.side_effect = wait
+        weight_switches.append((MagicMock(), method, state))
+    impl._pcp_o_proj_weight_switches = tuple(weight_switches)
     impl.compress_ratio = 4
     impl.compressor = SimpleNamespace(
         state_cache=SimpleNamespace(prefix="compressor.state_cache"),
@@ -2234,6 +2258,9 @@ def test_pcp_forward_updates_global_caches_before_local_attention(
     )
 
     def fake_o_proj(o_proj_input: torch.Tensor, output_tensor: torch.Tensor) -> torch.Tensor:
+        if shard_o_proj:
+            for _, method, state in weight_switches:
+                method.wait_weight_all_gather(state)
         captured_o_proj_inputs.append(o_proj_input.clone())
         output_tensor[:local_num_actual_tokens].copy_(
             o_proj_input[:local_num_actual_tokens].reshape(local_num_actual_tokens, 2)
@@ -2271,20 +2298,27 @@ def test_pcp_forward_updates_global_caches_before_local_attention(
         patch("vllm_ascend.attention.dsa_v1.notify_kv_cache_written"),
         patch("vllm_ascend.attention.dsa_v1.maybe_save_kv_layer_to_connector"),
     ):
-        actual = impl.forward(
-            layer_name="layer",
-            hidden_states=hidden_states,
-            kv_cache=caches,
-            attn_metadata=attn_metadata,
-            output=output,
-        )
+        # Repeated empty batches must not leave pending gathers for the next layer.
+        num_calls = 2 if shard_o_proj and local_num_actual_tokens == 0 else 1
+        for _ in range(num_calls):
+            actual = impl.forward(
+                layer_name="layer",
+                hidden_states=hidden_states,
+                kv_cache=caches,
+                attn_metadata=attn_metadata,
+                output=output,
+            )
 
     assert actual is output
     assert torch.equal(pcp_group.all_gather.call_args.args[0], hidden_states)
     assert pcp_group.all_gather.call_args.kwargs == {"dim": 0}
-    update_swa.assert_called_once()
-    update_compressor.assert_called_once()
-    impl.indexer.update_cache.assert_called_once()
+    assert update_swa.call_count == num_calls
+    assert update_compressor.call_count == num_calls
+    assert impl.indexer.update_cache.call_count == num_calls
+    for _, method, state in weight_switches:
+        assert method.all_gather_weight.call_count == (num_calls if shard_o_proj else 0)
+        assert method.wait_weight_all_gather.call_count == (num_calls if shard_o_proj else 0)
+        assert not state.handles
     expected_global_hidden = gathered_hidden_states.index_select(0, restore_idx)
     assert torch.equal(update_swa.call_args.args[1], expected_global_hidden)
     assert torch.equal(update_compressor.call_args.args[0], expected_global_hidden)
@@ -2322,6 +2356,12 @@ def test_pcp_decode_delegates_to_standard_cache_preparation():
         num_prefills=0,
     )
     attn_metadata = {"swa_cache": metadata}
+    impl.enable_pcp_o_proj_weight_sharding = True
+    impl._pcp_o_proj_use_full_weight = True
+    with override_forward_context(_make_forward_context()):
+        impl._get_o_proj_input_shape(attn_metadata)
+    assert not impl._pcp_o_proj_use_full_weight
+    impl._get_pcp_o_proj_weight_switches = MagicMock()
 
     with patch.object(
         AscendDSAImpl,
@@ -2337,3 +2377,68 @@ def test_pcp_decode_delegates_to_standard_cache_preparation():
         )
 
     prepare_standard_caches.assert_called_once()
+    impl._get_pcp_o_proj_weight_switches.assert_not_called()
+
+
+@pytest.mark.parametrize("tp_size", [1, 2])
+@pytest.mark.parametrize("reduce_results", [False, True])
+@pytest.mark.parametrize("quant_bias_value", [0, 64])
+def test_pcp_local_o_projection_adds_static_quant_bias_once(tp_size, reduce_results, quant_bias_value):
+    """The complete wo_b bias must survive TP/PCP summation exactly once."""
+    scheme = object.__new__(AscendW8A8LinearMethod)
+    scheme.quant_method = "modelslim"
+    partial_outputs = []
+    for pcp_rank in range(2):
+        for tp_rank in range(tp_size):
+            impl = _make_impl(AscendDSAPCPImpl)
+            impl.n_local_groups = 2
+            impl.support_fp8_attention = False
+            layer = object.__new__(AscendRowParallelLinear)
+            torch.nn.Module.__init__(layer)
+            layer.quant_method = AscendLinearMethod(scheme)
+            layer.weight = torch.zeros((2, 2), dtype=torch.int8)
+            layer.deq_scale = torch.ones(2)
+            layer.quant_bias = torch.full((2,), quant_bias_value, dtype=torch.int32)
+            layer.params_dtype = torch.bfloat16
+            layer.aclnn_input_scale = torch.ones(2)
+            layer.aclnn_input_scale_reciprocal = torch.ones(2)
+            layer.aclnn_input_offset = torch.zeros(2)
+            layer.bias = None
+            layer.input_is_parallel = True
+            layer.skip_bias_add = False
+            layer.return_bias = False
+            layer.reduce_results = reduce_results
+            layer.tp_rank = tp_rank
+            layer.tp_size = tp_size
+            layer.prefix = "layer.wo_b"
+            layer.custom_op = None
+            impl.wo_b = layer
+            tp_group = SimpleNamespace(
+                rank_in_group=tp_rank, world_size=tp_size, all_reduce=MagicMock(side_effect=lambda x: x)
+            )
+            pcp_group = SimpleNamespace(
+                rank_in_group=pcp_rank, world_size=2, all_reduce=MagicMock(side_effect=lambda x: x)
+            )
+
+            def quant_matmul(x, weight, scale, *, bias, output_dtype):
+                result = torch.zeros((x.shape[0], 2), dtype=output_dtype)
+                return result if bias is None else result + bias.to(output_dtype)
+
+            with (
+                patch("vllm_ascend.attention.context_parallel.dsa_cp.get_pcp_group", return_value=pcp_group),
+                patch("vllm_ascend.attention.context_parallel.dsa_cp.get_tp_group", return_value=tp_group),
+                patch("vllm_ascend.quantization.method_adapters.get_tensor_model_parallel_rank", return_value=tp_rank),
+                patch(
+                    "vllm.model_executor.layers.linear.tensor_model_parallel_all_reduce",
+                    side_effect=tp_group.all_reduce,
+                ),
+                patch.object(torch.ops.vllm, "quantize", create=True, side_effect=lambda x, *args: x.to(torch.int8)),
+                patch("torch_npu.npu_transpose_batchmatmul", create=True, side_effect=lambda x, *args, **kwargs: x),
+                patch("torch_npu.npu_quant_matmul", create=True, side_effect=quant_matmul),
+            ):
+                result = torch.empty((1, 2), dtype=torch.bfloat16)
+                impl._forward_o_proj_with_local_weights(torch.zeros((1, 2, 2), dtype=torch.bfloat16), result)
+                partial_outputs.append(result)
+            assert tp_group.all_reduce.call_count == int(reduce_results and tp_size > 1)
+            pcp_group.all_reduce.assert_called_once()
+    assert torch.equal(torch.stack(partial_outputs).sum(0), torch.full((1, 2), quant_bias_value, dtype=torch.bfloat16))
