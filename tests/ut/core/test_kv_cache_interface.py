@@ -11,6 +11,7 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendSlidingWindowMLASpec,
     get_kv_cache_compression_ratio,
     get_storage_block_size,
+    supports_component_major_mla_pd,
 )
 
 
@@ -50,3 +51,33 @@ def test_sliding_window_mla_storage_and_page_size():
     )
     assert spec.storage_block_size == 16
     assert spec.real_page_size_bytes == 16 * 128 * 2
+
+
+def test_component_major_mla_pd_gate():
+    assert supports_component_major_mla_pd(SimpleNamespace(kv_transfer_config=None))
+
+    for connector in ("MooncakeConnectorV2", "MooncakePullConnector"):
+        config = SimpleNamespace(
+            kv_transfer_config=SimpleNamespace(
+                kv_connector=connector,
+                kv_connector_module_path=None,
+            )
+        )
+        assert supports_component_major_mla_pd(config)
+
+    for connector in ("MooncakeConnectorV1", "AscendStoreConnector", "MultiConnector"):
+        config = SimpleNamespace(
+            kv_transfer_config=SimpleNamespace(
+                kv_connector=connector,
+                kv_connector_module_path=None,
+            )
+        )
+        assert not supports_component_major_mla_pd(config)
+
+    config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(
+            kv_connector="MooncakeConnectorV2",
+            kv_connector_module_path="custom.connector",
+        )
+    )
+    assert not supports_component_major_mla_pd(config)
