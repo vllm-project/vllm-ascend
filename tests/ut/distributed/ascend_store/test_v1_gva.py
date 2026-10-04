@@ -362,6 +362,12 @@ def test_gva_runtime_publishes_after_all_layers_and_reports_job_release() -> Non
     backend_io = runtime._backend_io
     assert len(backend_io._rule_store_bases) == 1
     resolved_bases = next(iter(backend_io._rule_store_bases.values()))
+    prepared_plan = backend_io._store_plan
+    assert prepared_plan is not None
+    assert prepared_plan.groups_by_layer[0][0] is prepared_plan.groups_by_layer[1][0]
+    assert prepared_plan.keys_by_layer[0] is prepared_plan.keys_by_layer[1]
+    assert prepared_plan.object_bases_by_group is not None
+    assert prepared_plan.object_bases_by_group[0] is resolved_bases
     assert [call[0] for call in store.calls].count("copy") == 1
     assert not any(call[0] == "publish" for call in store.calls)
 

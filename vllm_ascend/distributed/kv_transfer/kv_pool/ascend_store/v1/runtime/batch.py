@@ -92,6 +92,80 @@ class KVGroupBatch:
 
 
 @dataclass(frozen=True, slots=True)
+class LayerStoreGroup:
+    """One Group's admitted object rows shared by every Store layer."""
+
+    batch: KVGroupBatch
+    keys: tuple[str, ...]
+    block_ids: ByteArray
+    token_counts: ByteArray
+
+    @property
+    def group_id(self) -> int:
+        return self.batch.group_id
+
+    @property
+    def physical_layer_ids(self) -> tuple[int, ...]:
+        return self.batch.physical_layer_ids
+
+
+@dataclass(frozen=True, slots=True)
+class LayerStorePlan:
+    """One Store's object rows and layer membership lowered during materialization."""
+
+    groups: tuple[LayerStoreGroup, ...]
+    groups_by_layer: dict[int, tuple[LayerStoreGroup, ...]]
+    keys_by_layer: dict[int, list[str]]
+    object_bases_by_group: dict[int, ByteArray] | None = None
+
+
+def make_layer_store_group(
+    group: KVGroupBatch,
+    selected_object_indices: IndexArray | None = None,
+) -> LayerStoreGroup:
+    """Align one materialized Group's dynamic rows with its admitted objects."""
+
+    keys = group.selected_keys()
+    if not keys:
+        return LayerStoreGroup(group, (), group.block_ids[:0], group.token_counts[:0])
+    if selected_object_indices is None and group.selection is not None:
+        selected_object_indices = np.flatnonzero(group.selection)
+    if selected_object_indices is None:
+        axis_count = len(group.key_axes)
+        block_ids = group.block_ids if axis_count == 1 else np.tile(group.block_ids, axis_count)
+        token_counts = group.token_counts if axis_count == 1 else np.tile(group.token_counts, axis_count)
+    else:
+        row_indices = selected_object_indices % group.row_count
+        block_ids = group.block_ids[row_indices]
+        token_counts = group.token_counts[row_indices]
+    if not (len(keys) == len(block_ids) == len(token_counts)):
+        raise RuntimeError(f"Layerwise Store group {group.group_id} has misaligned keys and object rows")
+    block_ids.flags.writeable = False
+    token_counts.flags.writeable = False
+    return LayerStoreGroup(group, keys, block_ids, token_counts)
+
+
+def make_layer_store_plan(groups: tuple[LayerStoreGroup, ...]) -> LayerStorePlan:
+    """Compile reusable group membership and key axes without touching object rows."""
+
+    active_groups = tuple(group for group in groups if group.keys)
+    mutable_groups_by_layer: dict[int, list[LayerStoreGroup]] = {}
+    for group in active_groups:
+        for layer_id in group.physical_layer_ids:
+            mutable_groups_by_layer.setdefault(layer_id, []).append(group)
+
+    groups_by_layer = {layer_id: tuple(layer_groups) for layer_id, layer_groups in mutable_groups_by_layer.items()}
+    keys_by_membership: dict[tuple[int, ...], list[str]] = {}
+    keys_by_layer = {}
+    for layer_id, layer_groups in groups_by_layer.items():
+        membership = tuple(group.group_id for group in layer_groups)
+        if membership not in keys_by_membership:
+            keys_by_membership[membership] = [key for group in layer_groups for key in group.keys]
+        keys_by_layer[layer_id] = keys_by_membership[membership]
+    return LayerStorePlan(active_groups, groups_by_layer, keys_by_layer)
+
+
+@dataclass(frozen=True, slots=True)
 class KVTransferBatch:
     """One Runtime invocation with request ownership retained on Group rows."""
 
@@ -99,6 +173,7 @@ class KVTransferBatch:
     groups: tuple[KVGroupBatch, ...]
     store_job_ids: tuple[int | None, ...] | None = None
     selected_key_values: tuple[str, ...] | None = None
+    layer_store_plan: LayerStorePlan | None = None
 
     @property
     def empty(self) -> bool:
@@ -113,12 +188,22 @@ class KVTransferBatch:
         claimed: set[str] | None = set() if claim_once else None
         groups = tuple(group.select_keys(accepted, claimed) for group in self.groups)
         selected_keys = tuple(key for group in groups for key in group.selected_keys())
-        return replace(self, groups=groups, selected_key_values=selected_keys)
+        layer_store_plan = (
+            None
+            if self.layer_store_plan is None
+            else make_layer_store_plan(tuple(make_layer_store_group(group) for group in groups))
+        )
+        return replace(
+            self,
+            groups=groups,
+            selected_key_values=selected_keys,
+            layer_store_plan=layer_store_plan,
+        )
 
     def for_layer(self, layer_id: int) -> KVTransferBatch:
         groups = tuple(group for group in self.groups if layer_id in group.physical_layer_ids)
         selected_keys = tuple(key for group in groups for key in group.selected_keys())
-        return replace(self, groups=groups, selected_key_values=selected_keys)
+        return replace(self, groups=groups, selected_key_values=selected_keys, layer_store_plan=None)
 
 
 @dataclass(frozen=True, slots=True)
