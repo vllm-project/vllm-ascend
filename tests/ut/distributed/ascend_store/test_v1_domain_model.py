@@ -223,9 +223,10 @@ def test_bulk_runtime_store_success_and_failure_preserve_source_safety(monkeypat
     )
 
     def reject_full_batch(*_args, **_kwargs):
-        raise AssertionError("Full-hit Store must not assemble a transfer batch")
+        raise AssertionError("Full-hit Store must not materialize a transfer batch")
 
     monkeypatch.setattr(full_hit, "_assemble_batch", reject_full_batch)
+    monkeypatch.setattr(full_hit, "_materialize_store_candidates", reject_full_batch)
     begin_step(full_hit, store=StoreCommandBatch((command,)))
     full_hit.finish_step()
     full_hit_completions = full_hit.fence_previous_store()
@@ -281,6 +282,26 @@ def test_bulk_runtime_store_success_and_failure_preserve_source_safety(monkeypat
         with pytest.raises(RuntimeError, match="previous Store failure"):
             failed.close()
         assert not failed_resources.closed
+
+
+def test_bulk_store_candidates_compact_partial_admission_before_materialization() -> None:
+    backend = FakeBackend()
+    backend.presence = [1, 0]
+    runtime, resources, _ = make_runtime(backend, requires_exists_before_put=True, source_ready_event_factory=FakeEvent)
+    present = RangeStoreCommand("present", TokenRange(0, 4), ((1,),), (b"a",), 4, 7)
+    missing = RangeStoreCommand("missing", TokenRange(0, 4), ((3,),), (b"b",), 4, 8)
+
+    begin_step(runtime, store=StoreCommandBatch((present, missing)))
+    runtime.finish_step()
+    completions = runtime.fence_previous_store()
+
+    put_call = next(call for call in backend.calls if call[0] == "put")
+    assert len(put_call[1]) == 1
+    assert put_call[2] == ((1192, 2192),)
+    assert [len(completion.evidence.transfer_evidence) for completion in completions] == [0, 1]
+    assert runtime.take_released_store_job_ids() == {7, 8}
+    runtime.close()
+    assert resources.closed
 
 
 def test_layerwise_load_happy_path_reuses_rows_and_closes_one_session() -> None:
