@@ -12,22 +12,12 @@ import math
 from dataclasses import dataclass, replace
 from typing import Any
 
-import logging
-
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 import torch_npu
 from vllm.forward_context import get_forward_context
 from vllm.v1.utils import CpuGpuBuffer
-
-from vllm_ascend import envs
-
-logger = logging.getLogger(__name__)
-
-# Flipped to True once the row-event sentinel benchmark validates that the
-# recorded done_event fully covers HCCL completion on the target build.
-_ROW_EVENT_SENTINEL_VALIDATED = False
 
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.triton.dsa_compressor import (
@@ -128,55 +118,29 @@ class CompressorSPMetadata:
 class CompressorSPGatherHandle:
     """One fixed-shape Compressor SP all-gather and the buffers it references.
 
-    ``work`` None means the collective was queued inline on the issuing stream
-    and is already ordered there, so :meth:`wait` only returns the rows.
-    Otherwise the collective runs on the communication stream and a
-    ``done_event`` is recorded right behind it. :meth:`wait` joins the
-    *collective itself* (never the whole stream), so finalizing one gather
-    cannot over-wait a later gather queued behind it on the same stream.
+    ``work`` None means the collective was issued synchronously, so :meth:`wait`
+    only returns the rows. Otherwise it was issued with ``async_op=True`` and
+    runs on the process group's own internal HCCL stream, not on the issuing
+    stream.
 
-    Both buffers stay referenced here until the join: the collective keeps
-    reading the send buffer and writing the recv buffer until completion, so
-    they must not be freed or recycled before :meth:`wait`.
+    ``Work.wait()`` is the only correct join: it blocks the *calling* stream on
+    the collective's HCCL end event, so it works from any stream and covers this
+    collective alone, never a later one queued behind it. An event recorded on
+    the issuing stream would capture the launch point instead of completion.
 
-    Join semantics note (red line, sentinel-verified on torch_npu 2.10.0.post2):
-    stream-recorded events are NOT reliable completion coverage when multiple
-    async collectives are stacked on one stream (races observed), so the
-    default mode "both" -- Work.wait() invoked on the consumer's current
-    stream (non-blocking stream-dependency insertion on this build) followed
-    by the event edge -- is the production setting. "event" alone is kept
-    only as an A/B knob for future HCCL builds.
+    Both buffers stay referenced here until the join: the collective reads the
+    send buffer and writes the recv buffer until completion, so they must not be
+    freed or recycled before :meth:`wait`.
     """
 
     recv_buffer: torch.Tensor
     send_buffer: torch.Tensor
     work: Any = None
-    comm_stream: Any = None
-    done_event: Any = None
 
     def wait(self) -> torch.Tensor:
         """Join this collective and return the gathered rows."""
-        if self.work is None:
-            return self.recv_buffer
-        mode = envs.VLLM_ASCEND_COMPRESSOR_SP_AGG_WAIT_MODE
-        if mode not in ("both", "event"):
-            raise ValueError(
-                "VLLM_ASCEND_COMPRESSOR_SP_AGG_WAIT_MODE must be 'both' or "
-                f"'event', got {mode!r}"
-            )
-        if mode == "both":
-            # Work.wait() on torch_npu is non-blocking and inserts a
-            # completion dependency onto the CURRENT stream, so calling it
-            # here (the consumer stream) is the deterministic ordering
-            # primitive. The event edge below is supplementary only.
+        if self.work is not None:
             self.work.wait()
-        elif not _ROW_EVENT_SENTINEL_VALIDATED:
-            logger.warning(
-                "VLLM_ASCEND_COMPRESSOR_SP_AGG_WAIT_MODE='event' selected "
-                "before the row-event sentinel validated reliable event "
-                "coverage; correctness is not guaranteed on this build."
-            )
-        torch.npu.current_stream().wait_event(self.done_event)
         return self.recv_buffer
 
 
@@ -652,15 +616,12 @@ def rotate_activation(
 class CompressorSPStateDeferred:
     """Gather-side half of one deferred state replication chain.
 
-    :meth:`CompressorExecutor.launch_sp_state` only enqueues the state read
-    and the async all-gather and returns this handle. The apply half
-    (:meth:`CompressorExecutor.attach_sp_state`) is attached one layer later
-    by the runtime: attaching immediately after TopK means the Work.wait()
-    inside the apply-stream context can host-block on a backlogged gather
-    while the compute queue is empty (observed as rare 1-2.7 ms device
-    blanks after TopK). By the next layer's forward entry the host has
-    already enqueued SWA/attention/o_proj/MoE, so the same wait can no
-    longer starve the compute stream.
+    :meth:`CompressorExecutor.launch_sp_state` only enqueues the state read and
+    the async all-gather and returns this handle. The runtime attaches the apply
+    half (:meth:`CompressorExecutor.attach_sp_state`) one layer later, so that by
+    then the host has already queued the next layer's SWA/attention/o_proj/MoE
+    and a late apply cannot leave the compute queue empty. This is a
+    host-scheduling cushion, not a correctness requirement.
     """
 
     work: Any
@@ -847,55 +808,35 @@ class CompressorExecutor:
         self,
         send_buffer: torch.Tensor,
         recv_buffer: torch.Tensor,
-        comm_stream: Any | None = None,
+        async_op: bool = False,
     ) -> CompressorSPGatherHandle:
-        """Issue one fixed-shape Compressor SP all-gather.
+        """Issue one fixed-shape Compressor SP all-gather on the row group.
 
-        ``comm_stream`` None keeps the collective inline on the issuing stream,
-        which is the original blocking behaviour. Otherwise the collective is
-        queued on that one stream: every SP collective stays in a single
-        deterministic order across TP ranks, it never serializes behind
-        unrelated kernels on a compute stream, and the caller decides where to
-        join it.
+        ``async_op`` False issues it synchronously (graph capture and the
+        no-overlap fallback). True issues it from the current stream and defers
+        the join to :meth:`CompressorSPGatherHandle.wait`: the collective runs on
+        the row group's internal HCCL stream, which is already blocked on the
+        current stream, so the send-buffer writes enqueued above are covered.
+        This matches how the rest of the repo overlaps collectives
+        (``all_gather_async`` + ``handle.wait()``).
         """
-        if comm_stream is None:
-            dist.all_gather_into_tensor(
-                recv_buffer,
-                send_buffer,
-                group=self.row_group,
-                async_op=False,
-            )
-            return CompressorSPGatherHandle(recv_buffer=recv_buffer, send_buffer=send_buffer)
-
-        # The send buffer is filled on the current stream, so the collective
-        # must not start before those writes retire.
-        comm_stream.wait_stream(torch.npu.current_stream())
-        with torch_npu.npu.stream(comm_stream):
-            work = dist.all_gather_into_tensor(
-                recv_buffer,
-                send_buffer,
-                group=self.row_group,
-                async_op=True,
-            )
-            # Per-collective completion event: recorded inside the stream
-            # context, directly behind the all-gather. Consumers wait THIS
-            # event, never the whole stream, so a later gather on the same
-            # stream is not over-awaited.
-            done_event = torch.npu.Event()
-            done_event.record(comm_stream)
+        work = dist.all_gather_into_tensor(
+            recv_buffer,
+            send_buffer,
+            group=self.row_group,
+            async_op=async_op,
+        )
         return CompressorSPGatherHandle(
             recv_buffer=recv_buffer,
             send_buffer=send_buffer,
-            work=work,
-            comm_stream=comm_stream,
-            done_event=done_event,
+            work=work if async_op else None,
         )
 
     def launch_sp_input(
         self,
         hidden_states_local: torch.Tensor,
         sp_metadata: CompressorSPMetadata,
-        comm_stream: Any | None = None,
+        async_op: bool = False,
     ) -> CompressorSPGatherHandle:
         """Fill the local suffix window and start the suffix all-gather.
 
@@ -920,7 +861,7 @@ class CompressorExecutor:
         return self._all_gather_sp(
             local_suffix.contiguous(),
             sp_metadata.gathered_suffix_buffer,
-            comm_stream,
+            async_op,
         )
 
     def finish_sp_input(
@@ -953,7 +894,7 @@ class CompressorExecutor:
         self,
         compressed_kv: torch.Tensor,
         sp_metadata: CompressorSPMetadata,
-        comm_stream: Any | None = None,
+        async_op: bool = False,
     ) -> CompressorSPGatherHandle:
         """Start the fixed-capacity raw-row gather that precedes owner reorder."""
         target_rows = sp_metadata.gathered_compressed_tokens
@@ -969,7 +910,7 @@ class CompressorExecutor:
         return self._all_gather_sp(
             send_buffer,
             sp_metadata.gathered_compressed_kv_buffer,
-            comm_stream,
+            async_op,
         )
 
     def _gather_sp_output(
@@ -1008,6 +949,19 @@ class CompressorExecutor:
 
         if state_ready_event is None:
             raise ValueError("Deferred state replication requires a producer event")
+        # Cross-layer buffer-reuse edge: ``state_send_buffer`` and
+        # ``gathered_state_buffer`` are allocated once per cache group and shared
+        # by every layer, while the chain is deferred across layers. The previous
+        # chain's done event is recorded behind its scatter, so ordering the
+        # gather behind it covers both hazards at once -- the read below
+        # overwriting the send buffer that the previous all-gather may still be
+        # reading, and the all-gather below overwriting the recv buffer that the
+        # previous where/scatter may still be reading. Program order on this
+        # stream usually implies the edge already; keeping it explicit means the
+        # invariant does not depend on where the apply half is attached.
+        prev_done_event = getattr(runtime, "last_done_event", None)
+        if prev_done_event is not None:
+            state_stream.wait_event(prev_done_event)
         state_stream.wait_event(state_ready_event)
         with torch_npu.npu.stream(state_stream):
             self._state_read_send_buffer(state_cache, sp_metadata)
@@ -1029,22 +983,23 @@ class CompressorExecutor:
     def attach_sp_state(
         self,
         deferred: CompressorSPStateDeferred,
-        state_apply_stream: Any,
+        state_stream: Any,
     ) -> Any:
         """Attach the apply half of one deferred state chain.
 
-        Work.wait() is the sentinel-proven deterministic join (non-blocking
-        stream-dependency insertion on this torch_npu build); calling it
-        inside the apply-stream context orders where/scatter after the
-        gather without blocking the host whenever the gather has already
-        retired. Returns the chain-done event, which fires only after the
-        final scatter: the next step consumes the scattered state.
+        Runs on the same ``state_stream`` that issued the gather: the collective
+        never ran on this stream, so ``Work.wait()`` orders where/scatter behind
+        it from here as well as from anywhere else (see
+        :class:`CompressorSPGatherHandle`).
+
+        Returns the chain-done event, which fires only after the final scatter:
+        the next step consumes the scattered state.
         """
-        with torch_npu.npu.stream(state_apply_stream):
+        with torch_npu.npu.stream(state_stream):
             deferred.work.wait()
             self._state_mask_scatter(deferred.state_cache, deferred.sp_metadata)
             state_done_event = torch.npu.Event()
-            state_done_event.record(state_apply_stream)
+            state_done_event.record(state_stream)
         return state_done_event
 
     def _sync_sp_state(
@@ -1054,7 +1009,6 @@ class CompressorExecutor:
         state_stream: Any | None = None,
         state_ready_event: Any | None = None,
         runtime: Any | None = None,
-        state_apply_stream: Any | None = None,
     ) -> Any:
         """Launch and immediately attach one deferred state chain.
 
@@ -1071,9 +1025,7 @@ class CompressorExecutor:
         )
         if deferred is None:
             return None
-        if state_apply_stream is None:
-            raise ValueError("Deferred state replication requires an apply stream")
-        return self.attach_sp_state(deferred, state_apply_stream)
+        return self.attach_sp_state(deferred, state_stream)
 
     def _state_read_send_buffer(
         self,
@@ -1157,13 +1109,13 @@ class CompressorExecutor:
         state_block_table: torch.Tensor,
         sp_metadata: CompressorSPMetadata,
         hadamard: torch.Tensor | None = None,
-        comm_stream: Any | None = None,
+        async_op: bool = False,
     ) -> CompressorSPPending:
         """Run this rank's Compressor and start the compressed-row all-gather.
 
         The returned pending tail must be passed to :meth:`finalize_sp` before
-        anything reads the output cache. With ``comm_stream`` set, the caller
-        can run unrelated compute in between and cover the collective with it.
+        anything reads the output cache. With ``async_op`` the caller can run
+        unrelated compute in between and cover the collective with it.
         """
         if sp_metadata.input_count == 0:
             # Empty ranks still enter the fixed-shape collective below.
@@ -1188,7 +1140,7 @@ class CompressorExecutor:
                 start_pos=sp_metadata.packed_start_pos,
             )
 
-        if comm_stream is None:
+        if not async_op:
             # Inline path preserved for graph capture, the disabled-overlap
             # fallback and the unit tests that patch _gather_sp_output.
             handle = CompressorSPGatherHandle(
@@ -1197,7 +1149,7 @@ class CompressorExecutor:
             )
             state_ready_event = None
         else:
-            handle = self._launch_sp_output(compressed_kv, sp_metadata, comm_stream)
+            handle = self._launch_sp_output(compressed_kv, sp_metadata, async_op=True)
             # Producer event for the deferred state replication: recorded on
             # the compute stream directly behind the Compressor kernel (and
             # the send-buffer copy), so the state chain can start as soon as

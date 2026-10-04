@@ -50,21 +50,8 @@ from vllm_ascend.utils import (
     AscendDeviceType,
     enable_dsa_cp_with_o_proj_tp,
     get_ascend_device_type,
-    npu_stream_switch,
     olora_tp_enable,
 )
-
-_DSV4_OVERLAP_STREAMS = dict()
-
-def dsv4_overlap_stream(name: str) -> torch.npu.Stream:
-    global _DSV4_OVERLAP_STREAMS
-    if name not in _DSV4_OVERLAP_STREAMS:
-        _DSV4_OVERLAP_STREAMS[name] = torch_npu.npu.Stream()
-    return _DSV4_OVERLAP_STREAMS[name]
-
-
-_DSV4_SWA_OVERLAP_STREAM = None
-_DSV4_QUERY_OVERLAP_STREAM = None
 
 logger = logging.getLogger(__name__)
 
@@ -77,9 +64,11 @@ _INDEXER_COMPRESSOR = "indexer"
 class CompressorSPStateRuntime:
     """Per-process coordinator for deferred Compressor SP state replication.
 
-    All layers append their state chains (gather -> all-gather -> where ->
-    scatter) onto ``state_stream`` and never join inside the step. The only
-    regular consumer join is :meth:`drain`, called at the ``execute_model``
+    All layers append their state chains (gather -> all-gather -> Work.wait ->
+    where -> scatter) onto one ``state_stream`` and never join inside the step.
+    Keeping the whole chain on one stream makes the cross-layer reuse of the
+    shared send/recv state buffers safe by program order. The only regular
+    consumer join is :meth:`drain`, called at the ``execute_model``
     entry (and ``_dummy_run`` entry), which must run before preemption
     handling, ``_update_states``, block reuse or metadata rebuilds: freed or
     reused state blocks may still be written by in-flight chains.
@@ -92,15 +81,12 @@ class CompressorSPStateRuntime:
 
     def __init__(self, tp_group: Any) -> None:
         self.tp_group = tp_group
+        # One stream carries the whole chain: read -> all-gather -> Work.wait ->
+        # where -> scatter. Keeping it on a single stream is what makes the
+        # cross-layer reuse of the shared send/recv state buffers safe by
+        # program order; Work.wait() covers the collective's completion from
+        # the issuing stream, so no second stream is needed to join it.
         self.state_stream = torch_npu.npu.Stream()
-        # Sentinel verdict (torch_npu 2.10.0.post2): kernels enqueued on the
-        # SAME stream after an async HCCL all-gather are NOT ordered behind
-        # the collective -- not even via a same-stream event self-wait. Only
-        # a CROSS-stream wait on the collective's Work reliably covers
-        # completion. Therefore the state chain runs on two streams: the
-        # gather on ``state_stream``, the where/scatter epilogue on
-        # ``state_apply_stream`` joined via Work.wait().
-        self.state_apply_stream = torch_npu.npu.Stream()
         self.state_group = _create_compressor_sp_state_group(tp_group)
         self.last_done_event: torch.npu.Event | None = None
         self.pending_refs: list[Any] = []
@@ -131,15 +117,14 @@ class CompressorSPStateRuntime:
         """Attach queued apply halves.
 
         The production forward calls this at the NEXT layer's entry: by then
-        SWA/attention/o_proj/MoE kernels are already enqueued, so a
-        Work.wait() that degenerates to a host block on a backlogged gather
-        can no longer starve an empty compute stream (the rare 1-2.7 ms
-        post-TopK blanks observed in profiling).
+        SWA/attention/o_proj/MoE kernels are already enqueued, so a late apply
+        can no longer leave the compute queue empty (the rare post-TopK device
+        blanks seen in profiling).
         """
         if not self.pending_applies:
             return
         for executor, deferred in self.pending_applies:
-            done = executor.attach_sp_state(deferred, self.state_apply_stream)
+            done = executor.attach_sp_state(deferred, self.state_stream)
             # Replace the placeholder ref entry with the real event so the
             # buffers stay owned until the chain completes.
             for i, ref in enumerate(self.pending_refs):
@@ -187,16 +172,22 @@ class CompressorSPStateRuntime:
 def _create_compressor_sp_state_group(tp_group: Any) -> Any:
     """Return a dedicated process group for state replication (or the TP group).
 
-    A separate HCCL communicator lets the multi-millisecond state all-gathers
-    progress without serializing behind the latency-critical row all-gathers
-    inside one communicator. ``dist.new_group`` is collective across ALL world
-    ranks: every rank must create the groups for ALL TP subgroups in the same
-    canonical order and only then pick its own -- returning early after the
-    own subgroup would deadlock the remaining ranks inside new_group.
+    ProcessGroupHCCL keeps one internal stream per process group and serializes
+    that group's collectives on it, so a second communicator is the only way to
+    stop the large state all-gathers from head-of-line blocking the next layer's
+    latency-critical row all-gathers.
 
-    TODO: derive the subgroup list from the project rank generator instead of
-    assuming the contiguous layout, and hoist creation into the distributed
-    initialization phase instead of the first layer constructor.
+    ``dist.new_group`` is collective across ALL world ranks: every rank must
+    create the groups for ALL TP subgroups in the same canonical order and only
+    then pick its own -- returning early after the own subgroup would deadlock
+    the remaining ranks inside new_group. Creation happens once per process at
+    layer-construction time (see the call sites in ``__init__``), never on the
+    forward hot path.
+
+    Known limitation: the subgroup list assumes the canonical contiguous TP
+    layout. That holds for TP and TP x PP; combined with DP/EP reorderings it
+    raises below instead of hanging in a collective, but supporting it would
+    require deriving the layout from the project rank generator.
     """
     raw = envs.VLLM_ASCEND_COMPRESSOR_SP_STATE_PG
     if raw not in (0, 1):
@@ -300,13 +291,6 @@ def attach_compressor_sp_state_pending() -> None:
     """Attach last layer's deferred state applies before publishing caches."""
     for runtime in _COMPRESSOR_SP_STATE_RUNTIMES.values():
         runtime.attach_pending()
-
-
-def dsv4_swa_overlap_stream() -> torch.npu.Stream:
-    global _DSV4_SWA_OVERLAP_STREAM
-    if _DSV4_SWA_OVERLAP_STREAM is None:
-        _DSV4_SWA_OVERLAP_STREAM = torch_npu.npu.Stream()
-    return _DSV4_SWA_OVERLAP_STREAM
 
 
 @dataclass
@@ -1776,20 +1760,18 @@ class AscendDSACPImpl(DSAAttentionImpl):
 
         if self.compress_ratio > 1 and self.multistream_dsv4_dsa_overlap and has_kv_transfer_group():
             # A KV connector may export this layer's caches right after this
-            # forward, including the state group. Attach this layer's
-            # deferred applies (the last submitted chain is structurally this
-            # layer's) and wait its done event -- never the mutable runtime
-            # tail, so capture/inline/no-SP paths and future scheduling
-            # changes cannot wait on a stale or unrelated event.
+            # forward, including the state group, so the state writes must be
+            # physically retired first: attach this layer's deferred applies --
+            # the last submitted chain is structurally this layer's -- and host
+            # synchronize on the tail event.
+            #
+            # This costs one host sync per layer and so disables the cross-layer
+            # deferral whenever a connector is active. That is inherent, since
+            # the connector reads the cache from outside these streams.
             attach_compressor_sp_state_pending()
-            layer_event = getattr(self, "_compressor_sp_layer_state_event", None)
-            if layer_event is None and _COMPRESSOR_SP_STATE_RUNTIMES:
-                for runtime in _COMPRESSOR_SP_STATE_RUNTIMES.values():
-                    if runtime.last_done_event is not None:
-                        layer_event = runtime.last_done_event
-            if layer_event is not None:
-                layer_event.synchronize()
-                self._compressor_sp_layer_state_event = None
+            for runtime in _COMPRESSOR_SP_STATE_RUNTIMES.values():
+                if runtime.last_done_event is not None:
+                    runtime.last_done_event.synchronize()
         notify_kv_cache_written(layer_name)
         maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
 
@@ -1880,11 +1862,11 @@ class AscendDSACPImpl(DSAAttentionImpl):
         compressor_output_metadata: M,
         compressor_state_metadata: M,
         sp_metadata: CompressorSPMetadata | None,
-        comm_stream: torch.npu.Stream | None = None,
+        sp_async: bool = False,
     ) -> CompressorSPPending | None:
         """Run the main Compressor with separately built output/state metadata.
 
-        With ``comm_stream`` the SP row all-gather is only launched here and
+        With ``sp_async`` the SP row all-gather is only launched here and
         the caller must finalize the returned tail before attention reads the
         cache; otherwise the whole update completes inline as before.
         """
@@ -1894,7 +1876,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
         assert self.compressor_executor is not None
         assert compressor_output_metadata.req_metadata is not None
         assert compressor_state_metadata.req_metadata is not None
-        if comm_stream is not None:
+        if sp_async:
             assert sp_metadata is not None
             return self.compressor_executor.launch_sp(
                 compressor_input,
@@ -1903,7 +1885,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 metadata=compressor_output_metadata.req_metadata,
                 state_block_table=compressor_state_metadata.req_metadata.block_table,
                 sp_metadata=sp_metadata,
-                comm_stream=comm_stream,
+                async_op=True,
             )
         self.compressor_executor.run(
             compressor_input,
@@ -1976,51 +1958,51 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 if (main_compressor_sp_metadata is None) != (indexer_compressor_sp_metadata is None):
                     raise ValueError("Main and indexer compressors must use the same SP execution mode")
 
-        # Compute/communication dual stream: every kernel runs on this stream
-        # in a fixed order, and every Compressor SP row collective is queued
-        # on one FIFO communication stream (suffix -> LI rows -> main rows per
-        # layer, rank-uniform). Only resource-orthogonal work overlaps (HCCL
-        # on SDMA/AICPU vs compute on cube/vector cores). Graph capture cannot
-        # host-join deferred handles, so it stays inline.
+        # Compute/communication overlap: every kernel runs on this stream in a
+        # fixed order and every Compressor SP row collective is issued from it
+        # with async_op=True, which runs it on the row group's internal HCCL
+        # stream. Only resource-orthogonal work overlaps (HCCL on SDMA/AICPU vs
+        # compute on cube/vector cores). Row collectives stay in one
+        # rank-uniform FIFO on that internal stream (suffix -> LI rows -> main
+        # rows per layer); state collectives use a second process group so they
+        # cannot head-of-line block them. Graph capture cannot host-join
+        # deferred handles, so it stays inline.
         #
-        # Attach the PREVIOUS layer's deferred state applies now: by this
-        # point SWA/attention/o_proj/MoE kernels are already enqueued, so the
-        # Work.wait() inside attach cannot starve an empty compute stream
-        # even when it degenerates to a host block on a backlogged gather.
+        # Attach the PREVIOUS layer's deferred state applies now: by this point
+        # SWA/attention/o_proj/MoE kernels are already enqueued, so a late apply
+        # cannot leave the compute queue empty.
         attach_compressor_sp_state_pending()
-        compressor_sp_comm = None
-        if self.multistream_dsv4_dsa_overlap and not torch.npu.is_current_stream_capturing():
-            compressor_sp_comm = dsv4_overlap_stream("compressor_sp_comm")
+        sp_overlap = self.multistream_dsv4_dsa_overlap and not torch.npu.is_current_stream_capturing()
+        # Async SP collectives only make sense when this step actually built an
+        # SP plan; otherwise the executors take their inline path.
+        sp_async = sp_overlap and main_compressor_sp_metadata is not None
 
         suffix_gather_handle = None
-        if (
-            self.compress_ratio > 1
-            and main_compressor_sp_metadata is not None
-            and compressor_sp_comm is not None
-        ):
+        if self.compress_ratio > 1 and sp_async:
             suffix_gather_handle = self.compressor_executor.launch_sp_input(
                 hidden_states_local,
                 main_compressor_sp_metadata,
-                compressor_sp_comm,
+                async_op=True,
             )
 
-        # The query projections and the o-projection weight all-gather cover
-        # the suffix all-gather launched above.
+        # The query projections cover the suffix all-gather launched above.
         q, qr_local, qr_pertoken_scale_local, kv, _ = self._forward_query(
             hidden_states_local, local_cos, local_sin
         )
 
-        # The existing weight all-gather can overlap with subsequent computation.
-        o_proj_full_handles = self._maybe_all_gather_o_proj_full_weight(full_gather_wo_a_enabled)
+        # The o-projection weight all-gather shares PG_row with the SP row
+        # gathers, whose internal HCCL stream is strictly FIFO, and these
+        # weights are not joined until _switch_o_proj_to_full_weight after this
+        # forward returns -- whereas the row gathers gate finalize -> TopK ->
+        # attention inside this layer. So when row gathers are in flight the
+        # weights are issued after them (below, covered by the LI/main
+        # epilogues, TopK, SWA and sparse attention); otherwise they keep this
+        # earlier slot, covered by the projections above.
+        o_proj_full_handles: list = []
+        if not sp_async:
+            o_proj_full_handles = self._maybe_all_gather_o_proj_full_weight(full_gather_wo_a_enabled)
 
         compress_topk_idxs = None
-        # The communication stream only carries SP collectives, so it must only
-        # be handed to the executors when this step actually built an SP plan.
-        sp_comm = (
-            compressor_sp_comm
-            if main_compressor_sp_metadata is not None
-            else None
-        )
         if self.compress_ratio > 1:
             assert main_compressor_output_metadata.req_metadata is not None
             assert main_compressor_state_metadata.req_metadata is not None
@@ -2059,7 +2041,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
                     indexer_state_metadata=indexer_compressor_state_metadata,
                     indexer_output_metadata=indexer_compressor_output_metadata,
                     sp_metadata=indexer_compressor_sp_metadata,
-                    comm_stream=sp_comm,
+                    sp_async=sp_async,
                 )
 
             main_pending = self._forward_compressor_kv(
@@ -2068,8 +2050,13 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 main_compressor_output_metadata,
                 main_compressor_state_metadata,
                 main_compressor_sp_metadata,
-                comm_stream=sp_comm,
+                sp_async=sp_async,
             )
+
+            if sp_async:
+                # All row collectives for this layer are now queued on PG_row,
+                # so the weight all-gather can no longer delay them.
+                o_proj_full_handles = self._maybe_all_gather_o_proj_full_weight(full_gather_wo_a_enabled)
 
             # Join the row all-gathers per collective, restore global order
             # and write the caches. Both all-gathers are already launched
@@ -2096,14 +2083,14 @@ class AscendDSACPImpl(DSAAttentionImpl):
                     qr_pertoken_scale=qr_pertoken_scale_local,
                 )
 
-            if sp_comm is not None and main_compressor_sp_metadata is not None and main_pending is not None:
+            if sp_async and main_pending is not None:
                 # Launch the GATHER half only: read this rank's state rows and
                 # start the async state all-gather on the dedicated state
                 # stream / group, waiting just the producer event recorded
-                # behind the Compressor kernel. The apply half attaches at the
-                # next layer's forward entry (or execute_model drain for the
-                # last layer), so the Work.wait() involved can never stall an
-                # empty compute stream.
+                # behind the Compressor kernel rather than the compute stream
+                # tail. The apply half attaches at the next layer's forward
+                # entry (or execute_model drain for the last layer), which keeps
+                # a late apply from leaving the compute queue empty.
                 state_runtime = compressor_sp_state_runtime(self.tp_group)
                 main_state_cache = DeviceOperator.unpack_dsa_forward_kv_cache(
                     kv_cache, self.compress_ratio
@@ -2244,11 +2231,11 @@ class AscendDSACPImpl(DSAAttentionImpl):
         indexer_state_metadata: M,
         indexer_output_metadata: M,
         sp_metadata: CompressorSPMetadata | None,
-        comm_stream: torch.npu.Stream | None = None,
+        sp_async: bool = False,
     ) -> CompressorSPPending | None:
         """Run LI Compressor and update its K, scale, and full-value caches.
 
-        With ``comm_stream`` the SP row all-gather is only launched here and
+        With ``sp_async`` the SP row all-gather is only launched here and
         the caller must finalize the returned tail before TopK reads the
         indexer caches; otherwise the whole update completes inline as before.
         """
@@ -2258,7 +2245,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
         assert indexer_output_metadata.req_metadata is not None
         assert indexer_state_metadata.req_metadata is not None
         assert self.indexer_compressor_executor is not None
-        if comm_stream is not None:
+        if sp_async:
             assert sp_metadata is not None
             return self.indexer_compressor_executor.launch_sp(
                 compressor_input,
@@ -2268,7 +2255,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 state_block_table=indexer_state_metadata.req_metadata.block_table,
                 sp_metadata=sp_metadata,
                 hadamard=indexer_output_metadata.hadamard,
-                comm_stream=comm_stream,
+                async_op=True,
             )
         self.indexer_compressor_executor.run(
             compressor_input,

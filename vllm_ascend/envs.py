@@ -94,29 +94,21 @@ env_variables: dict[str, Callable[[], Any]] = {
     # `dispatch_ffn_combine` can be used only for moe layer with W8A8, EP<=32, non-mtp, non-dynamic-eplb.
     # `mega_moe` can be used only with moe layer with W8A8/W4A8/bf16(none quant), EP<=64, non-dynamic-eplb.
     "VLLM_ASCEND_ENABLE_FUSED_MC2": lambda: int(os.getenv("VLLM_ASCEND_ENABLE_FUSED_MC2", "0")),
-    # How a deferred Compressor SP row all-gather is joined at finalize time.
-    # - "event": the finalize waits only the per-collective done event recorded
-    #   on the communication stream.
-    # - "both": additionally calls Work.wait() first. This is the conservative
-    #   default until a sentinel micro-benchmark confirms that the recorded
-    #   event fully covers HCCL completion (recv buffer written) on the target
-    #   torch_npu build. Switch to "event" after validation for full overlap.
-    # Sensitive: no. Valid values: "event" | "both".
-    "VLLM_ASCEND_COMPRESSOR_SP_AGG_WAIT_MODE": lambda: os.getenv(
-        "VLLM_ASCEND_COMPRESSOR_SP_AGG_WAIT_MODE", "both"
-    ),
     # Emit per-step Compressor SP state-stream observability logs (submitted
     # layers, backlog depth, drain wait). 0 disables. Valid values: 0 | 1.
     "VLLM_ASCEND_COMPRESSOR_SP_STATE_DEBUG": lambda: int(
         os.getenv("VLLM_ASCEND_COMPRESSOR_SP_STATE_DEBUG", "0")
     ),
     # Create a dedicated HCCL process group for Compressor SP state
-    # replication so the multi-millisecond state all-gathers cannot serialize
-    # behind row all-gathers inside one communicator. Group creation is
-    # rank-uniform (every world rank builds all TP subgroups in canonical
-    # contiguous order). 0 reuses the TP group (phase A). Valid values: 0 | 1.
+    # replication. ProcessGroupHCCL keeps one internal stream per process group
+    # and serializes that group's collectives on it, so a second communicator
+    # keeps the large state all-gathers from head-of-line blocking the next
+    # layer's latency-critical row all-gathers. On by default; set 0 to fall
+    # back to the TP group (one communicator, saves the extra HCCL buffers).
+    # Group creation is rank-uniform (every world rank builds all TP subgroups
+    # in canonical contiguous order). Valid values: 0 | 1.
     "VLLM_ASCEND_COMPRESSOR_SP_STATE_PG": lambda: int(
-        os.getenv("VLLM_ASCEND_COMPRESSOR_SP_STATE_PG", "0")
+        os.getenv("VLLM_ASCEND_COMPRESSOR_SP_STATE_PG", "1")
     ),
     # DEPRECATED: VLLM_ASCEND_BALANCE_SCHEDULING env var will be removed in a future release.
     # Use --additional-config '{"enable_balance_scheduling": true}' instead.
