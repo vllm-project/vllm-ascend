@@ -19,7 +19,6 @@ import numpy as np
 from ..backend import LayerwiseAccessKind, resolve_backend_spec
 from ..topology import KVPoolTopology
 from .identity import (
-    BlockRows,
     KeyAxes,
     LayerwiseFullKey,
     LayerwisePartialKey,
@@ -86,7 +85,6 @@ class KVPoolRules:
         "requires_store_observation",
         "store_keys",
         "store_candidate_rows",
-        "store_rows",
         "store_selection",
         "lookup_selection",
     )
@@ -100,8 +98,7 @@ class KVPoolRules:
         resolve_lookup: Callable,
         load_rows: Callable,
         load_selection: Callable,
-        store_rows: Callable,
-        store_candidate_rows: Callable | None,
+        store_candidate_rows: Callable,
         store_selection: Callable,
         checkpoint_rows: Callable | None,
         lookup_keys: Callable,
@@ -121,7 +118,6 @@ class KVPoolRules:
         self.resolve_lookup = resolve_lookup
         self.load_rows = load_rows
         self.load_selection = load_selection
-        self.store_rows = store_rows
         self.store_candidate_rows = store_candidate_rows
         self.store_selection = store_selection
         self.checkpoint_rows = checkpoint_rows
@@ -183,18 +179,11 @@ def compile_kv_pool_rules(
     )
     ownership = bind_store_ownership(topology)
     checkpoint_rows = bind_checkpoint_rule(topology, ownership)
-    store_candidate_rows = None
-    if spec.use_layerwise:
-        store_rows = load_rows if _is_layerwise_store_leader(topology) else _discard_store_rows
-    else:
-        store_rows = partial(_store_rows, load_rows, ownership)
-        if (
-            len(groups) == 1
-            and not align_state_group_ids
-            and not topology.tp_partition.tp_mismatch
-            and store_pipeline_ranks is None
-        ):
-            store_candidate_rows = bind_store_candidate_rule(topology)
+    store_candidate_rows = bind_store_candidate_rule(
+        topology,
+        use_layerwise=spec.use_layerwise,
+        layerwise_store_leader=_is_layerwise_store_leader(topology),
+    )
 
     backend = resolve_backend_spec(spec.backend_name)
     format_ranges: Callable
@@ -233,7 +222,6 @@ def compile_kv_pool_rules(
         resolve_lookup=reachability.resolve_available_end,
         load_rows=load_rows,
         load_selection=reachability.select_for_load,
-        store_rows=store_rows,
         store_candidate_rows=store_candidate_rows,
         store_selection=reachability.select_for_store,
         checkpoint_rows=checkpoint_rows,
@@ -271,8 +259,7 @@ def _bind_rules(
     resolve_lookup: Callable,
     load_rows: Callable,
     load_selection: Callable,
-    store_rows: Callable,
-    store_candidate_rows: Callable | None,
+    store_candidate_rows: Callable,
     store_selection: Callable,
     checkpoint_rows: Callable | None,
     lookup_keys: Callable,
@@ -310,7 +297,6 @@ def _bind_rules(
         resolve_lookup=resolve_lookup,
         load_rows=load_rows,
         load_selection=load_selection,
-        store_rows=store_rows,
         store_candidate_rows=store_candidate_rows,
         store_selection=store_selection,
         checkpoint_rows=checkpoint_rows,
@@ -335,32 +321,8 @@ def _object_size(sizes: Mapping[int, int], group_id: int) -> int:
 # Runtime Rule Adapters
 # =============================================================================
 #
-# Adapt the selected Store ownership, admission, and Backend data plane to the
-# uniform call signatures held by ``KVPoolRules``.
-
-
-def _store_rows(
-    block_rows: Callable,
-    ownership: Callable,
-    group_id: int,
-    end_token: int,
-    block_hashes,
-    block_ids,
-    *,
-    start_token: int = 0,
-    mask=None,
-) -> BlockRows:
-    rows = block_rows(group_id, end_token, block_hashes, block_ids, start_token=start_token, mask=mask)
-    return ownership(group_id, rows)
-
-
-def _discard_store_rows(
-    group_id: int, end_token: int, block_hashes, block_ids, *, start_token: int = 0, mask=None
-) -> BlockRows:
-    del group_id, end_token, block_hashes, block_ids, start_token, mask
-    empty: np.ndarray = np.empty(0, dtype=np.uint64)
-    empty.flags.writeable = False
-    return empty, (), empty
+# Adapt Store admission and Backend data planes to the uniform call signatures
+# held by ``KVPoolRules``. Candidate row selection is bound in identity rules.
 
 
 def _is_layerwise_store_leader(topology: KVPoolTopology) -> bool:
