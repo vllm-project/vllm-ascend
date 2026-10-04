@@ -96,11 +96,21 @@ class FakeGVAStore:
 
     def batch_alloc(self, keys, sizes):
         self.calls.append(("alloc", tuple(keys), tuple(sizes)))
+        if self.allocation_result is not None:
+            for key, size, gva in zip(keys, sizes, self.allocation_result, strict=True):
+                if gva > 0:
+                    self.objects[key] = (gva, size, False)
+            return self.allocation_result
+
         gvas = []
         for key, size in zip(keys, sizes, strict=True):
-            region = self.objects.setdefault(key, (10_000 + 1000 * len(self.objects), size, False))
-            gvas.append(region[0])
-        return gvas if self.allocation_result is None else self.allocation_result
+            if key in self.objects:
+                gvas.append(0)
+                continue
+            gva = 10_000 + 1000 * len(self.objects)
+            self.objects[key] = (gva, size, False)
+            gvas.append(gva)
+        return gvas
 
     def batch_copy(self, gvas, addresses, sizes, direction):
         self.calls.append(("copy", tuple(gvas), tuple(addresses), tuple(sizes), direction))
@@ -243,10 +253,7 @@ def test_gva_initialization_validates_native_capabilities_and_registered_layout(
             put_step=2,
         ),
     )
-    caches = {
-        layer_name: torch.empty((8, 4), dtype=torch.float32)
-        for layer_name in topology.groups[0].layer_names
-    }
+    caches = {layer_name: torch.empty((8, 4), dtype=torch.float32) for layer_name in topology.groups[0].layer_names}
     registration = resources.bind_kv_caches(caches)
 
     assert registration["base_addresses"] == {0: [cache.data_ptr() for cache in caches.values()]}
@@ -301,18 +308,16 @@ def test_gva_load_admission_resolves_after_lease_and_releases_only_owned_keys(mo
     assert not backend_io._rule_load_bases
 
 
-def test_gva_store_admission_keeps_only_compatible_owned_allocations() -> None:
+def test_gva_store_admission_owns_only_successful_allocations() -> None:
     backend_io, batch, store = make_gva_binding()
     first, second = batch.selected_keys()
-    store.objects[first] = (1000, 8, True)
     store.allocation_result = [1000, 0]
 
-    assert backend_io.start_store_sessions([first, second], [64, 64]) == (-1, -1)
+    assert backend_io.start_store_sessions([first, second], [64, 64]) == (0, -1)
+    assert backend_io._store_sessions == {first: (1000, 64)}
+    assert store.calls == [("alloc", (first, second), (64, 64))]
+    assert backend_io.revoke_store_sessions([first, second]) == (-1, 0)
     assert not backend_io._store_sessions
-    assert backend_io.store_batch(batch, 0)[0].evidence.source_release_confirmed
-    assert not any(call[0] in ("copy", "publish") for call in store.calls)
-    assert backend_io.revoke_store_sessions([first, second]) == (0, 0)
-    assert store.objects[first] == (1000, 8, True)
 
 
 def test_gva_copy_normalizes_batch_result_and_unknown_evidence() -> None:

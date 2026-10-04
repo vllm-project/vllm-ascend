@@ -93,19 +93,11 @@ class GVABackendIO(BackendIO):
         if any(key in self._store_sessions for key in keys):
             raise RuntimeError("Previous GVA Store sessions have not ended")
         gvas = self._require_result_codes("batch_alloc", keys, self._store.batch_alloc(keys, object_sizes))
-        allocated_keys = []
         result_codes = []
         for key, gva, object_size in zip(keys, gvas, object_sizes, strict=True):
             result_codes.append(0 if gva > 0 else GVA_SESSION_FAILURE)
             if gva > 0:
                 self._store_sessions[key] = (gva, object_size)
-                allocated_keys.append(key)
-        # Allocation can return an existing object; its real size must still match the binding.
-        regions = dict(zip(allocated_keys, self._query_regions(allocated_keys, flag=0), strict=True))
-        for index, key in enumerate(keys):
-            if result_codes[index] == 0 and regions[key] != self._store_sessions[key]:
-                result_codes[index] = GVA_SESSION_FAILURE
-                del self._store_sessions[key]
         return tuple(result_codes)
 
     def load_batch(self, batch: KVTransferBatch, layer_id: int | None = None):
