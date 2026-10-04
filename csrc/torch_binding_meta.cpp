@@ -1,3 +1,4 @@
+#include <optional>
 #include <torch/extension.h>
 #include <torch/library.h>
 #include <torch/version.h>
@@ -1715,6 +1716,21 @@ std::tuple<at::Tensor, at::Tensor> situ_mx_quant_meta(
     return {y, mxscale};
 }
 
+std::tuple<at::Tensor, at::Tensor> gmm_dequant_situ_quant_meta(
+    const at::Tensor &x, at::TensorList weight, at::TensorList weight_scale,
+    const at::Tensor &x_scale, const at::Tensor &group_list, at::TensorList weight_assist_matrix,
+    double beta, std::optional<double> linear_beta, int64_t group_list_type)
+{
+    TORCH_CHECK(x.dim() == 2, "x must be [M, K]");
+    TORCH_CHECK(!weight.empty(), "weight list must be non-empty");
+    TORCH_CHECK(weight[0].dim() == 2, "weight[e] must be [K, N/8]");
+    // Each INT32 carrier packs eight INT4 values; SiTU halves the logical width.
+    const auto output_width = weight[0].sym_size(1) * INT4_NUMS_IN_INT32 / 2;
+    auto y = at::empty_symint(c10::SymDimVector{x.sym_size(0), output_width}, x.options().dtype(at::kChar));
+    auto scale = at::empty_symint(c10::SymDimVector{x.sym_size(0)}, x.options().dtype(at::kFloat));
+    return {y, scale};
+}
+
 std::tuple<at::Tensor, at::Tensor> make_grouped_matmul_situ_quant_meta_output(
     const at::Tensor &x, const c10::SymInt &n)
 {
@@ -1838,6 +1854,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_gemma_rms_norm", &vllm_ascend::meta::npu_gemma_rms_norm_meta);
     ops.impl("dequant_situ_quant", &vllm_ascend::meta::dequant_situ_quant_meta);
     ops.impl("situ_mx_quant", &vllm_ascend::meta::situ_mx_quant_meta);
+    ops.impl("gmm_dequant_situ_quant", &vllm_ascend::meta::gmm_dequant_situ_quant_meta);
 
     ops.impl("grouped_matmul_situ_quant", &vllm_ascend::meta::grouped_matmul_situ_quant_meta);
     ops.impl("grouped_matmul_situ_quant.list", &vllm_ascend::meta::grouped_matmul_situ_quant_list_meta);

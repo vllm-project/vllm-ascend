@@ -60,6 +60,7 @@
 #include "attention/store_kv_block_metadata/store_kv_block_metadata_torch_adpt.cpp"
 #include "moe/dequant_situ_quant/dequant_situ_quant_torch_adpt.h"
 #include "moe/situ_mx_quant/situ_mx_quant_torch_adpt.h"
+#include "gmm/gmm_dequant_situ_quant/gmm_dequant_situ_quant_torch_adpt.h"
 #include "moe/grouped_matmul_situ_quant/grouped_matmul_situ_quant_torch_adpt.h"
 #include <c10/core/Device.h>
 #include <c10/core/Scalar.h>
@@ -2871,6 +2872,12 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "              bool activate_left=False, "
         "              int dst_type=36) -> (Tensor y, Tensor mxscale)");
     ops.impl("situ_mx_quant", torch::kPrivateUse1, &vllm_ascend::situ_mx_quant);
+
+    ops.def(
+        "gmm_dequant_situ_quant(Tensor x, Tensor[] weight, Tensor[] weight_scale, "
+        "Tensor x_scale, Tensor group_list, Tensor[] weight_assist_matrix, "
+        "float beta=1.0, float? linear_beta=None, int group_list_type=1) -> (Tensor y, Tensor scale)");
+    ops.impl("gmm_dequant_situ_quant", torch::kPrivateUse1, &vllm_ascend::gmm_dequant_situ_quant);
 
     ops.def(
         "grouped_matmul_situ_quant(Tensor x, Tensor weight, Tensor weight_scale, Tensor? weight_assist_matrix, "
