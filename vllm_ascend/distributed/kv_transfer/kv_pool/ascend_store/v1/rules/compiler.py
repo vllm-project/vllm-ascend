@@ -1,4 +1,11 @@
-"""Compile static AscendStore facts into directly callable KV rules."""
+"""Compile configuration and registered memory into one callable KV rule family.
+
+Compilation selects identity, reachability, ownership, admission, and Backend
+argument rules from topology and Backend capabilities.  The returned binder
+adds registered memory facts and produces the final ``KVPoolRules`` surface.
+Request values, Backend observations, and transfer lifecycle state remain
+runtime-owned.
+"""
 
 from __future__ import annotations
 
@@ -35,6 +42,14 @@ from .memory import (
 from .reachability import HybridReachability, UnitaryReachability
 
 RuleBinder = Callable[..., "KVPoolRules"]
+
+
+# =============================================================================
+# Rule Family Contract
+# =============================================================================
+#
+# Separate the resolved static input from the final callable surface consumed by
+# Runtime. Registered memory is deliberately absent until the binding phase.
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,6 +133,14 @@ class KVPoolRules:
         self.required_object_sizes = required_object_sizes_rule
 
 
+# =============================================================================
+# Static Rule Compilation
+# =============================================================================
+#
+# Select configuration-dependent identity, reachability, ownership, admission,
+# and Backend argument rules, then return the one registration-time binder.
+
+
 def compile_kv_pool_rules(
     spec: KVPoolRuleSpec,
     *,
@@ -139,9 +162,7 @@ def compile_kv_pool_rules(
     _, lookup_chunks, load_rows = bind_chunk_rules(topology)
     if len(groups) == 1 and not align_state_group_ids:
         reachability: UnitaryReachability | HybridReachability = UnitaryReachability(
-            topology.transfer_group_ids[0],
-            spec.max_model_len,
-            topology.cache_transfer_granularity,
+            topology.transfer_group_ids[0], spec.max_model_len, topology.cache_transfer_granularity
         )
     else:
         reachability = HybridReachability(
@@ -154,10 +175,7 @@ def compile_kv_pool_rules(
         )
     store_pipeline_ranks = resolve_store_pipeline_ranks(topology)
     load_keys, store_keys, lookup_keys, partial_key = bind_key_rules(
-        topology,
-        layerwise_full_key,
-        layerwise_partial_key,
-        store_pipeline_ranks,
+        topology, layerwise_full_key, layerwise_partial_key, store_pipeline_ranks
     )
     ownership = bind_store_ownership(topology)
     checkpoint_rows = bind_checkpoint_rule(topology, ownership)
@@ -216,6 +234,14 @@ def compile_kv_pool_rules(
         required_object_sizes_rule=required_object_sizes_rule,
         memory_parameters=memory_parameters,
     )
+
+
+# =============================================================================
+# Registered Memory Binding
+# =============================================================================
+#
+# Add the process-local memory registration to the compiled static rules and
+# expose one immutable rule family with no intermediate public hierarchy.
 
 
 def _bind_rules(
@@ -290,6 +316,14 @@ def _object_size(sizes: Mapping[int, int], group_id: int) -> int:
     return sizes[group_id]
 
 
+# =============================================================================
+# Runtime Rule Adapters
+# =============================================================================
+#
+# Adapt the selected Store ownership, admission, and Backend data plane to the
+# uniform call signatures held by ``KVPoolRules``.
+
+
 def _store_rows(
     block_rows: Callable,
     ownership: Callable,
@@ -301,30 +335,17 @@ def _store_rows(
     start_token: int = 0,
     mask=None,
 ) -> BlockRows:
-    rows = block_rows(
-        group_id,
-        end_token,
-        block_hashes,
-        block_ids,
-        start_token=start_token,
-        mask=mask,
-    )
+    rows = block_rows(group_id, end_token, block_hashes, block_ids, start_token=start_token, mask=mask)
     return ownership(group_id, rows)
 
 
 def _discard_store_rows(
-    group_id: int,
-    end_token: int,
-    block_hashes,
-    block_ids,
-    *,
-    start_token: int = 0,
-    mask=None,
+    group_id: int, end_token: int, block_hashes, block_ids, *, start_token: int = 0, mask=None
 ) -> BlockRows:
     del group_id, end_token, block_hashes, block_ids, start_token, mask
     empty: np.ndarray = np.empty(0, dtype=np.uint64)
     empty.flags.writeable = False
-    return empty, empty, (), empty
+    return empty, (), empty
 
 
 def _is_layerwise_store_leader(topology: KVPoolTopology) -> bool:
@@ -350,42 +371,36 @@ def _missing_objects(exists: Sequence[bool]) -> np.ndarray:
 
 
 def _bulk_arguments(
-    key_axes: KeyAxes,
-    ranges: BulkRangeBatch,
-    *,
-    object_bases=None,
-    selected_objects: Sequence[bool] | None = None,
+    key_axes: KeyAxes, ranges: BulkRangeBatch, *, object_bases=None, selected_objects: Sequence[bool] | None = None
 ):
     del object_bases
     return bulk_arguments(key_axes, ranges, selected_objects)
 
 
 def _gva_arguments(
-    key_axes: KeyAxes,
-    ranges: RangeBatch,
-    *,
-    object_bases,
-    selected_objects: Sequence[bool] | None = None,
+    key_axes: KeyAxes, ranges: RangeBatch, *, object_bases, selected_objects: Sequence[bool] | None = None
 ):
     del key_axes
     return gva_arguments(ranges, object_bases, selected_objects)
 
 
 def _key_range_arguments(
-    key_axes: KeyAxes,
-    ranges: RangeBatch,
-    *,
-    object_bases=None,
-    selected_objects: Sequence[bool] | None = None,
+    key_axes: KeyAxes, ranges: RangeBatch, *, object_bases=None, selected_objects: Sequence[bool] | None = None
 ):
     del object_bases
     return key_range_arguments(key_axes, ranges, selected_objects)
 
 
+# =============================================================================
+# Composition Validation
+# =============================================================================
+#
+# Reject unsupported combinations before any registered memory or request value
+# can enter the selected rule family.
+
+
 def _validate_static_rules(
-    spec: KVPoolRuleSpec,
-    align_state_group_ids: frozenset[int],
-    layerwise_full_key: LayerwiseFullKey | None,
+    spec: KVPoolRuleSpec, align_state_group_ids: frozenset[int], layerwise_full_key: LayerwiseFullKey | None
 ) -> None:
     topology = spec.topology
     groups = topology.transfer_groups

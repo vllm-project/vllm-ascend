@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from functools import wraps
-from typing import Any, Concatenate, ParamSpec, TypeVar
+from typing import Any, Concatenate, ParamSpec, TypeAlias, TypeVar
 
 import numpy as np
 import torch
@@ -13,7 +13,6 @@ from vllm.logger import logger
 
 from ...attention_fence import reset_attention_compute_start_gate
 from ..backend import LayerwiseAccessKind
-from ..coordinates import TokenRange
 from ..protocol.lookup import LookupRequest, LookupResult
 from ..protocol.transfer import (
     CheckpointStoreCommand,
@@ -24,7 +23,6 @@ from ..protocol.transfer import (
 )
 from ..rules import KVPoolRules, RuleBinder
 from ..rules.identity import BlockRows, KeyAxes
-from ..rules.reachability import ChunkAvailability, GroupAvailability, KVSelection
 from ..timeline import StoreBatch
 from ..timeline.schedule import KVPoolSchedule
 from ..timeline.timeline import KVPoolTimeline
@@ -32,12 +30,14 @@ from ..topology import KVPoolTopology
 from .backend import BackendIO, GVABackendIO, KeyRangeBackendIO
 from .backend.io import _batch_sources
 from .batch import KVGroupBatch, KVTransferBatch
-from .evidence import LoadCompletion, StoreCompletion, StoreEvidence, TransferEvidence
+from .evidence import LayerStoreResult, LoadCompletion, StoreCompletion, StoreEvidence, TransferEvidence
 from .resources import KVPoolResources
 from .result import LoadResult
 
 _Parameters = ParamSpec("_Parameters")
 _Result = TypeVar("_Result")
+_StoreRowsByRequest: TypeAlias = list[dict[int, BlockRows]]
+_StorePreparationResult: TypeAlias = tuple[KVTransferBatch | None, tuple[StoreCompletion, ...]]
 
 
 @dataclass(slots=True)
@@ -47,7 +47,6 @@ class _KVPoolStepContext:
     step: KVTransferStep
     failed_request_ids: set[str] = field(default_factory=set)
     failed_block_ids: set[int] = field(default_factory=set)
-    store_batch: KVTransferBatch | None = None
     store_submitted: bool = False
 
 
@@ -93,8 +92,9 @@ class KVPoolRuntime:
             thread_initializer=backend_io.initialize_thread,
             source_ready_event_factory=source_ready_event_factory or (lambda: torch.npu.Event()),
             load_operation=self._execute_load,
-            store_operation=self._execute_store,
-            store_admission=self._admit_store,
+            bulk_store_operation=self._execute_bulk_store,
+            layerwise_store_operation=self._execute_layerwise_store,
+            layerwise_store_preparation=self._prepare_layerwise_store,
             layerwise_backend=layerwise_backend,
             start_gate_factory=start_gate_factory,
         )
@@ -115,17 +115,17 @@ class KVPoolRuntime:
             raise ValueError(
                 f"Lookup groups {request.transfer_group_ids} do not match configured groups {rules.group_ids}"
             )
-        selection: KVSelection = rules.lookup_selection(request.block_hashes, request.query_range)
-        availability = []
-        for group in selection.groups:
+        masks = rules.lookup_selection(request.block_hashes, request.query_range)
+        observations = []
+        for group_id, mask in zip(rules.group_ids, masks, strict=True):
             starts, counts, hashes = rules.lookup_chunks(
-                group.group_id,
+                group_id,
                 request.query_range.end_token,
                 request.block_hashes,
                 start_token=request.query_range.start_token,
-                mask=group.chunk_mask,
+                mask=mask,
             )
-            keys = rules.lookup_keys(group.group_id, hashes)
+            keys = rules.lookup_keys(group_id, hashes)
             try:
                 observed = self._backend_io.exists([key for axis in keys for key in axis])
             except Exception as error:
@@ -136,16 +136,8 @@ class KVPoolRuntime:
                 all(observed[axis_index * row_count + row_index] for axis_index in range(len(keys)))
                 for row_index in range(row_count)
             )
-            availability.append(
-                GroupAvailability(
-                    group.group_id,
-                    tuple(
-                        ChunkAvailability(TokenRange(int(start), int(start + count)), content_hash, hit)
-                        for start, count, content_hash, hit in zip(starts, counts, hashes, available, strict=True)
-                    ),
-                )
-            )
-        reachable = rules.resolve_lookup(selection, availability)
+            observations.append(((starts, counts, hashes), available))
+        reachable = rules.resolve_lookup(request.query_range, request.block_hashes, observations)
         return LookupResult(reachable.end_token, reachable.tail_key_boundaries)
 
     def begin_step(self, step: KVTransferStep) -> None:
@@ -155,8 +147,8 @@ class KVPoolRuntime:
         context = _KVPoolStepContext(step)
         if self._timeline.store_enabled and step.store.commands:
             try:
-                context.store_batch = self._build_store_batch(step.store.commands)
-                self._timeline.prepare_store(context.store_batch)
+                if self._timeline.prepares_store_by_layer:
+                    self._timeline.prepare_store(step.store.commands)
                 if step.store.all_sources_ready:
                     self._submit_store(context)
             except Exception as error:
@@ -233,7 +225,7 @@ class KVPoolRuntime:
     @_with_active_step
     def finish_step(self, context: _KVPoolStepContext) -> None:
         self._raise_store_error()
-        if not self._timeline.store_enabled or context.store_batch is None or context.store_submitted:
+        if not self._timeline.store_enabled or not context.step.store.commands or context.store_submitted:
             return
         try:
             self._submit_store(context)
@@ -246,8 +238,7 @@ class KVPoolRuntime:
     def _submit_store(self, context: _KVPoolStepContext) -> None:
         if self._pending_store_batch is not None:
             raise RuntimeError("Previous Store invocation has not reached its fence")
-        assert context.store_batch is not None
-        self._pending_store_batch = self._timeline.finish_store(context.store_batch)
+        self._pending_store_batch = self._timeline.finish_store(context.step.store.commands)
         context.store_submitted = True
 
     def fence_previous_store(self) -> tuple[StoreCompletion, ...]:
@@ -299,61 +290,89 @@ class KVPoolRuntime:
         if close_error is not None:
             raise close_error
 
-    def _execute_load(
-        self,
-        batch: KVTransferBatch,
-        layer_id: int | None,
-    ) -> tuple[LoadCompletion, ...]:
+    def _execute_load(self, batch: KVTransferBatch, layer_id: int | None) -> tuple[LoadCompletion, ...]:
         return self._backend_io.load_batch(batch, layer_id)
 
-    def _admit_store(self, batch: KVTransferBatch) -> KVTransferBatch:
+    def _execute_bulk_store(
+        self, commands: tuple[StoreCommand, ...], source_ready_event: Any
+    ) -> tuple[StoreCompletion, ...]:
+        selected: KVTransferBatch | None = None
+        try:
+            selected = self._build_admitted_store_batch(commands)
+            if selected is None:
+                return _store_command_completions(commands)
+            source_ready_event.synchronize()
+        except Exception as error:
+            if selected is None:
+                return _store_command_completions(commands, error)
+            evidence = tuple(TransferEvidence(source, None, True) for source in _batch_sources(selected, None))
+            return _failed_store_completions(selected, evidence, error)
+        return self._backend_io.store_batch(selected)
+
+    def _build_admitted_store_batch(self, commands: tuple[StoreCommand, ...]) -> KVTransferBatch | None:
+        rows_by_request, key_axes_by_group = self._build_store_candidates(commands)
+        candidate_keys = tuple(
+            key for group_id in self._bound_rules.group_ids for axis in key_axes_by_group[group_id] for key in axis
+        )
+        accepted, claim_once = self._admitted_store_keys(candidate_keys)
+        if accepted is not None and not accepted:
+            return None
+        batch = self._assemble_batch(
+            tuple(command.request_id for command in commands),
+            rows_by_request,
+            None,
+            tuple(command.store_job_id for command in commands),
+            key_axes_by_group=key_axes_by_group,
+        )
+        return batch if accepted is None else batch.select_keys(accepted, claim_once=claim_once)
+
+    def _admitted_store_keys(self, selected_keys: tuple[str, ...]) -> tuple[set[str] | None, bool]:
+        if not selected_keys:
+            return set(), False
         rules = self._bound_rules
-        selected_keys = batch.selected_keys()
         keys = tuple(dict.fromkeys(selected_keys))
         has_duplicates = len(keys) != len(selected_keys)
-        if not rules.requires_store_observation and not has_duplicates:
-            return batch
-        admitted = rules.admit_store(self._backend_io.exists(list(keys))) if rules.requires_store_observation else None
-        if admitted is None:
-            accepted = set(keys)
-        else:
-            if not has_duplicates and all(admitted):
-                return batch
-            accepted = {key for key, include in zip(keys, admitted, strict=True) if include}
-        return batch.select_keys(accepted, claim_once=has_duplicates)
+        if not rules.requires_store_observation:
+            return (set(keys), True) if has_duplicates else (None, False)
+        admitted = rules.admit_store(self._backend_io.exists(list(keys)))
+        if not has_duplicates and all(admitted):
+            return None, False
+        return {key for key, include in zip(keys, admitted, strict=True) if include}, has_duplicates
 
-    def _execute_store(
-        self,
-        batch: KVTransferBatch,
-        source_ready_event: Any,
-        layer_id: int | None,
-    ) -> tuple[StoreCompletion, ...]:
+    def _prepare_layerwise_store(self, commands: tuple[StoreCommand, ...]) -> _StorePreparationResult:
         try:
-            selected = self._admit_store(batch) if layer_id is None else batch
+            selected = self._build_admitted_store_batch(commands)
         except Exception as error:
-            evidence = tuple(TransferEvidence(source, None, True) for source in _batch_sources(batch, layer_id))
-            return _failed_store_completions(batch, evidence, error)
-        if selected.empty:
-            return self._backend_io.store_batch(selected, layer_id)
+            return None, _store_command_completions(commands, error)
+        if selected is None:
+            return None, _store_command_completions(commands)
+        return selected, ()
+
+    def _execute_layerwise_store(
+        self, batch: KVTransferBatch, source_ready_event: Any, layer_id: int | None
+    ) -> LayerStoreResult:
+        if layer_id is None:
+            raise ValueError("Layerwise Store requires a physical layer")
         try:
             source_ready_event.synchronize()
         except Exception as error:
-            evidence = tuple(TransferEvidence(source, None, True) for source in _batch_sources(selected, layer_id))
-            return _failed_store_completions(selected, evidence, error)
-        return self._backend_io.store_batch(selected, layer_id)
+            keys = batch.selected_keys()
+            return LayerStoreResult(keys, (None,) * len(keys), (True,) * len(keys), error)
+        layerwise_backend = self._backend_io
+        assert isinstance(layerwise_backend, (GVABackendIO, KeyRangeBackendIO))
+        return layerwise_backend.store_layer(batch, layer_id)
 
     def _build_load_batch(self, commands: tuple[LoadCommand, ...]) -> KVTransferBatch:
         rules = self._bound_rules
-        selections = tuple(rules.load_selection(command.block_hashes, command.load_range) for command in commands)
+        masks_by_request = tuple(rules.load_selection(command.block_hashes, command.load_range) for command in commands)
         rows_by_request: list[dict[int, BlockRows]] = []
-        for command, selection in zip(commands, selections, strict=True):
+        for command, masks in zip(commands, masks_by_request, strict=True):
             boundaries = {item.group_id: item.boundary_token for item in command.tail_key_boundaries}
             if len(boundaries) != len(command.tail_key_boundaries):
                 raise ValueError("Load contains duplicate tail-key boundaries for one cache group")
             unknown = set(boundaries).difference(rules.group_ids)
             if unknown:
                 raise ValueError(f"Load tail-key boundaries contain unknown cache groups {sorted(unknown)}")
-            masks = {group.group_id: group.chunk_mask for group in selection.groups}
             rows_by_request.append(
                 {
                     group_id: rules.load_rows(
@@ -362,21 +381,19 @@ class KVPoolRuntime:
                         command.block_hashes,
                         command.block_ids_by_group[group_id],
                         start_token=command.load_range.start_token,
-                        mask=masks[group_id],
+                        mask=mask,
                         tail_boundary_token=boundaries.get(group_id),
                     )
-                    for group_id in rules.group_ids
+                    for group_id, mask in zip(rules.group_ids, masks, strict=True)
                 }
             )
-        return self._assemble_batch(
-            tuple(command.request_id for command in commands),
-            rows_by_request,
-            rules.load_keys,
-        )
+        return self._assemble_batch(tuple(command.request_id for command in commands), rows_by_request, rules.load_keys)
 
-    def _build_store_batch(self, commands: tuple[StoreCommand, ...]) -> KVTransferBatch:
+    def _build_store_candidates(
+        self, commands: tuple[StoreCommand, ...]
+    ) -> tuple[_StoreRowsByRequest, dict[int, KeyAxes]]:
         rules = self._bound_rules
-        rows_by_request = []
+        rows_by_request: _StoreRowsByRequest = []
         for command in commands:
             if isinstance(command, CheckpointStoreCommand):
                 if rules.checkpoint_rows is None:
@@ -398,12 +415,7 @@ class KVPoolRuntime:
                 rows_by_request.append(rows)
                 continue
             assert isinstance(command, RangeStoreCommand)
-            selection: KVSelection = rules.store_selection(
-                command.block_hashes,
-                command.store_range,
-                command.num_prompt_tokens,
-            )
-            masks = {group.group_id: group.chunk_mask for group in selection.groups}
+            masks = rules.store_selection(command.block_hashes, command.store_range, command.num_prompt_tokens)
             rows_by_request.append(
                 {
                     group_id: rules.store_rows(
@@ -412,44 +424,45 @@ class KVPoolRuntime:
                         command.block_hashes,
                         command.block_ids_by_group[group_id],
                         start_token=command.store_range.start_token,
-                        mask=masks[group_id],
+                        mask=mask,
                     )
-                    for group_id in rules.group_ids
+                    for group_id, mask in zip(rules.group_ids, masks, strict=True)
                 }
             )
-        return self._assemble_batch(
-            tuple(command.request_id for command in commands),
-            rows_by_request,
-            rules.store_keys,
-            tuple(command.store_job_id for command in commands),
-        )
+        return rows_by_request, self._key_axes_by_group(rows_by_request, rules.store_keys)
 
     def _assemble_batch(
         self,
         request_ids: tuple[str, ...],
         rows_by_request: list[dict[int, BlockRows]],
-        key_rule: Callable[[int, Sequence], KeyAxes],
+        key_rule: Callable[[int, Sequence], KeyAxes] | None,
         store_job_ids: tuple[int | None, ...] | None = None,
+        *,
+        key_axes_by_group: dict[int, KeyAxes] | None = None,
     ) -> KVTransferBatch:
         groups = []
         for group_id in self._bound_rules.group_ids:
             block_parts = []
             count_parts = []
-            key_parts: list[KeyAxes] = []
             request_splits = [0]
             for rows_by_group in rows_by_request:
                 rows = rows_by_group.get(group_id, _empty_rows())
-                _, counts, hashes, block_ids = rows
+                counts, _, block_ids = rows
                 block_parts.append(block_ids)
                 count_parts.append(counts)
-                key_parts.append(key_rule(group_id, hashes))
                 request_splits.append(request_splits[-1] + len(block_ids))
-            key_axis_count = len(key_parts[0]) if key_parts else 0
-            if any(len(keys) != key_axis_count for keys in key_parts):
-                raise RuntimeError(f"Cache group {group_id} changed its key coordinate count at runtime")
-            key_axes = tuple(
-                tuple(key for keys in key_parts for key in keys[axis_index]) for axis_index in range(key_axis_count)
-            )
+            if key_axes_by_group is None:
+                if key_rule is None:
+                    raise RuntimeError("Batch assembly requires a key rule or precomputed key axes")
+                key_axes = _merge_key_axes(
+                    group_id,
+                    [
+                        key_rule(group_id, rows_by_group.get(group_id, _empty_rows())[1])
+                        for rows_by_group in rows_by_request
+                    ],
+                )
+            else:
+                key_axes = key_axes_by_group[group_id]
             topology = self._groups[group_id]
             groups.append(
                 KVGroupBatch(
@@ -463,6 +476,20 @@ class KVPoolRuntime:
                 )
             )
         return KVTransferBatch(request_ids, tuple(groups), store_job_ids)
+
+    def _key_axes_by_group(
+        self, rows_by_request: _StoreRowsByRequest, key_rule: Callable[[int, Sequence], KeyAxes]
+    ) -> dict[int, KeyAxes]:
+        return {
+            group_id: _merge_key_axes(
+                group_id,
+                [
+                    key_rule(group_id, rows_by_group.get(group_id, _empty_rows())[1])
+                    for rows_by_group in rows_by_request
+                ],
+            )
+            for group_id in self._bound_rules.group_ids
+        }
 
     def _raise_store_error(self) -> None:
         if self._store_error is not None:
@@ -504,9 +531,7 @@ def _validate_store_completion(completion: StoreCompletion) -> None:
 
 
 def _failed_store_completions(
-    batch: KVTransferBatch,
-    evidence: tuple[TransferEvidence, ...],
-    error: Exception,
+    batch: KVTransferBatch, evidence: tuple[TransferEvidence, ...], error: Exception
 ) -> tuple[StoreCompletion, ...]:
     by_request: list[list[TransferEvidence]] = [[] for _ in batch.request_ids]
     for item in evidence:
@@ -516,10 +541,7 @@ def _failed_store_completions(
         StoreCompletion(
             request_id,
             StoreEvidence(
-                tuple(items),
-                succeeded=not items,
-                source_release_confirmed=True,
-                error=error if items else None,
+                tuple(items), succeeded=not items, source_release_confirmed=True, error=error if items else None
             ),
             store_job_id,
         )
@@ -527,10 +549,24 @@ def _failed_store_completions(
     )
 
 
+def _store_command_completions(
+    commands: tuple[StoreCommand, ...], error: Exception | None = None
+) -> tuple[StoreCompletion, ...]:
+    evidence = StoreEvidence((), error is None, True, error)
+    return tuple(StoreCompletion(command.request_id, evidence, command.store_job_id) for command in commands)
+
+
+def _merge_key_axes(group_id: int, key_parts: list[KeyAxes]) -> KeyAxes:
+    key_axis_count = len(key_parts[0]) if key_parts else 0
+    if any(len(keys) != key_axis_count for keys in key_parts):
+        raise RuntimeError(f"Cache group {group_id} changed its key coordinate count at runtime")
+    return tuple(tuple(key for keys in key_parts for key in keys[axis_index]) for axis_index in range(key_axis_count))
+
+
 def _empty_rows() -> BlockRows:
     empty: np.ndarray = np.empty(0, dtype=np.uint64)
     empty.flags.writeable = False
-    return empty, empty, (), empty
+    return empty, (), empty
 
 
 def _concat_uint64(parts: Sequence[np.ndarray]) -> np.ndarray:

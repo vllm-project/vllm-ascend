@@ -5,10 +5,19 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+from ..protocol.transfer import StoreCommand
 from ..runtime.batch import KVTransferBatch
 from ..runtime.evidence import LoadCompletion, StoreCompletion
 from ..topology import KVPoolTopology
-from . import LoadTimelineProtocol, StoreBatch, StoreTimelineProtocol
+from . import (
+    BulkStoreOperation,
+    LayerwiseStoreOperation,
+    LayerwiseStorePreparation,
+    LoadOperation,
+    LoadTimelineProtocol,
+    StoreBatch,
+    StoreTimelineProtocol,
+)
 from .bulk import AsyncLoadTimeline, LoadTimeline, StoreTimeline
 from .layerwise import (
     LayerwiseBackendOperations,
@@ -18,10 +27,6 @@ from .layerwise import (
     LayerwiseStoreTimelineProtocol,
 )
 from .schedule import KVPoolSchedule, LoadScheduleKind, StoreScheduleKind
-
-LoadOperation = Callable[[KVTransferBatch, int | None], tuple[LoadCompletion, ...]]
-StoreOperation = Callable[[KVTransferBatch, Any, int | None], tuple[StoreCompletion, ...]]
-StoreAdmission = Callable[[KVTransferBatch], KVTransferBatch]
 
 
 class KVPoolTimeline:
@@ -46,6 +51,10 @@ class KVPoolTimeline:
         return self._schedule.fences_store_on_finish
 
     @property
+    def prepares_store_by_layer(self) -> bool:
+        return self._schedule.store_kind is StoreScheduleKind.LAYERWISE
+
+    @property
     def collects_load_completions(self) -> bool:
         return self.load.collects_completions
 
@@ -64,8 +73,9 @@ class KVPoolTimeline:
         thread_initializer: Callable[[], None],
         source_ready_event_factory: Callable[[], Any],
         load_operation: LoadOperation,
-        store_operation: StoreOperation,
-        store_admission: StoreAdmission,
+        bulk_store_operation: BulkStoreOperation,
+        layerwise_store_operation: LayerwiseStoreOperation,
+        layerwise_store_preparation: LayerwiseStorePreparation,
         layerwise_backend: LayerwiseBackendOperations | None,
         start_gate_factory: Callable[[], Any],
     ) -> None:
@@ -95,13 +105,13 @@ class KVPoolTimeline:
         if self._schedule.store_kind is StoreScheduleKind.LAYERWISE:
             assert layerwise_backend is not None
             layerwise_store = LayerwiseStoreTimeline(self._topology, layerwise_backend, thread_initializer)
-            layerwise_store.bind_admission(store_admission)
-            layerwise_store.bind_operation(store_operation)
+            layerwise_store.bind_preparation(layerwise_store_preparation)
+            layerwise_store.bind_operation(layerwise_store_operation)
             self._layerwise_store = layerwise_store
             self._store = layerwise_store
         elif self._schedule.store_kind is StoreScheduleKind.ASYNC:
             bulk_store = StoreTimeline(thread_initializer)
-            bulk_store.bind_operation(store_operation)
+            bulk_store.bind_operation(bulk_store_operation)
             self._bulk_store = bulk_store
             self._store = bulk_store
         self._source_ready_event_factory = source_ready_event_factory
@@ -125,21 +135,21 @@ class KVPoolTimeline:
     def abort_load(self) -> None:
         self.load.abort()
 
-    def prepare_store(self, batch: KVTransferBatch) -> None:
+    def prepare_store(self, commands: tuple[StoreCommand, ...]) -> None:
         if self._layerwise_store is not None:
-            self._layerwise_store.prepare(batch)
+            self._layerwise_store.prepare(commands)
 
     def submit_store_layer(self, layer_name: str) -> None:
         if self._layerwise_store is not None:
             self._layerwise_store.submit_layer(layer_name, self._record_source_ready)
 
-    def finish_store(self, batch: KVTransferBatch) -> StoreBatch:
+    def finish_store(self, commands: tuple[StoreCommand, ...]) -> StoreBatch:
         if self._store is None:
             raise RuntimeError("KV Pool runtime has no Store timeline")
         if self._layerwise_store is not None:
             return self._layerwise_store.finalize()
         assert self._bulk_store is not None
-        return self._bulk_store.submit(batch, self._record_source_ready())
+        return self._bulk_store.submit(commands, self._record_source_ready())
 
     def wait_store(self, batch: StoreBatch) -> tuple[StoreCompletion, ...]:
         if self._store is None:

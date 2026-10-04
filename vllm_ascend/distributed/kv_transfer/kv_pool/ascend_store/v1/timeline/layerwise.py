@@ -1,4 +1,10 @@
-"""Run Layerwise sessions while reusing one request batch across all layers."""
+"""Coordinate layer-triggered transfers with session-wide visibility fences.
+
+Load and Store sessions own Backend resources across multiple layer hooks.
+Layerwise Store queues command preparation before layer work, reuses only the
+admitted missing rows, and publishes request completion after every submitted
+layer has reached the session's commit or revoke boundary.
+"""
 
 from __future__ import annotations
 
@@ -10,10 +16,11 @@ from typing import TYPE_CHECKING, Any, Protocol
 import numpy as np
 from vllm.logger import logger
 
-from ..runtime.batch import KVTransferBatch
-from ..runtime.evidence import LoadCompletion, StoreCompletion, StoreEvidence, TransferEvidence
+from ..protocol.transfer import StoreCommand
+from ..runtime.batch import KVTransferBatch, TransferSource
+from ..runtime.evidence import LayerStoreResult, LoadCompletion, StoreCompletion, StoreEvidence, TransferEvidence
 from ..topology import KVPoolTopology
-from . import LoadTimelineProtocol, StoreBatch
+from . import LayerwiseStoreOperation, LayerwiseStorePreparation, LoadOperation, LoadTimelineProtocol, StoreBatch
 from .executor import TimelineExecutor
 
 if TYPE_CHECKING:
@@ -41,16 +48,13 @@ class LayerwiseLoadTimelineProtocol(LoadTimelineProtocol, Protocol):
 
 
 class LayerwiseStoreTimelineProtocol(Protocol):
-    def bind_admission(self, admission: Callable[[KVTransferBatch], KVTransferBatch]) -> None: ...
+    def bind_preparation(self, preparation: LayerwiseStorePreparation) -> None: ...
 
-    def bind_operation(
-        self,
-        operation: Callable[[KVTransferBatch, Any, int | None], tuple[StoreCompletion, ...]],
-    ) -> None: ...
+    def bind_operation(self, operation: LayerwiseStoreOperation) -> None: ...
 
     def start(self) -> None: ...
 
-    def prepare(self, batch: KVTransferBatch) -> None: ...
+    def prepare(self, commands: tuple[StoreCommand, ...]) -> None: ...
 
     def submit_layer(self, layer_name: str, record_source_ready: Callable[[], Any]) -> None: ...
 
@@ -123,17 +127,14 @@ class LayerwiseLoadTimeline:
         self._layer_order = tuple(sorted(set(self._layer_ids_by_name.values())))
         self._prefetch_layers = prefetch_layers
         self._start_gate_factory = start_gate_factory
-        self._operation: Callable[[KVTransferBatch, int | None], tuple[LoadCompletion, ...]] | None = None
+        self._operation: LoadOperation | None = None
         self._session: _LoadSession | None = None
         self._lifecycle_lock = threading.Lock()
         self._executor = TimelineExecutor(
             "KVPoolLayerwiseLoadExecutor", thread_initializer, self._execute, self._complete
         )
 
-    def bind_operation(
-        self,
-        operation: Callable[[KVTransferBatch, int | None], tuple[LoadCompletion, ...]],
-    ) -> None:
+    def bind_operation(self, operation: LoadOperation) -> None:
         with self._lifecycle_lock:
             if self._operation is not None:
                 raise RuntimeError("Layerwise Load operation is already bound")
@@ -281,10 +282,7 @@ class LayerwiseLoadTimeline:
         job.completions = self._operation(job.session.batch.for_layer(job.layer_id), job.layer_id)
 
     def _fill_prefetch_window(
-        self,
-        session: _LoadSession,
-        current_layer_id: int,
-        start_gate: AttentionComputeStartGate,
+        self, session: _LoadSession, current_layer_id: int, start_gate: AttentionComputeStartGate
     ) -> None:
         active = sum(item.submitted and not item.consumed for item in session.layer_jobs.values())
         while active < self._prefetch_layers and session.next_layer_index < len(session.layer_order):
@@ -299,10 +297,7 @@ class LayerwiseLoadTimeline:
         self._schedule_finish_if_complete(session)
 
     def _submit_through_layer(
-        self,
-        session: _LoadSession,
-        layer_id: int,
-        start_gate: AttentionComputeStartGate,
+        self, session: _LoadSession, layer_id: int, start_gate: AttentionComputeStartGate
     ) -> None:
         target_index = session.layer_order.index(layer_id)
         while session.next_layer_index <= target_index:
@@ -376,59 +371,64 @@ class LayerwiseLoadTimeline:
 
 @dataclass(slots=True)
 class _StoreSession:
-    batch: KVTransferBatch
-    request_indices: dict[str, int]
-    existing_keys: set[str] = field(default_factory=set)
+    commands: tuple[StoreCommand, ...]
+    batch: KVTransferBatch | None = None
+    terminal_completions: tuple[StoreCompletion, ...] = ()
     pending_finalization_keys: tuple[str, ...] = ()
     selected: KVTransferBatch | None = None
+    request_keys: tuple[frozenset[str], ...] = ()
+    observed_layer_ids: set[int] = field(default_factory=set)
     pending_layer_ids: set[int] = field(default_factory=set)
+    submitted_layer_ids: set[int] = field(default_factory=set)
     failed_keys: set[str] = field(default_factory=set)
     session_result_codes: dict[str, int | None] = field(default_factory=dict)
-    range_result_codes: dict[tuple[str, int], int | None] = field(default_factory=dict)
-    evidence_by_request: list[list[TransferEvidence]] = field(default_factory=list)
-    unsafe_requests: set[int] = field(default_factory=set)
+    range_failure_codes: dict[str, int | None] = field(default_factory=dict)
+    unsafe_keys: set[str] = field(default_factory=set)
     errors_by_key: dict[str, Exception] = field(default_factory=dict)
 
     def open(
         self,
-        admitted: KVTransferBatch,
-        object_sizes_by_key: dict[str, int],
+        batch: KVTransferBatch | None,
+        terminal_completions: tuple[StoreCompletion, ...],
         backend_io: LayerwiseBackendOperations,
     ) -> None:
-        self.evidence_by_request = [[] for _ in self.batch.request_ids]
-        missing_keys = tuple(dict.fromkeys(admitted.selected_keys()))
-        self.existing_keys.update(set(object_sizes_by_key) - set(missing_keys))
+        self.batch = batch
+        self.terminal_completions = terminal_completions
+        if batch is None:
+            return
+        self.request_keys = _keys_by_request(batch)
+        object_sizes_by_key = _collect_object_sizes(batch)
+        missing_keys = tuple(dict.fromkeys(batch.selected_keys()))
         if missing_keys:
             self._start_sessions(missing_keys, object_sizes_by_key, backend_io)
-        self.selected = admitted.select_keys(set(self.pending_finalization_keys), claim_once=True)
+        self.selected = batch.select_keys(set(self.pending_finalization_keys), claim_once=True)
         self.pending_layer_ids = {
             layer_id for group in self.selected.groups if group.selected_keys() for layer_id in group.physical_layer_ids
         }
 
-    def record_range(self, completions: tuple[StoreCompletion, ...], layer_id: int) -> None:
-        for completion in completions:
-            request_index = self.request_indices[completion.request_id]
-            observed_keys = set()
-            for item in completion.evidence.transfer_evidence:
-                self.evidence_by_request[request_index].append(item)
-                observed_keys.add(item.source.key)
-                self.range_result_codes[item.source.key, layer_id] = item.result_code
-                if item.result_code != 0:
-                    self.failed_keys.add(item.source.key)
-                if item.source_release_confirmed is not True:
-                    self.unsafe_requests.add(request_index)
-            if completion.evidence.error is not None:
-                error_keys = observed_keys or _request_keys(self.selected or self.batch, request_index)
-                for key in error_keys:
-                    self.errors_by_key.setdefault(key, completion.evidence.error)
-            if not completion.evidence.succeeded:
-                self.failed_keys.update(observed_keys)
+    def record_range(self, result: LayerStoreResult, layer_id: int, expected_keys: tuple[str, ...]) -> None:
+        if self.batch is None:
+            raise RuntimeError("Layerwise Store range completed without a prepared batch")
+        if not (len(result.keys) == len(result.result_codes) == len(result.source_release_confirmed)):
+            raise RuntimeError("Layerwise Store result axes are not aligned")
+        if result.keys != expected_keys:
+            raise RuntimeError(f"Layerwise Store layer {layer_id} returned results for unexpected keys")
+        self.observed_layer_ids.add(layer_id)
+        for key, code, released in zip(result.keys, result.result_codes, result.source_release_confirmed, strict=True):
+            if code != 0:
+                self.failed_keys.add(key)
+                self.range_failure_codes.setdefault(key, code)
+            if not released:
+                self.unsafe_keys.add(key)
+            if result.error is not None:
+                self.errors_by_key.setdefault(key, result.error)
 
-    def finalize(
-        self,
-        backend_io: LayerwiseBackendOperations,
-        incomplete_layer_ids: tuple[int, ...],
-    ) -> tuple[StoreCompletion, ...]:
+    def finalize(self, backend_io: LayerwiseBackendOperations) -> tuple[StoreCompletion, ...]:
+        if self.terminal_completions:
+            return self.terminal_completions
+        if self.batch is None:
+            raise RuntimeError("Layerwise Store preparation produced neither a batch nor completions")
+        incomplete_layer_ids = tuple(sorted(self.pending_layer_ids))
         if incomplete_layer_ids:
             error = RuntimeError(f"Layerwise Store did not reach physical layers {list(incomplete_layer_ids)}")
             for key in self.pending_finalization_keys:
@@ -457,10 +457,7 @@ class _StoreSession:
             logger.exception("Failed to revoke Layerwise Store sessions after a timeline error")
 
     def _start_sessions(
-        self,
-        missing_keys: tuple[str, ...],
-        object_sizes_by_key: dict[str, int],
-        backend_io: LayerwiseBackendOperations,
+        self, missing_keys: tuple[str, ...], object_sizes_by_key: dict[str, int], backend_io: LayerwiseBackendOperations
     ) -> None:
         try:
             result_codes = backend_io.start_store_sessions(
@@ -498,33 +495,33 @@ class _StoreSession:
                 if code != 0:
                     self.session_result_codes.setdefault(key, code)
                     self.errors_by_key.setdefault(
-                        key,
-                        RuntimeError(f"Store session revocation was not confirmed; result code {code}"),
+                        key, RuntimeError(f"Store session revocation was not confirmed; result code {code}")
                     )
         self.pending_finalization_keys = tuple(key for key in self.pending_finalization_keys if key not in keys)
 
     def _build_completions(self) -> tuple[StoreCompletion, ...]:
-        job_ids = self.batch.store_job_ids or (None,) * len(self.batch.request_ids)
+        if self.batch is None:
+            raise RuntimeError("Layerwise Store cannot build completions without a prepared batch")
+        batch = self.batch
+        job_ids = batch.store_job_ids or (None,) * len(batch.request_ids)
+        selected = self.selected
+        if selected is None:
+            raise RuntimeError("Layerwise Store cannot build completions without selected sessions")
+        sources_by_request = _sources_by_request(selected, self.observed_layer_ids)
         completions = []
-        for request_index, (request_id, store_job_id) in enumerate(zip(self.batch.request_ids, job_ids, strict=True)):
+        for request_index, (request_id, store_job_id) in enumerate(zip(batch.request_ids, job_ids, strict=True)):
             evidence = tuple(
                 TransferEvidence(
-                    item.source,
-                    self.session_result_codes.get(
-                        item.source.key,
-                        self.range_result_codes.get((item.source.key, item.source.physical_layer_ids[0])),
-                    ),
-                    item.source_release_confirmed,
+                    source,
+                    self.session_result_codes.get(source.key, self.range_failure_codes.get(source.key)),
+                    source.key not in self.unsafe_keys,
                 )
-                for item in self.evidence_by_request[request_index]
-                if item.source.key not in self.existing_keys
+                for source in sources_by_request[request_index]
             )
-            keys = _request_keys(self.batch, request_index)
+            keys = self.request_keys[request_index]
             failed = keys & self.failed_keys
             error = next((self.errors_by_key[key] for key in keys if key in self.errors_by_key), None)
-            source_release_confirmed = request_index not in self.unsafe_requests and all(
-                item.source_release_confirmed is True for item in evidence
-            )
+            source_release_confirmed = all(item.source_release_confirmed is True for item in evidence)
             completions.append(
                 StoreCompletion(
                     request_id,
@@ -537,10 +534,7 @@ class _StoreSession:
 
 @dataclass(slots=True)
 class _OpenStoreSession:
-    batch: KVTransferBatch
-    object_sizes_by_key: dict[str, int]
-    completed: threading.Event = field(default_factory=threading.Event)
-    session: _StoreSession | None = None
+    session: _StoreSession
 
 
 @dataclass(frozen=True, slots=True)
@@ -554,22 +548,18 @@ class _StoreLayerJob:
 class _FinalizeStoreSession:
     session: _StoreSession
     batch: StoreBatch
-    incomplete_layer_ids: tuple[int, ...]
 
 
 class LayerwiseStoreTimeline:
     """Publish layer ranges, then commit or revoke their shared objects."""
 
     def __init__(
-        self,
-        topology: KVPoolTopology,
-        backend_io: LayerwiseBackendOperations,
-        thread_initializer: Callable[[], None],
+        self, topology: KVPoolTopology, backend_io: LayerwiseBackendOperations, thread_initializer: Callable[[], None]
     ) -> None:
         self._backend_io = backend_io
         self._layer_ids_by_name = _compile_layer_ids_by_name(topology)
-        self._admission: Callable[[KVTransferBatch], KVTransferBatch] | None = None
-        self._operation: Callable[[KVTransferBatch, Any, int | None], tuple[StoreCompletion, ...]] | None = None
+        self._preparation: LayerwiseStorePreparation | None = None
+        self._operation: LayerwiseStoreOperation | None = None
         self._lifecycle_lock = threading.Lock()
         self._session: _StoreSession | None = None
         self._pending_batch: StoreBatch | None = None
@@ -577,16 +567,13 @@ class LayerwiseStoreTimeline:
             "KVPoolLayerwiseStoreExecutor", thread_initializer, self._execute, self._complete
         )
 
-    def bind_admission(self, admission: Callable[[KVTransferBatch], KVTransferBatch]) -> None:
+    def bind_preparation(self, preparation: LayerwiseStorePreparation) -> None:
         with self._lifecycle_lock:
-            if self._admission is not None:
-                raise RuntimeError("Layerwise Store admission is already bound")
-            self._admission = admission
+            if self._preparation is not None:
+                raise RuntimeError("Layerwise Store preparation is already bound")
+            self._preparation = preparation
 
-    def bind_operation(
-        self,
-        operation: Callable[[KVTransferBatch, Any, int | None], tuple[StoreCompletion, ...]],
-    ) -> None:
+    def bind_operation(self, operation: LayerwiseStoreOperation) -> None:
         with self._lifecycle_lock:
             if self._operation is not None:
                 raise RuntimeError("Layerwise Store operation is already bound")
@@ -594,18 +581,20 @@ class LayerwiseStoreTimeline:
 
     def start(self) -> None:
         with self._lifecycle_lock:
-            if self._admission is None or self._operation is None:
+            if self._preparation is None or self._operation is None:
                 raise RuntimeError("Layerwise Store timeline is not fully bound")
             self._backend_io.validate_support()
         self._executor.start()
         self._raise_if_failed()
 
-    def prepare(self, batch: KVTransferBatch) -> None:
+    def prepare(self, commands: tuple[StoreCommand, ...]) -> None:
         with self._lifecycle_lock:
             self._raise_if_not_running()
             if self._session is not None or self._pending_batch is not None:
                 raise RuntimeError("Previous Layerwise Store session has not reached its fence")
-            self._session = self._open_session(batch)
+            session = _StoreSession(commands)
+            self._session = session
+            self._executor.submit(_OpenStoreSession(session))
 
     def submit_layer(self, layer_name: str, record_source_ready: Callable[[], Any]) -> None:
         with self._lifecycle_lock:
@@ -614,10 +603,10 @@ class LayerwiseStoreTimeline:
             if session is None:
                 return
             layer_id = self._layer_ids_by_name.get(layer_name)
-            if layer_id is None or layer_id not in session.pending_layer_ids:
+            if layer_id is None or layer_id in session.submitted_layer_ids:
                 return
             source_ready_event = record_source_ready()
-            session.pending_layer_ids.remove(layer_id)
+            session.submitted_layer_ids.add(layer_id)
             self._executor.submit(_StoreLayerJob(session, layer_id, source_ready_event))
 
     def finalize(self) -> StoreBatch:
@@ -629,11 +618,10 @@ class LayerwiseStoreTimeline:
         session = self._session
         if session is None:
             raise RuntimeError("Layerwise Store session has not been prepared")
-        batch = StoreBatch(session.batch)
+        batch = StoreBatch()
         self._session = None
         self._pending_batch = batch
-        incomplete = tuple(sorted(session.pending_layer_ids))
-        self._executor.submit(_FinalizeStoreSession(session, batch, incomplete))
+        self._executor.submit(_FinalizeStoreSession(session, batch))
         return batch
 
     def wait(self, batch: StoreBatch) -> tuple[StoreCompletion, ...]:
@@ -668,54 +656,32 @@ class LayerwiseStoreTimeline:
     def _execute(self, command: _OpenStoreSession | _StoreLayerJob | _FinalizeStoreSession) -> None:
         try:
             if isinstance(command, _OpenStoreSession):
-                assert self._admission is not None
-                session = _StoreSession(
-                    command.batch,
-                    {request_id: index for index, request_id in enumerate(command.batch.request_ids)},
-                )
-                command.session = session
-                admitted = self._admission(command.batch)
-                session.open(admitted, command.object_sizes_by_key, self._backend_io)
+                assert self._preparation is not None
+                batch, completions = self._preparation(command.session.commands)
+                command.session.open(batch, completions, self._backend_io)
             elif isinstance(command, _StoreLayerJob):
                 self._execute_layer(command)
             else:
-                command.batch.completions.extend(
-                    command.session.finalize(self._backend_io, command.incomplete_layer_ids)
-                )
+                command.batch.completions.extend(command.session.finalize(self._backend_io))
         except BaseException:
-            failed_session: _StoreSession | None = command.session
-            if failed_session is not None:
-                failed_session.revoke_pending(self._backend_io)
+            command.session.revoke_pending(self._backend_io)
             raise
 
     @staticmethod
     def _complete(command: _OpenStoreSession | _StoreLayerJob | _FinalizeStoreSession) -> None:
-        if isinstance(command, _OpenStoreSession):
-            command.completed.set()
-        elif isinstance(command, _FinalizeStoreSession):
+        if isinstance(command, _FinalizeStoreSession):
             command.batch.completed.set()
-
-    def _open_session(self, batch: KVTransferBatch) -> _StoreSession:
-        command = _OpenStoreSession(batch, _collect_object_sizes(batch))
-        self._executor.submit(command)
-        self._wait_for_completion(command.completed)
-        if command.session is None:
-            raise RuntimeError("Layerwise Store executor did not create a session")
-        return command.session
 
     def _execute_layer(self, job: _StoreLayerJob) -> None:
         assert self._operation is not None
-        assert job.session.selected is not None
+        if job.layer_id not in job.session.pending_layer_ids:
+            return
+        job.session.pending_layer_ids.remove(job.layer_id)
+        if job.session.selected is None:
+            raise RuntimeError("Layerwise Store layer executed without a prepared batch")
         layer_batch = job.session.selected.for_layer(job.layer_id)
-        completions = self._operation(layer_batch, job.source_ready_event, job.layer_id)
-        job.session.record_range(completions, job.layer_id)
-
-    def _wait_for_completion(self, completed: threading.Event) -> None:
-        while True:
-            self._raise_if_failed()
-            if completed.wait(timeout=_TIMELINE_POLL_INTERVAL_S):
-                self._raise_if_failed()
-                return
+        result = self._operation(layer_batch, job.source_ready_event, job.layer_id)
+        job.session.record_range(result, job.layer_id, layer_batch.selected_keys())
 
     def _raise_if_failed(self) -> None:
         if self._executor.failure is not None:
@@ -736,10 +702,7 @@ def _collect_object_sizes(batch: KVTransferBatch) -> dict[str, int]:
     return object_sizes
 
 
-def _load_session_failures(
-    batch: KVTransferBatch,
-    codes_by_key: dict[str, int],
-) -> tuple[LoadCompletion, ...]:
+def _load_session_failures(batch: KVTransferBatch, codes_by_key: dict[str, int]) -> tuple[LoadCompletion, ...]:
     evidence_by_request: list[list[TransferEvidence]] = [[] for _ in batch.request_ids]
     for group in batch.groups:
         selected = range(group.object_count) if group.selection is None else np.flatnonzero(group.selection).tolist()
@@ -755,18 +718,40 @@ def _load_session_failures(
     )
 
 
-def _request_keys(batch: KVTransferBatch, request_index: int) -> set[str]:
-    keys = set()
+def _keys_by_request(batch: KVTransferBatch) -> tuple[frozenset[str], ...]:
+    keys_by_request: list[set[str]] = [set() for _ in batch.request_ids]
     for group in batch.groups:
-        start = int(group.request_splits[request_index])
-        end = int(group.request_splits[request_index + 1])
-        for axis_index, axis in enumerate(group.key_axes):
-            axis_offset = axis_index * group.row_count
-            for row_index in range(start, end):
-                object_index = axis_offset + row_index
-                if group.selection is None or group.selection[object_index]:
-                    keys.add(axis[row_index])
-    return keys
+        for request_index, keys in enumerate(keys_by_request):
+            start = int(group.request_splits[request_index])
+            end = int(group.request_splits[request_index + 1])
+            for axis_index, axis in enumerate(group.key_axes):
+                axis_offset = axis_index * group.row_count
+                for row_index in range(start, end):
+                    object_index = axis_offset + row_index
+                    if group.selection is None or group.selection[object_index]:
+                        keys.add(axis[row_index])
+    return tuple(frozenset(keys) for keys in keys_by_request)
+
+
+def _sources_by_request(batch: KVTransferBatch, observed_layer_ids: set[int]) -> tuple[tuple[TransferSource, ...], ...]:
+    sources_by_request: list[list[TransferSource]] = [[] for _ in batch.request_ids]
+    for group in batch.groups:
+        physical_layer_ids = tuple(layer_id for layer_id in group.physical_layer_ids if layer_id in observed_layer_ids)
+        if not physical_layer_ids:
+            continue
+        for request_index, sources in enumerate(sources_by_request):
+            start = int(group.request_splits[request_index])
+            end = int(group.request_splits[request_index + 1])
+            for axis_index, axis in enumerate(group.key_axes):
+                axis_offset = axis_index * group.row_count
+                for row_index in range(start, end):
+                    object_index = axis_offset + row_index
+                    if group.selection is None or group.selection[object_index]:
+                        source = TransferSource(
+                            group, object_index, row_index, request_index, physical_layer_ids, axis[row_index]
+                        )
+                        sources.append(source)
+    return tuple(tuple(sources) for sources in sources_by_request)
 
 
 def _compile_layer_ids_by_name(topology: KVPoolTopology) -> dict[str, int]:
