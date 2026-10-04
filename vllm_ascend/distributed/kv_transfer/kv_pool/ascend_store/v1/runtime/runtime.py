@@ -28,7 +28,13 @@ from ..timeline.timeline import KVPoolTimeline
 from ..topology import KVPoolTopology
 from .backend import BackendIO, GVABackendIO, KeyRangeBackendIO
 from .backend.io import _batch_sources
-from .batch import KVGroupBatch, KVTransferBatch
+from .batch import (
+    KVGroupBatch,
+    KVTransferBatch,
+    LayerStoreGroup,
+    make_layer_store_group,
+    make_layer_store_plan,
+)
 from .evidence import LayerStoreResult, LoadCompletion, StoreCompletion, StoreEvidence, TransferEvidence
 from .resources import KVPoolResources
 from .result import LoadResult
@@ -71,6 +77,14 @@ class _StoreCandidates:
     """All pre-admission Store objects in canonical group/axis/row order."""
 
     groups: tuple[_StoreGroupCandidates, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _MaterializedStoreGroup:
+    """One domain Group plus its optional Layerwise execution operands."""
+
+    batch: KVGroupBatch
+    layer_store: LayerStoreGroup | None
 
 
 class KVPoolRuntime:
@@ -332,7 +346,12 @@ class KVPoolRuntime:
             return _failed_store_completions(selected, evidence, error)
         return self._backend_io.store_batch(selected)
 
-    def _build_admitted_store_batch(self, commands: tuple[StoreCommand, ...]) -> KVTransferBatch | None:
+    def _build_admitted_store_batch(
+        self,
+        commands: tuple[StoreCommand, ...],
+        *,
+        prepare_layerwise: bool = False,
+    ) -> KVTransferBatch | None:
         candidates = self._build_store_candidates(commands)
         candidate_keys = _store_candidate_keys(candidates)
         accepted, claim_once = self._admitted_store_keys(candidate_keys)
@@ -343,39 +362,55 @@ class KVPoolRuntime:
             if accepted is None
             else _select_store_candidate_objects(candidate_keys, accepted, claim_once=claim_once)
         )
-        return self._materialize_store_candidates(commands, candidates, selected_objects)
+        return self._materialize_store_candidates(
+            commands,
+            candidates,
+            selected_objects,
+            prepare_layerwise=prepare_layerwise,
+        )
 
     def _materialize_store_candidates(
         self,
         commands: tuple[StoreCommand, ...],
         candidates: _StoreCandidates,
         selected_objects: tuple[bool, ...] | None,
+        *,
+        prepare_layerwise: bool = False,
     ) -> KVTransferBatch:
         groups = []
+        layer_store_groups = []
         object_offset = 0
         for group_candidates in candidates.groups:
             next_offset = object_offset + group_candidates.object_count
             group_selection = None if selected_objects is None else selected_objects[object_offset:next_offset]
-            groups.append(self._materialize_store_group(group_candidates, group_selection))
+            materialized = self._materialize_store_group(
+                group_candidates,
+                group_selection,
+                prepare_layerwise=prepare_layerwise,
+            )
+            groups.append(materialized.batch)
+            if materialized.layer_store is not None:
+                layer_store_groups.append(materialized.layer_store)
             object_offset = next_offset
         if selected_objects is not None and object_offset != len(selected_objects):
             raise RuntimeError("Store candidate selection does not match the candidate object count")
 
-        selected_keys = (
-            None if selected_objects is None else tuple(key for group in groups for key in group.selected_keys())
-        )
+        selected_keys = tuple(key for group in groups for key in group.selected_keys())
         return KVTransferBatch(
             tuple(command.request_id for command in commands),
             tuple(groups),
             tuple(command.store_job_id for command in commands),
             selected_keys,
+            make_layer_store_plan(tuple(layer_store_groups)) if prepare_layerwise else None,
         )
 
     def _materialize_store_group(
         self,
         candidates: _StoreGroupCandidates,
         selected_objects: tuple[bool, ...] | None,
-    ) -> KVGroupBatch:
+        *,
+        prepare_layerwise: bool,
+    ) -> _MaterializedStoreGroup:
         row_count = candidates.row_count
         for counts, hashes, block_ids in candidates.rows_by_request:
             if len(hashes) != len(counts) or len(block_ids) != len(counts):
@@ -388,6 +423,7 @@ class KVPoolRuntime:
             )
 
         key_axes: KeyAxes
+        selected_object_indices = None
         if selected_objects is not None and len(candidates.key_axes) == 1:
             token_counts, block_ids, request_splits, selected_axis = _compact_single_axis_rows(
                 candidates.rows_by_request,
@@ -401,7 +437,7 @@ class KVPoolRuntime:
             keep_rows: tuple[bool, ...] | None = None
             key_axes = candidates.key_axes
             materialized_selection = None
-            selected_keys = None
+            selected_keys = tuple(key for axis in key_axes for key in axis)
         else:
             selections_by_axis = tuple(
                 selected_objects[axis_index * row_count : (axis_index + 1) * row_count]
@@ -415,6 +451,8 @@ class KVPoolRuntime:
                 include for axis in selections_by_axis for include, keep in zip(axis, keep_rows, strict=True) if keep
             )
             materialized_selection = None if all(compact_selection) else _readonly_bool(compact_selection)
+            if materialized_selection is not None:
+                selected_object_indices = np.flatnonzero(materialized_selection)
             selected_keys = tuple(
                 key
                 for axis, selection in zip(key_axes, _split_selection(compact_selection, len(key_axes)), strict=True)
@@ -440,7 +478,7 @@ class KVPoolRuntime:
                 row_offset += request_row_count
 
         topology = self._groups[candidates.group_id]
-        return KVGroupBatch(
+        group = KVGroupBatch(
             candidates.group_id,
             _readonly_uint64(block_ids),
             _readonly_uint64(token_counts),
@@ -451,6 +489,10 @@ class KVPoolRuntime:
             materialized_selection,
             selected_keys,
         )
+        layer_store = (
+            make_layer_store_group(group, selected_object_indices) if prepare_layerwise and selected_keys else None
+        )
+        return _MaterializedStoreGroup(group, layer_store)
 
     def _admitted_store_keys(self, selected_keys: tuple[str, ...]) -> tuple[set[str] | None, bool]:
         if not selected_keys:
@@ -467,26 +509,21 @@ class KVPoolRuntime:
 
     def _prepare_layerwise_store(self, commands: tuple[StoreCommand, ...]) -> _StorePreparationResult:
         try:
-            selected = self._build_admitted_store_batch(commands)
+            selected = self._build_admitted_store_batch(commands, prepare_layerwise=True)
         except Exception as error:
             return None, _store_command_completions(commands, error)
         if selected is None:
             return None, _store_command_completions(commands)
         return selected, ()
 
-    def _execute_layerwise_store(
-        self, batch: KVTransferBatch, source_ready_event: Any, layer_id: int | None
-    ) -> LayerStoreResult:
-        if layer_id is None:
-            raise ValueError("Layerwise Store requires a physical layer")
+    def _execute_layerwise_store(self, source_ready_event: Any, layer_id: int) -> LayerStoreResult:
         try:
             source_ready_event.synchronize()
         except Exception as error:
-            keys = batch.selected_keys()
-            return LayerStoreResult(keys, (None,) * len(keys), (True,) * len(keys), error)
+            return LayerStoreResult(None, True, error)
         layerwise_backend = self._backend_io
         assert isinstance(layerwise_backend, (GVABackendIO, KeyRangeBackendIO))
-        return layerwise_backend.store_layer(batch, layer_id)
+        return layerwise_backend.store_layer(layer_id)
 
     def _build_load_batch(self, commands: tuple[LoadCommand, ...]) -> KVTransferBatch:
         rules = self._bound_rules

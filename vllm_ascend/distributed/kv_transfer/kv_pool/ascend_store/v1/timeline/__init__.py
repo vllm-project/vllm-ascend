@@ -13,7 +13,7 @@ from ..runtime.evidence import LayerStoreResult, LoadCompletion, StoreCompletion
 
 LoadOperation = Callable[[KVTransferBatch, int | None], tuple[LoadCompletion, ...]]
 BulkStoreOperation = Callable[[tuple[StoreCommand, ...], Any], tuple[StoreCompletion, ...]]
-LayerwiseStoreOperation = Callable[[KVTransferBatch, Any, int | None], LayerStoreResult]
+LayerwiseStoreOperation = Callable[[Any, int], LayerStoreResult]
 LayerwiseStorePreparation = Callable[
     [tuple[StoreCommand, ...]], tuple[KVTransferBatch | None, tuple[StoreCompletion, ...]]
 ]

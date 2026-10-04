@@ -9,8 +9,8 @@ layer has reached the session's commit or revoke boundary.
 from __future__ import annotations
 
 import threading
-from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field
+from collections.abc import Callable, Iterable, Sequence
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Protocol
 
 import numpy as np
@@ -37,6 +37,8 @@ class LayerwiseBackendOperations(Protocol):
     def finish_load_sessions(self, keys: list[str]) -> None: ...
 
     def start_store_sessions(self, keys: list[str], object_sizes: list[int]) -> tuple[int, ...]: ...
+
+    def prepare_store_layers(self, batch: KVTransferBatch) -> dict[int, list[str]]: ...
 
     def commit_store_sessions(self, keys: list[str]) -> tuple[int, ...]: ...
 
@@ -377,6 +379,8 @@ class _StoreSession:
     pending_finalization_keys: tuple[str, ...] = ()
     selected: KVTransferBatch | None = None
     request_keys: tuple[frozenset[str], ...] = ()
+    sources_by_request: tuple[tuple[TransferSource, ...], ...] = ()
+    expected_keys_by_layer: dict[int, list[str]] = field(default_factory=dict)
     observed_layer_ids: set[int] = field(default_factory=set)
     pending_layer_ids: set[int] = field(default_factory=set)
     submitted_layer_ids: set[int] = field(default_factory=set)
@@ -396,7 +400,6 @@ class _StoreSession:
         self.terminal_completions = terminal_completions
         if batch is None:
             return
-        self.request_keys = _keys_by_request(batch)
         object_sizes_by_key = _collect_object_sizes(batch)
         selected_keys = batch.selected_keys()
         session_keys = tuple(dict.fromkeys(selected_keys))
@@ -407,19 +410,45 @@ class _StoreSession:
             if self.pending_finalization_keys == selected_keys
             else batch.select_keys(set(self.pending_finalization_keys), claim_once=True)
         )
-        self.pending_layer_ids = {
-            layer_id for group in self.selected.groups if group.selected_keys() for layer_id in group.physical_layer_ids
-        }
+        if self.selected is batch:
+            self.request_keys, self.sources_by_request = _request_state(batch)
+        else:
+            self.request_keys = _keys_by_request(batch)
+            self.sources_by_request = _sources_by_request(self.selected)
+        try:
+            self.expected_keys_by_layer = backend_io.prepare_store_layers(self.selected)
+        except Exception as error:
+            self.failed_keys.update(self.pending_finalization_keys)
+            self.errors_by_key.update((key, error) for key in self.pending_finalization_keys)
+            return
+        self.pending_layer_ids = set(self.expected_keys_by_layer)
 
-    def record_range(self, result: LayerStoreResult, layer_id: int, expected_keys: tuple[str, ...]) -> None:
+    def record_range(self, result: LayerStoreResult, layer_id: int, expected_keys: Sequence[str]) -> None:
         if self.batch is None:
             raise RuntimeError("Layerwise Store range completed without a prepared batch")
-        if not (len(result.keys) == len(result.result_codes) == len(result.source_release_confirmed)):
-            raise RuntimeError("Layerwise Store result axes are not aligned")
-        if result.keys != expected_keys:
-            raise RuntimeError(f"Layerwise Store layer {layer_id} returned results for unexpected keys")
         self.observed_layer_ids.add(layer_id)
-        for key, code, released in zip(result.keys, result.result_codes, result.source_release_confirmed, strict=True):
+        if isinstance(result.result_codes, tuple):
+            if not isinstance(result.source_release_confirmed, tuple) or not (
+                len(expected_keys) == len(result.result_codes) == len(result.source_release_confirmed)
+            ):
+                raise RuntimeError("Layerwise Store result axes are not aligned")
+            results = zip(expected_keys, result.result_codes, result.source_release_confirmed, strict=True)
+        else:
+            if not isinstance(result.source_release_confirmed, bool):
+                raise RuntimeError("Layerwise Store scalar result has non-scalar source evidence")
+            code = result.result_codes
+            released = result.source_release_confirmed
+            if code != 0:
+                self.failed_keys.update(expected_keys)
+                for key in expected_keys:
+                    self.range_failure_codes.setdefault(key, code)
+            if not released:
+                self.unsafe_keys.update(expected_keys)
+            if result.error is not None:
+                for key in expected_keys:
+                    self.errors_by_key.setdefault(key, result.error)
+            return
+        for key, code, released in results:
             if code != 0:
                 self.failed_keys.add(key)
                 self.range_failure_codes.setdefault(key, code)
@@ -512,7 +541,7 @@ class _StoreSession:
         selected = self.selected
         if selected is None:
             raise RuntimeError("Layerwise Store cannot build completions without selected sessions")
-        sources_by_request = _sources_by_request(selected, self.observed_layer_ids)
+        sources_by_request = _sources_for_observed_layers(self.sources_by_request, self.observed_layer_ids)
         completions = []
         for request_index, (request_id, store_job_id) in enumerate(zip(batch.request_ids, job_ids, strict=True)):
             evidence = tuple(
@@ -682,11 +711,9 @@ class LayerwiseStoreTimeline:
         if job.layer_id not in job.session.pending_layer_ids:
             return
         job.session.pending_layer_ids.remove(job.layer_id)
-        if job.session.selected is None:
-            raise RuntimeError("Layerwise Store layer executed without a prepared batch")
-        layer_batch = job.session.selected.for_layer(job.layer_id)
-        result = self._operation(layer_batch, job.source_ready_event, job.layer_id)
-        job.session.record_range(result, job.layer_id, layer_batch.selected_keys())
+        expected_keys = job.session.expected_keys_by_layer[job.layer_id]
+        result = self._operation(job.source_ready_event, job.layer_id)
+        job.session.record_range(result, job.layer_id, expected_keys)
 
     def _raise_if_failed(self) -> None:
         if self._executor.failure is not None:
@@ -738,12 +765,42 @@ def _keys_by_request(batch: KVTransferBatch) -> tuple[frozenset[str], ...]:
     return tuple(frozenset(keys) for keys in keys_by_request)
 
 
-def _sources_by_request(batch: KVTransferBatch, observed_layer_ids: set[int]) -> tuple[tuple[TransferSource, ...], ...]:
+def _request_state(
+    batch: KVTransferBatch,
+) -> tuple[tuple[frozenset[str], ...], tuple[tuple[TransferSource, ...], ...]]:
+    keys_by_request: list[set[str]] = [set() for _ in batch.request_ids]
     sources_by_request: list[list[TransferSource]] = [[] for _ in batch.request_ids]
     for group in batch.groups:
-        physical_layer_ids = tuple(layer_id for layer_id in group.physical_layer_ids if layer_id in observed_layer_ids)
-        if not physical_layer_ids:
-            continue
+        for request_index, (keys, sources) in enumerate(zip(keys_by_request, sources_by_request, strict=True)):
+            start = int(group.request_splits[request_index])
+            end = int(group.request_splits[request_index + 1])
+            for axis_index, axis in enumerate(group.key_axes):
+                axis_offset = axis_index * group.row_count
+                for row_index in range(start, end):
+                    object_index = axis_offset + row_index
+                    if group.selection is not None and not group.selection[object_index]:
+                        continue
+                    key = axis[row_index]
+                    keys.add(key)
+                    sources.append(
+                        TransferSource(
+                            group,
+                            object_index,
+                            row_index,
+                            request_index,
+                            group.physical_layer_ids,
+                            key,
+                        )
+                    )
+    return (
+        tuple(frozenset(keys) for keys in keys_by_request),
+        tuple(tuple(sources) for sources in sources_by_request),
+    )
+
+
+def _sources_by_request(batch: KVTransferBatch) -> tuple[tuple[TransferSource, ...], ...]:
+    sources_by_request: list[list[TransferSource]] = [[] for _ in batch.request_ids]
+    for group in batch.groups:
         for request_index, sources in enumerate(sources_by_request):
             start = int(group.request_splits[request_index])
             end = int(group.request_splits[request_index + 1])
@@ -753,10 +810,31 @@ def _sources_by_request(batch: KVTransferBatch, observed_layer_ids: set[int]) ->
                     object_index = axis_offset + row_index
                     if group.selection is None or group.selection[object_index]:
                         source = TransferSource(
-                            group, object_index, row_index, request_index, physical_layer_ids, axis[row_index]
+                            group, object_index, row_index, request_index, group.physical_layer_ids, axis[row_index]
                         )
                         sources.append(source)
     return tuple(tuple(sources) for sources in sources_by_request)
+
+
+def _sources_for_observed_layers(
+    sources_by_request: tuple[tuple[TransferSource, ...], ...], observed_layer_ids: set[int]
+) -> tuple[tuple[TransferSource, ...], ...]:
+    observed_by_request = []
+    for sources in sources_by_request:
+        observed_sources = []
+        for source in sources:
+            physical_layer_ids = tuple(
+                layer_id for layer_id in source.physical_layer_ids if layer_id in observed_layer_ids
+            )
+            if not physical_layer_ids:
+                continue
+            observed_sources.append(
+                source
+                if physical_layer_ids == source.physical_layer_ids
+                else replace(source, physical_layer_ids=physical_layer_ids)
+            )
+        observed_by_request.append(tuple(observed_sources))
+    return tuple(observed_by_request)
 
 
 def _compile_layer_ids_by_name(topology: KVPoolTopology) -> dict[str, int]:

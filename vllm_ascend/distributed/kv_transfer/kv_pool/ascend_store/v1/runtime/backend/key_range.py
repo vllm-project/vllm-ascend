@@ -7,7 +7,7 @@ from numbers import Integral
 from ..batch import KVTransferBatch
 from ..evidence import LayerStoreResult
 from ..evidence import TransferEvidence as RuntimeTransferEvidence
-from .arguments import materialize_rule_ranges, merge_rule_key_ranges
+from .arguments import materialize_rule_ranges, materialize_store_layer_ranges, merge_rule_key_ranges
 from .io import BackendIO, _batch_sources, _load_completions, _store_completions
 
 
@@ -21,6 +21,7 @@ class KeyRangeBackendIO(BackendIO):
         return self._require_result_codes("batch_get_start", keys, self._backend.batch_get_start(keys))
 
     def start_store_sessions(self, keys: list[str], object_sizes: list[int]) -> tuple[int, ...]:
+        self._clear_prepared_store_layers()
         return self._require_result_codes("batch_put_start", keys, self._backend.batch_put_start(keys, object_sizes))
 
     def load_batch(self, batch: KVTransferBatch, layer_id: int | None = None):
@@ -71,26 +72,21 @@ class KeyRangeBackendIO(BackendIO):
         )
         return _store_completions(batch, evidence, result_error, force_failed=result_codes is None)
 
-    def store_layer(self, batch: KVTransferBatch, layer_id: int) -> LayerStoreResult:
+    def store_layer(self, layer_id: int) -> LayerStoreResult:
         """Copy one layer and defer immutable source evidence to session finalization."""
 
         source_handed_off = False
-        keys = batch.selected_keys()
+        groups, keys = self._prepared_store_layer(layer_id)
         try:
-            ranges = materialize_rule_ranges(
-                self._bound_rules, batch, layer_id=layer_id, store=True, include_sources=False
-            )
-            arguments = merge_rule_key_ranges(ranges)
-            keys = tuple(arguments.keys)
+            addresses, sizes, offsets = materialize_store_layer_ranges(self._bound_rules, groups, layer_id)
             source_handed_off = True
-            native_result = self._backend.batch_copy_put(
-                arguments.keys, arguments.addresses, arguments.sizes, arguments.offsets
-            )
+            native_result = self._backend.batch_copy_put(keys, addresses, sizes, offsets)
         except Exception as error:
-            return LayerStoreResult(keys, (None,) * len(keys), (not source_handed_off,) * len(keys), error)
+            return LayerStoreResult(None, not source_handed_off, error)
         result_codes, result_error = self._interpret_store_results(len(keys), native_result)
-        codes = (None,) * len(keys) if result_codes is None else result_codes
-        return LayerStoreResult(keys, codes, tuple(code == 0 for code in codes), result_error)
+        if result_codes is None:
+            return LayerStoreResult(None, False, result_error)
+        return LayerStoreResult(result_codes, tuple(code == 0 for code in result_codes), result_error)
 
     def finish_load_sessions(self, keys: list[str]) -> None:
         native_result = self._backend.batch_get_end(keys)
@@ -100,7 +96,13 @@ class KeyRangeBackendIO(BackendIO):
             raise RuntimeError(f"batch_get_end failed with result code {native_result}")
 
     def commit_store_sessions(self, keys: list[str]) -> tuple[int, ...]:
-        return self._require_result_codes("batch_commit", keys, self._backend.batch_commit(keys))
+        try:
+            return self._require_result_codes("batch_commit", keys, self._backend.batch_commit(keys))
+        finally:
+            self._clear_prepared_store_layers()
 
     def revoke_store_sessions(self, keys: list[str]) -> tuple[int, ...]:
-        return self._require_result_codes("batch_revoke", keys, self._backend.batch_revoke(keys))
+        try:
+            return self._require_result_codes("batch_revoke", keys, self._backend.batch_revoke(keys))
+        finally:
+            self._clear_prepared_store_layers()

@@ -9,11 +9,10 @@ from .batch import TransferSource
 
 @dataclass(frozen=True, slots=True)
 class LayerStoreResult:
-    """One layer copy's key-aligned result without per-range evidence objects."""
+    """One layer copy result; scalar values apply to every prepared key."""
 
-    keys: tuple[str, ...]
-    result_codes: tuple[int | None, ...]
-    source_release_confirmed: tuple[bool, ...]
+    result_codes: tuple[int | None, ...] | int | None
+    source_release_confirmed: tuple[bool, ...] | bool
     error: Exception | None = None
 
 

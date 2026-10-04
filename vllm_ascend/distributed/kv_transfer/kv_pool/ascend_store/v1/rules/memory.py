@@ -33,6 +33,7 @@ MemoryDataPlane: TypeAlias = Literal["bulk", "key_range", "gva"]
 # needs offsets inside each remote object and its registered global size.
 BulkRangeBatch: TypeAlias = tuple[ByteArray, ByteArray, IndexArray]
 RangeBatch: TypeAlias = tuple[ByteArray, ByteArray, ByteArray, IndexArray, ByteArray]
+LayerRangeBatch: TypeAlias = tuple[ByteArray, ByteArray, ByteArray]
 
 
 # =============================================================================
@@ -46,7 +47,7 @@ RangeBatch: TypeAlias = tuple[ByteArray, ByteArray, ByteArray, IndexArray, ByteA
 class KVMemoryRule:
     """Dispatch each cache Group to its bound full and partial range rules."""
 
-    __slots__ = ("full", "partial", "store_full", "store_partial")
+    __slots__ = ("full", "partial", "store_full", "store_layer", "store_partial")
 
     def __init__(
         self,
@@ -75,6 +76,7 @@ class KVMemoryRule:
         load_full: dict[int, Callable] = {}
         load_partial: dict[int, Callable] = {}
         store_full: dict[int, Callable] = {}
+        store_layer: dict[int, Callable] = {}
         store_partial: dict[int, Callable] = {}
         for group_id in group_ids:
             if data_plane == "gva" and object_sizes is not None and group_id not in object_sizes:
@@ -102,7 +104,7 @@ class KVMemoryRule:
                 load_partial[group_id] = store_partial[group_id] = partial_extent
                 continue
 
-            full, partial_extent, store_full_rule, store_partial_rule = _bind_contiguous_group(
+            full, partial_extent, store_full_rule, store_partial_rule, store_layer_rule = _bind_contiguous_group(
                 group_id=group_id,
                 base_addresses=bases,
                 block_lengths=lengths,
@@ -121,11 +123,14 @@ class KVMemoryRule:
             load_partial[group_id] = partial_extent
             store_full[group_id] = store_full_rule
             store_partial[group_id] = store_partial_rule
+            if store_layer_rule is not None:
+                store_layer[group_id] = store_layer_rule
 
         self.full = partial(_dispatch, load_full)
         self.partial = partial(_dispatch, load_partial)
         self.store_full = partial(_dispatch, store_full)
         self.store_partial = partial(_dispatch, store_partial)
+        self.store_layer = partial(_dispatch, store_layer)
 
 
 def _bind_contiguous_group(
@@ -143,7 +148,7 @@ def _bind_contiguous_group(
     data_plane: MemoryDataPlane,
     object_size: int | None,
     object_offset: int | None,
-) -> tuple[Callable, Callable, Callable, Callable]:
+) -> tuple[Callable, Callable, Callable, Callable, Callable | None]:
     _validate_registration(group_id, base_addresses, block_lengths, block_strides, layer_entry_offsets, physical_layers)
     bases = _readonly(base_addresses)
     lengths = _readonly(block_lengths)
@@ -159,6 +164,7 @@ def _bind_contiguous_group(
 
     load: Callable
     store: Callable
+    store_layer: Callable | None = None
     if data_plane == "bulk":
         load = partial(
             _bulk_contiguous_ranges,
@@ -215,12 +221,23 @@ def _bind_contiguous_group(
             object_size=bound_object_size,
         )
         store = load
+        store_layer = partial(
+            _layer_object_ranges,
+            bases=bases,
+            lengths=lengths,
+            strides=strides,
+            offsets=offsets,
+            block_size=block_size,
+            align_state=align_state,
+            layer_bounds=layer_bounds,
+        )
 
     return (
         partial(load, partial_extent=False),
         partial(load, partial_extent=True),
         partial(store, partial_extent=False),
         partial(store, partial_extent=True),
+        store_layer,
     )
 
 
@@ -435,6 +452,33 @@ def _object_ranges(
         _splits(_range_counts(selected_rows, len(block_ids_array), range_count)),
         np.full(len(block_ids_array), object_size, dtype=np.uint64),
     )
+
+
+def _layer_object_ranges(
+    object_block_ids: ByteArray,
+    object_token_counts: ByteArray,
+    *,
+    layer_id: int,
+    bases: ByteArray,
+    lengths: ByteArray,
+    strides: ByteArray,
+    offsets: ByteArray,
+    block_size: int,
+    align_state: bool,
+    layer_bounds: Mapping[int, tuple[int, int]],
+) -> LayerRangeBatch:
+    """Evaluate one layer from object-aligned rows prepared by the Runtime."""
+
+    start, end = layer_bounds[layer_id]
+    layer_bases = bases[start:end]
+    layer_lengths = lengths[start:end]
+    layer_strides = strides[start:end]
+    addresses = layer_bases[None, :] + object_block_ids[:, None] * layer_strides[None, :]
+    if align_state:
+        sizes = np.broadcast_to(layer_lengths, addresses.shape)
+    else:
+        sizes = layer_lengths[None, :] * object_token_counts[:, None] // np.uint64(block_size)
+    return addresses, sizes, np.broadcast_to(offsets[start:end], addresses.shape)
 
 
 def _dynamic_rows(

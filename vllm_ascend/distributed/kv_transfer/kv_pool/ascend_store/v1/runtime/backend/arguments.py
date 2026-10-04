@@ -2,13 +2,21 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, replace
 
 import numpy as np
 
 from ...rules import KVPoolRules
-from ..batch import KVGroupBatch, KVTransferBatch, TransferSource
+from ..batch import (
+    KVGroupBatch,
+    KVTransferBatch,
+    LayerStoreGroup,
+    LayerStorePlan,
+    TransferSource,
+    make_layer_store_group,
+    make_layer_store_plan,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,6 +39,79 @@ class RuleGVA:
     local_addresses: np.ndarray
     sizes: np.ndarray
     sources: tuple[TransferSource, ...]
+
+
+ObjectBaseResolver = Callable[[KVGroupBatch, tuple[str, ...]], np.ndarray]
+
+
+def prepare_layer_store(
+    batch: KVTransferBatch,
+    resolve_object_bases: ObjectBaseResolver | None = None,
+) -> LayerStorePlan:
+    """Bind session-only GVA bases to the plan produced by materialization."""
+
+    plan = batch.layer_store_plan
+    if plan is None:
+        # Partial session-start failure creates a new selected batch. Rebuild only
+        # on that cold failure path; the successful path reuses the original plan.
+        plan = make_layer_store_plan(tuple(make_layer_store_group(group) for group in batch.groups))
+    if resolve_object_bases is None:
+        return plan
+
+    object_bases_by_group = {}
+    for group in plan.groups:
+        object_bases = resolve_object_bases(group.batch, group.keys)
+        if len(object_bases) != len(group.keys):
+            raise RuntimeError(f"Layerwise Store group {group.group_id} has misaligned GVA bases")
+        object_bases_by_group[group.group_id] = object_bases
+    return replace(plan, object_bases_by_group=object_bases_by_group)
+
+
+def materialize_store_layer_ranges(
+    rules: KVPoolRules,
+    groups: tuple[LayerStoreGroup, ...],
+    layer_id: int,
+) -> tuple[list[list[int]], list[list[int]], list[list[int]]]:
+    """Evaluate only layer-dependent KeyRange arrays from prepared objects."""
+
+    addresses: list[list[int]] = []
+    sizes: list[list[int]] = []
+    offsets: list[list[int]] = []
+    for group in groups:
+        local, group_sizes, group_offsets = rules.memory.store_layer(
+            group.group_id, group.block_ids, group.token_counts, layer_id=layer_id
+        )
+        addresses.extend(local.tolist())
+        sizes.extend(group_sizes.tolist())
+        offsets.extend(group_offsets.tolist())
+    return addresses, sizes, offsets
+
+
+def materialize_store_layer_gva(
+    rules: KVPoolRules,
+    plan: LayerStorePlan,
+    layer_id: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Evaluate only layer-dependent GVA arrays from prepared objects."""
+
+    object_bases_by_group = plan.object_bases_by_group
+    if object_bases_by_group is None:
+        raise RuntimeError("Layerwise Store GVA bases were not prepared")
+    remote_parts = []
+    local_parts = []
+    size_parts = []
+    for group in plan.groups_by_layer[layer_id]:
+        local, sizes, offsets = rules.memory.store_layer(
+            group.group_id, group.block_ids, group.token_counts, layer_id=layer_id
+        )
+        remote_parts.append((object_bases_by_group[group.group_id][:, None] + offsets).ravel())
+        local_parts.append(local.ravel())
+        size_parts.append(sizes.ravel())
+    return (
+        _concatenate_gva_parts(remote_parts),
+        _concatenate_gva_parts(local_parts),
+        _concatenate_gva_parts(size_parts),
+    )
 
 
 def materialize_rule_ranges(

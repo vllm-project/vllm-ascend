@@ -13,8 +13,8 @@ from ...backend import BackendSpec
 from ..batch import KVGroupBatch, KVTransferBatch
 from ..evidence import LayerStoreResult
 from ..evidence import TransferEvidence as RuntimeTransferEvidence
-from .arguments import materialize_rule_gva
-from .io import BackendIO, _batch_sources, _load_completions, _store_completions
+from .arguments import materialize_rule_gva, materialize_store_layer_gva
+from .io import BackendIO, _batch_sources, _is_integer_result, _load_completions, _store_completions
 
 if TYPE_CHECKING:
     from ....backend.memcache_backend import MemcacheBackend
@@ -88,6 +88,7 @@ class GVABackendIO(BackendIO):
 
     def start_store_sessions(self, keys: list[str], object_sizes: list[int]) -> tuple[int, ...]:
         self._rule_store_bases.clear()
+        self._clear_prepared_store_layers()
         if not keys:
             return ()
         if any(key in self._store_sessions for key in keys):
@@ -99,6 +100,9 @@ class GVABackendIO(BackendIO):
             if gva > 0:
                 self._store_sessions[key] = (gva, object_size)
         return tuple(result_codes)
+
+    def prepare_store_layers(self, batch: KVTransferBatch) -> dict[int, list[str]]:
+        return self._prepare_store_layers(batch, self._resolve_store_bases)
 
     def load_batch(self, batch: KVTransferBatch, layer_id: int | None = None):
         if layer_id is None:
@@ -114,7 +118,7 @@ class GVABackendIO(BackendIO):
             arguments.sizes.tolist(),
             self._load_direction,
         )
-        if isinstance(result_code, bool) or not isinstance(result_code, Integral):
+        if not _is_integer_result(result_code):
             raise RuntimeError("GVA batch_copy returned a non-integer result")
         evidence = tuple(RuntimeTransferEvidence(source, int(result_code)) for source in arguments.sources)
         return _load_completions(batch, evidence)
@@ -136,7 +140,7 @@ class GVABackendIO(BackendIO):
                 arguments.sizes.tolist(),
                 self._store_direction,
             )
-            if isinstance(result_code, bool) or not isinstance(result_code, Integral):
+            if not _is_integer_result(result_code):
                 raise RuntimeError("GVA batch_copy returned a non-integer result")
         except Exception as error:
             sources = _batch_sources(batch, layer_id)
@@ -146,35 +150,26 @@ class GVABackendIO(BackendIO):
         evidence = tuple(RuntimeTransferEvidence(source, int(result_code), succeeded) for source in arguments.sources)
         return _store_completions(batch, evidence)
 
-    def store_layer(self, batch: KVTransferBatch, layer_id: int) -> LayerStoreResult:
+    def store_layer(self, layer_id: int) -> LayerStoreResult:
         """Copy one layer and defer immutable source evidence to session finalization."""
 
         source_handed_off = False
-        keys = batch.selected_keys()
+        plan = self._prepared_store_plan()
         try:
-            arguments = materialize_rule_gva(
-                self._bound_rules,
-                batch,
-                self._store_sessions,
-                self._rule_store_bases,
-                layer_id=layer_id,
-                store=True,
-                include_sources=False,
-            )
-            keys = arguments.keys
+            remote_addresses, local_addresses, sizes = materialize_store_layer_gva(self._bound_rules, plan, layer_id)
             source_handed_off = True
             result_code = self._store.batch_copy(
-                arguments.remote_addresses.tolist(),
-                arguments.local_addresses.tolist(),
-                arguments.sizes.tolist(),
+                remote_addresses.tolist(),
+                local_addresses.tolist(),
+                sizes.tolist(),
                 self._store_direction,
             )
-            if isinstance(result_code, bool) or not isinstance(result_code, Integral):
+            if not _is_integer_result(result_code):
                 raise RuntimeError("GVA batch_copy returned a non-integer result")
         except Exception as error:
-            return LayerStoreResult(keys, (None,) * len(keys), (not source_handed_off,) * len(keys), error)
+            return LayerStoreResult(None, not source_handed_off, error)
         succeeded = result_code == 0
-        return LayerStoreResult(keys, (int(result_code),) * len(keys), (succeeded,) * len(keys))
+        return LayerStoreResult(int(result_code), succeeded)
 
     def commit_store_sessions(self, keys: list[str]) -> tuple[int, ...]:
         if not keys:
@@ -187,6 +182,7 @@ class GVABackendIO(BackendIO):
             if code == 0:
                 del self._store_sessions[key]
         self._rule_store_bases.clear()
+        self._clear_prepared_store_layers()
         return result_codes
 
     def revoke_store_sessions(self, keys: list[str]) -> tuple[int, ...]:
@@ -194,7 +190,26 @@ class GVABackendIO(BackendIO):
         # Do not delete another writer's object; leave uncertain write leases to Backend expiry.
         result = tuple(GVA_SESSION_FAILURE if self._store_sessions.pop(key, None) is not None else 0 for key in keys)
         self._rule_store_bases.clear()
+        self._clear_prepared_store_layers()
         return result
+
+    def _resolve_store_bases(self, group: KVGroupBatch, keys: tuple[str, ...]) -> np.ndarray:
+        object_bases = self._rule_store_bases.get(group)
+        if object_bases is not None:
+            return object_bases
+        bases = []
+        for key in keys:
+            session = self._store_sessions.get(key)
+            if session is None:
+                raise RuntimeError(f"GVA session for {key!r} is unavailable")
+            base, object_size = session
+            if object_size != group.object_size:
+                raise RuntimeError(f"GVA session for {key!r} has an unexpected object size")
+            bases.append(base)
+        object_bases = np.asarray(bases, dtype=np.uint64)
+        object_bases.flags.writeable = False
+        self._rule_store_bases[group] = object_bases
+        return object_bases
 
     def _query_regions(self, keys: list[str], flag: int = READABLE_GVA_QUERY) -> tuple[tuple[int, int] | None, ...]:
         if not keys:
@@ -206,12 +221,12 @@ class GVABackendIO(BackendIO):
         for info in infos:
             size = info.size()
             gvas = tuple(info.gva_list())
-            if isinstance(size, bool) or not isinstance(size, Integral):
+            if not _is_integer_result(size):
                 raise RuntimeError("batch_get_key_info returned a non-integer object size")
             if size <= 0 or not gvas:
                 regions.append(None)
                 continue
-            if len(gvas) != 1 or isinstance(gvas[0], bool) or not isinstance(gvas[0], Integral):
+            if len(gvas) != 1 or not _is_integer_result(gvas[0]):
                 raise RuntimeError("GVA sessions require exactly one integer address per object")
             regions.append((int(gvas[0]), int(size)) if gvas[0] > 0 else None)
         return tuple(regions)

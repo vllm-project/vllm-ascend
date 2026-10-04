@@ -56,7 +56,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.rules.reachabil
     ReachablePrefix,
     UnitaryReachability,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.runtime.batch import KVTransferBatch
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.runtime.batch import (
+    KVGroupBatch,
+    KVTransferBatch,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.topology import (
     KVPoolGroupTopology,
     KVPoolLayerTopology,
@@ -593,6 +596,51 @@ def test_layerwise_store_reuses_fully_started_batch_and_filters_failed_sessions(
     with pytest.raises(RuntimeError, match="previous Store failure"):
         failed.close()
     assert failed_resources.closed
+
+
+def test_layerwise_store_reuses_lowered_execution_state_across_layers(monkeypatch) -> None:
+    runtime, resources, backend = make_runtime(layerwise=True, physical_layers=(0, 1, 2))
+    command = RangeStoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4, 17)
+    begin_step(runtime, store=StoreCommandBatch((command,)))
+    runtime._timeline.store._executor._queue.join()
+
+    backend_io = runtime._backend_io
+    prepared_plan = backend_io._store_plan
+    assert prepared_plan is not None
+    session = runtime._timeline.store._session
+    assert session is not None and session.selected is not None
+    assert session.selected.layer_store_plan is prepared_plan
+    prepared_groups = [prepared_plan.groups_by_layer[layer_id] for layer_id in range(3)]
+    prepared_keys = [prepared_plan.keys_by_layer[layer_id] for layer_id in range(3)]
+    assert prepared_groups[0][0] is prepared_groups[1][0] is prepared_groups[2][0]
+    assert prepared_groups[0][0].block_ids is session.selected.groups[0].block_ids
+    assert prepared_groups[0][0].token_counts is session.selected.groups[0].token_counts
+    assert prepared_keys[0] is prepared_keys[1] is prepared_keys[2]
+
+    direct_calls = []
+    direct_rule = runtime._bound_rules.memory.store_layer
+
+    def record_direct_rule(group_id, block_ids, token_counts, *, layer_id):
+        direct_calls.append(layer_id)
+        return direct_rule(group_id, block_ids, token_counts, layer_id=layer_id)
+
+    def reject_rebuild(*_args, **_kwargs):
+        raise AssertionError("Layerwise Store rebuilt cross-layer execution state")
+
+    monkeypatch.setattr(runtime._bound_rules.memory, "store_layer", record_direct_rule)
+    monkeypatch.setattr(runtime._bound_rules.memory, "store_partial", reject_rebuild)
+    monkeypatch.setattr(KVTransferBatch, "for_layer", reject_rebuild)
+    monkeypatch.setattr(KVGroupBatch, "selected_keys", reject_rebuild)
+
+    for layer_id in range(3):
+        runtime.save_layer(f"layers.{layer_id}.group.0")
+    runtime.finish_step()
+
+    assert direct_calls == [0, 1, 2]
+    assert [call[0] for call in backend.calls].count("batch_copy_put") == 3
+    assert runtime.take_released_store_job_ids() == {17}
+    runtime.close()
+    assert resources.closed
 
 
 def test_layerwise_store_prepares_asynchronously_behind_layer_jobs(monkeypatch) -> None:
