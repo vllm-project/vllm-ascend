@@ -12,7 +12,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
 
 from ...backend import BackendSpec
 from ...rules import KVPoolRules
-from ..batch import KVTransferBatch
+from ..batch import KVTransferBatch, LayerStoreGroup, LayerStorePlan
 from ..evidence import (
     LoadCompletion as RuntimeLoadCompletion,
 )
@@ -25,7 +25,7 @@ from ..evidence import (
 from ..evidence import (
     TransferEvidence as RuntimeTransferEvidence,
 )
-from .arguments import materialize_rule_ranges
+from .arguments import ObjectBaseResolver, materialize_rule_ranges, prepare_layer_store
 
 if TYPE_CHECKING:
     from ....backend.memcache_backend import MemcacheBackend
@@ -40,6 +40,7 @@ class BackendIO:
         self._backend = backend
         self._backend_spec = backend_spec
         self._rules: KVPoolRules | None = None
+        self._store_plan: LayerStorePlan | None = None
 
     def bind_rules(self, rules: KVPoolRules) -> None:
         if self._rules is not None:
@@ -48,6 +49,11 @@ class BackendIO:
 
     def initialize_thread(self) -> None:
         self._backend.set_device()
+
+    def prepare_store_layers(self, batch: KVTransferBatch) -> dict[int, list[str]]:
+        """Lower one admitted Store session into cross-layer reusable state."""
+
+        return self._prepare_store_layers(batch)
 
     def exists(self, keys: list[str]) -> tuple[bool, ...]:
         if not keys:
@@ -145,7 +151,7 @@ class BackendIO:
                 f"{self._backend_spec.name} Store returned {len(result_codes)} results for {expected_count} keys"
             )
             return None, result_error
-        if any(isinstance(code, bool) or not isinstance(code, Integral) for code in result_codes):
+        if any(not _is_integer_result(code) for code in result_codes):
             return None, RuntimeError(f"{self._backend_spec.name} Store returned non-integer results")
         return tuple(int(code) for code in result_codes), None
 
@@ -157,7 +163,7 @@ class BackendIO:
             raise RuntimeError(f"{operation} returned non-integer results") from error
         if len(result_codes) != len(keys):
             raise RuntimeError(f"{operation} returned {len(result_codes)} results for {len(keys)} keys")
-        if any(isinstance(code, bool) or not isinstance(code, Integral) for code in result_codes):
+        if any(not _is_integer_result(code) for code in result_codes):
             raise RuntimeError(f"{operation} returned non-integer results")
         return tuple(int(code) for code in result_codes)
 
@@ -171,7 +177,7 @@ class BackendIO:
             return (None,) * expected_count
         if len(result_codes) != expected_count:
             return (None,) * expected_count
-        if any(isinstance(code, bool) or not isinstance(code, Integral) for code in result_codes):
+        if any(not _is_integer_result(code) for code in result_codes):
             return (None,) * expected_count
         return tuple(int(code) for code in result_codes)
 
@@ -180,6 +186,29 @@ class BackendIO:
         if self._rules is None:
             raise RuntimeError("Backend rules are unavailable before cache registration")
         return self._rules
+
+    def _prepare_store_layers(
+        self,
+        batch: KVTransferBatch,
+        resolve_object_bases: ObjectBaseResolver | None = None,
+    ) -> dict[int, list[str]]:
+        self._store_plan = prepare_layer_store(batch, resolve_object_bases)
+        return self._store_plan.keys_by_layer
+
+    def _prepared_store_layer(self, layer_id: int) -> tuple[tuple[LayerStoreGroup, ...], list[str]]:
+        plan = self._prepared_store_plan()
+        try:
+            return plan.groups_by_layer[layer_id], plan.keys_by_layer[layer_id]
+        except KeyError as error:
+            raise RuntimeError(f"Layerwise Store layer {layer_id} was not prepared") from error
+
+    def _prepared_store_plan(self) -> LayerStorePlan:
+        if self._store_plan is None:
+            raise RuntimeError("Layerwise Store plan was not prepared")
+        return self._store_plan
+
+    def _clear_prepared_store_layers(self) -> None:
+        self._store_plan = None
 
 
 def _batch_sources(batch: KVTransferBatch, layer_id: int | None) -> tuple:
@@ -192,6 +221,16 @@ def _batch_sources(batch: KVTransferBatch, layer_id: int | None) -> tuple:
                 range(group.object_count) if group.selection is None else np.flatnonzero(group.selection).tolist()
             )
         )
+    )
+
+
+def _is_integer_result(value: Any) -> bool:
+    """Accept Backend integer scalars without paying ABC lookup for plain ints."""
+
+    return (
+        type(value) is int
+        or isinstance(value, np.integer)
+        or (not isinstance(value, bool) and isinstance(value, Integral))
     )
 
 
