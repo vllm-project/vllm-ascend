@@ -25,6 +25,7 @@ CONNECTOR_MODULE = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.
 PROMPT_TOKEN_COUNT = 513
 OUTPUT_TOKEN_COUNT = 8
 POOL_MEMORY_BYTES = 1 << 30
+DUPLICATE_COLD_REQUEST_COUNT = 2
 
 pytestmark = pytest.mark.e2e_model(MODEL)
 
@@ -62,7 +63,10 @@ def test_inprocess_store_lookup_load(monkeypatch: pytest.MonkeyPatch, tmp_path: 
     # Trusted test callbacks need pickle support in the client and spawned EngineCore.
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     # Keep a nonaligned tail: Store publishes full chunks; Load still leaves work for prefill.
-    prompts = [TokensPrompt(prompt_token_ids=[0] * PROMPT_TOKEN_COUNT)]
+    cold_prompts = [
+        TokensPrompt(prompt_token_ids=[0] * PROMPT_TOKEN_COUNT) for _ in range(DUPLICATE_COLD_REQUEST_COUNT)
+    ]
+    warm_prompts = cold_prompts[:1]
     sampling_params = SamplingParams(temperature=0, max_tokens=OUTPUT_TOKEN_COUNT, ignore_eos=True)
 
     with SingleNodeMooncakeManager(pool_config, tmp_path.name) as pool:
@@ -72,7 +76,7 @@ def test_inprocess_store_lookup_load(monkeypatch: pytest.MonkeyPatch, tmp_path: 
             maybe_model_redirect(MODEL),
             max_model_len=1024,
             max_num_batched_tokens=1024,
-            max_num_seqs=1,
+            max_num_seqs=DUPLICATE_COLD_REQUEST_COUNT,
             tensor_parallel_size=1,
             pipeline_parallel_size=1,
             gpu_memory_utilization=0.5,
@@ -86,19 +90,24 @@ def test_inprocess_store_lookup_load(monkeypatch: pytest.MonkeyPatch, tmp_path: 
             (granularity,) = runner.model.collective_rpc(install_worker_io_probe)
             expected_loaded_tokens = PROMPT_TOKEN_COUNT // granularity * granularity
             assert 0 < expected_loaded_tokens < PROMPT_TOKEN_COUNT
-            cold_output = runner.model.generate(prompts, sampling_params, use_tqdm=False)[0]
-            assert cold_output.finished
-            assert cold_output.num_cached_tokens == 0
-            assert len(cold_output.outputs[0].token_ids) == OUTPUT_TOKEN_COUNT
+            # Identical cold requests exercise claim-once Store admission: both requests
+            # complete, while each missing Backend object is published only once.
+            cold_outputs = runner.model.generate(cold_prompts, sampling_params, use_tqdm=False)
+            assert len(cold_outputs) == DUPLICATE_COLD_REQUEST_COUNT
+            assert all(output.finished and output.num_cached_tokens == 0 for output in cold_outputs)
+            assert all(len(output.outputs[0].token_ids) == OUTPUT_TOKEN_COUNT for output in cold_outputs)
+            assert all(
+                output.outputs[0].token_ids == cold_outputs[0].outputs[0].token_ids for output in cold_outputs[1:]
+            )
 
             # Reset removes cache hashes, not bytes. Erase Worker KV as well, but preserve the Mooncake objects.
             assert runner.model.reset_prefix_cache(), "Local KV must be cleared before testing remote Load"
             (cold_evidence,) = runner.model.collective_rpc(clear_worker_local_kv)
             assert len(cold_evidence["stored_keys"]) == expected_loaded_tokens // granularity
-            warm_output = runner.model.generate(prompts, sampling_params, use_tqdm=False)[0]
+            warm_output = runner.model.generate(warm_prompts, sampling_params, use_tqdm=False)[0]
             assert warm_output.finished
             assert warm_output.num_cached_tokens == expected_loaded_tokens
-            assert warm_output.outputs[0].token_ids == cold_output.outputs[0].token_ids
+            assert warm_output.outputs[0].token_ids == cold_outputs[0].outputs[0].token_ids
             (warm_evidence,) = runner.model.collective_rpc(collect_worker_io_probe)
             assert warm_evidence["get_calls"] == 1, "The warm request must execute a real Backend GET"
             assert sorted(warm_evidence["loaded_keys"]) == sorted(cold_evidence["stored_keys"])

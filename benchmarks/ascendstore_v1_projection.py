@@ -131,9 +131,7 @@ class BenchmarkCase:
             return _consume(result)
 
         def new() -> int:
-            result = tuple(
-                self.project(group, access, layer, object_bases) for layer in range(self.scenario.layers)
-            )
+            result = tuple(self.project(group, access, layer, object_bases) for layer in range(self.scenario.layers))
             return _consume(result)
 
         return legacy, new
