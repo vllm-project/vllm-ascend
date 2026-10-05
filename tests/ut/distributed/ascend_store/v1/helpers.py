@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from typing import Any
-from unittest.mock import patch
 
 import torch
 from vllm.v1.kv_cache_interface import FullAttentionSpec
@@ -12,23 +10,34 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import KeyMetadata
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend import (
     BackendSpec,
+    BufferRegistration,
     LayerwiseAccessKind,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.rules import (
-    KVPoolRuleSpec,
-    compile_kv_pool_rules,
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.projection import (
+    BulkProjectionBinder,
+    GVALayerwiseProjectionBinder,
+    KeyRangeLayerwiseProjectionBinder,
+    LayerwiseProjectionBinder,
+    compile_bulk_projection_binder,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.runtime.runtime import KVPoolRuntime
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.timeline.schedule import (
-    KVPoolSchedule,
-    LoadScheduleKind,
-    StoreScheduleKind,
-)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.route import KVPoolRouteSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.topology import (
     KVPoolGroupTopology,
     KVPoolLayerTopology,
     KVPoolTopology,
     TPPartitionSpec,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker import (
+    AsynchronousBulkWorker,
+    GVALayerwiseWorker,
+    KeyRangeLayerwiseWorker,
+    SynchronousBulkWorker,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.state import (
+    select_store_candidate_objects as _select_store_candidate_objects,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.state import (
+    store_candidate_keys as _store_candidate_keys,
 )
 
 
@@ -37,6 +46,7 @@ class FakeBackend:
 
     def __init__(self) -> None:
         self.presence: list[int] | None = None
+        self.presence_results: list[list[int]] = []
         self.get_result: object = None
         self.put_result: object = None
         self.session_start_result: list[int] | None = None
@@ -51,6 +61,8 @@ class FakeBackend:
 
     def exists(self, keys):
         self.calls.append(("exists", tuple(keys)))
+        if self.presence_results:
+            return self.presence_results.pop(0)
         return self.presence if self.presence is not None else [1] * len(keys)
 
     def get(self, keys, addresses, sizes):
@@ -63,18 +75,40 @@ class FakeBackend:
             raise self.put_result
         return self.put_result if self.put_result is not None else [0] * len(keys)
 
+    def load(self, keys, addresses, sizes):
+        return self.get(keys, addresses, sizes)
+
+    def store(self, keys, addresses, sizes):
+        return self.put(keys, addresses, sizes)
+
     def set_device(self) -> None:
         self.calls.append(("set_device",))
 
-    def register_buffer(self, addresses, sizes) -> None:
+    def register_buffer(self, addresses, sizes) -> BufferRegistration:
         self.calls.append(("register_buffer", tuple(addresses), tuple(sizes)))
+        registration = BufferRegistration(self._unregister_buffer)
+        for address, size in zip(addresses, sizes, strict=True):
+            registration.acquire(address, size)
+        return registration
+
+    def _unregister_buffer(self, address: int, size: int) -> None:
+        self.calls.append(("unregister_buffer", address, size))
 
     def validate_layerwise_support(self) -> None:
         self.calls.append(("validate_layerwise_support",))
 
+    def validate_key_range_support(self) -> None:
+        self.validate_layerwise_support()
+
+    def validate_gva_support(self) -> None:
+        self.validate_layerwise_support()
+
     def batch_get_start(self, keys):
         self.calls.append(("batch_get_start", tuple(keys)))
         return self.session_start_result if self.session_start_result is not None else [0] * len(keys)
+
+    def start_key_range_load(self, keys):
+        return tuple(self.batch_get_start(keys))
 
     def batch_copy_get(self, keys, addresses, sizes, offsets):
         self.calls.append(
@@ -90,13 +124,24 @@ class FakeBackend:
             raise self.session_copy_result
         return self.session_copy_result if self.session_copy_result is not None else [0] * len(keys)
 
+    def copy_key_range_load(self, keys, addresses, sizes, offsets):
+        return tuple(self.batch_copy_get(keys, addresses, sizes, offsets))
+
     def batch_get_end(self, keys):
         self.calls.append(("batch_get_end", tuple(keys)))
         return self.session_end_result
 
+    def finish_key_range_load(self, keys):
+        result = self.batch_get_end(keys)
+        if result != 0:
+            raise RuntimeError(f"batch_get_end failed with result code {result}")
+
     def batch_put_start(self, keys, object_sizes):
         self.calls.append(("batch_put_start", tuple(keys), tuple(object_sizes)))
         return self.store_session_start_result if self.store_session_start_result is not None else [0] * len(keys)
+
+    def start_key_range_store(self, keys, object_sizes):
+        return tuple(self.batch_put_start(keys, object_sizes))
 
     def batch_copy_put(self, keys, addresses, sizes, offsets):
         self.calls.append(
@@ -112,15 +157,25 @@ class FakeBackend:
             raise self.store_session_copy_result
         return self.store_session_copy_result if self.store_session_copy_result is not None else [0] * len(keys)
 
+    def copy_key_range_store(self, keys, addresses, sizes, offsets):
+        return tuple(self.batch_copy_put(keys, addresses, sizes, offsets))
+
     def batch_commit(self, keys):
         self.calls.append(("batch_commit", tuple(keys)))
         return self.store_session_commit_result if self.store_session_commit_result is not None else [0] * len(keys)
+
+    def commit_key_range_store(self, keys):
+        return tuple(self.batch_commit(keys))
 
     def batch_revoke(self, keys):
         self.calls.append(("batch_revoke", tuple(keys)))
         return self.store_session_revoke_result if self.store_session_revoke_result is not None else [0] * len(keys)
 
+    def revoke_key_range_store(self, keys):
+        return tuple(self.batch_revoke(keys))
+
     def close(self) -> None:
+        self.calls.append(("backend_close",))
         self.closed = True
 
 
@@ -133,7 +188,6 @@ def make_backend_spec(
     return BackendSpec(
         name,
         FakeBackend,
-        SimpleNamespace(),
         layerwise_access,
         requires_exists_before_put,
     )
@@ -145,6 +199,17 @@ def make_topology(
     physical_layers: tuple[int, ...] = (0, 1),
     tp_mismatch: bool = False,
     tp_rank: int = 0,
+    tp_size: int = 1,
+    pp_size: int = 1,
+    pp_rank: int = 0,
+    pcp_rank: int = 0,
+    pcp_size: int = 1,
+    dcp_rank: int = 0,
+    dcp_size: int = 1,
+    put_step: int = 1,
+    head_or_tp_rank: int = 0,
+    key_rank_count: int | None = None,
+    key_slices_per_rank: int | None = None,
     consumer_pipeline_partitions: tuple[int, ...] | None = None,
 ) -> KVPoolTopology:
     groups = tuple(
@@ -159,36 +224,28 @@ def make_topology(
             tuple(
                 KVPoolLayerTopology(layer_id, (f"layers.{layer_id}.group.{group_id}",)) for layer_id in physical_layers
             ),
-            KeyMetadata("model", 0, 0, 0, group_id),
+            KeyMetadata("model", head_or_tp_rank, dcp_rank, pp_rank, group_id),
         )
         for group_id in range(max(group_ids) + 1)
     )
     return KVPoolTopology(
         tp_rank=tp_rank,
-        tp_size=1,
-        pp_size=1,
-        pcp_rank=0,
-        pcp_size=1,
-        dcp_size=1,
-        put_step=1,
+        tp_size=tp_size,
+        pp_size=pp_size,
+        pcp_rank=pcp_rank,
+        pcp_size=pcp_size,
+        dcp_size=dcp_size,
+        put_step=put_step,
         cache_transfer_granularity=4,
         hash_block_size=4,
         tp_partition=TPPartitionSpec(
             tp_mismatch,
-            2 if tp_mismatch else 1,
-            2 if tp_mismatch else 1,
+            key_rank_count if key_rank_count is not None else (2 if tp_mismatch else 1),
+            key_slices_per_rank if key_slices_per_rank is not None else (2 if tp_mismatch else 1),
         ),
         groups=groups,
         transfer_group_ids=group_ids,
         consumer_pipeline_partitions=consumer_pipeline_partitions,
-    )
-
-
-def make_schedule(*, layerwise: bool = False, store: bool = True) -> KVPoolSchedule:
-    return KVPoolSchedule(
-        LoadScheduleKind.LAYERWISE if layerwise else LoadScheduleKind.SYNC,
-        (StoreScheduleKind.LAYERWISE if layerwise else StoreScheduleKind.ASYNC) if store else None,
-        2,
     )
 
 
@@ -236,21 +293,23 @@ class FakeResources:
             layer_entry_offsets[group_id] = list(range(len(group.layers) + 1))
             object_sizes[group_id] = 32 * len(group.layers)
             object_offsets[group_id] = 0
-        return {
+        registration = {
             "base_addresses": base_addresses,
             "block_lengths": block_lengths,
             "block_strides": block_strides,
             "layer_entry_offsets": layer_entry_offsets,
-            "object_sizes": object_sizes,
-            "object_offsets": object_offsets,
         }
+        if self.backend_spec.layerwise_access is LayerwiseAccessKind.GVA:
+            registration["object_sizes"] = object_sizes
+            registration["object_offsets"] = object_offsets
+        return registration
 
     def close(self) -> None:
         self.closed = True
         self.kv_caches = None
 
 
-def make_runtime(
+def make_worker(
     backend: FakeBackend | None = None,
     *,
     topology: KVPoolTopology | None = None,
@@ -258,39 +317,85 @@ def make_runtime(
     async_load: bool = False,
     store: bool = True,
     physical_layers: tuple[int, ...] = (0, 1),
+    backend_name: str = "fake",
     requires_exists_before_put: bool = False,
     source_ready_event_factory=None,
     start_gate_factory=None,
+    bind: bool = True,
 ):
     backend = backend or FakeBackend()
     topology = topology or make_topology(physical_layers=physical_layers)
-    schedule = KVPoolSchedule(
-        LoadScheduleKind.LAYERWISE if layerwise else (LoadScheduleKind.ASYNC if async_load else LoadScheduleKind.SYNC),
-        (StoreScheduleKind.LAYERWISE if layerwise else StoreScheduleKind.ASYNC) if store else None,
-        2,
-    )
     backend_spec = make_backend_spec(
+        name=backend_name,
         layerwise_access=LayerwiseAccessKind.KEY_RANGE if layerwise else None,
         requires_exists_before_put=requires_exists_before_put,
     )
     resources = FakeResources(backend, backend_spec, topology)
-    rule_spec = KVPoolRuleSpec(topology, "fake", 64, use_layerwise=layerwise)
+    route_spec = KVPoolRouteSpec(topology, "fake", 64, use_layerwise=layerwise)
     full_key = lambda group, value, head, stage: f"g{group}:p{stage}:h{head}:{value}"
-    with patch(
-        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.rules.compiler.resolve_backend_spec",
-        return_value=backend_spec,
-    ):
-        rule_binder = compile_kv_pool_rules(
-            rule_spec,
-            layerwise_full_key=full_key if layerwise else None,
+    projection_binder: LayerwiseProjectionBinder | BulkProjectionBinder
+    if not layerwise:
+        projection_binder = compile_bulk_projection_binder(topology, route_spec.max_model_len)
+    else:
+        assert backend_spec.layerwise_access is not None
+        binder_type = (
+            GVALayerwiseProjectionBinder
+            if backend_spec.layerwise_access is LayerwiseAccessKind.GVA
+            else KeyRangeLayerwiseProjectionBinder
         )
-    runtime = KVPoolRuntime(
-        topology,
-        schedule,
-        rule_binder,
-        resources,
-        **({"start_gate_factory": start_gate_factory} if start_gate_factory is not None else {}),
-        source_ready_event_factory=source_ready_event_factory or FakeEvent,
+        projection_binder = binder_type(topology, route_spec.max_model_len, full_key)
+    if isinstance(projection_binder, GVALayerwiseProjectionBinder):
+        worker = GVALayerwiseWorker(
+            topology,
+            projection_binder,
+            resources,  # type: ignore[arg-type]
+            store_enabled=store,
+            **({"start_gate_factory": start_gate_factory} if start_gate_factory is not None else {}),
+            source_ready_event_factory=source_ready_event_factory or FakeEvent,
+        )
+    elif isinstance(projection_binder, KeyRangeLayerwiseProjectionBinder):
+        worker = KeyRangeLayerwiseWorker(
+            topology,
+            projection_binder,
+            resources,  # type: ignore[arg-type]
+            store_enabled=store,
+            **({"start_gate_factory": start_gate_factory} if start_gate_factory is not None else {}),
+            source_ready_event_factory=source_ready_event_factory or FakeEvent,
+        )
+    else:
+        worker_type = AsynchronousBulkWorker if async_load else SynchronousBulkWorker
+        worker = worker_type(
+            topology,
+            projection_binder,
+            resources,  # type: ignore[arg-type]
+            store_enabled=store,
+            source_ready_event_factory=source_ready_event_factory or FakeEvent,
+        )
+    if bind:
+        worker.bind_kv_caches({"cache": object()})
+    return worker, resources, backend
+
+
+def build_admitted_store_batch(worker, commands, *, layerwise: bool = False):
+    """Keep pre-Slice-4 lowering tests out of Worker's public mainline."""
+
+    candidates = worker._build_store_candidates(commands)
+    candidate_keys = _store_candidate_keys(candidates)
+    accepted, claim_once = worker._admitted_store_keys(candidate_keys)
+    if accepted is not None and not accepted:
+        return None
+    selected_objects = (
+        None if accepted is None else _select_store_candidate_objects(candidate_keys, accepted, claim_once=claim_once)
     )
-    runtime.bind_kv_caches({"cache": object()})
-    return runtime, resources, backend
+    return worker._materialize_store_candidates(
+        commands,
+        candidates,
+        selected_objects,
+        prepare_layerwise=layerwise,
+    )
+
+
+def worker_backend_io(worker):
+    """Return the concrete Backend boundary for lower-level migration guards."""
+
+    return worker._backend_io

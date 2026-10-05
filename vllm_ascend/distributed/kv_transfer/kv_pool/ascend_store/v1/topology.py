@@ -1,4 +1,4 @@
-"""Describe the resolved static topology shared by KV rules and Runtime."""
+"""Describe the resolved static topology shared by KV projection and Worker."""
 
 from __future__ import annotations
 
@@ -85,6 +85,16 @@ def kv_cache_spec_uses_align_state(kv_cache_spec: KVCacheSpec) -> bool:
     else:
         specs = (kv_cache_spec,)
     return any(isinstance(spec, MambaSpec) and spec.mamba_cache_mode == "align" for spec in specs)
+
+
+def kv_cache_spec_contains_mamba(kv_cache_spec: KVCacheSpec) -> bool:
+    """Whether a cache group contains any recurrent Mamba state."""
+
+    if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+        specs = kv_cache_spec.kv_cache_specs.values()
+    else:
+        specs = (kv_cache_spec,)
+    return any(isinstance(spec, MambaSpec) for spec in specs)
 
 
 def resolve_group_layers(layer_names: list[str], base_layer_count: int) -> tuple[KVPoolLayerTopology, ...]:

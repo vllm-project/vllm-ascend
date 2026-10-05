@@ -28,7 +28,7 @@ class LookupClient:
 
 
 class LookupServer:
-    """Forward decoded Lookup requests to the KV Pool Runtime owned by this Worker."""
+    """Forward decoded Lookup requests to the KV Pool Worker owned by this Worker."""
 
     def __init__(self, lookup: Callable[[LookupRequest], LookupResult], address: str) -> None:
         self._codec = LookupCodec()

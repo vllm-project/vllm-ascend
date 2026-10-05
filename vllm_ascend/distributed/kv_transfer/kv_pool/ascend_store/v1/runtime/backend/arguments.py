@@ -1,27 +1,40 @@
-"""Evaluate bound rules into the argument shape required by each Backend."""
+"""Evaluate bound projection into the argument shape required by each Backend."""
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 
 import numpy as np
 
-from ...rules import KVPoolRules
+from ...projection import GVALayerwiseProjection, KeyRangeLayerwiseProjection
+from ...projection.layerwise.gva import gva_layer_ranges
+from ...projection.layerwise.key_range import key_range_layer_ranges
 from ..batch import (
     KVGroupBatch,
     KVTransferBatch,
-    LayerStoreGroup,
-    LayerStorePlan,
+    LayerTransferGroup,
+    LayerTransferPlan,
     TransferSource,
-    make_layer_store_group,
-    make_layer_store_plan,
+    make_layer_load_plan,
+    make_layer_transfer_group,
+    make_layer_transfer_plan,
 )
 
 
 @dataclass(frozen=True, slots=True)
-class RuleRanges:
-    """Key-aligned local ranges evaluated for one Runtime submission."""
+class BulkBackendArguments:
+    """Key-aligned local ranges prepared by the concrete Bulk route."""
+
+    keys: list[str]
+    addresses: list[list[int]]
+    sizes: list[list[int]]
+    sources: tuple[TransferSource, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class KeyRangeArguments:
+    """Per-key local ranges and remote object offsets for one physical layer."""
 
     keys: list[str]
     addresses: list[list[int]]
@@ -31,7 +44,7 @@ class RuleRanges:
 
 
 @dataclass(frozen=True, slots=True)
-class RuleGVA:
+class GVAArguments:
     """Flattened global and local ranges evaluated for one GVA copy."""
 
     keys: tuple[str, ...]
@@ -47,14 +60,33 @@ ObjectBaseResolver = Callable[[KVGroupBatch, tuple[str, ...]], np.ndarray]
 def prepare_layer_store(
     batch: KVTransferBatch,
     resolve_object_bases: ObjectBaseResolver | None = None,
-) -> LayerStorePlan:
+) -> LayerTransferPlan:
     """Bind session-only GVA bases to the plan produced by materialization."""
 
     plan = batch.layer_store_plan
     if plan is None:
         # Partial session-start failure creates a new selected batch. Rebuild only
         # on that cold failure path; the successful path reuses the original plan.
-        plan = make_layer_store_plan(tuple(make_layer_store_group(group) for group in batch.groups))
+        plan = make_layer_transfer_plan(
+            batch,
+            tuple(make_layer_transfer_group(group) for group in batch.groups),
+        )
+    return _bind_object_bases(plan, resolve_object_bases)
+
+
+def prepare_layer_load(
+    batch: KVTransferBatch,
+    resolve_object_bases: ObjectBaseResolver | None = None,
+) -> LayerTransferPlan:
+    """Lower selected Load rows once after session admission."""
+
+    return _bind_object_bases(make_layer_load_plan(batch), resolve_object_bases)
+
+
+def _bind_object_bases(
+    plan: LayerTransferPlan,
+    resolve_object_bases: ObjectBaseResolver | None,
+) -> LayerTransferPlan:
     if resolve_object_bases is None:
         return plan
 
@@ -62,14 +94,14 @@ def prepare_layer_store(
     for group in plan.groups:
         object_bases = resolve_object_bases(group.batch, group.keys)
         if len(object_bases) != len(group.keys):
-            raise RuntimeError(f"Layerwise Store group {group.group_id} has misaligned GVA bases")
+            raise RuntimeError(f"Layerwise group {group.group_id} has misaligned GVA bases")
         object_bases_by_group[group.group_id] = object_bases
     return replace(plan, object_bases_by_group=object_bases_by_group)
 
 
 def materialize_store_layer_ranges(
-    rules: KVPoolRules,
-    groups: tuple[LayerStoreGroup, ...],
+    projection: KeyRangeLayerwiseProjection,
+    groups: tuple[LayerTransferGroup, ...],
     layer_id: int,
 ) -> tuple[list[list[int]], list[list[int]], list[list[int]]]:
     """Evaluate only layer-dependent KeyRange arrays from prepared objects."""
@@ -78,8 +110,11 @@ def materialize_store_layer_ranges(
     sizes: list[list[int]] = []
     offsets: list[list[int]] = []
     for group in groups:
-        local, group_sizes, group_offsets = rules.memory.store_layer(
-            group.group_id, group.block_ids, group.token_counts, layer_id=layer_id
+        local, group_sizes, group_offsets = key_range_layer_ranges(
+            projection.groups[group.group_id],
+            group.block_ids,
+            group.token_counts,
+            layer_id=layer_id,
         )
         addresses.extend(local.tolist())
         sizes.extend(group_sizes.tolist())
@@ -88,8 +123,8 @@ def materialize_store_layer_ranges(
 
 
 def materialize_store_layer_gva(
-    rules: KVPoolRules,
-    plan: LayerStorePlan,
+    projection: GVALayerwiseProjection,
+    plan: LayerTransferPlan,
     layer_id: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Evaluate only layer-dependent GVA arrays from prepared objects."""
@@ -101,12 +136,16 @@ def materialize_store_layer_gva(
     local_parts = []
     size_parts = []
     for group in plan.groups_by_layer[layer_id]:
-        local, sizes, offsets = rules.memory.store_layer(
-            group.group_id, group.block_ids, group.token_counts, layer_id=layer_id
+        remote, local, sizes = gva_layer_ranges(
+            projection.groups[group.group_id],
+            group.block_ids,
+            group.token_counts,
+            object_bases_by_group[group.group_id],
+            layer_id=layer_id,
         )
-        remote_parts.append((object_bases_by_group[group.group_id][:, None] + offsets).ravel())
-        local_parts.append(local.ravel())
-        size_parts.append(sizes.ravel())
+        remote_parts.append(remote)
+        local_parts.append(local)
+        size_parts.append(sizes)
     return (
         _concatenate_gva_parts(remote_parts),
         _concatenate_gva_parts(local_parts),
@@ -114,79 +153,62 @@ def materialize_store_layer_gva(
     )
 
 
-def materialize_rule_ranges(
-    rules: KVPoolRules, batch: KVTransferBatch, *, layer_id: int | None, store: bool, include_sources: bool = True
-) -> RuleRanges:
-    """Evaluate only the current request rows and execution fence."""
+def materialize_load_layer_ranges(
+    projection: KeyRangeLayerwiseProjection,
+    plan: LayerTransferPlan,
+    layer_id: int,
+) -> KeyRangeArguments:
+    """Evaluate one KeyRange Load layer from cross-layer reusable rows."""
 
     keys: list[str] = []
     addresses: list[list[int]] = []
     sizes: list[list[int]] = []
     offsets: list[list[int]] = []
     sources: list[TransferSource] = []
-    memory_rule = rules.memory.store_partial if store else rules.memory.partial
-    for group in batch.groups:
-        ranges = memory_rule(
-            group.group_id, group.block_ids, group.token_counts, layer_id=layer_id, selected_objects=group.selection
+    for group in plan.groups_by_layer[layer_id]:
+        group_addresses, group_sizes, group_offsets = key_range_layer_ranges(
+            projection.groups[group.group_id],
+            group.block_ids,
+            group.token_counts,
+            layer_id=layer_id,
         )
-        materialized = rules.format_ranges(group.key_axes, ranges, object_bases=None, selected_objects=group.selection)
-        group_keys, group_addresses, group_sizes, *group_offsets = materialized
-        keys.extend(group_keys)
-        addresses.extend(group_addresses)
-        sizes.extend(group_sizes)
-        offsets.extend(group_offsets[0] if group_offsets else ([] for _ in group_keys))
-        if include_sources:
-            sources.extend(_selected_sources(group, layer_id))
-    return RuleRanges(keys, addresses, sizes, offsets, tuple(sources))
+        keys.extend(group.keys)
+        addresses.extend(group_addresses.tolist())
+        sizes.extend(group_sizes.tolist())
+        offsets.extend(group_offsets.tolist())
+        sources.extend(_layer_sources(group, layer_id))
+    return KeyRangeArguments(keys, addresses, sizes, offsets, tuple(sources))
 
 
-def materialize_rule_gva(
-    rules: KVPoolRules,
-    batch: KVTransferBatch,
-    sessions: Mapping[str, tuple[int, int] | None],
-    resolved_bases: dict[KVGroupBatch, np.ndarray],
-    *,
+def materialize_load_layer_gva(
+    projection: GVALayerwiseProjection,
+    plan: LayerTransferPlan,
     layer_id: int,
-    store: bool,
-    include_sources: bool = True,
-) -> RuleGVA:
-    """Combine dynamic GVA bases with static offsets at the Backend boundary."""
+) -> GVAArguments:
+    """Evaluate one GVA Load layer from leased bases resolved once per session."""
 
+    object_bases_by_group = plan.object_bases_by_group
+    if object_bases_by_group is None:
+        raise RuntimeError("Layerwise Load GVA bases were not prepared")
     remote_parts = []
     local_parts = []
     size_parts = []
     keys: list[str] = []
     sources: list[TransferSource] = []
-    memory_rule = rules.memory.store_partial if store else rules.memory.partial
-    for group in batch.groups:
-        ranges = memory_rule(
-            group.group_id, group.block_ids, group.token_counts, layer_id=layer_id, selected_objects=group.selection
-        )
-        selected_keys = group.selected_keys()
-        selected_sources = _selected_sources(group, layer_id) if include_sources else ()
-        object_bases = resolved_bases.get(group)
-        if object_bases is None:
-            bases = []
-            for key in selected_keys:
-                session = sessions.get(key)
-                if session is None:
-                    raise RuntimeError(f"GVA session for {key!r} is unavailable")
-                base, object_size = session
-                if object_size != group.object_size:
-                    raise RuntimeError(f"GVA session for {key!r} has an unexpected object size")
-                bases.append(base)
-            object_bases = np.asarray(bases, dtype=np.uint64)
-            object_bases.flags.writeable = False
-            resolved_bases[group] = object_bases
-        remote, local, sizes = rules.format_ranges(
-            group.key_axes, ranges, object_bases=object_bases, selected_objects=group.selection
+    for group in plan.groups_by_layer[layer_id]:
+        remote, local, sizes = gva_layer_ranges(
+            projection.groups[group.group_id],
+            group.block_ids,
+            group.token_counts,
+            object_bases_by_group[group.group_id],
+            layer_id=layer_id,
         )
         remote_parts.append(remote)
         local_parts.append(local)
         size_parts.append(sizes)
-        keys.extend(selected_keys)
-        sources.extend(selected_sources)
-    return RuleGVA(
+        keys.extend(group.keys)
+        sources.extend(_layer_sources(group, layer_id))
+    return GVAArguments(
         tuple(keys),
         _concatenate_gva_parts(remote_parts),
         _concatenate_gva_parts(local_parts),
@@ -195,7 +217,7 @@ def materialize_rule_gva(
     )
 
 
-def merge_rule_key_ranges(ranges: RuleRanges) -> RuleRanges:
+def merge_key_range_arguments(ranges: KeyRangeArguments) -> KeyRangeArguments:
     """Coalesce repeated object keys before one KeyRange Backend call."""
 
     if len(set(ranges.keys)) == len(ranges.keys):
@@ -219,15 +241,11 @@ def merge_rule_key_ranges(ranges: RuleRanges) -> RuleRanges:
         addresses[index].extend(row_addresses)
         sizes[index].extend(row_sizes)
         offsets[index].extend(row_offsets)
-    return RuleRanges(keys, addresses, sizes, offsets, ranges.sources)
+    return KeyRangeArguments(keys, addresses, sizes, offsets, ranges.sources)
 
 
-def _selected_sources(group: KVGroupBatch, layer_id: int | None) -> tuple[TransferSource, ...]:
-    if group.selection is None:
-        indices = range(group.object_count)
-    else:
-        indices = np.flatnonzero(group.selection).tolist()
-    return tuple(group.source(index, layer_id) for index in indices)
+def _layer_sources(group: LayerTransferGroup, layer_id: int) -> tuple[TransferSource, ...]:
+    return tuple(group.batch.source(int(index), layer_id) for index in group.object_indices)
 
 
 def _concatenate_gva_parts(parts: list[np.ndarray]) -> np.ndarray:
