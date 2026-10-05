@@ -99,7 +99,7 @@ def _probe_hixl_binding() -> str | None:
     ``libcann_hixl.so`` directly when the package is absent.
     """
     try:
-        import hixl
+        import hixl  # type: ignore[import-not-found]
 
         if hasattr(hixl, "Hixl"):
             return None
@@ -569,7 +569,11 @@ def _prepare_commit_maps(
         raise ValueError("Async EPLB produced more replicas than the configured capacity")
     if padding:
         logical_map = torch.nn.functional.pad(logical_map, (0, padding), value=-1)
-    return tuple(_pin_host_map(value) for value in (physical_map, logical_map, replica_count))
+    return (
+        _pin_host_map(physical_map),
+        _pin_host_map(logical_map),
+        _pin_host_map(replica_count),
+    )
 
 
 def _copy_host_map(src: torch.Tensor, dst: torch.Tensor) -> None:

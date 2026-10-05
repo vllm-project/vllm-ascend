@@ -32,7 +32,9 @@ import glob
 import os
 import struct
 import threading
+from collections.abc import Callable
 from enum import IntEnum
+from typing import Any
 
 from vllm.logger import logger
 
@@ -256,7 +258,7 @@ class _HixlBindings:
         )
 
     @staticmethod
-    def _symbol(library: ctypes.CDLL, symbol: str, restype, argtypes) -> ctypes._CFuncPtr:
+    def _symbol(library: ctypes.CDLL, symbol: str, restype, argtypes) -> Callable[..., Any]:
         try:
             function = getattr(library, symbol)
         except AttributeError as error:
@@ -297,7 +299,7 @@ class _AscendString:
 
     def __init__(self, bindings: _HixlBindings, value: str) -> None:
         text = value.encode()
-        self._storage = ctypes.create_string_buffer(text, len(text) + 1)
+        self._storage: ctypes.Array[ctypes.c_char] | None = ctypes.create_string_buffer(text, len(text) + 1)
         self._buffer = (ctypes.c_char * 16)()
         self._destroyed = False
         bindings.ascend_string_ctor(self._buffer, self._storage, len(text))
@@ -338,7 +340,7 @@ class Hixl:
         self._bindings = ensure_available()
         self._lock = threading.Lock()
         self._initialized = False
-        self._engine = (ctypes.c_char * 8)()
+        self._engine: ctypes.Array[ctypes.c_char] | None = (ctypes.c_char * 8)()
         self._bindings.hixl_ctor(self._engine)
         self._strings: dict[str, _AscendString] = {}
 
