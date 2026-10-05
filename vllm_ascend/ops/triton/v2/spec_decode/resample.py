@@ -20,18 +20,7 @@ def _get_vectorcore_num() -> int:
         return int(get_vectorcore_num())
 
 
-@triton.jit(
-    do_not_specialize=["num_reqs"],
-    do_not_specialize_on_alignment=[
-        "target_rejected_logsumexp_ptr",
-        "draft_rejected_logsumexp_ptr",
-        "rejected_step_ptr",
-        "cu_num_logits_ptr",
-        "expanded_idx_mapping_ptr",
-        "draft_sampled_ptr",
-        "temp_ptr",
-    ],
-)
+@triton.jit
 def _resample_kernel(
     local_argmax_ptr,
     local_argmax_stride,
@@ -134,20 +123,7 @@ def _resample_kernel(
                 tl.store(local_mass_ptr + req_idx * local_mass_stride + block_idx, tl.sum(token_mass, axis=0))
 
 
-@triton.jit(
-    do_not_specialize_on_alignment=[
-        "num_sampled_ptr",
-        "target_rejected_logsumexp_ptr",
-        "draft_rejected_logsumexp_ptr",
-        "rejected_step_ptr",
-        "cu_num_logits_ptr",
-        "expanded_idx_mapping_ptr",
-        "draft_sampled_ptr",
-        "temp_ptr",
-        "seed_ptr",
-        "pos_ptr",
-    ],
-)
+@triton.jit
 def _categorical_finalize_kernel(
     sampled_ptr,
     sampled_stride,

@@ -218,7 +218,7 @@ class AscendRMSNormGated(RMSNormGated):
 class AscendFusedRMSNormGated(FusedRMSNormGated):
     """Use Ascend's fused kernel at the upstream FLA CustomOp boundary."""
 
-    def forward_oot(self, x, g, residual=None, prenorm=False, residual_in_fp32=False, out=None):
+    def forward_oot(self, x, g, residual=None, prenorm=False, residual_in_fp32=False):
         return rms_norm_gated(
             x,
             g,
@@ -229,5 +229,4 @@ class AscendFusedRMSNormGated(FusedRMSNormGated):
             eps=self.eps,
             prenorm=prenorm,
             residual_in_fp32=residual_in_fp32,
-            out=out,
         )
