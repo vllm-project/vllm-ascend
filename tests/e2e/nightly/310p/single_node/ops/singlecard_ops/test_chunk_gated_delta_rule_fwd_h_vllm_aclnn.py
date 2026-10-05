@@ -12,9 +12,7 @@ from vllm_ascend.utils import enable_custom_op
 CHUNK_SIZE = 64
 
 
-def npu_chunk_gdr_fwd_h(
-    k, w, u, g, initial_state=None, chunk_size=64, output_final_state=False
-):
+def npu_chunk_gdr_fwd_h(k, w, u, g, initial_state=None, chunk_size=64, output_final_state=False):
     enable_custom_op()
     return torch.ops._C_ascend.chunk_gated_delta_rule_fwd_h_vllm(
         k,
@@ -50,9 +48,7 @@ def cpu_reference(k, w, u, g, initial_state=None, chunk_size=64):
             vn = u[:, :, t0 + i, :] - ws[:, :, i, :]
             v_new[:, :, t0 + i, :] = vn
             v_update[:, :, i, :] = gi_cum.unsqueeze(-1).exp() * vn
-        K_chunk = k[:, :, t0 : t0 + chunk_size, :].repeat_interleave(
-            head_groups, dim=1
-        )
+        K_chunk = k[:, :, t0 : t0 + chunk_size, :].repeat_interleave(head_groups, dim=1)
         h_work = torch.einsum("bhik,bhiv->bhkv", K_chunk, v_update)
         h = h * g_chunk[:, :, -1:].unsqueeze(-1).exp() + h_work
         h_chunks.append(h.clone())
@@ -76,13 +72,7 @@ class TestChunkGatedDeltaRuleFwdHVllm310:
         """The final pipeline drain must preserve every head's g_last."""
         DTYPE = torch.float16
         T = K = V = 128
-        init = (
-            (torch.arange(B * HV).reshape(B, HV, 1, 1) + 1)
-            .div(128)
-            .expand(B, HV, K, V)
-            .contiguous()
-            .to(DTYPE)
-        )
+        init = (torch.arange(B * HV).reshape(B, HV, 1, 1) + 1).div(128).expand(B, HV, K, V).contiguous().to(DTYPE)
         factors = 1 + (torch.arange(B * HV).reshape(B, HV) % 5).float() / 4
         g_chunk = (
             -torch.log(torch.tensor(2.0))
@@ -149,8 +139,7 @@ class TestChunkGatedDeltaRuleFwdHVllm310:
             cos = cosine(npu, ref)
             finite_by_head = torch.isfinite(h_npu[0, :, c]).flatten(1).all(1)
             assert cos >= 0.99, (
-                f"h[{c}] cos={cos:.6f} too low; "
-                f"nonfinite_heads={(~finite_by_head).nonzero().flatten().tolist()}"
+                f"h[{c}] cos={cos:.6f} too low; nonfinite_heads={(~finite_by_head).nonzero().flatten().tolist()}"
             )
 
     @pytest.mark.parametrize(

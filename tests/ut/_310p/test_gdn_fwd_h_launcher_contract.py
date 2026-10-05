@@ -5,12 +5,13 @@ These tests need neither vLLM nor CANN. Host-stub compilation checks dispatch
 and argument counts only; it does not compile or execute the device kernels.
 """
 
-import re
 import shutil
 import subprocess
 import unittest
 from pathlib import Path
+from typing import ClassVar
 
+import regex as re
 
 ROOT = Path(__file__).resolve().parents[3]
 OP_KERNEL = ROOT / "csrc/moe/chunk_gated_delta_rule_fwd_h/op_kernel"
@@ -75,6 +76,9 @@ def render_host_stub(source):
 
 
 class FwdHLauncherContractTests(unittest.TestCase):
+    source: ClassVar[str]
+    compiler: ClassVar[str | None]
+
     @classmethod
     def setUpClass(cls):
         cls.source = LAUNCHER.read_text(encoding="utf-8")
@@ -101,10 +105,10 @@ class FwdHLauncherContractTests(unittest.TestCase):
             with self.subTest(arch=arch):
                 source = (OP_KERNEL / arch / "gemm/kernel/gdn_fwd_h_kernel.hpp").read_text(encoding="utf-8")
                 match = re.search(r"template\s*<([^>]+)>\s*class\s+GDNFwdHKernel", source)
-                self.assertIsNotNone(match)
+                assert match is not None, f"Missing GDNFwdHKernel template in {arch}"
                 self.assertEqual(len(match.group(1).split(",")), template_count)
                 init = re.search(r"\bvoid\s+Init\((.*?)\)", source, re.DOTALL)
-                self.assertIsNotNone(init)
+                assert init is not None, f"Missing GDNFwdHKernel.Init in {arch}"
                 self.assertEqual(len(init.group(1).split(",")), init_count)
                 self.assertEqual(bool(re.search(r"\bgk\b", init.group(1))), arch != "arch20")
 
@@ -154,9 +158,7 @@ class FwdHLauncherContractTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_host_stub_rejects_six_parameter_regression(self):
-        mutated = self.source.replace(
-            "float, float, workspaceType>", "float, float, workspaceType, int, false>"
-        )
+        mutated = self.source.replace("float, float, workspaceType>", "float, float, workspaceType, int, false>")
         self.assertNotEqual(mutated, self.source)
         result = self.compile_source(mutated, 200)
         self.assertNotEqual(result.returncode, 0, "Negative control unexpectedly compiled")
