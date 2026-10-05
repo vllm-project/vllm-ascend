@@ -78,9 +78,9 @@ inline void* GetOfficialQliFuncAddr(const char* symbol) {
 
 }  // namespace vllm_ascend
 
-// The shared EXEC_NPU_CMD intentionally searches custom OPPs first. Official
-// QLI must resolve both stages from one CANN library, so only this operator
-// uses the otherwise identical execution sequence below.
+// The shared EXEC_NPU_CMD intentionally searches custom operators first.
+// Official QLI must resolve both stages from one CANN library. Only this
+// operator uses the otherwise identical execution sequence below.
 #define EXEC_OFFICIAL_QLI_CMD(aclnn_api, ...)                                 \
   do {                                                                        \
     static const auto getWorkspaceSizeFuncAddr =                              \
