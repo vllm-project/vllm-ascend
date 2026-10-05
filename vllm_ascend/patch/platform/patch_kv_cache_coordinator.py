@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import sys
-from collections import defaultdict, deque
+from collections import OrderedDict, defaultdict, deque
 from collections.abc import Iterable, Mapping
 from copy import copy
 from dataclasses import replace
@@ -107,20 +107,17 @@ def _manager_spec(spec: KVCacheSpec) -> KVCacheSpec:
 
 
 class _GroupStableBlockPool(BlockPool):
-    """Keep packed physical pages in the cache group that first owns them.
+    """Give packed A5 pages one live owner; reclaim free pages when zeroing is on."""
 
-    A5 V4.1 cache groups are different typed views over the same physical page
-    slots. Reassigning a recycled page to another group is not graph-safe, so
-    free pages are reused only by their owning group; untouched pages remain
-    available to every group.
-    """
-
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, allow_group_reassignment: bool = False, **kwargs):
         super().__init__(*args, **kwargs)
+        self._allow_group_reassignment = allow_group_reassignment
         self._owners = [-1] * self.num_gpu_blocks
         self._unowned = deque(self.blocks[1:])
-        self._free_by_group: dict[int, deque[KVCacheBlock]] = defaultdict(deque)
-        self._queued_by_group: dict[int, set[int]] = defaultdict(set)
+        # Dict insertion order tracks the age of free blocks. Removing a
+        # touched block also removes its queue entry, so re-freeing it cannot
+        # revive a stale entry and evict the newly cached prefix first.
+        self._free_by_group: dict[int, OrderedDict[int, KVCacheBlock]] = defaultdict(OrderedDict)
 
     @staticmethod
     def _is_free(block: KVCacheBlock) -> bool:
@@ -135,31 +132,67 @@ class _GroupStableBlockPool(BlockPool):
         if num_blocks == 0:
             return []
         preferred: list[KVCacheBlock] = []
-        group_queue = self._free_by_group[group_id]
-        queued = self._queued_by_group[group_id]
-        while group_queue and len(preferred) < num_blocks:
-            block = group_queue.popleft()
-            if block.block_id not in queued:
-                continue
-            queued.remove(block.block_id)
-            if self._is_free(block):
-                preferred.append(block)
-        while self._unowned and len(preferred) < num_blocks:
-            block = self._unowned.popleft()
+
+        # Select first and change queues only after the full allocation is
+        # possible. An unsuccessful group allocation must leave them intact.
+        for block in self._unowned:
+            if len(preferred) == num_blocks:
+                break
             if self._owners[block.block_id] == -1 and self._is_free(block):
                 preferred.append(block)
+
+        def add_free(owner: int, cached: bool) -> None:
+            for block in self._free_by_group[owner].values():
+                if len(preferred) == num_blocks:
+                    break
+                if self._owners[block.block_id] != owner or not self._is_free(block):
+                    continue
+                has_hash = block.block_hash is not None or bool(self.cached_block_hashes_by_block.get(block.block_id))
+                if has_hash == cached:
+                    preferred.append(block)
+
+        # Never evict this group's cached prefix while an uncached page is
+        # available. A free donor page is safe to reuse only when the worker
+        # zeroes *all* physical backings for every newly allocated block ID.
+        add_free(group_id, cached=False)
+        if self._allow_group_reassignment and len(preferred) < num_blocks:
+            for owner in tuple(self._free_by_group):
+                if owner != group_id:
+                    add_free(owner, cached=False)
+        if self._allow_group_reassignment:
+            # Once uncached pages are exhausted, preserve the global free
+            # queue's age order. Preferring this group's cached pages can
+            # erase a live trajectory while older donor caches remain idle.
+            queue = self.free_block_queue
+            block = queue.fake_free_list_head.next_free_block
+            while block is not queue.fake_free_list_tail and len(preferred) < num_blocks:
+                assert block is not None
+                has_hash = block.block_hash is not None or bool(self.cached_block_hashes_by_block.get(block.block_id))
+                if has_hash and self._is_free(block):
+                    preferred.append(block)
+                block = block.next_free_block
+        else:
+            add_free(group_id, cached=True)
+
         if len(preferred) != num_blocks:
             raise ValueError(
-                f"Cache group {group_id} needs {num_blocks} stable pages, "
-                f"but only {len(preferred)} owned or unowned pages are free"
+                f"Cache group {group_id} needs {num_blocks} pages, "
+                f"but only {len(preferred)} unowned or reclaimable pages are free"
             )
+
         for block in preferred:
+            owner = self._owners[block.block_id]
+            if owner == -1:
+                assert self._unowned.popleft() is block
+            else:
+                self._free_by_group[owner].pop(block.block_id)
             self.free_block_queue.remove(block)
         self.free_block_queue.prepend_n(preferred)
         blocks = super().get_new_blocks(num_blocks)
         for block in blocks:
-            owner = self._owners[block.block_id]
-            assert owner in (-1, group_id)
+            # super() removes every old cache hash before ownership changes.
+            assert block.block_hash is None
+            assert block.block_id not in self.cached_block_hashes_by_block
             self._owners[block.block_id] = group_id
         return blocks
 
@@ -168,18 +201,14 @@ class _GroupStableBlockPool(BlockPool):
         super().free_blocks(blocks)
         for block in blocks:
             group_id = self._owners[block.block_id]
-            if group_id < 0 or not self._is_free(block):
-                continue
-            queued = self._queued_by_group[group_id]
-            if block.block_id not in queued:
-                self._free_by_group[group_id].appendleft(block)
-                queued.add(block.block_id)
+            if group_id >= 0 and self._is_free(block):
+                self._free_by_group[group_id].setdefault(block.block_id, block)
 
     def touch(self, blocks: list[KVCacheBlock]) -> None:
         for block in blocks:
             group_id = self._owners[block.block_id]
             if group_id >= 0:
-                self._queued_by_group[group_id].discard(block.block_id)
+                self._free_by_group[group_id].pop(block.block_id, None)
         super().touch(blocks)
 
     def free_blocks_for_group(self, ordered_blocks: Iterable[KVCacheBlock], group_id: int) -> None:
@@ -266,13 +295,18 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 kv_cache_config,
             )
         pool_cls = _GroupStableBlockPool if _is_a5_packed_cache_config(kv_cache_config) else BlockPool
-        self.block_pool = pool_cls(
+        pool_kwargs = dict(
             num_gpu_blocks=kv_cache_config.num_blocks,
             enable_caching=enable_caching,
             hash_block_size=hash_block_size,
             enable_kv_cache_events=enable_kv_cache_events,
             metrics_collector=metrics_collector,
         )
+        if pool_cls is _GroupStableBlockPool:
+            # A5 groups alias the same physical pages. Transfer an idle block
+            # across groups only when the worker will zero every backing.
+            pool_kwargs["allow_group_reassignment"] = kv_cache_config.needs_kv_cache_zeroing
+        self.block_pool = pool_cls(**pool_kwargs)
 
         # KV cache group indices that get the EAGLE last-block drop.
         self.eagle_group_ids: set[int] = {  # type: ignore[no-redef]
