@@ -17,7 +17,6 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import cast
 
 import torch
 from vllm.logger import logger
@@ -47,32 +46,21 @@ from vllm_ascend.ops.fused_moe.token_dispatcher import (
 )
 from vllm_ascend.quantization.quant_type import QuantType
 
-_MoECommMethods: dict[tuple[MoECommType | None, tuple[int, ...]], MoECommMethod] = {}
+_MoECommMethods: dict[MoECommType | None, MoECommMethod] = {}
 
 
-def _moe_config_key(
-    moe_comm_type: MoECommType | None, moe_config: FusedMoEConfig | None
-) -> tuple[MoECommType | None, tuple[int, ...]]:
-    """Return the execution shape that owns mutable MoE comm state."""
-    _CONFIG_KEY_FIELDS = ("num_experts", "num_local_experts")
-    return (moe_comm_type, tuple(int(getattr(moe_config, field, 0) or 0) for field in _CONFIG_KEY_FIELDS))
-
-
-def get_moe_comm_method(
-    moe_comm_type: MoECommType | None,
-    moe_config: FusedMoEConfig | None = None,
-) -> MoECommMethod | None:
-    return _MoECommMethods.get(_moe_config_key(moe_comm_type, moe_config))
+def get_moe_comm_method(moe_comm_type: MoECommType | None) -> MoECommMethod | None:
+    return _MoECommMethods.get(moe_comm_type)
 
 
 def setup_moe_comm_method(moe_config):
     if moe_config.ep_size > 1:
-        _MoECommMethods[_moe_config_key(MoECommType.ALLTOALL, moe_config)] = AlltoAllCommImpl(moe_config)
-        _MoECommMethods[_moe_config_key(MoECommType.ALLGATHER, moe_config)] = AllGatherCommImpl(moe_config)
-        _MoECommMethods[_moe_config_key(MoECommType.MC2, moe_config)] = MC2CommImpl(moe_config)
-        _MoECommMethods[_moe_config_key(MoECommType.FUSED_MC2, moe_config)] = FusedMC2CommImpl(moe_config)
+        _MoECommMethods[MoECommType.ALLTOALL] = AlltoAllCommImpl(moe_config)
+        _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
+        _MoECommMethods[MoECommType.MC2] = MC2CommImpl(moe_config)
+        _MoECommMethods[MoECommType.FUSED_MC2] = FusedMC2CommImpl(moe_config)
     else:
-        _MoECommMethods[_moe_config_key(MoECommType.ALLGATHER, moe_config)] = AllGatherCommImpl(moe_config)
+        _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
 
 
 @dataclass
@@ -285,17 +273,6 @@ class FusedMC2CommImpl(MoECommMethod):
         if self.enable_fused_mc2 == 1 and is_mega_moe_supported():
             self.mega_moe_symm_buffer = None
             self.get_symm_buffer_for_mega_moe, self.mega_moe = moe_utils.load_cann_mega_moe_ops()
-            # Resolve the Python ABI once, before the first collective/capture.
-            # The activation and its scalar parameters belong to FusedMoEConfig.
-            self.mega_moe_activation_kwargs = moe_utils.select_mega_moe_activation_kwargs(
-                self.mega_moe,
-                activation=moe_config.activation,
-                activation_clamp=moe_config.swiglu_limit if (moe_config.swiglu_limit or 0.0) > 0 else None,
-                swiglu_alpha=1.0 if moe_config.swiglu_alpha is None else moe_config.swiglu_alpha,
-                swiglu_beta=0.0 if moe_config.swiglu_beta is None else moe_config.swiglu_beta,
-                situ_beta=moe_config.activation_situ_beta,
-                situ_linear_beta=moe_config.activation_situ_linear_beta,
-            )
         if self.enable_fused_mc2 == 1:
             self.expert_token_nums = torch.zeros([self.moe_config.num_local_experts], dtype=torch.int32, device="npu")
         else:
@@ -493,6 +470,7 @@ class FusedMC2CommImpl(MoECommMethod):
             self.mega_moe_symm_buffer.dispatch_quant_mode = dispatch_quant_mode
             self.mega_moe_symm_buffer.dispatch_quant_out_dtype = dispatch_quant_out_dtype
 
+        activation_clamp = self.swiglu_limit if self.swiglu_limit > 0 else None
         x_active_mask = None
         # Ascend 950 (A5) MegaMoe only support a null x_active_mask, and it
         # must be passed as None. But on A2/A3 it must be valid.
@@ -513,9 +491,14 @@ class FusedMC2CommImpl(MoECommMethod):
         # A8W4-INT precision-compensation biases B1/B2 (l1_bias/l2_bias).
         l1_bias = weights.w1_scale_bias
         l2_bias = weights.w2_scale_bias
-        # Quant methods supply the routed layer, whose activation was bound at
-        # initialization. The shared communicator may belong to a later layer.
-        layer = cast(torch.nn.Module, fused_experts_input.layer)
+        activation_kwargs = moe_utils.select_mega_moe_activation_kwargs(
+            self.mega_moe,
+            activation=fused_experts_input.activation,
+            activation_clamp=activation_clamp,
+            swiglu_alpha=self.swiglu_alpha,
+            swiglu_beta=self.swiglu_beta,
+        )
+
         out, expert_tokens = self.mega_moe(
             fused_experts_input.hidden_states,
             fused_experts_input.topk_ids.to(torch.int32),
@@ -530,7 +513,7 @@ class FusedMC2CommImpl(MoECommMethod):
             x_active_mask=x_active_mask,
             weight1_type=weight_type,
             weight2_type=weight_type,
-            **layer.mega_moe_activation_kwargs,
+            **activation_kwargs,
         )
         # NOTE: self.expert_token_nums is only used by the
         # mega_moe path (enable_fused_mc2 == 1) as a

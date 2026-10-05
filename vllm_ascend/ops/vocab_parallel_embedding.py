@@ -41,6 +41,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.utils import set_weight_attrs
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import (
     GroupCoordinator,
     get_embed_tp_group,
@@ -324,15 +325,19 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         num_tokens = input_.shape[0]
         exchange_group = self.token_exchange_group
         assert exchange_group is not None
-        exchange_group_size = exchange_group.world_size
+        comm_size = exchange_group.world_size
 
-        # The scheduler's token limit covers the static buffers for both
-        # prefill and decode.
+        # potential_max_tokens covers the uniform decode path. Fine-grained
+        # Embedding TP and DSA PCP also enter this path during prefill, including
+        # the max_num_batched_tokens profiling run, so their static buffers must
+        # cover the scheduler's full token capacity as well.
         capacity = self.embedding_tp_capacity
         assert capacity is not None
         if num_tokens > capacity:
             raise ValueError(
-                f"embedding_tp static capacity {capacity} < num_tokens {num_tokens}; increase max_num_batched_tokens."
+                f"embedding_tp static capacity {capacity} < num_tokens "
+                f"{num_tokens}; increase max_cudagraph_capture_size or "
+                f"max_num_batched_tokens."
             )
 
         # Lazy init on first call (profiling run, which precedes ACL graph
@@ -346,33 +351,27 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
             device = input_.device
             # all_gather buffers carry token IDs (int64).
             self._embed_ag_in_buf = torch.zeros((capacity,), dtype=input_.dtype, device=device)
-            self._embed_ag_out_buf = torch.empty((exchange_group_size * capacity,), dtype=input_.dtype, device=device)
+            self._embed_ag_out_buf = torch.empty((comm_size * capacity,), dtype=input_.dtype, device=device)
             # reduce_scatter buffers carry bf16 embeddings.
             self._embed_rs_in_buf = torch.empty(
-                (exchange_group_size * capacity, self.embedding_dim), dtype=self.params_dtype, device=device
+                (comm_size * capacity, self.embedding_dim), dtype=self.params_dtype, device=device
             )
             self._embed_rs_out_buf = torch.empty((capacity, self.embedding_dim), dtype=self.params_dtype, device=device)
 
-        # PCP ranks have the same local token count. Fine-grained Embedding TP
-        # keeps the fixed capacity so all DP ranks exchange the same span.
-        exchange_tokens = capacity
-        if self.parallel_mode == VocabParallelMode.PCP_X_TP:
-            exchange_tokens = num_tokens
-        all_gather_input = self._embed_ag_in_buf[:exchange_tokens]
-        if exchange_tokens > num_tokens:
-            all_gather_input.zero_()
-        all_gather_input[:num_tokens].copy_(input_)
-        all_gather_output = self._embed_ag_out_buf[: exchange_group_size * exchange_tokens]
+        # Pad input into the address-stable all_gather input buffer.
+        self._embed_ag_in_buf.zero_()
+        self._embed_ag_in_buf[:num_tokens].copy_(input_)
         dist.all_gather_into_tensor(
-            all_gather_output,
-            all_gather_input,
+            self._embed_ag_out_buf,
+            self._embed_ag_in_buf,
             group=exchange_group.device_group,
         )
+        complete_input = self._embed_ag_out_buf
 
-        # Out-of-vocabulary rows are masked below. The DP exchange padding and
-        # PCP rank-local padding both use token ID 0, which is a valid token.
+        # Masking unchanged; padding rows map to OOB and get masked to 0
+        # via masked_fill_ below (token_id=0 stays in-range after shift).
         masked_input, input_mask = self._mask_input_for_vocab_range(
-            all_gather_output,
+            complete_input,
             self.shard_indices.org_vocab_start_index,
             self.shard_indices.org_vocab_end_index,
             self.shard_indices.num_org_vocab_padding,
@@ -380,21 +379,19 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
             self.shard_indices.added_vocab_end_index,
         )
         # Embedding lookup is a local op (F.embedding); its fresh allocation
-        # does not affect ACL graph replay. Copy into the static reduce_scatter input
+        # does not affect ACL graph replay. Copy into the static rs_in
         # buffer so reduce_scatter reads from a stable address.
         output_parallel = self.quant_method.embedding(self, masked_input.long())
-        reduce_scatter_input = self._embed_rs_in_buf[: exchange_group_size * exchange_tokens]
-        reduce_scatter_input.copy_(output_parallel)
-        reduce_scatter_input.masked_fill_(input_mask.unsqueeze(-1), 0)
-        reduce_scatter_output = self._embed_rs_out_buf[:exchange_tokens]
+        self._embed_rs_in_buf.copy_(output_parallel)
+        self._embed_rs_in_buf.masked_fill_(input_mask.unsqueeze(-1), 0)
         dist.reduce_scatter_tensor(
-            reduce_scatter_output,
-            reduce_scatter_input,
+            self._embed_rs_out_buf,
+            self._embed_rs_in_buf,
             group=exchange_group.device_group,
         )
 
-        # Strip exchange padding and preserve the original return shape.
-        output = reduce_scatter_output[:num_tokens].view(num_tokens, -1)
+        # Strip padding rows; preserve the original return shape.
+        output = self._embed_rs_out_buf[:num_tokens].view(num_tokens, -1)
         reduce_group = self.output_reduce_group
         if reduce_group is not None and reduce_group.world_size > 1:
             # PCP reduce-scatter reconstructs the TP-local contribution. This
@@ -507,7 +504,9 @@ def lmhead_all_to_all(
         )
     vocab_per_partition = logits.shape[-1]
     # [N, V/P] -> [P, N/P, V/P]. The `.contiguous()` is a no-op on the live
-    # lm-head path (fresh matmul output).
+    # lm-head path (fresh matmul output), but load-bearing for the spec-decode
+    # reduce-sample callers, whose input is a vocab-truncated last-dim slice
+    # (non-contiguous whenever the vocab shard is padded): view() would fail.
     input_ = logits.contiguous().view(world_size, -1, vocab_per_partition)
     output = torch.empty_like(input_)
     dist.all_to_all_single(output, input_, group=comm_group.device_group)
@@ -579,11 +578,15 @@ class AscendLogitsProcessor(LogitsProcessor):
         gathered_hidden_states = get_lmhead_tp_group().all_gather(hidden_states, dim=0)
         logits = self._apply_head(lm_head, gathered_hidden_states, embedding_bias)
         # Gather logits for tensor parallel
-        logits = lmhead_all_to_all(logits, get_lmhead_tp_group())
+        if not get_ascend_config().enable_reduce_sample:
+            logits = lmhead_all_to_all(logits, get_lmhead_tp_group())
 
         # Remove paddings in vocab (if any)
         if logits is not None:
-            logits = logits[..., : self.org_vocab_size]
+            if not get_ascend_config().enable_reduce_sample:
+                logits = logits[..., : self.org_vocab_size]
+            else:
+                logits = logits[..., : lm_head.num_org_embeddings_per_partition]
         return logits
 
     def _get_logits_normal(
@@ -597,11 +600,14 @@ class AscendLogitsProcessor(LogitsProcessor):
         # group, so skip it for a replicated head (e.g. the DSpark Markov w2):
         # each rank already holds the full vocab logits locally and no
         # all-gather is needed.
-        if lm_head.tp_size > 1:
+        if not get_ascend_config().enable_reduce_sample and lm_head.tp_size > 1:
             logits = self._gather_logits(logits)
 
         # Remove paddings in vocab (if any)
         if logits is not None:
-            logits = logits[..., : self.org_vocab_size]
+            if not get_ascend_config().enable_reduce_sample:
+                logits = logits[..., : self.org_vocab_size]
+            else:
+                logits = logits[..., : lm_head.num_org_embeddings_per_partition]
 
         return logits
