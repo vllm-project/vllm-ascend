@@ -386,6 +386,14 @@ class NPUModelRunner(GPUModelRunner):
             valid_dummy_state_slots=valid_dummy_state_slots,
         )
         self.model_state.kvpp_is_dummy_run = False
+        if dummy_run and lmhead_tp_enable() and not is_profile and self.is_last_pp_rank:
+            # Join the target head before the parent dummy run proposes MTP
+            # tokens. Busy ranks always run target -> draft, so idle ranks
+            # must issue the same collectives in the same order.
+            if self.execute_model_state is None:
+                raise RuntimeError("lmhead TP idle join requires execute_model_state")
+            dummy_indices = torch.zeros(self._lmhead_tp_max_num_logits(), dtype=torch.int64, device=self.device)
+            self.model.compute_logits(self.execute_model_state.hidden_states[dummy_indices])
         self.kvpp.complete_forward()
 
         self._cpp_execution_time_ms = _finish_profiling_chunk_timing(
@@ -797,7 +805,7 @@ class NPUModelRunner(GPUModelRunner):
         is_profile: bool = False,
         **kwargs,
     ):
-        """Join LM-head TP before stepping EPLB on an idle DP rank."""
+        """Run the dummy path; target head joins in execute_model before draft."""
         skip_ring = bool(kwargs.pop("skip_gdn_state_update", False))
         # Adaptive verification profiles eager tail sizes after graph capture.
         # Use balanced dummy routing, as the initial memory profile does, so a
@@ -821,13 +829,6 @@ class NPUModelRunner(GPUModelRunner):
                 is_profile=is_profile,
                 **kwargs,
             )
-        if lmhead_tp_enable() and not is_profile and hidden_states is not None:
-            dummy_indices = torch.zeros(
-                self._lmhead_tp_max_num_logits(),
-                dtype=torch.int64,
-                device=hidden_states.device,
-            )
-            self.model.compute_logits(hidden_states[dummy_indices])
         return hidden_states, sample_hidden_states
 
     def postprocess_sampled(

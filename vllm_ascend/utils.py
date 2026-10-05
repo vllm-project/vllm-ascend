@@ -908,6 +908,22 @@ def lmhead_tp_enable() -> bool:
     return get_ascend_config().finegrained_tp_config.lmhead_tensor_parallel_size > 0
 
 
+def lmhead_tp_max_num_logits(max_num_reqs: int, logits_rows_per_req: int) -> int:
+    """Row capacity agreed by every rank of the fine-grained LM-head group."""
+    return max_num_reqs * logits_rows_per_req
+
+
+def lmhead_tp_pad_rows(rows: torch.Tensor, capacity: int, formula: str) -> torch.Tensor:
+    """Pad the leading dimension before fixed-shape head collectives."""
+    num_rows = rows.shape[0]
+    if num_rows > capacity:
+        raise ValueError(f"lmhead TP rows ({num_rows}) exceed capacity ({capacity} = {formula})")
+    if num_rows == capacity:
+        return rows
+    padding = (0, 0, 0, capacity - num_rows) if rows.dim() == 2 else (0, capacity - num_rows)
+    return torch.nn.functional.pad(rows, padding)
+
+
 def embedding_tp_enable() -> bool:
     return get_ascend_config().finegrained_tp_config.embedding_tensor_parallel_size > 0
 

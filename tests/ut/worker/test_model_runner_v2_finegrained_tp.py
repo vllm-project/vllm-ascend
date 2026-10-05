@@ -8,19 +8,20 @@ eagerly dispatched step into an explicit error. Collective behavior itself
 is validated on real hardware.
 """
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, create_autospec, patch
 
 import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
-from vllm.v1.worker.gpu.eplb_utils import step_eplb_after
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler import RejectionSampler
 from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
 
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
+from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
 
 
 def _make_runner(max_num_reqs=8, decode_query_len=2, vocab=6):
@@ -189,7 +190,7 @@ def test_dispatch_tail_canary_matches_upstream_sample(with_grammar, with_draft):
 
 
 @pytest.mark.parametrize(
-    "lmhead_enabled,is_profile,has_hidden_states,skip_eplb",
+    "lmhead_enabled,is_profile,last_pp_rank,skip_eplb",
     [
         (True, False, True, False),
         (False, False, True, False),
@@ -198,49 +199,61 @@ def test_dispatch_tail_canary_matches_upstream_sample(with_grammar, with_draft):
         (True, False, True, True),
     ],
 )
-def test_dummy_lmhead_collective_precedes_eplb(lmhead_enabled, is_profile, has_hidden_states, skip_eplb):
-    """An idle rank must join LM-head TP before its EPLB step can block it."""
-    runner = _make_runner(max_num_reqs=8, decode_query_len=2)  # capacity 16
-    hidden_states = torch.randn(10, 6)
-    sample_hidden = torch.randn(3, 6)
+def test_idle_target_head_precedes_draft_and_eplb(lmhead_enabled, is_profile, last_pp_rank, skip_eplb):
+    """Exercise the wrapper called by the parent before its draft propose."""
+    runner = _make_runner(max_num_reqs=8, decode_query_len=2)
+    runner.device = torch.device("cpu")
+    runner.is_last_pp_rank = last_pp_rank
+    runner.model_state = SimpleNamespace(kvpp_is_dummy_run=False)
+    runner.kvpp = MagicMock()
+    runner.ascend_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(profiling_chunk_config=None),
+        xlite_graph_config=SimpleNamespace(enabled=False),
+    )
     runner.eplb = MagicMock()
     events = []
-    runner.eplb.step.side_effect = lambda **kwargs: events.append("eplb")
+    hidden_states = torch.randn(10, 6)
 
-    @step_eplb_after(is_dummy=True)
-    def parent_dummy_run(self, *args, **kwargs):
-        assert kwargs["skip_eplb"] is True
+    def parent_execute(self, *args, **kwargs):
         events.append("forward")
-        return (hidden_states, sample_hidden) if has_hidden_states else (None, None)
+        self.execute_model_state = SimpleNamespace(hidden_states=hidden_states)
+        return "forward-output"
+
+    def parent_dummy(self, *args, **kwargs):
+        assert kwargs["skip_eplb"] is True
+        self.execute_model(MagicMock(), dummy_run=True, is_profile=kwargs["is_profile"])
+        events.append("draft")
+        return hidden_states, hidden_states
 
     def compute_logits(inputs):
-        events.append("lmhead")
+        events.append("target")
         return torch.zeros(inputs.shape[0], 6)
 
     runner.model.compute_logits.side_effect = compute_logits
-
+    runner.eplb.step.side_effect = lambda **kwargs: events.append("eplb")
     with (
         patch("vllm_ascend.worker.v2.model_runner.lmhead_tp_enable", return_value=lmhead_enabled),
-        patch.object(GPUModelRunner, "_dummy_run", parent_dummy_run),
+        patch("vllm_ascend.worker.v2.model_runner.has_kv_transfer_group", return_value=False),
+        patch("vllm_ascend.worker.v2.model_runner._start_profiling_chunk_timing", return_value=None),
+        patch("vllm_ascend.worker.v2.model_runner._finish_profiling_chunk_timing", return_value=None),
+        patch.object(GPUModelRunner, "execute_model", parent_execute),
+        patch.object(GPUModelRunner, "_dummy_run", parent_dummy),
     ):
-        result = runner._dummy_run(4, uniform_decode=True, is_profile=is_profile, skip_eplb=skip_eplb)
+        runner._dummy_run(4, uniform_decode=True, is_profile=is_profile, skip_eplb=skip_eplb)
 
-    expected_events = ["forward"]
-    if lmhead_enabled and not is_profile and has_hidden_states:
-        expected_events.append("lmhead")
-    if not skip_eplb:
-        expected_events.append("eplb")
-        runner.eplb.step.assert_called_once_with(is_dummy=True, is_profile=is_profile)
-    else:
-        runner.eplb.step.assert_not_called()
-    assert events == expected_events
-    assert result == ((hidden_states, sample_hidden) if has_hidden_states else (None, None))
-    if lmhead_enabled and not is_profile and has_hidden_states:
-        dummy_input = runner.model.compute_logits.call_args.args[0]
-        assert dummy_input.shape == (16, 6)
-        torch.testing.assert_close(dummy_input, hidden_states[torch.zeros(16, dtype=torch.long)])
+    expected = ["forward"]
+    if lmhead_enabled and not is_profile and last_pp_rank:
+        expected.append("target")
+        inputs = runner.model.compute_logits.call_args.args[0]
+        assert inputs.shape == (16, 6)
+        torch.testing.assert_close(inputs, hidden_states[0].expand(16, 6))
+        runner.model.compute_logits.assert_called_once()
     else:
         runner.model.compute_logits.assert_not_called()
+    expected.append("draft")
+    if not skip_eplb:
+        expected.append("eplb")
+    assert events == expected
 
 
 def test_finegrained_tp_guard_contract():
@@ -252,3 +265,84 @@ def test_finegrained_tp_guard_contract():
         NPUModelRunner._check_finegrained_tp_graph_step(runner, CUDAGraphMode.NONE)
     NPUModelRunner._check_finegrained_tp_graph_step(runner, CUDAGraphMode.FULL_DECODE_ONLY)
     NPUModelRunner._check_finegrained_tp_graph_step(runner, CUDAGraphMode.FULL)
+
+
+class _GreedyDraftSampler:
+    def sample_draft(self, hidden_states, *args):
+        return self.model.compute_logits(hidden_states).argmax(dim=-1)
+
+
+class _DraftSampler(LmheadTPDraftSamplingMixin, _GreedyDraftSampler):
+    pass
+
+
+def _make_draft_sampler(max_num_reqs=8, num_speculative_steps=1):
+    spec = _DraftSampler()
+    spec.max_num_reqs = max_num_reqs
+    spec.num_speculative_steps = num_speculative_steps
+    spec.speculative_config = SimpleNamespace(draft_sample_method="greedy")
+    spec.use_local_argmax_reduction = False
+    spec.enable_adaptive_verification = False
+    spec.model = MagicMock()
+    spec.model.compute_logits.side_effect = lambda hs: torch.nn.functional.one_hot(
+        torch.arange(hs.shape[0]) % 4, 4
+    ).float()
+    return spec
+
+
+@pytest.mark.parametrize(
+    "enabled,num_rows,num_steps",
+    [(True, 1, 1), (True, 2, 1), (True, 3, 1), (True, 16, 1), (True, 0, 1), (True, 3, 3), (False, 3, 1)],
+)
+def test_draft_head_aligns_rank_rows_and_trims_tokens(enabled, num_rows, num_steps):
+    spec = _make_draft_sampler(num_speculative_steps=num_steps)
+    hidden_states = torch.randn(num_rows, 5)
+    with patch("vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils.lmhead_tp_enable", return_value=enabled):
+        tokens = spec.sample_draft(hidden_states, None, None, None, None, None, None)
+    inputs = spec.model.compute_logits.call_args.args[0]
+    capacity = 8 * (num_steps + 1)
+    assert inputs.shape == (capacity if enabled else num_rows, 5)
+    torch.testing.assert_close(inputs[:num_rows], hidden_states)
+    if enabled:
+        assert torch.all(inputs[num_rows:] == 0)
+    assert tokens.shape == (num_rows,)
+    torch.testing.assert_close(tokens, torch.arange(num_rows) % 4)
+
+
+def test_draft_head_rejects_overflow_before_collective():
+    spec = _make_draft_sampler(max_num_reqs=4)
+    with (
+        patch("vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils.lmhead_tp_enable", return_value=True),
+        pytest.raises(ValueError, match="exceed capacity"),
+    ):
+        spec.sample_draft(torch.randn(9, 5), None, None, None, None, None, None)
+    spec.model.compute_logits.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "option,match",
+    [
+        ("greedy", None),
+        ("probabilistic", "probabilistic"),
+        ("use_local_argmax_reduction", "use_local_argmax_reduction"),
+        ("enable_adaptive_verification", "enable_adaptive_verification"),
+    ],
+)
+def test_draft_sampling_rejects_unsupported_combinations(option, match):
+    spec = _make_draft_sampler()
+    if option == "probabilistic":
+        spec.speculative_config.draft_sample_method = option
+    elif option != "greedy":
+        setattr(spec, option, True)
+    with (
+        patch("vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils.lmhead_tp_enable", return_value=True),
+        nullcontext() if match is None else pytest.raises(NotImplementedError, match=match),
+    ):
+        spec._lmhead_tp_validate_draft_sampling()
+
+
+def test_mtp_uses_group_aligned_draft_sampling():
+    from vllm_ascend.worker.v2.spec_decode.mtp.speculator import AscendMTPSpeculator
+
+    assert issubclass(AscendMTPSpeculator, LmheadTPDraftSamplingMixin)
+    assert AscendMTPSpeculator.sample_draft is LmheadTPDraftSamplingMixin.sample_draft

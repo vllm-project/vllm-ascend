@@ -146,6 +146,7 @@ def test_draft_runtime_config_preserves_target_worker_topology(
             "vllm_ascend.worker.v2.spec_decode.pcp_utils.replace",
             side_effect=fake_replace,
         ),
+        patch("vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils.lmhead_tp_enable", return_value=False),
         patch.object(
             speculator_module.AutoRegressiveSpeculator,
             "__init__",
