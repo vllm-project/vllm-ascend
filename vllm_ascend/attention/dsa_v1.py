@@ -1522,6 +1522,8 @@ class AscendDSAImpl(AttentionImplBase[Any]):
     understand this class
     """
 
+    enable_pcp_o_proj_weight_sharding = False
+
     def __init__(
         self,
         n_heads: int,
@@ -1771,7 +1773,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         layer_name,
         hidden_states: torch.Tensor,  # query in unified attn
         kv_cache: tuple[torch.Tensor, ...] | None,
-        attn_metadata: DSAMetadataDict,
+        attn_metadata: DSAMetadataDict | None,
         output: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
@@ -1780,7 +1782,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         if attn_metadata is None:
             # Profiling run: run o_proj on zero input so HCCL collectives are
             # captured by the ACL graph.  Non-OTP just zeros the output.
-            if oproj_tp_enable():
+            if oproj_tp_enable() or self.enable_pcp_o_proj_weight_sharding:
                 o_proj_input = hidden_states.new_zeros(o_proj_input_shape)
                 self._forward_o_proj(o_proj_input, output)
             else:

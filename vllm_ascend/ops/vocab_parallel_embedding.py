@@ -359,7 +359,10 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         if self.parallel_mode == VocabParallelMode.PCP_X_TP:
             exchange_tokens = num_tokens
         all_gather_input = self._embed_ag_in_buf[:exchange_tokens]
-        if exchange_tokens > num_tokens:
+        if self.parallel_mode != VocabParallelMode.PCP_X_TP:
+            # Zero unconditionally: guarding with exchange_tokens > num_tokens
+            # lets dynamo pin num_tokens == capacity, breaking strictly dynamic
+            # inputs (tail rows are discarded after the reduce-scatter).
             all_gather_input.zero_()
         all_gather_input[:num_tokens].copy_(input_)
         all_gather_output = self._embed_ag_out_buf[: exchange_group_size * exchange_tokens]

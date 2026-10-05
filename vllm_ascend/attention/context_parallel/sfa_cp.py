@@ -7,6 +7,7 @@ import torch_npu
 from torch import nn
 from vllm.config import VllmConfig
 from vllm.distributed import get_dcp_group, get_pcp_group, get_tp_group
+from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
@@ -41,6 +42,7 @@ from vllm_ascend.attention.utils import (
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.ops.triton.pcp_kv_cache import copy_pcp_kv_cache
+from vllm_ascend.quantization.methods import AscendLinearScheme
 from vllm_ascend.utils import (
     _round_up,
     enable_dsa_cp,
@@ -78,11 +80,23 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         self._initialize_o_proj_weight_switch(WeightSwitchConfig.from_group(get_pcp_group(), shard_axis="input"))
         if not self.enable_pcp_o_proj_weight_sharding:
             return
+        pcp_size = self.o_proj_weight_switch_config.world_size
+        try:
+            input_width = getattr(self.o_proj, "input_size_per_partition", None)
+            if not isinstance(input_width, int) or input_width <= 0 or input_width % pcp_size != 0:
+                raise ValueError(f"input_size_per_partition={input_width!r} cannot be split across pcp_size={pcp_size}")
+            linear_method = self._get_o_proj_weight_switch_method()
+        except (RuntimeError, ValueError) as exc:
+            logger.warning_once(
+                "SFA-PCP O-projection weight sharding is unavailable (%s); using unsharded O-projection weights.",
+                exc,
+            )
+            self.enable_pcp_o_proj_weight_sharding = False
+            return
         self.o_proj_weight_load_partition = WeightLoadPartition.from_nested_groups(
             get_tp_group(),
             get_pcp_group(),
         )
-        linear_method = self._get_o_proj_weight_switch_method()
         self.o_proj_weight_load_state = linear_method.prepare_layer_for_parallel_weight_load(
             self.o_proj,
             self.o_proj_weight_switch_config,
@@ -149,7 +163,13 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
             self.o_proj_weight_switch_config.rank,
             dim=-1,
         )
-        partial_output = linear_method.apply(self.o_proj, local_input, bias=None)
+        if isinstance(linear_method, AscendLinearScheme):
+            # W8A8's quant_bias belongs to the complete O projection. Add it
+            # on only one rank before reducing the TP and PCP weight shards.
+            bias_rank = 0 if get_tp_group().rank_in_group == 0 and self.o_proj_weight_switch_config.rank == 0 else 1
+            partial_output = linear_method.apply(self.o_proj, local_input, bias=None, tp_rank=bias_rank)
+        else:
+            partial_output = linear_method.apply(self.o_proj, local_input, bias=None)
         partial_output = self.o_proj_weight_switch_config.group.all_reduce(partial_output)
 
         if self.o_proj.reduce_results and get_tp_group().world_size > 1:
