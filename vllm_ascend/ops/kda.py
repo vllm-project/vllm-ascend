@@ -1,14 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Shared fla_npu KDA execution; callers own projections and cache updates."""
+"""Shared AscendC KDA execution; callers own projections and cache updates."""
 
 from collections.abc import Sequence
 
 import torch
-
-# KDA operators from the flashserve/flash-linear-attention-npu ecosystem repository.
-# https://github.com/flashserve/flash-linear-attention-npu
-from fla_npu.ops.ascendc import chunk_kda_fwd, recurrent_kda
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
 
 KDA_CHUNK_SIZE = 64
@@ -31,23 +27,19 @@ def run_recurrent_kda(
     num_accepted_tokens: torch.Tensor | None = None,
 ) -> torch.Tensor:
     # Recurrent KDA consumes independent Q/K/V token/head strides directly.
-    output, _ = recurrent_kda(
+    return torch.ops._C_ascend.recurrent_kda(
         q,
         k,
         v,
         raw_gate.contiguous(),
         beta.contiguous(),
         state,
-        cu_seqlens=cu_seqlens,
-        ssm_state_indices=state_indices,
-        A_log=a_log.reshape(-1).contiguous(),
-        dt_bias=dt_bias.contiguous(),
+        cu_seqlens,
+        state_indices,
+        a_log.reshape(-1).contiguous(),
+        dt_bias.contiguous(),
         num_accepted_tokens=num_accepted_tokens,
-        layout="BSND",
         scale=q.shape[-1] ** -0.5,
-        output_final_state=False,
-        inplace_final_state=True,
-        state_v_first=True,
         use_qk_l2norm_in_kernel=True,
         use_gate_in_kernel=True,
         use_beta_sigmoid_in_kernel=not beta_is_preprocessed,
@@ -55,7 +47,6 @@ def run_recurrent_kda(
         safe_gate=lower_bound is not None,
         lower_bound=lower_bound if lower_bound is not None else -5.0,
     )
-    return output
 
 
 def run_chunk_kda(
@@ -65,15 +56,15 @@ def run_chunk_kda(
     raw_gate: torch.Tensor,
     beta: torch.Tensor,
     initial_state: torch.Tensor,
-    cu_seqlens: Sequence[int],
-    chunk_indices: Sequence[int],
+    cu_seqlens: torch.Tensor | Sequence[int],
+    chunk_indices: torch.Tensor | Sequence[int],
     a_log: torch.Tensor,
     dt_bias: torch.Tensor,
     *,
     lower_bound: float | None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Consume preprocessed beta and return output plus the final VK state."""
-    output, final_state, *_ = chunk_kda_fwd(
+    output, final_state, *_ = torch.ops._C_ascend.chunk_kda_fwd(
         l2norm_fwd(q.contiguous()),
         l2norm_fwd(k.contiguous()),
         v.contiguous(),

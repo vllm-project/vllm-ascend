@@ -95,31 +95,35 @@ def build_sfa_dcp_replicated_slot_mapping(
     replicated_view_block_size: int,
     device: torch.device,
 ) -> torch.Tensor:
-    """Build replicated slots with replay-safe request indices and padding."""
+    """Build slots that address the physically replicated indexer cache."""
     num_reqs = common_attn_metadata.num_reqs
     num_input_tokens = common_attn_metadata.num_input_tokens
     num_actual_tokens = min(common_attn_metadata.num_actual_tokens, num_input_tokens)
+    num_query_tokens = int(common_attn_metadata.query_start_loc_cpu[num_reqs])
     slot_mapping_output.fill_(-1)
-    if num_reqs == 0 or num_actual_tokens == 0:
+    if num_actual_tokens == 0:
         return slot_mapping_output
 
-    # Padded input capacity can exceed the device-side query total.
-    # repeat_interleave with a fixed output_size can leave invalid request
-    # indices in that tail, so derive validity from device query boundaries.
-    token_indices = torch.arange(num_input_tokens, dtype=torch.int32, device=device)
-    req_indices = torch.searchsorted(
-        common_attn_metadata.query_start_loc[1 : num_reqs + 1].contiguous(),
-        token_indices,
-        right=True,
+    query_lens = (
+        common_attn_metadata.query_start_loc[1 : num_reqs + 1] - common_attn_metadata.query_start_loc[:num_reqs]
     )
-    valid = (token_indices < num_actual_tokens) & (req_indices < num_reqs)
-    req_indices = req_indices.clamp(max=num_reqs - 1)
-    positions = common_attn_metadata.positions[:num_input_tokens].to(device=device, dtype=torch.int32)
-    positions = torch.where(valid, positions, 0)
+    req_indices = torch.repeat_interleave(
+        torch.arange(num_reqs, dtype=torch.int32, device=device),
+        query_lens.to(device=device),
+        output_size=num_query_tokens,
+    )[:num_actual_tokens]
+    if req_indices.numel() == 0:
+        return slot_mapping_output
+
+    num_actual_tokens = min(num_actual_tokens, req_indices.shape[0])
+    req_indices = req_indices[:num_actual_tokens]
+    positions = common_attn_metadata.positions[:num_actual_tokens].to(
+        device=device,
+        dtype=torch.int32,
+    )
     logical_block_idx = positions // replicated_view_block_size
     block_offsets = positions % replicated_view_block_size
     block_table_indices = req_indices * block_table_replicated_view.shape[1] + logical_block_idx
     block_numbers = block_table_replicated_view.flatten()[block_table_indices]
-    slots = block_numbers * replicated_view_block_size + block_offsets
-    slot_mapping_output[:num_input_tokens] = torch.where(valid, slots, -1)
+    slot_mapping_output[:num_actual_tokens] = block_numbers * replicated_view_block_size + block_offsets
     return slot_mapping_output
