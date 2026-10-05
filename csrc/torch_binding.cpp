@@ -30,7 +30,7 @@
 #include "ops.h"
 #include "utils.h"
 #include "aclnn_torch_adapter/op_api_common.h"
-#include "aclnn_torch_adapter/cann_op_api.h"
+#include "attention/quant_lightning_indexer_v2/official_qli_torch_adpt.h"
 #include "moe/add_rms_norm_bias/add_rms_norm_bias_torch_adpt.h"
 #include "moe/rms_norm_cast/rms_norm_cast_torch_adpt.h"
 #ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
@@ -1164,7 +1164,7 @@ std::tuple<at::Tensor, at::Tensor> npu_quant_lightning_indexer_v2_npu(
     }
     CannQliTensor query_wrapper{query};
     CannQliTensor key_wrapper{key};
-    EXEC_NPU_CMD_WITH_RESOLVER(GetCannQliOpApiFuncAddr, aclnnQuantLightningIndexerV2,
+    EXEC_OFFICIAL_QLI_CMD(aclnnQuantLightningIndexerV2,
         query_wrapper, key_wrapper, weights, query_dequant_scale, key_dequant_scale,
         cu_seqlens_q, cu_seqlens_k, seqused_q, seqused_k, cmp_residual_k, block_table, output_idx_offset, metadata,
         topk, quant_mode, max_seqlen_q, query_layout_ptr, key_layout_ptr, mask_mode, cmp_ratio, return_value,
@@ -1353,7 +1353,7 @@ at::Tensor npu_quant_lightning_indexer_v2_metadata_npu(
     char *layout_k_ptr = const_cast<char *>(layout_k_str.c_str());
 
     if constexpr (UseCann) {
-        EXEC_NPU_CMD_WITH_RESOLVER(GetCannQliOpApiFuncAddr, aclnnQuantLightningIndexerV2Metadata,
+        EXEC_OFFICIAL_QLI_CMD(aclnnQuantLightningIndexerV2Metadata,
                      cu_seqlens_q_val, cu_seqlens_k_val, seqused_q_val, seqused_k_val,
                      cmp_residual_k_val, num_heads_q, num_heads_k, head_dim, topk, quant_mode, batch_size, max_seqlen_q,
                      max_seqlen_k, layout_q_ptr, layout_k_ptr, mask_mode, cmp_ratio, output);

@@ -9,7 +9,7 @@
  */
 
 /*!
- * \file quant_lightning_indexer_v2_def.cpp
+ * \file vllm_ascend_quant_lightning_indexer_v2_def.cpp
  * \brief
  */
 

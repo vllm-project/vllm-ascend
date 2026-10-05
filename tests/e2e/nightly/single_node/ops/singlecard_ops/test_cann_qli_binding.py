@@ -7,7 +7,6 @@ This test does not remove custom OPP paths or import cann_ops_transformer.
 """
 
 from functools import partial
-from statistics import median
 
 import pytest
 import torch
@@ -20,7 +19,7 @@ from vllm_ascend.utils import enable_custom_op
 @pytest.mark.parametrize("quant_mode", [1, 5])
 @pytest.mark.parametrize("batch,qlen,klen", [(1, 1, 128), (1, 8, 4096), (2, 1, 4096)])
 @torch.inference_mode()
-def test_cann_qli_against_cpu(quant_mode, batch, qlen, klen, record_property):
+def test_cann_qli_against_cpu(quant_mode, batch, qlen, klen):
     enable_custom_op()
     torch.manual_seed(123)
     heads, dim, block_size, topk = 64, 128, 128, 2048
@@ -114,25 +113,3 @@ def test_cann_qli_against_cpu(quant_mode, batch, qlen, klen, record_property):
             # FP4's quantized score accumulation may differ slightly at the
             # top-k cutoff from the CPU reference; 2% covers that rounding.
             torch.testing.assert_close(actual, expected, rtol=0.02, atol=0.01)
-
-    def run_pair():
-        return run_qli(metadata=make_metadata())
-
-    # Device-event samples after correctness checks and warmup. These are
-    # single-operator measurements, not model throughput or speedup claims.
-    for name, operation in (("metadata", make_metadata), ("qli", run_qli), ("pair", run_pair)):
-        for _ in range(10):
-            operation()
-        torch.npu.synchronize()
-        samples_us = []
-        for _ in range(5):
-            start = torch.npu.Event(enable_timing=True)
-            end = torch.npu.Event(enable_timing=True)
-            start.record()
-            for _ in range(50):
-                operation()
-            end.record()
-            end.synchronize()
-            samples_us.append(start.elapsed_time(end) * 1000 / 50)
-        record_property(f"{name}_median_us", median(samples_us))
-        record_property(f"{name}_samples_us", str(samples_us))
