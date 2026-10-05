@@ -5,6 +5,7 @@ import ctypes
 import struct
 import sys
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -112,7 +113,9 @@ def test_hixl_communicator_reads_through_hixl_compat(monkeypatch):
     monkeypatch.setattr(torch.distributed, "all_reduce", all_reduce)
 
     device = SimpleNamespace(type="npu", index=0)
-    weights = [
+    # Each layer holds one stacked view and one per-expert tensor list; the
+    # heterogeneous shape is intentional, so keep the annotation loose.
+    weights: list[list[Any]] = [
         [_Tensor(1000, device), [_Tensor(2100, device, (4,), 16), _Tensor(2200, device, (4,), 16)]],
         [_Tensor(3000, device), [_Tensor(4100, device, (4,), 16), _Tensor(4200, device, (4,), 16)]],
     ]
