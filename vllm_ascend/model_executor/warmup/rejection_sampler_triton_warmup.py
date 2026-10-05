@@ -27,7 +27,9 @@ if TYPE_CHECKING:
 
 # Keep dummy tensors small; JIT keys are driven by constexpr flags.
 _WARMUP_VOCAB_SIZE = 1024
+_WARMUP_SELECTED_VOCAB_SIZE = 256
 _SUB_BLOCK = 4096
+_VOCAB_BLOCK_SIZE = 512
 _EPSILON = 1e-10
 
 
@@ -91,6 +93,7 @@ def _make_rejection_tensors(
     device: torch.device,
     *,
     with_draft_probs: bool,
+    enable_reduce_sampling: bool,
 ) -> dict[str, Any]:
     """Build dummy tensors for recovered / random / greedy warmup launches."""
     num_tokens = batch_size * max_spec_len
@@ -112,13 +115,27 @@ def _make_rejection_tensors(
         global_vocab = vocab_size
         draft_probs = None
 
-    prob_vocab = global_vocab if with_draft_probs else vocab_size
+    if enable_reduce_sampling:
+        prob_vocab = _WARMUP_SELECTED_VOCAB_SIZE
+        global_vocab_size = global_vocab if with_draft_probs else _WARMUP_SELECTED_VOCAB_SIZE
+        target_indices = torch.randint(
+            0,
+            vocab_size,
+            (num_tokens, prob_vocab),
+            dtype=torch.int32,
+            device=device,
+        )
+    else:
+        prob_vocab = global_vocab if with_draft_probs else vocab_size
+        global_vocab_size = prob_vocab
+        target_indices = None
 
     return {
         "cu_num_draft_tokens": cu_num_draft_tokens,
         "draft_token_ids": torch.zeros(num_tokens, dtype=torch.int32, device=device),
         "draft_probs": draft_probs,
         "target_probs": torch.rand(num_tokens, prob_vocab, dtype=torch.float32, device=device),
+        "target_indices": target_indices,
         "bonus_token_ids": torch.zeros(batch_size, 1, dtype=torch.int32, device=device),
         "recovered_token_ids": torch.zeros(num_tokens, dtype=torch.int32, device=device),
         "uniform_probs": torch.full((num_tokens,), 0.5, dtype=torch.float32, device=device),
@@ -137,7 +154,7 @@ def _make_rejection_tensors(
             device=device,
         ),
         "target_argmax": torch.zeros(num_tokens, dtype=torch.int64, device=device),
-        "global_vocab_size": prob_vocab,
+        "global_vocab_size": global_vocab_size,
         "prob_vocab_size": prob_vocab,
     }
 
@@ -206,6 +223,7 @@ def _warm_greedy(
         _WARMUP_VOCAB_SIZE,
         device,
         with_draft_probs=False,
+        enable_reduce_sampling=False,
     )
     rejection_greedy_sample_with_triton(
         tensors["output_token_ids"],
@@ -227,6 +245,7 @@ def _warm_sample_recovered(
     tensors: dict[str, Any],
     *,
     no_draft_probs: bool,
+    enable_reduce_sampling: bool,
 ) -> None:
     """Warm ``sample_recovered_tokens_kernel`` for one constexpr combination."""
     sample_recovered_tokens_kernel[(batch_size, max_spec_len)](
@@ -235,9 +254,13 @@ def _warm_sample_recovered(
         tensors["draft_token_ids"],
         tensors["draft_probs"],
         tensors["target_probs"],
+        tensors["target_indices"],
         tensors["q"],
         tensors["prob_vocab_size"],
+        tensors["global_vocab_size"],
         NO_DRAFT_PROBS=no_draft_probs,
+        ENABLE_REDUCE_SAMPLING=enable_reduce_sampling,
+        VOCAB_BLOCK_SIZE=_VOCAB_BLOCK_SIZE,
         SUB_BLOCK=_SUB_BLOCK,
         multibuffer=False,
     )
@@ -251,6 +274,7 @@ def _warm_rejection_random(
     tensors: dict[str, Any],
     *,
     no_draft_probs: bool,
+    enable_reduce_sampling: bool,
     block_verify: bool,
 ) -> None:
     """Warm random or block-verify rejection kernel for one constexpr combination."""
@@ -266,6 +290,7 @@ def _warm_rejection_random(
         tensors["draft_token_ids"],
         draft_probs,
         tensors["target_probs"],
+        tensors["target_indices"],
         tensors["bonus_token_ids"],
         tensors["recovered_token_ids"],
         tensors["uniform_probs"],
@@ -279,6 +304,7 @@ def _warm_rejection_random(
     constexpr_kwargs = dict(
         NO_ORI_TARGET_PROBS=ori_target_probs is None,
         NO_DRAFT_PROBS=no_draft_probs,
+        ENABLE_REDUCE_SAMPLING=enable_reduce_sampling,
         ENTROPY_VERIFY=using_entropy_verify,
         BLOCK_SIZE=block_size,
         POSTERIOR_THRESHOLD=float(rejection_config.posterior_threshold),
@@ -296,6 +322,7 @@ def _warm_rejection_random(
         rejection_random_sample_kernel[(grid,)](
             *kernel_args,
             None,  # synthetic_conditional_rates_ptr (unused unless SYNTHETIC_MODE)
+            VOCAB_BLOCK_SIZE=_VOCAB_BLOCK_SIZE,
             SYNTHETIC_MODE=False,
             **constexpr_kwargs,
         )
@@ -328,6 +355,7 @@ def rejection_sampler_triton_warmup(worker: NPUWorker) -> None:
     vocab_size = min(worker.vllm_config.model_config.get_vocab_size(), _WARMUP_VOCAB_SIZE)
 
     ascend_config = get_ascend_config()
+    enable_reduce_sampling = bool(ascend_config.enable_reduce_sample)
     # Match rejection_sample: block verify needs config and max_spec_len >= 3.
     block_verify = max_spec_len >= 3 and bool(ascend_config.rejection_sampler_config.enable_block_verify)
     no_draft_probs_values = _collect_no_draft_probs_values(
@@ -347,12 +375,14 @@ def rejection_sampler_triton_warmup(worker: NPUWorker) -> None:
             vocab_size,
             device,
             with_draft_probs=not no_draft_probs,
+            enable_reduce_sampling=enable_reduce_sampling,
         )
         _warm_sample_recovered(
             1,
             max_spec_len,
             tensors,
             no_draft_probs=no_draft_probs,
+            enable_reduce_sampling=enable_reduce_sampling,
         )
 
     # expand / greedy / random specialize on BLOCK_SIZE from batch_size.
@@ -380,6 +410,7 @@ def rejection_sampler_triton_warmup(worker: NPUWorker) -> None:
                 vocab_size,
                 device,
                 with_draft_probs=not no_draft_probs,
+                enable_reduce_sampling=enable_reduce_sampling,
             )
             _warm_rejection_random(
                 batch_size,
@@ -388,5 +419,6 @@ def rejection_sampler_triton_warmup(worker: NPUWorker) -> None:
                 grid,
                 tensors,
                 no_draft_probs=no_draft_probs,
+                enable_reduce_sampling=enable_reduce_sampling,
                 block_verify=block_verify,
             )

@@ -40,54 +40,51 @@ else:
 
 class BaseDeviceAdaptor:
     @classmethod
-    def scatter_cache(cls, var: torch.Tensor, indices: torch.Tensor, updates: torch.Tensor) -> None:
-        """Dispatch a cache scatter with the original operator's arguments.
+    def scatter_cache(cls, key: torch.Tensor, cache: torch.Tensor, slots: torch.Tensor, tokens: int) -> None:
+        """Write cache rows in place, falling back to the generic scatter.
 
-        Callers retain their existing views and slices. SK and generic scatter
-        receive the original tensors; A5 adapts their layout for PA without
-        copying the destination, truncating updates, or filtering slots.
+        The actual-token prefix must contain valid slots: this helper does not
+        filter negative slots, and neither fast operator is assumed to skip them.
+        Layout checks inspect strides only; no device-to-host synchronization is
+        introduced. Never make a contiguous copy of the destination cache.
         """
-        if cls._is_row_cache(var, indices, updates) and cls._scatter_cache(var, indices, updates):
-            return
-        torch_npu.npu_scatter_nd_update_(var, indices, updates)
+        if (
+            key.ndim in (2, 3)
+            and cache.ndim == 4
+            and cache.shape[2] == 1
+            and (key.ndim == 2 or key.shape[1] == 1)
+            and key.shape[0] >= tokens
+            and slots.ndim == 1
+            and slots.numel() >= tokens
+            and slots.dtype in (torch.int32, torch.int64)
+            and key.dtype == cache.dtype
+            and key.shape[-1] == cache.shape[-1]
+        ):
+            stored = cls._scatter_cache(key[:tokens].reshape(tokens, key.shape[-1]), cache, slots[:tokens])
+            if stored:
+                return
+
+        torch_npu.npu_scatter_nd_update_(
+            cache.view(-1, key.shape[-1]),
+            slots[:tokens].view(-1, 1),
+            key[:tokens],
+        )
 
     @staticmethod
-    def _is_row_cache(var, indices, updates) -> bool:
-        # This adaptor optimizes row writes: var[N, D], indices[T, 1],
-        # updates[T, D]. These checks bound the cache optimization, not SK's
-        # full shape support. Other inputs retain the original scatter path.
-        if var.ndim != 2 or indices.ndim != 2 or updates.ndim != 2:
-            return False
-        if indices.shape[1] != 1 or updates.shape != (indices.shape[0], var.shape[1]):
-            return False
-        return updates.dtype == var.dtype and indices.dtype in (torch.int32, torch.int64)
-
-    @staticmethod
-    def _scatter_cache(var, indices, updates) -> bool:
-        # Select only available kernels and supported cache dtypes. FP32 is
-        # used by indexer scales; FP8 requires a matching kernel ABI.
-        profile = get_current_hardware_profile()
-        if not profile.supports(HardwareCapability.SCATTER_ND_CACHE_STORE):
+    def _scatter_cache(key, cache, slots) -> bool:
+        if not get_current_hardware_profile().supports(HardwareCapability.SCATTER_ND_CACHE_STORE):
             return False
         operation = getattr(torch.ops._C_ascend, "npu_scatter_nd_update_sk", None)
-        if operation is None:
+        if operation is None or key.dtype not in (torch.int8, torch.float16, torch.bfloat16):
             return False
-        if updates.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
-            if not profile.supports(HardwareCapability.SCATTER_ND_FP8_CACHE_STORE):
-                return False
-        elif updates.dtype not in (torch.int8, torch.float16, torch.bfloat16, torch.float32):
+        width = key.shape[-1]
+        try:
+            target = cache.view(-1, width)
+        except RuntimeError:
             return False
-
-        # Write the destination in place: rows must be internally contiguous
-        # and non-overlapping. Never make a contiguous copy of the cache.
-        # Read-only indices/updates are made contiguous inside ACLNN as needed.
-        if var.stride(1) != 1 or var.stride(0) < var.shape[1]:
+        if target.stride(1) != 1 or target.stride(0) < width:
             return False
-        # arch35 can drop writes to row-strided destinations. Keep them on
-        # generic scatter until fixed; A2/A3 retain their stride-aware kernel.
-        if not var.is_contiguous() and not profile.supports(HardwareCapability.SCATTER_ND_STRIDED_CACHE_STORE):
-            return False
-        operation(var, indices, updates)
+        operation(target, slots.reshape(-1, 1), key)
         return True
 
     @classmethod
@@ -161,8 +158,8 @@ class BaseDeviceAdaptor:
 
         return torch_npu.npu_fused_infer_attention_score(
             query=query,
-            key=key,
-            value=value,
+            key=key.contiguous(),
+            value=value.contiguous(),
             num_key_value_heads=num_key_value_heads,
             num_heads=num_heads,
             scale=scale,
@@ -303,21 +300,6 @@ class BaseDeviceAdaptor:
         )
 
     @staticmethod
-    def npu_grouped_matmul_situ_quant(
-        *,
-        x: torch.Tensor,
-        weight: torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...],
-        group_list: torch.Tensor,
-        group_list_type: int,
-        weight_scale: torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...],
-        x_scale: torch.Tensor,
-        beta: float,
-        linear_beta: float,
-        mxfp_quant_dtype: QuantType | None = None,
-    ):
-        raise RuntimeError("GMM-SiTU quant fusion is only supported on Ascend A5.")
-
-    @staticmethod
     def get_quant_gmm2_kwargs(
         *,
         input_dtype: torch.dtype,
@@ -416,7 +398,11 @@ class BaseDeviceAdaptor:
         enable_sparse_li_c8: bool,
         use_torch_npu_lightning_indexer: bool,
     ) -> torch.Tensor:
+        # DSV3.2 currently has graph compilation issues when using torch_npu.npu.lightning_indexer.
+        # So two branches are maintained temporarily.
+        # TODO: torch.ops._C_ascend.npu_lightning_indexer needs to be removed.
         indexer_cache_idx = indexer_k_cache_idx
+        indexer_scale_cache_idx = indexer_scale_cache_idx
 
         if enable_sparse_li_c8:
             # ``kv_cache`` is the indexer's own cache tuple (k + scale).
@@ -440,8 +426,21 @@ class BaseDeviceAdaptor:
                 sparse_count=2048,
                 sparse_mode=3,
             )
-        else:
+        elif use_torch_npu_lightning_indexer:
             topk_indices, _ = torch_npu.npu_lightning_indexer(
+                query=q_li,
+                key=kv_cache[indexer_cache_idx],
+                weights=weights,
+                actual_seq_lengths_query=actual_seq_lengths_query,
+                actual_seq_lengths_key=actual_seq_lengths_key,
+                block_table=attn_metadata.block_table,
+                layout_query="TND",
+                layout_key="PA_BSND",
+                sparse_count=2048,
+                sparse_mode=3,
+            )
+        else:
+            topk_indices, _ = torch.ops._C_ascend.npu_lightning_indexer(
                 query=q_li,
                 key=kv_cache[indexer_cache_idx],
                 weights=weights,
@@ -935,28 +934,13 @@ class BaseDeviceAdaptor:
 
 class A5DeviceAdaptor(BaseDeviceAdaptor):
     @staticmethod
-    def _scatter_cache(var, indices, updates) -> bool:
+    def _scatter_cache(key, cache, slots) -> bool:
         operation = getattr(torch_npu, "npu_scatter_pa_cache", None)
-        if operation is None or not var.is_contiguous():
+        if operation is None or not cache.is_contiguous():
             return False
-        if updates.dtype not in (
-            torch.int8,
-            torch.float16,
-            torch.bfloat16,
-            torch.float32,
-            torch.float8_e4m3fn,
-            torch.float8_e5m2,
-        ):
+        if key.dtype not in (torch.int8, torch.float16, torch.bfloat16, torch.float32, torch.float8_e4m3fn):
             return False
-        # PA expects [T, H, D] keys and [blocks, block_size, H, D] cache.
-        # With one row per block, flattened slot indices keep their original
-        # offsets. This is a view of the same destination, including its offset.
-        width = var.shape[1]
-        operation(
-            updates.reshape(-1, 1, width).contiguous(),
-            indices.reshape(-1).contiguous(),
-            key_cache=var.view(var.shape[0], 1, 1, width),
-        )
+        operation(key.reshape(-1, 1, key.shape[-1]).contiguous(), slots.contiguous(), key_cache=cache)
         return True
 
     @classmethod
@@ -995,8 +979,8 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
     ):
         return torch_npu.npu_fused_infer_attention_score(
             query=query,
-            key=key,
-            value=value,
+            key=key.contiguous(),
+            value=value.contiguous(),
             num_key_value_heads=num_key_value_heads,
             num_heads=num_heads,
             scale=scale,
@@ -1017,24 +1001,6 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         sparse_mode: int = 3,
         return_lse: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        if getattr(sfa_impl, "qk_rope_head_dim", q_pe.shape[-1]) == 0:
-            # RoPE0 packed C8 is implemented by the vllm-ascend custom operator
-            # (csrc/attention/kv_quant_sparse_flash_attention). The torch_npu
-            # built-in aclnn op has no RoPE0 contract: it sizes its outputs from
-            # rope_head_dim=64 and faults while registering them. Route RoPE0 to
-            # the custom operator and keep RoPE64 on the built-in one.
-            return BaseDeviceAdaptor._execute_kv_quant_sparse_flash_attention(
-                sfa_impl,
-                ql_nope,
-                q_pe,
-                kv,
-                block_table,
-                topk_indices,
-                actual_seq_lengths_query,
-                actual_seq_lengths_key,
-                sparse_mode=sparse_mode,
-                return_lse=return_lse,
-            )
         # torch.cat allocates a fresh contiguous output, so no extra
         # .contiguous() pass is needed here.
         query = torch.cat([ql_nope, q_pe], dim=-1)
@@ -1231,87 +1197,6 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             swiglu_limit=swiglu_limit,
             use_mxfp_quant=False,
         )
-
-    @staticmethod
-    def npu_grouped_matmul_situ_quant(
-        *,
-        x: torch.Tensor,
-        weight: torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...],
-        group_list: torch.Tensor,
-        group_list_type: int,
-        weight_scale: torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...],
-        x_scale: torch.Tensor,
-        beta: float,
-        linear_beta: float,
-        mxfp_quant_dtype: QuantType | None = None,
-    ):
-        if mxfp_quant_dtype != QuantType.W4A8MXFP:
-            raise RuntimeError("GMM-SiTU quant fusion requires W4A8 MXFP quantization.")
-
-        weight_scale = A5DeviceAdaptor._restore_mxfp_semantic_dtype(weight_scale, torch.float8_e8m0fnu)
-        x_scale = A5DeviceAdaptor._restore_mxfp_semantic_dtype(x_scale, torch.float8_e8m0fnu)
-
-        is_list = isinstance(weight, (list, tuple))
-        if isinstance(weight, torch.Tensor) and not weight.is_contiguous():
-            weight = weight.transpose(1, 2)
-        if isinstance(weight_scale, (list, tuple)):
-            weight_scale = [
-                scale if scale.is_contiguous() else A5DeviceAdaptor._align_gmm_situ_weight_scale(scale)
-                for scale in weight_scale
-            ]
-        elif not weight_scale.is_contiguous():
-            weight_scale = A5DeviceAdaptor._align_gmm_situ_weight_scale(weight_scale)
-
-        op = torch.ops._C_ascend.grouped_matmul_situ_quant_weight_nz
-        if is_list:
-            op = op.list
-        out, out_scale = op(
-            x=x,
-            weight=weight,
-            weight_scale=weight_scale,
-            weight_assist_matrix=None,
-            bias=None,
-            x_scale=x_scale,
-            smooth_scale=None,
-            group_list=group_list,
-            dequant_mode=1,
-            dequant_dtype=0,
-            quant_mode=1,
-            group_list_type=group_list_type,
-            tuning_config=None,
-            beta=beta,
-            linear_beta=linear_beta,
-        )
-        return out, out_scale, None
-
-    @staticmethod
-    def _align_gmm_situ_weight_scale(scale: torch.Tensor) -> torch.Tensor:
-        scale = scale.transpose(-3, -2)
-        if not scale.is_contiguous():
-            raise ValueError(
-                "weight_scale must be the transposed view of N-major bytes "
-                f"or an already-contiguous N-major tensor; got shape {tuple(scale.shape)} "
-                f"and strides {tuple(scale.stride())}"
-            )
-        return scale
-
-    @staticmethod
-    def _restore_mxfp_semantic_dtype(
-        tensors: torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...],
-        semantic_dtype: torch.dtype,
-    ) -> torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...]:
-        def restore_dtype(tensor: torch.Tensor) -> torch.Tensor:
-            if tensor.dtype != torch.uint8:
-                return tensor
-            if isinstance(tensor, torch.Tensor) and int(torch_npu.get_npu_format(tensor)) != int(torch_npu.Format.ND):
-                return tensor
-            return tensor.view(semantic_dtype)
-
-        if isinstance(tensors, list):
-            return [restore_dtype(tensor) for tensor in tensors]
-        if isinstance(tensors, tuple):
-            return tuple(restore_dtype(tensor) for tensor in tensors)
-        return restore_dtype(tensors)
 
     @staticmethod
     def get_quant_gmm2_kwargs(
