@@ -13,9 +13,20 @@ from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.ops.triton.v2.sample.sampling_mask import sampling_mask_from_logits_npu
 
 _HAS_COMPACT_IDS = "token_ids" in SamplingMaskTensors._fields
+# vLLM #59359 added cu_num_logits and request-major multi-row output slots.
+_HAS_ROWS_PER_REQUEST = "rows_per_request" in SamplingMaskTensors._fields
 
 
 def _from_logits(logits, num_sampled_tokens, max_num_kept=512):
+    if _HAS_ROWS_PER_REQUEST:
+        cu_num_logits = torch.arange(logits.shape[0] + 1, dtype=torch.int32, device=logits.device)
+        return sampling_mask_from_logits_npu(
+            SamplingMaskTensors,
+            logits,
+            cu_num_logits,
+            num_sampled_tokens,
+            max_num_kept,
+        )
     if _HAS_COMPACT_IDS:
         return sampling_mask_from_logits_npu(
             SamplingMaskTensors,
@@ -149,3 +160,61 @@ def test_sampling_mask_non_contiguous_vocab_dimension():
         expected = [expected_ids] * 2
 
     assert result == expected
+
+
+@pytest.mark.skipif(not _HAS_ROWS_PER_REQUEST, reason="requires the request-major SamplingMaskTensors API")
+def test_sampling_mask_uses_request_boundaries():
+    init_device_properties_triton()
+
+    logits = torch.full((6, 8), -float("inf"), device="npu")
+    logits[0, [1, 3]] = 0
+    logits[2, [2, 4, 6]] = 0
+    logits[5, [0, 7]] = 0
+
+    tensors = sampling_mask_from_logits_npu(
+        SamplingMaskTensors,
+        logits,
+        torch.tensor([0, 2, 5, 6], dtype=torch.int32, device="npu"),
+        torch.tensor([1, 0, 1], dtype=torch.int32, device="npu"),
+        3,
+    )
+    torch.npu.synchronize()
+
+    assert tensors.tolists().to_nested_list() == [[1, 3], [], [0, 7]]
+
+
+@pytest.mark.skipif(not _HAS_ROWS_PER_REQUEST, reason="requires the request-major SamplingMaskTensors API")
+def test_sampling_mask_multirow_request_layout():
+    """Spec-decode layout: each request owns a fixed number of output slots."""
+    init_device_properties_triton()
+
+    rows_per_request = 4
+    vocab_size = 64
+    row_sizes = [3, 5, 1, 2, 9, 4, 6]
+    generator = torch.Generator().manual_seed(1)
+    logits = torch.full((len(row_sizes), vocab_size), -float("inf"))
+    for row, size in enumerate(row_sizes):
+        kept = torch.randperm(vocab_size, generator=generator)[:size]
+        logits[row, kept] = torch.randn(size, generator=generator)
+
+    cu_num_logits = torch.tensor([0, 3, 4, 7], dtype=torch.int32)
+    num_sampled = torch.tensor([2, 1, 3], dtype=torch.int32)
+    expected = [
+        torch.isfinite(logits[int(cu_num_logits[req]) + slot]).nonzero().flatten().tolist()
+        for req in range(len(num_sampled))
+        for slot in range(int(num_sampled[req]))
+    ]
+
+    tensors = sampling_mask_from_logits_npu(
+        SamplingMaskTensors,
+        logits.to("npu"),
+        cu_num_logits.to("npu"),
+        num_sampled.to("npu"),
+        3,
+        rows_per_request,
+    )
+    torch.npu.synchronize()
+
+    assert tensors.rows_per_request == rows_per_request
+    assert tensors.counts.shape == (len(num_sampled) * rows_per_request,)
+    assert tensors.tolists(num_sampled.numpy()).to_nested_list() == expected
