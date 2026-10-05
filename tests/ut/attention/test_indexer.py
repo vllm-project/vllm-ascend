@@ -77,7 +77,7 @@ def _make_common_metadata() -> SimpleNamespace:
         seq_lens=torch.tensor([5, 6, 7]),
         max_query_len=2,
         is_prefilling=torch.tensor([True, True]),
-        context_parallel_metadata=None,
+        dcp_context=None,
         block_table_tensor=torch.arange(6).view(3, 2),
         group_len=MagicMock(name="group_len"),
         group_key_idx=MagicMock(name="group_key_idx"),

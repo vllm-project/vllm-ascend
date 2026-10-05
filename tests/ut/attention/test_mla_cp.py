@@ -113,7 +113,7 @@ def test_mla_dcp_v2_mixed_batch_survives_base_decode_length_slice(num_prefills, 
     builder.attn_mask_builder = Mock()
     builder.nope_zero_rope_cache = None
     common = SimpleNamespace(
-        context_parallel_metadata=None,
+        dcp_context=None,
         num_reqs=1 + num_prefills,
         dcp_local_seq_lens_cpu=torch.tensor(
             [(length + dcp_size - 1) // dcp_size for length in [11] + [18] * num_prefills],

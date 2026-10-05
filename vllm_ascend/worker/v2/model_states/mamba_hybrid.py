@@ -302,6 +302,12 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             num_accepted_tokens=num_accepted_tokens,
             num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
         )
+        max_query_len = input_batch.num_scheduled_tokens.max().item()
+        dcp_context = (
+            self.dcp_manager.generate_dcp_metadata_v2(input_batch, attn_groups, num_reqs, max_query_len)
+            if self.dcp_manager is not None
+            else None
+        )
         self.attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,
@@ -310,13 +316,14 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             num_actual_tokens=input_batch.num_tokens,
             query_start_loc_gpu=input_batch.query_start_loc,
             query_start_loc_cpu=torch.from_numpy(input_batch.query_start_loc_np),
-            max_query_len=input_batch.num_scheduled_tokens.max().item(),
+            max_query_len=max_query_len,
             seq_lens=input_batch.seq_lens,
             max_seq_len=self.max_model_len,
             block_tables=block_tables,
             slot_mappings=slot_mappings,
             kv_cache_config=kv_cache_config,
             dcp_local_seq_lens=input_batch.dcp_local_seq_lens,
+            dcp_context=dcp_context,
             parallel_config=self.vllm_config.parallel_config,
             seq_lens_np=input_batch.seq_lens_np,
             positions=input_batch.positions,

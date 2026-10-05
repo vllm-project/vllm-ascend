@@ -33,7 +33,6 @@ def test_mla_dcp_decode_metadata_slices_lengths_to_decode_batch(mock_build, dcp_
         num_computed_tokens_of_dcp=local_lengths.numpy(),
         query_lens_cpu=torch.tensor([4, 8], dtype=torch.int32),
         max_query_len=8,
-        draft_cp_seq_len=local_lengths[:, dcp_rank],
         dcp_mtp_attn_mask=mtp_mask,
     )
     builder = AscendMlaDCPMetadataBuilder.__new__(AscendMlaDCPMetadataBuilder)
@@ -47,7 +46,7 @@ def test_mla_dcp_decode_metadata_slices_lengths_to_decode_batch(mock_build, dcp_
     result = builder.build_decode_metadata(
         common_prefix_len=0,
         common_attn_metadata=SimpleNamespace(
-            context_parallel_metadata=dcp_metadata,
+            dcp_context=dcp_metadata,
             dcp_local_seq_lens_cpu=local_lengths[:, dcp_rank],
         ),
     )

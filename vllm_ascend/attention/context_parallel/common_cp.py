@@ -68,7 +68,7 @@ class DCPMetadataBuilderMixin:
     def _require_dcp_metadata(
         common_attn_metadata: Any,
     ) -> Any:
-        dcp_metadata = common_attn_metadata.context_parallel_metadata
+        dcp_metadata = common_attn_metadata.dcp_context
         if dcp_metadata is None or dcp_metadata.num_computed_tokens_of_dcp is None:
             raise AssertionError("DCP metadata must be populated.")
         return dcp_metadata

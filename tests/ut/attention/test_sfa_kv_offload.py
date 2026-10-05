@@ -24,7 +24,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
 
 def _make_boundary_decode_metadata():
     return SimpleNamespace(
-        context_parallel_metadata=None,
+        dcp_context=None,
         max_query_len=1,
         num_reqs=1,
         num_actual_tokens=1,

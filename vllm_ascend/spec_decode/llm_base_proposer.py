@@ -660,14 +660,21 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             update_params = []
             for per_step_metadata in multi_steps_attn_metadata:
                 for layer_name, metadata in per_step_metadata.items():
-                    update_params.append(
-                        {
-                            "layer_name": layer_name,
+                    if getattr(metadata, "decode_meta", None) is not None:
+                        from vllm.distributed import get_dcp_group
+
+                        from vllm_ascend.attention.context_parallel.attention_cp import DCPFIAParamProvider
+
+                        params = DCPFIAParamProvider(layer_name, get_dcp_group().rank_in_group, True).resolve(
+                            per_step_metadata
+                        )
+                    else:
+                        params = {
                             "actual_seq_lengths": metadata.actual_seq_lengths_q,
                             "actual_seq_lengths_kv": metadata.seq_lens_list,
                             "block_table": metadata.block_tables,
                         }
-                    )
+                    update_params.append({"layer_name": layer_name, **params})
             self._runnable.update_draft_model_metadata(update_params)  # type: ignore
             self._runnable.set_attn_backend(att_backend)  # type: ignore
 
@@ -846,7 +853,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 )
                 if dcp_manager is not None:
                     # update long_seq related params and flatten block_table
-                    common_attn_metadata.context_parallel_metadata = dcp_manager.long_seq_metadata
+                    common_attn_metadata.dcp_context = dcp_manager.long_seq_metadata
 
                 assert len(self.draft_attn_groups) > 0
                 # update the tensor's address for each step.

@@ -207,14 +207,14 @@ def test_prepare_legacy_dcp_metadata_uses_full_query_kv_length(prefill_flags) ->
         _seq_lens_cpu=torch.tensor([133, 261], dtype=torch.int32),
         seq_lens=torch.tensor([133, 261], dtype=torch.int32),
         is_prefilling=torch.tensor(prefill_flags),
-        context_parallel_metadata=None,
+        dcp_context=None,
     )
 
     common_attn_metadata.query_start_loc_cpu = torch.tensor([0, 5, 10], dtype=torch.int32)
     common_attn_metadata.max_query_len = 5
     manager.prepare_legacy_dcp_metadata(common_attn_metadata)
 
-    metadata = common_attn_metadata.context_parallel_metadata
+    metadata = common_attn_metadata.dcp_context
     np.testing.assert_array_equal(
         metadata.num_computed_tokens_of_dcp,
         np.array([[67, 66], [131, 130]], dtype=np.int32),
@@ -309,7 +309,7 @@ def test_prepare_spec_decode_drafting_metadata_transitions_to_decode() -> None:
         max_query_len=8,
     )
     common_attn_metadata = SimpleNamespace(
-        context_parallel_metadata=original_dcp_metadata,
+        dcp_context=original_dcp_metadata,
         query_start_loc_cpu=torch.tensor([0, 1, 2], dtype=torch.int32),
         is_prefilling=torch.tensor([True, True]),
         _seq_lens_cpu=torch.tensor([8, 12], dtype=torch.int32),
@@ -331,10 +331,9 @@ def test_prepare_spec_decode_drafting_metadata_transitions_to_decode() -> None:
     # The common global lengths have already advanced; do not add another step.
     assert common_attn_metadata.dcp_local_seq_lens_cpu.tolist() == [4, 6]
     assert common_attn_metadata.dcp_local_seq_lens.tolist() == [3, 5]
-    assert common_attn_metadata.context_parallel_metadata is None
+    assert common_attn_metadata.dcp_context is None
     assert not torch.any(common_attn_metadata.is_prefilling)
     assert original_dcp_metadata.max_query_len == 8
-    assert original_dcp_metadata.draft_cp_seq_len is None
 
 
 def test_update_spec_decode_drafting_metadata_requires_mla_decode() -> None:

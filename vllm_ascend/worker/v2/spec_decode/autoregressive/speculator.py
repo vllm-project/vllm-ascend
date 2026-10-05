@@ -690,6 +690,15 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         layer_name, metadata = next(iter(draft_attn_metadata.items()))
         block_table = metadata.block_tables
         if is_draft_model_prefill:
+            if self.use_dcp and getattr(metadata, "decode_meta", None) is not None:
+                from vllm.distributed import get_dcp_group
+
+                from vllm_ascend.attention.context_parallel.attention_cp import DCPFIAParamProvider
+
+                params = DCPFIAParamProvider(layer_name, get_dcp_group().rank_in_group, True).resolve(
+                    draft_attn_metadata
+                )
+                return [{"layer_name": layer_name, **params}]
             return [
                 {
                     "layer_name": layer_name,
@@ -707,6 +716,18 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
                 min(int(seq_len) + step, self.max_model_len) for seq_len in self.input_batch.seq_lens_np[:num_reqs]
             ]
             seq_lens.extend([0] * (num_reqs_padded - num_reqs))
+            if self.use_dcp:
+                from vllm.distributed import get_dcp_group
+                from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
+
+                parallel_config = self.draft_vllm_config.parallel_config
+                seq_lens = get_dcp_local_seq_lens(
+                    torch.tensor(seq_lens, dtype=torch.int32),
+                    dcp_size=parallel_config.decode_context_parallel_size,
+                    dcp_rank=get_dcp_group().rank_in_group,
+                    cp_kv_cache_interleave_size=parallel_config.cp_kv_cache_interleave_size,
+                ).tolist()
+                query_start_loc = [1] * num_reqs_padded
             for layer_name in self.draft_attn_layer_names:
                 fia_params.append(
                     {

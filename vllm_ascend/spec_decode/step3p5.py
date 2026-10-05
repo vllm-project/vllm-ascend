@@ -252,7 +252,7 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
                 max_seq_len=0,
             )
             if self.dcp_size > 1:
-                common_attn_metadata.context_parallel_metadata = self.runner.dcp_manager.long_seq_metadata
+                common_attn_metadata.dcp_context = self.runner.dcp_manager.long_seq_metadata
 
             common_attn_metadata = self.shallow_copy_metadata(common_attn_metadata)
             common_attn_metadata.slot_mapping = self.slot_mapping_group[0]

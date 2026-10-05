@@ -66,7 +66,7 @@ def _common(block_size):
     expanded = (pages.unsqueeze(-1) * split + torch.arange(split, dtype=torch.int32)).reshape(2, -1)
     expanded[1, split:] = -1
     return SimpleNamespace(
-        context_parallel_metadata=None,
+        dcp_context=None,
         num_reqs=2,
         num_actual_tokens=3,
         num_input_tokens=4,

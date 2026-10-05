@@ -57,12 +57,13 @@ from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_config import KVPPConfig, get_ascend_config
-from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder
 from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
+    AscendDCPMetadata,
     get_sfa_qsfa_packed_head_dim,
 )
 from vllm_ascend.core.kv_cache_interface import (
@@ -313,6 +314,7 @@ def build_attn_metadata(
     slot_mappings: torch.Tensor,
     kv_cache_config: KVCacheConfig,
     dcp_local_seq_lens: torch.Tensor | None = None,
+    dcp_context: AscendDCPMetadata | None = None,
     # extra attributes for ascend npus.
     parallel_config: ParallelConfig | None = None,
     seq_lens_np: np.ndarray | None = None,
@@ -421,6 +423,7 @@ def build_attn_metadata(
             causal=group_causal,
             dcp_local_seq_lens=dcp_local_seq_lens,
             dcp_local_seq_lens_cpu=dcp_local_seq_lens_cpu,
+            dcp_context=dcp_context,
             **common_attn_metadata_extra_kwargs,
         )
 
@@ -1455,14 +1458,17 @@ def _reshape_kv_cache_v2(
             else:
                 if k_dtype != v_dtype:
                     raise ValueError("Combined hybrid K/V cache requires matching K/V dtypes.")
-                if isinstance(kv_cache_spec, (AscendMLAAttentionSpec, MLAAttentionSpec)):
-                    # MLA backends return a 4D latent cache shape. Keep its K
-                    # and V components in contiguous regions, as in MRv1.
+                if isinstance(kv_cache_spec, (AscendMLAAttentionSpec, MLAAttentionSpec)) or (
+                    group.backend is AscendAttentionBackend
+                    and vllm_config.parallel_config.decode_context_parallel_size > 1
+                ):
+                    # MLA and GQA DCP FIA require contiguous K/V components.
+                    # Split the allocation without copying cache contents.
                     typed_cache = raw_cache.view(k_dtype)
                     k_elements = math.prod(k_shape)
                     v_elements = math.prod(v_shape)
                     if k_elements + v_elements > typed_cache.numel():
-                        raise ValueError(f"Combined MLA cache for {layer_name} is too small.")
+                        raise ValueError(f"Combined K/V cache for {layer_name} is too small.")
                     padding_elements = typed_cache.numel() - k_elements - v_elements
                     k_cache = typed_cache[padding_elements : padding_elements + k_elements].view(k_shape)
                     v_cache = typed_cache[padding_elements + k_elements :].view(v_shape)

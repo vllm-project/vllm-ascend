@@ -371,7 +371,7 @@ class _DSparkProposerTestBase:
         cad = SimpleNamespace(
             num_reqs=num_reqs,
             is_prefilling=inherited_prefill_flags,
-            context_parallel_metadata=inherited_dcp_metadata,
+            dcp_context=inherited_dcp_metadata,
             dcp_local_seq_lens=torch.full((num_reqs,), -777, dtype=torch.int32),
             dcp_local_seq_lens_cpu=torch.full((num_reqs,), -888, dtype=torch.int32),
             query_start_loc=torch.arange(num_reqs + 1, dtype=torch.int32) * block_size,
@@ -473,7 +473,7 @@ class TestDSparkDraftQueryPhase(_DSparkProposerTestBase):
         )
         if backend in ("gqa", "mixed"):
             legacy.assert_called_once_with(cad)
-            metadata = cad.context_parallel_metadata
+            metadata = cad.dcp_context
             assert metadata.num_computed_tokens_of_dcp.tolist() == [
                 [local(length, rank) for rank in range(8)] for length in host_global
             ]
@@ -481,7 +481,7 @@ class TestDSparkDraftQueryPhase(_DSparkProposerTestBase):
             assert metadata.max_query_len == width
         else:
             legacy.assert_not_called()
-            assert cad.context_parallel_metadata is None
+            assert cad.dcp_context is None
 
     @pytest.mark.parametrize("dcp_size", [1, 8])
     def test_only_dcp_overrides_target_prefill_flags(self, monkeypatch, dcp_size):

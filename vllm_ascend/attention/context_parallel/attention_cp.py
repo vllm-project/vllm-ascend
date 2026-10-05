@@ -21,6 +21,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 import torch_npu
+from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_v1 import (
@@ -36,22 +37,17 @@ from vllm_ascend.attention.context_parallel.common_cp import (
 )
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
+    AscendDCPMetadata,
     enable_dcp,
     filter_chunked_req_indices,
     split_decodes_and_prefills,
 )
-from vllm_ascend.compilation.acl_graph import (
-    get_draft_graph_params,
-    get_graph_params,
-    update_draft_graph_params_workspaces,
-    update_graph_params_workspaces,
-)
+from vllm_ascend.compilation.updatable_graph import get_capture_resource, register_task
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.utils import (
     cp_chunkedprefill_comm_stream,
     is_pd_decode_recompute_scheduler_enabled,
-    weak_ref_tensors,
 )
 
 
@@ -110,8 +106,13 @@ class AscendAttentionDCPMetadataBuilder(
         return split_decodes_and_prefills(
             common_attn_metadata,
             decode_threshold=self.decode_threshold,
+            require_uniform=self.speculative_config is not None,
+            # Full decode graphs replay verification batches with up to
+            # decode_threshold queries even when the input batch retains a
+            # prefill flag. Their GQA DCP metadata must use the decode path.
             treat_short_extends_as_decodes=(
-                self.dcp_enabled and is_pd_decode_recompute_scheduler_enabled(self.vllm_config)
+                self.speculative_config is not None
+                or (self.dcp_enabled and is_pd_decode_recompute_scheduler_enabled(self.vllm_config))
             ),
         )
 
@@ -131,18 +132,34 @@ class AscendAttentionDCPMetadataBuilder(
         num_decodes: int,
         num_prefills: int,
     ) -> dict[str, object]:
-        dcp_metadata = self._require_dcp_metadata(common_attn_metadata)
+        dcp_metadata = common_attn_metadata.dcp_context
+        if dcp_metadata is None or dcp_metadata.num_computed_tokens_of_dcp is None:
+            # V2 only attaches the verification mask to the common context.
+            # Populate the GQA decode view from the available CPU lengths.
+            local_seq_lens = get_dcp_local_seq_lens(
+                seq_lens[: common_attn_metadata.num_reqs],
+                dcp_size=self.dcp_size,
+                cp_kv_cache_interleave_size=self.vllm_config.parallel_config.cp_kv_cache_interleave_size,
+            )
+            dcp_metadata = AscendDCPMetadata(
+                num_computed_tokens_of_dcp=local_seq_lens.numpy(),
+                query_lens_cpu=query_lens,
+                max_query_len=common_attn_metadata.max_query_len,
+                dcp_mtp_attn_mask=(dcp_metadata.dcp_mtp_attn_mask if dcp_metadata is not None else None),
+            )
         prefill_metadata = None
         if num_prefills > 0:
             prefill_query_lens = query_lens[num_decodes:]
             context_lens_cpu = (seq_lens - query_lens)[num_decodes:]
             chunked_context_metadata = None
             if self.chunked_prefill_enabled and context_lens_cpu.numel() > 0 and context_lens_cpu.max().item() > 0:
-                local_context_lens_allranks = self._get_dcp_context_lens(
-                    common_attn_metadata,
-                    start=num_decodes,
-                    device=self.device,
-                )
+                # Use the cached history, not total lengths, for prefill
+                # context. V2 does not publish the legacy DCP payload here.
+                local_context_lens_allranks = get_dcp_local_seq_lens(
+                    context_lens_cpu,
+                    dcp_size=self.dcp_size,
+                    cp_kv_cache_interleave_size=self.vllm_config.parallel_config.cp_kv_cache_interleave_size,
+                ).to(self.device)
                 local_chunked_kv_lens = local_context_lens_allranks[:, self.dcp_rank]
                 chunked_req_mask = self._get_chunked_req_mask(local_context_lens_allranks)
                 chunked_context_metadata = AscendMetadataForPrefill.ChunkedContextMetadata(
@@ -181,110 +198,32 @@ class AscendAttentionDCPMetadataBuilder(
         }
 
 
+@dataclass(frozen=True, slots=True)
+class DCPFIAParamProvider:
+    layer_name: str | None
+    dcp_rank: int
+    use_bsnd: bool
+
+    def resolve(self, attn_metadata) -> dict[str, object]:
+        metadata = attn_metadata[self.layer_name]
+        decode_metadata = metadata.decode_meta
+        assert decode_metadata is not None
+        query_lens = metadata.actual_seq_lengths_q[: metadata.num_decodes]
+        if self.use_bsnd:
+            query_lens = [query_lens[0]] * len(query_lens)
+        local_seq_lens = decode_metadata.num_computed_tokens_of_dcp[:, self.dcp_rank].tolist()
+        local_seq_lens.extend([0] * (len(query_lens) - len(local_seq_lens)))
+        return {
+            "actual_seq_lengths": query_lens,
+            "actual_seq_lengths_kv": local_seq_lens,
+            "block_table": decode_metadata.block_tables,
+            "atten_mask": decode_metadata.dcp_mtp_attn_mask,
+        }
+
+
 class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
-    @staticmethod
-    def update_graph_params(
-        update_stream,
-        forward_context,
-        num_tokens,
-        vllm_config=None,
-        speculative_config=None,
-        draft_attn_metadatas=None,
-    ):
-        if _EXTRA_CTX.is_draft_model:
-            graph_params = get_draft_graph_params()
-            attn_metadata = draft_attn_metadatas
-            attn_keys = list(attn_metadata[0].keys())
-        else:
-            graph_params = get_graph_params()
-            attn_metadata = forward_context.attn_metadata
-            attn_keys = list(attn_metadata.keys())
-        # FIXME: Behold! We are using a temporary hack here to update the args
-        # for each layer's attention op in the graph.
-        num_layers = len(attn_keys)
-        if num_layers == 0:
-            return
-        if _EXTRA_CTX.is_draft_model:
-            attn_keys = attn_keys * (len(graph_params.attn_params[num_tokens]) // num_layers)
-        attn_count = 0
-        with torch.npu.stream(update_stream):
-            for key, param, handle, event in zip(
-                attn_keys,
-                graph_params.attn_params[num_tokens],
-                graph_params.handles[num_tokens],
-                graph_params.events[num_tokens],
-            ):
-                (
-                    q_nope,
-                    k_nope,
-                    value,
-                    num_heads,
-                    num_kv_heads,
-                    scale,
-                    block_table,
-                    block_size,
-                    actual_seq_lengths_kv,
-                    actual_seq_lengths_q,
-                    attn_output,
-                    softmax_lse,
-                    dcp_size,
-                    dcp_rank,
-                    attn_mask,
-                ) = param
-
-                if _EXTRA_CTX.is_draft_model:
-                    draft_step = attn_count // num_layers
-                    actual_seq_lengths_kv = attn_metadata[draft_step][key].decode_meta.num_computed_tokens_of_dcp[
-                        :, dcp_rank
-                    ]
-                    pad_length = num_tokens - len(actual_seq_lengths_kv)
-                    if pad_length > 0:
-                        pad_tensor = np.zeros(pad_length, dtype=actual_seq_lengths_kv.dtype)
-                        actual_seq_lengths_kv = np.concatenate([actual_seq_lengths_kv, pad_tensor])
-
-                    actual_seq_lengths_q = attn_metadata[draft_step][key].actual_seq_lengths_q
-                    attn_count = attn_count + 1
-                else:
-                    actual_seq_lengths_kv = attn_metadata[key].decode_meta.num_computed_tokens_of_dcp[:, dcp_rank]
-                    pad_length = num_tokens - len(actual_seq_lengths_kv)
-                    if pad_length > 0:
-                        pad_tensor = np.zeros(pad_length, dtype=actual_seq_lengths_kv.dtype)
-                        actual_seq_lengths_kv = np.concatenate([actual_seq_lengths_kv, pad_tensor])
-
-                    actual_seq_lengths_q = attn_metadata[key].actual_seq_lengths_q
-
-                if dcp_size > 1:
-                    num_heads = num_heads * dcp_size
-
-                torch.npu.graph_task_update_begin(update_stream, handle)
-
-                input_layout = "TND"
-                if speculative_config is not None:
-                    input_layout = "BSND"
-                    actual_seq_lengths_q = [actual_seq_lengths_q[0] for _ in range(len(actual_seq_lengths_q))]
-
-                torch_npu.npu_fused_infer_attention_score.out(
-                    q_nope,
-                    k_nope,
-                    value,
-                    num_heads=num_heads,
-                    num_key_value_heads=num_kv_heads,
-                    input_layout=input_layout,
-                    atten_mask=attn_mask,
-                    scale=scale,
-                    antiquant_mode=0,
-                    antiquant_scale=None,
-                    softmax_lse_flag=True,
-                    block_table=block_table,
-                    block_size=block_size,
-                    actual_seq_lengths_kv=actual_seq_lengths_kv,
-                    actual_seq_lengths=actual_seq_lengths_q,
-                    workspace=graph_params.workspaces.get(num_tokens),
-                    out=[attn_output, softmax_lse],
-                )
-                torch.npu.graph_task_update_end(update_stream)
-
-                event.record(update_stream)
+    can_return_lse_for_decode: bool = True
+    supports_mtp_with_cp_non_trivial_interleave_size: bool = True
 
     def _forward_decode_dcp(
         self,
@@ -305,16 +244,18 @@ class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
 
         attn_mask = None
         input_layerout = "TND"
-        actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q[: attn_metadata.num_decodes]
+        num_decodes = attn_metadata.num_decodes
+        actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q[:num_decodes]
         if self.vllm_config.speculative_config is not None:
             input_layerout = "BSND"
-            num_decodes = attn_metadata.num_decodes
+            # Padded metadata may contain zero-query requests. The sliced
+            # decode query contains only the active, uniform query prefix.
+            query_len = actual_seq_lengths_q[0]
+            query = query.view(-1, query_len, query.shape[1], query.shape[-1])
+            num_decodes = query.shape[0]
             if attn_metadata.decode_meta.dcp_mtp_attn_mask is not None:
-                attn_mask = attn_metadata.decode_meta.dcp_mtp_attn_mask
-            else:
-                attn_mask = None
-            query = query.view(num_decodes, -1, query.shape[1], query.shape[-1])
-            actual_seq_lengths_q = [actual_seq_lengths_q[0] for _ in range(len(actual_seq_lengths_q))]
+                attn_mask = attn_metadata.decode_meta.dcp_mtp_attn_mask[:num_decodes]
+            actual_seq_lengths_q = [query_len] * num_decodes
 
         common_kwargs = {
             "num_heads": num_heads,
@@ -325,73 +266,39 @@ class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
             "antiquant_mode": 0,
             "antiquant_scale": None,
             "softmax_lse_flag": True,
-            "block_table": attn_metadata.decode_meta.block_tables,
+            "block_table": attn_metadata.decode_meta.block_tables[:num_decodes],
             "block_size": self.key_cache.shape[1],
-            "actual_seq_lengths_kv": attn_metadata.decode_meta.num_computed_tokens_of_dcp[
-                : attn_metadata.num_decodes, self.dcp_rank
-            ],
+            "actual_seq_lengths_kv": attn_metadata.decode_meta.num_computed_tokens_of_dcp[:num_decodes, self.dcp_rank],
             "actual_seq_lengths": actual_seq_lengths_q,
         }
 
-        if _EXTRA_CTX.is_draft_model:
-            graph_params = get_draft_graph_params()
-        else:
-            graph_params = get_graph_params()
-
-        if input_layerout == "TND":
-            num_tokens = query.shape[0]
-        else:
-            num_tokens = query.shape[0] * query.shape[1]
-
         if _EXTRA_CTX.capturing:
-            stream = torch_npu.npu.current_stream()
-
-            event = torch.npu.ExternalEvent()
-            event.wait(stream)
-            event.reset(stream)
-            graph_params.events[num_tokens].append(event)
-
-            workspace = graph_params.workspaces.get(num_tokens)
-            if workspace is None:
-                workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
+            workspace = get_capture_resource(
+                (DCPFIAParamProvider, num_heads, self.num_kv_heads, input_layerout),
+                lambda: torch_npu._npu_fused_infer_attention_score_get_max_workspace(
                     query, k_nope, value, **common_kwargs
-                )
-                if _EXTRA_CTX.is_draft_model:
-                    update_draft_graph_params_workspaces(num_tokens, workspace)
-                else:
-                    update_graph_params_workspaces(num_tokens, workspace)
+                ),
+                self._use_max_workspace_for_fia_graph,
+            )
             attn_out = torch.empty_like(query)
             if input_layerout == "TND":
-                attn_lse = torch.empty((num_tokens, num_heads, 1), dtype=torch.float, device=query.device)
+                attn_lse = torch.empty((query.shape[0], num_heads, 1), dtype=torch.float, device=query.device)
             else:
                 attn_lse = torch.empty(
                     (query.shape[0], num_heads, query.shape[1], 1), dtype=torch.float, device=query.device
                 )
-            graph_params.attn_params[num_tokens].append(
-                (
-                    weak_ref_tensors(query),
-                    weak_ref_tensors(k_nope),
-                    weak_ref_tensors(value),
-                    self.num_heads,
-                    self.num_kv_heads,
-                    self.scale,
-                    attn_metadata.block_tables,
-                    self.key_cache.shape[1],
-                    attn_metadata.decode_meta.num_computed_tokens_of_dcp[: attn_metadata.num_decodes, self.dcp_rank],
-                    actual_seq_lengths_q,
-                    weak_ref_tensors(attn_out),
-                    weak_ref_tensors(attn_lse),
-                    self.dcp_size,
-                    self.dcp_rank,
-                    attn_mask,
-                )
+            register_task(
+                torch_npu.npu_fused_infer_attention_score.out,
+                {
+                    "query": query,
+                    "key": k_nope,
+                    "value": value,
+                    **common_kwargs,
+                    "workspace": workspace,
+                    "out": [attn_out, attn_lse],
+                },
+                DCPFIAParamProvider(self._graph_metadata_layer_name(), self.dcp_rank, input_layerout == "BSND"),
             )
-            torch.npu.graph_task_group_begin(stream)
-            torch_npu.npu_fused_infer_attention_score.out(
-                query, k_nope, value, **common_kwargs, workspace=workspace, out=[attn_out, attn_lse]
-            )
-            handle = torch.npu.graph_task_group_end(stream)
-            graph_params.handles[num_tokens].append(handle)
         else:
             attn_out, attn_lse = torch_npu.npu_fused_infer_attention_score(query, k_nope, value, **common_kwargs)
         if input_layerout == "BSND":

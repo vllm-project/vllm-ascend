@@ -1009,7 +1009,7 @@ class TestEagleProposerPropose:
         'dcp_local_seq_lens_cpu, _seq_lens_cpu, _num_computed_tokens_cpu,' \
         '_num_computed_tokens_cache, seq_lens_cpu, num_computed_tokens_cpu,' \
         'decode_token_per_req, actual_seq_lengths_q, positions, attn_state,' \
-        'graph_pad_size, num_input_tokens, context_parallel_metadata',
+        'graph_pad_size, num_input_tokens, dcp_context',
         [
             (
                 "prefill", torch.tensor([ 0, 13], device=torch.device("cpu"), dtype=torch.int32), torch.tensor([ 0, 13], dtype=torch.int32), 
@@ -1054,7 +1054,7 @@ class TestEagleProposerPropose:
                      dcp_local_seq_lens_cpu, _seq_lens_cpu, _num_computed_tokens_cpu,
                      _num_computed_tokens_cache, seq_lens_cpu, num_computed_tokens_cpu,
                      decode_token_per_req, actual_seq_lengths_q, positions, attn_state,
-                     graph_pad_size, num_input_tokens, context_parallel_metadata
+                     graph_pad_size, num_input_tokens, dcp_context
                     ):
         # adjust for fullgraph mode
         if graphmode == 'full':
@@ -1183,7 +1183,7 @@ class TestEagleProposerPropose:
                                         dcp_local_seq_lens_cpu, _seq_lens_cpu, _num_computed_tokens_cpu,
                                         _num_computed_tokens_cache, seq_lens_cpu, num_computed_tokens_cpu,
                                         decode_token_per_req, actual_seq_lengths_q, positions, attn_state,
-                                        graph_pad_size, num_input_tokens, context_parallel_metadata
+                                        graph_pad_size, num_input_tokens, dcp_context
                                         )
         
         # create other parameters
@@ -1304,7 +1304,7 @@ class TestEagleProposerPropose:
                                         dcp_local_seq_lens_cpu, _seq_lens_cpu, _num_computed_tokens_cpu,
                                         _num_computed_tokens_cache, seq_lens_cpu, num_computed_tokens_cpu,
                                         decode_token_per_req, actual_seq_lengths_q, positions, attn_state,
-                                        graph_pad_size, num_input_tokens, context_parallel_metadata
+                                        graph_pad_size, num_input_tokens, dcp_context
                                         ):
         mock_common_attn_metadata.query_start_loc = query_start_loc
         mock_common_attn_metadata.query_start_loc_cpu = query_start_loc_cpu
@@ -1333,7 +1333,7 @@ class TestEagleProposerPropose:
         mock_common_attn_metadata.attn_state = attn_state
         mock_common_attn_metadata.graph_pad_size = graph_pad_size
         mock_common_attn_metadata.num_input_tokens = num_input_tokens
-        mock_common_attn_metadata.context_parallel_metadata = context_parallel_metadata
+        mock_common_attn_metadata.dcp_context = dcp_context
 
     # assert the value common_attn_metadata
     def assert_value_common_attn_metadata(self, captured_common_attn_metadata, flag_prefill_decode, model_type, graphmode):
@@ -1450,7 +1450,7 @@ class TestEagleProposerPropose:
         else:
             assert captured_common_attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill
         assert captured_common_attn_metadata.graph_pad_size == -1
-        assert captured_common_attn_metadata.context_parallel_metadata is None
+        assert captured_common_attn_metadata.dcp_context is None
         if model_type == 'qwen_dense' and graphmode == 'eager' and flag_prefill_decode == 'decode_and_prefill':
             assert torch.equal(self.proposer.slot_mapping_group[0][:30], torch.tensor([141, 142, 143, 144, 256, 257, 258, 259, 260, 261, 262, 263, 264, 265,
                                                                                        266, 267, 268, 384, 385, 386, 387, 388, 389, 390, 391, 392, 393, 394, 395, 396]))
@@ -1661,7 +1661,7 @@ class TestEagleProposerPropose:
         assert hasattr(vllm_ascend.attention.utils, 'AscendCommonAttentionMetadata')
         fields = {
             'positions', 'seq_lens_cpu', 'decode_token_per_req', \
-            'context_parallel_metadata', 'actual_seq_lengths_q', \
+            'dcp_context', 'actual_seq_lengths_q', \
             'attn_state', 'num_computed_tokens_cpu', 'num_input_tokens', \
             'graph_pad_size', '_seq_lens_cpu', '_num_computed_tokens_cpu', \
             'dcp_local_seq_lens_cpu'
@@ -3852,7 +3852,7 @@ class TestEagleProposerSetInputsFirstPass:
             assert kwargs["long_seq_metadata"] is long_seq_metadata
             assert kwargs["req_scheduled_tokens"] == req_scheduled_tokens
             assert kwargs["req_ids"] == req_ids
-            common_attn_metadata.context_parallel_metadata = long_seq_metadata
+            common_attn_metadata.dcp_context = long_seq_metadata
             return DCPSpecDecodeFirstPassInputs(
                 num_tokens=12,
                 input_ids=expected_input_ids,
@@ -3903,7 +3903,7 @@ class TestEagleProposerSetInputsFirstPass:
         for attr in attrs_from_proposer:
             assert_attr_equal(attr, expected_proposer, proposer)
 
-        assert out_cad.context_parallel_metadata == long_seq_metadata
+        assert out_cad.dcp_context == long_seq_metadata
 
     def test_set_inputs_first_pass_parallel_drafting(self):
         """

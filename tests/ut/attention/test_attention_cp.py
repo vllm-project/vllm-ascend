@@ -99,7 +99,7 @@ def test_dcp_split_uses_builder_config_without_current_context(is_consumer, is_p
     builder.decode_threshold = 3
     query_start_loc = torch.tensor([0, query_lens[0], sum(query_lens)], dtype=torch.int32)
     common = SimpleNamespace(
-        context_parallel_metadata=None,
+        dcp_context=None,
         max_query_len=max(query_lens),
         num_reqs=2,
         num_actual_tokens=sum(query_lens),

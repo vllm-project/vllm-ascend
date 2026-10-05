@@ -68,6 +68,7 @@ from vllm_ascend.utils import (
     lmhead_tp_enable,
     set_potential_max_tokens,
 )
+from vllm_ascend.worker.dcp_utils import create_dcp_manager
 from vllm_ascend.worker.utils import disable_compilation
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import (
@@ -124,6 +125,7 @@ class NPUModelRunner(GPUModelRunner):
                 super().__init__(vllm_config, device)
             if pp_disabled:
                 restore_pp_after_upstream_init(self, vllm_config)
+        self.dcp_manager = create_dcp_manager(self.vllm_config, self.device)
         # Native PP owns token broadcast/writeback; only releases use our packing.
         # Legacy Spec+PP transport (0.28/0.29 only); deleted when 0.30+ is the floor.
         self.use_spec_pp = spec_pp_support is not None and use_legacy_spec_pp()
@@ -327,6 +329,8 @@ class NPUModelRunner(GPUModelRunner):
             self.vllm_config.compilation_config.static_forward_context,
             self.vllm_config.scheduler_config.max_num_seqs,
         )
+
+        self.model_state.dcp_manager = self.dcp_manager
 
         # Only target-model layers determine whether FIA is in use. This flag
         # is used for adaptive verification handling.

@@ -901,7 +901,7 @@ class TestAscendSFAMetadataBuilder(TestBase):
 
         common_attn_metadata = MagicMock()
         common_attn_metadata.decode_token_per_req = 1
-        common_attn_metadata.context_parallel_metadata = None
+        common_attn_metadata.dcp_context = None
         common_attn_metadata.max_query_len = 10
         common_attn_metadata.num_reqs = 10
         common_attn_metadata.num_actual_tokens = 100
@@ -965,7 +965,7 @@ class TestAscendSFAMetadataBuilder(TestBase):
 
         common_attn_metadata = MagicMock()
         common_attn_metadata.decode_token_per_req = 1
-        common_attn_metadata.context_parallel_metadata = None
+        common_attn_metadata.dcp_context = None
         common_attn_metadata.max_query_len = 10
         common_attn_metadata.num_reqs = 10
         common_attn_metadata.num_actual_tokens = 100
@@ -1030,7 +1030,7 @@ class TestAscendSFAMetadataBuilder(TestBase):
 
         common_attn_metadata = MagicMock()
         common_attn_metadata.decode_token_per_req = 1
-        common_attn_metadata.context_parallel_metadata = None
+        common_attn_metadata.dcp_context = None
         common_attn_metadata.max_query_len = 10
         common_attn_metadata.num_reqs = 10
         common_attn_metadata.num_actual_tokens = 100

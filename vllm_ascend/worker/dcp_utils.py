@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import torch
 from vllm.config import VllmConfig
+from vllm.distributed import get_dcp_group
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.utils import CpuGpuBuffer
 
@@ -32,6 +33,9 @@ from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.worker.utils import AttentionGroup
+
+    from vllm_ascend.attention.utils import AscendDCPMetadata
+    from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 
 
 @dataclass(frozen=True)
@@ -93,6 +97,7 @@ class DCPManager:
         use_async_scheduling: bool,
         pin_memory: bool = False,
         use_sparse: bool = False,
+        mask_max_num_reqs: int | None = None,
     ) -> None:
         del max_buffer_num_tokens
         self.dcp_world_size = dcp_world_size
@@ -125,7 +130,7 @@ class DCPManager:
         if dcp_world_size > 1 and self.speculative_config and not vllm_config.model_config.use_mla:
             self.dcp_mtp_attn_mask = CpuGpuBuffer(
                 (
-                    max_num_reqs,
+                    mask_max_num_reqs or max_num_reqs,
                     self.decode_threshold,
                     vllm_config.model_config.max_model_len,
                 ),
@@ -280,7 +285,7 @@ class DCPManager:
     ) -> DCPSpecDecodeFirstPassInputs:
         del req_scheduled_tokens, req_ids, logits_indices, num_prefill_reqs, uses_mrope
         assert long_seq_metadata is not None
-        common_attn_metadata.context_parallel_metadata = long_seq_metadata
+        common_attn_metadata.dcp_context = long_seq_metadata
         original_sample_indices = token_indices_to_sample.clone()
         decode_query_lens = self.query_lens_full.cpu[:num_decode_reqs]
         return DCPSpecDecodeFirstPassInputs(
@@ -576,7 +581,7 @@ class DCPManager:
         if common_attn_metadata.is_prefilling is not None:
             common_attn_metadata.is_prefilling.fill_(False)
         # Target query metadata no longer describes this parallel draft block.
-        common_attn_metadata.context_parallel_metadata = None
+        common_attn_metadata.dcp_context = None
         self.prepare_common_attn_metadata(common_attn_metadata)
         if any(not isinstance(group.kv_cache_spec, MLAAttentionSpec) for group in draft_attn_groups):
             self.prepare_legacy_dcp_metadata(common_attn_metadata)
@@ -595,7 +600,7 @@ class DCPManager:
         assert seq_lens_cpu is not None
         local_seq_lens = self._get_dcp_local_seq_lens(seq_lens_cpu[: common_attn_metadata.num_reqs])
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
-        common_attn_metadata.context_parallel_metadata = AscendDCPMetadata(
+        common_attn_metadata.dcp_context = AscendDCPMetadata(
             num_computed_tokens_of_dcp=local_seq_lens.numpy(),
             query_lens_cpu=query_start_loc_cpu[1:] - query_start_loc_cpu[:-1],
             max_query_len=common_attn_metadata.max_query_len,
@@ -641,10 +646,10 @@ class DCPManager:
             self.prepare_common_attn_metadata(common_attn_metadata)
             # Do not let the first pass's query lengths override this decode
             # step's query_start_loc_cpu and max_query_len in the shared split.
-            common_attn_metadata.context_parallel_metadata = None
+            common_attn_metadata.dcp_context = None
             return
 
-        dcp_metadata = common_attn_metadata.context_parallel_metadata
+        dcp_metadata = common_attn_metadata.dcp_context
         assert dcp_metadata is not None, "DCP metadata must be populated for speculative drafting."
         dcp_metadata = copy.copy(dcp_metadata)
         # Subsequent draft steps have one query per request; the per-step KV
@@ -659,8 +664,7 @@ class DCPManager:
         seq_lens_for_dcp = seq_lens_cpu if seq_lens_cpu is not None else seq_lens
         local_seq_lens = self._get_dcp_local_seq_lens(seq_lens_for_dcp + draft_index + 1)
         dcp_metadata.num_computed_tokens_of_dcp = local_seq_lens
-        dcp_metadata.draft_cp_seq_len = local_seq_lens[:, self.dcp_world_rank]
-        common_attn_metadata.context_parallel_metadata = dcp_metadata
+        common_attn_metadata.dcp_context = dcp_metadata
 
     def update_spec_decode_drafting_cp_metadata(
         self,
@@ -752,6 +756,48 @@ class DCPManager:
         self.long_seq_metadata = metadata
         return metadata, block_table_tensor
 
+    def generate_dcp_metadata_v2(
+        self,
+        input_batch: "AscendInputBatch",
+        attn_groups: Sequence[Sequence["AttentionGroup"]],
+        num_reqs: int,
+        max_query_len: int,
+    ) -> "AscendDCPMetadata | None":
+        """Build the target GQA DCP context for model runner V2."""
+        from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
+        from vllm_ascend.attention.utils import AscendDCPMetadata
+
+        if (
+            self.vllm_config.model_config.use_mla
+            or num_reqs == 0
+            or not any(group.backend is AscendAttentionBackend for groups in attn_groups for group in groups)
+        ):
+            return None
+
+        query_lens_np = np.diff(input_batch.query_start_loc_np[: num_reqs + 1])
+        local_seq_lens = self._get_dcp_local_seq_lens(torch.from_numpy(input_batch.seq_lens_np[:num_reqs]))
+
+        dcp_mtp_attn_mask = None
+        mask_buffer = self.dcp_mtp_attn_mask
+        if mask_buffer is not None and query_lens_np[0] <= self.decode_threshold:
+            # The target verifies a uniform decode prefix. These lengths are
+            # already on the host; drafting does not reuse the verify mask.
+            nonuniform = np.flatnonzero((query_lens_np != query_lens_np[0]) & (query_lens_np != 0))
+            num_decodes = int(nonuniform[0]) if nonuniform.size else num_reqs
+            if num_decodes:
+                if not torch.npu.is_current_stream_capturing():
+                    histories = (input_batch.seq_lens_np[:num_decodes] - query_lens_np[:num_decodes]).tolist()
+                    self.generate_mtp_attention_mask_for_decode(histories, query_lens_np[:num_decodes], num_decodes)
+                    mask_buffer.copy_to_gpu(num_decodes)
+                dcp_mtp_attn_mask = mask_buffer.gpu[:num_decodes]
+
+        return AscendDCPMetadata(
+            num_computed_tokens_of_dcp=local_seq_lens.numpy(),
+            query_lens_cpu=torch.from_numpy(query_lens_np),
+            max_query_len=max_query_len,
+            dcp_mtp_attn_mask=dcp_mtp_attn_mask,
+        )
+
     def generate_mtp_attention_mask_for_decode(
         self,
         decode_num_computed_tokens: list[int],
@@ -801,3 +847,24 @@ class DCPManager:
         full_mask = (k_indices[None, None, :] > upper[:, :, None]) & valid_q[:, :, None] & valid_k[:, None, :]
         output[:num_decode_reqs, :max_q, :max_k] = full_mask
         return output
+
+
+def create_dcp_manager(vllm_config: VllmConfig, device: torch.device) -> DCPManager | None:
+    """Create the DCP manager when decode context parallelism is enabled."""
+    parallel_config = vllm_config.parallel_config
+    if parallel_config.decode_context_parallel_size <= 1:
+        return None
+
+    scheduler_config = vllm_config.scheduler_config
+    max_num_reqs = scheduler_config.max_num_seqs
+    return DCPManager(
+        dcp_world_size=parallel_config.decode_context_parallel_size,
+        dcp_rank=get_dcp_group().rank_in_group,
+        max_buffer_num_tokens=scheduler_config.max_num_batched_tokens,
+        max_num_reqs=max_num_reqs,
+        mask_max_num_reqs=2 * max_num_reqs,
+        device=device,
+        vllm_config=vllm_config,
+        use_async_scheduling=scheduler_config.async_scheduling,
+        pin_memory=True,
+    )

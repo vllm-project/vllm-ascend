@@ -940,7 +940,7 @@ def test_build_classifies_short_speculative_extends_as_decodes(
         num_actual_tokens=14,
         num_input_tokens=14,
         max_query_len=7,
-        context_parallel_metadata=None,
+        dcp_context=None,
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc,
         positions=torch.arange(14, dtype=torch.int64),

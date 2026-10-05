@@ -980,7 +980,7 @@ def test_sfa_dcp_split_uses_builder_config_without_current_context(is_consumer, 
     slots = torch.arange(sum(query_lens), dtype=torch.int64)
     blocks = torch.tensor([[0, 1], [2, 3]], dtype=torch.int32)
     common = SimpleNamespace(
-        context_parallel_metadata=None,
+        dcp_context=None,
         max_query_len=max(query_lens),
         num_reqs=2,
         num_actual_tokens=sum(query_lens),
@@ -1199,7 +1199,7 @@ def _make_sfa_split_common(query_lens, flags, actual, threshold, capture=False, 
     slots = torch.arange(num_tokens)
     slots[actual:] = -1
     return SimpleNamespace(
-        context_parallel_metadata=None,
+        dcp_context=None,
         num_reqs=num_reqs,
         num_actual_tokens=actual,
         num_input_tokens=num_tokens,

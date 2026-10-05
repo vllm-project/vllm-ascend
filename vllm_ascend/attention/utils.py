@@ -215,8 +215,6 @@ class AscendDCPMetadata:
     query_lens_cpu: torch.Tensor = None
     max_query_len: int = 0
     dcp_mtp_attn_mask: torch.Tensor = None
-    draft_cp_seq_len: torch.Tensor | None = None
-    draft_base_seq_lens: torch.Tensor | None = None
 
 
 @dataclass
@@ -261,7 +259,7 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     num_input_tokens: int = 0
 
     # Metadata for Decode Context Parallelism (DCP) operations.
-    context_parallel_metadata: AscendDCPMetadata | None = None
+    dcp_context: AscendDCPMetadata | None = None
     group_len: torch.Tensor = None
     group_key_idx: torch.Tensor = None
     group_key_cache_idx: torch.Tensor = None
@@ -314,7 +312,7 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             attn_state=self.attn_state,
             graph_pad_size=-1,  # It should be -1 when not run in fullgraph mode.
             num_input_tokens=self.num_input_tokens,
-            context_parallel_metadata=self.context_parallel_metadata,
+            dcp_context=self.dcp_context,
             seq_lens_cpu_upper_bound=self.seq_lens_cpu_upper_bound[:num_actual_reqs]
             if self.seq_lens_cpu_upper_bound is not None
             else None,
@@ -406,7 +404,7 @@ def split_decodes_and_prefills(
         num_decode_tokens: The number of tokens in the decode requests.
         num_prefill_tokens: The number of tokens in the prefill requests.
     """
-    dcp_metadata = common_attn_metadata.context_parallel_metadata
+    dcp_metadata = common_attn_metadata.dcp_context
     query_lens_dcp = dcp_metadata.query_lens_cpu if dcp_metadata else None
     max_query_len_dcp = dcp_metadata.max_query_len if dcp_metadata else 0
     max_query_len = common_attn_metadata.max_query_len if max_query_len_dcp == 0 else max_query_len_dcp

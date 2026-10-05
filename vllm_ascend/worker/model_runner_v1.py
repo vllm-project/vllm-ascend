@@ -3663,7 +3663,7 @@ class NPUModelRunner(GPUModelRunner):
             positions_cpu=self._dsa_positions_cpu_buf if self.use_compress else None,
             attn_state=self.attn_state,
             decode_token_per_req=self.decode_token_per_req,
-            context_parallel_metadata=self.long_seq_metadata,
+            dcp_context=self.long_seq_metadata,
             group_len = self.group_len.gpu[:num_reqs_padded],
             group_key_idx = self.group_key_idx.gpu[:num_reqs_padded],
             group_key_cache_idx = self.group_key_cache_idx.gpu[:num_reqs_padded],
@@ -5637,10 +5637,16 @@ class NPUModelRunner(GPUModelRunner):
                         current_kv_cache_spec.num_kv_heads,
                         current_kv_cache_spec.head_size,
                     )
+                    # GQA DCP uses FIA with paged K/V, which requires each
+                    # cache to be contiguous. Keep its existing split views.
                     if (
                         raw_kv_is_combined
                         and len(kv_cache_shape) == 5
                         and kv_cache_shape[0] == 2
+                        and not (
+                            attn_backend is AscendAttentionBackend
+                            and self.parallel_config.decode_context_parallel_size > 1
+                        )
                     ):
                         raw_typed = raw_k_tensor.view(current_kv_cache_spec.dtype)
                         if raw_typed.numel() == math.prod(kv_cache_shape):

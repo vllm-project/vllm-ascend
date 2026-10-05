@@ -919,7 +919,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
         common_metadata.num_reqs = 4
         common_metadata.num_actual_tokens = 5
         common_metadata.max_query_len = 5
-        common_metadata.context_parallel_metadata = None
+        common_metadata.dcp_context = None
         common_metadata.seq_lens_cpu = torch.Tensor([9, 10, 8, 8]).int()
         common_metadata.query_start_loc = torch.Tensor([0, 1, 2, 4, 5]).int()
         common_metadata.query_start_loc_cpu = torch.Tensor([0, 1, 2, 4, 5]).int()

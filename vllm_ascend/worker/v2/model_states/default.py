@@ -30,6 +30,7 @@ from vllm_ascend.worker.v2.attn_utils import build_attn_metadata, ring_state_upd
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 
 if TYPE_CHECKING:
+    from vllm_ascend.worker.dcp_utils import DCPManager
     from vllm_ascend.worker.v2.kvpp import KVPPRuntime
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext, AscendPCPManager
 
@@ -39,6 +40,7 @@ class AscendModelState(DefaultModelState):
 
     pcp_manager: "AscendPCPManager | None" = None
     pcp_context: "AscendPCPAttentionContext | None" = None
+    dcp_manager: "DCPManager | None" = None
     kvpp_runtime: "KVPPRuntime | None" = None
     kvpp_is_dummy_run: bool = False
 
@@ -152,6 +154,11 @@ class AscendModelState(DefaultModelState):
             if self.pcp_manager is not None
             else None
         )
+        dcp_context = (
+            self.dcp_manager.generate_dcp_metadata_v2(input_batch, attn_groups, num_reqs, max_query_len)
+            if self.dcp_manager is not None
+            else None
+        )
         # attn_metadata is needed when update_full_graph_params, but no way can get it now.
         # Temporarily store it in model_state.
         self.block_tables = block_tables
@@ -175,6 +182,7 @@ class AscendModelState(DefaultModelState):
             slot_mappings=slot_mappings,
             kv_cache_config=kv_cache_config,
             dcp_local_seq_lens=input_batch.dcp_local_seq_lens,
+            dcp_context=dcp_context,
             parallel_config=self.vllm_config.parallel_config,
             # extra attributes for ascend npus.
             seq_lens_np=input_batch.seq_lens_np,
