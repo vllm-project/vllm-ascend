@@ -6198,7 +6198,10 @@ class NPUModelRunner(GPUModelRunner):
                 # Remove this special case once the generic vLLM spec/backend
                 # path can describe the Ascend SFA indexer layout directly.
                 cache_sparse_li_c8 = self.ascend_config.is_sparse_li_c8_layer(layer_name)
-                cache_sparse_li_c4 = self.ascend_config.is_sparse_li_c4_layer(layer_name)
+                cache_sparse_li_c4 = (
+                    getattr(self, "enable_sparse_li_c4", False)
+                    and self.ascend_config.is_sparse_li_c4_layer(layer_name)
+                )
                 li_quant_mode = "c4" if cache_sparse_li_c4 else "c8" if cache_sparse_li_c8 else ""
                 index_head_dim = self.model_config.hf_text_config.index_head_dim
                 kv_cache_spec[layer_name] = AscendSFAIndexerCacheSpec(
