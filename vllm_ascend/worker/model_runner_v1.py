@@ -5654,7 +5654,7 @@ class NPUModelRunner(GPUModelRunner):
                         )
                         if (
                             get_current_hardware_profile().supports(HardwareCapability.MLA_FLASH)
-                            and current_kv_cache_spec.num_heads in MLA_FLASH_SUPPORTED_Q_HEADS
+                            and current_kv_cache_spec.num_query_heads in MLA_FLASH_SUPPORTED_Q_HEADS
                         ):
                             # A5每个kernel slot内按token交错存储[nope|rope]：
                             # token0[nope|rope], token1[nope|rope], ...。
@@ -6287,7 +6287,7 @@ class NPUModelRunner(GPUModelRunner):
                     indexes_kv_by_block_stride = bool(getattr(attn_module, "indexes_kv_by_block_stride", False))
                     kv_cache_spec[layer_name] = AscendMLAAttentionSpec(
                         block_size=self.block_size,
-                        num_heads=attn_module.num_heads,
+                        num_query_heads=attn_module.num_heads,
                         num_kv_heads=1,
                         head_size=head_size,
                         dtype=dtype,
@@ -6320,7 +6320,7 @@ class NPUModelRunner(GPUModelRunner):
                     )
                     kv_cache_spec[layer_name] = AscendMLAAttentionSpec(
                         block_size=spec.block_size,
-                        num_heads=attn_module.num_heads,
+                        num_query_heads=attn_module.num_heads,
                         num_kv_heads=spec.num_kv_heads,
                         head_size=head_size,
                         dtype=dtype,
