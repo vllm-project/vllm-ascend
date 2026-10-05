@@ -257,7 +257,9 @@ class TestChunkFwdOVllm310:
         g = torch.zeros(1, heads_v, tokens, dtype=g_dtype)
         h = torch.zeros(1, heads_v, chunks, dim, dim, dtype=torch.float16)
         expected = torch.zeros_like(v, dtype=torch.float64)
-        cu, indices, chunk_index = [0], [], 0
+        cu = [0]
+        indices: list[int] = []
+        chunk_index = 0
         for seq, length in enumerate(lengths):
             start = cu[-1]
             for local_chunk, pos in enumerate(range(0, length, CHUNK_SIZE)):
