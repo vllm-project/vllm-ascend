@@ -60,3 +60,41 @@ def test_dspark_draft_partition_isolation(monkeypatch, inherits_quant, pp_size, 
     assert patch_dspark.model_utils.get_draft_quant_config is get_quant_config
     assert patch_dspark.dspark_utils.get_pp_group is get_pp_group
     assert "_should_share" not in vars(patch_dspark.dspark_utils)
+
+
+@pytest.mark.parametrize(
+    "draft_path,target_path",
+    [(None, None), (None, "target"), ("draft", None)],
+    ids=["both-missing", "draft-missing", "target-missing"],
+)
+def test_dspark_draft_load_without_model_path(monkeypatch, draft_path, target_path):
+    # Upstream's DSpark embedding-sharing test builds its configs from
+    # SimpleNamespace and sets no model path. Reading one must not raise, and
+    # two absent paths must not compare equal into a same-checkpoint alias.
+    draft_model_config = SimpleNamespace()
+    model_config = SimpleNamespace(architecture="GlmMoeDsaForCausalLM")
+    if draft_path is not None:
+        draft_model_config.model = draft_path
+    if target_path is not None:
+        model_config.model = target_path
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(pipeline_parallel_size=1),
+        model_config=model_config,
+        speculative_config=SimpleNamespace(method="dspark", draft_model_config=draft_model_config),
+        quant_config=object(),
+    )
+    maybe_share = eagle_utils.maybe_share_target_embed
+    get_quant_config = patch_dspark.model_utils.get_draft_quant_config
+
+    def load(target, received_config):
+        assert received_config is config
+        # A missing path is never a same-checkpoint draft, so the draft keeps
+        # its own quant config instead of inheriting the target's.
+        assert patch_dspark.model_utils.get_draft_quant_config is get_quant_config
+        return target
+
+    monkeypatch.setattr(patch_dspark, "_original_load_dspark_model", load)
+    target = object()
+    assert patch_dspark._load_dspark_model_with_target_quant(target, config) is target
+    assert patch_dspark.model_utils.get_draft_quant_config is get_quant_config
+    assert eagle_utils.maybe_share_target_embed is maybe_share
