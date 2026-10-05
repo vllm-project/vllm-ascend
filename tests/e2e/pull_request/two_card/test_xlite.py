@@ -56,7 +56,6 @@ def test_models_with_xlite_decode_only(model: str, tpdp: tuple[int, int]):
         enable_expert_parallel=True,
         block_size=128,
         max_model_len=2048,
-        max_num_seqs=len(PROMPTS_SHORT),
         additional_config={
             "weight_nz_mode": 2,
             "xlite_graph_config": {"enabled": True, "full_mode": False},
@@ -91,7 +90,6 @@ def test_models_with_xlite_full_mode(model: str, tpdp: tuple[int, int]):
         enable_expert_parallel=True,
         block_size=128,
         max_model_len=2048,
-        max_num_seqs=len(PROMPTS_SHORT),
         additional_config={
             "weight_nz_mode": 2,
             "xlite_graph_config": {"enabled": True, "full_mode": True},

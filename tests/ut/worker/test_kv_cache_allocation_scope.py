@@ -41,10 +41,9 @@ def test_mrv1_kv_pool_only_wraps_backing_allocation() -> None:
         assert scope.active
         return raw_tensors
 
-    def reshape(_kv_cache_config, tensors, kernel_block_sizes):
+    def reshape(_kv_cache_config, tensors):
         assert not scope.active
         assert tensors is raw_tensors
-        assert kernel_block_sizes is None
         return reshaped
 
     def bind(*_args, **_kwargs):
