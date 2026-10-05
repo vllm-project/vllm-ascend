@@ -225,6 +225,19 @@ class AscendNgramHashState(NgramHashState):
     Keep that compiler workaround in this subclass, without changing vLLM.
     """
 
+    def dummy_hashes(self, input_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Participate in DP lookups without valid rows or hash-cache updates."""
+        num_tokens = input_ids.shape[0]
+        num_layers, max_ngram = self.multipliers.shape
+        num_heads = self.primes.shape[-1]
+        hashes = input_ids.new_full(
+            (num_tokens, num_layers, (max_ngram - 1) * num_heads),
+            DEAD_ID,
+            dtype=torch.int32,
+        )
+        keep = torch.zeros(num_tokens, dtype=torch.bool, device=input_ids.device)
+        return hashes, keep
+
     def forward(
         self,
         input_ids: torch.Tensor,
