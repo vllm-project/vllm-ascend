@@ -166,9 +166,11 @@ def real_parser(monkeypatch):
     monkeypatch.setattr(glm47_moe.Glm47MoeParser, "__init__", glm47_moe.Glm47MoeParser.__init__)
     load_patch()
     vocab = {token: i for i, token in enumerate(("<think>", "</think>", "<tool_call>", "</tool_call>"))}
+    id_to_token = {token_id: token for token, token_id in vocab.items()}
     tokenizer = SimpleNamespace(
         chat_template=GLM53_TEMPLATE,
         get_vocab=lambda: vocab,
+        decode=lambda token_ids: "".join(id_to_token[token_id] for token_id in token_ids),
         all_special_tokens=list(vocab),
         all_special_ids=list(vocab.values()),
     )
