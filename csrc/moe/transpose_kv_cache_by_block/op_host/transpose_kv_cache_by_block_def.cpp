@@ -9,14 +9,12 @@ public:
             .ParamType(DYNAMIC)
             .DataType({ge::DT_FLOAT16, ge::DT_BF16})
             .Format({ge::FORMAT_ND, ge::FORMAT_ND})
-            .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND})
-            .IgnoreContiguous();
+            .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND});
         this->Input("VCache")
             .ParamType(DYNAMIC)
             .DataType({ge::DT_FLOAT16, ge::DT_BF16})
             .Format({ge::FORMAT_ND, ge::FORMAT_ND})
-            .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND})
-            .IgnoreContiguous();
+            .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND});
         this->Input("blockIDs")
             .ParamType(REQUIRED)
             .DataType({ge::DT_INT64, ge::DT_INT64})
@@ -27,8 +25,6 @@ public:
         this->Attr("headDim").Int();
         this->Attr("splitNum").Int();
         this->Attr("layerNum").Int();
-        this->Attr("kBlockStride").AttrType(OPTIONAL).Int(0);
-        this->Attr("vBlockStride").AttrType(OPTIONAL).Int(0);
 
         this->AICore().AddConfig("ascend910b");
         this->AICore().AddConfig("ascend910_93");
