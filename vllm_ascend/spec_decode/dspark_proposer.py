@@ -356,12 +356,6 @@ class AscendDSparkProposer(AscendDflashProposer):
 
         return num_query_total, token_indices_to_sample, cad, long_seq_args
 
-    def _clear_dummy_slot_mappings(self) -> None:
-        for buf in self._per_group_query_slot_mapping_buffers.values():
-            buf.fill_(-1)
-        for buf in self._per_group_context_slot_mapping_buffers.values():
-            buf.fill_(-1)
-
     @torch.inference_mode()
     def dummy_run(
         self,
@@ -390,7 +384,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         context_states = self.hidden_states[:num_input_tokens]
 
         self.token_indices_to_sample.fill_(0)
-        self._clear_dummy_slot_mappings()
+        self._pad_draft_buffers(num_query_total, num_input_tokens)
 
         with set_ascend_forward_context(
             None,

@@ -374,8 +374,6 @@ class NPUPlatform(Platform):
 
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: VllmConfig) -> None:
-        super().update_block_size_for_backend(vllm_config)
-
         # TODO: NPU still sets block_size in check_and_update_config.
         # Move that logic here so block_size is chosen by the backend.
         using_kv_transfer_with_hybrid = (
@@ -484,10 +482,8 @@ class NPUPlatform(Platform):
 
         cls._validate_indexer_pp_config(vllm_config)
 
-        _validate_routing_replay_config(vllm_config)
         _validate_draft_decode_context_parallel_config(vllm_config)
         _validate_parallel_config(vllm_config)
-        _validate_engram_config(vllm_config)
 
         # 3.Auto detect quantization method and verify cache dtype
         maybe_auto_detect_quantization(vllm_config)
@@ -557,11 +553,9 @@ class NPUPlatform(Platform):
         """
         # NOTE(Ronald1995): avoid circular import.
         from vllm_ascend.ascend_forward_context import (
-            _is_decode_only_node,
             get_mc2_mask,
             get_mrv2_in_profile_run,
             select_moe_comm_method,
-            use_cann_megamoe,
         )
         from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
         from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
@@ -636,8 +630,6 @@ class NPUPlatform(Platform):
         return {
             "moe_comm_type": moe_comm_type,
             "moe_comm_method": moe_comm_method,
-            "use_mega_moe": use_cann_megamoe(vllm_config),
-            "is_decode_only_node": _is_decode_only_node(vllm_config),
             "capturing": capturing,
             "mmrs_fusion": mmrs_fusion,
             "num_tokens": num_tokens,
@@ -939,13 +931,12 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
 
     use_v2_model_runner = bool(getattr(vllm_config, "use_v2_model_runner", False))
     if use_v2_model_runner:
-        supported_eplb_fields = {"load_collection_phase", "stair_config"}
-        unsupported_eplb_fields = sorted(set(eplb_config) - supported_eplb_fields)
-        if unsupported_eplb_fields:
+        legacy_eplb_fields = sorted(set(eplb_config) - {"load_collection_phase"})
+        if legacy_eplb_fields:
             raise ValueError(
-                "Model Runner V2 only accepts 'load_collection_phase' and 'stair_config' in "
-                "additional_config.eplb_config; unsupported fields: "
-                f"{', '.join(unsupported_eplb_fields)}."
+                "Model Runner V2 only accepts 'load_collection_phase' in "
+                "additional_config.eplb_config; legacy fields are not supported: "
+                f"{', '.join(legacy_eplb_fields)}."
             )
         if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv(
             "EXPERT_MAP_RECORD", "false"
@@ -975,10 +966,10 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
                 upstream_eplb_config.communicator = "torch_gloo"
             if vllm_config.parallel_config.enable_elastic_ep:
                 raise ValueError("Async EPLB is not supported with elastic EP on Ascend.")
-    elif {"load_collection_phase", "stair_config"} & eplb_config.keys():
+    elif "load_collection_phase" in eplb_config:
         raise ValueError(
-            "stair_config and load_collection_phase are only supported by Model Runner V2; "
-            "use eplb_heat_collection_stage with Model Runner V1."
+            "additional_config.eplb_config.load_collection_phase is only supported by "
+            "Model Runner V2; use eplb_heat_collection_stage with Model Runner V1."
         )
     elif vllm_config.parallel_config.enable_eplb:
         raise ValueError("Upstream EPLB is only supported by Model Runner V2 on Ascend.")
@@ -1013,9 +1004,8 @@ def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:
 
     _validate_kv_load_failure_policy(vllm_config)
 
-    # short_request_first_config requires FCFS and excludes batch-job and
-    # kv-consumer paths. When profiling-chunk is also enabled, the profiling
-    # chunk scheduler installs the SRF waiting queue itself.
+    # short_request_first_config requires FCFS, excludes batch-job and
+    # kv-consumer paths, and only supports profiling-chunk synchronously.
     if scheduler_extension_config.short_request_first_config.enabled:
         kv_transfer_config = vllm_config.kv_transfer_config
         kv_role = getattr(kv_transfer_config, "kv_role", None)
@@ -1029,6 +1019,11 @@ def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:
                 "ShortRequestFirst scheduling cannot be enabled with batch_job_sched_config. "
                 "Please disable one of them."
             )
+        if scheduler_extension_config.profiling_chunk_config.enabled and vllm_config.scheduler_config.async_scheduling:
+            raise ValueError(
+                "ShortRequestFirst with profiling_chunk_config requires synchronous scheduling. "
+                "Please disable async scheduling."
+            )
         if kv_role == "kv_consumer":
             raise ValueError(
                 "ShortRequestFirst scheduling is supported only on prefill or PD-mixed nodes, "
@@ -1037,17 +1032,6 @@ def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:
         if vllm_config.scheduler_config.async_scheduling:
             vllm_config.scheduler_config.scheduler_cls = (
                 "vllm_ascend.core.short_request_first_scheduler.ShortRequestFirstAsyncScheduler"
-            )
-
-    # profiling_chunk (CPP) works with async scheduling only on the v2 model
-    # runner; the v1 PP execution path does not provide the same asynchronous
-    # sampled-token cadence and broadcast guarantees.
-    profiling_chunk_config = scheduler_extension_config.profiling_chunk_config
-    if profiling_chunk_config.enabled and vllm_config.scheduler_config.async_scheduling:
-        if not vllm_config.use_v2_model_runner:
-            raise ValueError(
-                "profiling_chunk_config with async scheduling requires the v2 model runner "
-                "(VLLM_USE_V2_MODEL_RUNNER=1). Please enable it or disable async scheduling."
             )
 
     dyntra_lb_config = scheduler_extension_config.dyntra_lb_config
@@ -1350,9 +1334,7 @@ def _setup_worker_and_scheduler(
     # Use ProfilingChunkScheduler when profiling-based chunk sizing is on.
     if scheduler_config.profiling_chunk_config.enabled:
         vllm_config.scheduler_config.scheduler_cls = (
-            "vllm_ascend.core.scheduler_profiling_chunk.ProfilingChunkAsyncScheduler"
-            if vllm_config.scheduler_config.async_scheduling
-            else "vllm_ascend.core.scheduler_profiling_chunk.ProfilingChunkScheduler"
+            "vllm_ascend.core.scheduler_profiling_chunk.ProfilingChunkScheduler"
         )
         # Apply the EngineCore.__init__ patch here for the InprocClient (in-process).
         # And the EngineCore.__init__ patch for EngineCoreProc (the spawned child process)
@@ -1558,58 +1540,6 @@ def _get_dyntra_lb_scheduler_cls(*, async_scheduling: bool) -> str:
     if async_scheduling:
         return "vllm_ascend.core.dyntra_lb_scheduler.AsyncDyntraLBScheduler"
     return "vllm_ascend.core.dyntra_lb_scheduler.DyntraLBScheduler"
-
-
-def _validate_engram_config(vllm_config: VllmConfig) -> None:
-    engram_config = getattr(vllm_config, "engram_config", None)
-    model_config = vllm_config.model_config
-    spec = vllm_config.speculative_config
-    if spec is not None and model_config is spec.draft_model_config:
-        model_config = spec.target_model_config
-    if engram_config is None:
-        if (
-            model_config is None
-            or model_config.architecture != "DeepseekV41ForCausalLM"
-            or not getattr(model_config.hf_text_config, "engram_layer_ids", None)
-        ):
-            return
-        # Upstream skips automatic Engram defaults on non-CUDA platforms.
-        # Supply its native config here and reuse its resolver and validation.
-        from vllm.config import EngramConfig, VllmConfig
-
-        vllm_config.engram_config = engram_config = EngramConfig()
-        VllmConfig._resolve_and_verify_engram_config(vllm_config)
-
-    if model_config is None or model_config.architecture != "DeepseekV41ForCausalLM":
-        raise ValueError("Ascend Engram requires DeepSeek V4.1.")
-    if engram_config.embedding_across_dp:
-        raise ValueError("Ascend Engram does not support embedding_across_dp")
-    parallel_config = vllm_config.parallel_config
-    if (
-        parallel_config.enable_elastic_ep
-        or parallel_config.tensor_parallel_size not in (1, 2, 4, 8)
-        or parallel_config.pipeline_parallel_size != 1
-        or parallel_config.prefill_context_parallel_size != 1
-        or parallel_config.decode_context_parallel_size != 1
-    ):
-        raise ValueError("Ascend Engram requires TP=1/2/4/8 with PP=PCP=DCP=1.")
-    load_format = vllm_config.load_config.load_format
-    if load_format not in ("auto", "safetensors", "dummy"):
-        raise ValueError("Ascend Engram requires indexed safetensors (auto/safetensors), or dummy weights.")
-
-
-def _validate_routing_replay_config(vllm_config: VllmConfig) -> None:
-    """Refuse routed-experts capture (R3) on the V1 model runner.
-
-    Its R3 data plane was removed here, so without this check the engine would
-    start and silently return no ``routed_experts``.
-    """
-    r3_requested = getattr(vllm_config.model_config, "enable_return_routed_experts", False)
-    if r3_requested and not vllm_config.use_v2_model_runner:
-        raise ValueError(
-            "routed-experts capture (--enable-return-routed-experts) is only supported by the "
-            "V2 model runner; set VLLM_USE_V2_MODEL_RUNNER=1 or drop the flag."
-        )
 
 
 def _validate_parallel_config(vllm_config: VllmConfig) -> None:

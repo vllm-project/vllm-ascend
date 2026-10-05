@@ -786,6 +786,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
     from vllm_ascend.ops.fused_moe.gate_linear import AscendGateLinear
     from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
+    from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
     from vllm_ascend.ops.layernorm import AscendFusedRMSNormGated, AscendGemmaRMSNorm, AscendRMSNorm, AscendRMSNormGated
     from vllm_ascend.ops.linear import (
         AscendColumnParallelLinear,
@@ -801,7 +802,6 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     from vllm_ascend.ops.rotary_embedding import (
         AscendApplyRotaryEmb,
         AscendDeepseekScalingRotaryEmbedding,
-        AscendGemma4RotaryEmbedding,
         AscendMRotaryEmbedding,
         AscendRotaryEmbedding,
         AscendYaRNRotaryEmbedding,
@@ -818,7 +818,6 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "SiluAndMul": AscendSiluAndMul,
         "SiluAndMulClamp": AscendSiluAndMulWithClamp,
         "RotaryEmbedding": AscendRotaryEmbedding,
-        "Gemma4RotaryEmbedding": AscendGemma4RotaryEmbedding,
         "MRotaryEmbedding": AscendMRotaryEmbedding,
         "ColumnParallelLinear": AscendColumnParallelLinear,
         "RowParallelLinear": AscendRowParallelLinear,
@@ -840,6 +839,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "Conv3dLayer": AscendConv3dLayer,
         "RelPosAttention": AscendRelPosAttention,
         "CustomQwen2Decoder": AscendCustomQwen2Decoder,
+        "GatedDeltaNetAttention": AscendGatedDeltaNetAttention,
         "BailingMoELinearAttention": AscendBailingMoELinearAttention,
         "MoERunner": AscendMoERunner,
         "RoutedExperts": AscendRoutedExperts,
@@ -892,11 +892,6 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
                 "RoutedExperts": AscendRoutedExperts310,
             }
         )
-    else:
-        from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
-
-        REGISTERED_ASCEND_OPS["GatedDeltaNetAttention"] = AscendGatedDeltaNetAttention
-
     for name, op_cls in REGISTERED_ASCEND_OPS.items():
         CustomOp.register_oot(_decorated_op_cls=op_cls, name=name)
 
@@ -1781,14 +1776,3 @@ def use_updatable_graph(
     from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 
     return attn_backend is not None and issubclass(attn_backend, AscendAttentionBackend)
-
-
-def _is_glm_model(model_config) -> bool:
-    """Return True if the target model belongs to the GLM series.
-
-    Detection is based on the model_type string (covers glm, chatglm, glm4,
-    glm4_moe, glm4_moe_lite, glm4_1v, glm_ocr, glm_moe_dsa, etc).
-    """
-    hf_text_config = getattr(model_config, "hf_text_config", None)
-    model_type = getattr(hf_text_config, "model_type", "") or ""
-    return "glm" in str(model_type).lower()

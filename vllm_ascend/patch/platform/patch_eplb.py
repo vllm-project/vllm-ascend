@@ -8,11 +8,10 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from functools import wraps
 from inspect import signature
-from typing import Any, Literal, get_args
+from typing import Any
 
 import numpy as np
 import torch
-from pydantic.dataclasses import rebuild_dataclass
 from vllm.config import parallel as _parallel_config
 from vllm.distributed.eplb import async_worker as _async_worker
 from vllm.distributed.eplb import eplb_communicator as _eplb_communicator
@@ -23,7 +22,6 @@ from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
 from vllm_ascend.distributed.eplb.communicator import AscendGlooEplbCommunicator
 from vllm_ascend.distributed.eplb.explicit_transfer import stage_explicit_layer_transfer
-from vllm_ascend.distributed.eplb.policy import PreparedLoadStats
 from vllm_ascend.distributed.eplb.state import (
     ASYNC_EPLB_CYCLE_COMMITTED_LOG,
     EXPERT_MAPPING_EP_SIZE,
@@ -35,7 +33,6 @@ _PATCH_MARKER = "_vllm_ascend_eplb_patch"
 # Old async APIs pass one target layer at a time. Preserve the augmented full
 # target on its per-model communicator until the last workspace commit.
 _EXPLICIT_TRANSFER_TARGET_ATTR = "_vllm_ascend_explicit_transfer_target"
-_ASCEND_EPLB_POLICIES = ("default", "stair")
 
 
 @dataclass
@@ -88,42 +85,6 @@ def _patch_parallel_config() -> None:
     platform = _parallel_config.current_platform
     if not isinstance(platform, _CudaAlikeEplbPlatformProxy):
         _parallel_config.current_platform = _CudaAlikeEplbPlatformProxy(platform)
-
-
-def _patch_eplb_policy_config() -> None:
-    """Extend the upstream policy field while preserving its validation."""
-    config_cls = _parallel_config.EPLBConfig
-    policy_field = getattr(config_cls, "__dataclass_fields__", {}).get("policy")
-    if policy_field is None:
-        raise RuntimeError("Unsupported vLLM EPLB contract: policy field is missing.")
-    policy_type = Literal["default", "stair"]
-    if get_args(policy_field.type) == _ASCEND_EPLB_POLICIES and policy_field.default == "stair":
-        return
-
-    decorators = getattr(config_cls, "__pydantic_decorators__", None)
-    validator = None if decorators is None else decorators.model_validators.get("_validate_eplb_config")
-    if validator is None:
-        raise RuntimeError("Unsupported vLLM EPLB contract: policy validator is missing.")
-    original_validator = validator.func
-
-    @wraps(original_validator)
-    def _validate_with_stair(config):
-        if config.policy != "stair":
-            return original_validator(config)
-        config.policy = "default"
-        try:
-            validated = original_validator(config)
-        finally:
-            config.policy = "stair"
-        return validated
-
-    _parallel_config.EPLBPolicyOption = policy_type  # type: ignore[misc]
-    config_cls.__annotations__["policy"] = policy_type
-    policy_field.type = policy_type
-    policy_field.default = "stair"
-    validator.func = _validate_with_stair
-    rebuild_dataclass(config_cls, force=True)
-    rebuild_dataclass(_parallel_config.ParallelConfig, force=True)
 
 
 def _wrap_communicator_factory(original_factory):
@@ -242,54 +203,15 @@ def _clear_transfer_target(communicator, target=None) -> None:
 
 def _wrap_async_rebalance(original_rebalance):
     rebalance_signature = signature(original_rebalance)
-    stream_parameter = "stream" if "stream" in rebalance_signature.parameters else "cuda_stream"
-    required = {
-        "model_state",
-        "eplb_state",
-        "physical_to_logical_map_cpu",
-        stream_parameter,
-    }
-    if not required.issubset(rebalance_signature.parameters):
-        raise RuntimeError("Unsupported vLLM EPLB contract: asynchronous rebalance signature changed.")
+    if "model_state" not in rebalance_signature.parameters:
+        raise RuntimeError("Unsupported vLLM EPLB contract: async rebalance has no model_state parameter.")
 
     @wraps(original_rebalance)
     def _async_rebalance(*args, **kwargs):
         bound = rebalance_signature.bind(*args, **kwargs)
-        model_state = bound.arguments["model_state"]
-        eplb_state = bound.arguments["eplb_state"]
-        communicator = model_state.communicator
+        communicator = bound.arguments["model_state"].communicator
         _clear_transfer_target(communicator)
-        prepared_stats = getattr(model_state, "_policy_load_stats", None)
-        eplb_stats = model_state.eplb_stats
-        if (
-            prepared_stats is None
-            or eplb_stats is None
-            or prepared_stats.values is not eplb_stats.global_expert_load_window
-        ):
-            target = original_rebalance(*bound.args, **bound.kwargs)
-        else:
-            stream = bound.arguments[stream_parameter]
-            with stream if stream is not None else nullcontext():
-                cpu_stats = PreparedLoadStats(
-                    prepared_stats.values.cpu(),
-                    prepared_stats.sample_counts,
-                )
-            current_mapping = bound.arguments["physical_to_logical_map_cpu"]
-            rank_node_ids = eplb_state.get_rank_node_ids()
-            target = eplb_state.policy.rebalance_experts(
-                cpu_stats,
-                eplb_stats.num_replicas,
-                eplb_stats.num_groups,
-                eplb_stats.num_nodes,
-                eplb_stats.num_gpus,
-                current_mapping,
-                last_committed_mean_ratios=model_state._last_committed_mean_ratios,
-                rank_node_ids=rank_node_ids,
-            )
-            if target.device.type != "cpu":
-                raise RuntimeError("EPLB policy returned a non-CPU expert mapping")
-            target.changed_layer_count = int((target != current_mapping).any(dim=1).sum().item())
-            target.rank_node_ids = rank_node_ids
+        target = original_rebalance(*bound.args, **bound.kwargs)
         if _has_explicit_sources(target):
             setattr(communicator, _EXPLICIT_TRANSFER_TARGET_ATTR, target)
         return target
@@ -492,10 +414,6 @@ def _wrap_move_to_workspace(original_move):
                 result = original_move(*bound.args, **bound.kwargs)
             if layer_idx is not None:
                 refresh_model_routing_tables(model_state, layer_idx)
-                if full_target is not None and hasattr(full_target, "predicted_mean_ratios"):
-                    predicted_ratio = full_target.predicted_mean_ratios[layer_idx]
-                    if np.isfinite(predicted_ratio):
-                        model_state._last_committed_mean_ratios[layer_idx] = predicted_ratio
             if is_last_result:
                 _clear_transfer_target(model_state.communicator)
                 if bound.arguments["ep_rank"] == 0:
@@ -509,34 +427,12 @@ def _wrap_move_to_workspace(original_move):
                         source_ranks = np.asarray(full_target.source_rank_ids)
                         destination_ranks = np.arange(source_ranks.shape[-2])[None, :, None]
                         rank_transfers = np.count_nonzero(source_ranks != destination_ranks)
-                        imbalance = getattr(full_target, "predicted_imbalance_summary", None)
-                        rank_node_ids = getattr(full_target, "rank_node_ids", None)
-                        if imbalance is None or rank_node_ids is None:
-                            logger.info(
-                                "%s: model=%s rank_transfers=%d",
-                                ASYNC_EPLB_CYCLE_COMMITTED_LOG,
-                                model_state.model_name,
-                                rank_transfers,
-                            )
-                        else:
-                            rank_node_ids = np.asarray(rank_node_ids)
-                            cross_node_transfers = np.count_nonzero(
-                                rank_node_ids[source_ranks] != rank_node_ids[destination_ranks]
-                            )
-                            mean_before, p95_before, mean_after, p95_after = imbalance
-                            logger.info(
-                                "%s: model=%s mean=%.4f->%.4f p95=%.4f->%.4f changed_layers=%d "
-                                "rank_transfers=%d cross_node_transfers=%d",
-                                ASYNC_EPLB_CYCLE_COMMITTED_LOG,
-                                model_state.model_name,
-                                mean_before,
-                                mean_after,
-                                p95_before,
-                                p95_after,
-                                full_target.changed_layer_count,
-                                rank_transfers,
-                                cross_node_transfers,
-                            )
+                        logger.info(
+                            "%s: model=%s rank_transfers=%d",
+                            ASYNC_EPLB_CYCLE_COMMITTED_LOG,
+                            model_state.model_name,
+                            rank_transfers,
+                        )
         finally:
             if pending_result is not None and consumed_event is not None:
                 pending_result.consumed_event = consumed_event
@@ -554,7 +450,6 @@ def _patch_async_move_to_workspace() -> None:
         _eplb_state._move_to_workspace = _wrap_move_to_workspace(original_move)
 
 
-_patch_eplb_policy_config()
 _patch_parallel_config()
 _patch_initial_expert_layout()
 _patch_communicator_factory()
