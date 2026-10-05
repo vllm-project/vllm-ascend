@@ -23,6 +23,7 @@ from vllm.distributed.kv_events import BlockStored
 from vllm.logger import logger
 from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
 from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
     KVCacheConfig,
     MambaSpec,
     UniformTypeKVCacheSpecs,
@@ -1006,6 +1007,22 @@ class KVPoolWorker:
             registered_regions[storage_key] = (new_start, end)
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
+        layer_specs = get_layerwise_kv_cache_specs(self.kv_cache_config) if self.kv_cache_config is not None else {}
+        normalized_caches: dict[str, Any] = {}
+        for layer_name, cache in kv_caches.items():
+            if (
+                not self.use_mla
+                and not self.use_sparse
+                and type(layer_specs.get(layer_name)) is FullAttentionSpec
+                and isinstance(cache, torch.Tensor)
+                and cache.ndim == 5
+                and cache.shape[0] == 2
+            ):
+                normalized_caches[layer_name] = cache.unbind(0)
+            else:
+                normalized_caches[layer_name] = cache
+        kv_caches = normalized_caches
+
         _, first_kv_cache_tuple = next(iter(kv_caches.items()))
         first_kv_cache_tuple = self._as_cache_tuple(first_kv_cache_tuple)
         first_kv_cache = first_kv_cache_tuple[0]
