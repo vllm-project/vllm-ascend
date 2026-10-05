@@ -14,6 +14,7 @@ from vllm.v1.worker.gpu.sample import (
     thinking_budget,
 )
 from vllm.v1.worker.gpu.spec_decode import rejection_sampler, rejection_sampler_utils
+from vllm.v1.worker.gpu.spec_decode.dflash import speculator as dflash_speculator
 from vllm.v1.worker.gpu.spec_decode.dspark import speculator as dspark_speculator
 from vllm.v1.worker.gpu.spec_decode.eagle import speculator
 
@@ -33,6 +34,7 @@ from vllm_ascend.worker.v2.sample.gumbel import apply_temperature
 from vllm_ascend.worker.v2.sample.logprob import compute_token_logprobs, compute_topk_logprobs
 from vllm_ascend.worker.v2.sample.min_p import apply_min_p
 from vllm_ascend.worker.v2.sample.penalties import apply_penalties, bincount
+from vllm_ascend.worker.v2.spec_decode.dflash.speculator import prepare_dflash_inputs
 from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import (
     rejection_sample as npu_rejection_sample,
 )
@@ -60,6 +62,7 @@ sampler.gumbel_sample = categorical_sample
 topk_topp_sampler.apply_top_k_top_p_triton = apply_top_k_top_p_npu
 structured_outputs._apply_grammar_bitmask_kernel = _apply_grammar_bitmask_kernel
 mamba_utils.precopy_mamba_align_fused_kernel = precopy_mamba_align_fused_kernel
+dflash_speculator.prepare_dflash_inputs = prepare_dflash_inputs
 # This patch may be revisited or reverted once the compiler and Triton Ascend toolkit
 # support the upstream implementation of fill_logprob_token_ids_kernel.
 # For now, use the Ascend-specific implementation.
