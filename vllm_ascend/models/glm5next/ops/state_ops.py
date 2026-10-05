@@ -1,34 +1,41 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Ascend recurrent-state gather/scatter for the GLM-5.3-Flash KDA layers."""
+"""Ascend recurrent-state gather/scatter for the GLM-5.3-Flash KDA layers.
 
-import math
+The upstream helpers in ``vllm.model_executor.layers.mamba.ops`` assert
+``state.is_cuda`` and launch Triton kernels that reference
+``tl.extra.cuda.gdc_wait``, neither of which holds on Ascend. Both are plain
+index ops, so they are expressed in torch here. Keeping the masking on device
+(rather than branching on ``has_initial_state``) avoids a host sync and leaves
+the sequence ACL-graph safe.
+"""
 
 import torch
-import torch_npu
-
-from vllm_ascend.ops.triton.mamba.state_ops import (
-    gather_initial_states as gather_initial_states,
-)
 
 
-def scatter_states(state: torch.Tensor, src: torch.Tensor, indices: torch.Tensor) -> None:
-    """Write unique selected state rows without a contiguous copy of the pool."""
-    if state.device.type != "npu":
-        state.index_copy_(0, indices.to(torch.int64), src)
-        return
-    if indices.numel() == 0 or math.prod(state.shape[1:]) == 0:
-        return
-    assert state.ndim >= 2 and src.ndim == state.ndim
-    assert indices.ndim == 1 and indices.device == state.device
-    assert src.shape == (indices.numel(), *state.shape[1:])
-    assert indices.dtype in (torch.int32, torch.int64)
-    assert state[0].is_contiguous() and src[0].is_contiguous()
-    # Treat each contiguous state as one cache row. These views preserve the
-    # page stride and storage offset without copying the padded state pool.
-    row_size = math.prod(state.shape[1:])
-    torch_npu.npu_scatter_nd_update_(
-        state.view(state.shape[0], row_size),
-        indices.unsqueeze(-1),
-        src.view(indices.numel(), row_size),
-    )
+def gather_initial_states(
+    state: torch.Tensor,
+    indices: torch.Tensor,
+    has_initial_state: torch.Tensor,
+) -> torch.Tensor:
+    """Read the cache rows at ``indices``, zeroing sequences that start fresh."""
+    idx = indices.to(torch.int64) * has_initial_state.to(torch.int64)
+    out = state.index_select(0, idx)
+    keep = has_initial_state.view([-1] + [1] * (state.dim() - 1)).to(torch.bool)
+    # Fresh requests must ignore stale cache values, including NaN/Inf:
+    # multiplying such values by zero would still produce NaN.
+    return torch.where(keep, out, 0)
+
+
+def scatter_states(
+    state: torch.Tensor,
+    src: torch.Tensor,
+    indices: torch.Tensor,
+) -> None:
+    """Scatter ``src`` rows into ``state`` at ``indices`` (in place).
+
+    Equivalent to ``state[indices] = src``. Cache slots are unique per sequence,
+    so the write needs no atomics. ``gather_initial_states`` is the read-side
+    counterpart.
+    """
+    state.index_copy_(0, indices.to(torch.int64), src)
