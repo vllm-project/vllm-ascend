@@ -4939,6 +4939,7 @@ class NPUModelRunner(GPUModelRunner):
             and not self.use_compress
             and not self.sparse_kv_offload_enabled
             and not self.ascend_config.xlite_graph_config.enabled
+            and self.hybrid_with_attn_and_mamba
         ):
             layer_backends = {
                 layer_name: group.backend
