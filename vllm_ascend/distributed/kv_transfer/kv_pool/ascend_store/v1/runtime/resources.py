@@ -1,4 +1,4 @@
-"""Register Worker KV memory and expose the facts consumed by rule binding."""
+"""Register Worker KV memory and expose the facts consumed by projection binding."""
 
 from __future__ import annotations
 
@@ -7,9 +7,12 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
-
-from ..backend import BackendSpec
+from ..backend import (
+    BackendSpec,
+    BufferRegistrationError,
+    KVStoreBackend,
+    Registration,
+)
 
 if TYPE_CHECKING:
     from ..topology import KVPoolGroupTopology
@@ -33,7 +36,7 @@ class KVPoolResources:
 
     def __init__(
         self,
-        backend: Backend,
+        backend: KVStoreBackend,
         backend_spec: BackendSpec,
         num_blocks: int,
         groups: tuple[KVPoolGroupTopology, ...],
@@ -48,29 +51,38 @@ class KVPoolResources:
         self._gva_layout = gva_layout
         self._align_shared_storage = align_shared_storage
         self.kv_caches: dict[str, torch.Tensor] | None = None
-        self._memory_bound = False
+        self._buffer_registration: Registration | None = None
+        self._binding_started = False
         self._closed = False
 
     def bind_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> dict[str, Any]:
         if self._closed:
             raise RuntimeError("KV resources are closed")
-        if self._memory_bound:
+        if self._binding_started:
             raise RuntimeError("KV caches are already bound")
-        registration = self._register_kv_buffers(kv_caches)
+        self._binding_started = True
         self.kv_caches = kv_caches
-        self._memory_bound = True
+        try:
+            buffer_registration, registration = self._register_kv_buffers(kv_caches)
+        except BufferRegistrationError as error:
+            self._buffer_registration = error.registration
+            raise
+        self._buffer_registration = buffer_registration
         return registration
 
     def close(self) -> None:
         if self._closed:
             return
-        close_backend = getattr(self.backend, "close", None)
-        if callable(close_backend):
-            close_backend()
+        if self._buffer_registration is not None:
+            self._buffer_registration.close()
+        self.backend.close()
         self.kv_caches = None
         self._closed = True
 
-    def _register_kv_buffers(self, kv_caches: dict[str, torch.Tensor]) -> dict[str, Any]:
+    def _register_kv_buffers(
+        self,
+        kv_caches: dict[str, torch.Tensor],
+    ) -> tuple[Registration, dict[str, Any]]:
         base_addresses: dict[int, list[int]] = {}
         block_lengths: dict[int, list[int]] = {}
         block_strides: dict[int, list[int]] = {}
@@ -117,11 +129,6 @@ class KVPoolResources:
                 if aligned_start < storage_key:
                     raise ValueError("Shared KV storage cannot satisfy the GVA alignment boundary")
                 registered_regions[storage_key] = aligned_start, end
-        self.backend.register_buffer(
-            [start for start, _ in registered_regions.values()],
-            [end - start for start, end in registered_regions.values()],
-        )
-
         registration: dict[str, Any] = {
             "base_addresses": base_addresses,
             "block_lengths": block_lengths,
@@ -132,7 +139,13 @@ class KVPoolResources:
             object_sizes, object_offsets = self._resolve_gva_objects(block_lengths)
             registration["object_sizes"] = object_sizes
             registration["object_offsets"] = object_offsets
-        return registration
+        buffer_registration = self.backend.register_buffer(
+            [start for start, _ in registered_regions.values()],
+            [end - start for start, end in registered_regions.values()],
+        )
+        if not callable(getattr(buffer_registration, "close", None)):
+            raise TypeError(f"{type(self.backend).__name__}.register_buffer must return a Registration owner")
+        return buffer_registration, registration
 
     def _resolve_gva_objects(
         self,

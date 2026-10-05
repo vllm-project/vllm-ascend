@@ -1,10 +1,10 @@
-"""Carry one Runtime invocation's rows from rule selection to Backend I/O.
+"""Carry one Worker invocation's rows from projection selection to Backend I/O.
 
 The batch values retain dynamic Block IDs, token counts, keys, request
 ownership, and current object selection together with the minimal bound facts
 needed to interpret them: physical layers and remote object size. Reusable
-layout formulas remain in ``KVPoolRules``; session progress and visibility
-fences remain in Timeline state.
+layout formulas remain in the bound variant projection; session progress and
+visibility fences remain in Timeline state.
 """
 
 from __future__ import annotations
@@ -15,11 +15,10 @@ from typing import TypeAlias
 import numpy as np
 from numpy.typing import NDArray
 
-from ..rules.identity import KeyAxes
-
 ByteArray: TypeAlias = NDArray[np.uint64]
 IndexArray: TypeAlias = NDArray[np.intp]
 BoolArray: TypeAlias = NDArray[np.bool_]
+KeyAxes: TypeAlias = tuple[tuple[str, ...], ...]
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -35,6 +34,11 @@ class KVGroupBatch:
     object_size: int
     selected_objects: BoolArray | None = None
     selected_key_values: tuple[str, ...] | None = None
+    physical_layer_ids_by_axis: tuple[tuple[int, ...], ...] | None = None
+
+    def __post_init__(self) -> None:
+        if self.physical_layer_ids_by_axis is not None and len(self.physical_layer_ids_by_axis) != len(self.key_axes):
+            raise ValueError("Per-axis physical layers must align the key axes")
 
     @property
     def row_count(self) -> int:
@@ -85,20 +89,27 @@ class KVGroupBatch:
 
     def source(self, object_index: int, layer_id: int | None) -> TransferSource:
         axis_index, row_index = divmod(object_index, self.row_count)
-        layer_ids = self.physical_layer_ids if layer_id is None else (layer_id,)
+        layer_ids: tuple[int, ...]
+        if layer_id is not None:
+            layer_ids = (layer_id,)
+        elif self.physical_layer_ids_by_axis is None:
+            layer_ids = self.physical_layer_ids
+        else:
+            layer_ids = self.physical_layer_ids_by_axis[axis_index]
         request_index = self.request_index(object_index)
         key = self.key_axes[axis_index][row_index]
         return TransferSource(self, object_index, row_index, request_index, layer_ids, key)
 
 
 @dataclass(frozen=True, slots=True)
-class LayerStoreGroup:
-    """One Group's admitted object rows shared by every Store layer."""
+class LayerTransferGroup:
+    """One Group's selected object rows shared by every Layerwise copy."""
 
     batch: KVGroupBatch
     keys: tuple[str, ...]
     block_ids: ByteArray
     token_counts: ByteArray
+    object_indices: range | IndexArray
 
     @property
     def group_id(self) -> int:
@@ -110,46 +121,59 @@ class LayerStoreGroup:
 
 
 @dataclass(frozen=True, slots=True)
-class LayerStorePlan:
-    """One Store's object rows and layer membership lowered during materialization."""
+class LayerTransferPlan:
+    """Selected object rows and layer membership lowered once per session."""
 
-    groups: tuple[LayerStoreGroup, ...]
-    groups_by_layer: dict[int, tuple[LayerStoreGroup, ...]]
+    batch: KVTransferBatch
+    groups: tuple[LayerTransferGroup, ...]
+    groups_by_layer: dict[int, tuple[LayerTransferGroup, ...]]
     keys_by_layer: dict[int, list[str]]
     object_bases_by_group: dict[int, ByteArray] | None = None
 
 
-def make_layer_store_group(
+def make_layer_transfer_group(
     group: KVGroupBatch,
     selected_object_indices: IndexArray | None = None,
-) -> LayerStoreGroup:
-    """Align one materialized Group's dynamic rows with its admitted objects."""
+) -> LayerTransferGroup:
+    """Align one materialized Group's dynamic rows with its selected objects."""
 
     keys = group.selected_keys()
     if not keys:
-        return LayerStoreGroup(group, (), group.block_ids[:0], group.token_counts[:0])
+        return LayerTransferGroup(
+            group,
+            (),
+            group.block_ids[:0],
+            group.token_counts[:0],
+            range(0),
+        )
     if selected_object_indices is None and group.selection is not None:
         selected_object_indices = np.flatnonzero(group.selection)
     if selected_object_indices is None:
         axis_count = len(group.key_axes)
+        object_indices: range | IndexArray = range(group.object_count)
         block_ids = group.block_ids if axis_count == 1 else np.tile(group.block_ids, axis_count)
         token_counts = group.token_counts if axis_count == 1 else np.tile(group.token_counts, axis_count)
     else:
         row_indices = selected_object_indices % group.row_count
         block_ids = group.block_ids[row_indices]
         token_counts = group.token_counts[row_indices]
+        selected_object_indices.flags.writeable = False
+        object_indices = selected_object_indices
     if not (len(keys) == len(block_ids) == len(token_counts)):
-        raise RuntimeError(f"Layerwise Store group {group.group_id} has misaligned keys and object rows")
+        raise RuntimeError(f"Layerwise group {group.group_id} has misaligned keys and object rows")
     block_ids.flags.writeable = False
     token_counts.flags.writeable = False
-    return LayerStoreGroup(group, keys, block_ids, token_counts)
+    return LayerTransferGroup(group, keys, block_ids, token_counts, object_indices)
 
 
-def make_layer_store_plan(groups: tuple[LayerStoreGroup, ...]) -> LayerStorePlan:
+def make_layer_transfer_plan(
+    batch: KVTransferBatch,
+    groups: tuple[LayerTransferGroup, ...],
+) -> LayerTransferPlan:
     """Compile reusable group membership and key axes without touching object rows."""
 
     active_groups = tuple(group for group in groups if group.keys)
-    mutable_groups_by_layer: dict[int, list[LayerStoreGroup]] = {}
+    mutable_groups_by_layer: dict[int, list[LayerTransferGroup]] = {}
     for group in active_groups:
         for layer_id in group.physical_layer_ids:
             mutable_groups_by_layer.setdefault(layer_id, []).append(group)
@@ -162,18 +186,18 @@ def make_layer_store_plan(groups: tuple[LayerStoreGroup, ...]) -> LayerStorePlan
         if membership not in keys_by_membership:
             keys_by_membership[membership] = [key for group in layer_groups for key in group.keys]
         keys_by_layer[layer_id] = keys_by_membership[membership]
-    return LayerStorePlan(active_groups, groups_by_layer, keys_by_layer)
+    return LayerTransferPlan(batch, active_groups, groups_by_layer, keys_by_layer)
 
 
 @dataclass(frozen=True, slots=True)
 class KVTransferBatch:
-    """One Runtime invocation with request ownership retained on Group rows."""
+    """One Worker invocation with request ownership retained on Group rows."""
 
     request_ids: tuple[str, ...]
     groups: tuple[KVGroupBatch, ...]
     store_job_ids: tuple[int | None, ...] | None = None
     selected_key_values: tuple[str, ...] | None = None
-    layer_store_plan: LayerStorePlan | None = None
+    layer_store_plan: LayerTransferPlan | None = None
 
     @property
     def empty(self) -> bool:
@@ -191,7 +215,10 @@ class KVTransferBatch:
         layer_store_plan = (
             None
             if self.layer_store_plan is None
-            else make_layer_store_plan(tuple(make_layer_store_group(group) for group in groups))
+            else make_layer_transfer_plan(
+                replace(self, groups=groups, selected_key_values=selected_keys, layer_store_plan=None),
+                tuple(make_layer_transfer_group(group) for group in groups),
+            )
         )
         return replace(
             self,
@@ -204,6 +231,22 @@ class KVTransferBatch:
         groups = tuple(group for group in self.groups if layer_id in group.physical_layer_ids)
         selected_keys = tuple(key for group in groups for key in group.selected_keys())
         return replace(self, groups=groups, selected_key_values=selected_keys, layer_store_plan=None)
+
+
+# Store builds this plan during Worker materialization. Load builds the same
+# shape after session admission, so both directions retain one cross-layer
+# lowering without sharing mutable lifecycle state.
+LayerStoreGroup = LayerTransferGroup
+LayerStorePlan = LayerTransferPlan
+make_layer_store_group = make_layer_transfer_group
+
+
+def make_layer_store_plan(groups: tuple[LayerTransferGroup, ...], batch: KVTransferBatch) -> LayerTransferPlan:
+    return make_layer_transfer_plan(batch, groups)
+
+
+def make_layer_load_plan(batch: KVTransferBatch) -> LayerTransferPlan:
+    return make_layer_transfer_plan(batch, tuple(make_layer_transfer_group(group) for group in batch.groups))
 
 
 @dataclass(frozen=True, slots=True)

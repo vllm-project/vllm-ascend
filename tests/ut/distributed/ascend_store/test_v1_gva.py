@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -13,20 +12,25 @@ import torch
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1 import backend as backend_module
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend import (
     BackendSpec,
+    GVARegion,
     LayerwiseAccessKind,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.coordinates import TokenRange
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.projection import (
+    GVALayerwiseProjection,
+    GVALayerwiseProjectionBinder,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.projection.layerwise.gva import gva_local_keys
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.transfer import (
     KVTransferStep,
     RangeStoreCommand,
     StoreCommandBatch,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.rules import (
-    KVPoolRuleSpec,
-    compile_kv_pool_rules,
-)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.runtime.backend import (
     GVABackendIO,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.runtime.backend import (
+    arguments as arguments_module,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.runtime.batch import (
     KVGroupBatch,
@@ -36,13 +40,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.runtime.resourc
     GVAObjectLayout,
     KVPoolResources,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.runtime.runtime import (
-    KVPoolRuntime,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.timeline.schedule import (
-    KVPoolSchedule,
-    LoadScheduleKind,
-    StoreScheduleKind,
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker import (
+    GVALayerwiseWorker,
 )
 
 from .v1.helpers import (
@@ -137,47 +136,85 @@ class FakeGVABackend(FakeBackend):
 
     def __init__(self) -> None:
         super().__init__()
-        self.store = FakeGVAStore()
+        self.native_store: FakeGVAStore | None = FakeGVAStore()
 
-    def ensure_initialized(self) -> None:
-        pass
+    def validate_gva_support(self) -> None:
+        if self.native_store is None:
+            raise RuntimeError("Memcache store is unavailable for GVA")
+        for method in (
+            "batch_get_key_info",
+            "batch_add_lease",
+            "batch_remove_lease",
+            "batch_alloc",
+            "batch_copy",
+            "batch_write_finish",
+        ):
+            if not callable(getattr(self.native_store, method, None)):
+                raise RuntimeError(f"Memcache GVA requires native {method}")
+
+    def query_gva_regions(self, keys):
+        assert self.native_store is not None
+        infos = self.native_store.batch_get_key_info(keys, 1)
+        return tuple(
+            None if not info.gva_list() or info.size() <= 0 else GVARegion(info.gva_list()[0], info.size())
+            for info in infos
+        )
+
+    def add_gva_leases(self, keys):
+        assert self.native_store is not None
+        return tuple(self.native_store.batch_add_lease(keys))
+
+    def remove_gva_leases(self, keys):
+        assert self.native_store is not None
+        result = self.native_store.batch_remove_lease(keys)
+        if result != 0:
+            raise RuntimeError(f"batch_remove_lease failed with result {result}")
+
+    def allocate_gva(self, keys, sizes):
+        assert self.native_store is not None
+        return tuple(self.native_store.batch_alloc(keys, sizes))
+
+    def copy_from_gva(self, remote_addresses, local_addresses, sizes):
+        assert self.native_store is not None
+        return self.native_store.batch_copy(remote_addresses, local_addresses, sizes, 1)
+
+    def copy_to_gva(self, remote_addresses, local_addresses, sizes):
+        assert self.native_store is not None
+        return self.native_store.batch_copy(remote_addresses, local_addresses, sizes, 0)
+
+    def publish_gva(self, keys):
+        assert self.native_store is not None
+        return tuple(self.native_store.batch_write_finish(keys, [0] * len(keys)))
 
 
 def make_gva_spec() -> BackendSpec:
-    directions = SimpleNamespace(COPY_L2G=SimpleNamespace(value=0), COPY_G2L=SimpleNamespace(value=1))
     return BackendSpec(
         "memcache",
         FakeGVABackend,
-        SimpleNamespace(MmcDirect=directions),
         LayerwiseAccessKind.GVA,
         True,
     )
 
 
-def make_gva_runtime():
+def make_gva_worker():
     backend = FakeGVABackend()
     topology = make_topology()
-    schedule = KVPoolSchedule(LoadScheduleKind.LAYERWISE, StoreScheduleKind.LAYERWISE, 2)
     backend_spec = make_gva_spec()
     resources = FakeResources(backend, backend_spec, topology)
-    rule_spec = KVPoolRuleSpec(topology, "memcache", 64, use_layerwise=True)
-    with patch(
-        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.rules.compiler.resolve_backend_spec",
-        return_value=backend_spec,
-    ):
-        rule_binder = compile_kv_pool_rules(
-            rule_spec,
-            layerwise_full_key=lambda group, value, head, stage: f"g{group}:p{stage}:h{head}:{value}",
-        )
-    runtime = KVPoolRuntime(
+    projection_binder = GVALayerwiseProjectionBinder(
         topology,
-        schedule,
-        rule_binder,
-        resources,
+        64,
+        lambda group, value, head, stage: f"g{group}:p{stage}:h{head}:{value}",
+    )
+    worker = GVALayerwiseWorker(
+        topology,
+        projection_binder,
+        resources,  # type: ignore[arg-type]
         source_ready_event_factory=FakeEvent,
     )
-    runtime.bind_kv_caches({"cache": object()})
-    return runtime, resources, backend.store
+    worker.bind_kv_caches({"cache": object()})
+    assert backend.native_store is not None
+    return worker, resources, backend.native_store
 
 
 def make_gva_binding(block_ids: tuple[int, ...] = (1, 3)):
@@ -185,21 +222,19 @@ def make_gva_binding(block_ids: tuple[int, ...] = (1, 3)):
     topology = make_topology()
     backend_spec = make_gva_spec()
     resources = FakeResources(backend, backend_spec, topology)
-    with patch(
-        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.rules.compiler.resolve_backend_spec",
-        return_value=backend_spec,
-    ):
-        binder = compile_kv_pool_rules(
-            KVPoolRuleSpec(topology, "memcache", 64, use_layerwise=True),
-            layerwise_full_key=lambda group, value, head, stage: f"g{group}:p{stage}:h{head}:{value}",
-        )
-    rules = binder(**resources.bind_kv_caches({"cache": object()}))
+    binder = GVALayerwiseProjectionBinder(
+        topology,
+        64,
+        lambda group, value, head, stage: f"g{group}:p{stage}:h{head}:{value}",
+    )
+    projection = binder.bind(**resources.bind_kv_caches({"cache": object()}))
+    assert isinstance(projection, GVALayerwiseProjection)
     backend_io = GVABackendIO(backend, backend_spec)
-    backend_io.bind_rules(rules)
+    backend_io.bind_projection(projection)
 
     hashes = tuple(f"h{index}" for index in range(len(block_ids)))
     ids = np.asarray(block_ids, dtype=np.uint64)
-    counts = np.full(len(block_ids), 4, dtype=np.uint64)
+    counts: np.ndarray = np.full(len(block_ids), 4, dtype=np.uint64)
     request_splits = np.asarray([0, len(block_ids)], dtype=np.intp)
     for values in (ids, counts, request_splits):
         values.flags.writeable = False
@@ -207,12 +242,13 @@ def make_gva_binding(block_ids: tuple[int, ...] = (1, 3)):
         0,
         ids,
         counts,
-        rules.load_keys(0, hashes),
+        gva_local_keys(projection.groups[0], hashes),
         request_splits,
         (0, 1),
-        rules.object_size(0),
+        projection.groups[0].object_size,
     )
-    return backend_io, KVTransferBatch(("request",), (group,), (17,)), backend.store
+    assert backend.native_store is not None
+    return backend_io, KVTransferBatch(("request",), (group,), (17,)), backend.native_store
 
 
 def test_backend_selection_fixes_access_kind_once(monkeypatch) -> None:
@@ -221,20 +257,33 @@ def test_backend_selection_fixes_access_kind_once(monkeypatch) -> None:
     expected = {
         "mooncake": LayerwiseAccessKind.KEY_RANGE,
         "memcache": LayerwiseAccessKind.GVA,
-        "yuanrong": None,
     }
     assert {name: backend_module.resolve_backend_spec(name).layerwise_access for name in expected} == expected
 
 
+def test_backend_registry_loads_only_v1_owned_adapters() -> None:
+    expected_modules = {
+        "mooncake": f"{backend_module.__name__}.mooncake",
+        "memcache": f"{backend_module.__name__}.memcache",
+    }
+
+    assert {
+        name: backend_module.resolve_backend_spec(name).backend_factory.__module__ for name in expected_modules
+    } == expected_modules
+    with pytest.raises(ValueError, match="Unsupported AscendStore v1 backend"):
+        backend_module.resolve_backend_spec("yuanrong")
+
+
 def test_gva_initialization_validates_native_capabilities_and_registered_layout(monkeypatch) -> None:
     backend = FakeGVABackend()
-    monkeypatch.setattr(backend.store, "batch_write_finish", None)
+    assert backend.native_store is not None
+    monkeypatch.setattr(backend.native_store, "batch_write_finish", None)
     monkeypatch.setattr(backend, "batch_write_finish", lambda *args: [0], raising=False)
     with pytest.raises(RuntimeError, match="native batch_write_finish"):
         GVABackendIO(backend, make_gva_spec())
 
     unavailable = FakeGVABackend()
-    monkeypatch.setattr(unavailable, "store", None)
+    unavailable.native_store = None
     with pytest.raises(RuntimeError, match="store is unavailable"):
         GVABackendIO(unavailable, make_gva_spec())
 
@@ -263,6 +312,41 @@ def test_gva_initialization_validates_native_capabilities_and_registered_layout(
     assert registration["object_offsets"] == {0: 2 * 1024 * 1024 + 64}
     assert registration["object_sizes"] == {0: 4 * 1024 * 1024}
     assert registration_backend.calls[-1][0] == "register_buffer"
+
+
+def test_gva_worker_close_unregisters_exact_region_before_backend_close() -> None:
+    backend = FakeGVABackend()
+    topology = make_topology(physical_layers=(0,))
+    backend_spec = make_gva_spec()
+    resources = KVPoolResources(
+        backend,
+        backend_spec,
+        8,
+        topology.groups,
+        gva_layout=GVAObjectLayout(0, 1, 0, 1, 1),
+    )
+    projection_binder = GVALayerwiseProjectionBinder(
+        topology,
+        64,
+        lambda group, value, head, stage: f"g{group}:p{stage}:h{head}:{value}",
+    )
+    worker = GVALayerwiseWorker(
+        topology,
+        projection_binder,
+        resources,
+        source_ready_event_factory=FakeEvent,
+    )
+    cache = torch.empty((8, 4), dtype=torch.float32)
+
+    worker.bind_kv_caches({topology.groups[0].layer_names[0]: cache})
+    worker.close()
+
+    lifecycle = [call for call in backend.calls if call[0] in ("register_buffer", "unregister_buffer", "backend_close")]
+    assert lifecycle == [
+        ("register_buffer", (cache.data_ptr(),), (cache.nbytes,)),
+        ("unregister_buffer", cache.data_ptr(), cache.nbytes),
+        ("backend_close",),
+    ]
 
 
 def test_gva_readability_changes_only_after_publication() -> None:
@@ -300,12 +384,83 @@ def test_gva_load_admission_resolves_after_lease_and_releases_only_owned_keys(mo
     assert backend_io.start_load_sessions([first, second, "wrong-size"], [64, 64, 64]) == (0, -7, -1)
     completion = backend_io.load_batch(batch.select_keys({first}), 0)[0]
     assert completion.transfer_evidence[0].result_code == 0
-    assert len(backend_io._rule_load_bases) == 1
+    assert backend_io._load_plan is not None
+    assert backend_io._load_plan.object_bases_by_group is not None
+    assert backend_io._load_plan.object_bases_by_group[0].tolist() == [4000]
     assert next(call for call in store.calls if call[0] == "copy")[1] == (4000,)
     backend_io.finish_load_sessions([first, second, "wrong-size"])
     assert store.calls[-1] == ("release", (first,))
     assert not store.leases
-    assert not backend_io._rule_load_bases
+    assert backend_io._load_plan is None
+
+
+def test_gva_layerwise_load_reuses_rows_and_leased_bases_across_layers(monkeypatch) -> None:
+    backend_io, batch, store = make_gva_binding()
+    first, second = batch.selected_keys()
+    store.objects.update(
+        {
+            first: (1000, 64, True),
+            second: (2000, 64, True),
+        }
+    )
+    assert backend_io.start_load_sessions([first, second], [64, 64]) == (0, 0)
+    backend_io.prepare_load_layers(batch)
+
+    prepared_plan = backend_io._load_plan
+    assert prepared_plan is not None
+    assert prepared_plan.groups_by_layer[0][0] is prepared_plan.groups_by_layer[1][0]
+    assert prepared_plan.keys_by_layer[0] is prepared_plan.keys_by_layer[1]
+    assert prepared_plan.object_bases_by_group is not None
+    resolved_bases = prepared_plan.object_bases_by_group[0]
+
+    direct_calls = []
+    direct_projection = arguments_module.gva_layer_ranges
+
+    def record_direct_projection(group, block_ids, token_counts, object_bases, *, layer_id):
+        direct_calls.append(layer_id)
+        return direct_projection(group, block_ids, token_counts, object_bases, layer_id=layer_id)
+
+    def reject_rebuild(*_args, **_kwargs):
+        raise AssertionError("Layerwise GVA Load rebuilt cross-layer execution state")
+
+    monkeypatch.setattr(arguments_module, "gva_layer_ranges", record_direct_projection)
+    monkeypatch.setattr(backend_io, "_resolve_load_bases", reject_rebuild)
+    monkeypatch.setattr(KVTransferBatch, "for_layer", reject_rebuild)
+    monkeypatch.setattr(KVGroupBatch, "selected_keys", reject_rebuild)
+
+    assert all(item.result_code == 0 for item in backend_io.load_layer(0)[0].transfer_evidence)
+    assert all(item.result_code == 0 for item in backend_io.load_layer(1)[0].transfer_evidence)
+    assert direct_calls == [0, 1]
+    assert backend_io._load_plan is prepared_plan
+    assert backend_io._load_plan.object_bases_by_group[0] is resolved_bases
+    assert [call[1] for call in store.calls if call[0] == "copy"] == [
+        (1000, 2000),
+        (1032, 2032),
+    ]
+
+    backend_io.finish_load_sessions([first, second])
+    assert backend_io._load_plan is None
+
+
+def test_gva_load_copy_exception_becomes_unknown_source_evidence() -> None:
+    backend_io, batch, store = make_gva_binding(block_ids=(1,))
+    key = batch.selected_keys()[0]
+    store.objects[key] = (1000, 64, True)
+
+    assert backend_io.start_load_sessions([key], [64]) == (0,)
+    store.copy_result = RuntimeError("GVA copy failed")
+    completion = backend_io.load_batch(batch, 0)[0]
+
+    assert len(completion.transfer_evidence) == 1
+    evidence = completion.transfer_evidence[0]
+    assert evidence.result_code is None
+    assert (
+        evidence.source.group_id,
+        evidence.source.block_id,
+        evidence.source.physical_layer_ids,
+    ) == (0, 1, (0,))
+    backend_io.finish_load_sessions([key])
+    assert not store.leases
 
 
 def test_gva_store_admission_owns_only_successful_allocations() -> None:
@@ -352,29 +507,31 @@ def test_gva_publication_failure_does_not_hide_copy_source_release() -> None:
     assert backend_io.revoke_store_sessions([key]) == (-1,)
 
 
-def test_gva_runtime_publishes_after_all_layers_and_reports_job_release() -> None:
-    runtime, resources, store = make_gva_runtime()
+def test_gva_worker_publishes_after_all_layers_and_reports_job_release() -> None:
+    worker, resources, store = make_gva_worker()
     command = RangeStoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4, store_job_id=17)
-    runtime.begin_step(KVTransferStep(store=StoreCommandBatch((command,))))
+    worker.begin_step(KVTransferStep(store=StoreCommandBatch((command,))))
 
-    runtime.save_layer("layers.0.group.0")
-    runtime._timeline.store._executor._queue.join()
-    backend_io = runtime._backend_io
-    assert len(backend_io._rule_store_bases) == 1
-    resolved_bases = next(iter(backend_io._rule_store_bases.values()))
+    worker.save_layer("layers.0.group.0")
+    assert worker._layerwise_store_timeline is not None
+    worker._layerwise_store_timeline._executor._queue.join()
+    backend_io = worker._gva_backend_io
+    assert backend_io is not None
     prepared_plan = backend_io._store_plan
     assert prepared_plan is not None
     assert prepared_plan.groups_by_layer[0][0] is prepared_plan.groups_by_layer[1][0]
     assert prepared_plan.keys_by_layer[0] is prepared_plan.keys_by_layer[1]
     assert prepared_plan.object_bases_by_group is not None
+    resolved_bases = prepared_plan.object_bases_by_group[0]
     assert prepared_plan.object_bases_by_group[0] is resolved_bases
     assert [call[0] for call in store.calls].count("copy") == 1
     assert not any(call[0] == "publish" for call in store.calls)
 
-    runtime.save_layer("layers.1.group.0")
-    runtime._timeline.store._executor._queue.join()
-    assert next(iter(backend_io._rule_store_bases.values())) is resolved_bases
-    runtime.finish_step()
+    worker.save_layer("layers.1.group.0")
+    worker._layerwise_store_timeline._executor._queue.join()
+    assert backend_io._store_plan is prepared_plan
+    assert backend_io._store_plan.object_bases_by_group[0] is resolved_bases
+    worker.finish_step()
     assert [call[0] for call in store.calls if call[0] in ("alloc", "copy", "publish")] == [
         "alloc",
         "copy",
@@ -382,39 +539,39 @@ def test_gva_runtime_publishes_after_all_layers_and_reports_job_release() -> Non
         "publish",
     ]
     assert all(region[2] for region in store.objects.values())
-    assert not backend_io._rule_store_bases
-    assert runtime.take_released_store_job_ids() == {17}
-    runtime.close()
+    assert backend_io._store_plan is None
+    assert worker.take_released_store_job_ids() == {17}
+    worker.close()
     assert resources.closed
 
 
-def test_gva_runtime_distinguishes_copy_failure_from_publication_failure() -> None:
+def test_gva_worker_distinguishes_copy_failure_from_publication_failure() -> None:
     command = RangeStoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4, store_job_id=17)
 
-    copy_runtime, copy_resources, copy_store = make_gva_runtime()
+    copy_worker, copy_resources, copy_store = make_gva_worker()
     copy_store.copy_result = -9
-    copy_runtime.begin_step(KVTransferStep(store=StoreCommandBatch((command,))))
-    copy_runtime.save_layer("layers.0.group.0")
-    copy_runtime.save_layer("layers.1.group.0")
+    copy_worker.begin_step(KVTransferStep(store=StoreCommandBatch((command,))))
+    copy_worker.save_layer("layers.0.group.0")
+    copy_worker.save_layer("layers.1.group.0")
     with pytest.raises(RuntimeError, match="Store failed"):
-        copy_runtime.finish_step()
-    assert copy_runtime.take_released_store_job_ids() == set()
-    assert copy_runtime._pending_store_batch is not None
+        copy_worker.finish_step()
+    assert copy_worker.take_released_store_job_ids() == set()
+    assert copy_worker._pending_store_batch is not None
     assert not any(call[0] == "publish" for call in copy_store.calls)
     with pytest.raises(RuntimeError, match="previous Store failure"):
-        copy_runtime.close()
+        copy_worker.close()
     assert not copy_resources.closed
 
-    publish_runtime, publish_resources, publish_store = make_gva_runtime()
+    publish_worker, publish_resources, publish_store = make_gva_worker()
     publish_store.commit_result = [-8]
-    publish_runtime.begin_step(KVTransferStep(store=StoreCommandBatch((command,))))
-    publish_runtime.save_layer("layers.0.group.0")
-    publish_runtime.save_layer("layers.1.group.0")
+    publish_worker.begin_step(KVTransferStep(store=StoreCommandBatch((command,))))
+    publish_worker.save_layer("layers.0.group.0")
+    publish_worker.save_layer("layers.1.group.0")
     with pytest.raises(RuntimeError, match="Store failed"):
-        publish_runtime.finish_step()
-    assert publish_runtime.take_released_store_job_ids() == {17}
-    assert publish_runtime._pending_store_batch is None
+        publish_worker.finish_step()
+    assert publish_worker.take_released_store_job_ids() == {17}
+    assert publish_worker._pending_store_batch is None
     assert not any(region[2] for region in publish_store.objects.values())
     with pytest.raises(RuntimeError, match="previous Store failure"):
-        publish_runtime.close()
+        publish_worker.close()
     assert publish_resources.closed
