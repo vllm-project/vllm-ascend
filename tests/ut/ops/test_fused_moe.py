@@ -2528,10 +2528,15 @@ def _stub_moe_runner_init(monkeypatch, *, gate=None, shared_experts=None, fused_
     monkeypatch.setattr(fused_moe_module, "get_tp_group", MagicMock(return_value=object()))
     monkeypatch.setattr(fused_moe_module, "get_dp_group", MagicMock(return_value=object()))
     monkeypatch.setattr(fused_moe_module, "setup_moe_comm_method", MagicMock())
+
+    def get_comm_method(kind, config):
+        assert config is moe_config
+        return fused_mc2_comm if kind == MoECommType.FUSED_MC2 else None
+
     monkeypatch.setattr(
         fused_moe_module,
         "get_moe_comm_method",
-        lambda kind: fused_mc2_comm if kind == MoECommType.FUSED_MC2 else None,
+        get_comm_method,
     )
 
     return AscendMoERunner(
