@@ -5,18 +5,18 @@
 #include "kernel_operator.h"
 #endif
 
-// Bisheng CCE provides bfloat16_t on 310P; legacy compilers need a stub.
-#if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 200)
-#define __COMPAT_310P_ACTIVE__
-#if !defined(__BISHENG_CCEC__) && !defined(__bfloat16_t_defined)
+// Dummy bfloat16_t only needed on 310P (dav_m200) where the compiler
+// doesn't provide a native bf16 type. On 910B/910C the compiler's
+// __clang_cce_types.h already typedefs bfloat16_t from __bf16.
+#if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 200) && !defined(__bfloat16_t_defined)
 #define __bfloat16_t_defined
+#define __COMPAT_310P_ACTIVE__
 struct bfloat16_t {
     uint16_t val;
     bfloat16_t() = default;
     bfloat16_t(float v) : val(0) { (void)v; }
     operator float() const { return 0.f; }
 };
-#endif
 #endif
 
 // 310P has no fixpipe unit; post-matmul stores go through MTE3
@@ -29,7 +29,7 @@ struct bfloat16_t {
 #define LoadDataWithSparse LoadDataWithSparseCal
 #endif
 
-// Keep the 310P scalar conversion shim for both native and legacy bf16 types.
+// 310P has no AscendC::ToFloat — dummy bfloat16_t already has operator float()
 #ifdef __COMPAT_310P_ACTIVE__
 namespace AscendC {
     inline float ToFloat(bfloat16_t v) { return (float)v; }
