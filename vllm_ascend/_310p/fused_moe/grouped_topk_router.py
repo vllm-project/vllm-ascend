@@ -41,9 +41,10 @@ class AscendGroupedTopKRouter310(AscendGroupedTopKRouter):
                 input_ids=input_ids,
             )
 
-        # Fallback gate paths may still produce FP32 logits.
-        # npu_moe_gating_top_k_softmax requires FP16 ND input. This adjusts
-        # dtype only; the default FP16 gate path needs no dtype conversion.
+        # vLLM recomputes router_logits as fp32 in _forward_impl,
+        # but the resulting tensor may be in FRACTAL_NZ format on 310P.
+        # npu_moe_gating_top_k_softmax only supports DT_FLOAT16 + ND,
+        # so cast the router_logits accordingly.
         router_logits = router_logits.to(torch.float16)
 
         if router_logits.shape[0] > self.MAX_TOKENS_PER_GATING_CALL:
