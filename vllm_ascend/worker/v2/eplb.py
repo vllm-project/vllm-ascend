@@ -11,8 +11,6 @@ from vllm.model_executor.models.interfaces import (
 )
 from vllm.v1.worker.gpu.eplb_utils import EPLBController
 
-from vllm_ascend.ascend_config import EplbConfig
-from vllm_ascend.distributed.eplb.policy.factory import create_eplb_policy
 from vllm_ascend.distributed.eplb.state import AscendEplbState
 
 
@@ -40,22 +38,17 @@ class AscendEPLBController(EPLBController):
         self,
         parallel_config: Any,
         device: torch.device,
-        ascend_eplb_config: EplbConfig | None = None,
+        load_collection_phase: str = "all",
     ) -> None:
         super().__init__(parallel_config, device)
-        ascend_eplb_config = ascend_eplb_config or EplbConfig()
-        self.load_collection_phase = ascend_eplb_config.load_collection_phase
-        self.eplb_policy = create_eplb_policy(
-            parallel_config.eplb_config.policy,
-            ascend_eplb_config.stair_config,
-        )
+        self.load_collection_phase = load_collection_phase
         self._load_collection_phase_matched = True
 
     def prepare_load(self) -> None:
         self.state = None
         self._has_registered_models = False
         if self.parallel_config.enable_eplb:
-            self.state = AscendEplbState(self.parallel_config, self.device, self.eplb_policy)
+            self.state = AscendEplbState(self.parallel_config, self.device)
 
     def set_batch_phase(self, batch_has_prefill: bool) -> None:
         self._load_collection_phase_matched = is_eplb_load_collection_phase_matched(
@@ -72,16 +65,14 @@ class AscendEPLBController(EPLBController):
         state = self.state
         if state is None or not self.parallel_config.enable_eplb:
             return
-        if not state.uses_custom_load_stats:
-            state.prepare_forward(model_config, num_unpadded_tokens, ubatch_slices)
-            return
-        # Operator-provided counts make the upstream unpadded-token tensor unused.
+        state.prepare_forward(model_config, num_unpadded_tokens, ubatch_slices)
         if state.should_record_tensor is not None:
             is_sampling = state._should_record_current_step(log_stats=self.parallel_config.eplb_config.log_balancedness)
             should_record = is_sampling and self._load_collection_phase_matched
             state.should_record_tensor.fill_(should_record)
-            state._is_load_sampling_step = is_sampling
-            state._should_collect_local_load = should_record
+            if state.uses_custom_load_stats:
+                state._is_load_sampling_step = is_sampling
+                state._should_collect_local_load = should_record
             if should_record:
                 state._has_fresh_recorded_load = True
 
@@ -100,7 +91,6 @@ class AscendEPLBController(EPLBController):
             device=self.device,
             parallel_config=self.parallel_config,
             expanded_physical_to_logical=expanded_physical_to_logical,
-            policy=self.eplb_policy,
         )
         if old_num_physical_experts is not None:
             from_mapping_kwargs["num_valid_physical_experts"] = old_num_physical_experts

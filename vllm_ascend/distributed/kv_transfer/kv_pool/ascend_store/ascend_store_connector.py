@@ -108,7 +108,6 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
         self.use_layerwise = extra_config.get("use_layerwise", False)
         self.consumer_is_to_put = extra_config.get("consumer_is_to_put", False)
-        self.memcache_dp_init_barrier = extra_config.get("memcache_dp_init_barrier", True)
         self.backend_name = extra_config.get("backend", "mooncake").lower()
         self.layerwise_protocol = get_layerwise_protocol(self.backend_name)
         self.layerwise_data_plane = get_layerwise_data_plane(self.layerwise_protocol)
@@ -142,7 +141,6 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
                 vllm_config,
                 self.use_layerwise,
                 kv_cache_config,
-                memcache_dp_init_barrier=self.memcache_dp_init_barrier,
             )
             assert self.connector_worker is not None
             if not self.use_layerwise and vllm_config.parallel_config.rank == 0:
@@ -256,22 +254,9 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_worker is not None
         self.connector_worker.wait_for_previous_save()
 
-    def bind_connector_metadata(self, connector_metadata: KVConnectorMetadata) -> None:
-        super().bind_connector_metadata(connector_metadata)
-        if self.use_layerwise:
-            assert self.connector_worker is not None
-            # Layerwise hooks need this step's tasks before target forward.
-            # If scheduler_output.has_sync_kv_loads is False (e.g. save-only
-            # steps), V1 calls start_load_kv after target forward, before MTP.
-            # Target hooks have advanced current_layer by then, so preparing
-            # the step there would reset the current layer before MTP.
-            self._mamba_copy_bufs = None
-            self.connector_worker.prepare_layerwise_step(connector_metadata)
-
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
-        if not self.use_layerwise:
-            self._mamba_copy_bufs = None
+        self._mamba_copy_bufs = None
         metadata = self._get_connector_metadata()
         self._current_step_has_real_forward = forward_context is not None
         logger.debug(

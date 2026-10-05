@@ -27,12 +27,10 @@ using namespace op;
 extern "C" {
 #endif
 
-// Common ACLNN types, including arch35 FP8. Per-SoC kernel availability is
-// specified by the OpDef (arch22 does not register FP8 kernels).
+// arch22 (910b/910_93) 所支持的 var/updates dtype，与 OpDef 保持一致
 static const std::initializer_list<op::DataType> VAR_DTYPE_SUPPORT_LIST = {
     op::DataType::DT_FLOAT, op::DataType::DT_FLOAT16, op::DataType::DT_BOOL, op::DataType::DT_BF16,
-    op::DataType::DT_INT64, op::DataType::DT_INT8,    op::DataType::DT_INT32, op::DataType::DT_INT16,
-    op::DataType::DT_FLOAT8_E4M3FN, op::DataType::DT_FLOAT8_E5M2};
+    op::DataType::DT_INT64, op::DataType::DT_INT8,    op::DataType::DT_INT32, op::DataType::DT_INT16};
 
 static const std::initializer_list<op::DataType> INDEX_DTYPE_SUPPORT_LIST = {op::DataType::DT_INT64,
                                                                              op::DataType::DT_INT32};

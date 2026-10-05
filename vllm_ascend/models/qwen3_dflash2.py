@@ -20,9 +20,6 @@ from vllm.model_executor.models.qwen3_dflash import (
 )
 from vllm.model_executor.models.utils import maybe_prefix
 
-from vllm_ascend.models.qwen3_dspark import align_draft_weights
-from vllm_ascend.utils import get_rotation_path
-
 
 def _grouped_conv(
     hidden_states: torch.Tensor,
@@ -278,13 +275,6 @@ class DFlash2Qwen3ForCausalLM(DFlashQwen3ForCausalLM):
         self.output_multiplier = float(draft_config.get("output_multiplier", 1.0))
         softcap = float(draft_config.get("final_logit_softcapping") or 0.0)
         self.final_logit_softcapping = softcap if softcap > 0 else None
-
-    def post_process(self, vllm_config: VllmConfig) -> None:
-        if get_rotation_path(vllm_config) is None:
-            return
-        if not hasattr(self.model, "fc"):
-            raise ValueError("DFlash2 with a QuaRot target requires auxiliary hidden states.")
-        align_draft_weights(self, self.model.fc, vllm_config)
 
     def compute_candidates(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         if not isinstance(self.lm_head.quant_method, UnquantizedEmbeddingMethod):
