@@ -58,10 +58,12 @@ The separately preserved HQ_TEST integration is not modified by this cleanup.
 The FwdH launcher matches the headers present in the rebased tree: arch20 uses
 four template parameters, arch22 uses six, and arch35 has eight with defaults
 for its additional options. The non-310P dispatch and architecture-specific
-headers are preserved from upstream. The 310P entry has twelve arguments
-without the unused `gk` input; non-310P entries retain the upstream
-thirteen-argument ABI. Source-contract and host-stub compilation tests cover
-these architecture routes; they are not a CANN build or NPU correctness test.
+headers are preserved from upstream. All entries retain the thirteen-argument
+OpDef ABI, including the optional `gk` slot. The internal arch20 implementation
+still takes twelve arguments and supports scalar gating only; tiling rejects
+non-null `gk` on 310P. Host-stub tests derive the external entry arguments from
+the OpDef and compile a generated-wrapper-like call for each architecture.
+They are not a CANN build or NPU correctness test.
 
 Prior integrated standalone and e2e results remain evidence for their exact
 recorded source, binaries, environment and configuration. They are not a new

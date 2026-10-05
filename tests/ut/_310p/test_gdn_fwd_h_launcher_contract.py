@@ -16,6 +16,15 @@ import regex as re
 ROOT = Path(__file__).resolve().parents[3]
 OP_KERNEL = ROOT / "csrc/moe/chunk_gated_delta_rule_fwd_h/op_kernel"
 LAUNCHER = OP_KERNEL / "chunk_gated_delta_rule_fwd_h.cpp"
+OP_DEF = OP_KERNEL.parent / "op_host/chunk_gated_delta_rule_fwd_h_def.cpp"
+
+
+def entry_parameters() -> list[str]:
+    definition = OP_DEF.read_text(encoding="utf-8")
+    inputs = re.findall(r'this->Input\("([^"\n]+)"\)', definition)
+    outputs = re.findall(r'this->Output\("([^"\n]+)"\)', definition)
+    return [*inputs, *outputs, "workspace", "tiling"]
+
 
 # Match the declarations actually present in each architecture header.
 HOST_STUB = """
@@ -72,7 +81,9 @@ struct GDNFwdHKernel {
 def render_host_stub(source):
     # Quoted includes are checked separately against the real source tree.
     body = re.sub(r'^#include\s+"[^"\n]+"\s*$', "", source, flags=re.MULTILINE)
-    return HOST_STUB + body
+    arguments = ", ".join("nullptr" for _ in entry_parameters())
+    wrapper = f"\nvoid generated_wrapper() {{ chunk_gated_delta_rule_fwd_h({arguments}); }}\n"
+    return HOST_STUB + body + wrapper
 
 
 class FwdHLauncherContractTests(unittest.TestCase):
@@ -141,8 +152,8 @@ class FwdHLauncherContractTests(unittest.TestCase):
                 source = self.preprocess_source(architecture)
                 entries = re.findall(r"\bvoid\s+chunk_gated_delta_rule_fwd_h\((.*?)\)", source, re.DOTALL)
                 self.assertEqual(len(entries), 1)
-                self.assertEqual(len(entries[0].split(",")), 12 if architecture == 200 else 13)
-                self.assertEqual(bool(re.search(r"\bgk\b", entries[0])), architecture != 200)
+                names = [argument.strip().split()[-1] for argument in entries[0].split(",")]
+                self.assertEqual(names, entry_parameters())
 
     def test_tile_shape_dispatch_is_non_310p_only(self):
         source = self.preprocess_source(200)
@@ -163,6 +174,14 @@ class FwdHLauncherContractTests(unittest.TestCase):
         result = self.compile_source(mutated, 200)
         self.assertNotEqual(result.returncode, 0, "Negative control unexpectedly compiled")
         self.assertRegex(result.stderr, r"wrong number of template arguments|too many template arguments")
+
+    def test_host_stub_rejects_missing_optional_input_slot(self):
+        state_parameter = f"GM_ADDR {entry_parameters()[5]}"
+        mutated = self.source.replace(f"GM_ADDR gk, {state_parameter}", state_parameter, 1)
+        self.assertNotEqual(mutated, self.source)
+        result = self.compile_source(mutated, 200)
+        self.assertNotEqual(result.returncode, 0, "Missing OpDef input slot unexpectedly compiled")
+        self.assertRegex(result.stderr, r"too many arguments")
 
     def test_initial_state_seed_is_310p_only(self):
         binding = (ROOT / "csrc/torch_binding.cpp").read_text(encoding="utf-8")
