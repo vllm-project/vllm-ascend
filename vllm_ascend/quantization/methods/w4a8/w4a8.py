@@ -480,10 +480,7 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
                 bias=None,
                 quant_scale=None,
                 quant_offset=None,
-                # The kernel reads the per-expert row counts as INT64 and
-                # skips the dead tail rows of the worst-case expanded
-                # buffer; group_list arrives as int32 from routing.
-                group_index=(group_list.to(torch.int64) if group_list is not None else None),
+                group_index=None,
                 beta=1.0 if mlp_compute_input.activation_situ_beta is None else mlp_compute_input.activation_situ_beta,
                 linear_beta=mlp_compute_input.activation_situ_linear_beta or 0.0,
                 activate_left=True,

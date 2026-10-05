@@ -18,8 +18,6 @@ class TransposeKvCacheByBlockKernelGeneral {
     uint32_t headDim_;
     uint32_t splitNum_;
     uint32_t layerNum_;
-    uint64_t kBlockStride_;
-    uint64_t vBlockStride_;
     uint32_t headNumSplited_;
     uint32_t blockSizeSplitNum_;
 
@@ -40,7 +38,7 @@ class TransposeKvCacheByBlockKernelGeneral {
     uint32_t dataBlockSize_;
     bool needSync_;
 
-    __aicore__ inline void CopyIn(GlobalTensor<T> &cacheGm, uint64_t offsetBlock, DataCopyParams &repeatParams) {
+    __aicore__ inline void CopyIn(GlobalTensor<T> &cacheGm, uint32_t offsetBlock, DataCopyParams &repeatParams) {
         LocalTensor<T> cacheLocal = queBind_.AllocTensor<T>();
         for (uint32_t i = 0; i < splitNum_; ++i) {
             DataCopy(cacheLocal[i * dstFactor_], cacheGm[i * srcFactor_ + offsetBlock], repeatParams);
@@ -48,7 +46,7 @@ class TransposeKvCacheByBlockKernelGeneral {
         queBind_.EnQue(cacheLocal);
     }
 
-    __aicore__ inline void CopyOut(GlobalTensor<T> &cacheGm, uint64_t offsetBlock) {
+    __aicore__ inline void CopyOut(GlobalTensor<T> &cacheGm, uint32_t offsetBlock) {
         LocalTensor<T> cacheLocal = queBind_.DeQue<T>();
         AscendC::CrossCoreSetFlag<0x0, PIPE_MTE2>(0x8);
         AscendC::CrossCoreWaitFlag(0x8);
@@ -99,8 +97,6 @@ class TransposeKvCacheByBlockKernelGeneral {
         headDim_ = tilingData->headDim;
         splitNum_ = tilingData->splitNum;
         layerNum_ = tilingData->layerNum;
-        kBlockStride_ = tilingData->kBlockStride;
-        vBlockStride_ = tilingData->vBlockStride;
         // tiling info
         useCoreNum_ = tilingData->useCoreNum;
         blockPerCore_ = tilingData->blockPerCore;
@@ -134,8 +130,7 @@ class TransposeKvCacheByBlockKernelGeneral {
 
         for (uint32_t i = startBlock; i < endBlock; ++i) {
             int64_t blockId = blockIDsGm_.GetValue(i);
-            uint64_t kOffsetBlock = static_cast<uint64_t>(blockId) * kBlockStride_;
-            uint64_t vOffsetBlock = static_cast<uint64_t>(blockId) * vBlockStride_;
+            uint32_t offsetBlock = blockId * blockSize_ * headNum_ * headDim_;
             uint32_t realStartLayer;
             uint32_t realEndLayer;
             if (i == startBlock) {
@@ -174,11 +169,11 @@ class TransposeKvCacheByBlockKernelGeneral {
                     dstOffset = blockSizeIndex * blockSizePerTime_ * headNum_ * headDim_;
                 }
 
-                CopyIn(kCacheGm_, kOffsetBlock + srcOffset, repeatParams);
-                CopyOut(kCacheGm_, kOffsetBlock + dstOffset);
+                CopyIn(kCacheGm_, offsetBlock + srcOffset, repeatParams);
+                CopyOut(kCacheGm_, offsetBlock + dstOffset);
 
-                CopyIn(vCacheGm_, vOffsetBlock + srcOffset, repeatParams);
-                CopyOut(vCacheGm_, vOffsetBlock + dstOffset);
+                CopyIn(vCacheGm_, offsetBlock + srcOffset, repeatParams);
+                CopyOut(vCacheGm_, offsetBlock + dstOffset);
             }
 
         }
