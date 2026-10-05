@@ -459,7 +459,7 @@ class AscendModelSlimConfig(QuantizationConfig):
 
     def get_cache_scale_mapper(self) -> "WeightsMapper":
         """Upstream use staticmethod, but we need to use instance attribute"""
-        suffix_map = {}
+        suffix_map: dict[str, str | None] = {}
         regex_map = {}
         if self._has_mxfp_c8_recipe and not self.enable_mxfp_c8_quant:
             logger.warning_once(

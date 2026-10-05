@@ -48,9 +48,7 @@ class TestC8MXFPQfaQueryPlan(TestBase):
         )
         seen = {"source_scale": scale}
 
-        def fake_metadata(
-            _self, _metadata, *, cu_seqlens_q, seqused_kv, max_seqlen_q, mask_mode, layout_q_descale
-        ):
+        def fake_metadata(_self, _metadata, *, cu_seqlens_q, seqused_kv, max_seqlen_q, mask_mode, layout_q_descale):
             seen["metadata_max_seqlen_q"] = max_seqlen_q
             seen["metadata_mask_mode"] = mask_mode
             seen["metadata_layout"] = layout_q_descale

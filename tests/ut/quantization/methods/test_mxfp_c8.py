@@ -14,6 +14,8 @@ from vllm_ascend.attention.attention_c8_mxfp import (
     mxfp_k_scale_cache_shape,
     mxfp_k_scale_page_bytes,
     mxfp_k_scale_slot_index,
+    mxfp_packet_size_bytes,
+    mxfp_paged_cache_views,
     mxfp_v_scale_cache_shape,
     mxfp_v_scale_page_bytes,
     scatter_mxfp_k_scale_cache,
@@ -80,17 +82,25 @@ class TestScatterMXFPPaNzKvCache(TestBase):
     validated on-device by the FIA C8 path, which makes this exact call.
     """
 
-    BLOCK_SIZE = 4
+    BLOCK_SIZE = 64
     NUM_KV_HEADS = 2
     HEAD_DIM = 64  # D//32 = 2 fragments
     NUM_BLOCKS = 2
 
     def setUp(self):
-        self.key_cache = torch.zeros(
-            (self.NUM_BLOCKS, self.BLOCK_SIZE, self.NUM_KV_HEADS, self.HEAD_DIM),
-            dtype=torch.uint8,
+        raw = torch.zeros(
+            self.NUM_BLOCKS
+            * (mxfp_packet_size_bytes(self.NUM_KV_HEADS, self.BLOCK_SIZE, self.HEAD_DIM, self.HEAD_DIM)),
+            dtype=torch.int8,
         )
-        self.value_cache = torch.zeros_like(self.key_cache)
+        self.key_cache, self.value_cache, _, _ = mxfp_paged_cache_views(
+            raw,
+            self.NUM_BLOCKS,
+            self.NUM_KV_HEADS,
+            self.HEAD_DIM,
+            self.HEAD_DIM,
+            self.BLOCK_SIZE,
+        )
 
     def _scatter(self, num_tokens=3, slots=None, dtype=torch.uint8):
         key = (
@@ -104,12 +114,13 @@ class TestScatterMXFPPaNzKvCache(TestBase):
         if slots is None:
             slots = torch.tensor([2, 5, -1][:num_tokens], dtype=torch.int64)
         with patch.object(mxfp_kv_cache.torch_npu, "npu_scatter_pa_kv_cache") as op:
-            scatter_mxfp_pa_nz_kv_cache(key, key.clone(), self.key_cache, self.value_cache, slots, self.BLOCK_SIZE)
+            scatter_mxfp_pa_nz_kv_cache(key, key.clone(), self.key_cache, self.value_cache, slots)
         return op, key, slots
 
-    def test_caches_are_passed_in_the_nz_five_d_view(self):
+    def test_caches_reach_the_operator_as_the_nz_five_d_strided_view(self):
         op, _, _ = self._scatter()
         op.assert_called_once()
+        packet = mxfp_packet_size_bytes(self.NUM_KV_HEADS, self.BLOCK_SIZE, self.HEAD_DIM, self.HEAD_DIM)
         for name in ("key_cache", "value_cache"):
             cache = op.call_args.kwargs[name]
             self.assertEqual(
@@ -123,6 +134,9 @@ class TestScatterMXFPPaNzKvCache(TestBase):
                 ),
                 f"{name} must reach the operator as (Bn, KV_N, D/32, Bs, 32)",
             )
+            # The operator's tiling reads dim0 stride as the block stride;
+            # it must be the packet size, not the contiguous-layout value.
+            self.assertEqual(cache.stride(0), packet)
 
     def test_pa_nz_cache_mode_is_declared(self):
         # Scenario 1 of the ScatterPaKvCache contract is selected by
@@ -139,10 +153,14 @@ class TestScatterMXFPPaNzKvCache(TestBase):
 
     def test_everything_reaches_the_operator_as_one_byte_int8(self):
         # The FIA C8 path feeds int8; erasing the dtype here is what keeps the
-        # FP8 payload out of the operator's type check.
+        # FP8 payload out of the operator's type check. The bitcast is a
+        # same-itemsize view, so it preserves the packet strides.
         op, _, _ = self._scatter(dtype=torch.float8_e4m3fn)
+        packet = mxfp_packet_size_bytes(self.NUM_KV_HEADS, self.BLOCK_SIZE, self.HEAD_DIM, self.HEAD_DIM)
         for name in ("key", "value", "key_cache", "value_cache"):
             self.assertEqual(op.call_args.kwargs[name].dtype, torch.int8, name)
+        for name in ("key_cache", "value_cache"):
+            self.assertEqual(op.call_args.kwargs[name].stride(0), packet)
 
     def test_negative_slots_are_left_for_the_operator(self):
         # No clamp, no filtering: the operator skips PAD_SLOT_ID itself, and
@@ -161,20 +179,8 @@ class TestScatterMXFPPaNzKvCache(TestBase):
                 self.key_cache,
                 self.value_cache,
                 torch.zeros(0, dtype=torch.int64),
-                self.BLOCK_SIZE,
             )
         op.assert_not_called()
-
-    def test_nz_view_places_a_token_at_its_fragment_coordinates(self):
-        # Pure indexing math, independent of the operator: channel c of a
-        # token at in-block offset o lives at [block, head, c//32, o, c%32].
-        cache = torch.zeros((self.NUM_BLOCKS, self.BLOCK_SIZE, self.NUM_KV_HEADS, self.HEAD_DIM), dtype=torch.uint8)
-        nz = cache.view(self.NUM_BLOCKS, self.NUM_KV_HEADS, self.HEAD_DIM // 32, self.BLOCK_SIZE, 32)
-        nz[1, 0, 1, 2, 5] = 42
-        flat = cache.reshape(-1)
-        expected = (((1 * self.NUM_KV_HEADS + 0) * (self.HEAD_DIM // 32) + 1) * self.BLOCK_SIZE + 2) * 32 + 5
-        self.assertEqual(flat[expected].item(), 42)
-        self.assertEqual(int((flat != 0).sum()), 1)
 
 
 class TestFillMXFPVScaleCache(TestBase):
@@ -378,6 +384,12 @@ class TestAscendC8MXFPKVCacheAttentionMethod(TestBase):
         if with_impl:
             layer.impl = object.__new__(AscendC8MXFPAttentionBackendImpl.__base__)
         return layer
+
+    def test_missing_checkpoint_v_scale_defaults_to_neutral(self):
+        layer = self._make_layer()
+        method = AscendC8MXFPKVCacheAttentionMethod({}, "layer")
+        method.create_weights(layer)
+        self.assertTrue(torch.equal(layer.v_cache_scale, torch.full((8,), 127, dtype=torch.uint8)))
 
     def test_weight_loader_accepts_column_vector_checkpoint_layout(self):
         """ModelSlim exports v_scale as [hidden, 1]; the parameter is 1-D.

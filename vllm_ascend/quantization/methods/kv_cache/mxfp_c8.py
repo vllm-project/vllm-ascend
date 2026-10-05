@@ -78,7 +78,7 @@ class AscendC8MXFPKVCacheAttentionMethod(AscendAttentionScheme):
         # The checkpoint supplies the static V-cache scale.
         hidden_size = layer.num_kv_heads * layer.head_size_v
         weight_param = torch.nn.Parameter(
-            torch.empty((hidden_size,), dtype=torch.uint8),
+            torch.full((hidden_size,), 127, dtype=torch.uint8),
             requires_grad=False,
         )
         layer.register_parameter("v_cache_scale", weight_param)

@@ -1332,22 +1332,14 @@ def refresh_block_size(vllm_config):
     if cache_config.block_size is None:
         cache_config.block_size = 128
 
-    # Reuse the hybrid config hook's layout calculation after cache settings
-    # are finalized; dense C8-MXFP caches use the kernel block size.
+    # Hybrid page padding is handled by the upstream cache planner. C8 only
+    # constrains the scheduler block to contain whole 512-token kernel blocks.
     if is_c8_mxfp_kv_quant(vllm_config):
-        if model_config is not None and model_config.is_hybrid:
-            from vllm_ascend.patch.platform.patch_mamba_config import update_hybrid_cache_layout
-
-            update_hybrid_cache_layout(vllm_config)
-        elif cache_config.block_size != A5_C8_MXFP_KV_CACHE_BLOCK_SIZE:
+        kernel_size = A5_C8_MXFP_KV_CACHE_BLOCK_SIZE
+        if cache_config.block_size % kernel_size:
             if getattr(cache_config, "user_specified_block_size", False):
-                raise ValueError(f"C8_MXFP currently supports --block-size 512; got {cache_config.block_size}.")
-            logger.info(
-                "Ascend A5 with C8_MXFP KV cache requires block_size=%s; overriding block_size from %s.",
-                A5_C8_MXFP_KV_CACHE_BLOCK_SIZE,
-                cache_config.block_size,
-            )
-            cache_config.block_size = A5_C8_MXFP_KV_CACHE_BLOCK_SIZE
+                raise ValueError(f"C8_MXFP requires --block-size to be a multiple of {kernel_size}.")
+            cache_config.block_size = kernel_size
         return
 
     if not scheduler_config or not model_config:
