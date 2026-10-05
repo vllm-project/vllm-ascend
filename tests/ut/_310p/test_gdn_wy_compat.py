@@ -37,7 +37,7 @@ int main() {{ {body} }}
                 check=False,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            result = subprocess.run([str(executable)], capture_output=True, timeout=20, check=False)
+            result = subprocess.run([str(executable)], text=True, capture_output=True, timeout=20, check=False)
             self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_bisheng_native_bfloat16_is_not_redeclared(self):
