@@ -28,17 +28,17 @@
 #if __has_include("../../common/op_kernel/CopyInL1.h")
 #include "../../common/op_kernel/CopyInL1.h"
 #else
-#include "../../../common/op_kernel/CopyInL1.h"
+#include "../common/CopyInL1.h"
 #endif
 #if __has_include("../../common/op_kernel/matmul.h")
 #include "../../common/op_kernel/matmul.h"
 #else
-#include "../../../common/op_kernel/matmul.h"
+#include "../common/matmul.h"
 #endif
 #if __has_include("../../common/op_kernel/FixpipeOut.h")
 #include "../../common/op_kernel/FixpipeOut.h"
 #else
-#include "../../../common/op_kernel/FixpipeOut.h"
+#include "../common/FixpipeOut.h"
 #endif
 
 using matmul::MatmulType;
@@ -413,7 +413,7 @@ __aicore__ inline void KvQuantSparseFlashAttentionMla<CubeBlockType, VecBlockTyp
     constInfo.sparseBlockCount = sharedParams.sparseBlockCount;
     constInfo.sparseBlockSize = 1;
 
-    constInfo.sparseMode = sharedParams.oriMaskMode;
+    constInfo.sparseMode = sharedParams.maskMode;
     constInfo.n2G = constInfo.n2Size * constInfo.gSize;
 
     constInfo.s1Dv = constInfo.s1Size * constInfo.dSizeV;
@@ -432,7 +432,7 @@ __aicore__ inline void KvQuantSparseFlashAttentionMla<CubeBlockType, VecBlockTyp
     if constexpr (LAYOUT_T == QSFA_LAYOUT::TND) {
         // (BS)ND
         constInfo.s1BaseN2GDv = constInfo.s1BaseSize * constInfo.n2GDv;
-        constInfo.mm1Ka = constInfo.n2Size * QueryInputDim(constInfo);
+        constInfo.mm1Ka = constInfo.n2Size * constInfo.dSize;
         if ASCEND_IS_AIV {
             constInfo.attentionOutStride = \
                 (constInfo.n2G - constInfo.gSize) * constInfo.dSizeV * sizeof(OUTPUT_T);
@@ -440,7 +440,7 @@ __aicore__ inline void KvQuantSparseFlashAttentionMla<CubeBlockType, VecBlockTyp
     } else if constexpr (LAYOUT_T == QSFA_LAYOUT::BSND) {
         // BSH/BSNGD
         constInfo.s1BaseN2GDv = constInfo.s1BaseSize * constInfo.n2GDv;
-        constInfo.mm1Ka = constInfo.n2Size * QueryInputDim(constInfo);
+        constInfo.mm1Ka = constInfo.n2Size * constInfo.dSize;
 
         if ASCEND_IS_AIV {
             constInfo.attentionOutStride = \
@@ -449,9 +449,9 @@ __aicore__ inline void KvQuantSparseFlashAttentionMla<CubeBlockType, VecBlockTyp
     }
 
     if ASCEND_IS_AIV {
-        constInfo.oriBlockSize = sharedParams.oriBlockSize;
+        constInfo.blockSize = sharedParams.blockSize;
         constInfo.softmaxScale = sharedParams.softmaxScale;
-        constInfo.oriMaxBlockNumPerBatch = sharedParams.oriMaxBlockNumPerBatch;
+        constInfo.maxBlockNumPerBatch = sharedParams.maxBlockNumPerBatch;
     }
 
     InitUniqueConstInfo();

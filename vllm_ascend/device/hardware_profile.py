@@ -57,13 +57,10 @@ class HardwareCapability(Enum):
     ATB_WARMUP = auto()
     # Register fake/meta implementations for the custom BGMV and SGMV LoRA ops.
     BGMV_SGMV_META_REGISTRATION = auto()
-    # SK scatter kernel for paged cache writes (A2/A3/A5 ABI).
+    # Stride-aware scatter kernel for paged cache writes (A2/A3 ABI).
     SCATTER_ND_CACHE_STORE = auto()
-    # Extend SK cache writes to non-overlapping row-strided destinations.
-    # A5 is excluded until arch35 handles their storage bounds correctly.
-    SCATTER_ND_STRIDED_CACHE_STORE = auto()
-    # Extend SK cache writes to FP8 E4M3FN/E5M2 (A5 ABI).
-    SCATTER_ND_FP8_CACHE_STORE = auto()
+    # CANN ScatterPaCache for contiguous paged caches (A5 ABI).
+    SCATTER_PA_CACHE_STORE = auto()
     # Allow the CANN MegaMoe fused-MC2 path when its model, EP, and config checks pass.
     CANN_MEGAMOE = auto()
     # Allow A5 MegaMoe's MXFP-only path and its A5-specific calling conventions.
@@ -99,9 +96,6 @@ class HardwareCapability(Enum):
     GRAPH_MULS_ADD_FUSION = auto()
     # Register the FX graph rewrites for supported RMSNorm-plus-quant patterns.
     GRAPH_NORM_QUANT_FUSION = auto()
-    # Register the FX graph rewrite that fuses q/k RMSNorm, RoPE and the weight-less
-    # v RMSNorm into the SIMD ``split_qkv_rmsnorm_rope_vnorm`` Triton kernel.
-    GRAPH_QKV_NORM_ROPE_FUSION = auto()
     # Let inplace_partial_rotary_mul negate sine internally; profiles without
     # this contract negate the sine input explicitly and pass negate_sin=False.
     INPLACE_PARTIAL_ROTARY_MUL_NEGATE_SIN = auto()
@@ -111,6 +105,8 @@ class HardwareCapability(Enum):
     LOCAL_KV_COMM_RESOURCE = auto()
     # Use vLLM-Ascend's custom BGMV/SGMV LoRA kernels when rank constraints also pass.
     LORA_CUSTOM_OPS = auto()
+    # Allow the fused MLA decode prolog even when the model does not use MLA RoPE.
+    MLA_DECODE_PROLOG_WITHOUT_ROPE = auto()
     # Allow MLAPO with native floating-point projection weights, not only quantized weights.
     MLAPO_NATIVE_WEIGHTS = auto()
     # Accept ``fullmesh_v2`` as the MC2 communication algorithm.
@@ -125,7 +121,6 @@ class HardwareCapability(Enum):
     # ``moe_gating_top_k_hash`` ABI with ``bias_vl`` and image sentinels.
     MOE_GATING_TOP_K_HASH_VISION = auto()
     # Allow the extended NPU graph backend; static-kernel mode depends on this contract.
-    MM_REDUCE_SCATTER_AI_CPU_INFERENCE = auto()
     NPUGRAPH_EX = auto()
     # Use ``torch_npu.npu_top_k_top_p`` for sampling instead of the PyTorch fallback.
     NPU_TOP_K_TOP_P = auto()
@@ -241,7 +236,6 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.FUSED_SWIGLU_TUNING_ARGS,
         HardwareCapability.GRAPH_MULS_ADD_FUSION,
         HardwareCapability.GRAPH_NORM_QUANT_FUSION,
-        HardwareCapability.GRAPH_QKV_NORM_ROPE_FUSION,
         HardwareCapability.INPLACE_PARTIAL_ROTARY_MUL_NEGATE_SIN,
         HardwareCapability.IRQ_CPU_RESERVATION,
         HardwareCapability.LORA_CUSTOM_OPS,
@@ -251,7 +245,6 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.PAGED_ATTENTION,
         HardwareCapability.RUNTIME_CUSTOM_OPS,
         HardwareCapability.SCATTER_ND_CACHE_STORE,
-        HardwareCapability.SCATTER_ND_STRIDED_CACHE_STORE,
         HardwareCapability.SFA_C8_DCP_REPLICATED_INDEXER,
         HardwareCapability.STANDARD_MAMBA_PATCH,
         HardwareCapability.STANDARD_WORKER_PATCHES,
@@ -329,8 +322,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             capabilities=frozenset(
                 {
                     HardwareCapability.AUTO_ENABLE_CUSTOM_OPS,
-                    HardwareCapability.SCATTER_ND_CACHE_STORE,
-                    HardwareCapability.SCATTER_ND_FP8_CACHE_STORE,
+                    HardwareCapability.SCATTER_PA_CACHE_STORE,
                     HardwareCapability.BGMV_SGMV_META_REGISTRATION,
                     HardwareCapability.CANN_MEGAMOE,
                     HardwareCapability.CANN_MEGAMOE_MXFP,
@@ -346,10 +338,10 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.GRAPH_NORM_QUANT_FUSION,
                     HardwareCapability.LOCAL_KV_COMM_RESOURCE,
                     HardwareCapability.LORA_CUSTOM_OPS,
+                    HardwareCapability.MLA_DECODE_PROLOG_WITHOUT_ROPE,
                     HardwareCapability.MLAPO_NATIVE_WEIGHTS,
                     HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
                     HardwareCapability.MOE_DISPATCH_SHARED_EXPERT_ARGS,
-                    HardwareCapability.MM_REDUCE_SCATTER_AI_CPU_INFERENCE,
                     HardwareCapability.NPUGRAPH_EX,
                     HardwareCapability.STANDARD_MAMBA_PATCH,
                     HardwareCapability.STANDARD_WORKER_PATCHES,

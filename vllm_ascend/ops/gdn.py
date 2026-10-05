@@ -20,11 +20,6 @@ from functools import lru_cache, wraps
 import torch
 import torch_npu
 from einops import rearrange
-from fla_npu.ops.ascendc import (
-    causal_conv1d_fn,
-    causal_conv1d_update,
-    recurrent_gated_delta_rule,
-)
 from torch import nn
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
@@ -49,7 +44,6 @@ from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
-from vllm_ascend.ops.triton.mamba.state_index import gather_ssm_states, scatter_ssm_states_
 
 _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
 
@@ -133,15 +127,6 @@ def initialize_packed_conv_weight(layer: nn.Module) -> None:
 def _get_packed_conv_weights(layer: nn.Module) -> torch.Tensor:
     """Return the registered, kernel-layout convolution parameter."""
     return _get_base_conv1d(layer).get_parameter(_PACKED_CONV_WEIGHT_NAME)
-
-
-def _normalize_causal_cache_indices(cache_indices: torch.Tensor) -> torch.Tensor:
-    """Normalize 1D or 2D GDN cache indices to one index per request."""
-    if cache_indices.dim() == 1:
-        return cache_indices.contiguous()
-    if cache_indices.dim() == 2:
-        return cache_indices[:, 0].contiguous()
-    raise ValueError(f"GDN causal cache_indices must be 1D or 2D, got shape={tuple(cache_indices.shape)}")
 
 
 class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
@@ -424,21 +409,23 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # 1.1: Process the multi-query part
         if spec_sequence_masks is not None:
+            activation_num = 1 if self.activation else 0
             spec_causal_conv1d_meta = attn_metadata.spec_decode_metadata.spec_causal_conv1d
             spec_query_start_loc_device = spec_causal_conv1d_meta.query_start_loc
             output_spec = torch.empty_like(mixed_qkv_spec)
-            output_spec = causal_conv1d_update(
+            torch.ops._C_ascend.npu_causal_conv1d_custom(
+                output_spec,
                 mixed_qkv_spec,
-                self_kv_cache[0],
                 conv_weights_T,
-                bias=self.conv1d.bias,
-                activation="silu" if self.activation else None,
-                conv_state_indices=_normalize_causal_cache_indices(spec_causal_conv1d_meta.cache_indices),
-                num_accepted_tokens=spec_causal_conv1d_meta.num_accepted_tokens,
-                query_start_loc=spec_query_start_loc_device,
-                max_query_len=self.num_spec + 1,
-                null_block_id=0,
-                out=output_spec,
+                conv_state=self_kv_cache[0],
+                bias_opt=self.conv1d.bias,
+                query_start_loc_opt=spec_query_start_loc_device,
+                cache_indices_opt=spec_causal_conv1d_meta.cache_indices,
+                initial_state_mode_opt=None,
+                num_accepted_tokens_opt=spec_causal_conv1d_meta.num_accepted_tokens,
+                activation_mode=activation_num,
+                pad_slot_id=PAD_SLOT_ID,
+                run_mode=1,
             )
             mixed_qkv_spec = output_spec
 
@@ -450,6 +437,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 cache_indices_opt = non_spec_causal_conv1d_meta.cache_indices
                 initial_state_mode_opt = non_spec_causal_conv1d_meta.initial_state_mode
                 if get_pcp_group().world_size > 1:
+                    activation_num = 1 if self.activation else 0
                     non_spec_query_start_loc = attn_metadata.non_spec_query_start_loc
                     assert non_spec_query_start_loc is not None
                     non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor
@@ -470,17 +458,20 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                         self_kv_cache[0][prefill_cache_indices, :state_len, :] = all_last_width_prefill_x[
                             pcp_rank - 1, ...
                         ].transpose(-1, -2)
-                    mixed_qkv_non_spec_output = causal_conv1d_fn(
+                    mixed_qkv_non_spec_output = torch.empty_like(mixed_qkv_non_spec)
+                    torch.ops._C_ascend.npu_causal_conv1d_custom(
+                        mixed_qkv_non_spec_output,
                         mixed_qkv_non_spec,
                         conv_weights_T,
-                        self.conv1d.bias,
-                        conv_states=self_kv_cache[0],
-                        query_start_loc=query_start_loc_opt,
-                        cache_indices=_normalize_causal_cache_indices(cache_indices_opt),
-                        has_initial_state=initial_state_mode_opt,
-                        activation="silu" if self.activation else None,
+                        conv_state=self_kv_cache[0],
+                        bias_opt=self.conv1d.bias,
+                        query_start_loc_opt=query_start_loc_opt,
+                        cache_indices_opt=cache_indices_opt,
+                        initial_state_mode_opt=initial_state_mode_opt,
+                        num_accepted_tokens_opt=None,
+                        activation_mode=activation_num,
                         pad_slot_id=PAD_SLOT_ID,
-                        null_block_id=0,
+                        run_mode=0,
                     )
                     mixed_qkv_non_spec = mixed_qkv_non_spec_output
                     if prefill_cache_indices.shape[0] > 0:
@@ -488,34 +479,41 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                             -1, ...
                         ].transpose(-1, -2)
                 else:
-                    mixed_qkv_non_spec_output = causal_conv1d_fn(
+                    activation_num = 1 if self.activation else 0
+                    mixed_qkv_non_spec_output = torch.empty_like(mixed_qkv_non_spec)
+                    torch.ops._C_ascend.npu_causal_conv1d_custom(
+                        mixed_qkv_non_spec_output,
                         mixed_qkv_non_spec,
                         conv_weights_T,
-                        self.conv1d.bias,
-                        conv_states=self_kv_cache[0],
-                        query_start_loc=query_start_loc_opt,
-                        cache_indices=_normalize_causal_cache_indices(cache_indices_opt),
-                        has_initial_state=initial_state_mode_opt,
-                        activation="silu" if self.activation else None,
+                        conv_state=self_kv_cache[0],
+                        bias_opt=self.conv1d.bias,
+                        query_start_loc_opt=query_start_loc_opt,
+                        cache_indices_opt=cache_indices_opt,
+                        initial_state_mode_opt=initial_state_mode_opt,
+                        num_accepted_tokens_opt=None,
+                        activation_mode=activation_num,
                         pad_slot_id=PAD_SLOT_ID,
-                        null_block_id=0,
+                        run_mode=0,
                     )
                     mixed_qkv_non_spec = mixed_qkv_non_spec_output
         elif attn_metadata.num_decodes > 0:
+            activation_num = 1 if self.activation else 0
             non_spec_causal_conv1d_meta = attn_metadata.non_spec_decode_metadata.causal_conv1d
             non_spec_query_start_loc_device = non_spec_causal_conv1d_meta.query_start_loc
             output_non_spec = torch.empty_like(mixed_qkv_non_spec)
-            output_non_spec = causal_conv1d_update(
+            torch.ops._C_ascend.npu_causal_conv1d_custom(
+                output_non_spec,
                 mixed_qkv_non_spec,
-                self_kv_cache[0],
                 conv_weights_T,
-                bias=self.conv1d.bias,
-                activation="silu" if self.activation else None,
-                conv_state_indices=_normalize_causal_cache_indices(non_spec_causal_conv1d_meta.cache_indices),
-                query_start_loc=non_spec_query_start_loc_device,
-                max_query_len=1,
-                null_block_id=0,
-                out=output_non_spec,
+                conv_state=self_kv_cache[0],
+                bias_opt=self.conv1d.bias,
+                query_start_loc_opt=non_spec_query_start_loc_device,
+                cache_indices_opt=non_spec_causal_conv1d_meta.cache_indices,
+                initial_state_mode_opt=None,
+                num_accepted_tokens_opt=None,
+                activation_mode=activation_num,
+                pad_slot_id=PAD_SLOT_ID,
+                run_mode=1,
             )
             mixed_qkv_non_spec = output_non_spec
         else:
@@ -553,13 +551,17 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             actual_seq_lengths = attn_metadata.spec_decode_metadata.actual_seq_lengths
             query_spec = l2norm_fwd(query_spec)
             key_spec = l2norm_fwd(key_spec)
-            core_attn_out_spec = recurrent_gated_delta_rule(
-                query_spec.squeeze(0),
-                key_spec.squeeze(0),
-                value_spec.squeeze(0),
-                ssm_state,
+            # Dispatches to the vllm-ascend AscendC custom operator
+            # (csrc/recurrent_gated_delta_rule), NOT the built-in CANN operator.
+            # The custom op extends dtype support (e.g. float32 state) and is
+            # loaded at runtime via ASCEND_CUSTOM_OPP_PATH.
+            core_attn_out_spec = torch.ops._C_ascend.npu_recurrent_gated_delta_rule(
+                query=query_spec.squeeze(0),
+                key=key_spec.squeeze(0),
+                value=value_spec.squeeze(0),
                 g=g_spec.squeeze(0),
                 beta=beta_spec.squeeze(0),
+                state=ssm_state,
                 scale=key_spec.shape[-1] ** -0.5,
                 actual_seq_lengths=actual_seq_lengths,
                 ssm_state_indices=spec_state_indices_tensor.flatten(),
@@ -578,13 +580,13 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             actual_seq_lengths = attn_metadata.non_spec_decode_metadata.actual_seq_lengths
             query_decode = l2norm_fwd(query_decode)
             key_decode = l2norm_fwd(key_decode)
-            core_attn_out_decode = recurrent_gated_delta_rule(
-                query_decode.squeeze(0),
-                key_decode.squeeze(0),
-                value_decode.squeeze(0),
-                ssm_state,
+            core_attn_out_decode = torch.ops._C_ascend.npu_recurrent_gated_delta_rule(
+                query=query_decode.squeeze(0),
+                key=key_decode.squeeze(0),
+                value=value_decode.squeeze(0),
                 g=g_non_spec[:, :num_decode_tokens].squeeze(0),
                 beta=beta_non_spec[:, :num_decode_tokens].squeeze(0),
+                state=ssm_state,
                 scale=key_decode.shape[-1] ** -0.5,
                 actual_seq_lengths=actual_seq_lengths,
                 ssm_state_indices=non_spec_state_indices_tensor[: attn_metadata.num_decodes],
@@ -614,11 +616,8 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             )
             fla_gdn_prefill_op = _get_fla_gdn_prefill_op() if use_fla_gdn_prefill else None
             if fla_gdn_prefill_op is not None:
-                initial_state = gather_ssm_states(
-                    ssm_state,
-                    prefill_state_indices,
-                    prefill_has_initial_state,
-                )
+                initial_state = ssm_state[prefill_state_indices]
+                clear_ssm_states(initial_state, prefill_has_initial_state)
                 (core_attn_out_non_spec, last_recurrent_state) = DeviceOperator.fla_gdn_prefill(
                     q=query_non_spec,
                     k=key_non_spec,
@@ -630,24 +629,16 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     prebuilt_meta=attn_metadata.non_spec_prefill_metadata.chunk,
                     fused_fwd=fla_gdn_prefill_op,
                 )
-                scatter_ssm_states_(
-                    ssm_state,
-                    prefill_state_indices,
-                    last_recurrent_state.to(ssm_state.dtype).contiguous(),
-                )
+                ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)
             # Use the fused CANN operator when available (probed once, cached on
             # the class) and applicable. It only supports the non-PCP case; fall
             # back to the Triton pipeline under PCP or if the op is unavailable.
             elif AscendGatedDeltaNetAttention._probe_fused_chunk() and get_pcp_group().world_size == 1:
-                # Gather only the selected rows. Generic advanced indexing first
-                # materializes the complete cache when ssm_state has a padded
-                # batch stride under the hybrid KV-cache manager.
-                initial_state = gather_ssm_states(
-                    ssm_state,
-                    prefill_state_indices,
-                    prefill_has_initial_state,
-                    output_dtype=torch.bfloat16,
-                )
+                # The fused op's state layout [N, Nv, Dv, Dk] matches ssm_state
+                # directly, so no transpose is needed. Advanced indexing already
+                # returns a copy, safe to clear in place.
+                initial_state = ssm_state[prefill_state_indices]
+                clear_ssm_states(initial_state, prefill_has_initial_state)
                 core_attn_out_non_spec, last_recurrent_state = (
                     AscendGatedDeltaNetAttention._chunk_gated_delta_rule_fused(
                         q=query_non_spec,
@@ -660,11 +651,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                         scale=key_non_spec.shape[-1] ** -0.5,
                     )
                 )
-                scatter_ssm_states_(
-                    ssm_state,
-                    prefill_state_indices,
-                    last_recurrent_state,
-                )
+                ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)
             else:
                 initial_state = ssm_state[prefill_state_indices].transpose(-1, -2).contiguous()
                 clear_ssm_states(initial_state, prefill_has_initial_state)
@@ -693,13 +680,15 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             actual_seq_lengths = attn_metadata.non_spec_decode_metadata.actual_seq_lengths
             query_non_spec = l2norm_fwd(query_non_spec)
             key_non_spec = l2norm_fwd(key_non_spec)
-            core_attn_out_non_spec = recurrent_gated_delta_rule(
-                query_non_spec.squeeze(0),
-                key_non_spec.squeeze(0),
-                value_non_spec.squeeze(0),
-                ssm_state,
+            # Dispatches to the vllm-ascend AscendC custom operator
+            # (csrc/recurrent_gated_delta_rule), NOT the built-in CANN operator.
+            core_attn_out_non_spec = torch.ops._C_ascend.npu_recurrent_gated_delta_rule(
+                query=query_non_spec.squeeze(0),
+                key=key_non_spec.squeeze(0),
+                value=value_non_spec.squeeze(0),
                 g=g_non_spec.squeeze(0) if g_non_spec is not None else g_non_spec,
                 beta=beta_non_spec.squeeze(0) if beta_non_spec is not None else beta_non_spec,
+                state=ssm_state,
                 scale=key_non_spec.shape[-1] ** -0.5,
                 actual_seq_lengths=actual_seq_lengths,
                 ssm_state_indices=non_spec_state_indices_tensor,
