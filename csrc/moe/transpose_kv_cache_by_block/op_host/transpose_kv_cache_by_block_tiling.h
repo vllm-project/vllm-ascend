@@ -9,8 +9,6 @@ BEGIN_TILING_DATA_DEF(TransposeKvCacheByBlockTilingData)
   TILING_DATA_FIELD_DEF(uint32_t, headDim);
   TILING_DATA_FIELD_DEF(uint32_t, splitNum);
   TILING_DATA_FIELD_DEF(uint32_t, layerNum);
-  TILING_DATA_FIELD_DEF(uint64_t, kBlockStride);
-  TILING_DATA_FIELD_DEF(uint64_t, vBlockStride);
   // tiling info
   TILING_DATA_FIELD_DEF(uint32_t, useCoreNum);
   TILING_DATA_FIELD_DEF(uint32_t, blockPerCore);
