@@ -8,7 +8,7 @@ before running the compressor, indexer and sparse-attention operators without
 moving cache or scheduler knowledge back into the model.
 """
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -196,11 +196,9 @@ def _request_counts(common: Any, num_reqs: int):
     ):
         return 0, 0, 0, 0
     flags = is_prefilling[:num_reqs].bool()
-    num_flags = min(flags.numel(), query_start_loc_cpu.numel() - 1)
-    flags = flags[:num_flags]
-    query_lens_cpu = query_start_loc_cpu[1 : num_flags + 1] - query_start_loc_cpu[:num_flags]
+    query_lens_cpu = query_start_loc_cpu[1 : num_reqs + 1] - query_start_loc_cpu[:num_reqs]
     num_prefills = int(flags.sum().item())
-    num_decodes = num_flags - num_prefills
+    num_decodes = num_reqs - num_prefills
     num_prefill_tokens = int(query_lens_cpu[flags].sum().item())
     num_decode_tokens = int(query_lens_cpu[~flags].sum().item())
     return num_decodes, num_decode_tokens, num_prefills, num_prefill_tokens
@@ -576,16 +574,6 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         build_query_metadata=True,
         build_compressor_metadata=True,
     ):
-        if (
-            isinstance(kv_cache_spec, AscendMLAAttentionSpec)
-            and getattr(kv_cache_spec, "model_version", None) == "deepseek_v41"
-        ):
-            logical_block_size = vllm_config.cache_config.block_size
-            if kv_cache_spec.block_size != logical_block_size:
-                updates = {"block_size": logical_block_size}
-                if "storage_block_size" in kv_cache_spec.__dataclass_fields__:
-                    updates["storage_block_size"] = logical_block_size // get_kv_cache_compression_ratio(kv_cache_spec)
-                kv_cache_spec = replace(kv_cache_spec, **updates)
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         max_tokens = getattr(vllm_config.scheduler_config, "max_num_batched_tokens", 4096)
         max_reqs = getattr(vllm_config.scheduler_config, "max_num_seqs", 256)
@@ -663,20 +651,11 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         # remain independent; the builder owns the operator metadata buffers.
         return self.build(0, common_attn_metadata)
 
-    def prepare_source_rope(self) -> None:
-        """Validate and cache V4.1 source RoPE tables without async tasks.
-
-        MRV2 keeps metadata tasks synchronous (``_publish_task`` runs them
-        inline), so this must NOT flip ``_device_metadata_enabled`` — only
-        ``enable_device_metadata`` may turn the async task switch on.
-        """
+    def enable_device_metadata(self) -> None:
+        self._device_metadata_enabled = True
         if self._build_compressor_metadata and self._cache_kind == "compressor_state":
             source_rope = get_full_cos_and_sin_dsa_for_layer(self._c2_rope_layer_names[0])
             self._c2_full_source_rope = source_rope
-
-    def enable_device_metadata(self) -> None:
-        self._device_metadata_enabled = True
-        self.prepare_source_rope()
 
     def take_device_metadata_tasks(self) -> tuple[DeviceMetadataTask, ...]:
         tasks = self._device_metadata_tasks
@@ -831,10 +810,6 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                 compressed_lengths = (self._cache_seq_lens[:num_reqs], self._cmp_residual[:num_reqs])
                 batch_shared["lengths:c2"] = compressed_lengths
             coordinates["cache_seq_lens"], cmp_residual_buffer = compressed_lengths
-        # Capture the indexer path even when a dummy C2 decode has no
-        # completed compression group. Device cache lengths remain exact.
-        if full_graph_mode and compressed:
-            coordinates["max_cache_seq_len"] = max(plane_ratio, coordinates["max_cache_seq_len"])
         coordinates["max_cache_seq_len"] //= plane_ratio
         cos = sin = None
         if cache_kind == "swa" and positions is not None:
@@ -1110,10 +1085,6 @@ class DeepseekV41CacheLayer(nn.Module, AttentionLayerBase):
         self.kv_cache = [torch.empty(0)]
         context = vllm_config.compilation_config.static_forward_context
         context[prefix] = self
-
-    def bind_kv_cache(self, kv_cache: torch.Tensor | tuple[torch.Tensor, ...]) -> None:
-        """Bind one allocated slot view, keeping the ``kv_cache[0]`` contract."""
-        self.kv_cache = [kv_cache]
 
     def get_kv_cache_spec(self, vllm_config):
         return self.spec
