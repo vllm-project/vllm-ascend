@@ -4,23 +4,26 @@ _envs: &envs
   OMP_NUM_THREADS: "10"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
   HCCL_BUFFSIZE: "1024"
+  PYTHONHASHSEED: "0"
+  ASCEND_ENABLE_USE_FABRIC_MEM: "1"
+  ACL_OP_INIT_MODE: "1"
 
 _kv_pool: &kv_pool
-  type: "memcache"
-  meta_service_port: 5000
-  config_store_port: 6000
+  type: "mooncake"
+  master_port: 50088
+  metrics_port: 50089
   config:
-    meta:
-      ock.mmc.log_level: "info"
-    local:
-      ock.mmc.log_level: "info"
-      ock.mmc.local_service.world_size: 256
-      ock.mmc.local_service.protocol: "device_sdma"
-      ock.mmc.local_service.dram.size: "10GB"
+    metadata_server: "P2PHANDSHAKE"
+    protocol: "ascend"
+    device_name: ""
+    # The proven A3 TP8 non-layerwise configuration uses a 32 GiB segment.
+    global_segment_size: "32GB"
+    preferred_segment: false
+    prefer_alloc_in_same_node: true
 
 _server_cmd: &server_cmd
   # Keep the external pool as the only prefix-hit path. The warmup below
-  # populates memcache, then the measured run loads the shared prefix from it.
+  # populates Mooncake, then the measured run loads the shared prefix from it.
   - "--no-enable-prefix-caching"
   - "--max_model_len"
   - "135000"
@@ -58,7 +61,7 @@ _server_cmd: &server_cmd
   - "--speculative-config"
   - '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
   - "--kv-transfer-config"
-  - '{"kv_connector": "AscendStoreConnector", "kv_role": "kv_both", "kv_connector_extra_config": {"backend": "memcache", "lookup_rpc_port": "0", "use_layerwise": true}}'
+  - '{"kv_connector": "AscendStoreConnector", "kv_role": "kv_both", "kv_connector_extra_config": {"backend": "mooncake", "lookup_rpc_port": "0", "use_layerwise": false}}'
 
 _benchmarks_perf: &benchmarks_perf
   pool_warmup:
@@ -76,8 +79,8 @@ _benchmarks_perf: &benchmarks_perf
     threshold: 0.97
   perf:
     case_type: performance
-    # Exercise layerwise load-back together with MTP3 draft/verify from the
-    # first measured request. Recalibrate after repeated valid pool-hit runs.
+    # Exercise whole-block Mooncake load-back together with MTP3 draft/verify
+    # from the first measured request. Recalibrate after valid pool-hit runs.
     dataset_path: vllm-ascend/GSM8K_prefix90_in65536_bs1000_qwen
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf

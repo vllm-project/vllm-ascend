@@ -74,19 +74,26 @@ test_cases:
     model: "/root/.cache/modelscope/hub/models/deepseek-ai/DeepSeek-V4-Flash"
     envs:
       <<: *envs
+      # A5 uses the UB/URMA MemFabric path for the managed Memcache pool.
+      PYTHONHASHSEED: "0"
+      ASCEND_LOCAL_COMM_RES: '{"version":"1.3"}'
     kv_pool:
-      type: "mooncake"
-      master_port: 50088
-      metrics_port: 50089
+      type: "memcache"
+      meta_service_port: 5000
+      config_store_port: 6000
       config:
-        metadata_server: "P2PHANDSHAKE"
-        protocol: "ascend"
-        device_name: ""
-        global_segment_size: "1GB"
-        preferred_segment: false
-        prefer_alloc_in_same_node: true
+        meta:
+          ock.mmc.log_level: "info"
+        local:
+          ock.mmc.log_level: "info"
+          ock.mmc.local_service.world_size: 256
+          ock.mmc.local_service.protocol: "device_urma"
+          ock.mmc.local_service.dram.size: "10GB"
     server_cmd: *server_cmd
     server_cmd_extra:
+      # Force shared-prefix reuse through the external pool rather than the
+      # in-process HBM prefix cache.
+      - "--no-enable-prefix-caching"
       - "--max-model-len"
       - "135000"
       - "--speculative-config"
@@ -94,7 +101,7 @@ test_cases:
       - "--additional-config"
       - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":true,"rejection_sampler_config":{"enable_block_verify":false,"enable_entropy_verify":false,"posterior_threshold":0.95,"posterior_alpha":0.4}}'
       - "--kv-transfer-config"
-      - '{"kv_connector": "AscendStoreConnector", "kv_role": "kv_both", "kv_connector_extra_config": {"backend": "mooncake", "lookup_rpc_port": "0", "use_layerwise": true}}'
+      - '{"kv_connector": "AscendStoreConnector", "kv_role": "kv_both", "kv_connector_extra_config": {"backend": "memcache", "lookup_rpc_port": "0", "use_layerwise": true}}'
     benchmarks:
       acc:
         case_type: accuracy
@@ -109,17 +116,31 @@ test_cases:
         ignore_eos: false
         top_p: 1.0
         thinking: True
-      perf:
+      pool_warmup:
         case_type: performance
-        dataset_path: /root/.cache/modelscope/hub/datasets/vllm-ascend/DeekSeek-V4-Flash_input_3500_lines_128
+        # Populate one shared long prefix before the measured workload.
+        dataset_path: vllm-ascend/GSM8K_prefix90_in65536_bs1000_qwen
         request_conf: vllm_api_stream_chat
         dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-        num_prompts: 128
-        max_out_len: 1500
-        batch_size: 32
+        num_prompts: 1
+        max_out_len: 1
+        batch_size: 1
         request_rate: 0
-        baseline: 83.50106007067137
-        threshold: 0.95
+        baseline: 0
+        threshold: 0.97
+      perf:
+        case_type: performance
+        # Measure A5 layerwise load-back from Memcache. Recalibrate after
+        # repeated valid runs with positive pool hit/load evidence.
+        dataset_path: vllm-ascend/GSM8K_prefix90_in65536_bs1000_qwen
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 64
+        max_out_len: 1024
+        batch_size: 16
+        request_rate: 0
+        baseline: 1
+        threshold: 0.1
         temperature: 0
         ignore_eos: True
   - name: "Refuse_sampling_acceptance_rate_test_06"
