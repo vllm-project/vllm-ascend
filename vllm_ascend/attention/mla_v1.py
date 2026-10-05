@@ -989,8 +989,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         config = self.vllm_config
         if not config.use_v2_model_runner:
             raise ValueError("External FlashMLA currently requires model runner V2")
-        if config.speculative_config is not None:
-            raise ValueError("External FlashMLA speculative decoding integration is separate")
+        if config.speculative_config is not None and config.speculative_config.method != "dspark":
+            raise ValueError("External FlashMLA speculative decoding currently supports DSpark only")
         if not get_current_hardware_profile().supports(HardwareCapability.MLA_FLASH):
             raise ValueError("External FlashMLA requires an Ascend MLA_FLASH-capable device")
         if self.num_heads not in MLA_FLASH_SUPPORTED_Q_HEADS or self.num_kv_heads != 1:
@@ -1023,7 +1023,12 @@ class AscendMLAImpl(MLAAttentionImpl):
             # layers in the same metadata dict, but only MLA layers contribute a
             # captured FIA op, so zipping unfiltered keys against attn_params
             # pairs MLA params with KDA layer names.
-            attn_keys = [k for k in attn_metadata[0] if getattr(attn_metadata[0][k], "decode", None) is not None]
+            attn_keys = [
+                k
+                for k in attn_metadata[0]
+                if getattr(attn_metadata[0][k], "decode", None) is not None
+                and getattr(attn_metadata[0][k], "external_flashmla", None) is None
+            ]
         else:
             graph_params = get_graph_params()
             attn_metadata = forward_context.attn_metadata

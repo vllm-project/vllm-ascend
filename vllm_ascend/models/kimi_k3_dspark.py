@@ -211,11 +211,15 @@ class AscendK3DSparkModel(UpstreamK3DSparkModel):
             slots = context_slot_mapping[layer_idx] if per_layer_slot_mapping else context_slot_mapping
             if slots is None:
                 continue
+            kv_cache = attn.kv_cache
+            if isinstance(kv_cache, torch.Tensor):
+                # Context writes bypass MLA forward's fused-cache view split.
+                kv_cache = (kv_cache[..., : attn.impl.kv_lora_rank], kv_cache[..., attn.impl.kv_lora_rank :])
             attn.impl.exec_kv_prefill(
                 kv_no_split,
                 cos,
                 sin,
-                attn.kv_cache,
+                kv_cache,
                 slots,
             )
 

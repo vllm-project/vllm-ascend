@@ -32,14 +32,17 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
     DSparkSpeculator,
 )
 
+from vllm_ascend import envs
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.utils import lmhead_tp_enable, lmhead_tp_max_num_logits
 from vllm_ascend.worker.dcp_utils import DCPManager
+from vllm_ascend.worker.device_metadata import DeviceMetadataExecutor
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_factory,
     build_attn_metadata_wrapper,
+    flashmla_metadata_scope,
 )
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import prepare_dflash_inputs_factory
@@ -65,6 +68,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         self._lmhead_tp_validate_draft_sampling()
         self.input_batch: InputBatch | None = None
         self.attn_architecture: str | None = None
+        self.flashmla_executor = DeviceMetadataExecutor() if envs.VLLM_ASCEND_ENABLE_FLASH_MLA else None
         self._init_dcp()
 
     def _init_dcp(self) -> None:
@@ -139,6 +143,10 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         # It needs this speculator to update full-graph params, so set it here.
         self.query_cudagraph_manager.speculator = self
         self.query_cudagraph_manager.update_stream = self.update_stream
+
+    def capture(self) -> None:
+        with flashmla_metadata_scope(self.attn_groups, self.flashmla_executor):
+            super().capture()
 
     def set_attn(
         self,
@@ -297,6 +305,8 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         """Match FULL-graph query lengths to the padded request count."""
         query_lens_list = [(i + 1) * self.num_query_per_req for i in range(num_reqs_padded)]
         for metadata in attn_metadata.values():
+            if getattr(metadata, "external_flashmla", None) is not None:
+                continue
             decode_metadata = metadata.decode if self.attn_architecture == "MLA" else metadata
             decode_metadata.actual_seq_lengths_q = query_lens_list
         return attn_metadata
@@ -357,7 +367,15 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
             seq_lens_cpu, is_prefilling = self._prepare_draft_dcp_metadata_inputs(
                 input_batch.num_reqs, self.max_num_reqs, self.num_query_per_req
             )
+        # Initial memory profiling invokes the drafter before set_attn creates
+        # its draft builders. Keep real runs bound to those builders.
+        attn_groups = getattr(self, "attn_groups", None)
+        if self.flashmla_executor is not None and attn_groups is None:
+            if not (dummy_run and is_profile and skip_attn_for_dummy_run):
+                raise RuntimeError("DSpark attention groups are unavailable outside initial memory profiling")
+            attn_groups = ()
         with (
+            flashmla_metadata_scope(attn_groups, self.flashmla_executor),
             build_attn_metadata_wrapper(),
             build_attn_metadata_factory(
                 self.input_buffers.positions,
