@@ -83,31 +83,7 @@
 #    Future Plan:
 #       Find a better way to support tensor alignment for 310p without this patch.
 #
-# ** 4. File: platform/patch_dp_device_ids.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.core.dp_utils.get_physical_gpu_ids_for_local_dp_rank`
-#    Why:
-#       PR #45026 removed the per-process device isolation that older vLLM
-#       versions performed internally. Application-level DP (e.g.
-#       `offline_data_parallel.py`) now has to slice ASCEND_RT_VISIBLE_DEVICES
-#       per rank itself, but the upstream helper still expects the env var to
-#       contain ALL devices for ALL ranks and tries to read it with the
-#       `local_dp_rank * world_size` offset. With a sharded env var, that
-#       offset is out of range and the helper raises IndexError (wrapped in the
-#       user-facing "Error computing device indices for ..." message).
-#    How：
-#       Patch `get_physical_gpu_ids_for_local_dp_rank` so it tolerates a
-#       pre-sharded ASCEND_RT_VISIBLE_DEVICES env var (one slice per DP rank),
-#       instead of unconditionally applying `local_dp_rank * world_size` as an
-#       offset into it.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/45026
-#    Future Plan:
-#       Remove this patch once upstream `get_physical_gpu_ids_for_local_dp_rank`
-#       handles a pre-sharded visible-devices env var, or vLLM-Ascend stops
-#       relying on application-level device slicing for DP.
-#
-# ** 5. File: platform/patch_dyntra_lb_core.py**
+# ** 4. File: platform/patch_dyntra_lb_core.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.engine.core.DPEngineCoreProc` (class provided only; the swap
 #      is performed by patch_engine_core.py when dyntra-lb is enabled)
@@ -240,7 +216,7 @@
 #       a backend-neutral router configuration object or MoE factory extension
 #       hook that carries vision routing metadata into the Ascend runner.
 #
-# ** 7a. File: platform/patch_glm5next_config.py**
+# ** 7. File: platform/patch_glm5next_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.transformers_utils.config._CONFIG_REGISTRY`
 #    Why:
