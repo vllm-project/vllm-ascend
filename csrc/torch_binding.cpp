@@ -38,6 +38,7 @@
 #include "mc2/dispatch_ffn_combine/dispatch_ffn_combine_torch_adpt.h"
 #include "gmm/grouped_matmul_swiglu_quant_weight_nz_tensor_list/grouped_matmul_swiglu_quant_torch_adpt.h"
 #include "gmm/grouped_matmul_swiglu_quant_v2/grouped_matmul_swiglu_quant_v2_torch_adpt.h"
+#include "attention/lightning_indexer/lightning_indexer_torch_adpt.h"
 #include "moe/moe_gating_top_k/moe_gating_top_k_torch_adpt.h"
 #include "attention/sparse_flash_attention/sparse_flash_attention_torch_adpt.h"
 #include "attention/sparse_flash_mla/sparse_flash_mla_torch_adpt.h"
@@ -47,9 +48,10 @@
 #include "attention/fused_lightning_indexer_manage/fused_lightning_indexer_manage_torch_adpt.h"
 #include "attention/fused_scatter_copy_sparse_flash_attention/fused_scatter_copy_sparse_flash_attention_torch_adpt.h"
 #include "attention/lightning_indexer_quant/lightning_indexer_quant_torch_adpt.h"
-#include "attention/fused_quant_lightning_indexer_manage/fused_quant_lightning_indexer_manage_torch_adpt.h"
 #include "moe/causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
-#include "attention/attn_res_fwd/attn_res_fwd_torch_adpt.h"
+#include "attention/recurrent_gated_delta_rule/recurrent_gated_delta_rule_torch_adpt.h"
+#include "attention/recurrent_kda/recurrent_kda_torch_adpt.h"
+#include "attention/chunk_kda_fwd/chunk_kda_fwd_torch_adpt.h"
 #include "attention/kda_gate_cumsum/kda_gate_cumsum_torch_adpt.h"
 #include "attention/kda_layout_swap12/kda_layout_swap12_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
@@ -60,7 +62,7 @@
 #include "attention/store_kv_block_metadata/store_kv_block_metadata_torch_adpt.cpp"
 #include "moe/dequant_situ_quant/dequant_situ_quant_torch_adpt.h"
 #include "moe/situ_mx_quant/situ_mx_quant_torch_adpt.h"
-#include "moe/grouped_matmul_situ_quant/grouped_matmul_situ_quant_torch_adpt.h"
+#include "attention/mla_prolog_v3_k3/mla_prolog_v3_k3_torch_adpt.h"
 #include <c10/core/Device.h>
 #include <c10/core/Scalar.h>
 #include <c10/util/Exception.h>
@@ -582,68 +584,10 @@ void transpose_kv_cache_by_block(
     int64_t splitNum,
     int64_t layerNum)
 {
-    TORCH_CHECK(layerNum >= 0 && kCache.size() == layerNum && vCache.size() == layerNum,
-                "K/V cache lists must match layerNum");
-    TORCH_CHECK(blockSize > 0 && headNum > 0 && headDim > 0 && splitNum > 0 && headNum % splitNum == 0,
-                "Invalid KV block dimensions or splitNum");
-    TORCH_CHECK(blockIDs.dim() == 1 && blockIDs.scalar_type() == at::kLong && blockIDs.is_contiguous(),
-                "blockIDs must be a contiguous 1D int64 tensor");
-    if (layerNum == 0) {
-        return;
-    }
 
-    // Only the block axis may have gaps. The kernel still transposes a dense
-    // [blockSize, headNum, headDim] payload inside each selected block.
-    auto checkCache = [&](const at::Tensor &cache) {
-        TORCH_CHECK(cache.dim() == 4 && cache.size(1) == blockSize &&
-                    cache.size(2) == headNum && cache.size(3) == headDim,
-                    "KV caches must have shape [blocks, blockSize, headNum, headDim]");
-        TORCH_CHECK(cache.device() == blockIDs.device() && cache.scalar_type() == kCache[0].scalar_type(),
-                    "KV caches must have the same dtype and be on the blockIDs device");
-        int64_t denseStride = 1;
-        for (int64_t dim = 3; dim > 0; --dim) {
-            TORCH_CHECK(cache.size(dim) == 1 || cache.stride(dim) == denseStride,
-                        "KV caches must be contiguous within each block");
-            denseStride *= cache.size(dim);
-        }
-        TORCH_CHECK(cache.size(0) <= 1 || cache.stride(0) >= denseStride,
-                    "KV cache blocks must not overlap");
-        TORCH_CHECK(cache.size(0) > 0 || blockIDs.numel() == 0,
-                    "Nonempty blockIDs require nonempty KV caches");
-    };
-    for (int64_t layer = 0; layer < layerNum; ++layer) {
-        checkCache(kCache[layer]);
-        checkCache(vCache[layer]);
-        TORCH_CHECK(kCache[layer].size(0) == vCache[layer].size(0),
-                    "K/V caches must have the same number of blocks");
-    }
-    if (blockIDs.numel() == 0) {
-        return;
-    }
+    EXEC_NPU_CMD(aclnnTransposeKvCacheByBlock, kCache, vCache, blockIDs,
+                 blockSize, headNum, headDim, splitNum, layerNum);
 
-    // ACLNN tiling does not reliably expose dynamic-input strides. Pass the
-    // physical strides explicitly, without copying or replacing the caches.
-    // Consecutive layers with the same K/V strides retain one fused launch.
-    auto getBlockStride = [&](const at::Tensor &cache) -> int64_t {
-        // A singleton block axis never advances, so its stride is arbitrary.
-        // Normalize it for both layer grouping and the tiling overlap check.
-        return cache.size(0) > 1 ? cache.stride(0) : blockSize * headNum * headDim;
-    };
-    for (int64_t begin = 0; begin < layerNum;) {
-        int64_t kBlockStride = getBlockStride(kCache[begin]);
-        int64_t vBlockStride = getBlockStride(vCache[begin]);
-        int64_t end = begin + 1;
-        while (end < layerNum && getBlockStride(kCache[end]) == kBlockStride &&
-               getBlockStride(vCache[end]) == vBlockStride) {
-            ++end;
-        }
-        int64_t groupLayers = end - begin;
-        auto kGroup = kCache.slice(begin, groupLayers);
-        auto vGroup = vCache.slice(begin, groupLayers);
-        EXEC_NPU_CMD(aclnnTransposeKvCacheByBlock, kGroup, vGroup, blockIDs,
-                     blockSize, headNum, headDim, splitNum, groupLayers, kBlockStride, vBlockStride);
-        begin = end;
-    }
 }
 
 void npu_scatter_pa_kv_cache(
@@ -758,6 +702,38 @@ npu_copy_and_expand_eagle_inputs(
 
     return {out_input_ids, out_positions, out_is_rejected_token_mask, out_is_masked_token_mask,
             out_new_token_indices, out_hidden_state_mapping};
+}
+
+at::Tensor npu_causal_conv1d_custom(
+    const at::Tensor& output,
+    const at::Tensor& x,
+    const at::Tensor& weight,
+    const at::Tensor& conv_state,
+    const c10::optional<at::Tensor>& bias_opt,
+    const c10::optional<at::Tensor>& query_start_loc_opt,
+    const c10::optional<at::Tensor>& cache_indices_opt,
+    const c10::optional<at::Tensor>& initial_state_mode_opt,
+    const c10::optional<at::Tensor>& num_accepted_tokens_opt,
+    int64_t  activation_mode,
+    int64_t  pad_slot_id,
+    int64_t  run_mode)
+{
+    EXEC_NPU_CMD(aclnnCausalConv1d,
+                    x,
+                    weight,
+                    bias_opt,
+                    conv_state,
+                    query_start_loc_opt,
+                    cache_indices_opt,
+                    initial_state_mode_opt,
+                    num_accepted_tokens_opt,
+                    activation_mode,
+                    pad_slot_id,
+                    run_mode,
+                    output
+                );
+
+    return output;
 }
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> moe_gating_top_k_hash(
@@ -2816,6 +2792,11 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("chunk_fwd_o_vllm", torch::kPrivateUse1, &vllm_ascend::chunk_fwd_o_vllm);
 
     ops.def(
+        "chunk_kda_fwd(Tensor q, Tensor k, Tensor v, Tensor g, Tensor beta, float scale, int chunk_size, str layout=\"BSND\", *, Tensor? initial_state=None, bool? output_final_state=False, int[]? cu_seqlens=None, int[]? chunk_indices=None, bool? safe_gate=False, float? lower_bound=None, bool? use_gate_in_kernel=False, Tensor? A_log=None, Tensor? dt_bias=None, bool? disable_recompute=False, bool? return_intermediate_states=False, bool? state_v_first=False) -> (Tensor o, Tensor? final_state, Tensor? gk, Tensor aqk, Tensor akk, Tensor? w, Tensor? u, Tensor? qg, Tensor? kg, Tensor? v_new, Tensor? h, Tensor? initial_state_out)"
+    );
+    ops.impl("chunk_kda_fwd", torch::kPrivateUse1, &vllm_ascend::chunk_kda_fwd);
+
+    ops.def(
         "kda_gate_cumsum(Tensor g, int chunk_size, *, Tensor? A_log=None, Tensor? dt_bias=None, int[]? cu_seqlens=None, bool? use_gate_in_kernel=False, bool? safe_gate=False, float? lower_bound=-5.0, str layout=\"BSND\") -> Tensor"
     );
     ops.impl("kda_gate_cumsum", torch::kPrivateUse1, &vllm_ascend::kda_gate_cumsum);
@@ -2844,11 +2825,28 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("npu_gemma_rms_norm", torch::kPrivateUse1, &vllm_ascend::npu_gemma_rms_norm);
 
     ops.def(
-        "attn_res_fwd(Tensor(b) prefix_sum, Tensor? addend, Tensor(a!) block_residual, "
-        "Tensor proj_weight, Tensor norm_weight, float norm_eps, int num_valid_blocks, "
-        "Tensor? output_norm_weight=None, float output_norm_eps=1e-5, int block_write_idx=-1, "
-        "bool return_materialized=False, bool mix=True, bool optimize_prefill=False) -> (Tensor(c), Tensor(b), Tensor(c))");
-    ops.impl("attn_res_fwd", torch::kPrivateUse1, &vllm_ascend::attn_res_fwd);
+        "npu_recurrent_gated_delta_rule(Tensor query, "
+        "                               Tensor key, "
+        "                               Tensor value, "
+        "                               Tensor(a!) state, "
+        "                               *, "
+        "                               Tensor? beta=None, "
+        "                               float? scale=None, "
+        "                               Tensor? actual_seq_lengths=None, "
+        "                               Tensor? ssm_state_indices=None, "
+        "                               Tensor? num_accepted_tokens=None, "
+        "                               Tensor? g=None, "
+        "                               Tensor? gk=None) -> Tensor");
+    ops.impl("npu_recurrent_gated_delta_rule", torch::kPrivateUse1, &vllm_ascend::npu_recurrent_gated_delta_rule);
+
+    ops.def(
+        "recurrent_kda(Tensor query, Tensor key, Tensor value, Tensor gate, Tensor beta, "
+        "Tensor(a!) initial_state, Tensor cu_seqlens, Tensor ssm_state_indices, Tensor A_log, Tensor dt_bias, *, "
+        "Tensor? num_accepted_tokens=None, float scale=0.08838834764831845, "
+        "bool use_qk_l2norm_in_kernel=True, bool use_gate_in_kernel=True, "
+        "bool use_beta_sigmoid_in_kernel=False, bool allow_neg_eigval=False, "
+        "bool safe_gate=True, float lower_bound=-5.0) -> Tensor output");
+    ops.impl("recurrent_kda", torch::kPrivateUse1, &vllm_ascend::recurrent_kda);
 
     ops.def(
         "dequant_situ_quant(Tensor x, "
@@ -2871,35 +2869,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "              bool activate_left=False, "
         "              int dst_type=36) -> (Tensor y, Tensor mxscale)");
     ops.impl("situ_mx_quant", torch::kPrivateUse1, &vllm_ascend::situ_mx_quant);
-
-    ops.def(
-        "grouped_matmul_situ_quant(Tensor x, Tensor weight, Tensor weight_scale, Tensor? weight_assist_matrix, "
-        "Tensor? bias, Tensor x_scale, Tensor? smooth_scale, Tensor group_list, int dequant_mode, "
-        "int dequant_dtype, int quant_mode, int group_list_type, int[]? tuning_config, float beta, "
-        "float linear_beta) -> (Tensor output, Tensor output_scale)");
-    ops.impl("grouped_matmul_situ_quant", torch::kPrivateUse1,
-             &ascend_kernel::gmm_situ_quant_v2_nd);
-    ops.def(
-        "grouped_matmul_situ_quant.list(Tensor x, Tensor[] weight, Tensor[] weight_scale, "
-        "Tensor[]? weight_assist_matrix, Tensor? bias, Tensor x_scale, Tensor? smooth_scale, "
-        "Tensor group_list, int dequant_mode, int dequant_dtype, int quant_mode, int group_list_type, "
-        "int[]? tuning_config, float beta, float linear_beta) -> (Tensor output, Tensor output_scale)");
-    ops.impl("grouped_matmul_situ_quant.list", torch::kPrivateUse1,
-             &ascend_kernel::gmm_situ_quant_v2_nd_list);
-    ops.def(
-        "grouped_matmul_situ_quant_weight_nz(Tensor x, Tensor weight, Tensor weight_scale, "
-        "Tensor? weight_assist_matrix, Tensor? bias, Tensor x_scale, Tensor? smooth_scale, "
-        "Tensor group_list, int dequant_mode, int dequant_dtype, int quant_mode, int group_list_type, "
-        "int[]? tuning_config, float beta, float linear_beta) -> (Tensor output, Tensor output_scale)");
-    ops.impl("grouped_matmul_situ_quant_weight_nz", torch::kPrivateUse1,
-             &ascend_kernel::gmm_situ_quant_v2_nz);
-    ops.def(
-        "grouped_matmul_situ_quant_weight_nz.list(Tensor x, Tensor[] weight, Tensor[] weight_scale, "
-        "Tensor[]? weight_assist_matrix, Tensor? bias, Tensor x_scale, Tensor? smooth_scale, "
-        "Tensor group_list, int dequant_mode, int dequant_dtype, int quant_mode, int group_list_type, "
-        "int[]? tuning_config, float beta, float linear_beta) -> (Tensor output, Tensor output_scale)");
-    ops.impl("grouped_matmul_situ_quant_weight_nz.list", torch::kPrivateUse1,
-             &ascend_kernel::gmm_situ_quant_v2_nz_list);
 
 #ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
     // Direct kernel custom ops
@@ -2935,6 +2904,24 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.def("swap_blocks(Tensor! x, Tensor! y, Tensor z) -> ()");
     ops.impl("swap_blocks", torch::kPrivateUse1, &vllm_ascend::swap_blocks);
 #endif
+
+    // K3 MLA prolog uses a distinct ACLNN/operator name to keep CANN's MlaPrologV3 available.
+    ops.def(
+        "npu_mla_prolog_v3_k3(Tensor token_x, Tensor weight_dq, Tensor weight_uq_qr, Tensor weight_uk,"
+        "           Tensor weight_dkv_kr, Tensor rmsnorm_gamma_cq, Tensor rmsnorm_gamma_ckv,"
+        "           Tensor rope_sin, Tensor rope_cos, Tensor(a!) kv_cache, Tensor(b!) kr_cache, *,"
+        "           Tensor? cache_index=None, Tensor? dequant_scale_x=None,"
+        "           Tensor? dequant_scale_w_dq=None, Tensor? dequant_scale_w_uq_qr=None,"
+        "           Tensor? dequant_scale_w_dkv_kr=None, Tensor? quant_scale_ckv=None,"
+        "           Tensor? quant_scale_ckr=None, Tensor? smooth_scales_cq=None,"
+        "           Tensor? actual_seq_len=None, Tensor? k_nope_clip_alpha=None,"
+        "           float rmsnorm_epsilon_cq=1e-05, float rmsnorm_epsilon_ckv=1e-05,"
+        "           str cache_mode=\"PA_BSND\", bool query_norm_flag=False,"
+        "           int weight_quant_mode=0, int kv_cache_quant_mode=0, int query_quant_mode=0,"
+        "           int ckvkr_repo_mode=0, int quant_scale_repo_mode=0, int tile_size=128,"
+        "           float qc_qr_scale=1.0, float kc_scale=1.0)"
+        " -> (Tensor, Tensor, Tensor, Tensor, Tensor)");
+    ops.impl("npu_mla_prolog_v3_k3", torch::kPrivateUse1, &vllm_ascend::npu_mla_prolog_v3_k3);
 
     // swap_blocks_batch takes CPU tensors (int64 pointer/size arrays), not NPU
     // tensors, so dispatch must be registered on the CPU backend. The function
@@ -3046,20 +3033,21 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     );
     ops.impl("grouped_matmul_swiglu_quant_v2", torch::kPrivateUse1, &vllm_ascend::grouped_matmul_swiglu_quant_v2);
 
-    // fused_quant_lightning_indexer_manage (nanovllm fused_li_manage_mtp port, quantized C8 variant)
     ops.def(
-        "npu_fused_quant_lightning_indexer_manage(Tensor index_weights, Tensor query_dequant_scale, "
-        "Tensor query, Tensor index_key_dequant_scale, Tensor index_key_cache, "
-        "Tensor index_block_table, Tensor actual_seq_lengths_query, "
-        "Tensor actual_seq_lengths_key, Tensor offload_seq_lengths_key, "
-        "Tensor num_cache_tokens, Tensor request_state, Tensor req_pool_entries, "
-        "Tensor(a!) cache_slots_pool, Tensor(b!) topk_src_ids, "
-        "Tensor(c!) topk_dst_slots, Tensor(d!) topk_miss_counts, "
-        "Tensor(e!) miss_src_ids, Tensor(f!) miss_dst_slots, "
-        "Tensor(g!) miss_counts) -> ()"
+        "npu_lightning_indexer("
+            "Tensor query, Tensor key, Tensor weights, "
+            "*, "
+            "Tensor? actual_seq_lengths_query=None, "
+            "Tensor? actual_seq_lengths_key=None, "
+            "Tensor? block_table=None, "
+            "str layout_query=\"BSND\", str layout_key=\"BSND\", "
+            "int sparse_count=2048, int sparse_mode=3, "
+            "int pre_tokens=9223372036854775807, "
+            "int next_tokens=9223372036854775807, "
+            "bool return_value=False"
+        ") -> (Tensor sparse_indices, Tensor sparse_values)"
     );
-    ops.impl("npu_fused_quant_lightning_indexer_manage", torch::kPrivateUse1,
-             &vllm_ascend::npu_fused_quant_lightning_indexer_manage);
+    ops.impl("npu_lightning_indexer", torch::kPrivateUse1, &vllm_ascend::npu_lightning_indexer);
 
     // k2q_csr: q2k -> k2q CSR (Meta/Hist/RowPrefix/TilePrefix/Scatter)
     ops.def(
@@ -3239,6 +3227,21 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "Tensor out_is_masked_token_mask, Tensor out_new_token_indices, Tensor out_hidden_state_mapping)"
     );
     ops.impl("npu_copy_and_expand_eagle_inputs", torch::kPrivateUse1, &vllm_ascend::npu_copy_and_expand_eagle_inputs);
+    ops.def(
+        "npu_causal_conv1d_custom(Tensor output, Tensor x, "
+        "                         Tensor weight, "
+        "                         Tensor conv_state, "
+        "                         Tensor? bias_opt, "
+        "                         Tensor? query_start_loc_opt, "
+        "                         Tensor? cache_indices_opt, "
+        "                         Tensor? initial_state_mode_opt, "
+        "                         Tensor? num_accepted_tokens_opt, "
+        "                         int activation_mode, "
+        "                         int pad_slot_id, "
+        "                         int run_mode"
+        ") -> (Tensor output)");
+    ops.impl("npu_causal_conv1d_custom", torch::kPrivateUse1, &vllm_ascend::npu_causal_conv1d_custom);
+
     ops.def(
         "moe_gating_top_k_hash("
         "Tensor x, "
@@ -3566,6 +3569,11 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "chunk_fwd_o_vllm(Tensor q, Tensor k, Tensor v, Tensor h, float scale, *, Tensor? g=None, Tensor? g_gamma=None, int[]? cu_seqlens=None, int[]? chunk_indices=None, int? chunk_size=None, bool? transpose_state_layout=False) -> Tensor"
     );
     ops.impl("chunk_fwd_o_vllm", torch::kPrivateUse1, &vllm_ascend::chunk_fwd_o_vllm);
+
+    ops.def(
+        "chunk_kda_fwd(Tensor q, Tensor k, Tensor v, Tensor g, Tensor beta, float scale, int chunk_size, str layout=\"BSND\", *, Tensor? initial_state=None, bool? output_final_state=False, int[]? cu_seqlens=None, int[]? chunk_indices=None, bool? safe_gate=False, float? lower_bound=None, bool? use_gate_in_kernel=False, Tensor? A_log=None, Tensor? dt_bias=None, bool? disable_recompute=False, bool? return_intermediate_states=False, bool? state_v_first=False) -> (Tensor o, Tensor? final_state, Tensor? gk, Tensor aqk, Tensor akk, Tensor? w, Tensor? u, Tensor? qg, Tensor? kg, Tensor? v_new, Tensor? h, Tensor? initial_state_out)"
+    );
+    ops.impl("chunk_kda_fwd", torch::kPrivateUse1, &vllm_ascend::chunk_kda_fwd);
 
     ops.def(
         "kda_gate_cumsum(Tensor g, int chunk_size, *, Tensor? A_log=None, Tensor? dt_bias=None, int[]? cu_seqlens=None, bool? use_gate_in_kernel=False, bool? safe_gate=False, float? lower_bound=-5.0, str layout=\"BSND\") -> Tensor"

@@ -6,8 +6,8 @@ import torch
 import torch_npu
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
-from vllm.distributed import get_pcp_group, get_tensor_model_parallel_world_size
-from vllm.forward_context import get_forward_context, is_forward_context_available
+from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadataBuilder
 from vllm.model_executor.utils import replace_parameter
@@ -34,7 +34,6 @@ from vllm_ascend.attention.utils import (
     get_sfa_qsfa_packed_head_dim,
     maybe_save_kv_layer_to_connector,
     notify_kv_cache_written,
-    split_decodes_and_prefills,
     trans_rope_weight,
     transdata,
     wait_for_kv_layer_from_connector,
@@ -172,22 +171,14 @@ def sparse_mla(query, cache, indices, metadata, scale):
         topk_length = metadata.smla_topk_length
         cu_seqlens_q = metadata.query_start_loc
         plan = metadata.smla_metadata
-        # The plan has to be generated from the very tensors the operator call
-        # receives: a plan built over different ones makes the kernel index past
-        # what it was handed. The shape check below catches the eager case, where
-        # the query is trimmed to the unpadded row count, but a replayed FULL
-        # draft graph passes the padded count the plan was built for. The MTP
-        # draft replays one captured graph per step, so its pre-built plan can
-        # describe a different step's rows; rebuild from the indices actually
-        # passed whenever the draft model is running.
-        draft_model = is_forward_context_available() and getattr(get_forward_context(), "is_draft_model", False)
-        if query.shape[0] != topk_length.shape[0] or draft_model:
+        if query.shape[0] != topk_length.shape[0]:
             # Eager and piecewise steps trim the query to the unpadded token
             # count, while the plan built during metadata construction still
             # describes the padded one (graph capacity, and under data
             # parallelism the group-wide token count, which can be hundreds of
             # rows larger). cu_seqlens_q is padded for the same reason. Rebuild
-            # for the rows actually being passed.
+            # for the rows actually being passed; a replayed full graph never
+            # reaches this branch, so the captured plan is left intact.
             #
             # Since this branch regenerates the plan anyway, take the top-k
             # lengths from the indices being passed rather than from the
@@ -246,7 +237,13 @@ def sparse_mla(query, cache, indices, metadata, scale):
             attention_mode=2,
             return_softmax_lse=False,
         )
-    return result[0]
+    output = result[0]
+    # Kernels may leave graph-capacity rows unwritten. Mask on device before
+    # value/output projections so NaNs in padding cannot escape the layer.
+    # query_start_loc's last entry is the PADDED token count, so bounding by it
+    # masks nothing; num_actual_tokens is what this batch really scheduled.
+    valid = torch.arange(query.shape[0], device=query.device) < metadata.num_actual_tokens
+    return output.masked_fill(~valid[:, None, None], 0)
 
 
 class SparseMLAMetadataState:
@@ -428,10 +425,6 @@ class AscendSFAMetadata:
     # For logging.
     num_input_tokens: int = 0  # Number of tokens including padding.
     pcp_slot_mapping: torch.Tensor | None = None
-    pcp_prolog_local_slots: torch.Tensor | None = None
-    pcp_prolog_global_slots: torch.Tensor | None = None
-    # All PCP ranks must join prefill KV gathers even when a rank has only padding.
-    pcp_has_global_prefill: bool = False
     # The dimension of the attention heads
     head_dim: int | None = None
     attn_mask: torch.Tensor = None
@@ -524,7 +517,6 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         if self.nope:
             self.nope_indexer = layer.impl.indexer
 
-        self.use_pcp = vllm_config.parallel_config.prefill_context_parallel_size > 1
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1
         if self.speculative_config:
@@ -593,28 +585,10 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         **kwargs,
     ) -> AscendSFAMetadata:
         # common_prefix_len / fast_build are unused; kept for API compatibility.
-        metadata = self._build_with_metadata_view(
+        return self._build_with_metadata_view(
             common_attn_metadata,
-            lambda: self._build(common_attn_metadata, draft_index=None, pcp_context=kwargs.get("pcp_context")),
+            lambda: self._build(common_attn_metadata, draft_index=None),
         )
-        if (
-            self.use_pcp
-            and kwargs.get("pcp_context") is not None
-            and (metadata.num_prefills or metadata.pcp_has_global_prefill)
-        ):
-            assert metadata.pcp_slot_mapping is not None
-            group = get_pcp_group()
-            num_tokens = metadata.num_input_tokens
-            rank_slots = metadata.pcp_slot_mapping[: group.world_size * num_tokens].view(group.world_size, num_tokens)
-            num_decode_tokens = metadata.num_decode_tokens
-            local_slots = rank_slots[group.rank_in_group].contiguous()
-            if num_decode_tokens and group.rank_in_group != 0:
-                # Replicated decode slots are masked outside rank 0, but each
-                # rank still writes its locally computed decode KV.
-                local_slots = torch.cat((rank_slots[0, :num_decode_tokens], local_slots[num_decode_tokens:]))
-            metadata.pcp_prolog_local_slots = local_slots
-            metadata.pcp_prolog_global_slots = rank_slots[:, num_decode_tokens:].reshape(-1)
-        return metadata
 
     def build_for_drafting(
         self,
@@ -646,11 +620,18 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         self,
         common_attn_metadata: AscendCommonAttentionMetadata,
         draft_index: int | None = None,
-        pcp_context: Any | None = None,
     ) -> AscendSFAMetadata:
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         num_input_tokens = common_attn_metadata.num_input_tokens
+        if (
+            self.speculative_config is not None
+            and self.speculative_config.method == "dspark"
+            and getattr(self.speculative_config, "enable_adaptive_verification", False)
+        ):
+            # TODO(lzt): Pass the adaptive verification token count explicitly
+            # instead of deriving its padded shape from positions. Need fix.
+            num_input_tokens = common_attn_metadata.positions.shape[0]
         block_table = common_attn_metadata.block_table_tensor[:num_reqs]
         pcp_slot_mapping = common_attn_metadata.slot_mapping
         slot_mapping = pcp_slot_mapping[:num_input_tokens]
@@ -697,7 +678,6 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             seq_lens_cpu=seq_lens_cpu,
             slot_mapping=slot_mapping,
             pcp_slot_mapping=pcp_slot_mapping,
-            pcp_has_global_prefill=bool(pcp_context is not None and pcp_context.global_batch.is_prefilling_np.any()),
             head_dim=self.model_config.get_head_size(),
             attn_mask=self.attn_mask_builder.get_attention_mask(common_attn_metadata.causal, self.model_config),
             attn_state=common_attn_metadata.attn_state,
@@ -711,17 +691,15 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             block_size=block_size,
             **parallel_metadata,
         )
-        (
-            metadata.num_decodes,
-            metadata.num_prefills,
-            metadata.num_decode_tokens,
-            _,
-        ) = split_decodes_and_prefills(
-            common_attn_metadata,
-            decode_threshold=self.decode_threshold,
-            treat_short_extends_as_decodes=not self.use_pcp,
-        )
         if self.nope:
+            query_lens = (
+                common_attn_metadata.query_start_loc_cpu[1 : num_reqs + 1]
+                - common_attn_metadata.query_start_loc_cpu[:num_reqs]
+            )
+            is_prefilling = query_lens > getattr(common_attn_metadata, "decode_token_per_req", 1)
+            metadata.num_prefills = int(is_prefilling.sum())
+            metadata.num_decodes = num_reqs - metadata.num_prefills
+            metadata.num_decode_tokens = int(query_lens[~is_prefilling].sum())
             if draft_index not in self.nope_states:
                 self.nope_states[draft_index] = SparseMLAMetadataState(
                     self.kv_cache_spec, self.vllm_config, self.device, self.nope_indexer, self.kernel_block_size
@@ -875,6 +853,8 @@ class AscendSFAImpl(MLAAttentionImpl):
         # The user-facing switches control these layouts independently. LI C8
         # applies only to layers that own an indexer cache.
         self.enable_sparse_sfa_c8 = ascend_config.enable_sparse_sfa_c8
+        if self.qk_rope_head_dim == 0 and self.enable_sparse_sfa_c8:
+            raise NotImplementedError("NoPE SFA currently requires an unquantized latent KV cache.")
         if self.enable_sparse_sfa_c8:
             self.c8_cache_dtype = kv_cache_dtype_str_to_dtype(
                 self.vllm_config.cache_config.cache_dtype, self.vllm_config.model_config
@@ -1237,7 +1217,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         slots: torch.Tensor,
         attn_metadata: M,
     ):
-        if self.qk_rope_head_dim == 0 and not self.enable_sparse_sfa_c8:
+        if self.qk_rope_head_dim == 0:
             assert self.kv_a_layernorm is not None
             values = self.kv_a_layernorm(kv_no_split.reshape(-1, self.kv_lora_rank))
             cache = kv_cache[0]
@@ -1353,18 +1333,12 @@ class AscendSFAImpl(MLAAttentionImpl):
         cos: torch.Tensor,
         sin: torch.Tensor,
         slot_mapping: torch.Tensor,
-        *,
-        attn_metadata: M | None = None,
     ) -> tuple[
         torch.Tensor,
         torch.Tensor,
         torch.Tensor,
         torch.Tensor | tuple[torch.Tensor, torch.Tensor] | None,
     ]:
-        assert slot_mapping.numel() == hidden_states.shape[0], (
-            "SFA Prolog V3 requires one cache index per input token, "
-            f"got token_x={hidden_states.shape[0]} and cache_index={slot_mapping.numel()}."
-        )
         assert self.q_a_layernorm is not None, "q_a_layernorm must be initialized for PROLOG_V3"
         assert self.kv_a_layernorm is not None, "kv_a_layernorm must be initialized for PROLOG_V3"
 
@@ -1569,13 +1543,9 @@ class AscendSFAImpl(MLAAttentionImpl):
         actual_seq_lengths_key,
         block_table=None,
     ):
-        if self.qk_rope_head_dim == 0 and not self.enable_sparse_sfa_c8:
-            return sparse_mla(ql_nope, kv_cache[0], topk_indices, attn_metadata, self.scale)
         if self.qk_rope_head_dim == 0:
-            # Present packed NoPE cache with the logical page size used by its metadata.
-            cache = kv_cache[0]
-            kv_cache = (cache.view(-1, attn_metadata.block_size, *cache.shape[2:]), *kv_cache[1:])
-        output = DeviceOperator.execute_sparse_flash_attention_process(
+            return sparse_mla(ql_nope, kv_cache[0], topk_indices, attn_metadata, self.scale)
+        return DeviceOperator.execute_sparse_flash_attention_process(
             self,
             ql_nope,
             q_pe,
@@ -1586,12 +1556,6 @@ class AscendSFAImpl(MLAAttentionImpl):
             actual_seq_lengths_key,
             block_table=block_table,
         )
-        if self.qk_rope_head_dim == 0:
-            # As in floating NoPE, graph-capacity rows may be unwritten by the kernel.
-            assert isinstance(output, torch.Tensor)
-            valid = torch.arange(ql_nope.shape[0], device=ql_nope.device) < actual_seq_lengths_query[-1]
-            output = output.masked_fill(~valid[:, None, None], 0)
-        return output
 
     def _record_query_gather_context(
         self,
@@ -1600,9 +1564,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         attn_metadata: M,
     ) -> None:
         return
-
-    def _get_indexer_attn_q_gather_handle(self, attn_metadata: M) -> torch.distributed.Work | None:
-        return None
 
     def _parallel_query_gather_dim(self) -> int:
         """Dimension restored by an outer DCP query gather."""
@@ -1644,8 +1605,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             packed_kv = torch.cat(
                 [
                     k_nope.view(-1, k_nope.shape[-1]),
-                    # Flatten leading dimensions even when the RoPE feature dimension is zero.
-                    k_pe.flatten(0, -2),
+                    k_pe.view(-1, k_pe.shape[-1]),
                     knope_scale.view(-1, knope_scale.shape[-1]),
                 ],
                 dim=-1,
@@ -1653,12 +1613,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             packed_head_dim = self.sfa_qsfa_packed_kv_head_dim
             assert packed_kv.shape[-1] == packed_head_dim
             assert kv_cache is not None
-            packed_kv = packed_kv.view(-1, packed_head_dim)
-            DeviceOperator.scatter_cache(
-                kv_cache[0].view(-1, packed_head_dim),
-                slot_mapping_sfa[: packed_kv.shape[0]].view(-1, 1),
-                packed_kv,
-            )
+            DeviceOperator.scatter_cache(packed_kv, kv_cache[0], slot_mapping_sfa, attn_metadata.num_actual_tokens)
 
         return k_pe, k_nope
 
@@ -1859,6 +1814,11 @@ class AscendSFAImpl(MLAAttentionImpl):
             gate_hidden_states = gate_hidden_states[:num_input_tokens]
 
         if fused_type != PreprocessType.NATIVE:
+            if fused_type == PreprocessType.PROLOG_V3:
+                assert slot_mapping_sfa.numel() == hidden_states.shape[0], (
+                    "SFA Prolog V3 requires one cache index per input token, "
+                    f"got token_x={hidden_states.shape[0]} and cache_index={slot_mapping_sfa.numel()}."
+                )
             # Keep the raw hidden states for the indexer's k path: the fused
             # preprocess below returns new tensors and does not modify this
             # one in place.
@@ -1879,7 +1839,6 @@ class AscendSFAImpl(MLAAttentionImpl):
                     # the per-step conversion so all layers of a step share
                     # one Cast kernel (the .to() inside is a no-op on int64).
                     slot_mapping=_int64_kv_slots(slot_mapping_sfa, attn_metadata),
-                    attn_metadata=attn_metadata,
                 )
             else:
                 hidden_states, ql_nope, q_pe, q_c = self._sfa_preprocess_mlapo(
@@ -1972,7 +1931,6 @@ class AscendSFAImpl(MLAAttentionImpl):
                 k_hidden_states,
                 indexer_attn_metadata,
                 compute_topk=not self.skip_topk,
-                attn_q_gather_handle=self._get_indexer_attn_q_gather_handle(attn_metadata),
             )
             if self.skip_topk:
                 topk_indices = self._get_indexcache_topk_indices(parallel_context.topk_num_tokens)
@@ -2023,8 +1981,8 @@ class AscendSFAImpl(MLAAttentionImpl):
 def custom_kv_rmsnorm_rope(
     kv: torch.Tensor,
     gamma: torch.Tensor,
-    cos: torch.Tensor | None,
-    sin: torch.Tensor | None,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
     kv_lora_rank: int,
     qk_rope_head_dim: int,
     *,
@@ -2034,7 +1992,7 @@ def custom_kv_rmsnorm_rope(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     rms_in, rope_in = kv.split([kv_lora_rank, qk_rope_head_dim], dim=-1)
     k_nope, _ = torch_npu.npu_rms_norm(rms_in, gamma, epsilon=epsilon)
-    k_rope = torch_npu.npu_interleave_rope(rope_in, cos, sin) if qk_rope_head_dim else rope_in
+    k_rope = torch_npu.npu_interleave_rope(rope_in, cos, sin)
 
     prefix_shape = k_nope.shape[:-1]
     # npu_rms_norm returns a contiguous tensor, so the explicit
@@ -2048,7 +2006,7 @@ def custom_kv_rmsnorm_rope(
     if dst_type == torch.int8:
         # Return byte views so the caller can concatenate all three components.
         return (
-            k_rope.contiguous().view(torch.int8) if qk_rope_head_dim else k_nope.new_empty((*prefix_shape, 0)),
+            k_rope.contiguous().view(torch.int8),
             k_nope.view(*prefix_shape, kv_lora_rank),
             knope_scale.to(torch.float32).view(*prefix_shape, -1).contiguous().view(torch.int8),
         )
