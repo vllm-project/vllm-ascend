@@ -289,8 +289,7 @@ def test_compute_wy_correlated_keys_avoid_finite_cancellation_error(decay):
     first = None
     for _ in range(3):
         actual = tuple(
-            tensor.cpu()
-            for tensor in torch.ops._C_ascend.chunk_gated_delta_rule_compute_wy(*inputs, CHUNK_SIZE)
+            tensor.cpu() for tensor in torch.ops._C_ascend.chunk_gated_delta_rule_compute_wy(*inputs, CHUNK_SIZE)
         )
         for index in (2, 3):
             assert torch.isfinite(actual[index]).all(), f"nonfinite WY output {index}, decay={decay}"

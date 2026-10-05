@@ -200,8 +200,7 @@ class TestChunkFwdOVllm310:
             actual = npu_chunk_fwd_o(q, k, v, h, g, 1.0 / dim).cpu()
             bad = actual != expected
             assert not bad.any(), (
-                f"repeat={repeat}, wrong_elements={bad.sum().item()}, "
-                f"first_bad={bad.nonzero()[:8].tolist()}"
+                f"repeat={repeat}, wrong_elements={bad.sum().item()}, first_bad={bad.nonzero()[:8].tolist()}"
             )
         assert torch.equal(v.cpu(), v_cpu), "FwdO modified its value input"
 
@@ -229,7 +228,7 @@ class TestChunkFwdOVllm310:
         expected[..., :CHUNK_SIZE] = gate
         # Validate that this fixture rejects the specific addressing mutations.
         for mutant in (gate.flip(1), gate.flip(2), torch.ones_like(gate).tril()):
-            assert ((mutant - gate).abs() > .002 + .005 * gate.abs()).any()
+            assert ((mutant - gate).abs() > 0.002 + 0.005 * gate.abs()).any()
         g = g_cpu.reshape(1, heads, tokens).npu()
         before = g.cpu().clone()
         expected = expected.reshape(1, heads, tokens, dim)
@@ -237,7 +236,7 @@ class TestChunkFwdOVllm310:
         for repeat in range(3):
             actual = npu_chunk_fwd_o(q, k, v, h, g, 1.0 / dim).cpu()
             error = (actual.double() - expected).abs()
-            bad = ~torch.isfinite(actual) | (error > .002 + .005 * expected.abs())
+            bad = ~torch.isfinite(actual) | (error > 0.002 + 0.005 * expected.abs())
             assert not bad.any(), f"repeat={repeat}, wrong={bad.sum().item()}, max_abs={error.max().item()}"
             if first is None:
                 first = actual.clone()
@@ -267,16 +266,13 @@ class TestChunkFwdOVllm310:
                 v[0, :, token_slice, :n] = torch.eye(n)
                 # Distinct heads/states also expose incorrect h-layout contracts.
                 h[0, :, chunk_index, 0, :] = (
-                    (torch.arange(heads_v)[:, None] + chunk_index + 1)
-                    * (torch.arange(dim)[None, :] + 1) / 1024
+                    (torch.arange(heads_v)[:, None] + chunk_index + 1) * (torch.arange(dim)[None, :] + 1) / 1024
                 )
                 slopes = (torch.arange(heads_v)[:, None] + 1) / 16
                 gate_log = (-slopes * torch.arange(n)).to(g_dtype)
                 g[0, :, token_slice] = gate_log
                 gd = gate_log.double()
-                expected[0, :, token_slice, :n] = (
-                    gd.unsqueeze(-1) - gd.unsqueeze(-2)
-                ).clamp(max=0).exp().tril()
+                expected[0, :, token_slice, :n] = (gd.unsqueeze(-1) - gd.unsqueeze(-2)).clamp(max=0).exp().tril()
                 expected[0, :, token_slice] += (
                     gd.exp().unsqueeze(-1) * h[0, :, chunk_index, 0].double().unsqueeze(1) / dim
                 )
@@ -291,12 +287,19 @@ class TestChunkFwdOVllm310:
         first = None
         for repeat in range(3):
             actual = torch.ops._C_ascend.chunk_fwd_o_vllm(
-                qn, qn, vn, hn, 1.0 / dim, g=gn, cu_seqlens=cu,
-                chunk_indices=indices, chunk_size=CHUNK_SIZE,
+                qn,
+                qn,
+                vn,
+                hn,
+                1.0 / dim,
+                g=gn,
+                cu_seqlens=cu,
+                chunk_indices=indices,
+                chunk_size=CHUNK_SIZE,
                 transpose_state_layout=False,
             ).cpu()
             error = (actual.double() - expected).abs()
-            bad = ~torch.isfinite(actual) | (error > .002 + .005 * expected.abs())
+            bad = ~torch.isfinite(actual) | (error > 0.002 + 0.005 * expected.abs())
             assert not bad.any(), (
                 f"tail={tail}, repeat={repeat}, wrong={bad.sum().item()}, "
                 f"first_bad={bad.nonzero()[:5].tolist()}, max_abs={error.max().item()}"
