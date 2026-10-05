@@ -15,12 +15,14 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import importlib.util
 import json
 import os
 import sys
 import tempfile
 import unittest
 from contextlib import ExitStack
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
@@ -65,6 +67,15 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.yuanrong_b
 def _format_log_call(call):
     args = call.args
     return args[0] % args[1:]
+
+
+def _load_global_te_type():
+    source = Path(mooncake_module.__file__).resolve().parents[3] / "utils" / "mooncake_transfer_engine.py"
+    spec = importlib.util.spec_from_file_location("_ascend_store_test_global_te", source)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.GlobalTE
 
 
 # =========================================================================
@@ -1528,6 +1539,104 @@ class TestMemcacheBackendMethods(unittest.TestCase):
         error_log = _format_log_call(mock_logger.error.call_args)
         self.assertIn("RuntimeError", error_log)
         self.assertIn("backend fail", error_log)
+
+
+class TestGlobalTransferEngineRegistration(unittest.TestCase):
+    def _make_global_te(self):
+        manager = _load_global_te_type()()
+        manager.transfer_engine = MagicMock()
+        manager.transfer_engine.register_memory.return_value = 0
+        manager.transfer_engine.unregister_memory.return_value = 0
+        return manager
+
+    def test_shared_region_is_natively_registered_once_and_reference_counted(self):
+        manager = self._make_global_te()
+
+        first = manager.acquire_registration([100], [10])
+        second = manager.acquire_registration([100], [10])
+        first.close()
+        manager.transfer_engine.unregister_memory.assert_not_called()
+        second.close()
+
+        manager.transfer_engine.register_memory.assert_called_once_with(100, 10)
+        manager.transfer_engine.unregister_memory.assert_called_once_with(100)
+        self.assertFalse(manager.is_register_buffer)
+
+    def test_classic_registration_retains_one_process_lifetime_lease(self):
+        manager = self._make_global_te()
+
+        self.assertIsNone(manager.register_buffer([100], [10]))
+        self.assertIsNone(manager.register_buffer([200], [20]))
+
+        manager.transfer_engine.register_memory.assert_called_once_with(100, 10)
+        manager.transfer_engine.unregister_memory.assert_not_called()
+        self.assertTrue(manager.is_register_buffer)
+
+    def test_classic_registration_protects_region_after_v1_lease_closes(self):
+        manager = self._make_global_te()
+
+        v1_registration = manager.acquire_registration([100], [10])
+        manager.register_buffer([100], [10])
+        v1_registration.close()
+
+        manager.transfer_engine.register_memory.assert_called_once_with(100, 10)
+        manager.transfer_engine.unregister_memory.assert_not_called()
+        self.assertTrue(manager.is_register_buffer)
+
+    def test_failed_initialization_does_not_publish_global_engine(self):
+        manager = _load_global_te_type()()
+        failed_engine = MagicMock()
+        failed_engine.initialize.return_value = -7
+        initialized_engine = MagicMock()
+        initialized_engine.initialize.return_value = 0
+        engine_factory = MagicMock(side_effect=(failed_engine, initialized_engine))
+
+        with patch.object(sys.modules["mooncake.engine"], "TransferEngine", engine_factory, create=True):
+            with self.assertRaisesRegex(RuntimeError, "initialization failed"):
+                manager.get_transfer_engine("host", None)
+            self.assertIsNone(manager.transfer_engine)
+            self.assertIs(manager.get_transfer_engine("host", None), initialized_engine)
+
+        self.assertEqual(engine_factory.call_count, 2)
+        failed_engine.initialize.assert_called_once_with("host", "P2PHANDSHAKE", "ascend", "")
+        initialized_engine.initialize.assert_called_once_with("host", "P2PHANDSHAKE", "ascend", "")
+
+    def test_partial_registration_failure_rolls_back_owned_prefix(self):
+        manager = self._make_global_te()
+        manager.transfer_engine.register_memory.side_effect = [0, -7]
+
+        with self.assertRaisesRegex(RuntimeError, "registration failed"):
+            manager.acquire_registration([100, 200], [10, 20])
+
+        manager.transfer_engine.unregister_memory.assert_called_once_with(100)
+        self.assertFalse(manager.is_register_buffer)
+
+    def test_partial_rollback_failure_returns_retryable_registration(self):
+        manager = self._make_global_te()
+        manager.transfer_engine.register_memory.side_effect = [0, -7]
+        manager.transfer_engine.unregister_memory.side_effect = [-9, 0]
+
+        with self.assertRaisesRegex(RuntimeError, "rollback is incomplete") as context:
+            manager.acquire_registration([100, 200], [10, 20])
+
+        self.assertEqual(
+            tuple((region.address, region.size) for region in context.exception.registration.regions),
+            ((100, 10),),
+        )
+        context.exception.registration.close()
+        self.assertFalse(manager.is_register_buffer)
+
+    def test_classic_partial_rollback_failure_retains_process_owner(self):
+        manager = self._make_global_te()
+        manager.transfer_engine.register_memory.side_effect = [0, -7]
+        manager.transfer_engine.unregister_memory.return_value = -9
+
+        with self.assertRaisesRegex(RuntimeError, "rollback is incomplete"):
+            manager.register_buffer([100, 200], [10, 20])
+        manager.register_buffer([300], [30])
+
+        self.assertTrue(manager.is_register_buffer)
+        self.assertEqual(manager.transfer_engine.register_memory.call_count, 2)
 
 
 # =========================================================================

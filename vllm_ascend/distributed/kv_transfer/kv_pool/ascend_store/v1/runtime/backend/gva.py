@@ -2,62 +2,65 @@
 
 from __future__ import annotations
 
-from numbers import Integral
-from typing import TYPE_CHECKING, cast
+from collections.abc import Mapping
 
 import numpy as np
+from vllm.logger import logger
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
-
-from ...backend import BackendSpec
-from ..batch import KVGroupBatch, KVTransferBatch
+from ...backend import BackendSpec, GVABackend, GVARegion
+from ...projection import GVALayerwiseProjection
+from ..batch import KVGroupBatch, KVTransferBatch, LayerTransferPlan
 from ..evidence import LayerStoreResult
 from ..evidence import TransferEvidence as RuntimeTransferEvidence
-from .arguments import materialize_rule_gva, materialize_store_layer_gva
-from .io import BackendIO, _batch_sources, _is_integer_result, _load_completions, _store_completions
+from .arguments import (
+    materialize_load_layer_gva,
+    materialize_store_layer_gva,
+    prepare_layer_load,
+    prepare_layer_store,
+)
+from .io import (
+    BackendIO,
+    _batch_sources,
+    _failed_load_completions,
+    _is_integer_result,
+    _load_completions,
+    _store_completions,
+)
 
-if TYPE_CHECKING:
-    from ....backend.memcache_backend import MemcacheBackend
-
-READABLE_GVA_QUERY = 1
 GVA_SESSION_FAILURE = -1
 
 
 class GVABackendIO(BackendIO):
     """Keep leased GVA addresses inside the Backend boundary."""
 
-    def __init__(self, backend: Backend, backend_spec: BackendSpec) -> None:
+    def __init__(self, backend: GVABackend, backend_spec: BackendSpec) -> None:
         super().__init__(backend, backend_spec)
-        memcache_backend = cast("MemcacheBackend", backend)
-        memcache_backend.ensure_initialized()
-        store = memcache_backend.store
-        if store is None:
-            raise RuntimeError("Memcache store is unavailable for GVA")
-        self._store = store
+        self._gva_backend = backend
         self._load_sessions: dict[str, tuple[int, int] | None] = {}
         self._store_sessions: dict[str, tuple[int, int]] = {}
-        self._rule_load_bases: dict[KVGroupBatch, np.ndarray] = {}
-        self._rule_store_bases: dict[KVGroupBatch, np.ndarray] = {}
-        self._load_direction = backend_spec.backend_module.MmcDirect.COPY_G2L.value
-        self._store_direction = backend_spec.backend_module.MmcDirect.COPY_L2G.value
+        self._projection: GVALayerwiseProjection | None = None
+        self._load_plan: LayerTransferPlan | None = None
+        self._store_plan: LayerTransferPlan | None = None
         self.validate_support()
 
+    def bind_projection(self, projection: GVALayerwiseProjection) -> None:
+        if self._projection is not None:
+            raise RuntimeError("GVA projection is already bound")
+        self._projection = projection
+
     def validate_support(self) -> None:
-        required = ("batch_get_key_info", "batch_add_lease", "batch_remove_lease", "batch_alloc", "batch_copy")
-        for method in (*required, "batch_write_finish"):
-            if not callable(getattr(self._store, method, None)):
-                raise RuntimeError(f"Memcache GVA requires native {method}; upgrade the Backend library")
+        self._gva_backend.validate_gva_support()
 
     def exists(self, keys: list[str]) -> tuple[bool, ...]:
         return tuple(region is not None for region in self._query_regions(keys))
 
     def start_load_sessions(self, keys: list[str], object_sizes: list[int]) -> tuple[int, ...]:
-        self._rule_load_bases.clear()
+        self._load_plan = None
         if not keys:
             return ()
         if any(key in self._load_sessions for key in keys):
             raise RuntimeError("Previous GVA Load sessions have not ended")
-        result_codes = list(self._require_result_codes("batch_add_lease", keys, self._store.batch_add_lease(keys)))
+        result_codes = list(self._gva_backend.add_gva_leases(keys))
         leased_keys = [key for key, code in zip(keys, result_codes, strict=True) if code == 0]
         self._load_sessions.update((key, None) for key in leased_keys)
         # Resolve after acquiring the lease: an earlier Lookup address may already have been evicted.
@@ -67,33 +70,30 @@ class GVABackendIO(BackendIO):
             if result_codes[index] != 0:
                 continue
             region = regions[key]
-            if region is None or region[1] != object_size:
+            if region is None or region.size != object_size:
                 result_codes[index] = GVA_SESSION_FAILURE
                 rejected_keys.append(key)
             else:
-                self._load_sessions[key] = region
+                self._load_sessions[key] = (region.address, region.size)
         self.finish_load_sessions(rejected_keys)
         return tuple(result_codes)
 
     def finish_load_sessions(self, keys: list[str]) -> None:
-        self._rule_load_bases.clear()
         leased_keys = [key for key in keys if key in self._load_sessions]
         if not leased_keys:
             return
-        result_code = self._store.batch_remove_lease(leased_keys)
-        if isinstance(result_code, bool) or not isinstance(result_code, Integral) or result_code != 0:
-            raise RuntimeError(f"batch_remove_lease failed with result {result_code!r}")
+        self._gva_backend.remove_gva_leases(leased_keys)
         for key in leased_keys:
             del self._load_sessions[key]
+        self._load_plan = None
 
     def start_store_sessions(self, keys: list[str], object_sizes: list[int]) -> tuple[int, ...]:
-        self._rule_store_bases.clear()
-        self._clear_prepared_store_layers()
+        self._store_plan = None
         if not keys:
             return ()
         if any(key in self._store_sessions for key in keys):
             raise RuntimeError("Previous GVA Store sessions have not ended")
-        gvas = self._require_result_codes("batch_alloc", keys, self._store.batch_alloc(keys, object_sizes))
+        gvas = self._gva_backend.allocate_gva(keys, object_sizes)
         result_codes = []
         for key, gva, object_size in zip(keys, gvas, object_sizes, strict=True):
             result_codes.append(0 if gva > 0 else GVA_SESSION_FAILURE)
@@ -102,43 +102,63 @@ class GVABackendIO(BackendIO):
         return tuple(result_codes)
 
     def prepare_store_layers(self, batch: KVTransferBatch) -> dict[int, list[str]]:
-        return self._prepare_store_layers(batch, self._resolve_store_bases)
+        self._store_plan = prepare_layer_store(batch, self._resolve_store_bases)
+        return self._store_plan.keys_by_layer
+
+    def prepare_load_layers(self, batch: KVTransferBatch) -> dict[int, list[str]]:
+        self._load_plan = prepare_layer_load(batch, self._resolve_load_bases)
+        return self._load_plan.keys_by_layer
+
+    def load_layer(self, layer_id: int):
+        plan = self._prepared_load_plan()
+        if not plan.groups:
+            return _load_completions(plan.batch, ())
+        try:
+            arguments = materialize_load_layer_gva(self._bound_projection, plan, layer_id)
+            result_code = self._gva_backend.copy_from_gva(
+                arguments.remote_addresses.tolist(),
+                arguments.local_addresses.tolist(),
+                arguments.sizes.tolist(),
+            )
+            if not _is_integer_result(result_code):
+                raise RuntimeError("GVA batch_copy returned a non-integer result")
+        except Exception as error:
+            logger.error(
+                "GVA Load failed for requests %s. type=%s, error=%s",
+                plan.batch.request_ids,
+                type(error).__name__,
+                error,
+            )
+            return _failed_load_completions(plan.batch, layer_id)
+        evidence = tuple(RuntimeTransferEvidence(source, int(result_code)) for source in arguments.sources)
+        return _load_completions(plan.batch, evidence)
 
     def load_batch(self, batch: KVTransferBatch, layer_id: int | None = None):
+        """Compatibility entry for direct adapter tests; Timeline uses the plan."""
+
         if layer_id is None:
             raise ValueError("GVA Load requires a physical layer")
-        if batch.empty:
-            return _load_completions(batch, ())
-        arguments = materialize_rule_gva(
-            self._bound_rules, batch, self._load_sessions, self._rule_load_bases, layer_id=layer_id, store=False
-        )
-        result_code = self._store.batch_copy(
-            arguments.remote_addresses.tolist(),
-            arguments.local_addresses.tolist(),
-            arguments.sizes.tolist(),
-            self._load_direction,
-        )
-        if not _is_integer_result(result_code):
-            raise RuntimeError("GVA batch_copy returned a non-integer result")
-        evidence = tuple(RuntimeTransferEvidence(source, int(result_code)) for source in arguments.sources)
-        return _load_completions(batch, evidence)
+        self.prepare_load_layers(batch)
+        return self.load_layer(layer_id)
 
     def store_batch(self, batch: KVTransferBatch, layer_id: int | None = None):
         if layer_id is None:
             raise ValueError("GVA Store requires a physical layer")
         if batch.empty:
             return _store_completions(batch, ())
+        self.prepare_store_layers(batch)
         source_handed_off = False
         try:
-            arguments = materialize_rule_gva(
-                self._bound_rules, batch, self._store_sessions, self._rule_store_bases, layer_id=layer_id, store=True
+            remote_addresses, local_addresses, sizes = materialize_store_layer_gva(
+                self._bound_projection,
+                self._prepared_store_plan(),
+                layer_id,
             )
             source_handed_off = True
-            result_code = self._store.batch_copy(
-                arguments.remote_addresses.tolist(),
-                arguments.local_addresses.tolist(),
-                arguments.sizes.tolist(),
-                self._store_direction,
+            result_code = self._gva_backend.copy_to_gva(
+                remote_addresses.tolist(),
+                local_addresses.tolist(),
+                sizes.tolist(),
             )
             if not _is_integer_result(result_code):
                 raise RuntimeError("GVA batch_copy returned a non-integer result")
@@ -147,7 +167,9 @@ class GVABackendIO(BackendIO):
             evidence = tuple(RuntimeTransferEvidence(source, None, not source_handed_off) for source in sources)
             return _store_completions(batch, evidence, error, force_failed=True)
         succeeded = result_code == 0
-        evidence = tuple(RuntimeTransferEvidence(source, int(result_code), succeeded) for source in arguments.sources)
+        evidence = tuple(
+            RuntimeTransferEvidence(source, int(result_code), succeeded) for source in _batch_sources(batch, layer_id)
+        )
         return _store_completions(batch, evidence)
 
     def store_layer(self, layer_id: int) -> LayerStoreResult:
@@ -156,13 +178,14 @@ class GVABackendIO(BackendIO):
         source_handed_off = False
         plan = self._prepared_store_plan()
         try:
-            remote_addresses, local_addresses, sizes = materialize_store_layer_gva(self._bound_rules, plan, layer_id)
+            remote_addresses, local_addresses, sizes = materialize_store_layer_gva(
+                self._bound_projection, plan, layer_id
+            )
             source_handed_off = True
-            result_code = self._store.batch_copy(
+            result_code = self._gva_backend.copy_to_gva(
                 remote_addresses.tolist(),
                 local_addresses.tolist(),
                 sizes.tolist(),
-                self._store_direction,
             )
             if not _is_integer_result(result_code):
                 raise RuntimeError("GVA batch_copy returned a non-integer result")
@@ -176,30 +199,35 @@ class GVABackendIO(BackendIO):
             return ()
         if any(key not in self._store_sessions for key in keys):
             raise RuntimeError("GVA commit has no owning Store session")
-        native_result = self._store.batch_write_finish(keys, [0] * len(keys))
-        result_codes = self._require_result_codes("batch_write_finish", keys, native_result)
+        result_codes = self._gva_backend.publish_gva(keys)
         for key, code in zip(keys, result_codes, strict=True):
             if code == 0:
                 del self._store_sessions[key]
-        self._rule_store_bases.clear()
-        self._clear_prepared_store_layers()
+        self._store_plan = None
         return result_codes
 
     def revoke_store_sessions(self, keys: list[str]) -> tuple[int, ...]:
         # Native failed-write notification deletes by key, even after a duplicate allocation.
         # Do not delete another writer's object; leave uncertain write leases to Backend expiry.
         result = tuple(GVA_SESSION_FAILURE if self._store_sessions.pop(key, None) is not None else 0 for key in keys)
-        self._rule_store_bases.clear()
-        self._clear_prepared_store_layers()
+        self._store_plan = None
         return result
 
     def _resolve_store_bases(self, group: KVGroupBatch, keys: tuple[str, ...]) -> np.ndarray:
-        object_bases = self._rule_store_bases.get(group)
-        if object_bases is not None:
-            return object_bases
+        return self._resolve_bases(group, keys, self._store_sessions)
+
+    def _resolve_load_bases(self, group: KVGroupBatch, keys: tuple[str, ...]) -> np.ndarray:
+        return self._resolve_bases(group, keys, self._load_sessions)
+
+    @staticmethod
+    def _resolve_bases(
+        group: KVGroupBatch,
+        keys: tuple[str, ...],
+        sessions: Mapping[str, tuple[int, int] | None],
+    ) -> np.ndarray:
         bases = []
         for key in keys:
-            session = self._store_sessions.get(key)
+            session = sessions.get(key)
             if session is None:
                 raise RuntimeError(f"GVA session for {key!r} is unavailable")
             base, object_size = session
@@ -208,25 +236,23 @@ class GVABackendIO(BackendIO):
             bases.append(base)
         object_bases = np.asarray(bases, dtype=np.uint64)
         object_bases.flags.writeable = False
-        self._rule_store_bases[group] = object_bases
         return object_bases
 
-    def _query_regions(self, keys: list[str], flag: int = READABLE_GVA_QUERY) -> tuple[tuple[int, int] | None, ...]:
-        if not keys:
-            return ()
-        infos = tuple(self._store.batch_get_key_info(keys, flag))
-        if len(infos) != len(keys):
-            raise RuntimeError(f"batch_get_key_info returned {len(infos)} results for {len(keys)} keys")
-        regions: list[tuple[int, int] | None] = []
-        for info in infos:
-            size = info.size()
-            gvas = tuple(info.gva_list())
-            if not _is_integer_result(size):
-                raise RuntimeError("batch_get_key_info returned a non-integer object size")
-            if size <= 0 or not gvas:
-                regions.append(None)
-                continue
-            if len(gvas) != 1 or not _is_integer_result(gvas[0]):
-                raise RuntimeError("GVA sessions require exactly one integer address per object")
-            regions.append((int(gvas[0]), int(size)) if gvas[0] > 0 else None)
-        return tuple(regions)
+    @property
+    def _bound_projection(self) -> GVALayerwiseProjection:
+        if self._projection is None:
+            raise RuntimeError("GVA projection is unavailable before cache registration")
+        return self._projection
+
+    def _prepared_load_plan(self) -> LayerTransferPlan:
+        if self._load_plan is None:
+            raise RuntimeError("Layerwise Load plan was not prepared")
+        return self._load_plan
+
+    def _prepared_store_plan(self) -> LayerTransferPlan:
+        if self._store_plan is None:
+            raise RuntimeError("Layerwise Store plan was not prepared")
+        return self._store_plan
+
+    def _query_regions(self, keys: list[str]) -> tuple[GVARegion | None, ...]:
+        return self._gva_backend.query_gva_regions(keys)

@@ -12,29 +12,11 @@ import torch
 from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1 import vllm_adapter
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.connector import (
-    AscendStoreV1Connector,
-)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.coordinates import TokenRange
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.planning.availability import (
-    ExternalPrefixPlan,
-    LookupQuery,
-    RemoteAvailability,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.planning.planner import (
-    TransferPlanner,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.planning.progress import (
-    AllocationLoadPublication,
-    RequestSnapshot,
-    ScheduledLoadPublication,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.planning.spec import (
-    TransferPlanningSpec,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.planning.step import (
-    ScheduledRequestKind,
-    TransferPlanningStep,
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.projection.reachability import (
+    HybridReachability,
+    ReachablePrefix,
+    UnitaryReachability,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.lookup import (
     LookupCodec,
@@ -51,14 +33,27 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.transf
     StateCheckpointSource,
     StoreCommandBatch,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.rules.reachability import (
-    HybridReachability,
-    ReachablePrefix,
-    UnitaryReachability,
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.runtime.backend import (
+    arguments as arguments_module,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.runtime.batch import (
     KVGroupBatch,
     KVTransferBatch,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.timeline.asynchronous_load import (
+    AsynchronousLoadTimeline,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.timeline.asynchronous_store import (
+    AsynchronousStoreTimeline,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.timeline.layerwise_load import (
+    LayerwiseLoadTimeline,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.timeline.layerwise_store import (
+    LayerwiseStoreTimeline,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.timeline.synchronous_load import (
+    SynchronousLoadTimeline,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.topology import (
     KVPoolGroupTopology,
@@ -69,22 +64,11 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.topology import
 from .v1.helpers import (
     FakeBackend,
     FakeEvent,
-    make_runtime,
+    build_admitted_store_batch,
     make_topology,
+    make_worker,
+    worker_backend_io,
 )
-
-
-class FakeAvailabilityProbe:
-    def __init__(self, availability: RemoteAvailability | None) -> None:
-        self.availability = availability
-        self.queries: list[LookupQuery] = []
-
-    def query(self, query: LookupQuery) -> RemoteAvailability | None:
-        self.queries.append(query)
-        return self.availability
-
-    def close(self) -> None:
-        pass
 
 
 class FakeLoadStartGate:
@@ -103,37 +87,20 @@ class FakeLoadStartGate:
         return self._opened.wait(timeout)
 
 
-def begin_step(runtime, *, load=None, store=None) -> None:
-    runtime.begin_step(KVTransferStep(load or LoadCommandBatch(), store or StoreCommandBatch()))
+def begin_step(worker, *, load=None, store=None) -> None:
+    worker.begin_step(KVTransferStep(load or LoadCommandBatch(), store or StoreCommandBatch()))
 
 
-def make_planner(availability, *, async_load=False, save_decode=False, store_enabled=True):
-    publication = AllocationLoadPublication() if async_load else ScheduledLoadPublication()
-    return TransferPlanner(
-        TransferPlanningSpec(4, 4, (0,), True),
-        FakeAvailabilityProbe(availability),
-        publication,
-        store_enabled=store_enabled,
-        save_decode_cache=save_decode,
+def test_v1_rejects_yuanrong_during_configuration(monkeypatch) -> None:
+    config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(kv_connector_extra_config={"backend": "yuanrong"}),
+        model_config=SimpleNamespace(max_model_len=4096),
     )
+    kv_cache_config = SimpleNamespace(prefix_cache_retention_interval=None)
+    monkeypatch.setattr(vllm_adapter, "_resolve_kv_pool_topology", lambda *_: object())
 
-
-def build_planner_step(planner, scheduler_output, requests=None, *, resumed_request_ids=()):
-    requests = requests or {}
-    for request in requests.values():
-        if not hasattr(request, "prompt_token_ids"):
-            request.prompt_token_ids = [0] * getattr(request, "num_prompt_tokens", 0)
-        if not hasattr(request, "num_prompt_tokens"):
-            request.num_prompt_tokens = len(request.prompt_token_ids)
-    cached = scheduler_output.scheduled_cached_reqs
-    cached.resumed_req_ids = set(resumed_request_ids)
-    scheduler_output.kv_connector_block_state = getattr(scheduler_output, "kv_connector_block_state", None)
-    scheduler_output.num_scheduled_tokens = getattr(scheduler_output, "num_scheduled_tokens", {})
-    scheduler_output.preempted_req_ids = getattr(scheduler_output, "preempted_req_ids", set())
-    planning_step = vllm_adapter.adapt_scheduler_output(
-        scheduler_output, requests, store_enabled=planner._store_enabled
-    )
-    return planner.build_step(planning_step)
+    with pytest.raises(ValueError, match="temporarily does not support the Yuanrong Backend"):
+        vllm_adapter.resolve_kv_pool_route_spec(config, kv_cache_config)
 
 
 def test_small_value_and_codec_contracts_share_one_domain_smoke_test() -> None:
@@ -201,10 +168,10 @@ def test_reachability_matrix_preserves_contiguous_and_partial_tail_semantics() -
     )
 
 
-def test_bulk_runtime_store_success_and_failure_preserve_source_safety(monkeypatch) -> None:
+def test_bulk_worker_store_success_and_failure_preserve_source_safety(monkeypatch) -> None:
     command = RangeStoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4, 7)
 
-    success, resources, backend = make_runtime(source_ready_event_factory=FakeEvent)
+    success, resources, backend = make_worker(source_ready_event_factory=FakeEvent)
     begin_step(success, store=StoreCommandBatch((command,)))
     success.finish_step()
     completions = success.fence_previous_store()
@@ -221,14 +188,13 @@ def test_bulk_runtime_store_success_and_failure_preserve_source_safety(monkeypat
         full_hit_events.append(event)
         return event
 
-    full_hit, full_hit_resources, full_hit_backend = make_runtime(
+    full_hit, full_hit_resources, full_hit_backend = make_worker(
         requires_exists_before_put=True, source_ready_event_factory=make_full_hit_event
     )
 
     def reject_full_batch(*_args, **_kwargs):
         raise AssertionError("Full-hit Store must not materialize a transfer batch")
 
-    monkeypatch.setattr(full_hit, "_assemble_batch", reject_full_batch)
     monkeypatch.setattr(full_hit, "_materialize_store_candidates", reject_full_batch)
     begin_step(full_hit, store=StoreCommandBatch((command,)))
     full_hit.finish_step()
@@ -242,15 +208,15 @@ def test_bulk_runtime_store_success_and_failure_preserve_source_safety(monkeypat
     assert full_hit_resources.closed
 
     duplicate_backend = FakeBackend()
-    duplicate_runtime, duplicate_resources, _ = make_runtime(duplicate_backend, source_ready_event_factory=FakeEvent)
+    duplicate_worker, duplicate_resources, _ = make_worker(duplicate_backend, source_ready_event_factory=FakeEvent)
     duplicate_command = replace(command, request_id="duplicate", block_ids_by_group=((3,),), store_job_id=8)
-    begin_step(duplicate_runtime, store=StoreCommandBatch((command, duplicate_command)))
-    duplicate_runtime.finish_step()
-    duplicate_runtime.fence_previous_store()
+    begin_step(duplicate_worker, store=StoreCommandBatch((command, duplicate_command)))
+    duplicate_worker.finish_step()
+    duplicate_worker.fence_previous_store()
     put_call = next(call for call in duplicate_backend.calls if call[0] == "put")
     assert len(put_call[1]) == 1
-    assert duplicate_runtime.take_released_store_job_ids() == {7, 8}
-    duplicate_runtime.close()
+    assert duplicate_worker.take_released_store_job_ids() == {7, 8}
+    duplicate_worker.close()
     assert duplicate_resources.closed
 
     admission_backend = FakeBackend()
@@ -259,7 +225,7 @@ def test_bulk_runtime_store_success_and_failure_preserve_source_safety(monkeypat
         raise RuntimeError("exists failed")
 
     monkeypatch.setattr(admission_backend, "exists", fail_admission)
-    admission_failure, admission_resources, _ = make_runtime(
+    admission_failure, admission_resources, _ = make_worker(
         admission_backend, requires_exists_before_put=True, source_ready_event_factory=FakeEvent
     )
     begin_step(admission_failure, store=StoreCommandBatch((command,)))
@@ -274,7 +240,7 @@ def test_bulk_runtime_store_success_and_failure_preserve_source_safety(monkeypat
     for native_result in ([-1], RuntimeError("put failed")):
         failed_backend = FakeBackend()
         failed_backend.put_result = native_result
-        failed, failed_resources, _ = make_runtime(failed_backend, source_ready_event_factory=FakeEvent)
+        failed, failed_resources, _ = make_worker(failed_backend, source_ready_event_factory=FakeEvent)
         begin_step(failed, store=StoreCommandBatch((command,)))
         failed.finish_step()
         with pytest.raises(RuntimeError, match="Store failed|result codes"):
@@ -290,20 +256,20 @@ def test_bulk_runtime_store_success_and_failure_preserve_source_safety(monkeypat
 def test_bulk_store_candidates_compact_partial_admission_before_materialization() -> None:
     backend = FakeBackend()
     backend.presence = [1, 0]
-    runtime, resources, _ = make_runtime(backend, requires_exists_before_put=True, source_ready_event_factory=FakeEvent)
+    worker, resources, _ = make_worker(backend, requires_exists_before_put=True, source_ready_event_factory=FakeEvent)
     present = RangeStoreCommand("present", TokenRange(0, 4), ((1,),), (b"a",), 4, 7)
     missing = RangeStoreCommand("missing", TokenRange(0, 4), ((3,),), (b"b",), 4, 8)
 
-    begin_step(runtime, store=StoreCommandBatch((present, missing)))
-    runtime.finish_step()
-    completions = runtime.fence_previous_store()
+    begin_step(worker, store=StoreCommandBatch((present, missing)))
+    worker.finish_step()
+    completions = worker.fence_previous_store()
 
     put_call = next(call for call in backend.calls if call[0] == "put")
     assert len(put_call[1]) == 1
     assert put_call[2] == ((1192, 2192),)
     assert [len(completion.evidence.transfer_evidence) for completion in completions] == [0, 1]
-    assert runtime.take_released_store_job_ids() == {7, 8}
-    runtime.close()
+    assert worker.take_released_store_job_ids() == {7, 8}
+    worker.close()
     assert resources.closed
 
 
@@ -312,7 +278,7 @@ def test_unified_store_candidates_compact_each_group_before_timeline_selection(l
     topology = make_topology(group_ids=(0, 1))
     backend = FakeBackend()
     backend.presence = [1, 0, 0, 1]
-    runtime, resources, _ = make_runtime(
+    worker, resources, _ = make_worker(
         backend,
         topology=topology,
         layerwise=layerwise,
@@ -327,7 +293,7 @@ def test_unified_store_candidates_compact_each_group_before_timeline_selection(l
         17,
     )
 
-    batch = runtime._build_admitted_store_batch((command,))
+    batch = build_admitted_store_batch(worker, (command,), layerwise=layerwise)
 
     assert batch is not None
     assert [group.block_ids.tolist() for group in batch.groups] == [[2], [3]]
@@ -337,16 +303,17 @@ def test_unified_store_candidates_compact_each_group_before_timeline_selection(l
     assert len(batch.selected_keys()) == 2
     assert batch.selected_keys() == tuple(group.selected_keys()[0] for group in batch.groups)
     if layerwise:
-        runtime._backend_io.store_batch(batch, layer_id=0)
+        worker_backend_io(worker).store_batch(batch, layer_id=0)
         copy_call = next(call for call in backend.calls if call[0] == "batch_copy_put")
         assert copy_call[1] == batch.selected_keys()
         assert copy_call[2] == ((1128,), (11192,))
     else:
-        runtime._backend_io.store_batch(batch)
+        arguments = worker._materialize_concrete_bulk_arguments(batch, store=True)
+        worker_backend_io(worker).store_materialized(batch, arguments)
         put_call = next(call for call in backend.calls if call[0] == "put")
         assert put_call[1] == batch.selected_keys()
         assert put_call[2] == ((1128, 2128), (11192, 12192))
-    runtime.close()
+    worker.close()
     assert resources.closed
 
 
@@ -360,14 +327,14 @@ def test_unified_store_candidates_compact_each_group_before_timeline_selection(l
 def test_unified_store_candidates_preserve_object_axis_admission(topology, presence, expected_selection) -> None:
     backend = FakeBackend()
     backend.presence = presence
-    runtime, resources, _ = make_runtime(
+    worker, resources, _ = make_worker(
         backend,
         topology=topology,
         requires_exists_before_put=True,
     )
     command = RangeStoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4, 17)
 
-    batch = runtime._build_admitted_store_batch((command,))
+    batch = build_admitted_store_batch(worker, (command,))
 
     assert batch is not None
     group = batch.groups[0]
@@ -376,7 +343,7 @@ def test_unified_store_candidates_preserve_object_axis_admission(topology, prese
     assert group.selection.tolist() == expected_selection
     assert batch.selected_keys() == group.selected_keys()
     assert len(batch.selected_keys()) == 1
-    runtime.close()
+    worker.close()
     assert resources.closed
 
 
@@ -404,7 +371,7 @@ def test_unified_store_candidates_defer_hybrid_checkpoint_materialization() -> N
     topology = replace(base, cache_transfer_granularity=8, hash_block_size=4, groups=groups)
     backend = FakeBackend()
     backend.presence = [1, 0]
-    runtime, resources, _ = make_runtime(
+    worker, resources, _ = make_worker(
         backend,
         topology=topology,
         requires_exists_before_put=True,
@@ -418,7 +385,7 @@ def test_unified_store_candidates_defer_hybrid_checkpoint_materialization() -> N
         23,
     )
 
-    batch = runtime._build_admitted_store_batch((command,))
+    batch = build_admitted_store_batch(worker, (command,))
 
     assert batch is not None
     assert [group.block_ids.tolist() for group in batch.groups] == [[], [7]]
@@ -426,26 +393,27 @@ def test_unified_store_candidates_defer_hybrid_checkpoint_materialization() -> N
     assert len(batch.selected_keys()) == 1
     assert "@group:1@" in batch.selected_keys()[0]
     assert next(call for call in backend.calls if call[0] == "exists")[1] != batch.selected_keys()
-    runtime._backend_io.store_batch(batch)
+    arguments = worker._materialize_concrete_bulk_arguments(batch, store=True)
+    worker_backend_io(worker).store_materialized(batch, arguments)
     put_call = next(call for call in backend.calls if call[0] == "put")
     assert put_call[1] == batch.selected_keys()
     assert put_call[2] == ((12448,),)
     assert put_call[3] == ((32,),)
-    runtime.close()
+    worker.close()
     assert resources.closed
 
 
 def test_layerwise_load_happy_path_reuses_rows_and_closes_one_session() -> None:
-    runtime, resources, backend = make_runtime(
+    worker, resources, backend = make_worker(
         layerwise=True, store=False, start_gate_factory=lambda: FakeLoadStartGate(opened=True)
     )
     command = LoadCommand("request", TokenRange(0, 4), ((1,),), (b"a",))
-    begin_step(runtime, load=LoadCommandBatch((command,)))
+    begin_step(worker, load=LoadCommandBatch((command,)))
 
-    runtime.start_load()
-    runtime.wait_for_layer_load("layers.0.group.0")
-    runtime.wait_for_layer_load("layers.1.group.0")
-    runtime.close()
+    worker.start_load()
+    worker.wait_for_layer_load("layers.0.group.0")
+    worker.wait_for_layer_load("layers.1.group.0")
+    worker.close()
 
     session_calls = [call for call in backend.calls if call[0] in ("batch_get_start", "batch_get_end")]
     copy_calls = [call for call in backend.calls if call[0] == "batch_copy_get"]
@@ -455,19 +423,66 @@ def test_layerwise_load_happy_path_reuses_rows_and_closes_one_session() -> None:
     assert resources.closed
 
 
+def test_key_range_layerwise_load_reuses_lowered_execution_state_across_layers(monkeypatch) -> None:
+    worker, resources, backend = make_worker(
+        layerwise=True,
+        store=False,
+        physical_layers=(0, 1, 2),
+        start_gate_factory=lambda: FakeLoadStartGate(opened=True),
+    )
+    command = LoadCommand("request", TokenRange(0, 4), ((1,),), (b"a",))
+    begin_step(worker, load=LoadCommandBatch((command,)))
+    worker.start_load()
+
+    backend_io = worker_backend_io(worker)
+    prepared_plan = backend_io._load_plan
+    assert prepared_plan is not None
+    prepared_groups = [prepared_plan.groups_by_layer[layer_id] for layer_id in range(3)]
+    prepared_keys = [prepared_plan.keys_by_layer[layer_id] for layer_id in range(3)]
+    assert prepared_groups[0][0] is prepared_groups[1][0] is prepared_groups[2][0]
+    assert prepared_groups[0][0].block_ids is prepared_plan.groups[0].block_ids
+    assert prepared_groups[0][0].token_counts is prepared_plan.groups[0].token_counts
+    assert prepared_keys[0] is prepared_keys[1] is prepared_keys[2]
+
+    direct_calls = []
+    direct_projection = arguments_module.key_range_layer_ranges
+
+    def record_direct_projection(group, block_ids, token_counts, *, layer_id):
+        direct_calls.append(layer_id)
+        return direct_projection(group, block_ids, token_counts, layer_id=layer_id)
+
+    def reject_rebuild(*_args, **_kwargs):
+        raise AssertionError("Layerwise Load rebuilt cross-layer execution state")
+
+    monkeypatch.setattr(arguments_module, "key_range_layer_ranges", record_direct_projection)
+    monkeypatch.setattr(KVTransferBatch, "for_layer", reject_rebuild)
+    monkeypatch.setattr(KVGroupBatch, "selected_keys", reject_rebuild)
+
+    for layer_id in range(2):
+        worker.wait_for_layer_load(f"layers.{layer_id}.group.0")
+    assert backend_io._load_plan is prepared_plan
+    worker.wait_for_layer_load("layers.2.group.0")
+    assert direct_calls == [0, 1, 2]
+    assert backend_io._load_plan is None
+    worker.close()
+
+    assert [call[0] for call in backend.calls].count("batch_copy_get") == 3
+    assert resources.closed
+
+
 def test_layerwise_load_failure_cleans_sessions_and_preserves_block_identity() -> None:
     backend = FakeBackend()
     backend.session_copy_result = [-1]
-    runtime, resources, _ = make_runtime(backend, layerwise=True, store=False, physical_layers=(0,))
+    worker, resources, _ = make_worker(backend, layerwise=True, store=False, physical_layers=(0,))
     command = LoadCommand("request", TokenRange(0, 4), ((7,),), (b"a",))
-    begin_step(runtime, load=LoadCommandBatch((command,)))
+    begin_step(worker, load=LoadCommandBatch((command,)))
 
-    runtime.start_load()
-    runtime.wait_for_layer_load("layers.0.group.0")
-    result = runtime.collect_load_result()
+    worker.start_load()
+    worker.wait_for_layer_load("layers.0.group.0")
+    result = worker.collect_load_result()
     assert result.failed_block_ids == frozenset({7})
     assert [call[0] for call in backend.calls].count("batch_get_end") == 1
-    runtime.close()
+    worker.close()
     assert resources.closed
 
 
@@ -479,22 +494,22 @@ def test_layerwise_load_keeps_a_bounded_prefetch_window() -> None:
         gates.append(gate)
         return gate
 
-    runtime, _, backend = make_runtime(
+    worker, _, backend = make_worker(
         layerwise=True, store=False, physical_layers=(0, 1, 2), start_gate_factory=make_gate
     )
     command = LoadCommand("request", TokenRange(0, 4), ((1,),), (b"a",))
-    begin_step(runtime, load=LoadCommandBatch((command,)))
+    begin_step(worker, load=LoadCommandBatch((command,)))
 
-    runtime.start_load()
+    worker.start_load()
     assert not any(call[0] == "batch_copy_get" for call in backend.calls)
-    runtime.wait_for_layer_load("layers.0.group.0")
+    worker.wait_for_layer_load("layers.0.group.0")
     assert [call[0] for call in backend.calls].count("batch_copy_get") == 1
     gates[0].open()
-    runtime.wait_for_layer_load("layers.1.group.0")
+    worker.wait_for_layer_load("layers.1.group.0")
     assert [call[0] for call in backend.calls].count("batch_copy_get") == 2
     gates[1].open()
-    runtime.wait_for_layer_load("layers.2.group.0")
-    runtime.close()
+    worker.wait_for_layer_load("layers.2.group.0")
+    worker.close()
     assert [call[0] for call in backend.calls].count("batch_copy_get") == 3
 
 
@@ -506,39 +521,40 @@ def test_layerwise_load_start_exception_closes_attempted_session_once(monkeypatc
         raise RuntimeError("session start failed")
 
     monkeypatch.setattr(backend, "batch_get_start", fail_start)
-    runtime, resources, _ = make_runtime(backend, layerwise=True, store=False)
+    worker, resources, _ = make_worker(backend, layerwise=True, store=False)
     command = LoadCommand("request", TokenRange(0, 4), ((1,),), (b"a",))
-    begin_step(runtime, load=LoadCommandBatch((command,)))
+    begin_step(worker, load=LoadCommandBatch((command,)))
 
     with pytest.raises(RuntimeError, match="Layerwise Load timeline terminated"):
-        runtime.start_load()
+        worker.start_load()
     assert [call[0] for call in backend.calls].count("batch_get_end") == 1
     with pytest.raises(RuntimeError, match="Layerwise Load timeline terminated"):
-        runtime.close()
+        worker.close()
     assert [call[0] for call in backend.calls].count("batch_get_end") == 1
     assert resources.closed
 
 
 def test_layerwise_store_commits_only_after_all_layers_and_unknown_failure_retains_source() -> None:
     command = RangeStoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4, 17)
-    runtime, resources, backend = make_runtime(layerwise=True)
-    begin_step(runtime, store=StoreCommandBatch((command,)))
+    worker, resources, backend = make_worker(layerwise=True)
+    begin_step(worker, store=StoreCommandBatch((command,)))
 
-    runtime.save_layer("layers.0.group.0")
-    runtime._timeline.store._executor._queue.join()
+    worker.save_layer("layers.0.group.0")
+    assert worker._layerwise_store_timeline is not None
+    worker._layerwise_store_timeline._executor._queue.join()
     assert [call[0] for call in backend.calls].count("batch_copy_put") == 1
     assert "batch_commit" not in [call[0] for call in backend.calls]
 
-    runtime.save_layer("layers.1.group.0")
-    runtime.finish_step()
+    worker.save_layer("layers.1.group.0")
+    worker.finish_step()
     assert [call[0] for call in backend.calls].count("batch_commit") == 1
-    assert runtime.take_released_store_job_ids() == {17}
-    runtime.close()
+    assert worker.take_released_store_job_ids() == {17}
+    worker.close()
     assert resources.closed
 
     failing_backend = FakeBackend()
     failing_backend.store_session_copy_result = RuntimeError("copy failed")
-    failed, failed_resources, _ = make_runtime(failing_backend, layerwise=True)
+    failed, failed_resources, _ = make_worker(failing_backend, layerwise=True)
     duplicate = RangeStoreCommand("duplicate", TokenRange(0, 4), ((3,),), (b"a",), 4, 18)
     begin_step(failed, store=StoreCommandBatch((command, duplicate)))
     failed.save_layer("layers.0.group.0")
@@ -568,18 +584,18 @@ def test_layerwise_store_reuses_fully_started_batch_and_filters_failed_sessions(
     first = RangeStoreCommand("first", TokenRange(0, 4), ((1,),), (b"a",), 4, 17)
     second = RangeStoreCommand("second", TokenRange(0, 4), ((3,),), (b"b",), 4, 18)
 
-    runtime, resources, _ = make_runtime(layerwise=True)
-    begin_step(runtime, store=StoreCommandBatch((first, second)))
-    runtime.save_layer("layers.0.group.0")
-    runtime.save_layer("layers.1.group.0")
-    runtime.finish_step()
+    worker, resources, _ = make_worker(layerwise=True)
+    begin_step(worker, store=StoreCommandBatch((first, second)))
+    worker.save_layer("layers.0.group.0")
+    worker.save_layer("layers.1.group.0")
+    worker.finish_step()
     assert selections == []
-    runtime.close()
+    worker.close()
     assert resources.closed
 
     backend = FakeBackend()
     backend.store_session_start_result = [0, -1]
-    failed, failed_resources, _ = make_runtime(backend, layerwise=True)
+    failed, failed_resources, _ = make_worker(backend, layerwise=True)
     begin_step(failed, store=StoreCommandBatch((first, second)))
     failed.save_layer("layers.0.group.0")
     failed.save_layer("layers.1.group.0")
@@ -599,15 +615,16 @@ def test_layerwise_store_reuses_fully_started_batch_and_filters_failed_sessions(
 
 
 def test_layerwise_store_reuses_lowered_execution_state_across_layers(monkeypatch) -> None:
-    runtime, resources, backend = make_runtime(layerwise=True, physical_layers=(0, 1, 2))
+    worker, resources, backend = make_worker(layerwise=True, physical_layers=(0, 1, 2))
     command = RangeStoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4, 17)
-    begin_step(runtime, store=StoreCommandBatch((command,)))
-    runtime._timeline.store._executor._queue.join()
+    begin_step(worker, store=StoreCommandBatch((command,)))
+    assert worker._layerwise_store_timeline is not None
+    worker._layerwise_store_timeline._executor._queue.join()
 
-    backend_io = runtime._backend_io
+    backend_io = worker_backend_io(worker)
     prepared_plan = backend_io._store_plan
     assert prepared_plan is not None
-    session = runtime._timeline.store._session
+    session = worker._layerwise_store_timeline._session
     assert session is not None and session.selected is not None
     assert session.selected.layer_store_plan is prepared_plan
     prepared_groups = [prepared_plan.groups_by_layer[layer_id] for layer_id in range(3)]
@@ -618,28 +635,39 @@ def test_layerwise_store_reuses_lowered_execution_state_across_layers(monkeypatc
     assert prepared_keys[0] is prepared_keys[1] is prepared_keys[2]
 
     direct_calls = []
-    direct_rule = runtime._bound_rules.memory.store_layer
+    direct_projection = arguments_module.key_range_layer_ranges
 
-    def record_direct_rule(group_id, block_ids, token_counts, *, layer_id):
+    def record_direct_projection(group, block_ids, token_counts, *, layer_id):
         direct_calls.append(layer_id)
-        return direct_rule(group_id, block_ids, token_counts, layer_id=layer_id)
+        return direct_projection(group, block_ids, token_counts, layer_id=layer_id)
 
     def reject_rebuild(*_args, **_kwargs):
         raise AssertionError("Layerwise Store rebuilt cross-layer execution state")
 
-    monkeypatch.setattr(runtime._bound_rules.memory, "store_layer", record_direct_rule)
-    monkeypatch.setattr(runtime._bound_rules.memory, "store_partial", reject_rebuild)
+    monkeypatch.setattr(arguments_module, "key_range_layer_ranges", record_direct_projection)
     monkeypatch.setattr(KVTransferBatch, "for_layer", reject_rebuild)
     monkeypatch.setattr(KVGroupBatch, "selected_keys", reject_rebuild)
 
     for layer_id in range(3):
-        runtime.save_layer(f"layers.{layer_id}.group.0")
-    runtime.finish_step()
+        worker.save_layer(f"layers.{layer_id}.group.0")
+    worker.finish_step()
 
     assert direct_calls == [0, 1, 2]
     assert [call[0] for call in backend.calls].count("batch_copy_put") == 3
-    assert runtime.take_released_store_job_ids() == {17}
-    runtime.close()
+    assert worker.take_released_store_job_ids() == {17}
+    worker.close()
+    assert resources.closed
+
+
+def test_layerwise_non_leader_discards_store_rows_in_worker_business_path() -> None:
+    topology = make_topology(tp_rank=1, tp_size=2, put_step=2)
+    worker, resources, _ = make_worker(topology=topology, layerwise=True)
+    command = RangeStoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4, 17)
+
+    assert worker._layerwise_store_leader is False
+    assert worker._store_candidate_rows(command) == (([], [], []),)
+
+    worker.close()
     assert resources.closed
 
 
@@ -656,14 +684,14 @@ def test_layerwise_store_prepares_asynchronously_behind_layer_jobs(monkeypatch) 
         return [0] * len(keys)
 
     monkeypatch.setattr(backend, "exists", blocking_exists)
-    runtime, resources, _ = make_runtime(backend, layerwise=True, requires_exists_before_put=True)
+    worker, resources, _ = make_worker(backend, layerwise=True, requires_exists_before_put=True)
     command = RangeStoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4, 17)
     begin_completed = threading.Event()
     begin_errors = []
 
     def begin() -> None:
         try:
-            begin_step(runtime, store=StoreCommandBatch((command,)))
+            begin_step(worker, store=StoreCommandBatch((command,)))
         except BaseException as error:
             begin_errors.append(error)
         finally:
@@ -675,14 +703,14 @@ def test_layerwise_store_prepares_asynchronously_behind_layer_jobs(monkeypatch) 
         assert admission_started.wait(timeout=2)
         returned_before_admission = begin_completed.wait(timeout=0.2)
         assert returned_before_admission
-        runtime.save_layer("layers.0.group.0")
+        worker.save_layer("layers.0.group.0")
     finally:
         release_admission.set()
         caller.join(timeout=5)
 
     assert not begin_errors
-    runtime.save_layer("layers.1.group.0")
-    runtime.finish_step()
+    worker.save_layer("layers.1.group.0")
+    worker.finish_step()
     assert [
         call[0] for call in backend.calls if call[0] in {"exists", "batch_put_start", "batch_copy_put", "batch_commit"}
     ] == [
@@ -692,7 +720,7 @@ def test_layerwise_store_prepares_asynchronously_behind_layer_jobs(monkeypatch) 
         "batch_copy_put",
         "batch_commit",
     ]
-    runtime.close()
+    worker.close()
     assert resources.closed
 
 
@@ -708,13 +736,13 @@ def test_layerwise_store_materializes_only_missing_rows_and_skips_full_hits(monk
         events.append(event)
         return event
 
-    runtime, resources, _ = make_runtime(
+    worker, resources, _ = make_worker(
         backend, layerwise=True, requires_exists_before_put=True, source_ready_event_factory=make_event
     )
-    begin_step(runtime, store=StoreCommandBatch((command, missing)))
-    runtime.save_layer("layers.0.group.0")
-    runtime.save_layer("layers.1.group.0")
-    runtime.finish_step()
+    begin_step(worker, store=StoreCommandBatch((command, missing)))
+    worker.save_layer("layers.0.group.0")
+    worker.save_layer("layers.1.group.0")
+    worker.finish_step()
 
     start = next(call for call in backend.calls if call[0] == "batch_put_start")
     copies = [call for call in backend.calls if call[0] == "batch_copy_put"]
@@ -722,8 +750,8 @@ def test_layerwise_store_materializes_only_missing_rows_and_skips_full_hits(monk
     assert [call[1] for call in copies] == [start[1], start[1]]
     assert [call[2] for call in copies] == [((1192,),), ((2192,),)]
     assert all(event.recorded and event.synchronized for event in events)
-    assert runtime.take_released_store_job_ids() == {17, 18}
-    runtime.close()
+    assert worker.take_released_store_job_ids() == {17, 18}
+    worker.close()
     assert resources.closed
 
     full_hit_backend = FakeBackend()
@@ -734,7 +762,7 @@ def test_layerwise_store_materializes_only_missing_rows_and_skips_full_hits(monk
         full_hit_events.append(event)
         return event
 
-    full_hit, full_hit_resources, _ = make_runtime(
+    full_hit, full_hit_resources, _ = make_worker(
         full_hit_backend,
         layerwise=True,
         requires_exists_before_put=True,
@@ -758,16 +786,16 @@ def test_layerwise_store_materializes_only_missing_rows_and_skips_full_hits(monk
 
 
 def test_layerwise_store_aggregates_terminal_evidence_across_layers() -> None:
-    runtime, resources, _ = make_runtime(layerwise=True)
+    worker, resources, _ = make_worker(layerwise=True)
     command = RangeStoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4, 17)
-    begin_step(runtime, store=StoreCommandBatch((command,)))
-    runtime.save_layer("layers.0.group.0")
-    runtime.save_layer("layers.1.group.0")
+    begin_step(worker, store=StoreCommandBatch((command,)))
+    worker.save_layer("layers.0.group.0")
+    worker.save_layer("layers.1.group.0")
 
-    context = runtime._active_step
+    context = worker._active_step
     assert context is not None
-    runtime._submit_store(context)
-    completions = runtime.fence_previous_store()
+    worker._finalize_layerwise_store(context)
+    completions = worker.fence_previous_store()
 
     assert len(completions) == 1
     evidence = completions[0].evidence.transfer_evidence
@@ -776,45 +804,67 @@ def test_layerwise_store_aggregates_terminal_evidence_across_layers() -> None:
     assert evidence[0].result_code == 0
     assert evidence[0].source_release_confirmed
 
-    runtime.end_step()
-    runtime.close()
+    worker.end_step()
+    worker.close()
     assert resources.closed
 
 
-def test_runtime_close_reports_incomplete_layerwise_store_but_releases_safe_source() -> None:
-    runtime, resources, backend = make_runtime(layerwise=True)
+def test_worker_close_reports_incomplete_layerwise_store_but_releases_safe_source() -> None:
+    worker, resources, backend = make_worker(layerwise=True)
     command = RangeStoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4, 17)
-    begin_step(runtime, store=StoreCommandBatch((command,)))
-    runtime.save_layer("layers.0.group.0")
+    begin_step(worker, store=StoreCommandBatch((command,)))
+    worker.save_layer("layers.0.group.0")
 
     with pytest.raises(RuntimeError, match="Store failed"):
-        runtime.close()
+        worker.close()
 
-    assert runtime.take_released_store_job_ids() == {17}
-    assert runtime._pending_store_batch is None
+    assert worker.take_released_store_job_ids() == {17}
+    assert worker._pending_store_batch is None
     assert resources.closed
     assert "batch_revoke" in [call[0] for call in backend.calls]
     assert "batch_commit" not in [call[0] for call in backend.calls]
 
 
-def test_runtime_owns_active_step_and_async_completion_lifecycle() -> None:
-    runtime, _, _ = make_runtime(async_load=True, store=False)
+def test_worker_owns_active_step_and_async_completion_lifecycle() -> None:
+    worker, _, _ = make_worker(async_load=True, store=False)
     command = LoadCommand("request", TokenRange(0, 4), ((1,),), (b"a",))
 
     with pytest.raises(RuntimeError, match="has not begun"):
-        runtime.start_load()
-    begin_step(runtime, load=LoadCommandBatch((command,)))
+        worker.start_load()
+    begin_step(worker, load=LoadCommandBatch((command,)))
     with pytest.raises(RuntimeError, match="has not ended"):
-        runtime.begin_step(KVTransferStep())
-    runtime.start_load()
-    runtime.end_step()
-    begin_step(runtime)
-    runtime._timeline.load._executor._queue.join()
-    result = runtime.collect_load_result()
+        worker.begin_step(KVTransferStep())
+    worker.start_load()
+    worker.end_step()
+    begin_step(worker)
+    assert isinstance(worker._asynchronous_load_timeline, AsynchronousLoadTimeline)
+    worker._asynchronous_load_timeline._executor._queue.join()
+    result = worker.collect_load_result()
     assert result.completed_request_ids == {"request"}
-    assert runtime.collect_load_result().completed_request_ids == set()
-    runtime.end_step()
-    runtime.close()
+    assert worker.collect_load_result().completed_request_ids == set()
+    worker.end_step()
+    worker.close()
+
+
+def test_worker_selects_concrete_timelines_from_bound_configuration() -> None:
+    synchronous, synchronous_resources, _ = make_worker(store=False)
+    asynchronous, asynchronous_resources, _ = make_worker(async_load=True)
+    layerwise, layerwise_resources, _ = make_worker(layerwise=True)
+
+    try:
+        assert isinstance(synchronous._synchronous_load_timeline, SynchronousLoadTimeline)
+        assert synchronous._asynchronous_store_timeline is None
+        assert isinstance(asynchronous._asynchronous_load_timeline, AsynchronousLoadTimeline)
+        assert isinstance(asynchronous._asynchronous_store_timeline, AsynchronousStoreTimeline)
+        assert isinstance(layerwise._layerwise_load_timeline, LayerwiseLoadTimeline)
+        assert isinstance(layerwise._layerwise_store_timeline, LayerwiseStoreTimeline)
+    finally:
+        synchronous.close()
+        asynchronous.close()
+        layerwise.close()
+    assert synchronous_resources.closed
+    assert asynchronous_resources.closed
+    assert layerwise_resources.closed
 
 
 def test_async_load_failure_drains_pending_work_and_rejects_overlap(monkeypatch) -> None:
@@ -824,171 +874,20 @@ def test_async_load_failure_drains_pending_work_and_rejects_overlap(monkeypatch)
         raise RuntimeError("backend get failed")
 
     monkeypatch.setattr(backend, "get", fail_get)
-    runtime, _, _ = make_runtime(backend, async_load=True, store=False)
+    worker, _, _ = make_worker(backend, async_load=True, store=False)
     command = LoadCommand("request", TokenRange(0, 4), ((1,),), (b"a",))
-    begin_step(runtime, load=LoadCommandBatch((command,)))
-    runtime.start_load()
-    runtime.end_step()
+    begin_step(worker, load=LoadCommandBatch((command,)))
+    worker.start_load()
+    worker.end_step()
 
-    begin_step(runtime, load=LoadCommandBatch((replace(command, request_id="other"), command)))
+    begin_step(worker, load=LoadCommandBatch((replace(command, request_id="other"), command)))
     with pytest.raises(RuntimeError, match="already has a pending asynchronous Load"):
-        runtime.start_load()
-    assert runtime._pending_load_request_ids == {"request"}
-    runtime._timeline.load._executor._queue.join()
-    with pytest.raises(RuntimeError, match="asynchronous Load|backend get failed"):
-        runtime.collect_load_result()
-    with pytest.raises(RuntimeError, match="asynchronous Load|backend get failed"):
-        runtime.close()
-
-
-def test_planner_full_hit_and_deferred_load_publish_only_after_allocation() -> None:
-    request = SimpleNamespace(
-        request_id="request",
-        prompt_token_ids=[0] * 12,
-        num_tokens=12,
-        block_hashes=[b"a", b"b", b"c"],
-    )
-    planner = make_planner(RemoteAvailability(TokenRange(0, 12), 11))
-    assert planner.lookup(LookupQuery("request", 12, 12, request.block_hashes, 0)) == ExternalPrefixPlan(11, False)
-    planner.confirm_allocation("request", ((1, 2, 3),), tuple(request.block_hashes), 12, 11)
-    step = build_planner_step(
-        planner,
-        SimpleNamespace(
-            finished_req_ids=set(),
-            scheduled_new_reqs=[SimpleNamespace(req_id="request", num_computed_tokens=11, block_ids=([1, 2, 3],))],
-            scheduled_cached_reqs=SimpleNamespace(req_ids=[], new_block_ids=[]),
-            num_scheduled_tokens={"request": 1},
-        ),
-        {"request": request},
-    )
-    assert step.load.commands[0].load_range == TokenRange(0, 12)
-    assert step.store.commands == ()
-
-    deferred = make_planner(RemoteAvailability(TokenRange(4, 8), 8), async_load=True)
-    short_request = SimpleNamespace(
-        request_id="request",
-        prompt_token_ids=[0] * 8,
-        num_tokens=8,
-        block_hashes=[b"a", b"b"],
-    )
-    assert deferred.lookup(LookupQuery("request", 8, 9, short_request.block_hashes, 4)).load_is_deferred
-    deferred.confirm_allocation("request", ((1, 2),), tuple(short_request.block_hashes), 8, 4)
-    deferred_step = build_planner_step(
-        deferred,
-        SimpleNamespace(
-            finished_req_ids=set(),
-            scheduled_new_reqs=[],
-            scheduled_cached_reqs=SimpleNamespace(req_ids=[], new_block_ids=[]),
-        ),
-        {"request": short_request},
-    )
-    assert deferred_step.load.commands[0].load_range == TokenRange(4, 8)
-
-
-def test_planner_uses_scheduler_resumption_as_authoritative_request_kind() -> None:
-    request = SimpleNamespace(
-        request_id="request",
-        prompt_token_ids=[0] * 4,
-        num_prompt_tokens=4,
-        num_tokens=7,
-        block_hashes=[b"a", b"b"],
-    )
-    scheduler_output = SimpleNamespace(
-        scheduled_new_reqs=[],
-        scheduled_cached_reqs=SimpleNamespace(
-            req_ids=["request"],
-            resumed_req_ids={"request"},
-            new_block_ids=[([3, 4],)],
-            num_computed_tokens=[4],
-        ),
-        num_scheduled_tokens={"request": 3},
-        finished_req_ids=set(),
-        preempted_req_ids=None,
-        kv_connector_block_state=None,
-    )
-    step = vllm_adapter.adapt_scheduler_output(scheduler_output, {"request": request}, store_enabled=True)
-    assert isinstance(step, TransferPlanningStep)
-    assert step.scheduled_requests[0].kind is ScheduledRequestKind.RESUMED
-    assert step.scheduled_requests[0].block_ids_by_group == ((3, 4),)
-
-
-def test_checkpoint_planning_and_projection_keep_exact_source_identity() -> None:
-    planner = TransferPlanner(
-        TransferPlanningSpec(4, 4, (0, 1), True),
-        FakeAvailabilityProbe(None),
-        ScheduledLoadPublication(),
-        store_enabled=True,
-        save_decode_cache=False,
-    )
-    request = SimpleNamespace(block_hashes=[b"a", b"b", b"c"])
-    planner.request_progress["request"] = RequestSnapshot(
-        "request",
-        12,
-        ((1, 2), (10, 11)),
-        (b"a", b"b", b"c"),
-        8,
-        published_store_end_token=4,
-    )
-    output = SimpleNamespace(
-        finished_req_ids=set(),
-        scheduled_new_reqs=[],
-        scheduled_cached_reqs=SimpleNamespace(req_ids=[], new_block_ids=[]),
-        kv_connector_block_state=SimpleNamespace(boundary_state_offloads={"request": [(1, 10, 8), (1, 11, 12)]}),
-    )
-
-    commands = build_planner_step(planner, output, {"request": request}).store.commands
-
-    assert [command.sources for command in commands] == [
-        (StateCheckpointSource(1, 10, 8),),
-        (StateCheckpointSource(1, 11, 12),),
-    ]
-    assert all(isinstance(command, CheckpointStoreCommand) for command in commands)
-    assert commands[0].block_ids_by_group == ((1, 2), (10, 11))
-
-
-def test_connector_translates_lookup_allocation_and_step_lifecycle() -> None:
-    queries = []
-    confirmations = []
-    planning_steps = []
-
-    def lookup(query):
-        queries.append(query)
-        return ExternalPrefixPlan(4, True)
-
-    def build_step(step):
-        planning_steps.append(step)
-        return KVTransferStep()
-
-    connector = AscendStoreV1Connector.__new__(AscendStoreV1Connector)
-    connector._requests = {}
-    connector._store_enabled = False
-    connector._finished_checkpoint_stores = []
-    connector._store_source_leases = SimpleNamespace(acquire=lambda command: command)
-    connector.planner = SimpleNamespace(
-        lookup=lookup, confirm_allocation=lambda *args: confirmations.append(args), build_step=build_step
-    )
-    request = SimpleNamespace(
-        request_id="request",
-        prompt_token_ids=None,
-        num_prompt_tokens=8,
-        num_tokens=9,
-        block_hashes=[b"a", b"b"],
-    )
-
-    assert connector.get_num_new_matched_tokens(request, 4) == (4, True)
-    connector.update_state_after_alloc(request, SimpleNamespace(get_block_ids=lambda: ([1, 2],)), 4)
-    connector.build_connector_meta(
-        SimpleNamespace(
-            scheduled_new_reqs=[],
-            scheduled_cached_reqs=SimpleNamespace(req_ids=[]),
-            num_scheduled_tokens={},
-            finished_req_ids={"request"},
-            preempted_req_ids=None,
-            kv_connector_block_state=None,
-        )
-    )
-
-    assert queries == [LookupQuery("request", 8, 9, request.block_hashes, 4)]
-    assert confirmations == [("request", ((1, 2),), (b"a", b"b"), 8, 4)]
-    assert planning_steps[0].finished_request_ids == {"request"}
-    assert connector._requests == {}
+        worker.start_load()
+    assert worker._pending_load_request_ids == {"request"}
+    assert isinstance(worker._asynchronous_load_timeline, AsynchronousLoadTimeline)
+    worker._asynchronous_load_timeline._executor._queue.join()
+    result = worker.collect_load_result()
+    assert result.completed_request_ids == {"request"}
+    assert result.failed_block_ids == {1}
+    assert [(location.group_id, location.block_id) for location in result.failed_locations] == [(0, 1)]
+    worker.close()

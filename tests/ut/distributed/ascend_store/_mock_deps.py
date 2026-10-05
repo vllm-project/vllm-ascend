@@ -242,6 +242,12 @@ class _FakeSlidingWindowSpec(_FakeKVCacheSpec):
         super().__init__(block_size=block_size, sliding_window=sliding_window, **kwargs)
 
 
+class _FakeCircularBufferSpec(_FakeKVCacheSpec):
+    prefix_cacheable = False
+    participates_in_prefix_caching = False
+    is_circular = True
+
+
 class _FakeMambaSpec(_FakeKVCacheSpec):
     def __init__(self, block_size=16, **kwargs):
         super().__init__(block_size=block_size, **kwargs)
@@ -315,7 +321,9 @@ class _FakeSingleTypeKVCacheManager:
         kv_cache_spec,
         use_eagle,
         retention_interval=None,
-        num_prompt_tokens=None,
+        reachable_boundaries=(),
+        dcp_world_size=1,
+        final_segment_end_block=None,
     ):
         return None
 
@@ -343,7 +351,112 @@ class _FakeSingleTypeKVCacheManager:
         if drop_eagle_block and computed and computed[0]:
             for blocks in computed:
                 blocks.pop()
-        return computed
+        hit_length = len(computed[0]) * kv_cache_spec.block_size if computed else 0
+        return computed, hit_length
+
+
+class _FakeFullAttentionManager(_FakeSingleTypeKVCacheManager):
+    supports_fine_grained_hash_lookup = True
+
+    @classmethod
+    def find_longest_cache_hit(
+        cls,
+        block_hashes,
+        max_length,
+        kv_cache_group_ids,
+        block_pool,
+        kv_cache_spec,
+        drop_eagle_block=False,
+        alignment_tokens=16,
+        dcp_world_size=1,
+        pcp_world_size=1,
+    ):
+        del dcp_world_size, pcp_world_size
+        block_size = kv_cache_spec.block_size
+        if alignment_tokens >= block_size:
+            return super().find_longest_cache_hit(
+                block_hashes,
+                max_length,
+                kv_cache_group_ids,
+                block_pool,
+                kv_cache_spec,
+                drop_eagle_block,
+                alignment_tokens,
+            )
+
+        computed: tuple[list[object], ...] = tuple([] for _ in kv_cache_group_ids)
+        scale = block_size // alignment_tokens
+        full_block_count = 0
+        for hash_index in range(scale - 1, min(max_length // alignment_tokens, len(block_hashes)), scale):
+            cached = block_pool.get_cached_block(block_hashes[hash_index], kv_cache_group_ids)
+            if not cached:
+                break
+            for blocks, block in zip(computed, cached):
+                blocks.append(block)
+            full_block_count += 1
+
+        hit_length = full_block_count * block_size
+        first_partial_index = full_block_count * scale
+        last_partial_index = min(
+            first_partial_index + scale,
+            max_length // alignment_tokens,
+            len(block_hashes),
+        )
+        for hash_index in range(last_partial_index - 1, first_partial_index - 1, -1):
+            cached = block_pool.get_cached_block(block_hashes[hash_index], kv_cache_group_ids)
+            if not cached:
+                continue
+            for blocks, block in zip(computed, cached):
+                blocks.append(block)
+            hit_length = (hash_index + 1) * alignment_tokens
+            break
+        if drop_eagle_block and hit_length:
+            hit_length -= alignment_tokens
+        return computed, hit_length
+
+
+class _FakeMambaManager(_FakeSingleTypeKVCacheManager):
+    supports_fine_grained_hash_lookup = True
+
+    @classmethod
+    def find_longest_cache_hit(
+        cls,
+        block_hashes,
+        max_length,
+        kv_cache_group_ids,
+        block_pool,
+        kv_cache_spec,
+        drop_eagle_block=False,
+        alignment_tokens=16,
+        dcp_world_size=1,
+        pcp_world_size=1,
+    ):
+        del drop_eagle_block, dcp_world_size, pcp_world_size
+        block_size = kv_cache_spec.block_size
+        if alignment_tokens >= block_size:
+            return super().find_longest_cache_hit(
+                block_hashes,
+                max_length,
+                kv_cache_group_ids,
+                block_pool,
+                kv_cache_spec,
+                False,
+                alignment_tokens,
+            )
+
+        computed: tuple[list[object], ...] = tuple([] for _ in kv_cache_group_ids)
+        scale = block_size // alignment_tokens
+        last_index = min(max_length // alignment_tokens, len(block_hashes)) - 1
+        for hash_index in range(last_index, -1, -1):
+            cached = block_pool.get_cached_block(block_hashes[hash_index], kv_cache_group_ids)
+            if not cached:
+                continue
+            block_index = hash_index // scale
+            for blocks, block in zip(computed, cached):
+                blocks.extend([block_pool.null_block] * block_index)
+                blocks.append(block)
+            return computed, (hash_index + 1) * alignment_tokens
+        return computed, 0
 
 
 class _FakeSlidingWindowManager(_FakeSingleTypeKVCacheManager):
@@ -356,7 +469,9 @@ class _FakeSlidingWindowManager(_FakeSingleTypeKVCacheManager):
         kv_cache_spec,
         use_eagle,
         retention_interval=None,
-        num_prompt_tokens=None,
+        reachable_boundaries=(),
+        dcp_world_size=1,
+        final_segment_end_block=None,
     ):
         if alignment_tokens is None:
             return None
@@ -368,13 +483,13 @@ _single_type_mod: Any = (
     sys.modules["vllm.v1.core.single_type_kv_cache_manager"] if _MOCK_VLLM_DEPS else types.SimpleNamespace()
 )
 _single_type_mod.SingleTypeKVCacheManager = _FakeSingleTypeKVCacheManager  # type: ignore[attr-defined]
-_single_type_mod.FullAttentionManager = _FakeSingleTypeKVCacheManager  # type: ignore[attr-defined]
+_single_type_mod.FullAttentionManager = _FakeFullAttentionManager  # type: ignore[attr-defined]
 _single_type_mod.SlidingWindowManager = _FakeSlidingWindowManager  # type: ignore[attr-defined]
-_single_type_mod.MambaManager = _FakeSingleTypeKVCacheManager  # type: ignore[attr-defined]
+_single_type_mod.MambaManager = _FakeMambaManager  # type: ignore[attr-defined]
 _single_type_mod.spec_manager_map = {  # type: ignore[attr-defined]
-    _FakeFullAttentionSpec: _FakeSingleTypeKVCacheManager,
+    _FakeFullAttentionSpec: _FakeFullAttentionManager,
     _FakeSlidingWindowSpec: _FakeSlidingWindowManager,
-    _FakeMambaSpec: _FakeSingleTypeKVCacheManager,
+    _FakeMambaSpec: _FakeMambaManager,
 }
 
 _kv_interface_mod: Any = sys.modules["vllm.v1.kv_cache_interface"] if _MOCK_VLLM_DEPS else types.SimpleNamespace()
@@ -382,6 +497,7 @@ _kv_interface_mod.KVCacheSpec = _FakeKVCacheSpec  # type: ignore[attr-defined]
 _kv_interface_mod.AttentionSpec = _FakeAttentionSpec  # type: ignore[attr-defined]
 _kv_interface_mod.FullAttentionSpec = _FakeFullAttentionSpec  # type: ignore[attr-defined]
 _kv_interface_mod.SlidingWindowSpec = _FakeSlidingWindowSpec  # type: ignore[attr-defined]
+_kv_interface_mod.CircularBufferSpec = _FakeCircularBufferSpec  # type: ignore[attr-defined]
 _kv_interface_mod.MambaSpec = _FakeMambaSpec  # type: ignore[attr-defined]
 _kv_interface_mod.UniformTypeKVCacheSpecs = _FakeUniformTypeKVCacheSpecs  # type: ignore[attr-defined]
 _kv_interface_mod.KVCacheGroupSpec = _FakeKVCacheGroupSpec  # type: ignore[attr-defined]
@@ -393,6 +509,10 @@ class _FakeKVCacheSpecRegistry:
     def get_manager_class(cls, kv_cache_spec):
         if isinstance(kv_cache_spec, _FakeSlidingWindowSpec):
             return _FakeSlidingWindowManager
+        if isinstance(kv_cache_spec, _FakeFullAttentionSpec):
+            return _FakeFullAttentionManager
+        if isinstance(kv_cache_spec, _FakeMambaSpec):
+            return _FakeMambaManager
         return _FakeSingleTypeKVCacheManager
 
 

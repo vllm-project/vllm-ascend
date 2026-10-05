@@ -31,6 +31,7 @@ class TimelineExecutor(threading.Thread, Generic[CommandT]):
         self._lifecycle_lock = threading.Lock()
         self._has_started = False
         self._closed = False
+        self._join_complete = False
         self._stop_requested = False
         self._queue: queue.Queue[CommandT | object] = queue.Queue()
         self._failure: BaseException | None = None
@@ -46,6 +47,12 @@ class TimelineExecutor(threading.Thread, Generic[CommandT]):
     def closed(self) -> bool:
         with self._lifecycle_lock:
             return self._closed
+
+    @property
+    def stopped(self) -> bool:
+        """Whether close has confirmed that no executor thread can run."""
+        with self._lifecycle_lock:
+            return self._join_complete
 
     @property
     def failed_command(self) -> CommandT | None:
@@ -94,13 +101,18 @@ class TimelineExecutor(threading.Thread, Generic[CommandT]):
 
     def close(self) -> None:
         with self._lifecycle_lock:
-            if self._closed:
+            if self._join_complete:
                 return
             self._closed = True
             if not self._has_started:
+                self._join_complete = True
                 return
             self._request_stop()
         self.join()
+        if self.is_alive():
+            raise RuntimeError(f"{self.name} did not stop after join")
+        with self._lifecycle_lock:
+            self._join_complete = True
 
     def run(self) -> None:
         try:
