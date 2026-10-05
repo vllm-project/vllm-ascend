@@ -16,7 +16,6 @@ from vllm.parser import glm47_moe
 
 if TYPE_CHECKING:
     from vllm.tokenizers import TokenizerLike
-    from vllm.tool_parsers.abstract_tool_parser import Tool
 
 
 def _glm53_always_thinks(tokenizer: TokenizerLike) -> bool:
@@ -44,12 +43,8 @@ def _patch_glm53_reasoning() -> None:
         return
 
     @wraps(original_init)
-    def patched_init(
-        self,
-        tokenizer: TokenizerLike,
-        tools: list[Tool] | None = None,
-        **kwargs,
-    ) -> None:
+    def patched_init(self, *args, **kwargs) -> None:
+        tokenizer = args[0] if args else kwargs.get("tokenizer")
         chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
         thinking = chat_kwargs.get("thinking")
         enable_thinking = chat_kwargs.get("enable_thinking")
@@ -62,7 +57,7 @@ def _patch_glm53_reasoning() -> None:
             # Normalize only the parser's copy, before it selects its initial
             # state and reasoning terminals. Never mutate caller-owned kwargs.
             kwargs["chat_template_kwargs"] = dict(chat_kwargs, thinking=None, enable_thinking=None)
-        original_init(self, tokenizer, tools, **kwargs)
+        original_init(self, *args, **kwargs)
 
     patched_init._vllm_ascend_glm53_reasoning = True  # type: ignore[attr-defined]
     glm47_moe.Glm47MoeParser.__init__ = patched_init

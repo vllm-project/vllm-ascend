@@ -74,6 +74,41 @@ def test_normalizes_disabled_thinking_without_mutating_request(isolated_patch, d
     logger.warning_once.assert_called_once()
 
 
+@pytest.mark.parametrize("call_style", ["tokenizer-only", "keyword-tokenizer", "keyword-tools", "extra-positional"])
+@pytest.mark.parametrize("disable_thinking", [False, True])
+def test_constructor_arguments_are_forwarded(isolated_patch, monkeypatch, call_style, disable_thinking):
+    patch, parser_cls, _, _ = isolated_patch
+
+    def recording_init(self, *args, **kwargs):
+        self.args = args
+        self.kwargs = kwargs
+
+    monkeypatch.setattr(parser_cls, "__init__", recording_init)
+    patch._patch_glm53_reasoning()
+    tokenizer = SimpleNamespace(chat_template=GLM53_TEMPLATE)
+    tools = [object()]
+    extra = object()
+    chat_kwargs = {"enable_thinking": not disable_thinking}
+    kwargs = {"chat_template_kwargs": chat_kwargs, "future_option": object()}
+    args: tuple[object, ...] = (tokenizer,)
+    if call_style == "keyword-tokenizer":
+        args = ()
+        kwargs["tokenizer"] = tokenizer
+    elif call_style == "keyword-tools":
+        kwargs["tools"] = tools
+    elif call_style == "extra-positional":
+        args = (tokenizer, tools, extra)
+    expected_kwargs = kwargs.copy()
+    if disable_thinking:
+        expected_kwargs["chat_template_kwargs"] = {"thinking": None, "enable_thinking": None}
+
+    parser = parser_cls(*args, **kwargs)
+
+    assert parser.args == args
+    assert parser.kwargs == expected_kwargs
+    assert chat_kwargs == {"enable_thinking": not disable_thinking}
+
+
 @pytest.mark.parametrize("chat_kwargs", [None, {}, {"thinking": True}, {"enable_thinking": True}])
 def test_normal_requests_are_unchanged(isolated_patch, chat_kwargs):
     _, parser_cls, _, logger = isolated_patch
