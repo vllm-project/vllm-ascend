@@ -242,11 +242,11 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
 
     @property
     def enable_sparse_li_quant(self) -> bool:
-        return self.enable_sparse_li_c8 or self.enable_sparse_li_c4
+        return self.enable_sparse_li_c8 or getattr(self, "enable_sparse_li_c4", False)
 
     @property
     def li_quant_mode(self) -> str:
-        if self.enable_sparse_li_c4:
+        if getattr(self, "enable_sparse_li_c4", False):
             return "c4"
         if self.enable_sparse_li_c8:
             return "c8"
@@ -305,7 +305,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
                 slot_mapping.view(-1, 1),
                 k_li.view(-1, k_li.shape[-1]),
             )
-        if self.enable_sparse_li_quant:
+        if self.enable_sparse_li_c8 or getattr(self, "enable_sparse_li_c4", False):
             assert k_li_scale is not None
             indexer_scale_cache = self.k_cache.kv_cache[INDEXER_SCALE_CACHE_SLOT]
             if use_reshape_optim:
@@ -319,7 +319,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
                     indexer_attn_metadata.block_size,
                 )
             else:
-                if self.li_quant_mode == "c4":
+                if getattr(self, "enable_sparse_li_c4", False):
                     # The scatter update cannot write E8M0 directly. Persist its
                     # packed bytes and reinterpret them at the CANN boundary.
                     indexer_scale_cache = indexer_scale_cache.view(torch.uint8)
@@ -425,7 +425,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             # throughput becomes a concern.
             k_li, k_handle = all_gather_async(k_li, get_tp_group(), async_op=True)
             scale_handle = None
-            if self.enable_sparse_li_quant:
+            if self.enable_sparse_li_c8 or getattr(self, "enable_sparse_li_c4", False):
                 assert k_li_scale is not None
                 k_li_scale, scale_handle = all_gather_async(k_li_scale, get_tp_group(), async_op=True)
             if k_handle is not None:
