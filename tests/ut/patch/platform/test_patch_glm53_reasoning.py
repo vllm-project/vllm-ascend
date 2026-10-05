@@ -21,6 +21,7 @@ DISABLE_KWARGS = [
 
 def load_patch():
     spec = importlib.util.spec_from_file_location("_test_glm53_reasoning_patch", PATCH_PATH)
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -40,16 +41,17 @@ def isolated_patch(monkeypatch):
     parser_module = ModuleType("vllm.parser")
     glm_module = ModuleType("vllm.parser.glm47_moe")
     logger_module = ModuleType("vllm.logger")
-    glm_module.Glm47MoeParser = RecordingParser
-    logger_module.logger = Mock()
-    parser_module.glm47_moe = glm_module
-    vllm.parser = parser_module
-    vllm.logger = logger_module
+    monkeypatch.setattr(glm_module, "Glm47MoeParser", RecordingParser, raising=False)
+    logger = Mock()
+    monkeypatch.setattr(logger_module, "logger", logger, raising=False)
+    monkeypatch.setattr(parser_module, "glm47_moe", glm_module, raising=False)
+    monkeypatch.setattr(vllm, "parser", parser_module, raising=False)
+    monkeypatch.setattr(vllm, "logger", logger_module, raising=False)
     for module in (vllm, parser_module, glm_module, logger_module):
         monkeypatch.setitem(sys.modules, module.__name__, module)
     original_init = RecordingParser.__init__
     patch = load_patch()
-    return patch, RecordingParser, original_init, logger_module.logger
+    return patch, RecordingParser, original_init, logger
 
 
 @pytest.mark.parametrize("disable_kwargs", DISABLE_KWARGS)
@@ -155,7 +157,7 @@ def test_real_parser_keeps_reasoning_out_of_content(real_parser, disable_kwargs,
     else:
         deltas = []
         text = ""
-        token_ids = []
+        token_ids: list[int] = []
         for chunk in chunks:
             # Include the special token ID, as the serving detokenizer does.
             delta_ids = [tokenizer.get_vocab()[chunk]] if chunk in tokenizer.get_vocab() else []
