@@ -1085,8 +1085,13 @@ def _allocate_kv_cache(
                     attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
                 layer = attn_layers.get(layer_name)
                 backend = layer.get_attn_backend() if layer is not None else None
-                if (backend is None or not backend.is_sparse()) and not requires_contiguous_pa_kv_cache(
-                    layer, vllm_config, layer_spec
+                use_dcp = (
+                    getattr(getattr(vllm_config, "parallel_config", None), "decode_context_parallel_size", 1) > 1
+                )
+                if (
+                    (backend is None or not backend.is_sparse())
+                    and not use_dcp
+                    and not requires_contiguous_pa_kv_cache(layer, vllm_config, layer_spec)
                 ):
                     kv_cache_raw_tensors[layer_name] = _allocate_int8_cache_tensor(layer_size, alignment, device)
                     continue

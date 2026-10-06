@@ -68,6 +68,7 @@ _CURRENT_STREAM = None
 _GLOBAL_STREAM = None
 _SHARED_EXPERTS_CALCULATION_STREAM = None
 _CP_CHUNKEDPREFILL_COMM_STREAM = None
+_CP_DECODE_COMM_STREAM = None
 _ASCEND_CUSTOMOP_IS_REIGISTERED = False
 _DEFAULT_BUFFER_SIZE = 200
 _MIN_DP_BUFFER_SIZE = 50
@@ -654,6 +655,13 @@ def cp_chunkedprefill_comm_stream() -> torch.npu.Stream:
     if _CP_CHUNKEDPREFILL_COMM_STREAM is None:
         _CP_CHUNKEDPREFILL_COMM_STREAM = torch_npu.npu.Stream()
     return _CP_CHUNKEDPREFILL_COMM_STREAM
+
+
+def cp_decode_comm_stream() -> torch.npu.Stream:
+    global _CP_DECODE_COMM_STREAM
+    if _CP_DECODE_COMM_STREAM is None:
+        _CP_DECODE_COMM_STREAM = torch_npu.npu.Stream()
+    return _CP_DECODE_COMM_STREAM
 
 
 def attention_calculation_stream() -> torch.npu.Stream:

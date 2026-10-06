@@ -12,6 +12,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config, set_current_vllm_config
 from vllm.distributed.parallel_state import (
+    get_dcp_group,
     get_pp_group,
     get_tp_group,
     get_world_group,
@@ -658,8 +659,22 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     def _maybe_update_metadata(self, att_backend, multi_steps_attn_metadata):
         if use_updatable_graph(att_backend):
             update_params = []
-            for per_step_metadata in multi_steps_attn_metadata:
+            for draft_step, per_step_metadata in enumerate(multi_steps_attn_metadata):
                 for layer_name, metadata in per_step_metadata.items():
+                    if getattr(metadata, "decode", None) is not None:
+                        # Import lazily: attention backends also import spec-decode utilities.
+                        from vllm_ascend.attention.context_parallel.attention_cp import build_dcp_fia_params
+
+                        update_params.extend(
+                            build_dcp_fia_params(
+                                layer_name,
+                                metadata,
+                                get_dcp_group().rank_in_group,
+                                is_draft_model=True,
+                                is_draft_model_prefill=draft_step == 0,
+                            )
+                        )
+                        continue
                     update_params.append(
                         {
                             "layer_name": layer_name,
@@ -2128,9 +2143,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             dcp_manager.prepare_spec_decode_drafting_cp_metadata(
                 common_attn_metadata=common_attn_metadata,
                 kv_cache_spec=kv_cache_spec,
-                seq_lens=ori_seq_len,
-                draft_index=draft_index,
-                seq_lens_cpu=ori_seq_len_cpu,
             )
         group_common_attn_metadata = self._common_attn_metadata_for_draft_group(
             common_attn_metadata,
@@ -2150,7 +2162,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 kv_cache_spec=kv_cache_spec,
                 seq_lens=ori_seq_len,
                 draft_index=draft_index,
-                seq_lens_cpu=ori_seq_len_cpu,
                 attn_metadata_builder=attn_metadata_builder,
             )
 

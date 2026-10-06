@@ -1,3 +1,4 @@
+from enum import Enum
 from typing import Any
 
 import torch
@@ -7,6 +8,33 @@ from vllm.distributed import get_dcp_group, get_pcp_group, get_tp_group
 
 import vllm_ascend.ops.triton.dcp.dcp_a2a  # noqa: F401
 from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
+
+
+class CPKVScope(str, Enum):
+    """KV ranges used by context-parallel attention."""
+
+    HISTORY = "history"
+    CURRENT = "current"
+    FULL = "full"
+
+
+def use_history_current_split_decode(
+    attn_metadata: Any,
+    *,
+    is_draft_model: bool = False,
+    is_draft_model_prefill: bool = False,
+    use_spec_decode: bool = False,
+) -> bool:
+    """Choose one split policy for MLA and GQA decode attention."""
+    if not attn_metadata.causal or attn_metadata.decode is None:
+        return False
+    # Preserve the task layout of speculative target and draft-prefill graphs.
+    if is_draft_model_prefill or (use_spec_decode and not is_draft_model):
+        return True
+    decode = attn_metadata.decode
+    assert decode is not None and decode.actual_seq_lengths_q is not None
+    query_ends = decode.actual_seq_lengths_q
+    return any(end - start > 1 for start, end in zip([0] + query_ends[:-1], query_ends))
 
 
 def get_cp_local_query_key_lens(

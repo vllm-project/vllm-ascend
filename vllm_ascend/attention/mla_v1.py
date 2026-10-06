@@ -30,6 +30,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.context_parallel.common_cp import use_history_current_split_decode
 from vllm_ascend.attention.utils import (
     MLAPO_MAX_SUPPORTED_TOKENS,
     AscendCommonAttentionMetadata,
@@ -849,6 +850,7 @@ class AscendMLAImpl(MLAAttentionImpl):
     W_UV: torch.Tensor
     W_UK_T: torch.Tensor
     _dcp_current_kv_buffers: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None
+    needs_dcp_current_kv: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -1531,9 +1533,6 @@ class AscendMLAImpl(MLAAttentionImpl):
             return k_pe, k_nope
         return kv_cache[1], kv_cache[0]
 
-    def _decode_requires_current_kv(self, attn_metadata: AscendMLAMetadata) -> bool:
-        return False
-
     def exec_kv_decode(
         self,
         kv_no_split: torch.Tensor,
@@ -1934,7 +1933,12 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         bsz = attn_metadata.num_decode_tokens
         history_slots = attn_metadata.slot_mapping[:bsz]
-        return_current_kv = self._decode_requires_current_kv(attn_metadata)
+        return_current_kv = self.needs_dcp_current_kv and use_history_current_split_decode(
+            attn_metadata,
+            is_draft_model=_EXTRA_CTX.is_draft_model,
+            is_draft_model_prefill=_EXTRA_CTX.is_draft_model_prefill,
+            use_spec_decode=self.speculative_config is not None,
+        )
         if return_current_kv:
             # DCP attention needs every current row, while the paged cache keeps
             # only this rank's history. Use the existing prolog cache outputs for
@@ -2122,7 +2126,12 @@ class AscendMLAImpl(MLAAttentionImpl):
             decode_q_pe = (decode_q_pe / dequant_scale_q_nope.unsqueeze(-1) / self.fak_descale_float).to(torch.bfloat16)
         decode_slots = attn_metadata.slot_mapping[:num_decode_tokens:1]
         decode_kv_no_split = kv_no_split[:num_decode_tokens]
-        return_current_kv = self._decode_requires_current_kv(attn_metadata)
+        return_current_kv = self.needs_dcp_current_kv and use_history_current_split_decode(
+            attn_metadata,
+            is_draft_model=_EXTRA_CTX.is_draft_model,
+            is_draft_model_prefill=_EXTRA_CTX.is_draft_model_prefill,
+            use_spec_decode=self.speculative_config is not None,
+        )
         kv_result = self.exec_kv_decode(
             decode_kv_no_split,
             cos,
@@ -2242,7 +2251,12 @@ class AscendMLAImpl(MLAAttentionImpl):
             gate = self.g_proj(hidden_states.contiguous())[0]
 
         # MLA Preprocess
-        requires_current_kv = self._decode_requires_current_kv(attn_metadata)
+        requires_current_kv = self.needs_dcp_current_kv and use_history_current_split_decode(
+            attn_metadata,
+            is_draft_model=_EXTRA_CTX.is_draft_model,
+            is_draft_model_prefill=_EXTRA_CTX.is_draft_model_prefill,
+            use_spec_decode=self.speculative_config is not None,
+        )
         can_use_dcp_prolog = (
             self.enable_mlapo
             and not self.fa_quant_layer

@@ -380,6 +380,7 @@ def test_init_decode_draft_attn_metadatas_gqa():
     """Test draft decode metadata initialization for GQA."""
     speculator = AscendAutoRegressiveSpeculator.__new__(AscendAutoRegressiveSpeculator)
     speculator.attn_architecture = "GQA"
+    speculator.use_dcp = False
     speculator.input_batch = SimpleNamespace(
         num_reqs=2,
         seq_lens_cpu_upper_bound=torch.tensor([10, 20]),
@@ -433,6 +434,7 @@ def test_build_fia_params_prefill():
     speculator = AscendAutoRegressiveSpeculator.__new__(AscendAutoRegressiveSpeculator)
     block_table = torch.arange(12).reshape(4, 3)
     metadata = SimpleNamespace(block_tables=block_table, actual_seq_lengths_q=[1, 2], seq_lens_list=[10, 20])
+    speculator.use_dcp = False
     speculator.model_state = SimpleNamespace(attn_metadata={"draft": metadata})
     speculator.draft_attn_layer_names = {"draft"}
     result = speculator.build_fia_params(3, {"draft": metadata}, True)
@@ -446,6 +448,7 @@ def test_build_fia_params_prefill():
 def test_build_fia_params_decode():
     """Test building FIA parameters for decode."""
     speculator = AscendAutoRegressiveSpeculator.__new__(AscendAutoRegressiveSpeculator)
+    speculator.use_dcp = False
     metadata = SimpleNamespace(block_tables=torch.arange(12).reshape(4, 3))
     speculator.model_state = SimpleNamespace(attn_metadata={"draft": metadata})
     speculator.draft_attn_layer_names = {"draft"}

@@ -30,25 +30,89 @@ def test_gqa_dcp_extends_v1_backend_without_polluting_base_metadata() -> None:
         AscendAttentionMetadataBuilder,
     )
     assert AscendAttentionDCPMetadataBuilder.metadata_cls is (AscendAttentionDCPMetadata)
-    assert not hasattr(AscendMetadata(), "decode_meta")
+    assert not hasattr(AscendMetadata(), "decode")
     assert not hasattr(AscendMetadata(), "prefill")
 
 
 def test_dcp_chunked_request_mask_marks_nonempty_contexts() -> None:
-    local_context_lens = torch.tensor(
-        [
-            [0, 0],
-            [4, 0],
-            [0, 7],
-        ],
-        dtype=torch.int32,
-    )
+    local_context_lens = torch.tensor([0, 4, 7], dtype=torch.int32)
 
     assert AscendAttentionDCPMetadataBuilder._get_chunked_req_mask(local_context_lens) == [
         False,
         True,
         True,
     ]
+
+@pytest.mark.parametrize("size", [2, 4])
+@pytest.mark.parametrize("rank", [0, 1])
+@pytest.mark.parametrize("interleave", [1, 8])
+def test_dcp_chunked_prefill_keeps_host_parameters_and_device_history_separate(size, rank, interleave):
+    builder = object.__new__(AscendAttentionDCPMetadataBuilder)
+    builder.chunked_prefill_enabled = True
+    builder.dcp_size, builder.dcp_rank = size, rank
+    builder.device = torch.device("cpu")
+    builder.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=interleave))
+    # Include a decode request and a prefill request with no cached history.
+    seq_lens = torch.tensor([11, 20, 5, 14], dtype=torch.int32)
+    query_lens = torch.tensor([1, 3, 5, 6], dtype=torch.int32)
+    common = SimpleNamespace(
+        seq_lens=seq_lens.clone(),
+        query_start_loc=torch.cat([torch.zeros(1, dtype=torch.int32), query_lens.cumsum(0)]),
+        dcp_local_seq_lens_cpu=torch.tensor([
+            sum((position // interleave) % size == rank for position in range(length))
+            for length in seq_lens.tolist()
+        ], dtype=torch.int32),
+    )
+    tensor_to = torch.Tensor.to
+
+    def reject_all_rank_transfer(tensor, *args, **kwargs):
+        assert tensor.ndim != 2, "All-rank history lengths must stay on CPU"
+        return tensor_to(tensor, *args, **kwargs)
+
+    with patch.object(torch.Tensor, "to", reject_all_rank_transfer):
+        metadata = builder._build_backend_metadata(
+            common,
+            block_table=torch.zeros(4, 2, dtype=torch.int32),
+            query_lens=query_lens,
+            seq_lens=seq_lens,
+            num_decodes=1,
+            num_prefills=3,
+        )
+    chunked = metadata["prefill"].chunked_context
+    expected = [
+        sum((position // interleave) % size == rank for position in range(length))
+        for length in [17, 0, 8]
+    ]
+    torch.testing.assert_close(chunked.local_context_lens, torch.tensor(expected, dtype=torch.int32))
+    assert chunked.actual_seq_lengths_kv == np.cumsum(expected).tolist()
+    assert chunked.chunked_req_mask == [True, False, True]
+    assert chunked.local_total_toks == sum(expected)
+    assert chunked.chunk_seq_mask_filtered_indices.tolist() == [0, 1, 2, 8, 9, 10, 11, 12, 13]
+    assert chunked.starts.tolist() == [0, 0, 0]
+
+
+@pytest.mark.parametrize("rank", [0, 1])
+def test_dcp_decode_builder_consumes_producer_local_lengths(rank):
+    builder = object.__new__(AscendAttentionDCPMetadataBuilder)
+    builder.dcp_size, builder.dcp_rank = 2, rank
+    builder.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=8))
+    # The producer's local bound can differ from a recomputed global bound.
+    local_lengths = torch.tensor([101, 202, 303], dtype=torch.int32)
+    common = SimpleNamespace(dcp_local_seq_lens_cpu=local_lengths)
+    result = builder._build_backend_metadata(
+        common,
+        block_table=torch.zeros(3, 2, dtype=torch.int32),
+        query_lens=torch.tensor([3, 5, 1], dtype=torch.int32),
+        seq_lens=torch.tensor([13, 23, 31], dtype=torch.int32),
+        num_decodes=2,
+        num_prefills=0,
+    )
+    np.testing.assert_array_equal(result["decode"].num_computed_tokens_of_dcp[:, rank], [101, 202])
+    expected = [
+        sum((position // 8) % 2 == rank for position in range(length))
+        for length in [10, 18]
+    ]
+    assert result["decode"].cp_history_seq_len == expected
 
 
 def test_dcp_decode_metadata_keeps_rank_local_context_lengths() -> None:
@@ -97,6 +161,7 @@ def test_dcp_split_uses_builder_config_without_current_context(is_consumer, is_p
     dcp.assert_called_once_with()
     builder.vllm_config = config
     builder.decode_threshold = 3
+    builder.speculative_config = None
     query_start_loc = torch.tensor([0, query_lens[0], sum(query_lens)], dtype=torch.int32)
     common = SimpleNamespace(
         context_parallel_metadata=None,
