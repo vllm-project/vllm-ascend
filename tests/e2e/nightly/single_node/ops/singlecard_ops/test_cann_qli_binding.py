@@ -7,8 +7,8 @@ The official return_value=1 path is not supported by the custom candidate API.
 """
 
 from functools import partial
+from importlib import import_module
 
-import cann_ops_transformer  # noqa: F401
 import pytest
 import torch
 import torch_npu  # noqa: F401
@@ -24,6 +24,8 @@ def test_cann_qli_against_cpu(quant_mode, batch, qlen, klen, return_value):
     # explicitly so the official and renamed custom registrations coexist.
     bootstrap_custom_op_env()
     import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401
+
+    import_module("cann_ops_transformer")
 
     torch.manual_seed(123)
     heads, dim, block_size, topk = 64, 128, 128, 2048
