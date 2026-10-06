@@ -1,11 +1,4 @@
-"""Error-path tests for load_balance_proxy_layerwise_server_example.
-
-The layerwise proxy books a decoder's load and registers the request batch
-before it builds the streaming response, but releases both only from
-``generate_stream``'s ``finally`` - which runs when the response body is
-iterated, not when the handler returns. Any failure in between used to leak
-permanently.
-"""
+"""Regression tests for layerwise proxy setup failures and cancellation cleanup."""
 
 import argparse
 import asyncio
@@ -21,8 +14,6 @@ from examples.disaggregated_prefill_v1 import (  # noqa: E402
 
 
 class _FakeRequest:
-    """Minimal stand-in for a starlette Request."""
-
     def __init__(self, payload: dict):
         self._payload = payload
 
@@ -34,9 +25,16 @@ class _FakeRequest:
 
 
 @pytest.fixture
-def state():
-    proxy.global_args = argparse.Namespace(host="127.0.0.1", port=9000, max_retries=1, retry_delay=0.0)
-    proxy.proxy_state = proxy.ProxyState([("127.0.0.1", 8100)], [("127.0.0.1", 8200)])
+def state(monkeypatch):
+    monkeypatch.setattr(
+        proxy,
+        "global_args",
+        argparse.Namespace(host="127.0.0.1", port=9000, max_retries=1, retry_delay=0.0),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        proxy, "proxy_state", proxy.ProxyState([("127.0.0.1", 8100)], [("127.0.0.1", 8200)]), raising=False
+    )
     return proxy.proxy_state
 
 
@@ -49,8 +47,7 @@ def _assert_nothing_booked(state) -> None:
 
 
 def test_a_malformed_chat_body_books_nothing(state):
-    """``messages[0]`` runs after the decoder is booked and the batch
-    registered, so its IndexError used to strand both forever."""
+    """A setup failure must release decoder load and request bookkeeping."""
     request = _FakeRequest({"messages": [], "max_tokens": 4})
 
     with pytest.raises(IndexError):
@@ -59,9 +56,43 @@ def test_a_malformed_chat_body_books_nothing(state):
     _assert_nothing_booked(state)
 
 
+def test_cancelled_response_setup_releases_booking_without_error_output(state, monkeypatch, capsys):
+    def cancel_response(*args, **kwargs):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(proxy, "StreamingResponse", cancel_response)
+    request = _FakeRequest({"messages": [{"role": "user", "content": "hi"}]})
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(proxy._handle_completions("/chat/completions", request))
+
+    _assert_nothing_booked(state)
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert output.err == ""
+
+
+def test_cancelled_stream_releases_its_booking(state, monkeypatch):
+    async def cancel_stream(*args, **kwargs):
+        yield b"data: [DONE]\n\n"
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(proxy, "stream_service_response_with_retry", cancel_stream)
+
+    async def run():
+        response = await proxy._handle_completions(
+            "/chat/completions", _FakeRequest({"messages": [{"role": "user", "content": "hi"}]})
+        )
+        with pytest.raises(asyncio.CancelledError):
+            async for _ in response.body_iterator:
+                pass
+
+    asyncio.run(run())
+    _assert_nothing_booked(state)
+
+
 def test_a_completed_stream_releases_its_booking(state, monkeypatch):
-    """The happy path must still release exactly once - a double release would
-    drive the decoder's load below zero."""
+    """A completed stream must release decoder load exactly once."""
 
     async def _no_chunks(*args, **kwargs):
         if False:  # pragma: no cover - makes this an async generator

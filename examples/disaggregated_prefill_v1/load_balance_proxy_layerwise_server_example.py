@@ -93,6 +93,7 @@ import ipaddress
 import json
 import os
 import sys
+import traceback
 import uuid
 from contextlib import asynccontextmanager
 
@@ -629,22 +630,17 @@ async def _handle_completions(api: str, request: Request):
         request_handed_off = True
         return response
     except BaseException as e:
-        import traceback
-
-        exc_info = sys.exc_info()
-        print(f"Error occurred in disagg prefill proxy server - {api} endpoint")
-        print(e)
-        print("".join(traceback.format_exception(*exc_info)))
         if not request_handed_off:
-            # `generate_stream` never started, so its `finally` will not run:
-            # release what has already been accounted for instead of leaking the
-            # decoder's load and the request records for the lifetime of the
-            # process. A malformed chat body (e.g. `{"messages": []}`) is enough
-            # to get here.
+            # The response has not taken ownership of cleanup yet.
             if decoder_idx is not None:
                 proxy_state.release_decoder(decoder_idx, decoder_score)
             if registered_request_id is not None:
                 await proxy_state.cleanup_request_batch(registered_request_id)
+        if isinstance(e, Exception):
+            exc_info = sys.exc_info()
+            print(f"Error occurred in disagg prefill proxy server - {api} endpoint")
+            print(e)
+            print("".join(traceback.format_exception(*exc_info)))
         raise
 
 
