@@ -1365,6 +1365,7 @@ def test_v41_capture_keeps_compressed_indexer_branches(monkeypatch, capture, ful
         for_cudagraph_capture=capture,
         full_graph_mode=full_graph,
     )
+    assert builder.extra_kwargs is not None
     assert builder.extra_kwargs["full_graph_mode"] is (capture or full_graph)
 
 

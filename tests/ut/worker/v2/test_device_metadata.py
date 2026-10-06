@@ -96,7 +96,7 @@ def test_unretired_inputs_cannot_be_rebuilt(state, full):
 
 
 def test_failure_joins_only_submitted_stream(state, monkeypatch):
-    waits = []
+    waits: list[object] = []
     state.executor.stream = object()
     monkeypatch.setattr(module.torch.npu, "current_stream", lambda: SimpleNamespace(wait_stream=waits.append))
 

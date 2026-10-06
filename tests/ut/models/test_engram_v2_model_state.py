@@ -15,7 +15,7 @@ from vllm_ascend.worker.v2.model_states import deepseek_v41 as state_mod
 
 @pytest.fixture
 def runtime(monkeypatch):
-    calls = []
+    calls: list[tuple[object, ...]] = []
     main = SimpleNamespace(
         name="main",
         wait_stream=lambda stream: calls.append(("join", stream.name)),

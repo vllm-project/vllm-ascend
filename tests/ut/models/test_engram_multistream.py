@@ -16,7 +16,7 @@ from vllm_ascend.worker import model_runner_v1 as runner_mod
 
 @pytest.fixture
 def runtime(monkeypatch):
-    calls = []
+    calls: list[tuple[object, ...]] = []
     main = SimpleNamespace(
         name="main",
         wait_stream=lambda stream: calls.append(("join", stream.name)),

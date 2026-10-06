@@ -41,7 +41,8 @@ def test_deferred_metadata_keeps_compressor_state_outside_graph(in_graph, stage)
     builder._device_metadata_enabled = True
     builder._device_metadata_in_graph = in_graph
     builder._device_metadata_tasks = ()
-    shared, calls = {}, []
+    shared: dict[str, torch.Tensor] = {}
+    calls = []
     buffer = torch.zeros(1)
     assert builder._publish_task(shared, "shared", buffer, stage, lambda: calls.append(stage)) is buffer
     assert builder._publish_task(shared, "shared", torch.ones(1), stage, lambda: pytest.fail("duplicate")) is buffer
@@ -136,8 +137,16 @@ def test_index_selection_publishes_shared_output(monkeypatch, empty_cache):
 def test_qkv_projection_stream_choice(monkeypatch, a5, prefills, overlap_enabled, expected):
     impl = _impl(SimpleNamespace(is_kv_source=False))
     calls = []
-    monkeypatch.setattr(impl, "preprocess", lambda *args: calls.append("serial") or (None, None))
-    monkeypatch.setattr(impl, "multistream_preprocess", lambda *args: calls.append("multistream") or (None, None))
+
+    def preprocess(label):
+        def run(*args):
+            calls.append(label)
+            return None, None
+
+        return run
+
+    monkeypatch.setattr(impl, "preprocess", preprocess("serial"))
+    monkeypatch.setattr(impl, "multistream_preprocess", preprocess("multistream"))
     attn = SimpleNamespace(
         packed_cache_ops=object() if a5 else None,
         dsa_attn=SimpleNamespace(
