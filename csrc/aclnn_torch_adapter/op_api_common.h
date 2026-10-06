@@ -653,6 +653,34 @@ void ReleaseConvertTypes(Tuple &t) {
   CallRelease(t, std::make_index_sequence<size>{});
 }
 
+// Official QLI consumes logical FP4 dimensions, whereas PyTorch stores two
+// FP4 values per byte. Scope this conversion to the explicit official entry.
+struct CannQliTensor {
+  const at::Tensor& tensor;
+};
+
+inline aclTensor* ConvertType(const CannQliTensor& input) {
+  const auto& tensor = input.tensor;
+  if (tensor.scalar_type() != at::ScalarType::Float4_e2m1fn_x2) {
+    return ConvertType(tensor);
+  }
+  TORCH_CHECK(IsOpInputBaseFormat(tensor) && tensor.dim() > 0 && tensor.stride(-1) == 1,
+              "Official QLI FP4 tensors require base format and a packed contiguous last dimension");
+  auto shape = tensor.sizes().vec();
+  auto strides = tensor.strides().vec();
+  constexpr int64_t values_per_byte = 2;
+  shape.back() *= values_per_byte;
+  for (size_t axis = 0; axis + 1 < strides.size(); ++axis) {
+    strides[axis] *= values_per_byte;
+  }
+  int64_t storage_size = tensor.storage().nbytes() * values_per_byte;
+  static const auto create = GET_OP_API_FUNC(aclCreateTensor);
+  TORCH_CHECK(create != nullptr, "aclCreateTensor is unavailable");
+  return create(shape.data(), shape.size(), ACL_FLOAT4_E2M1, strides.data(),
+                tensor.storage_offset() * values_per_byte, ACL_FORMAT_ND,
+                &storage_size, 1, const_cast<void*>(tensor.storage().data()));
+}
+
 template <typename... Ts>
 constexpr auto ConvertTypes(Ts &... args) {
   return std::make_tuple(ConvertType(args)...);
@@ -702,11 +730,16 @@ typedef int (*InitHugeMemThreadLocal)(void *, bool);
 typedef void (*UnInitHugeMemThreadLocal)(void *, bool);
 typedef void (*ReleaseHugeMem)(void *, bool);
 
-#define EXEC_NPU_CMD(aclnn_api, ...)                                          \
+#define EXEC_NPU_CMD(aclnn_api, ...) \
+  EXEC_NPU_CMD_WITH_RESOLVER(GetOpApiFuncAddr, aclnn_api, __VA_ARGS__)
+
+// The resolver selects both operator entry points; tensor conversion and
+// runtime memory helpers retain their existing common-runtime behavior.
+#define EXEC_NPU_CMD_WITH_RESOLVER(resolver, aclnn_api, ...)                   \
   do {                                                                        \
     static const auto getWorkspaceSizeFuncAddr =                              \
-        GetOpApiFuncAddr(#aclnn_api "GetWorkspaceSize");                      \
-    static const auto opApiFuncAddr = GetOpApiFuncAddr(#aclnn_api);           \
+        resolver(#aclnn_api "GetWorkspaceSize");                              \
+    static const auto opApiFuncAddr = resolver(#aclnn_api);                   \
     static const auto initMemAddr =                                           \
         GetOpApiFuncAddr("InitHugeMemThreadLocal");                           \
     static const auto unInitMemAddr =                                         \

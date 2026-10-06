@@ -8,7 +8,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
-from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.device_op import A5DeviceAdaptor, DeviceOperator
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata
 from vllm_ascend.models.deepseek_v4.indexer import (
     AscendIndexerMetadata,
@@ -369,6 +370,45 @@ class TestIndexerForward:
 
 
 class TestIndexerOps:
+    def test_a5_select_topk_uses_official_qli(self):
+        ops = AscendIndexerOps(index_topk=3)
+        ops.device_operator = A5DeviceAdaptor
+        query = torch.ones((2, 2, 4), dtype=torch.float8_e4m3fn)
+        weights = torch.ones((2, 2), dtype=torch.float16)
+        query_scale = torch.ones((2, 2), dtype=torch.float16)
+        key = torch.empty_strided((2, 1, 1, 4), (8, 4, 4, 1), dtype=torch.float8_e4m3fn)
+        key_scale = torch.empty_strided((2, 1, 1, 1), (2, 1, 1, 1), dtype=torch.float32)
+        indices = torch.tensor([[[1, 2, 3]]], dtype=torch.int32)
+        metadata = SimpleNamespace(
+            qli_cu_seqlens_q=torch.tensor([0, 2], dtype=torch.int32),
+            qli_seqused_k=torch.tensor([1], dtype=torch.int32),
+            qli_cmp_residual_k=torch.tensor([0], dtype=torch.int32),
+            block_table=torch.zeros((1, 1), dtype=torch.int32),
+            qli_metadata=torch.zeros(1024, dtype=torch.int32),
+        )
+        cann = MagicMock(return_value=(indices, None))
+        legacy = MagicMock()
+        with (
+            patch("vllm_ascend.models.deepseek_v4.indexer.get_ascend_device_type", return_value=AscendDeviceType.A5),
+            patch.object(torch.ops._C_ascend, "npu_quant_lightning_indexer_v2_cann", cann, create=True),
+            patch.object(torch.ops._C_ascend, "npu_quant_lightning_indexer_v2", legacy, create=True),
+        ):
+            actual = ops.select_topk(query, weights, query_scale, key, key_scale, metadata)
+
+        assert actual is indices
+        legacy.assert_not_called()
+        args = cann.call_args.args
+        assert args[0] is query and args[1] is key
+        assert args[5:] == (3, 1)
+        assert args[2].dtype == torch.float32
+        assert args[3].dtype == torch.float32
+        assert args[4].dtype == torch.float32
+        assert args[1].stride(0) == 8
+        assert args[4].stride(0) == 2
+        assert cann.call_args.kwargs["metadata"] is metadata.qli_metadata
+        assert cann.call_args.kwargs["block_table"] is metadata.block_table
+        assert cann.call_args.kwargs["layout_k"] == "PA_BBND"
+
     def test_quantize_scatter_then_select_topk(self):
         indexer_ops = AscendIndexerOps(index_topk=3)
         key_cache = torch.empty((1, 1, 1, 4), dtype=torch.int8)
