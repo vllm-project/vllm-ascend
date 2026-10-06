@@ -8,8 +8,8 @@ vLLM Ascend provides two EPLB integration paths:
 
 - **Model Runner V2 (MRv2)** uses the upstream vLLM EPLB controller,
   configuration, default policy, load window, asynchronous worker, and
-  rearrangement lifecycle. Ascend adds Gloo CPU staging and the
-  `load_collection_phase` extension.
+  rearrangement lifecycle. Ascend adds the HIXL and Gloo movement adapters
+  and the `load_collection_phase` extension.
 - **Model Runner V1 (MRv1)** retains the legacy vLLM Ascend dynamic, recording,
   and static EPLB modes.
 
