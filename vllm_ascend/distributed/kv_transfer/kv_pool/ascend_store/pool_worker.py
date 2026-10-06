@@ -557,8 +557,7 @@ class KVPoolWorker:
                 physical_layers = set()
                 for layer_name in group_spec.layer_names:
                     physical_layer = self._extract_physical_layer_index(layer_name)
-                    physical_layer = self._global_to_local_layer[physical_layer]
-                    physical_layers.add(physical_layer)
+                    physical_layers.add(self._global_to_local_layer[physical_layer])
                 phys_to_layer_idx = {
                     physical_layer: layer_index for layer_index, physical_layer in enumerate(sorted(physical_layers))
                 }
