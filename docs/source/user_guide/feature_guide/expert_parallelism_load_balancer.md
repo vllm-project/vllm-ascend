@@ -120,18 +120,23 @@ MRv2 uses the upstream `EPLBConfig` fields:
 
 These fields may also be passed together as JSON through `--eplb-config`.
 They must not be placed in `--additional-config` for MRv2.
-Automatic selection uses HIXL when either the official `hixl` Python package
-distributed with CANN HIXL is importable or vllm_ascend's ctypes binding can
-load the local toolkit libraries (`libcann_hixl.so`, for CANN distributions
-that ship the library without the package). Otherwise it logs the fallback and
-uses `torch_gloo` CPU staging.
+Automatic selection requires the same HIXL binding class on every EPLB
+rank: each rank resolves either the official `hixl` Python package
+distributed with CANN HIXL or vllm_ascend's ctypes binding, which drives
+the local toolkit libraries directly (`libcann_hixl.so`, for CANN
+distributions that ship the library without the package). The ranks reach
+a group-wide consensus at startup; if any rank has no usable HIXL binding,
+or the binding classes differ between ranks, the whole group falls back to
+`torch_gloo` CPU staging and the decision is logged.
 
 STAIR leaves both per-rank and cross-node migration limits unrestricted by
 default (`-1`) so that HIXL can use the available bandwidth. When the
-communicator falls back to Gloo automatically, Ascend clamps
-`rank_transfer_limit` and `cross_node_transfer_limit` to `1` to avoid
-excessive CPU-staged transfers; explicitly setting `torch_gloo` keeps your
-configured limits.
+communicator falls back to Gloo automatically, Ascend clamps only the
+limits you have not set explicitly to `1` to avoid excessive CPU-staged
+transfers; explicitly configured values are kept (for example
+`cross_node_transfer_limit: 0` still forbids cross-node migrations) and a
+warning is logged. Explicitly setting `torch_gloo` or `hixl` also keeps
+your configured limits untouched.
 
 Ascend extends the upstream `policy` field without adding a second selector.
 For example, use `--eplb-config.policy default` to run the upstream policy;
