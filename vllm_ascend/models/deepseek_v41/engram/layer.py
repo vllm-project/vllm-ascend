@@ -6,7 +6,10 @@ import torch
 from torch import nn
 from vllm.model_executor.layers.linear import ReplicatedLinear
 
+from vllm_ascend.utils import is_950
+
 from .common import engram_gate
+from .gate import fused_engram_gate
 
 
 class AscendEngram(nn.Module):
@@ -36,6 +39,8 @@ class AscendEngram(nn.Module):
         rotation: torch.Tensor | None,
     ) -> torch.Tensor:
         kv = self.wkv(rows)
+        if rotation is None and hidden_states.device.type == "npu" and is_950():
+            return fused_engram_gate(hidden_states, kv, self.q_weight, self.k_weight, token_mask, self.eps)
         key, value = kv.split([self.hc_mult * self.dim, self.dim], -1)
         return engram_gate(
             hidden_states,

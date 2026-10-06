@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Ascend head-sharded Engram tables with BF16 or INT8 storage.
+"""Ascend head-sharded Engram tables with BF16, INT8 or native MXFP8 storage.
 
 Subclasses upstream ``ParallelEngramEmbedding`` and preserves its parameter
 and loader interface. Ascend supplies initialization, uniform head layout,
 storage and lookup; upstream rank selection and hash gathering are reused:
 
-* non-quantized checkpoints retain BF16 rows; quantized models use INT8 with
-  group-32 FP32 scales instead of upstream FP8/UE8M0;
+* BF16 and A5 MXFP8 checkpoints retain their original rows and scales;
+  INT8 checkpoints use group-32 FP32 scales;
 * the table is either NPU memory or CANN-registered host memory read through a
   chunked device pointer table.
 """
@@ -21,8 +21,6 @@ import torch.distributed as dist
 from safetensors import safe_open
 from torch import nn
 from vllm.distributed import (
-    get_engram_dp_group,
-    get_engram_dp_size,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
@@ -41,11 +39,17 @@ from .npu import (
     gather_dequantize_host_uva,
     quantize_engram_rows,
 )
-from .parallel import _gather_engram_rows, engram_head_shard_rank, gather_engram_hashes
+from .parallel import (
+    engram_head_shard_rank,
+    exchange_engram_rows,
+    gather_engram_hashes,
+    get_engram_dp_group,
+    get_engram_dp_size,
+)
 
 
 class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
-    """TP(+EDP) head shard, preserving BF16 or using INT8 + FP32 scales."""
+    """TP(+EDP) head shard with BF16, INT8/FP32 or native MXFP8/E8M0."""
 
     def __init__(
         self,
@@ -59,19 +63,18 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         storage_dtype: torch.dtype = torch.int8,
     ) -> None:
         self.storage_dtype = storage_dtype
+        if storage_dtype not in (torch.bfloat16, torch.int8, torch.float8_e4m3fn):
+            raise ValueError(f"Unsupported Engram storage dtype: {storage_dtype}")
+        self.scale_dtype = torch.uint8 if storage_dtype == torch.float8_e4m3fn else torch.float32
         self.cpu_offload = cpu_offload
         self.layer_hash_index = layer_hash_index
         self._shared_group = None
-        # The table is sharded and exchanged inside one node. The EDP group is
-        # derived from the physical placement, but the TP heads are gathered
-        # every step, so the TP shards have to be on one node as well. EDP
-        # falling back to a single replica does not by itself guarantee that.
         if not all(in_the_same_node_as(get_tp_group().cpu_group)):
             raise ValueError("Ascend Engram requires the TP ranks of one replica to stay on a single node")
         group = get_engram_dp_group()
         if group is not None and not all(in_the_same_node_as(group.cpu_group)):
             raise ValueError(
-                "Ascend Engram requires all Engram DP replicas to share the same node and shared-memory namespace"
+                "Ascend Engram requires all DP replicas to share the same node and shared-memory namespace"
             )
         if dp_shared_memory:
             if group is None or group.world_size <= 1:
@@ -84,8 +87,9 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
             self.dp_size = max(get_engram_dp_size(), 1)
         self._codes_uva: HostUvaBuffer | SharedUvaBuffer | None = None
         self._scales_uva: HostUvaBuffer | SharedUvaBuffer | None = None
+        self._lookup_stream = None
         # The upstream constructor queries CUDA properties; keep its parameter
-        # contract with Ascend INT8 storage.
+        # contract with Ascend storage and device allocation.
         nn.Module.__init__(self)
         assert head_sizes and all(size > 0 for size in head_sizes)
         assert sum(head_sizes) <= num_embeddings
@@ -94,6 +98,8 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         self.block_size = block_size
         self.n_hash_cols = len(head_sizes)
         self.tp_size = get_tensor_model_parallel_world_size()
+        if cpu_offload and dp_shared_memory and self.tp_size == 1:
+            self._lookup_stream = torch.npu.Stream()
         num_shards, head_rank = self._get_shard_info()
         if self.n_hash_cols % num_shards:
             raise ValueError(
@@ -116,7 +122,8 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         if cpu_offload:
             set_weight_attrs(self.weight, {"dummy_weight_value": 0})
             if self.weight_scale_inv is not None:
-                set_weight_attrs(self.weight_scale_inv, {"dummy_weight_value": 1.0})
+                scale_one = 127 if self.scale_dtype == torch.uint8 else 1.0
+                set_weight_attrs(self.weight_scale_inv, {"dummy_weight_value": scale_one})
             logger.info(
                 "Engram table offloaded to registered host memory: %d rows x %d, %.2f GiB per rank",
                 self.part_num_embeddings,
@@ -137,7 +144,7 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         codes_shape = (self.part_num_embeddings, self.dim)
         scales_shape = (self.part_num_embeddings, self.dim // self.block_size)
         device = torch.device("npu", torch.npu.current_device())
-        quantized = self.storage_dtype == torch.int8
+        quantized = self.storage_dtype != torch.bfloat16
         if not self.cpu_offload:
             return (
                 # Zeroed, not empty: the engine profiles the model (and runs the
@@ -145,18 +152,18 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
                 # uninitialised rows poisons the stream enough to break the MoE
                 # routing later in that same forward.
                 torch.zeros(codes_shape, dtype=self.storage_dtype, device=device),
-                torch.zeros(scales_shape, dtype=torch.float32, device=device) if quantized else None,
+                torch.zeros(scales_shape, dtype=self.scale_dtype, device=device) if quantized else None,
             )
         if self._shared_group is not None:
             # One physical copy of the mapped range, registered by each
             # rank in the sharing group.
             self._codes_uva = SharedUvaBuffer(codes_shape, self.storage_dtype, device, self._shared_group)
             if quantized:
-                self._scales_uva = SharedUvaBuffer(scales_shape, torch.float32, device, self._shared_group)
+                self._scales_uva = SharedUvaBuffer(scales_shape, self.scale_dtype, device, self._shared_group)
             return self._codes_uva.tensor, self._scales_uva.tensor if self._scales_uva is not None else None
         self._codes_uva = HostUvaBuffer(codes_shape, self.storage_dtype, device)
         if quantized:
-            self._scales_uva = HostUvaBuffer(scales_shape, torch.float32, device)
+            self._scales_uva = HostUvaBuffer(scales_shape, self.scale_dtype, device)
             self._scales_uva.tensor.zero_()
         # Same reason as the device path: aclrtMallocHost hands back whatever
         # was in the pages, and the profiling forward looks up before the
@@ -274,6 +281,23 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
                     stop = min(chunk_start + chunk_rows, end)
                     offset = chunk_start - start
                     self.weight.data[offset : offset + stop - chunk_start].copy_(tensor[chunk_start:stop])
+            elif self.weight.dtype == torch.float8_e4m3fn:
+                if source_dtype not in ("F8_E4M3", "F8_E4M3FN"):
+                    raise ValueError(f"{key}: expected MXFP8 source for MXFP8 storage")
+                with safe_open(root / index[scale_key], framework="pt", device="cpu") as sf:
+                    scale = sf.get_slice(scale_key)
+                    if scale.get_dtype() != "F8_E8M0":
+                        raise ValueError(f"{scale_key}: MXFP8 requires E8M0 scales")
+                    for chunk_start in range(start, end, chunk_rows):
+                        stop = min(chunk_start + chunk_rows, end)
+                        offset = chunk_start - start
+                        target_end = offset + stop - chunk_start
+                        # Preserve the checkpoint bits; uint8 scales hold the
+                        # E8M0 exponent, not a numerically cast integer value.
+                        self.weight.data[offset:target_end].view(torch.uint8).copy_(
+                            tensor[chunk_start:stop].view(torch.uint8)
+                        )
+                        self.weight_scale_inv.data[offset:target_end].copy_(scale[chunk_start:stop].view(torch.uint8))
             elif source_dtype in ("I8", "INT8"):
                 with safe_open(root / index[scale_key], framework="pt", device="cpu") as sf:
                     scale = sf.get_slice(scale_key)
@@ -284,9 +308,9 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
                         self.weight.data[offset:target_end].copy_(tensor[chunk_start:stop])
                         self.weight_scale_inv.data[offset:target_end].copy_(scale[chunk_start:stop])
             elif source_dtype in ("F8_E4M3", "F8_E4M3FN"):
-                # A5 ships an MXFP8 Engram table, not unscaled floating-point
-                # rows. Decode the checkpoint's E8M0 group-32 scales before
-                # requantizing into the runtime's INT8 + FP32 representation.
+                # Older devices use INT8/FP32 storage. Decode the checkpoint's
+                # E8M0 group-32 scales before requantizing; A5 takes the native
+                # bit-preserving load path above.
                 with safe_open(root / index[scale_key], framework="pt", device="cpu") as sf:
                     scale = sf.get_slice(scale_key)
                     for chunk_start in range(start, end, chunk_rows):
@@ -326,12 +350,43 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         )
         self.lookup(gathered, out)
         if self.dp_size > 1:
-            out = _gather_engram_rows(out, num_tokens)
+            out = exchange_engram_rows(out, num_tokens)
         else:
             out = out[:num_tokens]
         if self.tp_size > 1:
             out = tensor_model_parallel_all_gather(out, dim=1)
         return out[:, : self.n_hash_cols]
+
+    def embed_gathered_async(self, gathered: torch.Tensor, num_tokens: int, output: torch.Tensor, done=None):
+        """Launch a shared TP1 lookup on the shared producer NPU stream."""
+        if self._lookup_stream is None or self.dp_size != 1 or self.tp_size != 1:
+            raise RuntimeError("async Engram lookup requires shared host storage with TP1")
+        target = output[:num_tokens].view(num_tokens, self.n_hash_cols, self.dim)
+        main_stream = torch.npu.current_stream()
+        stream = self._lookup_stream
+        stream.wait_stream(main_stream)
+        gathered.record_stream(stream)
+        output.record_stream(stream)
+        try:
+            with torch.npu.stream(stream):
+                self.lookup(gathered, target)
+                if done is None:
+                    done = torch.npu.Event()
+                done.record(stream)
+        except Exception:
+            main_stream.wait_stream(stream)
+            raise
+        return done
+
+    @staticmethod
+    def wait_lookup(done, external: bool = False) -> None:
+        """Make the current stream wait for an asynchronous table lookup."""
+        stream = torch.npu.current_stream()
+        if external:
+            done.wait(stream)
+            done.reset(stream)
+        else:
+            stream.wait_event(done)
 
     def forward(self, indices: torch.Tensor) -> torch.Tensor:
         """indices: [num_tokens, n_hash_cols] -> [num_tokens, n_hash_cols, dim].
@@ -376,14 +431,40 @@ def _torch_lookup(embed: AscendParallelEngramEmbedding, indices, out) -> None:
     columns = indices[:, embed.head_start : embed.head_start + heads].long()
     owned = (columns >= embed.vocab_start_idx) & (columns < embed.vocab_end_idx)
     local = torch.where(owned, columns - embed.vocab_start_idx, 0).reshape(-1)
-    codes = torch.index_select(embed.weight.data, 0, local)
+    # CPU index_select does not implement all float8 dtypes.
+    if embed.weight.dtype == torch.float8_e4m3fn:
+        codes = torch.index_select(embed.weight.data.view(torch.uint8), 0, local).view(embed.weight.dtype)
+    else:
+        codes = torch.index_select(embed.weight.data, 0, local)
     if embed.weight_scale_inv is None:
         decoded = codes
     else:
         scales = torch.index_select(embed.weight_scale_inv.data, 0, local)
+        if scales.dtype == torch.uint8:
+            scales = torch.where(
+                scales == 255,
+                float("nan"),
+                torch.ldexp(torch.ones_like(scales, dtype=torch.float32), scales.int() - 127),
+            )
         decoded = (codes.float().unflatten(-1, (-1, embed.block_size)) * scales.unsqueeze(-1)).flatten(-2).bfloat16()
     decoded = decoded.view(indices.shape[0], heads, embed.dim)
     out[:, :heads].copy_(torch.where(owned.unsqueeze(-1), decoded, 0.0))
+
+
+def engram_storage_dtype(root, layer_id: int) -> torch.dtype:
+    """Choose storage from the table header, independently of dense-layer quantization."""
+    root = Path(root)
+    key = f"layers.{layer_id}.engram.embed.weight"
+    index = AscendParallelEngramEmbedding._checkpoint_index(root, key)
+    with safe_open(root / index[key], framework="pt", device="cpu") as file:
+        dtype = file.get_slice(key).get_dtype()
+    if dtype == "BF16":
+        return torch.bfloat16
+    if dtype in ("I8", "INT8"):
+        return torch.int8
+    if dtype in ("F8_E4M3", "F8_E4M3FN"):
+        return torch.float8_e4m3fn
+    raise ValueError(f"{key}: unsupported Engram checkpoint dtype {dtype}")
 
 
 def preflight_engram_checkpoint(root, layer_ids, embed_cls=AscendParallelEngramEmbedding) -> None:

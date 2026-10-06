@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """NPU-side Engram storage, routing and lookup.
 
-Tables are BF16 or INT8 with group-32 FP32 scales, sharded into contiguous hash
+Tables are BF16, INT8/FP32 or native MXFP8/E8M0, sharded into contiguous hash
 head buckets.  With ``EngramConfig.cpu_offload`` the shard stays in host memory:
 ``aclrtHostRegisterV2`` pins it and ``aclrtHostGetDevicePointer`` publishes the
 address the NPU gather kernel reads, so an offloaded table needs neither an H2D
@@ -26,6 +26,14 @@ SCALE_GROUP = 32
 CHUNK_ROWS = 1 << 22
 ACL_HOST_REG_MAPPED = 0x2
 ACL_HOST_REG_PINNED = 0x10000000
+
+
+def _host_register_flags() -> int:
+    from vllm_ascend.utils import is_950
+
+    # Ascend 950's CANN runtime rejects the A3 PINNED hint (107000).
+    # MAPPED registers both malloc-host buffers and shared-memory mappings.
+    return ACL_HOST_REG_MAPPED if is_950() else ACL_HOST_REG_MAPPED | ACL_HOST_REG_PINNED
 
 
 def engram_cpu_offload(vllm_config) -> bool:
@@ -61,6 +69,18 @@ def dequantize_engram_rows(codes, scale):
 
 
 @triton.jit
+def _decode_e8m0(scale):
+    # E8M0 has no sign or mantissa. 0 is 2^-127 (not FP32 zero),
+    # and 255 is NaN (not FP32 infinity).
+    # Ascend byte loads can sign-extend values >= 128 during widening.
+    exponent = scale.to(tl.int32) & 0xFF
+    bits = exponent << 23
+    bits = tl.where(exponent == 0, 0x00400000, bits)
+    bits = tl.where(exponent == 255, 0x7FC00000, bits)
+    return bits.to(tl.float32, bitcast=True)
+
+
+@triton.jit
 def _engram_int8_gather_dequant_kernel(
     weight_ptr,
     scale_ptr,
@@ -76,6 +96,7 @@ def _engram_int8_gather_dequant_kernel(
     LOCAL_HEADS: tl.constexpr,
     PAD_HEADS: tl.constexpr,
     QUANTIZED: tl.constexpr,
+    MXFP8: tl.constexpr,
 ):
     row = tl.program_id(0)
     if row >= rows:
@@ -96,6 +117,8 @@ def _engram_int8_gather_dequant_kernel(
     codes = tl.load(weight_ptr + local_row * WIDTH + offsets).to(tl.float32)
     if QUANTIZED:
         scales = tl.load(scale_ptr + local_row * (WIDTH // GROUP) + offsets // GROUP)
+        if MXFP8:
+            scales = _decode_e8m0(scales)
         codes = codes * scales
     result = codes.to(tl.bfloat16)
     tl.store(
@@ -117,7 +140,7 @@ def gather_dequantize_engram_int8(
     vocab_start: int = 0,
     vocab_end: int | None = None,
 ) -> torch.Tensor:
-    """Gather device rows, dequantizing INT8 when scales are supplied.
+    """Gather device rows, dequantizing INT8 or MXFP8 when scales are supplied.
 
     Returns ``[tokens * pad_heads, width]``; the head path views it as
     ``[tokens, pad_heads, width]``.
@@ -151,6 +174,7 @@ def gather_dequantize_engram_int8(
         LOCAL_HEADS=local_heads,
         PAD_HEADS=pad_heads,
         QUANTIZED=scales is not None,
+        MXFP8=weight.dtype == torch.float8_e4m3fn,
         num_warps=4,
     )
     return output
@@ -190,7 +214,7 @@ class HostUvaBuffer:
         self.buffer = (ctypes.c_char * size).from_address(self.pointer.value)
         self.tensor = torch.frombuffer(self.buffer, dtype=dtype).reshape(shape)
         try:
-            rc = self.lib.aclrtHostRegisterV2(self.pointer, size, ACL_HOST_REG_MAPPED | ACL_HOST_REG_PINNED)
+            rc = self.lib.aclrtHostRegisterV2(self.pointer, size, _host_register_flags())
             if rc:
                 raise RuntimeError(f"aclrtHostRegisterV2 failed: rc={rc} size={size}")
             address = ctypes.c_void_p()
@@ -252,29 +276,41 @@ def _engram_host_uva_gather_dequant_kernel(
     LOCAL_HEADS: tl.constexpr,
     PAD_HEADS: tl.constexpr,
     QUANTIZED: tl.constexpr,
+    MXFP8: tl.constexpr,
 ):
     row = tl.program_id(0)
     if row < rows:
         token = row // LOCAL_HEADS
         head_local = row % LOCAL_HEADS
         index = tl.load(ids + token * ids_stride_t + HEAD_START + head_local).to(tl.int64)
-        # The kernel owns the last line of defence: an id outside this shard
-        # must not become an address the pointer table is indexed with, whoever
-        # computed it.
         owned = (index >= vocab_start) & (index < vocab_end)
         local_row = tl.where(owned, index - vocab_start, 0)
         chunk = local_row // CHUNK
         local = local_row % CHUNK
-        if QUANTIZED:
+        if MXFP8:
+            codes = tl.load(codes_ptrs + chunk).to(tl.pointer_type(tl.float8e4nv))
+        elif QUANTIZED:
             codes = tl.load(codes_ptrs + chunk).to(tl.pointer_type(tl.int8))
         else:
             codes = tl.load(codes_ptrs + chunk).to(tl.pointer_type(tl.bfloat16))
         col = tl.arange(0, WIDTH)
         value = tl.load(codes + local * WIDTH + col).to(tl.float32)
         if QUANTIZED:
-            scales = tl.load(scales_ptrs + chunk).to(tl.pointer_type(tl.float32))
-            scale = tl.load(scales + local * (WIDTH // GROUP) + col // GROUP)
-            value = value * scale
+            if MXFP8:
+                scales = tl.load(scales_ptrs + chunk).to(tl.pointer_type(tl.uint8))
+            else:
+                scales = tl.load(scales_ptrs + chunk).to(tl.pointer_type(tl.float32))
+            if MXFP8:
+                # Read and decode each group scale once, then broadcast to
+                # its values instead of gathering WIDTH repeated bytes.
+                groups = tl.arange(0, WIDTH // GROUP)
+                scale = tl.load(scales + local * (WIDTH // GROUP) + groups)
+                scale = _decode_e8m0(scale)
+                value = tl.reshape(value, (WIDTH // GROUP, GROUP)) * scale[:, None]
+                value = tl.reshape(value, (WIDTH,))
+            else:
+                scale = tl.load(scales + local * (WIDTH // GROUP) + col // GROUP)
+                value = value * scale
         result = value.to(tl.bfloat16)
         tl.store(
             output + (token * PAD_HEADS + head_local) * WIDTH + col,
@@ -312,10 +348,11 @@ def gather_dequantize_host_uva(
     if rows == 0:
         return output
     init_device_properties_triton()
+    # The kernel widens loaded IDs to int64; no extra cast/copy is needed here.
     _engram_host_uva_gather_dequant_kernel[(rows,)](
         codes.ptrs,
         scales.ptrs if scales is not None else None,
-        ids.to(torch.int64),
+        ids,
         output,
         rows,
         vocab_start,
@@ -328,6 +365,98 @@ def gather_dequantize_host_uva(
         LOCAL_HEADS=local_heads,
         PAD_HEADS=pad_heads,
         QUANTIZED=scales is not None,
+        MXFP8=codes.tensor.dtype == torch.float8_e4m3fn,
+        num_warps=4,
+    )
+    return output
+
+
+@triton.jit
+def _engram_host_uva_gather_dequant_hbm_scale_kernel(
+    codes_ptrs,
+    scale_ptr,
+    ids,
+    output,
+    rows,
+    vocab_start,
+    vocab_end,
+    ids_stride_t,
+    CHUNK: tl.constexpr,
+    WIDTH: tl.constexpr,
+    GROUP: tl.constexpr,
+    HEAD_START: tl.constexpr,
+    LOCAL_HEADS: tl.constexpr,
+    PAD_HEADS: tl.constexpr,
+    MXFP8: tl.constexpr,
+):
+    row = tl.program_id(0)
+    if row < rows:
+        token = row // LOCAL_HEADS
+        head_local = row % LOCAL_HEADS
+        index = tl.load(ids + token * ids_stride_t + HEAD_START + head_local).to(tl.int64)
+        owned = (index >= vocab_start) & (index < vocab_end)
+        local_row = tl.where(owned, index - vocab_start, 0)
+        chunk = local_row // CHUNK
+        local = local_row % CHUNK
+        codes = tl.load(codes_ptrs + chunk).to(tl.pointer_type(tl.float8e4nv))
+        col = tl.arange(0, WIDTH)
+        value = tl.load(codes + local * WIDTH + col).to(tl.float32)
+        scale = tl.load(scale_ptr + local_row * (WIDTH // GROUP) + col // GROUP)
+        if MXFP8:
+            scale = _decode_e8m0(scale)
+        value = value * scale
+        result = value.to(tl.bfloat16)
+        tl.store(
+            output + (token * PAD_HEADS + head_local) * WIDTH + col,
+            tl.where(owned, result, tl.zeros_like(result)),
+        )
+
+
+def gather_dequantize_host_uva_hbm_scale(
+    codes: HostUvaBuffer,
+    scales: torch.Tensor,
+    ids: torch.Tensor,
+    *,
+    head_start: int = 0,
+    local_heads: int = 1,
+    pad_heads: int | None = None,
+    output: torch.Tensor | None = None,
+    vocab_start: int = 0,
+    vocab_end: int | None = None,
+) -> torch.Tensor:
+    """Gather host-UVA codes while reading group scales from NPU memory."""
+    from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
+
+    if scales.device.type != "npu" or not scales.is_contiguous():
+        raise ValueError("HBM Engram scales must be contiguous NPU memory")
+    if codes.tensor.dtype != torch.float8_e4m3fn:
+        raise ValueError("HBM-scale hybrid lookup currently targets native MXFP8 codes")
+    pad_heads = local_heads if pad_heads is None else pad_heads
+    width = codes.tensor.shape[-1]
+    vocab_end = codes.tensor.shape[0] if vocab_end is None else vocab_end
+    tokens = ids.shape[0]
+    rows = tokens * local_heads
+    if output is None:
+        output = torch.empty((tokens * pad_heads, width), dtype=torch.bfloat16, device=ids.device)
+    if rows == 0:
+        return output
+    init_device_properties_triton()
+    _engram_host_uva_gather_dequant_hbm_scale_kernel[(rows,)](
+        codes.ptrs,
+        scales,
+        ids,
+        output,
+        rows,
+        vocab_start,
+        vocab_end,
+        ids.stride(0),
+        CHUNK=CHUNK_ROWS,
+        WIDTH=width,
+        GROUP=SCALE_GROUP,
+        HEAD_START=head_start,
+        LOCAL_HEADS=local_heads,
+        PAD_HEADS=pad_heads,
+        MXFP8=True,
         num_warps=4,
     )
     return output
@@ -378,7 +507,7 @@ class SharedUvaBuffer:
                     self.shm = shared_memory.SharedMemory(name=name)
             assert self.shm.size >= size
             address_of_mapping = ctypes.c_void_p(ctypes.addressof(ctypes.c_char.from_buffer(self.shm.buf)))
-            rc = self.lib.aclrtHostRegisterV2(address_of_mapping, size, ACL_HOST_REG_MAPPED | ACL_HOST_REG_PINNED)
+            rc = self.lib.aclrtHostRegisterV2(address_of_mapping, size, _host_register_flags())
             if rc:
                 raise RuntimeError(f"aclrtHostRegisterV2 failed: rc={rc} size={size}")
             # Registration succeeded: from here on the mapping owes exactly one

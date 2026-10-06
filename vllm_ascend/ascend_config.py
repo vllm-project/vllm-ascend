@@ -424,6 +424,7 @@ class AscendConfig:
             "refresh": false,
             "enable_cpu_binding": true,
             "multistream_dsv4_dsa_overlap": true,
+            "multistream_engram_overlap": false,
             "enable_prefill_mc2": false,
             "multistream_overlap_shared_expert": false,
             "enable_kv_nz": false,
@@ -566,6 +567,10 @@ class AscendConfig:
     # ---- user-input switches: bool/int/list/str, auto type validation ----
     enable_cpu_binding: bool = True
     multistream_dsv4_dsa_overlap: bool = True
+    # Shared host Engram with TP1: publish lookups on a shared producer stream;
+    # FULL graphs wait on descriptor-specific external events at consumers.
+    # Opt in until the workload demonstrates an end-to-end benefit.
+    multistream_engram_overlap: bool = False
     enable_prefill_mc2: bool = False
     multistream_overlap_shared_expert: bool = False
     enable_kv_nz: bool = False

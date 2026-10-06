@@ -3324,6 +3324,10 @@ class NPUModelRunner(GPUModelRunner):
             else:
                 hidden_states = run_model()
                 self._update_full_graph_params_if_needed(forward_context, num_tokens_padded)
+        except Exception:
+            if model_inputs.get("engram_pending"):
+                self.model.retire_engram_lookups()
+            raise
         finally:
             # A forward that raises must still retire the device-metadata
             # submission: otherwise the next submit() refuses to start and a

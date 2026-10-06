@@ -25,7 +25,6 @@ from vllm_ascend.models.deepseek_v41.engram import npu
 from vllm_ascend.models.deepseek_v41.engram.common import engram_gate
 from vllm_ascend.models.deepseek_v41.engram.hash_state import DEAD_ID, AscendNgramHashState
 from vllm_ascend.models.deepseek_v41.engram.parallel import resolve_dp_shared_memory
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
 def test_shared_memory_needs_a_local_dp_peer(monkeypatch):
@@ -65,6 +64,34 @@ def test_loader_preserves_checkpoint_storage(tmp_path, quantized):
         assert torch.equal(table.weight_scale_inv, scales)
 
 
+from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+
+
+@pytest.mark.parametrize(
+    "enabled,shared,tp,mode,expected",
+    [
+        (True, True, 1, "FULL", True),
+        (True, True, 1, "NONE", True),
+        (False, True, 1, "FULL", False),
+        (True, False, 1, "FULL", False),
+        (True, True, 2, "FULL", False),
+        (True, True, 1, "PIECEWISE", False),
+    ],
+)
+def test_lookup_overlap_requires_shared_tp1_and_supported_runtime(monkeypatch, enabled, shared, tp, mode, expected):
+    from vllm.config import CUDAGraphMode
+
+    from vllm_ascend.models.deepseek_v41 import model as model_module
+
+    model = SimpleNamespace(_engram_overlap_enabled=enabled, engram_dp_shared_memory=shared)
+    monkeypatch.setattr(model_module, "get_tensor_model_parallel_world_size", lambda: tp)
+    monkeypatch.setattr(model_module, "is_forward_context_available", lambda: True)
+    monkeypatch.setattr(
+        model_module, "get_forward_context", lambda: SimpleNamespace(cudagraph_runtime_mode=CUDAGraphMode[mode])
+    )
+    assert model_module.DeepseekV41Model._can_defer_engram_lookup(model) is expected
+
+
 def test_bf16_gate_without_rotation():
     hidden = torch.ones(2, 4, 64, dtype=torch.bfloat16)
     value = torch.full((2, 64), 0.25, dtype=torch.bfloat16)
@@ -97,9 +124,7 @@ def test_loader_applies_mxfp8_checkpoint_scales(tmp_path):
     table.weight_scale_inv = torch.nn.Parameter(torch.empty((19, 2), dtype=torch.float32), requires_grad=False)
     table.load_checkpoint(tmp_path, key, chunk_rows=7)
     decoded = npu.dequantize_engram_rows(table.weight, table.weight_scale_inv)
-    expected = (
-        checkpoint_weight.float().unflatten(-1, (-1, 32)) * checkpoint_scale.float().unsqueeze(-1)
-    ).flatten(-2)
+    expected = (checkpoint_weight.float().unflatten(-1, (-1, 32)) * checkpoint_scale.float().unsqueeze(-1)).flatten(-2)
     torch.testing.assert_close(decoded.float(), expected, rtol=0, atol=0.02)
 
 
@@ -242,11 +267,12 @@ def test_engram_rejects_nonlocal_groups_before_allocation(monkeypatch, shared, r
 @pytest.mark.parametrize("dp_rank,num_tokens", [(2, 3), (3, 2), (3, 0)])
 def test_engram_gather_uses_the_local_edp_token_slice(monkeypatch, dp_rank, num_tokens):
     """A replica pads to its own EDP slot, never to another node's prefill."""
-    from vllm.models.deepseek_v41.nvidia import engram as parallel_mod
+    from vllm_ascend.models.deepseek_v41.engram import parallel as parallel_mod
 
     edp_group = SimpleNamespace(world_size=2, rank_in_group=dp_rank - 2, all_gather=lambda ids, dim=0: ids.repeat(2, 1))
     monkeypatch.setattr(parallel_mod, "get_engram_dp_group", lambda: edp_group)
     monkeypatch.setattr(parallel_mod, "get_dp_group", lambda: SimpleNamespace(rank_in_group=dp_rank))
+    monkeypatch.setattr(parallel_mod, "is_pd_decode_recompute_scheduler_enabled", lambda: False)
     # This EDP starts at global DP rank 2, so its slice is (4, 2) and not the
     # 9 tokens another node is prefilling.
     monkeypatch.setattr(
@@ -260,3 +286,49 @@ def test_engram_gather_uses_the_local_edp_token_slice(monkeypatch, dp_rank, num_
     for replica in gathered.reshape(2, 4, 5):
         torch.testing.assert_close(replica[:num_tokens], ids)
         assert (replica[num_tokens:] == parallel_mod.DEAD_ID).all()
+
+
+def test_native_mxfp8_preserves_shard_bits_and_lookup(tmp_path, monkeypatch):
+    key = "layers.1.engram.embed.weight"
+    scale_key = "layers.1.engram.embed.scale"
+    codes = torch.linspace(-32, 32, 19 * 64).reshape(19, 64).to(torch.float8_e4m3fn)
+    scale_bits = (torch.arange(19 * 2).reshape(19, 2) % 7 + 123).to(torch.uint8)
+    scales = scale_bits.view(torch.float8_e8m0fnu)
+    save_file({key: codes, scale_key: scales}, tmp_path / "model.safetensors")
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {key: "model.safetensors", scale_key: "model.safetensors"}})
+    )
+    assert embedding_mod.engram_storage_dtype(tmp_path, 1) == torch.float8_e4m3fn
+    embedding_mod.preflight_engram_checkpoint(tmp_path, [1])
+    table = object.__new__(embedding_mod.AscendParallelEngramEmbedding)
+    torch.nn.Module.__init__(table)
+    table._shared_group = None
+    table.vocab_start_idx, table.vocab_end_idx = 5, 17
+    table.block_size, table.dim = 32, 64
+    table.head_start, table.part_n_hash_cols = 1, 2
+    table.weight = torch.nn.Parameter(torch.empty((12, 64), dtype=torch.float8_e4m3fn), requires_grad=False)
+    table.weight_scale_inv = torch.nn.Parameter(torch.empty((12, 2), dtype=torch.uint8), requires_grad=False)
+    monkeypatch.setattr(embedding_mod, "quantize_engram_rows", Mock(side_effect=AssertionError("requantization")))
+    table.load_checkpoint(tmp_path, key, chunk_rows=5)
+    torch.testing.assert_close(table.weight.view(torch.uint8), codes[5:17].view(torch.uint8))
+    torch.testing.assert_close(table.weight_scale_inv, scale_bits[5:17])
+    ids = torch.tensor([[0, 5, 16], [0, -1, 19]])
+    out = torch.empty((2, 2, 64), dtype=torch.bfloat16)
+    embedding_mod._torch_lookup(table, ids, out)
+    reference = (codes.float().unflatten(-1, (-1, 32)) * scales.float().unsqueeze(-1)).flatten(-2).bfloat16()
+    torch.testing.assert_close(out[0], reference[[5, 16]], rtol=0, atol=0)
+    assert not out[1].any()
+
+
+def test_native_mxfp8_requires_e8m0_scales_before_allocation(tmp_path):
+    key = "layers.1.engram.embed.weight"
+    scale_key = "layers.1.engram.embed.scale"
+    save_file(
+        {key: torch.zeros(8, 64).to(torch.float8_e4m3fn), scale_key: torch.ones(8, 2)},
+        tmp_path / "model.safetensors",
+    )
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {key: "model.safetensors", scale_key: "model.safetensors"}})
+    )
+    with pytest.raises(ValueError, match="requires E8M0 scales"):
+        embedding_mod.preflight_engram_checkpoint(tmp_path, [1])

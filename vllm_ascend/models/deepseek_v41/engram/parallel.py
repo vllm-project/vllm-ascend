@@ -1,16 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Node-local Engram exchange with fixed slots for recompute decode."""
+"""Node-local Engram exchange with A5 recompute-decode fixed token slots.
+
+Reuse mainline EDP ownership and row exchange. The A5 scheduler can skip DP
+metadata synchronization, so hash gathering must retain its fixed-slot path.
+"""
 
 import torch
+import torch.distributed as dist
 from vllm.config import get_current_vllm_config
-from vllm.distributed import get_dp_group, get_tensor_model_parallel_rank
-from vllm.distributed.parallel_state import get_engram_dp_group, get_engram_dp_size
+from vllm.distributed import get_dp_group, get_engram_dp_group, get_engram_dp_size
 from vllm.forward_context import get_forward_context
 
 # Upstream #56741 normalized the V4.1 model package name.
 from vllm.models.deepseek_v41.common.engram import DEAD_ID
-from vllm.triton_utils import tl, triton
+from vllm.models.deepseek_v41.nvidia.engram import (
+    engram_head_shard_rank as engram_head_shard_rank,
+)
 
 from vllm_ascend.utils import get_potential_max_tokens, is_pd_decode_recompute_scheduler_enabled
 
@@ -18,18 +24,6 @@ from vllm_ascend.utils import get_potential_max_tokens, is_pd_decode_recompute_s
 def resolve_dp_shared_memory(requested: bool) -> bool:
     """A node with one DP replica uses ordinary TP shards, without sharing."""
     return requested and get_engram_dp_size() > 1
-
-
-def engram_head_shard_rank() -> int:
-    """This rank's slot among the hash-head shards of one engram table.
-
-    TP-major, so the shards a DP gather brings in are contiguous heads and
-    the following TP gather completes the head order.
-    """
-    dp_group = get_engram_dp_group()
-    dp_size = dp_group.world_size if dp_group is not None else 1
-    dp_rank = dp_group.rank_in_group if dp_group is not None else 0
-    return get_tensor_model_parallel_rank() * dp_size + dp_rank
 
 
 def engram_gathered_num_tokens() -> int:
@@ -79,66 +73,24 @@ def gather_engram_hashes(hash_ids: torch.Tensor, *, dp_shared_memory: bool = Fal
     return dp_group.all_gather(hash_ids, dim=0)
 
 
-@triton.jit(do_not_specialize=["num_tokens", "token_start", "num_elements"])
-def _engram_select_rows_kernel(
-    gathered,
-    output,
-    num_tokens,
-    token_start,
-    num_elements,
-    LOCAL_WIDTH: tl.constexpr,
-    WIDTH: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-):
-    offsets = tl.program_id(0).to(tl.int64) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    tokens = token_start + offsets // WIDTH
-    cols = offsets % WIDTH
-    source = (cols // LOCAL_WIDTH * num_tokens + tokens) * LOCAL_WIDTH
-    source += cols % LOCAL_WIDTH
-    values = tl.load(gathered + source, (offsets < num_elements) & (tokens < num_tokens), other=0)
-    tl.store(output + offsets, values, offsets < num_elements)
+def exchange_engram_rows(staged: torch.Tensor, num_tokens: int) -> torch.Tensor:
+    """Send each padded DP token block directly to its owning replica.
 
-
-def _engram_select_rows(
-    gathered: torch.Tensor,
-    output: torch.Tensor,
-    source_tokens: int,
-    token_start: int,
-    local_width: int,
-) -> None:
-    """Copy one token window out of a rank-major gathered buffer.
-
-    Both gathers land rank-major ([rank][token][local width]); this walks the
-    window the rank keeps and lays its ranks out side by side as width.
+    Input is [EDP * slot, local_heads, dim], in destination-rank order.
+    Each destination receives only its token block from every head owner,
+    instead of materializing every destination's block as all-gather does.
+    All ranks keep the same slot, including idle ranks with zero valid tokens.
     """
-    if output.numel() == 0:
-        return
-    _engram_select_rows_kernel[(triton.cdiv(output.numel(), 1024),)](
-        gathered,
-        output,
-        source_tokens,
-        token_start,
-        output.numel(),
-        local_width,
-        output.shape[1] * output.shape[2],
-        BLOCK_SIZE=1024,
-    )
-
-
-def _gather_engram_rows(staged: torch.Tensor, num_tokens: int) -> torch.Tensor:
-    """Exchange DP tokens for heads, retaining only this replica's tokens."""
-    dp_group = get_engram_dp_group()
-    assert dp_group is not None
-    slot, remainder = divmod(staged.shape[0], dp_group.world_size)
+    group = get_engram_dp_group()
+    assert group is not None
+    dp_size = group.world_size
+    slot, remainder = divmod(staged.shape[0], dp_size)
     assert remainder == 0 and 0 <= num_tokens <= slot
-    gathered = dp_group.all_gather(staged, dim=0)
+    if dp_size == 1:
+        return staged[:num_tokens]
     local_heads, dim = staged.shape[1:]
-    rows = staged.new_empty((num_tokens, dp_group.world_size * local_heads, dim))
-    _engram_select_rows(
-        gathered,
-        rows,
-        staged.shape[0],
-        dp_group.rank_in_group * slot,
-        local_heads * dim,
-    )
-    return rows
+    recv = torch.empty_like(staged)
+    dist.all_to_all_single(recv, staged.contiguous(), group=group.device_group)
+    # Received chunks are source-rank major; heads are contiguous across EDP.
+    rows = recv.view(dp_size, slot, local_heads, dim).permute(1, 0, 2, 3)
+    return rows[:num_tokens].reshape(num_tokens, dp_size * local_heads, dim)
