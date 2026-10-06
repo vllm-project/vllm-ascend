@@ -342,7 +342,7 @@ a3-560t:
         config_file_path: Qwen3-32B-Int8.yaml
         config_base_path: tests/e2e/cases/models/configs/Qwen
       - name: Qwen3-30B-QuaRot
-        os: linux-aarch64-a3-800i-2
+        os: linux-aarch64-a3-800i-16
         config_file_path: Qwen3-30B-QuaRot-eagle3.yaml
         config_base_path: tests/e2e/cases/models/configs/Qwen
       - name: Qwen3-32B-QuaRot
