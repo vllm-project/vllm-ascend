@@ -47,6 +47,7 @@ class DeepseekV41Indexer(nn.Module):
     ):
         super().__init__()
         self.owns_k = owns_k
+        self.qw_fusion = None
         self.dsv41_backend = DeviceOperator.get_deepseek_v41_backend()
         self.compress_ratio = compress_ratio
         self.n_heads = int(config.index_n_heads)
@@ -102,6 +103,14 @@ class DeepseekV41Indexer(nn.Module):
     def _output(linear, value):
         output = linear(value)
         return output[0] if isinstance(output, tuple) else output
+
+    def prepare_qw_fusion(self):
+        if self.dsv41_backend is None:
+            return
+        from vllm_ascend.ops.dsv41_a5.indexer_qw import IndexerQWFusion
+
+        if IndexerQWFusion.supports(self.wq_b, self.weights_proj, self.weights_scale):
+            self.qw_fusion = IndexerQWFusion(self.wq_b, self.weights_proj, self.weights_scale)
 
     def update_keys(self, latent, slots, cos, sin):
         """Publish source-owned index K before latent is RoPE'd as long KV."""
@@ -233,16 +242,21 @@ class DeepseekV41Indexer(nn.Module):
         block IDs only within this forward. Query quantization and position
         ordering stay outside the native QLI/candidate operator.
         """
-        candidate_shape = (query.shape[0], 1, candidate_topk_blocks)
+        # A fused projection publishes packed Q directly, without allocating
+        # a redundant BF16 query merely to carry its shape and device.
+        query_tensor = query if query is not None else quantized_query
+        if query_tensor is None:
+            raise ValueError("Indexer requires either BF16 or packed Q")
+        candidate_shape = (query_tensor.shape[0], 1, candidate_topk_blocks)
         topk = self.index_topk
-        if query.shape[0] == 0:
+        if query_tensor.shape[0] == 0:
             selected = (
-                torch.full((0, topk), -1, dtype=torch.int32, device=query.device)
+                torch.full((0, topk), -1, dtype=torch.int32, device=query_tensor.device)
                 if indices_output is None
                 else indices_output
             )
             if is_candidate_source:
-                candidates = torch.full(candidate_shape, -1, dtype=torch.int32, device=query.device)
+                candidates = torch.full(candidate_shape, -1, dtype=torch.int32, device=query_tensor.device)
             return selected, candidates
         if source_metadata.max_cache_seq_len == 0:
             if indices_output is not None:
@@ -252,12 +266,12 @@ class DeepseekV41Indexer(nn.Module):
             if is_candidate_source and candidate_lengths is not None:
                 candidate_lengths.zero_()
             selected = (
-                torch.full((query.shape[0], 0), -1, dtype=torch.int32, device=query.device)
+                torch.full((query_tensor.shape[0], 0), -1, dtype=torch.int32, device=query_tensor.device)
                 if indices_output is None
                 else indices_output
             )
             if is_candidate_source:
-                candidates = torch.full(candidate_shape, -1, dtype=torch.int32, device=query.device)
+                candidates = torch.full(candidate_shape, -1, dtype=torch.int32, device=query_tensor.device)
             return selected, candidates
 
         if self.dsv41_backend is not None:
