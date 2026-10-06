@@ -79,6 +79,10 @@ def _ascend_apply_eplb_mapping(self, topk_ids: torch.Tensor) -> torch.Tensor:
     expert_replica_routing_table = eplb_state.expert_replica_routing_table
     if expert_replica_routing_table is None:
         raise RuntimeError("Ascend EPLB expert replica routing table is not initialized.")
+    if getattr(eplb_state, "fused_map_record_active", False):
+        # Gating, replica mapping and load recording already ran in the fused
+        # Triton kernel; topk_ids are physical expert ids already.
+        return topk_ids
     return torch.ops.vllm.ascend_eplb_map_to_physical(
         topk_ids,
         expert_replica_routing_table,

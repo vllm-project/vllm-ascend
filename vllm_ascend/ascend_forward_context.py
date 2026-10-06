@@ -31,6 +31,14 @@ class MoECommType(Enum):
     FUSED_MC2 = 3
 
 
+class AscendAttentionState(Enum):
+    PrefillNoCache = 0
+    PrefillCacheHit = 1
+    DecodeOnly = 2
+    ChunkedPrefill = 3
+    SpecDecoding = 4
+
+
 _MRV2_IN_PROFILE_RUN: ContextVar[bool] = ContextVar("_MRV2_IN_PROFILE_RUN", default=False)
 
 
@@ -115,6 +123,10 @@ def set_ascend_forward_context(
     device_metadata_executor=None,
     has_sinks=False,
     eplb_heat_collection_status: bool = False,
+    # AscendAttentionState of the current step (or None before a batch is
+    # classified); annotated by name to avoid an import cycle with the
+    # attention module, which reads this context.
+    attn_state: AscendAttentionState | None = None,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -165,6 +177,7 @@ def set_ascend_forward_context(
             model_comm_methods[moe_comm_type] if model_comm_methods is not None else get_moe_comm_method(moe_comm_type)
         )
         forward_context.is_decode_only_node = _is_decode_only_node(vllm_config)
+        forward_context.attn_state = attn_state
         forward_context.use_mega_moe = use_cann_megamoe(vllm_config)
         forward_context.draft_moe_quant_type = draft_moe_quant_type
 
@@ -453,6 +466,9 @@ class _ExtraForwardContextProxy:
         "padded_num_tokens",
         "sinks",
         "eplb_heat_collection_status",
+        # AscendAttentionState of the current step, set by both model runners;
+        # None when the step has no batch classification (dummy/profile runs).
+        "attn_state",
     )
 
     def check_extra_attr(self, name: str):
