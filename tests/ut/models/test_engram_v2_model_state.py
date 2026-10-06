@@ -279,6 +279,9 @@ def test_forward_only_waits_external_events_on_full_runs(runtime, monkeypatch, m
 
 def make_state(model, monkeypatch):
     monkeypatch.setattr(state_mod, "_gather_lookback_kernel", MagicMock())
+    monkeypatch.setattr(
+        state_mod, "triton", SimpleNamespace(next_power_of_2=lambda value: 1 << (value - 1).bit_length())
+    )
     state = object.__new__(state_mod.AscendDeepseekV41ModelState)
     state.vllm_config = SimpleNamespace()
     state.max_num_reqs, state.device = 4, torch.device("cpu")
