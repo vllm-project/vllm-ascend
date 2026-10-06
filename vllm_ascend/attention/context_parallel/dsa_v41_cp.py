@@ -137,6 +137,7 @@ class AscendDSAV41CPImpl(AscendDSAV41Impl):
         hidden_states = hidden_states[start : start + swa_metadata.num_actual_tokens]
         kv_cos, kv_sin = global_metadata.rope(attn.rotary_emb.layername, kv_hidden_states.shape[0])
         swa_metadata = global_metadata.swa
+        write_cache_on_main = self._write_swa_cache_on_main_stream(attn, swa_metadata)
         main_stream = torch.npu.current_stream()
         aux_stream = dsv4_dsa_overlap_stream()
         v1_impl = attn.dsa_attn.dsa_attn.impl
@@ -174,13 +175,14 @@ class AscendDSAV41CPImpl(AscendDSAV41Impl):
                 rotary_mode="interleave",
                 partial_slice=[attn.nope_head_dim, attn.head_dim],
             )
-            # Keep CP's replicated-cache write on the same A5 backend path as
-            # the non-CP implementation. The legacy scatter op is unavailable
-            # in the packaged A5 OPP, and its 2-D coordinates do not describe
-            # the packed cache layout used by the A5 writer.
-            AscendDSAV41Impl._write_swa_cache(attn, swa_metadata, kv.squeeze(1))
+            if not write_cache_on_main:
+                AscendDSAV41Impl._write_swa_cache(attn, swa_metadata, kv.squeeze(1))
         q = wq_b.matmul(q_b_quant, q_b_scale, bias=attn.wq_b.bias).unflatten(-1, (attn.n_heads, attn.head_dim))
         main_stream.wait_stream(aux_stream)
+        if write_cache_on_main:
+            # CP writes replicated KV with global slots; keep the packaged A5
+            # writer on the captured stream for prefill and mixed batches.
+            AscendDSAV41Impl._write_swa_cache(attn, swa_metadata, kv.squeeze(1))
         torch.ops._C_ascend.inplace_partial_rotary_mul(
             q.unsqueeze(1),
             cos,

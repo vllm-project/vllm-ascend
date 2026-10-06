@@ -1624,10 +1624,10 @@ def test_v41_query_preparation_honors_multistream_setting(overlap):
     assert impl._prepare_queries(attn, "hidden", "positions", "cos", "sin", metadata) == ("q", "qr")
     selected = impl.multistream_preprocess if overlap else impl.preprocess
     selected.assert_called_once_with(attn, "hidden", "cos", "sin", metadata.swa)
-    impl._write_compressed_source.assert_called_once_with(attn, "hidden", "positions", "cos", "sin", metadata)
+    impl._write_compressed_source.assert_not_called()
 
 
-def test_v41_a5_prefill_keeps_cache_writes_on_current_stream():
+def test_v41_a5_prefill_selects_multistream_preparation():
     from unittest.mock import Mock
 
     from vllm_ascend.attention.dsa_v41 import AscendDSAV41Impl
@@ -1643,8 +1643,8 @@ def test_v41_a5_prefill_keeps_cache_writes_on_current_stream():
     metadata = SimpleNamespace(swa=SimpleNamespace(num_actual_tokens=6, num_prefills=1))
 
     assert impl._prepare_queries(attn, "hidden", "positions", "cos", "sin", metadata) == ("q", "qr")
-    impl.preprocess.assert_called_once_with(attn, "hidden", "cos", "sin", metadata.swa)
-    impl.multistream_preprocess.assert_not_called()
+    impl.multistream_preprocess.assert_called_once_with(attn, "hidden", "cos", "sin", metadata.swa)
+    impl.preprocess.assert_not_called()
 
 
 @pytest.mark.parametrize("overlap", [False, True])

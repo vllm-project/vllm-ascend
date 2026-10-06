@@ -83,21 +83,39 @@ def test_index_selection_publishes_shared_output(monkeypatch, empty_cache):
 
 
 @pytest.mark.parametrize(
-    ("a5", "prefills", "expected"),
-    [(False, 1, "multistream"), (True, 0, "multistream"), (True, 1, "serial")],
+    ("a5", "prefills", "overlap_enabled", "expected"),
+    [
+        (False, 1, True, "multistream"),
+        (True, 0, True, "multistream"),
+        (True, 1, True, "multistream"),
+        (True, 2, True, "multistream"),
+        (True, 1, False, "serial"),
+    ],
 )
-def test_qkv_projection_stream_choice(monkeypatch, a5, prefills, expected):
+def test_qkv_projection_stream_choice(monkeypatch, a5, prefills, overlap_enabled, expected):
     impl = _impl(SimpleNamespace(is_kv_source=False))
     calls = []
     monkeypatch.setattr(impl, "preprocess", lambda *args: calls.append("serial") or (None, None))
     monkeypatch.setattr(impl, "multistream_preprocess", lambda *args: calls.append("multistream") or (None, None))
     attn = SimpleNamespace(
         dsv41_backend=object() if a5 else None,
-        dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=SimpleNamespace(multistream_dsv4_dsa_overlap=True))),
+        dsa_attn=SimpleNamespace(
+            dsa_attn=SimpleNamespace(impl=SimpleNamespace(multistream_dsv4_dsa_overlap=overlap_enabled))
+        ),
     )
     metadata = SimpleNamespace(swa=SimpleNamespace(num_actual_tokens=TOKENS, num_prefills=prefills))
     impl._prepare_queries(attn, torch.zeros(TOKENS, 8), None, None, None, metadata)
     assert calls == [expected]
+
+
+@pytest.mark.parametrize(
+    ("prefills", "decodes", "requests", "write_on_main"),
+    [(0, 2, 2, False), (1, 1, 2, True), (0, 0, 2, True)],
+)
+def test_a5_cache_writer_stream_choice(prefills, decodes, requests, write_on_main):
+    metadata = SimpleNamespace(num_prefills=prefills, num_decodes=decodes, num_reqs=requests)
+    attn = SimpleNamespace(dsv41_backend=object())
+    assert AscendDSAV41Impl._write_swa_cache_on_main_stream(attn, metadata) is write_on_main
 
 
 @pytest.mark.parametrize("ratio", [1, 2])

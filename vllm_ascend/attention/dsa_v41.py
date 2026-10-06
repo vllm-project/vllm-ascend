@@ -318,6 +318,15 @@ class AscendDSAV41Impl:
             return
         scatter_cache_sk(cache, metadata.slot_mapping, value)
 
+    @staticmethod
+    def _write_swa_cache_on_main_stream(attn, metadata):
+        # Packaged A5 prefill/mixed cache writes must be captured on the
+        # current stream even when the independent Q/KV preparation overlaps.
+        # A missing prefill classification also cannot qualify as pure decode.
+        return getattr(attn, "dsv41_backend", None) is not None and (
+            metadata.num_prefills > 0 or metadata.num_decodes != metadata.num_reqs
+        )
+
     @classmethod
     def _project_q(cls, attn, hidden_states, cos, sin):
         qr = attn.q_norm(attn.wq_a(hidden_states))
@@ -354,11 +363,6 @@ class AscendDSAV41Impl:
         hidden_states = hidden_states[: metadata.swa.num_actual_tokens]
         v1_impl = attn.dsa_attn.dsa_attn.impl
         use_multistream = v1_impl.multistream_dsv4_dsa_overlap
-        if getattr(attn, "dsv41_backend", None) is not None:
-            # A5's packaged cache writes must stay on the captured stream for
-            # prefill and mixed batches. Pure decode can opt into the overlap
-            # after that path is qualified independently.
-            use_multistream = use_multistream and metadata.swa.num_prefills == 0
         preprocess = self.multistream_preprocess if use_multistream else self.preprocess
         q, qr = preprocess(attn, hidden_states, cos, sin, metadata.swa)
         return q, qr
@@ -462,16 +466,21 @@ class AscendDSAV41Impl:
         qr = attn.q_norm(q_a)
         q_b_quant, q_b_scale = wq_b.quantize(qr)
 
-        # Part 3: Q_b matmul (Cube) overlaps KV norm, RoPE and cache store (Vector).
+        # Part 3: Q_b matmul (Cube) overlaps KV norm and RoPE (Vector).
+        # A5 prefill/mixed cache publication follows the stream join below.
+        write_cache_on_main = self._write_swa_cache_on_main_stream(attn, swa_metadata)
         part3_start = main_stream.record_event()
         main_stream.wait_event(kv_matmul_done)
         with npu_stream_switch(aux_stream, enabled=True):
             aux_stream.wait_event(part3_start)
             kv = attn.kv_norm(kv).view(-1, 1, attn.head_dim)
             AscendDSAV41Impl._apply_rotary(attn, kv, cos, sin)
-            AscendDSAV41Impl._write_swa_cache(attn, swa_metadata, kv.squeeze(1))
+            if not write_cache_on_main:
+                AscendDSAV41Impl._write_swa_cache(attn, swa_metadata, kv.squeeze(1))
         q = wq_b.matmul(q_b_quant, q_b_scale, bias=attn.wq_b.bias).unflatten(-1, (attn.n_local_heads, attn.head_dim))
         main_stream.wait_stream(aux_stream)
+        if write_cache_on_main:
+            AscendDSAV41Impl._write_swa_cache(attn, swa_metadata, kv.squeeze(1))
         AscendDSAV41Impl._apply_rotary(attn, q, cos, sin)
         return q.to(hidden_states.dtype), qr
 
