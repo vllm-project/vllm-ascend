@@ -163,11 +163,20 @@ jobs:
       VLLM_ENGINE_READY_TIMEOUT_S: 1800
       OPENLIBING_SECRET: ${{ secrets.OPENLIBING_SECRET }}
       VLLM_ASCEND_BRANCH: ${{ inputs.vllm_ascend_branch }}
+      # CANN: INFO=1; keep plogs on disk in this job's log artifact.
+      ASCEND_GLOBAL_LOG_LEVEL: "1"
+      ASCEND_SLOG_PRINT_TO_STDOUT: "0"
+      ASCEND_PROCESS_LOG_PATH: /tmp/test-logs/ascend
     steps:
+      - name: Prepare log directories
+        run: mkdir -p /tmp/test-logs "$ASCEND_PROCESS_LOG_PATH"
+
       - name: Check npu and CANN info
         run: |
-          npu-smi info
-          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+          set -o pipefail
+          npu-smi info 2>&1 | tee /tmp/test-logs/npu-smi.log
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info \
+            2>&1 | tee /tmp/test-logs/cann-info.log
           sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
           pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
@@ -324,6 +333,26 @@ jobs:
           set -o pipefail
           pytest -sv tests/e2e/common/single_node/test_single_node.py \
             2>&1 | tee /tmp/test-logs/yaml-test.log
+
+      - name: Collect benchmark logs
+        if: ${{ always() }}
+        run: |
+          shopt -s nullglob
+          benchmark_logs=(/vllm-workspace/vllm-ascend/output_*.txt)
+          if [ ${#benchmark_logs[@]} -gt 0 ]; then
+            mkdir -p /tmp/test-logs/aisbench
+            cp "${benchmark_logs[@]}" /tmp/test-logs/aisbench/
+          fi
+
+      - name: Upload test and Ascend logs (GitHub Artifacts)
+        if: ${{ always() }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: nightly-test-logs-${{ inputs.vllm_ascend_branch }}-${{ inputs.name || github.job }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/test-logs/
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Update good_table.csv on success
         if: >-
