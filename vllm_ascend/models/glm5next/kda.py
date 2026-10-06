@@ -531,6 +531,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             output = prefill_output if output is None else torch.cat((output, prefill_output), dim=1)
         assert output is not None
         if direct_output:
+            maybe_save_kv_layer_to_connector("", [])
             return
         if use_spec:
             core_attn_out[0].index_copy_(0, non_spec_token_indx, output[0])

@@ -256,6 +256,10 @@ def test_plain_decode_writes_padded_destination_directly(monkeypatch, empty):
     monkeypatch.setattr(model_kda, "causal_conv1d", lambda x, *args, **kwargs: x)
     target = torch.full((1, 8, 1, 128), float("nan"))
     calls = []
+    events = []
+    monkeypatch.setattr(model_kda, "wait_for_kv_layer_from_connector", lambda prefix: events.append("load"))
+    monkeypatch.setattr(model_kda, "record_attention_compute_start", lambda: events.append("compute"))
+    monkeypatch.setattr(model_kda, "maybe_save_kv_layer_to_connector", lambda *args: events.append("save"))
 
     def recurrent(q, k, v, gate, beta, state, ends, slots, *args, output_buffer=None):
         assert output_buffer is target
@@ -266,11 +270,13 @@ def test_plain_decode_writes_padded_destination_directly(monkeypatch, empty):
         target.zero_()
         target[:, :3].copy_(q[:, :3] * 2)
         calls.append(True)
+        events.append("state_write")
         return target
 
     monkeypatch.setattr(model_kda, "recurrent_kda", recurrent)
     qkv = torch.arange(4 * 384, dtype=torch.float32).reshape(4, 384)
     layer._forward(qkv, torch.zeros(1, 4, 1, 128), torch.zeros(1, 4, 1), target)
+    assert events == (["load", "compute", "save"] if empty else ["load", "compute", "state_write", "save"])
     if empty:
         assert calls == []
         assert torch.count_nonzero(target) == 0

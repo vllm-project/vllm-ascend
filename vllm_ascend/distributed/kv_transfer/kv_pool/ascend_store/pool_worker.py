@@ -2480,10 +2480,23 @@ class KVPoolWorker:
             block_ids = request.block_ids_by_group[group_id]
             original_mask = result[group_id]
             num_blocks = request.save_end_token // self.grouped_block_size[group_id]
+            # An aligned prefill chunk ends with a real recurrent checkpoint,
+            # even when it is not the final prompt replay boundary. Keep that
+            # checkpoint before the next chunk moves/reuses its state slots.
+            chunk_checkpoint = (
+                request.num_prompt_tokens is not None
+                and request.target_token_len == request.save_end_token
+                and request.save_end_token % self.cache_transfer_granularity == 0
+                and 0 < request.target_token_len < request.num_prompt_tokens
+            )
             result[group_id] = [
                 index < len(block_ids)
                 and block_ids[index] != 0
-                and (original_mask is None or (index < len(original_mask) and original_mask[index]))
+                and (
+                    original_mask is None
+                    or (index < len(original_mask) and original_mask[index])
+                    or (chunk_checkpoint and index == num_blocks - 1)
+                )
                 for index in range(num_blocks)
             ]
         return tuple(result)

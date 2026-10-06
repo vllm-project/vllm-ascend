@@ -2572,6 +2572,31 @@ class TestKVPoolWorkerReachableMasks(unittest.TestCase):
         worker.token_database.store_mask = MagicMock(return_value=expected)
         self.assertEqual(worker._compute_reachable_store_masks(request), expected)
 
+    def test_aligned_prefill_chunk_preserves_real_recurrent_checkpoint(self):
+        worker = self._make_worker()
+        worker.block_key_hybrid = False
+        worker.cache_coordinator = object()
+        worker.cache_transfer_granularity = 4352
+        worker.grouped_block_size = [4352]
+        worker.group_uses_align_state = [True]
+        for target, end, ids, original, expected in [
+            (4352, 4352, [3], [False], [True]),
+            (4352, 4352, [0], [False], [False]),
+            (8192, 4352, [3, 8], [False], [False]),
+            (8705, 8704, [3, 0, 8], [False, True], [False, False]),
+            (8704, 8704, [0, 8], [False, True], [False, True]),
+        ]:
+            with self.subTest(target=target, ids=ids):
+                worker.token_database.store_mask = MagicMock(return_value=(original,))
+                request = self._make_request(
+                    block_ids=ids,
+                    block_ids_by_group=[ids],
+                    target_token_len=target,
+                    save_end_token=end,
+                    num_prompt_tokens=8705,
+                )
+                self.assertEqual(worker._compute_reachable_store_masks(request), (expected,))
+
     def test_alloc_gvas_for_save_respects_store_mask(self):
         worker = self._make_worker()
         worker.m_store.batch_alloc.return_value = [101, 103]
