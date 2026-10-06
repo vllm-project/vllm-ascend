@@ -964,19 +964,23 @@ def test_ensure_draft_hf_overrides_missing_attr() -> None:
 
 def test_eagle_create_draft_vllm_config_fills_hf_overrides() -> None:
     speculator = object.__new__(AscendEagleSpeculator)
-    speculator.draft_model_config = SimpleNamespace(hf_overrides=None)
+    speculator.replicated_pcp = False
+    speculator.draft_model_config = SimpleNamespace(hf_overrides=None, is_moe=False)
     speculator.vllm_config = SimpleNamespace(
         additional_config=None,
+        cache_config=SimpleNamespace(),
         parallel_config=SimpleNamespace(
             pipeline_parallel_size=8,
+            prefill_context_parallel_size=2,
+            decode_context_parallel_size=1,
             enable_expert_parallel=True,
             enable_eplb=True,
         ),
     )
 
-    with patch(
-        "vllm_ascend.worker.v2.spec_decode.eagle.speculator.replace",
-        side_effect=_fake_replace,
+    with (
+        patch.object(eagle_speculator_module, "replace", side_effect=_fake_replace),
+        patch.object(speculator_module, "replace", side_effect=_fake_replace),
     ):
         draft_config = speculator._create_draft_vllm_config()
 
