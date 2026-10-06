@@ -8,9 +8,8 @@ from vllm_ascend.ops.dsv41_a5 import dsl as ops
 from vllm_ascend.ops.triton.prepare_indexer_indices import (
     prepare_indexer_indices,
 )
+from vllm_ascend.ops.triton.quantize_mxfp4_indexer import quantize_mxfp4_indexer
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage, wait_for_device_metadata
-
-from .quantization import mxfp4_quantize_e8m0
 
 
 def _prepare_indices(
@@ -36,7 +35,7 @@ def _common(query, weights, source_cache, source_metadata, compress_ratio, quant
         raise RuntimeError("A5 QLI metadata was not built")
     wait_for_device_metadata(DeviceMetadataStage.INDEXER, id(op_metadata))
     if quantized_query is None:
-        quantized_query, query_scale = mxfp4_quantize_e8m0(query)
+        quantized_query, query_scale = quantize_mxfp4_indexer(query)
     query_start_loc = source_metadata.query_start_loc
     return (
         quantized_query,

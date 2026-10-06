@@ -135,14 +135,14 @@ def test_v41_draft_routes_to_v41(cp):
         patch("vllm_ascend.attention.context_parallel.dsa_v41_cp.enable_dsa_cp", return_value=cp),
         patch.object(
             deepseek_v41_dspark_module.DeviceOperator,
-            "get_deepseek_v41_backend",
+            "get_dsv41_packed_cache_ops",
             return_value=draft_backend,
         ),
     ):
         draft = DeepseekV41DSparkAttention(vllm_config=config, prefix="mtp.0.self_attn")
     assert type(draft.v41_impl) is (AscendDSAV41CPImpl if cp else AscendDSAV41Impl)
     assert config.compilation_config.static_forward_context[draft.v41_layer_name] is draft
-    assert draft.dsv41_backend is draft_backend
+    assert draft.packed_cache_ops is draft_backend
     assert draft.softmax_scale == 512**-0.5
 
 
@@ -195,7 +195,7 @@ def test_v41_draft_context_store_uses_physical_pairs_and_preserves_padding():
 
     cache = torch.empty(3, 128, 1, 8)
     attn = SimpleNamespace(
-        dsv41_backend=None,
+        packed_cache_ops=None,
         dsa_attn=SimpleNamespace(swa_cache_layer=SimpleNamespace(block_size=128, kv_cache=[cache])),
     )
     values = torch.randn(3, 1, 8)
@@ -213,7 +213,7 @@ def test_v41_draft_context_store_routes_packed_a5_cache_to_device_writer():
     cache = torch.empty(3, 128, 1, 8)
     writer = MagicMock()
     attn = SimpleNamespace(
-        dsv41_backend=SimpleNamespace(write_attention_cache=writer),
+        packed_cache_ops=SimpleNamespace(write_attention_cache=writer),
         dsa_attn=SimpleNamespace(swa_cache_layer=SimpleNamespace(block_size=128, kv_cache=[cache])),
     )
     slots = torch.tensor([129, -1, 258])
@@ -267,7 +267,7 @@ def test_draft_constructor_uses_upstream_head_contracts(monkeypatch, draft_vocab
     with (
         patch.object(
             module.DeviceOperator,
-            "get_deepseek_v41_backend",
+            "get_dsv41_packed_cache_ops",
             return_value=object(),
         ),
         patch.object(module, "DSparkMarkovHead", autospec=True, return_value=torch.nn.Identity()) as markov,

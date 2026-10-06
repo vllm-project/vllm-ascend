@@ -18,10 +18,10 @@ from vllm_ascend.models.deepseek_v41.cache_config import (
     make_index_cache_spec,
     uses_a5_packed_cache,
 )
-from vllm_ascend.ops.dsv41_a5.quantization import mxfp4_quantize_e8m0
 from vllm_ascend.ops.triton.fold_indexer_cache import fold_indexer_cache_rows
 from vllm_ascend.ops.triton.prepare_indexer_indices import prepare_indexer_indices
 from vllm_ascend.ops.triton.quantize_indexer_query import quantize_indexer_query
+from vllm_ascend.ops.triton.quantize_mxfp4_indexer import quantize_mxfp4_indexer
 from vllm_ascend.worker.device_metadata import (
     DeviceMetadataStage,
     wait_for_device_metadata,
@@ -47,8 +47,7 @@ class DeepseekV41Indexer(nn.Module):
     ):
         super().__init__()
         self.owns_k = owns_k
-        self.qw_fusion = None
-        self.dsv41_backend = DeviceOperator.get_deepseek_v41_backend()
+        self.packed_cache_ops = DeviceOperator.get_dsv41_packed_cache_ops()
         self.compress_ratio = compress_ratio
         self.n_heads = int(config.index_n_heads)
         self.width = int(config.index_head_dim)
@@ -104,39 +103,16 @@ class DeepseekV41Indexer(nn.Module):
         output = linear(value)
         return output[0] if isinstance(output, tuple) else output
 
-    def prepare_qw_fusion(self):
-        if self.dsv41_backend is None:
-            return
-        from vllm_ascend.ops.dsv41_a5.indexer_qw import IndexerQWFusion
-
-        if IndexerQWFusion.supports(self.wq_b, self.weights_proj, self.weights_scale):
-            self.qw_fusion = IndexerQWFusion(self.wq_b, self.weights_proj, self.weights_scale)
-
     def update_keys(self, latent, slots, cos, sin):
         """Publish source-owned index K before latent is RoPE'd as long KV."""
         if not self.owns_k or latent.shape[0] == 0:
             return
         key = self.k_norm(self.wk(latent)).view(-1, 1, self.width)
-        if self.dsv41_backend is not None:
-            self.dsv41_backend.apply_partial_rotary_inplace(
-                key,
-                cos,
-                sin,
-                start=self.width - self.rope_width,
-                end=self.width,
-            )
-        else:
-            torch.ops._C_ascend.inplace_partial_rotary_mul(
-                key.unsqueeze(1),
-                cos,
-                sin,
-                rotary_mode="interleave",
-                partial_slice=[self.width - self.rope_width, self.width],
-            )
+        DeviceOperator.apply_partial_rotary_inplace(key, cos, sin, start=self.width - self.rope_width, end=self.width)
         key = key.squeeze(1)
         k_cache, scale_cache = self.k_cache.kv_cache[0]
-        if self.dsv41_backend is not None:
-            self.dsv41_backend.write_index_cache((k_cache, scale_cache), slots, key)
+        if self.packed_cache_ops is not None:
+            self.packed_cache_ops.write_index_cache((k_cache, scale_cache), slots, key)
             if self.k_cache_folded is not None:
                 fold_indexer_cache_rows((k_cache, scale_cache), self.k_cache_folded.kv_cache[0], slots)
             return
@@ -192,29 +168,14 @@ class DeepseekV41Indexer(nn.Module):
         return self._output(self.wq_b, qr).unflatten(-1, (self.n_heads, self.width))
 
     def apply_query_rope(self, query, cos, sin):
-        if self.dsv41_backend is not None:
-            self.dsv41_backend.apply_partial_rotary_inplace(
-                query,
-                cos,
-                sin,
-                start=self.width - self.rope_width,
-                end=self.width,
-            )
-        else:
-            torch.ops._C_ascend.inplace_partial_rotary_mul(
-                query.unsqueeze(1),
-                cos,
-                sin,
-                rotary_mode="interleave",
-                partial_slice=[self.width - self.rope_width, self.width],
-            )
+        DeviceOperator.apply_partial_rotary_inplace(query, cos, sin, start=self.width - self.rope_width, end=self.width)
 
     def project_weights(self, hidden_states):
         return self._output(self.weights_proj, hidden_states).float() * self.weights_scale
 
     def quantize_query(self, query):
-        if self.dsv41_backend is not None:
-            return mxfp4_quantize_e8m0(query)
+        if self.packed_cache_ops is not None:
+            return quantize_mxfp4_indexer(query)
         return quantize_indexer_query(query)
 
     def select_projected(
@@ -242,21 +203,16 @@ class DeepseekV41Indexer(nn.Module):
         block IDs only within this forward. Query quantization and position
         ordering stay outside the native QLI/candidate operator.
         """
-        # A fused projection publishes packed Q directly, without allocating
-        # a redundant BF16 query merely to carry its shape and device.
-        query_tensor = query if query is not None else quantized_query
-        if query_tensor is None:
-            raise ValueError("Indexer requires either BF16 or packed Q")
-        candidate_shape = (query_tensor.shape[0], 1, candidate_topk_blocks)
+        candidate_shape = (query.shape[0], 1, candidate_topk_blocks)
         topk = self.index_topk
-        if query_tensor.shape[0] == 0:
+        if query.shape[0] == 0:
             selected = (
-                torch.full((0, topk), -1, dtype=torch.int32, device=query_tensor.device)
+                torch.full((0, topk), -1, dtype=torch.int32, device=query.device)
                 if indices_output is None
                 else indices_output
             )
             if is_candidate_source:
-                candidates = torch.full(candidate_shape, -1, dtype=torch.int32, device=query_tensor.device)
+                candidates = torch.full(candidate_shape, -1, dtype=torch.int32, device=query.device)
             return selected, candidates
         if source_metadata.max_cache_seq_len == 0:
             if indices_output is not None:
@@ -266,16 +222,16 @@ class DeepseekV41Indexer(nn.Module):
             if is_candidate_source and candidate_lengths is not None:
                 candidate_lengths.zero_()
             selected = (
-                torch.full((query_tensor.shape[0], 0), -1, dtype=torch.int32, device=query_tensor.device)
+                torch.full((query.shape[0], 0), -1, dtype=torch.int32, device=query.device)
                 if indices_output is None
                 else indices_output
             )
             if is_candidate_source:
-                candidates = torch.full(candidate_shape, -1, dtype=torch.int32, device=query_tensor.device)
+                candidates = torch.full(candidate_shape, -1, dtype=torch.int32, device=query.device)
             return selected, candidates
 
-        if self.dsv41_backend is not None:
-            return self.dsv41_backend.run_a5_indexer(
+        if self.packed_cache_ops is not None:
+            return self.packed_cache_ops.run_a5_indexer(
                 query,
                 weights,
                 positions,

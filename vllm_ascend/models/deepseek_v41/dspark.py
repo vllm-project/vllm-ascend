@@ -105,7 +105,7 @@ class DeepseekV41DSparkAttention(DeepseekV41SWAAttention):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.dsv41_backend = DeviceOperator.get_deepseek_v41_backend()
+        self.packed_cache_ops = DeviceOperator.get_dsv41_packed_cache_ops()
         self.softmax_scale = self.scale
         self.shared_state = None
         prefix = kwargs["prefix"]
@@ -184,7 +184,7 @@ class DeepseekV41DSparkModel(torch.nn.Module):
         model_quant_config = getattr(checkpoint_config, "quantization_config", None)
         main_proj_quant_config = (
             vllm_config.quant_config
-            if DeviceOperator.get_deepseek_v41_backend() is not None
+            if DeviceOperator.get_dsv41_packed_cache_ops() is not None
             and model_quant_config is not None
             and model_quant_config.get("quant_method") == "fp8"
             else None
@@ -225,11 +225,11 @@ class DeepseekV41DSparkModel(torch.nn.Module):
             return
         cache = attn.dsa_attn.swa_cache_layer
         values = shared_kv.squeeze(1)
-        if attn.dsv41_backend is not None:
+        if attn.packed_cache_ops is not None:
             # A5's cache is physically packed and must be updated through the
             # device-routed writer.  The draft proposer already supplies linear
             # physical slots, so keep them in that form for the native kernel.
-            attn.dsv41_backend.write_attention_cache(
+            attn.packed_cache_ops.write_attention_cache(
                 cache.kv_cache[0],
                 slot_mapping,
                 values,

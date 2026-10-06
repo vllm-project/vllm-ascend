@@ -18,7 +18,7 @@
 import os
 from functools import lru_cache
 from importlib import import_module
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn.functional as F
@@ -34,6 +34,13 @@ from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.quantization.utils import QUANT_DTYPES, get_dynamic_mx_quant_scale_alg
 
+if TYPE_CHECKING:
+    from vllm_ascend.ops.dsv41_a5 import DeepseekV41PackedCacheOps
+
+ACL_HOST_REG_MAPPED = 0x2
+ACL_HOST_REG_PINNED = 0x10000000
+
+
 if HAS_TRITON:
     from vllm_ascend.ops.triton.rms_norm import triton_q_rms  # noqa: F811
 else:
@@ -42,9 +49,43 @@ else:
 
 class BaseDeviceAdaptor:
     @staticmethod
-    def get_deepseek_v41_backend() -> Any | None:
-        """Return an optional device-specific DeepSeek V4.1 operator backend."""
+    def get_dsv41_packed_cache_ops() -> type["DeepseekV41PackedCacheOps"] | None:
+        """Return the packed-cache ABI implementation, or use standard caches."""
         return None
+
+    @staticmethod
+    def host_register_flags() -> int:
+        """ACL host registration flags for the standard runtime ABI."""
+        return ACL_HOST_REG_MAPPED | ACL_HOST_REG_PINNED
+
+    @staticmethod
+    def rms_norm_cast(x, weight, epsilon):
+        """Return fused rounded/FP32 outputs, or None for the normal RMSNorm path."""
+        from vllm_ascend.utils import enable_custom_op
+
+        if get_current_hardware_profile().supports(HardwareCapability.RMS_NORM_CAST) and enable_custom_op():
+            op = getattr(torch.ops._C_ascend, "npu_rms_norm_cast", None)
+            if op is not None:
+                return op(x, weight, epsilon)
+        return None
+
+    @staticmethod
+    def apply_partial_rotary_inplace(x, cos, sin, *, start, end, inverse=False):
+        """Adapt rank and inverse-RoPE arguments without copying the destination."""
+        work = x.unsqueeze(-2) if x.ndim == 2 else x
+        work = work.unsqueeze(1) if work.ndim == 3 else work
+        supports_negate_sin = get_current_hardware_profile().supports(
+            HardwareCapability.INPLACE_PARTIAL_ROTARY_MUL_NEGATE_SIN
+        )
+        torch.ops._C_ascend.inplace_partial_rotary_mul(
+            work,
+            cos,
+            -sin if inverse and not supports_negate_sin else sin,
+            rotary_mode="interleave",
+            partial_slice=[start, end],
+            **({"negate_sin": inverse} if supports_negate_sin else {}),
+        )
+        return x
 
     @classmethod
     def scatter_cache(cls, var: torch.Tensor, indices: torch.Tensor, updates: torch.Tensor) -> None:
@@ -980,14 +1021,20 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         return ops.quant_lightning_indexer_metadata, ops.quant_lightning_indexer
 
     @staticmethod
-    def get_deepseek_v41_backend() -> Any:
+    def host_register_flags() -> int:
+        # A5 runtime rejects the redundant PINNED hint with error 107000.
+        # MAPPED works for both malloc-host allocations and shared mappings.
+        return ACL_HOST_REG_MAPPED
+
+    @staticmethod
+    def get_dsv41_packed_cache_ops() -> type["DeepseekV41PackedCacheOps"]:
         # Import lazily so non-A5 processes never load the in-tree A5 operator
         # adapters or their runtime dependencies.
-        from vllm_ascend.ops import dsv41_a5
+        from vllm_ascend.ops.dsv41_a5 import DeepseekV41PackedCacheOps
         from vllm_ascend.utils import load_custom_op_library
 
         load_custom_op_library()
-        return dsv41_a5
+        return DeepseekV41PackedCacheOps
 
     @classmethod
     def reshape_and_cache(

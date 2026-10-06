@@ -5,7 +5,6 @@ import torch
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import get_forward_context, set_forward_context
-from vllm.logger import logger
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import (  # type: ignore[import-not-found]
@@ -93,15 +92,10 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
             self.speculator.input_batch.seq_lens_cpu_upper_bound,
         )
         if use_updatable_graph(attn_backend):
-            result = self._updatable_graph_replay(desc, draft_attn_metadatas)
+            return self._updatable_graph_replay(desc, draft_attn_metadatas)
         else:
             # This will be removed once the refactoring is fully complete.
-            result = self._graph_replay(desc, attn_backend, num_tokens, draft_attn_metadatas)
-        logger.info_once(
-            "ACL graph replay is active for the %s V2 speculator (logged once).",
-            getattr(self.speculator, "_speculator_name", type(self.speculator).__name__),
-        )
-        return result
+            return self._graph_replay(desc, attn_backend, num_tokens, draft_attn_metadatas)
 
     def _graph_replay(self, desc, attn_backend, num_tokens, draft_attn_metadatas):
         self.update_stream.wait_stream(torch.npu.current_stream())

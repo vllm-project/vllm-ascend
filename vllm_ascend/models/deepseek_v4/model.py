@@ -79,7 +79,6 @@ from vllm.v1.kv_cache_interface import KVCacheSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
-from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_padding_mask,
@@ -732,18 +731,14 @@ class DeepseekV4DecoderLayer(nn.Module):
 
     def rms_norm_cast(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Normalize once and provide the exact FP32 routing input."""
-        if enable_custom_op() and get_current_hardware_profile().supports(HardwareCapability.RMS_NORM_CAST):
-            op = getattr(torch.ops._C_ascend, "npu_rms_norm_cast", None)
-            if op is not None:
-                return op(
-                    hidden_states,
-                    self.post_attention_layernorm.weight,
-                    self.post_attention_layernorm.variance_epsilon,
-                )
-        # This fused operator is A3-specific. Preserve the pre-fusion equation
-        # and exact rounded FP32 router input on A5 or when the op is absent.
-        normalized = self.post_attention_layernorm(hidden_states)
-        return normalized, normalized.float()
+        if enable_custom_op():
+            return torch.ops._C_ascend.npu_rms_norm_cast(
+                hidden_states,
+                self.post_attention_layernorm.weight,
+                self.post_attention_layernorm.variance_epsilon,
+            )
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        return hidden_states, hidden_states.float()
 
     def hc_pre(self, x: torch.Tensor, hc_fn: torch.Tensor, hc_scale: torch.Tensor, hc_base: torch.Tensor):
         y = torch.ops._C_ascend.npu_hc_pre_v2(

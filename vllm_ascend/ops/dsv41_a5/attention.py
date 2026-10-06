@@ -16,21 +16,6 @@ from vllm_ascend.worker.device_metadata import (
 )
 
 
-def build_window_indices(
-    positions: torch.Tensor,
-    window_size: int,
-    *,
-    indices_output: torch.Tensor | None = None,
-    lengths_output: torch.Tensor | None = None,
-):
-    return build_window_indices_triton(
-        positions,
-        window_size,
-        indices_output=indices_output,
-        lengths_output=lengths_output,
-    )
-
-
 def build_smla_metadata(length_rows: torch.Tensor, cu_seqlens_q: torch.Tensor) -> torch.Tensor:
     """Build the fixed A5 mixed-quant SMLA launch metadata."""
     return ops.mixed_quant_sparse_flash_mla_metadata(
@@ -52,7 +37,7 @@ def _resolve_window_indices(q, metadata, window_size):
     indices = metadata.swa.ori_sparse_indices
     lengths = metadata.swa.ori_topk_length
     if indices is None or lengths is None:
-        return build_window_indices(
+        return build_window_indices_triton(
             metadata.positions[: q.shape[0]],
             window_size,
         )

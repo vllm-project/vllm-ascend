@@ -5,12 +5,67 @@ import pytest
 import torch
 
 from vllm_ascend.device.device_op import A5DeviceAdaptor, BaseDeviceAdaptor
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
+
+
+@pytest.mark.parametrize("device", [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5])
+@pytest.mark.parametrize("shape", [(2, 8), (2, 3, 8), (2, 1, 3, 8)])
+@pytest.mark.parametrize("inverse", [False, True])
+def test_partial_rotary_preserves_storage_and_adapts_native_signature(device, shape, inverse):
+    x = torch.randn(shape)
+    cos, sin = torch.randn(2, 1, 1, 4), torch.randn(2, 1, 1, 4)
+    with (
+        mock.patch(
+            "vllm_ascend.device.device_op.get_current_hardware_profile", return_value=get_hardware_profile(device)
+        ),
+        mock.patch.object(torch.ops._C_ascend, "inplace_partial_rotary_mul", create=True) as op,
+    ):
+        result = BaseDeviceAdaptor.apply_partial_rotary_inplace(x, cos, sin, start=4, end=8, inverse=inverse)
+    assert result is x
+    work, actual_cos, actual_sin = op.call_args.args
+    assert work.ndim == 4
+    assert work.data_ptr() == x.data_ptr()
+    assert actual_cos is cos
+    assert op.call_args.kwargs["partial_slice"] == [4, 8]
+    if device == AscendDeviceType.A5:
+        assert "negate_sin" not in op.call_args.kwargs
+        torch.testing.assert_close(actual_sin, -sin if inverse else sin)
+    else:
+        assert actual_sin is sin
+        assert op.call_args.kwargs["negate_sin"] is inverse
+
+
+@pytest.mark.parametrize("device", [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5])
+@pytest.mark.parametrize("custom_ops", [False, True])
+def test_rms_norm_cast_only_uses_supported_fused_operator(device, custom_ops):
+    x, weight = torch.randn(2, 8), torch.ones(8)
+    outputs = (x, x.float())
+    with (
+        mock.patch(
+            "vllm_ascend.device.device_op.get_current_hardware_profile", return_value=get_hardware_profile(device)
+        ),
+        mock.patch("vllm_ascend.utils.enable_custom_op", return_value=custom_ops),
+        mock.patch.object(torch.ops._C_ascend, "npu_rms_norm_cast", create=True, return_value=outputs) as op,
+    ):
+        result = BaseDeviceAdaptor.rms_norm_cast(x, weight, 1e-6)
+    if device == AscendDeviceType.A3 and custom_ops:
+        assert result is outputs
+        op.assert_called_once_with(x, weight, 1e-6)
+    else:
+        assert result is None
+        op.assert_not_called()
+
+
+def test_host_registration_flags_follow_runtime_abi():
+    assert BaseDeviceAdaptor.host_register_flags() == 0x10000002
+    assert A5DeviceAdaptor.host_register_flags() == 0x2
 
 
 def test_deepseek_v41_backend_is_device_routed():
-    assert BaseDeviceAdaptor.get_deepseek_v41_backend() is None
+    assert BaseDeviceAdaptor.get_dsv41_packed_cache_ops() is None
     with mock.patch("vllm_ascend.utils.load_custom_op_library") as load_library:
-        assert A5DeviceAdaptor.get_deepseek_v41_backend().__name__ == "vllm_ascend.ops.dsv41_a5"
+        assert A5DeviceAdaptor.get_dsv41_packed_cache_ops().__name__ == "DeepseekV41PackedCacheOps"
     load_library.assert_called_once_with()
 
 

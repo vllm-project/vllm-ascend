@@ -1617,7 +1617,7 @@ def test_v41_query_preparation_honors_multistream_setting(overlap):
     impl.multistream_preprocess = Mock(return_value=("q", "qr"))
     impl._write_compressed_source = Mock()
     attn = SimpleNamespace(
-        dsv41_backend=None,
+        packed_cache_ops=None,
         dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=SimpleNamespace(multistream_dsv4_dsa_overlap=overlap))),
     )
     metadata = SimpleNamespace(swa=SimpleNamespace(num_actual_tokens=6, num_prefills=0))
@@ -1637,7 +1637,7 @@ def test_v41_a5_prefill_selects_multistream_preparation():
     impl.preprocess = Mock(return_value=("q", "qr"))
     impl.multistream_preprocess = Mock(return_value=("q", "qr"))
     attn = SimpleNamespace(
-        dsv41_backend=object(),
+        packed_cache_ops=object(),
         dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=SimpleNamespace(multistream_dsv4_dsa_overlap=True))),
     )
     metadata = SimpleNamespace(swa=SimpleNamespace(num_actual_tokens=6, num_prefills=1))

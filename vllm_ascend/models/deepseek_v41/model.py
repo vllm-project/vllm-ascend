@@ -69,10 +69,8 @@ from vllm_ascend.ops.dsa import AscendDeepseekSparseAttention, DSAModules
 from vllm_ascend.ops.rope_dsv4 import ComplexExpRotaryEmbedding
 from vllm_ascend.ops.triton.mul_add import muls_add_triton
 from vllm_ascend.utils import (
-    enable_custom_op,
     enable_dsa_cp,
     get_rotation_path,
-    is_950,
     normalize_deepseek_v41_config,
 )
 
@@ -710,7 +708,7 @@ class DeepseekV41Attention(DeepseekV41SWAAttention):
         self.topology = topology
         self.shared_state = None
         self.prefix = prefix
-        self.dsv41_backend = DeviceOperator.get_deepseek_v41_backend()
+        self.packed_cache_ops = DeviceOperator.get_dsv41_packed_cache_ops()
         width = config.head_dim
         self.softmax_scale = width**-0.5
         if role.is_kv_source:
@@ -832,7 +830,6 @@ class DeepseekV41DecoderLayer(nn.Module):
         self.hc_attn_scale = nn.Parameter(torch.empty(3, dtype=torch.float32))
         self.hc_ffn_scale = nn.Parameter(torch.empty(3, dtype=torch.float32))
         self.use_sequence_parallel = vllm_config.parallel_config.use_sequence_parallel_moe
-        self.dsv41_backend = DeviceOperator.get_deepseek_v41_backend()
         # Leave the TP partial sums for the reduce-scatter below. The mHC
         # and MoE paths then stay sharded between attention calls.
         if self.use_sequence_parallel:
@@ -846,14 +843,11 @@ class DeepseekV41DecoderLayer(nn.Module):
 
     def rms_norm_cast(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Normalize once and provide the exact FP32 routing input."""
-        if enable_custom_op() and get_current_hardware_profile().supports(HardwareCapability.RMS_NORM_CAST):
-            op = getattr(torch.ops._C_ascend, "npu_rms_norm_cast", None)
-            if op is not None:
-                return op(
-                    hidden_states,
-                    self.post_attention_layernorm.weight,
-                    self.post_attention_layernorm.variance_epsilon,
-                )
+        outputs = DeviceOperator.rms_norm_cast(
+            hidden_states, self.post_attention_layernorm.weight, self.post_attention_layernorm.variance_epsilon
+        )
+        if outputs is not None:
+            return outputs
         normalized = self.post_attention_layernorm(hidden_states)
         return normalized, normalized.float()
 
@@ -862,18 +856,6 @@ class DeepseekV41DecoderLayer(nn.Module):
         return (pre_mix.unsqueeze(-1) * x.float()).sum(-2).to(x.dtype)
 
     def hc_pre(self, x, hc_fn, hc_scale, hc_base, pre_mix=None):
-        if self.dsv41_backend is not None:
-            return self.dsv41_backend.hc_pre(
-                x,
-                hc_fn,
-                hc_scale,
-                hc_base,
-                pre_mix,
-                hc_mult=self.hc_mult,
-                hc_sinkhorn_iters=self.hc_sinkhorn_iters,
-                norm_eps=self.norm_eps,
-                hc_eps=self.hc_eps,
-            )
         return torch.ops._C_ascend.npu_hc_pre_v3(
             x,
             hc_fn,
@@ -887,8 +869,6 @@ class DeepseekV41DecoderLayer(nn.Module):
         )
 
     def hc_post(self, x, residual, post, comb):
-        if self.dsv41_backend is not None:
-            return self.dsv41_backend.hc_post(x, residual, post, comb)
         return torch.ops._C_ascend.npu_hc_post(
             x.unsqueeze(0),
             residual.unsqueeze(0),
@@ -1055,14 +1035,15 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                 preflight_engram_checkpoint(
                     self.engram_weight_root, config.engram_layer_ids, AscendParallelEngramEmbedding
                 )
+            native_mxfp8 = get_current_hardware_profile().supports(HardwareCapability.ENGRAM_MXFP8)
             for slot, (layer_id, rows) in enumerate(zip(config.engram_layer_ids, config.engram_num_embeddings)):
                 head_sizes = tuple(size for order in self.engram_layout.primes[slot] for size in order)
                 storage_dtype = torch.bfloat16 if vllm_config.quant_config is None else torch.int8
                 if vllm_config.load_config.load_format != "dummy":
                     storage_dtype = engram_storage_dtype(self.engram_weight_root, layer_id)
-                    if storage_dtype == torch.float8_e4m3fn and not is_950():
+                    if storage_dtype == torch.float8_e4m3fn and not native_mxfp8:
                         storage_dtype = torch.int8
-                elif is_950() and vllm_config.quant_config is not None:
+                elif native_mxfp8 and vllm_config.quant_config is not None:
                     storage_dtype = torch.float8_e4m3fn
                 embed = AscendParallelEngramEmbedding(
                     rows,
@@ -1622,7 +1603,7 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
         # A5's packaged cache operators are qualified for eager prefill and
         # full-graph decode. Runtime NONE must bypass the compiled model rather
         # than entering a piecewise torch.compile path.
-        self.requires_uncompiled_fallback = DeviceOperator.get_deepseek_v41_backend() is not None
+        self.requires_uncompiled_fallback = DeviceOperator.get_dsv41_packed_cache_ops() is not None
 
         self.model = self.model_cls(vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model"))
         if get_pp_group().is_last_rank:
@@ -1681,13 +1662,6 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
 
     def retire_engram_lookups(self, *, reset_events=False):
         self.model.retire_engram_lookups(reset_events=reset_events)
-
-    def process_weights_after_loading(self):
-        # Upstream invokes this after all quantization methods transform their
-        # weights. Account persistent NZ copies before KV-cache sizing.
-        for module in tuple(self.model.modules()):
-            if isinstance(module, DeepseekV41Indexer):
-                module.prepare_qw_fusion()
 
     def get_model_state_cls(self):
         """V2 runner states read token_lookback_depth and drive engram inputs."""

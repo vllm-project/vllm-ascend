@@ -141,7 +141,7 @@ def test_v41_engram_checkpoint_contract_is_unchanged():
 def test_v41_a5_engram_requires_runtime_opt_in(monkeypatch):
     checkpoint = SimpleNamespace(engram_layer_ids=[1, 14])
     monkeypatch.setattr(
-        "vllm_ascend.models.deepseek_v41.model.DeviceOperator.get_deepseek_v41_backend",
+        "vllm_ascend.models.deepseek_v41.model.DeviceOperator.get_dsv41_packed_cache_ops",
         lambda: object(),
     )
 
@@ -199,7 +199,6 @@ def test_v41_text_only_load_skips_checkpoint_vision_weights():
     wrapper = object.__new__(AscendDeepseekV41ForCausalLM)
     nn.Module.__init__(wrapper)
     wrapper.vision = None
-    wrapper.requires_uncompiled_fallback = True
     wrapper.language_model = LanguageModel()
     text_weight = torch.tensor([1.0])
 

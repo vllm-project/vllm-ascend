@@ -19,21 +19,13 @@ import torch.distributed as dist
 from vllm.logger import logger
 from vllm.triton_utils import tl, triton
 
+from vllm_ascend.device.device_op import DeviceOperator
+
 SCALE_GROUP = 32
 # A 384M row table overflows the 32 bit offset arithmetic a single Triton tile
 # can express, so the device address of every group of rows is published
 # separately.
 CHUNK_ROWS = 1 << 22
-ACL_HOST_REG_MAPPED = 0x2
-ACL_HOST_REG_PINNED = 0x10000000
-
-
-def _host_register_flags() -> int:
-    from vllm_ascend.utils import is_950
-
-    # Ascend 950's CANN runtime rejects the A3 PINNED hint (107000).
-    # MAPPED registers both malloc-host buffers and shared-memory mappings.
-    return ACL_HOST_REG_MAPPED if is_950() else ACL_HOST_REG_MAPPED | ACL_HOST_REG_PINNED
 
 
 def engram_cpu_offload(vllm_config) -> bool:
@@ -214,7 +206,7 @@ class HostUvaBuffer:
         self.buffer = (ctypes.c_char * size).from_address(self.pointer.value)
         self.tensor = torch.frombuffer(self.buffer, dtype=dtype).reshape(shape)
         try:
-            rc = self.lib.aclrtHostRegisterV2(self.pointer, size, _host_register_flags())
+            rc = self.lib.aclrtHostRegisterV2(self.pointer, size, DeviceOperator.host_register_flags())
             if rc:
                 raise RuntimeError(f"aclrtHostRegisterV2 failed: rc={rc} size={size}")
             address = ctypes.c_void_p()
@@ -371,97 +363,6 @@ def gather_dequantize_host_uva(
     return output
 
 
-@triton.jit
-def _engram_host_uva_gather_dequant_hbm_scale_kernel(
-    codes_ptrs,
-    scale_ptr,
-    ids,
-    output,
-    rows,
-    vocab_start,
-    vocab_end,
-    ids_stride_t,
-    CHUNK: tl.constexpr,
-    WIDTH: tl.constexpr,
-    GROUP: tl.constexpr,
-    HEAD_START: tl.constexpr,
-    LOCAL_HEADS: tl.constexpr,
-    PAD_HEADS: tl.constexpr,
-    MXFP8: tl.constexpr,
-):
-    row = tl.program_id(0)
-    if row < rows:
-        token = row // LOCAL_HEADS
-        head_local = row % LOCAL_HEADS
-        index = tl.load(ids + token * ids_stride_t + HEAD_START + head_local).to(tl.int64)
-        owned = (index >= vocab_start) & (index < vocab_end)
-        local_row = tl.where(owned, index - vocab_start, 0)
-        chunk = local_row // CHUNK
-        local = local_row % CHUNK
-        codes = tl.load(codes_ptrs + chunk).to(tl.pointer_type(tl.float8e4nv))
-        col = tl.arange(0, WIDTH)
-        value = tl.load(codes + local * WIDTH + col).to(tl.float32)
-        scale = tl.load(scale_ptr + local_row * (WIDTH // GROUP) + col // GROUP)
-        if MXFP8:
-            scale = _decode_e8m0(scale)
-        value = value * scale
-        result = value.to(tl.bfloat16)
-        tl.store(
-            output + (token * PAD_HEADS + head_local) * WIDTH + col,
-            tl.where(owned, result, tl.zeros_like(result)),
-        )
-
-
-def gather_dequantize_host_uva_hbm_scale(
-    codes: HostUvaBuffer,
-    scales: torch.Tensor,
-    ids: torch.Tensor,
-    *,
-    head_start: int = 0,
-    local_heads: int = 1,
-    pad_heads: int | None = None,
-    output: torch.Tensor | None = None,
-    vocab_start: int = 0,
-    vocab_end: int | None = None,
-) -> torch.Tensor:
-    """Gather host-UVA codes while reading group scales from NPU memory."""
-    from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
-
-    if scales.device.type != "npu" or not scales.is_contiguous():
-        raise ValueError("HBM Engram scales must be contiguous NPU memory")
-    if codes.tensor.dtype != torch.float8_e4m3fn:
-        raise ValueError("HBM-scale hybrid lookup currently targets native MXFP8 codes")
-    pad_heads = local_heads if pad_heads is None else pad_heads
-    width = codes.tensor.shape[-1]
-    vocab_end = codes.tensor.shape[0] if vocab_end is None else vocab_end
-    tokens = ids.shape[0]
-    rows = tokens * local_heads
-    if output is None:
-        output = torch.empty((tokens * pad_heads, width), dtype=torch.bfloat16, device=ids.device)
-    if rows == 0:
-        return output
-    init_device_properties_triton()
-    _engram_host_uva_gather_dequant_hbm_scale_kernel[(rows,)](
-        codes.ptrs,
-        scales,
-        ids,
-        output,
-        rows,
-        vocab_start,
-        vocab_end,
-        ids.stride(0),
-        CHUNK=CHUNK_ROWS,
-        WIDTH=width,
-        GROUP=SCALE_GROUP,
-        HEAD_START=head_start,
-        LOCAL_HEADS=local_heads,
-        PAD_HEADS=pad_heads,
-        MXFP8=True,
-        num_warps=4,
-    )
-    return output
-
-
 class SharedUvaBuffer:
     """One host range mapped and registered by every rank of a local group.
 
@@ -507,7 +408,7 @@ class SharedUvaBuffer:
                     self.shm = shared_memory.SharedMemory(name=name)
             assert self.shm.size >= size
             address_of_mapping = ctypes.c_void_p(ctypes.addressof(ctypes.c_char.from_buffer(self.shm.buf)))
-            rc = self.lib.aclrtHostRegisterV2(address_of_mapping, size, _host_register_flags())
+            rc = self.lib.aclrtHostRegisterV2(address_of_mapping, size, DeviceOperator.host_register_flags())
             if rc:
                 raise RuntimeError(f"aclrtHostRegisterV2 failed: rc={rc} size={size}")
             # Registration succeeded: from here on the mapping owes exactly one

@@ -88,6 +88,8 @@ _EXPECTED_CAPABILITIES = {
             HardwareCapability.DSA_C128_STATE_SMALL_BLOCK_SIZES,
             HardwareCapability.DSV4_COMPRESSED_CACHE,
             HardwareCapability.DSV41_PACKED_CACHE,
+            HardwareCapability.ENGRAM_UNROTATED_GATE,
+            HardwareCapability.ENGRAM_MXFP8,
             HardwareCapability.DYNAMIC_MX_QUANT_FUSION,
             HardwareCapability.DYNAMIC_MX_QUANT_SCALE_ALG_ONE,
             HardwareCapability.FLA_GDN_PREFILL,

@@ -286,29 +286,14 @@ class AscendDSAV41Impl:
 
     @staticmethod
     def _apply_rotary(attn, value, cos, sin, *, inverse=False):
-        backend = getattr(attn, "dsv41_backend", None)
-        if backend is not None:
-            return backend.apply_partial_rotary_inplace(
-                value,
-                cos,
-                sin,
-                start=attn.nope_head_dim,
-                end=attn.head_dim,
-                inverse=inverse,
-            )
-        torch.ops._C_ascend.inplace_partial_rotary_mul(
-            value.unsqueeze(1),
-            cos,
-            -sin if inverse else sin,
-            rotary_mode="interleave",
-            partial_slice=[attn.nope_head_dim, attn.head_dim],
+        return DeviceOperator.apply_partial_rotary_inplace(
+            value, cos, sin, start=attn.nope_head_dim, end=attn.head_dim, inverse=inverse
         )
-        return value
 
     @staticmethod
     def _write_swa_cache(attn, metadata, value):
         cache = attn.dsa_attn.swa_cache_layer.kv_cache[0]
-        backend = getattr(attn, "dsv41_backend", None)
+        backend = getattr(attn, "packed_cache_ops", None)
         if backend is not None:
             backend.write_attention_cache(
                 cache,
@@ -324,7 +309,7 @@ class AscendDSAV41Impl:
         # Packaged A5 prefill/mixed cache writes must be captured on the
         # current stream even when the independent Q/KV preparation overlaps.
         # A missing prefill classification also cannot qualify as pure decode.
-        return getattr(attn, "dsv41_backend", None) is not None and (
+        return getattr(attn, "packed_cache_ops", None) is not None and (
             metadata.num_prefills > 0 or metadata.num_decodes != metadata.num_reqs
         )
 
@@ -375,9 +360,6 @@ class AscendDSAV41Impl:
         if not self.role.has_long_context or not self.role.is_index_source:
             return None
         indexer = attn.indexer
-        if indexer.qw_fusion is not None and qr.shape[0] > 0:
-            q, scale, weights = indexer.qw_fusion(self._indexer_hidden_states(hidden_states, metadata), qr, cos, sin)
-            return DeepseekV41PreparedIndexer(query=None, weights=weights, quantized_query=q, query_scale=scale)
         main_stream = torch.npu.current_stream()
         aux_stream = dsv4_dsa_overlap_stream()
 
@@ -549,7 +531,7 @@ class AscendDSAV41Impl:
         )
         latent = latent.view(-1, 1, attn.head_dim)
         AscendDSAV41Impl._apply_rotary(attn, latent, source_cos, source_sin)
-        backend = getattr(attn, "dsv41_backend", None)
+        backend = getattr(attn, "packed_cache_ops", None)
         if backend is not None:
             backend.write_attention_cache(
                 attn.long_kv_cache.kv_cache[0],
@@ -575,7 +557,7 @@ class AscendDSAV41Impl:
         context = get_forward_context().no_compile_layers
         source_layer = context[self.index_k_source_prefix]
         source_cache = source_layer.kv_cache[0]
-        if self.role.uses_candidate_filter and getattr(attn.indexer, "dsv41_backend", None) is not None:
+        if self.role.uses_candidate_filter and getattr(attn.indexer, "packed_cache_ops", None) is not None:
             folded_name = self.index_k_source_prefix + "_folded"
             folded_cache = context[folded_name].kv_cache[0]
             source_cache = (*source_cache, folded_cache)
@@ -614,7 +596,7 @@ class AscendDSAV41Impl:
         """Run SparseFlashMla with the same PA metadata for both operator stages."""
         if source_cache is None and self.role.has_long_context:
             source_cache = get_forward_context().no_compile_layers[self.long_kv_source_prefix].kv_cache[0]
-        backend = getattr(attn, "dsv41_backend", None)
+        backend = getattr(attn, "packed_cache_ops", None)
         if backend is not None:
             compressed_lengths = None
             if self.role.has_long_context and attn.shared_state.topk_lengths is not None:
@@ -763,7 +745,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                 self._cache_kind = "index_k" if kv_cache_spec.scale_dim else "long_kv"
         else:
             raise TypeError(f"Unsupported V4.1 cache spec: {type(kv_cache_spec).__name__}")
-        self._device_backend = DeviceOperator.get_deepseek_v41_backend()
+        self._device_backend = DeviceOperator.get_dsv41_packed_cache_ops()
         self._uses_a5_packed_cache = self._device_backend is not None
         text_config = vllm_config.model_config.hf_text_config
         window_size = int(_config_value(text_config, "sliding_window", 0))

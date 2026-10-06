@@ -104,11 +104,6 @@ def test_preprocess_equivalence_and_stream_dependencies(monkeypatch, share_quant
 
     class A5Backend:
         @staticmethod
-        def apply_partial_rotary_inplace(value, cos, sin, *, start, end, inverse=False):
-            rope(value.unsqueeze(1), cos, -sin if inverse else sin, partial_slice=(start, end))
-            return value
-
-        @staticmethod
         def write_attention_cache(cache, slots, values, *, kind):
             assert kind == "win"
             scatter(cache, slots, values)
@@ -138,7 +133,7 @@ def test_preprocess_equivalence_and_stream_dependencies(monkeypatch, share_quant
         n_heads=2,
         head_dim=4,
         nope_head_dim=2,
-        dsv41_backend=A5Backend() if a5_prefills is not None else None,
+        packed_cache_ops=A5Backend() if a5_prefills is not None else None,
         dsa_attn=SimpleNamespace(
             swa_cache_layer=SimpleNamespace(kv_cache=[cache]),
             dsa_attn=SimpleNamespace(impl=wrappers),
@@ -226,7 +221,7 @@ def test_forward_honors_multistream_preprocess_setting(monkeypatch, enabled):
         _forward_o_proj=lambda q, output: output.zero_(),
     )
     attn = SimpleNamespace(
-        dsv41_backend=None,
+        packed_cache_ops=None,
         rotary_emb=SimpleNamespace(layername="layer"),
         dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=v1_impl)),
         nope_head_dim=2,

@@ -56,30 +56,6 @@ def test_deferred_metadata_keeps_compressor_state_outside_graph(in_graph, stage)
     assert builder.take_device_metadata_tasks() == ()
 
 
-def test_fused_qw_skips_redundant_query_quantization():
-    impl = _impl(SimpleNamespace(has_long_context=True, is_index_source=True))
-    packed = torch.zeros(TOKENS, 32, 64, dtype=torch.uint8)
-    scales = torch.zeros(TOKENS, 32, 4, dtype=torch.uint8)
-    weights = torch.ones(TOKENS, 32)
-    calls = []
-
-    def fused(hidden, qr, cos, sin):
-        calls.append(hidden.shape[0])
-        return packed, scales, weights
-
-    attn = SimpleNamespace(indexer=SimpleNamespace(qw_fusion=fused))
-    metadata = SimpleNamespace(swa=SimpleNamespace(num_actual_tokens=TOKENS))
-    prepared = impl._prepare_indexer_inputs(
-        attn, torch.zeros(TOKENS + 2, 5120), torch.zeros(TOKENS, 1280), None, None, metadata
-    )
-    assert calls == [TOKENS]
-    assert prepared.query is None
-    assert prepared.quantized_query is packed
-    assert prepared.query_scale is scales
-    assert prepared.weights is weights
-    assert not impl._should_quantize_indexer(prepared, metadata)
-
-
 def _impl(role):
     impl = AscendDSAV41Impl.__new__(AscendDSAV41Impl)
     impl.role = role
@@ -163,7 +139,7 @@ def test_qkv_projection_stream_choice(monkeypatch, a5, prefills, overlap_enabled
     monkeypatch.setattr(impl, "preprocess", lambda *args: calls.append("serial") or (None, None))
     monkeypatch.setattr(impl, "multistream_preprocess", lambda *args: calls.append("multistream") or (None, None))
     attn = SimpleNamespace(
-        dsv41_backend=object() if a5 else None,
+        packed_cache_ops=object() if a5 else None,
         dsa_attn=SimpleNamespace(
             dsa_attn=SimpleNamespace(impl=SimpleNamespace(multistream_dsv4_dsa_overlap=overlap_enabled))
         ),
@@ -179,7 +155,7 @@ def test_qkv_projection_stream_choice(monkeypatch, a5, prefills, overlap_enabled
 )
 def test_a5_cache_writer_stream_choice(prefills, decodes, requests, write_on_main):
     metadata = SimpleNamespace(num_prefills=prefills, num_decodes=decodes, num_reqs=requests)
-    attn = SimpleNamespace(dsv41_backend=object())
+    attn = SimpleNamespace(packed_cache_ops=object())
     assert AscendDSAV41Impl._write_swa_cache_on_main_stream(attn, metadata) is write_on_main
 
 
@@ -279,7 +255,7 @@ def test_a5_indexer_uses_prequantized_query(monkeypatch):
     monkeypatch.setattr(a5_indexer, "wait_for_device_metadata", lambda *args: None)
     monkeypatch.setattr(
         a5_indexer,
-        "mxfp4_quantize_e8m0",
+        "quantize_mxfp4_indexer",
         lambda query: pytest.fail("query must not be quantized twice"),
     )
     query = torch.zeros(2, 1, 128)
