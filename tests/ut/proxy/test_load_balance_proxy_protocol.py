@@ -1,8 +1,4 @@
-"""Unit tests for PD proxy heap fairness and Messages/Responses forwarding.
-
-These tests call the proxy module in-process. They do not start subprocesses,
-so they run on Windows as well as in CI.
-"""
+"""Regression tests for PD proxy fairness and Messages/Responses forwarding."""
 
 import argparse
 import asyncio
@@ -307,6 +303,43 @@ def test_responses_prefill_is_one_token_and_streaming_usage_is_patched(installed
     assert event["response"]["usage"]["input_tokens_details"]["cached_tokens"] == 7
     assert len(prefill.posts) == 1
     assert scheduler.request_num == 0
+
+
+@pytest.mark.parametrize("api", ["/messages", "/responses"])
+@pytest.mark.parametrize("chunking", ["split-utf8", "coalesced"])
+def test_stream_usage_is_patched_across_http_chunk_boundaries(installed_runtime, api, chunking):
+    scheduler, _prefill, decode = installed_runtime
+    if api == "/messages":
+        event = {"type": "message_start", "message": {"usage": {"cache_read_input_tokens": 0}}}
+        expected_cached = 32
+    else:
+        event = {"type": "response.completed", "response": {"usage": {"input_tokens_details": {"cached_tokens": 0}}}}
+        expected_cached = 7
+    event["text"] = "你好"
+    usage_frame = b"event: usage\r\ndata: " + json.dumps(event, ensure_ascii=False).encode() + b"\r\n\r\n"
+    tail = b"event: ping\r\ndata: [DONE]\r\n\r\n"
+    if chunking == "split-utf8":
+        split = usage_frame.index("你".encode()) + 1
+        decode.chunks = [usage_frame[:split], usage_frame[split:] + tail]
+    else:
+        decode.chunks = [usage_frame + tail]
+
+    async def run():
+        response = await proxy.handle_completions_impl(api, _request({"model": "m", "stream": True}))
+        return await _body(response)
+
+    body = asyncio.run(run())
+    frame, done, _ = body.split(b"\r\n\r\n")
+    assert frame.startswith(b"event: usage\r\n")
+    patched = json.loads(frame.split(b"data: ", 1)[1])
+    assert patched["text"] == "你好"
+    if api == "/messages":
+        assert patched["message"]["usage"]["cache_read_input_tokens"] == expected_cached
+    else:
+        assert patched["response"]["usage"]["input_tokens_details"]["cached_tokens"] == expected_cached
+    assert done + b"\r\n\r\n" == tail
+    assert scheduler.request_num == 0
+    assert all(entry.active_tokens == 0 for entry in scheduler.decoders.values())
 
 
 def test_messages_does_not_retry_when_body_has_no_choices(installed_runtime):

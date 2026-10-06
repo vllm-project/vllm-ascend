@@ -891,8 +891,8 @@ def write_cached_tokens_for_api(api: str, chunk_json: dict, cached_tokens: int |
     if cached_tokens is None:
         return False
     usage = chunk_json.get("usage")
-    if kind == "responses" and not isinstance(usage, dict):
-        response_obj = chunk_json.get("response")
+    if not isinstance(usage, dict):
+        response_obj = chunk_json.get("response" if kind == "responses" else "message")
         usage = response_obj.get("usage") if isinstance(response_obj, dict) else None
     if not isinstance(usage, dict):
         return False
@@ -905,6 +905,22 @@ def write_cached_tokens_for_api(api: str, chunk_json: dict, cached_tokens: int |
     details["cached_tokens"] = cached_tokens
     usage["input_tokens_details"] = details
     return True
+
+
+def patch_cached_tokens_in_sse_frame(api: str, frame: bytes, cached_tokens: int | None) -> bytes:
+    lines = frame.splitlines(keepends=True)
+    data_indices = [index for index, line in enumerate(lines) if line.startswith(b"data:")]
+    payload = b"\n".join(lines[index][5:].strip() for index in data_indices)
+    try:
+        obj = json.loads(payload)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return frame
+    if not isinstance(obj, dict) or not write_cached_tokens_for_api(api, obj, cached_tokens):
+        return frame
+    first = data_indices[0]
+    ending = lines[first][len(lines[first].rstrip(b"\r\n")) :]
+    lines[first] = b"data: " + json.dumps(obj).encode("utf-8") + ending
+    return b"".join(line for index, line in enumerate(lines) if index == first or index not in data_indices)
 
 
 async def send_request_to_service(
@@ -1187,6 +1203,7 @@ async def handle_completions_impl(api: str, request: Request):
             try:
                 if _api_kind(api) != "openai":
                     nonstream_buf = bytearray() if not stream_flag else None
+                    stream_buf = bytearray()
                     if preopened_gen is not None:
                         gen = _replay_first_chunk(preopened_first, preopened_gen)
                         preopened_gen = None
@@ -1215,25 +1232,23 @@ async def handle_completions_impl(api: str, request: Request):
                                 yield bytes(nonstream_buf)
                             nonstream_buf.clear()
                             continue
-                        try:
-                            chunk_str = chunk.decode("utf-8").strip()
-                        except UnicodeDecodeError:
-                            yield chunk
-                            continue
-                        is_sse = chunk_str.startswith("data: ")
-                        payload = chunk_str[len("data: ") :] if is_sse else chunk_str
-                        try:
-                            chunk_json = json.loads(payload)
-                        except json.JSONDecodeError:
-                            chunk_json = None
-                        if chunk_json is not None and write_cached_tokens_for_api(
-                            api, chunk_json, reported_prefiller_cached_tokens
-                        ):
-                            yield encode_response_chunk(chunk_json, is_sse)
-                            continue
-                        yield chunk
+                        stream_buf += chunk
+                        while True:
+                            boundaries = [
+                                (offset, len(separator))
+                                for separator in (b"\n\n", b"\r\n\r\n", b"\r\r")
+                                if (offset := stream_buf.find(separator)) >= 0
+                            ]
+                            if not boundaries:
+                                break
+                            offset, size = min(boundaries)
+                            frame = bytes(stream_buf[: offset + size])
+                            del stream_buf[: offset + size]
+                            yield patch_cached_tokens_in_sse_frame(api, frame, reported_prefiller_cached_tokens)
                     if nonstream_buf is not None and nonstream_buf:
                         yield bytes(nonstream_buf)
+                    if stream_buf:
+                        yield bytes(stream_buf)
                     return
 
                 while retry:
