@@ -515,11 +515,16 @@ class KVPoolWorker:
             self.layerwise_key_layer_offset = 0
 
         if self.kv_cache_config is not None:
-            base_layers = getattr(
-                self.hf_config,
-                "num_hidden_layers",
-                self.num_layers,
+            get_total_num_layers = getattr(
+                self.vllm_config.model_config,
+                "get_total_num_hidden_layers",
+                None,
             )
+            total_base_layers = get_total_num_layers() if callable(get_total_num_layers) else None
+            if not isinstance(total_base_layers, int):
+                total_base_layers = getattr(self.hf_config, "num_hidden_layers", self.num_layers)
+            if not isinstance(total_base_layers, int):
+                total_base_layers = self.num_layers
             physical_layers = {
                 self._extract_physical_layer_index(layer_name)
                 for group_spec in self.kv_cache_config.kv_cache_groups
@@ -536,6 +541,7 @@ class KVPoolWorker:
                         if isinstance(spec, MambaSpec)
                     }
                 effective_num_layers = max(self.num_layers, len(physical_layers))
+                self.layerwise_key_layers = effective_num_layers
                 if effective_num_layers != self.num_layers:
                     logger.info(
                         "KVPoolWorker: updated num_layers %d -> %d from cache group layout.",
@@ -544,11 +550,17 @@ class KVPoolWorker:
                     )
                     self.num_layers = effective_num_layers
             if self.use_layerwise_transfer:
-                self._layerwise_reuse_layout = build_layerwise_reuse_layout(
-                    get_layerwise_kv_cache_specs(self.kv_cache_config),
-                    base_layers,
-                    self._extra_config,
+                base_layer_start, base_layer_end = self.vllm_config.model_config.get_layers_start_end_indices(
+                    self.vllm_config.parallel_config
                 )
+                expected_base_layers = set(range(base_layer_start, base_layer_end))
+                actual_base_layers = {layer for layer in physical_layers if 0 <= layer < total_base_layers}
+                if actual_base_layers == expected_base_layers:
+                    self._layerwise_reuse_layout = build_layerwise_reuse_layout(
+                        get_layerwise_kv_cache_specs(self.kv_cache_config),
+                        total_base_layers,
+                        self._extra_config,
+                    )
 
         if self.kv_cache_config is not None and self.num_kv_cache_groups > 1:
             for group_id, group_spec in enumerate(self.kv_cache_config.kv_cache_groups):
@@ -591,10 +603,13 @@ class KVPoolWorker:
                     self.num_layers,
                     self._extra_config,
                 )
-                self.layerwise_offload = cache_layout.has_layer_reuse
-                self.independent_layers = cache_layout.independent_layers
-                self.prefetch_layer_map = cache_layout.prefetch_layer_map
                 self.num_prefetch_layers = cache_layout.num_prefetch_layers
+                # A concrete but incomplete cache topology must not fall back
+                # to a model-layer-count-only reuse plan.
+                if self.kv_cache_config is None:
+                    self.layerwise_offload = cache_layout.has_layer_reuse
+                    self.independent_layers = cache_layout.independent_layers
+                    self.prefetch_layer_map = cache_layout.prefetch_layer_map
             else:
                 layout = self._layerwise_reuse_layout
                 stage_globals = sorted(layout.layer_cache_specs)
@@ -924,12 +939,17 @@ class KVPoolWorker:
             return cache.storage().data_ptr()
 
     def _extract_physical_layer_index(self, layer_name: str) -> int:
-        base_layers = getattr(
-            self.hf_config,
-            "num_hidden_layers",
-            self.num_layers,
+        get_total_num_layers = getattr(
+            self.vllm_config.model_config,
+            "get_total_num_hidden_layers",
+            None,
         )
-        return get_layerwise_physical_layer_index(layer_name, base_layers)
+        total_base_layers = get_total_num_layers() if callable(get_total_num_layers) else None
+        if not isinstance(total_base_layers, int):
+            total_base_layers = getattr(self.hf_config, "num_hidden_layers", self.num_layers)
+        if not isinstance(total_base_layers, int):
+            total_base_layers = self.num_layers
+        return get_layerwise_physical_layer_index(layer_name, total_base_layers)
 
     def _global_group_alloc_size(self, group_id: int) -> int:
         # GLOBAL region size: per-layer bytes x TOTAL model layers.
@@ -1126,10 +1146,12 @@ class KVPoolWorker:
                 self.sub_size_bytes,
             )
 
-        # Initialize store, register buffers, and start transfer threads
-        # directly here (like main) — no separate init_backend handshake.
-        if self.use_layerwise_transfer:
-            self.m_store.ensure_initialized()
+        # Register buffers eagerly; they stay pending inside the backend
+        # until the store initializes. Do NOT eagerly ensure_initialized()
+        # here: initializing the fabric store during worker startup wedges
+        # the first real forward compute stream on single-node (peerless)
+        # deployments. The store initializes lazily at the first real
+        # forward step via get_finished() -> ensure_store_initialized().
         self.m_store.register_buffer(ptrs, lengths)
         if self.use_block_key_layerwise:
             self.m_store.validate_layerwise_support()
@@ -1153,7 +1175,6 @@ class KVPoolWorker:
             return
         self.current_layer = 0
         self.layerwise_retrievers = []
-        logger.debug("KV pool worker start_load_kv requests=%d", len(metadata.requests))
         if len(metadata.requests) == 0:
             return
         for request in metadata.requests:
@@ -1774,6 +1795,13 @@ class KVPoolWorker:
         for request in requests:
             if request.load_spec is None or not request.load_spec.can_load:
                 continue
+            # Decode-step self-offload loads (the scheduler fabricates
+            # kvpool_cached_tokens == vllm_cached_tokens for a running
+            # request) race the request's own async saves: a not-yet-
+            # committed block reports gva=0. The KV is resident in HBM and
+            # batch_copy skips zero-GVA blocks, so tolerate the miss instead
+            # of failing the multi-group load.
+            pd_self_offload = request.load_spec.vllm_cached_tokens == request.load_spec.kvpool_cached_tokens
             cached_tokens = request.load_spec.kvpool_cached_tokens
             if not getattr(self, "use_eagle", False) and request.load_spec.kvpool_store_skip_tokens is not None:
                 cached_tokens = request.load_spec.kvpool_store_skip_tokens
@@ -1887,6 +1915,14 @@ class KVPoolWorker:
                     gvas.append(gva)
                     if gva > 0:
                         valid_gva_indices.append(len(gvas) - 1)
+                    elif pd_self_offload:
+                        logger.debug(
+                            "load_gvas: req=%s group=%d self-offload block not stored yet (size=%d), skip; block_id=%s",
+                            request.req_id,
+                            group_id,
+                            sizes if sizes else 0,
+                            int(block_ids_by_group[block_idx]) if block_idx < len(block_ids_by_group) else "N/A",
+                        )
                     else:
                         if block_idx < len(block_ids_by_group):
                             invalid_block_ids.append(int(block_ids_by_group[block_idx]))
@@ -1943,7 +1979,7 @@ class KVPoolWorker:
                             leased_keys.append(keys[gva_index])
                         else:
                             gvas[gva_index] = 0
-                            if block_id is not None:
+                            if block_id is not None and not pd_self_offload:
                                 invalid_block_ids.append(block_id)
                             logger.warning(
                                 "load_gvas: req=%s group=%d lease failed result=%d, block_id=%s load failed",
@@ -2693,13 +2729,17 @@ class KVPoolWorker:
         gate = reset_attention_compute_start_gate()
         try:
             self.kv_recv_thread.raise_if_failed()
-            if getattr(self, "block_key_hybrid", False):
+            if getattr(self, "block_key_hybrid", False) or self.use_layerwise_transfer:
                 layer_id = self.current_layer
                 # Conv/recurrent state is updated inside attention, after this
                 # entry event. Preserve its post-compute save hook.
                 if layer_id not in self._recurrent_layers:
+                    # GVA (memcache) plane shares the same layer send thread +
+                    # sync events; without this wiring its save tasks are built
+                    # and allocated but never dispatched (blobs stay empty).
                     gate.on_start = lambda: self._submit_attention_save(layer_id)
-                gate.on_finish = self._finish_attention_window
+                if getattr(self, "block_key_hybrid", False):
+                    gate.on_finish = self._finish_attention_window
             if getattr(self, "block_key_hybrid", False) and self.next_layer_to_submit <= self.current_layer:
                 # An unprefetched demand load must not race earlier collectives.
                 boundary = torch.npu.Event()

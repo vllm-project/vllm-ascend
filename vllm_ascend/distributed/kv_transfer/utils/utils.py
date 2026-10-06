@@ -20,6 +20,17 @@ PD_QOS_DEFAULT = 1
 QOS_MAX = 4
 
 
+def is_swa_cache_layer(layer_name: str) -> bool:
+    """Whether ``layer_name`` is a DeepSeek-V4 DSA sliding-window cache layer.
+
+    DSV4 attaches a per-layer SWA cache module (``...self_attn.swa_cache``)
+    next to the main MLA KV and indexer caches. Its single fused tensor is
+    part of neither transferred SFAPD component, so callers classifying KV
+    layers into main/indexer buckets must filter it out.
+    """
+    return layer_name.lower().endswith(".swa_cache")
+
+
 def inject_qos(qos: int) -> None:
     """Merge P/D QoS before engine initialization, preserving all other fields."""
     if type(qos) is not int or not 0 <= qos <= QOS_MAX:

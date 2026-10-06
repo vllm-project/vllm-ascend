@@ -76,6 +76,8 @@ class TestNPUWorker(TestBase):
         worker.model_config = MagicMock()
         worker.parallel_config = MagicMock()
         worker.model_config.get_num_layers.return_value = 6
+        worker.model_config.get_total_num_hidden_layers.return_value = 6
+        worker.model_config.get_layers_start_end_indices.return_value = (0, 6)
         main_spec = AscendMLAAttentionSpec(
             block_size=2,
             num_kv_heads=1,
@@ -97,16 +99,19 @@ class TestNPUWorker(TestBase):
             **{f"model.layers.{layer}.self_attn.indexer.k_cache": indexer_spec for layer in (1, 2, 4)},
         }
 
-        num_layers, num_slots, factor = worker._get_layerwise_kv_cache_memory_info(
-            specs,
-            {"layerwise_num_shared_buffers": 2},
+        num_layers, num_lanes, logical_bytes, physical_bytes, alignment_reserve = (
+            worker._get_layerwise_kv_cache_memory_info(
+                specs,
+                {"layerwise_num_shared_buffers": 2},
+            )
         )
 
         expected_logical_bytes = 6 * main_spec.page_size_bytes + 3 * indexer_spec.page_size_bytes
         # Both reused slots contain indexer layers; the independent slot does not.
         expected_physical_bytes = 3 * main_spec.page_size_bytes + 2 * indexer_spec.page_size_bytes
-        self.assertEqual((num_layers, num_slots), (6, 3))
-        self.assertEqual(factor, expected_logical_bytes / expected_physical_bytes)
+        self.assertEqual((num_layers, num_lanes), (6, 5))
+        self.assertEqual((logical_bytes, physical_bytes), (expected_logical_bytes, expected_physical_bytes))
+        self.assertEqual(alignment_reserve, 5 * 2 * 1024 * 1024)
 
     def test_layer_reuse_memory_factor_counts_components_per_buffer(self):
         from vllm_ascend.core.kv_cache_interface import (
@@ -119,6 +124,8 @@ class TestNPUWorker(TestBase):
         worker.model_config = MagicMock()
         worker.parallel_config = MagicMock()
         worker.model_config.get_num_layers.return_value = 6
+        worker.model_config.get_total_num_hidden_layers.return_value = 6
+        worker.model_config.get_layers_start_end_indices.return_value = (0, 6)
         main_spec = AscendMLAAttentionSpec(
             block_size=2,
             num_kv_heads=1,
@@ -143,9 +150,11 @@ class TestNPUWorker(TestBase):
             "model.mtp.0.self_attn.attn": main_spec,
         }
 
-        num_layers, num_slots, factor = worker._get_layerwise_kv_cache_memory_info(
-            specs,
-            {"layerwise_num_shared_buffers": 2},
+        num_layers, num_lanes, logical_bytes, physical_bytes, alignment_reserve = (
+            worker._get_layerwise_kv_cache_memory_info(
+                specs,
+                {"layerwise_num_shared_buffers": 2},
+            )
         )
 
         # Layer 0 independent; reused layers split into buffers [1,3,5] and [2,4,6] -> 3
@@ -153,8 +162,101 @@ class TestNPUWorker(TestBase):
         # counted once per buffer: independent + both reused == 3 indexer slots.
         expected_logical_bytes = 7 * main_spec.page_size_bytes + 3 * indexer_spec.page_size_bytes
         expected_physical_bytes = 3 * main_spec.page_size_bytes + 3 * indexer_spec.page_size_bytes
-        self.assertEqual((num_layers, num_slots), (7, 3))
-        self.assertEqual(factor, expected_logical_bytes / expected_physical_bytes)
+        self.assertEqual((num_layers, num_lanes), (7, 6))
+        self.assertEqual((logical_bytes, physical_bytes), (expected_logical_bytes, expected_physical_bytes))
+        self.assertEqual(alignment_reserve, 6 * 2 * 1024 * 1024)
+
+    def test_layer_reuse_memory_uses_dsv4_planner_divisor(self):
+        from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+        from vllm_ascend.patch.platform.patch_kv_cache_utils import (
+            _get_kv_cache_config_deepseek_v4_main,
+        )
+        from vllm_ascend.worker.worker import NPUWorker
+
+        worker = NPUWorker.__new__(NPUWorker)
+        worker.model_config = MagicMock()
+        worker.parallel_config = MagicMock()
+        worker.model_config.get_num_layers.return_value = 3
+        worker.model_config.get_total_num_hidden_layers.return_value = 3
+        worker.model_config.get_layers_start_end_indices.return_value = (0, 3)
+        worker.vllm_config = SimpleNamespace(
+            cache_config=SimpleNamespace(num_gpu_blocks_override=None),
+        )
+        small_name = "model.layers.0.self_attn.attn"
+        large_name = "model.layers.1.self_attn.attn"
+        aliased_large_name = "model.layers.2.self_attn.attn"
+        mtp_name = "model.mtp.layers.0.self_attn.attn"
+        small_spec = AscendMLAAttentionSpec(
+            block_size=8,
+            num_kv_heads=1,
+            head_size=4,
+            dtype=torch.bfloat16,
+            model_version="deepseek_v4",
+            tokens_per_state=1,
+        )
+        large_spec = AscendMLAAttentionSpec(
+            block_size=8,
+            num_kv_heads=1,
+            head_size=8,
+            dtype=torch.int8,
+            scale_dim=1,
+            scale_dtype=torch.float16,
+            model_version="deepseek_v4",
+            tokens_per_state=1,
+        )
+        specs = {
+            small_name: small_spec,
+            large_name: large_spec,
+            aliased_large_name: large_spec,
+            mtp_name: large_spec,
+        }
+        full_group_spec = UniformTypeKVCacheSpecs.from_specs(
+            {
+                small_name: small_spec,
+                large_name: large_spec,
+                mtp_name: large_spec,
+            }
+        )
+        alias_group_spec = UniformTypeKVCacheSpecs.from_specs({aliased_large_name: large_spec})
+        self.assertIsNotNone(full_group_spec)
+        self.assertIsNotNone(alias_group_spec)
+        assert full_group_spec is not None
+        assert alias_group_spec is not None
+        groups = [
+            KVCacheGroupSpec(
+                layer_names=[small_name, large_name, mtp_name],
+                kv_cache_spec=full_group_spec,
+            ),
+            KVCacheGroupSpec(
+                layer_names=[aliased_large_name],
+                kv_cache_spec=alias_group_spec,
+            ),
+        ]
+
+        with patch("vllm_ascend.worker.worker.get_kv_cache_groups", return_value=groups):
+            num_layers, num_lanes, logical_bytes, physical_bytes, alignment_reserve = (
+                worker._get_layerwise_kv_cache_memory_info(
+                    specs,
+                    {"layerwise_num_shared_buffers": 1},
+                )
+            )
+
+        # The DSV4 planner has two tuple slots, each containing both page-size
+        # buckets. Summing the four logical specs would instead produce 448 B.
+        expected_logical_bytes = 2 * (small_spec.page_size_bytes + large_spec.page_size_bytes)
+        expected_physical_bytes = small_spec.page_size_bytes + large_spec.page_size_bytes
+        self.assertEqual((num_layers, num_lanes), (4, 2))
+        self.assertEqual((logical_bytes, physical_bytes), (expected_logical_bytes, expected_physical_bytes))
+        self.assertEqual(alignment_reserve, 2 * 2 * 1024 * 1024)
+
+        physical_num_blocks = 200
+        advertised_memory = physical_num_blocks * logical_bytes
+        planned_num_blocks, _ = _get_kv_cache_config_deepseek_v4_main(
+            worker.vllm_config,
+            groups,
+            advertised_memory,
+        )
+        self.assertEqual(planned_num_blocks, physical_num_blocks)
 
     def test_incomplete_layer_layout_does_not_scale_memory_budget(self):
         from vllm_ascend.worker.worker import NPUWorker
@@ -163,6 +265,8 @@ class TestNPUWorker(TestBase):
         worker.model_config = MagicMock()
         worker.parallel_config = MagicMock()
         worker.model_config.get_num_layers.return_value = 4
+        worker.model_config.get_total_num_hidden_layers.return_value = 4
+        worker.model_config.get_layers_start_end_indices.return_value = (0, 4)
         specs = {
             "model.layers.0.self_attn.attn": MagicMock(),
             "model.layers.1.self_attn.attn": MagicMock(),
@@ -176,7 +280,7 @@ class TestNPUWorker(TestBase):
             },
         )
 
-        self.assertEqual(memory_info, (2, 2, 1.0))
+        self.assertEqual(memory_info, (2, 2, 0, 0, 0))
 
     def test_no_reuse_does_not_scale_layerwise_memory_layout(self):
         from vllm_ascend.worker.worker import NPUWorker
@@ -185,6 +289,8 @@ class TestNPUWorker(TestBase):
         worker.model_config = MagicMock()
         worker.parallel_config = MagicMock()
         worker.model_config.get_num_layers.return_value = 2
+        worker.model_config.get_total_num_hidden_layers.return_value = 2
+        worker.model_config.get_layers_start_end_indices.return_value = (0, 2)
         spec = FullAttentionSpec(
             block_size=2,
             num_kv_heads=1,
@@ -203,7 +309,7 @@ class TestNPUWorker(TestBase):
             {"layerwise_num_shared_buffers": 3},
         )
 
-        self.assertEqual(memory_info, (3, 3, 1.0))
+        self.assertEqual(memory_info, (3, 3, 0, 0, 0))
 
     def test_deepseek_v4_shared_tuple_layout_does_not_scale_budget(self):
         from vllm_ascend.worker.worker import NPUWorker

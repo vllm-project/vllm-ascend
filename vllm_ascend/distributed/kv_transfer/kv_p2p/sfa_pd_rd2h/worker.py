@@ -56,6 +56,7 @@ from vllm_ascend.distributed.kv_transfer.utils.memfabric_transfer_engine import 
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
     collect_storage_merged_register_regions,
     get_transfer_timeout_value,
+    is_swa_cache_layer,
     validate_register_region_count,
 )
 
@@ -682,7 +683,21 @@ class SFAPDRD2HProducerWorker:
                 layer2group_ids[layer_name] = group_idx
 
         num_blocks = self.kv_cache_config.num_blocks
-        main_by_layer = {_layer_idx(name): name for name in kv_caches if "indexer" not in name.lower()}
+        swa_layers = [name for name in kv_caches if is_swa_cache_layer(name)]
+        if swa_layers:
+            logger.warning(
+                "SFAPD producer skips %d DSV4 SWA cache layers (e.g. %s); "
+                "their window KV is not transferred.",
+                len(swa_layers),
+                swa_layers[0],
+            )
+        main_by_layer = {
+            _layer_idx(name): name
+            for name in kv_caches
+            if "indexer" not in name.lower()
+            and not is_swa_cache_layer(name)
+            and not name.lower().endswith(".state_cache")
+        }
         indexer_by_layer = {_layer_idx(name): name for name in kv_caches if "indexer" in name.lower()}
         if not main_by_layer:
             raise RuntimeError("SFAPD producer did not find main SFA KV cache layers")
@@ -707,7 +722,7 @@ class SFAPDRD2HProducerWorker:
             layer_meta = LayerMetadata([], [], [], [])
             _append_cache_tensors(layer_meta, kv_caches[main_name], layer2group_ids[main_name])
             layer_meta.main_tensor_count = len(layer_meta.kv_caches_base_addr)
-            if layer_meta.main_tensor_count != 2:
+            if layer_meta.main_tensor_count not in (1, 2):
                 raise RuntimeError(
                     f"SFAPD producer layer {main_name} must expose main K/V tensors, "
                     f"got {layer_meta.main_tensor_count} tensor(s)"
@@ -725,6 +740,12 @@ class SFAPDRD2HProducerWorker:
         self.last_layer_idx = max(main_by_layer)
         self.total_layers = self.last_layer_idx + 1
         self.stage_layer_names = [name for _, name in sorted(main_by_layer.items())]
+        # Global layer ordinal -> main KV name. The store-side reuse gate calls
+        # wait_for_layer_reuse() with ordinals over ALL stage layers (incl.
+        # layers without SFA main KV, e.g. DSV4 SWA-only layers), so the gate
+        # must translate by global ordinal, not by position in the compacted
+        # main-KV-only list above.
+        self.stage_layer_by_idx = dict(main_by_layer)
 
         # Infer physical storage slots directly from component addresses.
         # Main and indexer storage are tracked independently: a main-only layer
@@ -789,6 +810,10 @@ class SFAPDRD2HProducerWorker:
         )
         if resolved_layer_name is None:
             return
+        if resolved_layer_name not in self.layer_metadata:
+            # Non-transferred components (DSV4 SWA cache layers) carry no
+            # producer-side metadata.
+            return
         layer_idx = _layer_idx(resolved_layer_name)
         if layer_idx >= self.total_layers or layer_idx in self._pd_dispatched_layers:
             return
@@ -822,6 +847,10 @@ class SFAPDRD2HProducerWorker:
             self.stage_layer_names[self.current_layer] if self.current_layer < len(self.stage_layer_names) else None
         )
         if resolved_layer_name is None:
+            return
+        if resolved_layer_name not in self.layer_metadata:
+            # Non-transferred components (DSV4 SWA cache layers) carry no
+            # producer-side metadata.
             return
         layer_idx = _layer_idx(resolved_layer_name)
         if layer_idx >= self.total_layers:
@@ -930,15 +959,16 @@ class SFAPDRD2HProducerWorker:
                 )
 
     def wait_for_layer_reuse(self, stage_local_layer_idx: int) -> None:
-        """Translate AscendStore's stage-local ordinal to a global layer."""
-        try:
-            global_layer_idx = _layer_idx(self.stage_layer_names[stage_local_layer_idx])
-        except IndexError as error:
-            raise RuntimeError(
-                "SFA layerwise reuse mapping is missing stage-local layer "
-                f"{stage_local_layer_idx} on pp_rank={self.pp_rank}/{self.pp_size}"
-            ) from error
-        self.wait_for_layer_send(global_layer_idx)
+        """Gate buffer reuse for the layer at global ordinal ``stage_local_layer_idx``.
+
+        The caller (AscendStore reuse gate) counts ordinals over ALL stage
+        layers; layers without transferred SFA main KV (DSV4 SWA-only layers)
+        carry no buffer-reuse gate, so skip them instead of failing.
+        """
+        name = getattr(self, "stage_layer_by_idx", {}).get(stage_local_layer_idx)
+        if name is None:
+            return
+        self.wait_for_layer_send(_layer_idx(name))
 
     def shutdown(self) -> None:
         if self.kv_send_layer_thread is not None:

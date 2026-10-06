@@ -35,6 +35,9 @@ from vllm_ascend.attention.utils import (
     wait_for_kv_layer_from_connector,
 )
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, get_storage_block_size
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
+    record_attention_compute_start,
+)
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import attention_transfer_window
@@ -2304,4 +2307,5 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                 attn_kwargs["cmp_sparse_indices"] = compress_topk_idxs
 
         with attention_transfer_window():
+            record_attention_compute_start()
             return attn_op(q, **attn_kwargs)[0]
