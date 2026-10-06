@@ -580,6 +580,7 @@ class FusedMC2CommImpl(MoECommMethod):
                     group=self.token_dispatcher.moe_all_to_all_group_name,
                     max_output_size=get_ascend_config().mega_moe_max_tokens,
                     swiglu_limit=self.swiglu_limit,
+                    world_size=self.token_dispatcher.ep_world_size,
                     x_active_mask=fused_experts_input.routing.mc2_mask,
                     out=out,
                     expert_token_nums=self.expert_token_nums,
