@@ -144,7 +144,7 @@ def test_execution_ownership_has_no_legacy_runtime_package() -> None:
     v1_dir = Path(__file__).parents[5] / "vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/v1"
 
     assert not (v1_dir / "runtime").exists()
-    assert (v1_dir / "projection/bulk/rows.py").is_file()
+    assert (v1_dir / "worker/transfer/rows.py").is_file()
     assert (v1_dir / "worker/io/io.py").is_file()
     runtime_imports = [path for path in v1_dir.rglob("*.py") if ".runtime" in path.read_text()]
     assert runtime_imports == []
@@ -160,7 +160,9 @@ def test_worker_implementation_is_grouped_by_execution_role() -> None:
     assert (worker_dir / "transfer/batch.py").is_file()
     assert (worker_dir / "transfer/evidence.py").is_file()
     assert (worker_dir / "transfer/result.py").is_file()
+    assert (worker_dir / "transfer/rows.py").is_file()
     assert (worker_dir / "transfer/state.py").is_file()
+    assert not (worker_dir.parent / "projection/bulk/rows.py").exists()
 
     legacy_root_modules = (
         "batch.py",
