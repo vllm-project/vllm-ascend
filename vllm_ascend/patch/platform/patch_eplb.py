@@ -256,7 +256,7 @@ def _patch_parallel_config() -> None:
             and config.eplb_config.communicator is None
         ):
             # Provisional per-process decision; must precede the upstream
-            # auto-selection below so it is not pre-empted by nixl/gloo.
+            # auto-selection below so it is not preempted by nixl/gloo.
             binding, reason = _probe_local_hixl_binding()
             if binding != "none":
                 config.eplb_config.communicator = "hixl"
