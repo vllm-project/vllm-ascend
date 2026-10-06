@@ -266,7 +266,7 @@ jobs:
       ref: ${{ github.event.pull_request.head.sha }}
       base_ref: ${{ github.base_ref }}
       test_groups: >-
-        [{"partition_name":"cpu-ut","runner":"linux-amd64-cpu-8-hk","image_tag":"9.2.0_20260928212200-910b-ubuntu22.04-py3.12","npu_type":"cpu","num_npus":0,"tests":"tests/ut"}]
+        [{"partition_name":"cpu-ut","runner":"linux-amd64-cpu-8-hk","image_tag":"9.1.0-910b-ubuntu22.04-py3.12","npu_type":"cpu","num_npus":0,"tests":"tests/ut"}]
       enable-coverage: false
 
   recommend-tests:

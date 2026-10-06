@@ -175,12 +175,6 @@ def test_mixed_non_spec_reuses_rearranged_qkv() -> None:
         patch.object(AscendGatedDeltaNetAttention, "_probe_fused_chunk", return_value=False),
         patch("vllm_ascend.ops.gdn.clear_ssm_states"),
         patch(
-            "vllm_ascend.ops.gdn.gather_ssm_states",
-            side_effect=lambda state, indices, has_initial_state, **kwargs: state.index_select(
-                0, indices.to(torch.long)
-            ),
-        ),
-        patch(
             "vllm_ascend.ops.gdn.chunk_gated_delta_rule",
             side_effect=chunk_gated_delta_rule,
         ) as chunk_mock,
