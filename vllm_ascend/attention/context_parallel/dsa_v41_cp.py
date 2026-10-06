@@ -263,6 +263,13 @@ class AscendDSAV41CPImpl(AscendDSAV41Impl):
             padded = output.new_zeros((per_rank, output.shape[1], output.shape[2]))
             padded[: output.shape[0]] = output
         exchanged = restore_tp_heads(padded, get_tp_group())
+        # DSpark's DP/FlashComm padding can extend hidden states beyond the
+        # metadata token interval. Restore that suffix before O projection so
+        # its TP reduction keeps the caller's padded output layout.
+        if exchanged.shape[0] < hidden_states.shape[0]:
+            padded_exchange = exchanged.new_zeros((hidden_states.shape[0], *exchanged.shape[1:]))
+            padded_exchange[: exchanged.shape[0]] = exchanged
+            exchanged = padded_exchange
         # The inherited V4 module owns quantized weights and TP projection logic.
         attn.dsa_attn.dsa_attn.impl._forward_o_proj(exchanged[: hidden_states.shape[0]], projected)
         return projected

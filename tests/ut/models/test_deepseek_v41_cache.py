@@ -31,6 +31,7 @@ from tests.deepseek_v41_utils import (
     select_index_topk,
 )
 from vllm_ascend.attention import dsa_v41
+from vllm_ascend.attention.context_parallel import dsa_cp, dsa_v41_cp
 from vllm_ascend.attention.dsa_v41 import (
     AscendDSAV41Impl,
     AscendDSAV41MetadataBuilder,
@@ -1499,45 +1500,48 @@ def test_v41_cp_source_rope_initializes_global_compressor(runtime, monkeypatch, 
     assert builder._global_builder._device_metadata_enabled is async_metadata
 
 
-@pytest.mark.parametrize("local_tokens", [0, 1, 2])
-@pytest.mark.parametrize("num_tokens", [3, 4])
-def test_v41_cp_output_exchange_only_pads_partial_ranks(monkeypatch, local_tokens, num_tokens):
-    from vllm_ascend.attention.context_parallel.dsa_v41_cp import AscendDSAV41CPImpl
+@pytest.mark.parametrize(
+    "world,rank,live_tokens,extra_padding",
+    [(2, 0, 5, 0), (2, 1, 5, 1), (4, 0, 5, 3), (4, 3, 5, 1), (2, 1, 0, 2), (4, 3, 0, 2)],
+)
+def test_v41_cp_preserves_tp_heads_and_flashcomm_output_extent(monkeypatch, world, rank, live_tokens, extra_padding):
+    rank %= world
+    per_rank = (live_tokens + world - 1) // world
+    token_extent = world * (per_rank + extra_padding)
+    heads, width = 2 * world, 2
+    canonical = torch.arange(live_tokens * heads * width, dtype=torch.float32).view(live_tokens, heads, width) + 1
+    peers = torch.zeros(world * per_rank, heads, width)
+    peers[:live_tokens] = canonical
+    local = peers[rank * per_rank : min((rank + 1) * per_rank, live_tokens)]
+    group = SimpleNamespace(world_size=world, device_group=object())
 
-    impl = AscendDSAV41CPImpl("layer", SimpleNamespace(is_kv_source=False), None, None, None)
-    calls = []
-    monkeypatch.setattr("vllm_ascend.attention.context_parallel.dsa_v41_cp.get_tp_group", lambda: None)
+    def exchange(recv, send, *, group):
+        # Emulate peers' all-to-all sends, while running restore_tp_heads
+        # itself unmocked to test the token/head coordinate change.
+        expected_send = peers[rank * per_rank : (rank + 1) * per_rank]
+        expected_send = torch.cat(expected_send.split(2, dim=1), dim=0)
+        torch.testing.assert_close(send, expected_send)
+        recv.copy_(peers[:, rank * 2 : (rank + 1) * 2])
 
-    def exchange(tensor, group):
-        calls.append(tensor)
-        return torch.ones((4, 2, 3))
+    def project(value, output):
+        expected = torch.zeros(token_extent, 2, width)
+        expected[:live_tokens] = canonical[:, rank * 2 : (rank + 1) * 2]
+        torch.testing.assert_close(value, expected)
+        # FlashComm reduce-scatter keeps a TP-local token buffer.
+        output.copy_(value.flatten(1).chunk(world, dim=0)[rank])
 
-    monkeypatch.setattr("vllm_ascend.attention.context_parallel.dsa_v41_cp.restore_tp_heads", exchange)
-
-    def project(tensor, output):
-        assert output is destination
-        assert tensor.shape == (num_tokens, 2, 3)
-        output.copy_(tensor.flatten(1))
-
-    projection = SimpleNamespace(_forward_o_proj=project)
-    attn = SimpleNamespace(dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=projection)))
-    destination = torch.empty((num_tokens, 6))
-    local_output = torch.ones((local_tokens, 4, 3))
-    output = impl._project_output(
-        attn,
-        local_output,
-        torch.empty((num_tokens, 6)),
-        SimpleNamespace(swa=SimpleNamespace(cp_token_range=(0, 2, 2, 4))),
-        projected=destination,
+    monkeypatch.setattr(dsa_v41_cp, "get_tp_group", lambda: group)
+    monkeypatch.setattr(dsa_cp.dist, "all_to_all_single", exchange)
+    impl = dsa_v41_cp.AscendDSAV41CPImpl.__new__(dsa_v41_cp.AscendDSAV41CPImpl)
+    attn = SimpleNamespace(
+        dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=SimpleNamespace(_forward_o_proj=project)))
     )
-    assert output.data_ptr() == destination.data_ptr()
-    assert len(calls) == 1
-    assert calls[0].shape == (2, 4, 3)
-    assert (calls[0] is local_output) == (local_tokens == 2)
-    torch.testing.assert_close(calls[0][:local_tokens], local_output)
-    assert torch.count_nonzero(calls[0][local_tokens:]) == 0
-    assert output.shape == (num_tokens, 6)
-    torch.testing.assert_close(output, torch.ones_like(destination))
+    output = torch.full((token_extent // world, 4), -777.0)
+    metadata = SimpleNamespace(swa=SimpleNamespace(cp_token_range=(0, 0, per_rank, 0)))
+    assert impl._project_output(attn, local, torch.empty(token_extent, 4), metadata, projected=output) is output
+    full = torch.zeros(token_extent, 4)
+    full[:live_tokens] = canonical[:, rank * 2 : (rank + 1) * 2].flatten(1)
+    torch.testing.assert_close(output, full.chunk(world)[rank])
 
 
 def test_v41_cp_consumers_reuse_local_topk_and_candidates():
