@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -21,12 +22,14 @@ from vllm.model_executor.models.config import (
     HybridAttentionMambaModelConfig,
     MambaModelConfig,
 )
+from vllm.platforms.interface import Platform
 
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
 from vllm_ascend.patch.platform.patch_mamba_config import (
     _get_sparse_index_kpool,
     _using_kv_store,
 )
+from vllm_ascend.platform import NPUPlatform
 
 
 def _model_config(**text_config):
@@ -160,6 +163,75 @@ def test_kpool_page_alignment_preserves_packed_and_regular_geometry(cache_dtype,
     assert padded_page_size == expected_block_size * expected_token_page_size
     assert padded_page_size >= 356864
     assert config.cache_config.mamba_block_size == expected_block_size
+
+
+@pytest.mark.parametrize("cache_dtype", ["int8", "fp8"])
+@pytest.mark.parametrize("prefix_caching", [False, True])
+def test_backend_alignment_preserves_kpool_c8_page_geometry(cache_dtype, prefix_caching):
+    config = _config(prefix_caching=prefix_caching, mamba_cache_mode="align" if prefix_caching else "none")
+    config.parallel_config = SimpleNamespace(tensor_parallel_size=1)
+    config.cache_config.cache_dtype = cache_dtype
+    config.cache_config.user_specified_block_size = False
+    config.cache_config.user_specified_mamba_block_size = False
+    config.cache_config.kv_cache_dtype_skip_layers = []
+    config.cache_config.mamba_page_size_padded = None
+    config.model_config = SimpleNamespace(
+        architecture="DummyHybridModel",
+        is_hybrid=True,
+        use_mla=True,
+        dtype=torch.bfloat16,
+        max_model_len=133120,
+        hf_text_config=SimpleNamespace(index_topk=2048, index_kpool=4, kv_lora_rank=512, qk_rope_head_dim=0),
+        hf_config=SimpleNamespace(),
+        get_num_kv_heads=lambda _parallel_config: 1,
+        get_head_size=lambda: 512,
+    )
+    # GLM-5.3-Flash's convolution and recurrent-state pages occupy 4,587,520 bytes.
+    model_cls = SimpleNamespace(
+        get_mamba_state_shape_from_config=lambda _config: ((8, 24576), (64, 128, 128)),
+        get_mamba_state_dtype_from_config=lambda _config: (torch.bfloat16, torch.float32),
+    )
+    backend = SimpleNamespace(
+        get_preferred_block_size=lambda _default: 128,
+        get_supported_kernel_block_sizes=lambda: [128],
+    )
+
+    with (
+        patch.object(MambaModelConfig, "verify_and_update_config"),
+        patch("vllm.model_executor.models.ModelRegistry.resolve_model_cls", return_value=(model_cls, None)),
+        patch("vllm.config.vllm.set_current_vllm_config", return_value=nullcontext()),
+    ):
+        HybridAttentionMambaModelConfig.verify_and_update_config(config)
+        runner_block_size = config.cache_config.block_size
+        assert runner_block_size == 8704
+
+        # The backend pass resets the preferred block to 128. Generic MLA
+        # sizing omits the 16 scale bytes and changes it to 8960 instead.
+        for _ in range(2):
+            config.cache_config.block_size = backend.get_preferred_block_size(128)
+            NPUPlatform._align_hybrid_block_size(config, backend)
+            assert config.cache_config.block_size == runner_block_size
+            assert config.cache_config.mamba_page_size_padded == runner_block_size * 528
+            assert config.cache_config.block_size // 4 % 16 == 0
+            expected_mamba_block_size = runner_block_size if prefix_caching else config.model_config.max_model_len
+            assert config.cache_config.mamba_block_size == expected_mamba_block_size
+
+
+@pytest.mark.parametrize(
+    "use_mla,cache_dtype,kpool",
+    [(True, "auto", True), (True, "int8", False), (False, "int8", True)],
+)
+def test_backend_alignment_delegates_regular_cache_geometry(use_mla, cache_dtype, kpool):
+    config = _config()
+    config.cache_config.cache_dtype = cache_dtype
+    config.model_config.use_mla = use_mla
+    config.model_config.hf_text_config = SimpleNamespace(**({"index_kpool": 4} if kpool else {}))
+    backend = SimpleNamespace()
+
+    with patch.object(Platform, "_align_hybrid_block_size") as upstream:
+        NPUPlatform._align_hybrid_block_size(config, backend)
+
+    upstream.assert_called_once_with(config, backend)
 
 
 @pytest.mark.parametrize(

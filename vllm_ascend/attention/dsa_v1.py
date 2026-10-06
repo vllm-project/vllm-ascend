@@ -918,7 +918,13 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         max_seqlen_kv: int | torch.Tensor,
         cu_seqlens_ori_kv: torch.Tensor | None,
         cu_seqlens_cmp_kv: torch.Tensor | None,
+        ori_win_left: int,
+        ori_win_right: int,
+        dspark_swa: bool,
     ) -> torch.Tensor:
+        # DSpark widens the SWA window to include the whole draft block.
+        # Metadata and execution must use the same window so split-G cores
+        # agree on the number of KV iterations and synchronization events.
         sas_metadata = metadata_cache.get(layer_name)
         if sas_metadata is None:
             tp_size = get_tensor_model_parallel_world_size()
@@ -934,6 +940,13 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             kv_plan = get_dsa_attn_kv_plan(self.vllm_config)
             metadata_op = kv_plan.get_dsa_sparse_attn_metadata_op()
             metadata_kwargs = kv_plan.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
+            # Explicit DSpark indices give every query in a draft block the
+            # same visible KV set. Plan it as non-causal attention over that
+            # set, including when a short context crosses an S2 tile boundary.
+            sas_seq_lens = seq_lens
+            if dspark_swa:
+                query_lens = query_start_loc[1:] - query_start_loc[:-1]
+                sas_seq_lens = torch.minimum(seq_lens, query_lens + self.model_config.hf_config.sliding_window)
             sas_metadata = metadata_op(
                 **metadata_kwargs,
                 num_heads_q=n_local_heads,
@@ -943,16 +956,16 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 cu_seqlens_ori_kv=cu_seqlens_ori_kv,
                 cu_seqlens_cmp_kv=cu_seqlens_cmp_kv,
                 seqused_q=self.seqused_q,
-                seqused_kv=seq_lens,
+                seqused_kv=sas_seq_lens,
                 max_seqlen_q=max_seqlen_q,
                 max_seqlen_kv=max_seqlen_kv,
                 batch_size=len(seq_lens),
                 cmp_topk=index_topk if self.compressor_ratio == 4 else 0,
                 cmp_ratio=cmp_ratio,
-                ori_mask_mode=4,  # 4:sliding window
+                ori_mask_mode=0 if dspark_swa else 4,
                 cmp_mask_mode=3,  # 3:causal
-                ori_win_left=self.model_config.hf_config.sliding_window - 1,
-                ori_win_right=0,
+                ori_win_left=ori_win_left,
+                ori_win_right=ori_win_right,
                 layout_q="TND",
                 layout_kv=_dsa_layout_kv(self.vllm_config),
                 has_ori_kv=True,
@@ -1177,6 +1190,9 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     max_seqlen_kv=max_seqlen_kv,
                     cu_seqlens_ori_kv=cu_seqlens_ori_kv,
                     cu_seqlens_cmp_kv=cu_seqlens_cmp_kv,
+                    ori_win_left=ori_win_left,
+                    ori_win_right=ori_win_right,
+                    dspark_swa=dspark_swa_indices is not None,
                 )
 
             def build_qli_metadata() -> None:
@@ -1210,6 +1226,9 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 max_seqlen_kv=max_seqlen_kv,
                 cu_seqlens_ori_kv=cu_seqlens_ori_kv,
                 cu_seqlens_cmp_kv=cu_seqlens_cmp_kv,
+                ori_win_left=ori_win_left,
+                ori_win_right=ori_win_right,
+                dspark_swa=dspark_swa_indices is not None,
             )
             qli_metadata = self._build_qli_metadata(
                 metadata_cache=metadata_cache,
@@ -1427,6 +1446,9 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         def build_attention_metadata() -> torch.Tensor:
             if build_dspark_swa is not None:
                 build_dspark_swa()
+            sas_seq_lens = seq_lens
+            if dspark_swa_indices is not None:
+                sas_seq_lens = torch.minimum(seq_lens, seq_lens_q + self.model_config.hf_config.sliding_window)
             result = metadata_op(
                 **metadata_kwargs,
                 num_heads_q=n_local_heads,
@@ -1436,12 +1458,12 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 cu_seqlens_ori_kv=cu_seqlens_ori_kv,
                 cu_seqlens_cmp_kv=cu_seqlens_cmp_kv,
                 seqused_q=self.seqused_q,
-                seqused_kv=seq_lens,
+                seqused_kv=sas_seq_lens,
                 max_seqlen_q=max_seqlen_q,
                 max_seqlen_kv=max_seqlen_kv,
                 batch_size=num_reqs,
                 cmp_ratio=1,
-                ori_mask_mode=4,
+                ori_mask_mode=0 if dspark_swa_indices is not None else 4,
                 cmp_mask_mode=3,
                 ori_win_left=ori_win_left,
                 ori_win_right=ori_win_right,

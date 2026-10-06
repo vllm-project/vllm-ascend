@@ -117,6 +117,30 @@ def get_dsv4_compress_ratio(config: Any, layer_idx: int) -> int:
     return compress_ratios[layer_idx]
 
 
+def dsv4_skips_indexer_topk(config: Any, layer_idx: int, pp_start_layer: int | None = None) -> bool:
+    """Whether a main-model V4 layer reuses another Indexer's Top-K indices.
+
+    Each PP stage anchors its local cache at its first C4 layer. Later C4
+    layers keep the configured global reuse schedule.
+    """
+    if not getattr(config, "use_index_cache", False) or get_dsv4_compress_ratio(config, layer_idx) != 4:
+        return False
+    compress_ratios = getattr(config, "compress_ratios", None) or []
+    indexer_seq_idx = sum(ratio == 4 for ratio in compress_ratios[:layer_idx])
+    pattern = getattr(config, "index_topk_pattern", None)
+    if pattern is None:
+        freq = getattr(config, "index_topk_freq", 1)
+        skip_topk = max(indexer_seq_idx - 1, 0) % freq != 0
+    else:
+        assert pattern[0] == "F", "index_topk_pattern must start with 'F'"
+        skip_topk = indexer_seq_idx < len(pattern) and pattern[indexer_seq_idx] == "S"
+    if skip_topk and pp_start_layer is not None:
+        # C128 and dense stage-start layers cannot initialize this buffer.
+        # Override only the first local C4, not the rest of the reuse group.
+        return any(ratio == 4 for ratio in compress_ratios[pp_start_layer:layer_idx])
+    return skip_topk
+
+
 def is_deepseek_v41(hf_config: Any) -> bool:
     """Identify the released V4.1 config at the model boundary."""
     model_types = ("deepseek_v41", "deepseek_v41_text")
@@ -906,6 +930,29 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
 
 def lmhead_tp_enable() -> bool:
     return get_ascend_config().finegrained_tp_config.lmhead_tensor_parallel_size > 0
+
+
+def lmhead_tp_max_num_logits(max_num_reqs: int, logits_rows_per_req: int) -> int:
+    """Row capacity every rank of the lmhead-TP group must agree on;
+    cross-rank drift desyncs the collectives and hangs."""
+    return max_num_reqs * logits_rows_per_req
+
+
+def lmhead_tp_pad_rows(rows: torch.Tensor, capacity: int, formula: str) -> torch.Tensor:
+    """Zero-pad the leading dim of ``rows`` up to ``capacity`` — the one pad
+    primitive both head paths share; for 1-D indices the zero padding is the
+    safe row-0 gather index, overrun fails fast with ``formula`` named."""
+    num_rows = rows.shape[0]
+    if num_rows > capacity:
+        raise ValueError(
+            f"lmhead TP rows ({num_rows}) exceed the group-agreed capacity "
+            f"({capacity} = {formula}); the capacity formula no longer matches "
+            "upstream logits production."
+        )
+    if num_rows == capacity:
+        return rows
+    padding = (0, 0, 0, capacity - num_rows) if rows.dim() == 2 else (0, capacity - num_rows)
+    return torch.nn.functional.pad(rows, padding)
 
 
 def embedding_tp_enable() -> bool:

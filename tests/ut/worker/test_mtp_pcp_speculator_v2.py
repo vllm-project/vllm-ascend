@@ -33,6 +33,24 @@ from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _stub_ascend_config(monkeypatch):
+    # Speculators built through the real __init__ read the global ascend
+    # config during the lmhead TP construction-time validation; the stub
+    # reads as lmhead-off so validation no-ops.
+    from vllm_ascend import ascend_config as _ascend_config_module
+
+    monkeypatch.setattr(
+        _ascend_config_module,
+        "_ASCEND_CONFIG",
+        SimpleNamespace(
+            finegrained_tp_config=SimpleNamespace(lmhead_tensor_parallel_size=0),
+            ascend_compilation_config=object(),
+            eplb_config=object(),
+        ),
+    )
+
+
 def _fake_config_replace(config, **changes):
     values = vars(config).copy()
     values.update(changes)
@@ -108,7 +126,7 @@ def test_draft_runtime_config_preserves_target_worker_topology(
         cache_config=target_cache_config,
         additional_config={"scheduler_config": {"profiling_chunk_config": {"enabled": True}}},
     )
-    draft_model_config = object()
+    draft_model_config = SimpleNamespace(is_moe=False)
     captured: dict[str, SimpleNamespace] = {}
 
     def fake_replace(config, **changes):
@@ -118,7 +136,13 @@ def test_draft_runtime_config_preserves_target_worker_topology(
             assert changes["parallel_config"].decode_context_parallel_size == (1 if target_pcp_size > 1 else dcp_size)
         if config is target_config and "model_config" not in changes:
             reconstructed_parallel = changes["parallel_config"]
-            captured["reconstruction_dcp_size"] = reconstructed_parallel.decode_context_parallel_size
+            # model_config is swapped in after validation (V1 parity), so this
+            # branch runs on every build; record only a real DCP normalization.
+            if (
+                reconstructed_parallel.decode_context_parallel_size
+                != target_parallel_config.decode_context_parallel_size
+            ):
+                captured["reconstruction_dcp_size"] = reconstructed_parallel.decode_context_parallel_size
         values = vars(config).copy()
         values.update(changes)
         return SimpleNamespace(**values)
@@ -207,16 +231,24 @@ def test_eagle_draft_config_disables_profiling_chunk() -> None:
         additional_config=additional_config,
     )
     speculator = object.__new__(AscendEagleSpeculator)
+    # Delegation to the base's _create_draft_vllm_config reads these too.
+    speculator.replicated_pcp = False
     speculator.vllm_config = target_config
-    speculator.draft_model_config = object()
+    target_config.cache_config = SimpleNamespace()
+    target_config.parallel_config.decode_context_parallel_size = 1
+    speculator.draft_model_config = SimpleNamespace(is_moe=False)
 
-    with patch.object(eagle_speculator_module, "replace", side_effect=_fake_config_replace):
+    with (
+        patch.object(eagle_speculator_module, "replace", side_effect=_fake_config_replace),
+        patch.object(speculator_module, "replace", side_effect=_fake_config_replace),
+    ):
         draft_config = speculator._create_draft_vllm_config()
 
     assert draft_config.additional_config["scheduler_config"]["profiling_chunk_config"]["enabled"] is False
     assert target_config.additional_config is additional_config
     assert additional_config["scheduler_config"]["profiling_chunk_config"]["enabled"] == "yes"
     assert draft_config.parallel_config.pipeline_parallel_size == 1
+    assert draft_config.parallel_config.is_moe_model is False
 
 
 @pytest.mark.parametrize("replicated_pcp", [False, True])

@@ -106,7 +106,7 @@ class Backend(ABC):
         """
         raise NotImplementedError(f"{type(self).__name__} does not support batch_is_readable")
 
-    def batch_get_key_info(self, keys: list[str]):
+    def batch_get_key_info(self, keys: list[str], *, for_load: bool = False):
         raise NotImplementedError(f"{type(self).__name__} does not support batch_get_key_info")
 
     def batch_alloc(self, keys: list[str], sizes: list[int], lease_ttl_ms: int = 0) -> list[int]:
