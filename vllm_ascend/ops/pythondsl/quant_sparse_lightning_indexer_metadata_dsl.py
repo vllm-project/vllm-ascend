@@ -8,6 +8,7 @@ M is the operator's query tile index; S2 is a 512-token tile index.
 
 import tempfile
 from functools import lru_cache
+from typing import TYPE_CHECKING, Any
 
 import torch
 from cannbotdsl.aicpu import (
@@ -21,6 +22,10 @@ from cannbotdsl.aicpu import (
 )
 
 from vllm_ascend.ops.pythondsl.utils import get_indexer_worker_count
+
+if TYPE_CHECKING:
+    # Intrinsic resolved by the AICPU compiler inside decorated kernels.
+    zeros: Any
 
 
 class Args:

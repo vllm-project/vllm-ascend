@@ -12,6 +12,7 @@ No-LD records write directly to public outputs.
 from __future__ import annotations
 
 import threading
+from typing import Any
 
 import cannbotdsl
 import torch
@@ -139,7 +140,7 @@ class QsliRawTopKSelector:
     def __init__(
         self,
         topk: int,
-        workspace: QsliMergeTopKWorkspace,
+        workspace: QsliMergeTopKWorkspace | QsliLocalTopKWorkspace,
     ):
         self.topk = int(topk)
         if self.topk <= 0:
@@ -339,9 +340,11 @@ class LdTopKSelector(QsliRawTopKSelector):
         if not preloaded:
             mem_copy(local_slice(self.ld_indices, (1, valid_length)), partial_indices[0:1, 0:valid_length])
             mem_copy(local_slice(self.ld_bits, (1, valid_length)), partial_bits[0:1, 0:valid_length])
-        current_trunk = self.workspace.merge_key
-        history_key = self.workspace.history_key  # noqa: F841
-        history_idx = self.workspace.history_idx
+        # Only the merge selector calls this DSL method; the local selector
+        # uses select_local and allocates only radix scratch.
+        current_trunk = self.workspace.merge_key  # type: ignore[union-attr]
+        history_key = self.workspace.history_key  # type: ignore[union-attr]  # noqa: F841
+        history_idx = self.workspace.history_idx  # type: ignore[union-attr]
         with vf(mode="raw"):
             mask16 = rr.update_mask(64, elem_bits=16)[0]
             mask32 = rr.update_mask(64, elem_bits=32)[0]
@@ -695,6 +698,8 @@ def _split_page_general(value, reciprocal, divisor, shift, mask):
 
 class QsliVector0:
     """Each AIV gathers packed K/scales through two UB buffers into the GM ring."""
+
+    batch_consistency: bool
 
     def __init__(self, subblock_idx, pa_block_size):
         self.subblock_idx = subblock_idx
@@ -2083,7 +2088,7 @@ class QsliFusedKernel:
                                     )
 
 
-_COMPILED_KERNEL = {}
+_COMPILED_KERNEL: dict[tuple[object, ...], Any] = {}
 _COMPILED_KERNEL_LOCK = threading.Lock()
 
 
@@ -3203,7 +3208,7 @@ class QsliTndFusedKernel:
                                     )
 
 
-_TND_COMPILED_KERNEL = {}
+_TND_COMPILED_KERNEL: dict[tuple[object, ...], Any] = {}
 _TND_COMPILED_KERNEL_LOCK = threading.Lock()
 
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import threading
 from math import gcd
+from typing import Any
 
 import cannbotdsl
 import torch
@@ -151,6 +152,10 @@ class QliRawTopKSelector:
     the same radix selector over ``history + current trunk`` and maps its local
     uint16 positions back to global int32 token indices.
     """
+
+    cache_tmp: Tensor
+    cache_output_idx_stage: Tensor
+    cache_output_value_bits_stage: Tensor
 
     def __init__(
         self,
@@ -2710,6 +2715,8 @@ class QliCube:
 class QliVector:
     """Each AIV consumes its 64-row split and produces two QLI rows."""
 
+    full_key_cache: Tensor
+
     def __init__(
         self,
         subblock_idx,
@@ -4601,7 +4608,7 @@ class QliFusedKernel:
                         workspace_cursor += 1
 
 
-_COMPILED_KERNEL: dict[tuple[object, ...], object] = {}
+_COMPILED_KERNEL: dict[tuple[object, ...], Any] = {}
 _COMPILED_KERNEL_LOCK = threading.Lock()
 
 
@@ -5148,7 +5155,7 @@ def quant_lightning_indexer(
     if t <= 0:
         raise ValueError("q must contain at least one T1 row")
     has_cu_seqlens_q = cu_seqlens_q is not None
-    batch = int(cu_seqlens_q.numel()) - 1 if has_cu_seqlens_q else 1
+    batch = int(cu_seqlens_q.numel()) - 1 if cu_seqlens_q is not None else 1
     if batch <= 0:
         raise ValueError("cu_seqlens_q must have shape (B+1,)")
 
@@ -5850,7 +5857,7 @@ def _build_tnd_compiled_fused_runner(
     return compiled
 
 
-_TND_COMPILED_KERNEL = {}
+_TND_COMPILED_KERNEL: dict[tuple[object, ...], Any] = {}
 _TND_COMPILED_KERNEL_LOCK = threading.Lock()
 
 
@@ -5988,7 +5995,7 @@ def _run_tnd(
     if t <= 0:
         raise ValueError("q must contain at least one T1 row")
     has_cu_seqlens_q = cu_seqlens_q is not None
-    batch = int(cu_seqlens_q.numel()) - 1 if has_cu_seqlens_q else 1
+    batch = int(cu_seqlens_q.numel()) - 1 if cu_seqlens_q is not None else 1
     if batch <= 0:
         raise ValueError("cu_seqlens_q must have shape (B+1,)")
 

@@ -988,6 +988,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             if prepared_slots is None or prepared_flat_slots is None:
                 active_slots = common.slot_mapping[:num_input_tokens]
                 if self._uses_a5_packed_cache and active_slots.device.type == "npu":
+                    assert self._device_backend is not None
                     prepared_slots, prepared_flat_slots = self._device_backend.build_a5_slot_mapping(
                         active_slots,
                         positions,
@@ -1088,6 +1089,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                 )
                 self._dspark_swa_lengths = ori_topk_length.new_empty((self._max_tokens, *ori_topk_length.shape[1:]))
             indices_view = self._dspark_swa_indices[:num_actual_tokens]
+            assert self._dspark_swa_lengths is not None
             lengths_view = self._dspark_swa_lengths[:num_actual_tokens]
             indices_view.copy_(ori_sparse_indices)
             lengths_view.copy_(ori_topk_length)
@@ -1101,6 +1103,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             cache_key = f"a5-causal-swa:w{window_size}"
             cached_window = batch_shared.get(cache_key)
             if cached_window is None:
+                assert self._device_backend is not None
                 cached_window = self._device_backend.build_window_indices(
                     positions[:num_input_tokens],
                     window_size,

@@ -1280,6 +1280,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                 {layer: torch.npu.Event() for layer in self.config.engram_layer_ids},
             )
         stream = self._engram_capture_stream
+        assert self._engram_capture_events is not None
         mask_ready, events = self._engram_capture_events
         main = torch.npu.current_stream()
         stream.wait_stream(main)

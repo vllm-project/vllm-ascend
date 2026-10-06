@@ -10,6 +10,7 @@ import math
 import sys
 import threading
 from enum import IntEnum
+from typing import TYPE_CHECKING, Any
 
 import cannbotdsl
 import regex as _re
@@ -63,7 +64,7 @@ from cannbotdsl.types.delay_line import DelayLineGroup
 # ---- AICPU metadata 算子（同目录 mixed_quant_sparse_flash_mla_metadata.py）----
 # 布局常量 / 核数查询 / host 入口自该模块导入；mixed_quant_sparse_flash_mla_metadata
 # 在此 re-export，保持 ops.mixed_quant_sparse_flash_mla.* 的既有外部调用路径不变。
-if __package__:
+if TYPE_CHECKING or __package__:
     from .mixed_quant_sparse_flash_mla_metadata import (
         AIC_CORE_MAX_NUM,
         FA_BN2_END_INDEX,
@@ -167,17 +168,20 @@ def _addr_vec_eligible(ori_kv, ori_bt, ori_idx, cmp_kv, cmp_bt, cmp_idx):
     ok_w, bs_w = pool_ok(ori_kv, KV_ROW_BYTES_ORI)
     ok = ok_w
     bs_c, btp_c, k2 = None, None, None
+    btp = ori_bt.shape[1]
+    sp_w = ori_idx.shape[2]
+    out_w = _addr_tab_w(sp_w)
     if cmp_kv is not None:
         if not isinstance(cmp_bt.shape[1], int) or not isinstance(cmp_idx.shape[2], int):
             return False, None, None, None, None, None, None
         ok_c, bs_c = pool_ok(cmp_kv, KV_ROW_BYTES_CMP)
         ok = ok and ok_c
         btp_c, k2 = cmp_bt.shape[1], cmp_idx.shape[2]
-    btp = ori_bt.shape[1] if cmp_kv is None else max(ori_bt.shape[1], btp_c)
-    sp_w = ori_idx.shape[2] if cmp_kv is None else max(ori_idx.shape[2], k2)
+        btp = max(btp, btp_c)
+        sp_w = max(sp_w, k2)
+        out_w = max(out_w, _addr_tab_w(k2))
     # _ch_addr_out 按补齐宽度分配（见 _addr_tab_w），比 sp_w 最多多 _TILE_ROWS-1，
     # UB 预算必须按补齐后的值算，否则 K 接近上限时会超 UB 容量。
-    out_w = _addr_tab_w(ori_idx.shape[2]) if cmp_kv is None else max(_addr_tab_w(ori_idx.shape[2]), _addr_tab_w(k2))
     if (btp + sp_w + out_w) * 4 > _ADDR_VEC_UB_HEADROOM:
         return False, None, None, None, None, None, None
     return ok, bs_w, ori_bt.shape[1], ori_idx.shape[2], bs_c, btp_c, k2
@@ -2489,7 +2493,7 @@ def _run_mqsmla(
         cmp_idx_flat = cmp_idx_gm.view(cmp_idx_gm.shape[0] * cmp_idx_gm.shape[1], cmp_idx_gm.shape[2])
         if const_expr(cmp_len_gm is not None):
             cmp_len_flat = cmp_len_gm.view(cmp_len_gm.shape[0] * cmp_len_gm.shape[1])
-    op = MqsmlaKernel(
+    op: Any = MqsmlaKernel(
         tile_cube_m=N1,
         tile_vec_m=N1 // 2,
         tile_n=TILE_N,
@@ -2544,7 +2548,7 @@ def _run_mqsmla(
         )
 
 
-_COMPILED_KERNELS = {}
+_COMPILED_KERNELS: dict[tuple[object, ...], Any] = {}
 _COMPILED_KERNEL_LOCK = threading.Lock()
 
 

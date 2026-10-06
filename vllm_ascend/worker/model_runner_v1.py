@@ -3963,6 +3963,7 @@ class NPUModelRunner(GPUModelRunner):
         # in the same group share the same metadata.
         common_ratio_to_sas_metadata: dict[Any, Any] = {}
         common_v41_batch_metadata: dict[str, Any] = {}
+        assert num_tokens_padded is not None
         a5_group_slot_metadata = self._build_a5_slot_mapping_batch(
             num_tokens_padded,
             num_reqs,
@@ -4781,9 +4782,9 @@ class NPUModelRunner(GPUModelRunner):
                 for builder in attn_group.metadata_builders:
                     if not isinstance(builder, AscendDSAV41MetadataBuilder):
                         continue
-                    layout = builder.a5_slot_mapping_layout()
-                    if layout is not None:
-                        layouts.add((group_id, *layout))
+                    builder_layout = builder.a5_slot_mapping_layout()
+                    if builder_layout is not None:
+                        layouts.add((group_id, *builder_layout))
         if not layouts:
             return
 
@@ -4860,15 +4861,15 @@ class NPUModelRunner(GPUModelRunner):
                 )
                 for batch in self._a5_slot_mapping_batches
             )
-            group_views = [{} for _ in self.kv_cache_config.kv_cache_groups]
+            new_group_views: list[dict[str, torch.Tensor]] = [{} for _ in self.kv_cache_config.kv_cache_groups]
             for row, layout in enumerate(self._a5_slot_mapping_layouts):
-                group_views[layout.group_id][layout.coordinates_key] = (
+                new_group_views[layout.group_id][layout.coordinates_key] = (
                     self._a5_slot_coordinates[row, :num_tokens]
                 )
-                group_views[layout.group_id][layout.flat_key] = (
+                new_group_views[layout.group_id][layout.flat_key] = (
                     self._a5_flat_slots[row, :num_tokens]
                 )
-            cached = batch_views, tuple(group_views)
+            cached = batch_views, tuple(new_group_views)
             self._a5_slot_mapping_view_cache[num_tokens] = cached
 
         batch_views, group_views = cached

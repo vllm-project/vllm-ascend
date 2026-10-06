@@ -6,7 +6,7 @@ from contextlib import ExitStack, contextmanager
 
 import torch
 
-from vllm_ascend.worker.device_metadata import DeviceMetadataExecutor, use_device_metadata_executor
+from vllm_ascend.worker.device_metadata import DeviceMetadataExecutor, DeviceMetadataTask, use_device_metadata_executor
 
 
 class TargetDeviceMetadata:
@@ -20,7 +20,7 @@ class TargetDeviceMetadata:
 
     def __init__(self):
         self.executor = DeviceMetadataExecutor(capture_producers=True)
-        self._tasks = ()
+        self._tasks: tuple[DeviceMetadataTask, ...] = ()
         self._failed = False
 
     @contextmanager

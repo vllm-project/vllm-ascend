@@ -149,6 +149,8 @@ def _quant_lightning_indexer_fake(
     sparse_indices = torch.empty(output_shape, dtype=torch.int32, device=q.device)
     sparse_values_shape = output_shape if return_value else (0,)
     sparse_values = torch.empty(sparse_values_shape, dtype=torch.bfloat16, device=q.device)
+    candidate_indices_shape: tuple[int, ...]
+    candidate_length_shape: tuple[int, ...]
     if candidate_topk_blocks > 0:
         candidate_indices_shape = (q.shape[0], heads, candidate_topk_blocks)
         candidate_length_shape = (q.shape[0], heads)
@@ -534,6 +536,7 @@ def _mixed_quant_sparse_flash_mla_fake(
     return_softmax_lse=False,
 ):
     attn_out = torch.empty(q.shape, dtype=torch.bfloat16, device=q.device)
+    lse_shape: tuple[int, ...]
     if return_softmax_lse:
         n2 = ori_kv.shape[2]
         if layout_q == "TND":
@@ -621,6 +624,7 @@ def _mixed_quant_sparse_flash_mla_impl(
     dsl_attention, _ = _get_dsl_ops("mixed_quant_sparse_flash_mla", q.device)
 
     attn_out = torch.empty(q.shape, dtype=torch.bfloat16, device=q.device)
+    lse_shape: tuple[int, ...]
     if return_softmax_lse:
         n2 = ori_kv.shape[2]
         if layout_q == "TND":

@@ -167,12 +167,12 @@ class AscendKVBlockZeroer(KVBlockZeroer):
         Packed A5 caches use physical tensors so every byte of an aliased page
         is cleared. Otherwise, only AttentionSpec layers are processed.
         """
+        seen_ptrs: set[int] = set()
+        seg_addrs: list[int] = []
+        seg_page_sizes: list[int] = []
         if physical_block_tensors is not None:
             if num_blocks is None or num_blocks <= 0:
                 raise ValueError("num_blocks must be positive for physical KV cache zeroing")
-            seen_ptrs: set[int] = set()
-            seg_addrs: list[int] = []
-            seg_page_sizes: list[int] = []
             for tensor in physical_block_tensors:
                 if not tensor.is_contiguous() or tensor.numel() % num_blocks:
                     raise ValueError("Physical KV cache tensors must contain contiguous whole blocks")
@@ -188,9 +188,6 @@ class AscendKVBlockZeroer(KVBlockZeroer):
             self._init_meta_segments(seg_addrs, seg_page_sizes)
             return
 
-        seen_ptrs: set[int] = set()
-        seg_addrs: list[int] = []
-        seg_page_sizes: list[int] = []
         seg_page_strides: list[int] = []
 
         for group in attn_groups_iter:
@@ -233,9 +230,13 @@ class AscendKVBlockZeroer(KVBlockZeroer):
                         seg_page_sizes.append(payload_bytes * (ratio if contiguous else 1) // 4)
                         seg_page_strides.append(stride_bytes * ratio // 4)
 
-        self._init_meta_segments(seg_addrs, seg_page_sizes)
+        self._init_meta_segments(seg_addrs, seg_page_sizes, seg_page_strides)
 
-    def _init_meta_segments(self, seg_addrs: list[int], seg_page_sizes: list[int]) -> None:
+    def _init_meta_segments(
+        self, seg_addrs: list[int], seg_page_sizes: list[int], seg_page_strides: list[int] | None = None
+    ) -> None:
+        if seg_page_strides is None:
+            seg_page_strides = seg_page_sizes
         if not seg_addrs:
             self._meta = None
             self._seg_page_strides = None
