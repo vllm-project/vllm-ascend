@@ -7,9 +7,9 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from ...projection.bulk.rows import BlockRows, StoreCandidateRows
 from ...protocol.transfer import KVTransferStep
 from .batch import KeyAxes, KVGroupBatch, LayerStoreGroup, TransferSource
+from .rows import BlockRows, StoreCandidateRows
 
 
 @dataclass(slots=True)
