@@ -6,6 +6,9 @@ import torch
 from torch import nn
 from vllm.model_executor.layers.linear import ReplicatedLinear
 
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.ops.triton.engram_gate import fused_engram_gate
+
 from .common import engram_gate
 
 
