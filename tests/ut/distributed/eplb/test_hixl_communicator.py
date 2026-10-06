@@ -167,7 +167,7 @@ def test_hixl_reads_registered_remote_expert(monkeypatch):
     assert engine.options == {}
     assert engine.connected == [("192.0.2.2:12346", 300_000)]
     assert len(engine.registered) == 1
-    assert (engine.registered[0].addr, engine.registered[0].len) == (0, 2_097_152)
+    assert (engine.registered[0].addr, engine.registered[0].len) == (0, 8_388_608)
     assert len(engine.transfers) == 1
     remote_engine, operation, descriptors = engine.transfers[0]
     assert remote_engine == "192.0.2.2:12346"
