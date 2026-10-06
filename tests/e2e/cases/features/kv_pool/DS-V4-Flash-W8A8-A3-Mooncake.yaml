@@ -75,6 +75,7 @@ test_cases:
          "kv_connector_extra_config": {"backend": "mooncake",
          "lookup_rpc_port": "0", "use_layerwise": false}}
     benchmarks:
+      # https://github.com/vllm-project/vllm-ascend/actions/runs/37438869246/job/112189411294
       perf:
         case_type: performance
         dataset_path: vllm-ascend/GSM8K_prefix0_in32768_bs1000_deepseek
@@ -84,7 +85,7 @@ test_cases:
         max_out_len: 1024
         batch_size: 16
         request_rate: 0
-        baseline: 269.023
+        baseline: 319.831
         threshold: 0.95
       acc-gpqa:
         case_type: accuracy
