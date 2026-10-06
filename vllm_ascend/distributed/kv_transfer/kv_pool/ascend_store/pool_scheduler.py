@@ -699,7 +699,7 @@ class KVPoolScheduler:
             # containing the last token; num_tokens - lcm_block_size equals
             # that boundary only for lcm-aligned prompts and over-trims
             # unaligned prompts whose hit stops exactly on the boundary.
-            final_block_start = max(0, request.num_tokens - 1) // self.lcm_block_size * self.lcm_block_size
+            final_block_start = (request.num_tokens - 1) // self.lcm_block_size * self.lcm_block_size
             hit_reaches_final_block = num_external_hit_tokens > final_block_start
             if hit_reaches_final_block:
                 num_external_hit_tokens = max(

@@ -557,9 +557,7 @@ class KVPoolWorker:
                 physical_layers = set()
                 for layer_name in group_spec.layer_names:
                     physical_layer = self._extract_physical_layer_index(layer_name)
-                    # Match the stage-local indices used by registered buffers
-                    # and layerwise task queues, including nonzero PP offsets.
-                    physical_layer = self._global_to_local_layer.get(physical_layer, physical_layer)
+                    physical_layer = self._global_to_local_layer[physical_layer]
                     physical_layers.add(physical_layer)
                 phys_to_layer_idx = {
                     physical_layer: layer_index for layer_index, physical_layer in enumerate(sorted(physical_layers))
@@ -1866,8 +1864,6 @@ class KVPoolWorker:
                     continue
 
                 # PERF-TUNE(4): dedup identical keys across concurrent requests.
-                # Merge note (#16947 x #16946): keep main's per-step cache but
-                # preserve the PR's for_load semantics on the load path.
                 ki_cache = getattr(self, "_step_keyinfo_cache", None) or {}
                 self._step_keyinfo_cache = ki_cache
                 uncached = [k for k in keys if k not in ki_cache]
@@ -2062,9 +2058,6 @@ class KVPoolWorker:
                 raise RuntimeError(f"Mooncake layerwise: no KV cache group for local layer {local_layer}")
             return groups
         # GVA groups use stage-local indices too; PP offsets apply to pool keys and remote addresses.
-        # Merge note (#17246 x #16946): construction keys by stage-local index
-        # (via _global_to_local_layer), so the direct local lookup is correct;
-        # the PR's offset round-trip was equivalent but redundant.
         return self.physical_layer_to_group_layers.get(local_layer, [(0, local_layer)])
 
     def _layerwise_key_batches(self, keys: list[str]) -> list[list[str]]:
@@ -2798,19 +2791,15 @@ class KVPoolWorker:
         save_finished_events = self.layer_save_finished_events
         # The final layer may have no save task while earlier layers still copy.
         # Drain pending saves before clearing or reusing completion events.
-        # Skip the queue drain when the send thread is a test double without a
-        # real queue (a bare mock reports truthy unfinished_tasks forever).
         queue = send_thread.request_queue
-        pending = getattr(queue, "unfinished_tasks", None)
-        if isinstance(pending, int) and pending > 0:
-            with queue.all_tasks_done:
-                waited_s = 0
-                while queue.unfinished_tasks:
-                    send_thread.raise_if_failed()
-                    queue.all_tasks_done.wait(timeout=1)
-                    waited_s += 1
-                    if waited_s % 60 == 0:
-                        logger.info("Layerwise save drain still waiting on %d queued PUT(s)", queue.unfinished_tasks)
+        with queue.all_tasks_done:
+            waited_s = 0
+            while queue.unfinished_tasks:
+                send_thread.raise_if_failed()
+                queue.all_tasks_done.wait(timeout=1)
+                waited_s += 1
+                if waited_s % 60 == 0:
+                    logger.info("Layerwise save drain still waiting on %d queued PUT(s)", queue.unfinished_tasks)
         while not save_finished_events[num_local - 1].wait(timeout=10):
             send_thread.raise_if_failed()
             logger.info("Layerwise %d save not done, keep waiting", num_local - 1)

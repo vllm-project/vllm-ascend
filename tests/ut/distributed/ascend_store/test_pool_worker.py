@@ -1634,7 +1634,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         worker.layer_save_finished_events = [threading.Event() for _ in range(worker.num_layers)]
         worker.layer_load_finished_events = [threading.Event() for _ in range(worker.num_layers)]
         worker.sync_save_events = [MagicMock() for _ in range(worker.num_layers)]
-        worker.kv_send_thread = MagicMock()
+        worker.kv_send_thread = MagicMock(request_queue=queue.Queue())
         worker.kv_recv_thread = MagicMock()
         worker.prefetch_layer_map = {}
         worker.use_block_key_layerwise = False
