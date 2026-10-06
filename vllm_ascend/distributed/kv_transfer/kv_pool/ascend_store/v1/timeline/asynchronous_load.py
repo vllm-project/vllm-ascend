@@ -5,8 +5,8 @@ from __future__ import annotations
 import threading
 from collections.abc import Callable
 
-from ..runtime.batch import KVTransferBatch
-from ..runtime.evidence import LoadCompletion
+from ..worker.transfer.batch import KVTransferBatch
+from ..worker.transfer.evidence import LoadCompletion
 from .executor import TimelineExecutor
 
 LoadOperation = Callable[[KVTransferBatch, int | None], tuple[LoadCompletion, ...]]

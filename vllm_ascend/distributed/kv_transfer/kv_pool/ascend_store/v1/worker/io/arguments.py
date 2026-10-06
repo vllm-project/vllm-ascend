@@ -1,4 +1,4 @@
-"""Evaluate bound projection into the argument shape required by each Backend."""
+"""Lower bound projections into the argument shape required by each Backend."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import numpy as np
 from ...projection import GVALayerwiseProjection, KeyRangeLayerwiseProjection
 from ...projection.layerwise.gva import gva_layer_ranges
 from ...projection.layerwise.key_range import key_range_layer_ranges
-from ..batch import (
+from ..transfer.batch import (
     KVGroupBatch,
     KVTransferBatch,
     LayerTransferGroup,

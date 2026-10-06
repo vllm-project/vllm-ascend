@@ -1,4 +1,4 @@
-"""Carry one Worker invocation's rows from projection selection to Backend I/O.
+"""Carry one Worker transfer's rows from projection selection to Backend I/O.
 
 The batch values retain dynamic Block IDs, token counts, keys, request
 ownership, and current object selection together with the minimal bound facts

@@ -16,10 +16,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 
 from .protocol.rpc import LookupServer
 from .protocol.transfer import KVTransferStep, StoreSourceReleaseMetadata
-from .runtime.result import LoadResult
 from .scheduler import KVPoolScheduler
 from .vllm_adapter import create_kv_pool_scheduler, create_kv_pool_worker
-from .worker import KVPoolWorker
+from .worker.base import KVPoolWorker
+from .worker.transfer.result import LoadResult
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig

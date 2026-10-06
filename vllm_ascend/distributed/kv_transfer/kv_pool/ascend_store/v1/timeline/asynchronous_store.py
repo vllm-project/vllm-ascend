@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..protocol.transfer import StoreCommand
-from ..runtime.evidence import StoreCompletion
+from ..worker.transfer.evidence import StoreCompletion
 from .executor import TimelineExecutor
 from .store_batch import StoreBatch
 

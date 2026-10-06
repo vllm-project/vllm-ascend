@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from ..runtime.batch import KVTransferBatch
 from ..topology import KVPoolTopology
+from ..worker.transfer.batch import KVTransferBatch
 
 
 def collect_object_sizes(batch: KVTransferBatch) -> dict[str, int]:

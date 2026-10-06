@@ -1,17 +1,17 @@
-"""Layerwise Worker fixed to the GVA data plane."""
+"""Layerwise Worker route fixed to the GVA data plane."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from typing import Any, cast
 
-from ...attention_fence import reset_attention_compute_start_gate
-from ..backend import GVABackend, LayerwiseAccessKind
-from ..projection import GVALayerwiseProjection, GVALayerwiseProjectionBinder, LayerwiseProjection
-from ..runtime.backend import GVABackendIO
-from ..runtime.resources import KVPoolResources
-from ..topology import KVPoolTopology
-from .layerwise import LayerwiseWorker
+from ....attention_fence import reset_attention_compute_start_gate
+from ...backend import GVABackend, LayerwiseAccessKind
+from ...projection import GVALayerwiseProjection, GVALayerwiseProjectionBinder, LayerwiseProjection
+from ...topology import KVPoolTopology
+from ..io import GVABackendIO
+from ..resources import KVPoolResources
+from .worker import LayerwiseWorker
 
 
 class GVALayerwiseWorker(LayerwiseWorker):

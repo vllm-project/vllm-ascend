@@ -40,14 +40,16 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.transf
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.route import (
     KVPoolRouteSpec,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.runtime.result import (
-    LoadResult,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk import (
     AsynchronousBulkWorker,
+    SynchronousBulkWorker,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwise import (
     GVALayerwiseWorker,
     KeyRangeLayerwiseWorker,
-    SynchronousBulkWorker,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.transfer.result import (
+    LoadResult,
 )
 
 from .v1.helpers import FakeBackend, FakeEvent, FakeResources, make_topology, make_worker

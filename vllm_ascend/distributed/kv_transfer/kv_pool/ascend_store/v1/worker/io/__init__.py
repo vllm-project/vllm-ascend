@@ -1,4 +1,4 @@
-"""Backend I/O implementations consumed by the KV Pool runtime."""
+"""Worker-side execution adapters for Backend I/O."""
 
 from .gva import GVABackendIO
 from .io import BackendIO

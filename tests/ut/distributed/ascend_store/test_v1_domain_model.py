@@ -33,13 +33,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.transf
     StateCheckpointSource,
     StoreCommandBatch,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.runtime.backend import (
-    arguments as arguments_module,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.runtime.batch import (
-    KVGroupBatch,
-    KVTransferBatch,
-)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.timeline.asynchronous_load import (
     AsynchronousLoadTimeline,
 )
@@ -59,6 +52,13 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.topology import
     KVPoolGroupTopology,
     KVPoolLayerTopology,
     resolve_group_layers,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.io import (
+    arguments as arguments_module,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.transfer.batch import (
+    KVGroupBatch,
+    KVTransferBatch,
 )
 
 from .v1.helpers import (

@@ -1,4 +1,4 @@
-"""Execute layer-restricted bindings through Backend key-range sessions."""
+"""Execute Layerwise transfer work through Backend key-range sessions."""
 
 from __future__ import annotations
 
@@ -6,9 +6,8 @@ from vllm.logger import logger
 
 from ...backend import BackendSpec, KeyRangeBackend
 from ...projection import KeyRangeLayerwiseProjection
-from ..batch import KVTransferBatch, LayerTransferGroup, LayerTransferPlan
-from ..evidence import LayerStoreResult
-from ..evidence import TransferEvidence as RuntimeTransferEvidence
+from ..transfer.batch import KVTransferBatch, LayerTransferGroup, LayerTransferPlan
+from ..transfer.evidence import LayerStoreResult, TransferEvidence
 from .arguments import (
     materialize_load_layer_ranges,
     materialize_store_layer_ranges,
@@ -72,7 +71,7 @@ class KeyRangeBackendIO(BackendIO):
             )
             return _failed_load_completions(plan.batch, layer_id)
         codes_by_key = dict(zip(arguments.keys, result_codes, strict=True))
-        evidence = tuple(RuntimeTransferEvidence(source, codes_by_key[source.key]) for source in arguments.sources)
+        evidence = tuple(TransferEvidence(source, codes_by_key[source.key]) for source in arguments.sources)
         return _load_completions(plan.batch, evidence)
 
     def load_batch(self, batch: KVTransferBatch, layer_id: int | None = None):
@@ -95,7 +94,7 @@ class KeyRangeBackendIO(BackendIO):
         if isinstance(result.result_codes, tuple):
             codes_by_key = dict(zip(keys, result.result_codes, strict=True))
             evidence = tuple(
-                RuntimeTransferEvidence(
+                TransferEvidence(
                     source,
                     codes_by_key[source.key],
                     codes_by_key[source.key] == 0,
@@ -104,7 +103,7 @@ class KeyRangeBackendIO(BackendIO):
             )
         else:
             evidence = tuple(
-                RuntimeTransferEvidence(source, result.result_codes, bool(result.source_release_confirmed))
+                TransferEvidence(source, result.result_codes, bool(result.source_release_confirmed))
                 for source in _batch_sources(batch, layer_id)
             )
         return _store_completions(batch, evidence, result.error, force_failed=result.result_codes is None)

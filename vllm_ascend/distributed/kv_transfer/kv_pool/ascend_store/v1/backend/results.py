@@ -1,4 +1,4 @@
-"""Validate native Backend results before they enter the v1 runtime."""
+"""Validate native Backend results before they enter Worker execution."""
 
 from __future__ import annotations
 

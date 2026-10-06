@@ -1,4 +1,4 @@
-"""Backend evidence consumed by Worker and Timeline state."""
+"""Backend evidence carried from Worker I/O into Timeline state."""
 
 from __future__ import annotations
 
