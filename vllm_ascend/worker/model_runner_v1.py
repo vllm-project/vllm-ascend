@@ -887,6 +887,18 @@ class NPUModelRunner(GPUModelRunner):
             return self.model.unwrap()
         return self.model
 
+    @staticmethod
+    def _should_skip_compiled_forward(
+        model: nn.Module,
+        cudagraph_mode: CUDAGraphMode,
+        has_encoder_input: bool,
+    ) -> bool:
+        """Honor model-owned eager fallbacks outside full graph replay."""
+        return has_encoder_input or (
+            cudagraph_mode == CUDAGraphMode.NONE
+            and bool(getattr(model, "requires_uncompiled_fallback", False))
+        )
+
     def _is_pd_prefill_worker(self) -> bool:
         return self.is_kv_producer and not self.is_kv_consumer
 
@@ -2541,6 +2553,11 @@ class NPUModelRunner(GPUModelRunner):
             self.model_config.is_encoder_decoder
             or self.model_config.requires_raw_input_tokens
         )
+        skip_compiled = self._should_skip_compiled_forward(
+            self.get_model(),
+            cudagraph_mode,
+            has_encoder_input,
+        )
         # Run forward pass
         defer_kv_connector_finalize = self.speculative_config is not None and (
             get_pp_group().is_last_rank or self.broadcast_pp_output
@@ -2558,7 +2575,7 @@ class NPUModelRunner(GPUModelRunner):
                 num_actual_tokens=scheduler_output.total_num_scheduled_tokens,
                 model_instance=self.model,
                 device_metadata_executor=active_device_metadata_executor,
-                skip_compiled=has_encoder_input,
+                skip_compiled=skip_compiled,
                 has_sinks=self._has_sinks,
                 eplb_heat_collection_status=self.eplb_heat_collection_status if self.dynamic_eplb else False,
             ),
@@ -3928,6 +3945,7 @@ class NPUModelRunner(GPUModelRunner):
         profile_seq_lens: int | None = None,
         profile_cpp: bool = False,
         skip_gdn_state_update: bool = False,
+        uniform_dp_warmup: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         mm_config = self.vllm_config.model_config.multimodal_config
         if mm_config and mm_config.mm_encoder_only:
@@ -4262,6 +4280,10 @@ class NPUModelRunner(GPUModelRunner):
                 has_sinks = self._has_sinks,
                 eplb_heat_collection_status=self.eplb_heat_collection_status if self.dynamic_eplb else False,
             ):
+                # Initialization/CPP warmups use the same configured shape on
+                # every DP rank and may exceed the decode communication slot.
+                # Ordinary idle dummy batches must keep the fixed decode slot.
+                get_forward_context().engram_uniform_dp_warmup = uniform_dp_warmup or profile_cpp
                 if not is_graph_capturing and self.ascend_config.enable_force_eplb \
                     and self.vllm_config.model_config.is_moe:
                     build_force_eplb_topk(self.device, self.max_num_tokens)
@@ -4954,6 +4976,7 @@ class NPUModelRunner(GPUModelRunner):
             return allocate_kvpp_cache(self.vllm_config, kv_cache_config, self.device)
         # init kv cache tensors
         kv_cache_raw_tensors: dict[str, torch.Tensor | tuple[torch.Tensor, ...]] = {}
+        self._physical_kv_cache_block_tensors: list[torch.Tensor] = []
         # prefill disaggregation need the addr of cache tensor be aligned with 2M
         alignment = 2 * 1024 * 1024
         layer_kv_cache_spec = self._get_layer_kv_cache_specs(kv_cache_config)
@@ -4961,8 +4984,13 @@ class NPUModelRunner(GPUModelRunner):
             # V4.1 overlays the layers in each tuple on one physical slot.
             # Unlike DSV4's shared-tuple layout below, each descriptor owns
             # a separate allocation and its layers alias the same backing.
+            track_physical_pages = get_current_hardware_profile().supports(
+                HardwareCapability.DSV41_PACKED_CACHE
+            )
             for allocation in kv_cache_config.kv_cache_tensors:
                 backing = self._allocate_int8_cache_tensor(allocation.size, alignment)
+                if track_physical_pages:
+                    self._physical_kv_cache_block_tensors.append(backing)
                 for name in allocation.layers:
                     kv_cache_raw_tensors[name] = backing
             return kv_cache_raw_tensors
@@ -5431,6 +5459,13 @@ class NPUModelRunner(GPUModelRunner):
                             )
                         )
                         kv_cache_dtype_list.append(current_kv_cache_spec.scale_dtype)
+                    elif layer_name.endswith(".indexer.k_cache_folded"):
+                        source_name = layer_name.removesuffix(".indexer.k_cache_folded") + ".long_kv_cache"
+                        index_name = layer_name.removesuffix("_folded")
+                        initial_offset = (
+                            layer_kv_cache_spec[source_name].unpadded_page_size_bytes
+                            + layer_kv_cache_spec[index_name].unpadded_page_size_bytes
+                        )
                     views = self._adjust_kv_layout(
                         kv_cache_raw_tensors[layer_name],
                         kv_cache_shape_list,
@@ -6436,6 +6471,10 @@ class NPUModelRunner(GPUModelRunner):
             cache_dtype=self.cache_config.cache_dtype,
             runner_only_attn_layers=self.runner_only_attn_layers,
             static_forward_context=(self.compilation_config.static_forward_context),
+            physical_block_tensors=(
+                getattr(self, "_physical_kv_cache_block_tensors", None) or None
+            ),
+            num_blocks=self.kv_cache_config.num_blocks,
         )
 
 

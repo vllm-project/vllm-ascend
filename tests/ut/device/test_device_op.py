@@ -7,6 +7,13 @@ import torch
 from vllm_ascend.device.device_op import A5DeviceAdaptor, BaseDeviceAdaptor
 
 
+def test_deepseek_v41_backend_is_device_routed():
+    assert BaseDeviceAdaptor.get_deepseek_v41_backend() is None
+    with mock.patch("vllm_ascend.utils.load_custom_op_library") as load_library:
+        assert A5DeviceAdaptor.get_deepseek_v41_backend().__name__ == "vllm_ascend.ops.dsv41_a5"
+    load_library.assert_called_once_with()
+
+
 @pytest.mark.parametrize("adaptor", [BaseDeviceAdaptor, A5DeviceAdaptor])
 @pytest.mark.parametrize("block_table_mode", ["pa", "none", "omitted"])
 @pytest.mark.parametrize("contiguous", [False, True])

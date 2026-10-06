@@ -518,7 +518,10 @@ def build_attn_metadata(
                     skip_ring_state_update=skip_ring_state_update,
                     common_v41_metadata=common_v41_metadata,
                     common_v41_batch_metadata=common_v41_batch_metadata,
-                    full_graph_mode=full_graph_mode,
+                    # Upstream capture prepares metadata with runtime mode
+                    # NONE and for_cudagraph_capture=True. Keep V4.1 indexer
+                    # branches in the graph even for a short dummy sequence.
+                    full_graph_mode=full_graph_mode or for_cudagraph_capture,
                 )
             # Parallel attention and cache-only backends opt in to the PCP
             # context needed to construct their own metadata.
@@ -1308,6 +1311,16 @@ def _reshape_kv_cache_v2(
                         )
                     )
                     kv_cache_dtype_list.append(kv_cache_spec.scale_dtype)
+                elif layer_name.endswith(".indexer.k_cache_folded"):
+                    # A5 QSLI's folded indexer is the third view in the shared
+                    # page, after long KV and split indexer K/scale. Offset 0
+                    # aliases long KV and corrupts both consumers on writes.
+                    source_name = layer_name.removesuffix(".indexer.k_cache_folded") + ".long_kv_cache"
+                    index_name = layer_name.removesuffix("_folded")
+                    initial_offset = (
+                        layer_kv_cache_spec[source_name].unpadded_page_size_bytes
+                        + layer_kv_cache_spec[index_name].unpadded_page_size_bytes
+                    )
                 views = _adjust_dsv4_kv_layout(
                     kv_cache_raw_tensors[layer_name],
                     kv_cache_shape_list,

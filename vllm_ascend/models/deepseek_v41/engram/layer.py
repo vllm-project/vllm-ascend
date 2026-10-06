@@ -4,6 +4,7 @@
 
 import torch
 from torch import nn
+from vllm.model_executor.layers.linear import ReplicatedLinear
 
 from .common import engram_gate
 
@@ -11,16 +12,18 @@ from .common import engram_gate
 class AscendEngram(nn.Module):
     """Consume rows prepared by the v1 runner in the checkpoint residual basis."""
 
-    def __init__(self, config) -> None:
+    def __init__(self, config, quant_config, prefix: str) -> None:
         super().__init__()
         self.dim = config.hidden_size
         self.hc_mult = config.hc_mult
         self.eps = config.rms_norm_eps
-        self.wkv = nn.Linear(
+        self.wkv = ReplicatedLinear(
             (config.engram_max_ngram_size - 1) * config.engram_n_heads * config.engram_head_dim,
             (self.hc_mult + 1) * self.dim,
             bias=False,
-            dtype=torch.bfloat16,
+            quant_config=quant_config,
+            prefix=f"{prefix}.wkv",
+            return_bias=False,
         )
         self.q_weight = nn.Parameter(torch.empty(self.hc_mult, self.dim, dtype=torch.bfloat16))
         self.k_weight = nn.Parameter(torch.empty(self.hc_mult, self.dim, dtype=torch.bfloat16))

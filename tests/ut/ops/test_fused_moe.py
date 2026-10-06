@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import weakref
 from contextlib import contextmanager, nullcontext
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, call, patch
@@ -14,7 +15,7 @@ from vllm.model_executor.layers.activation import SituAndMul
 
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.device.hardware import AscendDeviceType
-from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_hardware_profile
 from vllm_ascend.ops import register_custom_ops as custom_ops
 from vllm_ascend.ops.fused_moe import fused_moe as fused_moe_module
 from vllm_ascend.ops.fused_moe import routed_experts as routed_experts_module
@@ -732,7 +733,8 @@ def test_hash_router_preserves_fp32_weights_and_explicit_input_ids(monkeypatch, 
     assert weights is topk_weights
     assert weights.dtype == torch.float32
     assert ids is topk_ids
-    torch.testing.assert_close(hash_op.call_args.kwargs["input_ids"], torch.tensor([22, 0], dtype=torch.int64))
+    # Padding normalization belongs to the native operator, after communication.
+    torch.testing.assert_close(hash_op.call_args.kwargs["input_ids"], gathered_input_ids)
     prepare_finalize.all_gather_input_ids.assert_called_once()
     actual_input_ids = prepare_finalize.all_gather_input_ids.call_args.args[0]
     torch.testing.assert_close(actual_input_ids, input_ids.to(torch.int64))
@@ -743,7 +745,7 @@ def test_hash_router_preserves_fp32_weights_and_explicit_input_ids(monkeypatch, 
 
 @pytest.mark.parametrize("image_sentinel_lo", [129257, 129264])
 @pytest.mark.parametrize("renormalize", [True, False])
-def test_vision_router_preserves_reference_routing_on_a5(monkeypatch, image_sentinel_lo, renormalize):
+def test_vision_router_preserves_reference_routing_without_native_vision(monkeypatch, image_sentinel_lo, renormalize):
     input_ids = torch.tensor([-1, image_sentinel_lo], dtype=torch.int32)
     hidden_states = torch.randn(2, 4)
     router_logits = torch.randn(2, 4, dtype=torch.float32)
@@ -758,10 +760,12 @@ def test_vision_router_preserves_reference_routing_on_a5(monkeypatch, image_sent
             moe_comm_method=SimpleNamespace(prepare_finalize=prepare_finalize),
         ),
     )
+    profile = get_hardware_profile(AscendDeviceType.A5)
+    profile = replace(profile, capabilities=profile.capabilities - {HardwareCapability.MOE_GATING_TOP_K_HASH_VISION})
     monkeypatch.setattr(
         fused_topk_router_module,
         "get_current_hardware_profile",
-        lambda: get_hardware_profile(AscendDeviceType.A5),
+        lambda: profile,
     )
     hash_op = MagicMock(side_effect=AssertionError("Vision routing must not call the hash kernel"))
     monkeypatch.setattr(

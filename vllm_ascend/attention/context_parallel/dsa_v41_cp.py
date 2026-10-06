@@ -14,7 +14,6 @@ from vllm_ascend.attention.dsa_v41 import (
     AscendDSAV41Impl,
     AscendDSAV41MetadataBuilder,
     _config_value,
-    scatter_cache_sk,
 )
 from vllm_ascend.utils import enable_dsa_cp, npu_stream_switch
 
@@ -33,6 +32,13 @@ class _ReplicatedCacheMetadataBuilder(AscendDSAV41MetadataBuilder):
         self._global_builder = AscendDSAV41MetadataBuilder(
             kv_cache_spec, layer_names, vllm_config, device, build_query_metadata=False
         )
+
+    def prepare_source_rope(self):
+        # MRV2 initializes RoPE without enabling MRV1's async metadata queue.
+        # The replicated global builder owns compressor metadata, while the
+        # outer builder only owns local query metadata. Initialize both.
+        super().prepare_source_rope()
+        self._global_builder.prepare_source_rope()
 
     def enable_device_metadata(self):
         super().enable_device_metadata()
@@ -168,7 +174,11 @@ class AscendDSAV41CPImpl(AscendDSAV41Impl):
                 rotary_mode="interleave",
                 partial_slice=[attn.nope_head_dim, attn.head_dim],
             )
-            scatter_cache_sk(attn.dsa_attn.swa_cache_layer.kv_cache[0], swa_metadata.slot_mapping, kv.squeeze(1))
+            # Keep CP's replicated-cache write on the same A5 backend path as
+            # the non-CP implementation. The legacy scatter op is unavailable
+            # in the packaged A5 OPP, and its 2-D coordinates do not describe
+            # the packed cache layout used by the A5 writer.
+            AscendDSAV41Impl._write_swa_cache(attn, swa_metadata, kv.squeeze(1))
         q = wq_b.matmul(q_b_quant, q_b_scale, bias=attn.wq_b.bias).unflatten(-1, (attn.n_heads, attn.head_dim))
         main_stream.wait_stream(aux_stream)
         torch.ops._C_ascend.inplace_partial_rotary_mul(

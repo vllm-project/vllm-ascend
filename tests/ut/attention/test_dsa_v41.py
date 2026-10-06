@@ -24,6 +24,8 @@ def _attn(selected):
     shared = SimpleNamespace(
         topk_indices=torch.full((TOKENS, TOPK), 7, dtype=torch.int32),
         candidates=torch.full((TOKENS, 1, 8), 7, dtype=torch.int32),
+        candidate_lengths=None,
+        topk_lengths=None,
     )
     indexer = SimpleNamespace(select=lambda *args, **kwargs: (selected, None))
     return SimpleNamespace(shared_state=shared, indexer=indexer), shared

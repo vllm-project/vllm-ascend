@@ -51,6 +51,7 @@ from vllm_ascend.models.deepseek_v41.cache_config import (
     group_cache_specs,
     is_deepseek_v41_cache,
     make_cache_groups,
+    make_folded_index_cache_spec,
 )
 from vllm_ascend.models.deepseek_v41.compressor import DeepseekV41Compressor
 from vllm_ascend.models.deepseek_v41.model import build_layer_plan
@@ -210,6 +211,58 @@ def test_twelve_groups_share_four_layer_slots(config, runtime):
                 assert key.dtype == torch.int8 and scale.dtype == torch.float16
                 assert scale.data_ptr() - key.data_ptr() == storage_block_size * spec.head_size
                 assert scale.shape == (blocks, storage_block_size, 1, 1)
+
+
+def test_candidate_source_folded_index_cache_is_in_same_physical_slot(runtime):
+    specs = collect_specs(runtime)
+    name = "model.layers.20.self_attn.indexer.k_cache_folded"
+    specs[name] = make_folded_index_cache_spec(block_size=runtime.cache_config.block_size)
+    index_name = name.removesuffix("_folded")
+    long_name = name.removesuffix(".indexer.k_cache_folded") + ".long_kv_cache"
+    page_sizes, tuples = get_layer_tuples(specs)
+    source_slot = next(i for i, slot in enumerate(tuples) if long_name in slot)
+    assert tuples[source_slot][:3] == (long_name, index_name, name)
+    assert page_sizes[source_slot] >= sum(specs[layer].unpadded_page_size_bytes for layer in tuples[source_slot][:3])
+    groups = make_cache_groups(group_cache_specs(specs))
+    planned = get_deepseek_v41_kv_cache_config(
+        runtime, groups, get_deepseek_v41_pool_bytes_per_block(groups) * 2
+    )
+    assert planned.kv_cache_tensors[source_slot].layers[:3] == [long_name, index_name, name]
+    assert planned.kv_cache_tensors[source_slot].block_stride == page_sizes[source_slot]
+
+
+@pytest.mark.parametrize("block_size", [32, 64, 128])
+def test_mrv2_folded_indexer_view_does_not_alias_long_kv(runtime, monkeypatch, block_size):
+    from vllm_ascend.worker.v2 import attn_utils
+
+    runtime.cache_config.block_size = block_size
+    specs = collect_specs(runtime)
+    folded = "model.layers.20.self_attn.indexer.k_cache_folded"
+    index = folded.removesuffix("_folded")
+    long_kv = folded.removesuffix(".indexer.k_cache_folded") + ".long_kv_cache"
+    specs[folded] = make_folded_index_cache_spec(block_size=runtime.cache_config.block_size)
+    groups = make_cache_groups(group_cache_specs(specs))
+    planned = get_deepseek_v41_kv_cache_config(runtime, groups, get_deepseek_v41_pool_bytes_per_block(groups) * 2)
+    layer_specs = attn_utils._get_layer_kv_cache_specs(planned)
+    allocation = next(d for d in planned.kv_cache_tensors if folded in d.layers)
+    backing = torch.zeros(allocation.size, dtype=torch.int8)
+    backend = SimpleNamespace(get_kv_cache_shape=lambda *shape: shape)
+    names = [long_kv, index, folded]
+    attn_groups = [
+        SimpleNamespace(kv_cache_group_id=i, kv_cache_spec=layer_specs[name], layer_names=[name], backend=backend)
+        for i, name in enumerate(names)
+    ]
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: runtime)
+    monkeypatch.setattr(attn_utils, "_is_dsv4_model", lambda _: False)
+    views = attn_utils._reshape_kv_cache_v2(
+        attn_groups, dict.fromkeys(names, backing), "auto", [runtime.cache_config.block_size] * 3, {}, planned
+    )
+    expected_offset = layer_specs[long_kv].unpadded_page_size_bytes + layer_specs[index].unpadded_page_size_bytes
+    assert views[folded].data_ptr() - backing.data_ptr() == expected_offset
+    assert views[folded].stride(0) * views[folded].element_size() == allocation.block_stride
+    views[folded].fill_(7)
+    assert torch.count_nonzero(views[long_kv]) == 0
+    assert all(torch.count_nonzero(part) == 0 for part in views[index])
 
 
 def test_production_layout_matches_design(config, runtime):
@@ -1099,8 +1152,10 @@ def test_ring_source_reuses_prepared_store_coordinates(monkeypatch, num_tokens, 
         compressor=SimpleNamespace(cache=cache, state=state),
         indexer=SimpleNamespace(cache=cache),
     )
+    impl = object.__new__(AscendDSAV41Impl)
+    impl.role = SimpleNamespace(compress_ratio=2)
     AscendDSAV41Impl._write_compressed_source(
-        SimpleNamespace(role=SimpleNamespace(compress_ratio=2)),
+        impl,
         attn,
         hidden_states,
         positions,
@@ -1386,6 +1441,26 @@ def test_v41_cp_builds_device_controls_only_on_consuming_side(runtime, monkeypat
         assert builder.take_device_metadata_tasks() == ()
 
 
+@pytest.mark.parametrize("async_metadata", [False, True])
+def test_v41_cp_source_rope_initializes_global_compressor(runtime, monkeypatch, async_metadata):
+    from vllm_ascend.attention.context_parallel.dsa_v41_cp import AscendDSAV41CPMetadataBuilder
+
+    spec = collect_specs(runtime)["model.layers.2.self_attn.compressor.state_cache"]
+    builder = AscendDSAV41CPMetadataBuilder(
+        spec, ["model.layers.2.self_attn.compressor.state_cache"], runtime, torch.device("cpu")
+    )
+    tables = (torch.ones(4, 2), torch.zeros(4, 2))
+    monkeypatch.setattr(dsa_v41, "get_full_cos_and_sin_dsa_for_layer", lambda _: tables)
+    if async_metadata:
+        builder.enable_device_metadata()
+    else:
+        builder.prepare_source_rope()
+    assert builder._global_builder._c2_full_source_rope is tables
+    assert builder._c2_full_source_rope is None  # Local Q does not own compression.
+    assert builder._device_metadata_enabled is async_metadata
+    assert builder._global_builder._device_metadata_enabled is async_metadata
+
+
 @pytest.mark.parametrize("local_tokens", [0, 1, 2])
 @pytest.mark.parametrize("num_tokens", [3, 4])
 def test_v41_cp_output_exchange_only_pads_partial_ranks(monkeypatch, local_tokens, num_tokens):
@@ -1498,22 +1573,45 @@ def test_v41_cp_resolves_own_planes_with_native_draft_metadata_present():
 
 
 @pytest.mark.parametrize("overlap", [False, True])
-def test_v41_query_preparation_uses_multistream(overlap):
+def test_v41_query_preparation_honors_multistream_setting(overlap):
     from unittest.mock import Mock
 
     from vllm_ascend.attention.dsa_v41 import AscendDSAV41Impl
 
     impl = AscendDSAV41Impl.__new__(AscendDSAV41Impl)
     impl.role = SimpleNamespace(is_kv_source=True)
+    impl.preprocess = Mock(return_value=("q", "qr"))
     impl.multistream_preprocess = Mock(return_value=("q", "qr"))
     impl._write_compressed_source = Mock()
     attn = SimpleNamespace(
-        dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=SimpleNamespace(multistream_dsv4_dsa_overlap=overlap)))
+        dsv41_backend=None,
+        dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=SimpleNamespace(multistream_dsv4_dsa_overlap=overlap))),
     )
-    metadata = SimpleNamespace(swa=SimpleNamespace(num_actual_tokens=6))
+    metadata = SimpleNamespace(swa=SimpleNamespace(num_actual_tokens=6, num_prefills=0))
     assert impl._prepare_queries(attn, "hidden", "positions", "cos", "sin", metadata) == ("q", "qr")
-    impl.multistream_preprocess.assert_called_once_with(attn, "hidden", "cos", "sin", metadata.swa)
+    selected = impl.multistream_preprocess if overlap else impl.preprocess
+    selected.assert_called_once_with(attn, "hidden", "cos", "sin", metadata.swa)
     impl._write_compressed_source.assert_called_once_with(attn, "hidden", "positions", "cos", "sin", metadata)
+
+
+def test_v41_a5_prefill_keeps_cache_writes_on_current_stream():
+    from unittest.mock import Mock
+
+    from vllm_ascend.attention.dsa_v41 import AscendDSAV41Impl
+
+    impl = AscendDSAV41Impl.__new__(AscendDSAV41Impl)
+    impl.role = SimpleNamespace(is_kv_source=False)
+    impl.preprocess = Mock(return_value=("q", "qr"))
+    impl.multistream_preprocess = Mock(return_value=("q", "qr"))
+    attn = SimpleNamespace(
+        dsv41_backend=object(),
+        dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=SimpleNamespace(multistream_dsv4_dsa_overlap=True))),
+    )
+    metadata = SimpleNamespace(swa=SimpleNamespace(num_actual_tokens=6, num_prefills=1))
+
+    assert impl._prepare_queries(attn, "hidden", "positions", "cos", "sin", metadata) == ("q", "qr")
+    impl.preprocess.assert_called_once_with(attn, "hidden", "cos", "sin", metadata.swa)
+    impl.multistream_preprocess.assert_not_called()
 
 
 @pytest.mark.parametrize("overlap", [False, True])
@@ -1559,6 +1657,36 @@ def test_v41_cp_input_preparation_updates_empty_rank_cache(overlap, local_tokens
         impl._update_caches.assert_not_called()
 
 
+def test_dspark_v41_indices_keep_capture_addresses(runtime):
+    runtime.speculative_config = SimpleNamespace(num_speculative_tokens=3)
+    spec = AscendSlidingWindowMLASpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.bfloat16,
+        sliding_window=128,
+        cache_dtype_str="bfloat16",
+        model_version="deepseek_v41",
+    )
+    builder = AscendDSAV41MetadataBuilder(spec, [], runtime, torch.device("cpu"))
+    common = _cp_common().replace(causal=False)
+    first = builder.build_for_drafting(common, 1)
+    indices_ptr = first.ori_sparse_indices.data_ptr()
+    lengths_ptr = first.ori_topk_length.data_ptr()
+    old_indices = first.ori_sparse_indices.clone()
+    common = common.replace(
+        seq_lens=torch.tensor([260, 5], dtype=torch.int32),
+        seq_lens_cpu=torch.tensor([260, 5], dtype=torch.int32),
+        max_seq_len=260,
+    )
+    second = builder.build_for_drafting(common, 1)
+    assert second.ori_sparse_indices.data_ptr() == indices_ptr
+    assert second.ori_topk_length.data_ptr() == lengths_ptr
+    assert not torch.equal(old_indices, second.ori_sparse_indices)
+    assert second.ori_sparse_indices[0, 0, 0] == 129
+    assert first.ori_topk_length.tolist() == [131, 131, 131, 5]
+
+
 def test_v41_cp_inherits_forward():
     from vllm_ascend.attention.context_parallel.dsa_v41_cp import AscendDSAV41CPImpl
     from vllm_ascend.attention.dsa_v41 import AscendDSAV41Impl
@@ -1598,7 +1726,7 @@ def test_dspark_v41_noncausal_metadata_preserves_full_visible_block(runtime, mon
     full = builder.build_for_drafting(common, 1)
     torch.testing.assert_close(
         native.call_args.kwargs["ori_topk_length"],
-        (full.ori_sparse_indices >= 0).sum(-1, dtype=torch.int32),
+        (full.ori_sparse_indices >= 0).sum((-1, -2), dtype=torch.int32),
     )
     assert full.ori_topk_length is native.call_args.kwargs["ori_topk_length"]
     assert full.ori_mask_mode == 0
@@ -1609,7 +1737,7 @@ def test_dspark_v41_noncausal_metadata_preserves_full_visible_block(runtime, mon
     assert full.ori_sparse_indices[0, 0, : len(expected)].tolist() == expected
     assert torch.all(full.ori_sparse_indices[0, 0, len(expected) :] == -1)
     assert full.ori_sparse_indices[3, 0, :5].tolist() == list(range(5))
-    assert full.ori_topk_length[:, 0].tolist() == [len(expected)] * 3 + [5]
+    assert full.ori_topk_length.tolist() == [len(expected)] * 3 + [5]
     if rank is None:
         return
     monkeypatch.setattr(

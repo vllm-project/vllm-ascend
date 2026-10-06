@@ -69,6 +69,37 @@ class SparseAttentionBackend(AscendAttentionBackend):
         return True
 
 
+class TestCompiledForwardFallback(unittest.TestCase):
+    def test_model_can_request_uncompiled_runtime_none(self):
+        model = SimpleNamespace(requires_uncompiled_fallback=True)
+
+        self.assertTrue(
+            NPUModelRunner._should_skip_compiled_forward(
+                model,
+                CUDAGraphMode.NONE,
+                has_encoder_input=False,
+            )
+        )
+        self.assertFalse(
+            NPUModelRunner._should_skip_compiled_forward(
+                model,
+                CUDAGraphMode.FULL_DECODE_ONLY,
+                has_encoder_input=False,
+            )
+        )
+
+    def test_encoder_input_remains_an_independent_fallback(self):
+        model = SimpleNamespace()
+
+        self.assertTrue(
+            NPUModelRunner._should_skip_compiled_forward(
+                model,
+                CUDAGraphMode.FULL_DECODE_ONLY,
+                has_encoder_input=True,
+            )
+        )
+
+
 class TestGlm5MtpGraphMetadata(unittest.TestCase):
     @staticmethod
     def _build_dispatch_runner(speculative: bool) -> NPUModelRunner:

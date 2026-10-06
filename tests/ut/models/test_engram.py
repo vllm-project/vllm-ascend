@@ -76,6 +76,33 @@ def test_bf16_gate_without_rotation():
     assert torch.equal(result[1], hidden[1])
 
 
+def test_loader_applies_mxfp8_checkpoint_scales(tmp_path):
+    key = "layers.1.engram.embed.weight"
+    scale_key = "layers.1.engram.embed.scale"
+    source = torch.linspace(-0.5, 0.5, 19 * 64).reshape(19, 64)
+    checkpoint_scale = torch.full((19, 2), 1 / 128, dtype=torch.float32).to(torch.float8_e8m0fnu)
+    checkpoint_weight = (source * 128).to(torch.float8_e4m3fn)
+    save_file({key: checkpoint_weight, scale_key: checkpoint_scale}, tmp_path / "model.safetensors")
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {key: "model.safetensors", scale_key: "model.safetensors"}})
+    )
+    embedding_mod.preflight_engram_checkpoint(tmp_path, [1])
+    table = object.__new__(embedding_mod.AscendParallelEngramEmbedding)
+    torch.nn.Module.__init__(table)
+    table._shared_group = None
+    table.vocab_start_idx = 0
+    table.vocab_end_idx = 19
+    table.block_size = 32
+    table.weight = torch.nn.Parameter(torch.empty((19, 64), dtype=torch.int8), requires_grad=False)
+    table.weight_scale_inv = torch.nn.Parameter(torch.empty((19, 2), dtype=torch.float32), requires_grad=False)
+    table.load_checkpoint(tmp_path, key, chunk_rows=7)
+    decoded = npu.dequantize_engram_rows(table.weight, table.weight_scale_inv)
+    expected = (
+        checkpoint_weight.float().unflatten(-1, (-1, 32)) * checkpoint_scale.float().unsqueeze(-1)
+    ).flatten(-2)
+    torch.testing.assert_close(decoded.float(), expected, rtol=0, atol=0.02)
+
+
 def _fake_host_library(device_offset):
     class Library:
         def aclrtHostRegisterV2(self, pointer, size, flags):

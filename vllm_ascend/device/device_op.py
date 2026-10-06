@@ -41,6 +41,11 @@ else:
 
 
 class BaseDeviceAdaptor:
+    @staticmethod
+    def get_deepseek_v41_backend() -> Any | None:
+        """Return an optional device-specific DeepSeek V4.1 operator backend."""
+        return None
+
     @classmethod
     def scatter_cache(cls, var: torch.Tensor, indices: torch.Tensor, updates: torch.Tensor) -> None:
         """Dispatch a cache scatter with the original operator's arguments.
@@ -973,6 +978,16 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
     def _load_cann_quant_lightning_indexer_ops():
         ops = import_module("cann_ops_transformer.ops")
         return ops.quant_lightning_indexer_metadata, ops.quant_lightning_indexer
+
+    @staticmethod
+    def get_deepseek_v41_backend() -> Any:
+        # Import lazily so non-A5 processes never load the in-tree A5 operator
+        # adapters or their runtime dependencies.
+        from vllm_ascend.ops import dsv41_a5
+        from vllm_ascend.utils import load_custom_op_library
+
+        load_custom_op_library()
+        return dsv41_a5
 
     @classmethod
     def reshape_and_cache(

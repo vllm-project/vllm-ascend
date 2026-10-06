@@ -150,6 +150,8 @@ class AscendKVBlockZeroer(KVBlockZeroer):
         cache_dtype: str,
         runner_only_attn_layers: set[str],
         static_forward_context: dict[str, Any],
+        physical_block_tensors: Iterable[torch.Tensor] | None = None,
+        num_blocks: int | None = None,
     ) -> None:
         """One-time precomputation for zero_block_ids.
 
@@ -162,8 +164,30 @@ class AscendKVBlockZeroer(KVBlockZeroer):
         Each segment's page size accounts for this ratio so that
         ``block_id * page_size_el`` lands at the correct offset.
 
-        Only AttentionSpec layers are processed; Mamba layers are skipped.
+        Packed A5 caches use physical tensors so every byte of an aliased page
+        is cleared. Otherwise, only AttentionSpec layers are processed.
         """
+        if physical_block_tensors is not None:
+            if num_blocks is None or num_blocks <= 0:
+                raise ValueError("num_blocks must be positive for physical KV cache zeroing")
+            seen_ptrs: set[int] = set()
+            seg_addrs: list[int] = []
+            seg_page_sizes: list[int] = []
+            for tensor in physical_block_tensors:
+                if not tensor.is_contiguous() or tensor.numel() % num_blocks:
+                    raise ValueError("Physical KV cache tensors must contain contiguous whole blocks")
+                data_ptr = tensor.data_ptr()
+                if data_ptr in seen_ptrs:
+                    continue
+                seen_ptrs.add(data_ptr)
+                page_size_bytes = tensor.numel() * tensor.element_size() // num_blocks
+                if page_size_bytes % 4:
+                    raise ValueError("Physical KV cache block size must be 4-byte aligned")
+                seg_addrs.append(data_ptr)
+                seg_page_sizes.append(page_size_bytes // 4)
+            self._init_meta_segments(seg_addrs, seg_page_sizes)
+            return
+
         seen_ptrs: set[int] = set()
         seg_addrs: list[int] = []
         seg_page_sizes: list[int] = []
@@ -209,6 +233,9 @@ class AscendKVBlockZeroer(KVBlockZeroer):
                         seg_page_sizes.append(payload_bytes * (ratio if contiguous else 1) // 4)
                         seg_page_strides.append(stride_bytes * ratio // 4)
 
+        self._init_meta_segments(seg_addrs, seg_page_sizes)
+
+    def _init_meta_segments(self, seg_addrs: list[int], seg_page_sizes: list[int]) -> None:
         if not seg_addrs:
             self._meta = None
             self._seg_page_strides = None

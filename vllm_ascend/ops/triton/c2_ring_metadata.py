@@ -76,9 +76,7 @@ def _build_c2_ring_metadata_kernel(
     live = reqs < num_actual_reqs
     used = tl.where(live & (skip_update == 0), used, 0)
     first_blocks = tl.load(
-        block_table_ptr
-        + reqs * block_table_row_stride
-        + 0 * block_table_col_stride,
+        block_table_ptr + reqs * block_table_row_stride + 0 * block_table_col_stride,
         mask=req_mask,
         other=0,
     ).to(tl.int32)
@@ -117,16 +115,9 @@ def _build_c2_ring_metadata_kernel(
         mask=token_mask,
         other=0,
     ).to(tl.int64)
-    valid_end = tl.load(
-        query_start_loc_ptr + num_actual_reqs * query_start_stride
-    ).to(tl.int32)
+    valid_end = tl.load(query_start_loc_ptr + num_actual_reqs * query_start_stride).to(tl.int32)
     valid_end = tl.minimum(valid_end, num_actual_tokens)
-    complete = (
-        token_mask
-        & (tokens < valid_end)
-        & ((positions % 2) == 1)
-        & (skip_update == 0)
-    )
+    complete = token_mask & (tokens < valid_end) & ((positions % 2) == 1) & (skip_update == 0)
     source_positions = tl.where(complete, positions - 1, 0)
     tl.store(
         complete_mask_ptr + tokens * complete_stride,
@@ -141,14 +132,8 @@ def _build_c2_ring_metadata_kernel(
 
     dims = tl.arange(0, ROPE_BLOCK)
     rope_mask = token_mask[:, None] & (dims[None, :] < ROPE_DIM)
-    source_offsets = (
-        source_positions[:, None] * source_rope_row_stride
-        + dims[None, :] * source_rope_dim_stride
-    )
-    output_offsets = (
-        tokens[:, None] * output_rope_row_stride
-        + dims[None, :] * output_rope_dim_stride
-    )
+    source_offsets = source_positions[:, None] * source_rope_row_stride + dims[None, :] * source_rope_dim_stride
+    output_offsets = tokens[:, None] * output_rope_row_stride + dims[None, :] * output_rope_dim_stride
     cos = tl.load(source_cos_ptr + source_offsets, mask=rope_mask)
     sin = tl.load(source_sin_ptr + source_offsets, mask=rope_mask)
     tl.store(output_cos_ptr + output_offsets, cos, mask=rope_mask)

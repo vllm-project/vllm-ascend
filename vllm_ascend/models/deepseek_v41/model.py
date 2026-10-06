@@ -7,13 +7,11 @@ from __future__ import annotations
 import typing
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from itertools import islice
 from typing import Any
 
 import torch
 import torch.nn.functional as F
 import vllm.envs as envs
-from safetensors import safe_open
 from torch import nn
 from transformers import PretrainedConfig
 from vllm.config import ParallelConfig, VllmConfig, get_current_vllm_config
@@ -49,7 +47,6 @@ from vllm.model_executor.models.utils import PPMissingLayer, is_pp_missing_param
 
 # Upstream #56741 normalized the V4.1 model package name.
 from vllm.models.deepseek_v41.common.engram import EngramLayout
-from vllm.models.deepseek_v41.nvidia.engram import gather_engram_hashes
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
@@ -58,7 +55,8 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.dsa_v41 import (
     DeepseekV41CacheLayer,
 )
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSlidingWindowMLASpec
+from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_padding_mask,
@@ -75,6 +73,10 @@ from vllm_ascend.utils import (
     normalize_deepseek_v41_config,
 )
 
+from .cache_config import (
+    make_long_cache_spec,
+    make_swa_cache_spec,
+)
 from .compressor import DeepseekV41Compressor
 from .engram import (
     create_engram_hash_state,
@@ -82,13 +84,19 @@ from .engram import (
     engram_dead_mask,
     engram_enabled,
 )
+from .engram.common import load_engram_rotation_block
 from .engram.embedding import (
     AscendParallelEngramEmbedding,
     preflight_engram_checkpoint,
 )
 from .engram.layer import AscendEngram
-from .engram.parallel import resolve_dp_shared_memory
+from .engram.parallel import gather_engram_hashes, resolve_dp_shared_memory
 from .indexer import DeepseekV41Indexer
+
+
+def _engram_enabled_for_runtime(config, vllm_config) -> bool:
+    """Use the current vLLM Engram opt-in for both runtime paths."""
+    return engram_enabled(config) and vllm_config.engram_config is not None
 
 
 class DeepseekV41MLP(nn.Module):
@@ -480,9 +488,11 @@ class DeepseekV41Topology:
 class DeepseekV41SharedAttentionState:
     """Per-forward handoff between index sources and their consumer layers."""
 
-    def __init__(self, topk_indices, candidates):
+    def __init__(self, topk_indices, candidates, candidate_lengths=None, topk_lengths=None):
         self.topk_indices = topk_indices
         self.candidates = candidates
+        self.candidate_lengths = candidate_lengths
+        self.topk_lengths = topk_lengths
 
     def reset(self):
         # Source layers overwrite the active rows before any consumer reads
@@ -556,15 +566,12 @@ class AscendDeepseekV41SWACache(DeepseekV41CacheLayer):
         from vllm_ascend.models.layer.attention.layer import DSV4_BLOCK_SIZES
 
         block_size = DSV4_BLOCK_SIZES[cache_config.block_size][0][1]
-        spec = AscendSlidingWindowMLASpec(
+        spec = make_swa_cache_spec(
             block_size=block_size,
-            num_kv_heads=1,
+            window_size=window_size,
             head_size=head_dim,
             dtype=dtype,
-            sliding_window=window_size,
-            cache_dtype_str=cache_config.cache_dtype,
-            model_version="deepseek_v41",
-            alignment=None,
+            cache_dtype=cache_config.cache_dtype,
         )
         super().__init__(get_current_vllm_config(), prefix, spec)
         self.head_dim = head_dim
@@ -699,20 +706,17 @@ class DeepseekV41Attention(DeepseekV41SWAAttention):
         self.topology = topology
         self.shared_state = None
         self.prefix = prefix
+        self.dsv41_backend = DeviceOperator.get_deepseek_v41_backend()
         width = config.head_dim
         self.softmax_scale = width**-0.5
         if role.is_kv_source:
             self.long_kv_cache = DeepseekV41CacheLayer(
                 vllm_config,
                 f"{prefix}.long_kv_cache",
-                AscendMLAAttentionSpec(
+                make_long_cache_spec(
                     block_size=block_size,
-                    num_kv_heads=1,
                     head_size=width,
-                    dtype=torch.bfloat16,
-                    tokens_per_state=role.compress_ratio,
-                    model_version="deepseek_v41",
-                    storage_block_size=block_size // role.compress_ratio,
+                    compress_ratio=role.compress_ratio,
                 ),
             )
         self.compressor = (
@@ -728,6 +732,7 @@ class DeepseekV41Attention(DeepseekV41SWAAttention):
                 f"{prefix}.indexer",
                 role.compress_ratio,
                 quant_config=quant_config,
+                is_candidate_source=role.is_candidate_source,
             )
             if role.is_index_source
             else None
@@ -823,33 +828,48 @@ class DeepseekV41DecoderLayer(nn.Module):
         self.hc_attn_scale = nn.Parameter(torch.empty(3, dtype=torch.float32))
         self.hc_ffn_scale = nn.Parameter(torch.empty(3, dtype=torch.float32))
         self.use_sequence_parallel = vllm_config.parallel_config.use_sequence_parallel_moe
+        self.dsv41_backend = DeviceOperator.get_deepseek_v41_backend()
         # Leave the TP partial sums for the reduce-scatter below. The mHC
         # and MoE paths then stay sharded between attention calls.
         if self.use_sequence_parallel:
             self.self_attn.wo_b.reduce_results = False
-        has_engram = engram_enabled(config)
+        has_engram = _engram_enabled_for_runtime(config, vllm_config)
         self.engram: AscendEngram | None
         if has_engram and not is_draft_layer and self.layer_idx in config.engram_layer_ids:
-            self.engram = AscendEngram(config)
+            self.engram = AscendEngram(config, quant_config, f"{prefix}.engram")
         else:
             self.engram = None
 
     def rms_norm_cast(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Normalize once and provide the exact FP32 routing input."""
-        if enable_custom_op():
-            return torch.ops._C_ascend.npu_rms_norm_cast(
-                hidden_states,
-                self.post_attention_layernorm.weight,
-                self.post_attention_layernorm.variance_epsilon,
-            )
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        return hidden_states, hidden_states.float()
+        if enable_custom_op() and get_current_hardware_profile().supports(HardwareCapability.RMS_NORM_CAST):
+            op = getattr(torch.ops._C_ascend, "npu_rms_norm_cast", None)
+            if op is not None:
+                return op(
+                    hidden_states,
+                    self.post_attention_layernorm.weight,
+                    self.post_attention_layernorm.variance_epsilon,
+                )
+        normalized = self.post_attention_layernorm(hidden_states)
+        return normalized, normalized.float()
 
     @staticmethod
     def hc_collapse(x, pre_mix):
         return (pre_mix.unsqueeze(-1) * x.float()).sum(-2).to(x.dtype)
 
     def hc_pre(self, x, hc_fn, hc_scale, hc_base, pre_mix=None):
+        if self.dsv41_backend is not None:
+            return self.dsv41_backend.hc_pre(
+                x,
+                hc_fn,
+                hc_scale,
+                hc_base,
+                pre_mix,
+                hc_mult=self.hc_mult,
+                hc_sinkhorn_iters=self.hc_sinkhorn_iters,
+                norm_eps=self.norm_eps,
+                hc_eps=self.hc_eps,
+            )
         return torch.ops._C_ascend.npu_hc_pre_v3(
             x,
             hc_fn,
@@ -863,6 +883,8 @@ class DeepseekV41DecoderLayer(nn.Module):
         )
 
     def hc_post(self, x, residual, post, comb):
+        if self.dsv41_backend is not None:
+            return self.dsv41_backend.hc_post(x, residual, post, comb)
         return torch.ops._C_ascend.npu_hc_post(
             x.unsqueeze(0),
             residual.unsqueeze(0),
@@ -925,6 +947,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         config = normalize_deepseek_v41_config(vllm_config.model_config.hf_config)
         quant_config = vllm_config.quant_config
         self.config = config
+        self.has_engram = _engram_enabled_for_runtime(config, vllm_config)
         self.device = current_platform.device_type
         self.use_sequence_parallel_moe = vllm_config.parallel_config.use_sequence_parallel_moe
 
@@ -958,10 +981,6 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             lambda prefix: self.decoder_layer_cls(vllm_config, prefix, topk_indices_buffer=topk_indices_buffer),
             prefix=f"{prefix}.layers",
         )
-        self.needs_moe_input_ids = any(
-            layer.mlp.gate.tid2eid is not None or layer.mlp.gate.bias_vl is not None
-            for layer in islice(self.layers, self.start_layer, self.end_layer)
-        )
 
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -994,9 +1013,19 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             device=self.topk_indices_buffer.device,
         )
         self.candidate_indices_buffer = candidate_buffer
+        candidate_lengths = torch.zeros(
+            (max_tokens, 1),
+            dtype=torch.int32,
+            device=self.topk_indices_buffer.device,
+        )
+        topk_lengths = torch.zeros_like(candidate_lengths)
+        self.candidate_lengths_buffer = candidate_lengths
+        self.topk_lengths_buffer = topk_lengths
         self.shared_attention_state = DeepseekV41SharedAttentionState(
             self.topk_indices_buffer,
             candidate_buffer,
+            candidate_lengths,
+            topk_lengths,
         )
         for layer in self.layers:
             if isinstance(layer, DeepseekV41DecoderLayer):
@@ -1013,7 +1042,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         self.engram_dp_shared_memory = resolve_dp_shared_memory(
             bool(vllm_config.engram_config and vllm_config.engram_config.dp_shared_memory)
         )
-        self.engram_layout = EngramLayout.from_config(config) if engram_enabled(config) else None
+        self.engram_layout = EngramLayout.from_config(config) if self.has_engram else None
         if self.engram_layout is not None:
             # Complete head buckets per rank, laid out over TP and the
             # node-local EDP group (upstream's, not one built from EP hosts).
@@ -1047,12 +1076,10 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         rotation_path = get_rotation_path(vllm_config)
         self.engram_rotated = rotation_path is not None
         self.register_buffer("engram_rotation", torch.eye(32), persistent=False)
-        if engram_enabled(config):
+        if self.has_engram:
             if rotation_path is not None and vllm_config.load_config.load_format != "dummy":
                 with torch.device("cpu"):
-                    with safe_open(rotation_path, framework="pt") as file:
-                        rotation = file.get_tensor("global_rotation")
-                    block = rotation[:32, :32].contiguous()
+                    block = load_engram_rotation_block(self.engram_root, config.hidden_size, rotation_path)
                 self.engram_rotation.copy_(block)
             # Upstream owns the n-gram history; the adapter only hands it the
             # Ascend SWA slot metadata (see engram/hash_state.py).
@@ -1087,7 +1114,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         lookback window, then the slot cache the hash state fills itself.
         """
         config = self.config
-        if not engram_enabled(config):
+        if not self.has_engram:
             return {}, torch.empty(0, dtype=torch.bool, device=positions.device)
         device = positions.device
         hash_state = self.engram_hash
@@ -1191,7 +1218,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
 
     def prepare_engram_graph_inputs(self, padded_tokens=None):
         """Capture fixed-address buffers without CPU history or routing work."""
-        if not engram_enabled(self.config):
+        if not self.has_engram:
             return {"engram_lookups": {}, "engram_mask": self.engram_rotation.new_empty(0, dtype=torch.bool)}
         if self._engram_input_buffers is None:
             capacity = self._engram_max_tokens
@@ -1248,9 +1275,6 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         pre_mix[:, 0] = 1.0
         last_layer = None
         aux_hidden_states = []
-        moe_input_ids = input_ids
-        if self.needs_moe_input_ids:
-            moe_input_ids = torch.where(input_ids == -1, 0, input_ids)
         for layer in self.layers:
             last_layer = layer
             # DSpark consumes the residual stream entering its configured
@@ -1272,7 +1296,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                     active_mask,
                     self.engram_rotation if self.engram_rotated else None,
                 )
-            hidden_states, pre_mix = layer(positions, hidden_states, pre_mix, None, input_ids=moe_input_ids)
+            hidden_states, pre_mix = layer(positions, hidden_states, pre_mix, None, input_ids=input_ids)
         assert last_layer is not None, "Hyper-connection collapse requires at least one decoder layer"
         # MTP needs full HC states
         if self._mtp_hidden_buffer is not None:
@@ -1301,6 +1325,10 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
+        # A5's packaged cache operators are qualified for eager prefill and
+        # full-graph decode. Runtime NONE must bypass the compiled model rather
+        # than entering a piecewise torch.compile path.
+        self.requires_uncompiled_fallback = DeviceOperator.get_deepseek_v41_backend() is not None
 
         self.model = self.model_cls(vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model"))
         if get_pp_group().is_last_rank:
@@ -1383,7 +1411,7 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        if not engram_enabled(self.model.config):
+        if not self.model.has_engram:
             return self._load_model_weights((name, tensor) for name, tensor in weights if ".engram." not in name)
         loaded = self._load_model_weights((name, tensor) for name, tensor in weights if self._is_milestone_weight(name))
         return loaded
@@ -1675,6 +1703,6 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
 
     @property
     def engram_cache_layer_name(self) -> str | None:
-        if not engram_enabled(self.model.config):
+        if not self.model.has_engram:
             return None
         return self.model.layers[0].self_attn.dsa_attn.swa_cache_layer.prefix

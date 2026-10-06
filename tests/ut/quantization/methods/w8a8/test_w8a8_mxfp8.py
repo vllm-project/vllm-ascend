@@ -12,6 +12,7 @@ from tests.ut.quantization.conftest_quantization import (
     create_mxfp_moe_layer,
 )
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import (
+    AscendW8A8MXFP8DSDynamicLinearMethod,
     AscendW8A8MXFP8DynamicFusedMoEMethod,
     AscendW8A8MXFP8DynamicLinearMethod,
 )
@@ -198,6 +199,36 @@ class TestAscendW8A8MXFP8LinearMethod(TestBase):
         self.assertEqual(padded_x.shape, (2, 544))
         torch.testing.assert_close(padded_x[:, :16], torch.zeros(2, 16))
         torch.testing.assert_close(padded_x[:, 16:], x)
+
+
+class TestAscendW8A8MXFP8DSLinearMethod(TestBase):
+    def test_process_weights_uses_checkpoint_block_size(self):
+        for block_size, output_size, input_size in ((32, 64, 64), (128, 256, 256)):
+            scheme = object.__new__(AscendW8A8MXFP8DSDynamicLinearMethod)
+            scheme.block_size = block_size
+            scheme.group_size = 32
+            layer = nn.Module()
+            layer.weight = nn.Parameter(
+                torch.zeros(output_size, input_size, dtype=torch.float8_e4m3fn),
+                requires_grad=False,
+            )
+            layer.weight_scale = nn.Parameter(
+                torch.ones(
+                    output_size // block_size,
+                    input_size // block_size,
+                    dtype=torch.float32,
+                ),
+                requires_grad=False,
+            )
+            layer.prefix = "model.layers.0.mlp.shared_experts.gate_up_proj"
+
+            scheme.process_weights_after_loading(layer)
+
+            self.assertEqual(layer.weight.shape, (input_size, output_size))
+            self.assertEqual(
+                layer.weight_scale.shape,
+                (input_size // scheme.group_size // 2, output_size, 2),
+            )
 
 
 class TestAscendW8A8MXFP8MoEMethod(TestBase):

@@ -531,6 +531,24 @@ def aligned_16(tensor: torch.Tensor):
     return new_tensor
 
 
+def load_custom_op_library() -> None:
+    """Register native operators without enabling unsupported model paths.
+
+    Device-specific backends can select individual supported operators while
+    ``enable_custom_op`` retains its hardware-wide opt-in policy. Call after
+    worker device selection; importing the extension can initialize CANN.
+    """
+    if not torch.compiler.is_compiling():
+        bootstrap_custom_op_env()
+    try:
+        import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401
+    except ImportError as error:
+        if torch.compiler.is_compiling() or "libcust_opapi.so" not in str(error):
+            raise
+        bootstrap_custom_op_env(include_vendor_lib=True)
+        import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401
+
+
 def enable_custom_op():
     """
     Enable lazy init for vllm_ascend_C to avoid early initialization of CANN's RTS component.
@@ -553,43 +571,19 @@ def enable_custom_op():
         return _CUSTOM_OP_ENABLED
 
     try:
-        if not torch.compiler.is_compiling():
-            bootstrap_custom_op_env()
-        # isort: off
-        # register custom ops into torch_library here
-        import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401
-
-        # register the meta implementation for custom kernel if necessary
+        load_custom_op_library()
         import vllm_ascend.meta_registration  # type: ignore  # noqa: F401
 
-        # isort: on
         _CUSTOM_OP_ENABLED = True
-    except ImportError as e:
-        # Prefer the extension's rpath for vendor op_api loading. Only fall back
-        # to mutating LD_LIBRARY_PATH when the import proves it is still needed.
-        if (not torch.compiler.is_compiling()) and "libcust_opapi.so" in str(e):
-            try:
-                bootstrap_custom_op_env(include_vendor_lib=True)
-                import vllm_ascend.meta_registration  # type: ignore  # noqa: F401
-                import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401
-
-                _CUSTOM_OP_ENABLED = True
-            except ImportError:
-                _CUSTOM_OP_ENABLED = False
-                logger.warning(
-                    "Failed to register custom ops, all custom ops will be disabled. "
-                    "The custom ops library might not be installed or the environment is not configured correctly. "
-                    "Please check the custom ops installation and environment variables."
-                )
-        else:
-            _CUSTOM_OP_ENABLED = False
-            logger.warning(
-                "Failed to register custom ops, all custom ops will be disabled. "
-                "error=%s. "
-                "The custom ops library might not be installed or the environment is not configured correctly. "
-                "Please check the custom ops installation and environment variables.",
-                e,
-            )
+    except ImportError as error:
+        _CUSTOM_OP_ENABLED = False
+        logger.warning(
+            "Failed to register custom ops, all custom ops will be disabled. "
+            "error=%s. "
+            "The custom ops library might not be installed or the environment is not configured correctly. "
+            "Please check the custom ops installation and environment variables.",
+            error,
+        )
     return _CUSTOM_OP_ENABLED
 
 
@@ -1176,7 +1170,16 @@ def get_hccl_config_for_pg_options(group_name: str) -> dict | None:
         "dp": {"hccl_buffer_size": calculate_dp_buffer_size()},
         "dynamic_eplb": {"hccl_buffer_size": _DYNAMIC_EPLB_BUFFER_SIZE},
     }
-    return hccl_config_map.get(group_name, get_default_buffer_config())
+    config = hccl_config_map.get(group_name, get_default_buffer_config())
+    if group_name == "tp" and os.environ.get("DSV41_A5_TP_CCU_MS") == "1":
+        # On the 950DT CANN 9.2 / torch_npu 2.10 build, communicator option 5
+        # selects CCU_MS. Only one group per device can reserve that resource.
+        # Keep the global mode at CCU_SCHED so WORLD/EP cannot claim it first.
+        if os.environ.get("HCCL_OP_EXPANSION_MODE") != "CCU_SCHED":
+            raise RuntimeError("DSV41_A5_TP_CCU_MS=1 requires HCCL_OP_EXPANSION_MODE=CCU_SCHED")
+        config = {**config, "hccl_op_expansion_mode": 5}
+        logger.info("Reserving HCCL CCU_MS for the tensor-parallel process group")
+    return config
 
 
 def get_default_buffer_config() -> dict:

@@ -33,11 +33,6 @@ from vllm.model_executor.utils import set_weight_attrs
 
 # Upstream #56741 normalized the V4.1 model package name.
 from vllm.models.deepseek_v41.common.engram import ParallelEngramEmbedding
-from vllm.models.deepseek_v41.nvidia.engram import (
-    _gather_engram_rows,
-    engram_head_shard_rank,
-    gather_engram_hashes,
-)
 
 from .npu import (
     HostUvaBuffer,
@@ -46,6 +41,7 @@ from .npu import (
     gather_dequantize_host_uva,
     quantize_engram_rows,
 )
+from .parallel import _gather_engram_rows, engram_head_shard_rank, gather_engram_hashes
 
 
 class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
@@ -270,7 +266,7 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         start, end = (self.vocab_start_idx, self.vocab_end_idx)
         with safe_open(root / index[key], framework="pt", device="cpu") as file:
             tensor = file.get_slice(key)
-            quantized = tensor.get_dtype() in ("I8", "INT8")
+            source_dtype = tensor.get_dtype()
             if self.weight.dtype == torch.bfloat16:
                 if tensor.get_dtype() != "BF16":
                     raise ValueError(f"{key}: expected BF16 source for BF16 storage")
@@ -278,7 +274,7 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
                     stop = min(chunk_start + chunk_rows, end)
                     offset = chunk_start - start
                     self.weight.data[offset : offset + stop - chunk_start].copy_(tensor[chunk_start:stop])
-            elif quantized:
+            elif source_dtype in ("I8", "INT8"):
                 with safe_open(root / index[scale_key], framework="pt", device="cpu") as sf:
                     scale = sf.get_slice(scale_key)
                     for chunk_start in range(start, end, chunk_rows):
@@ -287,6 +283,22 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
                         target_end = offset + (stop - chunk_start)
                         self.weight.data[offset:target_end].copy_(tensor[chunk_start:stop])
                         self.weight_scale_inv.data[offset:target_end].copy_(scale[chunk_start:stop])
+            elif source_dtype in ("F8_E4M3", "F8_E4M3FN"):
+                # A5 ships an MXFP8 Engram table, not unscaled floating-point
+                # rows. Decode the checkpoint's E8M0 group-32 scales before
+                # requantizing into the runtime's INT8 + FP32 representation.
+                with safe_open(root / index[scale_key], framework="pt", device="cpu") as sf:
+                    scale = sf.get_slice(scale_key)
+                    for chunk_start in range(start, end, chunk_rows):
+                        stop = min(chunk_start + chunk_rows, end)
+                        offset = chunk_start - self.vocab_start_idx
+                        target_end = offset + (stop - chunk_start)
+                        values = tensor[chunk_start:stop].float()
+                        group_scales = scale[chunk_start:stop].float()
+                        values = (values.unflatten(-1, (-1, self.block_size)) * group_scales.unsqueeze(-1)).flatten(-2)
+                        codes, scales = quantize_engram_rows(values)
+                        self.weight.data[offset:target_end].copy_(codes)
+                        self.weight_scale_inv.data[offset:target_end].copy_(scales)
             else:
                 for chunk_start in range(start, end, chunk_rows):
                     stop = min(chunk_start + chunk_rows, end)
@@ -393,8 +405,8 @@ def preflight_engram_checkpoint(root, layer_ids, embed_cls=AscendParallelEngramE
         if not shard.is_file():
             raise ValueError(f"Engram layer {layer_id}: the checkpoint index points at {shard}, which does not exist.")
         with safe_open(shard, framework="pt", device="cpu") as file:
-            quantized = file.get_slice(key).get_dtype() in ("I8", "INT8")
-        if not quantized:
+            source_dtype = file.get_slice(key).get_dtype()
+        if source_dtype not in ("I8", "INT8", "F8_E4M3", "F8_E4M3FN"):
             continue
         scale_key = key.removesuffix(".weight") + ".scale"
         # The loader resolves scales from the weight's selected index too.
@@ -413,3 +425,6 @@ def preflight_engram_checkpoint(root, layer_ids, embed_cls=AscendParallelEngramE
                 raise ValueError(
                     f"Engram layer {layer_id}: {scale_shard} does not contain the scale tensor {scale_key!r}."
                 )
+            scale_dtype = file.get_slice(scale_key).get_dtype()
+            if source_dtype in ("F8_E4M3", "F8_E4M3FN") and scale_dtype != "F8_E8M0":
+                raise ValueError(f"Engram layer {layer_id}: MXFP8 table requires E8M0 scales, got {scale_dtype}.")

@@ -33,6 +33,7 @@ from vllm.model_executor.models.utils import PPMissingLayer, maybe_prefix, proce
 from vllm_ascend.attention.context_parallel.dsa_v41_cp import get_v41_cp_classes
 from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheBackend, scatter_cache_sk
 from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
+from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_padding_mask,
@@ -104,6 +105,7 @@ class DeepseekV41DSparkAttention(DeepseekV41SWAAttention):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.dsv41_backend = DeviceOperator.get_deepseek_v41_backend()
         self.softmax_scale = self.scale
         self.shared_state = None
         prefix = kwargs["prefix"]
@@ -174,12 +176,25 @@ class DeepseekV41DSparkModel(torch.nn.Module):
 
         first_layer = self.layers[str(self.mtp_start_layer_idx)]
         self.use_sequence_parallel_moe = vllm_config.parallel_config.use_sequence_parallel_moe
+        # V4.1 keeps the checkpoint quantization contract on the composite
+        # config.  Its DSpark main projection is FP8 in the release checkpoint,
+        # so constructing a BF16 linear drops the scale parameter and makes the
+        # draft loader fail on ``main_proj.scale``.
+        checkpoint_config = getattr(draft_model_config, "hf_config", None)
+        model_quant_config = getattr(checkpoint_config, "quantization_config", None)
+        main_proj_quant_config = (
+            vllm_config.quant_config
+            if DeviceOperator.get_deepseek_v41_backend() is not None
+            and model_quant_config is not None
+            and model_quant_config.get("quant_method") == "fp8"
+            else None
+        )
         self.main_proj = ColumnParallelLinear(
             config.hidden_size * len(self.target_layer_ids),
             config.hidden_size,
             bias=False,
             return_bias=False,
-            quant_config=None,  # DeepSeek V4.1 stores this projection in BF16.
+            quant_config=main_proj_quant_config,
             prefix=maybe_prefix(prefix, f"layers.{self.mtp_start_layer_idx}.main_proj"),
             gather_output=True,
         )
@@ -205,14 +220,22 @@ class DeepseekV41DSparkModel(torch.nn.Module):
         last_layer.norm = self.norm
         last_layer.markov_head = self.markov_head
 
-        self.needs_moe_input_ids = any(
-            layer.mlp.gate.tid2eid is not None or layer.mlp.gate.bias_vl is not None for layer in self.layers.values()
-        )
-
     def _store_standard_swa_kv(self, shared_kv, slot_mapping, attn=None):
         if slot_mapping is None or slot_mapping.numel() == 0:
             return
         cache = attn.dsa_attn.swa_cache_layer
+        values = shared_kv.squeeze(1)
+        if attn.dsv41_backend is not None:
+            # A5's cache is physically packed and must be updated through the
+            # device-routed writer.  The draft proposer already supplies linear
+            # physical slots, so keep them in that form for the native kernel.
+            attn.dsv41_backend.write_attention_cache(
+                cache.kv_cache[0],
+                slot_mapping,
+                values,
+                kind="win",
+            )
+            return
         if slot_mapping.ndim == 1:
             valid = slot_mapping >= 0
             physical = slot_mapping.clamp_min(0)
@@ -220,7 +243,7 @@ class DeepseekV41DSparkModel(torch.nn.Module):
                 torch.int32
             )
             slot_mapping.masked_fill_(~valid.unsqueeze(-1), -1)
-        scatter_cache_sk(cache.kv_cache[0], slot_mapping, shared_kv.squeeze(1))
+        scatter_cache_sk(cache.kv_cache[0], slot_mapping, values)
 
     def forward(self, input_ids: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids).unsqueeze(-2).repeat(1, self.hc_mult, 1)
@@ -237,9 +260,6 @@ class DeepseekV41DSparkModel(torch.nn.Module):
         pre_mix = hidden_states.new_zeros(hidden_states.shape[0], self.hc_mult, dtype=torch.float32)
         pre_mix[:, 0] = 1.0
         last_layer = None
-        moe_input_ids = input_ids
-        if self.needs_moe_input_ids:
-            moe_input_ids = torch.where(input_ids == -1, 0, input_ids)
         for layer in self.layers.values():
             last_layer = layer
             hidden_states, pre_mix = layer(
@@ -247,7 +267,7 @@ class DeepseekV41DSparkModel(torch.nn.Module):
                 hidden_states,
                 pre_mix,
                 llama_4_scaling=None,
-                input_ids=moe_input_ids,
+                input_ids=input_ids,
             )
         assert last_layer is not None, "Hyper-connection collapse requires at least one decoder layer"
         hidden_states = last_layer.hc_collapse(hidden_states, pre_mix)
