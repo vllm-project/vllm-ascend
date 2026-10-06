@@ -1,4 +1,4 @@
-"""Common Worker route for layer-restricted Backend sessions."""
+"""Shared Worker route for layer-restricted Backend sessions."""
 
 from __future__ import annotations
 
@@ -8,29 +8,29 @@ from typing import Any, TypeAlias
 
 from vllm.logger import logger
 
-from ...attention_fence import reset_attention_compute_start_gate
-from ..projection import GVALayerwiseProjection, LayerwiseProjection, LayerwiseProjectionBinder
-from ..projection.layerwise.gva import gva_local_keys, gva_lookup_keys
-from ..projection.layerwise.key_range import key_range_local_keys, key_range_lookup_keys
-from ..protocol.lookup import LookupRequest, LookupResult
-from ..protocol.transfer import CheckpointStoreCommand, LoadCommand, StoreCommand
-from ..runtime.backend import GVABackendIO, KeyRangeBackendIO
-from ..runtime.batch import KeyAxes, KVGroupBatch, KVTransferBatch
-from ..runtime.bulk import (
+from ....attention_fence import reset_attention_compute_start_gate
+from ...projection import GVALayerwiseProjection, LayerwiseProjection, LayerwiseProjectionBinder
+from ...projection.bulk.rows import (
     BlockRows,
     StoreCandidateRows,
     load_block_rows,
     lookup_chunk_rows,
     store_candidate_rows,
 )
-from ..runtime.evidence import LayerStoreResult, LoadCompletion, StoreCompletion
-from ..runtime.resources import KVPoolResources
-from ..timeline.layerwise_load import LayerwiseLoadTimeline
-from ..timeline.layerwise_store import LayerwiseStoreTimeline
-from ..timeline.store_batch import StoreBatch
-from ..topology import KVPoolTopology
-from .base import KVPoolWorker, _store_command_completions
-from .state import (
+from ...projection.layerwise.gva import gva_local_keys, gva_lookup_keys
+from ...projection.layerwise.key_range import key_range_local_keys, key_range_lookup_keys
+from ...protocol.lookup import LookupRequest, LookupResult
+from ...protocol.transfer import CheckpointStoreCommand, LoadCommand, StoreCommand
+from ...timeline.layerwise_load import LayerwiseLoadTimeline
+from ...timeline.layerwise_store import LayerwiseStoreTimeline
+from ...timeline.store_batch import StoreBatch
+from ...topology import KVPoolTopology
+from ..base import KVPoolWorker, _store_command_completions
+from ..io import GVABackendIO, KeyRangeBackendIO
+from ..resources import KVPoolResources
+from ..transfer.batch import KeyAxes, KVGroupBatch, KVTransferBatch
+from ..transfer.evidence import LayerStoreResult, LoadCompletion, StoreCompletion
+from ..transfer.state import (
     KVPoolStepContext,
     StoreCandidates,
     StoreGroupCandidates,

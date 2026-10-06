@@ -135,6 +135,41 @@ def test_layerwise_projection_has_no_generic_functional_transport_layer() -> Non
     assert not (projection_dir / "memory.py").exists()
     assert not (projection_dir / "layerwise/common.py").exists()
 
-    arguments = (projection_dir.parent / "runtime/backend/arguments.py").read_text()
+    arguments = (projection_dir.parent / "worker/io/arguments.py").read_text()
     assert "RangeBatch" not in arguments
     assert "projection.memory" not in arguments
+
+
+def test_execution_ownership_has_no_legacy_runtime_package() -> None:
+    v1_dir = Path(__file__).parents[5] / "vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/v1"
+
+    assert not (v1_dir / "runtime").exists()
+    assert (v1_dir / "projection/bulk/rows.py").is_file()
+    assert (v1_dir / "worker/io/io.py").is_file()
+    runtime_imports = [path for path in v1_dir.rglob("*.py") if ".runtime" in path.read_text()]
+    assert runtime_imports == []
+
+
+def test_worker_implementation_is_grouped_by_execution_role() -> None:
+    worker_dir = Path(__file__).parents[5] / "vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/v1/worker"
+
+    assert (worker_dir / "bulk/worker.py").is_file()
+    assert (worker_dir / "layerwise/worker.py").is_file()
+    assert (worker_dir / "layerwise/gva.py").is_file()
+    assert (worker_dir / "layerwise/key_range.py").is_file()
+    assert (worker_dir / "transfer/batch.py").is_file()
+    assert (worker_dir / "transfer/evidence.py").is_file()
+    assert (worker_dir / "transfer/result.py").is_file()
+    assert (worker_dir / "transfer/state.py").is_file()
+
+    legacy_root_modules = (
+        "batch.py",
+        "bulk.py",
+        "evidence.py",
+        "gva.py",
+        "key_range.py",
+        "layerwise.py",
+        "result.py",
+        "state.py",
+    )
+    assert all(not (worker_dir / module).exists() for module in legacy_root_modules)

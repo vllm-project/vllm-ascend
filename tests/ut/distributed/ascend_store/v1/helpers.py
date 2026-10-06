@@ -27,16 +27,18 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.topology import
     KVPoolTopology,
     TPPartitionSpec,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk import (
     AsynchronousBulkWorker,
-    GVALayerwiseWorker,
-    KeyRangeLayerwiseWorker,
     SynchronousBulkWorker,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.state import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwise import (
+    GVALayerwiseWorker,
+    KeyRangeLayerwiseWorker,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.transfer.state import (
     select_store_candidate_objects as _select_store_candidate_objects,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.state import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.transfer.state import (
     store_candidate_keys as _store_candidate_keys,
 )
 

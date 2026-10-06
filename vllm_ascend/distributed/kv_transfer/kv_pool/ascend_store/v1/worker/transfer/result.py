@@ -1,4 +1,4 @@
-"""Results published by the KV Pool runtime."""
+"""Terminal transfer results published by the KV Pool Worker."""
 
 from __future__ import annotations
 

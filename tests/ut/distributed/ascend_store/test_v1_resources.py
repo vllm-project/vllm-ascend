@@ -37,11 +37,11 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.transf
     RangeStoreCommand,
     StoreCommandBatch,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.runtime.resources import (
-    KVPoolResources,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk import (
     SynchronousBulkWorker,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.resources import (
+    KVPoolResources,
 )
 
 from .v1.helpers import FakeBackend, FakeEvent, make_backend_spec, make_topology

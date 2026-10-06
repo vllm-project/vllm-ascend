@@ -1,4 +1,4 @@
-"""Translate KV Pool values to Backend calls and normalize their evidence."""
+"""Execute whole-object Backend calls and normalize their evidence."""
 
 from __future__ import annotations
 
@@ -9,19 +9,8 @@ import numpy as np
 from vllm.logger import logger
 
 from ...backend import BackendSpec, KVStoreBackend
-from ..batch import KVTransferBatch
-from ..evidence import (
-    LoadCompletion as RuntimeLoadCompletion,
-)
-from ..evidence import (
-    StoreCompletion as RuntimeStoreCompletion,
-)
-from ..evidence import (
-    StoreEvidence as RuntimeStoreEvidence,
-)
-from ..evidence import (
-    TransferEvidence as RuntimeTransferEvidence,
-)
+from ..transfer.batch import KVTransferBatch
+from ..transfer.evidence import LoadCompletion, StoreCompletion, StoreEvidence, TransferEvidence
 from .arguments import BulkBackendArguments
 
 
@@ -49,11 +38,11 @@ class BackendIO:
         self,
         batch: KVTransferBatch,
         arguments: BulkBackendArguments,
-    ) -> tuple[RuntimeLoadCompletion, ...]:
+    ) -> tuple[LoadCompletion, ...]:
         """Call the Backend with key/range arguments already prepared by Worker."""
 
         if not arguments.sources:
-            return tuple(RuntimeLoadCompletion(request_id, ()) for request_id in batch.request_ids)
+            return tuple(LoadCompletion(request_id, ()) for request_id in batch.request_ids)
         try:
             if len(arguments.keys) != len(arguments.sources):
                 raise RuntimeError("Bulk Load arguments do not align keys and source evidence")
@@ -65,13 +54,13 @@ class BackendIO:
                 type(error).__name__,
                 error,
             )
-            evidence = tuple(RuntimeTransferEvidence(source, None) for source in arguments.sources)
+            evidence = tuple(TransferEvidence(source, None) for source in arguments.sources)
             return _load_completions(batch, evidence)
         result_codes = self._aligned_result_codes(len(arguments.sources), native_result)
         if any(code is None for code in result_codes):
             logger.error("Bulk Load returned malformed evidence for requests %s", batch.request_ids)
         evidence = tuple(
-            RuntimeTransferEvidence(source, code) for source, code in zip(arguments.sources, result_codes, strict=True)
+            TransferEvidence(source, code) for source, code in zip(arguments.sources, result_codes, strict=True)
         )
         return _load_completions(batch, evidence)
 
@@ -79,7 +68,7 @@ class BackendIO:
         self,
         batch: KVTransferBatch,
         arguments: BulkBackendArguments,
-    ) -> tuple[RuntimeStoreCompletion, ...]:
+    ) -> tuple[StoreCompletion, ...]:
         """Call the Backend with admitted key/range arguments prepared by Worker."""
 
         if not arguments.sources:
@@ -92,15 +81,15 @@ class BackendIO:
             native_result = self._backend.store(arguments.keys, arguments.addresses, arguments.sizes)
         except Exception as error:
             evidence = tuple(
-                RuntimeTransferEvidence(source, None, not source_addresses_handed_off) for source in arguments.sources
+                TransferEvidence(source, None, not source_addresses_handed_off) for source in arguments.sources
             )
             return _store_completions(batch, evidence, error)
         result_codes, result_error = self._interpret_store_results(len(arguments.sources), native_result)
         if result_codes is None:
-            evidence = tuple(RuntimeTransferEvidence(source, None, False) for source in arguments.sources)
+            evidence = tuple(TransferEvidence(source, None, False) for source in arguments.sources)
         else:
             evidence = tuple(
-                RuntimeTransferEvidence(source, code, code == 0)
+                TransferEvidence(source, code, code == 0)
                 for source, code in zip(arguments.sources, result_codes, strict=True)
             )
         return _store_completions(batch, evidence, result_error, force_failed=result_codes is None)
@@ -175,13 +164,13 @@ def _is_integer_result(value: Any) -> bool:
 
 def _load_completions(
     batch: KVTransferBatch,
-    evidence: tuple[RuntimeTransferEvidence, ...],
-) -> tuple[RuntimeLoadCompletion, ...]:
-    by_request: list[list[RuntimeTransferEvidence]] = [[] for _ in batch.request_ids]
+    evidence: tuple[TransferEvidence, ...],
+) -> tuple[LoadCompletion, ...]:
+    by_request: list[list[TransferEvidence]] = [[] for _ in batch.request_ids]
     for item in evidence:
         by_request[item.source.request_index].append(item)
     return tuple(
-        RuntimeLoadCompletion(request_id, tuple(items))
+        LoadCompletion(request_id, tuple(items))
         for request_id, items in zip(batch.request_ids, by_request, strict=True)
     )
 
@@ -189,27 +178,27 @@ def _load_completions(
 def _failed_load_completions(
     batch: KVTransferBatch,
     layer_id: int | None,
-) -> tuple[RuntimeLoadCompletion, ...]:
-    evidence = tuple(RuntimeTransferEvidence(source, None) for source in _batch_sources(batch, layer_id))
+) -> tuple[LoadCompletion, ...]:
+    evidence = tuple(TransferEvidence(source, None) for source in _batch_sources(batch, layer_id))
     return _load_completions(batch, evidence)
 
 
-def _empty_store_completions(batch: KVTransferBatch) -> tuple[RuntimeStoreCompletion, ...]:
+def _empty_store_completions(batch: KVTransferBatch) -> tuple[StoreCompletion, ...]:
     job_ids = batch.store_job_ids or (None,) * len(batch.request_ids)
     return tuple(
-        RuntimeStoreCompletion(request_id, RuntimeStoreEvidence((), True, True), store_job_id)
+        StoreCompletion(request_id, StoreEvidence((), True, True), store_job_id)
         for request_id, store_job_id in zip(batch.request_ids, job_ids, strict=True)
     )
 
 
 def _store_completions(
     batch: KVTransferBatch,
-    evidence: tuple[RuntimeTransferEvidence, ...],
+    evidence: tuple[TransferEvidence, ...],
     error: Exception | None = None,
     *,
     force_failed: bool = False,
-) -> tuple[RuntimeStoreCompletion, ...]:
-    by_request: list[list[RuntimeTransferEvidence]] = [[] for _ in batch.request_ids]
+) -> tuple[StoreCompletion, ...]:
+    by_request: list[list[TransferEvidence]] = [[] for _ in batch.request_ids]
     for item in evidence:
         by_request[item.source.request_index].append(item)
     job_ids = batch.store_job_ids or (None,) * len(batch.request_ids)
@@ -218,9 +207,9 @@ def _store_completions(
         item_tuple = tuple(items)
         if not item_tuple:
             completions.append(
-                RuntimeStoreCompletion(
+                StoreCompletion(
                     request_id,
-                    RuntimeStoreEvidence((), True, True),
+                    StoreEvidence((), True, True),
                     store_job_id,
                 )
             )
@@ -235,9 +224,9 @@ def _store_completions(
         )
         source_released = all(item.source_release_confirmed is True for item in item_tuple)
         completions.append(
-            RuntimeStoreCompletion(
+            StoreCompletion(
                 request_id,
-                RuntimeStoreEvidence(item_tuple, succeeded, source_released, error),
+                StoreEvidence(item_tuple, succeeded, source_released, error),
                 store_job_id,
             )
         )

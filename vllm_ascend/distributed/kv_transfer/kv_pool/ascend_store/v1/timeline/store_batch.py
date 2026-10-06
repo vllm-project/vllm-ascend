@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass, field
 
-from ..runtime.evidence import StoreCompletion
+from ..worker.transfer.evidence import StoreCompletion
 
 
 @dataclass(slots=True)
