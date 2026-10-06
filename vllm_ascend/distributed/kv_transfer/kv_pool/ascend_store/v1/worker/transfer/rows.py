@@ -1,4 +1,4 @@
-"""Project request-time Bulk rows and select their writer ownership."""
+"""Materialize request-time rows and select their Worker ownership."""
 
 from __future__ import annotations
 

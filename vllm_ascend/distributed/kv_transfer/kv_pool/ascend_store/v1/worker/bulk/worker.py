@@ -36,16 +36,6 @@ from ...projection.bulk.ordinary import (
     ordinary_lookup_keys,
     ordinary_store_keys,
 )
-from ...projection.bulk.rows import (
-    BlockRows,
-    StoreCandidateRows,
-    boundary_hash,
-    fine_lookup_chunk_rows,
-    load_block_rows,
-    lookup_chunk_rows,
-    select_store_writer_rows,
-    store_candidate_rows,
-)
 from ...projection.bulk.tp_mismatch import (
     tp_mismatch_bulk_ranges,
     tp_mismatch_load_keys,
@@ -65,6 +55,16 @@ from ..io.io import _batch_sources, _failed_load_completions
 from ..resources import KVPoolResources
 from ..transfer.batch import KeyAxes, KVGroupBatch, KVTransferBatch
 from ..transfer.evidence import LoadCompletion, StoreCompletion, TransferEvidence
+from ..transfer.rows import (
+    BlockRows,
+    StoreCandidateRows,
+    boundary_hash,
+    fine_lookup_chunk_rows,
+    load_block_rows,
+    lookup_chunk_rows,
+    select_store_writer_rows,
+    store_candidate_rows,
+)
 from ..transfer.state import (
     KVPoolStepContext,
     StoreCandidates,

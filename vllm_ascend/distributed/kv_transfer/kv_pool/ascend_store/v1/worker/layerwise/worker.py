@@ -10,13 +10,6 @@ from vllm.logger import logger
 
 from ....attention_fence import reset_attention_compute_start_gate
 from ...projection import GVALayerwiseProjection, LayerwiseProjection, LayerwiseProjectionBinder
-from ...projection.bulk.rows import (
-    BlockRows,
-    StoreCandidateRows,
-    load_block_rows,
-    lookup_chunk_rows,
-    store_candidate_rows,
-)
 from ...projection.layerwise.gva import gva_local_keys, gva_lookup_keys
 from ...projection.layerwise.key_range import key_range_local_keys, key_range_lookup_keys
 from ...protocol.lookup import LookupRequest, LookupResult
@@ -30,6 +23,13 @@ from ..io import GVABackendIO, KeyRangeBackendIO
 from ..resources import KVPoolResources
 from ..transfer.batch import KeyAxes, KVGroupBatch, KVTransferBatch
 from ..transfer.evidence import LayerStoreResult, LoadCompletion, StoreCompletion
+from ..transfer.rows import (
+    BlockRows,
+    StoreCandidateRows,
+    load_block_rows,
+    lookup_chunk_rows,
+    store_candidate_rows,
+)
 from ..transfer.state import (
     KVPoolStepContext,
     StoreCandidates,
