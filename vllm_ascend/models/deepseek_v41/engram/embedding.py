@@ -87,7 +87,6 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
             self.dp_size = max(get_engram_dp_size(), 1)
         self._codes_uva: HostUvaBuffer | SharedUvaBuffer | None = None
         self._scales_uva: HostUvaBuffer | SharedUvaBuffer | None = None
-        self._lookup_stream = None
         # The upstream constructor queries CUDA properties; keep its parameter
         # contract with Ascend storage and device allocation.
         nn.Module.__init__(self)
@@ -98,8 +97,6 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         self.block_size = block_size
         self.n_hash_cols = len(head_sizes)
         self.tp_size = get_tensor_model_parallel_world_size()
-        if cpu_offload and dp_shared_memory and self.tp_size == 1:
-            self._lookup_stream = torch.npu.Stream()
         num_shards, head_rank = self._get_shard_info()
         if self.n_hash_cols % num_shards:
             raise ValueError(
@@ -356,27 +353,6 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         if self.tp_size > 1:
             out = tensor_model_parallel_all_gather(out, dim=1)
         return out[:, : self.n_hash_cols]
-
-    def embed_gathered_async(self, gathered: torch.Tensor, num_tokens: int, output: torch.Tensor, done=None):
-        """Launch a shared TP1 lookup on the shared producer NPU stream."""
-        if self._lookup_stream is None or self.dp_size != 1 or self.tp_size != 1:
-            raise RuntimeError("async Engram lookup requires shared host storage with TP1")
-        target = output[:num_tokens].view(num_tokens, self.n_hash_cols, self.dim)
-        main_stream = torch.npu.current_stream()
-        stream = self._lookup_stream
-        stream.wait_stream(main_stream)
-        gathered.record_stream(stream)
-        output.record_stream(stream)
-        try:
-            with torch.npu.stream(stream):
-                self.lookup(gathered, target)
-                if done is None:
-                    done = torch.npu.Event()
-                done.record(stream)
-        except Exception:
-            main_stream.wait_stream(stream)
-            raise
-        return done
 
     @staticmethod
     def wait_lookup(done, external: bool = False) -> None:

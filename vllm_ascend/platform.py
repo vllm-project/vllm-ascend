@@ -1612,6 +1612,18 @@ def _validate_engram_config(vllm_config: VllmConfig) -> None:
     load_format = vllm_config.load_config.load_format
     if load_format not in ("auto", "safetensors", "dummy"):
         raise ValueError("Ascend Engram requires indexed safetensors (auto/safetensors), or dummy weights.")
+    if (
+        vllm_config.use_v2_model_runner
+        and parallel_config.data_parallel_size > 1
+        and not engram_config.dp_shared_memory
+    ):
+        # V2 hashes slotless on runner state; DP-dummy ranks have no hash work,
+        # so every replica must share one table instead of running collectives.
+        raise NotImplementedError(
+            "The V2 model runner requires Engram DP shared tables: set "
+            '"dp_shared_memory": true in --engram-config when data parallel '
+            "size > 1."
+        )
 
 
 def _validate_routing_replay_config(vllm_config: VllmConfig) -> None:

@@ -3287,36 +3287,37 @@ class NPUModelRunner(GPUModelRunner):
             "inputs_embeds": inputs_embeds,
             **model_kwargs,
         }
-        # Routing runs before replay on every DP, never inside capture.
-        prepare_engram = getattr(self.model, "prepare_engram_inputs", None)
-        if prepare_engram is not None:
-            if (
-                getattr(self, "_engram_capture_active", False)
-                or getattr(forward_context, "capturing", False)
-                or torch.npu.is_current_stream_capturing()
-            ):
-                model_inputs.update(self.model.prepare_engram_graph_inputs(num_tokens_padded))
-            else:
-                # The window is upstream's: ``_preprocess`` already ran
-                # ``_init_model_kwargs`` -> ``_prepare_lookback_token_ids`` on
-                # this step's input batch, so ``model_kwargs`` carries the
-                # prompt-only lookback (column j = position start - 1 - j,
-                # -1 where that position is not a prompt token).  Generated
-                # positions stay -1 here and come from the slot cache the hash
-                # state fills itself, which is what keeps async draft
-                # placeholders out of the history.
-                model_inputs.update(
-                    prepare_engram(
-                        input_ids,
-                        positions,
-                        num_tokens_padded,
-                        model_kwargs.get("lookback_token_ids"),
-                        **self._get_engram_device_inputs(),
-                    )
-                )
-        run_model = partial(self.model, **model_inputs)
-
+        forward_failed = True
         try:
+            # Routing runs before replay on every DP, never inside capture.
+            prepare_engram = getattr(self.model, "prepare_engram_inputs", None)
+            if prepare_engram is not None:
+                if (
+                    getattr(self, "_engram_capture_active", False)
+                    or getattr(forward_context, "capturing", False)
+                    or torch.npu.is_current_stream_capturing()
+                ):
+                    model_inputs.update(self.model.prepare_engram_graph_inputs(num_tokens_padded))
+                else:
+                    # The window is upstream's: ``_preprocess`` already ran
+                    # ``_init_model_kwargs`` -> ``_prepare_lookback_token_ids`` on
+                    # this step's input batch, so ``model_kwargs`` carries the
+                    # prompt-only lookback (column j = position start - 1 - j,
+                    # -1 where that position is not a prompt token).  Generated
+                    # positions stay -1 here and come from the slot cache the hash
+                    # state fills itself, which is what keeps async draft
+                    # placeholders out of the history.
+                    model_inputs.update(
+                        prepare_engram(
+                            input_ids,
+                            positions,
+                            num_tokens_padded,
+                            model_kwargs.get("lookback_token_ids"),
+                            **self._get_engram_device_inputs(),
+                        )
+                    )
+            run_model = partial(self.model, **model_inputs)
+
             if self.enable_enpu:
                 # The soft segmentation scenario requires event.record first, then event.wait
                 self._update_full_graph_params_if_needed(forward_context, num_tokens_padded)
@@ -3324,11 +3325,12 @@ class NPUModelRunner(GPUModelRunner):
             else:
                 hidden_states = run_model()
                 self._update_full_graph_params_if_needed(forward_context, num_tokens_padded)
-        except Exception:
-            if model_inputs.get("engram_pending"):
-                self.model.retire_engram_lookups()
-            raise
+            forward_failed = False
         finally:
+            if model_inputs.get("engram_pending"):
+                # Also cover empty consumers and failures before a layer wait.
+                # This queues a device dependency; it does not block the CPU.
+                self.model.retire_engram_lookups(reset_events=forward_failed)
             # A forward that raises must still retire the device-metadata
             # submission: otherwise the next submit() refuses to start and a
             # single request error wedges every DP rank of the instance.

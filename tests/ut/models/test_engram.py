@@ -73,23 +73,24 @@ from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
         (True, True, 1, "FULL", True),
         (True, True, 1, "NONE", True),
         (False, True, 1, "FULL", False),
-        (True, False, 1, "FULL", False),
-        (True, True, 2, "FULL", False),
+        (True, False, 1, "FULL", True),
+        (True, True, 2, "FULL", True),
+        (True, False, 2, "NONE", True),
         (True, True, 1, "PIECEWISE", False),
     ],
 )
-def test_lookup_overlap_requires_shared_tp1_and_supported_runtime(monkeypatch, enabled, shared, tp, mode, expected):
+def test_preparation_overlap_supports_dp_tp_and_checks_runtime(monkeypatch, enabled, shared, tp, mode, expected):
     from vllm.config import CUDAGraphMode
 
     from vllm_ascend.models.deepseek_v41 import model as model_module
 
-    model = SimpleNamespace(_engram_overlap_enabled=enabled, engram_dp_shared_memory=shared)
+    model = SimpleNamespace(has_engram=True, _engram_overlap_enabled=enabled, engram_dp_shared_memory=shared)
     monkeypatch.setattr(model_module, "get_tensor_model_parallel_world_size", lambda: tp)
     monkeypatch.setattr(model_module, "is_forward_context_available", lambda: True)
     monkeypatch.setattr(
         model_module, "get_forward_context", lambda: SimpleNamespace(cudagraph_runtime_mode=CUDAGraphMode[mode])
     )
-    assert model_module.DeepseekV41Model._can_defer_engram_lookup(model) is expected
+    assert model_module.DeepseekV41Model._can_overlap_engram_preparation(model) is expected
 
 
 def test_bf16_gate_without_rotation():

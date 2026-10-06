@@ -403,16 +403,26 @@ class NPUModelRunner(GPUModelRunner):
         dp_coordination_context = (
             skip_dp_coordination() if should_skip_allreduce_across_dp_group(self.vllm_config) else nullcontext()
         )
+        # Engram preparation runs on an auxiliary stream during the forward;
+        # join it before the next step reuses its buffers. A failed forward
+        # also clears records a captured wait/reset never consumed.
+        retire_engram = getattr(getattr(self, "model", None), "retire_engram_lookups", None)
+        forward_failed = True
         with dp_coordination_context, metadata.activate() if metadata is not None else nullcontext():
-            output = super().execute_model(
-                scheduler_output,
-                intermediate_tensors=intermediate_tensors,
-                dummy_run=dummy_run,
-                skip_attn_for_dummy_run=skip_attn_for_dummy_run,
-                is_profile=is_profile,
-                context_len=context_len,
-                valid_dummy_state_slots=valid_dummy_state_slots,
-            )
+            try:
+                output = super().execute_model(
+                    scheduler_output,
+                    intermediate_tensors=intermediate_tensors,
+                    dummy_run=dummy_run,
+                    skip_attn_for_dummy_run=skip_attn_for_dummy_run,
+                    is_profile=is_profile,
+                    context_len=context_len,
+                    valid_dummy_state_slots=valid_dummy_state_slots,
+                )
+                forward_failed = False
+            finally:
+                if retire_engram is not None:
+                    retire_engram(reset_events=forward_failed)
         self.model_state.kvpp_is_dummy_run = False
         if dummy_run and lmhead_tp_enable() and not is_profile and self.is_last_pp_rank:
             # lmhead TP: idle ranks never call sample(); join the target head

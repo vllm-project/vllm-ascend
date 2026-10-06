@@ -83,26 +83,32 @@ class AscendModelState(DefaultModelState):
 
     def prepare_inputs(self, input_batch, req_states) -> dict[str, Any]:
         model_inputs = super().prepare_inputs(input_batch, req_states)
+        model_inputs.update(self.prepare_engram_inputs(input_batch, req_states))
+        return model_inputs
+
+    def prepare_engram_inputs(self, input_batch, req_states) -> dict[str, Any]:
+        """Model-specific history providers override this single preparation hook."""
         prepare_engram_inputs = getattr(self.model, "prepare_engram_inputs", None)
         if prepare_engram_inputs is None:
-            return model_inputs
+            return {}
         num_tokens = input_batch.num_tokens_after_padding
-        model_inputs.update(
-            prepare_engram_inputs(
-                input_batch.input_ids[:num_tokens],
-                input_batch.positions[:num_tokens],
-                num_tokens,
-                **self._get_engram_device_inputs(input_batch),
-            )
+        return prepare_engram_inputs(
+            input_batch.input_ids[:num_tokens],
+            input_batch.positions[:num_tokens],
+            num_tokens,
+            **self._get_engram_device_inputs(input_batch),
         )
-        return model_inputs
 
     def prepare_dummy_inputs(self, num_reqs: int, num_tokens: int) -> dict[str, Any]:
         model_inputs = super().prepare_dummy_inputs(num_reqs, num_tokens)
+        model_inputs.update(self.prepare_engram_dummy_inputs(num_reqs, num_tokens))
+        return model_inputs
+
+    def prepare_engram_dummy_inputs(self, num_reqs: int, num_tokens: int) -> dict[str, Any]:
         prepare_engram_graph_inputs = getattr(self.model, "prepare_engram_graph_inputs", None)
         if prepare_engram_graph_inputs is not None:
-            model_inputs.update(prepare_engram_graph_inputs(num_tokens))
-        return model_inputs
+            return prepare_engram_graph_inputs(num_tokens)
+        return {}
 
     def prepare_attn(
         self,

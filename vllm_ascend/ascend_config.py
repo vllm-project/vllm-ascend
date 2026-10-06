@@ -567,9 +567,7 @@ class AscendConfig:
     # ---- user-input switches: bool/int/list/str, auto type validation ----
     enable_cpu_binding: bool = True
     multistream_dsv4_dsa_overlap: bool = True
-    # Experimental MRV2 V4.1 metadata producer/consumer overlap. Independent
-    # from Q/KV projection overlap; preserves async scheduling and cache layout.
-    # Shared host Engram with TP1: publish lookups on a shared producer stream;
+    # Prepare Engram hashes, lookups and DP/TP exchanges on an auxiliary stream;
     # FULL graphs wait on descriptor-specific external events at consumers.
     # Opt in until the workload demonstrates an end-to-end benefit.
     multistream_engram_overlap: bool = False
