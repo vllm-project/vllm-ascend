@@ -7,7 +7,6 @@ test_cases:
     model: "vllm-ascend/Qwen3-30B-A3B-W8A8-QuaRot"
     envs:
       VLLM_WORKER_MULTIPROC_METHOD: "spawn"
-      ASCEND_RT_VISIBLE_DEVICES: "4,5"
       SERVER_PORT: "DEFAULT_PORT"
       HCCL_BUFFSIZE: "768"
     server_cmd:
@@ -25,8 +24,6 @@ test_cases:
       - "mp"
       - "--gpu-memory-utilization"
       - "0.9"
-      - "--additional-config"
-      - '{"enable_cpu_binding": true}'
       - "--speculative-config"
       - '{"method": "eagle3", "model": "AngelSlim/Qwen3-a3B_eagle3", "num_speculative_tokens": 3}'
     benchmarks:
