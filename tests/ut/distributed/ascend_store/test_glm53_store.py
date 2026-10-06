@@ -41,10 +41,7 @@ def make_glm53_plan(layer_offset=0):
         parts = name.split(".")
         parts[2] = str(int(parts[2]) + layer_offset)
         specs[".".join(parts)] = replace(spec, mamba_cache_mode="align") if isinstance(spec, MambaSpec) else spec
-    # Dense retention: the round-trip tests below persist and look up every
-    # block. The make_config default of 0 keeps only semantic checkpoints, and
-    # the coordinator passes no reachable boundaries, so 0 would mask off the
-    # mamba/indexer groups entirely (nothing stored, nothing found).
+    # Round trips use dense retention; sparse checkpoint policy is tested separately.
     config = make_config(retention_interval=None)
     groups = get_glm5_next_kv_cache_groups(config, specs)
     return get_glm5_next_kv_cache_config(config, groups, 24 * get_glm5_next_pool_bytes_per_block(groups))
@@ -99,6 +96,52 @@ def make_glm53_caches(plan):
 
 
 class TestGLM53Store(unittest.TestCase):
+    @staticmethod
+    def make_metadata(blocks, hashes, *, load=False, req_id=None):
+        tokens = 512 * len(hashes)
+        metadata = AscendConnectorMetadata(set())
+        metadata.add_request(
+            ReqMeta(
+                req_id or ("load" if load else "save"),
+                token_len_chunk=tokens,
+                block_ids_by_group=blocks,
+                block_ids_by_group_np=[np.asarray(ids) for ids in blocks],
+                block_hashes=hashes,
+                kv_cache_group_ids=list(range(5)),
+                can_save=not load,
+                load_spec=LoadSpec(0, tokens, True) if load else None,
+            )
+        )
+        return metadata
+
+    @staticmethod
+    def fill_caches(plan, caches, source, target, rank):
+        for group_id, group in enumerate(plan.kv_cache_groups):
+            for name in group.layer_names:
+                for cache in caches[name]:
+                    cache[source[group_id]] = 10 + group_id + (rank if group_id >= 2 else 0)
+                    cache[target[group_id]] = -1
+
+    def assert_restored(self, worker, caches, source, target, masks=None):
+        for group_id, group in enumerate(worker.kv_cache_config.kv_cache_groups):
+            for name in group.layer_names:
+                for cache in caches[name]:
+                    if group_id == 1:
+                        self.assertTrue(torch.all(cache[target[group_id]] == -1))
+                    else:
+                        for index, (src, dst) in enumerate(zip(source[group_id], target[group_id])):
+                            if masks is None or masks[group_id][index]:
+                                torch.testing.assert_close(cache[dst], cache[src])
+
+    @staticmethod
+    def finish_layerwise_step(worker, metadata, *, load=False):
+        for _ in range(4):
+            worker.wait_for_layer_load()
+            worker.save_kv_layer(metadata)
+        thread = worker.kv_recv_thread if load else worker.kv_send_thread
+        thread.request_queue.join()
+        thread.raise_if_failed()
+
     def test_hash_geometry_and_safe_full_hit(self):
         plan = make_glm53_plan()
         for prefix_unit in (None, 128, 512):
@@ -165,22 +208,8 @@ class TestGLM53Store(unittest.TestCase):
                         all(address > 0 for row in worker.group_kv_caches_base_addr.values() for address in row)
                     )
                     self.assertEqual(worker.group_block_len[0], [512 * 512 * 2, 128 * 128 * 2])
-                    for group_id, group in enumerate(plan.kv_cache_groups):
-                        for name in group.layer_names:
-                            for cache in caches[name]:
-                                cache[source[group_id]] = 10 + group_id + (rank if group_id >= 2 else 0)
-                                cache[target[group_id]] = -1
-                    metadata = AscendConnectorMetadata(set())
-                    metadata.add_request(
-                        ReqMeta(
-                            "save",
-                            token_len_chunk=1024,
-                            block_ids_by_group=source,
-                            block_hashes=hashes,
-                            kv_cache_group_ids=list(range(5)),
-                            can_save=True,
-                        )
-                    )
+                    self.fill_caches(plan, caches, source, target, rank)
+                    metadata = self.make_metadata(source, hashes)
                     worker.wait_for_save(metadata)
                     worker.wait_for_previous_save()
                     workers.append((worker, caches))
@@ -193,34 +222,13 @@ class TestGLM53Store(unittest.TestCase):
                 self.assertTrue(all("@head_or_tp_rank:0@" in key for key in mla_keys))
                 for worker, caches in workers:
                     self.assertEqual(worker.lookup_scheduler(1024, hashes, list(range(5))), 1024)
-                    metadata = AscendConnectorMetadata(set())
-                    metadata.add_request(
-                        ReqMeta(
-                            "load",
-                            token_len_chunk=1024,
-                            block_ids_by_group=target,
-                            block_hashes=hashes,
-                            kv_cache_group_ids=list(range(5)),
-                            load_spec=LoadSpec(0, 1024, True),
-                        )
-                    )
+                    metadata = self.make_metadata(target, hashes, load=True)
                     worker.start_load_kv(metadata)
                     if load_async:
                         worker.kv_recv_thread.request_queue.join()
                     self.assertTrue(worker.m_store.get.called)
                     masks = worker.token_database.load_mask(hashes, 1024)
-                    for group_id, group in enumerate(plan.kv_cache_groups):
-                        for name in group.layer_names:
-                            for cache in caches[name]:
-                                if group_id == 1:
-                                    self.assertTrue(torch.all(cache[target[group_id]] == -1))
-                                else:
-                                    for block_idx, allowed in enumerate(masks[group_id]):
-                                        if allowed:
-                                            torch.testing.assert_close(
-                                                cache[target[group_id][block_idx]],
-                                                cache[source[group_id][block_idx]],
-                                            )
+                    self.assert_restored(worker, caches, source, target, masks)
                 for rank in range(tp_size):
                     missing = next(
                         key
@@ -232,7 +240,6 @@ class TestGLM53Store(unittest.TestCase):
                     stored[missing] = payload
 
     def test_memcache_layerwise_round_trip_keeps_each_tp_state(self):
-        plan = make_glm53_plan()
         block_hash = bytes([1]) * 32
         buffers: dict[str, Any] = {}
         readable = set()
@@ -293,33 +300,16 @@ class TestGLM53Store(unittest.TestCase):
             worker.m_store.store.batch_copy.side_effect = copy
             caches = make_glm53_caches(plan)
             worker.register_kv_caches(caches)
-            for group_id, group in enumerate(plan.kv_cache_groups):
-                for name in group.layer_names:
-                    for cache in caches[name]:
-                        cache[source[group_id]] = 10 + group_id + (rank if group_id >= 2 else 0)
-                        cache[target[group_id]] = -1
-            metadata = AscendConnectorMetadata(set())
-            request = ReqMeta(
-                "save",
-                token_len_chunk=512,
-                block_ids_by_group=source,
-                block_ids_by_group_np=[np.asarray(ids) for ids in source],
-                block_hashes=[block_hash],
-                kv_cache_group_ids=list(range(5)),
-                can_save=True,
-            )
-            metadata.add_request(request)
+            self.fill_caches(plan, caches, source, target, rank)
+            metadata = self.make_metadata(source, [block_hash])
+            request = metadata.requests[0]
             # Layerwise state is prepared when metadata is bound (#17487);
             # start_load_kv is a no-op for layerwise workers.
             worker.prepare_layerwise_step(metadata)
             task_groups = {task.group_id for tasks in worker.layer_save_tasks for task in tasks}
             self.assertEqual(task_groups, {0, 2, 3, 4} if rank == 0 else {2, 3, 4})
             self.assertEqual(len(request.block_gvas_by_group_np), 5)
-            for _ in range(4):
-                worker.wait_for_layer_load()
-                worker.save_kv_layer(metadata)
-            worker.kv_send_thread.request_queue.join()
-            worker.kv_send_thread.raise_if_failed()
+            self.finish_layerwise_step(worker, metadata)
             self.assertEqual(worker.current_layer, 4)
             workers.append((worker, caches))
             self.doCleanups()
@@ -340,34 +330,13 @@ class TestGLM53Store(unittest.TestCase):
         self.assertEqual(len(scheduler._make_layerwise_hit_check_keys(2, block_hash.hex())), 4)
 
         for worker, caches in workers:
-            plan = worker.kv_cache_config
-            metadata = AscendConnectorMetadata(set())
-            request = ReqMeta(
-                "load",
-                token_len_chunk=512,
-                block_ids_by_group=target,
-                block_ids_by_group_np=[np.asarray(ids) for ids in target],
-                block_hashes=[block_hash],
-                kv_cache_group_ids=list(range(5)),
-                load_spec=LoadSpec(0, 512, True),
-                can_save=False,
-            )
-            metadata.add_request(request)
+            metadata = self.make_metadata(target, [block_hash], load=True)
+            request = metadata.requests[0]
             worker.prepare_layerwise_step(metadata)
             self.assertEqual(len(request.load_block_gvas_by_group_np), 5)
             self.assertEqual(len(request.load_block_gvas_by_group_np[1]), 0)
-            for _ in range(4):
-                worker.wait_for_layer_load()
-                worker.save_kv_layer(metadata)
-            worker.kv_recv_thread.request_queue.join()
-            worker.kv_recv_thread.raise_if_failed()
-            for group_id, group in enumerate(plan.kv_cache_groups):
-                for name in group.layer_names:
-                    for cache in caches[name]:
-                        if group_id == 1:
-                            self.assertTrue(torch.all(cache[target[group_id]] == -1))
-                        else:
-                            torch.testing.assert_close(cache[target[group_id]], cache[source[group_id]])
+            self.finish_layerwise_step(worker, metadata, load=True)
+            self.assert_restored(worker, caches, source, target)
         readable.remove(workers[1][0]._make_layerwise_full_key(4, block_hash.hex()))
         hit_request.request_id = "missing"
         self.assertEqual(scheduler.get_num_new_matched_tokens(hit_request, 0), (0, False))
@@ -456,17 +425,8 @@ class TestGLM53Store(unittest.TestCase):
         worker.m_store.batch_alloc.side_effect = lambda keys, sizes, ttl: [100000 + i * 4096 for i in range(len(keys))]
         hashes = [bytes([i]) * 32 for i in (1, 2, 3)]
         blocks = [[1, 2, 3], [4], [0, 5, 0], [6, 0, 0], [0, 0, 7]]
-        request = ReqMeta(
-            "null-kda-slots",
-            token_len_chunk=1536,
-            block_ids_by_group=blocks,
-            block_ids_by_group_np=[np.asarray(ids) for ids in blocks],
-            block_hashes=hashes,
-            kv_cache_group_ids=list(range(5)),
-            can_save=True,
-        )
-        metadata = AscendConnectorMetadata(set())
-        metadata.add_request(request)
+        metadata = self.make_metadata(blocks, hashes, req_id="null-kda-slots")
+        request = metadata.requests[0]
         worker.prepare_layerwise_step(metadata)
         expected = {2: [False, True, False], 3: [True, False, False], 4: [False, False, True]}
         for group_id, mask in expected.items():

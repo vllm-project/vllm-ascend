@@ -2579,21 +2579,22 @@ class TestKVPoolWorkerReachableMasks(unittest.TestCase):
         worker.cache_transfer_granularity = 4352
         worker.grouped_block_size = [4352]
         worker.group_uses_align_state = [True]
-        for target, end, ids, original, expected in [
-            (4352, 4352, [3], [False], [True]),
-            (4352, 4352, [0], [False], [False]),
-            (8192, 4352, [3, 8], [False], [False]),
-            (8705, 8704, [3, 0, 8], [False, True], [False, False]),
-            (8704, 8704, [0, 8], [False, True], [False, True]),
+        for prompt, target, end, ids, original, expected in [
+            (8705, 4352, 4352, [3], [False], [True]),  # Preserve an intermediate checkpoint.
+            (8705, 4352, 4352, [0], [False], [False]),  # Never publish a null state.
+            (8705, 8192, 4352, [3, 8], [False], [False]),  # State is past the save boundary.
+            (8705, 8705, 8704, [3, 0, 8], [False, True], [False, False]),
+            (8705, 8705, 8704, [0, 8, 9], [False, True], [False, True]),  # Keep the original mask.
+            (None, 4352, 4352, [3], [False], [False]),  # No prompt length: no extra checkpoint.
         ]:
-            with self.subTest(target=target, ids=ids):
+            with self.subTest(prompt=prompt, target=target, ids=ids):
                 worker.token_database.store_mask = MagicMock(return_value=(original,))
                 request = self._make_request(
                     block_ids=ids,
                     block_ids_by_group=[ids],
                     target_token_len=target,
                     save_end_token=end,
-                    num_prompt_tokens=8705,
+                    num_prompt_tokens=prompt,
                 )
                 self.assertEqual(worker._compute_reachable_store_masks(request), (expected,))
 
