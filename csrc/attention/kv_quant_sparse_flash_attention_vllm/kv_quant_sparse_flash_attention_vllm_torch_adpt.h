@@ -13,15 +13,15 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#ifndef KV_QUANT_SPARSE_FLASH_ATTENTION_TORCH_ADPT_H
-#define KV_QUANT_SPARSE_FLASH_ATTENTION_TORCH_ADPT_H
+#ifndef KV_QUANT_SPARSE_FLASH_ATTENTION_VLLM_TORCH_ADPT_H
+#define KV_QUANT_SPARSE_FLASH_ATTENTION_VLLM_TORCH_ADPT_H
 
 namespace vllm_ascend {
 
 namespace {
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor>
-construct_kv_quant_sparse_flash_attention_output_tensor(
+construct_kv_quant_sparse_flash_attention_vllm_output_tensor(
     const at::Tensor &query,
     const at::Tensor &key,
     const std::string &layout_query_str,
@@ -89,7 +89,7 @@ construct_kv_quant_sparse_flash_attention_output_tensor(
 }  // namespace
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor>
-npu_kv_quant_sparse_flash_attention(
+npu_kv_quant_sparse_flash_attention_vllm(
     const at::Tensor &query,
     const at::Tensor &key,
     const at::Tensor &value,
@@ -122,7 +122,7 @@ npu_kv_quant_sparse_flash_attention(
     std::string layout_query_str = std::string(layout_query);
     std::string layout_kv_str = std::string(layout_kv);
 
-    auto output = construct_kv_quant_sparse_flash_attention_output_tensor(
+    auto output = construct_kv_quant_sparse_flash_attention_vllm_output_tensor(
         query, key, layout_query_str, layout_kv_str, rope_head_dim,
         return_softmax_lse);
     at::Tensor attention_output = std::get<0>(output);
@@ -133,7 +133,7 @@ npu_kv_quant_sparse_flash_attention(
     char *layout_kv_ptr = const_cast<char *>(layout_kv_str.c_str());
 
     EXEC_NPU_CMD(
-        aclnnKvQuantSparseFlashAttention,
+        aclnnKvQuantSparseFlashAttentionVllm,
         query,
         key,
         value,
@@ -165,4 +165,4 @@ npu_kv_quant_sparse_flash_attention(
 }
 }  // namespace vllm_ascend
 
-#endif  // KV_QUANT_SPARSE_FLASH_ATTENTION_TORCH_ADPT_H
+#endif  // KV_QUANT_SPARSE_FLASH_ATTENTION_VLLM_TORCH_ADPT_H

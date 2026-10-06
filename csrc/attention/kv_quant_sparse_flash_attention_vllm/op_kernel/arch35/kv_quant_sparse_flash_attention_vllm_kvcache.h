@@ -9,15 +9,15 @@
  */
 
 /*!
- * \file kv_quant_sparse_flash_attention_kvcache.h
+ * \file kv_quant_sparse_flash_attention_vllm_kvcache.h
  * \brief
  */
-#ifndef KV_QUANT_SPARSE_FLASH_ATTENTION_KVCACHE_H
-#define KV_QUANT_SPARSE_FLASH_ATTENTION_KVCACHE_H
+#ifndef KV_QUANT_SPARSE_FLASH_ATTENTION_VLLM_KVCACHE_H
+#define KV_QUANT_SPARSE_FLASH_ATTENTION_VLLM_KVCACHE_H
 
 #include "kernel_operator.h"
 #include "kernel_operator_list_tensor_intf.h"
-#include "kv_quant_sparse_flash_attention_common_arch35.h"
+#include "kv_quant_sparse_flash_attention_vllm_common_arch35.h"
 
 using namespace matmul;
 using namespace regbaseutil;
@@ -253,4 +253,4 @@ __aicore__ inline void InitTaskParamByRun(const RunParamStr& runParam, RunInfo &
     runInfo.kvLoopEndIdx = runParam.kvLoopEndIdx;
 }
 
-#endif  // KV_QUANT_SPARSE_FLASH_ATTENTION_KVCACHE_H
+#endif  // KV_QUANT_SPARSE_FLASH_ATTENTION_VLLM_KVCACHE_H

@@ -188,7 +188,7 @@ def _reference_attention(inputs):
 
 
 def _run_custom_op(inputs, return_softmax_lse=False):
-    return torch.ops._C_ascend.npu_kv_quant_sparse_flash_attention(
+    return torch.ops._C_ascend.npu_kv_quant_sparse_flash_attention_vllm(
         inputs["query"],
         inputs["key"],
         inputs["value"],
@@ -212,7 +212,7 @@ def _run_custom_op(inputs, return_softmax_lse=False):
 
 
 @torch.inference_mode()
-def test_kv_quant_sparse_flash_attention():
+def test_kv_quant_sparse_flash_attention_vllm():
     inputs = _make_inputs()
     reference = _reference_attention(inputs)
 

@@ -9,11 +9,11 @@
  */
 
 /*!
- * \file kv_quant_sparse_flash_attention_tiling.h
+ * \file kv_quant_sparse_flash_attention_vllm_tiling.h
  * \brief
  */
-#ifndef KV_QUANT_SPARSE_FLASH_ATTENTION_TILING_H
-#define KV_QUANT_SPARSE_FLASH_ATTENTION_TILING_H
+#ifndef KV_QUANT_SPARSE_FLASH_ATTENTION_VLLM_TILING_H
+#define KV_QUANT_SPARSE_FLASH_ATTENTION_VLLM_TILING_H
 
 #include <sstream>
 #include <graph/utils/type_utils.h>
@@ -156,7 +156,7 @@ struct InnerSplitParams {
 };
 
 // -----------算子TilingData定义---------------
-BEGIN_TILING_DATA_DEF(KvQuantSparseFlashAttentionBaseParamsMla)
+BEGIN_TILING_DATA_DEF(KvQuantSparseFlashAttentionVllmBaseParamsMla)
 TILING_DATA_FIELD_DEF(uint32_t, batchSize)
 TILING_DATA_FIELD_DEF(uint32_t, seqSize)
 TILING_DATA_FIELD_DEF(uint32_t, qSeqSize)
@@ -176,45 +176,45 @@ TILING_DATA_FIELD_DEF(uint32_t, isActualLenDimsKVNull)
 TILING_DATA_FIELD_DEF(uint32_t, returnSoftmaxLse)
 END_TILING_DATA_DEF
 
-REGISTER_TILING_DATA_CLASS(KvQuantSparseFlashAttentionBaseParamsMlaOp, KvQuantSparseFlashAttentionBaseParamsMla)
+REGISTER_TILING_DATA_CLASS(KvQuantSparseFlashAttentionVllmBaseParamsMlaOp, KvQuantSparseFlashAttentionVllmBaseParamsMla)
 
-BEGIN_TILING_DATA_DEF(KvQuantSparseFlashAttentionSingleCoreParamsMla)
+BEGIN_TILING_DATA_DEF(KvQuantSparseFlashAttentionVllmSingleCoreParamsMla)
 TILING_DATA_FIELD_DEF(uint32_t, usedCoreNum);
 END_TILING_DATA_DEF
-REGISTER_TILING_DATA_CLASS(KvQuantSparseFlashAttentionSingleCoreParamsMlaOp,
-    KvQuantSparseFlashAttentionSingleCoreParamsMla)
+REGISTER_TILING_DATA_CLASS(KvQuantSparseFlashAttentionVllmSingleCoreParamsMlaOp,
+    KvQuantSparseFlashAttentionVllmSingleCoreParamsMla)
 
-BEGIN_TILING_DATA_DEF(KvQuantSparseFlashAttentionSingleCoreTensorSizeMla)
+BEGIN_TILING_DATA_DEF(KvQuantSparseFlashAttentionVllmSingleCoreTensorSizeMla)
 TILING_DATA_FIELD_DEF(uint32_t, mmResUbSize);
 TILING_DATA_FIELD_DEF(uint32_t, bmm2ResUbSize);
 END_TILING_DATA_DEF
-REGISTER_TILING_DATA_CLASS(KvQuantSparseFlashAttentionSingleCoreTensorSizeMlaOp,
-    KvQuantSparseFlashAttentionSingleCoreTensorSizeMla)
+REGISTER_TILING_DATA_CLASS(KvQuantSparseFlashAttentionVllmSingleCoreTensorSizeMlaOp,
+    KvQuantSparseFlashAttentionVllmSingleCoreTensorSizeMla)
 
-BEGIN_TILING_DATA_DEF(KvQuantSparseFlashAttentionSplitKVParamsMla)
+BEGIN_TILING_DATA_DEF(KvQuantSparseFlashAttentionVllmSplitKVParamsMla)
 TILING_DATA_FIELD_DEF(uint32_t, s2)             // S2切分份数
 TILING_DATA_FIELD_DEF(uint32_t, accumOutSize)   // FD workspace
 TILING_DATA_FIELD_DEF(uint32_t, logSumExpSize)  // FD workspace
 END_TILING_DATA_DEF
-REGISTER_TILING_DATA_CLASS(KvQuantSparseFlashAttentionSplitKVParamsMlaOp,
-    KvQuantSparseFlashAttentionSplitKVParamsMla)
+REGISTER_TILING_DATA_CLASS(KvQuantSparseFlashAttentionVllmSplitKVParamsMlaOp,
+    KvQuantSparseFlashAttentionVllmSplitKVParamsMla)
 
 // 内切基本块参数
-BEGIN_TILING_DATA_DEF(KvQuantSparseFlashAttentionInnerSplitParams)
+BEGIN_TILING_DATA_DEF(KvQuantSparseFlashAttentionVllmInnerSplitParams)
 TILING_DATA_FIELD_DEF(uint32_t, mBaseSize)
 TILING_DATA_FIELD_DEF(uint32_t, s2BaseSize)
 END_TILING_DATA_DEF
-REGISTER_TILING_DATA_CLASS(KvQuantSparseFlashAttentionInnerSplitParamsOp,
-    KvQuantSparseFlashAttentionInnerSplitParams)
+REGISTER_TILING_DATA_CLASS(KvQuantSparseFlashAttentionVllmInnerSplitParamsOp,
+    KvQuantSparseFlashAttentionVllmInnerSplitParams)
 
-BEGIN_TILING_DATA_DEF(KvQuantSparseFlashAttentionTilingDataMla)
-TILING_DATA_FIELD_DEF_STRUCT(KvQuantSparseFlashAttentionBaseParamsMla, baseParams);
-TILING_DATA_FIELD_DEF_STRUCT(KvQuantSparseFlashAttentionSplitKVParamsMla, splitKVParams);
-TILING_DATA_FIELD_DEF_STRUCT(KvQuantSparseFlashAttentionSingleCoreParamsMla, singleCoreParams);
-TILING_DATA_FIELD_DEF_STRUCT(KvQuantSparseFlashAttentionSingleCoreTensorSizeMla, singleCoreTensorSize);
-TILING_DATA_FIELD_DEF_STRUCT(KvQuantSparseFlashAttentionInnerSplitParams, innerSplitParams);
+BEGIN_TILING_DATA_DEF(KvQuantSparseFlashAttentionVllmTilingDataMla)
+TILING_DATA_FIELD_DEF_STRUCT(KvQuantSparseFlashAttentionVllmBaseParamsMla, baseParams);
+TILING_DATA_FIELD_DEF_STRUCT(KvQuantSparseFlashAttentionVllmSplitKVParamsMla, splitKVParams);
+TILING_DATA_FIELD_DEF_STRUCT(KvQuantSparseFlashAttentionVllmSingleCoreParamsMla, singleCoreParams);
+TILING_DATA_FIELD_DEF_STRUCT(KvQuantSparseFlashAttentionVllmSingleCoreTensorSizeMla, singleCoreTensorSize);
+TILING_DATA_FIELD_DEF_STRUCT(KvQuantSparseFlashAttentionVllmInnerSplitParams, innerSplitParams);
 END_TILING_DATA_DEF
-REGISTER_TILING_DATA_CLASS(KvQuantSparseFlashAttention, KvQuantSparseFlashAttentionTilingDataMla)
+REGISTER_TILING_DATA_CLASS(KvQuantSparseFlashAttentionVllm, KvQuantSparseFlashAttentionVllmTilingDataMla)
 
 template <typename T> inline T Align(T num, T rnd)
 {
@@ -365,7 +365,7 @@ private:
     uint32_t aivNum_ = 0;
     size_t libapiSize_ = 0;
 
-    KvQuantSparseFlashAttentionTilingDataMla tilingData_;
+    KvQuantSparseFlashAttentionVllmTilingDataMla tilingData_;
     uint32_t blockDim_{0};
     uint64_t workspaceSize_{0};
     uint64_t tilingKey_{0};
@@ -611,4 +611,4 @@ public:
     gert::Shape sparseIndicesShape_{};
 };
 } // namespace optiling
-#endif // KV_QUANT_SPARSE_FLASH_ATTENTION_TILING_H
+#endif // KV_QUANT_SPARSE_FLASH_ATTENTION_VLLM_TILING_H

@@ -9,11 +9,11 @@
  */
 
 /*!
- * \file kv_quant_sparse_flash_attention_common_arch35.h
+ * \file kv_quant_sparse_flash_attention_vllm_common_arch35.h
  * \brief
  */
-#ifndef KV_QUANT_SPARSE_FLASH_ATTENTION_COMMON_ARCH35_H
-#define KV_QUANT_SPARSE_FLASH_ATTENTION_COMMON_ARCH35_H
+#ifndef KV_QUANT_SPARSE_FLASH_ATTENTION_VLLM_COMMON_ARCH35_H
+#define KV_QUANT_SPARSE_FLASH_ATTENTION_VLLM_COMMON_ARCH35_H
 #include <type_traits>
 #include "kernel_tiling/kernel_tiling.h"
 
@@ -137,4 +137,4 @@ template <QSFA_CUBE_BLOCK_TRAITS_TYPE_FIELDS(GEN_TEMPLATE_TYPE_NODEF) \
     QSFA_CUBE_BLOCK_TRAITS_TYPE_FIELDS(GEN_ARG_NAME) \
     QSFA_CUBE_BLOCK_TRAITS_CONST_FIELDS(GEN_ARG_NAME) end
 
-#endif //KV_QUANT_SPARSE_FLASH_ATTENTION_COMMON_ARCH35_H
+#endif //KV_QUANT_SPARSE_FLASH_ATTENTION_VLLM_COMMON_ARCH35_H

@@ -413,7 +413,7 @@ at::Tensor npu_msa_index_score_meta(
         output_size, query.options().dtype(at::kFloat).device(c10::kMeta));
 }
 
-std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_kv_quant_sparse_flash_attention_meta(
+std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_kv_quant_sparse_flash_attention_vllm_meta(
     const at::Tensor &query,
     const at::Tensor &key,
     const at::Tensor &value,
@@ -1896,8 +1896,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_sparse_attention_score_prefill",
              &vllm_ascend::meta::npu_sparse_attention_score_prefill_meta);
     ops.impl("npu_msa_index_score", &vllm_ascend::meta::npu_msa_index_score_meta);
-    ops.impl("npu_kv_quant_sparse_flash_attention",
-             &vllm_ascend::meta::npu_kv_quant_sparse_flash_attention_meta);
+    ops.impl("npu_kv_quant_sparse_flash_attention_vllm",
+             &vllm_ascend::meta::npu_kv_quant_sparse_flash_attention_vllm_meta);
     // Fused sparse attention overlap
     ops.impl("npu_fused_sparse_attention_overlap", &vllm_ascend::meta::npu_fused_sparse_attention_overlap_meta);
     // Fused lightning indexer manage

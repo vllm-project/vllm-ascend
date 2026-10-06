@@ -9,22 +9,22 @@
  */
 
 /*!
- * \file kv_quant_sparse_flash_attention_kernel_mla.h
+ * \file kv_quant_sparse_flash_attention_vllm_kernel_mla.h
  * \brief
  */
 
-#ifndef KV_QUANT_SPARSE_FLASH_ATTENTION_KERNEL_MLA_H
-#define KV_QUANT_SPARSE_FLASH_ATTENTION_KERNEL_MLA_H
+#ifndef KV_QUANT_SPARSE_FLASH_ATTENTION_VLLM_KERNEL_MLA_H
+#define KV_QUANT_SPARSE_FLASH_ATTENTION_VLLM_KERNEL_MLA_H
 
 #include "kernel_operator.h"
 #include "kernel_operator_list_tensor_intf.h"
 #include "kernel_tiling/kernel_tiling.h"
 #include "lib/matmul_intf.h"
 #include "lib/matrix/matmul/tiling.h"
-#include "kv_quant_sparse_flash_attention_service_cube_mla.h"
-#include "kv_quant_sparse_flash_attention_service_vector_mla.h"
-#include "kv_quant_sparse_flash_attention_common_arch35.h"
-#include "kv_quant_sparse_flash_attention_kvcache.h"
+#include "kv_quant_sparse_flash_attention_vllm_service_cube_mla.h"
+#include "kv_quant_sparse_flash_attention_vllm_service_vector_mla.h"
+#include "kv_quant_sparse_flash_attention_vllm_common_arch35.h"
+#include "kv_quant_sparse_flash_attention_vllm_kvcache.h"
 #if __has_include("../../common/op_kernel/CopyInL1.h")
 #include "../../common/op_kernel/CopyInL1.h"
 #else
@@ -47,17 +47,17 @@ using namespace AscendC::Impl::Detail;
 using namespace regbaseutil;
 
 namespace BaseApi {
-template <typename CubeBlockType, typename VecBlockType> class KvQuantSparseFlashAttentionMla {
+template <typename CubeBlockType, typename VecBlockType> class KvQuantSparseFlashAttentionVllmMla {
 public:
     ARGS_TRAITS;
 
-    __aicore__ inline KvQuantSparseFlashAttentionMla(){};
+    __aicore__ inline KvQuantSparseFlashAttentionVllmMla(){};
     __aicore__ inline void Init(__gm__ uint8_t *query, __gm__ uint8_t *key, __gm__ uint8_t *value,
                                 __gm__ uint8_t *sparseIndices, __gm__ uint8_t* keyScale,
                                 __gm__ uint8_t* valueScale, __gm__ uint8_t *blockTable,
                                 __gm__ uint8_t *actualSeqLengthsQ, __gm__ uint8_t *actualSeqLengths,
                                 __gm__ uint8_t *attentionOut, __gm__ uint8_t *workspace,
-                                const KvQuantSparseFlashAttentionTilingDataMla *__restrict tiling,
+                                const KvQuantSparseFlashAttentionVllmTilingDataMla *__restrict tiling,
 				                TPipe *tPipe);
     __aicore__ inline void Process();
 
@@ -65,7 +65,7 @@ private:
     __aicore__ inline void ProcessMainLoop();
     __aicore__ inline void InitGlobalBuffer(__gm__ uint8_t *query, __gm__ uint8_t *key, __gm__ uint8_t *value,
     __gm__ uint8_t *sparseIndices, __gm__ uint8_t *blockTable, __gm__ uint8_t *actualSeqLengthsQ, __gm__ uint8_t *actualSeqLengths,
-    __gm__ uint8_t *workspace, const KvQuantSparseFlashAttentionTilingDataMla *__restrict tiling, TPipe *tPipe);
+    __gm__ uint8_t *workspace, const KvQuantSparseFlashAttentionVllmTilingDataMla *__restrict tiling, TPipe *tPipe);
     __aicore__ inline void InitLocalBuffer();
     __aicore__ inline void ComputeConstexpr();
     __aicore__ inline void InitMMResBuf(__gm__ uint8_t *workspace);
@@ -81,7 +81,7 @@ private:
 
     TPipe *pipe;
 
-    const KvQuantSparseFlashAttentionTilingDataMla *__restrict tilingData;
+    const KvQuantSparseFlashAttentionVllmTilingDataMla *__restrict tilingData;
     static constexpr uint64_t SYNC_MODE = 4;
     static constexpr uint32_t PRELOAD_NUM = 2;
     /* 核间通道 */
@@ -121,13 +121,13 @@ private:
 };
 
 template <typename CubeBlockType, typename VecBlockType>
-__aicore__ inline void KvQuantSparseFlashAttentionMla<CubeBlockType, VecBlockType>::Init(
+__aicore__ inline void KvQuantSparseFlashAttentionVllmMla<CubeBlockType, VecBlockType>::Init(
     __gm__ uint8_t *query,
     __gm__ uint8_t *key, __gm__ uint8_t *value,
     __gm__ uint8_t *sparseIndices, __gm__ uint8_t* keyScale,
     __gm__ uint8_t* valueScale, __gm__ uint8_t *blockTable, __gm__ uint8_t *actualSeqLengthsQ,
     __gm__ uint8_t *actualSeqLengths, __gm__ uint8_t *attentionOut, __gm__ uint8_t *workspace,
-    const KvQuantSparseFlashAttentionTilingDataMla *__restrict tiling,
+    const KvQuantSparseFlashAttentionVllmTilingDataMla *__restrict tiling,
     TPipe *tPipe)
 {
     fa_base_matmul::idCounterNum = 0;
@@ -175,7 +175,7 @@ __aicore__ inline void KvQuantSparseFlashAttentionMla<CubeBlockType, VecBlockTyp
 }
 
 template <typename CubeBlockType, typename VecBlockType>
-__aicore__ inline void KvQuantSparseFlashAttentionMla<CubeBlockType, VecBlockType>::InitCalcParamsEach()
+__aicore__ inline void KvQuantSparseFlashAttentionVllmMla<CubeBlockType, VecBlockType>::InitCalcParamsEach()
 {
     // 计算总的基本块
     maxS2LoopCnt = 0; // 所有核中最大累计s2Loop
@@ -271,7 +271,7 @@ __aicore__ inline void KvQuantSparseFlashAttentionMla<CubeBlockType, VecBlockTyp
 }
 
 template <typename CubeBlockType, typename VecBlockType>
-__aicore__ inline uint64_t KvQuantSparseFlashAttentionMla<CubeBlockType, VecBlockType>::\
+__aicore__ inline uint64_t KvQuantSparseFlashAttentionVllmMla<CubeBlockType, VecBlockType>::\
     GetBalanceActualSeqLengths(GlobalTensor<int32_t> &actualSeqLengths, uint32_t bIdx)
 {
     if constexpr (LAYOUT_T == QSFA_LAYOUT::TND) {
@@ -292,7 +292,7 @@ __aicore__ inline uint64_t KvQuantSparseFlashAttentionMla<CubeBlockType, VecBloc
 }
 
 template <typename CubeBlockType, typename VecBlockType>
-__aicore__ inline void KvQuantSparseFlashAttentionMla<CubeBlockType, VecBlockType>::GetAxisStartIdx(uint32_t bN2EndPrev,
+__aicore__ inline void KvQuantSparseFlashAttentionVllmMla<CubeBlockType, VecBlockType>::GetAxisStartIdx(uint32_t bN2EndPrev,
                                                                                 uint32_t s1GEndPrev,
                                                                                 uint32_t s2EndPrev)
 {
@@ -311,10 +311,10 @@ __aicore__ inline void KvQuantSparseFlashAttentionMla<CubeBlockType, VecBlockTyp
 }
 
 template <typename CubeBlockType, typename VecBlockType>
-__aicore__ inline void KvQuantSparseFlashAttentionMla<CubeBlockType, VecBlockType>::InitGlobalBuffer(
+__aicore__ inline void KvQuantSparseFlashAttentionVllmMla<CubeBlockType, VecBlockType>::InitGlobalBuffer(
     __gm__ uint8_t *query, __gm__ uint8_t *key, __gm__ uint8_t *value, __gm__ uint8_t *sparseIndices,
     __gm__ uint8_t *blockTable, __gm__ uint8_t *actualSeqLengthsQ, __gm__ uint8_t *actualSeqLengths,
-    __gm__ uint8_t *workspace, const KvQuantSparseFlashAttentionTilingDataMla *__restrict tiling, TPipe *tPipe)
+    __gm__ uint8_t *workspace, const KvQuantSparseFlashAttentionVllmTilingDataMla *__restrict tiling, TPipe *tPipe)
 {
     if (actualSeqLengthsQ != nullptr) {
         actualSeqQlenAddr = (__gm__ int32_t *)actualSeqLengthsQ;
@@ -330,7 +330,7 @@ __aicore__ inline void KvQuantSparseFlashAttentionMla<CubeBlockType, VecBlockTyp
 
 
 template <typename CubeBlockType, typename VecBlockType>
-__aicore__ inline void KvQuantSparseFlashAttentionMla<CubeBlockType, VecBlockType>::InitMMResBuf(
+__aicore__ inline void KvQuantSparseFlashAttentionVllmMla<CubeBlockType, VecBlockType>::InitMMResBuf(
     __gm__ uint8_t *workspace)
 {
     uint32_t mm1RightSize = constInfo.s2BaseSize * 576 * sizeof(Q_T);
@@ -385,13 +385,13 @@ __aicore__ inline void KvQuantSparseFlashAttentionMla<CubeBlockType, VecBlockTyp
 }
 
 template <typename CubeBlockType, typename VecBlockType>
-__aicore__ inline void KvQuantSparseFlashAttentionMla<CubeBlockType, VecBlockType>::InitLocalBuffer()
+__aicore__ inline void KvQuantSparseFlashAttentionVllmMla<CubeBlockType, VecBlockType>::InitLocalBuffer()
 {
     vecBlock.InitLocalBuffer(pipe, constInfo);
 }
 
 template <typename CubeBlockType, typename VecBlockType>
-__aicore__ inline void KvQuantSparseFlashAttentionMla<CubeBlockType, VecBlockType>::ComputeConstexpr()
+__aicore__ inline void KvQuantSparseFlashAttentionVllmMla<CubeBlockType, VecBlockType>::ComputeConstexpr()
 {
     // 计算轴的乘积
     usedCoreNum = sharedParams.usedCoreNum;
@@ -458,7 +458,7 @@ __aicore__ inline void KvQuantSparseFlashAttentionMla<CubeBlockType, VecBlockTyp
 }
 
 template <typename CubeBlockType, typename VecBlockType>
-__aicore__ inline void KvQuantSparseFlashAttentionMla<CubeBlockType, VecBlockType>::InitUniqueConstInfo()
+__aicore__ inline void KvQuantSparseFlashAttentionVllmMla<CubeBlockType, VecBlockType>::InitUniqueConstInfo()
 {
     // bsize + 1-> bsize
     this->constInfo.actualSeqLenSize = this->sharedParams.bSize;
@@ -466,7 +466,7 @@ __aicore__ inline void KvQuantSparseFlashAttentionMla<CubeBlockType, VecBlockTyp
 }
 
 template <typename CubeBlockType, typename VecBlockType>
-__aicore__ inline void KvQuantSparseFlashAttentionMla<CubeBlockType, VecBlockType>::Process()
+__aicore__ inline void KvQuantSparseFlashAttentionVllmMla<CubeBlockType, VecBlockType>::Process()
 {
     // SyncAll Cube和Vector都需要调用
     if (this->sharedParams.needInit) {
@@ -477,7 +477,7 @@ __aicore__ inline void KvQuantSparseFlashAttentionMla<CubeBlockType, VecBlockTyp
 }
 
 template <typename CubeBlockType, typename VecBlockType>
-__aicore__ inline void KvQuantSparseFlashAttentionMla<CubeBlockType, VecBlockType>::ProcessMainLoop()
+__aicore__ inline void KvQuantSparseFlashAttentionVllmMla<CubeBlockType, VecBlockType>::ProcessMainLoop()
 {
     bool hasLoad = aicIdx < usedCoreNum;
     if (!hasLoad) {
@@ -624,7 +624,7 @@ __aicore__ inline void KvQuantSparseFlashAttentionMla<CubeBlockType, VecBlockTyp
 }
 
 template <typename CubeBlockType, typename VecBlockType>
-__aicore__ inline void KvQuantSparseFlashAttentionMla<CubeBlockType, VecBlockType>::ComputeAxisIdxByBnAndGs1(
+__aicore__ inline void KvQuantSparseFlashAttentionVllmMla<CubeBlockType, VecBlockType>::ComputeAxisIdxByBnAndGs1(
     int64_t bnIndex, int64_t gS1Index, RunParamStr &runParam)
 {
     // GS1合轴, 不切G, 只切S1
@@ -637,7 +637,7 @@ __aicore__ inline void KvQuantSparseFlashAttentionMla<CubeBlockType, VecBlockTyp
 }
 
 template <typename CubeBlockType, typename VecBlockType>
-__aicore__ inline void KvQuantSparseFlashAttentionMla<CubeBlockType, VecBlockType>::SetRunInfo(
+__aicore__ inline void KvQuantSparseFlashAttentionVllmMla<CubeBlockType, VecBlockType>::SetRunInfo(
     RunInfo &runInfo, RunParamStr &runParam, int64_t taskId, int64_t s2LoopCount, int64_t s2LoopLimit, int64_t multiCoreInnerIdx)
 {
     if (s2LoopCount < runParam.kvLoopEndIdx) {
@@ -672,14 +672,14 @@ __aicore__ inline void KvQuantSparseFlashAttentionMla<CubeBlockType, VecBlockTyp
 }
 
 template <typename CubeBlockType, typename VecBlockType>
-__aicore__ inline void KvQuantSparseFlashAttentionMla<CubeBlockType, VecBlockType>::InitUniqueRunInfo(
+__aicore__ inline void KvQuantSparseFlashAttentionVllmMla<CubeBlockType, VecBlockType>::InitUniqueRunInfo(
     const RunParamStr &runParam, RunInfo &runInfo)
 {
     InitTaskParamByRun<TEMPLATE_INTF_ARGS>(runParam, runInfo);
 }
 
 template <typename CubeBlockType, typename VecBlockType>
-__aicore__ inline void KvQuantSparseFlashAttentionMla<CubeBlockType, VecBlockType>::ComputeBmm1Tail(
+__aicore__ inline void KvQuantSparseFlashAttentionVllmMla<CubeBlockType, VecBlockType>::ComputeBmm1Tail(
     RunInfo &runInfo, RunParamStr &runParam)
 {
     // ------------------------S1 Base Related---------------------------
@@ -704,4 +704,4 @@ __aicore__ inline void KvQuantSparseFlashAttentionMla<CubeBlockType, VecBlockTyp
     }
 }
 }
-#endif // KV_QUANT_SPARSE_FLASH_ATTENTION_KERNEL_MLA_H
+#endif // KV_QUANT_SPARSE_FLASH_ATTENTION_VLLM_KERNEL_MLA_H

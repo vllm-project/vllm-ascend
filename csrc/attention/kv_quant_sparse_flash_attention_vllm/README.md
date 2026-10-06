@@ -1,4 +1,4 @@
-# KvQuantSparseFlashAttention
+# KvQuantSparseFlashAttentionVllm
 
 ## 产品支持情况
 
@@ -13,7 +13,7 @@
 
 ## 功能说明
 
-- API功能：`kv_quant_sparse_flash_attention`在`sparse_flash_attention`的基础上支持了[Per-Token-Head-Tile-128量化]输入。随着大模型上下文长度的增加，Sparse Attention的重要性与日俱增，这一技术通过“只计算关键部分”大幅减少计算量，然而会引入大量的离散访存，造成数据搬运时间增加，进而影响整体性能。
+- API功能：`kv_quant_sparse_flash_attention_vllm`在`sparse_flash_attention`的基础上支持了[Per-Token-Head-Tile-128量化]输入。随着大模型上下文长度的增加，Sparse Attention的重要性与日俱增，这一技术通过“只计算关键部分”大幅减少计算量，然而会引入大量的离散访存，造成数据搬运时间增加，进而影响整体性能。
 
 - 计算公式：
 
@@ -22,7 +22,7 @@
     $$
 
     其中$\tilde{K},\tilde{V}$为基于某种选择算法（如`LightningIndexer`）得到的重要性较高的Key和Value，一般具有稀疏或分块稀疏的特征，$d_k$为$Q,\tilde{K}$每一个头的维度，$\text{Dequant}(\cdot,\cdot)$为反量化函数。
-本次公布的`kv_quant_sparse_flash_attention`是面向Sparse Attention的全新算子，针对离散访存进行了指令缩减及搬运聚合的细致优化。
+本次公布的`kv_quant_sparse_flash_attention_vllm`是面向Sparse Attention的全新算子，针对离散访存进行了指令缩减及搬运聚合的细致优化。
 
 ## 参数说明
 
@@ -256,11 +256,11 @@ rope_head_dim=0表示输入中没有RoPE分支，不需要调用方补齐64维Ro
 在仓库根目录、已编译并安装自定义算子的A2/A3环境中运行：
 
 ```bash
-python -m pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/test_kv_quant_sparse_flash_attention.py
-python -m pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/test_kv_quant_sparse_flash_attention_rope0.py
+python -m pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/test_kv_quant_sparse_flash_attention_vllm.py
+python -m pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/test_kv_quant_sparse_flash_attention_vllm_rope0.py
 ```
 
-原测试继续使用原有随机golden和精度阈值。新增[rope0测试](../../../tests/e2e/nightly/single_node/ops/singlecard_ops/test_kv_quant_sparse_flash_attention_rope0.py)
+原测试继续使用原有随机golden和精度阈值。新增[rope0测试](../../../tests/e2e/nightly/single_node/ops/singlecard_ops/test_kv_quant_sparse_flash_attention_vllm_rope0.py)
 共53项，仅在A2/A3硬件配置上运行，覆盖FP16/BF16、rope0/64、PA与TND、batch与尾块、
 LSE开关、图捕获/修改KV后的重放，以及非法RoPE维度和输入shape。
 随机紧凑输入与显式补零输入做逐位对照；均匀attention用例以独立计算的选中V均值验证精度，

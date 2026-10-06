@@ -9,12 +9,12 @@
  */
 
 /*!
- * \file kv_quant_sparse_flash_attention_template_tiling_key.h
+ * \file kv_quant_sparse_flash_attention_vllm_template_tiling_key.h
  * \brief
  */
 
-#ifndef KV_QUANT_SPARSE_FLASH_ATTENTION_TEMPLATE_TILING_KEY_H
-#define KV_QUANT_SPARSE_FLASH_ATTENTION_TEMPLATE_TILING_KEY_H
+#ifndef KV_QUANT_SPARSE_FLASH_ATTENTION_VLLM_TEMPLATE_TILING_KEY_H
+#define KV_QUANT_SPARSE_FLASH_ATTENTION_VLLM_TEMPLATE_TILING_KEY_H
 
 #include "ascendc/host_api/tiling/template_argument.h"
 
@@ -28,7 +28,7 @@
 #define V_TEMPLATE 1
 
 // 模板参数支持的范围定义
-ASCENDC_TPL_ARGS_DECL(KvQuantSparseFlashAttention, // 算子OpType
+ASCENDC_TPL_ARGS_DECL(KvQuantSparseFlashAttentionVllm, // 算子OpType
 ASCENDC_TPL_BOOL_DECL(FLASH_DECODE, 0, 1),
 ASCENDC_TPL_BOOL_DECL(PAGE_ATTENTION, 0, 1),
 ASCENDC_TPL_UINT_DECL(LAYOUT_T, ASCENDC_TPL_4_BW, ASCENDC_TPL_UI_LIST,

@@ -9,16 +9,16 @@
  */
 
  /*!
- * \file kv_quant_sparse_flash_attention.cpp
+ * \file kv_quant_sparse_flash_attention_vllm.cpp
  * \brief
  */
 
 #include "kernel_operator.h"
-#include "kv_quant_sparse_flash_attention_template_tiling_key.h"
+#include "kv_quant_sparse_flash_attention_vllm_template_tiling_key.h"
 #if (__CCE_AICORE__ == 310)
-#include "arch35/kv_quant_sparse_flash_attention_kernel_mla.h"
+#include "arch35/kv_quant_sparse_flash_attention_vllm_kernel_mla.h"
 #else
-#include "kv_quant_sparse_flash_attention_kernel_mla.h"
+#include "kv_quant_sparse_flash_attention_vllm_kernel_mla.h"
 #endif
 
 using namespace AscendC;
@@ -77,37 +77,37 @@ __aicore__ inline void DispatchKernelDtype310(
 {
     if constexpr (ORIG_DTYPE_QUERY == DT_BF16 && ORIG_DTYPE_KEY == DT_FLOAT8_E4M3FN &&
                   ORIG_DTYPE_ATTENTION_OUT == DT_BF16) {
-        QSFA_OP_IMPL(BaseApi::KvQuantSparseFlashAttentionMla, KvQuantSparseFlashAttentionTilingDataMla,
+        QSFA_OP_IMPL(BaseApi::KvQuantSparseFlashAttentionVllmMla, KvQuantSparseFlashAttentionVllmTilingDataMla,
             bfloat16_t, fp8_e4m3fn_t, float, bfloat16_t, FLASH_DECODE, PAGE_ATTENTION,
             static_cast<QSFA_LAYOUT>(LAYOUT_T), static_cast<QSFA_LAYOUT>(KV_LAYOUT_T),
             static_cast<QSFATemplateMode>(TEMPLATE_MODE), IS_SPLIT_G);
     } else if constexpr (ORIG_DTYPE_QUERY == DT_BF16 && ORIG_DTYPE_KEY == DT_HIFLOAT8 &&
                          ORIG_DTYPE_ATTENTION_OUT == DT_BF16) {
-        QSFA_OP_IMPL(BaseApi::KvQuantSparseFlashAttentionMla, KvQuantSparseFlashAttentionTilingDataMla,
+        QSFA_OP_IMPL(BaseApi::KvQuantSparseFlashAttentionVllmMla, KvQuantSparseFlashAttentionVllmTilingDataMla,
             bfloat16_t, hifloat8_t, float, bfloat16_t, FLASH_DECODE, PAGE_ATTENTION,
             static_cast<QSFA_LAYOUT>(LAYOUT_T), static_cast<QSFA_LAYOUT>(KV_LAYOUT_T),
             static_cast<QSFATemplateMode>(TEMPLATE_MODE), IS_SPLIT_G);
     } else if constexpr (ORIG_DTYPE_QUERY == DT_BF16 && ORIG_DTYPE_KEY == DT_INT8 &&
                          ORIG_DTYPE_ATTENTION_OUT == DT_BF16) {
-        QSFA_OP_IMPL(BaseApi::KvQuantSparseFlashAttentionMla, KvQuantSparseFlashAttentionTilingDataMla,
+        QSFA_OP_IMPL(BaseApi::KvQuantSparseFlashAttentionVllmMla, KvQuantSparseFlashAttentionVllmTilingDataMla,
             bfloat16_t, int8_t, float, bfloat16_t, FLASH_DECODE, PAGE_ATTENTION,
             static_cast<QSFA_LAYOUT>(LAYOUT_T), static_cast<QSFA_LAYOUT>(KV_LAYOUT_T),
             static_cast<QSFATemplateMode>(TEMPLATE_MODE), IS_SPLIT_G);
     } else if constexpr (ORIG_DTYPE_QUERY == DT_FLOAT16 && ORIG_DTYPE_KEY == DT_FLOAT8_E4M3FN &&
                          ORIG_DTYPE_ATTENTION_OUT == DT_FLOAT16) {
-        QSFA_OP_IMPL(BaseApi::KvQuantSparseFlashAttentionMla, KvQuantSparseFlashAttentionTilingDataMla,
+        QSFA_OP_IMPL(BaseApi::KvQuantSparseFlashAttentionVllmMla, KvQuantSparseFlashAttentionVllmTilingDataMla,
             half, fp8_e4m3fn_t, float, half, FLASH_DECODE, PAGE_ATTENTION,
             static_cast<QSFA_LAYOUT>(LAYOUT_T), static_cast<QSFA_LAYOUT>(KV_LAYOUT_T),
             static_cast<QSFATemplateMode>(TEMPLATE_MODE), IS_SPLIT_G);
     } else if constexpr (ORIG_DTYPE_QUERY == DT_FLOAT16 && ORIG_DTYPE_KEY == DT_HIFLOAT8 &&
                          ORIG_DTYPE_ATTENTION_OUT == DT_FLOAT16) {
-        QSFA_OP_IMPL(BaseApi::KvQuantSparseFlashAttentionMla, KvQuantSparseFlashAttentionTilingDataMla,
+        QSFA_OP_IMPL(BaseApi::KvQuantSparseFlashAttentionVllmMla, KvQuantSparseFlashAttentionVllmTilingDataMla,
             half, hifloat8_t, float, half, FLASH_DECODE, PAGE_ATTENTION,
             static_cast<QSFA_LAYOUT>(LAYOUT_T), static_cast<QSFA_LAYOUT>(KV_LAYOUT_T),
             static_cast<QSFATemplateMode>(TEMPLATE_MODE), IS_SPLIT_G);
     } else if constexpr (ORIG_DTYPE_QUERY == DT_FLOAT16 && ORIG_DTYPE_KEY == DT_INT8 &&
                          ORIG_DTYPE_ATTENTION_OUT == DT_FLOAT16) {
-        QSFA_OP_IMPL(BaseApi::KvQuantSparseFlashAttentionMla, KvQuantSparseFlashAttentionTilingDataMla,
+        QSFA_OP_IMPL(BaseApi::KvQuantSparseFlashAttentionVllmMla, KvQuantSparseFlashAttentionVllmTilingDataMla,
             half, int8_t, float, half, FLASH_DECODE, PAGE_ATTENTION,
             static_cast<QSFA_LAYOUT>(LAYOUT_T), static_cast<QSFA_LAYOUT>(KV_LAYOUT_T),
             static_cast<QSFATemplateMode>(TEMPLATE_MODE), IS_SPLIT_G);
@@ -117,7 +117,7 @@ __aicore__ inline void DispatchKernelDtype310(
 
 template<int FLASH_DECODE, int PAGE_ATTENTION, int LAYOUT_T, int KV_LAYOUT_T, int TEMPLATE_MODE, int IS_SPLIT_G>
  __global__ __aicore__ void
-kv_quant_sparse_flash_attention(__gm__ uint8_t *query, __gm__ uint8_t *key, __gm__ uint8_t *value,
+kv_quant_sparse_flash_attention_vllm(__gm__ uint8_t *query, __gm__ uint8_t *key, __gm__ uint8_t *value,
                        __gm__ uint8_t *sparseIndices, __gm__ uint8_t* keyScale, __gm__ uint8_t* valueScale,
                        __gm__ uint8_t *blocktable, __gm__ uint8_t *actualSeqLengthsQuery,
                        __gm__ uint8_t *actualSeqLengthsKV, __gm__ uint8_t *attentionOut,
@@ -135,11 +135,11 @@ kv_quant_sparse_flash_attention(__gm__ uint8_t *query, __gm__ uint8_t *key, __gm
 #else
     if constexpr (ORIG_DTYPE_QUERY == DT_FLOAT16 && ORIG_DTYPE_KEY == DT_INT8 &&
                   ORIG_DTYPE_ATTENTION_OUT == DT_FLOAT16) {
-        QSFA_OP_IMPL(KvQuantSparseFlashAttentionMla, KvQuantSparseFlashAttentionTilingDataMla, half, int8_t,
+        QSFA_OP_IMPL(KvQuantSparseFlashAttentionVllmMla, KvQuantSparseFlashAttentionVllmTilingDataMla, half, int8_t,
             half, FLASH_DECODE, static_cast<QSFA_LAYOUT>(LAYOUT_T), static_cast<QSFA_LAYOUT>(KV_LAYOUT_T),
             TEMPLATE_MODE);
     } else { // bf16
-        QSFA_OP_IMPL(KvQuantSparseFlashAttentionMla, KvQuantSparseFlashAttentionTilingDataMla, bfloat16_t, int8_t,
+        QSFA_OP_IMPL(KvQuantSparseFlashAttentionVllmMla, KvQuantSparseFlashAttentionVllmTilingDataMla, bfloat16_t, int8_t,
             bfloat16_t, FLASH_DECODE, static_cast<QSFA_LAYOUT>(LAYOUT_T), static_cast<QSFA_LAYOUT>(KV_LAYOUT_T),
             TEMPLATE_MODE);
     }

@@ -9,13 +9,13 @@
  */
 
 /*!
- * \file kv_quant_sparse_flash_attention_service_vector_mla.h
+ * \file kv_quant_sparse_flash_attention_vllm_service_vector_mla.h
  * \brief
  */
-#ifndef KV_QUANT_SPARSE_FLASH_ATTENTION_SERVICE_VECTOR_MLA_H
-#define KV_QUANT_SPARSE_FLASH_ATTENTION_SERVICE_VECTOR_MLA_H
+#ifndef KV_QUANT_SPARSE_FLASH_ATTENTION_VLLM_SERVICE_VECTOR_MLA_H
+#define KV_QUANT_SPARSE_FLASH_ATTENTION_VLLM_SERVICE_VECTOR_MLA_H
 
-#include "kv_quant_sparse_flash_attention_common_arch35.h"
+#include "kv_quant_sparse_flash_attention_vllm_common_arch35.h"
 #include "kernel_operator_list_tensor_intf.h"
 #include "lib/matrix/matmul/tiling.h"
 #include "lib/matmul_intf.h"
@@ -55,7 +55,7 @@ public:
 
     // ==================== Functions ======================
     __aicore__ inline QSFAVectorService() {};
-    __aicore__ inline void InitVecBlock(TPipe *pipe, const KvQuantSparseFlashAttentionTilingDataMla *__restrict tiling,
+    __aicore__ inline void InitVecBlock(TPipe *pipe, const KvQuantSparseFlashAttentionVllmTilingDataMla *__restrict tiling,
         CVSharedParams &sharedParams, int32_t aicIdx, uint8_t subBlockIdx, __gm__ uint8_t *actualSeqLengthsQ, __gm__ uint8_t *actualSeqLengths)
     {
         if ASCEND_IS_AIV {
@@ -132,7 +132,7 @@ private:
     __aicore__ inline void GetExtremeValue(T &negativeScalar);
 
     TPipe *tPipe;
-    const KvQuantSparseFlashAttentionTilingDataMla *__restrict tilingData;
+    const KvQuantSparseFlashAttentionVllmTilingDataMla *__restrict tilingData;
 
     GlobalTensor<OUTPUT_T> attentionOutGm;
     GlobalTensor<KV_T> keyGm;
@@ -887,7 +887,7 @@ public:
     __aicore__ inline void CleanOutput(__gm__ uint8_t *attentionOut, ConstInfo &constInfo) {}
     __aicore__ inline void InitGlobalBuffer(__gm__ uint8_t *key, __gm__ uint8_t *value, __gm__ uint8_t *sparseIndices,
         __gm__ uint8_t *blockTable) {}
-    __aicore__ inline void InitVecBlock(TPipe *pipe, const KvQuantSparseFlashAttentionTilingDataMla *__restrict tiling,
+    __aicore__ inline void InitVecBlock(TPipe *pipe, const KvQuantSparseFlashAttentionVllmTilingDataMla *__restrict tiling,
         CVSharedParams &sharedParams, int32_t aicIdx, uint8_t subBlockIdx, __gm__ uint8_t *actualSeqLengthsQ, __gm__ uint8_t *actualSeqLengths) {};
     __aicore__ inline void InitLocalBuffer(TPipe *pipe, ConstInfo &constInfo) {}
 
@@ -900,4 +900,4 @@ public:
         ConstInfo &constInfo) {}
 };
 }
-#endif // KV_QUANT_SPARSE_FLASH_ATTENTION_SERVICE_VECTOR_MLA_H
+#endif // KV_QUANT_SPARSE_FLASH_ATTENTION_VLLM_SERVICE_VECTOR_MLA_H

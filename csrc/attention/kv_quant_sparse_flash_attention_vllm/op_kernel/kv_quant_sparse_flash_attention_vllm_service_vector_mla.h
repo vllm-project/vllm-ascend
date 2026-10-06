@@ -9,18 +9,18 @@
  */
 
 /*!
- * \file kv_quant_sparse_flash_attention_service_vector_mla.h
+ * \file kv_quant_sparse_flash_attention_vllm_service_vector_mla.h
  * \brief
  */
-#ifndef KV_QUANT_SPARSE_FLASH_ATTENTION_SERVICE_VECTOR_MLA_H
-#define KV_QUANT_SPARSE_FLASH_ATTENTION_SERVICE_VECTOR_MLA_H
+#ifndef KV_QUANT_SPARSE_FLASH_ATTENTION_VLLM_SERVICE_VECTOR_MLA_H
+#define KV_QUANT_SPARSE_FLASH_ATTENTION_VLLM_SERVICE_VECTOR_MLA_H
 
 #include "kernel_operator.h"
 #include "kernel_operator_list_tensor_intf.h"
 #include "kernel_tiling/kernel_tiling.h"
 #include "lib/matmul_intf.h"
 #include "lib/matrix/matmul/tiling.h"
-#include "kv_quant_sparse_flash_attention_common.h"
+#include "kv_quant_sparse_flash_attention_vllm_common.h"
 
 using AscendC::CrossCoreSetFlag;
 using AscendC::CrossCoreWaitFlag;
@@ -42,7 +42,7 @@ public:
     __aicore__ inline void ProcessVec2L(const RunInfo &info);
     __aicore__ inline void InitBuffers(TPipe *pipe);
     __aicore__ inline void InitParams(const struct ConstInfo &constInfo,
-                                      const KvQuantSparseFlashAttentionTilingDataMla *__restrict tilingData);
+                                      const KvQuantSparseFlashAttentionVllmTilingDataMla *__restrict tilingData);
     __aicore__ inline void InitMm2ResInt32GmGlobalTensor(GlobalTensor<int32_t> mm2ResInt32Gm);
     __aicore__ inline void InitVec0GlobalTensor(const GlobalTensor<int32_t> &kvValidSizeGm,
                                                 const GlobalTensor<K_ROPE_T> &kvMergeGm,
@@ -147,7 +147,7 @@ private:
     static constexpr T RECIP_OF_LN2 = 1 / LN2;
     static constexpr T SOFTMAX_MIN_NUM = -2e38;
 
-    const KvQuantSparseFlashAttentionTilingDataMla *__restrict tilingData;
+    const KvQuantSparseFlashAttentionVllmTilingDataMla *__restrict tilingData;
 
     uint32_t pingpongFlag = 0U;
     ConstInfo constInfo = {};
@@ -233,7 +233,7 @@ template <typename QSFAT> __aicore__ inline void QSFAVectorService<QSFAT>::InitB
 template <typename QSFAT>
 __aicore__ inline void
 QSFAVectorService<QSFAT>::InitParams(const struct ConstInfo &constInfo,
-                                     const KvQuantSparseFlashAttentionTilingDataMla *__restrict tilingData)
+                                     const KvQuantSparseFlashAttentionVllmTilingDataMla *__restrict tilingData)
 {
     this->constInfo = constInfo;
     this->tilingData = tilingData;
@@ -1381,4 +1381,4 @@ QSFAVectorService<QSFAT>::RowMuls(LocalTensor<T> dstUb, LocalTensor<T> src0Ub, L
     }
 }
 
-#endif // KV_QUANT_SPARSE_FLASH_ATTENTION_SERVICE_VECTOR_MLA_H
+#endif // KV_QUANT_SPARSE_FLASH_ATTENTION_VLLM_SERVICE_VECTOR_MLA_H
