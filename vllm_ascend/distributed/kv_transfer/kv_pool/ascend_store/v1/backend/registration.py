@@ -1,4 +1,4 @@
-"""Own native buffer registrations for the AscendStore v1 runtime."""
+"""Own native buffer registrations for the AscendStore v1 Worker."""
 
 from __future__ import annotations
 

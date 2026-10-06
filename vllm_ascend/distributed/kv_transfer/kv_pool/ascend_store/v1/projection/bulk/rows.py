@@ -1,4 +1,4 @@
-"""Request-time row selection and writer ownership for concrete Bulk routes."""
+"""Project request-time Bulk rows and select their writer ownership."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from vllm.v1.core.kv_cache_utils import BlockHash
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import get_block_hashes
 
-from ..topology import KVPoolTopology
+from ...topology import KVPoolTopology
 
 ByteArray: TypeAlias = NDArray[np.uint64]
 ChunkRows: TypeAlias = tuple[ByteArray, ByteArray, tuple[BlockHash | str, ...]]

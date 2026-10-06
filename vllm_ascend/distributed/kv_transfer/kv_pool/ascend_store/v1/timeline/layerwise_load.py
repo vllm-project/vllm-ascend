@@ -10,9 +10,9 @@ from typing import TYPE_CHECKING
 import numpy as np
 from vllm.logger import logger
 
-from ..runtime.batch import KVTransferBatch
-from ..runtime.evidence import LoadCompletion, TransferEvidence
 from ..topology import KVPoolTopology
+from ..worker.transfer.batch import KVTransferBatch
+from ..worker.transfer.evidence import LoadCompletion, TransferEvidence
 from .executor import TimelineExecutor
 from .layerwise_common import collect_object_sizes, compile_layer_ids_by_name
 

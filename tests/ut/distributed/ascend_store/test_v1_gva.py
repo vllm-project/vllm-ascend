@@ -26,22 +26,22 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.transf
     RangeStoreCommand,
     StoreCommandBatch,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.runtime.backend import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.io import (
     GVABackendIO,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.runtime.backend import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.io import (
     arguments as arguments_module,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.runtime.batch import (
-    KVGroupBatch,
-    KVTransferBatch,
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwise import (
+    GVALayerwiseWorker,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.runtime.resources import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.resources import (
     GVAObjectLayout,
     KVPoolResources,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker import (
-    GVALayerwiseWorker,
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.transfer.batch import (
+    KVGroupBatch,
+    KVTransferBatch,
 )
 
 from .v1.helpers import (

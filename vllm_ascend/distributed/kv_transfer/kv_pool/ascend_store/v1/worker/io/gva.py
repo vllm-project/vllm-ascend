@@ -1,4 +1,4 @@
-"""Execute bound transfer work through Memcache GVA sessions."""
+"""Execute Layerwise transfer work through GVA Backend sessions."""
 
 from __future__ import annotations
 
@@ -9,9 +9,8 @@ from vllm.logger import logger
 
 from ...backend import BackendSpec, GVABackend, GVARegion
 from ...projection import GVALayerwiseProjection
-from ..batch import KVGroupBatch, KVTransferBatch, LayerTransferPlan
-from ..evidence import LayerStoreResult
-from ..evidence import TransferEvidence as RuntimeTransferEvidence
+from ..transfer.batch import KVGroupBatch, KVTransferBatch, LayerTransferPlan
+from ..transfer.evidence import LayerStoreResult, TransferEvidence
 from .arguments import (
     materialize_load_layer_gva,
     materialize_store_layer_gva,
@@ -130,7 +129,7 @@ class GVABackendIO(BackendIO):
                 error,
             )
             return _failed_load_completions(plan.batch, layer_id)
-        evidence = tuple(RuntimeTransferEvidence(source, int(result_code)) for source in arguments.sources)
+        evidence = tuple(TransferEvidence(source, int(result_code)) for source in arguments.sources)
         return _load_completions(plan.batch, evidence)
 
     def load_batch(self, batch: KVTransferBatch, layer_id: int | None = None):
@@ -164,11 +163,11 @@ class GVABackendIO(BackendIO):
                 raise RuntimeError("GVA batch_copy returned a non-integer result")
         except Exception as error:
             sources = _batch_sources(batch, layer_id)
-            evidence = tuple(RuntimeTransferEvidence(source, None, not source_handed_off) for source in sources)
+            evidence = tuple(TransferEvidence(source, None, not source_handed_off) for source in sources)
             return _store_completions(batch, evidence, error, force_failed=True)
         succeeded = result_code == 0
         evidence = tuple(
-            RuntimeTransferEvidence(source, int(result_code), succeeded) for source in _batch_sources(batch, layer_id)
+            TransferEvidence(source, int(result_code), succeeded) for source in _batch_sources(batch, layer_id)
         )
         return _store_completions(batch, evidence)
 

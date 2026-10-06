@@ -1,17 +1,17 @@
-"""Layerwise Worker fixed to the Backend key-range data plane."""
+"""Layerwise Worker route fixed to the Backend key-range data plane."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from typing import Any, cast
 
-from ...attention_fence import reset_attention_compute_start_gate
-from ..backend import KeyRangeBackend, LayerwiseAccessKind
-from ..projection import KeyRangeLayerwiseProjection, KeyRangeLayerwiseProjectionBinder, LayerwiseProjection
-from ..runtime.backend import KeyRangeBackendIO
-from ..runtime.resources import KVPoolResources
-from ..topology import KVPoolTopology
-from .layerwise import LayerwiseWorker
+from ....attention_fence import reset_attention_compute_start_gate
+from ...backend import KeyRangeBackend, LayerwiseAccessKind
+from ...projection import KeyRangeLayerwiseProjection, KeyRangeLayerwiseProjectionBinder, LayerwiseProjection
+from ...topology import KVPoolTopology
+from ..io import KeyRangeBackendIO
+from ..resources import KVPoolResources
+from .worker import LayerwiseWorker
 
 
 class KeyRangeLayerwiseWorker(LayerwiseWorker):

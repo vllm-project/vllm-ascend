@@ -1,4 +1,4 @@
-"""Narrow Backend capabilities consumed by the AscendStore v1 runtime."""
+"""Narrow Backend capabilities consumed by AscendStore v1 Worker I/O."""
 
 from __future__ import annotations
 

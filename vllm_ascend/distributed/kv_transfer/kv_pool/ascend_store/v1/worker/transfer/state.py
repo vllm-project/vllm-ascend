@@ -1,4 +1,4 @@
-"""Request and batch state shared by concrete Worker routes."""
+"""Step and batch state shared by concrete Worker routes."""
 
 from __future__ import annotations
 
@@ -7,9 +7,9 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from ..protocol.transfer import KVTransferStep
-from ..runtime.batch import KeyAxes, KVGroupBatch, LayerStoreGroup, TransferSource
-from ..runtime.bulk import BlockRows, StoreCandidateRows
+from ...projection.bulk.rows import BlockRows, StoreCandidateRows
+from ...protocol.transfer import KVTransferStep
+from .batch import KeyAxes, KVGroupBatch, LayerStoreGroup, TransferSource
 
 
 @dataclass(slots=True)

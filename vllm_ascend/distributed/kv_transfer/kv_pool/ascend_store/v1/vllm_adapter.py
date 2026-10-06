@@ -32,7 +32,6 @@ from .projection import (
     compile_bulk_projection_binder,
 )
 from .route import KVPoolRouteSpec
-from .runtime.resources import GVAObjectLayout, KVPoolResources
 from .scheduler import (
     AsynchronousBulkScheduler,
     KVPoolScheduler,
@@ -49,13 +48,10 @@ from .topology import (
     kv_cache_spec_uses_align_state,
     resolve_group_layers,
 )
-from .worker import (
-    AsynchronousBulkWorker,
-    GVALayerwiseWorker,
-    KeyRangeLayerwiseWorker,
-    KVPoolWorker,
-    SynchronousBulkWorker,
-)
+from .worker.base import KVPoolWorker
+from .worker.bulk import AsynchronousBulkWorker, SynchronousBulkWorker
+from .worker.layerwise import GVALayerwiseWorker, KeyRangeLayerwiseWorker
+from .worker.resources import GVAObjectLayout, KVPoolResources
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
