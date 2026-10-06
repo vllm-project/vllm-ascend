@@ -212,7 +212,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         "kv_compress_epilog"
         "kv_compress_epilog_v2"
         "compressor"
-        "compressor_v2"
         "compressor_metadata"
         "quant_lightning_indexer_v2"
         "quant_lightning_indexer_v2_metadata"

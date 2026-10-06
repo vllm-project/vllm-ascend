@@ -43,7 +43,6 @@
 #include "attention/sparse_flash_attention/sparse_flash_attention_torch_adpt.h"
 #include "attention/sparse_flash_mla/sparse_flash_mla_torch_adpt.h"
 #include "attention/kv_compress_epilog_v2/kv_compress_epilog_v2_torch_adpt.h"
-#include "attention/compressor_v2/compressor_v2_torch_adpt.h"
 #include "attention/quant_lightning_indexer_v2/quant_lightning_indexer_v2_torch_adpt.h"
 #include "attention/kv_quant_sparse_flash_attention_vllm/kv_quant_sparse_flash_attention_vllm_torch_adpt.h"
 #include "attention/fused_sparse_attention_overlap/fused_sparse_attention_overlap_torch_adpt.h"
@@ -3324,13 +3323,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         ") -> Tensor"
         );
     ops.impl("compressor", torch::kPrivateUse1, &vllm_ascend::compressor);
-
-    ops.def(
-        "compressor_v2(Tensor x, Tensor wkv, Tensor wgate, Tensor(a!) state_cache, "
-        "Tensor? state_block_table, Tensor? cu_seqlens, Tensor? seqused, "
-        "Tensor? start_pos, int cmp_ratio) -> Tensor"
-    );
-    ops.impl("compressor_v2", torch::kPrivateUse1, &vllm_ascend::compressor_v2);
 
     ops.def(
         "compressor_metadata("
