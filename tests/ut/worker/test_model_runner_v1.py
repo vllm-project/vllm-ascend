@@ -1292,6 +1292,9 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
     def test_pure_gqa_uses_noncontiguous_block_major_kv_cache(self):
         self._check_gqa_cache_layout(xlite_enabled=False)
 
+    def test_paged_attention_uses_contiguous_kv_cache(self):
+        self._check_gqa_cache_layout(xlite_enabled=False, pa_enabled=True)
+
     def test_xlite_uses_separate_contiguous_kv_cache(self):
         self._check_gqa_cache_layout(xlite_enabled=True)
 
@@ -1301,7 +1304,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
     def test_sparse_backend_uses_separate_contiguous_kv_cache(self):
         self._check_gqa_cache_layout(xlite_enabled=False, backend=SparseAttentionBackend)
 
-    def _check_gqa_cache_layout(self, xlite_enabled, backend=AscendAttentionBackend):
+    def _check_gqa_cache_layout(self, xlite_enabled, backend=AscendAttentionBackend, pa_enabled=False):
         runner = self._build_runner()
         runner.ascend_config.xlite_graph_config.enabled = xlite_enabled
         runner.model_config.use_mla = False
@@ -1336,9 +1339,10 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             ],
         )
 
-        raw_caches = runner._allocate_kv_cache_tensors(kv_cache_config)
+        with patch("vllm_ascend.worker.model_runner_v1.requires_contiguous_pa_kv_cache", return_value=pa_enabled):
+            raw_caches = runner._allocate_kv_cache_tensors(kv_cache_config)
 
-        uses_contiguous_cache = xlite_enabled or backend.is_sparse()
+        uses_contiguous_cache = xlite_enabled or backend.is_sparse() or pa_enabled
         assert isinstance(raw_caches[layer_name], tuple if uses_contiguous_cache else torch.Tensor)
         cache = runner._reshape_kv_cache_tensors(
             kv_cache_config,
@@ -1931,6 +1935,10 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         raw_caches = runner._allocate_kv_cache_tensors(kv_cache_config)
         assert raw_caches[layer_names[0]][0] is not raw_caches[layer_names[1]][0]
         assert raw_caches[layer_names[0]][1] is not raw_caches[layer_names[1]][1]
+
+    @patch("vllm_ascend.worker.model_runner_v1.requires_contiguous_pa_kv_cache", return_value=True)
+    def test_hybrid_backing_is_unchanged_when_pa_is_configured(self, _mock_requires_contiguous):
+        self.test_hybrid_descriptors_share_standardized_backing_allocation()
 
     def test_hybrid_descriptors_share_standardized_backing_allocation(self):
         attn_names = ["model.layers.0.self_attn.attn", "model.layers.2.self_attn.attn"]

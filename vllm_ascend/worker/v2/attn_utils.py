@@ -64,6 +64,7 @@ from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     get_sfa_qsfa_packed_head_dim,
+    requires_contiguous_pa_kv_cache,
 )
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
@@ -1022,7 +1023,9 @@ def _allocate_kv_cache(
                     attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
                 layer = attn_layers.get(layer_name)
                 backend = layer.get_attn_backend() if layer is not None else None
-                if backend is None or not backend.is_sparse():
+                if (backend is None or not backend.is_sparse()) and not requires_contiguous_pa_kv_cache(
+                    layer, vllm_config, layer_spec
+                ):
                     kv_cache_raw_tensors[layer_name] = _allocate_int8_cache_tensor(layer_size, alignment, device)
                     continue
                 if layer_spec.page_size_bytes != layer_spec.real_page_size_bytes:

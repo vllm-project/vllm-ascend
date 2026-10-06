@@ -13,7 +13,7 @@ from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import MLAAttentionImpl
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
-from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec, FullAttentionSpec
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
@@ -177,7 +177,8 @@ def ascend_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
     return chunked_prefill_workspace_size
 
 
-def using_paged_attention(runtime_shape: int, vllm_config: VllmConfig, head_size: int | None = None) -> bool:
+def using_paged_attention(runtime_shape: int | None, vllm_config: VllmConfig, head_size: int | None = None) -> bool:
+    """Check any configured PA shape for KV allocation when runtime_shape is None."""
     if vllm_config.speculative_config is not None:
         return False
     if not get_current_hardware_profile().supports(HardwareCapability.PAGED_ATTENTION):
@@ -193,7 +194,23 @@ def using_paged_attention(runtime_shape: int, vllm_config: VllmConfig, head_size
     if cudagraph_mode != CUDAGraphMode.FULL_DECODE_ONLY:
         return False
 
-    return runtime_shape in get_ascend_config().pa_shape_list
+    pa_shape_list = get_ascend_config().pa_shape_list
+    return bool(pa_shape_list) if runtime_shape is None else runtime_shape in pa_shape_list
+
+
+def requires_contiguous_pa_kv_cache(layer, vllm_config: VllmConfig, spec: FullAttentionSpec) -> bool:
+    """Require contiguous K/V only for unpadded ordinary Attention layers eligible for PA."""
+    # Import lazily to avoid a circular dependency with attention_v1.
+    from vllm_ascend.attention.attention_v1 import AscendAttentionBackendImpl
+
+    impl = getattr(layer, "impl", None)
+    return (
+        type(impl) is AscendAttentionBackendImpl
+        and impl.sliding_window is None
+        and getattr(vllm_config.model_config, "runner_type", None) != "pooling"
+        and spec.page_size_bytes == spec.real_page_size_bytes
+        and using_paged_attention(None, vllm_config, spec.head_size)
+    )
 
 
 @lru_cache(maxsize=1)

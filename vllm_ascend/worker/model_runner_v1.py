@@ -130,6 +130,7 @@ from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     get_sfa_qsfa_packed_head_dim,
+    requires_contiguous_pa_kv_cache,
     using_paged_attention,
 )
 
@@ -4945,6 +4946,7 @@ class NPUModelRunner(GPUModelRunner):
                 for group in self._kv_cache_spec_attn_group_iterator()
                 for layer_name in group.layer_names
             }
+            attn_layers = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
             strided_attention_cache_layers = {
                 layer_name
                 for layer_name, spec in layer_kv_cache_spec.items()
@@ -4952,6 +4954,7 @@ class NPUModelRunner(GPUModelRunner):
                 and not is_hidden_state_cache_spec(spec)
                 and layer_name in layer_backends
                 and not layer_backends[layer_name].is_sparse()
+                and not requires_contiguous_pa_kv_cache(attn_layers.get(layer_name), self.vllm_config, spec)
             }
 
         # GLM-Next emits one descriptor for each physical cache slot. Layers
