@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import os
-import re
 import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
+import regex as re
 import yaml
 
 WORKFLOW = Path(__file__).resolve().parents[3] / ".github/workflows/_e2e_nightly_single_node_560t.yaml"
@@ -43,7 +43,7 @@ def _localize(value):
 def _run_step(bash, tmp_path, job, name, *, commands="", extra_env=None):
     step = _step(job, name)
     environment = os.environ.copy()
-    for values in (job.get("env", {}), step.get("env", {}), extra_env or {}):
+    for values in (job.get("env") or {}, step.get("env") or {}, extra_env or {}):
         environment.update({key: _localize(str(value)) for key, value in values.items()})
     if os.name == "nt":
         commands = 'export PATH="/usr/bin:/mingw64/bin:/bin:$PATH"\n' + commands
@@ -56,6 +56,19 @@ def _run_step(bash, tmp_path, job, name, *, commands="", extra_env=None):
         timeout=10,
         check=False,
     )
+
+
+def test_run_step_accepts_empty_yaml_environment_blocks(bash, tmp_path):
+    job = yaml.safe_load("""env:
+steps:
+  - name: Empty environment
+    env:
+    run: printf '%s' "$EXTRA_VALUE"
+""")
+    result = _run_step(bash, tmp_path, job, "Empty environment", extra_env={"EXTRA_VALUE": "present"})
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "present"
 
 
 def test_log_artifact_is_available_for_both_test_entries(nightly_job):
@@ -102,6 +115,7 @@ printf 'INFO mock CANN process log\\n' > "$ASCEND_PROCESS_LOG_PATH/plog/plog-moc
 exit "$MOCK_PYTEST_EXIT_CODE"
 """,
         encoding="utf-8",
+        newline="\n",
     )
     result = _run_step(
         bash,
