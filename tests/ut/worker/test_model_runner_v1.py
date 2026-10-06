@@ -748,6 +748,7 @@ class TestDeviceMetadataFullGraphEvents(unittest.TestCase):
             patch("vllm_ascend.worker.model_runner_v1.get_pp_group", return_value=SimpleNamespace(is_first_rank=True)),
             patch("vllm_ascend.worker.model_runner_v1.lmhead_tp_enable", return_value=False),
             patch("vllm_ascend.worker.model_runner_v1.set_ascend_forward_context", forward_context),
+            patch("vllm_ascend.worker.model_runner_v1.get_forward_context", return_value=SimpleNamespace()),
             patch("vllm_ascend.worker.model_runner_v1.update_cos_sin"),
         ):
             runner._dummy_run(4, cudagraph_runtime_mode=CUDAGraphMode.FULL, is_graph_capturing=True)
@@ -1220,6 +1221,8 @@ def _ratio_kwargs(ratio: int) -> dict[str, int]:
 class TestNPUModelRunnerKVCache(unittest.TestCase):
     def _build_runner(self):
         runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner._attention_common_view_cache = {}
+        runner._attention_group_view_cache = {}
         runner.device = torch.device("cpu")
         runner.ascend_config = SimpleNamespace(
             kvpp_config=SimpleNamespace(size=1),
@@ -3196,7 +3199,12 @@ class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
     def _build_runner(self):
         runner = NPUModelRunner.__new__(NPUModelRunner)
         runner.device = torch.device("cpu")
-        runner._pending_spec_decode_metadata_copies = deque()
+        runner._spec_decode_metadata_offsets = (0, 8, 16, 48, 72, 80)
+        cpu = torch.zeros(80, dtype=torch.int32)
+        gpu = torch.zeros_like(cpu)
+        runner._spec_decode_metadata_buffer = SimpleNamespace(
+            np=cpu.numpy(), gpu=gpu, copy_to_gpu=MagicMock(side_effect=lambda: gpu.copy_(cpu))
+        )
         runner.vllm_config = MagicMock()
         runner.model_config = MagicMock()
         runner.use_compress = False
@@ -3322,35 +3330,22 @@ class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
         self.assertEqual(runner.input_ids.gpu.tolist(), [11, 0, 0, 0])
         self.assertEqual(runner.input_ids.cpu.tolist(), [11, -1, -1, -1])
 
-    def test_spec_decode_metadata_keeps_cpu_sources_until_h2d_completes(self):
+    def test_spec_decode_metadata_uses_one_copy_and_stable_device_views(self):
         runner = self._build_runner()
-        runner.device = SimpleNamespace(type="npu")
-        sources = tuple(MagicMock() for _ in range(5))
-        device_values = tuple(MagicMock() for _ in range(5))
-        for source, device_value in zip(sources, device_values):
-            source.to.return_value = device_value
-        copy_done = MagicMock()
-        copy_done.query.return_value = False
-        fake_npu = SimpleNamespace(
-            Event=MagicMock(return_value=copy_done),
-            current_stream=MagicMock(),
-        )
+        sources = tuple(np.arange(length, dtype=np.int32) for length in (2, 2, 6, 4, 2))
+        result = runner._copy_spec_decode_metadata_to_device(sources)
+        buffer = runner._spec_decode_metadata_buffer
+        buffer.copy_to_gpu.assert_called_once_with()
+        pointers = [value.data_ptr() for value in result]
+        for actual, expected in zip(result, sources):
+            torch.testing.assert_close(actual, torch.from_numpy(expected))
 
-        with patch.object(torch, "npu", fake_npu, create=True):
-            result = runner._copy_spec_decode_metadata_to_device(sources)
-
-            self.assertEqual(result, device_values)
-            pending_sources, event = runner._pending_spec_decode_metadata_copies[0]
-            self.assertIs(pending_sources, sources)
-            self.assertIs(event, copy_done)
-            for source in sources:
-                source.to.assert_called_once_with(runner.device, non_blocking=True)
-            fake_npu.current_stream.assert_called_once_with()
-            copy_done.record.assert_called_once_with(fake_npu.current_stream.return_value)
-
-            copy_done.query.return_value = True
-            runner._copy_spec_decode_metadata_to_device(sources)
-        self.assertEqual(len(runner._pending_spec_decode_metadata_copies), 1)
+        updated = tuple(value + 7 for value in sources)
+        second = runner._copy_spec_decode_metadata_to_device(updated)
+        self.assertEqual(buffer.copy_to_gpu.call_count, 2)
+        self.assertEqual([value.data_ptr() for value in second], pointers)
+        for actual, expected in zip(result, updated):
+            torch.testing.assert_close(actual, torch.from_numpy(expected))
 
 
 class TestNPUModelRunnerDebugger(unittest.TestCase):

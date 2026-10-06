@@ -26,6 +26,9 @@ class TestAscendW8A8MXFP8LinearMethod(TestBase):
         nz_config = patch("vllm_ascend.utils.get_ascend_config", return_value=SimpleNamespace(weight_nz_mode=1))
         self.addCleanup(nz_config.stop)
         nz_config.start()
+        format_cast = patch("torch_npu.npu_format_cast", side_effect=lambda weight, fmt, **kwargs: weight.clone())
+        self.addCleanup(format_cast.stop)
+        format_cast.start()
 
     def test_modelopt_config_defaults_group_size(self):
         vllm_config = create_mock_vllm_config()
@@ -245,6 +248,9 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
         nz_config = patch("vllm_ascend.utils.get_ascend_config", return_value=SimpleNamespace(weight_nz_mode=1))
         self.addCleanup(nz_config.stop)
         nz_config.start()
+        format_cast = patch("torch_npu.npu_format_cast", side_effect=lambda weight, fmt, **kwargs: weight.clone())
+        self.addCleanup(format_cast.stop)
+        format_cast.start()
 
     def test_modelopt_config_defaults_group_size(self):
         vllm_config = create_mock_vllm_config()

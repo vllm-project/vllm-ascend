@@ -1654,6 +1654,7 @@ class TestNPUWorker(TestBase):
             patch.object(kw_module, "kernel_warmup") as mock_kernel_warmup,
         ):
             worker = NPUWorker()
+            worker.use_v2_model_runner = False
             worker.model_runner = MagicMock()
             worker.vllm_config = MagicMock()
             worker.model_config = MagicMock()
@@ -1672,10 +1673,10 @@ class TestNPUWorker(TestBase):
 
             # Verify _dummy_run call count and order (by size descending)
             expected_calls = [
-                unittest.mock.call(16),
-                unittest.mock.call(8),
-                unittest.mock.call(4),
-                unittest.mock.call(1),
+                unittest.mock.call(16, uniform_dp_warmup=True),
+                unittest.mock.call(8, uniform_dp_warmup=True),
+                unittest.mock.call(4, uniform_dp_warmup=True),
+                unittest.mock.call(1, uniform_dp_warmup=True),
             ]
             worker.model_runner._dummy_run.assert_has_calls(expected_calls)
 
@@ -1720,6 +1721,7 @@ class TestNPUWorker(TestBase):
             patch.object(kw_module, "kernel_warmup") as mock_kernel_warmup,
         ):
             worker = NPUWorker()
+            worker.use_v2_model_runner = False
             worker.model_runner = MagicMock()
             worker.vllm_config = MagicMock()
             worker.model_config = MagicMock()
@@ -1739,7 +1741,10 @@ class TestNPUWorker(TestBase):
             worker.compile_or_warm_up_model()
 
             # Verify only call _dummy_run for sizes not in cudagraph_capture_sizes
-            expected_calls = [unittest.mock.call(16), unittest.mock.call(1)]
+            expected_calls = [
+                unittest.mock.call(16, uniform_dp_warmup=True),
+                unittest.mock.call(1, uniform_dp_warmup=True),
+            ]
             worker.model_runner._dummy_run.assert_has_calls(expected_calls)
 
             # Should call capture_model in non-eager mode
