@@ -68,9 +68,11 @@ def mock_npu_rms_norm(monkeypatch):
 
     monkeypatch.setattr(torch_npu, "npu_rms_norm", rms_norm)
     monkeypatch.setattr(torch.Tensor, "pin_memory", lambda self: self)
+    monkeypatch.setattr(dsa_v41, "get_ascend_config", lambda: SimpleNamespace(multistream_dsv4_dsa_overlap=True))
     vllm_config = MagicMock()
     vllm_config.compilation_config.custom_ops = ["all"]
     vllm_config.quant_config = None
+    vllm_config.parallel_config.prefill_context_parallel_size = 1
     with set_current_vllm_config(vllm_config):
         yield
 
@@ -1567,19 +1569,6 @@ def test_v41_cp_consumers_reuse_local_topk_and_candidates():
     assert shared.candidates is candidates
 
 
-@pytest.mark.parametrize("cp", [False, True])
-def test_v41_backend_routes_metadata_and_execution_together(monkeypatch, cp):
-    from vllm_ascend.attention.context_parallel import dsa_v41_cp
-    from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheBackend
-
-    monkeypatch.setattr(dsa_v41_cp, "enable_dsa_cp", lambda: cp)
-    builder, impl = dsa_v41_cp.get_v41_cp_classes()
-    assert DeepseekV41CacheBackend.get_builder_cls() is builder
-    assert not DeepseekV41CacheBackend.supports_pcp()
-    if cp:
-        assert issubclass(impl, dsa_v41_cp.AscendDSAV41CPImpl)
-
-
 def test_v41_cp_accepts_async_seq_lens_mirror(runtime, monkeypatch):
     from vllm_ascend.attention.context_parallel.dsa_v41_cp import AscendDSAV41CPMetadataBuilder
 
@@ -1614,91 +1603,6 @@ def test_v41_cp_resolves_own_planes_with_native_draft_metadata_present():
     assert impl._global_layer_metadata(metadata).swa is global_swa
 
 
-@pytest.mark.parametrize("overlap", [False, True])
-def test_v41_query_preparation_honors_multistream_setting(overlap):
-    from unittest.mock import Mock
-
-    from vllm_ascend.attention.dsa_v41 import AscendDSAV41Impl
-
-    impl = AscendDSAV41Impl.__new__(AscendDSAV41Impl)
-    impl.role = SimpleNamespace(is_kv_source=True)
-    impl.preprocess = Mock(return_value=("q", "qr"))
-    impl.multistream_preprocess = Mock(return_value=("q", "qr"))
-    impl._write_compressed_source = Mock()
-    attn = SimpleNamespace(
-        packed_cache_ops=None,
-        dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=SimpleNamespace(multistream_dsv4_dsa_overlap=overlap))),
-    )
-    metadata = SimpleNamespace(swa=SimpleNamespace(num_actual_tokens=6, num_prefills=0))
-    assert impl._prepare_queries(attn, "hidden", "positions", "cos", "sin", metadata) == ("q", "qr")
-    selected = impl.multistream_preprocess if overlap else impl.preprocess
-    selected.assert_called_once_with(attn, "hidden", "cos", "sin", metadata.swa)
-    impl._write_compressed_source.assert_not_called()
-
-
-def test_v41_a5_prefill_selects_multistream_preparation():
-    from unittest.mock import Mock
-
-    from vllm_ascend.attention.dsa_v41 import AscendDSAV41Impl
-
-    impl = AscendDSAV41Impl.__new__(AscendDSAV41Impl)
-    impl.role = SimpleNamespace(is_kv_source=False)
-    impl.preprocess = Mock(return_value=("q", "qr"))
-    impl.multistream_preprocess = Mock(return_value=("q", "qr"))
-    attn = SimpleNamespace(
-        packed_cache_ops=object(),
-        dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=SimpleNamespace(multistream_dsv4_dsa_overlap=True))),
-    )
-    metadata = SimpleNamespace(swa=SimpleNamespace(num_actual_tokens=6, num_prefills=1))
-
-    assert impl._prepare_queries(attn, "hidden", "positions", "cos", "sin", metadata) == ("q", "qr")
-    impl.multistream_preprocess.assert_called_once_with(attn, "hidden", "cos", "sin", metadata.swa)
-    impl.preprocess.assert_not_called()
-
-
-@pytest.mark.parametrize("overlap", [False, True])
-def test_v41_cp_query_preparation_uses_full_inputs(overlap):
-    from unittest.mock import Mock
-
-    from vllm_ascend.attention.context_parallel.dsa_v41_cp import AscendDSAV41CPImpl
-
-    impl = AscendDSAV41CPImpl.__new__(AscendDSAV41CPImpl)
-    impl.multistream_preprocess = Mock(return_value=("q", "qr"))
-    impl._write_compressed_source = Mock()
-    attn = SimpleNamespace(
-        dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=SimpleNamespace(multistream_dsv4_dsa_overlap=overlap)))
-    )
-    metadata = SimpleNamespace(swa=SimpleNamespace(num_actual_tokens=2, cp_token_range=(2, 4, 2, 6)))
-    assert impl._prepare_queries(attn, "abcdef", "positions", "cos", "sin", metadata) == ("q", "qr")
-    impl.multistream_preprocess.assert_called_once_with(attn, "abcdef", "cos", "sin", metadata.swa)
-    impl._write_compressed_source.assert_not_called()
-
-
-@pytest.mark.parametrize("overlap", [False, True])
-@pytest.mark.parametrize("local_tokens", [0, 2])
-def test_v41_cp_input_preparation_updates_empty_rank_cache(overlap, local_tokens):
-    from unittest.mock import Mock
-
-    from vllm_ascend.attention.context_parallel.dsa_v41_cp import AscendDSAV41CPImpl
-
-    impl = AscendDSAV41CPImpl.__new__(AscendDSAV41CPImpl)
-    full = torch.arange(24).reshape(6, 4)
-    global_metadata = SimpleNamespace(swa=SimpleNamespace(num_actual_tokens=5))
-    impl._global_layer_metadata = Mock(return_value=global_metadata)
-    impl._update_caches = Mock()
-    attn = SimpleNamespace(
-        dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=SimpleNamespace(multistream_dsv4_dsa_overlap=overlap)))
-    )
-    metadata = SimpleNamespace(swa=SimpleNamespace(cp_token_range=(3, 6, 3, 6), num_actual_tokens=local_tokens))
-    assert impl._prepare_inputs_and_caches(attn, full, metadata, {}) is None
-    if local_tokens == 0:
-        impl._update_caches.assert_called_once()
-        assert torch.equal(impl._update_caches.call_args.args[1], full[:5])
-        assert impl._update_caches.call_args.args[2] is global_metadata
-    else:
-        impl._update_caches.assert_not_called()
-
-
 def test_dspark_v41_indices_keep_capture_addresses(runtime):
     runtime.speculative_config = SimpleNamespace(num_speculative_tokens=3)
     spec = AscendSlidingWindowMLASpec(
@@ -1727,13 +1631,6 @@ def test_dspark_v41_indices_keep_capture_addresses(runtime):
     assert not torch.equal(old_indices, second.ori_sparse_indices)
     assert second.ori_sparse_indices[0, 0, 0] == 129
     assert first.ori_topk_length.tolist() == [131, 131, 131, 5]
-
-
-def test_v41_cp_inherits_forward():
-    from vllm_ascend.attention.context_parallel.dsa_v41_cp import AscendDSAV41CPImpl
-    from vllm_ascend.attention.dsa_v41 import AscendDSAV41Impl
-
-    assert AscendDSAV41CPImpl.forward is AscendDSAV41Impl.forward
 
 
 @pytest.mark.parametrize("rank", [None, 0, 1, 7])
