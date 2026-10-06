@@ -455,6 +455,7 @@ class FIAParamProvider:
     layer_name: str | None
     sliding_window: int | None
     is_draft_model: bool = False
+    is_non_pa: bool = False
 
     def resolve(self, attn_metadata) -> dict[str, Any]:
         metadata = attn_metadata[self.layer_name]
@@ -463,7 +464,7 @@ class FIAParamProvider:
             return {
                 "actual_seq_lengths": metadata.actual_seq_lengths_q,
                 "actual_seq_lengths_kv": metadata.seq_lens_list,
-                "block_table": metadata.block_tables,
+                "block_table": None if self.is_non_pa else metadata.block_tables,
             }
         else:
             return {
@@ -626,6 +627,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
             attn_mask = None
             sparse_mode = 0
 
+        if block_table is None:
+            key = key.contiguous()
+            value = value.contiguous()
+
         use_max_workspace = self._use_max_workspace_for_fia_graph
         workspace = get_capture_resource(
             _FIA_WORKSPACE_KEY,
@@ -671,7 +676,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 "out": [output_view, softmax_lse],
                 **extra_args,
             },
-            FIAParamProvider(self._layer_name, self.sliding_window, _EXTRA_CTX.is_draft_model),
+            FIAParamProvider(
+                self._layer_name,
+                self.sliding_window,
+                _EXTRA_CTX.is_draft_model,
+                is_non_pa=block_table is None,
+            ),
         )
         return output, num_tokens
 
@@ -689,6 +699,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
         actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q
         softmax_lse = torch.empty(1, dtype=query.dtype, device=query.device)
         output_view = output[: attn_metadata.num_actual_tokens]
+        if block_table is None:
+            key = key.contiguous()
+            value = value.contiguous()
+
         use_max_workspace = self._use_max_workspace_for_fia_graph
         workspace = get_capture_resource(
             _FIA_V2_WORKSPACE_KEY,
@@ -861,6 +875,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
         ):
             key = key[:num_tokens]
             value = value[:num_tokens]
+        if block_table is None:
+            key = key.contiguous()
+            value = value.contiguous()
+
         # Get workspace from cache or calculate it if not present.
         if self.sinks is not None:
             actual_seq_qlen = attn_metadata.actual_seq_lengths_q
@@ -1621,8 +1639,8 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
             cache_block_size = self.key_cache.shape[1]  # type: ignore[attr-defined]
             attn_out, _ = torch_npu.npu_fused_infer_attention_score(
                 query=prefill_q,
-                key=prefill_k,
-                value=prefill_v,
+                key=prefill_k.contiguous(),
+                value=prefill_v.contiguous(),
                 atten_mask=attn_metadata.attn_mask,
                 block_table=None,
                 input_layout="TND",
@@ -1679,6 +1697,10 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
             else:
                 key = (key.to(query.dtype) - layer._c8_k_offset) * layer._c8_k_scale
                 value = (value.to(query.dtype) - layer._c8_v_offset) * layer._c8_v_scale
+
+        if block_table is None:
+            key = key.contiguous()
+            value = value.contiguous()
 
         attn_output, _ = torch_npu.npu_fused_infer_attention_score(
             query=query,

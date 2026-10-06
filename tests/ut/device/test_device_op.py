@@ -7,6 +7,58 @@ import torch
 from vllm_ascend.device.device_op import A5DeviceAdaptor, BaseDeviceAdaptor
 
 
+@pytest.mark.parametrize("adaptor", [BaseDeviceAdaptor, A5DeviceAdaptor])
+@pytest.mark.parametrize("block_table_mode", ["pa", "none", "omitted"])
+@pytest.mark.parametrize("contiguous", [False, True])
+def test_fia_only_contiguizes_non_pa_inputs(adaptor, block_table_mode, contiguous):
+    use_pa = block_table_mode == "pa"
+    omit_block_table = block_table_mode == "omitted"
+    key = torch.randn(2, 3, 4).transpose(0, 1)
+    value = torch.randn_like(key)
+    if contiguous:
+        key = key.contiguous()
+        value = value.contiguous()
+    block_table = torch.tensor([[0]], dtype=torch.int32) if use_pa else None
+    kwargs = {} if omit_block_table else {"block_table": block_table}
+    expected = (object(), object())
+
+    with mock.patch(
+        "vllm_ascend.device.device_op.torch_npu.npu_fused_infer_attention_score", return_value=expected
+    ) as mock_fia:
+        result = adaptor.npu_fused_infer_attention_score(
+            query=torch.randn(3, 2, 4),
+            key=key,
+            value=value,
+            attn_metadata=None,
+            key_cache=None,
+            value_cache=None,
+            current_key=key,
+            current_value=value,
+            num_heads=2,
+            num_key_value_heads=2,
+            head_size=4,
+            scale=0.5,
+            is_prefill_no_cache=not use_pa,
+            **kwargs,
+        )
+
+    assert result is expected
+    mock_fia.assert_called_once()
+    call_kwargs = mock_fia.call_args.kwargs
+    for name, original in (("key", key), ("value", value)):
+        actual = call_kwargs[name]
+        torch.testing.assert_close(actual, original)
+        if use_pa or contiguous:
+            assert actual is original
+        else:
+            assert actual.is_contiguous()
+            assert actual.data_ptr() != original.data_ptr()
+        if use_pa:
+            assert actual.stride() == original.stride()
+    assert call_kwargs.get("block_table") is block_table
+    assert ("block_table" in call_kwargs) is (not omit_block_table)
+
+
 def test_reshape_and_cache_makes_scatter_inputs_contiguous():
     key = torch.randn(2, 3, 4).transpose(0, 1)
     value = torch.randn(2, 3, 4).transpose(0, 1)
