@@ -1082,3 +1082,64 @@ def test_copy_num_computed_tokens_to_cpu_records_event():
     stream.wait_stream.assert_called_once_with(default_stream)
     runner.num_computed_tokens_cpu.copy_.assert_called_once()
     runner.num_computed_tokens_event.record.assert_called_once_with()
+
+
+@pytest.mark.parametrize("fallback", [None, "hardware", "model", "pp", "pcp", "dcp", "kvpp", "mixed", "empty"])
+def test_v41_device_lengths_are_enabled_only_for_verified_consumers(fallback):
+    import vllm_ascend.worker.v2.model_runner as runner_module
+
+    runner = _make_runner()
+    runner.model_config = SimpleNamespace(architecture="DeepseekV41ForCausalLM")
+    runner.parallel_config = SimpleNamespace(
+        pipeline_parallel_size=1, prefill_context_parallel_size=1, decode_context_parallel_size=1
+    )
+    runner.kvpp = SimpleNamespace(scheduler=None)
+    runner.attn_groups = [[SimpleNamespace(backend=runner_module.DeepseekV41CacheBackend)]]
+    if fallback == "model":
+        runner.model_config.architecture = "OtherModel"
+    elif fallback in ("pp", "pcp", "dcp"):
+        name = {
+            "pp": "pipeline_parallel_size",
+            "pcp": "prefill_context_parallel_size",
+            "dcp": "decode_context_parallel_size",
+        }[fallback]
+        setattr(runner.parallel_config, name, 2)
+    elif fallback == "kvpp":
+        runner.kvpp.scheduler = object()
+    elif fallback == "mixed":
+        runner.attn_groups[0].append(SimpleNamespace(backend=object))
+    elif fallback == "empty":
+        runner.attn_groups = []
+    with patch.object(runner_module, "uses_a5_packed_cache", return_value=fallback != "hardware"):
+        runner._configure_cpu_seq_lens_sync()
+    assert runner._needs_seq_lens_cpu_sync is (fallback is not None)
+
+
+def test_device_only_postprocess_keeps_device_update_without_d2h():
+    runner = _make_runner()
+    runner.speculator = object()
+    runner._needs_seq_lens_cpu_sync = False
+    runner._copy_num_computed_tokens_to_cpu = MagicMock()
+    with patch.object(GPUModelRunner, "postprocess_sampled") as parent:
+        runner.postprocess_sampled("idx", "tok", 3, 2, query_start_loc="q")
+    parent.assert_called_once_with("idx", "tok", 3, 2, "q")
+    runner._copy_num_computed_tokens_to_cpu.assert_not_called()
+
+
+def test_device_only_cpu_lengths_remain_upper_bounds_without_event_wait():
+    runner, output, batch, _ = _prepare_inputs_runner(speculator=True)
+    runner._needs_seq_lens_cpu_sync = False
+    before = runner.req_states.num_computed_tokens_cpu.clone()
+    runner._update_seq_lens_cpu(output, batch.req_ids)
+    runner.num_computed_tokens_event.synchronize.assert_not_called()
+    torch.testing.assert_close(runner.req_states.num_computed_tokens_cpu, before)
+    for i, req_id in enumerate(batch.req_ids):
+        index = runner.req_states.req_id_to_index[req_id]
+        assert runner.input_buffers.seq_lens_cpu[i] == before[index] + output.num_scheduled_tokens[req_id]
+
+
+def test_device_only_copy_helper_does_not_touch_stream_or_host_buffer():
+    runner = _make_runner()
+    runner._needs_seq_lens_cpu_sync = False
+    # No event/stream/buffer is needed on the device-only route.
+    runner._copy_num_computed_tokens_to_cpu()

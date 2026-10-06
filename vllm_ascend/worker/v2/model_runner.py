@@ -58,6 +58,7 @@ from vllm_ascend.ascend_forward_context import (
     set_mc2_tokens_capacity,
 )
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
+from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.core.profiling_chunk_predictor import (
@@ -372,6 +373,28 @@ class NPUModelRunner(GPUModelRunner):
             static_forward_context=self.compilation_config.static_forward_context,
         )
         self.model_state.kvpp_runtime = self.kvpp
+        self._configure_cpu_seq_lens_sync()
+
+    def _configure_cpu_seq_lens_sync(self) -> None:
+        # MRV1 uses actual layer backends, not the runner's default backend.
+        # V4.1 kernels consume rejection-corrected device lengths; their CPU
+        # lengths are allocation/dispatch upper bounds only. Keep exact copies
+        # for unknown/mixed backends and parallel/pooling consumers.
+        backends = [group.backend for groups in self.attn_groups for group in groups]
+        self._needs_seq_lens_cpu_sync = True
+        if not backends:
+            return
+        parallel = self.parallel_config
+        self._needs_seq_lens_cpu_sync = not (
+            uses_a5_packed_cache()
+            and self.model_config.architecture == "DeepseekV41ForCausalLM"
+            and parallel.pipeline_parallel_size == 1
+            and parallel.prefill_context_parallel_size == 1
+            and parallel.decode_context_parallel_size == 1
+            and self.kvpp.scheduler is None
+            and backends
+            and all(backend is DeepseekV41CacheBackend for backend in backends)
+        )
 
     @torch.inference_mode()
     def execute_model(
@@ -893,7 +916,9 @@ class NPUModelRunner(GPUModelRunner):
         )
 
         # Non-last PP stages receive rejections without owning a speculator.
-        if self.speculator is not None or self.sync_spec_pp_cpu_counts:
+        if (self.speculator is not None or self.sync_spec_pp_cpu_counts) and getattr(
+            self, "_needs_seq_lens_cpu_sync", True
+        ):
             self._copy_num_computed_tokens_to_cpu()
 
     def postprocess_num_computed_tokens(self, input_batch: AscendInputBatch) -> None:
@@ -903,6 +928,8 @@ class NPUModelRunner(GPUModelRunner):
             self._copy_num_computed_tokens_to_cpu()
 
     def _copy_num_computed_tokens_to_cpu(self):
+        if not getattr(self, "_needs_seq_lens_cpu_sync", True):
+            return
         # Attention metadata still needs exact CPU lengths. This non-blocking
         # D2H is waited on in _update_seq_lens_cpu, introducing a host/device
         # sync point that can break asynchronous scheduling overlap.
@@ -927,14 +954,17 @@ class NPUModelRunner(GPUModelRunner):
         # Speculative decoding needs corrected num_computed_tokens after rejection.
         # req_states.num_computed_tokens_cpu shares storage with its NumPy view,
         # so this update also corrects the num_computed_tokens_np used by PCP.
-        if self.speculator is not None or self.sync_spec_pp_cpu_counts:
+        if (self.speculator is not None or self.sync_spec_pp_cpu_counts) and getattr(
+            self, "_needs_seq_lens_cpu_sync", True
+        ):
             # Blocks CPU submission until D2H completes; may stall the async pipeline.
             self.num_computed_tokens_event.synchronize()
             for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
                 req_index = self.req_states.req_id_to_index[req_id]
                 self.req_states.num_computed_tokens_cpu[req_index] = self.num_computed_tokens_cpu[req_index]
 
-        # update seq_lens_cpu
+        # Without a CPU consumer, retain the upstream optimistic upper bound.
+        # prepare_pos_seq_lens still reads exact rejection-corrected NPU state.
         for i, req_id in enumerate(req_ids):  # type: ignore
             req_index = self.req_states.req_id_to_index[req_id]
             num_computed_tokens = self.req_states.num_computed_tokens_cpu[req_index]
