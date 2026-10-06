@@ -131,7 +131,7 @@ from vllm_ascend.attention.attention_c8_mxfp import (
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBuilder
-from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
+from vllm_ascend.attention.dsa_v1 import AscendDSABackend, AscendDSAMetadataBuilder
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
@@ -599,14 +599,6 @@ class NPUModelRunner(GPUModelRunner):
         self.enable_enpu = _enpu is not None and _enpu.lower() == "true"
 
         self._set_up_drafter()
-
-        # Backends that consume CPU seq_lens (AscendAttentionBackend,
-        # AscendMLABackend, and DSV4 compressed attention metadata) need
-        # ``optimistic_seq_lens_cpu`` to match the corrected GPU seq_lens
-        # in async spec decode mode; others (SFA, GDN, etc.) do not.
-        self._needs_seq_lens_cpu_sync = self.use_compress or issubclass(
-            self.attn_backend, (AscendAttentionBackend, AscendMLABackend)
-        )
 
         # kv role
         self.is_kv_producer = False
@@ -1118,6 +1110,20 @@ class NPUModelRunner(GPUModelRunner):
             accepted[:num_reqs].fill(1)
         self.input_batch.num_accepted_tokens_cpu[:num_reqs] = accepted[:num_reqs]
 
+    def _prepare_num_accepted_tokens(self, num_reqs: int, has_prev_mapping: bool) -> None:
+        # Upstream creates this event for every speculative model, but only
+        # Mamba state postprocessing produces accepted counts on the CPU.
+        if self.need_accepted_tokens and self.num_accepted_tokens_event is not None:
+            self.num_accepted_tokens_event.synchronize()
+            self._sync_num_accepted_tokens(num_reqs, has_prev_mapping)
+            self.num_accepted_tokens.np[num_reqs:].fill(1)
+            self.num_accepted_tokens.copy_to_gpu()
+        else:
+            # Async speculative correction below fills participating rows from
+            # device counts. New requests and prefills retain the default of 1.
+            self.num_accepted_tokens.np.fill(1)
+            self.num_accepted_tokens.gpu.fill_(1)
+
     def _pad_query_start_loc_for_fia(
         self,
         query_start_loc: torch.Tensor,
@@ -1550,18 +1556,7 @@ class NPUModelRunner(GPUModelRunner):
         self.discard_request_mask.np[:num_reqs] = discard_requests_mask
         self.discard_request_mask.copy_to_gpu(num_reqs)
 
-        # Sync num_accepted_tokens from CPU (set by
-        # _update_states_after_model_execute for hybrid models).
-        if self.num_accepted_tokens_event is not None:
-            self.num_accepted_tokens_event.synchronize()
-            self._sync_num_accepted_tokens(
-                num_reqs, has_prev_mapping=bool(prev_req_id_to_index)
-            )
-            self.num_accepted_tokens.np[num_reqs:].fill(1)
-            self.num_accepted_tokens.copy_to_gpu()
-        else:
-            self.num_accepted_tokens.np.fill(1)
-            self.num_accepted_tokens.gpu.fill_(1)
+        self._prepare_num_accepted_tokens(num_reqs, has_prev_mapping=bool(prev_req_id_to_index))
 
         # Update num_computed_tokens on GPU. In async spec decode,
         # CPU values are optimistic (all drafts accepted). The kernel
@@ -2530,7 +2525,7 @@ class NPUModelRunner(GPUModelRunner):
                             self.mamba_state_idx,
                         )
 
-                if self.use_compress:
+                if self.use_compress and self._needs_seq_lens_cpu_sync:
                     if deferred_state_corrections_fn:
                         deferred_state_corrections_fn()
                         deferred_state_corrections_fn = None
@@ -3826,7 +3821,7 @@ class NPUModelRunner(GPUModelRunner):
             positions_cpu=(
                 None
                 if get_current_hardware_profile().supports(HardwareCapability.DSV41_PACKED_CACHE)
-                else self._dsa_positions_cpu_buf if self.use_compress else None
+                else self._dsa_positions_cpu_buf if self.use_compress and self._needs_seq_lens_cpu_sync else None
             ),
             attn_state=self.attn_state,
             decode_token_per_req=self.decode_token_per_req,
@@ -6421,6 +6416,16 @@ class NPUModelRunner(GPUModelRunner):
             attn_backends = get_attn_backends_for_group(kv_cache_group_spec)
             attention_backend_maps.append(attn_backends[0])
             attention_backend_list.append(attn_backends[1])
+
+        # Only backends that consume exact CPU lengths need to wait for the
+        # previous step's accepted-token D2H copy. Use the actual layer backends:
+        # the runner's default backend can be AscendAttentionBackend even when
+        # every layer uses device-side metadata (e.g. DeepSeek V4.1).
+        self._needs_seq_lens_cpu_sync = any(
+            issubclass(backend, (AscendAttentionBackend, AscendMLABackend, AscendDSABackend))
+            for backends in attention_backend_list
+            for backend in backends
+        )
 
         self._check_and_update_cudagraph_mode(
             attention_backend_list,

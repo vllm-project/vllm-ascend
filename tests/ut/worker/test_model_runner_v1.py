@@ -36,6 +36,8 @@ from vllm_ascend.attention.attention_c8_mxfp import (
     mxfp_v_scale_cache_shape,
 )
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
+from vllm_ascend.attention.dsa_v1 import AscendDSABackend
+from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
 from vllm_ascend.core.kv_cache_interface import (
@@ -1034,6 +1036,52 @@ class TestAcceptedTokenSnapshot(unittest.TestCase):
         runner.num_accepted_tokens_event = MagicMock()
         return runner
 
+    def test_models_without_mamba_use_device_accepted_counts(self):
+        from vllm_ascend.spec_decode.utils import update_num_computed_tokens_for_batch_change
+
+        runner = self._build_runner()
+        runner.need_accepted_tokens = False
+        runner.num_accepted_tokens.np.fill(99)
+        runner.num_accepted_tokens.gpu.fill_(99)
+        runner.prev_positions.np[:4] = [2, -1, 0, 1]
+        runner._prepare_num_accepted_tokens(4, has_prev_mapping=True)
+
+        runner.num_accepted_tokens_event.synchronize.assert_not_called()
+        np.testing.assert_array_equal(runner.num_accepted_tokens.np, np.ones(12))
+        # Previous rows are reordered, one request is new, and one continuing
+        # prefill has no drafts. Rejected drafts must not advance positions.
+        computed = torch.tensor([10, 20, 30, 999], dtype=torch.int32)
+        update_num_computed_tokens_for_batch_change(
+            computed,
+            runner.num_accepted_tokens.gpu[:4],
+            torch.tensor([2, -1, 0, 1]),
+            torch.tensor([1, 1, 3]),
+            torch.tensor([5, 0, 5]),
+            torch.tensor([36, 0, 16, 21], dtype=torch.int32),
+        )
+        torch.testing.assert_close(computed, torch.tensor([33, 0, 11, 21], dtype=torch.int32))
+        torch.testing.assert_close(runner.num_accepted_tokens.gpu[:4], torch.tensor([3, 1, 1, 1], dtype=torch.int32))
+        torch.testing.assert_close(runner.num_accepted_tokens.gpu[4:], torch.ones(8, dtype=torch.int32))
+
+    def test_mamba_counts_are_read_after_d2h_and_reordered_before_h2d(self):
+        runner = self._build_runner()
+        runner.need_accepted_tokens = True
+        runner.num_accepted_tokens.np.fill(99)
+        runner.prev_positions.np[:3] = [2, -1, 0]
+
+        def finish_copy():
+            runner.num_accepted_tokens.np[:3] = [2, 3, 4]
+
+        runner.num_accepted_tokens_event.synchronize.side_effect = finish_copy
+        runner._prepare_num_accepted_tokens(3, has_prev_mapping=True)
+
+        runner.num_accepted_tokens_event.synchronize.assert_called_once()
+        np.testing.assert_array_equal(runner.input_batch.num_accepted_tokens_cpu[:3], [4, 1, 2])
+        torch.testing.assert_close(
+            runner.num_accepted_tokens.gpu,
+            torch.tensor([4, 1, 2] + [1] * 9, dtype=torch.int32),
+        )
+
     def test_snapshot_survives_request_replacement_and_backend_reorder(self):
         runner = self._build_runner()
         with patch("vllm.v1.worker.gpu_input_batch.PIN_MEMORY", False):
@@ -1819,6 +1867,60 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         )
         self.assertIsNone(specs["model.layers.1.indexer.k_cache"].page_size_padded)
         self.assertIsNone(specs["model.layers.1.indexer.tail_cache"].page_size_padded)
+
+    @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
+    def test_cpu_seq_lengths_follow_actual_layer_backends(self, mock_get_layers):
+        class Builder:
+            def __init__(self, *_args):
+                pass
+
+        cases = (
+            ((DeepseekV41CacheBackend,), False),
+            ((AscendDSABackend,), True),
+            ((AscendMLABackend,), True),
+            ((AscendAttentionBackend,), True),
+            ((DeepseekV41CacheBackend, AscendAttentionBackend), True),
+        )
+        for backends, expected in cases:
+            with self.subTest(backends=backends):
+                runner = self._build_runner()
+                # Both V4 and V4.1 expose compress_ratios; the default backend
+                # and this config flag cannot identify CPU metadata consumers.
+                runner.use_compress = True
+                runner.attn_backend = AscendAttentionBackend
+                runner.attn_groups = []
+                runner._check_and_update_cudagraph_mode = MagicMock()
+                runner.calculate_reorder_batch_threshold = MagicMock()
+                layers = {
+                    f"layer.{index}": SimpleNamespace(
+                        get_attn_backend=lambda backend=backend: backend,
+                        impl=SimpleNamespace(use_mla_rope=False),
+                    )
+                    for index, backend in enumerate(backends)
+                }
+                mock_get_layers.return_value = layers
+                config = KVCacheConfig(
+                    num_blocks=2,
+                    kv_cache_tensors=[],
+                    kv_cache_groups=[
+                        KVCacheGroupSpec(
+                            layer_names=list(layers),
+                            kv_cache_spec=FullAttentionSpec(
+                                block_size=16, num_kv_heads=1, head_size=128, dtype=torch.bfloat16
+                            ),
+                        )
+                    ],
+                )
+                with (
+                    patch.object(DeepseekV41CacheBackend, "get_builder_cls", return_value=Builder),
+                    patch.object(AscendDSABackend, "get_builder_cls", return_value=Builder),
+                    patch.object(AscendMLABackend, "get_builder_cls", return_value=Builder),
+                    patch.object(AscendAttentionBackend, "get_builder_cls", return_value=Builder),
+                ):
+                    runner.initialize_attn_backend(config)
+
+                self.assertEqual(runner._needs_seq_lens_cpu_sync, expected)
+                self.assertEqual({group.backend for group in runner.attn_groups[0]}, set(backends))
 
     @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
     def test_mla_rope_modes_and_cache_layers_use_separate_metadata_groups(self, mock_get_layers):

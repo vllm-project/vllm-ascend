@@ -224,9 +224,7 @@ def test_candidate_source_folded_index_cache_is_in_same_physical_slot(runtime):
     assert tuples[source_slot][:3] == (long_name, index_name, name)
     assert page_sizes[source_slot] >= sum(specs[layer].unpadded_page_size_bytes for layer in tuples[source_slot][:3])
     groups = make_cache_groups(group_cache_specs(specs))
-    planned = get_deepseek_v41_kv_cache_config(
-        runtime, groups, get_deepseek_v41_pool_bytes_per_block(groups) * 2
-    )
+    planned = get_deepseek_v41_kv_cache_config(runtime, groups, get_deepseek_v41_pool_bytes_per_block(groups) * 2)
     assert planned.kv_cache_tensors[source_slot].layers[:3] == [long_name, index_name, name]
     assert planned.kv_cache_tensors[source_slot].block_stride == page_sizes[source_slot]
 
@@ -836,6 +834,41 @@ def test_full_graph_capture_keeps_empty_compressed_descriptor_nonzero(runtime, n
     assert metadata.max_cache_seq_len == 1
     assert metadata.cache_seq_lens.tolist() == [0]
     assert metadata.seq_lens.tolist() == [0]
+
+
+@pytest.mark.parametrize("deferred", [False, True])
+@pytest.mark.parametrize("seq_len", [1, 2, 3])
+def test_async_compressed_lengths_use_device_values_at_rejection_boundary(runtime, deferred, seq_len):
+    spec = collect_specs(runtime)["model.layers.2.self_attn.long_kv_cache"]
+    builder = AscendDSAV41MetadataBuilder(spec, [], runtime, torch.device("cpu"))
+    if deferred:
+        builder.enable_device_metadata()
+    common = SimpleNamespace(
+        slot_mapping=torch.tensor([seq_len - 1]),
+        block_table_tensor=torch.tensor([[0], [1]]),
+        query_start_loc=torch.tensor([0, 1, 1]),
+        query_start_loc_cpu=torch.tensor([0, 1, 1]),
+        seq_lens=torch.tensor([seq_len, 999]),
+        seq_lens_cpu=None,
+        _seq_lens_cpu=torch.tensor([seq_len + 5, 999]),
+        positions=torch.tensor([seq_len - 1]),
+        num_reqs=2,
+        num_actual_tokens=1,
+        num_input_tokens=1,
+        max_query_len=1,
+        max_seq_len=seq_len + 5,
+        is_prefilling=torch.tensor([False, False]),
+    )
+    metadata = builder.build(0, common, num_actual_reqs=1)
+    for task in builder.take_device_metadata_tasks():
+        task.run()
+
+    # An optimistic C2 bound can be nonzero while no complete pair exists.
+    # Padding and rejected tokens must never become readable cache entries.
+    assert metadata.max_cache_seq_len == (seq_len + 5) // 2
+    assert metadata.seq_lens.tolist() == [seq_len, 0]
+    assert metadata.cache_seq_lens.tolist() == [seq_len // 2, 0]
+    assert metadata.cmp_residual.tolist() == [seq_len % 2, 0]
 
 
 @pytest.mark.parametrize("deferred", [False, True])
