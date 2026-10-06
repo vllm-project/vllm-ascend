@@ -43,7 +43,9 @@ from vllm.model_executor.models.utils import WeightsMapper
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
+    AscendDeviceType,
     calc_split_factor,
+    get_ascend_device_type,
 )
 
 from ..methods import get_scheme_class
@@ -347,6 +349,9 @@ class AscendModelSlimConfig(QuantizationConfig):
         # This will be updated by upstream vLLM with model-specific mappings.
         self.packed_modules_mapping: dict[str, list[str]] = {}
         self.quant_description = quant_config if quant_config is not None else {}
+        self.online_quantization = self.quant_description.get("online_quantization", False)
+        self._online_ignored_layers: list[str] = []
+        self._validate_online_quantization()
         self._format_metadata: dict[str, Any] = {}
         self._apply_extra_quant_adaptations()
         self.model_type: str | None = None
@@ -390,6 +395,64 @@ class AscendModelSlimConfig(QuantizationConfig):
         return cls(config)
 
     @classmethod
+    def from_config_dict_json(cls, config: dict[str, Any] | str) -> "AscendModelSlimConfig":
+        """Read explicit online options through vLLM's HF overrides hook."""
+        if isinstance(config, str):
+            config = json.loads(config)
+        if not isinstance(config, dict):
+            raise ValueError("Ascend quantization configuration must be a JSON object.")
+        return cls.from_config(config)
+
+    def _validate_online_quantization(self) -> None:
+        if not isinstance(self.online_quantization, bool):
+            raise ValueError("online_quantization must be a boolean.")
+        if not self.online_quantization:
+            return
+        if self.quant_description.get("model_quant_type") != "W8A8_MXFP8":
+            raise ValueError("Online Ascend quantization currently supports only W8A8_MXFP8.")
+        group_size = self.quant_description.get("group_size", 32)
+        if type(group_size) is not int or group_size != 32:
+            raise ValueError("Online MXFP8 requires group_size=32.")
+        ignored = self.quant_description.get("ignore", [])
+        if not isinstance(ignored, list) or not all(isinstance(prefix, str) for prefix in ignored):
+            raise ValueError("Online MXFP8 ignore must be a list of layer names or patterns.")
+        if any(key.endswith(".weight") for key in self.quant_description):
+            raise ValueError("Online MXFP8 cannot be combined with checkpoint quantization entries; use ignore.")
+        if any(self.quant_description.get(key) for key in ("fa_quant_type", "indexer_quant_type", "kv_cache_type")):
+            raise ValueError("Online MXFP8 does not support KV-cache quantization configuration.")
+        if get_ascend_device_type() != AscendDeviceType.A5:
+            raise ValueError("Online MXFP8 requires an A5 device.")
+        self._online_ignored_layers = list(ignored)
+
+    def _get_online_quant_method(self, layer: torch.nn.Module, prefix: str, tid2eid=None) -> QuantizeMethodBase | None:
+        # Delayed imports avoid the quantization/ops import cycle.
+        from vllm.model_executor.layers.quantization.compressed_tensors.utils import should_ignore_layer
+
+        from ..method_adapters import AscendLinearMethod, AscendOnlineFusedMoEMethod
+        from ..methods.w8a8.w8a8_mxfp8 import AscendMXFP8OnlineLinearMethod, AscendMXFP8OnlineMoEMethod
+
+        if not isinstance(layer, LinearBase) and not is_fused_moe_layer(layer):
+            if isinstance(layer, VocabParallelEmbedding):
+                return UnquantizedEmbeddingMethod()
+            return None
+        vllm_config = get_current_vllm_config()
+        self._update_packed_modules_mapping(vllm_config.model_config.hf_config.model_type)
+        ignored = should_ignore_layer(
+            prefix, ignore=self._online_ignored_layers, fused_mapping=self.packed_modules_mapping
+        )
+        if isinstance(layer, LinearBase):
+            if ignored:
+                from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
+
+                return AscendUnquantizedLinearMethod()
+            return AscendLinearMethod(AscendMXFP8OnlineLinearMethod())
+        if ignored:
+            from vllm_ascend.ops.fused_moe.routed_experts import AscendUnquantizedFusedMoEMethod
+
+            return AscendUnquantizedFusedMoEMethod(layer.moe_config, tid2eid=tid2eid)
+        return AscendOnlineFusedMoEMethod(AscendMXFP8OnlineMoEMethod(), layer.moe_config, tid2eid=tid2eid)
+
+    @classmethod
     def override_quantization_method(cls, hf_quant_cfg, user_quant, hf_config: Any = None) -> str | None:
         if hf_quant_cfg is not None:
             quant_method = hf_quant_cfg.get("quant_method", None)
@@ -411,6 +474,12 @@ class AscendModelSlimConfig(QuantizationConfig):
                 that contains model-specific prefix mappings (HF to vLLM).
         """
         if self._mapper_applied and self.hf_to_vllm_mapper is hf_to_vllm_mapper:
+            return
+
+        if self.online_quantization:
+            self._online_ignored_layers = hf_to_vllm_mapper.apply_list(self._online_ignored_layers)
+            self.hf_to_vllm_mapper = hf_to_vllm_mapper
+            self._mapper_applied = True
             return
 
         self.hf_to_vllm_mapper = hf_to_vllm_mapper
@@ -599,6 +668,9 @@ class AscendModelSlimConfig(QuantizationConfig):
                 self.packed_modules_mapping["experts"] = [f"experts.0.{name}" for name in sorted(shard_names)]
 
     def get_quant_method(self, layer: torch.nn.Module, prefix: str, tid2eid=None) -> Optional["QuantizeMethodBase"]:
+        if self.online_quantization:
+            return self._get_online_quant_method(layer, prefix, tid2eid=tid2eid)
+
         from ..method_adapters import (
             AscendEmbeddingMethod,
             AscendFusedMoEMethod,

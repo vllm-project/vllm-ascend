@@ -16,11 +16,11 @@ vLLM Ascend supports models quantized by two main tools: `ModelSlim` and `LLM-Co
 
 ### 1. ModelSlim (Recommended)
 
-[ModelSlim](https://gitcode.com/Ascend/msmodelslim/blob/master/README.md) is an Ascend-friendly compression tool focused on acceleration, using compression techniques, and built for Ascend hardware. It includes a series of inference optimization technologies such as quantization and compression, aiming to accelerate large language dense models, MoE models, multimodal understanding models, multimodal generation models, etc.
+[ModelSlim](https://github.com/Ascend/msmodelslim/blob/master/README.md) is an Ascend-friendly compression tool focused on acceleration, using compression techniques, and built for Ascend hardware. It includes a series of inference optimization technologies such as quantization and compression, aiming to accelerate large language dense models, MoE models, multimodal understanding models, multimodal generation models, etc.
 
 #### Installation
 
-To use ModelSlim for model quantization, install it from its [Git repository](https://gitcode.com/Ascend/msmodelslim):
+To use ModelSlim for model quantization, install it from its [Git repository](https://github.com/Ascend/msmodelslim):
 
 ```bash
 # Install 26.0.0 version, this is currently the latest stable branch
@@ -33,7 +33,7 @@ bash install.sh
 
 #### Model Quantization
 
-The following example shows how to generate W8A8 quantized weights for the [Qwen3-MoE model](https://gitcode.com/Ascend/msmodelslim/blob/master/example/Qwen3-MOE/README.md).
+The following example shows how to generate W8A8 quantized weights for the [Qwen3-MoE model](https://github.com/Ascend/msmodelslim/blob/master/example/Qwen3-MOE/README.md).
 
 **Quantization Script:**
 
@@ -58,7 +58,7 @@ python3 quant_qwen_moe_w8a8.py --model_path $MODEL_PATH \
 
 After quantization completes, the output directory will contain the quantized model files.
 
-For more examples, refer to the [official examples](https://gitcode.com/Ascend/msmodelslim/tree/master/example).
+For more examples, refer to the [official examples](https://github.com/Ascend/msmodelslim/tree/master/example).
 
 ### 2. LLM-Compressor
 
@@ -172,8 +172,34 @@ python -m vllm.entrypoints.api_server \
     --trust-remote-code 
 ```
 
+## Online MXFP8 from float checkpoints
+
+The `ascend` quantization method can convert original BF16/FP16 weights to
+W8A8 MXFP8 while loading on Ascend 950. It uses the existing
+`quantization_config_dict_json` override and requires no separate ModelSlim
+configuration file.
+
+```bash
+vllm serve Qwen/Qwen3-0.6B --dtype bfloat16 \
+    --quantization ascend \
+    --hf-overrides '{"quantization_config_dict_json":{"online_quantization":true,"model_quant_type":"W8A8_MXFP8","group_size":32,"ignore":["lm_head"]}}'
+```
+
+`online_quantization` is an explicit boolean opt-in. The quantization type must
+be `W8A8_MXFP8`, with group size 32. Linear and fused MoE weights are quantized
+after loading. Optional `ignore` accepts layer names or `re:` patterns; all
+shards of a fused projection must use the same scheme. Embeddings, attention,
+KV cache and ignored layers retain their normal float implementation.
+
+Use a float checkpoint without embedded quantization metadata. This mode
+cannot be mixed with offline per-layer `.weight` entries or KV-cache
+quantization. It initially allocates float weights, so peak loading memory is
+not reduced. For training updates, retain BF16/FP16 source weights and use
+the native layerwise reload lifecycle. Validate accuracy and graph replay on
+Ascend 950 before production use.
+
 ## References
 
-- [ModelSlim GitCode](https://gitcode.com/Ascend/msmodelslim)
+- [ModelSlim GitHub](https://github.com/Ascend/msmodelslim)
 - [LLM-Compressor GitHub](https://github.com/vllm-project/llm-compressor)
 - [vLLM Quantization Guide](https://docs.vllm.ai/en/latest/features/quantization/)
