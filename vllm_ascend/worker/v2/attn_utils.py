@@ -190,14 +190,15 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
         if enable_sfa_dcp_replicated_indexer(vllm_config)
         else 1
     )
-
-    c8_k_cache_dtype = kv_cache_dtype_str_to_dtype(
-        vllm_config.attention_config.indexer_kv_dtype, vllm_config.model_config
-    )
-    if c8_k_cache_dtype == torch.float8_e4m3fn:
-        c8_k_scale_cache_dtype = torch.float32
-    elif c8_k_cache_dtype == torch.int8:
-        c8_k_scale_cache_dtype = torch.float16
+    enable_sparse_li_c8 = vllm_config.attention_config.indexer_kv_dtype in ["fp8", "int8"]
+    if enable_sparse_li_c8:
+        c8_k_cache_dtype = kv_cache_dtype_str_to_dtype(
+            vllm_config.attention_config.indexer_kv_dtype, vllm_config.model_config
+        )
+        if c8_k_cache_dtype == torch.float8_e4m3fn:
+            c8_k_scale_cache_dtype = torch.float32
+        elif c8_k_cache_dtype == torch.int8:
+            c8_k_scale_cache_dtype = torch.float16
 
     c8_cache_dtype = kv_cache_dtype_str_to_dtype(vllm_config.cache_config.cache_dtype, vllm_config.model_config)
 
