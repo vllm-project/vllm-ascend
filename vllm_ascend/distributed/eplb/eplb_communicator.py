@@ -243,14 +243,22 @@ class AscendHixlEplbCommunicator(EplbCommunicator):
                 tensor for layer_views in all_expert_weights for tensor in self._iter_storage_tensors(layer_views)
             ]
             tensors.extend(self._iter_storage_tensors(expert_buffer))
-            self._register_tensor_ranges(tensors)
+            self._register_tensor_segments(tensors)
             self._exchange_remote_state(local_engine, all_expert_weights)
             self._connect_peers()
         except Exception:
             self._close()
             raise
 
-    def _register_tensor_ranges(self, tensors: Sequence[torch.Tensor]) -> None:
+    def _register_tensor_segments(self, tensors: Sequence[torch.Tensor]) -> None:
+        """Register the allocator segments holding the transferable tensors.
+
+        Per-tensor padded ranges fragment into one region per contiguous
+        tensor run and exceed the engine's region limit on deep MoE models,
+        so register whole segments instead: a segment is 2 MiB aligned, which
+        is exactly the granularity a registration accepts, and transfers only
+        ever touch expert slots named in the exchanged remote metadata.
+        """
         segments = sorted(
             {
                 (int(segment["address"]), int(segment["total_size"]))
@@ -258,7 +266,7 @@ class AscendHixlEplbCommunicator(EplbCommunicator):
                 if segment.get("device") == self._device.index
             }
         )
-        ranges: list[tuple[int, int]] = []
+        regions: set[tuple[int, int]] = set()
         for tensor in tensors:
             segment = next(
                 (
@@ -270,37 +278,24 @@ class AscendHixlEplbCommunicator(EplbCommunicator):
             )
             if segment is None:
                 raise RuntimeError("HIXL EPLB could not resolve an allocator segment for every expert tensor")
-            segment_address, segment_size = segment
-            if segment_address % _HIXL_MEMORY_ALIGNMENT or segment_size % _HIXL_MEMORY_ALIGNMENT:
+            if segment[0] % _HIXL_MEMORY_ALIGNMENT or segment[1] % _HIXL_MEMORY_ALIGNMENT:
                 raise RuntimeError("HIXL EPLB allocator segments must be 2 MiB aligned")
-            tensor_start = tensor.data_ptr() // _HIXL_MEMORY_ALIGNMENT * _HIXL_MEMORY_ALIGNMENT
-            tensor_end = (
-                (tensor.data_ptr() + tensor.nbytes + _HIXL_MEMORY_ALIGNMENT - 1)
-                // _HIXL_MEMORY_ALIGNMENT
-                * _HIXL_MEMORY_ALIGNMENT
-            )
-            ranges.append((tensor_start, tensor_end))
-
-        regions: list[tuple[int, int]] = []
-        for start, end in sorted(ranges):
-            if regions and start <= regions[-1][1]:
-                regions[-1] = (regions[-1][0], max(end, regions[-1][1]))
-            else:
-                regions.append((start, end))
-        if len(regions) > _HIXL_MAX_REGISTERED_REGIONS:
+            regions.add(segment)
+        ordered_regions = sorted(regions)
+        if len(ordered_regions) > _HIXL_MAX_REGISTERED_REGIONS:
             raise RuntimeError(
-                f"HIXL EPLB requires {len(regions)} memory registrations; "
+                f"HIXL EPLB requires {len(ordered_regions)} memory registrations; "
                 f"the HIXL limit is {_HIXL_MAX_REGISTERED_REGIONS}"
             )
         if self._rank == 0:
-            registered_bytes = sum(end - start for start, end in regions)
+            registered_bytes = sum(size for _, size in ordered_regions)
             logger.info(
                 "Registering %d NPU memory regions (%.2f GiB) for HIXL EPLB.",
-                len(regions),
+                len(ordered_regions),
                 registered_bytes / 1024**3,
             )
-        for start, end in regions:
-            self._register_region(start, end - start)
+        for start, size in ordered_regions:
+            self._register_region(start, size)
 
     def _register_region(self, address: int, size: int) -> None:
         assert self._engine is not None
