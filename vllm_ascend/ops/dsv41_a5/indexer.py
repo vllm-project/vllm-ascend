@@ -30,16 +30,17 @@ def _prepare_indices(
     )
 
 
-def _common(query, weights, source_cache, source_metadata, compress_ratio):
+def _common(query, weights, source_cache, source_metadata, compress_ratio, quantized_query, query_scale):
     op_metadata = source_metadata.qli_metadata
     if op_metadata is None:
         raise RuntimeError("A5 QLI metadata was not built")
     wait_for_device_metadata(DeviceMetadataStage.INDEXER, id(op_metadata))
-    q_data, q_scale = mxfp4_quantize_e8m0(query)
+    if quantized_query is None:
+        quantized_query, query_scale = mxfp4_quantize_e8m0(query)
     query_start_loc = source_metadata.query_start_loc
     return (
-        q_data,
-        q_scale.unflatten(-1, (2, 2)).contiguous(),
+        quantized_query,
+        query_scale.unflatten(-1, (2, 2)).contiguous(),
         weights.float().contiguous(),
         source_cache[0],
         source_cache[1].unflatten(-1, (2, 2)),
@@ -74,6 +75,8 @@ def _qli(
     candidate_lengths,
     topk_lengths,
     indices_output,
+    quantized_query,
+    query_scale,
 ):
     q, qs, w, k, ks, common = _common(
         query,
@@ -81,6 +84,8 @@ def _qli(
         source_cache,
         source_metadata,
         compress_ratio,
+        quantized_query,
+        query_scale,
     )
     common["layout_k"] = "PA_BBND"
     indices, _, candidate_out, candidate_length = ops.quant_lightning_indexer(
@@ -121,6 +126,8 @@ def _qsli(
     candidate_lengths,
     topk_lengths,
     indices_output,
+    quantized_query,
+    query_scale,
 ):
     if len(source_cache) != 3:
         raise RuntimeError("A5 QSLI requires its source's folded K/scale twin")
@@ -130,6 +137,8 @@ def _qsli(
         source_cache,
         source_metadata,
         compress_ratio,
+        quantized_query,
+        query_scale,
     )
     common.pop("metadata")
     metadata = ops.quant_sparse_lightning_indexer_metadata(
@@ -192,6 +201,8 @@ def run_a5_indexer(
     candidate_lengths,
     topk_lengths,
     indices_output,
+    quantized_query=None,
+    query_scale=None,
 ):
     if uses_candidate_filter:
         return _qsli(
@@ -207,6 +218,8 @@ def run_a5_indexer(
             candidate_lengths=candidate_lengths,
             topk_lengths=topk_lengths,
             indices_output=indices_output,
+            quantized_query=quantized_query,
+            query_scale=query_scale,
         )
     return _qli(
         query,
@@ -223,4 +236,6 @@ def run_a5_indexer(
         candidate_lengths=candidate_lengths,
         topk_lengths=topk_lengths,
         indices_output=indices_output,
+        quantized_query=quantized_query,
+        query_scale=query_scale,
     )
