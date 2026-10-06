@@ -461,6 +461,9 @@ def test_v1_draft_builder_owns_history_and_padding_without_manager_override(rank
         is_prefilling=torch.ones(16, dtype=torch.bool),
         context_parallel_metadata=object(),
     )
+    # Production __init__ pre-allocates this graph-replay buffer; the fixture
+    # builds the builder without __init__, so provide it explicitly.
+    builder._seq_lens_device_buffer = torch.empty(common.num_reqs + 1, dtype=torch.int32)
     manager = object.__new__(DCPManager)
     manager.dcp_world_size, manager.dcp_world_rank = 2, rank
     manager.vllm_config = builder.vllm_config
