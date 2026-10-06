@@ -163,6 +163,15 @@ class SimpleCPUOffloadNPUWorker(SimpleCPUOffloadWorker):
             self.store_stream,
         )
 
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        """NPU blocks whose load copy raised, so vLLM can apply its policy.
+
+        The copy backend still records a completion event for a failed job, so
+        the request is reported as finished receiving in the usual pass; without
+        this the engine would attend over blocks that were never written.
+        """
+        return self._backend.drain_load_errors()
+
     def get_finished(
         self,
         finished_req_ids: set[str],
