@@ -27,6 +27,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.kv_cache_interface import CircularBufferSpec
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.dsa_v1 import build_dspark_swa_indices, dsv4_dsa_overlap_stream
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
@@ -241,6 +242,7 @@ class AscendDSAV41Impl:
     """
 
     def __init__(self, prefix, role, topology, long_kv_source_prefix, index_k_source_prefix):
+        self.multistream_dsv4_dsa_overlap = get_ascend_config().multistream_dsv4_dsa_overlap
         self.prefix = prefix
         self.layer_name = f"{prefix}.attn"
         self.role = role
@@ -291,15 +293,41 @@ class AscendDSAV41Impl:
             self._write_compressed_source(attn, hidden_states, positions, cos, sin, metadata)
 
     def _prepare_inputs_and_caches(self, attn, hidden_states, metadata, metadata_by_prefix):
-        """CP overrides this to update replicated caches before local queries."""
-        pass
+        return self._preprocess(attn, hidden_states, hidden_states, metadata, metadata)
 
-    def _prepare_queries(self, attn, hidden_states, positions, cos, sin, metadata):
-        hidden_states = hidden_states[: metadata.swa.num_actual_tokens]
-        q, qr = self.multistream_preprocess(attn, hidden_states, cos, sin, metadata.swa)
-        if self.role.is_kv_source:
-            self._write_compressed_source(attn, hidden_states, positions, cos, sin, metadata)
-        return q, qr
+    def _preprocess(self, attn, query_hidden, cache_hidden, query_metadata, cache_metadata):
+        query_hidden = query_hidden[: query_metadata.swa.num_actual_tokens]
+        cache_hidden = cache_hidden[: cache_metadata.swa.num_actual_tokens]
+        if not query_hidden.shape[0]:
+            self._update_caches(attn, cache_hidden, cache_metadata)
+            return None, None
+        cos, sin = query_metadata.rope(attn.rotary_emb.layername, query_hidden.shape[0])
+        kv_cos, kv_sin = cache_metadata.rope(attn.rotary_emb.layername, cache_hidden.shape[0])
+        if self.multistream_dsv4_dsa_overlap and cache_hidden.shape[0]:
+            q, qr = self.multistream_preprocess(
+                attn,
+                query_hidden,
+                cache_hidden,
+                kv_cos,
+                kv_sin,
+                cache_metadata.swa,
+                share_inputs=query_metadata is cache_metadata,
+            )
+        else:
+            qr = attn.q_norm(attn.wq_a(query_hidden))
+            q = attn.wq_b(qr).unflatten(-1, (-1, attn.head_dim))
+            if cache_hidden.shape[0]:
+                kv = self._project_kv(attn, cache_hidden, kv_cos, kv_sin)
+                scatter_cache_sk(attn.dsa_attn.swa_cache_layer.kv_cache[0], cache_metadata.swa.slot_mapping, kv)
+        # Compression may reuse the RoPE scratch tables backing Q's views.
+        torch.ops._C_ascend.inplace_partial_rotary_mul(
+            q.unsqueeze(1), cos, sin, rotary_mode="interleave", partial_slice=[attn.nope_head_dim, attn.head_dim]
+        )
+        if self.role.is_kv_source and cache_hidden.shape[0]:
+            self._write_compressed_source(
+                attn, cache_hidden, cache_metadata.positions[: cache_hidden.shape[0]], kv_cos, kv_sin, cache_metadata
+            )
+        return q.to(query_hidden.dtype), qr
 
     def _project_output(self, attn, output, hidden_states, metadata, *, projected):
         padded = output
@@ -309,73 +337,57 @@ class AscendDSAV41Impl:
         attn.dsa_attn.dsa_attn.impl._forward_o_proj(padded, projected)
         return projected
 
-    def multistream_preprocess(self, attn, hidden_states, cos, sin, swa_metadata):
-        """Overlap Q Vector work with KV Cube work, then reverse their roles.
-
-        Reuse V1's stream and projection wrappers. V4.1 keeps floating-point
-        qr for its indexer and has no post-Wq_b Q RMSNorm. Stage events serialize
-        the Cube matmuls; the final join makes SWA writes visible to attention.
-        """
+    def multistream_preprocess(self, attn, query_hidden, cache_hidden, kv_cos, kv_sin, swa_metadata, *, share_inputs):
+        """Serialize Cube matmuls while overlapping independent Q/KV Vector work."""
         main_stream = torch.npu.current_stream()
         aux_stream = dsv4_dsa_overlap_stream()
         v1_impl = attn.dsa_attn.dsa_attn.impl
         wq_a, wkv, wq_b = v1_impl.cv_wq_a, v1_impl.cv_wkv, v1_impl.cv_wq_b
         share_quant = (
-            type(wq_a._quant_method) is type(wkv._quant_method) and wq_a._has_communication == wkv._has_communication
+            share_inputs
+            and type(wq_a._quant_method) is type(wkv._quant_method)
+            and wq_a._has_communication == wkv._has_communication
         )
+        try:
+            q_quant, q_scale = wq_a.quantize(query_hidden)
+            kv_quant_done = None
+            if share_quant:
+                kv_quant, kv_scale = q_quant, q_scale
+            else:
+                q_quant_done = main_stream.record_event()
+                with npu_stream_switch(aux_stream):
+                    aux_stream.wait_event(q_quant_done)
+                    kv_quant, kv_scale = wkv.quantize(cache_hidden)
+                    kv_quant_done = aux_stream.record_event()
+            q_a = wq_a.matmul(q_quant, q_scale, bias=attn.wq_a.bias)
 
-        # Part 1: Q_a matmul (Cube) overlaps independent KV quantization (Vector).
-        q_quant, q_scale = wq_a.quantize(hidden_states)
-        kv_quant_done = None
-        if share_quant:
-            kv_quant, kv_scale = q_quant, q_scale
-        else:
-            q_quant_done = main_stream.record_event()
-            with npu_stream_switch(aux_stream, enabled=True):
-                aux_stream.wait_event(q_quant_done)
-                kv_quant, kv_scale = wkv.quantize(hidden_states)
-                kv_quant_done = aux_stream.record_event()
-        q_a = wq_a.matmul(q_quant, q_scale, bias=attn.wq_a.bias)
+            part2_start = main_stream.record_event()
+            if kv_quant_done is not None:
+                main_stream.wait_event(kv_quant_done)
+            with npu_stream_switch(aux_stream):
+                aux_stream.wait_event(part2_start)
+                kv = wkv.matmul(kv_quant, kv_scale, bias=attn.wkv.bias)
+                kv_matmul_done = aux_stream.record_event()
+            qr = attn.q_norm(q_a)
+            q_b_quant, q_b_scale = wq_b.quantize(qr)
 
-        # Part 2: Q normalization/quantization (Vector) overlaps KV matmul (Cube).
-        part2_start = main_stream.record_event()
-        if kv_quant_done is not None:
-            main_stream.wait_event(kv_quant_done)
-        with npu_stream_switch(aux_stream, enabled=True):
-            aux_stream.wait_event(part2_start)
-            kv = wkv.matmul(kv_quant, kv_scale, bias=attn.wkv.bias)
-            kv_matmul_done = aux_stream.record_event()
-        qr = attn.q_norm(q_a)
-        q_b_quant, q_b_scale = wq_b.quantize(qr)
-
-        # Part 3: Q_b matmul (Cube) overlaps KV norm, RoPE and cache store (Vector).
-        part3_start = main_stream.record_event()
-        main_stream.wait_event(kv_matmul_done)
-        with npu_stream_switch(aux_stream, enabled=True):
-            aux_stream.wait_event(part3_start)
-            kv = attn.kv_norm(kv).view(-1, 1, attn.head_dim)
-            torch.ops._C_ascend.inplace_partial_rotary_mul(
-                kv.unsqueeze(1),
-                cos,
-                sin,
-                rotary_mode="interleave",
-                partial_slice=[attn.nope_head_dim, attn.head_dim],
-            )
-            scatter_cache_sk(
-                attn.dsa_attn.swa_cache_layer.kv_cache[0],
-                swa_metadata.slot_mapping,
-                kv.squeeze(1),
-            )
-        q = wq_b.matmul(q_b_quant, q_b_scale, bias=attn.wq_b.bias).unflatten(-1, (attn.n_local_heads, attn.head_dim))
-        main_stream.wait_stream(aux_stream)
-        torch.ops._C_ascend.inplace_partial_rotary_mul(
-            q.unsqueeze(1),
-            cos,
-            sin,
-            rotary_mode="interleave",
-            partial_slice=[attn.nope_head_dim, attn.head_dim],
-        )
-        return q.to(hidden_states.dtype), qr
+            part3_start = main_stream.record_event()
+            main_stream.wait_event(kv_matmul_done)
+            with npu_stream_switch(aux_stream):
+                aux_stream.wait_event(part3_start)
+                kv = attn.kv_norm(kv).view(-1, 1, attn.head_dim)
+                torch.ops._C_ascend.inplace_partial_rotary_mul(
+                    kv.unsqueeze(1),
+                    kv_cos,
+                    kv_sin,
+                    rotary_mode="interleave",
+                    partial_slice=[attn.nope_head_dim, attn.head_dim],
+                )
+                scatter_cache_sk(attn.dsa_attn.swa_cache_layer.kv_cache[0], swa_metadata.slot_mapping, kv.squeeze(1))
+            q = wq_b.matmul(q_b_quant, q_b_scale, bias=attn.wq_b.bias).unflatten(-1, (-1, attn.head_dim))
+        finally:
+            main_stream.wait_stream(aux_stream)
+        return q, qr
 
     def _write_compressed_source(
         self,
@@ -543,12 +555,11 @@ class AscendDSAV41Impl:
             output.zero_()
             return output
         metadata = self._get_layer_metadata(forward_context.attn_metadata)
-        self._prepare_inputs_and_caches(attn, hidden_states, metadata, forward_context.attn_metadata)
+        q, qr = self._prepare_inputs_and_caches(attn, hidden_states, metadata, forward_context.attn_metadata)
         num_tokens = metadata.swa.num_actual_tokens
         if num_tokens:
             positions = metadata.positions[:num_tokens]
             cos, sin = metadata.rope(attn.rotary_emb.layername, num_tokens)
-            q, qr = self._prepare_queries(attn, hidden_states, positions, cos, sin, metadata)
             compressed_indices = self._select_sparse_indices(attn, hidden_states, qr, positions, cos, sin, metadata)
             attention_output = self._forward_attention(attn, q, metadata, compressed_indices)
             torch.ops._C_ascend.inplace_partial_rotary_mul(
@@ -590,8 +601,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         max_tokens = getattr(vllm_config.scheduler_config, "max_num_batched_tokens", 4096)
         max_reqs = getattr(vllm_config.scheduler_config, "max_num_seqs", 256)
         self._supports_device_ops = getattr(device, "type", "cpu") != "cpu"
-        # CP uses global cache-write controls and local query controls. These
-        # roles are fixed before allocation and graph capture.
+        # Allocate both decode and prefill owners before graph capture.
         self._build_query_metadata = build_query_metadata
         self._build_compressor_metadata = build_compressor_metadata
         if isinstance(kv_cache_spec, CircularBufferSpec):
@@ -961,7 +971,12 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         c2_source_cos = None
         c2_source_sin = None
         c2_metadata_group_id = None
-        if self._build_compressor_metadata and cache_kind == "compressor_state" and positions is not None:
+        if (
+            self._build_compressor_metadata
+            and kwargs.get("build_compressor_metadata", True)
+            and cache_kind == "compressor_state"
+            and positions is not None
+        ):
             ring_meta = self._c2_ring_metadata[: 5 * num_reqs].view(5, num_reqs)
             input_positions = positions
             if self._supports_device_ops:
@@ -1083,7 +1098,9 @@ class DeepseekV41CacheBackend(AttentionBackend):
 
     @staticmethod
     def get_impl_cls():
-        return AscendDSAV41Impl
+        from vllm_ascend.attention.context_parallel.dsa_v41_cp import get_v41_cp_classes
+
+        return get_v41_cp_classes()[1]
 
     @staticmethod
     def get_builder_cls():
@@ -1093,7 +1110,7 @@ class DeepseekV41CacheBackend(AttentionBackend):
 
     @classmethod
     def supports_pcp(cls) -> bool:
-        return False
+        return True
 
     @staticmethod
     def get_kv_cache_shape(num_blocks, block_size, num_kv_heads, head_size, cache_dtype_str="auto"):

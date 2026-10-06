@@ -1,4 +1,5 @@
 import math
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, ClassVar, TypeAlias
 
@@ -2622,6 +2623,36 @@ class AscendDSAPCPImpl(dsa_v1.AscendDSAImpl):
         for _, method, state in self._get_pcp_o_proj_weight_switches():
             method.all_gather_weight(state, self.pcp_o_proj_weight_switch_config)
 
+    @contextmanager
+    def pcp_o_proj_batch(self, *, has_prefill: bool):
+        self._pcp_o_proj_use_full_weight = self.enable_pcp_o_proj_weight_sharding and has_prefill
+        try:
+            # Initialize persistent aliases after loading, including profile warmup.
+            if self.enable_pcp_o_proj_weight_sharding:
+                self._get_pcp_o_proj_weight_switches()
+            yield
+        finally:
+            error = None
+            for layer, method, state in self._pcp_o_proj_weight_switches or ():
+                try:
+                    if state.handles:
+                        method.wait_weight_all_gather(state)
+                except Exception as exc:
+                    error = error or exc
+                try:
+                    if self._pcp_o_proj_use_full_weight:
+                        method.switch_weight(layer, state, use_full_weight=False)
+                except Exception as exc:
+                    error = error or exc
+            self._pcp_o_proj_use_full_weight = False
+            if error is not None:
+                raise error
+
+    def forward(self, layer_name, hidden_states, kv_cache, attn_metadata, output=None):
+        has_prefill = attn_metadata is not None and isinstance(next(iter(attn_metadata.values())), AscendDSAPCPMetadata)
+        with self.pcp_o_proj_batch(has_prefill=has_prefill):
+            return super().forward(layer_name, hidden_states, kv_cache, attn_metadata, output)
+
     def _forward_o_proj_with_local_weights(self, o_proj_input: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
         # Decode tokens and their KV cache updates are replicated across PCP
         # ranks, so each rank projects the same attention output locally.
@@ -2679,10 +2710,10 @@ class AscendDSAPCPImpl(dsa_v1.AscendDSAImpl):
             return self._forward_o_proj_with_local_weights(o_proj_input, output)
 
         weight_switches = self._get_pcp_o_proj_weight_switches()
-        for layer, method, state in weight_switches:
-            method.wait_weight_all_gather(state)
-            method.switch_weight(layer, state, use_full_weight=True)
         try:
+            for layer, method, state in weight_switches:
+                method.wait_weight_all_gather(state)
+                method.switch_weight(layer, state, use_full_weight=True)
             return super()._forward_o_proj(o_proj_input, output)
         finally:
             for layer, method, state in weight_switches:
