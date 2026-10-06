@@ -16,6 +16,8 @@
 # This file is a part of the vllm-ascend project.
 #
 import os
+from functools import lru_cache
+from importlib import import_module
 from typing import Any
 
 import torch
@@ -418,9 +420,12 @@ class BaseDeviceAdaptor:
         actual_seq_lengths_query: torch.Tensor,
         actual_seq_lengths_key: torch.Tensor,
         enable_sparse_li_c8: bool,
+        enable_sparse_li_c4: bool,
         use_torch_npu_lightning_indexer: bool,
     ) -> torch.Tensor:
         indexer_cache_idx = indexer_k_cache_idx
+        if enable_sparse_li_c4:
+            raise RuntimeError("C4 lightning indexer is only supported on A5 devices.")
 
         if enable_sparse_li_c8:
             # ``kv_cache`` is the indexer's own cache tuple (k + scale).
@@ -962,6 +967,12 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             key_cache=var.view(var.shape[0], 1, 1, width),
         )
         return True
+
+    @staticmethod
+    @lru_cache(maxsize=1)
+    def _load_cann_quant_lightning_indexer_ops():
+        ops = import_module("cann_ops_transformer.ops")
+        return ops.quant_lightning_indexer_metadata, ops.quant_lightning_indexer
 
     @classmethod
     def reshape_and_cache(
@@ -1594,12 +1605,86 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         actual_seq_lengths_query: torch.Tensor,
         actual_seq_lengths_key: torch.Tensor,
         enable_sparse_li_c8: bool,
+        enable_sparse_li_c4: bool,
         use_torch_npu_lightning_indexer: bool,
     ) -> torch.Tensor:
         indexer_cache_idx = indexer_k_cache_idx
         indexer_scale_cache_idx = indexer_scale_cache_idx
 
-        if enable_sparse_li_c8:
+        if enable_sparse_li_c4:
+            assert len(kv_cache) == 2
+            assert q_li_shape_ori is not None
+            assert q_li_scale is not None
+
+            # C4 uses cann_ops_transformer.quant_lightning_indexer (V2 API)
+            # with quant_mode=5: q/k=float4_e2m1, scale=float8_e8m0, w=float32.
+            # V2 API uses: topk (not sparse_count), mask_mode (not sparse_mode),
+            # cu_seqlens_q/seqused_k (not actual_seq_lengths_*),
+            # and requires metadata from quant_lightning_indexer_metadata.
+            # k_descale (PA_BBND, quant_mode=5): (block_num, block_size, k_n, d/64, 2)
+            key_dequant_scale = kv_cache[indexer_scale_cache_idx]
+            # quant_mode=5 requires weights to be float32.
+            weights_c4 = weights.to(torch.float32)
+
+            # TND layout requires cu_seqlens_q (b+1,) cumulative.
+            # actual_seq_lengths_query is cum_query_lens = query_start_loc[1:] (b,).
+            # Reconstruct full cu_seqlens_q by prepending 0.
+            cu_seqlens_q = torch.cat(
+                [
+                    torch.zeros(1, dtype=actual_seq_lengths_query.dtype,
+                                device=actual_seq_lengths_query.device),
+                    actual_seq_lengths_query,
+                ]
+            )
+            seqused_k = actual_seq_lengths_key
+
+            num_heads_q = q_li_shape_ori[1]
+            head_dim = q_li_shape_ori[-1]
+            batch_size = seqused_k.shape[0]
+
+            quant_li_metadata_op, quant_li_op = A5DeviceAdaptor._load_cann_quant_lightning_indexer_ops()
+
+            metadata = quant_li_metadata_op(
+                num_heads_q=num_heads_q,
+                num_heads_k=1,
+                head_dim=head_dim,
+                topk=2048,
+                quant_mode=5,
+                cu_seqlens_q=cu_seqlens_q,
+                seqused_k=seqused_k,
+                batch_size=batch_size,
+                max_seqlen_q=-1,
+                max_seqlen_k=-1,
+                layout_q="TND",
+                layout_k="PA_BBND",
+                mask_mode=3,
+                cmp_ratio=1,
+            )
+
+            # FP4 (float4_e2m1fn_x2) packs 2 values per byte: npu_dynamic_mx_quant
+            # returns half the elements.  View q_li to the packed shape (d/2)
+            # rather than the original logical shape (d).
+            q_li_packed_shape = (*q_li_shape_ori[:-1], q_li_shape_ori[-1] // 2)
+            topk_indices, _ = quant_li_op(
+                q_li.view(q_li_packed_shape),
+                kv_cache[indexer_cache_idx],
+                weights_c4,
+                q_li_scale,
+                key_dequant_scale,
+                topk=2048,
+                quant_mode=5,
+                cu_seqlens_q=cu_seqlens_q,
+                seqused_k=seqused_k,
+                block_table=attn_metadata.block_table,
+                metadata=metadata,
+                max_seqlen_q=-1,
+                layout_q="TND",
+                layout_k="PA_BBND",
+                mask_mode=3,
+                cmp_ratio=1,
+                return_value=0,
+            )
+        elif enable_sparse_li_c8:
             # ``kv_cache`` is the indexer's own cache tuple (k + scale).
             assert len(kv_cache) == 2
             assert q_li_shape_ori is not None
