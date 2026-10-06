@@ -164,6 +164,10 @@ def test_execute_model_records_profiling_time():
             "execute_model",
             return_value=None,
         ) as mock_execute_model,
+        patch(
+            "vllm_ascend.worker.v2.model_runner.should_skip_allreduce_across_dp_group",
+            return_value=False,
+        ),
         patch("vllm_ascend.core.profiling_chunk_predictor.torch.npu.synchronize") as mock_synchronize,
         patch(
             "vllm_ascend.core.profiling_chunk_predictor.time.perf_counter",
@@ -197,6 +201,10 @@ def test_execute_model_disables_profiling_timer_and_clears_stale_time():
             "execute_model",
             return_value=None,
         ),
+        patch(
+            "vllm_ascend.worker.v2.model_runner.should_skip_allreduce_across_dp_group",
+            return_value=False,
+        ),
         patch("vllm_ascend.core.profiling_chunk_predictor.torch.npu.synchronize") as mock_synchronize,
         patch("vllm_ascend.core.profiling_chunk_predictor.time.perf_counter") as mock_perf_counter,
     ):
@@ -207,6 +215,31 @@ def test_execute_model_disables_profiling_timer_and_clears_stale_time():
     assert runner._cpp_execution_time_ms is None
     mock_synchronize.assert_not_called()
     mock_perf_counter.assert_not_called()
+
+
+def test_execute_model_skips_dp_coordination_when_safe():
+    runner = _make_runner(need_timing=False)
+    scheduler_output = SimpleNamespace(disable_profiling_timing=True)
+    coordination_context = MagicMock()
+
+    with (
+        patch.object(GPUModelRunner, "execute_model", return_value=None) as mock_execute_model,
+        patch(
+            "vllm_ascend.worker.v2.model_runner.should_skip_allreduce_across_dp_group",
+            return_value=True,
+        ) as mock_should_skip,
+        patch(
+            "vllm_ascend.worker.v2.model_runner.skip_dp_coordination",
+            return_value=coordination_context,
+        ) as mock_skip_context,
+    ):
+        runner.execute_model(scheduler_output)
+
+    mock_should_skip.assert_called_once_with(runner.vllm_config)
+    mock_skip_context.assert_called_once_with()
+    coordination_context.__enter__.assert_called_once_with()
+    coordination_context.__exit__.assert_called_once()
+    mock_execute_model.assert_called_once()
 
 
 def test_full_decode_only_keeps_graph_descriptor_request_count():
@@ -475,6 +508,10 @@ def test_kvpp_history_ignores_padding_and_dummy_work(monkeypatch, computed, dumm
         return metadata
 
     monkeypatch.setattr(GPUModelRunner, "execute_model", forward)
+    monkeypatch.setattr(
+        "vllm_ascend.worker.v2.model_runner.should_skip_allreduce_across_dp_group",
+        lambda _config: False,
+    )
     assert runner.execute_model(SimpleNamespace(), dummy_run=dummy_run, is_profile=is_profile) is metadata
     assert events == ([("prepare", expected)] if enabled else []) + ["forward", "complete"]
     assert state.kvpp_is_dummy_run is False
