@@ -1,26 +1,30 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Official QLI pair accuracy with the framework custom OPP still enabled.
+"""Official QLI accuracy and score-output behavior with custom OPP enabled.
 
 Run only on an available Ascend 950 device with matching CANN libraries.
-This test does not remove custom OPP paths or import cann_ops_transformer.
+The official return_value=1 path is not supported by the custom candidate API.
 """
 
 from functools import partial
 
+import cann_ops_transformer  # noqa: F401
 import pytest
 import torch
 import torch_npu  # noqa: F401
-import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401
 
-from vllm_ascend.utils import enable_custom_op
+from vllm_ascend.utils import bootstrap_custom_op_env
 
 
 @pytest.mark.parametrize("quant_mode", [1, 5])
-@pytest.mark.parametrize("batch,qlen,klen", [(1, 1, 128), (1, 8, 4096), (2, 1, 4096)])
+@pytest.mark.parametrize("batch,qlen,klen,return_value", [(1, 1, 128, 1), (1, 8, 4096, 0), (2, 1, 4096, 0)])
 @torch.inference_mode()
-def test_cann_qli_against_cpu(quant_mode, batch, qlen, klen):
-    enable_custom_op()
+def test_cann_qli_against_cpu(quant_mode, batch, qlen, klen, return_value):
+    # A5 disables enable_custom_op() globally; load the installed custom OPP
+    # explicitly so the official and renamed custom registrations coexist.
+    bootstrap_custom_op_env()
+    import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401
+
     torch.manual_seed(123)
     heads, dim, block_size, topk = 64, 128, 128, 2048
     total_q = batch * qlen
@@ -52,7 +56,7 @@ def test_cann_qli_against_cpu(quant_mode, batch, qlen, klen):
     cu_q = torch.arange(batch + 1, dtype=torch.int32, device="npu") * qlen
     used_k = torch.full((batch,), klen, dtype=torch.int32, device="npu")
     make_metadata = partial(
-        torch.ops._C_ascend.npu_quant_lightning_indexer_v2_metadata_cann,
+        torch.ops.cann_ops_transformer.quant_lightning_indexer_metadata,
         heads,
         1,
         dim,
@@ -70,7 +74,7 @@ def test_cann_qli_against_cpu(quant_mode, batch, qlen, klen):
     )
     metadata = make_metadata()
     run_qli = partial(
-        torch.ops._C_ascend.npu_quant_lightning_indexer_v2_cann,
+        torch.ops.cann_ops_transformer.quant_lightning_indexer,
         query,
         key,
         weights,
@@ -87,13 +91,18 @@ def test_cann_qli_against_cpu(quant_mode, batch, qlen, klen):
         layout_k="PA_BBND",
         mask_mode=3,
         cmp_ratio=1,
-        return_value=0,
+        return_value=return_value,
     )
     indices, values = run_qli()
     torch.npu.synchronize()
     assert indices.shape == (total_q, 1, topk)
     assert indices.dtype == torch.int32
-    assert values.numel() == 0
+    if return_value:
+        assert values.shape == indices.shape
+        assert values.dtype == torch.bfloat16
+        assert torch.isfinite(values[indices >= 0]).all()
+    else:
+        assert values.numel() == 0
     indices = indices.cpu().long()
     for b in range(batch):
         logical_key = key_ref[pages[b]].reshape(klen, dim)
