@@ -374,7 +374,8 @@ class NPUPlatform(Platform):
 
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: VllmConfig) -> None:
-        super().update_block_size_for_backend(vllm_config)
+        if get_current_hardware_profile().attention_backend_family is not AttentionBackendFamily.COMPATIBILITY:
+            super().update_block_size_for_backend(vllm_config)
 
         # TODO: NPU still sets block_size in check_and_update_config.
         # Move that logic here so block_size is chosen by the backend.
