@@ -17,14 +17,14 @@ importlib.import_module("vllm_ascend.vllm_ascend_C")
 patch_uva = importlib.import_module("vllm_ascend.patch.worker.patch_v2.patch_uva")
 
 try:
-    import triton
-    import triton.language as tl
+    import triton  # type: ignore[import-untyped, import-not-found]
+    import triton.language as tl  # type: ignore[import-untyped, import-not-found]
 except ImportError:
     triton = None
     tl = None
 
 try:
-    triton_ascend_version = version("triton-ascend")
+    triton_ascend_version: str | None = version("triton-ascend")
 except PackageNotFoundError:
     triton_ascend_version = None
 
