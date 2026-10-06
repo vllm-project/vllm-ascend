@@ -485,6 +485,9 @@ function(add_bin_compile_target)
         # kernel sources and ASCEND_OP_NAME selection retain the old directory name.
         if (_op_name STREQUAL "quant_lightning_indexer_v2")
             set(vllm_ascend_quant_lightning_indexer_v2_dir ${_op_info})
+            if (DEFINED quant_lightning_indexer_v2_depends)
+                set(vllm_ascend_quant_lightning_indexer_v2_depends ${quant_lightning_indexer_v2_depends})
+            endif()
         endif()
     endforeach()
 
