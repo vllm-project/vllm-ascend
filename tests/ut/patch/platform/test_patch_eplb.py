@@ -54,6 +54,9 @@ def test_parallel_and_vllm_config_keep_upstream_validation():
         patch("vllm_ascend.logger.configure_ascend_file_logging"),
         patch("vllm_ascend.logger.configure_ascend_logging"),
         patch("vllm.distributed.nixl_utils.is_nixl_available", return_value=False),
+        # Stub the local probe: whether this container happens to ship a
+        # usable hixl binding must not change the assertion.
+        patch.object(patch_eplb, "_probe_local_hixl_binding", return_value=("none", "stubbed")),
     ):
         parallel_config = ParallelConfig(
             tensor_parallel_size=2,
