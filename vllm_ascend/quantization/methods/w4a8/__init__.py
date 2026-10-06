@@ -16,7 +16,10 @@
 #
 """W4A8 quantization methods for Ascend NPU."""
 
-from .w4a8 import AscendW4A8DynamicFusedMoEMethod
+from .w4a8 import (
+    AscendKimiK3W4A8DynamicLinearMethod,
+    AscendW4A8DynamicFusedMoEMethod,
+)
 from .w4a8_mxfp4 import (
     AscendW4A8MXFPDSDynamicFusedMoEMethod,
     AscendW4A8MXFPDynamicFusedMoEMethod,
@@ -24,6 +27,7 @@ from .w4a8_mxfp4 import (
 )
 
 __all__ = [
+    "AscendKimiK3W4A8DynamicLinearMethod",
     "AscendW4A8DynamicFusedMoEMethod",
     "AscendW4A8MXFPDSDynamicFusedMoEMethod",
     "AscendW4A8MXFPDynamicFusedMoEMethod",
