@@ -1,5 +1,5 @@
 import ast
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
@@ -40,6 +40,42 @@ def _make_runner(need_timing: bool = True):
     # these tests focus on buffer refresh / upstream passthrough only.
     runner.kv_cache_config = SimpleNamespace(kv_cache_groups=[])
     return runner
+
+
+@pytest.mark.parametrize("dummy", [False, True])
+@pytest.mark.parametrize("fail", [False, True])
+def test_metadata_and_dp_skip_scopes_coexist_and_retire(monkeypatch, dummy, fail):
+    runner = _make_runner(need_timing=False)
+    active = set()
+
+    @contextmanager
+    def scope(name):
+        active.add(name)
+        try:
+            yield
+        finally:
+            active.remove(name)
+
+    runner.model_state.device_metadata = SimpleNamespace(activate=lambda: scope("metadata"))
+    module = "vllm_ascend.worker.v2.model_runner."
+    monkeypatch.setattr(module + "has_kv_transfer_group", lambda: False)
+    monkeypatch.setattr(module + "should_skip_allreduce_across_dp_group", lambda _config: True)
+    monkeypatch.setattr(module + "skip_dp_coordination", lambda: scope("dp_skip"))
+
+    def forward(_self, _output, **kwargs):
+        assert active == {"metadata", "dp_skip"}
+        assert kwargs["dummy_run"] is dummy
+        if fail:
+            raise ValueError("forward failed")
+        return "output"
+
+    monkeypatch.setattr(GPUModelRunner, "execute_model", forward)
+    if fail:
+        with pytest.raises(ValueError, match="forward failed"):
+            runner.execute_model(SimpleNamespace(), dummy_run=dummy)
+    else:
+        assert runner.execute_model(SimpleNamespace(), dummy_run=dummy) == "output"
+    assert active == set()
 
 
 def _make_batch_state(computed: list[int], scheduled: list[int], prefill_lens: list[int]) -> BatchReqState:
@@ -608,7 +644,9 @@ def test_sample_tokens_spec_pp_broadcasts_draft_tokens():
     runner.pp_handler.broadcast_drafts.assert_called_once_with()
 
 
-def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp():
+@pytest.mark.parametrize("a5", [False, True])
+@pytest.mark.parametrize("architecture", ["DeepseekV41ForCausalLM", "OtherModel"])
+def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture):
     """Cache binding precedes KDA preparation and preserves PCP setup."""
     runner = _make_runner()
     runner.compilation_config = SimpleNamespace(static_forward_context={})
@@ -618,7 +656,7 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp():
     runner.pcp_manager = MagicMock(spec=AscendPCPManager)
     runner.model_state = SimpleNamespace(pcp_manager=None, kvpp_runtime=None)
     runner.speculator = SimpleNamespace()
-    runner.model_config = SimpleNamespace(enable_return_routed_experts=True)
+    runner.model_config = SimpleNamespace(enable_return_routed_experts=True, architecture=architecture)
     runner.init_routed_experts_capturer = MagicMock()
     kv_cache_config = KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
     original = vllm_model_runner.ModelCudaGraphManager
@@ -642,6 +680,8 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp():
         assert maximum == 8
 
     with (
+        patch("vllm_ascend.worker.v2.model_runner.uses_a5_packed_cache", return_value=a5),
+        patch("vllm_ascend.worker.v2.model_runner.TargetDeviceMetadata", return_value="metadata") as metadata_cls,
         patch("vllm_ascend.ops.kda_state_copy_plan.initialize_kda_state_copy", side_effect=_prepare_kda) as prepare_kda,
         patch.object(GPUModelRunner, "initialize_kv_cache", _super),
         patch("vllm_ascend.worker.v2.model_runner.ModelAclGraphManager", return_value="acl") as acl_cls,
@@ -654,6 +694,10 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp():
         seen["factory"](runner.vllm_config, torch.device("cpu"), CUDAGraphMode.FULL, 1)
 
     prepare_kda.assert_called_once_with(runner.compilation_config.static_forward_context, 8)
+    assert runner.model_state.device_metadata == (
+        "metadata" if a5 and architecture == "DeepseekV41ForCausalLM" else None
+    )
+    assert metadata_cls.call_count == int(a5 and architecture == "DeepseekV41ForCausalLM")
     assert seen["cfg"] == kv_cache_config
     assert vllm_model_runner.ModelCudaGraphManager is original
     acl_cls.assert_called_once()
@@ -676,7 +720,7 @@ def test_initialize_kv_cache_forwards_allocation_context():
     runner.pcp_manager = None
     runner.model_state = SimpleNamespace(pcp_manager=None, kvpp_runtime=None)
     runner.speculator = None
-    runner.model_config = SimpleNamespace(enable_return_routed_experts=False)
+    runner.model_config = SimpleNamespace(enable_return_routed_experts=False, architecture="OtherModel")
     called = False
     captured_kwargs: dict[str, object] = {}
     allocation_context = object()

@@ -63,6 +63,7 @@ from vllm_ascend.core.profiling_chunk_predictor import (
     _finish_profiling_chunk_timing,
     _start_profiling_chunk_timing,
 )
+from vllm_ascend.models.deepseek_v41.cache_config import uses_a5_packed_cache
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import (
     is_pd_decode_recompute_scheduler_enabled,
@@ -77,6 +78,7 @@ from vllm_ascend.worker.v2.attn_utils import (
     build_attn_state,
     skip_ring_state_update,
 )
+from vllm_ascend.worker.v2.device_metadata import TargetDeviceMetadata
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
@@ -330,6 +332,13 @@ class NPUModelRunner(GPUModelRunner):
                 if isinstance(module, DeepseekV41Compressor) and module.ratio == 2:
                     module.prepare_ring_compressor(self.max_num_tokens, self.device)
         prepare_v41_source_rope(self)
+        # Recreate along with KV initialization: profiling capture owns a
+        # throwaway model state and must not leak event/buffer bindings.
+        self.model_state.device_metadata = (
+            TargetDeviceMetadata()
+            if uses_a5_packed_cache() and self.model_config.architecture == "DeepseekV41ForCausalLM"
+            else None
+        )
 
         # Upstream has bound every local cache; publish sealed plans before
         # the worker can warm up, capture graphs or execute prefill requests.
@@ -388,15 +397,17 @@ class NPUModelRunner(GPUModelRunner):
             get_kv_transfer_group().handle_preemptions(kv_connector_metadata)
 
         self.model_state.kvpp_is_dummy_run = dummy_run or is_profile
-        output = super().execute_model(
-            scheduler_output,
-            intermediate_tensors=intermediate_tensors,
-            dummy_run=dummy_run,
-            skip_attn_for_dummy_run=skip_attn_for_dummy_run,
-            is_profile=is_profile,
-            context_len=context_len,
-            valid_dummy_state_slots=valid_dummy_state_slots,
-        )
+        metadata = getattr(self.model_state, "device_metadata", None)
+        with metadata.activate() if metadata is not None else nullcontext():
+            output = super().execute_model(
+                scheduler_output,
+                intermediate_tensors=intermediate_tensors,
+                dummy_run=dummy_run,
+                skip_attn_for_dummy_run=skip_attn_for_dummy_run,
+                is_profile=is_profile,
+                context_len=context_len,
+                valid_dummy_state_slots=valid_dummy_state_slots,
+            )
         self.model_state.kvpp_is_dummy_run = False
         if dummy_run and lmhead_tp_enable() and not is_profile and self.is_last_pp_rank:
             # lmhead TP: idle ranks never call sample(); join the target head

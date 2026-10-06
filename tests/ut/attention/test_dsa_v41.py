@@ -15,6 +15,71 @@ from vllm_ascend.ops.dsv41_a5 import indexer as a5_indexer
 TOKENS, TOPK = 4, 512
 
 
+@pytest.mark.parametrize("in_graph", [False, True])
+def test_cp_defer_scope_forwards_graph_mode_and_restores_both_builders(monkeypatch, in_graph):
+    base = dsa_v41.AscendDSAV41MetadataBuilder
+    cp = dsa_v41_cp._ReplicatedCacheMetadataBuilder.__new__(dsa_v41_cp._ReplicatedCacheMetadataBuilder)
+    cp._global_builder = base.__new__(base)
+    for builder in (cp, cp._global_builder):
+        builder._device_metadata_enabled = False
+        builder._device_metadata_in_graph = False
+        builder._uses_a5_packed_cache = True
+    monkeypatch.setattr(base, "prepare_source_rope", lambda self: None)
+    with cp.defer_device_metadata(in_graph=in_graph):
+        for builder in (cp, cp._global_builder):
+            assert builder._device_metadata_enabled
+            assert builder._device_metadata_in_graph == in_graph
+    for builder in (cp, cp._global_builder):
+        assert not builder._device_metadata_enabled
+        assert not builder._device_metadata_in_graph
+
+
+@pytest.mark.parametrize("in_graph", [False, True])
+@pytest.mark.parametrize("stage", list(dsa_v41.DeviceMetadataStage))
+def test_deferred_metadata_keeps_compressor_state_outside_graph(in_graph, stage):
+    builder = dsa_v41.AscendDSAV41MetadataBuilder.__new__(dsa_v41.AscendDSAV41MetadataBuilder)
+    builder._device_metadata_enabled = True
+    builder._device_metadata_in_graph = in_graph
+    builder._device_metadata_tasks = ()
+    shared, calls = {}, []
+    buffer = torch.zeros(1)
+    assert builder._publish_task(shared, "shared", buffer, stage, lambda: calls.append(stage)) is buffer
+    assert builder._publish_task(shared, "shared", torch.ones(1), stage, lambda: pytest.fail("duplicate")) is buffer
+    tasks = builder.take_device_metadata_tasks()
+    inline = in_graph and stage == dsa_v41.DeviceMetadataStage.COMPRESSOR
+    assert len(tasks) == (0 if inline else 1)
+    assert calls == ([stage] if inline else [])
+    for task in tasks:
+        assert task.group_id == id(buffer)
+        task.run()
+    assert calls == [stage]
+    assert builder.take_device_metadata_tasks() == ()
+
+
+def test_fused_qw_skips_redundant_query_quantization():
+    impl = _impl(SimpleNamespace(has_long_context=True, is_index_source=True))
+    packed = torch.zeros(TOKENS, 32, 64, dtype=torch.uint8)
+    scales = torch.zeros(TOKENS, 32, 4, dtype=torch.uint8)
+    weights = torch.ones(TOKENS, 32)
+    calls = []
+
+    def fused(hidden, qr, cos, sin):
+        calls.append(hidden.shape[0])
+        return packed, scales, weights
+
+    attn = SimpleNamespace(indexer=SimpleNamespace(qw_fusion=fused))
+    metadata = SimpleNamespace(swa=SimpleNamespace(num_actual_tokens=TOKENS))
+    prepared = impl._prepare_indexer_inputs(
+        attn, torch.zeros(TOKENS + 2, 5120), torch.zeros(TOKENS, 1280), None, None, metadata
+    )
+    assert calls == [TOKENS]
+    assert prepared.query is None
+    assert prepared.quantized_query is packed
+    assert prepared.query_scale is scales
+    assert prepared.weights is weights
+    assert not impl._should_quantize_indexer(prepared, metadata)
+
+
 def _impl(role):
     impl = AscendDSAV41Impl.__new__(AscendDSAV41Impl)
     impl.role = role
@@ -119,7 +184,8 @@ def test_a5_cache_writer_stream_choice(prefills, decodes, requests, write_on_mai
 
 
 @pytest.mark.parametrize("ratio", [1, 2])
-def test_compressor_input_ready_before_query_quantization(monkeypatch, ratio):
+@pytest.mark.parametrize("c2_group", [None, 0])
+def test_compressor_input_ready_before_query_quantization(monkeypatch, ratio, c2_group):
     hidden_states = torch.zeros(TOKENS, 8, dtype=torch.bfloat16)
     latent = torch.zeros(TOKENS, 8, dtype=torch.bfloat16)
     positions = torch.arange(TOKENS)
@@ -140,7 +206,8 @@ def test_compressor_input_ready_before_query_quantization(monkeypatch, ratio):
 
     monkeypatch.setattr(torch.Tensor, "float", cast)
     monkeypatch.setattr(AscendDSAV41Impl, "_quantize_indexer_query", lambda *args: calls.append("query_quantization"))
-    monkeypatch.setattr(dsa_v41, "wait_for_device_metadata", lambda *args: None)
+    metadata_waits = []
+    monkeypatch.setattr(dsa_v41, "wait_for_device_metadata", lambda *args: metadata_waits.append(args))
     monkeypatch.setattr(dsa_v41, "scatter_cache_sk", lambda *args: None)
     monkeypatch.setattr(AscendDSAV41Impl, "_apply_rotary", lambda *args, **kwargs: None)
     cache = SimpleNamespace(slot_mapping=positions)
@@ -148,7 +215,7 @@ def test_compressor_input_ready_before_query_quantization(monkeypatch, ratio):
         indexer=SimpleNamespace(cache=cache),
         compressor=SimpleNamespace(
             cache=cache,
-            state=SimpleNamespace(c2_metadata_group_id=0, c2_source_cos=cos, c2_source_sin=sin),
+            state=SimpleNamespace(c2_metadata_group_id=c2_group, c2_source_cos=cos, c2_source_sin=sin),
         ),
     )
 
@@ -174,6 +241,9 @@ def test_compressor_input_ready_before_query_quantization(monkeypatch, ratio):
     assert calls.index("query_quantization") < calls.index("wkv")
     if ratio == 2:
         assert calls.index("input_cast") < calls.index("query_quantization")
+    assert metadata_waits == (
+        [(dsa_v41.DeviceMetadataStage.COMPRESSOR, c2_group)] if ratio == 2 and c2_group is not None else []
+    )
 
 
 def test_cp_keeps_local_query_and_global_compressor_inputs(monkeypatch):

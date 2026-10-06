@@ -8,6 +8,7 @@ before running the compressor, indexer and sparse-attention operators without
 moving cache or scheduler knowledge back into the model.
 """
 
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -182,7 +183,7 @@ class DeepseekV41LayerMetadata:
 class DeepseekV41PreparedIndexer:
     """Query-local projections and the event guarding auxiliary quantization."""
 
-    query: torch.Tensor
+    query: torch.Tensor | None
     weights: torch.Tensor
     quantized_query: torch.Tensor | None = None
     query_scale: torch.Tensor | None = None
@@ -374,6 +375,9 @@ class AscendDSAV41Impl:
         if not self.role.has_long_context or not self.role.is_index_source:
             return None
         indexer = attn.indexer
+        if indexer.qw_fusion is not None and qr.shape[0] > 0:
+            q, scale, weights = indexer.qw_fusion(self._indexer_hidden_states(hidden_states, metadata), qr, cos, sin)
+            return DeepseekV41PreparedIndexer(query=None, weights=weights, quantized_query=q, query_scale=scale)
         main_stream = torch.npu.current_stream()
         aux_stream = dsv4_dsa_overlap_stream()
 
@@ -389,7 +393,13 @@ class AscendDSAV41Impl:
 
     @staticmethod
     def _should_quantize_indexer(prepared, metadata):
-        return prepared is not None and prepared.query.shape[0] > 0 and metadata.indexer.cache.max_cache_seq_len > 0
+        return (
+            prepared is not None
+            and prepared.quantized_query is None
+            and prepared.query is not None
+            and prepared.query.shape[0] > 0
+            and metadata.indexer.cache.max_cache_seq_len > 0
+        )
 
     def _quantize_indexer_query(self, attn, prepared, metadata):
         if not self._should_quantize_indexer(prepared, metadata):
@@ -511,7 +521,8 @@ class AscendDSAV41Impl:
             long_slots = compressor_metadata.cache.slot_mapping[: positions.shape[0]]
         else:
             state_metadata = compressor_metadata.state
-            wait_for_device_metadata(DeviceMetadataStage.COMPRESSOR, state_metadata.c2_metadata_group_id)
+            if state_metadata.c2_metadata_group_id is not None:
+                wait_for_device_metadata(DeviceMetadataStage.COMPRESSOR, state_metadata.c2_metadata_group_id)
             hidden_states_fp32 = hidden_states.float()
             # Finish the input cast before query quantization starts on the
             # auxiliary stream, so the WKV matmul can overlap that quantization.
@@ -804,6 +815,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         )
         self._c2_full_source_rope: tuple[torch.Tensor, torch.Tensor] | None = None
         self._device_metadata_enabled = False
+        self._device_metadata_in_graph = False
         self._device_metadata_tasks: tuple[DeviceMetadataTask, ...] = ()
 
     @classmethod
@@ -845,6 +857,21 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         self._device_metadata_enabled = True
         self.prepare_source_rope()
 
+    @contextmanager
+    def defer_device_metadata(self, *, in_graph: bool = False):
+        """Defer this target build without changing the drafter's builder mode."""
+        was_enabled = self._device_metadata_enabled
+        was_in_graph = self._device_metadata_in_graph
+        if in_graph and not self._uses_a5_packed_cache:
+            raise ValueError("Captured V4.1 device metadata currently requires the A5 packed-cache backend")
+        self.enable_device_metadata()
+        self._device_metadata_in_graph = in_graph
+        try:
+            yield
+        finally:
+            self._device_metadata_enabled = was_enabled
+            self._device_metadata_in_graph = was_in_graph
+
     def take_device_metadata_tasks(self) -> tuple[DeviceMetadataTask, ...]:
         tasks = self._device_metadata_tasks
         self._device_metadata_tasks = ()
@@ -879,7 +906,9 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         if existing is not None:
             return existing
         shared[key] = buffer
-        if self._device_metadata_enabled:
+        if self._device_metadata_enabled and not (
+            self._device_metadata_in_graph and stage == DeviceMetadataStage.COMPRESSOR
+        ):
             self._device_metadata_tasks = (
                 *self._device_metadata_tasks,
                 DeviceMetadataTask(stage, run, id(buffer)),
@@ -936,6 +965,11 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         num_actual_reqs = min(num_actual_reqs, num_reqs)
         num_input_tokens = int(getattr(common, "num_input_tokens", common.slot_mapping.shape[0]))
         num_actual_tokens = int(getattr(common, "num_actual_tokens", num_input_tokens))
+        # FULL graphs consume the runner's persistent padded request buffers.
+        # Only tiling metadata is captured. C2 state preparation stays outside
+        # the graph, with its actual counts and state-update policy.
+        metadata_in_graph = self._device_metadata_in_graph
+        metadata_tokens = num_input_tokens if metadata_in_graph else num_actual_tokens
         shared = kwargs.get("common_v41_metadata")
         if shared is None:
             shared = {}
@@ -1110,10 +1144,10 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         ):
 
             def build_a5_smla_metadata() -> None:
-                if num_actual_tokens == 0:
+                if metadata_tokens == 0:
                     self._a5_smla_metadata.zero_()
                     return
-                length_rows = self._a5_smla_length_rows[:num_actual_tokens]
+                length_rows = self._a5_smla_length_rows[:metadata_tokens]
                 value = dsv41_ops.mixed_quant_sparse_flash_mla_metadata(
                     length_rows,
                     length_rows,
@@ -1204,7 +1238,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                 )
 
                 def build_qli_metadata() -> None:
-                    if num_actual_tokens == 0:
+                    if num_actual_tokens == 0 and not metadata_in_graph:
                         self._qli_metadata.zero_()
                         return
                     value = dsv41_ops.quant_lightning_indexer_metadata(
@@ -1358,7 +1392,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             if self._supports_device_ops:
                 c2_source_cos = self._c2_source_cos[:num_input_tokens]
                 c2_source_sin = self._c2_source_sin[:num_input_tokens]
-            c2_metadata_group_id = id(self._c2_complete_mask)
+            c2_metadata_group_id = None if metadata_in_graph else id(self._c2_complete_mask)
         return AscendDSAV41Metadata(
             block_table=common.block_table_tensor[:num_reqs],
             slot_mapping=slots,

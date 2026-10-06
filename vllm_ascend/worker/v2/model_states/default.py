@@ -17,6 +17,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -30,6 +31,7 @@ from vllm_ascend.worker.v2.attn_utils import build_attn_metadata, ring_state_upd
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 
 if TYPE_CHECKING:
+    from vllm_ascend.worker.v2.device_metadata import TargetDeviceMetadata
     from vllm_ascend.worker.v2.kvpp import KVPPRuntime
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext, AscendPCPManager
 
@@ -41,6 +43,7 @@ class AscendModelState(DefaultModelState):
     pcp_context: "AscendPCPAttentionContext | None" = None
     kvpp_runtime: "KVPPRuntime | None" = None
     kvpp_is_dummy_run: bool = False
+    device_metadata: "TargetDeviceMetadata | None" = None
 
     def _get_engram_device_inputs(self, input_batch: AscendInputBatch) -> dict[str, torch.Tensor]:
         """Device request coordinates for upstream NgramHashState."""
@@ -158,7 +161,12 @@ class AscendModelState(DefaultModelState):
         self.slot_mappings = slot_mappings
         self.kv_cache_config = kv_cache_config
         self.pcp_context = pcp_context
-        self.attn_metadata = build_attn_metadata(
+        build_metadata = (
+            build_attn_metadata
+            if self.device_metadata is None
+            else partial(self.device_metadata.run_build, build_attn_metadata)
+        )
+        self.attn_metadata = build_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,
             num_actual_reqs=num_actual_reqs,
