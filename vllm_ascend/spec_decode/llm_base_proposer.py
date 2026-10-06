@@ -57,6 +57,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
 )
 from vllm_ascend.models.deepseek_v4.dspark import DSparkDeepseekV4ForCausalLM
 from vllm_ascend.models.llama_eagle3_vwn import Eagle3VwnLlamaForCausalLM
+from vllm_ascend.ops.triton.spec_decode.next_token_ids import prepare_next_token_ids
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 from vllm_ascend.spec_decode.utils import (
@@ -2182,6 +2183,15 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             [requests[gpu_input_batch.req_ids[i]].get_token_id(seq_lens_list[i]) for i in range(num_reqs)]
         )
         self.backup_next_token_ids.copy_to_gpu(num_reqs)
+
+        if sampled_token_ids.device.type == "npu":
+            return prepare_next_token_ids(
+                sampled_token_ids,
+                self.backup_next_token_ids.gpu[:num_reqs],
+                discard_request_indices,
+                num_discarded_requests,
+                gpu_input_batch.vocab_size,
+            )
 
         # Mask out the sampled tokens indices that should not be sampled.
         discard_sampled_tokens_req_indices = discard_request_indices[:num_discarded_requests]
