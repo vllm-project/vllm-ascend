@@ -442,7 +442,7 @@ class AscendDSAV41Impl:
         weights_start = main_stream.record_event()
         with npu_stream_switch(aux_stream, enabled=True):
             aux_stream.wait_event(weights_start)
-            weights = indexer.project_weights(self._indexer_hidden_states(hidden_states, metadata))
+            weights = indexer.project_weights(hidden_states)
             weights_done = aux_stream.record_event()
         indexer.apply_query_rope(query, cos, sin)
         main_stream.wait_event(weights_done)
@@ -468,6 +468,47 @@ class AscendDSAV41Impl:
             aux_stream.wait_event(quantize_start)
             prepared.quantized_query, prepared.query_scale = attn.indexer.quantize_query(prepared.query)
             prepared.quantize_done = aux_stream.record_event()
+
+    def _preprocess(self, attn, query_hidden, cache_hidden, query_metadata, cache_metadata):
+        query_hidden = query_hidden[: query_metadata.swa.num_actual_tokens]
+        cache_hidden = cache_hidden[: cache_metadata.swa.num_actual_tokens]
+        if not query_hidden.shape[0]:
+            self._update_caches(attn, cache_hidden, cache_metadata)
+            return None, None, None
+        cos, sin = query_metadata.rope(attn.rotary_emb.layername, query_hidden.shape[0])
+        kv_cos, kv_sin = cache_metadata.rope(attn.rotary_emb.layername, cache_hidden.shape[0])
+        if self.multistream_dsv4_dsa_overlap and cache_hidden.shape[0]:
+            q, qr = self.multistream_preprocess(
+                attn,
+                query_hidden,
+                cache_hidden,
+                kv_cos,
+                kv_sin,
+                cache_metadata.swa,
+                share_inputs=query_metadata is cache_metadata,
+            )
+        else:
+            qr = attn.q_norm(attn.wq_a(query_hidden))
+            q = attn.wq_b(qr).unflatten(-1, (-1, attn.head_dim))
+            if cache_hidden.shape[0]:
+                kv = self._project_kv(attn, cache_hidden, kv_cos, kv_sin)
+                self._write_swa_cache(attn, cache_metadata.swa, kv)
+        self._apply_rotary(attn, q, cos, sin)
+        # Consume local Query RoPE before compression can reuse source tables.
+        prepared_indexer = self._prepare_indexer_inputs(attn, query_hidden, qr, cos, sin, query_metadata)
+        if self.role.is_kv_source and cache_hidden.shape[0]:
+            self._write_compressed_source(
+                attn,
+                cache_hidden,
+                cache_metadata.positions[: cache_hidden.shape[0]],
+                kv_cos,
+                kv_sin,
+                cache_metadata,
+                prepared_indexer=prepared_indexer,
+            )
+        else:
+            self._quantize_indexer_query(attn, prepared_indexer, query_metadata)
+        return q.to(query_hidden.dtype), qr, prepared_indexer
 
     def _prepare_queries(self, attn, hidden_states, positions, cos, sin, metadata):
         hidden_states = hidden_states[: metadata.swa.num_actual_tokens]
@@ -498,7 +539,7 @@ class AscendDSAV41Impl:
         self._write_swa_cache(attn, swa_metadata, kv)
         return q, qr
 
-    def multistream_preprocess(self, attn, hidden_states, cos, sin, swa_metadata):
+    def multistream_preprocess(self, attn, query_hidden, cache_hidden, kv_cos, kv_sin, swa_metadata, *, share_inputs):
         """Overlap Q Vector work with KV Cube work, then reverse their roles.
 
         Reuse V1's stream and projection wrappers. V4.1 keeps floating-point
@@ -546,12 +587,14 @@ class AscendDSAV41Impl:
         with npu_stream_switch(aux_stream):
             aux_stream.wait_event(part3_start)
             kv = attn.kv_norm(kv).view(-1, 1, attn.head_dim)
-            AscendDSAV41Impl._apply_rotary(attn, kv, cos, sin)
-            AscendDSAV41Impl._write_swa_cache(attn, swa_metadata, kv.squeeze(1))
-        q = wq_b.matmul(q_b_quant, q_b_scale, bias=attn.wq_b.bias).unflatten(-1, (attn.n_local_heads, attn.head_dim))
+            self._apply_rotary(attn, kv, kv_cos, kv_sin)
+            if not write_cache_on_main:
+                self._write_swa_cache(attn, swa_metadata, kv.squeeze(1))
+        q = wq_b.matmul(q_b_quant, q_b_scale, bias=attn.wq_b.bias).unflatten(-1, (-1, attn.head_dim))
         main_stream.wait_stream(aux_stream)
-        AscendDSAV41Impl._apply_rotary(attn, q, cos, sin)
-        return q.to(hidden_states.dtype), qr
+        if write_cache_on_main:
+            self._write_swa_cache(attn, swa_metadata, kv.squeeze(1))
+        return q, qr
 
     def _write_compressed_source(
         self,
@@ -764,8 +807,9 @@ class AscendDSAV41Impl:
         if num_tokens:
             positions = metadata.positions[:num_tokens]
             cos, sin = metadata.rope(attn.rotary_emb.layername, num_tokens)
-            q, qr = self._prepare_queries(attn, hidden_states, positions, cos, sin, metadata)
-            compressed_indices = self._select_sparse_indices(attn, hidden_states, qr, positions, cos, sin, metadata)
+            compressed_indices = self._select_sparse_indices(
+                attn, hidden_states, qr, positions, cos, sin, metadata, prepared_indexer
+            )
             attention_output = self._forward_attention(attn, q, metadata, compressed_indices)
             AscendDSAV41Impl._apply_rotary(attn, attention_output, cos, sin, inverse=True)
         else:
