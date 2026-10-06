@@ -1273,8 +1273,11 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             [4, 8],
         )
 
-        assert caches["full_attn"].shape == (2, 4, 4, 1, 2)
-        assert caches["full_attn"].stride() == (8, 16, 2, 2, 1)
+        assert isinstance(caches["full_attn"], tuple)
+        assert len(caches["full_attn"]) == 2
+        for cache in caches["full_attn"]:
+            assert cache.shape == (4, 4, 1, 2)
+            assert cache.stride() == (16, 2, 2, 1)
         conv_state, ssm_state = caches["linear_attn"]
         assert conv_state.shape == (2, 3)
         assert ssm_state.shape == (2, 5)
@@ -1356,10 +1359,23 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                 assert tensor.shape == (2, 8, 2, 2)
                 assert tensor.is_contiguous()
             return
-        assert cache.shape == (2, 2, 8, 2, 2)
-        assert cache.stride() == (32, 64, 4, 2, 1)
-        assert not cache[0].is_contiguous()
-        assert not cache[1].is_contiguous()
+        assert isinstance(cache, tuple)
+        assert len(cache) == 2
+        key, value = cache
+        for tensor in cache:
+            assert tensor.shape == (2, 8, 2, 2)
+            assert tensor.stride() == (64, 4, 2, 1)
+            assert not tensor.is_contiguous()
+            assert tensor.untyped_storage().data_ptr() == raw_caches[layer_name].untyped_storage().data_ptr()
+        assert key.data_ptr() == raw_caches[layer_name].data_ptr()
+        assert value.data_ptr() - key.data_ptr() == 32 * key.element_size()
+        # Component writes must preserve the other component and block.
+        key[0].fill_(3)
+        value[1].fill_(5)
+        assert torch.all(key[0] == 3)
+        assert torch.all(value[1] == 5)
+        assert torch.count_nonzero(value[0]) == 0
+        assert torch.count_nonzero(key[1]) == 0
 
     def test_full_attention_allocator_selects_layout_per_backend(self):
         self._check_full_attention_allocator_selects_layout_per_backend(

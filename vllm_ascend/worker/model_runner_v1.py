@@ -5662,7 +5662,9 @@ class NPUModelRunner(GPUModelRunner):
                                 ),
                                 storage_offset=raw_typed.storage_offset(),
                             )
-                            kv_caches[layer_name] = kv_cache
+                            # Match MRV2: expose block-first K/V views while
+                            # preserving the shared allocation and strides.
+                            kv_caches[layer_name] = (kv_cache[0], kv_cache[1])
                             # TODO: Remove this temporary observation point once
                             # the non-contiguous KV-cache layout is mature.
                             logger.debug(
