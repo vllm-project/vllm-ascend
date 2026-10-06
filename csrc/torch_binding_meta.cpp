@@ -40,6 +40,24 @@ const int64_t INT4_NUMS_IN_INT32 = 8;
 constexpr int64_t DSA_SLOT_MAPPING_FLAT = 1;
 constexpr int64_t DSA_SLOT_MAPPING_BLOCK_OFFSET = 2;
 
+at::Tensor compressor_v2_meta(
+    const at::Tensor& x, const at::Tensor& wkv, const at::Tensor& wgate,
+    at::Tensor& state_cache, const c10::optional<at::Tensor>& state_block_table,
+    const c10::optional<at::Tensor>& cu_seqlens, const c10::optional<at::Tensor>& seqused,
+    const c10::optional<at::Tensor>& start_pos, int64_t cmp_ratio)
+{
+    TORCH_CHECK(cmp_ratio > 0, "cmp_ratio must be positive");
+    TORCH_CHECK(x.dim() == 2 || x.dim() == 3, "x must be 2D or 3D");
+    if (x.dim() == 3) {
+        return at::empty_symint(c10::SymDimVector{x.sym_size(0), (x.sym_size(1) + cmp_ratio - 1) / cmp_ratio,
+                               wkv.sym_size(0)}, x.options());
+    }
+    TORCH_CHECK(cu_seqlens.has_value(), "cu_seqlens is required for 2D x");
+    auto capacity = (x.sym_size(0) / cmp_ratio + cu_seqlens->sym_numel() - 1).min(x.sym_size(0));
+    return at::empty_symint(c10::SymDimVector{capacity, wkv.sym_size(0)}, x.options());
+}
+
+
 c10::SymInt ceil_div(const c10::SymInt& value, int64_t divisor)
 {
     return (value + c10::SymInt(divisor - 1)) / c10::SymInt(divisor);
@@ -1921,6 +1939,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_copy_and_expand_eagle_inputs", &vllm_ascend::meta::npu_copy_and_expand_eagle_inputs_meta);
     ops.impl("moe_gating_top_k_hash", &vllm_ascend::meta::moe_gating_top_k_hash_meta);
     ops.impl("compressor", &vllm_ascend::meta::compressor_meta);
+    ops.impl("compressor_v2", &vllm_ascend::meta::compressor_v2_meta);
     ops.impl("compressor_metadata", &vllm_ascend::meta::compressor_metadata_meta);
     ops.impl("npu_quant_lightning_indexer_v2", &vllm_ascend::meta::npu_quant_lightning_indexer_v2_meta);
     ops.impl("npu_quant_lightning_indexer_v2_metadata", &vllm_ascend::meta::npu_quant_lightning_indexer_v2_metadata_meta);

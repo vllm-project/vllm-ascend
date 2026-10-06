@@ -42,6 +42,8 @@
 #include "moe/moe_gating_top_k/moe_gating_top_k_torch_adpt.h"
 #include "attention/sparse_flash_attention/sparse_flash_attention_torch_adpt.h"
 #include "attention/sparse_flash_mla/sparse_flash_mla_torch_adpt.h"
+#include "attention/kv_compress_epilog_v2/kv_compress_epilog_v2_torch_adpt.h"
+#include "attention/compressor_v2/compressor_v2_torch_adpt.h"
 #include "attention/quant_lightning_indexer_v2/quant_lightning_indexer_v2_torch_adpt.h"
 #include "attention/kv_quant_sparse_flash_attention_vllm/kv_quant_sparse_flash_attention_vllm_torch_adpt.h"
 #include "attention/fused_sparse_attention_overlap/fused_sparse_attention_overlap_torch_adpt.h"
@@ -3324,6 +3326,13 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("compressor", torch::kPrivateUse1, &vllm_ascend::compressor);
 
     ops.def(
+        "compressor_v2(Tensor x, Tensor wkv, Tensor wgate, Tensor(a!) state_cache, "
+        "Tensor? state_block_table, Tensor? cu_seqlens, Tensor? seqused, "
+        "Tensor? start_pos, int cmp_ratio) -> Tensor"
+    );
+    ops.impl("compressor_v2", torch::kPrivateUse1, &vllm_ascend::compressor_v2);
+
+    ops.def(
         "compressor_metadata("
             "Tensor rope_cos, Tensor rope_sin, "
             "Tensor cu_seqlens, Tensor start_pos, Tensor kv_block_table, "
@@ -3480,6 +3489,16 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         ") -> ()"
     );
     ops.impl("kv_compress_epilog", torch::kPrivateUse1, &vllm_ascend::kv_compress_epilog_npu);
+
+    ops.def(
+        "kv_compress_epilog_v2(Tensor(a!) cache, Tensor x, Tensor slot_mapping, *, "
+        "int quant_group_size=32, str quant_mode='mxfp8_bf16', "
+        "bool round_scale=True, float x_scale=1.0) -> ()"
+    );
+    ops.impl("kv_compress_epilog_v2", torch::kPrivateUse1,
+             &vllm_ascend::kv_compress_v2::KvCompressEpilogV2Npu);
+    ops.impl("kv_compress_epilog_v2", torch::kMeta,
+             &vllm_ascend::kv_compress_v2::KvCompressEpilogV2Meta);
 
     ops.def(
         "npu_kv_quant_sparse_attn_sharedkv("
