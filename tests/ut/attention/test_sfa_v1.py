@@ -194,7 +194,7 @@ class TestAscendSFADeviceOperator(TestBase):
         with (
             patch.object(
                 torch.ops._C_ascend,
-                "npu_kv_quant_sparse_flash_attention",
+                "npu_kv_quant_sparse_flash_attention_vllm",
                 create=True,
                 return_value=(attn_output, softmax_max, softmax_sum),
             ) as mock_qsfa,
@@ -478,7 +478,7 @@ class TestAscendSFAKVQuantSparseAttention(TestBase):
         self.assertEqual(mock_block_quant.call_args.kwargs["row_block_size"], 1)
         self.assertEqual(mock_block_quant.call_args.kwargs["col_block_size"], 128)
 
-    def test_execute_kv_quant_sparse_flash_attention(self):
+    def test_execute_kv_quant_sparse_flash_attention_vllm(self):
         impl = AscendSFAImpl.__new__(AscendSFAImpl)
         impl.enable_sparse_sfa_c8 = True
         impl.scale = 0.125
@@ -495,7 +495,7 @@ class TestAscendSFAKVQuantSparseAttention(TestBase):
         with (
             patch.object(
                 torch.ops._C_ascend,
-                "npu_kv_quant_sparse_flash_attention",
+                "npu_kv_quant_sparse_flash_attention_vllm",
                 create=True,
                 return_value=(expected, torch.empty(0), torch.empty(0)),
             ) as mock_qsfa,

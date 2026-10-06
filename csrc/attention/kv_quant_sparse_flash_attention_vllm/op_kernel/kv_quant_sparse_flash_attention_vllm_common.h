@@ -9,12 +9,12 @@
  */
 
 /*!
- * \file kv_quant_sparse_flash_attention_common.h
+ * \file kv_quant_sparse_flash_attention_vllm_common.h
  * \brief
  */
 
-#ifndef KV_QUANT_SPARSE_FLASH_ATTENTION_COMMON_H
-#define KV_QUANT_SPARSE_FLASH_ATTENTION_COMMON_H
+#ifndef KV_QUANT_SPARSE_FLASH_ATTENTION_VLLM_COMMON_H
+#define KV_QUANT_SPARSE_FLASH_ATTENTION_VLLM_COMMON_H
 
 #include "kernel_operator.h"
 #include "lib/matmul_intf.h"
@@ -223,4 +223,4 @@ struct MSplitInfo {
     uint32_t vecDealM = 0U;
 };
 
-#endif // KV_QUANT_SPARSE_FLASH_ATTENTION_COMMON_H
+#endif // KV_QUANT_SPARSE_FLASH_ATTENTION_VLLM_COMMON_H

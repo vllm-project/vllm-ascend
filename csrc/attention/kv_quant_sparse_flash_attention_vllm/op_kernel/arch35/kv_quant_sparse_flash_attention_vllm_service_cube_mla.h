@@ -9,17 +9,17 @@
  */
 
 /*!
- * \file kv_quant_sparse_flash_attention_service_cube_mla.h
+ * \file kv_quant_sparse_flash_attention_vllm_service_cube_mla.h
  */
-#ifndef KV_QUANT_SPARSE_FLASH_ATTENTION_SERVICE_CUBE_MLA_H
-#define KV_QUANT_SPARSE_FLASH_ATTENTION_SERVICE_CUBE_MLA_H
+#ifndef KV_QUANT_SPARSE_FLASH_ATTENTION_VLLM_SERVICE_CUBE_MLA_H
+#define KV_QUANT_SPARSE_FLASH_ATTENTION_VLLM_SERVICE_CUBE_MLA_H
 
 #include "kernel_operator.h"
 #include "kernel_operator_list_tensor_intf.h"
 #include "kernel_tiling/kernel_tiling.h"
 #include "lib/matmul_intf.h"
 #include "lib/matrix/matmul/tiling.h"
-#include "kv_quant_sparse_flash_attention_common_arch35.h"
+#include "kv_quant_sparse_flash_attention_vllm_common_arch35.h"
 
 #if __has_include("../../common/op_kernel/offset_calculator.h")
 #include "../../common/op_kernel/offset_calculator.h"
@@ -397,4 +397,4 @@ DEFINE_QSFA_CUBE_BLOCK_TRAITS(QSFAMatmulServiceDummy);
     QSFA_CUBE_BLOCK_TRAITS_TYPE_FIELDS(GEN_ARGS_TYPE) \
     QSFA_CUBE_BLOCK_TRAITS_CONST_FIELDS(GEN_ARGS_CONST)
 }
-#endif // KV_QUANT_SPARSE_FLASH_ATTENTION_SERVICE_CUBE_MLA_H
+#endif // KV_QUANT_SPARSE_FLASH_ATTENTION_VLLM_SERVICE_CUBE_MLA_H

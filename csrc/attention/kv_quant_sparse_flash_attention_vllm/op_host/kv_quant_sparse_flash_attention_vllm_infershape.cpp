@@ -9,7 +9,7 @@
  */
 
 /*!
- * \file kv_quant_sparse_flash_attention_infershape.cpp
+ * \file kv_quant_sparse_flash_attention_vllm_infershape.cpp
  * \brief
  */
 
@@ -43,9 +43,9 @@ constexpr uint32_t OUTPUT_INDEX_0 = 0;
 constexpr uint32_t OUTPUT_INDEX_1 = 1;
 constexpr uint32_t OUTPUT_INDEX_2 = 2;
 
-ge::graphStatus InferShapeKvQuantSparseFlashAttention(gert::InferShapeContext *context)
+ge::graphStatus InferShapeKvQuantSparseFlashAttentionVllm(gert::InferShapeContext *context)
 {
-    OP_CHECK_IF(context == nullptr, OP_LOGE_WITH_INVALID_INPUT("KvQuantSparseFlashAttention", "InferShapeContext"),
+    OP_CHECK_IF(context == nullptr, OP_LOGE_WITH_INVALID_INPUT("KvQuantSparseFlashAttentionVllm", "InferShapeContext"),
                return ge::GRAPH_FAILED);
     const gert::Shape *queryShape = context->GetInputShape(QUERY_INPUT_INDEX);
     OP_CHECK_NULL_WITH_CONTEXT(context, queryShape);
@@ -135,9 +135,9 @@ ge::graphStatus InferShapeKvQuantSparseFlashAttention(gert::InferShapeContext *c
     return GRAPH_SUCCESS;
 }
 
-ge::graphStatus InferDataTypeKvQuantSparseFlashAttention(gert::InferDataTypeContext *context)
+ge::graphStatus InferDataTypeKvQuantSparseFlashAttentionVllm(gert::InferDataTypeContext *context)
 {
-    OP_CHECK_IF(context == nullptr, OP_LOGE_WITH_INVALID_INPUT("KvQuantSparseFlashAttention", "InferShapeContext"),
+    OP_CHECK_IF(context == nullptr, OP_LOGE_WITH_INVALID_INPUT("KvQuantSparseFlashAttentionVllm", "InferShapeContext"),
                return ge::GRAPH_FAILED);
     const auto inputDataType = context->GetInputDataType(QUERY_INPUT_INDEX);
     context->SetOutputDataType(OUTPUT_INDEX_0, inputDataType);
@@ -147,7 +147,7 @@ ge::graphStatus InferDataTypeKvQuantSparseFlashAttention(gert::InferDataTypeCont
     return ge::GRAPH_SUCCESS;
 }
 
-IMPL_OP_INFERSHAPE(KvQuantSparseFlashAttention)
-    .InferShape(InferShapeKvQuantSparseFlashAttention)
-    .InferDataType(InferDataTypeKvQuantSparseFlashAttention);
+IMPL_OP_INFERSHAPE(KvQuantSparseFlashAttentionVllm)
+    .InferShape(InferShapeKvQuantSparseFlashAttentionVllm)
+    .InferDataType(InferDataTypeKvQuantSparseFlashAttentionVllm);
 } // namespace ops

@@ -19,7 +19,7 @@ from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, custom_kv_rmsnorm_rope
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
 
-from .test_kv_quant_sparse_flash_attention import BF16_ATOL, BF16_RTOL, _run_custom_op
+from .test_kv_quant_sparse_flash_attention_vllm import BF16_ATOL, BF16_RTOL, _run_custom_op
 
 pytestmark = pytest.mark.skipif(
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3),

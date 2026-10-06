@@ -9,7 +9,7 @@
  */
 
 /*!
- * \file kv_quant_sparse_flash_attention_tiling.cpp
+ * \file kv_quant_sparse_flash_attention_vllm_tiling.cpp
  * \brief
  */
 
@@ -21,8 +21,8 @@
 #include <graph/utils/type_utils.h>
 #include "err/ops_err.h"
 #include "register/op_def_registry.h"
-#include "../op_kernel/kv_quant_sparse_flash_attention_template_tiling_key.h"
-#include "kv_quant_sparse_flash_attention_tiling.h"
+#include "../op_kernel/kv_quant_sparse_flash_attention_vllm_template_tiling_key.h"
+#include "kv_quant_sparse_flash_attention_vllm_tiling.h"
 
 using std::map;
 using std::string;
@@ -218,7 +218,7 @@ const std::map<ge::DataType, std::string> DATATYPE_TO_STRING_MAP = {
     {ge::DT_UINT1, "DT_UINT1"}                    // dt_variant type
 };
 
-struct KvQuantSparseFlashAttentionCompileInfo {
+struct KvQuantSparseFlashAttentionVllmCompileInfo {
     int64_t coreNum;
 };
 
@@ -625,7 +625,7 @@ ge::graphStatus QSFAMlaTiling::DoOpTiling(QSFATilingInfo *qsfaInfo)
     return ge::GRAPH_SUCCESS;
 }
 
-ge::graphStatus TilingKvQuantSparseFlashAttention(gert::TilingContext *context)
+ge::graphStatus TilingKvQuantSparseFlashAttentionVllm(gert::TilingContext *context)
 {
     QSFATilingInfo qsfaInfo;
     QSFAInfoParser qsfaInfoParser(context);
@@ -642,7 +642,7 @@ ge::graphStatus TilingKvQuantSparseFlashAttention(gert::TilingContext *context)
     return tiling.DoOpTiling(&qsfaInfo);
 }
 
-ge::graphStatus TilingPrepareForKvQuantSparseFlashAttention(gert::TilingParseContext* const context)
+ge::graphStatus TilingPrepareForKvQuantSparseFlashAttentionVllm(gert::TilingParseContext* const context)
 {
     (void)context;
     return ge::GRAPH_SUCCESS;
@@ -1620,7 +1620,7 @@ ge::graphStatus QSFAInfoParser::GetActualSeqLenQSize(uint32_t &size)
 ge::graphStatus QSFAInfoParser::GetOpName()
 {
     if (context_->GetNodeName() == nullptr) {
-        OP_LOGE_WITH_INVALID_INPUT("KvQuantSparseFlashAttention", "opName");
+        OP_LOGE_WITH_INVALID_INPUT("KvQuantSparseFlashAttentionVllm", "opName");
         return ge::GRAPH_FAILED;
     }
     opName_ = context_->GetNodeName();
@@ -2069,7 +2069,7 @@ void QSFAInfoParser::FillTilingInfoAttrsAndLayouts(QSFATilingInfo &qsfaInfo)
 ge::graphStatus QSFAInfoParser::Parse(QSFATilingInfo &qsfaInfo)
 {
     if (context_ == nullptr) {
-        OP_LOGE_WITH_INVALID_INPUT("KvQuantSparseFlashAttention", "tiling context");
+        OP_LOGE_WITH_INVALID_INPUT("KvQuantSparseFlashAttentionVllm", "tiling context");
         return ge::GRAPH_FAILED;
     }
     if (ge::GRAPH_SUCCESS != GetOpName() ||
@@ -2099,7 +2099,7 @@ ge::graphStatus QSFAInfoParser::Parse(QSFATilingInfo &qsfaInfo)
     return ge::GRAPH_SUCCESS;
 }
 
-IMPL_OP_OPTILING(KvQuantSparseFlashAttention)
-    .Tiling(TilingKvQuantSparseFlashAttention)
-    .TilingParse<KvQuantSparseFlashAttentionCompileInfo>(TilingPrepareForKvQuantSparseFlashAttention);
+IMPL_OP_OPTILING(KvQuantSparseFlashAttentionVllm)
+    .Tiling(TilingKvQuantSparseFlashAttentionVllm)
+    .TilingParse<KvQuantSparseFlashAttentionVllmCompileInfo>(TilingPrepareForKvQuantSparseFlashAttentionVllm);
 } // namespace optiling

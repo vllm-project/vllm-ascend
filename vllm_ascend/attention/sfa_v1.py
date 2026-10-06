@@ -870,7 +870,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             self.head_dim = getattr(hf_config, "index_head_dim", 0)
 
         # Sparse C8 has two independent meanings in SFA:
-        # - SFA packed KV cache for npu_kv_quant_sparse_flash_attention.
+        # - SFA packed KV cache for npu_kv_quant_sparse_flash_attention_vllm.
         # - C8 indexer cache for lightning indexer.
         # The user-facing switches control these layouts independently. LI C8
         # applies only to layers that own an indexer cache.

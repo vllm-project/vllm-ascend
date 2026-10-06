@@ -9,16 +9,16 @@
  */
 
 /*!
- * \file kv_quant_sparse_flash_attention_def.cpp
+ * \file kv_quant_sparse_flash_attention_vllm_def.cpp
  * \brief
  */
 
 #include "register/op_def_registry.h"
 
 namespace ops {
-class KvQuantSparseFlashAttention : public OpDef {
+class KvQuantSparseFlashAttentionVllm : public OpDef {
 public:
-    explicit KvQuantSparseFlashAttention(const char *name) : OpDef(name)
+    explicit KvQuantSparseFlashAttentionVllm(const char *name) : OpDef(name)
     {
         this->Input("query")
             .ParamType(REQUIRED)
@@ -167,5 +167,5 @@ public:
         this->AICore().AddConfig("ascend950", aicore_config_95);
     }
 };
-OP_ADD(KvQuantSparseFlashAttention);
+OP_ADD(KvQuantSparseFlashAttentionVllm);
 } // namespace ops
