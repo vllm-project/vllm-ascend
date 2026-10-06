@@ -614,13 +614,12 @@ class TestGetCacheScaleMapper(TestBase):
                 mapper._map_name("model.layers.3.self_attn.fa_v.scale"),
                 "model.layers.3.self_attn.attn.v_cache_scale",
             )
-            # K is quantized dynamically here, so its checkpoint scale has no
-            # parameter to land on and must be declared ignorable instead.
-            self.assertEqual(
-                mapper._map_name("model.layers.3.self_attn.fa_k.scale"),
-                "model.layers.3.self_attn.fa_k.scale",
-            )
-            for suffix in (".fa_k.scale", ".fa_q.scale", ".fa_k.offset"):
+            # Q/K are quantized dynamically and V has no offset. Drop legacy
+            # FAKQuant tensors at the mapper, before weight loading.
+            for suffix in (".fa_k.scale", ".fa_q.scale", ".fa_k.offset", ".fa_q.offset", ".fa_v.offset"):
+                with self.subTest(suffix=suffix):
+                    self.assertIsNone(mapper._map_name(f"model.layers.3.self_attn{suffix}"))
+            for suffix in (".fa_k.scale", ".fa_q.scale", ".fa_k.offset", ".fa_q.offset"):
                 self.assertIn(suffix, config._ignore_unexpected_suffixes)
 
     def test_fa_quant_returns_mapper(self):
