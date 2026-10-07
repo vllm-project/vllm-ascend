@@ -332,6 +332,28 @@ def test_shared_workspace_feature_gate_accepts_data_parallel_configuration(
     assert reasons == []
 
 
+@pytest.mark.parametrize("block_size", [2, 8, 32, 64, 128])
+@pytest.mark.parametrize("checkpoint_selected", [False, True])
+def test_prefix_gate_distinguishes_user_blocks_from_internal_tail_pages(block_size, checkpoint_selected):
+    scheduler_cls = (
+        "vllm_ascend.core.compressor_checkpoint_scheduler.CompressorCheckpointScheduler"
+        if checkpoint_selected
+        else None
+    )
+    reasons = get_dsv4_shared_compressor_workspace_fallback_reasons(
+        _stage1_config(
+            cache_config__enable_prefix_caching=True,
+            cache_config__block_size=block_size,
+            parallel_config__data_parallel_size=2,
+            scheduler_config__scheduler_cls=scheduler_cls,
+        ),
+        is_a3=True,
+        multistream_dsv4_dsa_overlap=False,
+    )
+    block_size_supported = block_size == 32 or (checkpoint_selected and block_size in (2, 8))
+    assert ("compressor checkpoints currently require block_size=32" not in reasons) == block_size_supported
+
+
 @pytest.mark.parametrize(
     ("config", "is_a3", "multistream", "expected_reason"),
     [

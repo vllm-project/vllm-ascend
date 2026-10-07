@@ -136,6 +136,8 @@ def test_uniform_layout_uses_logical_compressed_granularity(coordinator):
 
 
 def test_private_rings_preserve_prefix_block_size(coordinator):
+    if not hasattr(UniformTypeKVCacheSpecs, "prefix_cacheable"):
+        pytest.skip("This vLLM version does not exclude private groups from prefix block sizing")
     kv_cache_config = coordinator.kv_cache_config
     participating_sizes = [
         group.kv_cache_spec.block_size

@@ -23,6 +23,10 @@ from vllm.utils.math_utils import cdiv
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
+DSV4_CHECKPOINT_SCHEDULER = "vllm_ascend.core.compressor_checkpoint_scheduler.CompressorCheckpointScheduler"
+DSV4_CHECKPOINT_BLOCK_SIZE = 32
+DSV4_CHECKPOINT_TAIL_BLOCK_SIZES = (2, 8)
+
 
 def get_dsv4_shared_compressor_workspace_fallback_reasons(
     vllm_config: "VllmConfig",
@@ -49,7 +53,14 @@ def get_dsv4_shared_compressor_workspace_fallback_reasons(
         scheduler = vllm_config.scheduler_config
         if scheduler.async_scheduling is not False:
             reasons.append("compressor checkpoints require explicit synchronous scheduling")
-        if vllm_config.cache_config.block_size != 32:
+        block_size = vllm_config.cache_config.block_size
+        # Older EngineCore versions replace the validated block_size=32 with
+        # the smallest private tail page after profiling. The already-selected
+        # checkpoint scheduler identifies this internal layout; bootstrap must
+        # still validate the user-facing block size before selecting it.
+        checkpoint_layout_selected = scheduler.scheduler_cls == DSV4_CHECKPOINT_SCHEDULER
+        is_internal_tail_block_size = checkpoint_layout_selected and block_size in DSV4_CHECKPOINT_TAIL_BLOCK_SIZES
+        if block_size != DSV4_CHECKPOINT_BLOCK_SIZE and not is_internal_tail_block_size:
             reasons.append("compressor checkpoints currently require block_size=32")
         if vllm_config.parallel_config.pipeline_parallel_size != 1:
             reasons.append("compressor checkpoints require pipeline_parallel_size=1")
@@ -59,8 +70,7 @@ def get_dsv4_shared_compressor_workspace_fallback_reasons(
             reasons.append("compressor checkpoints require the v1 model runner")
         if vllm_config.kv_events_config is not None and vllm_config.kv_events_config.enable_kv_cache_events:
             reasons.append("compressor checkpoint KV events are not supported")
-        checkpoint_scheduler = "vllm_ascend.core.compressor_checkpoint_scheduler.CompressorCheckpointScheduler"
-        if scheduler.scheduler_cls not in (None, checkpoint_scheduler):
+        if scheduler.scheduler_cls not in (None, DSV4_CHECKPOINT_SCHEDULER):
             reasons.append("compressor checkpoints require the checkpoint scheduler")
     if vllm_config.kv_transfer_config is not None:
         reasons.append("KV transfer/P-D is enabled")
