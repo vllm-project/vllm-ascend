@@ -1,7 +1,7 @@
 # A3 1P1D DSpark deployment based on the official DeepSeek-V4-Flash tutorial.
 # https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/DeepSeek-V4-Flash.html#52-multi-node-pd-separation-deployment
 # Requires a DSpark-capable vLLM/Ascend build and the 0731 W8A8 checkpoint.
-# Mooncake must support the range/session API used by hybrid layerwise pooling.
+# Both P and D use non-layerwise Mooncake pooling.
 # The framework starts mooncake_master and injects MOONCAKE_CONFIG_PATH on each node.
 test_name: "DeepSeek-V4-Flash-DSpark-Mooncake-PD-acc"
 model: "Eco-Tech/DeepSeek-V4-Flash-0731-w8a8"
@@ -158,7 +158,7 @@ templates:
                 "kv_role": "kv_producer",
                 "kv_connector_extra_config": {
                   "backend": "mooncake",
-                  "use_layerwise": true,
+                  "use_layerwise": false,
                   "lookup_rpc_port": "0"
                 }
               }
