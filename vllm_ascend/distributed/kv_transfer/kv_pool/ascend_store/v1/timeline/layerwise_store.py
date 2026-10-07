@@ -400,7 +400,7 @@ def _keys_by_request(batch: KVTransferBatch) -> tuple[frozenset[str], ...]:
                 axis_offset = axis_index * group.row_count
                 for row_index in range(start, end):
                     object_index = axis_offset + row_index
-                    if group.selection is None or group.selection[object_index]:
+                    if group.selected_objects is None or group.selected_objects[object_index]:
                         keys.add(axis[row_index])
     return tuple(frozenset(keys) for keys in keys_by_request)
 
@@ -418,7 +418,7 @@ def _request_state(
                 axis_offset = axis_index * group.row_count
                 for row_index in range(start, end):
                     object_index = axis_offset + row_index
-                    if group.selection is not None and not group.selection[object_index]:
+                    if group.selected_objects is not None and not group.selected_objects[object_index]:
                         continue
                     key = axis[row_index]
                     keys.add(key)
@@ -448,7 +448,7 @@ def _sources_by_request(batch: KVTransferBatch) -> tuple[tuple[TransferSource, .
                 axis_offset = axis_index * group.row_count
                 for row_index in range(start, end):
                     object_index = axis_offset + row_index
-                    if group.selection is None or group.selection[object_index]:
+                    if group.selected_objects is None or group.selected_objects[object_index]:
                         source = TransferSource(
                             group, object_index, row_index, request_index, group.physical_layer_ids, axis[row_index]
                         )

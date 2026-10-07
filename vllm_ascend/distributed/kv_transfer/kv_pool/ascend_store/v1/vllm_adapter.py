@@ -122,7 +122,7 @@ def create_kv_pool_scheduler(
 def create_kv_pool_worker(vllm_config: VllmConfig, kv_cache_config: KVCacheConfig) -> KVPoolWorker:
     """Create the Worker-side owner of projection, memory, I/O, and timelines."""
 
-    route_spec = _resolve_kv_pool_configuration(vllm_config, kv_cache_config)
+    route_spec = resolve_kv_pool_route_spec(vllm_config, kv_cache_config)
     projection_binder = _compile_kv_pool_projection_binder(route_spec, vllm_config, kv_cache_config)
     backend_spec = resolve_backend_spec(route_spec.backend_name)
     backend = backend_spec.create(
@@ -203,7 +203,7 @@ def compile_kv_pool_projection_binder(
 ) -> LayerwiseProjectionBinder | BulkProjectionBinder:
     """Select static projection from vLLM state and return the memory binder."""
 
-    route_spec = _resolve_kv_pool_configuration(vllm_config, kv_cache_config)
+    route_spec = resolve_kv_pool_route_spec(vllm_config, kv_cache_config)
     return _compile_kv_pool_projection_binder(route_spec, vllm_config, kv_cache_config)
 
 
@@ -258,15 +258,8 @@ def resolve_kv_pool_route_spec(
     vllm_config: VllmConfig,
     kv_cache_config: KVCacheConfig,
 ) -> KVPoolRouteSpec:
-    """Capture the resolved static facts consumed by KV projection compilation."""
+    """Validate configuration and capture the static facts consumed by KV projection compilation."""
 
-    return _resolve_kv_pool_configuration(vllm_config, kv_cache_config)
-
-
-def _resolve_kv_pool_configuration(
-    vllm_config: VllmConfig,
-    kv_cache_config: KVCacheConfig,
-) -> KVPoolRouteSpec:
     extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
     use_layerwise = bool(extra_config.get("use_layerwise", False))
     backend_name = extra_config.get("backend", "mooncake").strip().lower()

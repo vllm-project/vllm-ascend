@@ -129,7 +129,7 @@ def load_block_rows(
             continue
         if tail_block_index is not None and block_index == tail_block_index:
             assert tail_boundary_token is not None
-            hashes.append(_boundary_hash(tail_boundary_token, block_hashes, hash_block_size))
+            hashes.append(boundary_hash(tail_boundary_token, block_hashes, hash_block_size))
         else:
             if block_index >= len(grouped_hashes):
                 continue
@@ -225,19 +225,6 @@ def _ceil_div(value: int, divisor: int) -> int:
     return (value + divisor - 1) // divisor
 
 
-def _boundary_hash(
-    boundary_token: int,
-    block_hashes: Sequence[BlockHash | str],
-    hash_block_size: int,
-) -> BlockHash | str:
-    if boundary_token <= 0 or boundary_token % hash_block_size:
-        raise ValueError(f"Token boundary {boundary_token} is not aligned to the hash block size")
-    hash_index = boundary_token // hash_block_size - 1
-    if hash_index >= len(block_hashes):
-        raise ValueError(f"Token boundary {boundary_token} has no corresponding block hash")
-    return block_hashes[hash_index]
-
-
 def boundary_hash(
     boundary_token: int,
     block_hashes: Sequence[BlockHash | str],
@@ -245,4 +232,9 @@ def boundary_hash(
 ) -> BlockHash | str:
     """Return the content hash that names one exact token boundary."""
 
-    return _boundary_hash(boundary_token, block_hashes, hash_block_size)
+    if boundary_token <= 0 or boundary_token % hash_block_size:
+        raise ValueError(f"Token boundary {boundary_token} is not aligned to the hash block size")
+    hash_index = boundary_token // hash_block_size - 1
+    if hash_index >= len(block_hashes):
+        raise ValueError(f"Token boundary {boundary_token} has no corresponding block hash")
+    return block_hashes[hash_index]

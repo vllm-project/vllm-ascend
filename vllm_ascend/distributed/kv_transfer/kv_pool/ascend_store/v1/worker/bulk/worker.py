@@ -567,13 +567,13 @@ class BulkWorker(KVPoolWorker):
                     projection.group(group.group_id),
                     group.block_ids,
                     group.token_counts,
-                    group.selection,
+                    group.selected_objects,
                     store=store,
                 )
                 group_keys, group_addresses, group_sizes = bulk_arguments(
                     group.key_axes,
                     ranges,
-                    group.selection,
+                    group.selected_objects,
                 )
                 keys.extend(group_keys)
                 addresses.extend(group_addresses)
@@ -587,7 +587,7 @@ class BulkWorker(KVPoolWorker):
                     projection,
                     group.block_ids,
                     group.token_counts,
-                    group.selection,
+                    group.selected_objects,
                 )
             elif isinstance(projection, ConsumerPipelineBulkProjection):
                 range_projection = consumer_pipeline_store_ranges if store else consumer_pipeline_load_ranges
@@ -595,7 +595,7 @@ class BulkWorker(KVPoolWorker):
                     projection,
                     group.block_ids,
                     group.token_counts,
-                    group.selection,
+                    group.selected_objects,
                 )
             else:
                 assert isinstance(projection, OrdinaryBulkProjection)
@@ -603,9 +603,9 @@ class BulkWorker(KVPoolWorker):
                     projection,
                     group.block_ids,
                     group.token_counts,
-                    group.selection,
+                    group.selected_objects,
                 )
-            keys, addresses, sizes = bulk_arguments(group.key_axes, ranges, group.selection)
+            keys, addresses, sizes = bulk_arguments(group.key_axes, ranges, group.selected_objects)
         return BulkBackendArguments(
             keys,
             addresses,
