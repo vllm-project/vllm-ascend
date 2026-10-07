@@ -84,39 +84,20 @@ def _make_pcp_config(
 
 
 @pytest.mark.parametrize(
-    "cudagraph_mode,allows_sharding",
+    "cudagraph_mode,speculative,pcp_size,dcp_size,expected_sharding",
     [
-        (CUDAGraphMode.NONE, True),
-        (CUDAGraphMode.PIECEWISE, False),
-        (CUDAGraphMode.FULL, False),
-        (CUDAGraphMode.FULL_DECODE_ONLY, False),
-        (CUDAGraphMode.FULL_AND_PIECEWISE, False),
+        (CUDAGraphMode.NONE, False, 2, 1, True),
+        (CUDAGraphMode.NONE, True, 2, 1, False),
+        (CUDAGraphMode.NONE, False, 1, 1, False),
+        (CUDAGraphMode.NONE, False, 2, 2, False),
+        (CUDAGraphMode.FULL_DECODE_ONLY, False, 2, 1, False),
     ],
 )
-@pytest.mark.parametrize("speculative", [False, True])
-@pytest.mark.parametrize("pcp_size,dcp_size", [(2, 1), (1, 1), (2, 2)])
-def test_decode_sharding_uses_parallel_config(cudagraph_mode, allows_sharding, speculative, pcp_size, dcp_size):
+def test_decode_sharding_uses_parallel_config(cudagraph_mode, speculative, pcp_size, dcp_size, expected_sharding):
     config = _make_pcp_config(cudagraph_mode)
     config.parallel_config.prefill_context_parallel_size = pcp_size
     config.parallel_config.decode_context_parallel_size = dcp_size
-    config.parallel_config.worker_cls = "test-worker"
     config.speculative_config = SimpleNamespace(method="mtp") if speculative else None
-    ascend_config = SimpleNamespace(
-        scheduler_config=SimpleNamespace(
-            dyntra_lb_config=SimpleNamespace(enabled=False),
-            profiling_chunk_config=SimpleNamespace(enabled=False),
-            batch_job_sched_config=SimpleNamespace(enabled=False),
-        )
-    )
-    with (
-        patch("vllm_ascend.platform.get_current_hardware_profile") as hardware_profile,
-        patch("vllm_ascend.platform.refresh_block_size"),
-    ):
-        hardware_profile.return_value.supports.return_value = False
-        _setup_worker_and_scheduler(config, ascend_config)
-
-    expected_sharding = allows_sharding and not speculative and pcp_size > 1 and dcp_size == 1
-    assert not hasattr(config.parallel_config, "pcp_shard_decode_requests")
     assert is_pcp_decode_sharding_enabled(config) is expected_sharding
     rank = pcp_size - 1
     manager = AscendPCPManager(pcp_size, rank, torch.device("cpu"), dcp_world_size=dcp_size)

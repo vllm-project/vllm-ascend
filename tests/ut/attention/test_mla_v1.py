@@ -108,7 +108,7 @@ def test_mxfp8_mla_fused_preprocess_owns_nz_conversion(
     original_scales = [layer.weight_scale.clone() for layer in projections]
     config = SimpleNamespace(
         model_config=SimpleNamespace(runner_type="draft" if is_draft else "generate", dtype=torch.bfloat16),
-        parallel_config=SimpleNamespace(prefill_context_parallel_size=1, pcp_shard_decode_requests=False),
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=1),
         cache_config=SimpleNamespace(cache_dtype="float16"),
         speculative_config=None,
     )
@@ -1625,7 +1625,6 @@ class TestAscendMLAImpl(TestBase):
         model_config = MagicMock()
         parallel_config = MagicMock()
         parallel_config.prefill_context_parallel_size = 1
-        parallel_config.pcp_shard_decode_requests = False
         speculative_config.num_speculative_tokens = 4
         vllm_config.speculative_config = speculative_config
         model_config.dtype = torch.float16

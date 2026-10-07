@@ -27,9 +27,7 @@ def _builder(block_size, a5, monkeypatch, rope_dim=0):
             get_head_size=lambda: 512,
             hf_text_config=SimpleNamespace(num_attention_heads=4, kv_lora_rank=512),
         ),
-        parallel_config=SimpleNamespace(
-            tensor_parallel_size=1, prefill_context_parallel_size=1, pcp_shard_decode_requests=False
-        ),
+        parallel_config=SimpleNamespace(tensor_parallel_size=1, prefill_context_parallel_size=1),
         scheduler_config=SimpleNamespace(max_num_seqs=2, max_num_batched_tokens=4),
         speculative_config=None,
         compilation_config=SimpleNamespace(
