@@ -17,6 +17,7 @@ from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.platform import (
     NPUPlatform,
     _setup_compile_backend,
+    _validate_draft_decode_context_parallel_config,
     _validate_eplb_config,
     _validate_parallel_config,
     _validate_routing_replay_config,
@@ -121,6 +122,30 @@ def test_ascend_sequence_parallel_moe_supports_dp1(dp_size, tp_size, enable_ep, 
     )
 
     assert config.use_sequence_parallel_moe is expected
+
+
+def test_eagle3_gqa_full_pcp_dcp_topology_skips_tp_only_head_limit():
+    draft_model_config = SimpleNamespace(
+        use_mla=False,
+        model_arch_config=SimpleNamespace(total_num_attention_heads=32),
+        get_total_num_kv_heads=lambda: 4,
+    )
+    speculative_config = SimpleNamespace(
+        num_speculative_tokens_per_batch_size=None,
+        draft_model_config=draft_model_config,
+        draft_parallel_config=None,
+        draft_tensor_parallel_size=None,
+    )
+    vllm_config = SimpleNamespace(
+        speculative_config=speculative_config,
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=8,
+            prefill_context_parallel_size=2,
+            decode_context_parallel_size=16,
+        ),
+    )
+
+    _validate_draft_decode_context_parallel_config(vllm_config)
 
 
 @pytest.mark.parametrize("model_role", ["target", "draft", "alias", "non_speculative"])

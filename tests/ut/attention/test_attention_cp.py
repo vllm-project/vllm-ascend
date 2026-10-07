@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -37,6 +38,26 @@ def test_gqa_dcp_extends_v1_backend_without_polluting_base_metadata() -> None:
 
 def test_gqa_dcp_builder_consumes_pcp_context() -> None:
     assert AscendAttentionDCPMetadataBuilder.consumes_pcp_context
+
+
+def test_gqa_full_dcp_gathers_distinct_kv_heads_across_tp() -> None:
+    impl = AscendAttentionDCPImpl.__new__(AscendAttentionDCPImpl)
+    impl.replicate_full_dcp_kv_heads = True
+    impl.kv_head_replication_factor = 2
+    gathered_key = torch.arange(16).view(1, 8, 2)
+    gathered_value = gathered_key + 100
+    impl.tp_group = SimpleNamespace(
+        all_gather=Mock(side_effect=(gathered_key, gathered_value)),
+    )
+
+    key, value = impl._gather_full_dcp_kv_heads(
+        torch.zeros(1, 1, 2),
+        torch.zeros(1, 1, 2),
+    )
+
+    torch.testing.assert_close(key, gathered_key[:, ::2])
+    torch.testing.assert_close(value, gathered_value[:, ::2])
+    assert impl.tp_group.all_gather.call_count == 2
 
 
 def test_gqa_dcp_capture_forwards_pcp_context() -> None:
@@ -154,6 +175,75 @@ def test_gqa_pcp_dcp_prefill_skips_replicated_decode_and_restores_global_current
     )
     assert fia.call_args.kwargs["actual_seq_lengths"] == [2, 4]
     assert impl.pcp_group.all_gather.call_count == 1
+
+
+def test_gqa_chunked_prefill_uses_shared_dcp_merge_for_pcp_overlap() -> None:
+    impl = AscendAttentionDCPImpl.__new__(AscendAttentionDCPImpl)
+    impl.pcp_enabled = False
+    impl.num_heads = 4
+    impl.num_kv_heads = 1
+    impl.head_size = 2
+    impl.scale = 0.5
+
+    chunked = AscendMetadataForPrefill.ChunkedContextMetadata(
+        actual_chunk_seq_lengths=torch.tensor([3], dtype=torch.int32),
+        actual_seq_lengths_kv=[5],
+        starts=torch.zeros(1, dtype=torch.int32),
+        chunk_seq_mask_filtered_indices=torch.arange(3),
+    )
+    metadata = AscendAttentionDCPMetadata(
+        num_decodes=0,
+        num_prefills=1,
+        num_decode_tokens=0,
+        num_actual_tokens=3,
+        causal=True,
+        attn_mask=torch.ones(3, 3, dtype=torch.bool),
+        prefill=AscendMetadataForPrefill(
+            chunked_context=chunked,
+            actual_seq_lengths_q=torch.tensor([3], dtype=torch.int32),
+        ),
+    )
+    query = torch.arange(24, dtype=torch.float32).view(3, 4, 2)
+    key = value = torch.arange(6, dtype=torch.float32).view(3, 1, 2)
+    output = torch.zeros_like(query)
+    current_output = torch.full_like(query, 1)
+    current_lse = torch.zeros(3, 4, 1)
+    history_output = torch.full_like(query, 2)
+    history_lse = torch.ones(3, 4, 1)
+    packed_history = object()
+    merged = torch.full_like(query, 3)
+    impl._prefill_query_all_gather = Mock(return_value=query)
+    impl._compute_prefill_context = Mock(return_value=(history_output, history_lse))
+    impl._merge_dcp_attention_output = Mock(return_value=packed_history)
+    stream = Mock()
+
+    module = "vllm_ascend.attention.context_parallel.attention_cp"
+    with (
+        patch(module + ".cp_chunkedprefill_comm_stream", return_value=stream),
+        patch(module + ".torch.npu.current_stream", return_value=stream),
+        patch(module + ".torch_npu.npu.stream", return_value=nullcontext()),
+        patch(module + ".record_attention_compute_start"),
+        patch(
+            module + ".torch.ops.npu.npu_fused_infer_attention_score",
+            return_value=(current_output, current_lse),
+        ),
+        patch(module + ".fused_dcp_lse_combine", return_value=merged) as combine,
+    ):
+        actual = impl.forward_impl(query, key, value, (object(), object()), metadata, output)
+
+    impl._merge_dcp_attention_output.assert_called_once_with(
+        history_output,
+        history_lse,
+        defer_combine=True,
+    )
+    combine.assert_called_once_with(
+        packed_history,
+        2,
+        scatter_dim=1,
+        local_output=current_output,
+        local_lse=current_lse,
+    )
+    torch.testing.assert_close(actual, merged)
 
 
 def test_dcp_chunked_request_mask_marks_nonempty_contexts() -> None:

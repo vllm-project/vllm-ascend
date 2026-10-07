@@ -23,6 +23,18 @@ class ReplicatedPCPDraftSpeculator(Protocol):
     pcp_manager: "AscendPCPManager | None"
 
 
+def replace_replicated_pcp_parallel_config(parallel_config: Any, **changes: Any) -> Any:
+    """Replace a replicated draft config without validating PCP=1 with target DCP."""
+    dcp_size = parallel_config.decode_context_parallel_size
+    parallel_config = replace(
+        parallel_config,
+        decode_context_parallel_size=1,
+        **changes,
+    )
+    parallel_config.decode_context_parallel_size = dcp_size
+    return parallel_config
+
+
 def _draft_additional_config(vllm_config: VllmConfig) -> dict[str, Any] | None:
     """Return a CPP-disabled copy when a PP target creates a PP=1 draft."""
     if vllm_config.parallel_config.pipeline_parallel_size <= 1:

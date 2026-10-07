@@ -86,6 +86,7 @@ from vllm_ascend.utils import (
     calc_split_factor,
     enable_sfa,
     enable_sfa_dcp_replicated_indexer,
+    get_gqa_full_dcp_kv_heads,
     get_kv_cache_tensor_layers,
     is_hidden_state_cache_spec,
     kv_cache_spec_uses_packed_sfa_main_cache,
@@ -190,6 +191,10 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
         if enable_sfa_dcp_replicated_indexer(vllm_config)
         else 1
     )
+    full_dcp_kv_heads = get_gqa_full_dcp_kv_heads(
+        vllm_config.model_config,
+        vllm_config.parallel_config,
+    )
 
     c8_k_cache_dtype = kv_cache_dtype_str_to_dtype(
         vllm_config.attention_config.indexer_kv_dtype, vllm_config.model_config
@@ -208,6 +213,13 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
         spec = attn_module.get_kv_cache_spec(vllm_config)
         if spec is None:
             continue
+
+        if full_dcp_kv_heads is not None and type(spec) is FullAttentionSpec:
+            # Full TP x PCP GQA DCP crosses TP ranks with different KV heads.
+            # Store the complete KV-head set on every token shard; otherwise
+            # each shard contains only one head and gathered Q heads attend to
+            # unrelated K/V, which corrupts decode output.
+            spec = replace(spec, num_kv_heads=full_dcp_kv_heads)
 
         if isinstance(spec, MambaSpec):
             # Keep Mamba groups after attention groups. Ascend graph parameter

@@ -87,6 +87,43 @@ _CUSTOM_OP_BASE_DIR = (
 _IS_ROT_WEIGHT_USED = None
 
 
+def is_gqa_pcp_dcp_topology(model_config: Any, parallel_config: Any) -> bool:
+    """Whether GQA/MQA DCP uses PCP ranks or the full TP x PCP domain."""
+    if model_config.use_mla:
+        return False
+    pcp_size = parallel_config.prefill_context_parallel_size
+    if pcp_size <= 1:
+        return False
+    tp_size = parallel_config.tensor_parallel_size
+    dcp_size = parallel_config.decode_context_parallel_size
+    return dcp_size in (pcp_size, tp_size * pcp_size)
+
+
+def get_gqa_full_dcp_kv_heads(model_config: Any, parallel_config: Any) -> int | None:
+    """Return replicated cache KV heads for a full TP x PCP GQA DCP group.
+
+    A TP-only GQA DCP group contains ranks that replicate one KV head.  A
+    full TP x PCP group also crosses ranks that own different KV heads, so
+    every rank must cache every model KV head before attention can merge all
+    DCP token shards.
+    """
+    if getattr(model_config, "use_mla", True):
+        return None
+    tp_size = getattr(parallel_config, "tensor_parallel_size", None)
+    dcp_size = getattr(parallel_config, "decode_context_parallel_size", 1)
+    if tp_size is None:
+        return None
+    if dcp_size <= tp_size:
+        return None
+    get_total_num_kv_heads = getattr(model_config, "get_total_num_kv_heads", None)
+    if get_total_num_kv_heads is None:
+        return None
+    total_kv_heads = get_total_num_kv_heads()
+    if total_kv_heads <= 0 or tp_size % total_kv_heads:
+        return None
+    return total_kv_heads
+
+
 def extract_dsv4_layer_index(config: Any, layer_name: str) -> int:
     """Extract DSV4 index for config per-layer arrays.
 

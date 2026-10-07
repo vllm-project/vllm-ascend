@@ -573,6 +573,46 @@ def test_build_attn_metadata_factory_applies_state(monkeypatch, state_kwargs, fa
     assert captured_kwargs["attn_state"] == factory_state
 
 
+@pytest.mark.parametrize(("dcp_size", "expected_kv_heads"), [(2, 1), (16, 4)])
+def test_full_gqa_pcp_dcp_cache_replicates_model_kv_heads(monkeypatch, dcp_size, expected_kv_heads):
+    source_spec = FullAttentionSpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+    )
+    layer = SimpleNamespace(
+        kv_sharing_target_layer_name=None,
+        align_kv_cache_with_mamba=True,
+        get_kv_cache_spec=lambda _config: source_spec,
+    )
+    model_config = SimpleNamespace(
+        use_mla=False,
+        dtype=torch.bfloat16,
+        get_total_num_kv_heads=lambda: 4,
+    )
+    vllm_config = SimpleNamespace(
+        model_config=model_config,
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=8,
+            prefill_context_parallel_size=2,
+            decode_context_parallel_size=dcp_size,
+        ),
+        attention_config=SimpleNamespace(indexer_kv_dtype="auto"),
+        cache_config=SimpleNamespace(cache_dtype="auto", block_size=128),
+    )
+    monkeypatch.setattr(
+        attn_utils,
+        "get_layers_from_vllm_config",
+        lambda *_args, **_kwargs: {"model.layers.0.self_attn.attn": layer},
+    )
+    monkeypatch.setattr(attn_utils, "enable_sfa_dcp_replicated_indexer", lambda _config: False)
+
+    specs = attn_utils.get_kv_cache_spec(vllm_config)
+
+    assert specs["model.layers.0.self_attn.attn"].num_kv_heads == expected_kv_heads
+
+
 @pytest.mark.parametrize(
     ("replicated_indexer", "expected_size"),
     [(False, 1), (True, 4)],

@@ -22,6 +22,9 @@ from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator
 from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import (
     AscendAutoRegressiveSpeculator,
 )
+from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
+    replace_replicated_pcp_parallel_config,
+)
 
 
 class AscendEagleSpeculator(AscendAutoRegressiveSpeculator, EagleSpeculator):
@@ -33,10 +36,15 @@ class AscendEagleSpeculator(AscendAutoRegressiveSpeculator, EagleSpeculator):
         # The base swaps in the draft model config without re-validating it;
         # the draft-only settings on top turn EP/EPLB off (no experts).
         draft_vllm_config = super()._create_draft_vllm_config()
-        draft_vllm_config.parallel_config = replace(
-            draft_vllm_config.parallel_config,
-            prefill_context_parallel_size=1,
-            enable_expert_parallel=False,
-            enable_eplb=False,
-        )
+        parallel_config = draft_vllm_config.parallel_config
+        changes = {
+            "prefill_context_parallel_size": 1,
+            "enable_expert_parallel": False,
+            "enable_eplb": False,
+        }
+        if self.replicated_pcp:
+            parallel_config = replace_replicated_pcp_parallel_config(parallel_config, **changes)
+        else:
+            parallel_config = replace(parallel_config, **changes)
+        draft_vllm_config.parallel_config = parallel_config
         return draft_vllm_config

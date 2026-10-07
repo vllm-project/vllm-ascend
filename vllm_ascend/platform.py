@@ -50,6 +50,7 @@ from vllm_ascend.utils import (
     bootstrap_custom_op_env,
     check_kv_extra_config,
     enable_sfa_dcp_replicated_indexer,
+    is_gqa_pcp_dcp_topology,
     is_moe_model,
     model_uses_kpool_indexer,
     model_uses_sfa_sparse,
@@ -1698,6 +1699,11 @@ def _validate_draft_decode_context_parallel_config(vllm_config: VllmConfig) -> N
 
     # MLA draft models do not use the GQA/MQA DCP head-sharding rule.
     if draft_model_config.use_mla:
+        return
+
+    # PCP+DCP uses PCP replicas or the full TP x PCP domain. The legacy
+    # TP-only GQA/MQA limit below does not describe either topology.
+    if is_gqa_pcp_dcp_topology(draft_model_config, parallel_config):
         return
 
     draft_parallel_config = speculative_config.draft_parallel_config

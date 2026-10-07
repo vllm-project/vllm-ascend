@@ -30,6 +30,7 @@ from vllm_ascend.worker.v2.spec_decode.mtp.speculator import (
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
     disable_profiling_chunk_for_draft,
     disable_target_pcp_for_replicated_draft,
+    replace_replicated_pcp_parallel_config,
 )
 
 
@@ -249,6 +250,34 @@ def test_eagle_draft_config_disables_profiling_chunk() -> None:
     assert additional_config["scheduler_config"]["profiling_chunk_config"]["enabled"] == "yes"
     assert draft_config.parallel_config.pipeline_parallel_size == 1
     assert draft_config.parallel_config.is_moe_model is False
+
+
+def test_replicated_pcp_parallel_replace_restores_full_dcp() -> None:
+    parallel_config = SimpleNamespace(
+        prefill_context_parallel_size=1,
+        decode_context_parallel_size=16,
+        enable_expert_parallel=True,
+    )
+    validated_dcp_sizes = []
+
+    def replace_config(config, **changes):
+        validated_dcp_sizes.append(changes["decode_context_parallel_size"])
+        values = vars(config).copy()
+        values.update(changes)
+        return SimpleNamespace(**values)
+
+    with patch(
+        "vllm_ascend.worker.v2.spec_decode.pcp_utils.replace",
+        side_effect=replace_config,
+    ):
+        draft_parallel_config = replace_replicated_pcp_parallel_config(
+            parallel_config,
+            enable_expert_parallel=False,
+        )
+
+    assert validated_dcp_sizes == [1]
+    assert draft_parallel_config.decode_context_parallel_size == 16
+    assert not draft_parallel_config.enable_expert_parallel
 
 
 @pytest.mark.parametrize("replicated_pcp", [False, True])

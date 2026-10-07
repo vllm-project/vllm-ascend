@@ -19,7 +19,6 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
-import torch.distributed as dist
 import torch_npu
 from vllm.distributed import get_pcp_group
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
@@ -34,8 +33,6 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     CPKVScope,
     DCPImplMixin,
     DCPMetadataBuilderMixin,
-    _npu_attn_out_lse_update,
-    _update_out_and_lse,
     use_history_current_split_decode,
 )
 from vllm_ascend.attention.utils import (
@@ -51,6 +48,7 @@ from vllm_ascend.ops.triton.dcp.dcp_a2a import fused_dcp_lse_combine
 from vllm_ascend.utils import (
     cp_chunkedprefill_comm_stream,
     cp_decode_comm_stream,
+    get_gqa_full_dcp_kv_heads,
     is_pd_decode_recompute_scheduler_enabled,
 )
 
@@ -413,9 +411,59 @@ class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
         super().__init__(*args, **kwargs)
         self.pcp_enabled = self.vllm_config.parallel_config.prefill_context_parallel_size > 1
         self._pcp_gathered_kv: tuple[torch.Tensor, torch.Tensor] | None = None
+        full_dcp_kv_heads = get_gqa_full_dcp_kv_heads(
+            self.vllm_config.model_config,
+            self.vllm_config.parallel_config,
+        )
+        self.dcp_cache_num_kv_heads = full_dcp_kv_heads or self.num_kv_heads
+        self.replicate_full_dcp_kv_heads = self.dcp_cache_num_kv_heads > self.num_kv_heads
+        self.kv_head_replication_factor = (
+            self.tp_group.world_size // self.dcp_cache_num_kv_heads
+            if self.replicate_full_dcp_kv_heads
+            else 1
+        )
 
     def _record_pcp_gathered_kv(self, key: torch.Tensor, value: torch.Tensor) -> None:
         self._pcp_gathered_kv = key, value
+
+    def _gather_full_dcp_kv_heads(
+        self,
+        key: torch.Tensor,
+        value: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Replicate distinct model KV heads on every full-domain DCP rank."""
+        if not self.replicate_full_dcp_kv_heads:
+            return key, value
+        key = self.tp_group.all_gather(key.contiguous(), dim=1)
+        value = self.tp_group.all_gather(value.contiguous(), dim=1)
+        replica_stride = self.kv_head_replication_factor
+        return (
+            key[:, ::replica_stride].contiguous(),
+            value[:, ::replica_stride].contiguous(),
+        )
+
+    def reshape_and_cache(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: tuple[torch.Tensor],
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor,
+    ):
+        key, value = self._gather_full_dcp_kv_heads(key, value)
+        return super().reshape_and_cache(query, key, value, kv_cache, attn_metadata, output)
+
+    def do_kv_cache_update(
+        self,
+        layer: torch.nn.Module,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: list[torch.Tensor],
+        slot_mapping: torch.Tensor,
+    ) -> None:
+        key, value = self._gather_full_dcp_kv_heads(key, value)
+        super().do_kv_cache_update(layer, key, value, kv_cache, slot_mapping)
 
     def _run_dcp_attention(
         self,
@@ -429,9 +477,11 @@ class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
         provider = DCPFIAParamProvider(self._graph_metadata_layer_name(), self.dcp_rank, attention_kind)
         params = provider.resolve({provider.metadata_layer_name: attn_metadata})
         is_current = attention_kind == CPKVScope.CURRENT
+        cache_num_kv_heads = getattr(self, "dcp_cache_num_kv_heads", self.num_kv_heads)
+        num_key_value_heads = self.num_kv_heads if is_current else cache_num_kv_heads
         kwargs = {
             "num_heads": num_heads,
-            "num_key_value_heads": self.num_kv_heads,
+            "num_key_value_heads": num_key_value_heads,
             "input_layout": "TND",
             "atten_mask": attn_metadata.attn_mask if is_current and attn_metadata.causal else None,
             "sparse_mode": 3 if is_current and attn_metadata.causal else 0,
@@ -450,7 +500,7 @@ class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
         # Match attention_v1: keep addresses stable and update only runtime
         # lengths/block tables through UpdatableGraph parameter providers.
         workspace = get_capture_resource(
-            (DCPFIAParamProvider, attention_kind, num_heads, self.num_kv_heads),
+            (DCPFIAParamProvider, attention_kind, num_heads, num_key_value_heads),
             lambda: torch_npu._npu_fused_infer_attention_score_get_max_workspace(query, key, value, **kwargs),
             self._use_max_workspace_for_fia_graph,
         )
@@ -530,36 +580,6 @@ class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
             local_lse=current_lse,
         )
 
-    def _update_chunk_attn_out_lse_with_current_attn_out_lse(
-        self,
-        current_attn_output_prefill,
-        current_attn_lse_prefill,
-        attn_output_full_chunk,
-        attn_lse_full_chunk,
-        prefill_query,
-        attn_metadata,
-    ):
-        num_tokens = prefill_query.size(0)
-        attn_output_full_chunk = attn_output_full_chunk[:num_tokens]
-        attn_lse_full_chunk = attn_lse_full_chunk[:num_tokens]
-
-        assert (
-            attn_output_full_chunk.shape == current_attn_output_prefill.shape
-            and attn_lse_full_chunk.shape == current_attn_lse_prefill.shape
-        )
-        filtered_indices = attn_metadata.prefill.chunked_context.chunk_seq_mask_filtered_indices
-
-        attn_output_prefill_filtered = current_attn_output_prefill[filtered_indices, :, :]
-        attn_lse_prefill_filtered = current_attn_lse_prefill[filtered_indices, :, :]
-        attn_output_full_chunk = attn_output_full_chunk[filtered_indices, :, :]
-        attn_lse_full_chunk = attn_lse_full_chunk[filtered_indices, :, :]
-
-        attn_output_filtered = _npu_attn_out_lse_update(
-            attn_lse_prefill_filtered, attn_lse_full_chunk, attn_output_prefill_filtered, attn_output_full_chunk
-        )
-
-        current_attn_output_prefill[filtered_indices, :, :] = attn_output_filtered.to(current_attn_output_prefill.dtype)
-
     def _prefill_query_all_gather(self, attn_metadata, prefill_query):
         (prefill_query,) = self._dcp_all_gather_fragments(prefill_query, dim=1)
         return prefill_query
@@ -596,7 +616,7 @@ class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
             key,
             value,
             num_heads=num_heads,
-            num_key_value_heads=self.num_kv_heads,
+            num_key_value_heads=getattr(self, "dcp_cache_num_kv_heads", self.num_kv_heads),
             input_layout="TND",
             atten_mask=None,
             scale=self.scale,
@@ -735,32 +755,6 @@ class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
             )
         return key, value
 
-    def _gather_global_context_output(self, local_context_attn_output):
-        if self.dcp_size > 1:
-            dcp_context_attn_output = torch.empty_like(local_context_attn_output)
-            dist.all_to_all_single(
-                dcp_context_attn_output,
-                local_context_attn_output,
-                group=self.dcp_device_group,
-            )
-        else:
-            dcp_context_attn_output = local_context_attn_output
-
-        return dcp_context_attn_output
-
-    def _update_global_context_output(self, global_context_output):
-        B_total, H_total, D_plus_1 = global_context_output.shape
-        S = B_total
-        H = H_total // self.dcp_size
-        D = self.head_size
-        assert D_plus_1 == D + 1
-        x = global_context_output.view(S, self.dcp_size, H, D_plus_1)
-        x = x.permute(1, 0, 2, 3).contiguous()
-        # Split out lse
-        attn_out_allgather, attn_lse_allgather = torch.split(x, [D, 1], dim=-1)  # [N, S, H, D], [N, S, H, 1]
-        context_output, context_lse = _update_out_and_lse(attn_out_allgather, attn_lse_allgather)
-        return context_output, context_lse
-
     def forward_impl(
         self,
         query: torch.Tensor,
@@ -846,22 +840,32 @@ class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
             if has_chunked_context:
                 torch.npu.current_stream().wait_stream(cp_chunkedprefill_comm_stream())
                 # computation of context
-                context_output = self._compute_prefill_context(prefill_query_all, kv_cache, attn_metadata)
-                # Note(qcs): (output, lse) -> [Seq, Head_num, Head_dim+1] -> [Head_num, Head_dim+1, Seq]
-                local_context_output = torch.cat(context_output, dim=-1).permute([1, 2, 0]).contiguous()
+                history_output, history_lse = self._compute_prefill_context(
+                    prefill_query_all,
+                    kv_cache,
+                    attn_metadata,
+                )
 
-                # all2all and all_gather output&lse // overlap the computation inner current chunk
+                # Exchange and merge the DCP history while current attention
+                # runs on the main stream. The shared helper also handles DCP
+                # groups that overlap PCP ranks without splitting query heads.
                 cp_chunkedprefill_comm_stream().wait_stream(torch.npu.current_stream())
                 with torch_npu.npu.stream(cp_chunkedprefill_comm_stream()):
-                    global_context_output = self._gather_global_context_output(local_context_output)
+                    history_recv = self._merge_dcp_attention_output(
+                        history_output,
+                        history_lse,
+                        defer_combine=True,
+                    )
 
             if has_chunked_context:
-                # update the output of current chunk with context part
+                # Merge the history shards with the current chunk exactly once.
                 torch.npu.current_stream().wait_stream(cp_chunkedprefill_comm_stream())
-                global_context_output = global_context_output.permute([2, 0, 1]).contiguous()
-                context_output, context_lse = self._update_global_context_output(global_context_output)
-                self._update_chunk_attn_out_lse_with_current_attn_out_lse(
-                    attn_output_prefill, attn_lse_prefill, context_output, context_lse, prefill_query, attn_metadata
+                attn_output_prefill = fused_dcp_lse_combine(
+                    history_recv,
+                    self.head_size,
+                    scatter_dim=1,
+                    local_output=attn_output_prefill,
+                    local_lse=attn_lse_prefill,
                 )
 
             output[num_decode_tokens : attn_output_prefill.shape[0] + num_decode_tokens] = attn_output_prefill

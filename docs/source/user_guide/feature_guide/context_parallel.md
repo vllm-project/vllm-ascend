@@ -122,9 +122,11 @@ For either method, remove `--enforce-eager` and add the following option to use 
 - Pipeline parallelism, encoder-decoder models, multimodal inputs, and LoRA are not supported with MRV2 PCP.
 - SFA draft attention is not supported with PCP speculative decoding.
 - PCP and DCP can be stacked for MLA and GQA. With PCP enabled, set DCP to
-  either the PCP size or the full TP x PCP size. GQA must also satisfy the
-  model's query-heads-per-KV-head DCP limit. For example, Qwen3-30B-A3B uses
-  TP 8, PCP 2, and DCP 2.
+  either the PCP size or the full TP x PCP size. For full-domain GQA DCP, each
+  token shard stores the model's complete KV-head set so attention can cross
+  TP ranks that own different KV heads. This increases per-rank KV-cache bytes
+  by the ratio of total KV heads to local KV heads. Qwen3-30B-A3B supports
+  TP 8, PCP 2, with either DCP 2 or DCP 16.
 - Adaptive verification is not supported with PCP speculative decoding.
 - Dynamic draft lengths are outside the currently validated scope.
 - PCP and [DSA-CP](#dsa-cp) cannot be enabled simultaneously with the DSA backend.

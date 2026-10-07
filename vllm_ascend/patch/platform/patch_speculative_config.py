@@ -9,7 +9,7 @@ from transformers import DeepseekV2Config, PretrainedConfig
 from vllm.config.model import ModelConfig
 from vllm.config.speculative import SpeculativeConfig
 
-from vllm_ascend.utils import is_deepseek_v41
+from vllm_ascend.utils import is_deepseek_v41, is_gqa_pcp_dcp_topology
 
 _orig_post_init = SpeculativeConfig.__post_init__
 _orig_hf_config_override = SpeculativeConfig.hf_config_override
@@ -225,6 +225,13 @@ _orig_verify_with_parallel_config = ModelConfig.verify_with_parallel_config
 def _ascend_verify_with_parallel_config(self, parallel_config):
     if parallel_config.enable_expert_parallel and not self.is_moe and getattr(self, "runner_type", None) == "draft":
         return
+    if is_gqa_pcp_dcp_topology(self, parallel_config):
+        # Upstream's GQA check assumes DCP only reuses TP ranks. With PCP,
+        # DCP either spans the replicated PCP axis or the full TP x PCP domain;
+        # the Ascend attention backend performs the matching query-head exchange.
+        guard_parallel_config = copy(parallel_config)
+        guard_parallel_config.decode_context_parallel_size = 1
+        return _orig_verify_with_parallel_config(self, guard_parallel_config)
     return _orig_verify_with_parallel_config(self, parallel_config)
 
 
