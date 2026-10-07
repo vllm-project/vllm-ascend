@@ -131,7 +131,7 @@ from vllm_ascend.attention.attention_c8_mxfp import (
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBuilder
-from vllm_ascend.attention.dsa_v1 import AscendDSABackend, AscendDSAMetadataBuilder
+from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
@@ -179,7 +179,6 @@ from vllm_ascend.models.glm5next.cache_views import view_glm5_next_cache
 from vllm_ascend.models.glm5next.kv_cache import is_glm5_next_cache_spec
 from vllm_ascend.ops.fused_moe.force_eplb import build_force_eplb_topk
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
-from vllm_ascend.ops.triton.a5_slot_mapping import build_a5_slot_mapping_batch
 from vllm_ascend.ops.triton.spec_decode.ngram import triton_ngram_spec_decode
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.sample.sampler import AscendSampler
@@ -359,38 +358,6 @@ class ExecuteModelState(NamedTuple):
     batch_desc: BatchDescriptor
 
 
-@dataclass(frozen=True)
-class _A5SlotMappingLayout:
-    group_id: int
-    coordinates_key: str
-    flat_key: str
-    page_size: int
-    compress_ratio: int
-
-
-@dataclass(frozen=True)
-class _A5SlotMappingBatch:
-    start: int
-    end: int
-    page_size: int
-    compress_ratio: int
-    group_ids: torch.Tensor
-
-
-def _needs_engram_block_table_cpu(kv_cache_spec: KVCacheSpec) -> bool:
-    """Return whether this group owns the target model's SWA history pages."""
-    specs = tuple(
-        kv_cache_spec.kv_cache_specs.values()
-        if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs)
-        else (kv_cache_spec,)
-    )
-    return bool(specs) and all(
-        isinstance(spec, AscendSlidingWindowMLASpec)
-        and getattr(spec, "model_version", None) == "deepseek_v41"
-        for spec in specs
-    )
-
-
 class NPUModelRunner(GPUModelRunner):
     # vLLM #51718 describes compatible KV cache groups as views over one
     # standardized backing allocation. The default runner preserves that
@@ -412,28 +379,6 @@ class NPUModelRunner(GPUModelRunner):
 
         self.device_metadata_executor: DeviceMetadataExecutor | None = None
         self.device_metadata_providers: dict[int, DeviceMetadataTaskProvider] | None = None
-        # Attention metadata is rebuilt for every decode step, but the backing
-        # buffers and graph-padded shapes are stable. Cache their Tensor views
-        # so a full-graph replay does not recreate the same slice/as_strided
-        # objects once per KV cache group.
-        self._attention_common_view_cache: dict[
-            tuple[int, int, int, int], dict[str, Any]
-        ] = {}
-        self._attention_group_view_cache: dict[
-            tuple[int, int, int, int],
-            tuple[torch.Tensor, torch.Tensor, torch.Tensor | None],
-        ] = {}
-        self._a5_slot_mapping_layouts: tuple[_A5SlotMappingLayout, ...] = ()
-        self._a5_slot_mapping_batches: tuple[_A5SlotMappingBatch, ...] = ()
-        self._a5_slot_coordinates: torch.Tensor | None = None
-        self._a5_flat_slots: torch.Tensor | None = None
-        self._a5_slot_mapping_view_cache: dict[
-            int,
-            tuple[
-                tuple[tuple[torch.Tensor, torch.Tensor], ...],
-                tuple[dict[str, torch.Tensor], ...],
-            ],
-        ] = {}
         self.pin_memory = PIN_MEMORY
 
         set_offloader(create_offloader(self.offload_config))
@@ -600,6 +545,14 @@ class NPUModelRunner(GPUModelRunner):
 
         self._set_up_drafter()
 
+        # Backends that consume CPU seq_lens (AscendAttentionBackend,
+        # AscendMLABackend, and DSV4 compressed attention metadata) need
+        # ``optimistic_seq_lens_cpu`` to match the corrected GPU seq_lens
+        # in async spec decode mode; others (SFA, GDN, etc.) do not.
+        self._needs_seq_lens_cpu_sync = self.use_compress or issubclass(
+            self.attn_backend, (AscendAttentionBackend, AscendMLABackend)
+        )
+
         # kv role
         self.is_kv_producer = False
         self.is_kv_consumer = False
@@ -717,10 +670,13 @@ class NPUModelRunner(GPUModelRunner):
         self._pending_encoder_cache_copies: deque[
             tuple[torch.Tensor, torch.npu.Event]
         ] = deque()
-        self._spec_decode_metadata_buffer = None
-        self._spec_decode_metadata_offsets: tuple[int, ...] = ()
-        if self.num_spec_tokens:
-            self._init_spec_decode_metadata_buffer()
+        # Keep the pinned CPU sources for speculative-decode metadata alive
+        # until their asynchronous H2D copies have completed.  Creating the
+        # sources as temporaries in ``_calc_spec_decode_metadata`` lets the
+        # pinned allocator reuse their storage while DMA is still reading it.
+        self._pending_spec_decode_metadata_copies: deque[
+            tuple[tuple[torch.Tensor, ...], torch.npu.Event]
+        ] = deque()
 
         self.sparse_kv_offload_config = self.ascend_config.sparse_kv_offload_config
         self.sparse_kv_offload_enabled = self.sparse_kv_offload_config.enabled
@@ -931,18 +887,6 @@ class NPUModelRunner(GPUModelRunner):
             return self.model.unwrap()
         return self.model
 
-    @staticmethod
-    def _should_skip_compiled_forward(
-        model: nn.Module,
-        cudagraph_mode: CUDAGraphMode,
-        has_encoder_input: bool,
-    ) -> bool:
-        """Honor model-owned eager fallbacks outside full graph replay."""
-        return has_encoder_input or (
-            cudagraph_mode == CUDAGraphMode.NONE
-            and bool(getattr(model, "requires_uncompiled_fallback", False))
-        )
-
     def _is_pd_prefill_worker(self) -> bool:
         return self.is_kv_producer and not self.is_kv_consumer
 
@@ -1109,20 +1053,6 @@ class NPUModelRunner(GPUModelRunner):
         else:
             accepted[:num_reqs].fill(1)
         self.input_batch.num_accepted_tokens_cpu[:num_reqs] = accepted[:num_reqs]
-
-    def _prepare_num_accepted_tokens(self, num_reqs: int, has_prev_mapping: bool) -> None:
-        # Upstream creates this event for every speculative model, but only
-        # Mamba state postprocessing produces accepted counts on the CPU.
-        if self.need_accepted_tokens and self.num_accepted_tokens_event is not None:
-            self.num_accepted_tokens_event.synchronize()
-            self._sync_num_accepted_tokens(num_reqs, has_prev_mapping)
-            self.num_accepted_tokens.np[num_reqs:].fill(1)
-            self.num_accepted_tokens.copy_to_gpu()
-        else:
-            # Async speculative correction below fills participating rows from
-            # device counts. New requests and prefills retain the default of 1.
-            self.num_accepted_tokens.np.fill(1)
-            self.num_accepted_tokens.gpu.fill_(1)
 
     def _pad_query_start_loc_for_fia(
         self,
@@ -1556,7 +1486,18 @@ class NPUModelRunner(GPUModelRunner):
         self.discard_request_mask.np[:num_reqs] = discard_requests_mask
         self.discard_request_mask.copy_to_gpu(num_reqs)
 
-        self._prepare_num_accepted_tokens(num_reqs, has_prev_mapping=bool(prev_req_id_to_index))
+        # Sync num_accepted_tokens from CPU (set by
+        # _update_states_after_model_execute for hybrid models).
+        if self.num_accepted_tokens_event is not None:
+            self.num_accepted_tokens_event.synchronize()
+            self._sync_num_accepted_tokens(
+                num_reqs, has_prev_mapping=bool(prev_req_id_to_index)
+            )
+            self.num_accepted_tokens.np[num_reqs:].fill(1)
+            self.num_accepted_tokens.copy_to_gpu()
+        else:
+            self.num_accepted_tokens.np.fill(1)
+            self.num_accepted_tokens.gpu.fill_(1)
 
         # Update num_computed_tokens on GPU. In async spec decode,
         # CPU values are optimistic (all drafts accepted). The kernel
@@ -1807,39 +1748,22 @@ class NPUModelRunner(GPUModelRunner):
         input_ids = self.input_ids.gpu[:num_forward_tokens]
         input_ids.masked_fill_(input_ids == PLACEHOLDER_TOKEN_ID, 0)
 
-    def _init_spec_decode_metadata_buffer(self) -> None:
-        capacities = (
-            self.max_num_reqs,
-            self.max_num_reqs,
-            self.max_num_reqs * (self.num_spec_tokens + 1),
-            self.max_num_reqs * self.num_spec_tokens,
-            self.max_num_reqs,
-        )
-        offsets = np.cumsum((0, *capacities), dtype=np.int32)
-        self._spec_decode_metadata_offsets = tuple(int(value) for value in offsets)
-        self._spec_decode_metadata_buffer = self._make_buffer(
-            int(offsets[-1]),
-            dtype=torch.int32,
-        )
-
     def _copy_spec_decode_metadata_to_device(
-        self, cpu_metadata: tuple[np.ndarray, ...]
+        self, cpu_metadata: tuple[torch.Tensor, ...]
     ) -> tuple[torch.Tensor, ...]:
-        buffer = self._spec_decode_metadata_buffer
-        assert buffer is not None
-        offsets = self._spec_decode_metadata_offsets
-        device_metadata = []
-        for index, value in enumerate(cpu_metadata):
-            start = offsets[index]
-            end = start + value.size
-            buffer.np[start:end] = value
-            device_metadata.append(buffer.gpu[start:end])
+        device_metadata = tuple(
+            value.to(self.device, non_blocking=True) for value in cpu_metadata
+        )
+        if self.device.type == "cpu":
+            return device_metadata
 
-        # ``synchronize_input_prep`` waits for the previous step before these
-        # persistent pinned bytes are overwritten, then records completion of
-        # this single packed H2D at the end of input preparation.
-        buffer.copy_to_gpu()
-        return tuple(device_metadata)
+        pending_copies = self._pending_spec_decode_metadata_copies
+        while pending_copies and pending_copies[0][1].query():
+            pending_copies.popleft()
+        copy_done = torch.npu.Event()
+        copy_done.record(torch.npu.current_stream())
+        pending_copies.append((cpu_metadata, copy_done))
+        return device_metadata
 
     def _calc_spec_decode_metadata(
         self,
@@ -1886,12 +1810,15 @@ class NPUModelRunner(GPUModelRunner):
         # [0, 1, 2, 5, 6, 9]
         target_logits_indices += arange
 
-        cpu_metadata = (
-            cu_num_draft_tokens,
-            cu_num_sampled_tokens,
-            logits_indices,
-            target_logits_indices,
-            bonus_logits_indices,
+        cpu_metadata = tuple(
+            torch.from_numpy(value).pin_memory()
+            for value in (
+                cu_num_draft_tokens,
+                cu_num_sampled_tokens,
+                logits_indices,
+                target_logits_indices,
+                bonus_logits_indices,
+            )
         )
         (
             cu_num_draft_tokens,
@@ -2525,7 +2452,7 @@ class NPUModelRunner(GPUModelRunner):
                             self.mamba_state_idx,
                         )
 
-                if self.use_compress and self._needs_seq_lens_cpu_sync:
+                if self.use_compress:
                     if deferred_state_corrections_fn:
                         deferred_state_corrections_fn()
                         deferred_state_corrections_fn = None
@@ -2614,11 +2541,6 @@ class NPUModelRunner(GPUModelRunner):
             self.model_config.is_encoder_decoder
             or self.model_config.requires_raw_input_tokens
         )
-        skip_compiled = self._should_skip_compiled_forward(
-            self.get_model(),
-            cudagraph_mode,
-            has_encoder_input,
-        )
         # Run forward pass
         defer_kv_connector_finalize = self.speculative_config is not None and (
             get_pp_group().is_last_rank or self.broadcast_pp_output
@@ -2636,7 +2558,7 @@ class NPUModelRunner(GPUModelRunner):
                 num_actual_tokens=scheduler_output.total_num_scheduled_tokens,
                 model_instance=self.model,
                 device_metadata_executor=active_device_metadata_executor,
-                skip_compiled=skip_compiled,
+                skip_compiled=has_encoder_input,
                 has_sinks=self._has_sinks,
                 eplb_heat_collection_status=self.eplb_heat_collection_status if self.dynamic_eplb else False,
             ),
@@ -3287,37 +3209,36 @@ class NPUModelRunner(GPUModelRunner):
             "inputs_embeds": inputs_embeds,
             **model_kwargs,
         }
-        forward_failed = True
-        try:
-            # Routing runs before replay on every DP, never inside capture.
-            prepare_engram = getattr(self.model, "prepare_engram_inputs", None)
-            if prepare_engram is not None:
-                if (
-                    getattr(self, "_engram_capture_active", False)
-                    or getattr(forward_context, "capturing", False)
-                    or torch.npu.is_current_stream_capturing()
-                ):
-                    model_inputs.update(self.model.prepare_engram_graph_inputs(num_tokens_padded))
-                else:
-                    # The window is upstream's: ``_preprocess`` already ran
-                    # ``_init_model_kwargs`` -> ``_prepare_lookback_token_ids`` on
-                    # this step's input batch, so ``model_kwargs`` carries the
-                    # prompt-only lookback (column j = position start - 1 - j,
-                    # -1 where that position is not a prompt token).  Generated
-                    # positions stay -1 here and come from the slot cache the hash
-                    # state fills itself, which is what keeps async draft
-                    # placeholders out of the history.
-                    model_inputs.update(
-                        prepare_engram(
-                            input_ids,
-                            positions,
-                            num_tokens_padded,
-                            model_kwargs.get("lookback_token_ids"),
-                            **self._get_engram_device_inputs(),
-                        )
+        # Routing runs before replay on every DP, never inside capture.
+        prepare_engram = getattr(self.model, "prepare_engram_inputs", None)
+        if prepare_engram is not None:
+            if (
+                getattr(self, "_engram_capture_active", False)
+                or getattr(forward_context, "capturing", False)
+                or torch.npu.is_current_stream_capturing()
+            ):
+                model_inputs.update(self.model.prepare_engram_graph_inputs(num_tokens_padded))
+            else:
+                # The window is upstream's: ``_preprocess`` already ran
+                # ``_init_model_kwargs`` -> ``_prepare_lookback_token_ids`` on
+                # this step's input batch, so ``model_kwargs`` carries the
+                # prompt-only lookback (column j = position start - 1 - j,
+                # -1 where that position is not a prompt token).  Generated
+                # positions stay -1 here and come from the slot cache the hash
+                # state fills itself, which is what keeps async draft
+                # placeholders out of the history.
+                model_inputs.update(
+                    prepare_engram(
+                        input_ids,
+                        positions,
+                        num_tokens_padded,
+                        model_kwargs.get("lookback_token_ids"),
+                        **self._get_engram_device_inputs(),
                     )
-            run_model = partial(self.model, **model_inputs)
+                )
+        run_model = partial(self.model, **model_inputs)
 
+        try:
             if self.enable_enpu:
                 # The soft segmentation scenario requires event.record first, then event.wait
                 self._update_full_graph_params_if_needed(forward_context, num_tokens_padded)
@@ -3325,12 +3246,7 @@ class NPUModelRunner(GPUModelRunner):
             else:
                 hidden_states = run_model()
                 self._update_full_graph_params_if_needed(forward_context, num_tokens_padded)
-            forward_failed = False
         finally:
-            if model_inputs.get("engram_pending"):
-                # Also cover empty consumers and failures before a layer wait.
-                # This queues a device dependency; it does not block the CPU.
-                self.model.retire_engram_lookups(reset_events=forward_failed)
             # A forward that raises must still retire the device-metadata
             # submission: otherwise the next submit() refuses to start and a
             # single request error wedges every DP rank of the instance.
@@ -3610,45 +3526,6 @@ class NPUModelRunner(GPUModelRunner):
 
         kv_cache_groups = self.kv_cache_config.kv_cache_groups
 
-        reuse_metadata_views = (
-            for_cudagraph_capture
-            or cudagraph_runtime_mode == CUDAGraphMode.FULL
-        )
-        common_view_key = (
-            id(self.input_batch),
-            id(self.positions),
-            num_tokens_padded,
-            num_reqs_padded,
-        )
-        common_views = (
-            self._attention_common_view_cache.get(common_view_key)
-            if reuse_metadata_views
-            else None
-        )
-        if common_views is None:
-            common_views = {
-                "query_start_loc": self.query_start_loc.gpu[: num_reqs_padded + 1],
-                "query_start_loc_cpu": self.query_start_loc.cpu[: num_reqs_padded + 1],
-                "seq_lens": self.seq_lens[:num_reqs_padded],
-                "seq_lens_cpu": self.optimistic_seq_lens_cpu[:num_reqs_padded],
-                "positions": self.positions,
-                "group_len": self.group_len.gpu[:num_reqs_padded],
-                "group_key_idx": self.group_key_idx.gpu[:num_reqs_padded],
-                "group_key_cache_idx": self.group_key_cache_idx.gpu[:num_reqs_padded],
-                "req_ids_tensor": (
-                    self._offload_req_ids_tensor.gpu[:num_reqs_padded]
-                    if self._offload_req_ids_tensor is not None
-                    else None
-                ),
-                "token_to_req": (
-                    self._offload_token_to_req.gpu[:num_tokens_padded]
-                    if self._offload_token_to_req is not None
-                    else None
-                ),
-            }
-            if reuse_metadata_views:
-                self._attention_common_view_cache[common_view_key] = common_views
-
         def _get_dcp_metadata(block_table_tensor):
             if not self.use_dcp:
                 return None, block_table_tensor
@@ -3675,62 +3552,29 @@ class NPUModelRunner(GPUModelRunner):
             kv_cache_gid: int,
         ):
             assert num_reqs_padded is not None and num_tokens_padded is not None
-            cache_key = (
-                id(self.input_batch),
-                kv_cache_gid,
-                num_tokens_padded,
-                num_reqs_padded,
-            )
-            cached_views = (
-                self._attention_group_view_cache.get(cache_key)
-                if reuse_metadata_views
-                else None
-            )
             kv_cache_spec = kv_cache_groups[kv_cache_gid].kv_cache_spec
-            needs_block_table_cpu = (
-                self.vllm_config.engram_config is not None
-                and _needs_engram_block_table_cpu(kv_cache_spec)
-            )
-            if cached_views is None:
-                if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
-                    blk_table_tensor = torch.zeros(
-                        (num_reqs_padded, 1),
-                        dtype=torch.int32,
-                        device=self.device,
-                    )
-                    slot_mapping = torch.zeros(
-                        (num_tokens_padded,),
-                        dtype=torch.int64,
-                        device=self.device,
-                    )
-                    block_table_cpu = None
-                else:
-                    blk_table = self.input_batch.block_table[kv_cache_gid]
-                    slot_mapping = blk_table.slot_mapping.gpu[:num_tokens_padded]
-                    blk_table_tensor = blk_table.get_device_tensor()[:num_reqs_padded]
-                    block_table_cpu = (
-                        blk_table.get_cpu_tensor()[:num_reqs_padded]
-                        if needs_block_table_cpu
-                        else None
-                    )
-                cached_views = (blk_table_tensor, slot_mapping, block_table_cpu)
-                if reuse_metadata_views:
-                    self._attention_group_view_cache[cache_key] = cached_views
+            if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
+                blk_table_tensor = torch.zeros(
+                    (num_reqs_padded, 1),
+                    dtype=torch.int32,
+                    device=self.device,
+                )
+                slot_mapping = torch.zeros(
+                    (num_tokens_padded,),
+                    dtype=torch.int64,
+                    device=self.device,
+                )
             else:
-                blk_table_tensor, slot_mapping, block_table_cpu = cached_views
-
-            if not isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
+                blk_table = self.input_batch.block_table[kv_cache_gid]
+                slot_mapping = blk_table.slot_mapping.gpu[:num_tokens_padded]
+                blk_table_tensor = blk_table.get_device_tensor()[:num_reqs_padded]
                 # Fill unused with -1. Needed for reshape_and_cache in full cuda
                 # graph mode. `blk_table_tensor` -1 to match mamba PAD_SLOT_ID
                 slot_mapping[num_tokens:num_tokens_padded].fill_(-1)
                 blk_table_tensor[num_reqs:num_reqs_padded].fill_(0)
-            return blk_table_tensor, slot_mapping, block_table_cpu
+            return blk_table_tensor, slot_mapping
 
-        (
-            block_table_gid_0,
-            slot_mapping_gid_0,
-            block_table_cpu_gid_0,
-        ) = _get_block_table_and_slot_mapping(0)
+        block_table_gid_0, slot_mapping_gid_0 = _get_block_table_and_slot_mapping(0)
         self.long_seq_metadata, block_table_gid_0 = _get_dcp_metadata(block_table_gid_0)
         if dcp_dummy_metadata is not None:
             # A DCP dummy decode must not inherit request state from the
@@ -3799,15 +3643,15 @@ class NPUModelRunner(GPUModelRunner):
                     req_doc_ranges[req_idx] = image_doc_ranges
 
         cm_base = AscendCommonAttentionMetadata(
-            query_start_loc=common_views["query_start_loc"],
-            query_start_loc_cpu=common_views["query_start_loc_cpu"],
-            seq_lens=common_views["seq_lens"],
+            query_start_loc=self.query_start_loc.gpu[: num_reqs_padded + 1],
+            query_start_loc_cpu=self.query_start_loc.cpu[: num_reqs_padded + 1],
+            seq_lens=self.seq_lens[:num_reqs_padded],
             # Always pass optimistic_seq_lens_cpu via _seq_lens_cpu so NPU
             # attention backends can get CPU seq_lens without GPU->CPU sync.
             # This is separate from seq_lens_cpu (None in async) which eagle
             # proposer checks to distinguish async/non-async behavior.
-            _seq_lens_cpu=common_views["seq_lens_cpu"],
-            seq_lens_cpu_upper_bound=common_views["seq_lens_cpu"],
+            _seq_lens_cpu=self.optimistic_seq_lens_cpu[:num_reqs_padded],
+            seq_lens_cpu_upper_bound=self.optimistic_seq_lens_cpu[:num_reqs_padded],
             # TODO
             seq_lens_cpu=seq_lens_cpu,
             # TODO
@@ -3823,20 +3667,24 @@ class NPUModelRunner(GPUModelRunner):
             is_prefilling=is_prefilling,
             num_input_tokens=num_tokens_padded,
             actual_seq_lengths_q=self.actual_seq_lengths_q,
-            positions=common_views["positions"],
-            positions_cpu=(
-                None
-                if get_current_hardware_profile().supports(HardwareCapability.DSV41_PACKED_CACHE)
-                else self._dsa_positions_cpu_buf if self.use_compress and self._needs_seq_lens_cpu_sync else None
-            ),
+            positions=self.positions,
+            positions_cpu=self._dsa_positions_cpu_buf if self.use_compress else None,
             attn_state=self.attn_state,
             decode_token_per_req=self.decode_token_per_req,
             context_parallel_metadata=self.long_seq_metadata,
-            group_len=common_views["group_len"],
-            group_key_idx=common_views["group_key_idx"],
-            group_key_cache_idx=common_views["group_key_cache_idx"],
-            req_ids_tensor=common_views["req_ids_tensor"],
-            token_to_req=common_views["token_to_req"],
+            group_len = self.group_len.gpu[:num_reqs_padded],
+            group_key_idx = self.group_key_idx.gpu[:num_reqs_padded],
+            group_key_cache_idx = self.group_key_cache_idx.gpu[:num_reqs_padded],
+            req_ids_tensor=(
+                self._offload_req_ids_tensor.gpu[:num_reqs_padded]
+                if self._offload_req_ids_tensor is not None
+                else None
+            ),
+            token_to_req=(
+                self._offload_token_to_req.gpu[:num_tokens_padded]
+                if self._offload_token_to_req is not None
+                else None
+            ),
             req_topk_buffer_slots=(self._offload_pool_slots.cpu[:num_reqs_padded]
                                    if self._offload_pool_slots is not None else None),
             req_topk_buffer_active=(self._offload_pool_active.cpu[:num_reqs_padded]
@@ -3963,23 +3811,12 @@ class NPUModelRunner(GPUModelRunner):
         # in the same group share the same metadata.
         common_ratio_to_sas_metadata: dict[Any, Any] = {}
         common_v41_batch_metadata: dict[str, Any] = {}
-        assert num_tokens_padded is not None
-        a5_group_slot_metadata = self._build_a5_slot_mapping_batch(
-            num_tokens_padded,
-            num_reqs,
-            num_tokens,
-            skip_gdn_state_update,
-        )
         spec_decode_common_attn_metadata = None
         for kv_cache_gid, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups):
             # V4.1 cache coordinates are shared only inside one framework KV
             # cache group. This lets a source's LongKV and Indexer reuse the
             # same [T, 2] mapping without aliasing any SWA group's mapping.
-            common_v41_metadata: dict[str, Any] = (
-                a5_group_slot_metadata[kv_cache_gid]
-                if a5_group_slot_metadata
-                else {}
-            )
+            common_v41_metadata: dict[str, Any] = {}
             cm = copy(cm_base)  # shallow copy
             # Basically only the encoder seq_lens, block_table and slot_mapping change
             # for each kv_cache_group.
@@ -4001,20 +3838,9 @@ class NPUModelRunner(GPUModelRunner):
                     cm.query_start_loc = self.gdn_query_start_loc.gpu[: num_reqs_padded + 1]
 
             if kv_cache_gid > 0:
-                (
-                    cm.block_table_tensor,
-                    cm.slot_mapping,
-                    block_table_cpu,
-                ) = _get_block_table_and_slot_mapping(kv_cache_gid)
-            else:
-                block_table_cpu = block_table_cpu_gid_0
-            cm.block_table_cpu = block_table_cpu
-            if block_table_cpu is not None:
-                if num_reqs < num_reqs_padded:
-                    # Match the device padding without modifying an H2D source
-                    # that may still be in flight.
-                    cm.block_table_cpu = cm.block_table_cpu.clone()
-                    cm.block_table_cpu[num_reqs:num_reqs_padded].zero_()
+                cm.block_table_tensor, cm.slot_mapping = _get_block_table_and_slot_mapping(
+                    kv_cache_gid
+                )
             if self.speculative_config and isinstance(self.drafter, (AscendStep3p5MTPProposer, AscendDSparkProposer)):
                 # step3p5 MTP draft layers span multiple KV cache groups; capture
                 # each group's block table / slot mapping so the proposer can
@@ -4102,7 +3928,6 @@ class NPUModelRunner(GPUModelRunner):
         profile_seq_lens: int | None = None,
         profile_cpp: bool = False,
         skip_gdn_state_update: bool = False,
-        uniform_dp_warmup: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         mm_config = self.vllm_config.model_config.multimodal_config
         if mm_config and mm_config.mm_encoder_only:
@@ -4292,10 +4117,7 @@ class NPUModelRunner(GPUModelRunner):
                     context = self.compilation_config.static_forward_context
                     for name in group.layer_names:
                         context[name].kv_cache[0][1:num_reqs + 1].zero_()
-                self.input_batch.block_table.commit_block_table(
-                    num_reqs_padded,
-                    force=True,
-                )
+                self.input_batch.block_table.commit_block_table(num_reqs_padded)
 
                 # Invalidate real-request slots before attention backends derive
                 # or copy their backend-specific metadata for dummy execution.
@@ -4440,10 +4262,6 @@ class NPUModelRunner(GPUModelRunner):
                 has_sinks = self._has_sinks,
                 eplb_heat_collection_status=self.eplb_heat_collection_status if self.dynamic_eplb else False,
             ):
-                # Initialization/CPP warmups use the same configured shape on
-                # every DP rank and may exceed the decode communication slot.
-                # Ordinary idle dummy batches must keep the fixed decode slot.
-                get_forward_context().engram_uniform_dp_warmup = uniform_dp_warmup or profile_cpp
                 if not is_graph_capturing and self.ascend_config.enable_force_eplb \
                     and self.vllm_config.model_config.is_moe:
                     build_force_eplb_topk(self.device, self.max_num_tokens)
@@ -4760,142 +4578,6 @@ class NPUModelRunner(GPUModelRunner):
 
         self.debugger.step(**kwargs)
 
-    def _initialize_a5_slot_mapping_batch(self) -> None:
-        self._a5_slot_mapping_layouts = ()
-        self._a5_slot_mapping_batches = ()
-        self._a5_slot_coordinates = None
-        self._a5_flat_slots = None
-        self._a5_slot_mapping_view_cache.clear()
-
-        shared_slot_mapping = getattr(
-            self.input_batch.block_table,
-            "slot_mapping",
-            None,
-        )
-        slots = getattr(shared_slot_mapping, "gpu", None)
-        if not isinstance(slots, torch.Tensor) or slots.ndim != 2:
-            return
-
-        layouts = set()
-        for group_id, attn_groups in enumerate(self.attn_groups):
-            for attn_group in attn_groups:
-                for builder in attn_group.metadata_builders:
-                    if not isinstance(builder, AscendDSAV41MetadataBuilder):
-                        continue
-                    builder_layout = builder.a5_slot_mapping_layout()
-                    if builder_layout is not None:
-                        layouts.add((group_id, *builder_layout))
-        if not layouts:
-            return
-
-        ordered = tuple(
-            _A5SlotMappingLayout(*layout)
-            for layout in sorted(
-                layouts,
-                key=lambda layout: (layout[4], layout[3], layout[0], layout[1]),
-            )
-        )
-        self._a5_slot_mapping_layouts = ordered
-        self._a5_slot_coordinates = torch.empty(
-            (len(ordered), self.max_num_tokens, 2),
-            dtype=torch.int32,
-            device=self.device,
-        )
-        self._a5_flat_slots = torch.empty(
-            (len(ordered), self.max_num_tokens),
-            dtype=torch.int32,
-            device=self.device,
-        )
-
-        batches = []
-        start = 0
-        while start < len(ordered):
-            layout = ordered[start]
-            end = start + 1
-            while (
-                end < len(ordered)
-                and ordered[end].page_size == layout.page_size
-                and ordered[end].compress_ratio == layout.compress_ratio
-            ):
-                end += 1
-            batches.append(
-                _A5SlotMappingBatch(
-                    start=start,
-                    end=end,
-                    page_size=layout.page_size,
-                    compress_ratio=layout.compress_ratio,
-                    group_ids=torch.tensor(
-                        [entry.group_id for entry in ordered[start:end]],
-                        dtype=torch.int32,
-                        device=self.device,
-                    ),
-                )
-            )
-            start = end
-        self._a5_slot_mapping_batches = tuple(batches)
-
-    def _build_a5_slot_mapping_batch(
-        self,
-        num_tokens: int,
-        num_actual_reqs: int,
-        num_actual_tokens: int,
-        skip_update: bool,
-    ) -> tuple[dict[str, torch.Tensor], ...]:
-        if not self._a5_slot_mapping_layouts:
-            return ()
-        assert self._a5_slot_coordinates is not None
-        assert self._a5_flat_slots is not None
-
-        cached = self._a5_slot_mapping_view_cache.get(num_tokens)
-        if cached is None:
-            batch_views = tuple(
-                (
-                    self._a5_slot_coordinates[
-                        batch.start : batch.end,
-                        :num_tokens,
-                    ],
-                    self._a5_flat_slots[
-                        batch.start : batch.end,
-                        :num_tokens,
-                    ],
-                )
-                for batch in self._a5_slot_mapping_batches
-            )
-            new_group_views: list[dict[str, torch.Tensor]] = [{} for _ in self.kv_cache_config.kv_cache_groups]
-            for row, layout in enumerate(self._a5_slot_mapping_layouts):
-                new_group_views[layout.group_id][layout.coordinates_key] = (
-                    self._a5_slot_coordinates[row, :num_tokens]
-                )
-                new_group_views[layout.group_id][layout.flat_key] = (
-                    self._a5_flat_slots[row, :num_tokens]
-                )
-            cached = batch_views, tuple(new_group_views)
-            self._a5_slot_mapping_view_cache[num_tokens] = cached
-
-        batch_views, group_views = cached
-        slots = self.input_batch.block_table.slot_mapping.gpu
-        for batch, (coordinates, flat_slots) in zip(
-            self._a5_slot_mapping_batches,
-            batch_views,
-        ):
-            build_a5_slot_mapping_batch(
-                slots,
-                batch.group_ids,
-                self.positions,
-                self.query_start_loc.gpu,
-                num_tokens,
-                num_actual_reqs,
-                num_actual_tokens,
-                batch.page_size,
-                batch.compress_ratio,
-                skip_update=skip_update,
-                coordinates_output=coordinates,
-                flat_output=flat_slots,
-            )
-        # Builders append group-local operator metadata, so retain only the
-        # address views in the persistent cache and hand out fresh mappings.
-        return tuple(dict(views) for views in group_views)
-
     def initialize_kv_cache(
         self,
         kv_cache_config: KVCacheConfig,
@@ -4928,7 +4610,6 @@ class NPUModelRunner(GPUModelRunner):
         )
         self.kernel_block_sizes = kernel_block_sizes
         self.may_reinitialize_input_batch(kv_cache_config, kernel_block_sizes)
-        self._initialize_a5_slot_mapping_batch()
         if self.sparse_kv_offload_enabled:
             self.sparse_kv_offload_manager = init_sparse_kv_offload_manager(
                 self.vllm_config,
@@ -5273,7 +4954,6 @@ class NPUModelRunner(GPUModelRunner):
             return allocate_kvpp_cache(self.vllm_config, kv_cache_config, self.device)
         # init kv cache tensors
         kv_cache_raw_tensors: dict[str, torch.Tensor | tuple[torch.Tensor, ...]] = {}
-        self._physical_kv_cache_block_tensors: list[torch.Tensor] = []
         # prefill disaggregation need the addr of cache tensor be aligned with 2M
         alignment = 2 * 1024 * 1024
         layer_kv_cache_spec = self._get_layer_kv_cache_specs(kv_cache_config)
@@ -5281,13 +4961,8 @@ class NPUModelRunner(GPUModelRunner):
             # V4.1 overlays the layers in each tuple on one physical slot.
             # Unlike DSV4's shared-tuple layout below, each descriptor owns
             # a separate allocation and its layers alias the same backing.
-            track_physical_pages = get_current_hardware_profile().supports(
-                HardwareCapability.DSV41_PACKED_CACHE
-            )
             for allocation in kv_cache_config.kv_cache_tensors:
                 backing = self._allocate_int8_cache_tensor(allocation.size, alignment)
-                if track_physical_pages:
-                    self._physical_kv_cache_block_tensors.append(backing)
                 for name in allocation.layers:
                     kv_cache_raw_tensors[name] = backing
             return kv_cache_raw_tensors
@@ -5756,13 +5431,6 @@ class NPUModelRunner(GPUModelRunner):
                             )
                         )
                         kv_cache_dtype_list.append(current_kv_cache_spec.scale_dtype)
-                    elif layer_name.endswith(".indexer.k_cache_folded"):
-                        source_name = layer_name.removesuffix(".indexer.k_cache_folded") + ".long_kv_cache"
-                        index_name = layer_name.removesuffix("_folded")
-                        initial_offset = (
-                            layer_kv_cache_spec[source_name].unpadded_page_size_bytes
-                            + layer_kv_cache_spec[index_name].unpadded_page_size_bytes
-                        )
                     views = self._adjust_kv_layout(
                         kv_cache_raw_tensors[layer_name],
                         kv_cache_shape_list,
@@ -6317,8 +5985,6 @@ class NPUModelRunner(GPUModelRunner):
                 cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
                 reasoning_config = getattr(self.vllm_config, "reasoning_config", None),
             )
-            self._attention_common_view_cache.clear()
-            self._attention_group_view_cache.clear()
 
     def initialize_attn_backend(self, kv_cache_config: KVCacheConfig) -> None:
         """
@@ -6423,16 +6089,6 @@ class NPUModelRunner(GPUModelRunner):
             attn_backends = get_attn_backends_for_group(kv_cache_group_spec)
             attention_backend_maps.append(attn_backends[0])
             attention_backend_list.append(attn_backends[1])
-
-        # Only backends that consume exact CPU lengths need to wait for the
-        # previous step's accepted-token D2H copy. Use the actual layer backends:
-        # the runner's default backend can be AscendAttentionBackend even when
-        # every layer uses device-side metadata (e.g. DeepSeek V4.1).
-        self._needs_seq_lens_cpu_sync = any(
-            issubclass(backend, (AscendAttentionBackend, AscendMLABackend, AscendDSABackend))
-            for backends in attention_backend_list
-            for backend in backends
-        )
 
         self._check_and_update_cudagraph_mode(
             attention_backend_list,
@@ -6780,10 +6436,6 @@ class NPUModelRunner(GPUModelRunner):
             cache_dtype=self.cache_config.cache_dtype,
             runner_only_attn_layers=self.runner_only_attn_layers,
             static_forward_context=(self.compilation_config.static_forward_context),
-            physical_block_tensors=(
-                getattr(self, "_physical_kv_cache_block_tensors", None) or None
-            ),
-            num_blocks=self.kv_cache_config.num_blocks,
         )
 
 

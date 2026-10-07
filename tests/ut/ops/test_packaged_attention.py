@@ -6,7 +6,7 @@
 import pytest
 import torch
 
-from vllm_ascend.ops.dsv41_a5 import dsl as ops
+from vllm_ascend.ops import packaged_attention as ops
 
 
 @pytest.mark.parametrize("return_value,candidate_blocks", [(False, -1), (True, 2048)])

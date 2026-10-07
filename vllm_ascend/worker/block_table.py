@@ -19,25 +19,6 @@ from vllm_ascend.ops.triton.compute_slot_mapping import (
 )
 
 
-class _CpuGpuBufferRow:
-    """A row view that preserves the small ``CpuGpuBuffer`` interface."""
-
-    def __init__(self, backing: CpuGpuBuffer, row: int) -> None:
-        self.cpu = backing.cpu[row]
-        self.gpu = backing.gpu[row]
-        self.np = backing.np[row]
-
-    def copy_to_gpu(self, n: int | None = None) -> torch.Tensor:
-        if n is None:
-            return self.gpu.copy_(self.cpu, non_blocking=True)
-        return self.gpu[:n].copy_(self.cpu[:n], non_blocking=True)
-
-    def copy_to_cpu(self, n: int | None = None) -> torch.Tensor:
-        if n is None:
-            return self.cpu.copy_(self.gpu, non_blocking=True)
-        return self.cpu[:n].copy_(self.gpu[:n], non_blocking=True)
-
-
 class BlockTable:
     def __init__(
         self,
@@ -51,7 +32,6 @@ class BlockTable:
         cp_kv_cache_interleave_size: int = 1,
         num_speculative_tokens: int = 0,
         kv_cache_group: KVCacheGroupSpec = None,
-        slot_mapping: _CpuGpuBufferRow | None = None,
     ):
         self.max_num_reqs = max_num_reqs
         self.dcp_world_size = get_dcp_group().world_size
@@ -117,16 +97,11 @@ class BlockTable:
             duplicate_size += num_speculative_tokens
         self.block_table = self._make_buffer(max_num_reqs * duplicate_size, logical_table_size, dtype=torch.int32)
         self.num_blocks_per_row = np.zeros(max_num_reqs, dtype=np.int32)
-        # Scheduler mutations are sparse during decode. Keep the device mirror
-        # current by uploading only rows whose block IDs changed instead of the
-        # full active prefix for every cache group on every step.
-        self._dirty_rows = set(range(max_num_reqs))
         # MTP slot preparation appends up to num_speculative_tokens - 1
         # draft positions for every request beyond the scheduler token limit.
         num_mtp_draft_slots = max(num_speculative_tokens - 1, 0) * self.max_num_reqs
-        slot_mapping_capacity = self.max_num_batched_tokens + num_mtp_draft_slots
-        self.slot_mapping = slot_mapping or self._make_buffer(
-            slot_mapping_capacity,
+        self.slot_mapping = self._make_buffer(
+            self.max_num_batched_tokens + num_mtp_draft_slots,
             dtype=torch.int32,
         )
 
@@ -149,25 +124,21 @@ class BlockTable:
 
         self.block_table.np[row_idx, start : start + num_blocks] = block_ids
         self.num_blocks_per_row[row_idx] += num_blocks
-        self._dirty_rows.add(row_idx)
 
     def add_row(self, block_ids: list[int], row_idx: int) -> None:
         self.num_blocks_per_row[row_idx] = 0
         self.append_row(block_ids, row_idx)
-        self._dirty_rows.add(row_idx)
 
     def clear_row(self, row_idx: int) -> None:
         num_blocks = self.num_blocks_per_row[row_idx]
         if num_blocks > 0:
             self.block_table.np[row_idx, :num_blocks] = 0
-            self._dirty_rows.add(row_idx)
         self.num_blocks_per_row[row_idx] = 0
 
     def move_row(self, src: int, tgt: int) -> None:
         num_blocks = self.num_blocks_per_row[src]
         self.block_table.np[tgt, :num_blocks] = self.block_table.np[src, :num_blocks]
         self.num_blocks_per_row[tgt] = num_blocks
-        self._dirty_rows.add(tgt)
 
     def swap_row(self, src: int, tgt: int) -> None:
         num_blocks_src = self.num_blocks_per_row[src]
@@ -176,7 +147,6 @@ class BlockTable:
         self.num_blocks_per_row[tgt] = num_blocks_src
 
         self.block_table.np[[src, tgt]] = self.block_table.np[[tgt, src]]
-        self._dirty_rows.update((src, tgt))
 
     def compute_slot_mapping(
         self,
@@ -325,39 +295,12 @@ class BlockTable:
             slot_mapping = block_numbers * self.block_size + block_offsets
             self.slot_mapping.cpu[: req_indices.shape[0]] = torch.where(mask, slot_mapping, -1)
 
-    def _copy_block_table_rows(self, start: int, end: int) -> None:
-        self.block_table.gpu[start:end].copy_(
-            self.block_table.cpu[start:end],
-            non_blocking=True,
-        )
-
-    def commit_block_table(self, num_reqs: int, *, force: bool = False) -> None:
-        """Upload changed active rows, coalescing adjacent rows per H2D copy."""
-        if num_reqs <= 0:
-            return
-        if force:
-            self._copy_block_table_rows(0, num_reqs)
-            self._dirty_rows.difference_update(range(num_reqs))
-            return
-        if not self._dirty_rows:
-            return
-
-        dirty_rows = sorted(row for row in self._dirty_rows if row < num_reqs)
-        if not dirty_rows:
-            return
-        start = previous = dirty_rows[0]
-        for row in dirty_rows[1:]:
-            if row != previous + 1:
-                self._copy_block_table_rows(start, previous + 1)
-                start = row
-            previous = row
-        self._copy_block_table_rows(start, previous + 1)
-        self._dirty_rows.difference_update(dirty_rows)
+    def commit_block_table(self, num_reqs: int) -> None:
+        self.block_table.copy_to_gpu(num_reqs)
 
     def clear(self) -> None:
         self.block_table.fill_(0)
         self.block_table.cpu.fill_(0)
-        self._dirty_rows.clear()
 
     def _convert_physical_to_logical_blocks(self, physical_blocks: np.ndarray) -> np.ndarray:
         """Convert physical block IDs to logical block IDs."""
@@ -434,19 +377,6 @@ class MultiGroupBlockTable:
                 f"max_num_blocks length ({len(max_num_blocks)}) must match block_sizes length ({len(block_sizes)})"
             )
 
-        # Keep every group's slot mapping in one allocation. Besides reducing
-        # allocator/object overhead, this lets A5 publish all cache-address
-        # layouts with a two-dimensional Triton launch and no gather/copy.
-        slot_mapping_capacity = max_num_batched_tokens + max(num_speculative_tokens - 1, 0) * max_num_reqs
-        self.slot_mapping = CpuGpuBuffer(
-            len(block_sizes),
-            slot_mapping_capacity,
-            dtype=torch.int32,
-            device=device,
-            pin_memory=pin_memory,
-        )
-        slot_mapping_rows = [_CpuGpuBufferRow(self.slot_mapping, row) for row in range(len(block_sizes))]
-
         # Use zip to pair block_sizes with kernel_sizes one-to-one
         if kv_cache_groups is not None:
             self.block_tables = [
@@ -461,20 +391,9 @@ class MultiGroupBlockTable:
                     cp_kv_cache_interleave_size,
                     num_speculative_tokens,
                     kv_cache_group,
-                    slot_mapping_row,
                 )
-                for (
-                    block_size,
-                    kernel_size,
-                    max_num_blocks_per_req,
-                    kv_cache_group,
-                    slot_mapping_row,
-                ) in zip(
-                    block_sizes,
-                    kernel_sizes,
-                    max_num_blocks,
-                    kv_cache_groups,
-                    slot_mapping_rows,
+                for block_size, kernel_size, max_num_blocks_per_req, kv_cache_group in zip(
+                    block_sizes, kernel_sizes, max_num_blocks, kv_cache_groups
                 )
             ]
         else:
@@ -489,19 +408,8 @@ class MultiGroupBlockTable:
                     [kernel_size],
                     cp_kv_cache_interleave_size,
                     num_speculative_tokens,
-                    slot_mapping=slot_mapping_row,
                 )
-                for (
-                    block_size,
-                    kernel_size,
-                    max_num_blocks_per_req,
-                    slot_mapping_row,
-                ) in zip(
-                    block_sizes,
-                    kernel_sizes,
-                    max_num_blocks,
-                    slot_mapping_rows,
-                )
+                for block_size, kernel_size, max_num_blocks_per_req in zip(block_sizes, kernel_sizes, max_num_blocks)
             ]
 
         active_block_tables = [block_table for block_table in self.block_tables if not block_table.is_mamba_group]
@@ -608,9 +516,9 @@ class MultiGroupBlockTable:
             else:
                 block_table.compute_slot_mapping_draft(req_indices, positions)
 
-    def commit_block_table(self, num_reqs: int, *, force: bool = False) -> None:
+    def commit_block_table(self, num_reqs: int) -> None:
         for block_table in self.block_tables:
-            block_table.commit_block_table(num_reqs, force=force)
+            block_table.commit_block_table(num_reqs)
 
     def clear(self) -> None:
         for block_table in self.block_tables:

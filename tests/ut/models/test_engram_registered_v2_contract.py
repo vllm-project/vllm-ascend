@@ -12,8 +12,8 @@ import torch
 from vllm.config.compilation import CUDAGraphMode
 
 from vllm_ascend import models
+from vllm_ascend.models.deepseek_v41.engram.model_state import EngramModelState
 from vllm_ascend.worker.v2.model_states import init_asecnd_model_state
-from vllm_ascend.worker.v2.model_states.deepseek_v41 import AscendDeepseekV41ModelState
 
 
 @pytest.fixture
@@ -30,7 +30,7 @@ def registered_wrapper():
     wrapper = object.__new__(cls)
     torch.nn.Module.__init__(wrapper)
     wrapper.language_model = SimpleNamespace(
-        get_model_state_cls=Mock(return_value=AscendDeepseekV41ModelState),
+        get_model_state_cls=Mock(return_value=EngramModelState),
         prime_engram_v2_graph_inputs=Mock(return_value={"engram_mask": "mask"}),
         prepare_engram_inputs=Mock(return_value={"engram_lookups": "rows"}),
         retire_engram_lookups=Mock(),
@@ -50,9 +50,9 @@ def test_registered_wrapper_accepts_v2_preparation_keywords(registered_wrapper, 
 
 def test_registry_to_runner_selects_engram_state(registered_wrapper):
     config, encoder_cache, device = Mock(), Mock(), torch.device("cpu")
-    with patch.object(AscendDeepseekV41ModelState, "__init__", return_value=None) as initialize:
+    with patch.object(EngramModelState, "__init__", return_value=None) as initialize:
         state = init_asecnd_model_state(config, registered_wrapper, encoder_cache, device)
-    assert isinstance(state, AscendDeepseekV41ModelState)
+    assert isinstance(state, EngramModelState)
     initialize.assert_called_once_with(config, registered_wrapper, encoder_cache, device)
     registered_wrapper.language_model.get_model_state_cls.assert_called_once_with()
 

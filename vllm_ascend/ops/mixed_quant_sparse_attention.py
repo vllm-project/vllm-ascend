@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import torch
 
-from vllm_ascend.ops.dsv41_a5 import dsl as ops
+from vllm_ascend.ops import packaged_attention as ops
 from vllm_ascend.ops.triton.build_window_indices import (
     build_window_indices_triton,
 )

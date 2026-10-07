@@ -57,7 +57,7 @@ def _gather_lookback_kernel(
     tl.store(lookback_ptr + batch_idx * DEPTH + offs, ids, mask=offs < DEPTH)
 
 
-class AscendDeepseekV41ModelState(AscendModelState):
+class EngramModelState(AscendModelState):
     """AscendModelState plus the engram lookback window and overlapped lookups.
 
     The engram n-gram hash needs the ids of the ``depth`` tokens preceding

@@ -35,7 +35,7 @@ from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.quantization.utils import QUANT_DTYPES, get_dynamic_mx_quant_scale_alg
 
 if TYPE_CHECKING:
-    from vllm_ascend.ops.dsv41_a5 import DeepseekV41PackedCacheOps
+    from vllm_ascend.ops.packed_cache import MixedQuantPackedCacheOps
 
 ACL_HOST_REG_MAPPED = 0x2
 ACL_HOST_REG_PINNED = 0x10000000
@@ -49,7 +49,7 @@ else:
 
 class BaseDeviceAdaptor:
     @staticmethod
-    def get_dsv41_packed_cache_ops() -> type["DeepseekV41PackedCacheOps"] | None:
+    def get_dsv41_packed_cache_ops() -> type["MixedQuantPackedCacheOps"] | None:
         """Return the packed-cache ABI implementation, or use standard caches."""
         return None
 
@@ -1027,14 +1027,14 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         return ACL_HOST_REG_MAPPED
 
     @staticmethod
-    def get_dsv41_packed_cache_ops() -> type["DeepseekV41PackedCacheOps"]:
+    def get_dsv41_packed_cache_ops() -> type["MixedQuantPackedCacheOps"]:
         # Import lazily so non-A5 processes never load the in-tree A5 operator
         # adapters or their runtime dependencies.
-        from vllm_ascend.ops.dsv41_a5 import DeepseekV41PackedCacheOps
+        from vllm_ascend.ops.packed_cache import MixedQuantPackedCacheOps
         from vllm_ascend.utils import load_custom_op_library
 
         load_custom_op_library()
-        return DeepseekV41PackedCacheOps
+        return MixedQuantPackedCacheOps
 
     @classmethod
     def reshape_and_cache(

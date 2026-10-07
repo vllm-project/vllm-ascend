@@ -36,7 +36,6 @@ from vllm_ascend.core.kv_cache_interface import (
     get_storage_block_size,
 )
 from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.ops.dsv41_a5 import dsl as dsv41_ops
 from vllm_ascend.ops.rope_dsv4 import (
     get_cos_and_sin_dsa,
     get_full_cos_and_sin_dsa_for_layer,
@@ -859,23 +858,6 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         self._device_metadata_tasks = ()
         return tasks
 
-    def a5_slot_mapping_layout(
-        self,
-    ) -> tuple[str, str, int, int] | None:
-        """Return the reusable address-layout keys for the batched A5 path."""
-        spec = self.kv_cache_spec
-        if not self._uses_a5_packed_cache or self._cache_kind == "compressor_state":
-            return None
-        compressed = self._cache_kind in {"long_kv", "index_k"}
-        ratio = get_kv_cache_compression_ratio(spec) if compressed else 1
-        page_size = get_storage_block_size(spec)
-        return (
-            f"slot:coordinates:c{ratio}:b{page_size}",
-            f"slot:flat:c{ratio}:b{page_size}",
-            page_size,
-            ratio,
-        )
-
     def _publish_task(
         self,
         shared: dict[str, Any],
@@ -1133,7 +1115,8 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                     self._a5_smla_metadata.zero_()
                     return
                 length_rows = self._a5_smla_length_rows[:metadata_tokens]
-                value = dsv41_ops.mixed_quant_sparse_flash_mla_metadata(
+                assert self._device_backend is not None
+                value = self._device_backend.mixed_quant_sparse_flash_mla_metadata(
                     length_rows,
                     length_rows,
                     cu_seqlens_q=common.query_start_loc[: num_reqs + 1].int().contiguous(),
@@ -1226,7 +1209,8 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                     if num_actual_tokens == 0 and not metadata_in_graph:
                         self._qli_metadata.zero_()
                         return
-                    value = dsv41_ops.quant_lightning_indexer_metadata(
+                    assert self._device_backend is not None
+                    value = self._device_backend.quant_lightning_indexer_metadata(
                         cu_seqlens_q=common.query_start_loc[: num_reqs + 1].int(),
                         seqused_k=coordinates["cache_seq_lens"],
                         cmp_residual_k=residual,

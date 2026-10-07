@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from vllm_ascend.ops.dsv41_a5 import dsl as ops
+from vllm_ascend.ops import packaged_attention as ops
 from vllm_ascend.ops.triton.prepare_indexer_indices import (
     prepare_indexer_indices,
 )

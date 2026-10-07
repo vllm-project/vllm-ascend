@@ -10,7 +10,7 @@ import torch
 from vllm.config import CUDAGraphMode
 
 from vllm_ascend.models.deepseek_v41 import model as model_mod
-from vllm_ascend.worker.v2.model_states import deepseek_v41 as state_mod
+from vllm_ascend.models.deepseek_v41.engram import model_state as state_mod
 
 
 @pytest.fixture
@@ -282,7 +282,7 @@ def make_state(model, monkeypatch):
     monkeypatch.setattr(
         state_mod, "triton", SimpleNamespace(next_power_of_2=lambda value: 1 << (value - 1).bit_length())
     )
-    state = object.__new__(state_mod.AscendDeepseekV41ModelState)
+    state = object.__new__(state_mod.EngramModelState)
     state.vllm_config = SimpleNamespace()
     state.max_num_reqs, state.device = 4, torch.device("cpu")
     state.rope_state = None

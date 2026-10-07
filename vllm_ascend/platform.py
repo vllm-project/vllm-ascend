@@ -494,6 +494,7 @@ class NPUPlatform(Platform):
             logger.warning("Model config is missing. Skipping Ascend-specific config updates.")
             return
 
+        _validate_model_runner_config(vllm_config)
         cls._validate_indexer_pp_config(vllm_config)
 
         _validate_routing_replay_config(vllm_config)
@@ -944,6 +945,15 @@ def _fix_incompatible_config(vllm_config: VllmConfig) -> None:
             "seconds for execute_model RPC calls in multiprocessing must be "
             "greater than 1836s, Set VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000"
         )
+
+
+def _validate_model_runner_config(vllm_config: VllmConfig) -> None:
+    if (
+        vllm_config.model_config.architecture in ("DeepseekV41ForCausalLM", "DeepseekV41DSparkModel")
+        and get_current_hardware_profile().supports(HardwareCapability.DSV41_PACKED_CACHE)
+        and not vllm_config.use_v2_model_runner
+    ):
+        raise ValueError("DeepSeek V4.1 on Ascend A5 requires Model Runner V2 (VLLM_USE_V2_MODEL_RUNNER=1).")
 
 
 def _validate_eplb_config(vllm_config: VllmConfig) -> None:

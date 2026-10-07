@@ -1666,9 +1666,9 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
 
     def get_model_state_cls(self):
         """V2 runner states read token_lookback_depth and drive engram inputs."""
-        from vllm_ascend.worker.v2.model_states.deepseek_v41 import AscendDeepseekV41ModelState
+        from vllm_ascend.models.deepseek_v41.engram.model_state import EngramModelState
 
-        return AscendDeepseekV41ModelState
+        return EngramModelState
 
     @property
     def supports_engram_graph_producer(self) -> bool:

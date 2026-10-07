@@ -11,7 +11,6 @@ from vllm.config import CUDAGraphMode
 
 from vllm_ascend.models.deepseek_v41 import model as model_mod
 from vllm_ascend.models.deepseek_v41.engram import embedding, parallel
-from vllm_ascend.worker import model_runner_v1 as runner_mod
 
 
 @pytest.fixture
@@ -154,36 +153,6 @@ def test_failed_graph_preparation_clears_unconsumed_events_after_join(runtime):
     assert calls[join + 1 :] == [
         ("reset", event, "main") for event in (binding["engram_mask_ready_event"], *binding["engram_pending"].values())
     ]
-
-
-@pytest.mark.parametrize("failure", [None, "producer", "consumer"])
-def test_runner_retires_producer_and_releases_metadata(runtime, monkeypatch, failure):
-    _, context, _ = runtime
-    executor = SimpleNamespace(submission_in_flight=True, release=Mock())
-    context.device_metadata_executor = executor
-    monkeypatch.setattr(runner_mod, "get_forward_context", lambda: context)
-    monkeypatch.setattr(torch.npu, "is_current_stream_capturing", lambda: False)
-    runner = object.__new__(runner_mod.NPUModelRunner)
-    runner.enable_enpu = False
-    runner._update_full_graph_params_if_needed = Mock()
-    runner._get_engram_device_inputs = Mock(return_value={})
-    runner.model = Mock(return_value="hidden")
-    runner.model.prepare_engram_inputs.return_value = {"engram_pending": {1: object()}}
-    if failure == "producer":
-        runner.model.prepare_engram_inputs.side_effect = RuntimeError("producer")
-    elif failure == "consumer":
-        runner.model.side_effect = RuntimeError("consumer")
-    if failure:
-        with pytest.raises(RuntimeError, match=failure):
-            runner._model_forward(4, torch.tensor([1]), torch.tensor([0]))
-    else:
-        assert runner._model_forward(4, torch.tensor([1]), torch.tensor([0])) == "hidden"
-    executor.release.assert_called_once_with()
-    if failure == "producer":
-        # prepare_engram_inputs owns cleanup when it fails before returning.
-        runner.model.retire_engram_lookups.assert_not_called()
-    else:
-        runner.model.retire_engram_lookups.assert_called_once_with(reset_events=failure is not None)
 
 
 @pytest.mark.parametrize("participates", [False, True])
