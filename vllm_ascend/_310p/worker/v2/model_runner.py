@@ -827,10 +827,12 @@ class NPUModelRunner310V2(NPUModelRunner):
                 block_size
                 for block_size in backend.get_supported_kernel_block_sizes()
                 if block_size * max_head_size <= _ATTENTION_BLOCK_SIZE_LIMIT
+                and all(spec.block_size % block_size == 0 for spec in attention_specs)
             ]
             if not supported_sizes:
                 raise NotImplementedError(
-                    f"310P paged attention requires block_size * head_size <= {_ATTENTION_BLOCK_SIZE_LIMIT}."
+                    f"310P paged attention requires block_size * head_size <= {_ATTENTION_BLOCK_SIZE_LIMIT} "
+                    "and a kernel block size that divides every attention cache block size in the group."
                 )
             self.kernel_block_sizes[group_id] = supported_sizes[0]
 
