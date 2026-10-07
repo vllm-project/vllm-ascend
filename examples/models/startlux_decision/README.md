@@ -7,9 +7,9 @@ registered or patched in the hardware plugin.
 
 ## Revisions and environment
 
-- vLLM fork branch: `Liuchenbing-2026/vllm:startlux_decision_npu`, based on
+- vLLM fork branch: `Liuchenbing-2026/vllm:startlux_decision_npu_eager`, based on
   `ced6857afa0ea7b2e3f0846a62e1394e90f15607` (v0.30.0).
-- Ascend fork branch: `Liuchenbing-2026/vllm-ascend:startlux_decision_npu`, based
+- Ascend fork branch: `Liuchenbing-2026/vllm-ascend:startlux_decision_npu_eager`, based
   on `a8fcedb03d93e60efceddbfc912406f7fa491d57` with the existing packed-GDN
   normalization change `eb68728c5989645edcd5f43db82d711ff7412aef`.
 - The Ascend Dockerfile and `.github/vllm-main-verified.commit` specify the
@@ -22,7 +22,7 @@ registered or patched in the hardware plugin.
   checkpoint names under `StartLuxAI` on ModelScope. Preserve model licenses.
 - The tested ModelScope weight revisions are
   `9113683823edce9311109fff84cf9719394835d8` (4B) and
-  `e6dafa13615ba6858e9489416216a9b46c36e45c` (35B-A3B download).
+  `e6dafa13615ba6858e9489416216a9b46c36e45c` (35B-A3B).
 - Runtime: Python 3.12.13, PyTorch 2.10.0+cpu, torch-npu 2.10.0.post4,
   Transformers 5.14.1 and triton-ascend 3.2.2. Check actual import paths:
   installed package metadata can describe the image rather than mounted source.
