@@ -19,7 +19,8 @@ from __future__ import annotations
 
 import torch
 from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
-from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.linear import ReplicatedLinear, UnquantizedLinearMethod
+from vllm.model_executor.layers.quantization import QuantizationConfig
 
 from vllm_ascend.ops.linear import AscendReplicatedLinear
 
@@ -37,28 +38,35 @@ class AscendGateLinear(GateLinear):
         output_size: int,
         bias: bool = False,
         out_dtype: torch.dtype | None = None,
-        params_dtype: torch.dtype | None = None,  # noqa: ARG002
-        force_fp32_compute: bool = False,  # noqa: ARG002
+        params_dtype: torch.dtype | None = None,
+        force_fp32_compute: bool = False,
+        skip_bias_add: bool = False,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        return_bias: bool = True,
     ):
         AscendReplicatedLinear.__init__(
             self,
             input_size,
             output_size,
             bias=bias,
-            params_dtype=torch.float32,
-            quant_config=None,
+            skip_bias_add=skip_bias_add,
+            params_dtype=torch.float32 if quant_config is None or force_fp32_compute else params_dtype,
+            quant_config=quant_config,
             prefix=prefix,
+            return_bias=return_bias,
         )
         self.out_dtype = out_dtype
+        self.is_unquantized = isinstance(self.quant_method, UnquantizedLinearMethod)
+        self.allow_cublas_router_gemm = False
+        self._router_gemm_cublas_capable = False
+        self.allow_specialized_router_gemm = False
 
     def forward(self, x: torch.Tensor):
         # TODO: Remove this workaround after upgrading to a vLLM version that
         # no longer forces router logits to bf16 via
         # self.gate.set_out_dtype(torch.bfloat16).
-        if x.dtype != torch.float32:
-            x = x.to(torch.float32)
+        if self.is_unquantized and x.dtype != self.weight.dtype:
+            x = x.to(self.weight.dtype)
 
-        output, output_bias = ReplicatedLinear.forward(self, x)
-
-        return output, output_bias
+        return ReplicatedLinear.forward(self, x)
