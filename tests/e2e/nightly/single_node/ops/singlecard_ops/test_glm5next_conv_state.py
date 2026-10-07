@@ -54,7 +54,7 @@ def test_causal_conv_first_packed_row_matches_reference(dtype, layout, run_mode,
     expected_state = expected_storage.as_strided(state.shape, strides)
     x = (torch.randn(tokens, dim, generator=generator) * 0.2).to(dtype)
     weight = (torch.randn(state_len + 1, dim, generator=generator) * 0.2).to(dtype)
-    # Persistent slot two becomes packed slot zero for both strided layouts.
+    # Persistent slot two becomes packed slot one; packed slot zero is null.
     history = expected_state[2].float() if initial else torch.zeros(state_len, dim)
     combined = torch.cat((history, x.float()))
     expected_output = (
@@ -74,3 +74,62 @@ def test_causal_conv_first_packed_row_matches_reference(dtype, layout, run_mode,
     torch.testing.assert_close(result.cpu(), expected_output, atol=tolerance, rtol=tolerance)
     # Check the entire allocation: unrelated slots and gaps must not change.
     torch.testing.assert_close(backing.cpu(), expected_storage, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("dim_first", [False, True])
+@pytest.mark.parametrize("use_graph", [False, True])
+@pytest.mark.parametrize("requests", [1, 2])
+def test_packed_decode_padding_preserves_output_and_shared_pages(dim_first, use_graph, requests):
+    # Match the full GLM-5.3-Flash convolution width and shared-cache page stride.
+    # The caller retains only the output; staging allocations remain in the wrapper.
+    slots, state_len, dim, page_stride = 4, 3, 24576, 2293760
+    dtype = torch.bfloat16
+    strides = (page_stride, 1, state_len) if dim_first else (page_stride, dim, 1)
+    x_cpu = ((torch.arange(dim, dtype=torch.float32) % 17) / 64).to(dtype).repeat(requests, 1)
+    history = torch.stack([x_cpu[0] + offset for offset in (0.125, 0.25, 0.5)])
+    storage = torch.full((slots * page_stride,), -3.0, dtype=dtype)
+    storage.as_strided((slots, state_len, dim), strides)[1 : requests + 1].copy_(history)
+    backing = storage.npu()
+    state = backing.as_strided((slots, state_len, dim), strides)
+    x = x_cpu.npu()
+    weight = torch.full((state_len + 1, dim), 0.25, dtype=dtype, device="npu")
+    indices = torch.arange(1, requests + 1, dtype=torch.int32, device="npu")
+    starts = torch.arange(requests + 1, dtype=torch.int32, device="npu")
+
+    def run():
+        return causal_conv1d(x, weight, state, starts, indices, run_mode=1)
+
+    result = run()
+    torch.npu.synchronize()
+    if use_graph:
+        graph = torch.npu.NPUGraph()
+        with torch.npu.graph(graph):
+            result = run()
+        torch.npu.synchronize()
+
+    # Reuse the same graph across active, idle and invalid requests, then active
+    # again. FLA decode ignores a zero query length, so the null slot must mask it.
+    for slot, tokens in [(1, 1), (1, 0), (-1, 1), (slots, 1), (1, 1)]:
+        backing.copy_(storage)
+        x.copy_(x_cpu)
+        indices.copy_(torch.tensor([slot, *range(2, requests + 1)], dtype=torch.int32))
+        starts.copy_(torch.tensor([0, *range(tokens, tokens + requests)], dtype=torch.int32))
+        if use_graph:
+            graph.replay()
+        else:
+            result = run()
+        torch.npu.synchronize()
+        expected_storage = storage.clone()
+        expected_output = torch.zeros_like(x_cpu)
+        for request in range(requests):
+            if request > 0 or (slot == 1 and tokens):
+                current_x = x_cpu[request : request + 1]
+                expected_storage.as_strided(state.shape, strides)[request + 1].copy_(
+                    torch.cat((history[1:], current_x))
+                )
+                expected_output[request].copy_(F.silu((history.float().sum(dim=0) + current_x[0].float()) * 0.25))
+        torch.testing.assert_close(result.cpu(), expected_output, atol=2e-2, rtol=2e-2)
+        if slot != 1 or not tokens:
+            torch.testing.assert_close(result[0].cpu(), torch.zeros_like(x_cpu[0]), atol=0, rtol=0)
+        torch.testing.assert_close(backing.cpu(), expected_storage, atol=0, rtol=0)
+        torch.testing.assert_close(x.cpu(), x_cpu, atol=0, rtol=0)
