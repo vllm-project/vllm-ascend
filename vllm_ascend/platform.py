@@ -550,8 +550,10 @@ class NPUPlatform(Platform):
             compilation_config.mode = CompilationMode.NONE
             ascend_config.ascend_compilation_config.enable_npugraph_ex = False
             ascend_config.ascend_compilation_config.enable_static_kernel = False
+            ascend_config.ascend_compilation_config.enable_super_kernel = False
             vllm_config.additional_config["ascend_compilation_config"]["enable_npugraph_ex"] = False
             vllm_config.additional_config["ascend_compilation_config"]["enable_static_kernel"] = False
+            vllm_config.additional_config["ascend_compilation_config"]["enable_super_kernel"] = False
         elif compilation_config.cudagraph_mode.requires_piecewise_compilation():
             # Our is_cuda_alike is False so we cannot reuse the assertion of upstream
             assert compilation_config.mode == CompilationMode.VLLM_COMPILE, (
@@ -581,8 +583,10 @@ class NPUPlatform(Platform):
                 prune_capture_sizes_for_950(vllm_config)
             ascend_config.ascend_compilation_config.enable_npugraph_ex = False
             ascend_config.ascend_compilation_config.enable_static_kernel = False
+            ascend_config.ascend_compilation_config.enable_super_kernel = False
             vllm_config.additional_config["ascend_compilation_config"]["enable_npugraph_ex"] = False
             vllm_config.additional_config["ascend_compilation_config"]["enable_static_kernel"] = False
+            vllm_config.additional_config["ascend_compilation_config"]["enable_super_kernel"] = False
         elif compilation_config.cudagraph_mode.has_full_cudagraphs():
             # We don't want to have our FX graph split for the sake of static kernel feature,
             # because it will compile multiple times, so we set splitting_ops to empty manually.
@@ -595,8 +599,10 @@ class NPUPlatform(Platform):
             compilation_config.mode = CompilationMode.NONE
             ascend_config.ascend_compilation_config.enable_npugraph_ex = False
             ascend_config.ascend_compilation_config.enable_static_kernel = False
+            ascend_config.ascend_compilation_config.enable_super_kernel = False
             vllm_config.additional_config["ascend_compilation_config"]["enable_npugraph_ex"] = False
             vllm_config.additional_config["ascend_compilation_config"]["enable_static_kernel"] = False
+            vllm_config.additional_config["ascend_compilation_config"]["enable_super_kernel"] = False
 
         # TODO: Remove this check when ACL Graph supports ASCEND_LAUNCH_BLOCKING=1
         # Then, we will have to discuss the error handling strategy and user experience
@@ -784,7 +790,7 @@ class NPUPlatform(Platform):
             os.environ["PYTORCH_NPU_ALLOC_CONF"] = npu_alloc_configs
             logger.info("Set PYTORCH_NPU_ALLOC_CONF=%s", npu_alloc_configs)
 
-        if ascend_config.enable_mc2_hierarchy_comm and ascend_config.enable_fused_mc2:
+        if ascend_config.mc2_comm_alg == "hierarchy" and ascend_config.enable_fused_mc2:
             raise ValueError(
                 "fused mc2 op cannot be used with hierarchy communication."
                 "Please disable VLLM_ASCEND_ENABLE_FUSED_MC2 by setting it to 0."

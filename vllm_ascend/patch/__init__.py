@@ -75,15 +75,16 @@
 #    Why:
 #       DeepSeek-V4-Flash-0731 defines three reasoning effort levels: low has
 #       no prompt prefix, high uses the original "Absolute maximum" prefix,
-#       and max uses the new "Beyond maximum" prefix. The supported vLLM
-#       Python tokenizer predates this 0731 prompt mapping.
+#       and max uses the new "Beyond maximum" prefix. The earlier Flash
+#       checkpoint uses a different mapping where only max/xhigh selects the
+#       "Absolute maximum" prefix. The supported vLLM Python tokenizer
+#       predates the 0731 prompt mapping.
 #    How:
-#       Monkey-patch tokenizer normalization so omitted options select
-#       thinking with high effort and compatibility aliases map to canonical
-#       low, high, or max. Wrap render_message to prepend the official 0731
-#       prompt before the first message in thinking mode. Align the parser's
-#       default state with the tokenizer so implicit thinking is extracted as
-#       reasoning instead of content.
+#       Select the 0731 mapping when the model config contains a dspark_*
+#       field; otherwise preserve the earlier Flash mapping. Wrap
+#       render_message to prepend the selected prompt before the first message
+#       in thinking mode. Align the parser's default state with the tokenizer
+#       so implicit thinking is extracted as reasoning instead of content.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/50580
 #       https://github.com/vllm-project/vllm/pull/51296
@@ -478,6 +479,23 @@
 #       profiling startup and per-step timing callbacks without monkey-patching
 #       `EngineCore` and the multiprocess entry point.
 #
+# ** 19a. File: platform/patch_shm_broadcast.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.distributed.device_communicators.shm_broadcast.MessageQueue`
+#    Why:
+#       vLLM 0.26.0 local readers can wait indefinitely after a best-effort ZMQ
+#       notification is lost. A caller exception can also leave a read slot
+#       unreleased and block the writer.
+#    How:
+#       Replace `timeout_ms` and `acquire_read` with the implementations from the
+#       upstream fix. Idle waits are capped at five seconds, and read-slot cleanup
+#       runs in a `finally` block.
+#    Related PR:
+#       https://github.com/vllm-project/vllm/pull/45224
+#       https://github.com/vllm-project/vllm-ascend/pull/14181
+#    Future Plan:
+#       Remove this patch when the supported vLLM release includes PR #45224.
+#
 # ** 20. File: platform/patch_speculative_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.speculative.SpeculativeConfig.hf_config_override`
@@ -521,6 +539,8 @@
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.sampling_params.SamplingParams._validate_structured_outputs`
 #      `vllm.v1.structured_output.StructuredOutputManager.grammar_init`
+#      `vllm.v1.structured_output.StructuredOutputManager.grammar_bitmask`
+#      `vllm.v1.structured_output.StructuredOutputManager.should_advance`
 #    Why:
 #       V1 structured outputs use one engine-level backend, while `backend=auto`
 #       resolves the backend per request. After one request initializes
@@ -530,10 +550,16 @@
 #       Record the first resolved backend on the structured-output config and
 #       reject later requests that resolve to a different backend. Also guard
 #       `grammar_init` so requests that bypass API-side validation fail before
-#       backend grammar compilation.
+#       backend grammar compilation. On vLLM v0.26.0 only, backport the
+#       reasoning-boundary fixes so the exact accepted speculative window
+#       advances the FSM, and validate post-boundary draft tokens before
+#       accepting them into the grammar.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/issues/43920
 #       https://github.com/vllm-project/vllm/pull/44401
+#       https://github.com/vllm-project/vllm/pull/44993
+#       https://github.com/vllm-project/vllm/pull/49626
+#       https://github.com/vllm-project/vllm/pull/53046
 #    Future Plan:
 #       Remove this patch once upstream vLLM either enforces backend consistency
 #       before grammar compilation or safely handles mixed-backend grammar
@@ -1321,3 +1347,67 @@
 #    Future Plan:
 #       Remove this patch when upstream vLLM exposes a token-native internal
 #       resume input for chat-completion P/D proxies.
+#
+# ** 34a. File: platform/patch_stop_token_ids_validation.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.sampling_params.SamplingParams.verify`
+#      `vllm.sampling_params.SamplingParams._validate_stop_token_ids`
+#      `vllm.sampling_params.SamplingParams._validate_allowed_token_ids`
+#    Why:
+#       Upstream vLLM (before #54196) does not validate stop_token_ids
+#       against the vocabulary, and validates allowed_token_ids against
+#       len(tokenizer) instead of the model vocab. Both fields are
+#       client-supplied ids used as column indices into the logits tensor
+#       on the device side (min_tokens / EOS masking does logits.index_put_
+#       on all_stop_token_ids; the allowed_token_ids mask in InputBatch is
+#       sized by model_config.get_vocab_size() and the ids are written as
+#       mask[req_index][allowed_token_ids]). For models whose tokenizer
+#       knows more ids than the language model, gap ids pass the
+#       tokenizer-based check yet still index out of bounds.
+#       On CANN 9.1.x the inserted IndexCheck kernel traps on the OOB index
+#       and the whole engine dies with an unrecoverable vector core exception;
+#       on older CANN the write silently corrupts logits of neighboring
+#       requests in the same batch. A single client request can therefore
+#       crash a production instance (vllm-ascend issue #15200).
+#    How：
+#       Monkey-patch SamplingParams.verify to run vocabulary-range checks on
+#       both stop_token_ids and allowed_token_ids (mirroring upstream
+#       _validate_logit_bias) and reject invalid requests with a 400 before
+#       they reach the engine. The patch self-disables once the bundled vLLM
+#       already ships `_validate_stop_token_ids` (the two validators landed
+#       in vllm#54196 together, so the single hasattr check covers both).
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/54196 (merged into vLLM main;
+#       not yet in the vLLM commit pinned by vllm-ascend releases/v0.26.0rc as
+#       of this patch)
+#    Future Plan:
+#       Remove this patch once the vLLM commit pinned by vllm-ascend
+#       releases/v0.26.0rc contains vllm#54196; until then the hasattr guard
+#       keeps it a no-op on fixed builds.
+#
+# ** 35. File: worker/patch_moe_runner.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.layers.fused_moe.runner.moe_runner.MoERunner.forward`
+#    Why:
+#       Upstream `MoERunner.forward` inlines the shared+routed output combine
+#       (`shared_output + fused_output`) without exposing it as an overridable
+#       hook. On NPU the combine should go through the fused multi-tensor add
+#       kernel (`torch._foreach_add`), whose kernel launch count is independent
+#       of the tensor-list length and which is the NPU-validated fast path for
+#       the MoE combine.
+#    How:
+#       Replace `MoERunner.forward` with a mirror of the v0.26.0 upstream
+#       pipeline where only the combine is switched to
+#       `torch._foreach_add([shared_output], [fused_output])[0]`. All
+#       reduction/scaling steps keep calling the overridable hooks, which
+#       `AscendMoERunner` already overrides. `AscendMoERunner` does not define
+#       `forward`, so every Ascend MoE layer picks up the patched method
+#       through inheritance.
+#    Related PR (if no, explain why):
+#       No, vllm-ascend-specific NPU kernel choice for the MoE shared+routed
+#       combine.
+#    Future Plan:
+#       Remove this patch once CANN ships the aclnnAdd_AddAiCore_Add fused-add
+#       operator in the supported release, so the plain add already lowers to
+#       the fused kernel and the foreach form is no longer needed.
+#

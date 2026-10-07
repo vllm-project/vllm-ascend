@@ -42,17 +42,6 @@ msgstr ""
 "采用混合专家（MoE）架构，面向复杂的系统工程和长周期智能体任务。"
 
 msgid ""
-"The `GLM-5` model is first supported in `vllm-ascend:v0.17.0rc1`, and all "
-"**v0.17.0rc1 and later versions** can run stably. To use the latest features"
-" (e.g., PD separation, MTP), it is recommended to use the latest release "
-"candidate or official version. The version of transformers need to be "
-"upgraded to 5.2.0 or later versions."
-msgstr ""
-"`GLM-5` 模型首次在 `vllm-ascend:v0.17.0rc1` 中得到支持，所有 **v0.17.0rc1 及更高版本** "
-"均可稳定运行。如需使用最新特性（如 PD 分离、MTP），建议使用最新的候选发布版或正式版。transformers 版本需升级至 5.2.0 "
-"或更高版本。"
-
-msgid ""
 "This document will show the main verification steps of the model, including "
 "supported features, feature configuration, environment preparation, single-"
 "node and multi-node deployment, accuracy and performance evaluation."
@@ -60,18 +49,6 @@ msgstr "本文档将展示该模型的主要验证步骤，包括支持的特性
 
 msgid "## 2 Supported Features"
 msgstr "## 2 支持的特性"
-
-msgid ""
-"Refer to [supported "
-"features](../../user_guide/support_matrix/supported_models.md) to get the "
-"model's supported feature matrix."
-msgstr ""
-"请参考[支持的特性](../../user_guide/support_matrix/supported_models.md)获取模型支持的特性矩阵。"
-
-msgid ""
-"Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the"
-" feature's configuration."
-msgstr "请参考[特性指南](../../user_guide/feature_guide/index.md)获取特性的配置方法。"
 
 msgid "## 3 Prerequisites"
 msgstr "## 3 前提条件"
@@ -142,27 +119,8 @@ msgid ""
 " on each node."
 msgstr "如果要部署多节点环境，需要在每个节点上进行环境设置。"
 
-msgid "## 5 Online Service Deployment"
-msgstr "## 5 在线服务部署"
-
 msgid "### 5.1 Single-Node Online Deployment"
 msgstr "### 5.1 单节点在线部署"
-
-msgid ""
-"- Quantized model `glm-5-w4a8` and `glm-5.1-w4a8` can be deployed on 1 Atlas"
-" 800 A3 (64G × 16) ."
-msgstr ""
-"- 量化模型 `glm-5-w4a8` 和 `glm-5.1-w4a8` 可部署在 1 台 Atlas 800 A3（64G × 16）上。"
-
-msgid ""
-"- Quantized model `glm-5-w8a8` and `glm-5.1-w8a8` can be deployed on 1 Atlas"
-" 800 A3 (64G × 16) ."
-msgstr ""
-"- 量化模型 `glm-5-w8a8` 和 `glm-5.1-w8a8` 可部署在 1 台 Atlas 800 A3（64G × 16）上。"
-
-msgid ""
-"- Quantized model `glm-5-w4a8` can be deployed on 1 Atlas 800 A2 (64G × 8) ."
-msgstr "- 量化模型 `glm-5-w4a8` 可部署在 1 台 Atlas 800 A2（64G × 8）上。"
 
 msgid ""
 "**Notice:**\n"
@@ -188,23 +146,11 @@ msgstr ""
 "communication)进行多节点通信验证。"
 
 msgid ""
-"Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md)."
-msgstr "常见问题提示：如果遇到问题，请参考[常见问题解答](../../faqs.md)。"
-
-msgid ""
-"- `glm-5-bf16` and `glm-5.1-bf16`: require at least 2 Atlas 800 A3 (64G × "
-"16)."
-msgstr "- `glm-5-bf16` 和 `glm-5.1-bf16`：至少需要 2 台 Atlas 800 A3（64G × 16）。"
-
-msgid ""
 "- For bf16 weight, use this script on each node to enable [Multi Token "
 "Prediction (MTP)](../../user_guide/feature_guide/speculative_decoding.md)."
 msgstr ""
 "- 对于 bf16 权重，在每个节点上使用此脚本启用[多 Token "
 "预测（MTP）](../../user_guide/feature_guide/speculative_decoding.md)。"
-
-msgid "- `glm-5-w8a8`: require 2 Atlas 800 A3 (64G × 16)."
-msgstr "- `glm-5-w8a8`：需要 2 台 Atlas 800 A3（64G × 16）。"
 
 msgid "### 5.3 Prefill-Decode Disaggregation"
 msgstr "### 5.3 预填充-解码分离"
@@ -226,9 +172,6 @@ msgstr "1. 在每个节点上准备脚本 `launch_online_dp.py`："
 
 msgid "2. prepare the script `run_dp_template.sh` on each node."
 msgstr "2. 在每个节点上准备脚本 `run_dp_template.sh`。"
-
-msgid "1. Prefill node 0"
-msgstr "1. 预填充节点 0"
 
 msgid ""
 "Once the preparation is done, you can start the server with the following "
@@ -319,12 +262,6 @@ msgstr ""
 msgid "### 8.2 Using vLLM Benchmark"
 msgstr "### 8.2 使用 vLLM Benchmark"
 
-msgid ""
-"Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/) for "
-"more details."
-msgstr ""
-"有关更多详细信息，请参阅 [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/)。"
-
 msgid "## 9 Performance Tuning"
 msgstr "## 9 性能调优"
 
@@ -353,11 +290,6 @@ msgstr "#### 表 2：详细节点配置"
 
 msgid "## 10 FAQ"
 msgstr "## 10 常见问题解答"
-
-msgid ""
-"- Common Issues Tip: If you encounter issues, Refer to "
-"[FAQs](../../faqs.md)."
-msgstr "- 常见问题提示：如果遇到问题，请参考 [常见问题解答](../../faqs.md)。"
 
 msgid ""
 "- **Q: How to solve ValueError: Tokenizer class TokenizersBackend does not "
@@ -412,10 +344,6 @@ msgid "6. Decode node 3"
 msgstr "6. 解码节点 3"
 
 msgid ""
-"|Scenario|Deployment Mode|*Total NPUs|Weight Version|Key Considerations|"
-msgstr "|场景|部署模式|*NPU总数|权重版本|关键考量|"
-
-msgid ""
 "|Scenario|Configuration|NPUs|TP|DP|Max Num Seqs|Max Num Batched Tokens|Max "
 "Model Len|MTP Speculation Num|"
 msgstr "|场景|配置|NPU数量|TP|DP|最大序列数|最大批处理Token数|最大模型长度|MTP推测数量|"
@@ -431,3 +359,73 @@ msgid ""
 "|Low Latency|1P1D deployment|32 (A3)|GLM5-w8a8/GLM5.1-w8a8|dp4 tp8 on both P"
 " and D nodes to reduce latency|"
 msgstr "|低延迟|1P1D部署|32 (A3)|GLM5-w8a8/GLM5.1-w8a8|在P和D节点上均使用dp4 tp8，以降低延迟|"
+
+msgid ""
+"The `GLM-5` model is first supported in `vllm-ascend:v0.17.0rc1`, and all "
+"**v0.17.0rc1 and later versions** can run stably. To use the latest features"
+" (e.g., PD separation, MTP), it is recommended to use the latest release "
+"candidate or official version."
+msgstr ""
+"`GLM-5` 模型在 `vllm-ascend:v0.17.0rc1` 中首次得到支持，所有 **v0.17.0rc1 及更高版本** "
+"均可稳定运行。如需使用最新特性（如 PD 分离、MTP），建议使用最新的候选版本或正式版本。"
+
+msgid ""
+"Refer to [Supported Features "
+"List](../../user_guide/support_matrix/supported_models.md) to get the "
+"model's supported feature matrix."
+msgstr ""
+"请参阅 [支持特性列表](../../user_guide/support_matrix/supported_models.md) "
+"获取该模型支持的特性矩阵。"
+
+msgid ""
+"Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the"
+" feature's configuration."
+msgstr "请参阅 [特性指南](../../user_guide/feature_guide/index.md) 获取该特性的配置。"
+
+msgid "## 5 Online Service Deployment {: #5-online-service-deployment }"
+msgstr "## 5 在线服务部署 {: #5-online-service-deployment }"
+
+msgid ""
+"- Quantized model `glm-5-w4a8` and `glm-5.1-w4a8` can be deployed on 1 Atlas"
+" 800 A3 (64GB × 16) ."
+msgstr ""
+"- 量化模型 `glm-5-w4a8` 和 `glm-5.1-w4a8` 可部署在 1 台 Atlas 800 A3（64GB × 16）上。"
+
+msgid ""
+"Common Issues Tip: If you encounter issues, Refer to [Public "
+"FAQs](../../faqs.md)."
+msgstr "常见问题提示：如果遇到问题，请参阅 [公共 FAQ](../../faqs.md)。"
+
+msgid ""
+"- Quantized model `glm-5-w8a8` and `glm-5.1-w8a8` can be deployed on 1 Atlas"
+" 800 A3 (64GB × 16) ."
+msgstr ""
+"- 量化模型 `glm-5-w8a8` 和 `glm-5.1-w8a8` 可部署在 1 台 Atlas 800 A3（64GB × 16）上。"
+
+msgid ""
+"- Quantized model `glm-5-w4a8` can be deployed on 1 Atlas 800 A2 (64GB × 8) "
+"."
+msgstr "- 量化模型 `glm-5-w4a8` 可部署在 1 台 Atlas 800 A2（64GB × 8）上。"
+
+msgid ""
+"- `glm-5-bf16` and `glm-5.1-bf16`: require at least 2 Atlas 800 A3 (64GB × "
+"16)."
+msgstr "- `glm-5-bf16` 和 `glm-5.1-bf16`：至少需要 2 台 Atlas 800 A3（64GB × 16）。"
+
+msgid "- `glm-5-w8a8`: require 2 Atlas 800 A3 (64GB × 16)."
+msgstr "- `glm-5-w8a8`：需要 2 台 Atlas 800 A3（64GB × 16）。"
+
+msgid ""
+"Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for "
+"more details."
+msgstr ""
+"更多详细信息，请参阅 [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/)。"
+
+msgid ""
+"|Scenario|Deployment Mode|Total NPUs|Weight Version|Key Considerations|"
+msgstr "|场景|部署模式|NPU 总数|权重版本|关键注意事项|"
+
+msgid ""
+"- Common Issues Tip: If you encounter issues, Refer to [Public "
+"FAQs](../../faqs.md)."
+msgstr "- 常见问题提示：如果遇到问题，请参阅 [公共 FAQ](../../faqs.md)。"

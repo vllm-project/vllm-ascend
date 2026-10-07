@@ -31,9 +31,6 @@ msgstr "## 在线服务器"
 msgid "### 1. Start the vLLM server"
 msgstr "### 1. 启动 vLLM 服务器"
 
-msgid "You can run docker container to start the vLLM server on a single NPU:"
-msgstr "您可以运行 Docker 容器在单个 NPU 上启动 vLLM 服务器："
-
 msgid "The vLLM server is started successfully, if you see logs as below:"
 msgstr "如果看到如下日志，则表示 vLLM 服务器启动成功："
 
@@ -110,3 +107,7 @@ msgstr ""
 
 msgid "Run the following command:"
 msgstr "运行以下命令："
+
+msgid ""
+"You can run a docker container to start the vLLM server on a single NPU:"
+msgstr "您可以通过运行一个Docker容器在单个NPU上启动vLLM服务器："

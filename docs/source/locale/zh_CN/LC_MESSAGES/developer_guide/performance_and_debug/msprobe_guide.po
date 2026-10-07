@@ -231,16 +231,6 @@ msgstr ""
 "   - `stack.json`：API/模块的调用栈。\n"
 "   - `construct.json`：层次结构描述。当 `level=L1` 时为空。"
 
-msgid ""
-"- `dump.json`: Statistics for the forward data of each API or module, "
-"including names, dtype, shape, max, min, mean, L2 norm (square root of the "
-"L2 variance), and CRC-32 when `summary_mode=\"md5\"`. See [dump.json file "
-"description](#dumpjson-file-description) for details."
-msgstr ""
-"- `dump.json`：每个API或模块前向数据的统计信息，包括名称、数据类型、形状、最大值、最小值、均值、L2范数（L2方差的平方根），以及当 "
-"`summary_mode=\"md5\"` 时的CRC-32。详见 [dump.json文件说明](#dumpjson-file-"
-"description)。"
-
 msgid "## 5. Analyze the results"
 msgstr "## 5. 分析结果"
 
@@ -459,6 +449,11 @@ msgstr ""
 "| `list`      | 要采样的算子范围。空列表表示收集所有算子。"
 "                                                                                                                                            "
 "|    否    |      ✅       |      ✅       |"
+
+msgid ""
+"- `dump.json`: See [dump.json file description](#dumpjson-file-description) "
+"for details."
+msgstr "- `dump.json`：详见[dump.json文件描述](#dumpjson-file-description)。"
 
 #~ msgid ""
 #~ "An L0 `dump.json` contains forward I/O for modules together with parameters."

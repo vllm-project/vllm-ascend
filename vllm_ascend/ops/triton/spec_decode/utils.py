@@ -117,7 +117,16 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid(
 
         seq_len = tl.load(seq_lens_ptr + req_idx)
         effective_seq_len = seq_len - num_rejected
-        last_pos = tl.load(target_positions_ptr + valid_ctx_end - 1)
+        # A discarded speculative step has no accepted tokens, so all context
+        # tokens for the step can be rejected. In that case valid_ctx_end points
+        # at this request's first token and valid_ctx_end - 1 belongs to the
+        # previous request (or is before the tensor for the first request).
+        has_valid_context = valid_ctx_end > ctx_start
+        last_pos_idx = tl.where(has_valid_context, valid_ctx_end - 1, ctx_start)
+        last_pos = tl.load(target_positions_ptr + last_pos_idx)
+        # query_pos is derived as last_pos + 1 + q_idx below. When no context
+        # remains, start it at this request's original first position.
+        last_pos = tl.where(has_valid_context, last_pos, last_pos - 1)
 
         for q_idx in range(0, num_query_per_req):
             query_pos = last_pos + 1 + q_idx

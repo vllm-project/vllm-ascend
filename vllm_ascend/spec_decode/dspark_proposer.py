@@ -16,6 +16,7 @@ from vllm.v1.worker.utils import AttentionGroup
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.mla_v1 import AscendMLAMetadataBuilder
 from vllm_ascend.models.deepseek_v4 import apply_quarot_block_rotation
 from vllm_ascend.models.deepseek_v4_dspark import DSparkDeepseekV4ForCausalLM
@@ -63,7 +64,10 @@ class AscendDSparkProposer(AscendDflashProposer):
         draft_vocab_size = getattr(draft_hf_config, "draft_vocab_size", None) or getattr(
             draft_hf_config, "vocab_size", target_vocab_size
         )
-        if draft_vocab_size != target_vocab_size:
+        if (
+            draft_vocab_size != target_vocab_size
+            or vllm_config.speculative_config.draft_sample_method == "probabilistic"
+        ):
             raise ValueError(
                 "DSpark on the v1 model runner does not support reduced-vocabulary "
                 f"drafts: draft_vocab_size={draft_vocab_size}, "
@@ -430,6 +434,16 @@ class AscendDSparkProposer(AscendDflashProposer):
                 f"groups. Missing layers: {self.attn_layer_names}"
             )
 
+        if (
+            getattr(self.runner, "device_metadata_executor", None) is not None
+            and self.dcp_size == 1
+            and self.vllm_config.parallel_config.prefill_context_parallel_size == 1
+        ):
+            for attn_group in self.draft_attn_groups:
+                builder = attn_group.get_metadata_builder()
+                if isinstance(builder, AscendDSAMetadataBuilder):
+                    builder.enable_dspark_device_metadata(self.max_query_tokens)
+
         self.kv_cache_gid = self.draft_attn_groups[0].kv_cache_group_id
         self.kernel_block_size = self._per_group_kernel_block_sizes[self.kv_cache_gid]
 
@@ -678,6 +692,9 @@ class AscendDSparkProposer(AscendDflashProposer):
             aclgraph_runtime_mode=aclgraph_runtime_mode,
             is_draft_model=True,
             draft_attn_metadatas=[],
+            eplb_heat_collection_status=(
+                self.runner.eplb_heat_collection_status if self.runner.dynamic_eplb else False
+            ),
         ):
             if is_profile:
                 self.model.precompute_and_store_context_kv(context_states, context_positions)

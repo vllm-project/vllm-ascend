@@ -317,13 +317,37 @@ class AscendConfig:
         # Enable dispatch/combine op inter-node communication by ROCE
         self.enable_mc2_hierarchy_comm = additional_config.get("enable_mc2_hierarchy_comm", False)
 
-        # Per-rank token capacity after dispatch in the mega moe (dispatch_ffn_combine) fused operator.
-        # When load imbalance causes a rank to receive more tokens than this limit, the excess tokens
-        # are dropped and skipped from computation, degrading accuracy.
-        # Do not set this too large: workspace memory scales linearly with this value, which matters
-        # especially under long-context scenarios where the operator should not hold too much memory.
-        # Default 131072.
-        self.mega_moe_max_tokens = additional_config.get("mega_moe_max_tokens", 131072)
+        self.mc2_comm_alg = additional_config.get("mc2_comm_alg", "")
+        if self.enable_mc2_hierarchy_comm:
+            self.mc2_comm_alg = "hierarchy"
+
+        if self.mc2_comm_alg not in ["", "fullmesh", "hierarchy", "fullmesh_v2"]:
+            raise ValueError(
+                'additional_config.mc2_comm_alg need in ["", "fullmesh", "hierarchy", "fullmesh_v2"], '
+                f"but got {self.mc2_comm_alg}."
+            )
+
+        from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+
+        device_type = get_ascend_device_type()
+        if self.mc2_comm_alg == "fullmesh_v2" and device_type != AscendDeviceType.A3:
+            raise NotImplementedError(
+                f"mc2_comm_alg == 'fullmesh_v2' is only supported on A3, but got {device_type.name}."
+            )
+
+        if self.mc2_comm_alg == "hierarchy" and device_type not in (AscendDeviceType.A2, AscendDeviceType.A3):
+            raise NotImplementedError(
+                f"mc2_comm_alg == 'hierarchy' is only supported on A2 and A3, but got {device_type.name}."
+            )
+
+        # Per-rank token capacity after dispatch in the fused MC2/MegaMoe path.
+        # The same value is passed as dispatch_ffn_combine's max_output_size
+        # and CANN MegaMoe buffer's max_recv_token_num.
+        # This is a reference value: if the actual per-rank received token
+        # count exceeds it, tokens may be truncated, causing precision
+        # degradation. Do not set it too large because workspace memory scales
+        # linearly with this value. Default 65536.
+        self.mega_moe_max_tokens = additional_config.get("mega_moe_max_tokens", 65536)
         if not isinstance(self.mega_moe_max_tokens, int):
             raise ValueError(
                 f"mega_moe_max_tokens must be an integer, got {type(self.mega_moe_max_tokens).__name__}: "
@@ -495,6 +519,15 @@ class AscendConfig:
     def update_compile_ranges_split_points(self):
         return
 
+    def get_mc2_comm_alg(self) -> str:
+        from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+
+        # When A3 and comm_alg == "fullmesh", dispatch/combine op need pass in "fullmesh_v1" instead of "fullmesh"
+        # TODO(zzzzwwjj): Remove it when op's param is uniformed between A2/A3/A5.
+        if self.mc2_comm_alg == "fullmesh" and get_ascend_device_type() == AscendDeviceType.A3:
+            return "fullmesh_v1"
+        return self.mc2_comm_alg
+
 
 class FinegrainedTPConfig:
     """
@@ -583,6 +616,7 @@ class AscendCompilationConfig:
         self,
         enable_npugraph_ex: bool = True,
         enable_static_kernel: bool = False,
+        enable_super_kernel: bool | None = None,
         fuse_norm_quant: bool = True,
         fuse_qknorm_rope: bool = True,
         **kwargs,
@@ -602,6 +636,8 @@ class AscendCompilationConfig:
                 binary files with the corresponding shapes based on the current batch_size,
                 which usually takes some time.
                 Default: False
+            enable_super_kernel (bool | None): Whether to enable Super Kernel.
+                When omitted, it follows enable_static_kernel.
             fuse_norm_quant (bool): Whether to enable norm and quant fusion optimization.
                 When set to True, the system will optimize norm and quant operations.
                 Default: True
@@ -611,6 +647,9 @@ class AscendCompilationConfig:
         """
         from vllm_ascend.utils import is_310p
 
+        if enable_super_kernel is None:
+            enable_super_kernel = enable_static_kernel
+
         if is_310p():
             if enable_npugraph_ex:
                 logger.warning("npugraph_ex is not supported on Ascend 310P. Disabling it.")
@@ -618,16 +657,24 @@ class AscendCompilationConfig:
                 logger.warning(
                     "static kernel requires npugraph_ex, which is not supported on Ascend 310P. Disabling it."
                 )
+            if enable_super_kernel:
+                logger.warning(
+                    "super kernel requires static kernel, which is not supported on Ascend 310P. Disabling it."
+                )
             enable_npugraph_ex = False
             enable_static_kernel = False
+            enable_super_kernel = False
 
         self.fuse_norm_quant = fuse_norm_quant
         self.fuse_qknorm_rope = fuse_qknorm_rope
         self.enable_npugraph_ex = enable_npugraph_ex
         self.enable_static_kernel = enable_static_kernel
+        self.enable_super_kernel = enable_super_kernel
         self.fuse_muls_add = kwargs.get("fuse_muls_add", True)
         if self.enable_static_kernel:
             assert self.enable_npugraph_ex, "Static kernel generation requires npugraph_ex to be enabled."
+        if self.enable_super_kernel:
+            assert self.enable_static_kernel, "Super kernel generation requires static kernel to be enabled."
 
 
 class AscendFusionConfig:

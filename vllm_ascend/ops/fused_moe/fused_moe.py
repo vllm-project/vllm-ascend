@@ -35,8 +35,8 @@ from vllm.model_executor.layers.fused_moe.layer import (
 )
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import UnquantizedFusedMoEMethod
 
-from vllm_ascend.ascend_config import _CANN_OPS_TRANSFORMER_AVAILABLE, get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
+from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType, use_cann_megamoe
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
@@ -80,6 +80,7 @@ class FusedMoEResult:
 class FusedMoEEvents:
     before_routed_experts: torch.npu.Event
     after_routed_experts: torch.npu.Event | None = field(default=None)
+    shared_input_ready: torch.npu.Event | None = field(default=None)
     before_dispatch: torch.npu.Event | None = field(default=None)
     before_gmm2: torch.npu.Event | None = field(default=None)
     before_combine: torch.npu.Event | None = field(default=None)
@@ -146,10 +147,11 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # in their native format without explicit casting here.
         enable_fused_mc2 = get_ascend_config().enable_fused_mc2
         if enable_fused_mc2:
-            if not _CANN_OPS_TRANSFORMER_AVAILABLE:
+            use_megamoe = use_cann_megamoe(get_current_vllm_config())
+            if not use_megamoe:
                 layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
                 layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
-            if _CANN_OPS_TRANSFORMER_AVAILABLE or self.dynamic_eplb:
+            if use_megamoe or self.dynamic_eplb:
                 layer.w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
                 layer.w2_weight_list = [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]
                 del layer.w13_weight
@@ -256,7 +258,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         w2_weight_list = getattr(layer, "w2_weight_list", None)
         has_split_weight_lists = isinstance(w13_weight_list, list) and isinstance(w2_weight_list, list)
         if _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2:
-            if _CANN_OPS_TRANSFORMER_AVAILABLE:
+            if _EXTRA_CTX.use_megamoe:
                 w1 = w13_weight_list if isinstance(w13_weight_list, list) else [layer.w13_weight]
                 w2 = w2_weight_list if isinstance(w2_weight_list, list) else [layer.w2_weight]
                 w1_scale = None
@@ -829,9 +831,22 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
 
         with npu_stream_switch(shared_experts_calculation_stream(), enabled=self.multistream_overlap_shared_expert):
             # FlashComm1 switches the token axis between complete TP blocks.
-            # Gather the sequence shard before entering a TP-sharded shared MLP.
-            torch.npu.current_stream().wait_event(fused_moe_evts.before_routed_experts)
-            hidden_states = self._prepare_shared_expert_input(hidden_states)
+            # The sequence-shard all-gather for the TP-sharded shared MLP runs
+            # on the DEFAULT stream (see shared_forward_impl) before the routed
+            # path is enqueued: issuing a TP-group collective here would run it
+            # concurrently with the routed path's EP-group collectives and can
+            # deadlock HCCL under multistream overlap. Wait for it before
+            # consuming the gathered input.
+            # shared_input_ready is unconditionally recorded by shared_forward_impl
+            # whenever shared experts run (the only caller), so there is deliberately
+            # no fallback: a missing event would mean the gather never ran, and
+            # waiting on before_routed_experts instead would silently consume
+            # ungathered sequence shards.
+            assert fused_moe_evts.shared_input_ready is not None, (
+                "shared_input_ready is None: the shared-expert input all-gather was "
+                "not issued on the default stream (see shared_forward_impl)"
+            )
+            torch.npu.current_stream().wait_event(fused_moe_evts.shared_input_ready)
 
             # Only used for int quantization
             has_quantized_shared = hasattr(self._shared_experts.gate_up_proj, "weight_scale") and hasattr(
@@ -963,13 +978,22 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             # increase with extra hidden states. We also assume that all gate
             # linear is unquantized so that we the weight is pre-casted in
             # process_weights_after_loading of AscendUnquantizedLinearMethod.
-            hidden_states_fp32 = shared_hidden_states.float()
+            hidden_states_fp32 = router_logits if router_logits.dtype == torch.float32 else shared_hidden_states.float()
             before_routed_experts = torch.npu.current_stream().record_event()
             router_logits = F.linear(hidden_states_fp32, gate.weight_fp32)
             after_routed_experts = torch.npu.current_stream().record_event()
         else:
             before_routed_experts = torch.npu.current_stream().record_event()
             after_routed_experts = None
+
+        # FlashComm1 + TP-sharded shared experts (sed_dp=false): gather the
+        # full sequence for the shared MLP on the DEFAULT stream, BEFORE the
+        # routed path is enqueued, so all collectives stay on one stream
+        # (multistream-safe); the shared-experts stream remains compute-only.
+        shared_input_ready = None
+        if self._shared_experts is not None:
+            shared_hidden_states = self._prepare_shared_expert_input(shared_hidden_states)
+            shared_input_ready = torch.npu.current_stream().record_event()
 
         fused_moe_results = self.no_shared_forward_impl(
             hidden_states,
@@ -986,6 +1010,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             FusedMoEEvents(
                 after_routed_experts=after_routed_experts,
                 before_routed_experts=before_routed_experts,
+                shared_input_ready=shared_input_ready,
                 before_dispatch=fused_moe_results.before_dispatch_evt,
                 before_gmm2=fused_moe_results.before_gmm2_evt,
                 before_combine=fused_moe_results.before_combine_evt,
@@ -1005,6 +1030,13 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         with self._sequence_parallel_context():
             if self.shared_experts is None:
+                if self.is_internal_router and router_logits.shape[-1] == self.hidden_size:
+                    gate = self.gate
+                    assert gate is not None
+                    hidden_states_fp32 = (
+                        router_logits if router_logits.dtype == torch.float32 else hidden_states.float()
+                    )
+                    router_logits = F.linear(hidden_states_fp32, gate.weight_fp32)
                 return self.no_shared_forward_impl(hidden_states, router_logits)
             else:
                 return self.shared_forward_impl(hidden_states, router_logits, shared_experts_input)

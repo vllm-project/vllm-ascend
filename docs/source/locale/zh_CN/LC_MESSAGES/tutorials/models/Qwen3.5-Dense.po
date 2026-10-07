@@ -216,14 +216,8 @@ msgstr "以下示例使用来自 ModelScope 的 FP16 权重。如有需要，请
 msgid "=== \"Qwen3.5-2B\""
 msgstr "=== \"Qwen3.5-2B\""
 
-msgid "Startup Command:"
-msgstr "启动命令："
-
 msgid "=== \"Qwen3.5-4B\""
 msgstr "=== \"Qwen3.5-4B\""
-
-msgid "Startup Command:"
-msgstr "启动命令："
 
 msgid "=== \"Qwen3.5-9B\""
 msgstr "=== \"Qwen3.5-9B\""
@@ -259,14 +253,6 @@ msgstr ""
 "    - `\"cudagraph_capture_sizes\"`：当启用张量并行（TP）时，硬件事件 ID 约束最多允许两个捕获大小（例如 `[1, 8]`）。\n"
 "- `--additional-config` 需要包含 `\"ascend_compilation_config\": {\"enable_npugraph_ex\": false}`，因为这些平台不支持 `enable_npugraph_ex`。"
 
-msgid ""
-"Common Issues Tip: If you encounter issues, please refer to the [Public "
-"FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for "
-"troubleshooting."
-msgstr ""
-"常见问题提示：如果遇到问题，请参考[公共 "
-"FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) 进行故障排除。"
-
 msgid "Service Verification:"
 msgstr "服务验证："
 
@@ -301,9 +287,6 @@ msgstr "预期结果：服务返回 HTTP 200 OK。JSON 响应中包含 `choices`
 
 msgid "## 7 Accuracy Evaluation"
 msgstr "## 7 精度评估"
-
-msgid "### Using AISBench"
-msgstr "### 使用 AISBench"
 
 msgid ""
 "1. Refer to [Using "
@@ -384,20 +367,22 @@ msgid ""
 msgstr ""
 "请参考[公共性能调优文档](../../developer_guide/performance_and_debug/optimization_and_tuning.md)了解调优方法。"
 
-msgid ""
-"Please refer to the [Feature "
-"Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed "
-"feature descriptions."
-msgstr ""
-"请参考[功能指南](../../user_guide/support_matrix/feature_matrix.md)了解详细的功能描述。"
-
 msgid "## 10 FAQ"
 msgstr "## 10 常见问题"
 
 msgid ""
-"For common environment, installation, and general parameter issues, please "
-"refer to the [vLLM-Ascend Public "
-"FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)."
+"Common Issues Tip: If you encounter issues, please refer to the [Public "
+"FAQs](../../faqs.md) for troubleshooting."
+msgstr "常见问题提示：如果遇到问题，请参考[公共FAQ](../../faqs.md)进行故障排查。"
+
+msgid ""
+"Please refer to the [Feature "
+"Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed "
+"feature descriptions."
 msgstr ""
-"关于常见的环境、安装和通用参数问题，请参考 [vLLM-Ascend 公共 "
-"FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)。"
+"请参考[功能矩阵](../../user_guide/support_matrix/feature_matrix.md)了解详细的功能描述。"
+
+msgid ""
+"For common environment, installation, and general parameter issues, please "
+"refer to the [Public FAQs](../../faqs.md)."
+msgstr "对于常见的环境、安装和通用参数问题，请参考[公共FAQ](../../faqs.md)。"

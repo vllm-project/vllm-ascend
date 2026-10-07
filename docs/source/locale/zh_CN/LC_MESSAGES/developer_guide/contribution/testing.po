@@ -37,12 +37,6 @@ msgstr "搭建测试环境最快的方式是使用主分支的容器镜像："
 msgid "You can run the unit tests on CPUs with the following steps:"
 msgstr "您可以按照以下步骤在 CPU 上运行单元测试："
 
-msgid "=== \"Single card\""
-msgstr "=== \"单卡\""
-
-msgid "=== \"Multi cards\""
-msgstr "=== \"多卡\""
-
 msgid "## Running tests"
 msgstr "## 运行测试"
 
@@ -177,11 +171,16 @@ msgstr "=== \"单卡\""
 msgid "=== \"Multi-card\""
 msgstr "=== \"多卡\""
 
+msgid "=== \"Multi-cards\""
+msgstr "=== \"多卡\""
+
 msgid ""
 "- Offline test example: "
-"[`tests/e2e/pull_request/one_card/test_camem.py`](https://github.com/vllm-"
-"project/vllm-ascend/blob/main/tests/e2e/pull_request/one_card/test_camem.py)"
+"[`tests/e2e/pull_request/one_card/test_qwen3_0_6b.py`](https://github.com/vllm-"
+"project/vllm-"
+"ascend/blob/main/tests/e2e/pull_request/one_card/test_qwen3_0_6b.py)"
 msgstr ""
 "- "
-"离线测试示例：[`tests/e2e/pull_request/one_card/test_camem.py`](https://github.com/vllm-"
-"project/vllm-ascend/blob/main/tests/e2e/pull_request/one_card/test_camem.py)"
+"离线测试示例：[`tests/e2e/pull_request/one_card/test_qwen3_0_6b.py`](https://github.com/vllm-"
+"project/vllm-"
+"ascend/blob/main/tests/e2e/pull_request/one_card/test_qwen3_0_6b.py)"

@@ -50,7 +50,6 @@ from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import (
     AscendDeviceType,
     get_ascend_device_type,
-    is_hierarchical_communication_enabled,
     should_skip_allreduce_across_dp_group,
 )
 
@@ -121,11 +120,10 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         self.enable_dispatch_v2 = hasattr(torch_npu, "npu_moe_distribute_dispatch_v2")
         self.need_extra_args = get_ascend_device_type() in [AscendDeviceType.A3, AscendDeviceType.A5]
         self.a5_need_extra_args = get_ascend_device_type() == AscendDeviceType.A5
-        # NOTE: When in A2, setting the environment variables HCCL_INTRA_PCIE_ENABLE=1 and
-        # HCCL_INTRA_ROCE_ENABLE=0 can reduce cross-machine communication traffic and significantly
-        # improve communication performance.
-        # When enable hierarchical communication, param `expert_scales` need to be passed in.
-        self.need_expert_scale = is_hierarchical_communication_enabled()
+        self.mc2_comm_alg = get_ascend_config().get_mc2_comm_alg()
+
+        # When enable hierarchical communication or A5 case, param `expert_scales` need to be passed in.
+        self.need_expert_scale = self.a5_need_extra_args or self.mc2_comm_alg == "hierarchy"
 
         # Here we need to calculate the global_bs = max_bs_per_rank * ep_world_size to execute
         # dispatch & combine operators with different input num_tokens per rank.
@@ -148,10 +146,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         # use the real global_bs and do NOT pass mc2_mask.
         self.global_bs = _max_global_bs if should_skip_allreduce_across_dp_group(vllm_config) else 0
 
-        # NOTE: When enable_mc2_hierarchy_comm is true, we need pass in `comm_alg` to mc2 op.
-        self.need_comm_alg = get_ascend_config().enable_mc2_hierarchy_comm
-
-        if not self.enable_dispatch_v2 and self.need_comm_alg:
+        if not self.enable_dispatch_v2 and self.mc2_comm_alg == "hierarchy":
             raise RuntimeError(
                 "PTA and CANN version is too old to support mc2 hierarchy comm, please upgrade your version."
             )
@@ -204,6 +199,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
             "group_ep": self.moe_all_to_all_group_name,
             "ep_world_size": self.ep_world_size,
             "ep_rank_id": self.ep_rank_id,
+            "comm_alg": self.mc2_comm_alg,
         }
         if self.need_extra_args:
             stage1_kwargs.update(
@@ -226,14 +222,12 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
             ):
                 y_dtype = token_dispatch_input.quant.mxfp.act_quant_type
             stage1_kwargs.update({"tp_world_size": 1, "tp_rank_id": 0, "y_dtype": y_dtype})
-        if self.need_expert_scale or self.a5_need_extra_args:
+        if self.need_expert_scale:
             stage1_kwargs.update(
                 {
                     "expert_scales": topk_weights.to(torch.float32),
                 }
             )
-        if self.need_comm_alg:
-            stage1_kwargs.update({"comm_alg": "hierarchy"})
 
         kwargs_mc2.update(stage1_kwargs)
         return kwargs_mc2
@@ -320,6 +314,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
             "ep_rank_id": self.ep_rank_id,
             "expand_scales": expand_scales,
             "comm_quant_mode": quant_mode,
+            "comm_alg": self.mc2_comm_alg,
         }
 
         if self.enable_dispatch_v2:
@@ -336,8 +331,6 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
                     "tp_rank_id": 0,
                 }
             )
-        if self.need_comm_alg:
-            stage3_kwargs.update({"comm_alg": "hierarchy"})
 
         kwargs_mc2.update(stage3_kwargs)
         return kwargs_mc2
@@ -438,14 +431,18 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
                 topk_weights=topk_weights,
                 expanded_row_idx=expanded_row_idx,
                 restore_shape=restore_shape,
+                combine_topk_weights_dtype=token_dispatch_input.combine_topk_weights_dtype,
             ),
         )
 
     def token_combine(self, hidden_states, combine_metadata, bias=None):
+        topk_weights = combine_metadata.topk_weights
+        if combine_metadata.combine_topk_weights_dtype is not None:
+            topk_weights = topk_weights.to(combine_metadata.combine_topk_weights_dtype)
         final_hidden_states = DeviceOperator.npu_moe_token_unpermute(
             permuted_tokens=hidden_states,
             sorted_indices=combine_metadata.expanded_row_idx,
-            probs=combine_metadata.topk_weights,
+            probs=topk_weights,
         )
         if len(combine_metadata.restore_shape) == 3:
             final_hidden_states = final_hidden_states.view(combine_metadata.restore_shape)
@@ -560,6 +557,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
                 reversed_global_input_permutation_mapping=reversed_global_input_permutation_mapping,
                 hidden_shape=hidden_shape,
                 hidden_shape_before_permute=hidden_shape_before_permute,
+                combine_topk_weights_dtype=token_dispatch_input.combine_topk_weights_dtype,
             ),
         )
 
@@ -735,10 +733,13 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         combine_metadata: MoEAllToAllCombineMetadata,
     ) -> torch.Tensor:
         # Unpermutation 1: AlltoAll output to output
+        topk_weights = combine_metadata.topk_weights
+        if combine_metadata.combine_topk_weights_dtype is not None:
+            topk_weights = topk_weights.to(combine_metadata.combine_topk_weights_dtype)
         output = torch_npu.npu_moe_token_unpermute(
             permuted_tokens=permutated_local_input_tokens,
             sorted_indices=combine_metadata.reversed_local_input_permutation_mapping.to(torch.int32),
-            probs=combine_metadata.topk_weights,
+            probs=topk_weights,
             restore_shape=combine_metadata.hidden_shape_before_permute,
         )
         output = output.view(combine_metadata.hidden_shape)

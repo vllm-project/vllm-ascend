@@ -86,16 +86,16 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 
 === "A2/A3"
 
-    | Model                         | Support   | Note                                                                 |    Supported Hardware | W8A8   |  Doc |
-    |-------------------------------|-----------|----------------------------------------------------------------------|------------------------------|------|
-    | Qwen3-Embedding               | 🔵        |                                                                      |         A2/A3           | 🟡| [Qwen3-Embedding](../../tutorials/models/Qwen3-Embedding.md)|
-    | Qwen3-VL-Embedding            | 🔵        |                                                                      |         A2/A3            | 🔵| [Qwen3-VL-Embedding](../../tutorials/models/Qwen3-VL-Embedding.md)|
-    | Qwen3-Reranker                | 🔵        |                                                                      |         A2/A3            |🟡 | [Qwen3-Reranker](../../tutorials/models/Qwen3-Reranker.md)|
-    | Qwen3-VL-Reranker             | 🔵        |                                                                      |         A2/A3            | 🔵| [Qwen3-VL-Reranker](../../tutorials/models/Qwen3-VL-Reranker.md)|
-    | Molmo                         | 🔵        | [1942](https://github.com/vllm-project/vllm-ascend/issues/1942)      |         A2/A3            | 🟡|      |
-    | XLM-RoBERTa-based             | 🔵        |                                                                      |         A2/A3            | 🟡|      |
-    | Bert                          | 🔵        |                                                                      |         A2/A3            |🟡 |      |
-    | Qwen2.5-Math-RM-72B           | ✅        | Reward Model, gsm8k_correctness accuracy=0.80 | A2 | [Qwen2.5-Math-RM-72B](../../tutorials/models/Qwen2.5-Math-RM-72B.md) |
+    | Model                         | Support | Note                                                            | Supported Hardware | W8A8 | Doc                                                                         |
+    |-------------------------------|---------|-----------------------------------------------------------------|--------------------|------|-----------------------------------------------------------------------------|
+    | Qwen3-Embedding               | 🔵       |                                                                 | A2/A3              | 🟡    | [Qwen3-Embedding](../../tutorials/models/Qwen3-Embedding.md)                 |
+    | Qwen3-VL-Embedding            | 🔵       |                                                                 | A2/A3              | 🔵    | [Qwen3-VL-Embedding](../../tutorials/models/Qwen3-VL-Embedding.md)           |
+    | Qwen3-Reranker                | 🔵       |                                                                 | A2/A3              | 🟡    | [Qwen3-Reranker](../../tutorials/models/Qwen3-Reranker.md)                   |
+    | Qwen3-VL-Reranker             | 🔵       |                                                                 | A2/A3              | 🔵    | [Qwen3-VL-Reranker](../../tutorials/models/Qwen3-VL-Reranker.md)             |
+    | Molmo                         | 🔵       | [1942](https://github.com/vllm-project/vllm-ascend/issues/1942) | A2/A3              | 🟡    |                                                                             |
+    | XLM-RoBERTa-based             | 🔵       |                                                                 | A2/A3              | 🟡    |                                                                             |
+    | Bert                          | 🔵       |                                                                 | A2/A3              | 🟡    |                                                                             |
+    | Qwen2.5-Math-RM-72B           | ✅       | Reward Model, gsm8k_correctness accuracy=0.80                   | A2                 |       | [Qwen2.5-Math-RM-72B](../../tutorials/models/Qwen2.5-Math-RM-72B.md)         |
 
 === "Atlas inference products"
 
@@ -120,6 +120,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
     |-----------------|----------|--------|------|------|------|---------|-------|------|------|--------|-------|--------|--------|-------|-------|--------|----------|---------|----------|-----|
     |Qwen3.5-397B-A17B|✅        |       |✅    | Ascend 950DT |✅|✅|✅||✅|✅|✅||✅|✅|✅|✅|✅|1010000|| [Qwen3.5-397B-A17B](../../tutorials/models/Qwen3.5-397B-A17B.md) |
     |Qwen3.6-27B      |✅        |       |✅    | Ascend 950 Products |✅|✅|✅||✅|✅|✅||✅|✅|✅|✅|✅|262144|| [Qwen3.5-27B / Qwen3.6-27B](../../tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md) |
+    |Kimi-K3          |🔵        |W4A8; DSpark; FULL_DECODE_ONLY||Ascend 950DT|||✅||✅||✅||✅|✅|✅||✅|131072||[Kimi-K3](../../tutorials/models/Kimi-K3.md)|
 
 === "A2/A3"
 
@@ -132,6 +133,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
     | Qwen3.6-35B-A3B | 🔵 |  | ✅ | A2/A3 | ✅ | ✅ | ✅ |  | 🔵 | ✅ | ✅ |  | ✅ | ✅ | ❌ | ✅ | ✅ | 262144 | [Qwen3.6-35B-A3B](../../tutorials/models/Qwen3.6-35B-A3B.md) |
     | Qwen3-Omni-30B-A3B-Thinking | 🔵 |  |  | A2/A3 |  |  |  |  |  |  | ✅ |  | ✅ |  |  |  |  |  | [Qwen3-Omni-30B-A3B-Thinking](../../tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md) |
     | Kimi-K2.5/Kimi-K2.6 | ✅ |  |  | A2/A3 |  | ✅ | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | 262144 | [Kimi-K2.5](../../tutorials/models/Kimi-K2.5.md)/[Kimi-K2.6](../../tutorials/models/Kimi-K2.6.md) |
+    | Kimi-K3 | 🔵 | W4A8; DSpark; FULL_DECODE_ONLY |  | A3 |  |  | ✅ |  | ✅ |  | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | 131072 | [Kimi-K3](../../tutorials/models/Kimi-K3.md) |
 
 === "Atlas inference products"
 

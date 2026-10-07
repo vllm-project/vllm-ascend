@@ -27,6 +27,8 @@
 #   2. from vllm_ascend import ops
 #   3. model loading  ->  deepseek_v2 imported  ->  gets patched FusedMoE  ✓
 
+import sys
+
 import vllm.model_executor.layers.fused_moe as _fused_moe_pkg
 import vllm.model_executor.layers.fused_moe.layer as _fused_moe_layer
 
@@ -86,3 +88,10 @@ def _ascend_FusedMoE(*args, runner_cls=None, runner_args=None, **kwargs):
 
 _fused_moe_layer.FusedMoE = _ascend_FusedMoE
 _fused_moe_pkg.FusedMoE = _ascend_FusedMoE
+
+
+for module_name, module in list(sys.modules.items()):
+    if not module_name.startswith("vllm.model_executor.models") or module is None:
+        continue
+    if module.__dict__.get("FusedMoE") is _original_FusedMoE:
+        module.__dict__["FusedMoE"] = _ascend_FusedMoE
