@@ -832,7 +832,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q
         softmax_lse = torch.empty(1, dtype=query.dtype, device=query.device)
         input_layout = "TND"
-        is_decode = attn_metadata.attn_state == AscendAttentionState.DecodeOnly 
+        is_decode = attn_metadata.attn_state == AscendAttentionState.DecodeOnly
         attn_mask, sparse_mode = (
             (None, 0)
             if is_decode and not self.sliding_window
@@ -1341,7 +1341,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     query=query,
                     key=key,
                     value=value,
-                    atten_mask=None if attn_metadata.attn_state == AscendAttentionState.DecodeOnly else attn_metadata.attn_mask,
+                    atten_mask=(
+                        None if attn_metadata.attn_state == AscendAttentionState.DecodeOnly else attn_metadata.attn_mask
+                    ),
                     block_table=block_table,
                     input_layout="TND",
                     block_size=block_size,
