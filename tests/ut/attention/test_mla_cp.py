@@ -11,7 +11,7 @@ from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel import mla_cp
-from vllm_ascend.attention.context_parallel.common_cp import CPKVScope, use_history_current_split_decode
+from vllm_ascend.attention.context_parallel.common_cp import CPKVScope
 from vllm_ascend.attention.context_parallel.mla_cp import (
     AscendMLADCPDecodeMetadata,
     AscendMlaDCPImpl,
@@ -354,17 +354,16 @@ def test_mla_dcp_uses_native_global_query_heads_for_fia(mock_fia) -> None:
     (True, True, [1, 2], True),
 ])
 def test_mla_split_selection_matches_shared_policy(use_spec_decode, is_draft, is_prefill, query_ends, expected):
+    impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
+    impl.speculative_config = object() if use_spec_decode else None
     metadata = SimpleNamespace(
         causal=True, decode=SimpleNamespace(actual_seq_lengths_q=query_ends)
     )
-    assert AscendMlaDCPImpl.needs_dcp_current_kv
-    assert not AscendMLAImpl.needs_dcp_current_kv
-    assert use_history_current_split_decode(
-        metadata,
-        is_draft_model=is_draft,
-        is_draft_model_prefill=is_prefill,
-        use_spec_decode=use_spec_decode,
-    ) == (expected or (use_spec_decode and not is_draft))
+    with patch(
+        "vllm_ascend.attention.context_parallel.mla_cp._EXTRA_CTX",
+        SimpleNamespace(is_draft_model=is_draft, is_draft_model_prefill=is_prefill, capturing=True),
+    ):
+        assert impl._decode_requires_current_kv(metadata) == (expected or (use_spec_decode and not is_draft))
 
 
 @pytest.mark.parametrize(
@@ -535,6 +534,8 @@ def test_split_decode_packs_on_main_overlapping_current_attention(
         patch("torch_npu.npu_attention_update", side_effect=AssertionError("unexpected NPU update")),
     ):
         metadata = SimpleNamespace(decode=decode, causal=True)
+        assert impl._decode_requires_current_kv(metadata)
+        assert not AscendMLAImpl.__new__(AscendMLAImpl)._decode_requires_current_kv(metadata)
         actual = impl._forward_decode(
             DecodeMLAPreprocessResult(
                 ql_nope=q_nope,

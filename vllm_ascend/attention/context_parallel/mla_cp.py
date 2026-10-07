@@ -313,7 +313,6 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
 
     can_return_lse_for_decode: bool = True
     supports_mtp_with_cp_non_trivial_interleave_size: bool = True
-    needs_dcp_current_kv = True
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -482,6 +481,14 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             decode_q_nope,
             decode_q_pe,
             dim=1,
+        )
+
+    def _decode_requires_current_kv(self, attn_metadata: AscendMLAMetadata) -> bool:
+        return use_history_current_split_decode(
+            attn_metadata,
+            is_draft_model=_EXTRA_CTX.is_draft_model,
+            is_draft_model_prefill=_EXTRA_CTX.is_draft_model_prefill,
+            use_spec_decode=self.speculative_config is not None,
         )
 
     def _run_dcp_mtp_split_attention_op(
@@ -735,12 +742,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         block_size: int,
         attn_metadata: AscendMLAMetadata,
     ) -> torch.Tensor:
-        if use_history_current_split_decode(
-            attn_metadata,
-            is_draft_model=_EXTRA_CTX.is_draft_model,
-            is_draft_model_prefill=_EXTRA_CTX.is_draft_model_prefill,
-            use_spec_decode=self.speculative_config is not None,
-        ):
+        if self._decode_requires_current_kv(attn_metadata):
             return self._forward_decode_split_attention(
                 decode_preprocess_res.ql_nope,
                 decode_preprocess_res.q_pe,
