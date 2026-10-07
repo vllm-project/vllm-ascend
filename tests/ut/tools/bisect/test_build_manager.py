@@ -99,7 +99,6 @@ def test_prepare_checkout_only_does_not_run_install_commands(
     manager = _build_manager(tmp_path)
     manager.last_built_commit = base
     monkeypatch.setattr(git_ops, "commit_changed_files", lambda repo, commit: ["tests/test_only.py"])
-    monkeypatch.setattr(git_ops, "resolve_commit", lambda repo, commit: commit)
     monkeypatch.setattr(git_ops, "checkout", lambda repo, commit: checkouts.append((repo, commit)))
     monkeypatch.setattr(manager, "_run", pytest.fail)
 

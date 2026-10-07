@@ -104,16 +104,8 @@ class IndexerWrapper(nn.Module):
         k_hidden_states: torch.Tensor,
         indexer_metadata: AttentionMetadata,
         compute_topk: bool = True,
-        attn_q_gather_handle: torch.distributed.Work | None = None,
     ) -> torch.Tensor | None:
-        return self.impl(
-            hidden_states,
-            q_c,
-            k_hidden_states,
-            indexer_metadata,
-            compute_topk,
-            attn_q_gather_handle=attn_q_gather_handle,
-        )
+        return self.impl(hidden_states, q_c, k_hidden_states, indexer_metadata, compute_topk)
 
 
 class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
@@ -148,17 +140,6 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         if impl is not None and hasattr(impl, "topk_indices_buffer"):
             impl.topk_indices_buffer = value
 
-    @property
-    def uses_lim_topk_metadata(self) -> bool:
-        impl = getattr(getattr(self, "mla_attn", None), "impl", None)
-        return bool(getattr(impl, "use_fused_copy_sfa", False))
-
-    def compact_lim_topk_metadata(self, slot_ids: torch.Tensor) -> None:
-        impl = getattr(getattr(self, "mla_attn", None), "impl", None)
-        compact = getattr(impl, "compact_lim_topk_metadata", None)
-        if compact is not None:
-            compact(slot_ids)
-
     def __init__(
         self,
         hidden_size: int,
@@ -184,7 +165,6 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
     ) -> None:
         nn.Module.__init__(self)
         self.hidden_size = hidden_size
-        self.output_token_shard_size = 1
         self.kv_lora_rank = kv_lora_rank
         self.qk_rope_head_dim = qk_rope_head_dim
         self.q_lora_rank = q_lora_rank
@@ -274,8 +254,9 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         attn_metadata: AttentionMetadata | None = None,
     ) -> torch.Tensor:
         hidden_dim = self.hidden_size
-        num_output_tokens = (hidden_states.shape[0] + self.output_token_shard_size - 1) // self.output_token_shard_size
-        output = torch.empty((num_output_tokens, hidden_dim), dtype=hidden_states.dtype, device=hidden_states.device)
+        output = torch.empty(
+            (hidden_states.shape[0], hidden_dim), dtype=hidden_states.dtype, device=hidden_states.device
+        )
 
         torch.ops.vllm.mla_forward(hidden_states, output, self.prefix)
         output = output.view(-1, hidden_dim)

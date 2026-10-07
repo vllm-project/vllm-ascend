@@ -519,56 +519,6 @@ def test_transfer_bucket_accepts_sfa_indexer_virtual_block_sizes() -> None:
     assert request_ids == {(0, 0): {"request"}}
 
 
-def test_multi_head_fa_uses_tp_transfer_with_global_dcp() -> None:
-    spec = make_full_spec(num_kv_heads=4)
-    thread = make_thread(
-        tp_size=2,
-        tp_rank=1,
-        dcp_size=2,
-        dcp_rank=1,
-        kv_cache_specs=[spec],
-        block_shapes=[[(2, 16, 4)]],
-    )
-    remote = make_pp_metadata(
-        block_shapes=[[(2, 16, 4)]],
-        tp_base_addrs={0: [[5000]], 1: [[6000]]},
-    )
-    groups = thread._get_layer_remote_tp_rank_groups(
-        0, 0, spec, remote, remote_pcp_size=1, remote_tp_size=2, remote_dcp_size=2
-    )
-    assert groups == [[1]]
-
-    buckets, _ = thread._build_transfer_block_buckets(
-        remote_metadata=remote,
-        layer_pairs=[(0, 0)],
-        tp_rank_groups_by_layer={(0, 0): groups},
-        remote_pcp_size=1,
-        remote_dcp_size=2,
-        requests={"request": make_req_meta()},
-        transfer_block_ids_by_spec={},
-    )
-    entries = buckets[(0, 1)][0]
-    assert entries[(0, 0)] == [("request", [10, 11], [20, 21])]
-
-    src: list[int] = []
-    dst: list[int] = []
-    lengths: list[int] = []
-    thread._append_spec_transfer_addresses(
-        0,
-        remote_pcp_rank=0,
-        remote_tp_rank=1,
-        remote_pcp_size=1,
-        remote_tp_size=2,
-        remote_dcp_size=2,
-        transfer_entries_by_layer=entries,
-        remote_metadata=remote,
-        src_list=src,
-        dst_list=dst,
-        length_list=lengths,
-    )
-    assert (src, dst, lengths) == ([2280], [8560], [256])
-
-
 def test_compute_sliding_window_blocks_uses_unhashed_suffix() -> None:
     thread = make_thread()
 

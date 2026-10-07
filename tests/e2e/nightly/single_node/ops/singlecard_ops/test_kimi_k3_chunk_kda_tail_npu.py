@@ -22,9 +22,11 @@ from dataclasses import dataclass
 import pytest
 import torch
 import torch_npu
-from fla_npu.ops.ascendc import chunk_kda_fwd
+
+from vllm_ascend.utils import enable_custom_op
 
 torch_npu.npu.config.allow_internal_format = True
+enable_custom_op()
 
 _CHUNK_SIZE = 64
 _HEADS = 6
@@ -173,7 +175,7 @@ def _run_chunk_kda(inputs: _ChunkKdaInputs, gate_mode: str, metadata_mode: str):
     use_gate_in_kernel = gate_mode == "raw_gate"
     gate = inputs.raw_gate if use_gate_in_kernel else inputs.activated_gate
     use_varlen_metadata = metadata_mode == "varlen"
-    return chunk_kda_fwd(
+    return torch.ops._C_ascend.chunk_kda_fwd(
         inputs.q,
         inputs.k,
         inputs.v,
@@ -248,6 +250,9 @@ def _describe_difference(
 @pytest.mark.parametrize("metadata_mode", ["dense", "varlen"])
 @torch.inference_mode()
 def test_kimi_k3_chunk_kda_bf16_tail_is_deterministic(tokens: int, gate_mode: str, metadata_mode: str):
+    if not hasattr(torch.ops._C_ascend, "chunk_kda_fwd"):
+        pytest.skip("requires the fused chunk KDA AscendC operator")
+
     inputs = _build_inputs(tokens)
     # Allocate both sets before the first launch so an out-of-bounds write from
     # that launch cannot change tensors allocated for the second invocation.

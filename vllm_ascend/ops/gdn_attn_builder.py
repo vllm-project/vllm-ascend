@@ -50,10 +50,7 @@ _GDN_GRAPH_DUMMY_ACCEPTED_TOKEN_COUNT = 1
 
 def _stable_argsort_for_npu(tensor: torch.Tensor) -> torch.Tensor:
     if tensor.dtype == torch.bool:
-        # Boolean mask values are exactly representable in float32. Integer
-        # argsort falls back to AiCPU on Ascend; keep this stable partition on
-        # AiCore without changing the ordering of tokens within either group.
-        tensor = tensor.to(torch.float32)
+        tensor = tensor.to(torch.int32)
     return torch.argsort(tensor, stable=True)
 
 

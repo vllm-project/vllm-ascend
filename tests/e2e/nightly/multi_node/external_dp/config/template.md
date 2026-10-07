@@ -1,0 +1,366 @@
+# External DP Config Template
+
+This document shows how to write YAML configs consumed by
+`tests/e2e/nightly/multi_node/external_dp/scripts/test_external_dp.py`.
+
+`server_cmd_template` contains only the arguments after
+`vllm serve <model>`. The framework prepends `vllm serve` and the top-level
+`model` automatically.
+
+Do not write `proxy_node_index`, `proxy_host`, `proxy_port`, `proxy_script`, or
+`dp_group` in YAML. The framework derives proxy metadata from `routing.type`,
+and roles are selected by `routing.groups`.
+
+## Disaggregated Prefill Template
+
+Use this template for PD disaggregation. `routing.groups` decides which config
+entries run as prefillers or decoders. The framework derives the PD proxy script
+from `routing.type`, so do not write `proxy_*` fields in YAML.
+
+```yaml
+test_name: "test DeepSeek-V2-Lite-W8A8 external dp disaggregated_prefill"
+model: "vllm-ascend/DeepSeek-V2-Lite-W8A8"
+num_nodes: 2
+npu_per_node: 16
+
+# Optional for local debugging. In CI, cluster IPs are resolved from LWS DNS.
+# cluster_hosts:
+#   - "172.22.0.xxx"
+#   - "172.22.0.xxx"
+
+routing:
+  type: "disaggregated_prefill"
+  groups:
+    prefiller: [0]
+    decoder: [1]
+
+# Optional. Select one managed KV pool backend and configure its ports. The
+# framework starts the backend service on node 0 and writes the backend config
+# used by every vLLM rank.
+kv_pool:
+  type: mooncake
+  master_port: 50088
+  metrics_port: 50089
+  config:
+    metadata_server: "P2PHANDSHAKE"
+    protocol: "ascend"
+    device_name: ""
+    global_segment_size: "1GB"
+    preferred_segment: false
+    prefer_alloc_in_same_node: true
+
+config:
+  - node_index: 0
+    port_start: 7100
+    dp_rpc_port: 12321
+    dp_size: 2
+    dp_size_local: 2
+    dp_rank_start: 0
+    tp_size: 1
+    dp_address: "${NODE_0_IP}"
+
+  - node_index: 1
+    port_start: 7100
+    dp_rpc_port: 12321
+    dp_size: 2
+    dp_size_local: 2
+    dp_rank_start: 0
+    tp_size: 1
+    dp_address: "${NODE_1_IP}"
+
+env_common: &env_common
+  HCCL_OP_
+  VLLM_USE_MODELSCOPE: "true"
+  LD_LIBRARY_PATH: "/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH"
+  PYTHONHASHSEED: "0"
+  OMP_PROC_BIND: "false"
+  OMP_NUM_THREADS: "10"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
+  ASCEND_ENABLE_USE_FABRIC_MEM: "1"
+  ACL_OP_INIT_MODE: "1"
+  HCCL_RDMA_TIMEOUT: "17"
+  ASCEND_CONNECT_TIMEOUT: "10000"
+  ASCEND_TRANSFER_TIMEOUT: "10000"
+  HCCL_BUFFSIZE: "256"
+  SERVER_PORT: "${PORT}"
+  VLLM_ASCEND_ENABLE_FLASHCOMM1: "0"
+
+templates:
+  - node_index: 0
+    envs:
+      <<: *env_common
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - $SERVER_PORT
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --trust-remote-code
+      - --quantization
+      - ascend
+      - --enable-expert-parallel
+      - --kv-transfer-config
+      - '{"kv_connector": "MooncakeConnectorV1",
+        "kv_role": "kv_producer",
+        "kv_port": "30000",
+        "kv_connector_extra_config": {
+          "prefill": {
+            "dp_size": 2,
+            "tp_size": 1
+          },
+          "decode": {
+            "dp_size": 2,
+            "tp_size": 1
+          }
+        }}'
+
+  - node_index: 1
+    envs:
+      <<: *env_common
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - $SERVER_PORT
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --trust-remote-code
+      - --quantization
+      - ascend
+      - --enable-expert-parallel
+      - --kv-transfer-config
+      - '{"kv_connector": "MooncakeConnectorV1",
+        "kv_role": "kv_consumer",
+        "kv_port": "30200",
+        "kv_connector_extra_config": {
+          "prefill": {
+            "dp_size": 2,
+            "tp_size": 1
+          },
+          "decode": {
+            "dp_size": 2,
+            "tp_size": 1
+          }
+        }}'
+
+benchmarks:
+  perf:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    max_out_len: 128
+    batch_size: 4
+    request_rate: 1
+    baseline: 1
+    threshold: 0.1
+
+  acc:
+    case_type: accuracy
+    dataset_path: vllm-ascend/gsm8k
+    request_conf: vllm_api_general_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
+    max_out_len: 48
+    batch_size: 4
+    baseline: 0
+    threshold: 100
+```
+
+## Field Notes
+
+- `test_name`: Human-readable test name. It is also used when writing benchmark
+  result metadata.
+- `model`: Model passed to `vllm serve <model>` and AISBench requests.
+- `num_nodes`: Number of config entries and templates expected.
+- `npu_per_node`: Device capacity validation for each node.
+- `cluster_hosts`: Optional local-debug IP list. Omit it in CI unless a test
+  needs fixed hosts.
+- `routing.type`: Supported value is `disaggregated_prefill`.
+- `routing.groups`: Maps config indices to roles. `disaggregated_prefill`
+  requires `prefiller` and `decoder`.
+- For `disaggregated_prefill`, use `kv_producer` for prefiller templates and
+  `kv_consumer` for decoder templates.
+- `config[].dp_size`: Global DP size for this DP group.
+- `config[].dp_size_local`: Number of vLLM ranks started on this node.
+- `config[].dp_rank_start`: First global DP rank owned by this node.
+- `config[].dp_address`: DP master address. For one global DP group, use
+  `${NODE_0_IP}` on all nodes. For PD disaggregation, use the prefiller master
+  address for prefiller nodes and the decoder master address for decoder nodes.
+- `templates`: One template per config entry. The framework expands one command
+  per local DP rank.
+- `kv_pool`: Optional managed KV pool. `type` is either `mooncake` or
+  `memcache`. Mooncake requires `master_port` and `metrics_port`; Memcache
+  requires `meta_service_port` and `config_store_port`. All configured ports
+  must be available on node 0. The framework starts the selected service on
+  node 0 before any vLLM rank starts.
+- `kv_pool.config`: Backend-specific config. For Mooncake, it is written to
+  each node's generated `mooncake.json`; the framework derives and overwrites
+  `master_server_address`. For Memcache, it contains `meta` and `local`
+  mappings written to `mmc-meta.conf` and `mmc-local.conf`; the framework
+  derives and overwrites the MetaService and Config Store URLs.
+
+For KV pooling, use `MultiConnector` in each server template. The prefiller
+uses `kv_producer` for both child connectors:
+
+```yaml
+- --kv-transfer-config
+- >-
+  {
+    "kv_connector": "MultiConnector",
+    "kv_role": "kv_producer",
+    "kv_load_failure_policy": "recompute",
+    "kv_connector_extra_config": {
+      "connectors": [
+        {
+          "kv_connector": "MooncakeConnectorV1",
+          "kv_role": "kv_producer",
+          "kv_port": "30000",
+          "kv_connector_extra_config": {
+            "prefill": {"dp_size": 2, "tp_size": 1},
+            "decode": {"dp_size": 2, "tp_size": 1}
+          }
+        },
+        {
+          "kv_connector": "AscendStoreConnector",
+          "kv_role": "kv_producer",
+          "kv_connector_extra_config": {
+            "lookup_rpc_port": "0",
+            "backend": "mooncake"
+          }
+        }
+      ]
+    }
+  }
+```
+
+The decoder uses the same structure with `kv_role: kv_consumer` on the outer
+connector and both child connectors. The framework passes this argument
+through unchanged. When selecting Memcache, write `"backend": "memcache"`
+in the YAML command yourself.
+
+To use Memcache instead, replace the `kv_pool` block with:
+
+```yaml
+kv_pool:
+  type: memcache
+  meta_service_port: 5000
+  config_store_port: 6000
+  config:
+    meta:
+      ock.mmc.log_level: error
+    local:
+      ock.mmc.log_level: error
+      ock.mmc.local_service.world_size: 256
+      ock.mmc.local_service.protocol: device_sdma
+      ock.mmc.local_service.dram.size: 1GB
+```
+
+The framework injects distributed network envs at startup:
+
+```text
+HCCL_IF_IP
+HCCL_SOCKET_IFNAME
+GLOO_SOCKET_IFNAME
+TP_SOCKET_IFNAME
+LOCAL_IP
+NIC_NAME
+MASTER_IP
+```
+
+When `kv_pool.type` is `mooncake`, it additionally injects:
+
+```text
+MOONCAKE_CONFIG_PATH
+MOONCAKE_MASTER
+```
+
+When `kv_pool.type` is `memcache`, it injects:
+
+```text
+MMC_LOCAL_CONFIG_PATH
+```
+
+The generated configs and service logs are archived with the node logs:
+
+```text
+<external-dp-log-root>/node-<index>/runtime/mooncake.json
+<external-dp-log-root>/node-0/mooncake-master.log
+<external-dp-log-root>/node-<index>/runtime/mmc-meta.conf
+<external-dp-log-root>/node-<index>/runtime/mmc-local.conf
+<external-dp-log-root>/node-0/memcache-meta-service.log
+```
+
+The framework also derives proxy metadata from `routing.type`:
+
+```text
+disaggregated_prefill -> examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py
+```
+
+The proxy runs on node 0, listens on `${NODE_0_IP}:1999`, and is used by node 0
+for benchmark requests.
+
+## Template Variables
+
+The following variables are available in `envs` and `server_cmd_template`:
+
+```text
+${MODEL}
+${PORT_START}
+${PORT}
+${DP_SIZE}
+${DP_SIZE_LOCAL}
+${DP_RANK_START}
+${DP_RANK}
+${LOCAL_RANK}
+${TP_SIZE}
+${CP_SIZE}
+${SP_SIZE}
+${PP_SIZE}
+${DP_ADDRESS}
+${DP_RPC_PORT}
+${VISIBLE_DEVICES}
+${NODE_INDEX}
+${CONFIG_INDEX}
+${NODE_0_IP}, ${NODE_1_IP}, ...
+${LOCAL_IP}
+${MASTER_IP}
+${LWS_WORKER_INDEX}
+```
+
+Command arguments can also reference rendered environment variables with
+shell-style `$VARNAME`, for example:
+
+```yaml
+envs:
+  SERVER_PORT: "${PORT}"
+server_cmd_template:
+  - --port
+  - $SERVER_PORT
+```
+
+## Checks Before Running
+
+- Keep `len(config) == num_nodes` and `len(templates) == num_nodes`.
+- Make sure each config index is assigned to exactly one routing group.
+- Ensure `dp_rank_start + dp_size_local <= dp_size`.
+- Ensure `dp_size_local * tp_size * cp_size * sp_size * pp_size <= npu_per_node`.
+- Set `--max-model-len` large enough for benchmark input tokens plus
+  `max_out_len`.

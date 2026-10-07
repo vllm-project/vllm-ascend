@@ -634,8 +634,3 @@ class AscendW8A8MXFP8DSDynamicLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
                 .transpose(1, 2)
                 .contiguous()
             )
-        elif layer.prefix.endswith("wo_b"):
-            # DSA PCP gathers these tensors directly along the leading
-            # dimension, which requires contiguous HCCL inputs.
-            layer.weight.data = layer.weight.data.contiguous()
-            layer.weight_scale.data = layer.weight_scale.data.contiguous()

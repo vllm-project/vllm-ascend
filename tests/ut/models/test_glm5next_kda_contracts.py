@@ -23,7 +23,7 @@ def test_recurrent_raw_gates_rollback_slots_and_padding(monkeypatch, accepted, q
     slots = torch.tensor([[2, 3], [5, 6], [0, 0]], dtype=torch.int32)
     accepted_tensor = None if accepted is None else torch.tensor(accepted, dtype=torch.int32)
 
-    def recurrent(q_arg, k_arg, v_arg, gate_arg, beta_arg, state_arg, *, cu_seqlens, ssm_state_indices, **kwargs):
+    def recurrent(q_arg, k_arg, v_arg, gate_arg, beta_arg, state_arg, cu, ids, a_log, bias, **kwargs):
         # Preserve each view's strides and storage without materializing Q/K/V.
         assert q_arg is q and k_arg is k and v_arg is v
         assert kwargs["use_gate_in_kernel"] and kwargs["use_beta_sigmoid_in_kernel"]
@@ -31,17 +31,14 @@ def test_recurrent_raw_gates_rollback_slots_and_padding(monkeypatch, accepted, q
         assert state_arg is state
         torch.testing.assert_close(gate_arg, gate)
         torch.testing.assert_close(beta_arg, beta)
-        assert cu_seqlens is starts
-        torch.testing.assert_close(ssm_state_indices, slots[:2])
-        assert kwargs["state_v_first"] and kwargs["inplace_final_state"]
-        assert not kwargs["output_final_state"]
+        torch.testing.assert_close(ids, slots[:2])
         if accepted_tensor is not None:
             torch.testing.assert_close(kwargs["num_accepted_tokens"], accepted_tensor[:2])
         result = q_arg.clone()
         result[:, 3:] = float("nan")
-        return result, None
+        return result
 
-    monkeypatch.setattr(kda_ops, "recurrent_kda", recurrent)
+    monkeypatch.setattr(torch.ops._C_ascend, "recurrent_kda", recurrent, raising=False)
     destination = torch.full((1, 8, 1, 128), float("nan"), dtype=q.dtype) if direct_output else None
 
     def writeback(source, target, ends):
@@ -83,9 +80,9 @@ def test_chunk_uses_host_descriptors_and_preserves_vk_cache(monkeypatch, state_d
     keep = torch.tensor([0]) if compact else None
     metadata = SimpleNamespace(
         keep_meta=keep,
-        cu_seqlens_host=(0, 3) if compact else (0, 1, 3),
+        cu_seqlens_host=torch.tensor([0, 3] if compact else [0, 1, 3]),
         cu_seqlens_kern=None,
-        chunk_indices_chunk64_host=(0, 0) if compact else (0, 0, 1, 0),
+        chunk_indices_chunk64_host=torch.tensor([[0, 0]] if compact else [[0, 0], [1, 0]]),
     )
 
     def chunk(q_arg, k_arg, v, g, beta, scale, chunk_size, **kwargs):
@@ -99,7 +96,7 @@ def test_chunk_uses_host_descriptors_and_preserves_vk_cache(monkeypatch, state_d
         torch.testing.assert_close(beta, torch.full_like(beta, 0.5))
         return v, torch.full_like(kwargs["initial_state"], 17)
 
-    monkeypatch.setattr(kda_ops, "chunk_kda_fwd", chunk)
+    monkeypatch.setattr(torch.ops._C_ascend, "chunk_kda_fwd", chunk, raising=False)
     monkeypatch.setattr(kda_ops, "l2norm_fwd", lambda x: x)
     out = kda.chunk_kda(
         q, q, q, q, torch.zeros(1, 3, 1), state, indices, has_initial, metadata, torch.zeros(1), torch.zeros(128), -4

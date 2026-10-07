@@ -235,7 +235,7 @@ jobs:
       bisect_no_verify_good: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_good || false }}
       bisect_no_verify_bad: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_bad || false }}
       bisect_force_initial_build: ${{ fromJSON(inputs.bisect_args_json || '{}').force_initial_build || false }}
-      bisect_config_base_path: ${{ matrix.test_config.config_base_path }}
+      bisect_config_base_path: tests/e2e/weekly/multi_node/external_dp/config
       testcase_timeout: 600
       should_run: >-
         ${{
@@ -323,7 +323,7 @@ jobs:
       image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
       tests: ${{ matrix.test_config.tests }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
-      config_base_path: ${{ matrix.test_config.config_base_path }}
+      config_base_path: tests/e2e/weekly/single_node/configs/
       name: ${{ matrix.test_config.name }}
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
       testcase_timeout: 600
@@ -345,7 +345,7 @@ jobs:
       bisect_no_verify_good: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_good || false }}
       bisect_no_verify_bad: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_bad || false }}
       bisect_force_initial_build: ${{ fromJSON(inputs.bisect_args_json || '{}').force_initial_build || false }}
-      bisect_config_base_path: ${{ matrix.test_config.config_base_path }}
+      bisect_config_base_path: ''
     secrets:
       OPENLIBING_SECRET: ${{ secrets.OPENLIBING_SECRET }}
 

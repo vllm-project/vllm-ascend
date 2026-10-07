@@ -23,14 +23,11 @@ import json
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import pytest
 import torch
 from safetensors.torch import save_file
 from torch import nn
 
 import vllm_ascend.models.qwen3_dspark as qwen3_dspark
-from vllm_ascend.models import qwen3_dflash2
-from vllm_ascend.models.qwen3_dflash2 import DFlash2Qwen3ForCausalLM
 
 
 class TestQwen3DSparkWeightLoading:
@@ -63,8 +60,7 @@ class TestQwen3DSparkWeightLoading:
         torch.testing.assert_close(model.lm_head.weight, head_before)
 
 
-@pytest.mark.parametrize("model_cls", [qwen3_dspark.AscendQwen3DSparkForCausalLM, DFlash2Qwen3ForCausalLM])
-def test_quarot_loads_missing_target_vocab_shards(tmp_path, model_cls) -> None:
+def test_quarot_loads_missing_target_vocab_shards(tmp_path) -> None:
     embed_name = "language_model.model.embed_tokens.weight"
     head_name = "language_model.lm_head.weight"
     shard_name = "model-00001-of-00001.safetensors"
@@ -78,6 +74,7 @@ def test_quarot_loads_missing_target_vocab_shards(tmp_path, model_cls) -> None:
     rotation_path = tmp_path / "rotation.safetensors"
     save_file({"global_rotation": rotation}, rotation_path)
 
+    model_cls = qwen3_dspark.AscendQwen3DSparkForCausalLM
     model = model_cls.__new__(model_cls)
     nn.Module.__init__(model)
     model.config = SimpleNamespace()
@@ -103,7 +100,6 @@ def test_quarot_loads_missing_target_vocab_shards(tmp_path, model_cls) -> None:
     )
     with (
         patch.object(qwen3_dspark, "get_rotation_path", return_value=rotation_path),
-        patch.object(qwen3_dflash2, "get_rotation_path", return_value=rotation_path),
         patch.object(qwen3_dspark, "VocabParallelEmbedding", side_effect=vocab_layer),
         patch.object(qwen3_dspark, "ParallelLMHead", side_effect=vocab_layer),
     ):

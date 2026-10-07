@@ -193,6 +193,30 @@ def test_sfa_indexer_metadata_builder_builds_kernel_metadata(mock_cos_sin, mock_
 
 @patch("vllm_ascend.attention.indexer.get_ascend_config")
 @patch("vllm_ascend.attention.indexer.get_cos_and_sin_mla")
+def test_sfa_indexer_metadata_builder_uses_graph_shape_for_dspark_adaptive(
+    mock_cos_sin,
+    mock_get_ascend_config,
+):
+    mock_get_ascend_config.return_value.c8_reshape_optim_enabled = False
+    mock_cos_sin.return_value = (
+        torch.zeros(5, 1, 1, 8),
+        torch.zeros(5, 1, 1, 8),
+    )
+    common = _make_common_metadata()
+
+    builder = _make_builder(num_speculative_tokens=7)
+    builder.speculative_config.method = "dspark"
+    builder.speculative_config.enable_adaptive_verification = True
+    metadata = builder.build(0, common)
+
+    positions = mock_cos_sin.call_args.args[0]
+    assert torch.equal(positions, common.positions)
+    assert metadata.cos.shape[0] == common.positions.shape[0]
+    assert metadata.sin.shape[0] == common.positions.shape[0]
+
+
+@patch("vllm_ascend.attention.indexer.get_ascend_config")
+@patch("vllm_ascend.attention.indexer.get_cos_and_sin_mla")
 def test_sfa_indexer_metadata_builder_emits_full_slot_mapping_under_pcp(mock_cos_sin, mock_get_ascend_config):
     mock_get_ascend_config.return_value.c8_reshape_optim_enabled = False
     mock_cos_sin.return_value = (torch.zeros(5, 1, 1, 8), torch.zeros(5, 1, 1, 8))
@@ -489,44 +513,3 @@ def test_sfa_indexer_metadata_builder_builds_pcp_dcp_slots_and_c8_groups(
     )
     assert metadata.group_len is not common.group_len
     assert metadata.group_len.numel() == metadata.slot_mapping.numel()
-
-
-@pytest.mark.parametrize("with_dependency", [False, True])
-@pytest.mark.parametrize("quantized", [False, True])
-def test_indexer_orders_cache_gathers_after_query_dependency(with_dependency, quantized):
-    events = []
-    k = torch.zeros(2, 4)
-    scale = torch.ones(2, 1) if quantized else None
-    slots = torch.arange(2)
-    metadata = SimpleNamespace(cos=None, sin=None, slot_mapping=slots)
-    indexer = SimpleNamespace(_pcp_active=False, _dsa_cp_active=True, enable_sparse_li_c8=quantized)
-
-    def forward_k(*args):
-        events.append("forward_k")
-        return k, scale, None
-
-    def gather(tensor, group, async_op):
-        label = "scale" if tensor is scale else "k"
-        events.append("gather_" + label)
-        return tensor, SimpleNamespace(wait=lambda: events.append("wait_" + label))
-
-    indexer.forward_k = forward_k
-    indexer._gather_cache_inputs = lambda *args: AscendSFAIndexerBackend._gather_cache_inputs(indexer, *args)
-    indexer.write_cache = lambda *args, **kwargs: events.append("write_cache")
-    dependency = SimpleNamespace(wait=lambda: events.append("wait_q")) if with_dependency else None
-    with (
-        patch("vllm_ascend.attention.indexer.get_tp_group", return_value=object()),
-        patch("vllm_ascend.attention.indexer.all_gather_async", side_effect=gather),
-    ):
-        assert (
-            AscendSFAIndexerBackend.forward(
-                indexer, k, k, k, metadata, compute_topk=False, attn_q_gather_handle=dependency
-            )
-            is None
-        )
-    expected = ["forward_k"] + (["wait_q"] if with_dependency else []) + ["gather_k"]
-    if quantized:
-        expected += ["gather_scale", "wait_k", "wait_scale"]
-    else:
-        expected += ["wait_k"]
-    assert events == expected + ["write_cache"]

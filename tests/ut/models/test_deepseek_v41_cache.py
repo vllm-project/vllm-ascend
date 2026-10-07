@@ -289,24 +289,6 @@ def test_view_with_nonzero_backing_storage_offset():
     assert not backing[:48].any()
 
 
-def test_v2_view_with_nonzero_initial_offset():
-    from vllm_ascend.worker.v2.attn_utils import _adjust_dsv4_kv_layout
-
-    backing = torch.zeros(16 + 2 * 256, dtype=torch.uint8)
-    raw = backing[16:]
-    cache = _adjust_dsv4_kv_layout(
-        raw,
-        [(2, 16, 1, 4)],
-        [torch.bfloat16],
-        256,
-        initial_offset_bytes=32,
-    )[0]
-    cache[1].fill_(7)
-    assert cache.data_ptr() == backing.data_ptr() + 48
-    torch.testing.assert_close(backing[304:432].view(torch.bfloat16), torch.full((64,), 7, dtype=torch.bfloat16))
-    assert not backing[:48].any()
-
-
 def test_view_accepts_latest_vllm_int8_backing_storage():
     from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
@@ -685,23 +667,6 @@ def test_slot_mapping_is_shared_per_compatible_cache_group(config, runtime):
     ]
 
 
-def test_builder_restores_v41_logical_block_size(runtime):
-    spec = collect_specs(runtime)["model.layers.2.self_attn.indexer.k_cache"]
-    expected_storage_block_size = get_storage_block_size(spec)
-    physical_spec = spec.copy_with_new_block_size(expected_storage_block_size)
-    assert get_storage_block_size(physical_spec) < expected_storage_block_size
-
-    builder = AscendDSAV41MetadataBuilder(
-        physical_spec,
-        ["model.layers.2.self_attn.indexer.k_cache"],
-        runtime,
-        torch.device("cpu"),
-    )
-
-    assert builder.kv_cache_spec.block_size == runtime.cache_config.block_size
-    assert get_storage_block_size(builder.kv_cache_spec) == expected_storage_block_size
-
-
 def test_compressed_metadata_exposes_original_and_cache_coordinates(config, runtime):
     specs = collect_specs(runtime)
     spec = specs["model.layers.2.self_attn.long_kv_cache"]
@@ -740,49 +705,6 @@ def test_compressed_metadata_exposes_original_and_cache_coordinates(config, runt
     assert metadata.num_prefill_tokens == 3
     assert metadata.num_decodes == 1
     assert metadata.num_decode_tokens == 2
-
-
-@pytest.mark.parametrize(
-    "name",
-    [
-        "model.layers.2.self_attn.long_kv_cache",
-        "model.layers.2.self_attn.indexer.k_cache",
-        "model.layers.20.self_attn.long_kv_cache",
-        "model.layers.20.self_attn.indexer.k_cache",
-    ],
-)
-def test_full_graph_capture_keeps_empty_compressed_descriptor_nonzero(runtime, name):
-    """FULL capture must include QLI even when the dummy cache is empty.
-
-    The descriptor passed to native metadata is the maximum compressed cache
-    length, while ``cache_seq_lens`` remains the exact per-request length.
-    This covers both C2 and C1 layers and the zero-cache dummy decode used by
-    FULL_DECODE_ONLY capture.
-    """
-    spec = collect_specs(runtime)[name]
-    assert spec.tokens_per_state in (1, 2)
-    builder = AscendDSAV41MetadataBuilder(spec, [], runtime, torch.device("cpu"))
-    common = SimpleNamespace(
-        slot_mapping=torch.tensor([-1]),
-        block_table_tensor=torch.tensor([[0]]),
-        query_start_loc=torch.tensor([0, 1]),
-        query_start_loc_cpu=torch.tensor([0, 1]),
-        seq_lens=torch.tensor([0]),
-        seq_lens_cpu=torch.tensor([0]),
-        positions=torch.tensor([0]),
-        num_reqs=1,
-        num_actual_tokens=1,
-        num_input_tokens=1,
-        max_query_len=1,
-        max_seq_len=0,
-        is_prefilling=torch.tensor([False]),
-    )
-
-    metadata = builder.build(0, common, full_graph_mode=True)
-
-    assert metadata.max_cache_seq_len == 1
-    assert metadata.cache_seq_lens.tolist() == [0]
-    assert metadata.seq_lens.tolist() == [0]
 
 
 @pytest.mark.parametrize("deferred", [False, True])

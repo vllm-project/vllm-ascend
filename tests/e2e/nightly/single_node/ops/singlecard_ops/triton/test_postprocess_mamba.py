@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 from unittest.mock import MagicMock
@@ -9,11 +10,9 @@ import numpy as np
 import pytest
 import torch
 from vllm.model_executor.layers.mamba.mamba_utils import (
-    MambaStateCopyFuncsByType,
     get_conv_copy_spec,
     get_temporal_copy_spec,
 )
-from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, MambaSpec
 from vllm.v1.worker.mamba_utils import (
@@ -24,11 +23,12 @@ from vllm.v1.worker.mamba_utils import (
 )
 
 import vllm_ascend.patch.worker.patch_mamba_utils  # noqa: F401
-from vllm_ascend.patch.worker.patch_mamba_utils import _reset_layerwise_copy_meta
 
-_COPY_FUNCS: MambaStateCopyFuncsByType = {
-    MambaAttentionBackendEnum.MAMBA2: (get_conv_copy_spec, get_temporal_copy_spec)
-}
+MambaStateCopyFunc = Callable[..., Any]
+_COPY_FUNCS: tuple[MambaStateCopyFunc, ...] = (
+    get_conv_copy_spec,
+    get_temporal_copy_spec,
+)
 
 
 def postprocess_mamba(
@@ -37,7 +37,7 @@ def postprocess_mamba(
     input_batch: Any,
     requests: dict[str, Any],
     forward_context: dict[str, Any],
-    mamba_state_copy_funcs: MambaStateCopyFuncsByType,
+    mamba_state_copy_funcs: tuple[MambaStateCopyFunc, ...],
     copy_bufs: MambaCopyBuffers,
 ):
     assert input_batch.mamba_state_idx_cpu is not None
@@ -48,7 +48,6 @@ def postprocess_mamba(
     mamba_group_ids = copy_bufs.mamba_group_ids
     mamba_spec = copy_bufs.mamba_spec
     copy_bufs.offset = 0
-    _reset_layerwise_copy_meta(copy_bufs)
     for i, req_id in enumerate(input_batch.req_ids):
         req_state = requests[req_id]
         num_computed_tokens = req_state.num_computed_tokens
@@ -75,10 +74,6 @@ def postprocess_mamba(
             )
             if src_block_idx == dest_block_idx:
                 num_accepted_tokens_cpu[i] = 1
-    # Match the explicit metadata staging required by the Ascend copy path.
-    copy_bufs.src_ptrs.copy_to_gpu(copy_bufs.offset)
-    copy_bufs.dst_ptrs.copy_to_gpu(copy_bufs.offset)
-    copy_bufs.sizes.copy_to_gpu(copy_bufs.offset)
     do_mamba_copy_block(copy_bufs)
 
 
@@ -205,7 +200,7 @@ def _make_gpu_ctx(cfg: _TestConfig, kv_cache_config: KVCacheConfig, device: torc
     return MambaSpecDecodeGPUContext.create(
         max_num_reqs=cfg.max_num_reqs,
         kv_cache_config=kv_cache_config,
-        copy_funcs=_COPY_FUNCS,
+        num_state_types=2,
         device=device,
         make_buffer=lambda n, dtype: _MockCpuGpuBuffer(n, dtype, device),
     )
@@ -216,7 +211,7 @@ def _run_gpu_postprocess(
     *,
     kv_cache_config: KVCacheConfig,
     forward_context: dict[str, Any],
-    copy_funcs: MambaStateCopyFuncsByType,
+    copy_funcs: tuple,
     block_table: torch.Tensor,
     req_ids: list[str],
     num_accepted_tokens: list[int],

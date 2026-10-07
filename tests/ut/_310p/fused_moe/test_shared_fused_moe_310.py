@@ -128,8 +128,7 @@ def test_runner_310_installs_specialized_comm():
         assert runner.ascend_shared_experts.multistream_overlap is False
         assert runner._forward_entry is upstream_forward_entry
         runner._select_forward.assert_called_once_with()
-        key = fused_moe_310_module._moe_config_key(MoECommType.ALLGATHER, moe_config)
-        assert fused_moe_310_module._MoECommMethods[key] is comm_method
+        assert fused_moe_310_module._MoECommMethods[MoECommType.ALLGATHER] is comm_method
         parent_init.assert_called_once()
 
 

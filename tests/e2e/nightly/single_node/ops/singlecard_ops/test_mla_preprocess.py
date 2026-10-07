@@ -150,6 +150,7 @@ def test_mla_preprocess_supported_modes(cache_mode: str, quant_mode: str, dtype:
         beta1 = de_scale0 = de_scale1 = bias0 = bias1 = None
         quant_scale0 = quant_offset0 = quant_scale1 = quant_offset1 = None
     else:
+        wuk = torch_npu.npu_format_cast(wuk, 29)
         wdqkv = torch.randint(0, 7, (1, hidden_size // 32, mm1_out, 32), dtype=torch.int8, device="npu")
         wdqkv = torch_npu.npu_format_cast(wdqkv.contiguous(), 29)
         wuq = torch.randint(0, 7, (1, q_lora // 32, head_num * 192, 32), dtype=torch.int8, device="npu")
@@ -255,6 +256,7 @@ def test_mla_preprocess_qm1_noncontiguous_cache(cache_mode: str):
     cos = torch.randn((token_num, 64), dtype=dtype, device="npu")
     sin = torch.randn((token_num, 64), dtype=dtype, device="npu")
     wuk = torch.randn((head_num, 128, 512), dtype=dtype, device="npu")
+    wuk = torch_npu.npu_format_cast(wuk, 29)
     slotmapping = torch.arange(token_num, dtype=torch.int32, device="npu")
 
     ctkv_scale = torch.tensor([1.0], dtype=dtype, device="npu")
@@ -372,6 +374,7 @@ def test_mla_preprocess_nzcache_accepts_logical_cache_shape():
     cos = torch.randn((token_num, rope_dim), dtype=dtype, device="npu")
     sin = torch.randn((token_num, rope_dim), dtype=dtype, device="npu")
     wuk = torch.randn((head_num, 128, kv_lora_rank), dtype=dtype, device="npu")
+    wuk = torch_npu.npu_format_cast(wuk, 29)
     slotmapping = torch.arange(token_num, dtype=torch.int32, device="npu")
     ctkv_scale = torch.tensor([1.0], dtype=dtype, device="npu")
     qnope_scale = torch.ones((head_num,), dtype=dtype, device="npu")

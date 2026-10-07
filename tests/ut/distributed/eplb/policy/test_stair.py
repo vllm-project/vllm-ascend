@@ -2,73 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
 import unittest
-from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 import numpy as np
-import torch
 from vllm.distributed.eplb.policy import AbstractEplbPolicy
 
 from vllm_ascend.ascend_config import StairConfig
-from vllm_ascend.distributed.eplb.policy import PreparedLoadStats
-from vllm_ascend.distributed.eplb.policy.stair import (
-    PlacementImbalance,
-    PlacementPlan,
-    StairEplbPolicy,
-    StairPlan,
-)
+from vllm_ascend.distributed.eplb.policy.stair import PlacementImbalance, PlacementPlan, StairEplbPolicy, StairPlan
 
 
 class TestStairLoadStatistics(unittest.TestCase):
-    def test_policy_implements_upstream_abstract_contract(self):
+    def test_policy_shares_upstream_abstract_base(self):
         self.assertTrue(issubclass(StairEplbPolicy, AbstractEplbPolicy))
-        self.assertFalse(StairEplbPolicy.__abstractmethods__)
-
-    @patch("vllm_ascend.distributed.eplb.policy.stair.get_eplb_group")
-    def test_upstream_contract_flattens_complete_plan(self, get_eplb_group):
-        policy = StairEplbPolicy(StairConfig())
-        get_eplb_group.return_value.cpu_group.size.return_value = 2
-        plan = StairPlan(
-            rank_expert_ids=np.array([[[0, 3], [2, 1]]]),
-            source_rank_ids=np.array([[[0, 1], [1, 0]]]),
-            source_slot_ids=np.array([[[0, 1], [0, 1]]]),
-            predicted_mean_ratios=np.array([1.0]),
-            imbalance_ratios=np.array([[1.4, 1.5, 1.1, 1.2]]),
-        )
-        with (
-            patch.object(policy, "plan_sharded_rebalance", return_value=plan),
-            patch.object(policy, "placement_imbalance", side_effect=AssertionError("parent recomputed metrics")),
-        ):
-            result = policy.rebalance_experts(
-                torch.tensor([[8.0, 7.0, 6.0, 5.0]]),
-                4,
-                1,
-                1,
-                2,
-                torch.tensor([[0, 1, 2, 3]]),
-            )
-
-        torch.testing.assert_close(result, torch.tensor([[0, 3, 2, 1]]))
-        np.testing.assert_array_equal(result.source_rank_ids, plan.source_rank_ids)
-        self.assertEqual(result.predicted_imbalance_summary, (1.4, 1.5, 1.1, 1.2))
-
-    @patch("vllm_ascend.distributed.eplb.policy.stair.get_eplb_group")
-    def test_rebalance_forwards_prepared_stats(self, get_eplb_group):
-        policy = StairEplbPolicy(StairConfig())
-        get_eplb_group.return_value.cpu_group.size.return_value = 2
-        current = np.array([[[0], [1]]])
-        plan = StairPlan(
-            rank_expert_ids=current.copy(),
-            source_rank_ids=np.array([[[0], [1]]]),
-            source_slot_ids=np.zeros_like(current),
-            predicted_mean_ratios=np.array([np.nan]),
-            imbalance_ratios=np.ones((1, 4)),
-        )
-        prepared = PreparedLoadStats(torch.tensor([[[4, 6]], [[9, 3]]]), np.array([2, 3]))
-        with patch.object(policy, "plan_sharded_rebalance", return_value=plan) as planner:
-            policy.rebalance_experts(prepared, 2, 1, 1, 2, torch.tensor([[0, 1]]))
-
-        np.testing.assert_array_equal(planner.call_args.kwargs["sample_counts"], prepared.sample_counts)
 
     def test_compression_preserves_all_steps_as_weighted_bins(self):
         samples = np.arange(20).reshape(5, 2, 2)
@@ -79,33 +24,6 @@ class TestStairLoadStatistics(unittest.TestCase):
         np.testing.assert_allclose(compressed[0], samples[:2].mean(axis=0))
         np.testing.assert_allclose(compressed[1], samples[2:].mean(axis=0))
         np.testing.assert_allclose(np.average(compressed, axis=0, weights=weights), samples.mean(axis=0))
-
-    def test_policy_prepares_weighted_load_sums(self):
-        policy = SimpleNamespace(
-            config=StairConfig(load_window_bins=2),
-            _load_bin_boundaries=StairEplbPolicy._load_bin_boundaries,
-        )
-        samples = torch.arange(20).reshape(5, 2, 2)
-
-        prepared = StairEplbPolicy.prepare_local_load_stats(policy, samples)
-
-        np.testing.assert_array_equal(prepared.sample_counts, [2, 3])
-        torch.testing.assert_close(prepared.values[0], samples[:2].sum(dim=0))
-        torch.testing.assert_close(prepared.values[1], samples[2:].sum(dim=0))
-
-    @patch.object(StairEplbPolicy, "gated_layer_imbalance", return_value=None)
-    def test_prepared_bin_sums_are_converted_to_weighted_means(self, gated_layer_imbalance):
-        StairEplbPolicy.plan_rebalance(
-            np.array([[[2.0, 4.0]], [[9.0, 3.0]]]),
-            np.array([[[0], [1]]]),
-            np.array([np.nan]),
-            np.array([0, 0]),
-            StairConfig(),
-            sample_counts=np.array([2, 3]),
-        )
-
-        np.testing.assert_allclose(gated_layer_imbalance.call_args.args[0], [[1.0, 2.0], [3.0, 1.0]])
-        np.testing.assert_array_equal(gated_layer_imbalance.call_args.args[1], [2, 3])
 
     def test_weighted_moments_use_covariance(self):
         samples = np.array([[1.0, 4.0], [3.0, 2.0]])
@@ -788,147 +706,6 @@ class TestStairLoadStatistics(unittest.TestCase):
             )
 
         self.assertEqual(planned_load_totals, [4.0, 8.0])
-
-    @patch("vllm_ascend.distributed.eplb.policy.stair.torch.distributed.all_reduce")
-    @patch.object(StairEplbPolicy, "_plan_in_subprocess")
-    @patch.object(StairEplbPolicy, "_gather_layer_shard")
-    def test_plan_sharded_rebalance_gathers_complete_plan(self, gather_shard, planner, all_reduce):
-        current = np.array([[[0], [1]]] * 3)
-        source_ranks = np.array([[[1], [0]]] * 3)
-        source_slots = np.zeros_like(current)
-        complete_plan = StairPlan(
-            rank_expert_ids=np.array([[[1], [0]]] * 3),
-            source_rank_ids=source_ranks,
-            source_slot_ids=source_slots,
-            predicted_mean_ratios=np.ones(3),
-            imbalance_ratios=np.ones((3, 4)),
-        )
-        local_plan = StairPlan(
-            rank_expert_ids=np.array([[[1], [0]]]),
-            source_rank_ids=np.array([[[1], [0]]]),
-            source_slot_ids=np.zeros((1, 2, 1), dtype=np.int64),
-            predicted_mean_ratios=np.ones(1),
-            imbalance_ratios=np.ones((1, 4)),
-        )
-        planner.return_value = local_plan
-        local_integer_fields = np.stack(
-            (local_plan.rank_expert_ids, local_plan.source_rank_ids, local_plan.source_slot_ids),
-            axis=1,
-        )
-        complete_integer_fields = np.stack(
-            (complete_plan.rank_expert_ids, complete_plan.source_rank_ids, complete_plan.source_slot_ids),
-            axis=1,
-        )
-        pending_field_gathers = [
-            (local_integer_fields, complete_integer_fields),
-            (
-                np.column_stack((local_plan.predicted_mean_ratios, local_plan.imbalance_ratios)),
-                np.column_stack((complete_plan.predicted_mean_ratios, complete_plan.imbalance_ratios)),
-            ),
-        ]
-
-        def gather(local_values, num_layers, cpu_group):
-            expected_local, complete = pending_field_gathers.pop(0)
-            self.assertEqual(num_layers, 3)
-            self.assertIs(cpu_group, group)
-            torch.testing.assert_close(local_values, torch.from_numpy(expected_local), equal_nan=True)
-            return torch.from_numpy(complete.copy())
-
-        group = Mock()
-        group.rank.return_value = 1
-        group.size.return_value = 2
-        gather_shard.side_effect = gather
-
-        plan = StairEplbPolicy(StairConfig()).plan_sharded_rebalance(
-            np.ones((1, 3, 2)),
-            current,
-            np.full(3, np.nan),
-            np.array([0, 1]),
-            StairConfig(),
-            group,
-        )
-
-        self.assertFalse(pending_field_gathers)
-        self.assertEqual(all_reduce.call_args.args[0].item(), 1)
-        np.testing.assert_array_equal(planner.call_args.args[0], np.ones((1, 1, 2)))
-        np.testing.assert_array_equal(planner.call_args.args[1], current[1:2])
-        np.testing.assert_array_equal(planner.call_args.args[2], [np.nan])
-        np.testing.assert_array_equal(plan.rank_expert_ids, complete_plan.rank_expert_ids)
-        np.testing.assert_array_equal(plan.source_rank_ids, complete_plan.source_rank_ids)
-        np.testing.assert_array_equal(plan.source_slot_ids, complete_plan.source_slot_ids)
-        np.testing.assert_array_equal(plan.predicted_mean_ratios, complete_plan.predicted_mean_ratios)
-        np.testing.assert_array_equal(plan.imbalance_ratios, complete_plan.imbalance_ratios)
-
-    @patch("vllm_ascend.distributed.eplb.policy.stair.torch.distributed.all_reduce")
-    @patch.object(StairEplbPolicy, "_plan_in_subprocess", side_effect=ValueError("invalid local shard"))
-    @patch.object(StairEplbPolicy, "_gather_layer_shard")
-    def test_plan_sharded_rebalance_synchronizes_local_failure(self, gather, _, all_reduce):
-        group = Mock()
-        group.rank.return_value = 0
-        group.size.return_value = 2
-
-        with self.assertRaisesRegex(ValueError, "invalid local shard"):
-            StairEplbPolicy(StairConfig()).plan_sharded_rebalance(
-                np.ones((1, 2, 2)),
-                np.array([[[0], [1]]] * 2),
-                np.full(2, np.nan),
-                np.array([0, 1]),
-                StairConfig(),
-                group,
-            )
-
-        self.assertEqual(all_reduce.call_args.args[0].item(), 0)
-        gather.assert_not_called()
-
-    @patch("vllm_ascend.distributed.eplb.policy.stair.torch.distributed.all_reduce")
-    @patch.object(StairEplbPolicy, "_plan_in_subprocess")
-    @patch.object(StairEplbPolicy, "_gather_layer_shard")
-    def test_plan_sharded_rebalance_stops_for_remote_failure(self, gather, planner, all_reduce):
-        current = np.array([[[0], [1]]] * 2)
-        planner.return_value = StairPlan(
-            rank_expert_ids=current.copy(),
-            source_rank_ids=np.array([[[0], [1]]] * 2),
-            source_slot_ids=np.zeros_like(current),
-            predicted_mean_ratios=np.full(2, np.nan),
-            imbalance_ratios=np.ones((2, 4)),
-        )
-        all_reduce.side_effect = lambda status, **_: status.zero_()
-        group = Mock()
-        group.rank.return_value = 0
-        group.size.return_value = 2
-
-        with self.assertRaisesRegex(RuntimeError, "another EPLB rank"):
-            StairEplbPolicy(StairConfig()).plan_sharded_rebalance(
-                np.ones((1, 2, 2)),
-                current,
-                np.full(2, np.nan),
-                np.array([0, 1]),
-                StairConfig(),
-                group,
-            )
-
-        gather.assert_not_called()
-
-    @patch("vllm_ascend.distributed.eplb.policy.stair.torch.distributed.all_gather")
-    def test_layer_shards_are_reconstructed_in_round_robin_order(self, all_gather):
-        shards = [
-            torch.tensor([[0], [3], [6]]),
-            torch.tensor([[1], [4], [7]]),
-            torch.tensor([[2], [5], [0]]),
-        ]
-
-        def gather(outputs, local, *, group):
-            torch.testing.assert_close(local, shards[2])
-            for output, shard in zip(outputs, shards):
-                output.copy_(shard)
-
-        all_gather.side_effect = gather
-        group = Mock()
-        group.size.return_value = 3
-
-        result = StairEplbPolicy._gather_layer_shard(shards[2][:2], 8, group)
-
-        torch.testing.assert_close(result[:, 0], torch.arange(8))
 
     def test_validate_plan_accepts_explicit_sources(self):
         current = np.array([[[0, 1], [2, 3]]])

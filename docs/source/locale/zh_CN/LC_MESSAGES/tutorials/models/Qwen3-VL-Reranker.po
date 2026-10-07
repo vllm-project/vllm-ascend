@@ -88,13 +88,6 @@ msgstr "在每个节点上启动docker镜像。"
 msgid "=== \"A2 series\""
 msgstr "=== \"A2系列\""
 
-msgid "=== \"Ascend 950DT&950PR Products\""
-msgstr "=== \"Ascend 950DT&950PR Products\""
-
-msgid ""
-"The following command uses the Ubuntu image for Ascend 950DT&950PR Products to start the container."
-msgstr "以下命令使用适用于 Ascend 950DT&950PR Products 的 Ubuntu 镜像启动容器。"
-
 msgid "=== \"Atlas 300I DUO\""
 msgstr "=== \"Atlas 300I DUO\""
 
@@ -114,8 +107,8 @@ msgstr "如果您想部署多节点环境，您需要在每个节点上设置环
 msgid "### 5.1 Chat Template"
 msgstr "### 5.1 对话模板"
 
-msgid "=== \"Ascend 950DT&950PR Products/A3/A2\""
-msgstr "=== \"Ascend 950DT&950PR Products/A3/A2\""
+msgid "=== \"A3/A2 series\""
+msgstr "=== \"A3/A2系列\""
 
 msgid "Required  Parameter Descriptions:"
 msgstr "必需参数说明："

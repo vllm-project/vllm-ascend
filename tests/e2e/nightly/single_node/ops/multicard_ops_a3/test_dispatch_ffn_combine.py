@@ -132,7 +132,6 @@ class TestDispatchFFNCombine:
             probs=probs,
             group=self.hcomm_info,
             max_output_size=512,
-            world_size=self.world_size,
             x_active_mask=xactmask,
             out=out,
             expert_token_nums=expert_token_nums,
@@ -185,7 +184,6 @@ class TestDispatchFFNCombine:
             probs=probs,
             group=self.hcomm_info,
             max_output_size=512,
-            world_size=self.world_size,
             out=out,
             expert_token_nums=expert_token_nums,
         )

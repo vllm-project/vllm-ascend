@@ -66,8 +66,6 @@ Unlike DCP, PCP adds extra ranks: `world_size_with_pcp = prefill_context_paralle
 
 When PCP size is greater than 1, PCP stores embedding and LM Head weights as TP×PCP resident shards by default for every supported attention backend. Set `enable_pcp_embedding_lmhead_weight_sharding` to `false` to disable this behavior.
 
-With PCP enabled, O-projection weight sharding is on by default for SFA-PCP O-projection and DSA-PCP two-stage O-projection (`wo_a`/`wo_b`). If the weight method or PCP partition does not support sharding, the option is disabled with a warning. Set `enable_pcp_o_proj_weight_sharding` to `false` to disable it. Other attention backends do not use this option. O-projection sharding is incompatible with fine-grained TP for the same modules.
-
 #### Speculative Decoding
 
 MRV2 PCP supports MTP with MLA and DSA models, Eagle3 with GQA models, and

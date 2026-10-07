@@ -387,10 +387,6 @@ def _generate(llm, prompts: list[dict]):
 def test_k3_mla_block5_tp4(k3_models: dict[str, str]) -> None:
     args = _engine_args(k3_models, "mla_block5")
     args["max_model_len"] = PREFIX_CACHE_MODEL_LEN
-    # Exercise hybrid-cache page creation with dense checkpoint retention.
-    # The default sparse policy can skip the 1536-token checkpoint because
-    # this prompt's EAGLE replay boundary is zero.
-    args["prefix_cache_retention_interval"] = None
     with VllmRunner(k3_models["target"], **args) as runner:
         llm = runner.model
         # Kernel-block boundaries in one mixed-length wave.

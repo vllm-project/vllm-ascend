@@ -18,6 +18,6 @@ Given a failing nightly test case, this package binary-searches the
 ``vllm-ascend`` commit history between the last-known-good commit and the
 currently failing commit to pinpoint the first bad commit (and the PR it
 belongs to). It deliberately reuses the existing nightly launch entries
-(``test_single_node.py`` / ``common/multi_node/run.sh``) so that the bisect
+(``test_single_node.py`` / ``multi_node/scripts/run.sh``) so that the bisect
 reproduces the exact nightly environment.
 """

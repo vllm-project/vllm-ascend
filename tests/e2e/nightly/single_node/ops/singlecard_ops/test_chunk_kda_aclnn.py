@@ -21,7 +21,6 @@ from dataclasses import dataclass
 import pytest
 import torch
 import torch_npu
-from fla_npu.ops.ascendc import chunk_kda_fwd
 
 from vllm_ascend.utils import enable_custom_op
 
@@ -199,7 +198,7 @@ def test_kda_torch_bindings_have_shape_correct_meta_kernels():
     dt_bias = torch.empty((2 * 128,), device="meta", dtype=torch.float32)
 
     gk = torch.ops._C_ascend.kda_gate_cumsum(raw_gate, 64, layout="BSND")
-    outputs = chunk_kda_fwd(
+    outputs = torch.ops._C_ascend.chunk_kda_fwd(
         q,
         k,
         v,
@@ -255,7 +254,7 @@ def test_chunk_kda_fwd_matches_reference_bsnd():
     initial_state = (torch.randn(bsz, hv, kdim, vdim, dtype=torch.float32) * 0.01).npu()
     scale = kdim**-0.5
 
-    got = chunk_kda_fwd(
+    got = torch.ops._C_ascend.chunk_kda_fwd(
         q,
         k,
         v,
@@ -313,7 +312,11 @@ def test_kda_layout_swap12_matches_reference(shape, dtype, with_dependency):
 
 @pytest.mark.parametrize(
     ("total_t", "hq", "hv", "kdim", "vdim", "dtype"),
-    [(64, 1, 1, 128, 128, torch.float16)],
+    [
+        (64, 1, 1, 128, 128, torch.float16),
+        (128, 1, 2, 128, 256, torch.float16),
+        (128, 2, 2, 128, 256, torch.bfloat16),
+    ],
 )
 @torch.inference_mode()
 def test_chunk_kda_fwd_c128_v256_path(total_t, hq, hv, kdim, vdim, dtype):
@@ -330,7 +333,7 @@ def test_chunk_kda_fwd_c128_v256_path(total_t, hq, hv, kdim, vdim, dtype):
     gk = torch.ops._C_ascend.kda_gate_cumsum(g, 64, layout="BSND")
 
     def run_chunk_kda_fwd():
-        return chunk_kda_fwd(
+        return torch.ops._C_ascend.chunk_kda_fwd(
             q,
             k,
             v,
@@ -401,7 +404,7 @@ def test_chunk_kda_fwd_tail_is_bitwise_deterministic(total_t, disable_recompute)
     chunk_indices = _canonical_chunk_indices([0, total_t], 64)
 
     def run_chunk_kda_fwd():
-        return chunk_kda_fwd(
+        return torch.ops._C_ascend.chunk_kda_fwd(
             q,
             k,
             v,
@@ -467,7 +470,7 @@ def test_chunk_kda_fwd_bnsd_layout_matches_reference():
     beta_bns = beta_bsn.transpose(1, 2).contiguous()
 
     gk_bnsd = torch.ops._C_ascend.kda_gate_cumsum(g_bnsd, 64, layout="BNSD")
-    got = chunk_kda_fwd(
+    got = torch.ops._C_ascend.chunk_kda_fwd(
         q_bnsd,
         k_bnsd,
         v_bnsd,
@@ -554,7 +557,7 @@ def _run_chunk_kda_fwd_a5_case(
     chunk_indices = _canonical_chunk_indices(cu_seqlens, chunk_size)
 
     torch.npu.synchronize()
-    outputs = chunk_kda_fwd(
+    outputs = torch.ops._C_ascend.chunk_kda_fwd(
         q,
         k,
         v,

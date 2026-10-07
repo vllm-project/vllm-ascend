@@ -1,17 +1,12 @@
-import json
-import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-import requests
 from vllm import SamplingParams
 from vllm.inputs import TokensPrompt
-from vllm.utils.network_utils import get_open_port
-from vllm.v1.metrics.reader import Counter, Vector
+from vllm.v1.metrics.reader import Counter
 
-from tests.e2e.conftest import DisaggPDProxy, RemotePDServer, VllmRunner, cleanup_dist_env_and_memory
-from vllm_ascend.device.device_config import is_950
+from tests.e2e.conftest import VllmRunner, cleanup_dist_env_and_memory
 
 ACCEPTANCE_LENGTH_RTOL = 0.08
 
@@ -282,9 +277,6 @@ def _run_speculative_decoding(
 
     num_drafts = 0
     num_accepted_tokens = 0
-    num_speculative_tokens = speculative_config["num_speculative_tokens"]
-    assert isinstance(num_speculative_tokens, int)
-    accepted_per_pos = [0] * num_speculative_tokens
     for metric in metrics:
         if metric.name == "vllm:spec_decode_num_drafts":
             assert isinstance(metric, Counter)
@@ -292,19 +284,8 @@ def _run_speculative_decoding(
         elif metric.name == "vllm:spec_decode_num_accepted_tokens":
             assert isinstance(metric, Counter)
             num_accepted_tokens += metric.value
-        elif metric.name == "vllm:spec_decode_num_accepted_tokens_per_pos":
-            assert isinstance(metric, Vector)
-            for pos, count in enumerate(metric.values):
-                accepted_per_pos[pos] += count
 
     acceptance_length = 1 + num_accepted_tokens / num_drafts if num_drafts > 0 else 1
-    print(f"Model: {model_name}, Acceptance length: {acceptance_length:.3f}", flush=True)
-    acceptance_per_pos = (
-        [count / num_drafts for count in accepted_per_pos] if num_drafts else [0.0] * len(accepted_per_pos)
-    )
-    print(f"Model: {model_name}, Acceptance rates per draft position: {acceptance_per_pos}", flush=True)
-    assert num_drafts > 0
-    assert sum(accepted_per_pos) == num_accepted_tokens
     relative_error = abs(acceptance_length - expected_acceptance_length) / expected_acceptance_length
     assert relative_error <= acceptance_length_rtol, (
         f"Acceptance length regression detected for {model_name}!\n"
@@ -497,132 +478,3 @@ def compare_logprobs(
         _check_prefill_token(base_seq, comp_seq, prompt_idx, atol)
         for token_idx in range(1, 3):
             _check_decode_token(base_seq, comp_seq, token_idx, prompt_idx, decode_atol)
-
-
-def run_pd_disaggregation(
-    *,
-    model: str,
-    model_args: Sequence[str] = (),
-    prefill_tp_size: int,
-    prefill_pcp_size: int,
-    decode_tp_size: int,
-    async_scheduling: bool,
-    use_model_runner_v2: bool,
-) -> str:
-    """Run one 1P1D request through the disaggregated proxy."""
-    prefiller_port = [get_open_port()]
-    decoder_port = [get_open_port()]
-    proxy_port = get_open_port()
-
-    ld_library_path = os.environ.get("LD_LIBRARY_PATH", "")
-    env_dict = {
-        "LD_LIBRARY_PATH": f"/usr/local/lib:{ld_library_path}",
-    }
-    # A5 UB requires the v1.3 HIXL resource format; preserve explicit transport configuration.
-    if is_950() and not any(name in os.environ for name in ("ASCEND_LOCAL_COMM_RES", "ASCEND_GLOBAL_RESOURCE_CONFIG")):
-        env_dict["ASCEND_LOCAL_COMM_RES"] = '{"version":"1.3"}'
-    if use_model_runner_v2:
-        env_dict["VLLM_USE_V2_MODEL_RUNNER"] = "1"
-
-    vllm_server_args = [
-        [
-            "--port",
-            str(prefiller_port[0]),
-            "--model",
-            model,
-            "--trust-remote-code",
-            "--enable-request-id-headers",
-            "--no-enable-prefix-caching",
-            *model_args,
-            "--max-model-len",
-            "1024",
-            "--max-num-batched-tokens",
-            "1024",
-            "--max-num-seqs",
-            "4",
-            "--tensor-parallel-size",
-            str(prefill_tp_size),
-            "--prefill-context-parallel-size",
-            str(prefill_pcp_size),
-            "--gpu-memory-utilization",
-            "0.9",
-            "--kv-transfer-config",
-            json.dumps(
-                {
-                    "kv_connector": "MooncakeConnectorV1",
-                    "kv_role": "kv_producer",
-                    "kv_port": "30000",
-                    "kv_connector_extra_config": {
-                        "prefill": {"dp_size": 1, "tp_size": prefill_tp_size},
-                        "decode": {"dp_size": 1, "tp_size": decode_tp_size},
-                    },
-                }
-            ),
-            "--enforce-eager",
-        ],
-        [
-            "--port",
-            str(decoder_port[0]),
-            "--model",
-            model,
-            "--trust-remote-code",
-            "--enable-request-id-headers",
-            "--no-enable-prefix-caching",
-            *model_args,
-            "--max-model-len",
-            "1024",
-            "--max-num-batched-tokens",
-            "1024",
-            "--max-num-seqs",
-            "4",
-            "--tensor-parallel-size",
-            str(decode_tp_size),
-            "--gpu-memory-utilization",
-            "0.9",
-            "--kv-transfer-config",
-            json.dumps(
-                {
-                    "kv_connector": "MooncakeConnectorV1",
-                    "kv_role": "kv_consumer",
-                    "kv_port": "30200",
-                    "kv_connector_extra_config": {
-                        "prefill": {"dp_size": 1, "tp_size": prefill_tp_size},
-                        "decode": {"dp_size": 1, "tp_size": decode_tp_size},
-                    },
-                }
-            ),
-            "--compilation-config",
-            json.dumps(
-                {
-                    "cudagraph_mode": "FULL_DECODE_ONLY",
-                    "cudagraph_capture_sizes": [1, 2, 4, 8],
-                }
-            ),
-            *(["--async-scheduling"] if async_scheduling else []),
-        ],
-    ]
-
-    with (
-        RemotePDServer(vllm_server_args, env_dict=env_dict),
-        DisaggPDProxy(
-            port=proxy_port,
-            prefiller_ports=prefiller_port,
-            decoder_ports=decoder_port,
-        ) as proxy,
-    ):
-        response = requests.post(
-            proxy.url_for("v1", "chat", "completions"),
-            json={
-                "model": model,
-                "messages": [{"role": "user", "content": "Hello, my name is"}],
-                "max_tokens": 5,
-                "temperature": 0.0,
-            },
-            timeout=600,
-        )
-        response.raise_for_status()
-        output = response.json()
-
-        content = output["choices"][0]["message"]["content"]
-        assert isinstance(content, str) and content
-        return content

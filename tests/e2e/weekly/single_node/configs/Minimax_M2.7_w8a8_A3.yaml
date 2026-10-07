@@ -1,0 +1,162 @@
+# ==========================================
+# Shared Configurations
+# ==========================================
+
+_envs: &envs
+  SERVER_PORT: "DEFAULT_PORT"
+  HCCL_OP_EXPANSION_MODE: "AIV"
+  HCCL_BUFFSIZE: "1200"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  OMP_NUM_THREADS: "1"
+  LD_PRELOAD: "/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD"
+  TASK_QUEUE_ENABLE: "1"
+
+_server_cmd: &server_cmd
+  - "--port"
+  - "$SERVER_PORT"
+  - "--host"
+  - "0.0.0.0"
+  - "--tensor-parallel-size"
+  - "8"
+  - "--data-parallel-size"
+  - "2"
+  - "--enable-expert-parallel"
+  - "--async-scheduling"
+  - "--max-num-seqs"
+  - "128"
+  - "--safetensors-load-strategy"
+  - 'prefetch'
+  - "--max-num-batched-tokens"
+  - "16384"
+  - "--trust-remote-code"
+  - "--quantization"
+  - "ascend"
+  - "--enable-auto-tool-choice"
+  - "--tool-call-parser"
+  - "minimax_m2"
+  - "--speculative-config"
+  - '{"method":"eagle3","model":"Eco-Tech/MiniMax-M2.7-eagle-model-short","num_speculative_tokens":3}'
+  - "--compilation-config"
+  - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+  - "--additional-config"
+  - '{"enable_cpu_binding": true, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false}, "enable_fused_mc2": true, "weight_nz_mode": 1, "enable_flashcomm1": true}'
+
+
+_benchmarks_acc: &benchmarks_acc
+  acc:
+    case_type: accuracy
+    dataset_path: vllm-ascend/aime2025
+    request_conf: vllm_api_general_chat
+    dataset_conf: aime2025/aime2025_gen_0_shot_chat_prompt
+    max_out_len: 65536
+    batch_size: 32
+    baseline: 93.33
+    threshold: 10
+    temperature: 1
+    top_p: 1
+    top_k: 40
+    ignore_eos: false
+
+_benchmarks_prefix_64k_50: &benchmarks_prefix_64k_50
+  perf_prefix_90:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix90_in65536_bs1000_Minimax
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 160
+    max_out_len: 1024
+    batch_size: 40
+    request_rate: 0
+    baseline: 825
+    threshold: 0.97
+
+_benchmarks_prefix_128k_50: &benchmarks_prefix_128k_50
+  perf_prefix_90:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs1000_Minimax
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 80
+    max_out_len: 1024
+    batch_size: 20
+    request_rate: 0
+    baseline: 242
+    threshold: 0.97
+
+_benchmarks_prefix_max: &benchmarks_prefix_max
+  perf_prefix_99:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix99_in203738_bs1_mini
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 1
+    max_out_len: 1024
+    batch_size: 1
+    request_rate: 0
+    baseline: 1
+    threshold: 0.1
+  perf_1:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix99_in203738_bs4_mini
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 1
+    max_out_len: 1024
+    batch_size: 1
+    request_rate: 0
+    baseline: 30
+    threshold: 0.97
+
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+
+test_cases:
+  - name: "MiniMax-M2.7-w8a8-acc"
+    model: "vllm-ascend/MiniMax-M2.7-w8a8-QuaRot"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--max-model-len"
+      - "204800"
+      - "--gpu-memory-utilization"
+      - "0.8"
+    benchmarks:
+      <<: *benchmarks_acc
+  - name: "MiniMax-M2.7-prefix_64k_50"
+    model: "vllm-ascend/MiniMax-M2.7-w8a8-QuaRot"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--max-model-len"
+      - "70000"
+      - "--gpu-memory-utilization"
+      - "0.8"
+    benchmarks:
+      <<: *benchmarks_prefix_64k_50
+  - name: "MiniMax-M2.7-prefix_128k_50"
+    model: "vllm-ascend/MiniMax-M2.7-w8a8-QuaRot"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--max-model-len"
+      - "196608"
+      - "--gpu-memory-utilization"
+      - "0.84"
+    benchmarks:
+      <<: *benchmarks_prefix_128k_50
+  - name: "MiniMax-M2.7-prefix_max"
+    model: "vllm-ascend/MiniMax-M2.7-w8a8-QuaRot"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--max-model-len"
+      - "204800"
+      - "--gpu-memory-utilization"
+      - "0.8"
+    benchmarks:
+      <<: *benchmarks_prefix_max

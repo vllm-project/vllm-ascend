@@ -3,7 +3,6 @@
 """AscendC short convolution for GLM prefill, decode and MTP verification."""
 
 import torch
-from fla_npu.ops.ascendc import causal_conv1d_fn, causal_conv1d_update
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 from vllm_ascend.ops.triton.kda.conv_state import copy_conv_state
@@ -27,7 +26,6 @@ def causal_conv1d(
         return output
     kernel_state = conv_state
     kernel_indices = cache_indices
-    null_block_id = 0
     # aclnnCausalConv1d materializes a non-contiguous state without writing its
     # mutations back to the view. Stage only this batch's rows, retaining both
     # page strides and DS layouts; never copy the entire persistent cache.
@@ -37,35 +35,21 @@ def causal_conv1d(
         kernel_state = torch.empty((requests, state_len, dim), dtype=conv_state.dtype, device=conv_state.device)
         kernel_indices = torch.empty(requests, dtype=torch.int32, device=cache_indices.device)
         copy_conv_state(conv_state, kernel_state, cache_indices, query_start_loc, kernel_indices, write_back=False)
-        # Packed rows start at zero, so zero is now a valid cache slot. Invalid
-        # requests were mapped to PAD_SLOT_ID by the gather kernel.
-        null_block_id = PAD_SLOT_ID
-    kernel_indices = kernel_indices.contiguous()
-    if run_mode == 0:
-        result = causal_conv1d_fn(
-            x,
-            weight,
-            None,
-            conv_states=kernel_state,
-            query_start_loc=query_start_loc,
-            cache_indices=kernel_indices,
-            has_initial_state=initial_state_mode,
-            activation="silu",
-            pad_slot_id=PAD_SLOT_ID,
-            null_block_id=null_block_id,
-        )
-    else:
-        result = causal_conv1d_update(
-            x,
-            kernel_state,
-            weight,
-            bias=None,
-            activation="silu",
-            conv_state_indices=kernel_indices,
-            num_accepted_tokens=num_accepted_tokens,
-            query_start_loc=query_start_loc,
-            null_block_id=null_block_id,
-        )
+    # Return the declared result so graph functionalization retains the call.
+    result = torch.ops._C_ascend.npu_causal_conv1d_custom(
+        output,
+        x,
+        weight,
+        conv_state=kernel_state,
+        bias_opt=None,
+        query_start_loc_opt=query_start_loc,
+        cache_indices_opt=kernel_indices,
+        initial_state_mode_opt=initial_state_mode,
+        num_accepted_tokens_opt=num_accepted_tokens,
+        activation_mode=1,
+        pad_slot_id=PAD_SLOT_ID,
+        run_mode=run_mode,
+    )
     if not conv_state.is_contiguous():
         copy_conv_state(conv_state, kernel_state, cache_indices, query_start_loc, kernel_indices, write_back=True)
     return result

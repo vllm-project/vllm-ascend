@@ -41,7 +41,6 @@ OUTPUT_DIR = Path("/root/.cache/upload_perf/results")
 UPLOAD_LABEL = "performance"
 UPLOAD_MODULE = "tools.upload_to_openlibing"
 _DATASET_PREFIX = "vllm-ascend/"
-_SUPPORTED_TEST_FREQUENCIES = {"nightly", "weekly"}
 
 
 def _default_upload_script_path() -> Path:
@@ -62,13 +61,11 @@ def _safe_name(name: str) -> str:
     return name.replace("/", "_").replace(" ", "_")
 
 
-def resolve_suite_name(test_frequency: str | None = None) -> str:
-    """Return the explicitly configured scheduled-test frequency."""
-    frequency = (test_frequency or os.getenv("TEST_FREQUENCY") or "nightly").strip().lower()
-    if frequency not in _SUPPORTED_TEST_FREQUENCIES:
-        supported = ", ".join(sorted(_SUPPORTED_TEST_FREQUENCIES))
-        raise ValueError(f"Unsupported TEST_FREQUENCY={frequency!r}; expected one of: {supported}")
-    return frequency
+def resolve_suite_name(config_base_path: str | None = None) -> str:
+    """Return 'weekly' or 'nightly' from CONFIG_BASE_PATH."""
+    base = config_base_path if config_base_path is not None else os.getenv("CONFIG_BASE_PATH", "")
+    normalized = base.replace("\\", "/")
+    return "weekly" if "weekly" in normalized else "nightly"
 
 
 def resolve_testcase_name(config_yaml_path: str | None = None, fallback: str = "") -> str:

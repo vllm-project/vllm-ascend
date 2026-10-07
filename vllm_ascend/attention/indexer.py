@@ -1,7 +1,6 @@
 from dataclasses import dataclass
 from typing import Any
 
-import numpy as np
 import scipy.linalg  # type: ignore
 import torch
 import torch_npu
@@ -9,7 +8,6 @@ from torch import nn
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tp_group
 from vllm.triton_utils import HAS_TRITON
-from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -19,7 +17,6 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
 from vllm.v1.kv_cache_interface import AttentionSpec
-from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.utils import select_common_block_size
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -85,11 +82,6 @@ class AscendSFAIndexerMetadata:
     # The PCP cache-write gather splits the local prefill region on this
     # independently computed decode-token count.
     num_decode_tokens: int = 0
-    # Optional selection supplied by the owning attention implementation.
-    # Projection, rope and cache writes continue to use this backend.
-    # The selector receives ``(q_li, weights, indexer, metadata, q_li_scale)``;
-    # ``q_li_scale`` is set only when LI C8 has already quantized ``q_li``.
-    topk_selector: Any | None = None
 
 
 class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
@@ -267,7 +259,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
                 indexer_attn_metadata.block_size,
             )
         else:
-            DeviceOperator.scatter_cache(
+            torch_npu.npu_scatter_nd_update_(
                 indexer_k_cache.view(-1, k_li.shape[-1]),
                 slot_mapping.view(-1, 1),
                 k_li.view(-1, k_li.shape[-1]),
@@ -286,7 +278,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
                     indexer_attn_metadata.block_size,
                 )
             else:
-                DeviceOperator.scatter_cache(
+                torch_npu.npu_scatter_nd_update_(
                     indexer_scale_cache.view(-1, k_li_scale.shape[-1]),
                     slot_mapping.view(-1, 1),
                     k_li_scale.view(-1, k_li_scale.shape[-1]),
@@ -403,7 +395,6 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         k_hidden_states: torch.Tensor,
         indexer_metadata: AscendSFAIndexerMetadata,
         compute_topk: bool = True,
-        attn_q_gather_handle: torch.distributed.Work | None = None,
     ) -> torch.Tensor | None:
         """Full indexer pipeline: k path -> cache write -> top-k selection.
 
@@ -418,11 +409,6 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         cos = indexer_metadata.cos
         sin = indexer_metadata.sin
         k_li, k_li_scale, indexer_weights = self.forward_k(k_hidden_states, cos, sin)
-        if attn_q_gather_handle is not None:
-            # Keep the k projection overlapped with Q communication, but order
-            # the TP cache gathers after Q to avoid concurrent cross-group AIV
-            # collectives during graph replay. wait() adds a stream dependency.
-            attn_q_gather_handle.wait()
         k_li, k_li_scale, slot_mapping = self._gather_cache_inputs(k_li, k_li_scale, indexer_metadata)
         self.write_cache(k_li, k_li_scale, slot_mapping, indexer_attn_metadata=indexer_metadata)
         if not compute_topk:
@@ -492,9 +478,6 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             q_li, q_li_scale = torch_npu.npu_dynamic_quant(q_li.view(-1, self.head_dim), dst_type=self.c8_k_cache_dtype)
             q_li_scale = q_li_scale.to(self.c8_k_scale_cache_dtype)  # [b*s,]
 
-        topk_selector = getattr(indexer_metadata, "topk_selector", None)
-        if topk_selector is not None:
-            return topk_selector(q_li, weights, self, indexer_metadata, q_li_scale)
         return DeviceOperator.indexer_select_post_process(
             q_li,
             q_li_scale,
@@ -555,7 +538,6 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         self._dcp_block_table_buffers: dict[object, torch.Tensor] = {}
         self._dcp_slot_mapping_buffers: dict[object, torch.Tensor] = {}
         self._pcp_indexer_slot_mapping_buffers: dict[object, torch.Tensor] = {}
-        self._lim_token_masks: dict[object, CpuGpuBuffer] = {}
         max_num_input_tokens = scheduler_config.max_num_batched_tokens
         self._rope_capacity = max_num_input_tokens
         pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
@@ -1020,26 +1002,6 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         # graph capture and runtime rebuild update the exact same storage.
         return ("slot_mapping", common_attn_metadata.slot_mapping.data_ptr())
 
-    def _mask_lim_slot_mapping(self, common_attn_metadata, slot_mapping, buffer_key) -> None:
-        active = getattr(common_attn_metadata, "req_topk_buffer_active", None)
-        if active is None or not get_ascend_config().sparse_kv_offload_config.use_fused_copy_sfa:
-            return
-        # Only request ownership and query layout are needed; exact device
-        # positions in this group's slot mapping must remain unchanged.
-        count = common_attn_metadata.num_reqs
-        ends = common_attn_metadata.query_start_loc_cpu[1 : count + 1].numpy()
-        positions = np.arange(slot_mapping.numel())
-        rows = np.searchsorted(ends, positions, side="right").clip(max=count - 1)
-        mask = self._lim_token_masks.get(buffer_key)
-        if mask is None:
-            mask = CpuGpuBuffer(
-                self._slot_capacity, dtype=torch.bool, device=slot_mapping.device, pin_memory=is_pin_memory_available()
-            )
-            self._lim_token_masks[buffer_key] = mask
-        size = slot_mapping.numel()
-        mask.np[:size] = (~active.numpy()[rows]) | (positions >= ends[-1])
-        slot_mapping.masked_fill_(mask.copy_to_gpu(size), -1)
-
     def _build(
         self,
         common_attn_metadata: CommonAttentionMetadata,
@@ -1050,6 +1012,15 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
     ) -> AscendSFAIndexerMetadata:
         num_reqs = common_attn_metadata.num_reqs
         num_input_tokens = common_attn_metadata.num_input_tokens
+        if (
+            self.speculative_config is not None
+            and getattr(self.speculative_config, "method", None) == "dspark"
+            and getattr(self.speculative_config, "enable_adaptive_verification", False)
+        ):
+            # Keep the independently built indexer metadata aligned with SFA:
+            # adaptive verification records its graph-shaped token count in
+            # positions rather than common_attn_metadata.num_input_tokens.
+            num_input_tokens = common_attn_metadata.positions.shape[0]
         if self.use_dcp:
             block_table, slot_mapping = self._build_dcp_cache_metadata(
                 common_attn_metadata,
@@ -1071,7 +1042,6 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
                 num_input_tokens,
                 buffer_key,
             )
-        self._mask_lim_slot_mapping(common_attn_metadata, slot_mapping, buffer_key)
         input_positions = common_attn_metadata.positions[:num_input_tokens].long()
         block_size = self.kernel_block_size
 

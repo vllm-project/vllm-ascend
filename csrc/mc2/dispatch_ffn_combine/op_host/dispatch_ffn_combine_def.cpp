@@ -78,7 +78,6 @@ class DispatchFFNCombine : public OpDef {
     this->Attr("transB").AttrType(OPTIONAL).Bool(false);
     this->Attr("weightNz").AttrType(OPTIONAL).Bool(false);
     this->Attr("swigluLimit").AttrType(OPTIONAL).Float(0.0f);
-    this->Attr("worldSize").AttrType(REQUIRED).Int();
 
     OpAICoreConfig aicore_config;
     aicore_config.DynamicCompileStaticFlag(true)

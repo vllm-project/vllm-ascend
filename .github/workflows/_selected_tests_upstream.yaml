@@ -89,21 +89,14 @@ env:
 jobs:
     e2e-upstream_pr:
         runs-on: linux-aarch64-a2b3-1
-        env:
-          RUNS_ON_S3_BUCKET_CACHE: ascend-ci-cache-hk
-          RUNS_ON_S3_BUCKET_ENDPOINT: https://obs.ap-southeast-1.myhuaweicloud.com
-          RUNS_ON_S3_FORCE_PATH_STYLE: "false"
-          AWS_S3_FORCE_PATH_STYLE: "false"
-          AWS_REGION: ap-southeast-1
-          RUNS_ON_RUNNER_NAME: ""
         strategy:
           fail-fast: false
           matrix:
             part: [0]
-            image_tag: [9.2.0_20260928212200-910b-ubuntu22.04-py3.12]
+            image_tag: [9.1.0-910b-ubuntu22.04-py3.12]
             num_npus: [1]
         container:
-          image: swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann:${{ matrix.image_tag }}
+          image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.image_tag }}
           env:
             VLLM_LOGGING_LEVEL: ERROR
             HF_HUB_OFFLINE: 1
@@ -232,24 +225,6 @@ jobs:
                 uv pip install -e . --no-build-isolation
               fi
               uv pip install tblib
-
-          - name: Install FLA NPU for A2 upstream tests
-            env:
-              GIT_PROXY: https://gh-proxy.test.osinfra.cn/
-            run: |
-              set -euo pipefail
-              FLA_WHL=flash_linear_attention_npu_a2-26.9.1+deva4a7958-py3-none-manylinux_2_34_aarch64.whl
-              FLA_SHA256=7c3d3d07419a9cb1a17ca0d683d4d5de82d69c6523ada96396c9d6d0317e583a
-              FLA_DOWNLOAD_URL="https://github.com/flashserve/flash-linear-attention-npu/releases/download/v26.9.1-beta2/$FLA_WHL"
-              if [ -n "${GIT_PROXY:-}" ]; then
-                FLA_DOWNLOAD_URL="${GIT_PROXY}${FLA_DOWNLOAD_URL}"
-              fi
-              curl --fail --location --show-error --silent --retry 3 --retry-delay 5 --retry-all-errors \
-                "$FLA_DOWNLOAD_URL" -o "/tmp/$FLA_WHL"
-              echo "$FLA_SHA256  /tmp/$FLA_WHL" | sha256sum --check
-              uv pip install --no-deps "/tmp/$FLA_WHL"
-              python3 -c "import fla_npu.ops.ascendc"
-              rm -f "/tmp/$FLA_WHL"
 
           - name: Run vllm-project/vllm test
             working-directory: ./vllm-empty

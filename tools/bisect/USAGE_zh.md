@@ -107,17 +107,10 @@ python -m tools.bisect.auto_bisect \
 
 - `--num-nodes` 不填则自动从配置 YAML 的 `num_nodes` 字段读取;`--node-index` 不填则读 `LWS_WORKER_INDEX`(LWS 自动注入)。LWS 编排下这两个都无需手填。
 - `--coord-dir` 不填时默认 `/root/.cache/nightly_bisect/coord`;LWS 下 `/root/.cache` 是共享 PVC,各节点天然共享,可不填。非 LWS 环境需手动指定共享路径。
-- internal / external DP 由配置 YAML 的 `dp_load_balancing` 字段决定；`--config-base-path` 只负责定位配置文件。
+- internal / external DP 通过 `--config-base-path`(或 yaml 路径含 `external_dp/config`)自动区分。
 - 所有节点切到同一 commit 后才会开跑(屏障同步)。
 
 > ⚠️ **常见坑(barrier timeout)**:报错 `Barrier timeout: only 1/2 nodes ready` 表示**只有 master 跑了 bisect、worker 节点没跑**。多机 bisect 要求**每个节点都启动 `auto_bisect.py --scene multi_node`**(worker 节点会自动进入 worker 循环:接收 commit→部署→上报 ready→等 master)。如果你的流水线只在 leader 上调了 bisect、worker pod 只跑了用例,worker 永远不会加入屏障,master 就会超时。修法:让流水线在**所有节点**(含 worker)都执行同一条 bisect 命令,且共享同一个 `--coord-dir`。
->
-> 相关行为说明:
->
-> - worker 仓库通常是 nightly 的 `--depth 1` 浅克隆,本地没有候选 commit;worker agent 启动时会先 `git fetch --unshallow` 恢复完整历史(把慢速网络操作挪出首轮屏障窗口),部署时再按需解析,无需手动处理。
-> - 若屏障超时且**从未有任何 worker 上报过 ready**,master 会**整体中止**(退出码 2)而不是逐轮空等屏障超时;迟到的 worker(其 ready 标记落在已结束的轮次)仍按单轮 SKIP 处理。已知限制:这是"曾加入"检查而非存活检查,worker 中途死亡后剩余轮次会退化为逐轮 SKIP(心跳检测为后续工作)。
-> - CI 里 leader 的"等待 worker 就绪"门槛读的是 `LOG_PREFIX/worker_ready_*`(每次运行唯一),协调目录默认是 `LOG_PREFIX/nightly_bisect_coord`;设置 `COORD_DIR` 时使用其下以本次 LWS 运行名命名的子目录,同样按运行隔离。手动调用工具的 `--coord-dir` 用法不变。协调文件(command/verdict/ready)均以原子方式写入,避免 PVC 上的撕裂读。
-> - AOP worker 等待 release 最多 300 秒;退出日志备份的每条命令最多 120 秒,另有 5 秒强制终止宽限。AOP 日志跟踪支持状态查询重试和一次容器重启后的原容器结果恢复;Pod 被替换或原结果丢失则明确失败。未开启 AOP 的执行路径保持不变。
 
 ---
 
@@ -150,8 +143,8 @@ python -m tools.bisect.auto_bisect \
 
 工具先比较 good 和 bad 两端的 vLLM、torch-npu 版本:
 
-- 两端版本相同**且环境实际版本与该 pin 一致**:该包后续不再检查;
-- 两端版本不同,**或环境实际版本与两端共同的 pin 不一致**(nightly 镜像自带构建,不保证跟随 pin):每次切换到候选 commit 后读取候选 commit 的版本文件,若运行环境版本不同则先切换依赖,再运行 nightly;
+- 两端版本相同:该包后续不再检查;
+- 两端版本不同:每次切换到候选 commit 后读取候选 commit 的版本文件,若运行环境版本不同则先切换依赖,再运行 nightly;
 
 vLLM 切换优先使用配置的 vLLM 源码目录(nightly 默认 `/vllm-workspace/vllm`) checkout 对应 release tag 并重新 editable 安装;找不到源码目录时回退到 pip 安装对应 release。torch-npu 使用 pip 强制重装目标版本。切换失败会将本轮标记为 `SKIP`,不会把环境问题误判成测试失败。
 
@@ -194,7 +187,7 @@ vLLM 切换优先使用配置的 vLLM 源码目录(nightly 默认 `/vllm-workspa
 - `state.json`:二分窗口 + 已判定结果(**被中断后原命令重跑会断点续跑**);
 - `report.json`:最终结论(首个 bad commit / PR + 完整试跑历史)。
 
-**退出码**:`0` = 成功定位首个 bad;`2` = 未定位(端点校验失败 / 区间无效 / 环境问题)或整体中止(如多机场景下从未有 worker 加入屏障)。
+**退出码**:`0` = 成功定位首个 bad;`2` = 未定位(端点校验失败 / 区间无效 / 环境问题)。
 
 ---
 
@@ -298,7 +291,7 @@ vLLM 切换优先使用配置的 vLLM 源码目录(nightly 默认 `/vllm-workspa
 #### `--num-nodes`
 
 - **作用**:集群节点总数;master 用它做屏障(等齐所有节点就绪才开跑)。
-- **默认**:**不填则自动从多机配置 YAML 的 `num_nodes` 字段读取**(在 `--config-base-path` 指定的目录里按 `--config-yaml` 找该文件)。
+- **默认**:**不填则自动从多机配置 YAML 的 `num_nodes` 字段读取**(在 `internal_dp/config` 或 `external_dp/config`,或 `--config-base-path` 指定的目录里按 `--config-yaml` 找该文件)。
 - **何时手填**:配置文件里没有 `num_nodes`、或你想覆盖时。单机场景固定为 1。
 - **注意**:这里**不依赖** `LWS_GROUP_SIZE` 之类的环境变量(节点数的权威来源就是配置 YAML,与现有 nightly 多机逻辑一致)。
 
@@ -331,9 +324,9 @@ vLLM 切换优先使用配置的 vLLM 源码目录(nightly 默认 `/vllm-workspa
 
 #### `--config-base-path`
 
-- **作用**:覆盖 configs 的基准目录,设进环境变量 `CONFIG_BASE_PATH`,用于定位 `--config-yaml` 指定的配置文件。
+- **作用**:覆盖 configs 的基准目录,设进环境变量 `CONFIG_BASE_PATH`;主要用于**多机 internal/external DP** 区分配置目录。
 - **默认**:环境变量 `CONFIG_BASE_PATH`。
-- **注意**:当前提交通过配置 YAML 的 `dp_load_balancing` 选择 DP 模式；二分到尚无公共 pytest 入口的旧提交时，才根据旧目录路径选择兼容入口。
+- **注意**:路径里含 `external_dp/config` 时,多机会自动选用 external DP 的 pytest 入口。
 
 ---
 

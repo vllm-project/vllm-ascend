@@ -43,13 +43,10 @@ def test_normal_and_mixed_fused_circular_mapping_and_graph(lengths):
     obj.blocks_per_phys_block, obj.cp_kv_cache_interleave_size = 1, 1
     obj.max_num_batched_tokens = count + 19
     obj.is_circular = True
-    obj.is_circular_group = True
     obj.block_table = SimpleNamespace(gpu=tail_table)
     obj.slot_mapping = SimpleNamespace(gpu=outputs[0])
     obj.compute_slot_mapping(num_reqs, ends, positions)
-    # Generic BlockTable writers must not update the circular tail cache.
-    # The explicit fused kernel below owns its circular address calculation.
-    torch.testing.assert_close(outputs[0].cpu(), torch.full((count + 19,), -1, dtype=torch.int32))
+    torch.testing.assert_close(outputs[0].cpu(), expected()[0], rtol=0, atol=0)
 
     def fused():
         compute_slot_mapping_fused_groups(
@@ -98,17 +95,12 @@ def test_normal_and_mixed_fused_circular_mapping_and_graph(lengths):
     torch.testing.assert_close(outputs[1].cpu(), expected()[1], rtol=0, atol=0)
 
 
-def test_draft_helper_disables_generic_writes_for_circular_groups():
+def test_draft_helper_preserves_circular_request_ids_and_negative_positions():
+    # Address-helper regression only; speculative acceptance remains deferred.
     obj = BlockTable.__new__(BlockTable)
     obj.dcp_world_size, obj.max_num_blocks_per_req, obj.blocks_per_phys_block = 1, 1, 1
     obj.block_size, obj.kernel_sizes, obj.is_circular = 4, [4], True
-    obj.is_circular_group = True
     obj.block_table = SimpleNamespace(np=np.array([[5], [9]], dtype=np.int32))
-    obj.slot_mapping = SimpleNamespace(
-        np=np.full(5, 777, dtype=np.int32),
-        gpu=torch.full((5,), 777, dtype=torch.int32, device="npu"),
-        copy_to_gpu=lambda n: None,
-    )
+    obj.slot_mapping = SimpleNamespace(np=np.full(5, 777, dtype=np.int32), copy_to_gpu=lambda n: None)
     obj.compute_slot_mapping_draft(np.array([0, 1, 0, 1, 0]), np.array([17, 1024, -1, 1027, 100000]))
-    assert obj.slot_mapping.gpu.cpu().tolist() == [-1] * 5
-    assert obj.slot_mapping.np.tolist() == [777] * 5
+    assert obj.slot_mapping.np.tolist() == [21, 36, -1, 39, 20]

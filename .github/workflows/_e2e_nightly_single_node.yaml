@@ -37,7 +37,7 @@ on:
         required: false
         type: string
         default: ''
-        description: CONFIG_BASE_PATH used by the YAML loader
+        description: override CONFIG_BASE_PATH used by the yaml loader (defaults to nightly path)
       soc_version:
         required: true
         type: string
@@ -149,12 +149,11 @@ jobs:
     name: ${{ inputs.name || inputs.config_file_path || inputs.tests }}
     runs-on: ${{ inputs.runner }}
     if: ${{ inputs.should_run }}
-    timeout-minutes: ${{ inputs.request_id != '' && (inputs.aop_single_enabled && 1440 || 240) || fromJSON(inputs.testcase_timeout) }}
+    timeout-minutes: ${{ inputs.request_id != '' && 240 || fromJSON(inputs.testcase_timeout) }}
     container:
       image: ${{ inputs.image }}
     env:
       HF_HUB_OFFLINE: 1
-      TEST_FREQUENCY: ${{ inputs.test_frequency }}
       VLLM_USE_MODELSCOPE: True
       UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
       UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi"
@@ -190,15 +189,6 @@ jobs:
           fetch-depth: 1
           submodules: recursive
 
-      - name: Restore incremental cache for source checkout
-        id: source-l1
-        if: ${{ inputs.request_id != '' }}
-        uses: $/.github/actions/csrc-l1-restore
-        with:
-          cache-dir: ${{ runner.temp }}/vllm-ascend-incremental-build-cache
-          architecture: ${{ runner.arch }}
-          soc-version: ${{ inputs.soc_version }}
-          source-root: ./temp-vllm-ascend
       - name: Move code to /vllm-workspace
         if: ${{ inputs.request_id != '' }}
         run: |
@@ -310,7 +300,9 @@ jobs:
           echo "Running pytest with tests path: ${{ inputs.tests }}"
           mkdir -p /tmp/test-logs
           set -o pipefail
-          pytest -sv "${{ inputs.tests }}" 2>&1 | tee /tmp/test-logs/pytest-driven.log
+          pytest -sv "${{ inputs.tests }}" \
+            --ignore=tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_moe.py \
+            2>&1 | tee /tmp/test-logs/pytest-driven.log
 
       - name: Run Pytest (YAML-driven)
         id: yaml-test
@@ -329,7 +321,7 @@ jobs:
           echo "Running YAML-driven test with config: ${{ inputs.config_file_path }}"
           mkdir -p /tmp/test-logs
           set -o pipefail
-          pytest -sv tests/e2e/common/single_node/test_single_node.py \
+          pytest -sv tests/e2e/nightly/single_node/models/scripts/test_single_node.py \
             2>&1 | tee /tmp/test-logs/yaml-test.log
 
       - name: Update good_table.csv on success

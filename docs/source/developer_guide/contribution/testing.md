@@ -248,9 +248,8 @@ You can run tests with `pytest` as well. Typical examples:
 For running nightly single-node model test cases locally, refer to the following example.
 
 ```bash
-export CONFIG_BASE_PATH=tests/e2e/cases/models/configs/Qwen
 export CONFIG_YAML_PATH=Qwen3-32B.yaml
-VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/common/single_node/test_single_node.py
+VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/nightly/single_node/models/scripts/test_single_node.py
 ```
 
 For running nightly multi-node model test cases locally, refer to the `Running Locally` section in [Multi Node Test](./multi_node_test.md).
@@ -258,24 +257,6 @@ For running nightly multi-node model test cases locally, refer to the `Running L
 #### E2E test examples
 
 - Offline test example: [`tests/e2e/pull_request/one_card/test_qwen3_0_6b.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/pull_request/one_card/test_qwen3_0_6b.py)
-
-### Csrc incremental build cache checks
-
-For changes to native build inputs or the cache adapter, run the cache engine,
-concurrency, and snapshot-key tests before requesting an NPU build:
-
-```bash
-pytest -q --confcutdir=tests/ut/_tools \
-  tests/ut/_tools/test_build_cache.py \
-  tests/ut/_tools/test_build_cache_concurrency.py \
-  tests/ut/_tools/test_prepare_csrc_l1_restore.py
-```
-
-On CI, a successful restore step only proves that an outer L1 snapshot was
-available. Check the inner cache telemetry for action HIT/MISS/BYPASS to
-establish whether a source build actually reused compiled work. See the
-[persistent csrc build cache design](../Design_Documents/persistent_csrc_build_cache.md)
-for the identity and failure contracts.
 
 ### PR selective testing (CI)
 

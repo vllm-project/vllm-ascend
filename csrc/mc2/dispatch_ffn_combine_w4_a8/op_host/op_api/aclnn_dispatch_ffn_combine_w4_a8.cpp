@@ -39,7 +39,7 @@ extern aclnnStatus aclnnInnerDispatchFFNCombineW4A8GetWorkspaceSize(const aclTen
                                                          const aclTensorList* bias1, const aclTensorList * bias2,
                                                          const aclTensor* probs,  const aclTensor* xActiveMask,
                                                          const char* group, int64_t maxOutputSize,
-                                                         bool transB, bool weightNz, double swigluLimit, int64_t worldSize,
+                                                         bool transB, bool weightNz, double swigluLimit,
                                                          const aclTensor* out, const aclTensor* expertTokenNums,
                                                          uint64_t* workspaceSize, aclOpExecutor** executor);
 extern aclnnStatus aclnnInnerDispatchFFNCombineW4A8(void *workspace, uint64_t workspaceSize,
@@ -52,7 +52,7 @@ aclnnStatus aclnnDispatchFFNCombineW4A8GetWorkspaceSize(const aclTensor* x, cons
                                                     const aclTensor* expertId, const aclTensorList* scale1, const aclTensorList* scale2,
                                                     const aclTensorList* bias1, const aclTensorList * bias2,
                                                     const aclTensor* probs, const aclTensor* xActiveMask,
-                                                    const char* group, int64_t maxOutputSize, double swigluLimit, int64_t worldSize,
+                                                    const char* group, int64_t maxOutputSize, double swigluLimit,
                                                     const aclTensor* out, const aclTensor* expertTokenNums,
                                                     uint64_t* workspaceSize, aclOpExecutor** executor)
 {
@@ -63,7 +63,7 @@ aclnnStatus aclnnDispatchFFNCombineW4A8GetWorkspaceSize(const aclTensor* x, cons
                                                                     scale1, scale2, bias1, bias2, 
                                                                     probs, xActiveMask,
                                                                     group, maxOutputSize, 
-                                                                    transB, weightNz, swigluLimit, worldSize,
+                                                                    transB, weightNz, swigluLimit,
                                                                     out, expertTokenNums, workspaceSize, executor);
     return ret;
 }

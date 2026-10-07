@@ -256,62 +256,70 @@ class WeightSwitchMixin:
         shard = tensor.narrow(dim, rank * shard_size, shard_size)
         return shard.contiguous() if contiguous else shard
 
-    def _prepare_layer_for_nested_weight_load(
+    def prepare_layer_for_parallel_weight_load(
         self,
         layer: torch.nn.Module,
         config: WeightSwitchConfig,
         load_partition: WeightLoadPartition,
-        shard_axis: Literal["input", "output"],
-    ) -> tuple[int, int]:
-        """Resize one axis before loading its nested checkpoint partition.
+    ) -> WeightSwitchLoadState:
+        """Install direct checkpoint loading into a nested local shard.
 
-        Only the resident parameter and checkpoint rank change here. The
-        linear layer keeps its original forward communication group.
+        The input-sharded parameters are resized before ``model.load_weights``.
+        Their replacement loader takes a single contiguous checkpoint slice
+        selected by ``load_partition``; no TP-local checkpoint tensor is loaded
+        before selecting the PCP-local shard.  The layer's forward TP metadata
+        is intentionally not modified.
         """
         if not self.supports_weight_switch:
             raise RuntimeError(f"{type(self).__name__} does not support weight switching.")
 
-        size_attr = f"{shard_axis}_size_per_partition"
-        dim_attr = f"{shard_axis}_dim"
-        v2_loader_attr = f"load_{shard_axis}_parallel_weight"
-        original_width = getattr(layer, size_attr, None)
+        original_width = getattr(layer, "input_size_per_partition", None)
         if not isinstance(original_width, int) or original_width <= 0:
-            raise RuntimeError(f"Loader-time weight sharding requires a positive {size_attr}, got {original_width!r}.")
+            raise RuntimeError(
+                "Loader-time weight sharding requires a row-parallel layer with "
+                f"a positive input_size_per_partition, got {original_width!r}."
+            )
         if original_width % config.world_size != 0:
-            raise RuntimeError(f"Cannot split {size_attr}={original_width} across world_size={config.world_size}.")
+            raise RuntimeError(
+                "Cannot split the TP-local input width across the requested parallel domain: "
+                f"input_size_per_partition={original_width}, world_size={config.world_size}."
+            )
+        if load_partition.world_size % config.world_size != 0:
+            raise RuntimeError(
+                "The checkpoint load partition must contain an integral number "
+                "of the switched parallel-domain shards: "
+                f"load_world_size={load_partition.world_size}, switch_world_size={config.world_size}."
+            )
+        if hasattr(layer, "_weight_switch_load_state"):
+            raise RuntimeError(
+                f"Loader-time weight sharding has already been installed for {getattr(layer, 'prefix', layer)}."
+            )
 
         local_width = original_width // config.world_size
         wrapped_params = 0
         for _, param in layer.named_parameters(recurse=False):
-            shard_dim = getattr(param, dim_attr, None)
+            input_dim = getattr(param, "input_dim", None)
             original_loader = getattr(param, "weight_loader", None)
-            if shard_dim is None:
+            if input_dim is None:
                 continue
             if original_loader is None:
                 raise RuntimeError(
-                    f"Loader-time {shard_axis} weight sharding requires weight_loader: "
+                    "Loader-time weight sharding requires weight_loader on every input-sharded parameter: "
                     f"layer={getattr(layer, 'prefix', layer)}, parameter={param}."
                 )
 
             physical_shape = list(param.shape)
-            if physical_shape[shard_dim] % config.world_size != 0:
+            if physical_shape[input_dim] % config.world_size != 0:
                 raise RuntimeError(
-                    f"Cannot resize {shard_axis}-sharded parameter for direct checkpoint loading: "
+                    "Cannot resize input-sharded parameter for direct checkpoint loading: "
                     f"layer={getattr(layer, 'prefix', layer)}, shape={tuple(param.shape)}, "
-                    f"{dim_attr}={shard_dim}, world_size={config.world_size}."
+                    f"input_dim={input_dim}, world_size={config.world_size}."
                 )
-            physical_shape[shard_dim] //= config.world_size
+            physical_shape[input_dim] //= config.world_size
             with torch.no_grad():
                 param.set_(torch.empty(tuple(physical_shape), dtype=param.dtype, device=param.device))
 
-            # A ModelWeightParameter exposes both V1 and V2 loading methods.
-            # Only use the V2 branch when the layer actually selected its V2
-            # loader; V1 loaders shard with layer.tp_rank, not param.tp_rank.
-            is_v2_parameter = (
-                original_loader == getattr(layer, "weight_loader_v2", None)
-                and hasattr(param, v2_loader_attr)
-                and hasattr(param, "tp_rank")
-            )
+            is_v2_parameter = hasattr(param, "load_row_parallel_weight") and hasattr(param, "tp_rank")
 
             def weight_loader(
                 target_param: torch.nn.Parameter,
@@ -319,15 +327,14 @@ class WeightSwitchMixin:
                 *args: Any,
                 _original_loader=original_loader,
                 _is_v2_parameter=is_v2_parameter,
-                _physical_shape=tuple(physical_shape),
                 **kwargs: Any,
             ) -> Any:
-                target_shard_dim = getattr(target_param, dim_attr, None)
-                if target_shard_dim is None:
+                target_input_dim = getattr(target_param, "input_dim", None)
+                if target_input_dim is None:
                     return _original_loader(target_param, loaded_weight, *args, **kwargs)
 
                 if _is_v2_parameter:
-                    # V2 parameters perform their own parallel narrow. Give
+                    # v2 parameters perform their own row-parallel narrow. Give
                     # that implementation the composed checkpoint rank only for
                     # this load; it has no bearing on forward TP communication.
                     old_rank = target_param.tp_rank
@@ -344,32 +351,25 @@ class WeightSwitchMixin:
                 use_bitsandbytes_4bit = getattr(target_param, "use_bitsandbytes_4bit", False)
                 is_sharded_weight = is_sharded_weight or use_bitsandbytes_4bit
                 param_data = target_param.data
-                shard_size = (
-                    _physical_shape[target_shard_dim] if shard_axis == "output" else param_data.shape[target_shard_dim]
-                )
                 if not is_sharded_weight:
+                    shard_size = param_data.shape[target_input_dim]
                     start_idx = load_partition.rank * shard_size
-                    loaded_weight = loaded_weight.narrow(target_shard_dim, start_idx, shard_size)
+                    loaded_weight = loaded_weight.narrow(target_input_dim, start_idx, shard_size)
                 elif loaded_weight.shape != param_data.shape:
                     # A pre-sharded checkpoint may already be outer-domain local.
                     # In that case select only the switched-domain shard.
-                    if loaded_weight.shape[target_shard_dim] == shard_size * config.world_size:
+                    shard_size = param_data.shape[target_input_dim]
+                    if loaded_weight.shape[target_input_dim] == shard_size * config.world_size:
                         start_idx = config.rank * shard_size
-                        loaded_weight = loaded_weight.narrow(target_shard_dim, start_idx, shard_size)
+                        loaded_weight = loaded_weight.narrow(target_input_dim, start_idx, shard_size)
 
                 if len(loaded_weight.shape) == 0:
                     loaded_weight = loaded_weight.reshape(1)
                 if param_data.shape != loaded_weight.shape:
-                    if shard_axis == "output":
-                        # DSA wo_a can already be in its post-processed 3D
-                        # layout during online weight updates. The checkpoint
-                        # shard is selected above; retain the original loader's
-                        # layout conversion in that case.
-                        return _original_loader(target_param, loaded_weight, *args, **kwargs)
                     raise RuntimeError(
                         "Direct checkpoint loader produced an unexpected parameter shape: "
                         f"target={tuple(param_data.shape)}, loaded={tuple(loaded_weight.shape)}, "
-                        f"{dim_attr}={target_shard_dim}, load_rank={load_partition.rank}, "
+                        f"input_dim={target_input_dim}, load_rank={load_partition.rank}, "
                         f"load_world_size={load_partition.world_size}."
                     )
                 param_data.copy_(loaded_weight)
@@ -380,45 +380,16 @@ class WeightSwitchMixin:
 
         if wrapped_params == 0:
             raise RuntimeError(
-                f"Loader-time weight sharding found no {shard_axis}-sharded parameters on "
-                f"{getattr(layer, 'prefix', layer)}."
+                f"Loader-time weight sharding found no input-sharded parameters on {getattr(layer, 'prefix', layer)}."
             )
 
-        setattr(layer, size_attr, local_width)
-        return original_width, local_width
-
-    def prepare_layer_for_parallel_weight_load(
-        self,
-        layer: torch.nn.Module,
-        config: WeightSwitchConfig,
-        load_partition: WeightLoadPartition,
-    ) -> WeightSwitchLoadState:
-        """Load one nested shard of an input-sharded linear layer."""
-        original_width, local_width = self._prepare_layer_for_nested_weight_load(
-            layer,
-            config,
-            load_partition,
-            "input",
-        )
-        return WeightSwitchLoadState(
+        load_state = WeightSwitchLoadState(
             input_size_per_partition_before=original_width,
             input_size_per_partition_after=local_width,
         )
-
-    def prepare_layer_for_parallel_output_weight_load(
-        self,
-        layer: torch.nn.Module,
-        config: WeightSwitchConfig,
-        load_partition: WeightLoadPartition,
-    ) -> None:
-        """Load one nested shard of an output-sharded linear layer."""
-        self._prepare_layer_for_nested_weight_load(
-            layer,
-            config,
-            load_partition,
-            "output",
-        )
-        layer.output_partition_sizes = [size // config.world_size for size in layer.output_partition_sizes]
+        layer.input_size_per_partition = local_width
+        layer._weight_switch_load_state = load_state
+        return load_state
 
     def enable_weight_switch(
         self,

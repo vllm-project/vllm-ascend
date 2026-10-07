@@ -1,8 +1,0 @@
-{
-  "tokenizer_class": "PreTrainedTokenizerFast",
-  "model_max_length": 1048576,
-  "unk_token": "[UNK]",
-  "eos_token": "<|endoftext|>",
-  "pad_token": "<|endoftext|>",
-  "additional_special_tokens": ["<|image|>", "<|video|>", "<|begin_of_image|>", "<|end_of_image|>", "<|begin_of_video|>", "<|end_of_video|>"]
-}
