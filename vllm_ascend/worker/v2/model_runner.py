@@ -45,6 +45,7 @@ from vllm.v1.worker.gpu.model_runner import (
     ExecuteModelState,
     GPUModelRunner,
 )
+from vllm.v1.worker.gpu.spec_decode.rejection_sampler import RejectionSampler
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import (
@@ -109,6 +110,7 @@ class NPUModelRunner(GPUModelRunner):
 
     execute_model_state: ExecuteModelState | None
     max_num_reqs: int
+    rejection_sampler: RejectionSampler | RecomputeAwareRejectionSampler | None
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # Ascend-specific configurations
