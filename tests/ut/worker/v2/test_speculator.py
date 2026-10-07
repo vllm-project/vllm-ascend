@@ -469,7 +469,7 @@ def test_set_attn_detects_architecture():
     ]
     for backend, expected in cases:
         speculator = AscendAutoRegressiveSpeculator.__new__(AscendAutoRegressiveSpeculator)
-        speculator.vllm_config = object()
+        speculator.draft_vllm_config = object()
         speculator.attn_groups = object()
         with (
             patch(

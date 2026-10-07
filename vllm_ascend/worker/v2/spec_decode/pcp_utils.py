@@ -4,9 +4,10 @@
 
 from collections.abc import Generator, Iterator
 from contextlib import contextmanager
+from copy import copy
 from typing import TYPE_CHECKING, Any, Protocol
 
-from vllm.config import VllmConfig, replace
+from vllm.config import VllmConfig
 
 from vllm_ascend.ascend_config import validate_additional_config_bool
 
@@ -125,17 +126,10 @@ def prepare_replicated_pcp_config(
     target_parallel_config = vllm_config.parallel_config
     replicated_pcp = target_parallel_config.prefill_context_parallel_size > 1
     if replicated_pcp:
-        # TODO: Separate draft execution settings from the worker topology.
-        # Temporarily disable DCP during reconstruction to avoid validating the
-        # target model with PCP=1; restoring DCP below does not rerun DCP checks
-        # or recompute DCP-dependent settings.
-        vllm_config = replace(
-            vllm_config,
-            parallel_config=replace(
-                target_parallel_config,
-                prefill_context_parallel_size=1,
-                decode_context_parallel_size=1,
-            ),
-        )
-        vllm_config.parallel_config.decode_context_parallel_size = target_parallel_config.decode_context_parallel_size
+        # PCP=1 describes replicated draft attention, not a new worker topology.
+        # Keep the validated DCP/EP/EPLB topology; reconstructing this execution
+        # view would incorrectly validate EPLB against the reduced PCP size.
+        vllm_config = copy(vllm_config)
+        vllm_config.parallel_config = copy(target_parallel_config)
+        vllm_config.parallel_config.prefill_context_parallel_size = 1
     return vllm_config, replicated_pcp
