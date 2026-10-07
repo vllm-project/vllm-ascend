@@ -277,15 +277,19 @@ def test_make_empty_intermediate_tensors_indexcache_only(monkeypatch):
     assert buffers[0].data_ptr() == topk_buffer.data_ptr()
 
 
-@pytest.mark.parametrize("topk_mode", ["indexshare", "indexcache"])
+@pytest.mark.parametrize("topk_mode", ["indexshare", "indexcache", "indexshare_with_indexcache"])
 def test_make_empty_intermediate_tensors_aux_and_topk(monkeypatch, topk_mode):
     topk_buffer = torch.zeros((8, 2), dtype=torch.int32)
     config = SimpleNamespace(num_hidden_layers=8, hidden_size=4)
     if topk_mode == "indexshare":
         config.indexer_types = ["full", "full", "shared", "full", "shared", "full", "full", "full"]
-    else:
+    elif topk_mode == "indexcache":
         config.use_index_cache = True
         monkeypatch.setattr(pp_transport, "should_reuse_topk", lambda config, layer_idx: layer_idx in {2, 4})
+    else:
+        config.indexer_types = ["full", "shared", "full", "shared", "full", "shared", "full", "shared"]
+        config.use_index_cache = True
+        config.index_topk_pattern = "FFSFSFSF"
     model = SimpleNamespace(
         config=config,
         start_layer=2,

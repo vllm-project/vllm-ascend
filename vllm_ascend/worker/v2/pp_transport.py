@@ -320,7 +320,10 @@ def pp_stage_requires_topk_indices(config: object, start_layer: int) -> bool:
         return False
 
     indexer_types = getattr(config, "indexer_types", None)
-    if indexer_types is not None and start_layer < len(indexer_types):
-        return indexer_types[start_layer].lower() == "shared"
-
-    return bool(getattr(config, "use_index_cache", False)) and should_reuse_topk(config, start_layer)
+    uses_shared_indexer = (
+        indexer_types is not None
+        and start_layer < len(indexer_types)
+        and indexer_types[start_layer].lower() == "shared"
+    )
+    uses_index_cache = bool(getattr(config, "use_index_cache", False)) and should_reuse_topk(config, start_layer)
+    return uses_shared_indexer or uses_index_cache
