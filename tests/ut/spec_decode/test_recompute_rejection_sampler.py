@@ -58,7 +58,7 @@ def test_decode_and_ordinary_prefill_preserve_batch_identity():
 
 def test_no_draft_preserves_batch_identity():
     batch = _batch(drafts=0)
-    seen = {}
+    seen: dict[str, Batch] = {}
     sampler = lambda logits, actual, draft: seen.setdefault("batch", actual)
     RecomputeAwareRejectionSampler(sampler)(None, batch, None)
     assert seen["batch"] is batch
