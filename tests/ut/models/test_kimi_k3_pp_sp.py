@@ -544,7 +544,7 @@ def test_host_positions_after_rejection_or_chunk(
             events.append("copy")
             self.num_computed_tokens_cpu.copy_(self.req_states.num_computed_tokens.gpu)
 
-    namespace = {"BaseStateRunner": BaseStateRunner}
+    namespace = {"BaseStateRunner": BaseStateRunner, "MambaHybridModelState": type("MambaHybridModelState", (), {})}
     load_definitions(
         "vllm_ascend/worker/v2/model_runner.py",
         {"NPUModelRunner"},
@@ -556,6 +556,8 @@ def test_host_positions_after_rejection_or_chunk(
     runner.speculator = object() if owns_speculator else None
     runner.use_spec_pp = use_pp and num_speculative_steps > 0 and legacy_transport
     runner.use_pp = use_pp
+    runner.is_last_pp_rank = not use_pp
+    runner.model_state = object()
     runner.num_speculative_steps = num_speculative_steps
     runner.model_config = SimpleNamespace(architecture=architecture)
     initialize_pp_cpu_count_sync(runner)

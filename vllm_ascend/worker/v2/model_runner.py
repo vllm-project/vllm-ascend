@@ -45,6 +45,7 @@ from vllm.v1.worker.gpu.model_runner import (
     ExecuteModelState,
     GPUModelRunner,
 )
+from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import (
@@ -847,6 +848,16 @@ class NPUModelRunner(GPUModelRunner):
         npu attention backends need seq_lens_cpu to work.
         so we need to copy num_computed_tokens back to cpu here.
         """
+        if (
+            self.use_pp
+            and not self.is_last_pp_rank
+            and isinstance(self.model_state, MambaHybridModelState)
+            and self.cache_config.mamba_cache_mode == "align"
+        ):
+            # Deferred PP results belong to an older batch than input_block_tables.
+            # Restore its rows before Mamba aligns the accepted recurrent state.
+            # Postprocess skips -1 (freed/unsampled) rows; gather needs valid indices.
+            self.block_tables.gather_block_tables(idx_mapping.clamp_min(0), idx_mapping.shape[0])
         super().postprocess_sampled(
             idx_mapping,
             sampled_tokens,

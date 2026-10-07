@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""CPU-only coverage of speculative PP host-count updates, without NPU imports."""
+"""CPU-only coverage of deferred PP postprocessing, without NPU imports."""
 
 import __future__
 
@@ -13,7 +13,12 @@ import torch
 
 
 @pytest.fixture
-def runner_cls():
+def mamba_state_cls():
+    return type("MambaHybridModelState", (), {})
+
+
+@pytest.fixture
+def runner_cls(mamba_state_cls):
     source = Path(__file__).resolve().parents[3] / "vllm_ascend/worker/v2/model_runner.py"
     tree = ast.parse(source.read_text())
     cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "NPUModelRunner")
@@ -40,6 +45,7 @@ def runner_cls():
         num_computed_tokens_cpu: torch.Tensor
 
         def postprocess_sampled(self, idx_mapping, sampled_tokens, num_sampled, num_rejected, query_start_loc=None):
+            self.last_idx_mapping = idx_mapping
             self.device_count -= num_rejected
             self.events.append("reject")
 
@@ -51,7 +57,7 @@ def runner_cls():
             self.num_computed_tokens_cpu[0] = self.device_count
             self.events.append("copy")
 
-    namespace = {"Parent": Parent}
+    namespace = {"Parent": Parent, "MambaHybridModelState": mamba_state_cls}
     module = ast.fix_missing_locations(ast.Module(body=[cls], type_ignores=[]))
     exec(compile(module, str(source), "exec", flags=__future__.annotations.compiler_flag), namespace)
     return namespace["NPUModelRunner"]
@@ -76,6 +82,8 @@ def test_exact_counts_after_rejection_or_chunk(
 ):
     runner = runner_cls.__new__(runner_cls)
     runner.use_pp = use_pp
+    runner.is_last_pp_rank = False
+    runner.model_state = object()
     runner.num_speculative_steps = steps
     runner.model_config = SimpleNamespace(architecture=architecture)
     runner.__init__(None, None)
@@ -110,3 +118,49 @@ def test_exact_counts_after_rejection_or_chunk(
     count = runner.device_count if copies and needs_sync else 35
     assert runner.req_states.num_computed_tokens_cpu.tolist() == [count, 128]
     assert runner.input_buffers.seq_lens_cpu.tolist() == [count + 4, 136]
+
+
+@pytest.mark.parametrize(
+    "use_pp,last_rank,hybrid,cache_mode,refresh",
+    [
+        (True, False, True, "align", True),
+        (False, True, True, "align", False),
+        (True, True, True, "align", False),
+        (True, False, False, "align", False),
+        (True, False, True, "none", False),
+    ],
+)
+@pytest.mark.parametrize("indices", [[3, 1], [3, -1, 1], [-1, -1], []])
+def test_deferred_mamba_postprocess_restores_batch_rows(
+    runner_cls, mamba_state_cls, use_pp, last_rank, hybrid, cache_mode, refresh, indices
+):
+    runner = runner_cls.__new__(runner_cls)
+    runner.use_pp = use_pp
+    runner.is_last_pp_rank = last_rank
+    runner.model_state = mamba_state_cls() if hybrid else object()
+    runner.cache_config = SimpleNamespace(mamba_cache_mode=cache_mode)
+    runner.speculator = None
+    runner.sync_spec_pp_cpu_counts = False
+    runner.events = []
+    runner.device_count = 19
+    idx_mapping = torch.tensor(indices, dtype=torch.int32)
+    request_tables = torch.arange(16, dtype=torch.int32).reshape(4, 4)
+    # A later PP batch has overwritten the persistent input block-table rows.
+    input_tables = torch.full((len(indices), 4), -1, dtype=torch.int32)
+
+    def gather(mapping, num_reqs):
+        assert num_reqs == len(indices)
+        assert mapping.tolist() == [max(index, 0) for index in indices]
+        input_tables.copy_(request_tables[mapping.long()])
+        runner.events.append("gather")
+
+    runner.block_tables = SimpleNamespace(gather_block_tables=gather)
+    runner.postprocess_sampled(idx_mapping, None, 2, 2)
+
+    assert runner.events == (["gather", "reject"] if refresh else ["reject"])
+    assert runner.last_idx_mapping is idx_mapping
+    assert idx_mapping.tolist() == indices  # Preserve -1 so postprocess skips filtered rows.
+    if refresh:
+        torch.testing.assert_close(input_tables, request_tables[idx_mapping.clamp_min(0).long()])
+    else:
+        assert torch.all(input_tables == -1)
