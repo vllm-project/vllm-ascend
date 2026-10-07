@@ -135,6 +135,7 @@ class TestNPUModelRunner310(TestBase):
         runner.pin_memory = False
         runner.is_pooling_model = False
         runner.model_config = SimpleNamespace(max_model_len=512, get_vocab_size=lambda: 32000)
+        runner.block_size = 128
         runner.cache_config = SimpleNamespace(block_size=128, enable_prefix_caching=True)
         runner.parallel_config = SimpleNamespace(cp_kv_cache_interleave_size=4)
         runner.vllm_config = SimpleNamespace(speculative_config=None)
@@ -196,6 +197,7 @@ def test_attention_kernel_blocks_match_input_batch_and_cache_shape(
     runner.pin_memory = False
     runner.is_pooling_model = False
     runner.model_config = SimpleNamespace(get_vocab_size=lambda: 32000)
+    runner.block_size = 128
     runner.cache_config = SimpleNamespace(block_size=128, enable_prefix_caching=False)
     runner.parallel_config = SimpleNamespace(cp_kv_cache_interleave_size=1)
     runner.vllm_config = SimpleNamespace(speculative_config=None)
