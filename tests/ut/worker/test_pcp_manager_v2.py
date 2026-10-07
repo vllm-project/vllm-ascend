@@ -140,8 +140,19 @@ def test_decode_sharding_does_not_add_a_parallel_config_field():
         speculative_config=SimpleNamespace(method="mtp"),
         compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE),
     )
-    with patch("vllm_ascend.platform.refresh_block_size"):
-        _setup_worker_and_scheduler(config, SimpleNamespace())
+    ascend_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(
+            dyntra_lb_config=SimpleNamespace(enabled=False),
+            profiling_chunk_config=SimpleNamespace(enabled=False),
+            batch_job_sched_config=SimpleNamespace(enabled=False),
+        )
+    )
+    with (
+        patch("vllm_ascend.platform.get_current_hardware_profile") as hardware_profile,
+        patch("vllm_ascend.platform.refresh_block_size"),
+    ):
+        hardware_profile.return_value.supports.return_value = False
+        _setup_worker_and_scheduler(config, ascend_config)
 
     assert not hasattr(parallel_config, "pcp_shard_decode_requests")
     replace(parallel_config)
@@ -1187,13 +1198,7 @@ def test_speculative_decode_keeps_draft_tokens_on_pcp_ranks(pcp_rank):
     ):
         local = manager.partition_batch(batch)
     assert manager.get_num_tokens_for_dispatch(batch.num_scheduled_tokens, batch.is_prefilling_np) == 4
-    if pcp_rank != 0:
-        assert local.num_tokens == 0
-        assert local.num_scheduled_tokens.tolist() == [0]
-        assert local.seq_lens.tolist() == [0]
-        assert local.seq_lens_np.tolist() == [0]
-        assert local.seq_lens_cpu_upper_bound.tolist() == [0]
-        return
+    # FULL_DECODE_ONLY with speculation stays replicated, so every rank keeps the tokens.
     assert local.num_tokens == 4
     assert local.req_ids == batch.req_ids
     assert batch.num_draft_tokens_per_req.tolist() == [3]

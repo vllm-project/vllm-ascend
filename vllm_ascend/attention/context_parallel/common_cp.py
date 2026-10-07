@@ -21,9 +21,14 @@ def is_pcp_decode_sharding_enabled(vllm_config) -> bool:
     parallel_config = vllm_config.parallel_config
     compilation_config = getattr(vllm_config, "compilation_config", None)
     cudagraph_mode = None if compilation_config is None else getattr(compilation_config, "cudagraph_mode", None)
+    # Incomplete test mocks expose MagicMock attributes. Treat those as unset.
+    pcp_size = getattr(parallel_config, "prefill_context_parallel_size", 1)
+    dcp_size = getattr(parallel_config, "decode_context_parallel_size", 1)
     return (
-        getattr(parallel_config, "prefill_context_parallel_size", 1) > 1
-        and getattr(parallel_config, "decode_context_parallel_size", 1) == 1
+        isinstance(pcp_size, int)
+        and pcp_size > 1
+        and isinstance(dcp_size, int)
+        and dcp_size == 1
         and getattr(vllm_config, "speculative_config", None) is None
         and cudagraph_mode == CUDAGraphMode.NONE
     )
