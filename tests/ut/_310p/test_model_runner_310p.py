@@ -25,9 +25,26 @@ from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
 
 from tests.ut.base import TestBase
 from vllm_ascend._310p.attention.attention_v1 import AscendAttentionBackend310
+from vllm_ascend._310p.block_table import MultiGroupBlockTable as MultiGroupBlockTable310
 from vllm_ascend._310p.model_runner_310p import NPUModelRunner310
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.worker.block_table import MultiGroupBlockTable
+
+
+def _initialize_310p_batch_table(**kwargs):
+    return SimpleNamespace(
+        logitsprocs=kwargs["logitsprocs"],
+        block_table=MultiGroupBlockTable310(
+            max_num_reqs=kwargs["max_num_reqs"],
+            max_model_len=kwargs["max_model_len"],
+            max_num_batched_tokens=kwargs["max_num_batched_tokens"],
+            pin_memory=kwargs["pin_memory"],
+            device=kwargs["device"],
+            block_sizes=kwargs["block_sizes"],
+            max_num_blocks=kwargs["max_num_blocks_per_req"],
+            kernel_sizes=kwargs["kernel_block_sizes"],
+            kv_cache_groups=kwargs["kv_cache_groups"],
+        ),
+    )
 
 
 def _prepare_inputs_source() -> str:
@@ -144,29 +161,17 @@ def test_reinitialized_310p_batch_uses_compatible_kernel_sizes(physical_block_si
     runner.parallel_config = SimpleNamespace(cp_kv_cache_interleave_size=1)
     runner.vllm_config = SimpleNamespace(speculative_config=None)
     runner.offload_config = SimpleNamespace(uva=SimpleNamespace(cpu_offload_gb=0))
-    runner.input_batch = SimpleNamespace(logitsprocs=MagicMock())
+    runner.input_batch = SimpleNamespace(
+        logitsprocs=MagicMock(),
+        block_table=SimpleNamespace(block_tables=[SimpleNamespace(physical_block_size=32, kernel_sizes=[32])]),
+    )
     backend = SimpleNamespace(get_supported_kernel_block_sizes=lambda: [128, 64])
     runner.attn_groups = [[SimpleNamespace(backend=backend)]]
     spec = AttentionSpec(block_size=physical_block_size, num_kv_heads=1, head_size=head_size, dtype=torch.float16)
     config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec)])
 
-    def initialize_common_table(**kwargs):
-        return SimpleNamespace(
-            block_table=MultiGroupBlockTable(
-                max_num_reqs=kwargs["max_num_reqs"],
-                max_model_len=kwargs["max_model_len"],
-                max_num_batched_tokens=kwargs["max_num_batched_tokens"],
-                pin_memory=kwargs["pin_memory"],
-                device=kwargs["device"],
-                block_sizes=kwargs["block_sizes"],
-                max_num_blocks=kwargs["max_num_blocks_per_req"],
-                kernel_sizes=[sizes[0] for sizes in kwargs["kernel_block_sizes"]],
-                kv_cache_groups=kwargs["kv_cache_groups"],
-            )
-        )
-
     with (
-        patch("vllm_ascend._310p.model_runner_310p.NPUInputBatch", side_effect=initialize_common_table) as batch,
+        patch("vllm_ascend._310p.model_runner_310p.NPUInputBatch", side_effect=_initialize_310p_batch_table) as batch,
         patch("vllm_ascend._310p.model_runner_310p.get_decode_context_model_parallel_world_size", return_value=1),
         patch(
             "vllm_ascend.worker.block_table.get_dcp_group",
@@ -180,6 +185,76 @@ def test_reinitialized_310p_batch_uses_compatible_kernel_sizes(physical_block_si
     assert table.physical_block_size == physical_block_size
     assert table.block_size == expected_candidates[0]
     assert table.blocks_per_phys_block == physical_block_size // expected_candidates[0]
+
+
+@pytest.mark.parametrize(
+    ("initial_block_size", "initial_kernel_sizes", "block_size", "head_size", "expected_kernel_sizes", "reinitialize"),
+    [
+        (128, [128], 64, 128, [64], True),
+        (64, [64], 64, 128, [64], False),
+        (128, [128], 128, 256, [64], True),
+        (128, [64], 128, 256, [64], False),
+        (256, [128, 64], 256, 128, [128, 64], False),
+    ],
+)
+def test_310p_batch_compares_existing_table_layout(
+    initial_block_size, initial_kernel_sizes, block_size, head_size, expected_kernel_sizes, reinitialize
+):
+    runner = object.__new__(NPUModelRunner310)
+    runner.max_num_reqs = 2
+    runner.max_model_len = 512
+    runner.max_encoder_len = 0
+    runner.max_num_tokens = 64
+    runner.device = torch.device("cpu")
+    runner.pin_memory = False
+    runner.is_pooling_model = False
+    runner.model_config = SimpleNamespace(get_vocab_size=lambda: 32)
+    runner.cache_config = SimpleNamespace(block_size=block_size, enable_prefix_caching=False)
+    runner.parallel_config = SimpleNamespace(cp_kv_cache_interleave_size=1)
+    runner.vllm_config = SimpleNamespace(speculative_config=None)
+    runner.offload_config = SimpleNamespace(uva=SimpleNamespace(cpu_offload_gb=0))
+    backend = SimpleNamespace(get_supported_kernel_block_sizes=lambda: [128, 64])
+    runner.attn_groups = [[SimpleNamespace(backend=backend)]]
+    spec = AttentionSpec(block_size=block_size, num_kv_heads=1, head_size=head_size, dtype=torch.float16)
+    config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec)])
+
+    with (
+        patch("vllm_ascend._310p.model_runner_310p.NPUInputBatch", side_effect=_initialize_310p_batch_table) as batch,
+        patch("vllm_ascend._310p.model_runner_310p.get_decode_context_model_parallel_world_size", return_value=1),
+        patch("vllm_ascend._310p.block_table.get_decode_context_model_parallel_world_size", return_value=1),
+        patch(
+            "vllm_ascend.worker.block_table.get_dcp_group",
+            return_value=SimpleNamespace(world_size=1, rank_in_group=0),
+        ),
+    ):
+        runner.input_batch = _initialize_310p_batch_table(
+            max_num_reqs=runner.max_num_reqs,
+            max_model_len=runner.max_model_len,
+            max_num_batched_tokens=runner.max_num_tokens,
+            pin_memory=runner.pin_memory,
+            device=runner.device,
+            block_sizes=[initial_block_size],
+            kernel_block_sizes=[initial_kernel_sizes],
+            max_num_blocks_per_req=None,
+            kv_cache_groups=None,
+            logitsprocs=MagicMock(),
+        )
+        original_batch = runner.input_batch
+        runner.may_reinitialize_input_batch(config, [expected_kernel_sizes[0]])
+
+    assert batch.call_count == int(reinitialize)
+    assert (runner.input_batch is not original_batch) is reinitialize
+    table = runner.input_batch.block_table[0]
+    assert table.physical_block_size == block_size
+    assert table.kernel_sizes == expected_kernel_sizes
+    assert table.block_size == expected_kernel_sizes[0]
+    assert table.blocks_per_phys_block == block_size // expected_kernel_sizes[0]
+    block_ids = np.array([3, 7], dtype=np.int32)
+    positions = np.array([0, table.block_size - 1, table.block_size, block_size - 1, block_size, block_size + 1])
+    table.append_row(block_ids.tolist(), 0)
+    table.compute_slot_mapping(np.zeros(len(positions), dtype=np.int64), positions)
+    expected_slots = block_ids[positions // block_size] * block_size + positions % block_size
+    np.testing.assert_array_equal(table.slot_mapping.np[: len(positions)], expected_slots)
 
 
 @pytest.mark.parametrize(
@@ -247,7 +322,10 @@ class TestNPUModelRunner310(TestBase):
         runner.parallel_config = SimpleNamespace(cp_kv_cache_interleave_size=4)
         runner.vllm_config = SimpleNamespace(speculative_config=None)
         runner.offload_config = SimpleNamespace(uva=SimpleNamespace(cpu_offload_gb=0))
-        runner.input_batch = SimpleNamespace(logitsprocs=MagicMock())
+        runner.input_batch = SimpleNamespace(
+            logitsprocs=MagicMock(),
+            block_table=SimpleNamespace(block_tables=[SimpleNamespace(physical_block_size=128, kernel_sizes=[128])]),
+        )
         attention_backend = SimpleNamespace(get_supported_kernel_block_sizes=lambda: [128, 64])
         runner.attn_groups = [[SimpleNamespace(backend=attention_backend)]]
 

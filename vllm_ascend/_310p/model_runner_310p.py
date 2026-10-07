@@ -942,9 +942,7 @@ class NPUModelRunner310(NPUModelRunner):
         kernel_block_sizes: list[int] | None = None,
     ) -> None:
         """
-        Re-initialize the input batch if the block sizes are different from
-        `[self.cache_config.block_size]`. This usually happens when there
-        are multiple KV cache groups.
+        Reinitialize the input batch when its existing block layout differs from the KV cache layout.
 
         Args:
             kv_cache_config: The KV cache configuration.
@@ -994,9 +992,10 @@ class NPUModelRunner310(NPUModelRunner):
                 max_num_blocks_per_req = max(max_num_blocks_per_req, mamba_blocks_per_req)
             max_num_blocks.append(max_num_blocks_per_req)
 
+        block_tables = self.input_batch.block_table.block_tables
         if (
-            block_sizes != [self.cache_config.block_size]
-            or self.kernel_block_sizes != [[self.cache_config.block_size]]
+            block_sizes != [table.physical_block_size for table in block_tables]
+            or self.kernel_block_sizes != [table.kernel_sizes for table in block_tables]
             or len(kv_cache_config.kv_cache_groups) > 1
         ):
             assert self.offload_config.uva.cpu_offload_gb == 0, (
