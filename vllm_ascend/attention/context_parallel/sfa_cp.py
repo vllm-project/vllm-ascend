@@ -120,10 +120,16 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
             num_input_tokens,
             hidden_states,
         )
-        context.gather_full_o_proj = self._o_proj_weight_switch_enabled and attn_metadata.attn_state not in {
-            AscendAttentionState.DecodeOnly,
-            AscendAttentionState.SpecDecoding,
-        }
+        # Single-token PCP prefill shards can have DecodeOnly state.
+        # Keep O-projection collectives consistent across the PCP group.
+        context.gather_full_o_proj = self._o_proj_weight_switch_enabled and (
+            attn_metadata.pcp_has_global_prefill
+            or attn_metadata.attn_state
+            not in {
+                AscendAttentionState.DecodeOnly,
+                AscendAttentionState.SpecDecoding,
+            }
+        )
         if context.gather_full_o_proj:
             self._all_gather_o_proj_full_weight()
         return context
