@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
 import pytest
 import torch
+from vllm.v1.kv_cache_interface import SlidingWindowSpec
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1 import vllm_adapter
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend import (
@@ -37,10 +39,13 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.transf
     RangeStoreCommand,
     StoreCommandBatch,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.route import KVPoolRouteSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk import (
+    AsynchronousBulkWorker,
     SynchronousBulkWorker,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.resources import (
+    GVAObjectLayout,
     KVPoolResources,
 )
 
@@ -129,6 +134,40 @@ def test_resources_own_exact_shared_storage_region_and_close_in_order() -> None:
         resources.bind_kv_caches(caches)
 
 
+@pytest.mark.parametrize("empty_first", (False, True))
+@pytest.mark.parametrize("use_gva", (False, True))
+def test_resources_skip_empty_rope_views_in_registration_and_projection(empty_first, use_gva) -> None:
+    backend = RecordingBackend()
+    topology = make_topology(physical_layers=(0,))
+    resources = KVPoolResources(
+        backend,
+        make_backend_spec(layerwise_access=LayerwiseAccessKind.GVA if use_gva else None),
+        8,
+        topology.transfer_groups,
+        gva_layout=GVAObjectLayout(0, 1, 0, 1, 1) if use_gva else None,
+    )
+    nope_cache = torch.empty((8, 4), dtype=torch.float32)
+    rope_cache = torch.empty((8, 4, 0), dtype=torch.float32)
+    caches = (rope_cache, nope_cache) if empty_first else (nope_cache, rope_cache)
+
+    registration = resources.bind_kv_caches({topology.groups[0].layer_names[0]: caches})
+
+    assert "tensor_layouts" not in registration
+    address = nope_cache.data_ptr()
+    region_size = nope_cache.numel() * nope_cache.element_size()
+    block_size_bytes = nope_cache[0].numel() * nope_cache.element_size()
+    assert backend.calls == [("register_region", address, region_size)]
+    assert registration["base_addresses"] == {0: [address]}
+    assert registration["block_lengths"] == {0: [block_size_bytes]}
+    assert registration["block_strides"] == {0: [block_size_bytes]}
+    assert registration["layer_entry_offsets"] == {0: [0, 1]}
+    if use_gva:
+        assert registration["object_sizes"] == {0: block_size_bytes}
+        assert registration["object_offsets"] == {0: 0}
+    resources.close()
+    assert backend.calls[-2:] == [("unregister_region", address, region_size), ("backend_close",)]
+
+
 def test_registration_failure_rolls_back_successful_prefix_before_backend_close() -> None:
     backend = RecordingBackend(fail_registration_index=1)
     topology, resources = _make_resources(backend)
@@ -196,6 +235,56 @@ def test_worker_bind_failure_releases_registration_before_backend_close() -> Non
     lifecycle = [call[0] for call in backend.calls]
     assert lifecycle == ["register_region", "unregister_region", "backend_close"]
     assert resources.kv_caches is None
+
+
+@pytest.mark.parametrize("load_async", (False, True))
+def test_memcache_bulk_factory_binds_hybrid_buffers_without_gva_constraints(monkeypatch, load_async) -> None:
+    topology = make_topology(group_ids=(0, 1), physical_layers=(0,))
+    sliding_spec = SlidingWindowSpec(
+        block_size=4,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=8,
+    )
+    topology = replace(topology, groups=(topology.groups[0], replace(topology.groups[1], kv_cache_spec=sliding_spec)))
+    backend = RecordingBackend()
+    backend_spec = BackendSpec("memcache", lambda *_args, **_kwargs: backend, LayerwiseAccessKind.GVA, True)
+    route_spec = KVPoolRouteSpec(topology, "memcache", 64, use_layerwise=False)
+    projection_binder = compile_bulk_projection_binder(topology, 64)
+    monkeypatch.setattr(vllm_adapter, "resolve_kv_pool_route_spec", lambda *_args: route_spec)
+    monkeypatch.setattr(vllm_adapter, "_compile_kv_pool_projection_binder", lambda *_args: projection_binder)
+    monkeypatch.setattr(vllm_adapter, "resolve_backend_spec", lambda _name: backend_spec)
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(),
+        kv_transfer_config=SimpleNamespace(kv_role="kv_consumer", kv_connector_extra_config={"load_async": load_async}),
+        model_config=SimpleNamespace(
+            get_layers_start_end_indices=MagicMock(return_value=(0, 1)),
+            get_total_num_hidden_layers=MagicMock(return_value=1),
+        ),
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+    )
+    cache_config = SimpleNamespace(
+        num_blocks=8,
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=group.kv_cache_spec) for group in topology.groups],
+    )
+
+    worker = vllm_adapter.create_kv_pool_worker(config, cache_config)
+    try:
+        assert type(worker) is (AsynchronousBulkWorker if load_async else SynchronousBulkWorker)
+        config.model_config.get_layers_start_end_indices.assert_not_called()
+        config.model_config.get_total_num_hidden_layers.assert_not_called()
+        caches = {
+            name: torch.empty((8, 4), dtype=torch.float32) for group in topology.groups for name in group.layer_names
+        }
+        worker.bind_kv_caches(caches)
+        registered_regions = [entry for entry in backend.calls if entry[0] == "register_region"]
+        assert registered_regions == [
+            ("register_region", cache.data_ptr(), cache.numel() * cache.element_size()) for cache in caches.values()
+        ]
+    finally:
+        worker.close()
+    assert backend.closed
 
 
 def test_worker_factory_closes_backend_when_layout_resolution_fails(monkeypatch) -> None:

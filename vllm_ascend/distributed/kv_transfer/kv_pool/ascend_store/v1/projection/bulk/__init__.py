@@ -4,13 +4,16 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import TypeAlias
+from typing import TYPE_CHECKING, TypeAlias
 
 from ...topology import KVPoolTopology
 from .consumer_pipeline import ConsumerPipelineBulkProjection, bind_consumer_pipeline_bulk_projection
 from .hybrid import HybridBulkProjection, bind_hybrid_bulk_projection
 from .ordinary import OrdinaryBulkProjection, bind_ordinary_bulk_projection
 from .tp_mismatch import TPMismatchBulkProjection, bind_tp_mismatch_bulk_projection
+
+if TYPE_CHECKING:
+    import torch
 
 BulkProjection: TypeAlias = (
     OrdinaryBulkProjection | TPMismatchBulkProjection | ConsumerPipelineBulkProjection | HybridBulkProjection
@@ -25,6 +28,7 @@ class BulkProjectionBinder:
     max_model_len: int
     use_eagle: bool = False
     retention_interval: int | None = None
+    kv_cache_layout: str = "NHD"
 
     def __post_init__(self) -> None:
         groups = self.topology.transfer_groups
@@ -50,6 +54,7 @@ class BulkProjectionBinder:
         *,
         object_sizes: Mapping[int, int] | None = None,
         object_offsets: Mapping[int, int] | None = None,
+        kv_caches: Mapping[str, torch.Tensor | Sequence[torch.Tensor]] | None = None,
     ) -> BulkProjection:
         del object_sizes, object_offsets
         common = (
@@ -62,7 +67,7 @@ class BulkProjectionBinder:
         )
         groups = self.topology.transfer_groups
         if self.topology.tp_partition.tp_mismatch:
-            return bind_tp_mismatch_bulk_projection(*common)
+            return bind_tp_mismatch_bulk_projection(*common, kv_cache_layout=self.kv_cache_layout, kv_caches=kv_caches)
         partitions = self.topology.consumer_pipeline_partitions
         if len(groups) == 1 and not groups[0].uses_align_state and partitions is not None and len(partitions) > 1:
             return bind_consumer_pipeline_bulk_projection(*common)
@@ -81,8 +86,9 @@ def compile_bulk_projection_binder(
     *,
     use_eagle: bool = False,
     retention_interval: int | None = None,
+    kv_cache_layout: str = "NHD",
 ) -> BulkProjectionBinder:
-    return BulkProjectionBinder(topology, max_model_len, use_eagle, retention_interval)
+    return BulkProjectionBinder(topology, max_model_len, use_eagle, retention_interval, kv_cache_layout)
 
 
 __all__ = (

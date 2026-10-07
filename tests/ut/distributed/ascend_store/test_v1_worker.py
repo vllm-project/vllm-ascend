@@ -507,6 +507,52 @@ def test_initialization_runs_layerwise_topology_validation_on_both_sides(monkeyp
                 vllm_adapter.resolve_kv_pool_route_spec(config, cache_config)
 
 
+@pytest.mark.parametrize("factory", ("scheduler", "worker"))
+@pytest.mark.parametrize("kv_role, peer_role", (("kv_producer", "decode"), ("kv_consumer", "prefill")))
+@pytest.mark.parametrize("context_axis", ("dcp", "pcp"))
+def test_layerwise_factories_reject_peer_context_parallel_mismatch(factory, kv_role, peer_role, context_axis) -> None:
+    config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(
+            kv_role=kv_role,
+            kv_connector_extra_config={
+                "backend": "memcache",
+                "use_layerwise": True,
+                f"{peer_role}_{context_axis}_size": 1 if context_axis == "dcp" else 2,
+            },
+        ),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=2, prefill_context_parallel_size=1),
+        speculative_config=None,
+    )
+
+    with pytest.raises(ValueError, match="same dcp_size/pcp_size"):
+        if factory == "scheduler":
+            vllm_adapter.create_kv_pool_scheduler(config, SimpleNamespace(), "unused")
+        else:
+            vllm_adapter.create_kv_pool_worker(config, SimpleNamespace())
+
+
+@pytest.mark.parametrize(
+    "kv_role, extra_config, use_layerwise",
+    (
+        ("kv_producer", {"decode_dcp_size": 2, "decode_pcp_size": 1}, True),
+        ("kv_consumer", {"prefill_dcp_size": 2, "prefill_pcp_size": 1}, True),
+        ("kv_producer", {}, True),
+        ("kv_consumer", {}, True),
+        ("kv_both", {"prefill_dcp_size": 1, "decode_pcp_size": 2}, True),
+        ("kv_producer", {"decode_dcp_size": 1}, False),
+        ("kv_consumer", {"prefill_pcp_size": 2}, False),
+    ),
+)
+def test_peer_context_parallel_check_preserves_production_scope(kv_role, extra_config, use_layerwise) -> None:
+    config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(kv_role=kv_role, kv_connector_extra_config=extra_config),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=2, prefill_context_parallel_size=1),
+        speculative_config=None,
+    )
+
+    vllm_adapter._validate_kv_pool_preflight(config, "memcache", use_layerwise=use_layerwise)
+
+
 def test_worker_connector_hooks_delegate_and_drain_worker_results() -> None:
     calls: list[tuple[Any, ...]] = []
     released_store_job_ids = {17}

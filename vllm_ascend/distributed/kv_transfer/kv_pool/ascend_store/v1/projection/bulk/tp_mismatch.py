@@ -6,6 +6,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 
 import numpy as np
+import torch
 
 from ...topology import KVPoolTopology
 from ..reachability import UnitaryReachability
@@ -54,6 +55,9 @@ def bind_tp_mismatch_bulk_projection(
     block_lengths: Mapping[int, Sequence[int]],
     block_strides: Mapping[int, Sequence[int]],
     layer_entry_offsets: Mapping[int, Sequence[int]],
+    *,
+    kv_cache_layout: str = "NHD",
+    kv_caches: Mapping[str, torch.Tensor | Sequence[torch.Tensor]] | None = None,
 ) -> TPMismatchBulkProjection:
     group = topology.transfer_groups[0]
     try:
@@ -75,28 +79,72 @@ def bind_tp_mismatch_bulk_projection(
     bases_by_slice: list[ByteArray] = []
     strides_by_slice: list[ByteArray] = []
     sizes_by_slice: list[ByteArray] = []
-    if slice_count > 1:
+    head_major = kv_cache_layout in ("HND", "LBHNC")
+    tensors: list[torch.Tensor] | None = None
+    if kv_caches is not None:
+        tensors = []
+        for layer in group.layers:
+            for layer_name in layer.layer_names:
+                cache_or_caches = kv_caches[layer_name]
+                entries = (cache_or_caches,) if isinstance(cache_or_caches, torch.Tensor) else cache_or_caches
+                tensors.extend(cache for cache in entries if cache.numel())
+        if len(tensors) != len(bases):
+            raise ValueError("TP mismatch tensors do not align the registered cache entries")
+    if tensors is None and head_major:
+        raise ValueError("Head-major TP mismatch requires the registered cache tensors")
+    token_indices: list[int] = []
+    packed_full_rows = slice_count == 1 and (
+        not head_major or (tensors is not None and all(cache.ndim == 4 and cache.shape[1] == 1 for cache in tensors))
+    )
+    if slice_count > 1 or tensors is not None:
         for slice_index in range(slice_count):
             slice_bases: list[int] = []
             slice_strides: list[int] = []
             slice_sizes: list[int] = []
-            for base, length, stride in zip(bases, lengths, strides, strict=True):
-                slice_size, remainder = divmod(int(length), group.block_size * slice_count)
-                if remainder or slice_size == 0:
-                    raise ValueError(
-                        f"KV cache group {group.group_id} block length {length} cannot form "
-                        f"{slice_count} Strided slices"
+            for entry_index, (base, length, stride) in enumerate(zip(bases, lengths, strides, strict=True)):
+                if tensors is None:
+                    slice_size, remainder = divmod(int(length), group.block_size * slice_count)
+                    if remainder or slice_size == 0:
+                        raise ValueError(
+                            f"KV cache group {group.group_id} block length {length} cannot form "
+                            f"{slice_count} Strided slices"
+                        )
+                    token_bytes = slice_size * slice_count
+                    offsets = [
+                        slice_index * slice_size + token_index * token_bytes for token_index in range(group.block_size)
+                    ]
+                    entry_sizes = [slice_size] * group.block_size
+                    entry_tokens = list(range(group.block_size))
+                else:
+                    offsets, entry_sizes, entry_tokens = _tensor_head_slice_ranges(
+                        tensors[entry_index],
+                        int(stride),
+                        group.block_size,
+                        slice_index,
+                        slice_count,
+                        head_major=head_major,
                     )
-                token_bytes = slice_size * slice_count
-                for token_index in range(group.block_size):
-                    slice_bases.append(int(base) + slice_index * slice_size + token_index * token_bytes)
-                    slice_strides.append(int(stride))
-                    slice_sizes.append(slice_size)
+                slice_bases.extend(int(base) + offset for offset in offsets)
+                slice_strides.extend([int(stride)] * len(offsets))
+                slice_sizes.extend(entry_sizes)
+                if slice_index == 0:
+                    token_indices.extend(entry_tokens)
+                if packed_full_rows:
+                    next_offset = 0
+                    for offset, size in zip(offsets, entry_sizes, strict=True):
+                        if offset != next_offset:
+                            packed_full_rows = False
+                            break
+                        next_offset += size
+                    packed_full_rows = packed_full_rows and next_offset == int(length)
             bases_by_slice.append(readonly_uint64(slice_bases))
             strides_by_slice.append(readonly_uint64(slice_strides))
             sizes_by_slice.append(readonly_uint64(slice_sizes))
-    token_indices = np.tile(np.arange(group.block_size, dtype=np.uint64), len(bases))
-    token_indices.flags.writeable = False
+    # A packed whole row needs no scatter plan; single-head HND also qualifies.
+    if packed_full_rows:
+        bases_by_slice.clear()
+        strides_by_slice.clear()
+        sizes_by_slice.clear()
     return TPMismatchBulkProjection(
         group_id=group.group_id,
         block_size=group.block_size,
@@ -111,10 +159,66 @@ def bind_tp_mismatch_bulk_projection(
         bases_by_slice=tuple(bases_by_slice),
         strides_by_slice=tuple(strides_by_slice),
         sizes_by_slice=tuple(sizes_by_slice),
-        token_indices=token_indices,
+        token_indices=readonly_uint64(token_indices),
         object_size=int(lengths.sum()),
         reachability=UnitaryReachability(group.group_id, max_model_len, topology.cache_transfer_granularity),
     )
+
+
+def _tensor_head_slice_ranges(
+    cache: torch.Tensor,
+    block_stride: int,
+    block_size: int,
+    slice_index: int,
+    slice_count: int,
+    *,
+    head_major: bool,
+) -> tuple[list[int], list[int], list[int]]:
+    """Compile local ranges while preserving this layout's existing Bulk wire order."""
+
+    token_axis, head_axis = (2, 1) if head_major else (1, 2)
+    if cache.ndim != 4:
+        raise ValueError("Dense TP mismatch requires a block/token/head/vector tensor")
+    element_size = cache.element_size()
+    byte_strides = tuple(stride * element_size for stride in cache.stride())
+    if byte_strides[0] <= 0:
+        raise ValueError("TP mismatch tensor must have a positive kernel block stride")
+    kernel_blocks_per_cache_block, stride_remainder = divmod(block_stride, byte_strides[0])
+    if stride_remainder or kernel_blocks_per_cache_block <= 0:
+        raise ValueError("TP mismatch registered block stride does not align the tensor's kernel blocks")
+    kernel_tokens = cache.shape[token_axis]
+    head_count = cache.shape[head_axis]
+    physical_tokens = kernel_tokens * kernel_blocks_per_cache_block
+    if physical_tokens <= 0 or block_size % physical_tokens:
+        raise ValueError("TP mismatch tensor token extent does not divide the logical cache block")
+    heads_per_slice, remainder = divmod(head_count, slice_count)
+    if remainder or heads_per_slice <= 0:
+        raise ValueError("TP mismatch key slices do not divide the tensor's local heads")
+    if cache.shape[-1] > 1 and byte_strides[-1] != element_size:
+        raise ValueError("Dense TP mismatch requires contiguous per-head vectors")
+    vector_bytes = cache.shape[-1] * element_size
+    if vector_bytes <= 0:
+        raise ValueError("TP mismatch tensor has an empty head vector")
+    head_stride = byte_strides[head_axis]
+    heads_per_range = heads_per_slice if not head_major and head_stride == vector_bytes else 1
+    raw_tokens_per_physical_token = block_size // physical_tokens
+    offsets: list[int] = []
+    sizes: list[int] = []
+    token_indices: list[int] = []
+    for kernel_block in range(kernel_blocks_per_cache_block):
+        head_indices = range(0, heads_per_slice, heads_per_range)
+        positions = (
+            ((token, head) for head in head_indices for token in range(kernel_tokens))
+            if head_major
+            else ((token, head) for token in range(kernel_tokens) for head in head_indices)
+        )
+        for kernel_token, head_index in positions:
+            token_offset = kernel_block * byte_strides[0] + kernel_token * byte_strides[token_axis]
+            offsets.append(token_offset + (slice_index * heads_per_slice + head_index) * head_stride)
+            sizes.append(heads_per_range * vector_bytes)
+            physical_token = kernel_block * kernel_tokens + kernel_token
+            token_indices.append(physical_token * raw_tokens_per_physical_token)
+    return offsets, sizes, token_indices
 
 
 def tp_mismatch_load_keys(projection: TPMismatchBulkProjection, hashes) -> KeyAxes:
@@ -135,7 +239,7 @@ def tp_mismatch_bulk_ranges(
     token_counts,
     selected_objects=None,
 ) -> BulkRangeBatch:
-    if projection.key_slices_per_rank == 1:
+    if not projection.bases_by_slice:
         return contiguous_ranges(
             block_ids,
             token_counts,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+import vllm.envs as vllm_envs
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
 from vllm.distributed import get_dcp_group, get_pcp_group, get_pp_group, get_tp_group
 from vllm.logger import logger
@@ -12,6 +13,7 @@ from vllm.v1.core.kv_cache_utils import resolve_dcp_kv_cache_spec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     KeyMetadata,
     infer_cacheable_group_ids,
+    infer_dcp_mismatch_info,
     infer_group_cache_families,
     infer_tp_mismatch_info,
     uses_hybrid_kv_cache,
@@ -132,7 +134,7 @@ def create_kv_pool_worker(vllm_config: VllmConfig, kv_cache_config: KVCacheConfi
     resources: KVPoolResources | None = None
     try:
         gva_layout = None
-        if backend_spec.layerwise_access is LayerwiseAccessKind.GVA:
+        if route_spec.use_layerwise and backend_spec.layerwise_access is LayerwiseAccessKind.GVA:
             layer_start, _ = vllm_config.model_config.get_layers_start_end_indices(vllm_config.parallel_config)
             topology = route_spec.topology
             gva_layout = GVAObjectLayout(
@@ -218,6 +220,7 @@ def _compile_kv_pool_projection_binder(
             spec.max_model_len,
             use_eagle=spec.use_eagle,
             retention_interval=spec.retention_interval,
+            kv_cache_layout=vllm_envs.VLLM_KV_CACHE_LAYOUT,
         )
 
     protocol = get_layerwise_protocol(spec.backend_name)
@@ -317,8 +320,30 @@ def _validate_kv_pool_preflight(
 
     _validate_speculative_support(vllm_config, use_layerwise=use_layerwise)
 
+    transfer_config = vllm_config.kv_transfer_config
+    parallel_config = vllm_config.parallel_config
+    dcp_size = getattr(parallel_config, "decode_context_parallel_size", 1)
+    pcp_size = getattr(parallel_config, "prefill_context_parallel_size", 1)
+    if (
+        use_layerwise
+        and transfer_config.kv_role in ("kv_producer", "kv_consumer")
+        and infer_dcp_mismatch_info(
+            transfer_config.kv_role,
+            transfer_config.kv_connector_extra_config,
+            dcp_size,
+            pcp_size,
+        )
+    ):
+        peer_role = "prefill" if transfer_config.kv_role == "kv_consumer" else "decode"
+        raise ValueError(
+            "Decode-context-parallel mismatch in PD-disaggregation "
+            f"(local dcp_size={dcp_size}, local pcp_size={pcp_size}, peer role={peer_role}) "
+            "is not supported with layerwise KV transfer. Both the producer and consumer must use "
+            "the same dcp_size/pcp_size so the layerwise GVA shard layout is consistent."
+        )
+
     protocol = get_layerwise_protocol(backend_name)
-    validate_layerwise_topology(protocol, vllm_config.parallel_config, use_layerwise)
+    validate_layerwise_topology(protocol, parallel_config, use_layerwise)
 
 
 def _validate_bulk_topology_support(

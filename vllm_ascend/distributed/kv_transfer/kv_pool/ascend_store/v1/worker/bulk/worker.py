@@ -113,7 +113,7 @@ class BulkWorker(KVPoolWorker):
         """Create the leaf Worker's fixed Bulk Load timeline."""
 
     def _bind_projection(self, registration: dict[str, Any]) -> None:
-        self._bulk_projection = self._bulk_projection_binder.bind(**registration)
+        self._bulk_projection = self._bulk_projection_binder.bind(**registration, kv_caches=self._resources.kv_caches)
 
     @property
     def _bound_bulk_projection(self) -> BulkProjection:
