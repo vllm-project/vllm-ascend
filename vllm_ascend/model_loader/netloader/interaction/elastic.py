@@ -32,6 +32,11 @@ from ..executor.elastic_load import (
 )
 from ..utils import find_free_port
 
+# Deadline for reading a client's registration message. The handshake is one
+# small JSON object, so anything slower is a dead or stuck peer; the value
+# mirrors the timeout ElasticClient sets on its own socket.
+_REGISTRATION_RECV_TIMEOUT_S = 60
+
 
 def _recv_json_message(sock: socket.socket, max_size: int = 64 * 1024 * 1024) -> dict:
     """Receive one complete JSON object from a TCP socket."""
@@ -398,9 +403,24 @@ class ElasticServer:
         Handles incoming client connections.
         """
         while True:
-            conn, addr = self.s.accept()
+            try:
+                conn, addr = self.s.accept()
+            except OSError:
+                # The listening socket is gone (server shutdown, or its fd was
+                # closed under us). Continuing would spin on the same error, so
+                # end the thread instead of burning a core.
+                logger.exception("[netloader_p2p] registration socket stopped accepting; handler thread exits")
+                return
             logger.info("Accept new connection from %s:%s...", *addr)
-            self.register_handler(conn, addr)
+            try:
+                self.register_handler(conn, addr)
+            except Exception:
+                # Nothing supervises or restarts this daemon thread, so letting
+                # one dead or malformed client escape here would stop the server
+                # from registering any client for the rest of its life.
+                logger.exception("[netloader_p2p] registration from %s:%s failed", *addr)
+                with suppress(Exception):
+                    conn.close()
 
     def register_handler(self, conn, addr, buffer_size=1024):
         """
@@ -411,8 +431,20 @@ class ElasticServer:
         - addr: The address of the client.
         - buffer_size: The size of the buffer for receiving data.
         """
-        data_str = conn.recv(buffer_size).decode("utf-8")
+        try:
+            # The handler runs on the accept thread, so without a deadline one
+            # silent peer blocks every other registration. Mirrors the timeout
+            # ElasticClient sets on its own socket.
+            conn.settimeout(_REGISTRATION_RECV_TIMEOUT_S)
+            data_str = conn.recv(buffer_size).decode("utf-8")
+        except (OSError, UnicodeDecodeError) as e:
+            logger.error("Failed to read a registration message from %s, details: %s", addr, e)
+            conn.close()
+            return
         if not data_str:
+            # A peer that connects and closes without sending anything (health
+            # check, port probe) would otherwise leak this socket.
+            conn.close()
             return
         try:
             data = json.loads(data_str)
