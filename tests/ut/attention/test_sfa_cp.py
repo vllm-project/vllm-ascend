@@ -622,9 +622,24 @@ def test_sfa_pcp_decode_projects_local_weight_then_reduces_pcp_and_tp() -> None:
     torch.testing.assert_close(result, expected)
 
 
-def test_sfa_pcp_prefill_context_starts_weight_gather_but_decode_does_not() -> None:
+@pytest.mark.parametrize(
+    "attn_state,global_has_prefill,weight_switch_enabled,expected_gather",
+    [
+        (AscendAttentionState.ChunkedPrefill, True, True, True),
+        (AscendAttentionState.ChunkedPrefill, False, True, True),
+        (AscendAttentionState.DecodeOnly, False, True, False),
+        (AscendAttentionState.SpecDecoding, False, True, False),
+        (AscendAttentionState.DecodeOnly, True, True, True),
+        (AscendAttentionState.SpecDecoding, True, True, True),
+        (AscendAttentionState.ChunkedPrefill, True, False, False),
+        (AscendAttentionState.DecodeOnly, True, False, False),
+    ],
+)
+def test_sfa_pcp_context_gathers_weight_for_global_prefill(
+    attn_state, global_has_prefill, weight_switch_enabled, expected_gather
+) -> None:
     impl = AscendSFAPCPImpl.__new__(AscendSFAPCPImpl)
-    impl._o_proj_weight_switch_enabled = True
+    impl._o_proj_weight_switch_enabled = weight_switch_enabled
     impl._all_gather_o_proj_full_weight = MagicMock()
     base_context = SFAForwardContext(
         actual_seq_lengths_query=torch.empty(0),
@@ -634,23 +649,16 @@ def test_sfa_pcp_prefill_context_starts_weight_gather_but_decode_does_not() -> N
     )
 
     with patch.object(AscendSFAImpl, "_get_parallel_forward_context", return_value=base_context):
-        prefill = impl._get_parallel_forward_context(
-            SimpleNamespace(attn_state=AscendAttentionState.ChunkedPrefill),
+        context = impl._get_parallel_forward_context(
+            SimpleNamespace(attn_state=attn_state, pcp_has_global_prefill=global_has_prefill),
             1,
             torch.empty(1),
         )
-    assert prefill.gather_full_o_proj
-    impl._all_gather_o_proj_full_weight.assert_called_once_with()
-
-    base_context.gather_full_o_proj = False
-    with patch.object(AscendSFAImpl, "_get_parallel_forward_context", return_value=base_context):
-        decode = impl._get_parallel_forward_context(
-            SimpleNamespace(attn_state=AscendAttentionState.DecodeOnly),
-            1,
-            torch.empty(1),
-        )
-    assert not decode.gather_full_o_proj
-    impl._all_gather_o_proj_full_weight.assert_called_once()
+    assert context.gather_full_o_proj is expected_gather
+    if expected_gather:
+        impl._all_gather_o_proj_full_weight.assert_called_once_with()
+    else:
+        impl._all_gather_o_proj_full_weight.assert_not_called()
 
 
 @pytest.mark.parametrize("async_gather", [False, True])
