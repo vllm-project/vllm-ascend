@@ -75,6 +75,7 @@ def test_recurrent_raw_gates_rollback_slots_and_padding(monkeypatch, accepted, q
 @pytest.mark.parametrize("state_dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("compact", [False, True])
 def test_chunk_uses_host_descriptors_and_preserves_vk_cache(monkeypatch, state_dtype, compact):
+    monkeypatch.setattr(kda_ops, "is_950", lambda: False)
     q = torch.ones(1, 3, 1, 128, dtype=torch.bfloat16)
     state = torch.arange(4 * 128 * 128, dtype=torch.float32).reshape(4, 1, 128, 128).to(state_dtype)
     saved = state.clone()
