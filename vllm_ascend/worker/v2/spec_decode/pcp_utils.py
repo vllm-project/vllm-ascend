@@ -7,15 +7,13 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, Protocol
 
 from vllm.config import VllmConfig, replace
-from vllm.logger import init_logger
+from vllm.logger import logger
 
 from vllm_ascend.ascend_config import validate_additional_config_bool
 
 if TYPE_CHECKING:
     from vllm_ascend.worker.v2.model_states.default import AscendModelState
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
-
-logger = init_logger(__name__)
 
 
 class ReplicatedPCPDraftSpeculator(Protocol):
