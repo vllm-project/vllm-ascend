@@ -34,6 +34,7 @@ from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm.v1.worker.gpu.states import RequestState
 
+from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 
@@ -125,7 +126,7 @@ class AscendPCPManager(PCPManager):
     @property
     def is_decode_sharded(self) -> bool:
         """Use the shared policy after the runner injects vllm_config."""
-        return self.vllm_config.parallel_config.pcp_shard_decode_requests
+        return is_pcp_decode_sharding_enabled(self.vllm_config)
 
     # TODO: Remove replicated_requests and _iter_rank_chunks once the paired
     # vLLM includes #52162, which shards decode requests upstream.

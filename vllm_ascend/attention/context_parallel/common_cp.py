@@ -8,6 +8,27 @@ from vllm.distributed import get_dcp_group
 from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
 
 
+def is_pcp_decode_sharding_enabled(vllm_config) -> bool:
+    """Shard decode requests only for eager PCP without speculation.
+
+    Graph execution and speculative decoding stay on the replicated path in
+    this change. The decision is derived from declared vLLM fields so cloning
+    a draft ``ParallelConfig`` with ``replace()`` does not see an undeclared
+    attribute.
+    """
+    from vllm.config.compilation import CUDAGraphMode
+
+    parallel_config = vllm_config.parallel_config
+    compilation_config = getattr(vllm_config, "compilation_config", None)
+    cudagraph_mode = None if compilation_config is None else getattr(compilation_config, "cudagraph_mode", None)
+    return (
+        getattr(parallel_config, "prefill_context_parallel_size", 1) > 1
+        and getattr(parallel_config, "decode_context_parallel_size", 1) == 1
+        and getattr(vllm_config, "speculative_config", None) is None
+        and cudagraph_mode == CUDAGraphMode.NONE
+    )
+
+
 def get_pcp_num_replicated_tokens(num_decode_tokens: int, is_decode_sharded: bool) -> int:
     """Return the leading rank-local tokens that every PCP rank computes identically.
 

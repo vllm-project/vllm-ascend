@@ -1372,17 +1372,10 @@ def _setup_worker_and_scheduler(
     vllm_config: VllmConfig,
     ascend_config,
 ) -> None:
-    from vllm.config.compilation import CUDAGraphMode
-
-    # Select worker class and refresh block size
+    # Select worker class and refresh block size.
+    # Decode sharding is derived by is_pcp_decode_sharding_enabled(); do not
+    # store it on ParallelConfig. Draft replace() rejects undeclared fields.
     parallel_config = vllm_config.parallel_config
-    # Graphs and speculation keep the existing replicated PCP path.
-    parallel_config.pcp_shard_decode_requests = (
-        parallel_config.prefill_context_parallel_size > 1
-        and parallel_config.decode_context_parallel_size == 1
-        and vllm_config.speculative_config is None
-        and vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
-    )
     if parallel_config and parallel_config.worker_cls == "auto":
         hardware_profile = get_current_hardware_profile()
         if ascend_config.xlite_graph_config.enabled and hardware_profile.supports(

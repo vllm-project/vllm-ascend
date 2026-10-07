@@ -27,6 +27,7 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     build_pcp_ordered_slot_mapping,
     get_cp_local_query_key_lens,
     get_pcp_num_replicated_tokens,
+    is_pcp_decode_sharding_enabled,
 )
 from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
     build_sfa_dcp_replicated_block_table,
@@ -211,7 +212,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         # indexer k across the TP group. Both are no-ops in the base layout.
         parallel_config = get_current_vllm_config().parallel_config
         self._pcp_active = parallel_config.prefill_context_parallel_size > 1
-        self._is_pcp_decode_sharded = parallel_config.pcp_shard_decode_requests
+        self._is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(get_current_vllm_config())
         self._dsa_cp_active = enable_dsa_cp()
 
         # The LI C8 Hadamard matrices are created while the sleep-mode weights

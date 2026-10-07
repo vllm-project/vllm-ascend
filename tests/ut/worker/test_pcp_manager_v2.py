@@ -23,11 +23,13 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 import torch
-from vllm.config import CUDAGraphMode
+from vllm.config import CUDAGraphMode, ParallelConfig
+from vllm.config.utils import replace
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
+from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
 from vllm_ascend.platform import _setup_worker_and_scheduler
 from vllm_ascend.worker.v2 import states as states_module
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager, _prepare_pcp_inputs_to_capture
@@ -61,15 +63,14 @@ def _make_pcp_config(
     sparse_mla: bool = True,
     pipeline_parallel_size: int = 1,
     data_parallel_size: int = 1,
-    pcp_shard_decode_requests: bool = True,
 ):
     hf_text_config = SimpleNamespace(index_topk=2048) if sparse_mla else SimpleNamespace()
     return SimpleNamespace(
         parallel_config=SimpleNamespace(
             prefill_context_parallel_size=2,
+            decode_context_parallel_size=1,
             pipeline_parallel_size=pipeline_parallel_size,
             data_parallel_size=data_parallel_size,
-            pcp_shard_decode_requests=pcp_shard_decode_requests,
         ),
         model_config=SimpleNamespace(
             use_mla=True,
@@ -82,7 +83,6 @@ def _make_pcp_config(
     )
 
 
-@pytest.mark.parametrize("enabled", [False, True])
 @pytest.mark.parametrize(
     "cudagraph_mode,allows_sharding",
     [
@@ -95,10 +95,8 @@ def _make_pcp_config(
 )
 @pytest.mark.parametrize("speculative", [False, True])
 @pytest.mark.parametrize("pcp_size,dcp_size", [(2, 1), (1, 1), (2, 2)])
-def test_decode_sharding_uses_parallel_config(
-    enabled, cudagraph_mode, allows_sharding, speculative, pcp_size, dcp_size
-):
-    config = _make_pcp_config(cudagraph_mode, pcp_shard_decode_requests=enabled)
+def test_decode_sharding_uses_parallel_config(cudagraph_mode, allows_sharding, speculative, pcp_size, dcp_size):
+    config = _make_pcp_config(cudagraph_mode)
     config.parallel_config.prefill_context_parallel_size = pcp_size
     config.parallel_config.decode_context_parallel_size = dcp_size
     config.parallel_config.worker_cls = "test-worker"
@@ -118,7 +116,8 @@ def test_decode_sharding_uses_parallel_config(
         _setup_worker_and_scheduler(config, ascend_config)
 
     expected_sharding = allows_sharding and not speculative and pcp_size > 1 and dcp_size == 1
-    assert config.parallel_config.pcp_shard_decode_requests is expected_sharding
+    assert not hasattr(config.parallel_config, "pcp_shard_decode_requests")
+    assert is_pcp_decode_sharding_enabled(config) is expected_sharding
     rank = pcp_size - 1
     manager = AscendPCPManager(pcp_size, rank, torch.device("cpu"), dcp_world_size=dcp_size)
     manager.vllm_config = config
@@ -131,6 +130,22 @@ def test_decode_sharding_uses_parallel_config(
     )
     expected = [(1, 0, 1)] if expected_sharding else [(0, 0, 1), (1, 0, 1)]
     assert list(manager._iter_rank_chunks(rank, counts, prefilling)) == expected
+
+
+def test_decode_sharding_does_not_add_a_parallel_config_field():
+    parallel_config = ParallelConfig(prefill_context_parallel_size=2, decode_context_parallel_size=1)
+    parallel_config.worker_cls = "test-worker"
+    config = SimpleNamespace(
+        parallel_config=parallel_config,
+        speculative_config=SimpleNamespace(method="mtp"),
+        compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE),
+    )
+    with patch("vllm_ascend.platform.refresh_block_size"):
+        _setup_worker_and_scheduler(config, SimpleNamespace())
+
+    assert not hasattr(parallel_config, "pcp_shard_decode_requests")
+    replace(parallel_config)
+    assert is_pcp_decode_sharding_enabled(config) is False
 
 
 def test_validate_config_allows_sparse_mla_full_decode_only():
@@ -356,7 +371,7 @@ def test_full_decode_request_layout_is_token_sized_only_without_drafts():
 
 def _make_replicated_pcp_manager():
     manager = AscendPCPManager(2, 0, torch.device("cpu"), max_num_reqs=8, max_num_tokens=32)
-    manager.vllm_config = _make_pcp_config(CUDAGraphMode.NONE, pcp_shard_decode_requests=False)
+    manager.vllm_config = _make_pcp_config(CUDAGraphMode.FULL_DECODE_ONLY)
     manager._hidden_restore_idx = torch.arange(32, dtype=torch.int64)
     return manager
 
@@ -421,7 +436,7 @@ def test_partition_batch_pads_decode_requests_when_tokens_are_already_padded():
 
     manager = _make_replicated_pcp_manager()
     manager._input_buffers = input_buffers
-    manager.vllm_config = _make_pcp_config(CUDAGraphMode.FULL_DECODE_ONLY, pcp_shard_decode_requests=False)
+    manager.vllm_config = _make_pcp_config(CUDAGraphMode.FULL_DECODE_ONLY)
     manager._hidden_restore_idx = torch.arange(4, dtype=torch.int64)
     # Upstream replace() preserves the global attention state.
     local_batch.attn_state = global_batch.attn_state
@@ -474,7 +489,7 @@ def test_partition_batch_keeps_piecewise_request_extent():
 
     manager = _make_replicated_pcp_manager()
     manager._input_buffers = None
-    manager.vllm_config = _make_pcp_config(CUDAGraphMode.PIECEWISE, pcp_shard_decode_requests=False)
+    manager.vllm_config = _make_pcp_config(CUDAGraphMode.PIECEWISE)
 
     with (
         patch.object(
@@ -612,7 +627,7 @@ def test_partition_batch_preserves_fia_dummy_layout() -> None:
     )
     # PIECEWISE pads tokens without padding requests, so the request-shaped
     # metadata must stay at the global batch's request extent.
-    manager.vllm_config = _make_pcp_config(CUDAGraphMode.PIECEWISE, pcp_shard_decode_requests=False)
+    manager.vllm_config = _make_pcp_config(CUDAGraphMode.PIECEWISE)
     input_buffers = manager._input_buffers
     assert input_buffers is not None
     input_buffers.positions[0] = 10
@@ -665,7 +680,8 @@ def test_partition_batch_preserves_speculative_target_inputs(pcp_rank) -> None:
     from vllm_ascend.attention.attention_v1 import AscendAttentionState
     from vllm_ascend.worker.v2.attn_utils import build_attn_state
 
-    config = _make_pcp_config(CUDAGraphMode.NONE, pcp_shard_decode_requests=False)
+    config = _make_pcp_config(CUDAGraphMode.NONE)
+    config.speculative_config = SimpleNamespace(method="mtp")
     config.model_config.runner_type = "generate"
     config.scheduler_config = SimpleNamespace(enable_chunked_prefill=False)
     buffers = AscendInputBuffers(2, 5, torch.device("cpu"))
@@ -1001,7 +1017,7 @@ def test_sample_tokens_uses_global_batch_only_on_non_last_pp_rank(
 
 def test_partition_batch_clears_padded_dcp_local_seq_lens() -> None:
     manager = _make_replicated_pcp_manager()
-    manager.vllm_config = _make_pcp_config(CUDAGraphMode.FULL_DECODE_ONLY, pcp_shard_decode_requests=False)
+    manager.vllm_config = _make_pcp_config(CUDAGraphMode.FULL_DECODE_ONLY)
     manager._input_buffers = AscendInputBuffers(
         max_num_reqs=8,
         max_num_tokens=16,
@@ -1175,6 +1191,8 @@ def test_speculative_decode_keeps_draft_tokens_on_pcp_ranks(pcp_rank):
         assert local.num_tokens == 0
         assert local.num_scheduled_tokens.tolist() == [0]
         assert local.seq_lens.tolist() == [0]
+        assert local.seq_lens_np.tolist() == [0]
+        assert local.seq_lens_cpu_upper_bound.tolist() == [0]
         return
     assert local.num_tokens == 4
     assert local.req_ids == batch.req_ids

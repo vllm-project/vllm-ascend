@@ -30,7 +30,10 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.context_parallel.common_cp import get_pcp_num_replicated_tokens
+from vllm_ascend.attention.context_parallel.common_cp import (
+    get_pcp_num_replicated_tokens,
+    is_pcp_decode_sharding_enabled,
+)
 from vllm_ascend.attention.utils import (
     MLAPO_MAX_SUPPORTED_TOKENS,
     AscendCommonAttentionMetadata,
@@ -281,7 +284,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         )
         self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
         self.pcp_enabled = self.pcp_size > 1
-        self.is_pcp_decode_sharded = vllm_config.parallel_config.pcp_shard_decode_requests
+        self.is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(vllm_config)
         self.dcp_enabled = enable_dcp()
 
         scheduler_config = vllm_config.scheduler_config
@@ -862,7 +865,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.use_mla_rope = kwargs.get("use_mla_rope", True)
         self.vllm_config = get_current_vllm_config()
         self.pcp_enabled = self.vllm_config.parallel_config.prefill_context_parallel_size > 1
-        self.is_pcp_decode_sharded = self.vllm_config.parallel_config.pcp_shard_decode_requests
+        self.is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(self.vllm_config)
         self.kv_a_proj_with_mqa = kwargs.get("kv_a_proj_with_mqa")
         self.kv_a_layernorm = kwargs.get("kv_a_layernorm")
         self.q_a_layernorm = kwargs.get("q_a_layernorm")
@@ -1472,7 +1475,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         )
         return k_pe, kv_c_normed
 
-    def _exec_kv_mla_nope(self, kv_no_split, kv_cache, slots, is_prefill: bool):
+    def _exec_kv_mla_nope(self, kv_no_split, kv_cache, slots, is_prefill: bool, skip_padding_slots: bool = False):
         # GLM MLA-NoPE: qk_rope_head_dim==0. KvRmsNormRopeCache rejects empty cos.
         B, N, S, _ = kv_no_split.shape
         assert self.kv_a_layernorm is not None
@@ -1486,6 +1489,11 @@ class AscendMLAImpl(MLAAttentionImpl):
         cache = kv_cache[0]
         idx = slots.to(torch.int64)
         token = k_nope.reshape(-1, cache.shape[-1]).to(cache.dtype)
+        if skip_padding_slots:
+            # Unlike reshape_and_cache, these writes do not skip slot -1; it
+            # addresses the last cache entry. Boolean masking is eager-only.
+            valid = idx >= 0
+            idx, token = idx[valid], token[valid]
         if cache.is_contiguous():
             cache.view(-1, cache.shape[-1]).index_copy_(0, idx, token)
         else:
@@ -1555,12 +1563,11 @@ class AscendMLAImpl(MLAAttentionImpl):
         *,
         attn_metadata: AscendMLAMetadata | None = None,
     ):
-        if not self.use_mla_rope:
-            return self._exec_kv_no_rope(kv_no_split, kv_cache, slots)
-
         pcp_local_range = None
         if self.pcp_enabled:
             assert attn_metadata is not None
+            # Gather before any RoPE-specific writer. use_mla_rope=False used
+            # to return first and store rank-local KV with the expanded slots.
             # Inputs cover this rank's padded tokens after its replicated rows
             # (none when decode is sharded); every rank writes the same
             # gathered KV to its cache.
@@ -1570,11 +1577,17 @@ class AscendMLAImpl(MLAAttentionImpl):
                 attn_metadata.num_decode_tokens, self.is_pcp_decode_sharded
             )
             local_capacity = local_num_input_tokens - num_replicated_tokens
-            if not (kv_no_split.shape[0] == cos.shape[0] == sin.shape[0] == local_capacity):
+            if (
+                cos is None
+                or sin is None
+                or not (kv_no_split.shape[0] == cos.shape[0] == sin.shape[0] == local_capacity)
+            ):
                 raise RuntimeError(
                     "PCP MLA KV input length mismatch: "
-                    f"kv={kv_no_split.shape[0]}, cos={cos.shape[0]}, "
-                    f"sin={sin.shape[0]}, expected={local_capacity}."
+                    f"kv={kv_no_split.shape[0]}, "
+                    f"cos={None if cos is None else cos.shape[0]}, "
+                    f"sin={None if sin is None else sin.shape[0]}, "
+                    f"expected={local_capacity}."
                 )
 
             rank_slot_mappings = attn_metadata.slot_mapping.view(pcp_group.world_size, local_num_input_tokens)
@@ -1586,32 +1599,38 @@ class AscendMLAImpl(MLAAttentionImpl):
             local_start = pcp_group.rank_in_group * local_capacity
             pcp_local_range = (local_start, local_start + attn_metadata.num_actual_tokens - num_replicated_tokens)
 
-        assert self.kv_a_layernorm is not None
-        B = kv_no_split.shape[0]
-        N = self.num_kv_heads
-        S = 1
-        # npu_kv_rmsnorm_rope_cache needs [B, N, S, D]
-        kv_no_split = kv_no_split.view(B, N, S, self.kv_lora_rank + self.qk_rope_head_dim)
-        if self.qk_rope_head_dim == 0:
-            k_pe, k_nope = self._exec_kv_mla_nope(kv_no_split, kv_cache, slots, is_prefill=True)
+        if not self.use_mla_rope:
+            k_pe, k_nope = self._exec_kv_no_rope(kv_no_split, kv_cache, slots)
         else:
-            cache_mode = "PA"
-            c_kv_scale = None
-            if self.support_fp8_attention and self.fa_quant_layer:
-                c_kv_scale = self.fak_descale_reciprocal
-            _, _, k_pe, k_nope = torch_npu.npu_kv_rmsnorm_rope_cache(
-                kv_no_split,
-                self.kv_a_layernorm.weight,  # type: ignore[union-attr]
-                cos,
-                sin,
-                slots.to(torch.int64),
-                kv_cache[1],
-                kv_cache[0],
-                c_kv_scale=c_kv_scale,
-                epsilon=self.kv_a_layernorm.variance_epsilon,  # type: ignore[union-attr]
-                cache_mode=cache_mode,
-                is_output_kv=True,
-            )
+            assert self.kv_a_layernorm is not None
+            B = kv_no_split.shape[0]
+            N = self.num_kv_heads
+            S = 1
+            # npu_kv_rmsnorm_rope_cache needs [B, N, S, D]
+            kv_no_split = kv_no_split.view(B, N, S, self.kv_lora_rank + self.qk_rope_head_dim)
+            if self.qk_rope_head_dim == 0:
+                # The PCP gather carries rank padding with slot -1.
+                k_pe, k_nope = self._exec_kv_mla_nope(
+                    kv_no_split, kv_cache, slots, is_prefill=True, skip_padding_slots=self.pcp_enabled
+                )
+            else:
+                cache_mode = "PA"
+                c_kv_scale = None
+                if self.support_fp8_attention and self.fa_quant_layer:
+                    c_kv_scale = self.fak_descale_reciprocal
+                _, _, k_pe, k_nope = torch_npu.npu_kv_rmsnorm_rope_cache(
+                    kv_no_split,
+                    self.kv_a_layernorm.weight,  # type: ignore[union-attr]
+                    cos,
+                    sin,
+                    slots.to(torch.int64),
+                    kv_cache[1],
+                    kv_cache[0],
+                    c_kv_scale=c_kv_scale,
+                    epsilon=self.kv_a_layernorm.variance_epsilon,  # type: ignore[union-attr]
+                    cache_mode=cache_mode,
+                    is_output_kv=True,
+                )
         if pcp_local_range is not None:
             # Due to the fused RMSNorm/RoPE/cache operator, KV normalization is
             # repeated after gather; trim outputs back to this rank's real range.
