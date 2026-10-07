@@ -143,7 +143,6 @@ The `pr-accuracy-group-*` entries only run on `/nightly` (PR-triggered) runs;
 
 | Test name | Description |
 |-----------|-------------|
-| `multi-node-deepseek-v3.2-W8A8-EP` | DeepSeek-V3.2-W8A8 with EP, 4-node |
 
 **Double-node tests** (`a3.double_node.test_config`, 2-node, run after multi-node):
 
@@ -151,11 +150,9 @@ The `pr-accuracy-group-*` entries only run on `/nightly` (PR-triggered) runs;
 |-----------|-------------|
 | `multi-node-qwen3-dp` | Qwen3-235B-A22B, 2-node DP |
 | `multi-node-qwenw8a8-2node-eplb` | Qwen3-235B-W8A8 with EPLB, 2-node |
-| `multi-node-dpsk3.2-2node` | DeepSeek-V3.2-W8A8, 2-node |
 | `multi-node-qwen-disagg-pd` | Qwen3-235B disaggregated PD, 2-node |
 | `multi-node-qwen-vl-disagg-pd` | Qwen3-VL-235B disaggregated PD, 2-node |
 | `multi-node-deepseek-v3.1` | DeepSeek-V3.1-BF16, 2-node |
-| `multi-node-deepseek-v3.2-W8A8-EP` | DeepSeek-V3.2-W8A8 with EP, 4-node |
 | `multi-node-glm-5.2` | GLM-5.1-W8A8, 2-node |
 
 **Single-node tests** (`a3.single_node.test_config`):
@@ -167,7 +164,6 @@ The `pr-accuracy-group-*` entries only run on `/nightly` (PR-triggered) runs;
 | `kimi-k2-thinking` | Kimi-K2-Thinking |
 | `qwen3-vl-235b-a22b-instruct-w8a8` | Qwen3-VL-235B-A22B-Instruct-W8A8 |
 | `deepseek-r1-0528-w8a8-prefix-cache` | DeepSeek-R1-0528-W8A8 prefix cache |
-| `deepseek-v3-2-w8a8` | DeepSeek-V3.2-W8A8 |
 | `glm-4.7-w8a8` | GLM-4.7 W8A8 |
 | `kimi-k2.5` | Kimi-K2.5 |
 | `qwen3-235b-a22b-w8a8` | Qwen3-235B-A22B-W8A8 |
