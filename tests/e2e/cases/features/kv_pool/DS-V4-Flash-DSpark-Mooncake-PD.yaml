@@ -135,6 +135,7 @@ templates:
         {
           "kv_connector": "MultiConnector",
           "kv_role": "kv_producer",
+          "engine_id": "0",
           "kv_connector_extra_config": {
             "connectors": [
               {
@@ -150,8 +151,7 @@ templates:
                     "dp_size": 16,
                     "tp_size": 1
                   }
-                },
-                "engine_id": "0"
+                }
               },
               {
                 "kv_connector": "AscendStoreConnector",
@@ -225,6 +225,7 @@ templates:
         {
           "kv_connector": "MultiConnector",
           "kv_role": "kv_consumer",
+          "engine_id": "1",
           "kv_connector_extra_config": {
             "connectors": [
               {
@@ -240,8 +241,7 @@ templates:
                     "dp_size": 16,
                     "tp_size": 1
                   }
-                },
-                "engine_id": "1"
+                }
               },
               {
                 "kv_connector": "AscendStoreConnector",
