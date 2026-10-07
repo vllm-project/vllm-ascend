@@ -2184,7 +2184,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         )
         self.backup_next_token_ids.copy_to_gpu(num_reqs)
 
-        if sampled_token_ids.device.type == "npu":
+        if HAS_TRITON and sampled_token_ids.device.type == "npu":
             return prepare_next_token_ids(
                 sampled_token_ids,
                 self.backup_next_token_ids.gpu[:num_reqs],

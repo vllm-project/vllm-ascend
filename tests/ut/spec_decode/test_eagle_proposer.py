@@ -1814,6 +1814,33 @@ class TestPrepareNextTokenIdsPadded(TestBase):
         self.mock_supports_multimodal_inputs.stop()
         set_current_vllm_config(None)
 
+    def test_npu_without_triton_uses_reference_path(self):
+        # 310P is an NPU but has no Triton runtime. Only spoof the input's
+        # device; the fallback must still execute real tensor operations.
+        sampled = MagicMock(spec=torch.Tensor)
+        sampled.device.type = "npu"
+        sampled.clone.return_value = torch.tensor([[101, -1], [201, 202]], dtype=torch.int64)
+        requests = {
+            "req_0": MockCachedRequestState("req_0", list(range(20))),
+            "req_1": MockCachedRequestState("req_1", list(range(20))),
+        }
+        batch = MockInputBatch(
+            num_reqs=2,
+            req_ids=["req_0", "req_1"],
+            vocab_size=1000,
+            num_tokens_no_spec=[11, 16],
+        )
+        with (
+            patch("vllm_ascend.spec_decode.llm_base_proposer.HAS_TRITON", False),
+            patch("vllm_ascend.spec_decode.llm_base_proposer.prepare_next_token_ids") as fused,
+        ):
+            tokens, counts = self.proposer.prepare_next_token_ids_padded(
+                sampled, requests, batch, torch.tensor([1], dtype=torch.int64), 1
+            )
+        fused.assert_not_called()
+        self.assertTrue(torch.equal(tokens, torch.tensor([101, 15], dtype=torch.int64)))
+        self.assertTrue(torch.equal(counts, torch.tensor([1, 0], dtype=torch.int64)))
+
     def test_all_valid_tokens(self):
         """Test case where all requests have valid sampled tokens"""
         num_reqs = 3
