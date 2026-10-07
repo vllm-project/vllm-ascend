@@ -13,8 +13,8 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec, Slid
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 from vllm_ascend.core.single_type_kv_cache_manager import (
-    CompressorTailManager,
     CompressAttentionManager,
+    CompressorTailManager,
 )
 
 
@@ -247,8 +247,7 @@ class AscendCompressorTailSpec(AscendSlidingWindowMLASpec):
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
         assert all(isinstance(spec, cls) for spec in specs), (
-            "All layers in a compressor-tail group must use "
-            "AscendCompressorTailSpec."
+            "All layers in a compressor-tail group must use AscendCompressorTailSpec."
         )
         first = specs[0]
         assert all(

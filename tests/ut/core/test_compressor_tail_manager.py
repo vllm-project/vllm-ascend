@@ -80,9 +80,7 @@ def test_tail_spec_has_constant_per_request_capacity(
 
     assert spec.ring_blocks_per_request == expected_blocks
     assert spec.max_admission_blocks_per_request(16_384, 65_536) == expected_blocks
-    assert spec.max_memory_usage_bytes(SimpleNamespace()) == (
-        expected_blocks * spec.page_size_bytes
-    )
+    assert spec.max_memory_usage_bytes(SimpleNamespace()) == (expected_blocks * spec.page_size_bytes)
     assert spec.max_num_blocks_per_req(SimpleNamespace(), 65_536) == expected_blocks
 
 
@@ -178,9 +176,7 @@ def test_absolute_position_maps_to_tail_ring(
 
 def test_all_compressor_call_sites_use_feature_gated_cache_mode() -> None:
     repo_root = Path(__file__).resolve().parents[3]
-    model_source = (repo_root / "vllm_ascend/models/deepseek_v4.py").read_text(
-        encoding="utf-8"
-    )
+    model_source = (repo_root / "vllm_ascend/models/deepseek_v4.py").read_text(encoding="utf-8")
     assert "from vllm.utils.math_utils import cdiv" in model_source
 
     expected_call_counts = {
@@ -196,8 +192,7 @@ def test_arch35_cycle_kernel_uses_multi_block_tail_ring() -> None:
     repo_root = Path(__file__).resolve().parents[3]
     kernel_paths = (
         repo_root / "csrc/attention/compressor/op_kernel/arch35/compressor_block_vec.h",
-        repo_root
-        / "csrc/attention/compressor/op_kernel/arch35/compressor_block_vec_full_load.h",
+        repo_root / "csrc/attention/compressor/op_kernel/arch35/compressor_block_vec_full_load.h",
     )
     for kernel_path in kernel_paths:
         source = kernel_path.read_text(encoding="utf-8")
@@ -207,9 +202,9 @@ def test_arch35_cycle_kernel_uses_multi_block_tail_ring() -> None:
         assert source.count("ringTokenIdx / constInfo_.blockSize") == 2
         assert source.count("ringTokenCount - ringTokenIdx") == 2
 
-    tiling_source = (
-        repo_root / "csrc/attention/compressor/op_host/arch35/compressor_tiling.cpp"
-    ).read_text(encoding="utf-8")
+    tiling_source = (repo_root / "csrc/attention/compressor/op_host/arch35/compressor_tiling.cpp").read_text(
+        encoding="utf-8"
+    )
     assert "blockTableShape.GetDimNum() == 1" in tiling_source
     assert "maxBlockNumPerBatch < ringBlocks" in tiling_source
     assert "blockNum < baseParams_->batchSize * ringBlocks" in tiling_source
@@ -217,10 +212,9 @@ def test_arch35_cycle_kernel_uses_multi_block_tail_ring() -> None:
 
 def test_a3_arch32_cycle_kernel_uses_multi_block_tail_ring() -> None:
     repo_root = Path(__file__).resolve().parents[3]
-    kernel_source = (
-        repo_root
-        / "csrc/attention/compressor/op_kernel/arch32/compressor_block_vec_perf.h"
-    ).read_text(encoding="utf-8")
+    kernel_source = (repo_root / "csrc/attention/compressor/op_kernel/arch32/compressor_block_vec_perf.h").read_text(
+        encoding="utf-8"
+    )
     # PERF is the implementation selected on __CCE_AICORE__ == 220. Lock both
     # state read/write mappings and the fixed-tail SaveState branch.
     assert kernel_source.count("batchIdx * constInfo_.maxBlockNumPerBatch") == 2
@@ -229,14 +223,14 @@ def test_a3_arch32_cycle_kernel_uses_multi_block_tail_ring() -> None:
     assert "if constexpr (COMP::cacheMode == CACHE_MODE::CYCLE)" in kernel_source
     assert "writeSeqStartIdx" in kernel_source
 
-    tiling_header = (
-        repo_root / "csrc/attention/compressor/op_host/arch32/compressor_tiling.h"
-    ).read_text(encoding="utf-8")
+    tiling_header = (repo_root / "csrc/attention/compressor/op_host/arch32/compressor_tiling.h").read_text(
+        encoding="utf-8"
+    )
     assert "const std::vector<int> CACHE_MODE {1, 2};" in tiling_header
 
-    tiling_source = (
-        repo_root / "csrc/attention/compressor/op_host/arch32/compressor_tiling.cpp"
-    ).read_text(encoding="utf-8")
+    tiling_source = (repo_root / "csrc/attention/compressor/op_host/arch32/compressor_tiling.cpp").read_text(
+        encoding="utf-8"
+    )
     assert "blockTableShape.GetDimNum() == 1" in tiling_source
     assert "maxBlockNumPerBatch < ringBlocks" in tiling_source
     assert "blockNum < baseParams_->batchSize * ringBlocks" in tiling_source
@@ -244,9 +238,7 @@ def test_a3_arch32_cycle_kernel_uses_multi_block_tail_ring() -> None:
 
 def test_a3_build_route_passes_cache_mode_to_arch32_comp_type() -> None:
     repo_root = Path(__file__).resolve().parents[3]
-    entry_source = (
-        repo_root / "csrc/attention/compressor/op_kernel/compressor.cpp"
-    ).read_text(encoding="utf-8")
+    entry_source = (repo_root / "csrc/attention/compressor/op_kernel/compressor.cpp").read_text(encoding="utf-8")
     assert '#include "arch32/compressor_kernel_perf.h"' in entry_source
     assert "__CCE_AICORE__ == 220" in entry_source
     assert (
@@ -254,9 +246,9 @@ def test_a3_build_route_passes_cache_mode_to_arch32_comp_type() -> None:
         "                                          cacheMode"
     ) in entry_source
 
-    comm_source = (
-        repo_root / "csrc/attention/compressor/op_kernel/arch32/compressor_comm.h"
-    ).read_text(encoding="utf-8")
+    comm_source = (repo_root / "csrc/attention/compressor/op_kernel/arch32/compressor_comm.h").read_text(
+        encoding="utf-8"
+    )
     assert "ROTARY_MODE Rotary_Mode, CACHE_MODE Cache_Mode" in comm_source
     assert "static constexpr CACHE_MODE cacheMode = Cache_Mode;" in comm_source
 
@@ -323,12 +315,20 @@ def test_stage1_feature_gate_accepts_target_configuration() -> None:
     assert reasons == []
 
 
-def test_prefix_feature_gate_accepts_checkpoint_configuration() -> None:
-    assert get_dsv4_shared_compressor_workspace_fallback_reasons(
-        _stage1_config(cache_config__enable_prefix_caching=True),
+@pytest.mark.parametrize("data_parallel_size", [1, 2, 4, 8])
+@pytest.mark.parametrize("enable_prefix_caching", [False, True])
+def test_shared_workspace_feature_gate_accepts_data_parallel_configuration(
+    data_parallel_size, enable_prefix_caching
+) -> None:
+    reasons = get_dsv4_shared_compressor_workspace_fallback_reasons(
+        _stage1_config(
+            cache_config__enable_prefix_caching=enable_prefix_caching,
+            parallel_config__data_parallel_size=data_parallel_size,
+        ),
         is_a3=True,
         multistream_dsv4_dsa_overlap=False,
-    ) == []
+    )
+    assert reasons == []
 
 
 @pytest.mark.parametrize(

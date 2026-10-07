@@ -57,8 +57,7 @@ class CompressorTailManager(SlidingWindowManager):
             apply_admission_cap,
         )
         assert not new_computed_blocks, (
-            "Checkpoint sources must be retained by the coordinator; "
-            "request tail rings require private allocations."
+            "Checkpoint sources must be retained by the coordinator; request tail rings require private allocations."
         )
         allocated = len(self.req_to_blocks.get(request_id, ()))
         return max(self.ring_blocks_per_request - allocated, 0)
@@ -395,12 +394,8 @@ def get_manager_for_kv_cache_spec(
         nested_specs = list(kv_cache_spec.kv_cache_specs.values())
         assert nested_specs, "UniformTypeKVCacheSpecs must contain at least one spec"
         manager_spec = nested_specs[0]
-        manager_classes = {
-            KVCacheSpecRegistry.get_manager_class(spec) for spec in nested_specs
-        }
-        assert len(manager_classes) == 1, (
-            "All specs in one uniform KV cache group must use the same manager"
-        )
+        manager_classes = {KVCacheSpecRegistry.get_manager_class(spec) for spec in nested_specs}
+        assert len(manager_classes) == 1, "All specs in one uniform KV cache group must use the same manager"
 
     manager_class = KVCacheSpecRegistry.get_manager_class(manager_spec)
     assert manager_class is not None, f"No KV cache manager registered for {type(kv_cache_spec).__name__}"

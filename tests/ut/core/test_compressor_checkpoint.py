@@ -188,6 +188,48 @@ def test_prefix_identity_and_duplicate_saves():
     assert store.lookup(key(position=32768)) == third.handle
 
 
+def test_replica_checkpoint_publication_restore_and_reset_are_independent():
+    layout = {3: 4, 4: 16}
+    allocators = [BlockPool(100), BlockPool(100)]
+    stores = [checkpoint.CompressorCheckpointPool(allocator, layout, 20) for allocator in allocators]
+    plans = []
+    for rank, (allocator, store) in enumerate(zip(allocators, stores)):
+        source = rings(allocator, layout)
+        for blocks in source.values():
+            for block in blocks:
+                allocator.payload[block.block_id] = [rank] * 8
+        plan = store.reserve(key(), source)
+        assert plan is not None
+        allocator.copy(plan)
+        plans.append(plan)
+
+    # Replica 0 can publish and restore while replica 1's save is in flight.
+    stores[0].complete_save(plans[0].handle)
+    assert stores[1].lookup(key()) is None
+    free_before = allocators[1].get_num_free_blocks()
+    stores[0].acquire(plans[0].handle)
+    destination = rings(allocators[0], layout)
+    restore = stores[0].restore_plan(plans[0].handle, destination)
+    allocators[0].copy(restore)
+    for operation in restore.copies:
+        assert allocators[0].payload[operation.destination] == [0] * 8
+    stores[0].release(plans[0].handle)
+    stores[0].reset()
+    assert stores[0].lookup(key()) is None
+    assert stores[1].has_checkpoint(key())
+    assert allocators[1].get_num_free_blocks() == free_before
+
+    # Resetting replica 0 must leave replica 1's copy endpoints and data intact.
+    stores[1].complete_save(plans[1].handle)
+    stores[1].acquire(plans[1].handle)
+    destination = rings(allocators[1], layout)
+    restore = stores[1].restore_plan(plans[1].handle, destination)
+    allocators[1].copy(restore)
+    for operation in restore.copies:
+        assert allocators[1].payload[operation.destination] == [1] * 8
+    stores[1].release(plans[1].handle)
+
+
 def test_failed_prepare_releases_reader_and_allows_reclaim():
     allocator = BlockPool(5)
     store = checkpoint.CompressorCheckpointPool(allocator, {0: 2}, 2)

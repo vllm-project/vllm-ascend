@@ -43,6 +43,9 @@ CHECK_IMPORTS = {
             "vllm_ascend/distributed/kv_transfer/kv_pool/cpu_offload/metadata.py",
             "vllm_ascend/distributed/weight_transfer/npu_ipc_engine.py",
             "tests/ut/distributed/test_hccl_weight_transfer.py",
+            # Round-trip a locally constructed scheduler output using the
+            # serialization employed by the upstream worker message queue.
+            "tests/ut/core/test_compressor_checkpoint_integration.py",
         },
     ),
     "re": ForbiddenImport(

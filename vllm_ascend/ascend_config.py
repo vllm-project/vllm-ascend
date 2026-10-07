@@ -53,8 +53,8 @@ def get_dsv4_shared_compressor_workspace_fallback_reasons(
             reasons.append("compressor checkpoints currently require block_size=32")
         if vllm_config.parallel_config.pipeline_parallel_size != 1:
             reasons.append("compressor checkpoints require pipeline_parallel_size=1")
-        if vllm_config.parallel_config.data_parallel_size != 1:
-            reasons.append("compressor checkpoints currently require data_parallel_size=1")
+        # Each DP replica owns its scheduler and checkpoint pool. Tail-copy
+        # completion is fenced within its TP group, so DP need not be one.
         if vllm_config.use_v2_model_runner:
             reasons.append("compressor checkpoints require the v1 model runner")
         if vllm_config.kv_events_config is not None and vllm_config.kv_events_config.enable_kv_cache_events:
@@ -200,16 +200,13 @@ class AscendConfig:
         if shared_compressor_workspace_requested:
             from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
-            shared_compressor_workspace_fallback_reasons = (
-                get_dsv4_shared_compressor_workspace_fallback_reasons(
-                    vllm_config,
-                    is_a3=get_ascend_device_type() == AscendDeviceType.A3,
-                    multistream_dsv4_dsa_overlap=self.multistream_dsv4_dsa_overlap,
-                )
+            shared_compressor_workspace_fallback_reasons = get_dsv4_shared_compressor_workspace_fallback_reasons(
+                vllm_config,
+                is_a3=get_ascend_device_type() == AscendDeviceType.A3,
+                multistream_dsv4_dsa_overlap=self.multistream_dsv4_dsa_overlap,
             )
         self.enable_dsv4_shared_compressor_workspace = (
-            shared_compressor_workspace_requested
-            and not shared_compressor_workspace_fallback_reasons
+            shared_compressor_workspace_requested and not shared_compressor_workspace_fallback_reasons
         )
         if self.enable_dsv4_shared_compressor_workspace and vllm_config.cache_config.enable_prefix_caching:
             if (
@@ -233,8 +230,7 @@ class AscendConfig:
                 )
             else:
                 logger.info_once(
-                    "Enabled DeepSeek-V4 persistent compressor tails and "
-                    "cross-layer transient workspace reuse."
+                    "Enabled DeepSeek-V4 persistent compressor tails and cross-layer transient workspace reuse."
                 )
         self.enable_prefill_mc2 = bool(additional_config.get("enable_prefill_mc2", False))
 

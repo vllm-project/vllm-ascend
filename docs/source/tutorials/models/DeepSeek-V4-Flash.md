@@ -967,7 +967,9 @@ Currently, we support 4k prefix cache hit in an experimental manner. You only ne
 
 The experimental shared compressor workspace can also reuse prefixes by saving
 immutable compressor-tail checkpoints and restoring them into each request's
-private ring. The validated configuration is Atlas A3, TP8, DP1, PP1, the v1
+private ring. Each DP replica owns its checkpoint pool and private rings; tail
+copies synchronize only within that replica's TP group. DP size is not
+restricted to one. The validated configuration is Atlas A3, TP8, DP1, PP1, the v1
 model runner, eager execution, synchronous scheduling, and `--block-size 32`.
 For this configuration, use these options alongside the model's loading options:
 

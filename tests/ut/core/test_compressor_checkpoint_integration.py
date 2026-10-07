@@ -3,6 +3,7 @@
 """Real vLLM cache integration on host; no compressor numerics are emulated."""
 
 import json
+import pickle
 
 import pytest
 import torch
@@ -245,7 +246,7 @@ def test_torch_page_copy_preserves_padding_slots_and_independent_borrowers(coord
 
 @pytest.fixture
 def scheduler(tmp_path, coordinator, monkeypatch, request):
-    from vllm.config import CacheConfig, DeviceConfig, ModelConfig, SchedulerConfig, VllmConfig
+    from vllm.config import CacheConfig, DeviceConfig, ModelConfig, ParallelConfig, SchedulerConfig, VllmConfig
     from vllm.v1.structured_output import StructuredOutputManager
 
     from vllm_ascend.core.compressor_checkpoint_scheduler import CompressorCheckpointScheduler
@@ -276,6 +277,11 @@ def scheduler(tmp_path, coordinator, monkeypatch, request):
     config = VllmConfig(
         model_config=model,
         device_config=DeviceConfig(device="cpu"),
+        parallel_config=ParallelConfig(
+            data_parallel_size=options.get("data_parallel_size", 1),
+            data_parallel_rank=options.get("data_parallel_rank", 0),
+            distributed_executor_backend="mp",
+        ),
         scheduler_config=SchedulerConfig(
             max_num_seqs=4,
             max_num_batched_tokens=options.get("token_budget", 6000),
@@ -323,6 +329,15 @@ def complete_step(scheduler, output):
     )
 
 
+@pytest.mark.parametrize(
+    "scheduler",
+    [
+        pytest.param({}, id="dp1"),
+        pytest.param({"data_parallel_size": 2, "data_parallel_rank": 0}, id="dp2-rank0"),
+        pytest.param({"data_parallel_size": 2, "data_parallel_rank": 1}, id="dp2-rank1"),
+    ],
+    indirect=True,
+)
 def test_real_scheduler_chunks_publishes_restores_and_skips_prefix(scheduler):
     source = request("source", length=8193)
     scheduler.add_request(source)
@@ -397,8 +412,6 @@ def test_cancel_inflight_restore_retains_snapshot_and_destination(scheduler):
 
 
 def test_scheduler_output_survives_worker_transport(scheduler):
-    import pickle
-
     source = request("source")
     scheduler.add_request(source)
     step = scheduler.schedule()
