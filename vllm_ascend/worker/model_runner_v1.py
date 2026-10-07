@@ -6252,7 +6252,7 @@ class NPUModelRunner(GPUModelRunner):
                     head_size=head_dim // 2 if cache_sparse_li_c4 else head_dim,
                     dtype=torch.uint8 if cache_sparse_li_c4
                     else self.c8_k_cache_dtype if cache_sparse_li_c8
-                    else self.kv_cache_dtype,
+                    else self.dtype,
                     cache_dtype_str=(
                         self.vllm_config.cache_config.cache_dtype
                         if (cache_sparse_li_c8 or cache_sparse_li_c4)
@@ -6260,7 +6260,7 @@ class NPUModelRunner(GPUModelRunner):
                     ),
                     scale_dim=head_dim // 64 * 2 if cache_sparse_li_c4 else 1 if cache_sparse_li_c8 else 0,
                     scale_dtype=torch.float8_e8m0fnu if cache_sparse_li_c4
-                    else c8_k_scale_cache_dtype if cache_sparse_li_c8 else torch.int8,
+                    else self.c8_k_scale_cache_dtype if cache_sparse_li_c8 else torch.int8,
                     cache_sparse_li_c4=cache_sparse_li_c4,
                     cache_sparse_li_c8=cache_sparse_li_c8,
                     sfa_dcp_replicated_indexer_size=self.sfa_dcp_replicated_indexer_size,
