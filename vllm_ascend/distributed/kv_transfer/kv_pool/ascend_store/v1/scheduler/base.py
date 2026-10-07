@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any
 
 from vllm.utils.math_utils import cdiv
 
@@ -21,8 +21,6 @@ from ..protocol.transfer import (
 from .lookup import RemoteLookup, resolve_load_candidate
 from .source_leases import StoreSourceLeases
 from .state import LoadCandidate, RequestAllocation, RequestProgress, SchedulerConfig
-
-CommandT = TypeVar("CommandT")
 
 if TYPE_CHECKING:
     from vllm.v1.core.block_pool import BlockPool
@@ -156,8 +154,10 @@ class KVPoolScheduler:
                 scheduled.num_computed_tokens,
                 scheduler_output.num_scheduled_tokens[scheduled.req_id],
             )
-            _append_command(load_command, load_commands)
-            _append_command(store_command, source_pending_commands)
+            if load_command is not None:
+                load_commands.append(load_command)
+            if store_command is not None:
+                source_pending_commands.append(store_command)
 
         cached = scheduler_output.scheduled_cached_reqs
         resumed_request_ids = frozenset(cached.resumed_req_ids)
@@ -177,8 +177,10 @@ class KVPoolScheduler:
                     cached.num_computed_tokens[index],
                     scheduler_output.num_scheduled_tokens[request_id],
                 )
-            _append_command(load_command, load_commands)
-            _append_command(store_command, source_pending_commands)
+            if load_command is not None:
+                load_commands.append(load_command)
+            if store_command is not None:
+                source_pending_commands.append(store_command)
 
         load_commands.extend(self._take_allocation_ready_loads())
         source_ready_commands.extend(self._plan_step_checkpoint_stores(scheduler_output.kv_connector_block_state))
@@ -455,8 +457,3 @@ class KVPoolScheduler:
 
 def _freeze_block_ids(block_ids_by_group: Iterable[Iterable[int]]) -> tuple[tuple[int, ...], ...]:
     return tuple(tuple(block_ids) for block_ids in block_ids_by_group)
-
-
-def _append_command(command: CommandT | None, destination: list[CommandT]) -> None:
-    if command is not None:
-        destination.append(command)

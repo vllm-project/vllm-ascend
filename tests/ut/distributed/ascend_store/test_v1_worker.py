@@ -92,7 +92,7 @@ def test_worker_factory_selects_one_concrete_route(monkeypatch) -> None:
 
         monkeypatch.setattr(
             vllm_adapter,
-            "_resolve_kv_pool_configuration",
+            "resolve_kv_pool_route_spec",
             lambda *_args, route_spec=route_spec: route_spec,
         )
         monkeypatch.setattr(

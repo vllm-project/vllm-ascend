@@ -328,7 +328,11 @@ class LayerwiseLoadTimeline:
 def _load_session_failures(batch: KVTransferBatch, codes_by_key: dict[str, int]) -> tuple[LoadCompletion, ...]:
     evidence_by_request: list[list[TransferEvidence]] = [[] for _ in batch.request_ids]
     for group in batch.groups:
-        selected = range(group.object_count) if group.selection is None else np.flatnonzero(group.selection).tolist()
+        selected = (
+            range(group.object_count)
+            if group.selected_objects is None
+            else np.flatnonzero(group.selected_objects).tolist()
+        )
         for object_index in selected:
             source = group.source(object_index, None)
             code = codes_by_key[source.key]

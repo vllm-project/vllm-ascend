@@ -7,7 +7,7 @@ from collections.abc import Mapping
 import numpy as np
 from vllm.logger import logger
 
-from ...backend import BackendSpec, GVABackend, GVARegion
+from ...backend import BackendSpec, GVABackend
 from ...projection import GVALayerwiseProjection
 from ..transfer.batch import KVGroupBatch, KVTransferBatch, LayerTransferPlan
 from ..transfer.evidence import LayerStoreResult, TransferEvidence
@@ -51,7 +51,7 @@ class GVABackendIO(BackendIO):
         self._gva_backend.validate_gva_support()
 
     def exists(self, keys: list[str]) -> tuple[bool, ...]:
-        return tuple(region is not None for region in self._query_regions(keys))
+        return tuple(region is not None for region in self._gva_backend.query_gva_regions(keys))
 
     def start_load_sessions(self, keys: list[str], object_sizes: list[int]) -> tuple[int, ...]:
         self._load_plan = None
@@ -63,7 +63,7 @@ class GVABackendIO(BackendIO):
         leased_keys = [key for key, code in zip(keys, result_codes, strict=True) if code == 0]
         self._load_sessions.update((key, None) for key in leased_keys)
         # Resolve after acquiring the lease: an earlier Lookup address may already have been evicted.
-        regions = dict(zip(leased_keys, self._query_regions(leased_keys), strict=True))
+        regions = dict(zip(leased_keys, self._gva_backend.query_gva_regions(leased_keys), strict=True))
         rejected_keys = []
         for index, (key, object_size) in enumerate(zip(keys, object_sizes, strict=True)):
             if result_codes[index] != 0:
@@ -252,6 +252,3 @@ class GVABackendIO(BackendIO):
         if self._store_plan is None:
             raise RuntimeError("Layerwise Store plan was not prepared")
         return self._store_plan
-
-    def _query_regions(self, keys: list[str]) -> tuple[GVARegion | None, ...]:
-        return self._gva_backend.query_gva_regions(keys)
