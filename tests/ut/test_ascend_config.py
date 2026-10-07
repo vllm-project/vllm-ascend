@@ -154,9 +154,7 @@ class TestAscendConfig(TestBase):
         (
             config._sparse_li_c8_layer_ids,
             config._sparse_li_c8_layer_names,
-        ) = AscendConfig._parse_sparse_li_layers_from_quant_config(
-            quant_config, ("INT8_DYNAMIC", "W8A8_MXFP8")
-        )
+        ) = AscendConfig._parse_sparse_li_layers_from_quant_config(quant_config, ("INT8_DYNAMIC", "W8A8_MXFP8"))
         config._sparse_li_layer_filter_enabled = AscendConfig._has_sparse_li_layer_config(quant_config)
         return config
 

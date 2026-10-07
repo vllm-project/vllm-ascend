@@ -1631,8 +1631,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             # Reconstruct full cu_seqlens_q by prepending 0.
             cu_seqlens_q = torch.cat(
                 [
-                    torch.zeros(1, dtype=actual_seq_lengths_query.dtype,
-                                device=actual_seq_lengths_query.device),
+                    torch.zeros(1, dtype=actual_seq_lengths_query.dtype, device=actual_seq_lengths_query.device),
                     actual_seq_lengths_query,
                 ]
             )
