@@ -235,29 +235,23 @@ function(add_ops_info_target)
         set(OPS_INFO_JSON ${ASCEND_AUTOGEN_DIR}/aic-${OPINFO_COMPUTE_UNIT}-ops-info.json)
     endif()
     set(CUSTOM_OPS_INFO_DIR ${CUSTOM_DIR}/op_impl/ai_core/tbe/config/${OPINFO_COMPUTE_UNIT})
-    get_filename_component(OPS_INFO_JSON_NAME ${OPS_INFO_JSON} NAME)
-    set(CUSTOM_OPS_INFO_JSON ${CUSTOM_OPS_INFO_DIR}/${OPS_INFO_JSON_NAME})
 
     set(OPS_INFO_INI          ${base_aclnn_binary_dir}/aic-${OPINFO_COMPUTE_UNIT}-ops-info.ini)
     set(OPS_INFO_INNER_INI    ${base_aclnn_binary_dir}/inner/aic-${OPINFO_COMPUTE_UNIT}-ops-info.ini)
     set(OPS_INFO_EXCLUDE_INI  ${base_aclnn_binary_dir}/exc/aic-${OPINFO_COMPUTE_UNIT}-ops-info.ini)
 
-    # opbuild emits the INI files as side effects, not declared file outputs.
-    # An OUTPUT command with only target-order dependencies can therefore keep
-    # an old JSON after the INI schema changes in an incremental build. Refresh
-    # this inexpensive metadata after opbuild on every invocation, just like
-    # generate_compile_cmd. Otherwise OPC can fall back to a same-named CANN
-    # built-in operator with a different input/output ABI.
-    add_custom_target(${OPS_INFO_TARGET} ALL
-            BYPRODUCTS ${OPS_INFO_JSON} ${CUSTOM_OPS_INFO_JSON}
+    add_custom_command(OUTPUT ${OPS_INFO_JSON}
             COMMAND ${HI_PYTHON} ${ASCENDC_CMAKE_UTIL_DIR}/parse_ini_to_json.py
             ${OPS_INFO_INI}
             ${OPS_INFO_INNER_INI}
             ${OPS_INFO_EXCLUDE_INI}
             ${OPS_INFO_JSON}
             COMMAND mkdir -p ${CUSTOM_OPS_INFO_DIR}
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${OPS_INFO_JSON} ${CUSTOM_OPS_INFO_JSON}
-            VERBATIM
+            COMMAND cp -f ${OPS_INFO_JSON} ${CUSTOM_OPS_INFO_DIR}
+    )
+
+    add_custom_target(${OPS_INFO_TARGET} ALL
+            DEPENDS ${OPS_INFO_JSON}
     )
 
     add_dependencies(${OPS_INFO_TARGET} opbuild_gen_default opbuild_gen_inner opbuild_gen_exc)

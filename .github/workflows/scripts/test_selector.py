@@ -44,36 +44,6 @@ MIN_AFFECTED_LINES = 1
 TEST_ROOTS = ("tests/e2e/pull_request/", "tests/ut/")
 
 
-def _git_pr_diff(repo_url: str, base_sha: str, head_sha: str) -> tuple[bytes, str]:
-    """Generate the complete PR diff, including history missing in shallow CI checkouts."""
-    shallow = subprocess.check_output(["git", "rev-parse", "--is-shallow-repository"], text=True).strip()
-    fetch = ["git", "fetch", "--no-tags"]
-    if shallow == "true":
-        fetch.append("--unshallow")
-    subprocess.run([*fetch, repo_url, base_sha, head_sha], check=True, timeout=300)
-    merge_base = subprocess.check_output(["git", "merge-base", base_sha, head_sha], text=True).strip()
-    diff = subprocess.check_output(
-        ["git", "diff", "--no-ext-diff", "--no-textconv", "--find-renames", merge_base, head_sha, "--"],
-        timeout=300,
-    )
-    return diff, merge_base
-
-
-def _download_pr_diff(request, ssl_context, pr_data) -> tuple[bytes, str]:
-    """Keep API failures visible; only the explicit diff-size limit uses Git."""
-    try:
-        with urllib.request.urlopen(request, timeout=60, context=ssl_context) as response:
-            return response.read(), pr_data["base"]["sha"]
-    except urllib.error.HTTPError as error:
-        if error.code != 406:
-            raise
-        payload = json.loads(error.read())
-        if not any(item.get("code") == "too_large" for item in payload.get("errors", [])):
-            raise
-    print("  GitHub diff size limit exceeded; generating the complete diff with Git")
-    return _git_pr_diff(pr_data["base"]["repo"]["clone_url"], pr_data["base"]["sha"], pr_data["head"]["sha"])
-
-
 def is_selectable_test(path: str) -> bool:
     return path.startswith(TEST_ROOTS) and fnmatchcase(PurePosixPath(path).name, "test_*.py")
 
@@ -2080,9 +2050,11 @@ def main():
 
                 # Download diff (use binary mode to avoid line ending conversion)
                 req = _github_request(pr_url, "application/vnd.github.v3.diff")
-                diff_bytes, base_sha = _download_pr_diff(req, ssl_context, pr_data)
-                with open(diff_file, "wb") as f:
-                    f.write(diff_bytes)
+                with urllib.request.urlopen(req, timeout=60, context=ssl_context) as response:
+                    diff_bytes = response.read()
+                    with open(diff_file, "wb") as f:
+                        f.write(diff_bytes)
+                print("  Using GitHub API to get diff")
                 break
             except Exception as e:
                 print(f"  Attempt {attempt} failed: {e}")

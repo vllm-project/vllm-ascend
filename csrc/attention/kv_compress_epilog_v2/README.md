@@ -21,8 +21,3 @@ payloads are packed consecutively inside each physical block. The adapter
 passes `cache.stride(0)` so non-contiguous block views remain supported.
 `x_scale` is reserved and must equal 1.0. The public adapter validates the
 mode, group size, dtype, dimensions, and read-only input contiguity.
-
-Byte-exact format, untouched-cache, invalid-slot, strided-page, and ACL graph
-replay tests are in
-`tests/e2e/nightly/single_node/ops/singlecard_ops/test_kv_compress_epilog_v2.py`.
-The cache-writer-to-attention module test is in `test_dsv41_dsl.py`.

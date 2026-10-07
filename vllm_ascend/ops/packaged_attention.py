@@ -4,7 +4,7 @@
 # Please refer to the License for details. You may not use this file except in compliance with the License.
 # THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
-# See packaged_attention.LICENSE in this directory for the full text of the License.
+# See csrc/attention/kv_compress_epilog_v2/LICENSE for the full text of the License.
 
 
 """Torch dispatcher contracts for the packaged A5 DSV4.1 DSL operators.

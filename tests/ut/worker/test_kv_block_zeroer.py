@@ -40,47 +40,6 @@ class _FakeKernel:
         return launch
 
 
-def test_physical_block_tensors_support_mixed_pages_and_deduplicate():
-    zeroer = AscendKVBlockZeroer(torch.device("cpu"), pin_memory=False)
-    small = torch.empty(4 * 32, dtype=torch.int8)
-    large = torch.empty(4 * 64, dtype=torch.int8)
-    zeroer.init_meta(
-        attn_groups_iter=[],
-        kernel_block_sizes=[],
-        cache_dtype="auto",
-        runner_only_attn_layers=set(),
-        static_forward_context={},
-        physical_block_tensors=[small, small, large],
-        num_blocks=4,
-    )
-    assert zeroer._meta is not None
-    addresses, sizes, max_chunks, block_size, n_segs = zeroer._meta
-    assert addresses.tolist() == [small.data_ptr(), large.data_ptr()]
-    assert sizes.tolist() == [8, 16]
-    assert (max_chunks, block_size, n_segs) == (2, 8, 2)
-
-
-@pytest.mark.parametrize("num_blocks", [None, 0, -1])
-def test_physical_block_tensors_require_positive_block_count(num_blocks):
-    zeroer = AscendKVBlockZeroer(torch.device("cpu"), pin_memory=False)
-    with pytest.raises(ValueError, match="num_blocks must be positive"):
-        zeroer.init_meta([], [], "auto", set(), {}, physical_block_tensors=[], num_blocks=num_blocks)
-
-
-@pytest.mark.parametrize(
-    "tensor,blocks,error",
-    [
-        (torch.empty(8, 8).t(), 4, "contiguous whole blocks"),
-        (torch.empty(15, dtype=torch.int8), 4, "contiguous whole blocks"),
-        (torch.empty(12, dtype=torch.int8), 4, "4-byte aligned"),
-    ],
-)
-def test_physical_block_tensors_reject_invalid_storage(tensor, blocks, error):
-    zeroer = AscendKVBlockZeroer(torch.device("cpu"), pin_memory=False)
-    with pytest.raises(ValueError, match=error):
-        zeroer.init_meta([], [], "auto", set(), {}, physical_block_tensors=[tensor], num_blocks=blocks)
-
-
 def test_init_meta_supports_non_uniform_page_sizes() -> None:
     """MLA K/V cache segments may have different sizes per logical block."""
     device = torch.device("cpu")
@@ -220,27 +179,6 @@ def test_init_meta_uses_flat_kernel_size_for_virtual_blocks():
     assert max_chunks == 1
     assert block_size == 16
     assert num_segments == 2
-
-
-def test_init_meta_preserves_strided_subblock_addresses():
-    zeroer = AscendKVBlockZeroer(torch.device("cpu"), pin_memory=False)
-    # Each payload has 8 float32 values, but physical pages are 16 values apart.
-    # One logical block spans two of these strided kernel blocks.
-    caches = tuple(torch.zeros((4, 16))[:, :8].view(4, 4, 1, 2) for _ in range(2))
-    zeroer.init_meta(
-        [_attention_group()],
-        kernel_block_sizes=[4],
-        cache_dtype="auto",
-        runner_only_attn_layers=set(),
-        static_forward_context={"full_attn": SimpleNamespace(kv_cache=caches)},
-    )
-    assert zeroer._meta is not None
-    addresses, page_sizes, _, _, num_segments = zeroer._meta
-    assert addresses.tolist() == [cache.data_ptr() + offset for cache in caches for offset in (0, 64)]
-    assert page_sizes.tolist() == [8] * 4
-    assert zeroer._seg_page_strides is not None
-    assert zeroer._seg_page_strides.tolist() == [32] * 4
-    assert num_segments == 4
 
 
 def test_init_meta_skips_group_without_kernel_size():
