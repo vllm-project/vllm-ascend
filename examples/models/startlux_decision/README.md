@@ -7,7 +7,11 @@ registered or patched in the hardware plugin.
 
 ## Revisions and environment
 
-- vLLM fork branch: `Liuchenbing-2026/vllm:startlux_decision_eager_pr`, based on
+The following pins describe the validated v0.30.0 runtime. The upstream model
+submission is maintained separately on main; its CI and runtime validation must
+complete before substituting that revision into this recipe.
+
+- vLLM fork branch: `Liuchenbing-2026/vllm:startlux_decision_npu_eager`, based on
   `ced6857afa0ea7b2e3f0846a62e1394e90f15607` (v0.30.0).
 - Ascend fork branch: `Liuchenbing-2026/vllm-ascend:startlux_decision_npu_eager`, based
   on `a8fcedb03d93e60efceddbfc912406f7fa491d57` with the existing packed-GDN
