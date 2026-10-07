@@ -1200,7 +1200,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         torch.nn.Module.__init__(attn_module)
         attn_module.impl = SimpleNamespace(fa_quant_layer=False)
         runner.compilation_config = SimpleNamespace(static_forward_context={layer_name: attn_module})
-        runner.kernel_block_sizes = [[128]]
+        runner.kernel_block_sizes = [128]
         runner._get_layer_kv_cache_specs = lambda config: {layer_name: spec}
         runner._get_attention_kv_cache_dims = lambda layer, cache_spec: (512, 64)
         runner._kv_cache_spec_attn_group_iterator = lambda: [
