@@ -499,7 +499,12 @@ def test_indexer_orders_cache_gathers_after_query_dependency(with_dependency, qu
     scale = torch.ones(2, 1) if quantized else None
     slots = torch.arange(2)
     metadata = SimpleNamespace(cos=None, sin=None, slot_mapping=slots)
-    indexer = SimpleNamespace(_pcp_active=False, _dsa_cp_active=True, enable_sparse_li_c8=quantized)
+    indexer = SimpleNamespace(
+        _pcp_active=False,
+        _dsa_cp_active=True,
+        enable_sparse_li_c8=quantized,
+        enable_sparse_li_quant=quantized,
+    )
 
     def forward_k(*args):
         events.append("forward_k")

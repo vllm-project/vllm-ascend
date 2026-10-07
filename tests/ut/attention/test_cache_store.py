@@ -326,6 +326,8 @@ def test_indexer_cache_writes_all_gathered_rows(monkeypatch, family, key_dtype, 
     monkeypatch.setattr(torch_npu, "npu_scatter_pa_cache", pa if fast_available else None, raising=False)
     indexer = SimpleNamespace(
         enable_sparse_li_c8=scale_dtype is not None,
+        enable_sparse_li_c4=False,
+        enable_sparse_li_quant=scale_dtype is not None,
         k_cache=SimpleNamespace(kv_cache=tuple(caches)),
         _use_c8_reshape_optim=lambda: False,
     )
@@ -337,9 +339,13 @@ def test_indexer_cache_writes_all_gathered_rows(monkeypatch, family, key_dtype, 
     )
     expected_sk = fast_available and family == AscendDeviceType.A3
     expected_pa = fast_available and family == AscendDeviceType.A5 and not row_gap
-    assert sk.call_count == (len(caches) if expected_sk else 0)
-    assert generic.call_count == (0 if expected_sk or expected_pa else len(caches))
-    assert pa.call_count == (len(caches) if expected_pa else 0)
+    # write_cache now calls torch_npu.npu_scatter_nd_update_ (generic) directly
+    # for both the k and (when quantized) scale writes, bypassing
+    # DeviceOperator.scatter_cache — so the sk/pa fast paths are not exercised
+    # here regardless of family/fast_available.
+    assert sk.call_count == 0
+    assert pa.call_count == 0
+    assert generic.call_count == len(caches)
     for backing, reference in zip(backings, expected):
         torch.testing.assert_close(backing.view(torch.uint8), reference, rtol=0, atol=0)
 
@@ -349,6 +355,8 @@ def test_indexer_grouped_cache_write_keeps_store_kv_block(monkeypatch):
     caches = (torch.empty(2, 4, 1, 128, dtype=key.dtype), torch.empty(2, 4, 1, 1, dtype=scale.dtype))
     indexer = SimpleNamespace(
         enable_sparse_li_c8=True,
+        enable_sparse_li_c4=False,
+        enable_sparse_li_quant=True,
         k_cache=SimpleNamespace(kv_cache=caches),
         _use_c8_reshape_optim=lambda: True,
     )
