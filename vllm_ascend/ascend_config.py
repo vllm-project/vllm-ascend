@@ -18,10 +18,12 @@ from __future__ import annotations
 import dataclasses
 import importlib.util
 import json
+import math
 import os
+from statistics import NormalDist
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
-from pydantic import ConfigDict, TypeAdapter, model_validator
+from pydantic import ConfigDict, TypeAdapter, field_validator, model_validator
 from pydantic_core import ArgsKwargs
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
@@ -181,6 +183,85 @@ class AscendFusionConfig:
     fusion_ops_gmmswigluquant: bool = True
 
 
+@config(config=ConfigDict(frozen=True))
+class StairConfig:
+    """Advanced tuning for the MRv2 STAIR policy.
+
+    Covariance-aware risk and hysteresis are mandatory policy behavior. Balance
+    is the reciprocal of the mean max-to-average rank-load ratio.
+
+    Attributes:
+        load_window_bins: Maximum chronological bins used to compress the
+            upstream EPLB load window. Bin means and weights represent all
+            samples in that window.
+        load_risk_quantile: One-sided standard-normal quantile converted to a
+            z-score for mean-plus-deviation expert and rank risk.
+        relative_balance_threshold: Rebalance when current balance divided by
+            the last committed balance is at or below this value.
+        absolute_balance_threshold: Rebalance when current balance is at or
+            below this value.
+        rank_transfer_limit: Maximum outgoing and incoming expert transfers
+            for each rank in one layer plan. Minus one removes this limit.
+        cross_node_transfer_limit: Maximum outgoing and incoming cross-node
+            expert transfers for each node in one layer plan. Minus one removes
+            this limit; zero disables cross-node transfers.
+        replica_search_num_stages: Number of risk-ordered expert groups handled
+            by the FlashTree-style replica search.
+        replica_search_radius: Maximum distance from the greedy extra-replica
+            budget explored at each search stage.
+        replica_search_beam_size: Maximum unique replica-count candidates kept
+            after each search stage.
+        placement_search_backtrack_limit: Maximum feasible-branch reversals
+            while constrained LPT places one candidate. Zero disables them.
+    """
+
+    load_window_bins: int = 64
+    load_risk_quantile: float = 0.75
+    relative_balance_threshold: float = 0.95
+    absolute_balance_threshold: float = 0.90
+    rank_transfer_limit: int = 1
+    cross_node_transfer_limit: int = 1
+    replica_search_num_stages: int = 4
+    replica_search_radius: int = 8
+    replica_search_beam_size: int = 64
+    placement_search_backtrack_limit: int = 32
+
+    @property
+    def z_score(self) -> float:
+        return NormalDist().inv_cdf(self.load_risk_quantile)
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def _reject_bool(cls, value: Any) -> Any:
+        if isinstance(value, bool):
+            raise ValueError("STAIR numeric fields must not be booleans")
+        return value
+
+    @model_validator(mode="after")
+    def _validate(self):
+        if not 2 <= self.load_window_bins <= 256:
+            raise ValueError("stair_config.load_window_bins must be between 2 and 256")
+        if not math.isfinite(self.load_risk_quantile) or not 0.5 < self.load_risk_quantile < 1:
+            raise ValueError("stair_config.load_risk_quantile must be between 0.5 and one")
+        for name in ("relative_balance_threshold", "absolute_balance_threshold"):
+            value = getattr(self, name)
+            if not math.isfinite(value) or not 0 < value <= 1:
+                raise ValueError(f"stair_config.{name} must be between zero and one")
+        if self.rank_transfer_limit != -1 and self.rank_transfer_limit < 1:
+            raise ValueError("stair_config.rank_transfer_limit must be -1 or positive")
+        if self.cross_node_transfer_limit < -1:
+            raise ValueError("stair_config.cross_node_transfer_limit must be at least -1")
+        if not 1 <= self.replica_search_num_stages <= 8:
+            raise ValueError("stair_config.replica_search_num_stages must be between 1 and 8")
+        if not 0 <= self.replica_search_radius <= 32:
+            raise ValueError("stair_config.replica_search_radius must be between 0 and 32")
+        if not 1 <= self.replica_search_beam_size <= 128:
+            raise ValueError("stair_config.replica_search_beam_size must be between 1 and 128")
+        if not 0 <= self.placement_search_backtrack_limit <= 64:
+            raise ValueError("stair_config.placement_search_backtrack_limit must be between 0 and 64")
+        return self
+
+
 @config
 class AscendWarmupConfig:
     """Configuration for startup warmup that overlaps weight loading.
@@ -216,6 +297,7 @@ class EplbConfig:
     # upstream EPLB expert-load window; any prefill request marks the batch
     # as prefill.
     load_collection_phase: str = "all"
+    stair_config: StairConfig = dataclasses.field(default_factory=StairConfig)
 
     @model_validator(mode="after")
     def _validate_config(self):
@@ -346,11 +428,10 @@ class AscendConfig:
             "multistream_overlap_shared_expert": false,
             "enable_kv_nz": false,
             "enable_mc2_hierarchy_comm": false,
-            "enable_reduce_sample": false,
             "enable_dsa_cp": false,
             "sfa_dcp_force_tmajor_restore": false,
             "enable_force_eplb": false,
-            "enable_pcp_o_proj_weight_sharding": false,
+            "enable_pcp_o_proj_weight_sharding": true,
             "enable_pcp_embedding_lmhead_weight_sharding": true,
             "draft_window_size": null,
             "mix_placement": false,
@@ -362,7 +443,6 @@ class AscendConfig:
             "mlapo_keep_prefill_weights": false,
             "msmonitor_use_daemon": false,
             "enable_transpose_kv_cache_by_block": true,
-            "block_table_no_commit_optimize": 0,
             "weight_nz_mode": 1,
             "enable_shared_expert_dp": false,
             "enable_sparse_sfa_c8": false,
@@ -391,7 +471,8 @@ class AscendConfig:
                 "num_redundant_experts": 0,
                 "eplb_policy_type": 2,
                 "eplb_heat_collection_stage": "all",
-                "load_collection_phase": "all"
+                "load_collection_phase": "all",
+                "stair_config": {}
             },
             "rejection_sampler_config": {
                 "enable_block_verify": false,
@@ -488,11 +569,10 @@ class AscendConfig:
     multistream_overlap_shared_expert: bool = False
     enable_kv_nz: bool = False
     enable_mc2_hierarchy_comm: bool = False  # deprecated, will be replaced by mc2_comm_alg = "hierarchy"
-    enable_reduce_sample: bool = False
     enable_dsa_cp: bool = False
     sfa_dcp_force_tmajor_restore: bool = False
     enable_force_eplb: bool = False
-    enable_pcp_o_proj_weight_sharding: bool = False
+    enable_pcp_o_proj_weight_sharding: bool = True
     enable_pcp_embedding_lmhead_weight_sharding: bool = True
     draft_window_size: int | None = None
     mix_placement: bool = False
@@ -526,8 +606,6 @@ class AscendConfig:
     mlapo_keep_prefill_weights: bool = False
     msmonitor_use_daemon: bool = False
     enable_transpose_kv_cache_by_block: bool = True
-    # MRv1 only: 0 uses dirty-range commits; 1 restores a full-table H2D copy.
-    block_table_no_commit_optimize: Literal[0, 1] = 0
     weight_nz_mode: int = 1
 
     # ---- sub-configs (no vllm_config dep): pydantic dict→dataclass coercion ----
@@ -599,6 +677,12 @@ class AscendConfig:
             and vc.model_config.is_moe
         ):
             raise ValueError("enable_force_eplb cannot be mixed with dynamic_eplb.")
+        if self.enable_dsa_cp and vc.parallel_config.prefill_context_parallel_size > 1:
+            raise ValueError(
+                "DSA-CP and PCP cannot be enabled at the same time. "
+                "Use PCP instead: remove enable_dsa_cp from additional_config "
+                "when --prefill-context-parallel-size is greater than 1."
+            )
         self._check_mooncake_c8_kv_cache_quant(vc)
 
         # profiling_chunk vs min_chunk clamp
@@ -660,12 +744,7 @@ class AscendConfig:
 
         if self.enable_dsa_cp:
             tp_size = vc.parallel_config.tensor_parallel_size
-            pcp_size = vc.parallel_config.prefill_context_parallel_size
-            if pcp_size > 1:
-                migration = (
-                    "Prefill context parallelism is already enabled; remove enable_dsa_cp from additional_config."
-                )
-            elif tp_size > 1:
+            if tp_size > 1:
                 migration = (
                     "Consider trying prefill context parallelism with "
                     f"--tensor-parallel-size 1 --prefill-context-parallel-size {tp_size} "
@@ -713,14 +792,12 @@ class AscendConfig:
 
         finegrained_tp_enabled = (
             self.finegrained_tp_config.oproj_tensor_parallel_size > 0
-            or self.finegrained_tp_config.embedding_tensor_parallel_size > 0
             or self.finegrained_tp_config.mlp_tensor_parallel_size > 0
-            or self.finegrained_tp_config.lmhead_tensor_parallel_size > 0
         )
         if finegrained_tp_enabled and not self.scheduler_config.recompute_scheduler_enable:
             raise AssertionError(
-                "finegrained_tp_config requires recompute_scheduler_enable=true: "
-                "it keeps decode-node steps decode-shaped.",
+                "oproj_tensor_parallel_size / mlp_tensor_parallel_size require "
+                "recompute_scheduler_enable=true: it keeps decode-node steps decode-shaped.",
             )
 
         # enable_fused_mc2 enum + MiniMax mutex + multistream auto-disable
@@ -800,11 +877,15 @@ class AscendConfig:
         # Sparse C8 derivation. StoreKVBlock can be disabled by users, and is
         # otherwise enabled only for SFA + Lightning Indexer C8 on PD prefill
         # nodes.
-        from vllm_ascend.utils import model_uses_sfa_sparse
+        from vllm_ascend.utils import model_uses_kpool_indexer, model_uses_sfa_sparse
 
         use_sparse = model_uses_sfa_sparse(vc.model_config)
+        # The SFA C8 packed KV cache path is indexer-agnostic; kpool-indexer
+        # models (e.g. GLM-5.3-Flash) can use it as well. LI C8 requires the
+        # LightningIndexer cache layout, so it stays gated by use_sparse.
+        use_sparse_sfa = use_sparse or model_uses_kpool_indexer(vc.model_config)
 
-        self.enable_sparse_sfa_c8 = vllm_config.cache_config.cache_dtype in ["fp8", "int8"] and use_sparse
+        self.enable_sparse_sfa_c8 = vllm_config.cache_config.cache_dtype in ["fp8", "int8"] and use_sparse_sfa
         self.enable_sparse_li_c8 = vllm_config.attention_config.indexer_kv_dtype in ["fp8", "int8"] and use_sparse
         kv_transfer_config = vc.kv_transfer_config
         is_prefill_node = kv_transfer_config is not None and (
@@ -833,31 +914,15 @@ class AscendConfig:
         if self.mega_moe_max_tokens <= 0:
             raise ValueError(f"mega_moe_max_tokens must be a positive integer, got {self.mega_moe_max_tokens}")
 
-        # Enable optimized reduce sampling scheme. Preserve the safeguards
-        # added on main while consuming the already-validated typed field.
-        if self.enable_reduce_sample:
-            logger.warning_once("enable_reduce_sample is an experimental feature. Use with caution.")
+        # batch-sharded sampling (Model Runner V2) shards the sampler inputs
+        # per TP rank, while lmhead TP overrides NPUModelRunner.sample with a
+        # whole-group LM-head collective path; the two are mutually exclusive.
+        if vc.parallel_config.enable_batch_sharded_sampling:
             if self.finegrained_tp_config.lmhead_tensor_parallel_size > 0:
                 raise ValueError(
-                    "enable_reduce_sample is incompatible with "
+                    "enable_batch_sharded_sampling is incompatible with "
                     "finegrained_tp_config.lmhead_tensor_parallel_size. "
                     "Please disable one of them."
-                )
-            if (
-                self.enable_pcp_embedding_lmhead_weight_sharding
-                and vc.parallel_config.prefill_context_parallel_size > 1
-            ):
-                raise ValueError(
-                    "enable_reduce_sample is incompatible with "
-                    "enable_pcp_embedding_lmhead_weight_sharding when PCP is enabled. "
-                    "Please disable one of them."
-                )
-            kv_transfer_config = getattr(vc, "kv_transfer_config", None)
-            kv_role = getattr(kv_transfer_config, "kv_role", None)
-            if kv_role == "kv_producer":
-                raise ValueError(
-                    "enable_reduce_sample is not supported on PD-disaggregated "
-                    "scenarios. Please disable enable_reduce_sample."
                 )
 
         # mix_placement mutex
@@ -978,34 +1043,42 @@ class AscendConfig:
 
     @staticmethod
     def _is_a5_megamoe_supported_by_config(vllm_config) -> bool:
-        # Ascend 950 MegaMoe supports only MXFP quantization (dispatch_quant_mode
-        # == 4) and constrains hidden / intermediate to fixed discrete sets, per
-        # cann_ops_transformer docs/zh/mega_moe.md (Ascend 950 constraints).
+        model_architectures = getattr(vllm_config.model_config, "architectures", None) or []
+        is_minimax_m3 = any(architecture.startswith("MiniMaxM3") for architecture in model_architectures)
+        is_kimi_k3 = any(
+            architecture in ("KimiK3ForCausalLM", "KimiLinearForCausalLM", "KimiK3ForConditionalGeneration")
+            for architecture in model_architectures
+        )
         hf_text_config = vllm_config.model_config.hf_text_config
-        hidden_size = getattr(hf_text_config, "hidden_size", None)
+        # K3 projects the residual stream before the routed FFN. Other models
+        # retain the existing hidden-size lookup and supported dimensions.
+        hidden_size = getattr(hf_text_config, "routed_expert_hidden_size", None) if is_kimi_k3 else None
+        if hidden_size is None:
+            hidden_size = getattr(hf_text_config, "hidden_size", None)
         if hidden_size is None and hasattr(vllm_config.model_config, "get_hidden_size"):
             hidden_size = vllm_config.model_config.get_hidden_size()
         if hidden_size is None:
             return False
-        if int(hidden_size) not in {1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192}:
+        supported_hidden_sizes = {1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192}
+        if is_kimi_k3:
+            supported_hidden_sizes.add(3584)
+        if int(hidden_size) not in supported_hidden_sizes:
             logger.warning(
-                "mega moe operator is not supported by current a5 config, for hidden_size %s"
-                " is not in {1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192}",
+                "MegaMoe requires hidden_size in %s; got %s.",
+                sorted(supported_hidden_sizes),
                 int(hidden_size),
             )
             return False
 
-        model_architectures = getattr(vllm_config.model_config, "architectures", None) or []
-        is_minimax_m3 = any(architecture.startswith("MiniMaxM3") for architecture in model_architectures)
         moe_intermediate_size = getattr(hf_text_config, "moe_intermediate_size", None)
         if moe_intermediate_size is None and is_minimax_m3:
             moe_intermediate_size = getattr(hf_text_config, "intermediate_size", None)
         if moe_intermediate_size is None:
             return False
-        # MiniMax-M3 uses intermediate_size=3072 and a SwiGLU-OAI wrapper
-        # supporting the corresponding 6144-wide first projection.
+        # Preserve MiniMax-M3's 6144-wide first projection and also allow K3's
+        # validated SiTU shape without widening support for unrelated models.
         supported_intermediate_sizes = {1024, 2048, 3072, 4096, 7168}
-        if is_minimax_m3:
+        if is_minimax_m3 or is_kimi_k3:
             supported_intermediate_sizes.add(6144)
         # intermediate_hidden == l1_weights.dim1 == 2 * moe_intermediate_size.
         intermediate_hidden = 2 * int(moe_intermediate_size)
@@ -1031,6 +1104,8 @@ class AscendConfig:
             "num_experts_per_tok",
             getattr(hf_text_config, "top_k_experts", 1),
         )
+        if is_kimi_k3:
+            num_top_k = getattr(hf_text_config, "num_experts_per_token", num_top_k)
         if not (1 <= int(num_top_k) <= 32):
             logger.warning(
                 "mega moe operator is not supported by current a5 config, for num_top_k %s is not between 1 and 32",
@@ -1550,9 +1625,20 @@ class SparseKVOffloadConfig:
     keep_device_kv_cache: bool = False
     topk: int = dataclasses.field(default=0, init=False)
     use_fused_overlap: bool = False
+    # Generalized Q1/MTP LIM + copy-SFA. The C8 operator is built separately
+    # but is not selected by this serving path.
+    fused_op_type: str = "none"
+
+    @property
+    def use_fused_copy_sfa(self) -> bool:
+        return self.fused_op_type == "fused_copy_sfa"
 
     @model_validator(mode="after")
     def _validate_values(self):
+        if self.fused_op_type not in ("none", "fused_copy_sfa"):
+            raise ValueError("sparse_kv_offload_config.fused_op_type must be none or fused_copy_sfa")
+        if self.use_fused_copy_sfa and self.use_fused_overlap:
+            raise ValueError("fused_copy_sfa and use_fused_overlap are mutually exclusive")
         if self.topk_buffer_size <= 0:
             raise ValueError("sparse_kv_offload_config.topk_buffer_size must be positive")
         if self.dram_size_per_dp_GB <= 0:
@@ -1600,6 +1686,18 @@ class SparseKVOffloadConfig:
             raise ValueError("Sparse KV offload doesn't support model_runner_v2 now.")
 
         self.topk = vllm_config.model_config.hf_text_config.index_topk
+        if self.use_fused_copy_sfa:
+            if vllm_config.speculative_config and vllm_config.speculative_config.method == "dspark":
+                raise ValueError("fused_copy_sfa does not support DSpark speculative decoding")
+            width = 1 + (vllm_config.speculative_config.num_speculative_tokens if vllm_config.speculative_config else 0)
+            if self.topk != 2048 or not 1 <= width <= 7:
+                raise ValueError("fused_copy_sfa serving requires TopK=2048 and 1–7 query rows per request")
+            if not width * self.topk <= self.topk_buffer_size <= 16256 or self.topk_buffer_size % 256:
+                raise ValueError(
+                    "fused_copy_sfa hot budget must be 256-aligned in [Q_max*2048, 16128]: "
+                    "the dense short-sequence layout only lines up with the circular "
+                    "tail slots when topk_buffer_size is a multiple of 256"
+                )
         if self.topk_buffer_size < self.topk:
             raise ValueError(
                 "sparse_kv_offload_config.topk_buffer_size must be >= topk, "

@@ -24,7 +24,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import build_fused_experts_input
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
-from vllm_ascend.ops.fused_moe.moe_comm_method import _MoECommMethods
+from vllm_ascend.ops.fused_moe.moe_comm_method import _moe_config_key, _MoECommMethods
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import maybe_trans_nz
@@ -181,10 +181,10 @@ class AscendMoERunner310(AscendMoERunner):
             routed_output_transform=routed_output_transform,
             routed_scaling_factor=routed_scaling_factor,
         )
-        if self.is_internal_router and self.gate is not None and not hasattr(self.gate, "weight_fp32"):
-            # Pre-cast the internal router weight during model loading. A
-            # forward-time Cast cannot be captured by ACLGraph on 310P.
-            self.gate.precast_fp32_weight = True
+        gate_weight = getattr(gate, "weight", None)
+        if isinstance(gate_weight, torch.Tensor) and gate_weight.dtype == torch.float16:
+            # Keep the 310P gate weight in FP16 NZ format at load time.
+            gate.precast_fp32_weight = False
 
         ascend_shared_experts = getattr(self, "ascend_shared_experts", None)
         if ascend_shared_experts is not None:
@@ -193,4 +193,17 @@ class AscendMoERunner310(AscendMoERunner):
             # 310P disables the unsupported feature. Restore the upstream entry
             # so its fake output contract matches the single-stream execution.
             self._forward_entry = self._select_forward()
-        _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl310(self.moe_config)
+        _MoECommMethods[_moe_config_key(MoECommType.ALLGATHER, self.moe_config)] = AllGatherCommImpl310(self.moe_config)
+
+    def _compute_router_logits(self, hidden_states: torch.Tensor, router_logits: torch.Tensor) -> torch.Tensor:
+        gate = self.gate
+        assert gate is not None
+        gate_weight = getattr(gate, "weight", None)
+        if (
+            hidden_states.dtype == torch.float16
+            and isinstance(gate_weight, torch.Tensor)
+            and gate_weight.dtype == torch.float16
+        ):
+            gate_out = gate(hidden_states)
+            return gate_out[0] if isinstance(gate_out, tuple) else gate_out
+        return super()._compute_router_logits(hidden_states, router_logits)

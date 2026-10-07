@@ -19,7 +19,7 @@ from pathlib import Path
 
 from tools.bisect.config import BisectInput, Candidate, TrialResult
 
-# ANSI colors (mirrors the style used in multi_node/scripts/run.sh).
+# ANSI colors (mirrors the style used in common/multi_node/run.sh).
 _GREEN = "\033[0;32m"
 _RED = "\033[0;31m"
 _YELLOW = "\033[0;33m"

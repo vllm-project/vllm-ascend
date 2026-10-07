@@ -454,6 +454,7 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         k_hidden_states: torch.Tensor,
         indexer_metadata: Any,
         compute_topk: bool = True,
+        attn_q_gather_handle: torch.distributed.Work | None = None,
     ) -> torch.Tensor | None:
         if not isinstance(indexer_metadata, AscendIndexerKPoolMetadata):
             raise TypeError("GLM KPool backend requires AscendIndexerKPoolMetadata.")
@@ -519,19 +520,9 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
                 else 0
             ),
             compute_topk=compute_topk,
+            output_buffer=self.topk_indices_buffer,
+            # FULL graphs retain padded token rows and replay the captured
+            # dispatch. Keep paged reads independent of the live query count.
+            allow_cache_packing=context.cudagraph_runtime_mode != CUDAGraphMode.FULL,
         )
-        if result is None or self.topk_indices_buffer is None:
-            return result
-
-        if num_tokens > self.topk_indices_buffer.shape[0]:
-            raise RuntimeError(
-                f"GLM KPool output exceeds the top-k buffer rows: {num_tokens} > {self.topk_indices_buffer.shape[0]}."
-            )
-        output = self.topk_indices_buffer[:num_tokens]
-        output.fill_(-1)
-        if result.shape[-1] > output.shape[-1]:
-            raise RuntimeError(
-                f"GLM KPool output exceeds the top-k buffer width: {result.shape[-1]} > {output.shape[-1]}."
-            )
-        output[:, : result.shape[-1]].copy_(result[:, 0])
         return result

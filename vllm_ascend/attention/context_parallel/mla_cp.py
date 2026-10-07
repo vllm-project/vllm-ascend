@@ -29,14 +29,14 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     DCPImplMixin,
     DCPMetadataBuilderMixin,
 )
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.attention.utils import MLAPO_MAX_SUPPORTED_TOKENS, AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import (
     get_draft_graph_params,
     get_draft_graph_prefill_params,
     get_graph_params,
     update_graph_params_workspaces,
 )
-from vllm_ascend.ops.triton.sfa_cp import fused_sfa_dcp_lse_combine
+from vllm_ascend.ops.triton.dcp.dcp_a2a import fused_dcp_lse_combine
 from vllm_ascend.utils import weak_ref_tensors
 
 
@@ -229,6 +229,31 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
 
     can_return_lse_for_decode: bool = True
     supports_mtp_with_cp_non_trivial_interleave_size: bool = True
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._dcp_current_kv_buffers: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
+
+    def process_weights_after_loading(self, act_dtype: torch.dtype):
+        super().process_weights_after_loading(act_dtype)
+        if self.enable_mlapo and not self.fa_quant_layer and not self.use_mla_rope and not self.enable_kv_nz:
+            self._prepare_dcp_current_kv_buffers()
+
+    def _prepare_dcp_current_kv_buffers(self) -> None:
+        # Every graph size uses a view of this layer-owned allocation, so the
+        # current KV and index addresses stay live across capture and replay.
+        max_tokens = min(
+            self.vllm_config.scheduler_config.max_num_batched_tokens,
+            MLAPO_MAX_SUPPORTED_TOKENS,
+        )
+        block_size = self.vllm_config.cache_config.block_size
+        cache_shape = (cdiv(max_tokens, block_size), block_size, self.num_kv_heads)
+        device = self.weight_dq.device
+        self._dcp_current_kv_buffers = (
+            torch.empty((*cache_shape, self.kv_lora_rank), dtype=self.dtype, device=device),
+            torch.empty((*cache_shape, self.qk_rope_head_dim), dtype=self.dtype, device=device),
+            torch.arange(max_tokens, dtype=torch.int64, device=device),
+        )
 
     @staticmethod
     def update_graph_params(
@@ -612,7 +637,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         current_output.record_stream(main_stream)
         current_lse.record_stream(main_stream)
 
-        history_recv = torch.ops.vllm.sfa_dcp_a2a_fused(
+        history_recv = torch.ops.vllm.dcp_a2a_fused(
             history_output,
             history_lse,
             self.dcp_size,
@@ -623,7 +648,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         main_stream.wait_event(current_attn_done)
         # Reduce all history shards and the replicated current chunk exactly
         # once, reading current FIA tensors directly without packing them.
-        attn_output = fused_sfa_dcp_lse_combine(
+        attn_output = fused_dcp_lse_combine(
             history_recv,
             self.kv_lora_rank,
             scatter_dim=1,

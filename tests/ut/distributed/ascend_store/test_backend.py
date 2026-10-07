@@ -20,8 +20,9 @@ import os
 import sys
 import tempfile
 import unittest
+from contextlib import ExitStack
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
@@ -38,6 +39,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import (
     MemcacheBackend,
+    MmcDirect,
     _inject_device_ub_qos,
     _validate_device_ub_qos,
     extract_layout_config,
@@ -77,7 +79,7 @@ class TestBackendABC(unittest.TestCase):
 class TestBackendDeviceBinding(unittest.TestCase):
     def test_memcache_scheduler_factory_does_not_create_npu_context(self):
         npu = MagicMock()
-        parallel_config = SimpleNamespace(assigned_physical_gpu_ids=[5])
+        parallel_config = SimpleNamespace(assigned_physical_gpu_ids=[5], data_parallel_size=1)
         store = MagicMock()
         store.init.return_value = 0
         with (
@@ -895,7 +897,7 @@ class TestMemcacheQosInjection(unittest.TestCase):
             patch.dict(os.environ, {}, clear=True),
             patch.object(MemcacheBackend, "_setup_store"),
         ):
-            MemcacheBackend(MagicMock(), device_id=0, extra_config={"qos_priority": 2})
+            MemcacheBackend(SimpleNamespace(data_parallel_size=1), device_id=0, extra_config={"qos_priority": 2})
             self.assertEqual(os.environ.get(self._ENV), "2")
 
 
@@ -1203,6 +1205,95 @@ class TestLayerwiseKeyFormats(unittest.TestCase):
 # =========================================================================
 # MemcacheBackend (mocked store)
 # =========================================================================
+class TestMemcacheDPInitBarrier(unittest.TestCase):
+    def setUp(self):
+        stack = ExitStack()
+        self.addCleanup(stack.close)
+        self.store = MagicMock()
+        self.store.init.return_value = 0
+        self.group = SimpleNamespace(cpu_group=object())
+        self.get_dp_group = stack.enter_context(patch.object(memcache_module, "get_dp_group", return_value=self.group))
+        self.barrier = stack.enter_context(patch.object(memcache_module.torch.distributed, "barrier"))
+        stack.enter_context(patch.object(MemcacheBackend, "set_device"))
+        stack.enter_context(patch.object(memcache_module, "_validate_device_ub_qos"))
+        stack.enter_context(patch.object(memcache_module.time, "sleep"))
+        stack.enter_context(
+            patch.object(sys.modules["memcache_hybrid"], "DistributedObjectStore", return_value=self.store, create=True)
+        )
+
+    def make_backend(self, dp_init_barrier=True, dp_size=8, init_bm=True, lazy_init=False):
+        return MemcacheBackend(
+            SimpleNamespace(data_parallel_size=dp_size),
+            device_id=0,
+            init_bm=init_bm,
+            lazy_init=lazy_init,
+            dp_init_barrier=dp_init_barrier,
+        )
+
+    def test_default_waits_on_cpu_group_after_successful_init(self):
+        calls = MagicMock()
+        calls.attach_mock(self.store.init, "init")
+        calls.attach_mock(self.barrier, "barrier")
+        backend = self.make_backend()
+        self.assertIs(backend.store, self.store)
+        self.assertEqual(
+            calls.mock_calls,
+            [unittest.mock.call.init(0, init_bm=True), unittest.mock.call.barrier(group=self.group.cpu_group)],
+        )
+
+    def test_explicit_enable(self):
+        self.make_backend(dp_init_barrier=True)
+        self.barrier.assert_called_once_with(group=self.group.cpu_group)
+
+    def test_disabled_single_dp_and_metadata_clients_skip_barrier(self):
+        for kwargs in ({"dp_init_barrier": False}, {"dp_size": 1}, {"init_bm": False}):
+            with self.subTest(**kwargs):
+                self.make_backend(**kwargs)
+                self.get_dp_group.assert_not_called()
+                self.barrier.assert_not_called()
+
+    def test_rejects_non_boolean_config_before_initialization(self):
+        for value in ("false", "true", 0, 1, None):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "memcache_dp_init_barrier.*boolean"):
+                self.make_backend(dp_init_barrier=value)
+        self.store.init.assert_not_called()
+        self.barrier.assert_not_called()
+
+    def test_failed_store_does_not_enter_barrier(self):
+        self.store.init.return_value = -1
+        with self.assertRaises(AssertionError):
+            self.make_backend()
+        self.get_dp_group.assert_not_called()
+        self.barrier.assert_not_called()
+
+    def test_store_exception_does_not_enter_barrier(self):
+        self.store.init.side_effect = RuntimeError("store init failed")
+        with self.assertRaisesRegex(RuntimeError, "store init failed"):
+            self.make_backend()
+        self.barrier.assert_not_called()
+
+    def test_lazy_initialization_does_not_synchronize(self):
+        with patch.object(memcache_module, "_is_device_sdma", return_value=True):
+            backend = self.make_backend(lazy_init=True)
+        self.store.init.assert_not_called()
+        self.barrier.assert_not_called()
+        backend.ensure_initialized()
+        backend.ensure_initialized()
+        self.store.init.assert_called_once_with(0, init_bm=True)
+        self.get_dp_group.assert_not_called()
+        self.barrier.assert_not_called()
+
+    def test_lazy_request_with_eager_backend_still_synchronizes(self):
+        with patch.object(memcache_module, "_is_device_sdma", return_value=False):
+            backend = self.make_backend(lazy_init=True)
+        self.assertFalse(backend._lazy_init)
+        self.store.init.assert_called_once_with(0, init_bm=True)
+        self.barrier.assert_called_once_with(group=self.group.cpu_group)
+        backend.ensure_initialized()
+        self.store.init.assert_called_once()
+        self.barrier.assert_called_once()
+
+
 class TestMemcacheBackendMethods(unittest.TestCase):
     def _make_backend(self):
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import MemcacheBackend
@@ -1211,11 +1302,57 @@ class TestMemcacheBackendMethods(unittest.TestCase):
             backend = MemcacheBackend.__new__(MemcacheBackend)
             backend.store = MagicMock()
             backend.device_id = 0
+            backend._dp_init_barrier = False
             # Set internal state to avoid lazy init logic during tests
             backend._lazy_init = False
             backend._store_initialized = True
             backend._pending_buffers = None
             return backend
+
+    def test_ssd_load_rewarms_via_registered_full_sized_npu_read(self):
+        b = self._make_backend()
+        ssd = SimpleNamespace(size=lambda: 64, type_list=lambda: [2], gva_list=lambda: [0])
+        resident = SimpleNamespace(size=lambda: 64, type_list=lambda: [2, 1], gva_list=lambda: [0, 4096])
+        b.store.batch_get_key_info.side_effect = [[ssd], [resident]]
+        b.store.batch_get_into.return_value = [0]
+        b.store.register_buffer.return_value = 0
+        scratch = SimpleNamespace(data_ptr=lambda: 8192)
+        with patch.object(memcache_module.torch, "empty", return_value=scratch):
+            self.assertEqual(b.batch_get_key_info(["ssd-key"], for_load=True), [resident])
+        keys, addresses, sizes, direction = b.store.batch_get_into.call_args.args
+        self.assertEqual(keys, ["ssd-key"])
+        self.assertEqual(sizes, [64])
+        self.assertGreater(addresses[0], 0)
+        self.assertEqual(direction, memcache_module.MmcDirect.COPY_G2L.value)
+        b.store.register_buffer.assert_called_once_with(8192, 64)
+        b.store.unregister_buffer.assert_called_once_with(8192, 64)
+
+    def test_scheduler_query_does_not_rewarm_ssd(self):
+        b = self._make_backend()
+        ssd = SimpleNamespace(size=lambda: 64, type_list=lambda: [2], gva_list=lambda: [0])
+        b.store.batch_get_key_info.return_value = [ssd]
+        self.assertEqual(b.batch_get_key_info(["ssd-key"]), [ssd])
+        b.store.batch_get_into.assert_not_called()
+
+    def test_ssd_with_resident_replica_does_not_copy_to_host(self):
+        b = self._make_backend()
+        info = SimpleNamespace(size=lambda: 64, type_list=lambda: [2, 1], gva_list=lambda: [0, 4096])
+        b.store.batch_get_key_info.return_value = [info]
+        self.assertEqual(b.batch_get_key_info(["resident-key"], for_load=True), [info])
+        b.store.batch_get_into.assert_not_called()
+
+    def test_ssd_rewarm_failure_is_not_a_successful_load(self):
+        b = self._make_backend()
+        ssd = SimpleNamespace(size=lambda: 64, type_list=lambda: [2], gva_list=lambda: [0])
+        b.store.batch_get_key_info.return_value = [ssd]
+        b.store.batch_get_into.return_value = [-1]
+        b.store.register_buffer.return_value = 0
+        with (
+            patch.object(memcache_module.torch, "empty", return_value=SimpleNamespace(data_ptr=lambda: 8192)),
+            self.assertRaisesRegex(RuntimeError, "SSD rewarm failed"),
+        ):
+            b.batch_get_key_info(["ssd-key"], for_load=True)
+        b.store.unregister_buffer.assert_called_once_with(8192, 64)
 
     def test_exists(self):
         b = self._make_backend()
@@ -1295,6 +1432,32 @@ class TestMemcacheBackendMethods(unittest.TestCase):
         b.register_buffer([100], [200])
         b.store.register_buffer.assert_called_once()
 
+    def test_unregister_buffer(self):
+        b = self._make_backend()
+
+        b.unregister_buffer([100, 200], [300, 400])
+
+        self.assertEqual(
+            b.store.unregister_buffer.call_args_list,
+            [call(100, 300), call(200, 400)],
+        )
+
+    def test_unregister_buffer_rejects_mismatched_ptrs_and_sizes(self):
+        b = self._make_backend()
+
+        with self.assertRaisesRegex(ValueError, "same length"):
+            b.unregister_buffer([100, 200], [300])
+
+        b.store.unregister_buffer.assert_not_called()
+
+    def test_unregister_buffer_before_store_initialization_is_noop(self):
+        b = self._make_backend()
+        b._store_initialized = False
+
+        b.unregister_buffer([100], [200])
+
+        b.store.unregister_buffer.assert_not_called()
+
     def test_batch_write_finish(self):
         b = self._make_backend()
         b.store.batch_write_finish.return_value = [0]
@@ -1313,6 +1476,32 @@ class TestMemcacheBackendMethods(unittest.TestCase):
         b.store.batch_get_into_layers.return_value = [0]
         b.get(["k1"], [[100]], [[10]])
         b.store.batch_get_into_layers.assert_called_once()
+
+    def test_batch_get_into_buffers(self):
+        b = self._make_backend()
+        b.store.batch_get_into.return_value = [0]
+
+        result = b.batch_get_into_buffers(["k1"], [100], [10])
+
+        self.assertEqual(result, [0])
+        b.store.batch_get_into.assert_called_once_with(["k1"], [100], [10], MmcDirect.COPY_G2L.value)
+
+    def test_batch_get_into_buffers_error(self):
+        b = self._make_backend()
+        b.store.batch_get_into.return_value = [1]
+
+        self.assertEqual(b.batch_get_into_buffers(["k1"], [100], [10]), [1])
+
+    def test_batch_get_into_buffers_exception(self):
+        b = self._make_backend()
+        b.store.batch_get_into.side_effect = RuntimeError("backend fail")
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend.logger"
+        ) as mock_logger:
+            self.assertIsNone(b.batch_get_into_buffers(["k1"], [100], [10]))
+        error_log = _format_log_call(mock_logger.error.call_args)
+        self.assertIn("RuntimeError", error_log)
+        self.assertIn("backend fail", error_log)
 
     def test_get_error(self):
         b = self._make_backend()
@@ -1348,6 +1537,39 @@ class TestMemcacheBackendMethods(unittest.TestCase):
             "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend.logger"
         ) as mock_logger:
             b.put(["k1"], [[100]], [[10]])
+        error_log = _format_log_call(mock_logger.error.call_args)
+        self.assertIn("RuntimeError", error_log)
+        self.assertIn("backend fail", error_log)
+
+    def test_put_from(self):
+        b = self._make_backend()
+        b.store.put_from.return_value = 0
+
+        self.assertEqual(b.put_from("k1", 100, 10), 0)
+        b.store.put_from.assert_called_once_with("k1", 100, 10, MmcDirect.COPY_L2G.value)
+
+    def test_put_from_error(self):
+        b = self._make_backend()
+        b.store.put_from.return_value = -1
+
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend.logger"
+        ) as mock_logger:
+            self.assertEqual(b.put_from("k1", 100, 10), -1)
+
+        error_log = _format_log_call(mock_logger.error.call_args)
+        self.assertIn("k1", error_log)
+        self.assertIn("-1", error_log)
+
+    def test_put_from_exception(self):
+        b = self._make_backend()
+        b.store.put_from.side_effect = RuntimeError("backend fail")
+
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend.logger"
+        ) as mock_logger:
+            self.assertIsNone(b.put_from("k1", 100, 10))
+
         error_log = _format_log_call(mock_logger.error.call_args)
         self.assertIn("RuntimeError", error_log)
         self.assertIn("backend fail", error_log)

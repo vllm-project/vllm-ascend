@@ -81,7 +81,7 @@ class CompressorMetadataKernel {
 public:
     __aicore__ inline CompressorMetadataKernel() {}
 
-    __aicore__ inline void Init(CompressorMetadataTilingData* tilingData, TPipe* pipe)
+    __aicore__ inline void Init(const CompressorMetadataTilingData* tilingData, TPipe* pipe)
     {
         numRows_ = tilingData->numRows;
         actualNumReqs_ = tilingData->actualNumReqs;

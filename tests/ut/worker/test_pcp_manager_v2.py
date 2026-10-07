@@ -16,7 +16,6 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-from dataclasses import replace
 from inspect import signature
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -363,7 +362,8 @@ def test_partition_batch_pads_decode_requests_when_tokens_are_already_padded():
     manager._input_buffers = input_buffers
     manager.vllm_config = _make_pcp_config(CUDAGraphMode.FULL_DECODE_ONLY)
     manager._hidden_restore_idx = torch.arange(4, dtype=torch.int64)
-    local_attn_state = object()
+    # Upstream replace() preserves the global attention state.
+    local_batch.attn_state = global_batch.attn_state
 
     with (
         patch.object(
@@ -373,7 +373,6 @@ def test_partition_batch_pads_decode_requests_when_tokens_are_already_padded():
         ) as upstream_partition,
         patch(
             "vllm_ascend.worker.v2.pcp_manager.build_attn_state",
-            return_value=local_attn_state,
         ) as build_attn_state,
         patch(
             "vllm_ascend.worker.v2.pcp_manager.async_copy_to_gpu",
@@ -395,10 +394,8 @@ def test_partition_batch_pads_decode_requests_when_tokens_are_already_padded():
     assert torch.equal(result.input_ids, torch.tensor([101, 102, 103, 0], dtype=torch.int32))
     assert torch.equal(result.positions, torch.tensor([10, 20, 30, 0], dtype=torch.int64))
     assert torch.equal(result.is_padding, torch.tensor([False, False, False, True]))
-    assert result.attn_state is local_attn_state
-    args = build_attn_state.call_args.args
-    assert args[2] == 3
-    np.testing.assert_array_equal(args[1], np.array([11, 21, 31], dtype=np.int32))
+    assert result.attn_state == global_batch.attn_state
+    build_attn_state.assert_not_called()
 
 
 def test_partition_batch_keeps_piecewise_request_extent():
@@ -602,68 +599,56 @@ def test_partition_batch_preserves_fia_dummy_layout() -> None:
     assert manager._hidden_restore_idx[1:4].tolist() == [0, 0, 0]
 
 
-def test_partition_batch_restores_speculative_target_inputs() -> None:
-    global_batch = _make_global_pcp_batch()
+@pytest.mark.parametrize("pcp_rank", [0, 1])
+def test_partition_batch_preserves_speculative_target_inputs(pcp_rank) -> None:
+    from vllm_ascend.attention.attention_v1 import AscendAttentionState
+    from vllm_ascend.worker.v2.attn_utils import build_attn_state
+
+    config = _make_pcp_config(CUDAGraphMode.NONE)
+    config.model_config.runner_type = "generate"
+    config.scheduler_config = SimpleNamespace(enable_chunked_prefill=False)
+    buffers = AscendInputBuffers(2, 5, torch.device("cpu"))
+    base = InputBatch.make_dummy(2, 5, buffers, max_query_len=3)
+    global_batch = AscendInputBatch(**base.__dict__, seq_lens_np=np.array([12, 23], dtype=np.int32))
+    global_batch.is_dummy = False
     global_batch.req_ids = ["spec-a", "spec-b"]
-    global_batch.num_reqs = 2
-    global_batch.num_reqs_after_padding = 2
-    global_batch.num_tokens = 5
-    global_batch.num_tokens_after_padding = 5
-    global_batch.input_ids = torch.tensor([101, 102, 201, 202, 203], dtype=torch.int32)
-    global_batch.positions = torch.tensor([10, 11, 20, 21, 22], dtype=torch.int64)
-    global_batch.is_padding = torch.zeros(5, dtype=torch.bool)
+    global_batch.input_ids.copy_(torch.tensor([101, 102, 201, 202, 203], dtype=torch.int32))
+    global_batch.positions.copy_(torch.tensor([10, 11, 20, 21, 22], dtype=torch.int64))
     global_batch.num_scheduled_tokens = np.array([2, 3], dtype=np.int32)
+    global_batch.query_start_loc_np = np.array([0, 2, 5], dtype=np.int32)
+    global_batch.query_start_loc.copy_(torch.tensor([0, 2, 5], dtype=torch.int32))
     global_batch.num_computed_tokens_np = np.array([10, 20], dtype=np.int32)
+    global_batch.prefill_len_np = np.array([10, 20], dtype=np.int32)
+    global_batch.num_computed_prefill_tokens_np = np.array([10, 20], dtype=np.int32)
     global_batch.is_prefilling_np = np.array([False, False])
+    global_batch.has_prefill = False
+    global_batch.seq_lens.copy_(torch.tensor([12, 23], dtype=torch.int32))
     global_batch.num_draft_tokens = 3
     global_batch.num_draft_tokens_per_req = np.array([1, 2], dtype=np.int32)
-
-    local_batch = replace(
-        global_batch,
-        req_ids=["spec-b", "spec-a"],
-        input_ids=torch.zeros(5, dtype=torch.int32),
-        num_draft_tokens=0,
-        num_draft_tokens_per_req=None,
-        num_scheduled_tokens=np.array([3, 2], dtype=np.int32),
-        num_computed_tokens_np=np.array([20, 10], dtype=np.int32),
-        seq_lens_np=np.array([23, 12], dtype=np.int32),
+    global_batch.attn_state = build_attn_state(
+        config, global_batch.seq_lens_np, 2, global_batch.num_scheduled_tokens, np.ones(2, dtype=np.int32)
     )
-    manager = AscendPCPManager.__new__(AscendPCPManager)
-    manager.pcp_rank = 1
-    manager.pcp_world_size = 2
-    manager._padded_gather_idx = torch.tensor([0, 1, 2, 3, 4, 2, 3, 4, 0, 1])
-    manager.vllm_config = _make_pcp_config(CUDAGraphMode.NONE)
-    local_attn_state = object()
+    manager = AscendPCPManager(2, pcp_rank, torch.device("cpu"), max_num_reqs=2, max_num_tokens=5)
+    manager.vllm_config = config
 
     with (
-        patch.object(
-            PCPManager,
-            "partition_batch",
-            return_value=local_batch,
-        ) as parent_partition,
-        patch(
-            "vllm_ascend.worker.v2.pcp_manager.build_attn_state",
-            return_value=local_attn_state,
-        ),
+        patch("vllm.v1.worker.gpu.pcp_manager.async_tensor_h2d", side_effect=_mock_async_copy_to_cpu),
+        patch("vllm_ascend.worker.v2.pcp_manager.build_attn_state") as recompute,
     ):
         result = manager.partition_batch(global_batch)
 
-    parent_input = parent_partition.call_args.args[0]
-    assert parent_input is not global_batch
-    assert parent_input.num_draft_tokens == 0
-    assert parent_input.num_draft_tokens_per_req is None
-    assert manager._global_batch is global_batch
-    assert result.input_ids.tolist() == [201, 202, 203, 101, 102]
-    assert result.num_draft_tokens == 3
-    np.testing.assert_array_equal(
-        result.num_draft_tokens_per_req,
-        np.array([2, 1], dtype=np.int32),
-    )
-    np.testing.assert_array_equal(
-        result.seq_lens_np,
-        np.array([23, 12], dtype=np.int32),
-    )
-    assert result.attn_state is local_attn_state
+    assert manager.global_batch is global_batch
+    assert global_batch.num_draft_tokens == 3
+    np.testing.assert_array_equal(global_batch.num_draft_tokens_per_req, np.array([1, 2], dtype=np.int32))
+    assert result.req_ids == global_batch.req_ids
+    torch.testing.assert_close(result.input_ids, global_batch.input_ids)
+    torch.testing.assert_close(result.positions, global_batch.positions)
+    np.testing.assert_array_equal(result.num_scheduled_tokens, np.array([2, 3], dtype=np.int32))
+    np.testing.assert_array_equal(result.seq_lens_np, np.array([12, 23], dtype=np.int32))
+    assert result.num_draft_tokens == 0
+    assert result.num_draft_tokens_per_req is None
+    assert result.attn_state == global_batch.attn_state == AscendAttentionState.ChunkedPrefill
+    recompute.assert_not_called()
 
 
 def test_request_state_cpu_and_numpy_tokens_share_storage() -> None:
@@ -921,6 +906,7 @@ def test_sample_tokens_uses_global_batch_only_on_non_last_pp_rank(
     runner.is_last_pp_rank = is_last_pp_rank
     runner.speculator = None
     runner.use_spec_pp = False
+    runner.prompt_logprobs_worker = None
     # vLLM main added these ExecuteModelState fields.
     state_kwargs: dict = {}
     state_kwargs["dp_sync"] = None
@@ -1095,3 +1081,56 @@ def test_pcp_slot_buffers_match_block_tables(slot_dtype):
     assert dummy.tolist() == [[-1, -1, -1, -1]]
     assert dummy.dtype == slot_dtype
     assert dummy.data_ptr() == buffer_ptr
+
+
+@pytest.mark.parametrize("pcp_rank", [0, 7])
+def test_speculative_decode_keeps_draft_tokens_on_pcp_ranks(pcp_rank):
+    computed = 127
+    batch = _make_global_pcp_batch()
+    batch.num_tokens = batch.num_tokens_after_padding = 4
+    batch.num_scheduled_tokens = np.array([4], dtype=np.int32)
+    batch.query_start_loc_np = np.array([0, 4], dtype=np.int32)
+    batch.query_start_loc.copy_(torch.tensor([0, 4], dtype=torch.int32))
+    batch.num_computed_tokens_np = np.array([computed], dtype=np.int32)
+    batch.prefill_len_np = np.array([computed], dtype=np.int32)
+    batch.num_computed_prefill_tokens_np = np.array([computed], dtype=np.int32)
+    batch.is_prefilling_np = np.array([False])
+    batch.input_ids = torch.tensor([101, 0, 0, 0], dtype=torch.int32)
+    batch.positions = torch.arange(computed, computed + 4, dtype=torch.int64)
+    batch.is_padding = torch.zeros(4, dtype=torch.bool)
+    batch.num_draft_tokens = 3
+    batch.num_draft_tokens_per_req = np.array([3], dtype=np.int32)
+    manager = AscendPCPManager(8, pcp_rank, torch.device("cpu"), max_num_reqs=1, max_num_tokens=32)
+    manager.vllm_config = _make_pcp_config(CUDAGraphMode.FULL_DECODE_ONLY)
+    manager.vllm_config.speculative_config = SimpleNamespace(num_speculative_tokens=3)
+    with (
+        patch("vllm.v1.worker.gpu.pcp_manager.async_tensor_h2d", side_effect=_mock_async_copy_to_cpu),
+        patch("vllm_ascend.worker.v2.pcp_manager.build_attn_state"),
+    ):
+        local = manager.partition_batch(batch)
+    assert manager.get_num_tokens_for_dispatch(batch.num_scheduled_tokens, batch.is_prefilling_np) == 4
+    assert local.num_tokens == 4
+    assert local.req_ids == batch.req_ids
+    assert batch.num_draft_tokens_per_req.tolist() == [3]
+    assert batch.num_draft_tokens == 3
+    assert local.num_draft_tokens_per_req is None
+    assert local.num_draft_tokens == 0
+    assert local.input_ids.tolist() == batch.input_ids.tolist()
+    assert local.positions.tolist() == batch.positions.tolist()
+    assert local.is_prefilling_np.tolist() == [False]
+    assert manager._hidden_restore_idx[:4].tolist() == [0, 1, 2, 3]
+
+
+@pytest.mark.parametrize("num_prefill_tokens", [1, 3, 7])
+def test_short_prefill_leaves_empty_pcp_ranks_in_mixed_batch(num_prefill_tokens):
+    manager = AscendPCPManager(8, 0, torch.device("cpu"))
+    manager.vllm_config = _make_pcp_config(CUDAGraphMode.NONE)
+    counts = np.array([4, 4, 4, num_prefill_tokens], dtype=np.int32)
+    prefilling = np.array([False, False, False, True])
+    for rank in range(8):
+        chunks = list(manager._iter_rank_chunks(rank, counts, prefilling))
+        expected = [(0, 0, 4), (1, 0, 4), (2, 0, 4)]
+        if rank < num_prefill_tokens:
+            expected.append((3, rank, 1))
+        assert chunks == expected
+    assert manager.get_num_tokens_for_dispatch(counts, prefilling) == 13

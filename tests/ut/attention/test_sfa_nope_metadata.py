@@ -27,7 +27,7 @@ def _builder(block_size, a5, monkeypatch, rope_dim=0):
             get_head_size=lambda: 512,
             hf_text_config=SimpleNamespace(num_attention_heads=4, kv_lora_rank=512),
         ),
-        parallel_config=SimpleNamespace(tensor_parallel_size=1),
+        parallel_config=SimpleNamespace(tensor_parallel_size=1, prefill_context_parallel_size=1),
         scheduler_config=SimpleNamespace(max_num_seqs=2, max_num_batched_tokens=4),
         speculative_config=None,
         compilation_config=SimpleNamespace(
@@ -66,6 +66,7 @@ def _common(block_size):
     expanded = (pages.unsqueeze(-1) * split + torch.arange(split, dtype=torch.int32)).reshape(2, -1)
     expanded[1, split:] = -1
     return SimpleNamespace(
+        context_parallel_metadata=None,
         num_reqs=2,
         num_actual_tokens=3,
         num_input_tokens=4,
@@ -99,6 +100,15 @@ def test_shared_sfa_nope_metadata_pages_lengths_and_draft_buffers(monkeypatch, b
 
     monkeypatch.setattr(sparse_mla, "sparse_flash_mla_metadata", plan)
     common = _common(block_size)
+    # The split helper consumes a decode-first batch. Reorder request and
+    # token metadata together; the original fixture is prefill-first.
+    common.query_start_loc = torch.tensor([0, 1, 3], dtype=torch.int32)
+    common.query_start_loc_cpu = common.query_start_loc.clone()
+    common.seq_lens = common.seq_lens.flip(0)
+    common.block_table_tensor = common.block_table_tensor.flip(0)
+    token_order = torch.tensor([2, 0, 1, 3])
+    common.slot_mapping = common.slot_mapping[token_order]
+    common.positions = common.positions[token_order]
     first = builder.build(0, common)
     assert type(first) is sfa.AscendSFAMetadata
     assert first.cos is None and first.sin is None and first.seq_lens_cpu is None
@@ -113,7 +123,7 @@ def test_shared_sfa_nope_metadata_pages_lengths_and_draft_buffers(monkeypatch, b
     if a5:
         torch.testing.assert_close(
             seen[0],
-            torch.tensor([[7], [7], [1], [0]], dtype=torch.int32),
+            torch.tensor([[1], [7], [7], [0]], dtype=torch.int32),
         )
         assert second.smla_metadata.data_ptr() == first.smla_metadata.data_ptr()
         assert draft.smla_metadata.data_ptr() != first.smla_metadata.data_ptr()
@@ -126,7 +136,7 @@ def test_shared_sfa_nope_metadata_pages_lengths_and_draft_buffers(monkeypatch, b
     builder.build(0, common)
     page_multiplier = builder.nope_states[None].split
     assert first.block_table[0, 0] == 3 * page_multiplier
-    assert draft.block_table[0, 0] == 7 * page_multiplier
+    assert draft.block_table[0, 0] == 5 * page_multiplier
 
 
 def test_a3_sparse_mla_preserves_storage_addresses(monkeypatch):
@@ -258,7 +268,7 @@ def test_rope_sfa_preserves_cache_composition_and_device_dispatch(sfa_c8, li_c8)
 
 
 @pytest.mark.parametrize("a5", [False, True])
-def test_nope_operator_masks_unwritten_graph_rows(monkeypatch, a5):
+def test_nope_operator_returns_kernel_output_with_unwritten_graph_rows(monkeypatch, a5):
     query = torch.ones(3, 2, 128)
     cache = torch.zeros(2, 128, 1, 128)
     metadata = SimpleNamespace(
@@ -274,18 +284,20 @@ def test_nope_operator_masks_unwritten_graph_rows(monkeypatch, a5):
         num_actual_tokens=2,
     )
 
+    kernel_output = query * 2
+    kernel_output[2] = float("nan")
+
     def op(*args, **kwargs):
-        result = query.clone()
-        result[2] = float("nan")
-        return (result,)
+        return (kernel_output,)
 
     if a5:
         monkeypatch.setattr(sparse_mla, "sparse_flash_mla", op)
     else:
         monkeypatch.setattr(torch.ops._C_ascend, "npu_sparse_flash_attention", op, raising=False)
     output = sparse_mla.sparse_mla(query, cache, torch.tensor([[[0]], [[0]], [[-1]]], dtype=torch.int32), metadata, 0.5)
-    torch.testing.assert_close(output[:2], query[:2])
-    assert (output[2] == 0).all()
+    # The helper returns the kernel buffer directly; padding rows are unspecified.
+    assert output is kernel_output
+    torch.testing.assert_close(output[:2], query[:2] * 2)
 
 
 def test_a5_smla_uses_original_cache_sorted_indices_and_stable_metadata(monkeypatch):
@@ -385,6 +397,92 @@ def test_a5_smla_rebuilds_plan_for_a_trimmed_query(monkeypatch):
     query = torch.ones(1, 2, 8, dtype=torch.bfloat16)
     cache = torch.zeros(3, 8, 1, 8, dtype=torch.bfloat16)
     indices = torch.tensor([[[5, -1, 1, -1]]], dtype=torch.int32)
+    torch.testing.assert_close(sparse_mla.sparse_mla(query, cache, indices, metadata, 0.5), query + 1)
+
+
+def test_a5_smla_rebuilds_plan_for_the_draft_model(monkeypatch):
+    """A replayed FULL draft graph passes the padded row count the plan was
+    built for, so the shape check alone stays silent.
+
+    The MTP draft replays one captured graph per step while the plan is built
+    once per metadata build, so a plan left intact can describe another step's
+    rows: its per-row top-k lengths then exceed what each row's index buffer
+    holds and the operator reads the -1 padding as KV positions. Rebuild from
+    the indices actually passed whenever the draft model is running.
+    """
+    metadata = SimpleNamespace(
+        query_start_loc=torch.tensor([0, 1, 2], dtype=torch.int32),
+        seq_lens=torch.tensor([8, 0], dtype=torch.int32),
+        max_query_len=1,
+        max_seq_len=8,
+        block_table=torch.tensor([[2], [0]], dtype=torch.int32),
+        smla_metadata=torch.zeros(sparse_mla.SMLA_METADATA_SIZE, dtype=torch.int32),
+        # Prediction for the padded batch: two rows, three entries each.
+        smla_topk_length=torch.full((2, 1), 3, dtype=torch.int32),
+        smla_sinks=torch.ones(2, dtype=torch.float32),
+        block_size=8,
+        num_actual_tokens=2,
+    )
+    regenerated = torch.full((sparse_mla.SMLA_METADATA_SIZE,), 5, dtype=torch.int32)
+
+    def plan(**kwargs):
+        # Row 1 is padding: its indices are all -1, so it claims no entries
+        # even though the prediction said three.
+        torch.testing.assert_close(kwargs["ori_topk_length"], torch.tensor([[2], [0]], dtype=torch.int32))
+        torch.testing.assert_close(kwargs["cu_seqlens_q"], torch.tensor([0, 1, 2], dtype=torch.int32))
+        return regenerated
+
+    def smla(q, **kwargs):
+        assert kwargs["metadata"] is regenerated
+        assert kwargs["metadata"] is not metadata.smla_metadata
+        return q + 1, torch.empty(0)
+
+    monkeypatch.setattr(sparse_mla, "sparse_flash_mla_metadata", plan)
+    monkeypatch.setattr(sparse_mla, "sparse_flash_mla", smla)
+    monkeypatch.setattr(sparse_mla, "is_forward_context_available", lambda: True)
+    monkeypatch.setattr(sparse_mla, "get_forward_context", lambda: SimpleNamespace(is_draft_model=True))
+    # query rows == topk_length rows: the shape check alone cannot detect the
+    # stale plan.
+    query = torch.ones(2, 2, 8, dtype=torch.bfloat16)
+    cache = torch.zeros(3, 8, 1, 8, dtype=torch.bfloat16)
+    indices = torch.tensor([[[5, 1, -1]], [[-1, -1, -1]]], dtype=torch.int32)
+    torch.testing.assert_close(sparse_mla.sparse_mla(query, cache, indices, metadata, 0.5), query + 1)
+
+
+def test_a5_smla_keeps_the_built_plan_for_the_target(monkeypatch):
+    """The target refreshes the plan from unpadded host values every step, so an
+    equal-shaped call must keep using the plan written during metadata
+    construction.
+
+    Also pins the no-forward-context case: ``sparse_mla`` is a module-level
+    helper that unit tests call directly, so the draft check must not touch the
+    forward context when none is set.
+    """
+    metadata = SimpleNamespace(
+        query_start_loc=torch.tensor([0, 1, 2], dtype=torch.int32),
+        seq_lens=torch.tensor([8, 0], dtype=torch.int32),
+        max_query_len=1,
+        max_seq_len=8,
+        block_table=torch.tensor([[2], [0]], dtype=torch.int32),
+        smla_metadata=torch.zeros(sparse_mla.SMLA_METADATA_SIZE, dtype=torch.int32),
+        smla_topk_length=torch.full((2, 1), 3, dtype=torch.int32),
+        smla_sinks=torch.ones(2, dtype=torch.float32),
+        block_size=8,
+        num_actual_tokens=2,
+    )
+
+    def smla(q, **kwargs):
+        assert kwargs["metadata"] is metadata.smla_metadata
+        assert kwargs["ori_topk_length"] is metadata.smla_topk_length
+        assert kwargs["cu_seqlens_q"] is metadata.query_start_loc
+        return q + 1, torch.empty(0)
+
+    monkeypatch.setattr(sparse_mla, "sparse_flash_mla_metadata", lambda **_: pytest.fail("must not rebuild"))
+    monkeypatch.setattr(sparse_mla, "sparse_flash_mla", smla)
+    monkeypatch.setattr(sparse_mla, "get_forward_context", lambda: SimpleNamespace(is_draft_model=False))
+    query = torch.ones(2, 2, 8, dtype=torch.bfloat16)
+    cache = torch.zeros(3, 8, 1, 8, dtype=torch.bfloat16)
+    indices = torch.tensor([[[5, 1, -1]], [[-1, -1, -1]]], dtype=torch.int32)
     torch.testing.assert_close(sparse_mla.sparse_mla(query, cache, indices, metadata, 0.5), query + 1)
 
 
