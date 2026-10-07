@@ -6,8 +6,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from vllm.model_executor.layers.attention.attention import _largest_kernel_block_within
+from vllm.v1.kv_cache_interface import SlidingWindowSpec
 from vllm.v1.outputs import ModelRunnerOutput
 
+from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 from vllm_ascend.worker.v2 import aclgraph_utils
 
@@ -75,3 +78,19 @@ def test_ascend_pp_mtp_output_preserves_draft_tokens():
         spec_token_ids=[[43, 44]],
     )
     assert output.spec_token_ids == [[43, 44]]
+
+
+def test_sliding_window_block_selection_accepts_cache_spec():
+    spec = SlidingWindowSpec(
+        block_size=1,
+        num_kv_heads=8,
+        head_size=128,
+        dtype=torch.bfloat16,
+        sliding_window=512,
+    )
+    per_token_bytes = spec.real_page_size_bytes
+    assert AscendAttentionBackend.get_supported_kernel_block_sizes() == [128]
+    assert AscendAttentionBackend.get_supported_kernel_block_sizes(kv_cache_spec=spec) == [128]
+    assert (
+        _largest_kernel_block_within(AscendAttentionBackend, per_token_bytes, per_token_bytes * 128, 128, spec) == 128
+    )
