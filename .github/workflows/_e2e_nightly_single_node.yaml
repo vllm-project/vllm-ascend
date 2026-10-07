@@ -447,6 +447,11 @@ jobs:
           BISECT_FORCE_INITIAL_BUILD: ${{ inputs.bisect_force_initial_build }}
           BISECT_CONFIG_BASE_PATH: ${{ inputs.bisect_config_base_path }}
         run: |
+          BISECT_WORK_DIR=$(mktemp -d /tmp/aop-bisect.XXXXXX)
+          export BISECT_WORK_DIR
+          mkdir -p /tmp/test-logs
+          set +e
+          set -o pipefail
           bash tests/e2e/nightly/scripts/aop_process.sh \
             "${{ steps.classify.outputs.failure_type }}" \
             "${{ steps.commit-age.outputs.commit_age_days }}" \
@@ -468,7 +473,33 @@ jobs:
             "$BISECT_NO_VERIFY_GOOD" \
             "$BISECT_NO_VERIFY_BAD" \
             "$BISECT_FORCE_INITIAL_BUILD" \
-            "$BISECT_CONFIG_BASE_PATH"
+            "$BISECT_CONFIG_BASE_PATH" 2>&1 | tee /tmp/test-logs/aop-process.log
+          process_rc=${PIPESTATUS[0]}
+          mkdir -p /tmp/aop-bisect-diagnostics
+          cp -a "$BISECT_WORK_DIR" /tmp/aop-bisect-diagnostics/bisect_runs || \
+            echo "Warning: could not collect bisect logs from $BISECT_WORK_DIR"
+          exit "$process_rc"
+
+      - name: Collect AOP bisect diagnostics
+        if: ${{ always() && inputs.aop_single_enabled }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          DEST=/tmp/aop-bisect-diagnostics
+          mkdir -p "$DEST"
+          if [ -d /tmp/test-logs ]; then
+            cp -a /tmp/test-logs "$DEST/initial_tests"
+          fi
+
+      - name: Upload AOP bisect diagnostics (GitHub Artifacts)
+        if: ${{ always() && inputs.aop_single_enabled }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: aop-bisect-${{ inputs.vllm_ascend_branch }}-${{ inputs.name || github.job }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/aop-bisect-diagnostics/
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: On success
         if: ${{ always() && inputs.aop_single_enabled && steps.test-result.outputs.result == 'success' }}
