@@ -6250,17 +6250,17 @@ class NPUModelRunner(GPUModelRunner):
                     block_size=self.block_size,
                     num_kv_heads=1,
                     head_size=head_dim // 2 if cache_sparse_li_c4 else head_dim,
-                    dtype=self.li_c4_k_cache_dtype if cache_sparse_li_c4
-                    else self.li_c8_k_cache_dtype if cache_sparse_li_c8
+                    dtype=torch.uint8 if cache_sparse_li_c4
+                    else self.c8_k_cache_dtype if cache_sparse_li_c8
                     else self.kv_cache_dtype,
                     cache_dtype_str=(
                         self.vllm_config.cache_config.cache_dtype
-                        if cache_sparse_li_c8 or cache_sparse_li_c4
+                        if (cache_sparse_li_c8 or cache_sparse_li_c4)
                         else "auto"
                     ),
                     scale_dim=head_dim // 64 * 2 if cache_sparse_li_c4 else 1 if cache_sparse_li_c8 else 0,
-                    scale_dtype=self.li_c4_k_scale_cache_dtype if cache_sparse_li_c4
-                    else self.li_c8_k_scale_cache_dtype if cache_sparse_li_c8 else torch.int8,
+                    scale_dtype=torch.float8_e8m0fnu if cache_sparse_li_c4
+                    else c8_k_scale_cache_dtype if cache_sparse_li_c8 else torch.int8,
                     cache_sparse_li_c4=cache_sparse_li_c4,
                     cache_sparse_li_c8=cache_sparse_li_c8,
                     sfa_dcp_replicated_indexer_size=self.sfa_dcp_replicated_indexer_size,
