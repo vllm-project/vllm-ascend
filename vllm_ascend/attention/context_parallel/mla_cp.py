@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from enum import Enum
+from math import lcm
 from typing import NamedTuple
 
 import numpy as np
@@ -125,6 +126,22 @@ class AscendMlaDCPMetadataBuilder(
     # Non-causal block drafters (e.g. DSpark) attend to all DCP-local KV.
     # Causal multi-token queries still need history/current split attention.
     supports_non_causal_multi_token_dcp = True
+
+    @staticmethod
+    def determine_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
+        workspace_size = AscendMLAMetadataBuilder.determine_chunked_prefill_workspace_size(vllm_config)
+        parallel_config = vllm_config.parallel_config
+        if parallel_config.prefill_context_parallel_size > 1 and parallel_config.decode_context_parallel_size > 1:
+            chunk_alignment = lcm(
+                vllm_config.cache_config.block_size,
+                parallel_config.cp_kv_cache_interleave_size * parallel_config.decode_context_parallel_size,
+            )
+            # The shared plan reserves two local fragments per global PCP
+            # request. After halving the budget, each request must still fit
+            # one aligned DCP chunk.
+            min_workspace_size = 2 * vllm_config.scheduler_config.max_num_seqs * chunk_alignment
+            workspace_size = max(workspace_size, min_workspace_size)
+        return workspace_size
 
     def __init__(
         self,

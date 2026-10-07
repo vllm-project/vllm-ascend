@@ -608,7 +608,14 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         self.max_context_chunk = workspace_size // num_prefills_with_context_cpu
         self.max_context_chunk = round_down(self.max_context_chunk, self.block_size)
 
-        assert self.max_context_chunk > 0
+        if self.max_context_chunk <= 0:
+            raise ValueError(
+                "MLA chunked prefill workspace is too small for one aligned chunk per request: "
+                f"workspace_size={workspace_size}, "
+                f"num_prefills_with_context={num_prefills_with_context_cpu}, "
+                f"block_size={self.block_size}, "
+                f"minimum_workspace_size={num_prefills_with_context_cpu * self.block_size}."
+            )
         self.num_chunks = cdiv(max_context_len_cpu, self.max_context_chunk)
         chunk_starts = (
             torch.arange(self.num_chunks, dtype=torch.int32).unsqueeze(1).expand(-1, self.num_prefills)

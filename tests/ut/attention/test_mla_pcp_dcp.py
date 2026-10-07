@@ -240,6 +240,84 @@ def test_chunked_metadata_preserves_explicit_plan_and_workspace(pcp_enabled):
         builder._get_pcp_prefill_kv_inputs.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    "pcp_size,dcp_size,max_num_seqs,interleave,expected",
+    [
+        (1, 1, 32, 128, 65536),
+        (2, 1, 32, 128, 65536),
+        (1, 16, 32, 128, 65536),
+        (2, 2, 32, 128, 65536),
+        (2, 16, 2, 128, 65536),
+        (2, 16, 16, 128, 65536),
+        (2, 16, 17, 128, 69632),
+        (2, 16, 32, 128, 131072),
+        (2, 16, 64, 128, 262144),
+        (2, 16, 32, 256, 262144),
+    ],
+)
+def test_pcp_dcp_workspace_fits_an_aligned_chunk_per_fragment(pcp_size, dcp_size, max_num_seqs, interleave, expected):
+    from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPMetadataBuilder
+
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(max_model_len=8192),
+        cache_config=SimpleNamespace(block_size=128),
+        scheduler_config=SimpleNamespace(max_num_seqs=max_num_seqs),
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=pcp_size,
+            decode_context_parallel_size=dcp_size,
+            cp_kv_cache_interleave_size=interleave,
+        ),
+    )
+    assert AscendMlaDCPMetadataBuilder.determine_chunked_prefill_workspace_size(config) == expected
+
+
+@pytest.mark.parametrize("workspace_size", [65536, 131072])
+def test_pcp_dcp_chunk_plan_rejects_insufficient_budget_and_fits_exact_boundary(workspace_size):
+    from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPMetadataBuilder
+
+    builder = AscendMlaDCPMetadataBuilder.__new__(AscendMlaDCPMetadataBuilder)
+    builder.pcp_enabled = builder.dcp_enabled = builder.chunked_prefill_enabled = True
+    builder.chunked_prefill_workspace_size = workspace_size
+    builder.chunked_prefill_workspace = torch.empty(0)
+    builder.block_size = builder.cp_virtual_block_size = 2048
+    builder.cp_local_block_size = 128
+    builder.dcp_size = 16
+    builder.dcp_collective_rank_order = list(range(16))
+    builder.device = torch.device("cpu")
+    builder.num_decodes = 0
+    builder.num_prefills = 64
+    builder.query_lens = torch.full((64,), 8, dtype=torch.int32)
+    builder.seq_lens = torch.tensor([4104, 4128] * 32, dtype=torch.int32)
+    builder._get_pcp_prefill_kv_inputs = Mock(
+        return_value=(torch.full((32,), 4128, dtype=torch.int32), [row for row in range(32) for _ in range(2)], None)
+    )
+    if workspace_size == 65536:
+        with pytest.raises(
+            ValueError,
+            match=r"workspace_size=32768, num_prefills_with_context=32, block_size=2048, minimum_workspace_size=65536",
+        ):
+            builder.build_chunked_metadata(0, SimpleNamespace(num_reqs=64))
+        return
+
+    cpu_zeros = torch.zeros
+
+    def zeros_without_pinning(*args, **kwargs):
+        kwargs.pop("pin_memory", None)
+        return cpu_zeros(*args, **kwargs)
+
+    with (
+        patch.object(torch.Tensor, "pin_memory", lambda x: x),
+        patch.object(torch.Tensor, "npu", lambda x: x, create=True),
+        patch("torch.zeros", side_effect=zeros_without_pinning),
+    ):
+        metadata = builder.build_chunked_metadata(0, SimpleNamespace(num_reqs=64))
+    assert builder.max_context_chunk == 2048
+    assert builder.num_chunks == 3
+    assert metadata.chunk_seq_lens.shape == (3, 64)
+    assert metadata.seq_tot == [4096, 4096, 4096]
+    assert metadata.chunk_seq_lens.sum(1).tolist() == [131072, 131072, 768]
+
+
 def test_pcp_global_plan_keeps_local_fragment_mapping():
     import numpy as np
 
