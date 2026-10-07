@@ -1,3 +1,5 @@
+# Diagnostic profiling: retain the original workload and guard; do not merge
+# the capture settings into normal nightly performance tests.
 # Qwen3-30B-A3B BF16 A2 x4 throughput and latency guard.
 #
 # The throughput baseline is the mean of three stable A2 x4 measurements under
@@ -39,6 +41,16 @@ test_cases:
       - '{"enable_cpu_binding":true}'
       - "--compilation-config"
       - '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2,4,8,16]}'
+    server_cmd_extra:
+      - "--profiler-config"
+      - '{"profiler":"torch","torch_profiler_dir":"/vllm-workspace/vllm-ascend/profiling/qwen3-bf16","torch_profiler_with_stack":false,"torch_profiler_with_memory":false,"ignore_frontend":true,"delay_iterations":1024,"max_iterations":256}'
+    profiling:
+      benchmark_key: perf
+      delay_iterations: 1024
+      max_iterations: 256
+      output_dir: profiling/qwen3-bf16
+      timeout_seconds: 300
+      expected_workers: 4
     benchmarks:
       perf:
         case_type: performance
