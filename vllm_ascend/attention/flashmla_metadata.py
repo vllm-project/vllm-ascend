@@ -9,8 +9,10 @@ Meta implementation and the existing executor. It never owns persistent KV.
 from dataclasses import dataclass, replace
 
 import torch
+from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 
 from vllm_ascend.attention.flashmla import (
+    FLASHMLA_BLOCK_SIZE,
     FLASHMLA_QK_DIM,
     FLASHMLA_V_DIM,
     FlashMLAAdapter,
@@ -18,6 +20,19 @@ from vllm_ascend.attention.flashmla import (
 )
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.worker.device_metadata import DeviceMetadataExecutor, DeviceMetadataStage, DeviceMetadataTask
+
+
+@dataclass
+class FlashMLACurrent:
+    """Replicated current chunk, independent of persistent KV and prefix pages."""
+
+    adapter: FlashMLAAdapter
+    query: torch.Tensor
+    schedule: torch.Tensor
+    cache: torch.Tensor
+    block_table: torch.Tensor
+    slots: torch.Tensor
+    attn_mask: torch.Tensor
 
 
 @dataclass
@@ -36,12 +51,21 @@ class FlashMLADecode:
     attn_mask: torch.Tensor | None
     cos: torch.Tensor | None
     sin: torch.Tensor | None
+    current: FlashMLACurrent | None = None
 
 
 class FlashMLAMetadataBuilder:
     def __init__(self, impl, device: torch.device, max_num_reqs: int, attn_mask: torch.Tensor):
-        adapter = FlashMLAAdapter.load(FlashMLAConfig(impl.num_heads, impl.scale))
-        self.adapters = {True: adapter, False: replace(adapter, config=replace(adapter.config, mask_mode=0))}
+        self.dcp_size = getattr(impl, "dcp_size", 1)
+        self.dcp_rank = getattr(impl, "dcp_rank", 0)
+        self.cp_interleave = impl.vllm_config.parallel_config.cp_kv_cache_interleave_size if self.dcp_size > 1 else 1
+        adapter = FlashMLAAdapter.load(FlashMLAConfig(impl.num_heads, impl.scale, return_softmax_lse=self.dcp_size > 1))
+        self.current_adapter = adapter
+        history_adapter = replace(
+            adapter,
+            config=replace(adapter.config, num_heads=impl.num_heads * self.dcp_size, mask_mode=0),
+        )
+        self.adapters = {True: history_adapter if self.dcp_size > 1 else adapter, False: history_adapter}
         self.device = device
         self.dtype = impl.dtype
         self.use_rope = impl.use_mla_rope
@@ -64,7 +88,7 @@ class FlashMLAMetadataBuilder:
             torch.empty_like(used, device="meta"),
         )
         rope_shape = (tokens, 1, 1, FLASHMLA_QK_DIM - FLASHMLA_V_DIM)
-        return FlashMLADecode(
+        flash = FlashMLADecode(
             adapter=adapter,
             query=torch.empty(
                 (tokens, adapter.config.num_heads, FLASHMLA_QK_DIM), dtype=self.dtype, device=self.device
@@ -78,10 +102,37 @@ class FlashMLAMetadataBuilder:
             positions=torch.zeros(tokens, dtype=torch.int64, device=self.device),
             token_live=torch.zeros(tokens, dtype=torch.bool, device=self.device),
             live_boundaries=torch.zeros(tokens + 1, **ints),
-            attn_mask=self.attn_mask if causal else None,
+            attn_mask=self.attn_mask if adapter.config.mask_mode == 3 else None,
             cos=torch.empty(rope_shape, dtype=self.dtype, device=self.device) if self.use_rope else None,
             sin=torch.empty(rope_shape, dtype=self.dtype, device=self.device) if self.use_rope else None,
         )
+        if self.dcp_size > 1 and causal:
+            # As in split DCP attention, each rank retains every current row.
+            # Only persistent history writes use the runner's rank-owned slots.
+            block_columns = (tokens + FLASHMLA_BLOCK_SIZE - 1) // FLASHMLA_BLOCK_SIZE
+            current_schedule = self.current_adapter.build_metadata(
+                torch.empty_like(used, device="meta"),
+                torch.empty_like(cu, device="meta"),
+                torch.empty_like(used, device="meta"),
+            )
+            flash.current = FlashMLACurrent(
+                adapter=self.current_adapter,
+                query=torch.empty(
+                    (tokens, self.current_adapter.config.num_heads, FLASHMLA_QK_DIM),
+                    dtype=self.dtype,
+                    device=self.device,
+                ),
+                schedule=torch.empty_like(current_schedule, device=self.device),
+                cache=torch.empty(
+                    (block_columns + rows, FLASHMLA_BLOCK_SIZE, 1, FLASHMLA_QK_DIM),
+                    dtype=self.dtype,
+                    device=self.device,
+                ),
+                block_table=torch.zeros((rows, block_columns), **ints),
+                slots=torch.full_like(flash.slots, -1),
+                attn_mask=self.attn_mask,
+            )
+        return flash
 
     def build(
         self, common, num_decodes: int, num_decode_tokens: int, has_prefill: bool, *, retain_for_graph: bool = False
@@ -114,7 +165,19 @@ class FlashMLAMetadataBuilder:
             flash.used_q[:num_decodes].copy_(flash.cu[1 : num_decodes + 1] - flash.cu[:num_decodes])
             flash.used_q[:num_decodes].masked_fill_(common.seq_lens[:num_decodes] <= 0, 0)
             flash.cache_lens.zero_()
-            flash.cache_lens[:num_decodes].copy_(common.seq_lens[:num_decodes])
+            lengths = common.seq_lens[:num_decodes]
+            if flash.current is not None:
+                # Remove the query globally before interleave-aware sharding.
+                # Noncausal draft queries instead see the entire local sequence.
+                lengths = (lengths - flash.used_q[:num_decodes]).clamp_min(0)
+            if self.dcp_size > 1:
+                lengths = get_dcp_local_seq_lens(
+                    lengths,
+                    dcp_size=self.dcp_size,
+                    dcp_rank=self.dcp_rank,
+                    cp_kv_cache_interleave_size=self.cp_interleave,
+                )
+            flash.cache_lens[:num_decodes].copy_(lengths)
             flash.cache_lens.masked_fill_(flash.used_q == 0, 0)
             flash.block_table.zero_()
             flash.block_table[:num_decodes].copy_(common.block_table_tensor[:num_decodes])
@@ -135,6 +198,18 @@ class FlashMLAMetadataBuilder:
                 flash.cos.copy_(cos)
                 flash.sin.copy_(sin)
             flash.schedule.copy_(flash.adapter.build_metadata(flash.cache_lens, flash.cu, flash.used_q))
+            if flash.current is not None:
+                current = flash.current
+                page_counts = (flash.used_q + FLASHMLA_BLOCK_SIZE - 1) // FLASHMLA_BLOCK_SIZE
+                page_starts = page_counts.cumsum(0) - page_counts
+                columns = torch.arange(current.block_table.shape[1], device=self.device)
+                current.block_table.copy_(page_starts[:, None] + columns)
+                current.block_table.masked_fill_(columns >= page_counts[:, None], 0)
+                indices = torch.arange(tokens, device=self.device)
+                requests = torch.searchsorted(flash.cu[1:], indices.to(torch.int32), right=True)
+                current.slots.copy_(page_starts[requests] * FLASHMLA_BLOCK_SIZE + indices - flash.cu[requests])
+                current.slots.masked_fill_(~flash.token_live, -1)
+                current.schedule.copy_(current.adapter.build_metadata(flash.used_q, flash.cu, flash.used_q))
 
         self.tasks = (DeviceMetadataTask(DeviceMetadataStage.ATTENTION, refresh, id(flash.schedule)),)
         if not self.defer:

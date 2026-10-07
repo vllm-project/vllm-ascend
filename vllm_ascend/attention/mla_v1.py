@@ -1008,7 +1008,9 @@ class AscendMLAImpl(MLAAttentionImpl):
             return False
         if self.fa_quant_layer or self.dtype not in (torch.bfloat16, torch.float16) or self.enable_kv_nz:
             return False
-        if self.pcp_enabled or config.parallel_config.decode_context_parallel_size != 1:
+        dcp_size = config.parallel_config.decode_context_parallel_size
+        # History sees all Q heads in the DCP group; current uses local heads.
+        if self.pcp_enabled or self.num_heads * dcp_size not in MLA_FLASH_SUPPORTED_Q_HEADS:
             return False
         if not supports_component_major_mla_pd(config) or enable_sfa(config):
             return False

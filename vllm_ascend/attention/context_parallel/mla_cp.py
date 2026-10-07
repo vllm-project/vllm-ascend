@@ -36,6 +36,7 @@ from vllm_ascend.compilation.acl_graph import (
     get_graph_params,
     update_graph_params_workspaces,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.ops.triton.dcp.dcp_a2a import fused_dcp_lse_combine
 from vllm_ascend.utils import weak_ref_tensors
 
@@ -270,11 +271,21 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             else:
                 graph_params = get_draft_graph_params()
             attn_metadata = draft_attn_metadatas
-            attn_keys = list(attn_metadata[0].keys())
+            attn_keys = [
+                key
+                for key, metadata in attn_metadata[0].items()
+                if getattr(metadata, "decode", None) is not None
+                and getattr(metadata, "external_flashmla", None) is None
+            ]
         else:
             graph_params = get_graph_params()
             attn_metadata = forward_context.attn_metadata
-            attn_keys = list(attn_metadata.keys())
+            attn_keys = [
+                key
+                for key, metadata in attn_metadata.items()
+                if getattr(metadata, "decode", None) is not None
+                and getattr(metadata, "external_flashmla", None) is None
+            ]
         # FIXME: Behold! We are using a temporary hack here to update the args
         # for each layer's attention op in the graph.
         num_layers = len(attn_keys)
@@ -404,7 +415,78 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         return any(query_len > 1 for query_len in query_lens[: attn_metadata.num_decodes])
 
     def _decode_requires_current_kv(self, attn_metadata: AscendMLAMetadata) -> bool:
+        if attn_metadata.external_flashmla is not None:
+            return attn_metadata.external_flashmla.current is not None
         return self._use_history_current_split_decode(attn_metadata)
+
+    def _forward_external_flashmla(self, preprocessed, fused_cache, metadata):
+        flash = metadata.external_flashmla
+        assert flash is not None
+        if not isinstance(fused_cache, torch.Tensor):
+            raise RuntimeError("DCP FlashMLA requires the original fused BBND cache")
+        # reorg_decode_q already gathers the Q fragments during preprocessing.
+        flash.query[..., : self.kv_lora_rank].copy_(preprocessed.ql_nope)
+        flash.query[..., self.kv_lora_rank :].copy_(preprocessed.q_pe)
+        record_attention_compute_start()
+        history_output, history_lse = flash.adapter.attention(
+            flash.query,
+            fused_cache,
+            block_table=flash.block_table,
+            cache_seqlens=flash.cache_lens,
+            cu_seqlens_q=flash.cu,
+            seqused_q=flash.used_q,
+            metadata=flash.schedule,
+            attn_mask=None,
+        )
+        # Flash returns NTD/NT; the existing DCP exchange consumes TND/TN1.
+        history_output.masked_fill_(~flash.token_live[None, :, None], 0)
+        history_lse.masked_fill_(~flash.token_live[None, :], -torch.inf)
+        history_recv = torch.ops.vllm.dcp_a2a_fused(
+            history_output.transpose(0, 1),
+            history_lse.transpose(0, 1).unsqueeze(-1),
+            self.dcp_size,
+            1,
+            self.dcp_group.unique_name,
+            defer_combine=True,
+        )
+        current_output = current_lse = None
+        if flash.current is not None:
+            current = flash.current
+            head_start = self.dcp_rank * self.num_heads
+            current.query.copy_(flash.query[:, head_start : head_start + self.num_heads])
+            assert preprocessed.current_k_nope is not None and preprocessed.current_k_pe is not None
+            torch_npu.npu_scatter_pa_kv_cache(
+                key=preprocessed.current_k_nope.reshape(-1, 1, self.kv_lora_rank).contiguous(),
+                value=preprocessed.current_k_pe.reshape(-1, 1, self.qk_rope_head_dim).contiguous(),
+                key_cache=current.cache[..., : self.kv_lora_rank],
+                value_cache=current.cache[..., self.kv_lora_rank :],
+                slot_mapping=current.slots,
+                cache_mode="Norm",
+            )
+            current_output, current_lse = current.adapter.attention(
+                current.query,
+                current.cache,
+                block_table=current.block_table,
+                cache_seqlens=flash.used_q,
+                cu_seqlens_q=flash.cu,
+                seqused_q=flash.used_q,
+                metadata=current.schedule,
+                attn_mask=current.attn_mask,
+            )
+            current_output.masked_fill_(~flash.token_live[None, :, None], 0)
+            current_lse.masked_fill_(~flash.token_live[None, :], -torch.inf)
+            current_output = current_output.transpose(0, 1)
+            current_lse = current_lse.transpose(0, 1).unsqueeze(-1)
+        # The replicated current chunk is a local contribution, counted once.
+        latent = fused_dcp_lse_combine(
+            history_recv,
+            self.kv_lora_rank,
+            scatter_dim=1,
+            local_output=current_output,
+            local_lse=current_lse,
+        )
+        latent.masked_fill_(~flash.token_live[:, None, None], 0)
+        return self._v_up_proj_batch_major(latent)
 
     def _run_dcp_mtp_split_attention_op(
         self,

@@ -109,3 +109,10 @@ def test_flashmla_selection_requires_operator_and_supported_mla_config(monkeypat
     impl.num_heads = 8
     config.parallel_config.decode_context_parallel_size = 2
     assert not AscendMLAImpl._can_use_flashmla(impl)
+
+    config.parallel_config.decode_context_parallel_size = 8
+    assert AscendMLAImpl._can_use_flashmla(impl)
+    impl.num_heads = 12
+    assert AscendMLAImpl._can_use_flashmla(impl)
+    config.parallel_config.decode_context_parallel_size = 4
+    assert not AscendMLAImpl._can_use_flashmla(impl)

@@ -211,7 +211,7 @@ class FlashMLAAdapter:
         config. Regenerate it when lengths change, including graph replay.
         """
         self._check_inputs(q, k_cache, block_table, cache_seqlens, cu_seqlens_q, metadata, seqused_q, attn_mask)
-        return self.attention_op(
+        output, lse = self.attention_op(
             q,
             k_cache,
             block_table=block_table,
@@ -230,6 +230,12 @@ class FlashMLAAdapter:
             layout_out="NTD",
             return_softmax_lse=self.config.return_softmax_lse,
         )
+        if self.config.return_softmax_lse:
+            # TND queries return NTD latent output and NT FP32 statistics.
+            # DCP must not guess an installed package's LSE layout or precision.
+            _check_tensor("output", output, (self.config.num_heads, q.shape[0], FLASHMLA_V_DIM), q.dtype)
+            _check_tensor("softmax_lse", lse, (self.config.num_heads, q.shape[0]), torch.float32)
+        return output, lse
 
     def _check_inputs(
         self,
