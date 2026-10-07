@@ -2,8 +2,7 @@
 
 The host, kernel, and input validation are ported from
 [cann-recipes-infer at 0322b30fa0c31229d1aa917921ddc5acb09f6c2e](https://gitcode.com/cann/cann-recipes-infer/tree/0322b30fa0c31229d1aa917921ddc5acb09f6c2e/ops/ascendc/src/kv_compress_epilog_v2).
-The CANN Open Software License notices are preserved; the agreement is
-included in [LICENSE](LICENSE).
+The original CANN Open Software License notices are preserved in the source files.
 
 `torch.ops._C_ascend.kv_compress_epilog_v2` quantizes BF16 rows and writes
 specified slots in a flat or paged cache in place. Negative and out-of-range
