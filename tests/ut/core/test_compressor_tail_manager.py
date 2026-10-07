@@ -79,6 +79,7 @@ def test_tail_spec_has_constant_per_request_capacity(
     )
 
     assert spec.ring_blocks_per_request == expected_blocks
+    assert not spec.prefix_cacheable
     assert spec.max_admission_blocks_per_request(16_384, 65_536) == expected_blocks
     assert spec.max_memory_usage_bytes(SimpleNamespace()) == (expected_blocks * spec.page_size_bytes)
     assert spec.max_num_blocks_per_req(SimpleNamespace(), 65_536) == expected_blocks

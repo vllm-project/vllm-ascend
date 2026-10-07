@@ -228,6 +228,13 @@ class AscendCompressorTailSpec(AscendSlidingWindowMLASpec):
     ring_blocks_per_request: int
     state_dim: int
 
+    @property
+    def prefix_cacheable(self) -> bool:
+        # Private rings are restored from coordinator-owned checkpoints,
+        # rather than shared as ordinary hashed KV pages. Their small storage
+        # pages must not change the engine's cache block size or hash grid.
+        return False
+
     def max_admission_blocks_per_request(
         self,
         max_in_flight_tokens: int,

@@ -4,12 +4,13 @@
 
 import json
 import pickle
+from types import SimpleNamespace
 
 import pytest
 import torch
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256
-from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash, resolve_kv_cache_block_sizes
 from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, UniformTypeKVCacheSpecs
 from vllm.v1.request import Request
@@ -132,6 +133,26 @@ def test_uniform_layout_uses_logical_compressed_granularity(coordinator):
     assert coordinator.tail_managers[3].ring_blocks_per_request == 4
     assert coordinator.tail_managers[4].ring_blocks_per_request == 16
     assert len(coordinator.attention_groups) == 3
+
+
+def test_private_rings_preserve_prefix_block_size(coordinator):
+    kv_cache_config = coordinator.kv_cache_config
+    participating_sizes = [
+        group.kv_cache_spec.block_size
+        for group in kv_cache_config.kv_cache_groups
+        if group.kv_cache_spec.prefix_cacheable
+    ]
+    # Match EngineCore's post-profiling cache block-size update. C4/C128
+    # private pages (2/8 rows) must not turn the configured block size into 2.
+    cache_block_size = min(participating_sizes)
+    assert cache_block_size == 32
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=cache_block_size, enable_prefix_caching=True, prefix_match_unit=None),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        kv_transfer_config=None,
+    )
+    _, hash_block_size = resolve_kv_cache_block_sizes(kv_cache_config, config)
+    assert hash_block_size == 32
 
 
 def test_base_coordinator_trims_both_dense_groups_after_swa_miss(coordinator):
