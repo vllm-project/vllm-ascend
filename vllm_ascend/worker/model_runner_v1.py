@@ -5639,7 +5639,7 @@ class NPUModelRunner(GPUModelRunner):
                     ):
                         dtype = current_kv_cache_spec.dtype
                         manager_block_size = current_kv_cache_spec.block_size
-                        kernel_block_size = self.kernel_block_sizes[group.kv_cache_group_id][0]
+                        kernel_block_size = self.kernel_block_sizes[group.kv_cache_group_id]
                         kernel_blocks_per_manager = manager_block_size // kernel_block_size
                         physical_page_bytes = current_kv_cache_spec.page_size_bytes
                         slot_bytes = physical_page_bytes // kernel_blocks_per_manager
