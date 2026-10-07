@@ -7,59 +7,24 @@
 # See LICENSE in this directory for the full text of the License.
 
 
-"""DSV4.1 dispatcher contracts for the external A5 operator package.
+"""Torch dispatcher contracts for the packaged A5 DSV4.1 DSL operators.
 
-Importing this module registers operators without importing the DSL compiler.
-Prefer the installed operator package. Operators and their metadata fall back
-together when the package APIs are absent or the legacy 32-worker package
-cannot run on the selected device.
+Load the operator package lazily so tracing can use fake implementations
+without importing the DSL compiler.
 """
 
 from functools import cache
 from importlib import import_module
-from importlib.metadata import PackageNotFoundError, version
 
 import torch
-from vllm.logger import logger
-
-_LEGACY_INDEXER_PACKAGE_VERSION = "0.1.0"
-_LEGACY_INDEXER_WORKERS = 32
 
 
 @cache
-def _get_dsl_ops(name: str, device: torch.device):
-    """Choose a matching compute/metadata pair before graph capture."""
-    try:
-        package_version = version("cannbot-arena-net-ops")
-    except PackageNotFoundError:
-        package_version = None
-    indexer = name in ("quant_lightning_indexer", "quant_sparse_lightning_indexer")
-    suffix = "_dsl" if indexer else ""
-    modules = (f"{name}{suffix}", f"{name}_metadata{suffix}")
-    legacy_unsupported = (
-        indexer
-        and package_version == _LEGACY_INDEXER_PACKAGE_VERSION
-        and torch.npu.get_device_properties(device).cube_core_num < _LEGACY_INDEXER_WORKERS
-    )
-    if not legacy_unsupported:
-        try:
-            compute = import_module(f"ops.{modules[0]}")
-            metadata = import_module(f"ops.{modules[1]}")
-        except ModuleNotFoundError as error:
-            if error.name not in ("ops", f"ops.{modules[0]}", f"ops.{modules[1]}"):
-                raise
-        else:
-            compute_op = getattr(compute, name, None)
-            metadata_op = getattr(metadata, f"{name}_metadata", None)
-            if callable(compute_op) and callable(metadata_op):
-                return compute_op, metadata_op
-    logger.info_once(
-        "Using local %s and metadata: %s.",
-        name,
-        "package 0.1.0 requires 32 Cube workers" if legacy_unsupported else "package APIs are missing",
-    )
-    compute = import_module(f"vllm_ascend.ops.pythondsl.{modules[0]}")
-    metadata = import_module(f"vllm_ascend.ops.pythondsl.{modules[1]}")
+def _get_dsl_ops(name: str):
+    """Load matching compute and metadata APIs from the operator package."""
+    suffix = "_dsl" if name in ("quant_lightning_indexer", "quant_sparse_lightning_indexer") else ""
+    compute = import_module(f"ops.{name}{suffix}")
+    metadata = import_module(f"ops.{name}_metadata{suffix}")
     return getattr(compute, name), getattr(metadata, f"{name}_metadata")
 
 
@@ -190,7 +155,7 @@ def _quant_lightning_indexer_impl(
     candidate_block_size=-1,
 ):
     """Run the CANNBotDSL QLI kernel through the Torch NPU dispatcher."""
-    dsl_quant_lightning_indexer, _ = _get_dsl_ops("quant_lightning_indexer", q.device)
+    dsl_quant_lightning_indexer, _ = _get_dsl_ops("quant_lightning_indexer")
 
     return dsl_quant_lightning_indexer(
         q,
@@ -241,13 +206,7 @@ def _quant_lightning_indexer_metadata_impl(
     candidate_topk_blocks=-1,
     candidate_block_size=-1,
 ):
-    device = next(
-        (t.device for t in (cu_seqlens_q, cu_seqlens_k, seqused_q, seqused_k, cmp_residual_k) if t is not None),
-        None,
-    )
-    if device is None:
-        device = torch.device("npu", torch.npu.current_device())
-    _, dsl_metadata = _get_dsl_ops("quant_lightning_indexer", device)
+    _, dsl_metadata = _get_dsl_ops("quant_lightning_indexer")
 
     return dsl_metadata(
         cu_seqlens_q,
@@ -387,7 +346,7 @@ def _quant_sparse_lightning_indexer_impl(
     return_value=False,
 ):
     """Run the CANNBotDSL QSLI kernel through the Torch NPU dispatcher."""
-    dsl_quant_sparse_lightning_indexer, _ = _get_dsl_ops("quant_sparse_lightning_indexer", q.device)
+    dsl_quant_sparse_lightning_indexer, _ = _get_dsl_ops("quant_sparse_lightning_indexer")
 
     return dsl_quant_sparse_lightning_indexer(
         q,
@@ -440,7 +399,7 @@ def _quant_sparse_lightning_indexer_metadata_impl(
     layout_q="TND",
     layout_k="TND",
 ):
-    _, dsl_metadata = _get_dsl_ops("quant_sparse_lightning_indexer", candidate_block_length.device)
+    _, dsl_metadata = _get_dsl_ops("quant_sparse_lightning_indexer")
 
     return dsl_metadata(
         candidate_block_length,
@@ -572,7 +531,7 @@ def _mixed_quant_sparse_flash_mla_metadata_impl(
     has_cmp_kv: bool = True,
 ):
     """Generate the core task table through the external operator package."""
-    _, dsl_metadata = _get_dsl_ops("mixed_quant_sparse_flash_mla", ori_topk_length.device)
+    _, dsl_metadata = _get_dsl_ops("mixed_quant_sparse_flash_mla")
 
     return dsl_metadata(
         ori_topk_length,
@@ -621,7 +580,7 @@ def _mixed_quant_sparse_flash_mla_impl(
     return_softmax_lse=False,
 ):
     """Allocate outputs and pass the original inputs to the external DSL."""
-    dsl_attention, _ = _get_dsl_ops("mixed_quant_sparse_flash_mla", q.device)
+    dsl_attention, _ = _get_dsl_ops("mixed_quant_sparse_flash_mla")
 
     attn_out = torch.empty(q.shape, dtype=torch.bfloat16, device=q.device)
     lse_shape: tuple[int, ...]

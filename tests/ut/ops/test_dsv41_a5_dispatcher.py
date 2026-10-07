@@ -1,102 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Test dispatcher contracts used when tracing without the DSL compiler.
-
-Numerical and device graph coverage lives in the singlecard DSV4.1 DSL suite.
-"""
-
-from types import SimpleNamespace
+"""Test packaged operator dispatcher contracts without the DSL compiler."""
 
 import pytest
 import torch
 
 from vllm_ascend.ops.dsv41_a5 import dsl as ops
-
-
-@pytest.mark.parametrize(
-    "name", ["quant_lightning_indexer", "quant_sparse_lightning_indexer", "mixed_quant_sparse_flash_mla"]
-)
-@pytest.mark.parametrize(
-    "package_version,cores,missing,local",
-    [
-        ("0.1.0", 28, None, True),
-        ("0.1.0", 32, None, False),
-        ("0.1.0", 36, None, False),
-        ("0.2.0", 28, None, False),
-        ("0.2.0", 28, "module", True),
-        ("0.2.0", 28, "api", True),
-    ],
-)
-def test_indexer_selects_compute_and_metadata_together(monkeypatch, name, package_version, cores, missing, local):
-    ops._get_dsl_ops.cache_clear()
-    if name == "mixed_quant_sparse_flash_mla" and missing is None:
-        local = False
-    external_pair = (lambda: None, lambda: None)
-    local_pair = (lambda: None, lambda: None)
-    imports = []
-
-    def import_module(module):
-        imports.append(module)
-        is_metadata = module.endswith(("_metadata_dsl", "_metadata"))
-        if module.startswith("ops."):
-            if missing == "module" and is_metadata:
-                raise ModuleNotFoundError(name=module)
-            if missing == "api" and is_metadata:
-                return SimpleNamespace()
-            pair = external_pair
-        else:
-            pair = local_pair
-        return SimpleNamespace(**{f"{name}_metadata" if is_metadata else name: pair[int(is_metadata)]})
-
-    monkeypatch.setattr(ops, "version", lambda _: package_version)
-    monkeypatch.setattr(ops, "import_module", import_module)
-    monkeypatch.setattr(torch.npu, "get_device_properties", lambda _: SimpleNamespace(cube_core_num=cores))
-    try:
-        result = ops._get_dsl_ops(name, torch.device("npu", 0))
-        assert result == (local_pair if local else external_pair)
-        count = len(imports)
-        assert ops._get_dsl_ops(name, torch.device("npu", 0)) is result
-        assert len(imports) == count
-        if local and package_version == "0.1.0" and cores < 32:
-            assert all(module.startswith("vllm_ascend.ops.pythondsl.") for module in imports)
-    finally:
-        ops._get_dsl_ops.cache_clear()
-
-
-def test_indexer_does_not_hide_broken_package_dependency(monkeypatch):
-    ops._get_dsl_ops.cache_clear()
-    monkeypatch.setattr(ops, "version", lambda _: "0.2.0")
-
-    def broken_import(module):
-        raise ModuleNotFoundError(name="cannbotdsl")
-
-    monkeypatch.setattr(ops, "import_module", broken_import)
-    with pytest.raises(ModuleNotFoundError) as error:
-        ops._get_dsl_ops("quant_lightning_indexer", torch.device("npu", 0))
-    assert error.value.name == "cannbotdsl"
-
-
-def test_missing_operator_package_uses_local_pair(monkeypatch):
-    ops._get_dsl_ops.cache_clear()
-    compute, metadata = lambda: None, lambda: None
-
-    def missing_version(_):
-        raise ops.PackageNotFoundError
-
-    def import_module(module):
-        if module.startswith("ops."):
-            raise ModuleNotFoundError(name="ops")
-        if module.endswith("_metadata_dsl"):
-            return SimpleNamespace(quant_lightning_indexer_metadata=metadata)
-        return SimpleNamespace(quant_lightning_indexer=compute)
-
-    monkeypatch.setattr(ops, "version", missing_version)
-    monkeypatch.setattr(ops, "import_module", import_module)
-    try:
-        assert ops._get_dsl_ops("quant_lightning_indexer", torch.device("npu", 0)) == (compute, metadata)
-    finally:
-        ops._get_dsl_ops.cache_clear()
 
 
 @pytest.mark.parametrize("return_value,candidate_blocks", [(False, -1), (True, 2048)])
