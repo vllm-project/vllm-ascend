@@ -222,6 +222,27 @@ def test_init_meta_uses_flat_kernel_size_for_virtual_blocks():
     assert num_segments == 2
 
 
+def test_init_meta_preserves_strided_subblock_addresses():
+    zeroer = AscendKVBlockZeroer(torch.device("cpu"), pin_memory=False)
+    # Each payload has 8 float32 values, but physical pages are 16 values apart.
+    # One logical block spans two of these strided kernel blocks.
+    caches = tuple(torch.zeros((4, 16))[:, :8].view(4, 4, 1, 2) for _ in range(2))
+    zeroer.init_meta(
+        [_attention_group()],
+        kernel_block_sizes=[4],
+        cache_dtype="auto",
+        runner_only_attn_layers=set(),
+        static_forward_context={"full_attn": SimpleNamespace(kv_cache=caches)},
+    )
+    assert zeroer._meta is not None
+    addresses, page_sizes, _, _, num_segments = zeroer._meta
+    assert addresses.tolist() == [cache.data_ptr() + offset for cache in caches for offset in (0, 64)]
+    assert page_sizes.tolist() == [8] * 4
+    assert zeroer._seg_page_strides is not None
+    assert zeroer._seg_page_strides.tolist() == [32] * 4
+    assert num_segments == 4
+
+
 def test_init_meta_skips_group_without_kernel_size():
     zeroer = AscendKVBlockZeroer(torch.device("cpu"), pin_memory=False)
 
