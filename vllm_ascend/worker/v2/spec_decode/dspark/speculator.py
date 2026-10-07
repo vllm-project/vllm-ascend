@@ -32,7 +32,6 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
     DSparkSpeculator,
 )
 
-from vllm_ascend import envs
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.utils import lmhead_tp_enable, lmhead_tp_max_num_logits
@@ -68,7 +67,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         self._lmhead_tp_validate_draft_sampling()
         self.input_batch: InputBatch | None = None
         self.attn_architecture: str | None = None
-        self.flashmla_executor = DeviceMetadataExecutor() if envs.VLLM_ASCEND_ENABLE_FLASH_MLA else None
+        self.flashmla_executor: DeviceMetadataExecutor | None = None
         self._init_dcp()
 
     def _init_dcp(self) -> None:
@@ -165,6 +164,12 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 target_input_buffers,
                 target_attn_groups,
             )
+            if any(
+                getattr(group.get_metadata_builder(0), "flashmla_state", None) is not None
+                for groups in self.attn_groups
+                for group in groups
+            ):
+                self.flashmla_executor = DeviceMetadataExecutor()
             self._context_slot_mappings = self._context_slot_mappings.to(torch.int32)  # type: ignore[has-type]
             # npu needs attn_backends to update full graph params in run_fullgraph.
             attn_backends: dict[str, type[AttentionBackend]] = {}

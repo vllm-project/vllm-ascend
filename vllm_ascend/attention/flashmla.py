@@ -11,6 +11,8 @@ decode hot path must not copy lengths or block tables to the CPU.
 from collections.abc import Callable
 from dataclasses import dataclass
 from importlib import import_module
+from importlib.util import find_spec
+from pathlib import Path
 
 import torch
 
@@ -97,6 +99,48 @@ def _check_lengths(
     return batch_size
 
 
+def _has_flashmla_module() -> bool:
+    """Avoid importing every legacy CANN op when FlashMLA is absent.
+
+    The current operator package eagerly imports its legacy map, including
+    JIT extensions, from ``cann_ops_transformer.ops``. Both the external wheel
+    and the target CANN package use this module path for the required APIs.
+    """
+    spec = find_spec("cann_ops_transformer")
+    return bool(
+        spec
+        and spec.submodule_search_locations
+        and any(
+            (Path(root) / "ops/attention/flash_mla_with_kvcache/__init__.py").is_file()
+            for root in spec.submodule_search_locations
+        )
+    )
+
+
+def get_flashmla_ops() -> tuple[Callable, Callable] | None:
+    """Find the two FlashMLA APIs in the active CANN operator package.
+
+    An absent package or API permits FIA selection before KV cache allocation.
+    Import failures inside an installed package remain errors rather than
+    silently selecting a different cache layout.
+    """
+    if not _has_flashmla_module():
+        return None
+
+    try:
+        ops = import_module("cann_ops_transformer.ops")
+    except ModuleNotFoundError as exc:
+        if exc.name in ("cann_ops_transformer", "cann_ops_transformer.ops"):
+            return None
+        raise
+
+    attention_op = getattr(ops, "flash_mla_with_kvcache", None)
+    metadata_op = getattr(ops, "flash_mla_with_kvcache_metadata", None)
+    if callable(attention_op) and callable(metadata_op):
+        return attention_op, metadata_op
+    return None
+
+
 @dataclass(frozen=True)
 class FlashMLAAdapter:
     """Keep metadata and attention attributes identical, preserving input storage.
@@ -113,16 +157,14 @@ class FlashMLAAdapter:
 
     @classmethod
     def load(cls, config: FlashMLAConfig) -> "FlashMLAAdapter":
-        try:
-            ops = import_module("cann_ops_transformer.ops")
-            attention_op = ops.flash_mla_with_kvcache
-            metadata_op = ops.flash_mla_with_kvcache_metadata
-        except (ImportError, AttributeError) as exc:
+        available_ops = get_flashmla_ops()
+        if available_ops is None:
             raise RuntimeError(
-                "External FlashMLA requires cann_ops_transformer.ops.flash_mla_with_kvcache "
+                "FlashMLA requires cann_ops_transformer.ops.flash_mla_with_kvcache "
                 "and flash_mla_with_kvcache_metadata. Install a package matching the worker's "
-                "CANN and torch_npu versions; the VA private native operator is not a fallback."
-            ) from exc
+                "CANN and torch_npu versions."
+            )
+        attention_op, metadata_op = available_ops
         return cls(config, attention_op, metadata_op)
 
     def build_metadata(

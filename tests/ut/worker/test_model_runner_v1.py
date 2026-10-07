@@ -1177,13 +1177,13 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner.attn_backend = backend
         return runner
 
-    def test_mla_single_raw_backing_selects_layout_by_hardware_and_local_q_heads(self):
+    def test_mla_single_raw_backing_selects_layout_by_resolved_backend(self):
         runner = self._build_runner()
         layer_name = "model.layers.0.self_attn.attn"
         num_blocks = 2
         spec = AscendMLAAttentionSpec(
             block_size=384,
-            num_heads=64,
+            num_query_heads=64,
             num_kv_heads=1,
             head_size=576,
             dtype=torch.bfloat16,
@@ -1196,7 +1196,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         )
         attn_module = MLAAttention.__new__(MLAAttention)
         torch.nn.Module.__init__(attn_module)
-        attn_module.impl = SimpleNamespace(fa_quant_layer=False)
+        attn_module.impl = SimpleNamespace(fa_quant_layer=False, use_flashmla=True)
         runner.compilation_config = SimpleNamespace(static_forward_context={layer_name: attn_module})
         runner.kernel_block_sizes = [128]
         runner._get_layer_kv_cache_specs = lambda config: {layer_name: spec}
@@ -1214,7 +1214,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         flash_profile = SimpleNamespace(supports=lambda capability: capability is HardwareCapability.MLA_FLASH)
         for q_heads in (8, 12, 64, 96):
             with self.subTest(q_heads=q_heads):
-                spec = replace(spec, num_heads=q_heads)
+                spec = replace(spec, num_query_heads=q_heads)
                 with patch(
                     "vllm_ascend.worker.model_runner_v1.get_current_hardware_profile",
                     return_value=flash_profile,
@@ -1225,9 +1225,10 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                 self.assertEqual(fused.shape, (6, 128, 1, 576))
                 self.assertEqual(fused.stride(), (81408, 576, 576, 1))
 
-        # A5 FlashMLA does not support arbitrary query-head counts. Keep these
-        # models on the FIA-compatible component-major layout.
-        spec = replace(spec, num_heads=48)
+        # The resolved backend rejects unsupported query-head counts before
+        # allocation, so FIA receives the component-major views.
+        spec = replace(spec, num_query_heads=48)
+        attn_module.impl.use_flashmla = False
         with patch(
             "vllm_ascend.worker.model_runner_v1.get_current_hardware_profile",
             return_value=flash_profile,

@@ -63,7 +63,6 @@ from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder
 from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import (
-    MLA_FLASH_SUPPORTED_Q_HEADS,
     AscendCommonAttentionMetadata,
     get_sfa_qsfa_packed_head_dim,
     requires_contiguous_pa_kv_cache,
@@ -1529,11 +1528,9 @@ def _reshape_kv_cache_v2(
                 nope_dim, rope_dim = _get_attention_kv_cache_dims(layer_name, kv_cache_spec)
                 fused_dim = nope_dim + rope_dim
 
-                if (
-                    get_current_hardware_profile().supports(HardwareCapability.MLA_FLASH)
-                    and kv_cache_spec.num_query_heads in MLA_FLASH_SUPPORTED_Q_HEADS
-                ):
-                    # Preserve the V1 A5 protocol: one token-fused tensor with
+                attn_impl = vllm_config.compilation_config.static_forward_context[layer_name].impl
+                if attn_impl.use_flashmla:
+                    # FlashMLA consumes one token-fused tensor with
                     # [nope | rope] in the trailing 576 lanes of every token.
                     fused_cache = make_page_strided_cache_view(
                         single_raw_mla_cache,
@@ -1544,7 +1541,7 @@ def _reshape_kv_cache_v2(
                     kv_caches[layer_name] = fused_cache
                     continue
 
-                # A3/FIA keeps each component internally contiguous and puts
+                # FIA keeps each component internally contiguous and puts
                 # the hybrid-page padding only in the leading block stride.
                 nope_cache = make_page_strided_cache_view(
                     single_raw_mla_cache,

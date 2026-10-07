@@ -26,7 +26,6 @@ from vllm.v1.attention.backends.utils import PAD_SLOT_ID  # type: ignore
 from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
 from vllm.v1.kv_cache_interface import AttentionSpec
 
-from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
@@ -34,6 +33,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.flashmla import (
     FLASHMLA_QK_DIM,
     FLASHMLA_V_DIM,
+    get_flashmla_ops,
     split_flashmla_requests,
 )
 from vllm_ascend.attention.flashmla_metadata import FlashMLADecode, FlashMLAMetadataBuilder
@@ -57,7 +57,7 @@ from vllm_ascend.compilation.acl_graph import (
     update_draft_graph_params_workspaces,
     update_graph_params_workspaces,
 )
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, supports_component_major_mla_pd
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
@@ -71,6 +71,7 @@ from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_ND,
     ACL_FORMAT_FRACTAL_NZ,
+    enable_sfa,
     is_pd_decode_recompute_scheduler_enabled,
     maybe_trans_nz,
     weak_ref_tensors,
@@ -340,7 +341,16 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         self.seq_lens: torch.Tensor = None
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
         self.flashmla_state = None
-        if envs.VLLM_ASCEND_ENABLE_FLASH_MLA:
+        flashmla_choices = {static_forward_context[name].impl.use_flashmla for name in layer_names}
+        if len(flashmla_choices) > 1:
+            raise ValueError("MLA layers in one attention group must use the same decode backend")
+        if layer_names:
+            logger.info(
+                "MLA decode backend for group starting at %s: %s",
+                layer_names[0],
+                "FlashMLA" if True in flashmla_choices else "FIA",
+            )
+        if True in flashmla_choices:
             impl = static_forward_context[layer_names[0]].impl
             self.flashmla_state = FlashMLAMetadataBuilder(
                 impl, device, scheduler_config.max_num_seqs, self.attn_mask_builder.get_splitfuse_attn_mask()
@@ -850,7 +860,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         capture_metadata = copy(common_attn_metadata)
         if capture_metadata.attn_state is None:
             capture_metadata.attn_state = AscendAttentionState.ChunkedPrefill
-        if (self.dcp_enabled or envs.VLLM_ASCEND_ENABLE_FLASH_MLA) and capture_metadata.is_prefilling is None:
+        if (self.dcp_enabled or self.flashmla_state is not None) and capture_metadata.is_prefilling is None:
             capture_metadata.is_prefilling = torch.zeros(capture_metadata.num_reqs, dtype=torch.bool)
         if self.flashmla_state is not None:
             assert capture_metadata.num_reqs <= capture_metadata.num_actual_tokens * self.reorder_batch_threshold
@@ -982,27 +992,27 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.mlapo_num_heads = self.num_heads
         self.mlapo_weight_quant_mode = 3
         self._mlapo_uses_native_weights = False
-        if envs.VLLM_ASCEND_ENABLE_FLASH_MLA:
-            self._validate_external_flashmla()
+        self.use_flashmla: bool = self._can_use_flashmla()
 
-    def _validate_external_flashmla(self) -> None:
+    def _can_use_flashmla(self) -> bool:
         config = self.vllm_config
-        if not config.use_v2_model_runner:
-            raise ValueError("External FlashMLA currently requires model runner V2")
+        if not getattr(config, "use_v2_model_runner", False):
+            return False
         if config.speculative_config is not None and config.speculative_config.method != "dspark":
-            raise ValueError("External FlashMLA speculative decoding currently supports DSpark only")
+            return False
         if not get_current_hardware_profile().supports(HardwareCapability.MLA_FLASH):
-            raise ValueError("External FlashMLA requires an Ascend MLA_FLASH-capable device")
+            return False
         if self.num_heads not in MLA_FLASH_SUPPORTED_Q_HEADS or self.num_kv_heads != 1:
-            raise ValueError(
-                f"External FlashMLA requires local Q heads in {MLA_FLASH_SUPPORTED_Q_HEADS} and one KV head"
-            )
+            return False
         if self.kv_lora_rank != FLASHMLA_V_DIM or self.qk_rope_head_dim != FLASHMLA_QK_DIM - FLASHMLA_V_DIM:
-            raise ValueError("External FlashMLA requires latent512 + positional64 inputs")
+            return False
         if self.fa_quant_layer or self.dtype not in (torch.bfloat16, torch.float16) or self.enable_kv_nz:
-            raise ValueError("External FlashMLA integration requires unquantized BF16/FP16 BBND cache")
+            return False
         if self.pcp_enabled or config.parallel_config.decode_context_parallel_size != 1:
-            raise ValueError("External FlashMLA currently requires PCP=1 and DCP=1; distributed adaptation is separate")
+            return False
+        if not supports_component_major_mla_pd(config) or enable_sfa(config):
+            return False
+        return get_flashmla_ops() is not None
 
     @staticmethod
     def update_graph_params(

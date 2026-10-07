@@ -434,12 +434,12 @@ def test_mrv2_attention_views_interleave_kv_per_physical_page():
 
 
 @pytest.mark.skipif(vllm_version_is("0.28.0"), reason="V2 single raw MLA follows the main allocation contract")
-def test_v2_mla_single_raw_backing_selects_layout_by_hardware_and_local_q_heads(monkeypatch):
+def test_v2_mla_single_raw_backing_selects_layout_by_resolved_backend(monkeypatch):
     layer_name = "model.layers.0.self_attn.attn"
     num_blocks = 2
     spec = AscendMLAAttentionSpec(
         block_size=384,
-        num_heads=64,
+        num_query_heads=64,
         num_kv_heads=1,
         head_size=576,
         dtype=torch.bfloat16,
@@ -449,7 +449,7 @@ def test_v2_mla_single_raw_backing_selects_layout_by_hardware_and_local_q_heads(
     torch.nn.Module.__init__(attn_module)
     attn_module.kv_lora_rank = 512
     attn_module.qk_rope_head_dim = 64
-    attn_module.impl = SimpleNamespace(fa_quant_layer=False)
+    attn_module.impl = SimpleNamespace(fa_quant_layer=False, use_flashmla=True)
     backend = MagicMock()
     backend.get_kv_cache_shape.side_effect = lambda num_block_ids, block_size, num_kv_heads, head_size, *_args: (
         num_block_ids,
@@ -462,6 +462,7 @@ def test_v2_mla_single_raw_backing_selects_layout_by_hardware_and_local_q_heads(
     vllm_config = SimpleNamespace(
         additional_config={},
         cache_config=SimpleNamespace(cache_dtype="auto"),
+        compilation_config=SimpleNamespace(static_forward_context={layer_name: attn_module}),
         kv_transfer_config=None,
         model_config=SimpleNamespace(hf_config=SimpleNamespace()),
         quant_config=None,
@@ -515,15 +516,16 @@ def test_v2_mla_single_raw_backing_selects_layout_by_hardware_and_local_q_heads(
 
     monkeypatch.setattr(attn_utils, "get_current_hardware_profile", lambda: flash_profile)
     for q_heads in (8, 12, 64, 96):
-        spec = replace(spec, num_heads=q_heads)
+        spec = replace(spec, num_query_heads=q_heads)
         fused = reshape()
         assert isinstance(fused, torch.Tensor)
         assert fused.shape == (6, 128, 1, 576)
         assert fused.stride() == (81408, 576, 576, 1)
 
-    # Even on A5, FlashMLA-incompatible query-head counts use the
-    # FIA-compatible component-major layout.
-    spec = replace(spec, num_heads=48)
+    # The resolved backend rejects unsupported query-head counts before cache
+    # allocation, so FIA receives the component-major view even on A5.
+    spec = replace(spec, num_query_heads=48)
+    attn_module.impl.use_flashmla = False
     a5_fallback = reshape()
     assert isinstance(a5_fallback, tuple)
 

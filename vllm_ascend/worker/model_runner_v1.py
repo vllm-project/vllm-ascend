@@ -134,7 +134,6 @@ from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBu
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import (
-    MLA_FLASH_SUPPORTED_Q_HEADS,
     AscendCommonAttentionMetadata,
     get_sfa_qsfa_packed_head_dim,
     requires_contiguous_pa_kv_cache,
@@ -5616,7 +5615,7 @@ class NPUModelRunner(GPUModelRunner):
                         continue
 
                     # MLA使用allocate/hybrid阶段的一整块raw backing。
-                    # A5FlashMLA消费token交错的单tensor；A3 FIA消费component-major 双view。MHA/GQA继续走raw K/V协议。
+                    # FlashMLA消费token交错的单tensor；FIA消费component-major双view。MHA/GQA继续走raw K/V协议。
                     raw_cache = kv_cache_raw_tensors[layer_name]
                     fused_raw_tensor = get_single_raw_mla_backing(raw_cache)
 
@@ -5652,10 +5651,7 @@ class NPUModelRunner(GPUModelRunner):
                             kernel_block_size,
                             current_kv_cache_spec.num_kv_heads,
                         )
-                        if (
-                            get_current_hardware_profile().supports(HardwareCapability.MLA_FLASH)
-                            and current_kv_cache_spec.num_query_heads in MLA_FLASH_SUPPORTED_Q_HEADS
-                        ):
+                        if attn_module.impl.use_flashmla:
                             # A5每个kernel slot内按token交错存储[nope|rope]：
                             # token0[nope|rope], token1[nope|rope], ...。
                             fused_cache = make_page_strided_cache_view(
@@ -5667,7 +5663,7 @@ class NPUModelRunner(GPUModelRunner):
                             kv_caches[layer_name] = fused_cache
                             continue
 
-                        # A3/FIA要求nope和rope各自内部连续，只允许首轴携带
+                        # FIA要求nope和rope各自内部连续，只允许首轴携带
                         # page padding stride。每个kernel slot物理上按
                         # [all nope][all rope][padding]写入。
                         nope_cache = make_page_strided_cache_view(

@@ -46,7 +46,6 @@ from vllm.v1.worker.gpu.model_runner import (
     GPUModelRunner,
 )
 
-from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import (
     MoECommType,
@@ -172,7 +171,7 @@ class NPUModelRunner(GPUModelRunner):
         )
 
         self.update_stream = None
-        self.flashmla_executor = DeviceMetadataExecutor() if ascend_envs.VLLM_ASCEND_ENABLE_FLASH_MLA else None
+        self.flashmla_executor: DeviceMetadataExecutor | None = None
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.update_stream = torch.npu.Stream()
 
@@ -332,6 +331,12 @@ class NPUModelRunner(GPUModelRunner):
                 kv_cache_config,
                 kv_cache_allocation_context=kv_cache_allocation_context,
             )
+            if any(
+                getattr(group.get_metadata_builder(0), "flashmla_state", None) is not None
+                for groups in self.attn_groups
+                for group in groups
+            ):
+                self.flashmla_executor = DeviceMetadataExecutor()
             if self.pcp_manager is not None:
                 assert isinstance(self.pcp_manager, AscendPCPManager)
                 self.pcp_manager.vllm_config = self.vllm_config
@@ -484,7 +489,7 @@ class NPUModelRunner(GPUModelRunner):
                     int(batch_state.num_scheduled_tokens.max()),
                     batch_state.has_prefill,
                 )
-        if ascend_envs.VLLM_ASCEND_ENABLE_FLASH_MLA and batch_state is not None:
+        if self.flashmla_executor is not None and batch_state is not None:
             # Reorder every per-request field before positions, slots, tables
             # and sampling indices are constructed. A short prompt is prefill.
             order = np.argsort(batch_state.is_prefilling_np, kind="stable")
