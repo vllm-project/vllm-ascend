@@ -1,20 +1,15 @@
-# Periodic E2E Test Cases
+# Periodic E2E Test Case Guide
 
-This directory contains test cases shared by the nightly and weekly E2E
-pipelines. It is the starting point for contributors who want to add, update,
-run, or schedule a periodic E2E case.
+This directory contains test cases shared by the nightly and weekly E2E pipelines.
+It is the starting point for contributors who want to add, update, run, or schedule a periodic E2E case.
 
 The test implementation is independent of its schedule and resource topology:
 
 - Test files and YAML case definitions live under `tests/e2e/cases/`.
-- Shared pytest runners and service orchestration live under
-  `tests/e2e/common/`.
-- Nightly and weekly frequency is selected in the corresponding workflow
-  matrix.
-- Single-node, double-node, and multi-node resources are selected by the
-  matrix section that contains the case.
-- Multi-node internal or external load balancing is selected by the
-  `dp_load_balancing` field in the case YAML.
+- Shared pytest runners and service orchestration live under `tests/e2e/common/`.
+- Nightly and weekly frequency is selected in the corresponding workflow matrix.
+- Single-node, double-node, and multi-node resources are selected by the matrix section that contains the case.
+- Multi-node internal or external load balancing is selected by the `dp_load_balancing` field in the case YAML.
 
 ## Contents
 
@@ -50,16 +45,12 @@ tests/e2e/
 
 Use the following placement rules:
 
-- Put model accuracy, performance, and model-specific serving configurations
-  under `models/configs/<model-family>/`.
-- Put feature-focused cases under `features/<feature>/`. Examples include KV
-  pooling, structured output, speculative decoding, and API compatibility.
-- Keep reusable runners, configuration loaders, service lifecycle code, and
-  cluster orchestration under `tests/e2e/common/`.
+- Put model accuracy, performance, and model-specific serving configurations under `models/configs/<model-family>/`.
+- Put feature-focused cases under `features/<feature>/`. Examples include KV pooling, structured output, speculative decoding, and API compatibility.
+- Keep reusable runners, configuration loaders, service lifecycle code, and cluster orchestration under `tests/e2e/common/`.
 
-A YAML file does not need to be under `models/configs/`. The workflow resolves
-it from the explicit `config_base_path`, so a feature YAML may stay next to the
-feature tests that own it.
+A YAML file does not need to be under `models/configs/`.
+The workflow resolves it from the explicit `config_base_path`, so a feature YAML may stay next to the feature tests that own it.
 
 ## How a Case Is Selected
 
@@ -78,9 +69,8 @@ The workflow matrices are:
 - `.github/workflows/configs/nightly_config.yaml`
 - `.github/workflows/configs/weekly_config.yaml`
 
-The `name` in a matrix entry is the identifier used by `/nightly` and
-`/weekly`. Keep it unique within the applicable SoC matrix and treat it as a
-stable case identifier.
+The `name` in a matrix entry is the identifier used by `/nightly` and `/weekly`.
+Keep it unique within the applicable SoC matrix and treat it as a stable case identifier.
 
 ## Choose a Test Style
 
@@ -88,23 +78,19 @@ Periodic E2E supports two test styles.
 
 ### YAML-driven cases
 
-Use a YAML-driven case when the shared framework can start the service and run
-the required requests or benchmarks. The matrix entry supplies
-`config_file_path` and `config_base_path`.
+Use a YAML-driven case when the shared framework can start the service and run the required requests or benchmarks.
+The matrix entry supplies `config_file_path` and `config_base_path`.
 
 ### Pytest-driven cases
 
-Use a pytest-driven case when the test needs custom fixtures, assertions, or
-control flow. The matrix entry supplies `tests`, pointing to a pytest file or
-directory under `tests/e2e/cases/`.
+Use a pytest-driven case when the test needs custom fixtures, assertions, or control flow.
+The matrix entry supplies `tests`, pointing to a pytest file or directory under `tests/e2e/cases/`.
 
-Use one style for each matrix entry. Do not set both `tests` and
-`config_file_path` for the same entry.
+Use one style for each matrix entry. Do not set both `tests` and `config_file_path` for the same entry.
 
 ## Single-Node YAML Cases
 
-A single-node YAML contains a `test_cases` list. The shared runner creates one
-pytest parameter for each item in that list.
+A single-node YAML contains a `test_cases` list. The shared runner creates one pytest parameter for each item in that list.
 
 Minimal example:
 
@@ -160,26 +146,21 @@ pytest -sv tests/e2e/common/single_node/test_single_node.py
 | `epd_proxy_args` | list | Conditional | `[]` | EPD proxy arguments |
 | `kv_pool` | mapping | No | - | Managed Mooncake or Memcache service |
 
-`name` must be non-empty. It appears in pytest output, for example
-`test_single_node[Qwen-example]`, and in the single-node start marker.
+`name` must be non-empty. It appears in pytest output, for example `test_single_node[Qwen-example]`, and in the single-node start marker.
 
-The recognized port variables are `SERVER_PORT`, `ENCODE_PORT`, `PD_PORT`, and
-`PROXY_PORT`. A missing value or `DEFAULT_PORT` is replaced with a free local
-port. Commands may reference values with `$VAR` or `${VAR}`.
+The recognized port variables are `SERVER_PORT`, `ENCODE_PORT`, `PD_PORT`, and `PROXY_PORT`.
+A missing value or `DEFAULT_PORT` is replaced with a free local port. Commands may reference values with `$VAR` or `${VAR}`.
 
-Use `server_cmd_extra` when cases share a base command but one case needs
-additional arguments. The loader appends it to `server_cmd` before launching
-the service.
+Use `server_cmd_extra` when cases share a base command but one case needs additional arguments.
+The loader appends it to `server_cmd` before launching the service.
 
 Unknown fields are retained in `extra_config` for registered test handlers.
-Adding a new handler or changing the service lifecycle is a framework change;
-see `tests/e2e/common/single_node/GUIDE_AND_TEMPLATE.md` for those extension
-points.
+Adding a new handler or changing the service lifecycle is a framework change; follow the extension process described below instead of adding service logic to a
+case YAML.
 
 ### Multiple single-node cases and YAML anchors
 
-One YAML may contain several cases. YAML anchors can keep their shared service
-configuration in one place:
+One YAML may contain several cases. YAML anchors can keep their shared service configuration in one place:
 
 ```yaml
 _envs: &envs
@@ -224,8 +205,7 @@ test_cases:
 
 ### Single-node EPD case
 
-Use `service_mode: epd` when one case starts encode and decode services plus a
-proxy:
+Use `service_mode: epd` when one case starts encode and decode services plus a proxy:
 
 ```yaml
 test_cases:
@@ -259,10 +239,8 @@ test_cases:
 
 ### Single-node managed KV pool
 
-The framework starts the selected pool before vLLM and stops it after all
-service and proxy processes exit. Pool ports must be available on the host.
-Keep the matching `--kv-transfer-config` in `server_cmd` or
-`epd_server_cmds`; the framework passes that argument through unchanged.
+The framework starts the selected pool before vLLM and stops it after all service and proxy processes exit. Pool ports must be available on the host.
+Keep the matching `--kv-transfer-config` in `server_cmd` or `epd_server_cmds`; the framework passes that argument through unchanged.
 
 Mooncake example:
 
@@ -299,8 +277,7 @@ kv_pool:
 
 ### Single-node debugging
 
-Use a prepared NPU environment with `pytest`, PyYAML, the OpenAI client, and
-AISBench installed as required by the selected case.
+Use a prepared NPU environment with `pytest`, PyYAML, the OpenAI client, and AISBench installed as required by the selected case.
 
 ```bash
 # Select one case from a YAML containing several test_cases.
@@ -310,15 +287,47 @@ pytest -sv tests/e2e/common/single_node/test_single_node.py -k case-name
 pytest -sv tests/e2e/common/single_node/test_single_node.py -x
 ```
 
-Use `-s` to keep service output attached to pytest while diagnosing startup or
-request failures; it is already enabled by `-sv`.
+Use `-s` to keep service output attached to pytest while diagnosing startup or request failures; it is already enabled by `-sv`.
+
+### Extending single-node functional phases
+
+`test_content` is dispatched through `TEST_HANDLERS` in `tests/e2e/common/single_node/test_single_node.py`.
+Add a new phase only when the existing handlers cannot express the required assertion or request flow.
+
+1. Implement an async handler that accepts the parsed configuration and the running server:
+
+   ```python
+   async def run_video_test(
+       config: SingleNodeConfig,
+       server: "RemoteOpenAIServer | DisaggEpdProxy",
+   ) -> None:
+       client = server.get_async_client()
+       # Send the request and assert the response.
+   ```
+
+2. Register the handler in `TEST_HANDLERS`:
+
+   ```python
+   TEST_HANDLERS = {
+       # Existing handlers...
+       "video": run_video_test,
+   }
+   ```
+
+3. Select the phase in the case YAML:
+
+   ```yaml
+   test_content:
+     - video
+   ```
+
+Handler-specific YAML fields are available through `config.extra_config`.
+Keep service startup and shutdown in the shared lifecycle managers, and add appropriate test coverage when extending the framework.
 
 ## Multi-Node YAML Cases
 
-Multi-node cases use the shared entrypoint
-`tests/e2e/common/multi_node/run.sh`. The entrypoint starts the common pytest
-runner, which reads `dp_load_balancing` from the selected YAML and dispatches
-to the appropriate implementation.
+Multi-node cases use the shared entrypoint `tests/e2e/common/multi_node/run.sh`.
+The entrypoint starts the common pytest runner, which reads `dp_load_balancing` from the selected YAML and dispatches to the appropriate implementation.
 
 Every new or migrated multi-node YAML must declare one of:
 
@@ -330,34 +339,28 @@ dp_load_balancing: internal
 dp_load_balancing: external
 ```
 
-The field describes how the case starts and balances its serving processes. It
-belongs to the case YAML because the required serving behavior is part of the
-test scenario. Do not encode this choice in the directory name.
+The field describes how the case starts and balances its serving processes.
+It belongs to the case YAML because the required serving behavior is part of the test scenario. Do not encode this choice in the directory name.
 
 ### Meaning of `dp_load_balancing`
 
-`dp_load_balancing` selects who creates the DP ranks and who distributes
-requests across them. It does not select the number of nodes and does not, by
-itself, enable or disable PD disaggregation.
+`dp_load_balancing` selects who creates the DP ranks and who distributes requests across them.
+It does not select the number of nodes and does not, by itself, enable or disable PD disaggregation.
 
 | Value | Rank startup | Request distribution | YAML layout |
 | --- | --- | --- | --- |
 | `internal` | Each `deployment` entry starts its configured `vllm serve` process; vLLM creates and coordinates the DP ranks declared by its DP arguments | The vLLM server performs DP dispatch internally | `deployment`, with a complete `server_cmd` per node |
 | `external` | The E2E framework expands `config` and `templates`, then starts an individual `vllm serve` process for each local DP rank | A framework-managed external proxy routes requests to the rank endpoints | `config`, `templates`, and `routing.groups` |
 
-An internal-DP case can still use PD disaggregation. In that situation the
-framework starts a PD proxy to route traffic between the prefill and decode
-server groups. That proxy performs PD routing; DP rank creation and balancing
-inside each vLLM server remain internal.
+An internal-DP case can still use PD disaggregation.
+In that situation the framework starts a PD proxy to route traffic between the prefill and decode server groups.
+That proxy performs PD routing; DP rank creation and balancing inside each vLLM server remain internal.
 
-An external-DP case starts independently addressable DP rank processes. The
-framework derives their commands from `server_cmd_template`, starts the
-external proxy, and sends benchmark requests through that proxy.
+An external-DP case starts independently addressable DP rank processes.
+The framework derives their commands from `server_cmd_template`, starts the external proxy, and sends benchmark requests through that proxy.
 
-Choose `internal` when the scenario is intended to exercise vLLM's native DP
-startup and dispatch. Choose `external` when the scenario requires the E2E
-framework to launch rank endpoints separately and balance requests through its
-proxy.
+Choose `internal` when the scenario is intended to exercise vLLM's native DP startup and dispatch.
+Choose `external` when the scenario requires the E2E framework to launch rank endpoints separately and balance requests through its proxy.
 
 Add the case to the matrix section that provides the required number of nodes:
 
@@ -373,23 +376,21 @@ a3:
 
 The matrix controls the allocation:
 
-- `double_node.test_config` and `multi_node.test_config` select the applicable
-  reusable workflow and resource pool.
+- `double_node.test_config` and `multi_node.test_config` select the applicable reusable workflow and resource pool.
 - `size` is passed to the cluster resource as the requested node count.
 
-The YAML controls serving behavior, including internal or external load
-balancing and any disaggregated prefill configuration required by the case.
+The YAML controls serving behavior, including internal or external load balancing and any disaggregated prefill configuration required by the case.
 
 The YAML `num_nodes` and the matrix `size` must describe the same allocation.
-`npu_per_node` records the device capacity available to each node and is used
-when validating the parallel layout.
+`npu_per_node` records the device capacity available to each node and is used when validating the parallel layout.
+
+The examples below use `env_common` as the name of a YAML anchor for shared environment variables.
+It is not a field read by either multi-node configuration loader, and the anchor may use any valid YAML name.
 
 ### Internal DP configuration
 
-Internal DP uses a `deployment` list. Each item contains the environment and a
-complete `vllm serve` command for one node. The framework starts the service
-directly and may start the disaggregated-prefill proxy when that mode is
-enabled.
+Internal DP uses a `deployment` list. Each item contains the environment and a complete `vllm serve` command for one node.
+The framework starts the service directly and may start the disaggregated-prefill proxy when that mode is enabled.
 
 | Field | Required | Description |
 | --- | --- | --- |
@@ -399,7 +400,6 @@ enabled.
 | `npu_per_node` | Yes | NPU capacity available on each node |
 | `dp_load_balancing` | Yes | Must be `internal` |
 | `cluster_hosts` | Local only | Explicit node IPs outside LWS |
-| `env_common` | No | YAML anchor for shared environment variables |
 | `disaggregated_prefill` | No | Internal PD role assignment |
 | `deployment` | Yes | One environment and server command per node |
 | `benchmarks` | Yes | AISBench jobs; use `{}` when none are required |
@@ -465,22 +465,18 @@ benchmarks:
     threshold: 10
 ```
 
-`prefiller_host_index` and `decoder_host_index` contain node indices, not IP
-addresses. A headless node that only contributes distributed workers is not a
-separate proxy endpoint.
+`prefiller_host_index` and `decoder_host_index` contain node indices, not IP addresses.
+A headless node that only contributes distributed workers is not a separate proxy endpoint.
 
 ### External DP configuration
 
-External DP uses separate `config` and `templates` lists. A config entry
-defines the DP ranks owned by one node, while the corresponding template
-defines the environment and vLLM arguments expanded for each local rank.
+External DP uses separate `config` and `templates` lists.
+A config entry defines the DP ranks owned by one node, while the corresponding template defines the environment and vLLM arguments expanded for each local rank.
 
-`server_cmd_template` contains only arguments after `vllm serve <model>`; the
-framework prepends those tokens automatically.
+`server_cmd_template` contains only arguments after `vllm serve <model>`; the framework prepends those tokens automatically.
 
-Do not add `proxy_node_index`, `proxy_host`, `proxy_port`, `proxy_script`, or
-`dp_group` to the YAML. The framework derives proxy metadata from
-`routing.type`, and `routing.groups` assigns each config index a role.
+Do not add `proxy_node_index`, `proxy_host`, `proxy_port`, `proxy_script`, or `dp_group` to the YAML.
+The framework derives proxy metadata from `routing.type`, and `routing.groups` assigns each config index a role.
 
 | Field | Required | Description |
 | --- | --- | --- |
@@ -493,7 +489,6 @@ Do not add `proxy_node_index`, `proxy_host`, `proxy_port`, `proxy_script`, or
 | `routing.type` | Yes | Currently `disaggregated_prefill` |
 | `routing.groups` | Yes | Config indices assigned to each serving role |
 | `config` | Yes | Per-node DP and parallel layout |
-| `env_common` | No | YAML anchor for shared environment variables |
 | `templates` | Yes | Per-config environment and command template |
 | `kv_pool` | No | Managed Mooncake or Memcache service |
 | `benchmarks` | Yes | AISBench jobs run on node 0; may be `{}` |
@@ -613,22 +608,17 @@ The main `config` fields are:
 - `dp_size`: Global size of this DP group.
 - `dp_size_local`: Number of vLLM ranks started on this node.
 - `dp_rank_start`: First global DP rank owned by this node.
-- `dp_address`: DP master address. Use one group master address for every
-  member of the same group.
-- `tp_size`, `cp_size`, `sp_size`, and `pp_size`: Parallel sizes expanded into
-  the command template. Optional parallel sizes default according to the
-  external DP loader.
+- `dp_address`: DP master address. Use one group master address for every member of the same group.
+- `tp_size`, `cp_size`, `sp_size`, and `pp_size`: Parallel sizes expanded into the command template.
+  Optional parallel sizes default according to the external DP loader.
 
-For disaggregated prefill, prefiller templates normally use
-`kv_role: kv_producer` and decoder templates use `kv_role: kv_consumer`.
-The framework derives the proxy script from `routing.type`, runs the proxy on
-node 0, and currently assigns port `1999`. Benchmark requests are sent through
-that proxy.
+For disaggregated prefill, prefiller templates normally use `kv_role: kv_producer` and decoder templates use `kv_role: kv_consumer`.
+The framework derives the proxy script from `routing.type`, runs the proxy on node 0, and currently assigns port `1999`.
+Benchmark requests are sent through that proxy.
 
 ### External DP template variables
 
-The following variables are available in `envs` and
-`server_cmd_template`:
+The following variables are available in `envs` and `server_cmd_template`:
 
 ```text
 ${MODEL}
@@ -654,8 +644,7 @@ ${MASTER_IP}
 ${LWS_WORKER_INDEX}
 ```
 
-Command arguments may also reference rendered environment variables such as
-`$SERVER_PORT`:
+Command arguments may also reference rendered environment variables such as `$SERVER_PORT`:
 
 ```yaml
 envs:
@@ -679,16 +668,13 @@ MASTER_IP
 
 ### External DP managed KV pool
 
-External DP supports an optional managed KV pool. Mooncake uses `master_port`
-and `metrics_port`; Memcache uses `meta_service_port` and
-`config_store_port`. All configured service ports must be available on node 0.
-The `kv_pool` blocks shown in the single-node section use the same schema when
-placed at the top level of an external DP YAML.
+External DP supports an optional managed KV pool. Mooncake uses `master_port` and `metrics_port`; Memcache uses `meta_service_port` and `config_store_port`.
+All configured service ports must be available on node 0.
+The `kv_pool` blocks shown in the single-node section use the same schema when placed at the top level of an external DP YAML.
 
-For external DP, the framework writes the generated backend configuration for
-every rank. It overwrites the Mooncake master address or the Memcache service
-URLs with resolved cluster values. The generated files and service logs are
-stored with the node logs:
+For external DP, the framework writes the generated backend configuration for every rank.
+It overwrites the Mooncake master address or the Memcache service URLs with resolved cluster values.
+The generated files and service logs are stored with the node logs:
 
 ```text
 <external-dp-log-root>/node-<index>/runtime/mooncake.json
@@ -698,14 +684,11 @@ stored with the node logs:
 <external-dp-log-root>/node-0/memcache-meta-service.log
 ```
 
-Mooncake additionally injects `MOONCAKE_CONFIG_PATH` and `MOONCAKE_MASTER`.
-Memcache injects `MMC_LOCAL_CONFIG_PATH`.
+Mooncake additionally injects `MOONCAKE_CONFIG_PATH` and `MOONCAKE_MASTER`. Memcache injects `MMC_LOCAL_CONFIG_PATH`.
 
-When KV pooling and PD transfer are both required, use `MultiConnector` in the
-server command. Set the prefiller's outer connector and child connectors to
-`kv_producer`, and set the decoder equivalents to `kv_consumer`. Select
-`backend: mooncake` or `backend: memcache` explicitly in the
-`AscendStoreConnector` configuration.
+When KV pooling and PD transfer are both required, use `MultiConnector` in the server command.
+Set the prefiller's outer connector and child connectors to `kv_producer`, and set the decoder equivalents to `kv_consumer`.
+Select `backend: mooncake` or `backend: memcache` explicitly in the `AscendStoreConnector` configuration.
 
 Prefiller example:
 
@@ -740,8 +723,7 @@ Prefiller example:
   }
 ```
 
-The decoder uses the same structure with `kv_consumer` on the outer connector
-and both child connectors.
+The decoder uses the same structure with `kv_consumer` on the outer connector and both child connectors.
 
 ### Benchmark fields
 
@@ -760,32 +742,25 @@ Each key under `benchmarks` names one AISBench job. Common fields include:
 | `baseline` | Expected reference result |
 | `threshold` | Allowed accuracy or performance threshold |
 
-Optional request fields such as `temperature`, `top_k`, and `top_p` are passed
-to the applicable benchmark configuration.
+Optional request fields such as `temperature`, `top_k`, and `top_p` are passed to the applicable benchmark configuration.
 
 ### Multi-node validation checklist
 
 - Keep the matrix `size` consistent with YAML `num_nodes`.
-- For external DP, keep `len(config) == num_nodes` and
-  `len(templates) == num_nodes`.
+- For external DP, keep `len(config) == num_nodes` and `len(templates) == num_nodes`.
 - Assign every external config index to exactly one routing group.
 - Keep `dp_rank_start + dp_size_local <= dp_size`.
-- Keep `dp_size_local * tp_size * cp_size * sp_size * pp_size` within
-  `npu_per_node`.
+- Keep `dp_size_local * tp_size * cp_size * sp_size * pp_size` within `npu_per_node`.
 - Use one DP master address for all members of the same DP group.
 - Give producer and consumer connectors the correct PD roles.
-- Set `--max-model-len` large enough for benchmark input tokens plus
-  `max_out_len`.
+- Set `--max-model-len` large enough for benchmark input tokens plus `max_out_len`.
 - Ensure API, RPC, proxy, and managed-pool ports do not conflict.
 
-For LWS details, bare-metal execution, environment variables, and log
-locations, see
-`docs/source/developer_guide/contribution/multi_node_test.md`.
+For LWS details, bare-metal execution, environment variables, and log locations, see `docs/source/developer_guide/contribution/multi_node_test.md`.
 
 ## Pytest-Driven Cases
 
-Place custom pytest cases under the most appropriate model or feature
-directory. A matrix entry points directly to the test file or directory:
+Place custom pytest cases under the most appropriate model or feature directory. A matrix entry points directly to the test file or directory:
 
 ```yaml
 a3:
@@ -802,24 +777,18 @@ Run the same target locally with pytest:
 pytest -sv tests/e2e/cases/features/structured_output
 ```
 
-If a pytest-driven case needs multiple nodes, its cluster startup and resource
-requirements must be supported by the selected reusable workflow before the
-case is added to a multi-node matrix.
+If a pytest-driven case needs multiple nodes, its cluster startup and resource requirements must be supported by the selected reusable workflow before the case
+is added to a multi-node matrix.
 
 ## Nightly and Weekly Scheduling
 
-Nightly and weekly reuse the same case files and common runners. A case may be
-listed in either or both matrices:
+Nightly and weekly reuse the same case files and common runners. A case may be listed in either or both matrices:
 
 - Add frequently needed regression coverage to `nightly_config.yaml`.
-- Add longer, more expensive, or lower-frequency coverage to
-  `weekly_config.yaml`.
-- If the same case appears in both matrices, point both entries to the same
-  test file or YAML unless the scenarios genuinely require different
-  configuration.
+- Add longer, more expensive, or lower-frequency coverage to `weekly_config.yaml`.
+- If the same case appears in both matrices, point both entries to the same test file or YAML unless the scenarios genuinely require different configuration.
 
-Do not copy a case into a `nightly/` or `weekly/` directory to select its
-frequency. Scheduling comes from matrix membership.
+Do not copy a case into a `nightly/` or `weekly/` directory to select its frequency. Scheduling comes from matrix membership.
 
 Example commands on an authorized pull request:
 
