@@ -46,6 +46,11 @@ class AscendModelState(DefaultModelState):
     kvpp_is_dummy_run: bool = False
     device_metadata: "TargetDeviceMetadata | None" = None
 
+    def finish_execution(self, *, failed: bool) -> None:
+        """Join auxiliary metadata work even if input preparation failed."""
+        if self.device_metadata is not None:
+            self.device_metadata.finish()
+
     def _get_engram_device_inputs(self, input_batch: AscendInputBatch) -> dict[str, torch.Tensor]:
         """Device request coordinates for upstream NgramHashState."""
         layer_name = getattr(self.model, "engram_cache_layer_name", None)

@@ -6,7 +6,7 @@ from contextlib import ExitStack, contextmanager
 
 import torch
 
-from vllm_ascend.worker.device_metadata import DeviceMetadataExecutor, DeviceMetadataTask, use_device_metadata_executor
+from vllm_ascend.worker.device_metadata import DeviceMetadataExecutor, DeviceMetadataTask
 
 
 class TargetDeviceMetadata:
@@ -23,18 +23,13 @@ class TargetDeviceMetadata:
         self._tasks: tuple[DeviceMetadataTask, ...] = ()
         self._failed = False
 
-    @contextmanager
-    def activate(self):
-        with use_device_metadata_executor(self.executor):
-            try:
-                yield
-            finally:
-                self.finish()
-
     def run_build(self, build_fn, **kwargs):
         full_graph = kwargs.get("full_graph_mode", False) or kwargs.get("for_cudagraph_capture", False)
         with self.build(kwargs["attn_groups"], full_graph):
-            return build_fn(**kwargs)
+            metadata = build_fn(**kwargs)
+            for resource in metadata.values():
+                resource.device_metadata_executor = self.executor
+            return metadata
 
     @contextmanager
     def build(self, attn_groups, full_graph: bool):

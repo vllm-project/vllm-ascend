@@ -107,6 +107,8 @@ class AscendDSAV41Metadata(AttentionMetadata):
     is_compressor_state: bool
     flat_slot_mapping: torch.Tensor | None = None
     cache_kind: str = "unknown"
+    # MRV2 producer ownership follows this forward's metadata, including capture.
+    device_metadata_executor: Any = None
     positions: torch.Tensor | None = None
     cos: Any = None
     sin: Any = None
@@ -796,6 +798,8 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         )
         self._c2_full_source_rope: tuple[torch.Tensor, torch.Tensor] | None = None
         self._device_metadata_enabled = False
+        # Default to eager preparation. MRV2 temporarily sets this during
+        # FULL warmup/capture so producers and consumer waits share one graph.
         self._device_metadata_in_graph = False
         self._device_metadata_tasks: tuple[DeviceMetadataTask, ...] = ()
 

@@ -14,28 +14,12 @@
 # limitations under the License.
 
 from collections.abc import Callable, Iterable
-from contextlib import contextmanager
-from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import IntEnum
 from typing import Protocol, runtime_checkable
 
 import torch
 from vllm.forward_context import BatchDescriptor, get_forward_context, is_forward_context_available
-
-_ACTIVE_DEVICE_METADATA: ContextVar["DeviceMetadataExecutor | None"] = ContextVar(
-    "ascend_active_device_metadata", default=None
-)
-
-
-@contextmanager
-def use_device_metadata_executor(executor: "DeviceMetadataExecutor | None"):
-    """Scope MRV2's producer to target execution, never to draft sampling."""
-    token = _ACTIVE_DEVICE_METADATA.set(executor)
-    try:
-        yield
-    finally:
-        _ACTIVE_DEVICE_METADATA.reset(token)
 
 
 class DeviceMetadataStage(IntEnum):
@@ -173,8 +157,14 @@ class DeviceMetadataExecutor:
 def wait_for_device_metadata(stage: DeviceMetadataStage, group_id: int) -> None:
     if not is_forward_context_available():
         return
-    executor = getattr(get_forward_context(), "device_metadata_executor", None)
+    context = get_forward_context()
+    executor = getattr(context, "device_metadata_executor", None)
     if executor is None:
-        executor = _ACTIVE_DEVICE_METADATA.get()
+        # MRV2 carries the producer with the attention metadata for this
+        # forward. Draft metadata cannot inherit a target execution scope.
+        metadata = getattr(context, "attn_metadata", None)
+        if isinstance(metadata, dict):
+            resource = next(iter(metadata.values()), None)
+            executor = getattr(resource, "device_metadata_executor", None)
     if executor is not None:
         executor.wait(stage, group_id)

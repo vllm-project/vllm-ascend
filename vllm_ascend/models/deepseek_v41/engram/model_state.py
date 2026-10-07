@@ -21,40 +21,12 @@ from typing import Any
 
 import torch
 from vllm.config.compilation import CUDAGraphMode
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import triton
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
-
-
-@triton.jit
-def _gather_lookback_kernel(
-    lookback_ptr,
-    idx_mapping_ptr,
-    num_computed_tokens_ptr,
-    all_token_ids_ptr,
-    all_token_ids_stride,
-    num_reqs,
-    DEPTH: tl.constexpr,
-    BLOCK_DEPTH: tl.constexpr,
-):
-    # One program per lookback row; rows past the batch are filled with -1.
-    batch_idx = tl.program_id(0)
-    in_batch = batch_idx < num_reqs
-    req_state_idx = tl.load(idx_mapping_ptr + batch_idx, mask=in_batch, other=0)
-    num_computed = tl.load(num_computed_tokens_ptr + req_state_idx)
-
-    offs = tl.arange(0, BLOCK_DEPTH)
-    pos = num_computed - 1 - offs
-    valid = in_batch & (offs < DEPTH) & (pos >= 0)
-    ids = tl.load(
-        all_token_ids_ptr + req_state_idx * all_token_ids_stride + pos,
-        mask=valid,
-        other=-1,
-    )
-    tl.store(lookback_ptr + batch_idx * DEPTH + offs, ids, mask=offs < DEPTH)
 
 
 class EngramModelState(AscendModelState):
@@ -86,6 +58,14 @@ class EngramModelState(AscendModelState):
                     "engram_query_start_loc": torch.zeros(self.max_num_reqs + 1, dtype=torch.int32, device=device),
                     "engram_valid_token_count": torch.zeros(1, dtype=torch.int32, device=device),
                 }
+
+    def finish_execution(self, *, failed: bool) -> None:
+        # Engram owns its lookup buffers and events. Keep their retirement
+        # beside the input preparation instead of exposing them to the runner.
+        try:
+            self.model.retire_engram_lookups(reset_events=failed)
+        finally:
+            super().finish_execution(failed=failed)
 
     def prepare_attn(
         self,
@@ -119,6 +99,8 @@ class EngramModelState(AscendModelState):
             return model_inputs
         all_token_ids = req_states.all_token_ids.gpu
         depth = window.shape[1]
+        from vllm_ascend.ops.triton.engram_lookback import _gather_lookback_kernel
+
         _gather_lookback_kernel[(window.shape[0],)](
             window,
             input_batch.idx_mapping,

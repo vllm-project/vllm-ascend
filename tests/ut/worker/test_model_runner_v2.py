@@ -26,7 +26,7 @@ def _make_runner(need_timing: bool = True):
     runner.vllm_config = SimpleNamespace()
     runner.kv_cache_config = KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
     runner.kvpp = SimpleNamespace(complete_forward=lambda: None)
-    runner.model_state = SimpleNamespace(kvpp_is_dummy_run=False)
+    runner.model_state = SimpleNamespace(kvpp_is_dummy_run=False, finish_execution=Mock())
     runner.execute_model_state = None
     runner.use_pp = False
     runner.is_last_pp_rank = False
@@ -56,14 +56,13 @@ def test_metadata_and_dp_skip_scopes_coexist_and_retire(monkeypatch, dummy, fail
         finally:
             active.remove(name)
 
-    runner.model_state.device_metadata = SimpleNamespace(activate=lambda: scope("metadata"))
     module = "vllm_ascend.worker.v2.model_runner."
     monkeypatch.setattr(module + "has_kv_transfer_group", lambda: False)
     monkeypatch.setattr(module + "should_skip_allreduce_across_dp_group", lambda _config: True)
     monkeypatch.setattr(module + "skip_dp_coordination", lambda: scope("dp_skip"))
 
     def forward(_self, _output, **kwargs):
-        assert active == {"metadata", "dp_skip"}
+        assert active == {"dp_skip"}
         assert kwargs["dummy_run"] is dummy
         if fail:
             raise ValueError("forward failed")
@@ -76,6 +75,7 @@ def test_metadata_and_dp_skip_scopes_coexist_and_retire(monkeypatch, dummy, fail
     else:
         assert runner.execute_model(SimpleNamespace(), dummy_run=dummy) == "output"
     assert active == set()
+    runner.model_state.finish_execution.assert_called_once_with(failed=fail)
 
 
 def _make_batch_state(computed: list[int], scheduled: list[int], prefill_lens: list[int]) -> BatchReqState:

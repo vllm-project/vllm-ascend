@@ -17,7 +17,7 @@
 # This file is a part of the vllm-ascend project.
 #
 from collections.abc import Callable
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from functools import partial
 from typing import Any
 
@@ -262,21 +262,26 @@ class ModelAclGraphManager(ModelCudaGraphManager):
                 _prepare_pcp_inputs_to_capture,
                 pcp_manager=pcp_manager,
             )
-        with communicator_switch(), metadata.activate() if metadata is not None else nullcontext():
-            return super().capture(
-                model,
-                model_state,
-                input_buffers,
-                intermediate_tensors,
-                block_tables,
-                attn_groups,
-                kv_cache_config,
-                pcp_manager=pcp_manager,
-                has_lora=has_lora,
-                use_aux_hidden_state_outputs=use_aux_hidden_state_outputs,
-                lora_capture_hook=lora_capture_hook,
-                progress_bar_desc=progress_bar_desc,
-            )
+        try:
+            with communicator_switch():
+                return super().capture(
+                    model,
+                    model_state,
+                    input_buffers,
+                    intermediate_tensors,
+                    block_tables,
+                    attn_groups,
+                    kv_cache_config,
+                    pcp_manager=pcp_manager,
+                    has_lora=has_lora,
+                    use_aux_hidden_state_outputs=use_aux_hidden_state_outputs,
+                    lora_capture_hook=lora_capture_hook,
+                    progress_bar_desc=progress_bar_desc,
+                )
+        finally:
+            # Input preparation can fail before ModelWithContext.forward runs.
+            if metadata is not None:
+                metadata.finish()
 
 
 class ModelWithContext(nn.Module):

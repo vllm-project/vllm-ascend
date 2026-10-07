@@ -84,8 +84,9 @@ def test_executor_context_is_scoped(monkeypatch):
     calls = []
     state = SimpleNamespace(wait=lambda *args: calls.append(args))
     monkeypatch.setattr(module, "is_forward_context_available", lambda: True)
-    monkeypatch.setattr(module, "get_forward_context", lambda: SimpleNamespace())
-    with module.use_device_metadata_executor(state):
-        module.wait_for_device_metadata(DeviceMetadataStage.ATTENTION, 1)
+    context = SimpleNamespace(attn_metadata={"cache": SimpleNamespace(device_metadata_executor=state)})
+    monkeypatch.setattr(module, "get_forward_context", lambda: context)
+    module.wait_for_device_metadata(DeviceMetadataStage.ATTENTION, 1)
+    context.attn_metadata = {}
     module.wait_for_device_metadata(DeviceMetadataStage.ATTENTION, 2)
     assert calls == [(DeviceMetadataStage.ATTENTION, 1)]

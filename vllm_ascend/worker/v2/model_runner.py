@@ -422,16 +422,11 @@ class NPUModelRunner(GPUModelRunner):
             get_kv_transfer_group().handle_preemptions(kv_connector_metadata)
 
         self.model_state.kvpp_is_dummy_run = dummy_run or is_profile
-        metadata = getattr(self.model_state, "device_metadata", None)
         dp_coordination_context = (
             skip_dp_coordination() if should_skip_allreduce_across_dp_group(self.vllm_config) else nullcontext()
         )
-        # Engram preparation runs on an auxiliary stream during the forward;
-        # join it before the next step reuses its buffers. A failed forward
-        # also clears records a captured wait/reset never consumed.
-        retire_engram = getattr(getattr(self, "model", None), "retire_engram_lookups", None)
         forward_failed = True
-        with dp_coordination_context, metadata.activate() if metadata is not None else nullcontext():
+        with dp_coordination_context:
             try:
                 output = super().execute_model(
                     scheduler_output,
@@ -444,8 +439,9 @@ class NPUModelRunner(GPUModelRunner):
                 )
                 forward_failed = False
             finally:
-                if retire_engram is not None:
-                    retire_engram(reset_events=forward_failed)
+                finish_execution = getattr(self.model_state, "finish_execution", None)
+                if finish_execution is not None:
+                    finish_execution(failed=forward_failed)
         self.model_state.kvpp_is_dummy_run = False
         if dummy_run and lmhead_tp_enable() and not is_profile and self.is_last_pp_rank:
             # lmhead TP: idle ranks never call sample(); join the target head

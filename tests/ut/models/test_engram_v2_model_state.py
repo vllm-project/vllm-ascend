@@ -11,6 +11,7 @@ from vllm.config import CUDAGraphMode
 
 from vllm_ascend.models.deepseek_v41 import model as model_mod
 from vllm_ascend.models.deepseek_v41.engram import model_state as state_mod
+from vllm_ascend.ops.triton import engram_lookback
 
 
 @pytest.fixture
@@ -278,7 +279,7 @@ def test_forward_only_waits_external_events_on_full_runs(runtime, monkeypatch, m
 
 
 def make_state(model, monkeypatch):
-    monkeypatch.setattr(state_mod, "_gather_lookback_kernel", MagicMock())
+    monkeypatch.setattr("vllm_ascend.ops.triton.engram_lookback._gather_lookback_kernel", MagicMock())
     monkeypatch.setattr(
         state_mod, "triton", SimpleNamespace(next_power_of_2=lambda value: 1 << (value - 1).bit_length())
     )
@@ -306,7 +307,7 @@ def test_state_gathers_lookback_and_overlaps_engram(runtime, monkeypatch):
         lookback.fill_(3)
         assert num_reqs == 2
 
-    state_mod._gather_lookback_kernel.__getitem__.side_effect = lambda grid: gather
+    engram_lookback._gather_lookback_kernel.__getitem__.side_effect = lambda grid: gather
     input_batch = SimpleNamespace(
         input_ids=torch.ones(4, dtype=torch.int32),
         positions=torch.arange(4),
