@@ -114,6 +114,7 @@ class DCPImplMixin:
 
     dcp_size: int
     dcp_rank: int
+    num_heads: int
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)

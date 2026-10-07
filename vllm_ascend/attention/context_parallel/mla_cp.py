@@ -195,18 +195,25 @@ class AscendMlaDCPMetadataBuilder(
         self,
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
+        *,
+        chunk_plan_lens_cpu: torch.Tensor | None = None,
+        chunk_workspace_size: int | None = None,
     ):
         context_lens_cpu = (self.seq_lens - self.query_lens)[self.num_decodes : common_attn_metadata.num_reqs]
-        gather_lens = context_lens_cpu
-        chunk_workspace_size = self.chunked_prefill_workspace_size
+        gather_lens = context_lens_cpu if chunk_plan_lens_cpu is None else chunk_plan_lens_cpu
+        use_default_chunk_workspace = chunk_workspace_size is None
+        if chunk_workspace_size is None:
+            chunk_workspace_size = self.chunked_prefill_workspace_size
         local_rows = None
         block_table = None
         if self.pcp_enabled and self.dcp_enabled:
             pcp_gather_lens, local_rows, block_table = self._get_pcp_prefill_kv_inputs()
             if pcp_gather_lens is not None:
-                gather_lens = pcp_gather_lens
+                if chunk_plan_lens_cpu is None:
+                    gather_lens = pcp_gather_lens
                 # A global PCP request may expand into two local attention rows.
-                chunk_workspace_size //= 2
+                if use_default_chunk_workspace:
+                    chunk_workspace_size //= 2
         chunked_context_metadata = super().build_chunked_metadata(
             common_prefix_len,
             common_attn_metadata,
@@ -965,6 +972,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             )
             padded_local_chunk_seq_len = padded_local_chunk_seq_lens_lst[source_row]
             if chunked_context.pcp_global_req_indices is not None:
+                assert chunked_context.padded_local_cu_seq_lens_lst is not None
                 src_token_idx = chunked_context.padded_local_cu_seq_lens_lst[chunk_idx][source_row]
             cur_seq_len = 0
             for rank, local_context_len in enumerate(local_context_lens):

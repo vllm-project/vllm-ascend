@@ -212,6 +212,32 @@ def test_mla_dcp_inherits_standard_build_and_does_not_materialize_whole_cache():
     assert "_gather_prefill_cache_blocks" not in AscendMlaDCPImpl.__dict__
 
 
+@pytest.mark.parametrize("pcp_enabled", [False, True])
+def test_chunked_metadata_preserves_explicit_plan_and_workspace(pcp_enabled):
+    from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPMetadataBuilder
+    from vllm_ascend.attention.mla_v1 import AscendMLAMetadataBuilder
+
+    builder = AscendMlaDCPMetadataBuilder.__new__(AscendMlaDCPMetadataBuilder)
+    builder.pcp_enabled = pcp_enabled
+    builder.dcp_enabled = True
+    builder.num_decodes = 0
+    builder.seq_lens = torch.tensor([6, 12], dtype=torch.int32)
+    builder.query_lens = torch.tensor([3, 3], dtype=torch.int32)
+    builder._get_pcp_prefill_kv_inputs = Mock(return_value=(torch.tensor([12]), [0, 0], torch.zeros(1, 1)))
+    plan = torch.tensor([20], dtype=torch.int32)
+    with patch.object(AscendMLAMetadataBuilder, "build_chunked_metadata", return_value=None) as base:
+        result = builder.build_chunked_metadata(
+            0, SimpleNamespace(num_reqs=2), chunk_plan_lens_cpu=plan, chunk_workspace_size=48
+        )
+    assert result is None
+    assert base.call_args.kwargs["chunk_plan_lens_cpu"] is plan
+    assert base.call_args.kwargs["chunk_workspace_size"] == 48
+    if pcp_enabled:
+        builder._get_pcp_prefill_kv_inputs.assert_called_once()
+    else:
+        builder._get_pcp_prefill_kv_inputs.assert_not_called()
+
+
 def test_pcp_global_plan_keeps_local_fragment_mapping():
     import numpy as np
 
