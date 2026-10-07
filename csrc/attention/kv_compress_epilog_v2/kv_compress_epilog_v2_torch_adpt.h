@@ -127,15 +127,6 @@ void KvCompressEpilogV2Npu(at::Tensor &cache, const at::Tensor &x,
                   quantGroupSize, quantModeInt, roundScale, xScale, blockStride);
 }
 
-void KvCompressEpilogV2Meta(at::Tensor &cache, const at::Tensor &x,
-                            const at::Tensor &slotMapping,
-                            int64_t quantGroupSize, std::string quantMode,
-                            bool roundScale, double xScale) {
-  const std::string normalizedQuantMode = NormalizeQuantMode(quantMode);
-  ValidateKvCompressEpilogV2Inputs(cache, x, slotMapping, quantGroupSize,
-                                   normalizedQuantMode, xScale);
-}
-
 } // namespace kv_compress_v2
 } // namespace vllm_ascend
 

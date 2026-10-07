@@ -3489,8 +3489,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     );
     ops.impl("kv_compress_epilog_v2", torch::kPrivateUse1,
              &vllm_ascend::kv_compress_v2::KvCompressEpilogV2Npu);
-    ops.impl("kv_compress_epilog_v2", torch::kMeta,
-             &vllm_ascend::kv_compress_v2::KvCompressEpilogV2Meta);
 
     ops.def(
         "npu_kv_quant_sparse_attn_sharedkv("
