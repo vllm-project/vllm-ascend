@@ -14,6 +14,7 @@ import pytest
 import requests
 import vllm
 
+from tests.e2e.common.single_node.benchmark_profiling import run_profiled_benchmarks
 from tests.e2e.common.single_node.kv_pool_runtime import (
     create_single_node_kv_pool_manager,
 )
@@ -569,11 +570,21 @@ def _run_benchmarks(config: SingleNodeConfig, port: int) -> None:
     if not aisbench_cases:
         return
 
-    result = run_aisbench_cases(
-        model=config.model,
-        port=port,
-        aisbench_cases=aisbench_cases,
-    )
+    if config.profiling is None:
+        result = run_aisbench_cases(
+            model=config.model,
+            port=port,
+            aisbench_cases=aisbench_cases,
+        )
+    else:
+        result = run_profiled_benchmarks(
+            model=config.model,
+            port=port,
+            benchmark_keys=benchmark_keys,
+            benchmarks=config.benchmarks,
+            profiling=config.profiling,
+            run_cases=run_aisbench_cases,
+        )
 
     _save_benchmark_results_json(config, benchmark_keys, result)
 
