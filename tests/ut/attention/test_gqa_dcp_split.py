@@ -192,7 +192,7 @@ def test_single_token_draft_reads_complete_cache_without_current_attention():
     assert actual is merged
     assert impl._run_dcp_attention.call_count == 1
     assert impl._run_dcp_attention.call_args.args[4:] == (CPKVScope.FULL, 4)
-    impl._merge_dcp_attention_output.assert_called_once_with(*cached, 8)
+    impl._merge_dcp_attention_output.assert_called_once_with(*cached)
 
 
 def test_capture_registers_tnd_history_and_current_with_separate_providers():
@@ -462,6 +462,7 @@ def test_v1_draft_builder_owns_history_and_padding_without_manager_override(rank
         num_actual_tokens=4,
         max_query_len=1,
         query_start_loc_cpu=torch.arange(17, dtype=torch.int32),
+        query_start_loc=torch.arange(17, dtype=torch.int32),
         seq_lens=advanced,
         _seq_lens_cpu=advanced,
         seq_lens_cpu=advanced,

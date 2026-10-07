@@ -95,9 +95,10 @@ class AscendAttentionBackend(AttentionBackend):
     @classmethod
     def supports_pcp(cls) -> bool:
         # vLLM checks this capability before any instance-level PCP dispatch.
-        # Only the main GQA implementation owns the PCP path; exact identity
-        # prevents backends such as 310P from inheriting unsupported capability.
-        return cls.get_impl_cls() is AscendAttentionBackendImpl
+        # The main backend owns both the ordinary GQA implementation and its
+        # DCP specialization. Keep derived backends such as 310P and C8 opted
+        # out unless they declare support themselves.
+        return cls is AscendAttentionBackend
 
     @staticmethod
     def get_kv_cache_shape(
@@ -1226,6 +1227,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             expanded_slot_mapping,
             attn_metadata.num_decode_tokens,
         )
+        self._record_pcp_gathered_kv(cache_key, cache_value)
         local_num_actual_tokens = attn_metadata.num_actual_tokens
         try:
             attn_metadata.slot_mapping = cache_slot_mapping
@@ -1236,6 +1238,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
             attn_metadata.num_actual_tokens = local_num_actual_tokens
 
         return query, key, value, output
+
+    def _record_pcp_gathered_kv(self, key: torch.Tensor, value: torch.Tensor) -> None:
+        """Allow combined CP implementations to reuse PCP's gathered current KV."""
+        return
 
     def forward_impl(
         self,

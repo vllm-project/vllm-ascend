@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 import pytest
@@ -17,6 +17,7 @@ from vllm_ascend.attention.context_parallel.attention_cp import (
     AscendAttentionDCPMetadata,
     AscendAttentionDCPMetadataBuilder,
     AscendMetadataForDecode,
+    AscendMetadataForPrefill,
 )
 from vllm_ascend.attention.context_parallel.common_cp import (
     _update_out_and_lse,
@@ -32,6 +33,127 @@ def test_gqa_dcp_extends_v1_backend_without_polluting_base_metadata() -> None:
     assert AscendAttentionDCPMetadataBuilder.metadata_cls is (AscendAttentionDCPMetadata)
     assert not hasattr(AscendMetadata(), "decode")
     assert not hasattr(AscendMetadata(), "prefill")
+
+
+def test_gqa_dcp_builder_consumes_pcp_context() -> None:
+    assert AscendAttentionDCPMetadataBuilder.consumes_pcp_context
+
+
+def test_gqa_dcp_capture_forwards_pcp_context() -> None:
+    builder = AscendAttentionDCPMetadataBuilder.__new__(AscendAttentionDCPMetadataBuilder)
+    builder.build = Mock(return_value="metadata")
+    common = object()
+    context = object()
+
+    assert (
+        builder.build_for_cudagraph_capture(common, pcp_context=context, pcp_cache_group_idx=2) == "metadata"
+    )
+    builder.build.assert_called_once_with(
+        common_prefix_len=0, common_attn_metadata=common, pcp_context=context, pcp_cache_group_idx=2
+    )
+
+
+def test_gqa_pcp_dcp_builder_uses_global_prefill_history_and_local_restore_indices() -> None:
+    builder = object.__new__(AscendAttentionDCPMetadataBuilder)
+    builder.chunked_prefill_enabled = True
+    builder.dcp_size = 2
+    builder.dcp_rank = 0
+    builder.device = torch.device("cpu")
+    builder.pcp_enabled = True
+    builder.pcp_group = SimpleNamespace(world_size=2, rank_in_group=0)
+    builder.vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=1)
+    )
+    global_table = torch.tensor([[1, 2], [3, 4], [5, 6]], dtype=torch.int32)
+    builder._pcp_cache_group_idx = 0
+    builder._pcp_context = SimpleNamespace(
+        global_batch=SimpleNamespace(
+            num_reqs=3,
+            is_prefilling_np=np.array([False, True, True]),
+            query_start_loc_np=np.array([0, 1, 5, 11]),
+            seq_lens_np=np.array([11, 10, 20]),
+        ),
+        global_block_tables=(global_table,),
+        hidden_restore_idx=torch.tensor([0, 1, 2, 7, 8, 3, 4, 5, 9, 10, 11]),
+        padded_gather_idx=torch.tensor([0, 1, 2, 5, 6, 7, 0, 3, 4, 8, 9, 10]),
+    )
+    query_lens = torch.tensor([1, 2, 3], dtype=torch.int32)
+    seq_lens = torch.tensor([11, 8, 17], dtype=torch.int32)
+    common = SimpleNamespace(
+        num_actual_tokens=6,
+        query_start_loc=torch.tensor([0, 1, 3, 6], dtype=torch.int32),
+        seq_lens=seq_lens,
+        dcp_local_seq_lens_cpu=torch.tensor([6], dtype=torch.int32),
+    )
+
+    result = builder._build_backend_metadata(
+        common,
+        block_table=torch.tensor([[11, 12], [13, 14], [15, 16]], dtype=torch.int32),
+        query_lens=query_lens,
+        seq_lens=seq_lens,
+        num_decodes=1,
+        num_prefills=2,
+    )
+
+    prefill = result["prefill"]
+    chunked = prefill.chunked_context
+    torch.testing.assert_close(prefill.block_tables, global_table[1:])
+    assert prefill.actual_seq_lengths_q.tolist() == [2, 5]
+    assert prefill.pcp_actual_seq_lengths_q == [4, 10]
+    assert prefill.pcp_local_num_input_tokens == 6
+    assert prefill.pcp_local_num_decode_tokens == 1
+    assert prefill.pcp_global_num_decode_tokens == 1
+    assert prefill.pcp_prefill_restore_idx.tolist() == [0, 1, 5, 6, 2, 3, 4, 7, 8, 9]
+    assert prefill.pcp_local_prefill_indices.tolist() == [0, 1, 4, 5, 6]
+    assert chunked.actual_seq_lengths_kv == [3, 10]
+    assert chunked.actual_chunk_seq_lengths.tolist() == [4, 10]
+    assert chunked.local_context_lens.tolist() == [3, 7]
+    assert chunked.starts.tolist() == [0, 0]
+
+
+def test_gqa_pcp_dcp_prefill_skips_replicated_decode_and_restores_global_current() -> None:
+    impl = AscendAttentionDCPImpl.__new__(AscendAttentionDCPImpl)
+    impl.pcp_group = SimpleNamespace(
+        all_gather=Mock(side_effect=lambda tensor, dim: torch.cat((tensor, tensor + 100), dim=dim))
+    )
+    impl.num_heads = 1
+    impl.num_kv_heads = 1
+    impl.head_size = 2
+    impl.scale = 0.5
+    impl._pcp_gathered_kv = (
+        torch.arange(14).view(7, 1, 2),
+        torch.arange(14, 28).view(7, 1, 2),
+    )
+    prefill = AscendMetadataForPrefill(
+        pcp_actual_seq_lengths_q=[2, 4],
+        pcp_prefill_restore_idx=torch.tensor([0, 1, 3, 4]),
+        pcp_local_prefill_indices=torch.tensor([0, 1]),
+        pcp_local_num_input_tokens=4,
+        pcp_local_num_decode_tokens=1,
+        pcp_global_num_decode_tokens=1,
+    )
+    metadata = AscendAttentionDCPMetadata(
+        prefill=prefill,
+        causal=True,
+        attn_mask=torch.ones(4, 4, dtype=torch.bool),
+    )
+    query = torch.arange(8).view(4, 1, 2)
+    key = value = query
+    current = torch.arange(8).view(4, 1, 2) + 1000
+
+    module = "vllm_ascend.attention.context_parallel.attention_cp"
+    with patch(module + ".torch.ops.npu.npu_fused_infer_attention_score", return_value=(current, torch.zeros(4, 1, 1))) as fia:
+        actual = impl._forward_prefill_pcp_dcp(query, key, value, (), metadata)
+
+    torch.testing.assert_close(actual, current[:2])
+    restored_query = fia.call_args.args[0]
+    torch.testing.assert_close(restored_query, torch.tensor([[[2, 3]], [[4, 5]], [[102, 103]], [[104, 105]]]))
+    torch.testing.assert_close(
+        fia.call_args.args[1],
+        torch.tensor([[[2, 3]], [[4, 5]], [[8, 9]], [[10, 11]]]),
+    )
+    assert fia.call_args.kwargs["actual_seq_lengths"] == [2, 4]
+    assert impl.pcp_group.all_gather.call_count == 1
 
 
 def test_dcp_chunked_request_mask_marks_nonempty_contexts() -> None:

@@ -149,6 +149,8 @@ class TestAscendAttentionBackend(TestBase):
     def test_supports_pcp_only_for_main_implementation(self):
         with patch("vllm_ascend.attention.attention_v1.enable_dcp", return_value=False):
             self.assertTrue(AscendAttentionBackend.supports_pcp())
+        with patch("vllm_ascend.attention.attention_v1.enable_dcp", return_value=True):
+            self.assertTrue(AscendAttentionBackend.supports_pcp())
 
         class OtherAttentionBackend(AscendAttentionBackend):
             @staticmethod
