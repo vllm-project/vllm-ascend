@@ -470,7 +470,12 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
         fast_build: bool = False,
+        *,
+        pcp_context=None,
+        pcp_cache_group_idx: int | None = None,
     ) -> AscendMLAMetadata:
+        self._pcp_context = pcp_context
+        self._pcp_cache_group_idx = pcp_cache_group_idx
         expanded_slot_mapping = common_attn_metadata.slot_mapping if self.pcp_enabled else None
         num_reqs = common_attn_metadata.num_reqs
         query_start_loc = common_attn_metadata.query_start_loc
@@ -580,6 +585,9 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         self,
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
+        *,
+        chunk_plan_lens_cpu: torch.Tensor | None = None,
+        chunk_workspace_size: int | None = None,
     ):
         if not self.chunked_prefill_enabled:
             return None
@@ -589,11 +597,15 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         reqs_start = self.num_decodes  # prefill_start
 
         self.context_lens_cpu = num_computed_tokens_cpu[reqs_start:num_reqs]
-        max_context_len_cpu = self.context_lens_cpu.max().item()
+        # PCP-local fragments already carry their own computed lengths. A shared
+        # plan changes only the workspace budget and the number of iterations.
+        chunk_plan_lens = self.context_lens_cpu if chunk_plan_lens_cpu is None else chunk_plan_lens_cpu
+        max_context_len_cpu = chunk_plan_lens.max().item()
         if not max_context_len_cpu > 0:
             return None
-        num_prefills_with_context_cpu = (self.context_lens_cpu > 0).sum().item()
-        self.max_context_chunk = self.chunked_prefill_workspace_size // num_prefills_with_context_cpu
+        num_prefills_with_context_cpu = (chunk_plan_lens > 0).sum().item()
+        workspace_size = self.chunked_prefill_workspace_size if chunk_workspace_size is None else chunk_workspace_size
+        self.max_context_chunk = workspace_size // num_prefills_with_context_cpu
         self.max_context_chunk = round_down(self.max_context_chunk, self.block_size)
 
         assert self.max_context_chunk > 0
@@ -759,13 +771,22 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         )
         return decode_metadata
 
-    def build_for_cudagraph_capture(self, common_attn_metadata: AscendCommonAttentionMetadata):
+    def build_for_cudagraph_capture(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        **kwargs: Any,
+    ):
         capture_metadata = copy(common_attn_metadata)
         if capture_metadata.attn_state is None:
             capture_metadata.attn_state = AscendAttentionState.ChunkedPrefill
         if self.dcp_enabled and capture_metadata.is_prefilling is None:
             capture_metadata.is_prefilling = torch.zeros(capture_metadata.num_reqs, dtype=torch.bool)
-        return super().build_for_cudagraph_capture(capture_metadata)
+        # Keep backend-specific PCP context on the same build path as replay.
+        return self.build(
+            common_prefix_len=0,
+            common_attn_metadata=capture_metadata,
+            **kwargs,
+        )
 
     def build_for_graph_capture(
         self,
@@ -1221,6 +1242,11 @@ class AscendMLAImpl(MLAAttentionImpl):
             self.q_proj.quant_bias = None
             torch.npu.empty_cache()
 
+    def get_context_block_table(self, attn_metadata: AscendMLAMetadata) -> torch.Tensor:
+        """Return the local request table for prefill KV loading."""
+        assert attn_metadata.prefill is not None
+        return attn_metadata.prefill.block_table
+
     def get_context_seq_len_npu(self, index: int, attn_metadata: AscendMLAMetadata):
         prefill_metadata = attn_metadata.prefill
         assert prefill_metadata is not None
@@ -1255,6 +1281,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         if prefill_metadata is None or prefill_metadata.chunked_context is None:
             return prefix_output, prefix_lse
 
+        context_table = self.get_context_block_table(attn_metadata)
+        current_attn_result = prefix_output, prefix_lse
         iters = len(prefill_metadata.chunked_context.seq_tot)
         cache_kv_c = kv_c_and_k_pe_cache[0]
         cache_k_pe = kv_c_and_k_pe_cache[1]
@@ -1311,7 +1339,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             DeviceOperator.kv_cache_load(
                 cache_kv_c,
                 pe_cache,
-                prefill_metadata.block_table,
+                context_table,
                 context_seq_len_npu,
                 prefill_metadata.chunked_context.starts[i],
                 key=kv_c_normed,
@@ -1326,6 +1354,8 @@ class AscendMLAImpl(MLAAttentionImpl):
                 chunk_idx=i,
                 toks=toks,
             )
+            if kv_c_normed.numel() == 0:
+                continue
             kv_c_normed = kv_c_normed.squeeze()
             if self.fa_quant_layer and self.support_fp8_attention:
                 kv_c_normed = torch.mul(kv_c_normed.to(self.fak_descale_float.dtype), self.fak_descale_float).to(
@@ -1361,6 +1391,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             out_list.append(chunk_out.reshape(num_tokens * H, D))
             lse_list.append(chunk_lse.reshape(num_tokens * H))
 
+        if len(out_list) == 1:
+            return current_attn_result
         output_final, _ = torch_npu.npu_attention_update(tuple(lse_list), tuple(out_list), 0)
         return output_final.view(num_tokens, H, D), None
 
