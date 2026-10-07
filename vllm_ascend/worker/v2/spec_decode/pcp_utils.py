@@ -7,12 +7,15 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, Protocol
 
 from vllm.config import VllmConfig, replace
+from vllm.logger import init_logger
 
 from vllm_ascend.ascend_config import validate_additional_config_bool
 
 if TYPE_CHECKING:
     from vllm_ascend.worker.v2.model_states.default import AscendModelState
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
+
+logger = init_logger(__name__)
 
 
 class ReplicatedPCPDraftSpeculator(Protocol):
@@ -125,6 +128,18 @@ def prepare_replicated_pcp_config(
     target_parallel_config = vllm_config.parallel_config
     replicated_pcp = target_parallel_config.prefill_context_parallel_size > 1
     if replicated_pcp:
+        enable_eplb = target_parallel_config.enable_eplb
+        eplb_config = target_parallel_config.eplb_config
+        if (
+            enable_eplb
+            and target_parallel_config.tensor_parallel_size == 1
+            and target_parallel_config.data_parallel_size == 1
+        ):
+            # Replicated draft attention uses PCP=1. Keep EP, but use a static
+            # expert layout when PCP is the target's only parallel dimension.
+            enable_eplb = False
+            eplb_config = replace(eplb_config, num_redundant_experts=0)
+            logger.warning_once("EPLB is disabled for the replicated PCP draft model; target EPLB remains enabled.")
         # TODO: Separate draft execution settings from the worker topology.
         # Temporarily disable DCP during reconstruction to avoid validating the
         # target model with PCP=1; restoring DCP below does not rerun DCP checks
@@ -135,6 +150,8 @@ def prepare_replicated_pcp_config(
                 target_parallel_config,
                 prefill_context_parallel_size=1,
                 decode_context_parallel_size=1,
+                enable_eplb=enable_eplb,
+                eplb_config=eplb_config,
             ),
         )
         vllm_config.parallel_config.decode_context_parallel_size = target_parallel_config.decode_context_parallel_size

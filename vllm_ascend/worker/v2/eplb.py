@@ -63,6 +63,18 @@ class AscendEPLBController(EPLBController):
             batch_has_prefill,
         )
 
+    def maybe_register_speculator(
+        self,
+        speculator: Any | None,
+        speculative_config: Any | None,
+        load_dummy_weights: bool,
+    ) -> bool:
+        # The upstream controller checks target EPLB, which can differ from
+        # the replicated draft's setting.
+        if speculator is not None and not speculator.vllm_config.parallel_config.enable_eplb:
+            return False
+        return super().maybe_register_speculator(speculator, speculative_config, load_dummy_weights)
+
     def prepare_forward(
         self,
         model_config: Any,

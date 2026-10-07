@@ -68,6 +68,41 @@ class TestAscendEPLBController(unittest.TestCase):
         controller.set_batch_phase(batch_has_prefill=False)
         self.assertFalse(controller._load_collection_phase_matched)
 
+    def test_draft_eplb_controls_registration_without_disabling_target(self):
+        for enabled in (True, False):
+            with self.subTest(draft_eplb=enabled):
+                controller = self._make_controller()
+                controller.parallel_config.enable_elastic_ep = False
+                controller._has_registered_models = False
+                controller.state = MagicMock()
+                speculator = SimpleNamespace(
+                    vllm_config=SimpleNamespace(parallel_config=SimpleNamespace(enable_eplb=enabled)),
+                    model=nn.Linear(2, 2),
+                    set_eplb_state=MagicMock(),
+                )
+                draft_config = SimpleNamespace()
+                with patch("vllm.v1.worker.gpu.eplb_utils.get_mixture_of_experts_model", return_value=speculator.model):
+                    added = controller.maybe_register_speculator(
+                        speculator, SimpleNamespace(draft_model_config=draft_config), False
+                    )
+                self.assertEqual(added, enabled)
+                self.assertEqual(controller._has_registered_models, enabled)
+                if enabled:
+                    controller.state.add_model.assert_called_once_with(speculator.model, draft_config)
+                    speculator.set_eplb_state.assert_called_once_with(controller.state)
+                else:
+                    controller.state.add_model.assert_not_called()
+                    speculator.set_eplb_state.assert_not_called()
+
+                    target = nn.Linear(2, 2)
+                    model_config = SimpleNamespace(model="target")
+                    with patch("vllm.v1.worker.gpu.eplb_utils.get_mixture_of_experts_model", return_value=target):
+                        added = controller.maybe_register_model(target, model_config, False)
+                    controller.state.add_model.assert_called_once_with(target, model_config)
+                    self.assertTrue(added)
+                    controller.maybe_start_async_loop(added)
+                    controller.state.start_async_loop.assert_called_once()
+
     def test_step_early_return_conditions(self):
         for condition in (
             "disabled",
