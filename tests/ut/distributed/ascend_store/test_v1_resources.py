@@ -215,7 +215,7 @@ def test_worker_factory_closes_backend_when_layout_resolution_fails(monkeypatch)
         True,
     )
     route_spec = SimpleNamespace(topology=topology, backend_name="memcache", use_layerwise=True)
-    monkeypatch.setattr(vllm_adapter, "_resolve_kv_pool_configuration", lambda *_args: route_spec)
+    monkeypatch.setattr(vllm_adapter, "resolve_kv_pool_route_spec", lambda *_args: route_spec)
     monkeypatch.setattr(vllm_adapter, "_compile_kv_pool_projection_binder", lambda *_args: object())
     monkeypatch.setattr(vllm_adapter, "resolve_backend_spec", lambda _name: backend_spec)
 

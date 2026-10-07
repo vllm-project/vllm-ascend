@@ -146,7 +146,9 @@ def _batch_sources(batch: KVTransferBatch, layer_id: int | None) -> tuple:
         for source in (
             group.source(index, layer_id)
             for index in (
-                range(group.object_count) if group.selection is None else np.flatnonzero(group.selection).tolist()
+                range(group.object_count)
+                if group.selected_objects is None
+                else np.flatnonzero(group.selected_objects).tolist()
             )
         )
     )

@@ -48,10 +48,6 @@ class KVGroupBatch:
     def object_count(self) -> int:
         return len(self.key_axes) * self.row_count
 
-    @property
-    def selection(self) -> BoolArray | None:
-        return self.selected_objects
-
     def selected_keys(self) -> tuple[str, ...]:
         if self.selected_key_values is not None:
             return self.selected_key_values
@@ -146,8 +142,8 @@ def make_layer_transfer_group(
             group.token_counts[:0],
             range(0),
         )
-    if selected_object_indices is None and group.selection is not None:
-        selected_object_indices = np.flatnonzero(group.selection)
+    if selected_object_indices is None and group.selected_objects is not None:
+        selected_object_indices = np.flatnonzero(group.selected_objects)
     if selected_object_indices is None:
         axis_count = len(group.key_axes)
         object_indices: range | IndexArray = range(group.object_count)

@@ -299,7 +299,7 @@ def test_unified_store_candidates_compact_each_group_before_timeline_selection(l
     assert [group.block_ids.tolist() for group in batch.groups] == [[2], [3]]
     assert [group.token_counts.tolist() for group in batch.groups] == [[4], [4]]
     assert [group.request_splits.tolist() for group in batch.groups] == [[0, 1], [0, 1]]
-    assert all(group.selection is None for group in batch.groups)
+    assert all(group.selected_objects is None for group in batch.groups)
     assert len(batch.selected_keys()) == 2
     assert batch.selected_keys() == tuple(group.selected_keys()[0] for group in batch.groups)
     if layerwise:
@@ -339,8 +339,8 @@ def test_unified_store_candidates_preserve_object_axis_admission(topology, prese
     assert batch is not None
     group = batch.groups[0]
     assert group.block_ids.tolist() == [1]
-    assert group.selection is not None
-    assert group.selection.tolist() == expected_selection
+    assert group.selected_objects is not None
+    assert group.selected_objects.tolist() == expected_selection
     assert batch.selected_keys() == group.selected_keys()
     assert len(batch.selected_keys()) == 1
     worker.close()
