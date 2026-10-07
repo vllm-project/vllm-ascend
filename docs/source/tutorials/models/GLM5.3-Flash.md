@@ -50,7 +50,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     Start the docker image on each node.
 
     ```shell
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5
+    export IMAGE=quay.io/ascend/vllm-ascend:glm-5.3-flash-a5-openeuler
     export NAME=vllm-ascend
 
     docker run --rm \
@@ -88,7 +88,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
     ```shell
 
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
+    export IMAGE=quay.io/ascend/vllm-ascend:glm-5.3-flash-a3
     export NAME=vllm-ascend
 
     # Run the container using the defined variables
@@ -132,7 +132,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
     ```shell
 
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+    export IMAGE=quay.io/ascend/vllm-ascend:glm-5.3-flash
     export NAME=vllm-ascend
 
     docker run --rm \
