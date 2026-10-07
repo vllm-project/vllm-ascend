@@ -27,7 +27,7 @@ env_common: &env_common
   PYTHONHASHSEED: "0"
   # A3 HCCS pool transport, matching the external-DP Mooncake template.
   ACL_OP_INIT_MODE: "1"
-  ASCEND_ENABLE_USE_FABRIC_MEM: "1"
+  ASCEND_ENABLE_USE_FABRIC_MEM: "0"
   VLLM_PREFIX_CACHE_RETENTION_INTERVAL: "4096"
 
 routing:
