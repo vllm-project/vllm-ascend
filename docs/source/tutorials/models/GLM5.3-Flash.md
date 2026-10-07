@@ -181,6 +181,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
     ```shell
 
+    export VLLM_USE_V2_MODEL_RUNNER=0
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_BUFFSIZE=1024
 
@@ -612,7 +613,7 @@ Only the key parameters specific to this model/scenario are described below. `ma
       --enable-chunked-prefill \
       --enable-prefix-caching \
       --seed 1024 \
-      --served-model-name glm5 \
+      --served-model-name glm \
       --safetensors-load-strategy prefetch \
       --max-model-len 200000 \
       --max-num-seqs 64 \
@@ -691,7 +692,7 @@ Only the key parameters specific to this model/scenario are described below. `ma
       --enable-chunked-prefill \
       --enable-prefix-caching \
       --seed 1024 \
-      --served-model-name glm5 \
+      --served-model-name glm \
       --safetensors-load-strategy prefetch \
       --max-model-len 200000 \
       --max-num-seqs 32 \
@@ -840,6 +841,7 @@ Only the key parameters specific to this model/scenario are described below. `ma
     # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
     node0_ip="xx.xx.xx.1"
 
+    export VLLM_USE_V2_MODEL_RUNNER=0
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_OP_EXPANSION_MODE=AIV
     export HCCL_BUFFSIZE=1024
@@ -889,6 +891,7 @@ Only the key parameters specific to this model/scenario are described below. `ma
     # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
     node0_ip="xx.xx.xx.1"
 
+    export VLLM_USE_V2_MODEL_RUNNER=0
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_OP_EXPANSION_MODE=AIV
     export HCCL_BUFFSIZE=1024
