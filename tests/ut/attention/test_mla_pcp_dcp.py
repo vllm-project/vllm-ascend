@@ -110,15 +110,17 @@ def test_capture_forwards_pcp_context_and_preserves_dcp_dummy_metadata(dcp_enabl
 
     builder = AscendMLAMetadataBuilder.__new__(AscendMLAMetadataBuilder)
     builder.dcp_enabled = dcp_enabled
+    builder.reorder_batch_threshold = 3
     expected = object()
     builder.build = Mock(return_value=expected)
-    common = SimpleNamespace(attn_state=None, is_prefilling=None, num_reqs=3)
+    common = SimpleNamespace(attn_state=None, is_prefilling=None, num_reqs=3, num_actual_tokens=9, max_query_len=3)
     context = object()
     kwargs = {"pcp_context": context, "pcp_cache_group_idx": 2} if with_pcp_context else {}
     assert builder.build_for_cudagraph_capture(common, **kwargs) is expected
+    args = builder.build.call_args.args
     call = builder.build.call_args.kwargs
-    assert call["common_prefix_len"] == 0
-    captured = call["common_attn_metadata"]
+    assert args[0] == 0
+    captured = args[1]
     assert captured is not common
     assert captured.attn_state == AscendAttentionState.ChunkedPrefill
     assert common.attn_state is None and common.is_prefilling is None
@@ -286,9 +288,16 @@ def test_pcp_global_plan_keeps_local_fragment_mapping():
         chunk_seq_lens_npu=chunk_lengths,
         chunk_actual_seq_lengths_kv_list=[[3, 12, 28], [0, 0, 4]],
     )
+    cpu_zeros = torch.zeros
+
+    def zeros_without_pinning(*args, **kwargs):
+        kwargs.pop("pin_memory", None)
+        return cpu_zeros(*args, **kwargs)
+
     with (
         patch.object(AscendMLAMetadataBuilder, "build_chunked_metadata", return_value=base_meta) as base,
         patch.object(torch.Tensor, "pin_memory", lambda x: x),
+        patch("torch.zeros", side_effect=zeros_without_pinning),
     ):
         result = builder.build_chunked_metadata(0, SimpleNamespace(num_reqs=3))
     assert isinstance(result, DCPChunkedContextMetadata)

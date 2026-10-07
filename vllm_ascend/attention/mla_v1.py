@@ -776,17 +776,18 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         common_attn_metadata: AscendCommonAttentionMetadata,
         **kwargs: Any,
     ):
+        # Preserve upstream decode-only validation while forwarding PCP inputs.
+        assert common_attn_metadata.num_reqs <= (
+            common_attn_metadata.num_actual_tokens * self.reorder_batch_threshold
+        ), "MLA only supports decode-only full CUDAGraph capture."
+        assert common_attn_metadata.max_query_len <= self.reorder_batch_threshold
         capture_metadata = copy(common_attn_metadata)
         if capture_metadata.attn_state is None:
             capture_metadata.attn_state = AscendAttentionState.ChunkedPrefill
         if self.dcp_enabled and capture_metadata.is_prefilling is None:
             capture_metadata.is_prefilling = torch.zeros(capture_metadata.num_reqs, dtype=torch.bool)
         # Keep backend-specific PCP context on the same build path as replay.
-        return self.build(
-            common_prefix_len=0,
-            common_attn_metadata=capture_metadata,
-            **kwargs,
-        )
+        return self.build(0, capture_metadata, **kwargs)
 
     def build_for_graph_capture(
         self,
