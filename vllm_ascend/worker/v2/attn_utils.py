@@ -215,7 +215,13 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             if getattr(attn_module.impl, "fa_quant_layer", False):
                 head_size = attn_module.head_size + attn_module.qk_rope_head_dim
                 dtype, cache_dtype_str = attn_module.impl.dtype, None
-            elif enable_sfa(vllm_config) and bool(getattr(attn_module.impl, "enable_sparse_sfa_c8", False)):
+            elif bool(getattr(attn_module.impl, "enable_sparse_sfa_c8", False)):
+                # Gate on the impl attribute only. AscendConfig
+                # enable_sparse_sfa_c8 already encodes the kv-dtype and
+                # indexer-family checks (use_sparse or kpool indexer).
+                # enable_sfa() hard-excludes kpool models, which would leave
+                # this spec bf16 while sfa_v1 forward packs rows to
+                # sfa_qsfa_packed_kv_head_dim and view() fails on startup.
                 cache_sparse_sfa_c8 = True
                 head_size = get_sfa_qsfa_packed_head_dim(
                     vllm_config.model_config.hf_text_config.kv_lora_rank,
@@ -1053,7 +1059,10 @@ def _allocate_kv_cache(
         # (correct even when the tensor's group is not the largest group).
         kv_cache_tensor_size = kv_cache_config.num_blocks * example_spec.page_size_bytes
         # TODO:Subsequently, extend the `AttentionSpec` class in the vLLM community and remove these branches.
-        if enable_sfa(vllm_config) and bool(getattr(example_spec, "cache_sparse_sfa_c8", False)):
+        if bool(getattr(example_spec, "cache_sparse_sfa_c8", False)):
+            # Spec attribute is the single source of truth: AscendConfig
+            # enable_sparse_sfa_c8 already gates kv-dtype and indexer family
+            # (use_sparse or kpool). enable_sfa() hard-excludes kpool models.
             k_size = kv_cache_tensor_size
             for layer_name in shared_names:
                 kv_cache_raw_tensors[layer_name] = _allocate_int8_cache_tensor(k_size, alignment, device)
@@ -1454,7 +1463,7 @@ def _reshape_kv_cache_v2(
                 kv_cache_spec.head_size,
                 cache_dtype,
             )
-            sparse_sfa_c8 = enable_sfa(vllm_config) and bool(getattr(kv_cache_spec, "cache_sparse_sfa_c8", False))
+            sparse_sfa_c8 = bool(getattr(kv_cache_spec, "cache_sparse_sfa_c8", False))
             if isinstance(kv_cache_spec, (AscendMLAAttentionSpec, MLAAttentionSpec)) and (
                 get_kv_cache_compression_ratio(kv_cache_spec) > 1
             ):
@@ -1492,7 +1501,7 @@ def _reshape_kv_cache_v2(
             k_dtype = v_dtype = kv_cache_spec.dtype
             if (
                 isinstance(kv_cache_spec, AscendMLAAttentionSpec)
-                and not enable_sfa(vllm_config)
+                and not (sparse_sfa_c8 or enable_sfa(vllm_config))
                 and enable_fa_quant(vllm_config)
             ):
                 k_dtype, v_dtype = vllm_config.quant_config.get_kv_quant_dtype(
