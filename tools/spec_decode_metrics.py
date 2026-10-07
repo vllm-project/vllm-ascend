@@ -81,3 +81,20 @@ def validate_acceptance_rate(actual: float, baseline: float, tolerance: float = 
         f"acceptance rate pos0: {actual:.4f} not within ±{tolerance:.0%} of baseline {baseline:.4f} "
         f"(range: {lower:.4f} ~ {upper:.4f})"
     )
+
+
+def validate_acceptance_rates(
+    actual_rates: list[float],
+    baseline_rates: list[float],
+    tolerance: float = 0.05,
+) -> None:
+    """Validate that every position stays above its tolerated baseline floor."""
+    assert len(actual_rates) == len(baseline_rates), (
+        f"acceptance rate position count mismatch: actual={len(actual_rates)}, baseline={len(baseline_rates)}"
+    )
+    for position, (actual, baseline) in enumerate(zip(actual_rates, baseline_rates)):
+        lower = baseline * (1 - tolerance)
+        assert actual >= lower, (
+            f"acceptance rate pos{position}: {actual:.4f} is below baseline {baseline:.4f} "
+            f"with tolerance {tolerance:.0%} (minimum: {lower:.4f})"
+        )

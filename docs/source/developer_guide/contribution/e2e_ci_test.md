@@ -5,7 +5,7 @@ comment command, without running the PR-selected test suite.
 
 ## Background
 
-The `E2E` workflow ([`pr_test.yaml`](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/pr_test.yaml)) runs a PR-selected set of tests when a PR has one of the `ready-precise`, `ready-all`, or `ready-a5` labels.
+The `E2E` workflow ([`pr_test.yaml`](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/pr_test.yaml)) runs a PR-selected set of tests when a PR has one of the `ready-precise`, `ready-all`, `ready-a5`, or `main2main` labels. `main2main` runs the full suite twice, once against the verified vLLM main commit and once against the matched vLLM release tag.
 This is expensive in CI resources and time.
 
 Authorized users can trigger only the specific test files they care about by posting a
@@ -48,8 +48,8 @@ to a logical partition, which selects an exact runner label from `runner_label.j
 
 | Path pattern | Hardware | Runner |
 |---|---|---|
-| `two_card` in path | two_card A3 NPU | `linux-aarch64-a3-2` |
-| `four_card` in path | four_card A3 NPU | `linux-aarch64-a3-4` |
+| `two_card` in path | two_card A3 NPU | `linux-aarch64-a3-800t-2` |
+| `four_card` in path | four_card A3 NPU | `linux-aarch64-a3-800t-4` |
 | `_310p` in filename under one/two_card | Ascend 310P x1 | `linux-aarch64-310p-*` |
 | `_310p` in filename under four_card | Ascend 310P x4 | `linux-aarch64-310p-*` |
 | All other paths | one_card A2 NPU | `linux-aarch64-a2b3-1` |

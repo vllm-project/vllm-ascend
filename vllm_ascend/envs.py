@@ -27,6 +27,14 @@ from typing import Any
 
 # begin-env-vars-definition
 
+
+def _strict_binary_env(name: str, default: str = "0") -> bool:
+    value = os.getenv(name, default)
+    if value not in {"0", "1"}:
+        raise ValueError(f"{name} must be either '0' or '1', got {value!r}")
+    return value == "1"
+
+
 env_variables: dict[str, Callable[[], Any]] = {
     # max compile thread number for package building. Usually, it is set to
     # the number of CPU cores. If not set, the default value is None, which
@@ -71,6 +79,14 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Emit per-layer KVPool ranged transfer audit events. Default: 0 (disabled).
+    # Valid values: 0 or 1. This configuration is not sensitive.
+    "VLLM_ASCEND_KVPOOL_RANGE_DEBUG": lambda: _strict_binary_env("VLLM_ASCEND_KVPOOL_RANGE_DEBUG"),
+    # Override the Unified Buffer (UB) size in KB for Triton kernel tile sizing.
+    # 0 (default): auto-detect from device properties, falling back to 192 KB
+    # (safe for Ascend 910B/A3). Set to a positive value to override when
+    # auto-detection is unavailable or for debugging UB overflow issues.
+    "VLLM_ASCEND_ROPE_UB_SIZE_KB": lambda: int(os.getenv("VLLM_ASCEND_ROPE_UB_SIZE_KB") or 0),
 }
 
 # end-env-vars-definition

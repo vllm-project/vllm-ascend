@@ -6,9 +6,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     supports_hma,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
+from vllm.v1.worker import mamba_utils
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.distributed.kv_events import KVConnectorKVEvents
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
@@ -27,6 +29,18 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
             "HMA should not be enabled unless all sub-connectors support it"
         )
         self._configure_layerwise_reuse_completion()
+        self._mamba_copy_bufs = None
+        # Handle to the (V2) mamba hybrid model state while its per-layer
+        # align pre-copy is deferred behind a layerwise child connector.
+        self._mamba_state: Any = None
+        self.requires_mamba_state_copy_after_layer_load = any(
+            getattr(
+                connector,
+                "requires_mamba_state_copy_after_layer_load",
+                False,
+            )
+            for connector in self._connectors
+        )
 
     def _configure_layerwise_reuse_completion(self) -> None:
         # Producers that report when a shared physical KV slot is safe to reuse.
@@ -67,6 +81,41 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
             connectors = [*self._layerwise_slot_release_providers, *self._non_slot_release_connectors]
         for connector in connectors:
             connector.wait_for_layer_load(layer_name)
+        if (copy_bufs := getattr(self, "_mamba_copy_bufs", None)) is not None:
+            mamba_utils.do_mamba_copy_block_for_layer(
+                copy_bufs,
+                layer_name,
+            )
+        # Mamba state copy runs after every child connector finished this
+        # layer's load so the copy never reads half-loaded state. The model
+        # state no-ops for non-mamba layers and for already-copied layers.
+        if (mamba_state := getattr(self, "_mamba_state", None)) is not None:
+            mamba_state.do_mamba_copy_for_layer(layer_name)
+
+    def prepare_mamba_state_copy(self, mamba_state_or_copy_bufs) -> bool:
+        """Take over the mamba align pre-copy for this step.
+
+        The V1 model runner passes its mamba copy buffers; the V2 model runner
+        passes its mamba hybrid model state. Returns True when any child
+        connector executes per-layer copies from its ``wait_for_layer_load``;
+        see ``AscendStoreConnector.prepare_mamba_state_copy``.
+        """
+        if not self.requires_mamba_state_copy_after_layer_load:
+            return False
+        if hasattr(mamba_state_or_copy_bufs, "do_mamba_copy_for_layer"):
+            self._mamba_state = mamba_state_or_copy_bufs
+        else:
+            mamba_utils.prepare_mamba_copy_by_layer(mamba_state_or_copy_bufs)
+            self._mamba_copy_bufs = mamba_state_or_copy_bufs
+        return True
+
+    def finish_mamba_state_copy(self) -> None:
+        if self._mamba_copy_bufs is not None:
+            try:
+                mamba_utils.finish_mamba_copy_by_layer(self._mamba_copy_bufs)
+            finally:
+                self._mamba_copy_bufs = None
+        self._mamba_state = None
 
     def save_kv_layer(
         self,
@@ -167,3 +216,17 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
         self._requests_to_connector.pop(request.request_id, None)
 
         return async_saves > 0, kv_txfer_params
+
+    def get_kv_connector_kv_cache_events(self) -> "KVConnectorKVEvents | None":
+        """Collect worker-side KV cache events from all child connectors."""
+        combined = None
+        for connector in self._connectors:
+            events = connector.get_kv_connector_kv_cache_events()
+            if events is None:
+                continue
+            if combined is None:
+                combined = events
+            else:
+                combined.add_events(events.get_all_events())
+                combined.increment_workers(events.get_number_of_workers())
+        return combined

@@ -84,55 +84,77 @@ def map_to_physical(
     return physical_ids if physical_ids.dtype == topk_ids.dtype else physical_ids.to(topk_ids.dtype)
 
 
-def map_to_physical_and_record(
+def map_to_physical_for_ascend(
     topk_ids: torch.Tensor,
     expert_replica_routing_table: torch.Tensor,
-    expert_load_view: torch.Tensor,
-    record_enabled: torch.Tensor,
-    num_unpadded_tokens: torch.Tensor,
 ) -> torch.Tensor:
-    """Map logical IDs and record load only while collection is enabled."""
+    """Map logical IDs through the graph-stable Ascend routing table."""
     if topk_ids.device.type != "cpu":
-        from vllm_ascend.ops.triton.eplb import map_to_physical_and_record_triton
+        from vllm_ascend.ops.triton.eplb import map_to_physical_triton
 
-        return map_to_physical_and_record_triton(
-            topk_ids,
-            expert_replica_routing_table,
-            expert_load_view,
-            record_enabled,
-            num_unpadded_tokens,
-        )
-
-    physical_ids = map_to_physical(topk_ids, expert_replica_routing_table)
-    if bool(record_enabled):
-        unpadded_physical_ids = physical_ids[: int(num_unpadded_tokens)].reshape(-1)
-        valid_physical_ids = unpadded_physical_ids[
-            (unpadded_physical_ids >= 0) & (unpadded_physical_ids < expert_load_view.numel())
-        ]
-        if valid_physical_ids.numel() > 0:
-            expert_load_view.add_(
-                torch.bincount(
-                    valid_physical_ids.to(torch.int64),
-                    minlength=expert_load_view.numel(),
-                ).to(expert_load_view.dtype)
-            )
-    return physical_ids
+        return map_to_physical_triton(topk_ids, expert_replica_routing_table)
+    return map_to_physical(topk_ids, expert_replica_routing_table)
 
 
-def _map_to_physical_and_record_fake(
-    topk_ids: torch.Tensor,
-    expert_replica_routing_table: torch.Tensor,
+def record_expert_tokens(
+    expert_tokens: torch.Tensor,
     expert_load_view: torch.Tensor,
     record_enabled: torch.Tensor,
-    num_unpadded_tokens: torch.Tensor,
+    group_list_type: int,
+    local_expert_start: int,
+) -> None:
+    """Accumulate local physical-expert counts returned by the MoE operator."""
+    if expert_tokens.ndim != 1 or group_list_type not in (0, 1):
+        raise ValueError("expert_tokens must be 1D and group_list_type must be 0 or 1")
+    if local_expert_start < 0 or local_expert_start + expert_tokens.numel() > expert_load_view.numel():
+        raise ValueError("Local expert counts are outside the physical expert load view")
+    if expert_tokens.device.type != "cpu":
+        from vllm_ascend.ops.triton.eplb import record_expert_tokens_triton
+
+        record_expert_tokens_triton(
+            expert_tokens, expert_load_view, record_enabled, group_list_type, local_expert_start
+        )
+        return
+
+    local_load = (
+        expert_tokens
+        if group_list_type == 1
+        else torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
+    )
+    expert_load_view[local_expert_start : local_expert_start + expert_tokens.numel()].add_(
+        local_load.to(expert_load_view.dtype) * record_enabled.to(expert_load_view.dtype)
+    )
+
+
+def _map_to_physical_fake(
+    topk_ids: torch.Tensor,
+    expert_replica_routing_table: torch.Tensor,
 ) -> torch.Tensor:
     return torch.empty_like(topk_ids)
 
 
+def _record_expert_tokens_fake(
+    expert_tokens: torch.Tensor,
+    expert_load_view: torch.Tensor,
+    record_enabled: torch.Tensor,
+    group_list_type: int,
+    local_expert_start: int,
+) -> None:
+    return None
+
+
 direct_register_custom_op(
-    op_name="ascend_eplb_map_to_physical_and_record",
-    op_func=map_to_physical_and_record,
+    op_name="ascend_eplb_map_to_physical",
+    op_func=map_to_physical_for_ascend,
+    mutates_args=[],
+    fake_impl=_map_to_physical_fake,
+    dispatch_key="PrivateUse1",
+)
+
+direct_register_custom_op(
+    op_name="ascend_eplb_record_expert_tokens",
+    op_func=record_expert_tokens,
     mutates_args=["expert_load_view"],
-    fake_impl=_map_to_physical_and_record_fake,
+    fake_impl=_record_expert_tokens_fake,
     dispatch_key="PrivateUse1",
 )

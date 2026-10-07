@@ -38,6 +38,7 @@ _SOC_VERSION_TO_DEVICE_TYPE = {
     "ascend910_9392": AscendDeviceType.A3,
     "ascend910_9382": AscendDeviceType.A3,
     "ascend910_9362": AscendDeviceType.A3,
+    "ascend910_9363": AscendDeviceType.A3,
     "ascend310p1": AscendDeviceType._310P,
     "ascend310p3": AscendDeviceType._310P,
     "ascend310p5": AscendDeviceType._310P,
@@ -66,7 +67,7 @@ def device_type_from_runtime_soc(soc_version: int) -> AscendDeviceType:
 
     if 220 <= soc_version <= 225:
         return AscendDeviceType.A2
-    if 250 <= soc_version <= 255:
+    if 250 <= soc_version <= 256:
         return AscendDeviceType.A3
     if 200 <= soc_version <= 205:
         return AscendDeviceType._310P

@@ -33,6 +33,8 @@ Run specific E2E tests under `tests/e2e/pull_request/`. Tests are automatically 
 
 > Only test paths under `tests/e2e/pull_request/` are supported. Tests in `tests/e2e/nightly/`, `tests/e2e/models/`, or `tests/e2e/doctests/` are not accepted by `/e2e`. Use `/nightly` for nightly tests.
 
+For doctests, run the **Doc Test** workflow manually in GitHub Actions, or let a relevant PR change trigger it automatically. See [Run doctest](../developer_guide/contribution/testing.md#run-doctest) for supported cases and local commands.
+
 Tests are run against both the community vLLM version and the latest release.
 
 ### `/nightly`
@@ -92,6 +94,8 @@ binary bisect for genuine failures. By default, AOP hooks are disabled.
 ```
 
 This triggers `workflow_dispatch` on both `schedule_nightly_test_a2.yaml` and `schedule_nightly_test_a3.yaml`.
+
+> **Note**: These `schedule_*` workflows do not declare a GitHub Actions `schedule:` (cron) trigger; they are dispatched externally via `workflow_dispatch`. See [CI workflow triggers and the schedule_ prefix](../developer_guide/contribution/testing.md#ci-workflow-triggers-and-the-schedule_-prefix).
 
 ### `/cherry-pick`
 
@@ -159,7 +163,7 @@ Force-cancel all workflow runs on the current PR commit. This cancels runs direc
 | Cancelled | Not cancelled |
 |---|---|
 | `pr_test.yaml` (E2E) — automatic PR CI | `/e2e` command runs |
-| `labeled_doctest.yaml` | `/rerun` command runs |
+| `schedule_doc_getting_started_test.yaml` | `/rerun` command runs |
 | `schedule_doc_linkcheck.yaml` | `/nightly` / `/weekly` command runs |
 | `schedule_image_build_and_push.yaml` (if labeled) | Downstream nightly/weekly test workflows |
 | `labeled_download_model_dataset.yaml` | Scheduled / `workflow_dispatch` / `push` runs |

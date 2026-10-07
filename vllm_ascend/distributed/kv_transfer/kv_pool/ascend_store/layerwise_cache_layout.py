@@ -14,6 +14,11 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
+    get_layerwise_protocol,
+)
+from vllm_ascend.utils import get_kv_cache_tensor_layers
+
 _NUM_SHARED_BUFFERS = "layerwise_num_shared_buffers"
 _PREFETCH_LAYERS = "layerwise_prefetch_layers"
 _INDEPENDENT_LAYERS = "layerwise_independent_layers"
@@ -55,6 +60,7 @@ class NamedKVCacheSpec:
 class LayerwiseLayerCacheSpecs:
     main: NamedKVCacheSpec
     indexer: NamedKVCacheSpec | None = None
+    extra_main_specs: tuple[NamedKVCacheSpec, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -67,8 +73,14 @@ class LayerwiseReuseLayout:
     has_layer_reuse: bool
 
 
-def get_gva_layerwise_config(kv_transfer_config: Any) -> dict[str, Any] | None:
-    """Return extra config for the MemCache GVA layerwise path."""
+def get_layerwise_reuse_config(kv_transfer_config: Any) -> dict[str, Any] | None:
+    """Return the extra config of the layerwise-reuse connector, if any.
+
+    A connector opts into layerwise reuse when its backend carries a
+    layerwise protocol and the protocol accepts the connector's extra
+    config. Both checks resolve through the backend registry — the generic
+    layer never names the protocol or the backend.
+    """
     if kv_transfer_config is None:
         return None
 
@@ -95,10 +107,12 @@ def get_gva_layerwise_config(kv_transfer_config: Any) -> dict[str, Any] | None:
         ):
             continue
         extra_config = connector_config.get("kv_connector_extra_config") or {}
-        if str(extra_config.get("backend", "mooncake")).lower() == "memcache" and extra_config.get(
-            "use_layerwise", False
-        ):
-            return extra_config
+        protocol = get_layerwise_protocol(str(extra_config.get("backend", "mooncake")))
+        if protocol is None:
+            continue
+        layerwise_config = protocol.extract_layout_config(extra_config)
+        if layerwise_config is not None:
+            return layerwise_config
     return None
 
 
@@ -217,15 +231,19 @@ def build_layerwise_reuse_layout(
 
         indexer_specs = [spec for spec in named_specs if spec.layer_name.endswith(_INDEXER_CACHE_SUFFIX)]
         main_specs = [spec for spec in named_specs if not spec.layer_name.endswith(_INDEXER_CACHE_SUFFIX)]
-        if len(main_specs) != 1 or len(indexer_specs) != 1:
+        if len(main_specs) < 1:
             raise ValueError(
-                f"Physical layer {physical_layer} with multiple cache specs must have "
-                f"exactly one main spec and one '{_INDEXER_CACHE_SUFFIX}' spec; "
+                f"Physical layer {physical_layer} has no main cache spec; "
                 f"got {[spec.layer_name for spec in named_specs]}."
             )
+        # Select '.attn' as main spec, rest as extra
+        main_spec = next((s for s in main_specs if s.layer_name.endswith(".attn")), main_specs[0])
+        extra_specs = tuple(s for s in main_specs if s is not main_spec)
+        indexer_spec = indexer_specs[0] if indexer_specs else None
         layer_cache_specs[physical_layer] = LayerwiseLayerCacheSpecs(
-            main=main_specs[0],
-            indexer=indexer_specs[0],
+            main=main_spec,
+            indexer=indexer_spec,
+            extra_main_specs=extra_specs,
         )
 
     signature_buckets: list[tuple[KVCacheSpec, list[int]]] = []
@@ -281,12 +299,12 @@ def apply_layerwise_kv_cache_plan(
     vllm_config: VllmConfig,
 ) -> None:
     """Rewrite logical layer tensors to use shared physical KV buffers."""
-    extra_config = get_gva_layerwise_config(vllm_config.kv_transfer_config)
+    extra_config = get_layerwise_reuse_config(vllm_config.kv_transfer_config)
     if extra_config is None:
         return
 
     old_tensors = kv_cache_config.kv_cache_tensors
-    if len(old_tensors) <= 1:
+    if not old_tensors:
         return
 
     base_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
@@ -299,11 +317,6 @@ def apply_layerwise_kv_cache_plan(
     actual_layers = len(reuse_layout.layer_cache_specs)
     if not reuse_layout.has_layer_reuse:
         return
-    if any(len(tensor.shared_by) != 1 or tensor.offset != 0 or tensor.block_stride != 0 for tensor in old_tensors):
-        raise NotImplementedError(
-            "Layerwise KV cache reuse does not support pre-shared or packed KV cache tensor descriptors."
-        )
-
     if actual_layers < base_layers:
         logger.warning(
             "Layer reuse expected at least %d layers, got %d; skip tensor merge.",
@@ -318,14 +331,27 @@ def apply_layerwise_kv_cache_plan(
             actual_layers - base_layers,
         )
 
-    tensors_by_name = {tensor.shared_by[0]: tensor for tensor in old_tensors}
+    # vLLM describes multiple contiguous layer regions in one backing
+    # allocation. Reuse replaces that placement before any storage exists;
+    # each new descriptor owns one physical slot whose layers alias it.
+    seen_layers: set[str] = set()
+    for tensor in old_tensors:
+        for layer_idx, layer_name in enumerate(get_kv_cache_tensor_layers(tensor)):
+            spec = layer_specs[layer_name]
+            layer_size = kv_cache_config.num_blocks * spec.page_size_bytes
+            start = tensor.offset + layer_idx * tensor.layer_stride
+            if tensor.block_stride != spec.page_size_bytes:
+                raise NotImplementedError("Layerwise KV cache reuse requires contiguous per-layer pages.")
+            if start < 0 or start + layer_size > tensor.size:
+                raise ValueError(f"Layerwise KV cache descriptor for {layer_name} exceeds its backing allocation.")
+            if layer_name in seen_layers:
+                raise ValueError(f"Duplicate layerwise KV cache descriptor for {layer_name}.")
+            seen_layers.add(layer_name)
+    if seen_layers != set(layer_specs):
+        raise ValueError("Layerwise KV cache descriptors must cover every cache spec.")
 
     def _merge_specs(named_specs: list[NamedKVCacheSpec]) -> None:
         shared_by = [named_spec.layer_name for named_spec in named_specs]
-        cache_tensors = [tensors_by_name[layer_name] for layer_name in shared_by]
-        tensor_sizes = {tensor.size for tensor in cache_tensors}
-        if len(tensor_sizes) != 1:
-            raise ValueError("Layers sharing layerwise KV buffers must have equal tensor sizes for every cache spec.")
         reference_spec = layer_specs[shared_by[0]]
         if any(layer_specs[layer_name] != reference_spec for layer_name in shared_by[1:]):
             raise ValueError(
@@ -333,8 +359,11 @@ def apply_layerwise_kv_cache_plan(
             )
         new_tensors.append(
             KVCacheTensor(
-                shared_by=shared_by,
-                size=cache_tensors[0].size,
+                layers=shared_by,
+                size=kv_cache_config.num_blocks * reference_spec.page_size_bytes,
+                layer_stride=0,
+                block_stride=reference_spec.page_size_bytes,
+                offset=0,
             )
         )
 

@@ -12,7 +12,7 @@ from vllm_ascend.ec_manager.score_ec_manager import (
     ScoreEncoderCacheConfig,
     ScoreEncoderCacheManager,
 )
-from vllm_ascend.utils import is_score_encoder_cache_manager, vllm_version_is
+from vllm_ascend.utils import is_score_encoder_cache_manager
 
 SCORE_MANAGER_CLS = "vllm_ascend.ec_manager.score_ec_manager.ScoreEncoderCacheManager"
 
@@ -60,10 +60,6 @@ def test_other_managers_do_not_enable_score_cache():
     assert not is_score_encoder_cache_manager(vllm_config)
 
 
-@pytest.mark.skipif(
-    vllm_version_is("0.27.1"),
-    reason=("ScoreEncoderCacheManager configuration requires vllm-project/vllm#51251."),
-)
 @pytest.mark.parametrize(
     ("vision_config", "expected_attn_heads"),
     [

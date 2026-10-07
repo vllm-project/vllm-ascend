@@ -24,15 +24,17 @@ The following model variants are available. It is recommended to download the mo
 
 | Model | Hardware Requirement | Download |
 |-------|---------------------|----------|
-| Qwen3-235B-A22B (BF16) | 1 Atlas 800I A3 (64GB × 16), 1 Atlas 800I A2 (64GB × 8), 2 Atlas 800I A2 (32GB × 8)| [Download](https://www.modelscope.cn/models/Qwen/Qwen3-235B-A22B) |
+| Qwen3-235B-A22B (BF16) | 1 Atlas 800I A3 (64GB × 16), 1 Atlas 800I A2 (64GB × 8), 2 Atlas 800I A2 (32GB × 8)| [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-235B-A22B) |
 
 **Quantized Version (Pre-converted):**
 
 | Model | Quantization | Hardware Requirement | Download |
 |-------|-------------|---------------------|----------|
-| Qwen3-235B-A22B-W8A8 | W8A8 | 1 Atlas 800I A3 (64GB × 16), 1 Atlas 800I A2 (64GB × 8), 2 Atlas 800I A2 (32GB × 8)| [Download](https://modelers.cn/models/Modelers_Park/Qwen3-235B-A22B-w8a8) |
+| Qwen3-235B-A22B-W8A8 | W8A8 | 1 Atlas 800I A3 (64GB × 16), 1 Atlas 800I A2 (64GB × 8), 2 Atlas 800I A2 (32GB × 8)| [Modelers](https://modelers.cn/models/Modelers_Park/Qwen3-235B-A22B-w8a8) |
 
 These are the recommended numbers of cards, which can be adjusted according to the actual situation.
+
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ### 3.2 Model Quantization
 
@@ -208,6 +210,7 @@ export HCCL_BUFFSIZE=512
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
+# Ensure the model path matches the directory recorded during download
 vllm serve your_model_path \
     --host <host_ip> \
     --port <port> \
@@ -338,6 +341,7 @@ export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 export GLOO_SOCKET_IFNAME=$nic_name
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
+# Ensure the model path matches the directory recorded during download
 vllm serve "/data/weights/Qwen3-235B-A22B-w8a8-rot" \
     --host 0.0.0.0 \
     --port $2 \
@@ -398,6 +402,7 @@ export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 export GLOO_SOCKET_IFNAME=$nic_name
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
+# Ensure the model path matches the directory recorded during download
 vllm serve "/data/weights/Qwen3-235B-A22B-w8a8-rot" \
     --host 0.0.0.0 \
     --port $2 \
@@ -458,6 +463,7 @@ export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 export GLOO_SOCKET_IFNAME=$nic_name
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
+# Ensure the model path matches the directory recorded during download
 vllm serve "/data/weights/Qwen3-235B-A22B-w8a8-rot" \
     --host 0.0.0.0 \
     --port $2 \
@@ -584,7 +590,7 @@ Expected result: HTTP 200 with a JSON response containing the `choices` field wi
 
 ## 7 Accuracy Evaluation
 
-### Using AISBench
+### 7.1 Using AISBench
 
 For setup details, including installation, dataset download, and configuration, please refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md).
 
@@ -631,7 +637,7 @@ ais_bench --models vllm_api_general_chat --datasets aime2024_gen_0_shot_chat_pro
 
 ## 8 Performance Evaluation
 
-### Using AISBench
+### 8.1 Using AISBench
 
 For setup details, including installation, dataset download, and configuration, please refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
@@ -672,7 +678,7 @@ models = [
 ais_bench --models vllm_api_stream_chat --datasets gsm8k_gen_0_shot_cot_str_perf --debug --summarizer default_perf --mode perf --num-prompts 560
 ```
 
-### Using vLLM Benchmark
+### 8.2 Using vLLM Benchmark
 
 Refer to [vLLM benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 

@@ -30,6 +30,8 @@ The following model weights and EAGLE3 weights are available on ModelScope. Sear
 
 It is recommended to download the model weights to a shared directory, such as `/root/.cache/`.
 
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
+
 ### 3.2 Verify Multi-node Communication (Optional)
 
 If you need to deploy a multi-node environment, verify the multi-node communication according to [Verify Multi-node Communication Environment](../../getting_started/installation.md#installation-multi-node-interconnect).
@@ -177,6 +179,7 @@ export HCCL_OP_EXPANSION_MODE="AIV"
 export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
+# Ensure the model path matches the directory recorded during download
 vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
     --served-model-name "MiniMax-M2.7" \
     --host 0.0.0.0 \
@@ -220,6 +223,7 @@ export HCCL_OP_EXPANSION_MODE="AIV"
 export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
+# Ensure the model path matches the directory recorded during download
 vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
     --served-model-name MiniMax-M2.7 \
     --host 0.0.0.0 \
@@ -286,6 +290,7 @@ export GLOO_SOCKET_IFNAME=$nic_name
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export PYTHONHASHSEED=0
 
+# Ensure the model path matches the directory recorded during download
 vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
     --host 0.0.0.0 \
     --port $2 \
@@ -342,6 +347,7 @@ export GLOO_SOCKET_IFNAME=$nic_name
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export PYTHONHASHSEED=0
 
+# Ensure the model path matches the directory recorded during download
 vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
     --host 0.0.0.0 \
     --port $2 \

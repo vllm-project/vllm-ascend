@@ -24,7 +24,11 @@ from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
 )
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
-from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
+from vllm_ascend.ops.gdn import (
+    AscendGatedDeltaNetAttention,
+    _pack_conv_weights,
+    initialize_packed_conv_weight,
+)
 from vllm_ascend.ops.gdn_attn_builder import (
     GDNCausalConv1dMetadata,
     GDNPrefillMetadata,
@@ -64,6 +68,9 @@ class _GDNForwardWrapper(nn.Module):
         self.norm = _Norm()
         self.out_proj = _OutputProjection()
         self.conv1d = nn.Conv1d(1, 2, kernel_size=2)
+        self.model_config = SimpleNamespace(dtype=self.conv1d.weight.dtype)
+        initialize_packed_conv_weight(self)
+        _pack_conv_weights(self.conv1d)
         self.num_v_heads = 1
         self.tp_size = 1
         self.head_v_dim = 2
@@ -152,10 +159,10 @@ def test_connector_observes_updated_gdn_state_for_each_compiled_call():
 
     connector.save_kv_layer.side_effect = record_ready_state
 
-    def causal_conv1d(output_tensor, mixed_qkv, conv_weights, **kwargs):
-        del conv_weights, kwargs
-        output_tensor.copy_(mixed_qkv)
+    def causal_conv1d(mixed_qkv, *args, **kwargs):
+        del args, kwargs
         model.kv_cache[0].add_(1)
+        return mixed_qkv.clone()
 
     def chunk_attention(**kwargs):
         initial_state = kwargs["initial_state"]
@@ -171,18 +178,30 @@ def test_connector_observes_updated_gdn_state_for_each_compiled_call():
         override_forward_context(forward_context),
         patch.object(torch.accelerator, "is_available", return_value=False),
         patch("vllm_ascend.ops.gdn.get_pcp_group", return_value=SimpleNamespace(world_size=1)),
+        patch(
+            "vllm_ascend.ops.gdn.get_current_hardware_profile",
+            return_value=SimpleNamespace(supports=lambda _: False),
+        ),
         patch("vllm_ascend.ops.gdn.DeviceOperator.fused_gdn_gating", return_value=gating),
         patch("vllm_ascend.ops.gdn.clear_ssm_states"),
-        patch("vllm_ascend.ops.gdn.chunk_gated_delta_rule", side_effect=chunk_attention),
-        patch.object(
-            torch.ops._C_ascend,
-            "npu_causal_conv1d_custom",
-            side_effect=causal_conv1d,
-            create=True,
+        patch("vllm_ascend.ops.gdn.l2norm_fwd", side_effect=lambda x: x),
+        patch.object(AscendGatedDeltaNetAttention, "_probe_fused_chunk", return_value=False),
+        patch(
+            "vllm_ascend.ops.gdn.gather_ssm_states",
+            side_effect=lambda state, indices, has_initial_state, **kwargs: state.index_select(
+                0, indices.to(torch.long)
+            ),
         ),
+        patch("vllm_ascend.ops.gdn.chunk_gated_delta_rule", side_effect=chunk_attention),
+        patch("vllm_ascend.ops.gdn.causal_conv1d_fn", side_effect=lambda x, *a, **k: causal_conv1d(x, *a, **k)),
+        patch("vllm_ascend.ops.gdn.causal_conv1d_update", side_effect=lambda x, *a, **k: causal_conv1d(x, *a, **k)),
         patch("vllm_ascend.attention.utils.has_kv_transfer_group", return_value=True),
         patch("vllm_ascend.attention.utils.is_v1_kv_transfer_group", return_value=True),
         patch("vllm_ascend.attention.utils.get_kv_transfer_group", return_value=connector),
+        # NPU-only side effects live in the compiled forward on device; stub them
+        # so the CPU inductor graph stays fullgraph (no graph break).
+        patch("vllm_ascend.ops.gdn.wait_for_kv_layer_from_connector", lambda *a, **k: None),
+        patch("vllm_ascend.ops.gdn.record_attention_compute_start", lambda: None),
     ):
         eager_output = _run_gdn_forward(model, hidden_states, output)
         torch.testing.assert_close(eager_output, hidden_states + 1)

@@ -4,6 +4,7 @@
 
     === "Ubuntu"
 
+        <!-- doctest: installation-cann-image-a2-ubuntu -->
         ```bash
         export IMAGE=quay.io/ascend/cann:{{ release_cann_version }}-910b-ubuntu22.04-py3.12
         docker pull "$IMAGE"
@@ -11,6 +12,7 @@
 
     === "openEuler"
 
+        <!-- doctest: installation-cann-image-a2-openeuler -->
         ```bash
         export IMAGE=quay.io/ascend/cann:{{ release_cann_version }}-910b-openeuler24.03-py3.12
         docker pull "$IMAGE"

@@ -26,7 +26,10 @@ import pytest
 import torch
 from vllm.config import CUDAGraphMode
 
-from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
+from vllm_ascend.spec_decode.llm_base_proposer import (
+    AscendSpecDecodeBaseProposer,
+    _draft_embed_accepts_mm,
+)
 
 # CUDAGraphMode values whose ``has_full_cudagraphs()`` is True: FULL plus the
 # two composite modes that mix FULL with NONE / PIECEWISE.
@@ -43,6 +46,106 @@ NON_FULL_CUDAGRAPH_MODES = [
 ]
 
 
+def test_query_start_loc_arange_expands_to_required_capacity():
+    proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
+    proposer.max_batch_size = 2
+    proposer.max_num_tokens = 4
+    proposer.arange = torch.arange(4, dtype=torch.int64)
+
+    proposer._ensure_query_start_loc_arange_capacity()
+
+    assert proposer.arange.dtype == torch.int64
+    assert torch.equal(proposer.arange, torch.arange(5, dtype=torch.int64))
+
+
+def test_query_start_loc_arange_keeps_sufficient_buffer():
+    proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
+    proposer.max_batch_size = 4
+    proposer.max_num_tokens = 2
+    arange = torch.arange(5, dtype=torch.int32)
+    proposer.arange = arange
+
+    proposer._ensure_query_start_loc_arange_capacity()
+
+    assert proposer.arange is arange
+
+
+@pytest.mark.parametrize(
+    "target_use_mla,draft_use_mla,dcp_size,expected_rows",
+    [
+        pytest.param(True, False, 1, 1, id="mla-target-gqa-draft"),
+        pytest.param(False, False, 1, 1, id="gqa-target-gqa-draft"),
+        pytest.param(True, True, 1, 4, id="mla-target-mla-draft"),
+        pytest.param(False, True, 1, 4, id="gqa-target-mla-draft"),
+        pytest.param(True, False, 2, 4, id="mla-target-dcp"),
+        pytest.param(False, False, 2, 4, id="gqa-target-dcp"),
+    ],
+)
+def test_eager_propose_aligns_block_table_to_draft_batch(target_use_mla, draft_use_mla, dcp_size, expected_rows):
+    """Target graph padding must not add requests to an eager GQA draft."""
+    proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
+    proposer.method = "dflash"
+    proposer.model = SimpleNamespace(combine_hidden_states=lambda states: states)
+    proposer.hidden_size = 4
+    proposer.use_cuda_graph = False
+    proposer.parallel_drafting = True
+    proposer.dcp_size = dcp_size
+    proposer.vllm_config = SimpleNamespace(model_config=SimpleNamespace(use_mla=target_use_mla))
+    proposer.draft_model_config = SimpleNamespace(use_mla=draft_use_mla)
+    proposer.draft_window_size = None
+    proposer.supports_mm_inputs = False
+    proposer.slot_mapping_group = [torch.zeros(6, dtype=torch.int32)]
+    proposer.seq_lens_group = [torch.zeros(1, dtype=torch.int32)]
+    proposer.query_start_loc_group = [torch.zeros(2, dtype=torch.int32)]
+    proposer._pad_draft_buffers = MagicMock()
+    proposer.runner = SimpleNamespace(
+        dcp_manager=None,
+        input_batch=SimpleNamespace(lora_id_to_lora_request={}),
+        _sync_metadata_across_dp=lambda num_tokens, **kwargs: (num_tokens, None, None),
+    )
+    block_table = torch.arange(1, 13, dtype=torch.int32).reshape(4, 3)
+    query_start_loc = torch.tensor([0, 6], dtype=torch.int32)
+    metadata = SimpleNamespace(
+        batch_size=lambda: 1,
+        num_reqs=1,
+        query_start_loc=query_start_loc,
+        query_start_loc_cpu=query_start_loc,
+        seq_lens=torch.tensor([16], dtype=torch.int32),
+        block_table_tensor=block_table,
+        slot_mapping=torch.arange(6, dtype=torch.int32),
+    )
+    sample_indices = torch.arange(1, 6, dtype=torch.int32)
+    proposer.set_inputs_first_pass = MagicMock(return_value=(6, sample_indices, metadata, None))
+
+    class MetadataChecked(Exception):
+        pass
+
+    def check_metadata(common_metadata, num_input_tokens, num_actual_tokens):
+        assert num_input_tokens == num_actual_tokens == 6
+        assert common_metadata.num_reqs == 1
+        assert torch.equal(common_metadata.query_start_loc, query_start_loc)
+        assert common_metadata.seq_lens.tolist() == [16]
+        assert torch.equal(common_metadata.block_table_tensor, block_table[:expected_rows])
+        raise MetadataChecked
+
+    proposer.build_draft_attn_metadata = check_metadata
+    with (
+        patch("vllm_ascend.spec_decode.llm_base_proposer._HIDDEN_STATE_DRAFTER_TYPES", (object,)),
+        pytest.raises(MetadataChecked),
+    ):
+        proposer._propose(
+            5,
+            target_token_ids=torch.ones(1, dtype=torch.int64),
+            target_positions=torch.zeros(1, dtype=torch.int32),
+            target_hidden_states=torch.ones((1, 4)),
+            next_token_ids=torch.ones(1, dtype=torch.int64),
+            token_indices_to_sample=sample_indices,
+            common_attn_metadata=metadata,
+            target_model_batch_desc=SimpleNamespace(uniform=True),
+            sampling_metadata=MagicMock(),
+        )
+
+
 class TestMultimodalImageTokenIndex:
     @pytest.mark.parametrize(
         "model_name",
@@ -55,6 +158,7 @@ class TestMultimodalImageTokenIndex:
             "Step3p7ForConditionalGeneration",
             "Gemma4ForConditionalGeneration",
             "Gemma4UnifiedForConditionalGeneration",
+            "Glm5NextForConditionalGeneration",
         ],
     )
     def test_models_using_image_token_id(self, model_name: str):
@@ -104,6 +208,15 @@ class TestMultimodalImageTokenIndex:
         )
 
         assert image_token_index == 456
+
+    def test_model_with_multiple_image_sentinels_needs_no_single_index(self):
+        config = SimpleNamespace()
+
+        image_token_index = AscendSpecDecodeBaseProposer._get_multimodal_image_token_index(
+            "AscendDeepseekV4ForConditionalGeneration", config
+        )
+
+        assert image_token_index is None
 
 
 class TestMtpSharesTheTargetLmHead:
@@ -180,9 +293,9 @@ def test_load_model_reads_validated_draft_window_size():
         patch("vllm_ascend.spec_decode.llm_base_proposer.get_pp_group") as mock_pp_group,
         patch(
             "vllm_ascend.spec_decode.llm_base_proposer.get_layers_from_vllm_config",
-            side_effect=[{}, {"draft": draft_layer}, {}, {"draft": draft_layer}],
+            side_effect=[{}, {"draft": draft_layer}, {"draft": draft_layer}],
         ),
-        patch("vllm_ascend.ascend_config.get_ascend_config") as mock_get_ascend_config,
+        patch("vllm_ascend.spec_decode.llm_base_proposer.get_ascend_config") as mock_get_ascend_config,
         patch("vllm_ascend.spec_decode.llm_base_proposer.SlidingWindowAdapter") as mock_adapter,
         patch("vllm_ascend.spec_decode.llm_base_proposer.supports_multimodal", return_value=False),
     ):
@@ -193,6 +306,98 @@ def test_load_model_reads_validated_draft_window_size():
 
     assert proposer.draft_window_size == 4096
     mock_adapter.assert_called_once_with(4096, 16, 8, 4, "cpu")
+
+
+@pytest.mark.parametrize(
+    "method,has_post_process",
+    [("dspark", True), ("dspark", False), ("dflash", True), ("dflash", False), ("eagle3", True), ("mtp", True)],
+)
+def test_load_model_aligns_draft_after_sharing_before_precomputing_hidden_states(method, has_post_process):
+    proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
+    proposer.vllm_config = SimpleNamespace(quant_config=object())
+    proposer.maybe_eager_context = nullcontext()
+    proposer.method = method
+    proposer.supports_mm_inputs = False
+    proposer.parallel_drafting = True
+    proposer.pass_hidden_states_to_model = True
+    proposer.eagle3_use_aux_hidden_state = True
+    proposer.hidden_size = 2
+    proposer.parallel_drafting_hidden_state_tensor = torch.empty(2)
+    events = []
+    draft = SimpleNamespace(mask_hidden=torch.ones(6))
+
+    def post_process(config):
+        assert config is proposer.vllm_config
+        events.append("post_process")
+
+    def combine_hidden_states(hidden):
+        events.append("combine")
+        assert torch.equal(hidden, torch.ones(6))
+        return torch.full((2,), 2.0 if "post_process" in events else 1.0)
+
+    if has_post_process:
+        draft.post_process = post_process
+    draft.combine_hidden_states = combine_hidden_states
+    proposer._get_model = MagicMock(return_value=draft)
+    proposer._maybe_share_embeddings = MagicMock(side_effect=lambda _: events.append("embeddings"))
+    proposer._maybe_share_topk_indices = MagicMock(side_effect=lambda _: events.append("indices"))
+    proposer._maybe_share_lm_head = MagicMock(side_effect=lambda _: events.append("lm_head"))
+    draft_layer = MagicMock()
+    draft_layer.get_kv_cache_spec.return_value = object()
+    draft_layer.get_attn_backend.return_value.get_supported_kernel_block_sizes.return_value = [16]
+    module = "vllm_ascend.spec_decode.llm_base_proposer"
+    with (
+        patch(f"{module}.get_pp_group", return_value=SimpleNamespace(is_last_rank=True)),
+        patch(
+            f"{module}.get_layers_from_vllm_config",
+            side_effect=[{}, {"draft": draft_layer}, {"draft": draft_layer}],
+        ),
+        patch("vllm_ascend.ascend_config.get_ascend_config", return_value=SimpleNamespace(draft_window_size=None)),
+        patch(f"{module}.get_ascend_config", return_value=SimpleNamespace(draft_window_size=None)),
+        patch(f"{module}.supports_multimodal", return_value=False),
+    ):
+        proposer.load_model(MagicMock())
+
+    should_process = method in ("dspark", "dflash") and has_post_process
+    expected = ["embeddings", "indices", "lm_head"]
+    if should_process:
+        expected.append("post_process")
+    assert events == [*expected, "combine"]
+    assert torch.equal(proposer.parallel_drafting_hidden_state_tensor, torch.full((2,), 2.0 if should_process else 1.0))
+
+
+def test_draft_vllm_config_only_propagates_draft_runner_type():
+    draft_model_config = SimpleNamespace(
+        runner_type="draft",
+        architecture="draft-architecture",
+        num_experts=0,
+    )
+    base_model_config = SimpleNamespace(
+        runner_type="generate",
+        architecture="target-architecture",
+        num_experts=256,
+    )
+    base_vllm_config = SimpleNamespace(model_config=base_model_config)
+    proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
+    proposer.speculative_config = SimpleNamespace(
+        draft_model_config=draft_model_config,
+    )
+
+    with (
+        patch(
+            "vllm.v1.spec_decode.llm_base_proposer.SpecDecodeBaseProposer._create_draft_vllm_config",
+            return_value=base_vllm_config,
+        ),
+    ):
+        draft_vllm_config = proposer._create_draft_vllm_config()
+
+    assert draft_vllm_config is not base_vllm_config
+    assert draft_vllm_config.model_config is not base_model_config
+    assert draft_vllm_config.model_config is not draft_model_config
+    assert draft_vllm_config.model_config.runner_type == "draft"
+    assert draft_vllm_config.model_config.architecture == "target-architecture"
+    assert draft_vllm_config.model_config.num_experts == 256
+    assert base_model_config.runner_type == "generate"
 
 
 class TestDisablePaddedDrafterBatchWithFullGraph:
@@ -265,3 +470,81 @@ class TestDisablePaddedDrafterBatchWithFullGraph:
         )
 
         proposer._raise_if_padded_drafter_batch_disabled_and_full_graph_enabled()
+
+
+class TestMtpTargetLmHeadLookup:
+    """Where the MTP branch of ``_maybe_share_lm_head`` finds the target head.
+
+    Multimodal wrappers such as ``Glm5NextForConditionalGeneration`` own no
+    ``lm_head``; it lives on the nested language model, so reading it off the
+    wrapper raises ``AttributeError``.
+    """
+
+    @staticmethod
+    def _share(target) -> SimpleNamespace:
+        """Return the resulting draft head after sharing runs."""
+        proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
+        proposer.method = "mtp"
+        proposer.vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(is_deepseek_mla=True),
+            compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE),
+        )
+        proposer.use_cuda_graph = False
+        layers = {"0": SimpleNamespace(shared_head=SimpleNamespace(head=SimpleNamespace(weight=torch.zeros(4, 3))))}
+        # The checkpoint ships no MTP head, so the draft head is shared
+        # whenever the target head is reachable at all.
+        proposer.model = SimpleNamespace(model=SimpleNamespace(layers=layers), has_own_lm_head=False)
+
+        proposer._maybe_share_lm_head(target)
+
+        return layers["0"].shared_head.head
+
+    def test_resolves_lm_head_through_get_language_model(self):
+        target_lm_head = SimpleNamespace(weight=torch.ones(4, 3))
+        target = SimpleNamespace(get_language_model=lambda: SimpleNamespace(lm_head=target_lm_head))
+
+        assert self._share(target) is target_lm_head
+
+    def test_resolves_lm_head_through_the_language_model_attribute(self):
+        target_lm_head = SimpleNamespace(weight=torch.ones(4, 3))
+        target = SimpleNamespace(language_model=SimpleNamespace(lm_head=target_lm_head))
+
+        assert self._share(target) is target_lm_head
+
+    def test_unreachable_lm_head_keeps_the_draft_head(self):
+        draft_head = self._share(SimpleNamespace())
+
+        assert torch.equal(draft_head.weight, torch.zeros(4, 3))
+
+
+class TestDraftEmbedMmSupport:
+    """Text-only MTP heads such as Glm5NextMTP expose ``embed_input_ids``
+    without multimodal parameters, so forwarding a multimodal target model's
+    multimodal kwargs to them raises ``TypeError``.
+    """
+
+    def test_head_taking_multimodal_embeddings_accepts_mm(self):
+        def embed_input_ids(input_ids, multimodal_embeddings=None):
+            return input_ids
+
+        assert _draft_embed_accepts_mm(embed_input_ids) is True
+
+    def test_text_only_head_does_not_accept_mm(self):
+        def embed_input_ids(input_ids):
+            return input_ids
+
+        assert _draft_embed_accepts_mm(embed_input_ids) is False
+
+    @pytest.mark.parametrize("error", [TypeError("C-bound callable"), ValueError("no signature found")])
+    def test_uninspectable_callable_is_treated_as_text_only(self, error: Exception):
+        """Falling back to text-only cannot raise, whereas assuming multimodal
+        support and forwarding the kwargs to a head that rejects them would.
+        """
+
+        def embed_input_ids(input_ids, multimodal_embeddings=None):
+            return input_ids
+
+        with patch("vllm_ascend.spec_decode.llm_base_proposer._inspect") as fake_inspect:
+            fake_inspect.signature.side_effect = error
+
+            assert _draft_embed_accepts_mm(embed_input_ids) is False

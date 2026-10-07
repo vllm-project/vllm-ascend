@@ -4,7 +4,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
-from vllm_ascend.models.qwen3_dflash2 import _grouped_conv, _score_edges
+from vllm_ascend.models.qwen3_dflash2 import (
+    DFlash2Qwen3DecoderLayer,
+    DFlash2Qwen3ForCausalLM,
+    DFlash2Qwen3Model,
+    _grouped_conv,
+    _score_edges,
+)
 from vllm_ascend.spec_decode.dflash2_proposer import (
     AscendDflash2Proposer,
     greedy_select_path,
@@ -66,6 +72,12 @@ def test_selector_edges_match_sequential_reference():
         )
 
     torch.testing.assert_close(actual, expected)
+
+
+def test_dflash2_declares_main_factory_classes():
+    """vLLM #52816 constructs DFlash subclasses through class factories."""
+    assert DFlash2Qwen3Model.decoder_layer_cls is DFlash2Qwen3DecoderLayer
+    assert DFlash2Qwen3ForCausalLM.model_cls is DFlash2Qwen3Model
 
 
 def _reference_walk(candidate_ids: torch.Tensor, scores: torch.Tensor) -> torch.Tensor:

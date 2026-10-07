@@ -20,6 +20,7 @@
 from typing import Any, Optional, cast
 
 import torch
+from compressed_tensors.config import CompressionFormat
 from compressed_tensors.quantization import QuantizationArgs, QuantizationStrategy, QuantizationType
 from vllm.logger import logger
 from vllm.model_executor.layers.linear import LinearBase
@@ -130,11 +131,11 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
                     if format is not None
                     else is_activation_quantization_format(quant_format)
                 )
+                mixed_precision_format = quant_format == CompressionFormat.mixed_precision.value
+
                 input_activations = quant_config.get("input_activations")
-                if act_quant_format and input_activations is not None:
-                    target_scheme_map[target]["input_activations"] = QuantizationArgs.model_validate(
-                        quant_config.get("input_activations")
-                    )
+                if (act_quant_format or mixed_precision_format) and input_activations is not None:
+                    target_scheme_map[target]["input_activations"] = QuantizationArgs.model_validate(input_activations)
         return target_scheme_map
 
     def get_quant_method(
@@ -342,6 +343,26 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
         format = format if format is not None else self.quant_format
         act_quant_format = is_activation_quantization_format(format)
 
+        # MXFP8: static FP8 group-wise weights + dynamic FP8 group-wise activations.
+        if format == CompressionFormat.mxfp8_quantized.value and self._is_dynamic_group_mx(
+            weight_quant=weight_quant,
+            input_quant=input_quant,
+            num_bits=8,
+        ):
+            assert self.quant_description is not None
+            self.quant_description["group_size"] = weight_quant.group_size or 32
+            return "W8A8_MXFP8"
+
+        # MXFP4: static packed FP4 group-wise weights + dynamic FP4 group-wise activations.
+        if format == CompressionFormat.mxfp4_pack_quantized.value and self._is_dynamic_group_mx(
+            weight_quant=weight_quant,
+            input_quant=input_quant,
+            num_bits=4,
+        ):
+            assert self.quant_description is not None
+            self.quant_description["group_size"] = weight_quant.group_size or 32
+            return "W4A4_MXFP4"
+
         if act_quant_format and input_quant is not None:
             if self._is_static_tensor_w8a8(weight_quant, input_quant):
                 return "W8A8"
@@ -359,6 +380,25 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
             return "W4A16"
 
         raise NotImplementedError("No compressed-tensors compatible quantization type was found.")
+
+    def _is_dynamic_group_mx(
+        self, weight_quant: "QuantizationArgs", input_quant: Optional["QuantizationArgs"], num_bits: int
+    ) -> bool:
+        """Detect MXFP group-wise weight and dynamic activation quantization."""
+        if input_quant is None:
+            return False
+
+        is_float = weight_quant.type == input_quant.type == QuantizationType.FLOAT
+        is_expected_bits = weight_quant.num_bits == input_quant.num_bits == num_bits
+        is_group = (
+            weight_quant.strategy == QuantizationStrategy.GROUP.value
+            and input_quant.strategy == QuantizationStrategy.GROUP.value
+        )
+        is_dynamic = not weight_quant.dynamic and input_quant.dynamic
+        is_symmetric = weight_quant.symmetric and input_quant.symmetric
+        is_group_size_32 = weight_quant.group_size == input_quant.group_size == 32
+
+        return is_float and is_expected_bits and is_group and is_dynamic and is_symmetric and is_group_size_32
 
     def _is_static_tensor_w8a8(self, weight_quant: "QuantizationArgs", input_quant: "QuantizationArgs") -> bool:
         is_8_bits = weight_quant.num_bits == input_quant.num_bits == 8

@@ -22,7 +22,7 @@ The following model variants are available. It is recommended to download the mo
 
 | Model                | Hardware Requirement                                                                             | Download                                                                 |
 | -------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------ |
-| Qwen3-Omni-30B-A3B (BF16) | Atlas 800I A3 (64G, 1\~2 cards)<br>Atlas 800I A2 (64G, 2\~4 cards) | [Download](https://www.modelscope.cn/models/Qwen/Qwen3-Omni-30B-A3B)          |
+| Qwen3-Omni-30B-A3B (BF16) | Atlas 800I A3 (64G, 1\~2 cards)<br>Atlas 800I A2 (64G, 2\~4 cards) | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-Omni-30B-A3B-Thinking) \| [Hugging Face](https://huggingface.co/Qwen/Qwen3-Omni-30B-A3B-Thinking) |
 | Qwen3-Omni-30B-A3B-W8A8   | Atlas 800I A3 (64G, 1\~2 cards)<br>Atlas 800I A2 (64G, 2\~4 cards)                               |  N/A|
 
 The W8A8 quantized weights are not available for direct download, you can obtain them by quantizing the BF16 model using **msmodelslim**. Refer to the [Quantization Guide](../../user_guide/feature_guide/quantization.md) for details. All model paths in this document should be adjusted to your actual local paths.
@@ -40,6 +40,8 @@ These are the recommended numbers of cards, which can be adjusted according to t
     - **MoE expert projections** (gate/up/down_proj): Dynamic W8A8 where input scales are computed on-the-fly during inference
 
 It is recommended to download the model weight to a shared directory across multiple nodes.
+
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ## 4 Installation
 
@@ -211,13 +213,12 @@ Single-node deployment completes both Prefill and Decode within the same node, s
 **Atlas 800I A2/A3:**
 
 ```bash
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
-export HCCL_OP_EXPANSION_MODE="AIV"  # not needed on A2
 export HCCL_BUFFSIZE=1024
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
+export HCCL_OP_EXPANSION_MODE="AIV"  # not needed on A2
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
+# Ensure the model path matches the directory recorded during download
 vllm serve your_model_path \
     --served-model-name qwen3-omni \
     --trust-remote-code \
@@ -340,7 +341,7 @@ Expected result: HTTP 200 with a JSON response containing the `choices` field wi
 
 ## 7 Accuracy Evaluation
 
-### Using EvalScope
+### 7.1 Using EvalScope
 
 As an example, take the `gsm8k` `omni_bench` `bbh` dataset as a test dataset, and run accuracy evaluation of `Qwen3-Omni-30B-A3B-Thinking` in online mode.
 
@@ -376,7 +377,7 @@ As an example, take the `gsm8k` `omni_bench` `bbh` dataset as a test dataset, an
 
 ## 8 Performance Evaluation
 
-### Using vLLM Benchmark
+### 8.1 Using vLLM Benchmark
 
 Run performance evaluation of `Qwen3-Omni-30B-A3B-Thinking` as an example.
 Refer to [vLLM Benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
@@ -390,8 +391,8 @@ There are three `vllm bench` subcommands:
 Take the `serve` as an example. Run the code as follows.
 
 ```bash
-export VLLM_USE_MODELSCOPE=True
 export MODEL=Qwen/Qwen3-Omni-30B-A3B-Thinking
+export VLLM_USE_MODELSCOPE=True
 python3 -m vllm.entrypoints.openai.api_server --model $MODEL --tensor-parallel-size 2 --swap-space 16 --disable-log-stats --disable-log-request --load-format dummy
 
 pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
@@ -459,11 +460,9 @@ P99 ITL (ms):                            176.02
 **Low Latency Configuration:**
 
 ```shell
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
-export HCCL_OP_EXPANSION_MODE="AIV"
 export HCCL_BUFFSIZE=1024
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
+export HCCL_OP_EXPANSION_MODE="AIV"
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
 vllm serve your_model_path \
@@ -495,11 +494,9 @@ vllm serve your_model_path \
 **High Throughput Configuration:**
 
 ```shell
-export ASCEND_RT_VISIBLE_DEVICES=0
-export HCCL_OP_EXPANSION_MODE="AIV"
 export HCCL_BUFFSIZE=1024
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
+export HCCL_OP_EXPANSION_MODE="AIV"
+export ASCEND_RT_VISIBLE_DEVICES=0
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
 vllm serve your_model_path \
@@ -530,11 +527,9 @@ vllm serve your_model_path \
 **Long Context Configuration:**
 
 ```shell
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
-export HCCL_OP_EXPANSION_MODE="AIV"
 export HCCL_BUFFSIZE=1024
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
+export HCCL_OP_EXPANSION_MODE="AIV"
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
 vllm serve your_model_path \

@@ -11,6 +11,11 @@ from torch import nn
 from vllm.config import VllmConfig
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 
+from vllm_ascend.utils import (
+    get_rotation_matrix,
+    get_rotation_path,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -26,33 +31,6 @@ def get_embedding_tensor(directory_path):
                 if "embed" in key.lower():
                     return tensor
     return None
-
-
-def get_rotation_path(vllm_config: VllmConfig) -> Path | None:
-    quant_config = vllm_config.quant_config
-    if quant_config is None:
-        return None
-    target_model_path = vllm_config.model_config.model
-    try:
-        quant_description = quant_config.quant_description
-        rotation_relative_path = quant_description["optional"]["quarot"]["rotation_map"]["global_rotation"]
-    except KeyError:
-        return None
-    return Path(target_model_path) / rotation_relative_path
-
-
-def get_rotation_matrix(rotation_path: Path | None) -> torch.Tensor:
-    """Load the global rotation matrix."""
-    try:
-        safetensor_data = load_file(rotation_path)
-        Q = safetensor_data["global_rotation"]
-        return Q
-    except Exception as e:
-        logger.error(
-            "Failed to load rotation weight from '%s'. If you want to use quarot model with eagle3, take a check.",
-            rotation_path,
-        )
-        raise e
 
 
 def _find_safetensors_weight(
@@ -82,10 +60,12 @@ def load_quarot_target_layer(
     layer: nn.Module,
     target_model_path: Path | str,
     weight_names: tuple[str, ...],
-    rotation: torch.Tensor,
+    rotation: torch.Tensor | None,
     label: str,
 ) -> None:
-    """Load one target vocab shard into the draft's unrotated hidden basis."""
+    """Load one target vocab shard into the draft's unrotated hidden basis.
+
+    ``rotation=None`` loads the shard unchanged (no QuaRot alignment)."""
     target_model_path = Path(target_model_path)
     shard_path, weight_name = _find_safetensors_weight(
         target_model_path,
@@ -102,15 +82,23 @@ def load_quarot_target_layer(
     with safe_open(shard_path, framework="pt", device="cpu") as shard:
         target_weight = shard.get_slice(weight_name)[start_index:end_index]
 
-    rotation = rotation.to(
-        device=layer.weight.device,
-        dtype=torch.float32,
-    )
-    target_weight = target_weight.to(
-        device=layer.weight.device,
-        dtype=torch.float32,
-    )
-    aligned_weight = torch.matmul(target_weight, rotation.T)
+    if rotation is not None:
+        rotation = rotation.to(
+            device=layer.weight.device,
+            dtype=torch.float32,
+        )
+        target_weight = target_weight.to(
+            device=layer.weight.device,
+            dtype=torch.float32,
+        )
+        aligned_weight = torch.matmul(target_weight, rotation.T)
+    else:
+        # No rotation: plain shard copy for drafts that cannot alias the
+        # target layer (e.g. the target embedding on a later PP stage).
+        aligned_weight = target_weight.to(
+            device=layer.weight.device,
+            dtype=layer.weight.dtype,
+        )
     loaded_rows = aligned_weight.shape[0]
     layer.weight.data[:loaded_rows].copy_(aligned_weight.to(layer.weight.dtype))
     layer.weight.data[loaded_rows:].zero_()

@@ -362,7 +362,7 @@ Assume the P server IP is `192.0.0.1`, and the D server IPs are `192.0.0.3` (dec
 >
 > - `--pipeline-parallel-size 2`: Enables Pipeline Parallelism (required, P node only)
 > - `--enable-chunked-prefill`: Enables Chunked Prefill (required, P node only)
-> - `--max-num-batched-tokens 32768`: Initial chunk size (recommended for 128K sequences)
+> - `--max-num-batched-tokens 32768`: Initial chunk size (recommended for 128k sequences)
 > - `profiling_chunk_config.enabled`: Enables Dynamic Chunked Pipeline Parallel
 > - `profiling_chunk_config.smooth_factor`:  Smoothing factor (0 < x ≤ 1.0). Higher values trust dynamic prediction more
 > - `profiling_chunk_config.min_chunk`: Minimum chunk size for dynamic calculation. Should be smaller than `max-num-batched-tokens`

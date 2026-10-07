@@ -85,12 +85,16 @@ class TestMiniMaxM3VitProcessor(unittest.TestCase):
 
     def test_shared_vision_tower_pruning_follows_image_video_limits(self) -> None:
         def make_vllm_config(limit_mm_per_prompt: dict[str, int]):
+            multimodal_config = _DummyMiniMaxM3MultimodalConfig(limit_mm_per_prompt)
+            model_config = SimpleNamespace(
+                hf_config=SimpleNamespace(vision_config=SimpleNamespace()),
+                hf_text_config=SimpleNamespace(hidden_size=1),
+                multimodal_config=multimodal_config,
+            )
+            # vLLM #54079 switched the multimodal model helpers to this accessor.
+            model_config.get_multimodal_config = lambda: multimodal_config
             return SimpleNamespace(
-                model_config=SimpleNamespace(
-                    hf_config=SimpleNamespace(vision_config=SimpleNamespace()),
-                    hf_text_config=SimpleNamespace(hidden_size=1),
-                    multimodal_config=_DummyMiniMaxM3MultimodalConfig(limit_mm_per_prompt),
-                ),
+                model_config=model_config,
                 quant_config=None,
             )
 

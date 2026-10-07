@@ -18,6 +18,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 
 
 class _FakeStore:
+    requires_exists_before_put = True
+
     def __init__(self, exists_result: list[int]):
         self.exists_result = exists_result
         self.put_calls: list[tuple[list[str], list[list[int]], list[list[int]]]] = []
@@ -36,7 +38,7 @@ class _FakeStore:
 class TestKVTransferMissingKeyPut(unittest.TestCase):
     def test_sending_thread_only_puts_missing_keys(self):
         store = _FakeStore(exists_result=[1, 0, 1, 0])
-        token_db = ChunkedTokenDatabase([KeyMetadata("m", 0, 0, 0, 0)], [16], None)
+        token_db = ChunkedTokenDatabase([KeyMetadata("m", 0, 0, 0)], [16], None)
         token_db.set_group_buffers({0: [1000]}, {0: [16]}, {0: [1]})
         thread = KVCacheStoreSendingThread(
             m_store=store,

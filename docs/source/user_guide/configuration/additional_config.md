@@ -22,6 +22,7 @@ Starting from [PR #9064](https://github.com/vllm-project/vllm-ascend/pull/9064),
 | `VLLM_ASCEND_ENABLE_NZ` | `weight_nz_mode` | Integer (unchanged, field name changed) |
 | `VLLM_ASCEND_ENABLE_FUSED_MC2` | `enable_fused_mc2` | Integer (unchanged) |
 | `VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK` | `enable_transpose_kv_cache_by_block` | `"1"` → `true`, `"0"` → `false` |
+| `VLLM_ASCEND_ENABLE_FLASHCOMM1` | `enable_flashcomm1` | `"1"` → `true`, `"0"` → `false` |
 
 ## How to use
 
@@ -50,6 +51,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `xlite_graph_config`                | dict | `{}`    | Configuration options for Xlite graph mode                                                                |
 | `finegrained_tp_config`             | dict | `{}`    | Configuration options for module tensor parallelism                                                       |
 | `ascend_compilation_config`         | dict | `{}`    | Configuration options for ascend compilation                                                              |
+| `ascend_warmup_config`              | dict | `{}`    | Configuration options for startup warmup that overlaps weight loading                                     |
 | `eplb_config`                       | dict | `{}`    | Runner-specific EPLB extensions. See [Expert Parallelism Load Balancer](../feature_guide/expert_parallelism_load_balancer.md). |
 | `scheduler_config`                  | dict | `{}`    | Configuration options for Ascend scheduler extensions, including balance scheduling, recompute scheduling, DyntraLB, ShortRequestFirst, and dynamic chunked pipeline parallel. |
 | `refresh`                           | bool | `false` | Whether to refresh global Ascend configuration content. This is usually used by rlhf or ut/e2e test case. |
@@ -59,35 +61,39 @@ The following table lists additional configuration options available in vLLM Asc
 | `multistream_overlap_shared_expert` | bool | `False` | Whether to enable multi-stream shared expert. This option only takes effect on MoE models with shared experts. |
 | `enable_cpu_binding`                | bool | `True`  | Enables Ascend-native CPU binding on ARM servers. Set to `False` to disable. See [CPU Binding](../feature_guide/cpu_binding.md). |
 | `pa_shape_list`                     | list | `[]`    | The custom shape list of page attention ops.                                                              |
-| `enable_kv_nz`                      | bool | `False` | Whether to enable KV cache NZ layout. This option only takes effects on models using MLA (e.g., DeepSeek).                                      |
-| `enable_sparse_sfa_c8`              | bool | `False` | Whether to enable the packed C8 KV cache for Sparse Flash Attention in DSA models (e.g., DeepSeek V3.2 and GLM5). This option is independent of `enable_sparse_li_c8`. SFA prefill context parallelism and Ascend 950 DCP are not supported. |
-| `enable_sparse_li_c8`               | bool | `False` | Whether to enable the C8 key and scale caches for LightningIndexer in DSA models. This option is independent of `enable_sparse_sfa_c8` and only applies to eligible indexer layers from the model quantization config. SFA prefill context parallelism and Ascend 950 DCP are not supported. |
-| `c8_enable_reshape_optim`           | bool | `False` | Whether to use the StoreKVBlock operator to accelerate LightningIndexer C8 cache writes. `enable_sparse_li_c8` must also be enabled. In the PD separation scenario, only the P node is enabled. |
+| `enable_kv_nz`                      | bool | `False` | Whether to enable KV cache NZ layout. This option only takes effect on models using MLA (e.g., DeepSeek).                                      |
+| `c8_enable_reshape_optim`           | bool | `True`  | Whether to use the StoreKVBlock operator to accelerate LightningIndexer C8 cache writes. When enabled, the optimization takes effect only when SFA and LightningIndexer C8 are active on a PD prefill (P) node. |
 | `mc2_comm_alg`                      | str  | `""`    | set dispatch/combine op's `comm_alg` param, only supports `""/"fullmesh"/"hierarchy"/"fullmesh_v2"`. `"hierarchy"` is only supported by A2/A3, and `"fullmesh_v2"` is only supported by A3 now. |
 | `enable_mc2_hierarchy_comm`         | bool | `False` | Enable dispatch/combine op inter-node communication by ROCE. This param will be deprecated and be replaced by mc2_comm_alg = "hierarchy" |
 | `enable_prefill_mc2`                | bool | `False` | Whether to reserve mc2_token_capacity for prefill batches. When enabled, `max_num_batched_tokens` is used to calculate the mc2_token_capacity instead of the decode-only capacity. In this scenario, the recommended maximum value of `max_num_batched_tokens` is `tp_size * 512`. This is a temporary switch; once MC2 operators are complete for all scenarios, this switch will be removed and MC2 will be enabled by default. |
-| `mega_moe_max_tokens`               | int  | `65536` | Per-rank token capacity after dispatch in the mega moe (dispatch_ffn_combine) fused operator. When load imbalance causes a rank to receive more tokens than this limit, the excess tokens are dropped and skipped from computation, degrading accuracy. Do not set this too large: workspace memory scales linearly with this value. |
+| `mega_moe_max_tokens`               | int  | `65536` | Reference per-rank token capacity after dispatch in the fused MC2/MegaMoe path. It is passed as `dispatch_ffn_combine`'s `max_output_size` and CANN MegaMoe buffer's `max_recv_token_num`. If a rank's actual MoE load exceeds this value, precision degradation may occur. The absolute safe upper bound is `num_max_tokens_per_rank * int(self.token_dispatcher.ep_world_size) * min(num_topk, expert_per_rank)`, but using it directly can consume very large device memory. Tune this value based on actual expert load distribution. |
 | `msmonitor_use_daemon`              | bool | `False` | Whether to use daemon mode for msmonitor. The legacy `MSMONITOR_USE_DAEMON` environment variable is no longer supported. |
 | `enable_mlapo`                      | bool | `True`  | Whether to enable MLAPO (Model Layer-wise Adaptive Parallel Optimization). The legacy `VLLM_ASCEND_ENABLE_MLAPO` environment variable is no longer supported. |
 | `mlapo_keep_prefill_weights`        | bool | `False` | When True, keep MLAPO prefill weights on NPU instead of freeing them on kv_consumer (decode-only D) nodes. D nodes have normal local-prefill paths (recompute / fallback / preempt) that crash when the weights are freed (issue #11882). Enable this to trade NPU memory for stability. |
 | `weight_nz_mode`                    | int  | `1`     | Weight NZ mode. `0` disables NZ, `1` enables NZ only for quantized weights, and `2` also enables NZ for BF16/FP16 weights when supported. The legacy `VLLM_ASCEND_ENABLE_NZ` environment variable is no longer supported. |
-| `enable_fused_mc2`                  | int  | `0`     | Fused MC2 configuration. `0` disables the fused path and `1` enables it when the model and parallel configuration support it. The legacy `VLLM_ASCEND_ENABLE_FUSED_MC2` environment variable is no longer supported. |
+| `enable_fused_mc2`                  | int  | `0`     | Fused MC2 configuration. `0` disables the fused path, `1` selects dispatch-FFN-combine, and `2` selects CANN MegaMoe when the model and parallel configuration support it. On A5, SiTU models require a CANN MegaMoe wrapper exposing `activation` and `activation_params`; both SiTU parameters are bound from the MoE configuration during initialization. The legacy `VLLM_ASCEND_ENABLE_FUSED_MC2` environment variable is no longer supported. |
 | `enable_transpose_kv_cache_by_block`| bool | `True`  | Whether to enable transpose KV cache by block. The legacy `VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK` environment variable is no longer supported. |
-| `enable_dsa_cp`                     | bool | `False` | Whether to enable dsa_cp for DeepSeek V3.2, DeepSeek V4, and other models with the same architecture. This feature requires sequence parallelism to be enabled.|
+| `enable_dsa_cp`                     | bool | `False` | Whether to enable dsa_cp for DeepSeek V3.2, DeepSeek V4, and other models with the same architecture. This feature requires sequence parallelism to be enabled. Enabling it automatically enables FlashComm.|
+| `enable_flashcomm1`                 | bool | `False` | Whether to enable SP MoE. The legacy `VLLM_ASCEND_ENABLE_FLASHCOMM1` environment variable is kept for compatibility. See [Sequence Parallelism](../feature_guide/sequence_parallelism.md). |
+| `enable_pcp_o_proj_weight_sharding` | bool | `True` | Whether PCP shards O-projection weights across the PCP group. This option controls SFA-PCP `o_proj` and DSA-PCP two-stage O-projection (`wo_a`/`wo_b`). If the weight method or PCP partition does not support sharding, the option is disabled with a warning. Set it to `false` at server startup to disable sharding. Other attention backends do not use this option. |
+| `enable_pcp_embedding_lmhead_weight_sharding` | bool | `True` | Whether PCP shards embedding and LM Head weights across PCP ranks inside each TP shard. This option is enabled by default, takes effect when PCP size is greater than 1, and is incompatible with batch-sharded sampling (`enable_batch_sharded_sampling`) and fine-grained TP for these modules. |
 | `rejection_sampler_config`          | dict | `{}`    | Configuration options for rejection sampler (block verify and entropy verify). |
 | `dynamic_spec_config`               | dict | `{}`    | Configuration options for Dynamic Speculative Decoding. See [Dynamic Speculative Decoding](../feature_guide/speculative_decoding.md#dynamic-speculative-decoding). |
 | `multistream_dsv4_dsa_overlap`      | bool | `True`  | Whether to enable dsa multi-stream overlap for DeepSeek V4.  |
 | `rl_config`                        | dict | `{}`    | One-click RL mode configuration. See <a href="#rl_config">rl_config</a> for all fields, the two deployment modes, usage examples, and the migration guide. |
-| `enable_reduce_sample`              | bool | `False` | Whether to enable reduce sample optimization to reduce communication and computation overheads in the tensor parallelism scenario. When enabled, logits are kept partitioned across TP ranks and only the small set of top-k candidate values/indices is communicated, instead of performing a full-vocabulary all-to-all/all-gather. **Note**: This is an experimental feature. **Limitations**: (1) Not supported on PD-disaggregated scenario. (2) Must be disabled when sampling logprobs are requested. When reduce sample is enabled, logprobs are silently computed over partitioned logits instead of the full vocabulary, producing incorrect logprob values and top-k rankings. (3) Cannot be enabled together with lmhead TP.|
+| `combine_quant_mode`                | int  | `0`     | Fused MC2 configuration. This configuration will be passed as the `comm_quant_mode` argument for the `torch_npu.npu_moe_distribute_combine_v2` operator. Please refer to the operator documentation for the valid value range. |
 
 The details of each configuration option are as follows:
+
+> [!WARNING]
+> With HDK 0.26.0 or earlier, `c8_enable_reshape_optim` may conflict with pooling models that use AICPU operators. Set `c8_enable_reshape_optim` to `false` to disable the optimization and avoid the conflict. See [issue #15896](https://github.com/vllm-project/vllm-ascend/issues/15896) for details.
 
 **xlite_graph_config**
 
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
 | `enabled` | bool | `False` | Whether to enable Xlite graph mode. See [Using XliteGraph](../feature_guide/graph_mode.md#using-xlitegraph) for the supported models, the decode-only vs. full-mode distinction, and examples. |
-| `full_mode` | bool | `False` | Whether to enable Xlite for both the prefill and decode stages. By default, Xlite is only enabled for the decode stage, with prefill falling back to the runnable under ACLGraph. When `True`, xlite owns prefill and decode, ACLGraph capture is not used, and `--enforce-eager` is recommended (unless speculative decoding is configured, etc.). |
+| `full_mode` | bool | `False` | Token budget sizing for the xlite runtime. Batches are routed by token count: those within the budget run on the xlite runtime, larger ones fall back to the runnable under ACLGraph. By default (`False`), the budget is sized for decode steps (`max_num_seqs × (1 + num_speculative_tokens)`), so prefill and large mixed batches typically fall back. When `True`, the budget is `max_num_batched_tokens`, so xlite handles prefill and decode alike, ACLGraph capture is not used, and `--enforce-eager` is recommended (unless speculative decoding is configured, etc.). Since v0.28.0, routing is by token count instead of the batch attention state. |
 
 **finegrained_tp_config**
 
@@ -104,17 +110,31 @@ The details of each configuration option are as follows:
 | ---- | ---- | ------- | ----------- |
 | `enable_npugraph_ex`               | bool | `True` | Whether to enable npugraph_ex backend.                                                 |
 | `enable_static_kernel` | bool | `False` | Whether to enable static kernel. Suitable for scenarios where shape changes are minimal and some time is available for static kernel compilation. |
+| `enable_super_kernel` | bool | Inherits `enable_static_kernel` | Whether to enable Super Kernel optimization. When omitted, it follows `enable_static_kernel`; set it explicitly to override that behavior. Super Kernel requires static kernel. |
 | `fuse_norm_quant`  | bool | `True` | Whether to enable fuse_norm_quant pass. |
 | `fuse_qknorm_rope` | bool | `True` | Whether to enable fuse_qknorm_rope pass. If Triton is not in the environment, set it to False. |
 | `fuse_muls_add` | bool | `True` | Whether to enable fuse_muls_add pass.|
+
+**ascend_warmup_config**
+
+Both warmups run on a background thread during weight loading. The worker waits for them at the end of model loading, before memory profiling and KV cache allocation.
+
+| Name | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `enable_early_kernel_warmup` | bool | `False` | Compile the rejection sampler, penalty, and RMS norm Triton warmup kernels while weights load, so the regular kernel warmup hits the Triton cache. |
+| `enable_early_nz_warmup` | bool | `False` | Pay the one-time lazy initialization of the first NZ format cast while weights load. Independent of the quantization scheme. |
 
 **eplb_config**
 
 The accepted fields depend on the model runner:
 
-- **Model Runner V2** accepts only `load_collection_phase` here. Configure
-  upstream EPLB through `--enable-eplb` and `--eplb-config`. Ascend uses the
-  upstream default policy and asynchronous Gloo movement.
+- **Model Runner V2** accepts `load_collection_phase` and `stair_config` here.
+  Configure upstream EPLB through `--enable-eplb` and `--eplb-config`. Ascend
+  uses the STAIR policy by default and asynchronous Gloo movement. Select
+  `default` or `stair` only through the upstream `--eplb-config.policy`
+  option. See the
+  [EPLB user guide](../feature_guide/expert_parallelism_load_balancer.md#advanced-stair-tuning)
+  for the advanced STAIR fields and their defaults.
 - **Model Runner V1** accepts the legacy fields below except
   `load_collection_phase`.
   MRv1 does not accept upstream `--enable-eplb` on Ascend.
@@ -323,3 +343,16 @@ An example of additional configuration is as follows:
     "refresh": False
 }
 ```
+
+### KV pipeline parallelism (KVPP)
+
+Set `enable_kvpp: true` in `--additional-config` to distribute persistent MLA
+KV-cache layers across TP and (with Model Runner V2) PCP ranks within the same
+DP replica and PP stage. Group size is TP x PCP: TP4 + PCP2 uses eight ranks;
+TP1 + PCP2 also enables KVPP. DP replicas and PP stages use separate groups.
+
+PCP requires `VLLM_USE_V2_MODEL_RUNNER=1`. KVPP still requires eager execution and
+non-hybrid MLA, and does not support DCP or KV transfer connectors. PCP gathers
+prefill KV before cache writes; layer broadcasts restore prior-forward cache
+contents before attention. The broadcast decision uses the global scheduled
+batch, not PCP-local segment offsets.

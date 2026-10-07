@@ -28,6 +28,7 @@ from vllm_ascend.utils import AscendDeviceType
 def make_cpu_alloc(rank_id=0):
     cpu_alloc = object.__new__(CpuAlloc)
     cpu_alloc.rank_id = rank_id
+    cpu_alloc.current_npu = 0
     cpu_alloc.device_info = SimpleNamespace(
         running_npu_list=[0],
         all_logic_npus=[0],
@@ -306,7 +307,15 @@ class TestCpuAlloc(unittest.TestCase):
             ("| NPU Chip | Process id |\n| 0 0 | 1234 | vllm | 56000 |\n| 1 0 | 1235 | vllm | 56000 |", 0),
             ("", 0),
         ]
-        self.cpu_alloc = CpuAlloc(0)
+        self.cpu_alloc = CpuAlloc(0, npu_id=0)
+
+    @patch("vllm_ascend.cpu_binding.DeviceInfo")
+    def test_explicit_npu_id_overrides_running_npu_order(self, mock_device_info):
+        mock_device_info.return_value.running_npu_list = [1, 3]
+
+        cpu_alloc = CpuAlloc(rank_id=0, npu_id=3)
+
+        self.assertEqual(cpu_alloc.current_npu, 3)
 
     def test_average_distribute(self):
         self.cpu_alloc.npu_cpu_pool = {0: [10, 11, 12, 13], 1: [10, 11, 12, 13]}
@@ -554,6 +563,7 @@ class TestCpuAlloc(unittest.TestCase):
         mock_execute_command.return_value = ("PCIe Bus Info 0000:03:00.0", 0)
         self.cpu_alloc.rank_id = 0
         self.cpu_alloc.device_info.running_npu_list = [3]
+        self.cpu_alloc.current_npu = 3
         self.cpu_alloc.npu_cpu_pool = {3: [0, 1, 2, 3, 4]}
 
         self.cpu_alloc.bind_npu_irq()
@@ -915,6 +925,7 @@ class TestCpuBindingSupplemental(unittest.TestCase):
     def test_print_plan_handles_empty_release_assignment(self, mock_logger_info, _mock_get_device_type):
         cpu_alloc = make_cpu_alloc()
         cpu_alloc.device_info.running_npu_list = [1]
+        cpu_alloc.current_npu = 1
         cpu_alloc.rank_id = 0
         cpu_alloc.assign_main = {1: [2, 3]}
         cpu_alloc.assign_acl = {1: [4]}
@@ -931,6 +942,7 @@ class TestCpuBindingSupplemental(unittest.TestCase):
     def test_print_plan_uses_ascend_950_worker_log(self, mock_logger_info, _mock_get_device_type):
         cpu_alloc = make_cpu_alloc()
         cpu_alloc.device_info.running_npu_list = [1]
+        cpu_alloc.current_npu = 1
         cpu_alloc.rank_id = 0
         cpu_alloc.assign_main = {1: [2, 3]}
         cpu_alloc.assign_acl = {1: []}
@@ -953,6 +965,7 @@ class TestCpuBindingSupplemental(unittest.TestCase):
     def test_print_plan_handles_non_empty_release_assignment(self, mock_logger_info, _mock_get_device_type):
         cpu_alloc = make_cpu_alloc()
         cpu_alloc.device_info.running_npu_list = [1]
+        cpu_alloc.current_npu = 1
         cpu_alloc.rank_id = 0
         cpu_alloc.assign_main = {1: [2, 3]}
         cpu_alloc.assign_acl = {1: [4]}
@@ -1023,10 +1036,10 @@ class TestCpuBindingSupplemental(unittest.TestCase):
                 call("3000", [4], False),
             ],
         )
-        mock_bind_memory.assert_called_once_with("1000", 0)
+        mock_bind_memory.assert_not_called()
 
     @patch("vllm_ascend.cpu_binding.psutil.Process")
-    def test_bind_ascend_950_threads_binds_only_main_and_memory(self, mock_process):
+    def test_bind_ascend_950_threads_binds_only_main(self, mock_process):
         cpu_alloc = make_cpu_alloc()
         cpu_alloc.device_info.running_npu_list = [0]
         cpu_alloc.assign_main = {0: [1, 2, 3]}
@@ -1036,7 +1049,7 @@ class TestCpuBindingSupplemental(unittest.TestCase):
             cpu_alloc.bind_ascend_950_threads()
 
         mock_bind.assert_called_once_with("1000", [1, 2, 3], True)
-        mock_bind_memory.assert_called_once_with("1000", 0)
+        mock_bind_memory.assert_not_called()
 
     @patch(
         "vllm_ascend.cpu_binding.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A2)
@@ -1247,11 +1260,14 @@ class TestCpuBindingSupplemental(unittest.TestCase):
             patch.object(cpu_alloc, "allocate", side_effect=lambda: calls.append("allocate")),
             patch.object(cpu_alloc, "print_plan", side_effect=lambda: calls.append("print_plan")),
             patch.object(cpu_alloc, "bind_threads", side_effect=lambda: calls.append("bind_threads")),
+            patch.object(cpu_alloc, "bind_memory", side_effect=lambda *args: calls.append("bind_memory")),
             patch.object(cpu_alloc, "bind_npu_irq", side_effect=lambda: calls.append("bind_npu_irq")),
         ):
             cpu_alloc.run_all()
 
-        self.assertEqual(calls, ["build_cpu_pools", "allocate", "print_plan", "bind_threads", "bind_npu_irq"])
+        self.assertEqual(
+            calls, ["build_cpu_pools", "allocate", "print_plan", "bind_threads", "bind_memory", "bind_npu_irq"]
+        )
 
     def test_run_all_returns_when_cpu_pool_build_is_skipped(self):
         cpu_alloc = make_cpu_alloc()
@@ -1289,16 +1305,16 @@ class TestBindingSwitch(unittest.TestCase):
     @patch("vllm_ascend.cpu_binding.is_arm_cpu")
     def test_bind_cpus_skip_non_arm(self, mock_is_arm_cpu, mock_cpu_alloc):
         mock_is_arm_cpu.return_value = False
-        bind_cpus(0)
+        bind_cpus(0, npu_id=0)
         mock_cpu_alloc.assert_not_called()
 
     @patch("vllm_ascend.cpu_binding.CpuAlloc")
     @patch("vllm_ascend.cpu_binding.is_arm_cpu", return_value=True)
     def test_bind_cpus_runs_allocator_on_arm(self, _mock_is_arm_cpu, mock_cpu_alloc):
-        bind_cpus(1)
+        bind_cpus(1, npu_id=3)
 
-        mock_cpu_alloc.assert_called_once_with(1)
-        mock_cpu_alloc.return_value.run_all.assert_called_once_with()
+        mock_cpu_alloc.assert_called_once_with(1, npu_id=3)
+        mock_cpu_alloc.return_value.run_all.assert_called_once_with(migrate_memory=True)
 
 
 if __name__ == "__main__":

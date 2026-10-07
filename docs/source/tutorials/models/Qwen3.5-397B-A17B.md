@@ -22,13 +22,17 @@ The support matrix records the maximum verified capability for this model. The s
 
 ### 3.1 Model Weight
 
-- `Qwen3.5-397B-A17B` (BF16 version): requires 2 Ascend 950DT(96GB x 8) nodes or 2 Atlas 800 A3 (64GB x 16) nodes or 4 Atlas 800 A2 (64GB x 8) nodes. [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3.5-397B-A17B).
-- `Qwen3.5-397B-A17B-w8a8` (quantized version): requires 1 Atlas 800 A3 (64GB x 16) node or 2 Atlas 800 A2 (64GB x 8) nodes. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp).
-- `Qwen3.5-397B-A17B-w4a8` (quantized version): requires 1 Atlas 800 A3 (64GB x 16) node or 2 Atlas 800 A2 (64GB x 8) nodes. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w4a8-mtp).
-- `Qwen3.5-397B-A17B-w8a8-mxfp8` (quantized version): requires 1 Ascend 950DT(96GB x 8) node. [Download model weight](https://modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w8a8-mxfp8)
-- `Qwen3.5-397B-A17B-w4a4-mxfp4` (quantized version): requires 1 Ascend 950DT(96GB x 8) node. [Download model weight](https://modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w4a4-mxfp4)
+|  Weight Version | Hardware Requirements | Download Links |
+|-----------------|-----------------------|----------------|
+| `Qwen3.5-397B-A17B` (BF16 version) | 2 950DT Products(96GB x 8) nodes or 2 Atlas 800 A3 (64GB x 16) nodes or 4 Atlas 800 A2 (64GB x 8) nodes | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3.5-397B-A17B) |
+| `Qwen3.5-397B-A17B-w8a8` (quantized version) | 1 Atlas 800 A3 (64GB x 16) node or 2 Atlas 800 A2 (64GB x 8) nodes | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp) |
+| `Qwen3.5-397B-A17B-w4a8` (quantized version) | 1 Atlas 800 A3 (64GB x 16) node or 2 Atlas 800 A2 (64GB x 8) nodes | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w4a8-mtp) |
+| `Qwen3.5-397B-A17B-w8a8-mxfp8` (quantized version) | 1 950DT Products(96GB x 8) node | [ModelScope](https://modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w8a8-mxfp8) |
+| `Qwen3.5-397B-A17B-w4a4-mxfp4` (quantized version) | 1 950DT Products(96GB x 8) node | [ModelScope](https://modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w4a4-mxfp4) |
 
 It is recommended to download the model weight to a shared directory across multiple nodes, such as `/root/.cache/`, so that all serving nodes can load the same path.
+
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ### 3.2 Verify Multi-node Communication (Optional)
 
@@ -42,12 +46,12 @@ Select an image based on your machine type and start the docker image on your no
 
 The `Qwen3.5-397B-A17B` model is first supported in `vllm-ascend:v0.17.0rc1`. Use `v0.17.0rc1` or later for this model.For Ascend95DT, the model is supported from `vllm-ascend:v0.23.0rc1`.
 
-=== "Ascend 950DT series"
+=== "950DT Products"
 
     Start the docker image on your each node.
 
     ```bash
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-950DT
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5
     export NAME=vllm-ascend
 
     docker run --rm \
@@ -173,28 +177,24 @@ If you want to deploy a multi-node service, install the same version of vLLM and
 
 Single-node deployment runs both Prefill and Decode on the same node. It is suitable for functional validation, long-context single-cluster serving.
 
-=== "Ascend 950DT series"
+=== "950DT Products"
 
-    Run the following script to execute online inference on 1 Ascend 950DT (96G x 8). The quantized versions (`Qwen3.5-397B-A17B-w8a8-mxfp8` and `Qwen3.5-397B-A17B-w4a4-mxfp4`) can be deployed on a single Ascend 950DT node, needs `--quantization ascend`.
+    Run the following script to execute online inference on 1 950DT Products (96G x 8). The quantized versions (`Qwen3.5-397B-A17B-w8a8-mxfp8` and `Qwen3.5-397B-A17B-w4a4-mxfp4`) can be deployed on a single 950DT Products node, needs `--quantization ascend`.
 
     ```shell
     #!/bin/sh
 
     # Load model from ModelScope to speed up download.
     export VLLM_USE_MODELSCOPE=True
+    export HCCL_BUFFSIZE=400
+    export HCCL_INTRA_ROCE_ENABLE=0
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1
 
     # Reduce memory fragmentation and avoid out-of-memory errors.
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-    export HCCL_OP_EXPANSION_MODE="AIV"
-    export HCCL_BUFFSIZE=400
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=100
-    export TASK_QUEUE_ENABLE=1
-    export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1
-    export HCCL_INTRA_PCIE_ENABLE=1
-    export HCCL_INTRA_ROCE_ENABLE=0
-
+    # Ensure the model path matches the directory recorded during download
     vllm serve Eco-Tech/Qwen3.5-397B-A17B-w4a4-mxfp4 \
       --host 0.0.0.0 \
       --port 8000 \
@@ -219,27 +219,26 @@ Single-node deployment runs both Prefill and Decode on the same node. It is suit
 
 === "A3 series"
 
-    Run the following script to execute online 128K inference on 1 Atlas 800 A3 (64GB x 16), and W8A8 deployment on 1 Atlas 800 A3 (64GB x 16) node. The W8A8 version needs `--quantization ascend`.
+    Run the following script to execute online 128k inference on 1 Atlas 800 A3 (64GB x 16), and W8A8 deployment on 1 Atlas 800 A3 (64GB x 16) node. The W8A8 version needs `--quantization ascend`.
 
     ```shell
     #!/bin/sh
 
     # Load model from ModelScope to speed up download.
     export VLLM_USE_MODELSCOPE=True
-
-    # Reduce memory fragmentation and avoid out-of-memory errors.
+    export HCCL_BUFFSIZE=1024
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-    export HCCL_OP_EXPANSION_MODE="AIV"
-    export HCCL_BUFFSIZE=1024
-    export OMP_NUM_THREADS=1
-    export TASK_QUEUE_ENABLE=1
+    # Reduce memory fragmentation and avoid out-of-memory errors.
+
     echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
     sysctl -w vm.swappiness=0
     sysctl -w kernel.numa_balancing=0
     sysctl kernel.sched_migration_cost_ns=50000
-    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-
+    
+    # Ensure the model path matches the directory recorded during download
     vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
       --host 0.0.0.0 \
       --port 8000 \
@@ -291,23 +290,19 @@ Run the following script on node 0.
 ```shell
 #!/bin/sh
 
-export VLLM_USE_MODELSCOPE=True
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-
 # Get these values through ifconfig.
 # nic_name is the network interface name corresponding to local_ip.
 nic_name="xxxx"
 local_ip="xxxx"
 
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
+export VLLM_USE_MODELSCOPE=True
 export HCCL_BUFFSIZE=1024
-export TASK_QUEUE_ENABLE=1
+export HCCL_IF_IP=$local_ip
+export HCCL_SOCKET_IFNAME=$nic_name
+export GLOO_SOCKET_IFNAME=$nic_name
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
+# Ensure the model path matches the directory recorded during download
 vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
   --host 0.0.0.0 \
   --port 8000 \
@@ -339,26 +334,22 @@ Run the following script on node 1.
 ```shell
 #!/bin/sh
 
-export VLLM_USE_MODELSCOPE=True
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-
 # Get these values through ifconfig.
 # nic_name is the network interface name corresponding to local_ip.
 nic_name="xxxx"
 local_ip="xxxx"
 
+export VLLM_USE_MODELSCOPE=True
+export HCCL_BUFFSIZE=1024
+export HCCL_IF_IP=$local_ip
+export HCCL_SOCKET_IFNAME=$nic_name
+export GLOO_SOCKET_IFNAME=$nic_name
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
 # The value of node0_ip must be consistent with local_ip on node 0.
 node0_ip="xxxx"
 
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
-export HCCL_BUFFSIZE=1024
-export TASK_QUEUE_ENABLE=1
-
+# Ensure the model path matches the directory recorded during download
 vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
   --host 0.0.0.0 \
   --port 8000 \
@@ -407,7 +398,7 @@ INFO:     Application startup complete.
 - `--api-server-count` controls how many API server processes are started on the master node.
 - `--headless` starts a worker node without exposing an API server. Use it on non-master nodes.
 - `--tensor-parallel-size 8` maps one TP group to the 8 NPUs on each A2 node.
-- `HCCL_IF_IP`, `GLOO_SOCKET_IFNAME`, `TP_SOCKET_IFNAME`, and `HCCL_SOCKET_IFNAME` bind HCCL, Gloo, and TP communication to the selected network.
+- `HCCL_IF_IP`, `GLOO_SOCKET_IFNAME`, and `HCCL_SOCKET_IFNAME` bind HCCL and Gloo communication to the selected network.
 - `multistream_overlap_shared_expert` overlaps shared expert computation for better throughput on MoE workloads.
 
 ### 5.3 Multi-Node Deployment with Ray
@@ -445,23 +436,18 @@ unset http_proxy
 nic_name="xxxx"
 local_ip="xxxx"
 
-export VLLM_ENGINE_READY_TIMEOUT_S=30000
-export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
 export IP_ADDRESS=$local_ip
 export NETWORK_CARD_NAME=$nic_name
-export HCCL_IF_IP=$IP_ADDRESS
-export GLOO_SOCKET_IFNAME=$NETWORK_CARD_NAME
-export TP_SOCKET_IFNAME=$NETWORK_CARD_NAME
-export HCCL_SOCKET_IFNAME=$NETWORK_CARD_NAME
-export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=1536
-export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
-export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
-export VLLM_TORCH_PROFILER_WITH_STACK=0
-export TASK_QUEUE_ENABLE=1
+export HCCL_IF_IP=$IP_ADDRESS
 export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_SOCKET_IFNAME=$NETWORK_CARD_NAME
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
+export GLOO_SOCKET_IFNAME=$NETWORK_CARD_NAME
+export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
 
+# Ensure the model path matches the directory recorded during download
 vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
   --host ${IP_ADDRESS} \
   --port 30060 \
@@ -521,23 +507,18 @@ unset http_proxy
 nic_name="xxxx"
 local_ip="xxxx"
 
-export VLLM_ENGINE_READY_TIMEOUT_S=30000
-export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
 export IP_ADDRESS=$local_ip
 export NETWORK_CARD_NAME=$nic_name
-export HCCL_IF_IP=$IP_ADDRESS
-export GLOO_SOCKET_IFNAME=$NETWORK_CARD_NAME
-export TP_SOCKET_IFNAME=$NETWORK_CARD_NAME
-export HCCL_SOCKET_IFNAME=$NETWORK_CARD_NAME
-export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=1536
-export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
-export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
-export VLLM_TORCH_PROFILER_WITH_STACK=0
-export TASK_QUEUE_ENABLE=1
+export HCCL_IF_IP=$IP_ADDRESS
 export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_SOCKET_IFNAME=$NETWORK_CARD_NAME
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
+export GLOO_SOCKET_IFNAME=$NETWORK_CARD_NAME
+export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
 
+# Ensure the model path matches the directory recorded during download
 vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
   --host ${IP_ADDRESS} \
   --port 30050 \
@@ -593,15 +574,14 @@ Common Issues Tip: If the decode node fails to initialize, check that `--tensor-
 - `--kv-transfer-config` sets the Mooncake connector. `kv_role` is `kv_producer` on prefill and `kv_consumer` on decode.
 - `kv_connector_extra_config.prefill.dp_size/tp_size` and `decode.dp_size/tp_size` must match the actual global DP and TP layout.
 - `--no-enable-prefix-caching` disables prefix caching. For PD disaggregation, the D-node prefix-cache known issue is tracked in [#7944](https://github.com/vllm-project/vllm-ascend/issues/7944).
-- `VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT` is the timeout in seconds for automatically releasing the prefiller KV cache for a request.
 - `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'` is recommended on the decode node to reduce decode dispatch overhead.
 
-### 5.5 Prefill-Decode Disaggregation (Ascend 950DT series)
+### 5.5 Prefill-Decode Disaggregation (950DT Products)
 
-For Ascend 950DT (96G x 8), we recommend deploying 1P1D with 2 nodes for `Qwen3.5-397B-A17B-w4a4-mxfp4`:
+For 950DT Products (96G x 8), we recommend deploying 1P1D with 2 nodes for `Qwen3.5-397B-A17B-w4a4-mxfp4`:
 
-- 1 Prefill node: 1 Ascend 950DT (96G x 8). Runs an independent service with DP=1, TP=8.
-- 1 Decode node: 1 Ascend 950DT (96G x 8). Forms a global DP=1 group, with 1 local DP rank (TP=8).
+- 1 Prefill node: 1 950DT Products (96G x 8). Runs an independent service with DP=1, TP=8.
+- 1 Decode node: 1 950DT Products (96G x 8). Forms a global DP=1 group, with 1 local DP rank (TP=8).
 
 The prefill service pushes KV cache to the decode node via the Mooncake p2p connector.
 
@@ -620,30 +600,23 @@ unset http_proxy
 
 source /root/.bashrc
 export PROMETHEUS_MULTIPROC_DIR=/dev/shm/vllm_metrics && mkdir -p $PROMETHEUS_MULTIPROC_DIR
-export HCCL_DFS_CONFIG="task_exception:off,inconsistent_check:off"
-
 # Get these values through ifconfig.
 # nic_name is the network interface name corresponding to local_ip.
 nic_name="xxx"
 local_ip="xxx"
 
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export HCCL_ALGO=level0:fullmesh
-export VLLM_RPC_TIMEOUT=3600000
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-export HCCL_EXEC_TIMEOUT=204
-export HCCL_CONNECT_TIMEOUT=180
 export HCCL_BUFFSIZE=300
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=10
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export TASK_QUEUE_ENABLE=1
+export HCCL_IF_IP=$local_ip
+export HCCL_SOCKET_IFNAME=$nic_name
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export DYNAMIC_EPLB="true"
+export GLOO_SOCKET_IFNAME=$nic_name
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export HCCL_DFS_CONFIG="task_exception:off,inconsistent_check:off"
+export HCCL_ALGO=level0:fullmesh
 
+# Ensure the model path matches the directory recorded during download
 vllm serve Eco-Tech/Qwen3.5-397B-A17B-w4a4-mxfp4 \
   --host 0.0.0.0 \
   --port 30060 \
@@ -702,30 +675,23 @@ unset http_proxy
 
 source /root/.bashrc
 export PROMETHEUS_MULTIPROC_DIR=/dev/shm/vllm_metrics && mkdir -p $PROMETHEUS_MULTIPROC_DIR
-export HCCL_DFS_CONFIG="task_exception:off,inconsistent_check:off"
-
 # Get these values through ifconfig.
 # nic_name is the network interface name corresponding to local_ip.
 nic_name="xxx"
 local_ip="xxx"
 
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export HCCL_ALGO=level0:fullmesh
-export VLLM_RPC_TIMEOUT=3600000
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-export HCCL_EXEC_TIMEOUT=200
-export HCCL_CONNECT_TIMEOUT=1800
 export HCCL_BUFFSIZE=1200
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=10
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export TASK_QUEUE_ENABLE=1
+export HCCL_IF_IP=$local_ip
+export HCCL_SOCKET_IFNAME=$nic_name
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export DYNAMIC_EPLB="true"
+export GLOO_SOCKET_IFNAME=$nic_name
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export HCCL_DFS_CONFIG="task_exception:off,inconsistent_check:off"
+export HCCL_ALGO=level0:fullmesh
 
+# Ensure the model path matches the directory recorded during download
 vllm serve Eco-Tech/Qwen3.5-397B-A17B-w4a4-mxfp4 \
   --host 0.0.0.0 \
   --port 30050 \
@@ -790,7 +756,7 @@ Run a proxy server on the same node as the prefiller service instance. You can g
       --decoder-hosts 192.xx.xx.2 \
       --decoder-ports 30050 \
       --host 192.xx.xx.1 \
-      --port 8010
+      --port 8000
     ```
 
     For example:
@@ -800,9 +766,9 @@ Run a proxy server on the same node as the prefiller service instance. You can g
     bash proxy.sh
     ```
 
-=== "Ascend 950DT series"
+=== "950DT Products"
 
-    For Ascend 950DT PD disaggregation (1P1D), the proxy forwards requests to 1 prefill node and 1 decode node. Use the layerwise proxy script.
+    For 950DT Products PD disaggregation (1P1D), the proxy forwards requests to 1 prefill node and 1 decode node. Use the layerwise proxy script.
 
     ```shell
     unset ftp_proxy
@@ -814,7 +780,7 @@ Run a proxy server on the same node as the prefiller service instance. You can g
       --decoder-hosts 192.xx.xx.2 \
       --decoder-ports 30050 \
       --host 192.xx.xx.1 \
-      --port 8010
+      --port 8000
     ```
 
 Common Issues Tip: If requests reach the proxy but no output is returned, check that the proxy host list includes all healthy prefill and decode endpoints, and verify that the service verification request in Section 6 succeeds through the proxy port.
@@ -904,10 +870,10 @@ The following configurations are validated in specific test environments and are
 | Scenario        | Deployment Mode            | Total NPUs          | Weight Version | Key Considerations                                                                                    |
 | --------------- | -------------------------- | ------------------- | -------------- | ----------------------------------------------------------------------------------------------------- |
 | Long context    | Single-node online serving | 16 A3 NPUs          | W8A8 MTP       | Use larger `--max-model-len` and reserve enough KV cache. Lower `--max-num-seqs` if OOM occurs.       |
-| Long context    | Single-node online serving | 8 Ascend 950DT NPUs  | W4A4 MXFP4 MTP | Use TP=8 and reserve enough KV cache for 133K context. Lower `--max-num-seqs` if OOM occurs.          |
+| Long context    | Single-node online serving | 8 950DT Products NPUs  | W4A4 MXFP4 MTP | Use TP=8 and reserve enough KV cache for 133k context. Lower `--max-num-seqs` if OOM occurs.          |
 | High throughput | Multi-node MP              | 16 A2 NPUs          | W8A8 MTP       | Increase concurrency through DP and tune `--max-num-batched-tokens` for prefill throughput.           |
 | Low latency     | 1P1D PD disaggregation     | 48 A3 NPUs          | W8A8 MTP       | Use separate prefill and decode DP/TP layouts and enable full decode ACLGraph on decode nodes.        |
-| Low latency     | 1P1D PD disaggregation     | 16 Ascend 950DT NPUs | W4A4 MXFP4 MTP | Use one 8-NPU prefill node and one 8-NPU decode node. Enable full decode ACLGraph on the decode node. |
+| Low latency     | 1P1D PD disaggregation     | 16 950DT Products NPUs  | W4A4 MXFP4 MTP | Use one 8-NPU prefill node and one 8-NPU decode node. Enable full decode ACLGraph on the decode node. |
 
 | Scenario | Node Role | NPUs | TP | DP | Max Num Seqs | Max Model Len | Max Num Batched Tokens | MTP Tokens | Prefix Cache | Main Optimizations |
 | -------- | --------- | ---- | -- | -- | ------------ | ------------- | ---------------------- | ---------- | ------------ | ------------------ |
@@ -962,7 +928,7 @@ For common environment, installation, and general parameter issues, refer to [Pu
 
 **Cause:** Network interface names, IP addresses, DP ranks, or RPC ports are inconsistent across nodes.
 
-**Solution:** Verify multi-node communication first. Ensure `HCCL_IF_IP`, `GLOO_SOCKET_IFNAME`, `TP_SOCKET_IFNAME`, and `HCCL_SOCKET_IFNAME` match the selected NIC. Ensure all nodes use the same `--data-parallel-rpc-port`, non-master nodes use `--headless`, and `--data-parallel-start-rank` does not overlap.
+**Solution:** Verify multi-node communication first. Ensure `HCCL_IF_IP`, `GLOO_SOCKET_IFNAME`, and `HCCL_SOCKET_IFNAME` match the selected NIC. Ensure all nodes use the same `--data-parallel-rpc-port`, non-master nodes use `--headless`, and `--data-parallel-start-rank` does not overlap.
 
 ### Q3: Why is prefix caching disabled in the PD disaggregation examples?
 

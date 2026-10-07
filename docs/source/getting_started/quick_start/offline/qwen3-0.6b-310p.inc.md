@@ -8,6 +8,7 @@ The following Qwen3-0.6B example has been validated on Atlas 300I DUO and Atlas 
 
 In the container terminal, create `example.py` with the following code:
 
+<!-- doctest: quickstart-300i-duo-offline -->
 ```python
 from vllm import LLM, SamplingParams
 
@@ -50,6 +51,7 @@ for output in outputs:
 
 Run the example:
 
+<!-- doctest: quickstart-300i-duo-offline-run -->
 ```bash
 python3 example.py
 ```

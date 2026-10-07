@@ -1,0 +1,3587 @@
+import unittest
+from collections import deque
+from contextlib import nullcontext
+from dataclasses import fields, replace
+from types import SimpleNamespace
+from unittest.mock import MagicMock, call, patch
+
+import numpy as np
+import torch
+from vllm.config import CompilationConfig, CUDAGraphMode
+from vllm.model_executor.layers.attention import MLAAttention
+from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
+from vllm.sampling_params import SamplingParams
+from vllm.v1.attention.backends.utils import reorder_batch_to_split_decodes_and_prefills
+from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    HiddenStateCacheSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    KVCacheTensor,
+    MambaSpec,
+    MLAAttentionSpec,
+    UniformTypeKVCacheSpecs,
+)
+from vllm.v1.utils import CpuGpuBuffer
+from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
+from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+
+from vllm_ascend.ascend_config import FinegrainedTPConfig
+from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.attention.attention_c8_mxfp import (
+    AscendC8MXFPAttentionBackendImpl,
+    mxfp_cache_spec,
+    mxfp_v_scale_cache_shape,
+)
+from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
+from vllm_ascend.attention.mla_v1 import AscendMLABackend
+from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
+from vllm_ascend.core.kv_cache_interface import (
+    AscendIndexerKPoolTailSpec,
+    AscendMLAAttentionSpec,
+    AscendSFAIndexerCacheSpec,
+)
+from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots import CopySfaRequestStates
+from vllm_ascend.eplb.eplb_updator import EplbUpdator
+from vllm_ascend.models.glm5next.kv_cache import (
+    Glm5NextIndexerCache,
+    Glm5NextTailCache,
+)
+from vllm_ascend.patch.platform.patch_kv_cache_utils import (
+    _get_kv_cache_config_deepseek_v4_main,
+)
+from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
+from vllm_ascend.utils import AscendDeviceType
+from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.worker.v2.kvpp import KVPPRuntime
+
+
+class DenseAttentionBackend(AscendAttentionBackend):
+    pass
+
+
+class SparseAttentionBackend(AscendAttentionBackend):
+    @classmethod
+    def is_sparse(cls) -> bool:
+        return True
+
+
+class TestGlm5MtpGraphMetadata(unittest.TestCase):
+    @staticmethod
+    def _build_dispatch_runner(speculative: bool) -> NPUModelRunner:
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.uniform_decode_query_len = 6
+        runner.speculative_config = object() if speculative else None
+        # ``use_dcp`` is derived from this field in production initialization.
+        runner.dcp_size = 1
+        runner._pad_for_sequence_parallelism = lambda num_tokens: num_tokens
+        runner.input_batch = SimpleNamespace(
+            num_computed_tokens_cpu=np.array([9, 10], dtype=np.int32),
+            num_prompt_tokens=np.array([10, 10], dtype=np.int32),
+            lora_id_to_lora_request={},
+        )
+        runner.model_config = SimpleNamespace(is_encoder_decoder=False, is_hybrid=False)
+        runner.cudagraph_dispatcher = MagicMock(
+            dispatch=MagicMock(
+                return_value=(
+                    CUDAGraphMode.NONE,
+                    SimpleNamespace(num_tokens=12),
+                )
+            )
+        )
+        runner.vllm_config = SimpleNamespace(
+            parallel_config=SimpleNamespace(
+                tensor_parallel_size=1,
+                data_parallel_size=1,
+            ),
+            observability_config=SimpleNamespace(cudagraph_metrics=False),
+        )
+        return runner
+
+    def test_partial_prompt_with_state_dispatches_speculative_decode_graph(self):
+        runner = self._build_dispatch_runner(speculative=True)
+
+        with patch(
+            "vllm_ascend.worker.model_runner_v1.enable_sp",
+            return_value=False,
+        ):
+            runner._determine_batch_execution_and_padding(
+                num_tokens=12,
+                num_reqs=2,
+                num_scheduled_tokens_np=np.array([6, 6], dtype=np.int32),
+                max_num_scheduled_tokens=6,
+                use_cascade_attn=False,
+            )
+
+        call_kwargs = runner.cudagraph_dispatcher.dispatch.call_args.kwargs
+        self.assertTrue(call_kwargs["uniform_decode"])
+
+    def test_mamba_prefill_graph_dispatch(self):
+        cases = [
+            ([2048], [2052], False, None, False),  # cached/continued short prefill
+            ([2052], [2052], False, None, True),  # first decode
+            ([2060, 2048], [2052, 2052], False, None, False),  # mixed batch
+            ([2060, 2056], [2052, 2052], False, None, True),
+            ([0], [4], False, None, False),
+            ([2048], [2052], True, None, False),  # DCP
+            ([0], [4], False, True, True),  # explicit capture/dummy override
+        ]
+        for computed, prompts, dcp, forced, expected in cases:
+            with self.subTest(computed=computed, prompts=prompts, dcp=dcp, forced=forced):
+                runner = self._build_dispatch_runner(speculative=True)
+                runner.model_config.is_hybrid = True
+                runner.dcp_size = 2 if dcp else 1
+                runner.uniform_decode_query_len = 4
+                # Extra stale rows must not affect the real batch decision.
+                runner.input_batch.num_computed_tokens_cpu = np.array(computed + [0])
+                runner.input_batch.num_prompt_tokens = np.array(prompts + [999])
+                with patch("vllm_ascend.worker.model_runner_v1.enable_sp", return_value=False):
+                    runner._determine_batch_execution_and_padding(
+                        num_tokens=4 * len(computed),
+                        num_reqs=len(computed),
+                        num_scheduled_tokens_np=np.full(len(computed), 4),
+                        max_num_scheduled_tokens=4,
+                        use_cascade_attn=False,
+                        force_uniform_decode=forced,
+                    )
+                self.assertEqual(runner.cudagraph_dispatcher.dispatch.call_args.kwargs["uniform_decode"], expected)
+
+    def test_mamba_non_spec_decode_graph_dispatch(self):
+        for computed, expected in ((2048, False), (2049, True)):
+            with self.subTest(computed=computed):
+                runner = self._build_dispatch_runner(speculative=False)
+                runner.model_config.is_hybrid = True
+                runner.uniform_decode_query_len = 1
+                runner.input_batch.num_computed_tokens_cpu = np.array([computed])
+                runner.input_batch.num_prompt_tokens = np.array([2049])
+                with patch("vllm_ascend.worker.model_runner_v1.enable_sp", return_value=False):
+                    runner._determine_batch_execution_and_padding(
+                        num_tokens=1,
+                        num_reqs=1,
+                        num_scheduled_tokens_np=np.array([1]),
+                        max_num_scheduled_tokens=1,
+                        use_cascade_attn=False,
+                    )
+                self.assertEqual(runner.cudagraph_dispatcher.dispatch.call_args.kwargs["uniform_decode"], expected)
+
+
+class TestDPPaddingPolicy(unittest.TestCase):
+    @staticmethod
+    def _make_runner(dp_rank=0):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.dp_size = 2
+        runner.dp_rank = dp_rank
+        runner.vllm_config = SimpleNamespace(model_config=SimpleNamespace())
+        runner.ascend_config = SimpleNamespace(finegrained_tp_config=FinegrainedTPConfig())
+        return runner
+
+    @staticmethod
+    def _run_sync(
+        runner,
+        tokens=(8, 32),
+        modes=(CUDAGraphMode.NONE, CUDAGraphMode.NONE),
+        comm_method=MoECommType.ALLTOALL,
+        is_draft=False,
+        mega_moe=False,
+    ):
+        module = "vllm_ascend.worker.model_runner_v1"
+
+        def all_reduce(packed_tensor, group):
+            remote_rank = 1 - runner.dp_rank
+            packed_tensor[0, remote_rank] = tokens[remote_rank]
+            packed_tensor[1, remote_rank] = modes[remote_rank].value
+
+        with (
+            patch(f"{module}.should_skip_allreduce_across_dp_group", return_value=False),
+            patch(f"{module}.get_dp_group", return_value=SimpleNamespace(cpu_group=None)),
+            patch(f"{module}.dist.all_reduce", side_effect=all_reduce),
+            patch(f"{module}.select_moe_comm_method", return_value=comm_method),
+            patch(f"{module}.use_cann_megamoe", return_value=mega_moe),
+        ):
+            return runner._sync_metadata_across_dp(
+                num_tokens=tokens[runner.dp_rank],
+                is_draft_model=is_draft,
+                cudagraph_mode=modes[runner.dp_rank],
+            )
+
+    def test_skip_dp_sync_keeps_local_token_count(self):
+        runner = self._make_runner()
+        module = "vllm_ascend.worker.model_runner_v1"
+        with (
+            patch(f"{module}.should_skip_allreduce_across_dp_group", return_value=True),
+            patch(f"{module}.dist.all_reduce") as all_reduce,
+            patch(f"{module}.select_moe_comm_method") as select_comm,
+        ):
+            maximum, across_dp, mode = runner._sync_metadata_across_dp(num_tokens=8)
+
+        self.assertEqual(maximum, 8)
+        self.assertEqual(mode, CUDAGraphMode.NONE)
+        self.assertEqual(across_dp.tolist(), [8, 8])
+        all_reduce.assert_not_called()
+        select_comm.assert_not_called()
+
+    def test_single_dp_does_not_synchronize(self):
+        runner = self._make_runner()
+        runner.dp_size = 1
+        with patch("vllm_ascend.worker.model_runner_v1.dist.all_reduce") as all_reduce:
+            self.assertEqual(runner._sync_metadata_across_dp(8), (8, None, CUDAGraphMode.NONE))
+        all_reduce.assert_not_called()
+
+    def test_sync_only_pads_for_uniform_input_consumers(self):
+        cases = (
+            ("dense_eager", None, CUDAGraphMode.NONE, False, False, False),
+            ("dense_graph", None, CUDAGraphMode.FULL, False, False, True),
+            ("allgather", MoECommType.ALLGATHER, CUDAGraphMode.NONE, False, False, True),
+            ("mc2", MoECommType.MC2, CUDAGraphMode.NONE, False, False, True),
+            ("alltoall", MoECommType.ALLTOALL, CUDAGraphMode.NONE, False, False, False),
+            ("fused_mc2", MoECommType.FUSED_MC2, CUDAGraphMode.NONE, False, False, False),
+            ("mega_moe", MoECommType.FUSED_MC2, CUDAGraphMode.NONE, False, True, True),
+            ("draft", None, CUDAGraphMode.NONE, True, False, True),
+        )
+        for name, comm_method, graph_mode, is_draft, mega_moe, should_pad in cases:
+            for dp_rank in range(2):
+                with self.subTest(name=name, dp_rank=dp_rank):
+                    maximum, across_dp, synced_mode = self._run_sync(
+                        self._make_runner(dp_rank),
+                        modes=(graph_mode, graph_mode),
+                        comm_method=comm_method,
+                        is_draft=is_draft,
+                        mega_moe=mega_moe,
+                    )
+                    self.assertEqual(maximum, 32)
+                    self.assertEqual(synced_mode, graph_mode)
+                    self.assertEqual(across_dp.tolist(), [32, 32] if should_pad else [8, 32])
+
+    def test_each_finegrained_tp_field_requires_uniform_inputs(self):
+        for field in fields(FinegrainedTPConfig):
+            for size in (0, 1, 2):
+                for comm_method in (MoECommType.ALLTOALL, MoECommType.FUSED_MC2):
+                    for tokens in ((0, 31), (8, 31)):
+                        for dp_rank in range(2):
+                            with self.subTest(
+                                field=field.name, size=size, comm_method=comm_method, tokens=tokens, dp_rank=dp_rank
+                            ):
+                                runner = self._make_runner(dp_rank)
+                                runner.ascend_config.finegrained_tp_config = FinegrainedTPConfig(**{field.name: size})
+                                maximum, across_dp, mode = self._run_sync(
+                                    runner, tokens=tokens, comm_method=comm_method
+                                )
+                                self.assertEqual(maximum, 31)
+                                self.assertEqual(mode, CUDAGraphMode.NONE)
+                                self.assertEqual(across_dp.tolist(), [31, 31] if size > 1 else list(tokens))
+
+    def test_imbalanced_and_idle_metadata_use_agreed_graph_mode(self):
+        for tokens in ((0, 32), (1, 32), (8, 32)):
+            for modes, expected_mode, should_pad in (
+                ((CUDAGraphMode.NONE, CUDAGraphMode.NONE), CUDAGraphMode.NONE, False),
+                ((CUDAGraphMode.FULL, CUDAGraphMode.NONE), CUDAGraphMode.NONE, False),
+                ((CUDAGraphMode.FULL, CUDAGraphMode.PIECEWISE), CUDAGraphMode.PIECEWISE, True),
+            ):
+                for dp_rank in range(2):
+                    with self.subTest(tokens=tokens, modes=modes, dp_rank=dp_rank):
+                        maximum, across_dp, mode = self._run_sync(self._make_runner(dp_rank), tokens, modes)
+                        self.assertEqual(maximum, 32)
+                        self.assertEqual(mode, expected_mode)
+                        self.assertEqual(across_dp.tolist(), [32, 32] if should_pad else list(tokens))
+
+
+class TestDPPaddingEplb(unittest.TestCase):
+    def test_dummy_padding_preserves_remote_metadata_for_eplb(self):
+        for dp_rank in range(2):
+            with self.subTest(dp_rank=dp_rank):
+                runner = NPUModelRunner.__new__(NPUModelRunner)
+                runner.dp_rank = dp_rank
+                runner.uniform_decode_query_len = 1
+                runner.scheduler_config = SimpleNamespace(max_num_batched_tokens=32, max_num_seqs=32)
+                runner.vllm_config = SimpleNamespace(model_config=SimpleNamespace(multimodal_config=None))
+                runner.dynamic_eplb = True
+                runner.eplb_updator = MagicMock()
+                runner.eplb_heat_collection_stage = "prefill"
+                runner.eplb_pd_thresholds = 16
+                expected_tokens = [32, 32]
+                expected_tokens[dp_rank] = 4
+                metadata = torch.tensor(expected_tokens, dtype=torch.int32)
+                runner._determine_batch_execution_and_padding = MagicMock(
+                    return_value=(CUDAGraphMode.NONE, SimpleNamespace(num_tokens=4, num_reqs=1), False, metadata, None)
+                )
+                update_status = runner.update_eplb_heat_collection_status
+
+                def stop_after_stage_selection(num_tokens, num_tokens_across_dp=None, *, update_status=update_status):
+                    update_status(num_tokens, num_tokens_across_dp)
+                    raise RuntimeError("stop before model execution")
+
+                runner.update_eplb_heat_collection_status = MagicMock(side_effect=stop_after_stage_selection)
+                with self.assertRaisesRegex(RuntimeError, "stop before model execution"):
+                    runner._dummy_run(1)
+
+                runner.update_eplb_heat_collection_status.assert_called_once_with(4, metadata)
+                self.assertEqual(metadata.tolist(), expected_tokens)
+                self.assertTrue(runner.eplb_heat_collection_status)
+
+    def test_stage_selection_uses_common_dp_maximum(self):
+        for stage in ("prefill", "decode", "all"):
+            for tokens in ((1, 32), (8, 32), (8, 16)):
+                statuses = []
+                metadata = torch.tensor(tokens, dtype=torch.int32)
+                for local_tokens in tokens:
+                    runner = NPUModelRunner.__new__(NPUModelRunner)
+                    runner.eplb_heat_collection_stage = stage
+                    runner.eplb_pd_thresholds = 16
+                    runner.update_eplb_heat_collection_status(local_tokens, metadata)
+                    statuses.append(runner.eplb_heat_collection_status)
+                expected = stage == "all" or (max(tokens) > 16 if stage == "prefill" else max(tokens) <= 16)
+                self.assertEqual(statuses, [expected, expected])
+                self.assertEqual(metadata.tolist(), list(tokens))
+
+    def test_without_dp_metadata_preserves_local_stage_selection(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.eplb_heat_collection_stage = "prefill"
+        runner.eplb_pd_thresholds = 16
+        runner.update_eplb_heat_collection_status(8)
+        self.assertFalse(runner.eplb_heat_collection_status)
+        runner.update_eplb_heat_collection_status(32)
+        self.assertTrue(runner.eplb_heat_collection_status)
+
+    def test_imbalanced_dp_ranks_enter_eplb_collectives_together(self):
+        for stage in ("prefill", "decode"):
+            for tokens in ((1, 32), (8, 16)):
+                with self.subTest(stage=stage, tokens=tokens):
+                    runners = [NPUModelRunner.__new__(NPUModelRunner) for _ in tokens]
+                    updators = [EplbUpdator.__new__(EplbUpdator) for _ in tokens]
+                    for runner, updator in zip(runners, updators):
+                        runner.eplb_heat_collection_stage = stage
+                        runner.eplb_pd_thresholds = 16
+                        updator.cur_iterations = 0
+                        updator.expert_heat_collection_interval = 3
+                        updator.algorithm_execution_interval = 1
+                        updator.num_moe_layers = 2
+                        updator.compute_and_set_moe_load = MagicMock()
+                        updator.wakeup_eplb_worker = MagicMock()
+                    for _ in range(3):
+                        for local_tokens, runner, updator in zip(tokens, runners, updators):
+                            runner.update_eplb_heat_collection_status(
+                                local_tokens, torch.tensor(tokens, dtype=torch.int32)
+                            )
+                            updator.forward_end(runner.eplb_heat_collection_status)
+                        self.assertEqual(updators[0].cur_iterations, updators[1].cur_iterations)
+                    expected_gathers = int(runners[0].eplb_heat_collection_status)
+                    for updator in updators:
+                        self.assertEqual(updator.compute_and_set_moe_load.call_count, expected_gathers)
+
+
+class TestDummyRunSlotInvalidation(unittest.TestCase):
+    def test_padded_speculative_dummy_preserves_logical_query_lengths(self):
+        # DSA CP rounds 186 tokens to 192 without adding a logical request.
+        # Also cover dispatchers that pad the request count itself.
+        for num_tokens, padded_tokens, padded_reqs in ((186, 192, 31), (12, 24, 4), (6, 24, 4), (12, 12, 2)):
+            with self.subTest(num_tokens=num_tokens):
+                runner = NPUModelRunner.__new__(NPUModelRunner)
+                runner.uniform_decode_query_len = 6
+                runner.scheduler_config = SimpleNamespace(max_num_batched_tokens=4096, max_num_seqs=32)
+                runner.dynamic_eplb = False
+                runner.dcp_size = 1
+                runner.speculative_config = None
+                runner._has_gdn = True
+                runner.vllm_config = MagicMock()
+                runner.vllm_config.model_config.multimodal_config = None
+                agreed_counts = torch.tensor([padded_tokens, 192], dtype=torch.int32)
+                runner._determine_batch_execution_and_padding = MagicMock(
+                    return_value=(
+                        CUDAGraphMode.FULL,
+                        SimpleNamespace(num_tokens=padded_tokens, num_reqs=padded_reqs),
+                        False,
+                        agreed_counts,
+                        None,
+                    )
+                )
+                runner.synchronize_input_prep = nullcontext
+                runner._should_build_dummy_attn_metadata = MagicMock(return_value=True)
+                runner.optimistic_seq_lens_cpu = torch.zeros(32, dtype=torch.int32)
+                runner.seq_lens = MagicMock()
+                runner.arange_np = np.arange(4096, dtype=np.int32)
+                runner.query_pos = SimpleNamespace(np=np.zeros(4096, dtype=np.int32))
+                runner.query_start_loc = SimpleNamespace(np=np.zeros(33, dtype=np.int32), copy_to_gpu=MagicMock())
+                runner.gdn_query_start_loc = SimpleNamespace(np=np.zeros(33, dtype=np.int32), copy_to_gpu=MagicMock())
+
+                def check_offsets(
+                    *args,
+                    runner=runner,
+                    num_tokens=num_tokens,
+                    padded_tokens=padded_tokens,
+                    padded_reqs=padded_reqs,
+                    agreed_counts=agreed_counts,
+                ):
+                    num_reqs = num_tokens // 6
+                    expected = np.concatenate(
+                        (np.arange(num_reqs + 1) * 6, np.full(padded_reqs - num_reqs, num_tokens))
+                    )
+                    np.testing.assert_array_equal(runner.query_start_loc.np[: padded_reqs + 1], expected)
+                    np.testing.assert_array_equal(runner.gdn_query_start_loc.np[: padded_reqs + 1], expected)
+                    np.testing.assert_array_equal(runner.query_pos.np[:num_tokens], np.tile(np.arange(6), num_reqs))
+                    torch.testing.assert_close(agreed_counts, torch.tensor([padded_tokens, 192], dtype=torch.int32))
+                    raise RuntimeError("logical query lengths checked")
+
+                get_cumsum = runner._get_cumsum_and_arange
+
+                def check_padded_schedule(
+                    schedule,
+                    arange,
+                    num_tokens=num_tokens,
+                    padded_reqs=padded_reqs,
+                    get_cumsum=get_cumsum,
+                ):
+                    num_reqs = num_tokens // 6
+                    expected = np.concatenate((np.full(num_reqs, 6), np.zeros(padded_reqs - num_reqs)))
+                    np.testing.assert_array_equal(schedule, expected)
+                    self.assertEqual(schedule.dtype, np.int32)
+                    self.assertEqual(int(schedule.sum()), num_tokens)
+                    return get_cumsum(schedule, arange)
+
+                runner._get_cumsum_and_arange = check_padded_schedule
+                runner._pad_query_start_loc_for_fia = check_offsets
+                with (
+                    patch("vllm_ascend.worker.model_runner_v1.using_paged_attention", return_value=False),
+                    self.assertRaisesRegex(RuntimeError, "logical query lengths checked"),
+                ):
+                    runner._dummy_run(num_tokens, uniform_decode=True, cudagraph_runtime_mode=CUDAGraphMode.FULL)
+
+    def test_padded_dummy_preserves_other_dp_token_counts(self):
+        for token_counts in ([24, 8], [8, 24], [8, 8]):
+            with self.subTest(token_counts=token_counts):
+                runner = NPUModelRunner.__new__(NPUModelRunner)
+                runner.vllm_config = SimpleNamespace(model_config=SimpleNamespace(multimodal_config=None))
+                runner.uniform_decode_query_len = 1
+                runner.scheduler_config = SimpleNamespace(max_num_batched_tokens=32, max_num_seqs=4)
+                runner.dynamic_eplb = False
+                runner.dcp_size = 1
+                agreed_counts = torch.tensor(token_counts, dtype=torch.int32)
+                runner._determine_batch_execution_and_padding = MagicMock(
+                    return_value=(
+                        CUDAGraphMode.NONE,
+                        SimpleNamespace(num_tokens=8, num_reqs=1),
+                        False,
+                        agreed_counts,
+                        None,
+                    )
+                )
+
+                def check_agreed_counts(agreed_counts=agreed_counts, token_counts=token_counts):
+                    torch.testing.assert_close(agreed_counts, torch.tensor(token_counts, dtype=torch.int32))
+                    raise RuntimeError("DP token counts checked")
+
+                runner.synchronize_input_prep = check_agreed_counts
+                with self.assertRaisesRegex(RuntimeError, "DP token counts checked"):
+                    runner._dummy_run(1, uniform_decode=True)
+
+    def test_backend_metadata_sees_invalidated_dummy_slots(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.kvpp = KVPPRuntime()
+        runner.uniform_decode_query_len = 1
+        runner.scheduler_config = SimpleNamespace(max_num_batched_tokens=8, max_num_seqs=8)
+        runner.dynamic_eplb = False
+        # use_dcp is a read-only property derived from dcp_size.
+        runner.dcp_size = 1
+        runner.speculative_config = None
+        runner.use_compress = True
+        runner._has_gdn = False
+        # _dummy_run reads multimodal_config for the mm_encoder_only early-exit.
+        runner.vllm_config = SimpleNamespace(model_config=SimpleNamespace(multimodal_config=None))
+
+        runner._determine_batch_execution_and_padding = MagicMock(
+            return_value=(CUDAGraphMode.NONE, SimpleNamespace(num_tokens=1, num_reqs=1), None, None, None)
+        )
+        runner._should_build_dummy_attn_metadata = MagicMock(return_value=True)
+        runner.synchronize_input_prep = MagicMock(return_value=nullcontext())
+        runner._get_cumsum_and_arange = MagicMock(return_value=np.array([1], dtype=np.int32))
+        runner._pad_query_start_loc_for_fia = MagicMock(return_value=1)
+
+        runner.optimistic_seq_lens_cpu = torch.zeros(8, dtype=torch.int32)
+        runner.seq_lens = MagicMock()
+        runner.query_pos = SimpleNamespace(np=np.zeros(8, dtype=np.int32))
+        runner.query_start_loc = SimpleNamespace(np=np.zeros(9, dtype=np.int32), copy_to_gpu=MagicMock())
+        runner.positions = MagicMock()
+        runner._dsa_positions_cpu_buf = MagicMock()
+
+        slot_mappings = [torch.tensor([3]), torch.tensor([7])]
+        block_tables = MagicMock()
+        block_tables.__getitem__.side_effect = lambda index: SimpleNamespace(
+            slot_mapping=SimpleNamespace(gpu=slot_mappings[index])
+        )
+        runner.input_batch = SimpleNamespace(block_table=block_tables)
+        runner.kv_cache_config = SimpleNamespace(
+            kv_cache_groups=[
+                SimpleNamespace(kv_cache_spec=object()),
+                SimpleNamespace(kv_cache_spec=object()),
+            ]
+        )
+
+        def check_slots_before_build(**_kwargs):
+            for slot_mapping in slot_mappings:
+                torch.testing.assert_close(slot_mapping, torch.full_like(slot_mapping, -1))
+            raise RuntimeError("metadata checked")
+
+        runner._build_attention_metadata = check_slots_before_build
+
+        with self.assertRaisesRegex(RuntimeError, "metadata checked"):
+            runner._dummy_run(1)
+
+    def test_graph_capture_invalidates_only_v41_active_slots(self):
+        from tests.deepseek_v41_utils import make_cache_config
+
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.uniform_decode_query_len = 1
+        runner.scheduler_config = SimpleNamespace(max_num_batched_tokens=8, max_num_seqs=8)
+        runner.dynamic_eplb = False
+        runner.dcp_size = 1
+        runner.speculative_config = None
+        runner.use_compress = True
+        runner._has_gdn = False
+        runner.vllm_config = MagicMock()
+        runner.vllm_config.model_config.multimodal_config = None
+
+        runner._determine_batch_execution_and_padding = MagicMock(
+            return_value=(
+                CUDAGraphMode.FULL,
+                SimpleNamespace(num_tokens=2, num_reqs=2),
+                None,
+                None,
+                None,
+            )
+        )
+        runner._should_build_dummy_attn_metadata = MagicMock(return_value=True)
+        runner.synchronize_input_prep = MagicMock(return_value=nullcontext())
+        runner._get_cumsum_and_arange = MagicMock(return_value=np.array([1, 2], dtype=np.int32))
+        runner._pad_query_start_loc_for_fia = MagicMock(return_value=2)
+
+        runner.optimistic_seq_lens_cpu = torch.zeros(8, dtype=torch.int32)
+        runner.seq_lens = MagicMock()
+        runner.query_pos = SimpleNamespace(np=np.zeros(8, dtype=np.int32))
+        runner.query_start_loc = SimpleNamespace(np=np.zeros(9, dtype=np.int32), copy_to_gpu=MagicMock())
+        runner.positions = MagicMock()
+        runner._dsa_positions_cpu_buf = MagicMock()
+
+        v41_group = make_cache_config(17).kv_cache_groups[0]
+        other_group = SimpleNamespace(kv_cache_spec=object())
+        slot_mappings = [torch.tensor([3, 4]), torch.tensor([7, 8])]
+        block_tables = MagicMock()
+        block_tables.__getitem__.side_effect = lambda index: SimpleNamespace(
+            slot_mapping=SimpleNamespace(gpu=slot_mappings[index])
+        )
+        runner.input_batch = SimpleNamespace(block_table=block_tables)
+        runner.kv_cache_config = SimpleNamespace(
+            kv_cache_groups=[v41_group, other_group],
+            num_blocks=17,
+        )
+
+        def check_slots_before_build(**_kwargs):
+            torch.testing.assert_close(slot_mappings[0], torch.full_like(slot_mappings[0], -1))
+            torch.testing.assert_close(slot_mappings[1], torch.tensor([7, 8]))
+            raise RuntimeError("metadata checked")
+
+        runner._build_attention_metadata = check_slots_before_build
+
+        with (
+            patch("vllm_ascend.worker.model_runner_v1.using_paged_attention", return_value=False),
+            self.assertRaisesRegex(RuntimeError, "metadata checked"),
+        ):
+            runner._dummy_run(2, cudagraph_runtime_mode=CUDAGraphMode.FULL, is_graph_capturing=True)
+
+
+class TestMmEncoderOnlyDummyRunEarlyExit(unittest.TestCase):
+    def _build_runner(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(multimodal_config=SimpleNamespace(mm_encoder_only=True))
+        )
+        return runner
+
+    def test_dummy_run_returns_empty_tensors_without_forward(self):
+        runner = self._build_runner()
+        runner._model_forward = MagicMock()
+
+        result = runner._dummy_run(4)
+
+        self.assertIsInstance(result, tuple)
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0].numel(), 0)
+        self.assertEqual(result[1].numel(), 0)
+        runner._model_forward.assert_not_called()
+
+    def test_dummy_sampler_run_returns_empty_tensor(self):
+        runner = self._build_runner()
+
+        result = runner._dummy_sampler_run(torch.zeros((4, 16)))
+
+        self.assertEqual(result.numel(), 0)
+
+
+class TestDeviceMetadataFullGraphEvents(unittest.TestCase):
+    def test_full_mode_requires_external_events(self):
+        for mode, uses_external_events, should_raise in (
+            (CUDAGraphMode.FULL, False, True),
+            (CUDAGraphMode.FULL, True, False),
+            (CUDAGraphMode.PIECEWISE, False, False),
+            (CUDAGraphMode.NONE, False, False),
+        ):
+            with self.subTest(mode=mode, uses_external_events=uses_external_events):
+                runner = NPUModelRunner.__new__(NPUModelRunner)
+                executor = SimpleNamespace(
+                    submission_in_flight=True,
+                    uses_external_events=uses_external_events,
+                )
+                runner.device_metadata_executor = executor
+
+                if should_raise:
+                    with self.assertRaisesRegex(RuntimeError, "requires external events"):
+                        runner._prepare_device_metadata_for_forward(mode)
+                else:
+                    self.assertIs(runner._prepare_device_metadata_for_forward(mode), executor)
+
+    def test_ignores_executor_without_active_submission(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        executor = MagicMock(submission_in_flight=False)
+        runner.device_metadata_executor = executor
+
+        active_executor = runner._prepare_device_metadata_for_forward(CUDAGraphMode.FULL)
+
+        self.assertIsNone(active_executor)
+
+    def test_dummy_full_uses_external_events_without_global_wait(self):
+        from contextlib import contextmanager, nullcontext
+
+        events: list[object] = []
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.kvpp = SimpleNamespace(
+            scheduler=object(),
+            prepare_forward=lambda history: events.append(("prepare", history)),
+            complete_forward=lambda: events.append("complete"),
+        )
+        runner.uniform_decode_query_len = 1
+        runner.scheduler_config = SimpleNamespace(max_num_batched_tokens=4, max_num_seqs=4)
+        runner.dynamic_eplb = False
+        runner.dcp_size = 1
+        runner._determine_batch_execution_and_padding = MagicMock(
+            return_value=(
+                CUDAGraphMode.FULL,
+                SimpleNamespace(num_tokens=4, num_reqs=4),
+                None,
+                None,
+                None,
+            )
+        )
+        runner.synchronize_input_prep = nullcontext
+        runner._should_build_dummy_attn_metadata = MagicMock(return_value=False)
+        runner.maybe_dummy_run_with_lora = MagicMock(return_value=nullcontext())
+        runner.lora_config = None
+        runner.max_num_tokens = 4
+        runner.device = torch.device("cpu")
+        runner.supports_mm_inputs = False
+        runner.model_config = SimpleNamespace(is_encoder_decoder=False)
+        runner.enable_prompt_embeds = False
+        runner.input_ids = SimpleNamespace(gpu=torch.zeros(4, dtype=torch.int64))
+        runner.uses_mrope = False
+        runner.uses_xdrope_dim = 0
+        runner.positions = torch.zeros(4, dtype=torch.int64)
+        runner.drafter = None
+        # _dummy_run reads multimodal_config for the mm_encoder_only
+        # early-exit; keep it real so the forward path is not skipped.
+        runner.vllm_config = SimpleNamespace(model_config=SimpleNamespace(multimodal_config=None))
+        runner.model = MagicMock()
+        runner._has_sinks = False
+        runner.use_aux_hidden_state_outputs = False
+        runner.use_compress = False
+        runner._finalize_dump_data = MagicMock()
+
+        def model_forward(*args):
+            events.append("forward")
+            return torch.zeros((4, 1))
+
+        runner._model_forward = MagicMock(side_effect=model_forward)
+        executor = MagicMock(submission_in_flight=True)
+        executor.uses_external_events = True
+        executor.release.side_effect = lambda: events.append("release")
+        runner.device_metadata_executor = executor
+
+        @contextmanager
+        def forward_context(*args, **kwargs):
+            events.append("context_enter")
+            yield
+            events.append("context_exit")
+
+        with (
+            patch("vllm_ascend.worker.model_runner_v1.get_pp_group", return_value=SimpleNamespace(is_first_rank=True)),
+            patch("vllm_ascend.worker.model_runner_v1.lmhead_tp_enable", return_value=False),
+            patch("vllm_ascend.worker.model_runner_v1.set_ascend_forward_context", forward_context),
+            patch("vllm_ascend.worker.model_runner_v1.update_cos_sin"),
+        ):
+            runner._dummy_run(4, cudagraph_runtime_mode=CUDAGraphMode.FULL, is_graph_capturing=True)
+
+        self.assertEqual(
+            events, [("prepare", False), "context_enter", "forward", "context_exit", "release", "complete"]
+        )
+
+
+class TestDSparkAuxCaptureMode(unittest.TestCase):
+    def _build_runner(
+        self,
+        *,
+        model_type: str,
+        architecture: str,
+        use_dspark: bool = True,
+    ):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.speculative_config = SimpleNamespace(
+            use_dspark=MagicMock(return_value=use_dspark),
+            draft_model_config=SimpleNamespace(
+                hf_config=SimpleNamespace(
+                    model_type=model_type,
+                    architectures=[architecture],
+                )
+            ),
+        )
+        return runner
+
+    def test_qwen3_gqa_dspark_uses_materialized_stream(self):
+        runner = self._build_runner(
+            model_type="qwen3",
+            architecture="Qwen3DSparkModel",
+        )
+
+        self.assertTrue(runner._draft_uses_qwen3_gqa_dspark())
+
+    def test_mla_dspark_keeps_raw_stream(self):
+        runner = self._build_runner(
+            model_type="kimi_k3_dspark",
+            architecture="KimiK3DSparkForCausalLM",
+        )
+
+        self.assertFalse(runner._draft_uses_qwen3_gqa_dspark())
+
+    def test_non_dspark_keeps_raw_stream(self):
+        runner = self._build_runner(
+            model_type="qwen3",
+            architecture="Qwen3DSparkModel",
+            use_dspark=False,
+        )
+
+        self.assertFalse(runner._draft_uses_qwen3_gqa_dspark())
+
+
+class TestDrafterMaxModelLen(unittest.TestCase):
+    def _build_runner(
+        self,
+        *,
+        dp_size: int = 1,
+        query_width: int | None = None,
+        model_backed: bool = True,
+        use_dflash: bool = False,
+    ):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.effective_drafter_max_model_len = 1024
+        runner.num_spec_tokens = 5
+        runner.parallel_config = SimpleNamespace(data_parallel_size=dp_size)
+        runner.input_batch = SimpleNamespace(req_ids=["req-0", "req-1"])
+        runner.speculative_config = SimpleNamespace(
+            use_dflash=MagicMock(return_value=use_dflash),
+            use_eagle=MagicMock(return_value=model_backed),
+            uses_draft_model=MagicMock(return_value=False),
+            uses_extract_hidden_states=MagicMock(return_value=False),
+        )
+
+        if query_width is None:
+            drafter = SimpleNamespace()
+        else:
+            drafter = AscendDSparkProposer.__new__(AscendDSparkProposer)
+            drafter.num_query_per_req = query_width
+        drafter.dummy_run = MagicMock()
+        runner.drafter = drafter
+        runner.device = torch.device("cpu")
+        runner._copy_draft_token_ids_to_cpu = MagicMock()
+        return runner
+
+    def test_dspark_fit_check_uses_its_exact_query_group(self):
+        runner = self._build_runner(query_width=6)
+
+        self.assertTrue(runner._input_fits_in_drafter(SimpleNamespace(max_seq_len=1018)))
+        self.assertFalse(runner._input_fits_in_drafter(SimpleNamespace(max_seq_len=1019)))
+
+    def test_dflash_fit_check_includes_bonus_query(self):
+        runner = self._build_runner(use_dflash=True)
+
+        self.assertTrue(runner._input_fits_in_drafter(SimpleNamespace(max_seq_len=1018)))
+        self.assertFalse(runner._input_fits_in_drafter(SimpleNamespace(max_seq_len=1019)))
+
+    def test_standard_drafter_fit_check_uses_spec_token_count(self):
+        runner = self._build_runner()
+
+        self.assertTrue(runner._input_fits_in_drafter(SimpleNamespace(max_seq_len=1019)))
+        self.assertFalse(runner._input_fits_in_drafter(SimpleNamespace(max_seq_len=1020)))
+        self.assertFalse(runner._input_fits_in_drafter(None))
+
+    def test_pp_rank_without_drafter_does_not_apply_local_limit(self):
+        runner = self._build_runner(dp_size=2)
+        runner.drafter = None
+
+        self.assertTrue(runner._input_fits_in_drafter(SimpleNamespace(max_seq_len=1024)))
+        scheduler_output = SimpleNamespace()
+        runner._skip_drafting(scheduler_output)
+        self.assertTrue(torch.equal(runner._draft_token_ids, torch.zeros(2, 5, dtype=torch.int32)))
+        runner._copy_draft_token_ids_to_cpu.assert_called_once_with(scheduler_output, zeros_only=True)
+
+    def test_dspark_overflow_rank_runs_complete_dp_dummy(self):
+        runner = self._build_runner(dp_size=2, query_width=6)
+
+        scheduler_output = SimpleNamespace()
+        runner._skip_drafting(scheduler_output)
+
+        runner.drafter.dummy_run.assert_called_once_with(num_tokens=6, num_reqs=1)
+        self.assertTrue(torch.equal(runner._draft_token_ids, torch.zeros(2, 5, dtype=torch.int32)))
+        self.assertIsNone(runner._draft_probs)
+        self.assertIsNone(runner._draft_prob_req_ids)
+        runner._copy_draft_token_ids_to_cpu.assert_called_once_with(scheduler_output, zeros_only=True)
+
+    def test_padded_overflow_preserves_sampled_token_state(self):
+        runner = self._build_runner(dp_size=2)
+        sampled_token_ids = torch.tensor([[11, -1], [21, 22]])
+        next_token_ids = torch.tensor([11, 22])
+        valid_sampled_tokens_count = torch.tensor([1, 2])
+        discard_request_indices = torch.tensor([1])
+        runner.valid_sampled_token_count_event = MagicMock()
+        runner.requests = {"req-0": MagicMock(), "req-1": MagicMock()}
+        runner.discard_request_indices = SimpleNamespace(gpu=discard_request_indices)
+        runner.num_discarded_requests = 1
+        runner.drafter.prepare_next_token_ids_padded = MagicMock(
+            return_value=(next_token_ids, valid_sampled_tokens_count)
+        )
+        runner._copy_valid_sampled_token_count = MagicMock()
+
+        scheduler_output = SimpleNamespace()
+        runner._skip_drafting(scheduler_output, sampled_token_ids)
+
+        runner.drafter.prepare_next_token_ids_padded.assert_called_once_with(
+            sampled_token_ids,
+            runner.requests,
+            runner.input_batch,
+            discard_request_indices,
+            1,
+        )
+        runner._copy_valid_sampled_token_count.assert_called_once_with(next_token_ids, valid_sampled_tokens_count)
+        runner.drafter.dummy_run.assert_called_once_with(num_tokens=1)
+        runner._copy_draft_token_ids_to_cpu.assert_called_once_with(scheduler_output, zeros_only=True)
+
+    def test_padded_overflow_avoids_state_work_without_count_event(self):
+        runner = self._build_runner(dp_size=1)
+        runner.valid_sampled_token_count_event = None
+        runner.drafter.prepare_next_token_ids_padded = MagicMock()
+
+        runner._skip_drafting(SimpleNamespace(), torch.tensor([[11]]))
+
+        runner.drafter.prepare_next_token_ids_padded.assert_not_called()
+
+    def test_model_backed_overflow_rank_runs_upstream_style_dp_dummy(self):
+        runner = self._build_runner(dp_size=2)
+
+        runner._skip_drafting(SimpleNamespace())
+
+        runner.drafter.dummy_run.assert_called_once_with(num_tokens=1)
+
+    def test_non_model_proposer_does_not_run_dp_dummy(self):
+        runner = self._build_runner(dp_size=2, model_backed=False)
+
+        runner._skip_drafting(SimpleNamespace())
+
+        runner.drafter.dummy_run.assert_not_called()
+        self.assertTrue(torch.equal(runner._draft_token_ids, torch.zeros(2, 5, dtype=torch.int32)))
+
+    def test_overflow_rank_skips_dummy_without_dp(self):
+        runner = self._build_runner(dp_size=1)
+
+        runner._skip_drafting(SimpleNamespace())
+
+        runner.drafter.dummy_run.assert_not_called()
+        self.assertTrue(torch.equal(runner._draft_token_ids, torch.zeros(2, 5, dtype=torch.int32)))
+
+    def _build_skip_transition_runner(self):
+        runner = self._build_runner()
+        # Use the real publication method; only NPU stream/event APIs are mocked.
+        del runner._copy_draft_token_ids_to_cpu
+        runner.use_async_scheduling = True
+        runner.input_batch.sampling_metadata = SimpleNamespace(output_token_ids=[])
+        runner.input_batch.prev_sampled_token_ids = torch.tensor([[11], [22]], dtype=torch.int32)
+        runner._draft_token_ids = torch.full((2, 2), 99, dtype=torch.int32)
+        runner.prev_num_spec_tokens = 2
+        runner._draft_token_req_ids = None
+        runner._draft_probs = object()
+        runner._draft_prob_req_ids = ["stale"]
+        runner.draft_token_ids_cpu = torch.full((3, 5), 99, dtype=torch.int32)
+        runner.draft_token_ids_event = MagicMock()
+        runner.draft_token_ids_copy_stream = MagicMock()
+        return runner
+
+    def test_skipped_drafts_prepare_next_async_inputs(self):
+        for draft_width in (1, 3, 5):
+            with self.subTest(draft_width=draft_width):
+                runner = self._build_skip_transition_runner()
+                scheduler_output = SimpleNamespace(
+                    has_structured_output_requests=False,
+                    num_spec_tokens_to_schedule=draft_width,
+                )
+                self.assertFalse(runner._input_fits_in_drafter(SimpleNamespace(max_seq_len=1020)))
+                with patch("vllm_ascend.worker.model_runner_v1.get_pp_group") as pp:
+                    pp.return_value.world_size = 1
+                    runner._skip_drafting(scheduler_output)
+                runner.draft_token_ids_event.record.assert_not_called()
+                self.assertEqual(runner.prev_num_spec_tokens, runner.num_spec_tokens)
+
+                # Next async step still has reserved speculative slots. Reorder
+                # requests to also exercise the previous-row draft tensor stride.
+                runner.input_batch.req_ids = ["req-1", "req-0"]
+                runner.prev_positions = SimpleNamespace(np=np.array([1, 0], dtype=np.int32))
+                runner._pp_recv_work = None
+                runner.enable_prompt_embeds = False
+                num_tokens = 2 * (draft_width + 1)
+                runner.input_ids = SimpleNamespace(
+                    gpu=torch.full((num_tokens,), -1, dtype=torch.int32),
+                    copy_to_gpu=MagicMock(),
+                )
+                next_output = SimpleNamespace(
+                    scheduled_spec_decode_tokens={req: [-1] * draft_width for req in runner.input_batch.req_ids}
+                )
+                with patch("vllm.v1.worker.gpu_model_runner.PIN_MEMORY", False):
+                    runner._prepare_input_ids(
+                        next_output,
+                        2,
+                        num_tokens,
+                        np.array([draft_width + 1, num_tokens], dtype=np.int32),
+                    )
+                expected = torch.tensor([22] + [0] * draft_width + [11] + [0] * draft_width, dtype=torch.int32)
+                torch.testing.assert_close(runner.input_ids.gpu, expected)
+                runner.input_ids.copy_to_gpu.assert_not_called()
+                self.assertIsNone(runner._draft_probs)
+                self.assertIsNone(runner._draft_prob_req_ids)
+
+    def test_skipped_drafts_publish_zero_cpu_buffer_when_required(self):
+        for mode in ("sync", "structured", "penalties", "pp"):
+            with self.subTest(mode=mode):
+                runner = self._build_skip_transition_runner()
+                runner.use_async_scheduling = mode != "sync"
+                runner.input_batch.sampling_metadata.output_token_ids = [[1]] if mode == "penalties" else []
+                scheduler_output = SimpleNamespace(has_structured_output_requests=mode == "structured")
+                with (
+                    patch("vllm_ascend.worker.model_runner_v1.get_pp_group") as pp,
+                    patch("torch.npu.current_stream"),
+                    patch("torch.npu.stream", return_value=nullcontext()),
+                ):
+                    pp.return_value.world_size = 2 if mode == "pp" else 1
+                    runner._skip_drafting(scheduler_output)
+                torch.testing.assert_close(runner._draft_token_ids, torch.zeros(2, 5, dtype=torch.int32))
+                torch.testing.assert_close(runner.draft_token_ids_cpu[:2], torch.zeros(2, 5, dtype=torch.int32))
+                torch.testing.assert_close(runner.draft_token_ids_cpu[2], torch.full((5,), 99, dtype=torch.int32))
+                self.assertEqual(runner._draft_token_req_ids, ["req-0", "req-1"])
+                runner.draft_token_ids_event.record.assert_called_once_with()
+                runner.draft_token_ids_copy_stream.wait_stream.assert_not_called()
+
+
+class TestAcceptedTokenSnapshot(unittest.TestCase):
+    def _build_runner(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.use_async_scheduling = True
+        runner.speculative_config = object()
+        runner.model_config = SimpleNamespace(is_hybrid=True)
+        runner.cache_config = SimpleNamespace(mamba_cache_mode="align")
+        runner._get_ascend_mamba_state_copy_funcs = MagicMock(return_value={})
+        runner.num_accepted_tokens = CpuGpuBuffer(12, dtype=torch.int32, device=torch.device("cpu"), pin_memory=False)
+        runner.prev_positions = CpuGpuBuffer(12, dtype=torch.int32, device=torch.device("cpu"), pin_memory=False)
+        batch_counts = torch.ones(12, dtype=torch.int32)
+        runner.input_batch = SimpleNamespace(
+            num_accepted_tokens_cpu=batch_counts.numpy(),
+            num_accepted_tokens_cpu_tensor=batch_counts,
+        )
+        runner.num_accepted_tokens_event = MagicMock()
+        return runner
+
+    def test_snapshot_survives_request_replacement_and_backend_reorder(self):
+        runner = self._build_runner()
+        with patch("vllm.v1.worker.gpu_input_batch.PIN_MEMORY", False):
+            batch = InputBatch(
+                max_num_reqs=12,
+                max_model_len=32,
+                max_num_batched_tokens=32,
+                device=torch.device("cpu"),
+                vocab_size=128,
+                block_sizes=[4],
+                kernel_block_sizes=[4],
+                max_num_blocks_per_req=[8],
+                num_spec_tokens=3,
+            )
+        runner.input_batch = batch
+        for req_id in ("A", "B", "C"):
+            batch.add_request(
+                CachedRequestState(
+                    req_id=req_id,
+                    prompt_token_ids=[10, 11],
+                    mm_features=[],
+                    sampling_params=SamplingParams(temperature=0),
+                    generator=None,
+                    block_ids=([1],),
+                    num_computed_tokens=2,
+                    output_token_ids=[],
+                )
+            )
+        batch.refresh_metadata()
+        batch.prev_req_id_to_index = dict(batch.req_id_to_index)
+        runner._get_mamba_bufs = MagicMock()
+        runner.kv_cache_config = object()
+        runner.compilation_config = SimpleNamespace(static_forward_context={})
+        runner.model = MagicMock()
+
+        # Only replace the device kernel boundary; use real InputBatch mutations.
+        def postprocess(**kwargs):
+            kwargs["num_accepted_tokens_cpu_tensor"][:3].copy_(kwargs["num_accepted_tokens_gpu"][:3])
+
+        with patch(
+            "vllm_ascend.worker.model_runner_v1.mamba_utils.postprocess_mamba_align_gpu",
+            side_effect=postprocess,
+        ):
+            runner._update_states_after_model_execute(
+                torch.tensor([[10, 11, -1, -1], [10, 11, 12, -1], [10, 11, 12, 13]]),
+                SimpleNamespace(),
+            )
+        runner.num_accepted_tokens_event.record.assert_called_once()
+        np.testing.assert_array_equal(runner.num_accepted_tokens.np[:3], [2, 3, 4])
+
+        batch.remove_request("A")
+        batch.add_request(
+            CachedRequestState(
+                req_id="D",
+                prompt_token_ids=[10] * 16,
+                mm_features=[],
+                sampling_params=SamplingParams(temperature=0),
+                generator=None,
+                block_ids=([2],),
+                num_computed_tokens=0,
+                output_token_ids=[],
+            )
+        )
+        batch.condense()
+        self.assertTrue(
+            reorder_batch_to_split_decodes_and_prefills(
+                batch,
+                SimpleNamespace(num_scheduled_tokens={"B": 4, "C": 4, "D": 16}),
+                decode_threshold=4,
+            )
+        )
+        batch.refresh_metadata()
+        runner._compute_prev_positions(batch.num_reqs)
+        runner._sync_num_accepted_tokens(batch.num_reqs, has_prev_mapping=True)
+
+        expected = [{"B": 3, "C": 4, "D": 1}[req_id] for req_id in batch.req_ids]
+        np.testing.assert_array_equal(runner.num_accepted_tokens.np[:3], expected)
+        np.testing.assert_array_equal(batch.num_accepted_tokens_cpu[:3], expected)
+
+    def test_sync_respects_snapshot_and_current_batch_ownership(self):
+        for async_scheduling, has_prev_mapping, expected in (
+            (True, True, [4, 1, 3]),
+            (True, False, [1, 1, 1]),
+            (False, True, [5, 6, 7]),
+        ):
+            with self.subTest(async_scheduling=async_scheduling, has_prev_mapping=has_prev_mapping):
+                runner = self._build_runner()
+                runner.use_async_scheduling = async_scheduling
+                runner.num_accepted_tokens.np[:] = np.arange(12)
+                runner.num_accepted_tokens.np[[11, 4]] = [4, 3]
+                runner.prev_positions.np[:3] = [11, -1, 4]
+                runner.input_batch.num_accepted_tokens_cpu[:3] = [5, 6, 7]
+
+                runner._sync_num_accepted_tokens(3, has_prev_mapping=has_prev_mapping)
+
+                np.testing.assert_array_equal(runner.num_accepted_tokens.np[:3], expected)
+                np.testing.assert_array_equal(runner.input_batch.num_accepted_tokens_cpu[:3], expected)
+
+    def test_non_align_postprocess_keeps_an_independent_snapshot(self):
+        for mode in ("none", "all"):
+            with self.subTest(mode=mode):
+                runner = self._build_runner()
+                runner.cache_config.mamba_cache_mode = mode
+                runner.kv_cache_config = object()
+                runner.requests = {}
+                runner.mamba_state_idx = {}
+                runner.num_spec_tokens = 3
+                with patch("vllm_ascend.worker.model_runner_v1.mamba_utils.postprocess_mamba_all") as postprocess_all:
+                    runner._update_states_after_model_execute(torch.tensor([[10, -1], [11, 12]]), SimpleNamespace())
+                np.testing.assert_array_equal(runner.num_accepted_tokens.np[:2], [1, 2])
+                np.testing.assert_array_equal(runner.input_batch.num_accepted_tokens_cpu[:2], [1, 1])
+                self.assertEqual(postprocess_all.call_count, int(mode == "all"))
+                runner.num_accepted_tokens_event.record.assert_called_once()
+
+
+def _make_kv_cache_tensor(
+    per_layer_size: int,
+    layer_names: list[str],
+    page_size: int,
+) -> KVCacheTensor:
+    """Build the standardized descriptor shared by both supported versions."""
+    return KVCacheTensor(
+        size=per_layer_size * len(layer_names),
+        layers=layer_names,
+        layer_stride=per_layer_size,
+        block_stride=page_size,
+        offset=0,
+    )
+
+
+def _ratio_kwargs(ratio: int) -> dict[str, int]:
+    """Map the MLA compression field renamed by vLLM #51718."""
+    return {"tokens_per_state": ratio}
+
+
+class TestNPUModelRunnerKVCache(unittest.TestCase):
+    def _build_runner(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.device = torch.device("cpu")
+        runner.ascend_config = SimpleNamespace(
+            kvpp_config=SimpleNamespace(size=1),
+            xlite_graph_config=SimpleNamespace(enabled=False),
+        )
+        runner.use_sparse = False
+        runner.enable_sparse_sfa_c8 = False
+        runner.enable_sparse_li_c8 = False
+        runner.use_compress = False
+        runner.use_hybrid_blocks = False
+        runner.hybrid_with_attn_and_mamba = False
+        runner.sfa_dcp_replicated_indexer_size = 1
+        runner.runner_only_attn_layers = set()
+        runner.is_kv_consumer = False
+        runner.sparse_kv_offload_enabled = False
+        runner.sparse_kv_offload_config = MagicMock()
+        runner.tp_rank = 0
+        runner.vllm_config = MagicMock()
+        runner.vllm_config.kv_transfer_config = None
+        runner.model_config = MagicMock()
+        runner.model_config.use_mla = True
+        runner.dtype = torch.bfloat16
+        runner.attn_groups = []
+        runner.kv_cache_config = KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
+        backend = MagicMock()
+        backend.is_sparse.return_value = False
+        backend.get_kv_cache_shape.side_effect = lambda num_blocks, block_size, num_kv_heads, head_size, **_: (
+            2,
+            num_blocks,
+            block_size,
+            num_kv_heads,
+            head_size,
+        )
+        runner.attn_backend = backend
+        return runner
+
+    def test_kvpp_allocate_and_reshape_views(self):
+        from tests.ut.kvpp_utils import assert_attention_cache_views, make_attention_cache_case, make_cache_config
+        from vllm_ascend.core import kv_cache_placement
+        from vllm_ascend.worker import kvpp_cache, model_runner_v1
+
+        for packed in (False, True):
+            with self.subTest(packed=packed):
+                config, specs, layers = make_attention_cache_case(packed)
+                runner = self._build_runner()
+                runner.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=2))
+                runner.vllm_config = config
+                runner.model_config = config.model_config
+                runner.use_sparse = packed
+                runner.c8_k_cache_dtype = torch.int8
+                runner.c8_cache_dtype = torch.int8
+                runner._kv_cache_spec_attn_group_iterator = lambda specs=specs, layers=layers: [
+                    SimpleNamespace(kv_cache_spec=spec, layer_names=[name], backend=layers[name].get_attn_backend())
+                    for name, spec in specs.items()
+                ]
+                with (
+                    patch.object(kvpp_cache, "get_kvpp_group", return_value=SimpleNamespace(rank_in_group=1)),
+                    patch.object(kv_cache_placement, "get_layers_from_vllm_config", return_value=layers),
+                    patch.object(model_runner_v1, "get_layers_from_vllm_config", return_value=layers),
+                    patch.object(kv_cache_placement, "enable_sfa", return_value=packed),
+                    patch.object(kv_cache_placement, "enable_fa_quant", return_value=False),
+                    patch.object(model_runner_v1, "enable_fa_quant", return_value=False),
+                ):
+                    cache_config = make_cache_config(specs)
+                    raw = runner._allocate_kv_cache_tensors(cache_config)
+                    caches = runner._reshape_kv_cache_tensors(cache_config, raw)
+                assert_attention_cache_views(caches, raw, packed)
+
+    def test_hybrid_noncontiguous_reshape_uses_per_group_kernel_sizes(self):
+        runner = self._build_runner()
+        runner.hybrid_with_attn_and_mamba = True
+        runner.use_hybrid_blocks = True
+        runner.cache_config = SimpleNamespace(cache_dtype="auto")
+
+        attention_spec = FullAttentionSpec(
+            block_size=8,
+            num_kv_heads=1,
+            head_size=2,
+            dtype=torch.float16,
+        )
+        mamba_spec = MambaSpec(
+            block_size=8,
+            shapes=((3,), (5,)),
+            dtypes=(torch.float16, torch.float16),
+            page_size_padded=32,
+            mamba_cache_mode="align",
+        )
+        attention_backend = MagicMock()
+        attention_backend.is_sparse.return_value = False
+        attention_backend.get_kv_cache_shape.side_effect = (
+            lambda num_blocks, block_size, num_kv_heads, head_size, **_: (
+                2,
+                num_blocks,
+                block_size,
+                num_kv_heads,
+                head_size,
+            )
+        )
+        groups = [
+            SimpleNamespace(
+                kv_cache_group_id=0,
+                kv_cache_spec=attention_spec,
+                backend=attention_backend,
+                layer_names=["full_attn"],
+            ),
+            SimpleNamespace(
+                kv_cache_group_id=1,
+                kv_cache_spec=mamba_spec,
+                backend=MagicMock(),
+                layer_names=["linear_attn"],
+            ),
+        ]
+        runner._kv_cache_spec_attn_group_iterator = lambda: iter(groups)
+        kv_cache_config = KVCacheConfig(
+            num_blocks=2,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    layer_names=["full_attn"],
+                    kv_cache_spec=attention_spec,
+                ),
+                KVCacheGroupSpec(
+                    layer_names=["linear_attn"],
+                    kv_cache_spec=mamba_spec,
+                ),
+            ],
+        )
+        raw_caches = {
+            "full_attn": torch.zeros(2 * attention_spec.page_size_bytes, dtype=torch.uint8),
+            "linear_attn": torch.zeros(2 * mamba_spec.page_size_bytes, dtype=torch.uint8),
+        }
+
+        caches = runner._reshape_kv_cache_tensors(
+            kv_cache_config,
+            raw_caches,
+            [4, 8],
+        )
+
+        assert caches["full_attn"].shape == (2, 4, 4, 1, 2)
+        assert caches["full_attn"].stride() == (8, 16, 2, 2, 1)
+        conv_state, ssm_state = caches["linear_attn"]
+        assert conv_state.shape == (2, 3)
+        assert ssm_state.shape == (2, 5)
+        assert conv_state.stride() == (16, 1)
+        assert ssm_state.stride() == (16, 1)
+        assert conv_state.storage_offset() == 0
+        assert ssm_state.storage_offset() == 3
+        attention_backend.get_kv_cache_shape.assert_any_call(
+            4,
+            4,
+            1,
+            2,
+        )
+
+    def test_pure_gqa_uses_noncontiguous_block_major_kv_cache(self):
+        self._check_gqa_cache_layout(xlite_enabled=False)
+
+    def test_paged_attention_uses_contiguous_kv_cache(self):
+        self._check_gqa_cache_layout(xlite_enabled=False, pa_enabled=True)
+
+    def test_xlite_uses_separate_contiguous_kv_cache(self):
+        self._check_gqa_cache_layout(xlite_enabled=True)
+
+    def test_dense_backend_subclass_keeps_non_contiguous_kv_cache(self):
+        self._check_gqa_cache_layout(xlite_enabled=False, backend=DenseAttentionBackend)
+
+    def test_sparse_backend_uses_separate_contiguous_kv_cache(self):
+        self._check_gqa_cache_layout(xlite_enabled=False, backend=SparseAttentionBackend)
+
+    def _check_gqa_cache_layout(self, xlite_enabled, backend=AscendAttentionBackend, pa_enabled=False):
+        runner = self._build_runner()
+        runner.ascend_config.xlite_graph_config.enabled = xlite_enabled
+        runner.model_config.use_mla = False
+        layer_name = "model.layers.0.self_attn.attn"
+        spec = FullAttentionSpec(
+            block_size=8,
+            num_kv_heads=2,
+            head_size=2,
+            dtype=torch.float16,
+        )
+        group = SimpleNamespace(
+            kv_cache_group_id=0,
+            kv_cache_spec=spec,
+            backend=backend,
+            layer_names=[layer_name],
+        )
+        runner._kv_cache_spec_attn_group_iterator = lambda: iter([group])
+        kv_cache_config = KVCacheConfig(
+            num_blocks=2,
+            kv_cache_tensors=[
+                _make_kv_cache_tensor(
+                    per_layer_size=2 * spec.page_size_bytes,
+                    layer_names=[layer_name],
+                    page_size=spec.page_size_bytes,
+                )
+            ],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    layer_names=[layer_name],
+                    kv_cache_spec=spec,
+                )
+            ],
+        )
+
+        with patch("vllm_ascend.worker.model_runner_v1.requires_contiguous_pa_kv_cache", return_value=pa_enabled):
+            raw_caches = runner._allocate_kv_cache_tensors(kv_cache_config)
+
+        uses_contiguous_cache = xlite_enabled or backend.is_sparse() or pa_enabled
+        assert isinstance(raw_caches[layer_name], tuple if uses_contiguous_cache else torch.Tensor)
+        cache = runner._reshape_kv_cache_tensors(
+            kv_cache_config,
+            raw_caches,
+            [spec.block_size],
+        )[layer_name]
+        if uses_contiguous_cache:
+            assert isinstance(cache, tuple)
+            assert len(cache) == 2
+            for tensor in cache:
+                assert tensor.shape == (2, 8, 2, 2)
+                assert tensor.is_contiguous()
+            return
+        assert cache.shape == (2, 2, 8, 2, 2)
+        assert cache.stride() == (32, 64, 4, 2, 1)
+        assert not cache[0].is_contiguous()
+        assert not cache[1].is_contiguous()
+
+    def test_full_attention_allocator_selects_layout_per_backend(self):
+        self._check_full_attention_allocator_selects_layout_per_backend(
+            [AscendAttentionBackend, SparseAttentionBackend]
+        )
+
+    def test_full_attention_allocator_layout_is_independent_of_backend_order(self):
+        self._check_full_attention_allocator_selects_layout_per_backend(
+            [SparseAttentionBackend, AscendAttentionBackend]
+        )
+
+    def _check_full_attention_allocator_selects_layout_per_backend(self, backends):
+        runner = self._build_runner()
+        spec = FullAttentionSpec(block_size=8, num_kv_heads=2, head_size=2, dtype=torch.float16)
+        names = ["model.layers.0.self_attn.attn", "model.layers.1.self_attn.attn"]
+        groups = [
+            SimpleNamespace(
+                kv_cache_group_id=0,
+                kv_cache_spec=spec,
+                backend=backend,
+                layer_names=[name],
+            )
+            for name, backend in zip(names, backends)
+        ]
+        runner._kv_cache_spec_attn_group_iterator = lambda: iter(groups)
+        config = KVCacheConfig(
+            num_blocks=3,
+            kv_cache_tensors=[_make_kv_cache_tensor(3 * spec.page_size_bytes, names, spec.page_size_bytes)],
+            kv_cache_groups=[KVCacheGroupSpec(layer_names=names, kv_cache_spec=spec)],
+        )
+
+        raw = runner._allocate_kv_cache_tensors(config)
+        supported_name = names[backends.index(AscendAttentionBackend)]
+        unsupported_name = names[backends.index(SparseAttentionBackend)]
+        assert isinstance(raw[supported_name], torch.Tensor)
+        assert isinstance(raw[unsupported_name], tuple)
+        caches = runner._reshape_kv_cache_tensors(config, raw, [spec.block_size])
+        assert not caches[supported_name][0].is_contiguous()
+        key, value = caches[unsupported_name]
+        assert key.is_contiguous() and value.is_contiguous()
+        key[1].fill_(3)
+        value[2].fill_(5)
+        assert torch.count_nonzero(key[0]) == 0
+        assert torch.count_nonzero(key[2]) == 0
+        assert torch.count_nonzero(value[:2]) == 0
+        assert torch.count_nonzero(caches[supported_name][0]) == 0
+        assert torch.count_nonzero(caches[supported_name][1]) == 0
+        assert key.numel() * key.element_size() + value.numel() * value.element_size() == 3 * spec.page_size_bytes
+
+    def test_hybrid_reshape_skips_groups_without_kernel_size(self):
+        runner = self._build_runner()
+        runner.hybrid_with_attn_and_mamba = True
+        groups = [SimpleNamespace(kv_cache_group_id=group_id) for group_id in (1, 3)]
+        runner._kv_cache_spec_attn_group_iterator = lambda: iter(groups)
+
+        caches = runner._reshape_kv_cache_tensors(
+            SimpleNamespace(kv_cache_groups=[]),
+            {},
+            [128],
+        )
+
+        assert caches == {}
+
+    def test_hybrid_reshape_skips_runner_only_attention_layers(self):
+        runner = self._build_runner()
+        runner.hybrid_with_attn_and_mamba = True
+        runner.runner_only_attn_layers = {"encoder_attn"}
+        runner.cache_config = SimpleNamespace(cache_dtype="auto")
+        attention_spec = FullAttentionSpec(
+            block_size=8,
+            num_kv_heads=1,
+            head_size=2,
+            dtype=torch.float16,
+        )
+        group = SimpleNamespace(
+            kv_cache_group_id=0,
+            kv_cache_spec=attention_spec,
+            backend=MagicMock(),
+            layer_names=["encoder_attn"],
+        )
+        runner._kv_cache_spec_attn_group_iterator = lambda: iter([group])
+        kv_cache_config = KVCacheConfig(
+            num_blocks=2,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    layer_names=["encoder_attn"],
+                    kv_cache_spec=attention_spec,
+                )
+            ],
+        )
+
+        caches = runner._reshape_kv_cache_tensors(kv_cache_config, {}, [8])
+
+        assert caches == {}
+
+    def _build_reinitialize_runner(self):
+        runner = self._build_runner()
+        runner.cache_config = SimpleNamespace(block_size=128)
+        runner.max_model_len = 1024
+        runner.max_encoder_len = 256
+        runner.max_num_reqs = 4
+        runner.max_num_tokens = 64
+        runner.pin_memory = False
+        runner.model_config.get_vocab_size.return_value = 32000
+        runner.is_pooling_model = False
+        runner.input_batch = SimpleNamespace(logitsprocs=object())
+        runner.offload_config = SimpleNamespace(uva=SimpleNamespace(cpu_offload_gb=0))
+        runner.vllm_config.speculative_config = None
+        runner.vllm_config.reasoning_config = None
+        runner.parallel_config = SimpleNamespace(cp_kv_cache_interleave_size=1)
+        return runner
+
+    @staticmethod
+    def _cache_config_with_block_sizes(*block_sizes):
+        groups = []
+        for index, block_size in enumerate(block_sizes):
+            spec = MagicMock(name=f"spec_{index}")
+            spec.block_size = block_size
+            spec.max_num_blocks_per_req.return_value = 10 + index
+            groups.append(
+                SimpleNamespace(
+                    kv_cache_spec=spec,
+                    layer_names=[f"layer_{index}"],
+                )
+            )
+        return SimpleNamespace(kv_cache_groups=groups)
+
+    @patch("vllm_ascend.worker.model_runner_v1.NPUInputBatch")
+    def test_matching_single_group_keeps_existing_input_batch(self, input_batch_cls):
+        runner = self._build_reinitialize_runner()
+        original_input_batch = runner.input_batch
+        config = self._cache_config_with_block_sizes(128)
+
+        runner.may_reinitialize_input_batch(config, [128])
+
+        input_batch_cls.assert_not_called()
+        assert runner.input_batch is original_input_batch
+
+    @patch("vllm_ascend.worker.model_runner_v1.NPUInputBatch")
+    def test_kernel_size_change_reinitializes_with_flat_values(self, input_batch_cls):
+        runner = self._build_reinitialize_runner()
+        config = self._cache_config_with_block_sizes(384)
+        replacement = input_batch_cls.return_value
+
+        runner.may_reinitialize_input_batch(config, [128])
+
+        assert runner.input_batch is replacement
+        input_batch_cls.assert_called_once_with(
+            max_num_reqs=4,
+            max_model_len=1024,
+            max_num_batched_tokens=64,
+            device=torch.device("cpu"),
+            pin_memory=False,
+            vocab_size=32000,
+            block_sizes=[384],
+            is_spec_decode=False,
+            logitsprocs=unittest.mock.ANY,
+            is_pooling_model=False,
+            num_speculative_tokens=0,
+            kernel_block_sizes=[128],
+            max_num_blocks_per_req=[10],
+            kv_cache_groups=config.kv_cache_groups,
+            cp_kv_cache_interleave_size=1,
+            reasoning_config=None,
+        )
+
+    @patch("vllm_ascend.worker.model_runner_v1.NPUInputBatch")
+    def test_multiple_groups_reinitialize_even_when_sizes_match(self, input_batch_cls):
+        runner = self._build_reinitialize_runner()
+        config = self._cache_config_with_block_sizes(128, 128)
+
+        runner.may_reinitialize_input_batch(config, [128, 128])
+
+        assert input_batch_cls.call_args.kwargs["block_sizes"] == [128, 128]
+        assert input_batch_cls.call_args.kwargs["kernel_block_sizes"] == [128, 128]
+        assert input_batch_cls.call_args.kwargs["max_num_blocks_per_req"] == [10, 11]
+
+    @patch("vllm_ascend.worker.model_runner_v1.NPUInputBatch")
+    def test_reinitialize_rejects_cpu_offload(self, input_batch_cls):
+        runner = self._build_reinitialize_runner()
+        runner.offload_config.uva.cpu_offload_gb = 1
+        config = self._cache_config_with_block_sizes(384)
+
+        with self.assertRaisesRegex(
+            AssertionError,
+            "Cannot re-initialize the input batch when CPU weight offloading is enabled",
+        ):
+            runner.may_reinitialize_input_batch(config, [128])
+
+        input_batch_cls.assert_not_called()
+
+    def test_v41_layer_outer_buffers_allocate_and_reshape(self):
+        from tests.deepseek_v41_utils import make_cache_config
+        from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheBackend
+
+        runner = self._build_runner()
+        runner.attn_backend = DeepseekV41CacheBackend
+        config = make_cache_config(4)
+        # vLLM shrinks each tensor proportionally when another rank has less
+        # capacity. Component offsets must not depend on the old block count.
+        for allocation in config.kv_cache_tensors:
+            allocation.size = allocation.size // config.num_blocks * 3
+        config.num_blocks = 3
+        raw = runner._allocate_kv_cache_tensors(config)
+        prefix = "model.layers."
+        long_name = prefix + "2.self_attn.long_kv_cache"
+        index_name = prefix + "2.self_attn.indexer.k_cache"
+        assert raw[long_name] is raw[index_name]
+        assert raw[long_name] is raw[prefix + "0.self_attn.swa_cache"]
+        assert raw[long_name] is not raw[prefix + "8.self_attn.long_kv_cache"]
+        unique = {id(value): value for value in raw.values()}
+        assert len(unique) == 4
+        assert sum(buffer.numel() for buffer in unique.values()) == 3 * 540928
+        runner._kv_cache_spec_attn_group_iterator = lambda: [
+            SimpleNamespace(kv_cache_spec=spec, backend=runner.attn_backend, layer_names=[name])
+            for group in config.kv_cache_groups
+            for name, spec in group.kv_cache_spec.kv_cache_specs.items()
+        ]
+        caches = runner._reshape_kv_cache_tensors(config, raw)
+        key, scale = caches[index_name]
+        assert key.shape == (3, 64, 1, 128)
+        assert scale.shape == (3, 64, 1, 1)
+        assert key.data_ptr() - caches[long_name].data_ptr() == 65536
+        assert scale.data_ptr() - key.data_ptr() == 8192
+        assert key.stride(0) == 131072
+        assert scale.stride(0) == 65536
+        assert not key.is_contiguous()
+        assert caches[prefix + "0.self_attn.swa_cache"].is_contiguous()
+        assert not caches[prefix + "3.self_attn.swa_cache"].is_contiguous()
+
+    def test_v41_dspark_shares_four_backings_after_rank_shrink(self):
+        from tests.deepseek_v41_utils import make_cache_config
+        from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheBackend
+
+        runner = self._build_runner()
+        runner.attn_backend = DeepseekV41CacheBackend
+        config = make_cache_config(5, draft_layers=3)
+        for allocation in config.kv_cache_tensors:
+            allocation.size = allocation.size // config.num_blocks * 3
+        config.num_blocks = 3
+        raw = runner._allocate_kv_cache_tensors(config)
+        assert len({id(value) for value in raw.values()}) == 4
+        runner._kv_cache_spec_attn_group_iterator = lambda: [
+            SimpleNamespace(kv_cache_spec=spec, backend=runner.attn_backend, layer_names=[name])
+            for group in config.kv_cache_groups
+            for name, spec in group.kv_cache_spec.kv_cache_specs.items()
+        ]
+        caches = runner._reshape_kv_cache_tensors(config, raw)
+        for stage, source in enumerate((2, 8, 14)):
+            draft = f"mtp.{stage}.self_attn.swa_cache"
+            target = f"model.layers.{source}.self_attn.long_kv_cache"
+            assert raw[draft] is raw[target]
+            assert caches[draft].shape == (3, 128, 1, 512)
+            assert caches[draft].stride(0) * 2 == 131072
+            assert caches[draft].data_ptr() == caches[target].data_ptr()
+            caches[target][1].fill_(2)
+            caches[draft][2].fill_(3)
+            assert (caches[target][1] == 2).all()
+            assert (caches[draft][0] == 0).all()
+
+    def test_c8_mxfp_cache_selection_excludes_mla(self):
+        runner = self._build_runner()
+        runner.vllm_config.cache_config.cache_dtype = "mxfp8"
+        for spec_type in (FullAttentionSpec, MLAAttentionSpec, AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec):
+            with self.subTest(spec_type=spec_type):
+                spec = spec_type(block_size=512, num_kv_heads=1, head_size=128, dtype=torch.float8_e4m3fn)
+                self.assertEqual(runner._is_c8_mxfp_kv_cache(spec), spec_type is FullAttentionSpec)
+        runner.vllm_config.cache_config.cache_dtype = "auto"
+        spec = FullAttentionSpec(block_size=512, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)
+        self.assertFalse(runner._is_c8_mxfp_kv_cache(spec))
+
+    def test_allocate_kv_cache_uses_layer_spec_for_draft_gqa(self):
+        runner = self._build_runner()
+        runner.sparse_kv_offload_enabled = False
+        kv_cache_spec = FullAttentionSpec(
+            block_size=16,
+            num_kv_heads=8,
+            head_size=64,
+            head_size_v=64,
+            dtype=torch.float16,
+        )
+        kv_cache_config = KVCacheConfig(
+            num_blocks=2,
+            kv_cache_tensors=[
+                _make_kv_cache_tensor(
+                    per_layer_size=kv_cache_spec.page_size_bytes * 2,
+                    layer_names=["draft_attn"],
+                    page_size=kv_cache_spec.page_size_bytes,
+                )
+            ],
+            kv_cache_groups=[KVCacheGroupSpec(layer_names=["draft_attn"], kv_cache_spec=kv_cache_spec)],
+        )
+        runner._kv_cache_spec_attn_group_iterator = lambda: iter(
+            [SimpleNamespace(backend=AscendAttentionBackend, layer_names=["draft_attn"])]
+        )
+
+        kv_cache_raw_tensors = runner._allocate_kv_cache_tensors(kv_cache_config)
+        combined_cache_raw = kv_cache_raw_tensors["draft_attn"]
+
+        self.assertIsInstance(combined_cache_raw, torch.Tensor)
+        self.assertEqual(
+            combined_cache_raw.numel(),
+            2 * kv_cache_spec.page_size_bytes,
+        )
+
+    @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
+    def test_mla_spec_preserves_block_stride_layout_contract(
+        self,
+        mock_get_layers,
+    ):
+        runner = self._build_runner()
+        runner.shared_kv_cache_layers = {}
+
+        layer_name = "model.layers.1.self_attn.attn"
+        source_spec = MLAAttentionSpec(
+            block_size=128,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.bfloat16,
+        )
+        attn_module = MLAAttention.__new__(MLAAttention)
+        torch.nn.Module.__init__(attn_module)
+        attn_module.impl = SimpleNamespace(fa_quant_layer=False)
+        attn_module.model_version = "glm5_next"
+        attn_module.indexes_kv_by_block_stride = True
+        attn_module.get_kv_cache_spec = MagicMock(return_value=source_spec)
+        mock_get_layers.return_value = {layer_name: attn_module}
+
+        spec = runner.get_kv_cache_spec()[layer_name]
+
+        self.assertIsInstance(spec, AscendMLAAttentionSpec)
+        self.assertEqual(spec.model_version, attn_module.model_version)
+        self.assertTrue(spec.indexes_kv_by_block_stride)
+
+    @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)
+    @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
+    def test_mamba_alignment_excludes_auxiliary_glm_caches(
+        self,
+        mock_get_layers,
+        _mock_has_ec_transfer,
+    ):
+        class FakeMamba:
+            def __init__(self, spec):
+                self.spec = spec
+
+            def get_kv_cache_spec(self, _vllm_config):
+                return self.spec
+
+        runner = self._build_runner()
+        runner.shared_kv_cache_layers = {}
+
+        main_spec = AscendMLAAttentionSpec(
+            block_size=8,
+            num_kv_heads=1,
+            head_size=4,
+            dtype=torch.bfloat16,
+            model_version="glm5_next",
+            indexes_kv_by_block_stride=True,
+        )
+        indexer_spec = AscendMLAAttentionSpec(
+            block_size=8,
+            num_kv_heads=1,
+            head_size=4,
+            dtype=torch.bfloat16,
+            model_version="glm5_next",
+            indexes_kv_by_block_stride=True,
+            **_ratio_kwargs(2),
+        )
+        state_spec = AscendIndexerKPoolTailSpec(
+            block_size=2,
+            sliding_window=2,
+            compress_ratio=2,
+            num_kv_heads=1,
+            head_size=3,
+            dtype=torch.float32,
+        )
+        mamba_spec = MambaSpec(
+            block_size=8,
+            shapes=((128,),),
+            dtypes=(torch.float32,),
+        )
+
+        main_module = SimpleNamespace(get_kv_cache_spec=lambda _config: main_spec)
+        indexer_module = Glm5NextIndexerCache.__new__(Glm5NextIndexerCache)
+        torch.nn.Module.__init__(indexer_module)
+        indexer_module.get_kv_cache_spec = lambda _config: indexer_spec
+        state_module = Glm5NextTailCache.__new__(Glm5NextTailCache)
+        torch.nn.Module.__init__(state_module)
+        state_module.get_kv_cache_spec = lambda _config: state_spec
+        mock_get_layers.return_value = {
+            "model.layers.1.attn": main_module,
+            "model.layers.1.indexer.k_cache": indexer_module,
+            "model.layers.1.indexer.tail_cache": state_module,
+            "model.layers.0.linear_attn": FakeMamba(mamba_spec),
+        }
+
+        with patch("vllm_ascend.worker.model_runner_v1.MambaBase", FakeMamba):
+            specs = runner.get_kv_cache_spec()
+
+        self.assertEqual(
+            specs["model.layers.1.attn"].page_size_padded,
+            mamba_spec.page_size_bytes,
+        )
+        self.assertIsNone(specs["model.layers.1.indexer.k_cache"].page_size_padded)
+        self.assertIsNone(specs["model.layers.1.indexer.tail_cache"].page_size_padded)
+
+    @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
+    def test_mla_rope_modes_and_cache_layers_use_separate_metadata_groups(self, mock_get_layers):
+        class FakeBuilder:
+            def __init__(self, _spec, layer_names, _config, _device):
+                self.layer_names = layer_names
+
+        class FakeMLABackend(AscendMLABackend):
+            @classmethod
+            def full_cls_name(cls):
+                return "test.FakeMLABackend"
+
+            @classmethod
+            def get_builder_cls(cls):
+                return FakeBuilder
+
+        class FakeCacheBackend:
+            @classmethod
+            def full_cls_name(cls):
+                return "test.FakeCacheBackend"
+
+            @classmethod
+            def get_builder_cls(cls):
+                return FakeBuilder
+
+        runner = self._build_runner()
+        runner.attn_groups = []
+        runner._check_and_update_cudagraph_mode = MagicMock()
+        runner.calculate_reorder_batch_threshold = MagicMock()
+
+        target_layer = "language_model.model.layers.0.self_attn.attn"
+        draft_layer = "model.layers.0.self_attn.attn"
+        cache_layer = "language_model.model.layers.0.self_attn.indexer.k_cache"
+        target_attn = MagicMock(spec=MLAAttention)
+        target_attn.impl = SimpleNamespace(use_mla_rope=False)
+        target_attn.get_attn_backend.return_value = FakeMLABackend
+        draft_attn = MagicMock(spec=MLAAttention)
+        draft_attn.impl = SimpleNamespace(use_mla_rope=True)
+        draft_attn.get_attn_backend.return_value = FakeMLABackend
+        mock_get_layers.return_value = {
+            target_layer: target_attn,
+            draft_layer: draft_attn,
+            cache_layer: SimpleNamespace(get_attn_backend=lambda: FakeCacheBackend),
+        }
+        specs = {
+            target_layer: AscendMLAAttentionSpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=576,
+                dtype=torch.bfloat16,
+            ),
+            draft_layer: AscendMLAAttentionSpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=576,
+                dtype=torch.bfloat16,
+            ),
+            cache_layer: AscendMLAAttentionSpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=576,
+                dtype=torch.bfloat16,
+            ),
+        }
+        group_spec = UniformTypeKVCacheSpecs.from_specs(specs)
+        self.assertIsNotNone(group_spec)
+        assert group_spec is not None
+        kv_cache_config = KVCacheConfig(
+            num_blocks=2,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    layer_names=[target_layer, draft_layer, cache_layer],
+                    kv_cache_spec=group_spec,
+                )
+            ],
+        )
+
+        runner.initialize_attn_backend(kv_cache_config)
+
+        self.assertEqual(len(runner.attn_groups), 1)
+        self.assertEqual(
+            {tuple(group.layer_names) for group in runner.attn_groups[0]},
+            {(target_layer,), (draft_layer,), (cache_layer,)},
+        )
+
+    def test_cp_or_sp_decode_dispatch_keys_are_actually_captured(self):
+        cases = (
+            (True, 8, 6, False),
+            (True, 16, 6, False),
+            (True, 8, 6, True),
+            (True, 8, 1, False),
+            (False, 8, 6, True),
+            (False, 16, 6, True),
+            (False, 8, 1, True),
+        )
+        for cp_enabled, tp_size, query_len, enable_sp in cases:
+            with self.subTest(cp=cp_enabled, tp_size=tp_size, query_len=query_len, enable_sp=enable_sp):
+                runner = self._build_runner()
+                max_tokens = 32 * query_len
+                config = CompilationConfig(
+                    cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+                    cudagraph_capture_sizes=list(range(tp_size, max_tokens + 1, tp_size)),
+                    max_cudagraph_capture_size=max_tokens,
+                )
+                config.pass_config.enable_sp = enable_sp
+                runner.compilation_config = config
+                runner.parallel_config = SimpleNamespace(tensor_parallel_size=tp_size)
+                runner.vllm_config = SimpleNamespace(
+                    compilation_config=config,
+                    parallel_config=runner.parallel_config,
+                    num_speculative_tokens=query_len - 1,
+                    lora_config=None,
+                    scheduler_config=SimpleNamespace(max_num_seqs=32),
+                )
+                runner.uniform_decode_query_len = query_len
+                runner.kv_cache_config = SimpleNamespace(has_mamba_layers=False)
+                runner.max_num_reqs = 32
+                runner.cudagraph_dispatcher = CudagraphDispatcher(runner.vllm_config)
+                runner.speculative_config = None
+                runner.drafter = None
+                runner.use_aclgraph = False
+                with (
+                    patch("vllm_ascend.worker.model_runner_v1.enable_dsa_cp", return_value=cp_enabled),
+                    patch("vllm_ascend.worker.model_runner_v1.enable_sp", return_value=enable_sp),
+                    patch("vllm_ascend.worker.model_runner_v1.update_pass_config", return_value=nullcontext()),
+                ):
+                    runner._check_and_update_cudagraph_mode([], [])
+                    dispatcher = runner.cudagraph_dispatcher
+                    captured = set()
+                    for mode, descriptors in dispatcher.get_capture_descs():
+                        for descriptor in descriptors:
+                            actual_mode, actual_key = dispatcher.dispatch(
+                                runner._pad_for_sequence_parallelism(descriptor.num_tokens), uniform_decode=True
+                            )
+                            self.assertEqual((actual_mode, actual_key), (mode, descriptor))
+                            captured.add(actual_key)
+                    # Includes the one-request dummy used by idle DP ranks.
+                    for num_reqs in range(1, 33):
+                        mode, key = dispatcher.dispatch(
+                            runner._pad_for_sequence_parallelism(num_reqs * query_len), uniform_decode=True
+                        )
+                        self.assertEqual(mode, CUDAGraphMode.FULL)
+                        self.assertIn(key, captured)
+
+    def test_sparse_c8_indexer_reuses_raw_cache_from_shared_descriptor(self):
+        runner = self._build_runner()
+        layer_names = [
+            "model.layers.1.self_attn.indexer.k_cache",
+            "model.layers.3.self_attn.indexer.k_cache",
+        ]
+        indexer_spec = AscendSFAIndexerCacheSpec(
+            block_size=2,
+            num_kv_heads=1,
+            head_size=4,
+            dtype=torch.int8,
+            scale_dim=1,
+            scale_dtype=torch.float16,
+            cache_sparse_li_c8=True,
+        )
+        kv_cache_config = KVCacheConfig(
+            num_blocks=2,
+            kv_cache_tensors=[
+                _make_kv_cache_tensor(
+                    per_layer_size=indexer_spec.page_size_bytes * 2,
+                    layer_names=layer_names,
+                    page_size=indexer_spec.page_size_bytes,
+                )
+            ],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    layer_names=layer_names,
+                    kv_cache_spec=indexer_spec,
+                )
+            ],
+        )
+
+        raw_caches = runner._allocate_kv_cache_tensors(kv_cache_config)
+        assert raw_caches[layer_names[0]][0] is not raw_caches[layer_names[1]][0]
+        assert raw_caches[layer_names[0]][1] is not raw_caches[layer_names[1]][1]
+
+    @patch("vllm_ascend.worker.model_runner_v1.requires_contiguous_pa_kv_cache", return_value=True)
+    def test_hybrid_backing_is_unchanged_when_pa_is_configured(self, _mock_requires_contiguous):
+        self.test_hybrid_descriptors_share_standardized_backing_allocation()
+
+    def test_hybrid_descriptors_share_standardized_backing_allocation(self):
+        attn_names = ["model.layers.0.self_attn.attn", "model.layers.2.self_attn.attn"]
+        mamba_names = ["model.layers.1.linear_attn", "model.layers.3.linear_attn"]
+        attn_spec = FullAttentionSpec(
+            block_size=2,
+            num_kv_heads=1,
+            head_size=4,
+            head_size_v=4,
+            dtype=torch.float16,
+        )
+        mamba_spec = MambaSpec(
+            block_size=2,
+            shapes=((2, 4),),
+            dtypes=(torch.float32,),
+        )
+        self.assertEqual(attn_spec.page_size_bytes, mamba_spec.page_size_bytes)
+        num_blocks = 3
+        layer_size = num_blocks * attn_spec.page_size_bytes
+        backing_size = layer_size * 2
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=[
+                KVCacheTensor(
+                    size=backing_size,
+                    layers=attn_names,
+                    layer_stride=layer_size,
+                    block_stride=attn_spec.page_size_bytes,
+                    offset=0,
+                ),
+                KVCacheTensor(
+                    size=backing_size,
+                    layers=mamba_names,
+                    layer_stride=layer_size,
+                    block_stride=mamba_spec.page_size_bytes,
+                    offset=0,
+                ),
+            ],
+            kv_cache_groups=[
+                KVCacheGroupSpec(layer_names=attn_names, kv_cache_spec=attn_spec),
+                KVCacheGroupSpec(layer_names=mamba_names, kv_cache_spec=mamba_spec),
+            ],
+        )
+        for kv_transfer_config in (
+            None,
+            SimpleNamespace(kv_connector="ExampleHiddenStatesConnector"),
+            SimpleNamespace(kv_connector="MooncakeConnectorV1"),
+            SimpleNamespace(kv_connector="MooncakeConnectorV2"),
+            SimpleNamespace(kv_connector="MooncakePullConnector"),
+        ):
+            with self.subTest(kv_transfer_config=kv_transfer_config):
+                runner = self._build_runner()
+                runner.vllm_config.kv_transfer_config = kv_transfer_config
+                layout = SimpleNamespace(is_layer_compact=True, is_block_compact=True)
+                runner.vllm_config.cache_config.get_resolved_kv_cache_layout.return_value = layout
+
+                raw_caches = runner._allocate_kv_cache_tensors(kv_cache_config)
+                storage_ptrs = {raw.untyped_storage().data_ptr() for raw in raw_caches.values()}
+                base_offset = raw_caches[attn_names[0]].storage_offset()
+
+                self.assertEqual(len(storage_ptrs), 1)
+                self.assertEqual(raw_caches[mamba_names[0]].storage_offset(), base_offset)
+                self.assertEqual(
+                    raw_caches[attn_names[1]].storage_offset(),
+                    base_offset + layer_size,
+                )
+                self.assertEqual(
+                    raw_caches[mamba_names[1]].storage_offset(),
+                    base_offset + layer_size,
+                )
+
+    @patch(
+        "vllm_ascend.patch.platform.patch_kv_cache_utils.may_override_num_blocks",
+        side_effect=lambda _config, num_blocks: num_blocks,
+    )
+    def test_dsv4_main_materializes_real_planner_geometry_once(
+        self,
+        _mock_override,
+    ):
+        small_name = "model.layers.0.self_attn.attn"
+        large_name = "model.layers.1.self_attn.attn"
+        aliased_large_name = "model.layers.2.self_attn.attn"
+        mtp_name = "model.mtp.layers.0.self_attn.attn"
+        small_spec = AscendMLAAttentionSpec(
+            block_size=8,
+            num_kv_heads=1,
+            head_size=4,
+            dtype=torch.float16,
+            model_version="deepseek_v4",
+            **_ratio_kwargs(1),
+        )
+        large_spec = AscendMLAAttentionSpec(
+            block_size=8,
+            num_kv_heads=1,
+            head_size=8,
+            dtype=torch.float16,
+            model_version="deepseek_v4",
+            **_ratio_kwargs(1),
+        )
+        full_group_spec = UniformTypeKVCacheSpecs.from_specs(
+            {
+                small_name: small_spec,
+                large_name: large_spec,
+                mtp_name: large_spec,
+            }
+        )
+        alias_group_spec = UniformTypeKVCacheSpecs.from_specs({aliased_large_name: large_spec})
+        self.assertIsNotNone(full_group_spec)
+        self.assertIsNotNone(alias_group_spec)
+        assert full_group_spec is not None
+        assert alias_group_spec is not None
+        groups = [
+            KVCacheGroupSpec(
+                layer_names=[small_name, large_name, mtp_name],
+                kv_cache_spec=full_group_spec,
+            ),
+            KVCacheGroupSpec(
+                layer_names=[aliased_large_name],
+                kv_cache_spec=alias_group_spec,
+            ),
+        ]
+        num_blocks = 3
+        tuple_stride = (small_spec.page_size_bytes + large_spec.page_size_bytes) * num_blocks
+        available_memory = tuple_stride * 2
+        planned_num_blocks, descriptors = _get_kv_cache_config_deepseek_v4_main(
+            SimpleNamespace(),
+            groups,
+            available_memory,
+        )
+        self.assertEqual(planned_num_blocks, num_blocks)
+        kv_cache_config = KVCacheConfig(
+            num_blocks=planned_num_blocks,
+            kv_cache_tensors=descriptors,
+            kv_cache_groups=groups,
+        )
+
+        runner = self._build_runner()
+        runner.use_compress = True
+        runner._allocate_int8_cache_tensor = MagicMock(
+            side_effect=lambda numel, _alignment: torch.zeros(
+                numel,
+                dtype=torch.int8,
+            )
+        )
+        raw_caches = runner._allocate_kv_cache_tensors(kv_cache_config)
+
+        runner._allocate_int8_cache_tensor.assert_called_once_with(
+            available_memory,
+            2 * 1024 * 1024,
+        )
+        storage_ptrs = {raw.untyped_storage().data_ptr() for raw in raw_caches.values()}
+        self.assertEqual(len(storage_ptrs), 1)
+        descriptors_by_layer = {
+            layer_name: descriptor for descriptor in descriptors for layer_name in descriptor.layers
+        }
+        base_offset = min(raw.storage_offset() - descriptors_by_layer[name].offset for name, raw in raw_caches.items())
+        for layer_name, raw in raw_caches.items():
+            descriptor = descriptors_by_layer[layer_name]
+            self.assertEqual(
+                raw.storage_offset(),
+                base_offset + descriptor.offset,
+            )
+            spec = small_spec if layer_name == small_name else large_spec
+            self.assertEqual(
+                raw.numel(),
+                num_blocks * spec.page_size_bytes,
+            )
+        self.assertEqual(
+            raw_caches[large_name].storage_offset(),
+            raw_caches[aliased_large_name].storage_offset(),
+        )
+        self.assertNotEqual(
+            raw_caches[small_name].storage_offset(),
+            raw_caches[large_name].storage_offset(),
+        )
+        self.assertEqual(
+            raw_caches[mtp_name].storage_offset(),
+            base_offset + tuple_stride + small_spec.page_size_bytes * num_blocks,
+        )
+
+    def test_reshape_kv_cache_uses_layer_spec_for_draft_gqa(self):
+        runner = self._build_runner()
+        runner.sparse_kv_offload_enabled = False
+        kv_cache_spec = FullAttentionSpec(
+            block_size=16,
+            num_kv_heads=8,
+            head_size=64,
+            head_size_v=64,
+            dtype=torch.float16,
+        )
+        kv_cache_config = KVCacheConfig(
+            num_blocks=2,
+            kv_cache_tensors=[
+                _make_kv_cache_tensor(
+                    per_layer_size=kv_cache_spec.page_size_bytes * 2,
+                    layer_names=["draft_attn"],
+                    page_size=kv_cache_spec.page_size_bytes,
+                )
+            ],
+            kv_cache_groups=[KVCacheGroupSpec(layer_names=["draft_attn"], kv_cache_spec=kv_cache_spec)],
+        )
+        kv_cache_raw_tensors = runner._allocate_kv_cache_tensors(kv_cache_config)
+        runner._kv_cache_spec_attn_group_iterator = lambda: [
+            SimpleNamespace(
+                kv_cache_group_id=0,
+                kv_cache_spec=kv_cache_spec,
+                backend=runner.attn_backend,
+                layer_names=["draft_attn"],
+            )
+        ]
+
+        kv_caches = runner._reshape_kv_cache_tensors(kv_cache_config, kv_cache_raw_tensors, [kv_cache_spec.block_size])
+        k_cache, v_cache = kv_caches["draft_attn"]
+
+        self.assertEqual(k_cache.shape, (2, 16, 8, 64))
+        self.assertEqual(v_cache.shape, (2, 16, 8, 64))
+
+    @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
+    def test_hybrid_mla_cache_uses_logical_kernel_block_shape(
+        self,
+        mock_get_layers,
+    ):
+        """A 384-token scheduler page is exposed as three 128-token blocks."""
+        runner = self._build_runner()
+        runner.use_hybrid_blocks = True
+        runner.hybrid_with_attn_and_mamba = False
+        runner.model_config.hf_text_config = SimpleNamespace(
+            kv_lora_rank=512,
+            qk_rope_head_dim=64,
+        )
+
+        layer_name = "draft_attn"
+        attn_module = MLAAttention.__new__(MLAAttention)
+        torch.nn.Module.__init__(attn_module)
+        attn_module.kv_lora_rank = 512
+        attn_module.qk_rope_head_dim = 64
+        mock_get_layers.return_value = {layer_name: attn_module}
+
+        physical_block_size = 384
+        kernel_block_size = 128
+        num_physical_blocks = 2
+        kv_cache_spec = AscendMLAAttentionSpec(
+            block_size=physical_block_size,
+            num_kv_heads=1,
+            head_size=512 + 64,
+            dtype=torch.bfloat16,
+        )
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_physical_blocks,
+            kv_cache_tensors=[
+                _make_kv_cache_tensor(
+                    per_layer_size=(kv_cache_spec.page_size_bytes * num_physical_blocks),
+                    layer_names=[layer_name],
+                    page_size=kv_cache_spec.page_size_bytes,
+                )
+            ],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    layer_names=[layer_name],
+                    kv_cache_spec=kv_cache_spec,
+                )
+            ],
+        )
+
+        # Raw cache tensors are byte buffers. Together they contain two
+        # physical pages: 512 latent dimensions plus 64 RoPE dimensions.
+        raw_k_cache = torch.empty(
+            num_physical_blocks * physical_block_size * 512 * 2,
+            dtype=torch.uint8,
+        )
+        raw_v_cache = torch.empty(
+            num_physical_blocks * physical_block_size * 64 * 2,
+            dtype=torch.uint8,
+        )
+        backend = MagicMock()
+        backend.get_supported_kernel_block_sizes.return_value = [kernel_block_size]
+        backend.get_kv_cache_shape.side_effect = lambda num_blocks, block_size, num_kv_heads, head_size: (
+            num_blocks,
+            block_size,
+            num_kv_heads,
+            head_size,
+        )
+        runner._kv_cache_spec_attn_group_iterator = lambda: [
+            SimpleNamespace(
+                kv_cache_group_id=0,
+                kv_cache_spec=kv_cache_spec,
+                backend=backend,
+                layer_names=[layer_name],
+            )
+        ]
+
+        k_cache, v_cache = runner._reshape_kv_cache_tensors(
+            kv_cache_config,
+            {layer_name: (raw_k_cache, raw_v_cache)},
+            [kernel_block_size],
+        )[layer_name]
+
+        num_kernel_blocks = num_physical_blocks * physical_block_size // kernel_block_size
+        self.assertEqual(k_cache.shape, (num_kernel_blocks, 128, 1, 512))
+        self.assertEqual(v_cache.shape, (num_kernel_blocks, 128, 1, 64))
+        self.assertEqual(
+            backend.get_kv_cache_shape.call_args.args[:2],
+            (num_kernel_blocks, kernel_block_size),
+        )
+
+    def test_reshape_cache_only_uses_upstream_bhnc_axis_order(self):
+        """vLLM #51718 standardized cache-only views as [B, H, N, C]."""
+        runner = self._build_runner()
+        layer_name = "model.cache_only_layers.0.attn"
+        spec = HiddenStateCacheSpec(
+            block_size=4,
+            num_kv_heads=2,
+            head_size=3,
+            dtype=torch.float16,
+            cache_dtype_str="auto",
+        )
+        kv_cache_config = KVCacheConfig(
+            num_blocks=2,
+            kv_cache_tensors=[],
+            kv_cache_groups=[KVCacheGroupSpec(layer_names=[layer_name], kv_cache_spec=spec)],
+        )
+        runner._kv_cache_spec_attn_group_iterator = lambda: [
+            SimpleNamespace(
+                kv_cache_group_id=0,
+                kv_cache_spec=spec,
+                backend=runner.attn_backend,
+                layer_names=[layer_name],
+            )
+        ]
+        raw = torch.zeros(spec.page_size_bytes * 2, dtype=torch.int8)
+
+        cache = runner._reshape_kv_cache_tensors(
+            kv_cache_config,
+            {layer_name: raw},
+            [spec.block_size],
+        )[layer_name]
+
+        self.assertEqual(cache.shape, (2, 2, 4, 3))
+
+    def test_reshape_hybrid_attention_strips_padding_without_block_splitting(self):
+        """vLLM #51718 pads hybrid pages independently of kernel splitting."""
+        runner = self._build_runner()
+        runner.use_hybrid_blocks = False
+        runner.cache_config = SimpleNamespace(cache_dtype="auto")
+        layer_name = "model.layers.0.self_attn.attn"
+        unpadded_page_size = 4 * 2 * (3 + 3) * torch.float16.itemsize
+        spec = FullAttentionSpec(
+            block_size=4,
+            num_kv_heads=2,
+            head_size=3,
+            head_size_v=3,
+            dtype=torch.float16,
+            page_size_padded=unpadded_page_size + 32,
+        )
+        kv_cache_config = KVCacheConfig(
+            num_blocks=2,
+            kv_cache_tensors=[],
+            kv_cache_groups=[KVCacheGroupSpec(layer_names=[layer_name], kv_cache_spec=spec)],
+        )
+        runner._kv_cache_spec_attn_group_iterator = lambda: [
+            SimpleNamespace(
+                kv_cache_group_id=0,
+                kv_cache_spec=spec,
+                backend=runner.attn_backend,
+                layer_names=[layer_name],
+            )
+        ]
+        raw_size = spec.page_size_bytes * 2
+        raw_caches = (
+            (
+                "legacy-combined",
+                torch.zeros(raw_size, dtype=torch.int8),
+                True,
+            ),
+            (
+                "main-separate",
+                (
+                    torch.zeros(raw_size // 2, dtype=torch.int8),
+                    torch.zeros(raw_size // 2, dtype=torch.int8),
+                ),
+                False,
+            ),
+        )
+
+        for layout, raw_cache, hybrid_flag in raw_caches:
+            runner.hybrid_with_attn_and_mamba = hybrid_flag
+            runner.use_hybrid_blocks = hybrid_flag
+            with self.subTest(layout=layout):
+                k_cache, v_cache = runner._reshape_kv_cache_tensors(
+                    kv_cache_config,
+                    {layer_name: raw_cache},
+                    [spec.block_size],
+                )[layer_name]
+
+            self.assertEqual(k_cache.shape, (2, 4, 2, 3))
+            self.assertEqual(v_cache.shape, (2, 4, 2, 3))
+
+    @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)
+    @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
+    def test_sparse_layer_without_indexer_allocates_only_mla_kv_cache(
+        self,
+        mock_get_layers,
+        _mock_has_ec_transfer,
+    ):
+        runner = self._build_runner()
+        runner.use_sparse = True
+        runner.block_size = 16
+        runner.kv_cache_dtype = torch.bfloat16
+        runner.shared_kv_cache_layers = {}
+        runner.ascend_config = MagicMock()
+        runner.ascend_config.kvpp_config.size = 1
+        runner.model_config.hf_text_config = SimpleNamespace(
+            kv_lora_rank=512,
+            qk_rope_head_dim=64,
+        )
+        runner.vllm_config.cache_config.cache_dtype = "auto"
+        runner.sparse_kv_offload_enabled = False
+
+        attn_module = MLAAttention.__new__(MLAAttention)
+        torch.nn.Module.__init__(attn_module)
+        attn_module.impl = SimpleNamespace(
+            has_indexer=False,
+            enable_sparse_sfa_c8=False,
+            enable_sparse_li_c8=False,
+        )
+        attn_module.kv_lora_rank = 512
+        attn_module.qk_rope_head_dim = 64
+        layer_name = "model.layers.1.self_attn.attn"
+        mock_get_layers.return_value = {layer_name: attn_module}
+
+        specs = runner.get_kv_cache_spec()
+        self.assertEqual(set(specs), {layer_name})
+        spec = specs[layer_name]
+        self.assertEqual(spec.head_size, 512 + 64)
+        self.assertFalse(hasattr(spec, "separate_sfa_indexer_cache"))
+
+        kv_cache_config = KVCacheConfig(
+            num_blocks=2,
+            kv_cache_tensors=[
+                _make_kv_cache_tensor(
+                    per_layer_size=spec.page_size_bytes * 2,
+                    layer_names=[layer_name],
+                    page_size=spec.page_size_bytes,
+                )
+            ],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    layer_names=[layer_name],
+                    kv_cache_spec=spec,
+                )
+            ],
+        )
+
+        raw_caches = runner._allocate_kv_cache_tensors(kv_cache_config)
+        raw_k_cache, raw_v_cache = raw_caches[layer_name]
+
+        self.assertEqual(raw_k_cache.numel(), 2 * 16 * 512 * 2)
+        self.assertEqual(raw_v_cache.numel(), 2 * 16 * 64 * 2)
+
+    @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)
+    @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
+    def test_sparse_indexer_allocates_separate_replicated_cache_tensor(
+        self,
+        mock_get_layers,
+        _mock_has_ec_transfer,
+    ):
+        runner = self._build_runner()
+        runner.use_sparse = True
+        runner.block_size = 16
+        runner.sfa_dcp_replicated_indexer_size = 2
+        runner.kv_cache_dtype = torch.bfloat16
+        runner.shared_kv_cache_layers = {}
+        runner.ascend_config = MagicMock()
+        runner.ascend_config.kvpp_config.size = 1
+        runner.ascend_config.is_sparse_li_c8_layer.return_value = False
+        runner.model_config.hf_text_config = SimpleNamespace(
+            kv_lora_rank=512,
+            qk_rope_head_dim=64,
+            index_head_dim=128,
+        )
+        runner.vllm_config.cache_config.cache_dtype = "auto"
+        runner.sparse_kv_offload_enabled = False
+
+        attn_module = MLAAttention.__new__(MLAAttention)
+        torch.nn.Module.__init__(attn_module)
+        attn_module.impl = SimpleNamespace(
+            has_indexer=True,
+            enable_sparse_sfa_c8=False,
+            enable_sparse_li_c8=False,
+        )
+        attn_module.kv_lora_rank = 512
+        attn_module.qk_rope_head_dim = 64
+        indexer_module = DeepseekV32IndexerCache.__new__(DeepseekV32IndexerCache)
+        torch.nn.Module.__init__(indexer_module)
+        attn_layer_name = "model.layers.1.self_attn.attn"
+        indexer_layer_name = "model.layers.1.self_attn.indexer.k_cache"
+        mock_get_layers.return_value = {
+            attn_layer_name: attn_module,
+            indexer_layer_name: indexer_module,
+        }
+
+        specs = runner.get_kv_cache_spec()
+        main_spec = specs[attn_layer_name]
+        indexer_spec = specs[indexer_layer_name]
+        self.assertIsInstance(indexer_spec, AscendSFAIndexerCacheSpec)
+        self.assertEqual(main_spec.page_size_bytes, 16 * (512 + 64) * 2)
+        self.assertEqual(indexer_spec.page_size_bytes, 2 * 16 * 128 * 2)
+
+        group_spec = UniformTypeKVCacheSpecs.from_specs(specs)
+        self.assertIsNotNone(group_spec)
+        kv_cache_config = KVCacheConfig(
+            num_blocks=2,
+            kv_cache_tensors=[
+                _make_kv_cache_tensor(
+                    per_layer_size=main_spec.page_size_bytes * 2,
+                    layer_names=[attn_layer_name],
+                    page_size=main_spec.page_size_bytes,
+                ),
+                _make_kv_cache_tensor(
+                    per_layer_size=indexer_spec.page_size_bytes * 2,
+                    layer_names=[indexer_layer_name],
+                    page_size=indexer_spec.page_size_bytes,
+                ),
+            ],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    layer_names=[attn_layer_name, indexer_layer_name],
+                    kv_cache_spec=group_spec,
+                )
+            ],
+        )
+
+        raw_caches = runner._allocate_kv_cache_tensors(kv_cache_config)
+        raw_k_cache, raw_v_cache = raw_caches[attn_layer_name]
+        (raw_indexer_cache,) = raw_caches[indexer_layer_name]
+
+        self.assertEqual(raw_k_cache.numel(), 2 * 16 * 512 * 2)
+        self.assertEqual(raw_v_cache.numel(), 2 * 16 * 64 * 2)
+        self.assertEqual(raw_indexer_cache.numel(), 2 * 2 * 16 * 128 * 2)
+
+        backend = MagicMock()
+        backend.get_kv_cache_shape.side_effect = lambda num_blocks, block_size, num_kv_heads, head_size: (
+            num_blocks,
+            block_size,
+            num_kv_heads,
+            head_size,
+        )
+        runner._kv_cache_spec_attn_group_iterator = lambda: [
+            SimpleNamespace(
+                kv_cache_group_id=0,
+                kv_cache_spec=main_spec,
+                backend=backend,
+                layer_names=[attn_layer_name],
+            ),
+            SimpleNamespace(
+                kv_cache_group_id=0,
+                kv_cache_spec=indexer_spec,
+                backend=backend,
+                layer_names=[indexer_layer_name],
+            ),
+        ]
+
+        caches = runner._reshape_kv_cache_tensors(kv_cache_config, raw_caches, [runner.block_size])
+        k_cache, v_cache = caches[attn_layer_name]
+        (indexer_cache,) = caches[indexer_layer_name]
+
+        self.assertEqual(k_cache.shape, (2, 16, 1, 512))
+        self.assertEqual(v_cache.shape, (2, 16, 1, 64))
+        self.assertEqual(indexer_cache.shape, (4, 16, 1, 128))
+
+    @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)
+    @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
+    def test_sparse_indexer_skips_allocation_for_runtime_shared_s_layer(
+        self,
+        mock_get_layers,
+        _mock_has_ec_transfer,
+    ):
+        runner = self._build_runner()
+        runner.use_sparse = True
+        runner.block_size = 16
+        runner.sfa_dcp_replicated_indexer_size = 1
+        runner.kv_cache_dtype = torch.bfloat16
+        runner.shared_kv_cache_layers = {}
+        runner.ascend_config = MagicMock()
+        runner.ascend_config.is_sparse_li_c8_layer.return_value = False
+        runner.model_config.hf_text_config = SimpleNamespace(
+            kv_lora_rank=512,
+            qk_rope_head_dim=64,
+            index_head_dim=128,
+        )
+        runner.vllm_config.cache_config.cache_dtype = "auto"
+
+        attn_module = MLAAttention.__new__(MLAAttention)
+        torch.nn.Module.__init__(attn_module)
+        attn_module.impl = SimpleNamespace(
+            has_indexer=True,
+            runtime_has_indexer=False,
+            enable_sparse_sfa_c8=False,
+            enable_sparse_li_c8=False,
+        )
+        attn_module.kv_lora_rank = 512
+        attn_module.qk_rope_head_dim = 64
+        indexer_module = DeepseekV32IndexerCache.__new__(DeepseekV32IndexerCache)
+        torch.nn.Module.__init__(indexer_module)
+        attn_layer_name = "model.layers.1.self_attn.attn"
+        indexer_layer_name = "model.layers.1.self_attn.indexer.k_cache"
+        mock_get_layers.return_value = {
+            attn_layer_name: attn_module,
+            indexer_layer_name: indexer_module,
+        }
+
+        specs = runner.get_kv_cache_spec()
+        self.assertIn(attn_layer_name, specs)
+        self.assertNotIn(indexer_layer_name, specs)
+
+    def test_sparse_c8_indexer_owns_quantized_cache_accounting(self):
+        main_spec = AscendMLAAttentionSpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=512 + 64,
+            dtype=torch.bfloat16,
+            cache_sparse_sfa_c8=False,
+        )
+        indexer_spec = AscendSFAIndexerCacheSpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.int8,
+            scale_dim=1,
+            scale_dtype=torch.float16,
+            cache_sparse_li_c8=True,
+            sfa_dcp_replicated_indexer_size=2,
+        )
+
+        self.assertEqual(main_spec.page_size_bytes, 16 * (512 + 64) * 2)
+        self.assertEqual(indexer_spec.page_size_bytes, 2 * 16 * (128 + 2))
+        self.assertFalse(hasattr(main_spec, "sfa_dcp_replicated_indexer_size"))
+
+    def test_sparse_sfa_and_li_c8_allocate_and_reshape_independently(self):
+        runner = self._build_runner()
+        runner.use_sparse = True
+        runner.block_size = 16
+        runner.c8_k_cache_dtype = torch.int8
+        runner.c8_cache_dtype = torch.int8
+        runner.c8_k_scale_cache_dtype = torch.float16
+        runner._get_attention_kv_cache_dims = lambda _layer_name, _spec: (512, 64)
+        runner.sparse_kv_offload_enabled = False
+
+        attn_layer_name = "model.layers.1.self_attn.attn"
+        indexer_layer_name = "model.layers.1.self_attn.indexer.k_cache"
+        packed_head_dim = get_sfa_qsfa_packed_head_dim(512, 64)
+
+        for enable_sfa_c8, enable_li_c8 in (
+            (False, False),
+            (True, False),
+            (False, True),
+            (True, True),
+        ):
+            with self.subTest(
+                enable_sfa_c8=enable_sfa_c8,
+                enable_li_c8=enable_li_c8,
+            ):
+                main_spec = AscendMLAAttentionSpec(
+                    block_size=runner.block_size,
+                    num_kv_heads=1,
+                    head_size=packed_head_dim if enable_sfa_c8 else 512 + 64,
+                    dtype=torch.int8 if enable_sfa_c8 else torch.bfloat16,
+                    cache_sparse_sfa_c8=enable_sfa_c8,
+                )
+                indexer_spec = AscendSFAIndexerCacheSpec(
+                    block_size=runner.block_size,
+                    num_kv_heads=1,
+                    head_size=128,
+                    dtype=torch.int8 if enable_li_c8 else torch.bfloat16,
+                    scale_dim=1 if enable_li_c8 else 0,
+                    scale_dtype=torch.float16 if enable_li_c8 else torch.int8,
+                    cache_sparse_li_c8=enable_li_c8,
+                )
+                group_spec = UniformTypeKVCacheSpecs.from_specs(
+                    {
+                        attn_layer_name: main_spec,
+                        indexer_layer_name: indexer_spec,
+                    }
+                )
+                self.assertIsNotNone(group_spec)
+                assert group_spec is not None
+
+                kv_cache_config = KVCacheConfig(
+                    num_blocks=2,
+                    kv_cache_tensors=[
+                        _make_kv_cache_tensor(
+                            per_layer_size=main_spec.page_size_bytes * 2,
+                            layer_names=[attn_layer_name],
+                            page_size=main_spec.page_size_bytes,
+                        ),
+                        _make_kv_cache_tensor(
+                            per_layer_size=indexer_spec.page_size_bytes * 2,
+                            layer_names=[indexer_layer_name],
+                            page_size=indexer_spec.page_size_bytes,
+                        ),
+                    ],
+                    kv_cache_groups=[
+                        KVCacheGroupSpec(
+                            layer_names=[attn_layer_name, indexer_layer_name],
+                            kv_cache_spec=group_spec,
+                        )
+                    ],
+                )
+                backend = MagicMock()
+                backend.get_kv_cache_shape.side_effect = lambda num_blocks, block_size, num_kv_heads, head_size: (
+                    num_blocks,
+                    block_size,
+                    num_kv_heads,
+                    head_size,
+                )
+                runner._kv_cache_spec_attn_group_iterator = MagicMock(
+                    return_value=[
+                        SimpleNamespace(
+                            kv_cache_group_id=0,
+                            kv_cache_spec=main_spec,
+                            backend=backend,
+                            layer_names=[attn_layer_name],
+                        ),
+                        SimpleNamespace(
+                            kv_cache_group_id=0,
+                            kv_cache_spec=indexer_spec,
+                            backend=backend,
+                            layer_names=[indexer_layer_name],
+                        ),
+                    ]
+                )
+
+                raw_caches = runner._allocate_kv_cache_tensors(kv_cache_config)
+                caches = runner._reshape_kv_cache_tensors(kv_cache_config, raw_caches, [runner.block_size])
+
+                main_cache = caches[attn_layer_name]
+                self.assertEqual(len(main_cache), 1 if enable_sfa_c8 else 2)
+                if enable_sfa_c8:
+                    self.assertEqual(main_cache[0].shape, (2, 16, 1, packed_head_dim))
+                    self.assertEqual(main_cache[0].dtype, torch.int8)
+                else:
+                    self.assertEqual(main_cache[0].shape, (2, 16, 1, 512))
+                    self.assertEqual(main_cache[1].shape, (2, 16, 1, 64))
+                    self.assertEqual(main_cache[0].dtype, torch.bfloat16)
+                    self.assertEqual(main_cache[1].dtype, torch.bfloat16)
+
+                indexer_cache = caches[indexer_layer_name]
+                self.assertEqual(len(indexer_cache), 2 if enable_li_c8 else 1)
+                self.assertEqual(indexer_cache[0].shape, (2, 16, 1, 128))
+                self.assertEqual(
+                    indexer_cache[0].dtype,
+                    torch.int8 if enable_li_c8 else torch.bfloat16,
+                )
+                if enable_li_c8:
+                    self.assertEqual(indexer_cache[1].shape, (2, 16, 1, 1))
+                    self.assertEqual(indexer_cache[1].dtype, torch.float16)
+
+    @patch(
+        "vllm_ascend.worker.model_runner_v1.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A5),
+    )
+    @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)
+    @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
+    def test_a5_sparse_c8_specs_keep_main_and_indexer_layouts_separate(
+        self,
+        mock_get_layers,
+        _mock_has_ec_transfer,
+        _mock_get_device_type,
+    ):
+        runner = self._build_runner()
+        runner.use_sparse = True
+        runner.block_size = 16
+        runner.kv_cache_dtype = torch.bfloat16
+        runner.c8_k_cache_dtype = torch.float8_e4m3fn
+        runner.c8_cache_dtype = torch.float8_e4m3fn
+        runner.c8_k_scale_cache_dtype = torch.float32
+        runner.shared_kv_cache_layers = {}
+        runner.ascend_config = MagicMock()
+        runner.ascend_config.kvpp_config.size = 1
+        runner.model_config.hf_text_config = SimpleNamespace(
+            kv_lora_rank=512,
+            qk_rope_head_dim=64,
+            index_head_dim=128,
+        )
+        runner.vllm_config.cache_config.cache_dtype = "auto"
+        runner.sparse_kv_offload_enabled = False
+
+        attn_module = MLAAttention.__new__(MLAAttention)
+        torch.nn.Module.__init__(attn_module)
+        attn_module.kv_lora_rank = 512
+        attn_module.qk_rope_head_dim = 64
+        indexer_module = DeepseekV32IndexerCache.__new__(DeepseekV32IndexerCache)
+        torch.nn.Module.__init__(indexer_module)
+        attn_layer_name = "model.layers.1.self_attn.attn"
+        indexer_layer_name = "model.layers.1.self_attn.indexer.k_cache"
+        mock_get_layers.return_value = {
+            attn_layer_name: attn_module,
+            indexer_layer_name: indexer_module,
+        }
+
+        packed_head_dim = get_sfa_qsfa_packed_head_dim(512, 64)
+        for enable_sfa_c8, enable_li_c8 in (
+            (False, False),
+            (True, False),
+            (False, True),
+            (True, True),
+        ):
+            with self.subTest(
+                enable_sfa_c8=enable_sfa_c8,
+                enable_li_c8=enable_li_c8,
+            ):
+                attn_module.impl = SimpleNamespace(
+                    has_indexer=True,
+                    enable_sparse_sfa_c8=enable_sfa_c8,
+                    enable_sparse_li_c8=enable_li_c8,
+                )
+                runner.ascend_config.is_sparse_li_c8_layer.return_value = enable_li_c8
+                runner.ascend_config.is_sparse_li_c8_layer.reset_mock()
+
+                specs = runner.get_kv_cache_spec()
+                main_spec = specs[attn_layer_name]
+                indexer_spec = specs[indexer_layer_name]
+
+                self.assertEqual(
+                    runner.ascend_config.is_sparse_li_c8_layer.call_args_list,
+                    [call(indexer_layer_name)],
+                )
+                self.assertEqual(
+                    main_spec.head_size,
+                    packed_head_dim if enable_sfa_c8 else 512 + 64,
+                )
+                self.assertEqual(
+                    main_spec.dtype,
+                    torch.float8_e4m3fn if enable_sfa_c8 else torch.bfloat16,
+                )
+                self.assertEqual(main_spec.cache_sparse_sfa_c8, enable_sfa_c8)
+                self.assertEqual(
+                    indexer_spec.dtype,
+                    torch.float8_e4m3fn if enable_li_c8 else torch.bfloat16,
+                )
+                self.assertEqual(indexer_spec.scale_dim, 1 if enable_li_c8 else 0)
+                self.assertEqual(
+                    indexer_spec.scale_dtype,
+                    torch.float32 if enable_li_c8 else torch.int8,
+                )
+                self.assertEqual(indexer_spec.cache_sparse_li_c8, enable_li_c8)
+
+    def test_deepseek_v4_indexer_keeps_compressed_mla_layout(self):
+        runner = self._build_runner()
+        runner.use_compress = True
+        layer_name = "model.layers.1.self_attn.indexer.k_cache"
+        indexer_spec = AscendMLAAttentionSpec(
+            block_size=16 * 4,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.int8,
+            model_version="deepseek_v4",
+            scale_dim=1,
+            scale_dtype=torch.float16,
+            **_ratio_kwargs(4),
+        )
+        kv_cache_config = KVCacheConfig(
+            num_blocks=2,
+            kv_cache_tensors=[
+                _make_kv_cache_tensor(
+                    per_layer_size=indexer_spec.page_size_bytes * 2,
+                    layer_names=[layer_name],
+                    page_size=indexer_spec.page_size_bytes,
+                )
+            ],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    layer_names=[layer_name],
+                    kv_cache_spec=indexer_spec,
+                )
+            ],
+        )
+
+        raw_caches = runner._allocate_kv_cache_tensors(kv_cache_config)
+        self.assertEqual(raw_caches[layer_name].numel(), 2 * 16 * (128 + 2))
+
+        backend = MagicMock()
+        backend.get_kv_cache_shape.side_effect = lambda num_blocks, block_size, num_kv_heads, head_size: (
+            num_blocks,
+            block_size,
+            num_kv_heads,
+            head_size,
+        )
+        runner.attn_backend = backend
+        runner._kv_cache_spec_attn_group_iterator = lambda: [
+            SimpleNamespace(
+                kv_cache_group_id=0,
+                kv_cache_spec=indexer_spec,
+                backend=backend,
+                layer_names=[layer_name],
+            )
+        ]
+
+        indexer_k_cache, indexer_scale_cache = runner._reshape_kv_cache_tensors(
+            kv_cache_config, raw_caches, [indexer_spec.block_size]
+        )[layer_name]
+        self.assertEqual(indexer_k_cache.shape, (2, 16, 1, 128))
+        self.assertEqual(indexer_k_cache.dtype, torch.int8)
+        self.assertEqual(indexer_scale_cache.shape, (2, 16, 1, 1))
+        self.assertEqual(indexer_scale_cache.dtype, torch.float16)
+
+
+class TestNPUModelRunnerEncoderCacheReset(unittest.TestCase):
+    @staticmethod
+    def _build_runner():
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.encoder_cache = {"device": object()}
+        runner.tmp_encoder_cache = {}
+        runner.cpu_encoder_cache = {}
+        runner.cached = {}
+        runner._offload_request_states = CopySfaRequestStates()
+        runner._pending_encoder_cache_copies = deque()
+        runner.late_interaction_runner = MagicMock()
+        runner._sync_device = MagicMock()
+        return runner
+
+    def test_request_removal_invalidates_offload_history_without_cached_request(self):
+        runner = self._build_runner()
+        slots = np.zeros(4, dtype=np.int32)
+        active = np.zeros(4, dtype=np.bool_)
+        args = dict(
+            req_ids=["a"],
+            live_req_ids=["a"],
+            slots=slots,
+            active=active,
+            prebound_slots={"a": 0},
+            padded_reqs=1,
+            block_size=128,
+            hot_tokens=8192,
+            dummy=False,
+            lim_cache_histories=(),
+        )
+        runner._offload_request_states.prepare(computed_tokens=np.asarray([8320]), **args)
+        runner._on_request_state_removed("a", None)
+        outcome = runner._offload_request_states.prepare(computed_tokens=np.asarray([512]), **args)
+        self.assertEqual(outcome, (False, {}, (0,)))
+
+    def test_reset_clears_score_encoder_cache_state(self):
+        runner = self._build_runner()
+        runner.tmp_encoder_cache["tmp"] = object()
+        runner.cpu_encoder_cache["cpu"] = object()
+        runner.cached["tmp"] = {"request"}
+        runner._pending_encoder_cache_copies.append((object(), MagicMock()))
+
+        runner.reset_encoder_cache()
+
+        runner._sync_device.assert_called_once_with()
+        self.assertFalse(runner.encoder_cache)
+        self.assertFalse(runner.tmp_encoder_cache)
+        self.assertFalse(runner.cpu_encoder_cache)
+        self.assertFalse(runner.cached)
+        self.assertFalse(runner._pending_encoder_cache_copies)
+        runner.late_interaction_runner.clear.assert_called_once_with()
+
+
+class TestNPUModelRunnerScoreEncoderCache(unittest.TestCase):
+    @staticmethod
+    def _build_runner(use_score_encoder_cache=True):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.encoder_cache = {}
+        runner.cpu_encoder_cache = {}
+        runner.tmp_encoder_cache = {}
+        runner.cached = {}
+        runner._pending_encoder_cache_copies = deque()
+        runner.use_score_encoder_cache = use_score_encoder_cache
+        runner._offload_request_states = None
+        runner.maybe_save_ec_to_connector = MagicMock()
+        return runner
+
+    def test_processes_score_cache_migrations_and_frees(self):
+        runner = self._build_runner()
+        runner.encoder_cache = {
+            "npu-freed": "npu",
+            "cpu-freed": "npu",
+        }
+        runner.cpu_encoder_cache = {
+            "npu-freed": "cpu",
+            "cpu-freed": "cpu",
+            "promote": "promote",
+            "temporary": "temporary",
+        }
+        runner._copy_cpu_encoder_cache_to_device = MagicMock(side_effect=lambda value: f"device-{value}")
+        metadata = SimpleNamespace(
+            promoting_mm_hashes=["promote"],
+            cpu_get_encoder_mm_hashes=["temporary"],
+            npu_freed=["npu-freed"],
+            cpu_freed=["cpu-freed"],
+        )
+        scheduler_output = SimpleNamespace(ec_manager_metadata=metadata)
+
+        runner._process_encoder_cache_scheduler_output(scheduler_output)
+
+        self.assertEqual(set(runner.encoder_cache), {"cpu-freed", "promote"})
+        self.assertEqual(
+            set(runner.cpu_encoder_cache),
+            {"npu-freed", "promote", "temporary"},
+        )
+        self.assertEqual(runner.encoder_cache["promote"], "device-promote")
+        self.assertEqual(runner.tmp_encoder_cache["temporary"], "device-temporary")
+
+    def test_score_cache_disabled_delegates_to_upstream(self):
+        runner = self._build_runner(use_score_encoder_cache=False)
+        scheduler_output = SimpleNamespace()
+
+        with patch.object(
+            GPUModelRunner,
+            "_process_encoder_cache_scheduler_output",
+            autospec=True,
+        ) as upstream_process:
+            runner._process_encoder_cache_scheduler_output(scheduler_output)
+
+        upstream_process.assert_called_once_with(runner, scheduler_output)
+
+    def test_async_copy_keeps_pinned_source_until_event_completes(self):
+        runner = self._build_runner()
+        runner.device = "npu"
+        cpu_value = MagicMock()
+        pinned_source = MagicMock()
+        npu_value = MagicMock()
+        copy_done = MagicMock()
+        cpu_value.is_pinned.return_value = False
+        cpu_value.pin_memory.return_value = pinned_source
+        fake_npu = SimpleNamespace(
+            Event=MagicMock(return_value=copy_done),
+            current_stream=MagicMock(),
+        )
+
+        with (
+            patch.object(torch, "empty_like", return_value=npu_value),
+            patch.object(torch, "npu", fake_npu, create=True),
+        ):
+            runner._copy_cpu_encoder_cache_to_device(cpu_value)
+
+        npu_value.copy_.assert_called_once_with(pinned_source, non_blocking=True)
+        self.assertIs(runner._pending_encoder_cache_copies[0][0], pinned_source)
+        self.assertIs(runner._pending_encoder_cache_copies[0][1], copy_done)
+        copy_done.record.assert_called_once()
+
+        copy_done.query.side_effect = [False, True]
+        runner._clear_finished_encoder_cache_copies()
+        self.assertEqual(len(runner._pending_encoder_cache_copies), 1)
+        runner._clear_finished_encoder_cache_copies()
+        self.assertFalse(runner._pending_encoder_cache_copies)
+
+    def test_new_output_is_staged_on_cpu(self):
+        runner = self._build_runner()
+        output = MagicMock()
+        staging = MagicMock()
+
+        with patch.object(torch, "empty_like", return_value=staging):
+            runner._cache_encoder_output(
+                "image",
+                output,
+                SimpleNamespace(promoting_mm_hashes=[], npu_freed=[]),
+                [],
+            )
+
+        self.assertIs(runner.cpu_encoder_cache["image"], staging)
+        self.assertIs(runner.tmp_encoder_cache["image"], output)
+        self.assertNotIn("image", runner.encoder_cache)
+        staging.copy_.assert_called_once_with(
+            output.detach.return_value,
+            non_blocking=True,
+        )
+
+    def test_tmp_cache_is_released_after_last_request_reference(self):
+        runner = self._build_runner()
+        tmp_output = object()
+        runner.tmp_encoder_cache["image"] = tmp_output
+        runner.cached["image"] = {"first", "second"}
+        req_state = SimpleNamespace(mm_features=[SimpleNamespace(identifier="image")])
+
+        runner._on_request_state_removed("first", req_state)
+
+        self.assertIn("image", runner.tmp_encoder_cache)
+
+        runner._on_request_state_removed("second", req_state)
+
+        self.assertNotIn("image", runner.cached)
+        self.assertNotIn("image", runner.tmp_encoder_cache)
+
+
+class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
+    def _build_runner(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.device = torch.device("cpu")
+        runner._pending_spec_decode_metadata_copies = deque()
+        runner.vllm_config = MagicMock()
+        runner.model_config = MagicMock()
+        runner.use_compress = False
+        return runner
+
+    @patch("vllm_ascend.worker.model_runner_v1.get_ascend_config")
+    @patch("vllm_ascend.worker.model_runner_v1.lmhead_tp_enable")
+    def test_sample_updates_output_token_ids_before_sampler(self, mock_lmhead_tp_enable, mock_get_ascend_config):
+        """Verify output_token_ids are updated before sampler is called"""
+        mock_lmhead_tp_enable.return_value = False
+        mock_ascend_config = MagicMock()
+        mock_get_ascend_config.return_value = mock_ascend_config
+
+        # Build input batch with historical sampled tokens
+        input_batch = MagicMock()
+        input_batch.sampling_metadata.output_token_ids = [
+            [1, 2, 3, -1],
+            [4, 5, -1],
+        ]
+        input_batch.sampling_metadata.top_k = None
+        input_batch.num_reqs = 2
+        input_batch.top_k_cpu = None
+        input_batch.prev_req_id_to_index = {
+            "req0": 0,
+            "req1": 1,
+        }
+        input_batch.sampled_token_ids_cpu = torch.tensor([6, 7])
+        input_batch.async_copy_ready_event = MagicMock()
+        input_batch.async_copy_ready_event.synchronize = MagicMock()
+
+        # Simulate the real behavior of InputBatch.update_async_output_token_ids
+        def mock_update_output_token_ids():
+            output_token_ids = input_batch.sampling_metadata.output_token_ids
+            sampled_ids = input_batch.sampled_token_ids_cpu.tolist()
+
+            for index, req_id in enumerate(input_batch.prev_req_id_to_index):
+                prev_index = input_batch.prev_req_id_to_index[req_id]
+                req_output = output_token_ids[index]
+                if req_output and req_output[-1] == -1:
+                    req_output[-1] = sampled_ids[prev_index]
+
+        input_batch.update_async_output_token_ids.side_effect = mock_update_output_token_ids
+
+        # Build runner and inject dependencies
+        runner = self._build_runner()
+        runner.input_batch = input_batch
+        runner.sampler = MagicMock(return_value=MagicMock())
+
+        # Call sample method
+        logits = torch.randn(2, 32000)
+        runner._sample(logits=logits, spec_decode_metadata=None)
+
+        # Verify sampler and update_async_output_token_ids were called
+        runner.sampler.assert_called_once()
+        input_batch.update_async_output_token_ids.assert_called_once()
+
+        # Verify output_token_ids were updated before sampler is called
+        call_kwargs = runner.sampler.call_args[1]
+        actual_sampling_metadata = call_kwargs["sampling_metadata"]
+        actual_output_token_ids = actual_sampling_metadata.output_token_ids
+        self.assertEqual(actual_output_token_ids[0], [1, 2, 3, 6])
+        self.assertEqual(actual_output_token_ids[1], [4, 5, 7])
+
+    def test_placeholder_spec_tokens_are_sanitized_only_for_forward(self):
+        runner = self._build_runner()
+        runner.input_ids = SimpleNamespace(
+            cpu=torch.tensor([11, -1, 33, -1], dtype=torch.int32),
+            gpu=torch.tensor([11, -1, 33, -1], dtype=torch.int32),
+        )
+        scheduler_output = SimpleNamespace(
+            scheduled_spec_decode_tokens={"req0": [-1]},
+        )
+
+        runner._sanitize_placeholder_input_ids_for_forward(
+            scheduler_output,
+            num_forward_tokens=4,
+        )
+
+        self.assertEqual(runner.input_ids.gpu.tolist(), [11, 0, 33, 0])
+        self.assertEqual(runner.input_ids.cpu.tolist(), [11, -1, 33, -1])
+
+    def test_placeholder_sanitization_is_scoped_to_current_forward(self):
+        runner = self._build_runner()
+        runner.input_ids = SimpleNamespace(
+            cpu=torch.tensor([11, -1, 33, -1], dtype=torch.int32),
+            gpu=torch.tensor([11, -1, 33, -1], dtype=torch.int32),
+        )
+        scheduler_output = SimpleNamespace(
+            scheduled_spec_decode_tokens={"req0": [-1]},
+        )
+
+        runner._sanitize_placeholder_input_ids_for_forward(
+            scheduler_output,
+            num_forward_tokens=2,
+        )
+
+        self.assertEqual(runner.input_ids.gpu.tolist(), [11, 0, 33, -1])
+
+    # This checks token metadata on CPU; pinned allocation is covered separately.
+    @patch.object(torch.Tensor, "pin_memory", lambda self: self)
+    def test_mtp3_placeholder_metadata_is_preserved_before_sanitizing_forward(self):
+        runner = self._build_runner()
+        runner.arange_np = np.arange(8, dtype=np.int32)
+        runner._arange_scratch = np.empty(8, dtype=np.int32)
+        runner.input_ids = SimpleNamespace(
+            cpu=torch.tensor([11, -1, -1, -1], dtype=torch.int32),
+            gpu=torch.tensor([11, -1, -1, -1], dtype=torch.int32),
+        )
+        scheduler_output = SimpleNamespace(
+            scheduled_spec_decode_tokens={"req0": [-1, -1, -1]},
+        )
+
+        spec_decode_metadata = runner._calc_spec_decode_metadata(
+            num_draft_tokens=np.array([3], dtype=np.int32),
+            cu_num_scheduled_tokens=np.array([4], dtype=np.int32),
+        )
+        runner._sanitize_placeholder_input_ids_for_forward(
+            scheduler_output,
+            num_forward_tokens=4,
+        )
+
+        self.assertEqual(spec_decode_metadata.draft_token_ids.tolist(), [-1, -1, -1])
+        self.assertEqual(runner.input_ids.gpu.tolist(), [11, 0, 0, 0])
+        self.assertEqual(runner.input_ids.cpu.tolist(), [11, -1, -1, -1])
+
+    def test_spec_decode_metadata_keeps_cpu_sources_until_h2d_completes(self):
+        runner = self._build_runner()
+        runner.device = SimpleNamespace(type="npu")
+        sources = tuple(MagicMock() for _ in range(5))
+        device_values = tuple(MagicMock() for _ in range(5))
+        for source, device_value in zip(sources, device_values):
+            source.to.return_value = device_value
+        copy_done = MagicMock()
+        copy_done.query.return_value = False
+        fake_npu = SimpleNamespace(
+            Event=MagicMock(return_value=copy_done),
+            current_stream=MagicMock(),
+        )
+
+        with patch.object(torch, "npu", fake_npu, create=True):
+            result = runner._copy_spec_decode_metadata_to_device(sources)
+
+            self.assertEqual(result, device_values)
+            pending_sources, event = runner._pending_spec_decode_metadata_copies[0]
+            self.assertIs(pending_sources, sources)
+            self.assertIs(event, copy_done)
+            for source in sources:
+                source.to.assert_called_once_with(runner.device, non_blocking=True)
+            fake_npu.current_stream.assert_called_once_with()
+            copy_done.record.assert_called_once_with(fake_npu.current_stream.return_value)
+
+            copy_done.query.return_value = True
+            runner._copy_spec_decode_metadata_to_device(sources)
+        self.assertEqual(len(runner._pending_spec_decode_metadata_copies), 1)
+
+
+class TestNPUModelRunnerDebugger(unittest.TestCase):
+    def _build_runner(self, debugger=None):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.debugger = debugger or MagicMock()
+        runner.model = MagicMock()
+        runner.model_config = MagicMock()
+        runner.model_config.enforce_eager = False
+        runner._debugger_started = True
+        runner._debugger_step_dummy_data_before_execute = False
+        runner.use_compress = False
+        return runner
+
+    def test_finalize_dump_data_stops_stop_capable_debugger(self):
+        runner = self._build_runner()
+
+        runner._finalize_dump_data()
+
+        runner.debugger.stop.assert_called_once_with()
+        runner.debugger.step.assert_called_once_with()
+        self.assertFalse(runner._debugger_started)
+
+    def test_finalize_dump_data_steps_graph_debugger_without_stop(self):
+        debugger = MagicMock(spec=["start", "step"])
+        runner = self._build_runner(debugger)
+
+        runner._finalize_dump_data()
+
+        debugger.step.assert_called_once_with()
+        self.assertTrue(runner._debugger_started)
+
+    def test_start_dump_data_noop_when_already_started(self):
+        runner = self._build_runner(MagicMock(spec=["start", "step"]))
+
+        runner._start_dump_data()
+
+        runner.debugger.start.assert_not_called()
+        runner.debugger.step.assert_not_called()
+        self.assertTrue(runner._debugger_started)
+
+    def test_start_dump_data_forwards_kwargs_to_debugger_start(self):
+        debugger = MagicMock(spec=["start", "step"])
+        runner = self._build_runner(debugger)
+        runner._debugger_started = False
+
+        runner._start_dump_data(scheduled_tokens={"req-0": 42})
+
+        debugger.start.assert_called_once_with(runner.model, scheduled_tokens={"req-0": 42})
+        self.assertTrue(runner._debugger_started)
+
+    @patch("vllm_ascend.worker.model_runner_v1.has_kv_transfer_group", return_value=False)
+    @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)
+    @patch("vllm_ascend.worker.model_runner_v1.get_pp_group")
+    @patch("vllm_ascend.worker.model_runner_v1.record_function_or_nullcontext")
+    def test_execute_model_skips_dump_start_for_dp_dummy_run(
+        self, mock_record_function, mock_get_pp_group, _mock_has_ec_transfer, _mock_has_kv_transfer_group
+    ):
+        from contextlib import nullcontext
+
+        mock_record_function.return_value = nullcontext()
+        mock_get_pp_group.return_value = SimpleNamespace(world_size=1, is_first_rank=True, is_last_rank=True)
+        runner = self._build_runner(MagicMock(spec=["start", "stop", "step"]))
+        runner.vllm_config = MagicMock()
+        runner.ascend_config = SimpleNamespace(
+            scheduler_config=SimpleNamespace(profiling_chunk_config=SimpleNamespace(enabled=False, need_timing=False))
+        )
+        runner.execute_model_state = None
+        runner.speculative_config = None
+        runner.use_async_scheduling = False
+        runner.num_spec_tokens = 0
+        runner._draft_token_ids = None
+        runner.supports_mm_inputs = False
+        runner.model_config.is_encoder_decoder = False
+        runner.synchronize_input_prep = nullcontext
+        runner._update_states = MagicMock(return_value=None)
+        runner.parallel_config = SimpleNamespace(distributed_executor_backend="external_launcher", data_parallel_size=2)
+        runner._dummy_run = MagicMock()
+        runner._start_dump_data = MagicMock()
+        runner.requests = {}
+        scheduler_output = SimpleNamespace(total_num_scheduled_tokens=0)
+
+        runner.execute_model(scheduler_output)
+
+        runner._dummy_run.assert_called_once_with(
+            1,
+            skip_gdn_state_update=True,
+        )
+        runner._start_dump_data.assert_not_called()
+
+    @patch("vllm_ascend.worker.model_runner_v1.has_kv_transfer_group", return_value=False)
+    @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)
+    @patch("vllm_ascend.worker.model_runner_v1.get_pp_group")
+    @patch("vllm_ascend.worker.model_runner_v1.record_function_or_nullcontext")
+    def test_execute_model_starts_dump_for_real_batch(
+        self, mock_record_function, mock_get_pp_group, _mock_has_ec_transfer, _mock_has_kv_transfer_group
+    ):
+        from contextlib import nullcontext
+
+        mock_record_function.return_value = nullcontext()
+        mock_get_pp_group.return_value = SimpleNamespace(world_size=1, is_first_rank=True, is_last_rank=True)
+        runner = self._build_runner(MagicMock(spec=["start", "stop", "step"]))
+        runner.vllm_config = MagicMock()
+        runner.ascend_config = SimpleNamespace(
+            scheduler_config=SimpleNamespace(profiling_chunk_config=SimpleNamespace(enabled=False, need_timing=False))
+        )
+        runner.execute_model_state = None
+        runner.speculative_config = None
+        runner.use_async_scheduling = False
+        runner.num_spec_tokens = 0
+        runner._draft_token_ids = None
+        runner.supports_mm_inputs = False
+        runner.model_config.is_encoder_decoder = False
+        runner.synchronize_input_prep = nullcontext
+        runner._update_states = MagicMock(return_value=None)
+        runner.parallel_config = SimpleNamespace(
+            distributed_executor_backend="external_launcher", data_parallel_size=2, enable_dbo=False
+        )
+        runner.cache_config = SimpleNamespace(kv_sharing_fast_prefill=False)
+        runner.input_batch = SimpleNamespace(num_reqs=1, req_ids=["req0"], prev_req_id_to_index=None)
+        runner.requests = {}
+        runner._start_dump_data = MagicMock()
+        runner._prepare_inputs = MagicMock(side_effect=RuntimeError("sentinel"))
+        scheduler_output = SimpleNamespace(total_num_scheduled_tokens=1, num_scheduled_tokens={"req0": 1})
+
+        with self.assertRaisesRegex(RuntimeError, "sentinel"):
+            runner.execute_model(scheduler_output)
+
+        runner._start_dump_data.assert_called_once_with(scheduled_tokens={"req0": 1})
+
+
+class TestCorrectOptimisticSeqLensCpu(unittest.TestCase):
+    """Regression tests for async spec-decode seq_lens correction.
+
+    The helper must synchronize the device->host copy event *before* reading
+    ``valid_sampled_token_count_cpu``. Reading it early consumes stale counts
+    and corrupts the CPU seq_lens, which surfaced as an accuracy regression on
+    DeepSeek-V4 (its compressed-KV slot mapping is built from these seq_lens).
+    """
+
+    def _build_runner(self, optimistic, prev_positions, prev_drafts, counts_cpu):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.optimistic_seq_lens_cpu = optimistic
+        runner.prev_positions = SimpleNamespace(np=prev_positions)
+        runner.prev_num_draft_tokens = SimpleNamespace(np=prev_drafts)
+        runner.valid_sampled_token_count_cpu = counts_cpu
+        return runner
+
+    def test_synchronizes_before_host_read(self):
+        num_reqs = 3
+        # Optimistic (all drafts assumed accepted):
+        #   prev_computed=[100,200,50], prev_drafts=[2,3,1], sched=[3,4,2]
+        #   optimistic = prev_computed + (prev_drafts + 1) + sched
+        optimistic = torch.tensor([106, 208, 54], dtype=torch.int64)
+        prev_positions = np.array([0, 1, 2], dtype=np.int64)
+        prev_drafts = np.array([2, 3, 1], dtype=np.int32)
+
+        # CPU buffer initially holds STALE counts (== drafts + 1, i.e. "all
+        # accepted"). If the helper reads before synchronizing, the correction
+        # is a no-op and the assertion below fails.
+        counts_cpu = torch.tensor([3, 4, 2], dtype=torch.int32)
+        # The true counts that the async copy delivers on synchronize().
+        true_counts = np.array([2, 1, 2], dtype=np.int32)
+
+        runner = self._build_runner(optimistic, prev_positions, prev_drafts, counts_cpu)
+        event = MagicMock()
+        event.synchronize.side_effect = lambda: counts_cpu.copy_(torch.from_numpy(true_counts))
+        runner.valid_sampled_token_count_event = event
+
+        runner._correct_optimistic_seq_lens_cpu(num_reqs)
+
+        event.synchronize.assert_called_once()
+        # correction = (prev_drafts + 1 - true_counts) = [1, 3, 0]
+        # corrected  = optimistic - correction          = [105, 205, 54]
+        np.testing.assert_array_equal(optimistic.numpy(), np.array([105, 205, 54]))
+
+    def test_asserts_event_present(self):
+        runner = self._build_runner(
+            torch.tensor([10], dtype=torch.int64),
+            np.array([0], dtype=np.int64),
+            np.array([1], dtype=np.int32),
+            torch.tensor([1], dtype=torch.int32),
+        )
+        runner.valid_sampled_token_count_event = None
+        with self.assertRaises(AssertionError):
+            runner._correct_optimistic_seq_lens_cpu(1)
+
+
+class TestKVPPExecute(unittest.TestCase):
+    def test_history_gate_uses_only_actual_requests(self):
+        from vllm_ascend.worker import model_runner_v1 as module
+
+        events: list[object] = []
+        result = SimpleNamespace()
+        for computed, expected in (([0, 0, 99, 99], False), ([0, 4, 0, 0], True), (None, None)):
+            with self.subTest(computed=computed):
+                events.clear()
+                runner = NPUModelRunner.__new__(NPUModelRunner)
+                runner.ascend_config = SimpleNamespace(
+                    scheduler_config=SimpleNamespace(
+                        profiling_chunk_config=SimpleNamespace(enabled=False, need_timing=False)
+                    )
+                )
+                runner.execute_model_state = None
+                runner.speculative_config = None
+                runner.use_async_scheduling = False
+                runner.use_compress = False
+                runner.dynamic_eplb = False
+                runner.cascade_attn_enabled = False
+                runner.dcp_size = 1
+                runner._has_sinks = False
+                runner.use_aux_hidden_state_outputs = False
+                runner.broadcast_pp_output = False
+                runner.is_pooling_model = True
+                runner.model = object()
+                runner.vllm_config = SimpleNamespace()
+                runner.parallel_config = SimpleNamespace(num_ubatches=1)
+                runner.model_config = SimpleNamespace(
+                    enforce_eager=True,
+                    hf_config=SimpleNamespace(model_type="test"),
+                    hf_text_config=SimpleNamespace(model_type="test"),
+                )
+                runner.cache_config = SimpleNamespace(kv_sharing_fast_prefill=False, mamba_cache_mode=None)
+                runner.input_batch = SimpleNamespace(
+                    num_reqs=2, req_ids=["a", "b"], num_computed_tokens_cpu=np.array(computed)
+                )
+                runner.synchronize_input_prep = nullcontext
+                runner._update_states = lambda _: None
+                runner._start_dump_data = MagicMock()
+                runner._finalize_dump_data = MagicMock()
+                runner._prepare_inputs = lambda *_args: (torch.tensor([0, 1]), None, 2)
+                runner._determine_batch_execution_and_padding = lambda **_kwargs: (
+                    CUDAGraphMode.NONE,
+                    SimpleNamespace(num_tokens=2, num_reqs=2),
+                    False,
+                    None,
+                    None,
+                )
+                runner._build_attention_metadata = lambda **_kwargs: ({}, None)
+                runner._sanitize_placeholder_input_ids_for_forward = MagicMock()
+                runner._preprocess = lambda *_args: (None, None, torch.arange(2), None, {}, None)
+                runner._prepare_device_metadata_for_forward = lambda _: None
+                runner.maybe_get_kv_connector_output = lambda *_args, **_kwargs: nullcontext()
+                runner.kvpp = SimpleNamespace(
+                    scheduler=object() if computed is not None else None,
+                    prepare_forward=lambda history: events.append(("prepare", history)),
+                    complete_forward=lambda: events.append("complete"),
+                )
+
+                def forward(*_args, **_kwargs):
+                    events.append("forward")
+                    return torch.ones(2, 1)
+
+                runner._model_forward = forward
+                runner._pool = lambda *_args: result
+                scheduler_output = SimpleNamespace(
+                    total_num_scheduled_tokens=2,
+                    num_scheduled_tokens={"a": 1, "b": 1},
+                    scheduled_encoder_inputs={},
+                    scheduled_spec_decode_tokens={},
+                )
+                with (
+                    patch.object(module, "get_pp_group", return_value=SimpleNamespace(world_size=1, is_last_rank=True)),
+                    patch.object(module, "has_kv_transfer_group", return_value=False),
+                    patch.object(module, "has_ec_transfer", return_value=False),
+                    patch.object(module, "enable_sp", return_value=False),
+                    patch.object(module, "maybe_create_ubatch_slices", return_value=(None, None)),
+                    patch.object(module, "set_ascend_forward_context", side_effect=lambda *_a, **_k: nullcontext()),
+                    patch.object(module, "update_cos_sin"),
+                ):
+                    self.assertIs(runner.execute_model(scheduler_output), result)
+                self.assertEqual(
+                    events, ([("prepare", expected)] if computed is not None else []) + ["forward", "complete"]
+                )
+
+
+class TestC8MXFPVScaleCacheFill(unittest.TestCase):
+    """The static V scale is written at KV cache setup, not in forward.
+
+    Filling it lazily during attention meant the write could be recorded into
+    an ACL graph instead of executed, which left the draft model's V scale at
+    zero and collapsed MTP acceptance. Doing it here happens before any
+    capture, replay or request, so no execution order can skip it.
+    """
+
+    NUM_BLOCKS = 2
+    NUM_KV_HEADS = 2
+    BLOCK_SIZE = 128
+    HEAD_DIM = 64
+
+    def _runner(self, layers):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.compilation_config = SimpleNamespace(static_forward_context=layers)
+        runner.vllm_config = SimpleNamespace(
+            cache_config=SimpleNamespace(cache_dtype="mxfp8"),
+            compilation_config=runner.compilation_config,
+        )
+        return runner
+
+    def _c8_layer(self):
+        layer = SimpleNamespace(
+            v_cache_scale=torch.arange(self.NUM_KV_HEADS * self.HEAD_DIM, dtype=torch.int32)
+            .remainder(251)
+            .to(torch.uint8),
+            impl=object.__new__(AscendC8MXFPAttentionBackendImpl),
+        )
+        return layer
+
+    def _c8_cache(self):
+        v_scale = torch.zeros(
+            mxfp_v_scale_cache_shape(self.NUM_BLOCKS, self.BLOCK_SIZE, self.NUM_KV_HEADS, self.HEAD_DIM),
+            dtype=torch.uint8,
+        )
+        return (MagicMock(), MagicMock(), MagicMock(), v_scale)
+
+    def test_every_c8_mxfp_layer_is_filled(self):
+        layers = {f"layer.{i}": self._c8_layer() for i in range(3)}
+        kv_caches = {name: self._c8_cache() for name in layers}
+        self._runner(layers)._fill_c8_mxfp_v_scale_caches(kv_caches)
+        for name, layer in layers.items():
+            self.assertEqual(
+                kv_caches[name][3][0, :, :, 0, :, 0].reshape(-1).tolist(),
+                layer.v_cache_scale.tolist(),
+            )
+
+    def test_other_backends_are_left_alone(self):
+        # Non-C8 layers hand out plain (k, v) pairs; indexing them as a
+        # four-tuple would be the bug, so they must not be touched at all.
+        layers = {"plain": SimpleNamespace(impl=object())}
+        kv_caches = {"plain": (MagicMock(), MagicMock())}
+        self._runner(layers)._fill_c8_mxfp_v_scale_caches(kv_caches)
+
+    def test_a_layer_without_a_forward_context_entry_is_skipped(self):
+        self._runner({})._fill_c8_mxfp_v_scale_caches({"stray": (MagicMock(), MagicMock())})
+
+    def test_cache_setup_hands_back_a_filled_cache(self):
+        # The wiring, not just the helper: nothing downstream of
+        # initialize_kv_cache_tensors fills this cache, so if the call site
+        # ever goes away the scales are zero for the life of the process.
+        layers = {"layer.0": self._c8_layer()}
+        kv_caches = {"layer.0": self._c8_cache()}
+        runner = self._runner(layers)
+        runner.shared_kv_cache_layers = {}
+        runner.kv_caches = []
+        runner.model_config = SimpleNamespace(hf_text_config=SimpleNamespace(model_type="qwen3"))
+        with (
+            patch.object(NPUModelRunner, "_allocate_kv_cache_tensors", return_value={}),
+            patch.object(NPUModelRunner, "_reshape_kv_cache_tensors", return_value=kv_caches),
+            patch("vllm.v1.worker.utils.bind_kv_cache"),
+        ):
+            returned = runner.initialize_kv_cache_tensors(MagicMock())
+        self.assertEqual(
+            returned["layer.0"][3][0, :, :, 0, :, 0].reshape(-1).tolist(),
+            layers["layer.0"].v_cache_scale.tolist(),
+        )
+
+    def test_v1_reshape_uses_flat_kernel_size_and_physical_page_padding(self):
+        runner = self._runner({})
+        spec = mxfp_cache_spec(
+            FullAttentionSpec(
+                block_size=1024,
+                num_kv_heads=1,
+                head_size=256,
+                dtype=torch.float8_e4m3fn,
+            )
+        )
+        spec = replace(spec, page_size_padded=spec.page_size_bytes + 512)
+        group = SimpleNamespace(kv_cache_spec=spec, kv_cache_group_id=0, layer_names=["attn"], backend=MagicMock())
+        runner._get_layer_kv_cache_specs = MagicMock(return_value={"attn": spec})
+        runner._kv_cache_spec_attn_group_iterator = MagicMock(return_value=iter([group]))
+        runner.runner_only_attn_layers = set()
+        raw = torch.zeros(128 + 2 * spec.page_size_bytes, dtype=torch.int8)[128:]
+        caches = runner._reshape_kv_cache_tensors(SimpleNamespace(num_blocks=2), {"attn": raw}, [512])
+        k, v, ks, vs = caches["attn"]
+        self.assertEqual(k.shape, (4, 1, 8, 512, 32))
+        self.assertEqual(ks.shape, (4, 1, 32, 4, 16, 2))
+        self.assertEqual(vs.shape, (4, 1, 16, 8, 16, 2))
+        self.assertEqual(k.storage_offset(), 128)
+        self.assertTrue(all(view.stride(0) == spec.page_size_bytes // 2 for view in (k, v, ks, vs)))
+        group.backend.get_kv_cache_shape.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()

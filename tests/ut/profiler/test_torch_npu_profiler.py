@@ -40,13 +40,13 @@ class TestTorchNPUProfilerWrapper(TestBase):
         mock_profiler.stop.assert_called_once()
 
     @patch("vllm_ascend.profiler.torch_npu_profiler.get_ascend_config")
-    @patch("torch_npu.profiler._ExperimentalConfig")
-    @patch("torch_npu.profiler.profile")
-    @patch("torch_npu.profiler.tensorboard_trace_handler")
-    @patch("torch_npu.profiler.ExportType")
-    @patch("torch_npu.profiler.ProfilerLevel")
-    @patch("torch_npu.profiler.AiCMetrics")
-    @patch("torch_npu.profiler.ProfilerActivity")
+    @patch("vllm_ascend.profiler.torch_npu_profiler.torch_npu.profiler._ExperimentalConfig", create=True)
+    @patch("vllm_ascend.profiler.torch_npu_profiler.torch_npu.profiler.profile", create=True)
+    @patch("vllm_ascend.profiler.torch_npu_profiler.torch_npu.profiler.tensorboard_trace_handler", create=True)
+    @patch("vllm_ascend.profiler.torch_npu_profiler.torch_npu.profiler.ExportType", create=True)
+    @patch("vllm_ascend.profiler.torch_npu_profiler.torch_npu.profiler.ProfilerLevel", create=True)
+    @patch("vllm_ascend.profiler.torch_npu_profiler.torch_npu.profiler.AiCMetrics", create=True)
+    @patch("vllm_ascend.profiler.torch_npu_profiler.torch_npu.profiler.ProfilerActivity", create=True)
     def test_create_profiler_enabled(
         self,
         mock_profiler_activity,
@@ -154,13 +154,13 @@ class TestTorchNPUProfilerWrapper(TestBase):
             str(cm.exception),
         )
 
-    @patch("torch_npu.profiler._ExperimentalConfig")
-    @patch("torch_npu.profiler.profile")
-    @patch("torch_npu.profiler.tensorboard_trace_handler")
-    @patch("torch_npu.profiler.ExportType")
-    @patch("torch_npu.profiler.ProfilerLevel")
-    @patch("torch_npu.profiler.AiCMetrics")
-    @patch("torch_npu.profiler.ProfilerActivity")
+    @patch("vllm_ascend.profiler.torch_npu_profiler.torch_npu.profiler._ExperimentalConfig", create=True)
+    @patch("vllm_ascend.profiler.torch_npu_profiler.torch_npu.profiler.profile", create=True)
+    @patch("vllm_ascend.profiler.torch_npu_profiler.torch_npu.profiler.tensorboard_trace_handler", create=True)
+    @patch("vllm_ascend.profiler.torch_npu_profiler.torch_npu.profiler.ExportType", create=True)
+    @patch("vllm_ascend.profiler.torch_npu_profiler.torch_npu.profiler.ProfilerLevel", create=True)
+    @patch("vllm_ascend.profiler.torch_npu_profiler.torch_npu.profiler.AiCMetrics", create=True)
+    @patch("vllm_ascend.profiler.torch_npu_profiler.torch_npu.profiler.ProfilerActivity", create=True)
     @patch("vllm_ascend.profiler.torch_npu_profiler.get_ascend_config")
     def test_create_profiler_with_msmonitor_disabled(
         self,

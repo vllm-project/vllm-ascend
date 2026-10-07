@@ -25,7 +25,7 @@ jobs:
         include:
           - runner: linux-aarch64-a2b3-0
             cluster: a2
-          - runner: linux-aarch64-a3-0
+          - runner: linux-aarch64-a3-800t-0
             cluster: a3
           - runner: linux-aarch64-a5-0
             cluster: a5
@@ -37,7 +37,7 @@ jobs:
         run: |
           apt-get update -y && apt-get install git jq -y
           pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/
-          pip install modelscope datasets
+          pip install 'modelscope<1.38' datasets
 
       - name: Show Current Disk Usage
         run: |

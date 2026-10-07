@@ -21,9 +21,6 @@ msgstr ""
 msgid "# Hy3-preview"
 msgstr "# Hy3-preview"
 
-msgid "## Introduction"
-msgstr "## 简介"
-
 msgid ""
 "Hy3-preview is a Mixture-of-Experts model, with 295B total parameters, 21B "
 "active parameters and 3.8B MTP layer parameters, developed by the Tencent Hy"
@@ -42,22 +39,10 @@ msgstr ""
 "本指南记录了在单个 Atlas A3 16-NPU 节点上，针对 Hy3-preview 已验证的 vLLM Ascend 服务路径。已验证的默认路径为"
 " TP16 + EP + MTP + ACLGraph。"
 
-msgid "## Supported Features"
-msgstr "## 支持的特性"
-
-msgid "## Environment Preparation"
-msgstr "## 环境准备"
-
-msgid "### Model Weight"
-msgstr "### 模型权重"
-
 msgid ""
 "Download or mount the checkpoint to a path shared by the runtime container, "
 "for example `/models/Hy3-preview`."
 msgstr "将检查点下载或挂载到运行容器共享的路径，例如 `/models/Hy3-preview`。"
-
-msgid "### Hardware"
-msgstr "### 硬件"
 
 msgid ""
 "The verified configuration uses one Atlas A3 node with 16 NPUs and 64 GB HBM"
@@ -66,9 +51,6 @@ msgid ""
 msgstr ""
 "已验证的配置使用一个 Atlas A3 节点，包含16个NPU，每个NPU拥有64 GB HBM。实际权重运行在启动后，每个NPU使用了约58 "
 "GB的进程内存。"
-
-msgid "### Installation"
-msgstr "### 安装"
 
 msgid ""
 "You can use our official docker image to run Hy3-preview directly. For Atlas"
@@ -84,25 +66,8 @@ msgid ""
 "also build all from source:"
 msgstr "此外，如果您不想像上面那样使用 Docker 镜像，也可以从源码构建所有组件："
 
-msgid ""
-"- Install `vllm-ascend` from source, refer to "
-"[installation](https://github.com/vllm-project/vllm-"
-"ascend/blob/main/docs/source/installation.md)."
-msgstr ""
-"- 从源码安装 `vllm-ascend`，请参考[安装指南](https://github.com/vllm-project/vllm-"
-"ascend/blob/main/docs/source/installation.md)。"
-
-msgid "## Deployment"
-msgstr "## 部署"
-
-msgid "### Single-node Deployment"
-msgstr "### 单节点部署"
-
 msgid "Run `vllm serve` from `/workspace`."
 msgstr "在 `/workspace` 目录下运行 `vllm serve`。"
-
-msgid "## Functional Verification"
-msgstr "## 功能验证"
 
 msgid "Check model readiness first:"
 msgstr "首先检查模型就绪状态："
@@ -112,9 +77,6 @@ msgstr "运行一个文本冒烟请求："
 
 msgid "Expected result:"
 msgstr "预期结果："
-
-msgid "## Accuracy Evaluation"
-msgstr "## 精度评估"
 
 msgid "Here are two accuracy evaluation methods."
 msgstr "这里提供两种精度评估方法。"
@@ -131,17 +93,8 @@ msgid ""
 " only."
 msgstr "2. 执行后，您可以获取结果，以下结果仅供参考。"
 
-msgid "### Using Language Model Evaluation Harness"
-msgstr "### 使用 Language Model Evaluation Harness"
-
 msgid "Not tested yet."
 msgstr "尚未测试。"
-
-msgid "## Performance"
-msgstr "## 性能"
-
-msgid "### Using AISBench"
-msgstr "### 使用 AISBench"
 
 msgid ""
 "Refer to [Using AISBench for performance "
@@ -151,12 +104,6 @@ msgstr ""
 "详细信息请参考[使用 AISBench "
 "进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-"
 "performance-evaluation)。"
-
-msgid "### Using vLLM Benchmark"
-msgstr "### 使用 vLLM Benchmark"
-
-msgid "### Lightweight Online Benchmark"
-msgstr "### 轻量级在线基准测试"
 
 msgid ""
 "The following numbers are from a real-weight smoke benchmark on one Atlas A3"
@@ -168,9 +115,6 @@ msgstr ""
 "以下数据来自单个 Atlas A3 16-NPU 节点上的实际权重冒烟基准测试，使用了 TP16 + EP + MTP + "
 "ACLGraph。基准测试使用了 `vllm bench serve`、随机提示、输出长度 128、`--max-concurrency "
 "1`、`--temperature 0`，每个输入长度发送 4 个请求。这些数据是功能性能的证明，而非调优后的吞吐量上限。"
-
-msgid "## Known Limitations"
-msgstr "## 已知限制"
 
 msgid ""
 "- The model config supports 262,144 tokens, but this guide only verifies 32,768-token serving. Larger contexts require a separate capacity validation.\n"
@@ -188,15 +132,6 @@ msgid ""
 msgstr ""
 "| 随机输入长度 | 成功/总数 | 平均TTFT（毫秒） | 平均TPOT（毫秒） | 输出吞吐量（tok/s） | 总token吞吐量（tok/s）"
 " |"
-
-msgid ""
-"- Hugging Face: [tencent/Hy3-preview](https://huggingface.co/tencent/Hy3-preview)\n"
-"- ModelScope: [Tencent-Hunyuan/Hy3-preview](https://www.modelscope.cn/models/Tencent-Hunyuan/Hy3-preview)\n"
-"- GitCode: [tencent_hunyuan/Hy3-preview](https://ai.gitcode.com/tencent_hunyuan/Hy3-preview)"
-msgstr ""
-"- Hugging Face: [tencent/Hy3-preview](https://huggingface.co/tencent/Hy3-preview)\n"
-"- ModelScope: [Tencent-Hunyuan/Hy3-preview](https://www.modelscope.cn/models/Tencent-Hunyuan/Hy3-preview)\n"
-"- GitCode: [tencent_hunyuan/Hy3-preview](https://ai.gitcode.com/tencent_hunyuan/Hy3-preview)"
 
 msgid ""
 "- `--enable-ep-weight-filter` recommended. It skips expert weights that do not belong to the local EP rank during loading, reducing disk and host-memory pressure for very large MoE checkpoints. We recommend keeping it enabled.\n"
@@ -222,3 +157,85 @@ msgid ""
 "Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the"
 " feature's configuration."
 msgstr "请参阅[特性指南](../../user_guide/feature_guide/index.md)以获取该特性的配置。"
+
+msgid ""
+"- Install `vllm-ascend` from source, refer to "
+"[installation](../../getting_started/installation.md)."
+msgstr "- 从源码安装 `vllm-ascend`，请参考[安装](../../getting_started/installation.md)。"
+
+msgid "## 1 Introduction"
+msgstr "## 1 简介"
+
+msgid "## 2 Supported Features"
+msgstr "## 2 支持的特性"
+
+msgid "## 3 Environment Preparation"
+msgstr "## 3 环境准备"
+
+msgid "### 3.1 Model Weight"
+msgstr "### 3.1 模型权重"
+
+msgid "|  Weight Version | Download Links |"
+msgstr "|  权重版本 | 下载链接 |"
+
+msgid ""
+"| Hy3-preview     | [ModelScope](https://www.modelscope.cn/models/Tencent-"
+"Hunyuan/Hy3-preview) \\| [Hugging "
+"Face](https://huggingface.co/tencent/Hy3-preview) \\| "
+"[GitCode](https://ai.gitcode.com/tencent_hunyuan/Hy3-preview) |"
+msgstr ""
+"| Hy3-preview     | [ModelScope](https://www.modelscope.cn/models/Tencent-"
+"Hunyuan/Hy3-preview) \\| [Hugging "
+"Face](https://huggingface.co/tencent/Hy3-preview) \\| "
+"[GitCode](https://ai.gitcode.com/tencent_hunyuan/Hy3-preview) |"
+
+msgid ""
+">**Path description**: Download the model weights to a directory of your "
+"choice and record it. Ensure the model path in the subsequent deployment "
+"command matches this directory."
+msgstr ">**路径说明**：将模型权重下载到您选择的目录并记录该路径。请确保后续部署命令中的模型路径与此目录一致。"
+
+msgid "### 3.2 Hardware"
+msgstr "### 3.2 硬件"
+
+msgid "## 4 Installation"
+msgstr "## 4 安装"
+
+msgid "### 4.1 Docker Image Installation"
+msgstr "### 4.1 Docker 镜像安装"
+
+msgid "### 4.2 Source Code Installation"
+msgstr "### 4.2 源码安装"
+
+msgid "## 5 Deployment"
+msgstr "## 5 部署"
+
+msgid "### 5.1 Single-node Deployment"
+msgstr "### 5.1 单机部署"
+
+msgid "## 6 Functional Verification"
+msgstr "## 6 功能验证"
+
+msgid "## 7 Accuracy Evaluation"
+msgstr "## 7 精度评估"
+
+msgid "### 7.1 Using AISBench"
+msgstr "### 7.1 使用 AISBench"
+
+msgid "### 7.2 Using Language Model Evaluation Harness"
+msgstr "### 7.2 使用 Language Model Evaluation Harness"
+
+msgid "## 8 Performance Evaluation"
+msgstr "## 8 性能评估"
+
+msgid "### 8.1 Using AISBench"
+msgstr "### 8.1 使用 AISBench"
+
+msgid "### 8.2 Using vLLM Benchmark"
+msgstr "### 8.2 使用 vLLM Benchmark"
+
+msgid "### 8.3 Lightweight Online Benchmark"
+msgstr "### 8.3 轻量级在线基准测试"
+
+msgid "## 9 Known Limitations"
+msgstr "## 9 已知限制"

@@ -62,15 +62,41 @@ def add_rms_norm(
     return x_, None, residual_
 
 
-def reduce_sum(x: torch.Tensor, dim: int | None = None, keepdim: bool = False) -> torch.Tensor:
+_SUPPORTED_DTYPES = (torch.float16, torch.float32, torch.bfloat16)
+
+
+def reduce_sum(
+    x: torch.Tensor,
+    dim: int | None = None,
+    keepdim: bool = False,
+    *,
+    axis: int | None = None,
+    dtype: torch.dtype | None = None,
+) -> torch.Tensor:
     """npu_reduce_sum_batch_invariant requires dim to be specified, but torch.sum
     doesn't require it, so we set dim to -1 by default if dim is None and x.dim()==1.
+
+    Mirrors ``torch.Tensor.sum``, which also accepts the NumPy-style ``axis``
+    alias and an output ``dtype``. ``axis`` is mapped to ``dim`` and ``dtype``
+    forces the native fallback so the returned type keeps the caller's intent.
     """
+    if axis is not None:
+        if dim is not None:
+            raise TypeError("reduce_sum() received both 'dim' and 'axis'")
+        dim = axis
     dim = -1 if dim is None and x.dim() == 1 else dim
-    if x.device.type == "npu" and dim is not None:
+    # aclnnReduceSumBatchInvariant only supports reducing the last dimension and
+    # raises AclNN_Parameter_Error(EZ1001, "Provided dim only support last dim")
+    # for any other dim. The last dim can only be spelled as -1 or x.dim() - 1, so
+    # only those take the batch-invariant path, and the caller's dim is forwarded
+    # unchanged. Everything else (non-last-dim, tuple dim, full reduction when dim
+    # is None, CPU tensors, unsupported dtypes, explicit dtype) falls back to the
+    # saved native torch.sum.
+    if dtype is None and x.device.type == "npu" and (dim == -1 or dim == x.dim() - 1) and x.dtype in _SUPPORTED_DTYPES:
         return torch.ops.batch_invariant_ops.npu_reduce_sum_batch_invariant(x, dim, keepdim)
-    # cpu tensor can't use npu_reduce_sum_batch_invariant, so we use torch.sum instead.
-    return torch_sum(x, dim, keepdim)
+    if dtype is None:
+        return torch_sum(x, dim, keepdim)
+    return torch_sum(x, dim, keepdim, dtype=dtype)
 
 
 def override_envs_for_invariance():
@@ -115,7 +141,6 @@ def enable_batch_invariant_mode():
     if HAS_ASCENDC_BATCH_INVARIANT:
         _batch_invariant_LIB.impl("aten::mm", torch.ops.batch_invariant_ops.npu_mm_batch_invariant, "NPU")
         _batch_invariant_LIB.impl("aten::matmul", torch.ops.batch_invariant_ops.npu_matmul_batch_invariant, "NPU")
-        _batch_invariant_LIB.impl("aten::sum", torch.ops.batch_invariant_ops.npu_reduce_sum_batch_invariant, "NPU")
         # torch_npu.npu_fused_infer_attention_score is a function of torch_npu, not a torch.ops.Operator,
         # so we need to patch it directly.
         torch_npu.npu_fused_infer_attention_score = (
@@ -125,6 +150,8 @@ def enable_batch_invariant_mode():
         torch_npu.npu_add_rms_norm = add_rms_norm
         # torch.sum can't be replaced by dispatch logic, so we patch it directly.
         torch.sum = reduce_sum
+        # Tensor.sum uses the same batch-invariant reduce_sum implementation.
+        torch.Tensor.sum = reduce_sum
 
     # register triton implementations if ascendc is not available.
     elif HAS_TRITON:

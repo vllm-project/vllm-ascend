@@ -186,6 +186,10 @@ class AscendDflashProposer(AscendEagleProposer):
 
         return num_query_total, token_indices_to_sample, cad, None
 
+    def _clear_dummy_slot_mappings(self) -> None:
+        self._slot_mapping_buffer.fill_(-1)
+        self._context_slot_mapping_buffers.fill_(-1)
+
     @torch.inference_mode()
     def dummy_run(
         self,
@@ -250,6 +254,13 @@ class AscendDflashProposer(AscendEagleProposer):
             multi_steps_attn_metadata.append(per_layer_attn_metadata)
 
         self.token_indices_to_sample.fill_(0)
+        self._clear_dummy_slot_mappings()
+
+        if aclgraph_runtime_mode == CUDAGraphMode.FULL:
+            self._maybe_update_metadata(
+                self.draft_attn_groups[0].backend,
+                multi_steps_attn_metadata,
+            )
 
         with set_ascend_forward_context(
             multi_steps_attn_metadata[0] if multi_steps_attn_metadata else None,

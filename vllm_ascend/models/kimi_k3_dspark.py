@@ -3,17 +3,16 @@
 """Kimi K3 MLA DSpark draft model for Ascend."""
 
 from collections.abc import Iterable
+from dataclasses import replace
 
 import torch
 from torch import nn
 from vllm.config import VllmConfig
+from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelLMHead,
-    VocabParallelEmbedding,
-)
+from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.qwen3_dspark import DSparkMarkovHead
 from vllm.model_executor.models.utils import (
@@ -36,18 +35,8 @@ from vllm.models.kimi_k3.nvidia.dspark_mla import (
 from vllm_ascend.models.kimi_k3 import (
     AscendKimiMLAAttention,
 )
-from vllm_ascend.models.llama_eagle3 import (
-    get_rotation_matrix,
-    get_rotation_path,
-    load_quarot_target_layer,
-)
-from vllm_ascend.models.qwen3_dspark import (
-    TARGET_EMBED_WEIGHT_NAMES,
-    TARGET_LM_HEAD_WEIGHT_NAMES,
-    process_weight,
-)
+from vllm_ascend.models.qwen3_dspark import align_draft_weights
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
-from vllm_ascend.utils import vllm_version_is
 
 
 def _uses_causal_draft_attention(config) -> bool:
@@ -153,14 +142,25 @@ class AscendK3DSparkModel(UpstreamK3DSparkModel):
         self.config = draft_model_config.hf_config
         self.quant_config = get_draft_quant_config(vllm_config)
         self.embed_tokens: nn.Module | None = None
+        # The draft config used for construction reports PP=1; query the real
+        # PP group, the same signal maybe_share_target_embed uses.
+        if get_pp_group().world_size > 1:
+            # PP stages after the first cannot alias the target's stage-0
+            # embedding; own the frozen copy shipped in the draft checkpoint.
+            self.embed_tokens = VocabParallelEmbedding(
+                self.config.vocab_size,
+                self.config.target_hidden_size,
+                prefix=maybe_prefix(prefix, "embed_tokens"),
+            )
 
-        self.context_proj = ReplicatedLinear(
+        self.context_proj = ColumnParallelLinear(
             self.config.target_hidden_size * self.config.num_target_layers,
             self.config.hidden_size,
             bias=False,
             return_bias=False,
             quant_config=self.quant_config,
             prefix=maybe_prefix(prefix, "context_proj"),
+            gather_output=True,
         )
         self.context_norm = RMSNorm(
             self.config.hidden_size,
@@ -253,25 +253,37 @@ class AscendK3DSparkForCausalLM(UpstreamK3DSparkForCausalLM):
             prefix=maybe_prefix(prefix, "model"),
         )
         self.lm_head: nn.Module | None = None
+        self._owns_embed_tokens = get_pp_group().world_size > 1
+        if self._owns_embed_tokens:
+            # The draft runs on the last PP stage, where the target embedding
+            # (stage 0) cannot be aliased. Declare ownership so the loader's
+            # share check keeps the checkpoint copy instead of raising.
+            self.has_own_embed_tokens = True
         self.logits_processor = LogitsProcessor(
             self.config.draft_vocab_size,
             scale=getattr(self.config, "logit_scale", 1.0),
         )
-        self.rotation_path = get_rotation_path(vllm_config)
-        self.target_model_path = vllm_config.model_config.model
-        if self.rotation_path is not None:
-            target_config = vllm_config.model_config.hf_text_config
-            model_prefix = maybe_prefix(prefix, "model")
-            self.model.embed_tokens = VocabParallelEmbedding(
-                target_config.vocab_size,
-                target_config.hidden_size,
-                prefix=maybe_prefix(model_prefix, "embed_tokens"),
-            )
-            self.lm_head = ParallelLMHead(
-                target_config.vocab_size,
-                target_config.hidden_size,
-                prefix=maybe_prefix(prefix, "lm_head"),
-            )
+
+    def post_process(self, vllm_config: VllmConfig) -> None:
+        align_draft_weights(self, self.model.context_proj, vllm_config)
+
+    def configure_target_aux_hidden_capture(self, target_model: nn.Module) -> None:
+        """Select the raw-prefix-sum inputs required by this MLA checkpoint."""
+        target = target_model.get_language_model() if hasattr(target_model, "get_language_model") else target_model
+        setter = getattr(target, "set_dspark_aux_capture_materialized", None)
+        if setter is None:
+            raise ValueError("K3 MLA DSpark requires a target supporting raw-prefix-sum auxiliary capture.")
+        config = self.config
+        target_layers = getattr(config, "dspark_target_layer_ids", None) or getattr(config, "target_layer_ids", None)
+        boundaries = tuple(int(layer) + 1 for layer in (target_layers or ()))
+        aux_layers = getattr(target.model, "aux_hidden_state_layers", None)
+        if (
+            aux_layers is None
+            or tuple(aux_layers) != boundaries
+            or target.model.config.hidden_size != config.target_hidden_size
+        ):
+            raise ValueError("K3 MLA draft and target auxiliary states are incompatible.")
+        setter(False)
 
     def get_draft_attn_causal(self) -> list[bool]:
         causal = _uses_causal_draft_attention(self.config)
@@ -288,49 +300,17 @@ class AscendK3DSparkForCausalLM(UpstreamK3DSparkForCausalLM):
         quantization-aware per-layer projections, so use vLLM's public loader
         interface without creating that extra packed parameter.
         """
-        if vllm_version_is("0.27.1"):
-            loader = AutoWeightsLoader(
-                self,
-                skip_substrs=list(self.checkpoint_skip_substrs),
+        loader = AutoWeightsLoader(self)
+        mapper = self.hf_to_vllm_mapper
+        if self._owns_embed_tokens:
+            # Keep the frozen embedding without duplicating upstream mappings.
+            mapper = replace(
+                mapper,
+                orig_to_new_substr={
+                    key: value for key, value in mapper.orig_to_new_substr.items() if key != "embed_tokens"
+                },
             )
-        else:
-            # Current vLLM drops the training-only and shared checkpoint
-            # weights in hf_to_vllm_mapper instead of AutoWeightsLoader.
-            loader = AutoWeightsLoader(self)
-        rotation_weight = None
-        if self.rotation_path is not None:
-            rotation_weight = get_rotation_matrix(self.rotation_path)
-            weights = (
-                (
-                    name,
-                    process_weight(loaded_weight, rotation_weight) if "context_proj." in name else loaded_weight,
-                )
-                for name, loaded_weight in weights
-            )
-        loaded_weights = loader.load_weights(
-            weights,
-            mapper=self.hf_to_vllm_mapper,
-        )
-        if rotation_weight is not None:
-            assert self.model.embed_tokens is not None
-            assert self.lm_head is not None
-            load_quarot_target_layer(
-                self.model.embed_tokens,
-                self.target_model_path,
-                TARGET_EMBED_WEIGHT_NAMES,
-                rotation_weight,
-                "draft embed_tokens.weight",
-            )
-            load_quarot_target_layer(
-                self.lm_head,
-                self.target_model_path,
-                TARGET_LM_HEAD_WEIGHT_NAMES,
-                rotation_weight,
-                "draft lm_head.weight",
-            )
-            self.has_own_embed_tokens = True
-            self.has_own_lm_head = True
-        return loaded_weights
+        return loader.load_weights(weights, mapper=mapper)
 
     def embed_input_ids(
         self,

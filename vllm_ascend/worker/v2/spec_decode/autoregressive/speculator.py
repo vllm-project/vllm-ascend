@@ -1,4 +1,4 @@
-# Adapt from https://github.com/vllm-project/vllm/blob/main/vllm/v1/worker/gpu/sample/spec_decode/autoregressive/speculator.py
+# Adapt from https://github.com/vllm-project/vllm/blob/main/vllm/v1/worker/gpu/spec_decode/autoregressive/speculator.py
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
@@ -17,15 +17,19 @@
 # This file is a part of the vllm-ascend project.
 #
 import logging
+from collections.abc import Mapping
 from contextlib import contextmanager
 from copy import copy
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+import numpy as np
 import torch
-from vllm.config import VllmConfig, replace
+from vllm.config import VllmConfig, replace, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed import get_dcp_group
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
@@ -38,28 +42,41 @@ from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend
+from vllm_ascend.worker.dcp_utils import DCPManager
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import (
+    build_attn_metadata_factory,
     build_attn_metadata_wrapper,
-    build_draft_attn_metadata_factory,
 )
-from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
+from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
+from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
+from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
+from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
+    disable_profiling_chunk_for_draft,
+    disable_target_pcp_for_replicated_draft,
+    prepare_replicated_pcp_config,
+)
+
+if TYPE_CHECKING:
+    from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
 logger = logging.getLogger(__name__)
 
 
-class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
+class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveSpeculator):
     """Shared Ascend spec-decode loop for AscendEagle/AscendMTPSpeculator.
 
     GQA, MLA, DSA, and SFA draft decode state share one path. The current MTP path
     uses the draft attention backend recorded by ``set_attn``.
 
     MLA's per-step state lives in ``.decode`` (cloned per step, written via an
-    alias), GQA's is top-level. MLA also rebuilds the base (live ``.decode`` is
-    None/wrong-batch) and forwards rotary ``positions`` into
+    alias), GQA's is top-level. Both rebuild the base metadata for the padded
+    draft batch. MLA also forwards rotary ``positions`` into
     build_attn_metadata. DSA and SFA manage their draft state in their metadata
     builders and skip the generic MLA/GQA init and update logic.
     """
+
+    model_state: "AscendModelState"
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         """Override the upstream __init__ for Ascend NPUs.
@@ -68,11 +85,14 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         seq_lens_cpu from input_batch), so we replace input_buffers with
         AscendInputBuffers after super().__init__.
         """
+        vllm_config, self.replicated_pcp = prepare_replicated_pcp_config(vllm_config)
         super().__init__(vllm_config, device)
+        self._lmhead_tp_validate_draft_sampling()
 
         self.attn_architecture: str | None = None
         self.attn_backend: type[AttentionBackend] | None = None
         self.draft_vllm_config = self._create_draft_vllm_config()
+        self._init_dcp()
 
         del self.input_buffers
         # AscendInputBuffers has extra `seq_lens_cpu` attribute.
@@ -94,16 +114,150 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         # when in decode phase of eagle speculator, we need some value in
         # draft model's input_batch. so we keep a reference here.
         self.input_batch: InputBatch | None = None
+        self.pcp_manager: AscendPCPManager | None = None
 
-    def _create_draft_vllm_config(self) -> VllmConfig:
-        """Build the runtime config used while executing the draft model."""
-        return replace(
-            self.vllm_config,
-            model_config=self.draft_model_config,
+    def _init_dcp(self) -> None:
+        self.use_dcp = self.draft_vllm_config.parallel_config.decode_context_parallel_size > 1
+        self.dcp_manager: DCPManager | None = None
+        if not self.use_dcp:
+            return
+        self.dcp_manager = DCPManager(
+            dcp_world_size=self.draft_vllm_config.parallel_config.decode_context_parallel_size,
+            dcp_rank=get_dcp_group().rank_in_group,
+            max_buffer_num_tokens=self.max_num_tokens,
+            max_num_reqs=self.max_num_reqs,
+            device=self.device,
+            vllm_config=self.draft_vllm_config,
+            use_async_scheduling=self.vllm_config.scheduler_config.async_scheduling,
         )
 
+    def _create_draft_vllm_config(self) -> VllmConfig:
+        """Build the runtime config the way V1's proposer does: validate the
+        target-derived config, then swap in the draft model config without
+        re-validating it."""
+        source_parallel_config = self.vllm_config.parallel_config
+        dcp_size = source_parallel_config.decode_context_parallel_size
+        parallel_config = replace(
+            source_parallel_config,
+            pipeline_parallel_size=1,
+            decode_context_parallel_size=1 if self.replicated_pcp else dcp_size,
+        )
+        with disable_profiling_chunk_for_draft(self.vllm_config):
+            draft_config = replace(
+                self.vllm_config,
+                parallel_config=parallel_config,
+                cache_config=replace(self.vllm_config.cache_config),
+            )
+        # V1 parity: swap in the draft model config after validation —
+        # re-validating would reject the dense head (fine-grained TP is MoE-only).
+        draft_config.model_config = self.draft_model_config
+        # replace() used to re-run post_init's is_moe_model recompute; mirror it.
+        draft_config.parallel_config.is_moe_model = self.draft_model_config.is_moe
+        if self.replicated_pcp:
+            # TODO: Separate draft execution settings from worker topology.
+            # Restore DCP only after the complete draft config reconstruction;
+            # this does not rerun validation or recompute DCP-dependent settings.
+            draft_config.parallel_config.decode_context_parallel_size = dcp_size
+        return draft_config
+
+    # TODO: Remove this method once vllm-project/vllm#53458 or an
+    # equivalent upstream fix is merged.
+    def _maybe_remove_d2t(self, draft_model: torch.nn.Module) -> None:
+        """Drop the identity d2t mapping of a full-vocab EAGLE3 draft."""
+        if self.method != "eagle3":
+            return
+        target_vocab_size = self.draft_model_config.get_vocab_size()
+        draft_vocab_size = draft_model.config.draft_vocab_size
+        if draft_vocab_size == target_vocab_size:
+            draft_model.draft_id_to_target_id = None
+
+    def load_model(self, target_model: torch.nn.Module) -> None:
+        super().load_model(target_model)
+        if self.vllm_config.parallel_config.pipeline_parallel_size > 1:
+            # The draft runs on the last PP stage without an encoder cache.
+            # Set this before profiling so compiled inputs stay consistent.
+            self.supports_mm_inputs = False
+
+    def load_draft_model(
+        self,
+        target_model: torch.nn.Module,
+        target_attn_layer_names: set[str],
+    ) -> torch.nn.Module:
+        draft_model = super().load_draft_model(
+            target_model,
+            target_attn_layer_names,
+        )
+        self._maybe_remove_d2t(draft_model)
+        return draft_model
+
+    @property
+    def draft_prefill_attn_groups(self) -> list[list[AttentionGroup]]:
+        if self.replicated_pcp:
+            return self.attn_groups
+        return self.target_attn_groups
+
+    def _prepare_replicated_prefill_attn(
+        self,
+        attn_metadata: dict[str, Any] | None,
+        slot_mappings: dict[str, torch.Tensor] | None,
+        num_reqs_padded: int,
+        num_tokens_padded: int,
+        cudagraph_runtime_mode: CUDAGraphMode,
+    ) -> tuple[
+        dict[str, Any] | None,
+        dict[str, torch.Tensor] | None,
+    ]:
+        """Refresh global draft mappings and prepare attention for replicated PCP."""
+        input_batch = self.input_batch
+        if attn_metadata is None or not self.replicated_pcp or input_batch is None:
+            return attn_metadata, slot_mappings
+
+        assert isinstance(input_batch, AscendInputBatch)
+        if input_batch.is_dummy:
+            return attn_metadata, slot_mappings
+
+        # Omitting out updates the default buffers bound by draft graph capture.
+        self.block_tables.gather_block_tables(
+            input_batch.idx_mapping,
+            num_reqs_padded=num_reqs_padded,
+        )
+        slot_mappings_tensor = self.block_tables.compute_slot_mappings(
+            input_batch.idx_mapping,
+            input_batch.query_start_loc,
+            input_batch.positions,
+            num_tokens_padded=num_tokens_padded,
+        )
+        # TODO: Remove this early return once FIA supports padded Query tensors
+        # whose token count exceeds the cumulative query length. Keep the
+        # mapping refresh above when unifying metadata construction.
+        if cudagraph_runtime_mode == CUDAGraphMode.FULL and self.attn_architecture in ("MLA", "GQA"):
+            return attn_metadata, slot_mappings
+
+        slot_mappings = build_slot_mappings_by_layer(
+            slot_mappings_tensor,
+            self.kv_cache_config,
+        )
+        # This is draft prefill, not the later one-token-per-request decode.
+        # Query lengths may differ, so do not use _build_uniform_attn_metadata.
+        attn_metadata = self._build_attn_metadata(
+            num_reqs=input_batch.num_reqs,
+            batch_desc=BatchExecutionDescriptor(
+                cg_mode=cudagraph_runtime_mode,
+                num_tokens=num_tokens_padded,
+                num_reqs=num_reqs_padded,
+            ),
+            query_start_loc_np=input_batch.query_start_loc_np,
+            seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound,
+            step=0,
+        )
+        return attn_metadata, slot_mappings
+
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
+        if self.speculative_config.enforce_eager:
+            cudagraph_mode = CUDAGraphMode.NONE
         super().init_cudagraph_manager(cudagraph_mode)
+        assert self.prefill_cudagraph_manager is not None
+        assert self.decode_cudagraph_manager is not None
         # The Ascend graph managers are patched onto the upstream module and
         # created by super().init_cudagraph_manager without a speculator ref.
         # They need this speculator to update full-graph params, so set it here.
@@ -133,7 +287,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         temperature: torch.Tensor,
         # [max_num_reqs]
         seeds: torch.Tensor,
-        num_tokens_across_dp: torch.Tensor | None = None,
+        dp_sync: Any = None,
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
@@ -145,9 +299,16 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         generate_draft.
         """
         self.input_batch = input_batch
+        # Replicated drafts use global tokens, unlike the PCP-local target.
+        # Every DP rank must take the draft sync, including decode and idle ranks.
+        sync_state = None if self.replicated_pcp else dp_sync
         # wrap build_attn_metadata to use Ascend attention metadata building.
         # so we can call super().propose() directly.
-        with build_attn_metadata_wrapper(), torch_gather_wrapper():
+        with (
+            disable_target_pcp_for_replicated_draft(self),
+            build_attn_metadata_wrapper(),
+            torch_gather_wrapper(),
+        ):
             return super().propose(
                 input_batch,
                 attn_metadata,
@@ -160,7 +321,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
                 next_prefill_tokens,
                 temperature,
                 seeds,
-                num_tokens_across_dp,
+                sync_state,
                 dummy_run,
                 skip_attn_for_dummy_run,
                 mm_inputs,
@@ -175,17 +336,19 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         target_input_buffers: InputBuffers,
         target_attn_groups: list[list[AttentionGroup]],
     ) -> None:
-        super().set_attn(
-            model_state,
-            kv_cache_config,
-            block_tables,
-            target_input_buffers,
-            target_attn_groups,
-        )
+        # Initialize the draft attention backend with its PCP=1 config.
+        with set_current_vllm_config(self.attn_vllm_config):
+            super().set_attn(
+                model_state,
+                kv_cache_config,
+                block_tables,
+                target_input_buffers,
+                target_attn_groups,
+            )
 
-        # Use the first executable draft attention layer as the architecture
-        # discriminator and cache it for ACL graph parameter updates.
-        self.attn_backend = _get_graph_update_backend(self.attn_groups)
+            # Use the first executable draft attention layer as the architecture
+            # discriminator and cache it for ACL graph parameter updates.
+            self.attn_backend = _get_graph_update_backend(self.attn_groups)
         if issubclass(self.attn_backend, AscendDSABackend):
             self.attn_architecture = "DSA"
         elif issubclass(self.attn_backend, AscendMLABackend):
@@ -211,22 +374,26 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         assert self.prefill_cudagraph_manager is not None
         if self.prefill_cudagraph_manager.use_breakable_cg:
             self.prefill_cudagraph_manager.init_breakable_cg_runner(self.model)
-        self.prefill_cudagraph_manager.capture(
-            self._prefill,
-            self.model_state,
-            self.target_input_buffers,
-            self.block_tables,
-            self.target_attn_groups,
-            self.kv_cache_config,
-            progress_bar_desc="Capturing prefill CUDA graphs",
-        )
+        with disable_target_pcp_for_replicated_draft(self):
+            self.prefill_cudagraph_manager.capture(
+                self._prefill,
+                self.model_state,
+                self.target_input_buffers,
+                self.block_tables,
+                self.draft_prefill_attn_groups,
+                self.kv_cache_config,
+                progress_bar_desc="Capturing prefill CUDA graphs",
+            )
 
         if self.num_speculative_steps == 1:
             return
 
         # Capture all decode draft generation steps as a single graph.
         assert self.decode_cudagraph_manager is not None
-        with build_attn_metadata_wrapper():
+        with (
+            disable_target_pcp_for_replicated_draft(self),
+            build_attn_metadata_wrapper(),
+        ):
             self.decode_cudagraph_manager.capture(
                 self._multi_step_decode,
                 self.model_state,
@@ -256,7 +423,9 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             cudagraph_runtime_mode,
             mm_inputs,
         )
-        return last_hidden_states, hidden_states
+        return AscendPCPManager.broadcast_replicated_hidden_states(
+            last_hidden_states, hidden_states, num_tokens, replicated_pcp=self.replicated_pcp
+        )
 
     def _generate_draft(
         self,
@@ -313,6 +482,13 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
     ) -> None:
+        attn_metadata, slot_mappings = self._prepare_replicated_prefill_attn(
+            attn_metadata,
+            slot_mappings,
+            num_reqs,
+            num_tokens,
+            cudagraph_runtime_mode=cudagraph_runtime_mode,
+        )
         # Draft prefill reuses target metadata, but the target metadata may
         # also contain target-only attention layers (e.g. GDN layers).
         if attn_metadata is not None and self.draft_attn_layer_names is not None:
@@ -330,40 +506,67 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             mm_inputs,
         )
 
-    def _build_draft_attn_metadata(  # type: ignore[misc]
+    def _build_attn_metadata(  # type: ignore[misc]
         self,
         num_reqs: int,
-        num_reqs_padded: int,
-        num_tokens_padded: int,
+        batch_desc: BatchExecutionDescriptor,
+        query_start_loc_np: np.ndarray,
         seq_lens_cpu_upper_bound: torch.Tensor,
         step: int,
-        num_query_per_req: int = 1,
-        causal: bool = True,
+        causal: bool | Mapping[int, bool] = True,
+        dcp_local_seq_lens: torch.Tensor | None = None,
     ) -> dict[str, Any] | None:
+        """Build Ascend draft metadata for uniform and explicit query layouts."""
         assert self.input_batch is not None
-        with build_draft_attn_metadata_factory(
+        seq_lens_cpu = None
+        is_prefilling = torch.from_numpy(self.input_batch.is_prefilling_np)
+        if self.use_dcp:
+            assert self.dcp_manager is not None
+            num_reqs_padded = batch_desc.num_reqs or num_reqs
+            seq_lens_cpu, is_prefilling = self.dcp_manager.prepare_draft_dcp_metadata_inputs(
+                target_seq_lens_cpu=self._get_seq_lens_cpu(num_reqs_padded),
+                is_prefilling=is_prefilling,
+                num_reqs=num_reqs,
+                num_reqs_padded=num_reqs_padded,
+                step=step,
+                max_model_len=self.max_model_len,
+            )
+
+        # Upstream's uniform builder calls self._build_attn_metadata, so this
+        # single hook also covers graph capture and eager draft decode.
+        with build_attn_metadata_factory(
             self.input_buffers.positions,
-            num_tokens_padded,
-            torch.from_numpy(self.input_batch.is_prefilling_np),
+            batch_desc.num_tokens,
+            is_prefilling,
+            seq_lens_cpu=seq_lens_cpu,
+            parallel_config=self.draft_vllm_config.parallel_config,
         ):
-            attn_metadata = super()._build_draft_attn_metadata(
+            attn_metadata = super()._build_attn_metadata(
                 num_reqs,
-                num_reqs_padded,
-                num_tokens_padded,
+                batch_desc,
+                query_start_loc_np,
                 seq_lens_cpu_upper_bound,
                 step,
-                num_query_per_req,
                 causal,
+                dcp_local_seq_lens,
             )
         if attn_metadata is not None:
-            # Ascend-specific: force DecodeOnly attention state for the draft model.
             for metadata in attn_metadata.values():
                 if metadata is None:
                     continue
                 metadata.attn_state = AscendAttentionState.DecodeOnly
+            # Only draft decode steps (step > 0) update CPU-side lengths.
+            # Step 0 is draft prefill and skips this decode update.
+            if step > 0:
+                self._update_decode_attn_metadata(attn_metadata, step, num_reqs)
         return attn_metadata
 
-    def build_draft_attn_metadatas(self, num_reqs_padded, is_draft_model_prefill):
+    def build_draft_attn_metadatas(
+        self,
+        num_reqs_padded: int,
+        num_tokens_padded: int,
+        is_draft_model_prefill: bool,
+    ):
         """Build draft_attn_metadatas for partial-merged draft graph."""
         attn_metadata = self.model_state.attn_metadata
         attn_metadata = {
@@ -371,7 +574,15 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         }
 
         if is_draft_model_prefill:
-            return [attn_metadata]
+            prepared_attn_metadata, _ = self._prepare_replicated_prefill_attn(
+                attn_metadata,
+                None,
+                num_reqs_padded,
+                num_tokens_padded,
+                cudagraph_runtime_mode=CUDAGraphMode.FULL,
+            )
+            assert prepared_attn_metadata is not None
+            return [prepared_attn_metadata]
 
         draft_attn_metadatas = self._init_decode_draft_attn_metadatas(attn_metadata, num_reqs_padded)
 
@@ -392,15 +603,22 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         if self.attn_architecture in ("DSA", "SFA"):
             return []
 
-        # TODO: _build_draft_attn_metadata pulls data (seq_lens, block_table,
+        # TODO: _build_attn_metadata pulls data (seq_lens, block_table,
         # ...) from input_buffers internally; future may pass these as CPU
         # params directly to build_attn_metadata, decoupling from input_buffers.
-        if self.attn_architecture == "MLA":
+        # Target metadata can contain fewer block-table rows than the draft
+        # decode graph requires. Rebuild GQA metadata too, so its block tables
+        # and query layout describe the same padded batch as the sequence lengths.
+        if self.attn_architecture in ("GQA", "MLA"):
             assert self.input_batch is not None
-            attn_metadata = self._build_draft_attn_metadata(  # type: ignore[call-arg]
+            attn_metadata = self._build_uniform_attn_metadata(
+                batch_desc=BatchExecutionDescriptor(
+                    cg_mode=CUDAGraphMode.FULL,
+                    num_tokens=num_reqs_padded,  # decode: 1 token/req
+                    num_reqs=num_reqs_padded,
+                ),
                 num_reqs=self.input_batch.num_reqs,
-                num_reqs_padded=num_reqs_padded,
-                num_tokens_padded=num_reqs_padded,  # decode: 1 token/req
+                num_query_per_req=1,
                 seq_lens_cpu_upper_bound=self.input_batch.seq_lens_cpu_upper_bound,
                 step=1,
             )
@@ -443,6 +661,11 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             num_reqs = num_reqs_padded
         next_seq_lens_cpu = self._calc_next_seq_lens_cpu(seq_lens_cpu, num_reqs, num_reqs_padded, step)
 
+        dcp_local_seq_lens_cpu = None
+        if self.use_dcp and self.attn_architecture == "MLA":
+            assert self.dcp_manager is not None
+            dcp_local_seq_lens_cpu = self.dcp_manager.prepare_dcp_local_seq_lens_cpu(next_seq_lens_cpu)
+
         query_lens_list = [i for i in range(1, num_reqs_padded + 1)]
         seq_lens_list = next_seq_lens_cpu.tolist()
         for metadata in attn_metadata.values():
@@ -452,7 +675,56 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
                 decode_metadata = metadata
             decode_metadata.seq_lens_list = seq_lens_list
             decode_metadata.actual_seq_lengths_q = query_lens_list
+            if dcp_local_seq_lens_cpu is not None:
+                assert self.dcp_manager is not None
+                parallel_config = self.draft_vllm_config.parallel_config
+                decode_metadata.update_dcp_seq_lens_cpu(
+                    next_seq_lens_cpu,
+                    dcp_local_seq_lens_cpu,
+                    torch.ones_like(next_seq_lens_cpu),
+                    dcp_size=parallel_config.decode_context_parallel_size,
+                    dcp_rank=self.dcp_manager.dcp_world_rank,
+                    cp_kv_cache_interleave_size=parallel_config.cp_kv_cache_interleave_size,
+                )
+
             metadata.seq_lens_cpu.copy_(next_seq_lens_cpu)
+
+    def build_fia_params(
+        self,
+        num_reqs_padded: int,
+        draft_attn_metadata: Any,
+        is_draft_model_prefill: bool,
+    ) -> list[dict[str, Any]]:
+        layer_name, metadata = next(iter(draft_attn_metadata.items()))
+        block_table = metadata.block_tables
+        if is_draft_model_prefill:
+            return [
+                {
+                    "layer_name": layer_name,
+                    "actual_seq_lengths": metadata.actual_seq_lengths_q,
+                    "actual_seq_lengths_kv": metadata.seq_lens_list,
+                    "block_table": block_table,
+                }
+            ]
+        assert self.input_batch is not None
+        num_reqs = self.input_batch.num_reqs
+        query_start_loc = list(range(1, num_reqs_padded + 1))
+        fia_params: list[dict[str, Any]] = []
+        for step in range(1, self.num_speculative_steps):
+            seq_lens = [
+                min(int(seq_len) + step, self.max_model_len) for seq_len in self.input_batch.seq_lens_np[:num_reqs]
+            ]
+            seq_lens.extend([0] * (num_reqs_padded - num_reqs))
+            for layer_name in self.draft_attn_layer_names:
+                fia_params.append(
+                    {
+                        "layer_name": layer_name,
+                        "actual_seq_lengths": query_start_loc,
+                        "actual_seq_lengths_kv": seq_lens,
+                        "block_table": block_table,
+                    }
+                )
+        return fia_params
 
     def _calc_next_seq_lens_cpu(self, seq_lens_cpu, num_reqs, num_reqs_padded, step):
         # NOTE(drslark) to achieve fully alignment with vllm, `num_rejected` should be subtracted from `seq_lens`

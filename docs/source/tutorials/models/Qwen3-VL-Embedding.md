@@ -12,10 +12,14 @@ Refer to [Supported Features List](../../user_guide/support_matrix/supported_mod
 
 ### 3.1 Model Weight
 
-- `Qwen3-VL-Embedding-8B` [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Embedding-8B)
-- `Qwen3-VL-Embedding-2B` [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Embedding-2B)
+|  Weight Version         | Download Links |
+|-------------------------|----------------|
+| `Qwen3-VL-Embedding-8B` | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Embedding-8B) |
+| `Qwen3-VL-Embedding-2B` | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Embedding-2B) |
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
+
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ## 4 Installation
 
@@ -24,6 +28,30 @@ It is recommended to download the model weight to the shared directory of multip
 You can use our official docker image to run `Qwen3-VL-Embedding` model directly.
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
+
+=== "Ascend 950DT&950PR Products"
+
+    The following command uses the Ubuntu image for Ascend 950DT&950PR Products to start the container.
+
+    ```bash
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5
+    docker run --rm \
+        --name vllm-ascend \
+        --net=host \
+        --shm-size=1g \
+        --device /dev/davinci0 \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /root/.cache:/root/.cache \
+        -it $IMAGE bash
+    ```
 
 === "A3 series"
 
@@ -110,14 +138,11 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 ## 5 Online Service Deployment {: #5-online-service-deployment }
 
-=== "A3/A2 series"
-
-    Start the docker image on each node.
+=== "Ascend 950DT&950PR Products/A3/A2"
 
     ```shell
-    #!/bin/sh
-    vllm serve Qwen/Qwen3-VL-Embedding-2B  \
-      --served-model-name Qwen/Qwen3-VL-Embedding-2B  \
+    vllm serve Qwen/Qwen3-VL-Embedding-2B \
+      --served-model-name Qwen/Qwen3-VL-Embedding-2B \
       --runner pooling \
       --port 8000 \
       --max-model-len 1024
@@ -129,6 +154,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
     ```shell
     #!/bin/sh
+    # Ensure the model path matches the directory recorded during download
     vllm serve Qwen/Qwen3-VL-Embedding-2B  \
       --served-model-name Qwen/Qwen3-VL-Embedding-2B  \
       --compilation-config '{"cudagraph_capture_sizes": [1024,512]}' \
@@ -207,7 +233,7 @@ For more usage examples, please reference the [examples](https://github.com/vllm
 
 Here are two accuracy evaluation methods.
 
-### Using MTEB
+### 7.1 Using MTEB
 
 1. Refer to [MTEB](https://docs.mteb.org/) for details.
 
@@ -243,7 +269,7 @@ Here are two accuracy evaluation methods.
 
 ## 8 Performance Evaluation
 
-### Using vLLM Benchmark
+### 8.1 Using vLLM Benchmark
 
 Run performance of `Qwen3-VL-Embedding-2B` as an example.
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/cli/) for more details.
