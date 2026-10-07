@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -50,12 +51,12 @@ class KVPoolResources:
         self._groups = groups
         self._gva_layout = gva_layout
         self._align_shared_storage = align_shared_storage
-        self.kv_caches: dict[str, torch.Tensor] | None = None
+        self.kv_caches: Mapping[str, torch.Tensor | Sequence[torch.Tensor]] | None = None
         self._buffer_registration: Registration | None = None
         self._binding_started = False
         self._closed = False
 
-    def bind_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> dict[str, Any]:
+    def bind_kv_caches(self, kv_caches: Mapping[str, torch.Tensor | Sequence[torch.Tensor]]) -> dict[str, Any]:
         if self._closed:
             raise RuntimeError("KV resources are closed")
         if self._binding_started:
@@ -81,7 +82,7 @@ class KVPoolResources:
 
     def _register_kv_buffers(
         self,
-        kv_caches: dict[str, torch.Tensor],
+        kv_caches: Mapping[str, torch.Tensor | Sequence[torch.Tensor]],
     ) -> tuple[Registration, dict[str, Any]]:
         base_addresses: dict[int, list[int]] = {}
         block_lengths: dict[int, list[int]] = {}
@@ -99,6 +100,9 @@ class KVPoolResources:
                     cache_or_caches = kv_caches[layer_name]
                     caches = (cache_or_caches,) if isinstance(cache_or_caches, torch.Tensor) else tuple(cache_or_caches)
                     for cache in caches:
+                        # NoPE MLA exposes an empty RoPE view whose data_ptr() is zero.
+                        if not cache.numel():
+                            continue
                         assert cache.shape[0] % self.num_blocks == 0, (
                             "The external block size must be an integer multiple of the kernel block size."
                         )
@@ -109,7 +113,17 @@ class KVPoolResources:
                         bases.append(address)
                         lengths.append(block_length)
                         strides.append(block_stride)
-                        region_end = address + (self.num_blocks - 1) * block_stride + block_length
+                        # Payload lengths exclude padding; registration must still cover the last kernel block.
+                        element_size = cache.element_size()
+                        kernel_block_span = element_size + sum(
+                            (size - 1) * stride * element_size
+                            for size, stride in zip(cache.shape[1:], cache.stride()[1:], strict=True)
+                        )
+                        region_end = (
+                            address
+                            + (self.num_blocks * block_scale - 1) * cache.stride(0) * element_size
+                            + kernel_block_span
+                        )
                         storage_key = cache.untyped_storage().data_ptr()
                         previous = registered_regions.get(storage_key)
                         registered_regions[storage_key] = (
