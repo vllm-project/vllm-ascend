@@ -270,8 +270,8 @@ class TestAscendSFAIndexerBackend(TestBase):
         self.assertIs(out_slots, indexer_metadata.slot_mapping)
 
     @patch("vllm_ascend.attention.indexer.get_ascend_config")
-    @patch("vllm_ascend.attention.indexer.torch_npu")
-    def test_write_cache_scatter_path(self, mock_torch_npu, mock_get_ascend_config):
+    @patch("vllm_ascend.attention.indexer.DeviceOperator.scatter_cache")
+    def test_write_cache_scatter_path(self, mock_scatter, mock_get_ascend_config):
         mock_get_ascend_config.return_value.c8_reshape_optim_enabled = False
         indexer = AscendSFAIndexerBackend.__new__(AscendSFAIndexerBackend)
         indexer.enable_sparse_li_c8 = True
@@ -286,8 +286,8 @@ class TestAscendSFAIndexerBackend(TestBase):
 
         indexer.write_cache(k_li, k_li_scale, slot_mapping, MagicMock())
 
-        self.assertEqual(mock_torch_npu.npu_scatter_nd_update_.call_count, 2)
-        k_call, scale_call = mock_torch_npu.npu_scatter_nd_update_.call_args_list
+        self.assertEqual(mock_scatter.call_count, 2)
+        k_call, scale_call = mock_scatter.call_args_list
         self.assertEqual(k_call.args[0].data_ptr(), indexer_k_cache.data_ptr())
         self.assertEqual(k_call.args[1].data_ptr(), slot_mapping.data_ptr())
         self.assertEqual(k_call.args[2].data_ptr(), k_li.data_ptr())
@@ -298,8 +298,8 @@ class TestAscendSFAIndexerBackend(TestBase):
         self.assertEqual(len(scale_call.args), 3)
 
     @patch("vllm_ascend.attention.indexer.get_ascend_config")
-    @patch("vllm_ascend.attention.indexer.torch_npu")
-    def test_write_cache_without_li_c8_writes_k_only(self, mock_torch_npu, mock_get_ascend_config):
+    @patch("vllm_ascend.attention.indexer.DeviceOperator.scatter_cache")
+    def test_write_cache_without_li_c8_writes_k_only(self, mock_scatter, mock_get_ascend_config):
         mock_get_ascend_config.return_value.c8_reshape_optim_enabled = False
         indexer = AscendSFAIndexerBackend.__new__(AscendSFAIndexerBackend)
         indexer.enable_sparse_li_c8 = False
@@ -312,11 +312,11 @@ class TestAscendSFAIndexerBackend(TestBase):
 
         indexer.write_cache(k_li, None, slot_mapping, MagicMock())
 
-        mock_torch_npu.npu_scatter_nd_update_.assert_called_once()
-        self.assertEqual(mock_torch_npu.npu_scatter_nd_update_.call_args.args[0].data_ptr(), indexer_k_cache.data_ptr())
-        self.assertEqual(mock_torch_npu.npu_scatter_nd_update_.call_args.args[1].data_ptr(), slot_mapping.data_ptr())
-        self.assertEqual(mock_torch_npu.npu_scatter_nd_update_.call_args.args[2].data_ptr(), k_li.data_ptr())
-        self.assertEqual(len(mock_torch_npu.npu_scatter_nd_update_.call_args.args), 3)
+        mock_scatter.assert_called_once()
+        self.assertEqual(mock_scatter.call_args.args[0].data_ptr(), indexer_k_cache.data_ptr())
+        self.assertEqual(mock_scatter.call_args.args[1].data_ptr(), slot_mapping.data_ptr())
+        self.assertEqual(mock_scatter.call_args.args[2].data_ptr(), k_li.data_ptr())
+        self.assertEqual(len(mock_scatter.call_args.args), 3)
 
     @patch("vllm_ascend.attention.indexer.get_ascend_config")
     @patch("vllm_ascend.attention.indexer.torch.ops._C_ascend.store_kv_block", create=True)

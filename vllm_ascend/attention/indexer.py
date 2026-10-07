@@ -276,51 +276,54 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         ``indexer_attn_metadata`` is this indexer's own layer metadata; the
         LI quant reshape-optim path reads its group fields.
         """
+        indexer_k_cache = self.k_cache.kv_cache[INDEXER_K_CACHE_SLOT]
         use_reshape_optim = self._use_c8_reshape_optim()
-
-        def _store_kv(src: torch.Tensor, cache_idx: int) -> None:
+        # float4_e2m1fn_x2 / float8_e8m0fnu are not supported by the scatter /
+        # store_kv_block kernels; view as uint8 (same 1-byte layout) for the
+        # cache write.
+        if k_li.dtype == torch_npu.float4_e2m1fn_x2:
+            indexer_k_cache = indexer_k_cache.view(torch.uint8)
+            k_li = k_li.view(torch.uint8)
+        if use_reshape_optim:
+            assert indexer_attn_metadata is not None
+            torch.ops._C_ascend.store_kv_block(
+                k_li,
+                indexer_k_cache,
+                indexer_attn_metadata.group_len,
+                indexer_attn_metadata.group_key_idx,
+                indexer_attn_metadata.group_key_cache_idx,
+                indexer_attn_metadata.block_size,
+            )
+        else:
+            DeviceOperator.scatter_cache(
+                indexer_k_cache.view(-1, k_li.shape[-1]),
+                slot_mapping.view(-1, 1),
+                k_li.view(-1, k_li.shape[-1]),
+            )
+        if self.enable_sparse_li_quant:
+            assert k_li_scale is not None
+            # C4 scale is multi-dimensional (b*s, d/64, 2); C8 is (b*s, 1).
+            # Keep all trailing dims beyond the token axis for the scatter.
+            scale_per_token = k_li_scale.shape[1:]
+            indexer_scale_cache = self.k_cache.kv_cache[INDEXER_SCALE_CACHE_SLOT]
+            if indexer_scale_cache.dtype == torch.float8_e8m0fnu:
+                indexer_scale_cache = indexer_scale_cache.view(torch.uint8)
+                k_li_scale = k_li_scale.view(torch.uint8)
             if use_reshape_optim:
                 assert indexer_attn_metadata is not None
                 torch.ops._C_ascend.store_kv_block(
-                    src,
-                    self.k_cache.kv_cache[cache_idx],
+                    k_li_scale,
+                    indexer_scale_cache,
                     indexer_attn_metadata.group_len,
                     indexer_attn_metadata.group_key_idx,
                     indexer_attn_metadata.group_key_cache_idx,
                     indexer_attn_metadata.block_size,
                 )
             else:
-                cache = self.k_cache.kv_cache[cache_idx]
-                # npu_scatter_nd_update_ doesn't support float4_e2m1fn_x2;
-                # view as uint8 (same 1-byte layout) for the scatter write.
-                if src.dtype == torch_npu.float4_e2m1fn_x2:
-                    cache = cache.view(torch.uint8)
-                    src = src.view(torch.uint8)
-                torch_npu.npu_scatter_nd_update_(
-                    cache.view(-1, src.shape[-1]),
+                DeviceOperator.scatter_cache(
+                    indexer_scale_cache.view(-1, *scale_per_token),
                     slot_mapping.view(-1, 1),
-                    src.view(-1, src.shape[-1]),
-                )
-
-        _store_kv(k_li, INDEXER_K_CACHE_SLOT)
-
-        if self.enable_sparse_li_quant:
-            assert k_li_scale is not None
-            if use_reshape_optim:
-                _store_kv(k_li_scale, INDEXER_SCALE_CACHE_SLOT)
-            else:
-                # C4=(b*s, d/64, 2), C8=(b*s, 1).
-                scale_per_token = k_li_scale.shape[1:]
-                scale_cache = self.k_cache.kv_cache[INDEXER_SCALE_CACHE_SLOT]
-                # npu_scatter_nd_update_ doesn't support float8_e8m0fnu; view as
-                # uint8 (same 1-byte layout) for the scatter write.
-                if scale_cache.dtype == torch.float8_e8m0fnu:
-                    scale_cache = scale_cache.view(torch.uint8)
-                    k_li_scale = k_li_scale.view(torch.uint8)
-                torch_npu.npu_scatter_nd_update_(
-                    scale_cache.view(-1, *scale_per_token),
-                    slot_mapping.view(-1, 1),
-                    k_li_scale,
+                    k_li_scale.view(-1, *scale_per_token),
                 )
 
     def _use_c8_reshape_optim(self) -> bool:
@@ -373,6 +376,8 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
 
         if self.enable_sparse_li_quant:
             k_li, k_li_scale = self._quantize_li_tensor(k_li)
+            if self.enable_sparse_li_c8:
+                k_li_scale = k_li_scale.unsqueeze(-1)
         else:
             k_li_scale = None
 

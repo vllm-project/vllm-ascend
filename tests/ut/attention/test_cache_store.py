@@ -337,13 +337,11 @@ def test_indexer_cache_writes_all_gathered_rows(monkeypatch, family, key_dtype, 
     AscendSFAIndexerBackend.write_cache(
         indexer, k_li, keys[1] if scale_dtype else None, slots, SimpleNamespace(num_actual_tokens=2)
     )
-    # write_cache now calls torch_npu.npu_scatter_nd_update_ (generic) directly
-    # for both the k and (when quantized) scale writes, bypassing
-    # DeviceOperator.scatter_cache — so the sk/pa fast paths are not exercised
-    # here regardless of family/fast_available.
-    assert sk.call_count == 0
-    assert pa.call_count == 0
-    assert generic.call_count == len(caches)
+    expected_sk = fast_available and family == AscendDeviceType.A3
+    expected_pa = fast_available and family == AscendDeviceType.A5 and not row_gap
+    assert sk.call_count == (len(caches) if expected_sk else 0)
+    assert generic.call_count == (0 if expected_sk or expected_pa else len(caches))
+    assert pa.call_count == (len(caches) if expected_pa else 0)
     for backing, reference in zip(backings, expected):
         torch.testing.assert_close(backing.view(torch.uint8), reference, rtol=0, atol=0)
 
