@@ -15,9 +15,10 @@ import torch
 from vllm import SamplingParams
 from vllm.distributed.parallel_state import get_dp_group, get_ep_group, get_tp_group
 from vllm.model_executor.model_loader import register_model_loader
+from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
 
 from tests.e2e.conftest import DPVllmRunner
-from tests.e2e.pull_request.four_card.test_glm5_3_flash import NUM_LAYERS, OUTPUT_TOKENS, FlashDummyLoader, _write_model
+from tests.e2e.pull_request.four_card.test_glm5_3_flash import NUM_LAYERS, OUTPUT_TOKENS, _write_model
 
 DP_SIZE = 4
 LOADER = "glm53flash_a5_functional_dummy"
@@ -49,12 +50,27 @@ def _write_a5_model(destination):
     return config
 
 
+def _parameter_seed(name, ep_rank):
+    # Expert tensors have the same local shape/name on each EP rank. Distinct
+    # weights make incorrect cross-rank routing visible; replicated weights
+    # retain identical seeds. This helper is used only for FP8 parameters.
+    key = f"{name}.ep_rank={ep_rank}" if ".experts." in name else name
+    return int.from_bytes(hashlib.sha256(key.encode()).digest()[:8], "little")
+
+
 @register_model_loader(LOADER)
-class FlashA5DummyLoader(FlashDummyLoader):
+class FlashA5DummyLoader(DummyModelLoader):
+    """A5-local initialization, independent of the frozen A3 smoke loader."""
+
+    def load_weights(self, model, model_config):
+        with torch.no_grad():
+            for name, value in model.named_parameters():
+                self.initialize_parameter(name, value)
+
     @staticmethod
     def initialize_parameter(name, value):
         if value.dtype == torch.float8_e4m3fn:
-            seed = int.from_bytes(hashlib.sha256(name.encode()).digest()[:8], "little")
+            seed = _parameter_seed(name, get_ep_group().rank_in_group)
             generator = torch.Generator(device=value.device).manual_seed(seed)
             # FP8 uniform_ is not implemented on all backends. Generate bounded
             # FP32 chunks then cast, without a full-size FP32 MoE allocation.
@@ -65,7 +81,29 @@ class FlashA5DummyLoader(FlashDummyLoader):
         elif value.dtype == torch.uint8 and name.endswith("weight_scale"):
             value.fill_(MXFP8_SCALE_EXPONENT)
         else:
-            FlashDummyLoader.initialize_parameter(name, value)
+            seed = int.from_bytes(hashlib.sha256(name.encode()).digest()[:8], "little")
+            generator = torch.Generator(device=value.device).manual_seed(seed)
+            if name.endswith("weight") and value.dtype == torch.int8:
+                value.random_(-8, 9, generator=generator)
+            elif not value.is_floating_point() or "A_log" in name:
+                value.zero_()
+            elif "dt_bias" in name:
+                value.fill_(-2.0)
+            elif "hc_" in name:
+                if name.endswith("scale"):
+                    value.fill_(1.0)
+                elif name.endswith("base"):
+                    value.zero_()
+                else:
+                    value.uniform_(-0.001, 0.001, generator=generator)
+            elif "scale" in name:
+                value.fill_(0.01)
+            elif "offset" in name or name.endswith("bias"):
+                value.zero_()
+            elif "norm" in name and name.endswith("weight"):
+                value.fill_(1.0)
+            else:
+                value.uniform_(-0.01, 0.01, generator=generator)
 
 
 class FlashA5Worker:
