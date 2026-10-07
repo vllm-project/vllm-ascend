@@ -172,6 +172,9 @@ class _StoreSession:
             if code != 0:
                 self.failed_keys.add(key)
                 self.session_result_codes[key] = code
+                self.errors_by_key[key] = RuntimeError(
+                    f"Store session start failed for key {key!r}; result code {code}"
+                )
 
     def _record_session_results(self, keys: list[str], result_codes: tuple[int, ...]) -> None:
         for key, code in zip(keys, result_codes, strict=True):
