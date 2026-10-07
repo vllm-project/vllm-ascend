@@ -1629,12 +1629,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             # TND layout requires cu_seqlens_q (b+1,) cumulative.
             # actual_seq_lengths_query is cum_query_lens = query_start_loc[1:] (b,).
             # Reconstruct full cu_seqlens_q by prepending 0.
-            cu_seqlens_q = torch.cat(
-                [
-                    torch.zeros(1, dtype=actual_seq_lengths_query.dtype, device=actual_seq_lengths_query.device),
-                    actual_seq_lengths_query,
-                ]
-            )
+            cu_seqlens_q = F.pad(actual_seq_lengths_query, (1, 0), value=0)
             seqused_k = actual_seq_lengths_key
 
             num_heads_q = q_li_shape_ori[1]

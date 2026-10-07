@@ -293,7 +293,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
                 cache = self.k_cache.kv_cache[cache_idx]
                 # npu_scatter_nd_update_ doesn't support float4_e2m1fn_x2;
                 # view as uint8 (same 1-byte layout) for the scatter write.
-                if src.dtype == torch.float4_e2m1fn_x2:
+                if src.dtype == torch_npu.float4_e2m1fn_x2:
                     cache = cache.view(torch.uint8)
                     src = src.view(torch.uint8)
                 torch_npu.npu_scatter_nd_update_(
