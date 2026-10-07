@@ -642,6 +642,17 @@ class AscendModelSlimConfig(QuantizationConfig):
             and "language_model.lm_head.weight" in self.quant_description
         ):
             prefix = "language_model.lm_head"
+        # DSV4 builds its fused q-down projection as wq_a_kv while the ModelSlim
+        # description keys the same projection as wq_a. When the direct lookup
+        # misses, alias the suffix so the layer resolves its declared scheme
+        # (e.g. W8A8_DYNAMIC with weight_offset) instead of falling back to an
+        # offset-less method.
+        if prefix.endswith(".wq_a_kv") and not any(
+            key.startswith(prefix + ".") for key in self.quant_description
+        ):
+            aliased = prefix[: -len("wq_a_kv")] + "wq_a"
+            if any(key.startswith(aliased + ".") for key in self.quant_description):
+                return aliased
         prefix_mapping = QUANT_MODEL_PREFIX_MAPPINGS.get(model_type)
         substr_mapping = QUANT_MODEL_SUBSTR_MAPPINGS.get(model_type)
         if prefix_mapping or substr_mapping:

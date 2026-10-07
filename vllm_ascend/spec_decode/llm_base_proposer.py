@@ -450,6 +450,19 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         from vllm.compilation.backends import set_model_tag
 
         draft_vllm_config = self._create_draft_vllm_config()
+        # Newer cores null quant_config on the draft VllmConfig, but DSV4 MTP
+        # checkpoints carry quantized draft weights (the quant_model_description
+        # covers mtp.* layers). Restore the target's quant config so the drafter
+        # builds its Linears with the matching Ascend quant method.
+        if (
+            getattr(draft_vllm_config, "quant_config", None) is None
+            and self.vllm_config.quant_config is not None
+        ):
+            from dataclasses import replace as _dc_replace
+
+            draft_vllm_config = _dc_replace(
+                draft_vllm_config, quant_config=self.vllm_config.quant_config
+            )
         draft_load_config = self.speculative_config.draft_load_config
         logger.info(
             "[spec_decode/base] Loading draft model: method=%s, load_format=%s, model=%s",
