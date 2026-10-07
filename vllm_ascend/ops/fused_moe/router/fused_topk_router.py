@@ -24,7 +24,6 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.fused_moe.router.grouped_topk_router import AscendGroupedTopKRouter
-from vllm_ascend.utils import load_custom_op_library
 
 DEEPSEEK_V4_IMAGE_SENTINEL_BASE_ID = 129257
 DEEPSEEK_V4_IMAGE_SENTINEL_COUNT = 5
@@ -48,8 +47,6 @@ def select_deepseek_v4_vision_experts(
     ``tid2eid`` lookup used by the text-only model, while image rows use the
     checkpoint's ``bias_vl`` with the sqrt-softplus router scores.
     """
-    # Native routing performs this normalization inside the operator.
-    input_ids = torch.where(input_ids == -1, 0, input_ids)
     scores = torch.nn.functional.softplus(router_logits).sqrt()
     image_hi = image_sentinel_lo + DEEPSEEK_V4_IMAGE_SENTINEL_COUNT
     image_mask = (input_ids >= image_sentinel_lo) & (input_ids < image_hi)
@@ -121,15 +118,6 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
         self.tid2eid = tid2eid
         self.bias_vl = bias_vl
         self.image_sentinel_lo = image_sentinel_lo
-        profile = get_current_hardware_profile()
-        if (
-            scoring_func == "sqrtsoftplus"
-            and profile.supports(HardwareCapability.MOE_GATING_TOP_K_HASH_VISION)
-            and not profile.supports(HardwareCapability.RUNTIME_CUSTOM_OPS)
-        ):
-            # A5 skips the worker's global custom-op loader. V4 routers also
-            # need this native op without constructing a V4.1 backend first.
-            load_custom_op_library()
 
     def is_fused_supported(
         self,
@@ -185,6 +173,7 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
                     # ids. Apply the identical TP chunk only when communication
                     # has not already aligned ids with local router rows.
                     input_ids = sequence_parallel_chunk(input_ids.reshape(-1, 1)).reshape(-1)
+                input_ids = torch.where(input_ids == -1, 0, input_ids)
             else:
                 input_ids = None
                 tid2eid_ones = None

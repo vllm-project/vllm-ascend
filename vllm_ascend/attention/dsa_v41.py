@@ -971,7 +971,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                 active_slots = common.slot_mapping[:num_input_tokens]
                 if self._uses_a5_packed_cache and active_slots.device.type == "npu":
                     assert self._device_backend is not None
-                    prepared_slots, prepared_flat_slots = self._device_backend.build_a5_slot_mapping(
+                    prepared_slots, prepared_flat_slots = self._device_backend.build_packed_cache_slot_mapping(
                         active_slots,
                         positions,
                         common.query_start_loc,

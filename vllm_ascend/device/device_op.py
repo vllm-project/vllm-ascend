@@ -35,7 +35,7 @@ from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.quantization.utils import QUANT_DTYPES, get_dynamic_mx_quant_scale_alg
 
 if TYPE_CHECKING:
-    from vllm_ascend.ops.packed_cache import MixedQuantPackedCacheOps
+    from vllm_ascend.models.deepseek_v41.mixed_quant_attention import MixedQuantPackedCacheOps
 
 ACL_HOST_REG_MAPPED = 0x2
 ACL_HOST_REG_PINNED = 0x10000000
@@ -56,6 +56,9 @@ class BaseDeviceAdaptor:
     @staticmethod
     def host_register_flags() -> int:
         """ACL host registration flags for the standard runtime ABI."""
+        # PINNED prevents paging while MAPPED exposes the host allocation to
+        # NPU kernels. Both flags are required by the standard runtime path.
+        # TODO: unify flags when supported CANN runtimes accept the same ABI.
         return ACL_HOST_REG_MAPPED | ACL_HOST_REG_PINNED
 
     @staticmethod
@@ -1028,12 +1031,8 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
 
     @staticmethod
     def get_dsv41_packed_cache_ops() -> type["MixedQuantPackedCacheOps"]:
-        # Import lazily so non-A5 processes never load the in-tree A5 operator
-        # adapters or their runtime dependencies.
-        from vllm_ascend.ops.packed_cache import MixedQuantPackedCacheOps
-        from vllm_ascend.utils import load_custom_op_library
+        from vllm_ascend.models.deepseek_v41.mixed_quant_attention import MixedQuantPackedCacheOps
 
-        load_custom_op_library()
         return MixedQuantPackedCacheOps
 
     @classmethod

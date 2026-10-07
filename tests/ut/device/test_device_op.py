@@ -64,9 +64,8 @@ def test_host_registration_flags_follow_runtime_abi():
 
 def test_deepseek_v41_backend_is_device_routed():
     assert BaseDeviceAdaptor.get_dsv41_packed_cache_ops() is None
-    with mock.patch("vllm_ascend.utils.load_custom_op_library") as load_library:
+    with mock.patch.dict("sys.modules", {"vllm_ascend.vllm_ascend_C": mock.Mock()}):
         assert A5DeviceAdaptor.get_dsv41_packed_cache_ops().__name__ == "MixedQuantPackedCacheOps"
-    load_library.assert_called_once_with()
 
 
 @pytest.mark.parametrize("adaptor", [BaseDeviceAdaptor, A5DeviceAdaptor])

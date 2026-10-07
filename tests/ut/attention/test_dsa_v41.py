@@ -10,7 +10,7 @@ import torch
 from vllm_ascend.attention import dsa_v41
 from vllm_ascend.attention.context_parallel import dsa_v41_cp
 from vllm_ascend.attention.dsa_v41 import AscendDSAV41Impl, DeepseekV41PreparedIndexer
-from vllm_ascend.ops import quant_lightning_indexer as a5_indexer
+from vllm_ascend.models.deepseek_v41 import mixed_quant_attention as a5_indexer
 
 TOKENS, TOPK = 4, 512
 

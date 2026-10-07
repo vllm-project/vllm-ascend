@@ -26,18 +26,10 @@ from vllm_ascend.device.hardware_profile import (
 
 STATE_RING_ROWS = 32
 
-A5_CMP_LOGICAL_DIM = 512
-A5_CMP_GROUP_SIZE = 16
-A5_CMP_ROW_BYTES = A5_CMP_LOGICAL_DIM // 2 + (A5_CMP_LOGICAL_DIM // A5_CMP_GROUP_SIZE) * torch.bfloat16.itemsize
-A5_WIN_LOGICAL_DIM = 512
-A5_WIN_GROUP_SIZE = 32
-A5_WIN_ROW_BYTES = A5_WIN_LOGICAL_DIM + (A5_WIN_LOGICAL_DIM // A5_WIN_GROUP_SIZE) * torch.bfloat16.itemsize
-A5_INDEX_LOGICAL_DIM = 128
-A5_INDEX_GROUP_SIZE = 32
-A5_INDEX_DATA_BYTES = A5_INDEX_LOGICAL_DIM // 2
-A5_INDEX_SCALE_COUNT = A5_INDEX_LOGICAL_DIM // A5_INDEX_GROUP_SIZE
-A5_INDEX_FOLDED_GROUP_ROWS = 8
-A5_INDEX_FOLDED_ROW_BYTES = A5_INDEX_FOLDED_GROUP_ROWS * (A5_INDEX_DATA_BYTES + A5_INDEX_SCALE_COUNT)
+# Fixed dimensions accepted by the packaged mixed-quant attention ABI.
+MLA_HEAD_DIM = 512
+INDEX_HEAD_DIM = 128
+INDEX_FOLD_ROWS = 8
 
 
 def uses_a5_packed_cache() -> bool:
@@ -47,9 +39,10 @@ def uses_a5_packed_cache() -> bool:
 
 def make_swa_cache_spec(*, block_size, window_size, head_size, dtype, cache_dtype):
     if uses_a5_packed_cache():
-        if head_size != A5_WIN_LOGICAL_DIM:
-            raise ValueError(f"A5 DeepSeek V4.1 requires head size {A5_WIN_LOGICAL_DIM}, got {head_size}")
-        head_size = A5_WIN_ROW_BYTES
+        if head_size != MLA_HEAD_DIM:
+            raise ValueError(f"A5 DeepSeek V4.1 requires head size {MLA_HEAD_DIM}, got {head_size}")
+        # FP8 values followed by one BF16 scale per 32 values.
+        head_size += (head_size // 32) * torch.bfloat16.itemsize
         dtype = torch.uint8
         cache_dtype = "a5_mxfp8_bf16_scale"
     return AscendSlidingWindowMLASpec(
@@ -64,11 +57,12 @@ def make_swa_cache_spec(*, block_size, window_size, head_size, dtype, cache_dtyp
     )
 
 
-def make_long_cache_spec(*, block_size, head_size, compress_ratio):
+def make_mla_cache_spec(*, block_size, head_size, compress_ratio):
     if uses_a5_packed_cache():
-        if head_size != A5_CMP_LOGICAL_DIM:
-            raise ValueError(f"A5 DeepSeek V4.1 requires head size {A5_CMP_LOGICAL_DIM}, got {head_size}")
-        head_size = A5_CMP_ROW_BYTES
+        if head_size != MLA_HEAD_DIM:
+            raise ValueError(f"A5 DeepSeek V4.1 requires head size {MLA_HEAD_DIM}, got {head_size}")
+        # Two FP4 values per byte, followed by one BF16 scale per 16 values.
+        head_size = head_size // 2 + (head_size // 16) * torch.bfloat16.itemsize
         dtype = torch.uint8
         scale_dtype = torch.bfloat16
     else:
@@ -88,11 +82,11 @@ def make_long_cache_spec(*, block_size, head_size, compress_ratio):
 
 def make_index_cache_spec(*, block_size, head_size, compress_ratio):
     if uses_a5_packed_cache():
-        if head_size != A5_INDEX_LOGICAL_DIM:
-            raise ValueError(f"A5 DeepSeek V4.1 requires head size {A5_INDEX_LOGICAL_DIM}, got {head_size}")
-        head_size = A5_INDEX_DATA_BYTES
+        if head_size != INDEX_HEAD_DIM:
+            raise ValueError(f"A5 DeepSeek V4.1 requires head size {INDEX_HEAD_DIM}, got {head_size}")
+        scale_dim = head_size // 32
+        head_size //= 2
         dtype = torch.uint8
-        scale_dim = A5_INDEX_SCALE_COUNT
         scale_dtype = torch.uint8
     else:
         dtype = torch.int8
@@ -113,16 +107,16 @@ def make_index_cache_spec(*, block_size, head_size, compress_ratio):
 
 def make_folded_index_cache_spec(*, block_size):
     """QSLI candidate-source view: eight K/scale rows per 544-byte row."""
-    if block_size % A5_INDEX_FOLDED_GROUP_ROWS:
+    if block_size % INDEX_FOLD_ROWS:
         raise ValueError("A5 folded index page must contain full 8-token groups")
     return AscendMLAAttentionSpec(
         block_size=block_size,
         num_kv_heads=1,
-        head_size=A5_INDEX_FOLDED_ROW_BYTES,
+        head_size=INDEX_FOLD_ROWS * (INDEX_HEAD_DIM // 2 + INDEX_HEAD_DIM // 32),
         dtype=torch.uint8,
-        tokens_per_state=A5_INDEX_FOLDED_GROUP_ROWS,
+        tokens_per_state=INDEX_FOLD_ROWS,
         model_version="deepseek_v41",
-        storage_block_size=block_size // A5_INDEX_FOLDED_GROUP_ROWS,
+        storage_block_size=block_size // INDEX_FOLD_ROWS,
     )
 
 

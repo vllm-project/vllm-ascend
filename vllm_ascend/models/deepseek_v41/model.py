@@ -75,7 +75,7 @@ from vllm_ascend.utils import (
 )
 
 from .cache_config import (
-    make_long_cache_spec,
+    make_mla_cache_spec,
     make_swa_cache_spec,
 )
 from .compressor import DeepseekV41Compressor
@@ -715,7 +715,7 @@ class DeepseekV41Attention(DeepseekV41SWAAttention):
             self.long_kv_cache = DeepseekV41CacheLayer(
                 vllm_config,
                 f"{prefix}.long_kv_cache",
-                make_long_cache_spec(
+                make_mla_cache_spec(
                     block_size=block_size,
                     head_size=width,
                     compress_ratio=role.compress_ratio,

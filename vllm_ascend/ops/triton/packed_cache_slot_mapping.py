@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Build A5 cache slot metadata in one NPU launch."""
+"""Build packed cache slot metadata in one NPU launch."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from vllm.triton_utils import tl, triton
         "skip_update",
     ]
 )
-def _build_a5_slot_mapping_kernel(
+def _build_packed_cache_slot_mapping_kernel(
     slots_ptr,
     positions_ptr,
     query_start_loc_ptr,
@@ -39,7 +39,7 @@ def _build_a5_slot_mapping_kernel(
     request_end = tl.load(query_start_loc_ptr + num_actual_reqs * query_start_stride).to(tl.int64)
     valid_end = tl.minimum(request_end, num_actual_tokens)
     # Full graphs keep a fixed token carrier whose padded tail may still hold
-    # slot IDs from an earlier replay.  Never let those rows write any A5 cache
+    # slot IDs from an earlier replay.  Never let those rows write any packed cache
     # plane, including the uncompressed SWA/C1 planes.
     valid = mask & (tokens < valid_end) & (slots >= 0)
 
@@ -64,7 +64,7 @@ def _build_a5_slot_mapping_kernel(
     tl.store(coordinates_ptr + tokens * 2 + 1, rows, mask=mask)
 
 
-def build_a5_slot_mapping(
+def build_packed_cache_slot_mapping(
     slots: torch.Tensor,
     positions: torch.Tensor,
     query_start_loc: torch.Tensor,
@@ -78,7 +78,7 @@ def build_a5_slot_mapping(
     coordinates_output: torch.Tensor,
     flat_output: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Publish coordinate and flat A5 cache addresses together.
+    """Publish coordinate and flat packed cache addresses together.
 
     This replaces the eager GE/Add/Remainder/And/Div/Where/Copy chain used by
     every KV cache group. Ratio-2 completion and padded-row masking follow the
@@ -88,7 +88,7 @@ def build_a5_slot_mapping(
         raise ValueError("compress_ratio must be 1 or 2")
     if num_tokens:
         block_size = 256
-        _build_a5_slot_mapping_kernel[(triton.cdiv(num_tokens, block_size),)](
+        _build_packed_cache_slot_mapping_kernel[(triton.cdiv(num_tokens, block_size),)](
             slots,
             positions,
             query_start_loc,
