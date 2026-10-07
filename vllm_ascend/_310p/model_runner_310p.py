@@ -802,6 +802,7 @@ class NPUModelRunner310(NPUModelRunner):
                         support_size
                         for support_size in self.attn_backend.get_supported_kernel_block_sizes()
                         if support_size * kv_cache_spec.head_size <= _ATTENTION_BLOCK_SIZE_LIMIT
+                        and kv_cache_spec.block_size % support_size == 0
                     ]
                     if supported_sizes:
                         block_size = supported_sizes[0]
@@ -972,6 +973,7 @@ class NPUModelRunner310(NPUModelRunner):
                         support_size
                         for support_size in backend.get_supported_kernel_block_sizes()
                         if support_size * kv_cache_spec.head_size <= _ATTENTION_BLOCK_SIZE_LIMIT
+                        and kv_cache_spec.block_size % support_size == 0
                     ]
                     kernel_block_size_list = supported_sizes if supported_sizes else [self.cache_config.block_size]
                 except IndexError:
