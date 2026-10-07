@@ -10,6 +10,7 @@ port=${PORT:-18190}
 ascend_source=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 export PYTHONPATH="$VLLM_SOURCE:$ascend_source:$STARTLUX_SOURCE${PYTHONPATH:+:$PYTHONPATH}"
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
+export VLLM_ENABLE_V1_MULTIPROCESSING=${VLLM_ENABLE_V1_MULTIPROCESSING:-0}
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-4}
 exec "$python_bin" "$VLLM_SOURCE/examples/pooling/classify/serve_startlux_decision.py" \
  --model "$MODEL_PATH" --tensor-parallel-size "$tensor_parallel_size" \

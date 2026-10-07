@@ -20,6 +20,12 @@ registered or patched in the hardware plugin.
 - Checkpoints: `startlux-models/StartLux-Decision-4B` and
   `startlux-models/StartLux-Decision-35B-A3B` on Hugging Face, or the same
   checkpoint names under `StartLuxAI` on ModelScope. Preserve model licenses.
+- The tested ModelScope weight revisions are
+  `9113683823edce9311109fff84cf9719394835d8` (4B) and
+  `e6dafa13615ba6858e9489416216a9b46c36e45c` (35B-A3B download).
+- Runtime: Python 3.12.13, PyTorch 2.10.0+cpu, torch-npu 2.10.0.post4,
+  Transformers 5.14.1 and triton-ascend 3.2.2. Check actual import paths:
+  installed package metadata can describe the image rather than mounted source.
 
 Create a new container and a virtual environment for this recipe. Install the
 paired editable repositories following the Ascend installation guide. The
@@ -27,6 +33,11 @@ vLLM install uses `VLLM_TARGET_DEVICE=empty`; build Ascend C++ extensions when
 switching away from the compiled revision supplied by the image. Installing
 CUDA dependencies from the official StartLux requirements is unnecessary:
 only its renderer and answer protocol are imported.
+
+The initial experiment reused matching, previously built Ascend extensions.
+Those binaries differ from the base image's plugin binaries. On a fresh machine,
+build the selected Ascend checkout; do not mix its Python sources with arbitrary
+image extensions. No C++ or operator source is changed by this recipe.
 
 ## Run
 
@@ -45,6 +56,14 @@ For the 35B-A3B checkpoint, set `TENSOR_PARALLEL_SIZE=4` and select four assigne
 NPUs. The default HTTP listener is loopback. Configure `PORT` to run separate
 services. Begin with eager execution; removing `--enforce-eager` must be
 validated against eager outputs before making graph-mode accuracy claims.
+
+The launcher defaults the existing vLLM setting
+`VLLM_ENABLE_V1_MULTIPROCESSING=0`. In-process scheduling queues the questions
+before executing the batch. The background engine can execute the first question
+before the rest arrive, causing additional forward passes. Set the variable to
+`1` to reproduce that baseline. Tensor parallel workers remain separate when
+TP is greater than one. Recheck both probabilities and latency when changing
+scheduling or graph shapes.
 
 ```bash
 curl -s http://127.0.0.1:18190/v1/systemone \
@@ -77,7 +96,14 @@ bash eval/fetch_benchmarks.sh
   --out outputs/startlux-npu
 "$PYTHON_BIN" eval/suites.py score outputs/startlux-npu \
   --json outputs/startlux-npu-metrics.json
+"$PYTHON_BIN" eval/latency.py http://127.0.0.1:18190/v1/systemone 200
 ```
+
+The latency script warms up 20 times, then times 200 serial HTTP requests, each
+with choice, yes/no and score fields. Report its actual processed token count;
+request-content tokens and separately rendered question tokens are different.
+Before reporting the seven-suite average, require all 12,351 decisions, zero
+missing rows and zero invalid results. Use a fresh output directory for each run.
 
 Keep full predictions, final metrics, exact weight hashes and timing evidence
 in the local experiment archive. Serving startup and CPU unit tests alone do
