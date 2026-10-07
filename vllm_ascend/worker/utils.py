@@ -203,6 +203,19 @@ def _component_views_share_slot(kv_cache: object, spec: FullAttentionSpec) -> bo
     )
 
 
+def _is_page_strided_mla_cache(kv: torch.Tensor, spec: FullAttentionSpec, ratio: int) -> bool:
+    """Whether an MLA view advances by one physical page on its first axis."""
+
+    return (
+        isinstance(spec, MLAAttentionSpec)
+        and kv.ndim > 0
+        and kv.shape[0] > 0
+        and kv.shape[0] % ratio == 0
+        and not kv.is_contiguous()
+        and kv.stride(0) > kv[0].numel()
+    )
+
+
 class AscendKVBlockZeroer(KVBlockZeroer):
     """Manages efficient zeroing of KV cache blocks via a Triton kernel.
 
@@ -279,6 +292,15 @@ class AscendKVBlockZeroer(KVBlockZeroer):
                     seen_ptrs.add(dp)
 
                     el = kv.element_size()
+                    if _is_page_strided_mla_cache(kv, spec, ratio):
+                        physical_page_bytes = kv.stride(0) * el * ratio
+                        assert physical_page_bytes % 4 == 0
+                        physical_page_el = physical_page_bytes // 4
+                        seg_addrs.append(dp)
+                        seg_page_sizes.append(physical_page_el)
+                        seg_page_strides.append(physical_page_el)
+                        continue
+
                     payload_bytes = kv[0].numel() * el
                     stride_bytes = kv.stride(0) * el
                     assert kv[0].is_contiguous(), "KV block payload must be contiguous"
