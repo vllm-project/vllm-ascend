@@ -165,10 +165,7 @@ class GVABackendIO(BackendIO):
             sources = _batch_sources(batch, layer_id)
             evidence = tuple(TransferEvidence(source, None, not source_handed_off) for source in sources)
             return _store_completions(batch, evidence, error, force_failed=True)
-        succeeded = result_code == 0
-        evidence = tuple(
-            TransferEvidence(source, int(result_code), succeeded) for source in _batch_sources(batch, layer_id)
-        )
+        evidence = tuple(TransferEvidence(source, int(result_code), True) for source in _batch_sources(batch, layer_id))
         return _store_completions(batch, evidence)
 
     def store_layer(self, layer_id: int) -> LayerStoreResult:
@@ -190,8 +187,7 @@ class GVABackendIO(BackendIO):
                 raise RuntimeError("GVA batch_copy returned a non-integer result")
         except Exception as error:
             return LayerStoreResult(None, not source_handed_off, error)
-        succeeded = result_code == 0
-        return LayerStoreResult(int(result_code), succeeded)
+        return LayerStoreResult(int(result_code), True)
 
     def commit_store_sessions(self, keys: list[str]) -> tuple[int, ...]:
         if not keys:

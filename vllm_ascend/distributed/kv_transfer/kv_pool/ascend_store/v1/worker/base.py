@@ -67,7 +67,9 @@ class KVPoolWorker(ABC):
         self._pending_load_request_ids: set[str] = set()
         self._pending_store_batch: StoreBatch | None = None
         self._released_store_job_ids: set[int] = set()
-        self._store_error: Exception | None = None
+        # Only source-safety and execution faults block later steps. Completed
+        # cache write failures are logged at the Store fence.
+        self._store_fatal_error: Exception | None = None
         self._timelines_started = False
         self._source_ready_event_factory = source_ready_event_factory or (lambda: torch.npu.Event())
 
@@ -95,7 +97,7 @@ class KVPoolWorker(ABC):
         """Resolve the readable remote prefix for one request."""
 
     def begin_step(self, step: KVTransferStep) -> None:
-        self._raise_store_error()
+        self._raise_store_fatal_error()
         if self._active_step is not None:
             raise RuntimeError("Previous KV Pool step has not ended")
         context = KVPoolStepContext(step)
@@ -105,7 +107,7 @@ class KVPoolWorker(ABC):
                 if step.store.all_sources_ready:
                     self._submit_step_store(context, fence=False)
             except Exception as error:
-                self._store_error = error
+                self._store_fatal_error = error
                 raise
         self._active_step = context
 
@@ -170,22 +172,22 @@ class KVPoolWorker(ABC):
 
     @_with_active_step
     def save_layer(self, _context: KVPoolStepContext, layer_name: str) -> None:
-        self._raise_store_error()
+        self._raise_store_fatal_error()
         try:
             self._submit_store_layer(layer_name)
         except Exception as error:
-            self._store_error = error
+            self._store_fatal_error = error
             raise
 
     @_with_active_step
     def finish_step(self, context: KVPoolStepContext) -> None:
-        self._raise_store_error()
+        self._raise_store_fatal_error()
         if self._store_timeline is None or not context.step.store.commands or context.store_submitted:
             return
         try:
             self._submit_step_store(context, fence=True)
         except Exception as error:
-            self._store_error = error
+            self._store_fatal_error = error
             raise
 
     @abstractmethod
@@ -224,7 +226,7 @@ class KVPoolWorker(ABC):
         del completion
 
     def fence_previous_store(self) -> tuple[StoreCompletion, ...]:
-        self._raise_store_error()
+        self._raise_store_fatal_error()
         pending = self._pending_store_batch
         if pending is None:
             return ()
@@ -233,7 +235,7 @@ class KVPoolWorker(ABC):
                 raise RuntimeError("Store completion exists without a Store timeline")
             completions = self._store_timeline.wait(pending)
         except Exception as error:
-            self._store_error = error
+            self._store_fatal_error = error
             raise
         for completion in completions:
             if completion.evidence.source_release_confirmed and completion.store_job_id is not None:
@@ -241,11 +243,20 @@ class KVPoolWorker(ABC):
         if all(completion.evidence.source_release_confirmed for completion in completions):
             self._pending_store_batch = None
         for completion in completions:
-            try:
-                _validate_store_completion(completion)
-            except Exception as error:
-                self._store_error = error
-                raise
+            evidence = completion.evidence
+            if evidence.error is not None or not evidence.succeeded:
+                logger.error(
+                    "KV cache Store failed for request %s (job %s); result codes=%s, error=%s",
+                    completion.request_id,
+                    completion.store_job_id,
+                    [item.result_code for item in evidence.transfer_evidence],
+                    evidence.error,
+                )
+            if not evidence.source_release_confirmed:
+                self._store_fatal_error = RuntimeError(
+                    f"Store source release is unknown for request {completion.request_id}"
+                )
+                raise self._store_fatal_error from evidence.error
         return completions
 
     def take_released_store_job_ids(self) -> set[int]:
@@ -463,9 +474,9 @@ class KVPoolWorker(ABC):
     def _build_store_candidates(self, commands: tuple[StoreCommand, ...]) -> StoreCandidates:
         """Build request rows and keys before Store admission."""
 
-    def _raise_store_error(self) -> None:
-        if self._store_error is not None:
-            raise RuntimeError("KVPoolWorker cannot continue after a previous Store failure") from self._store_error
+    def _raise_store_fatal_error(self) -> None:
+        if self._store_fatal_error is not None:
+            raise RuntimeError("KVPoolWorker cannot continue after a fatal Store failure") from self._store_fatal_error
 
     def _record_load_completion(self, context: KVPoolStepContext, completion: LoadCompletion) -> None:
         failed_sources = [item.source for item in completion.transfer_evidence if item.result_code != 0]
@@ -495,19 +506,6 @@ class KVPoolWorker(ABC):
     @abstractmethod
     def _transfer_group_count(self) -> int:
         """Return the number of cache groups represented in one request result."""
-
-
-def _validate_store_completion(completion: StoreCompletion) -> None:
-    evidence = completion.evidence
-    if evidence.error is not None:
-        raise RuntimeError(f"Store failed for request {completion.request_id}") from evidence.error
-    if not evidence.succeeded:
-        raise RuntimeError(
-            f"Store success was not confirmed for request {completion.request_id}; "
-            f"result codes {[item.result_code for item in evidence.transfer_evidence]}"
-        )
-    if not evidence.source_release_confirmed:
-        raise RuntimeError(f"Store source release is unknown for request {completion.request_id}")
 
 
 def _failed_store_completions(

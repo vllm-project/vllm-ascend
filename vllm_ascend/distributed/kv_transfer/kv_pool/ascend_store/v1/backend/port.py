@@ -36,7 +36,13 @@ class KVStoreBackend(Protocol):
 
     def load(self, keys: list[str], addresses: AddressRows, sizes: SizeRows) -> ResultCodes: ...
 
-    def store(self, keys: list[str], addresses: AddressRows, sizes: SizeRows) -> ResultCodes: ...
+    def store(self, keys: list[str], addresses: AddressRows, sizes: SizeRows) -> ResultCodes:
+        """Finish all source reads before returning per-key success or failure codes.
+
+        An exception does not confirm source release. A failed cache write must
+        not make an incomplete object readable through ``exists`` or ``load``.
+        """
+        ...
 
 
 class KeyRangeBackend(KVStoreBackend, Protocol):
@@ -64,7 +70,9 @@ class KeyRangeBackend(KVStoreBackend, Protocol):
         addresses: AddressRows,
         sizes: SizeRows,
         destination_offsets: OffsetRows,
-    ) -> ResultCodes: ...
+    ) -> ResultCodes:
+        """Finish this range's source reads before returning, including failed copies."""
+        ...
 
     def commit_key_range_store(self, keys: list[str]) -> ResultCodes: ...
 
@@ -96,6 +104,8 @@ class GVABackend(KVStoreBackend, Protocol):
         remote_addresses: list[int],
         local_addresses: list[int],
         sizes: list[int],
-    ) -> int: ...
+    ) -> int:
+        """Finish all source reads before returning a success or failure code."""
+        ...
 
     def publish_gva(self, keys: list[str]) -> ResultCodes: ...

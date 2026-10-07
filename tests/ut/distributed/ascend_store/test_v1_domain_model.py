@@ -230,27 +230,41 @@ def test_bulk_worker_store_success_and_failure_preserve_source_safety(monkeypatc
     )
     begin_step(admission_failure, store=StoreCommandBatch((command,)))
     admission_failure.finish_step()
-    with pytest.raises(RuntimeError, match="Store failed"):
-        admission_failure.fence_previous_store()
+    completions = admission_failure.fence_previous_store()
+    assert not completions[0].evidence.succeeded
+    assert completions[0].evidence.source_release_confirmed
     assert admission_failure.take_released_store_job_ids() == {7}
-    with pytest.raises(RuntimeError, match="previous Store failure"):
-        admission_failure.close()
+    admission_failure.close()
     assert admission_resources.closed
 
-    for native_result in ([-1], RuntimeError("put failed")):
-        failed_backend = FakeBackend()
-        failed_backend.put_result = native_result
-        failed, failed_resources, _ = make_worker(failed_backend, source_ready_event_factory=FakeEvent)
-        begin_step(failed, store=StoreCommandBatch((command,)))
-        failed.finish_step()
-        with pytest.raises(RuntimeError, match="Store failed|result codes"):
-            failed.fence_previous_store()
-        assert failed._pending_store_batch is not None
-        assert not failed._pending_store_batch.completions[0].evidence.source_release_confirmed
-        assert failed.take_released_store_job_ids() == set()
-        with pytest.raises(RuntimeError, match="previous Store failure"):
-            failed.close()
-        assert not failed_resources.closed
+    failed_backend = FakeBackend()
+    failed_backend.put_result = [-1]
+    failed, failed_resources, _ = make_worker(failed_backend, source_ready_event_factory=FakeEvent)
+    begin_step(failed, store=StoreCommandBatch((command,)))
+    failed.finish_step()
+    completions = failed.fence_previous_store()
+    assert not completions[0].evidence.succeeded
+    assert completions[0].evidence.source_release_confirmed
+    assert failed._pending_store_batch is None
+    assert failed.take_released_store_job_ids() == {7}
+    failed.close()
+    assert failed_resources.closed
+
+
+def test_bulk_store_argument_alignment_error_is_not_suppressed() -> None:
+    worker, resources, backend = make_worker()
+    command = RangeStoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4, 7)
+    batch = build_admitted_store_batch(worker, (command,))
+    assert batch is not None
+    arguments = worker._materialize_concrete_bulk_arguments(batch, store=True)
+
+    try:
+        with pytest.raises(RuntimeError, match="Bulk Store arguments do not align"):
+            worker_backend_io(worker).store_materialized(batch, replace(arguments, keys=[]))
+        assert "put" not in [call[0] for call in backend.calls]
+    finally:
+        worker.close()
+    assert resources.closed
 
 
 def test_bulk_store_candidates_compact_partial_admission_before_materialization() -> None:
@@ -559,7 +573,7 @@ def test_layerwise_store_commits_only_after_all_layers_and_unknown_failure_retai
     begin_step(failed, store=StoreCommandBatch((command, duplicate)))
     failed.save_layer("layers.0.group.0")
     failed.save_layer("layers.1.group.0")
-    with pytest.raises(RuntimeError, match="Store failed"):
+    with pytest.raises(RuntimeError, match="Store source release is unknown"):
         failed.finish_step()
     assert failed._pending_store_batch is not None
     assert not failed._pending_store_batch.completions[0].evidence.source_release_confirmed
@@ -567,7 +581,7 @@ def test_layerwise_store_commits_only_after_all_layers_and_unknown_failure_retai
     assert failed.take_released_store_job_ids() == {18}
     assert "batch_commit" not in [call[0] for call in failing_backend.calls]
     assert "batch_revoke" in [call[0] for call in failing_backend.calls]
-    with pytest.raises(RuntimeError, match="previous Store failure"):
+    with pytest.raises(RuntimeError, match="fatal Store failure"):
         failed.close()
     assert not failed_resources.closed
 
@@ -599,8 +613,7 @@ def test_layerwise_store_reuses_fully_started_batch_and_filters_failed_sessions(
     begin_step(failed, store=StoreCommandBatch((first, second)))
     failed.save_layer("layers.0.group.0")
     failed.save_layer("layers.1.group.0")
-    with pytest.raises(RuntimeError, match="Store success was not confirmed"):
-        failed.finish_step()
+    failed.finish_step()
 
     started_keys = next(call[1] for call in backend.calls if call[0] == "batch_put_start")
     copied_keys = [call[1] for call in backend.calls if call[0] == "batch_copy_put"]
@@ -609,8 +622,7 @@ def test_layerwise_store_reuses_fully_started_batch_and_filters_failed_sessions(
     assert copied_keys == [(started_keys[0],), (started_keys[0],)]
     assert committed_keys == (started_keys[0],)
     assert failed.take_released_store_job_ids() == {17, 18}
-    with pytest.raises(RuntimeError, match="previous Store failure"):
-        failed.close()
+    failed.close()
     assert failed_resources.closed
 
 
@@ -815,8 +827,7 @@ def test_worker_close_reports_incomplete_layerwise_store_but_releases_safe_sourc
     begin_step(worker, store=StoreCommandBatch((command,)))
     worker.save_layer("layers.0.group.0")
 
-    with pytest.raises(RuntimeError, match="Store failed"):
-        worker.close()
+    worker.close()
 
     assert worker.take_released_store_job_ids() == {17}
     assert worker._pending_store_batch is None

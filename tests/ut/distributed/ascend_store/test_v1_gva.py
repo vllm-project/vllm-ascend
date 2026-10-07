@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from types import SimpleNamespace
 from typing import Any
 
@@ -21,11 +22,13 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.projection impo
     GVALayerwiseProjectionBinder,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.projection.layerwise.gva import gva_local_keys
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.lookup import LookupRequest
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.transfer import (
     KVTransferStep,
     RangeStoreCommand,
     StoreCommandBatch,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker import base as worker_module
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.io import (
     GVABackendIO,
 )
@@ -478,7 +481,7 @@ def test_gva_store_admission_owns_only_successful_allocations() -> None:
 def test_gva_copy_normalizes_batch_result_and_unknown_evidence() -> None:
     for native_result, expected_codes, succeeded, released in (
         (0, [0, 0], True, True),
-        (-9, [-9, -9], False, False),
+        (-9, [-9, -9], False, True),
         (None, [None, None], False, False),
         (True, [None, None], False, False),
         ([0], [None, None], False, False),
@@ -545,6 +548,46 @@ def test_gva_worker_publishes_after_all_layers_and_reports_job_release() -> None
     assert resources.closed
 
 
+@pytest.mark.parametrize("failure", ("allocation", "copy", "publication"))
+def test_gva_store_failure_is_a_cache_miss_and_next_step_can_publish(failure: str, monkeypatch, caplog) -> None:
+    monkeypatch.setattr(worker_module, "logger", logging.getLogger(__name__))
+    worker, resources, store = make_gva_worker()
+    if failure == "allocation":
+        store.allocation_result = [0]
+    elif failure == "copy":
+        store.copy_result = -9
+    else:
+        store.commit_result = [-8]
+    command = RangeStoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4, store_job_id=17)
+    worker.begin_step(KVTransferStep(store=StoreCommandBatch((command,))))
+    worker.save_layer("layers.0.group.0")
+    worker.save_layer("layers.1.group.0")
+    worker.finish_step()
+
+    assert "KV cache Store failed for request request (job 17)" in caplog.text
+    if failure == "allocation":
+        assert "Store session start failed" in caplog.text
+        assert "result code -1" in caplog.text
+    assert worker.take_released_store_job_ids() == {17}
+    assert worker._pending_store_batch is None
+    assert not any(region[2] for region in store.objects.values())
+    assert worker.lookup(LookupRequest(TokenRange(0, 4), (0,), (b"a",))).available_end_token == 0
+    worker.end_step()
+
+    store.allocation_result = None
+    store.copy_result = 0
+    store.commit_result = None
+    next_command = RangeStoreCommand("next", TokenRange(0, 4), ((3,),), (b"b",), 4, store_job_id=18)
+    worker.begin_step(KVTransferStep(store=StoreCommandBatch((next_command,))))
+    worker.save_layer("layers.0.group.0")
+    worker.save_layer("layers.1.group.0")
+    worker.finish_step()
+    assert worker.take_released_store_job_ids() == {18}
+    assert worker.lookup(LookupRequest(TokenRange(0, 4), (0,), (b"b",))).available_end_token == 4
+    worker.close()
+    assert resources.closed
+
+
 def test_gva_worker_distinguishes_copy_failure_from_publication_failure() -> None:
     command = RangeStoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4, store_job_id=17)
 
@@ -553,25 +596,21 @@ def test_gva_worker_distinguishes_copy_failure_from_publication_failure() -> Non
     copy_worker.begin_step(KVTransferStep(store=StoreCommandBatch((command,))))
     copy_worker.save_layer("layers.0.group.0")
     copy_worker.save_layer("layers.1.group.0")
-    with pytest.raises(RuntimeError, match="Store failed"):
-        copy_worker.finish_step()
-    assert copy_worker.take_released_store_job_ids() == set()
-    assert copy_worker._pending_store_batch is not None
+    copy_worker.finish_step()
+    assert copy_worker.take_released_store_job_ids() == {17}
+    assert copy_worker._pending_store_batch is None
     assert not any(call[0] == "publish" for call in copy_store.calls)
-    with pytest.raises(RuntimeError, match="previous Store failure"):
-        copy_worker.close()
-    assert not copy_resources.closed
+    copy_worker.close()
+    assert copy_resources.closed
 
     publish_worker, publish_resources, publish_store = make_gva_worker()
     publish_store.commit_result = [-8]
     publish_worker.begin_step(KVTransferStep(store=StoreCommandBatch((command,))))
     publish_worker.save_layer("layers.0.group.0")
     publish_worker.save_layer("layers.1.group.0")
-    with pytest.raises(RuntimeError, match="Store failed"):
-        publish_worker.finish_step()
+    publish_worker.finish_step()
     assert publish_worker.take_released_store_job_ids() == {17}
     assert publish_worker._pending_store_batch is None
     assert not any(region[2] for region in publish_store.objects.values())
-    with pytest.raises(RuntimeError, match="previous Store failure"):
-        publish_worker.close()
+    publish_worker.close()
     assert publish_resources.closed

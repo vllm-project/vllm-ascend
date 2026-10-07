@@ -99,8 +99,10 @@ def test_sparse_transfer_groups_keep_original_identity_in_bulk_trace_and_evidenc
         assert put_call[3] == ((24,), (24,))
         assert [item.source.group_id for item in completion.evidence.transfer_evidence] == [1, 3]
         assert [item.source.block_id for item in completion.evidence.transfer_evidence] == [1, 2]
-        assert [item.source_release_confirmed for item in completion.evidence.transfer_evidence] == [True, False]
+        assert [item.source_release_confirmed for item in completion.evidence.transfer_evidence] == [True, True]
+        assert [item.result_code for item in completion.evidence.transfer_evidence] == [0, -1]
         assert not completion.evidence.succeeded
+        assert completion.evidence.source_release_confirmed
     finally:
         worker.close()
         assert resources.closed

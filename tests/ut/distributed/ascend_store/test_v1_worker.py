@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 from types import SimpleNamespace
 from typing import Any
@@ -40,6 +41,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.transf
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.route import (
     KVPoolRouteSpec,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker import base as worker_module
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk import (
     AsynchronousBulkWorker,
     SynchronousBulkWorker,
@@ -301,18 +303,82 @@ def test_bulk_store_orders_source_ready_copy_and_close_fence() -> None:
     assert resources.closed
 
 
-def test_bulk_store_unknown_evidence_keeps_registered_resources() -> None:
+@pytest.mark.parametrize("layerwise,async_load", ((False, False), (False, True), (True, False)))
+def test_completed_store_failure_logs_releases_sources_and_allows_next_step(
+    layerwise: bool, async_load: bool, monkeypatch, caplog
+) -> None:
+    monkeypatch.setattr(worker_module, "logger", logging.getLogger(__name__))
     backend = FakeBackend()
-    backend.put_result = RuntimeError("put failed after address handoff")
+    backend.presence = [0]
+    if layerwise:
+        backend.store_session_copy_result = [-9]
+    else:
+        backend.put_result = [-9]
+    worker, resources, _ = make_worker(backend, layerwise=layerwise, async_load=async_load)
+    command = RangeStoreCommand("request", TokenRange(0, 4), ((7,),), (b"a",), 4, 17)
+    _begin(worker, store=(command,))
+    if layerwise:
+        worker.save_layer("layers.0.group.0")
+        worker.save_layer("layers.1.group.0")
+    worker.finish_step()
+    worker.fence_previous_store()
+
+    assert "KV cache Store failed for request request (job 17)" in caplog.text
+    assert worker.take_released_store_job_ids() == {17}
+    assert worker._pending_store_batch is None
+    assert worker.lookup(LookupRequest(TokenRange(0, 4), (0,), (b"a",))).available_end_token == 0
+    if layerwise:
+        assert "batch_commit" not in [call[0] for call in backend.calls]
+        assert "batch_revoke" in [call[0] for call in backend.calls]
+    worker.end_step()
+
+    backend.put_result = None
+    backend.store_session_copy_result = None
+    next_command = RangeStoreCommand("next", TokenRange(0, 4), ((9,),), (b"b",), 4, 18)
+    _begin(worker, store=(next_command,))
+    if layerwise:
+        worker.save_layer("layers.0.group.0")
+        worker.save_layer("layers.1.group.0")
+    worker.finish_step()
+    worker.fence_previous_store()
+    assert worker.take_released_store_job_ids() == {18}
+    worker.close()
+    assert resources.closed
+
+
+@pytest.mark.parametrize("native_result", ([], [True], RuntimeError("put failed after address handoff")))
+def test_bulk_store_unknown_evidence_keeps_registered_resources(native_result) -> None:
+    backend = FakeBackend()
+    backend.put_result = native_result
     worker, resources, _ = make_worker(backend)
     command = RangeStoreCommand("request", TokenRange(0, 4), ((7,),), (b"a",), 4, 17)
     _begin(worker, store=(command,))
     worker.finish_step()
 
-    with pytest.raises(RuntimeError, match="Store failed"):
+    with pytest.raises(RuntimeError, match="Store source release is unknown"):
         worker.close()
 
     assert worker.take_released_store_job_ids() == set()
+    assert not resources.closed
+
+
+def test_store_executor_failure_still_blocks_worker_execution(monkeypatch) -> None:
+    worker, resources, _ = make_worker()
+
+    def fail_executor(*_args):
+        raise RuntimeError("unexpected Store executor failure")
+
+    monkeypatch.setattr(worker._asynchronous_store_timeline, "_operation", fail_executor)
+    command = RangeStoreCommand("request", TokenRange(0, 4), ((7,),), (b"a",), 4, 17)
+    _begin(worker, store=(command,))
+    worker.finish_step()
+    with pytest.raises(RuntimeError, match="KVPoolStoreExecutor failed"):
+        worker.fence_previous_store()
+    worker.end_step()
+    with pytest.raises(RuntimeError, match="fatal Store failure"):
+        worker.begin_step(KVTransferStep())
+    with pytest.raises(RuntimeError, match="fatal Store failure"):
+        worker.close()
     assert not resources.closed
 
 

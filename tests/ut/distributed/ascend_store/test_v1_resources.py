@@ -588,7 +588,7 @@ def test_unknown_store_source_keeps_real_registration_and_backend_open() -> None
     )
     worker.finish_step()
 
-    with pytest.raises(RuntimeError, match="Store failed"):
+    with pytest.raises(RuntimeError, match="Store source release is unknown"):
         worker.close()
 
     assert resources.kv_caches is caches

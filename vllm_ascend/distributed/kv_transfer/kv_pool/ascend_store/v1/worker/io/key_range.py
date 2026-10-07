@@ -122,7 +122,7 @@ class KeyRangeBackendIO(BackendIO):
         result_codes, result_error = self._interpret_store_results(len(keys), native_result)
         if result_codes is None:
             return LayerStoreResult(None, False, result_error)
-        return LayerStoreResult(result_codes, tuple(code == 0 for code in result_codes), result_error)
+        return LayerStoreResult(result_codes, (True,) * len(result_codes), result_error)
 
     def finish_load_sessions(self, keys: list[str]) -> None:
         self._key_range_backend.finish_key_range_load(keys)
