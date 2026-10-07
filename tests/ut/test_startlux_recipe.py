@@ -14,7 +14,8 @@ def test_startlux_launcher_preserves_arguments(tmp_path, tp, devices):
     launcher = Path(__file__).parents[2] / "examples/models/startlux_decision/serve.sh"
     capture = tmp_path / "capture"
     capture.write_text(
-        '#!/bin/bash\nprintf "%s\\n" "$@" "$ASCEND_RT_VISIBLE_DEVICES" "$VLLM_ENABLE_V1_MULTIPROCESSING" "$PYTHONPATH"\n'
+        '#!/bin/bash\nprintf "%s\\n" "$@" "$ASCEND_RT_VISIBLE_DEVICES" '
+        '"$VLLM_ENABLE_V1_MULTIPROCESSING" "$PYTHONPATH"\n'
     )
     capture.chmod(0o755)
     env = dict(
