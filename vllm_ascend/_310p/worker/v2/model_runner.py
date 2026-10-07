@@ -1116,6 +1116,11 @@ class NPUModelRunner310V2(NPUModelRunner):
                 self.input_buffers.input_ids[:num_decode_reqs].copy_(
                     decode_tokens.to(self.input_buffers.input_ids.dtype)
                 )
+                # FULL decode graphs embed padded rows as well. Clear them
+                # after the partial copy: reused buffers may contain stale
+                # out-of-vocabulary IDs, and 310P slice writes can affect the
+                # adjacent tail element.
+                self.input_buffers.input_ids[num_decode_reqs:num_tokens_after_padding].zero_()
                 return
             self._decode_req_indices.np[:num_decode_reqs] = decode_req_indices
             self._decode_input_indices.np[:num_decode_reqs] = decode_input_indices
