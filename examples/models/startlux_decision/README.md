@@ -7,7 +7,7 @@ registered or patched in the hardware plugin.
 
 ## Revisions and environment
 
-- vLLM fork branch: `Liuchenbing-2026/vllm:startlux_decision_npu_eager`, based on
+- vLLM fork branch: `Liuchenbing-2026/vllm:startlux_decision_eager_pr`, based on
   `ced6857afa0ea7b2e3f0846a62e1394e90f15607` (v0.30.0).
 - Ascend fork branch: `Liuchenbing-2026/vllm-ascend:startlux_decision_npu_eager`, based
   on `a8fcedb03d93e60efceddbfc912406f7fa491d57` with the existing packed-GDN
@@ -54,8 +54,7 @@ bash examples/models/startlux_decision/serve.sh --enforce-eager
 
 For the 35B-A3B checkpoint, set `TENSOR_PARALLEL_SIZE=4` and select four assigned
 NPUs. The default HTTP listener is loopback. Configure `PORT` to run separate
-services. Begin with eager execution; removing `--enforce-eager` must be
-validated against eager outputs before making graph-mode accuracy claims.
+services. This recipe uses eager execution. Graph-mode validation is a separate change.
 
 The launcher defaults the existing vLLM setting
 `VLLM_ENABLE_V1_MULTIPROCESSING=0`. In-process scheduling queues the questions
@@ -108,3 +107,15 @@ missing rows and zero invalid results. Use a fresh output directory for each run
 Keep full predictions, final metrics, exact weight hashes and timing evidence
 in the local experiment archive. Serving startup and CPU unit tests alone do
 not establish seven-suite accuracy, tensor-parallel equivalence or latency.
+
+## Launcher regression
+
+The CPU-only launcher tests check argument quoting, physical device selection,
+source precedence and the in-process scheduling default. They are collected by
+the standard `tests/ut` CI selection:
+
+```bash
+python -m pytest tests/ut/test_startlux_recipe.py -q
+```
+
+These tests do not replace the two-checkpoint NPU accuracy evaluation above.
