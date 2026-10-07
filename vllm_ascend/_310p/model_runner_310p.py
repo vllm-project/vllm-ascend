@@ -994,9 +994,12 @@ class NPUModelRunner310(NPUModelRunner):
                 max_num_blocks_per_req = max(max_num_blocks_per_req, mamba_blocks_per_req)
             max_num_blocks.append(max_num_blocks_per_req)
 
+        # Backend selection may update cache_config.block_size after the
+        # initial input batch is created. Compare against its original size,
+        # otherwise a 128-token table can survive a switch to 64-token caches.
         if (
-            block_sizes != [self.cache_config.block_size]
-            or self.kernel_block_sizes != [[self.cache_config.block_size]]
+            block_sizes != [self.block_size]
+            or self.kernel_block_sizes != [[self.block_size]]
             or len(kv_cache_config.kv_cache_groups) > 1
         ):
             assert self.offload_config.uva.cpu_offload_gb == 0, (
