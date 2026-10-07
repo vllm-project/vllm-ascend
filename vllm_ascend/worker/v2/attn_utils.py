@@ -63,6 +63,7 @@ from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder
 from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import (
+    MLA_FLASH_SUPPORTED_Q_HEADS,
     AscendCommonAttentionMetadata,
     get_sfa_qsfa_packed_head_dim,
     requires_contiguous_pa_kv_cache,
@@ -74,6 +75,7 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendSlidingWindowMLASpec,
     get_kv_cache_compression_ratio,
     get_storage_block_size,
+    supports_component_major_mla_pd,
 )
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.models.deepseek_v41.cache_config import is_deepseek_v41_cache
@@ -85,11 +87,43 @@ from vllm_ascend.utils import (
     enable_sfa_dcp_replicated_indexer,
     get_kv_cache_tensor_layers,
     is_hidden_state_cache_spec,
+    vllm_version_is,
 )
+from vllm_ascend.worker.device_metadata import DeviceMetadataExecutor
 from vllm_ascend.worker.kvpp_cache import allocate_kvpp_cache
+from vllm_ascend.worker.utils import (
+    get_single_raw_mla_backing,
+    make_page_strided_cache_view,
+)
 
 if TYPE_CHECKING:
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
+
+
+@contextmanager
+def flashmla_metadata_scope(attn_groups, executor: DeviceMetadataExecutor | None):
+    """Bind a worker's executor to its MLA builders, without global state.
+
+    Keep ownership until target/draft consumers have been queued. Nested scopes
+    using the same builders leave release to the owner of the outer scope.
+    """
+    if executor is None:
+        yield
+        return
+    changed = []
+    for groups in attn_groups:
+        for group in groups:
+            state = getattr(group.get_metadata_builder(0), "flashmla_state", None)
+            if state is not None and state.executor is not executor:
+                changed.append((state, state.executor, state.defer))
+                state.executor, state.defer = executor, True
+    try:
+        yield
+    finally:
+        if changed and executor.submission_in_flight:
+            executor.release()
+        for state, previous_executor, previous_defer in changed:
+            state.executor, state.defer = previous_executor, previous_defer
 
 
 # MRV2's upstream _dummy_run drops runner-specific kwargs such as``skip_gdn_state_update``
@@ -236,6 +270,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             ratio_kwargs: dict[str, Any] = {"tokens_per_state": compression_ratio}
             spec = AscendMLAAttentionSpec(
                 block_size=spec.block_size,
+                num_query_heads=attn_module.num_heads,
                 num_kv_heads=spec.num_kv_heads,
                 head_size=head_size,
                 dtype=dtype,
@@ -335,6 +370,19 @@ def build_attn_metadata(
     skip_ring_state_update: bool | None = None,
 ) -> dict[str, Any]:
     """Build attention metadata for Ascend NPUs."""
+    flashmla_executors = {
+        state.executor
+        for groups in attn_groups
+        for group in groups
+        if (state := getattr(group.get_metadata_builder(0), "flashmla_state", None)) is not None
+        and state.executor is not None
+    }
+    if len(flashmla_executors) > 1:
+        raise RuntimeError("One attention build cannot share buffers across multiple FlashMLA executors")
+    executor = next(iter(flashmla_executors), None)
+    if executor is not None and executor.submission_in_flight:
+        executor.release()
+    flashmla_tasks = []
     if skip_ring_state_update is None:
         skip_ring_state_update = ring_state_update_skipped()
     if seq_lens_np is None:
@@ -512,8 +560,17 @@ def build_attn_metadata(
                 # Preserve sharing even if a builder replaces one of the
                 # dictionaries while constructing its metadata.
                 common_ratio_to_sas_metadata = attn_metadata_builder.common_ratio_to_sas_metadata  # type: ignore[assignment]
+            if executor is not None and getattr(attn_metadata_builder, "flashmla_state", None) is not None:
+                flashmla_tasks.extend(attn_metadata_builder.take_device_metadata_tasks())
             for layer_name in attn_group.layer_names:
                 attn_metadata[layer_name] = metadata
+    if flashmla_tasks:
+        if torch.npu.is_current_stream_capturing():
+            raise RuntimeError("FlashMLA metadata must be refreshed outside model capture/replay")
+        assert executor is not None
+        executor.submit(flashmla_tasks)
+        for task in flashmla_tasks:
+            executor.wait(task.stage, task.group_id)
     return attn_metadata
 
 
@@ -798,11 +855,36 @@ def _allocate_sparse_c8_indexer_tensors(
     return dsa_k_tensor, dsa_k_scale_tensor
 
 
+def _uses_single_raw_mla_cache(
+    vllm_config: VllmConfig,
+    layer_name: str,
+    kv_cache_spec: KVCacheSpec,
+) -> bool:
+    """Whether an MLA layer uses the Ascend single raw backing protocol."""
+    if vllm_version_is("0.28.0"):
+        return False
+
+    if not isinstance(kv_cache_spec, AscendMLAAttentionSpec):
+        return False
+    if not kv_cache_spec.supports_single_raw_backing:
+        return False
+
+    attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase, [layer_name])
+    attn_module = attn_layers.get(layer_name)
+    return (
+        isinstance(attn_module, MLAAttention)
+        and supports_component_major_mla_pd(vllm_config)
+        and not enable_sfa(vllm_config)
+        and getattr(attn_module, "indexer", None) is None
+        and not getattr(attn_module.impl, "fa_quant_layer", False)
+    )
+
+
 def _allocate_kv_cache(
     kv_cache_config: KVCacheConfig,
     shared_layers: dict[str, str],
     device: torch.device,
-) -> dict[str, torch.Tensor | tuple[torch.Tensor, torch.Tensor]]:
+) -> dict[str, torch.Tensor | tuple[torch.Tensor, ...]]:
     """
     Initialize the KV cache buffer with the correct size. The buffer needs to be
     reshaped to the desired shape before being used by the models.
@@ -1046,6 +1128,15 @@ def _allocate_kv_cache(
                         _allocate_int8_cache_tensor(k_tensor_size, alignment, device),
                     )
 
+            continue
+
+        if all(
+            _uses_single_raw_mla_cache(vllm_config, layer_name, layer_kv_cache_spec[layer_name])
+            for layer_name in shared_names
+        ):
+            for layer_name in shared_names:
+                raw_size = kv_cache_config.num_blocks * layer_kv_cache_spec[layer_name].page_size_bytes
+                kv_cache_raw_tensors[layer_name] = (_allocate_int8_cache_tensor(raw_size, alignment, device),)
             continue
 
         # vLLM #51718 packs all group layers into one tensor on main; the
@@ -1423,6 +1514,54 @@ def _reshape_kv_cache_v2(
                     [tensor.stride() for tensor in mamba_cache],
                     [tensor.is_contiguous() for tensor in mamba_cache],
                 )
+                continue
+
+            single_raw_mla_cache = get_single_raw_mla_backing(raw_cache)
+
+            if single_raw_mla_cache is not None and _uses_single_raw_mla_cache(vllm_config, layer_name, kv_cache_spec):
+                kernel_blocks_per_manager = kv_cache_spec.block_size // kernel_block_size
+                slot_bytes = kv_cache_spec.page_size_bytes // kernel_blocks_per_manager
+                component_shape = (
+                    kv_cache_config.num_blocks * kernel_blocks_per_manager,
+                    kernel_block_size,
+                    kv_cache_spec.num_kv_heads,
+                )
+                nope_dim, rope_dim = _get_attention_kv_cache_dims(layer_name, kv_cache_spec)
+                fused_dim = nope_dim + rope_dim
+
+                if (
+                    get_current_hardware_profile().supports(HardwareCapability.MLA_FLASH)
+                    and kv_cache_spec.num_query_heads in MLA_FLASH_SUPPORTED_Q_HEADS
+                ):
+                    # Preserve the V1 A5 protocol: one token-fused tensor with
+                    # [nope | rope] in the trailing 576 lanes of every token.
+                    fused_cache = make_page_strided_cache_view(
+                        single_raw_mla_cache,
+                        (*component_shape, fused_dim),
+                        kv_cache_spec.dtype,
+                        slot_bytes,
+                    )
+                    kv_caches[layer_name] = fused_cache
+                    continue
+
+                # A3/FIA keeps each component internally contiguous and puts
+                # the hybrid-page padding only in the leading block stride.
+                nope_cache = make_page_strided_cache_view(
+                    single_raw_mla_cache,
+                    (*component_shape, nope_dim),
+                    kv_cache_spec.dtype,
+                    slot_bytes,
+                )
+                rope_cache = make_page_strided_cache_view(
+                    single_raw_mla_cache,
+                    (*component_shape, rope_dim),
+                    kv_cache_spec.dtype,
+                    slot_bytes,
+                    offset_bytes=(
+                        kernel_block_size * kv_cache_spec.num_kv_heads * nope_dim * get_dtype_size(kv_cache_spec.dtype)
+                    ),
+                )
+                kv_caches[layer_name] = (nope_cache, rope_cache)
                 continue
 
             if not isinstance(kv_cache_spec, AttentionSpec):

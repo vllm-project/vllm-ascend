@@ -5,8 +5,9 @@ from typing import Any
 import torch
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import largest_power_of_2_divisor
+from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
-from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec
 from vllm.v1.worker.utils import AttentionGroup, KVBlockZeroer
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
@@ -58,10 +59,56 @@ def copy_kv_cache_blocks_inplace(
         # same-size bitcasts preserve the non-contiguous page geometry.
         if tensor.dtype == torch.float8_e4m3fn:
             tensor = tensor.view(torch.int8)
-        blocks = tensor.unflatten(0, (num_blocks, tensor.shape[0] // num_blocks))
+        kernel_blocks_per_block = tensor.shape[0] // num_blocks
+        # Page-strided MLA views are non-contiguous, so a flat ``view`` would
+        # either fail or materialize a copy. Split only dim 0 to preserve the
+        # original strided storage while copying every kernel block in a page.
+        blocks = tensor.unflatten(0, (num_blocks, kernel_blocks_per_block))
         source_blocks = torch.stack([blocks[copy.src_block_id] for copy in kv_cache_block_copies])
         for index, copy in enumerate(kv_cache_block_copies):
             blocks[copy.dst_block_id].copy_(source_blocks[index])
+
+
+def get_single_raw_mla_backing(raw_cache: object) -> torch.Tensor | None:
+    """Extract one raw MLA backing from either allocator representation.
+
+    Pure MLA allocations use a one-element tuple so generic K/V unpacking does
+    not mistake the backing for a `(key, value)` pair. Hybrid/shared pools can
+    instead store a bare tensor slice for an MLA layer.
+    """
+    if isinstance(raw_cache, torch.Tensor):
+        return raw_cache
+    if isinstance(raw_cache, tuple) and len(raw_cache) == 1 and isinstance(raw_cache[0], torch.Tensor):
+        return raw_cache[0]
+    return None
+
+
+def row_major_strides(shape: Sequence[int]) -> tuple[int, ...]:
+    """Return row-major strides for a shape without allocating tensor storage."""
+    strides = [1] * len(shape)
+    for dim in range(len(shape) - 2, -1, -1):
+        strides[dim] = strides[dim + 1] * shape[dim + 1]
+    return tuple(strides)
+
+
+def make_page_strided_cache_view(
+    raw_tensor: torch.Tensor,
+    shape: Sequence[int],
+    dtype: torch.dtype,
+    page_size_bytes: int,
+    offset_bytes: int = 0,
+) -> torch.Tensor:
+    """Create a first-axis page-strided view over a raw cache allocation."""
+    dtype_size = get_dtype_size(dtype)
+    strides = row_major_strides(tuple(shape))
+    storage_offset_bytes = raw_tensor.storage_offset() * raw_tensor.element_size() + offset_bytes
+    assert storage_offset_bytes % dtype_size == 0
+    return torch.as_strided(
+        raw_tensor.view(dtype),
+        size=tuple(shape),
+        stride=(page_size_bytes // dtype_size, *strides[1:]),
+        storage_offset=storage_offset_bytes // dtype_size,
+    )
 
 
 @contextmanager
@@ -126,6 +173,49 @@ def _zero_kv_blocks_kernel(
             tl.store(ptr + offset + cols, tl.zeros([BLOCK_SIZE], dtype=tl.int32))
 
 
+def _component_views_share_slot(kv_cache: object, spec: FullAttentionSpec) -> bool:
+    """Whether already-materialized MLA nope/rope views alias one physical page.
+
+    This is a post-reshape physical-aliasing check used by block zeroing and
+    COW. It deliberately differs from single-raw-backing eligibility:
+    eligibility decides how a cache may be allocated, while this function only
+    recognizes component-major views that were created over the same backing.
+    Legacy contiguous K/V tuples and independently backed tensors return false.
+    """
+
+    if not isinstance(spec, MLAAttentionSpec) or not isinstance(kv_cache, tuple) or len(kv_cache) != 2:
+        return False
+
+    nope, rope = kv_cache
+    if not isinstance(nope, torch.Tensor) or not isinstance(rope, torch.Tensor):
+        return False
+
+    storage_ptr = nope.untyped_storage().data_ptr()
+    first_offset = nope.storage_offset()
+    component_elements = nope[0].numel()
+    return (
+        rope.untyped_storage().data_ptr() == storage_ptr
+        and rope.stride(0) == nope.stride(0)
+        and not nope.is_contiguous()
+        and not rope.is_contiguous()
+        and rope.storage_offset() - first_offset == component_elements
+        and component_elements < nope.stride(0)
+    )
+
+
+def _is_page_strided_mla_cache(kv: torch.Tensor, spec: FullAttentionSpec, ratio: int) -> bool:
+    """Whether an MLA view advances by one physical page on its first axis."""
+
+    return (
+        isinstance(spec, MLAAttentionSpec)
+        and kv.ndim > 0
+        and kv.shape[0] > 0
+        and kv.shape[0] % ratio == 0
+        and not kv.is_contiguous()
+        and kv.stride(0) > kv[0].numel()
+    )
+
+
 class AscendKVBlockZeroer(KVBlockZeroer):
     """Manages efficient zeroing of KV cache blocks via a Triton kernel.
 
@@ -182,20 +272,35 @@ class AscendKVBlockZeroer(KVBlockZeroer):
             for layer_name in group.layer_names:
                 if layer_name in runner_only_attn_layers:
                     continue
-                kv_tuple = static_forward_context[layer_name].kv_cache
-                if cache_dtype == "mxfp8" and len(kv_tuple) == 4:
-                    # V scales are checkpoint constants, initialized before
-                    # capture. Clearing a recycled block must preserve them.
-                    kv_tuple = kv_tuple[:3]
+                kv_cache = static_forward_context[layer_name].kv_cache
+                # Fused MLA由单一tensor表示；component-major MLA的两个view同样共享一个物理page，从nope起点清理一次即可。
+                # legacy K/V协议仍逐个component清理。
+                if _component_views_share_slot(kv_cache, spec):
+                    kv_tensors = (kv_cache[0],)
+                elif isinstance(kv_cache, torch.Tensor):
+                    kv_tensors = (kv_cache,)
                 else:
-                    assert len(kv_tuple) == 2, "K and V are not stored separately"
-                for kv in kv_tuple:
+                    kv_tensors = kv_cache
+                    if cache_dtype == "mxfp8" and len(kv_tensors) == 4:
+                        # V scales are checkpoint constants, initialized before
+                        # capture. Clearing a recycled block must preserve them.
+                        kv_tensors = kv_tensors[:3]
+                for kv in kv_tensors:
                     dp = kv.data_ptr()
                     if dp in seen_ptrs:
                         continue
                     seen_ptrs.add(dp)
 
                     el = kv.element_size()
+                    if _is_page_strided_mla_cache(kv, spec, ratio):
+                        physical_page_bytes = kv.stride(0) * el * ratio
+                        assert physical_page_bytes % 4 == 0
+                        physical_page_el = physical_page_bytes // 4
+                        seg_addrs.append(dp)
+                        seg_page_sizes.append(physical_page_el)
+                        seg_page_strides.append(physical_page_el)
+                        continue
+
                     payload_bytes = kv[0].numel() * el
                     stride_bytes = kv.stride(0) * el
                     assert kv[0].is_contiguous(), "KV block payload must be contiguous"

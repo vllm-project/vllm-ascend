@@ -50,6 +50,7 @@ from vllm_ascend.compilation.updatable_graph import (
     UpdatableGraph,
 )
 from vllm_ascend.utils import use_updatable_graph
+from vllm_ascend.worker.v2.attn_utils import flashmla_metadata_scope
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.utils import communicator_switch
 
@@ -256,7 +257,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
                 _prepare_pcp_inputs_to_capture,
                 pcp_manager=pcp_manager,
             )
-        with communicator_switch():
+        with communicator_switch(), flashmla_metadata_scope(attn_groups, self.model_runner.flashmla_executor):
             return super().capture(
                 model,
                 model_state,
