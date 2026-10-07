@@ -5,9 +5,9 @@
 import torch
 from vllm.triton_utils import tl, triton
 
-FOLDED_GROUP_ROWS: tl.constexpr = 8
-INDEX_KEY_BYTES: tl.constexpr = 64
-INDEX_SCALE_BYTES: tl.constexpr = 4
+FOLDED_GROUP_ROWS = 8
+INDEX_KEY_BYTES = 64
+INDEX_SCALE_BYTES = 4
 FOLDED_ROW_BYTES = FOLDED_GROUP_ROWS * (INDEX_KEY_BYTES + INDEX_SCALE_BYTES)
 
 
@@ -23,6 +23,9 @@ def _fold_indexer_rows(
     scale_row_stride,
     folded_page_stride,
     folded_row_stride,
+    FOLDED_GROUP_ROWS: tl.constexpr,
+    INDEX_KEY_BYTES: tl.constexpr,
+    INDEX_SCALE_BYTES: tl.constexpr,
 ):
     token = tl.program_id(0)
     page = tl.load(slots_ptr + token * 2).to(tl.int64)
@@ -81,4 +84,7 @@ def fold_indexer_cache_rows(
         scale.stride(1),
         folded.stride(0),
         folded.stride(1),
+        FOLDED_GROUP_ROWS,
+        INDEX_KEY_BYTES,
+        INDEX_SCALE_BYTES,
     )
