@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from inspect import signature
 from pathlib import Path
 
 import numpy as np
 import pytest
 
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1 import topology as topology_module
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.projection import (
     GVALayerwiseProjection,
     GVALayerwiseProjectionBinder,
@@ -138,6 +140,13 @@ def test_layerwise_projection_has_no_generic_functional_transport_layer() -> Non
     arguments = (projection_dir.parent / "worker/io/arguments.py").read_text()
     assert "RangeBatch" not in arguments
     assert "projection.memory" not in arguments
+
+
+def test_tensor_geometry_is_not_a_topology_entity_or_layerwise_binding_input() -> None:
+    assert not hasattr(topology_module, "KVCacheTensorLayout")
+    for binder_type in (KeyRangeLayerwiseProjectionBinder, GVALayerwiseProjectionBinder):
+        assert "tensor_layouts" not in signature(binder_type.bind).parameters
+        assert "kv_caches" not in signature(binder_type.bind).parameters
 
 
 def test_execution_ownership_has_no_legacy_runtime_package() -> None:

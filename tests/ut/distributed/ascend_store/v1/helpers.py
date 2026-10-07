@@ -278,7 +278,8 @@ class FakeResources:
         self.closed = False
 
     def bind_kv_caches(self, kv_caches):
-        self.kv_caches = kv_caches
+        # This fixture publishes synthetic addresses without backing tensor storage.
+        self.kv_caches = None
         base_addresses = {}
         block_lengths = {}
         block_strides = {}
