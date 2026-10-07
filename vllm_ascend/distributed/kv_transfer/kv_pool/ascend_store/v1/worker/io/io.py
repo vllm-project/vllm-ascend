@@ -71,12 +71,12 @@ class BackendIO:
     ) -> tuple[StoreCompletion, ...]:
         """Call the Backend with admitted key/range arguments prepared by Worker."""
 
+        if len(arguments.keys) != len(arguments.sources):
+            raise RuntimeError("Bulk Store arguments do not align keys and source evidence")
         if not arguments.sources:
             return _empty_store_completions(batch)
         source_addresses_handed_off = False
         try:
-            if len(arguments.keys) != len(arguments.sources):
-                raise RuntimeError("Bulk Store arguments do not align keys and source evidence")
             source_addresses_handed_off = True
             native_result = self._backend.store(arguments.keys, arguments.addresses, arguments.sizes)
         except Exception as error:
@@ -88,8 +88,10 @@ class BackendIO:
         if result_codes is None:
             evidence = tuple(TransferEvidence(source, None, False) for source in arguments.sources)
         else:
+            # The synchronous Backend has finished reading every source even
+            # when individual cache writes failed.
             evidence = tuple(
-                TransferEvidence(source, code, code == 0)
+                TransferEvidence(source, code, True)
                 for source, code in zip(arguments.sources, result_codes, strict=True)
             )
         return _store_completions(batch, evidence, result_error, force_failed=result_codes is None)
