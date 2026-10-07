@@ -19,9 +19,9 @@ DP16/TP1 on the Decode node. Prefill runs in eager mode with FlashComm1, while
 Decode uses `FULL_DECODE_ONLY` graph mode and keeps FlashComm1 disabled.
 
 The A2 PD configuration in this guide uses DP2/TP8 across two Prefill
-nodes and DP4/TP4 across two Decode nodes. Prefill runs in eager mode
-with FlashComm1 and MC2 fusion, while Decode uses `FULL_DECODE_ONLY`
-graph mode with the recompute scheduler enabled and FlashComm1 disabled.
+nodes and DP8/TP2 across two Decode nodes. Prefill runs in eager mode,
+while Decode uses `FULL_DECODE_ONLY` graph mode and keeps FlashComm1
+disabled.
 
 GLM-5.3-Flash model currently supports only model runner V1 on Ascend, so
 all A3 scripts set `VLLM_USE_V2_MODEL_RUNNER=0` explicitly.
@@ -181,7 +181,6 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
     ```shell
 
-    export VLLM_USE_V2_MODEL_RUNNER=0
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_BUFFSIZE=1024
 
@@ -551,28 +550,29 @@ Only the key parameters specific to this model/scenario are described below. `ma
 
     This example uses four Atlas 800 A2 (64GB × 8) servers: two Prefill
     nodes running one DP rank with TP8 each (DP2/TP8 in total), and two
-    Decode nodes running two DP ranks with TP4 each (DP4/TP4 in total).
+    Decode nodes running four DP ranks with TP2 each (DP8/TP2 in total).
     Both layouts consume all eight devices on every server.
     `MooncakeConnectorV2` transfers KV cache from the Prefill engines to
     the Decode engines.
 
     Save the same `launch_online_dp.py` launcher from the A3 tab above on
-    every node. Before starting the services, replace `LOCAL_IP`,
+    the Decode nodes. Before starting the services, replace `LOCAL_IP`,
     `NIC_NAME`, and `MODEL_PATH` in the following templates with values
     for the deployment environment.
 
     **Start the Prefill nodes**
 
-    On each Prefill node, save the following script as `run_p.sh`. The
-    launcher passes the visible devices, API port, DP configuration, and
-    TP size as positional arguments.
+    On each Prefill node, save the following script as `run_p.sh`. Start
+    it directly with the node role as the argument: `bash run_p.sh 0` on
+    the first Prefill node and `bash run_p.sh 1` on the second. Node 0
+    hosts the only API endpoint; node 1 runs headless.
 
     ```shell
     #!/usr/bin/env bash
-    # Usage: bash run_p.sh <visible_devices> <http_port> <dp_size> \
-    #   <dp_rank> <dp_address> <rpc_port> <tp_size>
+    # Usage: bash run_p.sh <0 | 1>   # node role: 0 = master, 1 = headless
 
-    LOCAL_IP="<PREFILL_NODE_IP>"
+    NODE_ROLE="$1"
+    LOCAL_IP="<PREFILL_NODE_IP>"        # node0 IP on node 0, node1 IP on node 1
     NIC_NAME="<NETWORK_INTERFACE>"
     MODEL_PATH="<YOUR_MODEL_PATH>"
 
@@ -582,34 +582,38 @@ Only the key parameters specific to this model/scenario are described below. `ma
     export HCCL_SOCKET_IFNAME="$NIC_NAME"
     export VLLM_HOST_IP="$LOCAL_IP"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export VLLM_USE_V1=1
+    export VLLM_USE_V2_MODEL_RUNNER=0
     export HCCL_OP_EXPANSION_MODE=AIV
     export HCCL_BUFFSIZE=1024
-    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-    export HCCL_EXEC_TIMEOUT=1800
-    export HCCL_CONNECT_TIMEOUT=1800
-    export VLLM_RPC_TIMEOUT=360000
-    export VLLM_ENGINE_READY_TIMEOUT_S=1200
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+    export HCCL_EXEC_TIMEOUT=3600
+    export HCCL_CONNECT_TIMEOUT=1200
+    export VLLM_RPC_TIMEOUT=3600000
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=10
-    export TASK_QUEUE_ENABLE=1
-    export CPU_AFFINITY_CONF=1
-    export ACL_OP_INIT_MODE=1
-    export ASCEND_RT_VISIBLE_DEVICES="$1"
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+
+    DP_ARGS=(--data-parallel-size 2 \
+      --data-parallel-size-local 1 \
+      --data-parallel-address "<PREFILL_NODE0_IP>" \
+      --data-parallel-rpc-port 12321)
+    if [ "$NODE_ROLE" = "0" ]; then
+      DP_ARGS+=(--api-server-count 1)
+    else
+      DP_ARGS+=(--headless --data-parallel-start-rank 1)
+    fi
 
     exec vllm serve "$MODEL_PATH" \
       --host 0.0.0.0 \
-      --port "$2" \
-      --data-parallel-size "$3" \
-      --data-parallel-rank "$4" \
-      --data-parallel-address "$5" \
-      --data-parallel-rpc-port "$6" \
-      --tensor-parallel-size "$7" \
+      --port 10000 \
+      "${DP_ARGS[@]}" \
+      --tensor-parallel-size 8 \
       --enable-expert-parallel \
       --enable-chunked-prefill \
       --enable-prefix-caching \
       --seed 1024 \
-      --served-model-name glm \
+      --served-model-name glm5 \
+      --safetensors-load-strategy prefetch \
       --max-model-len 200000 \
       --max-num-seqs 64 \
       --max-num-batched-tokens 8192 \
@@ -622,7 +626,6 @@ Only the key parameters specific to this model/scenario are described below. `ma
       --reasoning-parser glm45 \
       --enable-auto-tool-choice \
       --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
-      --additional_config '{"enable_fused_mc2": 1, "enable_flashcomm1": true}' \
       --kv-transfer-config '{
         "kv_connector": "MooncakeConnectorV2",
         "kv_role": "kv_producer",
@@ -630,26 +633,15 @@ Only the key parameters specific to this model/scenario are described below. `ma
         "kv_connector_extra_config": {
           "use_ascend_direct": true,
           "prefill": {"dp_size": 2, "tp_size": 8},
-          "decode": {"dp_size": 4, "tp_size": 4}
+          "decode": {"dp_size": 8, "tp_size": 2}
         }
       }'
     ```
 
-    Start one DP2/TP8 engine on each Prefill node. `--dp-rank-start` is
-    `0` on the first Prefill node and `1` on the second. `--dp-address`
-    is the first Prefill node's IP on both nodes, and the launcher
-    assigns API port `9081` on each.
-
-    ```shell
-    python launch_online_dp.py \
-      --template ./run_p.sh \
-      --dp-size 2 \
-      --tp-size 8 \
-      --dp-size-local 1 \
-      --dp-rank-start <0 | 1> \
-      --dp-address "<PREFILL_NODE0_IP>" \
-      --vllm-start-port 9081
-    ```
+    Start one DP2/TP8 engine on each Prefill node with
+    `bash run_p.sh <0 | 1>`; no launcher is needed. Both nodes take their
+    DP configuration from the `DP_ARGS` block, and the only API endpoint
+    is node 0's port `10000`.
 
     **Start the Decode nodes**
 
@@ -659,7 +651,8 @@ Only the key parameters specific to this model/scenario are described below. `ma
 
     ```shell
     #!/usr/bin/env bash
-    # Usage is the same as run_p.sh.
+    # Usage: bash run_d.sh <visible_devices> <http_port> <dp_size> \
+    #   <dp_rank> <dp_address> <rpc_port> <tp_size>
 
     LOCAL_IP="<DECODE_NODE_IP>"
     NIC_NAME="<NETWORK_INTERFACE>"
@@ -670,20 +663,20 @@ Only the key parameters specific to this model/scenario are described below. `ma
     export TP_SOCKET_IFNAME="$NIC_NAME"
     export HCCL_SOCKET_IFNAME="$NIC_NAME"
     export VLLM_HOST_IP="$LOCAL_IP"
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export VLLM_USE_V1=1
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True,pin_memory_expandable_segments:True
+    export VLLM_USE_V2_MODEL_RUNNER=0
     export HCCL_OP_EXPANSION_MODE=AIV
     export HCCL_BUFFSIZE=1024
-    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-    export HCCL_EXEC_TIMEOUT=1800
-    export HCCL_CONNECT_TIMEOUT=1800
-    export VLLM_RPC_TIMEOUT=360000
-    export VLLM_ENGINE_READY_TIMEOUT_S=1200
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+    export HCCL_EXEC_TIMEOUT=3600
+    export HCCL_CONNECT_TIMEOUT=1200
+    export VLLM_RPC_TIMEOUT=3600000
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=10
-    export TASK_QUEUE_ENABLE=1
-    export CPU_AFFINITY_CONF=1
-    export ACL_OP_INIT_MODE=1
+    # Reserve disjoint HCCL port ranges per DP rank so multiple engines on
+    # one node never share host/NPU socket ports.
+    export HCCL_HOST_SOCKET_PORT_RANGE="$((60000 + $4 * 100))-$((60099 + $4 * 100))"
+    export HCCL_NPU_SOCKET_PORT_RANGE="$((60000 + $4 * 100))-$((60099 + $4 * 100))"
     export ASCEND_RT_VISIBLE_DEVICES="$1"
 
     exec vllm serve "$MODEL_PATH" \
@@ -698,20 +691,22 @@ Only the key parameters specific to this model/scenario are described below. `ma
       --enable-chunked-prefill \
       --enable-prefix-caching \
       --seed 1024 \
-      --served-model-name glm \
+      --served-model-name glm5 \
+      --safetensors-load-strategy prefetch \
       --max-model-len 200000 \
       --max-num-seqs 32 \
-      --max-num-batched-tokens 256 \
+      --max-num-batched-tokens 1024 \
       --trust-remote-code \
       --quantization ascend \
-      --gpu-memory-utilization 0.92 \
+      --gpu-memory-utilization 0.85 \
+      --skip-mm-profiling \
+      --limit-mm-per-prompt '{"image":1,"video":0}' \
       --async-scheduling \
       --tool-call-parser glm47 \
       --reasoning-parser glm45 \
       --enable-auto-tool-choice \
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
       --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
-      --additional_config '{"recompute_scheduler_enable": true, "enable_fused_mc2": 1}' \
       --kv-transfer-config '{
         "kv_connector": "MooncakeConnectorV2",
         "kv_role": "kv_consumer",
@@ -719,23 +714,23 @@ Only the key parameters specific to this model/scenario are described below. `ma
         "kv_connector_extra_config": {
           "use_ascend_direct": true,
           "prefill": {"dp_size": 2, "tp_size": 8},
-          "decode": {"dp_size": 4, "tp_size": 4}
+          "decode": {"dp_size": 8, "tp_size": 2}
         }
       }'
     ```
 
-    Start two DP4/TP4 engines on each Decode node. `--dp-rank-start` is
-    `0` on the first Decode node and `2` on the second. `--dp-address`
+    Start four DP8/TP2 engines on each Decode node. `--dp-rank-start` is
+    `0` on the first Decode node and `4` on the second. `--dp-address`
     is the first Decode node's IP on both nodes, and the launcher
-    assigns API ports `9900-9901` on each.
+    assigns API ports `9900-9903` on each.
 
     ```shell
     python launch_online_dp.py \
       --template ./run_d.sh \
-      --dp-size 4 \
-      --tp-size 4 \
-      --dp-size-local 2 \
-      --dp-rank-start <0 | 2> \
+      --dp-size 8 \
+      --tp-size 2 \
+      --dp-size-local 4 \
+      --dp-rank-start <0 | 4> \
       --dp-address "<DECODE_NODE0_IP>" \
       --vllm-start-port 9900
     ```
@@ -747,13 +742,14 @@ Only the key parameters specific to this model/scenario are described below. `ma
 
     1. Complete the container and multi-node communication checks on all
        four nodes.
-    2. Start Prefill node 0 and Decode node 0 with the launcher commands
-       above (`--dp-rank-start 0` on both). These two nodes host the
-       `--dp-address` endpoints that the remaining ranks connect to.
+    2. Start Prefill node 0 and Decode node 0 (Prefill node 0 with
+       `bash run_p.sh 0`, Decode node 0 with the launcher command above
+       `--dp-rank-start 0`). These two nodes host the endpoints that the
+       remaining ranks connect to.
     3. After the engines on these two nodes are ready, start Prefill
-       node 1 (`--dp-rank-start 1`) and Decode node 1
-       (`--dp-rank-start 2`).
-    4. After all six engines are ready, start the proxy. Verify each
+       node 1 (`bash run_p.sh 1`) and Decode node 1
+       (`--dp-rank-start 4`).
+    4. After all ten engines are ready, start the proxy. Verify each
        engine first with
        `curl http://127.0.0.1:<port>/v1/models`, then send requests to
        `<PREFILL_NODE0_IP>:8081`.
@@ -763,7 +759,7 @@ Only the key parameters specific to this model/scenario are described below. `ma
     Open another terminal in one Prefill container and start the
     [load-balancing proxy](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py).
     The proxy listens on port `8081`, distributes requests across the two
-    Prefill endpoints, and then forwards Decode work to the four Decode
+    Prefill endpoints, and then forwards Decode work to the eight Decode
     endpoints.
 
     ```shell
@@ -779,43 +775,47 @@ Only the key parameters specific to this model/scenario are described below. `ma
       --host 0.0.0.0 \
       --port 8081 \
       --prefiller-hosts "$P0_IP" "$P1_IP" \
-      --prefiller-ports 9081 9081 \
-      --decoder-hosts "$D0_IP" "$D0_IP" "$D1_IP" "$D1_IP" \
-      --decoder-ports 9900 9901 9900 9901
+      --prefiller-ports 10000 10000 \
+      --decoder-hosts "$D0_IP" "$D0_IP" "$D0_IP" "$D0_IP" "$D1_IP" "$D1_IP" "$D1_IP" "$D1_IP" \
+      --decoder-ports 9900 9901 9902 9903 9900 9901 9902 9903
     ```
 
     **Key parameter differences from the A3 layout**
 
-    - DP2/TP8 on Prefill and DP4/TP4 on Decode are the validated A2
+    - DP2/TP8 on Prefill and DP8/TP2 on Decode are the validated A2
       layouts. Their products must be 8 on each A2 node instead of 16 on
       each A3 node.
-    - `--dp-size-local` and `--dp-rank-start` split each DP group across
-      two nodes: Prefill hosts one rank per node, Decode hosts two ranks
-      per node.
+    - The Prefill scripts run `vllm serve` directly (node 0 with
+      `--api-server-count 1`, node 1 headless with
+      `--data-parallel-start-rank 1`) because each Prefill node hosts
+      exactly one rank. The Decode launcher splits its DP group across
+      two nodes with `--dp-size-local` and `--dp-rank-start`.
     - `kv_connector_extra_config` enables `use_ascend_direct` for direct
       NPU-to-NPU KV transfer and declares the actual Prefill and Decode
       `{dp_size, tp_size}` topology. The declared values must match the
       real deployment.
     - Prefill uses `--max-num-seqs 64` and `--max-num-batched-tokens 8192`
       with `--enforce-eager`; Decode uses `--max-num-seqs 32` and
-      `--max-num-batched-tokens 256` with `FULL_DECODE_ONLY` graph mode.
+      `--max-num-batched-tokens 1024` with `FULL_DECODE_ONLY` graph mode.
       Both roles run with `--async-scheduling`.
-    - `enable_flashcomm1` and `enable_fused_mc2` are enabled on Prefill.
-      Decode keeps FlashComm1 disabled and enables
-      `recompute_scheduler_enable` so decode steps stay decode-shaped. Do
-      not combine `enable_fused_mc2` with
-      `multistream_overlap_shared_expert`.
+    - Both roles rely on model runner V1 via
+      `VLLM_USE_V2_MODEL_RUNNER=0`, consistent with the other tabs in
+      this guide. `VLLM_HOST_IP` advertises the IP that peers use to
+      reach each engine for KV transfer.
     - MTP speculative decoding uses three speculative tokens on A2.
-    - `VLLM_USE_V1=1` explicitly selects the V1 engine core on both roles,
-      and `VLLM_HOST_IP` advertises the IP that peers use to reach each
-      engine for KV transfer.
+      `enforce_eager: true` keeps the MTP draft model in eager mode, as in
+      the other tabs of this guide.
+    - `HCCL_HOST_SOCKET_PORT_RANGE` and `HCCL_NPU_SOCKET_PORT_RANGE` on
+      Decode reserve a disjoint 100-port window per DP rank (starting at
+      `60000 + rank * 100`). When several engines share one node, these
+      ranges prevent the HCCL host-side sockets from silently sharing
+      ports across ranks, which can block engine startup.
     - The remaining timeout and runtime variables
       (`VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS`, `HCCL_EXEC_TIMEOUT`,
-      `HCCL_CONNECT_TIMEOUT`, `VLLM_RPC_TIMEOUT`,
-      `VLLM_ENGINE_READY_TIMEOUT_S`, `OMP_PROC_BIND`, `OMP_NUM_THREADS`,
-      `TASK_QUEUE_ENABLE`, `CPU_AFFINITY_CONF`, `ACL_OP_INIT_MODE`) are
-      the validated A2 startup defaults for this model size; keep them
-      unless your environment requires different values.
+      `HCCL_CONNECT_TIMEOUT`, `VLLM_RPC_TIMEOUT`, `OMP_PROC_BIND`,
+      `OMP_NUM_THREADS`) are the validated A2 startup defaults for this
+      model size; keep them unless your environment requires different
+      values.
     - `HCCL_IF_IP` and all socket interface variables must select the
       service network used by the configured node IPs. The DP RPC,
       engine, Mooncake, and proxy ports must be allowed by the host
@@ -840,7 +840,6 @@ Only the key parameters specific to this model/scenario are described below. `ma
     # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
     node0_ip="xx.xx.xx.1"
 
-    export VLLM_USE_V2_MODEL_RUNNER=0
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_OP_EXPANSION_MODE=AIV
     export HCCL_BUFFSIZE=1024
@@ -890,7 +889,6 @@ Only the key parameters specific to this model/scenario are described below. `ma
     # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
     node0_ip="xx.xx.xx.1"
 
-    export VLLM_USE_V2_MODEL_RUNNER=0
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_OP_EXPANSION_MODE=AIV
     export HCCL_BUFFSIZE=1024
@@ -1159,7 +1157,7 @@ still require computation.
 This configuration extends the A2 1P1D deployment in
 [Section 5.2](#52-1p1d-pd-disaggregated-deployment) with a Mooncake KV Cache
 Pool. Reuse the `launch_online_dp.py` launcher, the `run_p.sh` and `run_d.sh`
-templates, the DP2/TP8 Prefill and DP4/TP4 Decode topology, and the proxy
+templates, the DP2/TP8 Prefill and DP8/TP2 Decode topology, and the proxy
 configuration from that section. A2 nodes do not have the A3 HCCS fabric: the
 pool runs over the A2 RoCE network with the `P2PHANDSHAKE` metadata server
 and the `ascend` protocol, and the A3 fabric-memory exports do not apply.
@@ -1219,7 +1217,7 @@ including `--max-num-seqs 64`.
   '{
     "kv_connector": "MultiConnector",
     "kv_role": "kv_producer",
-    "engine_id": "glm53-flash-prefill-dp'"$4"'",
+    "engine_id": "glm53-flash-prefill-dp'"$1"'",
     "kv_connector_extra_config": {
       "connectors": [
         {
@@ -1229,7 +1227,7 @@ including `--max-num-seqs 64`.
           "kv_connector_extra_config": {
             "use_ascend_direct": true,
             "prefill": {"dp_size": 2, "tp_size": 8},
-            "decode": {"dp_size": 4, "tp_size": 4}
+            "decode": {"dp_size": 8, "tp_size": 2}
           }
         },
         {
@@ -1238,7 +1236,7 @@ including `--max-num-seqs 64`.
           "kv_connector_extra_config": {
             "backend": "mooncake",
             "use_layerwise": false,
-            "lookup_rpc_port": '"$((37000 + $4))"'
+            "lookup_rpc_port": '"$((37000 + $1))"'
           }
         }
       ]
@@ -1265,7 +1263,7 @@ including `FULL_DECODE_ONLY` graph mode and the MTP configuration.
           "kv_connector_extra_config": {
             "use_ascend_direct": true,
             "prefill": {"dp_size": 2, "tp_size": 8},
-            "decode": {"dp_size": 4, "tp_size": 4}
+            "decode": {"dp_size": 8, "tp_size": 2}
           }
         },
         {
@@ -1284,12 +1282,13 @@ including `FULL_DECODE_ONLY` graph mode and the MTP configuration.
   }'
 ```
 
-`$4` is the DP rank passed by `launch_online_dp.py`. Each engine must have a
-unique `engine_id` and `lookup_rpc_port`; the child connectors inherit the
-outer `engine_id`. The Prefill lookup ports are `37000-37001`, and the Decode
-lookup ports are `37100-37103`. The `prefill` and `decode` topology
-declared in the `MooncakeConnectorV2` fragment must match the real
-deployment.
+The Prefill script uses its node-role argument `$1` for the `engine_id` and
+lookup port, while the Decode script uses its launcher DP-rank argument `$4`.
+Each engine must have a unique `engine_id` and `lookup_rpc_port`; the child
+connectors inherit the outer `engine_id`. The Prefill lookup ports are
+`37000-37001`, and the Decode lookup ports are `37100-37107`. The `prefill`
+and `decode` topology declared in the `MooncakeConnectorV2` fragment must
+match the real deployment.
 
 **Start the services**
 
@@ -1300,11 +1299,12 @@ Proxy.
    Master with the command from Section 5.4.4. Ensure port `50088` is
    reachable from all four nodes.
 2. Start both Decode nodes with the launcher commands from Section 5.2
-   (`--dp-rank-start 0` and `2`; two engines per node on ports
-   `9900-9901`). Wait until all four Decode engines answer
+   (`--dp-rank-start 0` and `4`; four engines per node on ports
+   `9900-9903`). Wait until all eight Decode engines answer
    `curl /v1/models`.
-3. Start both Prefill nodes (`--dp-rank-start 0` and `1`; one engine per
-   node on port `9081`). Wait until both engines answer.
+3. Start both Prefill nodes (`bash run_p.sh 0` and `bash run_p.sh 1`;
+   one engine per node, API endpoint on node 0's port `10000`). Wait
+   until both engines answer.
 4. Start the proxy from Section 5.2. Send inference requests to
    `<PREFILL_NODE0_IP>:8081` using the examples in Section 6.
 
