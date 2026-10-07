@@ -337,8 +337,6 @@ def test_indexer_cache_writes_all_gathered_rows(monkeypatch, family, key_dtype, 
     AscendSFAIndexerBackend.write_cache(
         indexer, k_li, keys[1] if scale_dtype else None, slots, SimpleNamespace(num_actual_tokens=2)
     )
-    expected_sk = fast_available and family == AscendDeviceType.A3
-    expected_pa = fast_available and family == AscendDeviceType.A5 and not row_gap
     # write_cache now calls torch_npu.npu_scatter_nd_update_ (generic) directly
     # for both the k and (when quantized) scale writes, bypassing
     # DeviceOperator.scatter_cache — so the sk/pa fast paths are not exercised
