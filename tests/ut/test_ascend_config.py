@@ -23,7 +23,7 @@ from importlib.util import find_spec as real_find_spec
 from statistics import NormalDist
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import PropertyMock, patch
 
 from vllm.config import KVTransferConfig
 from vllm.config import VllmConfig as _VllmConfig
@@ -2069,3 +2069,26 @@ class TestKVPPConfig(TestBase):
         config.additional_config = {"enable_kvpp": True}
         actual = init_ascend_config(config)
         self.assertEqual(actual.kvpp_config.size, 4)
+
+
+class TestEngramSharedMemoryDefaults(TestBase):
+    def test_shared_tables_are_derived_for_mrv2_dp(self):
+        for use_v2 in (False, True):
+            for dp in (1, 2, 8):
+                for shared in (False, True):
+                    with self.subTest(use_v2=use_v2, dp=dp, shared=shared):
+                        config = VllmConfig()
+                        config.parallel_config.data_parallel_size = dp
+                        config.engram_config = SimpleNamespace(dp_shared_memory=shared)
+                        ascend_config = AscendConfig(sparse_kv_offload_config=SparseKVOffloadConfig())
+                        with patch.object(
+                            _VllmConfig, "use_v2_model_runner", new_callable=PropertyMock, return_value=use_v2
+                        ):
+                            ascend_config.derive_and_validate(config)
+                        self.assertEqual(config.engram_config.dp_shared_memory, shared or (use_v2 and dp > 1))
+
+    def test_no_engram_config_is_preserved(self):
+        config = VllmConfig()
+        config.engram_config = None
+        AscendConfig(sparse_kv_offload_config=SparseKVOffloadConfig()).derive_and_validate(config)
+        self.assertIsNone(config.engram_config)

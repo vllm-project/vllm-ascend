@@ -424,7 +424,7 @@ class AscendConfig:
             "refresh": false,
             "enable_cpu_binding": true,
             "multistream_dsv4_dsa_overlap": true,
-            "multistream_engram_overlap": false,
+            "multistream_engram_overlap": true,
             "enable_prefill_mc2": false,
             "multistream_overlap_shared_expert": false,
             "enable_kv_nz": false,
@@ -569,8 +569,8 @@ class AscendConfig:
     multistream_dsv4_dsa_overlap: bool = True
     # Prepare Engram hashes, lookups and DP/TP exchanges on an auxiliary stream;
     # FULL graphs wait on descriptor-specific external events at consumers.
-    # Opt in until the workload demonstrates an end-to-end benefit.
-    multistream_engram_overlap: bool = False
+    # Enabled by default; set false to serialize lookups for comparison.
+    multistream_engram_overlap: bool = True
     enable_prefill_mc2: bool = False
     multistream_overlap_shared_expert: bool = False
     enable_kv_nz: bool = False
@@ -680,6 +680,16 @@ class AscendConfig:
     # the max_num_batched_tokens that sequence-parallel writeback corrected).
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
         vc = vllm_config
+        engram_config = getattr(vc, "engram_config", None)
+        if (
+            engram_config is not None
+            and vc.use_v2_model_runner
+            and vc.parallel_config.data_parallel_size > 1
+            and not engram_config.dp_shared_memory
+        ):
+            # DP-dummy ranks have no hash work in MRV2. Share host tables so
+            # replicas do not require matching embedding collectives each step.
+            engram_config.dp_shared_memory = True
         if (
             self.enable_force_eplb
             and self.eplb_config.dynamic_eplb
