@@ -1852,9 +1852,9 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
         "dump_config_path",
         # pure-derived fields (derive_and_validate computes them; user input would residualize)
         # enable_sparse_li_c4 is selected by attention_config.indexer_kv_dtype
-        # and the model's sparse-attention support,not additional config
-        "enable_sparse_sfa_turboquant",
+        # and the model's sparse-attention support,not additional config.
         "enable_sparse_li_c4",
+        "enable_sparse_sfa_turboquant",
         "enable_sp_by_pass",
         "pd_tp_ratio",
         "pd_head_ratio",
