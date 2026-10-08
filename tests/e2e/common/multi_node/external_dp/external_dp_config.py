@@ -55,10 +55,22 @@ class NodeInfo:
     cp_size: int = 1
     sp_size: int = 1
     pp_size: int = 1
-
+    ###修改
+    pp_layer_partition: str = ""        # "41,37"
+    nnodes: int = 1                    # PP 跨节点数, P master=2, P worker=2
+    node_rank: int = 0                 # PP 组内 rank, P master=0, P worker=1
+    master_addr: str = ""              # PP master IP, 用 ${NODE_0_IP} 占位
+    master_port: int = 7060            # 分布式执行 master 端口
+    distributed_executor_backend: str = ""  # "mp"
+    is_headless: bool = False           # P worker=True, 无 HTTP server
     @property
     def devices_per_rank(self) -> int:
-        return self.tp_size * self.cp_size * self.sp_size * self.pp_size
+        # return self.tp_size * self.cp_size * self.sp_size * self.pp_size
+        ###修改
+        base = self.tp_size * self.cp_size * self.sp_size
+        if self.nnodes > 1:
+            return base  # PP 跨节点, 每节点只用 tp_size 个 NPU
+        return base * self.pp_size  # PP 在节点内
 
     @property
     def devices_per_node(self) -> int:
@@ -93,7 +105,14 @@ class RankInfo:
     dp_address: str
     dp_rpc_port: int
     port_start: int
-
+    ###修改
+    pp_layer_partition: str
+    nnodes: int
+    node_rank: int
+    master_addr: str
+    master_port: int
+    distributed_executor_backend: str
+    is_headless: bool
 
 @dataclass(frozen=True)
 class ExternalDPConfig:
@@ -311,6 +330,14 @@ class ExternalDPConfigLoader:
                     sp_size=int(node.get("sp_size", 1)),
                     dp_address=str(node["dp_address"]),
                     pp_size=int(node.get("pp_size", 1)),
+                    ###修改
+                    pp_layer_partition=str(node.get("pp_layer_partition", "")),
+                    nnodes=int(node.get("nnodes", 1)),
+                    node_rank=int(node.get("node_rank", 0)),
+                    master_addr=str(node.get("master_addr", "")),  # 会被 replace_cluster_placeholders 解析
+                    master_port=int(node.get("master_port", 7060)),
+                    distributed_executor_backend=str(node.get("distributed_executor_backend", "")),
+                    is_headless=bool(node.get("is_headless", False)),
                 )
             )
         return nodes
@@ -407,6 +434,12 @@ class ExternalDPConfigLoader:
                 )
             if node.dp_rank_start + node.dp_size_local > node.dp_size:
                 raise ValueError(f"node {node_index} dp rank range exceeds dp_size")
+            # PP worker 必须是 headless
+            if node.nnodes > 1 and node.node_rank > 0 and not node.is_headless:
+                raise ValueError(f"node {node_index} is PP worker but not headless")
+            # PP master 必须有 master_addr
+            if node.nnodes > 1 and not node.master_addr:
+                raise ValueError(f"node {node_index} uses multi-node PP but master_addr is empty")
 
     @staticmethod
     def _validate_kv_pool(config: ExternalDPConfig) -> None:
@@ -470,6 +503,14 @@ class RankResolver:
                     dp_address=node_info.dp_address,
                     dp_rpc_port=node_info.dp_rpc_port,
                     port_start=node_info.port_start,
+                    ##修改
+                    pp_layer_partition=node_info.pp_layer_partition,
+                    nnodes=node_info.nnodes,
+                    node_rank=node_info.node_rank,
+                    master_addr=node_info.master_addr,  # 已被 replace_cluster_placeholders 解析
+                    master_port=node_info.master_port,
+                    distributed_executor_backend=node_info.distributed_executor_backend,
+                    is_headless=node_info.is_headless,
                 )
             )
         return ranks
