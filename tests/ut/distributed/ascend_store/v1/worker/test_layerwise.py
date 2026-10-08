@@ -4,20 +4,30 @@ from __future__ import annotations
 
 import logging
 import threading
+from dataclasses import replace
 
 import pytest
 
 from tests.ut.distributed.ascend_store.v1.helpers import (
     FakeBackend,
+    FakeEvent,
     FakeLoadStartGate,
     begin_step,
+    make_backend_spec,
     make_topology,
     make_worker,
 )
+from tests.ut.distributed.ascend_store.v1.worker.bulk_fixtures import make_multi_spec_caches
 from tests.ut.distributed.ascend_store.v1.worker.gva_fixtures import (
+    FakeGVABackend,
+    make_gva_spec,
     make_gva_worker,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.coordinates import TokenRange
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.projection import (
+    GVALayerwiseProjectionBinder,
+    KeyRangeLayerwiseProjectionBinder,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.lookup import (
     LookupRequest,
 )
@@ -25,7 +35,100 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.transf
     LoadCommand,
     RangeStoreCommand,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.topology import resolve_group_layers
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker import base as worker_module
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwise import (
+    GVALayerwiseWorker,
+    KeyRangeLayerwiseWorker,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.resources import (
+    GVAObjectLayout,
+    KVPoolResources,
+)
+
+
+@pytest.mark.parametrize("use_gva", (False, True), ids=("key_range", "gva"))
+def test_layerwise_store_copies_all_cache_entries_at_each_physical_layer(use_gva) -> None:
+    cache_config, caches = make_multi_spec_caches()
+    base = make_topology(group_ids=(0, 2), physical_layers=(2, 3))
+    topology = replace(
+        base,
+        cache_transfer_granularity=32,
+        hash_block_size=32,
+        groups=tuple(
+            replace(
+                group,
+                kv_cache_spec=cache_config.kv_cache_groups[group.group_id].kv_cache_spec,
+                layers=resolve_group_layers(cache_config.kv_cache_groups[group.group_id].layer_names, 4),
+            )
+            for group in base.groups
+        ),
+    )
+    backend = FakeGVABackend() if use_gva else FakeBackend()
+    backend_spec = make_gva_spec() if use_gva else make_backend_spec()
+    resources = KVPoolResources(
+        backend,
+        backend_spec,
+        cache_config.num_blocks,
+        topology.transfer_groups,
+        gva_layout=GVAObjectLayout(0, 4, 0, 1, 1) if use_gva else None,
+    )
+    binder_type = GVALayerwiseProjectionBinder if use_gva else KeyRangeLayerwiseProjectionBinder
+    binder = binder_type(topology, 64, lambda group, value, head, stage: f"g{group}:{value}")
+    worker_type = GVALayerwiseWorker if use_gva else KeyRangeLayerwiseWorker
+    worker = worker_type(topology, binder, resources, source_ready_event_factory=FakeEvent)
+    source_blocks = {0: 1, 2: 3}
+    try:
+        worker.bind_kv_caches(caches)
+        command = RangeStoreCommand("request", TokenRange(0, 32), ((1,), (), (3,)), (b"a",), 32, 17)
+        begin_step(worker, store=(command,))
+        worker.save_layer("model.layers.2.attn")
+        worker.save_layer("model.layers.3.swa_cache")
+        worker.finish_step()
+        assert worker.take_released_store_job_ids() == {17}
+        if use_gva:
+            assert isinstance(backend, FakeGVABackend) and backend.native_store is not None
+            copies = [call for call in backend.native_store.calls if call[0] == "copy"]
+            object_bases = {
+                group.group_id: next(
+                    region[0]
+                    for key, region in backend.native_store.objects.items()
+                    if key.startswith(f"g{group.group_id}:")
+                )
+                for group in topology.transfer_groups
+            }
+        else:
+            copies = [call for call in backend.calls if call[0] == "batch_copy_put"]
+        assert len(copies) == 2
+        offsets = {0: 0, 2: 0}
+        for layer_id, copy in zip((2, 3), copies, strict=True):
+            addresses, sizes, remote_offsets = [], [], []
+            for group in topology.transfer_groups:
+                layer = next(layer for layer in group.layers if layer.physical_layer_id == layer_id)
+                group_addresses, group_sizes, group_offsets = [], [], []
+                for name in layer.layer_names:
+                    block = caches[name][source_blocks[group.group_id]]
+                    group_addresses.append(block.data_ptr())
+                    group_sizes.append(block.numel() * block.element_size())
+                    group_offsets.append(offsets[group.group_id])
+                    offsets[group.group_id] += group_sizes[-1]
+                addresses.append(tuple(group_addresses))
+                sizes.append(tuple(group_sizes))
+                remote_offsets.append(tuple(group_offsets))
+            if use_gva:
+                assert copy[1] == tuple(
+                    object_bases[group.group_id] + offset
+                    for group, row in zip(topology.transfer_groups, remote_offsets, strict=True)
+                    for offset in row
+                )
+                assert copy[2] == tuple(address for row in addresses for address in row)
+                assert copy[3] == tuple(size for row in sizes for size in row)
+            else:
+                assert copy[2:5] == (tuple(addresses), tuple(sizes), tuple(remote_offsets))
+        assert worker.lookup(LookupRequest(TokenRange(0, 32), (0, 2), (b"a",))).available_end_token == 32
+    finally:
+        worker.close()
+    assert backend.closed
 
 
 def test_layerwise_load_copies_each_layer_within_one_session() -> None:
