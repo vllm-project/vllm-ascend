@@ -51,6 +51,8 @@ class AscendPCPAttentionContext:
     global_block_table_num_blocks: torch.Tensor | None = None
     # Original batch row for each local request, in upstream segment order.
     local_to_global_req_indices: tuple[int, ...] | None = None
+    # Actual local tokens in the original, unpartitioned batch (no padding).
+    local_token_indices: torch.Tensor | None = None
 
 
 class AscendPCPManager(PCPManager):
@@ -478,6 +480,9 @@ class AscendPCPManager(PCPManager):
         global_batch = self._global_batch
         hidden_restore_idx = self._hidden_restore_idx
         assert global_batch is not None
+        local_batch = self._local_batch if input_batch is None else input_batch
+        assert local_batch is not None
+        assert self._local_gather_idx is not None
         assert self._block_tables is not None
         assert self._global_batch_slot_mappings is not None
         assert hidden_restore_idx is not None
@@ -497,6 +502,7 @@ class AscendPCPManager(PCPManager):
             )
         return AscendPCPAttentionContext(
             global_batch=global_batch,
+            local_token_indices=self._local_gather_idx[: local_batch.num_tokens],
             local_to_global_req_indices=local_to_global_req_indices,
             global_block_tables=self._block_tables.gather_block_tables(
                 global_batch.idx_mapping,

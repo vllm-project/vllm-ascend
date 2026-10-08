@@ -1079,6 +1079,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         query_start_loc=None,
         slot_mapping=None,
         block_table=None,
+        token_indices=None,
     ):
         """Hash on device with upstream NgramHashState, then look up head shards.
 
@@ -1123,6 +1124,8 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             image_pad_token_id = getattr(config, "image_pad_token_id", image_token_id + 1)
             dead = engram_dead_mask(input_ids, image_token_id, image_pad_token_id)
             if lookback_token_ids is None:
+                if not hash_state.use_slot_cache:
+                    raise ValueError("MRV2 Engram requires lookback_token_ids from device request history")
                 lookback_token_ids = input_ids.new_full((query_start_loc.numel() - 1, hash_state.lookback_depth), -1)
             hashes = hash_state(
                 input_ids,
@@ -1136,6 +1139,9 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             )
             # Engram.forward takes True=keep.
             mask = ~dead
+            if token_indices is not None:
+                hashes = hashes.index_select(0, token_indices)
+                mask = mask.index_select(0, token_indices)
         elif participates:
             assert hash_state is not None
             hashes, mask = hash_state.dummy_hashes(input_ids)
@@ -1165,6 +1171,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         query_start_loc=None,
         slot_mapping=None,
         block_table=None,
+        token_indices=None,
     ):
         """Synchronously refresh the rows read by this forward, before replay."""
         graph_inputs = self.prepare_engram_graph_inputs(padded_tokens)
@@ -1179,6 +1186,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             query_start_loc,
             slot_mapping,
             block_table,
+            token_indices,
         )
         buffers = graph_inputs["engram_lookups"]
         mask_buffer = graph_inputs["engram_mask"]
@@ -1335,6 +1343,7 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
         query_start_loc=None,
         slot_mapping=None,
         block_table=None,
+        token_indices=None,
     ):
         return self.model.prepare_engram_inputs(
             input_ids,
@@ -1344,6 +1353,7 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
             query_start_loc,
             slot_mapping,
             block_table,
+            token_indices,
         )
 
     def prepare_engram_graph_inputs(self, padded_tokens=None):

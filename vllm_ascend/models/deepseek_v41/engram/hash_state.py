@@ -28,6 +28,47 @@ from vllm.models.deepseek_v41.common.engram import (
 from vllm.triton_utils import tl, triton
 
 
+@triton.jit
+def _gather_lookback_kernel(
+    lookback_ptr,
+    idx_mapping_ptr,
+    num_computed_tokens_ptr,
+    all_token_ids_ptr,
+    all_token_ids_stride,
+    num_reqs,
+    DEPTH: tl.constexpr,
+    BLOCK_DEPTH: tl.constexpr,
+):
+    row = tl.program_id(0)
+    in_batch = row < num_reqs
+    req_idx = tl.load(idx_mapping_ptr + row, mask=in_batch, other=0)
+    computed = tl.load(num_computed_tokens_ptr + req_idx, mask=in_batch, other=0)
+    offsets = tl.arange(0, BLOCK_DEPTH)
+    positions = computed - 1 - offsets
+    ids = tl.load(
+        all_token_ids_ptr + req_idx * all_token_ids_stride + positions,
+        mask=in_batch & (offsets < DEPTH) & (positions >= 0),
+        other=-1,
+    )
+    tl.store(lookback_ptr + row * DEPTH + offsets, ids, mask=offsets < DEPTH)
+
+
+def gather_engram_lookback(window: torch.Tensor, input_batch, req_states) -> None:
+    """Read committed history at the device cursor, including speculative rollback."""
+    history = req_states.all_token_ids.gpu
+    depth = window.shape[1]
+    _gather_lookback_kernel[(window.shape[0],)](
+        window,
+        input_batch.idx_mapping,
+        req_states.num_computed_tokens.gpu,
+        history,
+        history.stride(0),
+        input_batch.num_reqs,
+        DEPTH=depth,
+        BLOCK_DEPTH=triton.next_power_of_2(depth),
+    )
+
+
 class AscendEngramSlotCache:
     """``swa_cache_module`` view for upstream ``NgramHashState``."""
 

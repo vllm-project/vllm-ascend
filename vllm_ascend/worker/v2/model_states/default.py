@@ -42,6 +42,13 @@ class AscendModelState(DefaultModelState):
     kvpp_runtime: "KVPPRuntime | None" = None
     kvpp_is_dummy_run: bool = False
 
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        depth = getattr(self.model, "token_lookback_depth", 0)
+        self.engram_lookback = (
+            torch.full((self.max_num_reqs, depth), -1, dtype=torch.int32, device=self.device) if depth > 0 else None
+        )
+
     def _get_engram_device_inputs(self, input_batch: AscendInputBatch) -> dict[str, torch.Tensor]:
         """Device request coordinates for upstream NgramHashState."""
         layer_name = getattr(self.model, "engram_cache_layer_name", None)
@@ -73,8 +80,8 @@ class AscendModelState(DefaultModelState):
         if block_tables is None or slot_mappings is None or group_id >= len(block_tables):
             return {}
         return {
-            "query_start_loc": batch.query_start_loc,
-            "slot_mapping": slot_mappings[group_id],
+            "query_start_loc": batch.query_start_loc[: batch.num_reqs + 1],
+            "slot_mapping": slot_mappings[group_id, : batch.num_tokens],
             "block_table": block_tables[group_id][: batch.num_reqs],
         }
 
@@ -84,12 +91,26 @@ class AscendModelState(DefaultModelState):
         if prepare_engram_inputs is None:
             return model_inputs
         num_tokens = input_batch.num_tokens_after_padding
+        device_inputs = self._get_engram_device_inputs(input_batch)
+        batch = input_batch
+        if device_inputs:
+            if self.pcp_context is not None:
+                # Hash contiguous global requests before selecting local lookup rows.
+                batch = self.pcp_context.global_batch
+                device_inputs["token_indices"] = self.pcp_context.local_token_indices
+            window = getattr(self, "engram_lookback", None)
+            if window is not None:
+                from vllm_ascend.models.deepseek_v41.engram.hash_state import gather_engram_lookback
+
+                gather_engram_lookback(window, batch, req_states)
+                device_inputs["lookback_token_ids"] = window[: batch.num_reqs]
+        actual_tokens = batch.num_tokens
         model_inputs.update(
             prepare_engram_inputs(
-                input_batch.input_ids[:num_tokens],
-                input_batch.positions[:num_tokens],
+                batch.input_ids[:actual_tokens],
+                batch.positions[:actual_tokens],
                 num_tokens,
-                **self._get_engram_device_inputs(input_batch),
+                **device_inputs,
             )
         )
         return model_inputs

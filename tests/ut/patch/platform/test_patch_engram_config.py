@@ -33,6 +33,7 @@ def engram_config():
             architecture="DeepseekV41ForCausalLM", hf_text_config=SimpleNamespace(engram_layer_ids=[1])
         ),
         speculative_config=None,
+        use_v2_model_runner=False,
         engram_config=config_module.EngramConfig(cpu_offload=True, dp_shared_memory=True),
         parallel_config=SimpleNamespace(
             tensor_parallel_size=8,
@@ -78,9 +79,9 @@ def test_native_engram_resolution_on_npu(engram_config, draft, shared):
         ("model_config", "architecture", "UnsupportedModel", "non-empty n-gram"),
         ("engram_config", "embedding_across_dp", True, "embedding_across_dp"),
         ("parallel_config", "tensor_parallel_size", 16, "TP=1/2/4/8"),
-        ("parallel_config", "pipeline_parallel_size", 2, "PP=PCP=DCP"),
-        ("parallel_config", "prefill_context_parallel_size", 2, "PP=PCP=DCP"),
-        ("parallel_config", "decode_context_parallel_size", 2, "PP=PCP=DCP"),
+        ("parallel_config", "pipeline_parallel_size", 2, "PP=DCP"),
+        ("parallel_config", "prefill_context_parallel_size", 2, "MRV2"),
+        ("parallel_config", "decode_context_parallel_size", 2, "PP=DCP"),
         ("load_config", "load_format", "pt", "indexed safetensors"),
     ],
 )
@@ -108,3 +109,14 @@ def test_platform_leaves_non_engram_models_alone(engram_config):
     engram_config.model_config.architecture = "OtherModel"
     _validate_engram_config(engram_config)
     assert engram_config.engram_config is None
+
+
+@pytest.mark.parametrize("pcp", [1, 2, 4, 8])
+@pytest.mark.parametrize("tp", [1, 2, 4, 8])
+def test_mrv2_engram_parallel_layouts(engram_config, pcp, tp):
+    from vllm_ascend.platform import _validate_engram_config
+
+    engram_config.use_v2_model_runner = True
+    engram_config.parallel_config.prefill_context_parallel_size = pcp
+    engram_config.parallel_config.tensor_parallel_size = tp
+    _validate_engram_config(engram_config)

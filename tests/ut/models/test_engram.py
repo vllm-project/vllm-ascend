@@ -233,3 +233,53 @@ def test_engram_gather_uses_the_local_edp_token_slice(monkeypatch, dp_rank, num_
     for replica in gathered.reshape(2, 4, 5):
         torch.testing.assert_close(replica[:num_tokens], ids)
         assert (replica[num_tokens:] == parallel_mod.DEAD_ID).all()
+
+
+@pytest.mark.parametrize("indices", [[0, 1, 6, 7], [2, 3, 4, 5], []])
+def test_pcp_hashes_global_history_but_looks_up_local_rows(monkeypatch, indices):
+    from vllm_ascend.models.deepseek_v41 import model as model_mod
+
+    class HashState:
+        lookback_depth = 2
+        use_slot_cache = False
+
+        def ensure_cache(self):
+            return True
+
+        def __call__(self, ids, positions, starts, dead, history, *args):
+            # Two-token n-grams cross PCP fragments and use prior-chunk history.
+            previous = ids.roll(1)
+            previous[starts[:-1].long()] = history[:, 0]
+            return (ids * 100 + previous).reshape(-1, 1, 1).int()
+
+    config = SimpleNamespace(engram_layer_ids=[0], image_token_id=999, image_pad_token_id=1000)
+    table = SimpleNamespace(
+        n_hash_cols=1, dim=1, embed_gathered=Mock(side_effect=lambda ids, count: ids[:count].bfloat16())
+    )
+    model = SimpleNamespace(
+        config=config,
+        engram_hash=HashState(),
+        engram_dp_shared_memory=False,
+        layers=[SimpleNamespace(engram=SimpleNamespace(embed_tokens=table))],
+    )
+    monkeypatch.setattr(model_mod, "get_engram_dp_size", lambda: 1)
+    monkeypatch.setattr(model_mod, "gather_engram_hashes", lambda hashes, **kwargs: hashes)
+    ids = torch.tensor([10, 11, 12, 13, 20, 21, 22, 23], dtype=torch.int32)
+    selected = torch.tensor(indices, dtype=torch.int64)
+    lookups, mask = model_mod.DeepseekV41Model.prepare_engram(
+        model,
+        ids,
+        torch.arange(8),
+        torch.tensor([[9, 8], [19, 18]], dtype=torch.int32),
+        torch.tensor([0, 4, 8]),
+        torch.arange(8),
+        torch.zeros(2, 1),
+        selected,
+    )
+    expected = torch.tensor([1009, 1110, 1211, 1312, 2019, 2120, 2221, 2322], dtype=torch.int32)
+    table.embed_gathered.assert_called_once()
+    gathered, count = table.embed_gathered.call_args.args
+    torch.testing.assert_close(gathered[:, 0], expected[selected])
+    assert count == len(indices)
+    torch.testing.assert_close(lookups[0][:, 0], expected[selected].bfloat16())
+    assert mask.tolist() == [True] * len(indices)

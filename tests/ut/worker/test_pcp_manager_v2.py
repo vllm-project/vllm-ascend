@@ -455,7 +455,8 @@ def test_attention_context_collects_global_pcp_data(dcp_world_size, is_prefillin
     gather_block_tables = MagicMock(return_value=block_tables)
     num_blocks = np.arange(16, dtype=np.int32).reshape(2, 8)
     manager._global_batch = input_batch
-    manager._local_batch = SimpleNamespace(num_reqs=3, idx_mapping_np=np.array([3, 3, 7], dtype=np.int32))
+    manager._local_batch = SimpleNamespace(num_reqs=3, num_tokens=3, idx_mapping_np=np.array([3, 3, 7], dtype=np.int32))
+    manager._local_gather_idx = torch.tensor([2, 3, 0, 0])
     manager._block_tables = SimpleNamespace(
         gather_block_tables=gather_block_tables,
         num_blocks=SimpleNamespace(np=num_blocks),
@@ -480,6 +481,7 @@ def test_attention_context_collects_global_pcp_data(dcp_world_size, is_prefillin
         assert actual.global_block_table_num_blocks is None
         assert actual.local_to_global_req_indices is None
     assert actual.global_batch is input_batch
+    torch.testing.assert_close(actual.local_token_indices, torch.tensor([2, 3, 0]))
     assert actual.global_block_tables is block_tables
     assert torch.equal(
         actual.global_slot_mappings,

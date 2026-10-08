@@ -31,6 +31,7 @@ def _prepare_engram_inputs_stub(
     query_start_loc=None,
     slot_mapping=None,
     block_table=None,
+    token_indices=None,
 ):
     # Signature mirror of DeepseekV41Model.prepare_engram_inputs (Ascend main):
     # create_autospec rejects calls carrying removed kwargs such as the old
@@ -52,6 +53,7 @@ def _batch(num_tokens=8, num_reqs=2):
         input_ids=torch.arange(num_tokens, dtype=torch.int32),
         positions=torch.arange(num_tokens, dtype=torch.int64),
         num_tokens_after_padding=num_tokens,
+        num_tokens=num_tokens,
         num_reqs=num_reqs,
         query_start_loc=torch.tensor([0, 4, 8][: num_reqs + 1], dtype=torch.int32),
     )
@@ -129,7 +131,7 @@ def test_prepare_inputs_passes_device_coordinates_from_cached_views(monkeypatch)
     _, kwargs = model.prepare_engram_inputs.call_args
     # Full-request coordinates from the engram group's per-step device views;
     # the stub signature rejects removed kwargs such as ``history_inputs``.
-    assert kwargs["query_start_loc"] is batch.query_start_loc
+    torch.testing.assert_close(kwargs["query_start_loc"], batch.query_start_loc)
     torch.testing.assert_close(kwargs["slot_mapping"], torch.arange(8))
     torch.testing.assert_close(kwargs["block_table"], torch.tensor([[5, 6], [7, 8]]))
 
@@ -146,15 +148,20 @@ def test_prepare_inputs_uses_pcp_global_coordinates(monkeypatch):
         global_batch=global_batch,
         global_block_tables=(torch.tensor([[1, 2], [3, 4]]),),
         global_slot_mappings=torch.arange(32).reshape(1, 32),
+        local_token_indices=torch.tensor([0, 1, 5, 6, 7, 8, 14, 15]),
     )
     state.pcp_context = pcp_context
     batch = _batch(num_tokens=8, num_reqs=2)
 
     state.prepare_inputs(batch, req_states=None)
 
-    _, kwargs = model.prepare_engram_inputs.call_args
-    assert kwargs["query_start_loc"] is pcp_context.global_batch.query_start_loc
-    torch.testing.assert_close(kwargs["slot_mapping"], pcp_context.global_slot_mappings[0])
+    args, kwargs = model.prepare_engram_inputs.call_args
+    torch.testing.assert_close(args[0], global_batch.input_ids)
+    torch.testing.assert_close(args[1], global_batch.positions)
+    assert args[2] == batch.num_tokens_after_padding
+    assert kwargs["token_indices"] is pcp_context.local_token_indices
+    torch.testing.assert_close(kwargs["query_start_loc"], pcp_context.global_batch.query_start_loc)
+    torch.testing.assert_close(kwargs["slot_mapping"], pcp_context.global_slot_mappings[0, :16])
     torch.testing.assert_close(kwargs["block_table"], pcp_context.global_block_tables[0])
 
 
