@@ -29,14 +29,15 @@ def test_ngram_propose_uses_committed_history_and_handles_padding(monkeypatch):
 
     captured = {}
 
-    def fake_kernel(token_ids, num_tokens, sampled, discard, *args):
+    def fake_kernel(token_ids, num_tokens, sampled, discard, *args, **kwargs):
         captured.update(
-            history=token_ids.clone(),
-            num_tokens=num_tokens.clone(),
-            sampled=sampled.clone(),
+            history=token_ids,
+            num_tokens=num_tokens,
+            sampled=sampled,
             discard=discard.clone(),
+            idx_mapping=kwargs["idx_mapping"].clone(),
+            num_sampled=kwargs["num_sampled"].clone(),
         )
-        token_ids[0, 4] = 99
         return (
             torch.zeros(2, dtype=torch.int32),
             torch.tensor([[11, 12], [-1, -1]], dtype=torch.int32),
@@ -63,8 +64,11 @@ def test_ngram_propose_uses_committed_history_and_handles_padding(monkeypatch):
         torch.empty(0),
     )
 
-    assert captured["num_tokens"].tolist() == [4, 0]
-    assert captured["sampled"].tolist() == [[8, 9, -1], [-1, -1, -1]]
+    assert captured["history"] is history
+    assert captured["num_tokens"] is total_len
+    assert captured["sampled"] is None
+    assert captured["idx_mapping"].tolist() == [1, -1]
+    assert captured["num_sampled"].tolist() == [2, 0]
     assert captured["discard"].tolist() == [False, True]
     assert history[1, 4].item() == 8
     assert output.tolist() == [[11, 12], [-1, -1]]

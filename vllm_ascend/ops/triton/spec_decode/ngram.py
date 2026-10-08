@@ -14,11 +14,17 @@ def ngram_spec_decode_kernel(
     num_valid_draft_ptr,
     raw_valid_count_ptr,
     max_seq_len: tl.constexpr,
-    max_new_tokens: tl.constexpr,
+    sampled_width: tl.constexpr,
     vocab_size: tl.constexpr,
     min_n: tl.constexpr,
     max_n: tl.constexpr,
     k: tl.constexpr,
+    sampled_len: tl.constexpr,
+    max_n_width: tl.constexpr,
+    k_width: tl.constexpr,
+    request_indices_ptr,
+    num_sampled_ptr,
+    read_only: tl.constexpr,
     batch_size,
 ):
     pid = tl.program_id(0)
@@ -29,38 +35,55 @@ def ngram_spec_decode_kernel(
     NO_MATCH_F: tl.constexpr = 1.0e9
 
     for batch_idx in range(pid, batch_size, num_cores):
-        seq_len = tl.load(num_tokens_ptr + batch_idx)
+        request_idx = batch_idx
+        if read_only:
+            request_idx = tl.load(request_indices_ptr + batch_idx)
+        valid_request = request_idx >= 0
+        safe_request_idx = tl.where(valid_request, request_idx, 0)
+        seq_len = tl.load(num_tokens_ptr + safe_request_idx)
         discard = tl.load(discard_ptr + batch_idx)
-        row_off = batch_idx * max_seq_len
+        row_off = safe_request_idx * max_seq_len
 
         # ── Filter phase ────────────────────────────────────────────────
-        s_off = tl.arange(0, max_new_tokens)
+        s_off = tl.arange(0, sampled_width)
+        sampled_mask = s_off < sampled_len
         sampled_vals = tl.load(
-            sampled_ptr + batch_idx * max_new_tokens + s_off,
-            care_padding=False,
+            sampled_ptr + batch_idx * sampled_width + s_off,
+            mask=sampled_mask,
+            other=-1,
         )
 
-        if discard != 0:
-            filtered = tl.full([max_new_tokens], -1, tl.int32)
+        if read_only:
+            valid_count = tl.load(num_sampled_ptr + batch_idx)
+            valid_count = tl.where(valid_request & (discard == 0), valid_count, 0)
+            filtered = sampled_vals
+        elif discard != 0:
+            filtered = tl.full([sampled_width], -1, tl.int32)
             valid_count = 0
         else:
             is_valid = (sampled_vals != -1) & (sampled_vals < vocab_size)
-            filtered = tl.where(is_valid, sampled_vals, tl.full([max_new_tokens], -1, tl.int32))
+            filtered = tl.where(is_valid, sampled_vals, tl.full([sampled_width], -1, tl.int32))
             valid_count = tl.sum(tl.cast(is_valid, tl.int32))
 
         tl.store(raw_valid_count_ptr + batch_idx, valid_count)
 
-        avail_space = max_seq_len - seq_len
-        if avail_space < 0:
-            avail_space = 0
-        if valid_count > avail_space:
-            valid_count = avail_space
-
-        nt = seq_len + valid_count
+        if read_only:
+            nt = seq_len
+        else:
+            avail_space = max_seq_len - seq_len
+            if avail_space < 0:
+                avail_space = 0
+            if valid_count > avail_space:
+                valid_count = avail_space
+            nt = seq_len + valid_count
 
         # next_token = filtered[valid_count - 1] (masked-sum extraction).
         # Stored to HBM immediately to keep its live register short.
-        if valid_count > 0:
+        if read_only:
+            backup_pos = seq_len - 1
+            backup_pos = tl.where(backup_pos < 0, 0, backup_pos)
+            next_token = tl.load(token_ids_ptr + row_off + backup_pos)
+        elif valid_count > 0:
             sel = s_off == (valid_count - 1)
             next_token = tl.sum(tl.where(sel, filtered, 0), axis=0)
         else:
@@ -72,7 +95,7 @@ def ngram_spec_decode_kernel(
 
         # Append the valid prefix to token_ids; the matching phase below searches
         # this row including the appended suffix.
-        if valid_count > 0:
+        if not read_only and valid_count > 0:
             c_mask = s_off < valid_count
             tl.store(
                 token_ids_ptr + row_off + seq_len + s_off,
@@ -100,10 +123,14 @@ def ngram_spec_decode_kernel(
             g_best_pos = NO_MATCH_F
 
             if NUM_BLOCKS > 1:
-                s_tail = tl.arange(0, max_n)
+                s_tail = tl.arange(0, max_n_width)
                 s_pos = nt - max_n + s_tail
                 s_pos = tl.where(s_pos < 0, 0, s_pos)
-                S_tail = tl.load(token_ids_ptr + row_off + s_pos)
+                S_tail = tl.load(
+                    token_ids_ptr + row_off + s_pos,
+                    mask=s_tail < max_n,
+                    other=0,
+                )
 
             for bidx in tl.range(NUM_BLOCKS):
                 base = bidx * BLOCK
@@ -160,16 +187,16 @@ def ngram_spec_decode_kernel(
         if tokens_avail < 0:
             tokens_avail = 0
 
-        d_off = tl.arange(0, k)
+        d_off = tl.arange(0, k_width)
         if best_pos >= 0:
-            can_copy = d_off < tokens_avail
+            can_copy = (d_off < tokens_avail) & (d_off < k)
             draft_vals = tl.load(
                 token_ids_ptr + row_off + draft_start + d_off,
                 mask=can_copy,
                 other=-1,
                 care_padding=False,
             )
-            tl.store(draft_token_ids_ptr + batch_idx * k + d_off, draft_vals)
+            tl.store(draft_token_ids_ptr + batch_idx * k + d_off, draft_vals, mask=d_off < k)
             # Draft tokens copied from the sequence are real (>= 0) token ids, so
             # the valid count is simply min(k, tokens_avail) — no reload/reduce.
             valid_draft = tokens_avail
@@ -178,7 +205,8 @@ def ngram_spec_decode_kernel(
         else:
             tl.store(
                 draft_token_ids_ptr + batch_idx * k + d_off,
-                tl.full([k], -1, tl.int32),
+                tl.full([k_width], -1, tl.int32),
+                mask=d_off < k,
             )
             valid_draft = 0
 
@@ -194,8 +222,11 @@ def triton_ngram_spec_decode(
     min_n,
     max_n,
     k,
+    idx_mapping=None,
+    num_sampled=None,
 ):
-    batch_size = token_ids.shape[0]
+    read_only = idx_mapping is not None
+    batch_size = idx_mapping.shape[0] if read_only else token_ids.shape[0]
     device = token_ids.device
     max_seq_len = token_ids.shape[1]
 
@@ -209,21 +240,51 @@ def triton_ngram_spec_decode(
             empty,
             empty,
         )
+    if k == 0:
+        return (
+            torch.zeros(batch_size, dtype=torch.int32, device=device),
+            torch.empty((batch_size, 0), dtype=torch.int32, device=device),
+            torch.zeros(batch_size, dtype=torch.int32, device=device),
+            torch.zeros(batch_size, dtype=torch.int32, device=device),
+        )
 
     device_idx = torch_npu.npu.current_device()
     properties = triton.runtime.driver.active.utils.get_device_properties(device_idx)
     vectorcore_num = properties["num_vectorcore"]
 
-    # Normalize sampled_token_ids: accept a list[list[int]] (padded to a
-    # rectangular int32 tensor) or a pre-batched tensor, then slice to the
-    # active batch_size derived from token_ids.
-    if isinstance(sampled_token_ids, list):
-        max_len = max((len(sublist) for sublist in sampled_token_ids), default=0)
-        max_len = max(max_len, 1)
-        padded_list = [sublist + [-1] * (max_len - len(sublist)) for sublist in sampled_token_ids]
-        sampled_token_ids = torch.tensor(padded_list, dtype=torch.int32, device=device)
-    sampled_token_ids = sampled_token_ids[:batch_size]
-    max_new_tokens = sampled_token_ids.shape[1]
+    def next_power_of_two(value):
+        return 1 if value <= 1 else 1 << (value - 1).bit_length()
+
+    if sampled_token_ids is None:
+        sampled_len = 0
+        sampled_width = 1
+        sampled_token_ids = torch.empty((batch_size, sampled_width), dtype=torch.int32, device=device)
+        sampled_token_ids.fill_(-1)
+    else:
+        if isinstance(sampled_token_ids, list):
+            sampled_len = max((len(sublist) for sublist in sampled_token_ids), default=0)
+            sampled_len = max(sampled_len, 1)
+            padded_list = [sublist + [-1] * (sampled_len - len(sublist)) for sublist in sampled_token_ids]
+            sampled_token_ids = torch.tensor(padded_list, dtype=torch.int32, device=device)
+        sampled_token_ids = sampled_token_ids[:batch_size].to(device=device, dtype=torch.int32)
+        sampled_len = sampled_token_ids.shape[1]
+        sampled_width = next_power_of_two(sampled_len)
+        if sampled_width != sampled_len:
+            padded = torch.full((batch_size, sampled_width), -1, dtype=torch.int32, device=device)
+            padded[:, :sampled_len] = sampled_token_ids
+            sampled_token_ids = padded
+
+    if idx_mapping is None:
+        request_indices = torch.empty(1, dtype=torch.int32, device=device)
+        num_sampled_ptr = torch.empty(1, dtype=torch.int32, device=device)
+    else:
+        request_indices = idx_mapping.to(device=device, dtype=torch.int32)
+        if num_sampled is None:
+            raise ValueError("num_sampled is required for the read-only NGram path")
+        num_sampled_ptr = num_sampled[:batch_size].to(device=device, dtype=torch.int32)
+
+    max_n_width = next_power_of_two(max_n)
+    k_width = next_power_of_two(k)
 
     base = torch.empty(batch_size * 3 + batch_size * k, dtype=torch.int32, device=device)
     next_token_ids = base[0 * batch_size : 1 * batch_size]
@@ -243,11 +304,17 @@ def triton_ngram_spec_decode(
         num_valid_draft_tokens,
         valid_sampled_tokens_count,
         max_seq_len=max_seq_len,
-        max_new_tokens=max_new_tokens,
+        sampled_width=sampled_width,
         vocab_size=vocab_size,
         min_n=min_n,
         max_n=max_n,
         k=k,
+        sampled_len=sampled_len,
+        max_n_width=max_n_width,
+        k_width=k_width,
+        request_indices_ptr=request_indices,
+        num_sampled_ptr=num_sampled_ptr,
+        read_only=read_only,
         batch_size=batch_size,
     )
 

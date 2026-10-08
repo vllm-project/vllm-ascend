@@ -84,29 +84,24 @@ class AscendNgramSpeculator(BaseSpeculator):
         device = self.drafts.device
         indices = indices.to(device=device)
         safe_indices = indices.clamp(min=0).long()
-        # index_select owns its storage: the V1 kernel must not append to the
-        # authoritative history, which MRV2 post_update has already committed.
-        history = self.req_states.all_token_ids.gpu.index_select(0, safe_indices)
-        total_len = self.req_states.total_len.gpu.index_select(0, safe_indices)
         counts = num_sampled[:batch_size].to(device=device).clamp(min=0, max=self.num_speculative_steps + 1)
         eligible = (indices >= 0) & (counts > 0)
-        prefix_len = (total_len - counts).clamp(min=0).to(torch.int32)
-        sample_width = self.num_speculative_steps + 1
-        offsets = torch.arange(sample_width, dtype=torch.int32, device=device)
-        positions = prefix_len[:, None] + offsets[None, :]
-        positions = positions.clamp(min=0, max=max(history.shape[1] - 1, 0))
-        sampled = history.gather(1, positions.long()).to(torch.int32)
-        sampled = sampled.masked_fill(offsets[None, :] >= counts[:, None], -1)
-        sampled = sampled.masked_fill(~eligible[:, None], -1)
+        # MRV2 commits sampled tokens to the request state before proposing.
+        # Pass the authoritative dense history directly and keep the kernel
+        # read-only so proposal generation cannot mutate that state.
+        history = self.req_states.all_token_ids.gpu
+        total_len = self.req_states.total_len.gpu
         _, proposed, valid_len, _ = triton_ngram_spec_decode(
             history,
-            prefix_len,
-            sampled,
+            total_len,
+            None,
             ~eligible,
             self.vocab_size,
             self.min_n,
             self.max_n,
             k,
+            idx_mapping=indices,
+            num_sampled=counts,
         )
         # Unmatched slots repeat the last token, as in upstream #40704; the V1
         # valid length is not sent to the scheduler.
