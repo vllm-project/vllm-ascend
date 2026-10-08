@@ -26,14 +26,7 @@ from __future__ import annotations
 import warnings
 
 import torch
-
-try:
-    from vllm.triton_utils import HAS_TRITON, tl, triton
-except ImportError:  # standalone test environments without vllm installed
-    import triton  # type: ignore[import-untyped]
-    import triton.language as tl  # type: ignore[import-untyped]
-
-    HAS_TRITON = True
+from vllm.triton_utils import HAS_TRITON, tl, triton
 
 if HAS_TRITON:
 
