@@ -18,7 +18,7 @@
 | --- | --- | --- | --- | --- |
 | `query` | Input | Query vectors, `[T, H, D]`; model shape `[T, 32, 128]` | BF16 | ND |
 | `indexer_cache` | Input | Compressed keys, `[N, B, 1, D]` | BF16 | ND; block, token, and dimension strides supported |
-| `weights` | Input | Per-head query weights with model scaling already applied, `[T, H]` | BF16 | ND |
+| `weights` | Input | Per-head query weights with model scaling already applied, `[T, H]`; model callers retain FP32 ranking precision | FP32 or BF16 | ND |
 | `cum_query_lens` | Input | Cumulative exclusive query ends, `[R]`, without a leading zero | int32 | Contiguous ND |
 | `indexer_seq_lens` | Input | Number of available complete pools per request, `[R]`, not raw token lengths | int32 | Contiguous ND |
 | `indexer_block_table` | Input | Logical compressed-cache page to physical block mapping, `[R, M]` | int32 | ND; request and page strides supported |
