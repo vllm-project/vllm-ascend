@@ -193,6 +193,19 @@ templates:
       - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_consumer", "kv_port": "30200", "engine_id": "2", "kv_connector_extra_config": {"use_ascend_direct": true,"prefill": {"dp_size": 2, "tp_size": 8}, "decode": {"dp_size": 32, "tp_size": 1}}}'
 
 benchmarks:
+  # Same 3500-token batch as perf_1. Model Runner V2 compiles that shape on
+  # the first request; baseline 0 keeps the warmup out of the 0.97 gate.
+  perf_warmup:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K-in3500-bs8000-qwen3
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 190
+    max_out_len: 128
+    batch_size: 190
+    request_rate: 0
+    baseline: 0
+    threshold: 0.97
   perf_1:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K-in3500-bs8000-qwen3
