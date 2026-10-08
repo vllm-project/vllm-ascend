@@ -15,9 +15,23 @@ class TestBuildAclnn(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir()
+        git = bin_dir / "git"
+        # Git configuration and dependency fetching are outside this test's scope.
+        # Stub Git to avoid global configuration writes on any Git version.
+        git.write_text(
+            '#!/bin/sh\nprintf "%s\\n" "$@" >> git-calls\n'
+            'case "$*" in\n'
+            '  "config --global --add safe.directory "*) exit 0 ;;\n'
+            '  "config -f "*) echo test; exit 0 ;;\n'
+            '  *) echo "Unexpected git command: $*" >&2; exit 1 ;;\n'
+            "esac\n"
+        )
+        git.chmod(0o755)
         self.env = {
             **os.environ,
-            "GIT_CONFIG_GLOBAL": str(self.root / "gitconfig"),
+            "PATH": str(bin_dir) + os.pathsep + os.environ.get("PATH", os.defpath),
             "VLLM_BATCH_INVARIANT": "0",
         }
 
@@ -39,7 +53,7 @@ class TestBuildAclnn(unittest.TestCase):
                 self.assertIn("Unsupported SOC_VERSION", result.stderr)
                 self.assertIn("ascend910b", result.stderr)
                 self.assertNotIn("skip build_aclnn", result.stdout)
-                self.assertFalse((self.root / "gitconfig").exists())
+                self.assertFalse((self.root / "git-calls").exists())
 
     def test_reject_missing_soc(self):
         result = self.run_build()
@@ -49,7 +63,6 @@ class TestBuildAclnn(unittest.TestCase):
     def test_supported_soc_builds_and_installs(self):
         csrc = self.root / "csrc"
         (csrc / "third_party" / "catlass" / "include").mkdir(parents=True)
-        (self.root / ".gitmodules").write_text('[submodule "csrc/third_party/catlass"]\ncommit = test\n')
         (csrc / "build.sh").write_text(
             '#!/bin/bash\nprintf "%s\\n" "$@" > build-args\n'
             "mkdir -p build\n"
