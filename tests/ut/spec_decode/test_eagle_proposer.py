@@ -1074,6 +1074,7 @@ class TestEagleProposerPropose:
                 )
 
         # mock and adjust functions and var in propose
+        self.proposer.draft_model_config.use_mla = model_type == 'deepseek'
         if model_type == 'deepseek':
             self.proposer.method = 'mtp'
             if not self.is_decode(flag_prefill_decode):

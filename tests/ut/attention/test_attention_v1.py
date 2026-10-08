@@ -2,6 +2,8 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
+from vllm.config.compilation import CUDAGraphMode
+from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 import vllm_ascend.attention.attention_v1 as attn_module
 from tests.ut.base import TestBase
@@ -21,6 +23,7 @@ from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     cache_graph_workspace,
     needs_layer_aware_fia_graph_replay,
+    requires_contiguous_pa_kv_cache,
     using_paged_attention,
 )
 from vllm_ascend.device.device_op import A5DeviceAdaptor
@@ -32,6 +35,76 @@ LARGE_HEAD_PREFILL_PATH = "vllm_ascend.device.utils.npu_large_head_prefill_atten
 
 
 class TestAttentionGraphHelpers(TestBase):
+    @patch("vllm_ascend.attention.utils.using_paged_attention", return_value=True)
+    def test_pa_contiguous_cache_requirement_is_limited_to_normal_impl(self, mock_using_pa):
+        config = SimpleNamespace(model_config=SimpleNamespace(runner_type="generate"))
+        spec = FullAttentionSpec(block_size=8, num_kv_heads=2, head_size=128, dtype=torch.float16)
+        for impl_cls in (AscendAttentionBackendImpl, AscendC8AttentionBackendImpl, AscendAttentionDCPImpl):
+            with self.subTest(impl=impl_cls):
+                impl = impl_cls.__new__(impl_cls)
+                impl.sliding_window = None
+                self.assertEqual(
+                    requires_contiguous_pa_kv_cache(SimpleNamespace(impl=impl), config, spec),
+                    impl_cls is AscendAttentionBackendImpl,
+                )
+        impl = AscendAttentionBackendImpl.__new__(AscendAttentionBackendImpl)
+        impl.sliding_window = 128
+        self.assertFalse(requires_contiguous_pa_kv_cache(SimpleNamespace(impl=impl), config, spec))
+        self.assertFalse(requires_contiguous_pa_kv_cache(None, config, spec))
+        impl.sliding_window = None
+        config.model_config.runner_type = "pooling"
+        self.assertFalse(requires_contiguous_pa_kv_cache(SimpleNamespace(impl=impl), config, spec))
+        config.model_config.runner_type = "generate"
+        padded_spec = FullAttentionSpec(
+            block_size=8,
+            num_kv_heads=2,
+            head_size=128,
+            dtype=torch.float16,
+            page_size_padded=spec.real_page_size_bytes + 64,
+        )
+        self.assertFalse(requires_contiguous_pa_kv_cache(SimpleNamespace(impl=impl), config, padded_spec))
+        mock_using_pa.assert_called_once()
+
+    def test_paged_attention_allocation_checks_any_configured_shape(self):
+        config = SimpleNamespace(
+            speculative_config=None,
+            model_config=SimpleNamespace(is_hybrid=False),
+            compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY),
+        )
+        pa_config = SimpleNamespace(pa_shape_list=[32, 60])
+        with (
+            patch(
+                "vllm_ascend.attention.utils.get_current_hardware_profile",
+                return_value=get_hardware_profile(AscendDeviceType.A3),
+            ),
+            patch("vllm_ascend.attention.utils.get_ascend_config", return_value=pa_config),
+        ):
+            self.assertTrue(using_paged_attention(None, config, head_size=128))
+            self.assertTrue(using_paged_attention(60, config, head_size=128))
+            self.assertFalse(using_paged_attention(31, config, head_size=128))
+            config.model_config.is_hybrid = True
+            self.assertTrue(using_paged_attention(None, config, head_size=128))
+            self.assertTrue(using_paged_attention(60, config, head_size=128))
+            config.model_config.is_hybrid = False
+            pa_config.pa_shape_list = []
+            self.assertFalse(using_paged_attention(None, config, head_size=128))
+            pa_config.pa_shape_list = [60]
+            config.speculative_config = object()
+            self.assertFalse(using_paged_attention(None, config, head_size=128))
+            config.speculative_config = None
+            config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+            self.assertFalse(using_paged_attention(None, config, head_size=128))
+            self.assertTrue(using_paged_attention(None, config, head_size=512))
+            self.assertTrue(using_paged_attention(60, config, head_size=512))
+            config.speculative_config = object()
+            self.assertFalse(using_paged_attention(None, config, head_size=512))
+            config.speculative_config = None
+        with patch(
+            "vllm_ascend.attention.utils.get_current_hardware_profile",
+            return_value=get_hardware_profile(AscendDeviceType.A5),
+        ):
+            self.assertFalse(using_paged_attention(None, config, head_size=512))
+
     def test_cache_graph_workspace_keeps_first_workspace_by_default(self):
         graph_params = SimpleNamespace(workspaces={1: torch.empty(4)})
         candidate_workspace = torch.empty(8)
@@ -58,6 +131,7 @@ class TestAttentionGraphHelpers(TestBase):
             return_value=get_hardware_profile(AscendDeviceType.A2),
         ):
             self.assertTrue(using_paged_attention(1, vllm_config, head_size=FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE))
+            self.assertTrue(using_paged_attention(None, vllm_config, head_size=FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE))
 
 
 class TestAscendAttentionBackend(TestBase):

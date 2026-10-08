@@ -21,7 +21,6 @@ estimated_times:
   tests/e2e/pull_request/one_card/_310p/test_spec_decode_mtp_310p.py: 510
   tests/e2e/pull_request/one_card/_310p/test_sampling_temp_310p.py: 190
   tests/e2e/pull_request/one_card/_310p/test_vl_model_310p.py: 330
-  tests/e2e/pull_request/one_card/aclgraph/test_aclgraph_batch_invariant.py: 550
   tests/e2e/pull_request/one_card/aclgraph/test_device_metadata.py: 30
   tests/e2e/pull_request/one_card/compile/test_graphex_norm_quant_fusion.py: 150
   tests/e2e/pull_request/one_card/compile/test_graphex_qknorm_rope_fusion.py: 180
@@ -58,7 +57,6 @@ estimated_times:
   tests/e2e/pull_request/one_card/spec_decode/test_ngram_npu.py: 250
   tests/e2e/pull_request/one_card/spec_decode/test_suffix.py: 220
   tests/e2e/pull_request/one_card/rlhf/consistency/test_attention_fa3.py: 30
-  tests/e2e/pull_request/one_card/test_camem.py: 140
   tests/e2e/pull_request/one_card/test_completion_with_prompt_embeds.py: 200
   tests/e2e/pull_request/one_card/test_cpu_offloading.py: 250
   tests/e2e/pull_request/one_card/test_cpu_weight_offload.py: 530

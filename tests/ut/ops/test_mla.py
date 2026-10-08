@@ -345,7 +345,7 @@ class TestIndexerWrapper(TestBase):
         self.assertIs(wrapper.k_cache, wrapper.impl.k_cache)
 
         wrapper("hidden", "q_c", "k_hidden", "meta", False)
-        wrapper.impl.assert_called_once_with("hidden", "q_c", "k_hidden", "meta", False)
+        wrapper.impl.assert_called_once_with("hidden", "q_c", "k_hidden", "meta", False, attn_q_gather_handle=None)
 
         wrapper.process_weights_after_loading()
         wrapper.impl.process_weights_after_loading.assert_called_once_with()

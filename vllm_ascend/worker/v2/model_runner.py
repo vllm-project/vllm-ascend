@@ -66,6 +66,8 @@ from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import (
     is_pd_decode_recompute_scheduler_enabled,
     lmhead_tp_enable,
+    lmhead_tp_max_num_logits,
+    lmhead_tp_pad_rows,
     set_potential_max_tokens,
 )
 from vllm_ascend.worker.utils import disable_compilation
@@ -78,7 +80,7 @@ from vllm_ascend.worker.v2.eplb import AscendEPLBController
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
-from vllm_ascend.worker.v2.pp_utils import (
+from vllm_ascend.worker.v2.pp_transport import (
     bypass_upstream_spec_pp_guard,
     resolve_spec_pp_support,
     restore_pp_after_upstream_init,
@@ -103,6 +105,7 @@ class NPUModelRunner(GPUModelRunner):
     supports_standardized_shared_kv_backing = True
 
     execute_model_state: ExecuteModelState | None
+    max_num_reqs: int
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # Ascend-specific configurations
@@ -271,6 +274,15 @@ class NPUModelRunner(GPUModelRunner):
         self.execute_model_state = state
 
     def sample_tokens(self, grammar_output):
+        if (
+            lmhead_tp_enable()
+            and self.prompt_logprobs_worker is not None
+            and self.prompt_logprobs_worker.uses_prompt_logprobs.any()
+        ):
+            # The prompt-logprobs worker issues a second compute_logits with
+            # unpadded rows that desyncs the LM-head collectives and hangs.
+            raise NotImplementedError("prompt_logprobs is not supported with lmhead TP.")
+
         pcp_manager = self.pcp_manager
         if pcp_manager is not None and not self.is_last_pp_rank and self.execute_model_state is not None:
             assert isinstance(pcp_manager, AscendPCPManager)
@@ -318,6 +330,15 @@ class NPUModelRunner(GPUModelRunner):
                     module.prepare_ring_compressor(self.max_num_tokens, self.device)
         prepare_v41_source_rope(self)
 
+        # Upstream has bound every local cache; publish sealed plans before
+        # the worker can warm up, capture graphs or execute prefill requests.
+        from vllm_ascend.ops.kda_state_copy_plan import initialize_kda_state_copy
+
+        initialize_kda_state_copy(
+            self.vllm_config.compilation_config.static_forward_context,
+            self.vllm_config.scheduler_config.max_num_seqs,
+        )
+
         # Only target-model layers determine whether FIA is in use. This flag
         # is used for adaptive verification handling.
         draft_layer_names: set[str] = getattr(self.speculator, "draft_attn_layer_names", set())
@@ -328,7 +349,9 @@ class NPUModelRunner(GPUModelRunner):
             for group in groups
         )
 
-        if self.model_config.enable_return_routed_experts:
+        # Legacy (pre-AuxOutput) R3 path; the getattr keeps MRv2 startable on a
+        # vLLM lane where ModelConfig no longer exposes the flag.
+        if getattr(self.model_config, "enable_return_routed_experts", False):
             self.init_routed_experts_capturer()
 
         self.kvpp = KVPPRuntime.create_from_kv_cache(
@@ -374,6 +397,19 @@ class NPUModelRunner(GPUModelRunner):
             valid_dummy_state_slots=valid_dummy_state_slots,
         )
         self.model_state.kvpp_is_dummy_run = False
+        if dummy_run and lmhead_tp_enable() and not is_profile and self.is_last_pp_rank:
+            # lmhead TP: idle ranks never call sample(); join the target head
+            # here at capacity, before _dummy_run replays the dummy propose.
+            if self.execute_model_state is None:
+                raise RuntimeError(
+                    "lmhead TP dummy join expects execute_model_state published by the upstream dummy execute_model."
+                )
+            dummy_indices = torch.zeros(
+                self._lmhead_tp_max_num_logits(),
+                dtype=torch.int64,
+                device=self.device,
+            )
+            self.model.compute_logits(self.execute_model_state.hidden_states[dummy_indices])
         self.kvpp.complete_forward()
 
         self._cpp_execution_time_ms = _finish_profiling_chunk_timing(
@@ -694,41 +730,28 @@ class NPUModelRunner(GPUModelRunner):
         return block_tables, slot_mappings
 
     def _lmhead_tp_max_num_logits(self) -> int:
-        """Logits row capacity shared by every rank of the lmhead-TP group.
-
-        Derived purely from global config so all ranks compute the identical
-        value, matching upstream's own logits capacity bound
-        (``max_num_reqs * decode_query_len``, see StructuredOutputsWorker init).
-        """
-        return self.max_num_reqs * self.decode_query_len
+        """Logits row capacity every rank agrees on (config-derived:
+        ``max_num_reqs * decode_query_len``); drift desyncs and hangs."""
+        return lmhead_tp_max_num_logits(self.max_num_reqs, self.decode_query_len)
 
     def sample(self, hidden_states, input_batch, grammar_output):
-        """Override GPUModelRunner.sample for lmhead TP.
-
-        The LM-head collectives span the whole group, so every rank must feed
-        compute_logits the same number of rows: pad hidden states up to
-        ``_lmhead_tp_max_num_logits()`` and trim the logits back before
-        sampling. ``logits_indices`` stays real (the V2 sampler gathers
-        penalties by it). prompt_logprobs is not supported with lmhead TP
-        (same as V1).
-        """
+        """Override GPUModelRunner.sample for lmhead TP: every rank must feed
+        compute_logits the same row count — pad up to ``_lmhead_tp_max_num_logits()``
+        and trim back; prompt_logprobs stays unsupported (same as V1)."""
         if not lmhead_tp_enable():
             return super().sample(hidden_states, input_batch, grammar_output)
 
         num_logits = input_batch.logits_indices.shape[0]
         capacity = self._lmhead_tp_max_num_logits()
-        # A mismatch would desync the LM-head all_gather/all_to_all across the
-        # group and hang the collectives. Fail fast instead.
-        assert num_logits <= capacity, (
-            f"lmhead TP logits rows ({num_logits}) exceed the group-agreed capacity "
-            f"({capacity} = max_num_reqs * decode_query_len); the capacity formula "
-            "no longer matches upstream logits production."
+        # V1-style index pad: pad a private copy of the indices (input_batch keeps
+        # the real ones; the V2 sampler gathers penalties by them) so one gather
+        # feeds compute_logits the capacity rows; zero entries gather row 0.
+        sample_indices = lmhead_tp_pad_rows(
+            input_batch.logits_indices,
+            capacity,
+            "max_num_reqs * decode_query_len",
         )
-
-        sample_hidden_states = hidden_states[input_batch.logits_indices]
-        if num_logits < capacity:
-            sample_hidden_states = torch.nn.functional.pad(sample_hidden_states, (0, 0, 0, capacity - num_logits))
-        logits = self.model.compute_logits(sample_hidden_states)
+        logits = self.model.compute_logits(hidden_states[sample_indices])
         logits = logits[:num_logits]
 
         # Dispatch tail mirrors GPUModelRunner.sample; refresh it on main bumps.
@@ -758,6 +781,21 @@ class NPUModelRunner(GPUModelRunner):
 
         return sampler_output, sampler_output.num_sampled, sampler_output.num_rejected
 
+    @contextmanager
+    def _cap_parallel_draft_dummy_reqs(self, uniform_decode: bool):
+        # TODO: Remove this context and its use once main2main includes
+        # https://github.com/vllm-project/vllm/pull/56448. Until then,
+        # profiling can exceed the speculator's query buffer.
+        original_max_num_reqs = self.max_num_reqs
+        if self.speculator is not None and not uniform_decode:
+            # Other speculators use one query row per request in vLLM v0.30.0.
+            query_width = getattr(self.speculator, "num_query_per_req", 1)
+            self.max_num_reqs = min(original_max_num_reqs, self.max_num_tokens // query_width)
+        try:
+            yield
+        finally:
+            self.max_num_reqs = original_max_num_reqs
+
     @step_eplb_after(is_dummy=True)
     def _dummy_run(
         self,
@@ -770,7 +808,9 @@ class NPUModelRunner(GPUModelRunner):
         is_profile: bool = False,
         **kwargs,
     ):
-        """Join LM-head TP before stepping EPLB on an idle DP rank."""
+        """Balanced dummy routing for adaptive-verification profiling; EPLB
+        steps via ``step_eplb_after`` (#17233). The lmhead TP join lives in the
+        ``execute_model`` tail — joining after ``super()._dummy_run`` deadlocks."""
         skip_ring = bool(kwargs.pop("skip_gdn_state_update", False))
         # Adaptive verification profiles eager tail sizes after graph capture.
         # Use balanced dummy routing, as the initial memory profile does, so a
@@ -783,8 +823,8 @@ class NPUModelRunner(GPUModelRunner):
                 "the profile-run marker, which makes XLite bypass its graph path."
             )
         load_balance_ctx = override_mrv2_in_profile_run(True) if profile_adaptive_tail else nullcontext()
-        with skip_ring_state_update(skip_ring), load_balance_ctx:
-            hidden_states, sample_hidden_states = super()._dummy_run(
+        with self._cap_parallel_draft_dummy_reqs(uniform_decode), skip_ring_state_update(skip_ring), load_balance_ctx:
+            return super()._dummy_run(
                 num_tokens,
                 *args,
                 skip_attn=skip_attn,
@@ -794,14 +834,6 @@ class NPUModelRunner(GPUModelRunner):
                 is_profile=is_profile,
                 **kwargs,
             )
-        if lmhead_tp_enable() and not is_profile and hidden_states is not None:
-            dummy_indices = torch.zeros(
-                self._lmhead_tp_max_num_logits(),
-                dtype=torch.int64,
-                device=hidden_states.device,
-            )
-            self.model.compute_logits(hidden_states[dummy_indices])
-        return hidden_states, sample_hidden_states
 
     def postprocess_sampled(
         self,

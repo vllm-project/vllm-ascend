@@ -17,9 +17,12 @@ class TestAscendEPLBController(unittest.TestCase):
     def _make_controller(*, enable_eplb=True, log_balancedness=False, policy="stair"):
         parallel_config = SimpleNamespace(
             enable_eplb=enable_eplb,
+            # Explicit communicator skips the group-wide consensus, which
+            # needs a live EPLB group that unit tests do not have.
             eplb_config=SimpleNamespace(
                 log_balancedness=log_balancedness,
                 policy=policy,
+                communicator="torch_gloo",
             ),
         )
         controller = AscendEPLBController(

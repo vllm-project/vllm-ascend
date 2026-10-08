@@ -187,6 +187,43 @@ def installed_versions() -> PackageVersions:
     )
 
 
+def environment_drift(expected: PackageVersions) -> tuple[str, ...]:
+    """Packages whose installed version differs from the ``expected`` pin.
+
+    The adaptation gate compares only the good/bad endpoint pins; when they
+    agree, version checks would be skipped entirely -- assuming the installed
+    environment matched that pin. The nightly image carries its own build
+    (e.g. vllm 0.28.0+empty while every commit pins v0.27.1), so any drift
+    must keep the per-candidate adaptation active, or every trial runs
+    against the wrong dependency and the bisect converges to a false
+    first-bad.
+    """
+    installed = installed_versions()
+    drift = []
+    for package in ALL_PACKAGES:
+        pin = expected.get(package)
+        if not pin:
+            continue  # nothing declared -> adaptation has no target anyway
+        if not _matches_expected(package, pin, installed.get(package)):
+            drift.append(package)
+    return tuple(drift)
+
+
+def policy_with_environment_drift(good: PackageVersions, bad: PackageVersions) -> tuple[VersionPolicy, tuple[str, ...]]:
+    """Build a version policy that covers endpoint changes and image drift.
+
+    An endpoint change already requires adapting that package for every trial.
+    A package whose endpoint pin is unchanged still needs adapting when the
+    nightly image differs from that common pin. These cases are independent:
+    for example, a vLLM endpoint change must not hide a mismatched, but
+    unchanged, torch-npu pin.
+    """
+    endpoint_policy = VersionPolicy.between(good, bad)
+    drift = tuple(package for package in environment_drift(good) if versions_equal(good.get(package), bad.get(package)))
+    checked = tuple(package for package in ALL_PACKAGES if endpoint_policy.checks(package) or package in drift)
+    return VersionPolicy(checked_packages=checked, good=good, bad=bad), drift
+
+
 class VersionAdapter:
     """Bring switchable packages to the versions declared by a candidate."""
 

@@ -58,6 +58,7 @@ def test_standardized_sfa_allocation_preserves_layerwise_aliases(reuse, indexer_
         else None
     )
     vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(cache_dtype="auto"),
         kv_transfer_config=connector,
         model_config=SimpleNamespace(get_num_layers=lambda _: 4),
         parallel_config=None,
