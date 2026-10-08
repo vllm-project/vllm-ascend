@@ -2,23 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Triton-Ascend fused implementation of build_dspark_swa_indices.
 
-Replaces the eager 12-op chain (arange / compare / div / gather / where /
-repeat_interleave / copy_ ...) used by the DSA metadata builder for DSpark
-non-causal parallel drafting (see vllm_ascend.attention.dsa_v1).
-
-Graph-capture contract:
-* Launched on a fixed grid (``min(AIV cores, max_num_reqs * NUM_CB)``); the
-  kernel claims the capacity work items grid-stride, so the launch shape is
-  stable across ACL-graph replays while the per-step batch size varies.
-* Programs past the last active request reset the padded rows
-  ``[num_rows, num_rows_padded)`` to (-1, 0) so a captured graph never replays
-  stale rows; the eager path leaves those rows untouched.
-* ``indices_output`` / ``lens_output`` accept pre-allocated persistent
-  buffers so tensor addresses stay stable across replays.
-
-Precision: tl.gather on Ascend only accepts fp16/fp32/bf16/fp8/int8 sources
-and int32 //, clamp and compares lower to scalar ops; an fp32 roundtrip
-handles both and stays exact below 2^24.
+See docs/dspark_swa_indices.md for the full description, semantics,
+constraints and Ascend-specific lowering notes.
 """
 
 from __future__ import annotations
@@ -201,31 +186,9 @@ def build_dspark_swa_indices_triton(
     """Fused Triton-Ascend build of DSpark non-causal SWA indices.
 
     Drop-in fast path for ``vllm_ascend.attention.dsa_v1.build_dspark_swa_indices``
-    (same leading signature and index_width semantics). Differences that are
-    intentional and graph-mode specific:
-
-    * ``indices_output`` / ``lens_output`` are written in place; when omitted,
-      fresh tensors sized to the active rows are allocated.
-    * ``max_num_reqs`` sizes the capacity grid: the claim space is
-      ``max_num_reqs * NUM_CB`` work items, and the launch grid is
-      ``min(num_aiv_cores, max_num_reqs * NUM_CB)`` — fixed across steps so
-      the launch shape is stable for ACL-graph capture while the per-step
-      batch size varies. Rows in ``[num_rows, num_rows_padded)`` of the
-      output buffers are explicitly reset to (-1, 0) — a strict superset of
-      the eager behavior, which leaves those rows stale.
-    * Pass the FULL ``indices_output`` buffer (``buffer``, not
-      ``buffer[:num_rows]``) to keep the pad cleanup armed: the cleanup
-      extent is clamped to the buffer, so an active-sized slice silences it
-      (flagged by a UserWarning under graph intent).
-    * ``num_query_per_req`` overrides the capacity-grid row-expansion
-      factor. It defaults to ``num_speculative_tokens + 1`` (DFlash-style
-      contract); the DSpark anchor-sampling mode uses
-      ``num_speculative_tokens`` instead — pass the exact factor when it
-      is known.
-    * ``num_decode_tokens`` (== ``num_reqs * num_query_per_req`` under the
-      uniform-query contract) supplies the num_rows scalar, avoiding any
-      D2H sync. The contract bounds each request's query count by
-      ``num_speculative_tokens + 1``; the kernel's output tile relies on it.
+    (same leading signature and index_width semantics). See
+    docs/dspark_swa_indices.md for the output contract, the graph-capture
+    buffer rules and the parameter semantics.
     """
 
     num_reqs = query_start_loc.shape[0] - 1
