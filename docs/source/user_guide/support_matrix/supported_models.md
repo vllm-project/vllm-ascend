@@ -28,7 +28,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 
     |       Model         | Support | Note | BF16 | Supported Hardware | W8A8 | Chunked Prefill | Automatic Prefix Cache | LoRA | Speculative Decoding | Async Scheduling | Tensor Parallel | Pipeline Parallel | Expert Parallel | Data Parallel | Prefill-decode Disaggregation | Piecewise AclGraph | Fullgraph AclGraph | max-model-len | Doc |
     | ------------------- | ------- | ---- | ---- | ------------------ | ---- | --------------- | ---------------------- | ------ | ---------------------- | ------------------ | ----------------- | ------------------- | ----------------- | --------------- | ------------------------------- | -------------------- | -------------------- | --------------- | ----- |
-    | DeepSeek V4-Flash   |   🔵    |      |  ✅ |       A2/A3        | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | 1M | [DeepSeek-V4-Flash](../../tutorials/models/DeepSeek-V4-Flash.md) |
+    | DeepSeek V4-Flash   |   🔵    | DSpark |  ✅ |       A2/A3        | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | 1M | [DeepSeek-V4-Flash](../../tutorials/models/DeepSeek-V4-Flash.md) |
     | DeepSeek V4-Pro     |   🔵    |      |  ✅ |       A2/A3        | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | 1M | [DeepSeek-V4-Pro](../../tutorials/models/DeepSeek-V4-Pro.md) |
     | DeepSeek V3/3.1     |   ✅    |      |  ✅ |       A2/A3        | ✅ | ✅ | ✅ |  | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 240k | [DeepSeek-V3.1](../../tutorials/models/DeepSeek-V3.1.md) |
     | DeepSeek V3.2       |   ✅    |      |  ✅ |       A2/A3        | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 160k | [DeepSeek-V3.2](../../tutorials/models/DeepSeek-V3.2.md) |
@@ -40,7 +40,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
     | Qwen3-Next          |   🔵    |      |  ✅ |       A2/A3        | ✅ |  |  |  |  |  | ✅ |  |  | ✅ |  | ✅ | ✅ |  | [Qwen3-Next](../../tutorials/models/Qwen3-Next.md) |
     | GLM-4.x             |   ✅    |      |      |       A2/A3        | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | 198k | [GLM-4.x](../../tutorials/models/GLM4.x.md) |
     | GLM-5/5.1           |   🔵    |      |  ✅ |       A2/A3        | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 200k | [GLM-5](../../tutorials/models/GLM5.md) |
-    | GLM-5.2             |   🔵    |      |  ✅ |       A2/A3        | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 200k | [GLM-5.2](../../tutorials/models/GLM5.2.md) |
+    | GLM-5.2             |   🔵    | 1M context on Atlas 800 A3 |  ✅ |       A2/A3        | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 200k | [GLM-5.2](../../tutorials/models/GLM5.2.md) |
     | GLM-5.3             |   🔵    |      |  ✅ |       A2/A3        | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | 🔵 | ✅ | ✅ | 🔵 | ✅ | ✅ | 200k | [GLM-5.3](../../tutorials/models/GLM5.3.md) |
     | GLM-5.3-Flash             |   🔵    |      |  ✅ |  A2/A3/950DT Products   | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 200k | [GLM-5.3-Flash](../../tutorials/models/GLM5.3-Flash.md) |
     | Gemma4              |   🔵    |      |  ✅ |   A2/A3/950PR&950DT Products  |     | ✅ | ✅ |  |  | ✅ | ✅ |  |  | ✅ |  | ✅ | ✅ |  | [Gemma4](../../tutorials/models/Gemma4.md) |
@@ -131,7 +131,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 
     | Model           | Support  | Note   | BF16 | Supported Hardware | W8A8 | Chunked Prefill | Automatic Prefix Cache | LoRA | Speculative Decoding | Async Scheduling | Tensor Parallel | Pipeline Parallel | Expert Parallel | Data Parallel | Prefill-decode Disaggregation | Piecewise AclGraph | Fullgraph AclGraph | max-model-len | MLP Weight Prefetch | Doc |
     |-----------------|----------|--------|------|------|------|---------|-------|------|------|--------|-------|--------|--------|-------|-------|--------|----------|---------|----------|-----|
-    |Qwen3.5-397B-A17B|✅        |       |✅    | 950DT Products |✅|✅|✅||✅|✅|✅||✅|✅|✅|✅|✅|1010000|| [Qwen3.5-397B-A17B](../../tutorials/models/Qwen3.5-397B-A17B.md) |
+    |Qwen3.5-397B-A17B|✅        |MXFP8  |✅    | 950DT Products |✅|✅|✅||✅|✅|✅||✅|✅|✅|✅|✅|1010000|| [Qwen3.5-397B-A17B](../../tutorials/models/Qwen3.5-397B-A17B.md) |
     |Qwen3.6-27B      |✅        |       |✅    | 950DT Products |✅|✅|✅||✅|✅|✅||✅|✅|✅|✅|✅|262144|| [Qwen3.5-27B / Qwen3.6-27B](../../tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md) |
     |MiniMax-M3       |✅        |MXFP8; text/image/video||950DT Products||✅|✅||✅|✅|✅|✅|✅|✅|✅|🟡|✅|1M|| [MiniMax-M3](../../tutorials/models/MiniMax-M3.md) |
 

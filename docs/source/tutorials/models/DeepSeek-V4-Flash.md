@@ -1176,6 +1176,8 @@ Please refer to the [Public Performance Tuning Documentation](../../developer_gu
 
 Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
+An alternative to multi-thread loading is `--safetensors-load-strategy prefetch`, which warms checkpoint files into the OS page cache before the normal iterator loads them. Do not combine it with multi-thread loading: the default loader rejects `prefetch`, `eager`, or `torchao` when `enable_multithread_load` is `true`. The examples in this document use only multi-thread loading.
+
 ## 10 FAQ
 
 For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md); this chapter only covers model-specific issues.

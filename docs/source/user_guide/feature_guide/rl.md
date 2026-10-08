@@ -159,10 +159,21 @@ The repository contains runnable examples for both backends:
 - [`rlhf_http_hccl.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/rl/rlhf_http_hccl.py)
 - [`rlhf_http_npu_ipc.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/rl/rlhf_http_npu_ipc.py)
 - [`rlhf_async_new_apis.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/rl/rlhf_async_new_apis.py)
+- [`rlhf_http_lora.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/rl/rlhf_http_lora.py)
 
 FRACTAL_NZ must be disabled for weight updates. RL mode forces
 `weight_nz_mode=0`; the weight-transfer start path validates the effective
 Ascend configuration.
+
+#### LoRA adapters
+
+When the policy is trained as a LoRA adapter, the rollout engine can receive
+adapter updates instead of full weights. Enable the runtime update endpoints as
+described in the [LoRA Adapters Guide](./lora.md#dynamic-lora). Unlike the `ipc`
+and `hccl` backends above, this path carries only the adapter, not the full
+model. [`examples/rl/rlhf_http_lora.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/rl/rlhf_http_lora.py)
+shows the RL loop, keeping a stable adapter name across training steps by
+reloading it with `"load_inplace": true`.
 
 ### Pause and resume generation
 

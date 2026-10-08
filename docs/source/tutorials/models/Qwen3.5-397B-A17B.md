@@ -217,6 +217,30 @@ Single-node deployment runs both Prefill and Decode on the same node. It is suit
       --additional-config '{"enable_cpu_binding":true}'
     ```
 
+    The `Qwen3.5-397B-A17B-w8a8-mxfp8` weights run on the same node with the same serving flags. Select the MXFP8 weight directory, and keep `--quantization ascend`; `--speculative-config` is only added for checkpoints that ship an MTP layer:
+
+    ```shell
+    vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mxfp8 \
+      --host 0.0.0.0 \
+      --port 8000 \
+      --distributed-executor-backend mp \
+      --data-parallel-size 1 \
+      --tensor-parallel-size 8 \
+      --enable-expert-parallel \
+      --seed 1024 \
+      --quantization ascend \
+      --served-model-name qwen3.5 \
+      --max-num-seqs 128 \
+      --max-model-len 133000 \
+      --max-num-batched-tokens 8192 \
+      --trust-remote-code \
+      --enable-prefix-caching \
+      --gpu-memory-utilization 0.95 \
+      --async-scheduling \
+      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+      --additional-config '{"enable_cpu_binding":true}'
+    ```
+
 === "A3 series"
 
     Run the following script to execute online 128k inference on 1 Atlas 800 A3 (64GB x 16), and W8A8 deployment on 1 Atlas 800 A3 (64GB x 16) node. The W8A8 version needs `--quantization ascend`.
