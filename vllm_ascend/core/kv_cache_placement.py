@@ -116,7 +116,7 @@ def register_kvpp_draft_layers(
 ) -> None:
     """Record loader-discovered ownership on this worker's cache modules."""
     spec = vllm_config.speculative_config
-    if spec is None or spec.method not in ("mtp", "dspark"):
+    if spec is None or not spec.use_eagle():
         return
     if not is_last_pp_rank:
         draft_names = set()
@@ -127,6 +127,8 @@ def register_kvpp_draft_layers(
         else:
             proposer = getattr(model_runner, "drafter", None)
             names = getattr(proposer, "_draft_attn_layer_names", None)
+            if names is None:
+                names = getattr(proposer, "attn_layer_names", None)
         if names is None:
             raise ValueError("KVPP requires draft cache layer names from the loaded proposer.")
         draft_names = set(names)
@@ -143,7 +145,7 @@ def register_kvpp_draft_layers(
 def find_draft_layers(vllm_config: VllmConfig, local_layer_names: Iterable[str]) -> set[str]:
     """Read exact worker-local ownership, never infer it from layer indices."""
     spec = vllm_config.speculative_config
-    if spec is None or spec.method not in ("mtp", "dspark"):
+    if spec is None or not spec.use_eagle():
         return set()
     context = vllm_config.compilation_config.static_forward_context
     result = set()
