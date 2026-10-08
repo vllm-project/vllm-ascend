@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
-from vllm.config import VllmConfig, replace, set_current_vllm_config
+from vllm.config import ParallelConfig, VllmConfig, replace, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import get_dcp_group
 from vllm.v1.attention.backend import AttentionBackend
@@ -35,6 +35,7 @@ from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import AutoRegressiveSpeculator
+from vllm.v1.worker.gpu.spec_decode.utils import get_pp_safe_draft_load_config
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
@@ -85,13 +86,37 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         seq_lens_cpu from input_batch), so we replace input_buffers with
         AscendInputBuffers after super().__init__.
         """
-        vllm_config, self.replicated_pcp = prepare_replicated_pcp_config(vllm_config)
+        self.replicated_pcp = vllm_config.parallel_config.prefill_context_parallel_size > 1
         super().__init__(vllm_config, device)
         self._lmhead_tp_validate_draft_sampling()
+
+        # Prepare loading settings while PCP still describes the worker topology.
+        # Consume overrides on a private copy so the inherited loader does not
+        # reconstruct the PCP=1 execution view or modify the target's requests.
+        draft_spec = copy(self.speculative_config)
+        changes: dict[str, Any] = {}
+        if draft_spec.moe_backend is not None:
+            changes["kernel_config"] = replace(self.vllm_config.kernel_config, moe_backend=draft_spec.moe_backend)
+            draft_spec.moe_backend = None
+        if draft_spec.kv_cache_dtype is not None:
+            changes["cache_config"] = replace(self.vllm_config.cache_config, cache_dtype=draft_spec.kv_cache_dtype)
+            draft_spec.kv_cache_dtype = None
+        if draft_spec.attention_backend is not None:
+            changes["attention_config"] = replace(
+                self.vllm_config.attention_config, backend=draft_spec.attention_backend
+            )
+            draft_spec.attention_backend = None
+        draft_load_config = get_pp_safe_draft_load_config(self.vllm_config.load_config)
+        if draft_load_config is not self.vllm_config.load_config:
+            changes["load_config"] = draft_load_config
+        if changes:
+            self.vllm_config = replace(self.vllm_config, speculative_config=draft_spec, **changes)
+            self.speculative_config = self.vllm_config.speculative_config
 
         self.attn_architecture: str | None = None
         self.attn_backend: type[AttentionBackend] | None = None
         self.draft_vllm_config = self._create_draft_vllm_config()
+        self.vllm_config, _ = prepare_replicated_pcp_config(self.vllm_config)
         self._init_dcp()
 
         del self.input_buffers
@@ -131,16 +156,13 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
             use_async_scheduling=self.vllm_config.scheduler_config.async_scheduling,
         )
 
-    def _create_draft_vllm_config(self) -> VllmConfig:
+    def _create_draft_vllm_config(self, parallel_config: ParallelConfig | None = None) -> VllmConfig:
         """Build the runtime config the way V1's proposer does: validate the
         target-derived config, then swap in the draft model config without
         re-validating it."""
-        source_parallel_config = self.vllm_config.parallel_config
-        dcp_size = source_parallel_config.decode_context_parallel_size
         parallel_config = replace(
-            source_parallel_config,
+            parallel_config if parallel_config is not None else self.vllm_config.parallel_config,
             pipeline_parallel_size=1,
-            decode_context_parallel_size=1 if self.replicated_pcp else dcp_size,
         )
         with disable_profiling_chunk_for_draft(self.vllm_config):
             draft_config = replace(
@@ -153,12 +175,12 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         draft_config.model_config = self.draft_model_config
         # replace() used to re-run post_init's is_moe_model recompute; mirror it.
         draft_config.parallel_config.is_moe_model = self.draft_model_config.is_moe
-        if self.replicated_pcp:
-            # TODO: Separate draft execution settings from worker topology.
-            # Restore DCP only after the complete draft config reconstruction;
-            # this does not rerun validation or recompute DCP-dependent settings.
-            draft_config.parallel_config.decode_context_parallel_size = dcp_size
+        draft_config, _ = prepare_replicated_pcp_config(draft_config)
         return draft_config
+
+    @property
+    def attn_vllm_config(self) -> VllmConfig:
+        return self.draft_vllm_config
 
     # TODO: Remove this method once vllm-project/vllm#53458 or an
     # equivalent upstream fix is merged.

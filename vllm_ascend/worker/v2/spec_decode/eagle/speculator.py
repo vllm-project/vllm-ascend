@@ -30,13 +30,12 @@ class AscendEagleSpeculator(AscendAutoRegressiveSpeculator, EagleSpeculator):
 
     def _create_draft_vllm_config(self) -> VllmConfig:
         # EAGLE draft models are dense even when the target is an MoE model.
-        # The base swaps in the draft model config without re-validating it;
-        # the draft-only settings on top turn EP/EPLB off (no experts).
-        draft_vllm_config = super()._create_draft_vllm_config()
-        draft_vllm_config.parallel_config = replace(
-            draft_vllm_config.parallel_config,
-            prefill_context_parallel_size=1,
-            enable_expert_parallel=False,
-            enable_eplb=False,
+        # Apply draft-only EP/EPLB settings before the base derives its PCP=1
+        # execution view, so reconstruction still sees the worker topology.
+        return super()._create_draft_vllm_config(
+            parallel_config=replace(
+                self.vllm_config.parallel_config,
+                enable_expert_parallel=False,
+                enable_eplb=False,
+            ),
         )
-        return draft_vllm_config
