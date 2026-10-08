@@ -58,7 +58,6 @@ from vllm_ascend.ascend_forward_context import (
     set_mc2_tokens_capacity,
 )
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
-from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.core.profiling_chunk_predictor import (
@@ -374,28 +373,6 @@ class NPUModelRunner(GPUModelRunner):
             static_forward_context=self.compilation_config.static_forward_context,
         )
         self.model_state.kvpp_runtime = self.kvpp
-        self._configure_cpu_seq_lens_sync()
-
-    def _configure_cpu_seq_lens_sync(self) -> None:
-        # Default to exact CPU lengths until every consumer is known to use
-        # rejection-corrected device lengths instead.
-        self._needs_seq_lens_cpu_sync = True
-        # Check actual layer backends, including mixed models. An empty set
-        # provides no evidence that skipping the CPU copy is safe.
-        backends = {group.backend for groups in self.attn_groups for group in groups}
-        if backends != {DeepseekV41CacheBackend}:
-            return
-        if not is_deepseek_v41(self.model_config.hf_config):
-            return
-        parallel = self.parallel_config
-        if (
-            parallel.pipeline_parallel_size != 1
-            or parallel.prefill_context_parallel_size != 1
-            or parallel.decode_context_parallel_size != 1
-            or self.kvpp.scheduler is not None
-        ):
-            return
-        self._needs_seq_lens_cpu_sync = False
 
     @torch.inference_mode()
     def execute_model(
@@ -912,10 +889,13 @@ class NPUModelRunner(GPUModelRunner):
             query_start_loc,
         )
 
+        # TODO: Gate CPU length synchronization by backend requirements, not
+        # speculative decoding alone. V4.1 uses device lengths; extend this
+        # exemption to other backends that do not need exact CPU seq_lens.
         # Non-last PP stages receive rejections without owning a speculator.
-        if (self.speculator is not None or self.sync_spec_pp_cpu_counts) and getattr(
-            self, "_needs_seq_lens_cpu_sync", True
-        ):
+        if (
+            self.speculator is not None and not is_deepseek_v41(self.model_config.hf_config)
+        ) or self.sync_spec_pp_cpu_counts:
             self._copy_num_computed_tokens_to_cpu()
 
     def postprocess_num_computed_tokens(self, input_batch: AscendInputBatch) -> None:
@@ -925,8 +905,6 @@ class NPUModelRunner(GPUModelRunner):
             self._copy_num_computed_tokens_to_cpu()
 
     def _copy_num_computed_tokens_to_cpu(self):
-        if not getattr(self, "_needs_seq_lens_cpu_sync", True):
-            return
         # Attention metadata still needs exact CPU lengths. This non-blocking
         # D2H is waited on in _update_seq_lens_cpu, introducing a host/device
         # sync point that can break asynchronous scheduling overlap.
@@ -951,9 +929,9 @@ class NPUModelRunner(GPUModelRunner):
         # Speculative decoding needs corrected num_computed_tokens after rejection.
         # req_states.num_computed_tokens_cpu shares storage with its NumPy view,
         # so this update also corrects the num_computed_tokens_np used by PCP.
-        if (self.speculator is not None or self.sync_spec_pp_cpu_counts) and getattr(
-            self, "_needs_seq_lens_cpu_sync", True
-        ):
+        if (
+            self.speculator is not None and not is_deepseek_v41(self.model_config.hf_config)
+        ) or self.sync_spec_pp_cpu_counts:
             # Blocks CPU submission until D2H completes; may stall the async pipeline.
             self.num_computed_tokens_event.synchronize()
             for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
