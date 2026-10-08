@@ -151,7 +151,8 @@ def build_kv_cache_copy_views(
     MLA/Mamba and indexer/tail components alias physical pages. Copy each
     shared page only once, preserving the logical views bound to layers.
     """
-    shared_cache_views: dict[int, torch.Tensor] = {}
+    copy_caches: list[torch.Tensor] = []
+    shared_page_ranges: list[tuple[torch.device, int, int]] = []
     for descriptor in kv_cache_config.kv_cache_tensors:
         if len(descriptor.layers) < 2 or descriptor.layer_stride != 0:
             continue
@@ -168,13 +169,19 @@ def build_kv_cache_copy_views(
         pages = torch.empty(0, dtype=torch.uint8, device=first.device).set_(
             storage, base, (kv_cache_config.num_blocks, descriptor.block_stride)
         )
-        for cache in caches:
-            shared_cache_views[id(cache)] = pages
+        copy_caches.append(pages)
+        shared_page_ranges.append((pages.device, pages.data_ptr(), pages.data_ptr() + pages.numel()))
 
-    copy_caches = (shared_cache_views.get(id(cache), cache) for cache in runner_caches)
-    return [
-        tensor
-        for cache in copy_caches
-        for tensor in ((cache,) if isinstance(cache, torch.Tensor) else cache)
-        if tensor.numel() > 0
-    ]
+    for cache in runner_caches:
+        for tensor in (cache,) if isinstance(cache, torch.Tensor) else cache:
+            if tensor.numel() == 0:
+                continue
+            # Layer bindings and runner tensors can be distinct objects over
+            # the same pages. Keep unrelated regions in a shared storage.
+            if any(
+                tensor.device == device and start <= tensor.data_ptr() < end
+                for device, start, end in shared_page_ranges
+            ):
+                continue
+            copy_caches.append(tensor)
+    return copy_caches

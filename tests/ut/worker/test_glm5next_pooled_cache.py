@@ -29,6 +29,7 @@ from vllm_ascend.models.glm5next.cache_config import (
     get_glm5_next_kv_cache_groups,
     get_glm5_next_pool_bytes_per_block,
 )
+from vllm_ascend.models.glm5next.cache_views import build_kv_cache_copy_views
 from vllm_ascend.utils import get_kv_cache_tensor_layers
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 from vllm_ascend.worker.v2 import attn_utils
@@ -363,7 +364,13 @@ def test_mrv2_copy_on_write_preserves_pooled_pages_and_layer_bindings(
         _runner.block_tables.block_sizes = [group.kv_cache_spec.block_size for group in cache_config.kv_cache_groups]
         _runner.block_tables.kernel_block_sizes = _runner.block_tables.block_sizes
         _runner.block_tables.is_circular = None
-        _runner.kv_caches = list(caches.values())
+        # Runner tensors can be different Python objects from the layer
+        # bindings while retaining the same physical cache storage.
+        _runner.kv_caches = [
+            tensor.view_as(tensor)
+            for cache in caches.values()
+            for tensor in ((cache,) if isinstance(cache, torch.Tensor) else cache)
+        ]
         if reverse_bindings:
             _runner.kv_caches.reverse()
 
@@ -406,6 +413,39 @@ def test_mrv2_copy_on_write_preserves_pooled_pages_and_layer_bindings(
         storage = torch.empty(0, dtype=torch.int8).set_(raw.untyped_storage())
         assert torch.all(storage[: raw.storage_offset()] == 99)
         assert torch.all(storage[raw.storage_offset() + raw.numel() :] == 99)
+
+
+def test_copy_inventory_preserves_other_regions_in_shared_storage(monkeypatch):
+    backing = torch.full((88,), 99, dtype=torch.uint8)
+    pages = backing[8:56].view(3, 16)
+    other = backing[56:80].view(3, 8)
+    for page_id, value in enumerate((11, 22, 33)):
+        pages[page_id].fill_(value)
+        other[page_id].fill_(value + 1)
+    bindings = {"first": [pages[:, :4]], "second": [pages[:, :8]]}
+    plan = KVCacheConfig(
+        num_blocks=3,
+        kv_cache_tensors=[SimpleNamespace(layers=list(bindings), layer_stride=0, block_stride=16, size=48)],
+        kv_cache_groups=[],
+    )
+    inventory = build_kv_cache_copy_views(
+        plan,
+        bindings.__getitem__,
+        [
+            bindings["second"][0].view_as(bindings["second"][0]),
+            other,
+            bindings["first"][0].view_as(bindings["first"][0]),
+        ],
+    )
+    expected_pages, expected_other = pages.clone(), other.clone()
+    expected_pages[[1, 2]] = pages[[0, 1]]
+    expected_other[[1, 2]] = other[[0, 1]]
+    monkeypatch.setattr(worker_utils, "async_tensor_h2d", lambda data, device: torch.as_tensor(data, device=device))
+    worker_utils.copy_kv_cache_blocks_inplace(inventory, plan.num_blocks, [(0, 1), (1, 2)])
+
+    torch.testing.assert_close(pages, expected_pages)
+    torch.testing.assert_close(other, expected_other)
+    assert torch.all(backing[:8] == 99) and torch.all(backing[80:] == 99)
 
 
 def test_standalone_mtp_uses_existing_compressed_cache_allocator(runner_factory):

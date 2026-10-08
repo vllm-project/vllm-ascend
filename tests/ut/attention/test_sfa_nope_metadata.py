@@ -12,6 +12,7 @@ from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
 
 import vllm_ascend.attention.sfa_v1 as sfa
 import vllm_ascend.attention.sfa_v1 as sparse_mla
+from vllm_ascend import ascend_forward_context
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily
 
 
@@ -401,7 +402,8 @@ def test_a5_smla_rebuilds_plan_for_a_trimmed_query(monkeypatch):
     torch.testing.assert_close(sparse_mla.sparse_mla(query, cache, indices, metadata, 0.5), query + 1)
 
 
-def test_a5_smla_rebuilds_plan_for_the_draft_model(monkeypatch):
+@pytest.mark.parametrize("use_v2", [False, True])
+def test_a5_smla_rebuilds_plan_for_the_draft_model(monkeypatch, use_v2):
     """A replayed FULL draft graph passes the padded row count the plan was
     built for, so the shape check alone stays silent.
 
@@ -441,7 +443,10 @@ def test_a5_smla_rebuilds_plan_for_the_draft_model(monkeypatch):
     monkeypatch.setattr(sparse_mla, "sparse_flash_mla_metadata", plan)
     monkeypatch.setattr(sparse_mla, "sparse_flash_mla", smla)
     monkeypatch.setattr(sparse_mla, "is_forward_context_available", lambda: True)
-    monkeypatch.setattr(sparse_mla, "get_forward_context", lambda: SimpleNamespace(is_draft_model=True))
+    context = SimpleNamespace(additional_kwargs={})
+    monkeypatch.setattr(ascend_forward_context.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", use_v2)
+    monkeypatch.setattr(ascend_forward_context, "get_forward_context", lambda: context)
+    ascend_forward_context._EXTRA_CTX.is_draft_model = True
     # query rows == topk_length rows: the shape check alone cannot detect the
     # stale plan.
     query = torch.ones(2, 2, 8, dtype=torch.bfloat16)
@@ -450,7 +455,8 @@ def test_a5_smla_rebuilds_plan_for_the_draft_model(monkeypatch):
     torch.testing.assert_close(sparse_mla.sparse_mla(query, cache, indices, metadata, 0.5), query + 1)
 
 
-def test_a5_smla_keeps_the_built_plan_for_the_target(monkeypatch):
+@pytest.mark.parametrize("use_v2", [False, True])
+def test_a5_smla_keeps_the_built_plan_for_the_target(monkeypatch, use_v2):
     """The target refreshes the plan from unpadded host values every step, so an
     equal-shaped call must keep using the plan written during metadata
     construction.
@@ -480,10 +486,18 @@ def test_a5_smla_keeps_the_built_plan_for_the_target(monkeypatch):
 
     monkeypatch.setattr(sparse_mla, "sparse_flash_mla_metadata", lambda **_: pytest.fail("must not rebuild"))
     monkeypatch.setattr(sparse_mla, "sparse_flash_mla", smla)
-    monkeypatch.setattr(sparse_mla, "get_forward_context", lambda: SimpleNamespace(is_draft_model=False))
+    context = SimpleNamespace(additional_kwargs={})
+    monkeypatch.setattr(sparse_mla, "is_forward_context_available", lambda: True)
+    monkeypatch.setattr(ascend_forward_context.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", use_v2)
+    monkeypatch.setattr(ascend_forward_context, "get_forward_context", lambda: context)
+    ascend_forward_context._EXTRA_CTX.is_draft_model = False
     query = torch.ones(2, 2, 8, dtype=torch.bfloat16)
     cache = torch.zeros(3, 8, 1, 8, dtype=torch.bfloat16)
     indices = torch.tensor([[[5, 1, -1]], [[-1, -1, -1]]], dtype=torch.int32)
+    torch.testing.assert_close(sparse_mla.sparse_mla(query, cache, indices, metadata, 0.5), query + 1)
+
+    monkeypatch.setattr(sparse_mla, "is_forward_context_available", lambda: False)
+    monkeypatch.setattr(ascend_forward_context, "get_forward_context", lambda: pytest.fail("no forward context"))
     torch.testing.assert_close(sparse_mla.sparse_mla(query, cache, indices, metadata, 0.5), query + 1)
 
 

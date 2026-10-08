@@ -1423,6 +1423,17 @@ def _reshape_kv_cache_v2(
                 if mamba_cache[0].shape[0] < kv_cache_config.num_blocks:
                     raise ValueError(f"Mamba cache for {layer_name} has fewer blocks than KVCacheManager.")
                 kv_caches[layer_name] = mamba_cache
+                logger.debug(
+                    "[non-contiguous-kv-cache][mrv2] mamba layer=%s "
+                    "logical_page=%s physical_page=%s shapes=%s strides=%s "
+                    "contiguous=%s",
+                    layer_name,
+                    kv_cache_spec.page_size_bytes,
+                    kv_cache_spec.page_size_padded,
+                    [tuple(tensor.shape) for tensor in mamba_cache],
+                    [tensor.stride() for tensor in mamba_cache],
+                    [tensor.is_contiguous() for tensor in mamba_cache],
+                )
                 continue
 
             views = view_glm5_next_cache(
