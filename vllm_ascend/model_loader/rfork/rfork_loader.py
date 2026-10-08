@@ -108,9 +108,12 @@ def _start_rfork_seed_service(
     exclude_blocks: list[tuple[int, int]],
     *,
     load_source: str,
+    structural_digest: str | None = None,
 ) -> bool:
     try:
-        result = session.start_seed_service(model, processed_layout, exclude_blocks)
+        result = session.start_seed_service(
+            model, processed_layout, exclude_blocks, structural_digest=structural_digest
+        )
     except Exception:
         logger.exception(
             "RFork %s model loaded from %s, but seed service startup raised; inference can continue.",
@@ -693,16 +696,16 @@ class RForkModelLoader(BaseModelLoader):
                     with _rfork_skip_unquantized_moe_post_load_processing(model):
                         process_weights_after_loading(model, model_config, target_device)
 
-                session.log_transferred_model_layout(model, processed_layout_transfer)
-
                 # Advertise only after post-load and eval; the session owns failure cleanup.
                 model = model.eval()
+                structural_digest = session.log_transferred_model_layout(model, processed_layout_transfer)
                 _start_rfork_seed_service(
                     session,
                     model,
                     processed_layout_transfer,
                     exclude_blocks,
                     load_source="transfer",
+                    structural_digest=structural_digest,
                 )
                 _log_rfork_load_summary(session, "transfer", load_started_at)
                 return model

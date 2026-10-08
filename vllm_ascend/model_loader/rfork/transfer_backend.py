@@ -24,6 +24,7 @@ from vllm_ascend.model_loader.rfork.manifest import (
     validate_weight_manifest,
 )
 from vllm_ascend.model_loader.rfork.tensor_layout import (
+    build_structural_digest,
     collect_transferable_tensors,
     find_non_npu_state_tensors,
     is_transferable_tensor,
@@ -209,9 +210,11 @@ class RForkTransferBackend:
         self.transfer_session_id: str | None = None
         self.weight_manifest: dict[str, Any] | None = None
         self.weight_formats: dict[str, int] | None = None
+        self.registered_structural_digest: str | None = None
         self.registered_weight_blocks: list[tuple[int, int]] = []
         self.registered_memory_addresses: list[int] = []
         self.excluded_weight_blocks: list[tuple[int, int]] = []
+        self._registered_tensor_inventory: list[tuple[str, torch.Tensor]] | None = None
         self._registered_transferable_tensors: list[tuple[str, torch.Tensor]] | None = None
         self._registered_transferable_storages: list[Any] | None = None
         self._all_transferable_tensors_excluded = False
@@ -281,8 +284,10 @@ class RForkTransferBackend:
     def _clear_registration_state(self) -> None:
         self.weight_manifest = None
         self.weight_formats = None
+        self.registered_structural_digest = None
         self.registered_weight_blocks = []
         self.registered_memory_addresses = []
+        self._registered_tensor_inventory = None
         self._registered_transferable_tensors = None
         self._registered_transferable_storages = None
         self._all_transferable_tensors_excluded = False
@@ -292,6 +297,13 @@ class RForkTransferBackend:
         with self._lifecycle_lock:
             return list(self.registered_weight_blocks)
 
+    def snapshot_registered_tensor_inventory(self) -> list[tuple[str, torch.Tensor]]:
+        """Return the registration inventory, including excluded target-shared tensors."""
+        with self._lifecycle_lock:
+            if self._registered_tensor_inventory is None:
+                raise RuntimeError("RFork tensor inventory is unavailable before registration or after reset.")
+            return list(self._registered_tensor_inventory)
+
     def log_model_layout_summary(
         self,
         model,
@@ -299,11 +311,12 @@ class RForkTransferBackend:
         *,
         stage: str,
         peer_session_id: str | None = None,
-    ) -> None:
+    ) -> str | None:
         """Observe a live model layout without changing transfer acceptance."""
         try:
             with self._lifecycle_lock:
                 tensors = list(collect_transferable_tensors(model, processed_layout))
+                structural_digest = build_structural_digest(tensors)
                 tensors, _ = _split_tensors_by_excluded_blocks(tensors, self.excluded_weight_blocks)
                 log_tensor_layout_summary(
                     tensors,
@@ -312,6 +325,7 @@ class RForkTransferBackend:
                     peer_session_id=peer_session_id,
                     processed_layout=processed_layout,
                 )
+                return structural_digest
         except Exception as exc:
             # Diagnostics must not turn an otherwise usable transferred model into a fallback.
             error_excerpt = " ".join(str(exc).split())[:TENSOR_LAYOUT_ERROR_EXCERPT_CHARS]
@@ -324,6 +338,7 @@ class RForkTransferBackend:
                 type(exc).__name__,
                 error_excerpt,
             )
+            return None
 
     def register_memory_region(
         self,
@@ -428,6 +443,9 @@ class RForkTransferBackend:
             weight_format_dict[name] = weight_format
             tensor_ranges.append((weight_ptr, weight_ptr + weight_numel * weight_size))
 
+        # Digest the full inventory; only excluded target-shared tensors still need a format read.
+        structural_digest = build_structural_digest(all_transferable_tensors, known_formats=weight_format_dict)
+
         try:
             memory_snapshot = torch.npu.memory.memory_snapshot()
         except Exception as exc:
@@ -473,6 +491,7 @@ class RForkTransferBackend:
         self.weight_formats = weight_format_dict
         self.registered_weight_blocks = list(merged_blocks)
         self.registered_memory_addresses = []
+        self._registered_tensor_inventory = all_transferable_tensors
         self._registered_transferable_tensors = transferable_tensors
         self._registered_transferable_storages = transferable_storages
         self._all_transferable_tensors_excluded = bool(not transferable_tensors and excluded_names)
@@ -522,6 +541,7 @@ class RForkTransferBackend:
 
         # Publish confirmed addresses while retaining the manifest and owners for active transfers.
         self.registered_memory_addresses = list(registered_memory_addresses)
+        self.registered_structural_digest = structural_digest
         logger.debug(
             "register_memory_region time: %.4fs, weights: %d",
             time.perf_counter() - start_reg_mr_time,

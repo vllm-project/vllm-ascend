@@ -225,21 +225,26 @@ def test_shutdown_retains_resources_for_an_unresolved_lease(runtime, caplog):
 def test_register_destination_binds_structural_digest(runtime, monkeypatch):
     backend = Mock()
     backend.register_memory_region.return_value = True
+    backend.registered_structural_digest = "registered-digest"
     monkeypatch.setattr(runtime.session, "RForkTransferBackend", Mock(return_value=backend))
     session = runtime.session.RForkSession(runtime.config, runtime.identity)
 
     assert session.register_destination(dummy_model(), True)
-    assert session.planner.structural_digest is not None
+    assert session.planner.structural_digest == "registered-digest"
     assert session.planner.seed_key == "model-key"
 
 
 def test_seed_service_refuses_advertisement_after_digest_drift(runtime, monkeypatch, caplog):
     backend = Mock()
-    backend.register_memory_region.return_value = True
+    digests = iter(["digest-a", "digest-b"])
+
+    def register(*args):
+        backend.registered_structural_digest = next(digests)
+        return True
+
+    backend.register_memory_region.side_effect = register
     backend.unregister_memory_region.return_value = True
     monkeypatch.setattr(runtime.session, "RForkTransferBackend", Mock(return_value=backend))
-    digests = iter(["digest-a", "digest-b"])
-    monkeypatch.setattr(runtime.session, "build_structural_digest", lambda tensors: next(digests))
     session = runtime.session.RForkSession(runtime.config, runtime.identity)
 
     assert session.register_destination(dummy_model(), True)
