@@ -481,7 +481,7 @@ class TestAscendConfig(TestBase):
     def test_init_ascend_config_validates_mega_moe_max_tokens(self, mock_fix_incompatible_config):
         # NOTE: pydantic coerces numeric strings (e.g. "65536") to int, so only
         # out-of-range values are invalid on main.
-        invalid_values = [0, -1]
+        invalid_values = [-1]
 
         for invalid_value in invalid_values:
             clear_ascend_config()
@@ -493,6 +493,14 @@ class TestAscendConfig(TestBase):
                 self.assertRaisesRegex(ValueError, "mega_moe_max_tokens must be"),
             ):
                 init_ascend_config(test_vllm_config)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_init_ascend_config_accepts_zero_mega_moe_max_tokens(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {"mega_moe_max_tokens": 0}
+        ascend_config = init_ascend_config(test_vllm_config)
+        self.assertEqual(ascend_config.mega_moe_max_tokens, 0)
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
