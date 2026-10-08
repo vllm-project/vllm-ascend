@@ -1272,13 +1272,21 @@ class NPUWorker(WorkerBase):
         init_distributed_environment(
             self.parallel_config.world_size, self.rank, self.distributed_init_method, self.local_rank, "hccl"
         )
-        ensure_model_parallel_initialized(
-            self.parallel_config.tensor_parallel_size,
-            self.parallel_config.pipeline_parallel_size,
-            self.parallel_config.prefill_context_parallel_size,
-            self.parallel_config.decode_context_parallel_size,
-        )
-        init_ascend_model_parallel(self.parallel_config)
+        group_config = self.vllm_config
+        if group_config.engram_config is not None and self.parallel_config.prefill_context_parallel_size > 1:
+            # Skip upstream's DP-only Engram group so Ascend can create
+            # _ENGRAM_DP once with DP x PCP ranks. Copy the config to preserve
+            # the original Engram settings for Ascend and model initialization.
+            group_config = copy.copy(group_config)
+            group_config.engram_config = None
+        with set_current_vllm_config(group_config):
+            ensure_model_parallel_initialized(
+                self.parallel_config.tensor_parallel_size,
+                self.parallel_config.pipeline_parallel_size,
+                self.parallel_config.prefill_context_parallel_size,
+                self.parallel_config.decode_context_parallel_size,
+            )
+        init_ascend_model_parallel(self.parallel_config, self.vllm_config.engram_config)
         ensure_ec_transfer_initialized(self.vllm_config)
 
     def get_supported_pooling_tasks(self):

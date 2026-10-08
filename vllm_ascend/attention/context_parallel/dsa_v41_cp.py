@@ -287,6 +287,8 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
             buffer = getattr(builder, name)
             setattr(builder, name, buffer.new_zeros(capacity))
         if builder._build_compressor_metadata:
+            # C2 metadata rows: 0=start position, 1=valid token count,
+            # 2=output row base (reserved), 3=input row base, 4=state block ID.
             builder._c2_ring_metadata = builder._c2_ring_metadata.new_zeros(5 * capacity)
 
     def prepare_source_rope(self) -> None:
