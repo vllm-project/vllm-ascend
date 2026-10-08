@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ctypes
 from dataclasses import replace
 
 import pytest
@@ -17,6 +16,7 @@ from tests.ut.distributed.ascend_store.v1.helpers import (
     make_worker,
     store_one,
 )
+from tests.ut.distributed.ascend_store.v1.worker.bulk_fixtures import TensorBytesBackend
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.coordinates import TokenRange
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.projection import (
     compile_bulk_projection_binder,
@@ -112,47 +112,6 @@ def test_tp_mismatch_bulk_preserves_axis_result_provenance() -> None:
 
     worker.close()
     assert resources.closed
-
-
-class TensorBytesBackend(FakeBackend):
-    """Copy actual CPU tensor bytes through the public Bulk Backend contract."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.objects: dict[str, bytes] = {}
-        self.registered_regions: list[tuple[int, int]] = []
-
-    def register_buffer(self, addresses, sizes):
-        self.registered_regions.extend(zip(addresses, sizes, strict=True))
-        return super().register_buffer(addresses, sizes)
-
-    def _assert_registered_ranges(self, addresses, sizes) -> None:
-        for row_addresses, row_sizes in zip(addresses, sizes, strict=True):
-            for address, size in zip(row_addresses, row_sizes, strict=True):
-                assert any(
-                    start <= address and address + size <= start + span for start, span in self.registered_regions
-                )
-
-    def store(self, keys, addresses, sizes):
-        self._assert_registered_ranges(addresses, sizes)
-        codes = self.put(keys, addresses, sizes)
-        for key, row_addresses, row_sizes in zip(keys, addresses, sizes, strict=True):
-            self.objects[key] = b"".join(
-                ctypes.string_at(address, size) for address, size in zip(row_addresses, row_sizes, strict=True)
-            )
-        return codes
-
-    def load(self, keys, addresses, sizes):
-        self._assert_registered_ranges(addresses, sizes)
-        codes = self.get(keys, addresses, sizes)
-        for key, row_addresses, row_sizes in zip(keys, addresses, sizes, strict=True):
-            payload = self.objects[key]
-            assert sum(row_sizes) == len(payload)
-            offset = 0
-            for address, size in zip(row_addresses, row_sizes, strict=True):
-                ctypes.memmove(address, payload[offset : offset + size], size)
-                offset += size
-        return codes
 
 
 def _make_tensor_tp_worker(backend, layout, tp_size, tp_rank, *, total_heads, populate_cache, padded_kernel_blocks):
