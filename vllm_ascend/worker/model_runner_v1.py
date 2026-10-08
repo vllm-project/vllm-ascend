@@ -136,7 +136,6 @@ from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     get_sfa_qsfa_packed_head_dim,
-    requires_contiguous_pa_kv_cache,
     using_paged_attention,
 )
 
@@ -4977,28 +4976,13 @@ class NPUModelRunner(GPUModelRunner):
         self.hybrid_with_attn_and_mamba = any(
             isinstance(spec, MambaSpec) for spec in layer_kv_cache_spec.values()
         ) and any(isinstance(spec, AttentionSpec) for spec in layer_kv_cache_spec.values())
-        strided_attention_cache_layers: set[str] = set()
-        if (
-            not self.use_sparse
-            and not self.use_compress
-            and not self.sparse_kv_offload_enabled
-            and not self.ascend_config.xlite_graph_config.enabled
-        ):
-            layer_backends = {
-                layer_name: group.backend
-                for group in self._kv_cache_spec_attn_group_iterator()
-                for layer_name in group.layer_names
-            }
-            attn_layers = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
-            strided_attention_cache_layers = {
-                layer_name
-                for layer_name, spec in layer_kv_cache_spec.items()
-                if type(spec) is FullAttentionSpec
-                and not is_hidden_state_cache_spec(spec)
-                and layer_name in layer_backends
-                and not layer_backends[layer_name].is_sparse()
-                and not requires_contiguous_pa_kv_cache(attn_layers.get(layer_name), self.vllm_config, spec)
-            }
+        # Ordinary Attention uses separate contiguous K/V buffers. MXFP pages
+        # include quantization scales and require their packed single-buffer layout.
+        packed_attention_cache_layers = {
+            layer_name
+            for layer_name, spec in layer_kv_cache_spec.items()
+            if self._is_c8_mxfp_kv_cache(spec)
+        }
 
         # GLM-Next emits one descriptor for each physical cache slot. Layers
         # listed by a descriptor deliberately alias that slot even when they
@@ -5144,7 +5128,7 @@ class NPUModelRunner(GPUModelRunner):
                 if (
                     "linear_attn" in layer_name
                     or self.hybrid_with_attn_and_mamba
-                    or layer_name in strided_attention_cache_layers
+                    or layer_name in packed_attention_cache_layers
                     or "cache_only_layers" in layer_name
                     or is_hidden_state_cache_spec(layer_kv_cache_spec.get(layer_name))
                 ) and layer_name not in kv_cache_raw_tensors:
@@ -5156,8 +5140,8 @@ class NPUModelRunner(GPUModelRunner):
                     for layer_name_inner in shared_layers:
                         if (
                             not self.hybrid_with_attn_and_mamba
-                            and layer_name in strided_attention_cache_layers
-                            and layer_name_inner not in strided_attention_cache_layers
+                            and layer_name in packed_attention_cache_layers
+                            and layer_name_inner not in packed_attention_cache_layers
                         ):
                             continue
                         layer_size = (
@@ -5284,7 +5268,7 @@ class NPUModelRunner(GPUModelRunner):
                         if (
                             "attn" in layer_name_inner
                             and "linear_attn" not in layer_name_inner
-                            and layer_name_inner not in strided_attention_cache_layers
+                            and layer_name_inner not in packed_attention_cache_layers
                             and layer_name_inner not in kv_cache_raw_tensors
                         ):
                             k_tensor = self._allocate_int8_cache_tensor(
@@ -5614,7 +5598,6 @@ class NPUModelRunner(GPUModelRunner):
                         and "cache_only_layers" not in layer_name
                         and not is_hidden_state_cache_spec(current_kv_cache_spec)
                         and isinstance(kv_cache_raw_tensors[layer_name], torch.Tensor)
-                        and self.use_hybrid_blocks
                     ):
                         # Currently, we ensure that the same kvcache format is used even if there
                         # is no shared layer, such as the full attention mtp layer of qwen3.5, etc.
@@ -5690,49 +5673,6 @@ class NPUModelRunner(GPUModelRunner):
                         current_kv_cache_spec.num_kv_heads,
                         current_kv_cache_spec.head_size,
                     )
-                    if (
-                        raw_kv_is_combined
-                        and len(kv_cache_shape) == 5
-                        and kv_cache_shape[0] == 2
-                    ):
-                        raw_typed = raw_k_tensor.view(current_kv_cache_spec.dtype)
-                        if raw_typed.numel() == math.prod(kv_cache_shape):
-                            hidden_size = math.prod(kv_cache_shape[2:])
-                            dense_strides = [
-                                math.prod(kv_cache_shape[dim + 1 :])
-                                for dim in range(len(kv_cache_shape))
-                            ]
-                            kv_cache = torch.as_strided(
-                                raw_typed,
-                                size=kv_cache_shape,
-                                stride=(
-                                    hidden_size,
-                                    2 * hidden_size,
-                                    *dense_strides[2:],
-                                ),
-                                storage_offset=raw_typed.storage_offset(),
-                            )
-                            # Match MRV2: expose block-first K/V views while
-                            # preserving the shared allocation and strides.
-                            kv_caches[layer_name] = (kv_cache[0], kv_cache[1])
-                            # TODO: Remove this temporary observation point once
-                            # the non-contiguous KV-cache layout is mature.
-                            logger.debug(
-                                "[non-contiguous-kv-cache] attention mode=%s "
-                                "layer=%s shape=%s stride=%s "
-                                "k_contiguous=%s v_contiguous=%s",
-                                (
-                                    "hybrid"
-                                    if self.hybrid_with_attn_and_mamba
-                                    else "gqa"
-                                ),
-                                layer_name,
-                                tuple(kv_cache.shape),
-                                kv_cache.stride(),
-                                kv_cache[0].is_contiguous(),
-                                kv_cache[1].is_contiguous(),
-                            )
-                            continue
                     should_trim_page_padding = (
                         self.hybrid_with_attn_and_mamba and self.use_hybrid_blocks
                     ) or (
@@ -5874,8 +5814,12 @@ class NPUModelRunner(GPUModelRunner):
                     )
                     if (
                         self.hybrid_with_attn_and_mamba
+                        and is_c8_mxfp_kv_quant(self.vllm_config)
                         and not uses_same_raw_tensor
                     ):
+                        # MXFP Attention uses physical-page packets. Mamba states
+                        # sharing those pages must use the same stride to prevent
+                        # writes to different block IDs from overlapping.
                         shapes_with_blocks = tuple(
                             (num_blocks, *shape)
                             for shape in current_kv_cache_spec.shapes
@@ -5887,10 +5831,8 @@ class NPUModelRunner(GPUModelRunner):
                             current_kv_cache_spec.page_size_bytes,
                         )
                         kv_caches[layer_name] = state_tensors
-                        # TODO: Remove this temporary observation point once
-                        # the non-contiguous KV-cache layout is mature.
                         logger.debug(
-                            "[non-contiguous-kv-cache] mamba mode=hybrid "
+                            "[c8-mxfp-kv-cache] mamba mode=hybrid "
                             "layer=%s page_size_bytes=%s shapes=%s strides=%s "
                             "storage_offsets=%s contiguous=%s",
                             layer_name,

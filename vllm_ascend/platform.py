@@ -51,7 +51,6 @@ from vllm_ascend.utils import (
     check_kv_extra_config,
     enable_sfa_dcp_replicated_indexer,
     is_moe_model,
-    model_uses_kpool_indexer,
     model_uses_sfa_sparse,
     refresh_block_size,
     update_cudagraph_capture_sizes,
@@ -387,15 +386,11 @@ class NPUPlatform(Platform):
 
     @classmethod
     def _align_hybrid_block_size(cls, vllm_config: VllmConfig, backend_cls) -> None:
-        if (
-            vllm_config.model_config.use_mla
-            and vllm_config.cache_config.cache_dtype in ("int8", "fp8")
-            and model_uses_kpool_indexer(vllm_config.model_config)
-        ):
+        if getattr(vllm_config.model_config, "is_hybrid", False) and vllm_config.cache_config.cache_dtype != "mxfp8":
             from vllm.model_executor.models.config import HybridAttentionMambaModelConfig
 
-            # Reuse Ascend's packed C8 geometry, including scale bytes and
-            # compressed indexer alignment, after the backend selects its block size.
+            # Reapply contiguous alignment after the backend selects its block
+            # size, preserving the specialized page rules for sparse C8 caches.
             HybridAttentionMambaModelConfig.verify_and_update_config(vllm_config)
             return
 

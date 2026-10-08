@@ -91,30 +91,58 @@ def _config(
         kv_transfer_config=connector,
         speculative_config=(None if speculative_method is None else SimpleNamespace(method=speculative_method)),
         cache_config=SimpleNamespace(
+            cache_dtype="auto",
             block_size=128,
             mamba_page_size_padded=8192,
             mamba_cache_mode=mamba_cache_mode,
             enable_prefix_caching=prefix_caching,
             mamba_block_size=None,
         ),
-        model_config=SimpleNamespace(max_model_len=4096),
+        parallel_config=SimpleNamespace(tensor_parallel_size=1),
+        model_config=SimpleNamespace(
+            architecture="DummyHybridModel",
+            is_hybrid=True,
+            use_mla=False,
+            dtype=torch.bfloat16,
+            max_model_len=4096,
+            get_num_kv_heads=lambda _parallel_config: 2,
+            get_head_size=lambda: 128,
+        ),
     )
 
 
 def _run(config):
-    with patch.object(MambaModelConfig, "verify_and_update_config") as upstream:
+    model_cls = SimpleNamespace(
+        get_mamba_state_shape_from_config=lambda _config: ((6, 4096), (16, 128, 128)),
+        get_mamba_state_dtype_from_config=lambda _config: (torch.bfloat16, torch.float32),
+    )
+    with (
+        patch.object(MambaModelConfig, "verify_and_update_config") as upstream,
+        patch("vllm.model_executor.models.ModelRegistry.resolve_model_cls", return_value=(model_cls, None))
+        if _get_sparse_index_kpool(config.model_config) is None
+        else nullcontext(),
+    ):
         HybridAttentionMambaModelConfig.verify_and_update_config(config)
     upstream.assert_called_once_with(config)
 
 
-def test_hybrid_config_preserves_noncontiguous_page_sizes():
+@pytest.mark.parametrize("block_size", [None, 128, 2048])
+def test_hybrid_config_aligns_contiguous_state_segments(block_size):
     config = _config()
+    config.cache_config.block_size = block_size
 
     _run(config)
 
-    assert config.cache_config.block_size == 128
-    assert config.cache_config.mamba_page_size_padded == 8192
+    assert config.cache_config.block_size == 2048
+    assert config.cache_config.mamba_page_size_padded == 2 * 1048576 + 49152
     assert config.cache_config.mamba_block_size == 4096
+
+
+def test_contiguous_hybrid_rejects_larger_attention_segment():
+    config = _config()
+    config.cache_config.block_size = 4096
+    with pytest.raises(ValueError, match="requires block_size=2048"):
+        _run(config)
 
 
 @pytest.mark.parametrize("cache_dtype", ["fp8", "int8", "auto"])
@@ -225,6 +253,7 @@ def test_backend_alignment_delegates_regular_cache_geometry(use_mla, cache_dtype
     config = _config()
     config.cache_config.cache_dtype = cache_dtype
     config.model_config.use_mla = use_mla
+    config.model_config.is_hybrid = False
     config.model_config.hf_text_config = SimpleNamespace(**({"index_kpool": 4} if kpool else {}))
     backend = SimpleNamespace()
 
@@ -232,6 +261,41 @@ def test_backend_alignment_delegates_regular_cache_geometry(use_mla, cache_dtype
         NPUPlatform._align_hybrid_block_size(config, backend)
 
     upstream.assert_called_once_with(config, backend)
+
+
+def test_backend_alignment_restores_contiguous_hybrid_geometry():
+    config = _config()
+    _run(config)
+    for _ in range(2):
+        config.cache_config.block_size = 128
+        with patch.object(Platform, "_align_hybrid_block_size") as upstream:
+            _run_backend_alignment(config)
+        upstream.assert_not_called()
+        assert config.cache_config.block_size == 2048
+        assert config.cache_config.mamba_page_size_padded == 2 * 1048576 + 49152
+
+
+def _run_backend_alignment(config):
+    model_cls = SimpleNamespace(
+        get_mamba_state_shape_from_config=lambda _config: ((6, 4096), (16, 128, 128)),
+        get_mamba_state_dtype_from_config=lambda _config: (torch.bfloat16, torch.float32),
+    )
+    with (
+        patch.object(MambaModelConfig, "verify_and_update_config"),
+        patch("vllm.model_executor.models.ModelRegistry.resolve_model_cls", return_value=(model_cls, None)),
+    ):
+        NPUPlatform._align_hybrid_block_size(config, SimpleNamespace())
+
+
+def test_mxfp8_keeps_its_existing_page_geometry():
+    config = _config()
+    config.cache_config.cache_dtype = "mxfp8"
+    _run(config)
+    assert config.cache_config.block_size == 128
+    assert config.cache_config.mamba_page_size_padded == 8192
+    with patch.object(Platform, "_align_hybrid_block_size") as upstream:
+        NPUPlatform._align_hybrid_block_size(config, SimpleNamespace())
+    upstream.assert_called_once_with(config, SimpleNamespace())
 
 
 @pytest.mark.parametrize(
@@ -309,8 +373,5 @@ def test_kv_store_rejects_non_align_explicit_mode():
         mamba_cache_mode="all",
     )
 
-    with (
-        patch.object(MambaModelConfig, "verify_and_update_config"),
-        pytest.raises(AssertionError, match="only support 'align'"),
-    ):
-        HybridAttentionMambaModelConfig.verify_and_update_config(config)
+    with pytest.raises(AssertionError, match="only support 'align'"):
+        _run(config)
