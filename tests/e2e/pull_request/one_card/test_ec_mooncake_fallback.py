@@ -1,17 +1,14 @@
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 # This file is a part of the vllm-ascend project.
 # SPDX-License-Identifier: Apache-2.0
-"""One-card PR hardware checks for Mooncake encoder-output fallback.
+"""One-card NPU check for Mooncake encoder-output fallback memory.
 
-Both tests use the current NPU. The real transfer test writes to the local
-session of the process-wide Ascend TransferEngine over the loopback address.
-The two-card EPD test covers transfer between separate server processes.
+The two-card EPD test owns real Mooncake integration coverage. Keeping this
+test focused on the NPU bounce copy avoids constructing the process-wide
+native TransferEngine, whose library teardown is unsafe in the pytest process.
 """
 
 from __future__ import annotations
-
-import gc
-from collections.abc import Iterator
 
 import pytest
 import torch
@@ -20,15 +17,8 @@ pytest.importorskip("torch_npu")
 
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.memory import (  # noqa: E402
     ASCEND_DIRECT_MEMORY_ALIGNMENT,
-    AscendContiguousAllocator,
     AscendProducerAllocator,
     AscendProducerMemoryPool,
-)
-from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.transfer import (  # noqa: E402
-    AscendMooncakeTransfer,
-)
-from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import (  # noqa: E402
-    global_te,
 )
 
 pytestmark = pytest.mark.skipif(
@@ -37,18 +27,19 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-@pytest.fixture(scope="module", autouse=True)
-def _release_process_transfer_engine() -> Iterator[None]:
-    """Destroy the test-owned process engine before Python runtime teardown."""
-    yield
-    torch.npu.synchronize()
-    with global_te.transfer_engine_lock:
-        engine = global_te.transfer_engine
-        global_te.transfer_engine = None
-    with global_te.register_buffer_lock:
-        global_te.is_register_buffer = False
-    del engine
-    gc.collect()
+class _RegistrationStub:
+    """Provide only the allocator registration API used by this test."""
+
+    def __init__(self) -> None:
+        self.registered: set[int] = set()
+
+    def register_memory(self, tensor: torch.Tensor) -> int:
+        self.registered.add(tensor.data_ptr())
+        return 0
+
+    def unregister_memory(self, tensor: torch.Tensor) -> bool:
+        self.registered.remove(tensor.data_ptr())
+        return True
 
 
 def _npu_device() -> tuple[torch.device, int]:
@@ -61,14 +52,14 @@ def _byte_pattern(nbytes: int, device: torch.device) -> torch.Tensor:
     return torch.arange(nbytes, dtype=torch.int32, device=device).remainder_(251).to(torch.uint8)
 
 
-def test_real_npu_bounce_copy_is_byte_tight_and_visible():
-    device, device_index = _npu_device()
+def test_npu_bounce_copy_is_byte_tight_and_visible():
+    device, _ = _npu_device()
     allocator = AscendProducerAllocator(
         staging_capacity=4096,
         bounce_capacity=ASCEND_DIRECT_MEMORY_ALIGNMENT,
     )
-    transfer = AscendMooncakeTransfer("127.0.0.1", device_index)
-    pool = AscendProducerMemoryPool(4096, transfer, allocator)
+    transfer = _RegistrationStub()
+    pool = AscendProducerMemoryPool(4096, transfer, allocator)  # type: ignore[arg-type]
     lease = None
 
     try:
@@ -95,56 +86,5 @@ def test_real_npu_bounce_copy_is_byte_tight_and_visible():
     finally:
         if lease is not None:
             pool.release_bounce(lease)
-        allocator.close(transfer)
-        transfer.close()
-
-
-def test_real_mooncake_bounce_prefix_and_registered_interior_suffix():
-    device, device_index = _npu_device()
-    transfer = AscendMooncakeTransfer("127.0.0.1", device_index)
-    producer_allocator = AscendProducerAllocator(
-        staging_capacity=ASCEND_DIRECT_MEMORY_ALIGNMENT,
-        bounce_capacity=ASCEND_DIRECT_MEMORY_ALIGNMENT,
-    )
-    consumer_allocator = AscendContiguousAllocator(8192)
-    producer_pool = AscendProducerMemoryPool(
-        ASCEND_DIRECT_MEMORY_ALIGNMENT,
-        transfer,
-        producer_allocator,
-    )
-    lease = None
-
-    try:
-        producer_allocator.prepare(device, transfer)
-        consumer_allocator.prepare(device, transfer)
-        assert producer_allocator.tensor is not None
-        assert consumer_allocator.tensor is not None
-
-        source = producer_allocator.tensor.narrow(0, 123, 4096)
-        source.copy_(_byte_pattern(source.nbytes, device))
-        destination = consumer_allocator.tensor.narrow(0, 257, source.nbytes)
-        destination.zero_()
-
-        prefix_nbytes = 300
-        lease = producer_pool.acquire_bounce(prefix_nbytes)
-        assert lease is not None
-        bounce_address = producer_pool.copy_to_bounce(
-            lease,
-            [(source, 0, prefix_nbytes)],
-        )
-
-        transfer.write(
-            transfer.local_session(),
-            [bounce_address, source.data_ptr() + prefix_nbytes],
-            [destination.data_ptr(), destination.data_ptr() + prefix_nbytes],
-            [prefix_nbytes, source.nbytes - prefix_nbytes],
-        )
-        torch.npu.synchronize()
-
-        assert torch.equal(destination.cpu(), source.cpu())
-    finally:
-        if lease is not None:
-            producer_pool.release_bounce(lease)
-        producer_allocator.close(transfer)
-        consumer_allocator.close(transfer)
-        transfer.close()
+        assert allocator.close(transfer)  # type: ignore[arg-type]
+        assert not transfer.registered
