@@ -1084,19 +1084,20 @@ def test_copy_num_computed_tokens_to_cpu_records_event():
     runner.num_computed_tokens_event.record.assert_called_once_with()
 
 
-@pytest.mark.parametrize("fallback", [None, "hardware", "model", "pp", "pcp", "dcp", "kvpp", "mixed", "empty"])
-def test_v41_device_lengths_are_enabled_only_for_verified_consumers(fallback):
+@pytest.mark.parametrize("packed_cache", [False, True], ids=["a3", "a5"])
+@pytest.mark.parametrize("fallback", [None, "model", "pp", "pcp", "dcp", "kvpp", "mixed", "empty"])
+def test_v41_device_lengths_are_enabled_only_for_verified_consumers(fallback, packed_cache):
     import vllm_ascend.worker.v2.model_runner as runner_module
 
     runner = _make_runner()
-    runner.model_config = SimpleNamespace(architecture="DeepseekV41ForCausalLM")
+    runner.model_config = SimpleNamespace(hf_config=SimpleNamespace(model_type="deepseek_v41"))
     runner.parallel_config = SimpleNamespace(
         pipeline_parallel_size=1, prefill_context_parallel_size=1, decode_context_parallel_size=1
     )
     runner.kvpp = SimpleNamespace(scheduler=None)
     runner.attn_groups = [[SimpleNamespace(backend=runner_module.DeepseekV41CacheBackend)]]
     if fallback == "model":
-        runner.model_config.architecture = "OtherModel"
+        runner.model_config.hf_config.model_type = "other_model"
     elif fallback in ("pp", "pcp", "dcp"):
         name = {
             "pp": "pipeline_parallel_size",
@@ -1110,7 +1111,7 @@ def test_v41_device_lengths_are_enabled_only_for_verified_consumers(fallback):
         runner.attn_groups[0].append(SimpleNamespace(backend=object))
     elif fallback == "empty":
         runner.attn_groups = []
-    with patch.object(runner_module, "uses_a5_packed_cache", return_value=fallback != "hardware"):
+    with patch.object(runner_module, "uses_a5_packed_cache", return_value=packed_cache):
         runner._configure_cpu_seq_lens_sync()
     assert runner._needs_seq_lens_cpu_sync is (fallback is not None)
 

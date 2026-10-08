@@ -68,6 +68,7 @@ from vllm_ascend.core.profiling_chunk_predictor import (
 from vllm_ascend.models.deepseek_v41.cache_config import uses_a5_packed_cache
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import (
+    is_deepseek_v41,
     is_pd_decode_recompute_scheduler_enabled,
     lmhead_tp_enable,
     lmhead_tp_max_num_logits,
@@ -384,7 +385,7 @@ class NPUModelRunner(GPUModelRunner):
         backends = {group.backend for groups in self.attn_groups for group in groups}
         if backends != {DeepseekV41CacheBackend}:
             return
-        if not uses_a5_packed_cache() or self.model_config.architecture != "DeepseekV41ForCausalLM":
+        if not is_deepseek_v41(self.model_config.hf_config):
             return
         parallel = self.parallel_config
         if (
