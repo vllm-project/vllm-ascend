@@ -586,7 +586,7 @@ class AscendConfig:
     # This is a reference value: if the actual per-rank received token
     # count exceeds it, tokens may be truncated, causing precision
     # degradation. Do not set it too large because workspace memory scales
-    # linearly with this value. Default 65536.
+    # linearly with this value. Accepts non-negative values; default 65536.
     mega_moe_max_tokens: int = 65536
     ascend_log_path: str = dataclasses.field(
         default_factory=lambda: os.path.join(os.path.expanduser("~"), "ascend", "log", "vllm_ascend")
@@ -914,8 +914,8 @@ class AscendConfig:
         self._validate_mc2_comm_alg(vc)
 
         # mega_moe_max_tokens range
-        if self.mega_moe_max_tokens <= 0:
-            raise ValueError(f"mega_moe_max_tokens must be a positive integer, got {self.mega_moe_max_tokens}")
+        if self.mega_moe_max_tokens < 0:
+            raise ValueError(f"mega_moe_max_tokens must be a non-negative integer, got {self.mega_moe_max_tokens}")
 
         # batch-sharded sampling (Model Runner V2) shards the sampler inputs
         # per TP rank, while lmhead TP overrides NPUModelRunner.sample with a
