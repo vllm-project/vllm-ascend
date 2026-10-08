@@ -10,6 +10,9 @@ The two-card EPD test covers transfer between separate server processes.
 
 from __future__ import annotations
 
+import gc
+from collections.abc import Iterator
+
 import pytest
 import torch
 
@@ -24,11 +27,28 @@ from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.memory import (  
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.transfer import (  # noqa: E402
     AscendMooncakeTransfer,
 )
+from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import (  # noqa: E402
+    global_te,
+)
 
 pytestmark = pytest.mark.skipif(
     not torch.npu.is_available(),
     reason="Ascend NPU is unavailable",
 )
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _release_process_transfer_engine() -> Iterator[None]:
+    """Destroy the test-owned process engine before Python runtime teardown."""
+    yield
+    torch.npu.synchronize()
+    with global_te.transfer_engine_lock:
+        engine = global_te.transfer_engine
+        global_te.transfer_engine = None
+    with global_te.register_buffer_lock:
+        global_te.is_register_buffer = False
+    del engine
+    gc.collect()
 
 
 def _npu_device() -> tuple[torch.device, int]:

@@ -21,8 +21,8 @@ from vllm.multimodal.utils import encode_image_url
 from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.conftest import (
-    RemoteEPDServer,
     RemoteOpenAIServer,
+    RemotePDServer,
     wait_until_npu_memory_free,
 )
 
@@ -173,17 +173,16 @@ def _prepare_decode_body(
         )
         response.raise_for_status()
         params = response.json().get("ec_transfer_params") or {}
-        reported_items = params.get("ec_items") or []
-        assert len(reported_items) == 1, f"encoder returned unexpected EC items for image {index}: {reported_items!r}"
-        reported = reported_items[0]
+        assert len(params) == 1, f"encoder returned unexpected EC items for image {index}: {params!r}"
+        ec_mm_hash, reported = next(iter(params.items()))
+        assert ec_mm_hash, f"encoder returned an empty mm_hash for image {index}"
         assert isinstance(reported, dict), f"encoder returned a non-dict EC item for image {index}: {reported!r}"
-        ec_mm_hash = reported.get("mm_hash")
-        assert ec_mm_hash, f"encoder returned no mm_hash for image {index}: {reported!r}"
         reported_transfer_id = reported.get("transfer_id")
         assert reported_transfer_id in (None, transfer_id), (
             f"encoder changed transfer_id for image {index}: expected {transfer_id!r}, got {reported_transfer_id!r}"
         )
-        metadata = {key: value for key, value in reported.items() if key not in {"mm_hash", "transfer_id"}}
+        metadata = reported.get("metadata") or {}
+        assert isinstance(metadata, dict), f"encoder returned non-dict metadata for image {index}: {metadata!r}"
         assert metadata, f"encoder returned no metadata for image {index}"
         item_meta = {
             "uuid": item_uuid,
@@ -332,7 +331,7 @@ def _run_epd(
         "VLLM_USE_V2_MODEL_RUNNER": "1",
     }
 
-    with RemoteEPDServer(vllm_serve_args=server_args, env_dict=env_dict):
+    with RemotePDServer(vllm_serve_args=server_args, env_dict=env_dict):
         for _ in range(repeat):
             assert _run_epd_requests(encode_port, pd_port, reservation_port) == baseline_outputs
 
