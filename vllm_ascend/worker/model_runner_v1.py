@@ -136,6 +136,7 @@ from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     get_sfa_qsfa_packed_head_dim,
+    get_tq_fused_slot_bytes,
     requires_contiguous_pa_kv_cache,
     using_paged_attention,
 )
@@ -213,6 +214,7 @@ from vllm_ascend.utils import (
     is_c8_mxfp_kv_quant,
     is_hidden_state_cache_spec,
     is_score_encoder_cache_manager,
+    kv_cache_spec_uses_packed_sfa_main_cache,
     kv_cache_spec_uses_sparse_sfa_c8,
     lmhead_tp_enable,
     model_uses_kpool_indexer,
@@ -5234,7 +5236,7 @@ class NPUModelRunner(GPUModelRunner):
                     # and rope head dim.
                     current_kv_cache_spec = layer_kv_cache_spec[layer_name]
                     assert isinstance(current_kv_cache_spec, AttentionSpec)
-                    current_sparse_sfa_c8 = kv_cache_spec_uses_sparse_sfa_c8(current_kv_cache_spec)
+                    current_packed_sfa_main_cache = kv_cache_spec_uses_packed_sfa_main_cache(current_kv_cache_spec)
 
                     # vLLM #51718 packs every layer of a group into a single
                     # KVCacheTensor on main; the per-layer size is the block
@@ -5244,7 +5246,7 @@ class NPUModelRunner(GPUModelRunner):
                     kv_cache_tensor_size = (
                         kv_cache_config.num_blocks * current_kv_cache_spec.page_size_bytes
                     )
-                    if current_sparse_sfa_c8:
+                    if current_packed_sfa_main_cache:
                         k_tensor_size = kv_cache_tensor_size
                         v_tensor_size = None
                     else:
@@ -5264,7 +5266,9 @@ class NPUModelRunner(GPUModelRunner):
                         v_tensor_size = int(kv_cache_tensor_size // v_tensor_split_factor)
                     if self.sparse_kv_offload_enabled:
                         assert self.use_sparse, "Sparse KV offload only support sparse attention."
-                        assert not current_sparse_sfa_c8, "Sparse KV offload do not support sparse SFA C8."
+                        assert not current_packed_sfa_main_cache, (
+                            "Sparse KV offload do not support a packed SFA main cache."
+                        )
                         assert v_tensor_size is not None
                         for layer_name_inner in allocation_layers:
                             if "attn" in layer_name_inner and "linear_attn" not in layer_name_inner:
@@ -5298,7 +5302,7 @@ class NPUModelRunner(GPUModelRunner):
                                     v_tensor_size,
                                     alignment,
                                 )
-                            if current_sparse_sfa_c8:
+                            if current_packed_sfa_main_cache:
                                 kv_cache_raw_tensors[layer_name_inner] = (k_tensor,)
                             else:
                                 assert v_tensor is not None
@@ -5575,9 +5579,12 @@ class NPUModelRunner(GPUModelRunner):
                     # elif branch below before the sparse branch tries to
                     # unpack them as a K/V tuple.
                     current_sparse_sfa_c8 = kv_cache_spec_uses_sparse_sfa_c8(current_kv_cache_spec)
+                    current_packed_sfa_main_cache = kv_cache_spec_uses_packed_sfa_main_cache(current_kv_cache_spec)
                     if self.sparse_kv_offload_enabled:
                         assert self.use_sparse, "Sparse KV offload only support sparse attention."
-                        assert not current_sparse_sfa_c8, "Sparse KV offload do not support sparse SFA C8."
+                        assert not current_packed_sfa_main_cache, (
+                            "Sparse KV offload do not support a packed SFA main cache."
+                        )
                         reshaped_tensors = reshape_kv_cache_tensors_for_sparse_kv_offload(
                             kv_cache_raw_tensors[layer_name],
                             current_kv_cache_spec,
@@ -5589,12 +5596,12 @@ class NPUModelRunner(GPUModelRunner):
                         kv_caches[layer_name] = reshaped_tensors
                         continue
                     raw_kv_is_combined = False
-                    if (self.use_sparse or current_sparse_sfa_c8) and "cache_only_layers" not in layer_name:
+                    if (self.use_sparse or current_packed_sfa_main_cache) and "cache_only_layers" not in layer_name:
                         raw_cache = kv_cache_raw_tensors[layer_name]
                         if not isinstance(raw_cache, tuple):
                             raw_k_tensor = raw_v_tensor = raw_cache
                             sum_page_size_bytes = raw_k_tensor.numel()
-                        elif current_sparse_sfa_c8:
+                        elif current_packed_sfa_main_cache:
                             (raw_k_tensor,) = raw_cache
                             raw_v_tensor = None
                             sum_page_size_bytes = raw_k_tensor.numel()
@@ -5803,7 +5810,7 @@ class NPUModelRunner(GPUModelRunner):
                             num_kv_heads,
                             k_dim,
                         )
-                        if current_sparse_sfa_c8:
+                        if current_packed_sfa_main_cache:
                             k_shape = (
                                 mla_num_blocks,
                                 mla_block_size,
@@ -5827,13 +5834,13 @@ class NPUModelRunner(GPUModelRunner):
                         )
 
                     k_cache = raw_k_tensor.view(k_cache_dtype).view(k_shape)
-                    if current_sparse_sfa_c8:
+                    if current_packed_sfa_main_cache:
                         v_cache = None
                     else:
                         assert raw_v_tensor is not None
                         v_cache = raw_v_tensor.view(v_cache_dtype).view(v_shape)
 
-                    if current_sparse_sfa_c8:
+                    if current_packed_sfa_main_cache:
                         kv_caches[layer_name] = (k_cache,)
                     else:
                         assert v_cache is not None
@@ -6162,12 +6169,23 @@ class NPUModelRunner(GPUModelRunner):
             elif isinstance(attn_module, MLAAttention):
                 if self.use_sparse or getattr(
                     getattr(attn_module, "impl", None), "enable_sparse_sfa_c8", False
+                ) or getattr(
+                    getattr(attn_module, "impl", None), "enable_sparse_sfa_turboquant", False
                 ):
                     impl = attn_module.impl
                     cache_sparse_sfa_c8 = bool(
                         getattr(impl, "enable_sparse_sfa_c8", False)
                     )
-                    if cache_sparse_sfa_c8:
+                    cache_sparse_sfa_turboquant = bool(
+                        getattr(impl, "enable_sparse_sfa_turboquant", False)
+                    )
+                    if cache_sparse_sfa_turboquant:
+                        head_size = get_tq_fused_slot_bytes(
+                            self.model_config.hf_text_config.kv_lora_rank,
+                            self.model_config.hf_text_config.qk_rope_head_dim,
+                        )
+                        dtype = torch.int8
+                    elif cache_sparse_sfa_c8:
                         head_size = get_sfa_qsfa_packed_head_dim(
                             self.model_config.hf_text_config.kv_lora_rank,
                             self.model_config.hf_text_config.qk_rope_head_dim,
@@ -6192,6 +6210,7 @@ class NPUModelRunner(GPUModelRunner):
                         dtype=dtype,
                         cache_dtype_str=self.vllm_config.cache_config.cache_dtype,
                         cache_sparse_sfa_c8=cache_sparse_sfa_c8,
+                        cache_sparse_sfa_turboquant=cache_sparse_sfa_turboquant,
                         store_on_host=self.sparse_kv_offload_enabled,
                         model_version=model_version,
                         indexes_kv_by_block_stride=indexes_kv_by_block_stride,
