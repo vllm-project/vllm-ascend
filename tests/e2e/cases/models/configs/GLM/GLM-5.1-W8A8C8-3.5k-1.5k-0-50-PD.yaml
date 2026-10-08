@@ -1,5 +1,5 @@
 test_name: "GLM-5.1-744B-3.5k-1.5k-0-50"
-model: "Eco-Tech/GLM-5.1-w8a8c8"
+model: "Eco-Tech/GLM-5.1-w8a8c8-MTP"
 num_nodes: 4
 npu_per_node: 16
 dp_load_balancing: external
@@ -89,10 +89,6 @@ templates:
       - "1024"
       - --max-model-len
       - "18432"
-      - --kv-cache-dtype
-      - "int8"
-      - --attention_config.indexer_kv_dtype
-      - "int8"
       - --additional-config
       - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable" : false,"multistream_overlap_shared_expert": true, "enable_dsa_cp":true, "enable_fused_mc2":1}'
       - --max-num-batched-tokens
@@ -157,10 +153,6 @@ templates:
       - "1024"
       - --max-model-len
       - "18432"
-      - --kv-cache-dtype
-      - "int8"
-      - --attention_config.indexer_kv_dtype
-      - "int8"
       - --additional-config
       - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable" : false,"multistream_overlap_shared_expert": true, "enable_dsa_cp":true, "enable_fused_mc2":1}'
       - --max-num-batched-tokens
@@ -229,10 +221,6 @@ templates:
       - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
       - --speculative-config
       - '{"num_speculative_tokens": 3,  "method":"deepseek_mtp","enforce_eager":true}'
-      - --kv-cache-dtype
-      - "int8"
-      - --attention_config.indexer_kv_dtype
-      - "int8"
       - --additional-config
       - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true, "finegrained_tp_config": {"lmhead_tensor_parallel_size":16},"enable_fused_mc2":1,"enable_mlapo":true}'
       - --trust-remote-code
@@ -298,10 +286,6 @@ templates:
       - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
       - --speculative-config
       - '{"num_speculative_tokens": 3,  "method":"deepseek_mtp","enforce_eager":true}'
-      - --kv-cache-dtype
-      - "int8"
-      - --attention_config.indexer_kv_dtype
-      - "int8"
       - --additional-config
       - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true, "finegrained_tp_config": {"lmhead_tensor_parallel_size":16},"enable_fused_mc2":1,"enable_mlapo":true}'
       - --trust-remote-code
