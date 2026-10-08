@@ -24,9 +24,19 @@
 
 - `T >= 0`, `K >= 1`, `R >= 1`, `E_logical >= 1`. All tensors are on the same device. The routing table and load use int32; the load is a contiguous 1-D view.
 - Logical IDs outside `[0, E_logical)` map to `-1`. The local range must lie within `expert_load` and have positive length. `BLOCK_P = next_power_of_2(local_expert_count)` and `BLOCK * BLOCK_P <= 8192`, where `BLOCK` counts contiguous assignments, not tokens. It is the minimum of 512, `8192 / BLOCK_P`, and the power-of-two padded largest program-owned assignment range, with a minimum of 2 to avoid singleton-index lowering. Extra lanes are masked out. The 8192 elements are an operator-internal comparison working-set safety budget—not a factor in grid selection. A local range whose `2 * BLOCK_P > 8192` cannot fit the minimum tile and is rejected internally.
+- Logical IDs retain their input integer width in the kernel: int32 is not unconditionally widened, and int64 is not truncated. Invalid-ID checks happen before the routing-table lookup.
 - The record contract is a **valid prefix**: rows `0 <= t < valid_tokens` are real and later rows are padding. The count can change on-device during graph replay. Mapping still produces output for padded rows, but they do not contribute to load.
 - Communication mode names are not a correctness guard. The MC2 mask count and the existing step-level unpadded count supply the valid-prefix value; no new ALLTOALL partition arithmetic is introduced. A DP/PCP AllGather with unequal per-rank valid lengths can place padding between valid rows, and a scalar prefix cannot represent that layout. This remains an unknown/inherited #17574 prefix-contract risk, not a problem created or solved by replacing global atomics with grid-private reduction.
 - Post-Router ID rewrites (`log2phy`, mixed placement, forced EPLB or forced load balance) use the existing downstream record path, because recording before the final ID rewrite would count the wrong assignment.
+
+## Integration Reference Boundary
+
+PR #17574 (`55b07ac7417b8d6c6d499769ae7cfca15f9613af`) records each valid token's mapped assignments into the same local physical-expert range using atomics. Given identical logical IDs, routing table, valid count, flag and local range, the grid-private histogram and reduction express the same integer sum. This does not imply identical end-to-end dispatch:
+
+- #17574 fuses selection, mapping and recording for supported decode batches up to 512 tokens. This operator consumes the existing Router's logical IDs at the mapping hook and does not select experts or restrict the routing phase.
+- #17574 obtains the valid count from the MC2 mask when present, otherwise from the prepared hidden-state row count. This integration uses the existing step-level unpadded count when no MC2 mask is present. These counts are equivalent only when they describe the same valid prefix of the mapping input.
+- Both paths skip the V2 downstream record after mapping-stage recording and use mutable device-side routing tables and record flags. Post-mapping ID rewrites cannot use early recording.
+- A separate TP2/EP2 ALLTOALL model audit found different mapping-stage and MoE destination counts. The source-rank input set and final distributed load aggregation need further investigation; this issue is preserved separately, not fixed by tiling or covered by standalone atomic/reduction equivalence.
 
 ## Origin and Differences
 

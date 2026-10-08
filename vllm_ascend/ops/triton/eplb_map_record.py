@@ -55,7 +55,7 @@ def _eplb_map_grid_record_kernel(
     for base in range(token_start * K, assignment_end, BLOCK):
         assignment = base + tl.arange(0, BLOCK)
         assignment_mask = assignment < assignment_end
-        logical_id = tl.load(logical_ids_ptr + assignment, mask=assignment_mask, other=0).to(tl.int64)
+        logical_id = tl.load(logical_ids_ptr + assignment, mask=assignment_mask, other=0)
         logical_valid = (logical_id >= 0) & (logical_id < experts)
         safe_logical_id = tl.where(logical_valid, logical_id, 0)
         table_index = ((assignment // K) % table_rows) * experts + safe_logical_id

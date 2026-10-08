@@ -128,9 +128,11 @@ def test_resource_guard_is_local_physical_not_logical_expert_count():
         eplb_map_and_record(logical_ids, table, load, enabled, 1, local_expert_start=0, local_expert_count=8193)
 
 
-def test_int64_ids_and_invalid_padding_ids_match_mainline_mapping():
+@pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
+def test_integer_ids_and_invalid_padding_ids_match_mainline_mapping(dtype):
     enable_custom_op()
-    logical_ids = torch.tensor([[0, 1], [-1, 2**31]], device="npu", dtype=torch.int64)
+    invalid_id = 2**31 if dtype == torch.int64 else 2**31 - 1
+    logical_ids = torch.tensor([[0, 1], [-1, invalid_id]], device="npu", dtype=dtype)
     table = torch.tensor([[1, 0]], device="npu", dtype=torch.int32)
     load = torch.zeros(2, device="npu", dtype=torch.int32)
     enabled = torch.tensor(True, device="npu")
