@@ -1313,35 +1313,45 @@ class FinegrainedTPConfig:
                     "oproj_tensor_parallel_size / mlp_tensor_parallel_size are not supported "
                     "with prefill_context_parallel_size > 1."
                 )
-            # Exchanges always run at the static capacity regardless of the replayed
-            # bucket, so a multi-bucket ladder only adds padding waste. Collapse to
-            # the recipe bucket instead of disabling the knobs (the scheduler's
-            # max_num_batched_tokens writeback follows the same adjust-and-warn pattern).
+            # The exchange buffers are sized once at the capacity, so every replayed
+            # bucket pays the same exchange; extra buckets only add capture graphs
+            # and their memory. Collapse to the recipe bucket instead of disabling
+            # the knobs (same adjust-and-warn pattern as the SP max_num_batched
+            # _tokens writeback above).
             capture_sizes = vc.compilation_config.cudagraph_capture_sizes
             if capture_sizes is None or len(capture_sizes) != 1:
                 decode_query_len = (
                     1 if vc.speculative_config is None else 1 + vc.speculative_config.num_speculative_tokens
                 )
+                # Floor to a decode_query_len multiple within mnbt: a bucket above
+                # mnbt is dropped by _set_cudagraph_sizes' clipping, which empties
+                # the list and aborts startup.
                 chosen = min(
                     vc.scheduler_config.max_num_batched_tokens,
                     vc.scheduler_config.max_num_seqs * decode_query_len,
                 )
-                chosen = -(-chosen // decode_query_len) * decode_query_len
+                chosen -= chosen % decode_query_len
                 if capture_sizes:
                     chosen = max(chosen, max(capture_sizes))
+                chosen -= chosen % decode_query_len
+                chosen = min(chosen, vc.scheduler_config.max_num_batched_tokens)
                 vc.compilation_config.cudagraph_capture_sizes = [chosen]
                 vc.compilation_config.max_cudagraph_capture_size = chosen
+                # _setup_compile_backend would merge the platform's reduced cap
+                # back into the list and rebuild a multi-bucket ladder.
+                if getattr(vc.compilation_config, "reduced_cg_cap", None) is not None:
+                    delattr(vc.compilation_config, "reduced_cg_cap")
                 # warning_once caches its args in a set, so sizes must be hashable.
                 sizes_desc = "the default size ladder" if capture_sizes is None else str(capture_sizes)
                 logger.warning_once(
-                    "Fine-grained TP exchanges always run at the static capacity "
-                    "regardless of the replayed capture bucket, so a multi-bucket "
-                    "ladder only adds padding waste. Collapsing cudagraph_capture_sizes "
-                    "%s to [%d] (= min(max_num_batched_tokens, max_num_seqs * "
-                    "decode_query_len), rounded up to a decode_query_len multiple, "
-                    "clamped up to your largest bucket) so the bucket equals the "
-                    "exchange capacity. Set cudagraph_capture_sizes explicitly to "
-                    "silence this.",
+                    "Fine-grained TP exchanges always run at the static capacity, "
+                    "so extra capture buckets do not shrink the exchange - they "
+                    "only add capture graphs and memory. Collapsing "
+                    "cudagraph_capture_sizes %s to [%d] (= min(max_num_batched_"
+                    "tokens, max_num_seqs * decode_query_len), floored to a "
+                    "decode_query_len multiple, clamped up to your largest "
+                    "bucket) so one bucket equals the exchange capacity. Set "
+                    "cudagraph_capture_sizes explicitly to silence this.",
                     sizes_desc,
                     chosen,
                 )

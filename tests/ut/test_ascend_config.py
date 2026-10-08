@@ -1141,20 +1141,31 @@ class TestSubconfigPydanticTypeValidation(TestBase):
         cudagraph_capture_sizes=(512,),
         cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
         prefill_context_parallel_size=1,
+        max_num_batched_tokens=1024,
+        max_num_seqs=256,
+        num_speculative_tokens=None,
     ):
+        compilation_config = SimpleNamespace(
+            cudagraph_mode=cudagraph_mode,
+            cudagraph_capture_sizes=cudagraph_capture_sizes,
+            max_cudagraph_capture_size=max(cudagraph_capture_sizes) if cudagraph_capture_sizes else None,
+        )
+        if cudagraph_capture_sizes is None:
+            # The platform injects its reduced default before this validation runs.
+            compilation_config.reduced_cg_cap = 512
         return SimpleNamespace(
             parallel_config=SimpleNamespace(
                 tensor_parallel_size=1,
                 data_parallel_size=8,
                 prefill_context_parallel_size=prefill_context_parallel_size,
             ),
-            scheduler_config=SimpleNamespace(max_num_batched_tokens=1024, max_num_seqs=256),
-            speculative_config=None,
-            compilation_config=SimpleNamespace(
-                cudagraph_mode=cudagraph_mode,
-                cudagraph_capture_sizes=cudagraph_capture_sizes,
-                max_cudagraph_capture_size=max(cudagraph_capture_sizes) if cudagraph_capture_sizes else None,
+            scheduler_config=SimpleNamespace(max_num_batched_tokens=max_num_batched_tokens, max_num_seqs=max_num_seqs),
+            speculative_config=(
+                None
+                if num_speculative_tokens is None
+                else SimpleNamespace(num_speculative_tokens=num_speculative_tokens)
             ),
+            compilation_config=compilation_config,
             kv_transfer_config=SimpleNamespace(is_kv_consumer=True),
             model_config=SimpleNamespace(is_moe=True),
         )
@@ -1199,6 +1210,21 @@ class TestSubconfigPydanticTypeValidation(TestBase):
         config._validate_preconditions(vc)
         self.assertEqual(vc.compilation_config.cudagraph_capture_sizes, [256])
         self.assertEqual(config.oproj_tensor_parallel_size, 2)
+        # The platform's reduced cap must be cleared, or _setup_compile_backend
+        # merges it back and rebuilds a multi-bucket ladder.
+        self.assertIsNone(getattr(vc.compilation_config, "reduced_cg_cap", None))
+        # A bucket must stay a decode_query_len multiple within mnbt: a bucket
+        # above mnbt is dropped by _set_cudagraph_sizes and aborts startup.
+        vc = self._oproj_tp_vllm_config(
+            cudagraph_capture_sizes=None,
+            max_num_batched_tokens=1000,
+            max_num_seqs=335,
+            num_speculative_tokens=2,
+        )
+        config._validate_preconditions(vc)
+        self.assertEqual(vc.compilation_config.cudagraph_capture_sizes, [999])
+        self.assertLessEqual(vc.compilation_config.max_cudagraph_capture_size, 1000)
+        self.assertEqual(vc.compilation_config.max_cudagraph_capture_size % 3, 0)
 
     def test_eplb_config_int_field_lax(self):
         cfg = EplbConfig(eplb_policy_type="2")
