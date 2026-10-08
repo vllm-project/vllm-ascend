@@ -1158,7 +1158,17 @@ class AscendMLAImpl(MLAAttentionImpl):
             supports_native_weights = get_current_hardware_profile().supports(
                 HardwareCapability.MLAPO_NATIVE_WEIGHTS
             ) and isinstance(layer_quant_method, UnquantizedLinearMethod)
-            if self.fused_qkv_a_proj is None or not (supports_quantized_weights or supports_native_weights):
+
+            if isinstance(quant_method, AscendW8A8LinearMethod) and not self.fa_quant_layer:
+                # Static quant_bias can include ModelSlim M4 affine compensation,
+                # not just the activation zero-point correction. The dynamic
+                # prolog drops it, so retain the original projections and norms.
+                self.enable_mlapo = False
+                logger.warning_once(
+                    "MLAPO does not preserve static W8A8 quantization bias. "
+                    "Using unfused MLA preprocessing for non-FA-quant layers."
+                )
+            elif self.fused_qkv_a_proj is None or not (supports_quantized_weights or supports_native_weights):
                 self.enable_mlapo = False
                 logger.warning_once(
                     "MLAPO supports W8A8/W8A8-MXFP8 weights, INT8 W8A8_DYNAMIC "
