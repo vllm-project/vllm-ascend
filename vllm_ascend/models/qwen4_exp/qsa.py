@@ -38,6 +38,7 @@ from vllm_ascend.ops.triton.qwen4_exp.qsa import (
     qsa_select_paged_tokens as qsa_select_paged_tokens_triton,
 )
 from vllm_ascend.ops.triton.qwen4_exp.qsa import (
+    qsa_q_norm_rope,
     qsa_sparse_paged_attention,
     qsa_store_cache_rows,
 )
@@ -83,11 +84,29 @@ def apply_qsa_rope(
     rotary_emb: torch.nn.Module,
     positions: torch.Tensor,
     tensor: torch.Tensor,
+    *,
+    q_norm: torch.nn.Module | None = None,
+    num_q_heads: int = 0,
+    head_dim: int = 0,
 ) -> torch.Tensor:
     """Apply RoPE using the QSA head width rather than the main Q/K width."""
     rotary_dim = int(rotary_emb.rotary_dim)
     cache = rotary_emb._match_cos_sin_cache_dtype(tensor)  # noqa: SLF001
     sections = list(getattr(rotary_emb, "mrope_section", []))
+    if q_norm is not None:
+        return qsa_q_norm_rope(
+            tensor,
+            q_norm.weight,
+            positions,
+            cache,
+            num_q_heads,
+            head_dim,
+            rotary_dim,
+            q_norm.variance_epsilon,
+            neox=getattr(rotary_emb, "is_neox_style", False),
+            interleaved=getattr(rotary_emb, "mrope_interleaved", False),
+            sections=tuple(sections) if positions.ndim == 2 else (0, 0, 0),
+        )
     # Keep the materialized normalization/RoPE boundary portable on Ascend.
     # The CUDA/ROCm variants use a Triton MRoPE gather here; advanced indexing
     # has identical semantics and is graph-capturable by the NPU backend.
@@ -217,7 +236,7 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
         num_tokens = raw_metadata.num_actual_tokens
         hidden_states = hidden_states[:num_tokens]
         positions = positions[..., :num_tokens]
-        query, token_k = self.project_qk(hidden_states, positions)
+        query, token_k = self.project_qk(hidden_states, positions,compute_query=not self.skip_topk)
         self._update_and_compress(
             token_k,
             positions,
@@ -235,19 +254,30 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
         self,
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        *,
+        compute_query: bool = True,
+    ) -> tuple[torch.Tensor | None, torch.Tensor]:
         qk, _ = self.index_qk_proj(hidden_states)
-        q_raw, token_k = qk.split(
+        _, token_k = qk.split(
             (
                 self.index_n_heads * self.index_head_dim,
                 self.index_kv_heads * self.index_head_dim,
             ),
             dim=-1,
         )
-        q = q_raw.reshape(-1, self.index_n_heads, self.index_head_dim)
-        q = self.q_layernorm(q.reshape(-1, self.index_head_dim)).reshape_as(q)
-        q = apply_qsa_rope(self.rotary_emb, positions, q)
-        return q, token_k.reshape(-1, 1, self.index_head_dim)
+        token_k = token_k.reshape(-1, 1, self.index_head_dim)
+
+        if not compute_query:
+            return None, token_k
+        q = apply_qsa_rope(
+            self.rotary_emb,
+            positions,
+            qk,
+            q_norm=self.q_layernorm,
+            num_q_heads=self.index_n_heads,
+            head_dim=self.index_head_dim
+        )
+        return q, token_k
 
     def _update_and_compress(
         self,

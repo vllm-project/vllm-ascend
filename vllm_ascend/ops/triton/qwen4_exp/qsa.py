@@ -577,6 +577,128 @@ def _compress_qsa_groups_kernel(
         mask=(row < num_rows) & (position_dims < 3),
     )
 
+@triton.jit
+def _qsa_q_norm_rope_kernel(
+    QK,
+    WEIGHT,
+    POSITIONS,
+    CACHE,
+    OUT,
+    qk_stride_t,
+    qk_stride_d,
+    weight_stride,
+    pos_stride_axis,
+    pos_stride_t,
+    cache_stride_p,
+    cache_stride_d,
+    EPS: tl.constexpr,
+    HEADS: tl.constexpr,
+    DIM: tl.constexpr,
+    ROTARY_DIM: tl.constexpr,
+    THREE_AXES: tl.constexpr,
+    INTERLEAVED: tl.constexpr,
+    NEOX:tl.constexpr,
+    SECTION_0: tl.constexpr,
+    SECTION_1: tl.constexpr,
+    SECTION_2: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    row = tl.program_id(0)
+    token = row // HEADS
+    head = row % HEADS
+
+    d = tl.arange(0, BLOCK)
+    valid = d < DIM
+    rotating = d < ROTARY_DIM
+    half = ROTARY_DIM // 2
+
+    q_base = QK + token * qk_stride_t + head * qk_stride_d * DIM
+    x = tl.load(
+        q_base + d * qk_stride_d,
+        mask=valid,
+        other=0.0,
+    ).to(tl.float32)
+
+    variance = tl.sum(x * x, axis=0) / DIM
+    inv_rms = tl.rsqrt(variance + EPS)
+
+    w = tl.load(
+        WEIGHT + d * weight_stride,
+        mask=valid,
+        other=0.0,
+    ).to(tl.float32)
+
+    out_dtype = OUT.dtype.element_ty
+    q = ((x * inv_rms) * (1.0 + w)).to(out_dtype).to(tl.float32)
+
+    if NEOX:
+        pair_d = tl.where(d < half, d + half, d - half)
+        freq = d % half
+        negative = d < half
+    else:
+        pair_d = d ^ 1
+        freq = d // 2
+        negative = (d % 2) == 0
+
+    pair_d = tl.where(rotating, pair_d, 0)
+    pair_x = tl.load(
+        q_base + pair_d * qk_stride_d,
+        mask=rotating,
+        other=0.0,
+    ).to(tl.float32)
+    pair_w = tl.load(
+        WEIGHT + pair_d * weight_stride,
+        mask=rotating,
+        other=0.0,
+    ).to(tl.float32)
+    pair_q = ((pair_x * inv_rms) * (1.0 + pair_w)).to(out_dtype).to(tl.float32)
+
+    axis = tl.full((BLOCK,), 0, dtype=tl.int32)
+    if THREE_AXES:
+        if INTERLEAVED:
+            axis = tl.where(
+                (freq % 3 == 1) & (freq < SECTION_1 * 3),
+                1,
+                axis,
+            )
+            axis = tl.where(
+                (freq % 3 == 2) & (freq < SECTION_2 * 3),
+                2,
+                axis,
+            )
+        else:
+            axis = tl.where(
+                freq < SECTION_0,
+                0,
+                tl.where(freq < SECTION_0 + SECTION_1,1,2),
+            )
+    position = tl.load(
+        POSITIONS + token * pos_stride_t + axis * pos_stride_axis,
+        mask=rotating,
+        other=0,
+    ).to(tl.int64)
+
+    cos = tl.load(
+        CACHE + position * cache_stride_p + freq * cache_stride_d,
+        mask=rotating,
+        other=0,
+    ).to(tl.float32)
+    sin = tl.load(
+        CACHE + position * cache_stride_p + (freq + half) * cache_stride_d,
+        mask=rotating,
+        other=0,
+    ).to(tl.float32)
+
+    q_cos = (q * cos).to(out_dtype).to(tl.float32)
+    pair_sin = (pair_q * sin).to(out_dtype).to(tl.float32)
+    rotated = tl.where(
+        negative,
+        q_cos - pair_sin,
+        q_cos + pair_sin,
+    )
+    result = tl.where(rotating, rotated, q)
+    tl.store(OUT + row * DIM + d, result, mask=valid)
+
 
 def _validate_mqa(q: torch.Tensor) -> None:
     if q.ndim != 3 or q.shape[1] <= 0 or q.shape[2] <= 0:
@@ -1145,6 +1267,55 @@ def qsa_compress_groups_with_ratio(
     )
     return pooled, first_positions
 
+def qsa_q_norm_rope(
+    qk: torch.Tensor,
+    weight: torch.Tensor,
+    positions: torch.Tensor,
+    cache: torch.Tensor,
+    num_heads: int,
+    head_dim: int,
+    rotary_dim: int,
+    eps: float,
+    neox: bool,
+    interleaved: bool,
+    sections: tuple[int, int, int],
+) -> torch.Tensor:
+    num_tokens = qk.shape[0]
+    out = torch.empty(
+        (num_tokens, num_heads, head_dim),
+        dtype=qk.dtype,
+        device=qk.device,
+    )
+    if num_tokens == 0:
+        return out
+    three_axes = positions.ndim == 2
+    _qsa_q_norm_rope_kernel[(num_tokens * num_heads,)](
+        qk,
+        weight,
+        positions,
+        cache,
+        out,
+        qk.stride(0),
+        qk.stride(1),
+        weight.stride(0),
+        positions.stride(0) if three_axes else 0,
+        positions.stride(-1),
+        cache.stride(0),
+        cache.stride(1),
+        EPS=eps,
+        HEADS=num_heads,
+        DIM=head_dim,
+        ROTARY_DIM=rotary_dim,
+        THREE_AXES=three_axes,
+        INTERLEAVED=interleaved,
+        NEOX=neox,
+        SECTION_0=sections[0],
+        SECTION_1=sections[1],
+        SECTION_2=sections[2],
+        BLOCK=triton.next_power_of_2(head_dim),
+        enable_fp_fusion = False,
+    )
+    return out
 
 __all__ = [
     "expand_qsa_block_indices_npu",
@@ -1153,4 +1324,5 @@ __all__ = [
     "qsa_select_paged_tokens",
     "qsa_sparse_paged_attention",
     "qsa_store_cache_rows",
+    "qsa_q_norm_rope",
 ]
