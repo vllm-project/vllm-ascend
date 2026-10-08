@@ -1,5 +1,7 @@
 import torch
 
+from vllm_ascend._310p.ops.fla.cann_ops import get_gdn_op
+
 
 def fused_gdn_gating_pytorch(
     A_log: torch.Tensor,
@@ -60,3 +62,26 @@ def fused_gdn_gating_pytorch(
     beta_output = beta_output.unsqueeze(0)
 
     return g, beta_output
+
+
+def fused_gdn_gating(
+    A_log: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    dt_bias: torch.Tensor,
+    beta: float = 1.0,
+    threshold: float = 20.0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Use the ops-transformer GDN op when possible, otherwise use PyTorch."""
+    op = get_gdn_op("fused_gdn_gating")
+    if op is not None and a.device.type == "npu":
+        return op(
+            A_log.to(torch.float16).contiguous(),
+            a.to(torch.float16).contiguous(),
+            b.to(torch.float16).contiguous(),
+            dt_bias.to(torch.float16).contiguous(),
+            beta,
+            threshold,
+        )
+
+    return fused_gdn_gating_pytorch(A_log, a, b, dt_bias, beta, threshold)
