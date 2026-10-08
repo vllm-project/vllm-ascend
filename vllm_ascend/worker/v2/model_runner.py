@@ -86,7 +86,6 @@ from vllm_ascend.worker.v2.pp_utils import (
     use_legacy_spec_pp,
 )
 from vllm_ascend.worker.v2.spec_decode import init_speculator
-from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 from vllm_ascend.worker.v2.states import AscendRequestState
 from vllm_ascend.worker.v2.utils import (
     prepare_v41_dummy_ring_state,
@@ -176,18 +175,13 @@ class NPUModelRunner(GPUModelRunner):
         del self.input_buffers
         del self.speculator
 
-        # we define AscendEagleSpeculator in vllm_ascend.worker.v2.spec_decode.eagle.speculator
-        # init_speculator will return AscendEagleSpeculator when eagle is used.
-        # so here we just call init_speculator to reinitialize speculator.
-        self.speculator: AscendEagleSpeculator | None = None
-        if self.speculative_config is not None and self.is_last_pp_rank:
-            self.speculator = init_speculator(self.vllm_config, self.device)
-            # Shared update_stream: main model (ModelAclGraphManager) and draft
-            # (Eagle/DFlash/DSpark AclGraphManager) all use this same stream.
-            self.speculator.update_stream = self.update_stream
-
         # AscendRequestState has extra `num_computed_tokens_cpu` attribute.
         # so reinitialize req_states here.
+        num_prefill_lookahead = max(1, getattr(self.vllm_config, "num_prefill_lookahead_tokens", 1))
+        use_dense_all_token_ids = bool(
+            self.speculative_config is not None
+            and getattr(self.speculative_config, "use_ngram", lambda: False)()
+        )
         self.req_states: AscendRequestState = AscendRequestState(
             max_num_reqs=self.max_num_reqs,
             max_model_len=self.max_model_len,
@@ -195,7 +189,19 @@ class NPUModelRunner(GPUModelRunner):
             num_speculative_steps=self.num_speculative_steps,
             vocab_size=self.vocab_size,
             device=self.device,
+            num_prefill_lookahead=num_prefill_lookahead,
+            use_dense_all_token_ids=use_dense_all_token_ids,
         )
+
+        # Future MRV2 NGram proposal will read the same request state that
+        # receives post-verification token updates. Construct the speculator
+        # only after that state exists, matching the upstream contract.
+        self.speculator = None
+        if self.speculative_config is not None and self.is_last_pp_rank:
+            self.speculator = init_speculator(self.vllm_config, self.device, self.req_states)
+            # Shared update_stream: main model (ModelAclGraphManager) and draft
+            # (Eagle/DFlash/DSpark AclGraphManager) all use this same stream.
+            self.speculator.update_stream = self.update_stream
         if self.use_spec_pp:
             from vllm_ascend.patch.worker.patch_v2.patch_spec_pp import (
                 install_upstream_spec_pp_protocol,

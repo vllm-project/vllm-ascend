@@ -565,8 +565,8 @@ def test_init_spec_pp_full_graph_and_speculator():
             lambda self, cfg, dev: _parent_init(self, cfg, dev, full_graph=True, speculative=True, use_pp=True),
         ),
         patch("vllm_ascend.worker.v2.model_runner.AscendEPLBController", return_value="eplb") as eplb_cls,
-        patch("vllm_ascend.worker.v2.model_runner.init_speculator", return_value=speculator),
-        patch("vllm_ascend.worker.v2.model_runner.AscendRequestState", return_value="req"),
+        patch("vllm_ascend.worker.v2.model_runner.init_speculator", return_value=speculator) as init_speculator,
+        patch("vllm_ascend.worker.v2.model_runner.AscendRequestState", return_value="req") as request_state,
         patch("vllm_ascend.worker.v2.model_runner.AscendInputBuffers", return_value="buf"),
         patch("vllm_ascend.worker.v2.model_runner.set_cos_and_sin"),
         patch("vllm_ascend.worker.v2.model_runner.set_mc2_tokens_capacity"),
@@ -586,6 +586,17 @@ def test_init_spec_pp_full_graph_and_speculator():
     assert runner.use_aclgraph is True
     assert runner.use_aux_hidden_state_outputs is True
     assert runner.speculator is speculator
+    init_speculator.assert_called_once_with(vllm_config, torch.device("cpu"), "req")
+    request_state.assert_called_once_with(
+        max_num_reqs=2,
+        max_model_len=32,
+        max_num_batched_tokens=8,
+        num_speculative_steps=1,
+        vocab_size=16,
+        device=torch.device("cpu"),
+        num_prefill_lookahead=1,
+        use_dense_all_token_ids=False,
+    )
     assert speculator.update_stream is runner.update_stream
     assert runner.use_spec_pp is False
     assert runner.sync_spec_pp_cpu_counts is True

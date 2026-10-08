@@ -23,6 +23,8 @@ def _make_config(
     """Create a minimal speculative decoding config for init_speculator tests."""
     speculative_config = SimpleNamespace(
         method=method,
+        use_ngram=MagicMock(return_value=False),
+        use_ngram_gpu=MagicMock(return_value=False),
         use_dspark=MagicMock(return_value=use_dspark),
         use_dflash=MagicMock(return_value=use_dflash),
         use_eagle=MagicMock(return_value=use_eagle),

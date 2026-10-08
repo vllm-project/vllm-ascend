@@ -16,16 +16,25 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+from typing import TYPE_CHECKING
+
 import torch
 from vllm.config import VllmConfig
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.states import RequestState
 
 
 def init_speculator(
     vllm_config: VllmConfig,
     device: torch.device,
+    req_states: "RequestState | None" = None,
 ):
     """Override GPU init_speculator for Ascend NPUs.
-    Use AscendEagleSpeculator when eagle is used.
+
+    ``req_states`` mirrors the upstream MRV2 factory contract.  It is kept in
+    the interface even while Ascend NGram proposal generation remains disabled;
+    the future NPU speculator will consume the same final request state.
     """
     speculative_config = vllm_config.speculative_config
     assert speculative_config is not None
