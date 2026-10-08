@@ -127,8 +127,6 @@ def register_kvpp_draft_layers(
         else:
             proposer = getattr(model_runner, "drafter", None)
             names = getattr(proposer, "_draft_attn_layer_names", None)
-            if names is None:
-                names = getattr(proposer, "attn_layer_names", None)
         if names is None:
             raise ValueError("KVPP requires draft cache layer names from the loaded proposer.")
         draft_names = set(names)
