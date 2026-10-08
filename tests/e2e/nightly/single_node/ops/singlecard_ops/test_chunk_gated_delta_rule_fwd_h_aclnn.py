@@ -20,13 +20,73 @@ import math
 import pytest
 import torch
 import torch_npu
-from fla_npu.ops.ascendc import chunk_gated_delta_rule_fwd_h
+
+from vllm_ascend.utils import enable_custom_op
 
 torch_npu.npu.config.allow_internal_format = True
+enable_custom_op()
 
 CHUNK_SIZE = 64
 DETERMINISM_REPEATS = 20
 FWD_H_OUTPUT_NAMES = ("h", "v_new", "final_state")
+
+
+@pytest.mark.parametrize(
+    ("dtype", "initial_state_dtype", "output_final_state", "is_varlen"),
+    [
+        (torch.float16, None, False, False),
+        (torch.bfloat16, None, False, True),
+        (torch.float16, None, True, False),
+        (torch.bfloat16, None, True, True),
+        (torch.float16, torch.float16, True, False),
+        (torch.bfloat16, torch.bfloat16, True, True),
+        (torch.float16, None, True, True),
+        (torch.bfloat16, None, True, False),
+        (torch.float16, torch.float32, True, True),
+        (torch.bfloat16, torch.float32, True, False),
+        (torch.float16, torch.float16, False, True),
+        (torch.bfloat16, torch.float32, False, False),
+    ],
+)
+def test_chunk_gated_delta_rule_fwd_h_vllm_meta_contract(dtype, initial_state_dtype, output_final_state, is_varlen):
+    batch, seqlen, k_num_head, v_num_head, k_dim, v_dim = 1 if is_varlen else 2, 96, 2, 4, 128, 256
+    k = torch.empty((batch, k_num_head, seqlen, k_dim), dtype=dtype, device="meta")
+    w = torch.empty((batch, v_num_head, seqlen, k_dim), dtype=dtype, device="meta")
+    u = torch.empty((batch, v_num_head, seqlen, v_dim), dtype=dtype, device="meta")
+    g = torch.empty((batch, v_num_head, seqlen), dtype=torch.float32, device="meta")
+    cu_seqlens = (0, 16, seqlen) if is_varlen else None
+    chunk_indices = (0, 0, 1, 0, 1, 1) if is_varlen else None
+    num_sequences = len(cu_seqlens) - 1 if cu_seqlens is not None else batch
+    num_chunks = len(chunk_indices) // 2 if chunk_indices is not None else math.ceil(seqlen / CHUNK_SIZE)
+    initial_state = (
+        torch.empty((num_sequences, v_num_head, k_dim, v_dim), dtype=initial_state_dtype, device="meta")
+        if initial_state_dtype is not None
+        else None
+    )
+    h, v_new, final_state = torch.ops._C_ascend.chunk_gated_delta_rule_fwd_h_vllm(
+        k,
+        w,
+        u,
+        g=g,
+        initial_state=initial_state,
+        output_final_state=output_final_state,
+        chunk_size=CHUNK_SIZE,
+        save_new_value=True,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        use_exp2=False,
+        transpose_state_layout=False,
+    )
+    assert h.shape == (batch, v_num_head, num_chunks, k_dim, v_dim)
+    assert h.dtype == dtype and h.device.type == "meta"
+    assert v_new.shape == u.shape
+    assert v_new.dtype == dtype and v_new.device.type == "meta"
+    if output_final_state:
+        assert final_state.shape == (num_sequences, v_num_head, k_dim, v_dim)
+        assert final_state.dtype == (initial_state_dtype if initial_state_dtype is not None else torch.float32)
+        assert final_state.device.type == "meta"
+    else:
+        assert final_state is None
 
 
 def _cleanup_npu():
@@ -252,7 +312,7 @@ def test_chunk_gated_delta_rule_fwd_h_matches_reference(
         cu_seqlens,
     )
 
-    h_out, v_new, final_state = chunk_gated_delta_rule_fwd_h(
+    h_out, v_new, final_state = torch.ops._C_ascend.chunk_gated_delta_rule_fwd_h_vllm(
         k.npu(),
         w.npu(),
         u.npu(),
@@ -261,6 +321,9 @@ def test_chunk_gated_delta_rule_fwd_h_matches_reference(
         chunk_size=CHUNK_SIZE,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
+        save_new_value=True,
+        use_exp2=False,
+        transpose_state_layout=False,
     )
 
     assert final_state is None
@@ -306,7 +369,7 @@ def test_chunk_gated_delta_rule_fwd_h_kda_is_bitwise_deterministic():
     initial_state_npu = initial_state.npu()
 
     def run_fwd_h():
-        return chunk_gated_delta_rule_fwd_h(
+        return torch.ops._C_ascend.chunk_gated_delta_rule_fwd_h_vllm(
             k_npu,
             w_npu,
             u_npu,
@@ -314,6 +377,9 @@ def test_chunk_gated_delta_rule_fwd_h_kda_is_bitwise_deterministic():
             initial_state=initial_state_npu,
             output_final_state=True,
             chunk_size=CHUNK_SIZE,
+            save_new_value=True,
+            use_exp2=False,
+            transpose_state_layout=False,
         )
 
     run_fwd_h()

@@ -11,14 +11,14 @@
 #include "opdev/op_log.h"
 #include "opdev/op_dfx.h"
 #include "opdev/make_op_executor.h"
-#include "chunk_gated_delta_rule_fwd_h.h"
+#include "chunk_gated_delta_rule_fwd_h_vllm.h"
 
 using namespace op;
 
 namespace l0op {
-OP_TYPE_REGISTER(ChunkGatedDeltaRuleFwdH);
+OP_TYPE_REGISTER(ChunkGatedDeltaRuleFwdHVllm);
 
-const std::array<const aclTensor *, 3> ChunkGatedDeltaRuleFwdH(
+const std::array<const aclTensor *, 3> ChunkGatedDeltaRuleFwdHVllm(
     const aclTensor *k,
     const aclTensor *w,
     const aclTensor *u,
@@ -34,7 +34,7 @@ const std::array<const aclTensor *, 3> ChunkGatedDeltaRuleFwdH(
     const aclTensor *finalStateOut,
     aclOpExecutor *executor)
 {
-    L0_DFX(ChunkGatedDeltaRuleFwdH, k, w, u, g, gkOptional, initalStateOptional, cuSeqlensOptional, chunkIndicesOptional, outputFinalState, chunkSize, hOut, vNewOut, finalStateOut);
+    L0_DFX(ChunkGatedDeltaRuleFwdHVllm, k, w, u, g, gkOptional, initalStateOptional, cuSeqlensOptional, chunkIndicesOptional, outputFinalState, chunkSize, hOut, vNewOut, finalStateOut);
 
     const aclTensor *actualCuSeqlens = nullptr;
     if (cuSeqlensOptional) {
@@ -56,7 +56,7 @@ const std::array<const aclTensor *, 3> ChunkGatedDeltaRuleFwdH(
         actualChunkIndices = nullptr;
     }
 
-    auto ret = ADD_TO_LAUNCHER_LIST_AICORE(ChunkGatedDeltaRuleFwdH,
+    auto ret = ADD_TO_LAUNCHER_LIST_AICORE(ChunkGatedDeltaRuleFwdHVllm,
         OP_INPUT(k, w, u, g, gkOptional, initalStateOptional, actualCuSeqlens, actualChunkIndices),
         OP_OUTPUT(hOut, vNewOut, finalStateOut),
         OP_ATTR(outputFinalState, chunkSize));

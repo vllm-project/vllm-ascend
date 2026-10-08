@@ -8,11 +8,11 @@
  */
 
 /*!
- * \file chunk_gated_delta_rule_fwd_h_tiling.cpp
+ * \file chunk_gated_delta_rule_fwd_h_vllm_tiling.cpp
  * \brief
  */
 
-#include "chunk_gated_delta_rule_fwd_h_tiling.h"
+#include "chunk_gated_delta_rule_fwd_h_vllm_tiling.h"
 #include <register/op_impl_registry.h>
 #include "tiling_base/data_copy_transpose_tiling.h"
 #include "tiling_base/tiling_templates_registry.h"
@@ -57,7 +57,7 @@ static constexpr int64_t V_DIM_256 = 256;
 static void ChunkGatedDeltaRuleFwdHTilingDataPrint(gert::TilingContext *context, ChunkGatedDeltaRuleFwdHTilingData &tiling)
 {
     auto nodeName = context->GetNodeName();
-    OP_LOGD(nodeName, ">>>>>>>>>>>>>>> Start to print ChunkGatedDeltaRuleFwdH tiling data <<<<<<<<<<<<<<<<");
+    OP_LOGD(nodeName, ">>>>>>>>>>>>>>> Start to print ChunkGatedDeltaRuleFwdHVllm tiling data <<<<<<<<<<<<<<<<");
     OP_LOGD(nodeName, "=== batch: %ld", tiling.get_batch());
     OP_LOGD(nodeName, "=== seqlen: %ld", tiling.get_seqlen());
     OP_LOGD(nodeName, "=== kNumHead: %ld", tiling.get_kNumHead());
@@ -72,7 +72,7 @@ static void ChunkGatedDeltaRuleFwdHTilingDataPrint(gert::TilingContext *context,
     OP_LOGD(nodeName, "=== isVariedLen: %ld", tiling.get_isVariedLen());
     OP_LOGD(nodeName, "=== shapeBatch: %ld", tiling.get_shapeBatch());
     OP_LOGD(nodeName, "=== tokenBatch: %f", tiling.get_tokenBatch());
-    OP_LOGD(nodeName, ">>>>>>>>>>>>>>> Print ChunkGatedDeltaRuleFwdH tiling data end <<<<<<<<<<<<<<<<");
+    OP_LOGD(nodeName, ">>>>>>>>>>>>>>> Print ChunkGatedDeltaRuleFwdHVllm tiling data end <<<<<<<<<<<<<<<<");
 }
 
 ge::graphStatus Tiling4ChunkGatedDeltaRuleFwdH(gert::TilingContext *context)
@@ -187,7 +187,7 @@ ge::graphStatus TilingPrepareForChunkGatedDeltaRuleFwdH(gert::TilingParseContext
     return ge::GRAPH_SUCCESS;
 }
 
-IMPL_OP_OPTILING(ChunkGatedDeltaRuleFwdH)
+IMPL_OP_OPTILING(ChunkGatedDeltaRuleFwdHVllm)
     .Tiling(Tiling4ChunkGatedDeltaRuleFwdH)
     .TilingParse<ChunkGatedDeltaRuleFwdHCompileInfo>(TilingPrepareForChunkGatedDeltaRuleFwdH);
 

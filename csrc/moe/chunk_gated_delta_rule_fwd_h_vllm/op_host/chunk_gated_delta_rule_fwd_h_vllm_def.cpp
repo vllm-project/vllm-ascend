@@ -8,7 +8,7 @@
  */
 
 /*!
- * \file chunk_gated_delta_rule_fwd_h_def.cpp
+ * \file chunk_gated_delta_rule_fwd_h_vllm_def.cpp
  * \brief
  */
 
@@ -16,9 +16,9 @@
 
 namespace ops {
 
-class ChunkGatedDeltaRuleFwdH : public OpDef {
+class ChunkGatedDeltaRuleFwdHVllm : public OpDef {
 public:
-    explicit ChunkGatedDeltaRuleFwdH(const char *name) : OpDef(name)
+    explicit ChunkGatedDeltaRuleFwdHVllm(const char *name) : OpDef(name)
     {
         this->Input("k")
             .ParamType(REQUIRED)
@@ -118,6 +118,6 @@ public:
     }
 };
 
-OP_ADD(ChunkGatedDeltaRuleFwdH);
+OP_ADD(ChunkGatedDeltaRuleFwdHVllm);
 
 } // namespace ops

@@ -1,5 +1,5 @@
 """
-chunk_gated_delta_rule_fwd_h correctness tests on Ascend 310P
+chunk_gated_delta_rule_fwd_h_vllm correctness tests on Ascend 310P
 via torch.ops._C_ascend binding.
 """
 
@@ -14,7 +14,7 @@ CHUNK_SIZE = 64
 
 def npu_chunk_gdr_fwd_h(k, w, u, g, initial_state=None, chunk_size=64):
     enable_custom_op()
-    return torch.ops._C_ascend.chunk_gated_delta_rule_fwd_h(
+    return torch.ops._C_ascend.chunk_gated_delta_rule_fwd_h_vllm(
         k,
         w,
         u,
@@ -23,6 +23,8 @@ def npu_chunk_gdr_fwd_h(k, w, u, g, initial_state=None, chunk_size=64):
         output_final_state=False,
         chunk_size=chunk_size,
         save_new_value=True,
+        use_exp2=False,
+        transpose_state_layout=False,
     )
 
 
@@ -64,7 +66,7 @@ def cosine(a, b):
 
 
 class TestChunkGatedDeltaRuleFwdH310:
-    """chunk_gated_delta_rule_fwd_h kernel correctness on Ascend 310P."""
+    """chunk_gated_delta_rule_fwd_h_vllm kernel correctness on Ascend 310P."""
 
     @pytest.mark.parametrize(
         "B,Hg,HV,T,K,V",

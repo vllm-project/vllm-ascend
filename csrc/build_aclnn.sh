@@ -85,7 +85,7 @@ if [[ "$SOC_VERSION" =~ ^ascend310 ]]; then
         "causal_conv1d_v310"
         "recurrent_gated_delta_rule_v310"
         "chunk_fwd_o_vllm"
-        "chunk_gated_delta_rule_fwd_h"
+        "chunk_gated_delta_rule_fwd_h_vllm"
     )
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
     SOC_ARG="ascend310p"
@@ -124,6 +124,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "grouped_matmul_swiglu_quant"
         "grouped_matmul_swiglu_quant_v2"
         "chunk_fwd_o_vllm"
+        "chunk_gated_delta_rule_fwd_h_vllm"
         "kda_gate_cumsum"
         "kda_layout_swap12"
         "store_kv_block"
@@ -180,6 +181,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "grouped_matmul_swiglu_quant_v2"
         "attn_res_fwd"
         "chunk_fwd_o_vllm"
+        "chunk_gated_delta_rule_fwd_h_vllm"
         "kda_gate_cumsum"
         "kda_layout_swap12"
         "store_kv_block"
@@ -222,6 +224,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         "indexer_compress_epilog_v2"
         "attn_res_fwd"
         "chunk_fwd_o_vllm"
+        "chunk_gated_delta_rule_fwd_h_vllm"
         "kda_gate_cumsum"
         "kda_layout_swap12"
         "store_kv_block"

@@ -7,16 +7,16 @@
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  * See LICENSE in the root of the software repository for the full text of the License.
  */
-#ifndef OP_API_INC_ACLNN_CHUNK_GATED_DELTA_RULE_FWD_H_H
-#define OP_API_INC_ACLNN_CHUNK_GATED_DELTA_RULE_FWD_H_H
+#ifndef OP_API_INC_ACLNN_CHUNK_GATED_DELTA_RULE_FWD_H_VLLM_H
+#define OP_API_INC_ACLNN_CHUNK_GATED_DELTA_RULE_FWD_H_VLLM_H
 #include "aclnn/aclnn_base.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* function: aclnnChunkGatedDeltaRuleFwdHGetWorkspaceSize
- * parameters (order aligned with chunk_gated_delta_rule_fwd_h Python API):
+/* function: aclnnChunkGatedDeltaRuleFwdHVllmGetWorkspaceSize
+ * parameters (order aligned with chunk_gated_delta_rule_fwd_h_vllm Python API):
  * k : required
  * w : required
  * u : required
@@ -37,7 +37,7 @@ extern "C" {
  * executor : executor context(output).
  */
 __attribute__((visibility("default")))
-aclnnStatus aclnnChunkGatedDeltaRuleFwdHGetWorkspaceSize(
+aclnnStatus aclnnChunkGatedDeltaRuleFwdHVllmGetWorkspaceSize(
     const aclTensor *k,
     const aclTensor *w,
     const aclTensor *u,
@@ -57,7 +57,7 @@ aclnnStatus aclnnChunkGatedDeltaRuleFwdHGetWorkspaceSize(
     uint64_t *workspaceSize,
     aclOpExecutor **executor);
 
-/* function: aclnnChunkGatedDeltaRuleFwdH
+/* function: aclnnChunkGatedDeltaRuleFwdHVllm
  * parameters :
  * workspace : workspace memory addr(input).
  * workspaceSize : size of workspace(input).
@@ -65,7 +65,7 @@ aclnnStatus aclnnChunkGatedDeltaRuleFwdHGetWorkspaceSize(
  * stream : acl stream.
  */
 __attribute__((visibility("default")))
-aclnnStatus aclnnChunkGatedDeltaRuleFwdH(
+aclnnStatus aclnnChunkGatedDeltaRuleFwdHVllm(
     void *workspace,
     uint64_t workspaceSize,
     aclOpExecutor *executor,
