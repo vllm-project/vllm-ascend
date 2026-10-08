@@ -300,11 +300,7 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
                 MoEActivation.SITU,
                 "situ",
             )
-            w13_input_dtype = (
-                torch.float4_e2m1fn_x2
-                if is_situ
-                else torch_npu.float4_e2m1fn_x2
-            )
+            w13_input_dtype = torch.float4_e2m1fn_x2 if is_situ else torch_npu.float4_e2m1fn_x2
 
             layer.w13_weight_list = []
             for weight in layer.w13_weight.data.unbind(dim=0):
@@ -334,12 +330,8 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
             ]
             # GMM-SiTU consumes contiguous N-major expert lists. Ordinary GMM
             # gets zero-copy transposed views from _get_mlp_weights.
-            layer.w13_weight_scale_list = [
-                scale.clone() for scale in layer.w13_weight_scale.data.unbind(dim=0)
-            ]
-            layer.w2_weight_scale_list = [
-                scale.clone() for scale in layer.w2_weight_scale.data.unbind(dim=0)
-            ]
+            layer.w13_weight_scale_list = [scale.clone() for scale in layer.w13_weight_scale.data.unbind(dim=0)]
+            layer.w2_weight_scale_list = [scale.clone() for scale in layer.w2_weight_scale.data.unbind(dim=0)]
             del layer.w13_weight
             del layer.w2_weight
             del layer.w13_weight_scale
