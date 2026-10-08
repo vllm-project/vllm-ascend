@@ -1109,6 +1109,76 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
                 self.assertEqual(worker.group_block_len[0], [16])
                 self.assertEqual(worker.group_block_stride[0], [16])
 
+    def test_register_combined_attention_preserves_views_and_block_geometry(self):
+        for scale in (1, 2):
+            for padding in (0, 8):
+                with self.subTest(scale=scale, padding=padding):
+                    worker = self._make_worker()
+                    worker._transfer_threads_started = True
+                    num_blocks = 3
+                    kernel_block_size = 4
+                    spec = FullAttentionSpec(
+                        block_size=kernel_block_size * scale, num_kv_heads=2, head_size=8, dtype=torch.float32
+                    )
+                    names = ["layer.0", "layer.1"]
+                    worker.kv_cache_config = SimpleNamespace(
+                        num_blocks=num_blocks,
+                        kv_cache_groups=[KVCacheGroupSpec(layer_names=names, kv_cache_spec=spec)],
+                    )
+                    row_elements = kernel_block_size * 2 * 8
+                    row_stride = 2 * row_elements + padding
+                    combined = {}
+                    for name in names:
+                        raw = torch.arange(num_blocks * scale * row_stride, dtype=spec.dtype)
+                        combined[name] = torch.as_strided(
+                            raw,
+                            size=(2, num_blocks * scale, kernel_block_size, 2, 8),
+                            stride=(row_elements, row_stride, 16, 8, 1),
+                        )
+                    worker.register_kv_caches(combined)
+
+                    expected_len = row_elements * scale * 4
+                    expected_stride = row_stride * scale * 4
+                    self.assertEqual(worker.block_len, [expected_len, expected_len])
+                    self.assertEqual(worker.block_stride, [expected_stride, expected_stride])
+                    self.assertEqual(worker.group_block_len[0], [expected_len] * 4)
+                    self.assertEqual(worker.group_block_stride[0], [expected_stride] * 4)
+                    ptrs, lengths = worker.m_store.register_buffer.call_args.args
+                    self.assertEqual(len(ptrs), len(names))
+                    for name, ptr, length in zip(names, ptrs, lengths):
+                        original = combined[name]
+                        self.assertIsInstance(original, torch.Tensor)
+                        key, value = worker.kv_caches[name]
+                        for index, view in enumerate((key, value)):
+                            self.assertEqual(view.data_ptr(), original[index].data_ptr())
+                            self.assertEqual(view.stride(), original[index].stride())
+                            self.assertEqual(view.storage_offset(), original[index].storage_offset())
+                            self.assertFalse(view.is_contiguous())
+                            self.assertEqual(view.untyped_storage().data_ptr(), original.untyped_storage().data_ptr())
+                        self.assertEqual(ptr, key.data_ptr())
+                        region_len = (num_blocks - 1) * expected_stride + expected_len
+                        self.assertEqual(length, row_elements * 4 + region_len)
+
+    def test_register_combined_attention_does_not_split_other_cache_types(self):
+        for mode in ("tuple", "mla", "mamba", "sparse", "missing_spec"):
+            with self.subTest(mode=mode):
+                worker = self._make_worker()
+                worker._transfer_threads_started = True
+                worker.use_mla = mode == "mla"
+                worker.use_sparse = mode == "sparse"
+                spec = FullAttentionSpec(block_size=4, num_kv_heads=2, head_size=8, dtype=torch.float32)
+                if mode == "mamba":
+                    spec = MambaSpec(block_size=4, shapes=((4, 2, 8),), dtypes=(torch.float32,))
+                if mode != "missing_spec":
+                    worker.kv_cache_config = SimpleNamespace(
+                        num_blocks=2,
+                        kv_cache_groups=[KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=spec)],
+                    )
+                cache = torch.zeros(2, 2, 4, 2, 8)
+                original = (cache[0], cache[1]) if mode == "tuple" else cache
+                worker.register_kv_caches({"layer.0": original})
+                self.assertIs(worker.kv_caches["layer.0"], original)
+
     def test_as_cache_tuple_empty_and_nonempty_tensors(self):
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 

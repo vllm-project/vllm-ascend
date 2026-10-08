@@ -86,7 +86,7 @@ async def test_models(model: str, tp_size: int) -> None:
         "OMP_NUM_THREADS": "1",
         "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
         "MOONCAKE_CONFIG_PATH": "mooncake.json",
-        "ASCEND_ENABLE_USE_FABRIC_MEM": "1",
+        "ASCEND_ENABLE_USE_FABRIC_MEM": "0",
         "ASCEND_AUTO_CONNECT": "1",
     }
     kv_transfer_config = {
