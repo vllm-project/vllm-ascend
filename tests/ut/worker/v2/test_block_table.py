@@ -4,6 +4,9 @@
 
 from __future__ import annotations
 
+import sys
+from types import ModuleType
+
 import torch
 
 from vllm_ascend.patch.worker.patch_v2 import patch_uva
@@ -22,6 +25,17 @@ def test_encoder_only_zero_cache_groups_initialize_and_compute(monkeypatch) -> N
     # facility; the production AscendBlockTables constructor remains real.
     monkeypatch.setattr(torch, "zeros", zeros_without_pinning)
     monkeypatch.setattr(patch_uva, "is_uva_available", lambda: True)
+    monkeypatch.setitem(
+        sys.modules,
+        "vllm_ascend.vllm_ascend_C",
+        ModuleType("vllm_ascend.vllm_ascend_C"),
+    )
+    monkeypatch.setattr(
+        torch.ops._C_ascend,
+        "get_npu_view_from_cpu_tensor",
+        lambda tensor: tensor,
+        raising=False,
+    )
 
     block_tables = AscendBlockTables(
         block_sizes=[],
