@@ -581,9 +581,8 @@ class AscendConfig:
     # model's quant_type, 0 means disabled (use the model's own quant).
     combine_quant_mode: Literal[0, 2, 3, 4] = 0
     pa_shape_list: list[Any] = dataclasses.field(default_factory=list)
-    # Per-rank token capacity after dispatch in the fused MC2/MegaMoe path.
-    # The same value is passed as dispatch_ffn_combine's max_output_size
-    # and CANN MegaMoe buffer's max_recv_token_num.
+    # Per-rank token capacity after dispatch in the fused MC2 path.
+    # Passed as dispatch_ffn_combine's max_output_size.
     # This is a reference value: if the actual per-rank received token
     # count exceeds it, tokens may be truncated, causing precision
     # degradation. Do not set it too large because workspace memory scales

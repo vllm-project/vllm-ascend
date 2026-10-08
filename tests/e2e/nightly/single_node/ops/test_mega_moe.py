@@ -5,6 +5,7 @@ Source the CANN environment and set the HCCL/GLOO interface before running:
 
     torchrun --nproc_per_node=8 test_mega_moe.py --tokens 4 32 256 512
     torchrun --nproc_per_node=8 test_mega_moe.py --tokens 256 --graph
+    torchrun --nproc_per_node=8 test_mega_moe.py --tokens 256 --max-recv-tokens 65536
     torchrun --nproc_per_node=8 test_mega_moe.py --tokens 2048 --input-scale 10
 
 Use a fresh process for each graph shape to isolate CANN/HCCL graph lifetime.
@@ -47,7 +48,10 @@ def main():
     p.add_argument("--activation", choices=["situ", "silu"], default="situ")
     p.add_argument("--graph", action="store_true")
     p.add_argument("--input-scale", type=float, default=1.0)
+    p.add_argument("--max-recv-tokens", type=int, default=0, help="0 uses CANN automatic receive capacity")
     a = p.parse_args()
+    if a.max_recv_tokens < 0:
+        p.error("--max-recv-tokens must be non-negative")
     rank = int(os.environ["RANK"])
     world = int(os.environ["WORLD_SIZE"])
     torch.npu.set_device(int(os.environ["LOCAL_RANK"]))
@@ -114,7 +118,7 @@ def main():
         a.topk,
         a.hidden,
         2 * a.intermediate,
-        max_recv_token_num=min(65536, max(a.tokens) * world * min(a.topk, a.experts // world)),
+        max_recv_token_num=min(a.max_recv_tokens, max(a.tokens) * world * min(a.topk, a.experts // world)),
         dispatch_quant_mode=4,
         dispatch_quant_out_dtype=24,
     )

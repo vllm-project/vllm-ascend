@@ -406,34 +406,17 @@ class FusedMC2CommImpl(MoECommMethod):
         if is_decode_only_node:
             max_recv_token_num = absolute_safe_max_recv_token_num
         else:
-            # P nodes and PD-mixed nodes use the configured value. This keeps
-            # the existing memory/performance tradeoff for prefill workloads.
-            max_recv_token_num = get_ascend_config().mega_moe_max_tokens
-            # absolute_safe_max_recv_token_num is the max value required by mega moe api
-            if max_recv_token_num > absolute_safe_max_recv_token_num:
-                max_recv_token_num = absolute_safe_max_recv_token_num
-            logger.warning_once(
-                "MegaMoe symm buffer: max_recv_token_num is set from "
-                "mega_moe_max_tokens=%d (reference value) on a P or PD-mixed "
-                "node. If the actual per-rank received token count after "
-                "dispatch exceeds this value, precision degradation will "
-                "occur. The absolute safe upper bound is %d "
-                "(num_max_tokens_per_rank=%d, ep_world_size=%d, num_topk=%d, "
-                "expert_per_rank=%d). Please tune mega_moe_max_tokens in "
-                "additional_config based on actual expert load distribution.",
-                max_recv_token_num,
-                absolute_safe_max_recv_token_num,
-                num_max_tokens_per_rank,
-                int(self.token_dispatcher.ep_world_size),
-                num_topk,
-                expert_per_rank,
-            )
+            # P and PD-mixed nodes let CANN calculate receive capacity.
+            max_recv_token_num = 0
 
         logger.info(
-            "CANN MegaMoe sym-buffer alloc (must match across all EP ranks): ep_rank=%s ep_world=%s global_bs=%s",
+            "CANN MegaMoe sym-buffer alloc (must match across all EP ranks): "
+            "ep_rank=%s ep_world=%s global_bs=%s max_recv_token_num=%d safe_recv_capacity=%d",
             getattr(self.token_dispatcher, "ep_rank_id", "?"),
             getattr(self.token_dispatcher, "ep_world_size", "?"),
             self.token_dispatcher.global_bs,
+            max_recv_token_num,
+            absolute_safe_max_recv_token_num,
         )
 
         return self.get_symm_buffer_for_mega_moe(
