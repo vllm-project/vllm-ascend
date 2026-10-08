@@ -1,5 +1,5 @@
 test_name: "multi-node-GLM-5.1-W8A8C8-MTP-A3_3.5k_1.5k_0_20"
-model: "Eco-Tech/GLM-5.1-w8a8c8-MTP"
+model: "Eco-Tech/GLM-5.1-w8a8"
 num_nodes: 2
 npu_per_node: 16
 dp_load_balancing: internal
@@ -20,7 +20,7 @@ deployment:
   - envs:
       <<: *env_common
     server_cmd: >
-      vllm serve Eco-Tech/GLM-5.1-w8a8c8-MTP
+      vllm serve Eco-Tech/GLM-5.1-w8a8
       --host 0.0.0.0
       --port $SERVER_PORT
       --data-parallel-size 2
@@ -50,7 +50,7 @@ deployment:
     envs:
       <<: *env_common
     server_cmd: >
-      vllm serve Eco-Tech/GLM-5.1-w8a8c8-MTP
+      vllm serve Eco-Tech/GLM-5.1-w8a8
       --host 0.0.0.0
       --port $SERVER_PORT
       --data-parallel-size 2
