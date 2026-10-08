@@ -356,6 +356,41 @@ def _record_v2_eplb_load(router: FusedMoERouter, result: FusedExpertsResult) -> 
     )
 
 
+def _empty_like_preserving_npu_format(
+    tensor: torch.Tensor,
+    **kwargs,
+) -> torch.Tensor:
+    """Allocate an EPLB buffer with the source tensor's NPU storage format."""
+    target_dtype = kwargs.get("dtype") or tensor.dtype
+    target_layout = kwargs.get("layout") or tensor.layout
+    target_device = kwargs.get("device") or tensor.device
+    memory_format = kwargs.get("memory_format", torch.preserve_format)
+
+    # ACLNN-only devices force allow_internal_format=False, so torch.empty_like
+    # silently converts internal formats such as FRACTAL_NZ_C0_16 to ND. Use
+    # the explicit NPU allocator when the source layout is requested unchanged.
+    if (
+        tensor.device.type == "npu"
+        and torch.device(target_device).type == "npu"
+        and target_dtype == tensor.dtype
+        and target_layout == tensor.layout
+        and memory_format == torch.preserve_format
+    ):
+        result = torch_npu.empty_with_format(
+            size=tensor.size(),
+            dtype=target_dtype,
+            layout=target_layout,
+            device=target_device,
+            pin_memory=kwargs.get("pin_memory", False),
+            acl_format=int(torch_npu.get_npu_format(tensor)),
+        )
+        if kwargs.get("requires_grad", False):
+            result.requires_grad_(True)
+        return result
+
+    return torch.empty_like(tensor, **kwargs)
+
+
 class EplbExpertTensorList(list[torch.Tensor]):
     """Per-expert tensors exposed through the upstream EPLB weight contract."""
 
@@ -367,7 +402,7 @@ class EplbExpertTensorList(list[torch.Tensor]):
     def __torch_function__(cls, func, types, args=(), kwargs=None):
         if func is torch.empty_like:
             source = args[0]
-            return cls(torch.empty_like(tensor, **(kwargs or {})) for tensor in source)
+            return cls(_empty_like_preserving_npu_format(tensor, **(kwargs or {})) for tensor in source)
         return NotImplemented
 
 
