@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
+from typing import Any
 
 from tools.ttft_diagnostic import analyze_round, decode_time_points
 
@@ -15,7 +16,7 @@ class TestTTFTDiagnostic(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name).resolve()
         self.path = self.root / "gsm8k_details.jsonl"
-        self.row = {
+        self.row: dict[str, Any] = {
             "id": 0,
             "success": True,
             "input_tokens": 3500,
