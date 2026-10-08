@@ -722,6 +722,10 @@ def test_initialize_kv_cache_forwards_allocation_context():
 def test_initialize_kv_cache_configures_shared_block_tables_after_parent(fail):
     runner = _make_runner()
     runner.compilation_config = SimpleNamespace(static_forward_context={})
+    runner.vllm_config = SimpleNamespace(
+        compilation_config=runner.compilation_config, scheduler_config=SimpleNamespace(max_num_seqs=8)
+    )
+    runner.model = torch.nn.Module()
     runner.pcp_manager = None
     runner.speculator = SimpleNamespace()
     runner.model_config = SimpleNamespace(enable_return_routed_experts=False)
@@ -769,6 +773,9 @@ def test_initialize_kv_cache_configures_shared_block_tables_after_parent(fail):
 def test_copy_inventory_preserves_nonshared_cache_components(layer_stride, layer_names):
     runner = _make_runner()
     runner.compilation_config = SimpleNamespace(static_forward_context={})
+    runner.vllm_config = SimpleNamespace(
+        compilation_config=runner.compilation_config, scheduler_config=SimpleNamespace(max_num_seqs=8)
+    )
     runner.pcp_manager = None
     runner.speculator = None
     runner.model_config = SimpleNamespace(enable_return_routed_experts=False)

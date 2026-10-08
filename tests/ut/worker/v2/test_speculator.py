@@ -491,6 +491,8 @@ def test_capture_single_step_only_captures_prefill():
     """Test single-step capture only captures the prefill graph."""
     speculator = AscendAutoRegressiveSpeculator.__new__(AscendAutoRegressiveSpeculator)
     speculator.last_token_indices = MagicMock()
+    speculator.idx_mapping = torch.ones(2, dtype=torch.int32)
+    speculator.max_num_reqs = 2
     speculator.prefill_cudagraph_manager = MagicMock()
     speculator.prefill_cudagraph_manager.use_breakable_cg = True
     speculator.decode_cudagraph_manager = MagicMock()
@@ -517,6 +519,8 @@ def test_capture_multi_step_captures_decode():
     """Test multi-step capture includes the decode graph."""
     speculator = AscendAutoRegressiveSpeculator.__new__(AscendAutoRegressiveSpeculator)
     speculator.last_token_indices = MagicMock()
+    speculator.idx_mapping = torch.ones(2, dtype=torch.int32)
+    speculator.max_num_reqs = 2
     speculator.prefill_cudagraph_manager = MagicMock()
     speculator.prefill_cudagraph_manager.use_breakable_cg = False
     speculator.decode_cudagraph_manager = MagicMock()

@@ -80,7 +80,7 @@ def _make_config():
             decode_context_parallel_size=1,
             prefill_context_parallel_size=1,
         ),
-        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False, max_num_seqs=8),
         max_in_flight_tokens=8,
         cache_config=SimpleNamespace(
             cache_dtype="auto",
@@ -348,6 +348,7 @@ def test_mrv2_copy_on_write_preserves_pooled_pages_and_layer_bindings(
     runner.compilation_config = config.compilation_config
     runner.model_config = SimpleNamespace(enable_return_routed_experts=False)
     runner.model_state = SimpleNamespace()
+    runner.model = torch.nn.Module()
     runner.pcp_manager = None
     runner.speculator = None
     runner.attn_groups = []
