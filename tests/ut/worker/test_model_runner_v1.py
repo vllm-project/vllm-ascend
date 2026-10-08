@@ -1214,18 +1214,22 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         raw = torch.zeros(num_blocks * 488448, dtype=torch.uint8)
 
         flash_profile = SimpleNamespace(supports=lambda capability: capability is HardwareCapability.MLA_FLASH)
-        for q_heads in (8, 12, 64, 96):
-            with self.subTest(q_heads=q_heads):
-                spec = replace(spec, num_heads=q_heads)
-                with patch(
-                    "vllm_ascend.worker.model_runner_v1.get_current_hardware_profile",
-                    return_value=flash_profile,
-                ):
-                    fused = runner._reshape_kv_cache_tensors(kv_cache_config, {layer_name: (raw,)})[layer_name]
+        with patch(
+            "vllm_ascend.worker.model_runner_v1.get_flashmla_ops",
+            return_value=(MagicMock(), MagicMock()),
+        ):
+            for q_heads in (8, 12, 64, 96):
+                with self.subTest(q_heads=q_heads):
+                    spec = replace(spec, num_heads=q_heads)
+                    with patch(
+                        "vllm_ascend.worker.model_runner_v1.get_current_hardware_profile",
+                        return_value=flash_profile,
+                    ):
+                        fused = runner._reshape_kv_cache_tensors(kv_cache_config, {layer_name: (raw,)})[layer_name]
 
-                self.assertIsInstance(fused, torch.Tensor)
-                self.assertEqual(fused.shape, (6, 128, 1, 576))
-                self.assertEqual(fused.stride(), (81408, 576, 576, 1))
+                    self.assertIsInstance(fused, torch.Tensor)
+                    self.assertEqual(fused.shape, (6, 128, 1, 576))
+                    self.assertEqual(fused.stride(), (81408, 576, 576, 1))
 
         # A5 FlashMLA does not support arbitrary query-head counts. Keep these
         # models on the FIA-compatible component-major layout.
@@ -1237,6 +1241,20 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             a5_fallback = runner._reshape_kv_cache_tensors(kv_cache_config, {layer_name: (raw,)})[layer_name]
 
         self.assertIsInstance(a5_fallback, tuple)
+
+        # A5 also falls back to FIA when the active CANN package does not
+        # provide both FlashMLA APIs.
+        spec = replace(spec, num_heads=64)
+        with (
+            patch(
+                "vllm_ascend.worker.model_runner_v1.get_current_hardware_profile",
+                return_value=flash_profile,
+            ),
+            patch("vllm_ascend.worker.model_runner_v1.get_flashmla_ops", return_value=None),
+        ):
+            missing_flashmla_ops = runner._reshape_kv_cache_tensors(kv_cache_config, {layer_name: (raw,)})[layer_name]
+
+        self.assertIsInstance(missing_flashmla_ops, tuple)
 
         with patch(
             "vllm_ascend.worker.model_runner_v1.get_current_hardware_profile",

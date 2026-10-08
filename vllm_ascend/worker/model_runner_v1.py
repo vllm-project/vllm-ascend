@@ -136,6 +136,7 @@ from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import (
     MLA_FLASH_SUPPORTED_Q_HEADS,
     AscendCommonAttentionMetadata,
+    get_flashmla_ops,
     get_sfa_qsfa_packed_head_dim,
     get_tq_fused_slot_bytes,
     requires_contiguous_pa_kv_cache,
@@ -5681,6 +5682,7 @@ class NPUModelRunner(GPUModelRunner):
                         if (
                             get_current_hardware_profile().supports(HardwareCapability.MLA_FLASH)
                             and current_kv_cache_spec.num_heads in MLA_FLASH_SUPPORTED_Q_HEADS
+                            and get_flashmla_ops() is not None
                         ):
                             # A5每个kernel slot内按token交错存储[nope|rope]：
                             # token0[nope|rope], token1[nope|rope], ...。

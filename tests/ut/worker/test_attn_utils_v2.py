@@ -574,6 +574,7 @@ def test_v2_mla_single_raw_backing_selects_layout_by_hardware_and_local_q_heads(
         )[layer_name]
 
     monkeypatch.setattr(attn_utils, "get_current_hardware_profile", lambda: flash_profile)
+    monkeypatch.setattr(attn_utils, "get_flashmla_ops", lambda: (MagicMock(), MagicMock()))
     for q_heads in (8, 12, 64, 96):
         spec = replace(spec, num_heads=q_heads)
         fused = reshape()
@@ -586,6 +587,13 @@ def test_v2_mla_single_raw_backing_selects_layout_by_hardware_and_local_q_heads(
     spec = replace(spec, num_heads=48)
     a5_fallback = reshape()
     assert isinstance(a5_fallback, tuple)
+
+    # Missing FlashMLA APIs in the active CANN package also select the
+    # FIA-compatible component-major layout.
+    monkeypatch.setattr(attn_utils, "get_flashmla_ops", lambda: None)
+    spec = replace(spec, num_heads=64)
+    missing_flashmla_ops = reshape()
+    assert isinstance(missing_flashmla_ops, tuple)
 
     monkeypatch.setattr(attn_utils, "get_current_hardware_profile", lambda: component_profile)
     cache = reshape()

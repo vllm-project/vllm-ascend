@@ -67,6 +67,7 @@ from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import (
     MLA_FLASH_SUPPORTED_Q_HEADS,
     AscendCommonAttentionMetadata,
+    get_flashmla_ops,
     get_sfa_qsfa_packed_head_dim,
     get_tq_fused_slot_bytes,
     requires_contiguous_pa_kv_cache,
@@ -1610,6 +1611,7 @@ def _reshape_kv_cache_v2(
                 if (
                     get_current_hardware_profile().supports(HardwareCapability.MLA_FLASH)
                     and kv_cache_spec.num_heads in MLA_FLASH_SUPPORTED_Q_HEADS
+                    and get_flashmla_ops() is not None
                 ):
                     # Preserve the V1 A5 protocol: one token-fused tensor with
                     # [nope | rope] in the trailing 576 lanes of every token.
