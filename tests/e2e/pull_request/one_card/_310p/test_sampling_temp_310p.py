@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import os
-from unittest.mock import patch
 
 from vllm import SamplingParams
 
@@ -19,7 +18,6 @@ QWEN3_06B_MODEL = os.environ.get("QWEN3_06B_MODEL", "Qwen/Qwen3-0.6B")
 
 
 @wait_until_npu_memory_free(0.7)
-@patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
 def test_qwen3_mrv2_310p_topk() -> None:
     """MRV1 ``test_qwen3_topk`` counterpart on 310P MRV2.
 

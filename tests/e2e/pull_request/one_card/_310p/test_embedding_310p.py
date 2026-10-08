@@ -16,9 +16,6 @@
 # This file is a part of the vllm-ascend project.
 # Adapted from vllm/tests/basic_correctness/test_basic_correctness.py
 #
-import os
-from unittest.mock import patch
-
 import pytest
 from modelscope import snapshot_download  # type: ignore[import-untyped]
 
@@ -62,7 +59,6 @@ def test_embed_models_correctness(model: str):
     )
 
 
-@patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
 @wait_until_npu_memory_free(target_free_percentage=0.7)
 def test_qwen3_vl_embedding_mrv2_pooling():
     """Verify Qwen3-VL-Embedding pooling execution with Model Runner V2 on 310P."""

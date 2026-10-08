@@ -43,3 +43,28 @@ def test_native_v2_spec_pp_validation(method, enable_sp):
     unsupported = VllmConfig._get_v2_model_runner_unsupported_features(config)
     # Spec+PP is natively supported; unrelated upstream guards still apply.
     assert unsupported == (["sequence parallelism"] if enable_sp else [])
+
+
+def test_use_v2_model_runner_defaults_to_true_on_310p(monkeypatch):
+    monkeypatch.setattr(patch_use_v2_model_runner.envs, "VLLM_USE_V2_MODEL_RUNNER", None)
+    monkeypatch.setattr(patch_use_v2_model_runner, "is_310p", lambda: True)
+
+    assert patch_use_v2_model_runner._patched_use_v2_model_runner(object()) is True
+
+
+def test_use_v2_model_runner_defaults_to_false_off_310p(monkeypatch):
+    monkeypatch.setattr(patch_use_v2_model_runner.envs, "VLLM_USE_V2_MODEL_RUNNER", None)
+    monkeypatch.setattr(patch_use_v2_model_runner, "is_310p", lambda: False)
+
+    assert patch_use_v2_model_runner._patched_use_v2_model_runner(object()) is False
+
+
+def test_use_v2_model_runner_env_override_wins(monkeypatch):
+    monkeypatch.setattr(patch_use_v2_model_runner, "is_310p", lambda: True)
+
+    monkeypatch.setattr(patch_use_v2_model_runner.envs, "VLLM_USE_V2_MODEL_RUNNER", False)
+    assert patch_use_v2_model_runner._patched_use_v2_model_runner(object()) is False
+
+    monkeypatch.setattr(patch_use_v2_model_runner.envs, "VLLM_USE_V2_MODEL_RUNNER", True)
+    monkeypatch.setattr(patch_use_v2_model_runner, "is_310p", lambda: False)
+    assert patch_use_v2_model_runner._patched_use_v2_model_runner(object()) is True

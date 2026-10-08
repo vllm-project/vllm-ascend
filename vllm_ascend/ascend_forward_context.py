@@ -466,10 +466,26 @@ class _ExtraForwardContextProxy:
     def _ctx():
         return get_forward_context()
 
+    @staticmethod
+    def _use_v2_additional_kwargs() -> bool:
+        # Follow the Ascend-patched VllmConfig.use_v2_model_runner property so
+        # unset env on 310P (default MRV2) still uses additional_kwargs.
+        try:
+            from vllm.config import get_current_vllm_config
+
+            return bool(get_current_vllm_config().use_v2_model_runner)
+        except Exception:
+            use_v2 = envs_vllm.VLLM_USE_V2_MODEL_RUNNER
+            if use_v2 is not None:
+                return bool(use_v2)
+            from vllm_ascend.device.device_config import is_310p
+
+            return is_310p()
+
     def __getattr__(self, name: str) -> Any:
         self.check_extra_attr(name)
         ctx = self._ctx()
-        if envs_vllm.VLLM_USE_V2_MODEL_RUNNER:
+        if self._use_v2_additional_kwargs():
             # Unset known extras default to None so optional flags (e.g. `sinks`)
             # can be read with truthiness checks before the V2 path populates them.
             return ctx.additional_kwargs.get(name)
@@ -478,7 +494,7 @@ class _ExtraForwardContextProxy:
     def __setattr__(self, name: str, value: Any) -> None:
         self.check_extra_attr(name)
         ctx = self._ctx()
-        if envs_vllm.VLLM_USE_V2_MODEL_RUNNER:
+        if self._use_v2_additional_kwargs():
             ctx.additional_kwargs[name] = value
         else:
             setattr(ctx, name, value)
