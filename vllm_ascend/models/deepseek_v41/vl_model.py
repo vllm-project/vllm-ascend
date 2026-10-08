@@ -219,6 +219,8 @@ class AscendDeepseekV41ForCausalLM(
         query_start_loc=None,
         slot_mapping=None,
         block_table=None,
+        local_token_indices=None,
+        pre_forward=False,
     ):
         return self.language_model.prepare_engram_inputs(
             input_ids,
@@ -228,6 +230,8 @@ class AscendDeepseekV41ForCausalLM(
             query_start_loc,
             slot_mapping,
             block_table,
+            local_token_indices,
+            pre_forward,
         )
 
     @property

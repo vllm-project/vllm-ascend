@@ -50,6 +50,7 @@ from vllm_ascend.utils import (
     bootstrap_custom_op_env,
     check_kv_extra_config,
     enable_sfa_dcp_replicated_indexer,
+    is_deepseek_v41,
     is_moe_model,
     model_uses_kpool_indexer,
     model_uses_sfa_sparse,
@@ -1603,10 +1604,9 @@ def _validate_engram_config(vllm_config: VllmConfig) -> None:
         parallel_config.enable_elastic_ep
         or parallel_config.tensor_parallel_size not in (1, 2, 4, 8)
         or parallel_config.pipeline_parallel_size != 1
-        or parallel_config.prefill_context_parallel_size != 1
         or parallel_config.decode_context_parallel_size != 1
     ):
-        raise ValueError("Ascend Engram requires TP=1/2/4/8 with PP=PCP=DCP=1.")
+        raise ValueError("Ascend Engram requires TP=1/2/4/8 with PP=DCP=1.")
     load_format = vllm_config.load_config.load_format
     if load_format not in ("auto", "safetensors", "dummy"):
         raise ValueError("Ascend Engram requires indexed safetensors (auto/safetensors), or dummy weights.")
@@ -1626,6 +1626,40 @@ def _validate_routing_replay_config(vllm_config: VllmConfig) -> None:
         )
 
 
+def _validate_v41_pcp_config(vllm_config: VllmConfig) -> None:
+    """Keep V4.1 PCP within the eager, colocated execution contract."""
+    parallel = vllm_config.parallel_config
+    hf_config = getattr(vllm_config.model_config, "hf_config", None)
+    if parallel.prefill_context_parallel_size <= 1 or not is_deepseek_v41(hf_config):
+        return
+    if not vllm_config.use_v2_model_runner:
+        raise ValueError("V4.1 PCP requires model runner V2")
+    if not vllm_config.model_config.enforce_eager:
+        raise ValueError("V4.1 PCP requires enforce_eager")
+    if parallel.pipeline_parallel_size != 1 or parallel.decode_context_parallel_size != 1:
+        raise ValueError("V4.1 PCP currently requires PP=DCP=1")
+    if vllm_config.speculative_config is not None:
+        raise ValueError("V4.1 PCP currently requires speculative decoding to be disabled")
+    if vllm_config.kv_transfer_config is not None:
+        raise ValueError("V4.1 PCP currently requires colocated prefill and decode")
+    if (vllm_config.additional_config or {}).get("enable_dsa_cp", False):
+        raise ValueError("Legacy DSACP and PCP cannot be enabled at the same time")
+    finegrained_tp = (vllm_config.additional_config or {}).get("finegrained_tp_config", {})
+    if any(
+        finegrained_tp.get(name, 0) > 0
+        for name in (
+            "lmhead_tensor_parallel_size",
+            "embedding_tensor_parallel_size",
+            "oproj_tensor_parallel_size",
+            "mlp_tensor_parallel_size",
+        )
+    ):
+        raise ValueError("V4.1 PCP does not support fine-grained TP groups")
+    if vllm_config.cache_config.cache_dtype not in ("auto", "bfloat16"):
+        raise ValueError("V4.1 PCP currently requires BF16 KV cache")
+    vllm_config.cache_config.cache_dtype = "bfloat16"
+
+
 def _validate_parallel_config(vllm_config: VllmConfig) -> None:
     parallel_config = vllm_config.parallel_config
     if not vllm_config.use_v2_model_runner and parallel_config.prefill_context_parallel_size > 1:
@@ -1635,6 +1669,7 @@ def _validate_parallel_config(vllm_config: VllmConfig) -> None:
             f"Got prefill_context_parallel_size={parallel_config.prefill_context_parallel_size}."
         )
 
+    _validate_v41_pcp_config(vllm_config)
     kvpp_config = KVPPConfig.from_vllm_config(vllm_config)
     if kvpp_config.size > 1:
         kvpp_config.validate(vllm_config)

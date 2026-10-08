@@ -48,7 +48,7 @@ class AscendModelState(DefaultModelState):
         kv_cache_config = getattr(self, "kv_cache_config", None)
         if layer_name is None or kv_cache_config is None:
             return {}
-        if self.kvpp_is_dummy_run or ring_state_update_skipped():
+        if getattr(input_batch, "is_dummy", False) or self.kvpp_is_dummy_run or ring_state_update_skipped():
             return {}
         group_id = next(
             (
@@ -83,16 +83,109 @@ class AscendModelState(DefaultModelState):
         prepare_engram_inputs = getattr(self.model, "prepare_engram_inputs", None)
         if prepare_engram_inputs is None:
             return model_inputs
-        num_tokens = input_batch.num_tokens_after_padding
+        if self.pcp_manager is not None and getattr(self.model, "engram_cache_layer_name", None) is not None:
+            model_inputs.update(self._prepare_pcp_engram_inputs(input_batch, req_states))
+            return model_inputs
+        padded_tokens = input_batch.num_tokens_after_padding
+        num_tokens = padded_tokens
+        device_inputs = self._get_engram_device_inputs(input_batch)
+        if device_inputs and getattr(self.model, "token_lookback_depth", 0):
+            # MRV2 NgramHashState has no slot-cache fallback. Its eager hook
+            # needs accepted prompt/decode history even without PCP; upstream
+            # DefaultModelState.prepare_inputs does not supply that window.
+            num_tokens = input_batch.num_tokens
+            if input_batch.num_reqs and num_tokens:
+                device_inputs.update(
+                    lookback_token_ids=self._get_engram_lookback(input_batch, req_states),
+                    query_start_loc=input_batch.query_start_loc[: input_batch.num_reqs + 1],
+                    slot_mapping=device_inputs["slot_mapping"][:num_tokens],
+                )
+            else:
+                device_inputs = {}
+        if getattr(self.model, "engram_cache_layer_name", None) is not None:
+            # This hook precedes set_forward_context. V4.1 must negotiate its
+            # DP token slot from current local rows, including on dummy ranks.
+            device_inputs["pre_forward"] = True
         model_inputs.update(
             prepare_engram_inputs(
                 input_batch.input_ids[:num_tokens],
                 input_batch.positions[:num_tokens],
-                num_tokens,
-                **self._get_engram_device_inputs(input_batch),
+                padded_tokens,
+                **device_inputs,
             )
         )
         return model_inputs
+
+    def _get_engram_lookback(self, input_batch, req_states):
+        # Preserve lazy worker/model registration: hash/cache dependencies
+        # load only after the V4.1 model has initialized.
+        from vllm_ascend.models.deepseek_v41.engram.common import gather_engram_lookback
+
+        positions = input_batch.positions[: input_batch.num_tokens]
+        history = gather_engram_lookback(
+            positions,
+            input_batch.query_start_loc[: input_batch.num_reqs + 1],
+            input_batch.idx_mapping[: input_batch.num_reqs],
+            req_states.all_token_ids.gpu,
+            req_states.total_len.gpu,
+            self.model.token_lookback_depth,
+            execution_device=getattr(self, "device", positions.device),
+        )
+        # Registered UVA can return the short window on CPU. Hashing stays
+        # on device and never copies the full request token table.
+        return history.to(device=positions.device)
+
+    def _prepare_pcp_engram_inputs(self, input_batch, req_states) -> dict[str, Any]:
+        """Hash in full request order, then route only this PCP rank's rows."""
+        prepare_engram_inputs = self.model.prepare_engram_inputs
+        padded_tokens = input_batch.num_tokens_after_padding
+        if (
+            getattr(input_batch, "is_dummy", False)
+            or self.kvpp_is_dummy_run
+            or ring_state_update_skipped()
+            or not self.model.token_lookback_depth
+        ):
+            # Keep the new embedding's dummy/DP collective contract without
+            # reading request history or a previous step's PCP context.
+            return prepare_engram_inputs(
+                input_batch.input_ids[:padded_tokens],
+                input_batch.positions[:padded_tokens],
+                padded_tokens,
+                pre_forward=True,
+            )
+        context = getattr(self, "pcp_context", None)
+        if context is None or context.padded_gather_idx is None:
+            raise RuntimeError("PCP Engram requires the current step's global-to-local token mapping")
+        global_batch = context.global_batch
+        num_tokens, num_reqs = global_batch.num_tokens, global_batch.num_reqs
+        if num_tokens == 0 or num_reqs == 0:
+            return prepare_engram_inputs(
+                input_batch.input_ids[:0],
+                input_batch.positions[:0],
+                padded_tokens,
+                pre_forward=True,
+            )
+        query_start_loc = global_batch.query_start_loc[: num_reqs + 1]
+        positions = global_batch.positions[:num_tokens]
+        lookback = self._get_engram_lookback(global_batch, req_states)
+        rank_start = self.pcp_manager.pcp_rank * padded_tokens
+        # The mapping includes trailing padding pointing at global token 0.
+        # Exclude it before routing; prepare_engram_inputs clears padded rows.
+        local_indices = context.padded_gather_idx[rank_start : rank_start + input_batch.num_tokens]
+        device_inputs = self._get_engram_device_inputs(input_batch)
+        if not device_inputs:
+            raise RuntimeError("PCP Engram requires global request/cache coordinates")
+        return prepare_engram_inputs(
+            global_batch.input_ids[:num_tokens],
+            positions,
+            padded_tokens,
+            query_start_loc=query_start_loc,
+            lookback_token_ids=lookback,
+            slot_mapping=device_inputs["slot_mapping"][:num_tokens],
+            block_table=device_inputs["block_table"],
+            local_token_indices=local_indices,
+            pre_forward=True,
+        )
 
     def prepare_dummy_inputs(self, num_reqs: int, num_tokens: int) -> dict[str, Any]:
         model_inputs = super().prepare_dummy_inputs(num_reqs, num_tokens)
@@ -146,7 +239,7 @@ class AscendModelState(DefaultModelState):
             )
         query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
         is_prefilling = torch.from_numpy(input_batch.is_prefilling_np)
-        max_query_len = input_batch.num_scheduled_tokens.max().item()
+        max_query_len = input_batch.num_scheduled_tokens.max().item() if input_batch.num_scheduled_tokens.size else 0
         pcp_context = (
             self.pcp_manager.build_attention_context(input_batch, block_tables, slot_mappings)
             if self.pcp_manager is not None

@@ -35,8 +35,9 @@ The A3 configurations in this guide use W8A8 weights and INT8 Engram storage.
 The single-node colocated configuration uses DP4/TP4. The PD configuration
 uses DP4/TP4 on the Prefill node, DP8/TP2 on the Decode node, DSpark
 speculative decoding, and `FULL_DECODE_ONLY` ACL Graph on Decode. The
-DeepSeek-V4.1-Flash model currently supports only model runner V1 on Ascend, so
-all A3 scripts set `VLLM_USE_V2_MODEL_RUNNER=0` explicitly.
+DSACP configurations below use model runner V1 and set
+`VLLM_USE_V2_MODEL_RUNNER=0` explicitly. For the separate single-node MRV2
+PCP configuration, see Section 5.5.
 
 ## 3 Prerequisites
 
@@ -741,6 +742,81 @@ The response must contain a model entry whose `id` matches the configured
 `--served-model-name`: `dsv41` for the A3 examples and `deepseek-v41` for the
 retained A2 example.
 
+### 5.5 Single-Node MRV2 Prefill Context Parallelism
+
+The MRV2 PCP path distributes prompt tokens over a dedicated PCP process
+group. Use it separately from the MRV1 DSACP configurations above. For
+PP=1, the required logical-device count is `TP * DP * PCP`; DCP is not an
+additional device dimension. The following configuration uses all 16 A3
+logical devices with TP1/DP2/PCP8:
+
+```shell
+export VLLM_USE_V2_MODEL_RUNNER=1
+export VLLM_WORKER_MULTIPROC_METHOD=spawn
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+export HCCL_BUFFSIZE=1024
+export HCCL_OP_EXPANSION_MODE=AI_CPU
+export TMPDIR=/tmp/vllm-v41-pcp-compile
+export TRITON_CACHE_DIR=/tmp/vllm-v41-pcp-triton-cache
+mkdir -p "$TMPDIR" "$TRITON_CACHE_DIR"
+
+vllm serve /path/to/DeepSeek-V4.1-Flash-W8A8 \
+  --served-model-name dsv41 \
+  --distributed-executor-backend mp \
+  --data-parallel-backend mp \
+  --data-parallel-size 2 \
+  --data-parallel-size-local 2 \
+  --tensor-parallel-size 1 \
+  --prefill-context-parallel-size 8 \
+  --pipeline-parallel-size 1 \
+  --decode-context-parallel-size 1 \
+  --enable-expert-parallel \
+  --language-model-only \
+  --enforce-eager \
+  --dtype bfloat16 \
+  --kv-cache-dtype bfloat16 \
+  --quantization ascend \
+  --block-size 128 \
+  --max-model-len 131200 \
+  --max-num-batched-tokens 8192 \
+  --max-num-seqs 4 \
+  --gpu-memory-utilization 0.9 \
+  --seed 0 \
+  --enable-chunked-prefill \
+  --enable-prefix-caching \
+  --no-async-scheduling \
+  --no-disable-hybrid-kv-cache-manager \
+  --safetensors-load-strategy lazy \
+  --tokenizer-mode deepseek_v41 \
+  --reasoning-parser deepseek_v41 \
+  --tool-call-parser deepseek_v41 \
+  --generation-config vllm \
+  --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
+  --additional-config '{"enable_dsa_cp":false,"enable_flashcomm1":true}'
+```
+
+Keep compilation scratch and the Triton cache on a local filesystem.
+
+For a 16-device TP/PCP combination, change TP to 2 and PCP to 4 while
+keeping DP=2. For the MRV2 baseline, use TP8/DP2/PCP1 with DSACP disabled.
+These configurations use the same device count with different TP/PCP splits.
+
+PCP gathers hidden states for replicated KV/compressor updates and computes
+queries for rank-local tokens. KV memory remains replicated across PCP ranks.
+
+Engram CPU offload with `dp_shared_memory=true` shares each TP table partition
+across DP/PCP peers; every device registers its own view. Sharing requires
+indexed safetensors, a common host/IPC namespace and access to the creator's
+`/proc/<pid>/fd` mappings. Reserve host RAM for the Engram tables and loading
+buffers separately from model and KV device memory.
+
+The current scope is single-node eager text serving with MRV2, BF16 KV,
+PP=DCP=1, and TP sizes 1, 2, 4, or 8, with at most 16 logical devices and
+all DP replicas local. DSACP, speculative decoding/DSpark, PD KV transfer,
+fine-grained TP, DBO/microbatching, and elastic EP cannot be combined with
+this PCP path. A5, ACL Graph, multimodal PCP and multi-node PCP are outside
+the validated scope.
+
 ## 6 Functional Verification
 
 ### 6.1 Text Request
@@ -841,9 +917,8 @@ For common environment, installation, and parameter issues, refer to the
   servers in 1P1D mode, with an Ascend W8A8 checkpoint and INT8 Engram storage.
 - The A2 configuration is retained unchanged and is not revalidated by this
   update. Its revised configuration will be documented separately.
-- DeepSeek-V4.1-Flash currently supports only model runner V1 on Ascend. Keep
-  `VLLM_USE_V2_MODEL_RUNNER=0` in every A3 serving script. Pipeline parallelism
-  is not covered by this guide.
+- The DSACP scripts use model runner V1; the PCP script in Section 5.5 uses
+  model runner V2. Pipeline parallelism is not covered by this guide.
 - In the A3 PD example, Prefill runs in eager mode. Decode uses
   `FULL_DECODE_ONLY` ACL Graph for the target model and eager execution for the
   DSpark draft model.

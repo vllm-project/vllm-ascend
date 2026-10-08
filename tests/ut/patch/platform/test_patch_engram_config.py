@@ -78,9 +78,8 @@ def test_native_engram_resolution_on_npu(engram_config, draft, shared):
         ("model_config", "architecture", "UnsupportedModel", "non-empty n-gram"),
         ("engram_config", "embedding_across_dp", True, "embedding_across_dp"),
         ("parallel_config", "tensor_parallel_size", 16, "TP=1/2/4/8"),
-        ("parallel_config", "pipeline_parallel_size", 2, "PP=PCP=DCP"),
-        ("parallel_config", "prefill_context_parallel_size", 2, "PP=PCP=DCP"),
-        ("parallel_config", "decode_context_parallel_size", 2, "PP=PCP=DCP"),
+        ("parallel_config", "pipeline_parallel_size", 2, "PP=DCP"),
+        ("parallel_config", "decode_context_parallel_size", 2, "PP=DCP"),
         ("load_config", "load_format", "pt", "indexed safetensors"),
     ],
 )

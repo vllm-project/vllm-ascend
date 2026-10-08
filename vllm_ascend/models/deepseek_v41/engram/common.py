@@ -26,6 +26,49 @@ def valid_engram_token_mask(
     return (input_ids != image_token_id) & (input_ids != image_pad_token_id)
 
 
+def gather_engram_lookback(
+    positions,
+    query_start_loc,
+    request_indices,
+    all_token_ids,
+    total_lens,
+    depth,
+    *,
+    execution_device=None,
+):
+    """Read accepted history from MRV2's device request slots.
+
+    Column j is the token at chunk_start - 1 - j. Both prompt and generated
+    tokens live in all_token_ids; total_lens excludes unaccepted draft slots.
+    Use the current request index mapping, never cached physical KV pages.
+    """
+    history_device = all_token_ids.device
+    if execution_device is None:
+        execution_device = next(
+            (tensor.device for tensor in (positions, total_lens, request_indices) if tensor.device.type != "cpu"),
+            positions.device,
+        )
+    starts = positions.index_select(0, query_start_loc[:-1].to(device=positions.device, dtype=torch.long))
+    lengths = total_lens.index_select(0, request_indices.to(device=total_lens.device, dtype=torch.long))
+    # Ascend's registered UVA history is a CPU tensor; without UVA the same
+    # attribute is an NPU tensor. Move only per-request control vectors to
+    # its actual device, never the potentially multi-GB token table.
+    starts = starts.to(device=history_device)
+    lengths = lengths.to(device=history_device)
+    request_indices = request_indices.to(device=history_device, dtype=torch.long)
+    if history_device.type == "cpu" and execution_device.type != "cpu":
+        # post_update writes accepted tokens through the UVA pointer on the
+        # runner's current stream. Fence before host indexing, including when
+        # the caller already provided CPU control vectors and no D2H copy
+        # would otherwise make these asynchronous writes visible.
+        getattr(torch, execution_device.type).current_stream(execution_device).synchronize()
+    previous = starts[:, None] - 1 - torch.arange(depth, device=history_device)
+    valid = (previous >= 0) & (previous < lengths[:, None])
+    columns = previous.clamp(0, all_token_ids.shape[1] - 1).long()
+    tokens = all_token_ids[request_indices[:, None], columns]
+    return tokens.masked_fill(~valid, -1)
+
+
 def engram_gate(
     hidden: torch.Tensor,
     key: torch.Tensor,

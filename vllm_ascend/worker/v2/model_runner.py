@@ -726,7 +726,7 @@ class NPUModelRunner(GPUModelRunner):
             input_batch,
             valid_state_slots=valid_state_slots,
         )
-        prepare_v41_dummy_ring_state(self, input_batch.num_reqs)
+        prepare_v41_dummy_ring_state(self, input_batch.num_reqs, block_tables)
         return block_tables, slot_mappings
 
     def _lmhead_tp_max_num_logits(self) -> int:

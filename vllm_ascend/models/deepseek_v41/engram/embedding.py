@@ -36,16 +36,25 @@ from vllm.models.deepseek_v41.common.engram import ParallelEngramEmbedding
 from vllm.models.deepseek_v41.nvidia.engram import (
     _gather_engram_rows,
     engram_head_shard_rank,
-    gather_engram_hashes,
 )
 
 from .npu import (
+    EngramBufferInitializationError,
     HostUvaBuffer,
     SharedUvaBuffer,
     gather_dequantize_engram_int8,
     gather_dequantize_host_uva,
     quantize_engram_rows,
 )
+from .parallel import EngramStorageGroup, gather_engram_hashes
+
+
+class EngramTableInitializationError(RuntimeError):
+    """Keep a partially registered table owned until cleanup can be retried."""
+
+    def __init__(self, table, message: str) -> None:
+        super().__init__(message)
+        self.table = table
 
 
 class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
@@ -61,6 +70,7 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         cpu_offload: bool = False,
         dp_shared_memory: bool = False,
         storage_dtype: torch.dtype = torch.int8,
+        storage_group: EngramStorageGroup | None = None,
     ) -> None:
         self.storage_dtype = storage_dtype
         self.cpu_offload = cpu_offload
@@ -72,17 +82,17 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         # falling back to a single replica does not by itself guarantee that.
         if not all(in_the_same_node_as(get_tp_group().cpu_group)):
             raise ValueError("Ascend Engram requires the TP ranks of one replica to stay on a single node")
-        group = get_engram_dp_group()
+        group = storage_group if dp_shared_memory and storage_group is not None else get_engram_dp_group()
         if group is not None and not all(in_the_same_node_as(group.cpu_group)):
-            raise ValueError(
-                "Ascend Engram requires all Engram DP replicas to share the same node and shared-memory namespace"
-            )
+            raise ValueError("Ascend Engram storage peers must share the same node and shared-memory namespace")
         if dp_shared_memory:
+            if not cpu_offload:
+                raise ValueError("dp_shared_memory requires cpu_offload=True")
             if group is None or group.world_size <= 1:
                 raise ValueError("dp_shared_memory needs a node-local sharing group with more than one rank")
             self._shared_group = group
-            # Sharing replaces the per-step DP lookup collectives: every
-            # replica looks up its own tokens over the mapped table.
+            # DP and PCP peers map the same TP slice. Lookup stays local to
+            # each peer's tokens; only TP participates in head gathering.
             self.dp_size = 1
         else:
             self.dp_size = max(get_engram_dp_size(), 1)
@@ -122,7 +132,7 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
             if self.weight_scale_inv is not None:
                 set_weight_attrs(self.weight_scale_inv, {"dummy_weight_value": 1.0})
             logger.info(
-                "Engram table offloaded to registered host memory: %d rows x %d, %.2f GiB per rank",
+                "Engram table offloaded to registered host memory: %d rows x %d, %.2f GiB, shared by %d ranks",
                 self.part_num_embeddings,
                 self.dim,
                 (
@@ -130,6 +140,7 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
                     + (scales.numel() * scales.element_size() if scales is not None else 0)
                 )
                 / 1024**3,
+                self._shared_group.world_size if self._shared_group is not None else 1,
             )
 
     def _get_shard_info(self) -> tuple[int, int]:
@@ -154,9 +165,24 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         if self._shared_group is not None:
             # One physical copy of the mapped range, registered by each
             # rank in the sharing group.
-            self._codes_uva = SharedUvaBuffer(codes_shape, self.storage_dtype, device, self._shared_group)
+            buffers = [("_codes_uva", codes_shape, self.storage_dtype)]
             if quantized:
-                self._scales_uva = SharedUvaBuffer(scales_shape, torch.float32, device, self._shared_group)
+                buffers.append(("_scales_uva", scales_shape, torch.float32))
+            try:
+                for name, shape, dtype in buffers:
+                    try:
+                        setattr(self, name, SharedUvaBuffer(shape, dtype, device, self._shared_group))
+                    except EngramBufferInitializationError as exc:
+                        setattr(self, name, exc.buffer)
+                        raise
+            except Exception:
+                # Scales can fail after codes registered successfully. Do not
+                # leave that first mapping live when construction aborts.
+                try:
+                    self.close_host_offload()
+                except Exception as exc:
+                    raise EngramTableInitializationError(self, "Engram table allocation cleanup failed") from exc
+                raise
             return self._codes_uva.tensor, self._scales_uva.tensor if self._scales_uva is not None else None
         self._codes_uva = HostUvaBuffer(codes_shape, self.storage_dtype, device)
         if quantized:
@@ -188,7 +214,10 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
                 continue
             buffer.close()
             setattr(self, name, None)
-            param = getattr(self, alias)
+            param = getattr(self, alias, None)
+            if param is None:
+                # Allocation can fail before Parameter aliases are created.
+                continue
             setattr(
                 self,
                 alias,
@@ -215,7 +244,7 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
     def load_checkpoint(self, model_path, key, chunk_rows=65536):
         """Stream assigned rows, preserving BF16 in non-quantized models.
 
-        Shared head slices have one writer per EDP group. The final CPU
+        Shared head slices have one writer per storage group. The final CPU
         collective synchronizes writes and propagates loading failures.
         """
         if self._shared_group is None:
@@ -317,6 +346,11 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
             out = _gather_engram_rows(out, num_tokens)
         else:
             out = out[:num_tokens]
+        # All TP ranks of one DP/PCP replica have the same token count. An
+        # empty replica has already joined both DP gathers above; omit only
+        # its zero-element TP gather, which HCCL need not support.
+        if out.shape[0] == 0:
+            return out.new_empty((0, self.n_hash_cols, self.dim))
         if self.tp_size > 1:
             out = tensor_model_parallel_all_gather(out, dim=1)
         return out[:, : self.n_hash_cols]

@@ -139,6 +139,7 @@ class AscendDSAV41Metadata(AttentionMetadata):
     c2_source_sin: torch.Tensor | None = None
     c2_metadata_group_id: int | None = None
     global_metadata: "AscendDSAV41Metadata | None" = None
+    hidden_restore_idx: torch.Tensor | None = None
     cp_token_range: tuple[int, int, int, int] | None = None
 
 
@@ -589,6 +590,10 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         max_tokens = getattr(vllm_config.scheduler_config, "max_num_batched_tokens", 4096)
         max_reqs = getattr(vllm_config.scheduler_config, "max_num_seqs", 256)
+        if build_query_metadata and vllm_config.parallel_config.prefill_context_parallel_size > 1:
+            # Each request can have a head and tail segment on one PCP rank.
+            # Global compressor metadata still uses the original request count.
+            max_reqs *= 2
         self._supports_device_ops = getattr(device, "type", "cpu") != "cpu"
         # CP uses global cache-write controls and local query controls. These
         # roles are fixed before allocation and graph capture.
@@ -928,6 +933,11 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             residual = cmp_residual_buffer
 
             def build_qli_metadata() -> None:
+                # PCP can have a padded rank slice with no local query. Keep
+                # the buffer/task present without submitting an empty batch.
+                if num_actual_tokens == 0:
+                    self._qli_metadata.zero_()
+                    return
                 value = torch.ops._C_ascend.npu_quant_lightning_indexer_v2_metadata(
                     int(_config_value(text_config, "index_n_heads")),
                     1,
@@ -1093,7 +1103,7 @@ class DeepseekV41CacheBackend(AttentionBackend):
 
     @classmethod
     def supports_pcp(cls) -> bool:
-        return False
+        return True
 
     @staticmethod
     def get_kv_cache_shape(num_blocks, block_size, num_kv_heads, head_size, cache_dtype_str="auto"):

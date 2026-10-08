@@ -94,7 +94,9 @@ def prepare_v41_source_rope(runner: "NPUModelRunner") -> None:
                     builder.prepare_source_rope()
 
 
-def prepare_v41_dummy_ring_state(runner: "NPUModelRunner", num_reqs: int) -> None:
+def prepare_v41_dummy_ring_state(
+    runner: "NPUModelRunner", num_reqs: int, block_tables: tuple[torch.Tensor, ...]
+) -> None:
     """Assign live ring pages to dummy requests for V4.1 graph runs."""
     if ring_state_update_skipped():
         return
@@ -104,7 +106,9 @@ def prepare_v41_dummy_ring_state(runner: "NPUModelRunner", num_reqs: int) -> Non
         if num_reqs >= runner.kv_cache_config.num_blocks:
             raise ValueError("Insufficient ring pages for dummy graph requests")
         forward_context = runner.compilation_config.static_forward_context
-        block_table = runner.block_tables.input_block_tables[gid]
+        # PCP metadata reads persistent rank-local views, rather than the
+        # runner's global input tables. Initialize the actual returned view.
+        block_table = block_tables[gid]
         block_table[:num_reqs, 0] = torch.arange(
             1,
             num_reqs + 1,

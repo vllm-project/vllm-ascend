@@ -14,9 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Allow Engram on Ascend until the vLLM pin includes removal of the CUDA gate."""
+"""Allow Ascend Engram and validate PCP peers with the native config type."""
 
 import importlib.util
+from copy import copy
 
 # Older vLLM builds have no Engram config to patch.
 if importlib.util.find_spec("vllm.config.engram") is not None:
@@ -28,3 +29,35 @@ if importlib.util.find_spec("vllm.config.engram") is not None:
             raise ValueError("EngramConfig requires a supported model with non-empty n-gram layer ids.")
 
     EngramConfig.verify_model_config = verify_model_config
+
+    _verify_parallel_config = EngramConfig.verify_parallel_config
+
+    def verify_parallel_config(self, parallel_config) -> None:
+        storage_parallel_config = parallel_config
+        pcp = parallel_config.prefill_context_parallel_size
+        if self.dp_shared_memory and pcp > 1:
+            # Native validation counts DP-only replicas. Include PCP storage
+            # peers in a copy without changing runtime DP or native config types.
+            storage_parallel_config = copy(parallel_config)
+            storage_parallel_config.data_parallel_size *= pcp
+        _verify_parallel_config(self, storage_parallel_config)
+        if pcp <= 1:
+            return
+        tp = parallel_config.tensor_parallel_size
+        dp = parallel_config.data_parallel_size
+        if (
+            parallel_config.enable_elastic_ep
+            or tp not in (1, 2, 4, 8)
+            or min(dp, pcp) < 1
+            or tp * dp * pcp > 16
+            or parallel_config.pipeline_parallel_size != 1
+            or parallel_config.decode_context_parallel_size != 1
+            or parallel_config.nnodes != 1
+            or (not parallel_config.data_parallel_external_lb and parallel_config.data_parallel_size_local != dp)
+        ):
+            raise ValueError(
+                "Ascend Engram PCP requires single-node TP=1/2/4/8 with at most 16 ranks, "
+                "with all DP replicas local and PP=DCP=1."
+            )
+
+    EngramConfig.verify_parallel_config = verify_parallel_config

@@ -5,10 +5,14 @@
 from dataclasses import replace
 
 import torch
-from vllm.distributed import get_tp_group
+from vllm.distributed import get_pcp_group, get_tp_group
 from vllm.forward_context import get_forward_context
 
-from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder, restore_tp_heads
+from vllm_ascend.attention.context_parallel.dsa_cp import (
+    AscendDSACPMetadataBuilder,
+    AscendDSAPCPMetadataBuilder,
+    restore_tp_heads,
+)
 from vllm_ascend.attention.dsa_v1 import dsv4_dsa_overlap_stream
 from vllm_ascend.attention.dsa_v41 import (
     AscendDSAV41Impl,
@@ -16,11 +20,23 @@ from vllm_ascend.attention.dsa_v41 import (
     _config_value,
     scatter_cache_sk,
 )
+from vllm_ascend.attention.utils import enable_pcp
 from vllm_ascend.utils import enable_dsa_cp, npu_stream_switch
 
 
+def gather_and_restore_hidden_states(hidden_states, hidden_restore_idx, group=None):
+    group = get_pcp_group() if group is None else group
+    gathered = group.all_gather(hidden_states.contiguous(), dim=0)
+    return torch.index_select(gathered, 0, hidden_restore_idx)
+
+
 def get_v41_cp_classes():
-    if enable_dsa_cp():
+    use_cp, use_pcp = enable_dsa_cp(), enable_pcp()
+    if use_cp and use_pcp:
+        raise ValueError("Legacy DSACP and PCP cannot be enabled at the same time.")
+    if use_pcp:
+        return AscendDSAV41PCPMetadataBuilder, AscendDSAV41PCPImpl
+    if use_cp:
         return AscendDSAV41CPMetadataBuilder, AscendDSAV41CPImpl
     return AscendDSAV41MetadataBuilder, AscendDSAV41Impl
 
@@ -33,6 +49,10 @@ class _ReplicatedCacheMetadataBuilder(AscendDSAV41MetadataBuilder):
         self._global_builder = AscendDSAV41MetadataBuilder(
             kv_cache_spec, layer_names, vllm_config, device, build_query_metadata=False
         )
+
+    def prepare_source_rope(self):
+        super().prepare_source_rope()
+        self._global_builder.prepare_source_rope()
 
     def enable_device_metadata(self):
         super().enable_device_metadata()
@@ -53,6 +73,66 @@ class _ReplicatedCacheMetadataBuilder(AscendDSAV41MetadataBuilder):
         if batch_shared is not None:
             global_kwargs["common_v41_batch_metadata"] = batch_shared.setdefault("cp_global", {})
         return self._global_builder.build(common_prefix_len, common, fast_build, **global_kwargs)
+
+
+class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
+    """Build global writes and causal rank-local reads in independent buffers."""
+
+    consumes_pcp_context = True
+
+    # Reuse the canonical PCP views without inheriting V4-specific builders.
+    _build_global_common_attn_metadata = staticmethod(AscendDSAPCPMetadataBuilder._build_global_common_attn_metadata)
+    _build_local_common_attn_metadata = AscendDSAPCPMetadataBuilder._build_local_common_attn_metadata
+
+    def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        self._pcp_world_size = vllm_config.parallel_config.prefill_context_parallel_size
+        self._pcp_rank = get_pcp_group().rank_in_group
+
+    def build(
+        self,
+        common_prefix_len,
+        common_attn_metadata,
+        fast_build=False,
+        pcp_context=None,
+        pcp_cache_group_idx=None,
+        **kwargs,
+    ):
+        if pcp_context is None or pcp_cache_group_idx is None:
+            raise ValueError("V4.1 PCP requires the runner's canonical batch context")
+        global_common = self._build_global_common_attn_metadata(pcp_context, pcp_cache_group_idx, common_attn_metadata)
+        global_kwargs = dict(kwargs)
+        # A request can have two local segments, or none on an idle rank.
+        # Neither is the number of requests whose replicated cache is written.
+        global_kwargs["num_actual_reqs"] = pcp_context.global_batch.num_reqs
+        if pcp_context.global_batch.is_dummy:
+            global_kwargs["skip_ring_state_update"] = True
+            global_common = global_common.replace(slot_mapping=torch.full_like(global_common.slot_mapping, -1))
+        global_metadata = self._build_global_metadata(common_prefix_len, global_common, fast_build, global_kwargs)
+        local_common = self._build_local_common_attn_metadata(
+            pcp_context,
+            common_attn_metadata,
+            pcp_cache_group_idx,
+            has_prefill=bool(pcp_context.global_batch.is_prefilling_np.any()),
+        )
+        if global_metadata.cos is not None and global_metadata.sin is not None:
+            # A second cached RoPE lookup would overwrite the global tables
+            # needed by the replicated KV projections. Select from that view.
+            if pcp_context.padded_gather_idx is None:
+                if not pcp_context.global_batch.is_dummy:
+                    raise ValueError("V4.1 PCP requires the local-to-global token map")
+                local_indices = torch.arange(local_common.num_input_tokens, device=local_common.positions.device)
+            else:
+                local_indices = pcp_context.padded_gather_idx.view(self._pcp_world_size, -1)[
+                    self._pcp_rank, : local_common.num_input_tokens
+                ]
+            kwargs["rope_views"] = (global_metadata.cos[local_indices], global_metadata.sin[local_indices])
+        local_metadata = super().build(common_prefix_len, local_common, fast_build, **kwargs)
+        return replace(
+            local_metadata,
+            global_metadata=global_metadata,
+            hidden_restore_idx=pcp_context.hidden_restore_idx[: global_common.num_actual_tokens],
+        )
 
 
 class AscendDSAV41CPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
@@ -120,6 +200,57 @@ class AscendDSAV41CPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
             kwargs["ori_sparse_indices"] = global_metadata.ori_sparse_indices[actual_start:actual_end]
         local = super().build(common_prefix_len, local_common, fast_build, **kwargs)
         return replace(local, global_metadata=global_metadata, cp_token_range=(start, end, per_rank, padded))
+
+
+class AscendDSAV41PCPImpl(AscendDSAV41Impl):
+    """Replicate all cache planes; distribute query, indexer and model work."""
+
+    supports_pcp = True
+
+    @staticmethod
+    def _project_q(attn, hidden_states, cos, sin):
+        # Keep quantization in the model's projection modules. PCP updates all
+        # KV planes before this call, so the fused Q/KV preprocessing cannot
+        # be reused without writing local tokens a second time.
+        qr = attn.q_norm(attn.wq_a(hidden_states))
+        q = attn.wq_b(qr).unflatten(-1, (attn.n_local_heads, attn.head_dim))
+        torch.ops._C_ascend.inplace_partial_rotary_mul(
+            q.unsqueeze(1),
+            cos,
+            sin,
+            rotary_mode="interleave",
+            partial_slice=[attn.nope_head_dim, attn.head_dim],
+        )
+        return q.to(hidden_states.dtype), qr
+
+    def _global_layer_metadata(self, metadata_by_prefix):
+        prefixes = (
+            self.swa_prefix,
+            self.long_kv_source_prefix,
+            self.index_k_source_prefix,
+            self.compressor_state_prefix,
+        )
+        global_by_prefix = {}
+        for prefix in prefixes:
+            if prefix is None:
+                continue
+            metadata = metadata_by_prefix[prefix].global_metadata
+            if metadata is None:
+                raise ValueError(f"V4.1 PCP is missing global cache metadata for {prefix}")
+            global_by_prefix[prefix] = metadata
+        return self._get_layer_metadata(global_by_prefix)
+
+    def _prepare_inputs_and_caches(self, attn, hidden_states, metadata, metadata_by_prefix):
+        # Every rank must enter this collective, including ranks with no local
+        # query. Restoration removes padding and duplicate decode tokens, and
+        # puts C2 pairs back together before ring state and cache writes.
+        global_hidden = gather_and_restore_hidden_states(hidden_states, metadata.swa.hidden_restore_idx)
+        self._update_caches(attn, global_hidden, self._global_layer_metadata(metadata_by_prefix))
+
+    def _prepare_queries(self, attn, hidden_states, positions, cos, sin, metadata):
+        # Global cache writes already completed; ordinary preprocessing would
+        # write the local subset a second time and corrupt C2 residual state.
+        return self._project_q(attn, hidden_states[: metadata.swa.num_actual_tokens], cos, sin)
 
 
 class AscendDSAV41CPImpl(AscendDSAV41Impl):

@@ -361,6 +361,20 @@ class NPUWorker(WorkerBase):
         self.model_runner.reset_lora_state()
         self._weight_update_active = False
 
+    def _close_engram_storage(self) -> None:
+        model_runner = getattr(self, "model_runner", None)
+        if model_runner is None:
+            return
+        if getattr(model_runner, "model", None) is None:
+            return
+        get_model = getattr(model_runner, "get_model", None)
+        model = get_model() if callable(get_model) else getattr(model_runner, "model", None)
+        if isinstance(model, nn.Module):
+            for module in model.modules():
+                close_storage = getattr(module, "close_engram_storage", None)
+                if callable(close_storage):
+                    close_storage()
+
     def shutdown(self) -> None:
         if ensure_kv_transfer_shutdown is not None:
             ensure_kv_transfer_shutdown()
@@ -372,6 +386,7 @@ class NPUWorker(WorkerBase):
             weight_transfer_engine.shutdown()
 
         if model_runner := getattr(self, "model_runner", None):
+            self._close_engram_storage()
             shutdown_fn = getattr(model_runner, "shutdown", None)
             if callable(shutdown_fn):
                 shutdown_fn()
@@ -383,7 +398,7 @@ class NPUWorker(WorkerBase):
     def _init_device(self):
         # vLLM v0.24.0 (PR #45026) removed automatic per-process device
         # isolation for DP workers. Mirror gpu_worker.py::init_device:
-        # shift self.local_rank by dp_local_rank * tp_pp_world_size so
+        # shift self.local_rank by dp_local_rank * (TP * PP * PCP) so
         # that each DP group binds to a distinct set of NPUs.
         parallel_config = self.parallel_config
         if (
@@ -401,8 +416,9 @@ class NPUWorker(WorkerBase):
             dp_local_rank = parallel_config.data_parallel_rank_local
             if dp_local_rank is None:
                 dp_local_rank = parallel_config.data_parallel_index
-            tp_pp_world_size = parallel_config.pipeline_parallel_size * parallel_config.tensor_parallel_size
-            self.local_rank += dp_local_rank * tp_pp_world_size
+            # ParallelConfig.world_size includes every PCP partition of one
+            # DP replica. Omitting PCP here makes replicas bind overlapping NPUs.
+            self.local_rank += dp_local_rank * parallel_config.world_size
 
         # Publish the logical-to-physical mapping for topology queries.
         assigned_physical_gpu_ids = parallel_config.assigned_physical_gpu_ids
@@ -830,6 +846,9 @@ class NPUWorker(WorkerBase):
         return output
 
     def load_model(self) -> None:
+        # A replacement model must not leave the old shared mappings/group live.
+        # In-place reload_weights deliberately reuses the existing storage.
+        self._close_engram_storage()
         if self.vllm_config.model_config.enable_sleep_mode:
             allocator = CaMemAllocator.get_instance()
             assert allocator.get_current_usage() == 0, "Sleep mode can only be used for one instance per process."
