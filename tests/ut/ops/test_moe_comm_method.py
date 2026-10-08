@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -76,6 +77,30 @@ class TestMoECommMethod(TestBase):
         self._patch_get_ascend_config_module.stop()
         self._patch_get_ascend_config_forward_context.stop()
 
+    def test_prepared_megamoe_weights_select_operator_after_flag_reset(self):
+        comm_impl = object.__new__(FusedMC2CommImpl)
+        comm_impl.enable_fused_mc2 = 1
+        comm_impl.token_dispatcher = object.__new__(TokenDispatcherWithMC2)
+        comm_impl._apply_cann_mega_moe = MagicMock(return_value=("output", "expert_tokens"))
+        fused_input = SimpleNamespace(layer=SimpleNamespace(cann_mega_moe_w13_weight_list=["w1"]))
+        quant_method = MagicMock()
+        with (
+            patch(
+                "vllm_ascend.ops.fused_moe.moe_comm_method._EXTRA_CTX",
+                SimpleNamespace(use_mega_moe=False, is_decode_only_node=False),
+            ),
+            patch(
+                "vllm_ascend.ops.fused_moe.moe_comm_method.moe_utils.load_cann_mega_moe_ops",
+                return_value=("buffer_op", "mega_moe_op"),
+            ) as load_ops,
+        ):
+            result = comm_impl.fused_experts(fused_input, quant_method)
+
+        load_ops.assert_called_once_with()
+        comm_impl._apply_cann_mega_moe.assert_called_once()
+        self.assertEqual(result.routed_out, "output")
+        self.assertEqual(result.expert_tokens, "expert_tokens")
+
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_mc2_group")
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.logger.warning_once")
     def test_mega_moe_symm_buffer_uses_mega_moe_max_tokens(self, mock_warning_once, mock_get_mc2_group):
@@ -93,6 +118,18 @@ class TestMoECommMethod(TestBase):
         self.assertEqual(call_args.kwargs["max_recv_token_num"], 512)
         mock_warning_once.assert_called_once()
         self.assertIn("mega_moe_max_tokens", mock_warning_once.call_args.args[0])
+
+    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.logger.warning_once")
+    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_mc2_group")
+    def test_mega_moe_symm_buffer_passes_configured_zero_for_p_node(self, mock_get_mc2_group, mock_warning_once):
+        self.mock_ascend_config.mega_moe_max_tokens = 0
+        mock_get_mc2_group.return_value.device_group = "mc2_group"
+        comm_impl = self._make_fused_mc2_comm_for_buffer_init()
+
+        comm_impl._init_mega_moe_symm_buffer(is_decode_only_node=False)
+
+        comm_impl.get_symm_buffer_for_mega_moe.assert_called_once()
+        self.assertEqual(comm_impl.get_symm_buffer_for_mega_moe.call_args.kwargs["max_recv_token_num"], 0)
 
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.logger.warning_once")
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_mc2_group")
