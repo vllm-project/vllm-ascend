@@ -49,10 +49,16 @@ env:
   AWS_S3_FORCE_PATH_STYLE: "false"
   AWS_REGION: ap-southeast-1
   RUNS_ON_RUNNER_NAME: ""
+  # Fork account used for baseline storage, flow commits and cross-repo PRs
+  # (consumed by the flow code as $HEAD_FORK). Defaults live here; override
+  # via repository Variables (Settings → Secrets and variables → Actions →
+  # Variables) without editing this file.
+  HEAD_FORK: ${{ vars.MAIN2MAIN_HEAD_FORK || 'submitter-dev/vllm-ascend' }}
+  MAIN2MAIN_GIT_NAME: ${{ vars.MAIN2MAIN_GIT_NAME || 'submitter-dev' }}
+  MAIN2MAIN_GIT_EMAIL: ${{ vars.MAIN2MAIN_GIT_EMAIL || '339081302+submitter-dev@users.noreply.github.com' }}
   # Accumulated adaptation state ref on HEAD_FORK, shared by resolve-source
   # (incremental mode base) and the push step (PR-success update).
   MAIN2MAIN_BASELINE_REF: main2main_baseline
-  
 
 jobs:
   resolve-source:
@@ -64,7 +70,6 @@ jobs:
       base_sha: ${{ steps.source.outputs.base_sha }}
     env:
       TARGET_COMMIT: ${{ github.event_name == 'workflow_dispatch' && inputs.target_commit || '' }}
-      HEAD_FORK: dev-submitter/vllm-ascend
     steps:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v7
@@ -88,8 +93,8 @@ jobs:
             exit 1
           fi
 
-          git config user.name "dev-submitter"
-          git config user.email "330005789+dev-submitter@users.noreply.github.com"
+          git config user.name "${MAIN2MAIN_GIT_NAME}"
+          git config user.email "${MAIN2MAIN_GIT_EMAIL}"
           # This fetch gates the whole run; retry transient failures.
           attempt=0
           until git fetch "https://github.com/${UPSTREAM_REPO}.git" main; do
@@ -215,7 +220,6 @@ jobs:
       TARGET_COMMIT: ${{ github.event_name == 'workflow_dispatch' && inputs.target_commit || '' }}
       PUSH_TO_GITHUB: 'true'
       GITHUB_REPO: vllm-project/vllm-ascend
-      HEAD_FORK: dev-submitter/vllm-ascend
       MAIN2MAIN_KEEP_BRANCH: 'true'
       MAIN2MAIN_WORKSPACE: /tmp/main2main_flow/workspace
       MAIN2MAIN_CASES_FILE: .github/workflows/scripts/main2main_tests.json
@@ -284,8 +288,8 @@ jobs:
             fi
           fi
 
-          git config user.name "dev-submitter"
-          git config user.email "330005789+dev-submitter@users.noreply.github.com"
+          git config user.name "${MAIN2MAIN_GIT_NAME}"
+          git config user.email "${MAIN2MAIN_GIT_EMAIL}"
           gh --version
 
       - name: Load main2main test cases
