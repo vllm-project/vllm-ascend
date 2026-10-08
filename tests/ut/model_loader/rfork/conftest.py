@@ -36,7 +36,10 @@ def runtime(monkeypatch):
     stub("vllm.logger", logger=logging.getLogger("rfork-release-test"))
     stub("vllm.utils.network_utils", get_ip=lambda: "127.0.0.1", join_host_port=lambda host, port: f"{host}:{port}")
     stub(f"{prefix}.identity", build_seed_key=lambda **kwargs: "model-key")
-    stub(f"{prefix}.transfer_backend", RForkTransferBackend=Mock)
+    stub(
+        f"{prefix}.transfer_backend",
+        RForkTransferBackend=lambda **kwargs: Mock(registered_structural_digest="registered-digest"),
+    )
 
     class StartupError(RuntimeError):
         def __init__(self, message, *, handle=None):
