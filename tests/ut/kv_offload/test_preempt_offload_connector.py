@@ -347,6 +347,7 @@ def test_preempt_offload_connector_scheduler_d2h_keeps_sliding_window_offsets():
     scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
     scheduler._group_is_sliding_window = [True]
     scheduler._group_is_mamba = [False]
+    scheduler.dcp_world_size = 1
     scheduler.cpu_kv_cache_config = SimpleNamespace(
         kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16))]
     )
@@ -382,6 +383,7 @@ def test_preempt_offload_connector_scheduler_h2d_skips_sliding_window_null_block
     scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
     scheduler._group_is_sliding_window = [True]
     scheduler._group_is_mamba = [False]
+    scheduler.dcp_world_size = 1
     scheduler.cpu_kv_cache_config = SimpleNamespace(
         kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16))]
     )
@@ -414,6 +416,7 @@ def test_preempt_offload_connector_scheduler_h2d_clips_mtp_tail_blocks():
     scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
     scheduler._group_is_sliding_window = [False]
     scheduler._group_is_mamba = [False]
+    scheduler.dcp_world_size = 1
     scheduler.cpu_kv_cache_config = SimpleNamespace(
         kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16))]
     )

@@ -17,7 +17,7 @@ from vllm.v1.core.kv_cache_coordinator import (
     KVCacheCoordinator,
     get_kv_cache_coordinator,
 )
-from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
+from vllm.v1.core.kv_cache_utils import resolve_dcp_kv_block_size, resolve_kv_cache_block_sizes
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import MambaSpec, SlidingWindowSpec, UniformTypeKVCacheSpecs
 from vllm.v1.outputs import KVConnectorOutput
@@ -100,7 +100,13 @@ class PreemptOffloadScheduler:
 
         dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
         pcp_world_size = vllm_config.parallel_config.prefill_context_parallel_size
-        assert dcp_world_size == 1 and pcp_world_size == 1
+        # DCP>1 is supported: full-attention KV is sharded across DCP ranks while
+        # logical block ids are shared by all ranks of a group, so the per-rank
+        # worker copy stays correct; Mamba/replicated groups keep dcp=1 geometry
+        # via dcp_world_size_for_kv_cache_spec. PCP is prefill-side only and
+        # never applies on a decode node.
+        assert pcp_world_size == 1
+        self.dcp_world_size = dcp_world_size
         scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
         self.cpu_coordinator: KVCacheCoordinator = get_kv_cache_coordinator(
             kv_cache_config=self.cpu_kv_cache_config,
@@ -318,7 +324,9 @@ class PreemptOffloadScheduler:
                         gpu_blocks.append(gpu_block)
                         effective_hashes.append(None)
             else:
-                group_block_size = kv_cache_groups[g].kv_cache_spec.block_size
+                # Attention KV spans DCP ranks: a logical block covers
+                # block_size * dcp tokens, so resolve the effective span.
+                group_block_size = resolve_dcp_kv_block_size(kv_cache_groups[g].kv_cache_spec, self.dcp_world_size)
                 logical_num_blocks = cdiv(num_computed_tokens, group_block_size)
                 aligned_group_gpu_ids = self._align_group_block_ids(g, group_gpu_ids, logical_num_blocks)
 
@@ -509,7 +517,12 @@ class PreemptOffloadScheduler:
                     )
                 )
             else:
-                group_block_size = self.cpu_kv_cache_config.kv_cache_groups[g].kv_cache_spec.block_size
+                # Attention KV spans DCP ranks: a logical block covers
+                # block_size * dcp tokens, so resolve the effective span.
+                group_block_size = resolve_dcp_kv_block_size(
+                    self.cpu_kv_cache_config.kv_cache_groups[g].kv_cache_spec,
+                    self.dcp_world_size,
+                )
                 start_block = load_start_tokens // group_block_size
                 end_block = min(
                     len(group_cpu_ids),
