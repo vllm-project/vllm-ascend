@@ -140,21 +140,6 @@ msgid ""
 msgstr "| `layerwise_prefetch_layers` | `1` | 在计算前沿之前预取的层数。较高的值以内存为代价改善重叠。 |"
 
 msgid ""
-"| `layerwise_max_transfer_blocks` | `0` (unlimited) | Maximum number of KV "
-"blocks per transfer batch. |"
-msgstr "| `layerwise_max_transfer_blocks` | `0`（无限制） | 每次传输批次的KV块最大数量。 |"
-
-msgid ""
-"| `layerwise_max_transfer_bytes` | `0` (unlimited) | Maximum bytes per "
-"transfer batch. |"
-msgstr "| `layerwise_max_transfer_bytes` | `0`（无限制） | 每次传输批次的最大字节数。 |"
-
-msgid ""
-"| `h2d_stagger_us` | `0` | Stagger delay (microseconds) between H2D copies "
-"across TP ranks to avoid bus contention. |"
-msgstr "| `h2d_stagger_us` | `0` | 跨TP等级的H2D拷贝之间的交错延迟（微秒），以避免总线争用。 |"
-
-msgid ""
 "| `discard_partial_chunks` | `true` (non-layerwise) / `false` (layerwise) | "
 "Whether to discard KV for incomplete chunk boundaries. Layerwise defaults to"
 " `false` to preserve partial layers. |"
@@ -208,26 +193,6 @@ msgid ""
 "more temporary buffers. Typical values: `1–4`."
 msgstr ""
 "增加`layerwise_prefetch_layers`（默认`1`）以在计算前沿之前预取更多层。这增加了传输/计算重叠，但会使用更多临时缓冲区。典型值：`1–4`。"
-
-msgid "### Transfer Batching"
-msgstr "### 传输批处理"
-
-msgid ""
-"Use `layerwise_max_transfer_blocks` or `layerwise_max_transfer_bytes` to limit\n"
-"the size of each transfer batch. This prevents a single large layer from\n"
-"monopolizing the transfer bus. Set to `0` (default) for unlimited."
-msgstr ""
-"使用`layerwise_max_transfer_blocks`或`layerwise_max_transfer_bytes`限制每次传输批次的大小。这可以防止单个大层独占传输总线。设置为`0`（默认）表示无限制。"
-
-msgid "### H2D Stagger"
-msgstr "### H2D交错"
-
-msgid ""
-"On multi-TP deployments, H2D (host-to-device) copies for all TP ranks can\n"
-"contend on the PCIe/HCCS bus. Set `h2d_stagger_us` to spread them out (e.g.\n"
-"`100` for a 100 µs stagger between ranks)."
-msgstr ""
-"在多TP部署中，所有TP等级的H2D（主机到设备）拷贝可能会在PCIe/HCCS总线上争用。设置`h2d_stagger_us`以分散它们（例如，`100`表示等级之间100微秒的交错）。"
 
 msgid "## Supported Models"
 msgstr "## 支持的模型"

@@ -95,29 +95,30 @@ class TestMooncakeLayerBatchBuilder(unittest.TestCase):
         self.assertEqual(result.all_sizes, [[30]])
         self.assertEqual(result.all_offsets, [[30]])
 
-    def test_range_limits_split_rows_and_large_segments(self):
-        batches = KVTransferThread._range_transfer_batches(
-            ["k0", "k1"],
-            [[100], [200]],
-            [[25], [5]],
-            [[1000], [2000]],
-            max_transfer_blocks=1,
-            max_transfer_bytes=10,
-        )
+    def test_range_metadata_preserves_complete_segments(self):
+        buffers, sizes, offsets = [[100], [200]], [[25], [5]], [[1000], [2000]]
+        result = KVTransferThread._normalize_transfer_ranges(["k0", "k1"], buffers, sizes, offsets)
+        for actual, original in zip(result, (buffers, sizes, offsets), strict=True):
+            self.assertIs(actual, original)
 
-        self.assertEqual(len(batches), 2)
-        self.assertEqual(batches[0], (["k0"], [[100, 110, 120]], [[10, 10, 5]], [[1000, 1010, 1020]]))
-        self.assertEqual(batches[1], (["k1"], [[200]], [[5]], [[2000]]))
+    def test_range_metadata_omits_zero_segments_and_rejects_invalid_rows(self):
+        self.assertEqual(
+            KVTransferThread._normalize_transfer_ranges(["k0"], [[100, 200]], [[0, 25]], [[0, 10]]),
+            ([[200]], [[25]], [[10]]),
+        )
+        for buffers, sizes, offsets in [([], [[1]], [[0]]), ([[100]], [[1, 2]], [[0]]), ([[100]], [[-1]], [[0]])]:
+            with self.subTest(buffers=buffers, sizes=sizes, offsets=offsets), self.assertRaises(ValueError):
+                KVTransferThread._normalize_transfer_ranges(["k0"], buffers, sizes, offsets)
 
 
 class TestMooncakeLayerSaveSession(unittest.TestCase):
     def test_final_layer_commits_after_all_ranges(self):
         store = MagicMock()
         # Range APIs may return the positive number of bytes moved on success.
-        store.batch_copy_put.return_value = [30]
-        store.batch_commit.return_value = [0]
+        store.batch_copy_put.return_value = [30, 30]
+        store.batch_commit.return_value = [0, 0]
         tracker = LayerwiseSessionTracker()
-        tracker.register_put_keys("r1", [("key", 0)])
+        tracker.register_put_keys("r1", [("key", 0), ("key2", 1)])
         save_finished = [threading.Event(), threading.Event()]
         builder = LayerBatchBuilder(make_token_database(), page_size_bytes=60, num_layers=2)
         thread = KVCacheStoreLayerSendingThread(
@@ -133,21 +134,21 @@ class TestMooncakeLayerSaveSession(unittest.TestCase):
             layer_save_finished_events=save_finished,
             sync_save_events=[MagicMock(), MagicMock()],
             group_builders=[builder],
-            put_started_keys={"key"},
+            put_started_keys={"key", "key2"},
             session_tracker=tracker,
         )
-        request = ReqMeta("r1", block_ids=[2], block_hashes=[], is_last_chunk=True)
-        request.save_block_keys = ["key"]
+        request = ReqMeta("r1", block_ids=[2, 3], block_hashes=[], is_last_chunk=True)
+        request.save_block_keys = ["key", "key2"]
 
         for layer_id in range(2):
             task = LayerTransferTask(
                 layer_id=layer_id,
                 layer_idx_in_group=layer_id,
-                block_ranges=[LayerBlockRange(request, 0, 1)],
+                block_ranges=[LayerBlockRange(request, 0, 2)],
                 shared_block_data=builder.build_shared(
                     LayerTransferTask(
                         layer_id=layer_id,
-                        block_ranges=[LayerBlockRange(request, 0, 1)],
+                        block_ranges=[LayerBlockRange(request, 0, 2)],
                         use_key_major_ranges=True,
                     )
                 ),
@@ -156,10 +157,17 @@ class TestMooncakeLayerSaveSession(unittest.TestCase):
             thread.add_stored_request("r1")
             thread.request_queue.put([task])
             thread._handle_request([task])
+            if layer_id == 0:
+                store.batch_commit.assert_not_called()
+                store.batch_copy_put.assert_called_once_with(
+                    ["key", "key2"], [[1200, 2400], [1300, 2600]], [[10, 20], [10, 20]], [[0, 10], [0, 10]]
+                )
+            else:
+                store.batch_copy_put.assert_called_with(["key", "key2"], [[3600], [3900]], [[30], [30]], [[30], [30]])
 
         self.assertEqual(store.batch_copy_put.call_count, 2)
-        store.batch_commit.assert_called_once_with(["key"])
-        self.assertEqual(tracker.prepare_load_entries("r1", []), [("key", 0)])
+        store.batch_commit.assert_called_once_with(["key", "key2"])
+        self.assertEqual(tracker.prepare_load_entries("r1", []), [("key", 0), ("key2", 1)])
 
 
 class TestMooncakeWorkerSessionPreparation(unittest.TestCase):
@@ -193,13 +201,30 @@ class TestMooncakeWorkerSessionPreparation(unittest.TestCase):
         worker.independent_layers = []
         worker.page_size_bytes = 60
         worker.group_block_len = {0: [10, 20, 30]}
-        worker.layerwise_max_transfer_blocks = 0
         worker.use_eagle = False
         worker._put_started_keys = set()
         worker._put_started_keys_lock = threading.Lock()
         worker._layerwise_session_tracker = LayerwiseSessionTracker()
         worker.m_store = MagicMock()
         return worker
+
+    def test_sessions_submit_all_keys_and_skip_empty_batches(self):
+        worker = self._make_worker()
+        keys = ["k0", "k1"]
+        worker.m_store.batch_put_start.return_value = [0, -1]
+        worker.m_store.batch_get_start.return_value = [0, 0]
+        worker.m_store.batch_get_end.return_value = 0
+
+        self.assertEqual(worker._start_layerwise_put_keys(keys, 60), [0, -1])
+        self.assertEqual(worker._start_layerwise_get_keys(keys), [0, 0])
+        worker._end_layerwise_load_keys(keys + ["k0"])
+        self.assertEqual(worker._start_layerwise_put_keys([], 60), [])
+        self.assertEqual(worker._start_layerwise_get_keys([]), [])
+        worker._end_layerwise_load_keys([])
+
+        worker.m_store.batch_put_start.assert_called_once_with(keys, [60, 60])
+        worker.m_store.batch_get_start.assert_called_once_with(keys)
+        worker.m_store.batch_get_end.assert_called_once_with(keys)
 
     def test_put_start_uses_full_current_layout_size_and_skips_hits(self):
         worker = self._make_worker()

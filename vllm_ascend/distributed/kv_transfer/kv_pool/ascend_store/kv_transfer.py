@@ -525,7 +525,6 @@ class KVTransferThread(threading.Thread):
         self.tp_size = tp_size
         self.dcp_size = dcp_size
         self.token_database = token_database
-        self.num_addrs_per_block = len(token_database.group_block_len[0])
         self.done_task_lock = threading.Lock()
         self.request_queue: queue.Queue[Any] = queue.Queue()
         self.stored_requests: defaultdict[str, int] = defaultdict(int)
@@ -593,156 +592,32 @@ class KVTransferThread(threading.Thread):
             return False
 
     @staticmethod
-    def _split_transfer_packets(
-        gvas: np.ndarray,
-        addrs: np.ndarray,
-        sizes: np.ndarray,
-        max_transfer_bytes: int,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        if max_transfer_bytes <= 0:
-            return gvas, addrs, sizes
-
-        split_counts: np.ndarray = (sizes + max_transfer_bytes - 1) // max_transfer_bytes
-        total_splits = int(split_counts.sum())
-        if total_splits == sizes.shape[0]:
-            return gvas, addrs, sizes
-
-        split_indices: np.ndarray = np.arange(int(split_counts.max()), dtype=np.int64)
-        split_mask = split_indices[:, None] < split_counts[None, :]
-        entry_indices = np.broadcast_to(
-            np.arange(sizes.shape[0], dtype=np.int64),
-            split_mask.shape,
-        )[split_mask]
-        transfer_offsets = np.broadcast_to(
-            split_indices[:, None] * max_transfer_bytes,
-            split_mask.shape,
-        )[split_mask]
-
-        split_gvas = gvas[entry_indices] + transfer_offsets
-        split_addrs = addrs[entry_indices] + transfer_offsets
-        split_sizes = np.minimum(
-            max_transfer_bytes,
-            sizes[entry_indices] - transfer_offsets,
-        )
-        return split_gvas, split_addrs, split_sizes
-
-    def _batch_copy_with_limits(
-        self,
-        gvas: np.ndarray,
-        addrs: np.ndarray,
-        sizes: np.ndarray,
-        direction: int,
-        max_transfer_blocks: int,
-        max_transfer_bytes: int,
-    ) -> int:
-        if len(gvas) == 0:
-            return 0
-
-        # direction: 0/SMEMB_COPY_L2G = save (write), 1/SMEMB_COPY_G2L = load (read)
-        dir_name = "save(L2G)" if direction == 0 else "load(G2L)" if direction == 1 else f"dir{direction}"
-        logger.debug(
-            "[KVPOOL] batch_copy %s gvas=%d total_bytes=%d",
-            dir_name,
-            len(gvas),
-            int(sizes.sum()) if len(sizes) else 0,
-        )
-
-        max_transfer_addrs = 0
-        if max_transfer_blocks > 0:
-            max_transfer_addrs = max_transfer_blocks * self.num_addrs_per_block
-        if max_transfer_addrs <= 0:
-            max_transfer_addrs = len(gvas)
-
-        assert self.m_store.store is not None
-        for start in range(0, len(gvas), max_transfer_addrs):
-            end = start + max_transfer_addrs
-            split_gvas, split_addrs, split_sizes = self._split_transfer_packets(
-                gvas[start:end],
-                addrs[start:end],
-                sizes[start:end],
-                max_transfer_bytes,
-            )
-            logger.debug(
-                "[KVPOOL] batch_copy %s split_gvas=%s split_sizes=%s",
-                dir_name,
-                split_gvas.tolist(),
-                split_sizes.tolist(),
-            )
-            res = self.m_store.store.batch_copy(
-                split_gvas.tolist(),
-                split_addrs.tolist(),
-                split_sizes.tolist(),
-                direction,
-            )
-            if res != 0:
-                logger.error("[KVPOOL] batch_copy %s FAILED res=%d", dir_name, res)
-                return res
-        return 0
-
-    @staticmethod
-    def _range_transfer_batches(
+    def _normalize_transfer_ranges(
         keys: list[str],
         all_buffers: list[list[int]],
         all_sizes: list[list[int]],
         all_offsets: list[list[int]],
-        max_transfer_blocks: int,
-        max_transfer_bytes: int,
-    ) -> list[tuple[list[str], list[list[int]], list[list[int]], list[list[int]]]]:
-        """Split backend range calls by key count and per-segment byte size."""
-        row_count = len(keys)
-        if not (len(all_buffers) == len(all_sizes) == len(all_offsets) == row_count):
+    ) -> tuple[list[list[int]], list[list[int]], list[list[int]]]:
+        """Validate range metadata and omit zero-sized segments."""
+        if not (len(all_buffers) == len(all_sizes) == len(all_offsets) == len(keys)):
             raise ValueError("Layerwise range metadata must contain one buffer/size/offset row per key")
-
-        # Default configuration (both limits unset) means one batch holding every
-        # key and no per-segment splitting, so every row passes through as-is
-        # unless it carries an empty or negative segment. Detect that case and
-        # hand back the caller's own lists: this runs once per key, per layer,
-        # per group, and rebuilding them element-wise was the receive thread's
-        # largest single block of exposed time.
-        if max_transfer_blocks <= 0 and max_transfer_bytes <= 0:
-            for buffers, sizes, offsets in zip(all_buffers, all_sizes, all_offsets, strict=True):
-                if not (len(buffers) == len(sizes) == len(offsets)):
-                    raise ValueError("Layerwise range rows must align buffers, sizes, and offsets")
-                if sizes and min(sizes) >= 0 and 0 not in sizes:
-                    continue
-                break
-            else:
-                return [(keys, all_buffers, all_sizes, all_offsets)]
+        for buffers, sizes, offsets in zip(all_buffers, all_sizes, all_offsets, strict=True):
+            if not (len(buffers) == len(sizes) == len(offsets)):
+                raise ValueError("Layerwise range rows must align buffers, sizes, and offsets")
+            if sizes and min(sizes) < 0:
+                raise ValueError("Layerwise range size must be non-negative")
+        if not any(0 in sizes for sizes in all_sizes):
+            return all_buffers, all_sizes, all_offsets
 
         normalized_buffers: list[list[int]] = []
         normalized_sizes: list[list[int]] = []
         normalized_offsets: list[list[int]] = []
         for buffers, sizes, offsets in zip(all_buffers, all_sizes, all_offsets, strict=True):
-            if not (len(buffers) == len(sizes) == len(offsets)):
-                raise ValueError("Layerwise range rows must align buffers, sizes, and offsets")
-            split_buffers: list[int] = []
-            split_sizes: list[int] = []
-            split_offsets: list[int] = []
-            for buffer, size, offset in zip(buffers, sizes, offsets, strict=True):
-                if size < 0:
-                    raise ValueError(f"Layerwise range size must be non-negative, got {size}")
-                if size == 0:
-                    continue
-                packet_size = max_transfer_bytes if max_transfer_bytes > 0 else size
-                for packet_offset in range(0, size, packet_size):
-                    split_buffers.append(buffer + packet_offset)
-                    split_sizes.append(min(packet_size, size - packet_offset))
-                    split_offsets.append(offset + packet_offset)
-            normalized_buffers.append(split_buffers)
-            normalized_sizes.append(split_sizes)
-            normalized_offsets.append(split_offsets)
-
-        rows_per_batch = max_transfer_blocks if max_transfer_blocks > 0 else max(1, row_count)
-        return [
-            (
-                keys[start:end],
-                normalized_buffers[start:end],
-                normalized_sizes[start:end],
-                normalized_offsets[start:end],
-            )
-            for start in range(0, row_count, rows_per_batch)
-            for end in [min(start + rows_per_batch, row_count)]
-        ]
+            nonempty = [index for index, size in enumerate(sizes) if size > 0]
+            normalized_buffers.append([buffers[index] for index in nonempty])
+            normalized_sizes.append([sizes[index] for index in nonempty])
+            normalized_offsets.append([offsets[index] for index in nonempty])
+        return normalized_buffers, normalized_sizes, normalized_offsets
 
     def _set_os_thread_name(self) -> None:
         try:
@@ -1614,8 +1489,6 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         num_layers: int,
         layer_save_finished_events: list[threading.Event],
         sync_save_events: list[torch.npu.Event],
-        max_transfer_blocks: int = 0,
-        max_transfer_bytes: int = 0,
         group_builders: list[LayerBatchBuilder] | None = None,
         put_started_keys: set[str] | None = None,
         put_started_keys_lock: threading.Lock | None = None,
@@ -1634,8 +1507,6 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         self.final_layer_id = num_layers - 1
         self.layer_save_finished_events = layer_save_finished_events
         self.sync_save_events = sync_save_events
-        self.max_transfer_blocks = max_transfer_blocks
-        self.max_transfer_bytes = max_transfer_bytes
         self.write_results: dict[str, int] = {}
         self._put_started_keys = put_started_keys if put_started_keys is not None else set()
         self._put_started_keys_lock = put_started_keys_lock or threading.Lock()
@@ -1702,22 +1573,14 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
             active_buffers = [req_meta.all_buffers[index] for index in active_indices]
             active_sizes = [req_meta.all_sizes[index] for index in active_indices]
             active_offsets = [req_meta.all_offsets[index] for index in active_indices]
-            results: list[int] = []
-            for keys, buffers, sizes, offsets in self._range_transfer_batches(
+            buffers, sizes, offsets = self._normalize_transfer_ranges(
+                active_keys, active_buffers, active_sizes, active_offsets
+            )
+            results = require_aligned_batch_results(
+                "batch_copy_put",
                 active_keys,
-                active_buffers,
-                active_sizes,
-                active_offsets,
-                self.max_transfer_blocks,
-                self.max_transfer_bytes,
-            ):
-                results.extend(
-                    require_aligned_batch_results(
-                        "batch_copy_put",
-                        keys,
-                        self.m_store.batch_copy_put(keys, buffers, sizes, offsets),
-                    )
-                )
+                self.m_store.batch_copy_put(active_keys, buffers, sizes, offsets),
+            )
             _emit_range_debug_event("save", layer_id, active_sizes, active_offsets, results)
             failed_keys = [key for key, result in zip(active_keys, results, strict=True) if result < 0]
             if failed_keys:
@@ -1828,14 +1691,10 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
             gvas_array = np.concatenate(all_gvas) if len(all_gvas) > 1 else all_gvas[0]
             addr_array = np.concatenate(all_addrs) if len(all_addrs) > 1 else all_addrs[0]
             size_array = np.concatenate(all_sizes) if len(all_sizes) > 1 else all_sizes[0]
-            res = self._batch_copy_with_limits(
-                gvas_array,
-                addr_array,
-                size_array,
-                0,
-                self.max_transfer_blocks,
-                self.max_transfer_bytes,
-            )
+            res = 0
+            if gvas_array.size:
+                assert self.m_store.store is not None
+                res = self.m_store.store.batch_copy(gvas_array.tolist(), addr_array.tolist(), size_array.tolist(), 0)
             if res != 0:
                 raise RuntimeError(f"Layerwise {physical_layer} save batch_copy failed with return code {res}")
             if all_save_keys:
@@ -1886,9 +1745,6 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         layer_save_finished_events: list[threading.Event],
         sync_save_events: list[torch.npu.Event],
         num_layers: int,
-        h2d_stagger_us: int = 0,
-        max_transfer_blocks: int = 0,
-        max_transfer_bytes: int = 0,
         group_builders: list[LayerBatchBuilder] | None = None,
         external_slot_release_waiter: Callable[[int], None] | None = None,
         save_failure_checker: Callable[[], None] | None = None,
@@ -1911,9 +1767,6 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         self.layer_save_finished_events = layer_save_finished_events
         self.sync_save_events = sync_save_events
         self.final_layer_id = num_layers - 1
-        self.h2d_stagger_us = h2d_stagger_us
-        self.max_transfer_blocks = max_transfer_blocks
-        self.max_transfer_bytes = max_transfer_bytes
         self.external_slot_release_waiter = external_slot_release_waiter
         self.save_failure_checker = save_failure_checker
         self._invalid_block_ids = invalid_block_ids if invalid_block_ids is not None else set()
@@ -1975,26 +1828,17 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         ]
         active_keys = [req_meta.keys[index] for index in active_indices]
         if active_keys:
-            self._stagger_h2d_submit(layer_id)
             active_buffers = [req_meta.all_buffers[index] for index in active_indices]
             active_sizes = [req_meta.all_sizes[index] for index in active_indices]
             active_offsets = [req_meta.all_offsets[index] for index in active_indices]
-            results: list[int] = []
-            for keys, buffers, sizes, offsets in self._range_transfer_batches(
+            buffers, sizes, offsets = self._normalize_transfer_ranges(
+                active_keys, active_buffers, active_sizes, active_offsets
+            )
+            results = require_aligned_batch_results(
+                "batch_copy_get",
                 active_keys,
-                active_buffers,
-                active_sizes,
-                active_offsets,
-                self.max_transfer_blocks,
-                self.max_transfer_bytes,
-            ):
-                results.extend(
-                    require_aligned_batch_results(
-                        "batch_copy_get",
-                        keys,
-                        self.m_store.batch_copy_get(keys, buffers, sizes, offsets),
-                    )
-                )
+                self.m_store.batch_copy_get(active_keys, buffers, sizes, offsets),
+            )
             _emit_range_debug_event("load", layer_id, active_sizes, active_offsets, results)
             failed_indices = [index for index, result in zip(active_indices, results, strict=True) if result < 0]
             if failed_indices:
@@ -2050,20 +1894,6 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
                 self.layer_load_finished_events[layer_id].set()
             self.request_queue.task_done()
             self.get_event.set()
-
-    def _get_h2d_stagger_delay_us(self, layer_id: int) -> int:
-        if self.h2d_stagger_us <= 0:
-            return 0
-        slot = (self.tp_rank + layer_id) % self.tp_size
-        return slot * self.h2d_stagger_us
-
-    def _stagger_h2d_submit(self, layer_id: int) -> None:
-        delay_us = self._get_h2d_stagger_delay_us(layer_id)
-        if delay_us <= 0:
-            return
-        deadline = time.perf_counter() + delay_us / 1_000_000
-        while time.perf_counter() < deadline:
-            pass
 
     def _handle_request(  # type: ignore[override]
         self, data: LayerLoadTask
@@ -2149,20 +1979,15 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             all_addrs.append(req_meta.addr_array)
             all_sizes.append(req_meta.size_array)
 
-        self._stagger_h2d_submit(layer_id)
         gvas_array = np.concatenate(all_gvas) if len(all_gvas) > 1 else all_gvas[0]
         addr_array = np.concatenate(all_addrs) if len(all_addrs) > 1 else all_addrs[0]
         size_array = np.concatenate(all_sizes) if len(all_sizes) > 1 else all_sizes[0]
         if self.external_slot_release_waiter is not None:
             self.external_slot_release_waiter(layer_id)
-        res = self._batch_copy_with_limits(
-            gvas_array,
-            addr_array,
-            size_array,
-            1,
-            self.max_transfer_blocks,
-            self.max_transfer_bytes,
-        )
+        res = 0
+        if gvas_array.size:
+            assert self.m_store.store is not None
+            res = self.m_store.store.batch_copy(gvas_array.tolist(), addr_array.tolist(), size_array.tolist(), 1)
         if layer_id <= 2 or res != 0:
             logger.debug(
                 "load_thread: layer=%d groups=%d blocks=%d res=%d",

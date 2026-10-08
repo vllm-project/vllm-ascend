@@ -191,9 +191,6 @@ class KVPoolScheduler:
             has_recurrent_state=bool(self.num_speculative_blocks_by_group),
             tp_mismatch=self.use_block_key_layerwise and self.tp_mismatch,
         )
-        self.layerwise_max_transfer_blocks = int(
-            vllm_config.kv_transfer_config.kv_connector_extra_config.get("layerwise_max_transfer_blocks", 0)
-        )
         backend = backend_map.get(self.backend_name)
         if backend is None:
             raise ValueError(f"Unsupported KV pool backend: {backend_name}")
@@ -408,19 +405,9 @@ class KVPoolScheduler:
         if not all_keys:
             return []
 
-        keys_per_block = max(len(block_keys) for block_keys in keys_by_block)
-        batch_size = (
-            self.layerwise_max_transfer_blocks * keys_per_block
-            if self.layerwise_max_transfer_blocks > 0
-            else len(all_keys)
-        )
-        readable: list[bool] = []
-        for start in range(0, len(all_keys), batch_size):
-            batch = all_keys[start : start + batch_size]
-            batch_readable = self.store_scheduler.batch_is_readable(batch)
-            if len(batch_readable) != len(batch) or any(type(state) is not bool for state in batch_readable):
-                raise RuntimeError("Layerwise readability probe returned invalid results")
-            readable.extend(batch_readable)
+        readable = self.store_scheduler.batch_is_readable(all_keys)
+        if len(readable) != len(all_keys) or any(type(state) is not bool for state in readable):
+            raise RuntimeError("Layerwise readability probe returned invalid results")
 
         block_hits = []
         offset = 0
