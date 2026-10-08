@@ -26,11 +26,18 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
+# The real xlite._C probes the NPU runtime at import time and *aborts the
+# process* (not an ImportError) on CPU-only runners, so it must only be
+# imported when a real NPU is present. Otherwise install the stub below.
+_HAVE_XLITE = False
 try:
+    import subprocess as _sp
+
+    _sp.run(["npu-smi", "info"], capture_output=True, check=True)
     import xlite._C  # noqa: F401
 
     _HAVE_XLITE = True
-except Exception:  # pragma: no cover - CI CPU environments have no xlite wheel
+except Exception:  # pragma: no cover - CPU-only runners take the stub path
     _HAVE_XLITE = False
     import enum
 
@@ -42,15 +49,22 @@ except Exception:  # pragma: no cover - CI CPU environments have no xlite wheel
 
     xlite_mod = types.ModuleType("xlite")
     xlite_c = types.ModuleType("xlite._C")
-    xlite_c.AttnMHA = _AttnKind.MHA
-    xlite_c.AttnMLA = _AttnKind.MLA
-    xlite_c.AttnHybrid = _AttnKind.HYBRID
-    xlite_c.AttnDSA = _AttnKind.DSA
-    xlite_c.AttnMeta = type("AttnMeta", (), {})
-    xlite_c.AttnMetaV2 = type("AttnMetaV2", (), {})
-    xlite_c.Runtime = MagicMock
-    xlite_c.ScoringFuncSoftmax = 0
-    xlite_c.ScoringFuncSigmoid = 1
+    # setattr keeps the dynamic ModuleType attributes invisible to mypy.
+    for _name, _value in {
+        "AttnMHA": _AttnKind.MHA,
+        "AttnMLA": _AttnKind.MLA,
+        "AttnHybrid": _AttnKind.HYBRID,
+        "AttnDSA": _AttnKind.DSA,
+        "AttnMeta": type("AttnMeta", (), {}),
+        "AttnMetaV2": type("AttnMetaV2", (), {}),
+        # required by vllm_ascend/xlite/utils.py
+        "Model": type("Model", (), {}),
+        "ModelConfig": type("ModelConfig", (), {}),
+        "Runtime": MagicMock,
+        "ScoringFuncSoftmax": 0,
+        "ScoringFuncSigmoid": 1,
+    }.items():
+        setattr(xlite_c, _name, _value)
     for _name in (
         "graph_capture_begin",
         "graph_capture_end",
@@ -66,7 +80,8 @@ from vllm_ascend.xlite.xlite import (  # noqa: E402
     Qwen3_5XliteModel,
     _architecture_strategy_map,
     _gemma_norm_to_xlite,
-    _pack_mha_qkv_with_gate,
+    _pack_mha_qkv_bias,
+    _pack_mha_qkv_weight,
     _resolve_full_attention_interval,
 )
 
@@ -79,15 +94,13 @@ def test_gemma_norm_to_xlite_adds_one():
     assert out.is_contiguous()
 
 
-def test_pack_mha_qkv_with_gate_layout():
+def test_pack_mha_qkv_weight_layout():
     head_dim, num_heads, num_kv_heads = 4, 2, 1
     q_size, kv_size = num_heads * head_dim, num_kv_heads * head_dim
     # vLLM interleaved layout: per-head [Q | Gate] for Q rows, then K, then V.
     qkv = torch.arange(q_size * 2 + kv_size * 2, dtype=torch.float32).unsqueeze(1)
 
-    packed, packed_bias = _pack_mha_qkv_with_gate(qkv, head_dim, num_heads, num_kv_heads)
-
-    assert packed_bias is None
+    packed = _pack_mha_qkv_weight(qkv, head_dim, num_heads, num_kv_heads)
     # xlite layout: [Q | K | V | Gate]
     q_w, k_w, v_w, g_w = (
         packed[:q_size],
@@ -102,25 +115,23 @@ def test_pack_mha_qkv_with_gate_layout():
     assert torch.equal(g_w, q_gate[:, 1].reshape(q_size, -1))
 
 
-def test_pack_mha_qkv_with_gate_bias_reordered():
+def test_pack_mha_qkv_bias_reordered():
     head_dim, num_heads, num_kv_heads = 2, 2, 1
     q_size, kv_size = num_heads * head_dim, num_kv_heads * head_dim
-    qkv = torch.randn(q_size * 2 + kv_size * 2, 8)
     bias = torch.randn(q_size * 2 + kv_size * 2)
 
-    packed, packed_bias = _pack_mha_qkv_with_gate(qkv, head_dim, num_heads, num_kv_heads, qkv_bias=bias)
+    packed_bias = _pack_mha_qkv_bias(bias, head_dim, num_heads, num_kv_heads)
 
-    assert packed.shape[0] == q_size + 2 * kv_size + q_size
-    assert packed_bias is not None
+    assert packed_bias.shape[0] == q_size + 2 * kv_size + q_size
     q_gate_b = bias[: q_size * 2].view(num_heads, 2, head_dim)
     assert torch.equal(packed_bias[:q_size], q_gate_b[:, 0].reshape(-1))
     assert torch.equal(packed_bias[q_size : q_size + kv_size], bias[q_size * 2 : q_size * 2 + kv_size])
     assert torch.equal(packed_bias[-q_size:], q_gate_b[:, 1].reshape(-1))
 
 
-def test_pack_mha_qkv_with_gate_rejects_unexpected_rows():
+def test_pack_mha_qkv_weight_rejects_unexpected_rows():
     with pytest.raises(ValueError, match="Unexpected fused QKV rows"):
-        _pack_mha_qkv_with_gate(torch.zeros(7, 4), head_dim=4, num_heads=1, num_kv_heads=1)
+        _pack_mha_qkv_weight(torch.zeros(7, 4), head_dim=4, num_heads=1, num_kv_heads=1)
 
 
 def test_resolve_full_attention_interval_prefers_explicit_field():
@@ -133,8 +144,25 @@ def test_resolve_full_attention_interval_derived_from_layer_types():
         full_attention_interval=None,
         layer_types=["linear_attention", "full_attention", "linear_attention"],
     )
-    # First full-attention layer at index 1 -> every (1+1)-th layer is MHA.
+    # Single full-attention layer at index 1 -> every (1+1)-th layer is MHA.
     assert _resolve_full_attention_interval(hf) == 2
+
+
+def test_resolve_full_attention_interval_uses_gap_between_full_layers():
+    hf = SimpleNamespace(
+        full_attention_interval=None,
+        layer_types=[
+            "full_attention",
+            "linear_attention",
+            "linear_attention",
+            "full_attention",
+            "linear_attention",
+        ],
+    )
+    # A model may start with a full layer (index 0); the period must come from
+    # the distance between the first two full layers (3), not idx+1 (which
+    # would wrongly yield 1).
+    assert _resolve_full_attention_interval(hf) == 3
 
 
 def test_resolve_full_attention_interval_defaults_to_four():
@@ -169,8 +197,8 @@ def _hybrid_self():
         hidden_states=torch.zeros(1, 16, dtype=torch.float32),
         device="cpu",
         _xlite_hybrid_state_refs=[],
-        # referenced by the completion log on branches that carry the
-        # decode-only prototype state
+        _full_attention_mask=[False, True],  # layer 0 GDN, layer 1 MHA
+        # referenced by the slot-major adaptation log
         _xlite_native_gdn_groups=[],
     )
 
@@ -187,23 +215,46 @@ def test_adapt_hybrid_kv_caches_layout():
         torch.zeros(3, cfg.block_size, cfg.n_kv_heads, cfg.head_dim),
     ]
     caches = [
-        [],  # unused for the GDN layer; the adapter builds slot-major states
+        [],  # unused for the GDN layer in the batch-major layout
         full_kv,
     ]
     adapted = XliteWrapper._adapt_hybrid_kv_caches(self, caches)
 
     assert len(adapted) == 2
-    conv_b, ssm_b = adapted[0]
-    assert conv_b.shape == (cfg.max_batch_size, conv_dim, cfg.linear_conv_kernel_dim)
-    assert ssm_b.shape == (cfg.max_batch_size, cfg.linear_num_v_heads, cfg.linear_key_head_dim, cfg.linear_value_head_dim)
+    conv, ssm = adapted[0]
+    assert conv.shape == (cfg.max_batch_size, conv_dim, cfg.linear_conv_kernel_dim)
+    assert ssm.shape == (cfg.max_batch_size, cfg.linear_num_v_heads, cfg.linear_key_head_dim, cfg.linear_value_head_dim)
     assert adapted[1][0].data_ptr() == caches[1][0].data_ptr()  # full layers pass through
-    # Slot-major pool: slot 0 is NULL, so the persistent pool is max_batch+1 rows.
-    num_slots = cfg.max_batch_size + 1
-    assert len(self._xlite_hybrid_persistent) == 1  # one GDN layer group
+    # slot-major: each GDN layer keeps persistent (conv, ssm) + batch (conv, ssm)
+    assert len(self._xlite_hybrid_state_refs) == 4
     conv_p, ssm_p = self._xlite_hybrid_persistent[0]
-    assert conv_p.shape == (num_slots, conv_dim, cfg.linear_conv_kernel_dim)
-    assert ssm_p.shape == (num_slots, cfg.linear_num_v_heads, cfg.linear_key_head_dim, cfg.linear_value_head_dim)
-    assert self._xlite_hybrid_free_slots == list(range(1, num_slots))
-    assert self._xlite_hybrid_block_to_slot == {}
-    # Everything stays alive for the C++ runtime.
-    assert len(self._xlite_hybrid_state_refs) == 4  # persistent + batch, conv + ssm
+    assert conv_p.shape[0] == cfg.max_batch_size + 1  # slot 0 is NULL
+
+
+def test_adapt_hybrid_kv_caches_follows_role_mask_for_noncanonical_layout():
+    """Cache roles must follow _full_attention_mask, not the inferred interval:
+    for full layers at indices 0 and 3 (interval resolved to 3), the modulo
+    predicate would mark index 2 as full and hand the GDN cache to as_kv()."""
+    from vllm_ascend.xlite.xlite import XliteWrapper
+
+    self = _hybrid_self()
+    cfg = self.adapter_xlite_model.xlite_config
+    cfg.n_layers = 4
+    # Non-canonical arrangement: full at 0 and 3, GDN elsewhere.
+    self._full_attention_mask = [True, False, False, True]
+    full_kv = [
+        torch.zeros(3, cfg.block_size, cfg.n_kv_heads, cfg.head_dim),
+        torch.zeros(3, cfg.block_size, cfg.n_kv_heads, cfg.head_dim),
+    ]
+    caches = [full_kv, [], [], full_kv]
+    adapted = XliteWrapper._adapt_hybrid_kv_caches(self, caches)
+
+    assert len(adapted) == 4
+    # Full layers pass through as paged K/V.
+    assert adapted[0][0].data_ptr() == caches[0][0].data_ptr()
+    assert adapted[3][0].data_ptr() == caches[3][0].data_ptr()
+    # GDN layers get recurrent-state buffers, not paged K/V.
+    for i in (1, 2):
+        conv, ssm = adapted[i]
+        assert conv.shape[0] == cfg.max_batch_size
+        assert ssm.shape[0] == cfg.max_batch_size
