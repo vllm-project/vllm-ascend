@@ -59,16 +59,11 @@ on:
         required: false
         type: string
         default: ''
-      temp_only:
-        description: 'If true, push only to SWR temp repo and skip the merge-image job (no push to SWR_REPO).'
+      publish:
+        description: 'If true, commit-mode builds publish to the main repo (release: nightly-main tags; daily: dated CANN-versioned tags); if false, the image stays temp-only.'
         required: false
         type: boolean
-        default: false
-      publish_nightly_main:
-        description: 'If true, daily builds also publish release-compatible nightly-main tags.'
-        required: false
-        type: boolean
-        default: false
+        default: true
       build_type:
         description: 'Build type (release/daily)'
         required: false
@@ -166,6 +161,8 @@ jobs:
   build-push-digest:
     name: build
     runs-on: ${{ matrix.runner_info.runner }}
+    outputs:
+      temp_only: ${{ steps.gc-tag.outputs.temp_only }}
     container:
       image: ${{ format('{0}:{1}-{2}-ubuntu22.04-py3.12', inputs.cann_swr_url, inputs.cann_image_version, inputs.soc) }}
       env:
@@ -378,13 +375,19 @@ jobs:
     # Quay.io/swr automatically cleans up untagged digests on a regular basis, with a cycle of approximately one hour. 
     # Add temporary tags to digests to prevent them from being removed.
     - name: Tag digest to prevent GC
+      id: gc-tag
       if: ${{ inputs.should_push }}
       run: |
         SUFFIX=""
         if [ -n "${{ inputs.suffix }}" ]; then
           SUFFIX="-${{ inputs.suffix }}"
         fi
-        if [ "${{ inputs.temp_only }}" = "true" ]; then
+        TEMP_ONLY=false
+        if [ -n "${{ inputs.vllm_commit }}" ] && [ "${{ inputs.publish }}" != "true" ]; then
+          TEMP_ONLY=true
+        fi
+        echo "temp_only=$TEMP_ONLY" >> "$GITHUB_OUTPUT"
+        if [ "$TEMP_ONLY" = "true" ]; then
           case "${{ inputs.vllm_commit }}" in
             v*) VLLM_SHORT="${{ inputs.vllm_commit }}" ;;
             *) VLLM_SHORT=$(echo "${{ inputs.vllm_commit }}" | cut -c1-7) ;;
@@ -425,7 +428,7 @@ jobs:
   merge-image:
     runs-on: linux-amd64-cpu-4
     needs: build-push-digest
-    if: ${{ inputs.should_push && !inputs.temp_only }}
+    if: ${{ inputs.should_push && needs.build-push-digest.outputs.temp_only != 'true' }}
     steps:
       - name: Download arm64 digests
         uses: actions/download-artifact@v8
@@ -526,7 +529,7 @@ jobs:
             type=raw,value=${{ steps.tag_pattern.outputs.pattern }},enable=${{ github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag == '' }},prefix=nightly-,suffix=${{ env.SUFFIX }}
             
             # ===== New: Daily scenario specific tags =====
-            type=raw,value=${{ steps.daily_tags.outputs.daily_tag }},enable=${{ inputs.build_type == 'daily' && !inputs.publish_nightly_main }}
+            type=raw,value=${{ steps.daily_tags.outputs.daily_tag }},enable=${{ inputs.build_type == 'daily' }}
             # =============================================
           flavor:
             latest=false
@@ -559,12 +562,13 @@ jobs:
           echo "Current tags:"
           echo "$TAGS"
 
-          # Daily builds skip the plain tag unless explicitly promoted for the
-          # release-compatible nightly-ci pipeline.
+          # Daily builds (regular or commit-mode) publish only the CANN-versioned
+          # dated tag in the daily main repo; the bare nightly-main tag is skipped.
+          # Release builds keep the nightly-main tag for the nightly-ci pipeline.
           UNWANTED_TAG="nightly-${SCHEDULE_TAG_PATTERN}${SUFFIX}"
 
           for tag in $TAGS; do
-            if [ "$BUILD_TYPE" = "daily" ] && [ "${{ inputs.publish_nightly_main }}" != "true" ] && [ "$tag" = "${{ env.SWR_REPO }}:${UNWANTED_TAG}" ]; then
+            if [ "$BUILD_TYPE" = "daily" ] && [ "$tag" = "${{ env.SWR_REPO }}:${UNWANTED_TAG}" ]; then
               echo "Skipping unwanted schedule tag: $tag"
               continue
             fi
@@ -624,7 +628,7 @@ jobs:
     name: merge-image-temp
     runs-on: linux-amd64-cpu-4
     needs: build-push-digest
-    if: ${{ inputs.should_push && inputs.temp_only }}
+    if: ${{ inputs.should_push && needs.build-push-digest.outputs.temp_only == 'true' }}
     steps:
       - name: Download arm64 digests
         uses: actions/download-artifact@v8
