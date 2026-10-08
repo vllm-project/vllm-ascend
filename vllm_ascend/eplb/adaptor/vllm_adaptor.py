@@ -85,9 +85,7 @@ def _new_w4a8_mxfp_nz_buffer(expert_tensor: torch.Tensor) -> torch.Tensor:
     """Create an offset-0 NZ receive buffer matching an MXFP expert."""
     buffer_tensor = torch.empty(expert_tensor.shape, dtype=expert_tensor.dtype, device=expert_tensor.device)
     input_dtype = (
-        torch.float4_e2m1fn_x2
-        if expert_tensor.dtype == torch.float4_e2m1fn_x2
-        else torch_npu.float4_e2m1fn_x2
+        torch.float4_e2m1fn_x2 if expert_tensor.dtype == torch.float4_e2m1fn_x2 else torch_npu.float4_e2m1fn_x2
     )
     torch_npu.npu_format_cast_(
         buffer_tensor,
