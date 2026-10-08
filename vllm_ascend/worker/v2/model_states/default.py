@@ -32,7 +32,7 @@ from vllm_ascend.worker.v2.attn_utils import build_attn_metadata, ring_state_upd
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 
 if TYPE_CHECKING:
-    from vllm_ascend.worker.v2.device_metadata import TargetDeviceMetadata
+    from vllm_ascend.worker.device_metadata import TargetDeviceMetadata
     from vllm_ascend.worker.v2.kvpp import KVPPRuntime
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext, AscendPCPManager
 

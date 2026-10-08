@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-import vllm_ascend.worker.v2.device_metadata as module
+import vllm_ascend.worker.device_metadata as module
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage, DeviceMetadataTask
 
 
