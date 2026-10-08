@@ -63,7 +63,7 @@ v_new = u - w @ h_prev
 h_next = exp2(gk_last) * h_prev + kg^T @ v_new
 ```
 
-arch35 路径复用与 `ChunkGatedDeltaRuleFwdH` 相同的数学实现；其他场景在 `ChunkKdaFwd` 内嵌
+arch35 路径复用与 `ChunkGatedDeltaRuleFwdHVllm` 相同的数学实现；其他场景在 `ChunkKdaFwd` 内嵌
 共享 FwdH 实现。独立 GDN L0 原型继续保留给其他调用方，key-wise `gk` 固定使用 `exp2`。
 
 ### Finalize
