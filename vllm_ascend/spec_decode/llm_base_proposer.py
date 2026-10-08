@@ -661,7 +661,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             update_params = []
             for draft_step, per_step_metadata in enumerate(multi_steps_attn_metadata):
                 for layer_name, metadata in per_step_metadata.items():
-                    if getattr(metadata, "decode", None) is not None:
+                    if self.dcp_size > 1:
                         # Import lazily: attention backends also import spec-decode utilities.
                         from vllm_ascend.attention.context_parallel.attention_cp import build_dcp_fia_params
 

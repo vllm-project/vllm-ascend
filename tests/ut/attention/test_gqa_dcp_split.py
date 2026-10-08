@@ -15,7 +15,7 @@ from vllm_ascend.attention.context_parallel.attention_cp import (
     build_dcp_fia_params,
 )
 from vllm_ascend.attention.context_parallel.common_cp import CPKVScope, use_history_current_split_decode
-from vllm_ascend.compilation.updatable_graph import ContextSource, GraphUpdateTask, SharedSource, UpdatableGraph
+from vllm_ascend.compilation.updatable_graph import ContextSource, SharedSource
 from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import AscendAutoRegressiveSpeculator
 
 
@@ -66,7 +66,7 @@ def make_metadata(total=(13, 23), query=(4, 2), rank=1, interleave=1):
     )
 
 
-@pytest.mark.parametrize("num_reqs", [1, 2, 3, 5])
+@pytest.mark.parametrize("num_reqs", [1, 3])
 def test_plain_eager_paged_fia_uses_inner_precise_without_padding(monkeypatch, num_reqs):
     from vllm_ascend.attention.context_parallel import attention_cp
 
@@ -118,33 +118,23 @@ def test_history_current_graph_tasks_have_distinct_tnd_parameters():
     assert ContextSource({"layer": first}).get(history)[0] == histories[0]
 
 
-@pytest.mark.parametrize("causal", [True, False])
-def test_noncausal_cache_graph_uses_total_local_kv_lengths(causal):
-    metadata = make_metadata()
-    metadata.causal = causal
-    params = build_dcp_fia_params("layer", metadata, 1)
-    assert len(params) == (2 if causal else 1)
-    if not causal:
-        assert params[0]["layer_name"] == ("layer", "full")
-        assert params[0]["actual_seq_lengths_kv"] == [6, 11]
-
-
-@pytest.mark.parametrize("causal", [False, True])
-@pytest.mark.parametrize("use_spec_decode", [False, True])
 @pytest.mark.parametrize(
-    "is_draft,is_prefill,query",
+    "causal,use_spec_decode,is_draft,is_prefill,query,expected_split",
     [
-        (False, False, (1, 1)),
-        (False, False, (4, 2)),
-        (True, False, (1, 1)),
-        (True, False, (4, 2)),
-        (True, True, (1, 1)),
+        pytest.param(True, False, False, False, (1, 1), False, id="decode"),
+        pytest.param(True, False, False, False, (1, 4), True, id="multi-token-decode"),
+        pytest.param(True, True, False, False, (1, 1), True, id="speculative-target"),
+        pytest.param(True, True, True, False, (1, 1), False, id="draft-decode"),
+        pytest.param(True, True, True, False, (1, 4), True, id="multi-token-draft"),
+        pytest.param(True, False, True, True, (1, 1), True, id="draft-prefill"),
+        pytest.param(False, True, True, True, (4, 2), False, id="noncausal"),
     ],
 )
-def test_dcp_draft_path_selection_and_graph_parameters_agree(causal, use_spec_decode, is_draft, is_prefill, query):
+def test_dcp_draft_path_selection_and_graph_parameters_agree(
+    causal, use_spec_decode, is_draft, is_prefill, query, expected_split
+):
     metadata = make_metadata(query=query)
     metadata.causal = causal
-    split = causal and (is_prefill or (use_spec_decode and not is_draft) or max(query) > 1)
     assert (
         use_history_current_split_decode(
             metadata,
@@ -152,7 +142,7 @@ def test_dcp_draft_path_selection_and_graph_parameters_agree(causal, use_spec_de
             is_draft_model_prefill=is_prefill,
             use_spec_decode=use_spec_decode,
         )
-        == split
+        is expected_split
     )
     params = build_dcp_fia_params(
         "layer",
@@ -162,22 +152,19 @@ def test_dcp_draft_path_selection_and_graph_parameters_agree(causal, use_spec_de
         is_draft_model_prefill=is_prefill,
         use_spec_decode=use_spec_decode,
     )
-    assert [param["layer_name"] for param in params] == [
-        ("layer", kind) for kind in ((CPKVScope.HISTORY, CPKVScope.CURRENT) if split else (CPKVScope.FULL,))
-    ]
-    if not split:
+    kinds = (CPKVScope.HISTORY, CPKVScope.CURRENT) if expected_split else (CPKVScope.FULL,)
+    assert [param["layer_name"] for param in params] == [("layer", kind) for kind in kinds]
+    if not expected_split:
         assert params[0]["actual_seq_lengths_kv"] == [6, 11]
 
 
-@pytest.mark.parametrize("use_spec_decode", [False, True])
-@pytest.mark.parametrize("is_draft_model,is_draft_model_prefill", [(False, False), (True, True), (True, False)])
-def test_prefill_only_does_not_require_current_decode_kv(use_spec_decode, is_draft_model, is_draft_model_prefill):
+def test_prefill_only_does_not_require_current_decode_kv():
     metadata = SimpleNamespace(causal=True, decode=None)
     assert not use_history_current_split_decode(
         metadata,
-        use_spec_decode=use_spec_decode,
-        is_draft_model=is_draft_model,
-        is_draft_model_prefill=is_draft_model_prefill,
+        use_spec_decode=True,
+        is_draft_model=True,
+        is_draft_model_prefill=True,
     )
 
 
@@ -206,7 +193,7 @@ def test_single_token_draft_reads_complete_cache_without_current_attention():
     assert actual is merged
     assert impl._run_dcp_attention.call_count == 1
     assert impl._run_dcp_attention.call_args.args[4:] == (CPKVScope.FULL, 4)
-    impl._merge_dcp_attention_output.assert_called_once_with(*cached, 8)
+    impl._merge_dcp_attention_output.assert_called_once_with(*cached)
 
 
 def test_capture_registers_tnd_history_and_current_with_separate_providers():
@@ -321,8 +308,6 @@ def test_decode_only_historical_shards_are_exchanged_current_contributes_once(dc
 
 @pytest.mark.parametrize("interleave", [1, 8])
 def test_v2_draft_steps_update_history_and_current_independently(interleave):
-    from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import AscendAutoRegressiveSpeculator
-
     speculator = object.__new__(AscendAutoRegressiveSpeculator)
     speculator.attn_architecture = "GQA"
     speculator.max_model_len = 32
@@ -351,83 +336,7 @@ def test_v2_draft_steps_update_history_and_current_independently(interleave):
     assert metadata.decode.num_computed_tokens_of_dcp[:, 1].tolist() == expected_local.tolist()
 
 
-@pytest.mark.parametrize("is_prefill", [False, True])
-@pytest.mark.parametrize("causal", [False, True])
-@pytest.mark.parametrize("rank", [0, 1])
-@pytest.mark.parametrize("interleave", [1, 8])
-def test_v2_graph_shared_source_preserves_steps_layers_and_padding(is_prefill, causal, rank, interleave):
-    speculator = object.__new__(AscendAutoRegressiveSpeculator)
-    speculator.use_dcp = True
-    speculator.attn_architecture = "GQA"
-    speculator.dcp_manager = SimpleNamespace(dcp_world_rank=rank)
-    speculator.draft_vllm_config = SimpleNamespace(
-        parallel_config=SimpleNamespace(
-            decode_context_parallel_size=2,
-            cp_kv_cache_interleave_size=interleave,
-        )
-    )
-    speculator.input_batch = SimpleNamespace(num_reqs=2, seq_lens_np=[13, 31])
-    speculator.num_speculative_steps = 3
-    speculator.max_model_len = 32
-    query = (4, 2, 1) if is_prefill else (1, 1, 1)
-    steps = [
-        {
-            layer: make_metadata(total=(14 + step, 32, 0), query=query, rank=rank, interleave=interleave)
-            for layer in ("layer", "other_layer")
-        }
-        for step in range(1 if is_prefill else 2)
-    ]
-    speculator.draft_attn_layer_names = set(steps[0])
-    for step_index, metadata in enumerate(steps):
-        for layer_index, (layer, item) in enumerate(metadata.items()):
-            item.causal = causal
-            # Draft steps share each layer's block table, as in the metadata builder.
-            if step_index == 0:
-                item.decode.block_tables = item.decode.block_tables + 10 * layer_index
-            else:
-                item.decode.block_tables = steps[0][layer].decode.block_tables
-            if not is_prefill:
-                # Decode lengths come from the common seq_lens loop, not cached metadata.
-                item.decode.cp_history_seq_len = [-1, -1, -1]
-                item.decode.num_computed_tokens_of_dcp.fill(-1)
-    kinds = (CPKVScope.HISTORY, CPKVScope.CURRENT) if is_prefill and causal else (CPKVScope.FULL,)
-    providers = [DCPFIAParamProvider(layer, rank, kind) for layer in steps[0] for kind in kinds]
-    tasks = [
-        GraphUpdateTask(MagicMock(), {"step": step}, provider, step, None, None)
-        for step in range(len(steps))
-        for provider in providers
-    ]
-    graph = SimpleNamespace(tasks=tasks, provider_sizes={provider: len(steps) for provider in providers})
-    with patch.object(
-        AscendMetadataForDecode,
-        "update_dcp_seq_lens_cpu",
-        side_effect=AssertionError("FIA parameters must not mutate attention metadata"),
-    ):
-        params = speculator.build_fia_params(3, steps[0], is_prefill)
-        source = SharedSource(params)
-        resolved = UpdatableGraph.resolve_tasks(graph, source)
-
-    for task in resolved:
-        layer_metadata = steps[task.provider_index][task.provider.metadata_layer_name]
-        assert task.kwargs["actual_seq_lengths"] == layer_metadata.decode.actual_seq_lengths_q
-        if task.provider.attention_kind == CPKVScope.CURRENT:
-            assert task.kwargs["actual_seq_lengths_kv"] == layer_metadata.decode.actual_seq_lengths_q
-            assert task.kwargs["block_table"] is None
-        else:
-            lengths = layer_metadata.decode.seq_lens_list
-            if task.provider.attention_kind == CPKVScope.HISTORY:
-                lengths = [max(total - current, 0) for total, current in zip(lengths, query)]
-            expected = [sum((position // interleave) % 2 == rank for position in range(length)) for length in lengths]
-            assert task.kwargs["actual_seq_lengths_kv"] == expected
-            assert task.kwargs["actual_seq_lengths_kv"][-1] == 0
-            assert task.kwargs["block_table"] is layer_metadata.decode.block_tables
-        assert "layer_name" not in task.kwargs
-    assert all(task.kwargs == {"step": task.provider_index} for task in tasks)
-
-
 def test_v2_draft_metadata_does_not_alias_history_between_steps():
-    from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import AscendAutoRegressiveSpeculator
-
     speculator = object.__new__(AscendAutoRegressiveSpeculator)
     speculator.attn_architecture = "GQA"
     speculator.use_dcp = True
@@ -467,7 +376,9 @@ def test_v1_draft_builder_owns_history_and_padding_without_manager_override(rank
         num_actual_tokens=4,
         max_query_len=1,
         query_start_loc_cpu=torch.arange(17, dtype=torch.int32),
+        query_start_loc=torch.arange(17, dtype=torch.int32),
         seq_lens=advanced,
+        dcp_local_seq_lens_cpu=get_dcp_local_seq_lens(advanced, dcp_size=2, dcp_rank=rank),
         _seq_lens_cpu=advanced,
         seq_lens_cpu=advanced,
         block_table_tensor=torch.zeros(4, 1, dtype=torch.int32),

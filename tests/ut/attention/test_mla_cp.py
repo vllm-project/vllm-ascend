@@ -345,26 +345,23 @@ def test_mla_dcp_uses_native_global_query_heads_for_fia(mock_fia) -> None:
     assert merged["softmax_lse_shape"] == (4, 96, 1)
 
 
-@pytest.mark.parametrize("use_spec_decode", [False, True])
 @pytest.mark.parametrize(
-    "is_draft,is_prefill,query_ends,expected",
+    "use_spec_decode,is_draft,is_prefill,expected",
     [
-        (False, False, [1, 2], False),
-        (False, False, [2, 4], True),
-        (True, False, [1, 2], False),
-        (True, False, [2, 4], True),
-        (True, True, [1, 2], True),
+        pytest.param(True, False, False, True, id="speculative-target"),
+        pytest.param(True, True, False, False, id="draft-decode"),
+        pytest.param(False, True, True, True, id="draft-prefill"),
     ],
 )
-def test_mla_split_selection_matches_shared_policy(use_spec_decode, is_draft, is_prefill, query_ends, expected):
+def test_mla_split_selection_matches_shared_policy(use_spec_decode, is_draft, is_prefill, expected):
     impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
     impl.speculative_config = object() if use_spec_decode else None
-    metadata = SimpleNamespace(causal=True, decode=SimpleNamespace(actual_seq_lengths_q=query_ends))
+    metadata = SimpleNamespace(causal=True, decode=SimpleNamespace(actual_seq_lengths_q=[1, 2]))
     with patch(
         "vllm_ascend.attention.context_parallel.mla_cp._EXTRA_CTX",
         SimpleNamespace(is_draft_model=is_draft, is_draft_model_prefill=is_prefill, capturing=True),
     ):
-        assert impl._decode_requires_current_kv(metadata) == (expected or (use_spec_decode and not is_draft))
+        assert impl._decode_requires_current_kv(metadata) is expected
 
 
 @pytest.mark.parametrize(

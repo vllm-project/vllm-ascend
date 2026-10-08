@@ -24,10 +24,11 @@ from vllm.forward_context import BatchDescriptor, ForwardContext
 
 from tests.ut.base import TestBase
 from vllm_ascend.attention.context_parallel.attention_cp import (
-    AscendAttentionDCPImpl,
     AscendAttentionDCPMetadata,
     AscendMetadataForDecode,
+    DCPFIAParamProvider,
 )
+from vllm_ascend.attention.context_parallel.common_cp import CPKVScope
 from vllm_ascend.attention.context_parallel.mla_cp import (
     AscendMLADCPDecodeMetadata,
     AscendMlaDCPImpl,
@@ -45,6 +46,7 @@ from vllm_ascend.compilation.acl_graph import (
     update_draft_graph_params_workspaces,
     update_full_graph_params,
 )
+from vllm_ascend.compilation.updatable_graph import GraphUpdateTask
 from vllm_ascend.device_allocator.sleep_mem_optimized import AclGraphSleepWakeupManager
 
 
@@ -1045,71 +1047,30 @@ class TestDCPGraphParams(TestBase):
 
         _mock_graph_task_end.assert_called_once()
 
-    @patch("vllm_ascend.attention.context_parallel.attention_cp._EXTRA_CTX")
-    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
-    @patch("vllm_ascend.attention.context_parallel.attention_cp.torch.npu.graph_task_update_end")
-    @patch("vllm_ascend.attention.context_parallel.attention_cp.torch.npu.graph_task_update_begin", MagicMock())
-    @patch(
-        "vllm_ascend.attention.context_parallel.attention_cp.torch_npu.npu_fused_infer_attention_score.out",
-        MagicMock(),
-    )
-    @patch("vllm_ascend.attention.context_parallel.attention_cp.torch.npu.stream")
-    def test_update_attn_dcp_params(self, mock_stream, _mock_graph_task_end, mock_context, mock_extra_ctx):
-        mock_extra_ctx.is_draft_model = False
-        mock_extra_ctx.is_draft_model_prefill = False
-        block_table = torch.zeros(2, 5, dtype=torch.long)
-        num_heads = 256
-        scale = 0.1
-        num_kv_heads = 8
-        qk_head_dim = 96
-        qk_nope_head_dim = 64
-        query = torch.randn(4, num_heads, qk_head_dim)
-        q_nope = query[..., :qk_nope_head_dim]
-        k_nope = torch.randn(4, num_heads, qk_nope_head_dim)
-        actual_seq_lengths_kv = [1, 1]
-        actual_seq_lengths_q = np.array([1, 1])
-        out = torch.randn(2, 16, 128)
-        lse = torch.randn(2, 16, 8)
-
-        num_computed_tokens_of_dcp = np.array([[1, 1], [1, 1]])
-        decode = AscendMetadataForDecode(num_computed_tokens_of_dcp)
-        metadata = AscendAttentionDCPMetadata(
-            num_actual_tokens=2,
-            actual_seq_lengths_q=actual_seq_lengths_q,
-            num_decode_tokens=1,
-            decode=decode,
+    @patch("vllm_ascend.compilation.updatable_graph.torch.npu.graph_task_update_end")
+    @patch("vllm_ascend.compilation.updatable_graph.torch.npu.graph_task_update_begin")
+    def test_update_attn_dcp_params(self, mock_begin, mock_end):
+        """Update GQA DCP tasks with the provider's runtime parameters."""
+        block_table = torch.zeros(2, 5, dtype=torch.int32)
+        decode = AscendMetadataForDecode(
+            num_computed_tokens_of_dcp=np.array([[3, 2], [4, 3]]),
+            actual_seq_lengths_q=[1, 2],
+            block_tables=block_table,
         )
-        forward_context = MagicMock()
-        forward_context.attn_metadata = {"attn_layer_0": metadata}
-        forward_context.is_draft_model = False
-        forward_context.additional_kwargs = {
-            "is_draft_model": False,
-            "is_draft_model_prefill": False,
-        }
-        mock_context.return_value = forward_context
-
-        self.graph_params.attn_params[4] = []
-        self.graph_params.attn_params[4].append(
-            (
-                q_nope,
-                k_nope,
-                k_nope,
-                num_heads,
-                num_kv_heads,
-                scale,
-                block_table,
-                128,
-                actual_seq_lengths_kv,
-                actual_seq_lengths_q,
-                out,
-                lse,
-                2,
-                0,
-                None,
-            )
+        metadata = AscendAttentionDCPMetadata(decode=decode)
+        provider = DCPFIAParamProvider("attn_layer_0", 1, CPKVScope.FULL)
+        operation, handle, event = MagicMock(), MagicMock(), MagicMock()
+        query = torch.randn(2, 4, 8)
+        task = GraphUpdateTask(operation, {"query": query, "actual_seq_lengths_kv": [1, 1]}, provider, 0, handle, event)
+        params = provider.resolve({"attn_layer_0": metadata})
+        task.bind(params).apply(self.update_stream)
+        operation.assert_called_once_with(
+            query=query,
+            actual_seq_lengths=[1, 2],
+            actual_seq_lengths_kv=[2, 3],
+            block_table=block_table,
         )
-
-        with patch("torch_npu._C._npu_setStream", return_value=None):
-            AscendAttentionDCPImpl.update_graph_params(self.update_stream, forward_context, 4, None)
-
-        _mock_graph_task_end.assert_called_once()
+        mock_begin.assert_called_once_with(self.update_stream, handle)
+        mock_end.assert_called_once_with(self.update_stream)
+        event.record.assert_called_once_with(self.update_stream)
+        assert task.kwargs["actual_seq_lengths_kv"] == [1, 1]

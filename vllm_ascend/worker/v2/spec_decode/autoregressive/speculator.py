@@ -680,7 +680,7 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         query_lens_list = [i for i in range(1, num_reqs_padded + 1)]
         seq_lens_list = next_seq_lens_cpu.tolist()
         for metadata in attn_metadata.values():
-            if self.attn_architecture == "MLA" or (self.use_dcp and self.attn_architecture == "GQA"):
+            if hasattr(metadata, "decode"):
                 decode_metadata = metadata.decode
             else:
                 decode_metadata = metadata
@@ -700,6 +700,8 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
 
             metadata.seq_lens_cpu.copy_(next_seq_lens_cpu)
 
+    # TODO: Move build_fia_params and build_fia_params_dcp out of the
+    # speculator into the attention backend's graph-parameter helpers.
     def build_fia_params(
         self,
         num_reqs_padded: int,
@@ -707,7 +709,7 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         is_draft_model_prefill: bool,
     ) -> list[dict[str, Any]]:
         """Build all draft steps' FIA parameters for a single graph update."""
-        if self.use_dcp and self.attn_architecture == "GQA":
+        if self.use_dcp:
             return self.build_fia_params_dcp(num_reqs_padded, draft_attn_metadata, is_draft_model_prefill)
         layer_name, metadata = next(iter(draft_attn_metadata.items()))
         block_table = metadata.block_tables
