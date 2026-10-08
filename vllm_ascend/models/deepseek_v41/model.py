@@ -1025,8 +1025,8 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         )
         self.engram_layout = EngramLayout.from_config(config) if self.has_engram else None
         if self.engram_layout is not None:
-            # Complete head buckets per rank, laid out over TP and the
-            # node-local EDP group (upstream's, not one built from EP hosts).
+            # Head buckets use TP x DP x PCP when sharded, or TP alone when host
+            # storage is shared across local DP x PCP replicas.
             # Fail on an unreadable checkpoint before the first table exists:
             # the allocation below is per-rank 24-51 GiB, and discovering a
             # missing index/key during weight iteration would mean paying for
