@@ -1,6 +1,7 @@
 import vllm.envs as envs
 from vllm.config.vllm import VllmConfig
 
+from vllm_ascend.device.device_config import is_310p
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.worker.v2.pp_transport import resolve_spec_pp_support
 
@@ -16,18 +17,25 @@ _ASCEND_V1_SUPPORTED_FEATURES = frozenset(
 
 
 def _patched_use_v2_model_runner(self) -> bool:
-    """Return VLLM_USE_V2_MODEL_RUNNER env directly.
+    """Select Ascend Model Runner V2 from env, with 310P defaulting to V2.
 
     The upstream use_v2_model_runner gate-keeps the v2 runner with
     per-model architecture whitelists, Triton availability checks, and
     feature-support inspections. On Ascend the v2 runner is controlled
-    purely by the VLLM_USE_V2_MODEL_RUNNER environment variable;
-    model-compatibility decisions are deferred to the NPU runner itself.
+    by VLLM_USE_V2_MODEL_RUNNER when set; model-compatibility decisions
+    are deferred to the NPU runner itself.
+
+    When the env var is unset:
+    - Ascend 310P defaults to Model Runner V2 (MRV1 is no longer maintained
+      on 310P).
+    - Other Ascend platforms keep Model Runner V1 until they opt in with
+      VLLM_USE_V2_MODEL_RUNNER=1.
+    Explicit 0 / 1 overrides always win.
     """
     use_v2 = envs.VLLM_USE_V2_MODEL_RUNNER
     if use_v2 is not None:
         return use_v2
-    return False
+    return is_310p()
 
 
 def _patched_get_unsupported_features(self) -> list[str]:

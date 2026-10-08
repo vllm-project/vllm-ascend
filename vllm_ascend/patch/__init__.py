@@ -822,13 +822,17 @@
 #       compatibility checks. On Ascend the NPU v2 runner is not yet
 #       compatible with all upstream-defaulted models and features, so
 #       enabling by model architecture can crash. We override the
-#       property to read only VLLM_USE_V2_MODEL_RUNNER, deferring
-#       model/framework checks to the NPU runner itself.
+#       property to read VLLM_USE_V2_MODEL_RUNNER when set, deferring
+#       model/framework checks to the NPU runner itself. Ascend 310P
+#       defaults to Model Runner V2 when the env var is unset because
+#       MRV1 is no longer maintained on that platform.
 #    How:
 #       Monkey-patch VllmConfig.use_v2_model_runner to return
-#       envs.VLLM_USE_V2_MODEL_RUNNER (defaulting to False when unset).
-#       worker/patch_v2/patch_use_v2_model_runner.py reuses this platform
-#       patch so EngineCore and worker processes share the same behavior.
+#       envs.VLLM_USE_V2_MODEL_RUNNER when set; otherwise return True on
+#       310P and False on other Ascend platforms. Explicit 0 / 1 always
+#       wins. worker/patch_v2/patch_use_v2_model_runner.py reuses this
+#       platform patch so EngineCore and worker processes share the same
+#       behavior.
 #    Related PR (if no, explain why):
 #       1. https://github.com/vllm-project/vllm-ascend/pull/11389
 #    Future Plan:

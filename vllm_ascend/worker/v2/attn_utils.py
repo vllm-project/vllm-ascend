@@ -546,7 +546,8 @@ def build_attn_state(
     if vllm_config.model_config.runner_type == "pooling":
         if kv_cache_config is None:
             raise RuntimeError("Pooling attention state requires KVCacheConfig.")
-        if isinstance(
+        # Some encoder-only pooling models allocate no KV-cache groups.
+        if not kv_cache_config.kv_cache_groups or isinstance(
             kv_cache_config.kv_cache_groups[0].kv_cache_spec,
             EncoderOnlyAttentionSpec,
         ):

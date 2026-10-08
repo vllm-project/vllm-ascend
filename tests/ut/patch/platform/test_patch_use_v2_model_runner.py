@@ -35,3 +35,28 @@ def test_release_pcp_is_not_rejected_as_v2_unsupported_feature(monkeypatch):
     # Both supported pins delegate PCP checks to the manager (#53853).
     # The Ascend wrapper must preserve any remaining upstream restriction.
     assert unsupported == ["prefill context parallelism", "diffusion models"]
+
+
+def test_use_v2_model_runner_defaults_to_true_on_310p(monkeypatch):
+    monkeypatch.setattr(patch_use_v2_model_runner.envs, "VLLM_USE_V2_MODEL_RUNNER", None)
+    monkeypatch.setattr(patch_use_v2_model_runner, "is_310p", lambda: True)
+
+    assert patch_use_v2_model_runner._patched_use_v2_model_runner(object()) is True
+
+
+def test_use_v2_model_runner_defaults_to_false_off_310p(monkeypatch):
+    monkeypatch.setattr(patch_use_v2_model_runner.envs, "VLLM_USE_V2_MODEL_RUNNER", None)
+    monkeypatch.setattr(patch_use_v2_model_runner, "is_310p", lambda: False)
+
+    assert patch_use_v2_model_runner._patched_use_v2_model_runner(object()) is False
+
+
+def test_use_v2_model_runner_env_override_wins(monkeypatch):
+    monkeypatch.setattr(patch_use_v2_model_runner, "is_310p", lambda: True)
+
+    monkeypatch.setattr(patch_use_v2_model_runner.envs, "VLLM_USE_V2_MODEL_RUNNER", False)
+    assert patch_use_v2_model_runner._patched_use_v2_model_runner(object()) is False
+
+    monkeypatch.setattr(patch_use_v2_model_runner.envs, "VLLM_USE_V2_MODEL_RUNNER", True)
+    monkeypatch.setattr(patch_use_v2_model_runner, "is_310p", lambda: False)
+    assert patch_use_v2_model_runner._patched_use_v2_model_runner(object()) is True
