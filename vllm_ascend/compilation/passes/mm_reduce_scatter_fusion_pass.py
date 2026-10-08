@@ -20,9 +20,7 @@ from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
 from vllm.config import VllmConfig
 from vllm.config.utils import Range
 from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group
-from vllm.logger import init_logger
-
-logger = init_logger(__name__)
+from vllm.logger import logger
 
 _MIN_REDUCE_DIM = 256
 _MAX_REDUCE_DIM_EXCLUSIVE = 65535

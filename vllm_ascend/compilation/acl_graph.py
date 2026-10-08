@@ -209,9 +209,7 @@ class ACLGraphWrapper:
                 try:
                     # MMRS lazily allocates its HCCL resource on first use.
                     # CANN permits this allocation only in RELAXED capture.
-                    capture_error_mode = (
-                        "relaxed" if self.compilation_config.pass_config.fuse_gemm_comms else "global"
-                    )
+                    capture_error_mode = "relaxed" if self.compilation_config.pass_config.fuse_gemm_comms else "global"
                     with torch.npu.graph(
                         aclgraph,
                         pool=self.graph_pool,

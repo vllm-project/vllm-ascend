@@ -45,9 +45,7 @@ class TestGraphFusionPassManagerConfig(TestBase):
         init_ascend_config(vllm_config)
 
         profile = MagicMock()
-        profile.supports.side_effect = (
-            lambda capability: capability.name == "GRAPH_MM_REDUCE_SCATTER_FUSION"
-        )
+        profile.supports.side_effect = lambda capability: capability.name == "GRAPH_MM_REDUCE_SCATTER_FUSION"
         with patch(
             "vllm_ascend.compilation.graph_fusion_pass_manager.get_current_hardware_profile",
             return_value=profile,

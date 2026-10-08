@@ -195,12 +195,8 @@ def _npu_matmul_reduce_scatter_impl(
 ) -> torch.Tensor:
     """Fused ``reduce_scatter(x @ weight.T, dim=0)`` over the TP group."""
     tp_group = get_tp_group()
-    assert group_name == tp_group.unique_name, (
-        f"npu_matmul_reduce_scatter only supports the TP group, got {group_name}"
-    )
-    return DeviceOperator.npu_mm_reduce_scatter_base(
-        x, weight.t(), _tp_hccl_comm_name(), world_size, reduce_op="sum"
-    )
+    assert group_name == tp_group.unique_name, f"npu_matmul_reduce_scatter only supports the TP group, got {group_name}"
+    return DeviceOperator.npu_mm_reduce_scatter_base(x, weight.t(), _tp_hccl_comm_name(), world_size, reduce_op="sum")
 
 
 def _npu_matmul_reduce_scatter_fake(
