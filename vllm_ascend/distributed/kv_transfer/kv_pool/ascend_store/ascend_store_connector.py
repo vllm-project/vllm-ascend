@@ -441,30 +441,45 @@ class LookupKeyServer:
         self.running = True
 
         def process_request():
-            while self.running:
-                all_frames = self.socket.recv_multipart(copy=False)
-                token_len = int.from_bytes(all_frames[0], byteorder="big")
-                kv_group_ids = self.decoder.decode([all_frames[1]])
-                hbm_hit_tokens = int.from_bytes(all_frames[2], byteorder="big")
-                hashes_str = self.decoder.decode(all_frames[3:])
-                result = self.pool_worker.lookup_scheduler(
-                    token_len,
-                    hashes_str,
-                    kv_group_ids,
-                    use_layerwise=False,
-                    hbm_hit_tokens=hbm_hit_tokens,
-                )
-                logger.debug(
-                    "KV pool lookup response token_len=%d groups=%s hit_tokens=%d",
-                    token_len,
-                    kv_group_ids,
-                    result,
-                )
-                response = result.to_bytes(4, "big")
-                self.socket.send(response)
+            poller = zmq.Poller()
+            poller.register(self.socket, zmq.POLLIN)
+
+            try:
+                while self.running:
+                    if not poller.poll(timeout=100):
+                        continue
+
+                    try:
+                        all_frames = self.socket.recv_multipart(copy=False)
+                        token_len = int.from_bytes(all_frames[0], byteorder="big")
+                        kv_group_ids = self.decoder.decode([all_frames[1]])
+                        hbm_hit_tokens = int.from_bytes(all_frames[2], byteorder="big")
+                        hashes_str = self.decoder.decode(all_frames[3:])
+                        result = self.pool_worker.lookup_scheduler(
+                            token_len,
+                            hashes_str,
+                            kv_group_ids,
+                            use_layerwise=False,
+                            hbm_hit_tokens=hbm_hit_tokens,
+                        )
+                        logger.debug(
+                            "KV pool lookup response token_len=%d groups=%s hit_tokens=%d",
+                            token_len,
+                            kv_group_ids,
+                            result,
+                        )
+                        response = result.to_bytes(4, "big")
+                    except Exception:
+                        logger.exception("KV pool lookup handler failed; reporting 0 hit tokens")
+                        response = (0).to_bytes(4, "big")
+
+                    self.socket.send(response)
+            finally:
+                self.socket.close(linger=0)
 
         self.thread = threading.Thread(target=process_request, daemon=True)
         self.thread.start()
 
     def close(self):
-        self.socket.close(linger=0)
+        self.running = False
+        self.thread.join(timeout=1)

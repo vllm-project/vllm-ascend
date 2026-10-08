@@ -122,11 +122,7 @@ class KVPoolScheduler:
         self.original_block_size = infer_group_block_sizes(vllm_config.cache_config.block_size, kv_cache_groups)
         self.cacheable_group_ids = infer_cacheable_group_ids(kv_cache_groups)
         cacheable_block_sizes = [self.original_block_size[i] for i in self.cacheable_group_ids]
-        if (
-            self.use_layerwise
-            and self.backend_name != "memcache"
-            and len(cacheable_block_sizes) != len(self.original_block_size)
-        ):
+        if self.use_layerwise and len(cacheable_block_sizes) != len(self.original_block_size):
             raise ValueError("AscendStore private KV state requires non-layerwise transfer")
         self.grouped_block_size = [block_size * self.dcp_size for block_size in self.original_block_size]
         requested_hash_block_size = vllm_config.cache_config.prefix_match_unit
@@ -386,10 +382,7 @@ class KVPoolScheduler:
         protocol helper enumerates all stages and head/TP ranks.
         """
         assert self.layerwise_keys is not None
-        head_or_tp_ranks = (
-            self.tp_size if group_id in self.num_speculative_blocks_by_group else self.tp_size // self.put_step
-        )
-        return self.layerwise_keys.make_hit_check_keys(group_id, block_hash_hex, head_or_tp_ranks)
+        return self.layerwise_keys.make_hit_check_keys(group_id, block_hash_hex, self.tp_size // self.put_step)
 
     def _get_layerwise_hit_tokens(
         self,
@@ -672,7 +665,7 @@ class KVPoolScheduler:
             else:
                 if num_computed_tokens >= token_len:
                     return 0, False
-                if self.client is None:
+                if self.client is None or self.client.closed:
                     self.client = LookupKeyClient(self.vllm_config)
                 num_external_hit_tokens = self.client.lookup(
                     token_len,
@@ -1182,6 +1175,8 @@ class LookupKeyClient:
             zmq.REQ,  # type: ignore[attr-defined]
             bind=False,
         )
+        self.socket.setsockopt(zmq.RCVTIMEO, 1000)
+        self._closed = False
 
     def lookup(
         self,
@@ -1200,13 +1195,23 @@ class LookupKeyClient:
             hbm_hit_tokens.to_bytes(4, byteorder="big"),
             *hash_frames,
         ]
-        self.socket.send_multipart(all_frames, copy=False)
-        resp = self.socket.recv()
-        result = int.from_bytes(resp, "big")
-        return result
+        try:
+            self.socket.send_multipart(all_frames, copy=False)
+            resp = self.socket.recv()
+        except zmq.ZMQError:
+            logger.exception("KV pool lookup failed")
+            self.close()
+            return 0
+
+        return int.from_bytes(resp, "big")
 
     def close(self):
         self.socket.close(linger=0)
+        self._closed = True
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
 
 
 def get_zmq_rpc_path_lookup(vllm_config: "VllmConfig") -> str:

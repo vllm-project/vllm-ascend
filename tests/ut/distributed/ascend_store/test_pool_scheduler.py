@@ -21,6 +21,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+import zmq
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
@@ -795,6 +796,75 @@ class TestLookupKeyClient(unittest.TestCase):
                 b"hashes",
             ],
         )
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.make_zmq_socket")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.MsgpackEncoder")
+    def test_lookup_zmq_error_returns_zero(self, mock_encoder_cls, mock_make_socket):
+        config = MagicMock()
+        config.parallel_config.data_parallel_rank = 0
+        config.kv_transfer_config.kv_connector_extra_config = {}
+
+        mock_socket = MagicMock()
+        mock_make_socket.return_value = mock_socket
+        mock_socket.recv.side_effect = zmq.ZMQError("timeout")
+        mock_encoder_cls.return_value.encode.side_effect = [[b"hashes"], [b"groups"]]
+
+        client = LookupKeyClient(config)
+        result = client.lookup(64, [b"\\xaa\\xbb"], hbm_hit_tokens=16)
+
+        self.assertEqual(result, 0)
+        self.assertTrue(client.closed)
+        mock_socket.close.assert_called_once_with(linger=0)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.make_zmq_socket")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.zmq")
+    def test_socket_sets_receive_timeout(self, mock_zmq, mock_make_socket):
+        config = MagicMock()
+        config.parallel_config.data_parallel_rank = 0
+        config.kv_transfer_config.kv_connector_extra_config = {}
+
+        mock_socket = MagicMock()
+        mock_make_socket.return_value = mock_socket
+
+        LookupKeyClient(config)
+
+        mock_socket.setsockopt.assert_called_once_with(mock_zmq.RCVTIMEO, 1000)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_lookup_failure_rebuilds_client(self, mock_client_cls):
+        scheduler = KVPoolScheduler(
+            self._make_config(block_size=16),
+            use_layerwise=False,
+        )
+        request = MagicMock(
+            prompt_token_ids=list(range(64)),
+            num_tokens=64,
+            request_id="r1",
+            block_hashes=[b"h"] * 4,
+        )
+
+        first_client = MagicMock()
+        first_client.closed = True
+        first_client.lookup.return_value = 0
+
+        second_client = MagicMock()
+        second_client.closed = False
+        second_client.lookup.return_value = 32
+
+        mock_client_cls.side_effect = [first_client, second_client]
+
+        self.assertEqual(
+            scheduler.get_num_new_matched_tokens(request, 0),
+            (0, False),
+        )
+        self.assertIs(scheduler.client, first_client)
+
+        self.assertEqual(
+            scheduler.get_num_new_matched_tokens(request, 0),
+            (32, False),
+        )
+        self.assertIs(scheduler.client, second_client)
+        self.assertEqual(mock_client_cls.call_count, 2)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.make_zmq_socket")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.zmq")
