@@ -292,6 +292,34 @@ e2e-upstream_singlecard:
     estimated_time: 20
   - name: tests/v1/e2e/spec_decode/test_sharded_sampling.py
     estimated_time: 20
+  - name: tests/v1/kv_offload/cpu/test_canonical_layout.py
+    estimated_time: 20
+  - name: tests/v1/spec_decode/test_dflash_prepare_inputs.py
+    estimated_time: 20
+  - name: tests/v1/worker/test_gpu_bad_words.py
+    estimated_time: 20
+  - name: tests/v1/worker/test_gpu_batch_shard.py
+    estimated_time: 20
+  - name: tests/v1/worker/test_gpu_logit_bias.py
+    estimated_time: 20
+  - name: tests/v1/worker/test_gpu_model_runner_v2_cudagraph_profiling.py
+    estimated_time: 20
+  - name: tests/v1/worker/test_gpu_rejection_sampler_chunking.py
+    estimated_time: 20
+  - name: tests/v1/worker/test_gpu_sampler_flags.py
+    estimated_time: 20
+  - name: tests/v1/worker/test_gpu_thinking_budget.py
+    estimated_time: 20
+  - name: tests/v1/worker/test_gpu_trace_replay.py
+    estimated_time: 20
+  - name: tests/v1/worker/test_gpu_warmup_blocks.py
+    estimated_time: 20
+  - name: tests/v1/worker/test_jit_warmup_migration.py
+    estimated_time: 20
+  - name: tests/v1/worker/test_mamba_hybrid_model_state.py
+    estimated_time: 20
+  - name: tests/v1/worker/test_prompt_embeds_state.py
+    estimated_time: 20
 e2e-upstream_online_1:
   - name: tests/model_executor/model_loader/runai_streamer_loader/test_runai_model_streamer_s3.py
     estimated_time: 20
