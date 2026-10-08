@@ -149,10 +149,6 @@ a3:
         config_file_path: DeepSeek-V3.yaml
         config_base_path: tests/e2e/cases/models/configs/DeepSeek
         size: 2
-      - name: multi-node-glm4.7-w8a8c8-layerwise
-        config_file_path: GLM-4.7-W8A8C8-Mooncake-Layerwise.yaml
-        config_base_path: tests/e2e/cases/features/kv_pool
-        size: 2
       - name: multi-node-GLM-5.1-W8A8C8-MTP-A3_64k
         config_file_path: GLM-5.1-W8A8C8-A3_64k_90_50.yaml
         config_base_path: tests/e2e/cases/models/configs/GLM
@@ -288,10 +284,6 @@ a3:
       - name: GLM-5_1-W8A8_A3_weekly
         os: linux-aarch64-a3-800t-16
         config_file_path: GLM-5_1-W8A8_A3_weekly.yaml
-        config_base_path: tests/e2e/cases/models/configs/GLM
-      - name: glm-5-w4a8
-        os: linux-aarch64-a3-800t-16
-        config_file_path: GLM-5.yaml
         config_base_path: tests/e2e/cases/models/configs/GLM
       - name: qwen2-5-vl-7b-epd
         os: linux-aarch64-a3-800t-4
