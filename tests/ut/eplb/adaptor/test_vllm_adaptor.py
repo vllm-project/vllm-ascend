@@ -224,6 +224,7 @@ class TestVllmAdaptor(unittest.TestCase):
         with patch(
             "vllm_ascend.eplb.adaptor.vllm_adaptor.torch_npu.copy_memory_",
             side_effect=lambda dst, src: dst.copy_(src),
+            create=True,
         ) as mock_copy_memory:
             adaptor.do_update_expert_weight(0, 0, 0)
 
