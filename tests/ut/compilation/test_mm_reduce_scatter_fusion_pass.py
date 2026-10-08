@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import importlib.util
+import sys
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -8,9 +10,17 @@ from torch._subclasses.fake_tensor import FakeTensorMode
 from vllm.config import VllmConfig
 
 from tests.ut.base import TestBase
-from vllm_ascend.compilation.passes.mm_reduce_scatter_fusion_pass import (
-    MatmulReduceScatterFusionPass,
-)
+
+_stubbed_nge = importlib.util.find_spec("npugraph_ex") is None and importlib.util.find_spec("torchair") is None
+if _stubbed_nge:
+    sys.modules["npugraph_ex"] = MagicMock()
+try:
+    from vllm_ascend.compilation.passes.mm_reduce_scatter_fusion_pass import (
+        MatmulReduceScatterFusionPass,
+    )
+finally:
+    if _stubbed_nge:
+        del sys.modules["npugraph_ex"]
 
 TP_SIZE = 2
 TP_GROUP_NAME = "tp:0"
