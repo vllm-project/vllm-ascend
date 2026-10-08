@@ -1331,6 +1331,8 @@ class FinegrainedTPConfig:
                     chosen = max(chosen, max(capture_sizes))
                 vc.compilation_config.cudagraph_capture_sizes = [chosen]
                 vc.compilation_config.max_cudagraph_capture_size = chosen
+                # warning_once caches its args in a set, so sizes must be hashable.
+                sizes_desc = "the default size ladder" if capture_sizes is None else str(capture_sizes)
                 logger.warning_once(
                     "Fine-grained TP exchanges always run at the static capacity "
                     "regardless of the replayed capture bucket, so a multi-bucket "
@@ -1340,7 +1342,7 @@ class FinegrainedTPConfig:
                     "clamped up to your largest bucket) so the bucket equals the "
                     "exchange capacity. Set cudagraph_capture_sizes explicitly to "
                     "silence this.",
-                    "the default size ladder" if capture_sizes is None else capture_sizes,
+                    sizes_desc,
                     chosen,
                 )
             if self.oproj_tensor_parallel_size > 1:
