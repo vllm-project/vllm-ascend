@@ -3,8 +3,10 @@
 import json
 from unittest.mock import MagicMock
 
+import pytest
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.envs import VLLM_ENFORCE_STRICT_TOOL_CALLING
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.parser.abstract_parser import DelegatingParser
 from vllm.parser.parser_manager import ParserManager
 from vllm.tool_parsers.deepseekv4_tool_parser import DeepSeekV4ToolParser
 
@@ -103,6 +105,55 @@ def _unified_parser():
     )
     assert parser_cls is not None
     return parser_cls(MOCK_TOKENIZER, tools=[_tools()])
+
+
+def _request(api: str, choice: str):
+    function = _tools()["function"]
+    if api == "chat":
+        tool_choice = (
+            "required" if choice == "required" else {"type": "function", "function": {"name": function["name"]}}
+        )
+        return ChatCompletionRequest(model="deepseek-v4-flash", messages=[], tools=[_tools()], tool_choice=tool_choice)
+    tool_choice = "required" if choice == "required" else {"type": "function", "name": function["name"]}
+    return ResponsesRequest(
+        model="deepseek-v4-flash",
+        input="Plan a trip",
+        tools=[{"type": "function", **function}],
+        tool_choice=tool_choice,
+    )
+
+
+def _model_output(api: str, choice: str, strict: bool, arguments: dict):
+    if api == "chat" and strict:
+        return _build_tool_call("plan_trip", arguments)
+    if choice == "required":
+        return json.dumps([{"name": "plan_trip", "parameters": arguments}])
+    return json.dumps(arguments)
+
+
+def _stream_unified(parser, request, full_text: str):
+    deltas = []
+    previous_text = ""
+    function_name_returned = False
+    for delta_text in full_text:
+        current_text = previous_text + delta_text
+        delta, function_name_returned = parser._extract_tool_calls_streaming(
+            previous_text=previous_text,
+            current_text=current_text,
+            delta_text=delta_text,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[1],
+            request=request,
+            tool_call_idx=0,
+            function_name_returned=function_name_returned,
+        )
+        if delta is not None:
+            deltas.append(delta)
+        previous_text = current_text
+    if hasattr(parser._tool_parser, "_pending_delta_messages"):
+        deltas.extend(parser._tool_parser.drain_pending_tool_call_deltas())
+    return deltas
 
 
 def test_streaming_deepseek_v4_tool_calls_emit_chunked_arguments():
@@ -361,100 +412,104 @@ def test_registered_parser_is_patch_loaded():
         DeepSeekV4ToolParser.extract_tool_calls_streaming
         is patch_deepseek_v4_tool_call_parser._patched_extract_tool_calls_streaming
     )
-    assert DeepSeekV4ToolParser.supports_required_and_named == (not VLLM_ENFORCE_STRICT_TOOL_CALLING)
+    assert (
+        DelegatingParser._extract_tool_calls
+        is patch_deepseek_v4_tool_call_parser._patched_delegating_extract_tool_calls
+    )
+    assert (
+        DelegatingParser._extract_tool_calls_streaming
+        is patch_deepseek_v4_tool_call_parser._patched_delegating_extract_tool_calls_streaming
+    )
+    assert DeepSeekV4ToolParser.supports_required_and_named is True
 
 
-def test_required_and_named_support_tracks_strict_tool_calling():
-    original = DeepSeekV4ToolParser.supports_required_and_named
-    try:
-        patch_deepseek_v4_tool_call_parser._configure_required_and_named_support(True)
-        assert DeepSeekV4ToolParser.supports_required_and_named is False
+@pytest.mark.parametrize("strict", [False, True])
+@pytest.mark.parametrize("api", ["chat", "responses"])
+@pytest.mark.parametrize("choice", ["required", "named"])
+def test_required_and_named_non_streaming_routing(monkeypatch, strict, api, choice):
+    monkeypatch.setattr(patch_deepseek_v4_tool_call_parser, "VLLM_ENFORCE_STRICT_TOOL_CALLING", strict)
+    request = _request(api, choice)
+    original_request = request.model_dump()
+    arguments = {"days": 3, "flexible": False, "cities": ["Beijing"], "notes": "window seat"}
 
-        patch_deepseek_v4_tool_call_parser._configure_required_and_named_support(False)
-        assert DeepSeekV4ToolParser.supports_required_and_named is True
-    finally:
-        DeepSeekV4ToolParser.supports_required_and_named = original
+    parser = _unified_parser()
+    model_output = _model_output(api, choice, strict, arguments)
+    if isinstance(request, ResponsesRequest):
+        tool_calls, content = parser._parse_tool_calls(request=request, content=model_output, enable_auto_tools=True)
+    else:
+        tool_calls, content = parser._extract_tool_calls(content=model_output, request=request, enable_auto_tools=True)
 
-
-def test_required_tool_choice_routes_strict_dsml_to_native_parser():
-    original = DeepSeekV4ToolParser.supports_required_and_named
-    try:
-        patch_deepseek_v4_tool_call_parser._configure_required_and_named_support(True)
-        request = ChatCompletionRequest(
-            model="deepseek-v4-flash",
-            messages=[],
-            tools=[_tools()],
-            tool_choice="required",
-        )
-        model_output = _build_tool_call(
-            "plan_trip",
-            {
-                "days": 3,
-                "flexible": False,
-                "cities": ["Beijing"],
-                "notes": "window seat",
-            },
-        )
-
-        tool_calls, content = _unified_parser()._extract_tool_calls(
-            content=model_output,
-            request=request,
-            enable_auto_tools=True,
-        )
-
-        assert tool_calls is not None
-        assert len(tool_calls) == 1
-        assert tool_calls[0].name == "plan_trip"
-        assert json.loads(tool_calls[0].arguments) == {
-            "days": 3,
-            "flexible": False,
-            "cities": ["Beijing"],
-            "notes": "window seat",
-        }
-        assert content is None
-    finally:
-        DeepSeekV4ToolParser.supports_required_and_named = original
+    assert tool_calls is not None
+    assert len(tool_calls) == 1
+    assert tool_calls[0].name == "plan_trip"
+    assert json.loads(tool_calls[0].arguments) == arguments
+    assert content is None
+    assert request.model_dump() == original_request
+    assert DeepSeekV4ToolParser.supports_required_and_named is True
 
 
-def test_required_tool_choice_keeps_json_parser_without_strict():
-    original = DeepSeekV4ToolParser.supports_required_and_named
-    try:
-        patch_deepseek_v4_tool_call_parser._configure_required_and_named_support(False)
-        request = ChatCompletionRequest(
-            model="deepseek-v4-flash",
-            messages=[],
-            tools=[_tools()],
-            tool_choice="required",
-        )
-        model_output = json.dumps(
-            [
-                {
-                    "name": "plan_trip",
-                    "parameters": {
-                        "days": 3,
-                        "flexible": False,
-                        "cities": ["Beijing"],
-                        "notes": "window seat",
-                    },
-                }
-            ]
-        )
+@pytest.mark.parametrize("strict", [False, True])
+@pytest.mark.parametrize("api", ["chat", "responses"])
+@pytest.mark.parametrize("choice", ["required", "named"])
+def test_required_and_named_streaming_routing(monkeypatch, strict, api, choice):
+    monkeypatch.setattr(patch_deepseek_v4_tool_call_parser, "VLLM_ENFORCE_STRICT_TOOL_CALLING", strict)
+    request = _request(api, choice)
+    original_request = request.model_dump()
+    arguments = {"days": 3, "flexible": False, "cities": ["Beijing"], "notes": "window seat"}
 
-        tool_calls, content = _unified_parser()._extract_tool_calls(
-            content=model_output,
-            request=request,
-            enable_auto_tools=True,
-        )
+    deltas = _stream_unified(_unified_parser(), request, _model_output(api, choice, strict, arguments))
+    calls = [tc for delta in deltas for tc in delta.tool_calls or []]
 
-        assert tool_calls is not None
-        assert len(tool_calls) == 1
-        assert tool_calls[0].name == "plan_trip"
-        assert json.loads(tool_calls[0].arguments) == {
-            "days": 3,
-            "flexible": False,
-            "cities": ["Beijing"],
-            "notes": "window seat",
-        }
-        assert content is None
-    finally:
-        DeepSeekV4ToolParser.supports_required_and_named = original
+    assert calls
+    assert {tc.index for tc in calls} == {0}
+    assert [tc.function.name for tc in calls if tc.function and tc.function.name] == ["plan_trip"]
+    arguments_text = "".join(tc.function.arguments or "" for tc in calls if tc.function)
+    assert json.loads(arguments_text) == arguments
+    assert not any(delta.content for delta in deltas)
+    assert request.model_dump() == original_request
+    assert DeepSeekV4ToolParser.supports_required_and_named is True
+
+
+@pytest.mark.parametrize("api", ["chat", "responses"])
+@pytest.mark.parametrize("choice", ["required", "named"])
+def test_strict_generation_format_is_request_specific(monkeypatch, api, choice):
+    monkeypatch.setattr("vllm.tool_parsers.abstract_tool_parser.VLLM_ENFORCE_STRICT_TOOL_CALLING", True)
+    monkeypatch.setattr("vllm.tool_parsers.structural_tag_registry._enable_structured_outputs_in_reasoning", True)
+    request = _unified_parser().adjust_request(_request(api, choice))
+
+    if api == "chat":
+        assert request.structured_outputs.structural_tag is not None
+        assert "DSML" in request.structured_outputs.structural_tag
+        assert "</think>" in request.structured_outputs.structural_tag
+    else:
+        assert request.text.format.type == "json_schema"
+
+
+def test_strict_chat_routing_preserves_other_tool_parsers(monkeypatch):
+    monkeypatch.setattr(patch_deepseek_v4_tool_call_parser, "VLLM_ENFORCE_STRICT_TOOL_CALLING", True)
+    parser = _unified_parser()
+    parser._tool_parser = MagicMock()
+    parser._tool_parser.supports_required_and_named = True
+    arguments = {"days": 3}
+    tool_calls, content = parser._extract_tool_calls(
+        content=json.dumps(arguments), request=_request("chat", "named"), enable_auto_tools=True
+    )
+
+    assert tool_calls[0].name == "plan_trip"
+    assert json.loads(tool_calls[0].arguments) == arguments
+    assert content is None
+    parser._tool_parser.extract_tool_calls.assert_not_called()
+
+    model_output = json.dumps(arguments)
+    delta, _ = parser._extract_tool_calls_streaming(
+        previous_text="",
+        current_text=model_output,
+        delta_text=model_output,
+        previous_token_ids=[],
+        current_token_ids=[],
+        delta_token_ids=[1],
+        request=_request("chat", "named"),
+    )
+    assert delta.tool_calls[0].function.name == "plan_trip"
+    assert json.loads(delta.tool_calls[0].function.arguments) == arguments
+    parser._tool_parser.extract_tool_calls_streaming.assert_not_called()
