@@ -51,6 +51,7 @@ import vllm_ascend.patch.platform.patch_balance_schedule  # noqa
 
 # Must follow the Scheduler class swap so AsyncScheduler inherits it.
 import vllm_ascend.patch.platform.patch_async_scheduler  # noqa
+import vllm_ascend.patch.platform.patch_compilation_cache  # noqa
 
 import vllm_ascend.patch.platform.patch_kv_cache_coordinator  # noqa
 import vllm_ascend.patch.platform.patch_speculative_config  # noqa
