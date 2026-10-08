@@ -63,6 +63,8 @@ def test_environment_override_wins(monkeypatch, env_value):
         SimpleNamespace(additional_config={"enable_kvpp": True}),
         SimpleNamespace(additional_config={"enable_reduce_sample": False}),
         SimpleNamespace(additional_config={"enable_reduce_sample": "false"}),
+        SimpleNamespace(additional_config={"enable_dsa_cp": False}),
+        SimpleNamespace(additional_config={"enable_dsa_cp": "false"}),
         SimpleNamespace(additional_config={"eplb_config": {"dynamic_eplb": True}}),
         SimpleNamespace(kv_transfer_config=SimpleNamespace(kv_connector="AscendStoreConnector")),
         SimpleNamespace(
@@ -82,6 +84,8 @@ def test_environment_override_wins(monkeypatch, env_value):
         "kvpp",
         "reduce-sample-disabled",
         "reduce-sample-string-false",
+        "dsa-cp-disabled",
+        "dsa-cp-string-false",
         "dynamic-eplb",
         "kv-pool-connector",
         "kv-pool-memcache",
@@ -118,6 +122,9 @@ def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
         SimpleNamespace(additional_config={"enable_reduce_sample": True}),
         SimpleNamespace(additional_config={"enable_reduce_sample": "true"}),
         SimpleNamespace(additional_config={"enable_reduce_sample": 1}),
+        SimpleNamespace(additional_config={"enable_dsa_cp": True}),
+        SimpleNamespace(additional_config={"enable_dsa_cp": "true"}),
+        SimpleNamespace(additional_config={"enable_dsa_cp": 1}),
         SimpleNamespace(speculative_config=SimpleNamespace(method="suffix")),
         SimpleNamespace(speculative_config=SimpleNamespace(method="ngram")),
         SimpleNamespace(speculative_config=SimpleNamespace(method="ngram_gpu")),
@@ -148,6 +155,9 @@ def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
         "enable-reduce-sample",
         "enable-reduce-sample-string",
         "enable-reduce-sample-int",
+        "enable-dsa-cp",
+        "enable-dsa-cp-string",
+        "enable-dsa-cp-int",
         "suffix-speculative-decoding",
         "ngram-speculative-decoding",
         "ngram-gpu-speculative-decoding",
@@ -198,6 +208,7 @@ def test_blacklist_does_not_override_explicit_env(monkeypatch):
     assert use_v2_model_runner(SimpleNamespace(compilation_config=SimpleNamespace(cudagraph_mm_encoder=True))) is True
     assert use_v2_model_runner(SimpleNamespace(additional_config={"draft_window_size": 512})) is True
     assert use_v2_model_runner(SimpleNamespace(additional_config={"enable_reduce_sample": True})) is True
+    assert use_v2_model_runner(SimpleNamespace(additional_config={"enable_dsa_cp": True})) is True
     assert (
         use_v2_model_runner(SimpleNamespace(kv_transfer_config=SimpleNamespace(kv_connector="AscendStoreConnector")))
         is True
