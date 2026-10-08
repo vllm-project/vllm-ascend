@@ -67,6 +67,7 @@ def _make_lifecycle_worker() -> AscendECMooncakeWorker:
     worker._store_config = ("namespace", 4, 1024, 256)
     worker._output_store = None
     worker._producer_memory = MagicMock()
+    worker._transfer = MagicMock()
     worker._buffer_device = "npu"
     worker._shutdown = False
     return worker
@@ -83,6 +84,7 @@ def test_start_services_prepares_ascend_store_before_upstream_startup():
 
     with (
         patch.object(worker_module.torch, "device", return_value=device),
+        patch.object(store_client_module, "ensure_mooncake_store_imported") as import_store,
         patch.object(
             store_client_module,
             "create_ascend_mooncake_embedding_store_client",
@@ -100,6 +102,7 @@ def test_start_services_prepares_ascend_store_before_upstream_startup():
         ) as start_upstream_mock,
     ):
         lifecycle = MagicMock()
+        lifecycle.attach_mock(import_store, "import_store")
         lifecycle.attach_mock(worker._producer_memory.ensure_prepared, "prepare")
         lifecycle.attach_mock(create_store_client, "client")
         lifecycle.attach_mock(create_backend, "backend")
@@ -108,8 +111,13 @@ def test_start_services_prepares_ascend_store_before_upstream_startup():
         worker.start_services()
 
     assert lifecycle.mock_calls == [
+        call.import_store(),
         call.prepare(device),
-        call.client(worker._producer_memory.bounce_arena, read_buffer_bytes=256),
+        call.client(
+            worker._producer_memory.bounce_arena,
+            worker._transfer,
+            read_buffer_bytes=256,
+        ),
         call.backend(
             store_client,
             "namespace",
