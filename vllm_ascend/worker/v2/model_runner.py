@@ -376,25 +376,25 @@ class NPUModelRunner(GPUModelRunner):
         self._configure_cpu_seq_lens_sync()
 
     def _configure_cpu_seq_lens_sync(self) -> None:
-        # MRV1 uses actual layer backends, not the runner's default backend.
-        # V4.1 kernels consume rejection-corrected device lengths; their CPU
-        # lengths are allocation/dispatch upper bounds only. Keep exact copies
-        # for unknown/mixed backends and parallel/pooling consumers.
-        backends = [group.backend for groups in self.attn_groups for group in groups]
+        # Default to exact CPU lengths until every consumer is known to use
+        # rejection-corrected device lengths instead.
         self._needs_seq_lens_cpu_sync = True
-        if not backends:
+        # Check actual layer backends, including mixed models. An empty set
+        # provides no evidence that skipping the CPU copy is safe.
+        backends = {group.backend for groups in self.attn_groups for group in groups}
+        if backends != {DeepseekV41CacheBackend}:
+            return
+        if not uses_a5_packed_cache() or self.model_config.architecture != "DeepseekV41ForCausalLM":
             return
         parallel = self.parallel_config
-        self._needs_seq_lens_cpu_sync = not (
-            uses_a5_packed_cache()
-            and self.model_config.architecture == "DeepseekV41ForCausalLM"
-            and parallel.pipeline_parallel_size == 1
-            and parallel.prefill_context_parallel_size == 1
-            and parallel.decode_context_parallel_size == 1
-            and self.kvpp.scheduler is None
-            and backends
-            and all(backend is DeepseekV41CacheBackend for backend in backends)
-        )
+        if (
+            parallel.pipeline_parallel_size != 1
+            or parallel.prefill_context_parallel_size != 1
+            or parallel.decode_context_parallel_size != 1
+            or self.kvpp.scheduler is not None
+        ):
+            return
+        self._needs_seq_lens_cpu_sync = False
 
     @torch.inference_mode()
     def execute_model(
