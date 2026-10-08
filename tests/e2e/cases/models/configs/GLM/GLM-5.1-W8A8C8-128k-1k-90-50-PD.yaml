@@ -366,6 +366,6 @@ benchmarks:
     num_prompts: 256
     max_out_len: 1024
     batch_size: 64
-    request_rate: 1.52
+    request_rate: 1.78
     baseline: 923.60
     threshold: 0.97
