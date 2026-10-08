@@ -339,7 +339,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
     `MODEL_PATH` in the following scripts with values for the deployment
     environment.
 
-    #### 5.2.2 A3 Serving Scripts and Startup Commands
+    **A3 Serving Scripts and Startup Commands**
 
     **Start the Prefill node**
 
@@ -407,7 +407,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
       --vllm-start-port 9081
     ```
 
-    #### 5.2.3 Start the Decode Node
+    **Start the Decode Node**
 
     On the Decode node, save the following script as `run_d.sh`. Decode uses
     `FULL_DECODE_ONLY` graph mode for the target model. FlashComm1 remains
@@ -472,7 +472,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
       --vllm-start-port 9900
     ```
 
-    #### 5.2.4 Deploy the PD Proxy
+    **Deploy the PD Proxy**
 
     After all Prefill and Decode engines are ready, open another terminal in
     the Prefill container and start the
@@ -501,7 +501,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
       --decoder-ports $(seq "$D_PORT0" $((D_PORT0 + D_N - 1)))
     ```
 
-    #### 5.2.5 Key Parameter Descriptions
+    **Key Parameter Descriptions**
 
     - `--data-parallel-size` and `--tensor-parallel-size` define DP2/TP8 on
       Prefill and DP16/TP1 on Decode. Their product must be 16 on each A3 node.
@@ -1016,364 +1016,364 @@ Decode engines.
 For backend installation, hardware dependencies, memory sizing, eviction,
 and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_guide/feature_guide/kv_pool.md).
 
-#### 5.4.1 Atlas 800 A3 Series
+=== "Atlas 800 A3 series"
 
-Reuse the A3 DP2/TP8 Prefill and DP16/TP1 Decode topology, launcher, and
-proxy endpoint mapping from Section 5.2.
+    Reuse the A3 DP2/TP8 Prefill and DP16/TP1 Decode topology, launcher, and
+    proxy endpoint mapping from Section 5.2.
 
-##### 5.4.1.1 Prepare the Containers and Mooncake Configuration
+    **Prepare the Containers and Mooncake Configuration**
 
-Install the Mooncake backend according to the KV Cache Pool Deployment Guide.
-For A3 HCCS pooling, check the HDK, CANN, and LingQu Computing Network
-requirements in its [Hardware Dependency Quick Reference](../../user_guide/feature_guide/kv_pool.md#ascend_global_resource_config).
-Add the following mount to the A3 Docker command in Section 4.1 on both nodes:
+    Install the Mooncake backend according to the KV Cache Pool Deployment Guide.
+    For A3 HCCS pooling, check the HDK, CANN, and LingQu Computing Network
+    requirements in its [Hardware Dependency Quick Reference](../../user_guide/feature_guide/kv_pool.md#ascend_global_resource_config).
+    Add the following mount to the A3 Docker command in Section 4.1 on both nodes:
 
-```shell
--v /etc/hccn.conf:/etc/hccn.conf:ro \
-```
+    ```shell
+    -v /etc/hccn.conf:/etc/hccn.conf:ro \
+    ```
 
-Create a separate `mooncake.json` on each node. Replace `<PREFILL_NODE_IP>`
-with the Prefill node IP used in Section 5.2; Mooncake Master runs on that
-node at port `50088`. Use the same `tenant_id` on both nodes.
+    Create a separate `mooncake.json` on each node. Replace `<PREFILL_NODE_IP>`
+    with the Prefill node IP used in Section 5.2; Mooncake Master runs on that
+    node at port `50088`. Use the same `tenant_id` on both nodes.
 
-Prefill `mooncake.json`:
+    Prefill `mooncake.json`:
 
-```json
-{
-  "metadata_server": "P2PHANDSHAKE",
-  "protocol": "ascend",
-  "device_name": "",
-  "master_server_address": "<PREFILL_NODE_IP>:50088",
-  "global_segment_size": "64GB",
-  "preferred_segment": true,
-  "prefer_alloc_in_same_node": true,
-  "enable_ssd_offload": false,
-  "tenant_id": "default"
-}
-```
-
-`global_segment_size` is registered per worker, not per node. With DP2/TP8,
-the Prefill node starts 16 workers, so `64GB` per worker reserves `1TB` in
-total. Adjust this example to the available fabric memory, keeping each
-non-zero segment size aligned to `1GB`.
-
-Decode `mooncake.json`:
-
-```json
-{
-  "metadata_server": "P2PHANDSHAKE",
-  "protocol": "ascend",
-  "device_name": "",
-  "master_server_address": "<PREFILL_NODE_IP>:50088",
-  "global_segment_size": 0,
-  "preferred_segment": true,
-  "prefer_alloc_in_same_node": true,
-  "enable_ssd_offload": false,
-  "tenant_id": "default"
-}
-```
-
-##### 5.4.1.2 Add the Pool Environment Variables
-
-In both `run_p.sh` and `run_d.sh`, keep the Section 5.2 environment variables
-and add the following exports before `exec vllm serve`. Replace
-`<CONFIG_DIRECTORY>` with the absolute directory containing that node's
-`mooncake.json`.
-
-```shell
-export PYTHONHASHSEED=0
-export MOONCAKE_CONFIG_PATH="<CONFIG_DIRECTORY>/mooncake.json"
-
-# A3 HCCS fabric-memory pooling.
-export ACL_OP_INIT_MODE=1
-export ASCEND_ENABLE_USE_FABRIC_MEM=1
-
-# Optional: set MOONCAKE_LIB_DIRS if Mooncake uses a custom library path.
-if [ -n "${MOONCAKE_LIB_DIRS:-}" ]; then
-    export LD_LIBRARY_PATH="${MOONCAKE_LIB_DIRS}:${LD_LIBRARY_PATH:-}"
-fi
-```
-
-The two nodes must use the same `PYTHONHASHSEED`. For A3 RoCE pooling, use the
-communication and huge-page settings in the KV Cache Pool Deployment Guide
-instead of the HCCS fabric-memory exports above.
-
-##### 5.4.1.3 Update the Prefill and Decode Connectors
-
-Prefix caching and chunked prefill are enabled by default for this model,
-so the serving scripts omit their explicit flags. Keep both features
-enabled. GLM-5.3-Flash has linear-attention state, and `AscendStoreConnector`
-requires `mamba_cache_mode=align`; the model configuration selects this mode
-when prefix caching is enabled. Keep the hybrid KV cache manager enabled
-and `use_layerwise` disabled for this configuration.
-
-Replace the final `--kv-transfer-config` argument in `run_p.sh` with the
-following fragment. Keep the remaining
-Prefill flags from Section 5.2.2, including `--max-num-seqs 32`.
-
-```shell
-  --kv-transfer-config \
-  '{
-    "kv_connector": "MultiConnector",
-    "kv_role": "kv_producer",
-    "engine_id": "glm53-flash-prefill-dp'"$4"'",
-    "kv_connector_extra_config": {
-      "connectors": [
-        {
-          "kv_connector": "MooncakeConnectorV2",
-          "kv_role": "kv_producer",
-          "kv_port": "36680"
-        },
-        {
-          "kv_connector": "AscendStoreConnector",
-          "kv_role": "kv_producer",
-          "kv_connector_extra_config": {
-            "backend": "mooncake",
-            "use_layerwise": false,
-            "lookup_rpc_port": '"$((37000 + $4))"'
-          }
-        }
-      ]
+    ```json
+    {
+      "metadata_server": "P2PHANDSHAKE",
+      "protocol": "ascend",
+      "device_name": "",
+      "master_server_address": "<PREFILL_NODE_IP>:50088",
+      "global_segment_size": "64GB",
+      "preferred_segment": true,
+      "prefer_alloc_in_same_node": true,
+      "enable_ssd_offload": false,
+      "tenant_id": "default"
     }
-  }'
-```
+    ```
 
-Replace the final `--kv-transfer-config` argument in `run_d.sh` with the
-following fragment. Keep the remaining Decode flags from Section 5.2.3,
-including `FULL_DECODE_ONLY` graph mode and the MTP configuration.
+    `global_segment_size` is registered per worker, not per node. With DP2/TP8,
+    the Prefill node starts 16 workers, so `64GB` per worker reserves `1TB` in
+    total. Adjust this example to the available fabric memory, keeping each
+    non-zero segment size aligned to `1GB`.
 
-```shell
-  --kv-transfer-config \
-  '{
-    "kv_connector": "MultiConnector",
-    "kv_role": "kv_consumer",
-    "engine_id": "glm53-flash-decode-dp'"$4"'",
-    "kv_connector_extra_config": {
-      "connectors": [
-        {
-          "kv_connector": "MooncakeConnectorV2",
-          "kv_role": "kv_consumer",
-          "kv_port": "36580"
-        },
-        {
-          "kv_connector": "AscendStoreConnector",
-          "kv_role": "kv_consumer",
-          "kv_connector_extra_config": {
-            "backend": "mooncake",
-            "use_layerwise": false,
-            "consumer_is_to_load": false,
-            "consumer_is_to_put": false,
-            "lookup_rpc_port": '"$((37100 + $4))"'
-          }
-        }
-      ]
+    Decode `mooncake.json`:
+
+    ```json
+    {
+      "metadata_server": "P2PHANDSHAKE",
+      "protocol": "ascend",
+      "device_name": "",
+      "master_server_address": "<PREFILL_NODE_IP>:50088",
+      "global_segment_size": 0,
+      "preferred_segment": true,
+      "prefer_alloc_in_same_node": true,
+      "enable_ssd_offload": false,
+      "tenant_id": "default"
     }
-  }'
-```
+    ```
 
-`$4` is the DP rank passed by `launch_online_dp.py`. Each engine must have a
-unique `engine_id` and `lookup_rpc_port`; the child connectors inherit the
-outer `engine_id`. The Prefill lookup values are `37000-37001`, and the
-Decode lookup values are `37100-37115`. Keep the role-specific Mooncake KV
-base ports from Section 5.2; its workers and schedulers derive their own
-ports from the topology.
+    **Add the Pool Environment Variables**
 
-##### 5.4.1.4 Start the Services
+    In both `run_p.sh` and `run_d.sh`, keep the Section 5.2 environment variables
+    and add the following exports before `exec vllm serve`. Replace
+    `<CONFIG_DIRECTORY>` with the absolute directory containing that node's
+    `mooncake.json`.
 
-Start the services in this order: Mooncake Master → Decode → Prefill → Proxy.
+    ```shell
+    export PYTHONHASHSEED=0
+    export MOONCAKE_CONFIG_PATH="<CONFIG_DIRECTORY>/mooncake.json"
 
-1. In a separate terminal in the Prefill container, start Mooncake Master.
-   Ensure port `50088` is reachable from both nodes.
+    # A3 HCCS fabric-memory pooling.
+    export ACL_OP_INIT_MODE=1
+    export ASCEND_ENABLE_USE_FABRIC_MEM=1
 
-   ```shell
-   mooncake_master \
-     --port 50088 \
-     --eviction_high_watermark_ratio 0.9 \
-     --eviction_ratio 0.1 \
-     --default_kv_lease_ttl 11000 \
-     --enable_offload=false \
-     --client_ttl=120
-   ```
+    # Optional: set MOONCAKE_LIB_DIRS if Mooncake uses a custom library path.
+    if [ -n "${MOONCAKE_LIB_DIRS:-}" ]; then
+        export LD_LIBRARY_PATH="${MOONCAKE_LIB_DIRS}:${LD_LIBRARY_PATH:-}"
+    fi
+    ```
 
-2. Start Decode with the launcher command in Section 5.2.3. Wait until all
-   sixteen Decode engines on ports `9900-9915` are ready.
-3. Start Prefill with the launcher command in Section 5.2.2. Wait until both
-   Prefill engines on ports `9081-9082` are ready.
-4. Start the proxy from Section 5.2.4. Send inference requests to
-   `<PREFILL_NODE_IP>:8081` using the examples in Section 6.
+    The two nodes must use the same `PYTHONHASHSEED`. For A3 RoCE pooling, use the
+    communication and huge-page settings in the KV Cache Pool Deployment Guide
+    instead of the HCCS fabric-memory exports above.
 
-##### 5.4.1.5 Verify KV Cache Reuse
+    **Update the Prefill and Decode Connectors**
 
-Warm up the pool through the proxy with a prompt longer than one cache
-block, then repeat requests with the same prefix. Check Prefill output for
-successful pool saves, lookups, loads, and cache hits, and check Decode
-output for successful P→D transfers.
+    Prefix caching and chunked prefill are enabled by default for this model,
+    so the serving scripts omit their explicit flags. Keep both features
+    enabled. GLM-5.3-Flash has linear-attention state, and `AscendStoreConnector`
+    requires `mamba_cache_mode=align`; the model configuration selects this mode
+    when prefix caching is enabled. Keep the hybrid KV cache manager enabled
+    and `use_layerwise` disabled for this configuration.
 
-The proxy distributes requests across two Prefill engines. A repeated
-request can also hit an engine's local prefix cache; confirm pool load/hit
-information on the other Prefill rank to verify shared pool reuse. Only
-complete, cacheable blocks are reused, so a partial trailing block can
-still require computation.
+    Replace the final `--kv-transfer-config` argument in `run_p.sh` with the
+    following fragment. Keep the remaining
+    Prefill flags from Section 5.2.2, including `--max-num-seqs 32`.
 
-#### 5.4.2 Atlas 800 A2 Series
-
-Reuse the `launch_online_dp.py` launcher, the P0/P1 and D0/D1 scripts, the
-DP2/TP8 Prefill and DP8/TP2 Decode topology, and the proxy configuration from
-Section 5.2. A2 nodes do not have the A3 HCCS fabric: the
-pool runs over the A2 RoCE network with the `P2PHANDSHAKE` metadata server
-and the `ascend` protocol, and the A3 fabric-memory exports do not apply.
-
-For backend installation, memory sizing, eviction, and tenant options, refer
-to the [KV Cache Pool Deployment Guide](../../user_guide/feature_guide/kv_pool.md).
-
-##### 5.4.2.1 Prepare the Mooncake Configuration
-
-The A2 Docker command in Section 4.1 already mounts `/etc/hccn.conf`.
-Install the Mooncake backend according to the KV Cache Pool Deployment
-Guide, then create the Prefill and Decode `mooncake.json` files using the
-JSON shape shown in the A3 subsection. Set `master_server_address` to
-`<PREFILL_NODE0_IP>:50088`; Mooncake Master runs in the first Prefill
-container. `global_segment_size` is registered per worker: with DP2/TP8
-spread across two Prefill nodes, each node starts 8 workers. The validated
-example uses `8GB` per worker, a `128GB` pool in total; adjust the
-per-worker size to the available host memory, keeping each non-zero segment
-size aligned to `1GB`. Keep `global_segment_size` at `0` in the Decode
-`mooncake.json`.
-
-##### 5.4.2.2 Add the Pool Environment Variables
-
-In both `run_p.sh` and `run_d.sh`, keep the Section 5.2 environment
-variables and add the following exports before `exec vllm serve`. Replace
-`<CONFIG_DIRECTORY>` with the absolute directory containing that node's
-`mooncake.json`.
-
-```shell
-export PYTHONHASHSEED=0
-export MOONCAKE_CONFIG_PATH="<CONFIG_DIRECTORY>/mooncake.json"
-```
-
-All nodes must use the same `PYTHONHASHSEED`. Do not add the A3
-`ASCEND_ENABLE_USE_FABRIC_MEM` export; it applies to the A3 HCCS fabric
-only. The general A2 branch of the KV Cache Pool Deployment Guide also
-suggests huge pages and `HCCL_INTRA_ROCE_ENABLE`; with the `P2PHANDSHAKE`
-metadata server and the `ascend` protocol these are not required, and the
-validated configuration does not set them.
-
-##### 5.4.2.3 Update the Prefill and Decode Connectors
-
-Keep prefix caching and chunked prefill enabled. `use_layerwise` must
-remain `false` for this model: the GLM-5.3-Flash hybrid KV cache contains a
-non-prefix-cacheable group, and layer-wise pool transfer requires every
-group to be cacheable, so the pool stores and loads whole segments. No
-manual `--mamba-cache-mode` flag is needed either: when the connector list
-contains `AscendStoreConnector`, the engine switches the mamba cache mode to
-`align` automatically.
-
-Replace the final `--kv-transfer-config` argument in `run_p.sh` with the
-following fragment. Keep the remaining Prefill flags from Section 5.2,
-including `--max-num-seqs 64`.
-
-```shell
-  --kv-transfer-config \
-  '{
-    "kv_connector": "MultiConnector",
-    "kv_role": "kv_producer",
-    "engine_id": "glm53-flash-prefill-dp'"$4"'",
-    "kv_connector_extra_config": {
-      "connectors": [
-        {
-          "kv_connector": "MooncakeConnectorV2",
-          "kv_role": "kv_producer",
-          "kv_port": "30000",
-          "kv_connector_extra_config": {
-            "use_ascend_direct": true,
-            "prefill": {"dp_size": 2, "tp_size": 8},
-            "decode": {"dp_size": 8, "tp_size": 2}
-          }
-        },
-        {
-          "kv_connector": "AscendStoreConnector",
-          "kv_role": "kv_producer",
-          "kv_connector_extra_config": {
-            "backend": "mooncake",
-            "use_layerwise": false,
-            "lookup_rpc_port": '"$((37000 + $4))"'
-          }
+    ```shell
+      --kv-transfer-config \
+      '{
+        "kv_connector": "MultiConnector",
+        "kv_role": "kv_producer",
+        "engine_id": "glm53-flash-prefill-dp'"$4"'",
+        "kv_connector_extra_config": {
+          "connectors": [
+            {
+              "kv_connector": "MooncakeConnectorV2",
+              "kv_role": "kv_producer",
+              "kv_port": "36680"
+            },
+            {
+              "kv_connector": "AscendStoreConnector",
+              "kv_role": "kv_producer",
+              "kv_connector_extra_config": {
+                "backend": "mooncake",
+                "use_layerwise": false,
+                "lookup_rpc_port": '"$((37000 + $4))"'
+              }
+            }
+          ]
         }
-      ]
-    }
-  }'
-```
+      }'
+    ```
 
-Replace the final `--kv-transfer-config` argument in `run_d.sh` with the
-following fragment. Keep the remaining Decode flags from Section 5.2,
-including `FULL_DECODE_ONLY` graph mode and the MTP configuration.
+    Replace the final `--kv-transfer-config` argument in `run_d.sh` with the
+    following fragment. Keep the remaining Decode flags from Section 5.2.3,
+    including `FULL_DECODE_ONLY` graph mode and the MTP configuration.
 
-```shell
-  --kv-transfer-config \
-  '{
-    "kv_connector": "MultiConnector",
-    "kv_role": "kv_consumer",
-    "engine_id": "glm53-flash-decode-dp'"$4"'",
-    "kv_connector_extra_config": {
-      "connectors": [
-        {
-          "kv_connector": "MooncakeConnectorV2",
-          "kv_role": "kv_consumer",
-          "kv_port": "30100",
-          "kv_connector_extra_config": {
-            "use_ascend_direct": true,
-            "prefill": {"dp_size": 2, "tp_size": 8},
-            "decode": {"dp_size": 8, "tp_size": 2}
-          }
-        },
-        {
-          "kv_connector": "AscendStoreConnector",
-          "kv_role": "kv_consumer",
-          "kv_connector_extra_config": {
-            "backend": "mooncake",
-            "use_layerwise": false,
-            "consumer_is_to_load": false,
-            "consumer_is_to_put": false,
-            "lookup_rpc_port": '"$((37100 + $4))"'
-          }
+    ```shell
+      --kv-transfer-config \
+      '{
+        "kv_connector": "MultiConnector",
+        "kv_role": "kv_consumer",
+        "engine_id": "glm53-flash-decode-dp'"$4"'",
+        "kv_connector_extra_config": {
+          "connectors": [
+            {
+              "kv_connector": "MooncakeConnectorV2",
+              "kv_role": "kv_consumer",
+              "kv_port": "36580"
+            },
+            {
+              "kv_connector": "AscendStoreConnector",
+              "kv_role": "kv_consumer",
+              "kv_connector_extra_config": {
+                "backend": "mooncake",
+                "use_layerwise": false,
+                "consumer_is_to_load": false,
+                "consumer_is_to_put": false,
+                "lookup_rpc_port": '"$((37100 + $4))"'
+              }
+            }
+          ]
         }
-      ]
-    }
-  }'
-```
+      }'
+    ```
 
-Both role templates use the launcher DP-rank argument `$4` for the
-`engine_id` suffix and lookup port. Each engine must have a unique
-`engine_id` and `lookup_rpc_port`; the child connectors inherit the outer
-`engine_id`. The Prefill lookup ports are `37000-37001`, and the Decode lookup
-ports are `37100-37107`. The `prefill` and `decode` topology declared in the
-`MooncakeConnectorV2` fragment must match the real deployment.
+    `$4` is the DP rank passed by `launch_online_dp.py`. Each engine must have a
+    unique `engine_id` and `lookup_rpc_port`; the child connectors inherit the
+    outer `engine_id`. The Prefill lookup values are `37000-37001`, and the
+    Decode lookup values are `37100-37115`. Keep the role-specific Mooncake KV
+    base ports from Section 5.2; its workers and schedulers derive their own
+    ports from the topology.
 
-##### 5.4.2.4 Start the Services
+    **Start the Services**
 
-Start the services in this order: Mooncake Master → Decode → Prefill →
-Proxy.
+    Start the services in this order: Mooncake Master → Decode → Prefill → Proxy.
 
-1. In a separate terminal in the first Prefill container, start Mooncake
-   Master with the command from Section 5.4.1.4. Ensure port `50088` is
-   reachable from all four nodes.
-2. Start D0 and D1 with the launcher commands from Section 5.2
-   (`--dp-rank-start 0` and `4`; four engines per node on ports
-   `9900-9903`). Wait until all eight Decode engines answer
-   `curl /v1/models`.
-3. Start P0 and P1 with the launcher commands from Section 5.2
-   (`--dp-rank-start 0` and `1`; P0 serves the API endpoint on port
-   `9081`, while P1 is headless). Wait until both engines answer.
-4. Start the A2 proxy from Section 5.2. Send inference requests to
-   `<PREFILL_NODE0_IP>:8081` using the examples in Section 6.
+    1. In a separate terminal in the Prefill container, start Mooncake Master.
+       Ensure port `50088` is reachable from both nodes.
 
-##### 5.4.2.5 Verify KV Cache Reuse
+       ```shell
+       mooncake_master \
+         --port 50088 \
+         --eviction_high_watermark_ratio 0.9 \
+         --eviction_ratio 0.1 \
+         --default_kv_lease_ttl 11000 \
+         --enable_offload=false \
+         --client_ttl=120
+       ```
 
-Follow the verification steps in Section 5.4.1.5 through the proxy. The proxy
-sends requests to the P0 API while the DP group uses both Prefill ranks. A
-repeated request can hit a local prefix cache, so confirm pool load/hit
-information on the other Prefill rank to verify shared pool reuse.
+    2. Start Decode with the launcher command in Section 5.2.3. Wait until all
+       sixteen Decode engines on ports `9900-9915` are ready.
+    3. Start Prefill with the launcher command in Section 5.2.2. Wait until both
+       Prefill engines on ports `9081-9082` are ready.
+    4. Start the proxy from Section 5.2.4. Send inference requests to
+       `<PREFILL_NODE_IP>:8081` using the examples in Section 6.
+
+    **Verify KV Cache Reuse**
+
+    Warm up the pool through the proxy with a prompt longer than one cache
+    block, then repeat requests with the same prefix. Check Prefill output for
+    successful pool saves, lookups, loads, and cache hits, and check Decode
+    output for successful P→D transfers.
+
+    The proxy distributes requests across two Prefill engines. A repeated
+    request can also hit an engine's local prefix cache; confirm pool load/hit
+    information on the other Prefill rank to verify shared pool reuse. Only
+    complete, cacheable blocks are reused, so a partial trailing block can
+    still require computation.
+
+=== "Atlas 800 A2 series"
+
+    Reuse the `launch_online_dp.py` launcher, the P0/P1 and D0/D1 scripts, the
+    DP2/TP8 Prefill and DP8/TP2 Decode topology, and the proxy configuration from
+    Section 5.2. A2 nodes do not have the A3 HCCS fabric: the
+    pool runs over the A2 RoCE network with the `P2PHANDSHAKE` metadata server
+    and the `ascend` protocol, and the A3 fabric-memory exports do not apply.
+
+    For backend installation, memory sizing, eviction, and tenant options, refer
+    to the [KV Cache Pool Deployment Guide](../../user_guide/feature_guide/kv_pool.md).
+
+    **Prepare the Mooncake Configuration**
+
+    The A2 Docker command in Section 4.1 already mounts `/etc/hccn.conf`.
+    Install the Mooncake backend according to the KV Cache Pool Deployment
+    Guide, then create the Prefill and Decode `mooncake.json` files using the
+    JSON shape shown in the A3 subsection. Set `master_server_address` to
+    `<PREFILL_NODE0_IP>:50088`; Mooncake Master runs in the first Prefill
+    container. `global_segment_size` is registered per worker: with DP2/TP8
+    spread across two Prefill nodes, each node starts 8 workers. The validated
+    example uses `8GB` per worker, a `128GB` pool in total; adjust the
+    per-worker size to the available host memory, keeping each non-zero segment
+    size aligned to `1GB`. Keep `global_segment_size` at `0` in the Decode
+    `mooncake.json`.
+
+    **Add the Pool Environment Variables**
+
+    In both `run_p.sh` and `run_d.sh`, keep the Section 5.2 environment
+    variables and add the following exports before `exec vllm serve`. Replace
+    `<CONFIG_DIRECTORY>` with the absolute directory containing that node's
+    `mooncake.json`.
+
+    ```shell
+    export PYTHONHASHSEED=0
+    export MOONCAKE_CONFIG_PATH="<CONFIG_DIRECTORY>/mooncake.json"
+    ```
+
+    All nodes must use the same `PYTHONHASHSEED`. Do not add the A3
+    `ASCEND_ENABLE_USE_FABRIC_MEM` export; it applies to the A3 HCCS fabric
+    only. The general A2 branch of the KV Cache Pool Deployment Guide also
+    suggests huge pages and `HCCL_INTRA_ROCE_ENABLE`; with the `P2PHANDSHAKE`
+    metadata server and the `ascend` protocol these are not required, and the
+    validated configuration does not set them.
+
+    **Update the Prefill and Decode Connectors**
+
+    Keep prefix caching and chunked prefill enabled. `use_layerwise` must
+    remain `false` for this model: the GLM-5.3-Flash hybrid KV cache contains a
+    non-prefix-cacheable group, and layer-wise pool transfer requires every
+    group to be cacheable, so the pool stores and loads whole segments. No
+    manual `--mamba-cache-mode` flag is needed either: when the connector list
+    contains `AscendStoreConnector`, the engine switches the mamba cache mode to
+    `align` automatically.
+
+    Replace the final `--kv-transfer-config` argument in `run_p.sh` with the
+    following fragment. Keep the remaining Prefill flags from Section 5.2,
+    including `--max-num-seqs 64`.
+
+    ```shell
+      --kv-transfer-config \
+      '{
+        "kv_connector": "MultiConnector",
+        "kv_role": "kv_producer",
+        "engine_id": "glm53-flash-prefill-dp'"$4"'",
+        "kv_connector_extra_config": {
+          "connectors": [
+            {
+              "kv_connector": "MooncakeConnectorV2",
+              "kv_role": "kv_producer",
+              "kv_port": "30000",
+              "kv_connector_extra_config": {
+                "use_ascend_direct": true,
+                "prefill": {"dp_size": 2, "tp_size": 8},
+                "decode": {"dp_size": 8, "tp_size": 2}
+              }
+            },
+            {
+              "kv_connector": "AscendStoreConnector",
+              "kv_role": "kv_producer",
+              "kv_connector_extra_config": {
+                "backend": "mooncake",
+                "use_layerwise": false,
+                "lookup_rpc_port": '"$((37000 + $4))"'
+              }
+            }
+          ]
+        }
+      }'
+    ```
+
+    Replace the final `--kv-transfer-config` argument in `run_d.sh` with the
+    following fragment. Keep the remaining Decode flags from Section 5.2,
+    including `FULL_DECODE_ONLY` graph mode and the MTP configuration.
+
+    ```shell
+      --kv-transfer-config \
+      '{
+        "kv_connector": "MultiConnector",
+        "kv_role": "kv_consumer",
+        "engine_id": "glm53-flash-decode-dp'"$4"'",
+        "kv_connector_extra_config": {
+          "connectors": [
+            {
+              "kv_connector": "MooncakeConnectorV2",
+              "kv_role": "kv_consumer",
+              "kv_port": "30100",
+              "kv_connector_extra_config": {
+                "use_ascend_direct": true,
+                "prefill": {"dp_size": 2, "tp_size": 8},
+                "decode": {"dp_size": 8, "tp_size": 2}
+              }
+            },
+            {
+              "kv_connector": "AscendStoreConnector",
+              "kv_role": "kv_consumer",
+              "kv_connector_extra_config": {
+                "backend": "mooncake",
+                "use_layerwise": false,
+                "consumer_is_to_load": false,
+                "consumer_is_to_put": false,
+                "lookup_rpc_port": '"$((37100 + $4))"'
+              }
+            }
+          ]
+        }
+      }'
+    ```
+
+    Both role templates use the launcher DP-rank argument `$4` for the
+    `engine_id` suffix and lookup port. Each engine must have a unique
+    `engine_id` and `lookup_rpc_port`; the child connectors inherit the outer
+    `engine_id`. The Prefill lookup ports are `37000-37001`, and the Decode lookup
+    ports are `37100-37107`. The `prefill` and `decode` topology declared in the
+    `MooncakeConnectorV2` fragment must match the real deployment.
+
+    **Start the Services**
+
+    Start the services in this order: Mooncake Master → Decode → Prefill →
+    Proxy.
+
+    1. In a separate terminal in the first Prefill container, start Mooncake
+       Master with the command from Section 5.4.1.4. Ensure port `50088` is
+       reachable from all four nodes.
+    2. Start D0 and D1 with the launcher commands from Section 5.2
+       (`--dp-rank-start 0` and `4`; four engines per node on ports
+       `9900-9903`). Wait until all eight Decode engines answer
+       `curl /v1/models`.
+    3. Start P0 and P1 with the launcher commands from Section 5.2
+       (`--dp-rank-start 0` and `1`; P0 serves the API endpoint on port
+       `9081`, while P1 is headless). Wait until both engines answer.
+    4. Start the A2 proxy from Section 5.2. Send inference requests to
+       `<PREFILL_NODE0_IP>:8081` using the examples in Section 6.
+
+    **Verify KV Cache Reuse**
+
+    Follow the verification steps in Section 5.4.1.5 through the proxy. The proxy
+    sends requests to the P0 API while the DP group uses both Prefill ranks. A
+    repeated request can hit a local prefix cache, so confirm pool load/hit
+    information on the other Prefill rank to verify shared pool reuse.
 
 ## 6 Functional Verification
 
