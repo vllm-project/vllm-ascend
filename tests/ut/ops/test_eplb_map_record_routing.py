@@ -11,9 +11,9 @@ from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.fused_moe import routed_experts
 from vllm_ascend.ops.fused_moe.router.fused_topk_router import AscendFusedTopKRouter
 from vllm_ascend.ops.triton.eplb_map_record import (
+    MAX_ASSIGNMENTS_PER_TILE,
     MAX_COMPARISON_ELEMENTS,
-    MAX_TOKEN_TILE,
-    MIN_TOKEN_TILE,
+    MIN_ASSIGNMENTS_PER_TILE,
     _select_tiling,
 )
 
@@ -22,18 +22,21 @@ def test_valid_prefix_without_router_is_unavailable():
     assert routed_experts._mapping_valid_token_prefix(SimpleNamespace(router=None), None) is None
 
 
-def test_grid_ownership_is_balanced_and_independent_of_comparison_tile():
+@pytest.mark.parametrize("top_k", [1, 6, 8, 16])
+def test_grid_ownership_is_balanced_and_independent_of_comparison_tile(top_k):
     for tokens in (1, 2, 4, 8, 16, 32, 64, 65, 128, 256, 512, 65536, 131072, 262144, 524288):
         for vector_cores in (1, 40, 64):
             for local_count in (8, 16, 32, 64, 112):
-                num_grids, block_p, token_tile = _select_tiling(tokens, local_count, vector_cores)
+                num_grids, block_p, block = _select_tiling(tokens, top_k, local_count, vector_cores)
                 assert num_grids == min(tokens, vector_cores)
-                assert token_tile * block_p <= MAX_COMPARISON_ELEMENTS
-                assert token_tile >= MIN_TOKEN_TILE and token_tile & (token_tile - 1) == 0
+                assert block * block_p <= MAX_COMPARISON_ELEMENTS
+                assert block >= MIN_ASSIGNMENTS_PER_TILE and block & (block - 1) == 0
                 base, extra = divmod(tokens, num_grids)
-                owned_tile = 1 << ((base + bool(extra) - 1).bit_length())
-                assert token_tile == min(
-                    MAX_TOKEN_TILE, MAX_COMPARISON_ELEMENTS // block_p, max(MIN_TOKEN_TILE, owned_tile)
+                owned_tile = 1 << (((base + bool(extra)) * top_k - 1).bit_length())
+                assert block == min(
+                    MAX_ASSIGNMENTS_PER_TILE,
+                    MAX_COMPARISON_ELEMENTS // block_p,
+                    max(MIN_ASSIGNMENTS_PER_TILE, owned_tile),
                 )
                 ranges = [
                     (pid * base + min(pid, extra), (pid + 1) * base + min(pid + 1, extra)) for pid in range(num_grids)
@@ -43,9 +46,9 @@ def test_grid_ownership_is_balanced_and_independent_of_comparison_tile():
                 sizes = [end - start for start, end in ranges]
                 assert max(sizes) - min(sizes) <= 1
 
-    assert _select_tiling(1, 4096, 40) == (1, 4096, 2)
+    assert _select_tiling(1, top_k, 4096, 40) == (1, 4096, 2)
     with pytest.raises(ValueError, match="comparison resource budget"):
-        _select_tiling(1, 4097, 40)
+        _select_tiling(1, top_k, 4097, 40)
 
 
 @pytest.mark.parametrize("scoring", ["softmax", "sigmoid"])
