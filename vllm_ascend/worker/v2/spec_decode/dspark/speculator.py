@@ -27,27 +27,42 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch
+from vllm.v1.worker.gpu.spec_decode.dflash import speculator as dflash_speculator
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
     DSparkSpeculator,
 )
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
+from vllm_ascend.utils import lmhead_tp_enable, lmhead_tp_max_num_logits
 from vllm_ascend.worker.dcp_utils import DCPManager
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_factory,
     build_attn_metadata_wrapper,
 )
-from vllm_ascend.worker.v2.spec_decode.pcp_utils import prepare_replicated_pcp_config
+from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
+from vllm_ascend.worker.v2.spec_decode.dflash.speculator import prepare_dflash_inputs_factory
+from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
+from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
+    disable_profiling_chunk_for_draft,
+    prepare_replicated_pcp_config,
+)
 
 
-class AscendDSparkSpeculator(DSparkSpeculator):
+class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
     _speculator_name = "DSpark"
+    # DSpark samples via compute_draft_logits and never calls sample_draft, so
+    # the mixin sample_draft alignment is not used; instead load_draft_model
+    # wraps the draft model's compute_draft_logits to pad the LM-head input to
+    # the group-agreed capacity and trim the logits back (no _sample_sequential
+    # override, upstream sampling logic untouched).
+    _lmhead_tp_sample_draft_supported = True
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         vllm_config, self.replicated_pcp = prepare_replicated_pcp_config(vllm_config)
         super().__init__(vllm_config, device)
+        self._lmhead_tp_validate_draft_sampling()
         self.input_batch: InputBatch | None = None
         self.attn_architecture: str | None = None
         self._init_dcp()
@@ -72,13 +87,48 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         target_model: torch.nn.Module,
         target_attn_layer_names: set[str],
     ) -> torch.nn.Module:
-        model = super().load_draft_model(target_model, target_attn_layer_names)
+        with disable_profiling_chunk_for_draft(self.vllm_config):
+            model = super().load_draft_model(target_model, target_attn_layer_names)
         if hasattr(model, "post_process"):
             model.post_process(self.vllm_config)
         if hasattr(model, "configure_target_aux_hidden_capture"):
             model.configure_target_aux_hidden_capture(target_model)
 
+        self._lmhead_tp_wrap_draft_logits(model)
+
         return model
+
+    def _lmhead_tp_wrap_draft_logits(self, model: torch.nn.Module) -> None:
+        """Pad/trim the DSpark draft LM head around its collectives.
+
+        DSpark feeds its vocab-sharded draft LM head directly through
+        ``compute_draft_logits`` (inside upstream ``_sample_sequential`` /
+        ``_sample_sequential_topk``), which bypasses the mixin's
+        ``sample_draft`` alignment. Wrap the method instead of overriding the
+        sampling loop: every rank feeds the group-agreed capacity
+        (``max_num_reqs * num_speculative_steps``) into the LM-head
+        collectives, then the logits are trimmed back to the real rows.
+        """
+        if not lmhead_tp_enable():
+            return
+
+        original = model.compute_draft_logits
+        capacity = lmhead_tp_max_num_logits(self.max_num_reqs, self.num_speculative_steps)
+
+        def aligned(hidden_states: torch.Tensor) -> torch.Tensor:
+            num_logits = hidden_states.shape[0]
+            if num_logits > capacity:
+                raise ValueError(
+                    f"lmhead TP DSpark draft rows ({num_logits}) exceed the group-agreed "
+                    f"capacity ({capacity} = max_num_reqs * num_speculative_steps)."
+                )
+            padded = hidden_states
+            if num_logits < capacity:
+                # Zero rows carry no draft token; they are trimmed back off.
+                padded = torch.nn.functional.pad(hidden_states, (0, 0, 0, capacity - num_logits))
+            return original(padded)[:num_logits]
+
+        model.compute_draft_logits = aligned
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         if self.speculative_config.enforce_eager:
@@ -132,6 +182,9 @@ class AscendDSparkSpeculator(DSparkSpeculator):
                 self.attn_architecture = "GQA"
             else:
                 self.attn_architecture = None
+            dflash_speculator.prepare_dflash_inputs = prepare_dflash_inputs_factory(
+                self.vllm_config.cache_config.block_size
+            )
 
     def _prepare_draft_dcp_metadata_inputs(
         self, num_reqs: int, num_reqs_padded: int, step: int
@@ -248,6 +301,25 @@ class AscendDSparkSpeculator(DSparkSpeculator):
             decode_metadata.actual_seq_lengths_q = query_lens_list
         return attn_metadata
 
+    @torch.inference_mode()
+    def _run_model(
+        self,
+        num_tokens: int,
+        attn_metadata: dict[str, Any] | None,
+        slot_mappings: dict[str, torch.Tensor] | None,
+        num_tokens_across_dp: torch.Tensor | None,
+        cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+    ) -> torch.Tensor:
+        hidden_states = super()._run_model(
+            num_tokens, attn_metadata, slot_mappings, num_tokens_across_dp, cudagraph_runtime_mode
+        )
+        # PCP replicas must propose identical tokens for the next joint target
+        # verification. Share the backbone output before sequential Markov sampling.
+        hidden_states, _ = AscendPCPManager.broadcast_replicated_hidden_states(
+            hidden_states, hidden_states, num_tokens, replicated_pcp=self.replicated_pcp
+        )
+        return hidden_states
+
     def propose(
         self,
         input_batch: InputBatch,
@@ -277,12 +349,21 @@ class AscendDSparkSpeculator(DSparkSpeculator):
             # TODO: Remove this guard once main2main includes upstream vLLM
             # #54856 (facd9a74a1), which resets the profiling DP counts.
             sync_state = None
+        seq_lens_cpu = None
+        is_prefilling = torch.from_numpy(self.input_batch.is_prefilling_np)
+        if self.use_dcp and self.attn_architecture in ("GQA", "MLA") and not (dummy_run and skip_attn_for_dummy_run):
+            # DSpark drafts one block with a fixed step; zero unused request slots
+            # before upstream selects the padded batch size and slices this view.
+            seq_lens_cpu, is_prefilling = self._prepare_draft_dcp_metadata_inputs(
+                input_batch.num_reqs, self.max_num_reqs, self.num_query_per_req
+            )
         with (
             build_attn_metadata_wrapper(),
             build_attn_metadata_factory(
                 self.input_buffers.positions,
                 self.max_num_tokens,
-                torch.from_numpy(self.input_batch.is_prefilling_np),
+                is_prefilling,
+                seq_lens_cpu=seq_lens_cpu,
                 parallel_config=self.attn_vllm_config.parallel_config,
             ),
         ):

@@ -65,6 +65,19 @@ ge::graphStatus CalTiling(gert::TilingContext* context, TransposeKvCacheByBlockT
     int64_t headDim = *headDimPtr;
     int64_t splitNum = *splitNumPtr;
     int64_t layerNum = *layerNumPtr;
+    const int64_t* kBlockStridePtr = attr->GetAttrPointer<int64_t>(5);
+    const int64_t* vBlockStridePtr = attr->GetAttrPointer<int64_t>(6);
+    int64_t denseBlockStride = blockSize * headNum * headDim;
+    int64_t kBlockStride = kBlockStridePtr == nullptr || *kBlockStridePtr == 0
+                              ? denseBlockStride : *kBlockStridePtr;
+    int64_t vBlockStride = vBlockStridePtr == nullptr || *vBlockStridePtr == 0
+                              ? denseBlockStride : *vBlockStridePtr;
+    if (kBlockStride < denseBlockStride || vBlockStride < denseBlockStride) {
+        OPS_LOG_E(context->GetNodeName(), "KV cache block strides must not overlap blocks.");
+        return ge::GRAPH_FAILED;
+    }
+    tiling.set_kBlockStride(static_cast<uint64_t>(kBlockStride));
+    tiling.set_vBlockStride(static_cast<uint64_t>(vBlockStride));
     uint32_t tilingKey = FULL_LOAD;
 
     if (headDim * DATA_SIZE % BLOCK_SIZE != 0) {

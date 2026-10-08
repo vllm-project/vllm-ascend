@@ -53,6 +53,9 @@ def test_pp_stage_maps_multiple_cache_groups_to_local_layers(pp_rank, is_save):
     worker.total_layers = 8
     worker.num_layers = 4
     worker.num_kv_cache_groups = 2
+    # _init_layerwise_config skips non-cacheable groups; both attention
+    # groups here are prefix-cacheable.
+    worker.cacheable_group_ids = [0, 1]
     worker.use_layerwise_transfer = False
     worker.use_layerwise = False
     worker._extra_config = {}
@@ -86,6 +89,11 @@ def test_pp_stage_maps_multiple_cache_groups_to_local_layers(pp_rank, is_save):
     worker.tp_rank = 0
     worker.dcp_size = 1
     worker.put_step = 1
+    # _is_layerwise_save_owner gates the save path; attention groups never use
+    # align state, and a bare producer owns every save.
+    worker.kv_role = "kv_producer"
+    worker.consumer_is_to_put = False
+    worker.group_uses_align_state = [False, False]
     worker.grouped_block_size = [16, 16]
     worker.hash_block_size = 16
     worker.cache_coordinator = None

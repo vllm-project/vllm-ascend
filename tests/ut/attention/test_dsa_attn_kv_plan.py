@@ -58,6 +58,15 @@ def test_get_dsa_attn_kv_plan_requires_vllm_config():
         get_dsa_attn_kv_plan()
 
 
+@pytest.mark.parametrize("device_type", [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5])
+@pytest.mark.parametrize("cache_dtype", ["auto", "bfloat16", "fp8"])
+@pytest.mark.parametrize("compress_ratio", [1, 4, 128])
+def test_non_turboquant_plan_is_independent_of_compress_ratio(device_type, cache_dtype, compress_ratio):
+    with _on(device_type):
+        config = _cache_config(cache_dtype)
+        assert get_dsa_attn_kv_plan(config, compress_ratio) == get_dsa_attn_kv_plan(config)
+
+
 def test_a5_fp8_plan_uses_flat_shared_kv():
     with _on(AscendDeviceType.A5):
         plan = get_dsa_attn_kv_plan(_config(False))
@@ -88,6 +97,23 @@ def test_non_a5_plan_preserves_shared_kv_runtime_kwargs():
         assert "cu_seqlens_ori_kv" in kwargs
 
 
+@pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
+def test_batched_slot_conversion_matches_independent_groups(dtype):
+    with _on(AscendDeviceType.A3):
+        plan = get_dsa_attn_kv_plan(_cache_config("turboquant_4bit_nc"))
+    slots = torch.tensor(
+        [[0, 7, 8, -1, -5, 65537], [31, 32, 63, 64, -1, 98765], [127, 128, 129, -1, 0, 1000001]],
+        dtype=dtype,
+    )
+    slots = slots[:, :5]  # The runner slices active tokens from a wider buffer.
+    block_sizes = torch.tensor([8, 32, 128], dtype=dtype).unsqueeze(1)
+    expected = torch.stack([plan.format_dsa_slot_mapping(row, size) for row, size in zip(slots, [8, 32, 128])])
+    actual = plan.format_dsa_slot_mapping(slots, block_sizes)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert actual.dtype == torch.int32
+    assert (actual[slots < 0] == -1).all()
+
+
 def test_scatter_skips_none_updates():
     with _on(AscendDeviceType.A5):
         plan = get_dsa_attn_kv_plan(_config(False))
@@ -95,6 +121,16 @@ def test_scatter_skips_none_updates():
         with mock.patch.object(torch.ops._C_ascend, "kv_compress_epilog") as epilog:
             plan.dsa_kv_compress_scatter(cache, None, torch.tensor([0], dtype=torch.int32))
             epilog.assert_not_called()
+
+
+def test_a3_baseline_scatter_is_unchanged():
+    with _on(AscendDeviceType.A3):
+        plan = get_dsa_attn_kv_plan(_cache_config("bfloat16"))
+    cache = torch.zeros(2, 32, 1, 512)
+    updates = torch.ones(3, 1, 512)
+    slots = torch.tensor([[0, 1], [-1, -1], [1, 2]], dtype=torch.int32)
+    plan.dsa_kv_compress_scatter(cache, updates, slots)
+    torch.ops._C_ascend.npu_scatter_nd_update_sk.assert_called_once_with(cache, slots, updates)
 
 
 def _cpu_scatter_nd_update_(cache, indices, updates):

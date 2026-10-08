@@ -3,8 +3,9 @@ from typing import Any
 import torch
 import torch.distributed as dist
 import torch_npu
-from vllm.distributed import get_dcp_group
+from vllm.distributed import get_dcp_group, get_pcp_group, get_tp_group
 
+import vllm_ascend.ops.triton.dcp.dcp_a2a  # noqa: F401
 from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
 
 
@@ -113,10 +114,13 @@ class DCPImplMixin:
 
     dcp_size: int
     dcp_rank: int
+    num_heads: int
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.dcp_group = get_dcp_group()
+        self.pcp_group = get_pcp_group()
+        self.tp_group = get_tp_group()
         self.dcp_size = self.dcp_group.world_size
         self.dcp_rank = self.dcp_group.rank_in_group
         self.dcp_device_group = self.dcp_group.device_group if self.dcp_size > 1 else None
@@ -138,27 +142,53 @@ class DCPImplMixin:
         if not tensors:
             return ()
         split_sizes = [tensor.shape[-1] for tensor in tensors]
-        gathered = self._dcp_all_gather(
-            torch.cat(tensors, dim=-1),
-            dim,
-        )
+        pcp_group = getattr(self, "pcp_group", None)
+        if dim == 1 and pcp_group is not None and pcp_group.world_size > 1:
+            # Query heads are replicated across PCP ranks. Gather only
+            # distinct TP heads when DCP spans the full TP x PCP domain.
+            if self.dcp_size == pcp_group.world_size:
+                return tensors
+            gathered = self.tp_group.all_gather(torch.cat(tensors, dim=-1).contiguous(), dim=dim)
+        else:
+            gathered = self._dcp_all_gather(
+                torch.cat(tensors, dim=-1),
+                dim,
+            )
         return torch.split(gathered, split_sizes, dim=-1)
 
-    def _merge_dcp_attention_output(
-        self,
-        attn_output: torch.Tensor,
-        softmax_lse: torch.Tensor,
-        head_size: int,
-    ) -> torch.Tensor:
-        return _npu_attention_update(
-            head_size,
-            _process_attn_out_lse(
+    def _local_decode_query(self, *queries: torch.Tensor) -> tuple[torch.Tensor, ...]:
+        """Select this TP rank's query heads after a DCP query gather."""
+        pcp_group = getattr(self, "pcp_group", None)
+        if pcp_group is not None and pcp_group.world_size > 1:
+            head_rank = self.tp_group.rank_in_group if self.dcp_size > pcp_group.world_size else 0
+        else:
+            head_rank = self.dcp_rank
+        head_start = head_rank * self.num_heads
+        head_end = head_start + self.num_heads
+        return tuple(query[:, head_start:head_end].contiguous() for query in queries)
+
+    def _merge_dcp_attention_output(self, attn_output, softmax_lse, *, defer_combine=False):
+        pcp_group = getattr(self, "pcp_group", None)
+        if pcp_group is not None and pcp_group.world_size > 1:
+            # Match SFA: TP exchanges distinct head shards, then PCP gathers
+            # all KV contributions for that TP-local head range.
+            tp_size = self.tp_group.world_size if self.dcp_size > pcp_group.world_size else 1
+            return torch.ops.vllm.dcp_a2a_fused(
                 attn_output,
                 softmax_lse,
-                dcp_size=self.dcp_size,
-                dcp_device_group=self.dcp_device_group,
-            ),
-            dcp_size=self.dcp_size,
+                tp_size,
+                1,
+                self.tp_group.unique_name,
+                pcp_group.unique_name,
+                defer_combine=defer_combine,
+            )
+        return torch.ops.vllm.dcp_a2a_fused(
+            attn_output,
+            softmax_lse,
+            self.dcp_size,
+            1,
+            self.dcp_group.unique_name if self.dcp_size > 1 else "",
+            defer_combine=defer_combine,
         )
 
 

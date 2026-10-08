@@ -20,13 +20,48 @@ from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.spec_decode.autoregressive import (
     speculator as speculator_module,
 )
+from vllm_ascend.worker.v2.spec_decode.eagle import (
+    speculator as eagle_speculator_module,
+)
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 from vllm_ascend.worker.v2.spec_decode.mtp.speculator import (
     AscendMTPSpeculator,
 )
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
+    disable_profiling_chunk_for_draft,
     disable_target_pcp_for_replicated_draft,
 )
+
+
+@pytest.fixture(autouse=True)
+def _stub_ascend_config(monkeypatch):
+    # Speculators built through the real __init__ read the global ascend
+    # config during the lmhead TP construction-time validation; the stub
+    # reads as lmhead-off so validation no-ops.
+    from vllm_ascend import ascend_config as _ascend_config_module
+
+    monkeypatch.setattr(
+        _ascend_config_module,
+        "_ASCEND_CONFIG",
+        SimpleNamespace(
+            finegrained_tp_config=SimpleNamespace(lmhead_tensor_parallel_size=0),
+            ascend_compilation_config=object(),
+            eplb_config=object(),
+        ),
+    )
+
+
+def _fake_config_replace(config, **changes):
+    values = vars(config).copy()
+    values.update(changes)
+    return SimpleNamespace(**values)
+
+
+def _config(additional_config, pp_size=2):
+    return SimpleNamespace(
+        parallel_config=SimpleNamespace(pipeline_parallel_size=pp_size),
+        additional_config=additional_config,
+    )
 
 
 def _make_padded_input_batch() -> MagicMock:
@@ -74,6 +109,7 @@ def test_draft_runtime_config_preserves_target_worker_topology(
         rank=7,
         data_parallel_size=2,
         data_parallel_rank=1,
+        pipeline_parallel_size=2,
     )
     target_cache_config = SimpleNamespace(
         block_size=128,
@@ -88,8 +124,9 @@ def test_draft_runtime_config_preserves_target_worker_topology(
             cudagraph_mode=SimpleNamespace(decode_mode=lambda: None),
         ),
         cache_config=target_cache_config,
+        additional_config={"scheduler_config": {"profiling_chunk_config": {"enabled": True}}},
     )
-    draft_model_config = SimpleNamespace(hf_overrides=None)
+    draft_model_config = SimpleNamespace(is_moe=False)
     captured: dict[str, SimpleNamespace] = {}
 
     def fake_replace(config, **changes):
@@ -99,7 +136,13 @@ def test_draft_runtime_config_preserves_target_worker_topology(
             assert changes["parallel_config"].decode_context_parallel_size == (1 if target_pcp_size > 1 else dcp_size)
         if config is target_config and "model_config" not in changes:
             reconstructed_parallel = changes["parallel_config"]
-            captured["reconstruction_dcp_size"] = reconstructed_parallel.decode_context_parallel_size
+            # model_config is swapped in after validation (V1 parity), so this
+            # branch runs on every build; record only a real DCP normalization.
+            if (
+                reconstructed_parallel.decode_context_parallel_size
+                != target_parallel_config.decode_context_parallel_size
+            ):
+                captured["reconstruction_dcp_size"] = reconstructed_parallel.decode_context_parallel_size
         values = vars(config).copy()
         values.update(changes)
         return SimpleNamespace(**values)
@@ -168,11 +211,44 @@ def test_draft_runtime_config_preserves_target_worker_topology(
     assert not draft_parallel_config.enable_expert_parallel
     assert not draft_parallel_config.enable_eplb
     assert draft_config.model_config is draft_model_config
-    assert draft_model_config.hf_overrides == {}
     assert draft_config.parallel_config.prefill_context_parallel_size == expected_execution_pcp_size
     assert draft_config.parallel_config.cp_kv_cache_interleave_size == 128
     assert draft_config.parallel_config.pipeline_parallel_size == 1
     assert draft_config.parallel_config.decode_context_parallel_size == dcp_size
+    assert draft_config.additional_config["scheduler_config"]["profiling_chunk_config"]["enabled"] is False
+    assert target_config.additional_config["scheduler_config"]["profiling_chunk_config"]["enabled"] is True
+
+
+def test_eagle_draft_config_disables_profiling_chunk() -> None:
+    additional_config = {"scheduler_config": {"profiling_chunk_config": {"enabled": "yes"}}}
+    target_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            pipeline_parallel_size=2,
+            prefill_context_parallel_size=2,
+            enable_expert_parallel=True,
+            enable_eplb=True,
+        ),
+        additional_config=additional_config,
+    )
+    speculator = object.__new__(AscendEagleSpeculator)
+    # Delegation to the base's _create_draft_vllm_config reads these too.
+    speculator.replicated_pcp = False
+    speculator.vllm_config = target_config
+    target_config.cache_config = SimpleNamespace()
+    target_config.parallel_config.decode_context_parallel_size = 1
+    speculator.draft_model_config = SimpleNamespace(is_moe=False)
+
+    with (
+        patch.object(eagle_speculator_module, "replace", side_effect=_fake_config_replace),
+        patch.object(speculator_module, "replace", side_effect=_fake_config_replace),
+    ):
+        draft_config = speculator._create_draft_vllm_config()
+
+    assert draft_config.additional_config["scheduler_config"]["profiling_chunk_config"]["enabled"] is False
+    assert target_config.additional_config is additional_config
+    assert additional_config["scheduler_config"]["profiling_chunk_config"]["enabled"] == "yes"
+    assert draft_config.parallel_config.pipeline_parallel_size == 1
+    assert draft_config.parallel_config.is_moe_model is False
 
 
 @pytest.mark.parametrize("replicated_pcp", [False, True])
@@ -631,54 +707,70 @@ def test_propose_preserves_dp_sync_state() -> None:
     assert parent.call_args.args[11] is dp_sync
 
 
-def _fake_replace(config, **changes):
-    values = vars(config).copy()
-    values.update(changes)
-    return SimpleNamespace(**values)
+@pytest.mark.parametrize(("enabled", "legacy"), [(True, False), ("yes", True)])
+def test_disable_profiling_chunk_for_draft_accepts_pydantic_true_values(enabled, legacy):
+    profiling_chunk = {"enabled": enabled, "min_chunk": 128}
+    if legacy:
+        additional_config = {"profiling_chunk_config": profiling_chunk, "enable_cpu_binding": True}
+    else:
+        additional_config = {
+            "scheduler_config": {"profiling_chunk_config": profiling_chunk},
+            "enable_cpu_binding": True,
+        }
+    config = _config(additional_config)
+
+    with disable_profiling_chunk_for_draft(config):
+        draft_additional_config = config.additional_config
+        draft_profiling_chunk = (
+            draft_additional_config["profiling_chunk_config"]
+            if legacy
+            else draft_additional_config["scheduler_config"]["profiling_chunk_config"]
+        )
+        assert draft_profiling_chunk == {"enabled": False, "min_chunk": 128}
+        assert draft_additional_config is not additional_config
+        assert draft_profiling_chunk is not profiling_chunk
+
+    assert config.additional_config is additional_config
+    assert profiling_chunk["enabled"] == enabled
 
 
-@pytest.mark.parametrize(
-    ("hf_overrides", "expected"),
-    [
-        (None, {}),
-        ({"architectures": ["DeepSeekV4MTPModel"]}, {"architectures": ["DeepSeekV4MTPModel"]}),
-    ],
-)
-def test_ensure_draft_hf_overrides(hf_overrides, expected) -> None:
-    draft_model_config = SimpleNamespace(hf_overrides=hf_overrides)
+@pytest.mark.parametrize(("pp_size", "enabled"), [(1, True), (2, "off")])
+def test_disable_profiling_chunk_for_draft_noop(pp_size, enabled):
+    additional_config = {"profiling_chunk_config": {"enabled": enabled}}
+    config = _config(additional_config, pp_size=pp_size)
 
-    speculator_module.ensure_draft_hf_overrides(draft_model_config)
-
-    assert draft_model_config.hf_overrides == expected
+    with disable_profiling_chunk_for_draft(config):
+        assert config.additional_config is additional_config
 
 
-def test_ensure_draft_hf_overrides_missing_attr() -> None:
-    draft_model_config = SimpleNamespace()
+def test_disable_profiling_chunk_for_draft_uses_nested_precedence():
+    additional_config = {
+        "scheduler_config": {"profiling_chunk_config": {"enabled": False}},
+        "profiling_chunk_config": {"enabled": True},
+    }
+    config = _config(additional_config)
 
-    speculator_module.ensure_draft_hf_overrides(draft_model_config)
+    with disable_profiling_chunk_for_draft(config):
+        assert config.additional_config is additional_config
 
-    assert draft_model_config.hf_overrides == {}
+
+def test_disable_profiling_chunk_for_draft_restores_after_failure():
+    additional_config = {"scheduler_config": {"profiling_chunk_config": {"enabled": True}}}
+    config = _config(additional_config)
+    expected_context = pytest.raises(RuntimeError, match="draft failed")
+
+    with expected_context, disable_profiling_chunk_for_draft(config):
+        assert config.additional_config is not additional_config
+        raise RuntimeError("draft failed")
+
+    assert config.additional_config is additional_config
 
 
-def test_eagle_create_draft_vllm_config_fills_hf_overrides() -> None:
-    speculator = object.__new__(AscendEagleSpeculator)
-    speculator.draft_model_config = SimpleNamespace(hf_overrides=None)
-    speculator.vllm_config = SimpleNamespace(
-        parallel_config=SimpleNamespace(
-            pipeline_parallel_size=8,
-            enable_expert_parallel=True,
-            enable_eplb=True,
-        ),
-    )
+def test_disable_profiling_chunk_for_draft_rejects_invalid_boolean():
+    config = _config({"profiling_chunk_config": {"enabled": "sometimes"}})
 
-    with patch(
-        "vllm_ascend.worker.v2.spec_decode.eagle.speculator.replace",
-        side_effect=_fake_replace,
+    with (
+        pytest.raises(ValueError, match="additional_config.profiling_chunk_config.enabled must be a boolean"),
+        disable_profiling_chunk_for_draft(config),
     ):
-        draft_config = speculator._create_draft_vllm_config()
-
-    assert speculator.draft_model_config.hf_overrides == {}
-    assert draft_config.model_config is speculator.draft_model_config
-    assert draft_config.parallel_config.pipeline_parallel_size == 1
-    assert not draft_config.parallel_config.enable_expert_parallel
-    assert not draft_config.parallel_config.enable_eplb
+        pass

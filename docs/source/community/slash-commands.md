@@ -26,7 +26,8 @@ Run specific E2E tests under `tests/e2e/pull_request/`. Tests are automatically 
 | Test path contains | Runner |
 |---|---|
 | `four_card/_310p` | 310P 4-card |
-| `_310p` (under `one_card`/`two_card`) | 310P single card |
+| `two_card/_310p` | 310P 2-card |
+| `one_card/_310p` | 310P single card |
 | `four_card` | A3 4-card |
 | `two_card` | A3 2-card |
 | Others (e.g. `one_card`) | A2 single card |
