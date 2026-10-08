@@ -263,6 +263,9 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         self.group_size = quant_description.get("group_size", 32)
         ascend_config = get_ascend_config()
         self.dynamic_eplb = False if vllm_config.use_v2_model_runner else ascend_config.eplb_config.dynamic_eplb
+        self.use_expert_weight_list = self.dynamic_eplb or (
+            vllm_config.use_v2_model_runner is True and vllm_config.parallel_config.enable_eplb is True
+        )
 
     @staticmethod
     def get_weight(
@@ -453,7 +456,8 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         # float8_e4m3fn NZ tensors cannot be cloned directly, so
         # convert the whole block to ND first, unbind+clone, then
         # NZ-convert each expert in-place.
-        if self.dynamic_eplb:
+        
+        if self.use_expert_weight_list:
             max_experts_per_card = 128
             assert layer.local_num_experts <= max_experts_per_card, (
                 f"W8A8 MXFP8 EPLB requires local_num_experts <= {max_experts_per_card} "
