@@ -39,7 +39,15 @@ def get_kpool_tail_ring_capacity(vllm_config: VllmConfig, compress_ratio: int) -
     lookahead = int(getattr(speculative_config, "num_speculative_tokens", 0) or 0)
     if lookahead < 0:
         raise ValueError(f"num_speculative_tokens must be nonnegative, got {lookahead}.")
-    return compress_ratio + lookahead
+    needed = compress_ratio + lookahead
+    # The ring capacity doubles as the tail cache's scheduler block size, so it
+    # must divide the platform-aligned attention block size (a multiple of the
+    # 128-token SFA kernel block). Round up to a power of two to keep that
+    # divisibility invariant for any lookahead.
+    capacity = 1
+    while capacity < needed:
+        capacity *= 2
+    return capacity
 
 
 def format_indexer_kpool_slot_mapping(
