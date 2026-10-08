@@ -1645,6 +1645,7 @@ def test_indexer_speculative_decode_uses_tp_block_parallel_path(
 ) -> None:
     impl = object.__new__(AscendMiniMaxM3IndexerImpl)
     torch.nn.Module.__init__(impl)
+    impl.use_v2_model_runner = True
     impl.num_index_heads = 1
     impl.index_head_dim = 4
     impl.topk_blocks = 2
