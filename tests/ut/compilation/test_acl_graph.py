@@ -330,7 +330,7 @@ class TestACLGraphWrapper(TestBase):
         mock_torch.npu.graph.assert_called_once_with(
             mock_npu_graph,
             pool=self.mock_graph_pool,
-            capture_error_mode="relaxed",
+            capture_error_mode="global",
         )
         self.mock_runnable.assert_called_once_with(test_tensor, "arg2")
 
