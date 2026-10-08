@@ -292,6 +292,10 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             max_padded_reqs = max(max_padded_reqs, compilation_config.max_cudagraph_capture_size)
         # +1 holds the FIA dummy request inserted by mixed-batch padding.
         max_padded_reqs += 1
+        # The local-metadata kernel folds its cumsum into an 8-column view,
+        # so the capacity it derives from these buffers must be a multiple
+        # of 8 (asserted in dsa_local_metadata.build_local_metadata).
+        max_padded_reqs = (max_padded_reqs + 7) // 8 * 8
         self.start_pos_prefill = torch.zeros(max_padded_reqs, dtype=torch.int32, device=self.device)
         self.req_sas_metadata = torch.zeros(SAS_METADATA_SIZE, dtype=torch.int32, device=self.device)
         self.req_qli_metadata = torch.zeros(SAS_METADATA_SIZE, dtype=torch.int32, device=self.device)
