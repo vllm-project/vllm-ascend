@@ -802,6 +802,7 @@ class NPUModelRunner310(NPUModelRunner):
                         support_size
                         for support_size in self.attn_backend.get_supported_kernel_block_sizes()
                         if support_size * kv_cache_spec.head_size <= _ATTENTION_BLOCK_SIZE_LIMIT
+                        and kv_cache_spec.block_size % support_size == 0
                     ]
                     if supported_sizes:
                         block_size = supported_sizes[0]
@@ -941,9 +942,7 @@ class NPUModelRunner310(NPUModelRunner):
         kernel_block_sizes: list[int] | None = None,
     ) -> None:
         """
-        Re-initialize the input batch if the block sizes are different from
-        `[self.cache_config.block_size]`. This usually happens when there
-        are multiple KV cache groups.
+        Reinitialize the input batch when its existing block layout differs from the KV cache layout.
 
         Args:
             kv_cache_config: The KV cache configuration.
@@ -972,6 +971,7 @@ class NPUModelRunner310(NPUModelRunner):
                         support_size
                         for support_size in backend.get_supported_kernel_block_sizes()
                         if support_size * kv_cache_spec.head_size <= _ATTENTION_BLOCK_SIZE_LIMIT
+                        and kv_cache_spec.block_size % support_size == 0
                     ]
                     kernel_block_size_list = supported_sizes if supported_sizes else [self.cache_config.block_size]
                 except IndexError:
@@ -992,9 +992,10 @@ class NPUModelRunner310(NPUModelRunner):
                 max_num_blocks_per_req = max(max_num_blocks_per_req, mamba_blocks_per_req)
             max_num_blocks.append(max_num_blocks_per_req)
 
+        block_tables = self.input_batch.block_table.block_tables
         if (
-            block_sizes != [self.cache_config.block_size]
-            or self.kernel_block_sizes != [[self.cache_config.block_size]]
+            block_sizes != [table.physical_block_size for table in block_tables]
+            or self.kernel_block_sizes != [table.kernel_sizes for table in block_tables]
             or len(kv_cache_config.kv_cache_groups) > 1
         ):
             assert self.offload_config.uva.cpu_offload_gb == 0, (
