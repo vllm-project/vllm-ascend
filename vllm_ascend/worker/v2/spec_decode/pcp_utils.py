@@ -4,6 +4,7 @@
 
 from collections.abc import Generator, Iterator
 from contextlib import contextmanager
+from dataclasses import replace as dataclass_replace
 from typing import TYPE_CHECKING, Any, Protocol
 
 from vllm.config import VllmConfig, replace
@@ -136,7 +137,8 @@ def prepare_replicated_pcp_config(
             # Replicated draft attention uses PCP=1. Keep EP, but use a static
             # expert layout when PCP is the target's only parallel dimension.
             enable_eplb = False
-            eplb_config = replace(eplb_config, num_redundant_experts=0)
+            # Copy declared fields without transient communicator-selection state.
+            eplb_config = dataclass_replace(eplb_config, num_redundant_experts=0)
             logger.warning_once("EPLB is disabled for the replicated PCP draft model; target EPLB remains enabled.")
         # TODO: Separate draft execution settings from the worker topology.
         # Temporarily disable DCP during reconstruction to avoid validating the

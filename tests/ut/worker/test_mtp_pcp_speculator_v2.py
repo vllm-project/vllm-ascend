@@ -4,6 +4,7 @@
 
 import json
 from contextlib import nullcontext
+from dataclasses import replace as dataclass_replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -263,6 +264,8 @@ def eplb_worker_config(tmp_path):
             enable_eplb=True,
             distributed_executor_backend="mp",
         )
+        # Mirror the runtime marker added by communicator auto-selection.
+        parallel_config.eplb_config.__dict__["_vllm_ascend_eplb_auto_selected"] = True
         yield VllmConfig(
             model_config=model_config,
             parallel_config=parallel_config,
@@ -299,7 +302,9 @@ def test_replicated_pcp_draft_eplb_policy(eplb_worker_config, tp_size, pcp_size,
             prefill_context_parallel_size=pcp_size,
             data_parallel_size=dp_size,
             enable_eplb=enabled,
-            eplb_config=replace(eplb_worker_config.parallel_config.eplb_config, num_redundant_experts=redundant),
+            eplb_config=dataclass_replace(
+                eplb_worker_config.parallel_config.eplb_config, num_redundant_experts=redundant
+            ),
         ),
     )
     draft, replicated = prepare_replicated_pcp_config(config)
@@ -342,6 +347,7 @@ def test_pcp_only_eplb_draft_reaches_inherited_loader(eplb_worker_config):
     assert not speculator.draft_vllm_config.parallel_config.enable_eplb
     assert eplb_worker_config.parallel_config.enable_eplb
     assert eplb_worker_config.parallel_config.prefill_context_parallel_size == 8
+    assert eplb_worker_config.parallel_config.eplb_config.__dict__["_vllm_ascend_eplb_auto_selected"]
 
 
 def test_eagle_draft_config_disables_profiling_chunk() -> None:
