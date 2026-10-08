@@ -26,7 +26,10 @@ from contextlib import suppress
 from typing import Any
 
 import regex as re
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionNamedToolChoiceParam,
+    ChatCompletionRequest,
+)
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -35,9 +38,86 @@ from vllm.entrypoints.openai.engine.protocol import (
     FunctionCall,
     ToolCall,
 )
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.envs import VLLM_ENFORCE_STRICT_TOOL_CALLING
+from vllm.parser.abstract_parser import DelegatingParser
 from vllm.tool_parsers.deepseekv4_tool_parser import DeepSeekV4ToolParser
 
 ESCAPED_ARGUMENTS_PARAM_NAME = "__vllm_param_arguments__"
+_ORIGINAL_EXTRACT_TOOL_CALLS = DelegatingParser._extract_tool_calls
+_ORIGINAL_EXTRACT_TOOL_CALLS_STREAMING = DelegatingParser._extract_tool_calls_streaming
+
+
+def _use_strict_chat_dsml_parser(parser: DelegatingParser, request: ChatCompletionRequest | ResponsesRequest) -> bool:
+    """Responses required/named choices still generate JSON in vLLM 0.23.0."""
+    return (
+        VLLM_ENFORCE_STRICT_TOOL_CALLING
+        and isinstance(request, ChatCompletionRequest)
+        and isinstance(parser._tool_parser, DeepSeekV4ToolParser)
+        and (request.tool_choice == "required" or isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam))
+    )
+
+
+def _patched_delegating_extract_tool_calls(
+    self: DelegatingParser,
+    content: str | None,
+    request: ChatCompletionRequest | ResponsesRequest,
+    enable_auto_tools: bool = False,
+) -> tuple[list[FunctionCall] | None, str | None]:
+    if not (enable_auto_tools and _use_strict_chat_dsml_parser(self, request)):
+        return _ORIGINAL_EXTRACT_TOOL_CALLS(self, content, request, enable_auto_tools)
+
+    tool_call_info = self.extract_tool_calls(content or "", request)
+    if not tool_call_info.tools_called:
+        return None, content
+
+    tool_calls = [
+        FunctionCall(id=tc.id, name=tc.function.name, arguments=tc.function.arguments)
+        for tc in tool_call_info.tool_calls
+    ]
+    remaining_content = tool_call_info.content
+    if remaining_content and remaining_content.strip() == "":
+        remaining_content = None
+    return tool_calls, remaining_content
+
+
+def _patched_delegating_extract_tool_calls_streaming(
+    self: DelegatingParser,
+    previous_text: str,
+    current_text: str,
+    delta_text: str,
+    previous_token_ids: Sequence[int],
+    current_token_ids: Sequence[int],
+    delta_token_ids: Sequence[int],
+    request: ChatCompletionRequest | ResponsesRequest,
+    tool_call_idx: int | None = None,
+    tool_call_id_type: str = "random",
+    function_name_returned: bool = False,
+) -> tuple[DeltaMessage | None, bool]:
+    if _use_strict_chat_dsml_parser(self, request):
+        return self.extract_tool_calls_streaming(
+            previous_text,
+            current_text,
+            delta_text,
+            previous_token_ids,
+            current_token_ids,
+            delta_token_ids,
+            request,
+        ), False
+
+    return _ORIGINAL_EXTRACT_TOOL_CALLS_STREAMING(
+        self,
+        previous_text,
+        current_text,
+        delta_text,
+        previous_token_ids,
+        current_token_ids,
+        delta_token_ids,
+        request,
+        tool_call_idx,
+        tool_call_id_type,
+        function_name_returned,
+    )
 
 
 def _ensure_parser_regexes(self: DeepSeekV4ToolParser) -> None:
@@ -770,6 +850,8 @@ def _patched_extract_tool_calls_streaming(
 
 
 # Backward-compatible monkey patches.
+DelegatingParser._extract_tool_calls = _patched_delegating_extract_tool_calls
+DelegatingParser._extract_tool_calls_streaming = _patched_delegating_extract_tool_calls_streaming
 DeepSeekV4ToolParser._ensure_streaming_attrs = _ensure_streaming_attrs
 DeepSeekV4ToolParser._function_name = _function_name
 DeepSeekV4ToolParser._function_parameters = _function_parameters
