@@ -248,9 +248,10 @@ def eplb_worker_config(tmp_path):
         ),
         encoding="utf-8",
     )
-    # PCP config validation requires MRV2, independent of the CPU UT environment.
+    # Validate MRV2 PCP/EPLB config without requiring accelerator kernels on CPU.
     with (
         patch("vllm.envs.VLLM_USE_V2_MODEL_RUNNER", True),
+        patch("vllm.config.vllm.HAS_TRITON", True),
         patch("vllm.config.parallel.current_platform.is_cuda_alike", return_value=True),
     ):
         model_config = ModelConfig(
