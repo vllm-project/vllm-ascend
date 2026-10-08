@@ -419,6 +419,56 @@ class AscendDSAV41Impl:
     def _prepare_inputs_and_caches(self, attn, hidden_states, metadata, metadata_by_prefix):
         return self._preprocess(attn, hidden_states, hidden_states, metadata, metadata)
 
+    @staticmethod
+    def _write_swa_cache_on_main_stream(attn, metadata):
+        # Packaged A5 prefill/mixed cache writes must be captured on the
+        # current stream even when the independent Q/KV preparation overlaps.
+        # A missing prefill classification also cannot qualify as pure decode.
+        return getattr(attn, "packed_cache_ops", None) is not None and (
+            metadata.num_prefills > 0 or metadata.num_decodes != metadata.num_reqs
+        )
+
+    def _indexer_hidden_states(self, hidden_states, metadata):
+        return hidden_states[: metadata.swa.num_actual_tokens]
+
+    def _prepare_indexer_inputs(self, attn, hidden_states, qr, cos, sin, metadata):
+        if not self.role.has_long_context or not self.role.is_index_source:
+            return None
+        indexer = attn.indexer
+        main_stream = torch.npu.current_stream()
+        aux_stream = dsv4_dsa_overlap_stream()
+
+        query = indexer.project_query(qr)
+        weights_start = main_stream.record_event()
+        with npu_stream_switch(aux_stream, enabled=True):
+            aux_stream.wait_event(weights_start)
+            weights = indexer.project_weights(self._indexer_hidden_states(hidden_states, metadata))
+            weights_done = aux_stream.record_event()
+        indexer.apply_query_rope(query, cos, sin)
+        main_stream.wait_event(weights_done)
+        return DeepseekV41PreparedIndexer(query=query, weights=weights)
+
+    @staticmethod
+    def _should_quantize_indexer(prepared, metadata):
+        return (
+            prepared is not None
+            and prepared.quantized_query is None
+            and prepared.query is not None
+            and prepared.query.shape[0] > 0
+            and metadata.indexer.cache.max_cache_seq_len > 0
+        )
+
+    def _quantize_indexer_query(self, attn, prepared, metadata):
+        if not self._should_quantize_indexer(prepared, metadata):
+            return
+        main_stream = torch.npu.current_stream()
+        aux_stream = dsv4_dsa_overlap_stream()
+        quantize_start = main_stream.record_event()
+        with npu_stream_switch(aux_stream, enabled=True):
+            aux_stream.wait_event(quantize_start)
+            prepared.quantized_query, prepared.query_scale = attn.indexer.quantize_query(prepared.query)
+            prepared.quantize_done = aux_stream.record_event()
+
     def _prepare_queries(self, attn, hidden_states, positions, cos, sin, metadata):
         hidden_states = hidden_states[: metadata.swa.num_actual_tokens]
         v1_impl = attn.dsa_attn.dsa_attn.impl
@@ -588,12 +638,13 @@ class AscendDSAV41Impl:
             folded_name = self.index_k_source_prefix + "_folded"
             folded_cache = context[folded_name].kv_cache[0]
             source_cache = (*source_cache, folded_cache)
-        selected, candidates = attn.indexer.select(
-            hidden_states,
-            qr,
+        assert prepared_indexer is not None
+        if prepared_indexer.quantize_done is not None:
+            torch.npu.current_stream().wait_event(prepared_indexer.quantize_done)
+        selected, candidates = attn.indexer.select_projected(
+            prepared_indexer.query,
+            prepared_indexer.weights,
             positions,
-            cos,
-            sin,
             source_cache,
             metadata.indexer.cache,
             quantized_query=prepared_indexer.quantized_query,

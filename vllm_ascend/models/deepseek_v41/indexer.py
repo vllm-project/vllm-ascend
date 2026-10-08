@@ -225,6 +225,8 @@ class DeepseekV41Indexer(nn.Module):
         candidate_lengths=None,
         topk_lengths=None,
         indices_output=None,
+        quantized_query=None,
+        query_scale=None,
     ):
         """Run QLI V2 on paged INT8 K; candidates are block IDs, not positions.
 
@@ -244,6 +246,12 @@ class DeepseekV41Indexer(nn.Module):
                 candidates = torch.full(candidate_shape, -1, dtype=torch.int32, device=query.device)
             return selected, candidates
         if source_metadata.max_cache_seq_len == 0:
+            if indices_output is not None:
+                indices_output.fill_(-1)
+            if topk_lengths is not None:
+                topk_lengths.zero_()
+            if is_candidate_source and candidate_lengths is not None:
+                candidate_lengths.zero_()
             selected = (
                 torch.full((query.shape[0], 0), -1, dtype=torch.int32, device=query.device)
                 if indices_output is None
@@ -270,9 +278,12 @@ class DeepseekV41Indexer(nn.Module):
                 candidate_lengths=candidate_lengths,
                 topk_lengths=topk_lengths,
                 indices_output=indices_output,
+                quantized_query=quantized_query,
+                query_scale=query_scale,
             )
 
-        quantized_query, query_scale = quantize_indexer_query(query)
+        if quantized_query is None:
+            quantized_query, query_scale = self.quantize_query(query)
         weights = weights.to(torch.float16)
         key, key_scale = source_cache
         key_scale = key_scale.squeeze(-1)  # Preserve the Hybrid cache page stride.
