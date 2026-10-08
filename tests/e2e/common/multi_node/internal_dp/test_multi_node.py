@@ -23,6 +23,7 @@ from tests.e2e.common.multi_node.internal_dp.multi_node_config import (
 from tests.e2e.conftest import RemoteOpenAIServer
 from tests.e2e.nightly.scripts.result_postprocess import postprocess_benchmark_results
 from tools.aisbench import run_aisbench_cases
+from tools.ttft_diagnostic import run_ttft_diagnostic
 
 logger = logging.getLogger(__name__)
 
@@ -199,6 +200,20 @@ async def test_multi_node() -> None:
         host, port = config.benchmark_endpoint
 
         if config.is_master:
+            if len(config.benchmark_cases) == 1 and config.benchmark_cases[0].get("ttft_diagnostic"):
+                run_ttft_diagnostic(
+                    model=config.model,
+                    host=host,
+                    port=port,
+                    case=config.benchmark_cases[0],
+                    server_process=server.proc,
+                    output_dir=os.path.join(
+                        "/root/.cache/benchmark_results",
+                        os.environ.get("BENCHMARK_JOB_NAME") or config.test_name,
+                        "ttft-diagnostic",
+                    ),
+                )
+                return
             results = run_aisbench_cases(
                 model=config.model,
                 port=port,
