@@ -252,6 +252,7 @@ def test_rope_sfa_preserves_cache_composition_and_device_dispatch(sfa_c8, li_c8)
     impl.layer_name = "model.layers.0.self_attn"
     impl.has_indexer = True
     impl.enable_sparse_sfa_c8, impl.enable_sparse_li_c8 = sfa_c8, li_c8
+    impl.enable_sparse_sfa_turboquant = False
     main = tuple(torch.empty(1) for _ in range(1 if sfa_c8 else 2))
     indexer = tuple(torch.empty(1) for _ in range(2 if li_c8 else 1))
     impl.indexer = SimpleNamespace(k_cache=SimpleNamespace(kv_cache=indexer), num_cache_tensors=len(indexer))
@@ -268,7 +269,7 @@ def test_rope_sfa_preserves_cache_composition_and_device_dispatch(sfa_c8, li_c8)
 
 
 @pytest.mark.parametrize("a5", [False, True])
-def test_nope_operator_masks_unwritten_graph_rows(monkeypatch, a5):
+def test_nope_operator_returns_kernel_output_with_unwritten_graph_rows(monkeypatch, a5):
     query = torch.ones(3, 2, 128)
     cache = torch.zeros(2, 128, 1, 128)
     metadata = SimpleNamespace(
@@ -284,18 +285,20 @@ def test_nope_operator_masks_unwritten_graph_rows(monkeypatch, a5):
         num_actual_tokens=2,
     )
 
+    kernel_output = query * 2
+    kernel_output[2] = float("nan")
+
     def op(*args, **kwargs):
-        result = query.clone()
-        result[2] = float("nan")
-        return (result,)
+        return (kernel_output,)
 
     if a5:
         monkeypatch.setattr(sparse_mla, "sparse_flash_mla", op)
     else:
         monkeypatch.setattr(torch.ops._C_ascend, "npu_sparse_flash_attention", op, raising=False)
     output = sparse_mla.sparse_mla(query, cache, torch.tensor([[[0]], [[0]], [[-1]]], dtype=torch.int32), metadata, 0.5)
-    torch.testing.assert_close(output[:2], query[:2])
-    assert (output[2] == 0).all()
+    # The helper returns the kernel buffer directly; padding rows are unspecified.
+    assert output is kernel_output
+    torch.testing.assert_close(output[:2], query[:2] * 2)
 
 
 def test_a5_smla_uses_original_cache_sorted_indices_and_stable_metadata(monkeypatch):

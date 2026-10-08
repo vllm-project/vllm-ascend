@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -25,6 +26,7 @@ def test_native_main_c8_cache_preserves_packing_and_padding(tokens):
     slots[tokens:] = -1
     impl = AscendSFAImpl.__new__(AscendSFAImpl)
     impl.enable_sparse_sfa_c8 = True
+    impl.enable_sparse_sfa_turboquant = False
     impl.sfa_qsfa_packed_kv_head_dim = 656
     impl._store_parallel_kv(
         k_pe, k_nope, scale, None, [], (cache,), slots, SimpleNamespace(num_actual_tokens=tokens), False
@@ -64,14 +66,14 @@ def test_platform_cache_store_preserves_all_backing_bytes(dtype, width, tokens, 
     for delta in (0, 1):
         key.add_(delta)
         reference.view(-1, width)[slots[:tokens].cpu().long()] = key[:tokens].cpu()
-        DeviceOperator.scatter_cache(key, cache, slots, tokens)
+        DeviceOperator.scatter_cache(cache.view(-1, key.shape[-1]), slots.view(-1, 1), key)
         torch.npu.synchronize()
         assert cache.data_ptr() == ptr
         torch.testing.assert_close(backing.cpu(), initial, rtol=0, atol=0)
 
 
 @torch.inference_mode()
-def test_unsupported_fast_dtype_preserves_fallback_with_negative_slots():
+def test_missing_fast_operator_preserves_fallback_with_negative_slots():
     torch_npu.npu.set_device(0)
     assert enable_custom_op()
     key = torch.ones(2048, 128, dtype=torch.float32, device="npu")
@@ -81,8 +83,10 @@ def test_unsupported_fast_dtype_preserves_fallback_with_negative_slots():
     slots[-3:] = -1
     impl = AscendSFADSACPImpl.__new__(AscendSFADSACPImpl)
     impl.enable_sparse_sfa_c8 = True
+    impl.enable_sparse_sfa_turboquant = False
     impl.is_kv_producer, impl.is_kv_consumer = True, False
-    impl._store_parallel_kv(None, None, None, key, [], (cache,), slots, meta, False)
+    with patch.object(torch.ops._C_ascend, "npu_scatter_nd_update_sk", None):
+        impl._store_parallel_kv(None, None, None, key, [], (cache,), slots, meta, False)
     torch.npu.synchronize()
     reference = torch.zeros_like(cache, device="cpu").view(-1, 128)
     reference[:2045] = 1
@@ -103,9 +107,9 @@ def test_unsupported_inner_stride_matches_generic_scatter_behavior():
         torch.npu.synchronize()
     except RuntimeError:
         with pytest.raises(RuntimeError):
-            DeviceOperator.scatter_cache(key, cache, slots, 8)
+            DeviceOperator.scatter_cache(cache.view(-1, key.shape[-1]), slots.view(-1, 1), key)
             torch.npu.synchronize()
     else:
-        DeviceOperator.scatter_cache(key, cache, slots, 8)
+        DeviceOperator.scatter_cache(cache.view(-1, key.shape[-1]), slots.view(-1, 1), key)
         torch.npu.synchronize()
         torch.testing.assert_close(backing.cpu(), reference.cpu(), rtol=0, atol=0)

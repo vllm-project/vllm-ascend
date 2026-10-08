@@ -164,28 +164,22 @@
 #
 # ** 6. File: platform/patch_engram_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.engine.arg_utils.EngramConfig`
-#   2. `vllm.engine.arg_utils.get_kwargs`
-#   3. `vllm.config.vllm.VllmConfig._resolve_and_verify_engram_config`
+#   1. `vllm.config.engram.EngramConfig.verify_model_config`
 #    Why:
-#       The pinned vLLM 84030bbe does not define `dp_shared_memory` and only
-#       accepts CUDA Qwen Engram models. Its CLI schema is built from that
-#       config before the platform can supply an Ascend-specific subtype.
-#    How：
-#       Define an Ascend EngramConfig subtype with `dp_shared_memory`, use it
-#       for EngineArgs conversion and `--engram-config` JSON parsing, then
-#       resolve DeepSeek V4.1 target configs through that subtype. Keep model,
-#       topology, load-format and DBO validation in the subtype.
-#       Skip this patch when vLLM does not provide EngramConfig. External DP
-#       locality is checked on the initialized DP group because its
-#       data_parallel_size_local counts engines per launcher.
+#       Upstream Engram model validation requires CUDA before the platform hook.
+#    How:
+#       Keep upstream model/layer checks and lift only the CUDA requirement.
+#       Use the native EngramConfig and resolver. Ascend's normal platform hook
+#       supplies missing defaults and checks its model, topology and loader limits.
+#       Skip this patch when vLLM does not provide EngramConfig.
 #    Related PR (if no, explain why):
-#       No Ascend upstream PR. The required generic Engram behavior is
-#       selectively backported from vLLM commit f84b0c4bce:
-#       https://github.com/vllm-project/vllm/commit/f84b0c4bce
+#       https://github.com/vllm-project/vllm/pull/59171
+#       Tracks https://github.com/vllm-project/vllm/issues/59169.
+#       Removes CUDA-alike restrictions from model validation and defaults.
 #    Future Plan:
-#       Remove this patch when the pinned vLLM includes `dp_shared_memory` and
-#       exposes a platform hook for Engram config selection and validation.
+#       Once the pinned vLLM includes that change, remove this patch and
+#       platform-side default creation. Keep Ascend's
+#       model, topology and loader restrictions in the normal platform hook.
 #
 # ** 7. File: platform/patch_eplb.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -245,6 +239,28 @@
 #       Remove this DeepSeek-V4-specific argument bridge once upstream exposes
 #       a backend-neutral router configuration object or MoE factory extension
 #       hook that carries vision routing metadata into the Ascend runner.
+#
+# ** File: platform/patch_glm53_reasoning.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.parser.glm47_moe.Glm47MoeParser.__init__`
+#    Why:
+#       GLM-5.3 always generates reasoning, but the supported vLLM v0.30.0
+#       and verified main pin do not include PR #56994. Passing thinking=False
+#       or enable_thinking=False disables extraction and leaks reasoning into
+#       content, including for streamed responses.
+#    How:
+#       Detect the GLM-5.3 template using the upstream signature and normalize
+#       both switches on a copy of the parser kwargs before initialization.
+#       The shared GLM parser then enables reasoning for the glm45/glm47
+#       reasoning adapters and the glm47 tool adapter. Older GLM templates
+#       retain their thinking switch. Skip patching versions with the upstream
+#       helper, and do not wrap the constructor more than once.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/56994
+#       Original fix by Shijin Zhang (Dovis01), commit d95d1dcfb975.
+#    Future Plan:
+#       Remove this patch and its platform import once all supported vLLM
+#       release tags and verified main pins include the upstream fix.
 #
 # ** 7a. File: platform/patch_glm5next_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

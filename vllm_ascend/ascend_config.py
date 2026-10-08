@@ -219,8 +219,8 @@ class StairConfig:
     load_risk_quantile: float = 0.75
     relative_balance_threshold: float = 0.95
     absolute_balance_threshold: float = 0.90
-    rank_transfer_limit: int = 1
-    cross_node_transfer_limit: int = 1
+    rank_transfer_limit: int = -1
+    cross_node_transfer_limit: int = -1
     replica_search_num_stages: int = 4
     replica_search_radius: int = 8
     replica_search_beam_size: int = 64
@@ -428,11 +428,10 @@ class AscendConfig:
             "multistream_overlap_shared_expert": false,
             "enable_kv_nz": false,
             "enable_mc2_hierarchy_comm": false,
-            "enable_reduce_sample": false,
             "enable_dsa_cp": false,
             "sfa_dcp_force_tmajor_restore": false,
             "enable_force_eplb": false,
-            "enable_pcp_o_proj_weight_sharding": false,
+            "enable_pcp_o_proj_weight_sharding": true,
             "enable_pcp_embedding_lmhead_weight_sharding": true,
             "draft_window_size": null,
             "mix_placement": false,
@@ -570,11 +569,10 @@ class AscendConfig:
     multistream_overlap_shared_expert: bool = False
     enable_kv_nz: bool = False
     enable_mc2_hierarchy_comm: bool = False  # deprecated, will be replaced by mc2_comm_alg = "hierarchy"
-    enable_reduce_sample: bool = False
     enable_dsa_cp: bool = False
     sfa_dcp_force_tmajor_restore: bool = False
     enable_force_eplb: bool = False
-    enable_pcp_o_proj_weight_sharding: bool = False
+    enable_pcp_o_proj_weight_sharding: bool = True
     enable_pcp_embedding_lmhead_weight_sharding: bool = True
     draft_window_size: int | None = None
     mix_placement: bool = False
@@ -631,6 +629,7 @@ class AscendConfig:
     # ---- derived fields: sentinel default, after-validator overwrites ----
     enable_shared_expert_dp: bool = False
     enable_sp_by_pass: bool = False
+    enable_sparse_sfa_turboquant: bool = False
     enable_sparse_sfa_c8: bool = False
     enable_sparse_li_c8: bool = False
     # See https://github.com/vllm-project/vllm-ascend/issues/15896
@@ -879,11 +878,18 @@ class AscendConfig:
         # Sparse C8 derivation. StoreKVBlock can be disabled by users, and is
         # otherwise enabled only for SFA + Lightning Indexer C8 on PD prefill
         # nodes.
-        from vllm_ascend.utils import model_uses_sfa_sparse
+        from vllm_ascend.utils import model_uses_kpool_indexer, model_uses_sfa_sparse
 
         use_sparse = model_uses_sfa_sparse(vc.model_config)
+        # The SFA C8 packed KV cache path is indexer-agnostic; kpool-indexer
+        # models (e.g. GLM-5.3-Flash) can use it as well. LI C8 requires the
+        # LightningIndexer cache layout, so it stays gated by use_sparse.
+        use_sparse_sfa = use_sparse or model_uses_kpool_indexer(vc.model_config)
 
-        self.enable_sparse_sfa_c8 = vllm_config.cache_config.cache_dtype in ["fp8", "int8"] and use_sparse
+        cache_config = getattr(vc, "cache_config", None)
+        cache_dtype = getattr(cache_config, "cache_dtype", None)
+        self.enable_sparse_sfa_turboquant = cache_dtype == "turboquant_4bit_nc" and use_sparse_sfa
+        self.enable_sparse_sfa_c8 = vllm_config.cache_config.cache_dtype in ["fp8", "int8"] and use_sparse_sfa
         self.enable_sparse_li_c8 = vllm_config.attention_config.indexer_kv_dtype in ["fp8", "int8"] and use_sparse
         kv_transfer_config = vc.kv_transfer_config
         is_prefill_node = kv_transfer_config is not None and (
@@ -912,39 +918,30 @@ class AscendConfig:
         if self.mega_moe_max_tokens <= 0:
             raise ValueError(f"mega_moe_max_tokens must be a positive integer, got {self.mega_moe_max_tokens}")
 
-        # Enable optimized reduce sampling scheme. Preserve the safeguards
-        # added on main while consuming the already-validated typed field.
-        if self.enable_reduce_sample:
-            logger.warning_once("enable_reduce_sample is an experimental feature. Use with caution.")
+        # batch-sharded sampling (Model Runner V2) shards the sampler inputs
+        # per TP rank, while lmhead TP overrides NPUModelRunner.sample with a
+        # whole-group LM-head collective path; the two are mutually exclusive.
+        if vc.parallel_config.enable_batch_sharded_sampling:
             if self.finegrained_tp_config.lmhead_tensor_parallel_size > 0:
                 raise ValueError(
-                    "enable_reduce_sample is incompatible with "
+                    "enable_batch_sharded_sampling is incompatible with "
                     "finegrained_tp_config.lmhead_tensor_parallel_size. "
                     "Please disable one of them."
-                )
-            if (
-                self.enable_pcp_embedding_lmhead_weight_sharding
-                and vc.parallel_config.prefill_context_parallel_size > 1
-            ):
-                raise ValueError(
-                    "enable_reduce_sample is incompatible with "
-                    "enable_pcp_embedding_lmhead_weight_sharding when PCP is enabled. "
-                    "Please disable one of them."
-                )
-            kv_transfer_config = getattr(vc, "kv_transfer_config", None)
-            kv_role = getattr(kv_transfer_config, "kv_role", None)
-            if kv_role == "kv_producer":
-                raise ValueError(
-                    "enable_reduce_sample is not supported on PD-disaggregated "
-                    "scenarios. Please disable enable_reduce_sample."
                 )
 
         # mix_placement mutex
         self._check_mix_placement()
 
-        # sparse KV offload vs sparse SFA C8 main cache mutex
-        self._validate_sparse_c8_kv_offload_compatibility()
+        # sparse KV offload vs packed SFA main cache mutex
+        self._validate_sparse_packed_kv_offload_compatibility()
         return self
+
+    @property
+    def uses_packed_sfa_main_cache(self) -> bool:
+        """Whether SFA stores its main KV cache in one packed tensor."""
+        return bool(
+            getattr(self, "enable_sparse_sfa_c8", False) or getattr(self, "enable_sparse_sfa_turboquant", False)
+        )
 
     def _validate_mc2_comm_alg(self, vllm_config: VllmConfig) -> None:
         from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
@@ -978,12 +975,11 @@ class AscendConfig:
                 "Please set additional_config.enable_fused_mc2 to 0."
             )
 
-    def _validate_sparse_c8_kv_offload_compatibility(self) -> None:
-        if self.sparse_kv_offload_config.enabled and self.enable_sparse_sfa_c8:
+    def _validate_sparse_packed_kv_offload_compatibility(self) -> None:
+        if self.sparse_kv_offload_config.enabled and self.uses_packed_sfa_main_cache:
             raise NotImplementedError(
-                "Sparse KV offload does not support the sparse SFA C8 main "
-                "cache. Disable enable_sparse_sfa_c8; enable_sparse_li_c8 is "
-                "supported because the indexer cache remains device-resident."
+                "Sparse KV offload does not support packed SFA main caches (C8 or TQ4). "
+                "Sparse LI C8 is supported because the indexer cache remains device-resident."
             )
 
     @classmethod
@@ -1057,34 +1053,42 @@ class AscendConfig:
 
     @staticmethod
     def _is_a5_megamoe_supported_by_config(vllm_config) -> bool:
-        # Ascend 950 MegaMoe supports only MXFP quantization (dispatch_quant_mode
-        # == 4) and constrains hidden / intermediate to fixed discrete sets, per
-        # cann_ops_transformer docs/zh/mega_moe.md (Ascend 950 constraints).
+        model_architectures = getattr(vllm_config.model_config, "architectures", None) or []
+        is_minimax_m3 = any(architecture.startswith("MiniMaxM3") for architecture in model_architectures)
+        is_kimi_k3 = any(
+            architecture in ("KimiK3ForCausalLM", "KimiLinearForCausalLM", "KimiK3ForConditionalGeneration")
+            for architecture in model_architectures
+        )
         hf_text_config = vllm_config.model_config.hf_text_config
-        hidden_size = getattr(hf_text_config, "hidden_size", None)
+        # K3 projects the residual stream before the routed FFN. Other models
+        # retain the existing hidden-size lookup and supported dimensions.
+        hidden_size = getattr(hf_text_config, "routed_expert_hidden_size", None) if is_kimi_k3 else None
+        if hidden_size is None:
+            hidden_size = getattr(hf_text_config, "hidden_size", None)
         if hidden_size is None and hasattr(vllm_config.model_config, "get_hidden_size"):
             hidden_size = vllm_config.model_config.get_hidden_size()
         if hidden_size is None:
             return False
-        if int(hidden_size) not in {1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192}:
+        supported_hidden_sizes = {1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192}
+        if is_kimi_k3:
+            supported_hidden_sizes.add(3584)
+        if int(hidden_size) not in supported_hidden_sizes:
             logger.warning(
-                "mega moe operator is not supported by current a5 config, for hidden_size %s"
-                " is not in {1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192}",
+                "MegaMoe requires hidden_size in %s; got %s.",
+                sorted(supported_hidden_sizes),
                 int(hidden_size),
             )
             return False
 
-        model_architectures = getattr(vllm_config.model_config, "architectures", None) or []
-        is_minimax_m3 = any(architecture.startswith("MiniMaxM3") for architecture in model_architectures)
         moe_intermediate_size = getattr(hf_text_config, "moe_intermediate_size", None)
         if moe_intermediate_size is None and is_minimax_m3:
             moe_intermediate_size = getattr(hf_text_config, "intermediate_size", None)
         if moe_intermediate_size is None:
             return False
-        # MiniMax-M3 uses intermediate_size=3072 and a SwiGLU-OAI wrapper
-        # supporting the corresponding 6144-wide first projection.
+        # Preserve MiniMax-M3's 6144-wide first projection and also allow K3's
+        # validated SiTU shape without widening support for unrelated models.
         supported_intermediate_sizes = {1024, 2048, 3072, 4096, 7168}
-        if is_minimax_m3:
+        if is_minimax_m3 or is_kimi_k3:
             supported_intermediate_sizes.add(6144)
         # intermediate_hidden == l1_weights.dim1 == 2 * moe_intermediate_size.
         intermediate_hidden = 2 * int(moe_intermediate_size)
@@ -1110,6 +1114,8 @@ class AscendConfig:
             "num_experts_per_tok",
             getattr(hf_text_config, "top_k_experts", 1),
         )
+        if is_kimi_k3:
+            num_top_k = getattr(hf_text_config, "num_experts_per_token", num_top_k)
         if not (1 <= int(num_top_k) <= 32):
             logger.warning(
                 "mega moe operator is not supported by current a5 config, for num_top_k %s is not between 1 and 32",
@@ -1812,6 +1818,7 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
         # are NOT here — they are user-input fields that derive_and_validate
         # augments (self.x = self.x and condition), so the user must be able to
         # pass them. Only pure-derived fields (no user input) are stripped.
+        "enable_sparse_sfa_turboquant",
         "enable_sp_by_pass",
         "pd_tp_ratio",
         "pd_head_ratio",
