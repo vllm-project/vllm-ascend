@@ -63,6 +63,7 @@ def _make_pcp_config(
     sparse_mla: bool = True,
     pipeline_parallel_size: int = 1,
     data_parallel_size: int = 1,
+    speculative_config=None,
 ):
     hf_text_config = SimpleNamespace(index_topk=2048) if sparse_mla else SimpleNamespace()
     return SimpleNamespace(
@@ -78,7 +79,7 @@ def _make_pcp_config(
             hf_text_config=hf_text_config,
         ),
         lora_config=None,
-        speculative_config=None,
+        speculative_config=speculative_config,
         compilation_config=SimpleNamespace(cudagraph_mode=cudagraph_mode),
     )
 
@@ -90,7 +91,7 @@ def _make_pcp_config(
         (CUDAGraphMode.NONE, True, 2, 1, False),
         (CUDAGraphMode.NONE, False, 1, 1, False),
         (CUDAGraphMode.NONE, False, 2, 2, False),
-        (CUDAGraphMode.FULL_DECODE_ONLY, False, 2, 1, False),
+        (CUDAGraphMode.FULL_DECODE_ONLY, False, 2, 1, True),
     ],
 )
 def test_decode_sharding_uses_parallel_config(cudagraph_mode, speculative, pcp_size, dcp_size, expected_sharding):
@@ -363,7 +364,11 @@ def test_full_decode_request_layout_is_token_sized_only_without_drafts():
 
 def _make_replicated_pcp_manager():
     manager = AscendPCPManager(2, 0, torch.device("cpu"), max_num_reqs=8, max_num_tokens=32)
-    manager.vllm_config = _make_pcp_config(CUDAGraphMode.FULL_DECODE_ONLY)
+    # Graph execution with speculation stays replicated.
+    manager.vllm_config = _make_pcp_config(
+        CUDAGraphMode.FULL_DECODE_ONLY,
+        speculative_config=SimpleNamespace(num_speculative_tokens=3),
+    )
     manager._hidden_restore_idx = torch.arange(32, dtype=torch.int64)
     return manager
 
@@ -428,7 +433,10 @@ def test_partition_batch_pads_decode_requests_when_tokens_are_already_padded():
 
     manager = _make_replicated_pcp_manager()
     manager._input_buffers = input_buffers
-    manager.vllm_config = _make_pcp_config(CUDAGraphMode.FULL_DECODE_ONLY)
+    manager.vllm_config = _make_pcp_config(
+        CUDAGraphMode.FULL_DECODE_ONLY,
+        speculative_config=SimpleNamespace(num_speculative_tokens=3),
+    )
     manager._hidden_restore_idx = torch.arange(4, dtype=torch.int64)
     # Upstream replace() preserves the global attention state.
     local_batch.attn_state = global_batch.attn_state
@@ -481,7 +489,10 @@ def test_partition_batch_keeps_piecewise_request_extent():
 
     manager = _make_replicated_pcp_manager()
     manager._input_buffers = None
-    manager.vllm_config = _make_pcp_config(CUDAGraphMode.PIECEWISE)
+    manager.vllm_config = _make_pcp_config(
+        CUDAGraphMode.PIECEWISE,
+        speculative_config=SimpleNamespace(num_speculative_tokens=3),
+    )
 
     with (
         patch.object(
@@ -622,7 +633,10 @@ def test_partition_batch_preserves_fia_dummy_layout() -> None:
     )
     # PIECEWISE pads tokens without padding requests, so the request-shaped
     # metadata must stay at the global batch's request extent.
-    manager.vllm_config = _make_pcp_config(CUDAGraphMode.PIECEWISE)
+    manager.vllm_config = _make_pcp_config(
+        CUDAGraphMode.PIECEWISE,
+        speculative_config=SimpleNamespace(num_speculative_tokens=3),
+    )
     input_buffers = manager._input_buffers
     assert input_buffers is not None
     input_buffers.positions[0] = 10
@@ -1012,7 +1026,10 @@ def test_sample_tokens_uses_global_batch_only_on_non_last_pp_rank(
 
 def test_partition_batch_clears_padded_dcp_local_seq_lens() -> None:
     manager = _make_replicated_pcp_manager()
-    manager.vllm_config = _make_pcp_config(CUDAGraphMode.FULL_DECODE_ONLY)
+    manager.vllm_config = _make_pcp_config(
+        CUDAGraphMode.FULL_DECODE_ONLY,
+        speculative_config=SimpleNamespace(num_speculative_tokens=3),
+    )
     manager._input_buffers = AscendInputBuffers(
         max_num_reqs=8,
         max_num_tokens=16,
@@ -1083,7 +1100,11 @@ def test_validate_config_pcp_dp_graph_modes(dp_size, cudagraph_mode, allowed):
 @pytest.mark.parametrize("has_stale_batch", [False, True])
 def test_dummy_attention_context_uses_current_batch(pcp_rank, has_stale_batch):
     manager = AscendPCPManager(2, pcp_rank, torch.device("cpu"))
-    manager.vllm_config = _make_pcp_config(CUDAGraphMode.NONE, pcp_shard_decode_requests=False)
+    # Speculative decoding keeps the dummy batch on the replicated path.
+    manager.vllm_config = _make_pcp_config(
+        CUDAGraphMode.NONE,
+        speculative_config=SimpleNamespace(num_speculative_tokens=3),
+    )
     saved_batch = _make_global_pcp_batch() if has_stale_batch else None
     manager._global_batch = saved_batch
     manager._hidden_restore_idx = torch.tensor([99]) if has_stale_batch else None

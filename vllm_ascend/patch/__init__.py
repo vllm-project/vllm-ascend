@@ -1586,8 +1586,8 @@
 #       the runner still passes the global request count, so no uniform decode
 #       graph matches.
 #    How:
-#       When `ParallelConfig.pcp_shard_decode_requests` holds, derive the
-#       request count from the local tokens and the uniform query length.
+#       When `is_pcp_decode_sharding_enabled()` holds, derive the request
+#       count from the local tokens and the uniform query length.
 #    Related PR (if no, explain why):
 #       No upstream PR yet; vLLM #52162 still passes the global request count.
 #    Future Plan:
