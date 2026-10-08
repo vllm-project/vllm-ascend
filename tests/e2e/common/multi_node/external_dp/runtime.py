@@ -476,14 +476,14 @@ class ExternalDPServerManager:
     def start_current_node(self) -> None:
         local_ranks = [rank for rank in self.ranks if rank.node_index == self.current_node_index]
         # PP worker 等 master 就绪
-        pp_workers = [r for r in local_ranks if r.is_headless and r.nnodes > 1]
-        if pp_workers:
-            master_rank = next(
-                r for r in self.ranks
-                if r.role == "prefiller" and not r.is_headless and r.nnodes > 1
-            )
-            logger.info("PP worker waiting for master %s", rank_health_url(master_rank))
-            wait_http_ready(rank_health_url(master_rank), timeout=SERVER_READY_TIMEOUT_SECONDS)
+        # pp_workers = [r for r in local_ranks if r.is_headless and r.nnodes > 1]
+        # if pp_workers:
+        #     master_rank = next(
+        #         r for r in self.ranks
+        #         if r.role == "prefiller" and not r.is_headless and r.nnodes > 1
+        #     )
+        #     logger.info("PP worker waiting for master %s", rank_health_url(master_rank))
+        #     wait_http_ready(rank_health_url(master_rank), timeout=SERVER_READY_TIMEOUT_SECONDS)
         logger.info("Starting %d external DP ranks on node %d", len(local_ranks), self.current_node_index)
         try:
             for rank in local_ranks:
