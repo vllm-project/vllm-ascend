@@ -625,7 +625,10 @@ def test_sfa_indexer_cache_spec_runtime_ownership_and_dcp_replication(
     monkeypatch.setattr(
         attn_utils,
         "get_ascend_config",
-        lambda: SimpleNamespace(is_sparse_li_c8_layer=lambda _layer_name: li_c8),
+        lambda: SimpleNamespace(
+            is_sparse_li_c8_layer=lambda _layer_name: li_c8,
+            is_sparse_li_c4_layer=lambda _layer_name: False,
+        ),
     )
 
     specs = attn_utils.get_kv_cache_spec(vllm_config)
