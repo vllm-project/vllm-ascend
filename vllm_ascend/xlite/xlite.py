@@ -16,8 +16,8 @@
 #
 """Xlite integration module for vLLM-Ascend."""
 
-import json
 import math
+import os
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, TypeAlias, cast
@@ -36,9 +36,6 @@ from xlite._C import AttnDSA, AttnHybrid, AttnMeta, AttnMHA, AttnMLA, Runtime, S
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState, AscendMetadata
-from vllm_ascend.attention.mla_v1 import AscendMLAMetadata
-from vllm_ascend.attention.sfa_v1 import AscendSFAMetadata
-from vllm_ascend.compilation.acl_graph import ACLGraphWrapper
 from vllm_ascend.ops.rotary_embedding import AscendRotaryEmbedding
 from vllm_ascend.xlite.utils import (
     AttnMetadataRouter,
@@ -771,8 +768,10 @@ class Qwen3_5XliteModel(StandardXliteModel):
         xm.embed = get_dotted_attr(self.npu_runnable, f"{prefix}model.embed_tokens.weight", raises=True)
         norm_w = _gemma_norm_to_xlite(get_dotted_attr(self.npu_runnable, f"{prefix}model.norm.weight", raises=True))
         xm.norm = norm_w
-        xm.head = xm.embed if hf.tie_word_embeddings else get_dotted_attr(
-            self.npu_runnable, f"{prefix}lm_head.weight", raises=True
+        xm.head = (
+            xm.embed
+            if hf.tie_word_embeddings
+            else get_dotted_attr(self.npu_runnable, f"{prefix}lm_head.weight", raises=True)
         )
 
         empty = torch.empty(0, dtype=xm.embed.dtype, device=xm.embed.device)
@@ -782,12 +781,29 @@ class Qwen3_5XliteModel(StandardXliteModel):
         key_dim = (hf.linear_num_key_heads * hf.linear_key_head_dim) // tp
         value_dim = (hf.linear_num_value_heads * hf.linear_value_head_dim) // tp
 
-        lists: dict[str, list[torch.Tensor]] = {k: [] for k in (
-            "attn_norm", "mlp_norm", "mlp_up_gate", "mlp_down", "attn_out",
-            "mha_qkv", "mha_qkv_bias", "mha_q_norm", "mha_k_norm",
-            "linear_in_proj_qkv", "linear_in_proj_z", "linear_in_proj_b", "linear_in_proj_a",
-            "linear_conv1d", "linear_a_log", "linear_dt_bias", "linear_norm", "linear_out_proj",
-        )}
+        lists: dict[str, list[torch.Tensor]] = {
+            k: []
+            for k in (
+                "attn_norm",
+                "mlp_norm",
+                "mlp_up_gate",
+                "mlp_down",
+                "attn_out",
+                "mha_qkv",
+                "mha_qkv_bias",
+                "mha_q_norm",
+                "mha_k_norm",
+                "linear_in_proj_qkv",
+                "linear_in_proj_z",
+                "linear_in_proj_b",
+                "linear_in_proj_a",
+                "linear_conv1d",
+                "linear_a_log",
+                "linear_dt_bias",
+                "linear_norm",
+                "linear_out_proj",
+            )
+        }
         has_qkv_bias = False
 
         for layer in layers:
@@ -823,8 +839,15 @@ class Qwen3_5XliteModel(StandardXliteModel):
                 else:
                     lists["mha_qkv_bias"].append(empty)
                 for k in (
-                    "linear_in_proj_qkv", "linear_in_proj_z", "linear_in_proj_b", "linear_in_proj_a",
-                    "linear_conv1d", "linear_a_log", "linear_dt_bias", "linear_norm", "linear_out_proj",
+                    "linear_in_proj_qkv",
+                    "linear_in_proj_z",
+                    "linear_in_proj_b",
+                    "linear_in_proj_a",
+                    "linear_conv1d",
+                    "linear_a_log",
+                    "linear_dt_bias",
+                    "linear_norm",
+                    "linear_out_proj",
                 ):
                     lists[k].append(empty)
             else:
@@ -856,7 +879,6 @@ class Qwen3_5XliteModel(StandardXliteModel):
             setattr(xm, k, v)
         cfg.qk_norm = True
         cfg.qkv_bias = has_qkv_bias
-
 
 
 def get_adapter_xlite_model(npu_runner: "XliteModelRunner", vllm_config: VllmConfig) -> XliteModelBase:
@@ -907,9 +929,7 @@ class XliteWrapper:
         # models. Prefill runs the native runnable (piecewise ACLGraph kept);
         # decode steps run the xlite graph; GDN states produced by native
         # prefill are imported into the xlite persistent pool at handoff.
-        self._hybrid_decode_only: bool = (
-            os.environ.get("XLITE_DECODE_ONLY_HYBRID", "0") == "1"
-        )
+        self._hybrid_decode_only: bool = os.environ.get("XLITE_DECODE_ONLY_HYBRID", "0") == "1"
         self._xlite_native_dirty: set[int] = set()
         self._xlite_req_pages: dict[int, list[int]] = {}
         self._xlite_native_gdn_groups: list[list[torch.Tensor]] = []
@@ -1024,7 +1044,12 @@ class XliteWrapper:
             # Already kernel layout, or split manager page into kernel blocks.
             if k.shape[1] == block_size and k.shape[2:] == (kv_heads, head_dim):
                 return k, v
-            if k.ndim == 4 and k.shape[1] > block_size and k.shape[1] % block_size == 0 and k.shape[2:] == (kv_heads, head_dim):
+            if (
+                k.ndim == 4
+                and k.shape[1] > block_size
+                and k.shape[1] % block_size == 0
+                and k.shape[2:] == (kv_heads, head_dim)
+            ):
                 chunk = k.shape[1] // block_size
                 return (
                     k.view(k.shape[0] * chunk, block_size, kv_heads, head_dim),
@@ -1048,8 +1073,14 @@ class XliteWrapper:
                 self._xlite_hybrid_batch.append((conv_b, ssm_b))
                 self._xlite_hybrid_state_refs.extend([conv_p, ssm_p, conv_b, ssm_b])
                 adapted.append([conv_b, ssm_b])
-        logger.info("xlite hybrid KV adapted: layers=%s max_batch=%s gdn_slots=%s native_gdn_groups=%s caches_len=%s",
-                    n_layers, max_batch, num_slots, len(self._xlite_native_gdn_groups), len(caches))
+        logger.info(
+            "xlite hybrid KV adapted: layers=%s max_batch=%s gdn_slots=%s native_gdn_groups=%s caches_len=%s",
+            n_layers,
+            max_batch,
+            num_slots,
+            len(self._xlite_native_gdn_groups),
+            len(caches),
+        )
         return adapted
 
     @staticmethod
@@ -1065,9 +1096,11 @@ class XliteWrapper:
                 return None
             if len(cands) == 1 or expected_type is not AscendMetadata:
                 return cands[0]
+
             def score(m: Any) -> int:
                 bt = getattr(m, "block_tables", None)
                 return int(bt.shape[-1]) if bt is not None and hasattr(bt, "shape") else -1
+
             return max(cands, key=score)
         return None
 
@@ -1181,9 +1214,7 @@ class XliteWrapper:
             return None
         return [int(x) for x in idx[:num_reqs].detach().cpu().tolist()]
 
-    def _hybrid_import_native_states(
-        self, attn_metadata_raw: Any, layer0_idx: list[int] | None, num_reqs: int
-    ) -> None:
+    def _hybrid_import_native_states(self, attn_metadata_raw: Any, layer0_idx: list[int] | None, num_reqs: int) -> None:
         """A1 decode-only: import native mamba-pool GDN states into the xlite
         persistent pool.
 
@@ -1204,9 +1235,7 @@ class XliteWrapper:
         # one per native step).
         if self._pending_native_ids:
             for _t in self._pending_native_ids:
-                self._xlite_native_dirty.update(
-                    int(x) for x in _t.detach().cpu().tolist()
-                )
+                self._xlite_native_dirty.update(int(x) for x in _t.detach().cpu().tolist())
             self._pending_native_ids.clear()
         if len(self._xlite_native_gdn_groups) != len(self._xlite_hybrid_persistent):
             raise RuntimeError(
@@ -1254,7 +1283,7 @@ class XliteWrapper:
             _stacked.append(idx[:num_reqs].to(torch.long))
             _stacked_li.append(li)
         if _stacked:
-            _all = torch.stack(_stacked, dim=0).detach().cpu().tolist()   # ONE sync
+            _all = torch.stack(_stacked, dim=0).detach().cpu().tolist()  # ONE sync
             layer_map = {li: _all[j] for j, li in enumerate(_stacked_li)}
         for li, ((conv_p, ssm_p), group) in enumerate(
             zip(self._xlite_hybrid_persistent, self._xlite_native_gdn_groups)
@@ -1262,24 +1291,21 @@ class XliteWrapper:
             layer_ids = layer_map.get(li)
             if layer_ids is None:
                 continue
-            nconv, nssm = self._pick_native_conv_ssm(
-                group, int(conv_p.shape[1]), int(ssm_p.shape[1])
-            )
+            nconv, nssm = self._pick_native_conv_ssm(group, int(conv_p.shape[1]), int(ssm_p.shape[1]))
             conv_w = conv_p.shape[2] - 1
             for r, slot in enumerate(slots):
                 if not slot or r >= len(layer_ids) or key_ids[r] not in self._xlite_native_dirty:
                     continue
                 page = layer_ids[r]
-                nc = nconv[page] if nconv.ndim == 3 else nconv      # [K-1, C] or [C, K-1]
-                ns = nssm[page] if nssm.ndim == 4 else nssm         # [n_v, V, K]
+                nc = nconv[page] if nconv.ndim == 3 else nconv  # [K-1, C] or [C, K-1]
+                ns = nssm[page] if nssm.ndim == 4 else nssm  # [n_v, V, K]
                 if nc.shape[0] == conv_w:
-                    src = nc.t()                                    # [K-1, C] -> [C, K-1]
+                    src = nc.t()  # [K-1, C] -> [C, K-1]
                 elif nc.shape[1] == conv_w:
-                    src = nc                                        # [C, K-1]
+                    src = nc  # [C, K-1]
                 else:
                     raise RuntimeError(
-                        f"native conv state shape {tuple(nc.shape)} does not "
-                        f"match xlite conv width {conv_w}"
+                        f"native conv state shape {tuple(nc.shape)} does not match xlite conv width {conv_w}"
                     )
                 src = src.to(dtype=conv_p.dtype)
                 conv_p[slot, :, 1:] = src
@@ -1289,17 +1315,15 @@ class XliteWrapper:
                 ssm_p[slot] = ns.transpose(1, 2).to(dtype=ssm_p.dtype)
                 imported += 1
                 self._xlite_req_pages.setdefault(key_ids[r], [None] * len(self._xlite_native_gdn_groups))[li] = page
-        self._xlite_native_dirty.difference_update(
-            b for b in key_ids if b in self._xlite_native_dirty
-        )
+        self._xlite_native_dirty.difference_update(b for b in key_ids if b in self._xlite_native_dirty)
         # note: dirty keys are request-level (layer-0 scoped ids); clearing the
         # key clears ALL layers of that request at once
         if first_log:
             g0 = self._xlite_native_gdn_groups[0]
             logger.info(
-                "xlite decode-only: imported states for %s requests x %s layers "
-                "(native group[0] tensors: %s)",
-                len(key_ids), imported // max(1, len(key_ids)),
+                "xlite decode-only: imported states for %s requests x %s layers (native group[0] tensors: %s)",
+                len(key_ids),
+                imported // max(1, len(key_ids)),
                 [(tuple(t.shape), str(t.dtype)) for t in g0],
             )
             self._xlite_import_log_done = True
@@ -1332,9 +1356,7 @@ class XliteWrapper:
                 page = pages[li] if li < len(pages) else None
                 if not page:
                     continue
-                nconv, nssm = self._pick_native_conv_ssm(
-                    group, int(conv_p.shape[1]), int(ssm_p.shape[1])
-                )
+                nconv, nssm = self._pick_native_conv_ssm(group, int(conv_p.shape[1]), int(ssm_p.shape[1]))
                 if nconv.ndim == 3:
                     nconv[page] = conv_p[slot][:, 1:].t().to(nconv.dtype)
                 else:
@@ -1439,7 +1461,11 @@ class XliteWrapper:
             self._hybrid_copy(last_idx, to_batch=False)
             self._xlite_hybrid_dirty = False
         dense = bids if raw_idx is None else self._hybrid_slots(bids)
-        idx = last_idx if last_dense == dense and last_idx is not None else torch.tensor(dense, dtype=torch.long, device=self.device)
+        idx = (
+            last_idx
+            if last_dense == dense and last_idx is not None
+            else torch.tensor(dense, dtype=torch.long, device=self.device)
+        )
         self._hybrid_copy(idx, to_batch=True)
         if fresh:
             self._hybrid_zero_rows(fresh, dense)
@@ -1585,13 +1611,12 @@ class XliteWrapper:
                         # safety valve for decode-free workloads (out=1): the
                         # import never runs there, so bound the pending list
                         for _t in self._pending_native_ids:
-                            self._xlite_native_dirty.update(
-                                int(x) for x in _t.detach().cpu().tolist()
-                            )
+                            self._xlite_native_dirty.update(int(x) for x in _t.detach().cpu().tolist())
                         self._pending_native_ids.clear()
                 if os.environ.get("XLITE_DO_DEBUG", "0") == "1" and not getattr(self, "_dbg_mark_logged", False):
-                    logger.warning("xlite DO-DEBUG: native step pending=%s ids (deferred marking)",
-                                   len(self._pending_native_ids))
+                    logger.warning(
+                        "xlite DO-DEBUG: native step pending=%s ids (deferred marking)", len(self._pending_native_ids)
+                    )
                     logger.warning("xlite DO-DEBUG: native model_kwargs keys=%s", list(model_kwargs.keys()))
                     _mcp = model_kwargs.get("mamba_cache_params")
                     if _mcp is not None:
@@ -1615,9 +1640,7 @@ class XliteWrapper:
                 # are native and get re-imported via pending_native_ids.
                 _exp_keys = None
                 if self._last_decode_keys is not None:
-                    _exp_keys = [
-                        int(x) for x in self._last_decode_keys.detach().cpu().tolist()
-                    ]
+                    _exp_keys = [int(x) for x in self._last_decode_keys.detach().cpu().tolist()]
                     self._last_decode_keys = None
                 self._hybrid_export_to_native(_exp_keys)
             # A1 decode-only: call the UNWRAPPED native model. Going through
@@ -1692,22 +1715,17 @@ class XliteWrapper:
                 if self._xlite_native_dirty or self._pending_native_ids:
                     _layer0_ids = None
                     if _gdn_idx is not None:
-                        _layer0_ids = [
-                            int(x) for x in _gdn_idx[:num_reqs].detach().cpu().tolist()
-                        ]
-                    self._hybrid_import_native_states(
-                        attn_metadata_raw, _layer0_ids, num_reqs
-                    )
+                        _layer0_ids = [int(x) for x in _gdn_idx[:num_reqs].detach().cpu().tolist()]
+                    self._hybrid_import_native_states(attn_metadata_raw, _layer0_ids, num_reqs)
                 if os.environ.get("XLITE_DO_DEBUG", "0") == "1":
                     self._dbg_dec_steps = getattr(self, "_dbg_dec_steps", 0) + 1
                     _dbg_ids = (
-                        [int(x) for x in _gdn_idx[:num_reqs].detach().cpu().tolist()]
-                        if _gdn_idx is not None
-                        else None
+                        [int(x) for x in _gdn_idx[:num_reqs].detach().cpu().tolist()] if _gdn_idx is not None else None
                     )
                     logger.warning(
                         "xlite DO-STEP: decode step #%s (num_reqs=%s, ids=%s)",
-                        self._dbg_dec_steps, num_reqs,
+                        self._dbg_dec_steps,
+                        num_reqs,
                         None if _dbg_ids is None else _dbg_ids[:6],
                     )
                 # Remember this decode batch's key ids (device, no sync): the
@@ -1726,68 +1744,56 @@ class XliteWrapper:
                         continue
                     _cs = float(self._xlite_hybrid_persistent[0][0][_slot].float().sum())
                     _ss = float(self._xlite_hybrid_persistent[0][1][_slot].float().sum())
-                    _cols = [float(self._xlite_hybrid_persistent[0][0][_slot, :, c].float().sum())
-                             for c in range(self._xlite_hybrid_persistent[0][0].shape[2])]
-                    logger.warning("xlite DO-STATE: bid=%s slot=%s L0 conv_sum=%.6f ssm_sum=%.6f conv_cols=%s",
-                                   _b, _slot, _cs, _ss, [round(v, 4) for v in _cols])
+                    _cols = [
+                        float(self._xlite_hybrid_persistent[0][0][_slot, :, c].float().sum())
+                        for c in range(self._xlite_hybrid_persistent[0][0].shape[2])
+                    ]
+                    logger.warning(
+                        "xlite DO-STATE: bid=%s slot=%s L0 conv_sum=%.6f ssm_sum=%.6f conv_cols=%s",
+                        _b,
+                        _slot,
+                        _cs,
+                        _ss,
+                        [round(v, 4) for v in _cols],
+                    )
                     if not getattr(self, "_dbg_alllayer_logged", False):
-                        _ss_all = [round(float(p[1][_slot].float().sum()), 4)
-                                   for p in self._xlite_hybrid_persistent]
-                        _cv_all = [round(float(p[0][_slot].float().sum()), 4)
-                                   for p in self._xlite_hybrid_persistent]
+                        _ss_all = [round(float(p[1][_slot].float().sum()), 4) for p in self._xlite_hybrid_persistent]
+                        _cv_all = [round(float(p[0][_slot].float().sum()), 4) for p in self._xlite_hybrid_persistent]
                         logger.warning("xlite DO-STATE-ALL: ssm=%s", _ss_all)
                         logger.warning("xlite DO-STATE-ALL: conv=%s", _cv_all)
                         self._dbg_alllayer_logged = True
                     break
             elif os.environ.get("XLITE_DO_DEBUG", "0") == "1" and not getattr(self, "_dbg_imp_logged", False):
-                logger.warning("xlite DO-DEBUG: decode step skip import (dirty=%s, ids=%s)",
-                               len(self._xlite_native_dirty),
-                               None if _gdn_idx is None else _gdn_idx[:6].tolist())
+                logger.warning(
+                    "xlite DO-DEBUG: decode step skip import (dirty=%s, ids=%s)",
+                    len(self._xlite_native_dirty),
+                    None if _gdn_idx is None else _gdn_idx[:6].tolist(),
+                )
                 if getattr(self, "_dbg_imp_logged_n", 0) >= 2:
                     self._dbg_imp_logged = True
                 self._dbg_imp_logged_n = getattr(self, "_dbg_imp_logged_n", 0) + 1
             self._hybrid_gather(_gdn_idx, cached_lens_list, num_reqs)
-            _adp_mark("gdn_gather")
             stream = torch.npu.current_stream().npu_stream
-            if (os.environ.get("XLITE_DECODE_GRAPH", "0") == "1"
-                    and inputs_embeds is not None and num_reqs == num_actual_tokens
-                    and all(q == 1 for q in query_lens_list)):
-                _dg_out = self._decode_graph_step(
-                    inputs_embeds, positions, attn_metadata, num_reqs, cached_lens_list, stream)
-                if _dg_out is not None:
-                    _adp_mark("decode_graph")
-                    self._hybrid_scatter()
-                    _adp_mark("scatter")
-                    if _adp_prof:
-                        try:
-                            with open(os.environ.get("XLITE_ADAPTER_PROF_OUT", "/tmp/opencode/adapter_prof.jsonl"), "a") as _f:
-                                _f.write(json.dumps({
-                                    "num_reqs": num_reqs, "num_tokens": num_actual_tokens,
-                                    "with_prefill": bool(with_prefill), "decode_graph": True,
-                                    "total_ms": (_adp_last[0] - _adp_t0) * 1000,
-                                    "marks": dict(_adp_marks),
-                                }) + "\n")
-                        except Exception:
-                            pass
-                    return _ensure_output(_dg_out, "xlite hybrid decode graph")
-            elif not getattr(self, "_dg_cond_logged", False):
-                self._dg_cond_logged = True
-                logger.warning(
-                    "xlite decode graph: condition false (env=%s embeds_none=%s num_reqs=%s num_tokens=%s qlens=%s)",
-                    os.environ.get("XLITE_DECODE_GRAPH"), inputs_embeds is None,
-                    num_reqs, num_actual_tokens, query_lens_list[:4])
             xlite_attn_metadata = AttnMeta()
             xlite_attn_metadata.lens = query_lens_list
             xlite_attn_metadata.cached_lens = cached_lens_list
             xlite_attn_metadata.block_tables_cpu = block_tables_list
             pos = positions[0] if positions.ndim == 2 else positions
             xlite_attn_metadata.positions = pos[:num_actual_tokens].contiguous()
-            num_tokens = getattr(forward_context, "max_tokens_across_dp", None) or forward_context.batch_descriptor.num_tokens
+            num_tokens = (
+                getattr(forward_context, "max_tokens_across_dp", None) or forward_context.batch_descriptor.num_tokens
+            )
             h = self.hidden_states[:num_tokens]
             stream = torch.npu.current_stream().npu_stream
             if inputs_embeds is None:
                 self.xlite_model.forward(
-                    self.xlite_rt, input_ids[:num_actual_tokens], xlite_attn_metadata, self.kv_caches, self.freq_cis, h, stream
+                    self.xlite_rt,
+                    input_ids[:num_actual_tokens],
+                    xlite_attn_metadata,
+                    self.kv_caches,
+                    self.freq_cis,
+                    h,
+                    stream,
                 )
             else:
                 emb = inputs_embeds[:num_actual_tokens]

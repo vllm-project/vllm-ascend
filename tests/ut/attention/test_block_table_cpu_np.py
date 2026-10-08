@@ -24,7 +24,6 @@ import dataclasses
 import inspect
 
 import numpy as np
-import pytest
 
 from vllm_ascend.attention.attention_v1 import (
     AscendAttentionMetadataBuilder,

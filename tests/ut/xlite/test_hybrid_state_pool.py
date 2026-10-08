@@ -75,7 +75,8 @@ def _wrapper(n_layers=2, max_batch=8):
     w._xlite_hybrid_block_to_slot = {}
     w._xlite_hybrid_free_slots = list(range(1, max_batch + 1))
     w._xlite_hybrid_persistent = [
-        (torch.full(CONV_SHAPE, float(l + 1)), torch.full(SSM_SHAPE, float(l + 1))) for l in range(n_layers)
+        (torch.full(CONV_SHAPE, float(layer_idx + 1)), torch.full(SSM_SHAPE, float(layer_idx + 1)))
+        for layer_idx in range(n_layers)
     ]
     w._xlite_hybrid_batch = [(torch.zeros(CONV_SHAPE), torch.zeros(SSM_SHAPE)) for _ in range(n_layers)]
     w._xlite_hybrid_last_ids = None

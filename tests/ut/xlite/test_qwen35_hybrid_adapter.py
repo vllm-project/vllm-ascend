@@ -63,11 +63,11 @@ except Exception:  # pragma: no cover - CI CPU environments have no xlite wheel
     sys.modules.setdefault("xlite._C", xlite_c)
 
 from vllm_ascend.xlite.xlite import (  # noqa: E402
+    Qwen3_5XliteModel,
     _architecture_strategy_map,
     _gemma_norm_to_xlite,
     _pack_mha_qkv_with_gate,
     _resolve_full_attention_interval,
-    Qwen3_5XliteModel,
 )
 
 
@@ -179,9 +179,13 @@ def test_adapt_hybrid_kv_caches_layout():
     cfg = self.adapter_xlite_model.xlite_config
     conv_dim = cfg.linear_num_k_heads * cfg.linear_key_head_dim * 2 + cfg.linear_num_v_heads * cfg.linear_value_head_dim
     # Layer 0 is GDN (interval=2), layer 1 is full attention.
+    full_kv = [
+        torch.zeros(3, cfg.block_size, cfg.n_kv_heads, cfg.head_dim),
+        torch.zeros(3, cfg.block_size, cfg.n_kv_heads, cfg.head_dim),
+    ]
     caches = [
         [],  # unused for the GDN layer in the batch-major layout
-        [torch.zeros(3, cfg.block_size, cfg.n_kv_heads, cfg.head_dim), torch.zeros(3, cfg.block_size, cfg.n_kv_heads, cfg.head_dim)],
+        full_kv,
     ]
     adapted = XliteWrapper._adapt_hybrid_kv_caches(self, caches)
 
