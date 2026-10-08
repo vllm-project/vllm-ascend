@@ -1153,7 +1153,7 @@ class ProfilingChunkScheduler(Scheduler):
                         if self.ec_connector is not None:
                             self.ec_connector.update_state_after_alloc(request, i)
 
-            # re-queue requests skipped in this pass ahead of older skipped items.
+            # Re-queue requests skipped in this pass ahead of older skipped items.
             if step_skipped_waiting:
                 self.skipped_waiting.prepend_requests(step_skipped_waiting)
 
