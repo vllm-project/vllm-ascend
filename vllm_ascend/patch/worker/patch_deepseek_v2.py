@@ -35,6 +35,8 @@ from vllm.model_executor.models.utils import extract_layer_index
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backends.mla.index_group import SparseMLAIndexGroupBuilder
 
+from vllm_ascend.attention.context_parallel.common_cp import use_dcp_q_replicate
+from vllm_ascend.ops.linear import AscendDCPGroupColumnParallelLinear
 from vllm_ascend.utils import is_mtp_layer, should_reuse_topk
 from vllm_ascend.worker.v2 import pp_transport
 from vllm_ascend.worker.v2.pp_transport import (
@@ -129,12 +131,14 @@ def _deepseek_v2_mla_attention_init(
             prefix=f"{prefix}.kv_a_proj_with_mqa",
         )
 
+    dcp_q_replicate_enabled = use_dcp_q_replicate(vllm_config, config)
+    q_proj_cls = AscendDCPGroupColumnParallelLinear if dcp_q_replicate_enabled else ColumnParallelLinear
     if self.q_lora_rank is not None:
         self.q_a_layernorm = RMSNorm(
             self.q_lora_rank,
             eps=config.rms_norm_eps,
         )
-        self.q_b_proj = ColumnParallelLinear(
+        self.q_b_proj = q_proj_cls(
             self.q_lora_rank,
             self.num_heads * self.qk_head_dim,
             bias=False,
@@ -142,7 +146,7 @@ def _deepseek_v2_mla_attention_init(
             prefix=f"{prefix}.q_b_proj",
         )
     else:
-        self.q_proj = ColumnParallelLinear(
+        self.q_proj = q_proj_cls(
             proj_input_size,
             self.num_heads * self.qk_head_dim,
             bias=False,

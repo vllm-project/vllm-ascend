@@ -1,13 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import unittest
 from dataclasses import fields
+from itertools import product
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 import torch
 
+from vllm_ascend.attention import sfa_v1
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.context_parallel import sfa_cp
 from vllm_ascend.attention.context_parallel.common_cp import DCPMetadataBuilderMixin
 from vllm_ascend.attention.context_parallel.sfa_cp import (
     AscendSFADCPImpl,
@@ -33,6 +37,7 @@ from vllm_ascend.attention.sfa_v1 import (
     PreprocessType,
     SFAForwardContext,
 )
+from vllm_ascend.device.device_op import BaseDeviceAdaptor
 from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
 from vllm_ascend.weight_switch import (
     WeightSwitchConfig,
@@ -698,6 +703,7 @@ def test_dsa_cp_indexer_cache_follows_runtime_ownership(
     # lookup. Only projections/kernels are mocked; static layers have no cache
     # or metadata, while MTP must call the indexer even when top-k is skipped.
     impl = AscendSFADSACPImpl.__new__(AscendSFADSACPImpl)
+    impl.dcp_q_replicate_enabled = False
     impl.has_indexer = has_indexer
     impl.layerwise_kv_cache_hook = None
     impl.g_proj = None
@@ -1033,6 +1039,7 @@ def test_sfa_dcp_split_uses_builder_config_without_current_context(is_consumer, 
 
 def test_sfa_dcp_prefill_passes_contiguous_gathered_cache() -> None:
     impl = AscendSFADCPImpl.__new__(AscendSFADCPImpl)
+    impl.dcp_q_replicate_enabled = False
     impl.enable_sparse_sfa_turboquant = False
     impl.dcp_group = Mock()
     packed = torch.randn(2, 128, 1, 576)
@@ -1446,3 +1453,315 @@ def test_dsa_dcp_indexer_attn_q_gather_handle(has_prefill, has_handle):
 def test_other_sfa_layouts_have_no_indexer_attn_q_gather_handle(impl_cls):
     impl = impl_cls.__new__(impl_cls)
     assert impl._get_indexer_attn_q_gather_handle(Mock()) is None
+
+
+class TestSFADCPQReplication(unittest.TestCase):
+    @staticmethod
+    def _make_sparse_impl(active=True, dcp=2, rank=0):
+        impl = AscendSFADCPImpl.__new__(AscendSFADCPImpl)
+        impl.num_heads = impl.local_num_heads = 2
+        impl.dcp_size, impl.dcp_rank = dcp, rank
+        impl.dcp_q_replicate_enabled = active
+        impl.qk_nope_head_dim, impl.qk_rope_head_dim = 3, 2
+        impl.qk_head_dim, impl.kv_lora_rank, impl.v_head_dim = 5, 2, 3
+        impl.q_lora_rank = 4
+        impl.q_proj = Mock()
+        impl.scale = 5**-0.5
+        impl.rl_weight_update_enabled = False
+        impl.has_indexer = True
+        impl.indexer = Mock()
+        impl.enable_mlapo = impl.enable_sparse_sfa_c8 = impl.enable_sparse_sfa_turboquant = False
+        impl.indexer.enable_sparse_li_c8 = False
+        impl._resolve_preprocess_type = lambda _: PreprocessType.NATIVE
+        impl.dcp_group = SimpleNamespace(unique_name="sparse-dcp-q-replicate-test")
+        return impl
+
+    def test_sparse_weights_reload_from_local_source(self):
+        for active in [False, True]:
+            with self.subTest(active=active):
+                self._check_sparse_weights_reload_from_local_source(active)
+
+    def _check_sparse_weights_reload_from_local_source(self, active):
+        impl = self._make_sparse_impl(active)
+        impl.layer_name = "model.layers.0.self_attn.attn"
+        impl.vllm_config = SimpleNamespace(
+            compilation_config=SimpleNamespace(static_forward_context={impl.layer_name: torch.nn.Module()})
+        )
+        impl._remap_order = torch.arange(4, dtype=torch.float32)
+        impl._remap_invalid_index = torch.tensor(-1.0, dtype=torch.float32)
+        source = torch.arange(24, dtype=torch.float32).view(12, 2)
+        impl.kv_b_proj = SimpleNamespace(weight=source.clone(), quant_method=None)
+        remote = torch.randn(2, 3, 2)
+        gather = Mock(side_effect=lambda x, dim: torch.cat((x, remote), dim))
+        with (
+            patch.object(sfa_v1, "get_dcp_group", return_value=SimpleNamespace(all_gather=gather)),
+            patch.object(sfa_v1.torch_npu, "npu_format_cast", side_effect=lambda x, _: x),
+            patch.object(sfa_v1, "maybe_trans_nz", side_effect=lambda x: x),
+            patch.object(sfa_v1, "dispose_layer") as dispose,
+        ):
+            captured_group_weight = None
+            for offset in (0, 0, 200):
+                impl.kv_b_proj.weight.copy_(source + offset)
+                impl.process_weights_after_loading(torch.float32)
+                local = (source + offset).view(2, 6, 2)
+                torch.testing.assert_close(impl.W_UV, local[:, 3:].transpose(1, 2))
+                torch.testing.assert_close(impl.W_UK_T, local[:, :3])
+                if active:
+                    if captured_group_weight is None:
+                        captured_group_weight = impl.W_UK_T_dcp_group
+                    self.assertEqual(captured_group_weight.data_ptr(), impl.W_UK_T_dcp_group.data_ptr())
+                    torch.testing.assert_close(impl.W_UK_T_dcp_group, torch.cat((local[:, :3], remote)))
+            self.assertEqual(dispose.call_count, 0 if active else 3)
+        self.assertEqual(gather.call_count, 3 if active else 0)
+        self.assertEqual(impl.indexer.process_weights_after_loading.call_count, 3)
+        impl.q_proj.prepare_weights_for_processing.assert_not_called()
+
+    def test_sparse_projection_preserves_tokens_and_uses_group_uk(self):
+        for tokens, dtype in product([0, 1, 4], [torch.float64, torch.bfloat16]):
+            with self.subTest(tokens=tokens, dtype=dtype):
+                self._check_sparse_projection_preserves_tokens_and_uses_group_uk(tokens, dtype)
+
+    def _check_sparse_projection_preserves_tokens_and_uses_group_uk(self, tokens, dtype):
+        impl = self._make_sparse_impl()
+        x = torch.randn(tokens, 4).to(dtype)
+        weight = torch.randn(20, 4).to(dtype)
+        impl.W_UK_T_dcp_group = torch.randn(4, 3, 2).to(dtype)
+
+        class Projection:
+            group_size = 2
+
+            def __call__(self, x):
+                return (torch.nn.functional.linear(x, weight),)
+
+        impl.q_proj = Projection()
+        with patch.object(
+            sfa_v1.torch_npu,
+            "npu_transpose_batchmatmul",
+            create=True,
+            side_effect=lambda a, b, **kw: torch.bmm(a.transpose(0, 1), b).transpose(0, 1),
+        ) as bmm:
+            q, pe = impl._q_proj_and_k_up_proj(x)
+        expected = torch.nn.functional.linear(x, weight).view(tokens, 4, 5)
+        torch.testing.assert_close(q, torch.einsum("thp,hpl->thl", expected[..., :3], impl.W_UK_T_dcp_group))
+        torch.testing.assert_close(pe, expected[..., 3:])
+        self.assertEqual(bmm.call_count, int(dtype == torch.bfloat16))
+
+    def test_sparse_prefill_and_mixed_batch_keep_local_heads_and_kv_gather(self):
+        for rank, prefills in product([0, 1], [1, 2]):
+            with self.subTest(rank=rank, prefills=prefills):
+                impl = self._make_sparse_impl(rank=rank)
+                metadata = AscendSFADCPMetadata.__new__(AscendSFADCPMetadata)
+                metadata.num_prefills = prefills
+                metadata.num_decode_tokens = 1 if prefills == 1 else 0
+                handle = Mock()
+                packed = torch.randn(7, 1, 4)
+                context = DCPGatherContext(packed, handle, None, (2, 2))
+                metadata.dcp_context = SimpleNamespace(gather_context=context, kv_gather_block_table=object())
+                q, pe, topk = torch.randn(3, 2, 2), torch.randn(3, 2, 2), torch.tensor([[0], [1], [2]])
+                impl._start_dcp_query_gather = Mock(side_effect=AssertionError("Unexpected Q gather"))
+                with patch.object(
+                    sfa_cp.DeviceOperator, "execute_sparse_flash_attention_process", return_value=object()
+                ) as execute:
+                    impl._record_query_gather_context(q, pe, metadata)
+                    result = impl._execute_sparse_flash_attention_process(q, pe, (), topk, metadata, [1, 3], [4, 7])
+                self.assertIs(result, execute.return_value)
+                self.assertIs(execute.call_args.args[1], q)
+                self.assertIs(execute.call_args.args[2], pe)
+                self.assertIs(execute.call_args.args[4], topk)
+                self.assertIs(execute.call_args.kwargs["return_lse"], False)
+                self.assertEqual(execute.call_args.kwargs["sparse_mode"], 3)
+                self.assertTrue(all(t.is_contiguous() for t in execute.call_args.args[3]))
+                handle.wait.assert_called_once()
+                self.assertIs(metadata.dcp_context.gather_context, None)
+                impl._start_dcp_query_gather.assert_not_called()
+
+    def test_sparse_decode_matches_explicit_selected_attention(self):
+        for interleave, dcp in product([1, 2, 128], [2, 4]):
+            with self.subTest(interleave=interleave, dcp=dcp):
+                self._check_sparse_decode_matches_explicit_selected_attention(interleave, dcp)
+
+    def _check_sparse_decode_matches_explicit_selected_attention(self, interleave, dcp):
+        torch.manual_seed(42)
+        tokens, heads = 3, 2 * dcp
+        x, weight = torch.randn(tokens, 4, dtype=torch.float64), torch.randn(heads * 5, 4, dtype=torch.float64)
+        uk, uv = torch.randn(heads, 3, 2, dtype=torch.float64), torch.randn(heads, 2, 3, dtype=torch.float64)
+        cache, rope = torch.randn(7, 2, dtype=torch.float64), torch.randn(7, 2, dtype=torch.float64)
+        projected = torch.nn.functional.linear(x, weight).view(tokens, heads, 5)
+        group_q = torch.einsum("thp,hpl->thl", projected[..., :3], uk)
+        group_pe = projected[..., 3:]
+        # Selected global positions are causal for query positions 4, 5, 6.
+        topk = torch.tensor([[0, 1, -1], [1, 2, 3], [4, 5, 6]], dtype=torch.int32)
+        scale = 5**-0.5
+
+        def sparse_attention(q, pe, kv, kr, indices):
+            out, lses = [], []
+            for t in range(tokens):
+                ids = indices[t][indices[t] >= 0].long()
+                if ids.numel() == 0:
+                    out.append(torch.zeros_like(q[t]))
+                    lses.append(torch.full((heads, 1), -torch.inf, dtype=q.dtype))
+                    continue
+                scores = (q[t] @ kv[ids].T + pe[t] @ kr[ids].T) * scale
+                out.append(scores.softmax(-1) @ kv[ids])
+                lses.append(scores.logsumexp(-1, keepdim=True))
+            return torch.stack(out), torch.stack(lses)
+
+        partials, lses, impls, caches, indices = [], [], [], [], []
+        for rank in range(dcp):
+            impl = self._make_sparse_impl(dcp=dcp, rank=rank)
+            impl._dcp_interleave_size = interleave
+            impl._dcp_index_topk = 3
+            impl._remap_order = torch.arange(3, dtype=torch.float32)
+            impl._remap_invalid_index = torch.tensor(-1.0)
+            local_ids = [i for i in range(7) if i // interleave % dcp == rank]
+            local_cache = (cache[local_ids], rope[local_ids])
+            mapped = impl._remap_sparse_indices(topk)
+            out, lse = sparse_attention(group_q, group_pe, *local_cache, mapped)
+            partials.append(out)
+            lses.append(lse)
+            impls.append(impl)
+            caches.append(local_cache)
+            indices.append(mapped)
+        merged = (torch.stack(partials) * torch.stack(lses).softmax(0)).sum(0)
+        expected_outputs = []
+        for t in range(tokens):
+            ids = topk[t][topk[t] >= 0].long()
+            full_k = torch.cat((torch.einsum("jl,hpl->jhp", cache[ids], uk), rope[ids, None].expand(-1, heads, -1)), -1)
+            full_v = torch.einsum("jl,hlv->jhv", cache[ids], uv)
+            probs = (torch.einsum("hd,jhd->hj", projected[t], full_k) * scale).softmax(-1)
+            expected_outputs.append(torch.einsum("hj,jhv->hv", probs, full_v))
+        expected = torch.stack(expected_outputs)
+
+        for rank, impl in enumerate(impls):
+            local = slice(rank * 2, rank * 2 + 2)
+            for active in (False, True):
+                impl.dcp_q_replicate_enabled = active
+                metadata = AscendSFADCPMetadata.__new__(AscendSFADCPMetadata)
+                metadata.num_prefills = 0
+                metadata.dcp_context = SimpleNamespace(
+                    gather_context=None, seq_lens=[len(caches[rank][0])], block_table=object()
+                )
+                query, pe = (group_q, group_pe) if active else (group_q[:, local], group_pe[:, local])
+                handle = Mock()
+                context = DCPGatherContext(torch.cat((group_q, group_pe), -1), handle, None, (2, 2))
+                impl._start_dcp_query_gather = Mock(return_value=context)
+
+                def execute(_impl, q, p, kv, idx, *_args, rank=rank, **kw):
+                    self.assertTrue(kw["sparse_mode"] == 0 and kw["return_lse"])
+                    torch.testing.assert_close(q, group_q)
+                    torch.testing.assert_close(p, group_pe)
+                    torch.testing.assert_close(idx, indices[rank])
+                    out, lse = sparse_attention(q, p, kv[0], kv[1], idx)
+                    return out, lse.transpose(0, 1), torch.ones_like(lse.transpose(0, 1))
+
+                def merge(out, lse, size, dim, name, rank=rank, local=local):
+                    torch.testing.assert_close(out, partials[rank])
+                    torch.testing.assert_close(lse, lses[rank])
+                    self.assertTrue(size == dcp and dim == 1)
+                    return merged[:, local]
+
+                with (
+                    patch.object(sfa_cp, "get_pcp_group", return_value=SimpleNamespace(world_size=1)),
+                    patch.object(sfa_cp.DeviceOperator, "execute_sparse_flash_attention_process", side_effect=execute),
+                    patch("torch.ops.vllm.dcp_a2a_fused", side_effect=merge) as collective,
+                    patch.object(sfa_cp, "enable_sfa_dcp_force_tmajor_restore", return_value=False),
+                ):
+                    impl._record_query_gather_context(query, pe, metadata)
+                    result = impl._execute_sparse_flash_attention_process(
+                        query, pe, caches[rank], topk, metadata, [3], [7]
+                    )
+                actual = torch.einsum("thl,hlv->thv", result, uv[local])
+                torch.testing.assert_close(actual, expected[:, local], atol=1e-10, rtol=1e-10)
+                self.assertEqual(impl._start_dcp_query_gather.call_count, int(not active))
+                self.assertEqual(handle.wait.call_count, int(not active))
+                collective.assert_called_once()
+                self.assertIs(metadata.dcp_context.gather_context, None)
+
+    def test_sparse_dcp_q_replicate_rejects_inconsistent_decode_state(self):
+        for case in ["heads", "pending_gather"]:
+            with self.subTest(case=case):
+                impl = self._make_sparse_impl()
+                metadata = AscendSFADCPMetadata.__new__(AscendSFADCPMetadata)
+                metadata.num_prefills = 0
+                metadata.dcp_context = SimpleNamespace(gather_context=object() if case == "pending_gather" else None)
+                q = torch.zeros(2, 2 if case == "heads" else 4, 2)
+                error = ValueError if case == "heads" else RuntimeError
+                with self.assertRaisesRegex(error, "group head|pending Q gather"):
+                    impl._execute_sparse_flash_attention_process(q, q, (), None, metadata, None, None)
+
+    def test_sparse_prefill_projects_local_weights_before_bmm(self):
+        for dtype, tokens, (dcp, rank) in product(
+            [torch.float64, torch.bfloat16], [1, 4], [(2, 0), (2, 1), (4, 0), (4, 1), (4, 2), (4, 3)]
+        ):
+            with self.subTest(dtype=dtype, tokens=tokens, dcp=dcp, rank=rank):
+                self._check_sparse_prefill_projects_local_weights_before_bmm(dtype, tokens, dcp, rank)
+
+    def _check_sparse_prefill_projects_local_weights_before_bmm(self, dtype, tokens, dcp, rank):
+        impl = self._make_sparse_impl(dcp=dcp, rank=rank)
+        x = torch.randn(tokens, 4, dtype=dtype)
+        weight = torch.randn(2 * dcp * 5, 4, dtype=dtype)
+        local_weight = weight.chunk(dcp)[rank].contiguous()
+        impl.W_UK_T = torch.randn(2, 3, 2, dtype=dtype)
+
+        # No group UK buffer is available: prefill must not use it even transiently.
+        class Projection:
+            group_size = dcp
+
+            def __call__(self, x):
+                raise AssertionError("Prefill must not compute group-wide Q before slicing")
+
+            def forward_local(self, x):
+                return (torch.nn.functional.linear(x, local_weight),)
+
+        impl.q_proj = Projection()
+        with patch.object(
+            sfa_v1.torch_npu,
+            "npu_transpose_batchmatmul",
+            create=True,
+            side_effect=lambda a, b, **kw: torch.bmm(a.transpose(0, 1), b).transpose(0, 1),
+        ):
+            q, pe = impl._q_proj_and_k_up_proj(x, local_q=True)
+        expected = torch.nn.functional.linear(x, local_weight).view(tokens, 2, 5)
+        torch.testing.assert_close(q, torch.einsum("thp,hpl->thl", expected[..., :3], impl.W_UK_T))
+        torch.testing.assert_close(pe, expected[..., 3:])
+
+    def test_sparse_dcp_q_replicate_reuses_quantized_kv_attention(self):
+        for cache_dtype, prefill in product([torch.int8, torch.float8_e4m3fn], [False, True]):
+            with self.subTest(cache_dtype=cache_dtype, prefill=prefill):
+                impl = self._make_sparse_impl()
+                heads = impl.local_num_heads * (1 if prefill else impl.dcp_size)
+                q, pe = torch.randn(2, heads, 2), torch.randn(2, heads, 2)
+                cache = torch.zeros(3, 1, 8, dtype=cache_dtype)
+                topk = torch.tensor([[0], [1]], dtype=torch.int32)
+                metadata = AscendSFADCPMetadata.__new__(AscendSFADCPMetadata)
+                metadata.num_prefills = int(prefill)
+                metadata.dcp_context = SimpleNamespace(
+                    gather_context=object() if prefill else None,
+                    kv_gather_block_table=object(),
+                    block_table=object(),
+                    seq_lens=[3],
+                )
+                impl._finish_dcp_gather = Mock(return_value=(cache,))
+                impl._start_dcp_query_gather = Mock(side_effect=AssertionError("Unexpected Q gather"))
+                impl._remap_sparse_indices = Mock(return_value=topk)
+                local_output = torch.randn(2, impl.local_num_heads, 2)
+                impl._merge_dcp_outputs = Mock(return_value=local_output)
+                group_output = torch.randn(2, heads, 2)
+                stats = torch.zeros(heads, 2, 1)
+                with (
+                    patch.object(sfa_cp, "DeviceOperator", BaseDeviceAdaptor),
+                    patch(
+                        "torch.ops._C_ascend.npu_kv_quant_sparse_flash_attention_vllm",
+                        create=True,
+                        return_value=(group_output, stats, torch.ones_like(stats)),
+                    ) as kernel,
+                ):
+                    output = impl._execute_sparse_flash_attention_process(q, pe, (cache,), topk, metadata, [2], [3])
+                kwargs = kernel.call_args.kwargs
+                torch.testing.assert_close(kwargs["query"], torch.cat((q, pe), dim=-1))
+                self.assertIs(kwargs["key"], cache)
+                self.assertIs(kwargs["return_softmax_lse"], not prefill)
+                self.assertEqual(kwargs["sparse_mode"], 3 if prefill else 0)
+                self.assertIs(output, group_output if prefill else local_output)
+                self.assertEqual(impl._merge_dcp_outputs.call_count, int(not prefill))
+                impl._start_dcp_query_gather.assert_not_called()

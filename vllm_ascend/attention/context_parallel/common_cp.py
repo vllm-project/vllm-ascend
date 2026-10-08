@@ -3,10 +3,31 @@ from typing import Any
 import torch
 import torch.distributed as dist
 import torch_npu
+from vllm import envs
 from vllm.distributed import get_dcp_group, get_pcp_group, get_tp_group
 
 import vllm_ascend.ops.triton.dcp.dcp_a2a  # noqa: F401
 from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
+from vllm_ascend.utils import enable_dsa_cp
+
+
+def use_dcp_q_replicate(vllm_config, config) -> bool:
+    """Resolve Q replication and validate its configuration before creating Q projections."""
+    parallel = vllm_config.parallel_config
+    requested = (
+        envs.VLLM_DCP_Q_REPLICATE
+        if envs.is_set("VLLM_DCP_Q_REPLICATE")
+        else bool(getattr(parallel, "dcp_q_replicate", False))
+    )
+    if not requested or parallel.decode_context_parallel_size <= 1 or parallel.prefill_context_parallel_size > 1:
+        return False
+    # Replicated weights restore heads, not the token shards used by DSA-CP.
+    if hasattr(config, "index_topk") and enable_dsa_cp():
+        raise ValueError("Ascend dcp_q_replicate does not support DSA-CP token sharding")
+    # LoRA wrappers do not implement the replicated-Q projection layout.
+    if vllm_config.lora_config is not None:
+        raise ValueError("Ascend dcp_q_replicate does not support LoRA adapters")
+    return True
 
 
 def is_pcp_decode_sharding_enabled(vllm_config) -> bool:

@@ -80,6 +80,8 @@ class AscendLinearMethod(LinearMethodBase):
         scheme: The quantization scheme instance (e.g., AscendW8A8DynamicLinearMethod).
     """
 
+    supports_weight_preprocessing = True
+
     def __init__(self, scheme: AscendLinearScheme) -> None:
         self.quant_method = scheme
 
@@ -190,6 +192,11 @@ class AscendLinearMethod(LinearMethodBase):
                 )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if getattr(layer, "is_weights_processed", False) is True:
+            return
+        prepare = getattr(layer, "prepare_weights_for_processing", None)
+        if prepare is not None:
+            prepare()
         if hasattr(self.quant_method, "process_weights_after_loading"):
             self.quant_method.process_weights_after_loading(layer)
 
