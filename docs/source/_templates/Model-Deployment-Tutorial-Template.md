@@ -271,7 +271,7 @@ For model-specific optimizations, the key optimization techniques and hyperparam
 
 | Optimization Technique | Applicable Scenarios | Enablement Method | Precautions |
 | ---------------------- | -------------------- | ----------------- | ----------- |
-| FlashComm_v1           | A3 prefill nodes / co-located nodes  | `export VLLM_ASCEND_ENABLE_FLASHCOMM1=1` | Not available when `layer_sharding` includes `o_proj`  |
+| FlashComm_v1           | A3 prefill nodes / co-located nodes  | `--additional-config '{"enable_flashcomm1": true}'` | Not available when `layer_sharding` includes `o_proj`  |
 | MLAPO                  | A3 co-located high-throughput / PD decode nodes | `export VLLM_ASCEND_ENABLE_MLAPO=1` | Consumes more NPU memory; in PD scenarios enable on decode nodes only |
 
 #### 9.2.2 General Tuning Reference

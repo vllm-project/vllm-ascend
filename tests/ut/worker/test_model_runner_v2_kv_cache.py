@@ -11,7 +11,6 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as upstream
 
 from vllm_ascend.patch.worker.patch_v2 import patch_model_runner  # noqa: F401
-from vllm_ascend.worker import utils as ascend_utils
 
 
 @pytest.mark.parametrize("is_profiling", [False, True])
@@ -62,10 +61,7 @@ def test_mrv2_block_copy_preserves_segmented_mamba_storage():
     conv = storage[:12].view(3, 4)
     ssm = storage[12:].view(3, 8)
     before_conv, before_ssm = conv.clone(), ssm.clone()
-    with patch.object(ascend_utils, "async_tensor_h2d", side_effect=lambda data, **kw: torch.as_tensor(data, **kw)):
-        upstream.copy_kv_cache_blocks_inplace(
-            [conv, ssm, conv, ssm], 3, [KVCacheBlockCopy(src_block_id=0, dst_block_id=2)]
-        )
+    upstream.copy_kv_cache_blocks_inplace([conv, ssm, conv, ssm], 3, [KVCacheBlockCopy(src_block_id=0, dst_block_id=2)])
     torch.testing.assert_close(conv[2], before_conv[0])
     torch.testing.assert_close(ssm[2], before_ssm[0])
     torch.testing.assert_close(conv[:2], before_conv[:2])

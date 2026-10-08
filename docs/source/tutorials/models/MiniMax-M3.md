@@ -1427,15 +1427,15 @@ Proxy (:8009)
 
 1. Start `mooncake_master` on the Prefill node and confirm port `50088` is reachable:
 
-```bash
-mooncake_master \
-  --port 50088 \
-  --eviction_high_watermark_ratio 0.9 \
-  --eviction_ratio 0.1 \
-  --default_kv_lease_ttl 11000 \
-  --enable_offload=false \
-  --client_ttl=120
-```
+    ```bash
+    mooncake_master \
+    --port 50088 \
+    --eviction_high_watermark_ratio 0.9 \
+    --eviction_ratio 0.1 \
+    --default_kv_lease_ttl 11000 \
+    --enable_offload=false \
+    --client_ttl=120
+    ```
 
 2. Start Decode with the Section 5.3 `launch_online_dp.py` command for your platform. Wait until every Decode rank prints `Application startup complete`.
 
@@ -1492,8 +1492,6 @@ FLASHCOMM1 and language-model-only mode should not be enabled at the same time f
 # Enable language-model-only mode.
 --language-model-only
 ```
-
-`VLLM_ASCEND_ENABLE_FLASHCOMM1=1` is kept for compatibility, but `additional_config.enable_flashcomm1` is preferred.
 
 ## 6 Thinking and Parser Configuration
 

@@ -223,6 +223,7 @@ def test_fp8_cache_dispatch_preserves_bytes(monkeypatch, family, dtype, layout):
 def test_main_cache_write_delegates_with_own_slots(tokens, state, producer, consumer):
     impl = AscendSFADSACPImpl.__new__(AscendSFADSACPImpl)
     impl.enable_sparse_sfa_c8 = True
+    impl.enable_sparse_sfa_turboquant = False
     impl.is_kv_producer, impl.is_kv_consumer = producer, consumer
     key = torch.empty(2056, 656, dtype=torch.int8)
     cache = torch.empty(32, 128, 1, 656, dtype=torch.int8)
@@ -251,6 +252,7 @@ def test_main_cache_write_delegates_with_own_slots(tokens, state, producer, cons
 def test_native_main_c8_cache_packs_all_rows_and_preserves_padding(monkeypatch, tokens, fast_available):
     impl = AscendSFAImpl.__new__(AscendSFAImpl)
     impl.enable_sparse_sfa_c8 = True
+    impl.enable_sparse_sfa_turboquant = False
     impl.sfa_qsfa_packed_kv_head_dim = 656
     packed = (torch.arange(4 * 656).reshape(4, 656) % 251 - 125).to(torch.int8)
     k_nope, k_pe, scale = packed.split([512, 128, 16], dim=-1)

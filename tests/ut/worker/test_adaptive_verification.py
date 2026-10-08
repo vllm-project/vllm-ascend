@@ -58,6 +58,9 @@ def test_aclgraph_model_forwards_confidence_computation():
 )
 def test_adaptive_tail_dummy_run_balances_moe_routing(adaptive_verification, context_len, expected):
     runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.max_num_reqs = 32
+    runner.max_num_tokens = 256
+    runner.speculator = None
     runner.adaptive_verification = adaptive_verification
     runner.ascend_config = SimpleNamespace(xlite_graph_config=SimpleNamespace(enabled=False))
     runner.eplb = Mock()
