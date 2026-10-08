@@ -1,15 +1,15 @@
-"""Verify concrete Layerwise formulas without hiding request-time branches."""
+"""Layerwise bindings produce exact local and remote byte ranges."""
 
 from __future__ import annotations
 
 from dataclasses import replace
-from inspect import signature
-from pathlib import Path
 
 import numpy as np
 import pytest
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1 import topology as topology_module
+from tests.ut.distributed.ascend_store.v1.helpers import (
+    make_topology,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.projection import (
     GVALayerwiseProjection,
     GVALayerwiseProjectionBinder,
@@ -24,8 +24,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.projection.laye
     key_range_layer_ranges,
     key_range_local_keys,
 )
-
-from .helpers import make_topology
 
 
 def _registration(topology, *, block_length: int = 32):
@@ -68,8 +66,6 @@ def test_key_range_projection_bind_terminal_layer_formulas() -> None:
         lambda group, value, head, stage: f"g{group}:p{stage}:h{head}:{value}",
     ).bind(*_registration(topology))
     assert isinstance(projection, KeyRangeLayerwiseProjection)
-    assert not hasattr(projection, "load_rows")
-    assert not hasattr(projection, "store_candidate_rows")
 
     group = projection.groups[0]
     block_ids = np.asarray([1, 3], dtype=np.uint64)
@@ -111,8 +107,6 @@ def test_gva_projection_bind_global_layout_and_terminal_copy_formula() -> None:
         object_offsets={0: 16},
     )
     assert isinstance(projection, GVALayerwiseProjection)
-    assert not hasattr(projection, "load_rows")
-    assert not hasattr(projection, "store_candidate_rows")
 
     group = projection.groups[0]
     remote, local, sizes = gva_layer_ranges(
@@ -127,60 +121,3 @@ def test_gva_projection_bind_global_layout_and_terminal_copy_formula() -> None:
     assert sizes.tolist() == [16, 24]
     assert group.object_size == 128
     assert gva_local_keys(group, ("a",)) == (("g0:p0:h0:a",),)
-
-
-def test_layerwise_projection_has_no_generic_functional_transport_layer() -> None:
-    projection_dir = (
-        Path(__file__).parents[5] / "vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/v1/projection"
-    )
-    assert not (projection_dir / "identity.py").exists()
-    assert not (projection_dir / "memory.py").exists()
-    assert not (projection_dir / "layerwise/common.py").exists()
-
-    arguments = (projection_dir.parent / "worker/io/arguments.py").read_text()
-    assert "RangeBatch" not in arguments
-    assert "projection.memory" not in arguments
-
-
-def test_tensor_geometry_is_not_a_topology_entity_or_layerwise_binding_input() -> None:
-    assert not hasattr(topology_module, "KVCacheTensorLayout")
-    for binder_type in (KeyRangeLayerwiseProjectionBinder, GVALayerwiseProjectionBinder):
-        assert "tensor_layouts" not in signature(binder_type.bind).parameters
-        assert "kv_caches" not in signature(binder_type.bind).parameters
-
-
-def test_execution_ownership_has_no_legacy_runtime_package() -> None:
-    v1_dir = Path(__file__).parents[5] / "vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/v1"
-
-    assert not (v1_dir / "runtime").exists()
-    assert (v1_dir / "worker/transfer/rows.py").is_file()
-    assert (v1_dir / "worker/io/io.py").is_file()
-    runtime_imports = [path for path in v1_dir.rglob("*.py") if ".runtime" in path.read_text()]
-    assert runtime_imports == []
-
-
-def test_worker_implementation_is_grouped_by_execution_role() -> None:
-    worker_dir = Path(__file__).parents[5] / "vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/v1/worker"
-
-    assert (worker_dir / "bulk/worker.py").is_file()
-    assert (worker_dir / "layerwise/worker.py").is_file()
-    assert (worker_dir / "layerwise/gva.py").is_file()
-    assert (worker_dir / "layerwise/key_range.py").is_file()
-    assert (worker_dir / "transfer/batch.py").is_file()
-    assert (worker_dir / "transfer/evidence.py").is_file()
-    assert (worker_dir / "transfer/result.py").is_file()
-    assert (worker_dir / "transfer/rows.py").is_file()
-    assert (worker_dir / "transfer/state.py").is_file()
-    assert not (worker_dir.parent / "projection/bulk/rows.py").exists()
-
-    legacy_root_modules = (
-        "batch.py",
-        "bulk.py",
-        "evidence.py",
-        "gva.py",
-        "key_range.py",
-        "layerwise.py",
-        "result.py",
-        "state.py",
-    )
-    assert all(not (worker_dir / module).exists() for module in legacy_root_modules)

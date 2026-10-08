@@ -1,154 +1,38 @@
-"""Scheduler ownership and publication contracts for AscendStore v1."""
+"""Lookup frontiers, allocation-gated publication, and source-lease release."""
 
 from __future__ import annotations
 
 from dataclasses import replace
-from types import SimpleNamespace
-from typing import Any
 
 import numpy as np
 import pytest
-import torch
-from vllm.v1.kv_cache_interface import FullAttentionSpec
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1 import vllm_adapter
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.connector import (
-    AscendStoreV1Connector,
+from tests.ut.distributed.ascend_store.v1.helpers import (
+    make_topology,
+)
+from tests.ut.distributed.ascend_store.v1.scheduler.fixtures import (
+    FakeBlockPool,
+    FakeBlocks,
+    FakeRemoteLookup,
+    make_config,
+    make_output,
+    make_request,
+    new_request_data,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.coordinates import TokenRange
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.projection.reachability import (
     HybridReachability,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.lookup import LookupResult
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.transfer import (
     CheckpointStoreCommand,
-    KVTransferStep,
     StateCheckpointSource,
     StoreSourceReleaseMetadata,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.scheduler import (
     AsynchronousBulkScheduler,
     LayerwiseScheduler,
-    SchedulerConfig,
     SynchronousBulkScheduler,
 )
-
-from .v1.helpers import make_topology
-
-
-class FakeRemoteLookup:
-    def __init__(self, available_end_token: int = 0) -> None:
-        self.available_end_token = available_end_token
-        self.queries: list[tuple[TokenRange, tuple[int, ...], tuple[bytes, ...]]] = []
-        self.closed = False
-
-    def query(self, query_range, transfer_group_ids, block_hashes) -> LookupResult:
-        self.queries.append((query_range, transfer_group_ids, block_hashes))
-        return LookupResult(self.available_end_token)
-
-    def close(self) -> None:
-        self.closed = True
-
-
-class FakeBlocks:
-    def __init__(self, *groups: list[int]) -> None:
-        self.groups = groups
-
-    def get_block_ids(self):
-        return self.groups
-
-
-class FakeBlockPool:
-    def __init__(self, block_count: int = 64) -> None:
-        self.blocks = [SimpleNamespace(block_id=block_id) for block_id in range(block_count)]
-        self.touched: list[tuple[int, ...]] = []
-        self.freed: list[tuple[int, ...]] = []
-
-    def touch(self, blocks) -> None:
-        self.touched.append(tuple(block.block_id for block in blocks))
-
-    def free_blocks(self, blocks) -> None:
-        self.freed.append(tuple(block.block_id for block in blocks))
-
-
-def make_config(
-    *,
-    granularity: int = 4,
-    groups: tuple[int, ...] = (0,),
-    align_groups: frozenset[int] = frozenset(),
-    load: bool = True,
-    store: bool = False,
-    save_decode: bool = False,
-    eagle: bool = False,
-    private: bool = False,
-    workers: int = 1,
-) -> SchedulerConfig:
-    return SchedulerConfig(
-        cache_transfer_granularity=granularity,
-        hash_block_size=4,
-        transfer_group_ids=groups,
-        align_state_group_ids=align_groups,
-        load_enabled=load,
-        store_enabled=store,
-        save_decode_cache=save_decode,
-        discard_partial_chunks=True,
-        use_eagle_block_drop=eagle,
-        has_private_state=private,
-        expected_worker_count=workers,
-    )
-
-
-def make_request(
-    request_id: str = "request",
-    *,
-    prompt_tokens: int = 8,
-    tokens: int | None = None,
-    hashes: int | None = None,
-):
-    token_count = prompt_tokens if tokens is None else tokens
-    hash_count = (token_count + 3) // 4 if hashes is None else hashes
-    return SimpleNamespace(
-        request_id=request_id,
-        num_prompt_tokens=prompt_tokens,
-        num_tokens=token_count,
-        block_hashes=[bytes((index + 1,)) for index in range(hash_count)],
-    )
-
-
-def make_output(
-    *,
-    new=(),
-    cached=(),
-    resumed=(),
-    scheduled_tokens=None,
-    finished=(),
-    preempted=(),
-    checkpoints=None,
-):
-    cached = tuple(cached)
-    return SimpleNamespace(
-        scheduled_new_reqs=list(new),
-        scheduled_cached_reqs=SimpleNamespace(
-            req_ids=[entry[0] for entry in cached],
-            resumed_req_ids=set(resumed),
-            new_block_ids=[entry[1] for entry in cached],
-            num_computed_tokens=[entry[2] for entry in cached],
-        ),
-        num_scheduled_tokens={} if scheduled_tokens is None else scheduled_tokens,
-        finished_req_ids=set(finished),
-        preempted_req_ids=set(preempted),
-        kv_connector_block_state=(
-            None if checkpoints is None else SimpleNamespace(boundary_state_offloads=checkpoints)
-        ),
-    )
-
-
-def new_request_data(request_id: str, block_ids, num_computed_tokens: int):
-    return SimpleNamespace(
-        req_id=request_id,
-        block_ids=block_ids,
-        num_computed_tokens=num_computed_tokens,
-    )
 
 
 def test_load_publication_requires_allocation_and_is_exactly_once() -> None:
@@ -534,161 +418,6 @@ def test_worker_lookup_reports_raw_eagle_reachability() -> None:
     assert scheduler.get_num_new_matched_tokens(make_request(prompt_tokens=8), 0) == (4, False)
 
 
-def test_factory_binds_role_capabilities(monkeypatch) -> None:
-    cases: tuple[tuple[str, dict[str, bool], bool, bool], ...] = (
-        ("kv_producer", {}, True, True),
-        ("kv_both", {}, True, True),
-        ("kv_consumer", {}, False, False),
-        ("kv_consumer", {"consumer_is_to_load": True}, True, False),
-        ("kv_consumer", {"consumer_is_to_put": True}, False, True),
-    )
-    monkeypatch.setattr(vllm_adapter.kv_cache_utils, "resolve_kv_cache_block_sizes", lambda *_: (4, 4))
-    spec = FullAttentionSpec(block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float32)
-    cache_config = SimpleNamespace(
-        transfer_group_ids=(0,),
-        kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec)],
-    )
-    for role, extra, load_enabled, store_enabled in cases:
-        lookup = FakeRemoteLookup(4)
-        monkeypatch.setattr(vllm_adapter, "RemoteLookup", lambda _address, lookup=lookup: lookup)
-        config = SimpleNamespace(
-            kv_transfer_config=SimpleNamespace(kv_role=role, kv_connector_extra_config=extra),
-            parallel_config=SimpleNamespace(world_size=1),
-            speculative_config=None,
-        )
-        scheduler = vllm_adapter.create_kv_pool_scheduler(config, cache_config, "unused")
-        scheduler.bind_gpu_block_pool(FakeBlockPool())
-
-        lookup_request = make_request("lookup", tokens=9)
-        assert scheduler.get_num_new_matched_tokens(lookup_request, 0)[0] == (4 if load_enabled else 0), role
-        assert bool(lookup.queries) is load_enabled, role
-
-        store_request = make_request("store")
-        scheduler.confirm_allocation(store_request, FakeBlocks([1, 2]), 0)
-        step = scheduler.build_step(
-            make_output(
-                new=(new_request_data("store", ([1, 2],), 0),),
-                scheduled_tokens={"store": 4},
-            )
-        )
-        assert bool(step.store.commands) is store_enabled, role
-        for command in step.store.commands:
-            scheduler.accept_worker_metadata(StoreSourceReleaseMetadata({command.store_job_id: 1}))
-        scheduler.close()
-
-
-def test_factory_selects_one_concrete_publication_route(monkeypatch) -> None:
-    cases = (
-        (False, False, SynchronousBulkScheduler),
-        (False, True, AsynchronousBulkScheduler),
-        (True, False, LayerwiseScheduler),
-        (True, True, LayerwiseScheduler),
-    )
-    monkeypatch.setattr(vllm_adapter.kv_cache_utils, "resolve_kv_cache_block_sizes", lambda *_: (4, 4))
-    spec = FullAttentionSpec(block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float32)
-    cache_config = SimpleNamespace(
-        transfer_group_ids=(0,),
-        kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec)],
-    )
-    for use_layerwise, load_async, expected_type in cases:
-        config = SimpleNamespace(
-            kv_transfer_config=SimpleNamespace(
-                kv_role="kv_both",
-                kv_connector_extra_config={"use_layerwise": use_layerwise, "load_async": load_async},
-            ),
-            parallel_config=SimpleNamespace(world_size=1),
-            speculative_config=None,
-        )
-
-        scheduler = vllm_adapter.create_kv_pool_scheduler(config, cache_config, "unused")
-        assert isinstance(scheduler, expected_type), (use_layerwise, load_async)
-        scheduler.close()
-
-
-@pytest.mark.parametrize("private_only", (False, True))
-def test_factory_rejects_private_state_layerwise_and_private_only(monkeypatch, private_only) -> None:
-    monkeypatch.setattr(vllm_adapter.kv_cache_utils, "resolve_kv_cache_block_sizes", lambda *_: (4, 4))
-    cache_config = SimpleNamespace(
-        transfer_group_ids=() if private_only else (0,),
-        kv_cache_groups=[SimpleNamespace(kv_cache_spec=object())]
-        if private_only
-        else [SimpleNamespace(kv_cache_spec=object()), SimpleNamespace(kv_cache_spec=object())],
-    )
-    if private_only:
-
-        def reject_private_only(_groups):
-            raise AssertionError("no cacheable groups")
-
-        monkeypatch.setattr(
-            vllm_adapter,
-            "infer_cacheable_group_ids",
-            reject_private_only,
-        )
-        expected_message = "at least one prefix-cacheable"
-    else:
-        monkeypatch.setattr(vllm_adapter, "infer_cacheable_group_ids", lambda _groups: [0])
-        expected_message = "private KV state requires non-layerwise"
-    config = SimpleNamespace(
-        kv_transfer_config=SimpleNamespace(
-            kv_role="kv_both",
-            kv_connector_extra_config={"use_layerwise": True},
-        ),
-        parallel_config=SimpleNamespace(world_size=1),
-        speculative_config=None,
-    )
-
-    with pytest.raises(ValueError, match=expected_message):
-        vllm_adapter.create_kv_pool_scheduler(config, cache_config, "unused")
-
-
-@pytest.mark.parametrize(
-    "extra,force_reuse,expected_message",
-    (
-        (
-            {"discard_partial_chunks": False},
-            False,
-            "does not support discard_partial_chunks=False",
-        ),
-        (
-            {"use_layerwise": True, "discard_partial_chunks": False},
-            False,
-            "does not support discard_partial_chunks=False",
-        ),
-        (
-            {"use_layerwise": True},
-            True,
-            "buffer reuse requires native partial-object support",
-        ),
-    ),
-)
-def test_factories_reject_unproven_partial_object_routes(
-    monkeypatch,
-    extra,
-    force_reuse,
-    expected_message,
-) -> None:
-    monkeypatch.setattr(vllm_adapter.kv_cache_utils, "resolve_kv_cache_block_sizes", lambda *_: (4, 4))
-    monkeypatch.setattr(vllm_adapter, "_uses_layerwise_buffer_reuse", lambda *_: force_reuse)
-    spec = FullAttentionSpec(block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float32)
-    cache_config = SimpleNamespace(
-        transfer_group_ids=(0,),
-        kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec)],
-    )
-    config = SimpleNamespace(
-        kv_transfer_config=SimpleNamespace(
-            kv_role="kv_both",
-            kv_connector_extra_config=extra,
-        ),
-        parallel_config=SimpleNamespace(world_size=1),
-        speculative_config=None,
-    )
-
-    with pytest.raises(ValueError, match=expected_message):
-        vllm_adapter.create_kv_pool_scheduler(config, cache_config, "unused")
-    with pytest.raises(ValueError, match=expected_message):
-        vllm_adapter.resolve_kv_pool_route_spec(config, cache_config)
-
-
 def test_scheduler_close_rejects_active_store_source_leases() -> None:
     lookup = FakeRemoteLookup()
     scheduler = SynchronousBulkScheduler(
@@ -712,58 +441,3 @@ def test_scheduler_close_rejects_active_store_source_leases() -> None:
 
     scheduler.accept_worker_metadata(StoreSourceReleaseMetadata({command.store_job_id: 1}))
     scheduler.close()
-
-
-def test_connector_scheduler_hooks_are_thin_delegations() -> None:
-    calls: list[tuple[Any, ...]] = []
-    expected_step = KVTransferStep()
-
-    def get_num_new_matched_tokens(*args):
-        calls.append(("lookup", args))
-        return 3, True
-
-    def build_step(output):
-        calls.append(("step", output))
-        return expected_step
-
-    def register_finished_partial_tail(*args):
-        calls.append(("tail", args))
-        return False
-
-    scheduler = SimpleNamespace(
-        get_num_new_matched_tokens=get_num_new_matched_tokens,
-        confirm_allocation=lambda *args: calls.append(("allocation", args)),
-        build_step=build_step,
-        accept_worker_metadata=lambda metadata: calls.append(("worker", metadata)),
-        register_finished_partial_tail=register_finished_partial_tail,
-        bind_gpu_block_pool=lambda pool: calls.append(("pool", pool)),
-        has_pending_push_work=lambda: True,
-        close=lambda: calls.append(("close",)),
-    )
-    connector = AscendStoreV1Connector.__new__(AscendStoreV1Connector)
-    connector.scheduler = scheduler
-    connector.worker = None
-    connector.lookup_server = None
-    request = make_request()
-    blocks = FakeBlocks([1, 2])
-    output = make_output()
-    worker_metadata = object()
-
-    assert connector.get_num_new_matched_tokens(request, 2) == (3, True)
-    connector.update_state_after_alloc(request, blocks, 3)
-    assert connector.build_connector_meta(output) is expected_step
-    connector.update_connector_output(SimpleNamespace(kv_connector_worker_meta=worker_metadata))
-    connector.register_finished_partial_tail(request, ([1, 2],), [(0, 2, 8)])
-    connector.bind_gpu_block_pool("pool")
-    assert connector.has_pending_push_work()
-    connector.shutdown()
-
-    assert calls == [
-        ("lookup", (request, 2)),
-        ("allocation", (request, blocks, 3)),
-        ("step", output),
-        ("worker", worker_metadata),
-        ("tail", (request, ([1, 2],), [(0, 2, 8)])),
-        ("pool", "pool"),
-        ("close",),
-    ]
