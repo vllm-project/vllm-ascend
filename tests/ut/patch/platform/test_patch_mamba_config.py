@@ -14,7 +14,7 @@
 
 from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -314,3 +314,80 @@ def test_kv_store_rejects_non_align_explicit_mode():
         pytest.raises(AssertionError, match="only support 'align'"),
     ):
         HybridAttentionMambaModelConfig.verify_and_update_config(config)
+
+
+def _xlite_config(*, mamba_ssm_cache_dtype="float32", additional_config=None):
+    """Config with the fields the xlite ssm-dtype override touches."""
+    config = _config()
+    config.cache_config.mamba_ssm_cache_dtype = mamba_ssm_cache_dtype
+    config.additional_config = additional_config
+    return config
+
+
+def _xlite_ascend_config(enabled):
+    return SimpleNamespace(xlite_graph_config=SimpleNamespace(enabled=enabled))
+
+
+def test_xlite_graph_mode_overrides_mamba_ssm_dtype_to_bf16(monkeypatch):
+    """xlite owns the GDN states in bf16; float32 accounting only inflates pages."""
+    monkeypatch.setattr(
+        "vllm_ascend.ascend_config.get_ascend_config",
+        lambda: _xlite_ascend_config(enabled=True),
+    )
+    config = _xlite_config()
+
+    _run(config)
+
+    assert config.cache_config.mamba_ssm_cache_dtype == "bfloat16"
+
+
+def test_xlite_mamba_ssm_bf16_env_opt_out(monkeypatch):
+    monkeypatch.setattr(
+        "vllm_ascend.ascend_config.get_ascend_config",
+        lambda: _xlite_ascend_config(enabled=True),
+    )
+    monkeypatch.setenv("XLITE_MAMBA_SSM_BF16", "0")
+    config = _xlite_config()
+
+    _run(config)
+
+    assert config.cache_config.mamba_ssm_cache_dtype == "float32"
+
+
+def test_no_xlite_graph_leaves_mamba_ssm_dtype(monkeypatch):
+    monkeypatch.setattr(
+        "vllm_ascend.ascend_config.get_ascend_config",
+        lambda: _xlite_ascend_config(enabled=False),
+    )
+    config = _xlite_config()
+
+    _run(config)
+
+    assert config.cache_config.mamba_ssm_cache_dtype == "float32"
+
+
+def test_xlite_graph_from_additional_config_overrides_dtype(monkeypatch):
+    """When ascend_config is unavailable, additional_config enables the override."""
+    monkeypatch.setattr(
+        "vllm_ascend.ascend_config.get_ascend_config",
+        MagicMock(side_effect=RuntimeError("not initialized yet")),
+    )
+    config = _xlite_config(
+        additional_config={"xlite_graph_config": {"enabled": True}},
+    )
+
+    _run(config)
+
+    assert config.cache_config.mamba_ssm_cache_dtype == "bfloat16"
+
+
+def test_bf16_dtype_is_never_touched_by_xlite_override(monkeypatch):
+    monkeypatch.setattr(
+        "vllm_ascend.ascend_config.get_ascend_config",
+        lambda: _xlite_ascend_config(enabled=True),
+    )
+    config = _xlite_config(mamba_ssm_cache_dtype="bfloat16")
+
+    _run(config)
+
+    assert config.cache_config.mamba_ssm_cache_dtype == "bfloat16"
