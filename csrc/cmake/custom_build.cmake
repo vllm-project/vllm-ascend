@@ -295,6 +295,7 @@ else()
     # add_subdirectory(${op_class})
     add_subdirectory(attention)
 endif()
+add_subdirectory(qbmm)
 
 
 if (UT_TEST_ALL OR OP_HOST_UT OR OP_API_UT OR OP_KERNEL_UT OR OP_GRAPH_UT)
