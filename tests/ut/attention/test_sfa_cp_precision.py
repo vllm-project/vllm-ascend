@@ -17,6 +17,7 @@ def _make_impl(rank: int, interleave_size: int = 2) -> AscendSFADCPImpl:
     impl._dcp_index_topk = 8
     impl._remap_order = torch.arange(8, dtype=torch.float32)
     impl._remap_invalid_index = torch.tensor(-1.0)
+    impl.vllm_config = SimpleNamespace(scheduler_config=SimpleNamespace(max_num_batched_tokens=192))
     return impl
 
 
@@ -51,7 +52,7 @@ def test_sfa_dcp_routes_native_output_merge_to_custom_op(fused_a2a) -> None:
         actual = impl._merge_dcp_outputs(output, lse)
 
     assert actual is expected
-    fused_a2a.assert_called_once_with(output, lse, 2, 1, "dcp:0")
+    fused_a2a.assert_called_once_with(output, lse, 2, 1, "dcp:0", decode_token_budget=192)
 
 
 @patch("torch.ops.vllm.dcp_a2a_fused")
@@ -71,7 +72,7 @@ def test_sfa_dsa_dcp_routes_token_scatter_to_custom_op(fused_a2a) -> None:
     actual = impl._merge_dcp_outputs(output, lse, dsa_cp_context)
 
     assert actual is expected
-    fused_a2a.assert_called_once_with(output, lse, 2, 0, "dcp:0")
+    fused_a2a.assert_called_once_with(output, lse, 2, 0, "dcp:0", decode_token_budget=192)
 
 
 @pytest.mark.parametrize("scatter_dim", [0, 1])
@@ -107,7 +108,15 @@ def test_sfa_custom_op_passes_optional_lse_to_combine():
         actual = kernels.dcp_a2a_fused(output, lse, 1, 1, "", return_lse=True)
     assert actual is expected
     combine.assert_called_once_with(
-        output, lse, 1, 1, scatter_group=None, pcp_group=None, return_lse=True, defer_combine=False
+        output,
+        lse,
+        1,
+        1,
+        scatter_group=None,
+        pcp_group=None,
+        return_lse=True,
+        defer_combine=False,
+        decode_token_budget=None,
     )
 
 
