@@ -661,26 +661,27 @@ class TestNPUPlatform(TestBase):
         self.assertIsNone(vllm_config.compilation_config.max_cudagraph_capture_size)
         self.assertEqual(vllm_config.compilation_config.cudagraph_capture_sizes, [1, 2, 4])
 
-    @pytest.mark.parametrize("enabled_option", ["enable_sp", "fuse_gemm_comms"])
-    def test_apply_config_platform_defaults_sets_sp_threshold(self, enabled_option):
-        pass_config = SimpleNamespace(
-            enable_sp=False,
-            fuse_gemm_comms=False,
-            sp_min_token_num=None,
-        )
-        setattr(pass_config, enabled_option, True)
-        vllm_config = SimpleNamespace(compilation_config=SimpleNamespace(pass_config=pass_config))
+    def test_apply_config_platform_defaults_sets_sp_threshold(self):
+        for enabled_option in ("enable_sp", "fuse_gemm_comms"):
+            with self.subTest(enabled_option=enabled_option):
+                pass_config = SimpleNamespace(
+                    enable_sp=False,
+                    fuse_gemm_comms=False,
+                    sp_min_token_num=None,
+                )
+                setattr(pass_config, enabled_option, True)
+                vllm_config = SimpleNamespace(compilation_config=SimpleNamespace(pass_config=pass_config))
 
-        with patch("vllm_ascend.platform._get_reduced_cg_cap", return_value=None):
-            self.platform.apply_config_platform_defaults(vllm_config)
+                with patch("vllm_ascend.platform._get_reduced_cg_cap", return_value=None):
+                    self.platform.apply_config_platform_defaults(vllm_config)
 
-        self.assertEqual(pass_config.sp_min_token_num, 1)
+                self.assertEqual(pass_config.sp_min_token_num, 1)
 
-        pass_config.sp_min_token_num = 512
-        with patch("vllm_ascend.platform._get_reduced_cg_cap", return_value=None):
-            self.platform.apply_config_platform_defaults(vllm_config)
+                pass_config.sp_min_token_num = 512
+                with patch("vllm_ascend.platform._get_reduced_cg_cap", return_value=None):
+                    self.platform.apply_config_platform_defaults(vllm_config)
 
-        self.assertEqual(pass_config.sp_min_token_num, 512)
+                self.assertEqual(pass_config.sp_min_token_num, 512)
 
     def test_check_ascend_config_oproj_tp_requires_offload_connector(self):
         from vllm_ascend.platform import _check_ascend_config
