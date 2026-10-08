@@ -21,12 +21,13 @@ def build_local_metadata_triton(
     num_reqs,
     start_pos_out_ptr,  # [max_num_seqs], int32      (output)
     COMPUTE_START_POS,
+    BLOCK_SIZE: tl.constexpr = 1024,
 ):
     """Fused NPU kernel for local token metadata computation
 
     reduce kernel launch overhead.
     """
-    offsets = tl.program_id(0) * BUILD_LOCAL_METADATA_BLOCK_SIZE + tl.arange(0, BUILD_LOCAL_METADATA_BLOCK_SIZE)
+    offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = offsets < num_reqs
 
     q_base = tl.load(query_start_loc_ptr)

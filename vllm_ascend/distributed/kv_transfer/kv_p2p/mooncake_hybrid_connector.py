@@ -54,9 +54,16 @@ from vllm.v1.request import RequestStatus
 
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
+from vllm_ascend.distributed.kv_transfer.kv_p2p.layerwise_host_mirror import (
+    DeepSeekV4LayerwiseHostMirror,
+)
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
     as_kv_cache_tensors,
     collect_configured_register_regions,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
+    build_layerwise_reuse_layout,
+    get_layerwise_kv_cache_specs,
 )
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
@@ -1211,6 +1218,7 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         self._kv_transfer_config = vllm_config.kv_transfer_config
         self.engine_id = vllm_config.kv_transfer_config.engine_id
         self._connector_metadata = MooncakeConnectorMetadata()
+        self.is_producer = self._kv_transfer_config.kv_role == "kv_producer"
 
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler: MooncakeConnectorScheduler | None = MooncakeConnectorScheduler(
@@ -1220,6 +1228,11 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         elif role == KVConnectorRole.WORKER:
             self.connector_scheduler = None
             self.connector_worker = MooncakeConnectorWorker(vllm_config, str(self.engine_id), kv_cache_config)
+        self.supports_layerwise_buffer_reuse = False
+
+    def configure_layerwise_host_mirror(self, layout_config: dict[str, Any]) -> None:
+        if self.connector_worker is not None and self.is_producer:
+            self.supports_layerwise_buffer_reuse = self.connector_worker.configure_layerwise_host_mirror(layout_config)
 
     ############################################################
     # Scheduler Side Methods
@@ -1276,12 +1289,22 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
     def save_kv_layer(
         self, layer_name: str, kv_layer: torch.Tensor, attn_metadata: "AttentionMetadata", **kwargs
     ) -> None:
-        """MooncakeConnector does not save explicitly."""
-        pass
+        if self.supports_layerwise_buffer_reuse:
+            assert self.connector_worker is not None
+            metadata = kwargs.get("layerwise_store_metadata")
+            if metadata is None:
+                raise ValueError("DeepSeek-V4 P-side host mirror requires AscendStore step metadata.")
+            self.connector_worker.save_layer_to_host(layer_name, metadata.requests)
+
+    def wait_for_layer_reuse(self, layer_idx: int) -> None:
+        if self.supports_layerwise_buffer_reuse:
+            assert self.connector_worker is not None
+            self.connector_worker.wait_for_layer_reuse(layer_idx)
 
     def wait_for_save(self):
-        """MooncakeConnector does not save explicitly."""
-        pass
+        if self.supports_layerwise_buffer_reuse:
+            assert self.connector_worker is not None
+            self.connector_worker.wait_for_host_save()
 
     def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
         """
@@ -1647,6 +1670,10 @@ class MooncakeConnectorWorker:
     """Implementation of Worker side methods"""
 
     def __init__(self, vllm_config: VllmConfig, engine_id: str, kv_cache_config: KVCacheConfig):
+        self.base_layers = 0
+        self.use_layerwise_host_mirror = False
+        self.previous_slot_layer: dict[int, int] = {}
+        self.layerwise_host_mirror: DeepSeekV4LayerwiseHostMirror | None = None
         self._get_prefill_decode_size(vllm_config)
         os.environ["ASCEND_TRANSFER_TIMEOUT"] = str(get_transfer_timeout_value())
         if self._prefill_tp_size < self._decode_tp_size:
@@ -1776,6 +1803,17 @@ class MooncakeConnectorWorker:
         assert self._decode_pp_size == 1, "decode pp size must be 1"
         self._prefill_pp_layer_partition = prefill_parallel_config.get("pp_layer_partition")
 
+    def configure_layerwise_host_mirror(self, layout_config: dict[str, Any]) -> bool:
+        self.base_layers = self.vllm_config.model_config.get_num_layers(self.vllm_config.parallel_config)
+        self.use_layerwise_host_mirror = False
+        self.previous_slot_layer = {}
+        layer_specs = get_layerwise_kv_cache_specs(self.kv_cache_config)
+        if any(getattr(spec, "model_version", None) == "deepseek_v4" for spec in layer_specs.values()):
+            layout = build_layerwise_reuse_layout(layer_specs, self.base_layers, layout_config)
+            self.use_layerwise_host_mirror = layout.has_layer_reuse
+            self.previous_slot_layer = layout.prefetch_layer_map
+        return self.use_layerwise_host_mirror
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data."""
         self.use_mla = self.vllm_config.model_config.is_deepseek_mla
@@ -1784,6 +1822,10 @@ class MooncakeConnectorWorker:
         self.num_blocks = self.kv_cache_config.num_blocks
         logger.info("num_blocks: %s", self.num_blocks)
         self.kv_caches = kv_caches
+        if getattr(self, "use_layerwise_host_mirror", False):
+            self.layerwise_host_mirror = DeepSeekV4LayerwiseHostMirror(
+                self.kv_cache_config, kv_caches, self.base_layers, self.previous_slot_layer
+            )
         self.kv_caches_base_addr = []
         self.block_len_per_addr: list[int] = []
         self.block_stride_per_addr: list[int] = []
@@ -1830,13 +1872,15 @@ class MooncakeConnectorWorker:
             # runtime views. One entry is one complete padded page, so inner
             # views such as indexer K and scale must not become independent
             # full-page transfers.
-            for shared_page in _reconstruct_shared_pages(self.kv_cache_config, kv_caches):
+            mirror = getattr(self, "layerwise_host_mirror", None)
+            transfer_caches = mirror.host_views if mirror is not None else kv_caches
+            for shared_page in _reconstruct_shared_pages(self.kv_cache_config, transfer_caches):
                 page_base_addr: int | None = None
                 page_groups: set[int] = set()
                 shared_by = [layer_name for layer_name, _ in shared_page.placements]
                 for layer_name, placement_offset in shared_page.placements:
                     page_groups.add(layer_group_idx[layer_name])
-                    layer_tensors = as_kv_cache_tensors(kv_caches[layer_name])
+                    layer_tensors = as_kv_cache_tensors(transfer_caches[layer_name])
                     if not layer_tensors:
                         raise ValueError(f"DeepSeek-V4 shared KV cache layer has no materialized tensor: {layer_name}.")
 
@@ -1858,10 +1902,14 @@ class MooncakeConnectorWorker:
             raise TypeError("Mooncake connector does not support this type kv_cache now.")
 
         if self.use_hybrid:
-            register_regions = collect_configured_register_regions(self.kv_cache_config, kv_caches)
-            validate_register_region_count(register_regions)
-            ptrs = register_regions.ptrs
-            lengths = register_regions.lengths
+            if (mirror := getattr(self, "layerwise_host_mirror", None)) is not None:
+                ptrs = [mirror.backing.data_ptr()]
+                lengths = [mirror.backing.numel()]
+            else:
+                register_regions = collect_configured_register_regions(self.kv_cache_config, kv_caches)
+                validate_register_region_count(register_regions)
+                ptrs = register_regions.ptrs
+                lengths = register_regions.lengths
 
         global_te.register_buffer(ptrs, lengths)
         # After KV Caches registered, start the sending or receiving thread.
@@ -1926,6 +1974,18 @@ class MooncakeConnectorWorker:
             if time.time() - start_wait_time > 5 * 60:
                 raise RuntimeError("Timeout waiting for KV Cache thread to be ready.")
             time.sleep(3)
+
+    def save_layer_to_host(self, layer_name: str, requests: list[Any]) -> None:
+        assert self.layerwise_host_mirror is not None
+        self.layerwise_host_mirror.save_layer(layer_name, requests, self.base_layers)
+
+    def wait_for_layer_reuse(self, layer_idx: int) -> None:
+        assert self.layerwise_host_mirror is not None
+        self.layerwise_host_mirror.wait_for_layer_reuse(layer_idx)
+
+    def wait_for_host_save(self) -> None:
+        assert self.layerwise_host_mirror is not None
+        self.layerwise_host_mirror.wait_for_save()
 
     def get_finished(self) -> tuple[set[str], set[str]]:
         done_sending = (

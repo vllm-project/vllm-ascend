@@ -660,6 +660,25 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
         self.assertTrue(load_spec.can_load)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_layer_reuse_saves_intermediate_partial_chunk(self, mock_client_cls):
+        config = self._make_config(
+            extra_config={"backend": "memcache", "layerwise_num_shared_buffers": 1},
+            num_layers=4,
+        )
+        scheduler = KVPoolScheduler(config, use_layerwise=True)
+        self._set_running_chunk(scheduler)
+        output = self._make_running_chunk_output([1])
+        output.num_scheduled_tokens = {"r1": 4}
+
+        meta = scheduler.build_connector_meta(output)
+
+        self.assertFalse(scheduler._discard_partial_chunks)
+        self.assertEqual(len(meta.requests), 1)
+        self.assertEqual(meta.requests[0].save_start_token, 16)
+        self.assertEqual(meta.requests[0].save_end_token, 20)
+        self.assertEqual(meta.requests[0].load_spec.kvpool_cached_tokens, 16)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_running_decode_preserves_partial_block_with_layer_reuse(self, mock_client_cls):
         config = self._make_config(
             extra_config={
@@ -693,7 +712,7 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
         request_meta = meta.requests[0]
         self.assertTrue(request_meta.can_save)
         self.assertEqual(request_meta.save_start_token, 32)
-        self.assertEqual(request_meta.save_end_token, 32)
+        self.assertEqual(request_meta.save_end_token, 33)
         self.assertEqual(request_meta.target_token_len, 33)
         self.assertIsNotNone(request_meta.load_spec)
         self.assertEqual(request_meta.load_spec.kvpool_cached_tokens, 32)

@@ -250,6 +250,11 @@ class KVPoolScheduler:
                     self.num_layers,
                     vllm_config.kv_transfer_config.kv_connector_extra_config,
                 ).has_layer_reuse
+        if self.layerwise_offload:
+            # Every computed token in a reused layer is loaded from the pool on
+            # the next step. Rounding an intermediate save down to the common
+            # group granularity would leave that load with no matching KV.
+            self._discard_partial_chunks = False
         self.model_name = model_config.model.split("/")[-1]
 
         self.client: LookupKeyClient | None = None

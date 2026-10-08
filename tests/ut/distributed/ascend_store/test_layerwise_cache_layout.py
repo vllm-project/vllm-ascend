@@ -115,6 +115,63 @@ def test_base_layers_are_merged_into_shared_slots():
     ]
 
 
+def test_deepseek_v4_reuse_keeps_every_cache_component_in_one_backing():
+    main = AscendMLAAttentionSpec(
+        block_size=2,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.int8,
+        tokens_per_state=4,
+        model_version="deepseek_v4",
+    )
+    swa = _make_full_attention_spec(head_size=4)
+    indexer = AscendSFAIndexerCacheSpec(
+        block_size=2,
+        num_kv_heads=1,
+        head_size=4,
+        dtype=torch.int8,
+        scale_dim=1,
+        scale_dtype=torch.float16,
+    )
+    components = (("attn", main), ("swa_cache", swa), ("indexer.k_cache", indexer))
+    num_blocks = 2
+    tuple_stride = num_blocks * sum(spec.page_size_bytes for _, spec in components)
+    backing_size = 4 * tuple_stride
+    groups = []
+    tensors = []
+    offset_in_tuple = 0
+    for component, spec in components:
+        names = [f"model.layers.{i}.self_attn.{component}" for i in range(4)]
+        groups.append(
+            SimpleNamespace(
+                layer_names=names,
+                kv_cache_spec=UniformTypeKVCacheSpecs(block_size=2, kv_cache_specs=dict.fromkeys(names, spec)),
+            )
+        )
+        tensors.append(
+            KVCacheTensor(
+                size=backing_size,
+                layers=names,
+                offset=offset_in_tuple,
+                layer_stride=tuple_stride,
+                block_stride=spec.page_size_bytes,
+            )
+        )
+        offset_in_tuple += num_blocks * spec.page_size_bytes
+
+    config = SimpleNamespace(num_blocks=num_blocks, kv_cache_tensors=tensors, kv_cache_groups=groups)
+    apply_layerwise_kv_cache_plan(config, _make_vllm_config(4, 1))
+
+    assert len(config.kv_cache_tensors) == 6
+    assert {name for tensor in config.kv_cache_tensors for name in get_kv_cache_tensor_layers(tensor)} == {
+        name for group in groups for name in group.layer_names
+    }
+    assert {tensor.size for tensor in config.kv_cache_tensors} == {backing_size // 2}
+    assert [get_kv_cache_tensor_layers(tensor) for tensor in config.kv_cache_tensors[3:]] == [
+        [f"model.layers.{i}.self_attn.{component}" for i in (1, 2, 3)] for component, _ in components
+    ]
+
+
 def test_default_layout_keeps_one_buffer_per_layer():
     layout = build_layerwise_cache_layout(27)
 

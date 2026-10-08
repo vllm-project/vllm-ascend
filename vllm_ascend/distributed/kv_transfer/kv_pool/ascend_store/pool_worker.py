@@ -18,6 +18,7 @@ from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
+    get_tp_group,
 )
 from vllm.distributed.kv_events import BlockStored
 from vllm.logger import logger
@@ -1139,6 +1140,14 @@ class KVPoolWorker:
         """Prepare per-step hook state when the runner binds metadata."""
         assert self.use_layerwise
         self._drain_deferred_last_save()
+        if self.layerwise_offload:
+            # A rank can reload KV written by a different TP rank. Its own
+            # send queue being empty does not mean that rank's PUT is visible.
+            # Drain every local layer first, then fence all TP readers before
+            # preparing the next step's GVA lookups.
+            self._drain_attention_transfers(drain_recv=False, full=True)
+            if self.tp_size > 1:
+                get_tp_group().barrier()
         self.current_layer = 0
         self.layerwise_retrievers: list[Any] = []
         self.next_layer_to_submit = 0
@@ -1687,6 +1696,9 @@ class KVPoolWorker:
                             new_gvas[:5],
                             sum(1 for g in new_gvas if g <= 0),
                         )
+                        raise RuntimeError(
+                            f"Layerwise KV allocation failed for request {request.req_id}, group {group_id}"
+                        )
                     for pos, key, gva in zip(new_positions, new_keys, new_gvas):
                         if gva > 0:
                             block_gvas[pos] = gva
@@ -1718,12 +1730,9 @@ class KVPoolWorker:
                             self._allocated_gvas[partial_key] = partial_gva
                             all_group_save_keys.append(partial_key)
                         else:
-                            logger.error(
-                                "alloc_gvas: partial allocation failed req=%s group=%d block=%d gva=%d",
-                                request.req_id,
-                                group_id,
-                                partial_block_index,
-                                partial_gva,
+                            raise RuntimeError(
+                                "Layerwise partial KV allocation failed for "
+                                f"request {request.req_id}, group {group_id}, block {partial_block_index}"
                             )
                     # Partial keys are request-scoped; do not retain them forever.
                     self._allocated_gvas.pop(partial_key, None)

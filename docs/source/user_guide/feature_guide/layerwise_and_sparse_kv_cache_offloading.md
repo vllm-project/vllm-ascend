@@ -20,6 +20,30 @@ model families:
 
 Other sparse-attention models have not been validated.
 
+### DeepSeek-V4 Prefill-only offloading
+
+DeepSeek-V4 supports layerwise offloading on the Prefill side with
+`AscendStoreConnector` and `MooncakeHybridConnector` in an
+`AscendMultiConnector` deployment. Keep the Decode side on
+`MooncakeHybridConnector` without offloading.
+
+V4 reuses NPU slots only between layers with matching MLA, SWA, compressor
+and indexer component specifications. The Prefill connector retains the
+original complete KV layout in pinned host memory so Decode can pull from
+stable addresses after Prefill completes. Account for this host mirror in
+addition to the AscendStore pool when sizing host memory.
+
+Intermediate chunks must be saved, including partially filled cache pages.
+Before the next step loads KV, Prefill workers wait for local saves and
+synchronize the TP group so the owning rank has published its pool keys.
+Pool allocation failure raises an error instead of silently skipping KV.
+
+The validated A3 deployment uses eager Prefill with TP4/DP2, three shared
+buffers and no independent layers, and Decode with TP1/DP8 and five
+speculative tokens. V4 with the V2 runner or pipeline parallelism has not
+been validated. Size the pool for the target prompt lengths and concurrency;
+the validation used 16 GiB per Prefill rank with the `host_shm` protocol.
+
 ## 1. Install Dependencies
 
 The installation steps are grouped by hardware. A3 and 950PR&950DT Products are supported.

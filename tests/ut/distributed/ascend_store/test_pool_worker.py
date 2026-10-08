@@ -1610,6 +1610,21 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
             self.assertIsNot(worker.layer_save_tasks[layer_id], old_save_tasks[layer_id])
             self.assertIsNot(worker.layer_load_tasks[layer_id], old_load_tasks[layer_id])
 
+    def test_reused_layer_waits_for_tp_saves_before_loading(self):
+        worker = make_worker(self, use_layerwise=True, tp_size=4)
+        worker.layerwise_offload = True
+        order = []
+        worker._drain_attention_transfers = MagicMock(side_effect=lambda **kwargs: order.append("drain"))
+        worker.process_layer_data = MagicMock(side_effect=lambda requests: order.append("load"))
+        module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker"
+        tp_group = start_patch(self, f"{module}.get_tp_group")
+        tp_group.return_value.barrier.side_effect = lambda: order.append("barrier")
+
+        worker.prepare_layerwise_step(AscendConnectorMetadata(set(), set()))
+
+        self.assertEqual(order, ["drain", "barrier", "load"])
+        worker._drain_attention_transfers.assert_called_once_with(drain_recv=False, full=True)
+
     def test_deferred_last_save_drains_when_next_step_binds(self):
         worker = make_worker(self, use_layerwise=True)
         worker._pending_last_save_drain = True
@@ -2620,6 +2635,13 @@ class TestKVPoolWorkerReachableMasks(unittest.TestCase):
         keys = worker.m_store.batch_alloc.call_args.args[0]
         self.assertEqual(len(keys), 4)
         self.assertEqual(request.block_gvas_by_group_np[0].tolist(), [101, 102, 103, 104])
+
+    def test_alloc_gvas_for_save_fails_when_pool_is_full(self):
+        worker = self._make_worker()
+        worker.m_store.batch_alloc.return_value = [0, 0, 0, 0]
+
+        with self.assertRaisesRegex(RuntimeError, "Layerwise KV allocation failed"):
+            worker._alloc_gvas_for_save([self._make_request()])
 
     def test_process_save_for_layer_batch_splits_masked_runs(self):
         worker = self._make_worker()

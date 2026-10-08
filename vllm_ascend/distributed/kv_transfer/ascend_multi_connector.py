@@ -8,6 +8,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
 from vllm.v1.worker import mamba_utils
 
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
+    get_layerwise_reuse_config,
+)
+
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.distributed.kv_events import KVConnectorKVEvents
@@ -28,6 +32,12 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
         assert vllm_config.scheduler_config.disable_hybrid_kv_cache_manager or self._all_support_hma, (
             "HMA should not be enabled unless all sub-connectors support it"
         )
+        layerwise_config = get_layerwise_reuse_config(vllm_config.kv_transfer_config)
+        if layerwise_config is not None:
+            for connector in self._connectors:
+                configure_mirror = getattr(connector, "configure_layerwise_host_mirror", None)
+                if callable(configure_mirror):
+                    configure_mirror(layerwise_config)
         self._configure_layerwise_reuse_completion()
         self._mamba_copy_bufs = None
         # Handle to the (V2) mamba hybrid model state while its per-layer
@@ -124,6 +134,18 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
         attn_metadata: Any,
         **kwargs,
     ) -> None:
+        if self._layerwise_slot_release_providers:
+            store = next(
+                (
+                    connector
+                    for connector in self._non_slot_release_connectors
+                    if getattr(connector, "use_layerwise", False)
+                    and callable(getattr(connector, "_get_connector_metadata", None))
+                ),
+                None,
+            )
+            if store is not None:
+                kwargs["layerwise_store_metadata"] = store._get_connector_metadata()
         # Phase 1: providers must close any new slot gate before returning.
         for connector in self._layerwise_slot_release_providers:
             connector.save_kv_layer(layer_name, kv_layer, attn_metadata, **kwargs)

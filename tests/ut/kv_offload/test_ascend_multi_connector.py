@@ -143,6 +143,29 @@ def test_layerwise_reuse_completion_is_wired_and_provider_hooks_run_first():
     provider.wait_for_layer_load.assert_not_called()
 
 
+def test_layerwise_save_passes_store_request_metadata_to_pd_provider():
+    requests = [SimpleNamespace(block_ids_by_group=[[1, 2]])]
+    metadata = SimpleNamespace(requests=requests)
+    call_order = []
+    provider = SimpleNamespace(
+        save_kv_layer=MagicMock(side_effect=lambda *_args, **_kwargs: call_order.append("pd")),
+    )
+    store = SimpleNamespace(
+        use_layerwise=True,
+        _get_connector_metadata=MagicMock(return_value=metadata),
+        save_kv_layer=MagicMock(side_effect=lambda *_args, **_kwargs: call_order.append("store")),
+    )
+    connector = AscendMultiConnector.__new__(AscendMultiConnector)
+    connector._layerwise_slot_release_providers = [provider]
+    connector._non_slot_release_connectors = [store]
+
+    connector.save_kv_layer("model.layers.1.self_attn.attn", object(), object())
+
+    assert call_order == ["pd", "store"]
+    assert provider.save_kv_layer.call_args.kwargs["layerwise_store_metadata"] is metadata
+    store._get_connector_metadata.assert_called_once_with()
+
+
 def test_layerwise_reuse_without_sink_keeps_provider_layer_entry_wait():
     call_order = []
     provider = SimpleNamespace(

@@ -26,6 +26,15 @@ _DEFAULT_MAX_PREFETCH_LAYERS = 8
 _INDEXER_CACHE_SUFFIX = ".indexer.k_cache"
 
 
+def _cache_component_name(layer_name: str) -> str:
+    """Name a cache component independently of its physical layer number."""
+    return layer_name.split(".self_attn.", 1)[-1]
+
+
+def _is_deepseek_v4_spec(spec: KVCacheSpec) -> bool:
+    return getattr(spec, "model_version", None) == "deepseek_v4"
+
+
 def get_layerwise_physical_layer_index(layer_name: str, base_layers: int) -> int:
     match = re.search(
         r"(?:^|\.)mtp(?:\.layers)?\.(\d+)(?:\.|$)",
@@ -246,13 +255,28 @@ def build_layerwise_reuse_layout(
             extra_main_specs=extra_specs,
         )
 
-    signature_buckets: list[tuple[KVCacheSpec, list[int]]] = []
+    is_deepseek_v4 = any(_is_deepseek_v4_spec(spec) for spec in layer_specs.values())
+    signature_buckets: list[tuple[Any, list[int]]] = []
     for physical_layer in physical_layers:
         if physical_layer in independent_layer_set:
             continue
-        # TODO(lf): Plan shared buffers independently for every cache spec.
-        # Slots are grouped by main spec. Indexer specs are validated separately.
-        signature = layer_cache_specs[physical_layer].main.spec
+        # V4 has MLA, SWA, compressor state and indexer cache components.
+        # Reusing a slot across different component sets would either drop a
+        # component or alias two live components of the same request.
+        if is_deepseek_v4:
+            signature = tuple(
+                sorted(
+                    (
+                        (_cache_component_name(named.layer_name), named.spec)
+                        for named in named_specs_by_layer[physical_layer]
+                    ),
+                    key=lambda component: component[0],
+                )
+            )
+        else:
+            # GLM/SFA can share the main component even if some layers lack
+            # an indexer; the indexer is planned separately below.
+            signature = layer_cache_specs[physical_layer].main.spec
         for bucket_signature, bucket_layers in signature_buckets:
             if signature == bucket_signature:
                 bucket_layers.append(physical_layer)
@@ -366,6 +390,59 @@ def apply_layerwise_kv_cache_plan(
                 offset=0,
             )
         )
+
+    if any(_is_deepseek_v4_spec(spec) for spec in layer_specs.values()):
+        # The V4 model runner materializes every descriptor from one backing.
+        # Keep that contract while giving each distinct cache component its
+        # own range within every reusable physical-layer slot. In particular,
+        # do not discard the extra_main_specs (SWA and compressor state).
+        layer_groups = {
+            name: group_idx
+            for group_idx, group in enumerate(kv_cache_config.kv_cache_groups)
+            for name in group.layer_names
+        }
+        component_descriptors: list[tuple[list[str], KVCacheSpec]] = []
+        for slot in reuse_layout.buffer_slots:
+            shared_components: dict[tuple[int, str], list[str]] = {}
+            for layer in slot:
+                specs = reuse_layout.layer_cache_specs[layer]
+                for named in (specs.main, *specs.extra_main_specs, *([specs.indexer] if specs.indexer else [])):
+                    key = (layer_groups[named.layer_name], _cache_component_name(named.layer_name))
+                    shared_components.setdefault(key, []).append(named.layer_name)
+            for names in shared_components.values():
+                spec = layer_specs[names[0]]
+                if any(layer_specs[name] != spec for name in names[1:]):
+                    raise ValueError("DeepSeek-V4 shared cache components must have identical specs.")
+                component_descriptors.append((names, spec))
+
+        backing_size = kv_cache_config.num_blocks * sum(spec.page_size_bytes for _, spec in component_descriptors)
+        original_backing_size = max(tensor.size for tensor in old_tensors)
+        if backing_size > original_backing_size:
+            raise ValueError(
+                "DeepSeek-V4 layerwise plan exceeds the original KV cache budget: "
+                f"{backing_size} > {original_backing_size} bytes."
+            )
+        offset = 0
+        v4_tensors: list[KVCacheTensor] = []
+        for names, spec in component_descriptors:
+            v4_tensors.append(
+                KVCacheTensor(
+                    layers=names,
+                    size=backing_size,
+                    layer_stride=0,
+                    block_stride=spec.page_size_bytes,
+                    offset=offset,
+                )
+            )
+            offset += kv_cache_config.num_blocks * spec.page_size_bytes
+        kv_cache_config.kv_cache_tensors = v4_tensors
+        logger.info(
+            "DeepSeek-V4 layerwise KV cache reuse planned %d components in %d physical slots (%d bytes).",
+            len(v4_tensors),
+            len(reuse_layout.buffer_slots),
+            backing_size,
+        )
+        return
 
     new_tensors: list[KVCacheTensor] = []
     for slot in reuse_layout.buffer_slots:

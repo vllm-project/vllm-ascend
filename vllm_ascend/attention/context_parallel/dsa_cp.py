@@ -1190,6 +1190,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 num_reqs,
                 start_pos_out if start_pos_out is not None else self._zero_i32,
                 COMPUTE_START_POS=start_pos_out is not None,
+                BLOCK_SIZE=BUILD_LOCAL_METADATA_BLOCK_SIZE,
             )
         else:
             # torch fallback.

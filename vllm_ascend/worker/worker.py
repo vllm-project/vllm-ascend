@@ -1085,6 +1085,13 @@ class NPUWorker(WorkerBase):
             return num_layers, num_layers, 1.0
         num_buffer_assignments = len(reuse_layout.buffer_slots)
 
+        if any(getattr(spec, "model_version", None) == "deepseek_v4" for spec in kv_cache_spec.values()):
+            # The V4 planner overlays cache groups in one tuple backing.
+            # Summing logical per-layer pages overstates the memory reclaimed
+            # by reuse, so keep the original block count until the physical
+            # V4 backing geometry can be used for capacity scaling.
+            return num_layers, num_buffer_assignments, 1.0
+
         logical_page_bytes = sum(spec.page_size_bytes for spec in kv_cache_spec.values())
         physical_page_bytes = 0
         for slot in reuse_layout.buffer_slots:

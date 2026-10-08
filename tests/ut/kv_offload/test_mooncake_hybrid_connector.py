@@ -50,6 +50,20 @@ class MockRequest:
         self.output_token_ids = [101]
 
 
+def test_non_v4_layerwise_configuration_disables_host_mirror():
+    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker.vllm_config = MagicMock()
+    worker.kv_cache_config = MagicMock()
+    worker.use_layerwise_host_mirror = True
+    worker.previous_slot_layer = {1: 0}
+    with patch(
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector.get_layerwise_kv_cache_specs",
+        return_value={"model.layers.0": types.SimpleNamespace(model_version="other")},
+    ):
+        assert worker.configure_layerwise_host_mirror({}) is False
+    assert worker.previous_slot_layer == {}
+
+
 class TestHybridKVCacheRecvingThreadDispatch(unittest.TestCase):
     def _make_thread(self):
         thread = object.__new__(KVCacheRecvingThread)
