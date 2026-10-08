@@ -618,7 +618,7 @@ class AscendW8A8MXFP8DSDynamicLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
             layer.weight_scale.data = layer.weight_scale.data.to(torch.uint8)
         if self.block_size % self.group_size != 0:
             raise ValueError(
-                "DeepSeek MXFP8 weight block size must be divisible by the "
+                "MXFP8 weight block size must be divisible by the "
                 f"runtime group size, got block_size={self.block_size}, "
                 f"group_size={self.group_size}"
             )
