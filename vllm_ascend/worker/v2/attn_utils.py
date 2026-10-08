@@ -1436,7 +1436,7 @@ def _reshape_kv_cache_v2(
                 )
                 continue
 
-            views = view_glm5_next_cache(
+            glm_cache_views = view_glm5_next_cache(
                 layer_name,
                 kv_cache_spec,
                 raw_cache,
@@ -1445,8 +1445,8 @@ def _reshape_kv_cache_v2(
                 num_blocks=kv_cache_config.num_blocks,
                 get_kv_cache_dims=_get_attention_kv_cache_dims,
             )
-            if views is not None:
-                kv_caches[layer_name] = views
+            if glm_cache_views is not None:
+                kv_caches[layer_name] = glm_cache_views
                 continue
 
             if (is_dsv4_model or getattr(kv_cache_spec, "indexes_kv_by_block_stride", False)) and isinstance(
