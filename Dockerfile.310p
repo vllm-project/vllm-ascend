@@ -22,6 +22,9 @@ ARG CANN_VERSION="9.1.0"
 
 FROM ${CANN_QUAY_URL}:${CANN_VERSION}-310p-ubuntu22.04-py3.12
 
+# Make the global version argument available to build steps in this stage.
+ARG CANN_VERSION
+
 # Build-time arguments (declared once at the top of the stage for clarity).
 # PYTORCH_INDEX_URL (optional): Extra pip index URL for PyTorch wheels.
 ARG PYTORCH_INDEX_URL="https://download.pytorch.org/whl/cpu/"
@@ -45,6 +48,11 @@ ARG TORCH_NPU_VERSION
 ARG TORCH_NPU_DATE
 # DAILY_DEPS_MODE (optional): Daily deps install mode: 'full' or 'torch_npu_only'.
 ARG DAILY_DEPS_MODE="torch_npu_only"
+# OPS_TRANSFORMER_REPO (optional): Repository containing the 310P GDN operators.
+ARG OPS_TRANSFORMER_REPO="https://gitcode.com/wxc397/ops-transformer.git"
+# OPS_TRANSFORMER_COMMIT (optional): Exact source revision used for both the
+# custom run package and its matching PyTorch wheel.
+ARG OPS_TRANSFORMER_COMMIT="1ef3b272237f407c400c0aeda27b1e661bd21813"
 
 WORKDIR /workspace
 
@@ -83,6 +91,36 @@ RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
     python3 -m pip install -e /vllm-workspace/vllm-ascend/ --extra-index-url ${PYTORCH_INDEX_URL} && \
     python3 -m pip uninstall -y triton-ascend triton && \
+    python3 -m pip cache purge
+
+# Build and install the 310P GDN kernels and their matching lightweight
+# PyTorch bridge. Keep the custom run package and wheel on the same source
+# revision so their ACLNN interfaces cannot drift apart.
+RUN git init /tmp/ops-transformer && \
+    git -C /tmp/ops-transformer fetch --depth 1 "${OPS_TRANSFORMER_REPO}" "${OPS_TRANSFORMER_COMMIT}" && \
+    git -C /tmp/ops-transformer checkout --detach FETCH_HEAD && \
+    source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
+    python3 -m pip install build wheel ninja && \
+    cd /tmp/ops-transformer && \
+    bash build.sh --pkg --experimental \
+        --ops=fused_gdn_gating,chunk_gated_delta_rule_compute_wy \
+        --soc=ascend310p -j16 && \
+    GDN_RUN_PACKAGE="$(find build_out -maxdepth 1 -type f \
+        -name 'cann-ops-transformer-custom_linux-*.run' -print -quit)" && \
+    test -n "${GDN_RUN_PACKAGE}" && \
+    chmod +x "${GDN_RUN_PACKAGE}" && \
+    "${GDN_RUN_PACKAGE}" && \
+    bash build.sh --torch_extension \
+        --ops=fused_gdn_gating,chunk_gated_delta_rule_compute_wy && \
+    GDN_WHEEL="$(find build_out -maxdepth 1 -type f \
+        -name 'cann_ops_transformer_custom-*.whl' -print -quit)" && \
+    test -n "${GDN_WHEEL}" && \
+    python3 -m pip install \
+        --target="/usr/local/Ascend/cann-${CANN_VERSION}/python/site-packages" \
+        --upgrade --force-reinstall --no-deps "${GDN_WHEEL}" && \
+    cd /tmp && \
+    python3 -c "from cann_ops_transformer.ops import fused_gdn_gating, chunk_gated_delta_rule_compute_wy" && \
+    rm -rf /tmp/ops-transformer && \
     python3 -m pip cache purge
 
 # Install _rust_tool_parser for the Rust frontend.
