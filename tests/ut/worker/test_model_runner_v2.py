@@ -561,7 +561,7 @@ def _parent_init(self, vllm_config, device, *, full_graph=False, speculative=Fal
         has_full_cudagraphs=lambda: full_graph,
     )
     self.model_config = SimpleNamespace(enforce_eager=not full_graph, architecture="Qwen3_5ForConditionalGeneration")
-    self.speculative_config = object() if speculative else None
+    self.speculative_config = SimpleNamespace(method="mtp") if speculative else None
     self.use_pp = use_pp
     self.is_last_pp_rank = True
     self.pp_handler = MagicMock()
@@ -616,12 +616,15 @@ def test_init_without_spec_pp():
     assert runner.req_states == "req"
     assert runner.input_buffers == "buf"
     assert runner.speculator is None
+    assert runner.pd_dspark_aux_layer_ids == ()
+    assert runner._dspark_prefill_progress == {}
     assert runner.use_spec_pp is False
     assert runner.sync_spec_pp_cpu_counts is False
     assert runner.decode_query_len == 1
 
 
-def test_init_spec_pp_full_graph_and_speculator():
+@pytest.mark.parametrize("method", ["mtp", "ngram_gpu"])
+def test_init_spec_pp_full_graph_and_speculator(method):
     vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(enable_eplb=True))
     ascend_config = SimpleNamespace(eplb_config=SimpleNamespace(load_collection_phase="decode"))
 
@@ -634,6 +637,11 @@ def test_init_spec_pp_full_graph_and_speculator():
     )
     spec_pp = SimpleNamespace(needs_aux_hidden_states=True)
     speculator = SimpleNamespace()
+
+    def parent_init(self, cfg, dev):
+        _parent_init(self, cfg, dev, full_graph=True, speculative=True, use_pp=True)
+        self.speculative_config.method = method
+
     with (
         patch("vllm_ascend.worker.v2.model_runner.get_ascend_config", return_value=ascend_config),
         patch("vllm_ascend.worker.v2.model_runner.set_potential_max_tokens"),
@@ -647,11 +655,11 @@ def test_init_spec_pp_full_graph_and_speculator():
         patch.object(
             GPUModelRunner,
             "__init__",
-            lambda self, cfg, dev: _parent_init(self, cfg, dev, full_graph=True, speculative=True, use_pp=True),
+            parent_init,
         ),
         patch("vllm_ascend.worker.v2.model_runner.AscendEPLBController", return_value="eplb") as eplb_cls,
-        patch("vllm_ascend.worker.v2.model_runner.init_speculator", return_value=speculator),
-        patch("vllm_ascend.worker.v2.model_runner.AscendRequestState", return_value="req"),
+        patch("vllm_ascend.worker.v2.model_runner.init_speculator", return_value=speculator) as speculator_factory,
+        patch("vllm_ascend.worker.v2.model_runner.AscendRequestState", return_value="req") as request_state_cls,
         patch("vllm_ascend.worker.v2.model_runner.AscendInputBuffers", return_value="buf"),
         patch("vllm_ascend.worker.v2.model_runner.set_cos_and_sin"),
         patch("vllm_ascend.worker.v2.model_runner.set_mc2_tokens_capacity"),
@@ -671,6 +679,10 @@ def test_init_spec_pp_full_graph_and_speculator():
     assert runner.use_aclgraph is True
     assert runner.use_aux_hidden_state_outputs is True
     assert runner.speculator is speculator
+    assert runner.pd_dspark_aux_layer_ids == ()
+    assert runner._dspark_prefill_progress == {}
+    speculator_factory.assert_called_once_with(vllm_config, runner.device, runner.req_states)
+    assert request_state_cls.call_args.kwargs["use_dense_all_token_ids"] is (method == "ngram_gpu")
     assert speculator.update_stream is runner.update_stream
     assert runner.use_spec_pp is False
     assert runner.sync_spec_pp_cpu_counts is True

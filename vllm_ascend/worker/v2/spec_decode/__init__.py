@@ -16,19 +16,31 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+from typing import TYPE_CHECKING
+
 import torch
 from vllm.config import VllmConfig
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.states import RequestState
 
 
 def init_speculator(
     vllm_config: VllmConfig,
     device: torch.device,
+    req_states: "RequestState | None" = None,
 ):
     """Override GPU init_speculator for Ascend NPUs.
     Use AscendEagleSpeculator when eagle is used.
     """
     speculative_config = vllm_config.speculative_config
     assert speculative_config is not None
+    if speculative_config.method in ("ngram", "ngram_gpu"):
+        if req_states is None:
+            raise ValueError("MRV2 n-gram speculative decoding requires request states")
+        from vllm.v1.worker.gpu.spec_decode.ngram.speculator import NgramGPUSpeculator
+
+        return NgramGPUSpeculator(vllm_config, device, req_states)
     if speculative_config.method == "extract_hidden_states":
         # No Ascend-specific behavior beyond update_stream assignment in
         # NPUModelRunner; reuse upstream ExtractHiddenStatesSpeculator as-is.

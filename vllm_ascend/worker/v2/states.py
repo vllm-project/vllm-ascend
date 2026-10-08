@@ -32,6 +32,7 @@ class AscendRequestState(RequestState):
         num_speculative_steps: int,
         vocab_size: int,
         device: torch.device,
+        use_dense_all_token_ids: bool = False,
     ):
         super().__init__(
             max_num_reqs,
@@ -40,6 +41,9 @@ class AscendRequestState(RequestState):
             num_speculative_steps,
             vocab_size,
             device,
+            # Older vLLM releases do not have this option. Keep their existing
+            # model-based speculators usable; MRV2 n-gram requires #40704.
+            **({"use_dense_all_token_ids": True} if use_dense_all_token_ids else {}),
         )
         # Ascend attention needs a torch CPU view of the upstream NumPy state.
         # Sharing storage keeps both APIs coherent without duplicate writes.
