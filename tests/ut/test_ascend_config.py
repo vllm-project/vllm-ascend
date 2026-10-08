@@ -221,8 +221,8 @@ class TestAscendConfig(TestBase):
                 "load_risk_quantile": 0.75,
                 "relative_balance_threshold": 0.95,
                 "absolute_balance_threshold": 0.90,
-                "rank_transfer_limit": 1,
-                "cross_node_transfer_limit": 1,
+                "rank_transfer_limit": -1,
+                "cross_node_transfer_limit": -1,
                 "replica_search_num_stages": 4,
                 "replica_search_radius": 8,
                 "replica_search_beam_size": 64,
@@ -324,6 +324,11 @@ class TestAscendConfig(TestBase):
         ):
             with self.subTest(name=name), self.assertRaises(ValueError):
                 EplbConfig(stair_config={name: 0})
+
+    def test_eplb_config_rejects_policy_selection(self):
+        for policy in ("default", "stair"):
+            with self.subTest(policy=policy), self.assertRaises(ValueError):
+                EplbConfig(**{"policy": policy})
 
     def test_stair_config_rejects_unknown_option(self):
         with self.assertRaises(ValueError):
@@ -1246,6 +1251,91 @@ class TestUpstreamConfigCompatibility(TestBase):
         text_config.moe_intermediate_size = 1024
         self.assertTrue(AscendConfig._is_megamoe_supported_by_config(vc))
 
+    @patch(
+        "vllm_ascend.ascend_config.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A5),
+    )
+    def test_a5_megamoe_k3_uses_routed_dimensions_and_top_k(self, _mock_profile):
+        text_config = SimpleNamespace(
+            hidden_size=7168,
+            routed_expert_hidden_size=3584,
+            moe_intermediate_size=3072,
+            num_experts_per_token=16,
+        )
+        vc = SimpleNamespace(
+            model_config=SimpleNamespace(hf_text_config=text_config, get_num_experts=lambda: 896),
+            parallel_config=SimpleNamespace(world_size_across_dp=32, pipeline_parallel_size=1),
+        )
+        for architecture in ("KimiK3ForCausalLM", "KimiLinearForCausalLM", "KimiK3ForConditionalGeneration"):
+            with self.subTest(architecture=architecture):
+                vc.model_config.architectures = [architecture]
+                self.assertTrue(AscendConfig._is_megamoe_supported_by_config(vc))
+                with patch.object(text_config, "hidden_size", 896):
+                    self.assertTrue(AscendConfig._is_megamoe_supported_by_config(vc))
+                with patch.object(text_config, "routed_expert_hidden_size", None):
+                    self.assertTrue(AscendConfig._is_megamoe_supported_by_config(vc))
+                for field, value in (
+                    ("routed_expert_hidden_size", 896),
+                    ("routed_expert_hidden_size", 1536),
+                    ("num_experts_per_token", 33),
+                ):
+                    with self.subTest(field=field), patch.object(text_config, field, value):
+                        self.assertFalse(AscendConfig._is_megamoe_supported_by_config(vc))
+                # Dense MLP dimensions must not substitute for missing K3
+                # routed-expert dimensions, even if the shape looks supported.
+                with (
+                    patch.object(text_config, "moe_intermediate_size", None),
+                    patch.object(text_config, "intermediate_size", 3072, create=True),
+                ):
+                    self.assertFalse(AscendConfig._is_megamoe_supported_by_config(vc))
+                # K3's model constructor reads this spelling, not the aliases.
+                with (
+                    patch.object(text_config, "num_experts_per_token", 33),
+                    patch.object(text_config, "num_experts_per_tok", 4, create=True),
+                ):
+                    self.assertFalse(AscendConfig._is_megamoe_supported_by_config(vc))
+
+    @patch(
+        "vllm_ascend.ascend_config.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A5),
+    )
+    def test_a5_megamoe_other_models_keep_legacy_config_rules(self, _mock_profile):
+        text_config = SimpleNamespace(
+            hidden_size=4096,
+            routed_expert_hidden_size=896,
+            moe_intermediate_size=1024,
+            intermediate_size=1024,
+            num_experts_per_tok=4,
+            num_experts_per_token=33,
+        )
+        model_config = SimpleNamespace(hf_text_config=text_config, get_num_experts=lambda: 128)
+        vc = SimpleNamespace(
+            model_config=model_config,
+            parallel_config=SimpleNamespace(world_size_across_dp=8, pipeline_parallel_size=1),
+        )
+        for architectures in (
+            ["Qwen3_5MoeForConditionalGeneration"],
+            ["DeepseekV3ForCausalLM"],
+            ["DeepseekV2ForCausalLM"],
+            ["KimiK25ForConditionalGeneration"],
+            ["KimiK3MTPModel"],
+            ["K3DSparkModel"],
+            [],
+            None,
+        ):
+            with self.subTest(architectures=architectures):
+                model_config.architectures = architectures
+                # K3-specific fields must not change the legacy decision.
+                self.assertTrue(AscendConfig._is_megamoe_supported_by_config(vc))
+                for field, value in (
+                    ("hidden_size", 3584),
+                    ("moe_intermediate_size", 3072),
+                    ("moe_intermediate_size", None),
+                    ("num_experts_per_tok", 33),
+                ):
+                    with self.subTest(field=field), patch.object(text_config, field, value):
+                        self.assertFalse(AscendConfig._is_megamoe_supported_by_config(vc))
+
     def test_megamoe_model_config_constraints(self):
         supported = SimpleNamespace(
             model_config=SimpleNamespace(
@@ -1514,39 +1604,6 @@ class TestTopLevelSwitchTypeValidation(TestBase):
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_reduce_sample_configuration_compatibility(self, mock_fix):
-        cases: tuple[tuple[dict[str, Any], int, str | None, str | None], ...] = (
-            (
-                {"finegrained_tp_config": {"lmhead_tensor_parallel_size": 2}},
-                1,
-                None,
-                "finegrained_tp_config.lmhead_tensor_parallel_size",
-            ),
-            ({}, 2, None, "enable_pcp_embedding_lmhead_weight_sharding"),
-            ({"enable_pcp_embedding_lmhead_weight_sharding": False}, 1, "kv_producer", "PD-disaggregated"),
-            ({}, 1, None, None),
-            ({"enable_pcp_embedding_lmhead_weight_sharding": False}, 2, None, None),
-        )
-        for additional_config, pcp_size, kv_role, error in cases:
-            with self.subTest(pcp_size=pcp_size, kv_role=kv_role, error=error):
-                clear_ascend_config()
-                vc = VllmConfig()
-                vc.parallel_config.prefill_context_parallel_size = pcp_size
-                vc.additional_config = {"enable_reduce_sample": True, **additional_config}
-                if kv_role is not None:
-                    vc.kv_transfer_config = KVTransferConfig(
-                        kv_connector="MooncakeConnectorV1",
-                        kv_role=kv_role,
-                    )
-
-                if error is None:
-                    self.assertTrue(init_ascend_config(vc).enable_reduce_sample)
-                else:
-                    with self.assertRaisesRegex(ValueError, error):
-                        init_ascend_config(vc)
-
-    @_clean_up
-    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_enable_dsa_cp_model_gate_is_resolved_during_init(self, mock_fix):
         unsupported_vc = VllmConfig()
         unsupported_vc.additional_config = {"enable_dsa_cp": True}
@@ -1636,6 +1693,16 @@ class TestTopLevelSwitchTypeValidation(TestBase):
             self.assertTrue(enable_sp(vc))
             self.assertTrue(config.enable_dsa_cp)
             self.assertTrue(enable_dsa_cp())
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_dsa_cp_and_pcp_are_mutually_exclusive(self, mock_fix):
+        vc = VllmConfig()
+        vc.additional_config = {"enable_dsa_cp": True}
+        vc.parallel_config.prefill_context_parallel_size = 4
+
+        with self.assertRaisesRegex(ValueError, "DSA-CP and PCP cannot be enabled at the same time.*Use PCP instead"):
+            init_ascend_config(vc)
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")

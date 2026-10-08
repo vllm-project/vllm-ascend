@@ -50,8 +50,9 @@ to a logical partition, which selects an exact runner label from `runner_label.j
 |---|---|---|
 | `two_card` in path | two_card A3 NPU | `linux-aarch64-a3-800t-2` |
 | `four_card` in path | four_card A3 NPU | `linux-aarch64-a3-800t-4` |
-| `_310p` in filename under one/two_card | Ascend 310P x1 | `linux-aarch64-310p-*` |
-| `_310p` in filename under four_card | Ascend 310P x4 | `linux-aarch64-310p-*` |
+| `_310p` in filename under one_card | Ascend 310P x1 | `linux-aarch64-310p-1` |
+| `_310p` in filename under two_card | Ascend 310P x2 | `linux-aarch64-310p-2` |
+| `_310p` in filename under four_card | Ascend 310P x4 | `linux-aarch64-310p-4` |
 | All other paths | one_card A2 NPU | `linux-aarch64-a2b3-1` |
 
 When paths from multiple categories are listed in a single comment, each category's
@@ -68,11 +69,11 @@ tests/e2e/pull_request/
 ├── four_card/         # Four card tests → A3 NPU x4 runner
 ```
 
-310P tests use `_310p` subdirectories or `_310p.py` filename suffix under the
-corresponding card directory:
+310P tests use a `_310p` filename under the corresponding card directory:
 
 ```text
 tests/e2e/pull_request/one_card/_310p/   # 310P single card
+tests/e2e/pull_request/two_card/_310p/   # 310P two card
 tests/e2e/pull_request/four_card/_310p/  # 310P four card
 ```
 

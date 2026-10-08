@@ -112,6 +112,7 @@ runner_mapping:
     310p: 310p-1
   tests/e2e/pull_request/two_card:
     default: a3-2
+    310p: 310p-2
   tests/e2e/pull_request/four_card:
     default: a3-4
     310p: 310p-4
@@ -123,18 +124,21 @@ partition:
   310p-1:
     runner_label: linux-aarch64-310p-1
     count: 1
+  310p-2:
+    runner_label: linux-aarch64-310p-2
+    count: 1
   310p-4:
     runner_label: linux-aarch64-310p-4
     count: 1
   a2-1:
     runner_label: linux-aarch64-a2b3-1
-    count: 5
+    count: 7
   a3-2:
     runner_label: linux-aarch64-a3-2
-    count: 4
+    count: 5
   a3-4:
     runner_label: linux-aarch64-a3-4
-    count: 4
+    count: 5
   cpu-0:
     runner_label: linux-amd64-cpu-8-hk
     count: 1

@@ -15,7 +15,7 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheSpec
 from vllm_ascend.ascend_config import KVPPConfig
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.quantization.utils import enable_fa_quant
-from vllm_ascend.utils import calc_split_factor, enable_sfa
+from vllm_ascend.utils import calc_split_factor, enable_sfa, kv_cache_spec_uses_packed_sfa_main_cache
 
 # One buffer for the current layer and one for the next layer's prefetch.
 KVPP_SCRATCH_BUFFER_COUNT = 2
@@ -83,7 +83,7 @@ def build_kvpp_buffer_sizes(
             sizes.append(elements * spec.head_size * get_dtype_size(spec.dtype))
             if spec.scale_dim:
                 sizes.append(elements * spec.scale_dim * get_dtype_size(spec.scale_dtype))
-        elif isinstance(spec, AscendMLAAttentionSpec) and spec.cache_sparse_sfa_c8:
+        elif isinstance(spec, AscendMLAAttentionSpec) and kv_cache_spec_uses_packed_sfa_main_cache(spec):
             sizes.append(spec.page_size_bytes)
         else:
             dims = list(get_kvpp_attention_kv_dims(vllm_config, name, spec))

@@ -7,15 +7,18 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config.speculative import SpeculativeConfig
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group, is_v1_kv_transfer_group
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import MLAAttentionImpl
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec, FullAttentionSpec
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
 from vllm_ascend.utils import (
+    _is_glm_model,
     get_ascend_config,
     is_pd_decode_recompute_scheduler_enabled,
 )
@@ -98,6 +101,20 @@ def get_sfa_qsfa_packed_head_dim(
     return kv_lora_rank + qk_rope_head_dim * get_dtype_size(torch.bfloat16) + scale_metadata_bytes
 
 
+def get_tq_packed_bytes(kv_lora_rank: int) -> int:
+    """Bytes of the int4-packed nope half of one TurboQuant 4-bit latent slot."""
+    return kv_lora_rank // 2
+
+
+def get_tq_fused_slot_bytes(kv_lora_rank: int, qk_rope_head_dim: int) -> int:
+    """Bytes of one fused TQ4 slot: int4 nope + bf16 rope + fp16 scale."""
+    return (
+        get_tq_packed_bytes(kv_lora_rank)
+        + qk_rope_head_dim * get_dtype_size(torch.bfloat16)
+        + get_dtype_size(torch.float16)
+    )
+
+
 @dataclass
 class PagedAttentionGraphParam:
     """Mark PA params when PA and FIA share one graph replay list."""
@@ -174,7 +191,8 @@ def ascend_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
     return chunked_prefill_workspace_size
 
 
-def using_paged_attention(runtime_shape: int, vllm_config: VllmConfig, head_size: int | None = None) -> bool:
+def using_paged_attention(runtime_shape: int | None, vllm_config: VllmConfig, head_size: int | None = None) -> bool:
+    """Check any configured PA shape for KV allocation when runtime_shape is None."""
     if vllm_config.speculative_config is not None:
         return False
     if not get_current_hardware_profile().supports(HardwareCapability.PAGED_ATTENTION):
@@ -190,7 +208,23 @@ def using_paged_attention(runtime_shape: int, vllm_config: VllmConfig, head_size
     if cudagraph_mode != CUDAGraphMode.FULL_DECODE_ONLY:
         return False
 
-    return runtime_shape in get_ascend_config().pa_shape_list
+    pa_shape_list = get_ascend_config().pa_shape_list
+    return bool(pa_shape_list) if runtime_shape is None else runtime_shape in pa_shape_list
+
+
+def requires_contiguous_pa_kv_cache(layer, vllm_config: VllmConfig, spec: FullAttentionSpec) -> bool:
+    """Require contiguous K/V only for unpadded ordinary Attention layers eligible for PA."""
+    # Import lazily to avoid a circular dependency with attention_v1.
+    from vllm_ascend.attention.attention_v1 import AscendAttentionBackendImpl
+
+    impl = getattr(layer, "impl", None)
+    return (
+        type(impl) is AscendAttentionBackendImpl
+        and impl.sliding_window is None
+        and getattr(vllm_config.model_config, "runner_type", None) != "pooling"
+        and spec.page_size_bytes == spec.real_page_size_bytes
+        and using_paged_attention(None, vllm_config, spec.head_size)
+    )
 
 
 @lru_cache(maxsize=1)
@@ -268,7 +302,7 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     token_to_req: torch.Tensor | None = None
     # CPU views of runner-owned CpuGpuBuffers; never exact sequence lengths.
     req_topk_buffer_slots: torch.Tensor | None = None
-    req_topk_buffer_generations: torch.Tensor | None = None
+    req_topk_buffer_active: torch.Tensor | None = None
     copy_sfa_draft_index: int | None = None
     copy_sfa_restore_tails: bool = False
     offload_dummy: bool = False
@@ -337,7 +371,7 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             group_key_idx=self.group_key_idx,
             group_key_cache_idx=self.group_key_cache_idx,
             req_topk_buffer_slots=_slice_reqs(self.req_topk_buffer_slots),
-            req_topk_buffer_generations=_slice_reqs(self.req_topk_buffer_generations),
+            req_topk_buffer_active=_slice_reqs(self.req_topk_buffer_active),
             copy_sfa_draft_index=self.copy_sfa_draft_index,
             offload_dummy=self.offload_dummy,
             req_ids_tensor=_slice_reqs(self.req_ids_tensor),
@@ -555,3 +589,40 @@ def enabling_mlapo(vllm_config: VllmConfig) -> bool:
         and not vllm_config.kv_transfer_config.is_kv_producer
     )
     return bool(config_val and is_decode_instance)
+
+
+def _select_seq_lens(
+    common_attn_metadata: AscendCommonAttentionMetadata,
+    kv_cache_spec: AttentionSpec | None,
+    speculative_config: SpeculativeConfig | None,
+    vllm_config: VllmConfig,
+) -> torch.Tensor:
+    """Choose the seq_lens tensor carried by the built attention metadata.
+
+    Defaults to the CPU mirror: ``_seq_lens_cpu`` is always available and
+    updated during draft iterations, while ``seq_lens_cpu`` is None in async
+    spec decode mode. Cross-attention and generic parallel drafting override
+    this with the NPU ``seq_lens``; the one exception is DSpark on the GLM5.2
+    family, whose CPU mirror carries the same post-rejection-sampling lengths
+    across draft iterations, so building from it skips the NPU->CPU sync at
+    ``seq_lens.tolist()`` in the metadata build.
+    """
+    # Prefer _seq_lens_cpu (always available, updated during draft
+    # iterations) over seq_lens_cpu (None in async spec decode mode).
+    model_config = vllm_config.model_config
+    num_reqs = common_attn_metadata.num_reqs
+    if common_attn_metadata._seq_lens_cpu is not None:
+        seq_lens = common_attn_metadata._seq_lens_cpu[:num_reqs]
+    elif common_attn_metadata.seq_lens_cpu is not None:
+        seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
+    else:
+        seq_lens = common_attn_metadata.seq_lens[:num_reqs].to("cpu")
+
+    if isinstance(kv_cache_spec, CrossAttentionSpec):
+        seq_lens = common_attn_metadata.seq_lens
+    if speculative_config is not None and speculative_config.parallel_drafting:
+        # PARD / DFlash (and DSpark on other models) keep the NPU seq_lens;
+        # only DSpark on the GLM5.2 family keeps the CPU mirror above.
+        if not (speculative_config.use_dspark() and _is_glm_model(model_config)):
+            seq_lens = common_attn_metadata.seq_lens
+    return seq_lens
