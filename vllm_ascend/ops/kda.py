@@ -95,7 +95,7 @@ def run_chunk_kda(
         # make no update, while raw_gate=-inf gives log decay zero for both the
         # bounded sigmoid and the unbounded softplus gate.
         padded_cu = [0]
-        padded_chunks = []
+        padded_chunks: list[int] = []
         for sequence, (start, end) in enumerate(zip(cu_seqlens[:-1], cu_seqlens[1:])):
             num_chunks = (end - start + KDA_CHUNK_SIZE - 1) // KDA_CHUNK_SIZE
             padded_cu.append(padded_cu[-1] + num_chunks * KDA_CHUNK_SIZE)
