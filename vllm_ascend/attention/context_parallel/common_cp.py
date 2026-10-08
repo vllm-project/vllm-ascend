@@ -9,6 +9,34 @@ import vllm_ascend.ops.triton.dcp.dcp_a2a  # noqa: F401
 from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
 
 
+def is_pcp_decode_sharding_enabled(vllm_config) -> bool:
+    """Shard decode requests only for eager PCP without speculation.
+
+    Graph execution and speculative decoding stay on the replicated path in
+    this change. The decision is derived from declared vLLM fields so cloning
+    a draft ``ParallelConfig`` with ``replace()`` does not see an undeclared
+    attribute.
+    """
+    from vllm.config.compilation import CUDAGraphMode
+
+    parallel_config = vllm_config.parallel_config
+    return (
+        parallel_config.prefill_context_parallel_size > 1
+        and parallel_config.decode_context_parallel_size == 1
+        and vllm_config.speculative_config is None
+        and vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+    )
+
+
+def get_pcp_num_replicated_tokens(num_decode_tokens: int, is_decode_sharded: bool) -> int:
+    """Return the leading rank-local tokens that every PCP rank computes identically.
+
+    Replicated decodes need no KV gather. A sharded decode belongs to one PCP
+    rank, so its KV is gathered together with the prefill tokens.
+    """
+    return 0 if is_decode_sharded else num_decode_tokens
+
+
 def get_cp_local_query_key_lens(
     query_start_loc: torch.Tensor,
     cum_query_lens: torch.Tensor,

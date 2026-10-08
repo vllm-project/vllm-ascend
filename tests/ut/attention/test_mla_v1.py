@@ -383,7 +383,6 @@ def test_mla_pcp_metadata_keeps_expanded_slot_mapping() -> None:
     )
     builder = AscendMLAMetadataBuilder.__new__(AscendMLAMetadataBuilder)
     builder.pcp_size = 2
-    builder.pcp_rank = 1
 
     builder._finalize_pcp_metadata(metadata, expanded_slots)
 
@@ -391,13 +390,12 @@ def test_mla_pcp_metadata_keeps_expanded_slot_mapping() -> None:
     prefill_metadata = metadata.prefill
     assert prefill_metadata is not None
     assert prefill_metadata.pcp_local_num_input_tokens == 4
-    assert prefill_metadata.pcp_local_prefill_start == 3
-    assert prefill_metadata.pcp_local_prefill_end == 5
     assert metadata.attn_state == AscendAttentionState.ChunkedPrefill
 
 
 def test_mla_pcp_prefill_gathers_padded_cache_inputs() -> None:
     impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    impl.is_pcp_decode_sharded = False
     captured: dict[str, torch.Tensor] = {}
 
     def fake_gather(tensors, slot_mapping, num_decode_tokens):
@@ -424,8 +422,6 @@ def test_mla_pcp_prefill_gathers_padded_cache_inputs() -> None:
     prefill_metadata = metadata.prefill
     assert prefill_metadata is not None
     prefill_metadata.pcp_local_num_input_tokens = 4
-    prefill_metadata.pcp_local_prefill_start = 3
-    prefill_metadata.pcp_local_prefill_end = 5
     impl.pcp_enabled = True
     impl.use_mla_rope = True
     impl.kv_a_layernorm = SimpleNamespace(
@@ -477,6 +473,7 @@ def test_mla_pcp_prefill_gathers_padded_cache_inputs() -> None:
 
 def test_mla_pcp_nope_prefill_trims_gathered_outputs() -> None:
     impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    impl.is_pcp_decode_sharded = False
 
     def fake_gather(tensors, slot_mapping, num_decode_tokens):
         assert num_decode_tokens == 0
@@ -494,8 +491,6 @@ def test_mla_pcp_nope_prefill_trims_gathered_outputs() -> None:
     prefill_metadata = metadata.prefill
     assert prefill_metadata is not None
     prefill_metadata.pcp_local_num_input_tokens = 4
-    prefill_metadata.pcp_local_prefill_start = 3
-    prefill_metadata.pcp_local_prefill_end = 5
 
     impl.pcp_enabled = True
     impl.use_mla_rope = True
@@ -529,6 +524,71 @@ def test_mla_pcp_nope_prefill_trims_gathered_outputs() -> None:
 
     assert k_pe.shape == (2, 1, 1, 0)
     torch.testing.assert_close(k_nope, gathered_k_nope[3:5])
+
+
+def test_mla_pcp_no_rope_gathers_before_cache_write() -> None:
+    impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    impl.is_pcp_decode_sharded = True
+    seen: dict[str, torch.Tensor] = {}
+
+    def fake_gather(tensors, slot_mapping, num_decode_tokens):
+        assert num_decode_tokens == 0
+        return (
+            tuple(torch.cat((tensor, tensor), dim=0) for tensor in tensors),
+            slot_mapping,
+        )
+
+    def fake_no_rope(kv, _cache, slots):
+        seen["kv_rows"] = torch.tensor([kv.shape[0]])
+        seen["slots"] = slots
+        return kv[:, :1], kv
+
+    pcp_group = SimpleNamespace(world_size=2, rank_in_group=0)
+    metadata = _make_pcp_metadata(num_actual_tokens=2, num_decode_tokens=2)
+    metadata.slot_mapping = torch.tensor([5, -1, 7, -1], dtype=torch.int64)
+    impl.pcp_enabled = True
+    impl.use_mla_rope = False
+    with (
+        patch("vllm_ascend.attention.mla_v1.get_pcp_group", return_value=pcp_group),
+        patch("vllm_ascend.attention.mla_v1._gather_prefill_cache_inputs", side_effect=fake_gather),
+    ):
+        impl._exec_kv_no_rope = fake_no_rope
+        impl.exec_kv_prefill(
+            torch.zeros(2, 4),
+            torch.zeros(2, 1),
+            torch.zeros(2, 1),
+            (torch.empty(0), torch.empty(0)),
+            torch.empty(0, dtype=torch.int64),
+            attn_metadata=metadata,
+        )
+
+    assert int(seen["kv_rows"]) == 4
+    torch.testing.assert_close(seen["slots"], torch.tensor([5, -1, 7, -1]))
+
+
+def test_mla_nope_cache_write_skips_padding_slots() -> None:
+    impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    impl.kv_lora_rank = 2
+    impl.kv_a_layernorm = torch.nn.Identity()
+    kv = torch.tensor([[[[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]]]])
+    slots = torch.tensor([0, 1, -1, 2])
+
+    contiguous = torch.full((4, 2), -7.0)
+    impl._exec_kv_mla_nope(kv, (contiguous, contiguous), slots, is_prefill=True, skip_padding_slots=True)
+    torch.testing.assert_close(contiguous[0], torch.tensor([1.0, 2.0]))
+    torch.testing.assert_close(contiguous[1], torch.tensor([3.0, 4.0]))
+    torch.testing.assert_close(contiguous[2], torch.tensor([7.0, 8.0]))
+    torch.testing.assert_close(contiguous[3], torch.tensor([-7.0, -7.0]))
+
+    raw = torch.full((4, 2, 2), -7.0)
+    noncontiguous = raw.transpose(0, 1)
+    assert not noncontiguous.is_contiguous()
+    impl._exec_kv_mla_nope(
+        kv[:, :, :2], (noncontiguous, noncontiguous), torch.tensor([0, -1]), is_prefill=True, skip_padding_slots=True
+    )
+    # -1 would address the last block and last offset of a non-contiguous cache.
+    torch.testing.assert_close(raw[3, 1], torch.tensor([-7.0, -7.0]))
+    torch.testing.assert_close(noncontiguous[0, 0], torch.tensor([1.0, 2.0]))
 
 
 class TestDecodeMLAPreprocessResult(TestBase):
@@ -1144,8 +1204,7 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
     def tearDown(self):
         self.parent_init_patcher.stop()
 
-    @patch("vllm_ascend.attention.mla_v1.get_pcp_group")
-    def test_pcp_mode_is_initialized_from_config(self, mock_get_pcp_group):
+    def test_pcp_mode_is_initialized_from_config(self):
         builder = AscendMLAMetadataBuilder(
             self.kv_cache_spec,
             ["layer_0"],
@@ -1156,7 +1215,6 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
         self.assertIs(builder.metadata_cls, AscendMLAMetadata)
 
         self.mock_vllm_config.parallel_config.prefill_context_parallel_size = 2
-        mock_get_pcp_group.return_value.rank_in_group = 1
         pcp_builder = AscendMLAMetadataBuilder(
             self.kv_cache_spec,
             ["layer_0"],
@@ -1165,7 +1223,6 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
         )
         self.assertTrue(pcp_builder.pcp_enabled)
         self.assertIs(pcp_builder.metadata_cls, AscendMLAMetadata)
-        self.assertEqual(pcp_builder.pcp_rank, 1)
 
     @patch("vllm_ascend.attention.mla_v1.get_cos_and_sin_mla")
     @patch("vllm_ascend.attention.mla_v1.torch.zeros", wraps=torch.zeros)
@@ -2728,7 +2785,7 @@ class TestAscendMLAImpl(TestBase):
                 self.impl.mla_preprocess_prefill = MagicMock(
                     side_effect=lambda *_args: record_event("prefill_cache", prefill)
                 )
-                metadata = SimpleNamespace(num_decodes=decodes, num_prefills=prefills)
+                metadata = SimpleNamespace(num_actual_tokens=2, num_decodes=decodes, num_prefills=prefills)
                 with (
                     patch.object(mla_v1, "wait_for_kv_layer_from_connector"),
                     patch.object(mla_v1, "notify_kv_cache_written"),
