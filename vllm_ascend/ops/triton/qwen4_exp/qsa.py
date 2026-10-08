@@ -212,7 +212,13 @@ def _expand_qsa_indices_kernel(
     )
 
 
-@triton.jit
+# num_rows/num_requests/num_cache_blocks change every engine step (scheduled
+# tokens, batch size). Specializing them puts them in the Triton cache key, so
+# every prefill step with a new token count recompiles the kernel (~7s CPU
+# compile on the critical path, NPU idle). They only feed runtime bounds and
+# address math (never tl.arange or a compile-time branch), so dropping
+# specialization is safe.
+@triton.jit(do_not_specialize=["num_rows", "num_cache_blocks", "num_requests"])
 def _qsa_sparse_paged_gqa_splitk_kernel(
     q_ptr,
     k_cache_ptr,
@@ -367,7 +373,7 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
         )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["num_rows"])
 def _qsa_merge_splitk_kernel(
     partial_output_ptr,
     partial_lse_ptr,
