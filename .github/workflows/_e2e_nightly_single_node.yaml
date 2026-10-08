@@ -200,8 +200,8 @@ jobs:
                 { echo "::error::cannot fetch vllm ref '$VLLM_REF' (use a full commit SHA, tag, or branch name)"; exit 1; }
             fi
           fi
-          git checkout FETCH_HEAD
-          VLLM_TARGET_DEVICE=empty pip install -e . --no-deps --no-input --disable-pip-version-check
+          git checkout -f FETCH_HEAD
+          VLLM_TARGET_DEVICE=empty pip install -e . --no-input --disable-pip-version-check
           echo ""
           echo "Installed vllm from ref '$VLLM_REF':"
           pip show vllm

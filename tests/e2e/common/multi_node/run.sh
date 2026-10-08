@@ -187,8 +187,8 @@ checkout_and_install_vllm() {
                 { echo "ERROR: cannot fetch vllm ref '$VLLM_REF' (use a full commit SHA, tag, or branch name)"; return 1; }
         fi
     fi
-    git checkout FETCH_HEAD
-    VLLM_TARGET_DEVICE=empty pip install -e . --no-deps --no-input --disable-pip-version-check
+    git checkout -f FETCH_HEAD
+    VLLM_TARGET_DEVICE=empty pip install -e . --no-input --disable-pip-version-check
     # setuptools_scm falls back to 0.1.dev1+g<sha> when the ref carries no tag
     # information (bare SHA / branch); surface it instead of silently
     # misrouting every vllm_version_is() check in vllm-ascend.
