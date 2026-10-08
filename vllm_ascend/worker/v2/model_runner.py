@@ -45,6 +45,7 @@ from vllm.v1.worker.gpu.model_runner import (
     ExecuteModelState,
     GPUModelRunner,
 )
+from vllm.v1.worker.gpu.spec_decode.rejection_sampler import RejectionSampler
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import (
@@ -88,6 +89,9 @@ from vllm_ascend.worker.v2.pp_transport import (
 )
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
+from vllm_ascend.worker.v2.spec_decode.recompute_rejection_sampler import (
+    RecomputeAwareRejectionSampler,
+)
 from vllm_ascend.worker.v2.states import AscendRequestState
 from vllm_ascend.worker.v2.utils import (
     prepare_v41_dummy_ring_state,
@@ -106,6 +110,7 @@ class NPUModelRunner(GPUModelRunner):
 
     execute_model_state: ExecuteModelState | None
     max_num_reqs: int
+    rejection_sampler: RejectionSampler | RecomputeAwareRejectionSampler | None
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # Ascend-specific configurations
@@ -232,6 +237,12 @@ class NPUModelRunner(GPUModelRunner):
         set_mc2_tokens_capacity(vllm_config, self.max_num_reqs, self.decode_query_len)
         set_mc2_mask(vllm_config, self.device)
         set_potential_max_tokens(vllm_config)
+
+    def load_model(self, load_dummy_weights: bool = False, *args, **kwargs) -> None:
+        super().load_model(load_dummy_weights, *args, **kwargs)
+        if self.rejection_sampler is not None and is_pd_decode_recompute_scheduler_enabled(self.vllm_config):
+            self.rejection_sampler = RecomputeAwareRejectionSampler(self.rejection_sampler)
+            logger.info("Recompute sampler boundary adapter active: source=%s", __file__)
 
     @property
     def pcp_manager_cls(self) -> type[AscendPCPManager]:
