@@ -21,6 +21,6 @@ endforeach()
 # The common non-A5 entry includes these headers, including on legacy 310P
 # builds. Keep them with the entry even when architecture filtering selects
 # only arch22, and in build paths that install only top-level kernel files.
-install(DIRECTORY op_kernel/arch32
+install(DIRECTORY op_kernel/arch32 op_kernel/common
     DESTINATION ${IMPL_INSTALL_DIR}/ascendc/add_rms_norm_bias
 )

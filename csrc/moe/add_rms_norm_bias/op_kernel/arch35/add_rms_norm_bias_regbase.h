@@ -20,7 +20,7 @@
 #ifndef ADD_RMS_NORM_BIAS_REGBASE_H
 #define ADD_RMS_NORM_BIAS_REGBASE_H
 #include "add_rms_norm_bias_regbase_common.h"
-#include "../rms_norm_base.h"
+#include "../common/rms_norm_base.h"
 #include "kernel_operator.h"
 #include "deps/reduce_common_regbase.h"
 
@@ -34,7 +34,6 @@ constexpr int32_t UNROLL_NUM = 2;
 constexpr int32_t NUM_ONE = 1;
 constexpr int32_t NUM_TWO = 2;
 
-using RmsNorm::DataCopyCustom;
 using RmsNorm::DataCopyImpl;
 
 using AscendC::MicroAPI::LoadDist;

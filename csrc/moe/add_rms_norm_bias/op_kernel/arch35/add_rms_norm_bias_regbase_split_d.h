@@ -21,7 +21,7 @@
 #define ADD_RMS_NORM_BIAS_REGBASE_SPLIT_D_H
 
 #include "add_rms_norm_bias_regbase_common.h"
-#include "../rms_norm_base.h"
+#include "../common/rms_norm_base.h"
 namespace AddRmsNorm {
 using namespace AscendC;
 using AddRmsNorm::ALIGN_32_FACTOR;

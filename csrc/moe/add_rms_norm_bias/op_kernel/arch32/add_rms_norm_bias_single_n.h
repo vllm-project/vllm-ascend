@@ -14,7 +14,7 @@
  */
 #ifndef ADD_RMS_NORM_BIAS_SINGLE_N_H_
 #define ADD_RMS_NORM_BIAS_SINGLE_N_H_
-#include "../rms_norm_base.h"
+#include "rms_norm_base.h"
 
 using namespace AscendC;
 using namespace RmsNorm;
