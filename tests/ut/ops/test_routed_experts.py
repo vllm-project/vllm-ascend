@@ -6,7 +6,22 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+import vllm_ascend.ops.fused_moe.routed_experts as routed_experts_module
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts, EplbExpertTensorList
+
+
+class _FakeNpuTensor:
+    """Minimal NPU tensor stub for CPU-only unit tests."""
+
+    def __init__(self, shape, npu_format):
+        self.shape = torch.Size(shape)
+        self.dtype = torch.float16
+        self.layout = torch.strided
+        self.device = torch.device("npu")
+        self.npu_format = npu_format
+
+    def size(self):
+        return self.shape
 
 
 def _routed_experts(weight_views):
@@ -41,6 +56,114 @@ def test_get_expert_weights_preserves_independent_expert_tensors():
     assert isinstance(buffer, EplbExpertTensorList)
     assert buffer.shape == views[0].shape
     assert all(tensor.storage_offset() == 0 for tensor in buffer)
+
+
+def test_eplb_expert_buffers_preserve_each_source_npu_format(monkeypatch):
+    sources = EplbExpertTensorList(
+        [
+            _FakeNpuTensor((3, 4), 29),
+            _FakeNpuTensor((3, 4), 50),
+        ]
+    )
+    format_queries = []
+    allocations = []
+
+    def fake_get_npu_format(tensor):
+        format_queries.append(tensor)
+        return tensor.npu_format
+
+    def fake_empty_with_format(**kwargs):
+        allocations.append(kwargs)
+        # The CPU tensor stands in for the allocated NPU tensor.
+        return torch.empty(kwargs["size"], dtype=kwargs["dtype"])
+
+    monkeypatch.setattr(
+        routed_experts_module.torch_npu,
+        "get_npu_format",
+        fake_get_npu_format,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        routed_experts_module.torch_npu,
+        "empty_with_format",
+        fake_empty_with_format,
+        raising=False,
+    )
+
+    buffers = torch.empty_like(sources, requires_grad=True)
+
+    assert isinstance(buffers, EplbExpertTensorList)
+    assert [buffer.shape for buffer in buffers] == [
+        torch.Size((3, 4)),
+        torch.Size((3, 4)),
+    ]
+    assert all(buffer.requires_grad for buffer in buffers)
+    assert format_queries == list(sources)
+    assert allocations == [
+        {
+            "size": torch.Size((3, 4)),
+            "dtype": torch.float16,
+            "layout": torch.strided,
+            "device": torch.device("npu"),
+            "pin_memory": False,
+            "acl_format": 29,
+        },
+        {
+            "size": torch.Size((3, 4)),
+            "dtype": torch.float16,
+            "layout": torch.strided,
+            "device": torch.device("npu"),
+            "pin_memory": False,
+            "acl_format": 50,
+        },
+    ]
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        pytest.param({"dtype": torch.float32}, id="changed-dtype"),
+        pytest.param({"device": torch.device("cpu")}, id="changed-device"),
+        pytest.param(
+            {"memory_format": torch.contiguous_format},
+            id="changed-memory-format",
+        ),
+    ],
+)
+def test_eplb_expert_buffer_falls_back_when_properties_change(
+    monkeypatch,
+    kwargs,
+):
+    source = _FakeNpuTensor((3, 4), 50)
+    expected = object()
+    fallback_calls = []
+
+    def fake_empty_like(tensor, **actual_kwargs):
+        fallback_calls.append((tensor, actual_kwargs))
+        return expected
+
+    def fail_empty_with_format(**kwargs):
+        raise AssertionError("empty_with_format must not be used when tensor properties change")
+
+    monkeypatch.setattr(
+        routed_experts_module.torch,
+        "empty_like",
+        fake_empty_like,
+    )
+    monkeypatch.setattr(
+        routed_experts_module.torch_npu,
+        "empty_with_format",
+        fail_empty_with_format,
+        raising=False,
+    )
+
+    result = routed_experts_module._empty_like_preserving_npu_format(
+        source,
+        **kwargs,
+    )
+
+    assert result is expected
+    assert fallback_calls == [(source, kwargs)]
 
 
 def test_get_expert_weights_rejects_unsupported_quantization():
