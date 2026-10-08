@@ -683,9 +683,9 @@ class AscendConfig:
         engram_config = getattr(vc, "engram_config", None)
         if (
             engram_config is not None
+            and not engram_config.dp_shared_memory
             and vc.use_v2_model_runner
             and vc.parallel_config.data_parallel_size > 1
-            and not engram_config.dp_shared_memory
         ):
             # DP-dummy ranks have no hash work in MRV2. Share host tables so
             # replicas do not require matching embedding collectives each step.

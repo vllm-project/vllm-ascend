@@ -733,8 +733,10 @@ def test_hash_router_preserves_fp32_weights_and_explicit_input_ids(monkeypatch, 
     assert weights is topk_weights
     assert weights.dtype == torch.float32
     assert ids is topk_ids
-    # Padding normalization belongs to the native operator, after communication.
-    torch.testing.assert_close(hash_op.call_args.kwargs["input_ids"], gathered_input_ids)
+    # The upstream router normalizes padding after gathering token IDs.
+    torch.testing.assert_close(
+        hash_op.call_args.kwargs["input_ids"], torch.tensor([22, 0], dtype=torch.int64)
+    )
     prepare_finalize.all_gather_input_ids.assert_called_once()
     actual_input_ids = prepare_finalize.all_gather_input_ids.call_args.args[0]
     torch.testing.assert_close(actual_input_ids, input_ids.to(torch.int64))
