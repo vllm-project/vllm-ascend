@@ -178,16 +178,6 @@ class AscendDSAV41CPImpl(AscendDSAV41Impl):
             rotary_mode="interleave",
             partial_slice=[attn.nope_head_dim, attn.head_dim],
         )
-        # Both streams have joined before compressor/indexer cache reads.
-        if self.role.is_kv_source:
-            self._write_compressed_source(
-                attn,
-                kv_hidden_states,
-                global_metadata.positions[: kv_hidden_states.shape[0]],
-                kv_cos,
-                kv_sin,
-                global_metadata,
-            )
         return q.to(hidden_states.dtype), qr
 
     def _global_layer_metadata(self, metadata_by_prefix):
@@ -215,7 +205,44 @@ class AscendDSAV41CPImpl(AscendDSAV41Impl):
     def _prepare_queries(self, attn, hidden_states, positions, cos, sin, metadata):
         return self.multistream_preprocess(attn, hidden_states, cos, sin, metadata.swa)
 
-    def _select_sparse_indices(self, attn, hidden_states, qr, positions, cos, sin, metadata):
+    def _indexer_hidden_states(self, hidden_states, metadata):
+        start, _, _, _ = metadata.swa.cp_token_range
+        return hidden_states[start : start + metadata.swa.num_actual_tokens]
+
+    def _write_forward_compressed_source(
+        self,
+        attn,
+        hidden_states,
+        positions,
+        cos,
+        sin,
+        metadata,
+        prepared_indexer,
+    ):
+        global_metadata = self._global_layer_metadata(get_forward_context().attn_metadata)
+        kv_hidden_states = hidden_states[: global_metadata.swa.num_actual_tokens]
+        kv_cos, kv_sin = global_metadata.rope(attn.rotary_emb.layername, kv_hidden_states.shape[0])
+        return self._write_compressed_source(
+            attn,
+            kv_hidden_states,
+            global_metadata.positions[: kv_hidden_states.shape[0]],
+            kv_cos,
+            kv_sin,
+            global_metadata,
+            prepared_indexer=prepared_indexer,
+        )
+
+    def _select_sparse_indices(
+        self,
+        attn,
+        hidden_states,
+        qr,
+        positions,
+        cos,
+        sin,
+        metadata,
+        prepared_indexer=None,
+    ):
         if not self.role.has_long_context:
             return None
         if not self.role.is_index_source:
@@ -224,9 +251,16 @@ class AscendDSAV41CPImpl(AscendDSAV41Impl):
             # while ``qr`` was projected from this rank's local query slice.
             # SparseFlashMla requires cmp_sparse_indices.T to match q.T.
             return shared.topk_indices[: qr.shape[0]]
-        start, _, _, _ = metadata.swa.cp_token_range
-        hidden_states = hidden_states[start : start + metadata.swa.num_actual_tokens]
-        return super()._select_sparse_indices(attn, hidden_states, qr, positions, cos, sin, metadata)
+        return super()._select_sparse_indices(
+            attn,
+            hidden_states,
+            qr,
+            positions,
+            cos,
+            sin,
+            metadata,
+            prepared_indexer,
+        )
 
     def _project_output(self, attn, output, hidden_states, metadata, *, projected):
         _, _, per_rank, _ = metadata.swa.cp_token_range
