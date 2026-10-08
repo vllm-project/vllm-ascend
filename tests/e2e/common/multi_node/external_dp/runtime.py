@@ -377,7 +377,8 @@ class ServerCommandBuilder:
             "PP_NODE_RANK": str(rank.pp_node_rank),
             "PP_GROUP_SIZE": str(rank.pp_nnodes),
             "PP_MASTER_ADDR": rank.pp_master_addr,
-            "PP_LAYER_PARTITION": rank.pp_layer_partition,
+            #修改点
+            "PP_LAYER_PARTITION": rank.pp_layer_partition if rank.pp_size > 1 else "",
             "NNODES": str(rank.pp_nnodes),
             "IS_ENGINE_MASTER": str(rank.is_engine_master).lower(),
         }
