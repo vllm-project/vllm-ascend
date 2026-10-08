@@ -29,7 +29,7 @@ from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.config_utils import config
-from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability, get_current_hardware_profile
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -569,8 +569,11 @@ class AscendConfig:
     multistream_dsv4_dsa_overlap: bool = True
     # Prepare Engram hashes, lookups and DP/TP exchanges on an auxiliary stream;
     # FULL graphs wait on descriptor-specific external events at consumers.
-    # Enabled by default; set false to serialize lookups for comparison.
-    multistream_engram_overlap: bool = True
+    # Default to overlap on A5 only; explicit settings override this policy.
+    multistream_engram_overlap: bool = dataclasses.field(
+        default_factory=lambda: get_current_hardware_profile().device_adaptor_family
+        == DeviceAdaptorFamily.FP8_OPTIMIZED
+    )
     enable_prefill_mc2: bool = False
     multistream_overlap_shared_expert: bool = False
     enable_kv_nz: bool = False
