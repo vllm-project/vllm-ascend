@@ -115,7 +115,6 @@ from vllm_ascend.worker.v2.kvpp import KVPPRuntime
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.pp_transport import resolve_spec_pp_support
 from vllm_ascend.worker.v2.spec_decode import init_speculator
-from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 from vllm_ascend.worker.v2.states import AscendRequestState
 from vllm_ascend.worker.v2.utils import (
     AscendV2KVBlockZeroer,
@@ -201,17 +200,8 @@ class NPUModelRunner(GPUModelRunner):
         del self.input_buffers
         del self.speculator
 
-        # we define AscendEagleSpeculator in vllm_ascend.worker.v2.spec_decode.eagle.speculator
-        # init_speculator will return AscendEagleSpeculator when eagle is used.
-        # so here we just call init_speculator to reinitialize speculator.
-        self.speculator: AscendEagleSpeculator | None = None
         self.pd_dspark_aux_layer_ids: tuple[int, ...] = ()
         self._dspark_prefill_progress: dict[str, tuple[str, int]] = {}
-        if self.speculative_config is not None and self.is_last_pp_rank:
-            self.speculator = init_speculator(self.vllm_config, self.device)
-            # Shared update_stream: main model (ModelAclGraphManager) and draft
-            # (Eagle/DFlash/DSpark AclGraphManager) all use this same stream.
-            self.speculator.update_stream = self.update_stream
 
         # AscendRequestState has extra `num_computed_tokens_cpu` attribute.
         # so reinitialize req_states here.
@@ -222,7 +212,16 @@ class NPUModelRunner(GPUModelRunner):
             num_speculative_steps=self.num_speculative_steps,
             vocab_size=self.vocab_size,
             device=self.device,
+            use_dense_all_token_ids=(
+                self.speculative_config is not None and self.speculative_config.method in ("ngram", "ngram_gpu")
+            ),
         )
+        # History-based speculators must reference the replacement Ascend state.
+        self.speculator = None
+        if self.speculative_config is not None and self.is_last_pp_rank:
+            self.speculator = init_speculator(self.vllm_config, self.device, self.req_states)
+            # Share the update stream between the target and draft graph managers.
+            self.speculator.update_stream = self.update_stream
         # AscendInputBuffers has extra `seq_lens_cpu` attribute.
         # so reinitialize input_buffers here.
         self.input_buffers: AscendInputBuffers = AscendInputBuffers(

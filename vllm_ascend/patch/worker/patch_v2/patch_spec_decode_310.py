@@ -36,7 +36,7 @@ if not hasattr(aclgraph_utils_mod.ModelWithContext, "embed_input_ids"):
 _orig_init_speculator = ascend_spec_decode.init_speculator
 
 
-def _init_speculator_310p(vllm_config, device):
+def _init_speculator_310p(vllm_config, device, req_states=None):
     speculative_config = vllm_config.speculative_config
     assert speculative_config is not None
     if (
@@ -49,7 +49,7 @@ def _init_speculator_310p(vllm_config, device):
         )
 
         return AscendMTPSpeculator310(vllm_config, device)
-    return _orig_init_speculator(vllm_config, device)
+    return _orig_init_speculator(vllm_config, device, req_states)
 
 
 ascend_spec_decode.init_speculator = _init_speculator_310p
