@@ -14,7 +14,7 @@
  */
 #ifndef ADD_RMS_NORM_BIAS_MULTI_N_H_
 #define ADD_RMS_NORM_BIAS_MULTI_N_H_
-#include "./rms_norm_base.h"
+#include "../rms_norm_base.h"
 
 using namespace AscendC;
 using namespace RmsNorm;
@@ -38,8 +38,6 @@ public:
         this->ubFactor = tiling->ub_factor;
         this->epsilon = tiling->epsilon;
         this->avgFactor = tiling->avg_factor;
-        this->nullptrBeta = tiling->nullptr_beta;
-
         blockIdx_ = GetBlockIdx();
         if (blockIdx_ < GetBlockNum() - 1) {
             this->rowWork = blockFactor;
@@ -54,9 +52,7 @@ public:
         x1Gm.SetGlobalBuffer((__gm__ T*)x1 + blockIdx_ * blockFactor * numCol, rowWork * numCol);
         x2Gm.SetGlobalBuffer((__gm__ T*)x2 + blockIdx_ * blockFactor * numCol, rowWork * numCol);
         gammaGm.SetGlobalBuffer((__gm__ T*)gamma, numCol);
-        if (!this->nullptrBeta) {
-            betaGm.SetGlobalBuffer((__gm__ T*)beta, numCol);
-        }
+        betaGm.SetGlobalBuffer((__gm__ T*)beta, numCol);
         yGm.SetGlobalBuffer((__gm__ T*)y + blockIdx_ * blockFactor * numCol, rowWork * numCol);
         rstdGm.SetGlobalBuffer((__gm__ float*)rstd + blockIdx_ * blockFactor, blockFactor);
         xGm.SetGlobalBuffer((__gm__ T*)x + blockIdx_ * blockFactor * numCol, rowWork * numCol);
@@ -64,9 +60,7 @@ public:
         // pipe alloc memory to queue, the unit is Bytes
         Ppipe->InitBuffer(inQueueX, DOUBLE_BUFFER_NUM, ubFactor * sizeof(T));
         Ppipe->InitBuffer(inQueueGamma, BUFFER_NUM, numColAlign * sizeof(T));
-        if (!this->nullptrBeta) {
-            Ppipe->InitBuffer(inQueueBeta, BUFFER_NUM, numColAlign * sizeof(T));
-        }
+        Ppipe->InitBuffer(inQueueBeta, BUFFER_NUM, numColAlign * sizeof(T));
         Ppipe->InitBuffer(outQueueY, DOUBLE_BUFFER_NUM, ubFactor * sizeof(T));
 #if __CCE_AICORE__ == 220 || (defined(__NPU_ARCH__) && __NPU_ARCH__ == 3003)
         Ppipe->InitBuffer(outQueueRstd, BUFFER_NUM, rowFactor * NUM_PER_BLK_FP32 * sizeof(float));
@@ -83,10 +77,7 @@ public:
     __aicore__ inline void Process()
     {
         CopyInGammaBeta();
-        LocalTensor<T> betaLocal;
-        if (!this->nullptrBeta) {
-            betaLocal = inQueueBeta.DeQue<T>();
-        }
+        LocalTensor<T> betaLocal = inQueueBeta.DeQue<T>();
         LocalTensor<T> gammaLocal = inQueueGamma.DeQue<T>();
         LocalTensor<uint32_t> offsetLocal = offsetBuf.Get<uint32_t>();
         for (uint32_t i = 0; i < rowFactor; i++) {
@@ -97,9 +88,7 @@ public:
         }
         SubProcessHalf(rowLoop - 1, rowTail, gammaLocal, betaLocal);
         inQueueGamma.FreeTensor(gammaLocal);
-        if (!this->nullptrBeta) {
-            inQueueBeta.FreeTensor(betaLocal);
-        }
+        inQueueBeta.FreeTensor(betaLocal);
     }
 
     __aicore__ inline void SubProcessHalf(uint32_t i_o, uint32_t calc_row_num, LocalTensor<T>& gammaLocal, LocalTensor<T>& betaLocal)
@@ -170,11 +159,9 @@ private:
         LocalTensor<T> gammaLocal = inQueueGamma.AllocTensor<T>();
         DataCopyCustom<T>(gammaLocal, gammaGm, numCol);
         inQueueGamma.EnQue(gammaLocal);
-        if (!this->nullptrBeta) {
-            LocalTensor<T> betaLocal = inQueueBeta.AllocTensor<T>();
-            DataCopyCustom<T>(betaLocal, betaGm, numCol);
-            inQueueBeta.EnQue(betaLocal); 
-        }
+        LocalTensor<T> betaLocal = inQueueBeta.AllocTensor<T>();
+        DataCopyCustom<T>(betaLocal, betaGm, numCol);
+        inQueueBeta.EnQue(betaLocal);
     }
 
     __aicore__ inline void ComputeRstd(LocalTensor<T> xLocal, LocalTensor<float> rstdLocal, uint32_t calc_row_num)
@@ -244,11 +231,9 @@ private:
           for (uint32_t i_i = 0; i_i < calc_row_num; i_i++) {
               Mul(yLocal[i_i * numColAlign], gammaLocal, yLocal[i_i * numColAlign], numCol);
           }
-          if (!this->nullptrBeta) {
-            PipeBarrier<PIPE_V>();
-            for (uint32_t i_i = 0; i_i < calc_row_num; i_i++) {
-                Add(yLocal[i_i * numColAlign], betaLocal, yLocal[i_i * numColAlign], numCol);
-            }
+          PipeBarrier<PIPE_V>();
+          for (uint32_t i_i = 0; i_i < calc_row_num; i_i++) {
+              Add(yLocal[i_i * numColAlign], betaLocal, yLocal[i_i * numColAlign], numCol);
           }
         } else {
           Cast(yLocal, x_fp32, RoundMode::CAST_RINT, calc_row_num * numColAlign);
@@ -263,14 +248,12 @@ private:
               Mul(yfp32[i_i * numColAlign], gammaFp32, yfp32[i_i * numColAlign], numCol);
           }
           PipeBarrier<PIPE_V>();
-          if (!this->nullptrBeta) {
-            Cast(gammaFp32, betaLocal, RoundMode::CAST_NONE, numCol);
-            PipeBarrier<PIPE_V>();
-            for (uint32_t i_i = 0; i_i < calc_row_num; i_i++) {
-                Add(yfp32[i_i * numColAlign], gammaFp32, yfp32[i_i * numColAlign], numCol);
-            }
-            PipeBarrier<PIPE_V>();
+          Cast(gammaFp32, betaLocal, RoundMode::CAST_NONE, numCol);
+          PipeBarrier<PIPE_V>();
+          for (uint32_t i_i = 0; i_i < calc_row_num; i_i++) {
+              Add(yfp32[i_i * numColAlign], gammaFp32, yfp32[i_i * numColAlign], numCol);
           }
+          PipeBarrier<PIPE_V>();
           Cast(yLocal, yfp32, RoundMode::CAST_RINT, calc_row_num * numColAlign);
         }
         PipeBarrier<PIPE_V>();
@@ -334,6 +317,5 @@ private:
     uint32_t rowWork = 1;
     uint32_t rowLoop = 1;
     uint32_t rowTail = 0;
-    uint32_t nullptrBeta = 0;
 };
 #endif // ADD_RMS_NORM__BIAS_MULTI_N_H_

@@ -14,7 +14,7 @@
  */
 #ifndef ADD_RMS_NORM_BIAS_SINGLE_N_H_
 #define ADD_RMS_NORM_BIAS_SINGLE_N_H_
-#include "./rms_norm_base.h"
+#include "../rms_norm_base.h"
 
 using namespace AscendC;
 using namespace RmsNorm;
@@ -37,17 +37,13 @@ public:
         this->ubFactor = tiling->ub_factor;
         this->epsilon = tiling->epsilon;
         this->avgFactor = (numCol != 0) ? (float)1.0 / numCol : 0;
-        this->nullptrBeta = tiling->nullptr_beta;
-
         this->rowWork = 1;
         blockIdx_ = GetBlockIdx();
         // get start index for current core, core parallel
         x1Gm.SetGlobalBuffer((__gm__ T*)x1 + blockIdx_ * numCol, numCol);
         x2Gm.SetGlobalBuffer((__gm__ T*)x2 + blockIdx_ * numCol, numCol);
         gammaGm.SetGlobalBuffer((__gm__ T*)gamma, numCol);
-        if (!this->nullptrBeta) {
-            betaGm.SetGlobalBuffer((__gm__ T*)beta, numCol);
-        }
+        betaGm.SetGlobalBuffer((__gm__ T*)beta, numCol);
         yGm.SetGlobalBuffer((__gm__ T*)y + blockIdx_ * numCol, numCol);
         rstdGm.SetGlobalBuffer((__gm__ float*)rstd + blockIdx_, 1);
         xGm.SetGlobalBuffer((__gm__ T*)x + blockIdx_ * numCol, numCol);
@@ -142,16 +138,14 @@ private:
         WaitFlag<HardEvent::MTE2_V>(eventMTE2V2);
         Mul(x1Local, x1Local, x2Local, numCol);
 
-        if (!this->nullptrBeta) {
-            event_t eventVMTE2Beta = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE2));
-            SetFlag<HardEvent::V_MTE2>(eventVMTE2Beta);
-            WaitFlag<HardEvent::V_MTE2>(eventVMTE2Beta);
-            DataCopyCustom<T>(x2Local, betaGm, numCol);
-            event_t eventMTE2XBeta = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_V));
-            SetFlag<HardEvent::MTE2_V>(eventMTE2XBeta);
-            WaitFlag<HardEvent::MTE2_V>(eventMTE2XBeta);
-            Add(x1Local, x1Local, x2Local, numCol);
-        }
+        event_t eventVMTE2Beta = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE2));
+        SetFlag<HardEvent::V_MTE2>(eventVMTE2Beta);
+        WaitFlag<HardEvent::V_MTE2>(eventVMTE2Beta);
+        DataCopyCustom<T>(x2Local, betaGm, numCol);
+        event_t eventMTE2XBeta = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_V));
+        SetFlag<HardEvent::MTE2_V>(eventMTE2XBeta);
+        WaitFlag<HardEvent::MTE2_V>(eventMTE2XBeta);
+        Add(x1Local, x1Local, x2Local, numCol);
         SetFlag<HardEvent::V_MTE3>(eventVMTE3);
         WaitFlag<HardEvent::V_MTE3>(eventVMTE3);
         DataCopyCustom<T>(yGm, x1Local, numCol);
@@ -224,16 +218,14 @@ private:
         PipeBarrier<PIPE_V>();
         WaitFlag<HardEvent::MTE2_V>(eventMTE2V2);
         Mul(x1Local, x1Local, x2Local, numCol);
-        if (!this->nullptrBeta) {
-            event_t eventVMTE2Beta = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE2));
-            SetFlag<HardEvent::V_MTE2>(eventVMTE2Beta);
-            WaitFlag<HardEvent::V_MTE2>(eventVMTE2Beta);
-            DataCopyCustom<T>(x2Local, betaGm, numCol);
-            event_t eventMTE2XBeta = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_V));
-            SetFlag<HardEvent::MTE2_V>(eventMTE2XBeta);
-            WaitFlag<HardEvent::MTE2_V>(eventMTE2XBeta);
-            Add(x1Local, x1Local, x2Local, numCol);
-        }
+        event_t eventVMTE2Beta = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE2));
+        SetFlag<HardEvent::V_MTE2>(eventVMTE2Beta);
+        WaitFlag<HardEvent::V_MTE2>(eventVMTE2Beta);
+        DataCopyCustom<T>(x2Local, betaGm, numCol);
+        event_t eventMTE2XBeta = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_V));
+        SetFlag<HardEvent::MTE2_V>(eventMTE2XBeta);
+        WaitFlag<HardEvent::MTE2_V>(eventMTE2XBeta);
+        Add(x1Local, x1Local, x2Local, numCol);
         SetFlag<HardEvent::V_MTE3>(eventVMTE3);
         WaitFlag<HardEvent::V_MTE3>(eventVMTE3);
         DataCopyCustom<T>(yGm, x1Local, numCol);
@@ -314,7 +306,7 @@ private:
         event_t eventMTE3V2_BF16_0 = static_cast<event_t>(GetTPipePtr()->AllocEventID<HardEvent::MTE3_V>());
         SetFlag<HardEvent::MTE3_V>(eventMTE3V2_BF16_0);
 #endif
-        
+
         Muls(xFp32Local, xFp32Local, rstdValue, numCol);
         PipeBarrier<PIPE_V>();
         WaitFlag<HardEvent::MTE3_V>(eventMTE3V_BF16_0);
@@ -331,18 +323,16 @@ private:
         Cast(sqxLocal, x2Local, RoundMode::CAST_NONE, numCol);
         PipeBarrier<PIPE_V>();
         Mul(xFp32Local, xFp32Local, sqxLocal, numCol);
-        if (!this->nullptrBeta) {
-            event_t eventVMTE2Beta = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE2));
-            SetFlag<HardEvent::V_MTE2>(eventVMTE2Beta);
-            WaitFlag<HardEvent::V_MTE2>(eventVMTE2Beta);
-            DataCopyCustom<T>(x2Local, betaGm, numCol);
-            event_t eventMTE2XBeta = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_V));
-            SetFlag<HardEvent::MTE2_V>(eventMTE2XBeta);
-            WaitFlag<HardEvent::MTE2_V>(eventMTE2XBeta);
-            Cast(sqxLocal, x2Local, RoundMode::CAST_NONE, numCol);
-            PipeBarrier<PIPE_V>();
-            Add(xFp32Local, xFp32Local, sqxLocal, numCol);
-        }
+        event_t eventVMTE2Beta = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE2));
+        SetFlag<HardEvent::V_MTE2>(eventVMTE2Beta);
+        WaitFlag<HardEvent::V_MTE2>(eventVMTE2Beta);
+        DataCopyCustom<T>(x2Local, betaGm, numCol);
+        event_t eventMTE2XBeta = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_V));
+        SetFlag<HardEvent::MTE2_V>(eventMTE2XBeta);
+        WaitFlag<HardEvent::MTE2_V>(eventMTE2XBeta);
+        Cast(sqxLocal, x2Local, RoundMode::CAST_NONE, numCol);
+        PipeBarrier<PIPE_V>();
+        Add(xFp32Local, xFp32Local, sqxLocal, numCol);
         PipeBarrier<PIPE_V>();
         Cast(x1Local, xFp32Local, RoundMode::CAST_RINT, numCol);
         event_t eventVMTE3_BF16_2 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));
@@ -371,6 +361,5 @@ private:
     float avgFactor;
     int32_t blockIdx_;
     uint32_t rowWork = 1;
-    uint32_t nullptrBeta = 0;
 };
 #endif // _ADD_RMS_NORM_BIAS_SINGLE_N_H_

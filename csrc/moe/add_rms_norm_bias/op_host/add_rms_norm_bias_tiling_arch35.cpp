@@ -13,7 +13,7 @@
  * \brief
  */
 // Adapted from cann/ops-nn v9.2.0-beta.2 @ 30ef7dd563c8a4b74c3161835c8e47d1d96f87b6.
-// Preserve upstream tiling; add optional beta storage and local platform/logging adapters.
+// Preserve upstream tiling; add independent beta storage and local platform/logging adapters.
 
 #include <algorithm>
 #include <map>
@@ -32,7 +32,6 @@ constexpr uint32_t FLOAT_PER_REAPEAT = 64;
 constexpr uint32_t BYTE_SIZE_2_BLOCK_ALIGN_NUM = 16;
 constexpr uint32_t X_INDEX = 0;
 constexpr uint32_t GAMMA_INDEX = 2;
-constexpr uint32_t BETA_INDEX = 3;
 // A5-only dispatch; matches the copied Device platform helpers.
 constexpr uint64_t UB_BLOCK_BYTES = 32;
 constexpr uint64_t VECTOR_REGISTER_BYTES = 256;
@@ -81,7 +80,7 @@ void SetByDtype(ge::DataType dataType, uint32_t& dtypeKey, uint32_t& dataPerBloc
     }
 }
 
-uint32_t ComputeTotalBufSize(uint32_t bufferNum, ge::DataType dtype, uint32_t dtypeSize, uint32_t length, bool split, bool hasBeta)
+uint32_t ComputeTotalBufSize(uint32_t bufferNum, ge::DataType dtype, uint32_t dtypeSize, uint32_t length, bool split)
 {
     // queBuferSize: 计算搬运需要空间大小
     uint32_t queBufSize = bufferNum * length * dtypeSize * QUE_NUM + FLOAT_PER_REAPEAT * bufferNum * FLOAT_BYTE_SIZE;
@@ -93,7 +92,7 @@ uint32_t ComputeTotalBufSize(uint32_t bufferNum, ge::DataType dtype, uint32_t dt
         // 普通场景下：如果是float16及bfloat16数据类型，需要一块：转FP32
         tmpBufSzie = length * FLOAT_BYTE_SIZE;
     }
-    uint32_t betaBufSize = hasBeta ? bufferNum * length * dtypeSize : 0;
+    uint32_t betaBufSize = bufferNum * length * dtypeSize;
     return queBufSize + betaBufSize + tmpBufSzie + RETAINED_SIZE;
 }
 
@@ -120,21 +119,6 @@ ge::graphStatus TilingAddRmsNormBiasRegbase(gert::TilingContext* context)
     const float* epsilon = attrs->GetFloat(0);
     OP_CHECK_NULL_WITH_CONTEXT(context, epsilon);
     OP_CHECK_IF(*epsilon < 0, OP_LOGE(context, "Epsilon less than zero, please check."), return ge::GRAPH_FAILED);
-    const auto betaDesc = context->GetOptionalInputDesc(BETA_INDEX);
-    const bool hasBeta = betaDesc != nullptr;
-    if (hasBeta) {
-        const auto betaShape = context->GetOptionalInputShape(BETA_INDEX);
-        OP_CHECK_IF(betaShape == nullptr ||
-                        betaDesc->GetDataType() != context->GetInputDesc(GAMMA_INDEX)->GetDataType(),
-                    OP_LOGE(context, "Beta must have the same shape and dtype as gamma."), return ge::GRAPH_FAILED);
-        const auto& shape = betaShape->GetStorageShape();
-        OP_CHECK_IF(shape.GetDimNum() != gammaShape.GetDimNum(),
-                    OP_LOGE(context, "Beta rank must match gamma."), return ge::GRAPH_FAILED);
-        for (size_t i = 0; i < gammaShape.GetDimNum(); ++i) {
-            OP_CHECK_IF(shape.GetDim(i) != gammaShape.GetDim(i),
-                        OP_LOGE(context, "Beta shape must match gamma."), return ge::GRAPH_FAILED);
-        }
-    }
     uint64_t numCol = gammaShape.GetShapeSize();
     float avgFactor = (numCol == 0U) ? 0.0f : 1.0f / static_cast<float>(numCol);
     size_t xDimNum = xShape.GetDimNum();
@@ -189,7 +173,7 @@ ge::graphStatus TilingAddRmsNormBiasRegbase(gert::TilingContext* context)
     uint64_t binAddBufferOneline = CeilDiv((binAddQuotient + vlfp32 - 1) / vlfp32, ubfp32) * ubfp32;
 
     // 可以全载的行数
-    int64_t tmpSize = static_cast<int64_t>(ubSize) - UB_RESERVE_FOR_RSTDALIGN - (numColAlign * curElementByte * (hasBeta ? NUM_2 : 1));
+    int64_t tmpSize = static_cast<int64_t>(ubSize) - UB_RESERVE_FOR_RSTDALIGN - (numColAlign * curElementByte * NUM_2);
     if (tmpSize > 0 && numColAlign <= binaryAddElemtMaxLen) {
         rowFactor = tmpSize / (numColAlign * curElementByte * DOUBLE_BUFFER_NUM * QUE_MODE_NORMAL_NUM +
                                numColAlign * sizeof(float) + sizeof(float) * (DOUBLE_BUFFER_NUM + 1) +
@@ -207,7 +191,6 @@ ge::graphStatus TilingAddRmsNormBiasRegbase(gert::TilingContext* context)
         tiling.set_binAddQuotient(binAddQuotient);
         tiling.set_epsilon(*epsilon);
         tiling.set_avgFactor(avgFactor);
-        tiling.set_nullptr_beta(hasBeta ? 0 : 1);
         OP_LOGI(context,
                 "TilingData numCore: %u, ubSize: %lu, numRow: %u, numCol: %u, numColAlign: %u, "
                 "blockFactor: %u, rowFactor: %u, binAddQuotient: %u, "
@@ -223,7 +206,7 @@ ge::graphStatus TilingAddRmsNormBiasRegbase(gert::TilingContext* context)
         numColAlign = CeilDiv(numCol * curElementByte, ALING_FACTOR_512) * ALING_FACTOR_512 / curElementByte;
         rowFactor = FLOAT_PER_REAPEAT;
         ubFactor = 1U;
-        while (ComputeTotalBufSize(DOUBLE_BUFFER_NUM, dataType, curElementByte, ubFactor * MULTI_FACTOR_2, true, hasBeta) <
+        while (ComputeTotalBufSize(DOUBLE_BUFFER_NUM, dataType, curElementByte, ubFactor * MULTI_FACTOR_2, true) <
                ubSize) {
             ubFactor *= MULTI_FACTOR_2;
         }
@@ -243,7 +226,6 @@ ge::graphStatus TilingAddRmsNormBiasRegbase(gert::TilingContext* context)
         tiling.set_ubFactor(ubFactor);
         tiling.set_epsilon(*epsilon);
         tiling.set_avgFactor(avgFactor);
-        tiling.set_nullptr_beta(hasBeta ? 0 : 1);
         tiling.set_ubLoop(ubLoop);
         tiling.set_colBuferLength(colBuferLength);
         tiling.set_multiNNum(multiNNum);

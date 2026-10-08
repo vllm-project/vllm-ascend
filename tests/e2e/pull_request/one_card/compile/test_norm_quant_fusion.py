@@ -70,9 +70,7 @@ class TestModelWithoutBias(nn.Module):
         """
         residual = torch.zeros_like(x)
 
-        norm_output, _, new_residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
-            x, residual, self.rms_norm_weight, None, self.eps
-        )
+        norm_output, _, new_residual = torch.ops.npu.npu_add_rms_norm(x, residual, self.rms_norm_weight, self.eps)
 
         quantized_output = torch.ops.vllm.quantize(
             norm_output, self.quant_scale, self.quant_scale_reciprocal, self.quant_offset
@@ -82,7 +80,7 @@ class TestModelWithoutBias(nn.Module):
 
     def ops_in_model_before(self) -> list[OpOverload]:
         """Return the list of expected operators BEFORE fusion."""
-        return [torch.ops._C_ascend.npu_add_rms_norm_bias.default, torch.ops.vllm.quantize.default]
+        return [torch.ops.npu.npu_add_rms_norm.default, torch.ops.vllm.quantize.default]
 
     def ops_in_model_after(self) -> list[OpOverload]:
         """Return the list of expected operators AFTER successful fusion."""

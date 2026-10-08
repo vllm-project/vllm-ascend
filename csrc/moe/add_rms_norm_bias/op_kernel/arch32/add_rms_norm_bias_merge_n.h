@@ -14,7 +14,7 @@
  */
 #ifndef ADD_RMS_NORM_BIAS_MERGE_N_H_
 #define ADD_RMS_NORM_BIAS_MERGE_N_H_
-#include "./rms_norm_base.h"
+#include "../rms_norm_base.h"
 
 using namespace AscendC;
 using namespace RmsNorm;
@@ -56,14 +56,11 @@ public:
         this->mulTailFp16 = tiling->mul_tail_fp16;
         this->dstRepStrideFp16 = tiling->dst_rep_stride_fp16;
         this->isPerformance = tiling->is_performance;
-        this->nullptrBeta = tiling->nullptr_beta;
         // get start index for current core, core parallel
         x1Gm.SetGlobalBuffer((__gm__ T*)x1 + blockIdx_ * blockFactor * numCol, rowWork * numCol);
         x2Gm.SetGlobalBuffer((__gm__ T*)x2 + blockIdx_ * blockFactor * numCol, rowWork * numCol);
         gammaGm.SetGlobalBuffer((__gm__ T*)gamma, numCol);
-        if (!this->nullptrBeta) {
-            betaGm.SetGlobalBuffer((__gm__ T*)beta, numCol);
-        }
+        betaGm.SetGlobalBuffer((__gm__ T*)beta, numCol);
         yGm.SetGlobalBuffer((__gm__ T*)y + blockIdx_ * blockFactor * numCol, rowWork * numCol);
         rstdGm.SetGlobalBuffer((__gm__ float*)rstd + blockIdx_ * blockFactor, blockFactor);
         xGm.SetGlobalBuffer((__gm__ T*)x + blockIdx_ * blockFactor * numCol, rowWork * numCol);
@@ -71,9 +68,7 @@ public:
         // pipe alloc memory to queue, the unit is Bytes
         Ppipe->InitBuffer(inQueueX, DOUBLE_BUFFER_NUM, ubFactor * sizeof(T));
         Ppipe->InitBuffer(inQueueGamma, BUFFER_NUM, ubFactor * sizeof(T));
-        if (!this->nullptrBeta) {
-            Ppipe->InitBuffer(inQueueBeta, BUFFER_NUM, ubFactor * sizeof(T));
-        }
+        Ppipe->InitBuffer(inQueueBeta, BUFFER_NUM, ubFactor * sizeof(T));
         Ppipe->InitBuffer(outQueueY, DOUBLE_BUFFER_NUM, ubFactor * sizeof(T));
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 220 || (defined(__NPU_ARCH__) && __NPU_ARCH__ == 3003)
         Ppipe->InitBuffer(outQueueRstd, BUFFER_NUM, rowFactor * sizeof(float));
@@ -91,18 +86,13 @@ public:
     {
         CopyInGammaBeta();
         LocalTensor<T> gammaLocal = inQueueGamma.DeQue<T>();
-        LocalTensor<T> betaLocal;
-        if (!this->nullptrBeta) {
-            betaLocal = inQueueBeta.DeQue<T>();
-        }
+        LocalTensor<T> betaLocal = inQueueBeta.DeQue<T>();
         for (uint32_t i_o = 0; i_o < rowLoop - 1; i_o++) {
             MainCompute(i_o, rowFactor, gammaLocal, betaLocal);
         }
         MainCompute(rowLoop - 1, rowTail, gammaLocal, betaLocal);
         inQueueGamma.FreeTensor(gammaLocal);
-        if (!this->nullptrBeta) {
-            inQueueBeta.FreeTensor(betaLocal);
-        }
+        inQueueBeta.FreeTensor(betaLocal);
     }
 
     __aicore__ inline void MainCompute(uint32_t i_o, uint32_t calc_row_num, LocalTensor<T>& gammaLocal, LocalTensor<T>& betaLocal)
@@ -185,11 +175,9 @@ private:
         LocalTensor<T> gammaLocal = inQueueGamma.AllocTensor<T>();
         DataCopyCustom<T>(gammaLocal, gammaGm, numCol);
         inQueueGamma.EnQue(gammaLocal);
-        if (!this->nullptrBeta) {
-            LocalTensor<T> betaLocal = inQueueBeta.AllocTensor<T>();
-            DataCopyCustom<T>(betaLocal, betaGm, numCol);
-            inQueueBeta.EnQue(betaLocal);
-        }
+        LocalTensor<T> betaLocal = inQueueBeta.AllocTensor<T>();
+        DataCopyCustom<T>(betaLocal, betaGm, numCol);
+        inQueueBeta.EnQue(betaLocal);
     }
 
     __aicore__ inline void ComputeRstd(LocalTensor<T> xLocal, LocalTensor<float> rstdLocal, uint32_t calc_row_num, uint32_t elementNum)
@@ -233,7 +221,7 @@ private:
           Brcb(tmpLocal[r_i * splidRow * MOV_8], rstdLocal[r_i * splidRow], splidRow, {1, 8});
         }
         PipeBarrier<PIPE_V>();
-        
+
         if(rowRepeatTail1 > 0) {
           Brcb(tmpLocal[rowRepeatLoop1 * splidRow * MOV_8], rstdLocal[rowRepeatLoop1 * splidRow], rowRepeatTail1, {1, 8});
           PipeBarrier<PIPE_V>();
@@ -253,9 +241,7 @@ private:
         PipeBarrier<PIPE_V>();
         if constexpr (is_same<T, half>::value) {
             repeatByRow<half>(yLocal, yLocal, gammaLocal, calc_row_num, TWO_UINT);
-            if (!this->nullptrBeta) {
-                addRepeatByRow<half>(yLocal, yLocal, betaLocal, calc_row_num, TWO_UINT);
-            }
+            addRepeatByRow<half>(yLocal, yLocal, betaLocal, calc_row_num, TWO_UINT);
         } else if constexpr (is_same<T, bfloat16_t>::value) {
             LocalTensor<float> sqx = sqxBuf.Get<float>();
             LocalTensor<float> x_fp32 = xFp32Buf.Get<float>();
@@ -263,17 +249,13 @@ private:
             Cast(sqx, gammaLocal, RoundMode::CAST_NONE, elementNum);
             PipeBarrier<PIPE_V>();
             repeatByRow<float>(x_fp32, x_fp32, sqx, calc_row_num, THREE_UINT);
-            if (!this->nullptrBeta) {
-                Cast(sqx, betaLocal, RoundMode::CAST_NONE, elementNum);
-                PipeBarrier<PIPE_V>();
-                addRepeatByRow<float>(x_fp32, x_fp32, sqx, calc_row_num, THREE_UINT);
-            }
+            Cast(sqx, betaLocal, RoundMode::CAST_NONE, elementNum);
+            PipeBarrier<PIPE_V>();
+            addRepeatByRow<float>(x_fp32, x_fp32, sqx, calc_row_num, THREE_UINT);
             Cast(yLocal, x_fp32, RoundMode::CAST_RINT, elementNum);
         } else {
             repeatByRow<float>(yLocal, yLocal, gammaLocal, calc_row_num, THREE_UINT);
-            if (!this->nullptrBeta) {
-                addRepeatByRow<float>(yLocal, yLocal, betaLocal, calc_row_num, THREE_UINT);
-            }
+            addRepeatByRow<float>(yLocal, yLocal, betaLocal, calc_row_num, THREE_UINT);
         }
         PipeBarrier<PIPE_V>();
         outQueueY.EnQue<T>(yLocal);
@@ -298,10 +280,10 @@ private:
         outQueueRstd.FreeTensor(rstdLocal);
     }
 #endif
-    
+
     template <typename U>
     __aicore__ inline void repeatByRow(const LocalTensor<U>& dstLocal, const LocalTensor<U>& src1Local, const LocalTensor<U>& src2Local, uint32_t calc_row_num, uint32_t type)
-    {   
+    {
         // TWO_UINT=gammaFp16 ONE_UINT=rstd
         uint32_t strideParams[6] = {mulLoopFp32, mulTailFp32, 64, 1, dstRepStrideFp32, 0};
         if (type == TWO_UINT) {
@@ -360,7 +342,7 @@ private:
 
     template <typename U>
     __aicore__ inline void addRepeatByRow(const LocalTensor<U>& dstLocal, const LocalTensor<U>& src1Local, const LocalTensor<U>& src2Local, uint32_t calc_row_num, uint32_t type)
-    {   
+    {
         // TWO_UINT=gammaFp16 ONE_UINT=rstd
         uint32_t strideParams[6] = {mulLoopFp32, mulTailFp32, 64, 1, dstRepStrideFp32, 0};
         if (type == TWO_UINT) {
@@ -466,6 +448,5 @@ private:
     uint32_t mulLoopFp16;
     uint32_t mulTailFp16;
     uint8_t dstRepStrideFp16;
-    uint32_t nullptrBeta = 0;
 };
 #endif // _ADD_RMS_NORM_BIAS_MERGE_N_H_

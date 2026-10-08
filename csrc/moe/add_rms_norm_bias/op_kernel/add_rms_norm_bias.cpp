@@ -12,11 +12,11 @@
  * \file add_rms_norm_bias.cpp
  * \brief
  */
-#include "add_rms_norm_bias.h"
-#include "add_rms_norm_bias_split_d.h"
-#include "add_rms_norm_bias_merge_n.h"
-#include "add_rms_norm_bias_multi_n.h"
-#include "add_rms_norm_bias_single_n.h"
+#include "arch32/add_rms_norm_bias.h"
+#include "arch32/add_rms_norm_bias_split_d.h"
+#include "arch32/add_rms_norm_bias_merge_n.h"
+#include "arch32/add_rms_norm_bias_multi_n.h"
+#include "arch32/add_rms_norm_bias_single_n.h"
 
 using namespace AscendC;
 

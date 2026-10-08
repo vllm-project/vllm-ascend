@@ -563,9 +563,10 @@ std::tuple<at::Tensor,at::Tensor, at::Tensor> npu_add_rms_norm_bias_meta(
     const at::Tensor& x1,
     const at::Tensor& x2,
     const at::Tensor& gamma,
-    const c10::optional<at::Tensor> &beta,
+    const at::Tensor& beta,
     double epsilon)
 {
+    TORCH_CHECK(beta.defined(), "npu_add_rms_norm_bias requires a beta tensor");
     int64_t dim_x = x1.dim();
     int64_t dim_gamma = gamma.dim();
     int64_t diff = dim_x - dim_gamma;

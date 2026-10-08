@@ -3188,7 +3188,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "npu_add_rms_norm_bias(Tensor x1, "
                             "Tensor x2, "
                             "Tensor gamma, "
-                            "Tensor? beta=None, "
+                            "Tensor beta, "
                             "float epsilon=1e-6)"
         "-> (Tensor y ,Tensor rstd, Tensor x)"
         );

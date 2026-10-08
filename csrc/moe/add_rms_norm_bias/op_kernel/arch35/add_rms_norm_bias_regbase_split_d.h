@@ -52,15 +52,12 @@ public:
         epsilon = tiling->epsilon;
         colBufferLength = tiling->colBuferLength;
         avgFactor = tiling->avgFactor;
-        nullptrBeta = tiling->nullptr_beta;
         rowWork = (GetBlockIdx() < GetBlockNum() - 1) ? blockFactor : numRow - (GetBlockNum() - 1) * blockFactor;
         xGm1.SetGlobalBuffer((__gm__ T*)x1 + GetBlockIdx() * blockFactor * numCol, rowWork * numCol);
         xGm2.SetGlobalBuffer((__gm__ T*)x2 + GetBlockIdx() * blockFactor * numCol, rowWork * numCol);
         gammaGm.SetGlobalBuffer((__gm__ T*)gamma, numCol);
-        if (!nullptrBeta) {
-            betaGm.SetGlobalBuffer((__gm__ T*)beta, numCol);
-            pPipe->InitBuffer(inQueueBeta, DOUBLE_BUFFER_NUM, colBufferLength * sizeof(T));
-        }
+        betaGm.SetGlobalBuffer((__gm__ T*)beta, numCol);
+        pPipe->InitBuffer(inQueueBeta, DOUBLE_BUFFER_NUM, colBufferLength * sizeof(T));
         yGm.SetGlobalBuffer((__gm__ T*)y + GetBlockIdx() * blockFactor * numCol, rowWork * numCol);
         rstdGm.SetGlobalBuffer((__gm__ float*)rstd + GetBlockIdx() * blockFactor, blockFactor);
         xOutGm.SetGlobalBuffer((__gm__ T*)x + GetBlockIdx() * blockFactor * numCol, rowWork * numCol);
@@ -225,7 +222,7 @@ private:
             level1 += 1;
             ComputeMultiLevelReduce(level1Local, level2Local, level3Local, level1, level2, level3);
         }
-        ComputeMultiLevelRstd<false>(dstLocal, position, level1Local, level2Local, level3Local, level1, level2, level3);
+        ComputeMultiLevelRstd<false>(dstLocal, position, level1Local, level2Local, level3Local, level1, level2);
     }
 
     __aicore__ inline void ComputeLatter(uint32_t rowRepeat, uint32_t calRowNum, uint32_t colRepeat,
@@ -233,11 +230,8 @@ private:
     {
         CopyInGamma(colRepeat, calColNum);
         LocalTensor<T> gammaLocal = inQueueGamma.DeQue<T>();
-        LocalTensor<T> betaLocal;
-        if (!nullptrBeta) {
-            CopyInBeta(colRepeat, calColNum);
-            betaLocal = inQueueBeta.DeQue<T>();
-        }
+        CopyInBeta(colRepeat, calColNum);
+        LocalTensor<T> betaLocal = inQueueBeta.DeQue<T>();
         for (uint32_t row = 0; row < calRowNum; row++) {
             uint64_t offset = (rowRepeat * rowFactor + row) * numCol + colRepeat * ubFactor;
             CopyInX(offset, calColNum);
@@ -261,17 +255,9 @@ private:
             LocalTensor<T> xOutLocal = outQueueX.AllocTensor<T>();
             uint32_t calCount = CeilAlign((uint64_t)(calColNum * sizeof(T)), ALIGN_512_FACTOR) / sizeof(T);
             if constexpr (!is_same<T, float>::value) {
-                if (nullptrBeta) {
-                    ComputeLatterY<T, false>(xFp32, gammaLocal, betaLocal, yLocal, rstdLocal, row, calCount, xOutLocal);
-                } else {
-                    ComputeLatterY<T, true>(xFp32, gammaLocal, betaLocal, yLocal, rstdLocal, row, calCount, xOutLocal);
-                }
+                ComputeLatterY<T>(xFp32, gammaLocal, betaLocal, yLocal, rstdLocal, row, calCount, xOutLocal);
             } else {
-                if (nullptrBeta) {
-                    ComputeLatterY<T, false>(xLocal1, gammaLocal, betaLocal, yLocal, rstdLocal, row, calCount, xOutLocal);
-                } else {
-                    ComputeLatterY<T, true>(xLocal1, gammaLocal, betaLocal, yLocal, rstdLocal, row, calCount, xOutLocal);
-                }
+                ComputeLatterY<T>(xLocal1, gammaLocal, betaLocal, yLocal, rstdLocal, row, calCount, xOutLocal);
             }
             inQueueX1.FreeTensor(xLocal1);
             inQueueX2.FreeTensor(xLocal2);
@@ -281,9 +267,7 @@ private:
             CopyOutX(rowRepeat * rowFactor + row, colRepeat, calColNum);
         }
         inQueueGamma.FreeTensor(gammaLocal);
-        if (!nullptrBeta) {
-            inQueueBeta.FreeTensor(betaLocal);
-        }
+        inQueueBeta.FreeTensor(betaLocal);
     }
 
     __aicore__ inline void CopyOutY(uint32_t curRow, uint32_t curCol, uint32_t calColNum)
@@ -339,7 +323,6 @@ private:
     uint32_t rowFactor;
     float epsilon;
     float avgFactor;
-    uint32_t nullptrBeta{1};
     uint32_t rowWork{1};
 };
 } // namespace AddRmsNorm
