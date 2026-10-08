@@ -1,0 +1,16 @@
+{"inputs":[{"name":"x","type":"tensor","required":true,"dtype":"float16","shape":[1,4096]},{"name":"mult","type":"attr","required":true,"dtype":"int","value":4}]}
+{"inputs":[{"name":"x","type":"tensor","required":true,"dtype":"float16","shape":[4,4096]},{"name":"mult","type":"attr","required":true,"dtype":"int","value":4}]}
+{"inputs":[{"name":"x","type":"tensor","required":true,"dtype":"float16","shape":[16,4096]},{"name":"mult","type":"attr","required":true,"dtype":"int","value":4}]}
+{"inputs":[{"name":"x","type":"tensor","required":true,"dtype":"float16","shape":[17,4096]},{"name":"mult","type":"attr","required":true,"dtype":"int","value":4}]}
+{"inputs":[{"name":"x","type":"tensor","required":true,"dtype":"float16","shape":[128,4096]},{"name":"mult","type":"attr","required":true,"dtype":"int","value":4}]}
+{"inputs":[{"name":"x","type":"tensor","required":true,"dtype":"float16","shape":[1024,4096]},{"name":"mult","type":"attr","required":true,"dtype":"int","value":4}]}
+{"inputs":[{"name":"x","type":"tensor","required":true,"dtype":"float16","shape":[3500,4096]},{"name":"mult","type":"attr","required":true,"dtype":"int","value":4}]}
+{"inputs":[{"name":"x","type":"tensor","required":true,"dtype":"float16","shape":[8192,4096]},{"name":"mult","type":"attr","required":true,"dtype":"int","value":4}]}
+{"inputs":[{"name":"x","type":"tensor","required":true,"dtype":"bfloat16","shape":[1,4096]},{"name":"mult","type":"attr","required":true,"dtype":"int","value":4}]}
+{"inputs":[{"name":"x","type":"tensor","required":true,"dtype":"bfloat16","shape":[4,4096]},{"name":"mult","type":"attr","required":true,"dtype":"int","value":4}]}
+{"inputs":[{"name":"x","type":"tensor","required":true,"dtype":"bfloat16","shape":[16,4096]},{"name":"mult","type":"attr","required":true,"dtype":"int","value":4}]}
+{"inputs":[{"name":"x","type":"tensor","required":true,"dtype":"bfloat16","shape":[17,4096]},{"name":"mult","type":"attr","required":true,"dtype":"int","value":4}]}
+{"inputs":[{"name":"x","type":"tensor","required":true,"dtype":"bfloat16","shape":[128,4096]},{"name":"mult","type":"attr","required":true,"dtype":"int","value":4}]}
+{"inputs":[{"name":"x","type":"tensor","required":true,"dtype":"bfloat16","shape":[1024,4096]},{"name":"mult","type":"attr","required":true,"dtype":"int","value":4}]}
+{"inputs":[{"name":"x","type":"tensor","required":true,"dtype":"bfloat16","shape":[3500,4096]},{"name":"mult","type":"attr","required":true,"dtype":"int","value":4}]}
+{"inputs":[{"name":"x","type":"tensor","required":true,"dtype":"bfloat16","shape":[8192,4096]},{"name":"mult","type":"attr","required":true,"dtype":"int","value":4}]}

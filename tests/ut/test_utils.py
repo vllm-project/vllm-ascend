@@ -164,6 +164,17 @@ class TestUtils(TestBase):
             mock_import_module.side_effect = ImportError("import error")
             self.assertFalse(utils.enable_custom_op())
 
+    def test_enable_custom_op_cached_state_does_not_import(self):
+        # The mHC helper calls this for each forward. Both cached outcomes must
+        # return before entering the lazy loader or repeating its imports.
+        for enabled in (True, False):
+            with (
+                self.subTest(enabled=enabled),
+                mock.patch.object(utils, "_CUSTOM_OP_ENABLED", enabled),
+                mock.patch("builtins.__import__", side_effect=AssertionError("Cached loader imported a module")),
+            ):
+                self.assertIs(utils.enable_custom_op(), enabled)
+
     def test_find_hccl_library(self):
         with mock.patch.dict(os.environ, {"HCCL_SO_PATH": "/path/to/hccl/libhccl.so"}):
             self.assertEqual(utils.find_hccl_library(), "/path/to/hccl/libhccl.so")

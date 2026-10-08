@@ -51,6 +51,8 @@ class HardwareCapability(Enum):
     # Legacy default: replace vLLM's custom-op list with ``["all"]`` during
     # platform configuration. Runtime extension loading is a separate contract.
     AUTO_ENABLE_CUSTOM_OPS = auto()
+    # Forward FP16/BF16 mHC replication via the VllmMhcExpand ACLNN kernel.
+    MHC_EXPAND = auto()
     # Register ATB extension entry points eagerly during worker construction.
     ATB_EXTENSIONS = auto()
     # Run the ATB matmul warmup that avoids first-request cache-write latency.
@@ -284,7 +286,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             weight_layout_policy=WeightLayoutPolicy.CONFIGURABLE,
             moe_comm_policy=MoECommPolicy.CAPACITY_AND_EXPERT_DENSITY,
             quantization_backend_family=QuantizationBackendFamily.STANDARD,
-            capabilities=_STANDARD_CAPABILITIES | {HardwareCapability.NPU_TOP_K_TOP_P},
+            capabilities=_STANDARD_CAPABILITIES | {HardwareCapability.NPU_TOP_K_TOP_P, HardwareCapability.MHC_EXPAND},
         ),
         AscendDeviceType.A3: HardwareProfile(
             _device_type=AscendDeviceType.A3,
