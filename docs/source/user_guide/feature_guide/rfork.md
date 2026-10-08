@@ -73,7 +73,9 @@ RFork does not match instances by `model_url` alone. The local seed key is deriv
 
 The compatibility fingerprint covers configuration that changes tensor *contents* without changing tensor *shapes*: the RFork protocol version, `model_url`, `model_deploy_strategy_name`, the resolved model revision, the checkpoint quantization config digest, the architecture list, RoPE settings, the effective P/D role (`kv_role`), and `mix_placement`.
 
-The structural digest is computed from the same transferable tensor set the transfer manifest validates — names, shapes, dtypes, and NPU formats. Any setting that changes tensor structure is therefore captured automatically: weight dtype, TP/PP/EP sharding, NZ and fused MC2 layout switches, quantization post-processing, and speculative draft topology. New Ascend weight-layout switches do not need to be enumerated in the fingerprint.
+The structural digest is computed from the same transferable tensor inventory the transfer manifest validates: stable tensor IDs, shapes, dtypes, and NPU formats. Any setting that changes tensor structure is captured automatically, including weight dtype, TP/PP/EP sharding, NZ and fused MC2 layout switches, quantization post-processing, and speculative draft topology.
+
+Tensor IDs are readable canonical paths such as `layers.0.self_attn.impl.scales["w"]`. Registered parameters and buffers are named first through module registration edges, so their module paths stay canonical even when an implementation object exposes a shorter alias. Remaining tensors take the shortest path through supported tensor attributes, choosing the smallest path when several have the same length. Container keys use typed labels (strings are quoted, while integers, floats, booleans, `None`, dtypes, and tuples of these are tagged; ordinary Enum members use their canonical member names (aliases share that name), while Flag and IntFlag members use their integer values), and collection rejects any other key type, as well as distinct entries of one container that share a label, instead of guessing. IDs do not contain memory addresses and are independent of attribute insertion order. Exact aliases of the same tensor range are deduplicated, while distinct storage views remain separate entries. Seed and receiver must have compatible tensor and alias graphs.
 
 Shard ranks distinguish same-shaped shards: `tp_rank` picks the TP slice, `pp_rank` the pipeline stage, `ep_rank` the expert set (expert weights are same-shaped across EP ranks), and `sharded_dp_rank` the DP position — but only when weight content is actually sharded across the DP dimension. Two deployment forms break DP replication: fine-grained TP (`finegrained_tp_config`) shards selected modules across the DP dimension, and MoE models with `data_parallel_size > 1` shard expert weights across the DP×TP plane — with or without expert parallelism enabled, since with EP off the DP position is the only thing distinguishing same-shaped different-content expert shards. In those cases the DP rank joins the seed key as a shard selector; replicated DP ranks leave it unset and keep sharing one seed pool.
 
@@ -100,9 +102,6 @@ This path handles Ascend quantization changes such as weight transposition, NZ f
 
 When validating RFork for a quantized model:
 
-- Apply the same vLLM Ascend code to both the seed instance and the receiver instance.
-- Restart the planner and all vLLM instances after changing RFork code, because existing seeds keep their old transfer metadata.
-- Use a new `model_deploy_strategy_name` after changing model arguments or RFork code, so the planner does not match a receiver with an incompatible old seed.
 - A successful TP0 RFork transfer logs elapsed time, bytes, chunks, and throughput at INFO. Other TP ranks and
   per-chunk details remain at DEBUG. Seed acquisition that produces no lease — whether because no compatible seed
   is available or because the planner request or response fails validation — logs
@@ -127,7 +126,7 @@ manifest checks:
   that changes byte order must update the compatibility descriptor or extend the
   transfer protocol instead of relying on the existing dense-view contract.
 - **Processed NZ payload length:** RFork intentionally reads exactly
-  `numel * element_size` bytes for each named tensor, including processed NZ,
+  `numel * element_size` bytes for each tensor entry, including processed NZ,
   packed-weight, and derived-scale tensors. Allocation capacity, descriptor-only
   padding outside the tensor's dense logical range, and adjacent or shared storage
   are not part of that tensor's payload and are not copied implicitly. A future
@@ -142,6 +141,8 @@ Mainstream DeepSeek/Qwen/GLM series are supported.
 ## Performance Considerations
 
 RFork indexes tensor address ranges to find backing allocations and uses binary search for memory-coverage checks during registration. Registration still adds seed startup cost, so RFork is most beneficial when later replicas reuse a seed rather than for a single cold start.
+
+For processed-layout transfers, RFork reuses the full registration inventory to compute the initial structural digest and reuses the final post-eval layout digest for immediate seed publication. Checkpoint-layout processing rebuilds registration, and deferred seed publication scans the live model again to check for topology changes.
 
 Performance depends on model size, shard topology, NPU tensor layout, TransferEngine registration time, network bandwidth, and the number of concurrent destinations. Compare with the default loader using:
 
@@ -209,8 +210,8 @@ Successful loads log `source=transfer`, `local`, `fallback`, or `shared_target`.
 Successful TP0 weight reads also log transfer elapsed time, bytes, chunks, and
 throughput at INFO; other TP ranks and per-chunk timings remain at DEBUG.
 Every successful registration, receiver-before-read, and final receiver stage
-emits one bounded `RFork tensor layout summary` at INFO per rank. The summary hashes all tensor
-names, shapes, strides, dtypes, NPU formats, logical byte counts, storage byte
+emits one bounded `RFork tensor layout summary` at INFO per rank. The summary hashes all
+tensor IDs, shapes, strides, dtypes, NPU formats, logical byte counts, storage byte
 capacities, storage offsets, and NPU descriptor element counts into fixed-size
 semantic and physical digests. It also reports aggregate counts and at most
 three representative tensors, preferring storage views or tensors whose NPU
