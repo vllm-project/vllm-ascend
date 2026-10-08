@@ -44,6 +44,9 @@ def _mock_speculator_module(monkeypatch, module_name, class_name):
     return speculator_cls
 
 
+REQ_STATES = object()
+
+
 def test_init_speculator_extract_hidden_states(monkeypatch):
     """Test dispatching extract_hidden_states to the upstream speculator."""
     config = _make_config("extract_hidden_states")
@@ -54,7 +57,7 @@ def test_init_speculator_extract_hidden_states(monkeypatch):
         "ExtractHiddenStatesSpeculator",
     )
 
-    result = init_speculator(config, device)
+    result = init_speculator(config, device, REQ_STATES)
 
     assert result is speculator_cls.return_value
     speculator_cls.assert_called_once_with(config, device)
@@ -73,7 +76,7 @@ def test_init_speculator_dspark(monkeypatch):
         "AscendDSparkSpeculator",
     )
 
-    result = init_speculator(config, device)
+    result = init_speculator(config, device, REQ_STATES)
 
     assert result is speculator_cls.return_value
     speculator_cls.assert_called_once_with(config, device)
@@ -93,7 +96,7 @@ def test_init_speculator_dflash2(monkeypatch):
         "AscendDFlash2Speculator",
     )
 
-    result = init_speculator(config, device)
+    result = init_speculator(config, device, REQ_STATES)
 
     assert result is speculator_cls.return_value
     speculator_cls.assert_called_once_with(config, device)
@@ -113,7 +116,7 @@ def test_init_speculator_dflash(monkeypatch):
         "AscendDFlashSpeculator",
     )
 
-    result = init_speculator(config, device)
+    result = init_speculator(config, device, REQ_STATES)
 
     assert result is speculator_cls.return_value
     speculator_cls.assert_called_once_with(config, device)
@@ -129,7 +132,7 @@ def test_init_speculator_mtp(monkeypatch):
         "AscendMTPSpeculator",
     )
 
-    result = init_speculator(config, device)
+    result = init_speculator(config, device, REQ_STATES)
 
     assert result is speculator_cls.return_value
     speculator_cls.assert_called_once_with(config, device)
@@ -148,10 +151,26 @@ def test_init_speculator_eagle(monkeypatch):
         "AscendEagleSpeculator",
     )
 
-    result = init_speculator(config, device)
+    result = init_speculator(config, device, REQ_STATES)
 
     assert result is speculator_cls.return_value
     speculator_cls.assert_called_once_with(config, device)
+
+
+def test_init_speculator_ngram(monkeypatch):
+    config = _make_config("ngram_gpu")
+    config.speculative_config.use_ngram.return_value = True
+    device = torch.device("cpu")
+    speculator_cls = _mock_speculator_module(
+        monkeypatch,
+        "vllm_ascend.worker.v2.spec_decode.ngram",
+        "AscendNgramSpeculator",
+    )
+
+    result = init_speculator(config, device, REQ_STATES)
+
+    assert result is speculator_cls.return_value
+    speculator_cls.assert_called_once_with(config, device, REQ_STATES)
 
 
 def test_init_speculator_requires_speculative_config():
@@ -159,7 +178,7 @@ def test_init_speculator_requires_speculative_config():
     config = SimpleNamespace(speculative_config=None)
 
     with pytest.raises(AssertionError):
-        init_speculator(config, torch.device("cpu"))
+        init_speculator(config, torch.device("cpu"), REQ_STATES)
 
 
 def test_init_speculator_unsupported_method():
@@ -170,7 +189,7 @@ def test_init_speculator_unsupported_method():
         NotImplementedError,
         match="unsupported is not supported yet",
     ):
-        init_speculator(config, torch.device("cpu"))
+        init_speculator(config, torch.device("cpu"), REQ_STATES)
 
 
 @pytest.mark.parametrize(
@@ -195,4 +214,4 @@ def test_init_speculator_skips_special_mtp(
         NotImplementedError,
         match="mtp is not supported yet",
     ):
-        init_speculator(config, torch.device("cpu"))
+        init_speculator(config, torch.device("cpu"), REQ_STATES)

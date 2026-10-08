@@ -28,14 +28,9 @@ if TYPE_CHECKING:
 def init_speculator(
     vllm_config: VllmConfig,
     device: torch.device,
-    req_states: "RequestState | None" = None,
+    req_states: "RequestState",
 ):
-    """Override GPU init_speculator for Ascend NPUs.
-
-    ``req_states`` mirrors the upstream MRV2 factory contract.  It is kept in
-    the interface even while Ascend NGram proposal generation remains disabled;
-    the future NPU speculator will consume the same final request state.
-    """
+    """Build an Ascend speculator sharing the runner request state."""
     speculative_config = vllm_config.speculative_config
     assert speculative_config is not None
     if speculative_config.method == "extract_hidden_states":
@@ -78,4 +73,8 @@ def init_speculator(
         from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 
         return AscendEagleSpeculator(vllm_config, device)
+    if speculative_config.use_ngram():
+        from vllm_ascend.worker.v2.spec_decode.ngram import AscendNgramSpeculator
+
+        return AscendNgramSpeculator(vllm_config, device, req_states)
     raise NotImplementedError(f"{speculative_config.method} is not supported yet.")

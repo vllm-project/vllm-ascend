@@ -37,7 +37,7 @@ def test_init_speculator_dispatches_extract_hidden_states(monkeypatch):
         fake_speculator,
     )
 
-    assert init_speculator(vllm_config, device) == (vllm_config, device)
+    assert init_speculator(vllm_config, device, object()) == (vllm_config, device)
 
 
 class _RecordingModel(torch.nn.Module):

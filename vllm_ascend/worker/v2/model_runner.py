@@ -177,11 +177,8 @@ class NPUModelRunner(GPUModelRunner):
 
         # AscendRequestState has extra `num_computed_tokens_cpu` attribute.
         # so reinitialize req_states here.
-        num_prefill_lookahead = max(1, getattr(self.vllm_config, "num_prefill_lookahead_tokens", 1))
-        use_dense_all_token_ids = bool(
-            self.speculative_config is not None
-            and getattr(self.speculative_config, "use_ngram", lambda: False)()
-        )
+        num_prefill_lookahead = max(1, self.vllm_config.num_prefill_lookahead_tokens)
+        use_dense_all_token_ids = self.speculative_config is not None and self.speculative_config.use_ngram()
         self.req_states: AscendRequestState = AscendRequestState(
             max_num_reqs=self.max_num_reqs,
             max_model_len=self.max_model_len,
@@ -193,9 +190,6 @@ class NPUModelRunner(GPUModelRunner):
             use_dense_all_token_ids=use_dense_all_token_ids,
         )
 
-        # Future MRV2 NGram proposal will read the same request state that
-        # receives post-verification token updates. Construct the speculator
-        # only after that state exists, matching the upstream contract.
         self.speculator = None
         if self.speculative_config is not None and self.is_last_pp_rank:
             self.speculator = init_speculator(self.vllm_config, self.device, self.req_states)

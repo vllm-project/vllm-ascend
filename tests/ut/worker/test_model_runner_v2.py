@@ -476,7 +476,7 @@ def _parent_init(self, vllm_config, device, *, full_graph=False, speculative=Fal
         has_full_cudagraphs=lambda: full_graph,
     )
     self.model_config = SimpleNamespace(enforce_eager=not full_graph, architecture="Qwen3_5ForConditionalGeneration")
-    self.speculative_config = object() if speculative else None
+    self.speculative_config = SimpleNamespace(use_ngram=lambda: False) if speculative else None
     self.use_pp = use_pp
     self.is_last_pp_rank = True
     self.pp_handler = MagicMock()
@@ -492,7 +492,10 @@ def _parent_init(self, vllm_config, device, *, full_graph=False, speculative=Fal
 
 
 def test_init_without_spec_pp():
-    vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(enable_eplb=False))
+    vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(enable_eplb=False),
+        num_prefill_lookahead_tokens=1,
+    )
     ascend_config = SimpleNamespace(eplb_config=SimpleNamespace(load_collection_phase="all"))
 
     # Complete the fake with the fields NPUModelRunner reads (mirrors FinegrainedTPConfig).
@@ -537,7 +540,10 @@ def test_init_without_spec_pp():
 
 
 def test_init_spec_pp_full_graph_and_speculator():
-    vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(enable_eplb=True))
+    vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(enable_eplb=True),
+        num_prefill_lookahead_tokens=1,
+    )
     ascend_config = SimpleNamespace(eplb_config=SimpleNamespace(load_collection_phase="decode"))
 
     # Complete the fake with the fields NPUModelRunner reads (mirrors FinegrainedTPConfig).

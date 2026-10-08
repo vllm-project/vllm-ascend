@@ -36,7 +36,7 @@ if not hasattr(aclgraph_utils_mod.ModelWithContext, "embed_input_ids"):
 _orig_init_speculator = ascend_spec_decode.init_speculator
 
 
-def _init_speculator_310p(vllm_config, device, req_states=None):
+def _init_speculator_310p(vllm_config, device, req_states):
     speculative_config = vllm_config.speculative_config
     assert speculative_config is not None
     if (

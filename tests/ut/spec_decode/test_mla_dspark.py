@@ -93,7 +93,7 @@ def initialize_attention(monkeypatch, draft_backend, target_backend=AscendMLABac
         cache_config=SimpleNamespace(block_size=128),
     )
     monkeypatch.setattr(AscendDSparkSpeculator, "attn_vllm_config", property(lambda self: config))
-    spec = init_speculator(config, torch.device("cpu"))
+    spec = init_speculator(config, torch.device("cpu"), object())
     assert type(spec) is AscendDSparkSpeculator
     assert spec.attn_architecture is None
     spec.vllm_config = config

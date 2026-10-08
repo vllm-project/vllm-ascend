@@ -82,7 +82,7 @@ def _spec_config(arch: str) -> SimpleNamespace:
 def test_init_speculator_routes_dflash2_draft_model():
     cfg = SimpleNamespace(speculative_config=_spec_config("DFlash2DraftModel"))
     with patch("vllm_ascend.worker.v2.spec_decode.dflash2.speculator.AscendDFlash2Speculator") as d2:
-        assert init_speculator(cfg, torch.device("cpu")) is d2.return_value
+        assert init_speculator(cfg, torch.device("cpu"), object()) is d2.return_value
         d2.assert_called_once_with(cfg, torch.device("cpu"))
 
     cfg = SimpleNamespace(speculative_config=_spec_config("DFlashDraftModel"))
@@ -90,7 +90,7 @@ def test_init_speculator_routes_dflash2_draft_model():
         patch("vllm_ascend.worker.v2.spec_decode.dflash2.speculator.AscendDFlash2Speculator") as d2,
         patch("vllm_ascend.worker.v2.spec_decode.dflash.speculator.AscendDFlashSpeculator") as d1,
     ):
-        assert init_speculator(cfg, torch.device("cpu")) is d1.return_value
+        assert init_speculator(cfg, torch.device("cpu"), object()) is d1.return_value
         d2.assert_not_called()
 
 
