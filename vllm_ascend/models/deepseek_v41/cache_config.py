@@ -27,6 +27,8 @@ from vllm_ascend.device.hardware_profile import (
 STATE_RING_ROWS = 32
 
 # Fixed dimensions accepted by the packaged mixed-quant attention ABI.
+# The actual head sizes come from the model config; these bounds reject
+# unsupported layouts before allocating caches, rather than override config.
 MLA_HEAD_DIM = 512
 INDEX_HEAD_DIM = 128
 INDEX_FOLD_ROWS = 8

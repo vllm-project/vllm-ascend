@@ -740,6 +740,10 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         elif isinstance(kv_cache_spec, AscendSlidingWindowMLASpec):
             self._cache_kind = "swa"
         elif isinstance(kv_cache_spec, AscendMLAAttentionSpec):
+            # make_folded_index_cache_spec packs eight index rows into one:
+            # 8 * (128 / 2 FP4 bytes + 128 / 32 scale bytes) = 544 bytes.
+            # Its scales are inline (scale_dim=0), like long KV, so identify
+            # this layout first to avoid treating it as compressed long KV.
             if kv_cache_spec.tokens_per_state == 8 and kv_cache_spec.head_size == 544:
                 self._cache_kind = "index_k_folded"
             else:
