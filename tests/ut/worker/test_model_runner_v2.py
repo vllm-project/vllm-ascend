@@ -56,18 +56,13 @@ def _make_batch_state(computed: list[int], scheduled: list[int], prefill_lens: l
     )
 
 
-def test_recompute_scheduler_reclassifies_pd_tail_in_mixed_decode_batch():
+def test_prompt_tail_stays_on_uniform_decode_graph():
+    """KV-recv prompt tails must not drop FULL_DECODE_ONLY onto eager."""
     runner = _make_runner()
     runner.decode_query_len = 1
     batch_state = _make_batch_state([127, 64], [1, 1], [128, 64])
 
-    with (
-        patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(batch_state, None)),
-        patch(
-            "vllm_ascend.worker.v2.model_runner.is_pd_decode_recompute_scheduler_enabled",
-            return_value=True,
-        ),
-    ):
+    with patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(batch_state, None)):
         gathered, uniform = runner.gather_batch_req_state(SimpleNamespace(), False)
 
     np.testing.assert_array_equal(gathered.is_prefilling_np, [False, False])
@@ -76,21 +71,15 @@ def test_recompute_scheduler_reclassifies_pd_tail_in_mixed_decode_batch():
 
 
 @pytest.mark.parametrize(
-    ("computed", "scheduled", "enabled"),
-    [(64, 8, True), (127, 1, False)],
+    ("computed", "scheduled"),
+    [(64, 8), (0, 1), (127, 2)],
 )
-def test_recompute_scheduler_keeps_non_matching_prefill(computed, scheduled, enabled):
+def test_unfinished_prefill_stays_off_the_decode_graph(computed, scheduled):
     runner = _make_runner()
     runner.decode_query_len = 1
     batch_state = _make_batch_state([computed, 64], [scheduled, 1], [128, 64])
 
-    with (
-        patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(batch_state, None)),
-        patch(
-            "vllm_ascend.worker.v2.model_runner.is_pd_decode_recompute_scheduler_enabled",
-            return_value=enabled,
-        ),
-    ):
+    with patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(batch_state, None)):
         gathered, uniform = runner.gather_batch_req_state(SimpleNamespace(), False)
 
     np.testing.assert_array_equal(gathered.is_prefilling_np, [True, False])
@@ -98,18 +87,12 @@ def test_recompute_scheduler_keeps_non_matching_prefill(computed, scheduled, ena
     assert uniform is None
 
 
-def test_recompute_scheduler_supports_multi_token_decode_query():
+def test_prompt_tail_supports_multi_token_decode_query():
     runner = _make_runner()
     runner.decode_query_len = 2
     batch_state = _make_batch_state([126, 64], [2, 2], [128, 64])
 
-    with (
-        patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(batch_state, None)),
-        patch(
-            "vllm_ascend.worker.v2.model_runner.is_pd_decode_recompute_scheduler_enabled",
-            return_value=True,
-        ),
-    ):
+    with patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(batch_state, None)):
         gathered, uniform = runner.gather_batch_req_state(SimpleNamespace(), False)
 
     np.testing.assert_array_equal(gathered.is_prefilling_np, [False, False])
@@ -904,10 +887,7 @@ def test_pd_tail_input_survives_decode_reclassification(num_spec_tokens, full_cg
     runner.req_states.draft_tokens = torch.full((2, num_spec_tokens), 702, dtype=torch.int32)
     runner.req_states.next_prefill_tokens = torch.full((1, 2), -999, dtype=torch.int32)
 
-    with (
-        patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(batch_state, None)),
-        patch("vllm_ascend.worker.v2.model_runner.is_pd_decode_recompute_scheduler_enabled", return_value=True),
-    ):
+    with patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(batch_state, None)):
         gathered, uniform = runner.gather_batch_req_state(scheduler_output, False)
     assert not gathered.has_prefill
     assert uniform == query_len

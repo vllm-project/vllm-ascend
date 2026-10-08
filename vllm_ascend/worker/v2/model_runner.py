@@ -64,7 +64,6 @@ from vllm_ascend.core.profiling_chunk_predictor import (
 )
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import (
-    is_pd_decode_recompute_scheduler_enabled,
     lmhead_tp_enable,
     lmhead_tp_max_num_logits,
     lmhead_tp_pad_rows,
@@ -86,6 +85,7 @@ from vllm_ascend.worker.v2.pp_transport import (
     restore_pp_after_upstream_init,
     use_legacy_spec_pp,
 )
+from vllm_ascend.worker.v2.prompt_tail import prompt_tail_request_mask
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 from vllm_ascend.worker.v2.states import AscendRequestState
@@ -440,25 +440,31 @@ class NPUModelRunner(GPUModelRunner):
 
     def gather_batch_req_state(self, scheduler_output: SchedulerOutput, dummy_run: bool):
         batch_state, uniform_token_count = super().gather_batch_req_state(scheduler_output, dummy_run)
-        if batch_state is not None and is_pd_decode_recompute_scheduler_enabled(self.vllm_config):
-            pd_decode_recompute = (
-                batch_state.is_prefilling_np
-                & (batch_state.num_computed_prefill_tokens_np > 0)
-                & (batch_state.num_scheduled_tokens == self.decode_query_len)
-                & (
-                    batch_state.num_computed_prefill_tokens_np + batch_state.num_scheduled_tokens
-                    >= batch_state.prefill_len_np
-                )
-            )
-            if np.any(pd_decode_recompute):
-                batch_state.is_prefilling_np[pd_decode_recompute] = False
-                batch_state = batch_state._replace(has_prefill=bool(batch_state.is_prefilling_np.any()))
-                uniform_token_count = vllm_model_runner.get_uniform_decode_token_count(
-                    len(batch_state.req_ids),
-                    batch_state.num_tokens,
-                    int(batch_state.num_scheduled_tokens.max()),
-                    batch_state.has_prefill,
-                )
+        if batch_state is None:
+            return batch_state, uniform_token_count
+        # After async KV recv the scheduler schedules one prompt-tail token
+        # (num_computed == prompt_len - 1). Upstream still sets has_prefill, so
+        # FULL_DECODE_ONLY misses the captured decode graph and runs eager.
+        # One DP rank in eager forces every rank eager for that step, which
+        # stalls tokens already in decode. The tail is a decode-shaped query;
+        # prepare_inputs still reads its token from the prompt.
+        prompt_tail = prompt_tail_request_mask(
+            batch_state.is_prefilling_np,
+            batch_state.num_computed_prefill_tokens_np,
+            batch_state.num_scheduled_tokens,
+            batch_state.prefill_len_np,
+            self.decode_query_len,
+        )
+        if not np.any(prompt_tail):
+            return batch_state, uniform_token_count
+        batch_state.is_prefilling_np[prompt_tail] = False
+        batch_state = batch_state._replace(has_prefill=bool(batch_state.is_prefilling_np.any()))
+        uniform_token_count = vllm_model_runner.get_uniform_decode_token_count(
+            len(batch_state.req_ids),
+            batch_state.num_tokens,
+            int(batch_state.num_scheduled_tokens.max()),
+            batch_state.has_prefill,
+        )
         return batch_state, uniform_token_count
 
     def _check_finegrained_tp_graph_step(self, cg_mode: CUDAGraphMode) -> None:
