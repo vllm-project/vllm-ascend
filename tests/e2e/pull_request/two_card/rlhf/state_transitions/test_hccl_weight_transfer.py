@@ -163,6 +163,9 @@ def test_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: b
     env_dict = {
         "VLLM_SERVER_DEV_MODE": "1",
         "ASCEND_RT_VISIBLE_DEVICES": str(INFERENCE_DEVICE_INDEX),
+        # Live reload still diverges on the default V2 runner. Keep this lane
+        # on V1 for both the startup reference and the live updates.
+        "VLLM_USE_V2_MODEL_RUNNER": "0",
     }
 
     # Independent oracle first: a server that loads exactly this payload at
