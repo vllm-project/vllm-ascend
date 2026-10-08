@@ -136,6 +136,8 @@ def prepare_replicated_pcp_config(
         ):
             # Replicated draft attention uses PCP=1. Keep EP, but use a static
             # expert layout when PCP is the target's only parallel dimension.
+            # TODO: Refactor this policy when MTP supports prefill sharding across
+            # PCP ranks; disabling draft EPLB assumes replicated PCP=1 execution.
             enable_eplb = False
             # Copy declared fields without transient communicator-selection state.
             eplb_config = dataclass_replace(eplb_config, num_redundant_experts=0)
