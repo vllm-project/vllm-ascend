@@ -4698,11 +4698,35 @@ class NPUModelRunner(GPUModelRunner):
         return type(spec) is FullAttentionSpec and is_c8_mxfp_kv_quant(self.vllm_config)
 
     def _fill_c8_mxfp_v_scale_caches(self, kv_caches: dict[str, Any]) -> None:
-        """Fill static V scales once, before graph capture or any request."""
+        """Initialize V scales and retain views for physical-page reassignment.
+
+        Hybrid cache groups overlay the same backing allocation. A page used
+        by Mamba may overwrite every section of its former C8 packet, including
+        the static V scales. Checkpoint constants therefore need restoring when
+        the scheduler assigns that physical page to full attention again.
+        """
+        self._c8_mxfp_v_scale_caches = []
         for layer_name, cache in kv_caches.items():
             layer = self.compilation_config.static_forward_context.get(layer_name)
             if isinstance(getattr(layer, "impl", None), AscendC8MXFPAttentionBackendImpl):
-                fill_mxfp_v_scale_cache(layer.v_cache_scale, cache[3])
+                value_scale_cache = cache[3]
+                assert value_scale_cache.shape[0] % self.kv_cache_config.num_blocks == 0
+                kernel_blocks_per_page = value_scale_cache.shape[0] // self.kv_cache_config.num_blocks
+                self._c8_mxfp_v_scale_caches.append(
+                    (layer.v_cache_scale, value_scale_cache, kernel_blocks_per_page)
+                )
+                fill_mxfp_v_scale_cache(layer.v_cache_scale, value_scale_cache)
+
+    def _zero_block_ids(self, block_ids: list[int]) -> None:
+        """Prepare freshly assigned attention pages, including static C8 scales."""
+        super()._zero_block_ids(block_ids)
+        # MRV1 can receive new attention block IDs without a KV zeroer. Scale
+        # restoration must still run: Mamba owns the same physical pages while
+        # those IDs are assigned to its cache groups.
+        for value_scale, value_scale_cache, ratio in getattr(self, "_c8_mxfp_v_scale_caches", ()):
+            for block_id in block_ids:
+                start = block_id * ratio
+                fill_mxfp_v_scale_cache(value_scale, value_scale_cache[start : start + ratio])
 
     def initialize_kv_cache_tensors(
         self,

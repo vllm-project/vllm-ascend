@@ -154,8 +154,8 @@ class TestAscendConfig(TestBase):
         (
             config._sparse_li_c8_layer_ids,
             config._sparse_li_c8_layer_names,
-        ) = AscendConfig._parse_sparse_li_c8_layers_from_quant_config(quant_config)
-        config._sparse_li_c8_layer_filter_enabled = AscendConfig._has_sparse_li_c8_layer_config(quant_config)
+        ) = AscendConfig._parse_sparse_li_layers_from_quant_config(quant_config, ("INT8_DYNAMIC", "W8A8_MXFP8"))
+        config._sparse_li_layer_filter_enabled = AscendConfig._has_sparse_li_layer_config(quant_config)
         return config
 
     def test_sparse_li_c8_layer_filter_uses_indexer_quant_type(self):
@@ -221,8 +221,8 @@ class TestAscendConfig(TestBase):
                 "load_risk_quantile": 0.75,
                 "relative_balance_threshold": 0.95,
                 "absolute_balance_threshold": 0.90,
-                "rank_transfer_limit": 1,
-                "cross_node_transfer_limit": 1,
+                "rank_transfer_limit": -1,
+                "cross_node_transfer_limit": -1,
                 "replica_search_num_stages": 4,
                 "replica_search_radius": 8,
                 "replica_search_beam_size": 64,

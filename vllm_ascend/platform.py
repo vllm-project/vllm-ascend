@@ -473,41 +473,6 @@ class NPUPlatform(Platform):
                             )
                     else:
                         has_topk = True
-            elif use_index_cache:
-                index_topk_pattern = getattr(config, "index_topk_pattern", None)
-                if index_topk_pattern is None:
-                    index_topk_freq = getattr(config, "index_topk_freq", 1)
-                    index_skip_topk_offset = getattr(config, "index_skip_topk_offset", 2)
-                    skip_topk = max(start_layer - index_skip_topk_offset + 1, 0) % index_topk_freq != 0
-                else:
-                    skip_topk = start_layer < len(index_topk_pattern) and index_topk_pattern[start_layer] == "S"
-                if skip_topk:
-                    raise ValueError(
-                        "Index cache dependency crosses a pipeline-parallel stage boundary: "
-                        f"PP rank {pp_rank}/{pp_size} owns layers [{start_layer}, {end_layer}), "
-                        f"but layer {start_layer} skips Top-K computation without a preceding "
-                        "Top-K recomputation in the same PP stage. "
-                        "Cross-PP Top-K index propagation is not supported."
-                    )
-
-            if indexer_types is None:
-                continue
-
-            has_full_indexer = False
-            for layer_id in range(start_layer, end_layer):
-                indexer_type = indexer_types[layer_id] if layer_id < len(indexer_types) else None
-                if isinstance(indexer_type, str):
-                    indexer_type = indexer_type.lower()
-                if indexer_type == "full":
-                    has_full_indexer = True
-                elif indexer_type == "shared" and not has_full_indexer:
-                    raise ValueError(
-                        "IndexShare group crosses a pipeline-parallel stage boundary: "
-                        f"PP rank {pp_rank}/{pp_size} owns layers [{start_layer}, {end_layer}), "
-                        f"but layer {layer_id} uses a shared Indexer without a preceding "
-                        "full Indexer in the same PP stage. "
-                        "Cross-PP Top-K index propagation is not supported."
-                    )
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
@@ -1009,11 +974,11 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
             raise ValueError("additional_config.eplb_config.load_collection_phase requires --enable-eplb.")
         if vllm_config.parallel_config.enable_eplb:
             upstream_eplb_config = vllm_config.parallel_config.eplb_config
-            if upstream_eplb_config.communicator not in (None, "torch_gloo"):
+            if upstream_eplb_config.communicator not in (None, "torch_gloo", "hixl"):
                 raise ValueError(
-                    "Async EPLB on Ascend requires the torch_gloo communicator "
-                    f"(CPU staging), but got {upstream_eplb_config.communicator!r}. "
-                    "Set eplb_config.communicator to 'torch_gloo'."
+                    "Async EPLB on Ascend requires the torch_gloo or hixl communicator "
+                    f"but got {upstream_eplb_config.communicator!r}. "
+                    "Set eplb_config.communicator to 'torch_gloo' or 'hixl'."
                 )
             if not upstream_eplb_config.use_async:
                 logger.warning(
@@ -1022,7 +987,6 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
                     "action: forcing asynchronous EPLB."
                 )
                 upstream_eplb_config.use_async = True
-                upstream_eplb_config.communicator = "torch_gloo"
             if vllm_config.parallel_config.enable_elastic_ep:
                 raise ValueError("Async EPLB is not supported with elastic EP on Ascend.")
     elif {"load_collection_phase", "stair_config"} & eplb_config.keys():
@@ -1372,7 +1336,9 @@ def _setup_worker_and_scheduler(
     vllm_config: VllmConfig,
     ascend_config,
 ) -> None:
-    # Select worker class and refresh block size
+    # Select worker class and refresh block size.
+    # Decode sharding is derived by is_pcp_decode_sharding_enabled(); do not
+    # store it on ParallelConfig. Draft replace() rejects undeclared fields.
     parallel_config = vllm_config.parallel_config
     if parallel_config and parallel_config.worker_cls == "auto":
         hardware_profile = get_current_hardware_profile()

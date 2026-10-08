@@ -10,7 +10,7 @@ from bisect import bisect_left, bisect_right
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 
 import pytest
 import torch
@@ -216,18 +216,35 @@ def runtime(monkeypatch):
     }
     # Transport and sharding use the repository implementations, including
     # multi-dimensional residuals and zero-length token tensors.
-    transport = ast.parse((ROOT / "vllm_ascend/worker/v2/pp_utils.py").read_text())
+    transport = ast.parse((ROOT / "vllm_ascend/worker/v2/pp_transport.py").read_text())
     enum_node = next(node for node in transport.body if getattr(node, "name", None) == "PPTransportDataType")
-    exec(compile(ast.Module(body=[enum_node], type_ignores=[]), "pp_utils.py", "exec"), namespace)
+    exec(compile(ast.Module(body=[enum_node], type_ignores=[]), "pp_transport.py", "exec"), namespace)
     load_definitions(
-        "vllm_ascend/worker/v2/pp_utils.py",
+        "vllm_ascend/worker/v2/pp_transport.py",
         {
             "_get_transport_key_prefix",
             "get_pp_transport_tensors",
             "add_pp_transport_tensors",
             "add_pp_transport_buffers",
             "make_empty_intermediate_tensors",
+            "_add_aux_hidden_state_buffers",
+            "_add_topk_indices_buffer",
         },
+        namespace,
+    )
+    namespace["MappingProxyType"] = MappingProxyType
+    factories_node = next(
+        node
+        for node in transport.body
+        if isinstance(node, ast.AnnAssign) and getattr(node.target, "id", None) == "_PP_TRANSPORT_BUFFER_FACTORIES"
+    )
+    exec(
+        compile(
+            ast.Module(body=[factories_node], type_ignores=[]),
+            "pp_transport.py",
+            "exec",
+            flags=__future__.annotations.compiler_flag,
+        ),
         namespace,
     )
     namespace["make_pp_empty_intermediate_tensors"] = namespace["make_empty_intermediate_tensors"]

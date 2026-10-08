@@ -207,6 +207,16 @@ def model_uses_sfa_sparse(model_config: Any | None) -> bool:
     )
 
 
+def should_reuse_topk(config: Any, layer_id: int) -> bool:
+    """Return whether a layer reuses Top-K indices computed earlier."""
+    index_topk_pattern = getattr(config, "index_topk_pattern", None)
+    if index_topk_pattern is None:
+        index_topk_freq = getattr(config, "index_topk_freq", 1)
+        index_skip_topk_offset = getattr(config, "index_skip_topk_offset", 2)
+        return max(layer_id - index_skip_topk_offset + 1, 0) % index_topk_freq != 0
+    return 0 <= layer_id < len(index_topk_pattern) and index_topk_pattern[layer_id] == "S"
+
+
 def enable_sfa_dcp_replicated_indexer(vllm_config: VllmConfig | None = None) -> bool:
     if vllm_config is None:
         from vllm.config import get_current_vllm_config
@@ -1760,9 +1770,13 @@ def get_compressed_pos_and_indices(
 def kv_cache_spec_uses_sparse_sfa_c8(kv_cache_spec) -> bool:
     from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 
-    return isinstance(kv_cache_spec, AscendMLAAttentionSpec) and bool(
-        getattr(kv_cache_spec, "cache_sparse_sfa_c8", False)
-    )
+    return isinstance(kv_cache_spec, AscendMLAAttentionSpec) and bool(kv_cache_spec.cache_sparse_sfa_c8)
+
+
+def kv_cache_spec_uses_packed_sfa_main_cache(kv_cache_spec) -> bool:
+    from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+
+    return isinstance(kv_cache_spec, AscendMLAAttentionSpec) and bool(kv_cache_spec.uses_packed_sfa_main_cache)
 
 
 def is_hidden_state_cache_spec(spec) -> bool:

@@ -219,8 +219,8 @@ class StairConfig:
     load_risk_quantile: float = 0.75
     relative_balance_threshold: float = 0.95
     absolute_balance_threshold: float = 0.90
-    rank_transfer_limit: int = 1
-    cross_node_transfer_limit: int = 1
+    rank_transfer_limit: int = -1
+    cross_node_transfer_limit: int = -1
     replica_search_num_stages: int = 4
     replica_search_radius: int = 8
     replica_search_beam_size: int = 64
@@ -447,6 +447,7 @@ class AscendConfig:
             "enable_shared_expert_dp": false,
             "enable_sparse_sfa_c8": false,
             "enable_sparse_li_c8": false,
+            "enable_sparse_li_c4": false,
             "c8_enable_reshape_optim": true,
             "ascend_compilation_config": {
                 "enable_npugraph_ex": true,
@@ -629,8 +630,10 @@ class AscendConfig:
     # ---- derived fields: sentinel default, after-validator overwrites ----
     enable_shared_expert_dp: bool = False
     enable_sp_by_pass: bool = False
+    enable_sparse_sfa_turboquant: bool = False
     enable_sparse_sfa_c8: bool = False
     enable_sparse_li_c8: bool = False
+    enable_sparse_li_c4: bool = False
     # See https://github.com/vllm-project/vllm-ascend/issues/15896
     c8_enable_reshape_optim: bool = True
     pd_tp_ratio: int = 1
@@ -640,7 +643,9 @@ class AscendConfig:
     # ---- private derived state (init=False) ----
     _sparse_li_c8_layer_ids: set[int] = dataclasses.field(default_factory=set, init=False, repr=False)
     _sparse_li_c8_layer_names: set[str] = dataclasses.field(default_factory=set, init=False, repr=False)
-    _sparse_li_c8_layer_filter_enabled: bool = dataclasses.field(default=False, init=False, repr=False)
+    _sparse_li_c4_layer_ids: set[int] = dataclasses.field(default_factory=set, init=False, repr=False)
+    _sparse_li_c4_layer_names: set[str] = dataclasses.field(default_factory=set, init=False, repr=False)
+    _sparse_li_layer_filter_enabled: bool = dataclasses.field(default=False, init=False, repr=False)
     _c8_reshape_optim_enabled: bool = dataclasses.field(default=False, init=False, repr=False)
 
     @model_validator(mode="after")
@@ -885,8 +890,14 @@ class AscendConfig:
         # LightningIndexer cache layout, so it stays gated by use_sparse.
         use_sparse_sfa = use_sparse or model_uses_kpool_indexer(vc.model_config)
 
+        cache_config = getattr(vc, "cache_config", None)
+        cache_dtype = getattr(cache_config, "cache_dtype", None)
+        self.enable_sparse_sfa_turboquant = cache_dtype == "turboquant_4bit_nc" and use_sparse_sfa
         self.enable_sparse_sfa_c8 = vllm_config.cache_config.cache_dtype in ["fp8", "int8"] and use_sparse_sfa
         self.enable_sparse_li_c8 = vllm_config.attention_config.indexer_kv_dtype in ["fp8", "int8"] and use_sparse
+        self.enable_sparse_li_c4 = vllm_config.attention_config.indexer_kv_dtype == "mxfp4" and use_sparse
+        if self.enable_sparse_li_c8 and self.enable_sparse_li_c4:
+            raise ValueError("enable_sparse_li_c8 and enable_sparse_li_c4 are mutually exclusive.")
         kv_transfer_config = vc.kv_transfer_config
         is_prefill_node = kv_transfer_config is not None and (
             getattr(kv_transfer_config, "kv_role", None) == "kv_producer"
@@ -900,8 +911,12 @@ class AscendConfig:
         (
             self._sparse_li_c8_layer_ids,
             self._sparse_li_c8_layer_names,
-        ) = self._parse_sparse_li_c8_layers_from_quant_config(quant_config)
-        self._sparse_li_c8_layer_filter_enabled = self._has_sparse_li_c8_layer_config(quant_config)
+        ) = self._parse_sparse_li_layers_from_quant_config(quant_config, ("INT8_DYNAMIC", "W8A8_MXFP8"))
+        (
+            self._sparse_li_c4_layer_ids,
+            self._sparse_li_c4_layer_names,
+        ) = self._parse_sparse_li_layers_from_quant_config(quant_config, ("W8A8_MXFP8",))
+        self._sparse_li_layer_filter_enabled = self._has_sparse_li_layer_config(quant_config)
         self.enable_sp_by_pass = (
             vc.model_config is not None
             and not vc.model_config.enforce_eager
@@ -928,9 +943,16 @@ class AscendConfig:
         # mix_placement mutex
         self._check_mix_placement()
 
-        # sparse KV offload vs sparse SFA C8 main cache mutex
-        self._validate_sparse_c8_kv_offload_compatibility()
+        # sparse KV offload vs packed SFA main cache mutex
+        self._validate_sparse_packed_kv_offload_compatibility()
         return self
+
+    @property
+    def uses_packed_sfa_main_cache(self) -> bool:
+        """Whether SFA stores its main KV cache in one packed tensor."""
+        return bool(
+            getattr(self, "enable_sparse_sfa_c8", False) or getattr(self, "enable_sparse_sfa_turboquant", False)
+        )
 
     def _validate_mc2_comm_alg(self, vllm_config: VllmConfig) -> None:
         from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
@@ -964,12 +986,11 @@ class AscendConfig:
                 "Please set additional_config.enable_fused_mc2 to 0."
             )
 
-    def _validate_sparse_c8_kv_offload_compatibility(self) -> None:
-        if self.sparse_kv_offload_config.enabled and self.enable_sparse_sfa_c8:
+    def _validate_sparse_packed_kv_offload_compatibility(self) -> None:
+        if self.sparse_kv_offload_config.enabled and self.uses_packed_sfa_main_cache:
             raise NotImplementedError(
-                "Sparse KV offload does not support the sparse SFA C8 main "
-                "cache. Disable enable_sparse_sfa_c8; enable_sparse_li_c8 is "
-                "supported because the indexer cache remains device-resident."
+                "Sparse KV offload does not support packed SFA main caches (C8 or TQ4). "
+                "Sparse LI C8 is supported because the indexer cache remains device-resident."
             )
 
     @classmethod
@@ -1143,7 +1164,7 @@ class AscendConfig:
         return dump_config_path
 
     @staticmethod
-    def _has_sparse_li_c8_layer_config(quant_config: Any) -> bool:
+    def _has_sparse_li_layer_config(quant_config: Any) -> bool:
         quant_description = getattr(quant_config, "quant_description", None)
         if not isinstance(quant_description, dict):
             return False
@@ -1151,13 +1172,14 @@ class AscendConfig:
         return any(isinstance(key, str) and key.endswith(quant_suffixes) for key in quant_description)
 
     @classmethod
-    def _parse_sparse_li_c8_layers_from_quant_config(cls, quant_config: Any) -> tuple[set[int], set[str]]:
+    def _parse_sparse_li_layers_from_quant_config(
+        cls, quant_config: Any, valid_quant_types: tuple[str, ...]
+    ) -> tuple[set[int], set[str]]:
         quant_description = getattr(quant_config, "quant_description", None)
         if not isinstance(quant_description, dict):
             return set(), set()
 
         QUANT_SUFFIXES = (".indexer.quant_type", ".indexer.wq_b.weight")
-        VALID_QUANT_TYPES = ("INT8_DYNAMIC", "W8A8_MXFP8")
 
         layer_ids: set[int] = set()
         layer_names: set[str] = set()
@@ -1167,7 +1189,7 @@ class AscendConfig:
             if not isinstance(key, str):
                 continue
             matched_suffix = next((s for s in QUANT_SUFFIXES if key.endswith(s)), None)
-            if matched_suffix is None or value not in VALID_QUANT_TYPES:
+            if matched_suffix is None or value not in valid_quant_types:
                 continue
             layer_name = key[: -len(matched_suffix)].rstrip(".")
             if not layer_name:
@@ -1176,10 +1198,17 @@ class AscendConfig:
             layer_ids.add(extract_layer_index(layer_name))
         return layer_ids, layer_names
 
-    def is_sparse_li_c8_layer(self, layer_name: str | None) -> bool:
-        if not self.enable_sparse_li_c8:
+    @staticmethod
+    def _is_sparse_li_layer(
+        layer_name: str | None,
+        enable_flag: bool,
+        filter_enabled: bool,
+        layer_names: set[str],
+        layer_ids: set[int],
+    ) -> bool:
+        if not enable_flag:
             return False
-        if not self._sparse_li_c8_layer_filter_enabled:
+        if not filter_enabled:
             return True
         if layer_name is None:
             return False
@@ -1187,13 +1216,31 @@ class AscendConfig:
         normalized_layer_name = layer_name.rstrip(".")
         if any(
             normalized_layer_name == candidate or normalized_layer_name.startswith(f"{candidate}.")
-            for candidate in self._sparse_li_c8_layer_names
+            for candidate in layer_names
         ):
             return True
         from vllm.model_executor.models.utils import extract_layer_index
 
-        layer_ids = {extract_layer_index(normalized_layer_name)}
-        return any(layer_id in self._sparse_li_c8_layer_ids for layer_id in layer_ids)
+        ids = {extract_layer_index(normalized_layer_name)}
+        return any(layer_id in layer_ids for layer_id in ids)
+
+    def is_sparse_li_c8_layer(self, layer_name: str | None) -> bool:
+        return self._is_sparse_li_layer(
+            layer_name,
+            self.enable_sparse_li_c8,
+            self._sparse_li_layer_filter_enabled,
+            self._sparse_li_c8_layer_names,
+            self._sparse_li_c8_layer_ids,
+        )
+
+    def is_sparse_li_c4_layer(self, layer_name: str | None) -> bool:
+        return self._is_sparse_li_layer(
+            layer_name,
+            self.enable_sparse_li_c4,
+            self._sparse_li_layer_filter_enabled,
+            self._sparse_li_c4_layer_names,
+            self._sparse_li_c4_layer_ids,
+        )
 
     @property
     def c8_reshape_optim_enabled(self) -> bool:
@@ -1804,10 +1851,10 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
         "dump_config",
         "dump_config_path",
         # pure-derived fields (derive_and_validate computes them; user input would residualize)
-        # NOTE: enable_shared_expert_dp/enable_sparse_sfa_c8/enable_sparse_li_c8
-        # are NOT here — they are user-input fields that derive_and_validate
-        # augments (self.x = self.x and condition), so the user must be able to
-        # pass them. Only pure-derived fields (no user input) are stripped.
+        # enable_sparse_li_c4 is selected by attention_config.indexer_kv_dtype
+        # and the model's sparse-attention support,not additional config.
+        "enable_sparse_li_c4",
+        "enable_sparse_sfa_turboquant",
         "enable_sp_by_pass",
         "pd_tp_ratio",
         "pd_head_ratio",
@@ -1815,7 +1862,9 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
         # private derived state (init=False, but listed for safety)
         "_sparse_li_c8_layer_ids",
         "_sparse_li_c8_layer_names",
-        "_sparse_li_c8_layer_filter_enabled",
+        "_sparse_li_c4_layer_ids",
+        "_sparse_li_c4_layer_names",
+        "_sparse_li_layer_filter_enabled",
         # SchedulerConfig-internal top-level legacy keys (resolved internally,
         # then replaced by the typed scheduler_config passed above).
         "enable_balance_scheduling",

@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
-import vllm
+import vllm.v1.worker.gpu.spec_decode.speculator as _speculator
 from vllm.config import (
     ParallelConfig,
     VllmConfig,
@@ -58,6 +58,7 @@ from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_config import KVPPConfig, get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
 from vllm_ascend.attention.dsa_attn_kv_plan import get_dsa_attn_kv_plan
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder
@@ -65,6 +66,7 @@ from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     get_sfa_qsfa_packed_head_dim,
+    get_tq_fused_slot_bytes,
     requires_contiguous_pa_kv_cache,
 )
 from vllm_ascend.core.kv_cache_interface import (
@@ -77,6 +79,7 @@ from vllm_ascend.core.kv_cache_interface import (
 )
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.models.deepseek_v41.cache_config import is_deepseek_v41_cache
+from vllm_ascend.quantization.methods.kv_cache.turboquant import TURBOQUANT_CACHE_DTYPE
 from vllm_ascend.quantization.methods.kv_cache.turboquant.cache import uses_turboquant_groups
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import (
@@ -85,6 +88,7 @@ from vllm_ascend.utils import (
     enable_sfa_dcp_replicated_indexer,
     get_kv_cache_tensor_layers,
     is_hidden_state_cache_spec,
+    kv_cache_spec_uses_packed_sfa_main_cache,
 )
 from vllm_ascend.worker.kvpp_cache import allocate_kvpp_cache
 
@@ -175,6 +179,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     """Build Ascend-specific KV cache specs for v2 worker patching."""
     from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 
+    use_turboquant = vllm_config.cache_config.cache_dtype == TURBOQUANT_CACHE_DTYPE
     kv_cache_spec: dict[str, KVCacheSpec] = {}
     attention_layer_names: list[str] = []
     mamba_specs: dict[str, MambaSpec] = {}
@@ -185,14 +190,15 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
         if enable_sfa_dcp_replicated_indexer(vllm_config)
         else 1
     )
-
-    c8_k_cache_dtype = kv_cache_dtype_str_to_dtype(
-        vllm_config.attention_config.indexer_kv_dtype, vllm_config.model_config
-    )
-    if c8_k_cache_dtype == torch.float8_e4m3fn:
-        c8_k_scale_cache_dtype = torch.float32
-    elif c8_k_cache_dtype == torch.int8:
-        c8_k_scale_cache_dtype = torch.float16
+    enable_sparse_li_c8 = vllm_config.attention_config.indexer_kv_dtype in ["fp8", "int8"]
+    if enable_sparse_li_c8:
+        c8_k_cache_dtype = kv_cache_dtype_str_to_dtype(
+            vllm_config.attention_config.indexer_kv_dtype, vllm_config.model_config
+        )
+        if c8_k_cache_dtype == torch.float8_e4m3fn:
+            c8_k_scale_cache_dtype = torch.float32
+        elif c8_k_cache_dtype == torch.int8:
+            c8_k_scale_cache_dtype = torch.float16
 
     c8_cache_dtype = kv_cache_dtype_str_to_dtype(vllm_config.cache_config.cache_dtype, vllm_config.model_config)
 
@@ -212,9 +218,17 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
 
         if isinstance(attn_module, MLAAttention):
             cache_sparse_sfa_c8 = False
+            cache_sparse_sfa_turboquant = False
             if getattr(attn_module.impl, "fa_quant_layer", False):
                 head_size = attn_module.head_size + attn_module.qk_rope_head_dim
                 dtype, cache_dtype_str = attn_module.impl.dtype, None
+            elif enable_sfa(vllm_config) and bool(getattr(attn_module.impl, "enable_sparse_sfa_turboquant", False)):
+                cache_sparse_sfa_turboquant = True
+                head_size = get_tq_fused_slot_bytes(
+                    attn_module.kv_lora_rank,
+                    attn_module.qk_rope_head_dim,
+                )
+                dtype, cache_dtype_str = torch.int8, vllm_config.cache_config.cache_dtype
             elif enable_sfa(vllm_config) and bool(getattr(attn_module.impl, "enable_sparse_sfa_c8", False)):
                 cache_sparse_sfa_c8 = True
                 head_size = get_sfa_qsfa_packed_head_dim(
@@ -241,6 +255,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 dtype=dtype,
                 cache_dtype_str=cache_dtype_str,
                 cache_sparse_sfa_c8=cache_sparse_sfa_c8,
+                cache_sparse_sfa_turboquant=cache_sparse_sfa_turboquant,
                 non_causal_multi_token_decode=spec.non_causal_multi_token_decode,
                 model_version=model_version,
                 indexes_kv_by_block_stride=indexes_kv_by_block_stride,
@@ -254,14 +269,31 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             ):
                 continue
             cache_sparse_li_c8 = get_ascend_config().is_sparse_li_c8_layer(layer_name)
+            cache_sparse_li_c4 = get_ascend_config().is_sparse_li_c4_layer(layer_name)
+            head_dim = vllm_config.model_config.hf_text_config.index_head_dim
             kv_cache_spec[layer_name] = AscendSFAIndexerCacheSpec(
                 block_size=vllm_config.cache_config.block_size,
                 num_kv_heads=1,
-                head_size=vllm_config.model_config.hf_text_config.index_head_dim,
-                dtype=c8_k_cache_dtype if cache_sparse_li_c8 else vllm_config.model_config.dtype,
-                cache_dtype_str=(vllm_config.cache_config.cache_dtype if cache_sparse_li_c8 else "auto"),
-                scale_dim=1 if cache_sparse_li_c8 else 0,
-                scale_dtype=c8_k_scale_cache_dtype if cache_sparse_li_c8 else torch.int8,
+                head_size=head_dim // 2 if cache_sparse_li_c4 else head_dim,
+                dtype=torch.uint8
+                if cache_sparse_li_c4
+                else c8_k_cache_dtype
+                if cache_sparse_li_c8
+                else vllm_config.model_config.dtype,
+                cache_dtype_str=(
+                    vllm_config.cache_config.cache_dtype
+                    if (cache_sparse_li_c8 or cache_sparse_li_c4)
+                    else None
+                    if use_turboquant
+                    else "auto"
+                ),
+                scale_dim=head_dim // 64 * 2 if cache_sparse_li_c4 else 1 if cache_sparse_li_c8 else 0,
+                scale_dtype=torch.float8_e8m0fnu
+                if cache_sparse_li_c4
+                else c8_k_scale_cache_dtype
+                if cache_sparse_li_c8
+                else torch.int8,
+                cache_sparse_li_c4=cache_sparse_li_c4,
                 cache_sparse_li_c8=cache_sparse_li_c8,
                 sfa_dcp_replicated_indexer_size=sfa_dcp_replicated_indexer_size,
             )
@@ -400,24 +432,25 @@ def build_attn_metadata(
             ),
             None,
         )
-        if dsa_builder is None:
-            raise RuntimeError("TurboQuant KV cache groups require a DSA metadata builder")
-        block_sizes = dsa_builder.tq_group_block_sizes
-        if (
-            block_sizes is None
-            or block_sizes.dtype != slot_mappings.dtype
-            or block_sizes.device != slot_mappings.device
-        ):
-            # Group geometry is fixed for this builder. Keep one device tensor
-            # so metadata preparation does not add an H2D copy on every step.
-            block_sizes = torch.tensor(
-                [get_storage_block_size(group.kv_cache_spec) for group in kv_cache_groups],
-                dtype=slot_mappings.dtype,
-                device=slot_mappings.device,
-            ).unsqueeze(1)
-            dsa_builder.tq_group_block_sizes = block_sizes
-        plan = get_dsa_attn_kv_plan(dsa_builder.vllm_config, dsa_builder.compressor_ratio)
-        formatted_slot_mappings = plan.format_dsa_slot_mapping(slot_mappings[:, :num_input_tokens], block_sizes)
+        # TurboQuant is also the packed SFA main cache, which has no DSA
+        # metadata builder and does not consume a formatted slot mapping.
+        if dsa_builder is not None:
+            block_sizes = dsa_builder.tq_group_block_sizes
+            if (
+                block_sizes is None
+                or block_sizes.dtype != slot_mappings.dtype
+                or block_sizes.device != slot_mappings.device
+            ):
+                # Group geometry is fixed for this builder. Keep one device tensor
+                # so metadata preparation does not add an H2D copy on every step.
+                block_sizes = torch.tensor(
+                    [get_storage_block_size(group.kv_cache_spec) for group in kv_cache_groups],
+                    dtype=slot_mappings.dtype,
+                    device=slot_mappings.device,
+                ).unsqueeze(1)
+                dsa_builder.tq_group_block_sizes = block_sizes
+            plan = get_dsa_attn_kv_plan(dsa_builder.vllm_config, dsa_builder.compressor_ratio)
+            formatted_slot_mappings = plan.format_dsa_slot_mapping(slot_mappings[:, :num_input_tokens], block_sizes)
     for i, kv_cache_spec in enumerate(kv_cache_groups):
         block_table = block_tables[i]
         slot_mapping = slot_mappings[i]
@@ -459,7 +492,7 @@ def build_attn_metadata(
 
         for attn_group in attn_groups[i]:
             attn_metadata_builder = attn_group.get_metadata_builder(0)
-            is_dsa_builder = isinstance(attn_metadata_builder, AscendDSAMetadataBuilder)
+            is_dsa_builder = isinstance(attn_metadata_builder, (AscendDSAMetadataBuilder, AscendDSACPMetadataBuilder))
             is_v41_builder = isinstance(attn_metadata_builder, AscendDSAV41MetadataBuilder)
             is_sfa_builder = isinstance(attn_metadata_builder, AscendSFAMetadataBuilder)
             consumes_pcp_context = bool(getattr(attn_metadata_builder, "consumes_pcp_context", False))
@@ -1053,7 +1086,7 @@ def _allocate_kv_cache(
         # (correct even when the tensor's group is not the largest group).
         kv_cache_tensor_size = kv_cache_config.num_blocks * example_spec.page_size_bytes
         # TODO:Subsequently, extend the `AttentionSpec` class in the vLLM community and remove these branches.
-        if enable_sfa(vllm_config) and bool(getattr(example_spec, "cache_sparse_sfa_c8", False)):
+        if enable_sfa(vllm_config) and kv_cache_spec_uses_packed_sfa_main_cache(example_spec):
             k_size = kv_cache_tensor_size
             for layer_name in shared_names:
                 kv_cache_raw_tensors[layer_name] = _allocate_int8_cache_tensor(k_size, alignment, device)
@@ -1319,6 +1352,8 @@ def _reshape_kv_cache_v2(
                         group_spec.num_kv_heads,
                         group_spec.scale_dim,
                     )
+                    if group_spec.cache_sparse_li_c4:
+                        indexer_scale_cache_shape = (*indexer_scale_cache_shape[:-1], group_spec.head_size * 2 // 64, 2)
                     indexer_scale_cache = raw_scale_tensor.view(group_spec.scale_dtype).view(indexer_scale_cache_shape)
                     kv_caches[layer_name] = (indexer_k_cache, indexer_scale_cache)
 
@@ -1454,7 +1489,7 @@ def _reshape_kv_cache_v2(
                 kv_cache_spec.head_size,
                 cache_dtype,
             )
-            sparse_sfa_c8 = enable_sfa(vllm_config) and bool(getattr(kv_cache_spec, "cache_sparse_sfa_c8", False))
+            packed_sfa_main_cache = enable_sfa(vllm_config) and kv_cache_spec_uses_packed_sfa_main_cache(kv_cache_spec)
             if isinstance(kv_cache_spec, (AscendMLAAttentionSpec, MLAAttentionSpec)) and (
                 get_kv_cache_compression_ratio(kv_cache_spec) > 1
             ):
@@ -1478,7 +1513,7 @@ def _reshape_kv_cache_v2(
                 num_blocks_, block_size_, num_kv_heads, _ = kv_cache_shape
                 k_dim, v_dim = _get_attention_kv_cache_dims(layer_name, kv_cache_spec)
                 k_shape = (num_blocks_, block_size_, num_kv_heads, k_dim)
-                if sparse_sfa_c8:
+                if packed_sfa_main_cache:
                     k_shape = (num_blocks_, block_size_, num_kv_heads, kv_cache_spec.head_size)
                     v_dim = 0
                 v_shape = (num_blocks_, block_size_, num_kv_heads, v_dim)
@@ -1501,9 +1536,13 @@ def _reshape_kv_cache_v2(
                     vllm_config.model_config,
                 )
 
-            if sparse_sfa_c8:
+            if packed_sfa_main_cache:
                 raw_k_tensor = raw_cache
-                k_dtype = kv_cache_dtype_str_to_dtype(vllm_config.cache_config.cache_dtype, vllm_config.model_config)
+                k_dtype = (
+                    torch.int8
+                    if vllm_config.cache_config.cache_dtype == TURBOQUANT_CACHE_DTYPE
+                    else kv_cache_dtype_str_to_dtype(vllm_config.cache_config.cache_dtype, vllm_config.model_config)
+                )
                 k_cache = raw_k_tensor.view(k_dtype).view(k_shape)
                 kv_caches[layer_name] = (k_cache,)
             elif isinstance(raw_cache, tuple):
@@ -1549,7 +1588,7 @@ def _reshape_kv_cache_v2(
     return kv_caches
 
 
-_BUILD_ATTN_METADATA_MODULE = vllm.v1.worker.gpu.spec_decode.speculator
+_BUILD_ATTN_METADATA_MODULE = _speculator
 
 
 @contextmanager

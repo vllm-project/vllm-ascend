@@ -223,8 +223,8 @@ If you want to deploy multi-node environment, you need to set up environment on 
     --enable-auto-tool-choice \
     --tool-call-parser glm47 \
     --reasoning-parser glm45 \
-    --kv-cache-dtype int8 \
-    --attention_config.indexer_kv_dtype int8 \
+    --kv-cache-dtype fp8 \
+    --attention_config.indexer_kv_dtype fp8 \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
     --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
@@ -707,8 +707,8 @@ if __name__ == "__main__":
             --enable-auto-tool-choice \
             --tool-call-parser glm47 \
             --reasoning-parser glm45 \
-            --kv-cache-dtype int8 \
-            --attention_config.indexer_kv_dtype int8 \
+            --kv-cache-dtype fp8 \
+            --attention_config.indexer_kv_dtype fp8 \
             --speculative-config '{"num_speculative_tokens": 1, "method": "deepseek_mtp", "enforce_eager": true}' \
             --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
             --kv-transfer-config \
@@ -772,8 +772,8 @@ if __name__ == "__main__":
             --enable-auto-tool-choice \
             --tool-call-parser glm47 \
             --reasoning-parser glm45 \
-            --kv-cache-dtype int8 \
-            --attention_config.indexer_kv_dtype int8 \
+            --kv-cache-dtype fp8 \
+            --attention_config.indexer_kv_dtype fp8 \
             --speculative-config '{"num_speculative_tokens": 1, "method": "deepseek_mtp", "enforce_eager": true}' \
             --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
             --kv-transfer-config \
@@ -839,8 +839,8 @@ if __name__ == "__main__":
             --enable-auto-tool-choice \
             --tool-call-parser glm47 \
             --reasoning-parser glm45 \
-            --kv-cache-dtype int8 \
-            --attention_config.indexer_kv_dtype int8 \
+            --kv-cache-dtype fp8 \
+            --attention_config.indexer_kv_dtype fp8 \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
             --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
             --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
@@ -907,8 +907,8 @@ if __name__ == "__main__":
             --enable-auto-tool-choice \
             --tool-call-parser glm47 \
             --reasoning-parser glm45 \
-            --kv-cache-dtype int8 \
-            --attention_config.indexer_kv_dtype int8 \
+            --kv-cache-dtype fp8 \
+            --attention_config.indexer_kv_dtype fp8 \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
             --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
             --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \

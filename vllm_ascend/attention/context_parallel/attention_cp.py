@@ -397,11 +397,7 @@ class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
         if input_layerout == "BSND":
             attn_out = attn_out.view(-1, attn_out.shape[2], attn_out.shape[3])
             attn_lse = attn_lse.transpose(1, 2).reshape(-1, attn_lse.shape[1], 1)
-        return self._merge_dcp_attention_output(
-            attn_out,
-            attn_lse,
-            self.head_size,
-        )
+        return self._merge_dcp_attention_output(attn_out, attn_lse)
 
     def _update_chunk_attn_out_lse_with_current_attn_out_lse(
         self,

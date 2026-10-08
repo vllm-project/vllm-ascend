@@ -8,8 +8,8 @@ import pytest
 import vllm.envs as vllm_envs
 from vllm.distributed.utils import get_pp_indices
 
-from vllm_ascend.worker.v2 import pp_utils
-from vllm_ascend.worker.v2.pp_utils import (
+from vllm_ascend.worker.v2 import pp_transport
+from vllm_ascend.worker.v2.pp_transport import (
     SpecPPSupport,
     bypass_upstream_spec_pp_guard,
     resolve_spec_pp_support,
@@ -26,14 +26,37 @@ def _clear_partition_cache():
 
 def test_spec_pp_uses_native_protocol():
     """The supported release shares the upstream sampled-token protocol."""
-    assert pp_utils.use_legacy_spec_pp() is False
+    assert pp_transport.use_legacy_spec_pp() is False
+
+
+@pytest.mark.parametrize(
+    "indexer_type,use_index_cache,pattern,expected",
+    [
+        ("full", True, "FFSF", True),
+        ("full", True, "FFFF", False),
+        ("full", False, "FFSF", False),
+        ("shared", False, "FFFF", True),
+        ("shared", True, "FFFF", True),
+        ("shared", True, "FFSF", True),
+    ],
+)
+def test_topk_boundary_combines_indexshare_and_indexcache(indexer_type, use_index_cache, pattern, expected):
+    config = SimpleNamespace(
+        num_hidden_layers=4,
+        indexer_types=["full", "shared", indexer_type, "shared"],
+        use_index_cache=use_index_cache,
+        index_topk_pattern=pattern,
+    )
+    assert pp_transport.pp_stage_requires_topk_indices(config, 2) is expected
+    assert not pp_transport.pp_stage_requires_topk_indices(config, 0)
+    assert not pp_transport.pp_stage_requires_topk_indices(config, config.num_hidden_layers)
 
 
 @pytest.mark.parametrize("cached", [False, True])
 @pytest.mark.parametrize("partition", [None, "42,36"])
 @pytest.mark.parametrize("fail", [False, True])
 def test_unsharded_draft_preserves_target_partition(monkeypatch, cached, partition, fail):
-    monkeypatch.setattr(pp_utils, "use_legacy_spec_pp", lambda: True)
+    monkeypatch.setattr(pp_transport, "use_legacy_spec_pp", lambda: True)
     was_cached = vllm_envs._is_envs_cache_enabled()
     vllm_envs.disable_envs_cache()
     if partition is None:
@@ -81,7 +104,7 @@ def test_unsharded_draft_preserves_target_partition(monkeypatch, cached, partiti
     [(True, None), (True, SpecPPSupport()), (False, SpecPPSupport(bypass_upstream_pp_guard=True))],
 )
 def test_pp_guard_noop_preserves_partition(monkeypatch, legacy, support):
-    monkeypatch.setattr(pp_utils, "use_legacy_spec_pp", lambda: legacy)
+    monkeypatch.setattr(pp_transport, "use_legacy_spec_pp", lambda: legacy)
     monkeypatch.setattr(vllm_envs, "VLLM_PP_LAYER_PARTITION", "42,36")
     config = SimpleNamespace(parallel_config=SimpleNamespace(pipeline_parallel_size=2))
     with bypass_upstream_spec_pp_guard(config, support) as bypassed:
