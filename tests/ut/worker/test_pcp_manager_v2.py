@@ -994,6 +994,9 @@ def test_sample_tokens_uses_global_batch_only_on_non_last_pp_rank(
     runner.is_last_pp_rank = is_last_pp_rank
     runner.speculator = None
     runner.use_spec_pp = False
+    # Dump contract from the production initializer; helpers no-op on None.
+    runner.debugger = None
+    runner._debugger_started = False
     runner.prompt_logprobs_worker = None
     # vLLM main added these ExecuteModelState fields.
     state_kwargs: dict = {}
