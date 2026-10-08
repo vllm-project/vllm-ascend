@@ -11,11 +11,11 @@ RFork is a warm-start weight loading path for vLLM Ascend. Instead of always rea
 The RFork loading flow in the current implementation is:
 
 1. vLLM starts with `--load-format rfork`.
-2. RFork builds a **seed key** from the model identity and deployment topology.
-3. RFork asks the planner for an available seed matching that key.
-4. If a seed is returned, the new instance initializes the model structure on its local NPU, registers local weight memory, fetches the remote transfer-engine metadata from the seed, and performs batch weight transfer into local parameter buffers.
-5. If no seed is available, or any step fails, RFork cleans up and falls back to the default loader.
-6. After the instance finishes loading, it starts a local seed service and periodically reports heartbeat to the planner, so later instances can reuse it.
+2. RFork initializes the model structure on the local NPU, prepares the required tensor layout, and registers local weight memory.
+3. RFork builds a **seed key** from the configuration fingerprint, structural digest, and deployment topology, then asks the planner for a compatible seed.
+4. If a seed is returned, RFork fetches its transfer metadata and copies weights into the registered local buffers through `YuanRong TransferEngine`.
+5. If no compatible seed is returned, or RFork setup, seed acquisition, or transfer fails, RFork releases its registered memory and seed service, then falls back to the default loader. Fallback is conditional on that cleanup succeeding: if registered memory or the seed service cannot be released, RFork raises instead of allocating a second model while the old weights are still pinned.
+6. A successfully loaded model can publish a local seed service and send heartbeats to the planner. Publication waits for any source lease to be released.
 
 ## Flowchart
 
@@ -45,13 +45,13 @@ To enable RFork, pass `--load-format rfork` and provide RFork settings through `
 | **model_url** | String | Logical model identifier used to build the RFork seed key. | Required for RFork transfer. Instances that should share seeds must use the same value. |
 | **model_deploy_strategy_name** | String | Deployment strategy identifier used together with `model_url` to build the seed key. | Required for RFork transfer. Instances that should share seeds must use the same value. |
 | **rfork_scheduler_url** | String | Base URL of the planner service used for seed allocation, release, and heartbeat. | Required for planner-based matching. Example: `http://127.0.0.1:1223`. |
-| **rfork_seed_timeout_sec** | Number | Timeout for waiting until the local seed HTTP service becomes healthy after startup. | Optional. Default: `5.0`. Must be greater than `0`. Invalid values fall back to the default. |
-| **rfork_request_timeout_sec** | Number | HTTP connect/read timeout for planner and seed requests. | Optional. Default: `10.0`. Must be greater than `0`. |
-| **rfork_heartbeat_interval_sec** | Number | Interval between planner heartbeat reports. | Optional. Default: `30.0`. JSON configuration only. |
-| **rfork_lease_release_max_attempts** | Integer | Fast-attempt count before transient lease-release failures continue at a slower background interval. | Optional. Default: `3`. Permanent planner rejection still stops retries. |
-| **rfork_lease_release_retry_interval_sec** | Number | Interval between fast lease-release retries. | Optional. Default: `30.0`. JSON configuration only. |
+| **rfork_seed_timeout_sec** | Number | Timeout for waiting until the local seed HTTP service becomes healthy after startup. | Optional. Default: `5.0`. Must be finite and greater than `0`. A valid JSON value takes priority over `RFORK_SEED_TIMEOUT_SEC`; an invalid or absent JSON value uses a valid environment value, otherwise the default. |
+| **rfork_request_timeout_sec** | Number | HTTP connect/read timeout for planner and seed requests. | Optional. Default: `10.0`. Must be finite and greater than `0`. A valid JSON value takes priority over `RFORK_REQUEST_TIMEOUT_SEC`; an invalid or absent JSON value uses a valid environment value, otherwise the default. |
+| **rfork_heartbeat_interval_sec** | Number | Interval between planner heartbeat reports. | Optional. Default: `30.0`. JSON configuration only. Must be a finite positive number; invalid values fail configuration initialization. |
+| **rfork_lease_release_max_attempts** | Integer | Fast-attempt count before transient lease-release failures continue at a slower background interval. | Optional. Default: `3`. JSON configuration only. Must be a positive integer; invalid values fail configuration initialization. Permanent planner rejection still stops retries. |
+| **rfork_lease_release_retry_interval_sec** | Number | Interval between fast lease-release retries. | Optional. Default: `30.0`. JSON configuration only. Must be a finite positive number; invalid values fail configuration initialization. |
 | **rfork_seed_bind_host** | String | Local address used by the seed HTTP service. | Optional. Default: `0.0.0.0`. |
-| **rfork_seed_port_base** | Integer | Base port for deterministic seed HTTP endpoints. | Optional. Default: `0`, which lets the OS assign a port. For a nonzero base, main and draft models reserve adjacent slots per worker: main uses `base + 2 * global_rank`, draft uses `base + 2 * global_rank + 1`. Ports above `65535` or ports already in use fall back to OS assignment. Keep this range separate from TransferEngine, its HIXL endpoint range, and other service ports. |
+| **rfork_seed_port_base** | Integer | Base port for deterministic seed HTTP endpoints. | Optional. Default: `0`, which lets the OS assign a port. JSON configuration only. The base must be an integer in `[0, 65535]`; invalid values fail configuration initialization. For a nonzero base, main and draft models reserve adjacent slots per worker: main uses `base + 2 * global_rank`, draft uses `base + 2 * global_rank + 1`. If the calculated port exceeds `65535` or is already in use, the seed service falls back to OS assignment. Keep this range separate from TransferEngine, its HIXL endpoint range, and other service ports. |
 | **rfork_seed_advertise_host** | String | Seed address advertised to the planner. | Optional. Automatically detected when unset. |
 
 The YuanRong TransferEngine RPC port is not a configuration field: RFork initializes the engine with port `0`, and the
@@ -92,19 +92,32 @@ The planner treats the seed key as an opaque compatibility identifier. RFork der
 
 Lease release is asynchronous. An unresolved release delays advertising the receiver as a seed, but does not block inference. The bundled planner is a functional example, not a production scheduler.
 
-### Quantized Models
+### Quantized and NZ Models
 
 For quantized models, RFork transfers tensors after Ascend weight post-processing instead of raw checkpoint parameters. The receiver first builds the same post-load tensor layout as the seed, then RFork copies the live NPU tensors used by inference.
 
+The processed-layout path also applies to non-quantized models when the Ascend configuration sets `weight_nz_mode=2` or the hardware weight-layout policy is `FORCE_NZ`. Other non-quantized configurations use checkpoint-layout transfer and run weight post-processing after the read.
+
 This path handles Ascend quantization changes such as weight transposition, NZ format conversion, packed weights, derived scale tensors, and MLA/SFA runtime tensors such as `W_UV` and `W_UK_T`. Empty tensors that were released during post-processing are not included in the transfer manifest.
 
-When validating RFork for a quantized model:
+When validating RFork for a quantized or NZ model:
+
+- Use the same vLLM Ascend code on the seed and receiver, with compatible vLLM versions, the same model revision and quantization configuration, and matching shard and layout settings.
+- Load a seed instance first, then start a compatible receiver and confirm `source=transfer`. A successful load with `source=local` or `source=fallback` does not demonstrate a successful weight transfer.
+- Compare the receiver's output accuracy with the default loader on NPU hardware using the same inputs and inference settings. Tensor layout summaries help diagnose structural differences but do not prove tensor value equality or output accuracy.
+
+### Transfer Diagnostics
 
 - Apply the same vLLM Ascend code to both the seed instance and the receiver instance.
 - Restart the planner and all vLLM instances after changing RFork code, because existing seeds keep their old transfer metadata.
 - Use a new `model_deploy_strategy_name` after changing model arguments or RFork code, so the planner does not match a receiver with an incompatible old seed.
 - A successful TP0 RFork transfer logs elapsed time, bytes, chunks, and throughput at INFO. Other TP ranks and
-  per-chunk details remain at DEBUG. The fallback path logs `RFork transfer failed`.
+  per-chunk details remain at DEBUG. Seed acquisition that produces no lease — whether because no compatible seed
+  is available or because the planner request or response fails validation — logs
+  `seed acquisition was unsuccessful; loading locally` (INFO on the summary rank, DEBUG elsewhere) and reports
+  `source=local`. A failure during RFork setup or transfer, such as registration, metadata, or weight-read errors, logs `RFork transfer failed`
+  at WARNING and reports `source=fallback`; inspect the planner warning to distinguish a seed miss from an acquisition
+  error.
 
 ### Intentional transfer contracts
 
@@ -132,7 +145,7 @@ manifest checks:
 
 ## Supported Models
 
-Mainstream DeepSeek/Qwen/GLM series are supported.
+Mainstream model families such as DeepSeek, Qwen, and GLM are supported.
 
 ## Performance Considerations
 
@@ -171,7 +184,7 @@ python rfork_planner.py \
 
 Use the same RFork startup command for both the first instance and later instances in the same deployment.
 
-For the first instance, the planner usually has no compatible seed yet, so RFork falls back to the default loader. After loading finishes, that instance starts its local seed service and reports itself to the planner.
+For the first instance, the planner usually has no compatible seed yet, so RFork falls back to the default loader. After loading finishes, the instance can publish a local seed service and report itself to the planner.
 
 For later instances, if the planner can allocate a compatible seed, RFork will try to transfer weights from the existing seed instance before falling back to the default loader.
 
@@ -225,10 +238,20 @@ lease-release, and publication timing.
 ## Note & Caveats
 
 - RFork requires `YuanRong TransferEngine` at runtime. If the package is missing, RFork cannot initialize the transfer backend.
-- If RFORK is used, **each worker process** must bind a listening port. That port is assigned randomly.
-- RFork weight transfer does not support dynamic EPLB because expert weights and placement can change after the seed service starts. If `eplb_config.dynamic_eplb` or `eplb_config.expert_map_record_path` enables dynamic EPLB, RFork transfer is bypassed and the model is loaded through the default model loader.
+- A worker that is advertised as an RFork seed binds a seed HTTP listening port. With the default
+  `rfork_seed_port_base=0`, the OS assigns the port. A nonzero base reserves adjacent main and draft slots for each
+  worker; an occupied slot or a resolved port above `65535` falls back to OS assignment. Keep seed HTTP ports
+  separate from the vLLM serving port, TransferEngine RPC port, and HIXL endpoint range.
+- RFork transfer is bypassed entirely — the model loads through the default loader and no seed is advertised — under any of the configurations below. RFork registers live NPU weight memory and serves it to other instances, so it cannot be used when that memory may later be released or rewritten, nor when expert placement is not fixed at load time. The bypass is decided before any session or TransferEngine setup and is logged as `RFork transfer is disabled when <reason> is enabled; using the default model loader.`
+    - **Sleep mode** (`enable_sleep_mode` on either the model config or `vllm_config.model_config`), because sleeping discards and reallocates weight storage.
+    - **Online weight transfer** (`weight_transfer_config` is set), because weights can be replaced after loading.
+    - **Static expert placement** (`eplb_config.expert_map_path` is set), because the placement map is applied outside the transferred tensor set.
+    - **Dynamic EPLB**, because expert weights and placement can change after the seed service starts. This covers `parallel_config.enable_eplb`, `eplb_config.dynamic_eplb`, and `eplb_config.expert_map_record_path`.
+- Falling back to the default loader requires releasing the RFork seed service and registered memory first. RFork makes at most two cleanup attempts (`FALLBACK_CLEANUP_MAX_ATTEMPTS`, currently 2), with a short backoff before the second attempt, and only then reclaims memory and reruns the default loader. If cleanup still fails, tensor owners remain pinned and RFork raises rather than allocating a second copy of the model; a session that already reached the finalized state raises as well. Both cases abort startup instead of degrading to a slow load.
 - The example [`rfork_planner.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/rfork/rfork_planner.py) is only a simple mock implementation. If you need stronger scheduling, capacity management, or production-grade availability behavior, implement your own planner based on the RFork seed protocol.
-- The planner protocol headers `SEED_REFCNT` and `SEED_RANK` are deprecated and will be removed in a future release. `SEED_REFCNT` is always sent as `0` and ignored by the planner (seed capacity is controlled by planner configuration), and `SEED_RANK` duplicates the `tp_rank` already encoded in the seed key. Custom planner implementations must not depend on these headers.
+- The planner protocol headers `SEED_REFCNT` and `SEED_RANK` carry no scheduling meaning, but they are not optional on the wire today:
+    - `SEED_REFCNT` is always sent as `0` on advertisement and is ignored for capacity decisions (seed capacity is controlled by planner configuration). A planner must still accept the header.
+    - `SEED_RANK` remains a **required** field. RFork rejects a `/get_seed` response that omits it or carries a negative value, and sends it on every seed advertisement, lease renewal, lease release, and seed removal request. A planner must echo it back on `/get_seed` and accept it on the other routes. What is deprecated is using it for compatibility decisions: it duplicates the `tp_rank` already encoded in the seed key, so a planner must match on the seed key alone and treat `SEED_RANK` as an opaque part of the seed's identity tuple.
 - Each heartbeat verifies that the seed HTTP service remains alive. If the service exits, RFork stops heartbeats and
   attempts to withdraw the advertisement while leaving the loaded model available for inference.
 - Temporary planner outages do not stop inference. Retryable initial advertisements and lease releases continue in the
