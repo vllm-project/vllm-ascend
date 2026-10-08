@@ -134,8 +134,6 @@ class CaMemAllocator:
 
     instance = None
     default_tag: str = "default"
-    # Allocations with this tag stay mapped across sleep/wake cycles.
-    sleep_persistent_tag: str = "sleep_persistent"
 
     @staticmethod
     def get_instance() -> "CaMemAllocator":
@@ -207,9 +205,6 @@ class CaMemAllocator:
         torch.npu.synchronize()
 
         for ptr, data in self.pointer_to_data.items():
-            if data.tag == CaMemAllocator.sleep_persistent_tag:
-                # This memory is not offloaded or released during sleep.
-                continue
             handle = data.handle
             if data.tag in offload_tags:
                 size_in_bytes = handle[1]
@@ -237,9 +232,6 @@ class CaMemAllocator:
             tags or "all",
         )
         for ptr, data in self.pointer_to_data.items():
-            if data.tag == CaMemAllocator.sleep_persistent_tag:
-                # It was never released in sleep(), so there is nothing to remap.
-                continue
             if tags is None or data.tag in tags:
                 handle = data.handle
                 create_and_map(handle)
@@ -252,16 +244,6 @@ class CaMemAllocator:
                         dest_max = ptr + size_in_bytes * 2
                         memcpy(ptr, dest_max, cpu_ptr, size_in_bytes, ACL_MEMCPY_HOST_TO_DEVICE)
                         data.cpu_backup_tensor = None
-
-    @contextmanager
-    def use_allocation_tag(self, tag: str):
-        """Temporarily override the tag assigned to new allocations."""
-        old_tag = self.current_tag
-        self.current_tag = tag
-        try:
-            yield
-        finally:
-            self.current_tag = old_tag
 
     @contextmanager
     def use_memory_pool(self, tag: str | None = None):
