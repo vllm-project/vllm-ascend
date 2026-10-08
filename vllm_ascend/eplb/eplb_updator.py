@@ -133,7 +133,7 @@ class EplbUpdator:
                 self.wakeup_eplb_worker()
 
         if self.update_expert_weight_flag() and self.expert_map_record_path is None:
-            self.eplb_loader.update_expert_map_and_weight(self.reqs)
+            self.eplb_loader.update_expert_map_and_weight()
 
         # One circle of eplb update includes expert_heat_collection_interval + algorithm_execution_interval
         # + num_moe_layers (for weight update). In expert_heat_collection stage, we only update the counter

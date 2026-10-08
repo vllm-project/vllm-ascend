@@ -72,16 +72,13 @@ def test_asyn_transfer_and_update(mock_adaptor):
     loader_obj.state = loader.ExpertWeightUpdateState.READY
 
     reqs: list[MagicMock] = []
+    fake_reqs = [MagicMock(), MagicMock()]
 
-    with patch("torch.distributed.batch_isend_irecv", return_value=[MagicMock(), MagicMock()]):
+    with patch("torch.distributed.batch_isend_irecv", return_value=fake_reqs):
         loader_obj.asyn_expert_weight_transfer(reqs)
 
     assert loader_obj.state == loader.ExpertWeightUpdateState.TRANSFERRING
     assert len(reqs) > 0
-
-    mock_req = MagicMock()
-    mock_req.wait.return_value = None
-    reqs = [mock_req]
 
     loader_obj.recv_expert_list = [(0, 0)]
     loader_obj.updated_expert_map = {20: torch.tensor(0)}
@@ -89,7 +86,12 @@ def test_asyn_transfer_and_update(mock_adaptor):
     loader_obj.layer_id = 0
     loader_obj.comm_op_list = ["op"]
 
-    loader_obj.update_expert_map_and_weight(reqs)
+    loader_obj.update_expert_map_and_weight()
+
+    # No host-side blocking wait on the P2P requests: the consuming updates
+    # are stream-ordered after the D2D ops on the same stream
+    for req in fake_reqs:
+        req.wait.assert_not_called()
 
     mock_adaptor.do_update_expert_map.assert_called_once()
     mock_adaptor.do_update_log2phy_map.assert_called_once()
@@ -118,6 +120,6 @@ def test_invalid_state_asyn_update(mock_adaptor):
     assert reqs == []
 
     loader_obj.state = loader.ExpertWeightUpdateState.READY
-    loader_obj.update_expert_map_and_weight([])
+    loader_obj.update_expert_map_and_weight()
 
     assert not mock_adaptor.do_update_expert_map.called
