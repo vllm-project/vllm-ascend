@@ -578,14 +578,38 @@ def test_non_a5_decode_keeps_tp_block_sharding() -> None:
         assert not _should_use_tp_sharded_index_decode(tp_size=4, num_prefills=1)
 
 
+@pytest.mark.parametrize("use_v2_model_runner", [False, True])
+def test_indexer_caches_model_runner_choice(use_v2_model_runner: bool) -> None:
+    with (
+        patch.object(
+            msa_m3_module,
+            "get_current_vllm_config",
+            return_value=SimpleNamespace(use_v2_model_runner=use_v2_model_runner),
+        ) as get_config,
+        patch.object(msa_m3_module, "AscendMiniMaxM3IndexerCache"),
+    ):
+        impl = AscendMiniMaxM3IndexerImpl(
+            num_kv_heads=1,
+            scale=1.0,
+            topk_blocks=2,
+            sparse_block_size=128,
+            num_index_heads=1,
+            index_head_dim=4,
+            prefix="layer.attn",
+        )
+    assert impl.use_v2_model_runner is use_v2_model_runner
+    get_config.assert_called_once_with()
+
+
 def _make_mrv2_padding_context(
     *,
     is_padding: bool = True,
+    num_tokens: int = 1,
     tokens_across_dp: tuple[int, ...] = (370, 1),
     cudagraph_mode: CUDAGraphMode = CUDAGraphMode.NONE,
 ) -> SimpleNamespace:
     return SimpleNamespace(
-        is_padding=torch.tensor([is_padding]),
+        is_padding=torch.full((num_tokens,), is_padding, dtype=torch.bool),
         dp_metadata=SimpleNamespace(
             num_tokens_across_dp_cpu=torch.tensor(tokens_across_dp),
         ),
@@ -598,22 +622,22 @@ def _make_mrv2_padding_context(
 def test_mrv2_idle_dp_dummy_is_detected_and_cached(
     mock_get_vllm_config: MagicMock,
 ) -> None:
-    mock_get_vllm_config.return_value = SimpleNamespace(use_v2_model_runner=True)
+    mock_get_vllm_config.side_effect = AssertionError("No current config during forward")
     forward_context = _make_mrv2_padding_context()
 
-    assert _is_mrv2_idle_dp_dummy(forward_context) is True
+    assert _is_mrv2_idle_dp_dummy(forward_context, use_v2_model_runner=True) is True
     forward_context.is_padding[0] = False
-    assert _is_mrv2_idle_dp_dummy(forward_context) is True
-    mock_get_vllm_config.assert_called_once_with()
+    assert _is_mrv2_idle_dp_dummy(forward_context, use_v2_model_runner=True) is True
+    mock_get_vllm_config.assert_not_called()
 
 
 @patch("vllm_ascend.models.minimax_m3.msa_m3.get_current_vllm_config")
 def test_mrv1_padding_shape_is_not_classified_as_mrv2_dummy(
     mock_get_vllm_config: MagicMock,
 ) -> None:
-    mock_get_vllm_config.return_value = SimpleNamespace(use_v2_model_runner=False)
+    mock_get_vllm_config.side_effect = AssertionError("No current config during forward")
 
-    assert _is_mrv2_idle_dp_dummy(_make_mrv2_padding_context()) is False
+    assert _is_mrv2_idle_dp_dummy(_make_mrv2_padding_context(), use_v2_model_runner=False) is False
 
 
 @pytest.mark.parametrize(
@@ -622,17 +646,19 @@ def test_mrv1_padding_shape_is_not_classified_as_mrv2_dummy(
         _make_mrv2_padding_context(is_padding=False),
         _make_mrv2_padding_context(tokens_across_dp=(1, 1)),
         _make_mrv2_padding_context(cudagraph_mode=CUDAGraphMode.FULL),
+        _make_mrv2_padding_context(num_tokens=512),
+        _make_mrv2_padding_context(num_tokens=512, cudagraph_mode=CUDAGraphMode.FULL),
     ],
-    ids=["real_one_token_decode", "all_dp_ranks_one_token", "full_graph"],
+    ids=["real_one_token_decode", "all_dp_ranks_one_token", "full_graph", "capture_warmup", "capture_full"],
 )
 @patch("vllm_ascend.models.minimax_m3.msa_m3.get_current_vllm_config")
 def test_mrv2_non_dummy_forwards_are_not_skipped(
     mock_get_vllm_config: MagicMock,
     forward_context: SimpleNamespace,
 ) -> None:
-    mock_get_vllm_config.return_value = SimpleNamespace(use_v2_model_runner=True)
+    mock_get_vllm_config.side_effect = AssertionError("No current config during forward")
 
-    assert _is_mrv2_idle_dp_dummy(forward_context) is False
+    assert _is_mrv2_idle_dp_dummy(forward_context, use_v2_model_runner=True) is False
 
 
 @patch("vllm_ascend.models.minimax_m3.msa_m3.get_current_vllm_config")
@@ -645,6 +671,7 @@ def test_mrv2_idle_dp_runs_first_indexer_layer_then_skips_repeats(
 ) -> None:
     impl = object.__new__(AscendMiniMaxM3IndexerImpl)
     torch.nn.Module.__init__(impl)
+    impl.use_v2_model_runner = True
     impl.num_index_heads = 1
     impl.index_head_dim = 4
     impl.topk_blocks = 2
@@ -680,7 +707,7 @@ def test_mrv2_idle_dp_runs_first_indexer_layer_then_skips_repeats(
     forward_context.attn_metadata = {impl.index_cache.prefix: metadata}
     mock_get_forward_context.return_value = forward_context
     mock_get_tp_group.return_value = SimpleNamespace(world_size=4)
-    mock_get_vllm_config.return_value = SimpleNamespace(use_v2_model_runner=True)
+    mock_get_vllm_config.side_effect = AssertionError("No current config during forward")
     expected = torch.zeros(1, 1, 2, dtype=torch.int32)
 
     with patch(
