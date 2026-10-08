@@ -204,14 +204,17 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
 
         from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.store_client import (
             create_ascend_mooncake_embedding_store_client,
+            ensure_mooncake_store_imported,
         )
 
         producer_memory = cast(AscendProducerMemoryPool, self._producer_memory)
         namespace, max_items, max_bytes, read_bytes = self._store_config
+        ensure_mooncake_store_imported()
         producer_memory.ensure_prepared(torch.device(self._buffer_device))
         try:
             store_client = create_ascend_mooncake_embedding_store_client(
                 producer_memory.bounce_arena,
+                cast(AscendMooncakeTransfer, self._transfer),
                 read_buffer_bytes=read_bytes,
             )
             try:

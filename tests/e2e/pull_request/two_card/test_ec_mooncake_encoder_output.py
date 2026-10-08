@@ -8,8 +8,14 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import shutil
+import socket
+import subprocess
+import time
 import uuid
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Any
 
 import pybase64 as base64
@@ -34,6 +40,103 @@ FORCED_FALLBACK_STAGING_BYTES = 1
 CONSUMER_BUFFER_BYTES = 256 * 1024 * 1024
 BOUNCE_ARENA_BYTES = 2 * 1024 * 1024
 REQUEST_TIMEOUT_SECONDS = 600
+STORE_RETRY_DELAY_SECONDS = 1
+STORE_PUT_TIMEOUT_SECONDS = 30
+STORE_MASTER_START_TIMEOUT_SECONDS = 30
+STORE_MASTER_STOP_TIMEOUT_SECONDS = 10
+STORE_PUT_LOG = "Stored encoder output in Mooncake Store"
+STORE_HIT_LOG = "encoder output(s) from Mooncake Store"
+STORE_GLOBAL_SEGMENT_SIZE = "1GB"
+STORE_LOCAL_BUFFER_SIZE = "512MB"
+
+
+class _CapturingEPDServer(RemoteEPDServer):
+    """Keep child logs so the Store test can prove that a GET was used."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self.output_lines: list[str] = []
+        super().__init__(*args, **kwargs)
+
+    def _read_output(self, pipe: Any, prefix: str) -> None:
+        with pipe:
+            for line in iter(pipe.readline, ""):
+                if line:
+                    rendered = f"{prefix}: {line}"
+                    self.output_lines.append(rendered)
+                    print(rendered, end="")
+
+    def has_store_hit(self) -> bool:
+        return any(STORE_HIT_LOG in line for line in self.output_lines)
+
+    def has_store_put(self) -> bool:
+        return any(STORE_PUT_LOG in line for line in self.output_lines)
+
+
+def _wait_for_mooncake_master(
+    process: subprocess.Popen[Any],
+    port: int,
+    log_path: Path,
+) -> None:
+    deadline = time.monotonic() + STORE_MASTER_START_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            pytest.fail(
+                "mooncake_master exited during startup:\n"
+                + log_path.read_text(errors="replace")
+            )
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=1):
+                return
+        except OSError:
+            time.sleep(0.1)
+    pytest.fail(
+        "timed out waiting for mooncake_master:\n"
+        + log_path.read_text(errors="replace")
+    )
+
+
+@pytest.fixture(scope="module")
+def mooncake_store_config(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
+    master = shutil.which("mooncake_master")
+    if master is None:
+        pytest.fail("mooncake_master is required for the Store E2E")
+
+    work_dir = tmp_path_factory.mktemp("ec-mooncake-store")
+    config_path = work_dir / "mooncake_store.json"
+    log_path = work_dir / "mooncake_master.log"
+    port = get_open_port()
+    config_path.write_text(
+        json.dumps(
+            {
+                "mode": "embedded",
+                "metadata_server": "P2PHANDSHAKE",
+                "master_server_address": f"127.0.0.1:{port}",
+                "global_segment_size": STORE_GLOBAL_SEGMENT_SIZE,
+                "local_buffer_size": STORE_LOCAL_BUFFER_SIZE,
+                "protocol": "ascend",
+                "device_name": "",
+                "enable_offload": False,
+            }
+        )
+    )
+
+    with log_path.open("w") as log_file:
+        process = subprocess.Popen(
+            [master, "--port", str(port)],
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+        )
+        try:
+            _wait_for_mooncake_master(process, port, log_path)
+            yield str(config_path)
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=STORE_MASTER_STOP_TIMEOUT_SECONDS)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
 
 
 def _messages() -> dict[str, list[dict[str, Any]]]:
@@ -173,17 +276,16 @@ def _prepare_decode_body(
         )
         response.raise_for_status()
         params = response.json().get("ec_transfer_params") or {}
-        reported_items = params.get("ec_items") or []
-        assert len(reported_items) == 1, f"encoder returned unexpected EC items for image {index}: {reported_items!r}"
-        reported = reported_items[0]
+        assert len(params) == 1, f"encoder returned unexpected EC items for image {index}: {params!r}"
+        ec_mm_hash, reported = next(iter(params.items()))
+        assert ec_mm_hash, f"encoder returned an empty mm_hash for image {index}"
         assert isinstance(reported, dict), f"encoder returned a non-dict EC item for image {index}: {reported!r}"
-        ec_mm_hash = reported.get("mm_hash")
-        assert ec_mm_hash, f"encoder returned no mm_hash for image {index}: {reported!r}"
         reported_transfer_id = reported.get("transfer_id")
         assert reported_transfer_id in (None, transfer_id), (
             f"encoder changed transfer_id for image {index}: expected {transfer_id!r}, got {reported_transfer_id!r}"
         )
-        metadata = {key: value for key, value in reported.items() if key not in {"mm_hash", "transfer_id"}}
+        metadata = reported.get("metadata") or {}
+        assert isinstance(metadata, dict), f"encoder returned non-dict metadata for image {index}: {metadata!r}"
         assert metadata, f"encoder returned no metadata for image {index}"
         item_meta = {
             "uuid": item_uuid,
@@ -278,20 +380,32 @@ def _run_epd(
     baseline_outputs: dict[str, str],
     producer_staging_bytes: int,
     repeat: int,
+    cross_encoder_cache: bool = False,
+    mooncake_config_path: str | None = None,
 ) -> None:
     encode_port = get_open_port()
     pd_port = get_open_port()
     reservation_port = get_open_port()
+
+    producer_extra_config: dict[str, Any] = {
+        "mooncake_protocol": "ascend",
+        "ascend_mooncake_bounce_arena_size": BOUNCE_ARENA_BYTES,
+    }
+    if cross_encoder_cache:
+        producer_extra_config.update(
+            {
+                "cross_encoder_cache": True,
+                # Isolate this run so its first request must publish a miss.
+                "embedding_cache_prefix": f"e2e-{uuid.uuid4().hex}",
+            }
+        )
 
     producer_config = {
         "ec_connector": "ECMooncakeConnector",
         "ec_role": "ec_producer",
         "ec_buffer_size": producer_staging_bytes,
         "ec_buffer_device": "npu",
-        "ec_connector_extra_config": {
-            "mooncake_protocol": "ascend",
-            "ascend_mooncake_bounce_arena_size": BOUNCE_ARENA_BYTES,
-        },
+        "ec_connector_extra_config": producer_extra_config,
     }
     consumer_config = {
         "ec_connector": "ECMooncakeConnector",
@@ -331,10 +445,38 @@ def _run_epd(
         "MOONCAKE_EC_PROTOCOL": "ascend",
         "VLLM_USE_V2_MODEL_RUNNER": "1",
     }
+    if cross_encoder_cache:
+        assert mooncake_config_path is not None
+        env_dict["MOONCAKE_CONFIG_PATH"] = mooncake_config_path
+        env_dict["VLLM_SERVER_DEV_MODE"] = "1"
 
-    with RemoteEPDServer(vllm_serve_args=server_args, env_dict=env_dict):
-        for _ in range(repeat):
+    with _CapturingEPDServer(vllm_serve_args=server_args, env_dict=env_dict) as server:
+        for attempt in range(repeat):
             assert _run_epd_requests(encode_port, pd_port, reservation_port) == baseline_outputs
+            if cross_encoder_cache:
+                time.sleep(STORE_RETRY_DELAY_SECONDS)
+                if server.has_store_hit():
+                    return
+                if attempt == 0:
+                    deadline = time.monotonic() + STORE_PUT_TIMEOUT_SECONDS
+                    while not server.has_store_put() and time.monotonic() < deadline:
+                        time.sleep(0.1)
+                    if not server.has_store_put():
+                        pytest.fail(
+                            "initial requests never stored an encoder output "
+                            "in Mooncake Store"
+                        )
+                if attempt + 1 < repeat:
+                    response = requests.post(
+                        f"http://127.0.0.1:{encode_port}/reset_encoder_cache",
+                        timeout=REQUEST_TIMEOUT_SECONDS,
+                    )
+                    response.raise_for_status()
+    if cross_encoder_cache:
+        pytest.fail(
+            "successful Store PUT was observed, but repeated requests never "
+            "loaded an encoder output from Mooncake Store"
+        )
 
 
 @pytest.fixture(scope="module")
@@ -402,9 +544,16 @@ def test_mooncake_staging_matches_single_server(
 @wait_until_npu_memory_free()
 def test_mooncake_forced_fallback_matches_single_server(
     baseline_outputs: dict[str, str],
+    mooncake_store_config: str,
 ) -> None:
-    """Validate direct/bounce fallback and its resource reuse."""
+    """Validate fallback reuse and the Store round trip."""
     # One byte is deliberate fault injection used only by this case. It makes
     # stage() reject every non-empty encoder output and proves the insurance
     # path without depending on a particular model's encoder-output size.
-    _run_epd(baseline_outputs, FORCED_FALLBACK_STAGING_BYTES, repeat=2)
+    _run_epd(
+        baseline_outputs,
+        FORCED_FALLBACK_STAGING_BYTES,
+        repeat=4,
+        cross_encoder_cache=True,
+        mooncake_config_path=mooncake_store_config,
+    )

@@ -64,9 +64,13 @@ class AscendBlockTables(BlockTables):
         # touched by one token tile. Use the smallest kernel block size to form
         # one safe constexpr window for all groups, without staging a whole
         # row.
-        min_kernel_block_size = min(kernel_block_sizes)
-        window_size = (self._triton_block_size + min_kernel_block_size - 1) // min_kernel_block_size + 1
-        self._block_table_window_size = triton.next_power_of_2(window_size)
+        if kernel_block_sizes:
+            min_kernel_block_size = min(kernel_block_sizes)
+            window_size = (self._triton_block_size + min_kernel_block_size - 1) // min_kernel_block_size + 1
+            self._block_table_window_size = triton.next_power_of_2(window_size)
+        else:
+            # Encoder-only producers do not allocate decoder KV-cache groups.
+            self._block_table_window_size = 1
         # because we will override these attribute, delete these attribute to
         # make sure it's collected by python gc immediately.
         del self.slot_mappings

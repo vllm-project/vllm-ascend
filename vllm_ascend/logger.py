@@ -184,7 +184,14 @@ def configure_ascend_logging() -> None:
     This approach is safe for upstream tests and multiprocessing.
     """
     ascend_logger = logging.getLogger("vllm_ascend")
-    if ascend_logger.handlers:
+    # File logging is configured first during platform initialization. A
+    # FileHandler is also a StreamHandler, but it must not suppress creation
+    # of the dedicated console handler: E2E and operators consume stdout/stderr
+    # while the file handler writes only to the Ascend log directory.
+    if any(
+        isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler)
+        for handler in ascend_logger.handlers
+    ):
         return
 
     # Parse stream parameter

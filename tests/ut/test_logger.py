@@ -13,6 +13,9 @@
 # This file is a part of the vllm-ascend project.
 
 import logging
+from io import StringIO
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from tests.ut.base import TestBase
 
@@ -174,6 +177,51 @@ class TestLoggerModule(TestBase):
                 vllm_logger.removeHandler(new_handler)
         finally:
             logger_module._file_logging_configured = False
+
+    def test_configure_console_logging_when_file_handler_exists(self):
+        import vllm_ascend.logger as logger_module
+
+        ascend_logger = logging.getLogger("vllm_ascend")
+        original_handlers = list(ascend_logger.handlers)
+        original_level = ascend_logger.level
+        original_propagate = ascend_logger.propagate
+        stream = StringIO()
+
+        try:
+            with TemporaryDirectory() as tmpdir:
+                file_handler = logging.FileHandler(f"{tmpdir}/ascend.log")
+                ascend_logger.handlers = [file_handler]
+
+                with (
+                    patch.object(logger_module, "_use_color", return_value=False),
+                    patch.object(logger_module.sys, "stderr", stream),
+                    patch.object(logger_module.envs, "VLLM_LOGGING_LEVEL", "INFO"),
+                    patch.object(
+                        logger_module.envs,
+                        "VLLM_LOGGING_STREAM",
+                        "ext://sys.stderr",
+                    ),
+                ):
+                    logger_module.configure_ascend_logging()
+                    logger_module.configure_ascend_logging()
+                    ascend_logger.info("Store PUT completed")
+
+                console_handlers = [
+                    handler
+                    for handler in ascend_logger.handlers
+                    if isinstance(handler, logging.StreamHandler)
+                    and not isinstance(handler, logging.FileHandler)
+                ]
+                self.assertEqual(len(console_handlers), 1)
+                self.assertIn(file_handler, ascend_logger.handlers)
+                self.assertIn("Store PUT completed", stream.getvalue())
+        finally:
+            for handler in ascend_logger.handlers:
+                if handler not in original_handlers:
+                    handler.close()
+            ascend_logger.handlers = original_handlers
+            ascend_logger.setLevel(original_level)
+            ascend_logger.propagate = original_propagate
 
     def test_rotating_handler_rotates_on_size(self):
         import os
