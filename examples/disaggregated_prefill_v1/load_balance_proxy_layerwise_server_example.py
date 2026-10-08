@@ -107,6 +107,8 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (
 
 logger = init_logger(__name__)
 
+MODELS_REQUEST_TIMEOUT_SECONDS = 3.0
+
 # Add uvloop for faster event loop if available
 try:
     import uvloop
@@ -642,8 +644,8 @@ async def _handle_get_models(request: Request):
     """Forward the /models request to a backend server.
 
     Both prefiller and decoder servers serve the same model list,
-    so we pick the first available prefiller (fallback to decoder)
-    to answer the model listing request.
+    so we pick the first configured prefiller, or the first decoder
+    when no prefiller is configured. Failed requests are not retried.
     """
     # Prefer prefiller, fallback to decoder when no prefiller is available.
     # Both roles expose the same /v1/models endpoint in vLLM.
@@ -652,17 +654,25 @@ async def _handle_get_models(request: Request):
     elif proxy_state.decoders:
         backend = proxy_state.decoders[0]
     else:
-        raise RuntimeError("No backend servers available")
+        raise HTTPException(status_code=503, detail="No backend servers available")
 
     auth = request.headers.get("Authorization")
     headers = {"Authorization": auth} if auth else {}
     try:
-        response = await backend.client.get("/models", headers=headers)
+        response = await backend.client.get("/models", headers=headers, timeout=MODELS_REQUEST_TIMEOUT_SECONDS)
         response.raise_for_status()
         return response.json()
-    except (httpx.RequestError, httpx.HTTPStatusError) as e:
+    except httpx.TimeoutException as e:
+        logger.error("Timed out fetching models from %s: %s", backend.url, e)
+        raise HTTPException(status_code=504, detail="Model listing backend timed out") from e
+    except httpx.HTTPStatusError as e:
         logger.error("Failed to fetch models from %s: %s", backend.url, e)
-        raise
+        if e.response.status_code in (401, 403):
+            raise HTTPException(status_code=e.response.status_code, detail="Model listing authorization failed") from e
+        raise HTTPException(status_code=502, detail="Failed to fetch models from backend") from e
+    except (httpx.RequestError, ValueError) as e:
+        logger.error("Failed to fetch models from %s: %s", backend.url, e)
+        raise HTTPException(status_code=502, detail="Failed to fetch models from backend") from e
 
 
 @app.get("/v1/models")
