@@ -22,6 +22,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.utils import select_common_block_size
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
@@ -187,7 +188,7 @@ def sparse_mla(query, cache, indices, metadata, scale):
         # draft replays one captured graph per step, so its pre-built plan can
         # describe a different step's rows; rebuild from the indices actually
         # passed whenever the draft model is running.
-        draft_model = is_forward_context_available() and getattr(get_forward_context(), "is_draft_model", False)
+        draft_model = is_forward_context_available() and _EXTRA_CTX.is_draft_model
         if query.shape[0] != topk_length.shape[0] or draft_model:
             # Eager and piecewise steps trim the query to the unpadded token
             # count, while the plan built during metadata construction still
