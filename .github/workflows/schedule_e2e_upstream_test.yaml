@@ -81,10 +81,12 @@ jobs:
           fail-fast: false
           matrix:
             part: [0, 1, 2, 3]
-            image_tag: [9.1.0-910b-ubuntu22.04-py3.12]
+            #image_tag: [9.1.0-910b-ubuntu22.04-py3.12]
+            image_tag: [9.2.0_20260928212200-910b-ubuntu22.04-py3.12]
             num_npus: [1]
         container:
-          image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.image_tag }}
+          #image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.image_tag }}
+          image: swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.image_tag }}
           env:
             VLLM_LOGGING_LEVEL: ERROR
             HF_HUB_OFFLINE: 0
@@ -228,10 +230,12 @@ jobs:
           fail-fast: false
           matrix:
             part: [0]
-            image_tag: [9.1.0-910b-ubuntu22.04-py3.12]
+            #image_tag: [9.1.0-910b-ubuntu22.04-py3.12]
+            image_tag: [9.2.0_20260928212200-910b-ubuntu22.04-py3.12]
             num_npus: [2, 4]
         container:
-          image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.image_tag }}
+          #image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.image_tag }}
+          image: swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.image_tag }}
           env:
             VLLM_LOGGING_LEVEL: ERROR
             HF_HUB_OFFLINE: 1
@@ -359,10 +363,12 @@ jobs:
           fail-fast: false
           matrix:
             part: [0]
-            image_tag: [9.1.0-910b-ubuntu22.04-py3.12]
+            #image_tag: [9.1.0-910b-ubuntu22.04-py3.12]
+            image_tag: [9.2.0_20260928212200-910b-ubuntu22.04-py3.12]
             num_npus: [1]
         container:
-          image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.image_tag }}
+          #image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.image_tag }}
+          image: swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.image_tag }}
           env:
             VLLM_LOGGING_LEVEL: ERROR
             HF_HUB_OFFLINE: 0
