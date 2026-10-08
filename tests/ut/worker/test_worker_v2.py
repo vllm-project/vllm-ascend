@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -20,6 +21,50 @@ class TestNPUWorkerV2(TestBase):
         worker.vllm_config.model_config.enable_sleep_mode = False
         worker.vllm_config.weight_transfer_config = None
         return worker
+
+    def test_init_device_selects_mm_encoder_runner_under_cuda_wrapper(self):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        device = object()
+        runner = MagicMock()
+        events = []
+
+        @contextmanager
+        def wrapper():
+            events.append("wrapper_enter")
+            yield
+            events.append("wrapper_exit")
+
+        def make_runner(vllm_config, runner_device):
+            events.append("runner")
+            return runner
+
+        with (
+            patch.object(NPUWorker, "__init__", lambda self, **kwargs: None),
+            patch.object(NPUWorker, "_init_device", return_value=device),
+            patch("vllm_ascend.worker.worker.init_workspace_manager"),
+            patch("vllm_ascend.worker.worker.report_usage_stats") as report_usage_stats,
+            patch(
+                "vllm_ascend.worker.v2.utils.torch_cuda_wrapper",
+                side_effect=wrapper,
+            ) as torch_cuda_wrapper,
+            patch(
+                "vllm.v1.worker.mm_encoder_model_runner.MMEncoderModelRunner",
+                side_effect=make_runner,
+            ) as mm_encoder_runner,
+        ):
+            worker = NPUWorker()
+            worker.use_v2_model_runner = True
+            worker.vllm_config = SimpleNamespace(is_mm_encoder_only=True)
+            worker.rank = 1
+
+            worker.init_device()
+
+        self.assertEqual(events, ["wrapper_enter", "runner", "wrapper_exit"])
+        torch_cuda_wrapper.assert_called_once_with()
+        mm_encoder_runner.assert_called_once_with(worker.vllm_config, device)
+        self.assertIs(worker.model_runner, runner)
+        report_usage_stats.assert_not_called()
 
     @patch("vllm_ascend.worker.worker.get_ec_transfer")
     @patch("vllm_ascend.worker.worker.has_ec_transfer", return_value=True)
