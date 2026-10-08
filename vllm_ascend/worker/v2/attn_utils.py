@@ -606,7 +606,7 @@ def _get_attention_kv_cache_dims(
     return kv_cache_spec.head_size, head_size_v
 
 
-def _adjust_kv_layout(
+def _adjust_dsv4_kv_layout(
     raw_tensor: torch.Tensor,
     cache_shapes: list[tuple[int, ...]],
     cache_dtypes: list[torch.dtype],
@@ -672,7 +672,7 @@ def _reshape_combined_attention_kv_cache(
     return combined_cache[0], combined_cache[1]
 
 
-def _view_page_strided_cache(
+def _view_dsv4_cache(
     raw_tensor: torch.Tensor,
     kv_cache_spec: AttentionSpec,
     attn_backend: AttentionBackend,
@@ -730,7 +730,7 @@ def _view_page_strided_cache(
             cache_dtypes.append(kv_cache_spec.dtype)
             overlap_full_kv_cache = True
 
-    return _adjust_kv_layout(
+    return _adjust_dsv4_kv_layout(
         raw_tensor,
         cache_shapes,
         cache_dtypes,
@@ -1234,7 +1234,7 @@ def _reshape_mamba_kv_cache(
         raise ValueError("Mamba cache allocation is not a whole number of physical pages.")
     num_blocks = raw_cache.numel() // physical_page_size
     cache_shapes = [(num_blocks, *shape) for shape in kv_cache_spec.shapes]
-    return _adjust_kv_layout(
+    return _adjust_dsv4_kv_layout(
         raw_cache,
         cache_shapes,
         list(kv_cache_spec.dtypes),
@@ -1320,7 +1320,7 @@ def _reshape_kv_cache_v2(
                         )
                     )
                     kv_cache_dtype_list.append(kv_cache_spec.scale_dtype)
-                views = _adjust_kv_layout(
+                views = _adjust_dsv4_kv_layout(
                     kv_cache_raw_tensors[layer_name],
                     kv_cache_shape_list,
                     kv_cache_dtype_list,
@@ -1412,7 +1412,7 @@ def _reshape_kv_cache_v2(
                     raise ValueError(f"Mamba cache for {layer_name} must use one raw tensor.")
                 if uses_padded_page_layout:
                     num_blocks = raw_cache.numel() // kv_cache_spec.page_size_bytes
-                    mamba_cache = _adjust_kv_layout(
+                    mamba_cache = _adjust_dsv4_kv_layout(
                         raw_cache,
                         [(num_blocks, *shape) for shape in kv_cache_spec.shapes],
                         kv_cache_spec.dtypes,
@@ -1458,7 +1458,7 @@ def _reshape_kv_cache_v2(
                 mla_dims = None
                 if not is_dsv4_model and isinstance(attn_layer, MLAAttention):
                     mla_dims = _get_attention_kv_cache_dims(layer_name, kv_cache_spec)
-                kv_caches[layer_name] = _view_page_strided_cache(
+                kv_caches[layer_name] = _view_dsv4_cache(
                     raw_cache,
                     kv_cache_spec,
                     group.backend,
