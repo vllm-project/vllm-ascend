@@ -159,15 +159,21 @@ class TestAscendConfig(TestBase):
         return config
 
     def test_sparse_li_c8_layer_filter_uses_indexer_quant_type(self):
-        config = self._make_sparse_li_c8_config(
-            {
-                "model.layers.1.self_attn.indexer.quant_type": "INT8_DYNAMIC",
-                "model.layers.2.self_attn.indexer.quant_type": "BF16",
-            }
-        )
+        for quant_type in ("INT8_DYNAMIC", "QK_INT8_DYNAMIC"):
+            with self.subTest(quant_type=quant_type):
+                config = self._make_sparse_li_c8_config(
+                    {
+                        "model.layers.1.self_attn.indexer.quant_type": quant_type,
+                        "model.layers.2.self_attn.indexer.quant_type": "BF16",
+                    }
+                )
 
-        self.assertTrue(config.is_sparse_li_c8_layer("model.layers.1.self_attn.indexer.k_cache"))
-        self.assertFalse(config.is_sparse_li_c8_layer("model.layers.2.self_attn.indexer.k_cache"))
+                self.assertTrue(config.is_sparse_li_c8_layer("model.layers.1.self_attn.indexer.k_cache"))
+                self.assertFalse(config.is_sparse_li_c8_layer("model.layers.2.self_attn.indexer.k_cache"))
+                self.assertFalse(config.is_sparse_li_c8_layer("model.layers.3.self_attn.indexer.k_cache"))
+
+                config.enable_sparse_li_c8 = False
+                self.assertFalse(config.is_sparse_li_c8_layer("model.layers.1.self_attn.indexer.k_cache"))
 
     def test_sparse_li_c8_layer_filter_uses_indexer_wq_b_weight(self):
         config = self._make_sparse_li_c8_config(

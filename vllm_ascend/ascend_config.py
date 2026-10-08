@@ -1167,7 +1167,7 @@ class AscendConfig:
             return set(), set()
 
         QUANT_SUFFIXES = (".indexer.quant_type", ".indexer.wq_b.weight")
-        VALID_QUANT_TYPES = ("INT8_DYNAMIC", "W8A8_MXFP8")
+        VALID_QUANT_TYPES = ("INT8_DYNAMIC", "QK_INT8_DYNAMIC", "W8A8_MXFP8")
 
         layer_ids: set[int] = set()
         layer_names: set[str] = set()
