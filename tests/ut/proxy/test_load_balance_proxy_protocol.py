@@ -223,6 +223,7 @@ def test_cached_token_fields_follow_the_protocol():
     message_out = {"usage": {"cache_read_input_tokens": 0}}
     assert proxy.write_cached_tokens_for_api("/messages", message_out, 32) is True
     assert message_out["usage"]["cache_read_input_tokens"] == 32
+    assert "input_tokens" not in message_out["usage"]
 
     completed: dict[str, Any] = {"type": "response.completed", "response": {"usage": {"input_tokens": 10}}}
     assert proxy.write_cached_tokens_for_api("/responses", completed, 7) is True
@@ -266,6 +267,46 @@ def test_messages_passthrough_rejoins_split_json_and_releases_load(installed_run
     assert scheduler.request_num == 0
     assert all(entry.active_kv_cache == 0 for entry in scheduler.prefillers.values())
     assert all(entry.active_tokens == 0 for entry in scheduler.decoders.values())
+
+
+@pytest.mark.parametrize("event_type", ["message", "message_start", "message_delta"])
+@pytest.mark.parametrize("old_cached, new_cached", [(100, 20), (100, 0), (0, 100), (None, 20)])
+def test_messages_cached_usage_preserves_total_input_tokens(installed_runtime, event_type, old_cached, new_cached):
+    scheduler, prefill, decode = installed_runtime
+    prefill.payload["usage"]["cache_read_input_tokens"] = new_cached
+    usage = {"input_tokens": 100 - (old_cached or 0), "cache_creation_input_tokens": 7, "output_tokens": 17}
+    if old_cached is not None:
+        usage["cache_read_input_tokens"] = old_cached
+    event: dict[str, Any] = {"type": event_type}
+    if event_type == "message_start":
+        event["message"] = {"usage": usage}
+    else:
+        event["usage"] = usage
+    streaming = event_type != "message"
+    payload = json.dumps(event).encode()
+    if streaming:
+        payload = b"event: " + event_type.encode() + b"\ndata: " + payload + b"\n\n"
+    decode.chunks = [payload[:20], payload[20:]]
+
+    async def run():
+        response = await proxy.handle_completions_impl("/messages", _request({"model": "m", "stream": streaming}))
+        return await _body(response)
+
+    body = asyncio.run(run())
+    if streaming:
+        assert body.startswith(b"event: " + event_type.encode() + b"\n")
+        body = body.split(b"data: ", 1)[1].strip()
+    patched = json.loads(body)
+    patched_usage = patched["message"]["usage"] if event_type == "message_start" else patched["usage"]
+    assert patched_usage["input_tokens"] == 100 - new_cached
+    assert patched_usage["cache_read_input_tokens"] == new_cached
+    assert patched_usage["cache_creation_input_tokens"] == 7
+    assert patched_usage["output_tokens"] == 17
+    assert (
+        sum(patched_usage[key] for key in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
+        == 107
+    )
+    assert scheduler.request_num == 0
 
 
 def test_responses_prefill_is_one_token_and_streaming_usage_is_patched(installed_runtime):

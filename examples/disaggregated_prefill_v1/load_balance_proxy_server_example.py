@@ -897,6 +897,11 @@ def write_cached_tokens_for_api(api: str, chunk_json: dict, cached_tokens: int |
     if not isinstance(usage, dict):
         return False
     if kind == "messages":
+        input_tokens = usage.get("input_tokens")
+        previous_cached = usage.get("cache_read_input_tokens", 0)
+        if isinstance(input_tokens, int) and isinstance(previous_cached, int):
+            # Messages input_tokens excludes cache reads; preserve total input.
+            usage["input_tokens"] = input_tokens + previous_cached - cached_tokens
         usage["cache_read_input_tokens"] = cached_tokens
         return True
     details = usage.get("input_tokens_details")
