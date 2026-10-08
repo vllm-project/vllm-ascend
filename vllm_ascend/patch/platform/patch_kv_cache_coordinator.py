@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM projectx
 import sys
 from collections.abc import Mapping
 from math import lcm
@@ -24,7 +24,6 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     get_manager_for_kv_cache_spec,
 )
 from vllm.v1.kv_cache_interface import (
-    CircularBufferSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
@@ -81,16 +80,6 @@ def _is_deepseek_v4_kv_cache_spec(kv_cache_spec: KVCacheSpec) -> bool:
 
 def _is_deepseek_v4_kv_cache_config(kv_cache_config: KVCacheConfig) -> bool:
     return any(_is_deepseek_v4_kv_cache_spec(group.kv_cache_spec) for group in kv_cache_config.kv_cache_groups)
-
-
-def _is_a5_packed_cache_config(kv_cache_config: KVCacheConfig) -> bool:
-    for group in kv_cache_config.kv_cache_groups:
-        spec = group.kv_cache_spec
-        nested = getattr(spec, "kv_cache_specs", None)
-        specs = nested.values() if isinstance(nested, Mapping) else (spec,)
-        if any(getattr(item, "cache_dtype_str", None) == "a5_mxfp8_bf16_scale" for item in specs):
-            return True
-    return False
 
 
 def _manager_spec(spec: KVCacheSpec) -> KVCacheSpec:
@@ -196,16 +185,6 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             )
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )
-        # A CircularBufferSpec can share the global block-ID pool with
-        # attention caches even though its physical state is not an attention
-        # tensor.  Ascend's physical-page zeroer clears every backing for each
-        # reported ID, so circular-state allocations must participate as well;
-        # otherwise an ID recycled directly into the state group can retain a
-        # previous request's state indefinitely.
-        if _is_a5_packed_cache_config(kv_cache_config) and kv_cache_config.needs_kv_cache_zeroing:
-            for manager in self.single_type_managers:
-                if isinstance(manager.kv_cache_spec, CircularBufferSpec):
-                    manager._record_new_block_ids = True
         # vLLM #53614 aligns exported Mamba checkpoints with EAGLE replay.
         if use_eagle:
             for manager in self.single_type_managers:

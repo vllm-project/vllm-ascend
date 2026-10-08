@@ -19,7 +19,6 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     register_all_kvcache_specs,
 )
 from vllm.v1.kv_cache_interface import (
-    CircularBufferSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -33,6 +32,7 @@ from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 import vllm_ascend.patch.platform.patch_kv_cache_utils as kv_cache_utils_patch
 from vllm_ascend.core.kv_cache_interface import (
+    AscendCircularBufferSpec,
     AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,
     AscendSlidingWindowMLASpec,
@@ -67,7 +67,7 @@ def test_packed_cache_reuses_global_capacity_and_records_recycled_state_pages():
             model_version="deepseek_v41",
             alignment=None,
         ),
-        CircularBufferSpec(block_size=32, num_kv_heads=1, head_size=16, head_size_v=0, dtype=torch.float32),
+        AscendCircularBufferSpec(block_size=32, num_kv_heads=1, head_size=16, head_size_v=0, dtype=torch.float32),
     ]
     cfg = KVCacheConfig(
         num_blocks=9,

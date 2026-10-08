@@ -132,7 +132,11 @@ def collect_specs(runtime, prefix="model"):
     return build_v41_cache_specs(runtime.model_config.hf_text_config, runtime, prefix)
 
 
-def test_compressor_registers_state_cache_and_preserves_norm_weights(config, runtime):
+@pytest.mark.parametrize("packed", [False, True])
+def test_compressor_registers_state_cache_and_preserves_norm_weights(config, runtime, monkeypatch, packed):
+    from vllm_ascend.core.kv_cache_interface import AscendCircularBufferSpec
+
+    monkeypatch.setattr("vllm_ascend.models.deepseek_v41.compressor.uses_a5_packed_cache", lambda: packed)
     runtime.scheduler_config.max_num_batched_tokens = 8
     compressor = DeepseekV41Compressor(config, 2, runtime, prefix="compressor")
     state = compressor.state_cache
@@ -142,6 +146,7 @@ def test_compressor_registers_state_cache_and_preserves_norm_weights(config, run
     assert spec.dtype == torch.float32
     assert spec.block_size == 32
     assert spec.head_size == 2 * config.head_dim
+    assert type(spec) is (AscendCircularBufferSpec if packed else CircularBufferSpec)
     assert compressor.norm.weight.dtype == torch.bfloat16
     assert set(compressor.state_dict()) == {"wkv.weight", "wgate.weight", "norm.weight"}
 
