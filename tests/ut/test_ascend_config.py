@@ -1148,9 +1148,12 @@ class TestSubconfigPydanticTypeValidation(TestBase):
                 data_parallel_size=8,
                 prefill_context_parallel_size=prefill_context_parallel_size,
             ),
+            scheduler_config=SimpleNamespace(max_num_batched_tokens=1024, max_num_seqs=256),
+            speculative_config=None,
             compilation_config=SimpleNamespace(
                 cudagraph_mode=cudagraph_mode,
                 cudagraph_capture_sizes=cudagraph_capture_sizes,
+                max_cudagraph_capture_size=max(cudagraph_capture_sizes) if cudagraph_capture_sizes else None,
             ),
             kv_transfer_config=SimpleNamespace(is_kv_consumer=True),
             model_config=SimpleNamespace(is_moe=True),
@@ -1177,17 +1180,25 @@ class TestSubconfigPydanticTypeValidation(TestBase):
     def test_oproj_tp_requires_single_capture_size(self):
         # A single capture bucket keeps every captured step at the static exchange capacity.
         config = FinegrainedTPConfig(oproj_tensor_parallel_size=2)
-        config._validate_preconditions(self._oproj_tp_vllm_config())
+        vc = self._oproj_tp_vllm_config()
+        config._validate_preconditions(vc)
         self.assertEqual(config.oproj_tensor_parallel_size, 2)
-        # A size ladder disables both knobs together; an unset list becomes the
-        # default ladder, so it disables too.
+        self.assertEqual(vc.compilation_config.cudagraph_capture_sizes, (512,))
+        # A size ladder (or the unset default ladder) collapses to one bucket instead
+        # of disabling the knobs: the recipe is min(mnbt, mns * dql) = min(1024, 256)
+        # here, clamped up to the largest configured bucket.
         config = FinegrainedTPConfig(oproj_tensor_parallel_size=2, mlp_tensor_parallel_size=4)
-        config._validate_preconditions(self._oproj_tp_vllm_config(cudagraph_capture_sizes=[8, 16, 512]))
-        self.assertEqual(config.oproj_tensor_parallel_size, 0)
-        self.assertEqual(config.mlp_tensor_parallel_size, 0)
+        vc = self._oproj_tp_vllm_config(cudagraph_capture_sizes=[8, 16, 512])
+        config._validate_preconditions(vc)
+        self.assertEqual(vc.compilation_config.cudagraph_capture_sizes, [512])
+        self.assertEqual(vc.compilation_config.max_cudagraph_capture_size, 512)
+        self.assertEqual(config.oproj_tensor_parallel_size, 2)
+        self.assertEqual(config.mlp_tensor_parallel_size, 4)
         config = FinegrainedTPConfig(oproj_tensor_parallel_size=2)
-        config._validate_preconditions(self._oproj_tp_vllm_config(cudagraph_capture_sizes=None))
-        self.assertEqual(config.oproj_tensor_parallel_size, 0)
+        vc = self._oproj_tp_vllm_config(cudagraph_capture_sizes=None)
+        config._validate_preconditions(vc)
+        self.assertEqual(vc.compilation_config.cudagraph_capture_sizes, [256])
+        self.assertEqual(config.oproj_tensor_parallel_size, 2)
 
     def test_eplb_config_int_field_lax(self):
         cfg = EplbConfig(eplb_policy_type="2")

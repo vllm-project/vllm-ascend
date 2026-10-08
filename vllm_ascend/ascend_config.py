@@ -1314,28 +1314,39 @@ class FinegrainedTPConfig:
                     "with prefill_context_parallel_size > 1."
                 )
             # Exchanges always run at the static capacity regardless of the replayed
-            # bucket, so a multi-bucket ladder only adds padding waste (recipe in warning).
+            # bucket, so a multi-bucket ladder only adds padding waste. Collapse to
+            # the recipe bucket instead of disabling the knobs (the scheduler's
+            # max_num_batched_tokens writeback follows the same adjust-and-warn pattern).
             capture_sizes = vc.compilation_config.cudagraph_capture_sizes
             if capture_sizes is None or len(capture_sizes) != 1:
-                logger.warning(
-                    "Disabling oproj_tensor_parallel_size=%d and mlp_tensor_parallel_size=%d: "
-                    "fine-grained TP exchanges always run at the static capacity regardless "
-                    "of the replayed capture bucket, so a multi-bucket ladder only adds "
-                    "padding waste. Set compilation_config.cudagraph_capture_sizes to "
-                    "[min(max_num_batched_tokens, max_num_seqs * decode_query_len)] (a "
-                    "decode_query_len multiple under speculative decoding) so the bucket "
-                    "equals the exchange capacity, got %s.",
-                    self.oproj_tensor_parallel_size,
-                    self.mlp_tensor_parallel_size,
-                    "the default size ladder" if capture_sizes is None else capture_sizes,
+                decode_query_len = (
+                    1 if vc.speculative_config is None else 1 + vc.speculative_config.num_speculative_tokens
                 )
-                self.oproj_tensor_parallel_size = 0
-                self.mlp_tensor_parallel_size = 0
-            else:
-                if self.oproj_tensor_parallel_size > 1:
-                    enabled_configs.append(f"oproj_tensor_parallel_size={self.oproj_tensor_parallel_size}")
-                if self.mlp_tensor_parallel_size > 1:
-                    enabled_configs.append(f"mlp_tensor_parallel_size={self.mlp_tensor_parallel_size}")
+                chosen = min(
+                    vc.scheduler_config.max_num_batched_tokens,
+                    vc.scheduler_config.max_num_seqs * decode_query_len,
+                )
+                chosen = -(-chosen // decode_query_len) * decode_query_len
+                if capture_sizes:
+                    chosen = max(chosen, max(capture_sizes))
+                vc.compilation_config.cudagraph_capture_sizes = [chosen]
+                vc.compilation_config.max_cudagraph_capture_size = chosen
+                logger.warning_once(
+                    "Fine-grained TP exchanges always run at the static capacity "
+                    "regardless of the replayed capture bucket, so a multi-bucket "
+                    "ladder only adds padding waste. Collapsing cudagraph_capture_sizes "
+                    "%s to [%d] (= min(max_num_batched_tokens, max_num_seqs * "
+                    "decode_query_len), rounded up to a decode_query_len multiple, "
+                    "clamped up to your largest bucket) so the bucket equals the "
+                    "exchange capacity. Set cudagraph_capture_sizes explicitly to "
+                    "silence this.",
+                    "the default size ladder" if capture_sizes is None else capture_sizes,
+                    chosen,
+                )
+            if self.oproj_tensor_parallel_size > 1:
+                enabled_configs.append(f"oproj_tensor_parallel_size={self.oproj_tensor_parallel_size}")
+            if self.mlp_tensor_parallel_size > 1:
+                enabled_configs.append(f"mlp_tensor_parallel_size={self.mlp_tensor_parallel_size}")
         if self.lmhead_tensor_parallel_size > 0:
             enabled_configs.append(f"lmhead_tensor_parallel_size={self.lmhead_tensor_parallel_size}")
         if self.embedding_tensor_parallel_size > 0:
