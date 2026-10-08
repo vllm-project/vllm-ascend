@@ -91,7 +91,6 @@ env_common: &env_common
   PYTHONHASHSEED: "0"
   VLLM_USE_MODELSCOPE: "true"
   ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
-  VLLM_PP_LAYER_PARTITION: "${PP_LAYER_PARTITION}"
 
 templates:
   # PP master (node 0)
@@ -99,6 +98,7 @@ templates:
     envs:
       <<: *env_common
       VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+      VLLM_PP_LAYER_PARTITION: "${PP_LAYER_PARTITION}"
     server_cmd_template:
       - --host
       - "0.0.0.0"
@@ -155,7 +155,12 @@ templates:
     envs:
       <<: *env_common
       VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+      VLLM_PP_LAYER_PARTITION: "${PP_LAYER_PARTITION}"
     server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - ${PORT}
       - --tensor-parallel-size
       - ${TP_SIZE}
       - --enable-expert-parallel
