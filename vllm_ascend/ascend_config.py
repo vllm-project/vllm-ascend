@@ -678,6 +678,12 @@ class AscendConfig:
             and vc.model_config.is_moe
         ):
             raise ValueError("enable_force_eplb cannot be mixed with dynamic_eplb.")
+        # Reject the requested mode before model/SP gates can silently disable it.
+        if self.enable_dsa_cp and vc.use_v2_model_runner:
+            raise ValueError(
+                "DSA-CP is not supported with model runner v2. "
+                "Set enable_dsa_cp=false in additional_config and use PCP instead."
+            )
         if self.enable_dsa_cp and vc.parallel_config.prefill_context_parallel_size > 1:
             raise ValueError(
                 "DSA-CP and PCP cannot be enabled at the same time. "
