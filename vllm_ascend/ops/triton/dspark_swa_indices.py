@@ -7,9 +7,9 @@ repeat_interleave / copy_ ...) used by the DSA metadata builder for DSpark
 non-causal parallel drafting (see vllm_ascend.attention.dsa_v1).
 
 Graph-capture contract:
-* Launched on a fixed capacity grid (``max_num_reqs * NUM_CB``); the active
-  request count is read on device, so the launch shape is stable across
-  ACL-graph replays while the per-step batch size varies.
+* Launched on a fixed grid (``min(AIV cores, max_num_reqs * NUM_CB)``); the
+  kernel claims the capacity work items grid-stride, so the launch shape is
+  stable across ACL-graph replays while the per-step batch size varies.
 * Programs past the last active request reset the padded rows
   ``[num_rows, num_rows_padded)`` to (-1, 0) so a captured graph never replays
   stale rows; the eager path leaves those rows untouched.
@@ -43,6 +43,8 @@ if HAS_TRITON:
             "num_reqs",
             "num_rows_padded",
             "num_rows",
+            "num_query_per_req",
+            "num_slots",
         ]
     )
     def _dspark_swa_indices_kernel(
@@ -56,82 +58,95 @@ if HAS_TRITON:
         num_reqs,  # active request count == block_table.shape[0]
         num_rows_padded,  # padded row count == R_alloc * num_query_per_req
         num_rows,  # active row count == sum(query_lens)
+        num_query_per_req,  # row-expansion factor per request slot
+        num_slots,  # request-slot capacity (row bands are [r*nqp, (r+1)*nqp))
         WINDOW_SIZE: tl.constexpr,  # sliding window size (model constant)
         BLOCK_SIZE: tl.constexpr,  # DSA block size (power of two)
         INDEX_W: tl.constexpr,  # aligned index width
         BLOCK_W: tl.constexpr,  # column-block width
         ROW_POW2: tl.constexpr,  # next_pow2(num_blocks): UB preload tile shape
+        Q_POW2: tl.constexpr,  # next_pow2(spec + 1): output row-tile height
     ):
-        # 1D capacity grid: pid = r * NUM_CB + cb, matching the wrapper's
-        # cdiv(W, BLOCK_W). NUM_CB must be ceil: a floor division sends tail
-        # programs' r past R_alloc, reading qsl/seq_lens out of bounds (MTE
-        # "DDR address out of range" faults on non-divisible widths).
+        # NUM_CB must be ceil: a floor division sends tail items' r past
+        # num_slots, reading qsl/seq_lens out of bounds (MTE "DDR address
+        # out of range" faults on non-divisible widths).
         NUM_CB: tl.constexpr = (INDEX_W + BLOCK_W - 1) // BLOCK_W
-        # Aligned widths take the mask-free store path below.
         ALIGNED_W: tl.constexpr = (INDEX_W % BLOCK_W) == 0
         pid = tl.program_id(0)
         num_progs = tl.num_programs(0)
-        r = pid // NUM_CB
-        cb = pid % NUM_CB
+        total_items = num_slots * NUM_CB
 
-        # The last NUM_CB programs reset [num_rows, num_rows_padded) to the contract
-        # values (-1 / 0) so a captured graph never replays stale rows. Must
-        # precede every early-return below.
-        if pid >= num_progs - NUM_CB:
-            pad_offs = tl.arange(0, BLOCK_W)
-            pad_mask = (cb * BLOCK_W + pad_offs) < INDEX_W
-            for row in range(num_rows, num_rows_padded):
-                base = row * INDEX_W + cb * BLOCK_W
-                tl.store(slots_ptr + base + pad_offs, -1, mask=pad_mask)
-                if cb == 0:
-                    tl.store(lens_ptr + row, 0)
+        # Grid-stride: each program claims w = pid, pid + num_progs, ...
+        for w in range(pid, total_items, num_progs):
+            r = w // NUM_CB
+            cb = w % NUM_CB
 
-        # Guard MTE OOB reads when the caller passes exact-sized tensors
-        # instead of the padded capacity extent.
-        if r >= num_reqs:
-            return
+            # Distributed pad-row cleanup: reset the slice of
+            # [num_rows, num_rows_padded) in this item's row band
+            # [r*nqp, (r+1)*nqp). Must precede every guard below.
+            row_lo = tl.maximum(r * num_query_per_req, num_rows)
+            row_hi = tl.minimum((r + 1) * num_query_per_req, num_rows_padded)
+            if row_lo < row_hi:
+                pad_offs = tl.arange(0, BLOCK_W)
+                pad_mask = (cb * BLOCK_W + pad_offs) < INDEX_W
+                for row in range(row_lo, row_hi):
+                    base = row * INDEX_W + cb * BLOCK_W
+                    tl.store(slots_ptr + base + pad_offs, -1, mask=pad_mask)
+                    if cb == 0:
+                        tl.store(lens_ptr + row, 0)
 
-        q0 = tl.load(qsl_ptr + r).to(tl.int32)
-        q1 = tl.load(qsl_ptr + r + 1).to(tl.int32)
-        q_len = q1 - q0
-        seq_len = tl.load(seq_lens_ptr + r).to(tl.int32)
-        prefix_len = seq_len - q_len
-        start_pos = tl.maximum(prefix_len - WINDOW_SIZE, 0)
-        visible_len = seq_len - start_pos
+            # Positive guards (Triton has no `continue`): skipping an item
+            # must not drop the remaining items this program owns.
+            if r < num_reqs:
+                q0 = tl.load(qsl_ptr + r).to(tl.int32)
+                q1 = tl.load(qsl_ptr + r + 1).to(tl.int32)
+                q_len = q1 - q0
+                seq_len = tl.load(seq_lens_ptr + r).to(tl.int32)
+                prefix_len = seq_len - q_len
+                start_pos = tl.maximum(prefix_len - WINDOW_SIZE, 0)
+                visible_len = seq_len - start_pos
 
-        # Inactive requests (q_len == 0 on padded rows): their rows are
-        # already covered by the cleanup branch above.
-        if q_len <= 0:
-            return
+                if q_len > 0:
+                    offs_w = cb * BLOCK_W + tl.arange(0, BLOCK_W)
+                    pos = start_pos + offs_w
+                    blk_num = pos // BLOCK_SIZE
+                    # Clamp so gather never reads OOB; clamped lanes are
+                    # discarded by the visible mask below.
+                    blk_f = blk_num.to(tl.float32)
+                    safe_num = tl.minimum(tl.maximum(blk_f, 0.0), (num_blocks - 1).to(tl.float32)).to(tl.int32)
 
-        offs_w = cb * BLOCK_W + tl.arange(0, BLOCK_W)
-        pos = start_pos + offs_w
-        blk_num = pos // BLOCK_SIZE
-        # Clamp to valid block-table columns so gather never reads OOB; the
-        # clamped lanes are discarded by the visible mask below.
-        blk_f = blk_num.to(tl.float32)
-        safe_num = tl.minimum(tl.maximum(blk_f, 0.0), (num_blocks - 1).to(tl.float32)).to(tl.int32)
+                    # fp32 roundtrip: tl.gather rejects int32 sources, and
+                    # fp32 math rides the vector unit; exact < 2^24.
+                    r_offs = tl.arange(0, ROW_POW2)
+                    bt_row_f32 = tl.load(
+                        bt_ptr + r * stride_bt_r + r_offs,
+                        mask=r_offs < num_blocks,
+                        other=0,
+                    ).to(tl.float32)
+                    block_id = tl.gather(bt_row_f32, safe_num, 0).to(tl.int32)
 
-        # fp32 roundtrip: tl.gather rejects int32 sources, and fp32 math
-        # rides the vector unit (int32 lowers to scalar ops); exact < 2^24.
-        r_offs = tl.arange(0, ROW_POW2)
-        bt_row_f32 = tl.load(bt_ptr + r * stride_bt_r + r_offs, mask=r_offs < num_blocks, other=0).to(tl.float32)
-        block_id = tl.gather(bt_row_f32, safe_num, 0).to(tl.int32)
+                    blk_off = pos - blk_num * BLOCK_SIZE
+                    slot = block_id * BLOCK_SIZE + blk_off
+                    slot = tl.where(offs_w.to(tl.float32) < visible_len.to(tl.float32), slot, -1)
 
-        blk_off = pos - blk_num * BLOCK_SIZE
-        slot = block_id * BLOCK_SIZE + blk_off
-        slot = tl.where(offs_w.to(tl.float32) < visible_len.to(tl.float32), slot, -1)
+                    is_first_cb = cb.to(tl.float32) == 0.0
+                    lens_val = visible_len.to(tl.int64)
 
-        # Fused repeat_interleave: broadcast one computed row to all q_len
-        # output rows; only the first column block writes lens.
-        is_first_cb = cb.to(tl.float32) == 0.0
-        lens_val = visible_len.to(tl.int64)
-        for t in range(0, q_len):
-            if ALIGNED_W:
-                tl.store(slots_ptr + (q0 + t) * INDEX_W + offs_w, slot)
-            else:
-                tl.store(slots_ptr + (q0 + t) * INDEX_W + offs_w, slot, mask=offs_w < INDEX_W)
-            tl.store(lens_ptr + q0 + t, lens_val, mask=is_first_cb)
+                    # One 2D store for the [q_len, INDEX_W] tile: rows
+                    # [q0, q0+q_len) broadcast the same slot vector (the
+                    # uniform-query contract keeps q_len <= Q_POW2).
+                    t_offs = tl.arange(0, Q_POW2)
+                    slot_tile = tl.broadcast_to(slot[None, :], (Q_POW2, BLOCK_W))
+                    tile_ptrs = slots_ptr + (q0 + t_offs)[:, None] * INDEX_W + offs_w[None, :]
+                    if ALIGNED_W:
+                        tl.store(tile_ptrs, slot_tile, mask=(t_offs < q_len)[:, None])
+                    else:
+                        tl.store(
+                            tile_ptrs,
+                            slot_tile,
+                            mask=(t_offs < q_len)[:, None] & (offs_w < INDEX_W)[None, :],
+                        )
+                    tl.store(lens_ptr + q0 + t_offs, lens_val, mask=(t_offs < q_len) & is_first_cb)
 
 
 # Column-block width for the 1D grid split (optimum of the 910B4 benchmark
@@ -141,6 +156,22 @@ _DEFAULT_BLOCK_W = 1024
 # UB-preload tile cap: next_pow2(block_table_width) beyond this no longer
 # fits the per-program UB budget, and the wrapper falls back to eager.
 _MAX_ROW_POW2 = 8192
+
+# AIV core count bounding the grid-stride launch (a performance knob: any
+# grid >= 1 is correct). Fetched from the device properties, falling back
+# to the A2-class count the gate admits.
+_NUM_AIV_CORES = 40
+
+
+def _num_aiv_cores() -> int:
+    try:
+        props = torch.npu.get_device_properties(0)
+        vector_core_num = getattr(props, "vector_core_num", None)
+        if vector_core_num is not None and vector_core_num > 0:
+            return int(vector_core_num)
+    except Exception:
+        pass
+    return _NUM_AIV_CORES
 
 
 def dspark_swa_indices_supported(
@@ -196,11 +227,13 @@ def build_dspark_swa_indices_triton(
 
     * ``indices_output`` / ``lens_output`` are written in place; when omitted,
       fresh tensors sized to the active rows are allocated.
-    * ``max_num_reqs`` sizes the capacity grid: ``grid=(max_num_reqs * NUM_CB,)``
-      is fixed across steps so the launch shape is stable for ACL-graph
-      capture. Rows in ``[num_rows, num_rows_padded)`` of the output buffers are
-      explicitly reset to (-1, 0) — a strict superset of the eager behavior,
-      which leaves those rows stale.
+    * ``max_num_reqs`` sizes the capacity grid: the claim space is
+      ``max_num_reqs * NUM_CB`` work items, and the launch grid is
+      ``min(num_aiv_cores, max_num_reqs * NUM_CB)`` — fixed across steps so
+      the launch shape is stable for ACL-graph capture while the per-step
+      batch size varies. Rows in ``[num_rows, num_rows_padded)`` of the
+      output buffers are explicitly reset to (-1, 0) — a strict superset of
+      the eager behavior, which leaves those rows stale.
     * Pass the FULL ``indices_output`` buffer (``buffer``, not
       ``buffer[:num_rows]``) to keep the pad cleanup armed: the cleanup
       extent is clamped to the buffer, so an active-sized slice silences it
@@ -212,7 +245,8 @@ def build_dspark_swa_indices_triton(
       is known.
     * ``num_decode_tokens`` (== ``num_reqs * num_query_per_req`` under the
       uniform-query contract) supplies the num_rows scalar, avoiding any
-      D2H sync.
+      D2H sync. The contract bounds each request's query count by
+      ``num_speculative_tokens + 1``; the kernel's output tile relies on it.
     """
 
     num_reqs = query_start_loc.shape[0] - 1
@@ -292,7 +326,12 @@ def build_dspark_swa_indices_triton(
     eff_block_w = min(block_w, W)  # BLOCK_W > INDEX_W would zero NUM_CB
     num_cb = triton.cdiv(W, eff_block_w)
 
-    _dspark_swa_indices_kernel[(R_alloc * num_cb,)](
+    # num_slots (R_alloc) stays unclamped so buffer-extent clamping of
+    # num_rows_padded does not shrink the kernel's claim space.
+    total_items = R_alloc * num_cb
+    grid = min(_num_aiv_cores(), total_items)
+
+    _dspark_swa_indices_kernel[(grid,)](
         block_table,
         block_table.stride(0),
         query_start_loc,
@@ -303,11 +342,14 @@ def build_dspark_swa_indices_triton(
         num_reqs,
         num_rows_padded,
         num_rows,
+        num_query_per_req,
+        R_alloc,
         WINDOW_SIZE=int(window_size),
         BLOCK_SIZE=int(block_size),
         INDEX_W=W,
         BLOCK_W=eff_block_w,
         ROW_POW2=row_pow2,
+        Q_POW2=triton.next_power_of_2(int(num_speculative_tokens) + 1),
     )
 
     # Return views sized to the active extent, mirroring the eager function.
