@@ -73,6 +73,11 @@ def _make_config():
             num_gpu_blocks_override=None,
             mamba_cache_mode="none",
             enable_prefix_caching=False,
+            prefix_cache_retention_interval=0,
+            get_resolved_kv_cache_layout=lambda: SimpleNamespace(
+                is_layer_compact=True,
+                is_block_compact=True,
+            ),
         ),
         kv_transfer_config=None,
         compilation_config=SimpleNamespace(static_forward_context={}),
