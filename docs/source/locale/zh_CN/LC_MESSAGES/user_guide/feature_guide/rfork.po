@@ -290,6 +290,9 @@ msgstr ""
 "可选。默认值：`10.0`。必须是有限且大于 `0` 的数值。有效的 JSON 值优先于 "
 "`RFORK_REQUEST_TIMEOUT_SEC`；JSON 值无效或未提供时，使用有效的环境变量值，否则使用默认值。 |"
 
+msgid "| **rfork_model_identity_headers** | Boolean | Attach readable model identity headers to every planner request. | Optional. Default: `false`. Explicit JSON `true` or `false` overrides `RFORK_MODEL_IDENTITY_HEADERS`; otherwise the environment variable accepts `0`, `1`, `true`, or `false`, ignoring case and surrounding whitespace. |"
+msgstr "| **rfork_model_identity_headers** | Boolean | 为每个规划器请求附加可读的模型身份请求头。 | 可选。默认值：`false`。显式 JSON `true` 或 `false` 会覆盖 `RFORK_MODEL_IDENTITY_HEADERS`；否则环境变量接受 `0`、`1`、`true` 或 `false`，忽略大小写和首尾空白。 |"
+
 msgid ""
 "| **rfork_heartbeat_interval_sec** | Number | Interval between planner "
 "heartbeat reports. | Optional. Default: `30.0`. JSON configuration only. Must "
@@ -352,6 +355,36 @@ msgstr ""
 "内且不处于临时端口范围 `32768-60999`）；无效值会回退到由操作系统分配。请将此端口范围与种子 HTTP 端口和 HIXL "
 "端点范围分开。HIXL 数据平面端点默认使用基准端口 `22000`（`YR_TE_HIXL_BASE_PORT`，每个物理设备 100 "
 "个端口），在同时部署两种引擎的节点上，该范围与 Mooncake ADXL 默认基于 `20000` 的段保持错开。"
+
+msgid "### Optional Planner Model Identity Headers"
+msgstr "### 可选的规划器模型身份请求头"
+
+msgid "Set `\"rfork_model_identity_headers\": true` in `--model-loader-extra-config`, or set `RFORK_MODEL_IDENTITY_HEADERS=1` in the vLLM worker environment, to attach readable model metadata to every RFork planner request (`/get_seed`, `/put_seed`, `/renew_seed_lease`, `/remove_seed`, and `/add_seed`). RFork resolves this switch when constructing its configuration, with the following priority:"
+msgstr "在 `--model-loader-extra-config` 中设置 `\"rfork_model_identity_headers\": true`，或在 vLLM worker 环境中设置 `RFORK_MODEL_IDENTITY_HEADERS=1`，即可为每个 RFork 规划器请求（`/get_seed`、`/put_seed`、`/renew_seed_lease`、`/remove_seed` 和 `/add_seed`）附加可读的模型元数据。RFork 在构造配置时解析此开关，优先级如下："
+
+msgid "1. An explicit `rfork_model_identity_headers` JSON boolean (`true` or `false`). Other JSON types fail configuration initialization.\n2. The `RFORK_MODEL_IDENTITY_HEADERS` environment variable: `1` or `true` enables the headers; `0` or `false` disables them. Values are case-insensitive and surrounding whitespace is ignored. Other values, including empty or whitespace-only values, fail configuration initialization when no JSON override is supplied.\n3. The default, `false` (disabled)."
+msgstr "1. 显式的 `rfork_model_identity_headers` JSON 布尔值（`true` 或 `false`）。其他 JSON 类型会导致配置初始化失败。\n2. `RFORK_MODEL_IDENTITY_HEADERS` 环境变量：`1` 或 `true` 启用请求头；`0` 或 `false` 禁用请求头。值不区分大小写，并忽略首尾空白。当未提供 JSON 覆盖时，其他值（包括空值或仅包含空白的值）会导致配置初始化失败。\n3. 默认值 `false`（禁用）。"
+
+msgid "An explicit JSON `false` disables the headers even when the environment variable is `1`."
+msgstr "显式 JSON `false` 会禁用请求头，即使环境变量为 `1`。"
+
+msgid "When the headers are enabled, `model_url` and `model_deploy_strategy_name` must contain only ASCII characters. Non-ASCII values fail configuration initialization with an error naming the field. This restriction does not apply when the headers are disabled."
+msgstr "启用请求头时，`model_url` 和 `model_deploy_strategy_name` 只能包含 ASCII 字符。非 ASCII 值会导致配置初始化失败，并在错误中指出字段。禁用请求头时不受此限制。"
+
+msgid "| HTTP Header | Value |"
+msgstr "| HTTP 请求头 | 值 |"
+
+msgid "| `MODEL_URL` | The resolved RFork `model_url`. |"
+msgstr "| `MODEL_URL` | 解析后的 RFork `model_url`。 |"
+
+msgid "| `DEPLOY_STRATEGY` | The resolved RFork `model_deploy_strategy_name`. |"
+msgstr "| `DEPLOY_STRATEGY` | 解析后的 RFork `model_deploy_strategy_name`。 |"
+
+msgid "| `IS_DRAFT` | `true` for a draft model, otherwise `false`. |"
+msgstr "| `IS_DRAFT` | draft 模型为 `true`，否则为 `false`。 |"
+
+msgid "The switch is not sensitive, but enabling it sends model identifiers in plain text. Values must be valid HTTP header text; avoid model URLs containing credentials. The existing seed key and request headers are preserved. A planner must read the additional headers to use or display this metadata."
+msgstr "此开关不涉及敏感信息，但启用后会以明文发送模型标识符。值必须是有效的 HTTP 请求头文本；请避免使用包含凭据的模型 URL。现有的 seed key 和请求头会保留。规划器必须读取这些附加请求头，才能使用或显示此元数据。"
 
 msgid ""
 "RFork does not match instances by `model_url` alone. The local seed key is "
