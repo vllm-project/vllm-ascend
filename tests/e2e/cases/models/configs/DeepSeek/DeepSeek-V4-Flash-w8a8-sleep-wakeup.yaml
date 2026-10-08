@@ -19,6 +19,7 @@ test_cases:
       - "--tensor-parallel-size"
       - "4"
       - "--enable-expert-parallel"
+      - "--enable-sleep-mode"
       - "--port"
       - "$SERVER_PORT"
       - "--max-model-len"
@@ -56,10 +57,10 @@ test_cases:
       sleep_and_wakeup:
         case_type: curl_cmd
         cmds:
-          - 'curl -X POST "http://127.0.0.1:${SERVER_PORT}/sleep?level=1"'
-          - 'curl -X GET http://127.0.0.1:${SERVER_PORT}/is_sleeping'
-          - 'curl -X POST "http://127.0.0.1:${SERVER_PORT}/wake_up"'
-          - 'curl -X GET http://127.0.0.1:${SERVER_PORT}/is_sleeping'
+          - 'curl -f -X POST "http://127.0.0.1:${SERVER_PORT}/sleep?level=1"'
+          - 'curl -f http://127.0.0.1:${SERVER_PORT}/is_sleeping'
+          - 'curl -f -X POST "http://127.0.0.1:${SERVER_PORT}/wake_up"'
+          - 'curl -f http://127.0.0.1:${SERVER_PORT}/is_sleeping'
       acc:
         case_type: accuracy
         dataset_path: vllm-ascend/gsm8k
