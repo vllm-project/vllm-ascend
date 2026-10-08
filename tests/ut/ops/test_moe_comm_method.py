@@ -102,56 +102,29 @@ class TestMoECommMethod(TestBase):
         self.assertEqual(result.expert_tokens, "expert_tokens")
 
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_mc2_group")
-    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.logger.warning_once")
-    def test_mega_moe_symm_buffer_uses_mega_moe_max_tokens(self, mock_warning_once, mock_get_mc2_group):
-        self.mock_ascend_config.mega_moe_max_tokens = 512
-        mock_mc2_group = MagicMock()
-        mock_mc2_group.device_group = "mc2_group"
-        mock_get_mc2_group.return_value = mock_mc2_group
-        comm_impl = self._make_fused_mc2_comm_for_buffer_init()
+    def test_mega_moe_symm_buffer_uses_operator_auto_capacity_for_p_node(self, mock_get_mc2_group):
+        mock_get_mc2_group.return_value.device_group = "mc2_group"
+        for legacy_capacity in (512, 32768, 65536):
+            with self.subTest(mega_moe_max_tokens=legacy_capacity):
+                self.mock_ascend_config.mega_moe_max_tokens = legacy_capacity
+                comm_impl = self._make_fused_mc2_comm_for_buffer_init()
 
-        comm_impl._init_mega_moe_symm_buffer(is_decode_only_node=False)
+                comm_impl._init_mega_moe_symm_buffer(is_decode_only_node=False)
 
-        comm_impl.get_symm_buffer_for_mega_moe.assert_called_once()
-        call_args = comm_impl.get_symm_buffer_for_mega_moe.call_args
-        self.assertEqual(call_args.args[:4], ("mc2_group", 8, 128, 2))
-        self.assertEqual(call_args.kwargs["max_recv_token_num"], 512)
-        mock_warning_once.assert_called_once()
-        self.assertIn("mega_moe_max_tokens", mock_warning_once.call_args.args[0])
+                call_args = comm_impl.get_symm_buffer_for_mega_moe.call_args
+                self.assertEqual(call_args.args[:4], ("mc2_group", 8, 128, 2))
+                self.assertEqual(call_args.kwargs["max_recv_token_num"], 0)
 
-    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.logger.warning_once")
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_mc2_group")
-    def test_mega_moe_symm_buffer_clamps_to_safe_capacity_for_p_node(self, mock_get_mc2_group, mock_warning_once):
-        # mega_moe_max_tokens (32768) exceeds the absolute safe upper bound
-        # (1024), so the P-node buffer must be clamped to that bound.
-        self.mock_ascend_config.mega_moe_max_tokens = 32768
-        mock_mc2_group = MagicMock()
-        mock_mc2_group.device_group = "mc2_group"
-        mock_get_mc2_group.return_value = mock_mc2_group
-        comm_impl = self._make_fused_mc2_comm_for_buffer_init()
-
-        comm_impl._init_mega_moe_symm_buffer(is_decode_only_node=False)
-
-        comm_impl.get_symm_buffer_for_mega_moe.assert_called_once()
-        call_args = comm_impl.get_symm_buffer_for_mega_moe.call_args
-        self.assertEqual(call_args.kwargs["max_recv_token_num"], 1024)
-        mock_warning_once.assert_called_once()
-        self.assertIn("mega_moe_max_tokens", mock_warning_once.call_args.args[0])
-
-    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.logger.warning_once")
-    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_mc2_group")
-    def test_mega_moe_symm_buffer_uses_safe_capacity_for_d_node(self, mock_get_mc2_group, mock_warning_once):
-        self.mock_ascend_config.mega_moe_max_tokens = 32768
-        mock_mc2_group = MagicMock()
-        mock_mc2_group.device_group = "mc2_group"
-        mock_get_mc2_group.return_value = mock_mc2_group
+    def test_mega_moe_symm_buffer_preserves_safe_capacity_for_d_node(self, mock_get_mc2_group):
+        mock_get_mc2_group.return_value.device_group = "mc2_group"
         comm_impl = self._make_fused_mc2_comm_for_buffer_init()
 
         comm_impl._init_mega_moe_symm_buffer(is_decode_only_node=True)
 
         call_args = comm_impl.get_symm_buffer_for_mega_moe.call_args
+        self.assertEqual(call_args.args[:4], ("mc2_group", 8, 128, 2))
         self.assertEqual(call_args.kwargs["max_recv_token_num"], 1024)
-        mock_warning_once.assert_not_called()
 
     def test_apply_cann_mega_moe_passes_oai_kwargs_when_supported(self):
         captured = {}
