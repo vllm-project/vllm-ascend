@@ -110,7 +110,7 @@ class MatmulReduceScatterPattern(_MatmulReduceScatterPattern):
 class PaddedMatmulReduceScatterPattern(_MatmulReduceScatterPattern):
     """Match ``gemm -> padding -> reduce_scatter`` and move padding to input."""
 
-    def get_scalar_workaround(self) -> dict[str, int]:
+    def get_scalar_workaround(self) -> dict[str, float | int] | None:
         return {"pad_rows": 13}
 
     def get_nge_inputs(self) -> list:
