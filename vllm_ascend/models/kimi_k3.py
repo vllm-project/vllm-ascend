@@ -85,7 +85,7 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention  # type: ignore[import-untyped]
 from vllm_ascend.ops.linear_op import KimiOProjMMReduceScatterOp
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
-from vllm_ascend.utils import get_rotation_path, is_950
+from vllm_ascend.utils import get_rotation_path, is_950, vllm_version_is
 from vllm_ascend.worker.v2.pp_transport import (
     PPTransportDataType,
     add_pp_transport_tensors,
@@ -552,27 +552,45 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
             self.self_attn.mla_attn.output_token_shard_size = o_proj.tp_size
         return True
 
-    def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-        residual: torch.Tensor | None,
-        prepared_attn_input: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-        defer_mlp_add: bool = False,
-        optimize_prefill: bool = False,
-        **kwargs,
-    ):
-        if self.use_attn_residuals:
-            assert residual is not None
-            return self.forward_attn_residual(
-                positions,
-                hidden_states,
-                residual,
-                prepared_attn_input=prepared_attn_input,
-                defer_mlp_add=defer_mlp_add,
-                optimize_prefill=optimize_prefill,
-            )
-        return super().forward(positions, hidden_states, residual, **kwargs)
+    if vllm_version_is("0.30.0"):
+
+        def forward(
+            self,
+            positions: torch.Tensor,
+            hidden_states: torch.Tensor,
+            residual: torch.Tensor | None,
+            prepared_attn_input: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+            defer_mlp_add: bool = False,
+            optimize_prefill: bool = False,
+            **kwargs,
+        ):
+            if self.use_attn_residuals:
+                assert residual is not None
+                return self.forward_attn_residual(
+                    positions,
+                    hidden_states,
+                    residual,
+                    prepared_attn_input=prepared_attn_input,
+                    defer_mlp_add=defer_mlp_add,
+                    optimize_prefill=optimize_prefill,
+                )
+            return super().forward(positions, hidden_states, residual, **kwargs)
+
+    else:
+
+        def forward(
+            self,
+            positions: torch.Tensor,
+            hidden_states: torch.Tensor,
+            residual: torch.Tensor | None,
+            prefix_delta: torch.Tensor | None = None,
+            **kwargs,
+        ):
+            if self.use_attn_residuals:
+                assert residual is not None
+                return self.forward_attn_residual(positions, hidden_states, residual, prefix_delta)
+            assert prefix_delta is None
+            return super().forward(positions, hidden_states, residual, **kwargs)
 
     def _run_self_attn(
         self,
@@ -608,71 +626,73 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
             optimize_prefill=optimize_prefill,
         )
 
-    def forward_attn_residual(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-        block_residual: torch.Tensor,
-        prepared_attn_input: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-        defer_mlp_add: bool = False,
-        optimize_prefill: bool = False,
-    ):
-        """Each residual point runs one native add/AttnRes/RMSNorm kernel."""
-        if prepared_attn_input is None:
-            prepared_attn_input = self.prepare_attn_residual(
-                hidden_states, block_residual, optimize_prefill=optimize_prefill
+    if vllm_version_is("0.30.0"):
+
+        def forward_attn_residual(
+            self,
+            positions: torch.Tensor,
+            hidden_states: torch.Tensor,
+            block_residual: torch.Tensor,
+            prepared_attn_input: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+            defer_mlp_add: bool = False,
+            optimize_prefill: bool = False,
+        ):
+            """Each residual point runs one native add/AttnRes/RMSNorm kernel."""
+            if prepared_attn_input is None:
+                prepared_attn_input = self.prepare_attn_residual(
+                    hidden_states, block_residual, optimize_prefill=optimize_prefill
+                )
+            hidden_states, prefix_sum, _ = prepared_attn_input
+            if self.is_block_write_layer:
+                prefix_sum = None
+
+            if self.use_sequence_parallel:
+                hidden_states = sp_all_gather(hidden_states)
+                hidden_states = hidden_states[: positions.shape[0]]
+            hidden_states = self.self_attn(
+                hidden_states=hidden_states,
+                positions=positions,
             )
-        hidden_states, prefix_sum, _ = prepared_attn_input
-        if self.is_block_write_layer:
-            prefix_sum = None
+            if self.use_sequence_parallel and not self.fuse_o_proj_mm_reduce_scatter:
+                hidden_states = sp_reduce_scatter(hidden_states)
 
-        if self.use_sequence_parallel:
-            hidden_states = sp_all_gather(hidden_states)
-            hidden_states = hidden_states[: positions.shape[0]]
-        hidden_states = self.self_attn(
-            hidden_states=hidden_states,
-            positions=positions,
-        )
-        if self.use_sequence_parallel and not self.fuse_o_proj_mm_reduce_scatter:
-            hidden_states = sp_reduce_scatter(hidden_states)
-
-        mlp_valid_blocks = self.prev_valid_blocks + int(self.is_block_write_layer)
-        op = torch.ops._C_ascend.attn_res_fwd
-        hidden_states, prefix_sum, _ = op(
-            hidden_states if prefix_sum is None else prefix_sum,
-            None if prefix_sum is None else hidden_states,
-            block_residual,
-            self.mlp_res_proj.weight,
-            self.mlp_res_norm.weight,
-            self.mlp_res_norm.variance_epsilon,
-            mlp_valid_blocks,
-            self.post_attention_layernorm.weight,
-            self.post_attention_layernorm.variance_epsilon,
-            optimize_prefill=optimize_prefill,
-        )
-        mlp_output = self.mlp(hidden_states)
-        if defer_mlp_add:
-            # Only the enclosing model uses this contract. It materializes the
-            # prefix in the next fused residual point before any aux capture,
-            # or at the PP/final-output boundary before publishing a tensor.
-            return prefix_sum, block_residual, mlp_output
-        # Standalone decoder calls have no next residual point to absorb this.
-        hidden_states, _, _ = op(
-            prefix_sum,
-            mlp_output,
-            block_residual,
-            self.mlp_res_proj.weight,
-            self.mlp_res_norm.weight,
-            self.mlp_res_norm.variance_epsilon,
-            0,
-            mix=False,
-            optimize_prefill=optimize_prefill,
-        )
-        return hidden_states, block_residual
+            mlp_valid_blocks = self.prev_valid_blocks + int(self.is_block_write_layer)
+            op = torch.ops._C_ascend.attn_res_fwd
+            hidden_states, prefix_sum, _ = op(
+                hidden_states if prefix_sum is None else prefix_sum,
+                None if prefix_sum is None else hidden_states,
+                block_residual,
+                self.mlp_res_proj.weight,
+                self.mlp_res_norm.weight,
+                self.mlp_res_norm.variance_epsilon,
+                mlp_valid_blocks,
+                self.post_attention_layernorm.weight,
+                self.post_attention_layernorm.variance_epsilon,
+                optimize_prefill=optimize_prefill,
+            )
+            mlp_output = self.mlp(hidden_states)
+            if defer_mlp_add:
+                # Only the enclosing model uses this contract. It materializes the
+                # prefix in the next fused residual point before any aux capture,
+                # or at the PP/final-output boundary before publishing a tensor.
+                return prefix_sum, block_residual, mlp_output
+            # Standalone decoder calls have no next residual point to absorb this.
+            hidden_states, _, _ = op(
+                prefix_sum,
+                mlp_output,
+                block_residual,
+                self.mlp_res_proj.weight,
+                self.mlp_res_norm.weight,
+                self.mlp_res_norm.variance_epsilon,
+                0,
+                mix=False,
+                optimize_prefill=optimize_prefill,
+            )
+            return hidden_states, block_residual
 
     else:
 
-        def forward_attn_residual(  # type: ignore[misc]
+        def forward_attn_residual(
             self,
             positions: torch.Tensor,
             hidden_states: torch.Tensor,
@@ -683,19 +703,23 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
 
             Mirrors upstream vLLM main (#50592/#50593): `prefix_delta` is folded
             into the prefix stream before each attn-res mixture, the input and
-            post-attention norms are fused into the mixture via `output_norm`,
-            and the layer returns ``(prefix_sum, block_residual, hidden_states)``.
+            post-attention norms are fused into the mixture, and the layer
+            returns ``(prefix_sum, block_residual, hidden_states)``.
             """
-            prefix_sum: torch.Tensor | None = hidden_states
-            hidden_states = _apply_ascend_attn_res(  # type: ignore[call-arg]
-                prefix_sum,
+            # The fused op returns the new prefix (`prefix + delta`) as its
+            # second result, whereas upstream's `_apply_attn_res` mutates
+            # `prefix_sum` in place; capture it explicitly to mirror upstream.
+            hidden_states, prefix_sum, _ = torch.ops._C_ascend.attn_res_fwd(
+                hidden_states,
+                prefix_delta,
                 block_residual,
-                self.self_attention_res_proj,
-                self.self_attention_res_norm,
+                self.self_attention_res_proj.weight,
+                self.self_attention_res_norm.weight,
+                self.self_attention_res_norm.variance_epsilon,
                 self.prev_valid_blocks,
-                delta=prefix_delta,
-                output_norm=self.input_layernorm,
-                block_write_idx=(self.block_write_idx if self.is_block_write_layer else -1),
+                self.input_layernorm.weight,
+                self.input_layernorm.variance_epsilon,
+                self.block_write_idx if self.is_block_write_layer else -1,
             )
             if self.is_block_write_layer:
                 prefix_sum = None
@@ -717,14 +741,16 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
                 prefix_delta = hidden_states
 
             mlp_valid_blocks = self.prev_valid_blocks + (1 if self.is_block_write_layer else 0)
-            hidden_states = _apply_ascend_attn_res(  # type: ignore[call-arg]
+            hidden_states, prefix_sum, _ = torch.ops._C_ascend.attn_res_fwd(
                 prefix_sum,
+                prefix_delta,
                 block_residual,
-                self.mlp_res_proj,
-                self.mlp_res_norm,
+                self.mlp_res_proj.weight,
+                self.mlp_res_norm.weight,
+                self.mlp_res_norm.variance_epsilon,
                 mlp_valid_blocks,
-                delta=prefix_delta,
-                output_norm=self.post_attention_layernorm,
+                self.post_attention_layernorm.weight,
+                self.post_attention_layernorm.variance_epsilon,
             )
             hidden_states = self.mlp(hidden_states)
             return prefix_sum, block_residual, hidden_states
@@ -947,64 +973,135 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
         residual = block_residual
 
         optimize_attn_res_prefill = _use_attn_res_prefill_cache()
-        pending_mlp_output = None
-        for layer_idx, layer in enumerate(
-            self.layers[self.start_layer : self.end_layer],
-            start=self.start_layer,
-        ):
-            prepared = layer.prepare_attn_residual(
+        if vllm_version_is("0.30.0"):
+            pending_mlp_output = None
+            for layer_idx, layer in enumerate(
+                self.layers[self.start_layer : self.end_layer],
+                start=self.start_layer,
+            ):
+                prepared = layer.prepare_attn_residual(
+                    hidden_states,
+                    residual,
+                    pending_mlp_output,
+                    return_materialized=materialized_aux and layer_idx in self.aux_hidden_state_layers,
+                    optimize_prefill=optimize_attn_res_prefill,
+                )
+                if layer_idx > self.start_layer and not materialized_aux:
+                    self._maybe_add_hidden_state(aux_hidden_states, layer_idx, prepared[1], None)
+                if materialized_aux and layer_idx in self.aux_hidden_state_layers:
+                    aux_hidden_states.append(prepared[2])
+                hidden_states, residual, pending_mlp_output = layer(
+                    positions=positions,
+                    hidden_states=hidden_states,
+                    residual=residual,
+                    prepared_attn_input=prepared,
+                    defer_mlp_add=True,
+                    optimize_prefill=optimize_attn_res_prefill,
+                )
+
+            if not get_pp_group().is_last_rank and pending_mlp_output is not None:
+                hidden_states = hidden_states + pending_mlp_output
+                if not materialized_aux:
+                    # Publish the completed raw prefix at the PP boundary once.
+                    self._maybe_add_hidden_state(aux_hidden_states, self.end_layer, hidden_states, None)
+            if not get_pp_group().is_last_rank:
+                if self.use_sequence_parallel:
+                    # The next PP rank expects full-sequence tensors; close the
+                    # sequence-parallel region before crossing the boundary so the
+                    # upstream PP transport only sees replicated tensors.
+                    hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
+                    residual = sp_all_gather(residual)[:full_num_tokens]
+                    aux_hidden_states = [sp_all_gather(aux)[:full_num_tokens] for aux in aux_hidden_states]
+                return add_pp_transport_tensors(
+                    IntermediateTensors({"hidden_states": hidden_states, "residual": residual}),
+                    PPTransportDataType.AUX_HIDDEN_STATES,
+                    aux_hidden_states,
+                )
+
+            hidden_states, final_prefix, _ = torch.ops._C_ascend.attn_res_fwd(
                 hidden_states,
-                residual,
                 pending_mlp_output,
-                return_materialized=materialized_aux and layer_idx in self.aux_hidden_state_layers,
+                residual,
+                self.output_attn_res_proj.weight,
+                self.output_attn_res_norm.weight,
+                self.output_attn_res_norm.variance_epsilon,
+                attn_res_block_num,
                 optimize_prefill=optimize_attn_res_prefill,
             )
-            if layer_idx > self.start_layer and not materialized_aux:
-                self._maybe_add_hidden_state(aux_hidden_states, layer_idx, prepared[1], None)
-            if materialized_aux and layer_idx in self.aux_hidden_state_layers:
-                aux_hidden_states.append(prepared[2])
-            hidden_states, residual, pending_mlp_output = layer(
-                positions=positions,
-                hidden_states=hidden_states,
-                residual=residual,
-                prepared_attn_input=prepared,
-                defer_mlp_add=True,
-                optimize_prefill=optimize_attn_res_prefill,
-            )
+            if not materialized_aux and pending_mlp_output is not None:
+                self._maybe_add_hidden_state(aux_hidden_states, self.end_layer, final_prefix, None)
+            if materialized_aux and self.end_layer in self.aux_hidden_state_layers:
+                aux_hidden_states.append(hidden_states)
 
-        if not get_pp_group().is_last_rank and pending_mlp_output is not None:
-            hidden_states = hidden_states + pending_mlp_output
-            if not materialized_aux:
-                # Publish the completed raw prefix at the PP boundary once.
-                self._maybe_add_hidden_state(aux_hidden_states, self.end_layer, hidden_states, None)
-        if not get_pp_group().is_last_rank:
-            if self.use_sequence_parallel:
-                # The next PP rank expects full-sequence tensors; close the
-                # sequence-parallel region before crossing the boundary so the
-                # upstream PP transport only sees replicated tensors.
-                hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
-                residual = sp_all_gather(residual)[:full_num_tokens]
-                aux_hidden_states = [sp_all_gather(aux)[:full_num_tokens] for aux in aux_hidden_states]
-            return add_pp_transport_tensors(
-                IntermediateTensors({"hidden_states": hidden_states, "residual": residual}),
-                PPTransportDataType.AUX_HIDDEN_STATES,
-                aux_hidden_states,
-            )
+        else:
+            prefix_delta: torch.Tensor | None = None
+            for layer_idx, layer in enumerate(
+                self.layers[self.start_layer : self.end_layer],
+                start=self.start_layer,
+            ):
+                if materialized_aux and layer_idx in self.aux_hidden_state_layers:
+                    # Capture the layer input before the layer consumes it. This
+                    # fused call has no bank writeback, so it has no side effects
+                    # on the residual state.
+                    prefix_input = hidden_states + prefix_delta if prefix_delta is not None else hidden_states
+                    aux_hidden_states.append(
+                        torch.ops._C_ascend.attn_res_fwd(
+                            prefix_input,
+                            None,
+                            residual,
+                            layer.self_attention_res_proj.weight,
+                            layer.self_attention_res_norm.weight,
+                            layer.self_attention_res_norm.variance_epsilon,
+                            layer.prev_valid_blocks,
+                            return_materialized=True,
+                        )[2]
+                    )
+                hidden_states, residual, prefix_delta = layer(
+                    positions=positions,
+                    hidden_states=hidden_states,
+                    residual=residual,
+                    prefix_delta=prefix_delta,
+                )
+                if not materialized_aux and (layer_idx + 1) in self.aux_hidden_state_layers:
+                    self._maybe_add_hidden_state(
+                        aux_hidden_states,
+                        layer_idx + 1,
+                        hidden_states + prefix_delta if prefix_delta is not None else hidden_states,
+                        residual,
+                    )
 
-        hidden_states, final_prefix, _ = torch.ops._C_ascend.attn_res_fwd(
-            hidden_states,
-            pending_mlp_output,
-            residual,
-            self.output_attn_res_proj.weight,
-            self.output_attn_res_norm.weight,
-            self.output_attn_res_norm.variance_epsilon,
-            attn_res_block_num,
-            optimize_prefill=optimize_attn_res_prefill,
-        )
-        if not materialized_aux and pending_mlp_output is not None:
-            self._maybe_add_hidden_state(aux_hidden_states, self.end_layer, final_prefix, None)
-        if materialized_aux and self.end_layer in self.aux_hidden_state_layers:
-            aux_hidden_states.append(hidden_states)
+            if not get_pp_group().is_last_rank and prefix_delta is not None:
+                hidden_states = hidden_states + prefix_delta
+                if not materialized_aux:
+                    # Publish the completed raw prefix at the PP boundary once.
+                    self._maybe_add_hidden_state(aux_hidden_states, self.end_layer, hidden_states, None)
+            if not get_pp_group().is_last_rank:
+                if self.use_sequence_parallel:
+                    # The next PP rank expects full-sequence tensors; close the
+                    # sequence-parallel region before crossing the boundary so the
+                    # upstream PP transport only sees replicated tensors.
+                    hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
+                    residual = sp_all_gather(residual)[:full_num_tokens]
+                    aux_hidden_states = [sp_all_gather(aux)[:full_num_tokens] for aux in aux_hidden_states]
+                return add_pp_transport_tensors(
+                    IntermediateTensors({"hidden_states": hidden_states, "residual": residual}),
+                    PPTransportDataType.AUX_HIDDEN_STATES,
+                    aux_hidden_states,
+                )
+
+            hidden_states, final_prefix, _ = torch.ops._C_ascend.attn_res_fwd(
+                hidden_states,
+                prefix_delta,
+                residual,
+                self.output_attn_res_proj.weight,
+                self.output_attn_res_norm.weight,
+                self.output_attn_res_norm.variance_epsilon,
+                attn_res_block_num,
+            )
+            if not materialized_aux and prefix_delta is not None:
+                self._maybe_add_hidden_state(aux_hidden_states, self.end_layer, final_prefix, None)
+            if materialized_aux and self.end_layer in self.aux_hidden_state_layers:
+                aux_hidden_states.append(hidden_states)
         if self.use_sequence_parallel:
             if aux_hidden_states:
                 hidden_size = hidden_states.shape[-1]

@@ -212,11 +212,13 @@ def test_kimi_attention_residual_stays_sequence_sharded(monkeypatch):
     layer.fuse_o_proj_mm_reduce_scatter = False
     layer.prev_valid_blocks = 0
     layer.is_block_write_layer = False
-    layer.input_layernorm = nn.Identity()
+    # The main-contract fused path reads the norm/proj weights directly, so use
+    # weight-bearing stand-ins rather than opaque sentinels.
+    layer.input_layernorm = SimpleNamespace(weight=torch.ones(2), variance_epsilon=1e-5)
     layer.post_attention_layernorm = SimpleNamespace(weight=torch.ones(2), variance_epsilon=1e-5)
     layer.mlp = nn.Identity()
-    layer.self_attention_res_proj = object()
-    layer.self_attention_res_norm = object()
+    layer.self_attention_res_proj = SimpleNamespace(weight=torch.ones(1, 2))
+    layer.self_attention_res_norm = SimpleNamespace(weight=torch.ones(2), variance_epsilon=1e-5)
     layer.mlp_res_proj = SimpleNamespace(weight=torch.ones(1, 2))
     layer.mlp_res_norm = SimpleNamespace(weight=torch.ones(2), variance_epsilon=1e-5)
     layer.self_attn = IdentityAttention()
@@ -331,26 +333,52 @@ def test_kimi_model_allocates_attention_residual_after_sp_shard(monkeypatch):
 
 
 def test_kimi_model_selects_materialized_or_raw_dspark_aux_stream(monkeypatch):
-    class RecordingLayer(nn.Module):
-        def __init__(self, layer_idx: int) -> None:
-            super().__init__()
-            self.layer_idx = layer_idx
-            self.prev_valid_blocks = layer_idx
-            self.self_attention_res_proj = nn.Identity()
-            self.self_attention_res_norm = nn.Identity()
+    if vllm_version_is("0.30.0"):
 
-        def prepare_attn_residual(self, prefix, bank, addend=None, **kwargs):
-            raw = prefix if addend is None else prefix + addend
-            return raw + 100 * self.prev_valid_blocks, raw, raw + 100 * self.prev_valid_blocks
+        class RecordingLayer(nn.Module):
+            def __init__(self, layer_idx: int) -> None:
+                super().__init__()
+                self.layer_idx = layer_idx
+                self.prev_valid_blocks = layer_idx
+                self.self_attention_res_proj = nn.Identity()
+                self.self_attention_res_norm = nn.Identity()
 
-        def forward(self, *, positions, hidden_states, residual, prepared_attn_input, **kwargs):
-            del positions, hidden_states
-            return prepared_attn_input[1] + 10, residual, None
+            def prepare_attn_residual(self, prefix, bank, addend=None, **kwargs):
+                raw = prefix if addend is None else prefix + addend
+                return raw + 100 * self.prev_valid_blocks, raw, raw + 100 * self.prev_valid_blocks
+
+            def forward(self, *, positions, hidden_states, residual, prepared_attn_input, **kwargs):
+                del positions, hidden_states
+                return prepared_attn_input[1] + 10, residual, None
+
+        expected_materialized = torch.tensor([[111.0]])
+        expected_raw = torch.tensor([[11.0]])
+
+    else:
+
+        class RecordingLayer(nn.Module):
+            def __init__(self, layer_idx: int) -> None:
+                super().__init__()
+                self.layer_idx = layer_idx
+                self.prev_valid_blocks = layer_idx
+                self.self_attention_res_proj = SimpleNamespace(weight=torch.ones(1, 1))
+                self.self_attention_res_norm = SimpleNamespace(weight=torch.ones(1), variance_epsilon=1e-5)
+
+            def forward(self, *, positions, hidden_states, residual, prefix_delta=None, **kwargs):
+                del positions
+                return hidden_states + 10, residual, torch.full_like(hidden_states, 5)
+
+        expected_materialized = torch.tensor([[1016.0]])
+        expected_raw = torch.tensor([[16.0]])
 
     monkeypatch.setattr(kimi_k3, "_use_attn_res_prefill_cache", lambda: False)
 
-    def fake_fused(prefix, addend, *_args, **_kwargs):
+    def fake_fused(prefix, addend, *_args, **kwargs):
         raw = prefix if addend is None else prefix + addend
+        if kwargs.get("return_materialized"):
+            # A distinct marker keeps the materialized tap distinguishable from
+            # the raw prefix tap selected by the other mode.
+            return raw, raw, raw + 1000
         return raw, raw, raw
 
     monkeypatch.setattr(torch.ops._C_ascend, "attn_res_fwd", fake_fused, raising=False)
@@ -378,7 +406,7 @@ def test_kimi_model_selects_materialized_or_raw_dspark_aux_stream(monkeypatch):
         intermediate_tensors=None,
         inputs_embeds=torch.tensor([[1.0]]),
     )
-    torch.testing.assert_close(materialized_aux[0], torch.tensor([[111.0]]))
+    torch.testing.assert_close(materialized_aux[0], expected_materialized)
 
     model.dspark_aux_capture_materialized = False
     _, raw_aux = model(
@@ -387,7 +415,7 @@ def test_kimi_model_selects_materialized_or_raw_dspark_aux_stream(monkeypatch):
         intermediate_tensors=None,
         inputs_embeds=torch.tensor([[1.0]]),
     )
-    torch.testing.assert_close(raw_aux[0], torch.tensor([[11.0]]))
+    torch.testing.assert_close(raw_aux[0], expected_raw)
 
 
 def test_projector_applies_optional_modelslim_rotation():
