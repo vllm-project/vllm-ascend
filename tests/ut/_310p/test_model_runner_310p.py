@@ -228,7 +228,7 @@ def test_attention_kernel_blocks_match_input_batch_and_cache_shape(
 
     with (
         patch("vllm_ascend._310p.model_runner_310p.get_kv_cache_tensor_layers", return_value=["model.attn"]),
-        patch("vllm_ascend._310p.model_runner_310p.torch_npu.empty_with_format") as allocate,
+        patch("vllm_ascend._310p.model_runner_310p.torch_npu.empty_with_format", create=True) as allocate,
     ):
         caches = runner._allocate_kv_cache_tensors(cache_config)
     kernel_size = expected_kernel_sizes[0]
