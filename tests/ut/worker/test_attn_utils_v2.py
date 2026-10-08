@@ -173,6 +173,7 @@ def test_main_allocator_attention_layout(
         cache_config=SimpleNamespace(cache_dtype="auto"),
         kv_transfer_config=object() if kv_transfer else None,
         model_config=SimpleNamespace(hf_config=SimpleNamespace()),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=2 if cache_kind == "dcp" else 1),
         quant_config=None,
     )
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
@@ -205,7 +206,7 @@ def test_main_allocator_attention_layout(
     assert second_key.shape == expected_shape
     assert second_value.shape == expected_shape
     block_elements = kernel_block_size * spec.num_kv_heads * spec.head_size
-    if cache_kind in ("c8", "dcp") or (cache_kind in ("full", "mixed") and not pa_enabled):
+    if cache_kind == "c8" or (cache_kind in ("full", "mixed") and not pa_enabled):
         assert not key_cache.is_contiguous()
         assert not value_cache.is_contiguous()
         assert key_cache.stride(0) == value_cache.stride(0) == 2 * block_elements

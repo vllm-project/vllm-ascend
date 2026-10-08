@@ -11,12 +11,12 @@ from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel import mla_cp
+from vllm_ascend.attention.context_parallel.common_cp import CPKVScope
 from vllm_ascend.attention.context_parallel.mla_cp import (
     AscendMLADCPDecodeMetadata,
     AscendMlaDCPImpl,
     AscendMlaDCPMetadataBuilder,
     DCPChunkedContextMetadata,
-    MLASplitAttentionKind,
 )
 from vllm_ascend.attention.mla_v1 import (
     AscendMLADecodeMetadata,
@@ -197,7 +197,7 @@ def test_mla_dcp_uses_padded_local_chunk_lengths() -> None:
 
 @patch(
     "vllm_ascend.attention.context_parallel.mla_cp._EXTRA_CTX",
-    SimpleNamespace(is_draft_model=False, capturing=False),
+    SimpleNamespace(is_draft_model=False, is_draft_model_prefill=False, capturing=False),
 )
 @patch("vllm_ascend.attention.context_parallel.mla_cp.torch_npu.npu_fused_infer_attention_score")
 def test_mla_dcp_mixed_cache_hit_batch_uses_decode_bsnd_metadata(mock_fia) -> None:
@@ -268,7 +268,7 @@ def test_mla_dcp_mixed_cache_hit_batch_uses_decode_bsnd_metadata(mock_fia) -> No
 
 @patch(
     "vllm_ascend.attention.context_parallel.mla_cp._EXTRA_CTX",
-    SimpleNamespace(is_draft_model=False, capturing=False),
+    SimpleNamespace(is_draft_model=False, is_draft_model_prefill=False, capturing=False),
 )
 @patch("vllm_ascend.attention.context_parallel.mla_cp.torch_npu.npu_fused_infer_attention_score")
 def test_mla_dcp_uses_native_global_query_heads_for_fia(mock_fia) -> None:
@@ -345,6 +345,28 @@ def test_mla_dcp_uses_native_global_query_heads_for_fia(mock_fia) -> None:
     assert merged["softmax_lse_shape"] == (4, 96, 1)
 
 
+@pytest.mark.parametrize("use_spec_decode", [False, True])
+@pytest.mark.parametrize(
+    "is_draft,is_prefill,query_ends,expected",
+    [
+        (False, False, [1, 2], False),
+        (False, False, [2, 4], True),
+        (True, False, [1, 2], False),
+        (True, False, [2, 4], True),
+        (True, True, [1, 2], True),
+    ],
+)
+def test_mla_split_selection_matches_shared_policy(use_spec_decode, is_draft, is_prefill, query_ends, expected):
+    impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
+    impl.speculative_config = object() if use_spec_decode else None
+    metadata = SimpleNamespace(causal=True, decode=SimpleNamespace(actual_seq_lengths_q=query_ends))
+    with patch(
+        "vllm_ascend.attention.context_parallel.mla_cp._EXTRA_CTX",
+        SimpleNamespace(is_draft_model=is_draft, is_draft_model_prefill=is_prefill, capturing=True),
+    ):
+        assert impl._decode_requires_current_kv(metadata) == (expected or (use_spec_decode and not is_draft))
+
+
 @pytest.mark.parametrize(
     "dcp_size,dcp_rank,workspace_sizes,cached_size",
     [
@@ -366,6 +388,7 @@ def test_split_decode_packs_on_main_overlapping_current_attention(
 
     impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
     impl.scale = 0.5
+    impl.speculative_config = None
     impl.num_heads = 2
     impl.num_kv_heads = 1
     impl.kv_lora_rank = 4
@@ -441,10 +464,10 @@ def test_split_decode_packs_on_main_overlapping_current_attention(
         if workspace_sizes is not None:
             assert set(graph_params.workspaces) == {2}
             assert graph_params.workspaces[2].numel() == (cached_size or max(workspace_sizes))
-        expected_stream = "main" if kwargs["attention_kind"] == MLASplitAttentionKind.HISTORY else "attn"
+        expected_stream = "main" if kwargs["attention_kind"] == CPKVScope.HISTORY else "attn"
         assert active[0] == expected_stream
         events.append(kwargs["attention_kind"])
-        if kwargs["attention_kind"] == MLASplitAttentionKind.HISTORY:
+        if kwargs["attention_kind"] == CPKVScope.HISTORY:
             torch.testing.assert_close(q, q_nope)
             torch.testing.assert_close(q_rope, q_pe)
             assert kwargs["actual_seq_lengths_kv"] == [2]
@@ -499,11 +522,13 @@ def test_split_decode_packs_on_main_overlapping_current_attention(
     impl._v_up_proj_batch_major = Mock(side_effect=lambda x: x)
     with (
         patch.object(
-            mla_cp, "_EXTRA_CTX", SimpleNamespace(capturing=workspace_sizes is not None, is_draft_model=False)
+            mla_cp,
+            "_EXTRA_CTX",
+            SimpleNamespace(capturing=workspace_sizes is not None, is_draft_model=False, is_draft_model_prefill=False),
         ),
         patch.object(mla_cp, "get_graph_params", return_value=graph_params),
         patch.object(mla_cp.torch_npu, "_npu_fused_infer_attention_score_get_max_workspace", workspace_query),
-        patch.object(mla_cp, "_dcp_mtp_comm_stream", return_value=attn),
+        patch.object(mla_cp, "cp_decode_comm_stream", return_value=attn),
         patch.object(torch.npu, "current_stream", return_value=main),
         patch.object(torch.npu, "stream", side_effect=on_stream),
         patch.object(torch.Tensor, "record_stream", autospec=True) as record_stream,
@@ -532,10 +557,10 @@ def test_split_decode_packs_on_main_overlapping_current_attention(
     update.assert_called_once()
     assert record_stream.call_count == 7
     assert events == [
-        MLASplitAttentionKind.HISTORY,
+        CPKVScope.HISTORY,
         "history_ready",
         ("attn_wait", "ready"),
-        MLASplitAttentionKind.CURRENT,
+        CPKVScope.CURRENT,
         "attn_done",
         "history_collective",
         ("main_wait", "done"),

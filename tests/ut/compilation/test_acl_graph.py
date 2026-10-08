@@ -1077,7 +1077,7 @@ class TestDCPGraphParams(TestBase):
             num_actual_tokens=2,
             actual_seq_lengths_q=actual_seq_lengths_q,
             num_decode_tokens=1,
-            decode_meta=decode,
+            decode=decode,
         )
         forward_context = MagicMock()
         forward_context.attn_metadata = {"attn_layer_0": metadata}

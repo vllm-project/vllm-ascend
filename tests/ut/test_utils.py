@@ -66,6 +66,21 @@ def test_register_customop_selects_gdn_before_import(device_type):
         assert register.call_count == len(utils.REGISTERED_ASCEND_OPS)
 
 
+def test_cp_decode_stream_is_cached_and_separate_from_chunked_prefill():
+    decode_stream, prefill_stream = object(), object()
+    with (
+        mock.patch.object(utils, "_CP_DECODE_COMM_STREAM", None),
+        mock.patch.object(utils, "_CP_CHUNKEDPREFILL_COMM_STREAM", None),
+        mock.patch.object(utils.torch_npu.npu, "Stream", side_effect=[decode_stream, prefill_stream]) as create_stream,
+    ):
+        assert utils.cp_decode_comm_stream() is decode_stream
+        assert utils.cp_decode_comm_stream() is decode_stream
+        assert utils.cp_chunkedprefill_comm_stream() is prefill_stream
+        assert utils.cp_chunkedprefill_comm_stream() is prefill_stream
+        assert decode_stream is not prefill_stream
+    assert create_stream.call_count == 2
+
+
 class TestUtils(TestBase):
     def setUp(self):
         import importlib
