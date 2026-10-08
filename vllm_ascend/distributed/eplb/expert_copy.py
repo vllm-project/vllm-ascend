@@ -112,7 +112,10 @@ def move_from_buffer(
     primary_experts = primary_experts[order]
     primary_rows = primary_rows[order]
 
-    positions = np.searchsorted(primary_experts, duplicate_experts)
+    positions = np.asarray(
+        np.searchsorted(primary_experts, duplicate_experts),
+        dtype=np.intp,
+    )
     valid = np.logical_and(
         positions < primary_experts.shape[0],
         primary_experts[np.minimum(positions, primary_experts.shape[0] - 1)] == duplicate_experts,
