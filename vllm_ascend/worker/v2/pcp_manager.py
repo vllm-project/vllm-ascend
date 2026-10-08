@@ -227,9 +227,8 @@ class AscendPCPManager(PCPManager):
         supports_mm_inputs: bool,
     ) -> None:
         """Validate the graph-safe Ascend MRV2 PCP configuration."""
-        parallel_config = vllm_config.parallel_config
         model_config = vllm_config.model_config
-        pcp_size = parallel_config.prefill_context_parallel_size
+        pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
         if pcp_size <= 1:
             return
 
@@ -239,6 +238,7 @@ class AscendPCPManager(PCPManager):
             raise NotImplementedError("MRV2 PCP does not support MM inputs yet.")
         if vllm_config.lora_config is not None:
             raise NotImplementedError("MRV2 PCP does not support LoRA yet.")
+
         speculative_config = vllm_config.speculative_config
         if speculative_config is not None:
             if speculative_config.method not in ("mtp", "eagle3", "dspark"):
@@ -249,20 +249,10 @@ class AscendPCPManager(PCPManager):
                 raise NotImplementedError(
                     "Ascend MRV2 PCP speculative decoding currently requires greedy draft sampling."
                 )
-        is_sparse_mla = hasattr(model_config.hf_text_config, "index_topk")
+
         cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
-        if parallel_config.data_parallel_size > 1 and cudagraph_mode not in {
-            CUDAGraphMode.NONE,
-            CUDAGraphMode.FULL_DECODE_ONLY,
-        }:
-            raise NotImplementedError("MRV2 PCP+DP supports eager mode or FULL_DECODE_ONLY CUDA graphs only.")
-        if is_sparse_mla and cudagraph_mode not in {
-            CUDAGraphMode.NONE,
-            CUDAGraphMode.FULL_DECODE_ONLY,
-        }:
-            raise NotImplementedError("MRV2 sparse MLA PCP supports eager mode or FULL_DECODE_ONLY CUDA graphs only.")
-        if cudagraph_mode.has_full_cudagraphs() and cudagraph_mode != CUDAGraphMode.FULL_DECODE_ONLY:
-            raise NotImplementedError("MRV2 PCP supports FULL_DECODE_ONLY CUDA graphs only.")
+        if cudagraph_mode == CUDAGraphMode.FULL:
+            raise NotImplementedError("MRV2 PCP does not support FULL CUDA graphs.")
 
     def get_global_graph_num_reqs(self, batch_desc: BatchExecutionDescriptor) -> int | None:
         """Global request capacity of a sharded FULL decode graph, if any.
@@ -272,7 +262,7 @@ class AscendPCPManager(PCPManager):
         """
         if not self.is_decode_sharded or batch_desc.cg_mode != CUDAGraphMode.FULL:
             return None
-        # validate_config only allows FULL_DECODE_ONLY, whose batches are uniform.
+        # FULL graphs are dispatched only for uniform decode batches.
         assert batch_desc.num_reqs is not None and batch_desc.uniform_token_count is not None
         return self._get_global_graph_num_reqs(batch_desc.num_reqs, batch_desc.uniform_token_count)
 
@@ -463,13 +453,41 @@ class AscendPCPManager(PCPManager):
         return
 
     def restore_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        """Restore active tokens and zero any fixed-graph padding rows."""
+        """Restore tokens to the global PCP layout, following the batch length.
+
+        Output-length contract: the returned tensor matches the global batch
+        layout, i.e. ``num_tokens_after_padding`` rows when the batch is padded
+        for FULL graph replay and the compact ``num_tokens`` rows otherwise.
+        Downstream consumers (sampling, replicated drafters) index restored
+        states with the global batch layout, so padding rows must be present
+        for padded batches; they read as zeros. The parent may return compact
+        states for a padded batch; those are padded back to the graph layout.
+        """
         if not self.is_last_pp_rank:
             return hidden_states
 
         restored_hidden_states = super().restore_hidden_states(hidden_states)
-        if self._global_batch is not None:
-            restored_hidden_states[self._global_batch.num_tokens :].zero_()
+        if self._global_batch is None:
+            return restored_hidden_states
+
+        num_tokens = self._global_batch.num_tokens
+        num_tokens_after_padding = self._global_batch.num_tokens_after_padding
+        if num_tokens == num_tokens_after_padding:
+            return restored_hidden_states
+        if restored_hidden_states.shape[0] == num_tokens:
+            padded_hidden_states = restored_hidden_states.new_zeros(
+                (num_tokens_after_padding, *restored_hidden_states.shape[1:])
+            )
+            padded_hidden_states[:num_tokens].copy_(restored_hidden_states)
+            return padded_hidden_states
+        if restored_hidden_states.shape[0] != num_tokens_after_padding:
+            raise RuntimeError(
+                "PCP restored hidden-state length does not match the global "
+                "graph layout: "
+                f"{restored_hidden_states.shape[0]} != {num_tokens_after_padding}."
+            )
+
+        restored_hidden_states[num_tokens:num_tokens_after_padding].zero_()
         return restored_hidden_states
 
     def restore_for_sampling(

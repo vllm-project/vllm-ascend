@@ -2265,15 +2265,21 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
     def _prepare_graph_pcp_context(
         self,
         pcp_context: "AscendPCPAttentionContext",
+        full_graph_mode: bool,
     ) -> "AscendPCPAttentionContext":
         """Prepare graph-stable DSA tensors without changing the PCP batch layout."""
         global_batch = pcp_context.global_batch
         num_actual_tokens = global_batch.num_tokens
 
+        # FULL graphs replay the fixed padded batch, so the restore indices
+        # must cover every padded row. Other modes run the DSA cache update
+        # with the actual token extent, and compact indices avoid restoring
+        # placeholder rows that would be trimmed before the cache write anyway.
+        num_restore_tokens = global_batch.num_tokens_after_padding if full_graph_mode else num_actual_tokens
         # Use the preallocated buffer to keep the address fixed for graph replay.
-        hidden_restore_idx = self._hidden_restore_idx_buffer[: global_batch.num_tokens_after_padding]
+        hidden_restore_idx = self._hidden_restore_idx_buffer[:num_restore_tokens]
         hidden_restore_idx[:num_actual_tokens].copy_(pcp_context.hidden_restore_idx[:num_actual_tokens])
-        hidden_restore_idx[num_actual_tokens:].zero_()
+        hidden_restore_idx[num_actual_tokens:num_restore_tokens].zero_()
 
         # The upstream dummy path only invalidates gathered slot mappings.
         # DSA also consumes the scheduler-global mapping, so clear it here.
@@ -2426,6 +2432,7 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
         fast_build: bool,
         num_actual_reqs: int | None,
         common_ratio_to_sas_metadata: dict[Any, Any],
+        full_graph_mode: bool = False,
     ) -> dsa_v1.AscendDSAMetadata:
         # A captured graph still runs its padded queries, so their metadata
         # must be refreshed even when this rank owns no tokens.
@@ -2436,6 +2443,7 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
                 fast_build,
                 num_actual_reqs=num_actual_reqs,
                 common_ratio_to_sas_metadata=common_ratio_to_sas_metadata,
+                full_graph_mode=full_graph_mode,
             )
 
         # Empty ranks still participate in the global cache update collectives.
@@ -2461,6 +2469,7 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
         pcp_cache_group_idx: int | None = None,
         num_actual_reqs: int | None = None,
         common_ratio_to_sas_metadata: dict[Any, Any] | None = None,
+        full_graph_mode: bool = False,
         **kwargs: Any,
     ) -> dsa_v1.AscendDSAMetadata:
         assert pcp_context is not None
@@ -2471,7 +2480,10 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
         # owns different requests per rank, so it still needs global metadata.
         needs_global_metadata = has_prefill or self._is_decode_sharded
         if needs_global_metadata:
-            pcp_context = self._prepare_graph_pcp_context(pcp_context)
+            pcp_context = self._prepare_graph_pcp_context(
+                pcp_context,
+                full_graph_mode=full_graph_mode,
+            )
             global_common_attn_metadata = self._build_global_common_attn_metadata(
                 pcp_context,
                 pcp_cache_group_idx,
@@ -2491,6 +2503,7 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
                 num_actual_reqs=pcp_context.global_batch.num_reqs,
                 common_ratio_to_sas_metadata={},
                 can_use_rope_cache=False,
+                full_graph_mode=full_graph_mode,
             )
             if (
                 not has_prefill
@@ -2522,6 +2535,7 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
             fast_build,
             num_actual_reqs=num_actual_reqs,
             common_ratio_to_sas_metadata=common_ratio_to_sas_metadata,
+            full_graph_mode=full_graph_mode,
         )
         # Replicated decode tokens stay in scheduler order on every PCP rank.
         # The local metadata therefore describes the canonical cache update
@@ -2747,6 +2761,9 @@ class AscendDSAPCPImpl(dsa_v1.AscendDSAImpl):
             1,
             self.nope_head_dim + self.rope_head_dim,
         )
+        # cos/sin/slot_mapping are built at the restored batch length -- padded
+        # for FULL graphs, actual tokens otherwise -- so they already match the
+        # kv rows and need no trimming here.
         torch.ops._C_ascend.inplace_partial_rotary_mul(
             kv.unsqueeze(1),
             req_metadata.cos[layer_name],

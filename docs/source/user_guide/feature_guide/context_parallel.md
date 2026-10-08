@@ -19,11 +19,11 @@ PCP support is experimental and available only with ModelRunner V2. The followin
 
 | Attention Backend | Basic PCP | Prefix Caching + PCP | Chunked Prefill + PCP | MLAPO + PCP | Speculative Decoding + PCP | P/D Disaggregation + PCP | KV Cache Pool + PCP | Sequence Parallelism (SP) + PCP |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| MLA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | 🟠 Partial compatibility (MTP, eager and `FULL_DECODE_ONLY`) | ✅ Full compatibility (`MooncakeConnectorV1`, `MooncakeConnectorV2`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ✅ Full compatibility |
-| GQA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | — Not applicable | 🟠 Partial compatibility (Eagle3, eager and `FULL_DECODE_ONLY`) | ✅ Full compatibility (`MooncakeConnectorV1`, `MooncakeConnectorV2`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ✅ Full compatibility |
-| SFA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | 🟠 Partial compatibility (MTP, eager and `FULL_DECODE_ONLY`) | ✅ Full compatibility (`MooncakeConnectorV1`, `MooncakeConnectorV2`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ✅ Full compatibility |
-| DSA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | — Not applicable | 🟠 Partial compatibility (MTP and DSpark, eager and `FULL_DECODE_ONLY`) | ✅ Full compatibility (`MooncakeHybridConnector`, `MooncakeConnectorV2`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ✅ Full compatibility |
-| DSA V4.1 | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | — Not applicable | 🟠 Partial compatibility (DSpark, eager and `FULL_DECODE_ONLY`) | ✅ Full compatibility (`MooncakeHybridConnector`, `MooncakeConnectorV2`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ✅ Full compatibility |
+| MLA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | 🟠 Partial compatibility (MTP, eager, `PIECEWISE`, `FULL_AND_PIECEWISE` and `FULL_DECODE_ONLY`) | ✅ Full compatibility (`MooncakeConnectorV1`, `MooncakeConnectorV2`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ✅ Full compatibility |
+| GQA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | — Not applicable | 🟠 Partial compatibility (Eagle3, eager, `PIECEWISE`, `FULL_AND_PIECEWISE` and `FULL_DECODE_ONLY`) | ✅ Full compatibility (`MooncakeConnectorV1`, `MooncakeConnectorV2`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ✅ Full compatibility |
+| SFA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | 🟠 Partial compatibility (MTP, eager, `PIECEWISE`, `FULL_AND_PIECEWISE` and `FULL_DECODE_ONLY`) | ✅ Full compatibility (`MooncakeConnectorV1`, `MooncakeConnectorV2`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ✅ Full compatibility |
+| DSA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | — Not applicable | 🟠 Partial compatibility (MTP and DSpark, eager, `PIECEWISE`, `FULL_AND_PIECEWISE` and `FULL_DECODE_ONLY`) | ✅ Full compatibility (`MooncakeHybridConnector`, `MooncakeConnectorV2`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ✅ Full compatibility |
+| DSA V4.1 | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | — Not applicable | 🟠 Partial compatibility (DSpark, eager, `PIECEWISE`, `FULL_AND_PIECEWISE` and `FULL_DECODE_ONLY`) | ✅ Full compatibility (`MooncakeHybridConnector`, `MooncakeConnectorV2`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ✅ Full compatibility |
 
 - ✅ **Full compatibility**: The basic path or feature combination is supported.
 - 🟠 **Partial compatibility**: The basic path or feature combination is supported with the stated limitations.
@@ -104,7 +104,7 @@ vllm serve <gqa-target-model> \
     --speculative-config '{"method": "eagle3", "model": "<eagle3-draft-model>", "num_speculative_tokens": 3}'
 ```
 
-For either method, remove `--enforce-eager` and add the following option to use the supported graph mode:
+For either method, remove `--enforce-eager` and add the following option to use a supported graph mode such as `PIECEWISE` or `FULL_DECODE_ONLY`:
 
 ```bash
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
@@ -118,7 +118,7 @@ For either method, remove `--enforce-eager` and add the following option to use 
 - PCP speculative decoding supports MTP with MLA and DeepSeek-V4 DSA models,
   Eagle3 with GQA models, and DSpark with DeepSeek-V4 and DeepSeek-V4.1 DSA models.
 - Draft sampling must use the greedy method.
-- Full graph execution with PCP is limited to `FULL_DECODE_ONLY`.
+- PCP does not support `FULL` CUDA graphs; use eager mode, `PIECEWISE`, `FULL_AND_PIECEWISE`, or `FULL_DECODE_ONLY`.
 - Pipeline parallelism, encoder-decoder models, multimodal inputs, and LoRA are not supported with MRV2 PCP.
 - SFA draft attention is not supported with PCP speculative decoding.
 - PCP and DCP can be stacked for MLA, SFA, and GQA. MLA and SFA support DCP
