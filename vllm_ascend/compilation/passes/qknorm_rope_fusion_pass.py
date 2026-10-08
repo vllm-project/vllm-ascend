@@ -310,6 +310,17 @@ class QKNormRopeFusionPass(VllmInductorPass):
             logger.debug("QKNorm and Rope fusion enabled, but no Attention layers were discovered.")
             return
         layer = next(iter(attn_layers.values()))
+        rope_dim = get_rope_dim(vllm_config)
+        if rope_dim <= 0:
+            # Models without rotary position embedding (e.g. GLM MLA with
+            # qk_rope_head_dim=0) resolve rope_dim to 0. Registering here would
+            # bake a dead rope_dim=0 constant that can never match runtime
+            # calls, and the pattern's dummy trace crashes the Triton rope
+            # kernel (tl.arange(0, pad_rope_dim // 2) with pad_rope_dim=0).
+            # Seen when a rope-free target (GLM-5.3-Flash) compiles a ropeful
+            # draft (DFlash2/Qwen3) under the target VllmConfig.
+            logger.debug("QKNorm and Rope fusion not enabled: rope_dim %d <= 0", rope_dim)
+            return
         for epsilon in [1e-6, 1e-5]:
             if layer.head_size != 128:
                 logger.debug("QKNorm and Rope fusion not enabled: head_dim %d is not equal of 128", layer.head_size)

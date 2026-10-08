@@ -76,6 +76,7 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendSlidingWindowMLASpec,
     get_kv_cache_compression_ratio,
     get_storage_block_size,
+    requires_padded_page_layout,
 )
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.models.deepseek_v41.cache_config import is_deepseek_v41_cache
@@ -862,6 +863,44 @@ def _allocate_kv_cache(
     use_hybrid_layout = has_mamba and has_attention
     is_glm5_next = any(getattr(spec, "model_version", None) == "glm5_next" for spec in layer_kv_cache_spec.values())
 
+    # GLM-Next emits one descriptor for each physical pooled cache slot. Layers
+    # listed by a descriptor deliberately alias that slot even when they belong
+    # to different scheduler groups (for example MLA and Mamba, or the
+    # compressed indexer and its state cache). This differs from the generic
+    # main layout, which treats descriptor layers as independent regions
+    # within one common backing.
+    if requires_padded_page_layout(layer_kv_cache_spec.values()):
+        pooled_layers: set[str] = set()
+        for descriptor in kv_cache_config.kv_cache_tensors:
+            slot_layers = get_kv_cache_tensor_layers(descriptor)
+            if not slot_layers:
+                raise ValueError("GLM-Next KV cache descriptor has no layers.")
+            expected_size = kv_cache_config.num_blocks * descriptor.block_stride
+            if (
+                descriptor.offset != 0
+                or descriptor.layer_stride != 0
+                or descriptor.block_stride <= 0
+                or descriptor.size != expected_size
+                or any(
+                    layer_kv_cache_spec[layer_name].page_size_bytes != descriptor.block_stride
+                    for layer_name in slot_layers
+                )
+            ):
+                # Not a pooled slot (for example a spec-decode draft's own
+                # attention cache); fall through to the private-buffer path.
+                continue
+            backing = _allocate_int8_cache_tensor(descriptor.size, alignment, device)
+            for layer_name in slot_layers:
+                kv_cache_raw_tensors[layer_name] = backing
+                pooled_layers.add(layer_name)
+        for descriptor in kv_cache_config.kv_cache_tensors:
+            for layer_name in get_kv_cache_tensor_layers(descriptor):
+                if layer_name in pooled_layers:
+                    continue
+                layer_size = kv_cache_config.num_blocks * layer_kv_cache_spec[layer_name].page_size_bytes
+                kv_cache_raw_tensors[layer_name] = _allocate_int8_cache_tensor(layer_size, alignment, device)
+        return kv_cache_raw_tensors
+
     # The restored DeepSeek-V4 planner on main computes capacity for one
     # shared-tuple backing and emits every KVCacheTensor as a view into it.
     # Validate all descriptors before allocating so an unsupported geometry
@@ -1224,6 +1263,10 @@ def _reshape_kv_cache_v2(
     vllm_config = get_current_vllm_config()
     is_dsv4_model = _is_dsv4_model(vllm_config)
     layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config)
+    uses_padded_page_layout = requires_padded_page_layout(layer_kv_cache_spec.values())
+    if uses_padded_page_layout:
+        from vllm_ascend.models.glm5next.cache_views import view_glm5_next_cache
+
     kv_caches: dict[str, Any] = {}
     layer_tuple_strides: dict[str, int] = {}
     if is_deepseek_v41_cache(layer_kv_cache_spec):
@@ -1342,6 +1385,19 @@ def _reshape_kv_cache_v2(
                 continue
 
             raw_cache = kv_cache_raw_tensors[layer_name]
+            if uses_padded_page_layout:
+                pooled_views = view_glm5_next_cache(
+                    layer_name,
+                    kv_cache_spec,
+                    raw_cache,
+                    attn_backend=group.backend,
+                    kernel_block_size=kernel_block_sizes[group.kv_cache_group_id],
+                    num_blocks=kv_cache_config.num_blocks,
+                    get_kv_cache_dims=_get_attention_kv_cache_dims,
+                )
+                if pooled_views is not None:
+                    kv_caches[layer_name] = pooled_views
+                    continue
             if is_hidden_state_cache_spec(kv_cache_spec):
                 # Single tensor for extract_hidden_states (no K/V split).
                 # HiddenStateCacheSpec subclasses MLAAttentionSpec, so this

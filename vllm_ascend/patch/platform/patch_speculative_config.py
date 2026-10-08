@@ -96,7 +96,11 @@ def _normalize_legacy_qwen3_dspark_config(hf_config: PretrainedConfig) -> Pretra
             }
         )
     if hf_config.model_type in ("glm5_next", "glm5_next_text"):
-        n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+        # GLM-5.3-Flash ships its MTP draft inside a multimodal checkpoint:
+        # num_nextn_predict_layers lives on the text config, not the root.
+        # Read through text_config so the VL layout keeps working.
+        text_config = getattr(hf_config, "text_config", hf_config)
+        n_predict = getattr(text_config, "num_nextn_predict_layers", None)
         hf_config.model_type = "glm5_next_mtp"
         hf_config.update(
             {
