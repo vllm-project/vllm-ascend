@@ -376,6 +376,11 @@ def _empty_like_preserving_npu_format(
         and target_layout == tensor.layout
         and memory_format == torch.preserve_format
     ):
+        assert tensor.storage_offset() == 0, (
+            "EPLB expert buffer allocation requires an offset-0 source "
+            f"tensor, but got storage_offset={tensor.storage_offset()}"
+        )
+
         result = torch_npu.empty_with_format(
             size=tensor.size(),
             dtype=target_dtype,
@@ -384,6 +389,12 @@ def _empty_like_preserving_npu_format(
             pin_memory=kwargs.get("pin_memory", False),
             acl_format=int(torch_npu.get_npu_format(tensor)),
         )
+
+        assert result.stride() == tensor.stride(), (
+            "EPLB expert buffer allocation must preserve the source stride, "
+            f"but got source={tensor.stride()} and buffer={result.stride()}"
+        )
+
         if kwargs.get("requires_grad", False):
             result.requires_grad_(True)
         return result

@@ -13,15 +13,30 @@ from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts, EplbEx
 class _FakeNpuTensor:
     """Minimal NPU tensor stub for CPU-only unit tests."""
 
-    def __init__(self, shape, npu_format):
+    def __init__(
+        self,
+        shape,
+        npu_format,
+        *,
+        storage_offset=0,
+        stride=None,
+    ):
         self.shape = torch.Size(shape)
         self.dtype = torch.float16
         self.layout = torch.strided
         self.device = torch.device("npu")
         self.npu_format = npu_format
+        self._storage_offset = storage_offset
+        self._stride = stride or torch.empty(shape).stride()
 
     def size(self):
         return self.shape
+
+    def storage_offset(self):
+        return self._storage_offset
+
+    def stride(self):
+        return self._stride
 
 
 def _routed_experts(weight_views):
@@ -164,6 +179,54 @@ def test_eplb_expert_buffer_falls_back_when_properties_change(
 
     assert result is expected
     assert fallback_calls == [(source, kwargs)]
+
+
+def test_eplb_expert_buffer_rejects_nonzero_storage_offset(monkeypatch):
+    source = _FakeNpuTensor((3, 4), 50, storage_offset=1)
+
+    def fail_empty_with_format(**kwargs):
+        raise AssertionError("empty_with_format must not be called")
+
+    monkeypatch.setattr(
+        routed_experts_module.torch_npu,
+        "empty_with_format",
+        fail_empty_with_format,
+        raising=False,
+    )
+
+    with pytest.raises(AssertionError, match="storage_offset=1"):
+        routed_experts_module._empty_like_preserving_npu_format(
+            source,
+        )
+
+
+def test_eplb_expert_buffer_rejects_stride_mismatch(monkeypatch):
+    source = _FakeNpuTensor((3, 4), 50)
+
+    def fake_get_npu_format(tensor):
+        return tensor.npu_format
+
+    def fake_empty_with_format(**kwargs):
+        del kwargs
+        return torch.empty((4, 3)).t()
+
+    monkeypatch.setattr(
+        routed_experts_module.torch_npu,
+        "get_npu_format",
+        fake_get_npu_format,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        routed_experts_module.torch_npu,
+        "empty_with_format",
+        fake_empty_with_format,
+        raising=False,
+    )
+
+    with pytest.raises(AssertionError, match="source=.*buffer="):
+        routed_experts_module._empty_like_preserving_npu_format(
+            source,
+        )
 
 
 def test_get_expert_weights_rejects_unsupported_quantization():
