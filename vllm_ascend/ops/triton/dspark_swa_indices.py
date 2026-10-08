@@ -28,6 +28,8 @@ import warnings
 import torch
 from vllm.triton_utils import HAS_TRITON, tl, triton
 
+from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
+
 if HAS_TRITON:
 
     @triton.jit(
@@ -149,22 +151,6 @@ _DEFAULT_BLOCK_W = 1024
 # UB-preload tile cap: next_pow2(block_table_width) beyond this no longer
 # fits the per-program UB budget, and the wrapper falls back to eager.
 _MAX_ROW_POW2 = 8192
-
-# AIV core count bounding the grid-stride launch (a performance knob: any
-# grid >= 1 is correct). Fetched from the device properties, falling back
-# to the A2-class count the gate admits.
-_NUM_AIV_CORES = 40
-
-
-def _num_aiv_cores() -> int:
-    try:
-        props = torch.npu.get_device_properties(0)
-        vector_core_num = getattr(props, "vector_core_num", None)
-        if vector_core_num is not None and vector_core_num > 0:
-            return int(vector_core_num)
-    except Exception:
-        pass
-    return _NUM_AIV_CORES
 
 
 def dspark_swa_indices_supported(
@@ -320,9 +306,12 @@ def build_dspark_swa_indices_triton(
     num_cb = triton.cdiv(W, eff_block_w)
 
     # num_slots (R_alloc) stays unclamped so buffer-extent clamping of
-    # num_rows_padded does not shrink the kernel's claim space.
+    # num_rows_padded does not shrink the kernel's claim space. The kernel
+    # claims work items grid-stride, so the core count is a performance
+    # knob only; any grid >= 1 covers the work.
     total_items = R_alloc * num_cb
-    grid = min(_num_aiv_cores(), total_items)
+    init_device_properties_triton()
+    grid = min(get_vectorcore_num(), total_items)
 
     _dspark_swa_indices_kernel[(grid,)](
         block_table,

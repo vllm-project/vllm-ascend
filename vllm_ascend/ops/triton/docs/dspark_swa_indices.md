@@ -12,7 +12,7 @@
     - `slot[c] = block_table[r, block_num] * block_size + block_off` if `c < visible_len`, else `-1`
     - every active output row of request `r` receives the same `slot` vector; `lens[row] = visible_len`; padded rows `[num_rows, num_rows_padded)` are reset to `slots = -1`, `lens = 0`
 - **Algorithm flow** (processed per request-column-block item, independently):
-  1. Compute grid: `grid_size = min(num_aiv_cores, max_num_reqs * NUM_CB)` where `NUM_CB = ceil(index_width / BLOCK_W)`; the kernel claims work items `w = pid, pid + grid_size, ...` grid-stride, with item `w` mapping to request `r = w // NUM_CB`, column block `cb = w % NUM_CB`.
+  1. Compute grid: `grid_size = min(get_vectorcore_num(), max_num_reqs * NUM_CB)` where `NUM_CB = ceil(index_width / BLOCK_W)`; the kernel claims work items `w = pid, pid + grid_size, ...` grid-stride, with item `w` mapping to request `r = w // NUM_CB`, column block `cb = w % NUM_CB`.
   2. Distributed pad-row cleanup: each item resets the slice of `[num_rows, num_rows_padded)` inside its row band `[r * num_query_per_req, (r + 1) * num_query_per_req)`, so a captured ACL graph never replays stale rows.
   3. For active items: load the request's full block-table row (up to `ROW_POW2 = next_pow2(num_blocks)` lanes) into UB, clamp column block numbers into the table range, gather physical block IDs via `tl.gather`, and compute the slot vector for the column block.
   4. One 2D store writes the `[q_len, index_width]` output tile: the slot vector is broadcast over `Q_POW2 = next_pow2(num_speculative_tokens + 1)` rows (the uniform-query contract bounds `q_len <= Q_POW2`); the first column block also stores `visible_len` into `lens`.
@@ -43,6 +43,7 @@
 - `indices_output` must be int32. When a persistent `indices_output` is passed for graph capture, the FULL buffer (`buffer`, not `buffer[:num_rows]`) must be provided so the pad-row cleanup stays armed; an active-sized slice disables the cleanup and triggers a `UserWarning`.
 - Padded rows `[num_rows, num_rows_padded)` are reset to `slots = -1`, `lens = 0` in place — a strict superset of the eager behavior, which leaves those rows stale.
 - All runtime scalars (`num_blocks`, `num_reqs`, `num_rows_padded`, `num_rows`, `num_query_per_req`, `num_slots`) are `do_not_specialize`, so no recompilation is triggered by varying batch sizes; only the constexpr set (`WINDOW_SIZE`, `BLOCK_SIZE`, `INDEX_W`, `BLOCK_W`, `ROW_POW2`, `Q_POW2`) forms the JIT key, warmed once per `(num_blocks, index_width)` combination.
+- `get_vectorcore_num()` must have been initialised: the wrapper calls `init_device_properties_triton()` (idempotent) before each launch. In serving this happens during worker start-up as well; standalone callers get it implicitly.
 - Inference-only (decode, DSpark non-causal drafting); works under both eager and ACL graph-capture modes (fixed launch grid derived from `max_num_reqs`, stable tensor addresses from persistent buffers).
 
 ## Origin and Differences
