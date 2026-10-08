@@ -1349,8 +1349,8 @@ class FinegrainedTPConfig:
                     "only add capture graphs and memory. Collapsing "
                     "cudagraph_capture_sizes %s to [%d] (= min(max_num_batched_"
                     "tokens, max_num_seqs * decode_query_len), floored to a "
-                    "decode_query_len multiple, clamped up to your largest "
-                    "bucket) so one bucket equals the exchange capacity. Set "
+                    "decode_query_len multiple, guided by your largest bucket) "
+                    "so one bucket equals the exchange capacity. Set "
                     "cudagraph_capture_sizes explicitly to silence this.",
                     sizes_desc,
                     chosen,
