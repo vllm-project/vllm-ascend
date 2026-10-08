@@ -438,7 +438,7 @@ deployment:
       --tensor-parallel-size 8
       --enable-expert-parallel
       --kv-transfer-config
-      '{"kv_connector":"MooncakeConnectorV1","kv_role":"kv_producer"}'
+      '{"kv_connector":"MooncakeConnectorV1","kv_role":"kv_producer","kv_port":"30000","kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":8},"decode":{"dp_size":2,"tp_size":8}}}'
 
   - envs:
       <<: *env_common
@@ -451,7 +451,7 @@ deployment:
       --tensor-parallel-size 8
       --enable-expert-parallel
       --kv-transfer-config
-      '{"kv_connector":"MooncakeConnectorV1","kv_role":"kv_consumer"}'
+      '{"kv_connector":"MooncakeConnectorV1","kv_role":"kv_consumer","kv_port":"30200","kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":8},"decode":{"dp_size":2,"tp_size":8}}}'
 
 benchmarks:
   acc:
@@ -559,9 +559,7 @@ templates:
       - ${TP_SIZE}
       - --enable-expert-parallel
       - --kv-transfer-config
-      - >-
-        {"kv_connector":"MooncakeConnectorV1",
-         "kv_role":"kv_producer","kv_port":"30000"}
+      - '{"kv_connector":"MooncakeConnectorV1","kv_role":"kv_producer","kv_port":"30000","kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":8},"decode":{"dp_size":2,"tp_size":8}}}'
 
   - node_index: 1
     envs:
@@ -583,9 +581,7 @@ templates:
       - ${TP_SIZE}
       - --enable-expert-parallel
       - --kv-transfer-config
-      - >-
-        {"kv_connector":"MooncakeConnectorV1",
-         "kv_role":"kv_consumer","kv_port":"30200"}
+      - '{"kv_connector":"MooncakeConnectorV1","kv_role":"kv_consumer","kv_port":"30200","kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":8},"decode":{"dp_size":2,"tp_size":8}}}'
 
 benchmarks:
   perf:
