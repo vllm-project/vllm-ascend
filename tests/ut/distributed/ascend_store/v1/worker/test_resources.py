@@ -12,9 +12,12 @@ from vllm.v1.kv_cache_interface import SlidingWindowSpec
 
 from tests.ut.distributed.ascend_store.v1.helpers import (
     FakeEvent,
+    begin_step,
     make_backend_spec,
     make_topology,
+    store_one,
 )
+from tests.ut.distributed.ascend_store.v1.worker.bulk_fixtures import TensorBytesBackend, make_multi_spec_caches
 from tests.ut.distributed.ascend_store.v1.worker.gva_fixtures import (
     FakeGVABackend,
     make_gva_spec,
@@ -36,8 +39,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.projection impo
     GVALayerwiseProjectionBinder,
     compile_bulk_projection_binder,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.lookup import LookupRequest
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.transfer import (
     KVTransferStep,
+    LoadCommand,
     RangeStoreCommand,
     StoreCommandBatch,
 )
@@ -225,6 +230,97 @@ def test_memcache_bulk_factory_binds_hybrid_buffers_without_gva_constraints(monk
         assert registered_regions == [
             ("register_region", cache.data_ptr(), cache.numel() * cache.element_size()) for cache in caches.values()
         ]
+    finally:
+        worker.close()
+    assert backend.closed
+
+
+@pytest.mark.parametrize("load_async", (False, True), ids=("sync", "async"))
+def test_memcache_multi_spec_store_lookup_load_preserves_payloads_and_private_state(load_async, monkeypatch) -> None:
+    cache_config, caches = make_multi_spec_caches()
+    backend = TensorBytesBackend()
+    backend_spec = BackendSpec("memcache", lambda *_args, **_kwargs: backend, LayerwiseAccessKind.GVA, True)
+    monkeypatch.setattr(vllm_adapter, "resolve_backend_spec", lambda _name: backend_spec)
+    monkeypatch.setattr(vllm_adapter, "_kvpp_size", lambda _config: 1)
+    monkeypatch.setattr(vllm_adapter, "get_tp_group", lambda: SimpleNamespace(rank_in_group=0))
+    monkeypatch.setattr(vllm_adapter, "get_pp_group", lambda: SimpleNamespace(rank_in_group=0))
+    monkeypatch.setattr(vllm_adapter, "resolve_dcp_kv_cache_spec", lambda spec, _size: spec)
+    monkeypatch.setattr(vllm_adapter.kv_cache_utils, "resolve_kv_cache_block_sizes", lambda *_args: (32, 32))
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            world_size=1,
+            tensor_parallel_size=1,
+            pipeline_parallel_size=1,
+            decode_context_parallel_size=1,
+            prefill_context_parallel_size=1,
+        ),
+        kv_transfer_config=SimpleNamespace(
+            kv_role="kv_both",
+            kv_connector_extra_config={"backend": "memcache", "load_async": load_async},
+        ),
+        model_config=SimpleNamespace(
+            max_model_len=64,
+            model="deepseek_v41",
+            use_mla=True,
+            hf_text_config=SimpleNamespace(num_hidden_layers=4, model_type="deepseek_v41"),
+            get_total_num_hidden_layers=lambda: 4,
+            get_total_num_kv_heads=lambda: 1,
+        ),
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+        speculative_config=None,
+    )
+    source_blocks = {0: 1, 2: 3}
+    destination_blocks = {0: 5, 2: 6}
+    expected = {}
+    for group_id, block_id in source_blocks.items():
+        for index, name in enumerate(sorted(cache_config.kv_cache_groups[group_id].layer_names)):
+            block = caches[name][block_id]
+            values = (
+                torch.arange(block.numel(), dtype=block.dtype).reshape(block.shape)
+                + (group_id + 1) * 1000
+                + index * 100
+            )
+            block.copy_(values)
+            expected[name] = values
+    private_name = "model.layers.2.compressor.state_cache"
+    private_block = 4
+    caches[private_name][private_block].fill_(99)
+    private_state = caches[private_name][private_block].clone()
+
+    worker = vllm_adapter.create_kv_pool_worker(config, cache_config)
+    try:
+        worker.bind_kv_caches(caches)
+        assert len(backend.registered_regions) == 2
+        command = RangeStoreCommand("producer", TokenRange(0, 32), ((1,), (private_block,), (3,)), (b"a",), 32, 17)
+        completion = store_one(worker, command)
+        assert completion.evidence.succeeded
+        assert [(item.source.group_id, item.source.block_id) for item in completion.evidence.transfer_evidence] == [
+            (0, 1),
+            (2, 3),
+        ]
+        assert worker.take_released_store_job_ids() == {17}
+        for group_id in source_blocks:
+            (key,) = [key for key in backend.objects if f"@group:{group_id}@" in key]
+            names = sorted(cache_config.kv_cache_groups[group_id].layer_names)
+            payload = b"".join(expected[name].contiguous().view(torch.uint8).numpy().tobytes() for name in names)
+            assert backend.objects[key] == payload
+        assert len(backend.objects) == 2
+        assert worker.lookup(LookupRequest(TokenRange(0, 32), (0, 2), (b"a",))).available_end_token == 32
+        for group_id, block_id in destination_blocks.items():
+            for name in cache_config.kv_cache_groups[group_id].layer_names:
+                caches[name][block_id].zero_()
+        begin_step(worker, load=(LoadCommand("consumer", TokenRange(0, 32), ((5,), (private_block,), (6,)), (b"a",)),))
+        worker.start_load()
+        worker.close()
+        result = worker.collect_load_result()
+        if load_async:
+            assert result.completed_request_ids == {"consumer"}
+        assert not result.failed_locations
+        for group_id, block_id in destination_blocks.items():
+            for name in cache_config.kv_cache_groups[group_id].layer_names:
+                torch.testing.assert_close(caches[name][block_id], expected[name])
+        torch.testing.assert_close(caches[private_name][private_block], private_state)
+        worker.end_step()
     finally:
         worker.close()
     assert backend.closed
