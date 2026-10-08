@@ -221,8 +221,11 @@ msgstr "| 命令 | 触发者 |"
 msgid "| `four_card/_310p` | 310P 4-card |"
 msgstr "| `four_card/_310p` | 310P 四卡 |"
 
-msgid "| `_310p` (under `one_card`/`two_card`) | 310P single card |"
-msgstr "| `_310p`（位于 `one_card`/`two_card` 下） | 310P 单卡 |"
+msgid "| `two_card/_310p` | 310P 2-card |"
+msgstr "| `two_card/_310p` | 310P 双卡 |"
+
+msgid "| `one_card/_310p` | 310P single card |"
+msgstr "| `one_card/_310p` | 310P 单卡 |"
 
 msgid "| `four_card` | A3 4-card |"
 msgstr "| `four_card` | A3 四卡 |"

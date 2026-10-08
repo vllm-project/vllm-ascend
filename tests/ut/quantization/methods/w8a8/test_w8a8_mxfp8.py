@@ -406,3 +406,22 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
             shared_experts_input=None,
         )
         mock_comm.fused_experts.assert_called_once()
+
+
+class TestDSMXFP8OProjLayout(TestBase):
+    def test_wo_a_layout_uses_loaded_shard(self):
+        from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DSDynamicLinearMethod
+
+        for local_groups in (1, 2, 8):
+            scheme = AscendW8A8MXFP8DSDynamicLinearMethod.__new__(AscendW8A8MXFP8DSDynamicLinearMethod)
+            scheme.n_local_groups = 8  # Ordinary TP differs from OTP.
+            scheme.o_lora_rank = 128
+            layer = nn.Module()
+            layer.prefix = "model.layers.0.attn.wo_a"
+            weight = torch.arange(local_groups * 128 * 256, dtype=torch.float32).reshape(-1, 256)
+            layer.weight = nn.Parameter(weight, requires_grad=False)
+            layer.weight_scale = nn.Parameter(torch.ones(local_groups, 2), requires_grad=False)
+            scheme.process_weights_after_loading(layer)
+            self.assertEqual(layer.weight.shape, (local_groups, 256, 128))
+            self.assertEqual(layer.weight_scale.shape, (local_groups, 4, 128, 2))
+            torch.testing.assert_close(layer.weight, weight.reshape(local_groups, 128, 256).transpose(1, 2))

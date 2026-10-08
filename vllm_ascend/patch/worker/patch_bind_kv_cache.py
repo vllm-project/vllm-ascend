@@ -6,6 +6,8 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 from vllm.v1.worker.utils import defaultdict, extract_layer_index
 
+from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheLayer
+
 
 # Without this patch, it will raise an exception when initialize kv_cache.
 # TODO To remove the patch, we need check why the original bind_kv_cache raises an NotImplementedError.
@@ -73,7 +75,11 @@ def bind_kv_cache_to_layers(
     matching the Ascend bind_kv_cache patch above.
     """
     for layer_name, kv_cache in kv_caches.items():
-        forward_context[layer_name].kv_cache = kv_cache
+        layer = forward_context[layer_name]
+        if isinstance(layer, DeepseekV41CacheLayer):
+            layer.bind_kv_cache(kv_cache)
+        else:
+            layer.kv_cache = kv_cache
     ordered_layer_names = sorted(kv_caches, key=lambda name: extract_layer_index(name, num_attn_module))
     utils.share_replayssm_ring_trackers(ordered_layer_names, forward_context, kv_cache_groups)
 

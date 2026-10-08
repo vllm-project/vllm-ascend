@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
+import weakref
 from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, call, patch
 
 import pytest
@@ -999,6 +1001,7 @@ def test_routed_experts_forward_impl_runs_current_flow(monkeypatch, return_with_
         ),
     )
     monkeypatch.setattr(routed_experts_module, "get_forward_context", lambda: SimpleNamespace(all_moe_layers=None))
+    monkeypatch.setattr(routed_experts_module, "get_moe_comm_method", lambda *_: moe_comm_method)
     monkeypatch.setattr(routed_experts_module, "get_current_vllm_config", lambda: None)
     monkeypatch.setattr(routed_experts_module, "get_moe_num_logical_experts", lambda *args, **kwargs: 3)
     monkeypatch.setattr(routed_experts_module, "get_ascend_config", lambda: SimpleNamespace(enable_force_eplb=False))
@@ -2376,6 +2379,59 @@ def test_internal_router_reuses_fused_fp32_input(monkeypatch, has_shared_experts
         runner.ascend_shared_experts.forward.assert_called_once()
 
 
+@pytest.mark.parametrize("router_input_dtype", [torch.bfloat16, torch.float32])
+def test_compute_router_logits_bounds_fp32_cast_lifetime(monkeypatch, router_input_dtype):
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    nn.Module.__init__(runner)
+    runner.gate = SimpleNamespace(weight_fp32=torch.randn(3, 4, dtype=torch.float32))
+    hidden_states = torch.randn(2, 4, dtype=torch.bfloat16)
+    router_logits = hidden_states if router_input_dtype == torch.bfloat16 else torch.randn(2, 4, dtype=torch.float32)
+    router_logits_before = router_logits.clone()
+    captured: dict[str, Any] = {}
+
+    def fake_linear(input_tensor, weight):
+        captured["input_ref"] = weakref.ref(input_tensor)
+        captured["input_is_router_logits"] = input_tensor is router_logits
+        captured["input_dtype"] = input_tensor.dtype
+        assert weight is runner.gate.weight_fp32
+        return torch.empty(input_tensor.shape[0], weight.shape[0])
+
+    monkeypatch.setattr(fused_moe_module.F, "linear", fake_linear)
+
+    result = runner._compute_router_logits(hidden_states, router_logits)
+
+    assert result.shape == (2, 3)
+    assert captured["input_dtype"] == torch.float32
+    if router_input_dtype == torch.float32:
+        assert captured["input_is_router_logits"]
+        assert captured["input_ref"]() is router_logits
+    else:
+        assert not captured["input_is_router_logits"]
+        assert captured["input_ref"]() is None
+    torch.testing.assert_close(router_logits, router_logits_before)
+
+
+def test_compute_router_logits_fallback_does_not_cast_unused_input():
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    nn.Module.__init__(runner)
+    hidden_states = MagicMock()
+    hidden_states.float.side_effect = AssertionError("fallback must not allocate an unused FP32 input")
+    router_logits = SimpleNamespace(dtype=torch.bfloat16)
+    expected = object()
+
+    class FallbackGate:
+        def __call__(self, states):
+            assert states is hidden_states
+            return expected, None
+
+    runner.gate = FallbackGate()
+
+    result = runner._compute_router_logits(hidden_states, router_logits)
+
+    assert result is expected
+    hidden_states.float.assert_not_called()
+
+
 def test_forward_impl_keeps_full_width_input_for_shared_experts(monkeypatch):
     runner = AscendMoERunner.__new__(AscendMoERunner)
     nn.Module.__init__(runner)
@@ -2431,7 +2487,7 @@ def test_forward_impl_keeps_full_width_input_for_shared_experts(monkeypatch):
     assert result[1] is routed_out
 
 
-def _stub_moe_runner_init(monkeypatch, *, gate=None, shared_experts=None):
+def _stub_moe_runner_init(monkeypatch, *, gate=None, shared_experts=None, fused_mc2_comm=None):
     """Construct AscendMoERunner with a lightweight MoERunner.__init__ stub."""
     moe_config = SimpleNamespace(hidden_dim=4, ep_size=1)
     routed_experts = SimpleNamespace(
@@ -2472,7 +2528,11 @@ def _stub_moe_runner_init(monkeypatch, *, gate=None, shared_experts=None):
     monkeypatch.setattr(fused_moe_module, "get_tp_group", MagicMock(return_value=object()))
     monkeypatch.setattr(fused_moe_module, "get_dp_group", MagicMock(return_value=object()))
     monkeypatch.setattr(fused_moe_module, "setup_moe_comm_method", MagicMock())
-    monkeypatch.setattr(fused_moe_module, "get_moe_comm_method", MagicMock(return_value=None))
+    monkeypatch.setattr(
+        fused_moe_module,
+        "get_moe_comm_method",
+        lambda kind: fused_mc2_comm if kind == MoECommType.FUSED_MC2 else None,
+    )
 
     return AscendMoERunner(
         "model.layers.0.mlp",
@@ -2482,6 +2542,17 @@ def _stub_moe_runner_init(monkeypatch, *, gate=None, shared_experts=None):
         gate=gate,
         shared_experts=shared_experts,
     )
+
+
+def test_runner_keeps_mega_moe_activation_with_each_layer(monkeypatch):
+    first_kwargs = {"activation": "situglu", "activation_params": {"beta": 4.0, "linear_beta": 25.0}}
+    first = _stub_moe_runner_init(monkeypatch, fused_mc2_comm=SimpleNamespace(mega_moe_activation_kwargs=first_kwargs))
+    second_kwargs = {"activation_clamp": None}
+    second = _stub_moe_runner_init(
+        monkeypatch, fused_mc2_comm=SimpleNamespace(mega_moe_activation_kwargs=second_kwargs)
+    )
+    assert first.routed_experts.mega_moe_activation_kwargs is first_kwargs
+    assert second.routed_experts.mega_moe_activation_kwargs is second_kwargs
 
 
 def test_runner_sets_precast_fp32_weight(monkeypatch):

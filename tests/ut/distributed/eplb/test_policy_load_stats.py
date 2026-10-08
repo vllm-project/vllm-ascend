@@ -8,9 +8,9 @@ import numpy as np
 import torch
 from vllm.distributed.eplb import eplb_state as upstream_eplb_state
 
-from vllm_ascend.distributed.eplb import state as state_module
+from vllm_ascend.distributed.eplb import eplb_state as state_module
+from vllm_ascend.distributed.eplb.eplb_state import AscendEplbState
 from vllm_ascend.distributed.eplb.policy import PreparedLoadStats
-from vllm_ascend.distributed.eplb.state import AscendEplbState
 
 
 def _custom_policy():

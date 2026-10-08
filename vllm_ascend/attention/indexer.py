@@ -87,6 +87,8 @@ class AscendSFAIndexerMetadata:
     num_decode_tokens: int = 0
     # Optional selection supplied by the owning attention implementation.
     # Projection, rope and cache writes continue to use this backend.
+    # The selector receives ``(q_li, weights, indexer, metadata, q_li_scale)``;
+    # ``q_li_scale`` is set only when LI C8 has already quantized ``q_li``.
     topk_selector: Any | None = None
 
 
@@ -265,7 +267,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
                 indexer_attn_metadata.block_size,
             )
         else:
-            torch_npu.npu_scatter_nd_update_(
+            DeviceOperator.scatter_cache(
                 indexer_k_cache.view(-1, k_li.shape[-1]),
                 slot_mapping.view(-1, 1),
                 k_li.view(-1, k_li.shape[-1]),
@@ -284,7 +286,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
                     indexer_attn_metadata.block_size,
                 )
             else:
-                torch_npu.npu_scatter_nd_update_(
+                DeviceOperator.scatter_cache(
                     indexer_scale_cache.view(-1, k_li_scale.shape[-1]),
                     slot_mapping.view(-1, 1),
                     k_li_scale.view(-1, k_li_scale.shape[-1]),
@@ -401,6 +403,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         k_hidden_states: torch.Tensor,
         indexer_metadata: AscendSFAIndexerMetadata,
         compute_topk: bool = True,
+        attn_q_gather_handle: torch.distributed.Work | None = None,
     ) -> torch.Tensor | None:
         """Full indexer pipeline: k path -> cache write -> top-k selection.
 
@@ -415,6 +418,11 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         cos = indexer_metadata.cos
         sin = indexer_metadata.sin
         k_li, k_li_scale, indexer_weights = self.forward_k(k_hidden_states, cos, sin)
+        if attn_q_gather_handle is not None:
+            # Keep the k projection overlapped with Q communication, but order
+            # the TP cache gathers after Q to avoid concurrent cross-group AIV
+            # collectives during graph replay. wait() adds a stream dependency.
+            attn_q_gather_handle.wait()
         k_li, k_li_scale, slot_mapping = self._gather_cache_inputs(k_li, k_li_scale, indexer_metadata)
         self.write_cache(k_li, k_li_scale, slot_mapping, indexer_attn_metadata=indexer_metadata)
         if not compute_topk:
@@ -486,7 +494,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
 
         topk_selector = getattr(indexer_metadata, "topk_selector", None)
         if topk_selector is not None:
-            return topk_selector(q_li, weights, self, indexer_metadata)
+            return topk_selector(q_li, weights, self, indexer_metadata, q_li_scale)
         return DeviceOperator.indexer_select_post_process(
             q_li,
             q_li_scale,
@@ -1013,8 +1021,8 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         return ("slot_mapping", common_attn_metadata.slot_mapping.data_ptr())
 
     def _mask_lim_slot_mapping(self, common_attn_metadata, slot_mapping, buffer_key) -> None:
-        generations = getattr(common_attn_metadata, "req_topk_buffer_generations", None)
-        if generations is None or not get_ascend_config().sparse_kv_offload_config.use_fused_copy_sfa:
+        active = getattr(common_attn_metadata, "req_topk_buffer_active", None)
+        if active is None or not get_ascend_config().sparse_kv_offload_config.use_fused_copy_sfa:
             return
         # Only request ownership and query layout are needed; exact device
         # positions in this group's slot mapping must remain unchanged.
@@ -1029,7 +1037,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
             )
             self._lim_token_masks[buffer_key] = mask
         size = slot_mapping.numel()
-        mask.np[:size] = (generations.numpy()[rows] < 0) | (positions >= ends[-1])
+        mask.np[:size] = (~active.numpy()[rows]) | (positions >= ends[-1])
         slot_mapping.masked_fill_(mask.copy_to_gpu(size), -1)
 
     def _build(
@@ -1042,15 +1050,6 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
     ) -> AscendSFAIndexerMetadata:
         num_reqs = common_attn_metadata.num_reqs
         num_input_tokens = common_attn_metadata.num_input_tokens
-        if (
-            self.speculative_config is not None
-            and getattr(self.speculative_config, "method", None) == "dspark"
-            and getattr(self.speculative_config, "enable_adaptive_verification", False)
-        ):
-            # Keep the independently built indexer metadata aligned with SFA:
-            # adaptive verification records its graph-shaped token count in
-            # positions rather than common_attn_metadata.num_input_tokens.
-            num_input_tokens = common_attn_metadata.positions.shape[0]
         if self.use_dcp:
             block_table, slot_mapping = self._build_dcp_cache_metadata(
                 common_attn_metadata,

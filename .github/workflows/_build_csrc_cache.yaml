@@ -57,6 +57,11 @@ on:
         required: false
         default: false
         description: 'Allow callers in rollout mode to continue when this cache build fails.'
+    secrets:
+      HW_OBS_AK:
+        required: false
+      HW_OBS_SK:
+        required: false
 
 defaults:
   run:
@@ -71,6 +76,16 @@ env:
   UV_NO_CACHE: 1
   UV_SYSTEM_PYTHON: 1
 
+  # L1: persistent fine-grained build cache. L0 remains the exact final-artifact
+  # cache consumed by test jobs.
+  INCREMENTAL_BUILD_CACHE_DIR: /tmp/vllm-ascend-incremental-build-cache
+  RUNS_ON_S3_BUCKET_CACHE: ascend-ci-cache-hk
+  RUNS_ON_S3_BUCKET_ENDPOINT: https://obs.ap-southeast-1.myhuaweicloud.com
+  RUNS_ON_S3_FORCE_PATH_STYLE: "false"
+  AWS_S3_FORCE_PATH_STYLE: "false"
+  AWS_REGION: ap-southeast-1
+  RUNS_ON_RUNNER_NAME: ""
+
 jobs:
   build:
     name: build-${{ fromJSON(inputs.target).id }}-cache
@@ -78,6 +93,9 @@ jobs:
     # opts into tolerance only while NPU compilation remains the CI fallback.
     continue-on-error: ${{ inputs.continue_on_error }}
     runs-on: ${{ fromJSON(inputs.target).runner }}
+    env:
+      OBS_CACHE_WRITE_ACCESS_KEY_ID: ${{ secrets.HW_OBS_AK }}
+      OBS_CACHE_WRITE_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_SK }}
     container:
       image: ${{ fromJSON(inputs.target).image }}
     steps:
@@ -164,11 +182,25 @@ jobs:
           yum install -y python3-pip net-tools jemalloc numactl patch clang
           pip install uv
 
+      - name: Restore incremental build cache
+        id: incremental-cache-restore
+        uses: $/.github/actions/csrc-l1-restore
+        with:
+          cache-dir: ${{ env.INCREMENTAL_BUILD_CACHE_DIR }}
+          architecture: ${{ fromJSON(inputs.target).cache_arch }}
+          soc-version: ${{ fromJSON(inputs.target).soc_version }}
+          csrc-hash: ${{ inputs.csrc_hash }}
+
       - name: Install vllm-ascend
         env:
           SOC_VERSION: ${{ fromJSON(inputs.target).soc_version }}
           MAX_JOBS: '16'
+          VLLM_ASCEND_BUILD_CACHE_DIR: ${{ env.INCREMENTAL_BUILD_CACHE_DIR }}
         run: |
+          mkdir -p "$VLLM_ASCEND_BUILD_CACHE_DIR"
+          rm -f "$VLLM_ASCEND_BUILD_CACHE_EVENT_LOG"
+          touch "$VLLM_ASCEND_BUILD_CACHE_EVENT_LOG"
+
           source /usr/local/Ascend/ascend-toolkit/set_env.sh
           source /usr/local/Ascend/nnal/atb/set_env.sh
           arch=$(uname -i)
@@ -192,8 +224,26 @@ jobs:
             exit 1
           fi
 
+      # L1 transport failure is a performance degradation, not a correctness
+      # failure. The verified final L0 artifact can still be published.
+      - name: Save incremental build cache
+        uses: $/.github/actions/csrc-l1-save
+        with:
+          cache-dir: ${{ env.INCREMENTAL_BUILD_CACHE_DIR }}
+          primary-key: ${{ steps.incremental-cache-restore.outputs.primary-key }}
+          access-key-id: ${{ env.OBS_CACHE_WRITE_ACCESS_KEY_ID }}
+          secret-access-key: ${{ env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY }}
+
       - name: Save csrc cache
+        if: >-
+          ${{
+            env.OBS_CACHE_WRITE_ACCESS_KEY_ID != '' &&
+            env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY != ''
+          }}
         uses: runs-on/cache/save@v5
+        env:
+          AWS_ACCESS_KEY_ID: ${{ env.OBS_CACHE_WRITE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY }}
         with:
           path: |
             vllm_ascend/_cann_ops_custom
