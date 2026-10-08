@@ -597,8 +597,9 @@ class NPUModelRunner(GPUModelRunner):
         if dump_forward:
             if dummy_run:
                 self._finalize_dump_data(dump=False)
-            elif isinstance(output, IntermediateTensors):
-                # PP non-last rank: sample_tokens is not called (v1 parity).
+            elif isinstance(output, IntermediateTensors) and self.is_pooling_model:
+                # Non-last pooling ranks do not reach pool(). Decoding ranks
+                # finalize after sample_tokens(), including non-last PP ranks.
                 self._finalize_dump_data()
 
         self._cpp_execution_time_ms = _finish_profiling_chunk_timing(

@@ -33,6 +33,7 @@ def _make_runner(need_timing: bool = True):
     runner.execute_model_state = None
     runner.use_pp = False
     runner.is_last_pp_rank = False
+    runner.is_pooling_model = False
     # Dump contract from the production initializer; helpers no-op on None.
     runner.debugger = None
     runner._debugger_started = False
@@ -538,8 +539,8 @@ def test_execute_model_skips_eager_dump_for_dummy_run():
     runner = _make_dump_runner(debugger)
     scheduler_output = SimpleNamespace(
         disable_profiling_timing=False,
-        total_num_scheduled_tokens=0,
-        num_scheduled_tokens={},
+        total_num_scheduled_tokens=4,
+        num_scheduled_tokens={"_dummy_req_0": 4},
     )
 
     with patch.object(GPUModelRunner, "execute_model", return_value=None):
@@ -556,8 +557,8 @@ def test_execute_model_closes_graph_dummy_run_without_writing():
     runner._debugger_started = True
     scheduler_output = SimpleNamespace(
         disable_profiling_timing=False,
-        total_num_scheduled_tokens=0,
-        num_scheduled_tokens={},
+        total_num_scheduled_tokens=4,
+        num_scheduled_tokens={"_dummy_req_0": 4},
     )
 
     with patch.object(GPUModelRunner, "execute_model", return_value=None):
@@ -567,9 +568,39 @@ def test_execute_model_closes_graph_dummy_run_without_writing():
     debugger.step.assert_called_once_with(dump=False)
 
 
-def test_execute_model_finalizes_dump_for_pp_non_last_rank():
+@pytest.mark.parametrize("graph_dump", [False, True])
+def test_pp_decoding_dump_finalizes_once_per_sampled_step(graph_dump):
+    debugger = Mock(spec=["start", "step"] if graph_dump else ["start", "stop", "step"])
+    runner = _make_dump_runner(debugger)
+    runner.pcp_manager = None
+    runner.use_spec_pp = False
+    runner._debugger_started = graph_dump
+    scheduler_output = SimpleNamespace(
+        disable_profiling_timing=False,
+        total_num_scheduled_tokens=4,
+        num_scheduled_tokens={0: 4},
+    )
+    intermediate = IntermediateTensors({"hidden": torch.zeros(1, 2)})
+
+    with (
+        patch.object(GPUModelRunner, "execute_model", return_value=intermediate),
+        patch.object(GPUModelRunner, "sample_tokens", return_value="out"),
+    ):
+        for step in range(2):
+            assert runner.execute_model(scheduler_output) is intermediate
+            assert debugger.step.call_count == step
+            assert runner.sample_tokens(None) == "out"
+            assert debugger.step.call_count == step + 1
+
+    assert debugger.start.call_count == (0 if graph_dump else 2)
+    if not graph_dump:
+        assert debugger.stop.call_count == 2
+
+
+def test_execute_model_finalizes_dump_for_pooling_pp_non_last_rank():
     debugger = Mock(spec=["start", "step"])
     runner = _make_dump_runner(debugger)
+    runner.is_pooling_model = True
     scheduler_output = SimpleNamespace(
         disable_profiling_timing=False,
         total_num_scheduled_tokens=4,
@@ -582,7 +613,7 @@ def test_execute_model_finalizes_dump_for_pp_non_last_rank():
 
     assert output is intermediate
     debugger.start.assert_called_once()
-    # PP non-last ranks never reach sample_tokens(), so finalize here.
+    # Non-last pooling ranks return before the worker calls pool().
     debugger.step.assert_called_once_with()
 
 
