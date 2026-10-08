@@ -42,6 +42,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from vllm.distributed.utils import get_pp_indices
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory, fused_moe_make_expert_params_mapping
@@ -89,18 +90,20 @@ from vllm_ascend.models.deepseek_v4.indexer import DeepseekV4Indexer
 from vllm_ascend.ops.dsa import AscendDeepseekSparseAttention, DSAModules
 from vllm_ascend.ops.rope_dsv4 import ComplexExpRotaryEmbedding
 from vllm_ascend.ops.triton.mul_add import muls_add_triton
+from vllm_ascend.quantization.methods.kv_cache.turboquant import is_turboquant
 from vllm_ascend.utils import (
+    dsv4_skips_indexer_topk,
     enable_custom_op,
     enable_dsa_cp,
     extract_dsv4_layer_index,
     get_dsv4_compress_ratio,
 )
-from vllm_ascend.worker.v2.pp_utils import (
+from vllm_ascend.worker.v2.pp_transport import (
     PPTransportDataType,
     add_pp_transport_tensors,
     get_pp_transport_tensors,
 )
-from vllm_ascend.worker.v2.pp_utils import (
+from vllm_ascend.worker.v2.pp_transport import (
     make_empty_intermediate_tensors as make_pp_empty_intermediate_tensors,
 )
 
@@ -577,16 +580,9 @@ class DeepseekV4Attention(nn.Module):
         # only, leaving impl-level references stale.
         skip_topk = False
         if self.compress_ratio == 4 and use_index_cache and ".mtp." not in prefix:
-            compress_ratios = getattr(config, "compress_ratios", None) or []
-            indexer_seq_idx = sum(1 for r in compress_ratios[:config_layer_idx] if r == 4)
-            pattern = getattr(config, "index_topk_pattern", None)
-            freq = getattr(config, "index_topk_freq", 1)
-            if pattern is None:
-                skip_topk = max(indexer_seq_idx - 1, 0) % freq != 0
-            else:
-                assert pattern[0] == "F", "index_topk_pattern must start with 'F'"
-                if 0 <= indexer_seq_idx < len(pattern):
-                    skip_topk = pattern[indexer_seq_idx] == "S"
+            pp_group = get_pp_group()
+            pp_start_layer, _ = get_pp_indices(config.num_hidden_layers, pp_group.rank_in_group, pp_group.world_size)
+            skip_topk = dsv4_skips_indexer_topk(config, config_layer_idx, pp_start_layer)
 
         if self.compress_ratio > 1:
             self.compressor = Compressor(
@@ -613,6 +609,8 @@ class DeepseekV4Attention(nn.Module):
                 )
 
         kv_cache_dtype = kv_cache_dtype_str_to_dtype(vllm_config.cache_config.cache_dtype, vllm_config.model_config)
+        if is_turboquant(vllm_config):
+            kv_cache_dtype = torch.bfloat16
         swa_cache_layer = AscendDeepseekV4SWACache(
             head_dim=self.head_dim,
             window_size=self.window_size,

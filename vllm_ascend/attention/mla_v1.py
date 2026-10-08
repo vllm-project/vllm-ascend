@@ -54,7 +54,11 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
-from vllm_ascend.quantization.methods import AscendW8A8LinearMethod, AscendW8A8MXFP8DynamicLinearMethod
+from vllm_ascend.quantization.methods import (
+    AscendW8A8DynamicLinearMethod,
+    AscendW8A8LinearMethod,
+    AscendW8A8MXFP8DynamicLinearMethod,
+)
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_ND,
@@ -74,13 +78,6 @@ BUILD_METADATA_STEP_DECODE = 1
 
 # Exclusive batch * K limit of the fused op with perm_x1=(1, 0, 2).
 TRANSPOSE_BMM_MAX_SUPPORTED_DIM = 65536
-
-
-def _npu_mla_prolog_v3_k3(**kwargs):
-    """Call the isolated K3 MLA prolog with optional RoPE inputs omitted."""
-    import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401, PLC0415
-
-    return torch.ops._C_ascend.npu_mla_prolog_v3_k3(**kwargs)
 
 
 class AscendMLABackend(AttentionBackend):
@@ -473,7 +470,12 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
         fast_build: bool = False,
+        *,
+        pcp_context=None,
+        pcp_cache_group_idx: int | None = None,
     ) -> AscendMLAMetadata:
+        self._pcp_context = pcp_context
+        self._pcp_cache_group_idx = pcp_cache_group_idx
         expanded_slot_mapping = common_attn_metadata.slot_mapping if self.pcp_enabled else None
         num_reqs = common_attn_metadata.num_reqs
         query_start_loc = common_attn_metadata.query_start_loc
@@ -583,6 +585,9 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         self,
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
+        *,
+        chunk_plan_lens_cpu: torch.Tensor | None = None,
+        chunk_workspace_size: int | None = None,
     ):
         if not self.chunked_prefill_enabled:
             return None
@@ -592,14 +597,25 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         reqs_start = self.num_decodes  # prefill_start
 
         self.context_lens_cpu = num_computed_tokens_cpu[reqs_start:num_reqs]
-        max_context_len_cpu = self.context_lens_cpu.max().item()
+        # PCP-local fragments already carry their own computed lengths. A shared
+        # plan changes only the workspace budget and the number of iterations.
+        chunk_plan_lens = self.context_lens_cpu if chunk_plan_lens_cpu is None else chunk_plan_lens_cpu
+        max_context_len_cpu = chunk_plan_lens.max().item()
         if not max_context_len_cpu > 0:
             return None
-        num_prefills_with_context_cpu = (self.context_lens_cpu > 0).sum().item()
-        self.max_context_chunk = self.chunked_prefill_workspace_size // num_prefills_with_context_cpu
+        num_prefills_with_context_cpu = (chunk_plan_lens > 0).sum().item()
+        workspace_size = self.chunked_prefill_workspace_size if chunk_workspace_size is None else chunk_workspace_size
+        self.max_context_chunk = workspace_size // num_prefills_with_context_cpu
         self.max_context_chunk = round_down(self.max_context_chunk, self.block_size)
 
-        assert self.max_context_chunk > 0
+        if self.max_context_chunk <= 0:
+            raise ValueError(
+                "MLA chunked prefill workspace is too small for one aligned chunk per request: "
+                f"workspace_size={workspace_size}, "
+                f"num_prefills_with_context={num_prefills_with_context_cpu}, "
+                f"block_size={self.block_size}, "
+                f"minimum_workspace_size={num_prefills_with_context_cpu * self.block_size}."
+            )
         self.num_chunks = cdiv(max_context_len_cpu, self.max_context_chunk)
         chunk_starts = (
             torch.arange(self.num_chunks, dtype=torch.int32).unsqueeze(1).expand(-1, self.num_prefills)
@@ -762,13 +778,23 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         )
         return decode_metadata
 
-    def build_for_cudagraph_capture(self, common_attn_metadata: AscendCommonAttentionMetadata):
+    def build_for_cudagraph_capture(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        **kwargs: Any,
+    ):
+        # Preserve upstream decode-only validation while forwarding PCP inputs.
+        assert common_attn_metadata.num_reqs <= (
+            common_attn_metadata.num_actual_tokens * self.reorder_batch_threshold
+        ), "MLA only supports decode-only full CUDAGraph capture."
+        assert common_attn_metadata.max_query_len <= self.reorder_batch_threshold
         capture_metadata = copy(common_attn_metadata)
         if capture_metadata.attn_state is None:
             capture_metadata.attn_state = AscendAttentionState.ChunkedPrefill
         if self.dcp_enabled and capture_metadata.is_prefilling is None:
             capture_metadata.is_prefilling = torch.zeros(capture_metadata.num_reqs, dtype=torch.bool)
-        return super().build_for_cudagraph_capture(capture_metadata)
+        # Keep backend-specific PCP context on the same build path as replay.
+        return self.build(0, capture_metadata, **kwargs)
 
     def build_for_graph_capture(
         self,
@@ -822,6 +848,7 @@ class AscendMLAImpl(MLAAttentionImpl):
     # `Cannot determine type of "W_UK_T"  [has-type]`.
     W_UV: torch.Tensor
     W_UK_T: torch.Tensor
+    _dcp_current_kv_buffers: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None
 
     def __init__(
         self,
@@ -1025,6 +1052,7 @@ class AscendMLAImpl(MLAAttentionImpl):
     def _v_up_proj_batch_major(self, x: torch.Tensor) -> torch.Tensor:
         """Keep the DCP result batch-major and fuse both BMM permutations."""
         x = x.view(-1, self.num_heads, self.kv_lora_rank)
+        x = x.to(dtype=self.W_UV.dtype)
         # The operator's batch dimension is num_heads, not the token count.
         if 1 <= self.num_heads * self.kv_lora_rank < TRANSPOSE_BMM_MAX_SUPPORTED_DIM:
             x = torch_npu.npu_transpose_batchmatmul(x, self.W_UV, perm_x1=(1, 0, 2), perm_y=(1, 0, 2))
@@ -1118,6 +1146,9 @@ class AscendMLAImpl(MLAAttentionImpl):
             supports_quantized_weights = isinstance(
                 quant_method,
                 (AscendW8A8LinearMethod, AscendW8A8MXFP8DynamicLinearMethod),
+            ) or (
+                # Exclude the FP8 subclass; A2/A3 use CANN's INT8 mode 2.
+                not self.support_fp8_attention and type(quant_method) is AscendW8A8DynamicLinearMethod
             )
             supports_native_weights = get_current_hardware_profile().supports(
                 HardwareCapability.MLAPO_NATIVE_WEIGHTS
@@ -1125,7 +1156,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             if self.fused_qkv_a_proj is None or not (supports_quantized_weights or supports_native_weights):
                 self.enable_mlapo = False
                 logger.warning_once(
-                    "MLAPO supports W8A8/W8A8-MXFP8 weights, plus native "
+                    "MLAPO supports W8A8/W8A8-MXFP8 weights, INT8 W8A8_DYNAMIC "
+                    "weights on A2/A3, plus native "
                     "floating-point weights on A5. Some layers use an "
                     "unsupported weight type, so MLAPO is disabled for these layers."
                 )
@@ -1218,6 +1250,11 @@ class AscendMLAImpl(MLAAttentionImpl):
             self.q_proj.quant_bias = None
             torch.npu.empty_cache()
 
+    def get_context_block_table(self, attn_metadata: AscendMLAMetadata) -> torch.Tensor:
+        """Return the local request table for prefill KV loading."""
+        assert attn_metadata.prefill is not None
+        return attn_metadata.prefill.block_table
+
     def get_context_seq_len_npu(self, index: int, attn_metadata: AscendMLAMetadata):
         prefill_metadata = attn_metadata.prefill
         assert prefill_metadata is not None
@@ -1252,6 +1289,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         if prefill_metadata is None or prefill_metadata.chunked_context is None:
             return prefix_output, prefix_lse
 
+        context_table = self.get_context_block_table(attn_metadata)
+        current_attn_result = prefix_output, prefix_lse
         iters = len(prefill_metadata.chunked_context.seq_tot)
         cache_kv_c = kv_c_and_k_pe_cache[0]
         cache_k_pe = kv_c_and_k_pe_cache[1]
@@ -1308,7 +1347,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             DeviceOperator.kv_cache_load(
                 cache_kv_c,
                 pe_cache,
-                prefill_metadata.block_table,
+                context_table,
                 context_seq_len_npu,
                 prefill_metadata.chunked_context.starts[i],
                 key=kv_c_normed,
@@ -1323,6 +1362,8 @@ class AscendMLAImpl(MLAAttentionImpl):
                 chunk_idx=i,
                 toks=toks,
             )
+            if kv_c_normed.numel() == 0:
+                continue
             kv_c_normed = kv_c_normed.squeeze()
             if self.fa_quant_layer and self.support_fp8_attention:
                 kv_c_normed = torch.mul(kv_c_normed.to(self.fak_descale_float.dtype), self.fak_descale_float).to(
@@ -1358,6 +1399,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             out_list.append(chunk_out.reshape(num_tokens * H, D))
             lse_list.append(chunk_lse.reshape(num_tokens * H))
 
+        if len(out_list) == 1:
+            return current_attn_result
         output_final, _ = torch_npu.npu_attention_update(tuple(lse_list), tuple(out_list), 0)
         return output_final.view(num_tokens, H, D), None
 
@@ -1887,9 +1930,28 @@ class AscendMLAImpl(MLAAttentionImpl):
         return decode_q_nope, decode_q_pe
 
     def mla_preprocess_only_decode(self, hidden_states, kv_cache, attn_metadata):
+        from cann_ops_transformer import mla_prolog  # type: ignore[import-not-found,import-untyped]  # noqa: PLC0415
+
         bsz = attn_metadata.num_decode_tokens
-        cache_index = attn_metadata.slot_mapping[:bsz].to(torch.int64)
-        decode_k_nope, decode_k_pe = kv_cache[0], kv_cache[1]
+        history_slots = attn_metadata.slot_mapping[:bsz]
+        return_current_kv = self._decode_requires_current_kv(attn_metadata)
+        if return_current_kv:
+            # DCP attention needs every current row, while the paged cache keeps
+            # only this rank's history. Use the existing prolog cache outputs for
+            # the current chunk, then scatter its rank-owned rows to history.
+            assert self._dcp_current_kv_buffers is not None
+            current_nope_cache, current_pe_cache, current_indices = self._dcp_current_kv_buffers
+            assert bsz <= current_indices.numel()
+            block_size = kv_cache[0].shape[1]
+            num_blocks = cdiv(bsz, block_size)
+            current_nope_cache = current_nope_cache[:num_blocks]
+            current_pe_cache = current_pe_cache[:num_blocks]
+            decode_k_nope, decode_k_pe = current_nope_cache, current_pe_cache
+            cache_index = current_indices[:bsz]
+        else:
+            # Only the direct prolog needs int64; DCP scatters the original slots.
+            cache_index = history_slots.to(torch.int64)
+            decode_k_nope, decode_k_pe = kv_cache[0], kv_cache[1]
         hidden_states = hidden_states[:bsz]
 
         if self.support_fp8_attention:
@@ -1915,32 +1977,33 @@ class AscendMLAImpl(MLAAttentionImpl):
                 )
                 cos = attn_metadata.decode.cos.view(rope_shape)
                 sin = attn_metadata.decode.sin.view(rope_shape)
-                prolog_op = torch_npu.npu_mla_prolog_v3
             else:
                 cos = None
                 sin = None
-                prolog_op = _npu_mla_prolog_v3_k3
             cache_index = cache_index.view(bsz, -1) if quantized_x.dim() == 3 else cache_index.view(-1)
             cache_mode = "PA_BSND"
             weight_quant_mode = self.mlapo_weight_quant_mode
             quant_scale_ckv = self.fak_descale_reciprocal if self.fa_quant_layer else None
         else:
-            cos_shape = attn_metadata.decode.cos.shape
             quantized_x, dynamic_scale = torch_npu.npu_dynamic_quant(hidden_states)
             dequant_scale_x = dynamic_scale.view(-1, 1)
             dequant_scale_w_dq = self.dequant_scale_w_dq
             dequant_scale_w_uq_qr = self.dequant_scale_w_uq_qr
             dequant_scale_w_dkv_kr = self.dequant_scale_w_dkv_kr
-            cos = attn_metadata.decode.cos.view(cos_shape[0], cos_shape[-1])
-            sin = attn_metadata.decode.sin.view(cos_shape[0], cos_shape[-1])
-            prolog_op = torch_npu.npu_mla_prolog_v3
+            if self.use_mla_rope:
+                cos_shape = attn_metadata.decode.cos.shape
+                cos = attn_metadata.decode.cos.view(cos_shape[0], cos_shape[-1])
+                sin = attn_metadata.decode.sin.view(cos_shape[0], cos_shape[-1])
+            else:
+                cos = None
+                sin = None
             cache_mode = "PA_NZ" if (self.fa_quant_layer or self.enable_kv_nz) else "PA_BSND"
             weight_quant_mode = 2
             # v3 full-quant uses a per-tensor kv scale; quant_kscale is one scalar
             # broadcast to (1, Hckv), so slice out the single per-tensor value.
             quant_scale_ckv = self.quant_kscale[:, :1] if self.fa_quant_layer else None
 
-        decode_q_nope, decode_q_pe, dequant_scale_q_nope, _, _ = prolog_op(
+        decode_q_nope, decode_q_pe, dequant_scale_q_nope, _, _ = mla_prolog(
             kv_cache=decode_k_nope,
             kr_cache=decode_k_pe,
             token_x=quantized_x,
@@ -1968,8 +2031,26 @@ class AscendMLAImpl(MLAAttentionImpl):
         decode_q_pe = decode_q_pe.view(bsz, self.mlapo_num_heads, -1)
 
         decode_q_nope, decode_q_pe = self.reorg_decode_q(decode_q_nope, decode_q_pe)
+        current_k_nope = current_k_pe = None
+        if return_current_kv:
+            current_k_nope = current_nope_cache.flatten(0, 1)[:bsz]
+            current_k_pe = current_pe_cache.flatten(0, 1)[:bsz]
+            DeviceOperator.reshape_and_cache(
+                key=current_k_nope,
+                value=current_k_pe,
+                key_cache=kv_cache[0],
+                value_cache=kv_cache[1],
+                slot_mapping=history_slots,
+            )
+            decode_k_nope, decode_k_pe = kv_cache[0], kv_cache[1]
         decode_preprocess_res = DecodeMLAPreprocessResult(
-            decode_q_nope, decode_q_pe, decode_k_nope, decode_k_pe, dequant_scale_q_nope=dequant_scale_q_nope
+            decode_q_nope,
+            decode_q_pe,
+            decode_k_nope,
+            decode_k_pe,
+            dequant_scale_q_nope=dequant_scale_q_nope,
+            current_k_nope=current_k_nope,
+            current_k_pe=current_k_pe,
         )
         return decode_preprocess_res, None
 
@@ -2161,14 +2242,17 @@ class AscendMLAImpl(MLAAttentionImpl):
             gate = self.g_proj(hidden_states.contiguous())[0]
 
         # MLA Preprocess
-        can_use_decode_prolog = self.use_mla_rope or get_current_hardware_profile().supports(
-            HardwareCapability.MLA_DECODE_PROLOG_WITHOUT_ROPE
+        requires_current_kv = self._decode_requires_current_kv(attn_metadata)
+        can_use_dcp_prolog = (
+            self.enable_mlapo
+            and not self.fa_quant_layer
+            and not self.use_mla_rope
+            and not self.enable_kv_nz
+            and attn_metadata.num_decode_tokens > 0
         )
         if (
             (self.fa_quant_layer or self.enable_mlapo)
-            and can_use_decode_prolog
-            # The fused prolog does not return the replicated current KV.
-            and not self._decode_requires_current_kv(attn_metadata)
+            and (not requires_current_kv or can_use_dcp_prolog)
             and attn_metadata.num_decode_tokens <= MLAPO_MAX_SUPPORTED_TOKENS
             and attn_metadata.num_prefills == 0
         ):

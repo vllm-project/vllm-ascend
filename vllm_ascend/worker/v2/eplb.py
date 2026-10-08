@@ -12,8 +12,9 @@ from vllm.model_executor.models.interfaces import (
 from vllm.v1.worker.gpu.eplb_utils import EPLBController
 
 from vllm_ascend.ascend_config import EplbConfig
+from vllm_ascend.distributed.eplb.eplb_state import AscendEplbState
 from vllm_ascend.distributed.eplb.policy.factory import create_eplb_policy
-from vllm_ascend.distributed.eplb.state import AscendEplbState
+from vllm_ascend.patch.platform.patch_eplb import resolve_ascend_eplb_communicator
 
 
 def is_eplb_load_collection_phase_matched(
@@ -45,9 +46,16 @@ class AscendEPLBController(EPLBController):
         super().__init__(parallel_config, device)
         ascend_eplb_config = ascend_eplb_config or EplbConfig()
         self.load_collection_phase = ascend_eplb_config.load_collection_phase
+        # The communicator choice needs one binding class on every EPLB rank,
+        # so reach a group consensus before the policy or state is built.
+        stair_config = (
+            resolve_ascend_eplb_communicator(parallel_config, ascend_eplb_config)
+            if parallel_config.enable_eplb
+            else ascend_eplb_config.stair_config
+        )
         self.eplb_policy = create_eplb_policy(
             parallel_config.eplb_config.policy,
-            ascend_eplb_config.stair_config,
+            stair_config,
         )
         self._load_collection_phase_matched = True
 

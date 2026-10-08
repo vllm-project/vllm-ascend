@@ -47,6 +47,7 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.STANDARD_MAMBA_PATCH,
         HardwareCapability.STANDARD_WORKER_PATCHES,
         HardwareCapability.TRITON_BATCH_MEMCPY,
+        HardwareCapability.TURBOQUANT_4BIT_NC_CACHE,
     }
 )
 
@@ -55,6 +56,7 @@ _EXPECTED_CAPABILITIES = {
     AscendDeviceType.A3: _STANDARD_CAPABILITIES
     | {
         HardwareCapability.CANN_MEGAMOE,
+        HardwareCapability.GMM_DEQUANT_SITU_QUANT,
         HardwareCapability.MC2_FULLMESH_V2_COMM,
         HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
         HardwareCapability.NPU_TOP_K_TOP_P,
@@ -91,7 +93,6 @@ _EXPECTED_CAPABILITIES = {
             HardwareCapability.GRAPH_NORM_QUANT_FUSION,
             HardwareCapability.LOCAL_KV_COMM_RESOURCE,
             HardwareCapability.LORA_CUSTOM_OPS,
-            HardwareCapability.MLA_DECODE_PROLOG_WITHOUT_ROPE,
             HardwareCapability.MLAPO_NATIVE_WEIGHTS,
             HardwareCapability.MM_REDUCE_SCATTER_AI_CPU_INFERENCE,
             HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,

@@ -159,10 +159,14 @@ class BaseDeviceAdaptor:
                 is_prefill_no_cache=is_prefill_no_cache,
             )
 
+        if kwargs.get("block_table") is None:
+            key = key.contiguous()
+            value = value.contiguous()
+
         return torch_npu.npu_fused_infer_attention_score(
             query=query,
-            key=key.contiguous(),
-            value=value.contiguous(),
+            key=key,
+            value=value,
             num_key_value_heads=num_key_value_heads,
             num_heads=num_heads,
             scale=scale,
@@ -485,7 +489,7 @@ class BaseDeviceAdaptor:
             torch.float8_e5m2,
         )
         if use_kv_quant_sparse_attention:
-            result = cls._execute_kv_quant_sparse_flash_attention(
+            result = cls._execute_kv_quant_sparse_flash_attention_vllm(
                 sfa_impl,
                 ql_nope,
                 q_pe,
@@ -527,7 +531,7 @@ class BaseDeviceAdaptor:
             return result[0]
 
     @staticmethod
-    def _execute_kv_quant_sparse_flash_attention(
+    def _execute_kv_quant_sparse_flash_attention_vllm(
         sfa_impl,
         ql_nope: torch.Tensor,
         q_pe: torch.Tensor,
@@ -543,7 +547,7 @@ class BaseDeviceAdaptor:
         # torch.cat allocates a fresh contiguous output, so no extra
         # .contiguous() pass is needed here.
         query = torch.cat([ql_nope, q_pe], dim=-1)
-        return torch.ops._C_ascend.npu_kv_quant_sparse_flash_attention(
+        return torch.ops._C_ascend.npu_kv_quant_sparse_flash_attention_vllm(
             query=query,
             key=kv,
             value=kv,
@@ -993,10 +997,14 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         is_prefill_no_cache: bool,
         **kwargs,
     ):
+        if kwargs.get("block_table") is None:
+            key = key.contiguous()
+            value = value.contiguous()
+
         return torch_npu.npu_fused_infer_attention_score(
             query=query,
-            key=key.contiguous(),
-            value=value.contiguous(),
+            key=key,
+            value=value,
             num_key_value_heads=num_key_value_heads,
             num_heads=num_heads,
             scale=scale,
@@ -1004,7 +1012,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         )
 
     @staticmethod
-    def _execute_kv_quant_sparse_flash_attention(
+    def _execute_kv_quant_sparse_flash_attention_vllm(
         sfa_impl,
         ql_nope: torch.Tensor,
         q_pe: torch.Tensor,
@@ -1019,11 +1027,11 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if getattr(sfa_impl, "qk_rope_head_dim", q_pe.shape[-1]) == 0:
             # RoPE0 packed C8 is implemented by the vllm-ascend custom operator
-            # (csrc/attention/kv_quant_sparse_flash_attention). The torch_npu
+            # (csrc/attention/kv_quant_sparse_flash_attention_vllm). The torch_npu
             # built-in aclnn op has no RoPE0 contract: it sizes its outputs from
             # rope_head_dim=64 and faults while registering them. Route RoPE0 to
             # the custom operator and keep RoPE64 on the built-in one.
-            return BaseDeviceAdaptor._execute_kv_quant_sparse_flash_attention(
+            return BaseDeviceAdaptor._execute_kv_quant_sparse_flash_attention_vllm(
                 sfa_impl,
                 ql_nope,
                 q_pe,

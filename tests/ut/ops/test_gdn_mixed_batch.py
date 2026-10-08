@@ -172,8 +172,15 @@ def test_mixed_non_spec_reuses_rearranged_qkv() -> None:
             return_value=gating,
         ),
         patch("vllm_ascend.ops.gdn.l2norm_fwd", side_effect=lambda x: x),
-        patch.object(AscendGatedDeltaNetAttention, "_probe_fused_chunk", return_value=False),
+        patch.object(AscendGatedDeltaNetAttention, "_probe_fused_chunk", return_value=True),
+        patch.object(AscendGatedDeltaNetAttention, "_chunk_gated_delta_rule_fused") as fused_chunk_mock,
         patch("vllm_ascend.ops.gdn.clear_ssm_states"),
+        patch(
+            "vllm_ascend.ops.gdn.gather_ssm_states",
+            side_effect=lambda state, indices, has_initial_state, **kwargs: state.index_select(
+                0, indices.to(torch.long)
+            ),
+        ),
         patch(
             "vllm_ascend.ops.gdn.chunk_gated_delta_rule",
             side_effect=chunk_gated_delta_rule,
@@ -220,6 +227,7 @@ def test_mixed_non_spec_reuses_rearranged_qkv() -> None:
         mixed_qkv,
     )
     prefill_call = chunk_mock.call_args.kwargs
+    fused_chunk_mock.assert_not_called()
     torch.testing.assert_close(
         prefill_call["q"],
         torch.tensor([[[[3.0, 4.0]], [[5.0, 6.0]]]]),

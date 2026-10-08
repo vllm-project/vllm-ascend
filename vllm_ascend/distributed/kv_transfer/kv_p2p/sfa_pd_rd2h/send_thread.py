@@ -58,7 +58,7 @@ class MembPullSendingThread(threading.Thread):
         state: ProducerSendState,
     ) -> None:
         super().__init__(daemon=True, name="SfaPDMembPullSendingThread")
-        self.timeout = 10.0
+        self.timeout = 100.0
         self._mf_meta_sent_paths: set[str] = set()
         self._state = state
         self.last_layer_idx = state.last_layer_idx

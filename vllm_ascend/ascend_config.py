@@ -219,8 +219,8 @@ class StairConfig:
     load_risk_quantile: float = 0.75
     relative_balance_threshold: float = 0.95
     absolute_balance_threshold: float = 0.90
-    rank_transfer_limit: int = 1
-    cross_node_transfer_limit: int = 1
+    rank_transfer_limit: int = -1
+    cross_node_transfer_limit: int = -1
     replica_search_num_stages: int = 4
     replica_search_radius: int = 8
     replica_search_beam_size: int = 64
@@ -431,7 +431,7 @@ class AscendConfig:
             "enable_dsa_cp": false,
             "sfa_dcp_force_tmajor_restore": false,
             "enable_force_eplb": false,
-            "enable_pcp_o_proj_weight_sharding": false,
+            "enable_pcp_o_proj_weight_sharding": true,
             "enable_pcp_embedding_lmhead_weight_sharding": true,
             "draft_window_size": null,
             "mix_placement": false,
@@ -572,7 +572,7 @@ class AscendConfig:
     enable_dsa_cp: bool = False
     sfa_dcp_force_tmajor_restore: bool = False
     enable_force_eplb: bool = False
-    enable_pcp_o_proj_weight_sharding: bool = False
+    enable_pcp_o_proj_weight_sharding: bool = True
     enable_pcp_embedding_lmhead_weight_sharding: bool = True
     draft_window_size: int | None = None
     mix_placement: bool = False
@@ -629,6 +629,7 @@ class AscendConfig:
     # ---- derived fields: sentinel default, after-validator overwrites ----
     enable_shared_expert_dp: bool = False
     enable_sp_by_pass: bool = False
+    enable_sparse_sfa_turboquant: bool = False
     enable_sparse_sfa_c8: bool = False
     enable_sparse_li_c8: bool = False
     # See https://github.com/vllm-project/vllm-ascend/issues/15896
@@ -877,11 +878,18 @@ class AscendConfig:
         # Sparse C8 derivation. StoreKVBlock can be disabled by users, and is
         # otherwise enabled only for SFA + Lightning Indexer C8 on PD prefill
         # nodes.
-        from vllm_ascend.utils import model_uses_sfa_sparse
+        from vllm_ascend.utils import model_uses_kpool_indexer, model_uses_sfa_sparse
 
         use_sparse = model_uses_sfa_sparse(vc.model_config)
+        # The SFA C8 packed KV cache path is indexer-agnostic; kpool-indexer
+        # models (e.g. GLM-5.3-Flash) can use it as well. LI C8 requires the
+        # LightningIndexer cache layout, so it stays gated by use_sparse.
+        use_sparse_sfa = use_sparse or model_uses_kpool_indexer(vc.model_config)
 
-        self.enable_sparse_sfa_c8 = vllm_config.cache_config.cache_dtype in ["fp8", "int8"] and use_sparse
+        cache_config = getattr(vc, "cache_config", None)
+        cache_dtype = getattr(cache_config, "cache_dtype", None)
+        self.enable_sparse_sfa_turboquant = cache_dtype == "turboquant_4bit_nc" and use_sparse_sfa
+        self.enable_sparse_sfa_c8 = vllm_config.cache_config.cache_dtype in ["fp8", "int8"] and use_sparse_sfa
         self.enable_sparse_li_c8 = vllm_config.attention_config.indexer_kv_dtype in ["fp8", "int8"] and use_sparse
         kv_transfer_config = vc.kv_transfer_config
         is_prefill_node = kv_transfer_config is not None and (
@@ -924,9 +932,16 @@ class AscendConfig:
         # mix_placement mutex
         self._check_mix_placement()
 
-        # sparse KV offload vs sparse SFA C8 main cache mutex
-        self._validate_sparse_c8_kv_offload_compatibility()
+        # sparse KV offload vs packed SFA main cache mutex
+        self._validate_sparse_packed_kv_offload_compatibility()
         return self
+
+    @property
+    def uses_packed_sfa_main_cache(self) -> bool:
+        """Whether SFA stores its main KV cache in one packed tensor."""
+        return bool(
+            getattr(self, "enable_sparse_sfa_c8", False) or getattr(self, "enable_sparse_sfa_turboquant", False)
+        )
 
     def _validate_mc2_comm_alg(self, vllm_config: VllmConfig) -> None:
         from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
@@ -960,12 +975,11 @@ class AscendConfig:
                 "Please set additional_config.enable_fused_mc2 to 0."
             )
 
-    def _validate_sparse_c8_kv_offload_compatibility(self) -> None:
-        if self.sparse_kv_offload_config.enabled and self.enable_sparse_sfa_c8:
+    def _validate_sparse_packed_kv_offload_compatibility(self) -> None:
+        if self.sparse_kv_offload_config.enabled and self.uses_packed_sfa_main_cache:
             raise NotImplementedError(
-                "Sparse KV offload does not support the sparse SFA C8 main "
-                "cache. Disable enable_sparse_sfa_c8; enable_sparse_li_c8 is "
-                "supported because the indexer cache remains device-resident."
+                "Sparse KV offload does not support packed SFA main caches (C8 or TQ4). "
+                "Sparse LI C8 is supported because the indexer cache remains device-resident."
             )
 
     @classmethod
@@ -1804,6 +1818,7 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
         # are NOT here — they are user-input fields that derive_and_validate
         # augments (self.x = self.x and condition), so the user must be able to
         # pass them. Only pure-derived fields (no user input) are stripped.
+        "enable_sparse_sfa_turboquant",
         "enable_sp_by_pass",
         "pd_tp_ratio",
         "pd_head_ratio",

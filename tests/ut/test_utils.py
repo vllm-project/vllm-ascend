@@ -741,6 +741,13 @@ def test_is_pd_decode_recompute_scheduler_enabled_decode_consumer_disabled():
         assert utils.is_pd_decode_recompute_scheduler_enabled(vllm_config) is False
 
 
+def test_should_reuse_topk_keeps_frequency_logic():
+    config = SimpleNamespace(index_topk_freq=4, index_skip_topk_offset=3)
+
+    assert not utils.should_reuse_topk(config, 2)
+    assert utils.should_reuse_topk(config, 3)
+
+
 def test_check_gdn_layer_supports_kimi_linear_config_property():
     from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 
@@ -859,6 +866,41 @@ class TestIsRlWeightUpdateEnabled(TestBase):
     def test_enabled_by_both_switches(self):
         with mock.patch("vllm_ascend.utils.get_ascend_config", return_value=self._ascend_config(True)):
             self.assertTrue(utils.is_rl_weight_update_enabled(self._vllm_config(SimpleNamespace(backend="npu_ipc"))))
+
+
+class TestRefreshBlockSizeC8MXFP(TestBase):
+    def _config(self, block_size, *, is_hybrid=False, user_specified=False):
+        return SimpleNamespace(
+            cache_config=SimpleNamespace(
+                block_size=block_size,
+                cache_dtype="mxfp8",
+                user_specified_block_size=user_specified,
+                mamba_page_size_padded=123456,
+                mamba_block_size=32768,
+            ),
+            model_config=SimpleNamespace(is_hybrid=is_hybrid),
+            scheduler_config=SimpleNamespace(),
+            speculative_config=None,
+        )
+
+    def test_default_block_size_becomes_kernel_size(self):
+        for hybrid in (False, True):
+            config = self._config(128, is_hybrid=hybrid)
+            utils.refresh_block_size(config)
+            self.assertEqual(config.cache_config.block_size, 512)
+
+    def test_scheduler_block_can_contain_multiple_kernel_blocks(self):
+        for size in (512, 1024, 4096):
+            config = self._config(size, is_hybrid=True, user_specified=True)
+            utils.refresh_block_size(config)
+            self.assertEqual(config.cache_config.block_size, size)
+            self.assertEqual(config.cache_config.mamba_page_size_padded, 123456)
+            self.assertEqual(config.cache_config.mamba_block_size, 32768)
+
+    def test_invalid_explicit_block_size_is_rejected(self):
+        config = self._config(768, user_specified=True)
+        with self.assertRaisesRegex(ValueError, "multiple of 512"):
+            utils.refresh_block_size(config)
 
 
 @pytest.fixture

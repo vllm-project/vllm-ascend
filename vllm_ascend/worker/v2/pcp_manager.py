@@ -49,6 +49,8 @@ class AscendPCPAttentionContext:
     gathered_kv_write_mask: torch.Tensor | None = None
     # Device snapshot of allocated kernel-block counts in global request order.
     global_block_table_num_blocks: torch.Tensor | None = None
+    # Original batch row for each local request, in upstream segment order.
+    local_to_global_req_indices: tuple[int, ...] | None = None
 
 
 class AscendPCPManager(PCPManager):
@@ -465,6 +467,7 @@ class AscendPCPManager(PCPManager):
             restore_start = self.pcp_rank * num_tokens
             return AscendPCPAttentionContext(
                 global_batch=input_batch,
+                local_to_global_req_indices=tuple(range(input_batch.num_reqs)),
                 global_block_tables=block_tables,
                 global_slot_mappings=slot_mappings.view(slot_mappings.shape[0], self.pcp_world_size, num_tokens)[
                     :, self.pcp_rank
@@ -479,12 +482,22 @@ class AscendPCPManager(PCPManager):
         assert self._global_batch_slot_mappings is not None
         assert hidden_restore_idx is not None
         global_block_table_num_blocks = None
+        local_to_global_req_indices = None
         if self.dcp_world_size > 1 and bool(global_batch.is_prefilling_np.any()):
             global_block_table_num_blocks = torch.from_numpy(
                 self._block_tables.num_blocks.np[:, global_batch.idx_mapping_np[: global_batch.num_reqs]]
             ).to(device=self.device, non_blocking=True)
+            local_batch = self._local_batch if input_batch is None else input_batch
+            assert local_batch is not None
+            global_rows = {
+                int(state): row for row, state in enumerate(global_batch.idx_mapping_np[: global_batch.num_reqs])
+            }
+            local_to_global_req_indices = tuple(
+                global_rows[int(state)] for state in local_batch.idx_mapping_np[: local_batch.num_reqs]
+            )
         return AscendPCPAttentionContext(
             global_batch=global_batch,
+            local_to_global_req_indices=local_to_global_req_indices,
             global_block_tables=self._block_tables.gather_block_tables(
                 global_batch.idx_mapping,
                 global_batch.num_reqs_after_padding,

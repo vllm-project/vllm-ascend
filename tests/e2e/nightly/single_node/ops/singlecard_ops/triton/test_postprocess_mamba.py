@@ -24,6 +24,7 @@ from vllm.v1.worker.mamba_utils import (
 )
 
 import vllm_ascend.patch.worker.patch_mamba_utils  # noqa: F401
+from vllm_ascend.patch.worker.patch_mamba_utils import _reset_layerwise_copy_meta
 
 _COPY_FUNCS: MambaStateCopyFuncsByType = {
     MambaAttentionBackendEnum.MAMBA2: (get_conv_copy_spec, get_temporal_copy_spec)
@@ -47,6 +48,7 @@ def postprocess_mamba(
     mamba_group_ids = copy_bufs.mamba_group_ids
     mamba_spec = copy_bufs.mamba_spec
     copy_bufs.offset = 0
+    _reset_layerwise_copy_meta(copy_bufs)
     for i, req_id in enumerate(input_batch.req_ids):
         req_state = requests[req_id]
         num_computed_tokens = req_state.num_computed_tokens
@@ -73,6 +75,10 @@ def postprocess_mamba(
             )
             if src_block_idx == dest_block_idx:
                 num_accepted_tokens_cpu[i] = 1
+    # Match the explicit metadata staging required by the Ascend copy path.
+    copy_bufs.src_ptrs.copy_to_gpu(copy_bufs.offset)
+    copy_bufs.dst_ptrs.copy_to_gpu(copy_bufs.offset)
+    copy_bufs.sizes.copy_to_gpu(copy_bufs.offset)
     do_mamba_copy_block(copy_bufs)
 
 

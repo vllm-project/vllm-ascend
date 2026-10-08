@@ -95,6 +95,9 @@ class HardwareCapability(Enum):
     FUSED_SWIGLU_TUNING_ARGS = auto()
     # Select the compatibility GatedDeltaNet core and state-dtype implementation.
     GDN_COMPATIBILITY = auto()
+    # Fuse non-MX INT8/INT4 grouped matmul, dequantization, SiTU, and per-token
+    # quantization through the ACLNN GmmDequantSituQuant operator.
+    GMM_DEQUANT_SITU_QUANT = auto()
     # Register the FX graph rewrite that fuses the supported muls-plus-add pattern.
     GRAPH_MULS_ADD_FUSION = auto()
     # Register the FX graph rewrites for supported RMSNorm-plus-quant patterns.
@@ -111,8 +114,6 @@ class HardwareCapability(Enum):
     LOCAL_KV_COMM_RESOURCE = auto()
     # Use vLLM-Ascend's custom BGMV/SGMV LoRA kernels when rank constraints also pass.
     LORA_CUSTOM_OPS = auto()
-    # Allow the fused MLA decode prolog even when the model does not use MLA RoPE.
-    MLA_DECODE_PROLOG_WITHOUT_ROPE = auto()
     # Allow MLAPO with native floating-point projection weights, not only quantized weights.
     MLAPO_NATIVE_WEIGHTS = auto()
     # Accept ``fullmesh_v2`` as the MC2 communication algorithm.
@@ -148,6 +149,8 @@ class HardwareCapability(Enum):
     SWIGLU_OAI_MX_QUANT = auto()
     # Use the Triton batch-memcpy kernel for Mamba state copies.
     TRITON_BATCH_MEMCPY = auto()
+    # Native TurboQuant 4-bit non-causal MLA cache and SFA kernels.
+    TURBOQUANT_4BIT_NC_CACHE = auto()
     # Honor MLAPO enablement on any pipeline role; other profiles limit it to decode consumers.
     UNRESTRICTED_MLAPO = auto()
 
@@ -258,9 +261,11 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.STANDARD_MAMBA_PATCH,
         HardwareCapability.STANDARD_WORKER_PATCHES,
         HardwareCapability.TRITON_BATCH_MEMCPY,
+        HardwareCapability.TURBOQUANT_4BIT_NC_CACHE,
     }
 )
 _A3_CAPABILITIES = _STANDARD_CAPABILITIES | {
+    HardwareCapability.GMM_DEQUANT_SITU_QUANT,
     HardwareCapability.MC2_FULLMESH_V2_COMM,
 }
 _DEFAULT_WORKER_CLS = "vllm_ascend.worker.worker.NPUWorker"
@@ -348,7 +353,6 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.GRAPH_NORM_QUANT_FUSION,
                     HardwareCapability.LOCAL_KV_COMM_RESOURCE,
                     HardwareCapability.LORA_CUSTOM_OPS,
-                    HardwareCapability.MLA_DECODE_PROLOG_WITHOUT_ROPE,
                     HardwareCapability.MLAPO_NATIVE_WEIGHTS,
                     HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
                     HardwareCapability.MOE_DISPATCH_SHARED_EXPERT_ARGS,

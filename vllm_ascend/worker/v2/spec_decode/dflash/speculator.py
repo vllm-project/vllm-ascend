@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Callable
 from typing import Any, cast
 
 import torch
@@ -11,16 +12,29 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
+from vllm.v1.worker.gpu.spec_decode.dflash import speculator as dflash_speculator
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 
 from vllm_ascend.ops.triton.v2.spec_decode.prepare_dflash_inputs import prepare_dflash_inputs_triton
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
+from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
     disable_profiling_chunk_for_draft,
 )
 
 
-class AscendDFlashSpeculator(DFlashSpeculator):
+def prepare_dflash_inputs_factory(kv_cache_block_size: int) -> Callable[..., None]:
+    # Upstream uses the attention kernel block size for DCP ownership, which is
+    # incorrect when physical KV blocks are larger than kernel blocks. Bind the
+    # physical size so ownership uses KV cache blocks while slot lookup uses the
+    # kernel-sized block table supplied by the upstream caller.
+    def prepare_with_block_size(*args: Any, **kwargs: Any) -> None:
+        prepare_dflash_inputs(*args, **kwargs, kv_cache_block_size=kv_cache_block_size)
+
+    return prepare_with_block_size
+
+
+class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
     def load_draft_model(
         self,
         target_model: torch.nn.Module,
@@ -70,6 +84,7 @@ class AscendDFlashSpeculator(DFlashSpeculator):
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
+        self._lmhead_tp_validate_draft_sampling()
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         if self.speculative_config.enforce_eager:
@@ -117,6 +132,9 @@ class AscendDFlashSpeculator(DFlashSpeculator):
                 attn_backends[layer_name] = attn_layers[layer_name].get_attn_backend()
 
         self.attn_backends = attn_backends
+        dflash_speculator.prepare_dflash_inputs = prepare_dflash_inputs_factory(
+            self.vllm_config.cache_config.block_size
+        )
 
     def propose(
         self,
@@ -196,6 +214,8 @@ def prepare_dflash_inputs(
     max_num_tokens: int,
     max_model_len: int,
     sample_from_anchor: bool = False,
+    *,
+    kv_cache_block_size: int,
 ) -> None:
     prepare_dflash_inputs_triton(
         input_buffers,
@@ -226,4 +246,5 @@ def prepare_dflash_inputs(
         max_num_tokens,
         max_model_len,
         sample_from_anchor,
+        kv_cache_block_size=kv_cache_block_size,
     )
