@@ -47,6 +47,7 @@ To enable RFork, pass `--load-format rfork` and provide RFork settings through `
 | **rfork_scheduler_url** | String | Base URL of the planner service used for seed allocation, release, and heartbeat. | Required for planner-based matching. Example: `http://127.0.0.1:1223`. |
 | **rfork_seed_timeout_sec** | Number | Timeout for waiting until the local seed HTTP service becomes healthy after startup. | Optional. Default: `5.0`. Must be greater than `0`. Invalid values fall back to the default. |
 | **rfork_request_timeout_sec** | Number | HTTP connect/read timeout for planner and seed requests. | Optional. Default: `10.0`. Must be greater than `0`. |
+| **rfork_model_identity_headers** | Boolean | Attach readable model identity headers to every planner request. | Optional. Default: `false`. Explicit JSON `true` or `false` overrides `RFORK_MODEL_IDENTITY_HEADERS`; otherwise the environment variable accepts `0`, `1`, `true`, or `false`, ignoring case and surrounding whitespace. |
 | **rfork_heartbeat_interval_sec** | Number | Interval between planner heartbeat reports. | Optional. Default: `30.0`. JSON configuration only. |
 | **rfork_lease_release_max_attempts** | Integer | Fast-attempt count before transient lease-release failures continue at a slower background interval. | Optional. Default: `3`. Permanent planner rejection still stops retries. |
 | **rfork_lease_release_retry_interval_sec** | Number | Interval between fast lease-release retries. | Optional. Default: `30.0`. JSON configuration only. |
@@ -62,6 +63,26 @@ outside the ephemeral range `32768-60999`); invalid values fall back to OS assig
 the seed HTTP ports and the HIXL endpoint range. The HIXL data-plane endpoints default to base port `22000`
 (`YR_TE_HIXL_BASE_PORT`, 100 ports per physical device), which stays clear of Mooncake ADXL's default `20000`-based
 segments on nodes that co-locate both engines.
+
+### Optional Planner Model Identity Headers
+
+Set `"rfork_model_identity_headers": true` in `--model-loader-extra-config`, or set `RFORK_MODEL_IDENTITY_HEADERS=1` in the vLLM worker environment, to attach readable model metadata to every RFork planner request (`/get_seed`, `/put_seed`, `/renew_seed_lease`, `/remove_seed`, and `/add_seed`). RFork resolves this switch when constructing its configuration, with the following priority:
+
+1. An explicit `rfork_model_identity_headers` JSON boolean (`true` or `false`). Other JSON types fail configuration initialization.
+2. The `RFORK_MODEL_IDENTITY_HEADERS` environment variable: `1` or `true` enables the headers; `0` or `false` disables them. Values are case-insensitive and surrounding whitespace is ignored. Other values, including empty or whitespace-only values, fail configuration initialization when no JSON override is supplied.
+3. The default, `false` (disabled).
+
+An explicit JSON `false` disables the headers even when the environment variable is `1`.
+
+When the headers are enabled, `model_url` and `model_deploy_strategy_name` must contain only ASCII characters. Non-ASCII values fail configuration initialization with an error naming the field. This restriction does not apply when the headers are disabled.
+
+| HTTP Header | Value |
+| ----------- | ----- |
+| `MODEL_URL` | The resolved RFork `model_url`. |
+| `DEPLOY_STRATEGY` | The resolved RFork `model_deploy_strategy_name`. |
+| `IS_DRAFT` | `true` for a draft model, otherwise `false`. |
+
+The switch is not sensitive, but enabling it sends model identifiers in plain text. Values must be valid HTTP header text; avoid model URLs containing credentials. The existing seed key and request headers are preserved. A planner must read the additional headers to use or display this metadata.
 
 ### How RFork Matches Seeds
 
