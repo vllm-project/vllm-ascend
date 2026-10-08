@@ -38,12 +38,17 @@ def _ratio_kwargs(ratio: int) -> dict[str, int]:
     return {"tokens_per_state": ratio}
 
 
-@pytest.mark.parametrize(("pool", "lookahead", "capacity"), [(4, 0, 4), (4, 3, 7), (16, 5, 21)])
+@pytest.mark.parametrize(("pool", "lookahead", "capacity"), [(4, 0, 4), (4, 3, 8), (16, 5, 32)])
 def test_tail_ring_capacity_retains_speculative_lookahead(pool, lookahead, capacity):
     config = SimpleNamespace(
         speculative_config=(None if lookahead == 0 else SimpleNamespace(num_speculative_tokens=lookahead))
     )
-    assert get_kpool_tail_ring_capacity(config, pool) == capacity
+    # The capacity must cover pool + lookahead and stay a power of two so the
+    # tail's scheduler block size divides the platform-aligned block size.
+    ring = get_kpool_tail_ring_capacity(config, pool)
+    assert ring >= pool + lookahead
+    assert ring & (ring - 1) == 0
+    assert ring == capacity
 
 
 @pytest.mark.parametrize("capacity", [4, 12])
