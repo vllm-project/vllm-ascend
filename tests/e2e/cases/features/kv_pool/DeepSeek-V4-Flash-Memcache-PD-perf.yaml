@@ -119,6 +119,8 @@ templates:
       - "0.9"
       - "--quantization"
       - "ascend"
+      - "--attention_config.indexer_kv_dtype"
+      - "int8"
       - "--enforce-eager"
       - "--additional-config"
       - '{"enable_cpu_binding": true, "enable_shared_expert_dp": true}'
