@@ -34,6 +34,9 @@ def _stub_model(*, mhc: bool) -> Glm5NextModel:
         mhc_num_residual_streams=N_STREAMS,
     )
     model.is_sequence_parallel = False
+    # The forward loop indexes absolute layer ids for the DFlash aux capture.
+    model.start_layer = 0
+    model.aux_hidden_state_layers = ()
     return model
 
 
