@@ -154,8 +154,8 @@ class TestAscendConfig(TestBase):
         (
             config._sparse_li_c8_layer_ids,
             config._sparse_li_c8_layer_names,
-        ) = AscendConfig._parse_sparse_li_c8_layers_from_quant_config(quant_config)
-        config._sparse_li_c8_layer_filter_enabled = AscendConfig._has_sparse_li_c8_layer_config(quant_config)
+        ) = AscendConfig._parse_sparse_li_layers_from_quant_config(quant_config, ("INT8_DYNAMIC", "W8A8_MXFP8"))
+        config._sparse_li_layer_filter_enabled = AscendConfig._has_sparse_li_layer_config(quant_config)
         return config
 
     def test_sparse_li_c8_layer_filter_uses_indexer_quant_type(self):
