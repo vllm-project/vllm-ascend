@@ -5,11 +5,14 @@ from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import SpeculatorCudaGraphManager
 
-from vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph import AutoRegressiveAclGraphManager
+from vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph import (
+    AutoRegressiveAclGraphManager,
+)
 
 
 def _parent_init(
@@ -295,22 +298,27 @@ def test_graph_replay_updates_full_graph_params():
     )
 
 
-def test_updatable_graph_replay_updates_resolved_tasks():
-    """Verify updatable graph replay resolves and updates graph tasks."""
+@pytest.mark.parametrize("use_dcp,architecture", [(False, "GQA"), (True, "GQA"), (True, "MLA")])
+@pytest.mark.parametrize("is_prefill", [False, True])
+def test_updatable_graph_replay_reuses_shared_source(use_dcp, architecture, is_prefill):
+    """Build every draft step from the first metadata with one shared-source update."""
     manager = AutoRegressiveAclGraphManager.__new__(AutoRegressiveAclGraphManager)
     manager.update_stream = MagicMock()
-    manager.is_draft_model_prefill = False
-    desc = MagicMock()
-    desc.num_reqs = 2
+    manager.is_draft_model_prefill = is_prefill
+    desc = MagicMock(num_reqs=2)
     graph = MagicMock()
     resolved_tasks = object()
     graph.resolve_tasks.return_value = resolved_tasks
     manager.graphs = {desc: graph}
-    fia_params = [{"layer_name": "draft"}]
-    manager.speculator = SimpleNamespace(build_fia_params=MagicMock(return_value=fia_params))
+    steps = [{"draft": object()} for _ in range(1 if is_prefill else 2)]
+    fia_params = [{"layer_name": "draft", "step": i} for i in range(len(steps))]
+    manager.speculator = SimpleNamespace(
+        use_dcp=use_dcp,
+        attn_architecture=architecture,
+        build_fia_params=MagicMock(return_value=fia_params),
+    )
     source = object()
     current_stream = object()
-    draft_attn_metadatas = [{"draft": object()}]
 
     with (
         patch(
@@ -331,18 +339,11 @@ def test_updatable_graph_replay_updates_resolved_tasks():
             return_value="result",
         ) as parent_replay,
     ):
-        result = manager._updatable_graph_replay(
-            desc,
-            draft_attn_metadatas,
-        )
+        result = manager._updatable_graph_replay(desc, steps)
 
-    assert result == "result"
-    manager.speculator.build_fia_params.assert_called_once_with(
-        2,
-        draft_attn_metadatas[0],
-        False,
-    )
+    manager.speculator.build_fia_params.assert_called_once_with(2, steps[0], is_prefill)
     shared_source.assert_called_once_with(fia_params)
+    assert result == "result"
     graph.resolve_tasks.assert_called_once_with(source)
     manager.update_stream.wait_stream.assert_called_once_with(current_stream)
     parent_replay.assert_called_once_with(desc)

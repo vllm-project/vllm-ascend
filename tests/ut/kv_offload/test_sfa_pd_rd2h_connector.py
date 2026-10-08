@@ -17,6 +17,7 @@ pytest.importorskip("vllm")
 from vllm.distributed.kv_transfer.kv_connector.factory import (  # noqa: E402
     KVConnectorFactory,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole  # noqa: E402
 
 from examples.disaggregated_prefill_v1 import (  # noqa: E402
     load_balance_proxy_layerwise_server_example as proxy_example,
@@ -76,6 +77,40 @@ def test_sfa_remote_d2h_connector_is_registered():
         "vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.connector",
         "SfaRemoteD2HConnector",
     )
+
+
+@pytest.mark.parametrize("pp_size", [1, 2])
+def test_prefill_pp_uses_default_store_without_extra_topology_guard(pp_size):
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(pipeline_parallel_size=pp_size),
+        kv_transfer_config=SimpleNamespace(
+            kv_role="kv_producer",
+            is_kv_producer=True,
+            is_kv_consumer=False,
+            kv_connector_extra_config={"transfer_backend": "memfabric"},
+            engine_id="prefill",
+        ),
+    )
+    cache_config = MagicMock()
+    with (
+        patch(
+            "vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.connector.KVConnectorBase_V1.__init__",
+            return_value=None,
+        ),
+        patch("vllm_ascend.ascend_config.init_ascend_config"),
+        patch(
+            "vllm_ascend.ascend_config.get_ascend_config",
+            return_value=SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(enabled=False)),
+        ),
+        patch(
+            "vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.connector.SFAPDRD2HProducerScheduler"
+        ) as scheduler,
+    ):
+        connector = SfaRemoteD2HConnector(config, KVConnectorRole.SCHEDULER, cache_config)
+
+    scheduler.assert_called_once_with(config, cache_config, "prefill")
+    assert connector.connector_scheduler is scheduler.return_value
+    assert connector.is_producer
 
 
 def test_infer_separate_main_and_indexer_groups():
@@ -637,11 +672,13 @@ def test_send_thread_wires_both_cache_group_block_lists():
     thread.last_layer_idx = 0
     thread._p_save_events = {}
     thread._pending_reads_by_layer = {}
+    thread._pending_read_paths_by_layer = {}
     thread._storage_read_errors = {}
     thread.storage_send_done_events = [threading.Event(), threading.Event()]
     for event in thread.storage_send_done_events:
         event.set()
     thread._mf_meta_sent_paths = set()
+    thread._peer_engine_ids = {}
     thread._send_mf_meta = MagicMock()  # type: ignore[method-assign]
     dealer = MagicMock()
     thread._ensure_dealer = MagicMock(return_value=dealer)  # type: ignore[method-assign]
@@ -708,11 +745,13 @@ def test_send_thread_slices_each_group_at_chunk_boundaries():
     thread.last_layer_idx = 1
     thread._p_save_events = {}
     thread._pending_reads_by_layer = {}
+    thread._pending_read_paths_by_layer = {}
     thread._storage_read_errors = {}
     thread.storage_send_done_events = [threading.Event(), threading.Event()]
     for event in thread.storage_send_done_events:
         event.set()
     thread._mf_meta_sent_paths = {"tcp://127.0.0.1:1234"}
+    thread._peer_engine_ids = {}
     dealer = MagicMock()
     thread._ensure_dealer = MagicMock(return_value=dealer)  # type: ignore[method-assign]
     encoder = MagicMock()
@@ -834,6 +873,7 @@ def test_storage_slot_gate_is_shared_across_reuse_ring_boundary():
     thread.storage_send_done_events[0].set()
     thread._storage_read_errors = {}
     thread._pending_reads_by_layer = {}
+    thread._pending_read_paths_by_layer = {}
 
     thread.mark_layer_pending(5)
     storage_event = thread.get_storage_send_event(0)
@@ -1470,6 +1510,8 @@ def test_consumer_scheduler_binds_copy_sfa_tail_at_alloc():
     )
     scheduler._request_trackers = {}
     scheduler._reqs_need_recv = set()
+    scheduler._dspark_pending_recv = set()
+    scheduler._deferred_finished_req_ids = set()
     scheduler._copy_sfa_bindings = {}
     scheduler._copy_sfa_hot_tokens = 8192
     scheduler._copy_sfa_slot_allocator = CopySfaTopkSlotAllocator(4)

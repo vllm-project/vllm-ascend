@@ -6,6 +6,7 @@
 #include <torch_npu/csrc/framework/OpCommand.h>
 #include <torch_npu/csrc/npu/Module.h>
 #include "utils.h"
+
 /*
  * How to write a meta implementation for a custom operator (meta kernel):
  *
@@ -1186,6 +1187,13 @@ void kv_compress_epilog_meta(
     return;
 }
 
+void kv_compress_epilog_v2_meta(at::Tensor &cache, const at::Tensor &x,
+                            const at::Tensor &slotMapping,
+                            int64_t quantGroupSize, std::string quantMode,
+                            bool roundScale, double xScale) {
+    return;
+}
+
 std::tuple<at::Tensor, at::Tensor> npu_kv_quant_sparse_attn_sharedkv_meta(
     const at::Tensor& q,
     int64_t kv_quant_mode,
@@ -1932,6 +1940,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("inplace_partial_rotary_mul", &vllm_ascend::meta::inplace_partial_rotary_mul_meta);
     ops.impl("npu_rms_norm_dynamic_quant", &vllm_ascend::meta::npu_rms_norm_dynamic_quant_meta);
     ops.impl("kv_compress_epilog", &vllm_ascend::meta::kv_compress_epilog_meta);
+    ops.impl("kv_compress_epilog_v2", &vllm_ascend::meta::kv_compress_epilog_v2_meta);
     ops.impl("npu_kv_quant_sparse_attn_sharedkv", &vllm_ascend::meta::npu_kv_quant_sparse_attn_sharedkv_meta);
     ops.impl("npu_kv_quant_sparse_attn_sharedkv_metadata",
              &vllm_ascend::meta::npu_kv_quant_sparse_attn_sharedkv_metadata_meta);

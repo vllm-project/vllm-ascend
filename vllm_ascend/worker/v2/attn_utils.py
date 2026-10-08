@@ -21,6 +21,7 @@ import math
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
+from copy import copy
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
@@ -34,7 +35,7 @@ from vllm.config import (
     get_current_vllm_config_or_none,
     get_layers_from_vllm_config,
 )
-from vllm.distributed import get_dcp_group
+from vllm.distributed import get_dcp_group, get_tensor_model_parallel_rank
 from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -78,6 +79,11 @@ from vllm_ascend.core.kv_cache_interface import (
     get_storage_block_size,
 )
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import get_layerwise_reuse_config
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
+    allocate_kv_cache_tensors_for_sparse_kv_offload,
+    reshape_kv_cache_tensors_for_sparse_kv_offload,
+)
 from vllm_ascend.models.deepseek_v41.cache_config import is_deepseek_v41_cache
 from vllm_ascend.quantization.methods.kv_cache.turboquant import TURBOQUANT_CACHE_DTYPE
 from vllm_ascend.quantization.methods.kv_cache.turboquant.cache import uses_turboquant_groups
@@ -255,6 +261,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 dtype=dtype,
                 cache_dtype_str=cache_dtype_str,
                 cache_sparse_sfa_c8=cache_sparse_sfa_c8,
+                store_on_host=enable_sfa(vllm_config) and get_ascend_config().sparse_kv_offload_config.enabled,
                 cache_sparse_sfa_turboquant=cache_sparse_sfa_turboquant,
                 non_causal_multi_token_decode=spec.non_causal_multi_token_decode,
                 model_version=model_version,
@@ -365,6 +372,14 @@ def build_attn_metadata(
     causal: bool | Mapping[int, bool] = True,
     full_graph_mode: bool = False,
     skip_ring_state_update: bool | None = None,
+    req_ids_tensor: torch.Tensor | None = None,
+    token_to_req: torch.Tensor | None = None,
+    offload_dummy: bool = False,
+    req_topk_buffer_slots: torch.Tensor | None = None,
+    req_topk_buffer_active: torch.Tensor | None = None,
+    copy_sfa_draft_index: int | None = None,
+    copy_sfa_restore_tails: bool = False,
+    draft_layer_names: set[str] | None = None,
 ) -> dict[str, Any]:
     """Build attention metadata for Ascend NPUs."""
     if skip_ring_state_update is None:
@@ -485,6 +500,13 @@ def build_attn_metadata(
             is_prefilling=common_is_prefilling,
             max_seq_len=max_seq_len,
             causal=group_causal,
+            req_ids_tensor=req_ids_tensor,
+            token_to_req=token_to_req,
+            offload_dummy=offload_dummy,
+            req_topk_buffer_slots=req_topk_buffer_slots,
+            req_topk_buffer_active=req_topk_buffer_active,
+            copy_sfa_draft_index=copy_sfa_draft_index,
+            copy_sfa_restore_tails=copy_sfa_restore_tails,
             dcp_local_seq_lens=dcp_local_seq_lens,
             dcp_local_seq_lens_cpu=dcp_local_seq_lens_cpu,
             **common_attn_metadata_extra_kwargs,
@@ -495,6 +517,17 @@ def build_attn_metadata(
             is_dsa_builder = isinstance(attn_metadata_builder, (AscendDSAMetadataBuilder, AscendDSACPMetadataBuilder))
             is_v41_builder = isinstance(attn_metadata_builder, AscendDSAV41MetadataBuilder)
             is_sfa_builder = isinstance(attn_metadata_builder, AscendSFAMetadataBuilder)
+            metadata_variants = [(attn_group.layer_names, common_attn_metadata)]
+            if is_sfa_builder and draft_layer_names:
+                target_names = [name for name in attn_group.layer_names if name not in draft_layer_names]
+                draft_names = [name for name in attn_group.layer_names if name in draft_layer_names]
+                if draft_names:
+                    draft_common = copy(common_attn_metadata)
+                    draft_common.copy_sfa_draft_index = 0
+                    draft_common.copy_sfa_restore_tails = False
+                    metadata_variants = ([(target_names, common_attn_metadata)] if target_names else []) + [
+                        (draft_names, draft_common)
+                    ]
             consumes_pcp_context = bool(getattr(attn_metadata_builder, "consumes_pcp_context", False))
             attn_metadata_extra_kwargs = (
                 model_specific_attn_metadata.get_extra_attn_kwargs(
@@ -518,7 +551,10 @@ def build_attn_metadata(
                     skip_ring_state_update=skip_ring_state_update,
                     common_v41_metadata=common_v41_metadata,
                     common_v41_batch_metadata=common_v41_batch_metadata,
-                    full_graph_mode=full_graph_mode,
+                    # Upstream capture prepares metadata with runtime mode
+                    # NONE and for_cudagraph_capture=True. Keep V4.1 indexer
+                    # branches in the graph even for a short dummy sequence.
+                    full_graph_mode=full_graph_mode or for_cudagraph_capture,
                 )
             # Parallel attention and cache-only backends opt in to the PCP
             # context needed to construct their own metadata.
@@ -528,25 +564,26 @@ def build_attn_metadata(
                     pcp_cache_group_idx=i,
                 )
 
-            if for_cudagraph_capture:
-                metadata = attn_metadata_builder.build_for_cudagraph_capture(
-                    common_attn_metadata,
-                    **attn_metadata_extra_kwargs,
-                )
-            else:
-                if isinstance(attn_metadata_builder, GDNAttentionMetadataBuilder):
-                    attn_metadata_extra_kwargs["num_actual_reqs"] = num_actual_reqs
-                metadata = attn_metadata_builder.build(
-                    common_prefix_len=0,
-                    common_attn_metadata=common_attn_metadata,
-                    **attn_metadata_extra_kwargs,
-                )
-            if is_dsa_builder:
-                # Preserve sharing even if a builder replaces one of the
-                # dictionaries while constructing its metadata.
-                common_ratio_to_sas_metadata = attn_metadata_builder.common_ratio_to_sas_metadata  # type: ignore[assignment]
-            for layer_name in attn_group.layer_names:
-                attn_metadata[layer_name] = metadata
+            for variant_names, variant_common in metadata_variants:
+                if for_cudagraph_capture:
+                    metadata = attn_metadata_builder.build_for_cudagraph_capture(
+                        variant_common,
+                        **attn_metadata_extra_kwargs,
+                    )
+                else:
+                    if isinstance(attn_metadata_builder, GDNAttentionMetadataBuilder):
+                        attn_metadata_extra_kwargs["num_actual_reqs"] = num_actual_reqs
+                    metadata = attn_metadata_builder.build(
+                        common_prefix_len=0,
+                        common_attn_metadata=variant_common,
+                        **attn_metadata_extra_kwargs,
+                    )
+                if is_dsa_builder:
+                    # Preserve sharing even if a builder replaces one of the
+                    # dictionaries while constructing its metadata.
+                    common_ratio_to_sas_metadata = attn_metadata_builder.common_ratio_to_sas_metadata  # type: ignore[assignment]
+                for layer_name in variant_names:
+                    attn_metadata[layer_name] = metadata
     return attn_metadata
 
 
@@ -835,7 +872,7 @@ def _allocate_kv_cache(
     kv_cache_config: KVCacheConfig,
     shared_layers: dict[str, str],
     device: torch.device,
-) -> dict[str, torch.Tensor | tuple[torch.Tensor, torch.Tensor]]:
+) -> dict[str, Any]:
     """
     Initialize the KV cache buffer with the correct size. The buffer needs to be
     reshaped to the desired shape before being used by the models.
@@ -862,7 +899,7 @@ def _allocate_kv_cache(
         }
     is_dsv4_model = _is_dsv4_model(vllm_config)
     # init kv cache tensors
-    kv_cache_raw_tensors: dict[str, torch.Tensor | tuple[torch.Tensor, torch.Tensor]] = {}
+    kv_cache_raw_tensors: dict[str, Any] = {}
     # prefill disaggregation need the addr of cache tensor be aligned with 2M
     alignment = 2 * 1024 * 1024
     layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config)
@@ -941,10 +978,21 @@ def _allocate_kv_cache(
             )
             hybrid_backing = _align_memory(hybrid_backing, alignment)[:tensor_size]
 
+    layerwise_reuse = get_layerwise_reuse_config(vllm_config.kv_transfer_config) is not None
+    layerwise_aliases: dict[str, str] = {}
     for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
         shared_names = get_kv_cache_tensor_layers(kv_cache_tensor)
         if not shared_names:
             continue
+
+        # Only the layerwise planner's zero-stride descriptors share a
+        # physical slot. Ordinary packed descriptors still own private layers.
+        if layerwise_reuse and kv_cache_tensor.layer_stride == 0:
+            owner = shared_names[0]
+            if any(layer_kv_cache_spec[name] != layer_kv_cache_spec[owner] for name in shared_names[1:]):
+                raise ValueError("Layerwise V2 KV aliases require identical cache specs.")
+            layerwise_aliases.update({name: owner for name in shared_names[1:]})
+            shared_names = shared_names[:1]
 
         if dsv4_backing is not None:
             continue
@@ -1086,7 +1134,23 @@ def _allocate_kv_cache(
         # (correct even when the tensor's group is not the largest group).
         kv_cache_tensor_size = kv_cache_config.num_blocks * example_spec.page_size_bytes
         # TODO:Subsequently, extend the `AttentionSpec` class in the vLLM community and remove these branches.
-        if enable_sfa(vllm_config) and kv_cache_spec_uses_packed_sfa_main_cache(example_spec):
+        if getattr(example_spec, "store_on_host", False):
+            for layer_name in shared_names:
+                layer_spec = layer_kv_cache_spec[layer_name]
+                if not getattr(layer_spec, "store_on_host", False):
+                    raise ValueError("Sparse KV offload cannot share a cache allocation with device-resident layers")
+                k_dim, v_dim = _get_attention_kv_cache_dims(layer_name, layer_spec)
+                k_factor, v_factor = calc_split_factor([k_dim, v_dim])
+                layer_size = kv_cache_config.num_blocks * layer_spec.page_size_bytes
+                kv_cache_raw_tensors[layer_name] = allocate_kv_cache_tensors_for_sparse_kv_offload(
+                    int(layer_size // k_factor),
+                    int(layer_size // v_factor),
+                    alignment,
+                    get_tensor_model_parallel_rank(),
+                    get_ascend_config().sparse_kv_offload_config.keep_device_kv_cache,
+                    lambda size, align: _allocate_int8_cache_tensor(size, align, device),
+                )
+        elif enable_sfa(vllm_config) and kv_cache_spec_uses_packed_sfa_main_cache(example_spec):
             k_size = kv_cache_tensor_size
             for layer_name in shared_names:
                 kv_cache_raw_tensors[layer_name] = _allocate_int8_cache_tensor(k_size, alignment, device)
@@ -1101,8 +1165,13 @@ def _allocate_kv_cache(
                     attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
                 layer = attn_layers.get(layer_name)
                 backend = layer.get_attn_backend() if layer is not None else None
-                if (backend is None or not backend.is_sparse()) and not requires_contiguous_pa_kv_cache(
-                    layer, vllm_config, layer_spec
+                # TODO: Remove this DCP guard once DCP KV loading supports
+                # the generic packed K/V cache layout.
+                use_dcp = getattr(getattr(vllm_config, "parallel_config", None), "decode_context_parallel_size", 1) > 1
+                if (
+                    (backend is None or not backend.is_sparse())
+                    and not use_dcp
+                    and not requires_contiguous_pa_kv_cache(layer, vllm_config, layer_spec)
                 ):
                     kv_cache_raw_tensors[layer_name] = _allocate_int8_cache_tensor(layer_size, alignment, device)
                     continue
@@ -1135,6 +1204,9 @@ def _allocate_kv_cache(
                 k_tensor = _allocate_int8_cache_tensor(k_size, alignment, device)
                 v_tensor = _allocate_int8_cache_tensor(v_size, alignment, device)
                 kv_cache_raw_tensors[layer_name] = (k_tensor, v_tensor)
+
+    for layer_name, owner in layerwise_aliases.items():
+        kv_cache_raw_tensors[layer_name] = kv_cache_raw_tensors[owner]
 
     layer_names = {layer_name for group in kv_cache_config.kv_cache_groups for layer_name in group.layer_names}
     assert layer_names == (kv_cache_raw_tensors.keys() | shared_layers.keys()), (
@@ -1228,7 +1300,7 @@ def _reshape_mamba_kv_cache(
 
 def _reshape_kv_cache_v2(
     attn_groups: Sequence[AttentionGroup],
-    kv_cache_raw_tensors: dict[str, torch.Tensor | tuple[torch.Tensor, torch.Tensor]],
+    kv_cache_raw_tensors: dict[str, Any],
     cache_dtype: str,
     kernel_block_sizes: list[int],
     shared_kv_cache_layers: dict[str, str],
@@ -1308,6 +1380,16 @@ def _reshape_kv_cache_v2(
                         )
                     )
                     kv_cache_dtype_list.append(kv_cache_spec.scale_dtype)
+                elif layer_name.endswith(".indexer.k_cache_folded"):
+                    # A5 QSLI's folded indexer is the third view in the shared
+                    # page, after long KV and split indexer K/scale. Offset 0
+                    # aliases long KV and corrupts both consumers on writes.
+                    source_name = layer_name.removesuffix(".indexer.k_cache_folded") + ".long_kv_cache"
+                    index_name = layer_name.removesuffix("_folded")
+                    initial_offset = (
+                        layer_kv_cache_spec[source_name].unpadded_page_size_bytes
+                        + layer_kv_cache_spec[index_name].unpadded_page_size_bytes
+                    )
                 views = _adjust_dsv4_kv_layout(
                     kv_cache_raw_tensors[layer_name],
                     kv_cache_shape_list,
@@ -1360,6 +1442,16 @@ def _reshape_kv_cache_v2(
                 continue
 
             raw_cache = kv_cache_raw_tensors[layer_name]
+            if getattr(kv_cache_spec, "store_on_host", False):
+                kv_caches[layer_name] = reshape_kv_cache_tensors_for_sparse_kv_offload(
+                    raw_cache,
+                    kv_cache_spec,
+                    group.backend,
+                    get_tensor_model_parallel_rank(),
+                    vllm_config,
+                    get_ascend_config().sparse_kv_offload_config,
+                )
+                continue
             if is_hidden_state_cache_spec(kv_cache_spec):
                 # Single tensor for extract_hidden_states (no K/V split).
                 # HiddenStateCacheSpec subclasses MLAAttentionSpec, so this
@@ -1604,7 +1696,7 @@ def build_attn_metadata_wrapper():
 
 @contextmanager
 def build_attn_metadata_factory(
-    positions, pad, is_prefilling, seq_lens_cpu=None, *, attn_state=None, parallel_config=None
+    positions, pad, is_prefilling, seq_lens_cpu=None, *, attn_state=None, parallel_config=None, offload_kwargs=None
 ):
     """Wrap build_attn_metadata with Ascend draft-model context.
 
@@ -1623,6 +1715,8 @@ def build_attn_metadata_factory(
         kwargs["parallel_config"] = parallel_config
         if seq_lens_cpu is not None:
             kwargs["seq_lens_np"] = seq_lens_cpu.numpy()
+        if offload_kwargs is not None:
+            kwargs.update(offload_kwargs)
         return raw(*args, **kwargs)
 
     try:

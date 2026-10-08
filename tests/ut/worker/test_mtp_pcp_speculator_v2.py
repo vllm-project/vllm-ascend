@@ -45,6 +45,7 @@ def _stub_ascend_config(monkeypatch):
         "_ASCEND_CONFIG",
         SimpleNamespace(
             finegrained_tp_config=SimpleNamespace(lmhead_tensor_parallel_size=0),
+            sparse_kv_offload_config=SimpleNamespace(enabled=False),
             ascend_compilation_config=object(),
             eplb_config=object(),
         ),

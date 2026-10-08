@@ -32,8 +32,9 @@ def test_dsa_v41_custom_op_forwards_its_output_buffer(monkeypatch):
 @pytest.mark.parametrize("share_quant", [False, True])
 @pytest.mark.parametrize("num_tokens", [1, 5])
 @pytest.mark.parametrize("cp", [False, True])
+@pytest.mark.parametrize("a5_prefills", [None, 0, 1])
 @torch.inference_mode()
-def test_preprocess_equivalence_and_stream_dependencies(monkeypatch, share_quant, num_tokens, cp):
+def test_preprocess_equivalence_and_stream_dependencies(monkeypatch, share_quant, num_tokens, cp, a5_prefills):
     """Check Q/qr/cache parity and the cross-stream producer/consumer ordering."""
     trace: list[tuple[str, str, str]] = []
     active = "main"
@@ -101,13 +102,18 @@ def test_preprocess_equivalence_and_stream_dependencies(monkeypatch, share_quant
             if slot[0] >= 0:
                 cache[slot[0], slot[1]].copy_(value)
 
+    class A5Backend:
+        @staticmethod
+        def write_attention_cache(cache, slots, values, *, kind):
+            assert kind == "win"
+            scatter(cache, slots, values)
+
     monkeypatch.setattr(torch.npu, "current_stream", lambda: main)
     monkeypatch.setattr(dsa_v41, "dsv4_dsa_overlap_stream", lambda: aux)
     monkeypatch.setattr(dsa_v41, "npu_stream_switch", switch)
     monkeypatch.setattr(dsa_v41, "scatter_cache_sk", scatter)
     monkeypatch.setattr(dsa_v41_cp, "dsv4_dsa_overlap_stream", lambda: aux)
     monkeypatch.setattr(dsa_v41_cp, "npu_stream_switch", switch)
-    monkeypatch.setattr(dsa_v41_cp, "scatter_cache_sk", scatter)
     monkeypatch.setattr(torch.ops._C_ascend, "inplace_partial_rotary_mul", rope, raising=False)
     torch.manual_seed(7)
     cache = torch.zeros(2, num_tokens, 4)
@@ -127,6 +133,7 @@ def test_preprocess_equivalence_and_stream_dependencies(monkeypatch, share_quant
         n_heads=2,
         head_dim=4,
         nope_head_dim=2,
+        packed_cache_ops=A5Backend() if a5_prefills is not None else None,
         dsa_attn=SimpleNamespace(
             swa_cache_layer=SimpleNamespace(kv_cache=[cache]),
             dsa_attn=SimpleNamespace(impl=wrappers),
@@ -135,7 +142,13 @@ def test_preprocess_equivalence_and_stream_dependencies(monkeypatch, share_quant
     slots = torch.tensor([[1, i] for i in range(num_tokens)])
     if num_tokens > 1:
         slots[-1] = -1
-    metadata = SimpleNamespace(slot_mapping=slots)
+    metadata = SimpleNamespace(
+        slot_mapping=slots,
+        flat_slot_mapping=slots,
+        num_prefills=a5_prefills or 0,
+        num_decodes=int(a5_prefills != 1),
+        num_reqs=1,
+    )
     hidden = torch.randn(num_tokens, 8)
     cos, sin = torch.randn(num_tokens, 1, 1, 2), torch.randn(num_tokens, 1, 1, 2)
     start = num_tokens // 2 if cp else 0
@@ -170,7 +183,8 @@ def test_preprocess_equivalence_and_stream_dependencies(monkeypatch, share_quant
     torch.testing.assert_close(cache, expected_cache)
     assert qr.is_floating_point()
     assert (("aux", "kv", "quantize") in trace) == (cp or not share_quant)
-    assert trace.count(("aux", "cache", "scatter")) == 1
+    cache_stream = "main" if a5_prefills else "aux"
+    assert trace.count((cache_stream, "cache", "scatter")) == 1
     kv_mm = trace.index(("aux", "kv", "matmul"))
     kv_done = trace[kv_mm + 1]
     assert kv_done[:2] == ("aux", "record")
@@ -178,12 +192,16 @@ def test_preprocess_equivalence_and_stream_dependencies(monkeypatch, share_quant
     part3 = trace[trace.index(("main", "wait", kv_done[2])) - 1]
     assert part3[:2] == ("main", "record")
     assert trace.index(("aux", "wait", part3[2])) < trace.index(("aux", "kv", "norm"))
-    assert trace.index(("aux", "cache", "scatter")) < trace.index(("main", "join", "aux"))
+    if a5_prefills:
+        assert trace.index(("main", "join", "aux")) < trace.index(("main", "cache", "scatter"))
+        assert trace.index(("main", "qb", "matmul")) < trace.index(("main", "cache", "scatter"))
+    else:
+        assert trace.index(("aux", "cache", "scatter")) < trace.index(("main", "join", "aux"))
     assert trace.index(("main", "join", "aux")) < trace.index(("main", "rope", "apply"))
 
 
 @pytest.mark.parametrize("enabled", [False, True])
-def test_forward_uses_multistream_preprocess(monkeypatch, enabled):
+def test_forward_honors_multistream_preprocess_setting(monkeypatch, enabled):
     impl = object.__new__(dsa_v41.AscendDSAV41Impl)
     impl.role = SimpleNamespace(is_kv_source=False)
     hidden = torch.zeros(1, 8)
@@ -192,7 +210,10 @@ def test_forward_uses_multistream_preprocess(monkeypatch, enabled):
         positions=torch.zeros(1), swa=SimpleNamespace(num_actual_tokens=1), rope=lambda *args: (None, None)
     )
     impl._get_layer_metadata = Mock(return_value=metadata)
+    impl.preprocess = Mock(return_value=(q, qr))
     impl.multistream_preprocess = Mock(return_value=(q, qr))
+    impl._prepare_indexer_inputs = Mock(return_value=None)
+    impl._quantize_indexer_query = Mock()
     impl._select_sparse_indices = Mock(return_value=None)
     impl._forward_attention = Mock(return_value=q)
     v1_impl = SimpleNamespace(
@@ -200,6 +221,7 @@ def test_forward_uses_multistream_preprocess(monkeypatch, enabled):
         _forward_o_proj=lambda q, output: output.zero_(),
     )
     attn = SimpleNamespace(
+        packed_cache_ops=None,
         rotary_emb=SimpleNamespace(layername="layer"),
         dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=v1_impl)),
         nope_head_dim=2,
@@ -210,7 +232,8 @@ def test_forward_uses_multistream_preprocess(monkeypatch, enabled):
     monkeypatch.setattr(torch.ops._C_ascend, "inplace_partial_rotary_mul", lambda *args, **kwargs: None, raising=False)
     output = torch.full_like(hidden, 1)
     result = impl.forward(attn, None, hidden, output)
-    impl.multistream_preprocess.assert_called_once()
+    selected = impl.multistream_preprocess if enabled else impl.preprocess
+    selected.assert_called_once()
     assert result is output
     assert torch.count_nonzero(output) == 0
 
@@ -238,8 +261,10 @@ def test_cp_multistream_forward_preserves_full_cache_updates(monkeypatch, local_
     impl._global_layer_metadata = Mock(return_value=global_metadata)
     q, qr = torch.zeros(local_tokens, 2, 4), torch.zeros(local_tokens, 6)
     impl.multistream_preprocess = Mock(return_value=(q, qr))
+    impl._prepare_indexer_inputs = Mock(return_value=None)
+    impl._quantize_indexer_query = Mock()
     impl._update_caches = Mock()
-    impl._write_compressed_source = Mock()
+    impl._write_forward_compressed_source = Mock()
     impl._select_sparse_indices = Mock(return_value=None)
     impl._forward_attention = Mock(return_value=q)
     impl._project_output = Mock(side_effect=lambda *args, projected: projected.zero_())
@@ -265,14 +290,16 @@ def test_cp_multistream_forward_preserves_full_cache_updates(monkeypatch, local_
         assert args[2] is local_cos and args[3] is local_sin
         assert args[4] is metadata.swa
         assert not kwargs
-        # The mocked preprocessor owns compressed-cache writes.
-        impl._write_compressed_source.assert_not_called()
-        assert impl._select_sparse_indices.call_args.args[-1] is metadata
+        if is_source:
+            impl._write_forward_compressed_source.assert_called_once()
+        else:
+            impl._write_forward_compressed_source.assert_not_called()
+        assert impl._select_sparse_indices.call_args.args[-2] is metadata
     else:
         impl.multistream_preprocess.assert_not_called()
         impl._update_caches.assert_called_once()
         args = impl._update_caches.call_args.args
         torch.testing.assert_close(args[1], hidden[:4])
         assert args[2] is global_metadata
-        impl._write_compressed_source.assert_not_called()
+        impl._write_forward_compressed_source.assert_not_called()
         impl._forward_attention.assert_not_called()

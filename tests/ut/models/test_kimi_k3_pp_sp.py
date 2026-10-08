@@ -562,6 +562,7 @@ def test_host_positions_after_rejection_or_chunk(
             self.num_computed_tokens_cpu.copy_(self.req_states.num_computed_tokens.gpu)
 
     namespace = {"BaseStateRunner": BaseStateRunner, "MambaHybridModelState": type("MambaHybridModelState", (), {})}
+    load_definitions("vllm_ascend/utils.py", {"is_deepseek_v41"}, namespace)
     load_definitions(
         "vllm_ascend/worker/v2/model_runner.py",
         {"NPUModelRunner"},
@@ -576,7 +577,9 @@ def test_host_positions_after_rejection_or_chunk(
     runner.is_last_pp_rank = not use_pp
     runner.model_state = object()
     runner.num_speculative_steps = num_speculative_steps
-    runner.model_config = SimpleNamespace(architecture=architecture)
+    runner.model_config = SimpleNamespace(
+        architecture=architecture, hf_config=SimpleNamespace(architectures=[architecture])
+    )
     initialize_pp_cpu_count_sync(runner)
     runner.req_states = SimpleNamespace(
         req_id_to_index={"r": 0},

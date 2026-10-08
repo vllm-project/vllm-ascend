@@ -5,13 +5,10 @@ npu_per_node: 8
 dp_load_balancing: internal
 env_common: &env_common
   VLLM_USE_MODELSCOPE: true
-  OMP_PROC_BIND: false
-  OMP_NUM_THREADS: 1
   HCCL_BUFFSIZE: 1024
+  PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
   SERVER_PORT: 8080
   NUMEXPR_MAX_THREADS: 128
-  TASK_QUEUE_ENABLE: 1
-  PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
 
 deployment:
   -
@@ -33,6 +30,7 @@ deployment:
         --max-num-batched-tokens 2048
         --trust-remote-code
         --gpu-memory-utilization 0.9
+        --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true, "enable_static_kernel":true}}'
   -
     envs:
       <<: *env_common
@@ -52,6 +50,7 @@ deployment:
         --enable-expert-parallel
         --trust-remote-code
         --gpu-memory-utilization 0.9
+        --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true, "enable_static_kernel":true}}'
 benchmarks:
   perf:
     case_type: performance
@@ -72,4 +71,4 @@ benchmarks:
     max_out_len: 7680
     batch_size: 256
     baseline: 96
-    threshold: 10
+    threshold: 4
