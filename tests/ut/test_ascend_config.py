@@ -1759,18 +1759,31 @@ class TestTopLevelSwitchTypeValidation(TestBase):
     @patch("vllm_ascend.utils.model_uses_sfa_sparse", return_value=True)
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_private_sparse_layer_state_is_derived_on_factory_path(self, mock_fix, mock_sparse):
-        vc = VllmConfig()
-        vc.quant_config = SimpleNamespace(
-            quant_description={"model.layers.3.self_attn.indexer.quant_type": "INT8_DYNAMIC"}
-        )
-        # enable_sparse_li_c8 is derived from indexer_kv_dtype (see
-        # init_ascend_config): indexer_kv_dtype "int8" makes it active.
-        vc.attention_config.indexer_kv_dtype = "int8"
+        for quant_type in ("INT8_DYNAMIC", "QK_INT8_DYNAMIC"):
+            for indexer_dtype in ("int8", "bf16", "mxfp4"):
+                with self.subTest(quant_type=quant_type, indexer_dtype=indexer_dtype):
+                    clear_ascend_config()
+                    vc = VllmConfig()
+                    vc.quant_config = SimpleNamespace(
+                        quant_description={
+                            "indexer_quant_type": "INT8_DYNAMIC",
+                            "model.layers.3.self_attn.indexer.quant_type": quant_type,
+                            "model.layers.4.self_attn.indexer.quant_type": "BF16",
+                        }
+                    )
+                    vc.attention_config.indexer_kv_dtype = indexer_dtype
+                    vc.cache_config.cache_dtype = "auto"
 
-        config = init_ascend_config(vc)
+                    config = init_ascend_config(vc)
 
-        self.assertTrue(config.is_sparse_li_c8_layer("model.layers.3.self_attn.indexer.k_cache"))
-        self.assertFalse(config.is_sparse_li_c8_layer("model.layers.4.self_attn.indexer.k_cache"))
+                    self.assertEqual(
+                        config.is_sparse_li_c8_layer("model.layers.3.self_attn.indexer.k_cache"),
+                        indexer_dtype == "int8",
+                    )
+                    self.assertFalse(config.is_sparse_li_c8_layer("model.layers.4.self_attn.indexer.k_cache"))
+                    self.assertFalse(config.is_sparse_li_c8_layer("model.layers.5.self_attn.indexer.k_cache"))
+                    self.assertFalse(config.is_sparse_li_c4_layer("model.layers.3.self_attn.indexer.k_cache"))
+                    self.assertFalse(config.enable_sparse_sfa_c8)
 
     @_clean_up
     @patch("vllm_ascend.utils.model_uses_sfa_sparse", return_value=True)
