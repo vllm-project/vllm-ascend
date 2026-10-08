@@ -121,6 +121,8 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         self.need_shared_expert_args = profile.supports(HardwareCapability.MOE_DISPATCH_SHARED_EXPERT_ARGS)
         self.mc2_comm_alg = get_ascend_config().get_mc2_comm_alg()
 
+        # When enable hierarchical communication or A5 case, param `expert_scales` need to be passed in.
+        self.need_expert_scale = self.mc2_comm_alg == "hierarchy"
 
         # Here we need to calculate the global_bs = max_bs_per_rank * ep_world_size to execute
         # dispatch & combine operators with different input num_tokens per rank.
