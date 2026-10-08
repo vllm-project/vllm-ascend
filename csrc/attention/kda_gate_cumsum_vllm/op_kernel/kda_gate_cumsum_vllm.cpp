@@ -20,10 +20,10 @@ constexpr uint32_t GATE_MTE3_V_EVENT_ID = 5;
 constexpr uint32_t GATE_ROW_ELEMENTS = 256;
 
 template <typename T, bool SAFE_GATE>
-class KdaGateCumsumKernel {
+class KdaGateCumsumVllmKernel {
 public:
     __aicore__ inline void Init(GM_ADDR g, GM_ADDR aLog, GM_ADDR dtBias, GM_ADDR cuSeqlens, GM_ADDR gk,
-                                const KdaGateCumsumTilingData &tiling, TPipe *pipe)
+                                const KdaGateCumsumVllmTilingData &tiling, TPipe *pipe)
     {
         g_.SetGlobalBuffer(reinterpret_cast<__gm__ T *>(g));
         aLog_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(aLog));
@@ -291,28 +291,28 @@ private:
 };
 
 template <typename T, bool SAFE_GATE>
-__aicore__ inline void RunKdaGateCumsum(GM_ADDR g, GM_ADDR aLog, GM_ADDR dtBias, GM_ADDR cuSeqlens, GM_ADDR gk,
-                                        const KdaGateCumsumTilingData &tilingData, TPipe *pipe)
+__aicore__ inline void RunKdaGateCumsumVllm(GM_ADDR g, GM_ADDR aLog, GM_ADDR dtBias, GM_ADDR cuSeqlens, GM_ADDR gk,
+                                        const KdaGateCumsumVllmTilingData &tilingData, TPipe *pipe)
 {
-    KdaGateCumsumKernel<T, SAFE_GATE> op;
+    KdaGateCumsumVllmKernel<T, SAFE_GATE> op;
     op.Init(g, aLog, dtBias, cuSeqlens, gk, tilingData, pipe);
     op.Process();
 }
 
 template <typename T>
-__aicore__ inline void DispatchKdaGateCumsumBySafeGate(GM_ADDR g, GM_ADDR aLog, GM_ADDR dtBias, GM_ADDR cuSeqlens,
-                                                       GM_ADDR gk, const KdaGateCumsumTilingData &tilingData,
+__aicore__ inline void DispatchKdaGateCumsumVllmBySafeGate(GM_ADDR g, GM_ADDR aLog, GM_ADDR dtBias, GM_ADDR cuSeqlens,
+                                                       GM_ADDR gk, const KdaGateCumsumVllmTilingData &tilingData,
                                                        TPipe *pipe)
 {
     if (tilingData.safeGate != 0) {
-        RunKdaGateCumsum<T, true>(g, aLog, dtBias, cuSeqlens, gk, tilingData, pipe);
+        RunKdaGateCumsumVllm<T, true>(g, aLog, dtBias, cuSeqlens, gk, tilingData, pipe);
     } else {
-        RunKdaGateCumsum<T, false>(g, aLog, dtBias, cuSeqlens, gk, tilingData, pipe);
+        RunKdaGateCumsumVllm<T, false>(g, aLog, dtBias, cuSeqlens, gk, tilingData, pipe);
     }
 }
 } // namespace
 
-extern "C" __global__ __aicore__ void kda_gate_cumsum(GM_ADDR g, GM_ADDR aLog, GM_ADDR dtBias,
+extern "C" __global__ __aicore__ void kda_gate_cumsum_vllm(GM_ADDR g, GM_ADDR aLog, GM_ADDR dtBias,
                                                        GM_ADDR cuSeqlens, GM_ADDR gk, GM_ADDR workspace,
                                                        GM_ADDR tiling)
 {
@@ -321,10 +321,10 @@ extern "C" __global__ __aicore__ void kda_gate_cumsum(GM_ADDR g, GM_ADDR aLog, G
     GET_TILING_DATA(tilingData, tiling);
     TPipe pipe;
     if (tilingData.dataType == 2) {
-        DispatchKdaGateCumsumBySafeGate<float>(g, aLog, dtBias, cuSeqlens, gk, tilingData, &pipe);
+        DispatchKdaGateCumsumVllmBySafeGate<float>(g, aLog, dtBias, cuSeqlens, gk, tilingData, &pipe);
     } else if (tilingData.dataType == 1) {
-        DispatchKdaGateCumsumBySafeGate<bfloat16_t>(g, aLog, dtBias, cuSeqlens, gk, tilingData, &pipe);
+        DispatchKdaGateCumsumVllmBySafeGate<bfloat16_t>(g, aLog, dtBias, cuSeqlens, gk, tilingData, &pipe);
     } else {
-        DispatchKdaGateCumsumBySafeGate<half>(g, aLog, dtBias, cuSeqlens, gk, tilingData, &pipe);
+        DispatchKdaGateCumsumVllmBySafeGate<half>(g, aLog, dtBias, cuSeqlens, gk, tilingData, &pipe);
     }
 }

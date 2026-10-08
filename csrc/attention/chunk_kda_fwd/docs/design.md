@@ -24,7 +24,7 @@ A2/A3 和单 chunk 场景仍使用单次物理 L0。阶段选择仅使用私有 
 
 ## 阶段职责
 
-### KdaGateCumsum
+### KdaGateCumsumVllm
 
 将 raw/已激活 gate 转为 FP32 chunk-local log2 累计值：
 

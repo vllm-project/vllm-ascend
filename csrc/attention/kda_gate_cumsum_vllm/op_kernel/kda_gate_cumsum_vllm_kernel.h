@@ -15,7 +15,7 @@
 #endif
 #endif
 
-namespace KdaGateCumsum {
+namespace KdaGateCumsumVllm {
 
 using namespace AscendC;
 
@@ -146,7 +146,7 @@ static __simd_vf__ inline void AccumulateSafeGateChunk128Regbase(
 #endif
 
 template <typename T, bool USE_GATE_IN_KERNEL, bool SAFE_GATE>
-class KdaGateCumsumKernel {
+class KdaGateCumsumVllmKernel {
 public:
     template <typename TilingData>
     __aicore__ inline void Init(GM_ADDR g, GM_ADDR aLog, GM_ADDR dtBias, GM_ADDR cuSeqlens, GM_ADDR gk,
@@ -721,26 +721,26 @@ private:
 };
 
 template <typename T, bool USE_GATE_IN_KERNEL, bool SAFE_GATE, typename TilingData>
-__aicore__ inline void RunKdaGateCumsum(GM_ADDR g, GM_ADDR aLog, GM_ADDR dtBias, GM_ADDR cuSeqlens, GM_ADDR gk,
+__aicore__ inline void RunKdaGateCumsumVllm(GM_ADDR g, GM_ADDR aLog, GM_ADDR dtBias, GM_ADDR cuSeqlens, GM_ADDR gk,
                                         const TilingData &tilingData, TPipe *pipe)
 {
-    KdaGateCumsumKernel<T, USE_GATE_IN_KERNEL, SAFE_GATE> op;
+    KdaGateCumsumVllmKernel<T, USE_GATE_IN_KERNEL, SAFE_GATE> op;
     op.Init(g, aLog, dtBias, cuSeqlens, gk, tilingData, pipe);
     op.Process();
 }
 
 template <typename T, typename TilingData>
-__aicore__ inline void DispatchKdaGateCumsum(GM_ADDR g, GM_ADDR aLog, GM_ADDR dtBias, GM_ADDR cuSeqlens,
+__aicore__ inline void DispatchKdaGateCumsumVllm(GM_ADDR g, GM_ADDR aLog, GM_ADDR dtBias, GM_ADDR cuSeqlens,
                                              GM_ADDR gk, const TilingData &tilingData, TPipe *pipe)
 {
     if (tilingData.useGateInKernel != 0) {
         if (tilingData.safeGate != 0) {
-            RunKdaGateCumsum<T, true, true>(g, aLog, dtBias, cuSeqlens, gk, tilingData, pipe);
+            RunKdaGateCumsumVllm<T, true, true>(g, aLog, dtBias, cuSeqlens, gk, tilingData, pipe);
         } else {
-            RunKdaGateCumsum<T, true, false>(g, aLog, dtBias, cuSeqlens, gk, tilingData, pipe);
+            RunKdaGateCumsumVllm<T, true, false>(g, aLog, dtBias, cuSeqlens, gk, tilingData, pipe);
         }
     } else {
-        RunKdaGateCumsum<T, false, false>(g, aLog, dtBias, cuSeqlens, gk, tilingData, pipe);
+        RunKdaGateCumsumVllm<T, false, false>(g, aLog, dtBias, cuSeqlens, gk, tilingData, pipe);
     }
 }
-} // namespace KdaGateCumsum
+} // namespace KdaGateCumsumVllm

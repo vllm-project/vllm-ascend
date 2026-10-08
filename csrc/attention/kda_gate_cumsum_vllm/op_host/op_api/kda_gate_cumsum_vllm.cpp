@@ -5,7 +5,7 @@
  * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND.
  */
 
-#include "kda_gate_cumsum.h"
+#include "kda_gate_cumsum_vllm.h"
 
 #include "opdev/make_op_executor.h"
 #include "opdev/op_dfx.h"
@@ -14,9 +14,9 @@
 using namespace op;
 
 namespace l0op {
-OP_TYPE_REGISTER(KdaGateCumsum);
+OP_TYPE_REGISTER(KdaGateCumsumVllm);
 
-const std::array<const aclTensor *, 1> KdaGateCumsum(
+const std::array<const aclTensor *, 1> KdaGateCumsumVllm(
     const aclTensor *g,
     const aclTensor *aLogOptional,
     const aclTensor *dtBiasOptional,
@@ -29,7 +29,7 @@ const std::array<const aclTensor *, 1> KdaGateCumsum(
     const aclTensor *gkOut,
     aclOpExecutor *executor)
 {
-    L0_DFX(KdaGateCumsum, g, aLogOptional, dtBiasOptional, cuSeqlensOptional, chunkSize, useGateInKernel,
+    L0_DFX(KdaGateCumsumVllm, g, aLogOptional, dtBiasOptional, cuSeqlensOptional, chunkSize, useGateInKernel,
            safeGate, lowerBound, layout, gkOut);
 
     const aclTensor *actualCuSeqlens = nullptr;
@@ -41,12 +41,12 @@ const std::array<const aclTensor *, 1> KdaGateCumsum(
     }
 
     auto ret = ADD_TO_LAUNCHER_LIST_AICORE(
-        KdaGateCumsum,
+        KdaGateCumsumVllm,
         OP_INPUT(g, aLogOptional, dtBiasOptional, actualCuSeqlens),
         OP_OUTPUT(gkOut),
         OP_ATTR(chunkSize, useGateInKernel, safeGate, static_cast<float>(lowerBound), layout));
     if (ret != ACLNN_SUCCESS) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "ADD_TO_LAUNCHER_LIST_AICORE KdaGateCumsum failed.");
+        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "ADD_TO_LAUNCHER_LIST_AICORE KdaGateCumsumVllm failed.");
         return {nullptr};
     }
     return {gkOut};

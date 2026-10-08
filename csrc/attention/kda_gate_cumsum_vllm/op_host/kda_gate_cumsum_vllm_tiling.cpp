@@ -5,7 +5,7 @@
  * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND.
  */
 
-#include "kda_gate_cumsum_tiling.h"
+#include "kda_gate_cumsum_vllm_tiling.h"
 #include <algorithm>
 #include <cstring>
 #include <register/op_impl_registry.h>
@@ -32,9 +32,9 @@ enum class KdaGateLayout : int64_t {
 };
 } // namespace
 
-ge::graphStatus Tiling4KdaGateCumsum(gert::TilingContext *context)
+ge::graphStatus Tiling4KdaGateCumsumVllm(gert::TilingContext *context)
 {
-    KdaGateCumsumTilingData tiling;
+    KdaGateCumsumVllmTilingData tiling;
     auto gShape = context->GetOptionalInputShape(INPUT_G_IDX)->GetStorageShape();
     auto gDesc = context->GetInputDesc(INPUT_G_IDX);
     if (gDesc == nullptr || (gShape.GetDimNum() != 3 && gShape.GetDimNum() != 4)) {
@@ -123,14 +123,14 @@ ge::graphStatus Tiling4KdaGateCumsum(gert::TilingContext *context)
     return ge::GRAPH_SUCCESS;
 }
 
-ge::graphStatus TilingPrepare4KdaGateCumsum(gert::TilingParseContext *context)
+ge::graphStatus TilingPrepare4KdaGateCumsumVllm(gert::TilingParseContext *context)
 {
     (void)context;
     return ge::GRAPH_SUCCESS;
 }
 
-IMPL_OP_OPTILING(KdaGateCumsum)
-    .Tiling(Tiling4KdaGateCumsum)
-    .TilingParse<KdaGateCumsumCompileInfo>(TilingPrepare4KdaGateCumsum);
+IMPL_OP_OPTILING(KdaGateCumsumVllm)
+    .Tiling(Tiling4KdaGateCumsumVllm)
+    .TilingParse<KdaGateCumsumVllmCompileInfo>(TilingPrepare4KdaGateCumsumVllm);
 
 } // namespace optiling

@@ -8,9 +8,9 @@
 #include "register/op_def_registry.h"
 
 namespace ops {
-class KdaGateCumsum : public OpDef {
+class KdaGateCumsumVllm : public OpDef {
 public:
-    explicit KdaGateCumsum(const char *name) : OpDef(name)
+    explicit KdaGateCumsumVllm(const char *name) : OpDef(name)
     {
         const std::initializer_list<ge::DataType> gateTypes = {
             ge::DT_FLOAT, ge::DT_FLOAT16, ge::DT_BF16
@@ -56,5 +56,5 @@ public:
     }
 };
 
-OP_ADD(KdaGateCumsum);
+OP_ADD(KdaGateCumsumVllm);
 } // namespace ops

@@ -51,7 +51,7 @@
 #include "attention/fused_quant_lightning_indexer_manage/fused_quant_lightning_indexer_manage_torch_adpt.h"
 #include "moe/causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
 #include "attention/attn_res_fwd/attn_res_fwd_torch_adpt.h"
-#include "attention/kda_gate_cumsum/kda_gate_cumsum_torch_adpt.h"
+#include "attention/kda_gate_cumsum_vllm/kda_gate_cumsum_vllm_torch_adpt.h"
 #include "attention/kda_layout_swap12/kda_layout_swap12_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
 #include "attention/k2q_csr/k2q_csr_torch_adpt.h"
@@ -2856,9 +2856,9 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("chunk_fwd_o_vllm", torch::kPrivateUse1, &vllm_ascend::chunk_fwd_o_vllm);
 
     ops.def(
-        "kda_gate_cumsum(Tensor g, int chunk_size, *, Tensor? A_log=None, Tensor? dt_bias=None, int[]? cu_seqlens=None, bool? use_gate_in_kernel=False, bool? safe_gate=False, float? lower_bound=-5.0, str layout=\"BSND\") -> Tensor"
+        "kda_gate_cumsum_vllm(Tensor g, int chunk_size, *, Tensor? A_log=None, Tensor? dt_bias=None, int[]? cu_seqlens=None, bool? use_gate_in_kernel=False, bool? safe_gate=False, float? lower_bound=-5.0, str layout=\"BSND\") -> Tensor"
     );
-    ops.impl("kda_gate_cumsum", torch::kPrivateUse1, &vllm_ascend::kda_gate_cumsum);
+    ops.impl("kda_gate_cumsum_vllm", torch::kPrivateUse1, &vllm_ascend::kda_gate_cumsum_vllm);
 
     ops.def(
         "kda_layout_swap12(Tensor x, *, Tensor? dependency=None) -> Tensor"
@@ -3617,9 +3617,9 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("chunk_fwd_o_vllm", torch::kPrivateUse1, &vllm_ascend::chunk_fwd_o_vllm);
 
     ops.def(
-        "kda_gate_cumsum(Tensor g, int chunk_size, *, Tensor? A_log=None, Tensor? dt_bias=None, int[]? cu_seqlens=None, bool? use_gate_in_kernel=False, bool? safe_gate=False, float? lower_bound=-5.0, str layout=\"BSND\") -> Tensor"
+        "kda_gate_cumsum_vllm(Tensor g, int chunk_size, *, Tensor? A_log=None, Tensor? dt_bias=None, int[]? cu_seqlens=None, bool? use_gate_in_kernel=False, bool? safe_gate=False, float? lower_bound=-5.0, str layout=\"BSND\") -> Tensor"
     );
-    ops.impl("kda_gate_cumsum", torch::kPrivateUse1, &vllm_ascend::kda_gate_cumsum);
+    ops.impl("kda_gate_cumsum_vllm", torch::kPrivateUse1, &vllm_ascend::kda_gate_cumsum_vllm);
 
     ops.def(
         "kda_layout_swap12(Tensor x, *, Tensor? dependency=None) -> Tensor"

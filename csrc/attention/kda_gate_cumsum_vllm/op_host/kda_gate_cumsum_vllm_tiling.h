@@ -12,7 +12,7 @@
 
 namespace optiling {
 
-BEGIN_TILING_DATA_DEF(KdaGateCumsumTilingData)
+BEGIN_TILING_DATA_DEF(KdaGateCumsumVllmTilingData)
 TILING_DATA_FIELD_DEF(int64_t, batch);
 TILING_DATA_FIELD_DEF(int64_t, t);
 TILING_DATA_FIELD_DEF(int64_t, hv);
@@ -31,7 +31,7 @@ TILING_DATA_FIELD_DEF(float, lowerBound);
 TILING_DATA_FIELD_DEF(int64_t, usedCoreNum);
 END_TILING_DATA_DEF;
 
-REGISTER_TILING_DATA_CLASS(KdaGateCumsum, KdaGateCumsumTilingData)
+REGISTER_TILING_DATA_CLASS(KdaGateCumsumVllm, KdaGateCumsumVllmTilingData)
 
-struct KdaGateCumsumCompileInfo {};
+struct KdaGateCumsumVllmCompileInfo {};
 } // namespace optiling

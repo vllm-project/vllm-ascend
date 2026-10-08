@@ -5,13 +5,17 @@
  * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND.
  */
 
-#pragma once
+#ifndef OP_API_INC_ACLNN_KDA_GATE_CUMSUM_H
+#define OP_API_INC_ACLNN_KDA_GATE_CUMSUM_H
 
 #include "aclnn/aclnn_base.h"
-#include <array>
+#include "aclnn_util.h"
 
-namespace l0op {
-const std::array<const aclTensor *, 1> KdaGateCumsum(
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+aclnnStatus aclnnKdaGateCumsumVllmGetWorkspaceSize(
     const aclTensor *g,
     const aclTensor *aLogOptional,
     const aclTensor *dtBiasOptional,
@@ -22,5 +26,13 @@ const std::array<const aclTensor *, 1> KdaGateCumsum(
     double lowerBound,
     const char *layout,
     const aclTensor *gkOut,
-    aclOpExecutor *executor);
-} // namespace l0op
+    uint64_t *workspaceSize,
+    aclOpExecutor **executor);
+
+aclnnStatus aclnnKdaGateCumsumVllm(void *workspace, uint64_t workspaceSize, aclOpExecutor *executor, aclrtStream stream);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif
