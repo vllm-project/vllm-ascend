@@ -1616,10 +1616,9 @@ def _validate_engram_config(vllm_config: VllmConfig) -> None:
         parallel_config.enable_elastic_ep
         or parallel_config.tensor_parallel_size not in (1, 2, 4, 8)
         or parallel_config.pipeline_parallel_size != 1
-        or parallel_config.prefill_context_parallel_size != 1
         or parallel_config.decode_context_parallel_size != 1
     ):
-        raise ValueError("Ascend Engram requires TP=1/2/4/8 with PP=PCP=DCP=1.")
+        raise ValueError("Ascend Engram requires TP=1/2/4/8 with PP=DCP=1.")
     load_format = vllm_config.load_config.load_format
     if load_format not in ("auto", "safetensors", "dummy"):
         raise ValueError("Ascend Engram requires indexed safetensors (auto/safetensors), or dummy weights.")

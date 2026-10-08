@@ -43,7 +43,7 @@ def test_registered_wrapper_exposes_v2_engram_hooks(registered_wrapper, method):
     assert callable(getattr(registered_wrapper, method, None))
 
 
-@pytest.mark.parametrize("keyword", ["cg_mode", "force_dummy"])
+@pytest.mark.parametrize("keyword", ["cg_mode", "force_dummy", "token_indices"])
 def test_registered_wrapper_accepts_v2_preparation_keywords(registered_wrapper, keyword):
     assert keyword in inspect.signature(registered_wrapper.prepare_engram_inputs).parameters
 
@@ -59,17 +59,35 @@ def test_registry_to_runner_selects_engram_state(registered_wrapper):
 
 @pytest.mark.parametrize("mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL])
 @pytest.mark.parametrize("dummy", [False, True])
-def test_wrapper_forwards_history_and_runtime_mode(registered_wrapper, mode, dummy):
+@pytest.mark.parametrize("pcp", [False, True], ids=["replicated", "pcp"])
+def test_wrapper_forwards_history_and_runtime_mode(registered_wrapper, mode, dummy, pcp):
     ids = torch.tensor([12, 13], dtype=torch.int32)
     positions = torch.tensor([10, 11], dtype=torch.int64)
     lookback = torch.tensor([[11, 10, 9]], dtype=torch.int32)
     query_start_loc = torch.tensor([0, 2], dtype=torch.int32)
+    token_indices = torch.tensor([1], dtype=torch.int64) if pcp else None
     result = registered_wrapper.prepare_engram_inputs(
-        ids, positions, 4, lookback, query_start_loc, force_dummy=dummy, cg_mode=mode
+        ids,
+        positions,
+        4,
+        lookback,
+        query_start_loc,
+        token_indices=token_indices,
+        force_dummy=dummy,
+        cg_mode=mode,
     )
     assert result == {"engram_lookups": "rows"}
     registered_wrapper.language_model.prepare_engram_inputs.assert_called_once_with(
-        ids, positions, 4, lookback, query_start_loc, None, None, force_dummy=dummy, cg_mode=mode
+        ids,
+        positions,
+        4,
+        lookback,
+        query_start_loc,
+        None,
+        None,
+        token_indices=token_indices,
+        force_dummy=dummy,
+        cg_mode=mode,
     )
 
 
