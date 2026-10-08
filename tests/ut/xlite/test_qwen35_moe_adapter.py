@@ -18,7 +18,6 @@ import types
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-import pytest
 import torch
 
 try:
@@ -59,8 +58,8 @@ except Exception:  # pragma: no cover - CI CPU environments have no xlite wheel
 
 import vllm_ascend.xlite.xlite as xlite_mod_under_test  # noqa: E402
 from vllm_ascend.xlite.xlite import (  # noqa: E402
-    _architecture_strategy_map,
     Qwen3_5MoeXliteModel,
+    _architecture_strategy_map,
 )
 
 
