@@ -4,22 +4,20 @@
 """One-card NPU check for Mooncake encoder-output fallback memory.
 
 The two-card EPD test owns real Mooncake integration coverage. Keeping this
-test focused on the NPU bounce copy avoids constructing the process-wide
-native TransferEngine, whose library teardown is unsafe in the pytest process.
+test focused on the NPU bounce copy avoids loading the native TransferEngine
+extension in the pytest process, whose library teardown is unsafe there.
 """
 
 from __future__ import annotations
+
+import multiprocessing
+import sys
+from types import ModuleType
 
 import pytest
 import torch
 
 pytest.importorskip("torch_npu")
-
-from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.memory import (  # noqa: E402
-    ASCEND_DIRECT_MEMORY_ALIGNMENT,
-    AscendProducerAllocator,
-    AscendProducerMemoryPool,
-)
 
 pytestmark = pytest.mark.skipif(
     not torch.npu.is_available(),
@@ -42,18 +40,31 @@ class _RegistrationStub:
         return True
 
 
-def _npu_device() -> tuple[torch.device, int]:
+def _npu_device() -> torch.device:
     device_index = torch.npu.current_device()
     torch.npu.set_device(device_index)
-    return torch.device(f"npu:{device_index}"), device_index
+    return torch.device(f"npu:{device_index}")
 
 
 def _byte_pattern(nbytes: int, device: torch.device) -> torch.Tensor:
     return torch.arange(nbytes, dtype=torch.int32, device=device).remainder_(251).to(torch.uint8)
 
 
-def test_npu_bounce_copy_is_byte_tight_and_visible():
-    device, _ = _npu_device()
+def _run_npu_bounce_copy() -> None:
+    mooncake = ModuleType("mooncake")
+    mooncake.__path__ = []  # type: ignore[attr-defined]
+    mooncake_engine = ModuleType("mooncake.engine")
+    mooncake_engine.TransferEngine = object  # type: ignore[attr-defined]
+    sys.modules["mooncake"] = mooncake
+    sys.modules["mooncake.engine"] = mooncake_engine
+
+    from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.memory import (
+        ASCEND_DIRECT_MEMORY_ALIGNMENT,
+        AscendProducerAllocator,
+        AscendProducerMemoryPool,
+    )
+
+    device = _npu_device()
     allocator = AscendProducerAllocator(
         staging_capacity=4096,
         bounce_capacity=ASCEND_DIRECT_MEMORY_ALIGNMENT,
@@ -88,3 +99,16 @@ def test_npu_bounce_copy_is_byte_tight_and_visible():
             pool.release_bounce(lease)
         assert allocator.close(transfer)  # type: ignore[arg-type]
         assert not transfer.registered
+
+
+def test_npu_bounce_copy_is_byte_tight_and_visible():
+    process = multiprocessing.get_context("spawn").Process(
+        target=_run_npu_bounce_copy,
+    )
+    process.start()
+    process.join(timeout=60)
+    if process.is_alive():
+        process.terminate()
+        process.join()
+        pytest.fail("NPU bounce-copy subprocess timed out")
+    assert process.exitcode == 0
