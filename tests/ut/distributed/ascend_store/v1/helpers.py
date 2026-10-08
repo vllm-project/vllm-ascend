@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 import torch
@@ -20,6 +21,12 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.projection impo
     LayerwiseProjectionBinder,
     compile_bulk_projection_binder,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.transfer import (
+    KVTransferStep,
+    LoadCommandBatch,
+    StoreCommand,
+    StoreCommandBatch,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.route import KVPoolRouteSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.topology import (
     KVPoolGroupTopology,
@@ -34,12 +41,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk imp
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwise import (
     GVALayerwiseWorker,
     KeyRangeLayerwiseWorker,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.transfer.state import (
-    select_store_candidate_objects as _select_store_candidate_objects,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.transfer.state import (
-    store_candidate_keys as _store_candidate_keys,
 )
 
 
@@ -296,7 +297,7 @@ class FakeResources:
             layer_entry_offsets[group_id] = list(range(len(group.layers) + 1))
             object_sizes[group_id] = 32 * len(group.layers)
             object_offsets[group_id] = 0
-        registration = {
+        registration: dict[str, Any] = {
             "base_addresses": base_addresses,
             "block_lengths": block_lengths,
             "block_strides": block_strides,
@@ -379,26 +380,34 @@ def make_worker(
     return worker, resources, backend
 
 
-def build_admitted_store_batch(worker, commands, *, layerwise: bool = False):
-    """Keep pre-Slice-4 lowering tests out of Worker's public mainline."""
-
-    candidates = worker._build_store_candidates(commands)
-    candidate_keys = _store_candidate_keys(candidates)
-    accepted, claim_once = worker._admitted_store_keys(candidate_keys)
-    if accepted is not None and not accepted:
-        return None
-    selected_objects = (
-        None if accepted is None else _select_store_candidate_objects(candidate_keys, accepted, claim_once=claim_once)
-    )
-    return worker._materialize_store_candidates(
-        commands,
-        candidates,
-        selected_objects,
-        prepare_layerwise=layerwise,
+def begin_step(worker, *, load=(), store=()) -> None:
+    worker.begin_step(
+        KVTransferStep(
+            LoadCommandBatch(tuple(load)),
+            StoreCommandBatch(tuple(store)),
+        )
     )
 
 
-def worker_backend_io(worker):
-    """Return the concrete Backend boundary for lower-level migration guards."""
+def store_one(worker, command: StoreCommand):
+    begin_step(worker, store=(command,))
+    worker.finish_step()
+    (completion,) = worker.fence_previous_store()
+    worker.end_step()
+    return completion
 
-    return worker._backend_io
+
+class FakeLoadStartGate:
+    def __init__(self, opened: bool = False) -> None:
+        self._opened = threading.Event()
+        if opened:
+            self._opened.set()
+
+    def open(self) -> None:
+        self._opened.set()
+
+    def cancel(self) -> None:
+        self._opened.set()
+
+    def wait(self, timeout) -> bool:
+        return self._opened.wait(timeout)

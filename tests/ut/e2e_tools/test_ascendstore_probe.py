@@ -1,6 +1,6 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Check the production/v1 equivalence probe on CPU."""
+"""Validate the E2E probe's byte snapshots and evidence checks using CPU doubles."""
+
+from __future__ import annotations
 
 import sys
 from collections.abc import Callable
@@ -20,6 +20,8 @@ from tests.e2e.common.kv_pool.ascendstore_v1_probe import (
 )
 
 _PRODUCTION_MODULE = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector"
+
+
 _V1_MODULE = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.connector"
 
 
@@ -109,7 +111,7 @@ def worker_factory(monkeypatch: pytest.MonkeyPatch) -> Callable[[str], SimpleNam
     return make_worker
 
 
-def test_probe_proves_the_common_store_lookup_load_contract(
+def test_probe_accepts_verified_store_lookup_load_evidence(
     worker_factory: Callable[[str], SimpleNamespace], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     summaries = []
