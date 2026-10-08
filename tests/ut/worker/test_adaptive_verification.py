@@ -61,6 +61,7 @@ def test_adaptive_tail_dummy_run_balances_moe_routing(adaptive_verification, con
     runner = NPUModelRunner.__new__(NPUModelRunner)
     runner.input_buffers = SimpleNamespace(dummy_num_tokens=None)
     runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE)
+    runner.debugger = None
     runner.max_num_reqs = 32
     runner.max_num_tokens = 256
     runner.speculator = None
