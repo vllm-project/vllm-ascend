@@ -40,7 +40,7 @@ test_cases:
     benchmarks:
       acc:
         case_type: accuracy
-        dataset_path: vllm-ascend/textvqa-lite
+        dataset_path: vllm-ascend/textvqa-subset
         request_conf: vllm_api_stream_chat
         dataset_conf: textvqa/textvqa_gen_base64
         max_out_len: 10240
@@ -49,11 +49,6 @@ test_cases:
         threshold: 3
         enable_thinking: "false"
         temperature: 0
-        top_p:
-        top_k:
-        min_p:
-        presence_penalty:
-        repetition_penalty:
       perf_accept_rate:
         case_type: performance
         dataset_path: vllm-ascend/GSM8K-in3500-bs2800
