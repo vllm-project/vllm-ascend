@@ -9,8 +9,10 @@ rebuild tuple so those assumptions are explicit and easy to audit.
 
 import os
 import socket
-from functools import cache, lru_cache
+from functools import lru_cache
 from typing import Any
+
+import torch
 
 
 @lru_cache(maxsize=1)
@@ -24,77 +26,44 @@ def get_ip() -> str:
         return socket.gethostbyname(socket.gethostname())
 
 
-def _visible_device_ids() -> list[int] | None:
-    value = os.environ.get("ASCEND_RT_VISIBLE_DEVICES")
-    if not value:
-        return None
-    ids: list[int] = []
-    for item in value.split(","):
-        item = item.strip()
-        if not item:
-            continue
-        try:
-            ids.append(int(item))
-        except ValueError as exc:
-            raise ValueError(
-                f"ASCEND_RT_VISIBLE_DEVICES must contain comma-separated integer device ids, got {value!r}"
-            ) from exc
-    if not ids:
-        raise ValueError("ASCEND_RT_VISIBLE_DEVICES does not name any device")
-    return ids
-
-
-@cache
 def npu_generate_uuid(logical_device: int | None = None) -> str:
     """Return the stable host/physical-device identity used by NPU IPC.
 
-    ``logical_device`` is part of the cache key.  Callers must pass the worker
-    device explicitly when the current device is not guaranteed to match it.
+    The identity is intentionally host-local and follows the visible-device
+    mapping.  Callers on worker paths pass the logical device explicitly;
+    omitted values are resolved at call time rather than cached as ``None``.
     """
     if logical_device is None:
-        import torch
-
         logical_device = torch.accelerator.current_device_index()
+    if logical_device is None:
+        raise ValueError("logical NPU device is unavailable; pass an explicit device index")
     if logical_device < 0:
         raise ValueError(f"logical NPU device must be non-negative, got {logical_device}")
 
-    visible_ids = _visible_device_ids()
-    if visible_ids is None:
+    value = os.environ.get("ASCEND_RT_VISIBLE_DEVICES")
+    if not value:
         physical_device = logical_device
     else:
+        visible_ids: list[int] = []
+        for item in value.split(","):
+            item = item.strip()
+            if not item:
+                continue
+            try:
+                visible_ids.append(int(item))
+            except ValueError as exc:
+                raise ValueError(
+                    f"ASCEND_RT_VISIBLE_DEVICES must contain comma-separated integer device ids, got {value!r}"
+                ) from exc
+        if not visible_ids:
+            raise ValueError("ASCEND_RT_VISIBLE_DEVICES does not name any device")
         if logical_device >= len(visible_ids):
             raise ValueError(f"logical NPU device {logical_device} is outside the visible device list {visible_ids}")
         physical_device = visible_ids[logical_device]
     return f"{get_ip()}-{physical_device}"
 
 
-def rewrite_rebuild_device(args: tuple[Any, ...] | list[Any], device_index: int) -> list[Any]:
-    """Copy a torch_npu rebuild tuple and replace its device index.
-
-    The current torch_npu tuple ABI stores the device at index 6.  Keep the
-    check local to this helper so a future ABI change fails before collective
-    work instead of silently rebuilding on the wrong device.
-    """
-    if len(args) <= 6:
-        raise ValueError(
-            f"Unexpected torch_npu IPC rebuild tuple: expected a device field at index 6, got {len(args)} fields"
-        )
-    rewritten = list(args)
-    rewritten[6] = device_index
-    return rewritten
-
-
-def _freeze(value: Any) -> Any:
-    """Make nested export arguments safe to use as a cache key."""
-    if isinstance(value, dict):
-        return tuple(sorted((_freeze(k), _freeze(v)) for k, v in value.items()))
-    if isinstance(value, (list, tuple)):
-        return tuple(_freeze(item) for item in value)
-    try:
-        hash(value)
-    except TypeError:
-        return repr(value)
-    return value
+NPU_IPC_DEVICE_INDEX = 6
 
 
 class NpuPackedBufferImporter:
@@ -107,17 +76,17 @@ class NpuPackedBufferImporter:
     """
 
     def __init__(self) -> None:
-        self._entry: tuple[Any, Any] | None = None
+        self._entry: tuple[tuple[Any, ...], torch.Tensor] | None = None
 
-    def rebuild(self, args: tuple[Any, ...] | list[Any], device_index: int) -> Any:
+    def rebuild(self, list_args: list[Any]) -> torch.Tensor:
+        """Rebuild one packed buffer, reusing the import for each chunk."""
         from torch_npu.multiprocessing.reductions import rebuild_npu_tensor
 
-        rewritten = rewrite_rebuild_device(args, device_index)
-        key = _freeze(rewritten)
+        key = tuple(list_args)
         if self._entry is not None and self._entry[0] == key:
             return self._entry[1]
 
-        tensor = rebuild_npu_tensor(*rewritten)
+        tensor = rebuild_npu_tensor(*list_args)
         # Dropping the previous tensor releases its one importer-side reference
         # only after all users have finished the previous update.
         self._entry = (key, tensor)

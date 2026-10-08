@@ -362,7 +362,7 @@ def test_packed_iterator_initialization_failure_reaches_every_rank():
             "all_gather_object",
             side_effect=all_gather,
         ),
-        patch(f"{_MODULE}.packed_npu_ipc_producer", return_value=iter(())),
+        patch(f"{_MODULE}.packed_ipc_producer", return_value=iter(())),
         ThreadPoolExecutor(max_workers=2) as pool,
     ):
         futures = [pool.submit(engine._send_packed, source) for engine, source in zip(engines, sources)]
@@ -499,7 +499,6 @@ def test_handle_gather_rejects_same_length_different_schema():
             payload,
             {
                 "chunk_index": 0,
-                "done": False,
                 "schema": [("b", "float32", (1,), 4)],
                 "handles": [{"node-1": ("remote",)}],
             },
@@ -526,7 +525,6 @@ def test_handle_gather_rejects_data_end_mismatch():
             payload,
             {
                 "chunk_index": 0,
-                "done": True,
                 "schema": [],
                 "handles": [],
             },
@@ -554,7 +552,6 @@ def test_handle_gather_merges_matching_rank_handles():
             payload,
             {
                 "chunk_index": 0,
-                "done": False,
                 "schema": schema,
                 "handles": [{"node-1": ("remote",)}],
             },
@@ -609,6 +606,7 @@ def test_receive_weights_rebuilds_with_rebuild_npu_tensor():
     engine.model = MagicMock()
     engine.device = MagicMock(index=device_index)
     engine.packed = False
+    engine._packed_importer = MagicMock()
     engine.model.load_weights.side_effect = lambda weights: received.update(weights=weights)
 
     with (
@@ -617,7 +615,7 @@ def test_receive_weights_rebuilds_with_rebuild_npu_tensor():
     ):
         engine.receive_weights(update_info)
 
-    mock_uuid.assert_called_once_with()
+    mock_uuid.assert_called_once_with(device_index)
     engine.model.load_weights.assert_called_once()
     assert received["weights"][0][0] == "model.weight"
     assert torch.equal(received["weights"][0][1], rebuilt_weight)
@@ -640,6 +638,7 @@ def test_finish_weight_update():
     engine = object.__new__(NPUIPCWeightTransferEngine)
     engine.model = MagicMock()
     engine.model_config = MagicMock()
+    engine._packed_importer = MagicMock()
     mock_finalize = MagicMock()
 
     with _patch_reload_module(finalize=mock_finalize):
@@ -662,11 +661,12 @@ def test_receive_packed_weights_loads_model():
     engine.model = MagicMock()
     engine.device = MagicMock(index=0)
     engine.packed = True
+    engine._packed_importer = MagicMock()
 
     with (
         patch(f"{_MODULE}.npu_generate_uuid", return_value="node-0"),
         patch(
-            f"{_MODULE}.packed_npu_ipc_consumer",
+            f"{_MODULE}.packed_ipc_consumer",
             return_value=packed_weights,
         ) as mock_consumer,
     ):
@@ -674,11 +674,13 @@ def test_receive_packed_weights_loads_model():
 
     mock_consumer.assert_called_once_with(
         ipc_handle=update_info.ipc_handles,
-        physical_npu_id="node-0",
         names=update_info.names,
         shapes=update_info.shapes,
         dtype_names=update_info.dtype_names,
         tensor_sizes=update_info.tensor_sizes,
         device_index=0,
+        importer=engine._packed_importer,
+        device=engine.device,
+        physical_npu_id="node-0",
     )
     engine.model.load_weights.assert_called_once_with(packed_weights)

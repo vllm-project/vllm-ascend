@@ -3,10 +3,11 @@
 """NPU IPC-based weight transfer engine using Ascend IPC for communication."""
 
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass
 from enum import Enum, auto
-from typing import TYPE_CHECKING, Any, ClassVar
+from functools import partial
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, TypedDict
 
 import torch
 from torch.multiprocessing.reductions import reduce_tensor
@@ -19,20 +20,20 @@ from vllm.distributed.weight_transfer.base import (
 )
 from vllm.distributed.weight_transfer.ipc_engine import (
     IPCTrainerInitInfo,
-    IPCTrainerWeightTransferEngine,
     IPCWeightTransferUpdateInfo,
 )
 
 from vllm_ascend.distributed.weight_transfer.npu_ipc_utils import (
+    NPU_IPC_DEVICE_INDEX,
     NpuPackedBufferImporter,
     get_ip,  # noqa: F401 - preserved as a compatibility import
     npu_generate_uuid,
-    rewrite_rebuild_device,
 )
 from vllm_ascend.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
-    packed_npu_ipc_consumer,
-    packed_npu_ipc_producer,
+    PackedIpcChunk,
+    packed_ipc_consumer,
+    packed_ipc_producer,
 )
 
 if TYPE_CHECKING:
@@ -46,6 +47,13 @@ class _NPUIPCTrainerState(Enum):
     READY = auto()
     FAILED = auto()
     CLOSED = auto()
+
+
+class _PreparationStatus(TypedDict):
+    operation: str
+    outcome: Literal["ready", "done", "error"]
+    error_type: str | None
+    error_message: str | None
 
 
 @dataclass
@@ -123,9 +131,7 @@ class NPUIPCWeightTransferEngine(  # type: ignore[no-redef]
         """Record the trainer-supplied wire params so the worker decodes
         exactly as the trainer encoded."""
         self.packed = init_info.packed
-        importer = getattr(self, "_packed_importer", None)
-        if importer is not None:
-            importer.close()
+        self._packed_importer.close()
 
     def start_weight_update(self) -> None:
         from vllm.model_executor.model_loader.reload import (
@@ -140,9 +146,7 @@ class NPUIPCWeightTransferEngine(  # type: ignore[no-redef]
         )
 
         finalize_layerwise_reload(self.model, self.model_config)
-        importer = getattr(self, "_packed_importer", None)
-        if importer is not None:
-            importer.close()
+        self._packed_importer.close()
 
     def receive_weights(self, update_info: NPUIPCWeightTransferUpdateInfo) -> None:
         """Receive weights from the trainer via NPU IPC handles.
@@ -159,11 +163,8 @@ class NPUIPCWeightTransferEngine(  # type: ignore[no-redef]
         device_index = self.device.index
         if device_index is None:
             raise ValueError(f"NPU worker device must have an explicit index, got {self.device}")
-        # Fully initialized workers use the explicit logical device.  Keeping
-        # the no-argument fallback preserves compatibility with old CPU-only
-        # unit doubles that construct the engine via ``object.__new__``.
-        importer = getattr(self, "_packed_importer", None)
-        physical_npu_id = npu_generate_uuid(device_index) if importer is not None else npu_generate_uuid()
+        importer = self._packed_importer
+        physical_npu_id = npu_generate_uuid(device_index)
 
         with torch.npu.device(self.device):
             if self.packed:
@@ -171,19 +172,17 @@ class NPUIPCWeightTransferEngine(  # type: ignore[no-redef]
                     raise ValueError("`tensor_sizes` is required when packed=True")
                 if not isinstance(update_info.ipc_handles, dict):
                     raise ValueError("packed NPU IPC update requires one handle dictionary")
-                consumer_kwargs = dict(
+                weights = packed_ipc_consumer(
                     ipc_handle=update_info.ipc_handles,
-                    physical_npu_id=physical_npu_id,
                     names=update_info.names,
                     shapes=update_info.shapes,
                     dtype_names=update_info.dtype_names,
                     tensor_sizes=update_info.tensor_sizes,
                     device_index=device_index,
+                    importer=importer,
+                    device=self.device,
+                    physical_npu_id=physical_npu_id,
                 )
-                if importer is not None:
-                    consumer_kwargs["importer"] = importer
-                    consumer_kwargs["device"] = self.device
-                weights = packed_npu_ipc_consumer(**consumer_kwargs)
             else:
                 # Lazy import: ``rebuild_npu_tensor`` lives in ``torch_npu`` and
                 # must not be imported at module load time on non-NPU hosts.
@@ -201,8 +200,14 @@ class NPUIPCWeightTransferEngine(  # type: ignore[no-redef]
                             f"not co-located on the same physical NPU (node)."
                         )
 
-                    args = rewrite_rebuild_device(ipc_handle[physical_npu_id], device_index)
-                    weight = rebuild_npu_tensor(*args)
+                    args = ipc_handle[physical_npu_id]
+                    if len(args) <= NPU_IPC_DEVICE_INDEX:
+                        raise ValueError(
+                            f"NPU IPC rebuild arguments do not contain a device index: got {len(args)} values"
+                        )
+                    list_args = list(args)
+                    list_args[NPU_IPC_DEVICE_INDEX] = device_index
+                    weight = rebuild_npu_tensor(*list_args)
                     weights.append((name, weight))
 
             from vllm.model_executor.model_loader.mtp_validation import (
@@ -218,12 +223,10 @@ class NPUIPCWeightTransferEngine(  # type: ignore[no-redef]
             super().update_weights(update_info)
 
     def shutdown(self) -> None:
-        importer = getattr(self, "_packed_importer", None)
-        if importer is not None:
-            importer.close()
+        self._packed_importer.close()
 
 
-class NPUIPCTrainerWeightTransferEngine(IPCTrainerWeightTransferEngine):
+class NPUIPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[NPUIPCTrainerInitInfo]):
     """Trainer-side NPU IPC weight transfer engine.
 
     Mirrors upstream ``IPCTrainerWeightTransferEngine`` but swaps the
@@ -245,12 +248,7 @@ class NPUIPCTrainerWeightTransferEngine(IPCTrainerWeightTransferEngine):
         packed: bool = False,
         packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     ) -> None:
-        TrainerWeightTransferEngine.__init__(
-            self,
-            client=client,
-            source=source,
-            is_sender=is_sender,
-        )
+        super().__init__(client=client, source=source, is_sender=is_sender)
         self.packed = packed
         self.packed_buffer_size_bytes = packed_buffer_size_bytes
         self.device_index = torch.accelerator.current_device_index()
@@ -284,7 +282,14 @@ class NPUIPCTrainerWeightTransferEngine(IPCTrainerWeightTransferEngine):
         return engine
 
     def send_weights(self) -> None:
-        self._ensure_ready()
+        if self._state is _NPUIPCTrainerState.FAILED:
+            raise RuntimeError(
+                "NPU IPC trainer engine is failed and cannot be reused; "
+                "reinitialize the worker and trainer engine before retrying."
+            )
+        if self._state is _NPUIPCTrainerState.CLOSED:
+            raise RuntimeError("NPU IPC trainer engine is closed.")
+        assert self.source is not None
         weight_refs: list[torch.Tensor] | None = None
         try:
             self._run_sender_rpc("start", self.client.start_weight_update)
@@ -297,17 +302,13 @@ class NPUIPCTrainerWeightTransferEngine(IPCTrainerWeightTransferEngine):
         finally:
             del weight_refs
 
-    def _ensure_ready(self) -> None:
-        state = self._state
-        if state is _NPUIPCTrainerState.FAILED:
-            raise RuntimeError(
-                "NPU IPC trainer engine is failed and cannot be reused; "
-                "reinitialize the worker and trainer engine before retrying."
-            )
-        if state is _NPUIPCTrainerState.CLOSED:
-            raise RuntimeError("NPU IPC trainer engine is closed.")
-
-    def _run_sender_rpc(self, operation: str, call: Callable[[], Any]) -> None:
+    def _run_sender_rpc(
+        self,
+        operation: str,
+        call: Callable[[], None],
+        *,
+        local_error: Exception | None = None,
+    ) -> None:
         """Run one sender RPC and propagate its result to every trainer rank."""
         sender_error: Exception | None = None
         status: dict[str, Any] = {
@@ -317,7 +318,7 @@ class NPUIPCTrainerWeightTransferEngine(IPCTrainerWeightTransferEngine):
             "error_type": None,
             "error_message": None,
         }
-        if self.is_sender:
+        if self.is_sender and local_error is None:
             try:
                 call()
             except Exception as exc:
@@ -327,6 +328,13 @@ class NPUIPCTrainerWeightTransferEngine(IPCTrainerWeightTransferEngine):
                     error_type=type(exc).__name__,
                     error_message=str(exc),
                 )
+        elif self.is_sender and local_error is not None:
+            sender_error = local_error
+            status.update(
+                ok=False,
+                error_type=type(local_error).__name__,
+                error_message=str(local_error),
+            )
 
         if torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1:
             gathered: list[dict[str, Any] | None] = [None] * torch.distributed.get_world_size()
@@ -352,32 +360,23 @@ class NPUIPCTrainerWeightTransferEngine(IPCTrainerWeightTransferEngine):
     def _run_rank_preparation(
         self,
         operation: str,
-        call: Callable[[], Any],
-    ) -> tuple[bool, Any | None]:
+        *,
+        outcome: Literal["ready", "done", "error"],
+        local_error: Exception | None = None,
+    ) -> bool:
         """Run local preparation and exchange its outcome before data collectives.
 
         Every rank calls this at the same chunk boundary.  A local source,
         materialization, or IPC-export error is therefore reported before any
         peer enters the handle/schema collective for that chunk.
         """
-        local_error: Exception | None = None
-        value: Any | None = None
-        outcome = "ready"
-        try:
-            value = call()
-        except StopIteration:
-            outcome = "done"
-        except Exception as exc:
-            local_error = exc
-            outcome = "error"
-
-        status = {
+        status: _PreparationStatus = {
             "operation": operation,
             "outcome": outcome,
             "error_type": type(local_error).__name__ if local_error else None,
             "error_message": str(local_error) if local_error else None,
         }
-        gathered: list[dict[str, Any] | None] = [status]
+        gathered: list[_PreparationStatus | None] = [status]
         if torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1:
             gathered = [None] * torch.distributed.get_world_size()
             torch.distributed.all_gather_object(gathered, status)
@@ -413,7 +412,7 @@ class NPUIPCTrainerWeightTransferEngine(IPCTrainerWeightTransferEngine):
                 f"NPU IPC {operation} completed inconsistently across trainer ranks: "
                 f"{sorted(str(outcome) for outcome in outcomes)}"
             )
-        return outcome == "done", value
+        return outcome == "done"
 
     def shutdown(self) -> None:
         """Make this trainer instance permanently unavailable for new rounds."""
@@ -431,14 +430,12 @@ class NPUIPCTrainerWeightTransferEngine(IPCTrainerWeightTransferEngine):
         *,
         schema: list[tuple[str, str, tuple[int, ...], int]],
         chunk_index: int,
-        done: bool = False,
     ) -> list[dict[str, tuple]]:
         """Validate a chunk schema and merge handles across trainer ranks.
 
-        The data/end marker, chunk index, names, dtypes, shapes, and byte sizes
-        must match on every rank. The explicit end marker makes a different
-        number of chunks fail in the same collective instead of leaving one
-        rank waiting forever for the next collective.
+        The chunk index, names, dtypes, shapes, and byte sizes must match on
+        every rank. End-of-source is exchanged by ``_run_rank_preparation``
+        before entering this data collective.
         """
         if not torch.distributed.is_initialized() or torch.distributed.get_world_size() == 1:
             return handles
@@ -446,28 +443,26 @@ class NPUIPCTrainerWeightTransferEngine(IPCTrainerWeightTransferEngine):
         world_size = torch.distributed.get_world_size()
         payload = {
             "chunk_index": chunk_index,
-            "done": done,
             "schema": schema,
             "handles": handles,
         }
         gathered: list[dict[str, Any] | None] = [None] * world_size
         torch.distributed.all_gather_object(gathered, payload)
 
-        expected_header = (chunk_index, done, schema)
+        expected_header = (chunk_index, schema)
         for rank, rank_payload in enumerate(gathered):
             if not isinstance(rank_payload, dict):
                 raise ValueError(f"NPU IPC rank {rank} returned an invalid chunk payload")
             header = (
                 rank_payload.get("chunk_index"),
-                rank_payload.get("done"),
                 rank_payload.get("schema"),
             )
             if header != expected_header:
                 raise ValueError(
                     "NPU IPC trainer chunk schema mismatch at "
                     f"chunk {chunk_index}: rank {rank} reported "
-                    f"index={header[0]}, done={header[1]}, schema={header[2]!r}; "
-                    f"local done={done}, schema={schema!r}"
+                    f"index={header[0]}, schema={header[1]!r}; "
+                    f"local schema={schema!r}"
                 )
             rank_handles = rank_payload.get("handles")
             if not isinstance(rank_handles, list) or len(rank_handles) != len(handles):
@@ -508,66 +503,74 @@ class NPUIPCTrainerWeightTransferEngine(IPCTrainerWeightTransferEngine):
         references are released.
         """
 
-        def chunks() -> Any:
-            iterator = iter(source)
-            pending: tuple[str, torch.Tensor] | None = None
-            exhausted = False
-            while pending is not None or not exhausted:
-                names: list[str] = []
-                dtype_names: list[str] = []
-                shapes: list[list[int]] = []
-                ipc_handles: list[dict[str, tuple]] = []
-                weight_refs: list[torch.Tensor] = []
-                chunk_bytes = 0
-                while True:
+        iterator = iter(source)
+        pending: tuple[str, torch.Tensor] | None = None
+        exhausted = False
+        chunk_index = 0
+        while True:
+            names: list[str] = []
+            dtype_names: list[str] = []
+            shapes: list[list[int]] = []
+            ipc_handles: list[dict[str, tuple]] = []
+            weight_refs: list[torch.Tensor] = []
+            chunk_bytes = 0
+            local_error: Exception | None = None
+            outcome: Literal["ready", "done", "error"] = "ready"
+            while not exhausted:
+                try:
                     if pending is not None:
                         name, tensor = pending
                         pending = None
                     else:
-                        try:
-                            name, tensor = next(iterator)
-                        except StopIteration:
-                            exhausted = True
-                            break
+                        name, tensor = next(iterator)
+                except StopIteration:
+                    exhausted = True
+                    if not names:
+                        outcome = "done"
+                    break
+                except Exception as exc:
+                    local_error = exc
+                    outcome = "error"
+                    break
 
-                    tensor_bytes = tensor.numel() * tensor.element_size()
-                    if names and chunk_bytes + tensor_bytes > self.packed_buffer_size_bytes:
-                        pending = (name, tensor)
-                        break
-                    if tensor_bytes > self.packed_buffer_size_bytes:
-                        warnings.warn(
-                            f"Tensor {name!r} has size {tensor_bytes} bytes, which "
-                            f"exceeds the unpacked chunk budget "
-                            f"{self.packed_buffer_size_bytes}; sending it as one chunk.",
-                            stacklevel=2,
-                        )
+                tensor_bytes = tensor.numel() * tensor.element_size()
+                if names and chunk_bytes + tensor_bytes > self.packed_buffer_size_bytes:
+                    pending = (name, tensor)
+                    break
+                if tensor_bytes > self.packed_buffer_size_bytes:
+                    warnings.warn(
+                        f"Tensor {name!r} has size {tensor_bytes} bytes, which "
+                        f"exceeds the unpacked chunk budget "
+                        f"{self.packed_buffer_size_bytes}; sending it as one chunk.",
+                        stacklevel=2,
+                    )
+                try:
                     weight = tensor.detach().contiguous()
                     _, ipc_args = reduce_tensor(weight)
-                    names.append(name)
-                    dtype_names.append(str(tensor.dtype).split(".")[-1])
-                    shapes.append(list(tensor.shape))
-                    ipc_handles.append({self.npu_uuid: ipc_args})
-                    weight_refs.append(weight)
-                    chunk_bytes += tensor_bytes
+                except Exception as exc:
+                    local_error = exc
+                    outcome = "error"
+                    break
+                names.append(name)
+                dtype_names.append(str(tensor.dtype).split(".")[-1])
+                shapes.append(list(tensor.shape))
+                ipc_handles.append({self.npu_uuid: ipc_args})
+                weight_refs.append(weight)
+                chunk_bytes += tensor_bytes
 
-                if names:
-                    yield names, dtype_names, shapes, ipc_handles, weight_refs
-                    # Drop the generator frame's aliases before materializing
-                    # the next chunk.  The caller has already synchronized all
-                    # consumers before it resumes this generator.
-                    del names, dtype_names, shapes, ipc_handles, weight_refs
-
-        chunk_iterator = iter(chunks())
-        chunk_index = 0
-        while True:
-            done, prepared = self._run_rank_preparation(
+            if local_error is not None:
+                outcome = "error"
+            elif outcome != "done" and not names:
+                outcome = "done"
+            done = self._run_rank_preparation(
                 f"unpacked chunk {chunk_index} preparation",
-                lambda: next(chunk_iterator),
+                outcome=outcome,
+                local_error=local_error,
             )
             if done:
                 break
-            assert prepared is not None
-            names, dtype_names, shapes, ipc_handles, weight_refs = prepared
+            if not names:
+                raise RuntimeError("NPU IPC preparation reported ready without a chunk")
             schema = [
                 (
                     name,
@@ -593,32 +596,43 @@ class NPUIPCTrainerWeightTransferEngine(IPCTrainerWeightTransferEngine):
             # before replacing these locals.  Delete every completed-chunk
             # alias now so the next lazy source materialization cannot overlap
             # with a full previous staging chunk.
-            del prepared, names, dtype_names, shapes
+            del names, dtype_names, shapes
             del ipc_handles, weight_refs, schema, merged_handles
             chunk_index += 1
         return []
 
     def _send_packed(self, source: "WeightSource") -> None:
         """Send weights in bounded-memory chunks (packed mode)."""
-        post_iter_func: Callable = lambda item: item[1]
-
-        def chunks() -> Any:
-            # Keep ``iter(source)`` lazy so ordinary __iter__ initialization
-            # failures occur inside the coordinated preparation boundary.
-            yield from packed_npu_ipc_producer(
-                iterator=iter(source),
-                npu_uuid=self.npu_uuid,
-                post_iter_func=post_iter_func,
-                buffer_size_bytes=self.packed_buffer_size_bytes,
-                device=self.device,
-            )
-
-        chunk_iterator = iter(chunks())
+        packed_iterator: Iterator[PackedIpcChunk] | None = None
         chunk_index = 0
         while True:
-            done, chunk = self._run_rank_preparation(
+            chunk: PackedIpcChunk | None = None
+            local_error: Exception | None = None
+            outcome: Literal["ready", "done", "error"] = "ready"
+            try:
+                if packed_iterator is None:
+                    # Keep ``iter(source)`` lazy so ordinary __iter__
+                    # initialization failures occur inside the coordinated
+                    # preparation boundary.
+                    packed_iterator = iter(
+                        packed_ipc_producer(
+                            iterator=iter(source),
+                            npu_uuid=self.npu_uuid,
+                            post_iter_func=lambda item: item[1],
+                            buffer_size_bytes=self.packed_buffer_size_bytes,
+                            device=self.device,
+                        )
+                    )
+                chunk = next(packed_iterator)
+            except StopIteration:
+                outcome = "done"
+            except Exception as exc:
+                local_error = exc
+                outcome = "error"
+            done = self._run_rank_preparation(
                 f"packed chunk {chunk_index} preparation",
-                lambda: next(chunk_iterator),
+                outcome=outcome,
+                local_error=local_error,
             )
             if done:
                 break
@@ -626,23 +640,23 @@ class NPUIPCTrainerWeightTransferEngine(IPCTrainerWeightTransferEngine):
             schema = [
                 (name, dtype_name, tuple(shape), tensor_size)
                 for name, dtype_name, shape, tensor_size in zip(
-                    chunk["names"],
-                    chunk["dtype_names"],
-                    chunk["shapes"],
-                    chunk["tensor_sizes"],
+                    chunk.names,
+                    chunk.dtype_names,
+                    chunk.shapes,
+                    chunk.tensor_sizes,
                 )
             ]
             ipc_handle = self._all_gather_and_merge_handles(
-                [chunk["ipc_handle"]],
+                [chunk.ipc_handle],
                 schema=schema,
                 chunk_index=chunk_index,
             )[0]
             self._do_send(
-                names=chunk["names"],
-                dtype_names=chunk["dtype_names"],
-                shapes=chunk["shapes"],
+                names=chunk.names,
+                dtype_names=chunk.dtype_names,
+                shapes=chunk.shapes,
                 ipc_handles=ipc_handle,
-                tensor_sizes=chunk["tensor_sizes"],
+                tensor_sizes=chunk.tensor_sizes,
             )
             # Per-chunk barrier: the producer reuses a single IPC buffer
             # across chunks. Without syncing every rank here, non-sender
@@ -667,16 +681,25 @@ class NPUIPCTrainerWeightTransferEngine(IPCTrainerWeightTransferEngine):
         the entire trainer group before any rank enters the next barrier.
         """
 
-        def send_update() -> None:
-            update_fields: dict[str, Any] = {
-                "names": names,
-                "dtype_names": dtype_names,
-                "shapes": shapes,
-                "ipc_handles": ipc_handles,
-            }
-            if tensor_sizes is not None:
-                update_fields["tensor_sizes"] = tensor_sizes
-            update_info = NPUIPCWeightTransferUpdateInfo(**update_fields)
-            self.client.update_weights(asdict(update_info))
+        payload: dict[str, Any] | None = None
+        local_error: Exception | None = None
+        if self.is_sender:
+            try:
+                update_fields: dict[str, Any] = {
+                    "names": names,
+                    "dtype_names": dtype_names,
+                    "shapes": shapes,
+                    "ipc_handles": ipc_handles,
+                }
+                if tensor_sizes is not None:
+                    update_fields["tensor_sizes"] = tensor_sizes
+                update_info = NPUIPCWeightTransferUpdateInfo(**update_fields)
+                payload = asdict(update_info)
+            except Exception as exc:
+                local_error = exc
 
-        self._run_sender_rpc("update", send_update)
+        self._run_sender_rpc(
+            "update",
+            partial(self.client.update_weights, payload),
+            local_error=local_error,
+        )

@@ -15,6 +15,7 @@
 # limitations under the License.
 #
 
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -40,7 +41,7 @@ class PyHcclCommunicator:
         group: ProcessGroup | StatelessProcessGroup,
         device: int | str | torch.device,
         library_path: str | None = None,
-    ):
+    ) -> None:
         """
         Args:
             group: the process group to work on. If None, it will use the
@@ -137,7 +138,12 @@ class PyHcclCommunicator:
             torch.npu.synchronize(self.device)
             self.hccl.hcclCommDestroy(self.comm)
 
-    def all_reduce(self, in_tensor: torch.Tensor, op: ReduceOp = ReduceOp.SUM, stream=None) -> torch.Tensor:
+    def all_reduce(
+        self,
+        in_tensor: torch.Tensor,
+        op: ReduceOp = ReduceOp.SUM,
+        stream: Any | None = None,
+    ) -> torch.Tensor | None:
         if self.disabled:
             return None
         if not self.available:
@@ -165,7 +171,12 @@ class PyHcclCommunicator:
         )
         return out_tensor
 
-    def broadcast(self, tensor: torch.Tensor, src: int, stream=None):
+    def broadcast(
+        self,
+        tensor: torch.Tensor,
+        src: int,
+        stream: Any | None = None,
+    ) -> None:
         if self.disabled:
             return
         if not self.available:

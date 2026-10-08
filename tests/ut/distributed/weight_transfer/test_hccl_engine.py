@@ -12,6 +12,7 @@ from vllm_ascend.distributed.weight_transfer.hccl_engine import (
     HCCLTrainerWeightTransferEngine,
     HCCLWeightTransferEngine,
     HCCLWeightTransferInitInfo,
+    _HCCLTrainerState,
 )
 from vllm_ascend.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
@@ -69,10 +70,19 @@ def test_reinit_closes_previous_session_before_creating_next(_mock_device):
         assert engine.model_update_group is None
         return MagicMock()
 
-    with patch.object(HCCLWeightTransferEngine, "_stateless_init_process_group", side_effect=create_group) as init:
+    with patch(
+        "vllm_ascend.distributed.weight_transfer.hccl_common.worker_init_process_group",
+        side_effect=lambda info, parallel: create_group(
+            info.master_address,
+            info.master_port,
+            info.rank_offset,
+            info.world_size,
+            device=0,
+        ),
+    ) as init:
         engine.init_transfer_engine(init_info)
 
-    init.assert_called_once_with("127.0.0.1", 12345, 1, 2, device=0)
+    init.assert_called_once_with(init_info, engine.parallel_config)
     assert engine.model_update_group is not old_group
 
 
@@ -131,9 +141,8 @@ def test_reinit_restores_defaults_for_omitted_parameters(_mock_device):
         ),
     ]
 
-    with patch.object(
-        HCCLWeightTransferEngine,
-        "_stateless_init_process_group",
+    with patch(
+        "vllm_ascend.distributed.weight_transfer.hccl_common.worker_init_process_group",
         return_value=MagicMock(),
     ):
         for init_info, expected in init_infos:
@@ -178,7 +187,7 @@ def test_non_sender_drains_source_without_sender_validation(packed, tensor):
     fake_npu = SimpleNamespace(device=MagicMock(return_value=nullcontext()))
 
     with patch.object(torch, "npu", fake_npu, create=True):
-        HCCLTrainerWeightTransferEngine._broadcast(engine, metadata)
+        HCCLTrainerWeightTransferEngine._broadcast(engine, source, metadata)
 
     assert source.seen == ["weight"]
     engine.client.start_weight_update.assert_not_called()
@@ -194,7 +203,8 @@ def _make_trainer(*, is_sender: bool):
     engine.packed_buffer_size_bytes = 1024
     engine.packed_num_buffers = 2
     engine.device = torch.device("npu:0")
-    engine.group = MagicMock() if is_sender else None
+    engine.model_update_group = MagicMock() if is_sender else None
+    engine._state = _HCCLTrainerState.READY
     engine._broadcast = MagicMock()
     engine._post_send_sync = MagicMock()
     return engine
@@ -205,7 +215,7 @@ def test_non_sender_synchronizes_source_before_returning():
 
     engine.send_weights()
 
-    engine._broadcast.assert_called_once_with([])
+    engine._broadcast.assert_called_once_with(engine.source, [])
     engine._post_send_sync.assert_called_once_with()
     engine.client.start_weight_update.assert_not_called()
 
@@ -227,7 +237,7 @@ def test_post_send_sync_synchronizes_trainer_device_stream():
 
 def test_failed_trainer_rejects_retry_before_any_rpc():
     engine = _make_trainer(is_sender=True)
-    group = engine.group
+    group = engine.model_update_group
     engine._broadcast.side_effect = RuntimeError("broadcast failed")
 
     with pytest.raises(RuntimeError, match="broadcast failed"):
@@ -254,7 +264,7 @@ def test_update_rpc_failure_marks_trainer_failed():
 
 def test_shutdown_is_idempotent_and_rejects_future_send():
     engine = _make_trainer(is_sender=True)
-    group = engine.group
+    group = engine.model_update_group
 
     engine.shutdown()
     engine.shutdown()
