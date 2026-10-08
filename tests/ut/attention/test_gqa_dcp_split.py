@@ -414,3 +414,28 @@ def test_v1_draft_builder_owns_history_and_padding_without_manager_override(rank
     assert decode.cp_history_seq_len is original_history
     assert decode.num_computed_tokens_of_dcp is original_total
     manager._get_dcp_local_seq_lens.assert_not_called()
+
+
+def test_dcp_forward_preserves_graph_padding_query_span():
+    from unittest.mock import Mock
+
+    from vllm_ascend.attention.context_parallel.attention_cp import (
+        AscendAttentionDCPImpl,
+        AscendAttentionDCPMetadata,
+        AscendMetadataForDecode,
+    )
+
+    impl = AscendAttentionDCPImpl.__new__(AscendAttentionDCPImpl)
+    query = torch.arange(8).reshape(4, 1, 2).float()
+    impl._forward_decode_dcp = Mock(side_effect=lambda q, *_args: q)
+    metadata = AscendAttentionDCPMetadata(
+        num_decodes=4,
+        num_prefills=0,
+        num_decode_tokens=1,
+        num_actual_tokens=1,
+        decode=AscendMetadataForDecode(actual_seq_lengths_q=[1, 2, 3, 4]),
+    )
+    output = torch.zeros_like(query)
+    actual = impl.forward_impl(query, query, query, (), metadata, output)
+    torch.testing.assert_close(actual, query)
+    assert impl._forward_decode_dcp.call_args.args[0].shape[0] == 4

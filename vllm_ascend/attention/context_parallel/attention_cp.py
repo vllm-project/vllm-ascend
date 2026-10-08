@@ -546,6 +546,9 @@ class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
         has_prefill = attn_metadata.num_prefills > 0
         num_decode_tokens = attn_metadata.num_decode_tokens
         if has_decode:
+            assert attn_metadata.decode is not None and attn_metadata.decode.actual_seq_lengths_q is not None
+            # TND lengths include graph-padding queries as well as real tokens.
+            num_decode_tokens = attn_metadata.decode.actual_seq_lengths_q[-1]
             decode_query = query[:num_decode_tokens].contiguous()
             output_decode = self._forward_decode_dcp(
                 decode_query,

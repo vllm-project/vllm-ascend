@@ -1153,6 +1153,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner.use_hybrid_blocks = False
         runner.hybrid_with_attn_and_mamba = False
         runner.sfa_dcp_replicated_indexer_size = 1
+        runner.dcp_size = 1
         runner.runner_only_attn_layers = set()
         runner.is_kv_consumer = False
         runner.sparse_kv_offload_enabled = False
@@ -1304,6 +1305,9 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
     def test_paged_attention_uses_contiguous_kv_cache(self):
         self._check_gqa_cache_layout(xlite_enabled=False, pa_enabled=True)
 
+    def test_dcp_uses_separate_contiguous_kv_cache(self):
+        self._check_gqa_cache_layout(xlite_enabled=False, dcp_size=2)
+
     def test_xlite_uses_separate_contiguous_kv_cache(self):
         self._check_gqa_cache_layout(xlite_enabled=True)
 
@@ -1313,8 +1317,9 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
     def test_sparse_backend_uses_separate_contiguous_kv_cache(self):
         self._check_gqa_cache_layout(xlite_enabled=False, backend=SparseAttentionBackend)
 
-    def _check_gqa_cache_layout(self, xlite_enabled, backend=AscendAttentionBackend, pa_enabled=False):
+    def _check_gqa_cache_layout(self, xlite_enabled, backend=AscendAttentionBackend, pa_enabled=False, dcp_size=1):
         runner = self._build_runner()
+        runner.dcp_size = dcp_size
         runner.ascend_config.xlite_graph_config.enabled = xlite_enabled
         runner.model_config.use_mla = False
         layer_name = "model.layers.0.self_attn.attn"
@@ -1351,7 +1356,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         with patch("vllm_ascend.worker.model_runner_v1.requires_contiguous_pa_kv_cache", return_value=pa_enabled):
             raw_caches = runner._allocate_kv_cache_tensors(kv_cache_config)
 
-        uses_contiguous_cache = xlite_enabled or backend.is_sparse() or pa_enabled
+        uses_contiguous_cache = xlite_enabled or backend.is_sparse() or pa_enabled or dcp_size > 1
         assert isinstance(raw_caches[layer_name], tuple if uses_contiguous_cache else torch.Tensor)
         cache = runner._reshape_kv_cache_tensors(
             kv_cache_config,

@@ -686,6 +686,26 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             self._runnable.update_draft_model_metadata(update_params)  # type: ignore
             self._runnable.set_attn_backend(att_backend)  # type: ignore
 
+    def _prepare_dcp_draft_dummy_metadata(self, common_attn_metadata, draft_index: int) -> None:
+        """Match later GQA autoregressive capture steps, including graph padding."""
+        if self.dcp_size <= 1 or draft_index == 0 or self.parallel_drafting:
+            return
+        if self.draft_model_config.use_mla:
+            return
+        num_actual_reqs = min(common_attn_metadata.num_reqs, common_attn_metadata.num_actual_tokens)
+        num_reqs = common_attn_metadata.num_input_tokens
+        common_attn_metadata.num_reqs = num_reqs
+        common_attn_metadata.num_actual_tokens = num_actual_reqs
+        common_attn_metadata.max_query_len = 1
+        common_attn_metadata.query_start_loc_cpu = torch.arange(num_reqs + 1, dtype=torch.int32)
+        common_attn_metadata.query_start_loc = self.query_start_loc_group[draft_index][: num_reqs + 1]
+        common_attn_metadata.query_start_loc.copy_(common_attn_metadata.query_start_loc_cpu)
+        common_attn_metadata.seq_lens = self.seq_lens_group[draft_index][:num_reqs]
+        for field in ("seq_lens_cpu", "_seq_lens_cpu", "seq_lens_cpu_upper_bound", "num_computed_tokens_cpu"):
+            values = getattr(common_attn_metadata, field, None)
+            if values is not None:
+                setattr(common_attn_metadata, field, self._adjust_tensor(values[:num_actual_reqs], num_reqs))
+
     def _maybe_share_topk_indices(self, target_language_model: nn.Module) -> None:
         self._lim_topk_compactors = []
         draft_model = getattr(self.model, "model", None)
@@ -885,7 +905,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     self.query_start_loc_group[draft_index][: num_reqs + 1].copy_(common_attn_metadata.query_start_loc)
                     self.query_start_loc_group[draft_index][num_reqs + 1 :].fill_(0)
                     common_attn_metadata.query_start_loc = self.query_start_loc_group[draft_index][: num_reqs + 1]
+                    self._prepare_dcp_draft_dummy_metadata(common_attn_metadata, draft_index)
                     if self.dcp_size > 1 and draft_index > 0:
+                        num_reqs = common_attn_metadata.num_reqs
                         assert self.block_table_tensor_clone is not None, "block_table_tensor_clone is not init"
                         common_attn_metadata.block_table_tensor = self.block_table_tensor_clone[:num_reqs]
                     if dcp_manager is not None:
