@@ -26,7 +26,7 @@ from vllm.logger import logger
 from vllm.v1.engine.core import DPEngineCoreProc
 from vllm.v1.request import Request
 
-from vllm_ascend.ascend_config import DyntraLBConfig, get_ascend_config, init_ascend_config
+from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.core.dyntra_lb_scheduler import (
     diagnostics_enabled,
     get_dyntra_lb_request_block_num,

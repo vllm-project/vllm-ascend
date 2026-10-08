@@ -1342,7 +1342,7 @@ class ProfilingChunkScheduler(Scheduler):
 
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
-        if self._profiling_timing_done:
+        if getattr(self, "_profiling_timing_done", False) and scheduler_output is not None:
             scheduler_output.disable_profiling_timing = True
         return scheduler_output
 
