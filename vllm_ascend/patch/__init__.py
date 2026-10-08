@@ -101,6 +101,32 @@
 #       Remove this patch if upstream exposes a platform allocator capability hook
 #       for sleep mode validation.
 #
+# ** 2a. File: platform/patch_compilation_cache.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.compilation.decorators._try_load_aot_compiled_fn`
+#      `vllm.compilation.decorators._support_torch_compile`
+#      `vllm.compilation.backends.CompilerManager.initialize_cache`
+#    Why:
+#       vLLM's per-rank cache directory (`rank_{rank}_{dp_rank}`) does not
+#       identify the active device. External DP and internal DP launches can
+#       therefore reuse the same cache entry for the same rank while mapping
+#       that rank to different logical NPUs. AOT artifacts can retain NPU
+#       device state, which can make compiled constants and runtime tensors
+#       land on different NPUs.
+#    How:
+#       Add the current NPU index as a `dev{device}` directory immediately
+#       after each per-rank vLLM compile-cache directory. Redirect AOT loads,
+#       AOT saves, and `CompilerManager` cache initialization to that isolated
+#       path. Keep non-NPU and non-vLLM cache paths unchanged.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/38962 added a device index to
+#       upstream cache paths, but PR #53304 reverted it because the generic
+#       accelerator lookup regressed CPU execution. This patch applies the
+#       isolation only when an NPU is available.
+#    Future Plan:
+#       Remove this patch once upstream provides a platform-safe, device-aware
+#       compile-cache key that is shared by AOT and normal compile caches.
+#
 # ** 3. File: platform/patch_deepseek_v4_thinking.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.tokenizers.deepseek_v4.get_deepseek_v4_tokenizer`
