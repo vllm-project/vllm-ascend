@@ -36,7 +36,7 @@ from vllm_ascend.ops.fused_moe.dataclass.shared_experts import (
 )
 from vllm_ascend.ops.fused_moe.moe_utils import _pad_tokens_with_cat
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.utils import npu_stream_switch, shared_experts_calculation_stream
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, npu_stream_switch, shared_experts_calculation_stream
 
 # CANN uses 36 to select FP8 E4M3FN output for situ_mx_quant.
 SITU_MX_DST_TYPE_E4M3FN = 36
@@ -140,10 +140,12 @@ class AscendSharedExperts:
             return
         if not get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_MXFP):
             return
-        if self.quant_type != QuantType.W8A8MXFP:
-            # Only MXFP8 is implemented: its shared weights rebuild cheaply
-            # from the post-processed linear buffers. Packed-FP4 schemes
-            # (W4A8MXFP/W4A4MXFP) would need a dedicated NZ_C0_32 rebuild.
+        if self.quant_type not in (QuantType.W8A8MXFP, QuantType.W4A4MXFP):
+            # Only MXFP8 and MXFP4 are implemented. Their shared weights
+            # rebuild cheaply from the post-processed linear buffers: MXFP8
+            # needs an (out, in) transpose, packed MXFP4 additionally needs the
+            # same FRACTAL_NZ (w1) / FRACTAL_NZ_C0_32 (w2) rebuild as the
+            # routed experts.
             logger.info_once(
                 "MegaMoe shared-expert fusion is not implemented for quant type %s; "
                 "keeping the separate shared-expert forward.",
@@ -227,30 +229,48 @@ class AscendSharedExperts:
         """Rebuild one shared linear into the A5 MegaMoe layout.
 
         MegaMoe expects (out, in) tensors while the processed linear buffer is
-        (in, out) NZ, so a transpose+contiguous materializes the correct ND
+        (in, out) ND, so a transpose+contiguous materializes the correct ND
         layout; the per-group scale becomes (n, k//2, 2), matching the routed
-        per-expert scale shape.
+        per-expert scale shape. Packed MXFP4 additionally applies the same
+        format casts as the routed experts in the W4A4 MoE method: w1 stays
+        FRACTAL_NZ and w2 is rebuilt as FRACTAL_NZ_C0_32 on an fp8 carrier,
+        and the byte-stored E8M0 scales are viewed with their semantic dtype.
         """
         if self._megamoe_shared_fusion_disabled:
             return
-        padding = vars(linear).get("mxfp8_tp_padding", (0, 0))
+        padding = vars(linear).get("mxfp8_tp_padding", vars(linear).get("mxfp4_tp_padding", (0, 0)))
         if padding != (0, 0):
             self._disable_megamoe_shared_fusion(
                 f"padded shared-expert weights {padding} do not match the routed "
                 "intermediate size required by the MegaMoe layout"
             )
             return
-        expected_weight_shape = (
-            (
-                2 * self.moe_config.intermediate_size_per_partition,
-                self.moe_config.hidden_dim,
+        packed_fp4 = self.quant_type == QuantType.W4A4MXFP
+        if packed_fp4:
+            # Packed FP4 stores two logical K values per byte.
+            expected_weight_shape = (
+                (
+                    2 * self.moe_config.intermediate_size_per_partition,
+                    self.moe_config.hidden_dim // 2,
+                )
+                if slot == "w1"
+                else (
+                    self.moe_config.hidden_dim,
+                    self.moe_config.intermediate_size_per_partition // 2,
+                )
             )
-            if slot == "w1"
-            else (
-                self.moe_config.hidden_dim,
-                self.moe_config.intermediate_size_per_partition,
+        else:
+            expected_weight_shape = (
+                (
+                    2 * self.moe_config.intermediate_size_per_partition,
+                    self.moe_config.hidden_dim,
+                )
+                if slot == "w1"
+                else (
+                    self.moe_config.hidden_dim,
+                    self.moe_config.intermediate_size_per_partition,
+                )
             )
-        )
         weight = linear.weight.data.transpose(0, 1).contiguous()
         scale = linear.weight_scale.data.transpose(0, 1).contiguous()
         if tuple(weight.shape) != expected_weight_shape:
@@ -259,6 +279,22 @@ class AscendSharedExperts:
                 f"routed expert layout {expected_weight_shape}"
             )
             return
+        if packed_fp4:
+            # Mirror the routed-expert weight rebuild: gate/up (w1) is cast to
+            # FRACTAL_NZ directly, down (w2) goes through the packed-FP4 →
+            # fp8-carrier FRACTAL_NZ_C0_32 conversion.
+            if slot == "w1":
+                weight = torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ)
+            else:
+                weight = torch_npu.npu_format_cast(
+                    weight,
+                    ACL_FORMAT_FRACTAL_NZ,
+                    customize_dtype=torch.float8_e4m3fn,
+                    input_dtype=torch_npu.float4_e2m1fn_x2,
+                )
+            # Checkpoint E8M0 scales are stored as bytes; CANN MegaMoe
+            # requires their semantic dtype.
+            scale = scale.view(torch.float8_e8m0fnu)
         self._megamoe_shared_parts[slot] = weight
         self._megamoe_shared_parts[slot + "_scale"] = scale
         self._maybe_finish_megamoe_shared_weights()

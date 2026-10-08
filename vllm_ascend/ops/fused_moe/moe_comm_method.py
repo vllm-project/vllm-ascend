@@ -552,12 +552,8 @@ class FusedMC2CommImpl(MoECommMethod):
             x_active_mask=x_active_mask,
             weight1_type=weight_type,
             weight2_type=weight_type,
-<<<<<<< HEAD
-            **layer.mega_moe_activation_kwargs,
-=======
             **shared_kwargs,
-            **activation_kwargs,
->>>>>>> 57859a07d ([Feature] Fuse the shared expert into the A5 MegaMoe operator)
+            **layer.mega_moe_activation_kwargs,
         )
         # NOTE: self.expert_token_nums is only used by the
         # mega_moe path (enable_fused_mc2 == 1) as a
