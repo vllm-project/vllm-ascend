@@ -13,7 +13,7 @@
 #include "opdev/op_executor.h"
 
 namespace l0op {
-const std::array<const aclTensor *, 3> ChunkGatedDeltaRuleFwdH(
+const std::array<const aclTensor *, 3> ChunkGatedDeltaRuleFwdHVllm(
     const aclTensor *k,
     const aclTensor *w,
     const aclTensor *u,

@@ -9,11 +9,11 @@
 
 /*!
  * \file chunk_gated_delta_rule_fwd_h_struct.h
- * \brief Plain tiling data struct for chunk_gated_delta_rule_fwd_h.
+ * \brief Plain tiling data struct for chunk_gated_delta_rule_fwd_h_vllm.
  *
  * The aclnn/ascendc framework auto-generates a kernel-side tiling struct named
  * ChunkGatedDeltaRuleFwdHTilingData (global scope) from the BEGIN_TILING_DATA_DEF
- * macro in chunk_gated_delta_rule_fwd_h_tiling.h. The fast kernel launch extension
+ * macro in chunk_gated_delta_rule_fwd_h_vllm_tiling.h. The fast kernel launch extension
  * compiles the kernel standalone (without that auto-generated header), so it provides
  * the same plain struct here. The field order/types mirror the macro definition so the
  * kernel/scheduler can read it the same way, and so the struct can be passed by value

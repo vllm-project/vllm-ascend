@@ -8,7 +8,7 @@
  */
 
 /*!
- * \file chunk_gated_delta_rule_fwd_h_tiling.h
+ * \file chunk_gated_delta_rule_fwd_h_vllm_tiling.h
  * \brief
  */
 
@@ -46,7 +46,7 @@ TILING_DATA_FIELD_DEF(int64_t, numSeqWorkspaceOffset);
 TILING_DATA_FIELD_DEF(int64_t, numChunksWorkspaceOffset);
 END_TILING_DATA_DEF;
 
-REGISTER_TILING_DATA_CLASS(ChunkGatedDeltaRuleFwdH, ChunkGatedDeltaRuleFwdHTilingData)
+REGISTER_TILING_DATA_CLASS(ChunkGatedDeltaRuleFwdHVllm, ChunkGatedDeltaRuleFwdHTilingData)
 
 struct ChunkGatedDeltaRuleFwdHCompileInfo {};
 } // namespace optiling

@@ -194,9 +194,10 @@ def test_chunk_gated_delta_rule_fwd_threads_prebuilt_chunk_offsets(
             raising=False,
         )
         monkeypatch.setattr(
-            chunk,
-            "fla_chunk_gated_delta_rule_fwd_h",
+            torch.ops._C_ascend,
+            "chunk_gated_delta_rule_fwd_h_vllm",
             lambda *args, **kwargs: (_DummyTensor("h"), _DummyTensor("v_new"), _DummyTensor("final_state")),
+            raising=False,
         )
         monkeypatch.setattr(
             torch.ops._C_ascend,
@@ -264,7 +265,7 @@ def test_chunk_gated_delta_rule_fwd_uses_prebuilt_metadata_without_runtime_tolis
     beta = _DummyTensor("beta")
     initial_state = _DummyTensor("initial_state")
 
-    captured: dict[str, tuple[int, ...] | None] = {}
+    captured: dict[str, object] = {}
 
     monkeypatch.setattr(chunk, "get_forward_context", lambda: type("Ctx", (), {"attn_metadata": None})())
     monkeypatch.setattr(
@@ -277,17 +278,12 @@ def test_chunk_gated_delta_rule_fwd_uses_prebuilt_metadata_without_runtime_tolis
     monkeypatch.setattr(chunk, "solve_tril", lambda *args, **kwargs: _DummyTensor("A_solved"))
     monkeypatch.setattr(chunk, "recompute_w_u_fwd", lambda *args, **kwargs: (_DummyTensor("w"), _DummyTensor("u")))
     monkeypatch.setattr(
-        chunk,
-        "fla_chunk_gated_delta_rule_fwd_h",
+        torch.ops._C_ascend,
+        "chunk_gated_delta_rule_fwd_h_vllm",
         lambda *args, **kwargs: (
-            captured.update(
-                {
-                    "cu_seqlens": kwargs["cu_seqlens"],
-                    "chunk_indices": kwargs["chunk_indices"],
-                }
-            )
-            or (_DummyTensor("h"), _DummyTensor("v_new"), _DummyTensor("final_state"))
+            captured.update(kwargs) or (_DummyTensor("h"), _DummyTensor("v_new"), _DummyTensor("final_state"))
         ),
+        raising=False,
     )
     monkeypatch.setattr(
         torch.ops._C_ascend,
@@ -316,6 +312,12 @@ def test_chunk_gated_delta_rule_fwd_uses_prebuilt_metadata_without_runtime_tolis
 
     assert captured["cu_seqlens"] == prebuilt_meta.cu_seqlens_host
     assert captured["chunk_indices"] == prebuilt_meta.chunk_indices_chunk64_host
+    assert captured["initial_state"] is initial_state
+    assert captured["output_final_state"] is True
+    assert captured["save_new_value"] is True
+    assert captured["use_exp2"] is False
+    assert captured["transpose_state_layout"] is False
+    assert "state_v_first" not in captured
 
 
 def test_chunk_gated_delta_rule_fwd_pcp_chaining_subtracts_initial_state(
@@ -381,9 +383,10 @@ def test_chunk_gated_delta_rule_fwd_pcp_chaining_subtracts_initial_state(
     monkeypatch.setattr(chunk, "solve_tril", lambda *a, **kw: _DummyTensor("A_solved"))
     monkeypatch.setattr(chunk, "recompute_w_u_fwd", lambda *a, **kw: (_DummyTensor("w"), _DummyTensor("u")))
     monkeypatch.setattr(
-        chunk,
-        "fla_chunk_gated_delta_rule_fwd_h",
+        torch.ops._C_ascend,
+        "chunk_gated_delta_rule_fwd_h_vllm",
         lambda *a, **kw: (_DummyTensor("h"), _DummyTensor("v_new"), rank0_fs),
+        raising=False,
     )
     monkeypatch.setattr(
         chunk,
@@ -414,3 +417,77 @@ def test_chunk_gated_delta_rule_fwd_pcp_chaining_subtracts_initial_state(
     # Sequential: Φ_1·(Φ_0·s0 + p_0) + p_1
     expected = torch.matmul(phi_1, torch.matmul(phi_0, s0) + p_0) + p_1
     torch.testing.assert_close(final_state, expected, rtol=1e-4, atol=1e-4)
+
+
+def test_chunk_gated_delta_rule_fwd_compacts_empty_segments_and_restores_states(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    initial_state = torch.arange(3 * 2 * 4 * 4, dtype=torch.float32).view(3, 2, 4, 4)
+    keep_meta = torch.tensor([True, False, True])
+    compact_final_state = torch.stack([torch.full((2, 4, 4), 11.0), torch.full((2, 4, 4), -7.0)])
+    expected_final_state = torch.stack([compact_final_state[0], initial_state[1], compact_final_state[1]])
+    prebuilt_meta = type(
+        "PrebuiltMeta",
+        (),
+        {
+            "block_indices_cumsum": None,
+            "cu_seqlens_host": (0, 4, 4, 7),
+            "cu_seqlens_kern": (0, 4, 7),
+            "keep_meta": keep_meta,
+            "chunk_indices_chunk64_host": (0, 0, 1, 0),
+            "chunk_indices_chunk64": torch.tensor([[0, 0], [1, 0]], dtype=torch.int32),
+            "chunk_offsets_chunk64": torch.tensor([0, 1, 1, 2], dtype=torch.int32),
+            "update_chunk_offsets_chunk64": None,
+            "final_chunk_indices_chunk64": None,
+            "chunk_indices_large_block": None,
+        },
+    )()
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(chunk, "get_forward_context", lambda: type("Ctx", (), {"attn_metadata": None})())
+    monkeypatch.setattr(
+        chunk,
+        "get_pcp_group",
+        lambda: type("Group", (), {"world_size": 1, "rank_in_group": 0})(),
+    )
+    monkeypatch.setattr(chunk, "chunk_local_cumsum", lambda *args, **kwargs: _DummyTensor("g_cumsum"))
+    monkeypatch.setattr(chunk, "chunk_scaled_dot_kkt_fwd", lambda *args, **kwargs: _DummyTensor("A"))
+    monkeypatch.setattr(chunk, "solve_tril", lambda *args, **kwargs: _DummyTensor("A_solved"))
+    monkeypatch.setattr(chunk, "recompute_w_u_fwd", lambda *args, **kwargs: (_DummyTensor("w"), _DummyTensor("u")))
+    monkeypatch.setattr(
+        torch.ops._C_ascend,
+        "chunk_gated_delta_rule_fwd_h_vllm",
+        lambda *args, **kwargs: (
+            captured.update(kwargs) or (_DummyTensor("h"), _DummyTensor("v_new"), compact_final_state)
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        torch.ops._C_ascend,
+        "chunk_fwd_o_vllm",
+        lambda *args, **kwargs: _DummyTensor("o_ascend"),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        torch.Tensor,
+        "tolist",
+        lambda self: pytest.fail("runtime should not convert device tensors to host tuples"),
+    )
+    result = chunk.chunk_gated_delta_rule_fwd(
+        q=_DummyTensor("q"),
+        k=_DummyTensor("k"),
+        v=_DummyTensor("v"),
+        g=_DummyTensor("g"),
+        beta=_DummyTensor("beta"),
+        scale=1.0,
+        initial_state=initial_state,
+        output_final_state=True,
+        cu_seqlens=torch.tensor([0, 4, 4, 7], dtype=torch.int32),
+        prebuilt_meta=prebuilt_meta,
+    )
+    kernel_initial_state = captured["initial_state"]
+    assert isinstance(kernel_initial_state, torch.Tensor)
+    assert kernel_initial_state.dtype == torch.float32
+    torch.testing.assert_close(kernel_initial_state, initial_state[keep_meta])
+    assert captured["cu_seqlens"] == prebuilt_meta.cu_seqlens_kern
+    assert captured["chunk_indices"] == prebuilt_meta.chunk_indices_chunk64_host
+    torch.testing.assert_close(result[3], expected_final_state)

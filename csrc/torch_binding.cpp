@@ -1978,7 +1978,7 @@ void npu_scatter_nd_update_sk(
     return;
 }
 
-std::tuple<at::Tensor, at::Tensor, at::Tensor> chunk_gated_delta_rule_fwd_h(
+std::tuple<at::Tensor, at::Tensor, at::Tensor> chunk_gated_delta_rule_fwd_h_vllm(
     const at::Tensor & k,
     const at::Tensor & w,
     const at::Tensor & u,
@@ -2020,7 +2020,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> chunk_gated_delta_rule_fwd_h(
     at::Tensor final_state_out;
     if (output_final_state_) {
         int N = cu_seqlens.has_value() ? cu_seqlens->size() - 1 : B;
-        auto state_options = initial_state.has_value() ? initial_state->options() : h_out.options();
+        auto state_options = initial_state.has_value() ? initial_state->options() : h_out.options().dtype(at::kFloat);
         final_state_out = at::empty({N, HV, K, V}, state_options);
     } else {
         final_state_out = at::empty({1}, k.options());
@@ -2031,7 +2031,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> chunk_gated_delta_rule_fwd_h(
     bool transpose_state_layout_ = transpose_state_layout.value_or(false);
 
     EXEC_NPU_CMD(
-        aclnnChunkGatedDeltaRuleFwdH,
+        aclnnChunkGatedDeltaRuleFwdHVllm,
         k, w, u, g_,
         gk_, initial_state_, output_final_state_, chunk_size_, save_new_value_,
         cu_seqlens, chunk_indices, use_exp2_, transpose_state_layout_,
@@ -2846,9 +2846,9 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("npu_recurrent_gated_delta_rule_310", torch::kPrivateUse1, &vllm_ascend::npu_recurrent_gated_delta_rule_310);
 
     ops.def(
-        "chunk_gated_delta_rule_fwd_h(Tensor k, Tensor w, Tensor u, Tensor? g=None, *, Tensor? gk=None, Tensor? initial_state=None, bool? output_final_state=False, int? chunk_size=None, bool? save_new_value=True, int[]? cu_seqlens=None, int[]? chunk_indices=None, bool? use_exp2=False, bool? transpose_state_layout=False) -> (Tensor h_out, Tensor v_new_out, Tensor final_state_out)"
+        "chunk_gated_delta_rule_fwd_h_vllm(Tensor k, Tensor w, Tensor u, Tensor? g=None, *, Tensor? gk=None, Tensor? initial_state=None, bool? output_final_state=False, int? chunk_size=None, bool? save_new_value=True, int[]? cu_seqlens=None, int[]? chunk_indices=None, bool? use_exp2=False, bool? transpose_state_layout=False) -> (Tensor h_out, Tensor v_new_out, Tensor final_state_out)"
     );
-    ops.impl("chunk_gated_delta_rule_fwd_h", torch::kPrivateUse1, &vllm_ascend::chunk_gated_delta_rule_fwd_h);
+    ops.impl("chunk_gated_delta_rule_fwd_h_vllm", torch::kPrivateUse1, &vllm_ascend::chunk_gated_delta_rule_fwd_h_vllm);
 
     ops.def(
         "chunk_fwd_o_vllm(Tensor q, Tensor k, Tensor v, Tensor h, float scale, *, Tensor? g=None, Tensor? g_gamma=None, int[]? cu_seqlens=None, int[]? chunk_indices=None, int? chunk_size=None, bool? transpose_state_layout=False) -> Tensor"
@@ -3607,9 +3607,9 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("npu_lightning_indexer_quant", torch::kPrivateUse1, &vllm_ascend::npu_lightning_indexer_quant);
 
     ops.def(
-        "chunk_gated_delta_rule_fwd_h(Tensor k, Tensor w, Tensor u, Tensor? g=None, *, Tensor? gk=None, Tensor? initial_state=None, bool? output_final_state=False, int? chunk_size=None, bool? save_new_value=True, int[]? cu_seqlens=None, int[]? chunk_indices=None, bool? use_exp2=False, bool? transpose_state_layout=False) -> (Tensor h_out, Tensor v_new_out, Tensor final_state_out)"
+        "chunk_gated_delta_rule_fwd_h_vllm(Tensor k, Tensor w, Tensor u, Tensor? g=None, *, Tensor? gk=None, Tensor? initial_state=None, bool? output_final_state=False, int? chunk_size=None, bool? save_new_value=True, int[]? cu_seqlens=None, int[]? chunk_indices=None, bool? use_exp2=False, bool? transpose_state_layout=False) -> (Tensor h_out, Tensor v_new_out, Tensor final_state_out)"
     );
-    ops.impl("chunk_gated_delta_rule_fwd_h", torch::kPrivateUse1, &vllm_ascend::chunk_gated_delta_rule_fwd_h);
+    ops.impl("chunk_gated_delta_rule_fwd_h_vllm", torch::kPrivateUse1, &vllm_ascend::chunk_gated_delta_rule_fwd_h_vllm);
 
     ops.def(
         "chunk_fwd_o_vllm(Tensor q, Tensor k, Tensor v, Tensor h, float scale, *, Tensor? g=None, Tensor? g_gamma=None, int[]? cu_seqlens=None, int[]? chunk_indices=None, int? chunk_size=None, bool? transpose_state_layout=False) -> Tensor"

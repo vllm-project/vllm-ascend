@@ -7,8 +7,8 @@
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  * See LICENSE in the root of the software repository for the full text of the License.
  */
-#include "aclnn_chunk_gated_delta_rule_fwd_h.h"
-#include "chunk_gated_delta_rule_fwd_h.h"
+#include "aclnn_chunk_gated_delta_rule_fwd_h_vllm.h"
+#include "chunk_gated_delta_rule_fwd_h_vllm.h"
 #include <dlfcn.h>
 #include <new>
 
@@ -235,7 +235,7 @@ static aclnnStatus CheckParams(ChunkGatedDeltaRuleFwdHParams params)
     return ACLNN_SUCCESS;
 }
 
-aclnnStatus aclnnChunkGatedDeltaRuleFwdHGetWorkspaceSize(
+aclnnStatus aclnnChunkGatedDeltaRuleFwdHVllmGetWorkspaceSize(
     const aclTensor *k,
     const aclTensor *w,
     const aclTensor *u,
@@ -272,7 +272,7 @@ aclnnStatus aclnnChunkGatedDeltaRuleFwdHGetWorkspaceSize(
                                          vNewOut,
                                          finalStateOut};
     // Standard syntax, Check parameters.
-    L2_DFX_PHASE_1(aclnnChunkGatedDeltaRuleFwdH,
+    L2_DFX_PHASE_1(aclnnChunkGatedDeltaRuleFwdHVllm,
                    DFX_IN(k, w, u, gOptional, gkOptional, initalStateOptional, cuSeqlensOptional, chunkIndicesOptional),
                    DFX_OUT(hOut, vNewOut, finalStateOut));
     auto uniqueExecutor = CREATE_EXECUTOR();
@@ -286,7 +286,7 @@ aclnnStatus aclnnChunkGatedDeltaRuleFwdHGetWorkspaceSize(
         params.gOptional = MakeNeutralGate(params, executorPtr);
         CHECK_RET(params.gOptional != nullptr, ACLNN_ERR_INNER_NULLPTR);
     }
-    auto result = l0op::ChunkGatedDeltaRuleFwdH(params.k, params.w, params.u, params.gOptional, params.gkOptional, params.initalStateOptional, params.cuSeqlensOptional, params.chunkIndicesOptional, params.outputFinalState, params.chunkSize, params.hOut, params.vNewOut, params.finalStateOut, executorPtr);
+    auto result = l0op::ChunkGatedDeltaRuleFwdHVllm(params.k, params.w, params.u, params.gOptional, params.gkOptional, params.initalStateOptional, params.cuSeqlensOptional, params.chunkIndicesOptional, params.outputFinalState, params.chunkSize, params.hOut, params.vNewOut, params.finalStateOut, executorPtr);
     CHECK_RET(result[0] != nullptr, ACLNN_ERR_PARAM_NULLPTR);
 
     // If the output tensor is non-contiguous, convert the calculated contiguous tensor to non-contiguous.
@@ -306,11 +306,11 @@ aclnnStatus aclnnChunkGatedDeltaRuleFwdHGetWorkspaceSize(
 }
 
 
-aclnnStatus aclnnChunkGatedDeltaRuleFwdH(void *workspace, uint64_t workspaceSize, aclOpExecutor *executor, aclrtStream stream)
+aclnnStatus aclnnChunkGatedDeltaRuleFwdHVllm(void *workspace, uint64_t workspaceSize, aclOpExecutor *executor, aclrtStream stream)
 {
-    L2_DFX_PHASE_2(aclnnChunkGatedDeltaRuleFwdH);
+    L2_DFX_PHASE_2(aclnnChunkGatedDeltaRuleFwdHVllm);
     CHECK_COND(CommonOpExecutorRun(workspace, workspaceSize, executor, stream) == ACLNN_SUCCESS, ACLNN_ERR_INNER,
-               "This is an error in ChunkGatedDeltaRuleFwdH launch aicore.");
+               "This is an error in ChunkGatedDeltaRuleFwdHVllm launch aicore.");
     return ACLNN_SUCCESS;
 }
 
