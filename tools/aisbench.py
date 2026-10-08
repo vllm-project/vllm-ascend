@@ -64,10 +64,6 @@ class AisbenchRunner:
             ]
         if self.num_prompts:
             aisbench_cmd.extend(["--num-prompts", str(self.num_prompts)])
-        if self.num_warmups is not None:
-            aisbench_cmd.extend(["--num-warmups", str(self.num_warmups)])
-        if self.work_dir is not None:
-            aisbench_cmd.extend(["--work-dir", self.work_dir])
         self.stdout_file = f"output_{self.task_type}.txt"
         aisbench_cmd = " ".join(aisbench_cmd) + f" --debug > {self.stdout_file} 2>&1 &"
         print(f"running aisbench cmd: {aisbench_cmd}")
@@ -90,8 +86,6 @@ class AisbenchRunner:
         self.request_conf = aisbench_config["request_conf"]
         self.dataset_conf = aisbench_config.get("dataset_conf")
         self.num_prompts = aisbench_config.get("num_prompts")
-        self.num_warmups = aisbench_config.get("num_warmups")
-        self.work_dir = aisbench_config.get("work_dir")
         self.max_out_len = aisbench_config["max_out_len"]
         self.batch_size = aisbench_config["batch_size"]
         self.request_rate = aisbench_config.get("request_rate", 0)
