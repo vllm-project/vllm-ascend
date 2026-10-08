@@ -20,7 +20,6 @@ from torch import fx as fx
 from vllm.compilation.passes.inductor_pass import get_pass_context
 from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
 from vllm.config import VllmConfig
-from vllm.config.utils import Range
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 
@@ -35,9 +34,6 @@ class GraphFusionPassManager:
 
     def __init__(self):
         self.passes: list[VllmInductorPass] = []
-        # npugraph_ex registers PatternMatcher passes itself. Direct graph
-        # rewrites have no NGE equivalent and are run explicitly by both paths.
-        self.graph_passes: list[VllmInductorPass] = []
 
     def __call__(self, graph: fx.Graph) -> fx.Graph:
         compile_range = get_pass_context().compile_range
@@ -45,16 +41,8 @@ class GraphFusionPassManager:
         for pass_ in self.passes:
             if pass_.is_applicable_for_range(compile_range):
                 pass_(graph)
-        self.apply_graph_passes(graph, compile_range)
         graph.recompile()
         return graph
-
-    def apply_graph_passes(self, graph: fx.GraphModule, compile_range: Range) -> None:
-        for pass_ in self.graph_passes:
-            if pass_.is_applicable_for_range(compile_range):
-                pass_(graph)
-        if self.graph_passes:
-            graph.recompile()
 
     def add(self, pass_: VllmInductorPass):
         assert isinstance(pass_, VllmInductorPass)
@@ -89,4 +77,4 @@ class GraphFusionPassManager:
         ):
             from .passes.mm_reduce_scatter_fusion_pass import MatmulReduceScatterFusionPass
 
-            self.graph_passes.append(MatmulReduceScatterFusionPass(config))
+            self.passes.append(MatmulReduceScatterFusionPass(config))

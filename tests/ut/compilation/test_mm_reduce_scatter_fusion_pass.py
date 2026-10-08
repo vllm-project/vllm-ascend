@@ -32,6 +32,10 @@ def _build_graph(
     reduce_dim: int = REDUCE_DIM,
     extra_gemm_user: bool = False,
     dtype: torch.dtype = torch.bfloat16,
+    world_size: int = TP_SIZE,
+    group_name: str = TP_GROUP_NAME,
+    pad_value: float = 0.0,
+    valid_padding: bool = True,
 ) -> fx.GraphModule:
     graph = fx.Graph()
     fake_mode = FakeTensorMode()
@@ -51,15 +55,17 @@ def _build_graph(
     x = placeholder("x", num_tokens, reduce_dim)
     weight = placeholder("weight", OUTPUT_DIM, reduce_dim)
     bias_node = placeholder("bias", OUTPUT_DIM) if bias else None
-    gemm = call(GEMM_OP, (x, weight, bias_node), num_tokens, OUTPUT_DIM)
+    gemm_args = (x, weight, bias_node) if bias else (x, weight)
+    gemm = call(GEMM_OP, gemm_args, num_tokens, OUTPUT_DIM)
     scattered = gemm
     reduced_rows = num_tokens
     if pad_rows is not None:
         reduced_rows += pad_rows
-        scattered = call(PAD_OP, (gemm, [0, 0, 0, pad_rows], 0.0), reduced_rows, OUTPUT_DIM)
+        widths = [0, 0, 0, pad_rows] if valid_padding else [0, 1, 0, pad_rows]
+        scattered = call(PAD_OP, (gemm, widths, pad_value), reduced_rows, OUTPUT_DIM)
     reduce_scatter = call(
         REDUCE_SCATTER_OP,
-        (scattered, dim, TP_SIZE, TP_GROUP_NAME),
+        (scattered, dim, world_size, group_name),
         reduced_rows // TP_SIZE,
         OUTPUT_DIM,
     )
@@ -83,7 +89,9 @@ class TestMatmulReduceScatterFusionPass(TestBase):
             patch(f"{module}.get_tp_group", return_value=tp_group),
             patch(f"{module}.get_tensor_model_parallel_world_size", return_value=TP_SIZE),
         ):
-            return MatmulReduceScatterFusionPass(VllmConfig())
+            config = VllmConfig()
+            config.model_config = MagicMock(dtype=torch.bfloat16)
+            return MatmulReduceScatterFusionPass(config)
 
     def _apply(self, graph_module: fx.GraphModule) -> None:
         tp_group = MagicMock()
@@ -125,8 +133,12 @@ class TestMatmulReduceScatterFusionPass(TestBase):
             {"bias": True},
             {"extra_gemm_user": True},
             {"dim": 1},
+            {"world_size": 4},
+            {"group_name": "tp:1"},
             {"reduce_dim": 128},
             {"dtype": torch.float32},
+            {"pad_value": 1.0},
+            {"valid_padding": False},
         ):
             with self.subTest(**kwargs):
                 graph_module = _build_graph(**kwargs)
