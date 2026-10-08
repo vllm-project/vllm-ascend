@@ -1851,11 +1851,10 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
         "dump_config",
         "dump_config_path",
         # pure-derived fields (derive_and_validate computes them; user input would residualize)
-        # NOTE: enable_shared_expert_dp/enable_sparse_sfa_c8/enable_sparse_li_c8/enable_sparse_li_c4/
-        # are NOT here — they are user-input fields that derive_and_validate
-        # augments (self.x = self.x and condition), so the user must be able to
-        # pass them. Only pure-derived fields (no user input) are stripped.
+        # enable_sparse_li_c4 is selected by attention_config.indexer_kv_dtype
+        # and the model's sparse-attention support,not additional config
         "enable_sparse_sfa_turboquant",
+        "enable_sparse_li_c4",
         "enable_sp_by_pass",
         "pd_tp_ratio",
         "pd_head_ratio",

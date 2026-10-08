@@ -473,7 +473,7 @@ class NPUModelRunner(GPUModelRunner):
                 self.c8_k_scale_cache_dtype = torch.float16
         if self.enable_sparse_sfa_c8:
             self.c8_cache_dtype = kv_cache_dtype_str_to_dtype(
-                vllm_config.cache_config.cache_dtype, 
+                vllm_config.cache_config.cache_dtype,
                 vllm_config.model_config
             )
 
