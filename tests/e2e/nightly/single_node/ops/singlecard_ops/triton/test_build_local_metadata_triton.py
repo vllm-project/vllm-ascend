@@ -366,9 +366,8 @@ def test_build_local_metadata_tail_overwrites_stale_data(device: str) -> None:
 @pytest.mark.parametrize("device", DEVICES)
 @torch.inference_mode()
 def test_build_local_metadata_default_block_matches_capacity(device: str) -> None:
-    """The default block is the production scheduler capacity: the builder
-    allocates local_query_start_loc with max_num_seqs + 1 elements, so the
-    kernel's default BLOCK must divide it evenly (SUB_N=8 fold)."""
+    """The wrapper's default block must satisfy the SUB_N=8 fold contract
+    (block % 8 == 0); production derives block from the actual buffer
+    capacity, which dsa_cp.py keeps aligned to a multiple of 8."""
     assert DSA_LOCAL_METADATA_BLOCK == 512
-    assert (DSA_LOCAL_METADATA_BLOCK + 1) == 513
     assert DSA_LOCAL_METADATA_BLOCK % 8 == 0
