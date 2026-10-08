@@ -248,7 +248,11 @@ def eplb_worker_config(tmp_path):
         ),
         encoding="utf-8",
     )
-    with patch("vllm.config.parallel.current_platform.is_cuda_alike", return_value=True):
+    # PCP config validation requires MRV2, independent of the CPU UT environment.
+    with (
+        patch("vllm.envs.VLLM_USE_V2_MODEL_RUNNER", True),
+        patch("vllm.config.parallel.current_platform.is_cuda_alike", return_value=True),
+    ):
         model_config = ModelConfig(
             model=str(tmp_path), skip_tokenizer_init=True, dtype="float32", enforce_eager=True, max_model_len=128
         )
