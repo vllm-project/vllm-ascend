@@ -14,6 +14,7 @@ from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_
 
 # Bound the live [token, local-expert] comparison for one TopK slot. The
 # program count and contiguous token ownership are independent of this tile.
+MIN_TOKEN_TILE = 2
 MAX_TOKEN_TILE = 512
 MAX_COMPARISON_ELEMENTS = 8192
 
@@ -80,16 +81,17 @@ def _eplb_map_grid_record_kernel(
 
 def _select_tiling(tokens: int, local_expert_count: int, vector_core_num: int) -> tuple[int, int, int]:
     """Select independent program parallelism and per-slot comparison tile."""
-    block_p = triton.next_power_of_2(local_expert_count)
-    if block_p > MAX_COMPARISON_ELEMENTS:
+    block_p = 1 << (local_expert_count - 1).bit_length()
+    tile_limit = min(MAX_TOKEN_TILE, MAX_COMPARISON_ELEMENTS // block_p)
+    if tile_limit < MIN_TOKEN_TILE:
         raise ValueError("local physical expert count exceeds the comparison resource budget")
     num_grids = min(tokens, vector_core_num)
-    max_owned_tokens = triton.cdiv(tokens, num_grids)
-    token_tile = min(
-        MAX_TOKEN_TILE,
-        MAX_COMPARISON_ELEMENTS // block_p,
-        triton.next_power_of_2(max_owned_tokens),
-    )
+    # next_power_of_2(ceil(tokens / num_grids)), without a separate ceil.
+    owned_tile = 1 << ((tokens - 1) // num_grids).bit_length()
+    # Triton-Ascend 3.2.2 fails to lower singleton index tensors in this
+    # mapping kernel (TOKEN_TILE=1). Keep two lanes even for one owned token;
+    # token_mask excludes the extra lane from mapping and recording.
+    token_tile = min(tile_limit, max(MIN_TOKEN_TILE, owned_tile))
     return num_grids, block_p, token_tile
 
 

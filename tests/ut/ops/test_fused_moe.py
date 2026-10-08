@@ -956,6 +956,7 @@ def test_routed_experts_forward_impl_runs_current_flow(monkeypatch, return_with_
                 should_record_tensor=torch.tensor(False),
                 local_expert_count=2,
                 local_expert_start=2,
+                num_unpadded_tokens_tensors=None,
             )
             if v2_eplb
             else None
