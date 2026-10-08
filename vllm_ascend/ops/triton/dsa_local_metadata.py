@@ -1,44 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 """Fused Triton kernel for DSA context-parallel local token metadata.
 
-Replaces the next-power-of-2 Triton kernel in
-vllm_ascend/attention/context_parallel/dsa_cp.py::_build_local_token_metadata,
-whose BLOCK_NUM_REQS = next_power_of_2(num_reqs) changes every scheduling
-step and re-JITs the kernel each step (PR #15637 measured ~386us per
-recompilation). This implementation keeps a single cached binary per
-COMPUTE_START_POS variant by fixing the launch shape:
-
-- Fixed-capacity BLOCK: grid is always (1,) and BLOCK is always the
-  scheduler's max_num_seqs capacity (512 in production). The compiled
-  binary never depends on the runtime num_reqs value; active lanes are
-  selected by a runtime mask instead.
-- do_not_specialize on the three step-varying scalars (local_start,
-  local_end, num_reqs) kills Triton's divisible-by-16 / equals-1 int
-  specialization keys, so no scheduling step can re-specialize the kernel.
-- Full-capacity overwrite stores: lanes beyond num_reqs store 0, so the
-  whole output region is deterministic on return and callers may skip
-  their fill_(0) pre-zeroing of the output buffers.
-
-Ascend-specific lowering (910B):
-
-- int32 tl.minimum/tl.maximum/compare lower to scalar loops on Ascend;
-  the clamp/compare chain runs in fp32 to ride the vector SIMD units
-  (token offsets are < 2^24 and roundtrip losslessly through the fp32
-  mantissa; sp stays in the int32 domain as a pure integer expression).
-- 1-D tl.cumsum always degrades to a BLOCK-step scalar loop on 910B
-  (cumDim == lastDim). The vector is folded into a column-major
-  (SUB_N, COLS) view so cumsum runs on axis=0 (not the last dim) and
-  rides the vector units, then each column is compensated with the
-  prefix of the preceding columns' totals.
+See docs/dsa_local_metadata.md for the full description, semantics,
+constraints and Ascend-specific lowering notes.
 """
 
 import torch
 from vllm.triton_utils import tl, triton
 
-# max_num_seqs capacity from the production scheduler contract
-# (dsa_cp.py allocates local metadata buffers sized by scheduler_config
-# .max_num_seqs). A single fixed capacity keeps the kernel
-# compile-invariant across scheduling steps.
+# Wrapper fallback capacity; production derives block from the actual
+# buffer capacity (see docs/dsa_local_metadata.md).
 DSA_LOCAL_METADATA_BLOCK = 512
 
 
@@ -59,13 +30,9 @@ def build_local_metadata_kernel(
 ):
     """Fused local-token-metadata kernel; one BLOCK-lane vector pass.
 
-    Semantics (identical to the eager chain in dsa_cp.py):
-        lqs/lqe = clamp(qsl[i] / qsl[i+1], local_start, local_end)
-        local_query_start_loc = [0] + cumsum(lqe - lqs)
-        local_seq_lens[i] = (lql>0 & sl[i]>0) ? max(sl[i]-(qsl[i+1]-lqe), 0) : 0
-        start_pos_out[i]   = sl[i] - (qsl[i+1] - qsl[i])   (if enabled)
-    Lanes with i >= num_reqs store 0, so the full output buffers are
-    deterministic regardless of prior contents.
+    Semantics: see docs/dsa_local_metadata.md. Lanes with i >= num_reqs
+    store 0, so the full output buffers are deterministic regardless of
+    prior contents.
     """
     offs = tl.arange(0, BLOCK)
     # int32 vector < runtime int scalar lowers to a scalar compare loop on
@@ -87,16 +54,14 @@ def build_local_metadata_kernel(
     ls_f = local_start.to(tl.float32)
     le_f = local_end.to(tl.float32)
 
-    # Clamp chain in fp32 (int32 min/max lowers to scalar loops on Ascend).
     lqs = tl.minimum(tl.maximum(q_start, ls_f), le_f)
     lqe = tl.minimum(tl.maximum(q_end, ls_f), le_f)
     lql = lqe - lqs
 
-    # Output 1: [0] + inclusive cumsum of local query lens.
-    # Fold the vector into a column-major (SUB_N, COLS) view so cumsum
-    # runs on axis=0 (not the last dim) and rides the vector units; then
-    # compensate each column with the prefix of the preceding columns'
-    # totals. Reshape/trans stays in registers.
+    # Output 1: [0] + inclusive cumsum of local query lens, folded into a
+    # column-major (SUB_N, COLS) view so cumsum rides the vector units
+    # (see docs); each column is compensated with the prefix of the
+    # preceding columns' totals.
     x_col = tl.trans(tl.reshape(lql, (COLS, SUB_N)))  # (SUB_N, COLS) column-major
     cum_col = tl.cumsum(x_col, axis=0)  # vector path (not last dim)
     col_sums = tl.sum(x_col, axis=0)  # (COLS,) totals per column
@@ -146,14 +111,10 @@ def build_local_metadata(
 ):
     """Launch the fused local-token-metadata kernel.
 
-    The output buffers must be sized for the full capacity (BLOCK):
-    local_query_start_loc [block+1], local_seq_lens [block]. Every lane
-    is overwritten (tail beyond num_reqs stores 0), so the caller does
-    not need to pre-zero the buffers.
-
-    With num_reqs == 0 the outputs are all zeros by definition
-    ([0] + cumsum of an empty vector = 0), so the kernel launch is
-    skipped entirely and the buffers are zero-filled in one op.
+    Output buffers must be sized for the full capacity (block+1 / block)
+    and are fully overwritten — callers do not need to pre-zero. With
+    num_reqs == 0 the launch is skipped and the buffers are zero-filled.
+    See docs/dsa_local_metadata.md for the full contract.
     """
     # SUB_N x COLS fold requires the capacity to be a multiple of SUB_N.
     assert block % 8 == 0, f"block size {block} must be a multiple of 8"
