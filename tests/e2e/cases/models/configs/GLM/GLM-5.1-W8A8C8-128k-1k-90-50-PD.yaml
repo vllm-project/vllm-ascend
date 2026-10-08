@@ -105,7 +105,8 @@ templates:
       - "ascend"
       - --gpu-memory-utilization
       - "0.92"
-      - --enforce-eager
+      - --compilation-config
+      - '{"cudagraph_mode":"FULL", "cudagraph_capture_sizes": [ 1,2,4,8,16,32,64,128,256,512 ] }'
       - --enable-auto-tool-choice
       - --tool-call-parser
       - "glm47"
@@ -172,7 +173,8 @@ templates:
       - "ascend"
       - --gpu-memory-utilization
       - "0.92"
-      - --enforce-eager
+      - --compilation-config
+      - '{"cudagraph_mode":"FULL", "cudagraph_capture_sizes": [ 1,2,4,8,16,32,64,128,256,512 ] }'
       - --enable-auto-tool-choice
       - --tool-call-parser
       - "glm47"
