@@ -1,11 +1,13 @@
 from dataclasses import dataclass
 from enum import Enum
+from math import lcm
 from typing import NamedTuple
 
 import numpy as np
 import torch
 import torch_npu
 from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.distributed import get_dcp_group
 from vllm.forward_context import get_forward_context
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
@@ -29,14 +31,14 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     DCPImplMixin,
     DCPMetadataBuilderMixin,
 )
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.attention.utils import MLAPO_MAX_SUPPORTED_TOKENS, AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import (
     get_draft_graph_params,
     get_draft_graph_prefill_params,
     get_graph_params,
     update_graph_params_workspaces,
 )
-from vllm_ascend.ops.triton.sfa_cp import fused_sfa_dcp_lse_combine
+from vllm_ascend.ops.triton.dcp.dcp_a2a import fused_dcp_lse_combine
 from vllm_ascend.utils import weak_ref_tensors
 
 
@@ -73,6 +75,11 @@ class DCPChunkedContextMetadata(ChunkedContextMetadata):
     padded_local_cu_seq_lens: torch.Tensor = None
     cu_seq_lens_lst: list[list[int]] | None = None
     chunk_size: int | None = None
+    padded_local_cu_seq_lens_lst: list[list[int]] | None = None
+    pcp_global_req_indices: list[int] | None = None
+    pcp_global_block_table: torch.Tensor | None = None
+    # Per-chunk offsets in the gathered buffer, indexed by logical DCP rank.
+    kv_rank_offsets: list[list[int]] | None = None
 
 
 @dataclass
@@ -115,9 +122,26 @@ class AscendMlaDCPMetadataBuilder(
     """Build MLA metadata for decode context parallelism."""
 
     decode_metadata_cls = AscendMLADCPDecodeMetadata
+    consumes_pcp_context = True
     # Non-causal block drafters (e.g. DSpark) attend to all DCP-local KV.
     # Causal multi-token queries still need history/current split attention.
     supports_non_causal_multi_token_dcp = True
+
+    @staticmethod
+    def determine_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
+        workspace_size = AscendMLAMetadataBuilder.determine_chunked_prefill_workspace_size(vllm_config)
+        parallel_config = vllm_config.parallel_config
+        if parallel_config.prefill_context_parallel_size > 1 and parallel_config.decode_context_parallel_size > 1:
+            chunk_alignment = lcm(
+                vllm_config.cache_config.block_size,
+                parallel_config.cp_kv_cache_interleave_size * parallel_config.decode_context_parallel_size,
+            )
+            # The shared plan reserves two local fragments per global PCP
+            # request. After halving the budget, each request must still fit
+            # one aligned DCP chunk.
+            min_workspace_size = 2 * vllm_config.scheduler_config.max_num_seqs * chunk_alignment
+            workspace_size = max(workspace_size, min_workspace_size)
+        return workspace_size
 
     def __init__(
         self,
@@ -129,6 +153,11 @@ class AscendMlaDCPMetadataBuilder(
         supports_dcp_with_varlen: bool = True,
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device, metadata_cls, supports_dcp_with_varlen)
+        # ProcessGroup payloads follow sorted global ranks. Keep logical DCP
+        # rank order for attention and translate it into source offsets below.
+        dcp_ranks = get_dcp_group().ranks
+        collective_ranks = sorted(dcp_ranks)
+        self.dcp_collective_rank_order = [collective_ranks.index(rank) for rank in dcp_ranks]
         self.cp_local_block_size = vllm_config.parallel_config.cp_kv_cache_interleave_size
         self.cp_virtual_block_size = self.cp_local_block_size * self.dcp_size
         self.block_size = (self.block_size * self.cp_virtual_block_size) // np.gcd(
@@ -136,30 +165,94 @@ class AscendMlaDCPMetadataBuilder(
             self.cp_virtual_block_size,
         )
 
+    def _get_pcp_prefill_kv_inputs(
+        self,
+    ) -> tuple[torch.Tensor | None, list[int] | None, torch.Tensor | None]:
+        """Build the shared KV send inputs for PCP+DCP chunked prefill.
+
+        Return global sequence-length bounds, local prefill-to-global request
+        indices, and the global block table. The bounds give all DCP senders
+        the same padded KV ranges per chunk. After all-gather, each local
+        fragment selects its source request and consumes only its own history.
+        Return three None values when no global PCP prefill view is needed.
+
+        Example:
+            With PCP=2 on rank 0 and no decode requests:
+            - A: computed=100, query=12, global seq_len=112.
+              Its two local fragments have history lengths [100, 109].
+            - B: computed=200, query=20, global seq_len=220.
+              Its two local fragments have history lengths [200, 215].
+
+            Local rows are [A_first, A_last, B_first, B_last]. The result is:
+            - gather_lens: [112, 220], one bound per global request.
+            - local_rows: [0, 0, 1, 1], one index per local prefill fragment.
+            - gather_block_table: shape (2, num_block_cols), in [A, B] order.
+
+            The bounds include the current query; local attention still uses
+            each fragment's actual history length. Short replicated prefills
+            may have only one local fragment, so row counts need not be 2:1.
+        """
+        context = getattr(self, "_pcp_context", None)
+        if not self.pcp_enabled or context is None or not context.global_batch.is_prefilling_np.any():
+            return None, None, None
+        if self._pcp_cache_group_idx is None or context.local_to_global_req_indices is None:
+            raise ValueError("PCP+DCP chunks require global tables and the upstream request mapping.")
+
+        batch = context.global_batch
+        # The global sequence end bounds every fragment's history. Local
+        # attention still consumes only its own seq_lens - query_lens.
+        gather_lens = torch.from_numpy(
+            np.where(batch.is_prefilling_np[: batch.num_reqs], batch.seq_lens_np[: batch.num_reqs], 0)
+        ).to(torch.int32)
+        local_rows = list(context.local_to_global_req_indices[self.num_decodes : self.num_decodes + self.num_prefills])
+        gather_block_table = context.global_block_tables[self._pcp_cache_group_idx][: batch.num_reqs]
+        return gather_lens, local_rows, gather_block_table
+
     def build_chunked_metadata(
         self,
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
+        *,
+        chunk_plan_lens_cpu: torch.Tensor | None = None,
+        chunk_workspace_size: int | None = None,
     ):
-        chunked_context_metadata = super().build_chunked_metadata(common_prefix_len, common_attn_metadata)
+        context_lens_cpu = (self.seq_lens - self.query_lens)[self.num_decodes : common_attn_metadata.num_reqs]
+        gather_lens = context_lens_cpu if chunk_plan_lens_cpu is None else chunk_plan_lens_cpu
+        use_default_chunk_workspace = chunk_workspace_size is None
+        if chunk_workspace_size is None:
+            chunk_workspace_size = self.chunked_prefill_workspace_size
+        local_rows = None
+        block_table = None
+        if self.pcp_enabled and self.dcp_enabled:
+            pcp_gather_lens, local_rows, block_table = self._get_pcp_prefill_kv_inputs()
+            if pcp_gather_lens is not None:
+                if chunk_plan_lens_cpu is None:
+                    gather_lens = pcp_gather_lens
+                # A global PCP request may expand into two local attention rows.
+                if use_default_chunk_workspace:
+                    chunk_workspace_size //= 2
+        chunked_context_metadata = super().build_chunked_metadata(
+            common_prefix_len,
+            common_attn_metadata,
+            chunk_plan_lens_cpu=gather_lens,
+            chunk_workspace_size=chunk_workspace_size,
+        )
         if chunked_context_metadata is None:
             return None
 
-        # The base builder has removed query tokens from the global lengths.
-        # Both runners partition only cached history for chunked prefill.
+        # PCP sends use global request rows; attention retains local histories.
+        num_context_rows = gather_lens.numel()
         local_context_lens_allranks = get_dcp_local_seq_lens(
             self.context_lens_cpu,
             dcp_size=self.dcp_size,
             cp_kv_cache_interleave_size=self.cp_local_block_size,
         )
-        padded_local_context_lens_cpu = (
-            cdiv(self.context_lens_cpu, self.cp_virtual_block_size) * self.cp_local_block_size
-        )
+        padded_local_context_lens_cpu = cdiv(gather_lens, self.cp_virtual_block_size) * self.cp_local_block_size
         padded_local_max_context_chunk_across_ranks = (
             cdiv(self.max_context_chunk, self.cp_virtual_block_size) * self.cp_local_block_size
         )
         local_chunk_starts = (
-            torch.arange(self.num_chunks, dtype=torch.int32).unsqueeze(1).expand(-1, self.num_prefills)
+            torch.arange(self.num_chunks, dtype=torch.int32).unsqueeze(1).expand(-1, num_context_rows)
             * padded_local_max_context_chunk_across_ranks
         )
         local_chunk_ends = torch.min(
@@ -169,7 +262,7 @@ class AscendMlaDCPMetadataBuilder(
         padded_local_chunk_seq_lens = (local_chunk_ends - local_chunk_starts).clamp(min=0)
         padded_local_cu_chunk_seq_lens_cpu = torch.zeros(
             self.num_chunks,
-            self.num_prefills + 1,
+            num_context_rows + 1,
             dtype=torch.int32,
             pin_memory=True,
         )
@@ -179,10 +272,11 @@ class AscendMlaDCPMetadataBuilder(
             out=padded_local_cu_chunk_seq_lens_cpu[:, 1:],
             dtype=torch.int32,
         )
+        seq_tot = padded_local_chunk_seq_lens.sum(dim=1).tolist()
         return DCPChunkedContextMetadata(
             cu_seq_lens=chunked_context_metadata.cu_seq_lens,
             starts=local_chunk_starts.pin_memory().to(self.device, non_blocking=True),
-            seq_tot=padded_local_chunk_seq_lens.sum(dim=1).tolist(),
+            seq_tot=seq_tot,
             max_seq_lens=chunked_context_metadata.max_seq_lens,
             chunk_seq_lens=self.chunk_seq_lens,
             chunk_seq_lens_npu=chunked_context_metadata.chunk_seq_lens_npu,
@@ -197,6 +291,10 @@ class AscendMlaDCPMetadataBuilder(
             ),
             cu_seq_lens_lst=self.cu_seq_lens_cpu.tolist(),
             chunk_size=padded_local_max_context_chunk_across_ranks,
+            padded_local_cu_seq_lens_lst=padded_local_cu_chunk_seq_lens_cpu.tolist(),
+            pcp_global_req_indices=local_rows,
+            pcp_global_block_table=block_table,
+            kv_rank_offsets=[[rank * toks for rank in self.dcp_collective_rank_order] for toks in seq_tot],
         )
 
     def build_decode_metadata(
@@ -229,6 +327,31 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
 
     can_return_lse_for_decode: bool = True
     supports_mtp_with_cp_non_trivial_interleave_size: bool = True
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._dcp_current_kv_buffers: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
+
+    def process_weights_after_loading(self, act_dtype: torch.dtype):
+        super().process_weights_after_loading(act_dtype)
+        if self.enable_mlapo and not self.fa_quant_layer and not self.use_mla_rope and not self.enable_kv_nz:
+            self._prepare_dcp_current_kv_buffers()
+
+    def _prepare_dcp_current_kv_buffers(self) -> None:
+        # Every graph size uses a view of this layer-owned allocation, so the
+        # current KV and index addresses stay live across capture and replay.
+        max_tokens = min(
+            self.vllm_config.scheduler_config.max_num_batched_tokens,
+            MLAPO_MAX_SUPPORTED_TOKENS,
+        )
+        block_size = self.vllm_config.cache_config.block_size
+        cache_shape = (cdiv(max_tokens, block_size), block_size, self.num_kv_heads)
+        device = self.weight_dq.device
+        self._dcp_current_kv_buffers = (
+            torch.empty((*cache_shape, self.kv_lora_rank), dtype=self.dtype, device=device),
+            torch.empty((*cache_shape, self.qk_rope_head_dim), dtype=self.dtype, device=device),
+            torch.arange(max_tokens, dtype=torch.int64, device=device),
+        )
 
     @staticmethod
     def update_graph_params(
@@ -345,6 +468,17 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
                 torch.npu.graph_task_update_end(update_stream)
 
                 event.record(update_stream)
+
+    def get_context_block_table(self, attn_metadata: AscendMLAMetadata) -> torch.Tensor:
+        """Use the global PCP request table for DCP prefill KV loading."""
+        if not self.pcp_enabled:
+            return super().get_context_block_table(attn_metadata)
+        prefill_metadata = attn_metadata.prefill
+        assert prefill_metadata is not None
+        assert prefill_metadata.chunked_context is not None
+        assert isinstance(prefill_metadata.chunked_context, DCPChunkedContextMetadata)
+        assert prefill_metadata.chunked_context.pcp_global_block_table is not None
+        return prefill_metadata.chunked_context.pcp_global_block_table
 
     def get_context_seq_len_npu(self, index: int, attn_metadata: AscendMLAMetadata):
         prefill_metadata = attn_metadata.prefill
@@ -501,16 +635,13 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         assert current_k_nope is not None and current_k_pe is not None
 
         num_tokens = q_nope.size(0)
-        num_heads = self.num_heads * self.dcp_size if self.dcp_size > 1 else self.num_heads
+        num_heads = q_nope.size(1)
         q_nope = q_nope.view(num_tokens, num_heads, -1).contiguous()
         q_pe = q_pe.view(num_tokens, num_heads, -1)
         history_k_nope = cache_k_nope.view(-1, self.num_kv_heads, block_size, self.kv_lora_rank)
         history_k_pe = cache_k_pe.view(-1, self.num_kv_heads, block_size, self.qk_rope_head_dim)
 
-        head_start = self.dcp_rank * self.num_heads
-        head_end = head_start + self.num_heads
-        current_q_nope = q_nope[:, head_start:head_end].contiguous()
-        current_q_pe = q_pe[:, head_start:head_end].contiguous()
+        current_q_nope, current_q_pe = self._local_decode_query(q_nope, q_pe)
         current_k_nope = current_k_nope.view(num_tokens, self.num_kv_heads, self.kv_lora_rank).contiguous()
         current_k_pe = current_k_pe.view(num_tokens, self.num_kv_heads, self.qk_rope_head_dim).contiguous()
 
@@ -612,18 +743,15 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         current_output.record_stream(main_stream)
         current_lse.record_stream(main_stream)
 
-        history_recv = torch.ops.vllm.sfa_dcp_a2a_fused(
+        history_recv = self._merge_dcp_attention_output(
             history_output,
             history_lse,
-            self.dcp_size,
-            1,
-            self.dcp_group.unique_name if self.dcp_size > 1 else "",
             defer_combine=True,
         )
         main_stream.wait_event(current_attn_done)
         # Reduce all history shards and the replicated current chunk exactly
         # once, reading current FIA tensors directly without packing them.
-        attn_output = fused_sfa_dcp_lse_combine(
+        attn_output = fused_dcp_lse_combine(
             history_recv,
             self.kv_lora_rank,
             scatter_dim=1,
@@ -661,10 +789,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         num_tokens = q_nope.size(0)
         # shape of knope/k_pe for npu graph mode should be:
         # [num_blocks, num_kv_heads, block_size, self.kv_lora_rank/self.qk_rope_head_dim]
-        if self.dcp_size > 1:
-            num_heads = self.num_heads * self.dcp_size
-        else:
-            num_heads = self.num_heads
+        num_heads = q_nope.size(1)
         # Use DCP-local computed token counts to build sequence lengths and masks.
         k_nope = k_nope.view(-1, self.num_kv_heads, block_size, self.kv_lora_rank)
         k_pe = k_pe.view(-1, self.num_kv_heads, block_size, self.qk_rope_head_dim)
@@ -800,11 +925,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             softmax_lse = softmax_lse.permute(0, 2, 1, 3).reshape(B_lse * Q_S, N_lse, 1)
 
         # Update out&lse
-        attn_output = self._merge_dcp_attention_output(
-            attn_output,
-            softmax_lse,
-            self.kv_lora_rank,
-        )
+        attn_output = self._merge_dcp_attention_output(attn_output, softmax_lse)
         return self._v_up_proj_batch_major(attn_output)
 
     def _reorg_kvcache(
@@ -841,12 +962,14 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         assert chunked_context.cu_seq_lens_lst is not None
         assert chunked_context.max_seq_lens is not None
         assert chunked_context.chunk_size is not None
+        assert chunked_context.kv_rank_offsets is not None
 
         padded_local_chunk_seq_lens_lst = chunked_context.padded_local_chunk_seq_lens[chunk_idx]
         local_context_lens_allranks = chunked_context.local_context_lens_allranks
         sum_seq_len = chunked_context.cu_seq_lens_lst[chunk_idx][-1]
         max_seq_len = chunked_context.max_seq_lens[chunk_idx]
         chunk_size: int = chunked_context.chunk_size
+        kv_rank_offsets = chunked_context.kv_rank_offsets[chunk_idx]
         cache_kv_c_k_pe = torch.cat([kv_c_normed, k_pe], dim=-1)
         cache_kv_c_k_pe = self._dcp_all_gather(cache_kv_c_k_pe, 0)
 
@@ -858,9 +981,16 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         k_pe_segments = []
         src_token_idx = 0
         max_seq_len_check = 0
-        for padded_local_chunk_seq_len, local_context_lens in zip(
-            padded_local_chunk_seq_lens_lst, local_context_lens_allranks
-        ):
+        for row, local_context_lens in enumerate(local_context_lens_allranks):
+            source_row = (
+                chunked_context.pcp_global_req_indices[row]
+                if chunked_context.pcp_global_req_indices is not None
+                else row
+            )
+            padded_local_chunk_seq_len = padded_local_chunk_seq_lens_lst[source_row]
+            if chunked_context.pcp_global_req_indices is not None:
+                assert chunked_context.padded_local_cu_seq_lens_lst is not None
+                src_token_idx = chunked_context.padded_local_cu_seq_lens_lst[chunk_idx][source_row]
             cur_seq_len = 0
             for rank, local_context_len in enumerate(local_context_lens):
                 # Note(qcs): We split the context into multiple chunks,
@@ -875,17 +1005,16 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
                     padded_local_chunk_seq_len,
                 )
                 if local_chunk_len != 0:
-                    kv_c_segment = allgatered_kv_c_normed[
-                        rank * toks + src_token_idx : rank * toks + src_token_idx + local_chunk_len
-                    ]
-                    k_pe_segment = allgatered_k_pe[
-                        rank * toks + src_token_idx : rank * toks + src_token_idx + local_chunk_len
-                    ]
+                    src_start = kv_rank_offsets[rank] + src_token_idx
+                    kv_c_segment = allgatered_kv_c_normed[src_start : src_start + local_chunk_len]
+                    k_pe_segment = allgatered_k_pe[src_start : src_start + local_chunk_len]
                     kv_c_segments.append(kv_c_segment)
                     k_pe_segments.append(k_pe_segment)
                     cur_seq_len += local_chunk_len
             max_seq_len_check = max(max_seq_len_check, cur_seq_len)
             src_token_idx += padded_local_chunk_seq_len
+        if not kv_c_segments:
+            return kv_c_normed[:0], k_pe[:0]
         reorganized_kv_c_normed = torch.cat(kv_c_segments, dim=0)
         reorganized_k_pe = torch.cat(k_pe_segments, dim=0)
         assert reorganized_kv_c_normed.shape[0] == sum_seq_len, (

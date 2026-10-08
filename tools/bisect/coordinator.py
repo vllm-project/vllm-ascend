@@ -31,12 +31,25 @@ Protocol files under ``<coord_dir>/round_<N>/``::
 
 import json
 import logging
+import os
 import time
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 _POLL_INTERVAL_S = 3.0
+
+
+def _atomic_write(path: Path, text: str) -> None:
+    """Write ``text`` so readers only ever see the complete file.
+
+    Plain ``write_text`` creates the file before its content lands, so a node
+    polling on a shared PVC can observe a torn (partial) file and die parsing
+    it. Temp file + rename makes publication atomic.
+    """
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text)
+    os.replace(tmp, path)
 
 
 class Coordinator:
@@ -97,18 +110,18 @@ class Coordinator:
         if version_checks is not None:
             command["version_checks"] = list(version_checks)
         path = self._round_dir(rnd) / "command.json"
-        path.write_text(json.dumps(command))
+        _atomic_write(path, json.dumps(command))
         logger.info("[coord] published command round=%d commit=%s action=%s", rnd, commit[:12], action)
 
     def publish_verdict(self, rnd: int, verdict: str) -> None:
-        (self._round_dir(rnd) / "verdict.json").write_text(json.dumps({"verdict": verdict}))
+        _atomic_write(self._round_dir(rnd) / "verdict.json", json.dumps({"verdict": verdict}))
 
     def publish_start(self, rnd: int) -> None:
-        (self._round_dir(rnd) / "start.json").write_text("{}")
+        _atomic_write(self._round_dir(rnd) / "start.json", "{}")
         logger.info("[coord] released round %d for test execution", rnd)
 
     def publish_done(self) -> None:
-        self._done_flag.write_text("done")
+        _atomic_write(self._done_flag, "done")
         logger.info("[coord] published DONE")
 
     def is_done(self) -> bool:
@@ -117,7 +130,7 @@ class Coordinator:
     # ------------------------------------------------------- worker writes
     def signal_ready(self, rnd: int, head: str) -> None:
         path = self._round_dir(rnd) / f"ready_{self.node_index}.json"
-        path.write_text(json.dumps({"node": self.node_index, "head": head}))
+        _atomic_write(path, json.dumps({"node": self.node_index, "head": head}))
         logger.info("[coord] node %d ready for round %d at %s", self.node_index, rnd, head[:12])
 
     @staticmethod
@@ -182,6 +195,23 @@ class Coordinator:
             "launched on EVERY node (workers auto-enter the worker loop), all "
             f"pointing at the same shared --coord-dir ({self.root}). A worker that "
             "only ran the test (not the bisect agent) will never join this barrier."
+        )
+
+    def any_foreign_ready(self) -> bool:
+        """Master: True if any node other than this one signalled ready, in ANY
+        round of this run.
+
+        All ``round_*`` directories are scanned, not just the current round: a
+        worker that joins late still lands its ready marker in the round the
+        master has already left, and that must count as "a worker exists" (the
+        run should SKIP that round, not abort). Note this is a "has ever
+        joined" check, not liveness: a worker that dies mid-run keeps its
+        markers and the run degrades to per-round SKIPs.
+        """
+        return any(
+            ready.stem != f"ready_{self.node_index}"
+            for rdir in self.root.glob("round_*")
+            for ready in rdir.glob("ready_*.json")
         )
 
     def wait_verdict(self, rnd: int, timeout_s: float) -> str | None:

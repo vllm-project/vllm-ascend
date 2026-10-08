@@ -204,6 +204,30 @@ class TestAscendW4A8MXFP4MoEMethod(TestBase):
         return layer
 
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.get_current_vllm_config")
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.use_cann_megamoe", return_value=True)
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.torch_npu")
+    def test_megamoe_scales_preserve_e8m0_bytes(self, mock_npu, mock_use_cann_megamoe, mock_vllm):
+        mock_npu.npu_format_cast.side_effect = lambda x, *a, **kw: x
+        layer = self._make_moe_layer()
+        original_scales = {}
+        for name in ("w13_weight_scale", "w2_weight_scale"):
+            scale = getattr(layer, name).data
+            # Cover every byte encoding to detect accidental numeric conversion.
+            scale.copy_(torch.arange(scale.numel()).to(torch.uint8).reshape(scale.shape))
+            original_scales[name] = scale.clone()
+
+        self.scheme.process_weights_after_loading(layer)
+
+        for name, original in original_scales.items():
+            scales = getattr(layer, f"cann_mega_moe_{name}_list")
+            self.assertEqual(len(scales), original.shape[0])
+            for expert, scale in enumerate(scales):
+                with self.subTest(name=name, expert=expert):
+                    self.assertEqual(scale.dtype, torch.float8_e8m0fnu)
+                    self.assertEqual(scale.shape, (original.shape[1], original.shape[2] // 2, 2))
+                    torch.testing.assert_close(scale.view(torch.uint8).flatten(), original[expert].flatten())
+
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.get_current_vllm_config")
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.use_cann_megamoe", return_value=False)
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.torch_npu")
     def test_process_records_original_shapes_and_marks_transformed(self, mock_npu, mock_use_cann_megamoe, mock_vllm):

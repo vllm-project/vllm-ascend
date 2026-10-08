@@ -20,7 +20,18 @@ def _get_vectorcore_num() -> int:
         return int(get_vectorcore_num())
 
 
-@triton.jit
+@triton.jit(
+    do_not_specialize=["num_reqs"],
+    do_not_specialize_on_alignment=[
+        "target_rejected_logsumexp_ptr",
+        "draft_rejected_logsumexp_ptr",
+        "rejected_step_ptr",
+        "cu_num_logits_ptr",
+        "expanded_idx_mapping_ptr",
+        "draft_sampled_ptr",
+        "temp_ptr",
+    ],
+)
 def _resample_kernel(
     local_argmax_ptr,
     local_argmax_stride,
@@ -123,7 +134,20 @@ def _resample_kernel(
                 tl.store(local_mass_ptr + req_idx * local_mass_stride + block_idx, tl.sum(token_mass, axis=0))
 
 
-@triton.jit
+@triton.jit(
+    do_not_specialize_on_alignment=[
+        "num_sampled_ptr",
+        "target_rejected_logsumexp_ptr",
+        "draft_rejected_logsumexp_ptr",
+        "rejected_step_ptr",
+        "cu_num_logits_ptr",
+        "expanded_idx_mapping_ptr",
+        "draft_sampled_ptr",
+        "temp_ptr",
+        "seed_ptr",
+        "pos_ptr",
+    ],
+)
 def _categorical_finalize_kernel(
     sampled_ptr,
     sampled_stride,
@@ -153,7 +177,6 @@ def _categorical_finalize_kernel(
     BLOCK_SIZE: tl.constexpr,
     PADDED_NUM_BLOCKS: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
-    RESAMPLE_NOISE_SALT: tl.constexpr,
 ):
     """Select the final token using one global categorical threshold per request."""
     req_idx = tl.program_id(0)
@@ -194,8 +217,6 @@ def _categorical_finalize_kernel(
     # One random value defines one point on the whole vocabulary-mass interval.
     seed = tl.load(seed_ptr + req_state_idx)
     position = tl.load(pos_ptr + resample_token_idx).to(tl.int32)
-    # Rejection conditions its draw; residual sampling needs a separate RNG domain.
-    position += tl.where(is_random_residual, RESAMPLE_NOISE_SALT, 0)
     uniform = tl.max(tl.rand(tl.randint(seed, position), tl.arange(0, 1)).to(tl.float32), axis=0)
 
     stored_block_mass = tl.load(
@@ -424,5 +445,4 @@ def resample(
         BLOCK_SIZE=_RESAMPLE_BLOCK_SIZE,
         PADDED_NUM_BLOCKS=triton.next_power_of_2(num_blocks),
         HAS_DRAFT_LOGITS=has_draft_logits,
-        RESAMPLE_NOISE_SALT=1 << 29,
     )

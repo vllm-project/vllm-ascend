@@ -1001,6 +1001,7 @@ def test_routed_experts_forward_impl_runs_current_flow(monkeypatch, return_with_
         ),
     )
     monkeypatch.setattr(routed_experts_module, "get_forward_context", lambda: SimpleNamespace(all_moe_layers=None))
+    monkeypatch.setattr(routed_experts_module, "get_moe_comm_method", lambda *_: moe_comm_method)
     monkeypatch.setattr(routed_experts_module, "get_current_vllm_config", lambda: None)
     monkeypatch.setattr(routed_experts_module, "get_moe_num_logical_experts", lambda *args, **kwargs: 3)
     monkeypatch.setattr(routed_experts_module, "get_ascend_config", lambda: SimpleNamespace(enable_force_eplb=False))
@@ -2486,7 +2487,7 @@ def test_forward_impl_keeps_full_width_input_for_shared_experts(monkeypatch):
     assert result[1] is routed_out
 
 
-def _stub_moe_runner_init(monkeypatch, *, gate=None, shared_experts=None):
+def _stub_moe_runner_init(monkeypatch, *, gate=None, shared_experts=None, fused_mc2_comm=None):
     """Construct AscendMoERunner with a lightweight MoERunner.__init__ stub."""
     moe_config = SimpleNamespace(hidden_dim=4, ep_size=1)
     routed_experts = SimpleNamespace(
@@ -2527,7 +2528,11 @@ def _stub_moe_runner_init(monkeypatch, *, gate=None, shared_experts=None):
     monkeypatch.setattr(fused_moe_module, "get_tp_group", MagicMock(return_value=object()))
     monkeypatch.setattr(fused_moe_module, "get_dp_group", MagicMock(return_value=object()))
     monkeypatch.setattr(fused_moe_module, "setup_moe_comm_method", MagicMock())
-    monkeypatch.setattr(fused_moe_module, "get_moe_comm_method", MagicMock(return_value=None))
+    monkeypatch.setattr(
+        fused_moe_module,
+        "get_moe_comm_method",
+        lambda kind: fused_mc2_comm if kind == MoECommType.FUSED_MC2 else None,
+    )
 
     return AscendMoERunner(
         "model.layers.0.mlp",
@@ -2537,6 +2542,17 @@ def _stub_moe_runner_init(monkeypatch, *, gate=None, shared_experts=None):
         gate=gate,
         shared_experts=shared_experts,
     )
+
+
+def test_runner_keeps_mega_moe_activation_with_each_layer(monkeypatch):
+    first_kwargs = {"activation": "situglu", "activation_params": {"beta": 4.0, "linear_beta": 25.0}}
+    first = _stub_moe_runner_init(monkeypatch, fused_mc2_comm=SimpleNamespace(mega_moe_activation_kwargs=first_kwargs))
+    second_kwargs = {"activation_clamp": None}
+    second = _stub_moe_runner_init(
+        monkeypatch, fused_mc2_comm=SimpleNamespace(mega_moe_activation_kwargs=second_kwargs)
+    )
+    assert first.routed_experts.mega_moe_activation_kwargs is first_kwargs
+    assert second.routed_experts.mega_moe_activation_kwargs is second_kwargs
 
 
 def test_runner_sets_precast_fp32_weight(monkeypatch):

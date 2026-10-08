@@ -165,22 +165,19 @@ def _compute_slot_mapping_fused_groups_kernel(
     is_circular_ptr,
     HAS_CIRCULAR: tl.constexpr,
     PAD_ID: tl.constexpr,
-    NUM_REQS: tl.constexpr,
     TILE_BLOCK_SIZE: tl.constexpr,
     PARALLEL_TILES: tl.constexpr,
     BLOCK_TABLE_WINDOW_SIZE: tl.constexpr,
 ):
-    program_idx = tl.program_id(0)
-    programs_per_group: tl.constexpr = NUM_REQS * PARALLEL_TILES + 1
-    group_idx = program_idx // programs_per_group
-    group_program_idx = program_idx - group_idx * programs_per_group
+    group_idx = tl.program_id(0)
+    group_program_idx = tl.program_id(1)
 
     block_table_addr = tl.load(block_table_addrs_ptr + group_idx)
     slot_mapping_addr = tl.load(slot_mapping_addrs_ptr + group_idx)
     block_table_ptr = tl.cast(block_table_addr, tl.pointer_type(tl.int32))
     slot_mapping_ptr = tl.cast(slot_mapping_addr, tl.pointer_type(tl.int32))
 
-    if group_program_idx == programs_per_group - 1:
+    if group_program_idx == tl.num_programs(1) - 1:
         for i in range(num_tokens, max_num_tokens, TILE_BLOCK_SIZE):
             offsets = i + tl.arange(0, TILE_BLOCK_SIZE)
             tl.store(
@@ -239,22 +236,19 @@ def _compute_slot_mapping_fused_groups_adaptive_kernel(
     is_circular_ptr,
     HAS_CIRCULAR: tl.constexpr,
     PAD_ID: tl.constexpr,
-    NUM_REQS: tl.constexpr,
     SMALL_TILE_BLOCK_SIZE: tl.constexpr,
     SMALL_BLOCK_TABLE_WINDOW_SIZE: tl.constexpr,
     LARGE_BLOCK_TABLE_WINDOW_SIZE: tl.constexpr,
 ):
-    program_idx = tl.program_id(0)
-    programs_per_group: tl.constexpr = NUM_REQS + 1
-    group_idx = program_idx // programs_per_group
-    group_program_idx = program_idx - group_idx * programs_per_group
+    group_idx = tl.program_id(0)
+    req_idx = tl.program_id(1)
 
     block_table_addr = tl.load(block_table_addrs_ptr + group_idx)
     slot_mapping_addr = tl.load(slot_mapping_addrs_ptr + group_idx)
     block_table_ptr = tl.cast(block_table_addr, tl.pointer_type(tl.int32))
     slot_mapping_ptr = tl.cast(slot_mapping_addr, tl.pointer_type(tl.int32))
 
-    if group_program_idx == NUM_REQS:
+    if req_idx == tl.num_programs(1) - 1:
         for i in range(num_tokens, max_num_tokens, 1024):
             offsets = i + tl.arange(0, 1024)
             tl.store(
@@ -264,7 +258,6 @@ def _compute_slot_mapping_fused_groups_adaptive_kernel(
             )
         return
 
-    req_idx = group_program_idx
     start_idx = tl.load(query_start_loc_ptr + req_idx).to(tl.int64)
     end_idx = tl.load(query_start_loc_ptr + req_idx + 1).to(tl.int64)
     block_table_stride = tl.load(block_table_strides_ptr + group_idx)
@@ -356,7 +349,7 @@ def compute_slot_mapping_fused_groups(
     tile_block_size, parallel_tiles = _select_slot_mapping_launch_config(num_reqs, num_tokens)
     block_table_window_size = _next_power_of_2((tile_block_size + min_block_size - 1) // min_block_size + 1)
     if num_reqs > 1 and tile_block_size < 1024:
-        _compute_slot_mapping_fused_groups_adaptive_kernel[(group_count * (num_reqs + 1),)](
+        _compute_slot_mapping_fused_groups_adaptive_kernel[(group_count, num_reqs + 1)](
             num_tokens,
             max_num_tokens,
             query_start_loc_ptr,
@@ -368,14 +361,13 @@ def compute_slot_mapping_fused_groups(
             is_circular_ptr,
             HAS_CIRCULAR=is_circular_ptr is not None,
             PAD_ID=pad_id,
-            NUM_REQS=num_reqs,
             SMALL_TILE_BLOCK_SIZE=tile_block_size,
             SMALL_BLOCK_TABLE_WINDOW_SIZE=block_table_window_size,
             LARGE_BLOCK_TABLE_WINDOW_SIZE=_next_power_of_2((1024 + min_block_size - 1) // min_block_size + 1),
         )
     else:
         programs_per_group = num_reqs * parallel_tiles + 1
-        _compute_slot_mapping_fused_groups_kernel[(group_count * programs_per_group,)](
+        _compute_slot_mapping_fused_groups_kernel[(group_count, programs_per_group)](
             num_tokens,
             max_num_tokens,
             query_start_loc_ptr,
@@ -387,7 +379,6 @@ def compute_slot_mapping_fused_groups(
             is_circular_ptr,
             HAS_CIRCULAR=is_circular_ptr is not None,
             PAD_ID=pad_id,
-            NUM_REQS=num_reqs,
             TILE_BLOCK_SIZE=tile_block_size,
             PARALLEL_TILES=parallel_tiles,
             BLOCK_TABLE_WINDOW_SIZE=block_table_window_size,

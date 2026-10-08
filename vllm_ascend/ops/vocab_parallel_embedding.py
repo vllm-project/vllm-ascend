@@ -41,7 +41,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.utils import set_weight_attrs
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import (
     GroupCoordinator,
     get_embed_tp_group,
@@ -360,7 +359,10 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         if self.parallel_mode == VocabParallelMode.PCP_X_TP:
             exchange_tokens = num_tokens
         all_gather_input = self._embed_ag_in_buf[:exchange_tokens]
-        if exchange_tokens > num_tokens:
+        if self.parallel_mode != VocabParallelMode.PCP_X_TP:
+            # Zero unconditionally: guarding with exchange_tokens > num_tokens
+            # lets dynamo pin num_tokens == capacity, breaking strictly dynamic
+            # inputs (tail rows are discarded after the reduce-scatter).
             all_gather_input.zero_()
         all_gather_input[:num_tokens].copy_(input_)
         all_gather_output = self._embed_ag_out_buf[: exchange_group_size * exchange_tokens]
@@ -508,9 +510,7 @@ def lmhead_all_to_all(
         )
     vocab_per_partition = logits.shape[-1]
     # [N, V/P] -> [P, N/P, V/P]. The `.contiguous()` is a no-op on the live
-    # lm-head path (fresh matmul output), but load-bearing for the spec-decode
-    # reduce-sample callers, whose input is a vocab-truncated last-dim slice
-    # (non-contiguous whenever the vocab shard is padded): view() would fail.
+    # lm-head path (fresh matmul output).
     input_ = logits.contiguous().view(world_size, -1, vocab_per_partition)
     output = torch.empty_like(input_)
     dist.all_to_all_single(output, input_, group=comm_group.device_group)
@@ -582,15 +582,11 @@ class AscendLogitsProcessor(LogitsProcessor):
         gathered_hidden_states = get_lmhead_tp_group().all_gather(hidden_states, dim=0)
         logits = self._apply_head(lm_head, gathered_hidden_states, embedding_bias)
         # Gather logits for tensor parallel
-        if not get_ascend_config().enable_reduce_sample:
-            logits = lmhead_all_to_all(logits, get_lmhead_tp_group())
+        logits = lmhead_all_to_all(logits, get_lmhead_tp_group())
 
         # Remove paddings in vocab (if any)
         if logits is not None:
-            if not get_ascend_config().enable_reduce_sample:
-                logits = logits[..., : self.org_vocab_size]
-            else:
-                logits = logits[..., : lm_head.num_org_embeddings_per_partition]
+            logits = logits[..., : self.org_vocab_size]
         return logits
 
     def _get_logits_normal(
@@ -604,14 +600,11 @@ class AscendLogitsProcessor(LogitsProcessor):
         # group, so skip it for a replicated head (e.g. the DSpark Markov w2):
         # each rank already holds the full vocab logits locally and no
         # all-gather is needed.
-        if not get_ascend_config().enable_reduce_sample and lm_head.tp_size > 1:
+        if lm_head.tp_size > 1:
             logits = self._gather_logits(logits)
 
         # Remove paddings in vocab (if any)
         if logits is not None:
-            if not get_ascend_config().enable_reduce_sample:
-                logits = logits[..., : self.org_vocab_size]
-            else:
-                logits = logits[..., : lm_head.num_org_embeddings_per_partition]
+            logits = logits[..., : self.org_vocab_size]
 
         return logits

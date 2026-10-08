@@ -107,8 +107,7 @@ class KVPoolScheduler:
         self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get("load_async", False)
         kv_event_config = vllm_config.kv_events_config
         self.enable_kv_events = bool(kv_event_config and kv_event_config.enable_kv_cache_events)
-        retention_interval = getattr(envs, "VLLM_PREFIX_CACHE_RETENTION_INTERVAL", None)
-        self.retention_interval = retention_interval if isinstance(retention_interval, int) else None
+        self.retention_interval = vllm_config.cache_config.prefix_cache_retention_interval
         self.save_decode_cache = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "save_decode_cache", False
         )
@@ -123,7 +122,11 @@ class KVPoolScheduler:
         self.original_block_size = infer_group_block_sizes(vllm_config.cache_config.block_size, kv_cache_groups)
         self.cacheable_group_ids = infer_cacheable_group_ids(kv_cache_groups)
         cacheable_block_sizes = [self.original_block_size[i] for i in self.cacheable_group_ids]
-        if self.use_layerwise and len(cacheable_block_sizes) != len(self.original_block_size):
+        if (
+            self.use_layerwise
+            and self.backend_name != "memcache"
+            and len(cacheable_block_sizes) != len(self.original_block_size)
+        ):
             raise ValueError("AscendStore private KV state requires non-layerwise transfer")
         self.grouped_block_size = [block_size * self.dcp_size for block_size in self.original_block_size]
         requested_hash_block_size = vllm_config.cache_config.prefix_match_unit
@@ -383,7 +386,10 @@ class KVPoolScheduler:
         protocol helper enumerates all stages and head/TP ranks.
         """
         assert self.layerwise_keys is not None
-        return self.layerwise_keys.make_hit_check_keys(group_id, block_hash_hex, self.tp_size // self.put_step)
+        head_or_tp_ranks = (
+            self.tp_size if group_id in self.num_speculative_blocks_by_group else self.tp_size // self.put_step
+        )
+        return self.layerwise_keys.make_hit_check_keys(group_id, block_hash_hex, head_or_tp_ranks)
 
     def _get_layerwise_hit_tokens(
         self,

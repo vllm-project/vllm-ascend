@@ -73,6 +73,20 @@ git commit -sm "your commit info"
 
 You can refer to [Testing](./testing.md)  to set up a testing environment and running tests locally.
 
+### Local native build cache
+
+When a source build compiles native csrc actions, their reusable local entries are
+stored in the ignored `csrc/build_cache` directory. Set
+`VLLM_ASCEND_BUILD_CACHE_DIR` to an absolute path to use a different directory.
+This is local build state, not a remote OBS snapshot; deleting it while no
+build is running only makes the next relevant source build cold. Builds that
+disable custom-kernel compilation do not exercise the custom-operator action
+cache.
+
+If you change a generated operator input, compiler command, or toolchain
+dependency, review the [cache identity and CMake integration contract](../Design_Documents/persistent_csrc_build_cache.md#cmake-integration-contract)
+in the design document.
+
 ## DCO and Signed-off-by
 
 When contributing changes to this project, you must agree to the DCO. Commits must include a `Signed-off-by:` header which certifies agreement with the terms of the DCO (Developer Certificate of Origin).

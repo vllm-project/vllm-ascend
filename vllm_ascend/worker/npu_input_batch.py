@@ -50,7 +50,7 @@ class NPUInputBatch(InputBatch):
         pin_memory: bool,
         vocab_size: int,
         block_sizes: list[int],  # The block_size of each kv cache group
-        kernel_block_sizes: list[list[int]],
+        kernel_block_sizes: list[int] | list[list[int]],
         max_num_blocks_per_req: list[int] | None = None,
         logitsprocs: LogitsProcessors | None = None,
         logitsprocs_need_output_token_ids: bool = False,
@@ -138,7 +138,7 @@ class NPUInputBatch(InputBatch):
             block_sizes=block_sizes,
             max_num_blocks=max_num_blocks_per_req,
             num_speculative_tokens=num_speculative_tokens,
-            kernel_sizes=kernel_block_sizes,
+            kernel_sizes=[sizes[0] if isinstance(sizes, list) else sizes for sizes in kernel_block_sizes],
             cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
             kv_cache_groups=kv_cache_groups,
         )

@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 import torch
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 
-from vllm_ascend.distributed.eplb.state import AscendEplbLayerState
+from vllm_ascend.distributed.eplb.eplb_state import AscendEplbLayerState
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
 from vllm_ascend.patch.platform import patch_fused_moe
 
