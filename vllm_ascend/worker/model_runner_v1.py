@@ -3664,8 +3664,8 @@ class NPUModelRunner(GPUModelRunner):
 
         block_table_gid_0, slot_mapping_gid_0 = _get_block_table_and_slot_mapping(0)
         self.long_seq_metadata, block_table_gid_0 = _get_dcp_metadata(block_table_gid_0)
-        # xlite hybrid path: provide CPU numpy block_table to avoid per-step
-        # D2H sync in xlite.py (38ms/step at B16 from draining the stream).
+        # xlite hybrid path: provide a CPU numpy block_table so xlite.py
+        # can avoid a per-step D2H sync that would drain the compute stream.
         block_table_cpu_np = None
         if kv_cache_groups and hasattr(self.input_batch.block_table[0], "np"):
             block_table_cpu_np = self.input_batch.block_table[0].np[:num_reqs_padded]

@@ -1232,10 +1232,10 @@ class XliteWrapper:
         first_log = not self._xlite_import_log_done
         imported = 0
         # PERF: materialize ALL layers' state indices with ONE device->host
-        # sync. Previously each layer called _gdn_layer_indices() (its own
-        # .cpu()) — 48 stream syncs per import; under KV-preemption storms
-        # the import runs constantly and those syncs shattered the pipeline
-        # (2048/2048-b96 TPOT 2.2x native). Stack on-device, sync once,
+        # sync. Previously each layer resolved its indices with its own
+        # .cpu(), so every import event paid one full-stream sync per layer;
+        # under KV-preemption storms the import runs constantly and those
+        # syncs shatter the decode pipeline. Stack on-device, sync once,
         # slice per layer.
         layer_map: dict[int, list[int]] = {}
         _stacked: list[torch.Tensor] = []
@@ -1562,8 +1562,8 @@ class XliteWrapper:
                 # PERF: record the per-step state-index tensor (DEVICE) and
                 # defer materialization to the next import — a .cpu() here
                 # would sync the whole stream every native step and expose
-                # scheduler latency as device idle (~1-3ms/step, measurable
-                # on prefill-heavy cells). NOTE: batch_descriptor.num_reqs
+                # scheduler latency as device idle on prefill-heavy cells.
+                # NOTE: batch_descriptor.num_reqs
                 # can be None here; read the state indices straight from the
                 # GDN metadata instead.
                 _metas = (
@@ -1663,8 +1663,9 @@ class XliteWrapper:
             if len(seq_lens_list) < num_reqs or len(query_lens_list) < num_reqs:
                 return self.npu_runnable(input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs)
             cached_lens_list = [max(seq_lens_list[i] - query_lens_list[i], 0) for i in range(num_reqs)]
-            # xlite B16+ fix: prefer CPU numpy block_table (zero D2H sync,
-            # saves ~38ms/step at B16); fall back to D2H only if unavailable.
+            # Prefer the CPU numpy block_table: reading it avoids a
+            # per-step D2H sync that would drain the compute stream; fall
+            # back to D2H only if unavailable.
             bt_cpu_np = getattr(attn_metadata, "block_tables_cpu_np", None)
             if bt_cpu_np is not None:
                 block_tables_list = bt_cpu_np[:num_reqs].tolist()

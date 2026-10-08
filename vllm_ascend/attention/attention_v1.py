@@ -209,8 +209,8 @@ class AscendMetadata:
     # Block addresses per sequence (Seq id -> list of physical block).
     # (batch_size, max_blocks_per_seq)
     block_tables: torch.Tensor = None
-    # CPU numpy copy of block_tables for xlite hybrid path (avoids per-step
-    # D2H sync which costs 38ms/step at B16 by draining the compute stream).
+    # CPU numpy copy of block_tables for the xlite hybrid path: reading it
+    # avoids a per-step D2H sync that drains the compute stream.
     block_tables_cpu_np: np.ndarray | None = None
 
     # The indices of the token slots that input tokens will be stored into.
