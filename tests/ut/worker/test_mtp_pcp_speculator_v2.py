@@ -249,8 +249,36 @@ def eplb_worker_config(tmp_path):
         ),
         encoding="utf-8",
     )
+    # Static capabilities avoid registry inspection in an NPU-dependent subprocess.
+    model_info = SimpleNamespace(
+        architecture="DeepseekV3ForCausalLM",
+        is_text_generation_model=True,
+        is_pooling_model=False,
+        attn_type="decoder",
+        default_seq_pooling_type=None,
+        default_tok_pooling_type=None,
+        score_type=None,
+        supports_multimodal=False,
+        supports_multimodal_raw_input_only=False,
+        requires_raw_input_tokens=False,
+        supports_multimodal_encoder_tp_data=False,
+        supports_pp=True,
+        has_inner_state=False,
+        is_attention_free=False,
+        is_hybrid=False,
+        has_noops=False,
+        supports_mamba_prefix_caching=False,
+        supports_replayssm=False,
+        supports_transcription=False,
+        supports_transcription_only=False,
+        supported_video_pruning_methods=(),
+    )
     # Validate MRV2 PCP/EPLB config without requiring accelerator kernels on CPU.
     with (
+        patch(
+            "vllm.model_executor.models.ModelRegistry.inspect_model_cls",
+            return_value=(model_info, model_info.architecture),
+        ),
         patch("vllm.envs.VLLM_USE_V2_MODEL_RUNNER", True),
         patch("vllm.config.vllm.HAS_TRITON", True),
         patch("vllm.config.parallel.current_platform.is_cuda_alike", return_value=True),
