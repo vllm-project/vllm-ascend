@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 from contextlib import contextmanager
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -79,7 +80,7 @@ def test_plain_eager_paged_fia_uses_inner_precise_without_padding(monkeypatch, n
     metadata = make_metadata(total=tuple(range(13, 13 + num_reqs)), query=(1,) * num_reqs)
     query = torch.randn(num_reqs, 8, 128)
     key = value = impl.key_cache.view(4, 128, 128)
-    seen = {}
+    seen: dict[str, Any] = {}
 
     def fia(q, k, v, **kwargs):
         seen.update(query=q, key=k, value=v, **kwargs)
@@ -407,19 +408,19 @@ def test_v2_graph_shared_source_preserves_steps_layers_and_padding(is_prefill, c
         resolved = UpdatableGraph.resolve_tasks(graph, source)
 
     for task in resolved:
-        metadata = steps[task.provider_index][task.provider.metadata_layer_name]
-        assert task.kwargs["actual_seq_lengths"] == metadata.decode.actual_seq_lengths_q
+        layer_metadata = steps[task.provider_index][task.provider.metadata_layer_name]
+        assert task.kwargs["actual_seq_lengths"] == layer_metadata.decode.actual_seq_lengths_q
         if task.provider.attention_kind == CPKVScope.CURRENT:
-            assert task.kwargs["actual_seq_lengths_kv"] == metadata.decode.actual_seq_lengths_q
+            assert task.kwargs["actual_seq_lengths_kv"] == layer_metadata.decode.actual_seq_lengths_q
             assert task.kwargs["block_table"] is None
         else:
-            lengths = metadata.decode.seq_lens_list
+            lengths = layer_metadata.decode.seq_lens_list
             if task.provider.attention_kind == CPKVScope.HISTORY:
                 lengths = [max(total - current, 0) for total, current in zip(lengths, query)]
             expected = [sum((position // interleave) % 2 == rank for position in range(length)) for length in lengths]
             assert task.kwargs["actual_seq_lengths_kv"] == expected
             assert task.kwargs["actual_seq_lengths_kv"][-1] == 0
-            assert task.kwargs["block_table"] is metadata.decode.block_tables
+            assert task.kwargs["block_table"] is layer_metadata.decode.block_tables
         assert "layer_name" not in task.kwargs
     assert all(task.kwargs == {"step": task.provider_index} for task in tasks)
 
