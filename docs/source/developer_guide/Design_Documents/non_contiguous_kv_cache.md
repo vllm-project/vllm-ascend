@@ -1,5 +1,23 @@
 # Non-Contiguous KV Cache
 
+## Current Default Layout
+
+Ordinary GQA and Attention/Mamba hybrid models use contiguous cache views in
+MRv1 and MRv2 again. The non-contiguous design below is retained for historical
+reference and no longer describes the default layout for these models.
+
+- Pure GQA allocates K and V separately, with contiguous logical views.
+- Ordinary hybrid models use contiguous regions in shared backing: all conv
+  states, all SSM states, and all Attention K blocks and V blocks. See Section 3.1.
+- The hybrid Attention block size is derived from K/SSM segment sizes. Larger
+  manually configured blocks must not violate segment alignment. Restoring
+  contiguous layouts may increase padding and reduce cache capacity; performance
+  benefits require controlled A/B testing.
+- Specialized GLM/DeepSeek physical pages and existing C8_MXFP packed layouts are
+  outside this generic cache-layout rollback and retain their required page
+  strides. FLA operators, state gather/scatter, and cache-copy/zeroing
+  compatibility remain unchanged.
+
 ## 1. Overview
 
 vLLM normally exposes a logical KV-cache block as a regular tensor view. On

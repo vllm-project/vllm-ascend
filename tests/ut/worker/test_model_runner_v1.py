@@ -1209,7 +1209,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                     caches = runner._reshape_kv_cache_tensors(cache_config, raw)
                 assert_attention_cache_views(caches, raw, packed)
 
-    def test_hybrid_noncontiguous_reshape_uses_per_group_kernel_sizes(self):
+    def test_hybrid_contiguous_reshape_uses_per_group_kernel_sizes(self):
         runner = self._build_runner()
         runner.hybrid_with_attn_and_mamba = True
         runner.use_hybrid_blocks = True
@@ -1220,12 +1220,13 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             num_kv_heads=1,
             head_size=2,
             dtype=torch.float16,
+            page_size_padded=70,
         )
         mamba_spec = MambaSpec(
             block_size=8,
-            shapes=((3,), (5,)),
+            shapes=((3,), (16,)),
             dtypes=(torch.float16, torch.float16),
-            page_size_padded=32,
+            page_size_padded=70,
             mamba_cache_mode="align",
         )
         attention_backend = MagicMock()
@@ -1268,10 +1269,12 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                 ),
             ],
         )
-        raw_caches = {
-            "full_attn": torch.zeros(2 * attention_spec.page_size_bytes, dtype=torch.uint8),
-            "linear_attn": torch.zeros(2 * mamba_spec.page_size_bytes, dtype=torch.uint8),
-        }
+        # Place all conv blocks first, align K with SSM, and keep V at the tail.
+        # Verify same-block aliasing with shared backing and a nonzero offset.
+        backing = torch.full((16 + 2 * attention_spec.page_size_bytes + 16,), 37, dtype=torch.uint8)
+        raw = backing[16:-16]
+        raw.zero_()
+        raw_caches = {"full_attn": raw[:], "linear_attn": raw[:]}
 
         caches = runner._reshape_kv_cache_tensors(
             kv_cache_config,
@@ -1283,14 +1286,26 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         assert len(caches["full_attn"]) == 2
         for cache in caches["full_attn"]:
             assert cache.shape == (4, 4, 1, 2)
-            assert cache.stride() == (16, 2, 2, 1)
+            assert cache.stride() == (8, 2, 2, 1)
+            assert cache.is_contiguous()
         conv_state, ssm_state = caches["linear_attn"]
         assert conv_state.shape == (2, 3)
-        assert ssm_state.shape == (2, 5)
-        assert conv_state.stride() == (16, 1)
+        assert ssm_state.shape == (2, 16)
+        assert conv_state.stride() == (3, 1)
         assert ssm_state.stride() == (16, 1)
-        assert conv_state.storage_offset() == 0
-        assert ssm_state.storage_offset() == 3
+        assert conv_state.is_contiguous() and ssm_state.is_contiguous()
+        assert conv_state.storage_offset() == 8
+        assert ssm_state.storage_offset() == 14
+        key, value = caches["full_attn"]
+        assert key.data_ptr() == ssm_state.data_ptr()
+        ssm_state[1].fill_(7)
+        assert torch.all(key[2:] == 7)
+        assert torch.count_nonzero(key[:2]) == 0
+        assert torch.count_nonzero(value) == 0
+        conv_state[0].fill_(3)
+        assert torch.all(key[2:] == 7)
+        assert torch.count_nonzero(value) == 0
+        assert torch.all(backing[:16] == 37) and torch.all(backing[-16:] == 37)
         attention_backend.get_kv_cache_shape.assert_any_call(
             4,
             4,
@@ -1298,22 +1313,22 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             2,
         )
 
-    def test_pure_gqa_uses_noncontiguous_block_major_kv_cache(self):
+    def test_pure_gqa_uses_separate_contiguous_kv_cache(self):
         self._check_gqa_cache_layout(xlite_enabled=False)
 
     def test_paged_attention_uses_contiguous_kv_cache(self):
-        self._check_gqa_cache_layout(xlite_enabled=False, pa_enabled=True)
+        self._check_gqa_cache_layout(xlite_enabled=False)
 
     def test_xlite_uses_separate_contiguous_kv_cache(self):
         self._check_gqa_cache_layout(xlite_enabled=True)
 
-    def test_dense_backend_subclass_keeps_non_contiguous_kv_cache(self):
+    def test_dense_backend_subclass_uses_contiguous_kv_cache(self):
         self._check_gqa_cache_layout(xlite_enabled=False, backend=DenseAttentionBackend)
 
     def test_sparse_backend_uses_separate_contiguous_kv_cache(self):
         self._check_gqa_cache_layout(xlite_enabled=False, backend=SparseAttentionBackend)
 
-    def _check_gqa_cache_layout(self, xlite_enabled, backend=AscendAttentionBackend, pa_enabled=False):
+    def _check_gqa_cache_layout(self, xlite_enabled, backend=AscendAttentionBackend):
         runner = self._build_runner()
         runner.ascend_config.xlite_graph_config.enabled = xlite_enabled
         runner.model_config.use_mla = False
@@ -1348,34 +1363,23 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             ],
         )
 
-        with patch("vllm_ascend.worker.model_runner_v1.requires_contiguous_pa_kv_cache", return_value=pa_enabled):
-            raw_caches = runner._allocate_kv_cache_tensors(kv_cache_config)
-
-        uses_contiguous_cache = xlite_enabled or backend.is_sparse() or pa_enabled
-        assert isinstance(raw_caches[layer_name], tuple if uses_contiguous_cache else torch.Tensor)
+        raw_caches = runner._allocate_kv_cache_tensors(kv_cache_config)
+        assert isinstance(raw_caches[layer_name], tuple)
         cache = runner._reshape_kv_cache_tensors(
             kv_cache_config,
             raw_caches,
             [spec.block_size],
         )[layer_name]
-        if uses_contiguous_cache:
-            assert isinstance(cache, tuple)
-            assert len(cache) == 2
-            for tensor in cache:
-                assert tensor.shape == (2, 8, 2, 2)
-                assert tensor.is_contiguous()
-            return
         assert isinstance(cache, tuple)
         assert len(cache) == 2
         key, value = cache
         for tensor in cache:
             assert tensor.shape == (2, 8, 2, 2)
-            assert tensor.stride() == (64, 4, 2, 1)
-            assert not tensor.is_contiguous()
-            assert tensor.untyped_storage().data_ptr() == raw_caches[layer_name].untyped_storage().data_ptr()
-        assert key.data_ptr() == raw_caches[layer_name].data_ptr()
-        assert value.data_ptr() - key.data_ptr() == 32 * key.element_size()
-        # Component writes must preserve the other component and block.
+            assert tensor.stride() == (32, 4, 2, 1)
+            assert tensor.is_contiguous()
+        assert key.data_ptr() == raw_caches[layer_name][0].data_ptr()
+        assert value.data_ptr() == raw_caches[layer_name][1].data_ptr()
+        # K/V writes must preserve the other component and other blocks.
         key[0].fill_(3)
         value[1].fill_(5)
         assert torch.all(key[0] == 3)
@@ -1383,17 +1387,17 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         assert torch.count_nonzero(value[0]) == 0
         assert torch.count_nonzero(key[1]) == 0
 
-    def test_full_attention_allocator_selects_layout_per_backend(self):
-        self._check_full_attention_allocator_selects_layout_per_backend(
+    def test_full_attention_allocator_preserves_backend_isolation(self):
+        self._check_full_attention_allocator_preserves_backend_isolation(
             [AscendAttentionBackend, SparseAttentionBackend]
         )
 
-    def test_full_attention_allocator_layout_is_independent_of_backend_order(self):
-        self._check_full_attention_allocator_selects_layout_per_backend(
+    def test_full_attention_allocator_is_independent_of_backend_order(self):
+        self._check_full_attention_allocator_preserves_backend_isolation(
             [SparseAttentionBackend, AscendAttentionBackend]
         )
 
-    def _check_full_attention_allocator_selects_layout_per_backend(self, backends):
+    def _check_full_attention_allocator_preserves_backend_isolation(self, backends):
         runner = self._build_runner()
         spec = FullAttentionSpec(block_size=8, num_kv_heads=2, head_size=2, dtype=torch.float16)
         names = ["model.layers.0.self_attn.attn", "model.layers.1.self_attn.attn"]
@@ -1416,10 +1420,10 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         raw = runner._allocate_kv_cache_tensors(config)
         supported_name = names[backends.index(AscendAttentionBackend)]
         unsupported_name = names[backends.index(SparseAttentionBackend)]
-        assert isinstance(raw[supported_name], torch.Tensor)
+        assert isinstance(raw[supported_name], tuple)
         assert isinstance(raw[unsupported_name], tuple)
         caches = runner._reshape_kv_cache_tensors(config, raw, [spec.block_size])
-        assert not caches[supported_name][0].is_contiguous()
+        assert all(tensor.is_contiguous() for tensor in caches[supported_name])
         key, value = caches[unsupported_name]
         assert key.is_contiguous() and value.is_contiguous()
         key[1].fill_(3)
@@ -1654,6 +1658,66 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         spec = FullAttentionSpec(block_size=512, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)
         self.assertFalse(runner._is_c8_mxfp_kv_cache(spec))
 
+    def test_c8_mxfp_keeps_combined_allocation_and_hybrid_physical_pages(self):
+        runner = self._build_runner()
+        runner.vllm_config.cache_config.cache_dtype = "mxfp8"
+        runner.vllm_config.cache_config.get_resolved_kv_cache_layout.return_value = SimpleNamespace(
+            is_layer_compact=True, is_block_compact=True
+        )
+        attention_spec = mxfp_cache_spec(
+            FullAttentionSpec(block_size=512, num_kv_heads=1, head_size=128, dtype=torch.float8_e4m3fn)
+        )
+        mamba_spec = MambaSpec(
+            block_size=512,
+            shapes=((3,), (5,)),
+            dtypes=(torch.float16, torch.float16),
+            page_size_padded=attention_spec.page_size_bytes,
+        )
+        groups = [
+            SimpleNamespace(
+                kv_cache_group_id=group_id,
+                kv_cache_spec=spec,
+                backend=AscendAttentionBackend,
+                layer_names=[name],
+            )
+            for group_id, (name, spec) in enumerate((("full_attn", attention_spec), ("linear_attn", mamba_spec)))
+        ]
+        runner._kv_cache_spec_attn_group_iterator = lambda: iter(groups)
+        config = KVCacheConfig(
+            num_blocks=2,
+            kv_cache_tensors=[
+                _make_kv_cache_tensor(2 * spec.page_size_bytes, [name], spec.page_size_bytes)
+                for name, spec in (("full_attn", attention_spec), ("linear_attn", mamba_spec))
+            ],
+            kv_cache_groups=[
+                KVCacheGroupSpec(layer_names=group.layer_names, kv_cache_spec=group.kv_cache_spec) for group in groups
+            ],
+        )
+        pure_config = KVCacheConfig(
+            num_blocks=2,
+            kv_cache_tensors=config.kv_cache_tensors[:1],
+            kv_cache_groups=config.kv_cache_groups[:1],
+        )
+        runner._kv_cache_spec_attn_group_iterator = lambda: iter(groups[:1])
+        pure_raw = runner._allocate_kv_cache_tensors(pure_config)
+        self.assertIsInstance(pure_raw["full_attn"], torch.Tensor)
+        pure_cache = runner._reshape_kv_cache_tensors(pure_config, pure_raw, [512])["full_attn"]
+        self.assertEqual(len(pure_cache), 4)
+        runner._kv_cache_spec_attn_group_iterator = lambda: iter(groups)
+        raw = runner._allocate_kv_cache_tensors(config)
+        self.assertIsInstance(raw["full_attn"], torch.Tensor)
+        caches = runner._reshape_kv_cache_tensors(config, raw, [512, 512])
+        conv_state, ssm_state = caches["linear_attn"]
+        self.assertEqual(conv_state.stride(), (mamba_spec.page_size_bytes // 2, 1))
+        self.assertEqual(ssm_state.stride(), (mamba_spec.page_size_bytes // 2, 1))
+        # Writes to the second Mamba block must stay in its physical page
+        # without modifying the first packet.
+        page_zero = raw["full_attn"][: attention_spec.page_size_bytes].clone()
+        ssm_state[1].fill_(7)
+        self.assertTrue(torch.equal(raw["full_attn"][: attention_spec.page_size_bytes], page_zero))
+        self.assertEqual(ssm_state[1].data_ptr() - raw["full_attn"].data_ptr(), mamba_spec.page_size_bytes + 6)
+        self.assertTrue(all(view.stride(0) == attention_spec.page_size_bytes for view in caches["full_attn"]))
+
     def test_allocate_kv_cache_uses_layer_spec_for_draft_gqa(self):
         runner = self._build_runner()
         runner.sparse_kv_offload_enabled = False
@@ -1680,11 +1744,12 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         )
 
         kv_cache_raw_tensors = runner._allocate_kv_cache_tensors(kv_cache_config)
-        combined_cache_raw = kv_cache_raw_tensors["draft_attn"]
+        raw_key, raw_value = kv_cache_raw_tensors["draft_attn"]
 
-        self.assertIsInstance(combined_cache_raw, torch.Tensor)
+        self.assertIsInstance(raw_key, torch.Tensor)
+        self.assertIsInstance(raw_value, torch.Tensor)
         self.assertEqual(
-            combined_cache_raw.numel(),
+            raw_key.numel() + raw_value.numel(),
             2 * kv_cache_spec.page_size_bytes,
         )
 
@@ -1968,10 +2033,6 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         raw_caches = runner._allocate_kv_cache_tensors(kv_cache_config)
         assert raw_caches[layer_names[0]][0] is not raw_caches[layer_names[1]][0]
         assert raw_caches[layer_names[0]][1] is not raw_caches[layer_names[1]][1]
-
-    @patch("vllm_ascend.worker.model_runner_v1.requires_contiguous_pa_kv_cache", return_value=True)
-    def test_hybrid_backing_is_unchanged_when_pa_is_configured(self, _mock_requires_contiguous):
-        self.test_hybrid_descriptors_share_standardized_backing_allocation()
 
     def test_hybrid_descriptors_share_standardized_backing_allocation(self):
         attn_names = ["model.layers.0.self_attn.attn", "model.layers.2.self_attn.attn"]
@@ -2358,16 +2419,18 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
 
         for layout, raw_cache, hybrid_flag in raw_caches:
             runner.hybrid_with_attn_and_mamba = hybrid_flag
-            runner.use_hybrid_blocks = hybrid_flag
-            with self.subTest(layout=layout):
-                k_cache, v_cache = runner._reshape_kv_cache_tensors(
-                    kv_cache_config,
-                    {layer_name: raw_cache},
-                    [spec.block_size],
-                )[layer_name]
+            for use_hybrid_blocks in (False, True):
+                runner.use_hybrid_blocks = use_hybrid_blocks
+                with self.subTest(layout=layout, use_hybrid_blocks=use_hybrid_blocks):
+                    k_cache, v_cache = runner._reshape_kv_cache_tensors(
+                        kv_cache_config,
+                        {layer_name: raw_cache},
+                        [spec.block_size],
+                    )[layer_name]
 
-            self.assertEqual(k_cache.shape, (2, 4, 2, 3))
-            self.assertEqual(v_cache.shape, (2, 4, 2, 3))
+                self.assertEqual(k_cache.shape, (2, 4, 2, 3))
+                self.assertEqual(v_cache.shape, (2, 4, 2, 3))
+                self.assertTrue(k_cache.is_contiguous() and v_cache.is_contiguous())
 
     @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)
     @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")

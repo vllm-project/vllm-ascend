@@ -8,6 +8,7 @@ import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
+from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     HiddenStateCacheSpec,
@@ -41,15 +42,22 @@ from vllm_ascend.attention.dsa_v1 import (
 )
 from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
 from vllm_ascend.core.kv_cache_interface import (
+    AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
     get_storage_block_size,
+    requires_padded_page_layout,
 )
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.models.deepseek_v4 import compressor as deepseek_v4_compressor
 from vllm_ascend.models.deepseek_v4 import indexer as deepseek_v4_indexer
 from vllm_ascend.models.deepseek_v4 import model as deepseek_v4_model
+from vllm_ascend.models.glm5next.cache_config import (
+    get_glm5_next_kv_cache_config,
+    get_glm5_next_kv_cache_groups,
+    get_glm5_next_pool_bytes_per_block,
+)
 from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _get_kv_cache_config_deepseek_v4_main,
 )
@@ -93,16 +101,10 @@ def _spec_compress_ratio(spec) -> int:
     return spec.tokens_per_state
 
 
-@pytest.fixture(autouse=True)
-def default_pa_disabled(monkeypatch):
-    monkeypatch.setattr(attn_utils, "requires_contiguous_pa_kv_cache", lambda *_args, **_kwargs: False)
-
-
 def _configure_pa_allocation_check(monkeypatch, vllm_config, pa_enabled):
     """Exercise PA allocation policy using actual config and Attention implementations."""
     vllm_config.speculative_config = None
     vllm_config.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY)
-    monkeypatch.setattr(attn_utils, "requires_contiguous_pa_kv_cache", attention_utils.requires_contiguous_pa_kv_cache)
     monkeypatch.setattr(
         attention_utils, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A3)
     )
@@ -204,22 +206,15 @@ def test_main_allocator_attention_layout(
     second_key, second_value = kv_caches[second_layer_name]
     assert second_key.shape == expected_shape
     assert second_value.shape == expected_shape
-    block_elements = kernel_block_size * spec.num_kv_heads * spec.head_size
-    if cache_kind in ("c8", "dcp") or (cache_kind in ("full", "mixed") and not pa_enabled):
-        assert not key_cache.is_contiguous()
-        assert not value_cache.is_contiguous()
-        assert key_cache.stride(0) == value_cache.stride(0) == 2 * block_elements
-        assert key_cache.untyped_storage().data_ptr() == value_cache.untyped_storage().data_ptr()
-        assert value_cache.storage_offset() - key_cache.storage_offset() == block_elements
-        assert key_cache.untyped_storage().data_ptr() != second_key.untyped_storage().data_ptr()
-        expected_bytes = num_blocks * spec.page_size_bytes + (2 * 1024 * 1024 if kv_transfer else 0)
-        assert key_cache.untyped_storage().nbytes() == expected_bytes
-        if kv_transfer:
-            assert key_cache.data_ptr() % (2 * 1024 * 1024) == 0
-    else:
-        assert key_cache.is_contiguous()
-        assert value_cache.is_contiguous()
-        assert key_cache.untyped_storage().data_ptr() != value_cache.untyped_storage().data_ptr()
+    assert key_cache.is_contiguous()
+    assert value_cache.is_contiguous()
+    assert key_cache.untyped_storage().data_ptr() != value_cache.untyped_storage().data_ptr()
+    assert key_cache.untyped_storage().data_ptr() != second_key.untyped_storage().data_ptr()
+    expected_bytes = num_blocks * spec.page_size_bytes // 2 + (2 * 1024 * 1024 if kv_transfer else 0)
+    assert key_cache.untyped_storage().nbytes() == value_cache.untyped_storage().nbytes() == expected_bytes
+    if kv_transfer:
+        assert key_cache.data_ptr() % (2 * 1024 * 1024) == 0
+        assert value_cache.data_ptr() % (2 * 1024 * 1024) == 0
     if cache_kind == "mixed":
         assert second_key.is_contiguous()
         assert second_value.is_contiguous()
@@ -283,9 +278,16 @@ def test_hybrid_allocator_keeps_shared_backing_with_pa_configured(monkeypatch, p
     assert raw_caches[attn_name].data_ptr() == raw_caches[mamba_name].data_ptr()
 
 
-def test_hybrid_attention_layout_preserves_padding(monkeypatch):
+@pytest.mark.parametrize("splits", [1, 2, 9, 16])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+def test_hybrid_attention_layout_preserves_contiguous_segments_and_padding(monkeypatch, splits, dtype):
     name = "model.layers.0.self_attn.attn"
-    spec = FullAttentionSpec(block_size=2, num_kv_heads=1, head_size=4, dtype=torch.float16, page_size_padded=64)
+    kernel_block_size = 128
+    block_size = kernel_block_size * splits
+    page_size_bytes = 2 * block_size * dtype.itemsize + 64
+    spec = FullAttentionSpec(
+        block_size=block_size, num_kv_heads=1, head_size=1, dtype=dtype, page_size_padded=page_size_bytes
+    )
     config = KVCacheConfig(
         num_blocks=3,
         kv_cache_tensors=[],
@@ -306,21 +308,29 @@ def test_hybrid_attention_layout_preserves_padding(monkeypatch):
             attn_groups=[group],
             kv_cache_raw_tensors={name: raw},
             cache_dtype="auto",
-            kernel_block_sizes=[spec.block_size],
+            kernel_block_sizes=[kernel_block_size],
             shared_kv_cache_layers={},
             kv_cache_config=config,
         )
 
     key, value = reshape()[name]
-    assert not key.is_contiguous() and not value.is_contiguous()
-    key[1].fill_(3)
-    value[1].fill_(5)
-    torch.testing.assert_close(raw[: spec.page_size_bytes], before[: spec.page_size_bytes])
-    torch.testing.assert_close(raw[2 * spec.page_size_bytes :], before[2 * spec.page_size_bytes :])
-    torch.testing.assert_close(
-        raw[spec.page_size_bytes + spec.real_page_size_bytes : 2 * spec.page_size_bytes],
-        before[spec.page_size_bytes + spec.real_page_size_bytes : 2 * spec.page_size_bytes],
-    )
+    assert key.shape == value.shape == (3 * splits, kernel_block_size, 1, 1)
+    assert key.is_contiguous() and value.is_contiguous()
+    assert key.untyped_storage().data_ptr() == value.untyped_storage().data_ptr() == raw.untyped_storage().data_ptr()
+    padding_bytes = 3 * (spec.page_size_bytes - spec.real_page_size_bytes)
+    assert key.data_ptr() - raw.data_ptr() == padding_bytes
+    assert value.data_ptr() - key.data_ptr() == key.numel() * key.element_size()
+    for block_id in range(3):
+        raw.copy_(before)
+        before_key, before_value = key.clone(), value.clone()
+        start, end = block_id * splits, (block_id + 1) * splits
+        key[start:end].fill_(3)
+        value[start:end].fill_(5)
+        torch.testing.assert_close(key[:start], before_key[:start])
+        torch.testing.assert_close(key[end:], before_key[end:])
+        torch.testing.assert_close(value[:start], before_value[:start])
+        torch.testing.assert_close(value[end:], before_value[end:])
+        torch.testing.assert_close(raw[:padding_bytes], before[:padding_bytes])
 
 
 @pytest.mark.parametrize("sparse_backend", [False, True])
@@ -364,11 +374,14 @@ def test_padded_full_attention_allocation_preserves_backend_behavior(monkeypatch
             attn_utils._allocate_kv_cache(config, shared_layers={}, device=torch.device("cpu"))
     else:
         raw_caches = attn_utils._allocate_kv_cache(config, shared_layers={}, device=torch.device("cpu"))
-        assert isinstance(raw_caches[name], torch.Tensor)
-        assert raw_caches[name].numel() == 3 * spec.page_size_bytes
+        key_raw, value_raw = raw_caches[name]
+        assert key_raw.numel() == value_raw.numel() == 3 * spec.real_page_size_bytes // 2
+        key, value = attn_utils.allocate_kv_cache_main(config, torch.device("cpu"), None, [spec.block_size])[name]
+        assert key.shape == value.shape == (3, spec.block_size, spec.num_kv_heads, spec.head_size)
+        assert key.is_contiguous() and value.is_contiguous()
 
 
-def test_mrv2_mamba_views_skip_physical_page_padding():
+def test_mrv2_mamba_views_keep_contiguous_state_segments_and_tail_padding():
     spec = MambaSpec(
         block_size=1,
         shapes=((4,), (2,)),
@@ -381,51 +394,131 @@ def test_mrv2_mamba_views_skip_physical_page_padding():
 
     assert conv_state.shape == (3, 4)
     assert ssm_state.shape == (3, 2)
+    assert conv_state.stride() == (4, 1)
+    assert ssm_state.stride() == (2, 1)
+    assert conv_state.is_contiguous()
+    assert ssm_state.is_contiguous()
+    assert ssm_state.data_ptr() - raw.data_ptr() == conv_state.numel() * conv_state.element_size()
+
+    conv_state[1].fill_(1)
+    ssm_state[2].fill_(2)
+    assert torch.count_nonzero(raw[:8]) == 0
+    assert torch.count_nonzero(raw[8:16]) > 0
+    assert torch.count_nonzero(raw[16:40]) == 0
+    assert torch.count_nonzero(raw[40:48]) > 0
+    assert torch.count_nonzero(raw[48:]) == 0
+
+
+def test_mrv2_mxfp_mamba_views_preserve_physical_page_padding(monkeypatch):
+    name = "linear_attn"
+    spec = MambaSpec(block_size=1, shapes=((4,), (2,)), dtypes=(torch.float16, torch.float32), page_size_padded=32)
+    raw = torch.zeros(3 * spec.page_size_bytes, dtype=torch.int8)
+    config = KVCacheConfig(
+        num_blocks=3,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=[name], kv_cache_spec=spec)],
+    )
+    group = SimpleNamespace(kv_cache_group_id=0, kv_cache_spec=spec, layer_names=[name])
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=SimpleNamespace()), cache_config=SimpleNamespace(cache_dtype="mxfp8")
+    )
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
+    conv_state, ssm_state = attn_utils._reshape_kv_cache_v2([group], {name: raw}, "mxfp8", [1], {}, config)[name]
     assert conv_state.stride() == (16, 1)
     assert ssm_state.stride() == (8, 1)
-    assert not conv_state.is_contiguous()
-    assert not ssm_state.is_contiguous()
-
+    assert not conv_state.is_contiguous() and not ssm_state.is_contiguous()
     conv_state[1].fill_(1)
     ssm_state[2].fill_(2)
     assert torch.count_nonzero(raw[:32]) == 0
     assert torch.count_nonzero(raw[32:40]) > 0
-    assert torch.count_nonzero(raw[40:64]) == 0
-    assert torch.count_nonzero(raw[64:72]) == 0
+    assert torch.count_nonzero(raw[40:72]) == 0
     assert torch.count_nonzero(raw[72:80]) > 0
     assert torch.count_nonzero(raw[80:]) == 0
 
 
-def test_mrv2_attention_views_interleave_kv_per_physical_page():
-    num_blocks = 3
-    block_size = 2
-    num_heads = 1
-    head_size = 4
-    logical_page_elements = 2 * block_size * num_heads * head_size
-    physical_page_elements = logical_page_elements + 8
-    raw = torch.zeros(
-        num_blocks * physical_page_elements * torch.float16.itemsize,
-        dtype=torch.int8,
+def test_mrv2_glm5next_shared_slots_preserve_physical_block_boundaries(monkeypatch):
+    main_name = "model.layers.1.attn"
+    indexer_name = "model.layers.1.indexer.k_cache"
+    tail_name = "model.layers.1.indexer.tail_cache"
+    mamba_name = "model.layers.0.linear_attn"
+    specs = {
+        main_name: AscendMLAAttentionSpec(
+            block_size=8,
+            num_kv_heads=1,
+            head_size=4,
+            dtype=torch.bfloat16,
+            model_version="glm5_next",
+            indexes_kv_by_block_stride=True,
+        ),
+        indexer_name: AscendMLAAttentionSpec(
+            block_size=8,
+            num_kv_heads=1,
+            head_size=4,
+            dtype=torch.bfloat16,
+            model_version="glm5_next",
+            indexes_kv_by_block_stride=True,
+            tokens_per_state=2,
+        ),
+        tail_name: AscendIndexerKPoolTailSpec(
+            block_size=2, sliding_window=2, compress_ratio=2, num_kv_heads=1, head_size=1, dtype=torch.float32
+        ),
+        mamba_name: MambaSpec(block_size=8, shapes=((2, 2), (1, 2, 2)), dtypes=(torch.bfloat16, torch.float32)),
+    }
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(max_model_len=64, hf_config=SimpleNamespace()),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1, prefill_context_parallel_size=1),
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+        max_in_flight_tokens=8,
+        cache_config=SimpleNamespace(
+            num_gpu_blocks_override=None,
+            mamba_cache_mode="none",
+            enable_prefix_caching=False,
+            prefix_cache_retention_interval=0,
+            cache_dtype="auto",
+        ),
+        kv_transfer_config=None,
+        additional_config={},
+        compilation_config=SimpleNamespace(static_forward_context={}),
     )
-
-    key, value = attn_utils._reshape_combined_attention_kv_cache(
-        raw,
-        (2, num_blocks, block_size, num_heads, head_size),
-        torch.float16,
-        physical_page_elements * torch.float16.itemsize,
-    )
-
-    assert key.stride() == (physical_page_elements, 4, 4, 1)
-    assert value.stride() == (physical_page_elements, 4, 4, 1)
-    assert not key.is_contiguous()
-    assert not value.is_contiguous()
-
-    key[1].fill_(1)
-    value[2].fill_(2)
-    raw_typed = raw.view(torch.float16)
-    assert torch.count_nonzero(raw_typed[:physical_page_elements]) == 0
-    assert torch.count_nonzero(raw_typed[physical_page_elements : 2 * physical_page_elements]) == 8
-    assert torch.count_nonzero(raw_typed[2 * physical_page_elements :]) == 8
+    register_all_kvcache_specs(None)
+    groups = get_glm5_next_kv_cache_groups(vllm_config, specs)
+    plan = get_glm5_next_kv_cache_config(vllm_config, groups, 3 * get_glm5_next_pool_bytes_per_block(groups))
+    assert requires_padded_page_layout(specs.values())
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda *_args: False)
+    monkeypatch.setattr(attn_utils, "enable_fa_quant", lambda *_args: False)
+    monkeypatch.setattr(attn_utils, "_get_attention_kv_cache_dims", lambda _name, spec: (spec.head_size, 0))
+    raw_caches = attn_utils._allocate_kv_cache(plan, {}, torch.device("cpu"))
+    assert raw_caches[main_name] is raw_caches[mamba_name]
+    assert raw_caches[indexer_name] is raw_caches[tail_name]
+    backend = SimpleNamespace(get_kv_cache_shape=lambda n, b, h, d, *_args: (n, b, h, d))
+    attn_groups = [
+        SimpleNamespace(kv_cache_group_id=i, kv_cache_spec=specs[name], layer_names=[name], backend=backend)
+        for i, group in enumerate(groups)
+        for name in group.layer_names
+    ]
+    caches = attn_utils._reshape_kv_cache_v2(attn_groups, raw_caches, "auto", [8, 2, 8], {}, plan)
+    states = caches[mamba_name]
+    page_bytes = specs[mamba_name].page_size_bytes
+    assert all(state.stride(0) * state.element_size() == page_bytes for state in states)
+    assert states[1].data_ptr() - states[0].data_ptr() == states[0][0].numel() * states[0].element_size()
+    # Use real planner shared slots. Each view must write only the selected
+    # physical block without crossing its padding boundary.
+    for name, views in caches.items():
+        raw = raw_caches[name]
+        physical_page_bytes = raw.numel() // plan.num_blocks
+        for view in views:
+            assert view.untyped_storage().data_ptr() == raw.untyped_storage().data_ptr()
+            for block_id in range(plan.num_blocks):
+                raw.zero_()
+                before = raw.clone()
+                view[block_id].fill_(7)
+                torch.testing.assert_close(
+                    raw[: block_id * physical_page_bytes], before[: block_id * physical_page_bytes]
+                )
+                torch.testing.assert_close(
+                    raw[(block_id + 1) * physical_page_bytes :], before[(block_id + 1) * physical_page_bytes :]
+                )
 
 
 def test_main_dsv4_materializes_real_planner_geometry_once(monkeypatch):
@@ -943,69 +1036,11 @@ def test_draft_metadata_uses_per_request_cpu_upper_bounds():
         torch.testing.assert_close(common_metadata.seq_lens, torch.tensor([11, 25], dtype=torch.int32))
 
 
-@pytest.mark.parametrize("splits", [1, 9, 16])
-def test_combined_attention_kernel_blocks_match_physical_rows(splits):
-    shape = (2, 3 * splits, 128, 2, 256)
-    block_elements = 128 * 2 * 256
-    raw = torch.zeros(2 * shape[1] * block_elements, dtype=torch.float16)
-    key, value = attn_utils._reshape_combined_attention_kv_cache(
-        raw.view(torch.int8), shape, raw.dtype, splits * 2 * block_elements * 2, splits
-    )
-    physical = raw.view(3, splits, 2, 128, 2, 256)
-    for block_id in range(shape[1]):
-        key[block_id].fill_(block_id + 1)
-        value[block_id].fill_(-block_id - 1)
-    torch.testing.assert_close(key, physical[:, :, 0].flatten(0, 1))
-    torch.testing.assert_close(value, physical[:, :, 1].flatten(0, 1))
-    assert not key.is_contiguous()
-    assert key.stride(0) == 2 * block_elements
-    assert key.untyped_storage().data_ptr() == raw.untyped_storage().data_ptr()
-    with pytest.raises(ValueError, match="Padded combined"):
-        attn_utils._reshape_combined_attention_kv_cache(
-            raw.view(torch.int8), shape, raw.dtype, 9 * 2 * block_elements * 2 + 64, 9
-        )
-
-
-@pytest.mark.parametrize("splits", [1, 2, 4, 8])
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
-def test_padded_attention_kernel_writes_preserve_other_pages_and_padding(splits, dtype):
-    num_blocks, block_size, heads, dim = 3, 128, 1, 1
-    block_elements = block_size * heads * dim
-    dtype_size = torch.empty((), dtype=dtype).element_size()
-    page_bytes = splits * 2 * block_elements * dtype_size + 64
-    kernel_stride_elements = page_bytes // splits // dtype_size
-    raw = torch.full((num_blocks, splits, kernel_stride_elements), -7, dtype=dtype)
-    shape = (2, num_blocks * splits, block_size, heads, dim)
-    key, value = attn_utils._reshape_combined_attention_kv_cache(
-        raw.view(torch.int8).flatten(), shape, dtype, page_bytes, splits
-    )
-    assert key.untyped_storage().data_ptr() == raw.untyped_storage().data_ptr()
-    assert value.untyped_storage().data_ptr() == raw.untyped_storage().data_ptr()
-    assert not key.is_contiguous()
-    assert not value.is_contiguous()
-    assert key.stride(0) * splits * dtype_size == page_bytes
-
-    for block_id in range(num_blocks):
-        raw.fill_(-7)
-        before = raw.clone()
-        start, end = block_id * splits, (block_id + 1) * splits
-        key[start:end].fill_(block_id + 1)
-        value[start:end].fill_(-block_id - 1)
-        torch.testing.assert_close(raw[:block_id], before[:block_id])
-        torch.testing.assert_close(raw[block_id + 1 :], before[block_id + 1 :])
-        assert torch.all(raw[block_id, :, :block_elements] == block_id + 1)
-        assert torch.all(raw[block_id, :, block_elements : 2 * block_elements] == -block_id - 1)
-        torch.testing.assert_close(raw[:, :, 2 * block_elements :], before[:, :, 2 * block_elements :])
-
-
-@pytest.mark.parametrize(
-    ("splits", "page_bytes", "message"),
-    [(0, 512, "positive"), (2, 1026, "dtype-aligned"), (2, 512, "too small")],
-)
-def test_combined_attention_rejects_invalid_kernel_page_geometry(splits, page_bytes, message):
-    raw = torch.zeros(4096, dtype=torch.int8)
-    with pytest.raises(ValueError, match=message):
-        attn_utils._reshape_combined_attention_kv_cache(raw, (2, 4, 128, 1, 1), torch.float16, page_bytes, splits)
+@pytest.mark.parametrize("page_strided", [False, True])
+def test_mamba_cache_rejects_partial_physical_page(page_strided):
+    spec = MambaSpec(block_size=1, shapes=((4,),), dtypes=(torch.float16,), page_size_padded=32)
+    with pytest.raises(ValueError, match="whole number of physical pages"):
+        attn_utils._reshape_mamba_kv_cache(torch.zeros(95, dtype=torch.int8), spec, page_strided=page_strided)
 
 
 @pytest.mark.parametrize("for_capture", [False, True])
