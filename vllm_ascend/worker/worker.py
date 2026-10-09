@@ -727,6 +727,10 @@ class NPUWorker(WorkerBase):
             logger.info("Compile and warming up model for size %d", size)
             self.model_runner._dummy_run(size)
 
+        from vllm_ascend.worker.warmup import warmup_prefill
+
+        warmup_prefill(self.model_runner)
+
         npugraph_memory_bytes = 0
         if not self.model_config.enforce_eager:
             npugraph_memory_bytes = self.model_runner.capture_model()
