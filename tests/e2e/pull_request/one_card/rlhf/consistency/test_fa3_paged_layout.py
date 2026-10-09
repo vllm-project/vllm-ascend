@@ -91,3 +91,50 @@ def test_fa3_rejects_unsupported_page_layout():
     cache = torch.empty(4, 128, 2, 128).transpose(1, 2)
     with pytest.raises(ValueError, match="dense inner pages"):
         _as_fa3_paged_cache(cache)
+
+
+@pytest.mark.parametrize("page_step", [1, 2, 3])
+def test_fa3_empty_cache(page_step):
+    pytest.importorskip("flash_attn_npu_v3")
+    import vllm_ascend.ops  # noqa: F401
+    from vllm_ascend.attention.fa3_v1 import _as_fa3_paged_cache
+
+    cache = torch.empty(0, page_step, 128, 2, 128)[:, 0]
+    view, step = _as_fa3_paged_cache(cache)
+    assert view is cache
+    assert step == 1
+
+
+@pytest.mark.parametrize("page_step", [1, 2, 3])
+def test_fa3_preserves_page_table_sentinels(monkeypatch, page_step):
+    pytest.importorskip("flash_attn_npu_v3")
+    import vllm_ascend.ops  # noqa: F401
+    from vllm_ascend.attention import fa3_v1
+
+    cache = torch.empty(4, page_step, 128, 2, 128, device="npu", dtype=torch.bfloat16)[:, 0]
+    impl = fa3_v1.AscendFAImpl.__new__(fa3_v1.AscendFAImpl)
+    impl.key_cache = impl.value_cache = cache
+    impl.num_kv_heads, impl.head_size = 2, 128
+    table = torch.tensor([[0, 3, -1, -2]], device="npu", dtype=torch.int32)
+    original = table.clone()
+    captured = {}
+
+    def capture(query, key, value, **kwargs):
+        captured["table"] = kwargs["page_table"]
+        return query
+
+    # Inspect the actual adapter boundary, without asking the FA3 kernel to
+    # consume an invalid block ID in the active sequence.
+    monkeypatch.setattr(fa3_v1, "_fa3_fn", capture)
+    query = torch.empty(1, 2, 128, device="npu", dtype=torch.bfloat16)
+    impl._flash_attn_with_kvcache(
+        query,
+        table,
+        torch.tensor([0, 1], device="npu", dtype=torch.int32),
+        torch.tensor([1], device="npu", dtype=torch.int32),
+        False,
+        1,
+    )
+    expected = torch.tensor([[0, 3 * page_step, -1, -2]], dtype=torch.int32)
+    torch.testing.assert_close(captured["table"].cpu(), expected)
+    torch.testing.assert_close(table, original)
