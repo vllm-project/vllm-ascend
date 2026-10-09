@@ -16,6 +16,7 @@
 #
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -49,6 +50,9 @@ from vllm_ascend.utils import (
     cp_decode_comm_stream,
     is_pd_decode_recompute_scheduler_enabled,
 )
+
+if TYPE_CHECKING:
+    from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
 
 
 @dataclass
@@ -130,8 +134,8 @@ class AscendAttentionDCPMetadataBuilder(
         super().__init__(*args, **kwargs)
         self.dcp_enabled = enable_dcp()
         self.pcp_group = get_pcp_group()
-        self._pcp_context = None
-        self._pcp_cache_group_idx = None
+        self._pcp_context: AscendPCPAttentionContext | None = None
+        self._pcp_cache_group_idx: int | None = None
 
     def build(
         self,
@@ -139,12 +143,14 @@ class AscendAttentionDCPMetadataBuilder(
         common_attn_metadata: AscendCommonAttentionMetadata,
         fast_build: bool = False,
         *,
-        pcp_context=None,
+        pcp_context: "AscendPCPAttentionContext | None" = None,
         pcp_cache_group_idx: int | None = None,
     ) -> AscendAttentionDCPMetadata:
         self._pcp_context = pcp_context
         self._pcp_cache_group_idx = pcp_cache_group_idx
-        return super().build(common_prefix_len, common_attn_metadata, fast_build)
+        metadata = super().build(common_prefix_len, common_attn_metadata, fast_build)
+        assert isinstance(metadata, AscendAttentionDCPMetadata)
+        return metadata
 
     def build_for_cudagraph_capture(
         self,
@@ -216,6 +222,7 @@ class AscendAttentionDCPMetadataBuilder(
             common_attn_metadata, global_num_decodes, local_decode_tokens, query_restore_idx
         )
         if chunked_context is not None:
+            assert self._pcp_cache_group_idx is not None
             block_table = context.global_block_tables[self._pcp_cache_group_idx][global_num_decodes : batch.num_reqs]
         else:
             block_table = block_table[num_decodes:]
@@ -262,6 +269,7 @@ class AscendAttentionDCPMetadataBuilder(
     ) -> AscendMetadataForPrefill.ChunkedContextMetadata | None:
         """Prepare the global request view and PCP query indices for historical attention."""
         context = self._pcp_context
+        assert context is not None
         batch = context.global_batch
         history_lens = torch.from_numpy(batch.num_computed_tokens_np[global_num_decodes : batch.num_reqs].copy()).int()
         if not history_lens.any():
@@ -673,8 +681,8 @@ class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
             # PCP query gather includes padding; current attention uses actual local tokens.
             query_end = attn_metadata.num_actual_tokens
             if self.pcp_enabled:
+                assert attn_metadata.pcp_local_num_input_tokens is not None
                 query_end = attn_metadata.pcp_local_num_input_tokens
-                assert query_end is not None
             history_query = query[num_decode_tokens:query_end].contiguous()
             comm_stream = cp_chunkedprefill_comm_stream()
             comm_stream.wait_stream(main_stream)
