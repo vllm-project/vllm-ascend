@@ -2016,12 +2016,12 @@ def main():
 
         github_token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
 
-        def _github_request(url: str) -> urllib.request.Request:
+        def _github_request(url: str, accept: str = "application/vnd.github.v3+json") -> urllib.request.Request:
             # Descriptive User-Agent is required by the GitHub API; the urllib
             # default (Python-urllib/x.y) is a generic bot signature that edge
             # layers are more likely to throttle with 5xx.
             headers = {
-                "Accept": "application/vnd.github.v3+json",
+                "Accept": accept,
                 "User-Agent": "vllm-ascend-ci-test-selector/1.0",
                 "X-GitHub-Api-Version": "2022-11-28",
             }
@@ -2046,14 +2046,10 @@ def main():
                 req = _github_request(pr_url)
                 with urllib.request.urlopen(req, timeout=30, context=ssl_context) as response:
                     pr_data = json.loads(response.read().decode())
-                    diff_url = pr_data.get("diff_url")
                     base_sha = pr_data.get("base", {}).get("sha")
 
-                if not diff_url:
-                    raise Exception("Cannot get diff URL")
-
                 # Download diff (use binary mode to avoid line ending conversion)
-                req = _github_request(diff_url)
+                req = _github_request(pr_url, "application/vnd.github.v3.diff")
                 with urllib.request.urlopen(req, timeout=60, context=ssl_context) as response:
                     diff_bytes = response.read()
                     with open(diff_file, "wb") as f:

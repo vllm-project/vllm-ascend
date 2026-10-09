@@ -84,6 +84,7 @@ function(op_add_subdirectory OP_LIST OP_DIR_LIST)
         )
         if(BUILD_OPEN_PROJECT AND (NOT BUILD_OPS_RTY_KERNEL))
             file(GLOB CANNDEV_OPS_HOST_CMAKE_FILES
+                "${CMAKE_CURRENT_SOURCE_DIR}/mla_preprocess/CMakeLists.txt"
                 "${CMAKE_CURRENT_SOURCE_DIR}/posembedding/**/op_host/CMakeLists.txt"
                 "${CMAKE_CURRENT_SOURCE_DIR}/moe/**/op_host/CMakeLists.txt"
                 "${CMAKE_CURRENT_SOURCE_DIR}/ffn/**/op_host/CMakeLists.txt"
@@ -480,6 +481,14 @@ function(add_bin_compile_target)
         get_filename_component(_op_name "${_op_info}" NAME)
         set(${_op_name}_dir ${_op_info})
         set(${_op_name}_apt_dir ${_op_info})
+        # The custom QLI GE type has a distinct generated file name, but its
+        # kernel sources and ASCEND_OP_NAME selection retain the old directory name.
+        if (_op_name STREQUAL "quant_lightning_indexer_v2")
+            set(vllm_ascend_quant_lightning_indexer_v2_dir ${_op_info})
+            if (DEFINED quant_lightning_indexer_v2_depends)
+                set(vllm_ascend_quant_lightning_indexer_v2_depends ${quant_lightning_indexer_v2_depends})
+            endif()
+        endif()
     endforeach()
 
     set(_ops_target_list)
@@ -581,11 +590,15 @@ function(add_bin_compile_target)
         endif ()
 
         set(_group "1-0")
+        set(_selected_op_name ${op_file})
+        if (op_file STREQUAL "vllm_ascend_quant_lightning_indexer_v2")
+            set(_selected_op_name quant_lightning_indexer_v2)
+        endif()
         if (DEFINED ASCEND_OP_NAME AND NOT "${ASCEND_OP_NAME}" STREQUAL "")
             if (NOT "${ASCEND_OP_NAME}" STREQUAL "all" AND NOT "${ASCEND_OP_NAME}" STREQUAL "ALL")
-                if (${op_file} IN_LIST ASCEND_OP_NAME)
+                if (${_selected_op_name} IN_LIST ASCEND_OP_NAME)
                     list(LENGTH ASCEND_OP_NAME _len)
-                    list(FIND ASCEND_OP_NAME ${op_file} _index)
+                    list(FIND ASCEND_OP_NAME ${_selected_op_name} _index)
                     math(EXPR _next_index "${_index} + 1")
                     if (${_next_index} LESS ${_len})
                         list(GET ASCEND_OP_NAME ${_next_index} _group_str)

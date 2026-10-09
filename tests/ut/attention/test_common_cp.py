@@ -80,10 +80,14 @@ class TestCommonCP(unittest.TestCase):
         self.assertEqual(builder.dcp_rank, 2)
         mock_get_dcp_group.assert_called_once_with()
 
+    @patch("vllm_ascend.attention.context_parallel.common_cp.get_tp_group")
+    @patch("vllm_ascend.attention.context_parallel.common_cp.get_pcp_group")
     @patch("vllm_ascend.attention.context_parallel.common_cp.get_dcp_group")
     def test_impl_mixin_reuses_the_initialized_dcp_group(
         self,
         mock_get_dcp_group,
+        mock_get_pcp_group,
+        mock_get_tp_group,
     ):
         class BaseImpl:
             def __init__(self):
@@ -101,7 +105,11 @@ class TestCommonCP(unittest.TestCase):
         self.assertTrue(impl.base_initialized)
         self.assertIs(impl.dcp_group, group)
         self.assertIs(impl.dcp_device_group, group.device_group)
+        self.assertIs(impl.pcp_group, mock_get_pcp_group.return_value)
+        self.assertIs(impl.tp_group, mock_get_tp_group.return_value)
         mock_get_dcp_group.assert_called_once_with()
+        mock_get_pcp_group.assert_called_once_with()
+        mock_get_tp_group.assert_called_once_with()
 
     @patch("vllm_ascend.attention.context_parallel.common_cp.get_decode_context_model_parallel_world_size")
     @patch("vllm_ascend.attention.context_parallel.common_cp.get_dcp_group")
@@ -211,3 +219,21 @@ class TestCommonCP(unittest.TestCase):
 
         self.assertIsInstance(out_final, torch.Tensor)
         self.assertIsInstance(lse_final, torch.Tensor)
+
+
+def test_fragment_gather_keeps_kv_on_the_dcp_token_axis():
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    impl = DCPImplMixin.__new__(DCPImplMixin)
+    impl.dcp_size = 4
+    impl.pcp_group = SimpleNamespace(world_size=2)
+    impl.tp_group = SimpleNamespace(all_gather=Mock(side_effect=AssertionError("KV must use DCP")))
+    impl.dcp_group = SimpleNamespace(all_gather=Mock(side_effect=lambda x, dim: torch.cat([x] * 4, dim=dim)))
+    k_nope = torch.arange(6).float().view(2, 1, 3)
+    k_pe = torch.arange(4).float().view(2, 1, 2)
+    out_nope, out_pe = impl._dcp_all_gather_fragments(k_nope, k_pe, dim=0)
+    torch.testing.assert_close(out_nope, torch.cat([k_nope] * 4, dim=0))
+    torch.testing.assert_close(out_pe, torch.cat([k_pe] * 4, dim=0))
+    impl.tp_group.all_gather.assert_not_called()
+    impl.dcp_group.all_gather.assert_called_once()

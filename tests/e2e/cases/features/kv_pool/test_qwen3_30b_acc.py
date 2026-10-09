@@ -48,7 +48,7 @@ mooncake_json = {
     "protocol": "ascend",
     "device_name": "",
     "master_server_address": "",
-    "global_segment_size": 30000000000,
+    "global_segment_size": 8589934592,
 }
 
 aisbench_cases = [
@@ -86,6 +86,8 @@ async def test_models(model: str, tp_size: int) -> None:
         "OMP_NUM_THREADS": "1",
         "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
         "MOONCAKE_CONFIG_PATH": "mooncake.json",
+        "ASCEND_ENABLE_USE_FABRIC_MEM": "1",
+        "ASCEND_AUTO_CONNECT": "1",
     }
     kv_transfer_config = {
         "kv_connector": "AscendStoreConnector",
