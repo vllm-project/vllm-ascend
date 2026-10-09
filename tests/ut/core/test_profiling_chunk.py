@@ -709,7 +709,6 @@ class TestProfilingChunkScheduler(TestBase):
 
 
 class TestProfilingChunkAsyncScheduler(TestBase):
-    @patch("vllm_ascend.patch.platform.patch_balance_schedule.init_ascend_config")
     # ProfilingChunkScheduler imports these names inside __init__, so patch the
     # source module from which that inline import resolves them.
     @patch("vllm_ascend.ascend_config.init_ascend_config")
@@ -721,7 +720,6 @@ class TestProfilingChunkAsyncScheduler(TestBase):
         self,
         mock_get_ascend_config,
         _mock_profiling_init_ascend_config,
-        mock_balance_init_ascend_config,
         srf_enabled=False,
         async_scheduling=True,
         pipeline_parallel_size=1,
@@ -736,8 +734,6 @@ class TestProfilingChunkAsyncScheduler(TestBase):
         short_request_first_cfg.threshold = 256
         short_request_first_cfg.long_max_wait_ms = 2000.0
         mock_get_ascend_config.return_value.scheduler_config.short_request_first_config = short_request_first_cfg
-        mock_balance_init_ascend_config.return_value.scheduler_config.short_request_first_config.enabled = False
-
         mock_hf_config = MagicMock()
         mock_hf_config.model_type = "qwen3"
         mock_hf_config.is_encoder_decoder = False
