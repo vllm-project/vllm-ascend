@@ -31,6 +31,11 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 
 logger = logging.getLogger(__name__)
 
+# MoE communication methods that pad and split the token dimension across the
+# TP group even when DP == 1 (``PrepareAndFinalizeWithAll2All`` and
+# ``PrepareAndFinalizeWithMC2``).
+_TP_SHARDED_MOE_COMM_TYPES = frozenset({MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.FUSED_MC2})
+
 
 def capture(self, layer_id: int, topk_ids: torch.Tensor) -> None:
     """Capture expert routing decisions for a specific layer.
@@ -61,6 +66,12 @@ def capture(self, layer_id: int, topk_ids: torch.Tensor) -> None:
         few trailing padding rows which are trimmed by the downstream
         ``[:token_num_per_dp]`` slice.
 
+    The same TP sharding applies when ``dp_metadata`` is absent (DP == 1):
+    ``PrepareAndFinalizeWithAll2All`` / ``PrepareAndFinalizeWithMC2`` still
+    split the token dimension across the TP group, so each TP rank captures
+    only its own shard and we all-gather along dim=0 to rebuild the full
+    routing tensor.
+
     Args:
         layer_id: The layer index.
         topk_ids: Tensor of shape (batch_size, num_routed_experts).
@@ -68,9 +79,52 @@ def capture(self, layer_id: int, topk_ids: torch.Tensor) -> None:
 
     ctx = get_forward_context()
     if ctx.dp_metadata is None:  # single dp
+        n = topk_ids.shape[0]
         start_loc = 0
-        end_loc = topk_ids.shape[0]
-        token_num_per_dp = topk_ids.shape[0]
+        end_loc = n
+        token_num_per_dp = n
+
+        # Even with a single DP rank, ``PrepareAndFinalizeWithAll2All`` and
+        # ``PrepareAndFinalizeWithMC2`` pad and split the token dimension
+        # across the TP group, so ``topk_ids`` here is only this TP rank's
+        # shard. All-gather along dim=0 to rebuild the full per-DP-rank
+        # routing tensor before storing it; otherwise the remaining buffer
+        # rows keep their zeros and R3 replays those zeros as expert IDs.
+        #
+        # ``_EXTRA_CTX.num_tokens`` is the token count the model actually
+        # processed (already rounded up to a TP multiple when SP is on), so it
+        # matches the un-sharded ``topk_ids`` size. Note that when the batch is
+        # shorter than the TP group (e.g. a single-token batch), ``prepare``
+        # pads up to ``tp_size`` and every rank ends up with a one-row shard, so
+        # ``n`` alone equals both the shard size and the real token count and
+        # cannot reveal the padding; hence the ``full_num_tokens < tp_size``
+        # check below.
+        if self.tp_size > 1 and _EXTRA_CTX.moe_comm_type in _TP_SHARDED_MOE_COMM_TYPES:
+            full_num_tokens = _EXTRA_CTX.num_tokens
+            if isinstance(full_num_tokens, int) and full_num_tokens > 0 and (
+                n != full_num_tokens or full_num_tokens < self.tp_size
+            ):
+                token_num_per_dp = full_num_tokens
+                if _EXTRA_CTX.moe_comm_type == MoECommType.ALLTOALL:
+                    gather_topk_ids_shape = (
+                        (full_num_tokens, topk_ids.shape[1])
+                        if full_num_tokens >= self.tp_size
+                        else (self.tp_size, topk_ids.shape[1])
+                    )
+                else:
+                    # MC2 pads every TP shard to the same length.
+                    gather_topk_ids_shape = (n * self.tp_size, topk_ids.shape[1])
+
+                gather_topk_ids = torch.empty(
+                    gather_topk_ids_shape,
+                    dtype=topk_ids.dtype,
+                    device=topk_ids.device,
+                )
+                split_topk_ids = torch.tensor_split(gather_topk_ids, self.tp_size, dim=0)
+                dist.all_gather(list(split_topk_ids), topk_ids, get_tp_group().device_group)
+                topk_ids = gather_topk_ids
+                start_loc = 0
+                end_loc = token_num_per_dp
     else:  # multi dp
         num_tokens_dp = ctx.dp_metadata.num_tokens_across_dp_cpu
         token_num_per_dp = int(num_tokens_dp[self.dp_rank].item())
