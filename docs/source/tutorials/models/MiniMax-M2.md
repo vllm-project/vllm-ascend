@@ -216,6 +216,19 @@ vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
     --speculative_config '{"enforce_eager": true, "method": "eagle3", "model": "/path/to/weight/Eagle3/", "num_speculative_tokens": 3}'
 ```
 
+**Expected Startup Output:**
+
+After a successful startup, you should see log messages similar to the following:
+
+```{code-block} text
+INFO:     Started server process [xxxxx]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+```
+
+If the service fails to start, check the error logs for hints (e.g., OOM, port conflicts, HCCL initialization errors). Refer to [Chapter 10 FAQ](#10-faq) and the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+
 Remarks:
 
 - `minimax_m2_append_think` keeps `<think>...</think>` inside `content`.
@@ -280,6 +293,19 @@ vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
     --speculative_config '{"method": "eagle3", "model": "/path/to/weight/Eagle3/", "num_speculative_tokens":3}'
 ```
 
+**Expected Startup Output:**
+
+After a successful startup, you should see log messages similar to the following:
+
+```{code-block} text
+INFO:     Started server process [xxxxx]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+```
+
+If the service fails to start, check the error logs for hints (e.g., OOM, port conflicts, HCCL initialization errors). Refer to [Chapter 10 FAQ](#10-faq) and the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+
 > **Note**: The above parameters are validated in a specific test environment for reference only. Please adjust `--max-model-len`, `--max-num-seqs`, `--max-num-batched-tokens`, and `--gpu-memory-utilization` based on your actual input/output length, concurrency, and hardware configuration.
 
 - If you need to test with `curl` and tool calling, add the following to the startup command:
@@ -339,6 +365,18 @@ if __name__ == "__main__":
         p.start()
         p.join()
 ```
+
+Parameter descriptions:
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `--dp-size` | int | Yes | - | Data parallel size (total number of DP ranks across all nodes). |
+| `--tp-size` | int | No | 1 | Tensor parallel size within each DP rank. |
+| `--dp-size-local` | int | No | (same as `--dp-size`) | Number of DP ranks on the current node. If not set, defaults to `--dp-size`. |
+| `--dp-rank-start` | int | No | 0 | Starting rank offset for data parallel ranks on this node. |
+| `--dp-address` | str | Yes | - | IP address of the data parallel master node (node 0). |
+| `--dp-rpc-port` | str | No | 12345 | RPC port for data parallel master communication. |
+| `--vllm-start-port` | int | No | 9000 | Starting port for each vLLM engine instance on this node. Each DP rank's engine port = `vllm_start_port` + local rank index. |
 
 Then prepare `run_dp_template.sh` on each node.
 
@@ -490,6 +528,19 @@ python launch_online_dp.py \
     --vllm-start-port 7100
 ```
 
+**Expected Startup Output:**
+
+After launching the scripts on both Prefill and Decode nodes, each engine instance should start successfully. You should see log messages similar to the following on each node:
+
+```{code-block} text
+INFO:     Started server process [xxxxx]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:7xxx (Press CTRL+C to quit)
+```
+
+Verify that all instances are running before proceeding to the proxy setup. If any instance fails to start, check the error logs for hints (e.g., port conflicts, HCCL initialization errors, KV transfer connection timeouts). Refer to [Chapter 10 FAQ](#10-faq) and the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+
 #### Request Forwarding
 
 Run the proxy on any machine that can reach both nodes. You can get the proxy script from the repository: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py).
@@ -511,6 +562,90 @@ python load_balance_proxy_server_example.py \
 ```
 
 The service is then accessible at `http://<proxy_ip>:8009`.
+
+### 5.3 Startup Parameter Reference
+
+The following tables list all parameters used in the deployment commands for MiniMax-M2. Parameters marked with **\*** are required for MiniMax-M2 deployment.
+
+#### Basic Server Parameters
+
+| Parameter | Type | Default | Required | Constraints | Description |
+|-----------|------|---------|----------|-------------|-------------|
+| `--served-model-name` | str | - | Yes\* | - | Model name exposed via the API endpoint. |
+| `--host` | str | `127.0.0.1` | No | - | IP address to bind the server to. Use `0.0.0.0` to accept all connections. |
+| `--port` | int | `8000` | No | 1–65535 | Port number for the API server. |
+| `--trust-remote-code` | flag | False | Yes\* | - | Required for MiniMax-M2 models to load custom model code. |
+
+#### Model Configuration Parameters
+
+| Parameter | Type | Default | Required | Constraints | Description |
+|-----------|------|---------|----------|-------------|-------------|
+| `--quantization` | str | - | Yes\* | `ascend` | Quantization method. Set to `ascend` for MiniMax-M2 on Ascend NPUs. |
+| `--max-model-len` | int | - | Yes\* | Depends on model and memory | Maximum context length (input + output tokens) for a single request. Adjust based on your scenario and available NPU memory. |
+| `--max-num-batched-tokens` | int | - | Yes\* | ≥ 1 | Maximum number of tokens to process in a single batch. |
+| `--max-num-seqs` | int | `256` | Yes\* | ≥ 1 | Maximum number of concurrent sequences. Reduce if OOM occurs. |
+| `--gpu-memory-utilization` | float | `0.9` | No | 0.0–1.0 | Fraction of NPU memory to allocate for KV cache. Lower values leave more headroom for model weights. |
+| `--seed` | int | `0` | No | - | Random seed for reproducibility. |
+
+#### Parallelism Parameters
+
+| Parameter | Type | Default | Required | Constraints | Description |
+|-----------|------|---------|----------|-------------|-------------|
+| `--tensor-parallel-size` | int | `1` | Yes\* | ≥ 1, must divide NPU count | Tensor parallelism degree. Splits model layers across NPUs within a node. |
+| `--data-parallel-size` | int | `1` | No | ≥ 1 | Data parallelism degree. Replicates model instances for higher throughput. |
+| `--data-parallel-rank` | int | `0` | Yes (multi-node) | 0 ≤ rank < dp-size | Rank of the current data parallel instance. Required for multi-node deployments. |
+| `--data-parallel-address` | str | - | Yes (multi-node) | Valid IP address | IP address of the data parallel master node (rank 0). |
+| `--data-parallel-rpc-port` | str | `12345` | No | Valid port number | RPC port for data parallel master communication. |
+| `--enable-expert-parallel` | flag | False | Yes\* | - | Enable expert parallelism for MoE models. Required for MiniMax-M2. |
+| `--prefill-context-parallel-size` | int | `1` | No | ≥ 1 | Context parallelism degree for the prefill phase (long-context scenarios). |
+| `--decode-context-parallel-size` | int | `1` | No | ≥ 1 | Context parallelism degree for the decode phase (long-context scenarios). |
+| `--cp-kv-cache-interleave-size` | int | `128` | No | ≥ 1 | KV cache interleave size for context parallelism. |
+
+#### Performance Optimization Parameters
+
+| Parameter | Type | Default | Required | Constraints | Description |
+|-----------|------|---------|----------|-------------|-------------|
+| `--compilation-config` | json | - | No | JSON string | Compilation graph configuration. Recommended: `{"cudagraph_mode": "FULL_DECODE_ONLY"}` for decode optimization. |
+| `--async-scheduling` | flag | False | No | - | Enable asynchronous scheduling to overlap CPU scheduling with NPU computation. |
+| `--enforce-eager` | flag | False | No | - | Disable graph compilation. Use for PD separation prefill nodes when combined with `--compilation-config`. |
+| `--no-enable-prefix-caching` | flag | False | No | - | Disable automatic prefix caching (APC). Recommended for decode nodes in PD separation. |
+| `--additional-config` | json | - | No | JSON string | Additional vLLM-Ascend configuration options. See subsections below for available keys. |
+| `--additional-config.enable_cpu_binding` | bool | - | No | `true` / `false` | Bind CPU cores to reduce cross-core scheduling overhead. Recommended for all scenarios. |
+| `--additional-config.enable_fused_mc2` | bool | - | No | `true` / `false` | Enable Fused MC2 communication fusion operator. Recommended for A3 with TP ≥ 4. Not applicable for A2. |
+| `--additional-config.enable_flashcomm1` | bool | - | No | `true` / `false` | Enable FlashComm v1 communication optimization. Effective for high-concurrency TP scenarios. |
+| `--additional-config.weight_nz_mode` | bool | - | No | `true` / `false` | Enable weight non-zero mode optimization. |
+| `--model-loader-extra-config` | json | - | No | JSON string | Model weight loading configuration. |
+| `--model-loader-extra-config.enable_multithread_load` | bool | - | No | `true` / `false` | Enable multi-threaded weight loading for faster startup. |
+| `--model-loader-extra-config.num_threads` | int | - | No | ≥ 1 | Number of threads for parallel weight loading. |
+
+#### Speculative Decoding Parameters
+
+| Parameter | Type | Default | Required | Constraints | Description |
+|-----------|------|---------|----------|-------------|-------------|
+| `--speculative_config` | json | - | No | JSON string | Speculative decoding configuration. Supports EAGLE3 for MiniMax-M2. |
+| `--speculative_config.method` | str | - | Yes (if set) | `eagle3` | Speculative decoding method. Use `eagle3` for MiniMax-M2. |
+| `--speculative_config.model` | str | - | Yes (if set) | Path to EAGLE3 weight | Path to the EAGLE3 draft model weights. |
+| `--speculative_config.num_speculative_tokens` | int | - | Yes (if set) | 1–3 | Number of tokens to speculate per step. Recommend 3 for short context, 1 for long context. |
+| `--speculative_config.enforce_eager` | bool | - | No | `true` / `false` | Disable graph compilation for the draft model. |
+
+#### PD Separation (KV Transfer) Parameters
+
+| Parameter | Type | Default | Required | Constraints | Description |
+|-----------|------|---------|----------|-------------|-------------|
+| `--kv-transfer-config` | json | - | Yes (PD) | JSON string | KV cache transfer configuration for PD separation deployment. |
+| `--kv-transfer-config.kv_connector` | str | - | Yes (PD) | `MooncakeConnectorV1` | KV connector implementation for transferring KV cache between Prefill and Decode nodes. |
+| `--kv-transfer-config.kv_role` | str | - | Yes (PD) | `kv_producer` / `kv_consumer` | Role of this node: `kv_producer` for Prefill nodes, `kv_consumer` for Decode nodes. |
+| `--kv-transfer-config.kv_port` | str | - | Yes (PD) | Valid port number | Port for KV transfer communication. Must differ between Prefill and Decode nodes. |
+| `--kv-transfer-config.engine_id` | str | - | Yes (PD) | Unique per engine instance | Unique identifier for each engine instance in the PD cluster. |
+| `--kv-transfer-config.kv_connector_extra_config` | json | - | No | JSON string | Extra configuration for the KV connector. Includes `use_ascend_direct` and Prefill/Decode topology (`dp_size`, `tp_size`). |
+
+#### Tool Calling Parameters
+
+| Parameter | Type | Default | Required | Constraints | Description |
+|-----------|------|---------|----------|-------------|-------------|
+| `--enable-auto-tool-choice` | flag | False | No | - | Enable automatic tool choice. Required when using tool calling. |
+| `--tool-call-parser` | str | - | No | `minimax_m2` | Parser for tool call outputs. Use `minimax_m2` for MiniMax-M2. |
+| `--reasoning-parser` | str | - | No | `minimax_m2` / `minimax_m2_append_think` | Parser for reasoning content. `minimax_m2_append_think` keeps `<think>` in `content`; `minimax_m2` puts it in the `reasoning` field. |
 
 ## 6 Functional Verification
 
