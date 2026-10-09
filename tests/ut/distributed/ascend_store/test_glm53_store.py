@@ -41,8 +41,7 @@ def make_glm53_plan(layer_offset=0):
         parts = name.split(".")
         parts[2] = str(int(parts[2]) + layer_offset)
         specs[".".join(parts)] = replace(spec, mamba_cache_mode="align") if isinstance(spec, MambaSpec) else spec
-    # Round trips use dense retention; sparse checkpoint policy is tested separately.
-    config = make_config(retention_interval=None)
+    config = make_config()
     groups = get_glm5_next_kv_cache_groups(config, specs)
     return get_glm5_next_kv_cache_config(config, groups, 24 * get_glm5_next_pool_bytes_per_block(groups))
 

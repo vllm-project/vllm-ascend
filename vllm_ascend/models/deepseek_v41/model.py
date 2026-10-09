@@ -16,6 +16,7 @@ import torch.nn.functional as F
 import vllm.envs as envs
 from torch import nn
 from transformers import PretrainedConfig
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CUDAGraphMode, ParallelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_engram_dp_size,
@@ -920,6 +921,7 @@ class DeepseekV41DecoderLayer(nn.Module):
         return hidden_states, ffn_pre
 
 
+@support_torch_compile(dynamic_arg_dims={"input_ids": 0, "positions": 0, "intermediate_tensors": 0})
 class DeepseekV41Model(nn.Module, EagleModelMixin):
     """V4.1 backbone with delayed HC collapse and shared attention state."""
 
@@ -1173,6 +1175,8 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             mask = ~dead
             publish_mask()
             if lookback_token_ids is None:
+                if not hash_state.use_slot_cache:
+                    raise RuntimeError("MRV2 Engram requires device lookback_token_ids")
                 lookback_token_ids = input_ids.new_full((query_start_loc.numel() - 1, hash_state.lookback_depth), -1)
             hashes = hash_state(
                 input_ids,
@@ -1400,8 +1404,8 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         Dispatch keys off the forward context: the V1 runner calls this inside
         the forward, so capture (already done by
         ``prepare_engram_graph_inputs``) and the overlap check read the
-        context. The V2 runner calls it before any context exists and hands
-        ``cg_mode`` over instead: FULL steps reuse bucket-keyed ExternalEvents,
+        context. The V2 state defers lookup until the forward context exists and
+        passes ``cg_mode`` explicitly: FULL steps reuse bucket-keyed ExternalEvents,
         NONE steps get per-step plain events, unknown/other modes stay
         synchronous because compiled regions must not trace stream control
         ops. ``slot_mapping``/``block_table`` stay ``None`` under the V2
@@ -1414,16 +1418,16 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         output_tokens = num_tokens if padded_tokens is None else padded_tokens
         if not num_tokens <= output_tokens <= self._engram_max_tokens:
             raise ValueError("Engram token count exceeds the output buffer capacity")
-        if is_forward_context_available():
+        if cg_mode is None and is_forward_context_available():
             # V1: the context decided above (capture registered ExternalEvents
             # under the batch descriptor).
             overlap = self._can_overlap_engram_preparation()
         else:
-            # V2: no forward context exists yet, so the runner passes the
-            # graph mode of this step (captured by the model state); None
+            # V2 passes the step mode explicitly and retains capture bucket
+            # event keys after entering the forward context. None
             # means unknown, which stays synchronous.
             overlap = cg_mode in (CUDAGraphMode.NONE, CUDAGraphMode.FULL) and self._engram_overlap_enabled
-            if overlap and cg_mode == CUDAGraphMode.FULL and "engram_pending" not in graph_inputs:
+            if overlap and cg_mode == CUDAGraphMode.FULL:
                 mask_ready, events = self._get_engram_external_events(output_tokens, prime=False)
                 graph_inputs.update(engram_pending=events, engram_mask_ready_event=mask_ready, engram_graph_events=True)
         if overlap and "engram_pending" not in graph_inputs:

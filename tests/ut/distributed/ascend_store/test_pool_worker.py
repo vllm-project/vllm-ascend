@@ -22,7 +22,6 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
-import pytest
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 
@@ -124,7 +123,6 @@ def make_worker(
     if kv_cache_config is not None:
         config.scheduler_config.disable_hybrid_kv_cache_manager = False
     config.cache_config.block_size = cache_block_size
-    config.cache_config.prefix_cache_retention_interval = 0
     config.cache_config.prefix_match_unit = prefix_match_unit
     config.kv_events_config = None
     if enable_kv_events:
@@ -133,29 +131,6 @@ def make_worker(
     from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
     return KVPoolWorker(config, use_layerwise=use_layerwise, kv_cache_config=kv_cache_config)
-
-
-@pytest.mark.parametrize("retention_interval", [None, 0, 4096])
-def test_cache_coordinator_uses_kv_cache_config_retention_interval(retention_interval):
-    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import pool_worker
-
-    worker = pool_worker.KVPoolWorker.__new__(pool_worker.KVPoolWorker)
-    worker.kv_cache_config = SimpleNamespace(
-        kv_cache_groups=[object()],
-        prefix_cache_retention_interval=retention_interval,
-    )
-    worker.use_hybrid = True
-    worker.cache_transfer_granularity = 16
-    worker.hash_block_size = 16
-    worker.grouped_block_size = [16]
-    worker.kv_cache_group_families = ["mamba"]
-
-    vllm_config = SimpleNamespace(speculative_config=None)
-    with patch.object(pool_worker, "AscendStoreCoordinator") as coordinator_cls:
-        coordinator = worker._build_cache_coordinator(vllm_config)
-
-    assert coordinator is coordinator_cls.return_value
-    assert coordinator_cls.call_args.kwargs["retention_interval"] == retention_interval
 
 
 class TestPCPPoolWorker(unittest.TestCase):
@@ -286,8 +261,7 @@ class TestLayerwiseAttentionSave(unittest.TestCase):
                     FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float32),
                 )
                 for layer in range(2)
-            ],
-            prefix_cache_retention_interval=None,
+            ]
         )
         worker = make_worker(self, use_layerwise=True, kv_cache_config=plan)
         worker.kv_send_thread = MagicMock(request_queue=queue.Queue())
@@ -306,8 +280,7 @@ class TestLayerwiseAttentionSave(unittest.TestCase):
                         mamba_cache_mode="align",
                     ),
                 )
-            ],
-            prefix_cache_retention_interval=None,
+            ]
         )
         worker = make_worker(self, num_layers=1, use_layerwise=True, kv_cache_config=plan)
         worker.kv_recv_thread = MagicMock()
@@ -343,10 +316,7 @@ class TestLayerwiseAttentionSave(unittest.TestCase):
                     self,
                     num_layers=2,
                     use_layerwise=True,
-                    kv_cache_config=SimpleNamespace(
-                        kv_cache_groups=groups,
-                        prefix_cache_retention_interval=None,
-                    ),
+                    kv_cache_config=SimpleNamespace(kv_cache_groups=groups),
                     pp_rank=1,
                     pp_partition=(2, 2),
                 )

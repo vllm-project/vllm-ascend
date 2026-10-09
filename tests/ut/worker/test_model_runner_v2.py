@@ -420,8 +420,9 @@ def test_prepare_inputs_preserves_pcp_tokens_and_forwards_graph_padding():
     # graph descriptor, and forwards the whole descriptor (upstream vLLM #53867
     # changed maybe_partition_pcp_batch from padded_num_tokens to a
     # BatchExecutionDescriptor).
-    assert len(padding_assignments) == 1
+    assert len(padding_assignments) == 2
     assert ast.unparse(padding_assignments[0].value) == "max(num_tokens, batch_desc.num_tokens)"
+    assert ast.unparse(padding_assignments[1].value) == "global_graph_num_reqs * batch_desc.uniform_token_count"
 
     assert len(partition_calls) == 1
     partition_call = partition_calls[0]
@@ -717,6 +718,7 @@ def test_sample_tokens_spec_pp_broadcasts_draft_tokens():
 def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture):
     """Cache binding precedes KDA preparation and preserves PCP setup."""
     runner = _make_runner()
+    runner.input_buffers = object()
     runner.compilation_config = SimpleNamespace(static_forward_context={})
     runner.vllm_config = SimpleNamespace(
         compilation_config=runner.compilation_config,
@@ -994,6 +996,7 @@ def _prepare_inputs_runner(*, draft=False, full_cg=False, use_dcp=False, use_pp=
     batch_desc = SimpleNamespace(
         num_tokens=8 if full_cg else 4,
         num_reqs=2,
+        uniform_token_count=None,
         cg_mode=CUDAGraphMode.FULL if full_cg else CUDAGraphMode.NONE,
     )
     return runner, scheduler_output, batch_req_state, batch_desc

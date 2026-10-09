@@ -11,21 +11,18 @@ from vllm_ascend.distributed.utils import get_decode_context_model_parallel_worl
 
 
 def is_pcp_decode_sharding_enabled(vllm_config) -> bool:
-    """Shard decode requests only for eager PCP without speculation.
+    """Shard decode requests for PCP without speculation.
 
-    Graph execution and speculative decoding stay on the replicated path in
-    this change. The decision is derived from declared vLLM fields so cloning
-    a draft ``ParallelConfig`` with ``replace()`` does not see an undeclared
-    attribute.
+    Graph execution follows the sharded path as well. Speculative decoding
+    stays on the replicated path in this change. The decision is derived from
+    declared vLLM fields so cloning a draft ``ParallelConfig`` with
+    ``replace()`` does not see an undeclared attribute.
     """
-    from vllm.config.compilation import CUDAGraphMode
-
     parallel_config = vllm_config.parallel_config
     return (
         parallel_config.prefill_context_parallel_size > 1
         and parallel_config.decode_context_parallel_size == 1
         and vllm_config.speculative_config is None
-        and vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
     )
 
 
