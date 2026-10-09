@@ -31,7 +31,7 @@ ARG MOONCAKE_TAG=0.3.11.post1
 # VLLM_REPO (optional): Git repository URL of vLLM.
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
 # VLLM_TAG (optional): vLLM release tag to clone when VLLM_COMMIT is empty.
-ARG VLLM_TAG=v0.30.0
+ARG VLLM_TAG=v0.31.0
 # VLLM_COMMIT (optional): Exact vLLM commit to build; empty to fall back to VLLM_TAG.
 ARG VLLM_COMMIT=""
 # SOC_VERSION (optional): Ascend SoC version used for custom kernel compilation.
@@ -135,7 +135,7 @@ ENV PATH="/root/.cargo/bin:$PATH"
 RUN cd /vllm-workspace/vllm && \
     export PROTOC_INCLUDE=/usr/include && \
     python3 -m pip install setuptools-rust && \
-    ./build_rust.sh
+    ./tools/build_rust.sh
 
 # Append `libascend_hal.so` path (devlib) to LD_LIBRARY_PATH
 RUN echo "export LD_PRELOAD=/usr/lib/$(uname -m)-linux-gnu/libjemalloc.so.2:$LD_PRELOAD" >> ~/.bashrc
