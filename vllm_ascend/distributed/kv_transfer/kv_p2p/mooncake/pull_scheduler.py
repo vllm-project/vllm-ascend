@@ -681,6 +681,16 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
                 if self._recving_thread is None:
                     raise RuntimeError("Producer Mooncake scheduler received a receive-completion event")
                 self._recving_thread.add_request(*remote)
+                if req_id in connector_output.failed_recving:
+                    logger.error(
+                        "Mooncake D receive failed after worker aggregation: request_id=%s, "
+                        "remote_request_id=%s, producer=%s:%s, failure_policy=%s; producer release notification queued",
+                        req_id,
+                        remote[2],
+                        remote[0],
+                        remote[1],
+                        self.kv_transfer_config.kv_load_failure_policy,
+                    )
 
         # P side: feed scheduler-received ACKs into vLLM's standard delayed
         # free path. Scheduler._update_from_kv_xfer_finished reads this same
