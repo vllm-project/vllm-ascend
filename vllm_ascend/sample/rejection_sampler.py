@@ -4,6 +4,7 @@ import logging
 from dataclasses import replace
 
 import torch
+from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.outputs import SamplerOutput
@@ -216,6 +217,13 @@ class AscendRejectionSampler(RejectionSampler):
             # apply_logits_processors modifies the tensor in-place.
             target_logits = target_logits.clone()
         target_logits = self.apply_logits_processors(target_logits, sampling_metadata, metadata)
+        greedy_token_ids = None
+        if (
+            not sampling_metadata.all_greedy
+            and not sampling_metadata.all_random
+            and get_ascend_config().enable_reduce_sample
+        ):
+            greedy_token_ids = greedy_sample(target_logits)
         # [num_tokens, vocab_size]
         # NOTE(woosuk): `target_logits` can be updated in place inside the
         # `apply_sampling_constraints` function.
@@ -233,6 +241,7 @@ class AscendRejectionSampler(RejectionSampler):
             synthetic_mode=self.synthetic_mode,
             synthetic_conditional_rates=self.synthetic_conditional_rates,
             ori_target_logits=raw_target_logits,
+            greedy_token_ids=greedy_token_ids,
         )
 
         self._log_rejection_sampler_exit(output_token_ids, metadata)
@@ -318,6 +327,20 @@ class AscendRejectionSampler(RejectionSampler):
         )
 
 
+def greedy_sample(logits: torch.Tensor) -> torch.Tensor:
+    tp_group = get_tp_group()
+    _, vocab_size_local = logits.shape
+    rank = tp_group.rank_in_group
+
+    local_max_logits, local_max_indices = logits.max(dim=-1)
+    local_global_idx = local_max_indices + rank * vocab_size_local
+
+    gathered_logits = tp_group.all_gather(local_max_logits.unsqueeze(-1), dim=-1)
+    gathered_global_idx = tp_group.all_gather(local_global_idx.unsqueeze(-1), dim=-1)
+    global_max_rank = gathered_logits.argmax(dim=-1)
+    return gathered_global_idx.gather(dim=-1, index=global_max_rank.unsqueeze(-1)).squeeze(-1)
+
+
 def apply_sampling_constraints(
     logits: torch.Tensor,  # [num_tokens, vocab_size//tp_size]
     cu_num_draft_tokens: torch.Tensor,  # [batch_size]
@@ -393,6 +416,7 @@ def rejection_sample(
     synthetic_mode: bool = False,
     synthetic_conditional_rates: torch.Tensor | None = None,
     ori_target_logits: torch.Tensor | None = None,
+    greedy_token_ids: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
     Rejection sampling for speculative decoding in distributed setting.
@@ -507,7 +531,12 @@ def rejection_sample(
 
     # For greedy sampling, we need to do allgather first to get global argmax
     if not sampling_metadata.all_random:
-        target_argmax = target_logits.argmax(dim=-1).view(-1)
+        if greedy_token_ids is not None:
+            target_argmax = greedy_token_ids
+        elif get_ascend_config().enable_reduce_sample:
+            target_argmax = greedy_sample(target_logits)
+        else:
+            target_argmax = target_logits.argmax(dim=-1).view(-1)
 
         if HAS_TRITON:
             rejection_greedy_sample_with_triton(
