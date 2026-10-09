@@ -49,8 +49,15 @@ Trigger specific nightly test cases on A2 and A3. Supports only PR comments. Tes
 | `/nightly <test_cases>` | Runs on `main` branch |
 | `/nightly <test_cases> --branch <branch>` | Runs on the specified branch |
 | `/nightly <test_cases> --aop_enabled` | Enable AOP hooks (bisect / classify) on failure |
+| `/nightly <test_cases> --vllm-ref <ref>` | Install the given vllm commit / tag / branch instead of the image-baked vllm |
 
 Use `--branch <name>` to specify a target branch. Without `--branch`, all arguments are treated as test cases (separated by commas or spaces) and the branch defaults to `main`.
+
+Use `--vllm-ref <ref>` to override the upstream vllm version. `<ref>` is a vllm commit SHA (full 40-char SHA recommended — GitHub cannot fetch abbreviated SHAs directly), a release tag (e.g. `v0.29.0`), or a branch name (e.g. `main`). The ref is fetched into the image's editable checkout at `/vllm-workspace/vllm` and reinstalled with `VLLM_TARGET_DEVICE=empty` (no kernel compilation), on single-node, multi-node, and accuracy test jobs alike; on multi-node it is installed in every pod. This applies to `/weekly` as well. Not specifying `--vllm-ref` keeps the vllm version baked into the nightly image, exactly as before.
+
+> **Note**: vllm derives its version from git tags at build time. A release tag installs the exact version (e.g. `0.29.0+empty`), but a bare SHA or branch name carries no tag information, so the installed version falls back to `0.1.dev1+g<sha>` — a warning is printed in the job log when this happens. Version-gated code paths in vllm-ascend may misbehave under such a fallback version, so prefer release tags for reliable results.
+>
+> **Note**: vllm-ascend only tracks a specific vllm version per branch (see the `vLLM version:` line auto-maintained in the PR description). Passing an incompatible vllm ref may fail at install time or at the runtime version check; for a dev commit, set the `VLLM_VERSION` env var as described in the [versioning policy](versioning_policy.md) if needed. Also note that with `--aop_enabled`, the bisect pipeline may re-switch vllm to the version expected by each bisected commit.
 
 Use `--aop_enabled` to enable the AOP (Aspect-Oriented Programming) pipeline, which
 automatically captures test results, classifies failures (env vs. code), and triggers
@@ -92,6 +99,12 @@ binary bisect for genuine failures. By default, AOP hooks are disabled.
 
 # Run specific test with AOP on a release branch
 /nightly test_custom_op --branch releases/v0.24.0 --aop_enabled
+
+# Run against a specific vllm release tag
+/nightly qwen3-vl-32b-instruct-w8a8 --vllm-ref v0.29.0
+
+# Run against a specific vllm commit (full SHA) on a release branch
+/nightly test_custom_op --branch releases/v0.24.0 --vllm-ref 84030bbe3d74d99bad477a3d2e37a973ccd8865c
 ```
 
 This triggers `workflow_dispatch` on both `schedule_nightly_test_a2.yaml` and `schedule_nightly_test_a3.yaml`.
