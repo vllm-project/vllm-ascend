@@ -177,7 +177,7 @@ class TestGLM53Store(unittest.TestCase):
                 def put(keys, addresses, sizes, stored=stored):
                     for key, row, lengths in zip(keys, addresses, sizes):
                         stored[key] = [ctypes.string_at(address, length) for address, length in zip(row, lengths)]
-                    return [0] * len(keys)
+                    return [True] * len(keys)
 
                 def get(keys, addresses, sizes, stored=stored):
                     for key, row, lengths in zip(keys, addresses, sizes):
