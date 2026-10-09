@@ -61,6 +61,8 @@ class AscendInputBuffers(InputBuffers):
         # define seq_lens_np for easier calculation with numpy.
         self.seq_lens_np: np.ndarray = self.seq_lens_cpu.numpy()
 
+        self.dummy_num_tokens: int | None = None
+
 
 @dataclass
 class AscendInputBatch(InputBatch):
@@ -84,12 +86,25 @@ class AscendInputBatch(InputBatch):
         max_query_len: int | None = None,
     ) -> "AscendInputBatch":
         """Override the make_dummy method to calculate seq_lens_np."""
+        num_tokens_after_padding = num_tokens
+        if input_buffers.dummy_num_tokens is not None:
+            # PIECEWISE pads model inputs without adding scheduled queries.
+            num_tokens = input_buffers.dummy_num_tokens
+            assert num_tokens <= num_tokens_after_padding
         input_batch = InputBatch.make_dummy(
             num_reqs,
             num_tokens,
             input_buffers,
             max_query_len=max_query_len,
         )
+        if num_tokens_after_padding != num_tokens:
+            input_batch.num_tokens_after_padding = num_tokens_after_padding
+            input_buffers.input_ids[num_tokens:num_tokens_after_padding].zero_()
+            input_buffers.positions[num_tokens:num_tokens_after_padding].zero_()
+            input_buffers.is_padding[num_tokens:num_tokens_after_padding].fill_(True)
+            input_batch.input_ids = input_buffers.input_ids[:num_tokens_after_padding]
+            input_batch.positions = input_buffers.positions[:num_tokens_after_padding]
+            input_batch.is_padding = input_buffers.is_padding[:num_tokens_after_padding]
         base_tokens = num_tokens // num_reqs
         num_extra = num_tokens % num_reqs
         input_buffers.seq_lens_np[: num_reqs - num_extra] = base_tokens

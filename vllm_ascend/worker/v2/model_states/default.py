@@ -137,10 +137,12 @@ class AscendModelState(DefaultModelState):
             # Piecewise cudagraphs and eager use the actual request count.
             num_reqs = input_batch.num_reqs
 
-        if cudagraph_mode == CUDAGraphMode.FULL or self.vllm_config.parallel_config.prefill_context_parallel_size > 1:
-            # PCP pads each rank to the largest rank-local token count even
-            # during eager prefill, so token-shaped metadata must match the
-            # padded model input.
+        if (
+            cudagraph_mode == CUDAGraphMode.FULL
+            or self.vllm_config.parallel_config.prefill_context_parallel_size > 1
+            or (cudagraph_mode == CUDAGraphMode.PIECEWISE and input_batch.is_dummy)
+        ):
+            # Token-shaped metadata must match the padded model inputs.
             num_input_tokens = input_batch.num_tokens_after_padding
         else:
             num_input_tokens = input_batch.num_tokens
