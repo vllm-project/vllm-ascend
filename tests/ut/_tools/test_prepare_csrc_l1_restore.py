@@ -12,6 +12,7 @@ import venv
 from pathlib import Path
 
 import pytest
+import yaml
 
 from .build_cache_test_utils import ENGINE, REPO_ROOT, build_cache_command
 
@@ -81,6 +82,62 @@ def test_prepare_uses_engine_output_and_exports_environment(tmp_path: Path, monk
     exported = environment.read_text(encoding="utf-8")
     assert f"VLLM_ASCEND_BUILD_CACHE_DIR={tmp_path / 'cache'}" in exported
     assert f"VLLM_ASCEND_BUILD_CACHE_EVENT_LOG={runner_temp / 'csrc-l1-selected_a2.jsonl'}" in exported
+
+
+def test_prepare_relative_cache_dir_across_workspaces(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    helper = _load_helper("prepare_csrc_l1_restore_relative")
+    monkeypatch.setattr(
+        helper.subprocess,
+        "run",
+        lambda command, **_kwargs: subprocess.CompletedProcess(command, 0, stdout="primary\nsame\ncompat\n"),
+    )
+    for name in ("producer", "consumer"):
+        workspace = tmp_path / name
+        workspace.mkdir()
+        source_root = _source_root(workspace)
+        environment = workspace / "github-env"
+        monkeypatch.chdir(workspace)
+        monkeypatch.setenv("GITHUB_ENV", str(environment))
+        args = _args(workspace, source_root)
+        args.cache_dir = "csrc/build_cache"
+
+        assert helper.prepare(args)["supported"] == "true"
+        assert (workspace / args.cache_dir).is_dir()
+        assert f"VLLM_ASCEND_BUILD_CACHE_DIR={workspace / args.cache_dir}\n" in environment.read_text()
+
+
+def test_l1_callers_share_relative_transport_path():
+    # runs-on/cache versions the snapshot with the literal path input. Keep
+    # this transport path stable even when runner/container workspaces differ.
+    workflows = REPO_ROOT / ".github" / "workflows"
+    callers = []
+    for path in sorted(workflows.iterdir()):
+        if path.suffix not in (".yaml", ".yml"):
+            continue
+        workflow = yaml.safe_load(path.read_text())
+        for job in workflow.get("jobs", {}).values():
+            for step in job.get("steps", []):
+                if "csrc-l1-restore" not in step.get("uses", "") and "csrc-l1-save" not in step.get("uses", ""):
+                    continue
+                cache_dir = step["with"]["cache-dir"]
+                if cache_dir == "${{ env.INCREMENTAL_BUILD_CACHE_DIR }}":
+                    cache_dir = workflow["env"]["INCREMENTAL_BUILD_CACHE_DIR"]
+                assert cache_dir == "csrc/build_cache", f"{path.name}: {step['name']}"
+                callers.append(path.name)
+
+    assert "_build_csrc_cache.yaml" in callers
+    assert "_selected_tests.yaml" in callers
+    producer = yaml.safe_load((workflows / "_build_csrc_cache.yaml").read_text())
+    install = next(step for step in producer["jobs"]["build"]["steps"] if step["name"] == "Install vllm-ascend")
+    assert "VLLM_ASCEND_BUILD_CACHE_DIR" not in install.get("env", {})
+
+
+@pytest.mark.parametrize("action,operation", [("csrc-l1-restore", "restore"), ("csrc-l1-save", "save")])
+def test_l1_transport_failure_remains_nonfatal(action: str, operation: str):
+    path = REPO_ROOT / ".github" / "actions" / action / "action.yaml"
+    steps = yaml.safe_load(path.read_text())["runs"]["steps"]
+    transport = next(step for step in steps if step.get("uses") == f"runs-on/cache/{operation}@v5")
+    assert transport["continue-on-error"] is True
 
 
 @pytest.mark.parametrize("entrypoint", ["engine", "restore-helper"])

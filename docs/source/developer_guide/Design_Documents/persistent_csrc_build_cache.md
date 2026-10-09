@@ -372,8 +372,9 @@ Ordinary local source builds use the same action cache in the repository's
 ignored `csrc/build_cache` directory. This is local-only acceleration: no OBS
 credentials or remote snapshot transport are involved. Set
 `VLLM_ASCEND_BUILD_CACHE_DIR` to an absolute path to override this local
-default; CI supplies an explicit directory and is unaffected by the
-repository-local location. Deleting the local directory causes a cold build;
+default. CI uses the same workspace-relative `csrc/build_cache` transport
+path, which the restore helper resolves to an absolute directory for builds.
+Deleting the local directory causes a cold build;
 it does not change the compiled source or CI's persistent snapshot.
 
 ### Central producer
@@ -381,6 +382,16 @@ it does not change the compiled source or CI's persistent snapshot.
 The reusable producer restores L1, performs the ordinary source build, verifies
 final native artifacts, publishes changed L1 state, and then publishes the
 exact L0 artifact.
+
+All L1 producers and consumers must pass the same literal relative
+`cache-dir: csrc/build_cache` to the restore/save actions. `runs-on/cache`
+includes that path in its remote cache version: using `/tmp` on one runner
+and `runner.temp` on another separates otherwise compatible keys into
+different OBS namespaces. The relative archive layout also restores under
+each consumer's own workspace, not the producer's absolute directory.
+Restore/save transport failures remain nonfatal; ordinary source compilation
+is still the fallback. Existing snapshots under the old path namespaces are
+not migrated, so the first build with the shared path may be cold.
 
 ### Historical sources
 

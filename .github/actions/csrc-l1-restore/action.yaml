@@ -4,7 +4,7 @@ description: Restore a persistent snapshot for the content-addressed local csrc 
 inputs:
   cache-dir:
     required: true
-    description: Directory exported as VLLM_ASCEND_BUILD_CACHE_DIR.
+    description: Stable workspace-relative transport path; exported as an absolute VLLM_ASCEND_BUILD_CACHE_DIR.
   architecture:
     required: true
     description: Build architecture (x64 or arm64; common runner aliases are accepted).
@@ -70,6 +70,8 @@ runs:
         AWS_REGION: ap-southeast-1
         RUNS_ON_RUNNER_NAME: ""
       with:
+        # The literal path versions the OBS namespace and archive layout.
+        # Use the same relative spelling in every producer/consumer.
         path: ${{ inputs.cache-dir }}
         key: ${{ steps.key.outputs.primary_key }}
         restore-keys: |
