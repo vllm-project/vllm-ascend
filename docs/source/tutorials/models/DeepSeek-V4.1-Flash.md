@@ -16,9 +16,9 @@ speculative decoding. These designs reduce the global KV cache footprint to
 one eighth of DeepSeek-V4-Flash. The model accepts text and images and supports
 a continuously adjustable reasoning effort from 1 to 100.
 
-vLLM Ascend supports W8A8 deployment on Atlas 800 A3 and A2 servers. This
-guide provides a single-node colocated A3 configuration, a two-node A3
-Prefill-Decode (PD) disaggregated configuration, and a four-node A2 PD
+vLLM Ascend supports W8A8 and W4A8 deployment on Atlas 800 A3 and A2 servers. This
+guide provides a single-node colocated A3 configuration, a single-node colocated A2 configuration, a two-node A3
+Prefill-Decode (PD) disaggregated configuration, a two-node colocated A2 configuration, and a four-node A2 PD
 disaggregated configuration with two Prefill and two Decode servers.
 
 DeepSeek-V4.1-Flash support requires the `main` branch of vLLM Ascend and an
@@ -273,6 +273,65 @@ and use the `main` branch with the matching vLLM revision recorded in
         `enable_shared_expert_dp` enable the A3 MoE and communication optimizations
         used by this configuration. `enable_cpu_binding` pins worker processes to
         CPUs, while `enable_npugraph_ex` enables the enhanced ACL Graph path.
+
+=== "A2 series"
+
+    This configuration targets W4A8 and runs Prefill and Decode on one Atlas 800 A2 server. It
+    uses TP8 across all 8 logical devices, expert parallelism, Engram host
+    offload, asynchronous scheduling, and `FULL_DECODE_ONLY` ACL Graph.
+
+    Set `MODEL_PATH` to the local checkpoint path.
+
+    ```shell
+    #!/usr/bin/env bash
+
+    MODEL_PATH="<YOUR_MODEL_PATH>"
+
+    export VLLM_USE_V2_MODEL_RUNNER=0
+    export VLLM_ENGINE_READY_TIMEOUT_S=36000
+
+    export HCCL_BUFFSIZE=1024
+    export HCCL_OP_EXPANSION_MODE="AIV"
+
+    if [[ -f /usr/lib/aarch64-linux-gnu/libjemalloc.so.2 ]]; then
+        export LD_PRELOAD="/usr/lib/aarch64-linux-gnu/libjemalloc.so.2${LD_PRELOAD:+:$LD_PRELOAD}"
+    fi
+
+    vllm serve "$MODEL_PATH" \
+        --host 0.0.0.0 \
+        --port 8000 \
+        --data-parallel-size 1 \
+        --tensor-parallel-size 8 \
+        --enable-expert-parallel \
+        --seed 1024 \
+        --served-model-name dsv41-w4a8 \
+        --max-model-len 262144 \
+        --max-num-batched-tokens 8192 \
+        --max-num-seqs 32 \
+        --async-scheduling \
+        --block-size 128 \
+        --no-enable-prefix-caching \
+        --trust-remote-code \
+        --tokenizer-mode deepseek_v41 \
+        --reasoning-parser deepseek_v41 \
+        --tool-call-parser deepseek_v41 \
+        --enable-auto-tool-choice \
+        --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":16}' \
+        --safetensors-load-strategy lazy \
+        --gpu-memory-utilization 0.9 \
+        --quantization ascend \
+        --speculative-config '{"num_speculative_tokens":5,"method":"dspark","enforce_eager":true}' \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+        --engram-config '{"cpu_offload":true}' \
+        --additional-config '{
+            "ascend_compilation_config":{
+                "enable_npugraph_ex":true,
+                "enable_static_kernel":false
+            },
+            "enable_cpu_binding":true,
+            "multistream_overlap_shared_expert":true
+        }'
+    ```
 
 ### 5.2 PD Disaggregated Deployment
 
@@ -1092,6 +1151,86 @@ and use the `main` branch with the matching vLLM revision recorded in
     Omit `--data-parallel-start-rank` on Node 0. Start Node 0 first, followed by
     Nodes 1 through 3. Only Node 0 exposes the API endpoint. Each server contributes
     one TP8 rank to the global DP4 topology.
+
+=== "A2 series (two-node)"
+
+    This two-node colocated configuration uses two Atlas 800 A2 servers with one
+    local DP rank per server and a global DP2/TP8/EP topology.
+
+    Run this script on both A2 servers. Set `NODE_RANK` to `0` or
+    `1` on the corresponding node. Set `NODE0_IP` to the IP address of Node 0 and
+    set `LOCAL_IP`, `NIC_NAME`, and `MODEL_PATH` for each node.
+
+    ```bash
+    #!/usr/bin/env bash
+    set -euo pipefail
+    NODE_RANK=0
+    NODE0_IP="<NODE0_IP>"
+    NIC_NAME="<NETWORK_INTERFACE>"
+    LOCAL_IP="<LOCAL_IP>"
+    MODEL_PATH="<YOUR_MODEL_PATH>"
+
+    export HCCL_IF_IP="$LOCAL_IP"
+    export VLLM_HOST_IP="$LOCAL_IP"
+    export GLOO_SOCKET_IFNAME="$NIC_NAME"
+    export TP_SOCKET_IFNAME="$NIC_NAME"
+    export HCCL_SOCKET_IFNAME="$NIC_NAME"
+    export HCCL_INTRA_ROCE_ENABLE=1
+    export HCCL_BUFFSIZE=1024
+    export HCCL_CONNECT_TIMEOUT=1200
+    export VLLM_RPC_TIMEOUT=3600000
+    export VLLM_ENGINE_READY_TIMEOUT_S=360000
+    export VLLM_USE_V2_MODEL_RUNNER=0
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+
+    if [[ -f /usr/lib/aarch64-linux-gnu/libjemalloc.so.2 ]]; then
+      export LD_PRELOAD="/usr/lib/aarch64-linux-gnu/libjemalloc.so.2${LD_PRELOAD:+:$LD_PRELOAD}"
+    fi
+
+    HEADLESS_ARGS=()
+    if [[ "$NODE_RANK" != "0" ]]; then
+      HEADLESS_ARGS+=(--headless --data-parallel-start-rank "$NODE_RANK")
+    fi
+
+    vllm serve "$MODEL_PATH" \
+      --host 0.0.0.0 \
+      --port 8000 \
+      "${HEADLESS_ARGS[@]}" \
+      --data-parallel-address "$NODE0_IP" \
+      --data-parallel-rpc-port 13399 \
+      --data-parallel-size 2 \
+      --data-parallel-size-local 1 \
+      --tensor-parallel-size 8 \
+      --enable-expert-parallel \
+      --seed 1024 \
+      --served-model-name dsv41 \
+      --max-model-len 1048576 \
+      --max-num-batched-tokens 8192 \
+      --max-num-seqs 32 \
+      --async-scheduling \
+      --block-size 128 \
+      --enable-prefix-caching \
+      --trust-remote-code \
+      --tokenizer-mode deepseek_v41 \
+      --reasoning-parser deepseek_v41 \
+      --tool-call-parser deepseek_v41 \
+      --enable-auto-tool-choice \
+      --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":16}' \
+      --safetensors-load-strategy lazy \
+      --gpu-memory-utilization 0.9 \
+      --quantization ascend \
+      --speculative-config '{"num_speculative_tokens":5,"method":"dspark","enforce_eager":true}' \
+      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+      --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
+      --additional-config '{
+          "ascend_compilation_config":{
+              "enable_npugraph_ex":true,
+              "enable_static_kernel":false
+          },
+          "enable_cpu_binding":true,
+          "multistream_overlap_shared_expert":true
+      }'
+    ```
 
 ### 5.4 Service Verification
 
