@@ -403,6 +403,7 @@ class TestAscendSFACacheComposition(TestBase):
             torch.tensor([2], dtype=torch.int32),
             False,
             False,
+            False,
         )
 
         self.assertIs(result, expected_topk)
@@ -441,6 +442,7 @@ class TestAscendSFACacheComposition(TestBase):
             torch.tensor([2], dtype=torch.int32),
             torch.tensor([2], dtype=torch.int32),
             True,
+            False,
             False,
         )
 
@@ -677,6 +679,7 @@ class TestAscendSFAKPathFusion(TestBase):
         indexer.qk_rope_head_dim = 64
         indexer.is_rope_neox_style = False
         indexer.enable_sparse_li_c8 = False
+        indexer.enable_sparse_li_c4 = False
         indexer.n_head = n_head
         indexer.wq_b = MagicMock(return_value=(torch.randn(num_tokens, n_head * head_dim), None))
         indexer.use_torch_npu_lightning_indexer = False
@@ -1109,6 +1112,7 @@ class TestAscendSFAImpl(TestBase):
         mock_ascend_config.enable_sparse_li_c8 = False
         mock_ascend_config.enable_shared_expert_dp = False
         mock_ascend_config.is_sparse_li_c8_layer.return_value = False
+        mock_ascend_config.is_sparse_li_c4_layer.return_value = False
         mock_ascend_config.rl_config.enabled = False
         mock_get_ascend_config.return_value = mock_ascend_config
         self.mock_ascend_config = mock_ascend_config
@@ -1190,6 +1194,7 @@ class TestAscendSFAImpl(TestBase):
             sin=None,
             slot_mapping=torch.arange(2),
             num_input_tokens=2,
+            num_actual_tokens=2,
             num_decode_tokens=2,
             attn_state=AscendAttentionState.DecodeOnly,
         )

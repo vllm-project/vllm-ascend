@@ -201,6 +201,10 @@ class CopySfaTopkSlotAllocator:
     def get(self, req_id: str) -> int | None:
         return self._req_to_slot.get(req_id)
 
+    def can_bind(self, req_id: str) -> bool:
+        """Check admission without reserving a row before KV allocation succeeds."""
+        return req_id in self._req_to_slot or bool(self._free)
+
     def release(self, req_id: str) -> int | None:
         slot = self._req_to_slot.pop(req_id, None)
         if slot is not None:

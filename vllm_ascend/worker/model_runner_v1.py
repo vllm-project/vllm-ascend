@@ -4979,7 +4979,8 @@ class NPUModelRunner(GPUModelRunner):
         ) and any(isinstance(spec, AttentionSpec) for spec in layer_kv_cache_spec.values())
         strided_attention_cache_layers: set[str] = set()
         if (
-            not self.use_sparse
+            not self.use_dcp
+            and not self.use_sparse
             and not self.use_compress
             and not self.sparse_kv_offload_enabled
             and not self.ascend_config.xlite_graph_config.enabled

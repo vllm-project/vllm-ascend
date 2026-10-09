@@ -12,6 +12,7 @@ from tests.ut.quantization.conftest_quantization import (
     create_mxfp_moe_layer,
 )
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import (
+    AscendW8A8MXFP8DSDynamicLinearMethod,
     AscendW8A8MXFP8DynamicFusedMoEMethod,
     AscendW8A8MXFP8DynamicLinearMethod,
 )
@@ -25,6 +26,9 @@ class TestAscendW8A8MXFP8LinearMethod(TestBase):
         nz_config = patch("vllm_ascend.utils.get_ascend_config", return_value=SimpleNamespace(weight_nz_mode=1))
         self.addCleanup(nz_config.stop)
         nz_config.start()
+        format_cast = patch("torch_npu.npu_format_cast", side_effect=lambda weight, fmt, **kwargs: weight.clone())
+        self.addCleanup(format_cast.stop)
+        format_cast.start()
 
     def test_modelopt_config_defaults_group_size(self):
         vllm_config = create_mock_vllm_config()
@@ -200,6 +204,36 @@ class TestAscendW8A8MXFP8LinearMethod(TestBase):
         torch.testing.assert_close(padded_x[:, 16:], x)
 
 
+class TestAscendW8A8MXFP8DSLinearMethod(TestBase):
+    def test_process_weights_uses_checkpoint_block_size(self):
+        for block_size, output_size, input_size in ((32, 64, 64), (128, 256, 256)):
+            scheme = object.__new__(AscendW8A8MXFP8DSDynamicLinearMethod)
+            scheme.block_size = block_size
+            scheme.group_size = 32
+            layer = nn.Module()
+            layer.weight = nn.Parameter(
+                torch.zeros(output_size, input_size, dtype=torch.float8_e4m3fn),
+                requires_grad=False,
+            )
+            layer.weight_scale = nn.Parameter(
+                torch.ones(
+                    output_size // block_size,
+                    input_size // block_size,
+                    dtype=torch.float32,
+                ),
+                requires_grad=False,
+            )
+            layer.prefix = "model.layers.0.mlp.shared_experts.gate_up_proj"
+
+            scheme.process_weights_after_loading(layer)
+
+            self.assertEqual(layer.weight.shape, (input_size, output_size))
+            self.assertEqual(
+                layer.weight_scale.shape,
+                (input_size // scheme.group_size // 2, output_size, 2),
+            )
+
+
 class TestAscendW8A8MXFP8MoEMethod(TestBase):
     num_experts = 8
     hidden_size = 128
@@ -214,6 +248,9 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
         nz_config = patch("vllm_ascend.utils.get_ascend_config", return_value=SimpleNamespace(weight_nz_mode=1))
         self.addCleanup(nz_config.stop)
         nz_config.start()
+        format_cast = patch("torch_npu.npu_format_cast", side_effect=lambda weight, fmt, **kwargs: weight.clone())
+        self.addCleanup(format_cast.stop)
+        format_cast.start()
 
     def test_modelopt_config_defaults_group_size(self):
         vllm_config = create_mock_vllm_config()
@@ -414,6 +451,8 @@ class TestDSMXFP8OProjLayout(TestBase):
 
         for local_groups in (1, 2, 8):
             scheme = AscendW8A8MXFP8DSDynamicLinearMethod.__new__(AscendW8A8MXFP8DSDynamicLinearMethod)
+            scheme.block_size = 128
+            scheme.group_size = 32
             scheme.n_local_groups = 8  # Ordinary TP differs from OTP.
             scheme.o_lora_rank = 128
             layer = nn.Module()

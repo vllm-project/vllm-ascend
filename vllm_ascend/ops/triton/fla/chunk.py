@@ -12,7 +12,6 @@ import warnings
 
 import torch
 from einops import rearrange
-from fla_npu.ops.ascendc import chunk_gated_delta_rule_fwd_h as fla_chunk_gated_delta_rule_fwd_h
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.third_party.flash_linear_attention.ops.utils import SUPPRESS_LEVEL
@@ -113,7 +112,7 @@ def chunk_gated_delta_rule_fwd(
     else:
         cu_seqlens_kern, initial_state_kern = cu_seqlens_host, initial_state
         keep_meta = None
-    h, v_new, final_state = fla_chunk_gated_delta_rule_fwd_h(
+    h, v_new, final_state = torch.ops._C_ascend.chunk_gated_delta_rule_fwd_h_vllm(
         k_ascendc,
         w_ascendc,
         u_ascendc,
@@ -122,9 +121,11 @@ def chunk_gated_delta_rule_fwd(
         initial_state=initial_state_kern,
         output_final_state=True,
         chunk_size=64,
+        save_new_value=True,
         cu_seqlens=cu_seqlens_kern,
         chunk_indices=chunk_indices_chunk64_host,
-        state_v_first=False,
+        use_exp2=False,
+        transpose_state_layout=False,
     )
     if keep_meta is not None:
         # Scatter the compacted final_state back to the original [N, H, K, V]

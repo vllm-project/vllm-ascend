@@ -198,7 +198,7 @@ def test_kda_torch_bindings_have_shape_correct_meta_kernels():
     a_log = torch.empty((2,), device="meta", dtype=torch.float32)
     dt_bias = torch.empty((2 * 128,), device="meta", dtype=torch.float32)
 
-    gk = torch.ops._C_ascend.kda_gate_cumsum(raw_gate, 64, layout="BSND")
+    gk = torch.ops._C_ascend.kda_gate_cumsum_vllm(raw_gate, 64, layout="BSND")
     outputs = chunk_kda_fwd(
         q,
         k,
@@ -251,7 +251,7 @@ def test_chunk_kda_fwd_matches_reference_bsnd():
     v = (torch.randn(bsz, total_t, hv, vdim, dtype=dtype) * 0.05).npu()
     g = (-torch.rand(bsz, total_t, hv, kdim, dtype=torch.float32) * 0.05).npu()
     beta = torch.sigmoid(torch.randn(bsz, total_t, hv, dtype=torch.float32)).npu()
-    gk = torch.ops._C_ascend.kda_gate_cumsum(g, 64, layout="BSND")
+    gk = torch.ops._C_ascend.kda_gate_cumsum_vllm(g, 64, layout="BSND")
     initial_state = (torch.randn(bsz, hv, kdim, vdim, dtype=torch.float32) * 0.01).npu()
     scale = kdim**-0.5
 
@@ -327,7 +327,7 @@ def test_chunk_kda_fwd_c128_v256_path(total_t, hq, hv, kdim, vdim, dtype):
     initial_state = (torch.randn(1, hv, kdim, vdim, dtype=torch.float32) * 0.01).npu()
     scale = kdim**-0.5
 
-    gk = torch.ops._C_ascend.kda_gate_cumsum(g, 64, layout="BSND")
+    gk = torch.ops._C_ascend.kda_gate_cumsum_vllm(g, 64, layout="BSND")
 
     def run_chunk_kda_fwd():
         return chunk_kda_fwd(
@@ -434,12 +434,12 @@ def test_chunk_kda_fwd_tail_is_bitwise_deterministic(total_t, disable_recompute)
 
 
 @torch.inference_mode()
-def test_kda_gate_cumsum_matches_reference():
+def test_kda_gate_cumsum_vllm_matches_reference():
     torch.manual_seed(20260720)
 
     g = (-torch.rand(1, 96, 2, 128, dtype=torch.float32) * 0.05).npu()
     cu_seqlens = [0, 31, 96]
-    out = torch.ops._C_ascend.kda_gate_cumsum(g, 64, cu_seqlens=cu_seqlens, layout="BSND")
+    out = torch.ops._C_ascend.kda_gate_cumsum_vllm(g, 64, cu_seqlens=cu_seqlens, layout="BSND")
     ref = _gate_cumsum_reference(g, 64, cu_seqlens)
 
     assert torch.isfinite(out).all().item()
@@ -466,7 +466,7 @@ def test_chunk_kda_fwd_bnsd_layout_matches_reference():
     g_bnsd = g_bsnd.transpose(1, 2).contiguous()
     beta_bns = beta_bsn.transpose(1, 2).contiguous()
 
-    gk_bnsd = torch.ops._C_ascend.kda_gate_cumsum(g_bnsd, 64, layout="BNSD")
+    gk_bnsd = torch.ops._C_ascend.kda_gate_cumsum_vllm(g_bnsd, 64, layout="BNSD")
     got = chunk_kda_fwd(
         q_bnsd,
         k_bnsd,

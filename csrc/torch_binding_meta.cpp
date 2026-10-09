@@ -6,6 +6,7 @@
 #include <torch_npu/csrc/framework/OpCommand.h>
 #include <torch_npu/csrc/npu/Module.h>
 #include "utils.h"
+
 /*
  * How to write a meta implementation for a custom operator (meta kernel):
  *
@@ -1186,6 +1187,13 @@ void kv_compress_epilog_meta(
     return;
 }
 
+void kv_compress_epilog_v2_meta(at::Tensor &cache, const at::Tensor &x,
+                            const at::Tensor &slotMapping,
+                            int64_t quantGroupSize, std::string quantMode,
+                            bool roundScale, double xScale) {
+    return;
+}
+
 std::tuple<at::Tensor, at::Tensor> npu_kv_quant_sparse_attn_sharedkv_meta(
     const at::Tensor& q,
     int64_t kv_quant_mode,
@@ -1500,7 +1508,7 @@ void npu_scatter_nd_update_sk_meta(
 }
 
 
-std::tuple<at::Tensor, at::Tensor, at::Tensor> chunk_gated_delta_rule_fwd_h_meta(
+std::tuple<at::Tensor, at::Tensor, at::Tensor> chunk_gated_delta_rule_fwd_h_vllm_meta(
     const at::Tensor & k,
     const at::Tensor & w,
     const at::Tensor & u,
@@ -1580,7 +1588,7 @@ at::Tensor chunk_fwd_o_vllm_meta(
     return o;
 }
 
-at::Tensor kda_gate_cumsum_meta(
+at::Tensor kda_gate_cumsum_vllm_meta(
     const at::Tensor &g,
     int64_t chunk_size,
     const c10::optional<at::Tensor> &A_log,
@@ -1836,12 +1844,12 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_causal_conv1d_310", &vllm_ascend::meta::npu_causal_conv1d_310_meta);
     // npu_recurrent_gated_delta_rule_310
     ops.impl("npu_recurrent_gated_delta_rule_310", &vllm_ascend::meta::npu_recurrent_gated_delta_rule_310_meta);
-    // chunk_gated_delta_rule_fwd_h
-    ops.impl("chunk_gated_delta_rule_fwd_h", &vllm_ascend::meta::chunk_gated_delta_rule_fwd_h_meta);
+    // chunk_gated_delta_rule_fwd_h_vllm
+    ops.impl("chunk_gated_delta_rule_fwd_h_vllm", &vllm_ascend::meta::chunk_gated_delta_rule_fwd_h_vllm_meta);
     // chunk_fwd_o_vllm
     ops.impl("chunk_fwd_o_vllm", &vllm_ascend::meta::chunk_fwd_o_vllm_meta);
-    // kda_gate_cumsum
-    ops.impl("kda_gate_cumsum", &vllm_ascend::meta::kda_gate_cumsum_meta);
+    // kda_gate_cumsum_vllm
+    ops.impl("kda_gate_cumsum_vllm", &vllm_ascend::meta::kda_gate_cumsum_vllm_meta);
     // kda_layout_swap12
     ops.impl("kda_layout_swap12", &vllm_ascend::meta::kda_layout_swap12_meta);
 }
@@ -1932,6 +1940,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("inplace_partial_rotary_mul", &vllm_ascend::meta::inplace_partial_rotary_mul_meta);
     ops.impl("npu_rms_norm_dynamic_quant", &vllm_ascend::meta::npu_rms_norm_dynamic_quant_meta);
     ops.impl("kv_compress_epilog", &vllm_ascend::meta::kv_compress_epilog_meta);
+    ops.impl("kv_compress_epilog_v2", &vllm_ascend::meta::kv_compress_epilog_v2_meta);
     ops.impl("npu_kv_quant_sparse_attn_sharedkv", &vllm_ascend::meta::npu_kv_quant_sparse_attn_sharedkv_meta);
     ops.impl("npu_kv_quant_sparse_attn_sharedkv_metadata",
              &vllm_ascend::meta::npu_kv_quant_sparse_attn_sharedkv_metadata_meta);
@@ -1941,12 +1950,12 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_scatter_nd_update_sk", &vllm_ascend::meta::npu_scatter_nd_update_sk_meta);
     // Lightning indexer quant
     ops.impl("npu_lightning_indexer_quant", &vllm_ascend::meta::npu_lightning_indexer_quant_meta);
-    // chunk_gated_delta_rule_fwd_h
-    ops.impl("chunk_gated_delta_rule_fwd_h", &vllm_ascend::meta::chunk_gated_delta_rule_fwd_h_meta);
+    // chunk_gated_delta_rule_fwd_h_vllm
+    ops.impl("chunk_gated_delta_rule_fwd_h_vllm", &vllm_ascend::meta::chunk_gated_delta_rule_fwd_h_vllm_meta);
     // chunk_fwd_o_vllm
     ops.impl("chunk_fwd_o_vllm", &vllm_ascend::meta::chunk_fwd_o_vllm_meta);
-    // kda_gate_cumsum
-    ops.impl("kda_gate_cumsum", &vllm_ascend::meta::kda_gate_cumsum_meta);
+    // kda_gate_cumsum_vllm
+    ops.impl("kda_gate_cumsum_vllm", &vllm_ascend::meta::kda_gate_cumsum_vllm_meta);
     // kda_layout_swap12
     ops.impl("kda_layout_swap12", &vllm_ascend::meta::kda_layout_swap12_meta);
      // store_kv_block
