@@ -323,11 +323,19 @@ def test_session_reuses_inventory_and_final_digest(runtime, monkeypatch, process
             assert live_digest != expected_digest
             session.seed_lease = None
             session._promote_deferred_seed()
-            assert collect.call_count == expected_scans + 1
-            verify.assert_called_once_with(live_digest)
+            assert collect.call_count == expected_scans + processed_layout
+            if processed_layout:
+                verify.assert_called_once_with(live_digest)
+                assert session.state is runtime.types.RForkLifecycleState.INITIALIZED
+            else:
+                verify.assert_not_called()
+                assert session.state is runtime.types.RForkLifecycleState.SERVING
         else:
             assert result is runtime.types.RForkSeedServiceStartResult.STARTED
-            verify.assert_called_once_with(expected_digest)
+            if processed_layout:
+                verify.assert_called_once_with(expected_digest)
+            else:
+                verify.assert_not_called()
     finally:
         session.seed_lease = None
         assert session.shutdown()

@@ -83,7 +83,7 @@ class RForkPlannerClient:
         if self._structural_digest != digest:
             logger.error(
                 "RFork structural digest changed between registration and seed advertisement: "
-                "bound=%s current=%s; advertising under the registered digest.",
+                "bound=%s current=%s; retaining the registered digest.",
                 self._structural_digest,
                 digest,
             )
