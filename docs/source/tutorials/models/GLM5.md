@@ -1555,3 +1555,41 @@ For environment variable descriptions and constraints, refer to [envs.py](https:
   --reasoning-parser glm45 \
   --enable-auto-tool-choice \
   ```
+
+### 10.1 Ascend 950PR AlltoAllV fails during startup profiling
+
+On a 16-device Ascend 950PR deployment, inspect the device-side HCCL log when startup profiling fails with `HcclAlltoAllV`, `HcclLaunchAicpuKernel`, or ACL error `507018`. One observed failure selected `AicpuAllToAllVSoleMeshMultiJetty` and reported:
+
+```text
+[InsTempUBXAllToAllVMesh1D][GetRankNumPerBoard]
+rankNumPerBoard_[16] is more than [4]
+```
+
+For this specific failure, explicitly selecting CCU scheduling allowed the same TP16 deployment to pass startup profiling:
+
+```shell
+export HCCL_OP_EXPANSION_MODE=CCU_SCHED
+```
+
+This changes HCCL communication scheduling; it does not change tensor or expert parallel sizes. Treat it as a workaround for the affected runtime and topology, rather than a general requirement for all 950 deployments. A successful TP8 launch alone does not establish that the 16-device communication path is healthy. Check the HCCL device log before changing timeouts or memory utilization. See the [HCCL expansion-mode reference](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/910beta3/API/hcclug/docs/zh/user_guide/fault_diagnosis/param_link_stage.md) for hardware constraints.
+
+### 10.2 Sparse C8 attention crashes on the first request
+
+A server can pass startup profiling and return HTTP 200 from `/health` and `/v1/models`, then crash on the first real request with:
+
+```text
+Indv::CacheKeyBuilder::AppendShapeInfo
+NnopbaseAddOutput
+aclnnKvQuantSparseFlashAttentionGetWorkspaceSize
+Segfault
+```
+
+Older builds registered the custom sparse C8 attention operator under the same name as the built-in CANN operator. Their interfaces differ: the built-in binding supplies one attention output, while the custom interface also supplies a softmax-LSE flag and two softmax outputs. Registering the custom implementation can therefore make the built-in call resolve to an incompatible interface.
+
+The permanent fix is the operator namespace separation in [PR #17937](https://github.com/vllm-project/vllm-ascend/pull/17937), commit `c32c885f869ec80ed6baf09a8082d7d54494acd7`. It renames the custom operator and ACLNN API with a `Vllm` / `_vllm` suffix. Use an image containing that change, or rebuild both the native custom operators and the matching Python bindings from fixed source. Updating Python dispatch names alone leaves the native library inconsistent.
+
+To distinguish this failure from a communication problem, compare the same sparse-attention inputs in separate processes: the built-in operator without custom registration, the built-in operator after custom registration, and the custom operator through its matching binding. In the affected image, only the second case segfaulted. Sending a real inference request is required; health checks do not exercise this attention path.
+
+A temporary script-level workaround can route the affected call through the matching custom binding and select the attention-output tensor from its three outputs. Keep that adapter scoped to the affected launch. Once an image with the namespace fix is installed, remove the adapter and validate the standard launch again. The HCCL workaround above addresses a separate failure and may still be needed for the affected runtime.
+
+Validation of the temporary workaround on GLM-5.1 W4A4C8 with TP16, eager execution, FP8 KV cache, and one-token MTP covered a single request, four concurrent requests, 160 generated tokens, and a 9,247-token input using chunked prefill. These checks establish functional behavior for that configuration; they are not throughput, full-context, graph-mode, or accuracy benchmarks.
