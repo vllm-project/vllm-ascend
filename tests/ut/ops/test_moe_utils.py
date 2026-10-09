@@ -7,11 +7,13 @@ import torch
 import torch_npu  # noqa: F401 -- registers torch.npu used by the module under test
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
-from vllm_ascend.ops.fused_moe.moe_utils import (
+from vllm_ascend.ops.fused_moe.moe_mlp import (
     _custom_gmm_swiglu_enabled,
-    _get_cann_mega_moe_quant_settings,
     _prepare_dequant_swiglu_weight_scale,
     cumsum_group_list,
+)
+from vllm_ascend.ops.fused_moe.moe_utils import (
+    _get_cann_mega_moe_quant_settings,
     load_cann_mega_moe_ops,
     select_mega_moe_activation_kwargs,
 )
@@ -55,7 +57,7 @@ class TestFusionFlags(unittest.TestCase):
     def test_custom_gmm_swiglu_requires_fusion_dynamic_eplb(self):
         self.assertFalse(_custom_gmm_swiglu_enabled(False, True))
         self.assertFalse(_custom_gmm_swiglu_enabled(True, False))
-        with patch("vllm_ascend.ops.fused_moe.moe_utils.enable_custom_op", return_value=True):
+        with patch("vllm_ascend.ops.fused_moe.moe_mlp.enable_custom_op", return_value=True):
             self.assertTrue(_custom_gmm_swiglu_enabled(True, True, activation="silu"))
 
 

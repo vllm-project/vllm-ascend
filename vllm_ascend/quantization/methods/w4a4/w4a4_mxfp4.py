@@ -27,8 +27,6 @@ from vllm.utils.math_utils import cdiv
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
-from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
-from vllm_ascend.ops.fused_moe.moe_utils import cumsum_group_list, maybe_normalize_mxfp_scale_layout
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, COMPRESSED_TENSORS_METHOD, dispose_tensor
 
@@ -201,8 +199,6 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
 
     model_dtype = None
     quant_type: QuantType = QuantType.W4A4MXFP
-    act_quant_type: torch.dtype = torch_npu.float4_e2m1fn_x2
-    fused_activations = frozenset({"silu"})
     supports_eplb = True
 
     def __init__(self):
@@ -248,12 +244,15 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
         moe_comm_method = _EXTRA_CTX.moe_comm_method
+        weights = self.get_fused_mc2_weights(layer)
         return moe_comm_method.fused_experts(
             fused_experts_input=build_fused_experts_input(
+                layer=layer,
                 hidden_states=x,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                layer=layer,
+                w1=weights.w1,
+                w2=weights.w2,
                 quant_type=self.quant_type,
                 dynamic_eplb=self.dynamic_eplb,
                 expert_map=layer.ascend_expert_map,
@@ -267,8 +266,9 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
                 mxfp_scale_dtype=torch_npu.float8_e8m0fnu,
                 mxfp_per_token_scale_dtype=torch_npu.float8_e8m0fnu,
                 mxfp_use_bf16=(x.dtype in [torch.bfloat16, torch.uint8]),
-            ),
-            quant_method=self,
+                w1_scale=weights.w1_scale,
+                w2_scale=weights.w2_scale,
+            )
         )
 
     def get_fused_mc2_weights(self, layer: torch.nn.Module) -> MoEWeights:
@@ -362,99 +362,3 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
             layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2)
             layer.w13_weight_scale.data = layer.w13_weight_scale.data.transpose(1, 2)
             layer.w2_weight_scale.data = layer.w2_weight_scale.data.transpose(1, 2)
-
-    def apply_gmm1_act_quant(self, mlp_compute_input: MoEMlpComputeInput):
-        input_hidden_states = mlp_compute_input.hidden_states
-        requantized_input = mlp_compute_input.dynamic_scale is None
-        hidden_states, pertoken_scale = self._quant_hidden_states(input_hidden_states, mlp_compute_input.dynamic_scale)
-        # Dynamic MXFP quantization produces a new FP4 activation tensor. The
-        # original BF16 input is no longer consumed by GMM1, so release it
-        # before launching GMM1 to avoid inflating the profile-run peak.
-        if requantized_input:
-            dispose_tensor(input_hidden_states)
-        layer = mlp_compute_input.layer
-        assert layer is not None
-        out, out_scale = torch_npu.npu_grouped_matmul_swiglu_quant_v2(
-            x=hidden_states,
-            weight=[layer.w13_weight],
-            group_list=cumsum_group_list(mlp_compute_input.group_list, mlp_compute_input.group_list_type, 0),
-            weight_scale=[layer.w13_weight_scale],
-            x_scale=pertoken_scale,
-            dequant_mode=2,
-            quant_mode=2,
-            dequant_dtype=torch.float32,
-            quant_dtype=torch_npu.float4_e2m1fn_x2,
-            x_dtype=torch_npu.float4_e2m1fn_x2,
-            weight_dtype=torch_npu.float4_e2m1fn_x2,
-            weight_scale_dtype=torch_npu.float8_e8m0fnu,
-            x_scale_dtype=torch_npu.float8_e8m0fnu,
-        )
-        # With a dispatcher-provided scale, GMM1 consumes the input directly.
-        if not requantized_input:
-            dispose_tensor(input_hidden_states)
-        return out, maybe_normalize_mxfp_scale_layout(out_scale)
-
-    def apply_gmm1(self, mlp_compute_input: MoEMlpComputeInput):
-        input_hidden_states = mlp_compute_input.hidden_states
-        requantized_input = mlp_compute_input.dynamic_scale is None
-        hidden_states, pertoken_scale = self._quant_hidden_states(input_hidden_states, mlp_compute_input.dynamic_scale)
-        # Keep the same input lifetime as the pre-refactor quant_apply_mlp:
-        # once local dynamic quantization has produced a separate FP4 tensor,
-        # the BF16 source must not overlap with the GMM1 allocation.
-        if requantized_input:
-            dispose_tensor(input_hidden_states)
-        layer = mlp_compute_input.layer
-        assert layer is not None
-        # Packed FP4 tensors use uint8 storage. Pass their logical dtype so the
-        # operator does not dispatch them as an unsupported uint8/uint8 pair.
-        hidden_states = torch_npu.npu_grouped_matmul(
-            x=[hidden_states],
-            weight=[layer.w13_weight],
-            scale=[layer.w13_weight_scale],
-            per_token_scale=[pertoken_scale],
-            split_item=2,
-            group_type=0,
-            group_list=mlp_compute_input.group_list,
-            group_list_type=mlp_compute_input.group_list_type,
-            output_dtype=torch.bfloat16,
-            scale_dtype=torch_npu.float8_e8m0fnu,
-            per_token_scale_dtype=torch_npu.float8_e8m0fnu,
-            x_dtype=torch_npu.float4_e2m1fn_x2,
-            weight_dtype=torch_npu.float4_e2m1fn_x2,
-        )[0]
-        if not requantized_input:
-            dispose_tensor(input_hidden_states)
-        return hidden_states
-
-    def apply_act_quant(self, mlp_compute_input: MoEMlpComputeInput, hidden_states: torch.Tensor):
-        hidden_states, dynamic_scale = torch_npu.npu_dynamic_mx_quant(
-            hidden_states, dst_type=torch_npu.float4_e2m1fn_x2
-        )
-        return hidden_states, maybe_normalize_mxfp_scale_layout(dynamic_scale)
-
-    def apply_gmm2(self, mlp_compute_input: MoEMlpComputeInput, hidden_states, act_out_scale):
-        layer = mlp_compute_input.layer
-        assert layer is not None
-        input_dtype = mlp_compute_input.hidden_states.dtype
-        use_bf16 = input_dtype in [torch.bfloat16, torch.uint8, torch.float4_e2m1fn_x2]
-        output_dtype = (
-            input_dtype
-            if input_dtype in [torch.bfloat16, torch.float16]
-            else (torch.bfloat16 if use_bf16 else torch.float16)
-        )
-        return torch_npu.npu_grouped_matmul(
-            x=[hidden_states],
-            weight=[layer.w2_weight],
-            scale=[layer.w2_weight_scale],
-            bias=None,
-            per_token_scale=[act_out_scale],
-            split_item=2,
-            group_list_type=mlp_compute_input.group_list_type,
-            group_type=0,
-            group_list=mlp_compute_input.group_list,
-            output_dtype=output_dtype,
-            scale_dtype=torch_npu.float8_e8m0fnu,
-            per_token_scale_dtype=torch_npu.float8_e8m0fnu,
-            x_dtype=torch_npu.float4_e2m1fn_x2,
-            weight_dtype=torch_npu.float4_e2m1fn_x2,
-        )[0]

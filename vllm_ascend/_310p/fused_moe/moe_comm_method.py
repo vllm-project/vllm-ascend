@@ -15,8 +15,10 @@
 # This file is a part of the vllm-ascend project.
 from __future__ import annotations
 
+from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl
 
+from .moe_mlp import apply_moe_mlp
 from .token_dispatcher import TokenDispatcherWithAllGather310
 
 
@@ -41,3 +43,8 @@ class AllGatherCommImpl310(AllGatherCommImpl):
             num_experts=self.moe_config.num_experts,
             num_local_experts=self.moe_config.num_local_experts,
         )
+
+    def _apply_mlp(self, mlp_compute_input: MoEMlpComputeInput, quant_method=None):
+        if quant_method is None:
+            raise NotImplementedError("310P MoE requires a quantization method.")
+        return apply_moe_mlp(mlp_compute_input, quant_method)
