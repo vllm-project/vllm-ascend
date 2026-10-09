@@ -10,6 +10,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch_npu
 from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config, set_current_vllm_config
 from vllm.distributed.parallel_state import (
     get_dcp_group,
@@ -76,6 +77,21 @@ class _HiddenStateDrafter(Protocol):
 
 # Currently we will fix block size to a small one since `num_reqs` can't be too large
 _PREPARE_INPUTS_BLOCK_SIZE = 4
+
+# Side stream for the MTP drafter's per-step attention-metadata prebuild. The
+# prebuild is dominated by AIV/MTE-bound RoPE cos/sin lookups
+# (aclnnIndex_SliceAiCore_Slice) which have no data dependency on the first
+# draft forward's AI-core matmuls, so they can overlap on a separate stream.
+_MTP_METADATA_STREAM = None
+
+
+def mtp_metadata_stream():
+    """Lazily create (once) and return the MTP metadata side stream."""
+    global _MTP_METADATA_STREAM
+    if _MTP_METADATA_STREAM is None:
+        _MTP_METADATA_STREAM = torch_npu.npu.Stream()
+    return _MTP_METADATA_STREAM
+
 
 _HIDDEN_STATE_DRAFTER_TYPES: tuple[type, ...] = (
     Eagle3LlamaForCausalLM,
@@ -296,6 +312,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # DCP needs independent block-table tensors for the first and later steps.
         # since final block table tensor is not ready in __init__, it is delayed until dummy_run
         self.block_table_tensor_clone: torch.Tensor | None = None
+
+        # Keepalive for cross-stream tensors produced by the side-stream
+        # metadata prebuild (see _prebuild_draft_attn_metadata); replaced each
+        # step to defer their freeing by one scheduler step.
+        self._mtp_metadata_keepalive = None
 
         self._runnable: Any = self._run_merged_draft
         if self.uses_mrope:
@@ -1286,57 +1307,24 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     mtp_slot_mapping=dcp_mtp_inputs.slot_mapping,
                 )
 
-        should_update_next_steps = not self.parallel_drafting and (self.dcp_size == 1 or dcp_mtp_inputs is not None)
-        if should_update_next_steps:
-            cache_only_groups = (
-                [group for group in self.draft_attn_groups if self._is_cache_only_draft_attn_group(group)]
-                if self.method == "mtp"
-                else []
-            )
-            if cache_only_groups:
-                primary_group = self._get_primary_draft_attn_group()
-                if len(cache_only_groups) + 1 != len(self.draft_attn_groups):
-                    raise ValueError("MTP with cache-only groups requires exactly one main attention group.")
-            # Copy the old attn_metadata and update
-            for draft_index in range(1, self.num_speculative_tokens):
-                per_layer_attn_metadata = dict()
-                if cache_only_groups:
-                    # Attention and cache-only groups describe the same draft
-                    # step. Advance shared state once while building metadata
-                    # for the executable attention group.
-                    common_attn_metadata, primary_metadata = self.attn_update_stack_num_spec_norm(
-                        draft_index,
-                        common_attn_metadata,
-                        batch_size,
-                        num_input_tokens,
-                        used_update_positions,
-                        aclgraph_runtime_mode,
-                        **draft_cp_kwargs,
-                        attn_group=primary_group,
-                    )
-                    per_layer_attn_metadata = self._build_cache_only_group_next_step_attn_metadata(
-                        common_attn_metadata,
-                        draft_index,
-                        num_input_tokens,
-                        primary_group,
-                        primary_metadata,
-                        cache_only_groups,
-                    )
-                else:
-                    for attn_group in self.draft_attn_groups:
-                        common_attn_metadata, attn_metadata = self.attn_update_stack_num_spec_norm(
-                            draft_index,
-                            common_attn_metadata,
-                            batch_size,
-                            num_input_tokens,
-                            used_update_positions,
-                            aclgraph_runtime_mode,
-                            **draft_cp_kwargs,
-                            attn_group=attn_group,
-                        )
-                        for layer_name in self._get_attn_metadata_layer_names(attn_group):
-                            per_layer_attn_metadata[layer_name] = attn_metadata
-                multi_steps_attn_metadata.append(per_layer_attn_metadata)
+        window_events = None
+        if (
+            not self.parallel_drafting
+            and (self.dcp_size == 1 or dcp_mtp_inputs is not None)
+            and self._mtp_metadata_overlap_enabled()
+        ):
+            window_events = [torch.npu.ExternalEvent() for _ in range(self.num_speculative_tokens - 1)]
+        metadata_events = self._prebuild_draft_attn_metadata(
+            multi_steps_attn_metadata,
+            common_attn_metadata,
+            batch_size,
+            num_input_tokens,
+            used_update_positions,
+            aclgraph_runtime_mode,
+            draft_cp_kwargs,
+            dcp_mtp_inputs,
+            window_events,
+        )
 
         token_indices_to_sample_len = token_indices_to_sample.shape[0]
         self.token_indices_to_sample[:token_indices_to_sample_len].copy_(token_indices_to_sample)
@@ -1384,6 +1372,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 "is_prefill": is_prefill_batch,
                 "sampling_metadata": sampling_metadata,
             }
+            if metadata_events is not None:
+                model_inputs["metadata_events"] = metadata_events
+                model_inputs["window_events"] = window_events
             runnable = cast(Callable[..., Any], self._runnable)
             run_draft: Callable[[], Any] = partial(runnable, **model_inputs)
 
@@ -1422,6 +1413,144 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             return logits.argmax(dim=-1), None
 
         return super()._sample_from_logits(logits, sampling_metadata)
+
+    def _mtp_metadata_overlap_enabled(self):
+        return (
+            self.method == "mtp"
+            and not self.use_cuda_graph
+            and self.dcp_size == 1
+            and get_ascend_config().multistream_mtp_metadata_overlap
+        )
+
+    def _prebuild_draft_attn_metadata(
+        self,
+        multi_steps_attn_metadata,
+        common_attn_metadata,
+        batch_size,
+        num_input_tokens,
+        used_update_positions,
+        aclgraph_runtime_mode,
+        draft_cp_kwargs,
+        dcp_mtp_inputs,
+        window_events=None,
+    ):
+        """Pre-build per-draft-step attention metadata (steps 1..K-1).
+
+        Appends the built per-layer metadata dicts to ``multi_steps_attn_metadata``
+        (which already holds the step-0 entry) and returns per-step side-stream
+        events when the prebuild ran on the side stream, otherwise ``None``.
+        """
+        should_update_next_steps = not self.parallel_drafting and (self.dcp_size == 1 or dcp_mtp_inputs is not None)
+        if not should_update_next_steps:
+            return None
+
+        cache_only_groups = (
+            [group for group in self.draft_attn_groups if self._is_cache_only_draft_attn_group(group)]
+            if self.method == "mtp"
+            else []
+        )
+        if cache_only_groups:
+            primary_group = self._get_primary_draft_attn_group()
+            if len(cache_only_groups) + 1 != len(self.draft_attn_groups):
+                raise ValueError("MTP with cache-only groups requires exactly one main attention group.")
+
+        can_overlap = self._mtp_metadata_overlap_enabled()
+        if can_overlap:
+            assert window_events is not None
+            side = mtp_metadata_stream()
+            with torch.npu.stream(side):
+                chain = common_attn_metadata
+                metadata_events = []
+                for unit_index, draft_index in enumerate(range(1, self.num_speculative_tokens)):
+                    # Gate each unit to the lm_head (pure AIC) window of the
+                    # previous draft forward, so the side stream only makes
+                    # progress while the main stream runs cube-bound matmuls.
+                    side.wait_event(window_events[unit_index])
+                    per_layer_attn_metadata = dict()
+                    if cache_only_groups:
+                        # Attention and cache-only groups describe the same draft
+                        # step. Advance shared state once while building metadata
+                        # for the executable attention group.
+                        chain, primary_metadata = self.attn_update_stack_num_spec_norm(
+                            draft_index,
+                            chain,
+                            batch_size,
+                            num_input_tokens,
+                            used_update_positions,
+                            aclgraph_runtime_mode,
+                            **draft_cp_kwargs,
+                            attn_group=primary_group,
+                        )
+                        per_layer_attn_metadata = self._build_cache_only_group_next_step_attn_metadata(
+                            chain,
+                            draft_index,
+                            num_input_tokens,
+                            primary_group,
+                            primary_metadata,
+                            cache_only_groups,
+                        )
+                    else:
+                        for attn_group in self.draft_attn_groups:
+                            chain, attn_metadata = self.attn_update_stack_num_spec_norm(
+                                draft_index,
+                                chain,
+                                batch_size,
+                                num_input_tokens,
+                                used_update_positions,
+                                aclgraph_runtime_mode,
+                                **draft_cp_kwargs,
+                                attn_group=attn_group,
+                            )
+                            for layer_name in self._get_attn_metadata_layer_names(attn_group):
+                                per_layer_attn_metadata[layer_name] = attn_metadata
+                    multi_steps_attn_metadata.append(per_layer_attn_metadata)
+                    metadata_events.append(side.record_event())
+            # Keep the cross-stream tensors alive until the next step: the side-
+            # stream-produced metadata tensors are consumed by the draft forwards
+            # on the main stream, so freeing them at the end of this step could
+            # let the caching allocator hand their storage to new main-stream
+            # allocations while the forward kernels still read them.
+            self._mtp_metadata_keepalive = [multi_steps_attn_metadata, chain, used_update_positions]
+            return metadata_events
+
+        # Copy the old attn_metadata and update
+        for draft_index in range(1, self.num_speculative_tokens):
+            per_layer_attn_metadata = dict()
+            if cache_only_groups:
+                common_attn_metadata, primary_metadata = self.attn_update_stack_num_spec_norm(
+                    draft_index,
+                    common_attn_metadata,
+                    batch_size,
+                    num_input_tokens,
+                    used_update_positions,
+                    aclgraph_runtime_mode,
+                    **draft_cp_kwargs,
+                    attn_group=primary_group,
+                )
+                per_layer_attn_metadata = self._build_cache_only_group_next_step_attn_metadata(
+                    common_attn_metadata,
+                    draft_index,
+                    num_input_tokens,
+                    primary_group,
+                    primary_metadata,
+                    cache_only_groups,
+                )
+            else:
+                for attn_group in self.draft_attn_groups:
+                    common_attn_metadata, attn_metadata = self.attn_update_stack_num_spec_norm(
+                        draft_index,
+                        common_attn_metadata,
+                        batch_size,
+                        num_input_tokens,
+                        used_update_positions,
+                        aclgraph_runtime_mode,
+                        **draft_cp_kwargs,
+                        attn_group=attn_group,
+                    )
+                    for layer_name in self._get_attn_metadata_layer_names(attn_group):
+                        per_layer_attn_metadata[layer_name] = attn_metadata
+            multi_steps_attn_metadata.append(per_layer_attn_metadata)
+        return None
 
     def compute_draft_token_ids(
         self,
@@ -1462,6 +1591,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         num_tokens,
         is_prefill=None,
         sampling_metadata: SamplingMetadata | None = None,
+        metadata_events=None,
+        window_events=None,
     ) -> torch.Tensor:
         # Reset cached draft probs from the previous propose call.
         self._last_draft_probs = None
@@ -1533,6 +1664,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         sample_hidden_states = last_hidden_states[token_indices_to_sample]
 
+        if metadata_events:
+            assert window_events is not None
+            window_events[0].record()
         draft_probs_step0: torch.Tensor | None = None
         if getattr(self, "use_dflash2_selector", False):
             # DFlash2 always drafts greedily (probabilistic is rejected in
@@ -1632,6 +1766,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     self.dynamic_spec.update(
                         logits=logits,
                     )
+
+        if metadata_events:
+            torch.npu.current_stream().wait_event(metadata_events[0])
 
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1 or self.parallel_drafting:
@@ -1757,12 +1894,17 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 )
 
             sample_hidden_states = last_hidden_states[token_indices_to_sample]
+            if metadata_events and draft_index + 1 < len(metadata_events):
+                window_events[draft_index + 1].record()
             draft_probs_step: torch.Tensor | None = None
             logits = self.model.compute_logits(sample_hidden_states)
             if lmhead_tp_enable() and num_indices < logits.shape[0]:
                 logits = logits[:num_indices]
                 token_indices_to_sample = token_indices_to_sample[:num_indices]
             draft_token_ids, draft_probs_step = self._sample_draft_from_logits(logits, sampling_metadata)
+
+            if metadata_events and draft_index + 1 < len(metadata_events):
+                torch.npu.current_stream().wait_event(metadata_events[draft_index + 1])
 
             # TODO(wenlong): get more than one token for tree attention
             hidden_states = hidden_states[:batch_size]
@@ -1772,6 +1914,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     draft_probs_list.append(draft_probs_step)
                 else:
                     draft_probs_list = None
+
+        if metadata_events:
+            torch.npu.current_stream().wait_stream(mtp_metadata_stream())
 
         # [batch_size, num_speculative_tokens]
         draft_token_ids = draft_token_ids_tensor.swapaxes(0, 1)
