@@ -4,12 +4,14 @@ Compilation failures may fall back in production. The direct kernel tests
 intentionally do not use that fallback, so compiler/accuracy bugs stay visible.
 """
 
+import logging
 import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from vllm.logger import init_logger
 from vllm.triton_utils import HAS_TRITON
 
 import vllm_ascend.sample.sampler as sampler_module
@@ -148,13 +150,55 @@ def test_compile_failure_falls_back_and_is_not_retried(entry, filters, triton_pa
         patch.object(
             dispatch_module, "apply_top_k_top_p_triton", side_effect=_FakeCompilationError("compiler abort")
         ) as kernel,
-        patch.object(dispatch_module.logger, "warning_once") as warning,
+        patch.object(dispatch_module.logger, "warning", wraps=dispatch_module.logger.warning) as warning,
     ):
         for _ in range(2):
             actual = entry(logits.clone(), k, p)
             assert torch.equal(actual, expected)
     kernel.assert_called_once()
     warning.assert_called_once()
+
+
+@pytest.mark.parametrize("entry", [sampler_module._apply_top_k_top_p_ascend, mrv2.apply_top_k_top_p_npu])
+def test_compile_failure_logs_traceback_with_real_vllm_logger(entry, triton_path):
+    # warning_once does not accept exc_info in either supported vLLM version.
+    # Exercise the real logger API: an unrestricted MagicMock hid this failure.
+    real_logger = init_logger("vllm_ascend.sample.topk_topp_regression")
+    records: list[logging.LogRecord] = []
+
+    class RecordHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    handler = RecordHandler()
+    previous_level = real_logger.level
+    real_logger.setLevel(logging.WARNING)
+    real_logger.addHandler(handler)
+    logits = torch.tensor([[4.0, 3.0, 2.0, 1.0]])
+    k = torch.tensor([2], dtype=torch.int32)
+    error = _FakeCompilationError("compiler abort regression")
+    try:
+        with (
+            patch.object(dispatch_module, "logger", real_logger),
+            patch.object(dispatch_module, "apply_top_k_top_p_triton", side_effect=error) as kernel,
+        ):
+            for _ in range(2):
+                masked = entry(logits.clone(), k, None)
+                assert torch.equal(torch.isfinite(masked), torch.tensor([[True, True, False, False]]))
+    finally:
+        real_logger.removeHandler(handler)
+        real_logger.setLevel(previous_level)
+    kernel.assert_called_once()
+    assert len(records) == 1
+    record = records[0]
+    assert record.levelno == logging.WARNING
+    assert "Using sort-based masking for this specialization" in record.getMessage()
+    assert record.exc_info is not None
+    assert record.exc_info[1] is error
+    assert record.exc_info[2] is not None
+    formatted = logging.Formatter().format(record)
+    assert "Traceback (most recent call last)" in formatted
+    assert "compiler abort regression" in formatted
 
 
 @pytest.mark.parametrize(

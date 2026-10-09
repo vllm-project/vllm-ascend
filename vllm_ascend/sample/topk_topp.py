@@ -48,7 +48,9 @@ class _TopKTopPDispatcher:
                 # logits are still intact. Never swallow runtime/device errors
                 # or assertions, which may leave partially modified logits.
                 self.compilation_failed = True
-                logger.warning_once(
+                # The failed-specialization cache already suppresses repeat
+                # warnings. vLLM's warning_once does not accept exc_info.
+                logger.warning(
                     "[sample/topk_topp] Qrita compilation failed for shape=%s, "
                     "dtype=%s, device=%s, top_k=%s, top_p=%s (%s). "
                     "Using sort-based masking for this specialization.",
