@@ -723,18 +723,18 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         eplb_state = self.router.eplb_state
         if eplb_state is not None:
             eplb_state.record_done_in_mapping = False
-            eplb_state.mapping_valid_tokens = _mapping_valid_token_prefix(self, mc2_mask)
+            eplb_state.mapping_valid_tokens = None
             # Post-router ID rewrites prevent recording final assignments here.
             # Communication modes share the existing valid-prefix contract.
-            eplb_state.record_in_mapping_allowed = (
+            if (
                 self._use_v2_model_runner
-                and eplb_state.mapping_valid_tokens is not None
                 and self.log2phy is None
                 and not getattr(self, "mix_placement", False)
                 and not get_ascend_config().enable_force_eplb
                 and not enable_force_load_balance
                 and eplb_state.local_expert_count > 0
-            )
+            ):
+                eplb_state.mapping_valid_tokens = _mapping_valid_token_prefix(self, mc2_mask)
         topk_weights, topk_ids = self._select_experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
@@ -760,7 +760,6 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             _record_v2_eplb_load(self.router, fused_experts_results)
         if eplb_state is not None:
             eplb_state.record_done_in_mapping = False
-            eplb_state.record_in_mapping_allowed = False
             eplb_state.mapping_valid_tokens = None
 
         if self.dynamic_eplb and _EXTRA_CTX.eplb_heat_collection_status:

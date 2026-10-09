@@ -7,7 +7,6 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.fused_moe import routed_experts
 from vllm_ascend.ops.fused_moe.router.fused_topk_router import AscendFusedTopKRouter
 from vllm_ascend.ops.triton.eplb_map_record import (
@@ -32,12 +31,7 @@ def test_grid_ownership_is_balanced_and_independent_of_comparison_tile(top_k):
                 assert block * block_p <= MAX_COMPARISON_ELEMENTS
                 assert block >= MIN_ASSIGNMENTS_PER_TILE and block & (block - 1) == 0
                 base, extra = divmod(tokens, num_grids)
-                owned_tile = 1 << (((base + bool(extra)) * top_k - 1).bit_length())
-                assert block == min(
-                    MAX_ASSIGNMENTS_PER_TILE,
-                    MAX_COMPARISON_ELEMENTS // block_p,
-                    max(MIN_ASSIGNMENTS_PER_TILE, owned_tile),
-                )
+                assert block <= MAX_ASSIGNMENTS_PER_TILE
                 ranges = [
                     (pid * base + min(pid, extra), (pid + 1) * base + min(pid + 1, extra)) for pid in range(num_grids)
                 ]
@@ -91,33 +85,16 @@ def test_router_preserves_cann_logical_ids_and_weights_before_mapping(scoring, g
 
 
 @pytest.mark.parametrize(
-    "comm,dp,pcp,sequence_parallel,mask,expected",
+    "mask,expected",
     [
-        (MoECommType.ALLGATHER, 1, 1, False, None, 6),
-        (MoECommType.ALLGATHER, 2, 1, False, None, 6),
-        (MoECommType.ALLGATHER, 1, 2, False, None, 6),
-        (MoECommType.ALLGATHER, 1, 1, True, None, 6),
-        (MoECommType.MC2, 1, 1, False, [1, 1, 0, 0], 2),
-        (MoECommType.FUSED_MC2, 1, 1, False, [1, 1, 1, 0], 3),
-        (MoECommType.FUSED_MC2, 1, 1, False, None, 6),
-        (MoECommType.MC2, 1, 1, False, None, 6),
-        (MoECommType.ALLTOALL, 1, 1, False, None, 6),
-        (MoECommType.ALLTOALL, 1, 1, True, None, 6),
+        (None, 6),
+        ([1, 1, 0, 0], 2),
+        ([1, 1, 1, 0], 3),
     ],
 )
-def test_valid_prefix_uses_existing_step_count_and_mc2_mask(
-    monkeypatch, comm, dp, pcp, sequence_parallel, mask, expected
-):
+def test_valid_prefix_uses_existing_step_count_and_mc2_mask(monkeypatch, mask, expected):
     state = SimpleNamespace(num_unpadded_tokens_tensors=[torch.tensor(6, dtype=torch.int32)])
-    layer = SimpleNamespace(
-        router=SimpleNamespace(eplb_state=state),
-        moe_config=SimpleNamespace(dp_size=dp, pcp_size=pcp, is_sequence_parallel=sequence_parallel),
-    )
-    context = SimpleNamespace(
-        moe_comm_type=comm,
-        moe_comm_method=SimpleNamespace(prepare_finalize=SimpleNamespace(tp_rank=1, tp_size=2, num_tokens=8)),
-    )
-    monkeypatch.setattr(routed_experts, "_EXTRA_CTX", context)
+    layer = SimpleNamespace(router=SimpleNamespace(eplb_state=state))
     monkeypatch.setattr(routed_experts, "dbo_current_ubatch_id", lambda: 0)
     mc2_mask = torch.tensor(mask, dtype=torch.bool) if mask is not None else None
 

@@ -44,12 +44,13 @@ PR #17574 (`55b07ac7417b8d6c6d499769ae7cfca15f9613af`) records each valid token'
 - **Differences**:
     - NPU adaptation for performance: one mapping pass also accumulates program-private expert counts, replacing the separate map and downstream record kernels on eligible paths. A second single-writer reduction removes global atomic contention.
     - Integration: the existing Router/CANN TopK output is unchanged. The helper is called at the Ascend EPLB mapping hook; the downstream record is skipped only after mapping-stage recording occurred.
+    - Per-step state: `mapping_valid_tokens=None` selects the original map/downstream-record path; a non-`None` count enables map+record, including a zero count. `record_done_in_mapping` prevents duplicate downstream recording even when the device record flag is false. Both fields are cleared after the step.
 
 ## Test Cases
 
-The NPU test checks exact physical IDs against the existing mapping op and exact cumulative load against an independent valid-token assignment count. It covers E=128/896, K=16, a nonzero local physical range, padding, disabled recording, runtime table/flag/count graph replay, and noncontiguous input. CPU tests cover grouped/ungrouped routing continuity and the mapping-hook call chain. Both integer outputs require exact equality.
+The NPU test checks exact physical IDs against the existing mapping op and exact cumulative load against an independent valid-token assignment count. It covers E=128/896, K=16, a nonzero local physical range, padding, disabled recording, runtime table/flag/count graph replay, and noncontiguous input. CPU tests cover grouped/ungrouped routing continuity and the real forward/mapping-hook call chain with a CPU operator reference, including downstream-record skip, state reset and a subsequent fallback step. Both integer outputs require exact equality.
 
 ```bash
 pytest -sv tests/e2e/pull_request/one_card/test_eplb_map_record_npu.py
-pytest -sv tests/ut/ops/test_eplb_map_record_routing.py tests/ut/patch/platform/test_patch_fused_moe.py
+pytest -sv tests/ut/ops/test_eplb_map_record_routing.py tests/ut/ops/test_fused_moe.py tests/ut/patch/platform/test_patch_fused_moe.py
 ```

@@ -4,6 +4,7 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 
@@ -124,7 +125,8 @@ def test_adapted_router_uses_ascend_mapping_operation():
     )
 
 
-def test_adapted_router_records_at_mapping_without_touching_routing():
+@pytest.mark.parametrize("valid_tokens", [0, 1])
+def test_adapted_router_records_at_mapping_without_touching_routing(valid_tokens):
     router = _Router()
     patch_fused_moe._adapt_eplb_router(router, enable_eplb=True)
     state = router.eplb_state
@@ -134,8 +136,7 @@ def test_adapted_router_records_at_mapping_without_touching_routing():
     state.should_record_tensor = torch.tensor(True)
     state.local_expert_start = 2
     state.local_expert_count = 2
-    state.mapping_valid_tokens = torch.tensor(1, dtype=torch.int32)
-    state.record_in_mapping_allowed = True
+    state.mapping_valid_tokens = torch.tensor(valid_tokens, dtype=torch.int32)
     logical_ids = torch.tensor([[1]], dtype=torch.int32)
     physical_ids = torch.tensor([[2]], dtype=torch.int32)
 

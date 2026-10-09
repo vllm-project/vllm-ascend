@@ -80,9 +80,9 @@ def _ascend_apply_eplb_mapping(self, topk_ids: torch.Tensor) -> torch.Tensor:
     expert_replica_routing_table = eplb_state.expert_replica_routing_table
     if expert_replica_routing_table is None:
         raise RuntimeError("Ascend EPLB expert replica routing table is not initialized.")
-    if eplb_state.record_in_mapping_allowed:
-        valid_tokens = eplb_state.mapping_valid_tokens
-        if valid_tokens is None or eplb_state.should_record_tensor is None or eplb_state.expert_load_view is None:
+    valid_tokens = eplb_state.mapping_valid_tokens
+    if valid_tokens is not None:
+        if eplb_state.should_record_tensor is None or eplb_state.expert_load_view is None:
             raise RuntimeError("Ascend EPLB map+record state is not initialized.")
         physical_ids = eplb_map_and_record(
             topk_ids,
