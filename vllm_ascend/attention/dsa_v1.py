@@ -883,7 +883,13 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             else:
                 seq_lens_cpu = common_attn_metadata.seq_lens.cpu()
             self.common_ratio_to_sas_metadata["seq_lens_cpu"] = seq_lens_cpu
-            input_positions = common_attn_metadata.positions[:num_input_tokens].long()
+            # FULL graphs replay fixed shapes, so cos/sin must span the padded
+            # token count. Other modes consume only real tokens; build at the
+            # actual length so consumers never need to re-slice.
+            num_position_tokens = (
+                num_input_tokens if kwargs.get("full_graph_mode", False) else common_attn_metadata.num_actual_tokens
+            )
+            input_positions = common_attn_metadata.positions[:num_position_tokens].long()
             need_use_rope_cache = can_use_rope_cache and self.num_prefills == 0
             cos, sin = get_cos_and_sin_dsa(
                 input_positions,

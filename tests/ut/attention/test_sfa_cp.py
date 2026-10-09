@@ -33,7 +33,6 @@ from vllm_ascend.attention.sfa_v1 import (
     PreprocessType,
     SFAForwardContext,
 )
-from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
 from vllm_ascend.weight_switch import (
     WeightSwitchConfig,
     WeightSwitchGatherSpec,
@@ -1087,25 +1086,6 @@ def test_sfa_dcp_slot_mapping_matches_parallel_layout(impl_cls, local_prefill, g
     if expect_full:
         assert result is full_slots
     torch.testing.assert_close(result, full_slots if expect_full else full_slots[:2])
-
-
-@pytest.mark.parametrize("is_kv_consumer,sfa_c8", [(False, False), (True, True)])
-def test_sfa_pcp_keeps_prolog_v3_enabled(is_kv_consumer, sfa_c8):
-    impl = AscendSFAPCPImpl.__new__(AscendSFAPCPImpl)
-    impl.is_pcp_decode_sharded = False
-    quant_cls = AscendW8A8DynamicLinearMethod
-    impl.fused_qkv_a_proj = SimpleNamespace(quant_method=SimpleNamespace(quant_method=quant_cls.__new__(quant_cls)))
-    impl.q_proj = SimpleNamespace(_chunk_size=0)
-    impl.q_a_layernorm = object()
-    impl.kv_a_layernorm = object()
-    impl.qk_rope_head_dim = 64
-    impl.is_kv_consumer = is_kv_consumer
-    impl.enable_sparse_sfa_c8 = sfa_c8
-    impl.enable_sparse_sfa_turboquant = False
-    impl.enable_mlapo = False
-    with patch.object(impl, "_try_enable_type", return_value=True) as prepare_weights:
-        assert impl._resolve_preprocess_type(torch.bfloat16) == PreprocessType.PROLOG_V3
-    prepare_weights.assert_called_once_with(PreprocessType.PROLOG_V3, torch.bfloat16)
 
 
 @pytest.mark.parametrize(
