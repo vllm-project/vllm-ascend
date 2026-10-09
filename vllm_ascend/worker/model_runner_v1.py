@@ -22,7 +22,7 @@ import math
 import sys
 import time
 from collections import defaultdict, deque
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import copy, deepcopy
 from dataclasses import dataclass, replace
@@ -356,6 +356,80 @@ class ExecuteModelState(NamedTuple):
     ec_connector_output: "ECConnectorOutput | None"
     cudagraph_stats: CUDAGraphStat | None
     batch_desc: BatchDescriptor
+
+
+def _iter_kv_tensors(kv_cache: Any) -> Iterator[torch.Tensor]:
+    """Yield every tensor nested inside a kv_cache container."""
+    if isinstance(kv_cache, torch.Tensor):
+        yield kv_cache
+    elif isinstance(kv_cache, (list, tuple)):
+        for item in kv_cache:
+            yield from _iter_kv_tensors(item)
+    elif isinstance(kv_cache, dict):
+        for item in kv_cache.values():
+            yield from _iter_kv_tensors(item)
+
+
+def _zero_tensor(t: torch.Tensor) -> None:
+    """Zero a tensor in place without allocating a same-size buffer.
+
+    fp8 storages may not implement zero_(), and view(dtype) requires the
+    last dimension to be contiguous. The fallback must never materialize a
+    zeros_like() copy: doubling a resident buffer OOMed a nearly-full card
+    in CI (a2 mamba SSM state, 6.13 GiB with only 4.32 GiB free).
+    """
+    try:
+        t.zero_()
+        return
+    except RuntimeError:
+        pass
+    try:
+        # fp8 storages may not implement zero_(); reinterpret as int8.
+        t.view(torch.int8).zero_()
+        return
+    except RuntimeError:
+        pass
+    logger.warning(
+        "zeroing kv buffer of shape=%s dtype=%s device=%s via scalar "
+        "broadcast because zero_() and view(int8) both failed",
+        tuple(t.shape), t.dtype, t.device)
+    try:
+        # Broadcast a scalar zero instead of allocating a zeros_like() copy.
+        t.copy_(torch.zeros((), dtype=t.dtype, device=t.device))
+        return
+    except RuntimeError:
+        pass
+    if t.dim() == 0:
+        raise RuntimeError(f"cannot zero kv buffer of dtype {t.dtype} on {t.device}")
+    # Last resort: recurse over dim-0 slices, which may accept the fast
+    # paths above even when the whole tensor does not.
+    for i in range(t.shape[0]):
+        _zero_tensor(t[i])
+
+
+def _zero_static_kv_buffers(runner) -> None:
+    """Zero every KV-cache / recurrent-state tensor in static_forward_context.
+
+    Fix for the GLM-5.3-Flash C8 accuracy collapse: FULL_DECODE_ONLY capture
+    runs dummy decodes that really execute the KDA/SFA write paths over the
+    persistent buffers. On this model the KDA conv/recurrent state caches
+    share backing storage with the SFA fp8 KV pool (per 4-layer group the
+    KDA state tensors and the next SFA pool have the same data_ptr), so the
+    bf16 garbage written by causal_conv1d/recurrent_kda lands in pool blocks
+    0-8; reinterpreted as fp8 e4m3 those bytes include NaN encodings
+    (0x7F/0xFF), which the SFA forward then reads into the residual stream.
+    Nothing resets the buffers after capture, so the first real request
+    reads poisoned state and collapses into emitting '!' forever. Zeroing
+    right after capture_model() restores the logically-empty state the
+    engine assumes at startup. It runs exactly once per startup, outside
+    any captured graph, so graph replay and steady-state inference are
+    unaffected.
+    """
+    compilation_config = getattr(runner, "compilation_config", None)
+    ctx = getattr(compilation_config, "static_forward_context", None) or {}
+    for mod in ctx.values():
+        for tensor in _iter_kv_tensors(getattr(mod, "kv_cache", None)):
+            _zero_tensor(tensor)
 
 
 class NPUModelRunner(GPUModelRunner):
@@ -6392,6 +6466,8 @@ class NPUModelRunner(GPUModelRunner):
                 cuda_graph_size = GPUModelRunner.capture_model(self)
         finally:
             self._engram_capture_active = False
+
+        _zero_static_kv_buffers(self)
 
         mgr = self.encoder_cudagraph_manager
         if mgr is not None and self.update_stream is not None:
