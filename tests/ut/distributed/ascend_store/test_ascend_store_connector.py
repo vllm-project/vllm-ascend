@@ -699,10 +699,17 @@ class TestLookupDispatch(unittest.TestCase):
             dispatch_lookup_request,
         )
 
+        def decode_lookup_frame(frames: list[bytes]) -> list[int] | list[str]:
+            if frames == [b"groups"]:
+                groups: list[int] = [0]
+                return groups
+            hashes: list[str] = ["hash"]
+            return hashes
+
         worker = MagicMock()
         worker.lookup_scheduler.return_value = 8
         decoder = MagicMock()
-        decoder.decode.side_effect = lambda frames: [0] if frames == [b"groups"] else ["hash"]
+        decoder.decode.side_effect = decode_lookup_frame
         frames = [
             b"lookup",
             (64).to_bytes(4, "big"),
