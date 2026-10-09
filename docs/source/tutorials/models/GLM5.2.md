@@ -41,12 +41,54 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 ## 4 Installation
 
-- You can use our official docker image to run GLM-5.2 directly.
-- [KV Cache Pool (Ascend Store) Deployment Guide](https://docs.vllm.ai/projects/ascend/zh-cn/latest/user_guide/feature_guide/kv_pool.html)
+### 4.1 Docker Image Installation
+
+- You can use our official docker image to run GLM-5.2 and GLM-5.3. The hardware-specific container commands below follow the GLM-5.3-Flash guide.
+
+Before launching a container, replace the image tag with a compatible, tested build for your target model and hardware. The documentation-wide image tag is not a model compatibility guarantee. Use the same image digest on all nodes.
+
+For A5 PD deployment, the host must already have the platform-generated HCCL/HIXL configuration in `/etc/hccl_rootinfo.json` and `/etc/hixlep/`, as well as the device and driver paths mounted below. Do not substitute an empty directory for the communication configuration.
+
+=== "950DT Products"
+
+    Start the docker image on each node.
+
+    ```shell
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5
+    export NAME=vllm-ascend
+
+    docker run --rm \
+    --name $NAME \
+    --net=host \
+    --shm-size=1g \
+    --device /dev/davinci0 \
+    --device /dev/davinci1 \
+    --device /dev/davinci2 \
+    --device /dev/davinci3 \
+    --device /dev/davinci4 \
+    --device /dev/davinci5 \
+    --device /dev/davinci6 \
+    --device /dev/davinci7 \
+    --device /dev/davinci_manager \
+    --device /dev/hisi_hdc \
+    --device /dev/ummu \
+    --device /dev/uburma \
+    -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+    -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /etc/hccl_rootinfo.json:/etc/hccl_rootinfo.json \
+    -v /etc/hixlep/:/etc/hixlep/ \
+    -v /root/.cache:/root/.cache \
+    -v /usr/local/sbin:/usr/local/sbin \
+    -v /usr/local/dcmi:/usr/local/dcmi \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+    -v /usr/bin/urma_admin:/usr/bin/urma_admin \
+    -v /lib/route.conf:/lib/route.conf \
+    -itd $IMAGE bash
+    ```
 
 === "A3 series"
 
-    Start the docker image on your each node.
+    Start the docker image on each node.
 
     ```shell
 
@@ -90,37 +132,62 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 === "A2 series"
 
-    Start the docker image on each of your nodes.
+    Start the docker image on each node.
 
     ```shell
 
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+    export NAME=vllm-ascend
+
     docker run --rm \
-        --name vllm-ascend \
-        --shm-size=1g \
-        --net=host \
-        --device /dev/davinci0 \
-        --device /dev/davinci1 \
-        --device /dev/davinci2 \
-        --device /dev/davinci3 \
-        --device /dev/davinci4 \
-        --device /dev/davinci5 \
-        --device /dev/davinci6 \
-        --device /dev/davinci7 \
-        --device /dev/davinci_manager \
-        --device /dev/devmm_svm \
-        --device /dev/hisi_hdc \
-        -v /usr/local/dcmi:/usr/local/dcmi \
-        -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
-        -v /root/.cache:/root/.cache \
-        -it $IMAGE bash
+    --name $NAME \
+    --net=host \
+    --shm-size=500g \
+    --privileged \
+    --device /dev/davinci0 \
+    --device /dev/davinci1 \
+    --device /dev/davinci2 \
+    --device /dev/davinci3 \
+    --device /dev/davinci4 \
+    --device /dev/davinci5 \
+    --device /dev/davinci6 \
+    --device /dev/davinci7 \
+    --device /dev/davinci_manager \
+    --device /dev/devmm_svm \
+    --device /dev/hisi_hdc \
+    -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+    -v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware \
+    -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi \
+    -v /usr/local/sbin:/usr/local/sbin \
+    -v /etc/hccn.conf:/etc/hccn.conf:ro \
+    -v /root/.cache:/root/.cache \
+    -it $IMAGE bash
     ```
 
-If you want to deploy multi-node environment, you need to set up environment on each node.
+After starting the detached A5 container, enter it with `docker exec -it vllm-ascend bash`. Run the deployment commands inside the container on every node.
+
+### 4.2 Version Compatibility
+
+| Configuration | Version boundary |
+| --- | --- |
+| Commands on this page | Follow the current source configuration schema. Record the vLLM and vLLM Ascend versions and image digest used for validation; a documentation build is not an end-to-end deployment test. |
+| GLM-5.2 v0.26.0rc1/rc2 | Use the matching release documentation and image. Do not combine legacy additional-config fields with current commands. |
+| GLM-5.3 / A5 quantization | Requires a build supporting the selected model and checkpoint format; GLM-5.2 results do not establish GLM-5.3 compatibility. |
+
+In the current schema, Mul-Add fusion is configured as `ascend_compilation_config.fuse_muls_add`, not a top-level `fuse_muls_add` key. The examples retain this setting in the nested configuration. Do not copy the removed `enable_reduce_sample` field from older examples. KV-cache and indexer dtypes must match the checkpoint and runtime; do not copy A3 INT8 settings to A5 MXFP checkpoints.
+
+Capture runtime versions inside each container before testing:
+
+```shell
+python -m pip show vllm vllm-ascend
+vllm serve --help
+```
+
+Capture the image identity on the host (use the container name from the commands above):
+
+```shell
+docker inspect vllm-ascend
+```
 
 ## 5 Online Service Deployment {: #5-online-service-deployment }
 
@@ -373,7 +440,7 @@ If you want to deploy a multi-node environment, first verify the data-plane netw
     --tensor-parallel-size 8 \
     --enable-expert-parallel \
     --seed 1024 \
-    --served-model-name glm-52 \
+    --served-model-name glm \
     --tool-call-parser glm47 \
     --reasoning-parser glm45 \
     --enable-auto-tool-choice \
@@ -420,7 +487,7 @@ If you want to deploy a multi-node environment, first verify the data-plane netw
     --tensor-parallel-size 8 \
     --enable-expert-parallel \
     --seed 1024 \
-    --served-model-name glm-52 \
+    --served-model-name glm \
     --tool-call-parser glm47 \
     --reasoning-parser glm45 \
     --enable-auto-tool-choice \
@@ -462,7 +529,7 @@ If you want to deploy a multi-node environment, first verify the data-plane netw
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
     --max_model_len 40000 \
     --max-num-batched-tokens 4096 \
-    --served-model-name glm-52 \
+    --served-model-name glm \
     --seed 1024 \
     --gpu-memory-utilization 0.95 \
     --api-server-count 1 \
@@ -504,7 +571,7 @@ If you want to deploy a multi-node environment, first verify the data-plane netw
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
     --max_model_len 40000 \
     --max-num-batched-tokens 4096 \
-    --served-model-name glm-52 \
+    --served-model-name glm \
     --seed 1024 \
     --gpu-memory-utilization 0.95 \
     --max-num-seqs 16 \
@@ -1084,7 +1151,7 @@ In the PD disaggregation scenario, Mooncake is used as the KV cache transfer con
             # Ensure the model path matches the directory recorded during download
             vllm serve <MODEL_PATH> \
                 --host 0.0.0.0 \
-                --port $2 \
+                --port 9081 \
                 --tensor-parallel-size 16 \
                 --enable-expert-parallel \
                 --pipeline-parallel-size 2 \
@@ -1095,11 +1162,11 @@ In the PD disaggregation scenario, Mooncake is used as the KV cache transfer con
                 --node-rank 0 \
                 --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp","enforce_eager":true}' \
                 --seed 1024 \
-                --served-model-name glm-5 \
+                --served-model-name glm \
                 --max-model-len 202752 \
                 --safetensors-load-strategy 'prefetch' \
                 --attention_config.indexer_kv_dtype int8 \
-                --additional-config '{"fuse_muls_add":true, "enable_dsa_cp":true,  "enable_flashcomm1": true, "enable_fused_mc2": 1}' \
+                --additional-config '{"enable_dsa_cp":true,"enable_flashcomm1":true,"enable_fused_mc2":1,"ascend_compilation_config":{"fuse_muls_add":true}}' \
                 --max-num-batched-tokens 16384 \
                 --trust-remote-code \
                 --enable-prefix-caching \
@@ -1147,7 +1214,7 @@ In the PD disaggregation scenario, Mooncake is used as the KV cache transfer con
             # Ensure the model path matches the directory recorded during download
             vllm serve <MODEL_PATH> \
                 --host 0.0.0.0 \
-                --port $2 \
+                --port 9081 \
                 --tensor-parallel-size 16 \
                 --enable-expert-parallel \
                 --pipeline-parallel-size 2 \
@@ -1158,11 +1225,11 @@ In the PD disaggregation scenario, Mooncake is used as the KV cache transfer con
                 --node-rank 1 \
                 --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp","enforce_eager":true}' \
                 --seed 1024 \
-                --served-model-name glm-5 \
+                --served-model-name glm \
                 --max-model-len 202752 \
                 --safetensors-load-strategy 'prefetch' \
                 --attention_config.indexer_kv_dtype int8 \
-                --additional-config '{"fuse_muls_add":true, "enable_dsa_cp":true,  "enable_flashcomm1": true, "enable_fused_mc2": 1}' \
+                --additional-config '{"enable_dsa_cp":true,"enable_flashcomm1":true,"enable_fused_mc2":1,"ascend_compilation_config":{"fuse_muls_add":true}}' \
                 --max-num-batched-tokens 16384 \
                 --trust-remote-code \
                 --enable-prefix-caching \
@@ -1217,7 +1284,7 @@ In the PD disaggregation scenario, Mooncake is used as the KV cache transfer con
                 --tensor-parallel-size $7 \
                 --enable-expert-parallel \
                 --seed 1024 \
-                --served-model-name glm-5 \
+                --served-model-name glm \
                 --max-model-len 202752 \
                 --safetensors-load-strategy 'prefetch' \
                 --max-num-batched-tokens 192 \
@@ -1225,7 +1292,7 @@ In the PD disaggregation scenario, Mooncake is used as the KV cache transfer con
                 --kv-cache-dtype int8 \
                 --attention_config.indexer_kv_dtype int8 \
                 --speculative-config '{"num_speculative_tokens": 5,  "method":"deepseek_mtp","enforce_eager":true}' \
-                --additional-config '{"fuse_muls_add":true, "recompute_scheduler_enable":true, "enable_fused_mc2": 1, "enable_mlapo": true}' \
+                --additional-config '{"recompute_scheduler_enable":true,"enable_fused_mc2":1,"enable_mlapo":true,"ascend_compilation_config":{"fuse_muls_add":true}}' \
                 --trust-remote-code \
                 --max-num-seqs 32 \
                 --gpu-memory-utilization 0.90 \
@@ -1278,7 +1345,7 @@ In the PD disaggregation scenario, Mooncake is used as the KV cache transfer con
                 --tensor-parallel-size $7 \
                 --enable-expert-parallel \
                 --seed 1024 \
-                --served-model-name glm-5 \
+                --served-model-name glm \
                 --max-model-len 202752 \
                 --safetensors-load-strategy 'prefetch' \
                 --max-num-batched-tokens 192 \
@@ -1286,7 +1353,7 @@ In the PD disaggregation scenario, Mooncake is used as the KV cache transfer con
                 --kv-cache-dtype int8 \
                 --attention_config.indexer_kv_dtype int8 \
                 --speculative-config '{"num_speculative_tokens": 5,  "method":"deepseek_mtp","enforce_eager":true}' \
-                --additional-config '{"fuse_muls_add":true, "recompute_scheduler_enable":true, "enable_fused_mc2": 1, "enable_mlapo": true}' \
+                --additional-config '{"recompute_scheduler_enable":true,"enable_fused_mc2":1,"enable_mlapo":true,"ascend_compilation_config":{"fuse_muls_add":true}}' \
                 --trust-remote-code \
                 --max-num-seqs 32 \
                 --gpu-memory-utilization 0.90 \
@@ -1380,7 +1447,7 @@ In the PD disaggregation scenario, Mooncake is used as the KV cache transfer con
     - `enable_flashcomm1`: Enables FlashComm optimization to reduce communication and computation overhead on prefill nodes.
     - `--enforce-eager`: The prefill side runs in eager mode (the `FULL_DECODE_ONLY` graph capture is used on the decode side instead).
     - `--speculative-config '{"num_speculative_tokens": 1, ...}'`: Minimal MTP speculation during prefill (decode nodes use a higher count, see below).
-    - `fuse_muls_add` / `enable_dsa_cp` / `--kv-cache-dtype int8` / `--attention_config.indexer_kv_dtype int8`: Mul-Add fusion, DSA context parallelism for long-context prefill, the SFA/LI sparse attention optimizations and the reshape optimization of the C8 quantized model.
+    - `ascend_compilation_config.fuse_muls_add` / `enable_dsa_cp` / `--kv-cache-dtype int8` / `--attention_config.indexer_kv_dtype int8`: Mul-Add fusion, DSA context parallelism for long-context prefill, the SFA/LI sparse attention optimizations and the reshape optimization of the C8 quantized model.
 
     **Decode node-specific configurations (d0/d1):**
 
@@ -1441,7 +1508,7 @@ In the PD disaggregation scenario, Mooncake is used as the KV cache transfer con
         --enable-prefix-caching \
         --seed 1024 \
         --enable-chunked-prefill \
-        --served-model-name glm-5 \
+        --served-model-name glm \
         --max-model-len 200000 \
         --max-num-batched-tokens 8192 \
         --trust-remote-code \
@@ -1488,7 +1555,7 @@ In the PD disaggregation scenario, Mooncake is used as the KV cache transfer con
         }' \
         --kv-cache-dtype int8 \
         --attention_config.indexer_kv_dtype int8 \
-        --additional-config '{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false}, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_mc2_hierarchy_comm": false, "enable_cpu_binding": true, "recompute_scheduler_enable": false, "enable_mlapo": true}' \
+        --additional-config '{"enable_flashcomm1":true,"enable_dsa_cp":true,"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false,"fuse_muls_add":true},"multistream_overlap_shared_expert":true,"enable_mc2_hierarchy_comm":false,"enable_cpu_binding":true,"recompute_scheduler_enable":false,"enable_mlapo":true}' \
         --profiler-config \
         '{
             "profiler": "torch",
@@ -1530,7 +1597,7 @@ In the PD disaggregation scenario, Mooncake is used as the KV cache transfer con
         --enable-expert-parallel \
         --enable-prefix-caching \
         --seed 1024 \
-        --served-model-name glm-5 \
+        --served-model-name glm \
         --max-model-len 200000 \
         --max-num-batched-tokens 256 \
         --trust-remote-code \
@@ -1587,7 +1654,7 @@ In the PD disaggregation scenario, Mooncake is used as the KV cache transfer con
         }' \
         --kv-cache-dtype int8 \
         --attention_config.indexer_kv_dtype int8 \
-        --additional-config '{"enable_flashcomm1": false, "enable_dsa_cp": false, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false}, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_mc2_hierarchy_comm": false, "enable_cpu_binding": true, "recompute_scheduler_enable": true, "enable_mlapo": true}' \
+        --additional-config '{"enable_flashcomm1":false,"enable_dsa_cp":false,"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false,"fuse_muls_add":true},"multistream_overlap_shared_expert":true,"enable_mc2_hierarchy_comm":false,"enable_cpu_binding":true,"recompute_scheduler_enable":true,"enable_mlapo":true}' \
         --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp", "enforce_eager":true}'
     ```
 
@@ -1671,7 +1738,7 @@ vllm serve <MODEL_PATH> \
   --seed 1024 \
   --host 0.0.0.0 \
   --port 8000 \
-  --served-model-name glm-52 \
+  --served-model-name glm \
   --max-model-len 1024000 \
   --max-num-batched-tokens 16384 \
   --gpu-memory-utilization 0.80 \
@@ -1686,7 +1753,7 @@ vllm serve <MODEL_PATH> \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [4, 16, 128]}' \
   --kv-cache-dtype int8 \
   --attention_config.indexer_kv_dtype int8 \
-  --additional-config '{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false}, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_mc2_hierarchy_comm": false, "enable_cpu_binding": true, "recompute_scheduler_enable": false, "weight_nz_mode": 1}' \
+  --additional-config '{"enable_flashcomm1":true,"enable_dsa_cp":true,"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false,"fuse_muls_add":true},"multistream_overlap_shared_expert":true,"enable_mc2_hierarchy_comm":false,"enable_cpu_binding":true,"recompute_scheduler_enable":false,"weight_nz_mode":1}' \
   --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
   --quantization ascend \
   --enable-expert-parallel \
@@ -1720,7 +1787,7 @@ vllm serve <MODEL_PATH> \
   --seed 1024 \
   --host 0.0.0.0 \
   --port 8000 \
-  --served-model-name glm-52 \
+  --served-model-name glm \
   --max-model-len 1024000 \
   --max-num-batched-tokens 16384 \
   --gpu-memory-utilization 0.75 \
@@ -1739,7 +1806,7 @@ vllm serve <MODEL_PATH> \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
   --kv-cache-dtype int8 \
   --attention_config.indexer_kv_dtype int8 \
-  --additional-config '{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false}, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_mc2_hierarchy_comm": false, "enable_cpu_binding": true, "recompute_scheduler_enable": false, "weight_nz_mode": 1}' \
+  --additional-config '{"enable_flashcomm1":true,"enable_dsa_cp":true,"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false,"fuse_muls_add":true},"multistream_overlap_shared_expert":true,"enable_mc2_hierarchy_comm":false,"enable_cpu_binding":true,"recompute_scheduler_enable":false,"weight_nz_mode":1}' \
   --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
   --quantization ascend \
   --enable-expert-parallel \
@@ -1889,12 +1956,12 @@ prepare the script `run_dp_template.sh` on each node.
         --cp-kv-cache-interleave-size 128 \
         --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp","enforce_eager":true}' \
         --seed 1024 \
-        --served-model-name glm-5 \
+        --served-model-name glm \
         --max-model-len 1048576 \
         --safetensors-load-strategy 'prefetch' \
         --kv-cache-dtype int8 \
         --attention_config.indexer_kv_dtype int8 \
-        --additional-config '{"fuse_muls_add":true, "multistream_overlap_shared_expert": true, "enable_dsa_cp":true, "c8_enable_reshape_optim":true, "mega_moe_max_tokens": 8192, "enable_flashcomm1": true, "enable_fused_mc2": 1}' \
+        --additional-config '{"multistream_overlap_shared_expert":true,"enable_dsa_cp":true,"c8_enable_reshape_optim":true,"mega_moe_max_tokens":8192,"enable_flashcomm1":true,"enable_fused_mc2":1,"ascend_compilation_config":{"fuse_muls_add":true}}' \
         --max-num-batched-tokens 8192 \
         --trust-remote-code \
         --enable-prefix-caching \
@@ -1953,12 +2020,12 @@ prepare the script `run_dp_template.sh` on each node.
         --cp-kv-cache-interleave-size 128 \
         --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp","enforce_eager":true}' \
         --seed 1024 \
-        --served-model-name glm-5 \
+        --served-model-name glm \
         --max-model-len 1048576 \
         --safetensors-load-strategy 'prefetch' \
         --kv-cache-dtype int8 \
         --attention_config.indexer_kv_dtype int8 \
-        --additional-config '{"fuse_muls_add":true, "multistream_overlap_shared_expert": true, "c8_enable_reshape_optim":true, "mega_moe_max_tokens": 8192, "enable_flashcomm1": true, "enable_fused_mc2": 1}' \
+        --additional-config '{"multistream_overlap_shared_expert":true,"c8_enable_reshape_optim":true,"mega_moe_max_tokens":8192,"enable_flashcomm1":true,"enable_fused_mc2":1,"ascend_compilation_config":{"fuse_muls_add":true}}' \
         --max-num-batched-tokens 8192 \
         --trust-remote-code \
         --enable-prefix-caching \
@@ -2015,7 +2082,7 @@ prepare the script `run_dp_template.sh` on each node.
         --decode-context-parallel-size 8 \
         --cp-kv-cache-interleave-size 128 \
         --seed 1024 \
-        --served-model-name glm-5 \
+        --served-model-name glm \
         --max-model-len 1048576 \
         --safetensors-load-strategy 'prefetch' \
         --max-num-batched-tokens 192 \
@@ -2023,7 +2090,7 @@ prepare the script `run_dp_template.sh` on each node.
         --speculative-config '{"num_speculative_tokens": 5,  "method":"deepseek_mtp","enforce_eager":true}' \
         --kv-cache-dtype int8 \
         --attention_config.indexer_kv_dtype int8 \
-        --additional-config '{"fuse_muls_add":true, "recompute_scheduler_enable":true, "multistream_overlap_shared_expert":true, "enable_fused_mc2": 1, "enable_mlapo": true}' \
+        --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true,"enable_fused_mc2":1,"enable_mlapo":true,"ascend_compilation_config":{"fuse_muls_add":true}}' \
         --trust-remote-code \
         --max-num-seqs 32 \
         --gpu-memory-utilization 0.90 \
@@ -2078,7 +2145,7 @@ prepare the script `run_dp_template.sh` on each node.
         --decode-context-parallel-size 8 \
         --cp-kv-cache-interleave-size 128 \
         --seed 1024 \
-        --served-model-name glm-5 \
+        --served-model-name glm \
         --max-model-len 1048576 \
         --safetensors-load-strategy 'prefetch' \
         --max-num-batched-tokens 192 \
@@ -2086,7 +2153,7 @@ prepare the script `run_dp_template.sh` on each node.
         --attention_config.indexer_kv_dtype int8 \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --speculative-config '{"num_speculative_tokens": 5,  "method":"deepseek_mtp","enforce_eager":true}' \
-        --additional-config '{"fuse_muls_add":true, "recompute_scheduler_enable":true, "multistream_overlap_shared_expert":true, "enable_fused_mc2": 1, "enable_mlapo": true}' \
+        --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true,"enable_fused_mc2":1,"enable_mlapo":true,"ascend_compilation_config":{"fuse_muls_add":true}}' \
         --trust-remote-code \
         --max-num-seqs 32 \
         --gpu-memory-utilization 0.90 \
@@ -2183,54 +2250,46 @@ Please refer to [envs.py](https://github.com/vllm-project/vllm-ascend/blob/main/
 
 ## 6 Functional Verification
 
-Once your server is started, you can query the model with input prompts:
+All serving commands on this page use `--served-model-name glm`, including GLM-5.3. For colocated deployment, use the API-facing node and its configured HTTP port. For PD deployment, use the proxy host and port `8000`; do not send client requests to a headless worker.
 
 ```shell
-curl http://<node0_ip>:<port>/v1/completions \
+# Replace with the API server URL, or http://<proxy_ip>:8000 for PD.
+BASE_URL="http://<node0_ip>:<port>"
+curl --fail-with-body -sS -i "$BASE_URL/v1/completions" \
     -H "Content-Type: application/json" \
     -d '{
-        "model": "glm-52",
+        "model": "glm",
         "prompt": "The future of AI is",
-        "max_completion_tokens": 50,
+        "max_tokens": 50,
         "temperature": 0
     }'
 ```
 
-Expected Result:
-
-The service returns HTTP 200 OK. The JSON response contains the `choices` field with the generated text, along with usage statistics:
+Expected result: HTTP 200 with a JSON `choices` array containing generated text and `usage` statistics. The following is an illustrative response, not a captured test result; generated text, IDs, timing, token counts, and optional fields vary.
 
 ```json
 {
-    "id": "chatcmpl-90e6de0720743e72",
+    "id": "cmpl-example",
     "object": "text_completion",
-    "created": 1784891079,
-    "model": "glm-52",
+    "created": 0,
+    "model": "glm",
     "choices": [
         {
             "index": 0,
-            "text": "here,and it's not just about chatbots. It's about AI agents",
-            "logprobs":null,
-            "finish_reason":"length",
-            "stop_reason":null,
-            "token_ids":null,
-            "prompt_logprobs":null,
-            "prompt_token_ids":null,
-            "routed_experts":null
+            "text": " an open question.",
+            "logprobs": null,
+            "finish_reason": "stop"
         }
     ],
-    "service_tier":null,
-    "system fingerprint":"vllm-0.26.0-tp16-ep-2a76151d",
-    "usage":{
-        "prompt tokens :5,
-        "total tokens :21,
-        "completion tokens":16,
-        "prompt tokens details :null
-        },
-        "ky transfer params":null
+    "usage": {
+        "prompt_tokens": 5,
+        "completion_tokens": 4,
+        "total_tokens": 9
     }
 }
 ```
+
+An HTTP error, startup failure, or empty/invalid response is not a successful verification. Retain the startup command, runtime versions, image digest, server log, and actual HTTP response with the result.
 
 ## 7 Accuracy Evaluation
 
