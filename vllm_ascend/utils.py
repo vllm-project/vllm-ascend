@@ -87,6 +87,15 @@ _CUSTOM_OP_BASE_DIR = (
 _IS_ROT_WEIGHT_USED = None
 
 
+def is_gqa_pcp_dcp_config(model_config: Any, parallel_config: Any) -> bool:
+    """Whether a GQA/MQA model enables both PCP and DCP."""
+    return (
+        not model_config.use_mla
+        and parallel_config.prefill_context_parallel_size > 1
+        and parallel_config.decode_context_parallel_size > 1
+    )
+
+
 def extract_dsv4_layer_index(config: Any, layer_name: str) -> int:
     """Extract DSV4 index for config per-layer arrays.
 
