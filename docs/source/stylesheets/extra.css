@@ -112,8 +112,8 @@
 /* Match Material's clipboard action: always visible, with quiet theme colors. */
 .table-fullscreen-open {
   position: absolute;
-  top: 0.4rem;
-  right: 0.4rem;
+  top: -0.2rem;
+  right: -0.2rem;
   z-index: 1;
   width: 1.5rem;
   height: 1.5rem;
