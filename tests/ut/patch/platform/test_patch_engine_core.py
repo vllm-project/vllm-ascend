@@ -11,9 +11,8 @@ What is guarded here (everything reachable from CPU UT):
 * ``_OriginalRunEngineCore`` stashes the pristine upstream ``run_engine_core``
   -- the genuine original the wrapper must delegate to, regardless of import
   ordering;
-* ``_patch_dp_engine_core_proc`` selects ``DyntraLBDPEngineCoreProc`` when
-  dyntra-lb is enabled (and does not consult balance), else
-  ``BalanceDPEngineCoreProc`` when balance is enabled, else leaves the
+* ``_patch_dp_engine_core_proc`` selects the matching DP engine-core class
+  directly from ``scheduler_config.scheduler_cls``, else leaves the
   module-global ``DPEngineCoreProc`` untouched (the deferred-swap invariant
   the balance patch depends on);
 * ``_run_engine_core_patch_func`` initializes the ascend config and delegates
@@ -28,17 +27,20 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import vllm.v1.engine.core as _engine_core_mod
+from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine.core import DPEngineCoreProc as _UpstreamDPEngineCoreProc
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.engine.core import EngineCoreProc as _UpstreamEngineCoreProc
 
 import vllm_ascend.patch.platform.patch_engine_core as _engine_core_patch
+from vllm_ascend.core.balance_scheduler import BalanceScheduler
+from vllm_ascend.core.dyntra_lb_scheduler import DyntraLBScheduler
 from vllm_ascend.patch.platform.patch_balance_schedule import BalanceDPEngineCoreProc
 from vllm_ascend.patch.platform.patch_dyntra_lb_core import DyntraLBDPEngineCoreProc
 
 
-def _dyntra_config(enabled: bool, enable_diagnostics: bool = True):
-    return SimpleNamespace(enabled=enabled, enable_diagnostics=enable_diagnostics)
+def _vllm_config(scheduler_cls):
+    return SimpleNamespace(scheduler_config=SimpleNamespace(get_scheduler_cls=lambda: scheduler_cls))
 
 
 # ---------------------------------------------------------------------------
@@ -105,42 +107,35 @@ def test_engine_core_init_runs_profiling_for_supported_scheduler(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_dp_proc_swap_prefers_dyntra_over_balance(monkeypatch):
-    monkeypatch.setattr(_engine_core_patch, "_get_dyntra_lb_config", lambda _c: _dyntra_config(True))
-    monkeypatch.setattr(
-        _engine_core_patch,
-        "_balance_scheduling_enabled",
-        MagicMock(side_effect=AssertionError("balance must not be consulted when dyntra is enabled")),
-    )
+def test_dp_proc_swap_uses_dyntra_scheduler_qualname(monkeypatch):
     print_mock = MagicMock()
     monkeypatch.setattr(_engine_core_patch, "dyntra_print_rank_0", print_mock)
+    monkeypatch.setattr(_engine_core_patch, "diagnostics_enabled", lambda _c: True)
     # Register restore of the module-global swap the code under test performs.
     monkeypatch.setattr(_engine_core_mod, "DPEngineCoreProc", _engine_core_mod.DPEngineCoreProc)
 
-    _engine_core_patch._patch_dp_engine_core_proc(vllm_config=object(), dp_rank=2)
+    vllm_config = _vllm_config(DyntraLBScheduler)
+    _engine_core_patch._patch_dp_engine_core_proc(vllm_config=vllm_config, dp_rank=2)
 
     assert _engine_core_mod.DPEngineCoreProc is DyntraLBDPEngineCoreProc
     print_mock.assert_called_once_with("Enable DyntraLB DP load balancing.", 2, True)
 
 
-def test_dp_proc_swap_uses_balance_when_dyntra_disabled(monkeypatch):
-    monkeypatch.setattr(_engine_core_patch, "_get_dyntra_lb_config", lambda _c: _dyntra_config(False))
-    monkeypatch.setattr(_engine_core_patch, "_balance_scheduling_enabled", lambda _c: True)
+def test_dp_proc_swap_uses_balance_scheduler_qualname(monkeypatch):
     monkeypatch.setattr(_engine_core_mod, "DPEngineCoreProc", _engine_core_mod.DPEngineCoreProc)
 
-    _engine_core_patch._patch_dp_engine_core_proc(vllm_config=object(), dp_rank=0)
+    vllm_config = _vllm_config(BalanceScheduler)
+    _engine_core_patch._patch_dp_engine_core_proc(vllm_config=vllm_config, dp_rank=0)
 
     assert _engine_core_mod.DPEngineCoreProc is BalanceDPEngineCoreProc
 
 
-def test_dp_proc_swap_leaves_pristine_when_both_disabled(monkeypatch):
-    """Balance off must mean no involvement: the module-global class stays
-    untouched so PD-disaggregated recompute etc. keeps the upstream proc."""
-    monkeypatch.setattr(_engine_core_patch, "_get_dyntra_lb_config", lambda _c: _dyntra_config(False))
-    monkeypatch.setattr(_engine_core_patch, "_balance_scheduling_enabled", lambda _c: False)
+def test_dp_proc_swap_leaves_pristine_for_other_scheduler(monkeypatch):
+    """Other scheduler classes must keep the upstream DP engine core."""
     monkeypatch.setattr(_engine_core_mod, "DPEngineCoreProc", _engine_core_mod.DPEngineCoreProc)
 
-    _engine_core_patch._patch_dp_engine_core_proc(vllm_config=object(), dp_rank=0)
+    vllm_config = _vllm_config(Scheduler)
+    _engine_core_patch._patch_dp_engine_core_proc(vllm_config=vllm_config, dp_rank=0)
 
     assert _engine_core_mod.DPEngineCoreProc is _UpstreamDPEngineCoreProc
 

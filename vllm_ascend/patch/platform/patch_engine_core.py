@@ -19,8 +19,10 @@ from vllm.logger import logger
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
 
 from vllm_ascend.ascend_config import init_ascend_config
-from vllm_ascend.patch.platform.patch_balance_schedule import BalanceDPEngineCoreProc, _balance_scheduling_enabled
-from vllm_ascend.patch.platform.patch_dyntra_lb_core import DyntraLBDPEngineCoreProc, _get_dyntra_lb_config
+from vllm_ascend.core.balance_scheduler import BalanceScheduler
+from vllm_ascend.core.dyntra_lb_scheduler import DyntraLBPolicyMixin, diagnostics_enabled
+from vllm_ascend.patch.platform.patch_balance_schedule import BalanceDPEngineCoreProc
+from vllm_ascend.patch.platform.patch_dyntra_lb_core import DyntraLBDPEngineCoreProc
 from vllm_ascend.patch.platform.patch_dyntra_lb_core import _print_rank_0 as dyntra_print_rank_0
 from vllm_ascend.patch.platform.patch_pp_mtp import _patch_engine_core as pp_mtp_patch_post_step
 
@@ -38,15 +40,15 @@ def _patched_engine_core_init(self, *args, **kwargs):
 
 
 def _patch_dp_engine_core_proc(vllm_config, dp_rank: int):
-    dyntra_lb_config = _get_dyntra_lb_config(vllm_config)
-    if dyntra_lb_config.enabled:
+    scheduler_cls = vllm_config.scheduler_config.get_scheduler_cls()
+    if issubclass(scheduler_cls, DyntraLBPolicyMixin):
         dyntra_print_rank_0(
             "Enable DyntraLB DP load balancing.",
             dp_rank,
-            dyntra_lb_config.enable_diagnostics,
+            diagnostics_enabled(vllm_config),
         )
         _engine_core_mod.DPEngineCoreProc = DyntraLBDPEngineCoreProc
-    elif _balance_scheduling_enabled(vllm_config):
+    elif issubclass(scheduler_cls, BalanceScheduler):
         _engine_core_mod.DPEngineCoreProc = BalanceDPEngineCoreProc
 
 

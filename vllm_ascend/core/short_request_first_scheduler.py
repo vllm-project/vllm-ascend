@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable, Iterable, Iterator
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 from vllm.logger import logger
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
@@ -30,6 +30,9 @@ from vllm.v1.core.sched.request_queue import (
 )
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.request import Request, RequestStatus
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 
 class ShortRequestFirstRequestQueue(RequestQueue):
@@ -367,6 +370,8 @@ def install_short_request_first_waiting_queue(
 
 class _ShortRequestFirstSchedulerMixin:
     """Install the ShortRequestFirst queue on a vLLM scheduler."""
+
+    vllm_config: VllmConfig
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
