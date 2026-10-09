@@ -19,7 +19,7 @@ env_common: &env_common
   HCCL_OP_EXPANSION_MODE: "AIV"
   PYTHONHASHSEED: "0"
   SERVER_PORT: "${PORT}"
-  LD_PRELOAD: "/usr/lib/aarch64-linux-gnu/libjemalloc.so.2"
+  LD_PRELOAD: "/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD"
   VLLM_PREFIX_CACHE_RETENTION_INTERVAL: "4096"
 
 routing:
