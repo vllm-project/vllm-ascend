@@ -17,6 +17,7 @@ from vllm_ascend.models.kimi_k3 import (
 )
 from vllm_ascend.models.kimi_k3_dspark import (
     AscendK3DSparkForCausalLM,
+    AscendK3DSparkModel,
 )
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
 
@@ -106,6 +107,39 @@ def test_k3_dspark_reports_draft_attention_causality():
 
     model.config = SimpleNamespace()
     assert model.get_draft_attn_causal() == [False, False, False]
+
+
+def test_k3_dspark_context_writer_splits_fused_mla_cache(monkeypatch):
+    model = AscendK3DSparkModel.__new__(AscendK3DSparkModel)
+    nn.Module.__init__(model)
+
+    fused_cache = torch.arange(36, dtype=torch.float32).reshape(2, 3, 1, 6)
+    attn = SimpleNamespace(
+        fused_qkv_a_proj=MagicMock(return_value=(torch.randn(3, 8),)),
+        q_lora_rank=2,
+        kv_cache=fused_cache,
+        impl=SimpleNamespace(kv_lora_rank=4, exec_kv_prefill=MagicMock()),
+    )
+    model.layers = [SimpleNamespace(self_attn=attn)]
+    monkeypatch.setattr(
+        "vllm_ascend.models.kimi_k3_dspark.get_cos_and_sin_mla",
+        lambda positions: (torch.ones(3, 2), torch.zeros(3, 2)),
+    )
+
+    model.precompute_and_store_context_kv(
+        context_states=torch.randn(3, 8),
+        context_positions=torch.tensor([0, 1, 2]),
+        context_slot_mapping=torch.tensor([0, 1, 2]),
+    )
+
+    cache = attn.impl.exec_kv_prefill.call_args.args[3]
+    assert isinstance(cache, tuple)
+    assert cache[0].shape == (2, 3, 1, 4)
+    assert cache[1].shape == (2, 3, 1, 2)
+    assert cache[0].untyped_storage() is fused_cache.untyped_storage()
+    assert cache[1].untyped_storage() is fused_cache.untyped_storage()
+    torch.testing.assert_close(cache[0], fused_cache[..., :4])
+    torch.testing.assert_close(cache[1], fused_cache[..., 4:])
 
 
 def test_kimi_mixed_kda_gate_weights_use_upstream_packed_loader(monkeypatch):
