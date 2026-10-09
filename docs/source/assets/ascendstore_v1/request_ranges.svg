@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="572" viewBox="0 0 1120 572" role="img" aria-labelledby="ascendstore-v1-request-ranges-title ascendstore-v1-request-ranges-desc">
+<title id="ascendstore-v1-request-ranges-title">一次 Prefill 的加载、计算与保存范围</title>
+<desc id="ascendstore-v1-request-ranges-desc">输入长25，块和hash粒度均为4。本地前缀到4，Lookup命中到8，采用后加载4到8，计算8到18，本轮普通Store计划为8到16。Store条带表示计划，不代表实际写入已经完成。</desc>
+<defs><marker id="ascendstore-v1-request-ranges-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#526d7a"/></marker></defs>
+<style>text{font-family:Geist,"PingFang SC","Microsoft YaHei",sans-serif;fill:#223036}.sub{fill:#526d7a}</style>
+<rect width="1120" height="572" fill="#ffffff"/>
+<defs><pattern id="ascendstore-v1-tail" width="8" height="8" patternUnits="userSpaceOnUse"><path d="M0,8 L8,0" stroke="#4c2abe" stroke-opacity="0.25"/></pattern></defs>
+<text x="32" y="44" font-size="28" font-weight="600" text-anchor="start" style="fill:#223036">同一请求上的范围</text>
+<text x="32" y="80" font-size="18" font-weight="400" text-anchor="start" style="fill:#526d7a">输入 25 token · 同步 Bulk · 单 FullAttention group · TP=PP=PCP=DCP=1 · 块与 hash 粒度均为 4</text>
+<text x="32" y="124" font-size="20" font-weight="400" text-anchor="start" style="fill:#223036">Lookup：[4,24) → 命中到 8；vLLM 确认采用并分配目标块。</text>
+<text x="304.0" y="174" font-size="18" font-weight="400" text-anchor="middle" style="fill:#526d7a">0</text>
+<line x1="304.0" y1="184" x2="304.0" y2="452" stroke="#c8d4d9"/>
+<text x="425.6" y="174" font-size="18" font-weight="400" text-anchor="middle" style="fill:#526d7a">4</text>
+<line x1="425.6" y1="184" x2="425.6" y2="452" stroke="#c8d4d9"/>
+<text x="547.2" y="174" font-size="18" font-weight="400" text-anchor="middle" style="fill:#526d7a">8</text>
+<line x1="547.2" y1="184" x2="547.2" y2="452" stroke="#c8d4d9"/>
+<text x="668.8" y="174" font-size="18" font-weight="400" text-anchor="middle" style="fill:#526d7a">12</text>
+<line x1="668.8" y1="184" x2="668.8" y2="452" stroke="#c8d4d9"/>
+<text x="790.4" y="174" font-size="18" font-weight="400" text-anchor="middle" style="fill:#526d7a">16</text>
+<line x1="790.4" y1="184" x2="790.4" y2="452" stroke="#c8d4d9"/>
+<text x="851.1999999999999" y="174" font-size="18" font-weight="400" text-anchor="middle" style="fill:#526d7a">18</text>
+<line x1="851.1999999999999" y1="184" x2="851.1999999999999" y2="452" stroke="#c8d4d9"/>
+<text x="1033.6" y="174" font-size="18" font-weight="400" text-anchor="middle" style="fill:#526d7a">24</text>
+<line x1="1033.6" y1="184" x2="1033.6" y2="452" stroke="#c8d4d9"/>
+<text x="1064.0" y="174" font-size="18" font-weight="400" text-anchor="middle" style="fill:#526d7a">25</text>
+<line x1="1064.0" y1="184" x2="1064.0" y2="452" stroke="#c8d4d9"/>
+<text x="32" y="225" font-size="22" font-weight="600" text-anchor="start" style="fill:#223036">本地前缀</text>
+<line x1="304" y1="218" x2="1064" y2="218" stroke="#c8d4d9"/>
+<rect x="304.0" y="200" width="121.6" height="36" rx="4" fill="#eaf0f2" stroke="#526d7a"/>
+<text x="364.8" y="225" font-size="20" font-weight="600" text-anchor="middle" style="fill:#526d7a">[0,4)</text>
+<text x="32" y="293" font-size="22" font-weight="600" text-anchor="start" style="fill:#223036">Load</text>
+<line x1="304" y1="286" x2="1064" y2="286" stroke="#c8d4d9"/>
+<rect x="425.6" y="268" width="121.6" height="36" rx="4" fill="#eef8fb" stroke="#2a9cbe"/>
+<text x="486.4" y="293" font-size="20" font-weight="600" text-anchor="middle" style="fill:#2a9cbe">[4,8)</text>
+<text x="32" y="361" font-size="22" font-weight="600" text-anchor="start" style="fill:#223036">模型计算</text>
+<line x1="304" y1="354" x2="1064" y2="354" stroke="#c8d4d9"/>
+<rect x="547.2" y="336" width="304.0" height="36" rx="4" fill="#f3f0fc" stroke="#4c2abe"/>
+<text x="699.2" y="361" font-size="20" font-weight="600" text-anchor="middle" style="fill:#4c2abe">[8,18)</text>
+<text x="32" y="429" font-size="22" font-weight="600" text-anchor="start" style="fill:#223036">计划 Store</text>
+<line x1="304" y1="422" x2="1064" y2="422" stroke="#c8d4d9"/>
+<rect x="547.2" y="404" width="243.2" height="36" rx="4" fill="#eef2fc" stroke="#2a52be"/>
+<text x="668.8" y="429" font-size="20" font-weight="600" text-anchor="middle" style="fill:#2a52be">[8,16)</text>
+<rect x="790.4" y="336" width="60.8" height="36" rx="0" fill="url(#ascendstore-v1-tail)" stroke="none"/>
+<text x="32" y="494" font-size="20" font-weight="400" text-anchor="start" style="fill:#223036">本轮保存到 16；[16,18) 尚未形成整块，后续再规划。</text>
+<text x="32" y="538" font-size="18" font-weight="400" text-anchor="start" style="fill:#526d7a">横轴按 token 数绘制；Store 是本轮计划，实际写入结果另行处理。</text>
+</svg>

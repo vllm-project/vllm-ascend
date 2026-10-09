@@ -1,0 +1,93 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="1500" viewBox="0 0 1120 1500" role="img" aria-labelledby="ascendstore-v1-request-flow-title ascendstore-v1-request-flow-desc">
+<title id="ascendstore-v1-request-flow-title">一次请求的查询、规划、传输与回执</title>
+<desc id="ascendstore-v1-request-flow-desc">同步 Bulk 单 Worker 例子。Lookup 查询4到24并返回8，vLLM确认采用及目标分配，Scheduler规划Load4到8与Store8到16并取得job17来源引用。Worker同步加载后模型计算8到18，再记录来源事件提交后台Store。Worker回调等待来源事件后访问Backend，后续fence确认读源结束，释放计数经vLLM汇聚回到Scheduler。图按交接顺序绘制，不表示耗时。</desc>
+<defs><marker id="ascendstore-v1-request-flow-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#526a76"/></marker></defs>
+<style>text{font-family:Geist,"PingFang SC","Microsoft YaHei",sans-serif;fill:#223036}</style>
+<rect width="1120" height="1500" fill="white"/>
+<text x="32" y="44" font-size="28" font-weight="600" text-anchor="start" style="fill:#223036">一次请求怎样经过两侧</text>
+<text x="32" y="80" font-size="18" font-weight="400" text-anchor="start" style="fill:#223036">输入 25 token · 同步 Bulk · 单 FullAttention group · TP=PP=PCP=DCP=1 · B=h=4</text>
+<text x="32" y="112" font-size="18" font-weight="400" text-anchor="start" style="fill:#526a76">前提：Load 成功，Store 按同步约定返回且读源结束已确认；只画交接顺序。</text>
+<rect x="40" y="132" width="336" height="1288" rx="8" fill="#f8fafb" stroke="#9cafd8"/>
+<rect x="40" y="132" width="336" height="64" rx="8" fill="#edf1fb" stroke="#9cafd8"/>
+<text x="208" y="156" font-size="21" font-weight="600" text-anchor="middle" style="fill:#223036">Scheduler 侧</text>
+<text x="208" y="184" font-size="18" font-weight="400" text-anchor="middle" style="fill:#526a76">请求规划与来源引用</text>
+<rect x="392" y="132" width="336" height="1288" rx="8" fill="#f8fafb" stroke="#afa0d1"/>
+<rect x="392" y="132" width="336" height="64" rx="8" fill="#f2effb" stroke="#afa0d1"/>
+<text x="560" y="156" font-size="21" font-weight="600" text-anchor="middle" style="fill:#223036">vLLM／模型执行</text>
+<text x="560" y="184" font-size="18" font-weight="400" text-anchor="middle" style="fill:#526a76">采用、分配与本轮计算</text>
+<rect x="744" y="132" width="336" height="1288" rx="8" fill="#f8fafb" stroke="#8dbcc9"/>
+<rect x="744" y="132" width="336" height="64" rx="8" fill="#ecf7fa" stroke="#8dbcc9"/>
+<text x="912" y="156" font-size="21" font-weight="600" text-anchor="middle" style="fill:#223036">Worker 侧</text>
+<text x="912" y="184" font-size="18" font-weight="400" text-anchor="middle" style="fill:#526a76">调用线程与后台回调</text>
+<path d="M368,244 H752" fill="none" stroke="#526a76" stroke-width="1.5" marker-end="url(#ascendstore-v1-request-flow-arrow)"/>
+<path d="M752,308 H368" fill="none" stroke="#526a76" stroke-width="1.5" stroke-dasharray="5,4" marker-end="url(#ascendstore-v1-request-flow-arrow)"/>
+<path d="M208,336 V352 Q208,360 216,360 H552 Q560,360 560,368 V384" fill="none" stroke="#526a76" stroke-width="1.5" marker-end="url(#ascendstore-v1-request-flow-arrow)"/>
+<path d="M560,488 V504 Q560,512 552,512 H216 Q208,512 208,520 V536" fill="none" stroke="#526a76" stroke-width="1.5" marker-end="url(#ascendstore-v1-request-flow-arrow)"/>
+<path d="M208,676 V692 Q208,700 216,700 H904 Q912,700 912,708 V724" fill="none" stroke="#526a76" stroke-width="1.5" marker-end="url(#ascendstore-v1-request-flow-arrow)"/>
+<path d="M912,836 V852 Q912,860 904,860 H568 Q560,860 560,868 V884" fill="none" stroke="#526a76" stroke-width="1.5" marker-end="url(#ascendstore-v1-request-flow-arrow)"/>
+<path d="M560,996 V1012 Q560,1020 568,1020 H904 Q912,1020 912,1028 V1044" fill="none" stroke="#526a76" stroke-width="1.5" marker-end="url(#ascendstore-v1-request-flow-arrow)"/>
+<path d="M912,1216 V1240 Q912,1248 904,1248 H216 Q208,1248 208,1256 V1280" fill="none" stroke="#526a76" stroke-width="1.5" marker-end="url(#ascendstore-v1-request-flow-arrow)"/>
+<rect x="500.0" y="212" width="120" height="24" fill="white"/>
+<text x="560" y="230" font-size="18" font-weight="400" text-anchor="middle" style="fill:#526a76">Lookup 请求</text>
+<rect x="504.0" y="276" width="112" height="24" fill="white"/>
+<text x="560" y="294" font-size="18" font-weight="400" text-anchor="middle" style="fill:#526a76">共同终点 8</text>
+<rect x="512.0" y="668" width="96" height="24" fill="white"/>
+<text x="560" y="686" font-size="18" font-weight="400" text-anchor="middle" style="fill:#526a76">每步命令</text>
+<rect x="604.0" y="828" width="112" height="24" fill="white"/>
+<text x="660" y="846" font-size="18" font-weight="400" text-anchor="middle" style="fill:#526a76">Load 结果</text>
+<rect x="476.0" y="1216" width="168" height="24" fill="white"/>
+<text x="560" y="1234" font-size="18" font-weight="400" text-anchor="middle" style="fill:#526a76">经 vLLM 汇聚回流</text>
+<g data-node="lookup-request" data-x="48" data-y="204" data-w="320" data-h="132">
+<rect x="48" y="204" width="320" height="132" rx="8" fill="white" stroke="#c8d4d9"/>
+<text x="64" y="236" font-size="21" font-weight="600" text-anchor="start" style="fill:#223036">① 查询外部前缀</text>
+<text x="64" y="264" font-size="18" font-weight="400" text-anchor="start" style="fill:#526a76">本地到 4；查询 [4,24)</text>
+<text x="64" y="292" font-size="18" font-weight="400" text-anchor="start" style="fill:#526a76">接收终点 8，报告新增 4</text>
+</g>
+<g data-node="lookup-worker" data-x="752" data-y="204" data-w="320" data-h="132">
+<rect x="752" y="204" width="320" height="132" rx="8" fill="white" stroke="#c8d4d9"/>
+<text x="768" y="236" font-size="21" font-weight="600" text-anchor="start" style="fill:#223036">② Lookup 服务查询</text>
+<text x="768" y="264" font-size="18" font-weight="400" text-anchor="start" style="fill:#526a76">按 key 观察 Backend 对象</text>
+<text x="768" y="292" font-size="18" font-weight="400" text-anchor="start" style="fill:#526a76">Reachability 返回终点 8</text>
+</g>
+<g data-node="allocation" data-x="400" data-y="384" data-w="320" data-h="104">
+<rect x="400" y="384" width="320" height="104" rx="8" fill="white" stroke="#c8d4d9"/>
+<text x="416" y="416" font-size="21" font-weight="600" text-anchor="start" style="fill:#223036">③ 确认采用与分配</text>
+<text x="416" y="444" font-size="18" font-weight="400" text-anchor="start" style="fill:#526a76">采用 4 个外部 token</text>
+<text x="416" y="472" font-size="18" font-weight="400" text-anchor="start" style="fill:#526a76">分配表 [5,9,14,18,22]</text>
+</g>
+<g data-node="commands" data-x="48" data-y="536" data-w="320" data-h="140">
+<rect x="48" y="536" width="320" height="140" rx="8" fill="#eef2fc" stroke="#2a52be"/>
+<text x="64" y="568" font-size="21" font-weight="600" text-anchor="start" style="fill:#223036">④ 形成命令与 job</text>
+<text x="64" y="596" font-size="18" font-weight="400" text-anchor="start" style="fill:#526a76">Load [4,8)，Store [8,16)</text>
+<text x="64" y="624" font-size="18" font-weight="400" text-anchor="start" style="fill:#526a76">job17 取得额外来源引用</text>
+<text x="64" y="652" font-size="18" font-weight="400" text-anchor="start" style="fill:#526a76">已规划的保存终点推进到 16</text>
+</g>
+<g data-node="load" data-x="752" data-y="724" data-w="320" data-h="112">
+<rect x="752" y="724" width="320" height="112" rx="8" fill="#eef8fb" stroke="#2a9cbe"/>
+<text x="768" y="756" font-size="21" font-weight="600" text-anchor="start" style="fill:#223036">⑤ 执行同步 Load</text>
+<text x="768" y="784" font-size="18" font-weight="400" text-anchor="start" style="fill:#526a76">逻辑块 1 → 物理 block 9</text>
+<text x="768" y="812" font-size="18" font-weight="400" text-anchor="start" style="fill:#526a76">恢复 [4,8)，检查加载结果</text>
+</g>
+<g data-node="compute" data-x="400" data-y="884" data-w="320" data-h="112">
+<rect x="400" y="884" width="320" height="112" rx="8" fill="#f3f0fc" stroke="#4c2abe"/>
+<text x="416" y="916" font-size="21" font-weight="600" text-anchor="start" style="fill:#223036">⑥ 执行本轮模型计算</text>
+<text x="416" y="944" font-size="18" font-weight="400" text-anchor="start" style="fill:#526a76">计算 [8,18)，产生待存 KV</text>
+<text x="416" y="972" font-size="18" font-weight="400" text-anchor="start" style="fill:#526a76">提交后 NPU 可能仍在执行</text>
+</g>
+<g data-node="store" data-x="752" data-y="1044" data-w="320" data-h="172">
+<rect x="752" y="1044" width="320" height="172" rx="8" fill="#eef2fc" stroke="#2a52be"/>
+<text x="768" y="1076" font-size="21" font-weight="600" text-anchor="start" style="fill:#223036">⑦ 后台保存与结果检查</text>
+<text x="768" y="1104" font-size="18" font-weight="400" text-anchor="start" style="fill:#526a76">记录 event，经 Timeline 提交</text>
+<text x="768" y="1132" font-size="18" font-weight="400" text-anchor="start" style="fill:#526a76">先整理候选，读源前等 event</text>
+<text x="768" y="1160" font-size="18" font-weight="400" text-anchor="start" style="fill:#526a76">调用 Backend 保存选中对象</text>
+<text x="768" y="1188" font-size="18" font-weight="400" text-anchor="start" style="fill:#526a76">fence 确认后回传计数 1</text>
+</g>
+<g data-node="source-release" data-x="48" data-y="1280" data-w="320" data-h="112">
+<rect x="48" y="1280" width="320" height="112" rx="8" fill="white" stroke="#c8d4d9"/>
+<text x="64" y="1312" font-size="21" font-weight="600" text-anchor="start" style="fill:#223036">⑧ 处理来源释放回执</text>
+<text x="64" y="1340" font-size="18" font-weight="400" text-anchor="start" style="fill:#526a76">vLLM 汇聚后交回计数 1</text>
+<text x="64" y="1368" font-size="18" font-weight="400" text-anchor="start" style="fill:#526a76">收齐回执，归还 job17 引用</text>
+</g>
+<line x1="32" y1="1452" x2="1088" y2="1452" stroke="#c8d4d9"/>
+<text x="32" y="1478" font-size="18" font-weight="400" text-anchor="start" style="fill:#526a76">实线表示后续交接，虚线表示 Lookup 返回；命令只携带描述，KV 由 Worker 调用 Backend 读写。</text>
+</svg>
