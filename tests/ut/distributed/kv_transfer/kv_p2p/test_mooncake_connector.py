@@ -2092,12 +2092,22 @@ def test_wire_transfer_failure_does_not_poison_next_request(wire_transfer_contra
     def record_transfer_error(message, request_id, error):
         failures.append(("transfer", request_id, error, sys.exc_info()[2]))
 
-    def record_cleanup_error(message, error):
+    def record_cleanup_error(message, *args):
+        # DONE_RECVING retries log the exception as the last format argument.
+        error = args[-1] if args else message
         failures.append(("cleanup", None, error, sys.exc_info()[2]))
+
+    def make_failed_retry_socket(*args, **kwargs):
+        retry_socket = MagicMock(spec=Socket)
+        retry_socket.recv.return_value = done_ack
+        return retry_socket
 
     # Observe logging at its output boundary, not the transfer/cleanup helpers.
     monkeypatch.setattr(module.logger, "exception", record_transfer_error)
     monkeypatch.setattr(module.logger, "warning", record_cleanup_error)
+    # A rejected ACK is retried on a fresh socket. Keep those attempts in-process.
+    monkeypatch.setattr(module, "make_zmq_socket", make_failed_retry_socket)
+    monkeypatch.setattr(module.time, "sleep", lambda *_args, **_kwargs: None)
     engine.batch_transfer_sync_read.side_effect = [-1, 0]
     for request_id, block_id, expected_errors in [("a", 1, {1}), ("b", 2, set())]:
         if request_id == "b" and done_ack != b"ACK":
@@ -2141,7 +2151,9 @@ def test_wire_transfer_failure_does_not_poison_next_request(wire_transfer_contra
     assert isinstance(failures[0][2], RuntimeError)
     assert str(failures[0][2]) == "Mooncake transfer failed, ret: -1"
     assert failures[0][3] is not None
-    assert [failure[0] for failure in failures] == (["transfer"] if done_ack == b"ACK" else ["transfer", "cleanup"])
+    assert [failure[0] for failure in failures] == (
+        ["transfer"] if done_ack == b"ACK" else ["transfer", "cleanup", "cleanup", "cleanup"]
+    )
     if done_ack != b"ACK":
         assert "NOT-ACK" in str(failures[1][2])
         assert failures[1][3] is not None
