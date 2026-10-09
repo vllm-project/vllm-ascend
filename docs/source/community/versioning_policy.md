@@ -141,6 +141,14 @@ vLLM Ascend includes two branches: main and dev.
 
 Commits should typically be merged into the main branch first, and only then backported to the dev branch, to reduce maintenance costs as much as possible.
 
+### Release branch version baseline
+
+New release branches need a reachable version tag so that nightly package versions follow the release family. For `releases/vX.Y.Z` and `releases/vX.Y.Zrc`, the **Seed release branch version tag** workflow creates `vX.Y.Zrc0` at the branch creation commit when no tag for that version is already reachable. Later commits receive the usual setuptools-scm development version and commit hash.
+
+The baseline is created with the repository's `GITHUB_TOKEN`, so its push does not start the code/wheel publication workflows. Existing release tags are preserved. A conflicting version tag outside the branch's history makes the job fail for maintainer inspection.
+
+Check that the tagging job has completed before the first nightly image build. If the branch was created by another workflow using `GITHUB_TOKEN`, or from an older commit without this workflow, run **Seed release branch version tag** through `workflow_dispatch` and supply the release branch name. The manual run uses the branch's current tip when the baseline is missing.
+
 ### Maintenance branch and EOL
 
 The table below lists branch states.
