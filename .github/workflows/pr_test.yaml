@@ -411,11 +411,10 @@ jobs:
       source: ${{ steps.decide.outputs.mode }}
       has_tests_a5: ${{ steps.scope-a5.outputs.has_tests || steps.noop-a5.outputs.has_tests }}
       test_groups_a5: ${{ steps.scope-a5.outputs.test_groups || steps.noop-a5.outputs.test_groups }}
-      # TEMP(a2-dual-runner): dual-pool A2 outputs. A2B4 remains generated so
-      # it can be re-enabled by restoring its matrix entry below.
+      # TEMP(a2-dual-runner): dual-pool A2 outputs.
       has_tests_a2: ${{ steps.filter-a2.outputs.has_tests_a2 }}
       test_groups_a2b1: ${{ steps.filter-a2.outputs.test_groups_a2b1 }}
-      test_groups_a2b4: ${{ steps.filter-a2.outputs.test_groups_a2b4 }}
+      test_groups_a2b1b3: ${{ steps.filter-a2.outputs.test_groups_a2b1b3 }}
     steps:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v7
@@ -578,21 +577,21 @@ jobs:
           PY
 
       # TEMP(a2-dual-runner): keep only the A2 (one_card) groups from the
-      # full-suite selection and duplicate them for the two runner pools.
-      # A2B4 groups remain generated while their matrix entry is temporarily
-      # disabled below. a3 / 310p / cpu groups are dropped here.
+      # full-suite selection and duplicate them for the two runner pools, so
+      # the identical A2 suite runs once per pool. a3 / 310p / cpu groups are
+      # dropped here.
       - name: Build dual A2 runner test groups
         id: filter-a2
         env:
           TEST_GROUPS_JSON: ${{ steps.scope-all.outputs.test_groups }}
           # One-card labels, mirroring the a2b3 convention for one_card tests.
           A2B1_RUNNER_LABEL: linux-aarch64-a2b1-1-hk-001
-          A2B4_RUNNER_LABEL: linux-aarch64-a2b4-1-hk-001
+          A2B1B3_RUNNER_LABEL: linux-aarch64-a2b1b3-1-hk-001
         run: |
           python3 .github/workflows/scripts/a2_dual_runner_groups.py \
             --test-groups-json "$TEST_GROUPS_JSON" \
             --a2b1-runner-label "$A2B1_RUNNER_LABEL" \
-            --a2b4-runner-label "$A2B4_RUNNER_LABEL"
+            --a2b1b3-runner-label "$A2B1B3_RUNNER_LABEL"
 
   prepare-csrc-cache:
     needs:
@@ -675,9 +674,9 @@ jobs:
       base_ref: ${{ github.base_ref }}
       test_groups: ${{ needs.select-tests.outputs.test_groups_a5 }}
 
-  # TEMP(a2-dual-runner): retain the dual-runner matrix structure, but only
-  # schedule A2B1 for now. A2B4's 32 GiB HBM is insufficient for the full
-  # one-card suite; uncomment its include entry when it is needed again.
+  # TEMP(a2-dual-runner): the identical A2 (one_card) suite runs once per
+  # runner pool via this matrix. Each pool receives its own 7-bucket test
+  # groups produced by the filter-a2 step in select-tests.
   run-selected-tests-a2:
     needs:
       - pre-commit
@@ -699,12 +698,10 @@ jobs:
             vllm_version: ${{ needs.pre-commit.outputs.main_commit }}
             vllm_version_short: ${{ needs.pre-commit.outputs.main_commit_short }}
             test_groups: ${{ needs.select-tests.outputs.test_groups_a2b1 }}
-          # Temporarily disabled: A2B4 has only 32 GiB HBM and OOMs on the
-          # full one-card suite. Keep this entry for quick re-enablement.
-          # - runner_pool: a2b4
-          #   vllm_version: ${{ needs.pre-commit.outputs.main_commit }}
-          #   vllm_version_short: ${{ needs.pre-commit.outputs.main_commit_short }}
-          #   test_groups: ${{ needs.select-tests.outputs.test_groups_a2b4 }}
+          - runner_pool: a2b1b3
+            vllm_version: ${{ needs.pre-commit.outputs.main_commit }}
+            vllm_version_short: ${{ needs.pre-commit.outputs.main_commit_short }}
+            test_groups: ${{ needs.select-tests.outputs.test_groups_a2b1b3 }}
     uses: ./.github/workflows/_selected_tests.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
@@ -735,7 +732,7 @@ jobs:
           SELECT_TESTS_RESULT="${{ needs.select-tests.result }}"
           A2_TESTS_RESULT="${{ needs.run-selected-tests-a2.result }}"
 
-          echo "=== CI Gate Summary (temporary A2 runner validation) ==="
+          echo "=== CI Gate Summary (temporary A2 dual-runner validation) ==="
           echo "pre-commit: ${PRE_COMMIT_RESULT}"
           echo "select-tests: ${SELECT_TESTS_RESULT}"
           echo "has_tests_a2: ${HAS_TESTS_A2}"
@@ -758,7 +755,7 @@ jobs:
 
           if [ "${HAS_TESTS_A2}" = "true" ] && [ "${A2_TESTS_RESULT}" != "success" ]; then
             echo "::error::run-selected-tests-a2 did not succeed (result: ${A2_TESTS_RESULT})."
-            echo "::error::Open the failed run-selected-tests-a2 matrix job(s) above for details."
+            echo "::error::Open the failed run-selected-tests-a2 matrix job(s) above (one per runner pool) for details."
             exit 1
           fi
 

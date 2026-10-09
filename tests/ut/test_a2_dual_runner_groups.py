@@ -36,7 +36,7 @@ _SCRIPT_PATH = _REPO_ROOT / ".github" / "workflows" / "scripts" / "a2_dual_runne
 _SELECT_TESTS_PATH = _REPO_ROOT / ".github" / "workflows" / "scripts" / "select_tests.py"
 
 A2B1_LABEL = "linux-aarch64-a2b1-1-hk-001"
-A2B4_LABEL = "linux-aarch64-a2b4-1-hk-001"
+A2B1B3_LABEL = "linux-aarch64-a2b1b3-1-hk-001"
 BUCKET_COUNT = 7
 
 
@@ -111,7 +111,7 @@ class TestRewriteRunner:
             _make_group("a2", "linux-aarch64-a2b3-1", partition=f"{i}-{BUCKET_COUNT}")
             for i in range(1, BUCKET_COUNT + 1)
         ]
-        rewritten = dual.rewrite_runner(groups, A2B4_LABEL, "a2b4")
+        rewritten = dual.rewrite_runner(groups, A2B1B3_LABEL, "a2b1b3")
         assert len(rewritten) == BUCKET_COUNT
         for original, new in zip(groups, rewritten):
             assert new["partition"] == original["partition"]
@@ -145,8 +145,8 @@ class TestMain:
                 json.dumps(groups),
                 "--a2b1-runner-label",
                 A2B1_LABEL,
-                "--a2b4-runner-label",
-                A2B4_LABEL,
+                "--a2b1b3-runner-label",
+                A2B1B3_LABEL,
             ]
         )
         assert exit_code == 0
@@ -158,13 +158,13 @@ class TestMain:
 
         assert outputs["has_tests_a2"] == "true"
         b1_groups = json.loads(outputs["test_groups_a2b1"])
-        b4_groups = json.loads(outputs["test_groups_a2b4"])
+        b1b3_groups = json.loads(outputs["test_groups_a2b1b3"])
         # Only the a2 group survived, once per pool.
-        assert len(b1_groups) == len(b4_groups) == 1
+        assert len(b1_groups) == len(b1b3_groups) == 1
         assert b1_groups[0]["runner"] == A2B1_LABEL
-        assert b4_groups[0]["runner"] == A2B4_LABEL
+        assert b1b3_groups[0]["runner"] == A2B1B3_LABEL
         assert b1_groups[0]["partition_name"].endswith("-a2b1")
-        assert b4_groups[0]["partition_name"].endswith("-a2b4")
+        assert b1b3_groups[0]["partition_name"].endswith("-a2b1b3")
         # a3 cache target must not leak into the a2-only cache list.
         assert json.loads(outputs["csrc_cache_target_ids"]) == ["a2-arm64-ubuntu"]
 
@@ -179,8 +179,8 @@ class TestMain:
                     json.dumps(groups),
                     "--a2b1-runner-label",
                     A2B1_LABEL,
-                    "--a2b4-runner-label",
-                    A2B4_LABEL,
+                    "--a2b1b3-runner-label",
+                    A2B1B3_LABEL,
                 ]
             )
             == 0
@@ -188,7 +188,7 @@ class TestMain:
         outputs = dict(line.partition("=")[::2] for line in github_output.read_text().splitlines())
         assert outputs["has_tests_a2"] == "false"
         assert json.loads(outputs["test_groups_a2b1"]) == []
-        assert json.loads(outputs["test_groups_a2b4"]) == []
+        assert json.loads(outputs["test_groups_a2b1b3"]) == []
 
 
 class TestFullSuiteIntegration:
@@ -239,13 +239,13 @@ class TestFullSuiteIntegration:
     def test_dual_pools_run_identical_suite(self, dual, full_suite_groups):
         a2_groups = dual.filter_a2_groups(full_suite_groups)
         b1_groups = dual.rewrite_runner(a2_groups, A2B1_LABEL, "a2b1")
-        b4_groups = dual.rewrite_runner(a2_groups, A2B4_LABEL, "a2b4")
+        b1b3_groups = dual.rewrite_runner(a2_groups, A2B1B3_LABEL, "a2b1b3")
 
-        assert len(b1_groups) == len(b4_groups) == BUCKET_COUNT
+        assert len(b1_groups) == len(b1b3_groups) == BUCKET_COUNT
         assert {group["runner"] for group in b1_groups} == {A2B1_LABEL}
-        assert {group["runner"] for group in b4_groups} == {A2B4_LABEL}
+        assert {group["runner"] for group in b1b3_groups} == {A2B1B3_LABEL}
         # Both pools execute the exact same buckets/tests.
-        assert [group["tests"] for group in b1_groups] == [group["tests"] for group in b4_groups]
-        assert [group["partition"] for group in b1_groups] == [group["partition"] for group in b4_groups]
+        assert [group["tests"] for group in b1_groups] == [group["tests"] for group in b1b3_groups]
+        assert [group["partition"] for group in b1_groups] == [group["partition"] for group in b1b3_groups]
         # Cache target stays the a2 one so the a2 csrc cache is reused.
         assert dual.collect_csrc_cache_targets(a2_groups) == ["a2-arm64-ubuntu"]

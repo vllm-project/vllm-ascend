@@ -20,12 +20,12 @@ Temporary helper for the A2 dual-runner validation PR. It consumes the
 ``test_groups`` JSON produced by ``select_tests.py --all-tests``, keeps only
 the groups whose ``npu_type`` is ``a2`` (the one_card suite; a3 / 310p / cpu
 groups are dropped), and rewrites each surviving group for the two new runner
-pools (``a2b1`` and ``a2b4``) so the identical A2 suite runs once per pool.
+pools (``a2b1`` and ``a2b1b3``) so the identical A2 suite runs once per pool.
 
 Outputs (GITHUB_OUTPUT when set, stdout otherwise):
   has_tests_a2        - "true"/"false"
   test_groups_a2b1    - JSON array of groups routed to the a2b1 pool
-  test_groups_a2b4    - JSON array of groups routed to the a2b4 pool
+  test_groups_a2b1b3  - JSON array of groups routed to the a2b1b3 pool
   csrc_cache_target_ids - JSON array of csrc cache targets used by A2 groups
 """
 
@@ -77,21 +77,21 @@ def main(argv: list[str] | None = None) -> int:
         help="Exact runner label for the a2b1 pool (from runner_label.json)",
     )
     parser.add_argument(
-        "--a2b4-runner-label",
+        "--a2b1b3-runner-label",
         required=True,
-        help="Exact runner label for the a2b4 pool (from runner_label.json)",
+        help="Exact runner label for the a2b1b3 pool (from runner_label.json)",
     )
     args = parser.parse_args(argv)
 
     groups = json.loads(args.test_groups_json)
     a2_groups = filter_a2_groups(groups)
     a2b1_groups = rewrite_runner(a2_groups, args.a2b1_runner_label, "a2b1")
-    a2b4_groups = rewrite_runner(a2_groups, args.a2b4_runner_label, "a2b4")
+    a2b1b3_groups = rewrite_runner(a2_groups, args.a2b1b3_runner_label, "a2b1b3")
 
     outputs = {
         "has_tests_a2": str(bool(a2_groups)).lower(),
         "test_groups_a2b1": json.dumps(a2b1_groups, separators=(",", ":")),
-        "test_groups_a2b4": json.dumps(a2b4_groups, separators=(",", ":")),
+        "test_groups_a2b1b3": json.dumps(a2b1b3_groups, separators=(",", ":")),
         "csrc_cache_target_ids": json.dumps(collect_csrc_cache_targets(a2_groups), separators=(",", ":")),
     }
 
