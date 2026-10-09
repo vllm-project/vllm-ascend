@@ -32,7 +32,7 @@ test_cases:
       - "--enable-expert-parallel"
       - "--enable-eplb"
       - "--eplb-config"
-      - '{"window_size":600,"step_interval":50,"num_redundant_experts":0,"use_async":true,"log_balancedness":false}'
+      - '{"window_size":600,"step_interval":650,"num_redundant_experts":0,"use_async":true,"log_balancedness":false}'
       - "--max-num-seqs"
       - "24"
       - "--max-model-len"
