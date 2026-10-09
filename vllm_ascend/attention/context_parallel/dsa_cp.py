@@ -16,6 +16,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention import dsa_v1
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
 from vllm_ascend.attention.dsa_attn_kv_plan import (
     get_dsa_attn_kv_plan,
     is_a5_bf16_kv_enabled,
@@ -2245,6 +2246,7 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
         )
         self._pcp_world_size = vllm_config.parallel_config.prefill_context_parallel_size
         self._pcp_rank = get_pcp_group().rank_in_group
+        self._is_decode_sharded = is_pcp_decode_sharding_enabled(vllm_config)
         self._hidden_restore_idx_buffer = torch.empty(
             vllm_config.scheduler_config.max_num_batched_tokens,
             dtype=torch.int64,
@@ -2395,7 +2397,9 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
         has_prefill: bool,
     ) -> AscendCommonAttentionMetadata:
         num_local_padded_tokens = common_attn_metadata.num_input_tokens
-        if has_prefill:
+        # Sharded decode owns different requests per rank, so it uses the same
+        # rank-local slot slice as prefill. Replicated decode writes every rank.
+        if has_prefill or self._is_decode_sharded:
             gathered_slot_mapping = common_attn_metadata.slot_mapping
             if pcp_context.global_batch.is_dummy:
                 gathered_slot_mapping.fill_(-1)
@@ -2460,7 +2464,10 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
         assert pcp_cache_group_idx is not None
         assert common_ratio_to_sas_metadata is not None
         has_prefill = bool(pcp_context.global_batch.is_prefilling_np.any())
-        if has_prefill:
+        # Replicated decode stays on the local metadata path. Sharded decode
+        # owns different requests per rank, so it still needs global metadata.
+        needs_global_metadata = has_prefill or self._is_decode_sharded
+        if needs_global_metadata:
             pcp_context = self._prepare_graph_pcp_context(pcp_context)
             global_common_attn_metadata = self._build_global_common_attn_metadata(
                 pcp_context,
@@ -2472,7 +2479,8 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
                 pcp_context.global_batch.num_reqs,
             )
             # num_prefills can miss short prefills; prevent local PCP RoPE
-            # from overwriting the global RoPE buffer for a prefill batch.
+            # from overwriting the global RoPE buffer. Sharded decode also
+            # cannot share that buffer, because each rank has different positions.
             global_dsa_metadata = self._global_metadata_builder.build(
                 common_prefix_len,
                 global_common_attn_metadata,
@@ -2498,10 +2506,10 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
             num_actual_reqs=num_actual_reqs,
             common_ratio_to_sas_metadata=common_ratio_to_sas_metadata,
         )
-        # Decode tokens are replicated in scheduler order on every PCP rank.
+        # Replicated decode tokens stay in scheduler order on every PCP rank.
         # The local metadata therefore describes the canonical cache update
         # directly and can use the ordinary non-PCP DSA execution path.
-        if not has_prefill:
+        if not needs_global_metadata:
             return local_dsa_metadata
 
         return AscendDSAPCPMetadata.from_local_metadata(

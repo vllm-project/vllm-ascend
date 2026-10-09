@@ -36,6 +36,7 @@ class TestAscendSFAIndexerBackend(TestBase):
     @patch("vllm_ascend.attention.indexer.get_ascend_config")
     def test_initialization(self, mock_get_ascend_config, mock_get_vllm_config, _mock_enable_dsa_cp):
         mock_get_ascend_config.return_value.is_sparse_li_c8_layer.return_value = False
+        mock_get_ascend_config.return_value.is_sparse_li_c4_layer.return_value = False
         mock_get_vllm_config.return_value.model_config.hf_config.model_type = "deepseek_v32"
         mock_get_vllm_config.return_value.parallel_config.prefill_context_parallel_size = 1
         mock_indexer = self._make_vllm_indexer()
@@ -63,6 +64,7 @@ class TestAscendSFAIndexerBackend(TestBase):
     @patch("vllm_ascend.attention.indexer.get_ascend_config")
     def test_glm_model_type_flags(self, mock_get_ascend_config, mock_get_vllm_config, _mock_enable_dsa_cp):
         mock_get_ascend_config.return_value.is_sparse_li_c8_layer.return_value = False
+        mock_get_ascend_config.return_value.is_sparse_li_c4_layer.return_value = False
         mock_get_vllm_config.return_value.model_config.hf_config.model_type = "glm_moe_dsa"
         mock_get_vllm_config.return_value.parallel_config.prefill_context_parallel_size = 1
 
@@ -76,6 +78,7 @@ class TestAscendSFAIndexerBackend(TestBase):
     @patch("vllm_ascend.attention.indexer.get_ascend_config")
     def test_li_c8_dtypes(self, mock_get_ascend_config, mock_get_vllm_config, _mock_enable_dsa_cp):
         mock_get_ascend_config.return_value.is_sparse_li_c8_layer.return_value = True
+        mock_get_ascend_config.return_value.is_sparse_li_c4_layer.return_value = False
         mock_get_vllm_config.return_value.model_config.hf_config.model_type = "deepseek_v32"
         mock_get_vllm_config.return_value.parallel_config.prefill_context_parallel_size = 1
 
@@ -101,9 +104,11 @@ class TestAscendSFAIndexerBackend(TestBase):
         indexer = AscendSFAIndexerBackend.__new__(AscendSFAIndexerBackend)
 
         indexer.enable_sparse_li_c8 = False
+        indexer.enable_sparse_li_c4 = False
         self.assertEqual(indexer.num_cache_tensors, 1)
 
         indexer.enable_sparse_li_c8 = True
+        indexer.enable_sparse_li_c4 = False
         self.assertEqual(indexer.num_cache_tensors, 2)
 
     def _make_forward_indexer(self):
@@ -113,10 +118,12 @@ class TestAscendSFAIndexerBackend(TestBase):
         indexer.qk_rope_head_dim = 64
         indexer.is_rope_neox_style = True
         indexer.enable_sparse_li_c8 = False
+        indexer.enable_sparse_li_c4 = False
         indexer.use_torch_npu_lightning_indexer = False
         indexer.wk_weights_proj = MagicMock(return_value=(torch.zeros(2, 128 + 4), None))
         indexer.wq_b = MagicMock(return_value=(torch.zeros(2, 2 * 128), None))
         indexer._pcp_active = False
+        indexer._is_pcp_decode_sharded = False
         indexer._dsa_cp_active = False
         indexer_k_cache = MagicMock(name="indexer_k_cache")
         indexer.k_cache = SimpleNamespace(kv_cache=(indexer_k_cache,))
@@ -269,6 +276,7 @@ class TestAscendSFAIndexerBackend(TestBase):
         mock_get_ascend_config.return_value.c8_reshape_optim_enabled = False
         indexer = AscendSFAIndexerBackend.__new__(AscendSFAIndexerBackend)
         indexer.enable_sparse_li_c8 = True
+        indexer.enable_sparse_li_c4 = False
 
         k_li = torch.zeros(2, 4)
         k_li_scale = torch.zeros(2, 1)
@@ -296,6 +304,7 @@ class TestAscendSFAIndexerBackend(TestBase):
         mock_get_ascend_config.return_value.c8_reshape_optim_enabled = False
         indexer = AscendSFAIndexerBackend.__new__(AscendSFAIndexerBackend)
         indexer.enable_sparse_li_c8 = False
+        indexer.enable_sparse_li_c4 = False
 
         k_li = torch.zeros(2, 4)
         slot_mapping = torch.tensor([3, 5])
@@ -316,6 +325,7 @@ class TestAscendSFAIndexerBackend(TestBase):
         mock_get_ascend_config.return_value.c8_reshape_optim_enabled = True
         indexer = AscendSFAIndexerBackend.__new__(AscendSFAIndexerBackend)
         indexer.enable_sparse_li_c8 = True
+        indexer.enable_sparse_li_c4 = False
 
         k_li = torch.zeros(2, 4)
         k_li_scale = torch.zeros(2, 1)

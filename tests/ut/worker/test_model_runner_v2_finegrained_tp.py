@@ -33,6 +33,7 @@ def _make_runner(max_num_reqs=8, decode_query_len=2, vocab=6):
     a bare MagicMock.
     """
     runner = object.__new__(NPUModelRunner)
+    runner.vllm_config = MagicMock()
     runner.adaptive_verification = None
     runner.max_num_reqs = max_num_reqs
     runner.decode_query_len = decode_query_len
@@ -264,6 +265,7 @@ def _run_execute_model(runner, hidden_states, dummy_run=True, is_profile=False):
     with (
         patch("vllm_ascend.worker.v2.model_runner._start_profiling_chunk_timing", return_value=None),
         patch("vllm_ascend.worker.v2.model_runner._finish_profiling_chunk_timing", return_value=None),
+        patch("vllm_ascend.worker.v2.model_runner.should_skip_allreduce_across_dp_group", return_value=False),
         patch.object(GPUModelRunner, "execute_model", side_effect=super_execute),
     ):
         return runner.execute_model(MagicMock(), dummy_run=dummy_run, is_profile=is_profile)

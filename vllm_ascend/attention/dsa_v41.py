@@ -8,6 +8,7 @@ before running the compressor, indexer and sparse-attention operators without
 moving cache or scheduler knowledge back into the model.
 """
 
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -34,10 +35,12 @@ from vllm_ascend.core.kv_cache_interface import (
     get_kv_cache_compression_ratio,
     get_storage_block_size,
 )
+from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.rope_dsv4 import (
     get_cos_and_sin_dsa,
     get_full_cos_and_sin_dsa_for_layer,
 )
+from vllm_ascend.ops.triton.c2_ring_metadata import build_c2_ring_metadata
 from vllm_ascend.utils import npu_stream_switch
 from vllm_ascend.worker.device_metadata import (
     DeviceMetadataStage,
@@ -102,7 +105,10 @@ class AscendDSAV41Metadata(AttentionMetadata):
     compress_ratio: int
     storage_block_size: int
     is_compressor_state: bool
+    flat_slot_mapping: torch.Tensor | None = None
     cache_kind: str = "unknown"
+    # MRV2 producer ownership follows this forward's metadata, including capture.
+    device_metadata_executor: Any = None
     positions: torch.Tensor | None = None
     cos: Any = None
     sin: Any = None
@@ -172,6 +178,17 @@ class DeepseekV41LayerMetadata:
 
     def rope(self, layer_name: str, num_tokens: int):
         return self.swa.cos[layer_name][:num_tokens], self.swa.sin[layer_name][:num_tokens]
+
+
+@dataclass
+class DeepseekV41PreparedIndexer:
+    """Query-local projections and the event guarding auxiliary quantization."""
+
+    query: torch.Tensor | None
+    weights: torch.Tensor
+    quantized_query: torch.Tensor | None = None
+    query_scale: torch.Tensor | None = None
+    quantize_done: Any = None
 
 
 def compressed_slot_mapping(slot_mapping: torch.Tensor, ratio: int) -> torch.Tensor:
@@ -269,16 +286,51 @@ class AscendDSAV41Impl:
         )
 
     @staticmethod
-    def _project_kv(attn, hidden_states, cos, sin):
-        kv = attn.kv_norm(attn.wkv(hidden_states)).view(-1, 1, attn.head_dim)
-        torch.ops._C_ascend.inplace_partial_rotary_mul(
-            kv.unsqueeze(1),
-            cos,
-            sin,
-            rotary_mode="interleave",
-            partial_slice=[attn.nope_head_dim, attn.head_dim],
+    def _apply_rotary(attn, value, cos, sin, *, inverse=False):
+        return DeviceOperator.apply_partial_rotary_inplace(
+            value, cos, sin, start=attn.nope_head_dim, end=attn.head_dim, inverse=inverse
         )
+
+    @staticmethod
+    def _write_swa_cache(attn, metadata, value):
+        cache = attn.dsa_attn.swa_cache_layer.kv_cache[0]
+        backend = getattr(attn, "packed_cache_ops", None)
+        if backend is not None:
+            backend.write_attention_cache(
+                cache,
+                metadata.flat_slot_mapping[: value.shape[0]],
+                value,
+                kind="win",
+            )
+            return
+        scatter_cache_sk(cache, metadata.slot_mapping, value)
+
+    @staticmethod
+    def _write_swa_cache_on_main_stream(attn, metadata):
+        # Packaged A5 prefill/mixed cache writes must be captured on the
+        # current stream even when the independent Q/KV preparation overlaps.
+        # A missing prefill classification also cannot qualify as pure decode.
+        return getattr(attn, "packed_cache_ops", None) is not None and (
+            metadata.num_prefills > 0 or metadata.num_decodes != metadata.num_reqs
+        )
+
+    @classmethod
+    def _project_q(cls, attn, hidden_states, cos, sin):
+        qr = attn.q_norm(attn.wq_a(hidden_states))
+        q = attn.wq_b(qr).unflatten(-1, (-1, attn.head_dim))
+        cls._apply_rotary(attn, q, cos, sin)
+        return q.to(hidden_states.dtype), qr
+
+    @classmethod
+    def _project_kv(cls, attn, hidden_states, cos, sin):
+        kv = attn.kv_norm(attn.wkv(hidden_states)).view(-1, 1, attn.head_dim)
+        cls._apply_rotary(attn, kv, cos, sin)
         return kv.squeeze(1)
+
+    @classmethod
+    def _project_q_kv(cls, attn, hidden_states, cos, sin):
+        q, qr = cls._project_q(attn, hidden_states, cos, sin)
+        return q, qr, cls._project_kv(attn, hidden_states, cos, sin)
 
     def _update_caches(self, attn, hidden_states, metadata):
         if hidden_states.shape[0] == 0:
@@ -286,7 +338,7 @@ class AscendDSAV41Impl:
         positions = metadata.positions[: hidden_states.shape[0]]
         cos, sin = metadata.rope(attn.rotary_emb.layername, hidden_states.shape[0])
         kv = self._project_kv(attn, hidden_states, cos, sin)
-        scatter_cache_sk(attn.dsa_attn.swa_cache_layer.kv_cache[0], metadata.swa.slot_mapping, kv)
+        AscendDSAV41Impl._write_swa_cache(attn, metadata.swa, kv)
         if self.role.is_kv_source:
             self._write_compressed_source(attn, hidden_states, positions, cos, sin, metadata)
 
@@ -296,10 +348,63 @@ class AscendDSAV41Impl:
 
     def _prepare_queries(self, attn, hidden_states, positions, cos, sin, metadata):
         hidden_states = hidden_states[: metadata.swa.num_actual_tokens]
-        q, qr = self.multistream_preprocess(attn, hidden_states, cos, sin, metadata.swa)
-        if self.role.is_kv_source:
-            self._write_compressed_source(attn, hidden_states, positions, cos, sin, metadata)
+        v1_impl = attn.dsa_attn.dsa_attn.impl
+        use_multistream = v1_impl.multistream_dsv4_dsa_overlap
+        preprocess = self.multistream_preprocess if use_multistream else self.preprocess
+        q, qr = preprocess(attn, hidden_states, cos, sin, metadata.swa)
         return q, qr
+
+    def _indexer_hidden_states(self, hidden_states, metadata):
+        return hidden_states[: metadata.swa.num_actual_tokens]
+
+    def _prepare_indexer_inputs(self, attn, hidden_states, qr, cos, sin, metadata):
+        if not self.role.has_long_context or not self.role.is_index_source:
+            return None
+        indexer = attn.indexer
+        main_stream = torch.npu.current_stream()
+        aux_stream = dsv4_dsa_overlap_stream()
+
+        query = indexer.project_query(qr)
+        weights_start = main_stream.record_event()
+        with npu_stream_switch(aux_stream, enabled=True):
+            aux_stream.wait_event(weights_start)
+            weights = indexer.project_weights(self._indexer_hidden_states(hidden_states, metadata))
+            weights_done = aux_stream.record_event()
+        indexer.apply_query_rope(query, cos, sin)
+        main_stream.wait_event(weights_done)
+        return DeepseekV41PreparedIndexer(query=query, weights=weights)
+
+    @staticmethod
+    def _should_quantize_indexer(prepared, metadata):
+        return (
+            prepared is not None
+            and prepared.quantized_query is None
+            and prepared.query is not None
+            and prepared.query.shape[0] > 0
+            and metadata.indexer.cache.max_cache_seq_len > 0
+        )
+
+    def _quantize_indexer_query(self, attn, prepared, metadata):
+        if not self._should_quantize_indexer(prepared, metadata):
+            return
+        main_stream = torch.npu.current_stream()
+        aux_stream = dsv4_dsa_overlap_stream()
+        quantize_start = main_stream.record_event()
+        with npu_stream_switch(aux_stream, enabled=True):
+            aux_stream.wait_event(quantize_start)
+            prepared.quantized_query, prepared.query_scale = attn.indexer.quantize_query(prepared.query)
+            prepared.quantize_done = aux_stream.record_event()
+
+    def _write_forward_compressed_source(self, attn, hidden_states, positions, cos, sin, metadata, prepared_indexer):
+        self._write_compressed_source(
+            attn,
+            self._indexer_hidden_states(hidden_states, metadata),
+            positions,
+            cos,
+            sin,
+            metadata,
+            prepared_indexer=prepared_indexer,
+        )
 
     def _project_output(self, attn, output, hidden_states, metadata, *, projected):
         padded = output
@@ -308,6 +413,12 @@ class AscendDSAV41Impl:
             padded[: output.shape[0]] = output
         attn.dsa_attn.dsa_attn.impl._forward_o_proj(padded, projected)
         return projected
+
+    def preprocess(self, attn, hidden_states, cos, sin, swa_metadata):
+        """Project Q/KV and populate SWA cache on the current stream."""
+        q, qr, kv = self._project_q_kv(attn, hidden_states, cos, sin)
+        self._write_swa_cache(attn, swa_metadata, kv)
+        return q, qr
 
     def multistream_preprocess(self, attn, hidden_states, cos, sin, swa_metadata):
         """Overlap Q Vector work with KV Cube work, then reverse their roles.
@@ -348,33 +459,22 @@ class AscendDSAV41Impl:
         qr = attn.q_norm(q_a)
         q_b_quant, q_b_scale = wq_b.quantize(qr)
 
-        # Part 3: Q_b matmul (Cube) overlaps KV norm, RoPE and cache store (Vector).
+        # Part 3: Q_b matmul (Cube) overlaps KV norm and RoPE (Vector).
+        # A5 prefill/mixed cache publication follows the stream join below.
+        write_cache_on_main = self._write_swa_cache_on_main_stream(attn, swa_metadata)
         part3_start = main_stream.record_event()
         main_stream.wait_event(kv_matmul_done)
         with npu_stream_switch(aux_stream, enabled=True):
             aux_stream.wait_event(part3_start)
             kv = attn.kv_norm(kv).view(-1, 1, attn.head_dim)
-            torch.ops._C_ascend.inplace_partial_rotary_mul(
-                kv.unsqueeze(1),
-                cos,
-                sin,
-                rotary_mode="interleave",
-                partial_slice=[attn.nope_head_dim, attn.head_dim],
-            )
-            scatter_cache_sk(
-                attn.dsa_attn.swa_cache_layer.kv_cache[0],
-                swa_metadata.slot_mapping,
-                kv.squeeze(1),
-            )
+            AscendDSAV41Impl._apply_rotary(attn, kv, cos, sin)
+            if not write_cache_on_main:
+                AscendDSAV41Impl._write_swa_cache(attn, swa_metadata, kv.squeeze(1))
         q = wq_b.matmul(q_b_quant, q_b_scale, bias=attn.wq_b.bias).unflatten(-1, (attn.n_local_heads, attn.head_dim))
         main_stream.wait_stream(aux_stream)
-        torch.ops._C_ascend.inplace_partial_rotary_mul(
-            q.unsqueeze(1),
-            cos,
-            sin,
-            rotary_mode="interleave",
-            partial_slice=[attn.nope_head_dim, attn.head_dim],
-        )
+        if write_cache_on_main:
+            AscendDSAV41Impl._write_swa_cache(attn, swa_metadata, kv.squeeze(1))
+        AscendDSAV41Impl._apply_rotary(attn, q, cos, sin)
         return q.to(hidden_states.dtype), qr
 
     def _write_compressed_source(
@@ -385,12 +485,15 @@ class AscendDSAV41Impl:
         cos,
         sin,
         metadata,
+        *,
+        prepared_indexer=None,
     ):
         compressor = attn.compressor
         compressor_metadata = metadata.compressor
         indexer_metadata = metadata.indexer
         ratio = self.role.compress_ratio
         if ratio == 1:
+            self._quantize_indexer_query(attn, prepared_indexer, metadata)
             latent = compressor(hidden_states)
             # C1 source positions are the current token positions. Reuse the
             # query RoPE selected by the SWA metadata builder instead of
@@ -401,8 +504,12 @@ class AscendDSAV41Impl:
             long_slots = compressor_metadata.cache.slot_mapping[: positions.shape[0]]
         else:
             state_metadata = compressor_metadata.state
-            wait_for_device_metadata(DeviceMetadataStage.COMPRESSOR, state_metadata.c2_metadata_group_id)
+            if state_metadata.c2_metadata_group_id is not None:
+                wait_for_device_metadata(DeviceMetadataStage.COMPRESSOR, state_metadata.c2_metadata_group_id)
             hidden_states_fp32 = hidden_states.float()
+            # Finish the input cast before query quantization starts on the
+            # auxiliary stream, so the WKV matmul can overlap that quantization.
+            self._quantize_indexer_query(attn, prepared_indexer, metadata)
             kv = compressor.wkv(hidden_states_fp32)
             score = compressor.wgate(hidden_states_fp32)
             latent = compressor.pool_projected(kv, score, state_metadata)
@@ -424,21 +531,24 @@ class AscendDSAV41Impl:
             source_sin,
         )
         latent = latent.view(-1, 1, attn.head_dim)
-        torch.ops._C_ascend.inplace_partial_rotary_mul(
-            latent.unsqueeze(1),
-            source_cos,
-            source_sin,
-            rotary_mode="interleave",
-            partial_slice=[attn.nope_head_dim, attn.head_dim],
-        )
-        scatter_cache_sk(
-            attn.long_kv_cache.kv_cache[0],
-            long_slots,
-            latent.squeeze(1),
-        )
+        AscendDSAV41Impl._apply_rotary(attn, latent, source_cos, source_sin)
+        backend = getattr(attn, "packed_cache_ops", None)
+        if backend is not None:
+            backend.write_attention_cache(
+                attn.long_kv_cache.kv_cache[0],
+                compressor_metadata.cache.flat_slot_mapping[: positions.shape[0]],
+                latent.squeeze(1),
+                kind="cmp",
+            )
+        else:
+            scatter_cache_sk(
+                attn.long_kv_cache.kv_cache[0],
+                long_slots,
+                latent.squeeze(1),
+            )
 
-    def _select_sparse_indices(self, attn, hidden_states, qr, positions, cos, sin, metadata):
-        hidden_states = hidden_states[: metadata.swa.num_actual_tokens]
+    def _select_sparse_indices(self, attn, hidden_states, qr, positions, cos, sin, metadata, prepared_indexer=None):
+        hidden_states = self._indexer_hidden_states(hidden_states, metadata)
         if not self.role.has_long_context:
             return None
         shared = attn.shared_state
@@ -447,26 +557,38 @@ class AscendDSAV41Impl:
 
         context = get_forward_context().no_compile_layers
         source_layer = context[self.index_k_source_prefix]
-        selected, candidates = attn.indexer.select(
-            hidden_states,
-            qr,
+        source_cache = source_layer.kv_cache[0]
+        if self.role.uses_candidate_filter and getattr(attn.indexer, "packed_cache_ops", None) is not None:
+            folded_name = self.index_k_source_prefix + "_folded"
+            folded_cache = context[folded_name].kv_cache[0]
+            source_cache = (*source_cache, folded_cache)
+        assert prepared_indexer is not None
+        if prepared_indexer.quantize_done is not None:
+            torch.npu.current_stream().wait_event(prepared_indexer.quantize_done)
+        selected, candidates = attn.indexer.select_projected(
+            prepared_indexer.query,
+            prepared_indexer.weights,
             positions,
-            cos,
-            sin,
-            source_layer.kv_cache[0],
+            source_cache,
             metadata.indexer.cache,
+            quantized_query=prepared_indexer.quantized_query,
+            query_scale=prepared_indexer.query_scale,
             is_candidate_source=self.role.is_candidate_source,
             uses_candidate_filter=self.role.uses_candidate_filter,
             candidate_topk_blocks=self.topology.candidate_topk_blocks,
             candidate_block_size=self.topology.candidate_block_size,
             candidates=shared.candidates[: hidden_states.shape[0]],
-            output_indices=shared.topk_indices[: hidden_states.shape[0]],
+            candidate_lengths=(
+                None if shared.candidate_lengths is None else shared.candidate_lengths[: hidden_states.shape[0]]
+            ),
+            topk_lengths=(None if shared.topk_lengths is None else shared.topk_lengths[: hidden_states.shape[0]]),
+            indices_output=shared.topk_indices[: hidden_states.shape[0]],
         )
-        # An empty long-context cache returns a [tokens, 0] sentinel without
-        # writing output_indices. Publish "no slot" for FULL graph capture;
-        # nonempty selections are written directly into the shared buffer.
+        # An empty long-context cache does not write the stable output buffer.
         if selected.shape[1] == 0:
             shared.topk_indices[: selected.shape[0]].fill_(-1)
+        elif not getattr(attn, "uses_a5_packed_cache", False):
+            shared.topk_indices[: selected.shape[0]].copy_(selected)
         if self.role.is_candidate_source:
             shared.candidates[: candidates.shape[0]].copy_(candidates)
         return shared.topk_indices[: hidden_states.shape[0]]
@@ -475,6 +597,22 @@ class AscendDSAV41Impl:
         """Run SparseFlashMla with the same PA metadata for both operator stages."""
         if source_cache is None and self.role.has_long_context:
             source_cache = get_forward_context().no_compile_layers[self.long_kv_source_prefix].kv_cache[0]
+        backend = getattr(attn, "packed_cache_ops", None)
+        if backend is not None:
+            compressed_lengths = None
+            if self.role.has_long_context and attn.shared_state.topk_lengths is not None:
+                compressed_lengths = attn.shared_state.topk_lengths[: q.shape[0]]
+            return backend.qsmla(
+                q,
+                attn.dsa_attn.swa_cache_layer.kv_cache[0],
+                source_cache,
+                metadata,
+                compressed_indices,
+                compressed_lengths=compressed_lengths,
+                window_size=attn.window_size,
+                sinks=attn.attn_sink,
+                softmax_scale=attn.softmax_scale,
+            )
         has_compressed = self.role.compress_ratio in (1, 2)
         ratio = self.role.compress_ratio if has_compressed else 0
         num_reqs = metadata.swa.num_reqs
@@ -549,15 +687,18 @@ class AscendDSAV41Impl:
             positions = metadata.positions[:num_tokens]
             cos, sin = metadata.rope(attn.rotary_emb.layername, num_tokens)
             q, qr = self._prepare_queries(attn, hidden_states, positions, cos, sin, metadata)
-            compressed_indices = self._select_sparse_indices(attn, hidden_states, qr, positions, cos, sin, metadata)
-            attention_output = self._forward_attention(attn, q, metadata, compressed_indices)
-            torch.ops._C_ascend.inplace_partial_rotary_mul(
-                attention_output.unsqueeze(1),
-                cos,
-                -sin,
-                rotary_mode="interleave",
-                partial_slice=[attn.nope_head_dim, attn.head_dim],
+            prepared_indexer = self._prepare_indexer_inputs(attn, hidden_states, qr, cos, sin, metadata)
+            if self.role.is_kv_source:
+                self._write_forward_compressed_source(
+                    attn, hidden_states, positions, cos, sin, metadata, prepared_indexer
+                )
+            else:
+                self._quantize_indexer_query(attn, prepared_indexer, metadata)
+            compressed_indices = self._select_sparse_indices(
+                attn, hidden_states, qr, positions, cos, sin, metadata, prepared_indexer
             )
+            attention_output = self._forward_attention(attn, q, metadata, compressed_indices)
+            AscendDSAV41Impl._apply_rotary(attn, attention_output, cos, sin, inverse=True)
         else:
             heads = attn.n_heads if getattr(attn, "enable_dsa_cp", False) else attn.n_local_heads
             attention_output = hidden_states.new_empty((0, heads, attn.head_dim))
@@ -599,23 +740,47 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         elif isinstance(kv_cache_spec, AscendSlidingWindowMLASpec):
             self._cache_kind = "swa"
         elif isinstance(kv_cache_spec, AscendMLAAttentionSpec):
-            self._cache_kind = "index_k" if kv_cache_spec.scale_dim else "long_kv"
+            # make_folded_index_cache_spec packs eight index rows into one:
+            # 8 * (128 / 2 FP4 bytes + 128 / 32 scale bytes) = 544 bytes.
+            # Its scales are inline (scale_dim=0), like long KV, so identify
+            # this layout first to avoid treating it as compressed long KV.
+            if kv_cache_spec.tokens_per_state == 8 and kv_cache_spec.head_size == 544:
+                self._cache_kind = "index_k_folded"
+            else:
+                self._cache_kind = "index_k" if kv_cache_spec.scale_dim else "long_kv"
         else:
             raise TypeError(f"Unsupported V4.1 cache spec: {type(kv_cache_spec).__name__}")
+        self._device_backend = DeviceOperator.get_dsv41_packed_cache_ops()
+        self._uses_a5_packed_cache = self._device_backend is not None
+        text_config = vllm_config.model_config.hf_text_config
+        window_size = int(_config_value(text_config, "sliding_window", 0))
         query_metadata_size = V41_METADATA_BUFFER_SIZE if build_query_metadata else 0
         compressor_tokens = max_tokens if build_compressor_metadata else 0
         compressor_reqs = max_reqs if build_compressor_metadata else 0
         self._slot_mapping = torch.full((max_tokens,), -1, dtype=torch.int64, device=device)
         self._slot_mapping_2d = torch.full((max_tokens, 2), -1, dtype=torch.int32, device=device)
+        self._flat_slot_mapping = torch.full((max_tokens,), -1, dtype=torch.int64, device=device)
         self._seq_lens = torch.zeros(max_reqs, dtype=torch.int32, device=device)
+        self._max_tokens = max_tokens
+        self._dspark_swa_indices = None
+        self._dspark_swa_lengths = None
         self._cache_seq_lens = torch.zeros(max_reqs, dtype=torch.int32, device=device)
         self._cmp_residual = torch.zeros(max_reqs, dtype=torch.int32, device=device)
         self._smla_metadata = torch.zeros(query_metadata_size, dtype=torch.int32, device=device)
         self._qli_metadata = torch.zeros(query_metadata_size, dtype=torch.int32, device=device)
+        if self._supports_device_ops and self._uses_a5_packed_cache and self._cache_kind == "swa":
+            self._a5_causal_swa_indices = torch.empty((max_tokens, 1, window_size), dtype=torch.int32, device=device)
+            self._a5_causal_swa_lengths = torch.empty((max_tokens, 1), dtype=torch.int32, device=device)
+            self._a5_smla_metadata = torch.empty(V41_METADATA_BUFFER_SIZE, dtype=torch.int32, device=device)
+            self._a5_smla_length_rows = torch.empty((max_tokens, 1), dtype=torch.int32, device=device)
+        else:
+            self._a5_causal_swa_indices = None
+            self._a5_causal_swa_lengths = None
+            self._a5_smla_metadata = None
+            self._a5_smla_length_rows = None
         self._c2_ring_metadata = torch.zeros(5 * compressor_reqs, dtype=torch.int32, device=device)
         self._c2_complete_mask = torch.zeros(compressor_tokens, dtype=torch.bool, device=device)
         self._c2_source_positions = torch.zeros(compressor_tokens, dtype=torch.int64, device=device)
-        text_config = vllm_config.model_config.hf_text_config
         rope_dim = int(
             _config_value(
                 text_config,
@@ -637,6 +802,9 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         )
         self._c2_full_source_rope: tuple[torch.Tensor, torch.Tensor] | None = None
         self._device_metadata_enabled = False
+        # Default to eager preparation. MRV2 temporarily sets this during
+        # FULL warmup/capture so producers and consumer waits share one graph.
+        self._device_metadata_in_graph = False
         self._device_metadata_tasks: tuple[DeviceMetadataTask, ...] = ()
 
     @classmethod
@@ -678,6 +846,21 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         self._device_metadata_enabled = True
         self.prepare_source_rope()
 
+    @contextmanager
+    def defer_device_metadata(self, *, in_graph: bool = False):
+        """Defer this target build without changing the drafter's builder mode."""
+        was_enabled = self._device_metadata_enabled
+        was_in_graph = self._device_metadata_in_graph
+        if in_graph and not self._uses_a5_packed_cache:
+            raise ValueError("Captured V4.1 device metadata currently requires the A5 packed-cache backend")
+        self.enable_device_metadata()
+        self._device_metadata_in_graph = in_graph
+        try:
+            yield
+        finally:
+            self._device_metadata_enabled = was_enabled
+            self._device_metadata_in_graph = was_in_graph
+
     def take_device_metadata_tasks(self) -> tuple[DeviceMetadataTask, ...]:
         tasks = self._device_metadata_tasks
         self._device_metadata_tasks = ()
@@ -695,7 +878,9 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         if existing is not None:
             return existing
         shared[key] = buffer
-        if self._device_metadata_enabled:
+        if self._device_metadata_enabled and not (
+            self._device_metadata_in_graph and stage == DeviceMetadataStage.COMPRESSOR
+        ):
             self._device_metadata_tasks = (
                 *self._device_metadata_tasks,
                 DeviceMetadataTask(stage, run, id(buffer)),
@@ -752,6 +937,11 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         num_actual_reqs = min(num_actual_reqs, num_reqs)
         num_input_tokens = int(getattr(common, "num_input_tokens", common.slot_mapping.shape[0]))
         num_actual_tokens = int(getattr(common, "num_actual_tokens", num_input_tokens))
+        # FULL graphs consume the runner's persistent padded request buffers.
+        # Only tiling metadata is captured. C2 state preparation stays outside
+        # the graph, with its actual counts and state-update policy.
+        metadata_in_graph = self._device_metadata_in_graph
+        metadata_tokens = num_input_tokens if metadata_in_graph else num_actual_tokens
         shared = kwargs.get("common_v41_metadata")
         if shared is None:
             shared = {}
@@ -769,57 +959,69 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         seq_lens = coordinates["seq_lens"]
         positions = coordinates["positions"]
         full_graph_mode = bool(kwargs.get("full_graph_mode", False))
-
         # SWA uses original-token coordinates; circular state has no token slots.
         # Long KV and index K are addressed in completed compression groups.
         compressed = cache_kind in {"long_kv", "index_k"}
         if is_compressor_state:
             # State writes use ring ownership metadata; this buffer stays PAD.
             slots = self._slot_mapping[:num_input_tokens]
+            flat_slots = None
         else:
             # Scope ``shared`` to one framework KV cache group in the model
             # runner. Long KV and Indexer builders with the same physical
             # layout then share one persistent [T, 2] mapping, while every SWA
             # group owns a distinct mapping buffer.
-            slot_key = f"slot:c{ratio}:b{storage_block_size}"
+            slot_key = f"slot:coordinates:c{ratio}:b{storage_block_size}"
+            flat_slot_key = f"slot:flat:c{ratio}:b{storage_block_size}"
             prepared_slots = shared.get(slot_key)
-            if prepared_slots is None:
+            prepared_flat_slots = shared.get(flat_slot_key)
+            if prepared_slots is None or prepared_flat_slots is None:
                 active_slots = common.slot_mapping[:num_input_tokens]
-                if compressed and ratio != 1:
-                    active_slots = compressed_slot_mapping(active_slots, ratio)
-                valid = active_slots >= 0
-                if compressed and ratio == 2:
-                    # Prepare the C2 store mask once per cache group, before
-                    # forward. Match the ring compressor's completion policy.
-                    if kwargs.get("skip_ring_state_update", False):
-                        valid.zero_()
-                    else:
-                        valid_end = common.query_start_loc[num_actual_reqs].clamp_max(num_actual_tokens)
-                        valid &= torch.arange(num_input_tokens, device=active_slots.device) < valid_end
-                        if positions is not None:
-                            valid &= positions.remainder(2) == 1
-                physical = active_slots.clamp_min(0)
-                self._slot_mapping_2d[:num_input_tokens, 0].copy_(
-                    torch.where(
-                        valid,
-                        torch.div(
-                            physical,
-                            storage_block_size,
-                            rounding_mode="floor",
-                        ),
-                        -1,
+                if self._uses_a5_packed_cache and active_slots.device.type == "npu":
+                    assert self._device_backend is not None
+                    prepared_slots, prepared_flat_slots = self._device_backend.build_packed_cache_slot_mapping(
+                        active_slots,
+                        positions,
+                        common.query_start_loc,
+                        num_input_tokens,
+                        num_actual_reqs,
+                        num_actual_tokens,
+                        storage_block_size,
+                        ratio if compressed else 1,
+                        skip_update=kwargs.get("skip_ring_state_update", False),
+                        coordinates_output=self._slot_mapping_2d[:num_input_tokens],
+                        flat_output=self._flat_slot_mapping[:num_input_tokens],
                     )
-                )
-                self._slot_mapping_2d[:num_input_tokens, 1].copy_(
-                    torch.where(
-                        valid,
-                        physical.remainder(storage_block_size),
-                        -1,
+                else:
+                    if compressed and ratio != 1:
+                        active_slots = compressed_slot_mapping(active_slots, ratio)
+                    valid = active_slots >= 0
+                    if compressed and ratio == 2:
+                        if kwargs.get("skip_ring_state_update", False):
+                            valid.zero_()
+                        else:
+                            valid_end = common.query_start_loc[num_actual_reqs].clamp_max(num_actual_tokens)
+                            valid &= torch.arange(num_input_tokens, device=active_slots.device) < valid_end
+                            if positions is not None:
+                                valid &= positions.remainder(2) == 1
+                    physical = active_slots.clamp_min(0)
+                    self._slot_mapping_2d[:num_input_tokens, 0].copy_(
+                        torch.where(
+                            valid,
+                            torch.div(physical, storage_block_size, rounding_mode="floor"),
+                            -1,
+                        )
                     )
-                )
-                prepared_slots = self._slot_mapping_2d[:num_input_tokens]
+                    self._slot_mapping_2d[:num_input_tokens, 1].copy_(
+                        torch.where(valid, physical.remainder(storage_block_size), -1)
+                    )
+                    self._flat_slot_mapping[:num_input_tokens].copy_(torch.where(valid, active_slots, -1))
+                    prepared_slots = self._slot_mapping_2d[:num_input_tokens]
+                    prepared_flat_slots = self._flat_slot_mapping[:num_input_tokens]
                 shared[slot_key] = prepared_slots
+                shared[flat_slot_key] = prepared_flat_slots
             slots = prepared_slots
+            flat_slots = prepared_flat_slots
         plane_ratio = ratio if compressed else 1
         coordinates["cache_seq_lens"] = seq_lens
         cmp_residual_buffer = None
@@ -855,9 +1057,10 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         head_dim = int(_config_value(text_config, "head_dim"))
         index_topk = int(_config_value(text_config, "index_topk"))
         ori_sparse_indices = kwargs.get("ori_sparse_indices")
+        ori_topk_length = None
         noncausal = not bool(getattr(common, "causal", True))
         if noncausal and ori_sparse_indices is None:
-            ori_sparse_indices, _ = build_dspark_swa_indices(
+            ori_sparse_indices, ori_topk_length = build_dspark_swa_indices(
                 common.block_table_tensor[:num_reqs],
                 self.vllm_config.speculative_config.num_speculative_tokens,
                 window_size,
@@ -867,11 +1070,40 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                 num_actual_tokens,
                 use_logical_indices=True,
             )
-        ori_topk_length = (
-            (ori_sparse_indices >= 0).sum(dim=-1, dtype=torch.int32)
-            if ori_sparse_indices is not None and noncausal
-            else None
-        )
+            # Full draft graphs retain these addresses from capture. Rebuild
+            # the values in persistent buffers rather than returning temporary
+            # tensors whose capture-time contents never advance with decoding.
+            if self._dspark_swa_indices is None:
+                self._dspark_swa_indices = ori_sparse_indices.new_empty(
+                    (self._max_tokens, *ori_sparse_indices.shape[1:])
+                )
+                self._dspark_swa_lengths = ori_topk_length.new_empty((self._max_tokens, *ori_topk_length.shape[1:]))
+            indices_view = self._dspark_swa_indices[:num_actual_tokens]
+            assert self._dspark_swa_lengths is not None
+            lengths_view = self._dspark_swa_lengths[:num_actual_tokens]
+            indices_view.copy_(ori_sparse_indices)
+            lengths_view.copy_(ori_topk_length)
+            ori_sparse_indices, ori_topk_length = indices_view, lengths_view
+        if (
+            not noncausal
+            and ori_sparse_indices is None
+            and self._a5_causal_swa_indices is not None
+            and positions is not None
+        ):
+            cache_key = f"a5-causal-swa:w{window_size}"
+            cached_window = batch_shared.get(cache_key)
+            if cached_window is None:
+                assert self._device_backend is not None
+                cached_window = self._device_backend.build_window_indices(
+                    positions[:num_input_tokens],
+                    window_size,
+                    indices_output=self._a5_causal_swa_indices[:num_input_tokens],
+                    lengths_output=self._a5_causal_swa_lengths[:num_input_tokens],
+                )
+                batch_shared[cache_key] = cached_window
+            ori_sparse_indices, ori_topk_length = cached_window
+        if ori_topk_length is None and ori_sparse_indices is not None and noncausal:
+            ori_topk_length = (ori_sparse_indices >= 0).sum(dim=-1, dtype=torch.int32)
         ori_mask_mode = 0 if noncausal else 4
         ori_win_left = max(0, window_size - 1)
         ori_win_right = 0
@@ -879,7 +1111,48 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         smla_metadata = None
         qli_metadata = None
 
-        if self._build_query_metadata and self._supports_device_ops and cache_kind in {"swa", "long_kv"}:
+        if (
+            self._uses_a5_packed_cache
+            and cache_kind == "swa"
+            and self._a5_smla_metadata is not None
+            and self._a5_smla_length_rows is not None
+        ):
+
+            def build_a5_smla_metadata() -> None:
+                if metadata_tokens == 0:
+                    self._a5_smla_metadata.zero_()
+                    return
+                length_rows = self._a5_smla_length_rows[:metadata_tokens]
+                assert self._device_backend is not None
+                value = self._device_backend.mixed_quant_sparse_flash_mla_metadata(
+                    length_rows,
+                    length_rows,
+                    cu_seqlens_q=common.query_start_loc[: num_reqs + 1].int().contiguous(),
+                    num_heads_q=64,
+                    num_heads_kv=1,
+                    head_dim=512,
+                    quant_mode=1,
+                    layout_q="TND",
+                    layout_kv="PA_BBND",
+                    has_ori_kv=True,
+                    has_cmp_kv=True,
+                )
+                self._a5_smla_metadata.copy_(value)
+
+            smla_metadata = self._publish_task(
+                batch_shared,
+                "smla:a5",
+                self._a5_smla_metadata,
+                DeviceMetadataStage.ATTENTION,
+                build_a5_smla_metadata,
+            )
+
+        if (
+            self._build_query_metadata
+            and self._supports_device_ops
+            and not self._uses_a5_packed_cache
+            and cache_kind in {"swa", "long_kv"}
+        ):
             has_compressed = operator_ratio in (1, 2)
             cmp_seq_lens = coordinates["cache_seq_lens"] if has_compressed else None
             cmp_residual = cmp_residual_buffer
@@ -927,25 +1200,64 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         if self._build_query_metadata and self._supports_device_ops and cache_kind == "index_k":
             residual = cmp_residual_buffer
 
-            def build_qli_metadata() -> None:
-                value = torch.ops._C_ascend.npu_quant_lightning_indexer_v2_metadata(
-                    int(_config_value(text_config, "index_n_heads")),
-                    1,
-                    int(_config_value(text_config, "index_head_dim")),
-                    index_topk,
-                    2,
-                    cu_seqlens_q=common.query_start_loc[: num_reqs + 1].int(),
-                    seqused_k=coordinates["cache_seq_lens"],
-                    cmp_residual_k=residual,
-                    batch_size=num_reqs,
-                    max_seqlen_q=int(getattr(common, "max_query_len", 0)),
-                    max_seqlen_k=coordinates["max_cache_seq_len"],
-                    layout_q="TND",
-                    layout_k="PA_BBND",
-                    mask_mode=3,
-                    cmp_ratio=ratio,
+            if self._uses_a5_packed_cache:
+                candidate_source = int(_config_value(text_config, "candidate_source_layer_id", -1))
+                ratios = _config_value(text_config, "compress_ratios")
+                emits_candidates = (
+                    ratios is not None
+                    and 0 <= candidate_source < len(ratios)
+                    and int(ratios[candidate_source]) == ratio
                 )
-                self._qli_metadata.copy_(value)
+                candidate_blocks = int(_config_value(text_config, "candidate_topk_blocks")) if emits_candidates else -1
+                candidate_block_size = (
+                    int(_config_value(text_config, "candidate_block_size")) if emits_candidates else -1
+                )
+
+                def build_qli_metadata() -> None:
+                    if num_actual_tokens == 0 and not metadata_in_graph:
+                        self._qli_metadata.zero_()
+                        return
+                    assert self._device_backend is not None
+                    value = self._device_backend.quant_lightning_indexer_metadata(
+                        cu_seqlens_q=common.query_start_loc[: num_reqs + 1].int(),
+                        seqused_k=coordinates["cache_seq_lens"],
+                        cmp_residual_k=residual,
+                        batch_size=num_reqs,
+                        max_seqlen_q=-1,
+                        max_seqlen_k=-1,
+                        num_heads_q=int(_config_value(text_config, "index_n_heads")),
+                        num_heads_k=1,
+                        head_dim=int(_config_value(text_config, "index_head_dim")),
+                        topk=index_topk,
+                        mask_mode=3,
+                        cmp_ratio=ratio,
+                        layout_q="TND",
+                        layout_k="PA_BBND",
+                        candidate_topk_blocks=candidate_blocks,
+                        candidate_block_size=candidate_block_size,
+                    )
+                    self._qli_metadata.copy_(value)
+            else:
+
+                def build_qli_metadata() -> None:
+                    value = torch.ops._C_ascend.npu_quant_lightning_indexer_v2_metadata(
+                        int(_config_value(text_config, "index_n_heads")),
+                        1,
+                        int(_config_value(text_config, "index_head_dim")),
+                        index_topk,
+                        2,
+                        cu_seqlens_q=common.query_start_loc[: num_reqs + 1].int(),
+                        seqused_k=coordinates["cache_seq_lens"],
+                        cmp_residual_k=residual,
+                        batch_size=num_reqs,
+                        max_seqlen_q=int(getattr(common, "max_query_len", 0)),
+                        max_seqlen_k=coordinates["max_cache_seq_len"],
+                        layout_q="TND",
+                        layout_k="PA_BBND",
+                        mask_mode=3,
+                        cmp_ratio=ratio,
+                    )
+                    self._qli_metadata.copy_(value)
 
             qli_metadata = self._publish_task(
                 batch_shared,
@@ -971,15 +1283,36 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                 full_source_cos, full_source_sin = self._c2_full_source_rope
             else:
                 full_source_cos = full_source_sin = None
+            skip_ring_update = bool(kwargs.get("skip_ring_state_update", False))
 
             def build_c2_metadata() -> None:
+                if self._uses_a5_packed_cache and full_source_cos is not None and full_source_sin is not None:
+                    build_c2_ring_metadata(
+                        common.query_start_loc,
+                        seq_lens,
+                        input_positions,
+                        common.block_table_tensor,
+                        full_source_cos,
+                        full_source_sin,
+                        num_reqs,
+                        num_input_tokens,
+                        num_actual_reqs,
+                        num_actual_tokens,
+                        skip_update=skip_ring_update,
+                        ring_metadata_output=ring_meta,
+                        complete_mask_output=self._c2_complete_mask[:num_input_tokens],
+                        source_positions_output=self._c2_source_positions[:num_input_tokens],
+                        cos_output=self._c2_source_cos[:num_input_tokens],
+                        sin_output=self._c2_source_sin[:num_input_tokens],
+                    )
+                    return
                 starts = common.query_start_loc[:num_reqs].int()
                 ends = common.query_start_loc[1 : num_reqs + 1].int()
                 query_lens = ends - starts
                 live = torch.arange(num_reqs, device=starts.device) < num_actual_reqs
                 used = (ends.clamp_max(num_actual_tokens) - starts).clamp_min(0)
                 used = torch.where(live, used, 0)
-                if kwargs.get("skip_ring_state_update", False):
+                if skip_ring_update:
                     used = torch.zeros_like(used)
                 ring_meta[0].copy_((seq_lens - query_lens).clamp_min(0))
                 ring_meta[1].copy_(used)
@@ -989,7 +1322,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                 valid_end = common.query_start_loc[num_actual_reqs].clamp_max(num_actual_tokens)
                 valid = torch.arange(num_input_tokens, device=input_positions.device) < valid_end
                 complete = (input_positions.remainder(2) == 1) & valid
-                if kwargs.get("skip_ring_state_update", False):
+                if skip_ring_update:
                     complete = torch.zeros_like(complete)
                 self._c2_complete_mask[:num_input_tokens].copy_(complete)
                 self._c2_source_positions[:num_input_tokens].copy_(
@@ -1036,10 +1369,11 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             if self._supports_device_ops:
                 c2_source_cos = self._c2_source_cos[:num_input_tokens]
                 c2_source_sin = self._c2_source_sin[:num_input_tokens]
-            c2_metadata_group_id = id(self._c2_complete_mask)
+            c2_metadata_group_id = None if metadata_in_graph else id(self._c2_complete_mask)
         return AscendDSAV41Metadata(
             block_table=common.block_table_tensor[:num_reqs],
             slot_mapping=slots,
+            flat_slot_mapping=flat_slots,
             compress_ratio=ratio,
             storage_block_size=storage_block_size,
             is_compressor_state=is_compressor_state,

@@ -249,6 +249,10 @@ def test_sparse_mla_full_forward_uses_real_rows_and_latent_values(graph_mode, em
     indexer.head_dim = latent_dim
     indexer.enable_sparse_li_c8 = False
     config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=1,
+        ),
         kv_transfer_config=None,
         weight_transfer_config=None,
         model_config=SimpleNamespace(hf_config=SimpleNamespace()),
