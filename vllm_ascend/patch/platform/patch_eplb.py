@@ -34,7 +34,11 @@ from vllm_ascend.distributed.eplb.eplb_state import (
     AscendEplbState,
     refresh_model_routing_tables,
 )
-from vllm_ascend.distributed.eplb.explicit_transfer import stage_explicit_layer_transfer
+from vllm_ascend.distributed.eplb.explicit_transfer import (
+    commit_staged_expert_weights,
+    requires_format_aware_copy,
+    stage_explicit_layer_transfer,
+)
 from vllm_ascend.distributed.eplb.policy import PreparedLoadStats
 
 _PATCH_MARKER = "_vllm_ascend_eplb_patch"
@@ -663,13 +667,23 @@ def _move_changed_layer_to_workspace(model_state, ep_rank: int) -> None:
         assert result.new_physical_to_logical_map is not None
         assert result.new_logical_to_physical_map is not None
         assert result.new_logical_replica_count is not None
-        _eplb_state.move_from_buffer(
-            expert_weights=model_state.model.expert_weights[result.layer_idx],
-            expert_weights_buffers=model_state.expert_buffer,
-            transfer_metadata=result.transfer_metadata,
-            new_indices=result.new_physical_to_logical_map.numpy(),
-            ep_rank=ep_rank,
-        )
+        expert_weights = model_state.model.expert_weights[result.layer_idx]
+        if requires_format_aware_copy(expert_weights):
+            commit_staged_expert_weights(
+                expert_weights=expert_weights,
+                expert_weight_buffers=model_state.expert_buffer,
+                transfer_metadata=result.transfer_metadata,
+                new_indices=result.new_physical_to_logical_map.numpy(),
+                ep_rank=ep_rank,
+            )
+        else:
+            _eplb_state.move_from_buffer(
+                expert_weights=expert_weights,
+                expert_weights_buffers=model_state.expert_buffer,
+                transfer_metadata=result.transfer_metadata,
+                new_indices=result.new_physical_to_logical_map.numpy(),
+                ep_rank=ep_rank,
+            )
         _commit_ascend_maps_for_layer(
             model_state,
             result.new_physical_to_logical_map,
