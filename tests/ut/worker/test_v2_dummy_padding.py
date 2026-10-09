@@ -6,6 +6,7 @@ import pytest
 import torch
 from vllm.config import CUDAGraphMode
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
+from vllm.v1.worker.gpu.input_batch import set_dummy_context
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.utils import get_uniform_decode_token_count
 
@@ -151,23 +152,21 @@ def test_mixed_dp_dummy_keeps_graphs_and_reuses_sync(buffers, runner, draft_mode
 
 
 @pytest.mark.parametrize(
-    "kwargs,mode,pcp,ubatch,is_hybrid,expected",
+    "kwargs,mode,pcp,is_hybrid,expected",
     [
-        ({}, CUDAGraphMode.PIECEWISE, None, None, False, 1),
-        ({"uniform_decode": True}, CUDAGraphMode.PIECEWISE, None, None, False, 2),
-        ({"context_len": 1}, CUDAGraphMode.PIECEWISE, None, None, False, None),
-        ({"is_profile": True}, CUDAGraphMode.PIECEWISE, None, None, False, None),
-        ({}, CUDAGraphMode.PIECEWISE, object(), None, False, None),
-        ({}, CUDAGraphMode.PIECEWISE, None, object(), False, None),
-        ({}, CUDAGraphMode.PIECEWISE, None, None, True, None),
-        ({}, CUDAGraphMode.FULL_AND_PIECEWISE, None, None, False, None),
-        ({}, CUDAGraphMode.NONE, None, None, False, None),
+        ({}, CUDAGraphMode.PIECEWISE, None, False, 1),
+        ({"uniform_decode": True}, CUDAGraphMode.PIECEWISE, None, False, 2),
+        ({"context_len": 1}, CUDAGraphMode.PIECEWISE, None, False, 1),
+        ({"is_profile": True}, CUDAGraphMode.PIECEWISE, None, False, 1),
+        ({}, CUDAGraphMode.PIECEWISE, object(), False, None),
+        ({}, CUDAGraphMode.PIECEWISE, None, True, None),
+        ({}, CUDAGraphMode.FULL_AND_PIECEWISE, None, False, None),
+        ({}, CUDAGraphMode.NONE, None, False, None),
     ],
 )
-def test_dummy_scope_restores_state_on_exception(buffers, runner, kwargs, mode, pcp, ubatch, is_hybrid, expected):
+def test_dummy_scope_restores_state_on_exception(buffers, runner, kwargs, mode, pcp, is_hybrid, expected):
     runner.compilation_config.cudagraph_mode = mode
     runner.pcp_manager = pcp
-    runner.ubatch_runner = ubatch
     runner.model_config.is_hybrid = is_hybrid
     buffers.dummy_num_tokens = 7
 
@@ -181,6 +180,93 @@ def test_dummy_scope_restores_state_on_exception(buffers, runner, kwargs, mode, 
     ):
         runner._dummy_run(1, **kwargs)
     assert buffers.dummy_num_tokens == 7
+
+
+@pytest.mark.parametrize("inner_mode,expected", [(CUDAGraphMode.PIECEWISE, 6), (CUDAGraphMode.NONE, None)])
+def test_nested_dummy_runs_restore_outer_query_tokens(buffers, runner, inner_mode, expected):
+    buffers.dummy_num_tokens = 7
+
+    def execute_dummy(num_tokens, **kwargs):
+        if num_tokens == 2:
+            assert buffers.dummy_num_tokens == 2
+            with (
+                patch.object(runner.compilation_config, "cudagraph_mode", inner_mode),
+                pytest.raises(RuntimeError, match="inner dummy"),
+            ):
+                runner._dummy_run(6)
+            assert buffers.dummy_num_tokens == 2
+            return None, None
+        assert buffers.dummy_num_tokens == expected
+        raise RuntimeError("inner dummy")
+
+    with patch.object(GPUModelRunner, "_dummy_run", side_effect=execute_dummy):
+        runner._dummy_run(2)
+    assert buffers.dummy_num_tokens == 7
+
+
+@pytest.mark.parametrize("num_tokens,uniform_decode", [(1, False), (1, True), (6, True), (16, False)])
+def test_profile_dummy_keeps_eager_layout(buffers, runner, num_tokens, uniform_decode):
+    target = _make_graph_manager(buffers, CUDAGraphMode.PIECEWISE, runner.decode_query_len, 16)
+
+    def execute_dummy(num_tokens, **kwargs):
+        assert kwargs["is_profile"]
+        query_tokens = max(num_tokens, runner.decode_query_len) if uniform_decode else num_tokens
+        num_reqs = query_tokens // runner.decode_query_len if uniform_decode else min(query_tokens, runner.max_num_reqs)
+        desc, sync = dispatch_cg_and_sync_dp(
+            target,
+            num_reqs,
+            query_tokens,
+            runner.decode_query_len if uniform_decode else None,
+            1,
+            0,
+            need_eager=kwargs["is_profile"],
+        )
+        assert desc.cg_mode == CUDAGraphMode.NONE
+        assert sync is None
+        batch = AscendInputBatch.make_dummy(num_reqs, desc.num_tokens, buffers)
+        assert batch.num_tokens == batch.num_tokens_after_padding == query_tokens
+        assert len(batch.input_ids) == len(batch.positions) == query_tokens
+        assert batch.query_start_loc_np[-1] == query_tokens
+        np.testing.assert_array_equal(batch.seq_lens_np, batch.num_scheduled_tokens)
+        return None, None
+
+    with (
+        patch.object(GPUModelRunner, "_dummy_run", side_effect=execute_dummy),
+        patch("vllm_ascend.worker.v2.input_batch.update_cos_sin"),
+    ):
+        runner._dummy_run(num_tokens, uniform_decode=uniform_decode, is_profile=True)
+    assert buffers.dummy_num_tokens is None
+
+
+@pytest.mark.parametrize("num_tokens,expected_mode", [(16, CUDAGraphMode.PIECEWISE), (32, CUDAGraphMode.NONE)])
+def test_context_dummy_keeps_capture_and_tail_layouts(buffers, runner, num_tokens, expected_mode):
+    target = _make_graph_manager(buffers, CUDAGraphMode.PIECEWISE, runner.decode_query_len, 16)
+    context_len = 8
+
+    def execute_dummy(num_tokens, **kwargs):
+        assert buffers.dummy_num_tokens == num_tokens
+        num_reqs = min(num_tokens, runner.max_num_reqs)
+        desc, _ = dispatch_cg_and_sync_dp(target, num_reqs, num_tokens, None, 1, 0)
+        assert desc.cg_mode == expected_mode
+        batch = AscendInputBatch.make_dummy(num_reqs, desc.num_tokens, buffers, desc.max_query_len)
+        assert batch.num_tokens == batch.num_tokens_after_padding == num_tokens
+        blocks = SimpleNamespace(
+            input_block_tables=[torch.zeros((num_reqs, 8), dtype=torch.int32)],
+            kernel_block_sizes=[16],
+            blocks_per_kv_block=[1],
+        )
+        set_dummy_context(batch, blocks, kwargs["context_len"], 64, 128)
+        expected_positions = context_len + np.tile(np.arange(num_tokens // num_reqs), num_reqs)
+        np.testing.assert_array_equal(batch.positions.numpy(), expected_positions)
+        np.testing.assert_array_equal(batch.seq_lens.numpy(), batch.num_scheduled_tokens + context_len)
+        return None, None
+
+    with (
+        patch.object(GPUModelRunner, "_dummy_run", side_effect=execute_dummy),
+        patch("vllm_ascend.worker.v2.input_batch.update_cos_sin"),
+    ):
+        runner._dummy_run(num_tokens, context_len=context_len)
+    assert buffers.dummy_num_tokens is None
 
 
 def test_dummy_slot_mapping_uses_padded_persistent_buffer(buffers, runner):

@@ -34,6 +34,7 @@ def _make_runner(need_timing: bool = True):
     runner.attn_groups = []
     runner.adaptive_verification = None
     runner.input_buffers = SimpleNamespace(dummy_num_tokens=None)
+    runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE)
     runner.use_fia = False
     runner.sync_spec_pp_cpu_counts = False
     # Set by NPUModelRunner.__init__ on real instances.

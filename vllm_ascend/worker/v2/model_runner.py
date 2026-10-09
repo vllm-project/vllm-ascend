@@ -751,10 +751,14 @@ class NPUModelRunner(GPUModelRunner):
             valid_state_slots=valid_state_slots,
         )
         prepare_v41_dummy_ring_state(self, input_batch.num_reqs)
+        slot_mappings = self._maybe_extend_slot_mappings(input_batch, slot_mappings)
+        return block_tables, slot_mappings
+
+    def _maybe_extend_slot_mappings(self, input_batch: AscendInputBatch, slot_mappings: torch.Tensor) -> torch.Tensor:
         if input_batch.num_tokens_after_padding > input_batch.num_tokens:
             # The parent already filled the entire persistent slot buffer.
             slot_mappings = self.block_tables.slot_mappings[:, : input_batch.num_tokens_after_padding]
-        return block_tables, slot_mappings
+        return slot_mappings
 
     def _lmhead_tp_max_num_logits(self) -> int:
         """Logits row capacity every rank agrees on (config-derived:
@@ -810,9 +814,7 @@ class NPUModelRunner(GPUModelRunner):
 
     @contextmanager
     def _cap_parallel_draft_dummy_reqs(self, uniform_decode: bool):
-        # TODO: Remove this context and its use once main2main includes
-        # https://github.com/vllm-project/vllm/pull/56448. Until then,
-        # profiling can exceed the speculator's query buffer.
+        # Profiling can exceed the speculator's query buffer.
         original_max_num_reqs = self.max_num_reqs
         if self.speculator is not None and not uniform_decode:
             # Other speculators use one query row per request in vLLM v0.30.0.
@@ -822,6 +824,28 @@ class NPUModelRunner(GPUModelRunner):
             yield
         finally:
             self.max_num_reqs = original_max_num_reqs
+
+    @contextmanager
+    def _preserve_dummy_query_tokens(self, num_tokens: int, uniform_decode: bool):
+        dummy_query_tokens: int | None = None
+        if (
+            # FULL modes can also pad requests; only change token-only PIECEWISE padding.
+            self.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
+            # PCP prepares and partitions its own dummy input layout.
+            and self.pcp_manager is None
+            # Hybrid models also need recurrent-state metadata to stay aligned.
+            # TODO: Verify whether this hybrid-model guard can be removed.
+            and not self.model_config.is_hybrid
+        ):
+            # Match the logical token count in the upstream dummy scheduler.
+            dummy_query_tokens = max(num_tokens, self.decode_query_len) if uniform_decode else num_tokens
+
+        previous_dummy_tokens = self.input_buffers.dummy_num_tokens
+        self.input_buffers.dummy_num_tokens = dummy_query_tokens
+        try:
+            yield
+        finally:
+            self.input_buffers.dummy_num_tokens = previous_dummy_tokens
 
     @step_eplb_after(is_dummy=True)
     def _dummy_run(
@@ -850,39 +874,25 @@ class NPUModelRunner(GPUModelRunner):
                 "the profile-run marker, which makes XLite bypass its graph path."
             )
         load_balance_ctx = override_mrv2_in_profile_run(True) if profile_adaptive_tail else nullcontext()
-        # Preserve query widths when PIECEWISE pads the dummy model inputs.
-        dummy_tokens = max(num_tokens, self.decode_query_len) if uniform_decode else num_tokens
-        previous_dummy_tokens = self.input_buffers.dummy_num_tokens
-        self.input_buffers.dummy_num_tokens = (
-            dummy_tokens
-            if (
-                not is_profile
-                and context_len == 0
-                and self.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
-                and self.pcp_manager is None
-                and self.ubatch_runner is None
-                and not self.model_config.is_hybrid
+        with (
+            # Preserve scheduled query tokens before PIECEWISE graph padding.
+            self._preserve_dummy_query_tokens(num_tokens, uniform_decode),
+            # TODO: Remove this context and its use after the next main2main
+            # includes https://github.com/vllm-project/vllm/pull/56448.
+            self._cap_parallel_draft_dummy_reqs(uniform_decode),
+            skip_ring_state_update(skip_ring),
+            load_balance_ctx,
+        ):
+            return super()._dummy_run(
+                num_tokens,
+                *args,
+                skip_attn=skip_attn,
+                uniform_decode=uniform_decode,
+                context_len=context_len,
+                skip_eplb=True,
+                is_profile=is_profile,
+                **kwargs,
             )
-            else None
-        )
-        try:
-            with (
-                self._cap_parallel_draft_dummy_reqs(uniform_decode),
-                skip_ring_state_update(skip_ring),
-                load_balance_ctx,
-            ):
-                return super()._dummy_run(
-                    num_tokens,
-                    *args,
-                    skip_attn=skip_attn,
-                    uniform_decode=uniform_decode,
-                    context_len=context_len,
-                    skip_eplb=True,
-                    is_profile=is_profile,
-                    **kwargs,
-                )
-        finally:
-            self.input_buffers.dummy_num_tokens = previous_dummy_tokens
 
     def postprocess_sampled(
         self,

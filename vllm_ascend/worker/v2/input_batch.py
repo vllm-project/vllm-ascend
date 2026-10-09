@@ -61,6 +61,8 @@ class AscendInputBuffers(InputBuffers):
         # define seq_lens_np for easier calculation with numpy.
         self.seq_lens_np: np.ndarray = self.seq_lens_cpu.numpy()
 
+        # Logical query token count, scoped to _dummy_run before graph padding.
+        # None keeps the default layout for other dummy/capture paths.
         self.dummy_num_tokens: int | None = None
 
 
@@ -86,6 +88,9 @@ class AscendInputBatch(InputBatch):
         max_query_len: int | None = None,
     ) -> "AscendInputBatch":
         """Override the make_dummy method to calculate seq_lens_np."""
+        # The incoming count includes graph padding. Save it for the model input
+        # views below, while building query metadata from the original scheduled
+        # count used for DP synchronization. Only _dummy_run supplies that override.
         num_tokens_after_padding = num_tokens
         if input_buffers.dummy_num_tokens is not None:
             # PIECEWISE pads model inputs without adding scheduled queries.
