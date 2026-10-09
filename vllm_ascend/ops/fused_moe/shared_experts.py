@@ -33,6 +33,7 @@ from vllm_ascend.ops.fused_moe.dataclass.shared_experts import (
     PreparedSharedExpertInput,
     RoutedMoEMilestones,
 )
+from vllm_ascend.ops.fused_moe.moe_utils import _pad_tokens_with_cat
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import npu_stream_switch, shared_experts_calculation_stream
 
@@ -197,7 +198,7 @@ class AscendSharedExperts:
         tp_size = tp_group.world_size
         pad_size = (tp_size - original_num_tokens % tp_size) % tp_size
         if pad_size > 0:
-            hidden_states = F.pad(hidden_states, (0, 0, 0, pad_size))
+            hidden_states = _pad_tokens_with_cat(hidden_states, original_num_tokens + pad_size)
         hidden_states = torch.tensor_split(
             hidden_states,
             tp_size,

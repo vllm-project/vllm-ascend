@@ -11,12 +11,12 @@ from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel import mla_cp
+from vllm_ascend.attention.context_parallel.common_cp import CPKVScope
 from vllm_ascend.attention.context_parallel.mla_cp import (
     AscendMLADCPDecodeMetadata,
     AscendMlaDCPImpl,
     AscendMlaDCPMetadataBuilder,
     DCPChunkedContextMetadata,
-    MLASplitAttentionKind,
 )
 from vllm_ascend.attention.mla_v1 import (
     AscendMLADecodeMetadata,
@@ -197,7 +197,7 @@ def test_mla_dcp_uses_padded_local_chunk_lengths() -> None:
 
 @patch(
     "vllm_ascend.attention.context_parallel.mla_cp._EXTRA_CTX",
-    SimpleNamespace(is_draft_model=False, capturing=False),
+    SimpleNamespace(is_draft_model=False, is_draft_model_prefill=False, capturing=False),
 )
 @patch("vllm_ascend.attention.context_parallel.mla_cp.torch_npu.npu_fused_infer_attention_score")
 def test_mla_dcp_mixed_cache_hit_batch_uses_decode_bsnd_metadata(mock_fia) -> None:
@@ -209,7 +209,7 @@ def test_mla_dcp_mixed_cache_hit_batch_uses_decode_bsnd_metadata(mock_fia) -> No
     impl.qk_rope_head_dim = 2
     impl.scale = 1.0
     impl.speculative_config = SimpleNamespace(num_speculative_tokens=3)
-    impl._merge_dcp_attention_output = lambda output, _lse, _rank: output
+    impl._merge_dcp_attention_output = lambda output, _lse: output
     impl._v_up_proj_batch_major = lambda output: output
 
     decode = AscendMLADCPDecodeMetadata(
@@ -268,7 +268,7 @@ def test_mla_dcp_mixed_cache_hit_batch_uses_decode_bsnd_metadata(mock_fia) -> No
 
 @patch(
     "vllm_ascend.attention.context_parallel.mla_cp._EXTRA_CTX",
-    SimpleNamespace(is_draft_model=False, capturing=False),
+    SimpleNamespace(is_draft_model=False, is_draft_model_prefill=False, capturing=False),
 )
 @patch("vllm_ascend.attention.context_parallel.mla_cp.torch_npu.npu_fused_infer_attention_score")
 def test_mla_dcp_uses_native_global_query_heads_for_fia(mock_fia) -> None:
@@ -283,7 +283,7 @@ def test_mla_dcp_uses_native_global_query_heads_for_fia(mock_fia) -> None:
 
     merged = {}
 
-    def merge(output, softmax_lse, _rank):
+    def merge(output, softmax_lse):
         merged["output_shape"] = output.shape
         merged["softmax_lse_shape"] = softmax_lse.shape
         return output
@@ -346,6 +346,25 @@ def test_mla_dcp_uses_native_global_query_heads_for_fia(mock_fia) -> None:
 
 
 @pytest.mark.parametrize(
+    "use_spec_decode,is_draft,is_prefill,expected",
+    [
+        pytest.param(True, False, False, True, id="speculative-target"),
+        pytest.param(True, True, False, False, id="draft-decode"),
+        pytest.param(False, True, True, True, id="draft-prefill"),
+    ],
+)
+def test_mla_split_selection_matches_shared_policy(use_spec_decode, is_draft, is_prefill, expected):
+    impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
+    impl.speculative_config = object() if use_spec_decode else None
+    metadata = SimpleNamespace(causal=True, decode=SimpleNamespace(actual_seq_lengths_q=[1, 2]))
+    with patch(
+        "vllm_ascend.attention.context_parallel.mla_cp._EXTRA_CTX",
+        SimpleNamespace(is_draft_model=is_draft, is_draft_model_prefill=is_prefill, capturing=True),
+    ):
+        assert impl._decode_requires_current_kv(metadata) is expected
+
+
+@pytest.mark.parametrize(
     "dcp_size,dcp_rank,workspace_sizes,cached_size",
     [
         (1, 0, None, None),
@@ -357,14 +376,16 @@ def test_mla_dcp_uses_native_global_query_heads_for_fia(mock_fia) -> None:
         (2, 1, (64, 128), 256),
     ],
 )
+@pytest.mark.parametrize("pcp_size", [1, 2])
 @pytest.mark.parametrize("history_dtype", [torch.bfloat16, torch.float16, torch.float32])
 def test_split_decode_packs_on_main_overlapping_current_attention(
-    dcp_size, dcp_rank, workspace_sizes, cached_size, history_dtype
+    dcp_size, dcp_rank, workspace_sizes, cached_size, history_dtype, pcp_size
 ):
     import vllm_ascend.attention.context_parallel.mla_cp as mla_cp
 
     impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
     impl.scale = 0.5
+    impl.speculative_config = None
     impl.num_heads = 2
     impl.num_kv_heads = 1
     impl.kv_lora_rank = 4
@@ -373,8 +394,15 @@ def test_split_decode_packs_on_main_overlapping_current_attention(
     impl.dcp_rank = dcp_rank
     impl.dcp_device_group = object()
     impl.dcp_group = SimpleNamespace(unique_name="dcp-test")
-    q_nope = torch.arange(2 * 2 * dcp_size * 4).float().view(2, 2 * dcp_size, 4)
-    q_pe = torch.zeros(2, 2 * dcp_size, 2)
+    if pcp_size > dcp_size:
+        pytest.skip("PCP ranks belong to the physical DCP group")
+    tp_size = dcp_size // pcp_size
+    tp_rank = dcp_rank % tp_size
+    impl.pcp_group = SimpleNamespace(world_size=pcp_size, unique_name="pcp-test")
+    impl.tp_group = SimpleNamespace(world_size=tp_size, rank_in_group=tp_rank, unique_name="tp-test")
+    query_head_count = impl.num_heads * tp_size
+    q_nope = torch.arange(2 * query_head_count * 4).float().view(2, query_head_count, 4)
+    q_pe = torch.zeros(2, query_head_count, 2)
     current_k = torch.ones(2, 1, 4)
     current_pe = torch.ones(2, 1, 2)
     decode = AscendMLADCPDecodeMetadata(
@@ -387,8 +415,8 @@ def test_split_decode_packs_on_main_overlapping_current_attention(
         cp_history_seq_len=[2],
     )
     decode.attn_mask = torch.zeros(2, 2, dtype=torch.bool)
-    history_output = torch.ones(2, 2 * dcp_size, 4, dtype=history_dtype)
-    history_lse = torch.zeros(2, 2 * dcp_size, 1)
+    history_output = torch.ones(2, query_head_count, 4, dtype=history_dtype)
+    history_lse = torch.zeros(2, query_head_count, 1)
     current_output = torch.full((2, 2, 4), 3.0)
     current_lse = torch.zeros(2, 2, 1)
     transferred = torch.ones(dcp_size, 2, 2, 5)
@@ -433,10 +461,10 @@ def test_split_decode_packs_on_main_overlapping_current_attention(
         if workspace_sizes is not None:
             assert set(graph_params.workspaces) == {2}
             assert graph_params.workspaces[2].numel() == (cached_size or max(workspace_sizes))
-        expected_stream = "main" if kwargs["attention_kind"] == MLASplitAttentionKind.HISTORY else "attn"
+        expected_stream = "main" if kwargs["attention_kind"] == CPKVScope.HISTORY else "attn"
         assert active[0] == expected_stream
         events.append(kwargs["attention_kind"])
-        if kwargs["attention_kind"] == MLASplitAttentionKind.HISTORY:
+        if kwargs["attention_kind"] == CPKVScope.HISTORY:
             torch.testing.assert_close(q, q_nope)
             torch.testing.assert_close(q_rope, q_pe)
             assert kwargs["actual_seq_lengths_kv"] == [2]
@@ -446,7 +474,7 @@ def test_split_decode_packs_on_main_overlapping_current_attention(
             assert kwargs["attn_mask"] is None
             assert kwargs["sparse_mode"] == 0
             return history_output, history_lse
-        start = dcp_rank * impl.num_heads
+        start = (tp_rank if pcp_size > 1 else dcp_rank) * impl.num_heads
         torch.testing.assert_close(q, q_nope[:, start : start + impl.num_heads])
         torch.testing.assert_close(q_rope, q_pe[:, start : start + impl.num_heads])
         torch.testing.assert_close(k, current_k)
@@ -459,11 +487,15 @@ def test_split_decode_packs_on_main_overlapping_current_attention(
         assert kwargs["sparse_mode"] == 3
         return current_output, current_lse
 
-    def communicate(out, lse, size, scatter_dim, group_name, defer_combine):
+    def communicate(out, lse, size, scatter_dim, group_name, pcp_group_name=None, defer_combine=False):
         assert active[0] == "main"
         assert out is history_output and lse is history_lse
-        assert size == dcp_size and scatter_dim == 1 and defer_combine
-        assert group_name == ("dcp-test" if dcp_size > 1 else "")
+        assert size == tp_size and scatter_dim == 1 and defer_combine
+        if pcp_size > 1:
+            assert group_name == "tp-test" and pcp_group_name == "pcp-test"
+        else:
+            assert group_name == ("dcp-test" if dcp_size > 1 else "")
+            assert pcp_group_name is None
         events.append("history_collective")
         return transferred
 
@@ -487,16 +519,18 @@ def test_split_decode_packs_on_main_overlapping_current_attention(
     impl._v_up_proj_batch_major = Mock(side_effect=lambda x: x)
     with (
         patch.object(
-            mla_cp, "_EXTRA_CTX", SimpleNamespace(capturing=workspace_sizes is not None, is_draft_model=False)
+            mla_cp,
+            "_EXTRA_CTX",
+            SimpleNamespace(capturing=workspace_sizes is not None, is_draft_model=False, is_draft_model_prefill=False),
         ),
         patch.object(mla_cp, "get_graph_params", return_value=graph_params),
         patch.object(mla_cp.torch_npu, "_npu_fused_infer_attention_score_get_max_workspace", workspace_query),
-        patch.object(mla_cp, "_dcp_mtp_comm_stream", return_value=attn),
+        patch.object(mla_cp, "cp_decode_comm_stream", return_value=attn),
         patch.object(torch.npu, "current_stream", return_value=main),
         patch.object(torch.npu, "stream", side_effect=on_stream),
         patch.object(torch.Tensor, "record_stream", autospec=True) as record_stream,
-        patch("torch.ops.vllm.sfa_dcp_a2a_fused", side_effect=communicate) as history_update,
-        patch.object(mla_cp, "fused_sfa_dcp_lse_combine", side_effect=merge) as update,
+        patch("torch.ops.vllm.dcp_a2a_fused", side_effect=communicate) as history_update,
+        patch.object(mla_cp, "fused_dcp_lse_combine", side_effect=merge) as update,
         patch("torch_npu.npu_attention_update", side_effect=AssertionError("unexpected NPU update")),
     ):
         metadata = SimpleNamespace(decode=decode, causal=True)
@@ -520,10 +554,10 @@ def test_split_decode_packs_on_main_overlapping_current_attention(
     update.assert_called_once()
     assert record_stream.call_count == 7
     assert events == [
-        MLASplitAttentionKind.HISTORY,
+        CPKVScope.HISTORY,
         "history_ready",
         ("attn_wait", "ready"),
-        MLASplitAttentionKind.CURRENT,
+        CPKVScope.CURRENT,
         "attn_done",
         "history_collective",
         ("main_wait", "done"),

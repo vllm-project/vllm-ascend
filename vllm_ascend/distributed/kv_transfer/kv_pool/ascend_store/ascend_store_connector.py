@@ -40,6 +40,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     get_layerwise_protocol,
     validate_layerwise_topology,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cache import DSparkPrefixKeys
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendStoreKVConnectorWorkerMetadata,
     is_kv_save_role,
@@ -108,6 +109,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
         self.use_layerwise = extra_config.get("use_layerwise", False)
         self.consumer_is_to_put = extra_config.get("consumer_is_to_put", False)
+        self.memcache_dp_init_barrier = extra_config.get("memcache_dp_init_barrier", True)
         self.backend_name = extra_config.get("backend", "mooncake").lower()
         self.layerwise_protocol = get_layerwise_protocol(self.backend_name)
         self.layerwise_data_plane = get_layerwise_data_plane(self.layerwise_protocol)
@@ -132,6 +134,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
 
         self.connector_scheduler: KVPoolScheduler | None = None
         self.connector_worker: KVPoolWorker | None = None
+        self.dspark_prefix_cache_enabled = False
 
         if role == KVConnectorRole.SCHEDULER:
             assert kv_cache_config is not None
@@ -141,10 +144,47 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
                 vllm_config,
                 self.use_layerwise,
                 kv_cache_config,
+                memcache_dp_init_barrier=self.memcache_dp_init_barrier,
             )
             assert self.connector_worker is not None
             if not self.use_layerwise and vllm_config.parallel_config.rank == 0:
                 self.lookup_server = LookupKeyServer(self.connector_worker, vllm_config)
+
+    def configure_dspark_prefix_cache(self, vllm_config: VllmConfig) -> bool:
+        """Opt the SFA DSpark producer into joint external prefix reuse.
+
+        MultiConnector passes the parent config because a store child's config
+        alone does not identify its SFA PD sibling. Other serving paths do not
+        change their keys or layerwise hook layout.
+        """
+        if not self.use_layerwise or self.layerwise_data_plane != "gva" or self.kv_role != "kv_producer":
+            return False
+        keys = DSparkPrefixKeys.from_config(vllm_config)
+        if keys is None:
+            return False
+        self.dspark_prefix_cache_enabled = True
+        if self.connector_scheduler is not None:
+            self.connector_scheduler.dspark_prefix_keys = keys
+            # Retain a final prompt block for safe target/auxiliary recompute.
+            self.connector_scheduler.use_eagle = True
+        if self.connector_worker is not None:
+            self.connector_worker.configure_dspark_prefix_cache(keys)
+        return True
+
+    def restore_dspark_prefix(self, metadata: Any, request_id: str, offset: int, block_ids: Any) -> int:
+        assert self.connector_worker is not None
+        cache = self.connector_worker.dspark_prefix_cache
+        request = next((request for request in metadata.requests if request.req_id == request_id), None)
+        if cache is None or request is None:
+            raise RuntimeError("DSpark prefix hit has no registered draft cache or load metadata")
+        return cache.restore(request, offset, block_ids)
+
+    def save_dspark_prefix(self, metadata: Any, request_id: str, through_tokens: int, block_ids: Any) -> None:
+        assert self.connector_worker is not None
+        cache = self.connector_worker.dspark_prefix_cache
+        request = next((request for request in metadata.requests if request.req_id == request_id), None)
+        if cache is not None and request is not None:
+            cache.save(request, through_tokens, block_ids)
 
     ############################################################
     # Scheduler Side Methods
@@ -254,9 +294,22 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_worker is not None
         self.connector_worker.wait_for_previous_save()
 
+    def bind_connector_metadata(self, connector_metadata: KVConnectorMetadata) -> None:
+        super().bind_connector_metadata(connector_metadata)
+        if self.use_layerwise:
+            assert self.connector_worker is not None
+            # Layerwise hooks need this step's tasks before target forward.
+            # If scheduler_output.has_sync_kv_loads is False (e.g. save-only
+            # steps), V1 calls start_load_kv after target forward, before MTP.
+            # Target hooks have advanced current_layer by then, so preparing
+            # the step there would reset the current layer before MTP.
+            self._mamba_copy_bufs = None
+            self.connector_worker.prepare_layerwise_step(connector_metadata)
+
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
-        self._mamba_copy_bufs = None
+        if not self.use_layerwise:
+            self._mamba_copy_bufs = None
         metadata = self._get_connector_metadata()
         self._current_step_has_real_forward = forward_context is not None
         logger.debug(

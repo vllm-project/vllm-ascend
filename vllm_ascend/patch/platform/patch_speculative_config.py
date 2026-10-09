@@ -8,6 +8,7 @@ import vllm.config.speculative as speculative_config
 from transformers import DeepseekV2Config, PretrainedConfig
 from vllm.config.model import ModelConfig
 from vllm.config.speculative import SpeculativeConfig
+from vllm.transformers_utils.configs.speculators import SpeculatorsConfig
 
 from vllm_ascend.utils import is_deepseek_v41
 
@@ -205,6 +206,28 @@ def _dspark_post_init(self):
         # gqa backend dspark
         if getattr(draft_hf_config, "ptd_token_id", None) is None:  # type: ignore
             draft_hf_config.ptd_token_id = getattr(draft_hf_config, "mask_token_id", None)  # type: ignore
+        _normalize_glm_mla_dspark(self)
+
+
+def _normalize_glm_mla_dspark(self):
+    """Restore MLA architecture erased by the pinned Speculators DSpark converter.
+
+    Remove this narrow compatibility shim when upstream Speculators conversion
+    preserves Glm5DSparkForCausalLM and its MLA architecture metadata.
+    """
+    draft = getattr(self, "draft_model_config", None)
+    config = getattr(draft, "hf_config", None)
+    if draft is None or not isinstance(config, SpeculatorsConfig):
+        return
+    source, _ = SpeculatorsConfig.get_config_dict(draft.model)
+    if "Glm5DSparkForCausalLM" not in (source.get("architectures") or ()):
+        return
+    mla_fields = ("q_lora_rank", "kv_lora_rank", "qk_nope_head_dim", "qk_rope_head_dim", "v_head_dim")
+    if any(not isinstance(getattr(config, name, None), int) or getattr(config, name) <= 0 for name in mla_fields):
+        raise ValueError("Glm5DSparkForCausalLM requires dense MLA projection dimensions; cannot use GQA weights.")
+    config.architectures = ["Glm5DSparkForCausalLM"]
+    self.update_arch_()
+    draft.model_arch_config = replace(draft.model_arch_config, is_deepseek_mla=True)
 
 
 SpeculativeConfig.hf_config_override = staticmethod(_normalize_legacy_qwen3_dspark_config)

@@ -2,6 +2,11 @@
 
 This section provides comprehensive documentation for using vLLM Ascend in production environments.
 
+## Deployment Guide
+
+- **[Using MindIE Motor](deployment_guide/using_mindie_motor.md)** — Deploy with MindIE Motor
+- **[Using Volcano Kthena](deployment_guide/using_volcano_kthena.md)** — Deploy with Volcano Kthena
+
 ## Support Matrix
 
 - **[Supported Models](support_matrix/supported_models.md)** — Models supported by vLLM Ascend
@@ -18,11 +23,6 @@ This section provides comprehensive documentation for using vLLM Ascend in produ
 ## Feature Guide
 
 Explore detailed guides for vLLM Ascend features including graph mode, CPU binding, quantization, sleep mode, structured output, LoRA, expert parallelism load balancing, and more.
-
-## Deployment Guide
-
-- **[Using Volcano Kthena](deployment_guide/using_volcano_kthena.md)** — Deploy with Volcano Kthena
-- **[Using MindIE Motor](deployment_guide/using_mindie_motor.md)** — Deploy with MindIE Motor
 
 ## Release Notes
 

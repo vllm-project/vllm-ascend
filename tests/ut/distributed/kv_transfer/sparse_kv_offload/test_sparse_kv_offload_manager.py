@@ -260,7 +260,7 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
                 get_num_layers=MagicMock(return_value=1),
                 max_model_len=128,
             ),
-            parallel_config=SimpleNamespace(),
+            parallel_config=SimpleNamespace(data_parallel_index=0),
             scheduler_config=SimpleNamespace(
                 max_num_seqs=1,
                 max_num_batched_tokens=1,
@@ -271,6 +271,7 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
             topk_buffer_size=1,
             topk=1,
             use_fused_overlap=False,
+            use_fused_copy_sfa=False,
             dram_size_per_dp_GB=dram_size_per_dp_gb,
         )
         return vllm_config, kv_cache_config, offload_config
@@ -278,8 +279,14 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
     def test_manager_initializes_offload_with_planned_pool_size(self):
         vllm_config, kv_cache_config, offload_config = self._make_manager_init_inputs()
         planned_pool_size = 4096
-        for rank, expected_alloc_size in ((0, planned_pool_size), (1, 0)):
-            with self.subTest(rank=rank):
+        for rank, expected_alloc_size, dp_index in (
+            (0, planned_pool_size, 0),
+            (1, 0, 0),
+            (0, planned_pool_size, 1),
+            (1, 0, 1),
+        ):
+            with self.subTest(rank=rank, dp_index=dp_index):
+                vllm_config.parallel_config.data_parallel_index = dp_index
                 offload_backend = SimpleNamespace(
                     OffloadConfig=lambda: SimpleNamespace(),
                     Scene=SimpleNamespace(SHARED="shared"),
@@ -343,6 +350,10 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
                 )
                 self.assertEqual(initialized_config.world_size, 2)
                 self.assertEqual(initialized_config.rank_id, rank)
+                self.assertEqual(
+                    initialized_config.store_url,
+                    f"tcp://127.0.0.1:{manager_module.OFFLOAD_STORE_PORT_BASE + dp_index}",
+                )
                 tp_group.barrier.assert_called_once_with()
 
     def test_manager_rejects_pool_larger_than_dram_limit(self):

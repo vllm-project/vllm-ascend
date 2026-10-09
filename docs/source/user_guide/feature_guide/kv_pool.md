@@ -12,7 +12,7 @@ Supported since vLLM-Ascend v0.23.0 (using the latest version is recommended).
 
 | Category | Constraints |
 | :--- | :--- |
-| Common | Hardware:<br>• Supported hardware series A2/A3/950PR&950DT Products; for HDK/CANN requirements of each series, see the [Hardware Dependency Quick Reference table](#ascend_global_resource_config)<br>• 950PR&950DT Products requires extra mounts `/dev/ummu`, `/dev/uburma`, `/usr/bin/urma_admin`, `/lib/route.conf`, `/etc/hccl_rootinfo.json`<br>Software Dependencies:<br>• CANN >= 9.1.0<br>Model:<br>• `kv_load_failure_policy=recompute` does not yet support hybrid attention models (e.g., DeepSeekV4, Qwen 3.5)<br>• MLA models can use `consumer_is_to_put` for Decode node to store KV for Prefill node<br>Feature Mutex:<br>• `use_layerwise` only supported on the Prefill node of the Mooncake/Memcache backends |
+| Common | Hardware:<br>• Supported hardware series A2/A3/950PR&950DT Products; for HDK/CANN requirements of each series, see the [Hardware Dependency Quick Reference table](#ascend_global_resource_config)<br>• 950PR&950DT Products requires extra mounts `/dev/ummu`, `/dev/uburma`, `/usr/bin/urma_admin`, `/lib/route.conf`, `/etc/hccl_rootinfo.json`<br>Software Dependencies:<br>• CANN >= 9.1.0<br>Model:<br>• `kv_load_failure_policy=recompute` does not yet support hybrid attention models (e.g., DeepSeekV4, Qwen 3.5)<br>Feature Mutex:<br>• `use_layerwise` only supported on the Prefill node of the Mooncake/Memcache backends |
 | Mooncake backend | Software Dependencies:<br>• mooncake >= 0.3.11.post1 (non-default tenant requires >= 0.3.12); Mooncake wheel requires glibc >= 2.35<br>Deployment:<br>• Store/PD traffic separation applies to A3 and 950PR&950DT Products |
 | Memcache backend | Software Dependencies:<br>• Requires `memfabric-hybrid` and `memcache-hybrid` (SSD Cache needs `memcache_hybrid >= 1.2.0`)<br>Hardware:<br>• On A3, using `device_sdma` protocol requires LingQu Computing Network >= 1.5<br>Deployment:<br>• Additionally supports separated deployment of MemCache and vLLM |
 | Yuanrong backend | Software Dependencies:<br>• Requires `openyuanrong-datasystem`<br>Feature Mutex:<br>• Worker cannot configure both Coordinator and etcd discovery backends simultaneously<br>• Under `P2P_TRANSFER` or FabricMem mode, client-side device memory pre-registration is always skipped regardless of `enable_dev_mem_pregister` value |
@@ -472,6 +472,12 @@ Note: `--max-num-batched-tokens` only chunks prefill compute; it does not reduce
 ### Scenario 2: Memcache Backend
 
 Before starting the installation, complete the prerequisite checks in Step 1 (memory scan, 950PR&950DT Products signature verification disabling and container mounts, SSD disk status checks).
+
+#### MemCache DP Initialization Synchronization
+
+For the `memcache` backend, `memcache_dp_init_barrier` defaults to `true`. After successful store initialization, workers in a DP group synchronize through the CPU process group before continuing to NPU work such as graph capture. This keeps earlier workers from proceeding while peers are still initializing MemCache channels. DP size 1, metadata-only scheduler clients, and stores using lazy initialization skip this synchronization.
+
+Set the same value on every rank in the DP group. With `MultiConnector`, place this boolean in the `AscendStoreConnector` child's `kv_connector_extra_config`. To disable it, add `"memcache_dp_init_barrier": false` alongside `"backend": "memcache"`. No environment variable is needed. Lazy initialization can be triggered independently by requests on each DP rank, so it never enters the DP barrier. If a backend cannot honor a lazy initialization request and initializes eagerly instead, the startup barrier still applies.
 
 #### Step 1: Prerequisite Checks
 
