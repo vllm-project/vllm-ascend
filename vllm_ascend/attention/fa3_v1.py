@@ -149,7 +149,9 @@ class AscendFAImpl(AscendAttentionBackendImpl):
                     attn_metadata.block_tables[:num_decodes, :],
                     attn_metadata.query_start_loc[: num_decodes + 1],
                     attn_metadata.seq_lens[:num_decodes].npu(),
-                    False,
+                    # Speculative decode verifies multiple tokens per request;
+                    # earlier queries must not attend to later draft tokens.
+                    num_decode_tokens > num_decodes,
                     max(attn_metadata.seq_lens[:num_decodes]),
                 )
             )
@@ -158,8 +160,10 @@ class AscendFAImpl(AscendAttentionBackendImpl):
             outputs.append(
                 self._flash_attn_with_kvcache(
                     query[num_decode_tokens:],
-                    attn_metadata.block_tables[num_decode_tokens:, :],
-                    attn_metadata.query_start_loc[num_decodes:],
+                    attn_metadata.block_tables[num_decodes:, :],
+                    # Query was sliced above, so its cumulative offsets must
+                    # start at zero even when decode requests precede prefill.
+                    attn_metadata.query_start_loc[num_decodes:] - num_decode_tokens,
                     attn_metadata.seq_lens[num_decodes:].npu(),
                     True,  # enable causal for prefill
                     max(attn_metadata.seq_lens[num_decodes:]),

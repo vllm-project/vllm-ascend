@@ -156,3 +156,33 @@ def test_fa3_vs_fia_logprobs():
                     f"'{fia_token_lp[token_id].decoded_token}'): "
                     f"logprobs differ: FIA {fia_logprob:.6f} vs FA3 {fa3_logprob:.6f}"
                 )
+
+
+@pytest.mark.skipif(not _fa3_available(), reason="flash_attn_npu_v3 is not installed")
+def test_fa3_mixed_speculative_decoding():
+    """Ngram verification must preserve the non-speculative FA3 trajectory.
+
+    Short repetitive requests exercise multi-token decode while the longer
+    requests are still being prefetched in chunks. Backend-level tests also
+    construct this mixed metadata explicitly, independent of scheduling.
+    """
+    prompts = ["ab " * 12, "cd " * 12, "The quick brown fox jumps over the lazy dog. " * 30]
+    kwargs = dict(
+        additional_config=FA3_ADDITIONAL_CONFIG,
+        max_num_seqs=4,
+        max_num_batched_tokens=64,
+        enable_prefix_caching=False,
+    )
+    baseline = _generate_with_backend(prompts, max_tokens=24, **kwargs)
+    speculative = _generate_with_backend(
+        prompts,
+        max_tokens=24,
+        speculative_config={
+            "method": "ngram",
+            "num_speculative_tokens": 2,
+            "prompt_lookup_min": 2,
+            "prompt_lookup_max": 4,
+        },
+        **kwargs,
+    )
+    _assert_outputs_match(baseline, speculative, label="[MixedSpeculative] ")
