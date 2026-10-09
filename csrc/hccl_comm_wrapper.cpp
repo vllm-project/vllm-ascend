@@ -67,8 +67,6 @@ extern "C" PyObject* python_hccl_comm_init_root_info_config(
   config.hcclRdmaTrafficClass = traffic_class;
   memcpy(config.hcclUdi, group_name, name_len);
   config.hcclUdi[name_len] = '\0';
-  memcpy(config.hcclCommName, group_name, name_len);
-  config.hcclCommName[name_len] = '\0';
 
   HcclComm comm = nullptr;
   const HcclResult result = HcclCommInitRootInfoConfig(
