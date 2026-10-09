@@ -133,6 +133,10 @@ class EngramModelState(AscendModelState):
             # FULL replay runs its own producers. No Python-side hash/lookup
             # and no ExternalEvent records may precede it on this route.
             return model_inputs
+        # TODO: Support breakable PIECEWISE by refreshing lookups under the
+        # forward context before replay, which bypasses the model pre-hook.
+        # Align capture bindings with that path so replay does not retain
+        # dummy graph-producer coordinates.
         # DP lookup needs the forward context, which is not established yet.
         self._engram_inputs = {
             "input_ids": input_batch.input_ids[: input_batch.num_tokens],
