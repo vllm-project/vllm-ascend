@@ -1162,4 +1162,3 @@ def test_drain_preserves_original_error_when_diagnostic_logging_fails():
         assert len(packed_tensor_module._UNSYNCHRONIZED_BUFFERS) == 1
     finally:
         packed_tensor_module._UNSYNCHRONIZED_BUFFERS.clear()
-
