@@ -192,51 +192,58 @@ class AscendKimiMLP(KimiMLP):
 _WeightT = TypeVar("_WeightT", bound=tuple[str, torch.Tensor] | tuple[str, torch.Tensor, dict[str, Any]])
 
 
-def load_redundant_expert_weights(
+def load_eplb_expert_weights(
     model: nn.Module,
     weights: Iterable[_WeightT],
     num_redundant_experts: int,
     map_weight_name: Callable[[str], str | None] | None = None,
 ) -> Iterable[_WeightT]:
-    """Load replica slots while streaming the original weights to upstream.
+    """Stream expert weights according to the complete initial EPLB layout.
 
     Upstream Kimi loaders stop at the first matching expert mapping, so simply
     adding redundant entries to that mapping would leave replicas uninitialized.
-    Use the same mapping and parameter loaders for every redundant physical ID.
+    Remap the first logical-expert-count slots for the upstream loader and load
+    the remaining slots directly. MRV2 can place replicas in either range.
     """
     if not num_redundant_experts or not model.config.is_moe:
         yield from weights
         return
 
     params_dict = dict(model.named_parameters())
-    replica_mapping = [
-        entry
-        for entry in fused_moe_make_expert_params_mapping(
-            model,
-            ckpt_gate_proj_name="w1",
-            ckpt_down_proj_name="w2",
-            ckpt_up_proj_name="w3",
-            num_experts=model.config.num_experts,
-            num_redundant_experts=num_redundant_experts,
-        )
-        if entry[2] >= model.config.num_experts
-    ]
+    expert_mapping = fused_moe_make_expert_params_mapping(
+        model,
+        ckpt_gate_proj_name="w1",
+        ckpt_down_proj_name="w2",
+        ckpt_up_proj_name="w3",
+        num_experts=model.config.num_experts,
+        num_redundant_experts=num_redundant_experts,
+    )
     experts_unpacked = not any(name.endswith("w13_weight_packed") for name in params_dict)
     for args in weights:
         checkpoint_name = cast(str, args[0])
         name = map_weight_name(checkpoint_name) if map_weight_name else checkpoint_name
+        handled = False
         if name is not None:
             if experts_unpacked and name.endswith(".weight_packed"):
                 name = name.replace(".weight_packed", ".weight")
-            for param_name, weight_name, expert_id, shard_id in replica_mapping:
+            for param_name, weight_name, expert_id, shard_id in expert_mapping:
                 if weight_name not in name:
                     continue
                 mapped_name = name.replace(weight_name, param_name)
                 if mapped_name not in params_dict:
                     continue
-                param = params_dict[mapped_name]
-                param.weight_loader(param, args[1], mapped_name, expert_id=expert_id, shard_id=shard_id)
-        yield args
+                handled = True
+                if expert_id < model.config.num_experts:
+                    # The upstream mapping is identity and still owns loaded
+                    # parameter tracking and MTP checkpoint validation.
+                    logical_id = weight_name.split(".", 2)[1]
+                    physical_name = checkpoint_name.replace(f"experts.{logical_id}.", f"experts.{expert_id}.")
+                    yield cast(_WeightT, (physical_name, *args[1:]))
+                else:
+                    param = params_dict[mapped_name]
+                    param.weight_loader(param, args[1], mapped_name, expert_id=expert_id, shard_id=shard_id)
+        if not handled:
+            yield args
 
 
 def is_moe_layer_idx(config, layer_idx: int) -> bool:
@@ -906,7 +913,7 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
                     yield args
 
         return super().load_weights(
-            load_redundant_expert_weights(self, remap_mixed_gate_weights(), self.n_redundant_experts)
+            load_eplb_expert_weights(self, remap_mixed_gate_weights(), self.n_redundant_experts)
         )
 
     def forward(
@@ -1062,6 +1069,8 @@ class KimiMixtureOfExperts(MixtureOfExperts):
         self.expert_weights: list[Sequence[torch.Tensor]] = []
         self.num_expert_groups = getattr(self.config, "num_expert_group", None) or 1
         self.moe_layers = [moe.experts for moe in self.moe_mlp_layers]
+        # EPLB state and transfers operate within this PP stage.
+        self.num_moe_layers = len(self.moe_layers)
         example_moe = self.moe_mlp_layers[-1] if self.moe_mlp_layers else None
         if example_moe is None:
             self.num_logical_experts = 0
@@ -1127,11 +1136,6 @@ class AscendKimiLinearForCausalLM(UpstreamKimiLinearForCausalLM, KimiMixtureOfEx
         self.set_moe_parameters()
 
     def set_moe_parameters(self) -> None:
-        # Global count: EPLB state is sized over every MoE layer of the model,
-        # while ``moe_layers`` below only holds this PP rank's layers.
-        self.num_moe_layers = sum(
-            1 for layer_idx in range(self.config.num_hidden_layers) if is_moe_layer_idx(self.config, layer_idx)
-        )
         self.moe_mlp_layers = []
         for layer in self.model.layers:
             if isinstance(layer, PPMissingLayer):

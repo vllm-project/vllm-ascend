@@ -31,8 +31,7 @@ from vllm_ascend.models.kimi_k3 import (
     AscendKimiDecoderLayer,
     AscendKimiMoE,
     KimiMixtureOfExperts,
-    is_moe_layer_idx,
-    load_redundant_expert_weights,
+    load_eplb_expert_weights,
 )
 
 
@@ -115,13 +114,6 @@ class AscendKimiK3MTP(UpstreamKimiK3MTP, KimiMixtureOfExperts):
             mlp = layer.mtp_block.mlp
             if isinstance(mlp, AscendKimiMoE):
                 self.moe_mlp_layers.append(mlp)
-        self.num_moe_layers = sum(
-            is_moe_layer_idx(self.config, layer_idx)
-            for layer_idx in range(
-                self.model.mtp_start_layer_idx,
-                self.model.mtp_start_layer_idx + self.model.num_mtp_layers,
-            )
-        )
         self.extract_moe_parameters()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -133,5 +125,5 @@ class AscendKimiK3MTP(UpstreamKimiK3MTP, KimiMixtureOfExperts):
             return self._rewrite_spec_layer_name(spec_layer, name) if spec_layer is not None else None
 
         return super().load_weights(
-            load_redundant_expert_weights(self, weights, self.num_redundant_experts, map_weight_name)
+            load_eplb_expert_weights(self, weights, self.num_redundant_experts, map_weight_name)
         )
