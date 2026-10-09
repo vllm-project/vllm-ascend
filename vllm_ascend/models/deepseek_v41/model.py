@@ -857,7 +857,7 @@ class DeepseekV41DecoderLayer(nn.Module):
         if outputs is not None:
             return outputs
         normalized = self.post_attention_layernorm(hidden_states)
-        return normalized, normalized.float()
+        return normalized, None
 
     @staticmethod
     def hc_collapse(x, pre_mix):
