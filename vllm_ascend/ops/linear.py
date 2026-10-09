@@ -37,7 +37,7 @@ from vllm.model_executor.layers.linear import (  # noqa
     UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ops.linear_op import get_parallel_op, get_replicated_op
@@ -80,6 +80,16 @@ def _should_keep_nd_for_310p_weight(weight: torch.Tensor) -> bool:
     return is_310p() and weight.ndim >= 2 and (weight.shape[-1] == 1 or weight.shape[-2] == 1)
 
 
+def _should_reshape_wo_a_to_3d(prefix: str) -> bool:
+    """Whether DSV4 wo_a must become [n_local_groups, hidden_size, o_lora_rank].
+
+    A5 uses FP8 npu_transpose_quant_batchmatmul and must not take this reshape.
+    Dummy load skips weight_loader, so the 2D to 3D conversion belongs in
+    process_weights_after_loading.
+    """
+    return "wo_a" in prefix and get_ascend_device_type() != AscendDeviceType.A5
+
+
 class AscendUnquantizedLinearMethod(UnquantizedLinearMethod):
     """Linear method without quantization"""
 
@@ -89,7 +99,24 @@ class AscendUnquantizedLinearMethod(UnquantizedLinearMethod):
         # must use fp32 to avoid accuracy degradation in dsv4.
         if getattr(layer, "precast_fp32_weight", False):
             weight_fp32 = layer.weight.data.to(torch.float32)
-            layer.weight_fp32 = weight_fp32 if keep_nd_weight else maybe_trans_nz(weight_fp32)
+            new_fp32 = weight_fp32 if keep_nd_weight else maybe_trans_nz(weight_fp32)
+            # ACL graph holds weight_fp32 by reference. Replacing the attribute
+            # on a later RL after-loading leaves the graph on the old tensor.
+            replace_parameter(layer, "weight_fp32", new_fp32, prefer_copy=True)
+
+        # npu_transpose_batchmatmul consumes DSV4 wo_a as 3D.
+        # Dummy load skips weight_loader, so convert 2D to 3D here.
+        # Do this before maybe_trans_nz. Viewing FRACTAL_NZ corrupts the layout.
+        if (
+            _should_reshape_wo_a_to_3d(getattr(layer, "prefix", ""))
+            and layer.weight.data.ndim == 2
+        ):
+            layer.weight.data = (
+                layer.weight.data.view(layer.n_local_groups, layer.o_lora_rank, -1)
+                .transpose(2, 1)
+                .contiguous()
+            )
+
         if "conv1d" not in layer.prefix:
             # 310P torch_npu rejects FRACTAL_NZ matmul when the weight-side
             # matrix has n=1 or k=1. Keep scalar gates such as Qwen MoE's
@@ -465,15 +492,14 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
         return super().forward(input_)
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
-        if "wo_a" in self.prefix and get_ascend_device_type() != AscendDeviceType.A5:
+        if _should_reshape_wo_a_to_3d(self.prefix):
             if self.weight.ndim == 2:
+                # Stay 2D. The 2D to 3D conversion happens in
+                # process_weights_after_loading, so dummy load is covered too.
                 super().weight_loader(param, loaded_weight)
-                self.weight.data = (
-                    self.weight.data.view(self.n_local_groups, self.o_lora_rank, -1).transpose(2, 1).contiguous()
-                )
             else:
-                # In RL update flows, wo_a can be loaded again after being
-                # transformed into [n_local_groups, hidden_size, o_lora_rank].
+                # RL update_weights: wo_a is already
+                # [n_local_groups, hidden_size, o_lora_rank]. Copy it directly.
                 shard_size = self.n_local_groups * self.o_lora_rank
                 start_idx = self.tp_rank * shard_size
                 if loaded_weight.shape[0] != shard_size:
