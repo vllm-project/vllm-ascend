@@ -17,6 +17,8 @@ def _as_fa3_paged_cache(cache: torch.Tensor) -> tuple[torch.Tensor, int]:
     The final view ends at the last valid page, not the end of its padding.
     """
     num_blocks, block_size, num_heads, head_size = cache.shape
+    if num_blocks == 0:
+        return cache, 1
     page_elements = block_size * num_heads * head_size
     inner_strides = (num_heads * head_size, head_size, 1)
     page_step, remainder = divmod(cache.stride(0), page_elements)
@@ -100,7 +102,8 @@ class AscendFAImpl(AscendAttentionBackendImpl):
         if key_page_step != value_page_step:
             raise ValueError("FA3 requires matching K and V physical page strides")
         if key_page_step != 1:
-            block_table = block_table * key_page_step
+            # Preserve padding/sentinel entries; only valid page IDs are mapped.
+            block_table = torch.where(block_table >= 0, block_table * key_page_step, block_table)
 
         attn_output = _fa3_fn(
             query,
