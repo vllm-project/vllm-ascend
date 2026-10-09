@@ -195,7 +195,7 @@ jobs:
         if: ${{ inputs.request_id != '' }}
         uses: $/.github/actions/csrc-l1-restore
         with:
-          cache-dir: ${{ runner.temp }}/vllm-ascend-incremental-build-cache
+          cache-dir: csrc/build_cache
           architecture: ${{ runner.arch }}
           soc-version: ${{ inputs.soc_version }}
           source-root: ./temp-vllm-ascend
