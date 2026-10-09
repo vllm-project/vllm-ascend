@@ -114,7 +114,7 @@ No decorator is needed. UT runner routing is determined by path:
 
 ### E2E Routing
 
-All E2E tests run on NPU. E2E routing is determined by directory or `_310p` filename suffix:
+All E2E tests run on NPU. E2E routing is determined by directory:
 
 | Pattern | Runner |
 |---------|--------|
@@ -122,8 +122,9 @@ All E2E tests run on NPU. E2E routing is determined by directory or `_310p` file
 | `tests/e2e/pull_request/two_card/` | A3 NPU x2 |
 | `tests/e2e/pull_request/four_card/` | A3 NPU x4 |
 | `tests/e2e/pull_request/eight_card/` | A3 NPU x8 |
-| `*_310p.py` under one/two-card paths | 310P NPU x1 |
-| `*_310p.py` under four-card paths | 310P NPU x4 |
+| `tests/e2e/pull_request/one_card/_310p/` | 310P NPU x1 |
+| `tests/e2e/pull_request/two_card/_310p/` | 310P NPU x2 |
+| `tests/e2e/pull_request/four_card/_310p/` | 310P NPU x4 |
 
 ## Adding a New UT Test
 

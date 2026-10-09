@@ -5,9 +5,12 @@ import os
 import unittest
 from unittest.mock import patch
 
+import torch
+
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
     PD_QOS_DEFAULT,
     QOS_KEY,
+    collect_storage_merged_register_regions,
     inject_qos,
 )
 
@@ -76,3 +79,39 @@ class TestAscendResourceConfig(unittest.TestCase):
             with self.assertRaises(ValueError):
                 inject_qos(1)
             log.info.assert_not_called()
+
+
+class TestKVRegisterRegions(unittest.TestCase):
+    def test_combined_and_tuple_caches_register_the_same_physical_range(self):
+        for num_blocks in (2, 5):
+            for scale in (1, 3):
+                for block_major in (False, True):
+                    with self.subTest(num_blocks=num_blocks, scale=scale, block_major=block_major):
+                        count = num_blocks * scale
+                        # Keep prefix/suffix bytes outside the view to check offsets.
+                        elements = 2 * count * 16 * 2
+                        backing = torch.empty(elements + 32, dtype=torch.float32)
+                        raw = backing[16 : 16 + elements]
+                        if block_major:
+                            combined = raw.view(count, 2, 16, 1, 2).permute(1, 0, 2, 3, 4)
+                        else:
+                            combined = raw.view(2, count, 16, 1, 2)
+                        for caches in (combined, tuple(combined.unbind(0))):
+                            regions = collect_storage_merged_register_regions({"attn": caches})
+                            self.assertEqual(regions.ptrs, [raw.data_ptr()])
+                            self.assertEqual(regions.lengths, [raw.nbytes])
+                            self.assertEqual(regions.logical_total_bytes, raw.nbytes)
+                            # Both components of the final block must be registered.
+                            end = regions.ptrs[0] + regions.lengths[0]
+                            for component in combined.unbind(0):
+                                last_block = component[-1]
+                                self.assertLessEqual(last_block.data_ptr() + last_block.nbytes, end)
+
+    def test_padded_subview_registers_span_without_storage_tail(self):
+        backing = torch.empty(128, dtype=torch.float32)
+        cache = torch.as_strided(backing, size=(3, 4), stride=(16, 1), storage_offset=7)
+        regions = collect_storage_merged_register_regions({"attn": (cache, backing[:0])})
+        self.assertEqual(regions.ptrs, [cache.data_ptr()])
+        self.assertEqual(regions.lengths, [36 * cache.element_size()])
+        self.assertEqual(regions.logical_total_bytes, cache.nbytes)
+        self.assertEqual(regions.logical_tensor_count, 1)

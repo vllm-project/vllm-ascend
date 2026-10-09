@@ -80,6 +80,12 @@ class HardwareCapability(Enum):
     DSA_C128_STATE_SMALL_BLOCK_SIZES = auto()
     # Use the DeepSeek-V4/DSA compressed-KV-cache layout and compressor/indexer flow.
     DSV4_COMPRESSED_CACHE = auto()
+    # Use the DeepSeek-V4.1 mixed-quant cache and packaged QLI/QSMLA ABI.
+    DSV41_PACKED_CACHE = auto()
+    # Triton RMS/dot/gate/residual fusion for unrotated Engram inputs.
+    ENGRAM_UNROTATED_GATE = auto()
+    # Decode native FP8 codes and E8M0 group scales in Engram table lookups.
+    ENGRAM_MXFP8 = auto()
     # Enable dynamic-MX norm fusion and the associated ``wo_a`` weight-layout contract.
     DYNAMIC_MX_QUANT_FUSION = auto()
     # Select DynamicMxQuantV3 ``scale_alg=1`` for model paths that require it.
@@ -91,10 +97,15 @@ class HardwareCapability(Enum):
     FP8_ATTENTION = auto()
     # Select the compatibility grouped-top-k router used by the fused-MoE path.
     FUSED_MOE_COMPATIBILITY = auto()
+    # Use npu_rotary_mul with adjacent pairs (rotary_mode="interleave").
+    FUSED_ROTARY_MUL_INTERLEAVE = auto()
     # Pass ``glu_alpha`` and ``glu_bias`` to the fused dequant-SwiGLU-quant operator.
     FUSED_SWIGLU_TUNING_ARGS = auto()
     # Select the compatibility GatedDeltaNet core and state-dtype implementation.
     GDN_COMPATIBILITY = auto()
+    # Fuse non-MX INT8/INT4 grouped matmul, dequantization, SiTU, and per-token
+    # quantization through the ACLNN GmmDequantSituQuant operator.
+    GMM_DEQUANT_SITU_QUANT = auto()
     # Register the FX graph rewrite that fuses the supported muls-plus-add pattern.
     GRAPH_MULS_ADD_FUSION = auto()
     # Register the FX graph rewrites for supported RMSNorm-plus-quant patterns.
@@ -111,8 +122,6 @@ class HardwareCapability(Enum):
     LOCAL_KV_COMM_RESOURCE = auto()
     # Use vLLM-Ascend's custom BGMV/SGMV LoRA kernels when rank constraints also pass.
     LORA_CUSTOM_OPS = auto()
-    # Allow the fused MLA decode prolog even when the model does not use MLA RoPE.
-    MLA_DECODE_PROLOG_WITHOUT_ROPE = auto()
     # Allow MLAPO with native floating-point projection weights, not only quantized weights.
     MLAPO_NATIVE_WEIGHTS = auto()
     # Accept ``fullmesh_v2`` as the MC2 communication algorithm.
@@ -127,6 +136,7 @@ class HardwareCapability(Enum):
     # ``moe_gating_top_k_hash`` ABI with ``bias_vl`` and image sentinels.
     MOE_GATING_TOP_K_HASH_VISION = auto()
     # Allow the extended NPU graph backend; static-kernel mode depends on this contract.
+    MM_REDUCE_SCATTER_AI_CPU_INFERENCE = auto()
     NPUGRAPH_EX = auto()
     # Use ``torch_npu.npu_top_k_top_p`` for sampling instead of the PyTorch fallback.
     NPU_TOP_K_TOP_P = auto()
@@ -134,6 +144,8 @@ class HardwareCapability(Enum):
     PAGED_ATTENTION = auto()
     # Inspect PCIe topology to distinguish 310P Root-Complex and endpoint deployments.
     RC_DEVICE_DISCOVERY = auto()
+    # Fused RMSNorm+cast is available for the A3/CANN 9.1 path only.
+    RMS_NORM_CAST = auto()
     # Import and register the compiled vLLM-Ascend custom-op library at runtime.
     # This is independent of whether custom ops are enabled by default.
     RUNTIME_CUSTOM_OPS = auto()
@@ -147,6 +159,8 @@ class HardwareCapability(Enum):
     SWIGLU_OAI_MX_QUANT = auto()
     # Use the Triton batch-memcpy kernel for Mamba state copies.
     TRITON_BATCH_MEMCPY = auto()
+    # Native TurboQuant 4-bit non-causal MLA cache and SFA kernels.
+    TURBOQUANT_4BIT_NC_CACHE = auto()
     # Honor MLAPO enablement on any pipeline role; other profiles limit it to decode consumers.
     UNRESTRICTED_MLAPO = auto()
 
@@ -239,6 +253,7 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.ATB_WARMUP,
         HardwareCapability.BGMV_SGMV_META_REGISTRATION,
         HardwareCapability.FLA_GDN_PREFILL,
+        HardwareCapability.FUSED_ROTARY_MUL_INTERLEAVE,
         HardwareCapability.FUSED_SWIGLU_TUNING_ARGS,
         HardwareCapability.GRAPH_MULS_ADD_FUSION,
         HardwareCapability.GRAPH_NORM_QUANT_FUSION,
@@ -257,10 +272,13 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.STANDARD_MAMBA_PATCH,
         HardwareCapability.STANDARD_WORKER_PATCHES,
         HardwareCapability.TRITON_BATCH_MEMCPY,
+        HardwareCapability.TURBOQUANT_4BIT_NC_CACHE,
     }
 )
 _A3_CAPABILITIES = _STANDARD_CAPABILITIES | {
+    HardwareCapability.GMM_DEQUANT_SITU_QUANT,
     HardwareCapability.MC2_FULLMESH_V2_COMM,
+    HardwareCapability.RMS_NORM_CAST,
 }
 _DEFAULT_WORKER_CLS = "vllm_ascend.worker.worker.NPUWorker"
 _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyType(
@@ -339,18 +357,23 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.CLUSTER_CPU_TOPOLOGY,
                     HardwareCapability.DSA_C128_STATE_SMALL_BLOCK_SIZES,
                     HardwareCapability.DSV4_COMPRESSED_CACHE,
+                    HardwareCapability.DSV41_PACKED_CACHE,
+                    HardwareCapability.ENGRAM_UNROTATED_GATE,
+                    HardwareCapability.ENGRAM_MXFP8,
                     HardwareCapability.DYNAMIC_MX_QUANT_FUSION,
                     HardwareCapability.DYNAMIC_MX_QUANT_SCALE_ALG_ONE,
                     HardwareCapability.FLA_GDN_PREFILL,
                     HardwareCapability.FP8_ATTENTION,
+                    HardwareCapability.FUSED_ROTARY_MUL_INTERLEAVE,
                     HardwareCapability.GRAPH_MULS_ADD_FUSION,
                     HardwareCapability.GRAPH_NORM_QUANT_FUSION,
                     HardwareCapability.LOCAL_KV_COMM_RESOURCE,
                     HardwareCapability.LORA_CUSTOM_OPS,
-                    HardwareCapability.MLA_DECODE_PROLOG_WITHOUT_ROPE,
                     HardwareCapability.MLAPO_NATIVE_WEIGHTS,
                     HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
                     HardwareCapability.MOE_DISPATCH_SHARED_EXPERT_ARGS,
+                    HardwareCapability.MM_REDUCE_SCATTER_AI_CPU_INFERENCE,
+                    HardwareCapability.MOE_GATING_TOP_K_HASH_VISION,
                     HardwareCapability.NPUGRAPH_EX,
                     HardwareCapability.STANDARD_MAMBA_PATCH,
                     HardwareCapability.STANDARD_WORKER_PATCHES,

@@ -19,14 +19,13 @@ PCP support is experimental and available only with ModelRunner V2. The followin
 
 | Attention Backend | Basic PCP | Prefix Caching + PCP | Chunked Prefill + PCP | MLAPO + PCP | Speculative Decoding + PCP | P/D Disaggregation + PCP | KV Cache Pool + PCP | Sequence Parallelism (SP) + PCP |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| MLA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | 🟠 Partial compatibility (MTP, eager and `FULL_DECODE_ONLY`) | ✅ Full compatibility (`MooncakeConnectorV1`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ❌ No compatibility |
-| GQA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | — Not applicable | 🟠 Partial compatibility (Eagle3, eager and `FULL_DECODE_ONLY`) | ✅ Full compatibility (`MooncakeConnectorV1`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ❌ No compatibility |
-| SFA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ❌ No compatibility | ❌ No compatibility | ✅ Full compatibility (`MooncakeConnectorV1`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ❌ No compatibility |
-| DSA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | — Not applicable | 🟠 Partial compatibility (MTP and DSpark, eager and `FULL_DECODE_ONLY`) | ✅ Full compatibility (`MooncakeHybridConnector`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ❌ No compatibility |
+| MLA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | 🟠 Partial compatibility (MTP, eager and `FULL_DECODE_ONLY`) | ✅ Full compatibility (`MooncakeConnectorV1`, `MooncakeConnectorV2`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ✅ Full compatibility |
+| GQA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | — Not applicable | 🟠 Partial compatibility (Eagle3, eager and `FULL_DECODE_ONLY`) | ✅ Full compatibility (`MooncakeConnectorV1`, `MooncakeConnectorV2`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ✅ Full compatibility |
+| SFA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | 🟠 Partial compatibility (MTP, eager and `FULL_DECODE_ONLY`) | ✅ Full compatibility (`MooncakeConnectorV1`, `MooncakeConnectorV2`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ✅ Full compatibility |
+| DSA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | — Not applicable | 🟠 Partial compatibility (MTP and DSpark, eager and `FULL_DECODE_ONLY`) | ✅ Full compatibility (`MooncakeHybridConnector`, `MooncakeConnectorV2`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ✅ Full compatibility |
 
 - ✅ **Full compatibility**: The basic path or feature combination is supported.
 - 🟠 **Partial compatibility**: The basic path or feature combination is supported with the stated limitations.
-- ❌ **No compatibility**: The backend or feature combination is not supported by the current MRV2 PCP implementation.
 - **Not applicable**: The feature does not apply to the attention backend.
 
 ### Decode Context Parallel
@@ -65,6 +64,8 @@ vllm serve <supported-model> \
 Unlike DCP, PCP adds extra ranks: `world_size_with_pcp = prefill_context_parallel_size * original_world_size`.
 
 When PCP size is greater than 1, PCP stores embedding and LM Head weights as TP×PCP resident shards by default for every supported attention backend. Set `enable_pcp_embedding_lmhead_weight_sharding` to `false` to disable this behavior.
+
+With PCP enabled, O-projection weight sharding is on by default for SFA-PCP O-projection and DSA-PCP two-stage O-projection (`wo_a`/`wo_b`). If the weight method or PCP partition does not support sharding, the option is disabled with a warning. Set `enable_pcp_o_proj_weight_sharding` to `false` to disable it. Other attention backends do not use this option. O-projection sharding is incompatible with fine-grained TP for the same modules.
 
 #### Speculative Decoding
 

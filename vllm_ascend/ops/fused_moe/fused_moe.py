@@ -119,11 +119,6 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             self.moe_config.ep_group = get_ep_group()
             self.moe_config.mc2_group = get_mc2_group()
 
-        # Internal-router: precast weight_fp32 at load to avoid hot-path Cast.
-        # Use ctor `gate` (not self.is_internal_router): Module.__getattr__ shadows during init.
-        if gate is not None and not hasattr(gate, "weight_fp32"):
-            gate.precast_fp32_weight = True
-
         self.ascend_shared_experts = None
         if shared_experts is not None:
             routed_experts.return_with_event = True
@@ -137,7 +132,12 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 self._forward_entry = torch.ops.vllm.ascend_moe_forward_shared_sp
 
         setup_moe_comm_method(self.moe_config)
-        alltoall_comm = get_moe_comm_method(MoECommType.ALLTOALL)
+        # Communication objects are shared across MoE layers. Keep the bound
+        # activation with its owning layer when a later layer replaces them.
+        self.routed_experts.mega_moe_activation_kwargs = getattr(
+            get_moe_comm_method(MoECommType.FUSED_MC2, self.moe_config), "mega_moe_activation_kwargs", None
+        )
+        alltoall_comm = get_moe_comm_method(MoECommType.ALLTOALL, self.moe_config)
         if alltoall_comm is not None:
             expert_ids_per_ep_rank = getattr(alltoall_comm.token_dispatcher, "expert_ids_per_ep_rank", None)
             if expert_ids_per_ep_rank is not None:
