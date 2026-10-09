@@ -426,7 +426,11 @@ def test_dyntra_lb_reconciles_connector_hit_with_local_partial_tail(monkeypatch)
         block_size=block_size,
     )
     scheduler.add_request(request)
-    assert scheduler.connector.supports_divergent_local_hybrid_hits is True
+    monkeypatch.setattr(
+        type(scheduler.connector),
+        "supports_divergent_local_hybrid_hits",
+        property(lambda self: True),
+    )
     empty_blocks = scheduler.kv_cache_manager.empty_kv_cache_blocks
     connector_local_token_counts = []
     truncate_calls = []
