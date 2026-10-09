@@ -20,6 +20,7 @@ test_cases:
       TASK_QUEUE_ENABLE: "1"
       VLLM_ASCEND_ENABLE_NZ: "2"
       VLLM_USE_V1: "1"
+      VLLM_USE_V2_MODEL_RUNNER: "1"
     server_cmd:
       - "--async-scheduling"
       - "--tensor-parallel-size"
