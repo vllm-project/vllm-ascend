@@ -62,3 +62,35 @@ def test_fa3_mixed_paged_attention(q_lens, kv_lens, num_decodes):
     query = q_cpu.npu()
     actual = impl.forward_impl(query, None, None, (k, v), meta, torch.empty_like(query))
     torch.testing.assert_close(actual.float().cpu(), torch.cat(expected), atol=0.02, rtol=0.02)
+
+
+def test_fa3_pure_prefill_reuses_query_offsets(monkeypatch):
+    pytest.importorskip("flash_attn_npu_v3")
+    import vllm_ascend.ops  # noqa: F401
+    from vllm_ascend.attention.fa3_v1 import AscendFAImpl
+
+    query = torch.zeros(8, 2, 128, device="npu", dtype=torch.bfloat16)
+    offsets = torch.tensor([0, 3, 8], device="npu", dtype=torch.int32)
+    meta = SimpleNamespace(
+        actual_seq_lengths_q=[3, 8],
+        num_decodes=0,
+        num_decode_tokens=0,
+        num_prefills=2,
+        block_tables=torch.zeros(2, 1, device="npu", dtype=torch.int32),
+        query_start_loc=offsets,
+        seq_lens=torch.tensor([3, 5], dtype=torch.int32),
+    )
+    impl = AscendFAImpl.__new__(AscendFAImpl)
+    calls = []
+
+    def capture(query, block_table, actual_seq_lengths, seq_lens, is_causal, max_seq_len):
+        # Subtracting zero would allocate a new tensor; pure prefill must pass
+        # the original object straight through to the attention wrapper.
+        assert actual_seq_lengths is offsets
+        assert is_causal
+        calls.append(actual_seq_lengths)
+        return query
+
+    monkeypatch.setattr(impl, "_flash_attn_with_kvcache", capture)
+    impl.forward_impl(query, None, None, (), meta, torch.empty_like(query))
+    assert len(calls) == 1
