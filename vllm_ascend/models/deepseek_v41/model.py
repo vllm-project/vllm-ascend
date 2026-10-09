@@ -1547,10 +1547,12 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         if use_sequence_parallel and engram_mask_ready_event is not None:
             AscendParallelEngramEmbedding.wait_lookup(engram_mask_ready_event, external=engram_graph_events)
             engram_mask_ready_event = None
-        # Slice capacity-sized graph buffers before SP splits the token axis.
         token_mask = token_mask[:full_num_tokens]
-        lookups = {layer_idx: lookup[:full_num_tokens] for layer_idx, lookup in lookups.items()}
         if use_sequence_parallel:
+            # Dense SP divides token rows. Packed codes/scales retain capacity
+            # until their planes are split and sliced at the consumer below.
+            # The compressed backend rejects sequence parallelism at init.
+            lookups = {layer_idx: lookup[:full_num_tokens] for layer_idx, lookup in lookups.items()}
             if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
                 forward_context = get_forward_context()
                 forward_context.is_padding = sp_padding_mask(
