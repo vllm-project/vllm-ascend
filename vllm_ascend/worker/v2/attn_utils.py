@@ -1435,7 +1435,7 @@ def _reshape_kv_cache_v2(
                         group_spec.scale_dim,
                     )
                     if group_spec.cache_sparse_li_c4:
-                        indexer_scale_cache_shape = (*indexer_scale_cache_shape[:-1], group_spec.head_size * 2 // 64, 2)
+                        indexer_scale_cache_shape = (*indexer_scale_cache_shape[:-1], group_spec.scale_dim // 2, 2)
                     indexer_scale_cache = raw_scale_tensor.view(group_spec.scale_dtype).view(indexer_scale_cache_shape)
                     kv_caches[layer_name] = (indexer_k_cache, indexer_scale_cache)
 
