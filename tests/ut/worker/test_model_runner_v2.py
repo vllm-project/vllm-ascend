@@ -727,8 +727,7 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture)
     runner.pcp_manager = MagicMock(spec=AscendPCPManager)
     runner.model_state = SimpleNamespace(pcp_manager=None, kvpp_runtime=None)
     runner.speculator = SimpleNamespace()
-    runner.model_config = SimpleNamespace(enable_return_routed_experts=True, architecture=architecture)
-    runner.init_routed_experts_capturer = MagicMock()
+    runner.model_config = SimpleNamespace(architecture=architecture)
     kv_cache_config = KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
     original = vllm_model_runner.ModelCudaGraphManager
     seen = {}
@@ -780,7 +779,6 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture)
     assert runner.pcp_manager.vllm_config is runner.vllm_config
     assert runner.model_state.pcp_manager is runner.pcp_manager
     assert runner.speculator.pcp_manager is runner.pcp_manager
-    runner.init_routed_experts_capturer.assert_called_once_with()
 
 
 def test_initialize_kv_cache_forwards_allocation_context():
@@ -796,7 +794,7 @@ def test_initialize_kv_cache_forwards_allocation_context():
     runner.pcp_manager = None
     runner.model_state = SimpleNamespace(pcp_manager=None, kvpp_runtime=None)
     runner.speculator = None
-    runner.model_config = SimpleNamespace(enable_return_routed_experts=False, architecture="OtherModel")
+    runner.model_config = SimpleNamespace(architecture="OtherModel")
     called = False
     captured_kwargs: dict[str, object] = {}
     allocation_context = object()

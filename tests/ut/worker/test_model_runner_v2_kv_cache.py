@@ -26,6 +26,7 @@ def test_initialize_preserves_connector_containers_and_flattens_runner_cache(is_
     runner.max_model_len = 128
     runner.cache_config.kv_sharing_fast_prefill = False
     runner.jit_warmup_registry.activate.side_effect = nullcontext
+    runner.vllm_config.aux_output_config.enabled = False
     config = KVCacheConfig(num_blocks=3, kv_cache_tensors=[], kv_cache_groups=[])
     registration_order = []
     runner._register_sparse_kv_caches.side_effect = lambda _: registration_order.append("offload")
@@ -62,6 +63,46 @@ def test_initialize_preserves_connector_containers_and_flattens_runner_cache(is_
         assert caches["attention"][2] is v
         assert caches["mamba"][1] is ssm
         assert caches["other"] is other
+
+
+def test_initialize_builds_aux_output_connector_when_enabled():
+    """The vendored initializer must keep upstream's AuxOutput R3 wiring.
+
+    vLLM #45635 moved routed-experts capture into the AuxOutput connector, which
+    the runner builds here. Dropping that call leaves the worker without a
+    connector and makes the scheduler fail with "auxiliary output worker output
+    is missing <req_id>".
+    """
+    caches = {"attention": torch.empty(3, 4)}
+    runner = MagicMock()
+    runner.device = torch.device("cpu")
+    runner.is_encoder_decoder = False
+    runner.speculator = None
+    runner.vocab_size = 16
+    runner.max_model_len = 128
+    runner.cache_config.kv_sharing_fast_prefill = False
+    runner.jit_warmup_registry.activate.side_effect = nullcontext
+    runner.vllm_config.aux_output_config.enabled = True
+    config = KVCacheConfig(num_blocks=3, kv_cache_tensors=[], kv_cache_groups=[])
+
+    with (
+        patch.object(upstream, "init_attn_backend", return_value=([], MagicMock(), [])),
+        patch.object(upstream, "maybe_create_adaptive_verification_manager", return_value=None),
+        patch.object(upstream, "BlockTables"),
+        patch.object(upstream.pcp, "maybe_build_pcp_manager", return_value=None),
+        patch.object(upstream, "maybe_build_ubatch_runner", return_value=None),
+        patch.object(upstream, "initialize_mamba_ssu_backend"),
+        patch.object(upstream, "has_compiled_submodule", return_value=False),
+        patch.object(upstream, "ModelCudaGraphManager"),
+        patch.object(upstream, "check_attention_cp_compatibility"),
+        patch.object(upstream, "init_kv_cache", return_value=caches),
+        patch.object(upstream, "get_kv_connector"),
+        patch.object(upstream, "get_aux_output_connector", return_value="aux") as get_aux,
+    ):
+        upstream.GPUModelRunner.initialize_kv_cache(runner, config)
+
+    get_aux.assert_called_once_with(runner.model, runner.vllm_config, config)
+    assert runner.aux_output_connector == "aux"
 
 
 def test_mrv2_block_copy_preserves_segmented_mamba_storage():

@@ -1556,7 +1556,9 @@
 #       Adapt the upstream initializer to flatten only the runner's cache list
 #       before device filtering. Preserve the original dictionary and container
 #       types for model bindings and connector registration; remove the old
-#       first-tensor wrapper in patch_attn_utils.py.
+#       first-tensor wrapper in patch_attn_utils.py. Keep upstream's AuxOutput
+#       connector creation as well: the copied initializer would otherwise drop
+#       it, leaving the worker without a routed-experts (R3) connector.
 #    Related PR (if no, explain why):
 #       No upstream PR linked; this adapts Ascend multi-tensor allocations.
 #    Future Plan:

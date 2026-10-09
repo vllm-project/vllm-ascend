@@ -193,6 +193,16 @@ def initialize_kv_cache(
     else:
         self.kv_connector = upstream.get_kv_connector(self.vllm_config, kv_caches_dict)
 
+        # AuxOutput connector requires resolved kv_cache_config. Keep upstream's
+        # routed-experts (R3 / routing replay) wiring when mirroring its
+        # initializer: without it the worker never builds the connector, and the
+        # scheduler fails the step with
+        # "auxiliary output worker output is missing <req_id>".
+        if self.vllm_config.aux_output_config.enabled:
+            self.aux_output_connector = upstream.get_aux_output_connector(
+                self.model, self.vllm_config, kv_cache_config
+            )
+
 
 upstream.copy_kv_cache_blocks_inplace = copy_kv_cache_blocks_inplace
 
