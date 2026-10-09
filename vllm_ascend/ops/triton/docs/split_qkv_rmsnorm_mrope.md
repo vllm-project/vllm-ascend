@@ -60,7 +60,7 @@
   python3 -m unittest discover -s tests/ut/ops -p test_split_qkv_rmsnorm_mrope_dispatch.py
   ```
 
-- Host-only checks cover the shared UB helper, invalid capacity, exact-fit rejection, tensor layout, semantic constraints, the centralized override, and the real wrapper's Python selection/launch wiring using tensor/launch stubs. The production cleanup removes evidence/identity machinery and the unused M2 tail-only specialization, reuses the existing token partition, and preserves the G2 estimate and G3 threshold. Structural comparison with the pre-cleanup source checks the M1, M2 pair and odd-tail computation bodies. The archived device results below precede both the capacity-source refactor and this cleanup; they do not constitute on-device validation of the exact new source or JIT specialization.
+- Host-only checks cover the shared UB helper, invalid capacity, exact-fit rejection, tensor layout, semantic constraints, the centralized override, and the real wrapper's Python selection/launch wiring using tensor/launch stubs. The production cleanup removes evidence/identity machinery and the unused M2 tail-only specialization, reuses the existing token partition, and preserves the G2 estimate and G3 threshold. Structural comparison with the pre-cleanup source checks the M1, M2 pair and odd-tail computation bodies. The three-point device numerical run below validates the cleaned-up source; the performance measurements still belong to an earlier source.
 
 - The pre-existing single-card accuracy suite covers bf16/fp16, gate/no-gate, interleaved/contiguous MRoPE, two token counts, and two head configurations. It was not run on the exact current PR head in this work:
 
@@ -89,4 +89,13 @@
   | P5 | 8,192 | 4 / 1 | 347.070 / 283.090 | 6/6 | 1.2269x | `faster` at this sampled shape |
 
 - All six numerical items in that paired run passed; no failure or diagnostic was reported. These timings belong to the **earlier source and that B3 runtime**, not to the exact current PR head or a model-throughput claim. Their ratios must not be relabeled as main/Phase 0 speedups or multiplied by historical Phase 1 ratios to estimate a total gain. Earlier P1/P2/P3 results with no clear incremental M2 benefit likewise do not establish that the complete PR has no benefit over main: the current M1 fallback retains direct half RoPE. The full target result tree was not copied locally; the received compact handoff, target-side committed status, and mutation-free handoff form report-level evidence. The target-side original result remains the source for independent checksum review.
-- The exact current PR head has host-only tests but no matching-main NPU Nightly, model/graph-replay test, or fresh paired performance run. The trial workload threshold and conservative boundary guard remain explicit qualification limits.
+- The cleaned-up production source at `e0f26aeb` passed a three-point public-entry numerical run on Ascend910B3/P40 (`run_20261009T072317173553Z_numerics_aaee9b8d`, package `pkg_3a16bd076842b8c8`). The override was unset for all items. The older `v0.23.0rc1` image was staged with the exact main UB helper and the two required environment getters, rather than a mock capacity. Source/helper identities and branch compiler configurations were recorded in the bounded handoff.
+
+  | Case | Tokens | Q/KV heads | Actual route | Q / K maximum absolute error | V / Gate |
+  | --- | ---: | ---: | --- | --- | --- |
+  | HQ24_T1024_B3 | 1,024 | 24 / 4 | M2, `shape_resource`, multibuffer off | 0.015625 / 0.00390625 | Byte-exact |
+  | P3_B3 | 1 | 6 / 1 | M1, `g3_workload`, multibuffer on | 0 / 0 | Byte-exact |
+  | E2C_B3 | 192 | 16 / 4 | M1, `g2_resource`, multibuffer on | 0.0078125 / 0.0078125 | Byte-exact |
+
+  All three items were finite and passed Q/K `atol=rtol=0.02`; V/Gate had zero mismatched bytes and elements. HQ24/T1024 partitions include odd final rows, covering M2's single-row tail; the other points protect singleton and pair-boundary fallbacks. The result was reported completed, committed and mutation-free handoff-readable. This is **report-level numerical evidence**, not independent verification of the full target result checksums, IR semantics, measured UB usage, or fresh performance. It does not qualify every shape or a newer-main runtime.
+- There is still no matching-main NPU Nightly, model/graph-replay test, or fresh paired performance run for the cleaned-up source. The trial workload threshold and conservative boundary guard remain explicit qualification limits.
