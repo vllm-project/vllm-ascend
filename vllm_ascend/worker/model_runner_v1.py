@@ -6262,7 +6262,7 @@ class NPUModelRunner(GPUModelRunner):
                         if (cache_sparse_li_c8 or cache_sparse_li_c4)
                         else "auto"
                     ),
-                    scale_dim=head_dim // 64 * 2 if cache_sparse_li_c4 else 1 if cache_sparse_li_c8 else 0,
+                    scale_dim=head_dim // 32 if cache_sparse_li_c4 else 1 if cache_sparse_li_c8 else 0,
                     scale_dtype=torch.float8_e8m0fnu if cache_sparse_li_c4
                     else self.c8_k_scale_cache_dtype if cache_sparse_li_c8 else torch.int8,
                     cache_sparse_li_c4=cache_sparse_li_c4,

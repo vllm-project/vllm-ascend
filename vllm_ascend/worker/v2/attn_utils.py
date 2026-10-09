@@ -294,7 +294,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                     if use_turboquant
                     else "auto"
                 ),
-                scale_dim=head_dim // 64 * 2 if cache_sparse_li_c4 else 1 if cache_sparse_li_c8 else 0,
+                scale_dim=head_dim // 32 if cache_sparse_li_c4 else 1 if cache_sparse_li_c8 else 0,
                 scale_dtype=torch.float8_e8m0fnu
                 if cache_sparse_li_c4
                 else c8_k_scale_cache_dtype
