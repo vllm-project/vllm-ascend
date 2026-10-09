@@ -33,6 +33,7 @@ import vllm_ascend.patch.platform.patch_glm_tool_call_streaming  # noqa
 
 if vllm_version_is("0.23.0"):
     import vllm_ascend.patch.platform.patch_async_swa_kv_lifetime  # noqa
+    import vllm_ascend.patch.platform.patch_deepseek_v3_reasoning_usage_accounting  # noqa
     import vllm_ascend.patch.platform.patch_glm47_tool_call_parser  # noqa
     import vllm_ascend.patch.platform.patch_minimax_m2_tool_call_parser  # noqa
     import vllm_ascend.patch.platform.patch_minimax_usage_accounting  # noqa
