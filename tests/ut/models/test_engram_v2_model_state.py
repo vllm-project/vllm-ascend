@@ -538,3 +538,16 @@ def test_mask_wait_is_delayed_past_early_layer_compute(runtime):
     )
     assert calls.index(("layer", 0)) < calls.index(("wait_event", mask_event)) < calls.index(("layer", 1))
     assert calls.count(("wait_event", mask_event)) == 1
+
+
+def test_v2_full_lookup_uses_capture_bucket_events_inside_forward_context(runtime):
+    calls, context, _, available = runtime
+    model = make_model()
+    binding = model.prime_engram_v2_graph_inputs(4)
+    available[0] = True
+    context.cudagraph_runtime_mode = CUDAGraphMode.FULL
+    model.prepare_engram = Mock(return_value=({}, torch.zeros(2, dtype=torch.bool)))
+    result = model.prepare_engram_inputs(torch.arange(2), torch.arange(2), 4, cg_mode=CUDAGraphMode.FULL)
+    assert result["engram_pending"] is binding["engram_pending"]
+    assert result["engram_mask_ready_event"] is binding["engram_mask_ready_event"]
+    assert model.prepare_engram.call_args.kwargs["ready_events"] is binding["engram_pending"]
