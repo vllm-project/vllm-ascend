@@ -2069,3 +2069,85 @@ class TestKVPPConfig(TestBase):
         config.additional_config = {"enable_kvpp": True}
         actual = init_ascend_config(config)
         self.assertEqual(actual.kvpp_config.size, 4)
+
+
+class TestDeriveAndValidateConfig(TestBase):
+    """Regression tests for the reviewer-flagged ``vc`` -> ``vllm_config``
+    rename in ``AscendConfig.derive_and_validate``.
+
+    The reviewer found a latent ``NameError`` where ``vc`` was referenced
+    without being defined (in the upstream review the alias line was absent).
+    We removed the ``vc = vllm_config`` alias entirely and use the parameter
+    directly; these tests guard against the alias (or an undefined ``vc``)
+    being reintroduced.
+    """
+
+    @staticmethod
+    def _clean_up(func):
+        def wrapper(*args, **kwargs):
+            clear_ascend_config()
+            clear_enable_sp()
+            try:
+                func(*args, **kwargs)
+            finally:
+                clear_ascend_config()
+                clear_enable_sp()
+
+        return wrapper
+
+    def test_no_undefined_vc_identifier_remains_in_source(self):
+        """The alias ``vc``/``vc.`` must be gone from ascend_config.py."""
+        import re
+
+        import vllm_ascend.ascend_config as mod
+
+        with open(mod.__file__, encoding="utf-8") as f:
+            src = f.read()
+        # A standalone ``vc`` identifier (word-bounded) should not appear.
+        self.assertIsNone(
+            re.search(r"\bvc\b", src),
+            "standalone `vc` identifier still present in ascend_config.py",
+        )
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_derive_and_validate_runs_without_nameerror(self, _mock_fix):
+        """Exercise the vllm_config-parameter branches of derive_and_validate.
+
+        Configure a MoE, EP model so the ``vllm_config.model_config.is_moe``
+        and ``vllm_config.parallel_config`` reads scattered through
+        ``derive_and_validate`` are actually taken. A pre-fix NameError
+        (``vc`` undefined) would surface here.
+        """
+        vc = VllmConfig()
+        vc.model_config.is_moe = True
+        vc.parallel_config.enable_expert_parallel = True
+        vc.parallel_config.tensor_parallel_size = 8
+
+        config = init_ascend_config(vc)
+        # No exception (previously a NameError if `vc` had been used unset).
+        config.derive_and_validate(vc)
+        self.assertIsNotNone(config)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_derive_and_validate_force_eplb_mutual_exclusion(self, _mock_fix):
+        """derive_and_validate still raises its intended semantic error, not a
+        NameError, on the force_eplb + dynamic_eplb conflict."""
+        from unittest.mock import patch as _patch
+
+        vc = VllmConfig()
+        vc.model_config.is_moe = True
+        vc.parallel_config.enable_expert_parallel = True
+        vc.additional_config = {"enable_force_eplb": True}
+
+        config = init_ascend_config(vc)
+
+        class _Eplb:
+            dynamic_eplb = True
+
+        with (
+            _patch.object(config, "eplb_config", _Eplb()),
+            self.assertRaisesRegex(ValueError, "force_eplb"),
+        ):
+            config.derive_and_validate(vc)

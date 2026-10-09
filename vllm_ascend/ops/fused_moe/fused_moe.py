@@ -78,7 +78,6 @@ direct_register_custom_op(
     tags=(torch.Tag.needs_fixed_stride_order,),
 )
 
-
 class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
     def __init__(
         self,
@@ -245,7 +244,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
 
     @property
     def is_internal_router(self) -> bool:
-        # main (cdc4824a21): vllm#51838 removed the gate branch in
+# main (cdc4824a21): vllm#51838 removed the gate branch in
         # DeepseekV2MoE.forward, always passing router_logits=hidden_states.
         # The runner must recompute router_logits via the gate.
         return self.gate is not None

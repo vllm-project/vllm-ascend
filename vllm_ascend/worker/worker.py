@@ -59,7 +59,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
-from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
+from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput, VppContinuationOutput
 from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
 from vllm.v1.worker.startup_plan import (
@@ -752,7 +752,7 @@ class NPUWorker(WorkerBase):
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
-    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
+) -> ModelRunnerOutput | AsyncModelRunnerOutput | VppContinuationOutput | None:
         self.log_memory_stats()
         # enable msMonitor to monitor the performance of vllm-ascend
         if get_ascend_config().msmonitor_use_daemon:
@@ -763,6 +763,24 @@ class NPUWorker(WorkerBase):
                 handle.wait()
             self._pp_send_work = []
 
+        vp_size = self._get_vpp_size()
+        if vp_size > 1:
+            return self._execute_model_vpp(scheduler_output, vp_size)
+        return self._execute_model_regular(scheduler_output)
+    
+    def _get_vpp_size(self) -> int:
+        if not hasattr(self, "_vpp_size_cached"):
+            try:
+                from vllm_ascend.ascend_config import get_ascend_config
+                self._vpp_size_cached = get_ascend_config().virtual_pipeline_parallel_size
+            except RuntimeError:
+                self._vpp_size_cached = 1
+        return self._vpp_size_cached
+
+    def _execute_model_regular(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         if forward_pass and not get_pp_group().is_first_rank:
@@ -818,6 +836,35 @@ class NPUWorker(WorkerBase):
         output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
         output.kv_connector_output = kv_connector_output
         return output
+
+    def _execute_model_vpp(
+        self,
+        scheduler_output: "SchedulerOutput",
+        vp_size: int,
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | VppContinuationOutput | None:
+        """Execute model with VPP.
+
+        All per-stage VPP execution and P2P communication happen inside
+        model_runner.execute_model.
+        """
+        batch_id = getattr(scheduler_output, "batch_id", None)
+        if batch_id is None:
+            raise RuntimeError("VPP requires SchedulerOutput.batch_id")
+        output = self.model_runner.execute_model(
+            scheduler_output, None)
+        if isinstance(output, VppContinuationOutput):
+            return output
+        if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
+            return output
+
+        # Unreachable under vllm-ascend's VPP impl: P2P sends and
+        # kv-connector aggregation happen inside the model runner, so
+        # `execute_model` only ever returns one of the three types
+        # handled above. The legacy `IntermediateTensors` pass-through
+        # was dead; if a future refactor surfaces a new type here it
+        # should be added to the isinstance tuple above, not silently
+        # passed through.
+        return None
 
     @torch.inference_mode()
     def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput | AsyncModelRunnerOutput:
@@ -1301,3 +1348,14 @@ def parse_text_output(output) -> None:
             if line.split(":")[-1].strip() != "OK":
                 raise RuntimeError("NPU card health status is not OK")
     return
+
+
+# Force the VPP pp-group class swap EARLY. `vllm_ascend.patch.worker`
+# (patch_distributed.py) replaces `vllm.distributed.parallel_state.GroupCoordinator`
+# with `GroupCoordinatorPatch`, which teaches `send_tensor_dict(..., is_async=True)`
+# used by the VPP stage schedule. Importing here — last thing in this module, after
+# the class is fully defined — guarantees the swap runs in the worker process before
+# `init_distributed_environment` builds the cached `_PP`, so `get_pp_group()` and the
+# VPP next/prev group both end up patched. (A later swap only rewrites the module
+# attribute and would leave an already-constructed plain `_PP` untouched.)
+import vllm_ascend.patch.worker  # noqa: E402

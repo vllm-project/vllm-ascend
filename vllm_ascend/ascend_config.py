@@ -574,6 +574,12 @@ class AscendConfig:
     enable_force_eplb: bool = False
     enable_pcp_o_proj_weight_sharding: bool = True
     enable_pcp_embedding_lmhead_weight_sharding: bool = True
+    # VPP (vpp-14945) reads this to enable the async-exponential sampler for
+    # rope-v2 alpha sampling during exponential-averaged generation. Ascend
+    # chips rely on torch_npu's native sampler, so the flag stays OFF here;
+    # the field exists so the VPP execute path can atomically read it instead of
+    # raising AttributeError on an accessor that was never defined.
+    enable_async_exponential: bool = False
     draft_window_size: int | None = None
     mix_placement: bool = False
     # When non-zero, force the MC2 combine stage's comm quant_mode to this
@@ -670,25 +676,25 @@ class AscendConfig:
     # multi-step downgrades are order-dependent (e.g. profiling_chunk reads
     # the max_num_batched_tokens that sequence-parallel writeback corrected).
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
-        vc = vllm_config
+        vllm_config = vllm_config
         if (
             self.enable_force_eplb
             and self.eplb_config.dynamic_eplb
-            and vc.model_config is not None
-            and vc.model_config.is_moe
+            and vllm_config.model_config is not None
+            and vllm_config.model_config.is_moe
         ):
             raise ValueError("enable_force_eplb cannot be mixed with dynamic_eplb.")
-        if self.enable_dsa_cp and vc.parallel_config.prefill_context_parallel_size > 1:
+        if self.enable_dsa_cp and vllm_config.parallel_config.prefill_context_parallel_size > 1:
             raise ValueError(
                 "DSA-CP and PCP cannot be enabled at the same time. "
                 "Use PCP instead: remove enable_dsa_cp from additional_config "
                 "when --prefill-context-parallel-size is greater than 1."
             )
-        self._check_mooncake_c8_kv_cache_quant(vc)
+        self._check_mooncake_c8_kv_cache_quant(vllm_config)
 
         # profiling_chunk vs min_chunk clamp
         if self.scheduler_config.profiling_chunk_config.enabled:
-            max_batched = vc.scheduler_config.max_num_batched_tokens
+            max_batched = vllm_config.scheduler_config.max_num_batched_tokens
             if max_batched < self.scheduler_config.profiling_chunk_config.min_chunk:
                 logger.warning(
                     "max_num_batched_tokens is smaller than profiling_chunk_config.min_chunk. "
@@ -699,7 +705,10 @@ class AscendConfig:
                     max_batched,
                 )
                 self.scheduler_config.profiling_chunk_config.min_chunk = max_batched
-        if self.scheduler_config.profiling_chunk_config.enabled and vc.parallel_config.pipeline_parallel_size <= 1:
+        if (
+            self.scheduler_config.profiling_chunk_config.enabled
+            and vllm_config.parallel_config.pipeline_parallel_size <= 1
+        ):
             raise ValueError(
                 "profiling_chunk_config requires pipeline parallelism (pp > 1). "
                 "Please set --pipeline-parallel-size to a value greater than 1, "
@@ -718,12 +727,12 @@ class AscendConfig:
 
         self.enable_shared_expert_dp = (
             self.enable_shared_expert_dp
-            and vc.parallel_config.enable_expert_parallel
-            and vc.parallel_config.tensor_parallel_size > 1
+            and vllm_config.parallel_config.enable_expert_parallel
+            and vllm_config.parallel_config.tensor_parallel_size > 1
         )
         # FlashComm remains the SP MoE switch on Ascend.
         flashcomm_explicitly_enabled = validate_additional_config_bool(
-            (vc.additional_config or {}).get("enable_flashcomm1", False),
+            (vllm_config.additional_config or {}).get("enable_flashcomm1", False),
             "additional_config.enable_flashcomm1",
         ) or os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0").strip().lower() in ("1", "true")
         # DSA-CP depends on FlashComm: auto-enable FlashComm when DSA-CP is on
@@ -738,13 +747,13 @@ class AscendConfig:
                 "flashinfer_all2allv"  # TODO: a tricky way to disable SP moe. Disable this when SP is supported.
             )
             logger.info_once("FlashComm1 is disabled. Using flashinfer_all2allv as the all2all backend.")
-        elif not vc.parallel_config.use_sequence_parallel_moe:
+        elif not vllm_config.parallel_config.use_sequence_parallel_moe:
             logger.warning_once("FlashComm1 is enabled, but the current config does not support sp MoE. Disabling")
         else:
             logger.info_once("FlashComm1 is enabled.")
 
         if self.enable_dsa_cp:
-            tp_size = vc.parallel_config.tensor_parallel_size
+            tp_size = vllm_config.parallel_config.tensor_parallel_size
             if tp_size > 1:
                 migration = (
                     "Consider trying prefill context parallelism with "
@@ -768,27 +777,34 @@ class AscendConfig:
         # DeepSeek V3.2/V4). Resolve this while vllm_config is explicitly
         # available so runtime reads do not depend on vLLM's temporary config
         # context.
-        has_indexer = hasattr(vc.model_config, "hf_text_config") and hasattr(
-            vc.model_config.hf_text_config, "index_topk"
+        has_indexer = hasattr(vllm_config.model_config, "hf_text_config") and hasattr(
+            vllm_config.model_config.hf_text_config, "index_topk"
         )
-        if self.enable_dsa_cp and not vc.parallel_config.use_sequence_parallel_moe:
+        if self.enable_dsa_cp and not vllm_config.parallel_config.use_sequence_parallel_moe:
             logger.warning_once(
                 "DSA-CP is enabled, but the current config does not support sequence-parallel MoE. Disabling DSA-CP."
             )
-        self.enable_dsa_cp = self.enable_dsa_cp and has_indexer and vc.parallel_config.use_sequence_parallel_moe
+        self.enable_dsa_cp = (
+            self.enable_dsa_cp
+            and has_indexer
+            and vllm_config.parallel_config.use_sequence_parallel_moe
+        )
 
         # Sequence-parallel max_num_batched_tokens divisibility writeback
-        if vc.parallel_config.prefill_context_parallel_size > 1 and enable_sp(vllm_config=vc):
-            tp_pcp_size = vc.parallel_config.tensor_parallel_size * vc.parallel_config.prefill_context_parallel_size
-            if vc.scheduler_config.max_num_batched_tokens % tp_pcp_size != 0:
-                vc.scheduler_config.max_num_batched_tokens = (
-                    cdiv(vc.scheduler_config.max_num_batched_tokens, tp_pcp_size) * tp_pcp_size
+        if vllm_config.parallel_config.prefill_context_parallel_size > 1 and enable_sp(vllm_config=vllm_config):
+            tp_pcp_size = (
+                vllm_config.parallel_config.tensor_parallel_size
+                * vllm_config.parallel_config.prefill_context_parallel_size
+            )
+            if vllm_config.scheduler_config.max_num_batched_tokens % tp_pcp_size != 0:
+                vllm_config.scheduler_config.max_num_batched_tokens = (
+                    cdiv(vllm_config.scheduler_config.max_num_batched_tokens, tp_pcp_size) * tp_pcp_size
                 )
                 logger.warning_once(
                     "When using sequence parallelism, the max_num_batched_tokens should be divisible "
                     "by tp_size * pcp_size (%s). It has been adjusted to %s.",
                     str(tp_pcp_size),
-                    str(vc.scheduler_config.max_num_batched_tokens),
+                    str(vllm_config.scheduler_config.max_num_batched_tokens),
                 )
 
         finegrained_tp_enabled = (
@@ -803,7 +819,7 @@ class AscendConfig:
 
         # enable_fused_mc2 enum + MiniMax mutex + multistream auto-disable
         assert self.enable_fused_mc2 in (0, 1), f"enable_fused_mc2 must be 0 or 1, got {self.enable_fused_mc2}"
-        model_architectures = getattr(vc.model_config, "architectures", None) or []
+        model_architectures = getattr(vllm_config.model_config, "architectures", None) or []
         is_minimax_m3 = any(architecture.startswith("MiniMaxM3") for architecture in model_architectures)
         # dispatch_ffn_combine (enable_fused_mc2=1 after MegaMoe rollback) does not
         # support MiniMax M3 SwiGLU-OAI. MegaMoe (enable_fused_mc2=2) is allowed.
@@ -817,11 +833,47 @@ class AscendConfig:
                 "enable_fused_mc2 and multistream_overlap_shared_expert "
                 "cannot be enabled at the same time. Setting multistream_overlap_shared_expert to False."
             )
-        if self.enable_fused_mc2 == 1 and is_mega_moe_supported() and not self._is_megamoe_supported_by_config(vc):
+        if (
+            self.enable_fused_mc2 == 1
+            and is_mega_moe_supported()
+            and not self._is_megamoe_supported_by_config(vllm_config)
+        ):
             self.enable_fused_mc2 = 0
             logger.warning_once(
                 "MegaMoe is not supported for this model config; additional_config.enable_fused_mc2 will be set to 0."
             )
+
+        # Virtual Pipeline Parallelism (VPP)
+        _additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
+        # vLLM's `--additional-config` splats its keys into VllmConfig kwargs,
+        # and `virtual_pipeline_parallel_size` is not a vLLM field, so the value
+        # would otherwise be rejected by pydantic. Allow it via env as a fallback.
+        self.virtual_pipeline_parallel_size: int = _additional_config.get(
+            "virtual_pipeline_parallel_size",
+            int(os.getenv("VPP_SIZE", "1")),
+        )
+        vp_size = self.virtual_pipeline_parallel_size
+        pp_size = vllm_config.parallel_config.pipeline_parallel_size
+        self.vpp_layer_ranges: list[list[tuple[int, int]]] | None = None
+        if vp_size > 1:
+            if pp_size < vp_size:
+                raise ValueError(
+                    "virtual_pipeline_parallel_size > 1 requires "
+                    "pipeline_parallel_size >= vp_size.")
+            if vp_size != 2:
+                raise ValueError(
+                    "currently virtual_pipeline_parallel requires vp_size == 2"
+                )
+            num_layers = vllm_config.model_config.hf_text_config.num_hidden_layers
+            raw_ranges = _additional_config.get("vpp_layer_ranges", None)
+            if raw_ranges is not None:
+                from vllm_ascend.distributed.vpp_utils import validate_vpp_layer_ranges
+                self.vpp_layer_ranges = validate_vpp_layer_ranges(
+                    raw_ranges, num_layers, pp_size, vp_size)
+                logger.info(
+                    "VPP enabled with manual layer ranges: vp_size=%d, "
+                    "pp_size=%d, num_layers=%d, ranges=%s",
+                    vp_size, pp_size, num_layers, self.vpp_layer_ranges)
 
         # mlapo_keep_prefill_weights preconditions: the prefill weights are only
         # freed by MLAPO in the MLA attention path, so the keep switch is only
@@ -833,7 +885,7 @@ class AscendConfig:
                     "mlapo_keep_prefill_weights=True requires enable_mlapo=True. "
                     "The prefill weights are only freed when MLAPO is enabled."
                 )
-            if vc.model_config is None or not vc.model_config.is_deepseek_mla:
+            if vllm_config.model_config is None or not vllm_config.model_config.is_deepseek_mla:
                 raise ValueError(
                     "mlapo_keep_prefill_weights=True is only supported for MLA models "
                     "(e.g., DeepSeek). The prefill weights are only freed by MLAPO "
@@ -841,13 +893,17 @@ class AscendConfig:
                 )
 
         # PD tp_ratio / head_ratio / num_head_replica derivation
-        if vc.kv_transfer_config is not None and vc.model_config is not None and not vc.model_config.is_deepseek_mla:
-            prefill_tp_size = vc.kv_transfer_config.get_from_extra_config("prefill", {"tp_size": 1})["tp_size"]
-            decode_tp_size = vc.kv_transfer_config.get_from_extra_config("decode", {"tp_size": 1})["tp_size"]
+        if (
+            vllm_config.kv_transfer_config is not None
+            and vllm_config.model_config is not None
+            and not vllm_config.model_config.is_deepseek_mla
+        ):
+            prefill_tp_size = vllm_config.kv_transfer_config.get_from_extra_config("prefill", {"tp_size": 1})["tp_size"]
+            decode_tp_size = vllm_config.kv_transfer_config.get_from_extra_config("decode", {"tp_size": 1})["tp_size"]
             assert prefill_tp_size % decode_tp_size == 0, "Prefill TP size must be divisible by Decode TP size."
             self.pd_tp_ratio = prefill_tp_size // decode_tp_size
             if self.pd_tp_ratio > 1:
-                num_kv_head = vc.model_config.get_total_num_kv_heads()
+                num_kv_head = vllm_config.model_config.get_total_num_kv_heads()
                 if not num_kv_head or num_kv_head < 1:
                     raise ValueError(
                         "Could not determine a positive total KV head count for PD "
@@ -863,14 +919,14 @@ class AscendConfig:
 
         # enable_kv_nz preconditions
         if self.enable_kv_nz:
-            if vc.model_config is None:
+            if vllm_config.model_config is None:
                 raise RuntimeError("enable_kv_nz requires a valid model_config.")
             from vllm_ascend.utils import model_uses_sfa_sparse
 
-            use_sparse = model_uses_sfa_sparse(vc.model_config)
-            if not vc.model_config.is_deepseek_mla or use_sparse:
+            use_sparse = model_uses_sfa_sparse(vllm_config.model_config)
+            if not vllm_config.model_config.is_deepseek_mla or use_sparse:
                 raise RuntimeError("enable_kv_nz is only supported for mla currently.")
-            if vc.kv_transfer_config is None or not vc.kv_transfer_config.is_kv_consumer:
+            if vllm_config.kv_transfer_config is None or not vllm_config.kv_transfer_config.is_kv_consumer:
                 raise NotImplementedError(
                     "enable_kv_nz is only supported in pd scenario and can only be used in D node."
                 )
@@ -880,18 +936,18 @@ class AscendConfig:
         # nodes.
         from vllm_ascend.utils import model_uses_kpool_indexer, model_uses_sfa_sparse
 
-        use_sparse = model_uses_sfa_sparse(vc.model_config)
+        use_sparse = model_uses_sfa_sparse(vllm_config.model_config)
         # The SFA C8 packed KV cache path is indexer-agnostic; kpool-indexer
         # models (e.g. GLM-5.3-Flash) can use it as well. LI C8 requires the
         # LightningIndexer cache layout, so it stays gated by use_sparse.
-        use_sparse_sfa = use_sparse or model_uses_kpool_indexer(vc.model_config)
+        use_sparse_sfa = use_sparse or model_uses_kpool_indexer(vllm_config.model_config)
 
-        cache_config = getattr(vc, "cache_config", None)
+        cache_config = getattr(vllm_config, "cache_config", None)
         cache_dtype = getattr(cache_config, "cache_dtype", None)
         self.enable_sparse_sfa_turboquant = cache_dtype == "turboquant_4bit_nc" and use_sparse_sfa
         self.enable_sparse_sfa_c8 = vllm_config.cache_config.cache_dtype in ["fp8", "int8"] and use_sparse_sfa
         self.enable_sparse_li_c8 = vllm_config.attention_config.indexer_kv_dtype in ["fp8", "int8"] and use_sparse
-        kv_transfer_config = vc.kv_transfer_config
+        kv_transfer_config = vllm_config.kv_transfer_config
         is_prefill_node = kv_transfer_config is not None and (
             getattr(kv_transfer_config, "kv_role", None) == "kv_producer"
             or (
@@ -900,19 +956,19 @@ class AscendConfig:
             )
         )
         self._c8_reshape_optim_enabled = self.c8_enable_reshape_optim and self.enable_sparse_li_c8 and is_prefill_node
-        quant_config = getattr(vc, "quant_config", None)
+        quant_config = getattr(vllm_config, "quant_config", None)
         (
             self._sparse_li_c8_layer_ids,
             self._sparse_li_c8_layer_names,
         ) = self._parse_sparse_li_c8_layers_from_quant_config(quant_config)
         self._sparse_li_c8_layer_filter_enabled = self._has_sparse_li_c8_layer_config(quant_config)
         self.enable_sp_by_pass = (
-            vc.model_config is not None
-            and not vc.model_config.enforce_eager
-            and vc.compilation_config.pass_config.enable_sp
+            vllm_config.model_config is not None
+            and not vllm_config.model_config.enforce_eager
+            and vllm_config.compilation_config.pass_config.enable_sp
         )
 
-        self._validate_mc2_comm_alg(vc)
+        self._validate_mc2_comm_alg(vllm_config)
 
         # mega_moe_max_tokens range
         if self.mega_moe_max_tokens <= 0:
@@ -921,7 +977,7 @@ class AscendConfig:
         # batch-sharded sampling (Model Runner V2) shards the sampler inputs
         # per TP rank, while lmhead TP overrides NPUModelRunner.sample with a
         # whole-group LM-head collective path; the two are mutually exclusive.
-        if vc.parallel_config.enable_batch_sharded_sampling:
+        if vllm_config.parallel_config.enable_batch_sharded_sampling:
             if self.finegrained_tp_config.lmhead_tensor_parallel_size > 0:
                 raise ValueError(
                     "enable_batch_sharded_sampling is incompatible with "
@@ -1296,44 +1352,45 @@ class FinegrainedTPConfig:
         # Local import to avoid a circular import during platform resolution.
         from vllm.config.compilation import CUDAGraphMode
 
-        vc = vllm_config
+        vllm_config = vllm_config
         enabled_configs = []
         if self.oproj_tensor_parallel_size > 1 or self.mlp_tensor_parallel_size > 1:
             # o_proj's _forward_o_proj reshape misaligns under tp > 1; mlp is untested there.
-            if vc.parallel_config.tensor_parallel_size > 1:
+            if vllm_config.parallel_config.tensor_parallel_size > 1:
                 raise AssertionError(
                     "oproj_tensor_parallel_size / mlp_tensor_parallel_size currently "
                     "require tensor_parallel_size == 1, got "
-                    f"{vc.parallel_config.tensor_parallel_size}."
+                    f"{vllm_config.parallel_config.tensor_parallel_size}."
                 )
             # Graph dispatch is the only lane that aligns DP token counts (eager keeps per-rank counts).
-            if vc.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
+            if vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
                 raise AssertionError(
                     "oproj_tensor_parallel_size / mlp_tensor_parallel_size are only supported in graph mode"
                 )
-            if vc.kv_transfer_config is None or not vc.kv_transfer_config.is_kv_consumer:
+            if vllm_config.kv_transfer_config is None or not vllm_config.kv_transfer_config.is_kv_consumer:
                 raise AssertionError(
                     "oproj_tensor_parallel_size / mlp_tensor_parallel_size are only supported "
                     "in pd scenario and can only be used in D node."
                 )
             # PCP's dispatch recomputes num_tokens per rank, breaking the group-uniform step size.
-            if vc.parallel_config.prefill_context_parallel_size > 1:
+            if vllm_config.parallel_config.prefill_context_parallel_size > 1:
                 raise AssertionError(
                     "oproj_tensor_parallel_size / mlp_tensor_parallel_size are not supported "
                     "with prefill_context_parallel_size > 1."
                 )
             # decode_query_len mirrors _get_default_max_cudagraph_capture_size in platform.py.
             decode_query_len = 1
-            speculative_config = vc.speculative_config
+            speculative_config = vllm_config.speculative_config
             if speculative_config and speculative_config.num_speculative_tokens:
                 decode_query_len += speculative_config.num_speculative_tokens
             max_step = min(
-                vc.scheduler_config.max_num_batched_tokens, vc.scheduler_config.max_num_seqs * decode_query_len
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                vllm_config.scheduler_config.max_num_seqs * decode_query_len
             )
-            capture_bound = vc.compilation_config.max_cudagraph_capture_size
+            capture_bound = vllm_config.compilation_config.max_cudagraph_capture_size
             # An explicit sizes list is the bound until _set_cudagraph_sizes backfills the capture max.
             if capture_bound is None:
-                capture_sizes = vc.compilation_config.cudagraph_capture_sizes
+                capture_sizes = vllm_config.compilation_config.cudagraph_capture_sizes
                 capture_bound = max(capture_sizes) if capture_sizes else None
             # A step beyond the capture bound dispatches to eager and desyncs the cross-DP collectives.
             if capture_bound is None or capture_bound < max_step:
@@ -1371,9 +1428,9 @@ class FinegrainedTPConfig:
             # to greater than 1 in the model launch configuration, its value will be changed to 1 later.
             # This will cause an issue when finegrained tp is enabled, as it
             # cannot be split into the data parallel communication group, leading to an error.
-            if module_tp_size > 0 and not vc.model_config.is_moe:
+            if module_tp_size > 0 and not vllm_config.model_config.is_moe:
                 raise AssertionError("The finegrained tp sizes can be enabled only for MOE models.")
-            if module_tp_size > 0 and vc.parallel_config.data_parallel_size % module_tp_size != 0:
+            if module_tp_size > 0 and vllm_config.parallel_config.data_parallel_size % module_tp_size != 0:
                 raise AssertionError("finegrained tp sizes must divide by data_parallel_size.")
         if any(size > 0 for size in module_tp_sizes) and enabled_configs:
             logger.info("finegrained_tp_config enabled: %s", ", ".join(enabled_configs))

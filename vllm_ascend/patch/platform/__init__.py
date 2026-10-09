@@ -37,8 +37,28 @@ import vllm_ascend.patch.platform.patch_structured_output  # noqa
 import vllm_ascend.patch.platform.patch_torch_accelerator  # noqa
 import vllm_ascend.patch.platform.patch_mamba_manager  # noqa
 
-if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv("EXPERT_MAP_RECORD", "false") == "true":
+# VPP (scheme2) is activated through VPP_SIZE (falling back via ascend_config
+# when `virtual_pipeline_parallel_size` is unavailable). The engine-side VPP
+# patch (patch_vpp_core) is loaded unconditionally and self-gates on the same
+# config, so the executor-side output_rank patch must follow the SAME trigger
+# -- otherwise VPP_SIZE alone leaves AscendMultiprocExecutor unloaded and the
+# fold-point output_rank falls back to the last PP stage (fold rank), feeding
+# an empty ModelRunnerOutput into update_from_output -> KeyError. ENABLE_VPP
+# is kept as an explicit alias for setups that enable VPP independently.
+def _is_vpp_enabled() -> bool:
+    try:
+        return int(os.getenv("VPP_SIZE", "1")) > 1
+    except ValueError:
+        return False
+
+
+if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv("EXPERT_MAP_RECORD", "false") == "true" \
+    or _is_vpp_enabled() or os.getenv("ENABLE_VPP", "false").lower() in ("true", "1"):
     import vllm_ascend.patch.platform.patch_multiproc_executor  # noqa
+
+import vllm_ascend.patch.platform.patch_scheduler  # noqa
+import vllm_ascend.patch.platform.patch_outputs  # noqa
+import vllm_ascend.patch.platform.patch_vpp_core  # noqa
 
 import vllm_ascend.patch.platform.patch_balance_schedule  # noqa
 import vllm_ascend.patch.platform.patch_engine_core  # noqa
