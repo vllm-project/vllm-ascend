@@ -386,6 +386,38 @@ class ChunkedTokenDatabase:
             size_list.append(size)
         return addr_list, size_list, block_id
 
+    def prepare_values(
+        self,
+        starts: Sequence[int],
+        ends: Sequence[int],
+        block_ids: Sequence[int],
+        kv_cache_group_id: int = 0,
+        cache_role: str = "kv",
+    ) -> tuple[list[list[int]], list[list[int]]]:
+        """Prepare transfer addresses and sizes for a batch of cache blocks."""
+        if not (len(starts) == len(ends) == len(block_ids)):
+            raise ValueError("starts, ends and block_ids must have the same length")
+        if len(block_ids) == 0:
+            return [], []
+
+        group_addrs, group_block_len, group_block_stride = self._get_group_buffers(kv_cache_group_id, cache_role)
+        if not group_block_len:
+            return ([[] for _ in block_ids], [[] for _ in block_ids])
+
+        entry_indices = np.arange(len(group_addrs)) % len(group_block_len)
+        base_addrs = np.asarray(group_addrs, dtype=np.int64)
+        block_lens = np.asarray(group_block_len, dtype=np.int64)[entry_indices]
+        block_strides = (
+            np.asarray(group_block_stride, dtype=np.int64)[entry_indices] if group_block_stride else block_lens
+        )
+        block_ids_array = np.asarray(block_ids, dtype=np.int64)
+        token_spans = np.asarray(ends, dtype=np.int64) - np.asarray(starts, dtype=np.int64)
+        group_block_size = self.get_block_size(kv_cache_group_id)
+
+        addrs = base_addrs[None, :] + block_ids_array[:, None] * block_strides[None, :]
+        sizes = token_spans[:, None] * block_lens[None, :] // group_block_size
+        return addrs.tolist(), sizes.tolist()
+
     def prepare_block_info(self, start: int, end: int, block_ids: list[int]) -> tuple[int, list[int]]:
         block_size = self.block_size[0]
         block_id = block_ids[start // block_size]

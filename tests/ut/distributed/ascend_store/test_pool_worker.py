@@ -652,6 +652,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         worker.m_store.get = MagicMock()
         # Setup token database
         worker.token_database.set_group_buffers({0: [1000, 2000]}, {0: [160]})
+        worker.token_database.prepare_values = MagicMock(wraps=worker.token_database.prepare_values)
 
         load_spec = LoadSpec(vllm_cached_tokens=0, kvpool_cached_tokens=16, can_load=True, token_len=16)
         req = ReqMeta(
@@ -665,6 +666,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         meta.add_request(req)
         worker.start_load_kv(meta)
         worker.m_store.get.assert_called_once()
+        worker.token_database.prepare_values.assert_called_once_with([0], [16], [0], kv_cache_group_id=0)
 
     def test_start_load_kv_sync_uses_tail_block_id(self):
         worker = self._make_worker()
