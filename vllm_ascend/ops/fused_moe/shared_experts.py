@@ -175,7 +175,8 @@ class AscendSharedExperts:
             return
         # The operator applies the routed activation to the shared experts too,
         # so only the standard SiluAndMul pairing can be fused.
-        routed_activation = str(getattr(self.moe_layer, "activation", "silu"))
+        activation = getattr(self.moe_layer, "activation", "silu")
+        routed_activation = activation.name.lower() if hasattr(activation, "name") else str(activation)
         if (
             routed_activation != "silu"
             or isinstance(self.layer.act_fn, SituAndMul)
