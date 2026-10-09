@@ -47,12 +47,13 @@ from __future__ import annotations
 import importlib.util
 import json
 import math
-import re
 import sys
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any
+
+import regex as re
 
 _POLICY_DIR = Path(__file__).resolve().parent
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -493,7 +494,7 @@ def toolchain_matches_compat(fingerprint: str, compat: dict, demand) -> bool:
     """A live fingerprint is compatible iff every compat dist falls in range.
 
     Not an exact version whitelist: any patch within a pinned major.minor
-    interval is compatible; ``"unknown"`` / unparseable never matches.
+    interval is compatible; ``"unknown"`` / unparsable never matches.
     """
     parsed = _parse_fingerprint_for_compat(fingerprint, demand)
     if parsed is None:
