@@ -217,7 +217,7 @@ class NPUModelRunner(GPUModelRunner):
             ),
         )
         # History-based speculators must reference the replacement Ascend state.
-        self.speculator = None
+        self.speculator: Any = None
         if self.speculative_config is not None and self.is_last_pp_rank:
             self.speculator = init_speculator(self.vllm_config, self.device, self.req_states)
             # Share the update stream between the target and draft graph managers.
