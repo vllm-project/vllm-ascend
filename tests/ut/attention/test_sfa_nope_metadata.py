@@ -42,7 +42,6 @@ def _builder(block_size, a5, monkeypatch, rope_dim=0, builder_cls=sfa.AscendSFAM
         "get_current_hardware_profile",
         lambda: SimpleNamespace(device_adaptor_family=DeviceAdaptorFamily.FP8_OPTIMIZED if a5 else None),
     )
-    monkeypatch.setattr(sfa, "get_ascend_config", lambda: SimpleNamespace(c8_reshape_optim_enabled=False))
     monkeypatch.setattr(sfa, "select_common_block_size", lambda *args: 128)
     monkeypatch.setattr(
         sfa, "AttentionMaskBuilder", lambda device: SimpleNamespace(get_attention_mask=lambda *args: None)
@@ -79,9 +78,6 @@ def _common(block_size):
         block_table_tensor=expanded,
         max_query_len=2,
         max_seq_len=block_size + 2,
-        group_len=None,
-        group_key_idx=None,
-        group_key_cache_idx=None,
         attn_state=sfa.AscendAttentionState.ChunkedPrefill,
         causal=True,
     )
