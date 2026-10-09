@@ -109,8 +109,8 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
         scheduler_config = vllm_config.scheduler_config
         self._max_num_batched_tokens = scheduler_config.max_num_batched_tokens
         self.use_dsa_cp = enable_dsa_cp()
-        self.tp_size = get_tp_group().world_size if self.use_dsa_cp else 1
-        self._max_num_batched_tokens = _round_up(self._max_num_batched_tokens, self.tp_size)
+        self.dsa_cp_size = get_tp_group().world_size if self.use_dsa_cp else 1
+        self._max_num_batched_tokens = _round_up(self._max_num_batched_tokens, self.dsa_cp_size)
         self._max_num_seqs = scheduler_config.max_num_seqs
         # FULL draft graphs pad the request-shaped metadata to the selected
         # token bucket.  That padded length can exceed max_num_seqs (for
@@ -134,7 +134,7 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
     ) -> AscendIndexerKPoolQueryMetadata | None:
         if not self.use_dsa_cp:
             return None
-        local_tokens = positions.shape[0] // self.tp_size
+        local_tokens = positions.shape[0] // self.dsa_cp_size
         local_start = get_tp_group().rank_in_group * local_tokens
         local_end = local_start + local_tokens
         key = common.slot_mapping.data_ptr()
@@ -203,7 +203,7 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
         del common_prefix_len, fast_build, kwargs
         num_reqs = common_attn_metadata.num_reqs
         num_input_tokens = common_attn_metadata.num_input_tokens
-        num_cache_tokens = _round_up(num_input_tokens, self.tp_size)
+        num_cache_tokens = _round_up(num_input_tokens, self.dsa_cp_size)
         slot_buffer, seq_buffer, cum_buffer, raw_seq_buffer, positions_buffer = self._get_metadata_buffers(
             common_attn_metadata
         )
@@ -347,8 +347,8 @@ class AscendIndexerKPoolTailMetadataBuilder(AttentionMetadataBuilder):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.block_size = kv_cache_spec.block_size
         self.use_dsa_cp = enable_dsa_cp()
-        self.tp_size = get_tp_group().world_size if self.use_dsa_cp else 1
-        self._max_num_batched_tokens = _round_up(vllm_config.scheduler_config.max_num_batched_tokens, self.tp_size)
+        self.dsa_cp_size = get_tp_group().world_size if self.use_dsa_cp else 1
+        self._max_num_batched_tokens = _round_up(vllm_config.scheduler_config.max_num_batched_tokens, self.dsa_cp_size)
         self._slot_buffers: dict[int, torch.Tensor] = {}
 
     def build(
@@ -369,7 +369,7 @@ class AscendIndexerKPoolTailMetadataBuilder(AttentionMetadataBuilder):
                 self._slot_buffers[key] = torch.empty(
                     self._max_num_batched_tokens, dtype=slot_mapping.dtype, device=self.device
                 )
-            padded_tokens = _round_up(num_input_tokens, self.tp_size)
+            padded_tokens = _round_up(num_input_tokens, self.dsa_cp_size)
             slots = self._slot_buffers[key][:padded_tokens]
             slots[:num_input_tokens].copy_(slot_mapping)
             slots[num_input_tokens:].fill_(-1)
