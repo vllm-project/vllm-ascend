@@ -400,10 +400,7 @@ def _default_rebuild_npu_tensor(
     # compatibility path keeps this ABI local; the IPC engine supplies a
     # callback so its cached importer owns the same adjustment.
     if len(list_args) <= 6:
-        raise ValueError(
-            "NPU IPC rebuild arguments do not contain a device index: "
-            f"got {len(list_args)} values"
-        )
+        raise ValueError(f"NPU IPC rebuild arguments do not contain a device index: got {len(list_args)} values")
     list_args[6] = device_index
     return rebuild_npu_tensor(*list_args)
 
@@ -434,8 +431,7 @@ def packed_ipc_consumer(
         raise ValueError("physical_npu_id is required for packed IPC consumption")
     if physical_npu_id not in ipc_handle:
         raise ValueError(
-            f"IPC handle not found for NPU UUID {physical_npu_id}. "
-            f"Available UUIDs: {list(ipc_handle.keys())}"
+            f"IPC handle not found for NPU UUID {physical_npu_id}. Available UUIDs: {list(ipc_handle.keys())}"
         )
 
     dtypes: list[torch.dtype] = []
@@ -451,18 +447,14 @@ def packed_ipc_consumer(
             raise ValueError(f"invalid metadata for tensor {name!r}")
         expected = math.prod(shape) * dtype.itemsize
         if size != expected:
-            raise ValueError(
-                f"tensor {name!r} metadata says {size} bytes but requires {expected} bytes"
-            )
+            raise ValueError(f"tensor {name!r} metadata says {size} bytes but requires {expected} bytes")
 
     if device is None:
         resolved = torch.device("npu", device_index)
     else:
         resolved = torch.device(device)
         if resolved.type != "npu" or resolved.index is None:
-            raise ValueError(
-                f"packed IPC transfer requires an indexed NPU device, got {resolved}"
-            )
+            raise ValueError(f"packed IPC transfer requires an indexed NPU device, got {resolved}")
     rebuild = _default_rebuild_npu_tensor if rebuild_func is None else rebuild_func
     with torch.npu.device(resolved):
         packed = rebuild(ipc_handle[physical_npu_id], device_index)
@@ -474,7 +466,6 @@ def packed_ipc_consumer(
             dtypes,
             tensor_sizes,
         )
-
 
 
 # Compatibility aliases for the names used by the original Ascend PR.
@@ -531,3 +522,4 @@ def packed_npu_ipc_consumer(
         device=device,
         physical_npu_id=physical_npu_id,
     )
+
