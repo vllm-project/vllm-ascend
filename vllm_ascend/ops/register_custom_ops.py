@@ -1,5 +1,3 @@
-import contextlib
-import ctypes
 import functools
 
 import torch
@@ -18,35 +16,6 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.rotary_embedding import rope_forward_oot
 from vllm_ascend.ops.triton.muls_add import muls_add_triton
-
-_CAPTURE_MODE_RELAXED = 2
-
-
-@functools.lru_cache(maxsize=1)
-def _capture_mode_exchange_func():
-    lib = ctypes.CDLL("libascendcl.so")
-    exchange = lib.aclmdlRICaptureThreadExchangeMode
-    exchange.argtypes = [ctypes.POINTER(ctypes.c_int)]
-    exchange.restype = ctypes.c_int
-    return exchange
-
-
-def _exchange_capture_mode(mode: int) -> int:
-    exchanged_mode = ctypes.c_int(mode)
-    rc = _capture_mode_exchange_func()(ctypes.byref(exchanged_mode))
-    if rc:
-        raise RuntimeError(f"aclmdlRICaptureThreadExchangeMode failed: rc={rc}")
-    return exchanged_mode.value
-
-
-@contextlib.contextmanager
-def _relaxed_capture_mode():
-    previous_mode = _exchange_capture_mode(_CAPTURE_MODE_RELAXED)
-    try:
-        yield
-    finally:
-        _exchange_capture_mode(previous_mode)
-
 
 def _get_ep_local_sizes(dp_metadata, ep_group) -> list[int] | None:
     """Return the SP token layout when the MoE runner installed it."""
@@ -232,14 +201,7 @@ def _npu_matmul_reduce_scatter_impl(
             x, weight.t(), _tp_hccl_comm_name(), world_size, reduce_op="sum"
         )
 
-    if not torch.npu.is_current_stream_capturing():
-        return run_mmrs()
-
-    # MatmulReduceScatterV2 may allocate its HCCL resource on first use. ACL
-    # graph capture rejects that allocation in global mode, so relax only
-    # around this operator and restore the previous mode immediately after.
-    with _relaxed_capture_mode():
-        return run_mmrs()
+    return run_mmrs()
 
 
 def _npu_matmul_reduce_scatter_fake(

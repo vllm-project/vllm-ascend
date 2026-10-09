@@ -40,12 +40,15 @@ class BasePattern(ABC):
         return extra_stream_scope_check
 
     def get_extra_check(self):
+        """Return an additional predicate to validate pattern matches."""
         return lambda match: True
 
     def get_scalar_workaround(self) -> dict[str, float | int] | None:
+        """Return scalar example values for Inductor pattern registration."""
         return None
 
     def get_nge_inputs(self) -> list[Any]:
+        """Return example inputs for NGE pattern registration."""
         return self.get_inputs()
 
     def pattern_key(self) -> str:

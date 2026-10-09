@@ -266,8 +266,6 @@ class AscendCompiler(CompilerInterface):
         compile_range: Range,
         key: str | None = None,
     ) -> tuple[Callable | None, Any | None]:
-        # Keep this for npugraph_ex cache-miss recompilation in load().
-        self._compiler_config = compiler_config
         # inductor can inplace modify the graph, so we need to copy it
         # see https://github.com/pytorch/pytorch/issues/138980
         graph = copy.deepcopy(graph)
@@ -343,7 +341,7 @@ class AscendCompiler(CompilerInterface):
             compiled_fn, _ = npugraph_ex_compile(
                 graph,
                 example_inputs,
-                getattr(self, "_compiler_config", {}),
+                {},
                 self.vllm_config,
                 ascend_compilation_config,
                 compile_range,
