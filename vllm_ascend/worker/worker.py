@@ -1108,6 +1108,8 @@ class NPUWorker(WorkerBase):
         extra_config = get_layerwise_reuse_config(self.vllm_config.kv_transfer_config)
         if extra_config is not None:
             speculator = getattr(self.model_runner, "speculator", None)
+            if speculator is None:
+                speculator = getattr(self.model_runner, "drafter", None)
             speculative = self.vllm_config.speculative_config
             draft_names = (
                 set(speculator.draft_attn_layer_names)
@@ -1174,6 +1176,8 @@ class NPUWorker(WorkerBase):
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate NPU KV cache with the specified kv_cache_config."""
         speculator = getattr(self.model_runner, "speculator", None)
+        if speculator is None:
+            speculator = getattr(self.model_runner, "drafter", None)
         speculative = self.vllm_config.speculative_config
         if (
             speculative is not None

@@ -153,6 +153,15 @@ from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h import get_prebound_copy_sfa_slots
+from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
+    bind_dspark_context_receiver,
+    configure_dspark_kv_transfer,
+    get_pd_dspark_aux_layer_ids,
+)
+from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_kv import (
+    apply_dspark_resident_kv_specs,
+    get_resident_dspark_layer_names,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
     apply_layerwise_kv_cache_plan,
     get_layerwise_reuse_config,
@@ -233,6 +242,7 @@ from vllm_ascend.worker.device_metadata import (
     DeviceMetadataTask,
     DeviceMetadataTaskProvider,
 )
+from vllm_ascend.worker.dspark_pd import send_mrv1_dspark_prefill_kv
 from vllm_ascend.worker.kvpp_cache import allocate_kvpp_cache
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.utils import (
@@ -683,6 +693,8 @@ class NPUModelRunner(GPUModelRunner):
         self.sparse_kv_offload_config = self.ascend_config.sparse_kv_offload_config
         self.sparse_kv_offload_enabled = self.sparse_kv_offload_config.enabled
         self.sparse_kv_offload_manager = None
+        self.pd_dspark_aux_layer_ids: tuple[int, ...] = ()
+        self._dspark_prefill_progress: dict[str, tuple[str, int]] = {}
         self.tp_rank = get_tensor_model_parallel_rank() if model_parallel_is_initialized() else 0
 
         # Per-request metadata consumed by the Sparse KV offload resident LRU.
@@ -784,6 +796,8 @@ class NPUModelRunner(GPUModelRunner):
         return eagle_config.get("use_aux_hidden_state", True)
 
     def _get_eagle3_aux_layers_from_config(self) -> tuple[int, ...] | None:
+        if getattr(self, "pd_dspark_aux_layer_ids", ()):
+            return self.pd_dspark_aux_layer_ids
         layer_ids = super()._get_eagle3_aux_layers_from_config()
         if layer_ids:
             return layer_ids
@@ -2230,6 +2244,9 @@ class NPUModelRunner(GPUModelRunner):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
+        if getattr(self, "pd_dspark_aux_layer_ids", ()):
+            for req_id in scheduler_output.finished_req_ids:
+                self._dspark_prefill_progress.pop(req_id, None)
         self._cpp_execution_time_ms = None
         profiling_chunk_config = self.ascend_config.scheduler_config.profiling_chunk_config
         execution_start_time = _start_profiling_chunk_timing(
@@ -2610,6 +2627,8 @@ class NPUModelRunner(GPUModelRunner):
             aux_hidden_states = None
             if self.use_aux_hidden_state_outputs:
                 hidden_states, aux_hidden_states = hidden_states
+            if getattr(self, "pd_dspark_aux_layer_ids", ()) and get_pp_group().is_last_rank:
+                send_mrv1_dspark_prefill_kv(self, scheduler_output, aux_hidden_states)
             if not self.broadcast_pp_output:
                 # Common case.
                 if not get_pp_group().is_last_rank:
@@ -3288,14 +3307,20 @@ class NPUModelRunner(GPUModelRunner):
         assert self.intermediate_tensors is not None
         tp = self.vllm_config.parallel_config.tensor_parallel_size
 
+        def num_rows(key: str) -> int:
+            # The Ascend GLM PP relay gathers auxiliary states and TopK rows
+            # before sending; only hidden/residual remain sequence-sharded.
+            full_rows = getattr(self, "pd_dspark_aux_layer_ids", ()) and key not in ("hidden_states", "residual")
+            return (num_tokens + tp - 1) // tp if enable_sp() and not full_rows else num_tokens
+
         if sync_self:
             assert intermediate_tensors is not None
             for k, v in intermediate_tensors.items():
-                copy_len = (num_tokens + tp - 1) // tp if enable_sp() else num_tokens
-                if k not in self.intermediate_tensors.tensors:
+                copy_len = num_rows(k)
+                if k not in self.intermediate_tensors.tensors or self.intermediate_tensors[k].shape[0] < copy_len:
                     base_tensor = self.intermediate_tensors["hidden_states"]
                     self.intermediate_tensors[k] = v.new_empty(
-                        (base_tensor.shape[0], *v.shape[1:])
+                        (max(base_tensor.shape[0], copy_len), *v.shape[1:])
                     )
                 self.intermediate_tensors[k][:copy_len].copy_(
                     v[:copy_len], non_blocking=True
@@ -3303,9 +3328,7 @@ class NPUModelRunner(GPUModelRunner):
 
         return IntermediateTensors(
             {
-                k: v[: (num_tokens + tp - 1) // tp]
-                if enable_sp()
-                else v[:num_tokens]
+                k: v[:num_rows(k)]
                 for k, v in self.intermediate_tensors.items()
             }
         )
@@ -4217,13 +4240,18 @@ class NPUModelRunner(GPUModelRunner):
                     intermediate_tokens = (num_tokens_padded + tp_size - 1) // tp_size
                 if self.intermediate_tensors is None:
                     max_actual_tokens = self.max_num_tokens
-                    if enable_sp():
+                    if enable_sp() and not getattr(self, "pd_dspark_aux_layer_ids", ()):
                         max_actual_tokens = (self.max_num_tokens + tp_size - 1) // tp_size
                     self.intermediate_tensors = self.model.make_empty_intermediate_tensors(
                         batch_size=max_actual_tokens, dtype=self.dtype, device=self.device
                     )
                 intermediate_tensors = IntermediateTensors(
-                    {k: v[:intermediate_tokens] for k, v in self.intermediate_tensors.items()}
+                    {
+                        k: v[:num_tokens_padded]
+                        if getattr(self, "pd_dspark_aux_layer_ids", ()) and k not in ("hidden_states", "residual")
+                        else v[:intermediate_tokens]
+                        for k, v in self.intermediate_tensors.items()
+                    }
                 )
 
             need_dummy_logits = not is_profile and lmhead_tp_enable()
@@ -4370,6 +4398,11 @@ class NPUModelRunner(GPUModelRunner):
             self.eplb_heat_collection_status =  True
 
     def load_model(self) -> None:
+        self.pd_dspark_aux_layer_ids = get_pd_dspark_aux_layer_ids(self.vllm_config)
+        if self.pd_dspark_aux_layer_ids:
+            draft_config = self.speculative_config.draft_model_config.hf_config
+            if "Glm5DSparkForCausalLM" not in draft_config.architectures:
+                raise ValueError("MRV1 remote DSpark prompt initialization requires a GLM MLA draft")
         from vllm_ascend.model_executor.warmup.early_kernel_warmup import (
             join_early_kernel_warmup,
             start_early_kernel_warmup,
@@ -4419,7 +4452,7 @@ class NPUModelRunner(GPUModelRunner):
             should_configure_aux_hidden_states = (
                 self.use_aux_hidden_state_outputs
                 if pp_group.world_size == 1
-                else self._eagle3_uses_aux_hidden_state()
+                else (self._eagle3_uses_aux_hidden_state() or bool(self.pd_dspark_aux_layer_ids))
             )
             if should_configure_aux_hidden_states:
                 from vllm.model_executor.models.interfaces import supports_eagle3
@@ -4448,7 +4481,7 @@ class NPUModelRunner(GPUModelRunner):
                             "materialized GQA" if materialized else "raw MLA",
                         )
 
-                if pp_group.world_size > 1:
+                if pp_group.world_size > 1 and not self.pd_dspark_aux_layer_ids:
                     inner_model = self.model
                     if hasattr(inner_model, "get_language_model"):
                         inner_model = inner_model.get_language_model()
@@ -4598,7 +4631,20 @@ class NPUModelRunner(GPUModelRunner):
         self._mamba_bufs = None
         self._mamba_copy_bufs = None
         self.may_add_encoder_only_layers_to_kv_cache_config()
-        apply_layerwise_kv_cache_plan(kv_cache_config, self.vllm_config)
+        configure_dspark_kv_transfer(
+            self.vllm_config, self.drafter, kv_cache_config, is_last_pp_rank=get_pp_group().is_last_rank
+        )
+        resident_draft_names = get_resident_dspark_layer_names(
+            self.vllm_config,
+            self.drafter,
+            sparse_offload_enabled=self.sparse_kv_offload_enabled,
+            is_last_pp_rank=get_pp_group().is_last_rank,
+            shared_kv_cache_layers=self.shared_kv_cache_layers,
+        )
+        persistent_draft_names = resident_draft_names | set(getattr(kv_cache_config, "dspark_draft_layer_names", ()))
+        apply_layerwise_kv_cache_plan(
+            kv_cache_config, self.vllm_config, excluded_layer_names=persistent_draft_names
+        )
         self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
         # NOTE(cmq): initialize_attn_backend must before using self.attn_groups
         self.initialize_attn_backend(kv_cache_config)
@@ -4683,6 +4729,12 @@ class NPUModelRunner(GPUModelRunner):
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(kv_caches)
 
+        bind_dspark_context_receiver(
+            self.vllm_config,
+            sparse_offload_enabled=self.sparse_kv_offload_enabled,
+            is_last_pp_rank=get_pp_group().is_last_rank,
+            max_requests=self.max_num_reqs,
+        )
         self.kvpp = KVPPRuntime.create_from_kv_cache(
             vllm_config=self.vllm_config,
             kv_cache_config=self.kv_cache_config,
@@ -5130,7 +5182,6 @@ class NPUModelRunner(GPUModelRunner):
             # Only the layerwise planner emits zero-stride alias descriptors
             # here. Ordinary vLLM group descriptors retain private layer buffers.
             reuse_slot = layerwise_reuse and kv_cache_tensor.layer_stride == 0
-            allocation_layers = shared_layers[:1] if reuse_slot else shared_layers
             use_mamba = False
             use_compressed_cache = False
             for layer_name in shared_layers:
@@ -5140,6 +5191,9 @@ class NPUModelRunner(GPUModelRunner):
                     use_compressed_cache = True
             for idx in range(len(shared_layers)):
                 layer_name = shared_layers[idx]
+                # A descriptor may pack host target and resident draft layers.
+                # Allocate each region using its own placement, dtype and dims.
+                allocation_layers = [layer_name]
                 if reuse_slot and idx > 0:
                     kv_cache_raw_tensors[layer_name] = kv_cache_raw_tensors[shared_layers[0]]
                     continue
@@ -5264,7 +5318,7 @@ class NPUModelRunner(GPUModelRunner):
                             k_tensor_split_factor, v_tensor_split_factor = calc_split_factor(kv_head_dim_list)
                         k_tensor_size = int(kv_cache_tensor_size // k_tensor_split_factor)
                         v_tensor_size = int(kv_cache_tensor_size // v_tensor_split_factor)
-                    if self.sparse_kv_offload_enabled:
+                    if self.sparse_kv_offload_enabled and getattr(current_kv_cache_spec, "store_on_host", False):
                         assert self.use_sparse, "Sparse KV offload only support sparse attention."
                         assert not current_packed_sfa_main_cache, (
                             "Sparse KV offload do not support a packed SFA main cache."
@@ -5586,7 +5640,7 @@ class NPUModelRunner(GPUModelRunner):
                     # unpack them as a K/V tuple.
                     current_sparse_sfa_c8 = kv_cache_spec_uses_sparse_sfa_c8(current_kv_cache_spec)
                     current_packed_sfa_main_cache = kv_cache_spec_uses_packed_sfa_main_cache(current_kv_cache_spec)
-                    if self.sparse_kv_offload_enabled:
+                    if self.sparse_kv_offload_enabled and getattr(current_kv_cache_spec, "store_on_host", False):
                         assert self.use_sparse, "Sparse KV offload only support sparse attention."
                         assert not current_packed_sfa_main_cache, (
                             "Sparse KV offload do not support a packed SFA main cache."
@@ -6148,6 +6202,17 @@ class NPUModelRunner(GPUModelRunner):
         # ordering expected by graph parameter update logic in attention backends.
         mamba_layers: dict[str, MambaBase] = {}
         attn_layer_names = set()
+        dspark_layer_names = (
+            self.drafter.draft_attn_layer_names
+            if isinstance(getattr(self, "drafter", None), AscendDSparkProposer)
+            else set()
+        )
+        dense_dspark_layer_names = (
+            dspark_layer_names
+            if dspark_layer_names
+            and "Glm5DSparkForCausalLM" in self.drafter.draft_model_config.hf_config.architectures
+            else set()
+        )
         for layer_name, attn_module in attn_layers.items():
             if (isinstance(attn_module, Attention)
                     and (kv_tgt_layer := attn_module.kv_sharing_target_layer_name) is not None):
@@ -6173,10 +6238,10 @@ class NPUModelRunner(GPUModelRunner):
                     kv_cache_spec[layer_name] = spec
                     attn_layer_names.add(layer_name)
             elif isinstance(attn_module, MLAAttention):
-                if self.use_sparse or getattr(
-                    getattr(attn_module, "impl", None), "enable_sparse_sfa_c8", False
-                ) or getattr(
-                    getattr(attn_module, "impl", None), "enable_sparse_sfa_turboquant", False
+                if layer_name not in dense_dspark_layer_names and (
+                    self.use_sparse
+                    or getattr(getattr(attn_module, "impl", None), "enable_sparse_sfa_c8", False)
+                    or getattr(getattr(attn_module, "impl", None), "enable_sparse_sfa_turboquant", False)
                 ):
                     impl = attn_module.impl
                     cache_sparse_sfa_c8 = bool(
@@ -6329,6 +6394,15 @@ class NPUModelRunner(GPUModelRunner):
                 if kv_cache_spec[layer_name].page_size_bytes < mamba_page_size_padded:  # type: ignore[attr-defined]
                     object.__setattr__(kv_cache_spec[layer_name], "page_size_padded", mamba_page_size_padded)
 
+        if dspark_layer_names and self.sparse_kv_offload_enabled:
+            kv_cache_spec = apply_dspark_resident_kv_specs(
+                kv_cache_spec,
+                self.vllm_config,
+                self.drafter,
+                sparse_offload_enabled=True,
+                is_last_pp_rank=get_pp_group().is_last_rank,
+                shared_kv_cache_layers=self.shared_kv_cache_layers,
+            )
         if self.sparse_kv_offload_enabled:
             self.kv_cache_spec = kv_cache_spec # reserve for Sparse KV offload usage
         return kv_cache_spec

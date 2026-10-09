@@ -1924,6 +1924,29 @@ class TestNPUWorker(TestBase):
         mock_destroy.assert_called_once()
 
     @patch("vllm_ascend.worker.worker.ensure_kv_transfer_initialized")
+    def test_mrv1_dspark_names_reach_connector_before_initialization(self, ensure_transfer):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        worker = NPUWorker.__new__(NPUWorker)
+        worker.use_v2_model_runner = False
+        worker.model_runner = SimpleNamespace(
+            drafter=SimpleNamespace(draft_attn_layer_names={"draft.attn"}),
+            initialize_kv_cache=MagicMock(),
+        )
+        worker.vllm_config = SimpleNamespace(
+            speculative_config=SimpleNamespace(method="dspark"),
+            model_config=SimpleNamespace(enable_sleep_mode=False),
+        )
+        cache_config = SimpleNamespace(has_mamba_layers=False, needs_kv_cache_zeroing=False)
+        ensure_transfer.side_effect = lambda _config, cache: self.assertEqual(
+            cache.dspark_draft_layer_names, ("draft.attn",)
+        )
+        with patch("vllm_ascend.worker.worker.uses_sfa_dspark_kv_transfer", return_value=True):
+            worker.initialize_from_config(cache_config)
+        ensure_transfer.assert_called_once()
+        worker.model_runner.initialize_kv_cache.assert_called_once()
+
+    @patch("vllm_ascend.worker.worker.ensure_kv_transfer_initialized")
     def test_initialize_from_config_without_sleep_mode(self, mock_ensure_kv_transfer):
         """Test initialize_from_config method - without sleep mode enabled"""
         from vllm_ascend.worker.worker import NPUWorker

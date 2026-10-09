@@ -1748,14 +1748,6 @@ class SparseKVOffloadConfig:
                     "you can enable keep_device_kv_cache."
                 )
         self.topk = vllm_config.model_config.hf_text_config.index_topk
-        speculative = getattr(vllm_config, "speculative_config", None)
-        if (
-            speculative is not None
-            and speculative.method == "dspark"
-            and not getattr(vllm_config, "use_v2_model_runner", False)
-        ):
-            # Only V2 initializes the resident draft KV from remote prompt context.
-            raise ValueError("Sparse KV offload with DSpark requires V2 remote prompt-context initialization")
         if self.topk_buffer_size < self.topk:
             raise ValueError(
                 "sparse_kv_offload_config.topk_buffer_size must be >= topk, "

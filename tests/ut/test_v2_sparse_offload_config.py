@@ -137,11 +137,12 @@ def test_dspark_rejects_hot_budget_below_configured_width():
         make_fused_config(config, 26624)
 
 
+@pytest.mark.parametrize("v2", [False, True])
 @pytest.mark.parametrize("fused_op_type", ["none", "fused_copy_sfa"])
-def test_remote_dspark_requires_v2_context_initialization(fused_op_type):
+def test_remote_dspark_accepts_both_runner_context_initialization(v2, fused_op_type):
     config = make_dspark_config()
-    config.use_v2_model_runner = False
-    with pytest.raises(ValueError, match="V2 remote prompt-context initialization"):
-        SparseKVOffloadConfig.from_additional_config(
-            config, {"enabled": True, "fused_op_type": fused_op_type, "topk_buffer_size": 18432}
-        )
+    config.use_v2_model_runner = v2
+    offload = SparseKVOffloadConfig.from_additional_config(
+        config, {"enabled": True, "fused_op_type": fused_op_type, "topk_buffer_size": 18432}
+    )
+    assert offload.enabled

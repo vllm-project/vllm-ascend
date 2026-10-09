@@ -1648,6 +1648,73 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             assert (caches[target][1] == 2).all()
             assert (caches[draft][0] == 0).all()
 
+    @patch("vllm_ascend.worker.model_runner_v1.get_pp_group")
+    @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
+    @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)
+    def test_dspark_mla_spec_keeps_own_dimensions_dtype_and_noncausal_flag(self, _ec, layers, pp):
+        runner = self._build_runner()
+        runner.use_sparse = True
+        runner.sparse_kv_offload_enabled = True
+        runner.shared_kv_cache_layers = {}
+        runner.vllm_config.speculative_config = SimpleNamespace(method="dspark")
+        runner.vllm_config.compilation_config.static_forward_context = {}
+        runner.drafter = AscendDSparkProposer.__new__(AscendDSparkProposer)
+        runner.drafter.model = MagicMock()
+        runner.drafter.draft_model_config = SimpleNamespace(
+            hf_config=SimpleNamespace(architectures=["Glm5DSparkForCausalLM"])
+        )
+        name = "draft.layers.78.self_attn.attn"
+        runner.drafter.model.get_draft_kv_cache_layer_names.return_value = [name]
+        source = MLAAttentionSpec(
+            block_size=128,
+            num_kv_heads=1,
+            head_size=320,
+            dtype=torch.bfloat16,
+            non_causal_multi_token_decode=True,
+        )
+        attn = MLAAttention.__new__(MLAAttention)
+        torch.nn.Module.__init__(attn)
+        attn.impl = SimpleNamespace(fa_quant_layer=False)
+        attn.get_kv_cache_spec = MagicMock(return_value=source)
+        layers.return_value = {name: attn}
+        pp.return_value.is_last_rank = True
+        result = runner.get_kv_cache_spec()[name]
+        self.assertEqual(result.head_size, 320)
+        self.assertEqual(result.dtype, torch.bfloat16)
+        self.assertTrue(result.non_causal_multi_token_decode)
+        self.assertFalse(result.store_on_host)
+
+    @patch("vllm_ascend.worker.model_runner_v1.allocate_kv_cache_tensors_for_sparse_kv_offload")
+    def test_mixed_target_draft_descriptor_allocates_only_target_on_host(self, host_alloc):
+        runner = self._build_runner()
+        runner.use_sparse = True
+        runner.sparse_kv_offload_enabled = True
+        target = AscendMLAAttentionSpec(
+            block_size=128,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.bfloat16,
+            store_on_host=True,
+        )
+        draft = replace(target, store_on_host=False, non_causal_multi_token_decode=True)
+        names = ["target.attn", "draft.attn"]
+        group_spec = UniformTypeKVCacheSpecs(block_size=128, kv_cache_specs=dict(zip(names, (target, draft))))
+        config = KVCacheConfig(
+            num_blocks=2,
+            kv_cache_tensors=[_make_kv_cache_tensor(2 * target.page_size_bytes, names, target.page_size_bytes)],
+            kv_cache_groups=[KVCacheGroupSpec(layer_names=names, kv_cache_spec=group_spec)],
+        )
+        runner._kv_cache_spec_attn_group_iterator = lambda: iter(
+            [SimpleNamespace(backend=AscendMLABackend, layer_names=names)]
+        )
+        runner._get_attention_kv_cache_dims = lambda *_args: (512, 64)
+        host_alloc.return_value = ("host-cache",)
+        raw = runner._allocate_kv_cache_tensors(config)
+        self.assertEqual(host_alloc.call_count, 1)
+        self.assertEqual(raw["target.attn"], ("host-cache",))
+        self.assertEqual(len(raw["draft.attn"]), 2)
+        self.assertEqual(sum(t.numel() for t in raw["draft.attn"]), 2 * draft.page_size_bytes)
+
     def test_c8_mxfp_cache_selection_excludes_mla(self):
         runner = self._build_runner()
         runner.vllm_config.cache_config.cache_dtype = "mxfp8"

@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any
+from collections.abc import Mapping, Sequence
+from typing import TYPE_CHECKING, Any
 
 import torch
-from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
+from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config, set_current_vllm_config
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
@@ -17,7 +18,11 @@ from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.utils import enable_pcp
 from vllm_ascend.ops.triton.spec_decode.utils import copy_and_expand_dflash_and_dspark_inputs_kernel
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer, _compute_num_programs
+from vllm_ascend.spec_decode.dspark_utils import get_dspark_aux_layer_ids
 from vllm_ascend.spec_decode.utils import DynamicSpecScheduler
+
+if TYPE_CHECKING:
+    from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import DSparkContextChunk
 
 
 class AscendDSparkProposer(AscendDflashProposer):
@@ -105,6 +110,68 @@ class AscendDSparkProposer(AscendDflashProposer):
         self._per_group_context_slot_mapping_buffers: dict[int, torch.Tensor] = {}
         self._context_slot_mapping_buffers: list[torch.Tensor | None] | None = None
 
+    @property
+    def draft_attn_layer_names(self) -> set[str]:
+        # Cache planning runs before initialize_attn_backend. Ownership comes
+        # from the loaded model, never from numeric target/draft layer ranges.
+        return set(self.model.get_draft_kv_cache_layer_names())
+
+    def get_draft_context_group_layout(self) -> tuple[tuple[int, ...], tuple[int, ...], dict[int, int]]:
+        layer_names = self.model.get_draft_kv_cache_layer_names()
+        name_to_gid = {name: group.kv_cache_group_id for group in self.draft_attn_groups for name in group.layer_names}
+        if not layer_names or any(name not in name_to_gid for name in layer_names):
+            raise ValueError("DSpark context initialization requires every loaded draft cache layer")
+        layer_group_ids = tuple(name_to_gid[name] for name in layer_names)
+        group_ids = tuple(dict.fromkeys(layer_group_ids))
+        # Transfer block IDs use scheduler logical blocks, not kernel pages.
+        block_sizes = {
+            gid: self.runner.kv_cache_config.kv_cache_groups[gid].kv_cache_spec.block_size for gid in group_ids
+        }
+        return group_ids, layer_group_ids, block_sizes
+
+    @torch.inference_mode()
+    def initialize_local_context(
+        self,
+        chunk: "DSparkContextChunk",
+        aux_hidden_states: torch.Tensor,
+        draft_block_ids_by_group: Mapping[int, Sequence[int]],
+    ) -> None:
+        # The shared context module imports speculative-decode utilities.
+        # Defer this edge until both modules have finished initialization.
+        from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
+            initialize_draft_context_chunk,
+        )
+
+        parallel = self.vllm_config.parallel_config
+        if parallel.prefill_context_parallel_size != 1 or parallel.decode_context_parallel_size != 1:
+            raise ValueError("P-side DSpark prompt initialization does not support context parallelism")
+        if "Glm5DSparkForCausalLM" not in self.draft_model_config.hf_config.architectures:
+            raise ValueError("MRV1 remote DSpark prompt initialization requires a GLM MLA draft")
+        descriptor = chunk.descriptor
+        if (
+            descriptor.aux_layer_ids != get_dspark_aux_layer_ids(self.vllm_config)
+            or descriptor.hidden_size != self.vllm_config.model_config.get_hidden_size()
+            or descriptor.prompt_tokens > self.vllm_config.model_config.max_model_len
+        ):
+            raise ValueError("P-side DSpark context does not match the loaded target/draft schema")
+        if aux_hidden_states.dtype != torch.bfloat16 or tuple(aux_hidden_states.shape) != (
+            chunk.num_tokens,
+            descriptor.feature_width,
+        ):
+            raise ValueError("P-side DSpark context must contain ordered BF16 auxiliary features")
+        group_ids, layer_group_ids, block_sizes = self.get_draft_context_group_layout()
+        with set_current_vllm_config(self._create_draft_vllm_config()):
+            initialize_draft_context_chunk(
+                self.model,
+                chunk,
+                aux_hidden_states,
+                draft_group_ids=group_ids,
+                draft_block_ids_by_group={gid: tuple(draft_block_ids_by_group[gid]) for gid in group_ids},
+                block_sizes_by_group=block_sizes,
+                layer_group_ids=layer_group_ids,
+                device=self.device,
+            )
+
     def _compute_confidence(
         self,
         last_hidden_states: torch.Tensor,
@@ -136,7 +203,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         )
 
         self._draft_attn_layer_names = set(self.model.get_draft_kv_cache_layer_names())
-        self.attn_layer_names = list(sorted(self._draft_attn_layer_names))
+        self.attn_layer_names = list(self.model.get_draft_kv_cache_layer_names())
         self._per_group_kernel_block_sizes = {}
         self.draft_attn_groups: list[AttentionGroup] = []
 

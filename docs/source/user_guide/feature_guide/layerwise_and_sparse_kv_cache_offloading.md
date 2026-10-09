@@ -394,8 +394,13 @@ replace the graph compilation option with a top-level `--enforce-eager`.
 
 ### DSpark with Sparse Decode Offload
 
-GLM MLA DSpark requires Model Runner V2 on both Prefill and Decode. Configure
-the same draft checkpoint and speculative-token count on both nodes, for example:
+GLM MLA DSpark has integration paths for Model Runner V1 and V2 on Prefill
+and Decode. Select V1 with `VLLM_USE_V2_MODEL_RUNNER=0` or V2 with `=1`.
+MRV1 has passed single-request, 10,000-token eager smoke tests with Prefill
+DP2 × TP8 or DP1 × PP2 × TP8 and Decode DP8 × TP2, using DSpark8 and
+`max_num_seqs=1`. This does not establish accuracy, performance, or support
+for higher concurrency. Configure the same draft checkpoint and
+speculative-token count on both nodes, for example:
 
 ```bash
 VLLM_USE_V2_MODEL_RUNNER=1 vllm serve /path/to/target \
@@ -426,6 +431,10 @@ least `18432`; `20480` is an example with extra hot-cache capacity. These are
 kernel/layout bounds, not a draft-checkpoint whitelist or a guarantee that every
 width has been validated end to end. Both nodes must use the same cache block
 size. Remote DSpark draft-KV transfer does not support PCP or DCP.
+Prefill can use PP: every stage captures its checkpoint-selected auxiliary
+boundaries and relays them to the last stage, which owns the complete draft.
+Decode remains PP1. MRV1 uses the existing SFA connector readiness and cancellation
+protocol, including paired target/draft AscendStore prefix reuse.
 
 Only the target's main KV is offloaded to the host. The loaded draft supplies
 its cache-layer ownership, and its full context KV stays in device memory.
