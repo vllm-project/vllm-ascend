@@ -25,7 +25,7 @@ from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.moe_utils import cumsum_group_list, maybe_normalize_mxfp_scale_layout
@@ -272,96 +272,156 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
         )
 
     def get_fused_mc2_weights(self, layer: torch.nn.Module) -> MoEWeights:
-        if _EXTRA_CTX.use_mega_moe:
-            # MegaMoe consumes the non-transposed per-expert weight/scale lists
-            # built in process_weights_after_loading (the non-mega path uses the
-            # transposed single tensors below).
-            return MoEWeights(
-                w1=layer.cann_mega_moe_w13_weight_list,
-                w2=layer.cann_mega_moe_w2_weight_list,
-                w1_scale=layer.cann_mega_moe_w13_weight_scale_list,
-                w2_scale=layer.cann_mega_moe_w2_weight_scale_list,
-                w1_scale_bias=None,
-                w2_scale_bias=None,
-            )
-        else:
-            return MoEWeights(
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
-                w1_scale=layer.w13_weight_scale,
-                w2_scale=layer.w2_weight_scale,
-                w1_scale_bias=None,
-                w2_scale_bias=None,
-            )
+        return MoEWeights(
+            w1=layer.w13_weight_list,
+            w2=layer.w2_weight_list,
+            w1_scale=layer.w13_weight_scale_list,
+            w2_scale=layer.w2_weight_scale_list,
+            w1_scale_bias=None,
+            w2_scale_bias=None,
+        )
 
     @staticmethod
-    def get_eplb_weight_views(layer: torch.nn.Module) -> list[torch.Tensor]:
+    def get_eplb_weight_views(layer: torch.nn.Module) -> list:
         return [
-            layer.w13_weight.transpose(1, 2),
-            layer.w2_weight.transpose(1, 2),
-            layer.w13_weight_scale.transpose(1, 2),
-            layer.w2_weight_scale.transpose(1, 2),
+            layer.w13_weight_list,
+            layer.w2_weight_list,
+            layer.w13_weight_scale_list,
+            layer.w2_weight_scale_list,
         ]
 
     def process_weights_after_loading(self, layer):
+        if getattr(layer, "_mxfp4_transformed", False):
+            return
+
         _rename_packed_weight_parameter(layer, "w13_weight")
         _rename_packed_weight_parameter(layer, "w2_weight")
 
-        g_num, n_size, k_size = layer.w13_weight_scale.shape
-        # The NPU scale layout packs two adjacent MX scales together. Append
-        # one neutral entry when a valid local shard contains an odd count.
-        if k_size % 2 != 0:
-            layer.w13_weight_scale.data = F.pad(layer.w13_weight_scale.data, (0, 1), mode="constant", value=0)
-            k_size += 1
-        layer.w13_weight_scale.data = layer.w13_weight_scale.data.reshape(g_num, n_size, k_size // 2, 2)
-        g_num, n_size, k_size = layer.w2_weight_scale.shape
-        # Apply the same pair-alignment rule independently to the down weight.
-        if k_size % 2 != 0:
-            layer.w2_weight_scale.data = F.pad(layer.w2_weight_scale.data, (0, 1), mode="constant", value=0)
-            k_size += 1
-        layer.w2_weight_scale.data = layer.w2_weight_scale.data.reshape(g_num, n_size, k_size // 2, 2)
-        # MegaMoe (FUSED_MC2 on A5) expects the weights in their original
-        # (out, in) layout — weight1=(E, 2*inter, hidden//2), weight2=(E,
-        # hidden, inter//2) for packed FP4 — and the reshaped (not transposed)
-        # E8M0 scales. Capture per-expert lists before the non-mega path
-        # transposes everything below.
-        if use_cann_megamoe(get_current_vllm_config()):
-            # MegaMoe (FUSED_MC2) on A5 uses the packed FP4 weight format directly
-            layer.cann_mega_moe_w13_weight_list = [
-                torch_npu.npu_format_cast(weight.clone(), ACL_FORMAT_FRACTAL_NZ) for weight in layer.w13_weight.data
-            ]
+        if not hasattr(layer, "_mxfp4_original_shapes"):
+            layer._mxfp4_original_shapes = {
+                "w13_weight": tuple(layer.w13_weight.data.shape),
+                "w13_weight_scale": tuple(layer.w13_weight_scale.data.shape),
+                "w2_weight": tuple(layer.w2_weight.data.shape),
+                "w2_weight_scale": tuple(layer.w2_weight_scale.data.shape),
+            }
 
-            layer.cann_mega_moe_w2_weight_list = [
-                torch_npu.npu_format_cast(
-                    weight.clone(),
-                    ACL_FORMAT_FRACTAL_NZ,
-                    customize_dtype=torch.float8_e4m3fn,
-                    input_dtype=torch_npu.float4_e2m1fn_x2,
+        max_experts_per_card = 128
+        local_num_experts = getattr(layer, "local_num_experts", layer.w13_weight.shape[0])
+        assert local_num_experts <= max_experts_per_card, (
+            f"W4A4 MXFP4 requires local_num_experts <= {max_experts_per_card} "
+            "(CANN tensorList limit for per-expert NZ lists), "
+            f"got {local_num_experts}. "
+            "Consider increasing data-parallel-size to reduce experts per card."
+        )
+
+        if not hasattr(layer, "_mxfp4_moe_parameters"):
+            layer._mxfp4_moe_parameters = {
+                name: getattr(layer, name)
+                for name in (
+                    "w13_weight",
+                    "w2_weight",
+                    "w13_weight_scale",
+                    "w2_weight_scale",
                 )
-                for weight in layer.w2_weight.data
-            ]
-            layer.cann_mega_moe_w13_weight_scale_list = [
-                w13_weight_scale.clone() for w13_weight_scale in layer.w13_weight_scale.data.unbind(dim=0)
-            ]
-            layer.cann_mega_moe_w2_weight_scale_list = [
-                w2_weight_scale.clone() for w2_weight_scale in layer.w2_weight_scale.data.unbind(dim=0)
-            ]
-            tensor_names = (
-                "w13_weight",
-                "w2_weight",
-                "w13_weight_scale",
-                "w2_weight_scale",
-            )
-            for tensor_name in tensor_names:
-                dispose_tensor(getattr(layer, tensor_name))
+            }
 
-        else:
-            # The A5 MXFP4 fused grouped-matmul-swiglu op relies on the
-            # transpose stride to interpret packed FP4 weights as logical K.
-            layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2)
-            layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2)
-            layer.w13_weight_scale.data = layer.w13_weight_scale.data.transpose(1, 2)
-            layer.w2_weight_scale.data = layer.w2_weight_scale.data.transpose(1, 2)
+        for weight_name in ("w13_weight", "w2_weight"):
+            weight = getattr(layer, weight_name)
+            weight_nd = weight.data.transpose(1, 2).contiguous()
+            weight_list = []
+            for expert in weight_nd.unbind(dim=0):
+                expert = expert.clone()
+                if expert.device.type == "npu":
+                    expert = torch_npu.npu_format_cast(
+                        expert,
+                        ACL_FORMAT_FRACTAL_NZ,
+                        customize_dtype=torch.float8_e4m3fn,
+                        input_dtype=torch_npu.float4_e2m1fn_x2,
+                    )
+                weight_list.append(expert)
+            self._update_expert_list(layer, f"{weight_name}_list", weight_list)
+
+            scale_name = f"{weight_name}_scale"
+            scale = getattr(layer, scale_name)
+            g_num, n_size, k_size = scale.shape
+            if k_size % 2 != 0:
+                scale_data = F.pad(scale.data, (0, 1), mode="constant", value=0)
+                k_size += 1
+            else:
+                scale_data = scale.data
+            scale_nd = scale_data.reshape(g_num, n_size, k_size // 2, 2).transpose(1, 2).contiguous()
+            scale_list = [expert.clone() for expert in scale_nd.unbind(dim=0)]
+            self._update_expert_list(layer, f"{scale_name}_list", scale_list)
+
+        for tensor_name, parameter in layer._mxfp4_moe_parameters.items():
+            dispose_tensor(parameter)
+            delattr(layer, tensor_name)
+
+        layer._mxfp4_transformed = True
+        torch.npu.empty_cache()
+
+    @staticmethod
+    def _update_expert_list(layer: torch.nn.Module, name: str, values: list[torch.Tensor]) -> None:
+        """Install expert tensors or refresh graph-stable buffers in place."""
+        current = getattr(layer, name, None)
+        if current is None:
+            setattr(layer, name, values)
+            return
+        if len(current) != len(values):
+            raise ValueError(f"{name} changed expert count across weight reloads")
+        for destination, source in zip(current, values):
+            if destination.shape != source.shape or destination.dtype != source.dtype:
+                raise ValueError(f"{name} changed tensor schema across weight reloads")
+            if destination.device.type == "npu":
+                destination_format = int(torch_npu.get_npu_format(destination))
+                source_format = int(torch_npu.get_npu_format(source))
+                if destination_format != source_format:
+                    source = torch_npu.npu_format_cast(
+                        source,
+                        destination_format,
+                        customize_dtype=destination.dtype,
+                    )
+                if destination_format != int(torch_npu.Format.ND):
+                    torch_npu.copy_memory_(destination, source)
+                    continue
+            destination.copy_(source)
+
+    def restore_weights_for_rl_loading(self, layer):
+        """Restore the checkpoint layout before reloading RL weights."""
+        if not getattr(layer, "_mxfp4_transformed", False):
+            return
+
+        orig_shapes = layer._mxfp4_original_shapes
+        parameters = layer._mxfp4_moe_parameters
+        for weight_name in ("w13_weight", "w2_weight"):
+            scale_name = f"{weight_name}_scale"
+            weight_list = getattr(layer, f"{weight_name}_list")
+            scale_list = getattr(layer, f"{scale_name}_list")
+            weight_nd = [
+                torch_npu.npu_format_cast(weight, torch_npu.Format.ND)
+                if weight.device.type == "npu"
+                else weight
+                for weight in weight_list
+            ]
+            restored_weight = torch.stack(weight_nd).transpose(1, 2).contiguous()
+            original_scale_shape = orig_shapes[scale_name]
+            restored_scale = torch.stack(scale_list).transpose(1, 2).reshape(
+                original_scale_shape[0], original_scale_shape[1], -1
+            )
+            restored_scale = restored_scale[..., : original_scale_shape[-1]].contiguous()
+
+            weight_parameter = parameters[weight_name]
+            scale_parameter = parameters[scale_name]
+            weight_parameter.data = restored_weight.reshape(orig_shapes[weight_name])
+            scale_parameter.data = restored_scale
+            setattr(layer, weight_name, weight_parameter)
+            setattr(layer, scale_name, scale_parameter)
+
+        layer._mxfp4_transformed = False
+
+    @staticmethod
+    def _get_weights(layer: torch.nn.Module, name: str) -> list[torch.Tensor]:
+        return getattr(layer, f"{name}_list")
 
     def apply_gmm1_act_quant(self, mlp_compute_input: MoEMlpComputeInput):
         input_hidden_states = mlp_compute_input.hidden_states
@@ -376,9 +436,9 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
         assert layer is not None
         out, out_scale = torch_npu.npu_grouped_matmul_swiglu_quant_v2(
             x=hidden_states,
-            weight=[layer.w13_weight],
+            weight=self._get_weights(layer, "w13_weight"),
             group_list=cumsum_group_list(mlp_compute_input.group_list, mlp_compute_input.group_list_type, 0),
-            weight_scale=[layer.w13_weight_scale],
+            weight_scale=self._get_weights(layer, "w13_weight_scale"),
             x_scale=pertoken_scale,
             dequant_mode=2,
             quant_mode=2,
@@ -409,8 +469,8 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
         # operator does not dispatch them as an unsupported uint8/uint8 pair.
         hidden_states = torch_npu.npu_grouped_matmul(
             x=[hidden_states],
-            weight=[layer.w13_weight],
-            scale=[layer.w13_weight_scale],
+            weight=self._get_weights(layer, "w13_weight"),
+            scale=self._get_weights(layer, "w13_weight_scale"),
             per_token_scale=[pertoken_scale],
             split_item=2,
             group_type=0,
@@ -444,8 +504,8 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
         )
         return torch_npu.npu_grouped_matmul(
             x=[hidden_states],
-            weight=[layer.w2_weight],
-            scale=[layer.w2_weight_scale],
+            weight=self._get_weights(layer, "w2_weight"),
+            scale=self._get_weights(layer, "w2_weight_scale"),
             bias=None,
             per_token_scale=[act_out_scale],
             split_item=2,
