@@ -522,4 +522,3 @@ def packed_npu_ipc_consumer(
         device=device,
         physical_npu_id=physical_npu_id,
     )
-
