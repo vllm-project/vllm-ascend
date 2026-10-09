@@ -40,7 +40,7 @@ test_cases:
     benchmarks:
       acc:
         case_type: accuracy
-        dataset_path: vllm-ascend/textvqa-subset
+        dataset_path: vllm-ascend/textvqa-lite
         request_conf: vllm_api_stream_chat
         dataset_conf: textvqa/textvqa_gen_base64
         max_out_len: 10240
