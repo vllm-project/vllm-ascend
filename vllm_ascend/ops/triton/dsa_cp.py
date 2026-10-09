@@ -1,6 +1,6 @@
 from vllm.triton_utils import tl, triton
 
-BUILD_LOCAL_METADATA_BLOCK_SIZE = tl.constexpr(1024)
+BUILD_LOCAL_METADATA_BLOCK_SIZE = tl.constexpr(1024) if tl.constexpr is not None else 1024
 
 
 # These scalar values vary per batch and TP rank; keep them out of the JIT cache key.
