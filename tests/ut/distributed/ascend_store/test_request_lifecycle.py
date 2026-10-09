@@ -358,6 +358,9 @@ def test_raw_sequence_lifecycle(
             if req_id not in scheduler.requests:
                 # Consume the finished-ID notification and release Store references.
                 output = scheduler.schedule()
+                # The connector fences this output like any other: drain the
+                # finished request's final saves before its blocks are reused.
+                worker.handle_preemptions(output.kv_connector_metadata)
                 worker.bind_connector_metadata(output.kv_connector_metadata)
                 worker.get_finished(output.finished_req_ids)
                 worker.clear_connector_metadata()
