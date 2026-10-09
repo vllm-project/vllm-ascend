@@ -146,6 +146,7 @@ estimated_times:
   tests/e2e/pull_request/two_card/test_gemma4.py: 290
   tests/e2e/pull_request/four_card/test_minimax_m3.py: 240
   tests/e2e/pull_request/four_card/test_kimi_k3.py: 600
+  tests/e2e/pull_request/four_card/model_runner_v2/test_kimi_k3.py: 720
   # Conservative per-job scheduling budget for the GLM-5.3-Flash functional smoke.
   tests/e2e/pull_request/four_card/test_glm5_3_flash.py: 420
   tests/e2e/pull_request/one_card/test_attention_v1_precision.py: 480
