@@ -609,7 +609,8 @@ def test_packed_npu_ipc_consumer_does_not_clone_owned_slices_twice():
             dtype_names=["float32"],
             tensor_sizes=[4],
             device_index=0,
-            rebuild_func=lambda *_args: rebuild(),        )
+            rebuild_func=lambda *_args: rebuild(),
+        )
 
     assert weights == [("w", owned)]
     owned.clone.assert_not_called()
@@ -1025,7 +1026,8 @@ def test_packed_npu_ipc_roundtrip_scalar(dtype, value):
         dtype_names=chunks[0]["dtype_names"],
         tensor_sizes=chunks[0]["tensor_sizes"],
         device_index=0,
-        rebuild_func=lambda *_args: captured["buffer"],    )
+        rebuild_func=lambda *_args: captured["buffer"],
+    )
 
     restored = weights[0][1]
     assert restored.shape == torch.Size([])
@@ -1160,3 +1162,4 @@ def test_drain_preserves_original_error_when_diagnostic_logging_fails():
         assert len(packed_tensor_module._UNSYNCHRONIZED_BUFFERS) == 1
     finally:
         packed_tensor_module._UNSYNCHRONIZED_BUFFERS.clear()
+
