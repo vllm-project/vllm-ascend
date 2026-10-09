@@ -36,7 +36,7 @@ class EngramModelState(AscendModelState):
     The engram n-gram hash needs the ids of the ``depth`` tokens preceding
     each request's chunk start. The runner keeps the full token history on
     device, so the window is gathered there every step. Lookup rows are then
-    produced on the model's auxiliary stream, overlapped with the forward:
+    produced inside the forward context on the model's auxiliary stream:
     ``prepare_engram_inputs`` (with this step's ``cg_mode``) publishes
     persistent buffers plus ready events the model waits on (see
     ``DeepseekV41Model``).

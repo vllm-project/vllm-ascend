@@ -128,3 +128,14 @@ def test_model_selects_ascend_state():
 
     model = AscendDeepseekV41LLMForCausalLM.__new__(AscendDeepseekV41LLMForCausalLM)
     assert model.get_model_state_cls() is deepseek_v41.EngramModelState
+
+
+def test_eager_hook_forwards_lookup_events(state):
+    state.kvpp_is_dummy_run = True
+    events = {0: object()}
+    state.model.prepare_engram_inputs.return_value = dict(state.model.buffers_for_graph, engram_pending=events)
+    inputs = state.prepare_inputs(batch(), None)
+    result = state.model(**inputs)
+    assert result["engram_pending"] is events
+    state.prepare_engram()
+    state.model.prepare_engram_inputs.assert_called_once()

@@ -1402,8 +1402,8 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         Dispatch keys off the forward context: the V1 runner calls this inside
         the forward, so capture (already done by
         ``prepare_engram_graph_inputs``) and the overlap check read the
-        context. The V2 runner calls it before any context exists and hands
-        ``cg_mode`` over instead: FULL steps reuse bucket-keyed ExternalEvents,
+        context. The V2 state defers lookup until the forward context exists and
+        passes ``cg_mode`` explicitly: FULL steps reuse bucket-keyed ExternalEvents,
         NONE steps get per-step plain events, unknown/other modes stay
         synchronous because compiled regions must not trace stream control
         ops. ``slot_mapping``/``block_table`` stay ``None`` under the V2
@@ -1421,8 +1421,8 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             # under the batch descriptor).
             overlap = self._can_overlap_engram_preparation()
         else:
-            # V2: no forward context exists yet, so the runner passes the
-            # graph mode of this step (captured by the model state); None
+            # V2 passes the step mode explicitly and retains capture bucket
+            # event keys after entering the forward context. None
             # means unknown, which stays synchronous.
             overlap = cg_mode in (CUDAGraphMode.NONE, CUDAGraphMode.FULL) and self._engram_overlap_enabled
             if overlap and cg_mode == CUDAGraphMode.FULL:
