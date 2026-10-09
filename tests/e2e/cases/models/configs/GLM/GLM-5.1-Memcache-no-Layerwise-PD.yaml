@@ -176,6 +176,7 @@ templates:
       - ${NNODES}
       - --node-rank
       - ${NODE_RANK}
+      - --headless
       - --hf-overrides
       - '{"use_index_cache": true, "index_topk_freq": 4}'
       - --speculative-config
@@ -212,6 +213,7 @@ templates:
       <<: *env_common
       TASK_QUEUE_ENABLE: "1"
       VLLM_ASCEND_ENABLE_MLAPO: "1"
+      HCCL_BUFFSIZE: "256"
     server_cmd_template:
       - --host
       - "0.0.0.0"
