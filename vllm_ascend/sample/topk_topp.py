@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import importlib
 from collections.abc import Callable
 from functools import lru_cache
 
@@ -19,7 +20,7 @@ _MaskFunction = Callable[[torch.Tensor, torch.Tensor | None, torch.Tensor | None
 def _compilation_error_types() -> tuple[type[Exception], ...]:
     # Import only when actually using Triton. MLIRCompilationError is
     # specific to Triton Ascend and is absent from some Triton versions.
-    from triton.compiler import errors
+    errors = importlib.import_module("triton.compiler.errors")
 
     return tuple(
         error_type

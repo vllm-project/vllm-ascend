@@ -54,7 +54,7 @@ def test_compiler_exception_types_support_ascend_and_standard_triton(has_mlir_er
     errors = SimpleNamespace(CompilationError=CompilationError)
     if has_mlir_error:
         errors.MLIRCompilationError = MLIRCompilationError
-    monkeypatch.setitem(sys.modules, "triton.compiler", SimpleNamespace(errors=errors))
+    monkeypatch.setitem(sys.modules, "triton.compiler.errors", errors)
     expected = (CompilationError, MLIRCompilationError) if has_mlir_error else (CompilationError,)
     assert dispatch_module._compilation_error_types() == expected
 
