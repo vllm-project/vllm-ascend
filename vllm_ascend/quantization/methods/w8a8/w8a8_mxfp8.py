@@ -32,25 +32,15 @@ from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.moe_utils import cumsum_group_list, maybe_normalize_mxfp_scale_layout
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
 from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
-from vllm_ascend.utils import (
-    ACL_FORMAT_FRACTAL_NZ,
-    FP8_METHOD,
-    dispose_tensor,
-    maybe_trans_nz,
-    maybe_trans_nz_with_scale,
-)
+from vllm_ascend.utils import FP8_METHOD, dispose_tensor, maybe_trans_nz, maybe_trans_nz_with_scale
 
 from ..base import (
     AscendLinearScheme,
     AscendMoEScheme,
     QuantType,
-    WeightSwitchConfig,
     WeightSwitchGatherSpec,
-    WeightSwitchState,
 )
 from ..registry import register_scheme
-
-ACL_FORMAT_ND = 2
 
 
 @register_scheme("W8A8_MXFP8", "linear")
@@ -602,79 +592,6 @@ class AscendW8A8MXFP8DSDynamicLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
         WeightSwitchGatherSpec("weight_scale"),
     )
     supports_weight_switch = True
-
-    def enable_weight_switch(
-        self,
-        layer: torch.nn.Module,
-        config: WeightSwitchConfig,
-        *,
-        pool: dict[Any, torch.Tensor] | None = None,
-        pool_key_prefix: Any | None = None,
-        clone_local_tensors: bool = False,
-    ) -> WeightSwitchState:
-        if not layer.prefix.endswith("wo_a") or torch_npu.get_npu_format(layer.weight) == ACL_FORMAT_ND:
-            return super().enable_weight_switch(
-                layer, config, pool=pool, pool_key_prefix=pool_key_prefix, clone_local_tensors=clone_local_tensors
-            )
-
-        # HCCL buffers and the generic clone path require ND. Keep separate
-        # NZ local/full tensors for every CP/PCP batched-matmul invocation.
-        local_weight = layer.weight.detach()
-        layer.weight.data = torch_npu.npu_format_cast(local_weight, ACL_FORMAT_ND)
-        try:
-            state = super().enable_weight_switch(
-                layer, config, pool=pool, pool_key_prefix=pool_key_prefix, clone_local_tensors=clone_local_tensors
-            )
-        finally:
-            layer.weight.data = local_weight
-
-        part = state.gather_parts["weight"]
-        part.local_tensor = (
-            maybe_trans_nz(part.local_tensor, customize_dtype=torch.float8_e4m3fn)
-            if clone_local_tensors
-            else local_weight
-        )
-        layer.weight.data = part.local_tensor
-        nz_pool_key = (
-            pool_key_prefix,
-            "wo_a_nz",
-            local_weight.device,
-            local_weight.dtype,
-            tuple(part.full_tensor.shape),
-        )
-        full_weight = None if pool is None else pool.get(nz_pool_key)
-        if full_weight is None:
-            full_weight = maybe_trans_nz(part.full_tensor, customize_dtype=torch.float8_e4m3fn)
-            if pool is not None:
-                pool[nz_pool_key] = full_weight
-        part.full_tensor = full_weight
-        return state
-
-    def all_gather_weight(self, state: WeightSwitchState, config: WeightSwitchConfig, *, async_op: bool = True) -> None:
-        if state.handles:
-            raise RuntimeError("Weight all-gather is still pending; wait before launching another one.")
-        part = state.gather_parts.get("weight")
-        if part is not None and part.spec.gather_dim == 0 and part.full_tensor is not part.gather_output:
-            # Refresh the ND input without changing the persistent HCCL buffer.
-            part.gather_input.copy_(torch_npu.npu_format_cast(part.local_tensor, ACL_FORMAT_ND))
-        super().all_gather_weight(state, config, async_op=async_op)
-
-    def switch_weight(self, layer: torch.nn.Module, state: WeightSwitchState, *, use_full_weight: bool) -> None:
-        part = state.gather_parts.get("weight")
-        if (
-            use_full_weight
-            and part is not None
-            and part.spec.gather_dim == 0
-            and part.full_tensor is not part.gather_output
-        ):
-            # Callers wait for HCCL before switching. Ascend 950 does not
-            # support copy_ with NZ tensors; copy equal-layout storage instead.
-            # Preserve the full-weight address across graph capture/replay.
-            full_weight = torch_npu.npu_format_cast(
-                part.gather_output, ACL_FORMAT_FRACTAL_NZ, customize_dtype=torch.float8_e4m3fn
-            )
-            torch.ops.npu.copy_memory_(part.full_tensor, full_weight, non_blocking=True)
-        super().switch_weight(layer, state, use_full_weight=use_full_weight)
 
     def __init__(self, weight_block_size):
         super().__init__()
