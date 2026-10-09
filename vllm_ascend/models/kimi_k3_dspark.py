@@ -49,6 +49,28 @@ def _uses_causal_draft_attention(config) -> bool:
     return bool(getattr(config, "full_attention_causal", False))
 
 
+def _uses_prolog_v3_context_writer(kv_cache: object) -> bool:
+    """Whether a component-major cache needs the stride-aware PROLOG_V3 path."""
+    if not isinstance(kv_cache, tuple) or len(kv_cache) != 2:
+        return False
+    if not all(isinstance(cache, torch.Tensor) for cache in kv_cache):
+        return False
+
+    def first_axis_strided(cache: torch.Tensor) -> bool:
+        if cache.dim() != 4 or cache.is_contiguous():
+            return False
+        # PROLOG_V3 supports a non-contiguous first axis only. Fused
+        # token-interleaved views remain on their existing DSpark path.
+        return (
+            cache.stride(3) == 1
+            and cache.stride(2) == cache.shape[3]
+            and cache.stride(1) == cache.shape[2] * cache.stride(2)
+            and cache.stride(0) != cache.shape[1] * cache.stride(1)
+        )
+
+    return all(first_axis_strided(cache) for cache in kv_cache)
+
+
 def _log_dspark_mla_cache_diagnostic(
     layer_idx: int,
     original_cache: object,
@@ -278,14 +300,25 @@ class AscendK3DSparkModel(UpstreamK3DSparkModel):
         cos, sin = get_cos_and_sin_mla(context_positions)
         for layer_idx, layer in enumerate(self.layers):
             attn = layer.self_attn
-            assert attn.fused_qkv_a_proj is not None
-            assert attn.q_lora_rank is not None
-            qkv_lora = attn.fused_qkv_a_proj(context_states)[0]
-            kv_no_split = qkv_lora[..., attn.q_lora_rank :].contiguous()
             slots = context_slot_mapping[layer_idx] if per_layer_slot_mapping else context_slot_mapping
             if slots is None:
                 continue
             kv_cache = attn.kv_cache
+            if _uses_prolog_v3_context_writer(kv_cache):
+                _log_dspark_mla_cache_diagnostic(layer_idx, kv_cache, kv_cache, slots)
+                attn.impl.exec_context_kv_prolog_v3(
+                    context_states,
+                    cos,
+                    sin,
+                    kv_cache,
+                    slots,
+                )
+                continue
+
+            assert attn.fused_qkv_a_proj is not None
+            assert attn.q_lora_rank is not None
+            qkv_lora = attn.fused_qkv_a_proj(context_states)[0]
+            kv_no_split = qkv_lora[..., attn.q_lora_rank :].contiguous()
             if isinstance(kv_cache, torch.Tensor):
                 # Context writes bypass MLA forward's fused-cache view split.
                 kv_cache = (kv_cache[..., : attn.impl.kv_lora_rank], kv_cache[..., attn.impl.kv_lora_rank :])
