@@ -13,11 +13,11 @@ a2:
     test_config:
       # YAML-driven tests
       - name: qwen3-30b-a3b-bf16-a2-performance
-        os: linux-aarch64-a2b3-8
+        os: linux-aarch64-a2b3-4
         config_file_path: Qwen3-30B-A3B-BF16-A2.yaml
         config_base_path: tests/e2e/cases/models/configs/Qwen
       - name: qwen3-30b-a3b-w8a8-a2-performance
-        os: linux-aarch64-a2b3-8
+        os: linux-aarch64-a2b3-4
         config_file_path: Qwen3-30B-A3B-W8A8-A2.yaml
         config_base_path: tests/e2e/cases/models/configs/Qwen
       - name: qwen3-vl-32b-instruct-w8a8
