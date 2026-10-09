@@ -272,3 +272,41 @@ gen_ops_info_and_python()
     copied = root / "build/copied"
     assert (copied / "active/active.cpp").read_text() == "// active kernel source\n"
     assert not (copied / "stale").exists()
+
+
+def test_stage_aggregation_keeps_late_names_and_directories(tmp_path):
+    cmake_dir = REPO_ROOT / "csrc/cmake"
+    root = tmp_path / "project"
+    root.mkdir()
+    stages = ("attention", "gmm", "mc2")
+    for name in stages:
+        directory = root / name / f"{name}_operator" / "op_host"
+        directory.mkdir(parents=True)
+        (root / name / "CMakeLists.txt").write_text(f"add_subdirectory({name}_operator/op_host)\n")
+        (directory / "CMakeLists.txt").write_text("add_op_to_compiled_list()\n")
+    (root / "CMakeLists.txt").write_text(
+        f"""
+cmake_minimum_required(VERSION 3.22)
+project(stage_aggregation LANGUAGES NONE)
+set(OPS_TRANSFORMER_DIR "${{CMAKE_CURRENT_SOURCE_DIR}}")
+include("{cmake_dir}/compiled_ops.cmake")
+include("{cmake_dir}/func.cmake")
+set(OP_LIST implicit_operator)
+set(OP_DIR_LIST "${{OPS_TRANSFORMER_DIR}}/implicit_operator")
+foreach(stage attention gmm mc2)
+    add_subdirectory(${{stage}})
+    append_compiled_ops(OP_LIST OP_DIR_LIST)
+endforeach()
+append_compiled_ops(OP_LIST OP_DIR_LIST)
+file(WRITE "${{CMAKE_BINARY_DIR}}/manifest.txt" "${{OP_LIST}}\n${{OP_DIR_LIST}}\n")
+""",
+        encoding="utf-8",
+    )
+    result = subprocess.run([_CMAKE, "-S", str(root), "-B", str(root / "build")], capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    names, directories = (root / "build/manifest.txt").read_text().splitlines()
+    assert names.split(";") == ["implicit_operator", "attention_operator", "gmm_operator", "mc2_operator"]
+    assert directories.split(";") == [
+        str(root / "implicit_operator"),
+        *(str(root / stage / f"{stage}_operator") for stage in stages),
+    ]
