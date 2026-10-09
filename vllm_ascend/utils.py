@@ -90,9 +90,9 @@ _IS_ROT_WEIGHT_USED = None
 def is_gqa_pcp_dcp_config(model_config: Any, parallel_config: Any) -> bool:
     """Whether a GQA/MQA model enables both PCP and DCP."""
     return (
-        not model_config.use_mla
+        parallel_config.decode_context_parallel_size > 1
         and parallel_config.prefill_context_parallel_size > 1
-        and parallel_config.decode_context_parallel_size > 1
+        and not model_config.use_mla
     )
 
 
