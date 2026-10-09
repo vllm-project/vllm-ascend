@@ -1619,7 +1619,10 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         quant_method = self._get_context_prolog_quant_method(self.fused_qkv_a_proj)
         quant_type = type(quant_method) if quant_method is not None else None
-        if quant_type not in (None, AscendW8A8DynamicLinearMethod, AscendW8A8MXFP8DynamicLinearMethod):
+        if quant_type is not None and quant_type not in (
+            AscendW8A8DynamicLinearMethod,
+            AscendW8A8MXFP8DynamicLinearMethod,
+        ):
             raise RuntimeError(
                 "PROLOG_V3 supports native, W8A8Dynamic, and W8A8MXFP8Dynamic DSpark projections, "
                 f"got {quant_type.__name__}."
