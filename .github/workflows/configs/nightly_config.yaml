@@ -107,8 +107,8 @@ a3:
         config_file_path: GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
         config_base_path: tests/e2e/cases/models/configs/GLM
         size: 4
-      - name: Kimi-K3-MRV2-2P2D
-        config_file_path: Kimi-K3-MRV2-2P2D.yaml
+      - name: Kimi-K3-MRV2-A3
+        config_file_path: Kimi-K3-MRV2-A3.yaml
         config_base_path: tests/e2e/cases/models/configs/Kimi
         size: 4
       - name: DeepSeek-V4-Pro-w4a8-prefix-cache-PD

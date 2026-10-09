@@ -1,0 +1,179 @@
+# Four A3 nodes, 16 NPUs per node: internal DP4 / TP16 / EP64.
+# Each DP rank runs both prefill and decode; Node 0 exposes the API.
+# Based on the mixed-deployment configuration from upstream PR #14923.
+# PR E2E: evaluate 60 GPQA questions and run the separate perf_8k case.
+# The throughput baseline remains a placeholder pending calibration.
+# Local runs: set cluster_hosts to the four node IPs in rank order.
+# After startup, run the output check against Node 0:
+# SERVICE_URL=http://<node0-ip>:8080 bash tests/e2e/cases/models/kimi_k3_mrv2_curl_smoke.sh
+
+test_name: "Kimi-K3-MRV2-A3-PR"
+model: "Eco-Tech/Kimi-K3-w4a8"
+num_nodes: 4
+npu_per_node: 16
+dp_load_balancing: internal
+
+env_common: &env_common
+  VLLM_USE_V2_MODEL_RUNNER: "1"
+  VLLM_USE_MODELSCOPE: true
+  HCCL_BUFFSIZE: 800
+  PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+  OMP_PROC_BIND: false
+  OMP_NUM_THREADS: 1
+  TASK_QUEUE_ENABLE: 1
+  VLLM_ENGINE_READY_TIMEOUT_S: 7200
+  SERVER_PORT: 8080
+
+deployment:
+  - envs:
+      <<: *env_common
+    server_cmd: >
+      env -u HCCL_OP_EXPANSION_MODE -u LD_PRELOAD vllm serve Eco-Tech/Kimi-K3-w4a8
+        --host 0.0.0.0
+        --port $SERVER_PORT
+        --quantization ascend
+        --allowed-local-media-path /
+        --trust-remote-code
+        --tokenizer-mode kimi_k3
+        --tensor-parallel-size 16
+        --data-parallel-size 4
+        --data-parallel-size-local 1
+        --data-parallel-start-rank 0
+        --data-parallel-address $LOCAL_IP
+        --data-parallel-rpc-port 13389
+        --enable-expert-parallel
+        --enable-prefix-caching
+        --max-num-seqs 16
+        --max-model-len 133120
+        --max-num-batched-tokens 8192
+        --gpu-memory-utilization 0.9
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+        --additional-config '{"enable_cpu_binding":true,"enable_flashcomm1":true}'
+        --mm-processor-cache-gb 0
+        --mm-encoder-tp-mode data
+        --limit-mm-per-prompt '{"vision_chunk":2}'
+        --enable-auto-tool-choice
+        --reasoning-parser kimi_k3
+        --tool-call-parser kimi_k3
+
+  - envs:
+      <<: *env_common
+    server_cmd: >
+      env -u HCCL_OP_EXPANSION_MODE -u LD_PRELOAD vllm serve Eco-Tech/Kimi-K3-w4a8
+        --host 0.0.0.0
+        --port $SERVER_PORT
+        --quantization ascend
+        --allowed-local-media-path /
+        --trust-remote-code
+        --tokenizer-mode kimi_k3
+        --tensor-parallel-size 16
+        --data-parallel-size 4
+        --data-parallel-size-local 1
+        --data-parallel-start-rank 1
+        --data-parallel-address $MASTER_IP
+        --data-parallel-rpc-port 13389
+        --enable-expert-parallel
+        --enable-prefix-caching
+        --max-num-seqs 16
+        --max-model-len 133120
+        --max-num-batched-tokens 8192
+        --gpu-memory-utilization 0.9
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+        --additional-config '{"enable_cpu_binding":true,"enable_flashcomm1":true}'
+        --mm-processor-cache-gb 0
+        --mm-encoder-tp-mode data
+        --limit-mm-per-prompt '{"vision_chunk":2}'
+        --enable-auto-tool-choice
+        --reasoning-parser kimi_k3
+        --tool-call-parser kimi_k3
+
+  - envs:
+      <<: *env_common
+    server_cmd: >
+      env -u HCCL_OP_EXPANSION_MODE -u LD_PRELOAD vllm serve Eco-Tech/Kimi-K3-w4a8
+        --host 0.0.0.0
+        --port $SERVER_PORT
+        --quantization ascend
+        --allowed-local-media-path /
+        --trust-remote-code
+        --tokenizer-mode kimi_k3
+        --tensor-parallel-size 16
+        --data-parallel-size 4
+        --data-parallel-size-local 1
+        --data-parallel-start-rank 2
+        --data-parallel-address $MASTER_IP
+        --data-parallel-rpc-port 13389
+        --enable-expert-parallel
+        --enable-prefix-caching
+        --max-num-seqs 16
+        --max-model-len 133120
+        --max-num-batched-tokens 8192
+        --gpu-memory-utilization 0.9
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+        --additional-config '{"enable_cpu_binding":true,"enable_flashcomm1":true}'
+        --mm-processor-cache-gb 0
+        --mm-encoder-tp-mode data
+        --limit-mm-per-prompt '{"vision_chunk":2}'
+        --enable-auto-tool-choice
+        --reasoning-parser kimi_k3
+        --tool-call-parser kimi_k3
+
+  - envs:
+      <<: *env_common
+    server_cmd: >
+      env -u HCCL_OP_EXPANSION_MODE -u LD_PRELOAD vllm serve Eco-Tech/Kimi-K3-w4a8
+        --host 0.0.0.0
+        --port $SERVER_PORT
+        --quantization ascend
+        --allowed-local-media-path /
+        --trust-remote-code
+        --tokenizer-mode kimi_k3
+        --tensor-parallel-size 16
+        --data-parallel-size 4
+        --data-parallel-size-local 1
+        --data-parallel-start-rank 3
+        --data-parallel-address $MASTER_IP
+        --data-parallel-rpc-port 13389
+        --enable-expert-parallel
+        --enable-prefix-caching
+        --max-num-seqs 16
+        --max-model-len 133120
+        --max-num-batched-tokens 8192
+        --gpu-memory-utilization 0.9
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+        --additional-config '{"enable_cpu_binding":true,"enable_flashcomm1":true}'
+        --mm-processor-cache-gb 0
+        --mm-encoder-tp-mode data
+        --limit-mm-per-prompt '{"vision_chunk":2}'
+        --enable-auto-tool-choice
+        --reasoning-parser kimi_k3
+        --tool-call-parser kimi_k3
+
+benchmarks:
+  acc_gpqa_60:
+    case_type: accuracy
+    dataset_path: vllm-ascend/gpqa
+    request_conf: vllm_api_general_chat
+    dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
+    num_prompts: 60
+    max_out_len: 8192
+    batch_size: 8
+    thinking: true
+    temperature: 0.0
+    seed: 1024
+    baseline: 90
+    # Percentage points around the GPQA baseline, matching MRV1 coverage.
+    threshold: 5
+  perf_8k:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K-in3500-bs8000-qwen3
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 320
+    max_out_len: 1500
+    batch_size: 80
+    request_rate: 0
+    # Replace this placeholder with the calibrated 8K throughput before
+    # enabling a non-trivial performance gate.
+    baseline: 0
+    threshold: 0.97
