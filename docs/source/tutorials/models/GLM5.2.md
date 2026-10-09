@@ -16,18 +16,20 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
+Download the checkpoint from [Eco-Tech on Modelers](https://modelers.cn/user/Eco-Tech?model_name=glm) for the hardware shown below. A3 and A5 checkpoints use different quantization formats; do not interchange them. The scripts use `/root/.cache/modelscope/hub/models/vllm-ascend/<checkpoint-name>` as a local mount path, not as a download source. Preserve the exact case of the repository name when naming the local directory.
+
 |  Weight Version          | Hardware Requirements                                             | Download Links |
 |--------------------------|-------------------------------------------------------------------|----------------|
-|  `GLM-5.2-W8A8C8`        | 2 Atlas 800 A3 (64GB × 16) node or 4 Atlas 800 A2 (64GB × 8) node | [ModelScope](https://modelscope.cn/models/Eco-Tech/GLM-5.2-W8A8C8) |
-|  `GLM-5.2-W8A8C8-mxfp8` | 950PR&950DT Products | [ModelScope](https://modelscope.cn/models/Eco-Tech/GLM-5.2-W8A8C8-mxfp8) |
-|  `GLM-5.3-W8A8C8`        | Atlas 800 A3 / A2 | [ModelScope](https://modelscope.cn/models/Eco-Tech/GLM-5.3-W8A8C8) |
-|  `GLM-5.3-W8A8C8-mxfp8` | 950PR&950DT Products | [ModelScope](https://modelscope.cn/models/Eco-Tech/GLM-5.3-W8A8C8-mxfp8) |
-|  `GLM-5.2-w4a8c8`        | 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w4a8c8) |
-|  `GLM-5.2-w4a4c8`        | 950PR&950DT Products | Quantize locally with [msmodelslim](https://gitcode.com/Ascend/msmodelslim/blob/master/lab_practice/glm_5_2/glm_5_2_w4a4c8_mxfp4.yaml) |
+|  `GLM-5.2-w8a8c8`        | **A3**: 2 Atlas 800 A3 (64GB × 16) nodes; **A2**: 4 Atlas 800 A2 (64GB × 8) nodes | [Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.2-w8a8c8) |
+|  `GLM-5.2-W8A8C8-mxfp8` | **A5**: 950PR&950DT Products | [Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.2-W8A8C8-mxfp8) |
+|  `GLM-5.3-w8a8c8`        | **A3** / A2: Atlas 800 A3 / A2 | [Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.3-w8a8c8) |
+|  `GLM-5.3-W8A8C8-mxfp8` | **A5**: 950PR&950DT Products | [Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.3-W8A8C8-mxfp8) |
+|  `GLM-5.2-w4a8c8`        | **A3**: 1 Atlas 800 A3 (128GB × 8) node; **A2**: 2 Atlas 800 A2 (64GB × 8) nodes | [Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.2-w4a8c8) |
+|  `GLM-5.2-w4a4c8-mxfp4` | **A5**: 950PR&950DT Products | [Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.2-w4a4c8-mxfp4) |
 
-- `GLM-5.2-W8A8C8`: The weights have been verified and are recommended for use on A3. For GLM-5.3, use its own checkpoint and the version-specific commands below; do not apply the GLM-5.2 accuracy or performance results to GLM-5.3.
+- `GLM-5.2-w8a8c8`: The weights have been verified and are recommended for use on A3. For GLM-5.3, use its own checkpoint and the version-specific commands below; do not apply the GLM-5.2 accuracy or performance results to GLM-5.3.
 - You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to quantize the model directly.
-- `GLM-5.2-w4a4c8`(W4A4 MXFP4 mixed-precision quantization): For how the ultra-low-bit quantization preserves accuracy, see the [W4A4C8 FAQ](#q-how-do-the-w4a4c8-ultra-low-bit-quantized-weights-preserve-accuracy).
+- `GLM-5.2-w4a4c8-mxfp4` (A5, W4A4 MXFP4 mixed-precision quantization): For how the ultra-low-bit quantization preserves accuracy, see the [W4A4C8 FAQ](#q-how-do-the-w4a4c8-ultra-low-bit-quantized-weights-preserve-accuracy).
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
@@ -130,11 +132,11 @@ The deployment sections below cover GLM-5.2 and GLM-5.3. Select the checkpoint f
 
 === "950DT Products"
 
-    The GLM-5.2 configuration uses a locally quantized W4A4C8 checkpoint on one 950DT Product (96GB × 8). For GLM-5.3, select its published W8A8C8-mxfp8 checkpoint instead. Replace the placeholder with the actual GLM-5.2 W4A4C8 directory produced by [msmodelslim](https://gitcode.com/Ascend/msmodelslim/blob/master/lab_practice/glm_5_2/glm_5_2_w4a4c8_mxfp4.yaml).
+    The A5 GLM-5.2 configuration uses the published `GLM-5.2-w4a4c8-mxfp4` checkpoint on one 950DT Product (96GB × 8). For GLM-5.3, select its A5 `GLM-5.3-W8A8C8-mxfp8` checkpoint instead. Download the matching checkpoint from the Model Weight table before starting.
 
     ```shell
     # GLM-5.2:
-    MODEL_PATH=<path-to-GLM-5.2-W4A4C8-mxfp4>
+    MODEL_PATH=/root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a4c8-mxfp4
     # GLM-5.3 (use this line instead):
     # MODEL_PATH=/root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-W8A8C8-mxfp8
 
@@ -176,9 +178,9 @@ The deployment sections below cover GLM-5.2 and GLM-5.3. Select the checkpoint f
 
     ```shell
     # GLM-5.2:
-    MODEL_PATH=/root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-W8A8C8
+    MODEL_PATH=/root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8c8
     # GLM-5.3 (use this line instead):
-    # MODEL_PATH=/root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-W8A8C8
+    # MODEL_PATH=/root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-w8a8c8
 
     export HCCL_BUFFSIZE=200
     export HCCL_OP_EXPANSION_MODE="AIV"
@@ -336,7 +338,7 @@ If you want to deploy a multi-node environment, first verify the data-plane netw
 
 === "A3 series"
 
-    - `GLM-5.2-W8A8C8`: can be deployed on 2 Atlas 800 A3 (64GB × 16) with DP4/TP8 and expert parallelism. Both nodes must mount the same checkpoint path and expose all 16 logical NPUs to their containers.
+    - `GLM-5.2-w8a8c8`: can be deployed on 2 Atlas 800 A3 (64GB × 16) with DP4/TP8 and expert parallelism. Both nodes must mount the same checkpoint path and expose all 16 logical NPUs to their containers.
 
     Run the following scripts on two nodes respectively.
 
@@ -359,7 +361,7 @@ If you want to deploy a multi-node environment, first verify the data-plane netw
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     # Ensure the model path matches the directory recorded during download
-    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-W8A8C8 \
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8c8 \
     --host 0.0.0.0 \
     --port 8000 \
     --api-server-count 1 \
@@ -406,7 +408,7 @@ If you want to deploy a multi-node environment, first verify the data-plane netw
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     # Ensure the model path matches the directory recorded during download
-    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-W8A8C8 \
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8c8 \
     --host 0.0.0.0 \
     --port 8000 \
     --api-server-count 1 \
@@ -983,7 +985,7 @@ In the PD disaggregation scenario, Mooncake is used as the KV cache transfer con
 
 === "A3 Series"
 
-    Prefill-Decode disaggregation with the `GLM-5.2-W8A8C8` weights can be deployed on 4 Atlas 800 A3 (64GB × 16).
+    Prefill-Decode disaggregation with the `GLM-5.2-w8a8c8` weights can be deployed on 4 Atlas 800 A3 (64GB × 16).
 
     Before you start, please
 
@@ -1427,7 +1429,7 @@ In the PD disaggregation scenario, Mooncake is used as the KV cache transfer con
     export PYTHONHASHSEED=0
 
     # Ensure the model path matches the directory recorded during download
-    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-W8A8C8 \
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8c8 \
         --host 0.0.0.0 \
         --port $2 \
         --data-parallel-size $3 \
@@ -1517,7 +1519,7 @@ In the PD disaggregation scenario, Mooncake is used as the KV cache transfer con
     export PYTHONHASHSEED=0
 
     # Ensure the model path matches the directory recorded during download
-    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-W8A8C8 \
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8c8 \
         --host 0.0.0.0 \
         --port $2 \
         --data-parallel-size $3 \
@@ -1746,7 +1748,7 @@ vllm serve <MODEL_PATH> \
 
 #### 5.2.3 PD Disaggregation 1M Deployment
 
-PD disaggregation for the 1M context with the `GLM-5.2-W8A8C8` weights can be deployed on 4 Atlas 800 A3 (64GB × 16).
+PD disaggregation for the 1M context with the `GLM-5.2-w8a8c8` weights can be deployed on 4 Atlas 800 A3 (64GB × 16).
 
 Before you start, please
 

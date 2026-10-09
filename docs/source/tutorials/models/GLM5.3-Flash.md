@@ -30,11 +30,13 @@ all A3 scripts set `VLLM_USE_V2_MODEL_RUNNER=0` explicitly.
 
 ### 3.1 Model Weight
 
-- `GLM-5.3-Flash-w8a8-mxfp8 (950DT Products mxfp8 Quantized)`: requires 1 950DT Products (96GB × 8) node.[Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8-mxfp8).
-- `GLM-5.3-Flash-w8a8`: requires 1 Atlas 800 A3 (128GB × 8) node for
-  single-node deployment, or 2 nodes for 1P1D PD disaggregated deployment.
-  [Download model weight](https://modelscope.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8).
-- `GLM-5.3-Flash-w8a8`: requires 2 Atlas 800 A2 (64GB × 8) nodes.[Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8).
+Download the checkpoint from [Eco-Tech on Modelers](https://modelers.cn/user/Eco-Tech?model_name=glm) for the hardware shown below. A3 and A5 checkpoints use different quantization formats; do not interchange them. The scripts use `/root/.cache/modelscope/hub/models/vllm-ascend/<checkpoint-name>` as a local mount path, not as a download source. Preserve the exact case of the repository name when naming the local directory.
+
+| Checkpoint | Hardware | Deployment | Download |
+| --- | --- | --- | --- |
+| `GLM-5.3-Flash-w8a8-mxfp8` | **A5**: 950DT Products | 1 node (96GB × 8) for single-node deployment | [Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8-mxfp8) |
+| `GLM-5.3-Flash-w8a8` | **A3**: Atlas 800 A3 | 1 node for single-node deployment; 2 nodes for 1P1D PD | [Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8) |
+| `GLM-5.3-Flash-w8a8` | **A2**: Atlas 800 A2 | 2 nodes (64GB × 8 each) for colocated deployment; 4 nodes for PD | [Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8) |
 
 - You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to quantize the model directly.
 
@@ -188,7 +190,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     export OMP_NUM_THREADS=1
     export TASK_QUEUE_ENABLE=1
 
-    vllm serve Eco-Tech/GLM-5.3-Flash-w8a8-mxfp8 \
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-Flash-w8a8-mxfp8 \
       --host 0.0.0.0 \
       --port 8000 \
       --data-parallel-size 8 \
@@ -225,7 +227,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     export HCCL_BUFFSIZE=400
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
 
-    vllm serve Eco-Tech/GLM-5.3-Flash-w8a8 \
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-Flash-w8a8 \
       --host 0.0.0.0 \
       --port 8000 \
       --max-model-len 133120 \
@@ -360,7 +362,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
 
     LOCAL_IP="<PREFILL_NODE_IP>"
     NIC_NAME="<NETWORK_INTERFACE>"
-    MODEL_PATH="<YOUR_MODEL_PATH>"
+    MODEL_PATH="/root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-Flash-w8a8"
 
     export HCCL_IF_IP="$LOCAL_IP"
     export GLOO_SOCKET_IFNAME="$NIC_NAME"
@@ -425,7 +427,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
 
     LOCAL_IP="<DECODE_NODE_IP>"
     NIC_NAME="<NETWORK_INTERFACE>"
-    MODEL_PATH="<YOUR_MODEL_PATH>"
+    MODEL_PATH="/root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-Flash-w8a8"
 
     export HCCL_IF_IP="$LOCAL_IP"
     export GLOO_SOCKET_IFNAME="$NIC_NAME"
@@ -635,7 +637,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
     #!/usr/bin/env bash
     export LOCAL_IP="<PREFILL_NODE0_IP>"
     export NIC_NAME="<PREFILL_NODE0_NIC>"
-    export MODEL_PATH="<YOUR_MODEL_PATH>"
+    export MODEL_PATH="/root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-Flash-w8a8"
     export SERVER_ROLE_ARGS="--api-server-count 1"
     exec bash ./run_p.sh "$@"
     ```
@@ -646,7 +648,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
     #!/usr/bin/env bash
     export LOCAL_IP="<PREFILL_NODE1_IP>"
     export NIC_NAME="<PREFILL_NODE1_NIC>"
-    export MODEL_PATH="<YOUR_MODEL_PATH>"
+    export MODEL_PATH="/root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-Flash-w8a8"
     export SERVER_ROLE_ARGS="--headless"
     exec bash ./run_p.sh "$@"
     ```
@@ -761,7 +763,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
     #!/usr/bin/env bash
     export LOCAL_IP="<DECODE_NODE0_IP>"
     export NIC_NAME="<DECODE_NODE0_NIC>"
-    export MODEL_PATH="<YOUR_MODEL_PATH>"
+    export MODEL_PATH="/root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-Flash-w8a8"
     exec bash ./run_d.sh "$@"
     ```
 
@@ -771,7 +773,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
     #!/usr/bin/env bash
     export LOCAL_IP="<DECODE_NODE1_IP>"
     export NIC_NAME="<DECODE_NODE1_NIC>"
-    export MODEL_PATH="<YOUR_MODEL_PATH>"
+    export MODEL_PATH="/root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-Flash-w8a8"
     exec bash ./run_d.sh "$@"
     ```
 
@@ -1383,7 +1385,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
 
 ### 5.5 Historical Prefill-Decode Self-Test Reference (vLLM 0.29.0)
 
-The following 1P1D configurations come from separate A3 and 950DT self-tests of vLLM 0.29.0. They are not interchangeable with the co-located commands above. Both tests used locally requantized checkpoints; if you substitute the published ModelScope weights, revalidate accuracy and performance. The prefill and decode nodes must use the same checkpoint and be connected through their data-plane network. Replace the example IPs, interface names, and local model paths before starting.
+The following 1P1D configurations come from separate A3 and 950DT self-tests of vLLM 0.29.0. They are not interchangeable with the co-located commands above. Both tests used locally requantized checkpoints; if you substitute the published Modelers weights, revalidate accuracy and performance. The prefill and decode nodes must use the same checkpoint and be connected through their data-plane network. Replace the example IPs, interface names, and local model paths before starting.
 
 | Hardware | Prefill | Decode | Checkpoint used in the self-test |
 | --- | --- | --- | --- |
