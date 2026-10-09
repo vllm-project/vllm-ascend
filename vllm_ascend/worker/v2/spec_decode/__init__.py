@@ -40,6 +40,8 @@ def init_speculator(
             raise ValueError("MRV2 n-gram speculative decoding requires request states")
         from vllm.v1.worker.gpu.spec_decode.ngram.speculator import NgramGPUSpeculator
 
+        # MRV2 postprocess has already updated history. The MRV1 NPU kernel
+        # appends sampled tokens itself and cannot be used here unchanged.
         return NgramGPUSpeculator(vllm_config, device, req_states)
     if speculative_config.method == "extract_hidden_states":
         # No Ascend-specific behavior beyond update_stream assignment in
