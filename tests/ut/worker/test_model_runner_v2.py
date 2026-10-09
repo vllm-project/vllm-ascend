@@ -34,6 +34,8 @@ def _make_runner(need_timing: bool = True):
     runner.is_last_pp_rank = False
     runner.attn_groups = []
     runner.adaptive_verification = None
+    runner.input_buffers = SimpleNamespace(dummy_num_tokens=None)
+    runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE)
     runner.use_fia = False
     runner.sync_spec_pp_cpu_counts = False
     # Set by NPUModelRunner.__init__ on real instances.
@@ -476,7 +478,7 @@ def test_prepare_dummy_attn_without_pcp_uses_upstream(valid_state_slots):
     runner = _make_runner()
     runner.pcp_manager = None
     # num_reqs feeds the V4.1 ring-state prep that runs after the upstream call.
-    dummy = SimpleNamespace(num_reqs=0)
+    dummy = SimpleNamespace(num_reqs=0, num_tokens=0, num_tokens_after_padding=0)
     with (
         patch.object(GPUModelRunner, "prepare_dummy_attn", return_value=((), None)) as parent,
         patch("vllm_ascend.worker.v2.model_runner.prepare_v41_dummy_ring_state") as prepare_ring,
