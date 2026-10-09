@@ -16,6 +16,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheTensor,
     MambaSpec,
+    MLAAttentionSpec,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
@@ -984,6 +985,54 @@ def test_gqa_pcp_dcp_cache_keeps_tp_local_kv_heads(monkeypatch, dcp_size):
     specs = attn_utils.get_kv_cache_spec(vllm_config)
 
     assert specs["model.layers.0.self_attn.attn"].num_kv_heads == 1
+
+
+@pytest.mark.parametrize(
+    ("model_type", "expected_num_heads"),
+    [("kimi_linear", 1), ("deepseek_v3", 12)],
+)
+def test_mla_cache_spec_uses_physical_heads_for_kimi_k3(monkeypatch, model_type, expected_num_heads):
+    source_spec = MLAAttentionSpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=576,
+        dtype=torch.bfloat16,
+    )
+    layer = MLAAttention.__new__(MLAAttention)
+    layer.impl = SimpleNamespace(
+        fa_quant_layer=False,
+        enable_sparse_sfa_c8=False,
+        enable_sparse_sfa_turboquant=False,
+    )
+    layer.num_heads = 12
+    layer.model_version = None
+    layer.indexes_kv_by_block_stride = False
+    layer.get_kv_cache_spec = lambda _config: source_spec
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            dtype=torch.bfloat16,
+            hf_text_config=SimpleNamespace(model_type=model_type),
+        ),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=1,
+            prefill_context_parallel_size=1,
+        ),
+        attention_config=SimpleNamespace(indexer_kv_dtype="auto"),
+        cache_config=SimpleNamespace(block_size=128, cache_dtype="auto"),
+    )
+    monkeypatch.setattr(
+        attn_utils,
+        "get_layers_from_vllm_config",
+        lambda *_args, **_kwargs: {"model.layers.0.self_attn.attn": layer},
+    )
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda _config: False)
+    monkeypatch.setattr(attn_utils, "enable_sfa_dcp_replicated_indexer", lambda _config: False)
+
+    spec = attn_utils.get_kv_cache_spec(vllm_config)["model.layers.0.self_attn.attn"]
+
+    assert isinstance(spec, AscendMLAAttentionSpec)
+    assert spec.num_heads == expected_num_heads
+    assert spec.page_size_bytes == source_spec.page_size_bytes
 
 
 @pytest.mark.parametrize(
