@@ -1,12 +1,10 @@
-"""Unit tests for the Qrita top-k/top-p Triton kernel dispatch and warmup.
+"""CPU dispatch regressions and direct NPU Qrita equivalence tests.
 
-The dispatch-guard tests run on CPU with the torch_npu mocks installed by
-``tests/ut/conftest.py``. The kernel-equivalence tests need a real NPU and
-Triton runtime and are skipped on CPU hosts (the full single-operator
-accuracy suite lives under
-``tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_topk_topp.py``).
+Compilation failures may fall back in production. The direct kernel tests
+intentionally do not use that fallback, so compiler/accuracy bugs stay visible.
 """
 
+import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -15,6 +13,8 @@ import torch
 from vllm.triton_utils import HAS_TRITON
 
 import vllm_ascend.sample.sampler as sampler_module
+import vllm_ascend.sample.topk_topp as dispatch_module
+import vllm_ascend.worker.v2.sample.apply_top_k_top_p as mrv2
 from vllm_ascend.sample.sampler import (
     AscendSampler,
     _apply_top_k_top_p_pytorch,
@@ -27,191 +27,180 @@ class _FakeProfile:
         self._supports_cann = supports_cann
 
     def supports(self, capability):
-        if capability.__class__.__name__ == "HardwareCapability" and capability.name == "NPU_TOP_K_TOP_P":
-            return self._supports_cann
-        return False
+        return capability.name == "NPU_TOP_K_TOP_P" and self._supports_cann
 
 
-def test_dispatch_prefers_triton_when_available():
-    """HAS_TRITON + non-batch-invariant selects the Ascend Triton wrapper."""
+class _FakeCompilationError(Exception):
+    pass
+
+
+@pytest.fixture(autouse=True)
+def _reset_dispatchers():
+    dispatch_module._get_dispatcher.cache_clear()
+    dispatch_module._compilation_error_types.cache_clear()
+    yield
+    dispatch_module._get_dispatcher.cache_clear()
+    dispatch_module._compilation_error_types.cache_clear()
+
+
+@pytest.mark.parametrize("has_mlir_error", [True, False])
+def test_compiler_exception_types_support_ascend_and_standard_triton(has_mlir_error, monkeypatch):
+    class CompilationError(Exception):
+        pass
+
+    class MLIRCompilationError(Exception):
+        pass
+
+    errors = SimpleNamespace(CompilationError=CompilationError)
+    if has_mlir_error:
+        errors.MLIRCompilationError = MLIRCompilationError
+    monkeypatch.setitem(sys.modules, "triton.compiler", SimpleNamespace(errors=errors))
+    expected = (CompilationError, MLIRCompilationError) if has_mlir_error else (CompilationError,)
+    assert dispatch_module._compilation_error_types() == expected
+
+
+@pytest.fixture
+def triton_path():
     with (
-        patch.object(sampler_module, "HAS_TRITON", True),
-        patch.object(sampler_module.envs, "VLLM_BATCH_INVARIANT", False),
-        patch("vllm_ascend.sample.sampler.get_current_hardware_profile", return_value=_FakeProfile(False)),
+        patch.object(dispatch_module, "HAS_TRITON", True),
+        patch.object(dispatch_module.envs, "VLLM_BATCH_INVARIANT", False),
+        patch.object(dispatch_module, "is_950", return_value=False),
+        patch.object(dispatch_module, "is_310p", return_value=False),
+        patch.object(dispatch_module, "_compilation_error_types", return_value=(_FakeCompilationError,)),
+    ):
+        yield
+
+
+@pytest.mark.parametrize(
+    "has_triton,batch_invariant,supports_cann",
+    [(True, False, False), (True, True, True), (True, True, False), (False, False, True), (False, False, False)],
+)
+def test_dispatch_keeps_legacy_choice_when_required(has_triton, batch_invariant, supports_cann):
+    with (
+        patch.object(sampler_module, "HAS_TRITON", has_triton),
+        patch.object(sampler_module.envs, "VLLM_BATCH_INVARIANT", batch_invariant),
+        patch.object(sampler_module, "get_current_hardware_profile", return_value=_FakeProfile(supports_cann)),
     ):
         chosen = sampler_module._apply_top_k_top_p_dispatch()
-        assert chosen is sampler_module._apply_top_k_top_p_ascend
+    expected = (
+        sampler_module._apply_top_k_top_p_ascend
+        if has_triton and not batch_invariant
+        else _apply_top_k_top_p_torch_npu
+        if supports_cann
+        else _apply_top_k_top_p_pytorch
+    )
+    assert chosen is expected
 
 
-def test_dispatch_bypasses_triton_for_batch_invariant():
-    """batch_invariant mode keeps the original (non-Triton) selection."""
-    with (
-        patch.object(sampler_module, "HAS_TRITON", True),
-        patch.object(sampler_module.envs, "VLLM_BATCH_INVARIANT", True),
-        patch("vllm_ascend.sample.sampler.get_current_hardware_profile", return_value=_FakeProfile(True)),
-    ):
-        chosen = sampler_module._apply_top_k_top_p_dispatch()
-        assert chosen is _apply_top_k_top_p_torch_npu
-
-    with (
-        patch.object(sampler_module, "HAS_TRITON", True),
-        patch.object(sampler_module.envs, "VLLM_BATCH_INVARIANT", True),
-        patch("vllm_ascend.sample.sampler.get_current_hardware_profile", return_value=_FakeProfile(False)),
-    ):
-        chosen = sampler_module._apply_top_k_top_p_dispatch()
-        assert chosen is _apply_top_k_top_p_pytorch
-
-
-def test_dispatch_without_triton_keeps_legacy_choice():
-    with (
-        patch.object(sampler_module, "HAS_TRITON", False),
-        patch("vllm_ascend.sample.sampler.get_current_hardware_profile", return_value=_FakeProfile(True)),
-    ):
-        assert sampler_module._apply_top_k_top_p_dispatch() is _apply_top_k_top_p_torch_npu
-
-    with (
-        patch.object(sampler_module, "HAS_TRITON", False),
-        patch("vllm_ascend.sample.sampler.get_current_hardware_profile", return_value=_FakeProfile(False)),
-    ):
-        assert sampler_module._apply_top_k_top_p_dispatch() is _apply_top_k_top_p_pytorch
-
-
-def test_ascend_wrapper_routes_a5_to_cann_op():
-    """On A5 the pre-existing wrapper is kept even with Triton available.
-
-    The A5 hardware profile does not advertise NPU_TOP_K_TOP_P, so this
-    must not depend on that capability at all: is_950() alone routes
-    back to the CANN-op wrapper (which itself keeps the reduce-sample
-    behaviour and otherwise sorts).
-    """
-    logits = torch.tensor([[4.0, 3.0, 2.0, 1.0]])
-    k = torch.tensor([1], dtype=torch.int32)
-    sentinel = object()
-    cfg = MagicMock()
-    cfg.enable_reduce_sample = False
-
-    for a5_profile_supports_cann in (True, False):
-        with (
-            patch(
-                "vllm_ascend.sample.sampler.get_current_hardware_profile",
-                return_value=_FakeProfile(a5_profile_supports_cann),
-            ),
-            patch("vllm_ascend.sample.sampler.is_950", return_value=True),
-            patch("vllm_ascend.sample.sampler.get_ascend_config", return_value=cfg),
-            patch.object(sampler_module, "_apply_top_k_top_p_torch_npu", return_value=sentinel) as cann,
-        ):
-            out = sampler_module._apply_top_k_top_p_ascend(logits, k, None)
-        assert out is sentinel
-        cann.assert_called_once()
-
-
-def test_ascend_wrapper_routes_reduce_sample_to_cann_op():
-    """reduce-sample mode needs the gathered-tuple path on every device.
-
-    enable_reduce_sample=True must reach the CANN-op wrapper for every
-    is_950 x capability combination (A2/A3, A5, and 310P class devices
-    alike); the non-reduce A2/A3 -> Triton case is covered separately
-    by test_ascend_wrapper_uses_triton_off_a5.
-    """
-    logits = torch.tensor([[4.0, 3.0, 2.0, 1.0]])
-    k = torch.tensor([1], dtype=torch.int32)
-    sentinel = object()
-    cfg = MagicMock()
-    cfg.enable_reduce_sample = True
-
-    for a5 in (True, False):
-        for a2a3_profile_supports_cann in (True, False):
-            with (
-                patch(
-                    "vllm_ascend.sample.sampler.get_current_hardware_profile",
-                    return_value=_FakeProfile(a2a3_profile_supports_cann),
-                ),
-                patch("vllm_ascend.sample.sampler.is_950", return_value=a5),
-                patch("vllm_ascend.sample.sampler.get_ascend_config", return_value=cfg),
-                patch.object(sampler_module, "_apply_top_k_top_p_torch_npu", return_value=sentinel) as cann,
-                patch.object(sampler_module, "apply_top_k_top_p_triton") as triton,
-            ):
-                out = sampler_module._apply_top_k_top_p_ascend(logits, k, None, top_k=2)
-            assert out is sentinel
-            cann.assert_called_once()
-            triton.assert_not_called()
-
-
-def test_ascend_wrapper_uses_triton_off_a5():
+@pytest.mark.parametrize("entry", [sampler_module._apply_top_k_top_p_ascend, mrv2.apply_top_k_top_p_npu])
+def test_both_entries_use_triton_without_removed_config(entry, triton_path):
+    # No AscendConfig mock: enable_reduce_sample no longer exists upstream.
     logits = torch.tensor([[4.0, 3.0, 2.0, 1.0]])
     k = torch.tensor([1], dtype=torch.int32)
     p = torch.tensor([0.9])
+    with patch.object(dispatch_module, "apply_top_k_top_p_triton", return_value=logits) as kernel:
+        assert entry(logits, k, p) is logits
+    kernel.assert_called_once_with(logits, k, p)
+
+
+@pytest.mark.parametrize("entry", [sampler_module._apply_top_k_top_p_ascend, mrv2.apply_top_k_top_p_npu])
+def test_no_filters_are_a_true_noop(entry, triton_path):
+    logits = torch.randn(4, 64)
+    with patch.object(dispatch_module, "apply_top_k_top_p_triton") as kernel:
+        assert entry(logits, None, None) is logits
+    kernel.assert_not_called()
+    assert dispatch_module._get_dispatcher.cache_info().currsize == 0
+
+
+@pytest.mark.parametrize("entry", [sampler_module._apply_top_k_top_p_ascend, mrv2.apply_top_k_top_p_npu])
+@pytest.mark.parametrize(
+    "guard,value", [("is_950", True), ("is_310p", True), ("HAS_TRITON", False), ("VLLM_BATCH_INVARIANT", True)]
+)
+def test_hardware_and_mode_guards_keep_sort_fallback(entry, guard, value, triton_path):
+    logits = torch.tensor([[4.0, 3.0, 2.0, 1.0]])
+    k = torch.tensor([2], dtype=torch.int32)
+    target = dispatch_module.envs if guard == "VLLM_BATCH_INVARIANT" else dispatch_module
+    kwargs = {"return_value": value} if guard.startswith("is_") else {"new": value}
+    with (
+        patch.object(target, guard, **kwargs),
+        patch.object(dispatch_module, "apply_top_k_top_p_triton") as kernel,
+    ):
+        masked = entry(logits.clone(), k, None)
+    kernel.assert_not_called()
+    assert torch.equal(torch.isfinite(masked), torch.tensor([[True, True, False, False]]))
+    assert torch.equal(masked[:, :2], logits[:, :2])
+
+
+@pytest.mark.parametrize("entry", [sampler_module._apply_top_k_top_p_ascend, mrv2.apply_top_k_top_p_npu])
+@pytest.mark.parametrize("filters", ["k", "p", "both"])
+def test_compile_failure_falls_back_and_is_not_retried(entry, filters, triton_path):
+    logits = torch.tensor([[4.0, 3.0, 2.0, 1.0]])
+    k = torch.tensor([2], dtype=torch.int32) if filters != "p" else None
+    p = torch.tensor([0.7]) if filters != "k" else None
+    # Compare with the corresponding pre-PR production fallback.
+    fallback = (
+        _apply_top_k_top_p_torch_npu
+        if entry is sampler_module._apply_top_k_top_p_ascend
+        else mrv2.apply_top_k_top_p_pytorch
+    )
+    expected = fallback(logits.clone(), k, p)
+    with (
+        patch.object(
+            dispatch_module, "apply_top_k_top_p_triton", side_effect=_FakeCompilationError("compiler abort")
+        ) as kernel,
+        patch.object(dispatch_module.logger, "warning_once") as warning,
+    ):
+        for _ in range(2):
+            actual = entry(logits.clone(), k, p)
+            assert torch.equal(actual, expected)
+    kernel.assert_called_once()
+    warning.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "error", [RuntimeError("device error"), AssertionError("bad input"), ValueError("invalid shape")]
+)
+def test_runtime_and_input_errors_are_not_swallowed(error, triton_path):
+    logits = torch.tensor([[4.0, 3.0, 2.0, 1.0]])
+    k = torch.tensor([2], dtype=torch.int32)
+    fallback = MagicMock()
+    with patch.object(dispatch_module, "apply_top_k_top_p_triton", side_effect=error) as kernel:
+        for _ in range(2):
+            with pytest.raises(type(error), match=str(error)):
+                dispatch_module.apply_top_k_top_p_with_fallback(logits, k, None, fallback)
+    assert kernel.call_count == 2
+    fallback.assert_not_called()
+
+
+@pytest.mark.parametrize("variant", ["batch", "vocab", "dtype", "stride", "filters", "filter_dtype"])
+def test_compile_failure_does_not_disable_other_specializations(variant, triton_path):
+    logits = torch.tensor([[4.0, 3.0, 2.0, 1.0]])
+    k = torch.tensor([2], dtype=torch.int32)
+    fallback = MagicMock(return_value=logits)
     sentinel = object()
-    cfg = MagicMock()
-    cfg.enable_reduce_sample = False
-
-    # A2/A3 advertise NPU_TOP_K_TOP_P but are not 950; with reduce-sample
-    # disabled the Triton kernel is the path there.
-    with (
-        patch("vllm_ascend.sample.sampler.get_current_hardware_profile", return_value=_FakeProfile(True)),
-        patch("vllm_ascend.sample.sampler.is_950", return_value=False),
-        patch("vllm_ascend.sample.sampler.get_ascend_config", return_value=cfg),
-        patch.object(sampler_module, "apply_top_k_top_p_triton", return_value=sentinel) as triton,
-    ):
-        out = sampler_module._apply_top_k_top_p_ascend(logits, k, p)
-    assert out is sentinel
-    triton.assert_called_once_with(logits, k, p)
-
-    # k=p=None short-circuits before touching the kernel.
-    with (
-        patch("vllm_ascend.sample.sampler.get_current_hardware_profile", return_value=_FakeProfile(True)),
-        patch("vllm_ascend.sample.sampler.get_ascend_config", return_value=cfg),
-    ):
-        out = sampler_module._apply_top_k_top_p_ascend(logits, None, None)
-    assert out is logits
-
-
-def test_mrv2_entry_runs_kernel_on_warmup():
-    """k=p=None reaching the MRV2 hook still exercises the kernel.
-
-    Current upstream callers short-circuit before this hook when both
-    filters are disabled, so this is a defensive fallback; if reached,
-    it runs the kernel with effective no-op values (k=V, p=1.0).
-    """
-    import vllm_ascend.worker.v2.sample.apply_top_k_top_p as mrv2
-    from vllm_ascend.worker.v2.sample.apply_top_k_top_p import apply_top_k_top_p_npu
-
-    logits = torch.randn(4, 64, dtype=torch.float32)
-    # On a CPU runner HAS_TRITON is False at import time, so the guarded
-    # import in apply_top_k_top_p.py never bound apply_top_k_top_p_triton
-    # into the module; create the attribute so the patch works either way.
-    with (
-        patch.object(sampler_module, "HAS_TRITON", True),
-        patch.object(mrv2, "HAS_TRITON", True),
-        patch.object(mrv2, "apply_top_k_top_p_triton", create=True) as kern,
-    ):
-        kern.return_value = logits
-        apply_top_k_top_p_npu(logits, None, None)
-        kern.assert_called_once()
-        warmup_k = kern.call_args[0][1]
-        warmup_p = kern.call_args[0][2]
-        # k=V and p=1.0 are both effective no-ops for the kernel, but
-        # still allocate the buffer / tables.
-        assert torch.equal(warmup_k, torch.full((4,), 64, dtype=torch.int32))
-        assert torch.equal(warmup_p, torch.ones(4, dtype=torch.float32))
-
-
-def test_mrv2_entry_falls_back_without_triton():
-    from vllm_ascend.worker.v2.sample.apply_top_k_top_p import apply_top_k_top_p_npu
-
-    logits = torch.tensor([[4.0, 3.0, 2.0, 1.0], [1.0, 2.0, 3.0, 4.0]])
-    k = torch.tensor([1, 4], dtype=torch.int32)
-
-    with patch("vllm_ascend.worker.v2.sample.apply_top_k_top_p.HAS_TRITON", False):
-        out = apply_top_k_top_p_npu(logits.clone(), None, None)
-        assert out.shape == logits.shape
-
-        cfg = MagicMock()
-        cfg.enable_reduce_sample = False
-        with patch("vllm_ascend.sample.sampler.get_ascend_config", return_value=cfg):
-            masked = apply_top_k_top_p_npu(logits.clone(), k, None)
-        assert masked.shape == logits.shape
-        assert torch.isfinite(masked).any()
+    with patch.object(
+        dispatch_module, "apply_top_k_top_p_triton", side_effect=[_FakeCompilationError(), sentinel]
+    ) as kernel:
+        dispatch_module.apply_top_k_top_p_with_fallback(logits, k, None, fallback)
+        other = logits
+        other_k = k
+        other_p = None
+        if variant == "batch":
+            other = logits.repeat(2, 1)
+            other_k = k.repeat(2)
+        elif variant == "vocab":
+            other = torch.cat((logits, logits), dim=1)
+        elif variant == "dtype":
+            other = logits.to(torch.float64)
+        elif variant == "stride":
+            other = torch.cat((logits, logits), dim=1)[:, ::2]
+        elif variant == "filters":
+            other_p = torch.tensor([0.9])
+        elif variant == "filter_dtype":
+            other_k = k.to(torch.int64)
+        assert dispatch_module.apply_top_k_top_p_with_fallback(other, other_k, other_p, fallback) is sentinel
+    assert kernel.call_count == 2
+    fallback.assert_called_once()
 
 
 def _npu_runtime_available() -> bool:
@@ -233,9 +222,7 @@ class TestTopkToppKernelEquivalence:
 
     @staticmethod
     def _reference(logits, k, p):
-        cfg = SimpleNamespace(enable_reduce_sample=False)
-        with patch("vllm_ascend.sample.sampler.get_ascend_config", return_value=cfg):
-            return _apply_top_k_top_p_pytorch(logits, k, p)
+        return _apply_top_k_top_p_pytorch(logits, k, p)
 
     def test_small_shapes_match_reference(self):
         from vllm_ascend.ops.triton.v2.sample.topk_topp import apply_top_k_top_p_triton

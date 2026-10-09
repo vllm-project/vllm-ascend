@@ -58,7 +58,7 @@ Source: `vllm_ascend/ops/triton/v2/sample/topk_topp.py` (host wrapper: `apply_to
 - **BLOCK_SIZE=4096 / BLOCK_SIZE_TRUNC=2048 的取值依据**: A2/A3 统一缓冲区（UB）为 192 KB，搜索循环同时保有两个探针 pivot 的活跃 tile 变体与稠密临时量，4096-wide fp32 tile（16 KB）留足裕量；遵循树内 penalties/min_p 等 sampler kernel 的 tile 先例。此前移植（PR #13847）取 1024 导致 V=128K 需 126 个 tile 迭代、性能全面劣化，本取值将其降为 32/16，是 A3 review 给出的直接修复。
 - 每个 program 独占 BUFFER 的一行（`BUFFER + pid * VOCAB_SIZE`），launch grid 为 `min(num_vectorcore, batch_size)`，program 内 grid-stride 循环处理多行——同一行的两次访问（不同 pass）之间没有跨 program 依赖。
 - `multibuffer=False` 启动（与 grammar bitmask kernel 相同，关闭多缓冲以更好利用 UB）。
-- 图模式：支持。grid 仅依赖设备向量核数与 host 侧 shape。
+- 图模式：grid 仅依赖设备向量核数与 host 侧 shape，但新 kernel 的图捕获兼容性仍需真机验证，不能以 CPU 调度 UT 代替验证。
 - triton-ascend 平台适配（与上游 GPU 版的结构性差异）：
     - 候选聚集不做运行时索引 scatter（上游 `BUFFER_ROW + write_pos`，`write_pos` 由 `tl.cumsum` 派生），改写为按原位置稠密存 + `-inf`/0.0 填充——scatter 在 triton-ascend 上会 lower 为 DiscreteMemAccess/SyncBlockLock 使 kernel 串行化。代价是各搜索 pass 需扫描全词表宽度（-inf/0.0 lane 被值掩码跳过），收益是全部访存保持连续。
     - 标量计数器一律 int32（上游部分用 uint32，triton-ascend 标量 uint32 累加 lower 受限）。
@@ -70,7 +70,7 @@ Source: `vllm_ascend/ops/triton/v2/sample/topk_topp.py` (host wrapper: `apply_to
 - **Differences**:
     - NPU 性能适配：launch grid 从 `num_compute_units`（NPU 上语义为 Cube Core 数）改为 `min(get_vectorcore_num(), batch_size)` 向量核网格 + grid-stride 行循环；`BLOCK_SIZE` 8192→4096、`BLOCK_SIZE_TRUNC` 4096→2048（A2/A3 UB 192 KB）；`multibuffer=False`。
     - triton-ascend lower 限制适配：稠密 BUFFER 替代运行时索引 scatter；int32 标量计数；向量化查询表。
-    - 针对 vllm-ascend 逻辑的修改：top-p 强制终止时 pivot 与边界统计量同源（PR #13847 在 A3 上暴露的 top-p 边界精度问题的修复）；`num_keep` 下限钳到 1（至少保留一个 token）；MRV2 入口 `apply_top_k_top_p_npu` 在 k/p 均 None 时以 k=V/p=1.0 跑一次 kernel（防御性兜底：若未来有调用方在 warmup 期到达该 hook，可顺带完成 BUFFER 分配）。
+    - 针对 vllm-ascend 逻辑的修改：top-p 强制终止时 pivot 与边界统计量同源（PR #13847 在 A3 上暴露的 top-p 边界精度问题的修复）；`num_keep` 下限钳到 1（至少保留一个 token）；v1 与 MRV2 共用 `sample/topk_topp.py` 的硬件/编译守卫，k/p 均 None 时直接返回输入，不在无过滤的 dummy/warmup 调用中强制编译或分配 BUFFER。
 
 ## 测试用例 (Test Cases)
 
@@ -83,4 +83,11 @@ Source: `vllm_ascend/ops/triton/v2/sample/topk_topp.py` (host wrapper: `apply_to
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_topk_topp.py
 ```
 
-CPU 可跑的调度逻辑 UT 见 `tests/ut/sample/test_topk_topp_triton.py`（dispatch 守卫矩阵、reduce-sample/A5 回退、warmup 分支、pytorch fallback）。
+CPU 可跑的调度逻辑 UT 见 `tests/ut/sample/test_topk_topp_triton.py`（v1/MRV2 守卫矩阵、A5/310P 与 batch-invariant 回退、无过滤 no-op、编译失败缓存与异常边界）。
+
+## 生产回退与当前验证边界
+
+- 上游已经删除 `enable_reduce_sample`，调度不再访问该配置项；A5 和 310P 保留对应入口原有的 sort-based PyTorch 实现，不声称使用 CANN top-k/top-p 算子。
+- A2/A3 优先尝试 Qrita。2026-10-09 的 NPU CI 在 A2 上观察到 `MLIRCompilationError`，其子进程 `bishengir-compile` 在 `ConvertLinalgRToBinary` 阶段以 SIGABRT 退出；日志未提供足以确认具体编译器根因的 IR 诊断。
+- 生产调度仅捕获 Triton 编译异常，按设备、dtype、形状、stride 和过滤参数特化缓存失败并显式警告，然后使用各入口原有的 sort-based 实现；其他特化仍可尝试 Qrita。输入断言和 NPU 运行时错误继续抛出，不静默掩盖。
+- 此回退保护推理服务可用性，**不代表编译器问题已被根治，也不代表失败特化获得了性能收益**。直接调用 `apply_top_k_top_p_triton` 的 NPU 精度测试不经过生产回退，编译/精度失败仍会暴露。
