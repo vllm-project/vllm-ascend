@@ -577,6 +577,7 @@ def _compress_qsa_groups_kernel(
         mask=(row < num_rows) & (position_dims < 3),
     )
 
+
 @triton.jit
 def _qsa_q_norm_rope_kernel(
     QK,
@@ -597,7 +598,7 @@ def _qsa_q_norm_rope_kernel(
     ROTARY_DIM: tl.constexpr,
     THREE_AXES: tl.constexpr,
     INTERLEAVED: tl.constexpr,
-    NEOX:tl.constexpr,
+    NEOX: tl.constexpr,
     SECTION_0: tl.constexpr,
     SECTION_1: tl.constexpr,
     SECTION_2: tl.constexpr,
@@ -670,7 +671,7 @@ def _qsa_q_norm_rope_kernel(
             axis = tl.where(
                 freq < SECTION_0,
                 0,
-                tl.where(freq < SECTION_0 + SECTION_1,1,2),
+                tl.where(freq < SECTION_0 + SECTION_1, 1, 2),
             )
     position = tl.load(
         POSITIONS + token * pos_stride_t + axis * pos_stride_axis,
@@ -1267,6 +1268,7 @@ def qsa_compress_groups_with_ratio(
     )
     return pooled, first_positions
 
+
 def qsa_q_norm_rope(
     qk: torch.Tensor,
     weight: torch.Tensor,
@@ -1313,9 +1315,10 @@ def qsa_q_norm_rope(
         SECTION_1=sections[1],
         SECTION_2=sections[2],
         BLOCK=triton.next_power_of_2(head_dim),
-        enable_fp_fusion = False,
+        enable_fp_fusion=False,
     )
     return out
+
 
 __all__ = [
     "expand_qsa_block_indices_npu",

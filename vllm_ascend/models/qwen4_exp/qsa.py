@@ -35,12 +35,12 @@ from vllm_ascend.device.hardware_profile import (
     get_current_hardware_profile,
 )
 from vllm_ascend.ops.triton.qwen4_exp.qsa import (
-    qsa_select_paged_tokens as qsa_select_paged_tokens_triton,
-)
-from vllm_ascend.ops.triton.qwen4_exp.qsa import (
     qsa_q_norm_rope,
     qsa_sparse_paged_attention,
     qsa_store_cache_rows,
+)
+from vllm_ascend.ops.triton.qwen4_exp.qsa import (
+    qsa_select_paged_tokens as qsa_select_paged_tokens_triton,
 )
 from vllm_ascend.utils import is_950
 
@@ -236,7 +236,7 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
         num_tokens = raw_metadata.num_actual_tokens
         hidden_states = hidden_states[:num_tokens]
         positions = positions[..., :num_tokens]
-        query, token_k = self.project_qk(hidden_states, positions,compute_query=not self.skip_topk)
+        query, token_k = self.project_qk(hidden_states, positions, compute_query=not self.skip_topk)
         self._update_and_compress(
             token_k,
             positions,
@@ -275,7 +275,7 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
             qk,
             q_norm=self.q_layernorm,
             num_q_heads=self.index_n_heads,
-            head_dim=self.index_head_dim
+            head_dim=self.index_head_dim,
         )
         return q, token_k
 
