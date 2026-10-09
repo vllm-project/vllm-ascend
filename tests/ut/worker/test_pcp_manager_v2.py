@@ -63,6 +63,7 @@ def _make_pcp_config(
     sparse_mla: bool = True,
     pipeline_parallel_size: int = 1,
     data_parallel_size: int = 1,
+    speculative_config=None,
 ):
     hf_text_config = SimpleNamespace(index_topk=2048) if sparse_mla else SimpleNamespace()
     return SimpleNamespace(
@@ -78,7 +79,7 @@ def _make_pcp_config(
             hf_text_config=hf_text_config,
         ),
         lora_config=None,
-        speculative_config=None,
+        speculative_config=speculative_config,
         compilation_config=SimpleNamespace(cudagraph_mode=cudagraph_mode),
     )
 
@@ -90,7 +91,7 @@ def _make_pcp_config(
         (CUDAGraphMode.NONE, True, 2, 1, False),
         (CUDAGraphMode.NONE, False, 1, 1, False),
         (CUDAGraphMode.NONE, False, 2, 2, False),
-        (CUDAGraphMode.FULL_DECODE_ONLY, False, 2, 1, False),
+        (CUDAGraphMode.FULL_DECODE_ONLY, False, 2, 1, True),
     ],
 )
 def test_decode_sharding_uses_parallel_config(cudagraph_mode, speculative, pcp_size, dcp_size, expected_sharding):
@@ -363,7 +364,11 @@ def test_full_decode_request_layout_is_token_sized_only_without_drafts():
 
 def _make_replicated_pcp_manager():
     manager = AscendPCPManager(2, 0, torch.device("cpu"), max_num_reqs=8, max_num_tokens=32)
-    manager.vllm_config = _make_pcp_config(CUDAGraphMode.FULL_DECODE_ONLY)
+    # Graph execution with speculation stays replicated.
+    manager.vllm_config = _make_pcp_config(
+        CUDAGraphMode.FULL_DECODE_ONLY,
+        speculative_config=SimpleNamespace(num_speculative_tokens=3),
+    )
     manager._hidden_restore_idx = torch.arange(32, dtype=torch.int64)
     return manager
 
@@ -428,7 +433,10 @@ def test_partition_batch_pads_decode_requests_when_tokens_are_already_padded():
 
     manager = _make_replicated_pcp_manager()
     manager._input_buffers = input_buffers
-    manager.vllm_config = _make_pcp_config(CUDAGraphMode.FULL_DECODE_ONLY)
+    manager.vllm_config = _make_pcp_config(
+        CUDAGraphMode.FULL_DECODE_ONLY,
+        speculative_config=SimpleNamespace(num_speculative_tokens=3),
+    )
     manager._hidden_restore_idx = torch.arange(4, dtype=torch.int64)
     # Upstream replace() preserves the global attention state.
     local_batch.attn_state = global_batch.attn_state
@@ -449,7 +457,7 @@ def test_partition_batch_pads_decode_requests_when_tokens_are_already_padded():
     ):
         result = manager.partition_batch(global_batch, padded_num_tokens=4)
 
-    upstream_partition.assert_called_once_with(global_batch, padded_num_tokens=4)
+    upstream_partition.assert_called_once_with(global_batch, padded_num_tokens=4, padded_num_reqs=None)
     assert result.num_reqs == 3
     assert result.num_reqs_after_padding == 4
     assert result.num_tokens == 3
@@ -481,7 +489,10 @@ def test_partition_batch_keeps_piecewise_request_extent():
 
     manager = _make_replicated_pcp_manager()
     manager._input_buffers = None
-    manager.vllm_config = _make_pcp_config(CUDAGraphMode.PIECEWISE)
+    manager.vllm_config = _make_pcp_config(
+        CUDAGraphMode.PIECEWISE,
+        speculative_config=SimpleNamespace(num_speculative_tokens=3),
+    )
 
     with (
         patch.object(
@@ -493,7 +504,7 @@ def test_partition_batch_keeps_piecewise_request_extent():
     ):
         result = manager.partition_batch(batch, padded_num_tokens=4)
 
-    upstream_partition.assert_called_once_with(batch, padded_num_tokens=4)
+    upstream_partition.assert_called_once_with(batch, padded_num_tokens=4, padded_num_reqs=None)
     assert result.num_reqs_after_padding == 2
     assert torch.equal(result.query_start_loc, torch.tensor([0, 1, 2], dtype=torch.int32))
     np.testing.assert_array_equal(result.query_start_loc_np, np.array([0, 1, 2], dtype=np.int32))
@@ -523,7 +534,10 @@ def test_attention_context_collects_global_pcp_data(dcp_world_size, is_prefillin
     gather_block_tables = MagicMock(return_value=block_tables)
     num_blocks = np.arange(16, dtype=np.int32).reshape(2, 8)
     manager._global_batch = input_batch
-    manager._local_batch = SimpleNamespace(num_reqs=3, idx_mapping_np=np.array([3, 3, 7], dtype=np.int32))
+    manager._local_batch = SimpleNamespace(
+        num_reqs=3, num_tokens=input_batch.num_tokens, idx_mapping_np=np.array([3, 3, 7], dtype=np.int32)
+    )
+    manager._local_gather_idx = torch.arange(input_batch.num_tokens + 3, dtype=torch.int64)
     manager._block_tables = SimpleNamespace(
         gather_block_tables=gather_block_tables,
         num_blocks=SimpleNamespace(np=num_blocks),
@@ -554,6 +568,7 @@ def test_attention_context_collects_global_pcp_data(dcp_world_size, is_prefillin
         global_slot_mappings[:, : input_batch.num_tokens_after_padding],
     )
     assert actual.hidden_restore_idx is hidden_restore_idx
+    torch.testing.assert_close(actual.local_token_indices, manager._local_gather_idx[: input_batch.num_tokens])
     gather_block_tables.assert_called_once_with(
         input_batch.idx_mapping,
         input_batch.num_reqs_after_padding,
@@ -622,7 +637,10 @@ def test_partition_batch_preserves_fia_dummy_layout() -> None:
     )
     # PIECEWISE pads tokens without padding requests, so the request-shaped
     # metadata must stay at the global batch's request extent.
-    manager.vllm_config = _make_pcp_config(CUDAGraphMode.PIECEWISE)
+    manager.vllm_config = _make_pcp_config(
+        CUDAGraphMode.PIECEWISE,
+        speculative_config=SimpleNamespace(num_speculative_tokens=3),
+    )
     input_buffers = manager._input_buffers
     assert input_buffers is not None
     input_buffers.positions[0] = 10
@@ -1012,7 +1030,10 @@ def test_sample_tokens_uses_global_batch_only_on_non_last_pp_rank(
 
 def test_partition_batch_clears_padded_dcp_local_seq_lens() -> None:
     manager = _make_replicated_pcp_manager()
-    manager.vllm_config = _make_pcp_config(CUDAGraphMode.FULL_DECODE_ONLY)
+    manager.vllm_config = _make_pcp_config(
+        CUDAGraphMode.FULL_DECODE_ONLY,
+        speculative_config=SimpleNamespace(num_speculative_tokens=3),
+    )
     manager._input_buffers = AscendInputBuffers(
         max_num_reqs=8,
         max_num_tokens=16,
@@ -1083,6 +1104,11 @@ def test_validate_config_pcp_dp_graph_modes(dp_size, cudagraph_mode, allowed):
 @pytest.mark.parametrize("has_stale_batch", [False, True])
 def test_dummy_attention_context_uses_current_batch(pcp_rank, has_stale_batch):
     manager = AscendPCPManager(2, pcp_rank, torch.device("cpu"))
+    # Speculative decoding keeps the dummy batch on the replicated path.
+    manager.vllm_config = _make_pcp_config(
+        CUDAGraphMode.NONE,
+        speculative_config=SimpleNamespace(num_speculative_tokens=3),
+    )
     saved_batch = _make_global_pcp_batch() if has_stale_batch else None
     manager._global_batch = saved_batch
     manager._hidden_restore_idx = torch.tensor([99]) if has_stale_batch else None

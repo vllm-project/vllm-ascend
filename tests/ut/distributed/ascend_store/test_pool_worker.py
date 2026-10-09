@@ -1355,6 +1355,31 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         worker.kv_send_thread.add_stored_request.assert_not_called()
         worker.kv_send_thread.request_queue.join.assert_not_called()
 
+    def test_handle_released_saves_noop_without_send_thread(self):
+        worker = self._make_worker()
+        worker.kv_send_thread = None
+        worker.handle_released_saves({"r1"})
+
+    def test_handle_released_saves_drains_only_released_requests(self):
+        worker = self._make_worker()
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import KVCacheStoreSendingThread
+
+        worker.kv_send_thread = MagicMock(spec=KVCacheStoreSendingThread)
+        released = {"r1", "r2"}
+        worker.handle_released_saves(released)
+        worker.kv_send_thread.raise_if_failed.assert_called_once_with()
+        worker.kv_send_thread.wait_for_requests_saved.assert_called_once_with(released)
+
+    def test_handle_released_saves_skips_layerwise_thread(self):
+        worker = self._make_worker()
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import KVCacheStoreLayerSendingThread
+
+        # A spec'd layerwise-thread mock has no wait_for_requests_saved member,
+        # so a wrong dispatch would raise AttributeError here.
+        worker.kv_send_thread = MagicMock(spec=KVCacheStoreLayerSendingThread)
+        worker.handle_released_saves({"r1"})
+        worker.kv_send_thread.raise_if_failed.assert_called_once_with()
+
     def test_get_finished_producer_clears_synchronous_completions(self):
         worker = self._make_worker(kv_role="kv_producer")
 

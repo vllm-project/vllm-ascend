@@ -563,9 +563,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.is_kv_producer = (
             self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_producer
         )
-        self.kv_cache_dtype = kv_cache_dtype_str_to_dtype(
-            self.vllm_config.cache_config.cache_dtype, self.vllm_config.model_config
-        )
+        self.kv_cache_dtype = kv_cache_dtype_str_to_dtype(kv_cache_dtype, self.vllm_config.model_config)
         self.enable_c8_quant = self.vllm_config.quant_config is not None and getattr(
             self.vllm_config.quant_config, "enable_c8_quant", False
         )

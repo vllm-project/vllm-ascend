@@ -2115,6 +2115,7 @@ def test_pcp_metadata_builds_global_view_when_batch_has_prefill():
     global_slot_mapping = global_slot_mappings[1, : global_batch.num_tokens]
     local_common = SimpleNamespace(
         attn_state="local",
+        query_start_loc_cpu=torch.tensor([0, 2], dtype=torch.int32),
         num_actual_tokens=2,
         num_input_tokens=3,
         num_reqs=2,
@@ -2132,6 +2133,8 @@ def test_pcp_metadata_builds_global_view_when_batch_has_prefill():
     pcp_manager = AscendPCPManager.__new__(AscendPCPManager)
     pcp_manager.dcp_world_size = 1
     pcp_manager._global_batch = global_batch
+    pcp_manager._local_batch = SimpleNamespace(num_tokens=local_common.num_actual_tokens)
+    pcp_manager._local_gather_idx = torch.tensor([0, 4, -1], dtype=torch.int64)
     pcp_manager._block_tables = SimpleNamespace(
         gather_block_tables=gather_block_tables,
     )
@@ -2140,6 +2143,7 @@ def test_pcp_metadata_builds_global_view_when_batch_has_prefill():
     pcp_manager._padded_gather_idx = None
     pcp_manager._gathered_kv_write_mask = None
     pcp_context = pcp_manager.build_attention_context()
+    assert torch.equal(pcp_context.local_token_indices, torch.tensor([0, 4], dtype=torch.int64))
     global_metadata = AscendDSAMetadata(
         num_actual_tokens=5,
         num_decodes=0,
@@ -2753,3 +2757,71 @@ def test_a5_fp8_o_proj_keeps_otp_collectives(tp_size, num_tokens):
     bf16_mm.assert_not_called()
     expected = x.sum((1, 2)).unsqueeze(1).expand(-1, 2)
     torch.testing.assert_close(output, expected)
+
+
+@pytest.mark.parametrize("use_tq", [False, True])
+def test_kv_plan_reuse_is_turboquant_only(use_tq):
+    impl = AscendDSAImpl.__new__(AscendDSAImpl)
+    impl.vllm_config = _make_vllm_config()
+    impl.compress_ratio = 4
+    impl.turboquant = object() if use_tq else None
+    with patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan") as planner:
+        first = impl.get_kv_plan()
+        second = impl.get_kv_plan()
+    assert first is second
+    assert planner.call_count == (1 if use_tq else 2)
+    planner.assert_called_with(impl.vllm_config, 4)
+
+
+@pytest.mark.parametrize("use_tq", [False, True])
+@pytest.mark.parametrize("ratio", [1, 4, 128])
+@pytest.mark.parametrize("deferred", [False, True])
+def test_dspark_compressed_tq_metadata_keeps_full_context(use_tq, ratio, deferred):
+    config = _make_vllm_config(num_speculative_tokens=5)
+    config.model_config.hf_config.sliding_window = 128
+    config.speculative_config.method = "dspark"
+    config.cache_config = SimpleNamespace(cache_dtype="turboquant_4bit_nc" if use_tq else "auto")
+    with patch(f"{__name__}._make_vllm_config", return_value=config):
+        builder = _make_builder(compressor_ratio=ratio, num_speculative_tokens=5)
+    if deferred:
+        builder.enable_device_metadata()
+    builder._build_qli_metadata = MagicMock(return_value=None)
+    builder.num_actual_tokens = builder.num_decode_tokens = 5
+    builder.num_decodes = 1
+    builder.num_prefills = 0
+    builder.seq_lens = torch.tensor([261], dtype=torch.int32)
+    builder.block_table = torch.tensor([[0, 1, 2]], dtype=torch.int32)
+    query_start_loc = torch.tensor([0, 5], dtype=torch.int32)
+    common = SimpleNamespace(
+        num_reqs=1,
+        num_input_tokens=5,
+        positions=torch.arange(256, 261),
+        query_start_loc=query_start_loc,
+        query_start_loc_cpu=query_start_loc,
+        causal=False,
+    )
+    metadata_op = MagicMock(return_value=torch.zeros(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32))
+    plan = _mock_dsa_kv_plan(
+        get_dsa_sparse_attn_metadata_op=metadata_op,
+        get_dsa_sparse_attn_metadata_kwargs={},
+    )
+    with (
+        patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=plan),
+        patch("vllm_ascend.attention.dsa_v1.get_tensor_model_parallel_world_size", return_value=1),
+        patch("vllm_ascend.attention.dsa_v1.get_full_cos_and_sin_dsa", return_value=(None, None)),
+        patch("vllm_ascend.attention.dsa_v1.build_compressor_metadata_out"),
+    ):
+        metadata = builder.build_req_metadata(
+            common_attn_metadata=common,
+            seq_lens_cpu=builder.seq_lens,
+            num_actual_reqs=None,
+            cos=torch.ones(5),
+            sin=torch.zeros(5),
+        )
+        if deferred:
+            for task in builder.take_device_metadata_tasks():
+                task.run()
+    compressed_tq = use_tq and ratio > 1
+    assert metadata_op.call_args.kwargs["seqused_kv"].tolist() == [261 if compressed_tq else 133]
+    assert (metadata.dspark_swa_indices is None) == compressed_tq
+    assert metadata.ori_win_left == (127 if compressed_tq else 132)

@@ -181,6 +181,22 @@ class ModelAclGraphManager(ModelCudaGraphManager):
 
         metadata = getattr(self.model_runner.model_state, "device_metadata", None)
         try:
+            prepare_engram = getattr(self.model_runner.model_state, "prepare_engram", None)
+            if prepare_engram is not None:
+                # Match FULL replay's DP padding before lookup consumes it.
+                with (
+                    set_current_vllm_config(self.vllm_config),
+                    set_forward_context(
+                        attn_metadata,
+                        self.vllm_config,
+                        num_tokens=num_tokens,
+                        cudagraph_runtime_mode=desc.cg_mode,
+                        num_tokens_across_dp=torch.full([self.model_runner.dp_size], num_tokens),
+                        batch_descriptor=None,
+                        slot_mapping=None,
+                    ),
+                ):
+                    prepare_engram()
             if use_updatable_graph(attn_backend):
                 return self._updatable_graph_replay(desc, attn_metadata)
             else:
