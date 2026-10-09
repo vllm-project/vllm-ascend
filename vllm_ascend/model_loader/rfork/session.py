@@ -486,13 +486,12 @@ class RForkSession:
                                 "RFork seed memory registration raised; cleaning up before continuing inference."
                             )
                             registered = False
-                        if registered:
+                        # Preserve the lookup digest when checkpoint post-load processing reshapes weights.
+                        if registered and (processed_layout or self.planner.structural_digest is None):
                             try:
                                 structural_digest = _registered_structural_digest(self.transfer_backend)
                                 self.planner.bind_structural_digest(structural_digest)
                             except RuntimeError as exc:
-                                # The structure drifted from destination registration; a seed
-                                # advertised under the stale key could never pass manifest checks.
                                 logger.error(
                                     "RFork refuses to advertise a seed whose structure changed "
                                     "after destination registration: %s. Inference can continue.",
@@ -506,7 +505,6 @@ class RForkSession:
                 if self.seed_lease is not None:
                     if self._lease_release_exhausted or self.lease_release_stop_event.is_set():
                         return RForkSeedServiceStartResult.FAILED
-                    # A deferred promotion must inspect the live model again when it actually starts.
                     self._deferred_seed_start = (model, processed_layout, exclude_blocks)
                     self._ensure_lease_release_retry_locked()
                     logger.debug(
@@ -542,10 +540,12 @@ class RForkSession:
             self.state = RForkLifecycleState.CLEANUP_REQUIRED
         try:
             info = self._seed_transfer_info()
-            # Immediate promotion reuses the final-layout scan; deferred promotion takes a fresh scan.
-            if structural_digest is None:
-                structural_digest = _compute_structural_digest(model, processed_layout)
-            self.planner.verify_structural_digest(structural_digest)
+            # Processed layouts must match the lookup digest; deferred promotion rescans the live model.
+            if processed_layout:
+                if structural_digest is None:
+                    structural_digest = _compute_structural_digest(model, processed_layout)
+                if not self.planner.verify_structural_digest(structural_digest):
+                    return False
             # Reserve adjacent main/draft slots for every distributed worker.
             port = _resolve_seed_server_port(self.config, self.identity)
             if port > 0:
