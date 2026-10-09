@@ -127,13 +127,16 @@ class AscendFAImpl(AscendAttentionBackendImpl):
             )
 
         if num_prefills > 0:
+            prefill_query_start_loc = attn_metadata.query_start_loc
+            if num_decode_tokens > 0:
+                # Query was sliced above. Rebase only mixed batches; pure
+                # prefill already starts at zero and needs no device operation.
+                prefill_query_start_loc = prefill_query_start_loc[num_decodes:] - num_decode_tokens
             outputs.append(
                 self._flash_attn_with_kvcache(
                     query[num_decode_tokens:],
                     attn_metadata.block_tables[num_decodes:, :],
-                    # Query was sliced above, so its cumulative offsets must
-                    # start at zero even when decode requests precede prefill.
-                    attn_metadata.query_start_loc[num_decodes:] - num_decode_tokens,
+                    prefill_query_start_loc,
                     attn_metadata.seq_lens[num_decodes:].npu(),
                     True,  # enable causal for prefill
                     max(attn_metadata.seq_lens[num_decodes:]),
