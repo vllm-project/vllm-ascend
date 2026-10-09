@@ -45,7 +45,11 @@ from vllm.distributed import (
 from vllm.distributed.utils import get_pp_indices
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
-from vllm.model_executor.layers.fused_moe import FusedMoEFactory, fused_moe_make_expert_params_mapping
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoEFactory,
+    GateLinear,
+    fused_moe_make_expert_params_mapping,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -292,10 +296,13 @@ class DeepseekV4MoE(nn.Module):
         if config.hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {config.hidden_act}. Only silu is supported for now.")
 
-        self.gate = ReplicatedLinear(
-            config.hidden_size, config.n_routed_experts, bias=False, quant_config=None, prefix=f"{prefix}.gate"
+        self.gate = GateLinear(
+            input_size=config.hidden_size,
+            output_size=self.n_routed_experts,
+            bias=False,
+            out_dtype=torch.float32,
+            prefix=f"{prefix}.gate",
         )
-        self.gate.precast_fp32_weight = True
 
         # Load balancing settings.
         eplb_config = parallel_config.eplb_config
