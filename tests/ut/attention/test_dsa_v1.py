@@ -2762,8 +2762,8 @@ def test_kv_plan_reuse_is_turboquant_only(use_tq):
     impl.compress_ratio = 4
     impl.turboquant = object() if use_tq else None
     with patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan") as planner:
-        first = impl._get_kv_plan()
-        second = impl._get_kv_plan()
+        first = impl.get_kv_plan()
+        second = impl.get_kv_plan()
     assert first is second
     assert planner.call_count == (1 if use_tq else 2)
     planner.assert_called_with(impl.vllm_config, 4)

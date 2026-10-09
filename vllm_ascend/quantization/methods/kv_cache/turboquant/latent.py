@@ -12,7 +12,11 @@ import torch
 
 from . import HEAD_DIM
 
-_DSV4_LLOYD_MAX_SAMPLE_COUNT = 400_000
+# The historical DeepSeek V4 Lloyd-Max codebook was trained from 400,000
+# standard-normal samples using the same seed-0 RNG as the Hadamard signs.
+# Consume exactly that many samples to preserve the rotation sequence with
+# the fixed codebook; this is a compatibility constant, not a tuning parameter.
+_LEGACY_LLOYD_MAX_SAMPLE_COUNT = 400_000
 
 
 @lru_cache
@@ -45,10 +49,15 @@ CENTROIDS = (
 
 
 class TurboQuantLatent:
-    """Initialize before graph capture; DSV4 layers share read-only transforms."""
+    """Initialize before graph capture.
 
-    def __init__(self, *, dsv4: bool = False):
-        self._dsv4 = dsv4
+    ``legacy_hadamard`` selects the historical post-Lloyd-Max rotation sequence
+    with shared transforms and fused NPU packing. The default retains the SFA
+    initialization and packing path.
+    """
+
+    def __init__(self, *, legacy_hadamard: bool = False):
+        self._legacy_hadamard = legacy_hadamard
         self.inverse_rotation: torch.Tensor | None = None
         self.rotation: torch.Tensor | None = None
         self.centroids: torch.Tensor | None = None
@@ -59,8 +68,8 @@ class TurboQuantLatent:
             if self.rotation.device != device:
                 raise RuntimeError("TurboQuant transform cannot move devices after initialization")
             return
-        if self._dsv4:
-            self.rotation, self.inverse_rotation, self.centroids, self.norm_lut = _get_dsv4_transforms(device)
+        if self._legacy_hadamard:
+            self.rotation, self.inverse_rotation, self.centroids, self.norm_lut = _get_legacy_transforms(device)
             return
         self._initialize_transforms(device)
 
@@ -69,10 +78,10 @@ class TurboQuantLatent:
         while h.shape[0] < HEAD_DIM:
             h = np.block([[h, h], [h, -h]])
         rng = np.random.default_rng(0)
-        if self._dsv4:
+        if self._legacy_hadamard:
             # Historical DSV4 code drew Lloyd-Max training samples before the
             # signs. Preserve that sequence even though the codebook is fixed.
-            rng.standard_normal(_DSV4_LLOYD_MAX_SAMPLE_COUNT)
+            rng.standard_normal(_LEGACY_LLOYD_MAX_SAMPLE_COUNT)
         signs = rng.choice([-1.0, 1.0], HEAD_DIM).astype(np.float32)
         self.rotation = torch.tensor(signs[:, None] * h / math.sqrt(HEAD_DIM), device=device)
         self.centroids = torch.tensor(CENTROIDS, dtype=torch.float32, device=device)
@@ -90,7 +99,7 @@ class TurboQuantLatent:
         self._initialize(x.device)
         rotation = self.rotation
         assert rotation is not None
-        inverse_rotation = self.inverse_rotation if self._dsv4 else rotation.T
+        inverse_rotation = self.inverse_rotation if self._legacy_hadamard else rotation.T
         assert inverse_rotation is not None
         return (x.float().reshape(-1, HEAD_DIM) @ inverse_rotation).to(x.dtype).reshape(x.shape)
 
@@ -106,7 +115,7 @@ class TurboQuantLatent:
         packed, norm = _get_turbo_quant_op()(rotated, centroids)
         # ops-nn returns the original norm. MixedQuantSparseFlashMla multiplies
         # centroids by scale directly; retain the old DS norm correction here.
-        if self._dsv4 and packed.device.type == "npu":
+        if self._legacy_hadamard and packed.device.type == "npu":
             from vllm_ascend.ops.triton.turboquant_finalize import turboquant_finalize
 
             return turboquant_finalize(packed, norm, norm_lut)
@@ -116,10 +125,10 @@ class TurboQuantLatent:
 
 
 @cache
-def _get_dsv4_transforms(device: torch.device) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+def _get_legacy_transforms(device: torch.device) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     # Share read-only tensors across DSV4 layers, initialized before graph
     # capture. SFA keeps its original per-layer initialization and math path.
-    store = TurboQuantLatent(dsv4=True)
+    store = TurboQuantLatent(legacy_hadamard=True)
     store._initialize_transforms(device)
     assert store.rotation is not None
     assert store.centroids is not None

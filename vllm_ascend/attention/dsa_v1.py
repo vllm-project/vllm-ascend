@@ -1562,7 +1562,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
     turboquant: TurboQuantLatent | None = None
     _tq_kv_plan: DsaAttnKvPlan | None = None
 
-    def _get_kv_plan(self) -> DsaAttnKvPlan:
+    def get_kv_plan(self) -> DsaAttnKvPlan:
         # Only TQ modules cache their fixed execution plan. Other cache modes
         # retain the baseline planner and operator selection on every call.
         if self.turboquant is None:
@@ -1601,7 +1601,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         self.q_lora_rank = q_lora_rank
         self.compress_ratio = compress_ratio
         self.turboquant = (
-            TurboQuantLatent(dsv4=True) if is_turboquant(self.vllm_config) and compress_ratio == 4 else None
+            TurboQuantLatent(legacy_hadamard=True) if is_turboquant(self.vllm_config) and compress_ratio == 4 else None
         )
         self.softmax_scale = self.head_dim**-0.5
         self.support_fp8_attention = get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
@@ -2306,7 +2306,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
 
         notify_kv_cache_written(layer_name)
         wait_for_device_metadata(DeviceMetadataStage.ATTENTION, id(common_metadata.sas_metadata))
-        kv_plan = self._get_kv_plan()
+        kv_plan = self.get_kv_plan()
         attn_op = kv_plan.get_dsa_sparse_attn_op()
         attn_kwargs = kv_plan.get_dsa_sparse_attn_base_kwargs()
         if has_prefill:
