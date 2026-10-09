@@ -1606,12 +1606,16 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                     if engram_projections is None or layer.layer_idx not in engram_projections
                     else engram_projections[layer.layer_idx][:n]
                 )
-                hidden_states[:n] = layer.engram(
+                engram_args = (
                     hidden_states[:n],
                     lookup,
                     active_mask,
                     self.engram_rotation if self.engram_rotated else None,
-                    projected_kv=projected_kv,
+                )
+                hidden_states[:n] = (
+                    layer.engram(*engram_args)
+                    if projected_kv is None
+                    else layer.engram(*engram_args, projected_kv=projected_kv)
                 )
             hidden_states, pre_mix = layer(positions, hidden_states, pre_mix, None, input_ids=input_ids)
         assert last_layer is not None, "Hyper-connection collapse requires at least one decoder layer"
