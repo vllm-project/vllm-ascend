@@ -187,9 +187,10 @@ class RecomputeScheduler(Scheduler):
         scheduled_resumed_reqs: list[Request] = []
         scheduled_running_reqs: list[Request] = []
         preempted_reqs: list[Request] = []
+        # delta for recompute scheduler: collect requests returned to prefill.
         self._recomputed_reqs: list[RecomputeReqInfo] = []
 
-        # Recompute/DyntraLB: apply the composed load-balancing policy.
+        # delta for DyntraLB composition: apply cross-rank decisions.
         self._apply_load_balance_modifications()
 
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
@@ -386,6 +387,8 @@ class RecomputeScheduler(Scheduler):
                     else:
                         preempted_req = self.running.pop()
 
+                    # delta for recompute scheduler: offload or return the
+                    # victim to prefill instead of always preempting locally.
                     locally_preempted = self._preempt_or_recompute(
                         preempted_req,
                         scheduled_timestamp,
@@ -452,6 +455,8 @@ class RecomputeScheduler(Scheduler):
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
         # Next, schedule the WAITING requests.
+        # delta for recompute scheduler: do not admit new requests in a step
+        # that returned a decode request to prefill.
         if not preempted_reqs and not self._recomputed_reqs and self._pause_state == PauseState.UNPAUSED:
             step_skipped_waiting = create_request_queue(self.policy)
 
@@ -491,7 +496,7 @@ class RecomputeScheduler(Scheduler):
                     step_skipped_waiting.prepend_request(request)
                     continue
 
-                # DyntraLB composition: admit only requests selected by policy.
+                # delta for DyntraLB composition: admit only selected requests.
                 if not self._can_admit_waiting_request(request):
                     request_queue.pop_request()
                     step_skipped_waiting.prepend_request(request)
@@ -635,8 +640,10 @@ class RecomputeScheduler(Scheduler):
                     # Pad new decode requests to uniform spec decoding size to
                     # preserve full cudagraph for this step.
                     # Not for diffusion where draft tokens can't be padded.
-                    # No scheduled_running_reqs check: disaggregated D nodes never mix long prefills, so padding
-                    # always pays off; that check only helps colocated P/D, where prefill_scheduled still guards us.
+                    # delta for recompute scheduler: disaggregated D nodes never
+                    # mix long prefills, so padding always pays off. The upstream
+                    # scheduled_running_reqs check only helps colocated P/D,
+                    # where prefill_scheduled still guards us.
                     if (
                         (self.num_spec_tokens > 0 and self.dynamic_sd_lookup is None)
                         and self.num_sampled_tokens_per_step > 0
@@ -956,6 +963,7 @@ class RecomputeScheduler(Scheduler):
         if self.log_stats and self.observability_config.enable_logging_iteration_details:
             scheduled_encoder_input_stats = self._make_scheduled_encoder_input_stats(scheduled_encoder_inputs)
 
+        # delta for recompute scheduler: propagate recomputed requests to EngineCore.
         scheduler_output = RecomputeSchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
@@ -1004,6 +1012,7 @@ class RecomputeScheduler(Scheduler):
 
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
+        # delta for DyntraLB composition: print optional scheduler diagnostics.
         if getattr(self, "_enable_diagnostics", False):
             print_scheduler_summary(self, scheduler_output)
         return scheduler_output

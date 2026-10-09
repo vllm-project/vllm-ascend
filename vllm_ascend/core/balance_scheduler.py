@@ -421,13 +421,15 @@ class BalanceScheduler(Scheduler):
                 if num_running >= self.max_num_running_reqs:
                     break
 
-                # Keep admission balanced across DP ranks: if any rank was at
+                # delta for balance scheduling: if any rank was at
                 # the running cap after the previous step, stop admitting new
                 # waiting requests on every rank.
                 if max(t.item() for t in self.balance_queue) == self.max_num_running_reqs:
                     break
 
                 request_queue = self._select_waiting_queue_for_scheduling()
+                # delta for balance scheduling: a drained rank has no queue
+                # while admission is deferred, so do not assert as upstream does.
                 if request_queue is None:
                     break
 

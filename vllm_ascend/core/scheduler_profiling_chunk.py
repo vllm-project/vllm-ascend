@@ -501,7 +501,8 @@ class ProfilingChunkScheduler(Scheduler):
 
             # >>> PROFILING CHUNK: dynamic chunk sizing for RUNNING >>>
             if (
-                self.profiling_chunk_manager.is_ready
+                self.profiling_chunk_manager is not None
+                and self.profiling_chunk_manager.is_ready
                 and request.num_computed_tokens < request.num_prompt_tokens
                 and (request.num_computed_tokens > 0 or not self.profiling_chunk_config.need_timing)
             ):
@@ -860,7 +861,8 @@ class ProfilingChunkScheduler(Scheduler):
 
                     # >>> PROFILING CHUNK: dynamic chunk sizing >>>
                     if (
-                        self.profiling_chunk_manager.is_ready
+                        self.profiling_chunk_manager is not None
+                        and self.profiling_chunk_manager.is_ready
                         and request.num_computed_tokens < request.num_prompt_tokens
                         and (request.num_computed_tokens > 0 or not self.profiling_chunk_config.need_timing)
                     ):
@@ -1231,8 +1233,10 @@ class ProfilingChunkScheduler(Scheduler):
 
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
+        # >>> PROFILING CHUNK: propagate timing completion to workers >>>
         if getattr(self, "_profiling_timing_done", False) and scheduler_output is not None:
             scheduler_output.disable_profiling_timing = True
+        # <<< PROFILING CHUNK <<<
         return scheduler_output
 
 

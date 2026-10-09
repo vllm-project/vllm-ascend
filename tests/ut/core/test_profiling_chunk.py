@@ -360,7 +360,7 @@ class TestProfilingChunkScheduler(TestBase):
             stack.enter_context(
                 patch.object(ModelConfig, "is_encoder_decoder", new_callable=PropertyMock, return_value=False)
             )
-            # vLLM main (post-v0.28.0) reads model_config.uses_mrope in
+            # vLLM 0.30.0 reads model_config.uses_mrope in
             # Scheduler.__init__, which infinitely recurses on a bare
             # MagicMock hf_config. Override it to keep the UT runnable.
             stack.enter_context(patch.object(ModelConfig, "uses_mrope", new_callable=PropertyMock, return_value=False))
@@ -804,7 +804,7 @@ class TestProfilingChunkAsyncScheduler(TestBase):
             stack.enter_context(
                 patch.object(ModelConfig, "is_encoder_decoder", new_callable=PropertyMock, return_value=False)
             )
-            # vLLM main (post-v0.28.0) reads model_config.uses_mrope in
+            # vLLM 0.30.0 reads model_config.uses_mrope in
             # Scheduler.__init__, which infinitely recurses on a bare
             # MagicMock hf_config. Override it to keep the UT runnable.
             stack.enter_context(patch.object(ModelConfig, "uses_mrope", new_callable=PropertyMock, return_value=False))

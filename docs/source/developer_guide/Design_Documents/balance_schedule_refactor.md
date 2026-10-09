@@ -11,7 +11,7 @@ the explicitly selected scheduler class). The `schedule()` copy is **kept for no
 exposes no finer-grained hook to borrow, and deleting it depends on contributing
 an override seam upstream, tracked as later Phase 2B. The file therefore does
 not shrink to a few dozen lines: the `schedule()` body is still a verbatim
-upstream copy (**aligned verbatim to release tag `v0.24.0`**, with only 3
+upstream copy (**aligned verbatim to release tag `v0.30.0`**, with only 2
 balance deltas), and the file is ~830 lines. Aligning to a stable release tag
 (rather than a moving main-verified commit hash) makes "verbatim comparison
 against upstream" a reproducible drift check — a fixed tag points at the same
@@ -86,24 +86,24 @@ three large upstream units verbatim:
 This "copy whole units" approach has three concrete harms:
 
 1. **The `schedule()` copy is now aligned verbatim to a release tag (the
-   production pin, currently `v0.24.0`).** The **single source of truth** for
+   production pin, currently `v0.30.0`).** The **single source of truth** for
    the release tag is `.github/vllm-release-tag.commit` (CI reads the same file
    via `tr -d '[:space:]' < .github/vllm-release-tag.commit`), currently
-   `v0.24.0`; dev/CI actually installs the main-verified commit pointed at by
+   `v0.30.0`; dev/CI actually installs the main-verified commit pointed at by
    `.github/vllm-main-verified.commit` (which carries later scheduler
    evolution). The old patch copied a `schedule()` from an
-   older vLLM than v0.24.0, so it was stale as a whole. This round aligns the
+   older vLLM than v0.30.0, so it was stale as a whole. This round aligns the
    `schedule()` copy **verbatim to the release tag's `Scheduler.schedule()`**,
    keeping only the 2 balance deltas (`balance_flag` gate and
    `if request_queue is None: break`); the
    `run_busy_loop()` / `run_engine_core()` copies were deleted in Phase 1.
-   **Note: any concrete `v0.24.0` in this document is just a snapshot of the pin
+   **Note: any concrete `v0.30.0` in this document is just a snapshot of the pin
    file's current value — it goes stale as the pin advances and must NOT be
    used as a version authority; any code/test that needs this tag must read the
    file at runtime.**
 
-   **Why align to the v0.24.0 tag rather than the installed main-verified
-   commit?** Two reasons: (a) production actually runs the v0.24.0 release, so
+   **Why align to the v0.30.0 tag rather than the installed main-verified
+   commit?** Two reasons: (a) production actually runs the v0.30.0 release, so
    aligning the copy to it keeps production behavior consistent with runtime;
    (b) a fixed git tag points at the **same** source on every CI run, so
    "verbatim comparison of the copy against upstream (allowing only the 2
@@ -111,11 +111,11 @@ This "copy whole units" approach has three concrete harms:
    main-verified hash makes the comparison drift forward with every commit and
    cannot serve as a stable guardrail.
 
-   **Cost and boundary:** the copy (v0.24.0 logic) and the main-verified
+   **Cost and boundary:** the copy (v0.30.0 logic) and the main-verified
    runtime differ slightly in behavior, but balance's real scheduling path is
    only reached under NPU + DP + MoE, never by CPU UT (see Test plan); and
    those differences do not affect the gate's own semantics. Both supported
-   revisions — release tag v0.24.0 and main-verified commit e5588e49 — expose
+   revisions — release tag v0.30.0 and main-verified commit ced6857afa0ea7b2e3f0846a62e1394e90f15607 — expose
    `schedule(self, throttle_prefills=False)`, so the override matches that
    shared signature.
 
@@ -130,8 +130,9 @@ This "copy whole units" approach has three concrete harms:
    `if request_queue is None: break`. Such deviations make future diffs
    untrustworthy.
 
-> Lesson learned this round: after v0.23 support is dropped, both supported
-> revisions expose the same `Scheduler.schedule(self, throttle_prefills=False)`
+> Lesson learned this round: the v0.30.0 release pin and main-verified commit
+> both expose the same
+> `Scheduler.schedule(self, throttle_prefills=False)`
 > contract. Compatibility introspection and version-string branching therefore
 > add no value and should be removed. The unit test now requires the override's
 > signature to equal the installed upstream signature in each CI lane.
@@ -277,8 +278,8 @@ currently no overridable seam. This is solved in two phases.
 Keep the `schedule()` override, but:
 
 - **The override matches the shared supported signature:**
-  `def schedule(self, throttle_prefills: bool = False)`. Both v0.24.0 and
-  e5588e49 expose this signature. The old v0.23 compatibility branch and
+  `def schedule(self, throttle_prefills: bool = False)`. Both v0.30.0 and
+  ced6857afa0ea7b2e3f0846a62e1394e90f15607 expose this signature. The legacy compatibility branch and
   signature introspection are no longer needed.
 - Collapse the balance changes into 2 clearly-commented deltas: (1) the
   `balance_flag` gate inside the WAITING loop; (2)
@@ -288,7 +289,7 @@ Keep the `schedule()` override, but:
 - **Verbatim comparison is now reproducible:** the `schedule()` copy is aligned
   to the release tag (only the 2 balance deltas differ), so the fixed tag makes
   "verbatim comparison against upstream" yield the same baseline on every CI
-  run. The "intent lock" tests (signature equality, the 3 delta
+  run. The "intent lock" tests (signature equality, the 2 delta
   lines present, upstream seams still exist) remain as CPU-reachable guardrails,
   and a new "verbatim comparison against the release tag (allowing only the 2
   deltas)" drift test is added (see Test plan). The drift test **reads the tag
@@ -367,7 +368,7 @@ deviation is a bug.
 ## Post-refactor file shape
 
 After this round (Phase 1 + 2A), the key structure is as follows. The
-`schedule()` body is a verbatim copy of release tag `v0.24.0` (cannot be
+`schedule()` body is a verbatim copy of release tag `v0.30.0` (cannot be
 deleted before Phase 2B), with two documented deltas (the `balance_flag` gate
 and `if request_queue is None: break`):
 
@@ -393,7 +394,7 @@ class BalanceScheduler(Scheduler):
         running_tensor = torch.tensor([len(self.running)], dtype=torch.int, device="cpu")
         dist.all_gather(self.balance_queue, running_tensor, group=self.dp_group)
 
-    def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:  # shared by v0.24.0 and e5588e49
+    def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:  # shared by v0.30.0 and ced6857afa0ea7b2e3f0846a62e1394e90f15607
         # NOTE: balance_gather is NOT called here -- see BalanceDPEngineCoreProc.
         # ... upstream schedule() body ...
         #   # inside the WAITING loop (deltas 1, 2):
@@ -487,7 +488,7 @@ first inside `schedule()`, then inside `_process_engine_step`; now after
 | Phase | Scope                                                                                                                  | Risk | Depends on     | Status        |
 |-------|------------------------------------------------------------------------------------------------------------------------|------|----------------|---------------|
 | 1     | Hook gather onto `_has_global_unfinished_reqs` (after the cross-rank all-reduce — avoids both the schedule()-skip deadlock and the _process_engine_step wave-boundary deadlock); slim `BalanceDPEngineCoreProc` to that hook; delete the `run_engine_core`/`run_busy_loop` copies; select the DP engine core from the resolved scheduler class | Low  | none           | ✅ Done       |
-| 2A    | Override matches the shared supported signature (`schedule(self, throttle_prefills=False)` on v0.24.0 + e5588e49); **body aligned verbatim to the release tag** (only the 2 balance deltas); signature equality + intent-lock + release-tag verbatim drift tests | Low  | none           | ✅ Done       |
+| 2A    | Override matches the shared supported signature (`schedule(self, throttle_prefills=False)` on v0.30.0 + ced6857afa0ea7b2e3f0846a62e1394e90f15607); **body aligned verbatim to the release tag** (only the 2 balance deltas); signature equality + intent-lock + release-tag verbatim drift tests | Low  | none           | ✅ Done       |
 | 2B    | Upstream `_should_stop_admitting_waiting` PR; delete the `schedule()` copy                                            | Med  | upstream review | ⏳ TODO      |
 | Tests | Drift regression / behavior equivalence / gather cadence / NPU performance check                      | Low  | Phase 1 + 2A   | ⏳ TODO (needs NPU) |
 
