@@ -408,7 +408,7 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
 
         self.indexer_op = SparseAttnIndexerKpool(self.topk_tokens, self.head_dim)
         self.enable_sparse_li_c8 = False
-        for name in ("_wk_weight_f32", "_gate_weight_f32", "_norm_weight_f32", "_norm_bias_f32"):
+        for name in ("_wk_weight", "_head_weight_f32", "_gate_weight", "_norm_weight_f32", "_norm_bias_f32"):
             self.register_buffer(name, None, persistent=False)
 
     @property
@@ -425,8 +425,11 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         return 1
 
     def process_weights_after_loading(self) -> None:
-        self._wk_weight_f32 = self.wk_weights_proj.weight.detach().float()
-        self._gate_weight_f32 = self.index_kpool_compress_gate.detach().float()
+        self._wk_weight = self.wk_weights_proj.weight.detach()[: self.head_dim].contiguous()
+        # Like the upstream indexer, keep only the ranking-sensitive head
+        # projection in FP32. K and the compression gate use model precision.
+        self._head_weight_f32 = self.wk_weights_proj.weight.detach()[self.head_dim :].float().contiguous()
+        self._gate_weight = self.index_kpool_compress_gate.detach()
         self._norm_weight_f32 = self.k_norm.weight.detach().float() if self.k_norm.weight is not None else None
         self._norm_bias_f32 = self.k_norm.bias.detach().float() if self.k_norm.bias is not None else None
 
@@ -470,31 +473,27 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             num_tokens = min(num_tokens, indexer_metadata.num_actual_tokens)
         hidden = hidden_states[:num_tokens]
         k_hidden = k_hidden_states[:num_tokens]
-        if self._wk_weight_f32 is None:
+        if self._wk_weight is None:
             self.process_weights_after_loading()
-        assert self._wk_weight_f32 is not None
-        hidden_f32 = hidden.float()
-        k_hidden_f32 = hidden_f32 if k_hidden_states is hidden_states else k_hidden.float()
-        projected = F.linear(k_hidden_f32, self._wk_weight_f32)
+        assert self._wk_weight is not None
+        projected = F.linear(k_hidden, self._wk_weight)
         k = F.layer_norm(
-            projected[:, : self.head_dim],
+            projected.float(),
             (self.head_dim,),
             self._norm_weight_f32,
             self._norm_bias_f32,
             getattr(self.k_norm, "eps", getattr(self.k_norm, "variance_epsilon", 1e-6)),
         )
-        gate_score = F.linear(k_hidden_f32, self._gate_weight_f32)
+        # The compressor keeps FP32 keys/gates in its replayable tail cache;
+        # this does not require the preceding projection GEMMs to use FP32.
+        gate_score = F.linear(k_hidden, self._gate_weight).float()
         q_values = None
         weights = None
         if compute_topk:
             if isinstance(q_c, tuple):
                 raise TypeError("GLM KPool backend requires an unquantized q_c tensor.")
             q_values = self.wq_b(q_c[:num_tokens])[0].view(num_tokens, self.n_head, self.head_dim)
-            weights = (
-                projected[:, self.head_dim :]
-                if k_hidden_states is hidden_states
-                else F.linear(hidden_f32, self._wk_weight_f32[self.head_dim :])
-            ).to(q_values.dtype)
+            weights = F.linear(hidden.float(), self._head_weight_f32)
             weights = weights * (self.softmax_scale * self.n_head**-0.5)
 
         indexer_cache = self._bound_cache(self.k_cache)

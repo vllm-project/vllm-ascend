@@ -118,13 +118,14 @@ def test_triton_indexer_updates_both_caches_and_masks_padding(monkeypatch, compu
         cache[0, 0].fill_(11)
 
     select = MagicMock(return_value=torch.full((10, 1, 7), -1, dtype=torch.int32))
+    head_weights = torch.full((10, 1), 1.001, dtype=torch.float32)
     output_buffer = torch.empty(10, 16, dtype=torch.int32)
     monkeypatch.setattr(kpool_module, "glm5_next_kpool_tail_compress_and_write_cache_triton", compress)
     monkeypatch.setattr(kpool_module, "glm5_next_lightning_indexer_triton", select)
     result = SparseAttnIndexerKpool(4, 2)(
         torch.zeros(10, 2),
         torch.zeros(10, 1, 2, dtype=torch.bfloat16),
-        torch.ones(10, 1, dtype=torch.bfloat16),
+        head_weights,
         metadata.positions,
         indexer_cache,
         tail_cache,
@@ -144,6 +145,7 @@ def test_triton_indexer_updates_both_caches_and_masks_padding(monkeypatch, compu
         assert result.shape == (10, 1, 7)
         assert (result[8:] == -1).all()
         select.assert_called_once()
+        assert select.call_args.args[2] is head_weights
         assert select.call_args.kwargs["output_buffer"] is output_buffer
         assert select.call_args.kwargs["pack_tail"] is True
         assert select.call_args.kwargs["allow_cache_packing"] is allow_cache_packing
@@ -230,10 +232,10 @@ def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
     backend.topk_tokens = 2
     backend.index_kpool = 4
     backend.wq_b = _Projection()
-    backend.wk_weights_proj = nn.Linear(3, 4, bias=False)
+    backend.wk_weights_proj = nn.Linear(3, 4, bias=False, dtype=torch.bfloat16)
     backend.k_norm = nn.LayerNorm(2)
     backend.index_kpool_compress_ape = nn.Parameter(torch.zeros(4, 2))
-    backend.index_kpool_compress_gate = nn.Parameter(torch.zeros(2, 3))
+    backend.index_kpool_compress_gate = nn.Parameter(torch.arange(6, dtype=torch.bfloat16).reshape(2, 3))
     backend.k_cache = SimpleNamespace(
         prefix="indexer.k_cache",
         kv_cache=torch.zeros(2, 2, 1, 2, dtype=torch.bfloat16),
@@ -244,7 +246,7 @@ def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
     )
     backend.topk_indices_buffer = torch.empty(64, 16, dtype=torch.int32)
     backend.softmax_scale = 0.5
-    backend._wk_weight_f32 = None
+    backend._wk_weight = None
     backend.indexer_op = _RecordingKPool()
     tail_metadata = _tail_metadata()
     monkeypatch.setattr(
@@ -258,8 +260,8 @@ def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
     )
 
     # A 64-row graph bucket does not imply reuse for eight one-token requests.
-    normalized_q_c = torch.arange(128, dtype=torch.float32).reshape(64, 2)
-    hidden = torch.ones(64, 3)
+    normalized_q_c = torch.arange(128, dtype=torch.bfloat16).reshape(64, 2)
+    hidden = torch.ones(64, 3, dtype=torch.bfloat16)
     metadata = _indexer_metadata()
     metadata.cum_query_lens = torch.arange(1, 9, dtype=torch.int32)
     metadata.raw_seq_lens = torch.ones(8, dtype=torch.int32)
@@ -285,7 +287,7 @@ def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
         backend.indexer_op.args[1], normalized_q_c[:expected_rows].repeat(1, 2).view(expected_rows, 2, 2)
     )
     expected_k = torch.nn.functional.layer_norm(
-        torch.nn.functional.linear(hidden[:expected_rows] + 3, backend.wk_weights_proj.weight)[:, :2],
+        torch.nn.functional.linear(hidden[:expected_rows] + 3, backend.wk_weights_proj.weight[:2]).float(),
         (2,),
         backend.k_norm.weight,
         backend.k_norm.bias,
@@ -293,12 +295,16 @@ def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
     )
     torch.testing.assert_close(backend.indexer_op.args[0], expected_k)
     assert backend.indexer_op.args[0].dtype == torch.float32
-    expected_weights = torch.nn.functional.linear(hidden[:expected_rows], backend.wk_weights_proj.weight[2:]) * (
-        0.5 * 2**-0.5
-    )
+    expected_weights = torch.nn.functional.linear(
+        hidden[:expected_rows].float(), backend.wk_weights_proj.weight[2:].float()
+    ) * (0.5 * 2**-0.5)
     torch.testing.assert_close(backend.indexer_op.args[2], expected_weights)
-    assert backend.indexer_op.args[7] is tail_metadata
+    assert backend.indexer_op.args[1].dtype == torch.bfloat16
+    assert backend.indexer_op.args[2].dtype == torch.float32
     assert backend.indexer_op.kwargs is not None
+    expected_gate = torch.nn.functional.linear(hidden[:expected_rows] + 3, backend.index_kpool_compress_gate).float()
+    torch.testing.assert_close(backend.indexer_op.kwargs["gate_score"], expected_gate)
+    assert backend.indexer_op.args[7] is tail_metadata
     assert backend.indexer_op.kwargs["compute_topk"] is True
     assert backend.indexer_op.kwargs["output_buffer"] is backend.topk_indices_buffer
     assert backend.indexer_op.kwargs["allow_cache_packing"] is (graph_mode != CUDAGraphMode.FULL)
