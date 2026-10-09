@@ -656,16 +656,17 @@ def manager_config_path(proxy_port: int) -> Path:
 
 
 def write_manager_config(proxy_port: int, host: str, manager_port: int, authkey: bytes) -> None:
-    manager_config_path(proxy_port).write_text(
-        json.dumps(
+    path = manager_config_path(proxy_port)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(
             {
                 "host": host,
                 "port": manager_port,
                 "authkey": base64.b64encode(authkey).decode("ascii"),
-            }
-        ),
-        encoding="utf-8",
-    )
+            },
+            f,
+        )
 
 
 def read_manager_config(proxy_port: int) -> dict[str, Any]:
@@ -797,10 +798,10 @@ app = FastAPI(lifespan=lifespan)
 
 @app.middleware("http")
 async def authenticate(request: Request, call_next):
-    key = _proxy_api_key()
-    if key and request.url.path.startswith("/v1/"):
+    if request.url.path != "/healthcheck":
+        key = _proxy_api_key()
         auth = request.headers.get("Authorization", "")
-        if not secrets.compare_digest(auth, f"Bearer {key}"):
+        if not key or not secrets.compare_digest(auth, f"Bearer {key}"):
             return JSONResponse(
                 status_code=401,
                 content={
@@ -844,6 +845,8 @@ def with_cancellation(handler_func):
         done, pending = await asyncio.wait([handler_task, cancellation_task], return_when=asyncio.FIRST_COMPLETED)
         for task in pending:
             task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
         if handler_task in done:
             return handler_task.result()
         return None
@@ -1300,6 +1303,11 @@ async def handle_completions_impl(api: str, request: Request):
 
         media_type = "text/event-stream; charset=utf-8" if stream_flag else "application/json"
         return StreamingResponse(generate_stream(), media_type=media_type)
+    except asyncio.CancelledError:
+        if not request_released and "instance_info" in locals():
+            await _finish_instance(runtime, instance_info, release_prefill_kv=True)
+            request_released = True
+        raise
     except Exception as e:
         import traceback
 
