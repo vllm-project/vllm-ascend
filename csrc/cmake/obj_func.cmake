@@ -274,9 +274,7 @@ macro(add_mc2_modules_sources)
   get_filename_component(PARENT_DIR ${SOURCE_DIR} DIRECTORY)
   get_filename_component(OP_NAME ${PARENT_DIR} NAME)
   list(FIND ASCEND_OP_NAME ${OP_NAME} INDEX)
-  # 记录全局的COMPILED_OPS和COMPILED_OP_DIRS，其中COMPILED_OP_DIRS只记录到算子名，例如moe/moe_token_permute_with_routing_map_grad
-  set(COMPILED_OPS ${COMPILED_OPS} ${OP_NAME} CACHE STRING "Compiled Ops" FORCE)
-  set(COMPILED_OP_DIRS ${COMPILED_OP_DIRS} ${PARENT_DIR} CACHE STRING "Compiled Ops Dirs" FORCE)
+  record_compiled_op("${OP_NAME}" "${PARENT_DIR}")
   
   file(GLOB OPINFER_SRCS ${SOURCE_DIR}/*_infershape*.cpp)
   if (OPINFER_SRCS)
