@@ -11,7 +11,7 @@ under e2e/nightly.
 What is guarded here (everything reachable from CPU UT):
 
 * the ``schedule`` override signature stays aligned with the installed
-  scheduler signature shared by both supported vLLM refs;
+  scheduler signature;
 * the ``BalanceScheduler.__init__`` signature stays drop-in compatible with
   upstream ``Scheduler.__init__`` for qualified-name construction;
 * upstream ``run_engine_core`` still instantiates ``DPEngineCoreProc`` by
@@ -27,19 +27,16 @@ What is guarded here (everything reachable from CPU UT):
   upstream helper without an argument mismatch;
 * the 2 balance deltas remain present in ``schedule()`` (intent lock);
 * the copied ``schedule()`` body stays a verbatim copy of the ``schedule()``
-  at vllm-ascend's pinned vLLM release tag (read from
-  ``.github/vllm-release-tag.commit`` -- the same file CI uses), modulo exactly
-  those 2 deltas. Reading the tag from the pin file means a pin advance
-  auto-flips this guard to the new tag until the copy is re-synced.
+  at vllm-ascend's main-verified vLLM commit (read from
+  ``.github/vllm-main-verified.commit``), modulo exactly those 2 deltas. A pin
+  advance auto-flips this guard to the new commit until the copy is re-synced.
 
 What is NOT guarded here (structurally unreachable without a real engine):
 
 * instance-attribute renames (``self.running``, ``self.dp_group``,
   ``self.kv_cache_manager`` ...) -- only surface when balance runs;
-* behavioral drift of the copied ``schedule()`` body vs the *installed* (main-
-  verified) vLLM -- the body deliberately targets the pinned release tag (the
-  production pin), not the installed commit; the two diverge by design and only
-  converge on real NPU+DP+MoE hardware (e2e/nightly).
+* behavior under a real NPU+DP+MoE engine; that remains covered by
+  e2e/nightly rather than this structural CPU guard.
 """
 
 import ast
@@ -289,7 +286,7 @@ def test_mamba_waiting_path_schedules_without_argument_mismatch():
 def _schedule_body_ast(source: str) -> str:
     """Canonical AST dump of a ``schedule`` method body with the 2 balance
     deltas stripped, so the remainder can be compared verbatim against the
-    pinned release tag's ``schedule()``. AST-based on purpose: it is blind to
+    main-verified commit's ``schedule()``. AST-based on purpose: it is blind to
     comments and whitespace, so the only differences that surface are real code
     drift (not the escape-quoting of a comment or reformatting).
 
@@ -333,35 +330,31 @@ def _schedule_body_ast(source: str) -> str:
 
 def _vllm_ascend_repo_root() -> Path | None:
     """Walk up from this test file to find the vllm-ascend repo root -- the dir
-    holding ``.github/vllm-release-tag.commit``. Robust to the test being run
+    holding ``.github/vllm-main-verified.commit``. Robust to the test being run
     from anywhere under the repo; returns ``None`` outside a source checkout."""
     here = Path(__file__).resolve()
     for parent in (here, *here.parents):
-        if (parent / ".github" / "vllm-release-tag.commit").is_file():
+        if (parent / ".github" / "vllm-main-verified.commit").is_file():
             return parent
     return None
 
 
-def _pinned_release_tag() -> str | None:
-    """The vLLM release tag vllm-ascend pins to, read from
-    ``.github/vllm-release-tag.commit`` -- the SAME file CI reads (via
-    ``tr -d '[:space:]'``) to pick the tag. This is the single dynamic source
-    of truth; do NOT hardcode a version here or read it from a design doc
-    (docs go stale). Returns ``None`` when the pin file is absent."""
+def _main_verified_commit() -> str | None:
+    """Return the vLLM commit verified by vllm-ascend main."""
     root = _vllm_ascend_repo_root()
     if root is None:
         return None
-    return (root / ".github" / "vllm-release-tag.commit").read_text(encoding="utf-8").strip() or None
+    return (root / ".github" / "vllm-main-verified.commit").read_text(encoding="utf-8").strip() or None
 
 
-def _pinned_release_schedule_source() -> tuple[str, str] | None:
-    """Return ``(tag, source)`` of the pinned release tag's
+def _main_verified_schedule_source() -> tuple[str, str] | None:
+    """Return ``(commit, source)`` of the main-verified commit's
     ``Scheduler.schedule()``, or ``None`` if anything is unreachable: no pin
-    file, vllm not a git checkout, the tag absent from the repo, git not on
+    file, vllm not a git checkout, the commit absent from the repo, git not on
     PATH. Locates the vllm git repo from the imported scheduler file (the
-    dev/CI vllm is a source checkout whose repo carries every release tag)."""
-    tag = _pinned_release_tag()
-    if not tag:
+    dev/CI vllm is a source checkout containing the verified commit)."""
+    commit = _main_verified_commit()
+    if not commit:
         return None
     sched_file = Path(_UPSTREAM_SCHED_FILE).resolve()
     # <repo>/vllm/v1/core/sched/scheduler.py -> parents[4] is the repo root.
@@ -371,7 +364,7 @@ def _pinned_release_schedule_source() -> tuple[str, str] | None:
     try:
         rel = sched_file.relative_to(repo).as_posix()
         proc = subprocess.run(
-            ["git", "-C", str(repo), "show", f"{tag}:{rel}"],
+            ["git", "-C", str(repo), "show", f"{commit}:{rel}"],
             capture_output=True,
             text=True,
             timeout=30,
@@ -379,7 +372,7 @@ def _pinned_release_schedule_source() -> tuple[str, str] | None:
         )
     except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired, ValueError):
         return None
-    return (tag, proc.stdout)
+    return (commit, proc.stdout)
 
 
 # ---------------------------------------------------------------------------
@@ -412,46 +405,34 @@ def test_balance_deltas_present_in_schedule():
 
 
 # ---------------------------------------------------------------------------
-# 1c. copied schedule() body stays verbatim with the pinned release tag
+# 1c. copied schedule() body stays synchronized with main-verified vLLM
 # ---------------------------------------------------------------------------
 
 
-def test_schedule_body_matches_pinned_release_tag():
+def test_schedule_body_matches_main_verified_commit():
     """The copied ``schedule()`` body must stay a verbatim copy of the
-    ``schedule()`` at vllm-ascend's pinned vLLM release tag, modulo exactly the
-    2 balance deltas.
+    ``schedule()`` at vllm-ascend's main-verified vLLM commit, modulo exactly
+    the 2 balance deltas.
 
-    The tag is read dynamically from ``.github/vllm-release-tag.commit`` -- the
-    same file CI uses to pick the tag, NOT a hardcoded string or a design doc
-    (both go stale). So when the pin advances, this test AUTOMATICALLY compares
-    against the new tag and goes red until the copy is re-synced -- the
-    maintenance signal we want. Skipped (not failed) when the pin file or the
-    tag is unreachable: vllm installed from a wheel, the tag absent from the
-    repo, git not on PATH, or the test run outside the vllm-ascend tree.
-    Also skipped when the copied body already differs from the pin (or from
-    the installed scheduler): re-syncing ``schedule()`` is a separate
-    maintenance task. The 2 balance deltas are locked by
-    ``test_balance_deltas_present_in_schedule``."""
-    ref = _pinned_release_schedule_source()
+    The commit is read dynamically from ``.github/vllm-main-verified.commit``.
+    When that pin advances, this test goes red until the copy is re-synced.
+    It is skipped only when the commit cannot be read from a source checkout."""
+    ref = _main_verified_schedule_source()
     if ref is None:
         pytest.skip(
-            "pinned vLLM release tag or its schedule() not retrievable "
-            "(no .github/vllm-release-tag.commit, vllm not a git checkout, "
-            "or tag absent)"
+            "main-verified vLLM commit or its schedule() not retrievable "
+            "(no .github/vllm-main-verified.commit, vllm not a git checkout, "
+            "or commit absent)"
         )
     assert ref is not None
-    tag, pinned_src = ref
+    commit, pinned_src = ref
 
     theirs = _schedule_body_ast(pinned_src)
     ours = _schedule_body_ast(inspect.getsource(BalanceScheduler.schedule))
-    installed = _schedule_body_ast(inspect.getsource(_UpstreamScheduler.schedule))
-    if ours != theirs or installed != theirs:
-        pytest.skip(
-            f"BalanceScheduler.schedule is not a verbatim {tag} copy modulo "
-            "the 2 balance deltas (or installed vLLM already differs from "
-            "the pin). Re-sync is a separate maintenance task; the 2 deltas "
-            "are locked by test_balance_deltas_present_in_schedule."
-        )
+    assert ours == theirs, (
+        f"BalanceScheduler.schedule is not synchronized with main-verified "
+        f"vLLM commit {commit} modulo the 2 balance deltas"
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -1335,7 +1335,7 @@ _SCHEDULER_QUALNAMES: dict[tuple[str, bool], str] = {
     ("short_request_first", False): "vllm_ascend.core.short_request_first_scheduler.ShortRequestFirstScheduler",
     ("short_request_first", True): "vllm_ascend.core.short_request_first_scheduler.ShortRequestFirstAsyncScheduler",
     ("profiling_chunk", False): "vllm_ascend.core.scheduler_profiling_chunk.ProfilingChunkScheduler",
-    ("profiling_chunk", True): "vllm_ascend.core.scheduler_profiling_chunk.ProfilingChunkScheduler",
+    ("profiling_chunk", True): "vllm_ascend.core.scheduler_profiling_chunk.ProfilingChunkAsyncScheduler",
     ("batch_job", False): "vllm_ascend.core.batch_job_aware_scheduler.BatchJobAwareScheduler",
     ("batch_job", True): "vllm_ascend.core.batch_job_aware_scheduler.BatchJobAwareAsyncScheduler",
     ("dyntra_lb", False): "vllm_ascend.core.dyntra_lb_scheduler.DyntraLBScheduler",
@@ -1350,7 +1350,7 @@ _SCHEDULER_QUALNAMES: dict[tuple[str, bool], str] = {
 def _recompute_scheduler_enabled(vllm_config: VllmConfig, scheduler_config) -> bool:
     if not scheduler_config.recompute_scheduler_enable:
         return False
-    kv_transfer_config = vllm_config.kv_transfer_config
+    kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
     return getattr(kv_transfer_config, "kv_role", None) == "kv_consumer"
 
 

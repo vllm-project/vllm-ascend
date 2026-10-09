@@ -189,6 +189,7 @@ class RecomputeScheduler(Scheduler):
         preempted_reqs: list[Request] = []
         self._recomputed_reqs: list[RecomputeReqInfo] = []
 
+        # Recompute/DyntraLB: apply the composed load-balancing policy.
         self._apply_load_balance_modifications()
 
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
@@ -262,7 +263,8 @@ class RecomputeScheduler(Scheduler):
                 self.ec_connector is not None
                 and request.mm_features
                 and not self.ec_connector.ensure_cache_available(
-                    request, request.num_computed_tokens - request.num_output_placeholders
+                    request,
+                    request.num_computed_tokens - request.num_output_placeholders,
                 )
             ):
                 req_index += 1
@@ -360,13 +362,8 @@ class RecomputeScheduler(Scheduler):
                         break
 
                     if self.policy == SchedulingPolicy.PRIORITY:
-                        # Record the index of the preemption victim to
-                        # maintain accurate loop state.
                         victim_index = self.running.index(preempted_req)
                         del self.running[victim_index]
-                        # Decrement the loop cursor if the removed request
-                        # preceded the current iteration, preventing the
-                        # silent omission of the subsequent request.
                         if victim_index < req_index:
                             req_index -= 1
 
@@ -494,6 +491,7 @@ class RecomputeScheduler(Scheduler):
                     step_skipped_waiting.prepend_request(request)
                     continue
 
+                # DyntraLB composition: admit only requests selected by policy.
                 if not self._can_admit_waiting_request(request):
                     request_queue.pop_request()
                     step_skipped_waiting.prepend_request(request)
@@ -601,10 +599,13 @@ class RecomputeScheduler(Scheduler):
                         )
                 else:
                     # KVTransfer: WAITING reqs have num_computed_tokens > 0
-                    # after async KV recvs are completed.
+                    # after async KV recvs are completed. A streaming-input
+                    # session resumes here too, carrying whatever media its
+                    # latest chunk added, so this branch needs the same gate.
                     new_computed_blocks = self.kv_cache_manager.empty_kv_cache_blocks
                     num_new_local_computed_tokens = 0
                     num_computed_tokens = request.num_computed_tokens
+
                     if self._ec_transfer_pending(request, num_computed_tokens):
                         request_queue.pop_request()
                         step_skipped_waiting.prepend_request(request)
@@ -880,9 +881,6 @@ class RecomputeScheduler(Scheduler):
                 num_common_prefix_blocks = self.kv_cache_manager.get_num_common_prefix_blocks(any_request_id)
 
         # Construct the scheduler output.
-        new_request_kwargs = {
-            "uses_mrope": self.model_uses_mrope,
-        }
         if self.use_v2_model_runner:
             scheduled_new_reqs.extend(scheduled_resumed_reqs)
             scheduled_resumed_reqs.clear()
@@ -891,7 +889,7 @@ class RecomputeScheduler(Scheduler):
                     req,
                     req_to_new_blocks[req.request_id].get_block_ids(),
                     req._all_token_ids,
-                    **new_request_kwargs,
+                    uses_mrope=self.model_uses_mrope,
                 )
                 for req in scheduled_new_reqs
             ]
@@ -900,7 +898,7 @@ class RecomputeScheduler(Scheduler):
                 NewRequestData.from_request(
                     req,
                     req_to_new_blocks[req.request_id].get_block_ids(),
-                    **new_request_kwargs,
+                    uses_mrope=self.model_uses_mrope,
                 )
                 for req in scheduled_new_reqs
             ]
@@ -919,12 +917,19 @@ class RecomputeScheduler(Scheduler):
             self.prev_step_scheduled_req_ids.clear()
             self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
 
-        kv_connector_block_state = None
         # #51358 drains boundary offers even without a connector.
+        # Mamba "align" boundary states must be handed off with exact block ids;
+        # they cannot be reconstructed from a connector's append-only block
+        # table. Drained every step so stale offers cannot accumulate.
         boundary_state_offloads = self.kv_cache_manager.take_boundary_state_offloads()
+
+        kv_connector_block_state = None
         if self.connector is not None:
             # A scheduled request can finish a cache chunk without allocating
             # new blocks. Resolve its current table only when the connector reads it.
+            # Any request scheduled this step can become a connector job now,
+            # not only the ones that were allocated blocks: a store save lands
+            # on the step that fills a block, which allocated none.
             block_state_req_ids = set(num_scheduled_tokens)
             block_state_req_ids.update(req_id for req_id in boundary_state_offloads if req_id in self.requests)
             kv_connector_block_state = KVConnectorBlockState(
@@ -968,12 +973,12 @@ class RecomputeScheduler(Scheduler):
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             new_block_ids_to_zero=self._get_new_block_ids_to_zero(),
+            has_sync_kv_loads=has_sync_kv_loads,
             kv_cache_block_copies=pending_kv_cache_block_copies,
+            kv_connector_block_state=kv_connector_block_state,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
             ec_manager_metadata=self.encoder_cache_manager.get_manager_metadata(),
             recomputed_reqs=self._recomputed_reqs or None,
-            has_sync_kv_loads=has_sync_kv_loads,
-            kv_connector_block_state=kv_connector_block_state,
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:

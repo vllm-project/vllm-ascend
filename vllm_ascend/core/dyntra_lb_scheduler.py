@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any
 from vllm.config import VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
 from vllm.logger import logger
-from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.interface import PauseState
@@ -290,76 +289,6 @@ class DyntraLBPolicyMixin(_SchedulerBase):
     def _can_admit_waiting_request(self, request: Request) -> bool:
         return self._lb_admit_req_ids is None or request.request_id in self._lb_admit_req_ids
 
-    @staticmethod
-    def _scheduler_output_supports(field_name: str) -> bool:
-        fields = getattr(SchedulerOutput, "__dataclass_fields__", {})
-        return field_name in fields
-
-    def _has_pending_deliverable_output(self, request: Request) -> bool:
-        if hasattr(request, "num_stale_output_tokens"):
-            return request.num_stale_output_tokens > 0 and not request.drop_stale_output
-
-        # vLLM v0.26 tracks async work with num_in_flight_tokens. Only apply
-        # this fallback to requests paused by DyntraLB: regular preemption in
-        # that release has its own async_tokens_to_discard lifecycle.
-        return request.request_id in self._lb_paused_req_ids and getattr(request, "num_in_flight_tokens", 0) > 0
-
-    def _get_connector_computed_blocks(
-        self,
-        request: Request,
-    ) -> tuple[KVCacheBlocks, int, int, bool, bool]:
-        get_for_connector = getattr(
-            self.kv_cache_manager,
-            "get_computed_blocks_for_connector",
-            None,
-        )
-        truncate_blocks = getattr(
-            self.kv_cache_manager,
-            "truncate_computed_blocks",
-            None,
-        )
-        if callable(get_for_connector) and callable(truncate_blocks):
-            blocks, num_local, shared_boundary, hit_diverged = get_for_connector(request)
-            return blocks, num_local, shared_boundary, hit_diverged, True
-
-        # vLLM v0.26 keeps this hybrid/Mamba connector lookup in Scheduler
-        # instead of KVCacheManager. Preserve that release's behavior.
-        coordinator = self.kv_cache_manager.coordinator
-        if self.has_mamba_layers and isinstance(
-            coordinator,
-            HybridKVCacheCoordinator,
-        ):
-            computed, per_group_hits = coordinator.find_longest_cache_hit_per_group(
-                request.block_hashes,
-                request.num_tokens - 1,
-            )
-            blocks = self.kv_cache_manager.create_kv_cache_blocks(computed)
-            num_local = max(per_group_hits)
-            if self.kv_cache_manager.log_stats:
-                assert self.kv_cache_manager.prefix_cache_stats is not None
-                self.kv_cache_manager.prefix_cache_stats.record(
-                    num_tokens=request.num_tokens,
-                    num_hits=num_local,
-                    preempted=request.num_preemptions > 0,
-                )
-            return blocks, num_local, 0, False, False
-
-        blocks, num_local, shared_boundary = self.kv_cache_manager.get_computed_blocks(request)
-        return blocks, num_local, shared_boundary, False, False
-
-    def _record_prefix_cache_stats(
-        self,
-        request: Request,
-        num_local_tokens: int,
-    ) -> None:
-        record_stats = getattr(
-            self.kv_cache_manager,
-            "record_prefix_cache_stats",
-            None,
-        )
-        if callable(record_stats):
-            record_stats(request, num_local_tokens)
-
     def _preempt_request(
         self,
         request: Request,
@@ -367,16 +296,11 @@ class DyntraLBPolicyMixin(_SchedulerBase):
         drop_stale_output: bool = False,
     ) -> None:
         self._lb_paused_req_ids.discard(request.request_id)
-        if hasattr(request, "num_stale_output_tokens"):
-            super()._preempt_request(
-                request,
-                timestamp,
-                drop_stale_output=drop_stale_output,
-            )
-        else:
-            # Compatibility with vLLM releases before stale async output
-            # tracking was added to Request and Scheduler._preempt_request.
-            super()._preempt_request(request, timestamp)
+        super()._preempt_request(
+            request,
+            timestamp,
+            drop_stale_output=drop_stale_output,
+        )
 
     def _lb_pause_request(
         self,
@@ -444,6 +368,9 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
+        spec = self.vllm_config.speculative_config
+        draft_slots = spec.max_num_new_slots_for_drafting if spec is not None else 0
+        input_budget = self.scheduler_config.max_num_batched_tokens
         if self._pause_state == PauseState.PAUSED_ALL:
             # Do not schedule any requests when paused.
             token_budget = 0
@@ -455,6 +382,8 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
         # Whether the running batch contains any prefill requests.
         prefill_scheduled = False
+        # Whether any scheduled request has a synchronous connector KV load.
+        has_sync_kv_loads = False
 
         # For logging.
         scheduled_timestamp = time.monotonic()
@@ -471,6 +400,8 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
+            if input_budget <= draft_slots:
+                break
 
             if (
                 request.num_output_placeholders > 0
@@ -500,12 +431,23 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
                 req_index += 1
                 continue
 
+            if (
+                self.ec_connector is not None
+                and request.mm_features
+                and not self.ec_connector.ensure_cache_available(
+                    request,
+                    request.num_computed_tokens - request.num_output_placeholders,
+                )
+            ):
+                req_index += 1
+                continue
+
             num_new_tokens = (
                 request.num_tokens_with_spec + request.num_output_placeholders - request.num_computed_tokens
             )
             if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
                 num_new_tokens = self.scheduler_config.long_prefill_token_threshold
-            num_new_tokens = min(num_new_tokens, token_budget)
+            num_new_tokens = min(num_new_tokens, token_budget, input_budget - draft_slots)
 
             # Make sure the input position does not exceed the max model len.
             # This is necessary when using spec decoding.
@@ -513,6 +455,10 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
                 num_new_tokens,
                 self.max_model_len - request.num_computed_tokens - self.num_sampled_tokens_per_step,
             )
+
+            # Apply Mamba alignment before encoder caps.
+            if self.need_mamba_block_aligned_split:
+                num_new_tokens = self._mamba_block_aligned_split(request, num_new_tokens)
 
             # Schedule encoder inputs.
             encoder_inputs_to_schedule = None
@@ -529,11 +475,12 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
                     request.num_computed_tokens,
                     num_new_tokens,
                     encoder_compute_budget,
-                    shift_computed_tokens=1 if self.use_eagle else 0,
+                    shift_computed_tokens=self.num_prefill_lookahead,
                 )
 
-            if self.need_mamba_block_aligned_split:
-                num_new_tokens = self._mamba_block_aligned_split(request, num_new_tokens)
+            # Multi-module MTP: avoid ending a prefill chunk within
+            # num_prefill_lookahead of the prefill end.
+            num_new_tokens = self._reserve_prefill_lookahead(request, request.num_computed_tokens, num_new_tokens)
 
             if num_new_tokens == 0:
                 # The request cannot be scheduled because one of the following
@@ -547,6 +494,8 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
                 # 3. The encoder cache is exhausted.
                 # 4. Insufficient budget for a block-aligned chunk in hybrid
                 #    models with mamba cache mode \"align\".
+                # 5. Insufficient budget to keep a multi-module MTP prefill
+                #    chunk out of the prefill-lookahead window.
                 # NOTE(woosuk): Here, by doing `continue` instead of `break`,
                 # we do not strictly follow the FCFS scheduling policy and
                 # allow the lower-priority requests to be scheduled.
@@ -566,6 +515,9 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
                         # The request can be scheduled.
                         break
 
+                    if self.connector is not None and self.connector.has_pending_block_frees():
+                        break
+
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
                     if self.policy == SchedulingPolicy.PRIORITY:
@@ -573,11 +525,25 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
                             self.running,
                             key=lambda r: (r.priority, r.arrival_time),
                         )
-                        self.running.remove(preempted_req)
+                    else:
+                        preempted_req = self.running[-1]
+
+                    # A deferred free will not help with immediate allocation.
+                    if not self._request_blocks_can_be_freed(preempted_req):
+                        break
+
+                    if self.policy == SchedulingPolicy.PRIORITY:
+                        victim_index = self.running.index(preempted_req)
+                        del self.running[victim_index]
+                        if victim_index < req_index:
+                            req_index -= 1
+
                         if preempted_req in scheduled_running_reqs:
                             preempted_req_id = preempted_req.request_id
                             scheduled_running_reqs.remove(preempted_req)
-                            token_budget += num_scheduled_tokens.pop(preempted_req_id)
+                            restored = num_scheduled_tokens.pop(preempted_req_id)
+                            token_budget += restored
+                            input_budget += restored + draft_slots
                             req_to_new_blocks.pop(preempted_req_id)
                             scheduled_spec_decode_tokens.pop(preempted_req_id, None)
                             preempted_encoder_inputs = scheduled_encoder_inputs.pop(preempted_req_id, None)
@@ -588,18 +554,13 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
                                     preempted_req.get_num_encoder_embeds(i) for i in preempted_encoder_inputs
                                 )
                                 encoder_compute_budget += num_embeds_to_restore
-                            req_index -= 1
                     else:
                         preempted_req = self.running.pop()
 
                     self._preempt_request(
                         preempted_req,
                         scheduled_timestamp,
-                        drop_stale_output=getattr(
-                            self,
-                            "requires_kv_delivery",
-                            False,
-                        ),
+                        drop_stale_output=self.requires_kv_delivery,
                     )
                     preempted_reqs.append(preempted_req)
                     if preempted_req == request:
@@ -617,6 +578,7 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
             req_to_new_blocks[request_id] = new_blocks
             num_scheduled_tokens[request_id] = num_new_tokens
             token_budget -= num_new_tokens
+            input_budget -= num_new_tokens + draft_slots
             req_index += 1
 
             # Speculative decode related.
@@ -664,6 +626,8 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
             step_skipped_waiting = create_request_queue(self.policy)
 
             while (self.waiting or self.skipped_waiting) and token_budget > 0:
+                if input_budget <= draft_slots:
+                    break
                 # Paused streaming sessions (WAITING_FOR_STREAMING_REQ) are not
                 # in `running` but still hold a model-runner request slot.
                 num_running = len(self.running) + self.num_waiting_for_streaming_input
@@ -689,7 +653,7 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
                     step_skipped_waiting.prepend_request(request)
                     continue
 
-                if self._has_pending_deliverable_output(request):
+                if request.num_stale_output_tokens > 0 and not request.drop_stale_output:
                     # Deliverable stale output still in flight: resuming now
                     # could resample a position that output later delivers.
                     # It drains within the pipeline depth.
@@ -726,32 +690,19 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
                     did_prefix_cache_lookup = True
-                    hit_diverged = False
-                    # Get locally-cached tokens.
-                    if self.connector is not None:
-                        # A KV connector transfers the missing suffix, which needs a
-                        # hybrid-aware lookup that can diverge across groups.
-                        (
-                            new_computed_blocks,
-                            num_new_local_computed_tokens,
-                            request.shared_prefix_boundary,
-                            hit_diverged,
-                            supports_partial_tail,
-                        ) = self._get_connector_computed_blocks(request)
-                    else:
-                        (
-                            new_computed_blocks,
-                            num_new_local_computed_tokens,
-                            # Marconi shared-prefix junction to pin; 0 if none.
-                            request.shared_prefix_boundary,
-                        ) = self.kv_cache_manager.get_computed_blocks(request)
+                    (
+                        new_computed_blocks,
+                        num_new_local_computed_tokens,
+                        request.shared_prefix_boundary,
+                        hit_diverged,
+                    ) = self._get_local_prefix_cache_hit(request)
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
                         # Present a block-aligned local hit to the connector so
                         # a strictly longer remote hit can supersede a local
                         # sub-block tail without racing its copy-on-write.
-                        partial_tail = num_new_local_computed_tokens % self.block_size if supports_partial_tail else 0
+                        partial_tail = num_new_local_computed_tokens % self.block_size
                         block_aligned_local = num_new_local_computed_tokens - partial_tail
                         ext_tokens, load_kv_async = self.connector.get_num_new_matched_tokens(
                             request, block_aligned_local
@@ -771,8 +722,7 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
                             # cover it. Trim the partial block out of the local
                             # computed blocks so it is not adopted from the cache.
                             new_computed_blocks = self.kv_cache_manager.truncate_computed_blocks(
-                                new_computed_blocks,
-                                block_aligned_local,
+                                new_computed_blocks, block_aligned_local
                             )
                             num_new_local_computed_tokens = block_aligned_local
                             num_external_computed_tokens = ext_tokens
@@ -804,11 +754,7 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
                     assert num_computed_tokens <= request.num_tokens
 
                     # Skip request with pending mm encoding prefetches
-                    if (
-                        self.ec_connector is not None
-                        and request.mm_features
-                        and not self.ec_connector.ensure_cache_available(request, num_computed_tokens)
-                    ):
+                    if self._ec_transfer_pending(request, num_computed_tokens):
                         request_queue.pop_request()
                         step_skipped_waiting.prepend_request(request)
                         continue
@@ -823,10 +769,17 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
                         )
                 else:
                     # KVTransfer: WAITING reqs have num_computed_tokens > 0
-                    # after async KV recvs are completed.
+                    # after async KV recvs are completed. A streaming-input
+                    # session resumes here too, carrying whatever media its
+                    # latest chunk added, so this branch needs the same gate.
                     new_computed_blocks = self.kv_cache_manager.empty_kv_cache_blocks
                     num_new_local_computed_tokens = 0
                     num_computed_tokens = request.num_computed_tokens
+
+                    if self._ec_transfer_pending(request, num_computed_tokens):
+                        request_queue.pop_request()
+                        step_skipped_waiting.prepend_request(request)
+                        continue
 
                 encoder_inputs_to_schedule = None
                 external_load_encoder_input = []
@@ -842,6 +795,7 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
                     # compute to a cadence-aligned step.
                     break
                 else:
+                    request_token_budget = min(token_budget, input_budget - draft_slots)
                     # Number of tokens to be scheduled.
                     # We use `request.num_tokens` instead of
                     # `request.num_prompt_tokens` to consider the resumed
@@ -856,12 +810,19 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
                         and self.num_sampled_tokens_per_step > 0
                         and num_new_tokens == 1
                         and not prefill_scheduled
+                        and (scheduled_running_reqs or num_computed_tokens > 0)
                     ):
-                        num_new_tokens = 1 + self.num_spec_tokens
-                        if num_new_tokens > token_budget or num_computed_tokens + num_new_tokens > self.max_model_len:
-                            # Prefer to not schedule than schedule un-padded here.
-                            break
-                        pad_spec_decode = True
+                        padded_num_tokens = 1 + self.num_spec_tokens
+                        # Pad only when there is room for the sampled token(s).
+                        if (
+                            num_computed_tokens + padded_num_tokens + self.num_sampled_tokens_per_step
+                            <= self.max_model_len
+                        ):
+                            if padded_num_tokens > request_token_budget:
+                                # Prefer to not schedule than schedule un-padded.
+                                break
+                            num_new_tokens = padded_num_tokens
+                            pad_spec_decode = True
 
                     threshold = self.scheduler_config.long_prefill_token_threshold
                     if 0 < threshold < num_new_tokens:
@@ -869,13 +830,33 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
 
                     # chunked prefill has to be enabled explicitly to allow
                     # pooling requests to be chunked
-                    if not self.scheduler_config.enable_chunked_prefill and num_new_tokens > token_budget:
+                    if not self.scheduler_config.enable_chunked_prefill and num_new_tokens > request_token_budget:
                         # If chunked_prefill is disabled,
                         # we can stop the scheduling here.
                         break
 
-                    num_new_tokens = min(num_new_tokens, token_budget)
+                    num_new_tokens = min(num_new_tokens, request_token_budget)
                     assert num_new_tokens > 0
+
+                    # Apply Mamba alignment before encoder caps.
+                    if self.need_mamba_block_aligned_split:
+                        num_new_tokens = self._mamba_block_aligned_split(
+                            request,
+                            num_new_tokens,
+                            num_new_local_computed_tokens,
+                            num_external_computed_tokens,
+                        )
+                        if num_new_tokens == 0:
+                            break
+                        if pad_spec_decode and num_new_tokens != 1 + self.num_spec_tokens:
+                            # Alignment clipped the placeholder rows. The split
+                            # aligns prefill chunks, but the padded tail rows are
+                            # speculative positions, not prefill tokens. A padded
+                            # request must keep all 1 + num_spec rows or the
+                            # sampler's row count stops matching its query rows,
+                            # so drop the padding instead of shortening it.
+                            num_new_tokens = 1
+                            pad_spec_decode = False
 
                     # Schedule encoder inputs.
                     if request.has_encoder_inputs:
@@ -889,21 +870,15 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
                             num_computed_tokens,
                             num_new_tokens,
                             encoder_compute_budget,
-                            shift_computed_tokens=1 if self.use_eagle else 0,
+                            shift_computed_tokens=self.num_prefill_lookahead,
                         )
-                        if num_new_tokens == 0:
-                            # The request cannot be scheduled.
-                            break
 
-                # Skip block alignment when setting up async receive (no local work).
-                if self.need_mamba_block_aligned_split and not load_kv_async:
-                    num_new_tokens = self._mamba_block_aligned_split(
-                        request,
-                        num_new_tokens,
-                        num_new_local_computed_tokens,
-                        num_external_computed_tokens,
-                    )
+                    # Multi-module MTP: avoid ending a prefill chunk within
+                    # num_prefill_lookahead of the prefill end.
+                    num_new_tokens = self._reserve_prefill_lookahead(request, num_computed_tokens, num_new_tokens)
+
                     if num_new_tokens == 0:
+                        # The request cannot be scheduled.
                         break
 
                 # During async KV load, no forward pass is run yet.
@@ -967,10 +942,7 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
 
                 # Record at admission so unscheduled lookups are not counted.
                 if did_prefix_cache_lookup:
-                    self._record_prefix_cache_stats(
-                        request,
-                        num_new_local_computed_tokens,
-                    )
+                    self.kv_cache_manager.record_prefix_cache_stats(request, num_new_local_computed_tokens)
 
                 request = request_queue.pop_request()
                 if load_kv_async:
@@ -1006,6 +978,9 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
                     continue
 
                 self.running.append(request)
+                if num_external_computed_tokens > 0:
+                    # load_kv_async is False here
+                    has_sync_kv_loads = True
                 if self.log_stats:
                     request.record_event(EngineCoreEventType.SCHEDULED, scheduled_timestamp)
                 if request.status == RequestStatus.WAITING:
@@ -1020,9 +995,11 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
                 req_to_new_blocks[request_id] = self.kv_cache_manager.get_blocks(request_id)
                 num_scheduled_tokens[request_id] = num_new_tokens
                 token_budget -= num_new_tokens
+                input_budget -= num_new_tokens + draft_slots
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
                 if pad_spec_decode:
+                    assert num_new_tokens == 1 + self.num_spec_tokens
                     scheduled_spec_decode_tokens[request_id] = [-1] * self.num_spec_tokens
                 # Only track requests that will still be prefilling after this chunk.
                 if num_computed_tokens + num_new_tokens < request.num_tokens:
@@ -1057,6 +1034,7 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
         assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
 
         assert token_budget >= 0
+        assert input_budget >= 0
         assert len(self.running) <= self.max_num_running_reqs
         # Since some requests in the RUNNING queue may not be scheduled in
         # this step, the total number of scheduled requests can be smaller than
@@ -1080,12 +1058,17 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
                     req,
                     req_to_new_blocks[req.request_id].get_block_ids(),
                     req._all_token_ids,
+                    uses_mrope=self.model_uses_mrope,
                 )
                 for req in scheduled_new_reqs
             ]
         else:
             new_reqs_data = [
-                NewRequestData.from_request(req, req_to_new_blocks[req.request_id].get_block_ids())
+                NewRequestData.from_request(
+                    req,
+                    req_to_new_blocks[req.request_id].get_block_ids(),
+                    uses_mrope=self.model_uses_mrope,
+                )
                 for req in scheduled_new_reqs
             ]
 
@@ -1106,11 +1089,18 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
         # Drain every step, including without a connector, to avoid stale
         # Mamba boundary offers. Snapshot exact current block tables for the
         # connector before building its metadata.
-        kv_connector_block_state = None
+        # Mamba "align" boundary states must be handed off with exact block ids;
+        # they cannot be reconstructed from a connector's append-only block
+        # table. Drained every step so stale offers cannot accumulate.
         boundary_state_offloads = self.kv_cache_manager.take_boundary_state_offloads()
+
+        kv_connector_block_state = None
         if self.connector is not None:
             # A scheduled request can finish a cache chunk without allocating
             # new blocks. Resolve its current table only when the connector reads it.
+            # Any request scheduled this step can become a connector job now,
+            # not only the ones that were allocated blocks: a store save lands
+            # on the step that fills a block, which allocated none.
             block_state_req_ids = set(num_scheduled_tokens)
             block_state_req_ids.update(req_id for req_id in boundary_state_offloads if req_id in self.requests)
             kv_connector_block_state = KVConnectorBlockState(
@@ -1119,17 +1109,14 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
                 boundary_state_offloads=boundary_state_offloads,
             )
 
-        pending_kv_cache_block_copies = None
-        take_kv_cache_block_copies = getattr(self.kv_cache_manager, "take_kv_cache_block_copies", None)
-        if callable(take_kv_cache_block_copies):
-            kv_cache_block_copies, cow_retained_blocks = take_kv_cache_block_copies()
-            if kv_cache_block_copies:
-                # The copies run with this step's execution; the first non-empty
-                # step at or after it gets seq `sched_step_seq + 1` (0-token steps
-                # do not advance the seq), and its completion implies the copies
-                # have run.
-                self._free_cow_retained_blocks(cow_retained_blocks, self.sched_step_seq + 1)
-            pending_kv_cache_block_copies = kv_cache_block_copies or None
+        kv_cache_block_copies, cow_retained_blocks = self.kv_cache_manager.take_kv_cache_block_copies()
+        if kv_cache_block_copies:
+            # The copies run with this step's execution; the first non-empty
+            # step at or after it gets seq `sched_step_seq + 1` (0-token steps
+            # do not advance the seq), and its completion implies the copies
+            # have run.
+            self._free_cow_retained_blocks(cow_retained_blocks, self.sched_step_seq + 1)
+        pending_kv_cache_block_copies = kv_cache_block_copies or None
 
         # Dynamic speculative decoding: compute optimal K
         num_spec_tokens_to_schedule = self.num_spec_tokens
@@ -1140,7 +1127,7 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
         if self.log_stats and self.observability_config.enable_logging_iteration_details:
             scheduled_encoder_input_stats = self._make_scheduled_encoder_input_stats(scheduled_encoder_inputs)
 
-        scheduler_output_kwargs = dict(
+        scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
             num_scheduled_tokens=num_scheduled_tokens,
@@ -1157,21 +1144,12 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             new_block_ids_to_zero=self._get_new_block_ids_to_zero(),
+            has_sync_kv_loads=has_sync_kv_loads,
+            kv_cache_block_copies=pending_kv_cache_block_copies,
+            kv_connector_block_state=kv_connector_block_state,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
+            ec_manager_metadata=self.encoder_cache_manager.get_manager_metadata(),
         )
-        if self._scheduler_output_supports("kv_cache_block_copies"):
-            scheduler_output_kwargs["kv_cache_block_copies"] = pending_kv_cache_block_copies
-        if self._scheduler_output_supports("kv_connector_block_state"):
-            scheduler_output_kwargs["kv_connector_block_state"] = kv_connector_block_state
-        if self._scheduler_output_supports("ec_manager_metadata"):
-            get_manager_metadata = getattr(
-                self.encoder_cache_manager,
-                "get_manager_metadata",
-                None,
-            )
-            if callable(get_manager_metadata):
-                scheduler_output_kwargs["ec_manager_metadata"] = get_manager_metadata()
-        scheduler_output = SchedulerOutput(**scheduler_output_kwargs)
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
         # 1. Plan the KV cache store
@@ -1185,6 +1163,8 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
         if self.ec_connector is not None:
             ec_meta: ECConnectorMetadata = self.ec_connector.build_connector_meta(scheduler_output)
             scheduler_output.ec_connector_metadata = ec_meta
+
+        # Connector-only block state must not be dispatched to workers.
         scheduler_output.kv_connector_block_state = None
 
         # Advance the fence only for non-empty steps (those that actually

@@ -16,10 +16,9 @@
 #
 """Scheduler subclass with profiling-based dynamic chunk sizing.
 
-The ``schedule()`` override below is re-based on the ``Scheduler.schedule()``
-of vLLM v0.29.0 and kept compatible with vLLM v0.30.0 and main through
-``vllm_version_is`` branches and capability checks.  When the upstream
-``schedule()`` method is refactored, this override must be updated accordingly.
+The ``schedule()`` override below is based on the ``Scheduler.schedule()``
+from the vLLM commit pinned by ``.github/vllm-main-verified.commit``. When the
+pin advances, this override must be synchronized again.
 """
 
 import inspect
@@ -46,7 +45,6 @@ from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm_ascend.core.profiling_chunk_predictor import ProfilingChunkManager
-from vllm_ascend.utils import vllm_version_is
 
 
 class ProfilingChunkScheduler(Scheduler):
@@ -116,7 +114,6 @@ class ProfilingChunkScheduler(Scheduler):
         # DP prefill balancing state for the throttle_prefills path; updated
         # at the end of every schedule() step that admits prefills.
         self.prefill_capacity_bound: bool = False
-        self._profiling_timing_done = False
 
         logger.info(
             "[ProfilingChunk] Scheduler initialized. base_chunk=%d, page_size=%d, smooth_factor=%.2f, min_chunk=%d",
@@ -431,7 +428,7 @@ class ProfilingChunkScheduler(Scheduler):
                 req_index += 1
                 continue
 
-            if not vllm_version_is("0.29.0") and (
+            if (
                 self.ec_connector is not None
                 and request.mm_features
                 and not self.ec_connector.ensure_cache_available(
@@ -504,8 +501,7 @@ class ProfilingChunkScheduler(Scheduler):
 
             # >>> PROFILING CHUNK: dynamic chunk sizing for RUNNING >>>
             if (
-                self.profiling_chunk_manager is not None
-                and self.profiling_chunk_manager.is_ready
+                self.profiling_chunk_manager.is_ready
                 and request.num_computed_tokens < request.num_prompt_tokens
                 and (request.num_computed_tokens > 0 or not self.profiling_chunk_config.need_timing)
             ):
@@ -526,8 +522,9 @@ class ProfilingChunkScheduler(Scheduler):
                     logger.info("[Dynamic Chunk] Online calibration stage. Long requests are better")
                 elif time_budget == target_latency:
                     logger.warning_once(
-                        "[Dynamic Chunk] Profiling Failed. Degenerated to a fixed chunk size"
-                        "Please increase the `max_fit_chunk` to profile more data"
+                        "[Dynamic Chunk] Profiling failed; falling back to a "
+                        "fixed chunk size. Increase max_fit_chunk to profile "
+                        "more data."
                     )
                 else:
                     break
@@ -546,90 +543,47 @@ class ProfilingChunkScheduler(Scheduler):
                         # The request can be scheduled.
                         break
 
-                    # vLLM 0.30.0 can temporarily fail allocation while a KV
-                    # connector still owns blocks pending deferred release.
-                    # Preempting another request cannot make progress in that
-                    # state. Use capability detection to retain compatibility
-                    # with older connector implementations.
-                    has_pending_block_frees = (
-                        getattr(self.connector, "has_pending_block_frees", None) if self.connector is not None else None
-                    )
-                    if has_pending_block_frees is not None and has_pending_block_frees():
+                    if self.connector is not None and self.connector.has_pending_block_frees():
                         break
 
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
-                    if vllm_version_is("0.29.0"):
-                        if self.policy == SchedulingPolicy.PRIORITY:
-                            preempted_req = max(
-                                self.running,
-                                key=lambda r: (r.priority, r.arrival_time),
-                            )
-                            # Record the index of the preemption victim to
-                            # maintain accurate loop state.
-                            victim_index = self.running.index(preempted_req)
-                            del self.running[victim_index]
-                            # Decrement the loop cursor if the removed request
-                            # preceded the current iteration, preventing the
-                            # silent omission of the subsequent request.
-                            if victim_index < req_index:
-                                req_index -= 1
-
-                            if preempted_req in scheduled_running_reqs:
-                                preempted_req_id = preempted_req.request_id
-                                scheduled_running_reqs.remove(preempted_req)
-                                restored = num_scheduled_tokens.pop(preempted_req_id)
-                                token_budget += restored
-                                input_budget += restored + draft_slots
-                                req_to_new_blocks.pop(preempted_req_id)
-                                scheduled_spec_decode_tokens.pop(preempted_req_id, None)
-                                preempted_encoder_inputs = scheduled_encoder_inputs.pop(preempted_req_id, None)
-                                if preempted_encoder_inputs:
-                                    # Restore encoder compute budget if the preempted
-                                    # request had encoder inputs scheduled in this step.
-                                    num_embeds_to_restore = sum(
-                                        preempted_req.get_num_encoder_embeds(i) for i in preempted_encoder_inputs
-                                    )
-                                    encoder_compute_budget += num_embeds_to_restore
-                        else:
-                            preempted_req = self.running.pop()
+                    if self.policy == SchedulingPolicy.PRIORITY:
+                        preempted_req = max(
+                            self.running,
+                            key=lambda r: (r.priority, r.arrival_time),
+                        )
                     else:
-                        if self.policy == SchedulingPolicy.PRIORITY:
-                            preempted_req = max(
-                                self.running,
-                                key=lambda r: (r.priority, r.arrival_time),
-                            )
-                        else:
-                            preempted_req = self.running[-1]
+                        preempted_req = self.running[-1]
 
-                        # A deferred free will not help with immediate allocation.
-                        if not self._request_blocks_can_be_freed(preempted_req):
-                            break
+                    # A deferred free will not help with immediate allocation.
+                    if not self._request_blocks_can_be_freed(preempted_req):
+                        break
 
-                        if self.policy == SchedulingPolicy.PRIORITY:
-                            victim_index = self.running.index(preempted_req)
-                            del self.running[victim_index]
-                            if victim_index < req_index:
-                                req_index -= 1
+                    if self.policy == SchedulingPolicy.PRIORITY:
+                        victim_index = self.running.index(preempted_req)
+                        del self.running[victim_index]
+                        if victim_index < req_index:
+                            req_index -= 1
 
-                            if preempted_req in scheduled_running_reqs:
-                                preempted_req_id = preempted_req.request_id
-                                scheduled_running_reqs.remove(preempted_req)
-                                restored = num_scheduled_tokens.pop(preempted_req_id)
-                                token_budget += restored
-                                input_budget += restored + draft_slots
-                                req_to_new_blocks.pop(preempted_req_id)
-                                scheduled_spec_decode_tokens.pop(preempted_req_id, None)
-                                preempted_encoder_inputs = scheduled_encoder_inputs.pop(preempted_req_id, None)
-                                if preempted_encoder_inputs:
-                                    # Restore encoder compute budget if the preempted
-                                    # request had encoder inputs scheduled in this step.
-                                    num_embeds_to_restore = sum(
-                                        preempted_req.get_num_encoder_embeds(i) for i in preempted_encoder_inputs
-                                    )
-                                    encoder_compute_budget += num_embeds_to_restore
-                        else:
-                            preempted_req = self.running.pop()
+                        if preempted_req in scheduled_running_reqs:
+                            preempted_req_id = preempted_req.request_id
+                            scheduled_running_reqs.remove(preempted_req)
+                            restored = num_scheduled_tokens.pop(preempted_req_id)
+                            token_budget += restored
+                            input_budget += restored + draft_slots
+                            req_to_new_blocks.pop(preempted_req_id)
+                            scheduled_spec_decode_tokens.pop(preempted_req_id, None)
+                            preempted_encoder_inputs = scheduled_encoder_inputs.pop(preempted_req_id, None)
+                            if preempted_encoder_inputs:
+                                # Restore encoder compute budget if the preempted
+                                # request had encoder inputs scheduled in this step.
+                                num_embeds_to_restore = sum(
+                                    preempted_req.get_num_encoder_embeds(i) for i in preempted_encoder_inputs
+                                )
+                                encoder_compute_budget += num_embeds_to_restore
+                    else:
+                        preempted_req = self.running.pop()
 
                     self._preempt_request(
                         preempted_req,
@@ -830,16 +784,7 @@ class ProfilingChunkScheduler(Scheduler):
                     assert num_computed_tokens <= request.num_tokens
 
                     # Skip request with pending mm encoding prefetches
-                    if vllm_version_is("0.29.0"):
-                        if (
-                            self.ec_connector is not None
-                            and request.mm_features
-                            and not self.ec_connector.ensure_cache_available(request, num_computed_tokens)
-                        ):
-                            request_queue.pop_request()
-                            step_skipped_waiting.prepend_request(request)
-                            continue
-                    elif self._ec_transfer_pending(request, num_computed_tokens):
+                    if self._ec_transfer_pending(request, num_computed_tokens):
                         request_queue.pop_request()
                         step_skipped_waiting.prepend_request(request)
                         continue
@@ -854,12 +799,14 @@ class ProfilingChunkScheduler(Scheduler):
                         )
                 else:
                     # KVTransfer: WAITING reqs have num_computed_tokens > 0
-                    # after async KV recvs are completed.
+                    # after async KV recvs are completed. A streaming-input
+                    # session resumes here too, carrying whatever media its
+                    # latest chunk added, so this branch needs the same gate.
                     new_computed_blocks = self.kv_cache_manager.empty_kv_cache_blocks
                     num_new_local_computed_tokens = 0
                     num_computed_tokens = request.num_computed_tokens
 
-                    if not vllm_version_is("0.29.0") and self._ec_transfer_pending(request, num_computed_tokens):
+                    if self._ec_transfer_pending(request, num_computed_tokens):
                         request_queue.pop_request()
                         step_skipped_waiting.prepend_request(request)
                         continue
@@ -888,25 +835,7 @@ class ProfilingChunkScheduler(Scheduler):
                     # Pad new decode requests to uniform spec decoding size to
                     # preserve full cudagraph for this step.
                     # Not for diffusion where draft tokens can't be padded.
-                    if vllm_version_is("0.29.0"):
-                        if (
-                            (self.num_spec_tokens > 0 and self.dynamic_sd_lookup is None)
-                            and self.num_sampled_tokens_per_step > 0
-                            and num_new_tokens == 1
-                            and (scheduled_running_reqs and not prefill_scheduled)
-                        ):
-                            padded_num_tokens = 1 + self.num_spec_tokens
-                            # Pad only when there is room for the sampled token(s).
-                            if (
-                                num_computed_tokens + padded_num_tokens + self.num_sampled_tokens_per_step
-                                <= self.max_model_len
-                            ):
-                                if padded_num_tokens > request_token_budget:
-                                    # Prefer to not schedule than schedule un-padded.
-                                    break
-                                num_new_tokens = padded_num_tokens
-                                pad_spec_decode = True
-                    elif (
+                    if (
                         (self.num_spec_tokens > 0 and self.dynamic_sd_lookup is None)
                         and self.num_sampled_tokens_per_step > 0
                         and num_new_tokens == 1
@@ -931,8 +860,7 @@ class ProfilingChunkScheduler(Scheduler):
 
                     # >>> PROFILING CHUNK: dynamic chunk sizing >>>
                     if (
-                        self.profiling_chunk_manager is not None
-                        and self.profiling_chunk_manager.is_ready
+                        self.profiling_chunk_manager.is_ready
                         and request.num_computed_tokens < request.num_prompt_tokens
                         and (request.num_computed_tokens > 0 or not self.profiling_chunk_config.need_timing)
                     ):
@@ -946,8 +874,9 @@ class ProfilingChunkScheduler(Scheduler):
                             logger.info("[Dynamic Chunk] Online calibration stage. Long requests are better")
                         elif time_budget == target_latency:
                             logger.warning_once(
-                                "[Dynamic Chunk] Profiling Failed. Degenerated to a fixed chunk size"
-                                "Please increase the `max_fit_chunk` to profile more data"
+                                "[Dynamic Chunk] Profiling failed; falling back "
+                                "to a fixed chunk size. Increase max_fit_chunk "
+                                "to profile more data."
                             )
                         else:
                             break
@@ -1186,47 +1115,24 @@ class ProfilingChunkScheduler(Scheduler):
         if self.use_v2_model_runner:
             scheduled_new_reqs.extend(scheduled_resumed_reqs)
             scheduled_resumed_reqs.clear()
-            if vllm_version_is("0.29.0"):
-                new_reqs_data = [
-                    NewRequestData.from_request(
-                        req,
-                        req_to_new_blocks[req.request_id].get_block_ids(),
-                        req._all_token_ids,
-                        uses_mrope=self.model_uses_mrope,
-                        uses_xdrope=self.model_uses_xdrope,
-                    )
-                    for req in scheduled_new_reqs
-                ]
-            else:
-                new_reqs_data = [
-                    NewRequestData.from_request(
-                        req,
-                        req_to_new_blocks[req.request_id].get_block_ids(),
-                        req._all_token_ids,
-                        uses_mrope=self.model_uses_mrope,
-                    )
-                    for req in scheduled_new_reqs
-                ]
+            new_reqs_data = [
+                NewRequestData.from_request(
+                    req,
+                    req_to_new_blocks[req.request_id].get_block_ids(),
+                    req._all_token_ids,
+                    uses_mrope=self.model_uses_mrope,
+                )
+                for req in scheduled_new_reqs
+            ]
         else:
-            if vllm_version_is("0.29.0"):
-                new_reqs_data = [
-                    NewRequestData.from_request(
-                        req,
-                        req_to_new_blocks[req.request_id].get_block_ids(),
-                        uses_mrope=self.model_uses_mrope,
-                        uses_xdrope=self.model_uses_xdrope,
-                    )
-                    for req in scheduled_new_reqs
-                ]
-            else:
-                new_reqs_data = [
-                    NewRequestData.from_request(
-                        req,
-                        req_to_new_blocks[req.request_id].get_block_ids(),
-                        uses_mrope=self.model_uses_mrope,
-                    )
-                    for req in scheduled_new_reqs
-                ]
+            new_reqs_data = [
+                NewRequestData.from_request(
+                    req,
+                    req_to_new_blocks[req.request_id].get_block_ids(),
+                    uses_mrope=self.model_uses_mrope,
+                )
+                for req in scheduled_new_reqs
+            ]
 
         with record_function_or_nullcontext("schedule: make_cached_request_data"):
             cached_reqs_data = self._make_cached_request_data(
@@ -1249,33 +1155,16 @@ class ProfilingChunkScheduler(Scheduler):
 
         kv_connector_block_state = None
         if self.connector is not None:
-            if vllm_version_is("0.29.0"):
-                snapshot_req_ids = {req.req_id for req in new_reqs_data}
-                snapshot_req_ids.update(
-                    req_id
-                    for req_id, block_ids in zip(
-                        cached_reqs_data.req_ids,
-                        cached_reqs_data.new_block_ids,
-                        strict=True,
-                    )
-                    if block_ids
-                )
-                snapshot_req_ids.update(req_id for req_id in boundary_state_offloads if req_id in self.requests)
-                kv_connector_block_state = KVConnectorBlockState(
-                    block_ids={req_id: self.kv_cache_manager.get_block_ids(req_id) for req_id in snapshot_req_ids},
-                    boundary_state_offloads=boundary_state_offloads,
-                )
-            else:
-                # Any request scheduled this step can become a connector job now,
-                # not only the ones that were allocated blocks: a store save lands
-                # on the step that fills a block, which allocated none.
-                block_state_req_ids = set(num_scheduled_tokens)
-                block_state_req_ids.update(req_id for req_id in boundary_state_offloads if req_id in self.requests)
-                kv_connector_block_state = KVConnectorBlockState(
-                    req_ids=block_state_req_ids,
-                    resolve_block_ids=self.kv_cache_manager.get_block_ids,
-                    boundary_state_offloads=boundary_state_offloads,
-                )
+            # Any request scheduled this step can become a connector job now,
+            # not only the ones that were allocated blocks: a store save lands
+            # on the step that fills a block, which allocated none.
+            block_state_req_ids = set(num_scheduled_tokens)
+            block_state_req_ids.update(req_id for req_id in boundary_state_offloads if req_id in self.requests)
+            kv_connector_block_state = KVConnectorBlockState(
+                req_ids=block_state_req_ids,
+                resolve_block_ids=self.kv_cache_manager.get_block_ids,
+                boundary_state_offloads=boundary_state_offloads,
+            )
 
         kv_cache_block_copies, cow_retained_blocks = self.kv_cache_manager.take_kv_cache_block_copies()
         if kv_cache_block_copies:

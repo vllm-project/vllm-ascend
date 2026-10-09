@@ -7,7 +7,7 @@ units verbatim to inject roughly 5 lines of real logic: `Scheduler.schedule()`
 preserving the `balance_flag` semantics**, first deletes the two already-stale
 copies `run_busy_loop()` / `run_engine_core()` (replacing them with an engine
 core hook on `_has_global_unfinished_reqs` plus a module-level name swap for
-conditional activation). The `schedule()` copy is **kept for now** — upstream
+the explicitly selected scheduler class). The `schedule()` copy is **kept for now** — upstream
 exposes no finer-grained hook to borrow, and deleting it depends on contributing
 an override seam upstream, tracked as later Phase 2B. The file therefore does
 not shrink to a few dozen lines: the `schedule()` body is still a verbatim
@@ -94,8 +94,8 @@ This "copy whole units" approach has three concrete harms:
    evolution). The old patch copied a `schedule()` from an
    older vLLM than v0.24.0, so it was stale as a whole. This round aligns the
    `schedule()` copy **verbatim to the release tag's `Scheduler.schedule()`**,
-   keeping only the 3 balance deltas (disabled-path early return,
-   `balance_flag` gate, `if request_queue is None: break`); the
+   keeping only the 2 balance deltas (`balance_flag` gate and
+   `if request_queue is None: break`); the
    `run_busy_loop()` / `run_engine_core()` copies were deleted in Phase 1.
    **Note: any concrete `v0.24.0` in this document is just a snapshot of the pin
    file's current value — it goes stale as the pin advances and must NOT be
@@ -106,7 +106,7 @@ This "copy whole units" approach has three concrete harms:
    commit?** Two reasons: (a) production actually runs the v0.24.0 release, so
    aligning the copy to it keeps production behavior consistent with runtime;
    (b) a fixed git tag points at the **same** source on every CI run, so
-   "verbatim comparison of the copy against upstream (allowing only the 3
+   "verbatim comparison of the copy against upstream (allowing only the 2
    deltas)" becomes a **reproducible** drift check — whereas a moving
    main-verified hash makes the comparison drift forward with every commit and
    cannot serve as a stable guardrail.
@@ -117,9 +117,7 @@ This "copy whole units" approach has three concrete harms:
    those differences do not affect the gate's own semantics. Both supported
    revisions — release tag v0.24.0 and main-verified commit e5588e49 — expose
    `schedule(self, throttle_prefills=False)`, so the override matches that
-   shared signature and the disabled path forwards `throttle_prefills`
-   directly to `super()`. I.e.: **body aligned to the release tag; signature
-   matches both supported revisions; disabled path delegates directly.**
+   shared signature.
 
 2. **It violates the `AGENTS.md` patch policy.** The policy requires patches to
    be "minimal and focused" with "a long-term plan to contribute upstream". A
@@ -164,14 +162,12 @@ drafting assumptions did not hold; both are corrected here:
   calls `balance_gather` once); the `run_engine_core` copy is replaced by
   patching the module-level `DPEngineCoreProc` name (upstream's `run_engine_core`
   resolves this class by module-global name at call time), and the swap happens
-  **only when balance is enabled** (conditional activation).
+  **only when `BalanceScheduler` is explicitly selected**.
 
 Accordingly the Phase 1 description and the "post-refactor file shape" below are
-both rewritten to match the actual implementation. Phase 3 collapses config
-probing to two fallbacks (AscendConfig → additional_config) and **removes the
-direct environment-variable read**. Balance scheduling is now configured only
-through `additional_config`; `_balance_scheduling_enabled` no longer bypasses
-`AscendConfig`. Details in [Phased rollout](#phased-rollout).
+both rewritten to match the actual implementation. Scheduler selection is
+centralized in `platform.py`, which assigns the fully-qualified scheduler class
+from `additional_config`. Details are in [Phased rollout](#phased-rollout).
 
 ### Step 1 — Hook gather onto `_has_global_unfinished_reqs` and delete the EngineCore copies
 
@@ -217,12 +213,10 @@ The final landing is therefore:
   body (`engine_core = DPEngineCoreProc(*args, **kwargs)`, see
   [vllm/v1/engine/core.py](https://github.com/vllm-project/vllm)). So a thin
   wrapper wraps `run_engine_core`: at its entry (where `vllm_config` is
-  available) it decides, via `_balance_scheduling_enabled`, whether to swap the
-  module-level `DPEngineCoreProc` to `BalanceDPEngineCoreProc` or restore the
-  upstream original, then calls the original `run_engine_core`. This is
-  **conditional activation** — with balance off, upstream's implementation is
-  used verbatim; signal handling, `SignalCallback`, numa, and tracer all stay
-  upstream-correct.
+  available), it resolves `scheduler_config.scheduler_cls` and swaps the
+  module-level `DPEngineCoreProc` to `BalanceDPEngineCoreProc` when that class
+  is a `BalanceScheduler` subclass, then calls the original `run_engine_core`.
+  Signal handling, `SignalCallback`, numa, and tracer all stay upstream-correct.
 
 > **Lesson A — deadlock (gather must not live in `schedule()`).** An earlier
 > version put `balance_gather` at the top of `BalanceScheduler.schedule()` and
@@ -284,27 +278,26 @@ Keep the `schedule()` override, but:
 
 - **The override matches the shared supported signature:**
   `def schedule(self, throttle_prefills: bool = False)`. Both v0.24.0 and
-  e5588e49 expose this signature, and the disabled path delegates directly via
-  `super().schedule(throttle_prefills)`. The old v0.23 compatibility branch and
+  e5588e49 expose this signature. The old v0.23 compatibility branch and
   signature introspection are no longer needed.
-- Collapse the balance changes into 3 clearly-commented deltas: (1) the
-  disabled-path early return delegating to `super()`; (2) the `balance_flag`
-  gate inside the WAITING loop; (3) `if request_queue is None: break` (upstream
+- Collapse the balance changes into 2 clearly-commented deltas: (1) the
+  `balance_flag` gate inside the WAITING loop; (2)
+  `if request_queue is None: break` (upstream
   has `assert`). Because upstream has no finer-grained hook, the body still has
   to be copied.
 - **Verbatim comparison is now reproducible:** the `schedule()` copy is aligned
-  to the release tag (only the 3 balance deltas differ), so the fixed tag makes
+  to the release tag (only the 2 balance deltas differ), so the fixed tag makes
   "verbatim comparison against upstream" yield the same baseline on every CI
   run. The "intent lock" tests (signature equality, the 3 delta
   lines present, upstream seams still exist) remain as CPU-reachable guardrails,
-  and a new "verbatim comparison against the release tag (allowing only the 3
+  and a new "verbatim comparison against the release tag (allowing only the 2
   deltas)" drift test is added (see Test plan). The drift test **reads the tag
   at runtime from `.github/vllm-release-tag.commit`** (same source as CI) — it
   does not hardcode a version or read a design doc; when the pin advances, the
   test automatically compares against the new tag and goes red to signal "the
   copy needs re-syncing".
 - "Re-aligning the copy on a pin advance" is now routine maintenance: each time
-  the release tag advances, re-apply the 3 deltas onto the new tag's
+  the release tag advances, re-apply the 2 deltas onto the new tag's
   `schedule()` (continues until Phase 2B deletes the copy).
 
 **Phase 2B — target (lands with an upstream contribution):**
@@ -325,9 +318,7 @@ class BalanceScheduler(Scheduler):
     def _should_stop_admitting_waiting(self) -> bool:
         if super()._should_stop_admitting_waiting():
             return True
-        return self._balance_enabled and (
-            max(t.item() for t in self.balance_queue) >= self.max_num_running_reqs
-        )
+        return max(t.item() for t in self.balance_queue) >= self.max_num_running_reqs
 ```
 
 (`>=` and `==` are equivalent here because no rank's `len(running)` can exceed
@@ -345,27 +336,6 @@ to contribute upstream" that `AGENTS.md` requires.
 > `self.max_num_running_reqs = min(cap, max(balance_queue))`. That would produce
 > a **different** semantic ("make lagging ranks catch up to the leader") and is
 > **explicitly rejected** — see the contract below.
-
-### Step 3 — Normalize config probing
-
-`_balance_scheduling_enabled()` collapses to **two fallbacks (AscendConfig →
-additional_config)**. After deleting the `run_engine_core` copy, the only caller
-is `BalanceScheduler.__init__`, but whether AscendConfig is initialized at that
-moment still cannot be guaranteed (the origin of the old top-of-file TODO), so
-`additional_config` is kept as a startup-window fallback and the function
-returns `False` otherwise. This round tightens one thing relative to the old
-implementation:
-
-- **The environment-variable path is removed.** The old implementation read
-  the setting from the environment. Balance scheduling now takes effect only
-  through the main `get_ascend_config().enable_balance_scheduling` path,
-  avoiding multiple entry points.
-- The top-of-file TODO is updated to "once AscendConfig initialization is moved
-  earlier, this can collapse to a single
-  `get_ascend_config().enable_balance_scheduling` read".
-
-> Later (once AscendConfig timing is settled): collapse the two fallbacks into a
-> single read.
 
 ## Behavior-preservation contract
 
@@ -385,73 +355,52 @@ deviation is a bug.
 3. **Gather cadence unchanged.** Exactly one `all_gather` per active engine step,
    on the same DP group, payload still `len(self.running)`, skipped consistently
    by all ranks when all are idle. Only the call site moved.
-4. **Disabled path unchanged.** When `enable_balance_scheduling` is false,
-   `_balance_run_engine_core` restores the module-level `DPEngineCoreProc` to
-   the upstream original and the engine core runs upstream's implementation
-   verbatim; `BalanceScheduler` with `_balance_enabled=False` delegates
-   `schedule(throttle_prefills)` to `super().schedule(throttle_prefills)`, does
-   not allocate `balance_queue`, and
-   performs no collective communication. I.e. balance does not touch any config
-   when off (including PD-disaggregated recompute / `AsyncRecomputeScheduler`,
-   which is already mutually exclusive with balance via `platform.py`; this is a
-   second layer of defense).
+4. **Explicit selection.** When `enable_balance_scheduling` is false,
+   `platform.py` does not select `BalanceScheduler`, and the engine-core patch
+   does not install `BalanceDPEngineCoreProc`. Other scheduler configurations,
+   including PD-disaggregated recompute, keep their own scheduler and engine
+   core classes.
 5. **Existing constraints still apply.** The `profiling_chunk_config` mutex (see
    `vllm_ascend/ascend_config.py`) and the PD-mixed-mode restriction (see
    `vllm_ascend/platform.py`) are still enforced where they were.
 
 ## Post-refactor file shape
 
-After this round (Phase 1 + 2A + 3), the key structure is as follows. The
+After this round (Phase 1 + 2A), the key structure is as follows. The
 `schedule()` body is a verbatim copy of release tag `v0.24.0` (cannot be
-deleted before Phase 2B), with three documented deltas (disabled-path early return + the `balance_flag` gate in the WAITING loop + `if request_queue is None: break`):
+deleted before Phase 2B), with two documented deltas (the `balance_flag` gate
+and `if request_queue is None: break`):
 
 ```python
-# vllm_ascend/patch/platform/patch_balance_schedule.py
+# vllm_ascend/core/balance_scheduler.py
 import torch
 import torch.distributed as dist
-import vllm.v1.core.sched.scheduler as _sched_mod
 import vllm.v1.engine.core as _engine_core_mod
 from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.v1.engine.core import DPEngineCoreProc, EngineCoreProc
+from vllm.v1.engine.core import DPEngineCoreProc
 # ... other vllm imports ...
-
-
-def _balance_scheduling_enabled(vllm_config) -> bool:
-    try:
-        from vllm_ascend.ascend_config import get_ascend_config
-        return bool(get_ascend_config().enable_balance_scheduling)
-    except Exception:
-        pass
-    additional_config = getattr(vllm_config, "additional_config", None) or {}
-    if "enable_balance_scheduling" in additional_config:
-        return bool(additional_config["enable_balance_scheduling"])
-    return False  # no environment-variable fallback
 
 
 class BalanceScheduler(Scheduler):
     def __init__(self, ...):
         super().__init__(...)
-        self._balance_enabled = _balance_scheduling_enabled(vllm_config)
         self.dp_group = None  # injected by BalanceDPEngineCoreProc before the first gather
-        if self._balance_enabled:
-            self.balance_queue = [torch.tensor([0], ...) for _ in range(dp_size)]
+        self.balance_queue = [torch.tensor([0], ...) for _ in range(dp_size)]
 
-    def balance_gather(self):  # uses self.dp_group; no-op when disabled / not injected
-        if not self._balance_enabled or self.dp_group is None:
+    def balance_gather(self):  # uses self.dp_group; no-op until it is injected
+        if self.dp_group is None:
             return
         running_tensor = torch.tensor([len(self.running)], dtype=torch.int, device="cpu")
         dist.all_gather(self.balance_queue, running_tensor, group=self.dp_group)
 
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:  # shared by v0.24.0 and e5588e49
-        if not self._balance_enabled:  # delta 1: disabled-path early return
-            return super().schedule(throttle_prefills)
         # NOTE: balance_gather is NOT called here -- see BalanceDPEngineCoreProc.
-        # ... upstream schedule() body (verbatim-aligned to the v0.24.0 tag) ...
-        #   # inside the WAITING loop (deltas 2, 3):
-        #   if max(t.item() for t in self.balance_queue) == self.max_num_running_reqs:  # delta 2: leader-at-cap => global freeze
+        # ... upstream schedule() body ...
+        #   # inside the WAITING loop (deltas 1, 2):
+        #   if max(t.item() for t in self.balance_queue) == self.max_num_running_reqs:  # delta 1: leader-at-cap => global freeze
         #       break
         #   request_queue = self._select_waiting_queue_for_scheduling()
-        #   if request_queue is None:  # delta 3: keep if-break (upstream has assert)
+        #   if request_queue is None:  # delta 2: keep if-break (upstream has assert)
         #       break
         # ...
 
@@ -475,25 +424,15 @@ _OriginalDPEngineCoreProc = _engine_core_mod.DPEngineCoreProc
 _OriginalRunEngineCore = EngineCoreProc.run_engine_core
 
 
-def _balance_run_engine_core(*args, dp_rank=0, local_dp_rank=0, **kwargs):
-    # Conditional activation: swap the module-level DPEngineCoreProc only when balance is on.
-    if _balance_scheduling_enabled(kwargs.get("vllm_config")):
+def _patch_dp_engine_core_proc(vllm_config, dp_rank):
+    scheduler_cls = vllm_config.scheduler_config.get_scheduler_cls()
+    if issubclass(scheduler_cls, BalanceScheduler):
         _engine_core_mod.DPEngineCoreProc = BalanceDPEngineCoreProc
-    else:
-        _engine_core_mod.DPEngineCoreProc = _OriginalDPEngineCoreProc
-    return _OriginalRunEngineCore(*args, dp_rank=dp_rank, local_dp_rank=local_dp_rank, **kwargs)
-
-
-# Scheduler is constructed by module-global name when scheduler_cls is unset
-# (the PD-mixed balance path); recompute / dynamic-batch / profiling schedulers
-# set scheduler_cls and bypass this name, which is correct.
-_sched_mod.Scheduler = BalanceScheduler
-EngineCoreProc.run_engine_core = staticmethod(_balance_run_engine_core)
 ```
 
 This round deleted the ~95-line `run_engine_core` + `run_busy_loop` copies and
-their dead imports, and added the module docstring, comments, and the
-`_balance_run_engine_core` conditional-activation wrapper; the net line count
+their dead imports, and selects `BalanceDPEngineCoreProc` from the resolved
+scheduler class in `_patch_dp_engine_core_proc`; the net line count
 barely dropped, but **what it removes is stale-drift risk** (the old copies had
 fallen behind upstream's `_handle_shutdown` / `eep_scaling_state` /
 `SignalCallback` evolution) and it fixes the balance-enabled deadlock (gather
@@ -509,13 +448,11 @@ first inside `schedule()`, then inside `_process_engine_step`; now after
 1. **Signature + intent lock + verbatim drift test (Phase 2A).** Assert: (a)
    `BalanceScheduler.schedule`'s signature **equals the installed
    `Scheduler.schedule` signature**; both supported revisions share this
-   contract, so each CI lane checks the same invariant; (b) the 3
-   balance delta lines must exist in the body (disabled-path
-   `super().schedule(throttle_prefills)`
-   delegation, the `balance_flag` gate in the WAITING loop,
-   `if request_queue is None: break`); (c) the `_balance_run_engine_core`
-   wrapper is installed and `DPEngineCoreProc` is **not** swapped at import
-   (deferred to the wrapper, swapped conditionally on call); (d) upstream
+   contract, so each CI lane checks the same invariant; (b) the 2
+   balance delta lines must exist in the body (the `balance_flag` gate in the
+   WAITING loop and `if request_queue is None: break`); (c)
+   `_patch_dp_engine_core_proc` selects `BalanceDPEngineCoreProc` from the
+   resolved scheduler class; (d) upstream
    `DPEngineCoreProc._has_global_unfinished_reqs` still exists (the gather
    injection point — it MUST be called every non-idle iteration or the
    all_gather deadlocks); (e) upstream `Scheduler` seam methods (including
@@ -523,7 +460,7 @@ first inside `schedule()`, then inside `_process_engine_step`; now after
    (f) **verbatim drift detection** — first read the release tag from
    `.github/vllm-release-tag.commit` (same source as CI, **not hardcoded, not
    read from a design doc**), then `git show <tag>:vllm/v1/core/sched/scheduler.py`
-   to fetch that tag's `schedule()`, strip the same 3 deltas, and AST-compare it
+   to fetch that tag's `schedule()`, strip the same 2 deltas, and AST-compare it
    verbatim against `BalanceScheduler.schedule`'s source; the two must be
    identical. Reading the pin file means a pin advance **automatically** flips
    the test to compare against the new tag and go red, signaling "the copy needs
@@ -540,10 +477,7 @@ first inside `schedule()`, then inside `_process_engine_step`; now after
    `torch.distributed.all_gather`, not `vllm.distributed.all_gather`); assert
    that each `balance_gather()` does exactly one `all_gather`, with payload
    `len(self.running)` and the injected dp_group (contract item 3).
-4. **Disabled-path test.** With the flag off, assert `balance_queue` is not
-   allocated, `all_gather` is not called, and `schedule(throttle_prefills)`
-   delegates to `super().schedule(throttle_prefills)` (contract item 4).
-5. **NPU performance check.** Per AGENTS.md's NPU guidance,
+4. **NPU performance check.** Per AGENTS.md's NPU guidance,
    `max(t.item() for t in self.balance_queue)` triggers one host sync per step
    (unavoidable, since this value drives host-side control flow). Profile to
    confirm the refactor introduces **no** extra sync beyond the current one.
@@ -552,11 +486,10 @@ first inside `schedule()`, then inside `_process_engine_step`; now after
 
 | Phase | Scope                                                                                                                  | Risk | Depends on     | Status        |
 |-------|------------------------------------------------------------------------------------------------------------------------|------|----------------|---------------|
-| 1     | Hook gather onto `_has_global_unfinished_reqs` (after the cross-rank all-reduce — avoids both the schedule()-skip deadlock and the _process_engine_step wave-boundary deadlock); slim `BalanceDPEngineCoreProc` to that hook; delete the `run_engine_core`/`run_busy_loop` copies; `run_engine_core` wrapper conditionally activates `DPEngineCoreProc`; module-level `Scheduler` swap | Low  | none           | ✅ Done       |
-| 2A    | Override matches the shared supported signature (`schedule(self, throttle_prefills=False)` on v0.24.0 + e5588e49); **body aligned verbatim to the release tag** (only the 3 balance deltas); disabled path delegates directly to `super()`; signature equality + intent-lock + release-tag verbatim drift tests | Low  | none           | ✅ Done       |
-| 3     | Collapse config probing to two fallbacks (AscendConfig → additional_config); remove the direct env-var read (still parsed centrally by AscendConfig) | Low  | Phase 1        | ✅ Done       |
+| 1     | Hook gather onto `_has_global_unfinished_reqs` (after the cross-rank all-reduce — avoids both the schedule()-skip deadlock and the _process_engine_step wave-boundary deadlock); slim `BalanceDPEngineCoreProc` to that hook; delete the `run_engine_core`/`run_busy_loop` copies; select the DP engine core from the resolved scheduler class | Low  | none           | ✅ Done       |
+| 2A    | Override matches the shared supported signature (`schedule(self, throttle_prefills=False)` on v0.24.0 + e5588e49); **body aligned verbatim to the release tag** (only the 2 balance deltas); signature equality + intent-lock + release-tag verbatim drift tests | Low  | none           | ✅ Done       |
 | 2B    | Upstream `_should_stop_admitting_waiting` PR; delete the `schedule()` copy                                            | Med  | upstream review | ⏳ TODO      |
-| Tests | Drift regression / behavior equivalence / gather cadence / disabled path / NPU performance check                      | Low  | Phase 1 + 2A   | ⏳ TODO (needs NPU) |
+| Tests | Drift regression / behavior equivalence / gather cadence / NPU performance check                      | Low  | Phase 1 + 2A   | ⏳ TODO (needs NPU) |
 
-Each phase can be released and rolled back independently. Phases 1, 2A, and 3
-can land in the same release; 2B lands when the upstream PR merges.
+Each phase can be released and rolled back independently. Phases 1 and 2A can
+land in the same release; 2B lands when the upstream PR merges.
