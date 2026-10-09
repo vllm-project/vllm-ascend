@@ -1694,6 +1694,65 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         )
 
     @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
+    def test_eagle3_draft_mla_spec_uses_implementation_dtype(self, mock_get_layers):
+        runner = self._build_runner()
+        runner.shared_kv_cache_layers = {}
+        runner.speculative_config = SimpleNamespace(method="eagle3")
+        layer_name = "model.layers.0.self_attn.attn"
+        source_spec = MLAAttentionSpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.float8_e4m3fn,
+            cache_dtype_str="fp8",
+        )
+        attn_module = MLAAttention.__new__(MLAAttention)
+        torch.nn.Module.__init__(attn_module)
+        attn_module.impl = SimpleNamespace(
+            fa_quant_layer=False,
+            is_draft_model=True,
+            dtype=torch.bfloat16,
+        )
+        attn_module.get_kv_cache_spec = MagicMock(return_value=source_spec)
+        mock_get_layers.return_value = {layer_name: attn_module}
+
+        spec = runner.get_kv_cache_spec()[layer_name]
+
+        self.assertEqual(spec.head_size, 576)
+        self.assertEqual(spec.dtype, torch.bfloat16)
+        self.assertIsNone(spec.cache_dtype_str)
+        self.assertEqual(spec.page_size_bytes, 16 * 576 * 2)
+
+    @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
+    def test_non_draft_mla_spec_keeps_requested_cache_dtype(self, mock_get_layers):
+        runner = self._build_runner()
+        runner.shared_kv_cache_layers = {}
+        runner.speculative_config = SimpleNamespace(method="eagle3")
+        layer_name = "model.layers.0.self_attn.attn"
+        source_spec = MLAAttentionSpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.float8_e4m3fn,
+            cache_dtype_str="fp8",
+        )
+        attn_module = MLAAttention.__new__(MLAAttention)
+        torch.nn.Module.__init__(attn_module)
+        attn_module.impl = SimpleNamespace(
+            fa_quant_layer=False,
+            is_draft_model=False,
+            dtype=torch.bfloat16,
+        )
+        attn_module.get_kv_cache_spec = MagicMock(return_value=source_spec)
+        mock_get_layers.return_value = {layer_name: attn_module}
+
+        spec = runner.get_kv_cache_spec()[layer_name]
+
+        self.assertEqual(spec.head_size, 576)
+        self.assertEqual(spec.dtype, torch.float8_e4m3fn)
+        self.assertEqual(spec.cache_dtype_str, "fp8")
+
+    @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
     def test_mla_spec_preserves_block_stride_layout_contract(
         self,
         mock_get_layers,

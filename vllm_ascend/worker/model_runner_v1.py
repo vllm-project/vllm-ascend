@@ -6227,6 +6227,12 @@ class NPUModelRunner(GPUModelRunner):
                         dtype, cache_dtype_str = attn_module.impl.dtype, None
                     else:
                         head_size, dtype, cache_dtype_str = spec.head_size, spec.dtype, spec.cache_dtype_str
+                        if (
+                            getattr(attn_module.impl, "is_draft_model", False)
+                            and getattr(getattr(self, "speculative_config", None), "method", None) == "eagle3"
+                            and attn_module.impl.dtype != spec.dtype
+                        ):
+                            dtype, cache_dtype_str = attn_module.impl.dtype, None
                     # GLM-5.3-Flash pages (MLA + KDA/Mamba + kpool) do not
                     # evenly divide. Ascend binds KV as block-first views
                     # and indexes padded pages by runtime block stride, so
