@@ -516,6 +516,9 @@ class FusedMC2CommImpl(MoECommMethod):
         # Quant methods supply the routed layer, whose activation was bound at
         # initialization. The shared communicator may belong to a later layer.
         layer = cast(torch.nn.Module, fused_experts_input.layer)
+        activation_kwargs = getattr(layer, "mega_moe_activation_kwargs", None)
+        if activation_kwargs is None:
+            activation_kwargs = getattr(self, "mega_moe_activation_kwargs", {}) or {}
         out, expert_tokens = self.mega_moe(
             fused_experts_input.hidden_states,
             fused_experts_input.topk_ids.to(torch.int32),
@@ -530,7 +533,7 @@ class FusedMC2CommImpl(MoECommMethod):
             x_active_mask=x_active_mask,
             weight1_type=weight_type,
             weight2_type=weight_type,
-            **layer.mega_moe_activation_kwargs,
+            **activation_kwargs,
         )
         # NOTE: self.expert_token_nums is only used by the
         # mega_moe path (enable_fused_mc2 == 1) as a
