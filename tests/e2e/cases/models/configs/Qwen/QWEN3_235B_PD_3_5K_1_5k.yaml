@@ -136,7 +136,7 @@ templates:
       - --eplb-config
       - '{"window_size":4000,"step_interval":200,"num_redundant_experts":0,"use_async":true}'
       - --additional-config
-      - '{"finegrained_tp_config": {"lmhead_tensor_parallel_size":8},"enable_flashcomm1": true,"ascend_compilation_config":{"enable_npugraph_ex":true, "enable_static_kernel":true}}'
+      - '{"finegrained_tp_config": {"lmhead_tensor_parallel_size":8},"enable_flashcomm1": true,"ascend_compilation_config":{"enable_npugraph_ex":true, "enable_static_kernel":true},"scheduler_config":{"recompute_scheduler_enable": true}}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_consumer", "kv_port": "30200", "engine_id": "2", "kv_connector_extra_config": {"use_ascend_direct": true,"prefill": {"dp_size": 2, "tp_size": 8}, "decode": {"dp_size": 32, "tp_size": 1}}}'
 
@@ -177,7 +177,7 @@ templates:
       - --eplb-config
       - '{"window_size":4000,"step_interval":200,"num_redundant_experts":0,"use_async":true}'
       - --additional-config
-      - '{"finegrained_tp_config": {"lmhead_tensor_parallel_size":8},"enable_flashcomm1": true,"ascend_compilation_config":{"enable_npugraph_ex":true, "enable_static_kernel":true}}'
+      - '{"finegrained_tp_config": {"lmhead_tensor_parallel_size":8},"enable_flashcomm1": true,"ascend_compilation_config":{"enable_npugraph_ex":true, "enable_static_kernel":true},"scheduler_config":{"recompute_scheduler_enable": true}}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_consumer", "kv_port": "30200", "engine_id": "2", "kv_connector_extra_config": {"use_ascend_direct": true,"prefill": {"dp_size": 2, "tp_size": 8}, "decode": {"dp_size": 32, "tp_size": 1}}}'
 
