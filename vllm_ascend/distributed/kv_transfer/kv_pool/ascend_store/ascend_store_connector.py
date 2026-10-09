@@ -51,6 +51,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import (
     KVPoolScheduler,
+    LOOKUP_MSG,
+    RESET_MSG,
+    RESP_ERR,
+    RESP_OK,
     get_zmq_rpc_path_lookup,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
@@ -476,6 +480,27 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         self.connector_scheduler.bind_gpu_block_pool(gpu_block_pool)
 
+    def reset_cache(self) -> bool | None:
+        """Drop external Mooncake KV after a prefix-cache reset.
+
+        Scheduler only. Drains the rank-0 send queue, then ``remove_all``
+        on the Mooncake master. Caller must pause generation first so no
+        new puts are enqueued during the drain. Worker role returns None.
+        Mooncake layerwise is unsupported and returns False. Other backends
+        keep the base-class "not implemented" result of None.
+        """
+        if self.role != KVConnectorRole.SCHEDULER:
+            return None
+        if self.backend_name != "mooncake":
+            return None
+        if self.use_layerwise:
+            logger.error("AscendStoreConnector reset_cache does not support Mooncake layerwise.")
+            return False
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.load_specs.clear()
+        self._kv_cache_events = None
+        return self.connector_scheduler.reset_store()
+
     def build_connector_worker_meta(self) -> AscendStoreKVConnectorWorkerMetadata | None:
         assert self.connector_worker is not None
         return self.connector_worker.build_connector_worker_meta()
@@ -508,6 +533,43 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
 
     def has_pending_push_work(self) -> bool:
         return bool(self.connector_scheduler and self.connector_scheduler.has_pending_push_work())
+
+
+def dispatch_lookup_request(pool_worker: KVPoolWorker, decoder: MsgpackDecoder, all_frames) -> bytes:
+    """Handle one LookupKey request. Frame 0 is a message tag."""
+    msg_type = bytes(all_frames[0])
+
+    if msg_type == LOOKUP_MSG:
+        token_len = int.from_bytes(all_frames[1], byteorder="big")
+        kv_group_ids = decoder.decode([all_frames[2]])
+        hbm_hit_tokens = int.from_bytes(all_frames[3], byteorder="big")
+        hashes_str = decoder.decode(all_frames[4:])
+        result = pool_worker.lookup_scheduler(
+            token_len,
+            hashes_str,
+            kv_group_ids,
+            use_layerwise=False,
+            hbm_hit_tokens=hbm_hit_tokens,
+        )
+        logger.debug(
+            "KV pool lookup response token_len=%d groups=%s hit_tokens=%d",
+            token_len,
+            kv_group_ids,
+            result,
+        )
+        return result.to_bytes(4, "big")
+
+    elif msg_type == RESET_MSG:
+        try:
+            pool_worker.reset_store()
+            logger.info("AscendStore reset via remove_all succeeded.")
+            return RESP_OK
+        except Exception as e:
+            logger.error("AscendStore remove_all failed: %s", e)
+            return RESP_ERR
+
+    logger.warning("LookupKeyServer received unknown msg_type: %r", msg_type)
+    return RESP_ERR
 
 
 class LookupKeyServer:
@@ -548,24 +610,7 @@ class LookupKeyServer:
                         break
 
                     try:
-                        token_len = int.from_bytes(all_frames[0], byteorder="big")
-                        kv_group_ids = self.decoder.decode([all_frames[1]])
-                        hbm_hit_tokens = int.from_bytes(all_frames[2], byteorder="big")
-                        hashes_str = self.decoder.decode(all_frames[3:])
-                        result = self.pool_worker.lookup_scheduler(
-                            token_len,
-                            hashes_str,
-                            kv_group_ids,
-                            use_layerwise=False,
-                            hbm_hit_tokens=hbm_hit_tokens,
-                        )
-                        logger.debug(
-                            "KV pool lookup response token_len=%d groups=%s hit_tokens=%d",
-                            token_len,
-                            kv_group_ids,
-                            result,
-                        )
-                        response = result.to_bytes(4, "big")
+                        response = dispatch_lookup_request(self.pool_worker, self.decoder, all_frames)
                     except Exception:
                         logger.exception("KV pool lookup handler failed; reporting 0 hit tokens")
                         response = (0).to_bytes(4, "big")
