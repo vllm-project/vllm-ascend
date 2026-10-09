@@ -22,7 +22,7 @@ import json
 import math
 import os
 from importlib import import_module, util
-from typing import TYPE_CHECKING, Any, get_args
+from typing import TYPE_CHECKING, Any, cast, get_args
 from uuid import uuid4
 
 import torch
@@ -122,7 +122,7 @@ def _patch_engine_args_ai_qos() -> None:
             args.additional_config = additional_config
         return original(cls, args)
 
-    wrapped._ascend_ai_qos_wrapped = True
+    cast(Any, wrapped)._ascend_ai_qos_wrapped = True
     EngineArgs.from_cli_args = classmethod(wrapped)
 
 
