@@ -38,7 +38,10 @@ def init_speculator(
     if speculative_config.method in ("ngram", "ngram_gpu"):
         if req_states is None:
             raise ValueError("MRV2 n-gram speculative decoding requires request states")
-        from vllm.v1.worker.gpu.spec_decode.ngram.speculator import NgramGPUSpeculator
+        # Older vLLM pins lack this module; MRV2 n-gram requires upstream #40704.
+        from vllm.v1.worker.gpu.spec_decode.ngram.speculator import (  # type: ignore[import-not-found]
+            NgramGPUSpeculator,
+        )
 
         # MRV2 postprocess has already updated history. The MRV1 NPU kernel
         # appends sampled tokens itself and cannot be used here unchanged.
