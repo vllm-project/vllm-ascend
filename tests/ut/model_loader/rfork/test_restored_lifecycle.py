@@ -180,8 +180,9 @@ def test_fallback_reset_restores_ascend_globals_and_only_removes_new_dynamo_hook
     vllm_config = SimpleNamespace(compilation_config=SimpleNamespace())
     snapshot = rfork_helpers.loader._snapshot_process_global_model_state(vllm_config)
 
-    baseline_registry.append(object())
-    adaptor._registered_moe_layers = [object()]
+    discarded_layer = Module()
+    baseline_registry.append(ref(discarded_layer))
+    adaptor._registered_moe_layers = [ref(discarded_layer)]
     rfork_helpers.routed_experts_module.AscendRoutedExperts.moe_counter = 999
     dirty_caches = (object(), object(), object())
     (
