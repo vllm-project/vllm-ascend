@@ -815,16 +815,17 @@ def test_pcp_manager_skips_hidden_restore_before_last_pp_rank() -> None:
 
 
 @pytest.mark.parametrize("method", ["mtp", "eagle3", "dspark"])
+@pytest.mark.parametrize("draft_sample_method", ["greedy", "probabilistic"])
 @pytest.mark.parametrize(
     ("cudagraph_mode", "sparse_mla"),
     [(CUDAGraphMode.NONE, False), (CUDAGraphMode.NONE, True), (CUDAGraphMode.FULL_DECODE_ONLY, True)],
 )
 def test_validate_config_allows_supported_speculators(
-    method: str, cudagraph_mode: CUDAGraphMode, sparse_mla: bool
+    method: str, draft_sample_method: str, cudagraph_mode: CUDAGraphMode, sparse_mla: bool
 ) -> None:
     speculative_config = SimpleNamespace(
         method=method,
-        draft_sample_method="greedy",
+        draft_sample_method=draft_sample_method,
     )
     vllm_config = _make_pcp_config(cudagraph_mode, sparse_mla=sparse_mla)
     vllm_config.speculative_config = speculative_config
@@ -839,9 +840,6 @@ def test_validate_config_allows_supported_speculators(
     ("method", "draft_sample_method", "error"),
     [
         ("draft_model", "greedy", "supports speculative decoding only with"),
-        ("mtp", "random", "requires greedy draft sampling"),
-        ("eagle3", "random", "requires greedy draft sampling"),
-        ("dspark", "random", "requires greedy draft sampling"),
     ],
 )
 def test_validate_config_rejects_unsupported_speculator_options(
