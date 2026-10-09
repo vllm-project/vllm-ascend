@@ -264,7 +264,11 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             ratio_kwargs: dict[str, Any] = {"tokens_per_state": compression_ratio}
             spec = AscendMLAAttentionSpec(
                 block_size=spec.block_size,
-                num_heads=attn_module.num_heads,
+                num_heads=(
+                    spec.num_heads
+                    if vllm_config.model_config.hf_text_config.model_type == "kimi_linear"
+                    else attn_module.num_heads
+                ),
                 num_kv_heads=spec.num_kv_heads,
                 head_size=head_size,
                 dtype=dtype,
