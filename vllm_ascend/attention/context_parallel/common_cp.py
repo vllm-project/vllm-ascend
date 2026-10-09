@@ -108,6 +108,36 @@ class AscendMetadataForDecode:
     dcp_mtp_attn_mask: torch.Tensor = None
 
 
+def _mask_empty_kv_shards(
+    attn_output: torch.Tensor,
+    softmax_lse: torch.Tensor,
+    local_kv_seq_lens: list[int] | torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Turn an empty local KV shard into the online-softmax identity."""
+    if isinstance(local_kv_seq_lens, torch.Tensor):
+        seq_lens = local_kv_seq_lens.to(device=attn_output.device)
+    else:
+        seq_lens = torch.as_tensor(local_kv_seq_lens, device=attn_output.device)
+    num_rows = attn_output.shape[0]
+    if seq_lens.numel() > num_rows:
+        raise ValueError(
+            "local KV sequence lengths cannot exceed attention rows: "
+            f"{seq_lens.numel()} > {num_rows}"
+        )
+    if seq_lens.numel() < num_rows:
+        seq_lens = torch.cat(
+            [
+                seq_lens,
+                torch.zeros(num_rows - seq_lens.numel(), dtype=seq_lens.dtype, device=seq_lens.device),
+            ]
+        )
+    valid = seq_lens.reshape(-1, 1, 1) > 0
+    return (
+        torch.where(valid, attn_output, torch.zeros_like(attn_output)),
+        torch.where(valid, softmax_lse, torch.full_like(softmax_lse, float("-inf"))),
+    )
+
+
 def _process_attn_out_lse(attn_output: torch.Tensor, softmax_lse: torch.Tensor) -> torch.Tensor:
     pcp_size = get_pcp_group().world_size
     dcp_size = get_decode_context_model_parallel_world_size()
@@ -193,5 +223,9 @@ def _update_out_and_lse(out_list: torch.Tensor, lse_list: torch.Tensor) -> torch
         lse_final: shape = [batch_size, num_heads, 1]
     """
     lse_final = torch.logsumexp(lse_list, dim=0, keepdim=False)
-    out_final = torch.sum(torch.exp(lse_list - lse_final) * out_list, dim=0)
+    all_empty = torch.isneginf(lse_final)
+    safe_lse_final = torch.where(all_empty, torch.zeros_like(lse_final), lse_final)
+    weights = torch.exp(lse_list - safe_lse_final)
+    weights = torch.where(all_empty, torch.zeros_like(weights), weights)
+    out_final = torch.sum(weights * out_list, dim=0)
     return out_final, lse_final
