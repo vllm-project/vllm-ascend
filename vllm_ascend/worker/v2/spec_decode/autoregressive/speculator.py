@@ -20,6 +20,7 @@ import logging
 from collections.abc import Mapping
 from contextlib import contextmanager
 from copy import copy
+from inspect import signature
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -66,6 +67,9 @@ if TYPE_CHECKING:
     from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
 logger = logging.getLogger(__name__)
+
+# The verified vLLM main commit may predate the runtime-K interface.
+_SUPPORTS_RUNTIME_K = "num_speculative_tokens" in signature(AutoRegressiveSpeculator.propose).parameters
 
 
 class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveSpeculator):
@@ -306,6 +310,7 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: Any = None,
+        num_speculative_tokens: int | None = None,
     ):
         """Override GPU EagleSpeculator.propose for Ascend NPUs,
         because npu attention metadata needs more information,
@@ -313,6 +318,11 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         generate_draft.
         """
         self.input_batch = input_batch
+        runtime_kwargs = {}
+        if _SUPPORTS_RUNTIME_K:
+            runtime_kwargs["num_speculative_tokens"] = num_speculative_tokens
+        elif num_speculative_tokens is not None and num_speculative_tokens != self.num_speculative_steps:
+            raise ValueError("Runtime draft lengths require vLLM with the runtime-K interface (#57053)")
         # Replicated drafts use global tokens, unlike the PCP-local target.
         # Every DP rank must take the draft sync, including decode and idle ranks.
         sync_state = None if self.replicated_pcp else dp_sync
@@ -340,6 +350,7 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
                 skip_attn_for_dummy_run,
                 mm_inputs,
                 is_profile=is_profile,
+                **runtime_kwargs,
             )
 
     def set_attn(
@@ -422,6 +433,9 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
                 self.attn_groups,
                 self.kv_cache_config,
                 progress_bar_desc="Capturing decode CUDA graphs",
+                specialize_spec_tokens=(
+                    _SUPPORTS_RUNTIME_K and self.speculative_config.uses_dynamic_speculative_decoding()
+                ),
             )
 
     @torch.inference_mode()
@@ -455,10 +469,16 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         slot_mappings: dict[str, torch.Tensor] | None,
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+        num_speculative_steps: int | None = None,
     ) -> None:
         """Thin override: delegate to upstream single-step ``_generate_draft``,
         then apply Ascend-specific attention-metadata updates required by the
         FIA operator."""
+        runtime_kwargs = {}
+        if _SUPPORTS_RUNTIME_K:
+            runtime_kwargs["num_speculative_steps"] = (
+                self.num_speculative_steps if num_speculative_steps is None else num_speculative_steps
+            )
         super()._generate_draft(
             num_reqs,
             num_tokens_padded,
@@ -466,6 +486,7 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
             slot_mappings,
             num_tokens_across_dp,
             cudagraph_runtime_mode,
+            **runtime_kwargs,
         )
         if attn_metadata is not None:
             self._update_decode_attn_metadata(attn_metadata, 1, num_reqs)
@@ -477,6 +498,7 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         batch_desc: BatchExecutionDescriptor,
         num_tokens_across_dp: torch.Tensor | None,
         seq_lens_cpu_upper_bound: torch.Tensor | None = None,
+        num_speculative_steps: int | None = None,
     ) -> None:
         """Minimal override to handle the merged multi-step graph in FULL mode.
 
@@ -490,7 +512,14 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
             assert self.decode_cudagraph_manager is not None
             self.decode_cudagraph_manager.run_fullgraph(batch_desc)
             return
-        super()._multi_step_decode(num_reqs, skip_attn, batch_desc, num_tokens_across_dp, seq_lens_cpu_upper_bound)
+        runtime_kwargs = {}
+        if _SUPPORTS_RUNTIME_K:
+            runtime_kwargs["num_speculative_steps"] = (
+                self.num_speculative_steps if num_speculative_steps is None else num_speculative_steps
+            )
+        super()._multi_step_decode(
+            num_reqs, skip_attn, batch_desc, num_tokens_across_dp, seq_lens_cpu_upper_bound, **runtime_kwargs
+        )
 
     def _prefill(
         self,
@@ -590,6 +619,7 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         num_reqs_padded: int,
         num_tokens_padded: int,
         is_draft_model_prefill: bool,
+        num_speculative_steps: int | None = None,
     ):
         """Build draft_attn_metadatas for partial-merged draft graph."""
         attn_metadata = self.model_state.attn_metadata
@@ -608,7 +638,10 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
             assert prepared_attn_metadata is not None
             return [prepared_attn_metadata]
 
-        draft_attn_metadatas = self._init_decode_draft_attn_metadatas(attn_metadata, num_reqs_padded)
+        runtime_kwargs = {}
+        if num_speculative_steps is not None:
+            runtime_kwargs["num_speculative_steps"] = num_speculative_steps
+        draft_attn_metadatas = self._init_decode_draft_attn_metadatas(attn_metadata, num_reqs_padded, **runtime_kwargs)
 
         for i, per_step_attn_metadata in enumerate(draft_attn_metadatas):
             step = i + 1
@@ -617,10 +650,15 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
 
         return draft_attn_metadatas
 
-    def _init_decode_draft_attn_metadatas(self, attn_metadata: dict[str, Any] | None, num_reqs_padded: int):
+    def _init_decode_draft_attn_metadatas(
+        self,
+        attn_metadata: dict[str, Any] | None,
+        num_reqs_padded: int,
+        num_speculative_steps: int | None = None,
+    ):
         """Initialize per-step decode attention metadata for graph mode."""
         if attn_metadata is None:
-            return
+            return []
 
         # DSA and SFA own their per-step sparse-attention state in their
         # metadata builders and do not use draft graph metadata updates.
@@ -647,14 +685,17 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
                 step=1,
             )
             if attn_metadata is None:
-                return
+                return []
 
         attn_state = AscendAttentionState.DecodeOnly
 
         draft_attn_metadatas = []
         # attn_metadata is build in vllm's super class.
         # We need to update attn_state for each layer's metadata.
-        for seq_lens_cpu in self.input_buffers.draft_seq_lens_cpus:
+        seq_lens_cpus = self.input_buffers.draft_seq_lens_cpus
+        if num_speculative_steps is not None:
+            seq_lens_cpus = seq_lens_cpus[: max(0, num_speculative_steps - 1)]
+        for seq_lens_cpu in seq_lens_cpus:
             per_step_attn_metadata = {k: copy(v) for k, v in attn_metadata.items()}
 
             seq_lens_cpu = seq_lens_cpu[:num_reqs_padded]
@@ -720,10 +761,16 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         num_reqs_padded: int,
         draft_attn_metadata: dict[str, Any],
         is_draft_model_prefill: bool,
+        num_speculative_steps: int | None = None,
     ) -> list[dict[str, Any]]:
         """Build all draft steps' FIA parameters for a single graph update."""
         if self.use_dcp:
-            return self.build_fia_params_dcp(num_reqs_padded, draft_attn_metadata, is_draft_model_prefill)
+            return self.build_fia_params_dcp(
+                num_reqs_padded,
+                draft_attn_metadata,
+                is_draft_model_prefill,
+                num_speculative_steps=num_speculative_steps,
+            )
         layer_name, metadata = next(iter(draft_attn_metadata.items()))
         block_table = metadata.block_tables
         if is_draft_model_prefill:
@@ -739,7 +786,8 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         num_reqs = self.input_batch.num_reqs
         query_start_loc = list(range(1, num_reqs_padded + 1))
         fia_params: list[dict[str, Any]] = []
-        for step in range(1, self.num_speculative_steps):
+        num_steps = self.num_speculative_steps if num_speculative_steps is None else num_speculative_steps
+        for step in range(1, num_steps):
             seq_lens = [
                 min(int(seq_len) + step, self.max_model_len) for seq_len in self.input_batch.seq_lens_np[:num_reqs]
             ]
@@ -760,6 +808,7 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         num_reqs_padded: int,
         draft_attn_metadata: dict[str, Any],
         is_draft_model_prefill: bool,
+        num_speculative_steps: int | None = None,
     ) -> list[dict[str, Any]]:
         """Build all GQA DCP draft steps' history/current or cache parameters."""
         assert self.dcp_manager is not None
@@ -780,7 +829,8 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         num_reqs = self.input_batch.num_reqs
         query_start_loc = list(range(1, num_reqs_padded + 1))
         fia_params: list[dict[str, Any]] = []
-        for step in range(1, self.num_speculative_steps):
+        num_steps = self.num_speculative_steps if num_speculative_steps is None else num_speculative_steps
+        for step in range(1, num_steps):
             seq_lens = [
                 min(int(seq_len) + step, self.max_model_len) for seq_len in self.input_batch.seq_lens_np[:num_reqs]
             ]
