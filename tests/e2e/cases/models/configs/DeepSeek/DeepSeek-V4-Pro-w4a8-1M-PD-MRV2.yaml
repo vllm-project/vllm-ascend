@@ -2,6 +2,7 @@ test_name: "DeepSeek-V4-Pro-w4a8-1M-PD-MRV2"
 model: "Eco-Tech/DeepSeek-V4-Pro-0813-w4a8"
 num_nodes: 4
 npu_per_node: 16
+dp_load_balancing: external
 
 routing:
   type: "disaggregated_prefill"
