@@ -118,9 +118,6 @@ class HardwareCapability(Enum):
     LORA_CUSTOM_OPS = auto()
     # Allow MLAPO with native floating-point projection weights, not only quantized weights.
     MLAPO_NATIVE_WEIGHTS = auto()
-    # Run the repository's legacy mla_preprocess BF16 static/asymmetric W8A8 ABI.
-    # Callers must also check the model shape, normalization, and cache contract.
-    MLAPO_STATIC_W8A8 = auto()
     # Accept ``fullmesh_v2`` as the MC2 communication algorithm.
     MC2_FULLMESH_V2_COMM = auto()
     # Accept hierarchical MC2 communication, subject to its expert-count constraints.
@@ -273,7 +270,6 @@ _STANDARD_CAPABILITIES = frozenset(
 _A3_CAPABILITIES = _STANDARD_CAPABILITIES | {
     HardwareCapability.GMM_DEQUANT_SITU_QUANT,
     HardwareCapability.MC2_FULLMESH_V2_COMM,
-    HardwareCapability.MLAPO_STATIC_W8A8,
 }
 _DEFAULT_WORKER_CLS = "vllm_ascend.worker.worker.NPUWorker"
 _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyType(
@@ -288,11 +284,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             weight_layout_policy=WeightLayoutPolicy.CONFIGURABLE,
             moe_comm_policy=MoECommPolicy.CAPACITY_AND_EXPERT_DENSITY,
             quantization_backend_family=QuantizationBackendFamily.STANDARD,
-            capabilities=_STANDARD_CAPABILITIES
-            | {
-                HardwareCapability.MLAPO_STATIC_W8A8,
-                HardwareCapability.NPU_TOP_K_TOP_P,
-            },
+            capabilities=_STANDARD_CAPABILITIES | {HardwareCapability.NPU_TOP_K_TOP_P},
         ),
         AscendDeviceType.A3: HardwareProfile(
             _device_type=AscendDeviceType.A3,

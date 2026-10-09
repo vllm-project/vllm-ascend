@@ -53,17 +53,12 @@ _STANDARD_CAPABILITIES = frozenset(
 )
 
 _EXPECTED_CAPABILITIES = {
-    AscendDeviceType.A2: _STANDARD_CAPABILITIES
-    | {
-        HardwareCapability.MLAPO_STATIC_W8A8,
-        HardwareCapability.NPU_TOP_K_TOP_P,
-    },
+    AscendDeviceType.A2: _STANDARD_CAPABILITIES | {HardwareCapability.NPU_TOP_K_TOP_P},
     AscendDeviceType.A3: _STANDARD_CAPABILITIES
     | {
         HardwareCapability.CANN_MEGAMOE,
         HardwareCapability.GMM_DEQUANT_SITU_QUANT,
         HardwareCapability.MC2_FULLMESH_V2_COMM,
-        HardwareCapability.MLAPO_STATIC_W8A8,
         HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
         HardwareCapability.NPU_TOP_K_TOP_P,
     },
