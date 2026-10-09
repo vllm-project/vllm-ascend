@@ -188,7 +188,6 @@ class TestAscendSFAIndexerBackend(TestBase):
             k_li,
             None,
             indexer_metadata.slot_mapping,
-            indexer_attn_metadata=indexer_metadata,
         )
 
     def test_forward_skip_topk_still_persists_cache(self):
