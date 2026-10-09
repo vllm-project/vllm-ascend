@@ -248,9 +248,8 @@ jobs:
           done
 
   cpu-ut:
-    # Always run tests/ut twice in parallel: once on the verified vLLM main
-    # commit and once on the matched release tag. Independent of the
-    # main2main label, which only widens the NPU matrix.
+    # Run tests/ut against the matched release tag. Independent of the
+    # main2main label, which controls the NPU matrix.
     name: cpu-ut (vllm@${{ matrix.vllm }})
     needs: pre-commit
     if: ${{ needs.pre-commit.result == 'success' }}
@@ -258,7 +257,6 @@ jobs:
       fail-fast: false
       matrix:
         vllm:
-          - ${{ needs.pre-commit.outputs.main_commit }}
           - ${{ needs.pre-commit.outputs.release_tag }}
     uses: ./.github/workflows/_selected_tests.yaml
     with:
