@@ -7,14 +7,16 @@ from unittest.mock import Mock, patch
 
 import pytest
 import torch
+from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.context_parallel import mla_cp
+from vllm_ascend.attention.context_parallel.common_cp import CPKVScope
 from vllm_ascend.attention.context_parallel.mla_cp import (
     AscendMLADCPDecodeMetadata,
     AscendMlaDCPImpl,
     AscendMlaDCPMetadataBuilder,
     DCPChunkedContextMetadata,
-    MLASplitAttentionKind,
 )
 from vllm_ascend.attention.mla_v1 import (
     AscendMLADecodeMetadata,
@@ -39,69 +41,97 @@ def test_mla_dcp_extends_v1_backend() -> None:
     assert {"cp_seq_len", "dcp_mtp_attn_mask"} <= dcp_fields
 
 
-def test_mla_dcp_builds_missing_metadata_for_mixed_batch() -> None:
-    builder = AscendMlaDCPMetadataBuilder.__new__(AscendMlaDCPMetadataBuilder)
-    builder.dcp_size = 2
-    builder.cp_local_block_size = 128
-    builder.num_decodes = 1
-    builder.seq_lens = torch.tensor([257, 400], dtype=torch.int32)
-    builder.query_lens = torch.tensor([1, 100], dtype=torch.int32)
-    common = SimpleNamespace(context_parallel_metadata=None, max_query_len=100)
-
-    metadata = builder._require_dcp_metadata(common)
-
-    assert metadata.num_computed_tokens_of_dcp.tolist() == [[129, 128], [172, 128]]
-    assert metadata.query_lens_cpu.tolist() == [1, 100]
-    assert metadata.max_query_len == 100
-    assert builder.seq_lens.tolist() == [257, 400]
-    assert common.context_parallel_metadata is metadata
-
-
-def test_mla_dcp_preserves_runner_metadata() -> None:
-    builder = AscendMlaDCPMetadataBuilder.__new__(AscendMlaDCPMetadataBuilder)
-    metadata = SimpleNamespace(num_computed_tokens_of_dcp=[[128, 128]])
-    common = SimpleNamespace(context_parallel_metadata=metadata)
-    assert builder._require_dcp_metadata(common) is metadata
+@pytest.mark.parametrize("dcp_size", [1, 8])
+def test_mla_dcp_passes_runner_v2_cp_compatibility(dcp_size) -> None:
+    group = SimpleNamespace(world_size=dcp_size, rank_in_group=0)
+    with patch("vllm.distributed.parallel_state.get_dcp_group", return_value=group):
+        impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
+    assert impl.need_to_return_lse_for_decode == (dcp_size > 1)
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=dcp_size,
+            cp_kv_cache_interleave_size=1,
+        ),
+        speculative_config=None,
+    )
+    with patch(
+        "vllm.v1.worker.cp_utils.get_layers_from_vllm_config",
+        return_value={"attention": SimpleNamespace(impl=impl)},
+    ):
+        check_attention_cp_compatibility(config)
 
 
-def test_mla_dcp_decode_metadata_separates_history_and_preserves_padded_queries() -> None:
+@pytest.mark.parametrize("num_decodes", [1, 2], ids=["v1-padding", "v2-empty-row"])
+def test_mla_dcp_consumes_local_lengths_and_only_partitions_history(num_decodes) -> None:
+    lengths = torch.tensor([20, 0][:num_decodes], dtype=torch.int32)
     decode = AscendMLADCPDecodeMetadata(
-        input_positions=torch.arange(4),
-        block_table=torch.ones((1, 2), dtype=torch.int32),
-        seq_lens=torch.tensor([20]),
+        input_positions=torch.arange(4 * num_decodes),
+        block_table=torch.ones((num_decodes, 2), dtype=torch.int32),
+        seq_lens=lengths,
         max_seq_lens=20,
-        seq_lens_list=[20],
+        seq_lens_list=lengths.tolist(),
         actual_seq_lengths_q=[4, 8],
     )
-    mtp_mask = torch.zeros((2, 8, 32), dtype=torch.bool)
-    dcp_metadata = SimpleNamespace(
-        draft_cp_seq_len=torch.tensor([12, 11], dtype=torch.int32),
-        num_computed_tokens_of_dcp=[[12, 8]],
-        dcp_mtp_attn_mask=mtp_mask,
-    )
     builder = AscendMlaDCPMetadataBuilder.__new__(AscendMlaDCPMetadataBuilder)
-    builder.num_decodes = 1
+    builder.num_decodes = num_decodes
     builder.dcp_size = 2
     builder.dcp_rank = 0
     builder.cp_local_block_size = 4
-    builder.query_lens = torch.tensor([4, 4])
-    builder._require_dcp_metadata = lambda _metadata: dcp_metadata
-
-    with patch.object(
-        AscendMLAMetadataBuilder,
-        "build_decode_metadata",
-        return_value=decode,
+    builder.seq_lens = lengths
+    builder.query_lens = torch.tensor([4, 4], dtype=torch.int32)
+    # A sentinel distinct from recomputing total lengths proves producer ownership.
+    common = SimpleNamespace(dcp_local_seq_lens_cpu=torch.tensor([11, 0], dtype=torch.int32))
+    with (
+        patch.object(AscendMLAMetadataBuilder, "build_decode_metadata", return_value=decode),
+        patch.object(mla_cp, "get_dcp_local_seq_lens", wraps=mla_cp.get_dcp_local_seq_lens) as partition,
     ):
-        result = builder.build_decode_metadata(
-            common_prefix_len=0,
-            common_attn_metadata=SimpleNamespace(),
-        )
-
+        result = builder.build_decode_metadata(0, common)
+    partition.assert_called_once()
+    assert partition.call_args.args[0].tolist() == [16, 0][:num_decodes]
     assert result is decode
-    assert result.cp_seq_len.tolist() == [12]
+    assert result.cp_seq_len == [11, 0][:num_decodes]
     assert result.cp_history_seq_len == [8, 0]
     assert result.actual_seq_lengths_q == [4, 8]
     assert result.dcp_mtp_attn_mask is None
+
+
+@pytest.mark.parametrize("num_prefills,dcp_size", [(1, 2), (31, 8)])
+def test_mla_dcp_v2_mixed_batch_survives_base_decode_length_slice(num_prefills, dcp_size) -> None:
+    builder = AscendMlaDCPMetadataBuilder.__new__(AscendMlaDCPMetadataBuilder)
+    builder.num_decodes = 1
+    builder.num_decode_tokens = 1
+    builder.num_actual_tokens = 1 + 5 * num_prefills
+    builder.dcp_size = dcp_size
+    builder.dcp_rank = 0
+    builder.cp_local_block_size = 1
+    builder.seq_lens = torch.tensor([11] + [18] * num_prefills, dtype=torch.int32)
+    builder.query_lens = torch.tensor([1] + [5] * num_prefills, dtype=torch.int32)
+    builder.block_table = torch.ones((1 + num_prefills, 2), dtype=torch.int32)
+    builder.graph_pad_size = -1
+    builder.use_mla_rope = False
+    builder.attn_mask_builder = Mock()
+    builder.nope_zero_rope_cache = None
+    common = SimpleNamespace(
+        context_parallel_metadata=None,
+        num_reqs=1 + num_prefills,
+        dcp_local_seq_lens_cpu=torch.tensor(
+            [(length + dcp_size - 1) // dcp_size for length in [11] + [18] * num_prefills],
+            dtype=torch.int32,
+        ),
+        query_start_loc_cpu=torch.cat([torch.zeros(1, dtype=torch.int32), builder.query_lens.cumsum(0)]),
+        positions=torch.arange(builder.num_actual_tokens),
+    )
+
+    # Exercise the real base builder, which slices seq_lens to decodes but
+    # deliberately retains the complete mixed-batch query_lens tensor.
+    result = builder.build_decode_metadata(0, common)
+
+    assert result.cp_seq_len == [(11 + dcp_size - 1) // dcp_size]
+    assert result.cp_history_seq_len == [(10 + dcp_size - 1) // dcp_size]
+    assert result.actual_seq_lengths_q == [1]
+    assert builder.seq_lens.tolist() == [11]
+    assert builder.query_lens.tolist() == [1] + [5] * num_prefills
 
 
 def test_mla_dcp_reorg_decode_query_gathers_fused_query() -> None:
@@ -167,7 +197,7 @@ def test_mla_dcp_uses_padded_local_chunk_lengths() -> None:
 
 @patch(
     "vllm_ascend.attention.context_parallel.mla_cp._EXTRA_CTX",
-    SimpleNamespace(is_draft_model=False, capturing=False),
+    SimpleNamespace(is_draft_model=False, is_draft_model_prefill=False, capturing=False),
 )
 @patch("vllm_ascend.attention.context_parallel.mla_cp.torch_npu.npu_fused_infer_attention_score")
 def test_mla_dcp_mixed_cache_hit_batch_uses_decode_bsnd_metadata(mock_fia) -> None:
@@ -179,7 +209,7 @@ def test_mla_dcp_mixed_cache_hit_batch_uses_decode_bsnd_metadata(mock_fia) -> No
     impl.qk_rope_head_dim = 2
     impl.scale = 1.0
     impl.speculative_config = SimpleNamespace(num_speculative_tokens=3)
-    impl._merge_dcp_attention_output = lambda output, _lse, _rank: output
+    impl._merge_dcp_attention_output = lambda output, _lse: output
     impl._v_up_proj_batch_major = lambda output: output
 
     decode = AscendMLADCPDecodeMetadata(
@@ -238,7 +268,7 @@ def test_mla_dcp_mixed_cache_hit_batch_uses_decode_bsnd_metadata(mock_fia) -> No
 
 @patch(
     "vllm_ascend.attention.context_parallel.mla_cp._EXTRA_CTX",
-    SimpleNamespace(is_draft_model=False, capturing=False),
+    SimpleNamespace(is_draft_model=False, is_draft_model_prefill=False, capturing=False),
 )
 @patch("vllm_ascend.attention.context_parallel.mla_cp.torch_npu.npu_fused_infer_attention_score")
 def test_mla_dcp_uses_native_global_query_heads_for_fia(mock_fia) -> None:
@@ -253,7 +283,7 @@ def test_mla_dcp_uses_native_global_query_heads_for_fia(mock_fia) -> None:
 
     merged = {}
 
-    def merge(output, softmax_lse, _rank):
+    def merge(output, softmax_lse):
         merged["output_shape"] = output.shape
         merged["softmax_lse_shape"] = softmax_lse.shape
         return output
@@ -316,6 +346,25 @@ def test_mla_dcp_uses_native_global_query_heads_for_fia(mock_fia) -> None:
 
 
 @pytest.mark.parametrize(
+    "use_spec_decode,is_draft,is_prefill,expected",
+    [
+        pytest.param(True, False, False, True, id="speculative-target"),
+        pytest.param(True, True, False, False, id="draft-decode"),
+        pytest.param(False, True, True, True, id="draft-prefill"),
+    ],
+)
+def test_mla_split_selection_matches_shared_policy(use_spec_decode, is_draft, is_prefill, expected):
+    impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
+    impl.speculative_config = object() if use_spec_decode else None
+    metadata = SimpleNamespace(causal=True, decode=SimpleNamespace(actual_seq_lengths_q=[1, 2]))
+    with patch(
+        "vllm_ascend.attention.context_parallel.mla_cp._EXTRA_CTX",
+        SimpleNamespace(is_draft_model=is_draft, is_draft_model_prefill=is_prefill, capturing=True),
+    ):
+        assert impl._decode_requires_current_kv(metadata) is expected
+
+
+@pytest.mark.parametrize(
     "dcp_size,dcp_rank,workspace_sizes,cached_size",
     [
         (1, 0, None, None),
@@ -327,14 +376,16 @@ def test_mla_dcp_uses_native_global_query_heads_for_fia(mock_fia) -> None:
         (2, 1, (64, 128), 256),
     ],
 )
+@pytest.mark.parametrize("pcp_size", [1, 2])
 @pytest.mark.parametrize("history_dtype", [torch.bfloat16, torch.float16, torch.float32])
 def test_split_decode_packs_on_main_overlapping_current_attention(
-    dcp_size, dcp_rank, workspace_sizes, cached_size, history_dtype
+    dcp_size, dcp_rank, workspace_sizes, cached_size, history_dtype, pcp_size
 ):
     import vllm_ascend.attention.context_parallel.mla_cp as mla_cp
 
     impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
     impl.scale = 0.5
+    impl.speculative_config = None
     impl.num_heads = 2
     impl.num_kv_heads = 1
     impl.kv_lora_rank = 4
@@ -343,8 +394,15 @@ def test_split_decode_packs_on_main_overlapping_current_attention(
     impl.dcp_rank = dcp_rank
     impl.dcp_device_group = object()
     impl.dcp_group = SimpleNamespace(unique_name="dcp-test")
-    q_nope = torch.arange(2 * 2 * dcp_size * 4).float().view(2, 2 * dcp_size, 4)
-    q_pe = torch.zeros(2, 2 * dcp_size, 2)
+    if pcp_size > dcp_size:
+        pytest.skip("PCP ranks belong to the physical DCP group")
+    tp_size = dcp_size // pcp_size
+    tp_rank = dcp_rank % tp_size
+    impl.pcp_group = SimpleNamespace(world_size=pcp_size, unique_name="pcp-test")
+    impl.tp_group = SimpleNamespace(world_size=tp_size, rank_in_group=tp_rank, unique_name="tp-test")
+    query_head_count = impl.num_heads * tp_size
+    q_nope = torch.arange(2 * query_head_count * 4).float().view(2, query_head_count, 4)
+    q_pe = torch.zeros(2, query_head_count, 2)
     current_k = torch.ones(2, 1, 4)
     current_pe = torch.ones(2, 1, 2)
     decode = AscendMLADCPDecodeMetadata(
@@ -357,8 +415,8 @@ def test_split_decode_packs_on_main_overlapping_current_attention(
         cp_history_seq_len=[2],
     )
     decode.attn_mask = torch.zeros(2, 2, dtype=torch.bool)
-    history_output = torch.ones(2, 2 * dcp_size, 4, dtype=history_dtype)
-    history_lse = torch.zeros(2, 2 * dcp_size, 1)
+    history_output = torch.ones(2, query_head_count, 4, dtype=history_dtype)
+    history_lse = torch.zeros(2, query_head_count, 1)
     current_output = torch.full((2, 2, 4), 3.0)
     current_lse = torch.zeros(2, 2, 1)
     transferred = torch.ones(dcp_size, 2, 2, 5)
@@ -403,10 +461,10 @@ def test_split_decode_packs_on_main_overlapping_current_attention(
         if workspace_sizes is not None:
             assert set(graph_params.workspaces) == {2}
             assert graph_params.workspaces[2].numel() == (cached_size or max(workspace_sizes))
-        expected_stream = "main" if kwargs["attention_kind"] == MLASplitAttentionKind.HISTORY else "attn"
+        expected_stream = "main" if kwargs["attention_kind"] == CPKVScope.HISTORY else "attn"
         assert active[0] == expected_stream
         events.append(kwargs["attention_kind"])
-        if kwargs["attention_kind"] == MLASplitAttentionKind.HISTORY:
+        if kwargs["attention_kind"] == CPKVScope.HISTORY:
             torch.testing.assert_close(q, q_nope)
             torch.testing.assert_close(q_rope, q_pe)
             assert kwargs["actual_seq_lengths_kv"] == [2]
@@ -416,7 +474,7 @@ def test_split_decode_packs_on_main_overlapping_current_attention(
             assert kwargs["attn_mask"] is None
             assert kwargs["sparse_mode"] == 0
             return history_output, history_lse
-        start = dcp_rank * impl.num_heads
+        start = (tp_rank if pcp_size > 1 else dcp_rank) * impl.num_heads
         torch.testing.assert_close(q, q_nope[:, start : start + impl.num_heads])
         torch.testing.assert_close(q_rope, q_pe[:, start : start + impl.num_heads])
         torch.testing.assert_close(k, current_k)
@@ -429,11 +487,15 @@ def test_split_decode_packs_on_main_overlapping_current_attention(
         assert kwargs["sparse_mode"] == 3
         return current_output, current_lse
 
-    def communicate(out, lse, size, scatter_dim, group_name, defer_combine):
+    def communicate(out, lse, size, scatter_dim, group_name, pcp_group_name=None, defer_combine=False):
         assert active[0] == "main"
         assert out is history_output and lse is history_lse
-        assert size == dcp_size and scatter_dim == 1 and defer_combine
-        assert group_name == ("dcp-test" if dcp_size > 1 else "")
+        assert size == tp_size and scatter_dim == 1 and defer_combine
+        if pcp_size > 1:
+            assert group_name == "tp-test" and pcp_group_name == "pcp-test"
+        else:
+            assert group_name == ("dcp-test" if dcp_size > 1 else "")
+            assert pcp_group_name is None
         events.append("history_collective")
         return transferred
 
@@ -457,16 +519,18 @@ def test_split_decode_packs_on_main_overlapping_current_attention(
     impl._v_up_proj_batch_major = Mock(side_effect=lambda x: x)
     with (
         patch.object(
-            mla_cp, "_EXTRA_CTX", SimpleNamespace(capturing=workspace_sizes is not None, is_draft_model=False)
+            mla_cp,
+            "_EXTRA_CTX",
+            SimpleNamespace(capturing=workspace_sizes is not None, is_draft_model=False, is_draft_model_prefill=False),
         ),
         patch.object(mla_cp, "get_graph_params", return_value=graph_params),
         patch.object(mla_cp.torch_npu, "_npu_fused_infer_attention_score_get_max_workspace", workspace_query),
-        patch.object(mla_cp, "_dcp_mtp_comm_stream", return_value=attn),
+        patch.object(mla_cp, "cp_decode_comm_stream", return_value=attn),
         patch.object(torch.npu, "current_stream", return_value=main),
         patch.object(torch.npu, "stream", side_effect=on_stream),
         patch.object(torch.Tensor, "record_stream", autospec=True) as record_stream,
-        patch("torch.ops.vllm.sfa_dcp_a2a_fused", side_effect=communicate) as history_update,
-        patch.object(mla_cp, "fused_sfa_dcp_lse_combine", side_effect=merge) as update,
+        patch("torch.ops.vllm.dcp_a2a_fused", side_effect=communicate) as history_update,
+        patch.object(mla_cp, "fused_dcp_lse_combine", side_effect=merge) as update,
         patch("torch_npu.npu_attention_update", side_effect=AssertionError("unexpected NPU update")),
     ):
         metadata = SimpleNamespace(decode=decode, causal=True)
@@ -490,10 +554,10 @@ def test_split_decode_packs_on_main_overlapping_current_attention(
     update.assert_called_once()
     assert record_stream.call_count == 7
     assert events == [
-        MLASplitAttentionKind.HISTORY,
+        CPKVScope.HISTORY,
         "history_ready",
         ("attn_wait", "ready"),
-        MLASplitAttentionKind.CURRENT,
+        CPKVScope.CURRENT,
         "attn_done",
         "history_collective",
         ("main_wait", "done"),

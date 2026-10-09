@@ -59,16 +59,6 @@ FP8_METHOD = "fp8"
 SOC_VERSION_INFERENCE_SERIES = ["Ascend310P3"]
 REGISTERED_ASCEND_OPS = {}
 
-_SHARED_BACKING_KV_CONNECTORS = frozenset(
-    {
-        "ExampleHiddenStatesConnector",
-        "MooncakeConnectorV1",
-        "MooncakeConnectorV2",
-        "MooncakeHybridConnector",
-        "MooncakePullConnector",
-    }
-)
-
 ACL_FORMAT_FRACTAL_ND = 2
 ACL_FORMAT_FRACTAL_NZ = 29
 
@@ -78,9 +68,12 @@ _CURRENT_STREAM = None
 _GLOBAL_STREAM = None
 _SHARED_EXPERTS_CALCULATION_STREAM = None
 _CP_CHUNKEDPREFILL_COMM_STREAM = None
+_CP_DECODE_COMM_STREAM = None
 _ASCEND_CUSTOMOP_IS_REIGISTERED = False
 _DEFAULT_BUFFER_SIZE = 200
 _MIN_DP_BUFFER_SIZE = 50
+SLEEP_LIFECYCLE_ANCHOR_GROUP_NAME = "sleep_lifecycle_anchor"
+SLEEP_LIFECYCLE_ANCHOR_BUFFER_SIZE = 1
 _DYNAMIC_EPLB_BUFFER_SIZE = 100
 _IS_MOE_MODEL = None
 _IS_DRAFTER_MOE_MODEL = None
@@ -92,13 +85,6 @@ _CUSTOM_OP_BASE_DIR = (
     os.path.dirname(__file__) if os.path.isabs(__file__) else os.path.abspath(os.path.dirname(__file__))
 )
 _IS_ROT_WEIGHT_USED = None
-
-
-def kv_transfer_supports_shared_backing(kv_transfer_config: Any | None) -> bool:
-    """Whether a KV connector can consume standardized shared backing."""
-    if kv_transfer_config is None:
-        return True
-    return getattr(kv_transfer_config, "kv_connector", None) in _SHARED_BACKING_KV_CONNECTORS
 
 
 def extract_dsv4_layer_index(config: Any, layer_name: str) -> int:
@@ -130,6 +116,30 @@ def get_dsv4_compress_ratio(config: Any, layer_idx: int) -> int:
     if compress_ratios is None or layer_idx >= len(compress_ratios):
         return 0
     return compress_ratios[layer_idx]
+
+
+def dsv4_skips_indexer_topk(config: Any, layer_idx: int, pp_start_layer: int | None = None) -> bool:
+    """Whether a main-model V4 layer reuses another Indexer's Top-K indices.
+
+    Each PP stage anchors its local cache at its first C4 layer. Later C4
+    layers keep the configured global reuse schedule.
+    """
+    if not getattr(config, "use_index_cache", False) or get_dsv4_compress_ratio(config, layer_idx) != 4:
+        return False
+    compress_ratios = getattr(config, "compress_ratios", None) or []
+    indexer_seq_idx = sum(ratio == 4 for ratio in compress_ratios[:layer_idx])
+    pattern = getattr(config, "index_topk_pattern", None)
+    if pattern is None:
+        freq = getattr(config, "index_topk_freq", 1)
+        skip_topk = max(indexer_seq_idx - 1, 0) % freq != 0
+    else:
+        assert pattern[0] == "F", "index_topk_pattern must start with 'F'"
+        skip_topk = indexer_seq_idx < len(pattern) and pattern[indexer_seq_idx] == "S"
+    if skip_topk and pp_start_layer is not None:
+        # C128 and dense stage-start layers cannot initialize this buffer.
+        # Override only the first local C4, not the rest of the reuse group.
+        return any(ratio == 4 for ratio in compress_ratios[pp_start_layer:layer_idx])
+    return skip_topk
 
 
 def is_deepseek_v41(hf_config: Any) -> bool:
@@ -198,6 +208,16 @@ def model_uses_sfa_sparse(model_config: Any | None) -> bool:
     )
 
 
+def should_reuse_topk(config: Any, layer_id: int) -> bool:
+    """Return whether a layer reuses Top-K indices computed earlier."""
+    index_topk_pattern = getattr(config, "index_topk_pattern", None)
+    if index_topk_pattern is None:
+        index_topk_freq = getattr(config, "index_topk_freq", 1)
+        index_skip_topk_offset = getattr(config, "index_skip_topk_offset", 2)
+        return max(layer_id - index_skip_topk_offset + 1, 0) % index_topk_freq != 0
+    return 0 <= layer_id < len(index_topk_pattern) and index_topk_pattern[layer_id] == "S"
+
+
 def enable_sfa_dcp_replicated_indexer(vllm_config: VllmConfig | None = None) -> bool:
     if vllm_config is None:
         from vllm.config import get_current_vllm_config
@@ -212,6 +232,7 @@ def clear_enable_sp():
     enable_dsa_cp.cache_clear()
     enable_dsa_cp_full_o_proj.cache_clear()
     enable_pcp_o_proj_weight_sharding.cache_clear()
+    enable_pcp_embedding_lmhead_weight_sharding.cache_clear()
     _libc_getenv.cache_clear()
 
 
@@ -279,14 +300,7 @@ def is_rc_device() -> bool:
     return _IS_RC_DEVICE
 
 
-def _mark_op_side_effectful(op: Any) -> None:
-    torch.fx.node.has_side_effect(op)
-    default_overload = getattr(op, "default", None)
-    if default_overload is not None:
-        torch.fx.node.has_side_effect(default_overload)
-
-
-def _ensure_device_print_registered() -> None:
+def register_device_print() -> None:
     global _DEVICE_PRINT_OP_REGISTERED
 
     if _DEVICE_PRINT_OP_REGISTERED:
@@ -299,9 +313,10 @@ def _ensure_device_print_registered() -> None:
         )
 
     try:
-        # Mark device_print ops side-effectful so FX/Inductor does not DCE or reorder these debug callbacks.
-        _mark_op_side_effectful(torch.ops._C_ascend.device_print)
-        _mark_op_side_effectful(torch.ops._C_ascend.device_print_tensor)
+        from torch._higher_order_ops.effects import _EffectType, _register_effectful_op
+
+        _register_effectful_op(torch.ops._C_ascend.device_print.default, _EffectType.ORDERED)
+        _register_effectful_op(torch.ops._C_ascend.device_print_tensor.default, _EffectType.ORDERED)
         _DEVICE_PRINT_OP_REGISTERED = True
     except AttributeError as exc:
         raise RuntimeError(
@@ -323,7 +338,8 @@ def device_print(
 
     Supported usage:
 
-        >>> from vllm_ascend.utils import device_print
+        >>> from vllm_ascend.utils import device_print, register_device_print
+        >>> register_device_print()
         >>> device_print(x)
         >>> device_print("already formatted text")
         >>> device_print(7)
@@ -345,8 +361,6 @@ def device_print(
         >>> device_print(f"x = {x}")
         >>> device_print("x = " + str(x))
     """
-    _ensure_device_print_registered()
-
     if isinstance(value, torch.Tensor):
         torch.ops._C_ascend.device_print_tensor(value)
     elif isinstance(value, (str, int, float, bool, torch.dtype, torch.device, torch.Size)):
@@ -681,6 +695,13 @@ def cp_chunkedprefill_comm_stream() -> torch.npu.Stream:
     return _CP_CHUNKEDPREFILL_COMM_STREAM
 
 
+def cp_decode_comm_stream() -> torch.npu.Stream:
+    global _CP_DECODE_COMM_STREAM
+    if _CP_DECODE_COMM_STREAM is None:
+        _CP_DECODE_COMM_STREAM = torch_npu.npu.Stream()
+    return _CP_DECODE_COMM_STREAM
+
+
 def attention_calculation_stream() -> torch.npu.Stream:
     global _ATNN_CALCULATION_STREAM
     if _ATNN_CALCULATION_STREAM is None:
@@ -695,30 +716,25 @@ def adapt_patch(is_global_patch: bool = False):
         from vllm_ascend.patch import worker  # noqa: F401
 
 
-def setup_ascend_local_comm_res(local_rank: int, kv_transfer_config: Any | None) -> None:
-    """Load the local A5 endpoint config into ASCEND_LOCAL_COMM_RES."""
+def setup_ascend_local_comm_res(user_device_id: int, kv_transfer_config: Any | None) -> None:
+    """Load the physical NPU endpoint config after binding a runtime device.
+
+    user_device_id must be the ordinal passed to torch.npu.set_device, not
+    the vLLM local rank. Endpoint filenames use host physical device IDs.
+    """
     if kv_transfer_config is None:
         return
-
-    visible_devices = os.getenv("ASCEND_RT_VISIBLE_DEVICES")
-    if visible_devices is None:
-        from vllm_ascend.cpu_binding import DeviceInfo
-
-        devices = sorted([int(x) for x in DeviceInfo.get_npu_map_info()])
-    else:
-        devices = [int(x) for x in visible_devices.split(",") if x.strip()]
 
     extra_config = kv_transfer_config.kv_connector_extra_config or {}
     local_comm_res_path = extra_config.get("ascend_local_comm_res_path")
     if not local_comm_res_path:
         return
 
-    if not devices:
-        raise ValueError("No NPU devices found or specified in ASCEND_RT_VISIBLE_DEVICES.")
-    if local_rank < 0 or local_rank >= len(devices):
-        raise ValueError(f"local_rank {local_rank} is out of bounds for the available NPU devices: {devices}")
+    # Import lazily: the platform module also imports utils.
+    from vllm.platforms import current_platform
 
-    local_comm_res_file = os.path.join(local_comm_res_path, f"ub_endpoint_npu_{devices[local_rank]}.json")
+    npu_id = current_platform.visible_device_id_to_physical_device_id(user_device_id)
+    local_comm_res_file = os.path.join(local_comm_res_path, f"ub_endpoint_npu_{npu_id}.json")
     try:
         with open(local_comm_res_file) as f:
             data = json.load(f)
@@ -744,7 +760,7 @@ def vllm_version_is(target_vllm_version: str):
 
         vllm_version = vllm.__version__
     try:
-        # Strip any PEP 440 local version segment (e.g. "0.29.0+empty" built
+        # Strip any PEP 440 local version segment (e.g. "0.30.0+empty" built
         # with VLLM_TARGET_DEVICE=empty): it is a build artifact and must not
         # change the version identity for `vllm_version_is` comparisons.
         parsed = Version(vllm_version)
@@ -850,7 +866,6 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
     from vllm_ascend.ops.fused_moe.gate_linear import AscendGateLinear
     from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
-    from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
     from vllm_ascend.ops.layernorm import AscendFusedRMSNormGated, AscendGemmaRMSNorm, AscendRMSNorm, AscendRMSNormGated
     from vllm_ascend.ops.linear import (
         AscendColumnParallelLinear,
@@ -866,6 +881,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     from vllm_ascend.ops.rotary_embedding import (
         AscendApplyRotaryEmb,
         AscendDeepseekScalingRotaryEmbedding,
+        AscendGemma4RotaryEmbedding,
         AscendMRotaryEmbedding,
         AscendRotaryEmbedding,
         AscendYaRNRotaryEmbedding,
@@ -882,6 +898,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "SiluAndMul": AscendSiluAndMul,
         "SiluAndMulClamp": AscendSiluAndMulWithClamp,
         "RotaryEmbedding": AscendRotaryEmbedding,
+        "Gemma4RotaryEmbedding": AscendGemma4RotaryEmbedding,
         "MRotaryEmbedding": AscendMRotaryEmbedding,
         "ColumnParallelLinear": AscendColumnParallelLinear,
         "RowParallelLinear": AscendRowParallelLinear,
@@ -903,16 +920,14 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "Conv3dLayer": AscendConv3dLayer,
         "RelPosAttention": AscendRelPosAttention,
         "CustomQwen2Decoder": AscendCustomQwen2Decoder,
-        "GatedDeltaNetAttention": AscendGatedDeltaNetAttention,
         "BailingMoELinearAttention": AscendBailingMoELinearAttention,
         "MoERunner": AscendMoERunner,
         "RoutedExperts": AscendRoutedExperts,
         "GateLinear": AscendGateLinear,
     }
-    if not vllm_version_is("0.29.0"):
-        from vllm_ascend.ops.kimi_mla import AscendKimiK3MultiHeadLatentAttention
+    from vllm_ascend.ops.kimi_mla import AscendKimiK3MultiHeadLatentAttention
 
-        REGISTERED_ASCEND_OPS["KimiK3MultiHeadLatentAttentionWrapper"] = AscendKimiK3MultiHeadLatentAttention
+    REGISTERED_ASCEND_OPS["KimiK3MultiHeadLatentAttentionWrapper"] = AscendKimiK3MultiHeadLatentAttention
 
     if vllm_config is None:
         try:
@@ -957,6 +972,11 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
                 "RoutedExperts": AscendRoutedExperts310,
             }
         )
+    else:
+        from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
+
+        REGISTERED_ASCEND_OPS["GatedDeltaNetAttention"] = AscendGatedDeltaNetAttention
+
     for name, op_cls in REGISTERED_ASCEND_OPS.items():
         CustomOp.register_oot(_decorated_op_cls=op_cls, name=name)
 
@@ -966,6 +986,29 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
 
 def lmhead_tp_enable() -> bool:
     return get_ascend_config().finegrained_tp_config.lmhead_tensor_parallel_size > 0
+
+
+def lmhead_tp_max_num_logits(max_num_reqs: int, logits_rows_per_req: int) -> int:
+    """Row capacity every rank of the lmhead-TP group must agree on;
+    cross-rank drift desyncs the collectives and hangs."""
+    return max_num_reqs * logits_rows_per_req
+
+
+def lmhead_tp_pad_rows(rows: torch.Tensor, capacity: int, formula: str) -> torch.Tensor:
+    """Zero-pad the leading dim of ``rows`` up to ``capacity`` — the one pad
+    primitive both head paths share; for 1-D indices the zero padding is the
+    safe row-0 gather index, overrun fails fast with ``formula`` named."""
+    num_rows = rows.shape[0]
+    if num_rows > capacity:
+        raise ValueError(
+            f"lmhead TP rows ({num_rows}) exceed the group-agreed capacity "
+            f"({capacity} = {formula}); the capacity formula no longer matches "
+            "upstream logits production."
+        )
+    if num_rows == capacity:
+        return rows
+    padding = (0, 0, 0, capacity - num_rows) if rows.dim() == 2 else (0, capacity - num_rows)
+    return torch.nn.functional.pad(rows, padding)
 
 
 def embedding_tp_enable() -> bool:
@@ -1173,6 +1216,8 @@ def get_hccl_config_for_pg_options(group_name: str) -> dict | None:
     # result in memory misalignment problems.
     if group_name and "mc2" in group_name:
         return None
+    if group_name == SLEEP_LIFECYCLE_ANCHOR_GROUP_NAME:
+        return {"hccl_buffer_size": SLEEP_LIFECYCLE_ANCHOR_BUFFER_SIZE}
     hccl_config_map = {
         "dp": {"hccl_buffer_size": calculate_dp_buffer_size()},
         "dynamic_eplb": {"hccl_buffer_size": _DYNAMIC_EPLB_BUFFER_SIZE},
@@ -1351,6 +1396,20 @@ def has_layer_idx(model_instance: torch.nn.Module) -> bool:
     return hasattr(model_instance, "model") and hasattr(model_instance.model, "start_layer")
 
 
+# C8_MXFP (FP8 KV + E8M0 scales) on Ascend A5 uses 512-token kernel blocks for
+# the QFA path (the QFA D=256 requirement doc allows block sizes 512/1024).
+A5_C8_MXFP_KV_CACHE_BLOCK_SIZE = 512
+
+# Enabled with ``--kv-cache-dtype mxfp8``, like the other Ascend C8 KV cache
+# flavors. The ModelSlim checkpoint recipe (fa_v.scale weights) is loaded when
+# present; it is not the switch.
+C8_MXFP_KV_CACHE_DTYPE = "mxfp8"
+
+
+def is_c8_mxfp_kv_quant(vllm_config: VllmConfig) -> bool:
+    return vllm_config.cache_config.cache_dtype == C8_MXFP_KV_CACHE_DTYPE
+
+
 def refresh_block_size(vllm_config):
     """
     Refresh the block size in cache config.
@@ -1375,6 +1434,16 @@ def refresh_block_size(vllm_config):
 
     if cache_config.block_size is None:
         cache_config.block_size = 128
+
+    # Hybrid page padding is handled by the upstream cache planner. C8 only
+    # constrains the scheduler block to contain whole 512-token kernel blocks.
+    if is_c8_mxfp_kv_quant(vllm_config):
+        kernel_size = A5_C8_MXFP_KV_CACHE_BLOCK_SIZE
+        if cache_config.block_size % kernel_size:
+            if getattr(cache_config, "user_specified_block_size", False):
+                raise ValueError(f"C8_MXFP requires --block-size to be a multiple of {kernel_size}.")
+            cache_config.block_size = kernel_size
+        return
 
     if not scheduler_config or not model_config:
         return
@@ -1546,15 +1615,18 @@ def enable_sfa_dcp_force_tmajor_restore() -> bool:
 
 @lru_cache(maxsize=1)
 def enable_pcp_o_proj_weight_sharding() -> bool:
-    """Whether SFA-PCP stores O-proj weights as PCP-local resident shards.
-
-    This is a load-time option because it changes the physical parameter shape
-    from a TP-local shard to a TP×PCP-local shard. DSA-CP does not use this
-    user-controlled option.
-    """
+    """Whether PCP shards O-proj weights across its communication group."""
     from vllm_ascend.ascend_config import get_ascend_config
 
     return get_ascend_config().enable_pcp_o_proj_weight_sharding
+
+
+@lru_cache(maxsize=1)
+def enable_pcp_embedding_lmhead_weight_sharding() -> bool:
+    """Whether PCP shards embedding and LM Head weights."""
+    from vllm_ascend.ascend_config import get_ascend_config
+
+    return get_ascend_config().enable_pcp_embedding_lmhead_weight_sharding
 
 
 @lru_cache(maxsize=1)
@@ -1744,9 +1816,13 @@ def get_compressed_pos_and_indices(
 def kv_cache_spec_uses_sparse_sfa_c8(kv_cache_spec) -> bool:
     from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 
-    return isinstance(kv_cache_spec, AscendMLAAttentionSpec) and bool(
-        getattr(kv_cache_spec, "cache_sparse_sfa_c8", False)
-    )
+    return isinstance(kv_cache_spec, AscendMLAAttentionSpec) and bool(kv_cache_spec.cache_sparse_sfa_c8)
+
+
+def kv_cache_spec_uses_packed_sfa_main_cache(kv_cache_spec) -> bool:
+    from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+
+    return isinstance(kv_cache_spec, AscendMLAAttentionSpec) and bool(kv_cache_spec.uses_packed_sfa_main_cache)
 
 
 def is_hidden_state_cache_spec(spec) -> bool:
@@ -1831,3 +1907,14 @@ def use_updatable_graph(
     from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 
     return attn_backend is not None and issubclass(attn_backend, AscendAttentionBackend)
+
+
+def _is_glm_model(model_config) -> bool:
+    """Return True if the target model belongs to the GLM series.
+
+    Detection is based on the model_type string (covers glm, chatglm, glm4,
+    glm4_moe, glm4_moe_lite, glm4_1v, glm_ocr, glm_moe_dsa, etc).
+    """
+    hf_text_config = getattr(model_config, "hf_text_config", None)
+    model_type = getattr(hf_text_config, "model_type", "") or ""
+    return "glm" in str(model_type).lower()

@@ -25,8 +25,9 @@ from vllm_ascend.attention.mla_v1 import (
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, PreprocessType, mark_fused_preprocess_weights
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_hardware_profile
-from vllm_ascend.quantization.methods import AscendW8A8LinearMethod
+from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod, AscendW8A8LinearMethod
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
+from vllm_ascend.quantization.methods.w8a8.w8a8fp8_dynamic import AscendW8A8FP8DynamicLinearMethod
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ
 
 
@@ -55,47 +56,24 @@ def test_v_up_proj_transpose_bmm_limits(num_tokens, num_heads, kv_lora_rank):
     torch.testing.assert_close(result, expected)
 
 
-@pytest.mark.parametrize("use_rope", [False, True])
-@pytest.mark.parametrize("weight_quant_mode", [0, 3])
-def test_mla_prolog_k3_and_cann_dispatch_are_isolated(use_rope, weight_quant_mode):
+@pytest.mark.parametrize("kv_lora_rank", [4, 65536])
+def test_v_up_proj_batch_major_matches_weight_dtype(kv_lora_rank):
     impl = AscendMLAImpl.__new__(AscendMLAImpl)
-    impl.support_fp8_attention = True
-    impl.use_mla_rope = use_rope
-    impl.mlapo_weight_quant_mode = weight_quant_mode
-    impl.fa_quant_layer = False
-    impl.mlapo_num_heads = impl.num_heads = 2
-    impl.kv_lora_rank = 4
-    for name in ("weight_dq", "weight_uq_qr", "mlapo_W_UK_T", "weight_dkv_kr"):
-        setattr(impl, name, torch.empty(1))
-    for name in ("dequant_scale_w_dq", "dequant_scale_w_uq_qr", "dequant_scale_w_dkv_kr"):
-        setattr(impl, name, torch.ones(1, dtype=torch.uint8))
-    impl.q_a_layernorm = impl.kv_a_layernorm = SimpleNamespace(weight=torch.ones(1))
-    metadata = SimpleNamespace(
-        num_decode_tokens=2,
-        slot_mapping=torch.arange(2),
-        decode=SimpleNamespace(cos=torch.ones(2, 2), sin=torch.zeros(2, 2)),
-    )
-    kv_cache = (torch.empty(1, 128, 1, 4), torch.empty(1, 128, 1, 2))
-    outputs = (torch.randn(2, 2, 4), torch.randn(2, 2, 2), torch.empty(0), None, None)
-    with (
-        patch.dict("sys.modules", {"vllm_ascend.vllm_ascend_C": MagicMock()}),
-        patch("torch.ops._C_ascend.npu_mla_prolog_v3_k3", create=True, return_value=outputs) as k3_op,
-        patch("torch_npu.npu_mla_prolog_v3", return_value=outputs) as cann_op,
-        patch(
-            "torch_npu.npu_dynamic_mx_quant",
-            create=True,
-            return_value=(torch.empty(2, 1, 8), torch.ones(2, 1, 1, dtype=torch.uint8)),
-        ),
-    ):
-        impl.mla_preprocess_only_decode(torch.randn(2, 8), kv_cache, metadata)
+    impl.num_heads = 1
+    impl.kv_lora_rank = kv_lora_rank
+    impl.v_head_dim = 2
+    impl.W_UV = torch.randn(1, kv_lora_rank, 2, dtype=torch.bfloat16)
+    x = torch.randn(2, 1, kv_lora_rank, dtype=torch.float32)
+    expected = torch.bmm(x.to(impl.W_UV.dtype).transpose(0, 1), impl.W_UV).transpose(0, 1).reshape(2, -1)
 
-    selected, unused = (cann_op, k3_op) if use_rope else (k3_op, cann_op)
-    selected.assert_called_once()
-    unused.assert_not_called()
-    kwargs = selected.call_args.kwargs
-    assert kwargs["weight_quant_mode"] == weight_quant_mode
-    assert kwargs["kv_cache"] is kv_cache[0]
-    assert (kwargs["rope_cos"] is None) == (not use_rope)
+    def fused_bmm(input, weight, *, perm_x1=(0, 1, 2), perm_y):
+        return torch.bmm(input.permute(perm_x1), weight).permute(perm_y)
+
+    with patch("vllm_ascend.attention.mla_v1.torch_npu.npu_transpose_batchmatmul", side_effect=fused_bmm):
+        result = impl._v_up_proj_batch_major(x)
+
+    assert result.dtype == impl.W_UV.dtype
+    torch.testing.assert_close(result, expected)
 
 
 @pytest.mark.parametrize(
@@ -267,6 +245,39 @@ def test_mla_nz_management_respects_hardware_profile(device_type, enable_mlapo, 
     assert fused.call_count == int(enable_mlapo or fa_quant_layer)
 
 
+@pytest.mark.parametrize(
+    "device_type,scheme_type,expected_enabled",
+    [
+        (AscendDeviceType.A2, AscendW8A8DynamicLinearMethod, True),
+        (AscendDeviceType.A3, AscendW8A8DynamicLinearMethod, True),
+        (AscendDeviceType.A5, AscendW8A8DynamicLinearMethod, False),
+        (AscendDeviceType.A3, AscendW8A8FP8DynamicLinearMethod, False),
+    ],
+)
+def test_mla_dynamic_int8_weight_whitelist(device_type, scheme_type, expected_enabled):
+    impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    profile = get_hardware_profile(device_type)
+    impl.support_fp8_attention = profile.supports(HardwareCapability.FP8_ATTENTION)
+    impl.enable_mlapo = True
+    impl.fa_quant_layer = False
+    impl.fused_qkv_a_proj = SimpleNamespace(quant_method=SimpleNamespace(quant_method=scheme_type()))
+    impl.q_proj = SimpleNamespace()
+    impl.kv_lora_rank = 4
+    impl.num_heads = 1
+    impl.qk_nope_head_dim = 2
+    impl.v_head_dim = 2
+    impl.kv_b_proj = SimpleNamespace(weight=torch.randn(4, 4), quant_method=UnquantizedLinearMethod())
+    with (
+        patch("vllm_ascend.attention.mla_v1.get_current_hardware_profile", return_value=profile),
+        patch("torch_npu.npu_format_cast", side_effect=lambda weight, fmt: weight),
+        patch("vllm_ascend.attention.mla_v1.maybe_trans_nz", side_effect=lambda weight: weight),
+        patch.object(impl, "_process_weights_for_fused") as fused,
+    ):
+        impl.process_weights_after_loading(torch.bfloat16)
+    assert impl.enable_mlapo is expected_enabled
+    assert fused.call_count == int(expected_enabled)
+
+
 class TestAscendMLABackend(TestBase):
     def setUp(self):
         self.mock_config = MagicMock()
@@ -372,7 +383,6 @@ def test_mla_pcp_metadata_keeps_expanded_slot_mapping() -> None:
     )
     builder = AscendMLAMetadataBuilder.__new__(AscendMLAMetadataBuilder)
     builder.pcp_size = 2
-    builder.pcp_rank = 1
 
     builder._finalize_pcp_metadata(metadata, expanded_slots)
 
@@ -380,13 +390,12 @@ def test_mla_pcp_metadata_keeps_expanded_slot_mapping() -> None:
     prefill_metadata = metadata.prefill
     assert prefill_metadata is not None
     assert prefill_metadata.pcp_local_num_input_tokens == 4
-    assert prefill_metadata.pcp_local_prefill_start == 3
-    assert prefill_metadata.pcp_local_prefill_end == 5
     assert metadata.attn_state == AscendAttentionState.ChunkedPrefill
 
 
 def test_mla_pcp_prefill_gathers_padded_cache_inputs() -> None:
     impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    impl.is_pcp_decode_sharded = False
     captured: dict[str, torch.Tensor] = {}
 
     def fake_gather(tensors, slot_mapping, num_decode_tokens):
@@ -413,8 +422,6 @@ def test_mla_pcp_prefill_gathers_padded_cache_inputs() -> None:
     prefill_metadata = metadata.prefill
     assert prefill_metadata is not None
     prefill_metadata.pcp_local_num_input_tokens = 4
-    prefill_metadata.pcp_local_prefill_start = 3
-    prefill_metadata.pcp_local_prefill_end = 5
     impl.pcp_enabled = True
     impl.use_mla_rope = True
     impl.kv_a_layernorm = SimpleNamespace(
@@ -466,6 +473,7 @@ def test_mla_pcp_prefill_gathers_padded_cache_inputs() -> None:
 
 def test_mla_pcp_nope_prefill_trims_gathered_outputs() -> None:
     impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    impl.is_pcp_decode_sharded = False
 
     def fake_gather(tensors, slot_mapping, num_decode_tokens):
         assert num_decode_tokens == 0
@@ -483,8 +491,6 @@ def test_mla_pcp_nope_prefill_trims_gathered_outputs() -> None:
     prefill_metadata = metadata.prefill
     assert prefill_metadata is not None
     prefill_metadata.pcp_local_num_input_tokens = 4
-    prefill_metadata.pcp_local_prefill_start = 3
-    prefill_metadata.pcp_local_prefill_end = 5
 
     impl.pcp_enabled = True
     impl.use_mla_rope = True
@@ -518,6 +524,71 @@ def test_mla_pcp_nope_prefill_trims_gathered_outputs() -> None:
 
     assert k_pe.shape == (2, 1, 1, 0)
     torch.testing.assert_close(k_nope, gathered_k_nope[3:5])
+
+
+def test_mla_pcp_no_rope_gathers_before_cache_write() -> None:
+    impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    impl.is_pcp_decode_sharded = True
+    seen: dict[str, torch.Tensor] = {}
+
+    def fake_gather(tensors, slot_mapping, num_decode_tokens):
+        assert num_decode_tokens == 0
+        return (
+            tuple(torch.cat((tensor, tensor), dim=0) for tensor in tensors),
+            slot_mapping,
+        )
+
+    def fake_no_rope(kv, _cache, slots):
+        seen["kv_rows"] = torch.tensor([kv.shape[0]])
+        seen["slots"] = slots
+        return kv[:, :1], kv
+
+    pcp_group = SimpleNamespace(world_size=2, rank_in_group=0)
+    metadata = _make_pcp_metadata(num_actual_tokens=2, num_decode_tokens=2)
+    metadata.slot_mapping = torch.tensor([5, -1, 7, -1], dtype=torch.int64)
+    impl.pcp_enabled = True
+    impl.use_mla_rope = False
+    with (
+        patch("vllm_ascend.attention.mla_v1.get_pcp_group", return_value=pcp_group),
+        patch("vllm_ascend.attention.mla_v1._gather_prefill_cache_inputs", side_effect=fake_gather),
+    ):
+        impl._exec_kv_no_rope = fake_no_rope
+        impl.exec_kv_prefill(
+            torch.zeros(2, 4),
+            torch.zeros(2, 1),
+            torch.zeros(2, 1),
+            (torch.empty(0), torch.empty(0)),
+            torch.empty(0, dtype=torch.int64),
+            attn_metadata=metadata,
+        )
+
+    assert int(seen["kv_rows"]) == 4
+    torch.testing.assert_close(seen["slots"], torch.tensor([5, -1, 7, -1]))
+
+
+def test_mla_nope_cache_write_skips_padding_slots() -> None:
+    impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    impl.kv_lora_rank = 2
+    impl.kv_a_layernorm = torch.nn.Identity()
+    kv = torch.tensor([[[[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]]]])
+    slots = torch.tensor([0, 1, -1, 2])
+
+    contiguous = torch.full((4, 2), -7.0)
+    impl._exec_kv_mla_nope(kv, (contiguous, contiguous), slots, is_prefill=True, skip_padding_slots=True)
+    torch.testing.assert_close(contiguous[0], torch.tensor([1.0, 2.0]))
+    torch.testing.assert_close(contiguous[1], torch.tensor([3.0, 4.0]))
+    torch.testing.assert_close(contiguous[2], torch.tensor([7.0, 8.0]))
+    torch.testing.assert_close(contiguous[3], torch.tensor([-7.0, -7.0]))
+
+    raw = torch.full((4, 2, 2), -7.0)
+    noncontiguous = raw.transpose(0, 1)
+    assert not noncontiguous.is_contiguous()
+    impl._exec_kv_mla_nope(
+        kv[:, :, :2], (noncontiguous, noncontiguous), torch.tensor([0, -1]), is_prefill=True, skip_padding_slots=True
+    )
+    # -1 would address the last block and last offset of a non-contiguous cache.
+    torch.testing.assert_close(raw[3, 1], torch.tensor([-7.0, -7.0]))
+    torch.testing.assert_close(noncontiguous[0, 0], torch.tensor([1.0, 2.0]))
 
 
 class TestDecodeMLAPreprocessResult(TestBase):
@@ -1133,8 +1204,7 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
     def tearDown(self):
         self.parent_init_patcher.stop()
 
-    @patch("vllm_ascend.attention.mla_v1.get_pcp_group")
-    def test_pcp_mode_is_initialized_from_config(self, mock_get_pcp_group):
+    def test_pcp_mode_is_initialized_from_config(self):
         builder = AscendMLAMetadataBuilder(
             self.kv_cache_spec,
             ["layer_0"],
@@ -1145,7 +1215,6 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
         self.assertIs(builder.metadata_cls, AscendMLAMetadata)
 
         self.mock_vllm_config.parallel_config.prefill_context_parallel_size = 2
-        mock_get_pcp_group.return_value.rank_in_group = 1
         pcp_builder = AscendMLAMetadataBuilder(
             self.kv_cache_spec,
             ["layer_0"],
@@ -1154,7 +1223,6 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
         )
         self.assertTrue(pcp_builder.pcp_enabled)
         self.assertIs(pcp_builder.metadata_cls, AscendMLAMetadata)
-        self.assertEqual(pcp_builder.pcp_rank, 1)
 
     @patch("vllm_ascend.attention.mla_v1.get_cos_and_sin_mla")
     @patch("vllm_ascend.attention.mla_v1.torch.zeros", wraps=torch.zeros)
@@ -2379,6 +2447,103 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(self.impl.W_UV.shape[1], self.impl.kv_lora_rank)
         self.assertEqual(self.impl.W_UV.shape[2], self.impl.v_head_dim)
 
+    @patch("torch_npu.npu_format_cast")
+    def test_process_weights_after_loading_keeps_runtime_weight_address(self, mock_format_cast):
+        """A weight update reload must refresh ``W_UV``/``W_UK_T`` in place.
+
+        In graph + RL scenario the graph is captured once, so the addresses of
+        ``W_UV``/``W_UK_T`` are baked into the captured graph. Re-triggering
+        ``process_weights_after_loading`` (which is exactly what vLLM does
+        after a layerwise weight update) therefore has to reuse the existing
+        storage instead of rebinding the attributes.
+        """
+        layer = MagicMock(spec=LinearBase)
+        layer.input_size_per_partition = 10
+        layer.quant_method = MagicMock(spec=UnquantizedLinearMethod)
+        kv_b_proj_shape = (
+            self.impl.num_heads * (self.impl.qk_nope_head_dim + self.impl.v_head_dim),
+            self.impl.kv_lora_rank,
+        )
+        layer.weight = torch.randn(*kv_b_proj_shape, dtype=torch.bfloat16)
+        self.impl.kv_b_proj = layer
+        mock_format_cast.return_value = layer.weight
+        self.impl.enable_mlapo = False
+        self.impl.fa_quant_layer = False
+
+        self.impl.process_weights_after_loading(torch.bfloat16)
+        w_uv_ptr = self.impl.W_UV.data_ptr()
+        w_uk_t_ptr = self.impl.W_UK_T.data_ptr()
+        old_w_uv = self.impl.W_UV.clone()
+
+        # A weight update replaces the raw kv_b_proj weight; the derived
+        # tensors must follow it while staying at the same address.
+        layer.weight = torch.randn(*kv_b_proj_shape, dtype=torch.bfloat16)
+        mock_format_cast.return_value = layer.weight
+        self.impl.process_weights_after_loading(torch.bfloat16)
+
+        self.assertEqual(self.impl.W_UV.data_ptr(), w_uv_ptr)
+        self.assertEqual(self.impl.W_UK_T.data_ptr(), w_uk_t_ptr)
+
+        # ... and the refreshed buffers must hold the new kv_b_proj split.
+        expected_w_uk, expected_w_uv = layer.weight.T.view(
+            self.impl.kv_lora_rank,
+            self.impl.num_heads,
+            self.impl.qk_nope_head_dim + self.impl.v_head_dim,
+        ).split([self.impl.qk_nope_head_dim, self.impl.v_head_dim], dim=-1)
+        torch.testing.assert_close(self.impl.W_UV, expected_w_uv.transpose(0, 1).contiguous())
+        torch.testing.assert_close(self.impl.W_UK_T, expected_w_uk.permute(1, 2, 0).contiguous())
+        self.assertFalse(torch.equal(self.impl.W_UV, old_w_uv))
+
+    @patch("torch_npu.npu_format_cast")
+    def test_process_weights_after_loading_rebinds_incompatible_value(self, mock_format_cast):
+        """An incompatible reload must rebind instead of raising from ``copy_``.
+
+        ``replace_parameter(..., prefer_copy=True)`` reuses the stored storage
+        only while shape, dtype and device still match. The hand-rolled
+        ``copy_`` it replaced was unconditional, so a re-derived value that
+        stopped being compatible aborted the whole weight-update transaction
+        with a ``RuntimeError``. That failure mode is the only behaviour this
+        change alters, so it is the part of the contract the unit tests have to
+        pin down.
+        """
+        layer = MagicMock(spec=LinearBase)
+        layer.input_size_per_partition = 10
+        layer.quant_method = MagicMock(spec=UnquantizedLinearMethod)
+        layer.weight = torch.randn(
+            self.impl.num_heads * (self.impl.qk_nope_head_dim + self.impl.v_head_dim),
+            self.impl.kv_lora_rank,
+            dtype=torch.bfloat16,
+        )
+        self.impl.kv_b_proj = layer
+        mock_format_cast.return_value = layer.weight
+        self.impl.enable_mlapo = False
+        self.impl.fa_quant_layer = False
+
+        self.impl.process_weights_after_loading(torch.bfloat16)
+        w_uv_ptr = self.impl.W_UV.data_ptr()
+
+        # Narrow the layer: the re-derived split is still a valid value, but it
+        # no longer fits the buffer that is already stored.
+        self.impl.num_heads //= 2
+        layer.weight = torch.randn(
+            self.impl.num_heads * (self.impl.qk_nope_head_dim + self.impl.v_head_dim),
+            self.impl.kv_lora_rank,
+            dtype=torch.bfloat16,
+        )
+        mock_format_cast.return_value = layer.weight
+
+        self.impl.process_weights_after_loading(torch.bfloat16)
+
+        self.assertNotEqual(self.impl.W_UV.data_ptr(), w_uv_ptr)
+        self.assertEqual(
+            self.impl.W_UV.shape,
+            (self.impl.num_heads, self.impl.kv_lora_rank, self.impl.v_head_dim),
+        )
+        self.assertEqual(
+            self.impl.W_UK_T.shape,
+            (self.impl.num_heads, self.impl.qk_nope_head_dim, self.impl.kv_lora_rank),
+        )
+
     def test_compute_prefill_context_none(self):
         batch_size = 4
         kv_cache = torch.randn(10, 1, 1, 192)
@@ -2620,7 +2785,7 @@ class TestAscendMLAImpl(TestBase):
                 self.impl.mla_preprocess_prefill = MagicMock(
                     side_effect=lambda *_args: record_event("prefill_cache", prefill)
                 )
-                metadata = SimpleNamespace(num_decodes=decodes, num_prefills=prefills)
+                metadata = SimpleNamespace(num_actual_tokens=2, num_decodes=decodes, num_prefills=prefills)
                 with (
                     patch.object(mla_v1, "wait_for_kv_layer_from_connector"),
                     patch.object(mla_v1, "notify_kv_cache_written"),

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """V4.1 replicated-cache TP-token DSA CP adapter."""
 
+from contextlib import contextmanager
 from dataclasses import replace
 
 import torch
@@ -14,7 +15,6 @@ from vllm_ascend.attention.dsa_v41 import (
     AscendDSAV41Impl,
     AscendDSAV41MetadataBuilder,
     _config_value,
-    scatter_cache_sk,
 )
 from vllm_ascend.utils import enable_dsa_cp, npu_stream_switch
 
@@ -34,6 +34,13 @@ class _ReplicatedCacheMetadataBuilder(AscendDSAV41MetadataBuilder):
             kv_cache_spec, layer_names, vllm_config, device, build_query_metadata=False
         )
 
+    def prepare_source_rope(self):
+        # MRV2 initializes RoPE without enabling MRV1's async metadata queue.
+        # The replicated global builder owns compressor metadata, while the
+        # outer builder only owns local query metadata. Initialize both.
+        super().prepare_source_rope()
+        self._global_builder.prepare_source_rope()
+
     def enable_device_metadata(self):
         super().enable_device_metadata()
         self._global_builder.enable_device_metadata()
@@ -43,6 +50,15 @@ class _ReplicatedCacheMetadataBuilder(AscendDSAV41MetadataBuilder):
             *self._global_builder.take_device_metadata_tasks(),
             *super().take_device_metadata_tasks(),
         )
+
+    @contextmanager
+    def defer_device_metadata(self, *, in_graph: bool = False):
+        # Enter the global guard first: the outer enable method enables both.
+        with (
+            self._global_builder.defer_device_metadata(in_graph=in_graph),
+            super().defer_device_metadata(in_graph=in_graph),
+        ):
+            yield
 
     def _build_global_metadata(self, common_prefix_len, common, fast_build, kwargs):
         global_kwargs = dict(kwargs)
@@ -131,6 +147,7 @@ class AscendDSAV41CPImpl(AscendDSAV41Impl):
         hidden_states = hidden_states[start : start + swa_metadata.num_actual_tokens]
         kv_cos, kv_sin = global_metadata.rope(attn.rotary_emb.layername, kv_hidden_states.shape[0])
         swa_metadata = global_metadata.swa
+        write_cache_on_main = self._write_swa_cache_on_main_stream(attn, swa_metadata)
         main_stream = torch.npu.current_stream()
         aux_stream = dsv4_dsa_overlap_stream()
         v1_impl = attn.dsa_attn.dsa_attn.impl
@@ -168,9 +185,14 @@ class AscendDSAV41CPImpl(AscendDSAV41Impl):
                 rotary_mode="interleave",
                 partial_slice=[attn.nope_head_dim, attn.head_dim],
             )
-            scatter_cache_sk(attn.dsa_attn.swa_cache_layer.kv_cache[0], swa_metadata.slot_mapping, kv.squeeze(1))
+            if not write_cache_on_main:
+                AscendDSAV41Impl._write_swa_cache(attn, swa_metadata, kv.squeeze(1))
         q = wq_b.matmul(q_b_quant, q_b_scale, bias=attn.wq_b.bias).unflatten(-1, (attn.n_heads, attn.head_dim))
         main_stream.wait_stream(aux_stream)
+        if write_cache_on_main:
+            # CP writes replicated KV with global slots; keep the packaged A5
+            # writer on the captured stream for prefill and mixed batches.
+            AscendDSAV41Impl._write_swa_cache(attn, swa_metadata, kv.squeeze(1))
         torch.ops._C_ascend.inplace_partial_rotary_mul(
             q.unsqueeze(1),
             cos,
@@ -178,16 +200,6 @@ class AscendDSAV41CPImpl(AscendDSAV41Impl):
             rotary_mode="interleave",
             partial_slice=[attn.nope_head_dim, attn.head_dim],
         )
-        # Both streams have joined before compressor/indexer cache reads.
-        if self.role.is_kv_source:
-            self._write_compressed_source(
-                attn,
-                kv_hidden_states,
-                global_metadata.positions[: kv_hidden_states.shape[0]],
-                kv_cos,
-                kv_sin,
-                global_metadata,
-            )
         return q.to(hidden_states.dtype), qr
 
     def _global_layer_metadata(self, metadata_by_prefix):
@@ -215,7 +227,25 @@ class AscendDSAV41CPImpl(AscendDSAV41Impl):
     def _prepare_queries(self, attn, hidden_states, positions, cos, sin, metadata):
         return self.multistream_preprocess(attn, hidden_states, cos, sin, metadata.swa)
 
-    def _select_sparse_indices(self, attn, hidden_states, qr, positions, cos, sin, metadata):
+    def _indexer_hidden_states(self, hidden_states, metadata):
+        start, _, _, _ = metadata.swa.cp_token_range
+        return hidden_states[start : start + metadata.swa.num_actual_tokens]
+
+    def _write_forward_compressed_source(self, attn, hidden_states, positions, cos, sin, metadata, prepared_indexer):
+        global_metadata = self._global_layer_metadata(get_forward_context().attn_metadata)
+        global_hidden_states = hidden_states[: global_metadata.swa.num_actual_tokens]
+        global_cos, global_sin = global_metadata.rope(attn.rotary_emb.layername, global_hidden_states.shape[0])
+        self._write_compressed_source(
+            attn,
+            global_hidden_states,
+            global_metadata.positions[: global_hidden_states.shape[0]],
+            global_cos,
+            global_sin,
+            global_metadata,
+            prepared_indexer=prepared_indexer,
+        )
+
+    def _select_sparse_indices(self, attn, hidden_states, qr, positions, cos, sin, metadata, prepared_indexer=None):
         if not self.role.has_long_context:
             return None
         if not self.role.is_index_source:
@@ -224,9 +254,7 @@ class AscendDSAV41CPImpl(AscendDSAV41Impl):
             # while ``qr`` was projected from this rank's local query slice.
             # SparseFlashMla requires cmp_sparse_indices.T to match q.T.
             return shared.topk_indices[: qr.shape[0]]
-        start, _, _, _ = metadata.swa.cp_token_range
-        hidden_states = hidden_states[start : start + metadata.swa.num_actual_tokens]
-        return super()._select_sparse_indices(attn, hidden_states, qr, positions, cos, sin, metadata)
+        return super()._select_sparse_indices(attn, hidden_states, qr, positions, cos, sin, metadata, prepared_indexer)
 
     def _project_output(self, attn, output, hidden_states, metadata, *, projected):
         _, _, per_rank, _ = metadata.swa.cp_token_range

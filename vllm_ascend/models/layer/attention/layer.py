@@ -27,6 +27,7 @@ from vllm_ascend.attention.dsa_v1 import (
 )
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.quantization.methods.kv_cache.turboquant import SLOT_BYTES, is_turboquant
 
 
 def get_dsv4_block_sizes(use_a5_bf16_kv: bool = False):
@@ -229,10 +230,14 @@ class DSAAttention(nn.Module, AttentionLayerBase):
         if self.compress_ratio <= 1:  # SWA part. Allocated separately as DeepseekV4SWACache.
             return None
         kv_cache_dtype = kv_cache_dtype_str_to_dtype(self.kv_cache_dtype, vllm_config.model_config)
+        if is_turboquant(vllm_config):
+            kv_cache_dtype = torch.uint8 if self.compress_ratio == 4 else torch.bfloat16
         use_bf16_kv = is_a5_bf16_kv_enabled(vllm_config)
         has_compressed_cache = get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE)
 
         cached_head_size = self.head_size + 128 if has_compressed_cache and not use_bf16_kv else self.head_size
+        if is_turboquant(vllm_config) and self.compress_ratio == 4:
+            cached_head_size = SLOT_BYTES
         storage_block_size = dsv4_block_sizes(vllm_config)[vllm_config.cache_config.block_size][0][0]
         # vLLM #51718 replaced MLAAttentionSpec.compress_ratio with
         # AttentionSpec.tokens_per_state on main.

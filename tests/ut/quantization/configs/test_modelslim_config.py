@@ -20,7 +20,7 @@ from vllm_ascend.quantization.configs.modelslim_config import (
     _make_modelslim_moe_weight_loader,
     get_quant_type_for_layer,
 )
-from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, get_rotation_path, vllm_version_is
+from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, get_rotation_path
 
 
 class TestAscendModelSlimConfig(TestBase):
@@ -72,9 +72,6 @@ class TestAscendModelSlimConfig(TestBase):
         self.assertEqual(config.quant_description, {})
 
     def test_deepseek_v41_model_mapping_and_expert_discovery(self):
-        if vllm_version_is("0.29.0"):
-            self.skipTest("DeepSeek V4.1 is unavailable on vLLM 0.29")
-
         from vllm.model_executor.model_loader.utils import configure_quant_config
 
         from vllm_ascend.models.deepseek_v41.dspark import DSparkDeepseekV41ForCausalLM
@@ -565,6 +562,65 @@ class TestGetCacheScaleMapper(TestBase):
             mapper._map_name("model.layers.0.v_proj.kv_cache_offset"),
             "model.layers.0.attn.v_cache_offset",
         )
+
+    @staticmethod
+    def _mxfp8_dtype():
+        # C8-MXFP is enabled with --kv-cache-dtype mxfp8; the config property
+        # reads the current vllm config, which tests must provide.
+        return patch(
+            "vllm_ascend.quantization.configs.modelslim_config.get_current_vllm_config_or_none",
+            return_value=SimpleNamespace(cache_config=SimpleNamespace(cache_dtype="mxfp8")),
+        )
+
+    def test_mxfp_c8_recipe_detected_from_per_layer_quant_type(self):
+        # Newer ModelSlim checkpoints drop the model-wide kv_cache_type and
+        # state the recipe per layer instead; only full-attention layers of a
+        # hybrid model carry one. The recipe is detected, but the switch is
+        # the dtype: without it the config stays off.
+        config = AscendModelSlimConfig(
+            {
+                "model.layers.3.self_attn.quant_type": "QK_MXFP8_DYNAMIC_V_MXFP8_PER_CHANNEL",
+                "model.layers.0.linear_attn.quant_type": "W8A8_DYNAMIC",
+            }
+        )
+        self.assertTrue(config._has_mxfp_c8_recipe)
+        self.assertFalse(config.enable_mxfp_c8_quant)
+
+        with self._mxfp8_dtype():
+            self.assertTrue(config.enable_mxfp_c8_quant)
+            mapper = config.get_cache_scale_mapper()
+        self.assertEqual(
+            mapper._map_name("model.layers.3.self_attn.fa_v.scale"),
+            "model.layers.3.self_attn.attn.v_cache_scale",
+        )
+
+    def test_mxfp_c8_stands_fa_quant_down(self):
+        # Both recipes declared for the same layer: MXFP8 has to win, or the
+        # FAKQuant regex renames fa_v.scale into an MLA submodule a dense model
+        # does not have and the scale is silently dropped.
+        config = AscendModelSlimConfig(
+            {
+                "kv_cache_type": "K_DYNAMIC_V_STATIC_MXFP8_PER_CHANNEL",
+                "fa_quant_type": "FAKQuant",
+                "model.layers.3.self_attn.fa_k.scale": "FAKQuant",
+            }
+        )
+        self.assertTrue(config._has_mxfp_c8_recipe)
+
+        with self._mxfp8_dtype():
+            mapper = config.get_cache_scale_mapper()
+            self.assertFalse(config.enable_fa_quant)
+            self.assertEqual(
+                mapper._map_name("model.layers.3.self_attn.fa_v.scale"),
+                "model.layers.3.self_attn.attn.v_cache_scale",
+            )
+            # Q/K are quantized dynamically and V has no offset. Drop legacy
+            # FAKQuant tensors at the mapper, before weight loading.
+            for suffix in (".fa_k.scale", ".fa_q.scale", ".fa_k.offset", ".fa_q.offset", ".fa_v.offset"):
+                with self.subTest(suffix=suffix):
+                    self.assertIsNone(mapper._map_name(f"model.layers.3.self_attn{suffix}"))
+            for suffix in (".fa_k.scale", ".fa_q.scale", ".fa_k.offset", ".fa_q.offset"):
+                self.assertIn(suffix, config._ignore_unexpected_suffixes)
 
     def test_fa_quant_returns_mapper(self):
         config = AscendModelSlimConfig(

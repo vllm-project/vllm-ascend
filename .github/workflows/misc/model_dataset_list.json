@@ -328,6 +328,7 @@
             "Eco-Tech/DeepSeek-V3.1-Terminus-w8a8-mtp-QuaRot",
             "Eco-Tech/DeepSeek-V3.1-w8a8-mtp-QuaRot",
             "Eco-Tech/DeepSeek-V3.1-w8a8c8-mtp-QuaRot",
+            "Eco-Tech/DeepSeek-V4.1-Flash-w8a8",
             "Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp",
             "Eco-Tech/DeepSeek-V4-Flash-0731-w8a8",
             "Eco-Tech/DeepSeek-V4-Pro-w4a8-mtp",
@@ -580,6 +581,7 @@
             "zai-org/GLM-4.1V-9B-Thinking",
             "zai-org/GLM-Image",
             "Eco-Tech/GLM-5.2-w8a8c8",
+            "rainney/AEON-DFlash-Qwen3.6-35B-A3B",
             "Eco-Tech/GLM-5.3-w8a8c8"
         ],
         "a5": [
@@ -625,7 +627,9 @@
         "310p": [
             "vllm-ascend/Qwen3-8B-w8a8sc-310-vllm-tp1",
             "vllm-ascend/Qwen3-14B-w8a8sc-310-vllm-tp1",
-            "vllm-ascend/Qwen3-32B-w8a8sc-310-vllm-tp4"
+            "vllm-ascend/Qwen3-32B-w8a8sc-310-vllm-tp4",
+            "Qwen/Qwen3.5-2B",
+            "vllm-ascend/Qwen3-VL-8B-Instruct-w8a8sc-310-vllm-tp1"
         ]
     },
     "datasets": [

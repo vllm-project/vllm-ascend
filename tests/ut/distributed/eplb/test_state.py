@@ -8,16 +8,97 @@ import pytest
 import torch
 from vllm.distributed.eplb import eplb_state as upstream_eplb_state
 
-from vllm_ascend.distributed.eplb import state as eplb_state
-from vllm_ascend.distributed.eplb.state import (
+from vllm_ascend.ascend_config import StairConfig
+from vllm_ascend.distributed.eplb import eplb_state
+from vllm_ascend.distributed.eplb.eplb_state import (
     AscendEplbLayerState,
     AscendEplbState,
 )
+from vllm_ascend.distributed.eplb.policy.stair import StairEplbPolicy
 
 
 def test_uses_upstream_policy_and_async_worker_lifecycle():
-    assert AscendEplbState.add_model is upstream_eplb_state.EplbState.add_model
     assert AscendEplbState.start_async_loop is upstream_eplb_state.EplbState.start_async_loop
+
+
+def test_result_readiness_defers_incomplete_transfer(monkeypatch):
+    group = SimpleNamespace(size=lambda: 2)
+    monkeypatch.setattr(
+        "vllm_ascend.distributed.eplb.eplb_state.get_ep_group",
+        lambda: SimpleNamespace(cpu_group=group),
+    )
+    works = []
+
+    def all_reduce(flag, *, group, async_op):
+        assert group.size() == 2
+        assert async_op
+        if flag.item():
+            flag.fill_(2)
+        work = SimpleNamespace(wait=MagicMock())
+        works.append(work)
+        return work
+
+    monkeypatch.setattr(torch.distributed, "all_reduce", all_reduce)
+    state = AscendEplbState.__new__(AscendEplbState)
+    state.async_worker = None
+    model_state = SimpleNamespace(pending_result=None)
+
+    assert not state._all_ranks_result_ready(model_state)
+    model_state.pending_result = object()
+    assert not state._all_ranks_result_ready(model_state)
+    assert state._all_ranks_result_ready(model_state)
+    assert len(works) == 2
+    for work in works:
+        work.wait.assert_called_once_with()
+    assert not hasattr(model_state, "_eplb_ready_work")
+    assert not hasattr(model_state, "_eplb_ready_flag")
+    assert model_state._eplb_foreground_wait_ms >= 0
+    assert model_state._eplb_migration_span_steps == 3
+    assert model_state._eplb_migration_deferred_steps == 2
+
+
+def test_configured_upstream_policy_registration_is_scoped():
+    policy = StairEplbPolicy(StairConfig())
+    assert "stair" not in upstream_eplb_state.EPLB_POLICIES
+
+    with eplb_state._configured_upstream_policy("stair", policy):
+        assert upstream_eplb_state.EPLB_POLICIES["stair"] is policy
+
+    assert "stair" not in upstream_eplb_state.EPLB_POLICIES
+
+
+def test_drain_async_accepts_last_changed_layer_before_model_end():
+    consumed_event = MagicMock()
+    model_state = SimpleNamespace(
+        rebalanced=True,
+        model=SimpleNamespace(num_moe_layers=3),
+        pending_result=SimpleNamespace(
+            layer_idx=0,
+            is_last_result=True,
+            consumed_event=consumed_event,
+        ),
+    )
+    state = SimpleNamespace(
+        is_async=True,
+        model_states={"model": model_state},
+    )
+
+    AscendEplbState.drain_async(state)
+
+    assert not model_state.rebalanced
+    assert model_state.pending_result is None
+    consumed_event.record.assert_called_once_with()
+
+
+def test_drain_async_fails_when_worker_stops():
+    state = SimpleNamespace(
+        is_async=True,
+        async_worker=SimpleNamespace(is_alive=lambda: False),
+        model_states={"model": SimpleNamespace(rebalanced=True, pending_result=None)},
+    )
+
+    with pytest.raises(RuntimeError, match="background worker terminated"):
+        AscendEplbState.drain_async(state)
 
 
 def test_layer_state_builds_routing_table_and_preserves_captured_tensor(
@@ -29,7 +110,7 @@ def test_layer_state_builds_routing_table_and_preserves_captured_tensor(
     monkeypatch.setattr(
         eplb_state,
         "get_ep_group",
-        lambda: SimpleNamespace(rank_in_group=1),
+        lambda: SimpleNamespace(rank_in_group=1, world_size=2),
     )
     monkeypatch.setattr(
         eplb_state._eplb_ops,
@@ -115,7 +196,9 @@ def test_from_mapping_refreshes_final_mapping(monkeypatch):
         model=object(),
         model_config=object(),
         device=torch.device("cpu"),
-        parallel_config=object(),
+        parallel_config=SimpleNamespace(
+            eplb_config=SimpleNamespace(policy="default"),
+        ),
         expanded_physical_to_logical=torch.zeros(1),
     )
 
@@ -153,7 +236,9 @@ def test_from_mapping_forwards_release_valid_expert_count(monkeypatch):
         model=object(),
         model_config=object(),
         device=torch.device("cpu"),
-        parallel_config=object(),
+        parallel_config=SimpleNamespace(
+            eplb_config=SimpleNamespace(policy="default"),
+        ),
         expanded_physical_to_logical=torch.zeros((1, 2)),
         num_valid_physical_experts=1,
     )
@@ -192,7 +277,7 @@ def test_from_mapping_requires_release_valid_expert_count(monkeypatch):
 def test_init_sets_cuda_device_index_for_npu(monkeypatch):
     parallel_config = MagicMock()
     monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 5)
-    monkeypatch.setattr(torch.cuda, "Event", torch.npu.Event)
+    monkeypatch.setattr(upstream_eplb_state, "CpuGpuEvent", MagicMock)
 
     state = AscendEplbState(parallel_config, torch.device("cpu"))
 

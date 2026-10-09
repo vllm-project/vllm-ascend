@@ -451,19 +451,12 @@ msgstr ""
 "| `pr-accuracy-group-2` | Qwen2.5-Math-RM-72B、Hunyuan-A13B-Instruct | "
 "pr_only |"
 
-msgid ""
-"| `multi-node-deepseek-v3.2-W8A8-EP` | DeepSeek-V3.2-W8A8 with EP, 4-node |"
-msgstr "| `multi-node-deepseek-v3.2-W8A8-EP` | DeepSeek-V3.2-W8A8，EP，4节点 |"
-
 msgid "| `multi-node-qwen3-dp` | Qwen3-235B-A22B, 2-node DP |"
 msgstr "| `multi-node-qwen3-dp` | Qwen3-235B-A22B，2节点 DP |"
 
 msgid ""
 "| `multi-node-qwenw8a8-2node-eplb` | Qwen3-235B-W8A8 with EPLB, 2-node |"
 msgstr "| `multi-node-qwenw8a8-2node-eplb` | Qwen3-235B-W8A8，EPLB，2节点 |"
-
-msgid "| `multi-node-dpsk3.2-2node` | DeepSeek-V3.2-W8A8, 2-node |"
-msgstr "| `multi-node-dpsk3.2-2node` | DeepSeek-V3.2-W8A8，2节点 |"
 
 msgid "| `multi-node-qwen-disagg-pd` | Qwen3-235B disaggregated PD, 2-node |"
 msgstr "| `multi-node-qwen-disagg-pd` | Qwen3-235B 分离式 PD，2节点 |"
@@ -497,9 +490,6 @@ msgid ""
 "|"
 msgstr "| `deepseek-r1-0528-w8a8-prefix-cache` | DeepSeek-R1-0528-W8A8 前缀缓存 |"
 
-msgid "| `deepseek-v3-2-w8a8` | DeepSeek-V3.2-W8A8 |"
-msgstr "| `deepseek-v3-2-w8a8` | DeepSeek-V3.2-W8A8 |"
-
 msgid "| `glm-4.7-w8a8` | GLM-4.7 W8A8 |"
 msgstr "| `glm-4.7-w8a8` | GLM-4.7 W8A8 |"
 
@@ -511,9 +501,6 @@ msgstr "| `qwen3-235b-a22b-w8a8` | Qwen3-235B-A22B-W8A8 |"
 
 msgid "| `Qwen3.5-397B-A17B-w8a8-mtp` | Qwen3.5-397B-A17B W8A8 + MTP |"
 msgstr "| `Qwen3.5-397B-A17B-w8a8-mtp` | Qwen3.5-397B-A17B W8A8 + MTP |"
-
-msgid "| `MiniMax-M2.5-w8a8-QuaRot-A3` | MiniMax-M2.5 W8A8 + QuaRot |"
-msgstr "| `MiniMax-M2.5-w8a8-QuaRot-A3` | MiniMax-M2.5 W8A8 + QuaRot |"
 
 msgid "| `Qwen3.5-27B-w8a8-A3` | Qwen3.5-27B W8A8 |"
 msgstr "| `Qwen3.5-27B-w8a8-A3` | Qwen3.5-27B W8A8 |"
@@ -575,3 +562,14 @@ msgstr ""
 "- `multi-card-tests` 为 `my-new-test` 运行一个矩阵任务，其中\n"
 "  `should_run=true`。可复用工作流会检出你的 PR 代码（通过\n"
 "  `vllm_ascend_ref`），并运行你的 pytest。"
+
+msgid ""
+"The `schedule_nightly_test_*.yaml` workflows do not declare a GitHub Actions\n"
+"    `schedule:` (cron) trigger; they are dispatched by external automation through\n"
+"    `workflow_dispatch`. See\n"
+"    [CI workflow triggers and the schedule_ prefix](./testing.md#ci-workflow-triggers-and-the-schedule_-prefix)."
+msgstr ""
+"`schedule_nightly_test_*.yaml` 工作流并未声明 GitHub Actions 的\n"
+"    `schedule:`（cron）触发器；它们由外部自动化通过\n"
+"    `workflow_dispatch` 触发。请参阅\n"
+"    [CI 工作流触发器与 schedule_ 前缀](./testing.md#ci-workflow-triggers-and-the-schedule_-prefix)。"

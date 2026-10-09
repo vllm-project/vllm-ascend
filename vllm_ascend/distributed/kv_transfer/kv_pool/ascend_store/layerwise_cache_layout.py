@@ -297,6 +297,8 @@ def build_layerwise_reuse_layout(
 def apply_layerwise_kv_cache_plan(
     kv_cache_config: KVCacheConfig,
     vllm_config: VllmConfig,
+    *,
+    excluded_layer_names: set[str] | None = None,
 ) -> None:
     """Rewrite logical layer tensors to use shared physical KV buffers."""
     extra_config = get_layerwise_reuse_config(vllm_config.kv_transfer_config)
@@ -304,27 +306,20 @@ def apply_layerwise_kv_cache_plan(
         return
 
     old_tensors = kv_cache_config.kv_cache_tensors
-    if len(old_tensors) <= 1:
+    if not old_tensors:
         return
 
     base_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
     layer_specs = get_layerwise_kv_cache_specs(kv_cache_config)
+    excluded_layer_names = (excluded_layer_names or set()) & layer_specs.keys()
     reuse_layout = build_layerwise_reuse_layout(
-        layer_specs,
+        {name: spec for name, spec in layer_specs.items() if name not in excluded_layer_names},
         base_layers,
         extra_config,
     )
     actual_layers = len(reuse_layout.layer_cache_specs)
     if not reuse_layout.has_layer_reuse:
         return
-    if any(
-        len(get_kv_cache_tensor_layers(tensor)) != 1 or tensor.offset != 0 or tensor.block_stride != 0
-        for tensor in old_tensors
-    ):
-        raise NotImplementedError(
-            "Layerwise KV cache reuse does not support pre-shared or packed KV cache tensor descriptors."
-        )
-
     if actual_layers < base_layers:
         logger.warning(
             "Layer reuse expected at least %d layers, got %d; skip tensor merge.",
@@ -339,14 +334,27 @@ def apply_layerwise_kv_cache_plan(
             actual_layers - base_layers,
         )
 
-    tensors_by_name = {get_kv_cache_tensor_layers(tensor)[0]: tensor for tensor in old_tensors}
+    # vLLM describes multiple contiguous layer regions in one backing
+    # allocation. Reuse replaces that placement before any storage exists;
+    # each new descriptor owns one physical slot whose layers alias it.
+    seen_layers: set[str] = set()
+    for tensor in old_tensors:
+        for layer_idx, layer_name in enumerate(get_kv_cache_tensor_layers(tensor)):
+            spec = layer_specs[layer_name]
+            layer_size = kv_cache_config.num_blocks * spec.page_size_bytes
+            start = tensor.offset + layer_idx * tensor.layer_stride
+            if tensor.block_stride != spec.page_size_bytes:
+                raise NotImplementedError("Layerwise KV cache reuse requires contiguous per-layer pages.")
+            if start < 0 or start + layer_size > tensor.size:
+                raise ValueError(f"Layerwise KV cache descriptor for {layer_name} exceeds its backing allocation.")
+            if layer_name in seen_layers:
+                raise ValueError(f"Duplicate layerwise KV cache descriptor for {layer_name}.")
+            seen_layers.add(layer_name)
+    if seen_layers != set(layer_specs):
+        raise ValueError("Layerwise KV cache descriptors must cover every cache spec.")
 
     def _merge_specs(named_specs: list[NamedKVCacheSpec]) -> None:
         shared_by = [named_spec.layer_name for named_spec in named_specs]
-        cache_tensors = [tensors_by_name[layer_name] for layer_name in shared_by]
-        tensor_sizes = {tensor.size for tensor in cache_tensors}
-        if len(tensor_sizes) != 1:
-            raise ValueError("Layers sharing layerwise KV buffers must have equal tensor sizes for every cache spec.")
         reference_spec = layer_specs[shared_by[0]]
         if any(layer_specs[layer_name] != reference_spec for layer_name in shared_by[1:]):
             raise ValueError(
@@ -355,10 +363,10 @@ def apply_layerwise_kv_cache_plan(
         new_tensors.append(
             KVCacheTensor(
                 layers=shared_by,
-                size=cache_tensors[0].size,
-                layer_stride=cache_tensors[0].layer_stride,
-                block_stride=cache_tensors[0].block_stride,
-                offset=cache_tensors[0].offset,
+                size=kv_cache_config.num_blocks * reference_spec.page_size_bytes,
+                layer_stride=0,
+                block_stride=reference_spec.page_size_bytes,
+                offset=0,
             )
         )
 
@@ -372,6 +380,11 @@ def apply_layerwise_kv_cache_plan(
                 indexer_specs.append(indexer)
         if indexer_specs:
             _merge_specs(indexer_specs)
+    # Draft KV survives between forwards, unlike a layerwise target scratch
+    # slot. Give every resident draft layer its own persistent descriptor.
+    for layer_name in layer_specs:
+        if layer_name in excluded_layer_names:
+            _merge_specs([NamedKVCacheSpec(layer_name, layer_specs[layer_name])])
     kv_cache_config.kv_cache_tensors = new_tensors
     logger.info(
         "Layerwise KV cache reuse merged %d descriptors into %d descriptors using %d buffer assignments.",

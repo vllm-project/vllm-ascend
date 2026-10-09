@@ -26,6 +26,7 @@ from vllm.forward_context import is_forward_context_available
 from vllm.logger import logger
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding,
+    Gemma4RotaryEmbedding,
     MRotaryEmbedding,
     RotaryEmbedding,
     YaRNScalingRotaryEmbedding,
@@ -34,6 +35,7 @@ from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import enable_sp, has_rope, is_vl_model
 
@@ -336,15 +338,19 @@ class AscendYaRNRotaryEmbedding(YaRNScalingRotaryEmbedding):
         beta_fast: int = 32,
         beta_slow: int = 1,
         apply_yarn_scaling: bool = True,
+        mscale: float | None = None,
+        mscale_all_dim: float | None = None,
+        attention_factor: float | None = None,
         truncate: bool = False,
     ) -> None:
+        # vLLM main (#56446) replaced the YaRN mscale parameters with
+        # mscale/mscale_all_dim/attention_factor.
         extra_kwargs = {
-            "extrapolation_factor": extrapolation_factor,
-            "attn_factor": attn_factor,
             "beta_fast": beta_fast,
             "beta_slow": beta_slow,
-            "apply_yarn_scaling": apply_yarn_scaling,
-            # TODO: current not support actual truncate，adaptation for extra parameters to be compatible with vllm
+            "mscale": mscale,
+            "mscale_all_dim": mscale_all_dim,
+            "attention_factor": attention_factor,
             "truncate": truncate,
         }
         super().__init__(
@@ -359,6 +365,50 @@ class AscendYaRNRotaryEmbedding(YaRNScalingRotaryEmbedding):
         positions: torch.Tensor,
         query: torch.Tensor,
         key: torch.Tensor,
+        offsets: torch.Tensor | None = None,
+        is_neox_style_override: bool | None = None,
+        out_dtype: torch.dtype | None = None,
+    ):
+        return AscendRotaryEmbedding.forward_oot(
+            self,
+            positions,
+            query,
+            key,
+            offsets,
+            is_neox_style_override,
+            out_dtype,
+        )
+
+
+class AscendGemma4RotaryEmbedding(Gemma4RotaryEmbedding):
+    """Gemma4 proportional RoPE on the NPU rotary kernel.
+
+    Subclasses rather than reusing AscendRotaryEmbedding so Gemma4's
+    `_compute_inv_freq`, which zero-pads the non-rotated frequency pairs, keeps
+    building the cos/sin cache. Only the forward is swapped, which lets full
+    attention layers emit `npu_rotary_embedding` like the sliding ones instead
+    of an unfused rotate_half chain.
+    """
+
+    def __init__(
+        self,
+        head_size: int,
+        rotary_dim: int,
+        max_position_embeddings: int,
+        base: float,
+        is_neox_style: bool,
+        dtype: torch.dtype,
+    ) -> None:
+        super().__init__(head_size, rotary_dim, max_position_embeddings, base, is_neox_style, dtype)
+        vllm_config = get_current_vllm_config()
+        self.use_mtp = vllm_config.speculative_config and vllm_config.speculative_config.method == "mtp"
+        _record_cos_sin_cache(self.cos_sin_cache)
+
+    def forward_oot(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None,
         offsets: torch.Tensor | None = None,
         is_neox_style_override: bool | None = None,
         out_dtype: torch.dtype | None = None,
@@ -659,17 +709,33 @@ class AscendApplyRotaryEmb(ApplyRotaryEmb):
         if rotary_dim > head_dim:
             raise ValueError(f"rotary_dim ({rotary_dim}) must not exceed head_dim ({head_dim})")
 
+        if not self.is_neox_style and not get_current_hardware_profile().supports(
+            HardwareCapability.FUSED_ROTARY_MUL_INTERLEAVE
+        ):
+            # The legacy ACL backend only supports half pairing.
+            output = self.forward_static(x[..., :rotary_dim], cos, sin, is_neox_style=False)
+            if rotary_dim < head_dim:
+                output = torch.cat((output, x[..., rotary_dim:]), dim=-1)
+            return self._post_process(output, origin_shape, origin_dtype)
+
         # cos, sin: [seq_len, rotary_dim // 2]
-        cos = torch.cat((cos, cos), dim=-1)
-        sin = torch.cat((sin, sin), dim=-1)
+        if self.is_neox_style:
+            cos = torch.cat((cos, cos), dim=-1)
+            sin = torch.cat((sin, sin), dim=-1)
+            rotary_mode = "half"
+        else:
+            # GPT-J/Kimi pairs adjacent dimensions and repeats each coefficient.
+            cos = cos.repeat_interleave(2, dim=-1)
+            sin = sin.repeat_interleave(2, dim=-1)
+            rotary_mode = "interleave"
         # cos, sin: [1, seq_len, 1, rotary_dim]
         cos = cos.reshape(1, -1, 1, rotary_dim)
         sin = sin.reshape(1, -1, 1, rotary_dim)
 
         if rotary_dim == head_dim:
-            output = torch_npu.npu_rotary_mul(x, cos, sin)
+            output = torch_npu.npu_rotary_mul(x, cos, sin, rotary_mode=rotary_mode)
         else:
-            x_rot = torch_npu.npu_rotary_mul(x[..., :rotary_dim], cos, sin)
+            x_rot = torch_npu.npu_rotary_mul(x[..., :rotary_dim], cos, sin, rotary_mode=rotary_mode)
             output = torch.cat((x_rot, x[..., rotary_dim:]), dim=-1)
 
         output = self._post_process(output, origin_shape, origin_dtype)

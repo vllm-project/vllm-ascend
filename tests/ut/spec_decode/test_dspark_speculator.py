@@ -57,6 +57,7 @@ def _vllm_config(*, quarot: bool) -> SimpleNamespace:
     return SimpleNamespace(
         quant_config=quant_config,
         model_config=SimpleNamespace(model="/target"),
+        parallel_config=SimpleNamespace(pipeline_parallel_size=1),
     )
 
 

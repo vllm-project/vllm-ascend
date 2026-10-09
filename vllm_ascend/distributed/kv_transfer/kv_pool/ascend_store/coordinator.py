@@ -21,6 +21,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     block_hash_to_bytes,
     get_block_hashes,
+    infer_cacheable_group_ids,
 )
 
 _CACHE_MISSING = object()
@@ -29,7 +30,7 @@ _MANAGER_CLASS_CACHE_ATTR = "_manager_class_cache"
 # kwargs every reachable_block_mask implementation must accept. Used when the
 # manager's signature cannot be introspected.
 _REACHABLE_MASK_BASE_KWARGS = frozenset(("start_block", "end_block", "alignment_tokens", "kv_cache_spec", "use_eagle"))
-_REACHABLE_MASK_OPTIONAL_KWARGS = frozenset(("retention_interval", "num_prompt_tokens"))
+_REACHABLE_MASK_OPTIONAL_KWARGS = frozenset(("retention_interval", "num_prompt_tokens", "reachable_boundaries"))
 # manager class -> accepted reachable_block_mask parameter names.
 _REACHABLE_MASK_KWARGS_CACHE: dict[type[SingleTypeKVCacheManager], frozenset[str]] = {}
 
@@ -99,7 +100,9 @@ class AscendStoreCoordinator:
         self.group_block_sizes = group_block_sizes
         self.group_cache_families = group_cache_families
         self.group_effective_block_sizes = list(group_block_sizes)
-        for effective_block_size in self.group_effective_block_sizes:
+        self.cacheable_group_ids = infer_cacheable_group_ids(kv_cache_groups)
+        for group_id in self.cacheable_group_ids:
+            effective_block_size = self.group_effective_block_sizes[group_id]
             assert effective_block_size % hash_block_size == 0, "block_size must be divisible by hash_block_size"
             assert scheduler_block_size % effective_block_size == 0, (
                 "scheduler_block_size must be a multiple of each group's effective block_size"
@@ -119,6 +122,8 @@ class AscendStoreCoordinator:
             spec = _unwrap_spec(group.kv_cache_spec)
             effective_spec = _copy_spec_with_block_size(spec, self.group_effective_block_sizes[group_id])
             self.group_effective_specs.append(effective_spec)
+            if group_id not in self.cacheable_group_ids:
+                continue
             manager_cls = _get_manager_class(spec)
 
             for existing_spec, group_ids, existing_cls in attention_groups:
@@ -183,8 +188,19 @@ class AscendStoreCoordinator:
         assert aligned_token_len % self.lcm_block_size == 0, (
             f"aligned_token_len ({aligned_token_len}) must be a multiple of lcm_block_size ({self.lcm_block_size})"
         )
+        # Stores retain the request's replay checkpoint. Lookups must probe
+        # every possible checkpoint: a shorter request may have published a
+        # boundary that is not the current request's replay/segment boundary.
+        reachable_boundaries = (
+            (max(0, num_prompt_tokens - 1),)
+            if num_prompt_tokens is not None
+            else range(self.lcm_block_size, aligned_token_len + 1, self.lcm_block_size)
+        )
         masks: list[tuple[int, list[bool] | None]] = []
         for group_id, spec in enumerate(self.group_effective_specs):
+            if group_id not in self.cacheable_group_ids:
+                masks.append((0, []))
+                continue
             num_chunks = aligned_token_len // self.group_effective_block_sizes[group_id]
             if not _uses_reachable_mask(self.group_cache_families[group_id]):
                 masks.append((num_chunks, None))
@@ -199,6 +215,7 @@ class AscendStoreCoordinator:
                 use_eagle=group_id in self.eagle_reachable_group_ids,
                 retention_interval=retention_interval,
                 num_prompt_tokens=num_prompt_tokens,
+                reachable_boundaries=reachable_boundaries,
             )
             masks.append((num_chunks, mask))
         return masks
@@ -215,11 +232,8 @@ class AscendStoreCoordinator:
         self,
         aligned_token_len: int,
     ) -> tuple[list[bool] | None, ...]:
-        # Must use the same retention policy as store_mask. The lookup may only
-        # ask for blocks the save path actually persists: a denser lookup mask
-        # queries never-stored blocks, and find_longest_cache_hit turns the
-        # first such hole into a zero-length hit — i.e. no external hit at all,
-        # for every request, no matter how full the pool is.
+        # Probe candidate replay boundaries as well as segment boundaries;
+        # find_longest_cache_hit still requires all necessary states to exist.
         masks = self._reachable_masks(aligned_token_len, self.retention_interval, None)
         for num_chunks, mask in masks:
             if mask is not None:
@@ -253,7 +267,8 @@ class AscendStoreCoordinator:
         exists: set[tuple[int, bytes]] = set()
         block_hashes_to_check = block_hashes[: token_len // self.hash_block_size]
 
-        for group_id, group_block_size in enumerate(self.group_effective_block_sizes):
+        for group_id in self.cacheable_group_ids:
+            group_block_size = self.group_effective_block_sizes[group_id]
             group_block_hashes = get_block_hashes(block_hashes_to_check, group_block_size, self.hash_block_size)
             hits = query_group_hits(group_id, group_block_hashes, lookup_masks[group_id])
             exists.update((group_id, block_hash_to_bytes(hit)) for hit in hits)

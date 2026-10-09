@@ -230,7 +230,9 @@ def _pool_kernel(
         start_pos = tl.load(meta_ptr + batch)  # [0, NUM_BATCH)
         used_len = tl.load(meta_ptr + NUM_BATCH + batch)  # [NUM_BATCH, 2*NUM_BATCH)
         groups_in_batch = (start_pos + used_len) // RATIO - start_pos // RATIO
-        cache_row = tl.load(block_table_ptr + batch)
+        # A ring page is 32 * 2 * HEAD_DIM FP32 elements. At page 65536 the
+        # element offset exceeds INT32_MAX; widen before pointer arithmetic.
+        cache_row = tl.load(block_table_ptr + batch).to(tl.int64)
         valid = local_group < groups_in_batch
         if TOKEN_ALIGNED:
             valid = valid & (cache_row > 0) & (cache_row < NUM_CACHE_BLOCKS)
@@ -241,7 +243,7 @@ def _pool_kernel(
             token_pos = group_idx * RATIO + rows
             seg_off = token_pos - start_pos
             residual = start_pos - group_idx * RATIO  # 段前残余数，仅 local_group==0 时可能 >0
-            cache_row = tl.load(block_table_ptr + batch)
+            cache_row = tl.load(block_table_ptr + batch).to(tl.int64)
             if residual > 0:
                 # 残余组（每 batch 至多 1 个）：cache 拼接
                 pooled = _pooled_blocked(
@@ -345,7 +347,8 @@ def _cache_update_kernel(
         write_idx = task_id - batch * WRITE_SLOTS_PER_BATCH
         used_len = tl.load(meta_ptr + NUM_BATCH + batch)
         tail_count = used_len if used_len < CACHE_SIZE else CACHE_SIZE
-        cache_row = tl.load(block_table_ptr + batch)
+        # Keep the cache element offset 64-bit for high physical page IDs.
+        cache_row = tl.load(block_table_ptr + batch).to(tl.int64)
         valid = write_idx < tail_count
         if PROTECT_NULL:
             valid = valid & (cache_row > 0) & (cache_row < NUM_CACHE_BLOCKS)
@@ -354,7 +357,7 @@ def _cache_update_kernel(
             proj_row = tl.load(meta_ptr + 3 * NUM_BATCH + batch) + token_in_seg
             token_pos = tl.load(meta_ptr + batch) + token_in_seg
             slot = token_pos % CACHE_SIZE
-            cache_row = tl.load(block_table_ptr + batch)
+            cache_row = tl.load(block_table_ptr + batch).to(tl.int64)
             kv_vals = tl.load(kv_ptr + proj_row * HEAD_DIM + offs_h)
             score_vals = tl.load(score_ptr + proj_row * HEAD_DIM + offs_h)
             tl.store(cache_ptr + (cache_row * CACHE_SIZE + slot) * 2 * HEAD_DIM + offs_h, kv_vals)

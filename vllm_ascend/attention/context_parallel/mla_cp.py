@@ -1,12 +1,12 @@
 from dataclasses import dataclass
-from enum import Enum
+from math import lcm
 from typing import NamedTuple
 
 import numpy as np
 import torch
 import torch_npu
-from vllm.config import CUDAGraphMode, VllmConfig
-from vllm.forward_context import get_forward_context
+from vllm.config import VllmConfig
+from vllm.distributed import get_dcp_group
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 
@@ -26,41 +26,28 @@ from vllm_ascend.attention.mla_v1 import (
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.context_parallel.common_cp import (
+    CPKVScope,
     DCPImplMixin,
     DCPMetadataBuilderMixin,
+    use_history_current_split_decode,
 )
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, AscendDCPMetadata
+from vllm_ascend.attention.utils import MLAPO_MAX_SUPPORTED_TOKENS, AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import (
     get_draft_graph_params,
     get_draft_graph_prefill_params,
     get_graph_params,
     update_graph_params_workspaces,
 )
-from vllm_ascend.ops.triton.sfa_cp import fused_sfa_dcp_lse_combine
-from vllm_ascend.utils import weak_ref_tensors
-
-
-class MLASplitAttentionKind(Enum):
-    HISTORY = "split_history"
-    CURRENT = "split_current"
+from vllm_ascend.ops.triton.dcp.dcp_a2a import fused_dcp_lse_combine
+from vllm_ascend.utils import cp_decode_comm_stream, weak_ref_tensors
 
 
 class MLASplitAttentionGraphParams(NamedTuple):
     """One split attention task and its layer metadata identity."""
 
     attention_params: tuple
-    attention_kind: MLASplitAttentionKind
+    attention_kind: CPKVScope
     layer_name: str
-
-
-_DCP_MTP_COMM_STREAM: torch.npu.Stream | None = None
-
-
-def _dcp_mtp_comm_stream() -> torch.npu.Stream:
-    global _DCP_MTP_COMM_STREAM
-    if _DCP_MTP_COMM_STREAM is None:
-        _DCP_MTP_COMM_STREAM = torch_npu.npu.Stream()
-    return _DCP_MTP_COMM_STREAM
 
 
 @dataclass
@@ -73,15 +60,44 @@ class DCPChunkedContextMetadata(ChunkedContextMetadata):
     padded_local_cu_seq_lens: torch.Tensor = None
     cu_seq_lens_lst: list[list[int]] | None = None
     chunk_size: int | None = None
+    padded_local_cu_seq_lens_lst: list[list[int]] | None = None
+    pcp_global_req_indices: list[int] | None = None
+    pcp_global_block_table: torch.Tensor | None = None
+    # Per-chunk offsets in the gathered buffer, indexed by logical DCP rank.
+    kv_rank_offsets: list[list[int]] | None = None
 
 
 @dataclass
 class AscendMLADCPDecodeMetadata(AscendMLADecodeMetadata):
     """MLA decode metadata fields used only by DCP."""
 
-    cp_seq_len: torch.Tensor = None
+    cp_seq_len: list[int] | None = None
     dcp_mtp_attn_mask: torch.Tensor = None
     cp_history_seq_len: list[int] | None = None
+
+    def update_dcp_seq_lens_cpu(
+        self,
+        seq_lens_cpu: torch.Tensor,
+        dcp_local_seq_lens_cpu: torch.Tensor,
+        query_lens_cpu: torch.Tensor,
+        *,
+        dcp_size: int,
+        dcp_rank: int,
+        cp_kv_cache_interleave_size: int,
+    ) -> None:
+        """Consume producer-local lengths and derive MLA's cached history."""
+        self.cp_seq_len = dcp_local_seq_lens_cpu.tolist()
+        # Queries must be subtracted globally before partitioning history.
+        history_lens = (seq_lens_cpu - query_lens_cpu).clamp(min=0)
+        cp_history_seq_len = get_dcp_local_seq_lens(
+            history_lens,
+            dcp_size=dcp_size,
+            dcp_rank=dcp_rank,
+            cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
+        ).tolist()
+        assert self.actual_seq_lengths_q is not None
+        num_padded = len(self.actual_seq_lengths_q) - len(cp_history_seq_len)
+        self.cp_history_seq_len = cp_history_seq_len + [0] * num_padded
 
 
 class AscendMlaDCPMetadataBuilder(
@@ -91,9 +107,26 @@ class AscendMlaDCPMetadataBuilder(
     """Build MLA metadata for decode context parallelism."""
 
     decode_metadata_cls = AscendMLADCPDecodeMetadata
+    consumes_pcp_context = True
     # Non-causal block drafters (e.g. DSpark) attend to all DCP-local KV.
     # Causal multi-token queries still need history/current split attention.
     supports_non_causal_multi_token_dcp = True
+
+    @staticmethod
+    def determine_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
+        workspace_size = AscendMLAMetadataBuilder.determine_chunked_prefill_workspace_size(vllm_config)
+        parallel_config = vllm_config.parallel_config
+        if parallel_config.prefill_context_parallel_size > 1 and parallel_config.decode_context_parallel_size > 1:
+            chunk_alignment = lcm(
+                vllm_config.cache_config.block_size,
+                parallel_config.cp_kv_cache_interleave_size * parallel_config.decode_context_parallel_size,
+            )
+            # The shared plan reserves two local fragments per global PCP
+            # request. After halving the budget, each request must still fit
+            # one aligned DCP chunk.
+            min_workspace_size = 2 * vllm_config.scheduler_config.max_num_seqs * chunk_alignment
+            workspace_size = max(workspace_size, min_workspace_size)
+        return workspace_size
 
     def __init__(
         self,
@@ -105,6 +138,11 @@ class AscendMlaDCPMetadataBuilder(
         supports_dcp_with_varlen: bool = True,
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device, metadata_cls, supports_dcp_with_varlen)
+        # ProcessGroup payloads follow sorted global ranks. Keep logical DCP
+        # rank order for attention and translate it into source offsets below.
+        dcp_ranks = get_dcp_group().ranks
+        collective_ranks = sorted(dcp_ranks)
+        self.dcp_collective_rank_order = [collective_ranks.index(rank) for rank in dcp_ranks]
         self.cp_local_block_size = vllm_config.parallel_config.cp_kv_cache_interleave_size
         self.cp_virtual_block_size = self.cp_local_block_size * self.dcp_size
         self.block_size = (self.block_size * self.cp_virtual_block_size) // np.gcd(
@@ -112,47 +150,94 @@ class AscendMlaDCPMetadataBuilder(
             self.cp_virtual_block_size,
         )
 
-    def _require_dcp_metadata(
+    def _get_pcp_prefill_kv_inputs(
         self,
-        common_attn_metadata: AscendCommonAttentionMetadata,
-    ) -> AscendDCPMetadata:
-        if common_attn_metadata.context_parallel_metadata is None:
-            # MRV2 supplies common lengths instead of the V1 DCP metadata.
-            # Decode reads the current token too; prefill reads prior context.
-            context_lens = self.seq_lens.clone()
-            context_lens[self.num_decodes :] -= self.query_lens[self.num_decodes :]
-            common_attn_metadata.context_parallel_metadata = AscendDCPMetadata(
-                num_computed_tokens_of_dcp=get_dcp_local_seq_lens(
-                    context_lens,
-                    dcp_size=self.dcp_size,
-                    cp_kv_cache_interleave_size=self.cp_local_block_size,
-                ),
-                query_lens_cpu=self.query_lens,
-                max_query_len=common_attn_metadata.max_query_len,
-            )
-        return super()._require_dcp_metadata(common_attn_metadata)
+    ) -> tuple[torch.Tensor | None, list[int] | None, torch.Tensor | None]:
+        """Build the shared KV send inputs for PCP+DCP chunked prefill.
+
+        Return global sequence-length bounds, local prefill-to-global request
+        indices, and the global block table. The bounds give all DCP senders
+        the same padded KV ranges per chunk. After all-gather, each local
+        fragment selects its source request and consumes only its own history.
+        Return three None values when no global PCP prefill view is needed.
+
+        Example:
+            With PCP=2 on rank 0 and no decode requests:
+            - A: computed=100, query=12, global seq_len=112.
+              Its two local fragments have history lengths [100, 109].
+            - B: computed=200, query=20, global seq_len=220.
+              Its two local fragments have history lengths [200, 215].
+
+            Local rows are [A_first, A_last, B_first, B_last]. The result is:
+            - gather_lens: [112, 220], one bound per global request.
+            - local_rows: [0, 0, 1, 1], one index per local prefill fragment.
+            - gather_block_table: shape (2, num_block_cols), in [A, B] order.
+
+            The bounds include the current query; local attention still uses
+            each fragment's actual history length. Short replicated prefills
+            may have only one local fragment, so row counts need not be 2:1.
+        """
+        context = getattr(self, "_pcp_context", None)
+        if not self.pcp_enabled or context is None or not context.global_batch.is_prefilling_np.any():
+            return None, None, None
+        if self._pcp_cache_group_idx is None or context.local_to_global_req_indices is None:
+            raise ValueError("PCP+DCP chunks require global tables and the upstream request mapping.")
+
+        batch = context.global_batch
+        # The global sequence end bounds every fragment's history. Local
+        # attention still consumes only its own seq_lens - query_lens.
+        gather_lens = torch.from_numpy(
+            np.where(batch.is_prefilling_np[: batch.num_reqs], batch.seq_lens_np[: batch.num_reqs], 0)
+        ).to(torch.int32)
+        local_rows = list(context.local_to_global_req_indices[self.num_decodes : self.num_decodes + self.num_prefills])
+        gather_block_table = context.global_block_tables[self._pcp_cache_group_idx][: batch.num_reqs]
+        return gather_lens, local_rows, gather_block_table
 
     def build_chunked_metadata(
         self,
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
+        *,
+        chunk_plan_lens_cpu: torch.Tensor | None = None,
+        chunk_workspace_size: int | None = None,
     ):
-        chunked_context_metadata = super().build_chunked_metadata(common_prefix_len, common_attn_metadata)
+        context_lens_cpu = (self.seq_lens - self.query_lens)[self.num_decodes : common_attn_metadata.num_reqs]
+        gather_lens = context_lens_cpu if chunk_plan_lens_cpu is None else chunk_plan_lens_cpu
+        use_default_chunk_workspace = chunk_workspace_size is None
+        if chunk_workspace_size is None:
+            chunk_workspace_size = self.chunked_prefill_workspace_size
+        local_rows = None
+        block_table = None
+        if self.pcp_enabled and self.dcp_enabled:
+            pcp_gather_lens, local_rows, block_table = self._get_pcp_prefill_kv_inputs()
+            if pcp_gather_lens is not None:
+                if chunk_plan_lens_cpu is None:
+                    gather_lens = pcp_gather_lens
+                # A global PCP request may expand into two local attention rows.
+                if use_default_chunk_workspace:
+                    chunk_workspace_size //= 2
+        chunked_context_metadata = super().build_chunked_metadata(
+            common_prefix_len,
+            common_attn_metadata,
+            chunk_plan_lens_cpu=gather_lens,
+            chunk_workspace_size=chunk_workspace_size,
+        )
         if chunked_context_metadata is None:
             return None
 
-        local_context_lens_allranks = self._get_dcp_context_lens(
-            common_attn_metadata,
-            start=self.num_decodes,
+        # PCP sends use global request rows; attention retains local histories.
+        num_context_rows = gather_lens.numel()
+        local_context_lens_allranks = get_dcp_local_seq_lens(
+            self.context_lens_cpu,
+            dcp_size=self.dcp_size,
+            cp_kv_cache_interleave_size=self.cp_local_block_size,
         )
-        padded_local_context_lens_cpu = (
-            cdiv(self.context_lens_cpu, self.cp_virtual_block_size) * self.cp_local_block_size
-        )
+        padded_local_context_lens_cpu = cdiv(gather_lens, self.cp_virtual_block_size) * self.cp_local_block_size
         padded_local_max_context_chunk_across_ranks = (
             cdiv(self.max_context_chunk, self.cp_virtual_block_size) * self.cp_local_block_size
         )
         local_chunk_starts = (
-            torch.arange(self.num_chunks, dtype=torch.int32).unsqueeze(1).expand(-1, self.num_prefills)
+            torch.arange(self.num_chunks, dtype=torch.int32).unsqueeze(1).expand(-1, num_context_rows)
             * padded_local_max_context_chunk_across_ranks
         )
         local_chunk_ends = torch.min(
@@ -162,7 +247,7 @@ class AscendMlaDCPMetadataBuilder(
         padded_local_chunk_seq_lens = (local_chunk_ends - local_chunk_starts).clamp(min=0)
         padded_local_cu_chunk_seq_lens_cpu = torch.zeros(
             self.num_chunks,
-            self.num_prefills + 1,
+            num_context_rows + 1,
             dtype=torch.int32,
             pin_memory=True,
         )
@@ -172,10 +257,11 @@ class AscendMlaDCPMetadataBuilder(
             out=padded_local_cu_chunk_seq_lens_cpu[:, 1:],
             dtype=torch.int32,
         )
+        seq_tot = padded_local_chunk_seq_lens.sum(dim=1).tolist()
         return DCPChunkedContextMetadata(
             cu_seq_lens=chunked_context_metadata.cu_seq_lens,
             starts=local_chunk_starts.pin_memory().to(self.device, non_blocking=True),
-            seq_tot=padded_local_chunk_seq_lens.sum(dim=1).tolist(),
+            seq_tot=seq_tot,
             max_seq_lens=chunked_context_metadata.max_seq_lens,
             chunk_seq_lens=self.chunk_seq_lens,
             chunk_seq_lens_npu=chunked_context_metadata.chunk_seq_lens_npu,
@@ -190,6 +276,10 @@ class AscendMlaDCPMetadataBuilder(
             ),
             cu_seq_lens_lst=self.cu_seq_lens_cpu.tolist(),
             chunk_size=padded_local_max_context_chunk_across_ranks,
+            padded_local_cu_seq_lens_lst=padded_local_cu_chunk_seq_lens_cpu.tolist(),
+            pcp_global_req_indices=local_rows,
+            pcp_global_block_table=block_table,
+            kv_rank_offsets=[[rank * toks for rank in self.dcp_collective_rank_order] for toks in seq_tot],
         )
 
     def build_decode_metadata(
@@ -199,32 +289,17 @@ class AscendMlaDCPMetadataBuilder(
     ) -> AscendMLADecodeMetadata:
         decode_metadata = super().build_decode_metadata(common_prefix_len, common_attn_metadata)
         assert isinstance(decode_metadata, AscendMLADCPDecodeMetadata)
-        dcp_metadata = self._require_dcp_metadata(common_attn_metadata)
-        if dcp_metadata.draft_cp_seq_len is not None:
-            decode_metadata.cp_seq_len = dcp_metadata.draft_cp_seq_len[: self.num_decodes]
-        else:
-            decode_metadata.cp_seq_len = self._get_dcp_rank_context_lens(
-                common_attn_metadata,
-                end=self.num_decodes,
-            ).tolist()
-        # Use the DCP CPU mirror: it includes corrected verifier lengths
-        # and the draft-step extension. Do not synchronize GPU lengths here.
-        local_lengths = self._get_dcp_context_lens(common_attn_metadata, end=self.num_decodes)
-        # DCP lengths contain real requests; FULL graph query lengths also
-        # include padded requests. Compute real histories before padding.
-        query_lens = self.query_lens[: local_lengths.shape[0]]
-        history_lens = (local_lengths.sum(dim=-1) - query_lens).clamp(min=0)
-        cp_history_seq_len: list[int] = get_dcp_local_seq_lens(
-            history_lens,
+        dcp_local_seq_lens_cpu = common_attn_metadata.dcp_local_seq_lens_cpu
+        assert dcp_local_seq_lens_cpu is not None
+        seq_lens_cpu = self.seq_lens[: self.num_decodes]
+        decode_metadata.update_dcp_seq_lens_cpu(
+            seq_lens_cpu,
+            dcp_local_seq_lens_cpu[: self.num_decodes],
+            self.query_lens[: seq_lens_cpu.shape[0]],
             dcp_size=self.dcp_size,
             dcp_rank=self.dcp_rank,
             cp_kv_cache_interleave_size=self.cp_local_block_size,
-        ).tolist()
-        # Preserve the base builder's cumulative TND query boundaries,
-        # including graph padding; the old BSND path used per-request lengths.
-        assert decode_metadata.actual_seq_lengths_q is not None
-        num_padded = len(decode_metadata.actual_seq_lengths_q) - len(cp_history_seq_len)
-        decode_metadata.cp_history_seq_len = cp_history_seq_len + [0] * num_padded
+        )
         decode_metadata.dcp_mtp_attn_mask = None
         return decode_metadata
 
@@ -236,6 +311,32 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
     """
 
     can_return_lse_for_decode: bool = True
+    supports_mtp_with_cp_non_trivial_interleave_size: bool = True
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._dcp_current_kv_buffers: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
+
+    def process_weights_after_loading(self, act_dtype: torch.dtype):
+        super().process_weights_after_loading(act_dtype)
+        if self.enable_mlapo and not self.fa_quant_layer and not self.use_mla_rope and not self.enable_kv_nz:
+            self._prepare_dcp_current_kv_buffers()
+
+    def _prepare_dcp_current_kv_buffers(self) -> None:
+        # Every graph size uses a view of this layer-owned allocation, so the
+        # current KV and index addresses stay live across capture and replay.
+        max_tokens = min(
+            self.vllm_config.scheduler_config.max_num_batched_tokens,
+            MLAPO_MAX_SUPPORTED_TOKENS,
+        )
+        block_size = self.vllm_config.cache_config.block_size
+        cache_shape = (cdiv(max_tokens, block_size), block_size, self.num_kv_heads)
+        device = self.weight_dq.device
+        self._dcp_current_kv_buffers = (
+            torch.empty((*cache_shape, self.kv_lora_rank), dtype=self.dtype, device=device),
+            torch.empty((*cache_shape, self.qk_rope_head_dim), dtype=self.dtype, device=device),
+            torch.arange(max_tokens, dtype=torch.int64, device=device),
+        )
 
     @staticmethod
     def update_graph_params(
@@ -304,17 +405,13 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
 
                 # History/current share one layer invocation. Advance after
                 # selecting its metadata, once current or an unsplit task is reached.
-                if split_kind is not MLASplitAttentionKind.HISTORY:
+                if split_kind is not CPKVScope.HISTORY:
                     attn_count += 1
 
                 if split_kind is not None:
                     actual_seq_lengths = decode_meta.actual_seq_lengths_q
-                    seq_len = (
-                        decode_meta.cp_history_seq_len
-                        if split_kind is MLASplitAttentionKind.HISTORY
-                        else actual_seq_lengths
-                    )
-                    block_table = decode_meta.block_table if split_kind is MLASplitAttentionKind.HISTORY else None
+                    seq_len = decode_meta.cp_history_seq_len if split_kind is CPKVScope.HISTORY else actual_seq_lengths
+                    block_table = decode_meta.block_table if split_kind is CPKVScope.HISTORY else None
                 else:
                     seq_len = decode_meta.cp_seq_len
                 if isinstance(seq_len, torch.Tensor):
@@ -353,6 +450,17 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
 
                 event.record(update_stream)
 
+    def get_context_block_table(self, attn_metadata: AscendMLAMetadata) -> torch.Tensor:
+        """Use the global PCP request table for DCP prefill KV loading."""
+        if not self.pcp_enabled:
+            return super().get_context_block_table(attn_metadata)
+        prefill_metadata = attn_metadata.prefill
+        assert prefill_metadata is not None
+        assert prefill_metadata.chunked_context is not None
+        assert isinstance(prefill_metadata.chunked_context, DCPChunkedContextMetadata)
+        assert prefill_metadata.chunked_context.pcp_global_block_table is not None
+        return prefill_metadata.chunked_context.pcp_global_block_table
+
     def get_context_seq_len_npu(self, index: int, attn_metadata: AscendMLAMetadata):
         prefill_metadata = attn_metadata.prefill
         assert prefill_metadata is not None
@@ -370,23 +478,13 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             dim=1,
         )
 
-    def _use_history_current_split_decode(self, attn_metadata: AscendMLAMetadata) -> bool:
-        if not attn_metadata.causal:
-            return False
-        if not _EXTRA_CTX.is_draft_model:
-            return True
-        # Keep the captured task layout: the autoregressive draft dummy run can
-        # describe multiple queries even for later single-token draft steps.
-        if _EXTRA_CTX.capturing or get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.FULL:
-            return True
-        # The first draft pass may process several tokens from the target pass;
-        # only later autoregressive steps are necessarily single-token decodes.
-        query_lens = attn_metadata.query_lens
-        assert query_lens is not None
-        return any(query_len > 1 for query_len in query_lens[: attn_metadata.num_decodes])
-
     def _decode_requires_current_kv(self, attn_metadata: AscendMLAMetadata) -> bool:
-        return self._use_history_current_split_decode(attn_metadata)
+        return use_history_current_split_decode(
+            attn_metadata,
+            is_draft_model=_EXTRA_CTX.is_draft_model,
+            is_draft_model_prefill=_EXTRA_CTX.is_draft_model_prefill,
+            use_spec_decode=self.speculative_config is not None,
+        )
 
     def _run_dcp_mtp_split_attention_op(
         self,
@@ -400,7 +498,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         block_size: int,
         actual_seq_lengths: list[int],
         actual_seq_lengths_kv: list[int],
-        attention_kind: MLASplitAttentionKind,
+        attention_kind: CPKVScope,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         num_tokens = q_nope.size(0)
         num_heads = q_nope.size(1)
@@ -508,16 +606,13 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         assert current_k_nope is not None and current_k_pe is not None
 
         num_tokens = q_nope.size(0)
-        num_heads = self.num_heads * self.dcp_size if self.dcp_size > 1 else self.num_heads
+        num_heads = q_nope.size(1)
         q_nope = q_nope.view(num_tokens, num_heads, -1).contiguous()
         q_pe = q_pe.view(num_tokens, num_heads, -1)
         history_k_nope = cache_k_nope.view(-1, self.num_kv_heads, block_size, self.kv_lora_rank)
         history_k_pe = cache_k_pe.view(-1, self.num_kv_heads, block_size, self.qk_rope_head_dim)
 
-        head_start = self.dcp_rank * self.num_heads
-        head_end = head_start + self.num_heads
-        current_q_nope = q_nope[:, head_start:head_end].contiguous()
-        current_q_pe = q_pe[:, head_start:head_end].contiguous()
+        current_q_nope, current_q_pe = self._local_decode_query(q_nope, q_pe, num_heads=self.num_heads)
         current_k_nope = current_k_nope.view(num_tokens, self.num_kv_heads, self.kv_lora_rank).contiguous()
         current_k_pe = current_k_pe.view(num_tokens, self.num_kv_heads, self.qk_rope_head_dim).contiguous()
 
@@ -586,14 +681,14 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             block_size=block_size,
             actual_seq_lengths=decode_meta.actual_seq_lengths_q,
             actual_seq_lengths_kv=decode_meta.cp_history_seq_len,
-            attention_kind=MLASplitAttentionKind.HISTORY,
+            attention_kind=CPKVScope.HISTORY,
         )
 
         # Run current-token attention on the side stream while the main
         # stream packs and exchanges history. The ready event also orders
         # current attention after the history FIA's shared workspace use.
         main_stream = torch.npu.current_stream()
-        attn_stream = _dcp_mtp_comm_stream()
+        attn_stream = cp_decode_comm_stream()
         history_ready = main_stream.record_event()
         for tensor in (current_q_nope, current_q_pe, current_k_nope, current_k_pe, decode_meta.attn_mask):
             if tensor is not None:
@@ -613,24 +708,21 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
                 block_size=0,
                 actual_seq_lengths=decode_meta.actual_seq_lengths_q,
                 actual_seq_lengths_kv=decode_meta.actual_seq_lengths_q,
-                attention_kind=MLASplitAttentionKind.CURRENT,
+                attention_kind=CPKVScope.CURRENT,
             )
             current_attn_done = attn_stream.record_event()
         current_output.record_stream(main_stream)
         current_lse.record_stream(main_stream)
 
-        history_recv = torch.ops.vllm.sfa_dcp_a2a_fused(
+        history_recv = self._merge_dcp_attention_output(
             history_output,
             history_lse,
-            self.dcp_size,
-            1,
-            self.dcp_group.unique_name if self.dcp_size > 1 else "",
             defer_combine=True,
         )
         main_stream.wait_event(current_attn_done)
         # Reduce all history shards and the replicated current chunk exactly
         # once, reading current FIA tensors directly without packing them.
-        attn_output = fused_sfa_dcp_lse_combine(
+        attn_output = fused_dcp_lse_combine(
             history_recv,
             self.kv_lora_rank,
             scatter_dim=1,
@@ -645,7 +737,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         block_size: int,
         attn_metadata: AscendMLAMetadata,
     ) -> torch.Tensor:
-        if self._use_history_current_split_decode(attn_metadata):
+        if self._decode_requires_current_kv(attn_metadata):
             return self._forward_decode_split_attention(
                 decode_preprocess_res.ql_nope,
                 decode_preprocess_res.q_pe,
@@ -668,10 +760,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         num_tokens = q_nope.size(0)
         # shape of knope/k_pe for npu graph mode should be:
         # [num_blocks, num_kv_heads, block_size, self.kv_lora_rank/self.qk_rope_head_dim]
-        if self.dcp_size > 1:
-            num_heads = self.num_heads * self.dcp_size
-        else:
-            num_heads = self.num_heads
+        num_heads = q_nope.size(1)
         # Use DCP-local computed token counts to build sequence lengths and masks.
         k_nope = k_nope.view(-1, self.num_kv_heads, block_size, self.kv_lora_rank)
         k_pe = k_pe.view(-1, self.num_kv_heads, block_size, self.qk_rope_head_dim)
@@ -807,11 +896,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             softmax_lse = softmax_lse.permute(0, 2, 1, 3).reshape(B_lse * Q_S, N_lse, 1)
 
         # Update out&lse
-        attn_output = self._merge_dcp_attention_output(
-            attn_output,
-            softmax_lse,
-            self.kv_lora_rank,
-        )
+        attn_output = self._merge_dcp_attention_output(attn_output, softmax_lse)
         return self._v_up_proj_batch_major(attn_output)
 
     def _reorg_kvcache(
@@ -848,12 +933,14 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         assert chunked_context.cu_seq_lens_lst is not None
         assert chunked_context.max_seq_lens is not None
         assert chunked_context.chunk_size is not None
+        assert chunked_context.kv_rank_offsets is not None
 
         padded_local_chunk_seq_lens_lst = chunked_context.padded_local_chunk_seq_lens[chunk_idx]
         local_context_lens_allranks = chunked_context.local_context_lens_allranks
         sum_seq_len = chunked_context.cu_seq_lens_lst[chunk_idx][-1]
         max_seq_len = chunked_context.max_seq_lens[chunk_idx]
         chunk_size: int = chunked_context.chunk_size
+        kv_rank_offsets = chunked_context.kv_rank_offsets[chunk_idx]
         cache_kv_c_k_pe = torch.cat([kv_c_normed, k_pe], dim=-1)
         cache_kv_c_k_pe = self._dcp_all_gather(cache_kv_c_k_pe, 0)
 
@@ -865,9 +952,16 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         k_pe_segments = []
         src_token_idx = 0
         max_seq_len_check = 0
-        for padded_local_chunk_seq_len, local_context_lens in zip(
-            padded_local_chunk_seq_lens_lst, local_context_lens_allranks
-        ):
+        for row, local_context_lens in enumerate(local_context_lens_allranks):
+            source_row = (
+                chunked_context.pcp_global_req_indices[row]
+                if chunked_context.pcp_global_req_indices is not None
+                else row
+            )
+            padded_local_chunk_seq_len = padded_local_chunk_seq_lens_lst[source_row]
+            if chunked_context.pcp_global_req_indices is not None:
+                assert chunked_context.padded_local_cu_seq_lens_lst is not None
+                src_token_idx = chunked_context.padded_local_cu_seq_lens_lst[chunk_idx][source_row]
             cur_seq_len = 0
             for rank, local_context_len in enumerate(local_context_lens):
                 # Note(qcs): We split the context into multiple chunks,
@@ -882,17 +976,16 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
                     padded_local_chunk_seq_len,
                 )
                 if local_chunk_len != 0:
-                    kv_c_segment = allgatered_kv_c_normed[
-                        rank * toks + src_token_idx : rank * toks + src_token_idx + local_chunk_len
-                    ]
-                    k_pe_segment = allgatered_k_pe[
-                        rank * toks + src_token_idx : rank * toks + src_token_idx + local_chunk_len
-                    ]
+                    src_start = kv_rank_offsets[rank] + src_token_idx
+                    kv_c_segment = allgatered_kv_c_normed[src_start : src_start + local_chunk_len]
+                    k_pe_segment = allgatered_k_pe[src_start : src_start + local_chunk_len]
                     kv_c_segments.append(kv_c_segment)
                     k_pe_segments.append(k_pe_segment)
                     cur_seq_len += local_chunk_len
             max_seq_len_check = max(max_seq_len_check, cur_seq_len)
             src_token_idx += padded_local_chunk_seq_len
+        if not kv_c_segments:
+            return kv_c_normed[:0], k_pe[:0]
         reorganized_kv_c_normed = torch.cat(kv_c_segments, dim=0)
         reorganized_k_pe = torch.cat(k_pe_segments, dim=0)
         assert reorganized_kv_c_normed.shape[0] == sum_seq_len, (

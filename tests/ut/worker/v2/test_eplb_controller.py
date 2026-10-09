@@ -14,11 +14,15 @@ from vllm_ascend.worker.v2.eplb import AscendEPLBController, _unwrap_moe
 
 class TestAscendEPLBController(unittest.TestCase):
     @staticmethod
-    def _make_controller(*, enable_eplb=True, log_balancedness=False):
+    def _make_controller(*, enable_eplb=True, log_balancedness=False, policy="stair"):
         parallel_config = SimpleNamespace(
             enable_eplb=enable_eplb,
+            # Explicit communicator skips the group-wide consensus, which
+            # needs a live EPLB group that unit tests do not have.
             eplb_config=SimpleNamespace(
                 log_balancedness=log_balancedness,
+                policy=policy,
+                communicator="torch_gloo",
             ),
         )
         controller = AscendEPLBController(
@@ -54,6 +58,7 @@ class TestAscendEPLBController(unittest.TestCase):
         ascend_state.assert_called_once_with(
             controller.parallel_config,
             controller.device,
+            controller.eplb_policy,
         )
 
     def test_set_batch_phase_updates_match(self):
@@ -122,11 +127,7 @@ class TestAscendEPLBController(unittest.TestCase):
 
         controller.prepare_forward(model_config, 4, ubatch_slices)
 
-        state.prepare_forward.assert_called_once_with(
-            model_config,
-            4,
-            ubatch_slices,
-        )
+        state.prepare_forward.assert_not_called()
         state._should_record_current_step.assert_called_once_with(
             log_stats=True,
         )
@@ -203,6 +204,7 @@ class TestAscendEPLBController(unittest.TestCase):
             parallel_config=controller.parallel_config,
             expanded_physical_to_logical=mapping,
             num_valid_physical_experts=2,
+            policy=controller.eplb_policy,
         )
         self.assertIs(controller.state, state)
         self.assertTrue(controller._has_registered_models)

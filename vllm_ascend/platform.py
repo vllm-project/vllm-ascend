@@ -20,7 +20,7 @@ from __future__ import annotations
 import math
 import os
 from importlib import import_module, util
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, get_args
 from uuid import uuid4
 
 import torch
@@ -45,10 +45,13 @@ from vllm_ascend.utils import (
     COMPILATION_PASS_KEY,
     COMPRESSED_TENSORS_METHOD,
     FP8_METHOD,
+    dsv4_skips_indexer_topk,
+    get_dsv4_compress_ratio,
     bootstrap_custom_op_env,
     check_kv_extra_config,
     enable_sfa_dcp_replicated_indexer,
     is_moe_model,
+    model_uses_kpool_indexer,
     model_uses_sfa_sparse,
     refresh_block_size,
     update_cudagraph_capture_sizes,
@@ -75,8 +78,12 @@ logger.info_once(
 )
 
 _CUSTOM_OP_REGISTERED = False
-# Delete after the driver is released; temporarily hard-coded to 4
-MAX_REDUCED_CAPTURE_SIZES = 4
+_MINIMAX_M3_ARCHITECTURES = frozenset(
+    {
+        "MiniMaxM3SparseForCausalLM",
+        "MiniMaxM3SparseForConditionalGeneration",
+    }
+)
 
 
 class NPUPlatform(Platform):
@@ -320,6 +327,16 @@ class NPUPlatform(Platform):
             if quant_action and hasattr(quant_action, "choices") and quant_action.choices:
                 if ASCEND_QUANTIZATION_METHOD not in quant_action.choices:
                     quant_action.choices.append(ASCEND_QUANTIZATION_METHOD)
+            # Same pattern for --kv-cache-dtype: the argparse choices were
+            # built from the upstream CacheDType Literal before this patch
+            # widened it, so append the Ascend-only dtypes here.
+            dtype_action = parser._option_string_actions.get("--kv-cache-dtype")
+            if dtype_action and hasattr(dtype_action, "choices") and dtype_action.choices:
+                from vllm.config.cache import CacheConfig
+
+                for dtype in get_args(CacheConfig.__dataclass_fields__["cache_dtype"].type):
+                    if dtype not in dtype_action.choices:
+                        dtype_action.choices.append(dtype)
 
         if get_current_hardware_profile().quantization_backend_family is QuantizationBackendFamily.STANDARD:
             from vllm_ascend.quantization import (  # noqa: F401
@@ -337,9 +354,12 @@ class NPUPlatform(Platform):
     def apply_config_platform_defaults(cls, vllm_config: VllmConfig) -> None:
         """Apply Ascend-specific defaults."""
 
-        default_max_cg_capture_size = _get_default_max_cudagraph_capture_size(vllm_config)
-        if default_max_cg_capture_size is not None:
-            vllm_config.compilation_config.max_cudagraph_capture_size = default_max_cg_capture_size
+        # TODO: Remove this memory-saving capture-size override and its ceiling
+        # restoration once MC2 is no longer used.
+        reduced_cg_cap = _get_reduced_cg_cap(vllm_config)
+        if reduced_cg_cap is not None:
+            vllm_config.compilation_config.max_cudagraph_capture_size = reduced_cg_cap
+            vllm_config.compilation_config.reduced_cg_cap = reduced_cg_cap
 
     def num_compute_units(cls, device_id: int = 0) -> int:
         """Return the number of Cube Cores on the NPU device.
@@ -366,7 +386,25 @@ class NPUPlatform(Platform):
         return 24  # safe default (24 Cube Cores)
 
     @classmethod
+    def _align_hybrid_block_size(cls, vllm_config: VllmConfig, backend_cls) -> None:
+        if (
+            vllm_config.model_config.use_mla
+            and vllm_config.cache_config.cache_dtype in ("int8", "fp8")
+            and model_uses_kpool_indexer(vllm_config.model_config)
+        ):
+            from vllm.model_executor.models.config import HybridAttentionMambaModelConfig
+
+            # Reuse Ascend's packed C8 geometry, including scale bytes and
+            # compressed indexer alignment, after the backend selects its block size.
+            HybridAttentionMambaModelConfig.verify_and_update_config(vllm_config)
+            return
+
+        super()._align_hybrid_block_size(vllm_config, backend_cls)
+
+    @classmethod
     def update_block_size_for_backend(cls, vllm_config: VllmConfig) -> None:
+        super().update_block_size_for_backend(vllm_config)
+
         # TODO: NPU still sets block_size in check_and_update_config.
         # Move that logic here so block_size is chosen by the backend.
         using_kv_transfer_with_hybrid = (
@@ -417,41 +455,24 @@ class NPUPlatform(Platform):
             if start_layer >= end_layer:
                 continue
 
-            if use_index_cache:
-                index_topk_pattern = getattr(config, "index_topk_pattern", None)
-                if index_topk_pattern is None:
-                    index_topk_freq = getattr(config, "index_topk_freq", 1)
-                    index_skip_topk_offset = getattr(config, "index_skip_topk_offset", 2)
-                    skip_topk = max(start_layer - index_skip_topk_offset + 1, 0) % index_topk_freq != 0
-                else:
-                    skip_topk = start_layer < len(index_topk_pattern) and index_topk_pattern[start_layer] == "S"
-                if skip_topk:
-                    raise ValueError(
-                        "Index cache dependency crosses a pipeline-parallel stage boundary: "
-                        f"PP rank {pp_rank}/{pp_size} owns layers [{start_layer}, {end_layer}), "
-                        f"but layer {start_layer} skips Top-K computation without a preceding "
-                        "Top-K recomputation in the same PP stage. "
-                        "Cross-PP Top-K index propagation is not supported."
-                    )
-
-            if indexer_types is None:
-                continue
-
-            has_full_indexer = False
-            for layer_id in range(start_layer, end_layer):
-                indexer_type = indexer_types[layer_id] if layer_id < len(indexer_types) else None
-                if isinstance(indexer_type, str):
-                    indexer_type = indexer_type.lower()
-                if indexer_type == "full":
-                    has_full_indexer = True
-                elif indexer_type == "shared" and not has_full_indexer:
-                    raise ValueError(
-                        "IndexShare group crosses a pipeline-parallel stage boundary: "
-                        f"PP rank {pp_rank}/{pp_size} owns layers [{start_layer}, {end_layer}), "
-                        f"but layer {layer_id} uses a shared Indexer without a preceding "
-                        "full Indexer in the same PP stage. "
-                        "Cross-PP Top-K index propagation is not supported."
-                    )
+            if use_index_cache and getattr(config, "compress_ratios", None) is not None:
+                # V4 counts only c4 Indexers, not transformer layers. Dense
+                # and c128 layers do not populate the shared Top-K buffer.
+                has_topk = False
+                for layer_id in range(start_layer, end_layer):
+                    if get_dsv4_compress_ratio(config, layer_id) != 4:
+                        continue
+                    if dsv4_skips_indexer_topk(config, layer_id, start_layer):
+                        if not has_topk:
+                            raise ValueError(
+                                "Index cache dependency crosses a pipeline-parallel stage boundary: "
+                                f"PP rank {pp_rank}/{pp_size} owns layers [{start_layer}, {end_layer}), "
+                                f"but layer {layer_id} skips Top-K computation without a preceding "
+                                "Top-K recomputation in the same PP stage. "
+                                "Cross-PP Top-K index propagation is not supported."
+                            )
+                    else:
+                        has_topk = True
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
@@ -473,13 +494,19 @@ class NPUPlatform(Platform):
             logger.warning("Model config is missing. Skipping Ascend-specific config updates.")
             return
 
+        _validate_model_runner_config(vllm_config)
         cls._validate_indexer_pp_config(vllm_config)
 
+        _validate_routing_replay_config(vllm_config)
         _validate_draft_decode_context_parallel_config(vllm_config)
         _validate_parallel_config(vllm_config)
+        _validate_engram_config(vllm_config)
 
         # 3.Auto detect quantization method and verify cache dtype
         maybe_auto_detect_quantization(vllm_config)
+        from vllm_ascend.quantization.methods.kv_cache.turboquant.config import validate_turboquant
+
+        validate_turboquant(vllm_config)
         if vllm_config.cache_config.cache_dtype == "fp8" or vllm_config.attention_config.indexer_kv_dtype == "fp8":
             assert get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
 
@@ -546,9 +573,11 @@ class NPUPlatform(Platform):
         """
         # NOTE(Ronald1995): avoid circular import.
         from vllm_ascend.ascend_forward_context import (
+            _is_decode_only_node,
             get_mc2_mask,
             get_mrv2_in_profile_run,
             select_moe_comm_method,
+            use_cann_megamoe,
         )
         from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
         from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
@@ -623,6 +652,8 @@ class NPUPlatform(Platform):
         return {
             "moe_comm_type": moe_comm_type,
             "moe_comm_method": moe_comm_method,
+            "use_mega_moe": use_cann_megamoe(vllm_config),
+            "is_decode_only_node": _is_decode_only_node(vllm_config),
             "capturing": capturing,
             "mmrs_fusion": mmrs_fusion,
             "num_tokens": num_tokens,
@@ -637,6 +668,50 @@ class NPUPlatform(Platform):
             "sinks": sinks,
             "dynamic_mx_quant_scale_alg": dynamic_mx_quant_scale_alg,
         }
+
+
+def _configure_minimax_m3_a5_mixed_kv_cache(vllm_config: VllmConfig) -> None:
+    """Keep MiniMax-M3 GQA KV cache in BF16 on the A5 FP8 path."""
+    model_config = vllm_config.model_config
+    cache_config = vllm_config.cache_config
+    if (
+        model_config is None
+        or cache_config is None
+        or cache_config.cache_dtype not in ("fp8", "fp8_e4m3")
+        or not get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
+    ):
+        return
+
+    # ModelConfig.architecture is populated later in vLLM initialization. Read
+    # the source-of-truth HF architectures here because this hook runs early.
+    hf_config = getattr(model_config, "hf_config", None)
+    architectures = getattr(hf_config, "architectures", None) or ()
+    if not _MINIMAX_M3_ARCHITECTURES.intersection(architectures):
+        return
+
+    text_config = getattr(model_config, "hf_text_config", None)
+    if text_config is None:
+        return
+    num_hidden_layers = getattr(text_config, "num_hidden_layers", None)
+    if not isinstance(num_hidden_layers, int):
+        return
+
+    sparse_config = getattr(text_config, "sparse_attention_config", None) or {}
+    sparse_freq = sparse_config.get("sparse_attention_freq") or []
+    sparse_layer_ids = {layer_idx for layer_idx, freq in enumerate(sparse_freq) if freq != 0}
+    gqa_layer_ids = [str(layer_idx) for layer_idx in range(num_hidden_layers) if layer_idx not in sparse_layer_ids]
+    if not gqa_layer_ids:
+        return
+
+    skip_layers = list(dict.fromkeys(str(layer) for layer in (cache_config.kv_cache_dtype_skip_layers or [])))
+    known_skip_layers = set(skip_layers)
+    skip_layers.extend(layer for layer in gqa_layer_ids if layer not in known_skip_layers)
+    cache_config.kv_cache_dtype_skip_layers = skip_layers
+    logger.info_once(
+        "Using BF16 KV cache for MiniMax-M3 GQA layers %s on Ascend A5; other layers retain the configured %s policy.",
+        ", ".join(gqa_layer_ids),
+        cache_config.cache_dtype,
+    )
 
 
 def _fix_incompatible_config(vllm_config: VllmConfig) -> None:
@@ -672,6 +747,8 @@ def _fix_incompatible_config(vllm_config: VllmConfig) -> None:
                 "Parameter is not supported on Ascend NPU. parameter=calculate_kv_scales, action: resetting to False."
             )
             vllm_config.cache_config.calculate_kv_scales = False
+
+        _configure_minimax_m3_a5_mixed_kv_cache(vllm_config)
 
     # ==================== 3. MultiModal Config ====================
     multimodal_config = getattr(model_config, "multimodal_config", None) if model_config else None
@@ -870,6 +947,15 @@ def _fix_incompatible_config(vllm_config: VllmConfig) -> None:
         )
 
 
+def _validate_model_runner_config(vllm_config: VllmConfig) -> None:
+    if (
+        vllm_config.model_config.architecture in ("DeepseekV41ForCausalLM", "DeepseekV41DSparkModel")
+        and get_current_hardware_profile().supports(HardwareCapability.DSV41_PACKED_CACHE)
+        and not vllm_config.use_v2_model_runner
+    ):
+        raise ValueError("DeepSeek V4.1 on Ascend A5 requires Model Runner V2 (VLLM_USE_V2_MODEL_RUNNER=1).")
+
+
 def _validate_eplb_config(vllm_config: VllmConfig) -> None:
     additional_config = vllm_config.additional_config or {}
     eplb_config = additional_config.get("eplb_config", {})
@@ -878,12 +964,13 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
 
     use_v2_model_runner = bool(getattr(vllm_config, "use_v2_model_runner", False))
     if use_v2_model_runner:
-        legacy_eplb_fields = sorted(set(eplb_config) - {"load_collection_phase"})
-        if legacy_eplb_fields:
+        supported_eplb_fields = {"load_collection_phase", "stair_config"}
+        unsupported_eplb_fields = sorted(set(eplb_config) - supported_eplb_fields)
+        if unsupported_eplb_fields:
             raise ValueError(
-                "Model Runner V2 only accepts 'load_collection_phase' in "
-                "additional_config.eplb_config; legacy fields are not supported: "
-                f"{', '.join(legacy_eplb_fields)}."
+                "Model Runner V2 only accepts 'load_collection_phase' and 'stair_config' in "
+                "additional_config.eplb_config; unsupported fields: "
+                f"{', '.join(unsupported_eplb_fields)}."
             )
         if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv(
             "EXPERT_MAP_RECORD", "false"
@@ -897,11 +984,11 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
             raise ValueError("additional_config.eplb_config.load_collection_phase requires --enable-eplb.")
         if vllm_config.parallel_config.enable_eplb:
             upstream_eplb_config = vllm_config.parallel_config.eplb_config
-            if upstream_eplb_config.communicator not in (None, "torch_gloo"):
+            if upstream_eplb_config.communicator not in (None, "torch_gloo", "hixl"):
                 raise ValueError(
-                    "Async EPLB on Ascend requires the torch_gloo communicator "
-                    f"(CPU staging), but got {upstream_eplb_config.communicator!r}. "
-                    "Set eplb_config.communicator to 'torch_gloo'."
+                    "Async EPLB on Ascend requires the torch_gloo or hixl communicator "
+                    f"but got {upstream_eplb_config.communicator!r}. "
+                    "Set eplb_config.communicator to 'torch_gloo' or 'hixl'."
                 )
             if not upstream_eplb_config.use_async:
                 logger.warning(
@@ -910,13 +997,12 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
                     "action: forcing asynchronous EPLB."
                 )
                 upstream_eplb_config.use_async = True
-                upstream_eplb_config.communicator = "torch_gloo"
             if vllm_config.parallel_config.enable_elastic_ep:
                 raise ValueError("Async EPLB is not supported with elastic EP on Ascend.")
-    elif "load_collection_phase" in eplb_config:
+    elif {"load_collection_phase", "stair_config"} & eplb_config.keys():
         raise ValueError(
-            "additional_config.eplb_config.load_collection_phase is only supported by "
-            "Model Runner V2; use eplb_heat_collection_stage with Model Runner V1."
+            "stair_config and load_collection_phase are only supported by Model Runner V2; "
+            "use eplb_heat_collection_stage with Model Runner V1."
         )
     elif vllm_config.parallel_config.enable_eplb:
         raise ValueError("Upstream EPLB is only supported by Model Runner V2 on Ascend.")
@@ -951,8 +1037,9 @@ def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:
 
     _validate_kv_load_failure_policy(vllm_config)
 
-    # short_request_first_config requires FCFS, excludes batch-job and
-    # kv-consumer paths, and only supports profiling-chunk synchronously.
+    # short_request_first_config requires FCFS and excludes batch-job and
+    # kv-consumer paths. When profiling-chunk is also enabled, the profiling
+    # chunk scheduler installs the SRF waiting queue itself.
     if scheduler_extension_config.short_request_first_config.enabled:
         kv_transfer_config = vllm_config.kv_transfer_config
         kv_role = getattr(kv_transfer_config, "kv_role", None)
@@ -966,11 +1053,6 @@ def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:
                 "ShortRequestFirst scheduling cannot be enabled with batch_job_sched_config. "
                 "Please disable one of them."
             )
-        if scheduler_extension_config.profiling_chunk_config.enabled and vllm_config.scheduler_config.async_scheduling:
-            raise ValueError(
-                "ShortRequestFirst with profiling_chunk_config requires synchronous scheduling. "
-                "Please disable async scheduling."
-            )
         if kv_role == "kv_consumer":
             raise ValueError(
                 "ShortRequestFirst scheduling is supported only on prefill or PD-mixed nodes, "
@@ -979,6 +1061,17 @@ def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:
         if vllm_config.scheduler_config.async_scheduling:
             vllm_config.scheduler_config.scheduler_cls = (
                 "vllm_ascend.core.short_request_first_scheduler.ShortRequestFirstAsyncScheduler"
+            )
+
+    # profiling_chunk (CPP) works with async scheduling only on the v2 model
+    # runner; the v1 PP execution path does not provide the same asynchronous
+    # sampled-token cadence and broadcast guarantees.
+    profiling_chunk_config = scheduler_extension_config.profiling_chunk_config
+    if profiling_chunk_config.enabled and vllm_config.scheduler_config.async_scheduling:
+        if not vllm_config.use_v2_model_runner:
+            raise ValueError(
+                "profiling_chunk_config with async scheduling requires the v2 model runner "
+                "(VLLM_USE_V2_MODEL_RUNNER=1). Please enable it or disable async scheduling."
             )
 
     dyntra_lb_config = scheduler_extension_config.dyntra_lb_config
@@ -1042,6 +1135,19 @@ def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:
                 dyntra_lb_enabled=dyntra_lb_config.enabled,
             )
             vllm_config.scheduler_config = recompute_scheduler_config
+
+    # Checked here, not in AscendConfig: MultiConnector children re-validate the config
+    # with per-child copies that cannot see sibling connectors.
+    kv_transfer_config = vllm_config.kv_transfer_config
+    offload_missing = kv_transfer_config is None or not kv_transfer_config.has_connector("PreemptOffloadConnector")
+    # Only a real split (size > 1) needs the offload guarantee, mirroring the runner gate.
+    ftpc = ascend_config.finegrained_tp_config
+    if offload_missing and (ftpc.oproj_tensor_parallel_size > 1 or ftpc.mlp_tensor_parallel_size > 1):
+        raise AssertionError(
+            "oproj_tensor_parallel_size / mlp_tensor_parallel_size require PreemptOffloadConnector "
+            "(via MultiConnector): a preempted request must not return to the prefill node, "
+            "whose recomputed KV loses precision."
+        )
 
 
 def _validate_kv_load_failure_policy(vllm_config: VllmConfig) -> None:
@@ -1154,6 +1260,16 @@ def _setup_compile_backend(
         vllm_config.additional_config = {}
         additional_config = vllm_config.additional_config
 
+    reduced_cg_cap = getattr(compilation_config, "reduced_cg_cap", None)
+    if reduced_cg_cap is not None:
+        # Add the off-stride default before upstream rebuilds and truncates the list.
+        reduced_cg_cap = min(reduced_cg_cap, vllm_config.scheduler_config.max_num_batched_tokens)
+        compilation_config.cudagraph_capture_sizes = sorted(
+            set(compilation_config.cudagraph_capture_sizes or []) | {reduced_cg_cap}
+        )
+        compilation_config.max_cudagraph_capture_size = None
+        delattr(compilation_config, "reduced_cg_cap")
+
     # Recompute cudagraph sizes before extending splitting_ops (honors the
     # current max / size inputs after the mode adjustments above).
     compilation_config.cudagraph_num_of_warmups = 1
@@ -1211,9 +1327,6 @@ def _setup_compile_backend(
                 "vllm::dsa_forward",
             ]
         )
-        # TODO(2026/7/15): Delete the reduced gear after the new driver is released.
-        if get_current_hardware_profile().supports(HardwareCapability.REDUCED_CUDAGRAPH_CAPTURE_SIZES):
-            _prune_reduced_capture_sizes(vllm_config)
         additional_config["ascend_compilation_config"]["enable_npugraph_ex"] = False
         additional_config["ascend_compilation_config"]["enable_static_kernel"] = False
         additional_config["ascend_compilation_config"]["enable_super_kernel"] = False
@@ -1233,7 +1346,9 @@ def _setup_worker_and_scheduler(
     vllm_config: VllmConfig,
     ascend_config,
 ) -> None:
-    # Select worker class and refresh block size
+    # Select worker class and refresh block size.
+    # Decode sharding is derived by is_pcp_decode_sharding_enabled(); do not
+    # store it on ParallelConfig. Draft replace() rejects undeclared fields.
     parallel_config = vllm_config.parallel_config
     if parallel_config and parallel_config.worker_cls == "auto":
         hardware_profile = get_current_hardware_profile()
@@ -1261,7 +1376,9 @@ def _setup_worker_and_scheduler(
     # Use ProfilingChunkScheduler when profiling-based chunk sizing is on.
     if scheduler_config.profiling_chunk_config.enabled:
         vllm_config.scheduler_config.scheduler_cls = (
-            "vllm_ascend.core.scheduler_profiling_chunk.ProfilingChunkScheduler"
+            "vllm_ascend.core.scheduler_profiling_chunk.ProfilingChunkAsyncScheduler"
+            if vllm_config.scheduler_config.async_scheduling
+            else "vllm_ascend.core.scheduler_profiling_chunk.ProfilingChunkScheduler"
         )
         # Apply the EngineCore.__init__ patch here for the InprocClient (in-process).
         # And the EngineCore.__init__ patch for EngineCoreProc (the spawned child process)
@@ -1382,8 +1499,8 @@ def _validate_fa3_backend(key, _attn_selector_config):
     return True
 
 
-def _get_default_max_cudagraph_capture_size(vllm_config: VllmConfig) -> int | None:
-    """Mirror the default-max branch in vLLM's `_set_cudagraph_sizes()`.
+def _get_reduced_cg_cap(vllm_config: VllmConfig) -> int | None:
+    """Return Ascend's reduced capture cap, or None to preserve explicit settings.
 
     This helper corresponds to the upstream block under
     "determine the initial max_cudagraph_capture_size" when
@@ -1449,25 +1566,6 @@ def _config_deprecated_logging():
     warnings_logger.propagate = False
 
 
-def _prune_reduced_capture_sizes(vllm_config):
-    original_sizes = vllm_config.compilation_config.cudagraph_capture_sizes
-    if not original_sizes:
-        return
-    if len(original_sizes) <= MAX_REDUCED_CAPTURE_SIZES:
-        return
-    step = (len(original_sizes) - 1) / (MAX_REDUCED_CAPTURE_SIZES - 1)
-    indices = [round(i * step) for i in range(MAX_REDUCED_CAPTURE_SIZES)]
-    indices[0], indices[-1] = 0, len(original_sizes) - 1
-    sampled_sizes = [original_sizes[i] for i in indices]
-    update_cudagraph_capture_sizes(vllm_config, sampled_sizes)
-    logger.warning(
-        "Adjusted ACL graph batch sizes for model: %d → %d sizes due to HDK incompatibility"
-        "and this warning will be cleared soon.",
-        len(original_sizes),
-        MAX_REDUCED_CAPTURE_SIZES,
-    )
-
-
 def _get_recompute_scheduler_cls(
     *,
     async_scheduling: bool,
@@ -1486,6 +1584,58 @@ def _get_dyntra_lb_scheduler_cls(*, async_scheduling: bool) -> str:
     if async_scheduling:
         return "vllm_ascend.core.dyntra_lb_scheduler.AsyncDyntraLBScheduler"
     return "vllm_ascend.core.dyntra_lb_scheduler.DyntraLBScheduler"
+
+
+def _validate_engram_config(vllm_config: VllmConfig) -> None:
+    engram_config = getattr(vllm_config, "engram_config", None)
+    model_config = vllm_config.model_config
+    spec = vllm_config.speculative_config
+    if spec is not None and model_config is spec.draft_model_config:
+        model_config = spec.target_model_config
+    if engram_config is None:
+        if (
+            model_config is None
+            or model_config.architecture != "DeepseekV41ForCausalLM"
+            or not getattr(model_config.hf_text_config, "engram_layer_ids", None)
+        ):
+            return
+        # Upstream skips automatic Engram defaults on non-CUDA platforms.
+        # Supply its native config here and reuse its resolver and validation.
+        from vllm.config import EngramConfig, VllmConfig
+
+        vllm_config.engram_config = engram_config = EngramConfig()
+        VllmConfig._resolve_and_verify_engram_config(vllm_config)
+
+    if model_config is None or model_config.architecture != "DeepseekV41ForCausalLM":
+        raise ValueError("Ascend Engram requires DeepSeek V4.1.")
+    if engram_config.embedding_across_dp:
+        raise ValueError("Ascend Engram does not support embedding_across_dp")
+    parallel_config = vllm_config.parallel_config
+    if (
+        parallel_config.enable_elastic_ep
+        or parallel_config.tensor_parallel_size not in (1, 2, 4, 8)
+        or parallel_config.pipeline_parallel_size != 1
+        or parallel_config.prefill_context_parallel_size != 1
+        or parallel_config.decode_context_parallel_size != 1
+    ):
+        raise ValueError("Ascend Engram requires TP=1/2/4/8 with PP=PCP=DCP=1.")
+    load_format = vllm_config.load_config.load_format
+    if load_format not in ("auto", "safetensors", "dummy"):
+        raise ValueError("Ascend Engram requires indexed safetensors (auto/safetensors), or dummy weights.")
+
+
+def _validate_routing_replay_config(vllm_config: VllmConfig) -> None:
+    """Refuse routed-experts capture (R3) on the V1 model runner.
+
+    Its R3 data plane was removed here, so without this check the engine would
+    start and silently return no ``routed_experts``.
+    """
+    r3_requested = getattr(vllm_config.model_config, "enable_return_routed_experts", False)
+    if r3_requested and not vllm_config.use_v2_model_runner:
+        raise ValueError(
+            "routed-experts capture (--enable-return-routed-experts) is only supported by the "
+            "V2 model runner; set VLLM_USE_V2_MODEL_RUNNER=1 or drop the flag."
+        )
 
 
 def _validate_parallel_config(vllm_config: VllmConfig) -> None:

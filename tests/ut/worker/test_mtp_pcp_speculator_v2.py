@@ -11,6 +11,7 @@ import pytest
 import torch
 from vllm.config import CUDAGraphMode
 from vllm.v1.worker.gpu import dp_utils
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator
 from vllm.v1.worker.gpu.spec_decode.mtp.speculator import MTPSpeculator
 
@@ -19,13 +20,49 @@ from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.spec_decode.autoregressive import (
     speculator as speculator_module,
 )
+from vllm_ascend.worker.v2.spec_decode.eagle import (
+    speculator as eagle_speculator_module,
+)
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 from vllm_ascend.worker.v2.spec_decode.mtp.speculator import (
     AscendMTPSpeculator,
 )
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
+    disable_profiling_chunk_for_draft,
     disable_target_pcp_for_replicated_draft,
 )
+
+
+@pytest.fixture(autouse=True)
+def _stub_ascend_config(monkeypatch):
+    # Speculators built through the real __init__ read the global ascend
+    # config during the lmhead TP construction-time validation; the stub
+    # reads as lmhead-off so validation no-ops.
+    from vllm_ascend import ascend_config as _ascend_config_module
+
+    monkeypatch.setattr(
+        _ascend_config_module,
+        "_ASCEND_CONFIG",
+        SimpleNamespace(
+            finegrained_tp_config=SimpleNamespace(lmhead_tensor_parallel_size=0),
+            sparse_kv_offload_config=SimpleNamespace(enabled=False),
+            ascend_compilation_config=object(),
+            eplb_config=object(),
+        ),
+    )
+
+
+def _fake_config_replace(config, **changes):
+    values = vars(config).copy()
+    values.update(changes)
+    return SimpleNamespace(**values)
+
+
+def _config(additional_config, pp_size=2):
+    return SimpleNamespace(
+        parallel_config=SimpleNamespace(pipeline_parallel_size=pp_size),
+        additional_config=additional_config,
+    )
 
 
 def _make_padded_input_batch() -> MagicMock:
@@ -43,6 +80,7 @@ def _make_padded_input_batch() -> MagicMock:
     input_batch.positions = torch.arange(8, dtype=torch.int64)
     input_batch.is_padding = torch.zeros(8, dtype=torch.bool)
     input_batch.seq_lens_np = np.arange(4, dtype=np.int32)
+    input_batch.is_prefilling_np = np.zeros(4, dtype=np.bool_)
     return input_batch
 
 
@@ -72,11 +110,13 @@ def test_draft_runtime_config_preserves_target_worker_topology(
         rank=7,
         data_parallel_size=2,
         data_parallel_rank=1,
+        pipeline_parallel_size=2,
     )
     target_cache_config = SimpleNamespace(
         block_size=128,
     )
     target_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(async_scheduling=False),
         parallel_config=target_parallel_config,
         speculative_config=SimpleNamespace(
             draft_parallel_config=draft_parallel_config,
@@ -85,8 +125,9 @@ def test_draft_runtime_config_preserves_target_worker_topology(
             cudagraph_mode=SimpleNamespace(decode_mode=lambda: None),
         ),
         cache_config=target_cache_config,
+        additional_config={"scheduler_config": {"profiling_chunk_config": {"enabled": True}}},
     )
-    draft_model_config = object()
+    draft_model_config = SimpleNamespace(is_moe=False)
     captured: dict[str, SimpleNamespace] = {}
 
     def fake_replace(config, **changes):
@@ -96,13 +137,20 @@ def test_draft_runtime_config_preserves_target_worker_topology(
             assert changes["parallel_config"].decode_context_parallel_size == (1 if target_pcp_size > 1 else dcp_size)
         if config is target_config and "model_config" not in changes:
             reconstructed_parallel = changes["parallel_config"]
-            captured["reconstruction_dcp_size"] = reconstructed_parallel.decode_context_parallel_size
+            # model_config is swapped in after validation (V1 parity), so this
+            # branch runs on every build; record only a real DCP normalization.
+            if (
+                reconstructed_parallel.decode_context_parallel_size
+                != target_parallel_config.decode_context_parallel_size
+            ):
+                captured["reconstruction_dcp_size"] = reconstructed_parallel.decode_context_parallel_size
         values = vars(config).copy()
         values.update(changes)
         return SimpleNamespace(**values)
 
     def fake_parent_init(speculator, execution_config, device):
         captured["execution_config"] = execution_config
+        speculator.device = device
         speculator.vllm_config = execution_config
         speculator.speculative_config = execution_config.speculative_config
         speculator.draft_model_config = draft_model_config
@@ -112,6 +160,8 @@ def test_draft_runtime_config_preserves_target_worker_topology(
         speculator.num_speculative_steps = 3
 
     with (
+        patch.object(speculator_module, "get_dcp_group", return_value=SimpleNamespace(rank_in_group=0)),
+        patch.object(speculator_module, "DCPManager") as dcp_manager,
         patch.object(
             speculator_module,
             "replace",
@@ -134,6 +184,8 @@ def test_draft_runtime_config_preserves_target_worker_topology(
     ):
         speculator = AscendMTPSpeculator(target_config, torch.device("cpu"))
 
+    assert dcp_manager.call_args.kwargs["dcp_world_size"] == dcp_size
+    assert dcp_manager.call_args.kwargs["dcp_rank"] == 0
     execution_config = captured["execution_config"]
     execution_parallel_config = execution_config.parallel_config
     assert execution_parallel_config.prefill_context_parallel_size == expected_execution_pcp_size
@@ -164,6 +216,40 @@ def test_draft_runtime_config_preserves_target_worker_topology(
     assert draft_config.parallel_config.cp_kv_cache_interleave_size == 128
     assert draft_config.parallel_config.pipeline_parallel_size == 1
     assert draft_config.parallel_config.decode_context_parallel_size == dcp_size
+    assert draft_config.additional_config["scheduler_config"]["profiling_chunk_config"]["enabled"] is False
+    assert target_config.additional_config["scheduler_config"]["profiling_chunk_config"]["enabled"] is True
+
+
+def test_eagle_draft_config_disables_profiling_chunk() -> None:
+    additional_config = {"scheduler_config": {"profiling_chunk_config": {"enabled": "yes"}}}
+    target_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            pipeline_parallel_size=2,
+            prefill_context_parallel_size=2,
+            enable_expert_parallel=True,
+            enable_eplb=True,
+        ),
+        additional_config=additional_config,
+    )
+    speculator = object.__new__(AscendEagleSpeculator)
+    # Delegation to the base's _create_draft_vllm_config reads these too.
+    speculator.replicated_pcp = False
+    speculator.vllm_config = target_config
+    target_config.cache_config = SimpleNamespace()
+    target_config.parallel_config.decode_context_parallel_size = 1
+    speculator.draft_model_config = SimpleNamespace(is_moe=False)
+
+    with (
+        patch.object(eagle_speculator_module, "replace", side_effect=_fake_config_replace),
+        patch.object(speculator_module, "replace", side_effect=_fake_config_replace),
+    ):
+        draft_config = speculator._create_draft_vllm_config()
+
+    assert draft_config.additional_config["scheduler_config"]["profiling_chunk_config"]["enabled"] is False
+    assert target_config.additional_config is additional_config
+    assert additional_config["scheduler_config"]["profiling_chunk_config"]["enabled"] == "yes"
+    assert draft_config.parallel_config.pipeline_parallel_size == 1
+    assert draft_config.parallel_config.is_moe_model is False
 
 
 @pytest.mark.parametrize("replicated_pcp", [False, True])
@@ -276,7 +362,7 @@ def test_prepare_replicated_prefill_attn_uses_global_batch(attn_architecture, cu
     speculator.attn_architecture = attn_architecture
     speculator.block_tables = MagicMock()
     speculator.kv_cache_config = object()
-    speculator._build_draft_attn_metadata = MagicMock(return_value={"draft.layer": object()})
+    speculator._build_attn_metadata = MagicMock(return_value={"draft.layer": object()})
     input_batch = _make_padded_input_batch()
     input_batch.is_dummy = False
     speculator.input_batch = input_batch
@@ -300,7 +386,7 @@ def test_prepare_replicated_prefill_attn_uses_global_batch(attn_architecture, cu
             cudagraph_runtime_mode=cudagraph_runtime_mode,
         )
 
-    assert attn_metadata == speculator._build_draft_attn_metadata.return_value
+    assert attn_metadata == speculator._build_attn_metadata.return_value
     assert actual_slot_mappings is slot_mappings
     speculator.block_tables.gather_block_tables.assert_called_once_with(
         input_batch.idx_mapping,
@@ -316,13 +402,16 @@ def test_prepare_replicated_prefill_attn_uses_global_batch(attn_architecture, cu
         global_slot_mapping,
         speculator.kv_cache_config,
     )
-    speculator._build_draft_attn_metadata.assert_called_once_with(
+    speculator._build_attn_metadata.assert_called_once_with(
         num_reqs=input_batch.num_reqs,
-        num_reqs_padded=input_batch.num_reqs_after_padding,
-        num_tokens_padded=input_batch.num_tokens_after_padding,
+        batch_desc=BatchExecutionDescriptor(
+            cg_mode=cudagraph_runtime_mode,
+            num_tokens=input_batch.num_tokens_after_padding,
+            num_reqs=input_batch.num_reqs_after_padding,
+        ),
+        query_start_loc_np=input_batch.query_start_loc_np,
         seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound,
         step=0,
-        query_start_loc_np=input_batch.query_start_loc_np,
     )
 
 
@@ -391,7 +480,7 @@ def test_graph_prefill_builds_draft_metadata(attn_architecture: str, replicated_
     speculator.model_state = SimpleNamespace(
         attn_metadata={"draft.layer": local_draft_metadata, "target.layer": object()},
     )
-    speculator._build_draft_attn_metadata = MagicMock(
+    speculator._build_attn_metadata = MagicMock(
         return_value={"draft.layer": global_draft_metadata},
     )
 
@@ -406,7 +495,7 @@ def test_graph_prefill_builds_draft_metadata(attn_architecture: str, replicated_
     expected_metadata = global_draft_metadata if rebuild_metadata else local_draft_metadata
     assert actual == [{"draft.layer": expected_metadata}]
     assert actual[0]["draft.layer"] is expected_metadata
-    assert speculator._build_draft_attn_metadata.call_count == int(rebuild_metadata)
+    assert speculator._build_attn_metadata.call_count == int(rebuild_metadata)
     assert build_slots.call_count == int(rebuild_metadata)
     assert speculator.block_tables.gather_block_tables.call_count == int(replicated_pcp)
     assert speculator.block_tables.compute_slot_mappings.call_count == int(replicated_pcp)
@@ -422,7 +511,7 @@ def test_graph_prefill_refreshes_captured_cache_buffers(attn_architecture: str) 
     metadata = SimpleNamespace(actual_seq_lengths_q=[4, 8])
     speculator.model_state = SimpleNamespace(attn_metadata={"draft.layer": metadata})
     speculator.kv_cache_config = object()
-    speculator._build_draft_attn_metadata = MagicMock()
+    speculator._build_attn_metadata = MagicMock()
 
     # These views stand in for the persistent buffers bound during capture.
     captured_blocks = torch.zeros((2, 3), dtype=torch.int32)
@@ -471,7 +560,7 @@ def test_graph_prefill_refreshes_captured_cache_buffers(attn_architecture: str) 
             result = speculator.build_draft_attn_metadatas(2, 8, is_draft_model_prefill=True)
 
         assert result[0]["draft.layer"] is metadata
-        speculator._build_draft_attn_metadata.assert_not_called()
+        speculator._build_attn_metadata.assert_not_called()
         build_slots.assert_not_called()
         assert metadata.actual_seq_lengths_q == [4, 8]
         assert captured_slots.tolist() == [expected_slots + [-1] * 4]
@@ -479,15 +568,15 @@ def test_graph_prefill_refreshes_captured_cache_buffers(attn_architecture: str) 
         assert (captured_blocks.data_ptr(), captured_slots.data_ptr()) == (block_ptr, slot_ptr)
 
 
-@pytest.mark.parametrize("guard", ["non_pcp", "no_batch", "dummy", "no_metadata"])
+@pytest.mark.parametrize("guard", ["non_pcp", "no_batch", "no_metadata"])
 def test_prepare_replicated_prefill_preserves_bypass(guard: str) -> None:
     speculator = object.__new__(AscendMTPSpeculator)
     speculator.replicated_pcp = guard != "non_pcp"
     speculator.input_batch = _make_padded_input_batch() if guard != "no_batch" else None
     if speculator.input_batch is not None:
-        speculator.input_batch.is_dummy = guard == "dummy"
+        speculator.input_batch.is_dummy = False
     speculator.block_tables = MagicMock()
-    speculator._build_draft_attn_metadata = MagicMock()
+    speculator._build_attn_metadata = MagicMock()
     metadata = None if guard == "no_metadata" else {"draft.layer": object()}
     slots = {"draft.layer": object()}
 
@@ -499,30 +588,77 @@ def test_prepare_replicated_prefill_preserves_bypass(guard: str) -> None:
     assert actual_slots is slots
     speculator.block_tables.gather_block_tables.assert_not_called()
     speculator.block_tables.compute_slot_mappings.assert_not_called()
-    speculator._build_draft_attn_metadata.assert_not_called()
+    speculator._build_attn_metadata.assert_not_called()
 
 
-@pytest.mark.parametrize("attn_architecture", ["GQA", "MLA", "DSA", "SFA"])
-@pytest.mark.parametrize("guard", ["no_batch", "dummy"])
-def test_graph_prefill_without_real_batch_preserves_metadata(attn_architecture: str, guard: str) -> None:
+@pytest.mark.parametrize("attn_architecture", ["GQA", "SFA"])
+def test_graph_prefill_uses_local_dummy_metadata(attn_architecture: str) -> None:
     speculator = object.__new__(AscendMTPSpeculator)
     speculator.replicated_pcp = True
     speculator.attn_architecture = attn_architecture
-    speculator.input_batch = _make_padded_input_batch() if guard == "dummy" else None
-    if speculator.input_batch is not None:
-        speculator.input_batch.is_dummy = True
+    speculator.input_batch = _make_padded_input_batch()
+    speculator.input_batch.is_dummy = True
     speculator.block_tables = MagicMock()
-    speculator._build_draft_attn_metadata = MagicMock()
-    metadata = object()
+    speculator.kv_cache_config = object()
+    target_metadata, draft_metadata = object(), object()
+    speculator._build_attn_metadata = MagicMock(return_value={"draft.layer": draft_metadata})
     speculator.draft_attn_layer_names = {"draft.layer"}
-    speculator.model_state = SimpleNamespace(attn_metadata={"draft.layer": metadata})
+    speculator.model_state = SimpleNamespace(attn_metadata={"draft.layer": target_metadata})
 
-    [actual] = speculator.build_draft_attn_metadatas(2, 8, is_draft_model_prefill=True)
+    with patch.object(speculator_module, "build_slot_mappings_by_layer") as build_slots:
+        [actual] = speculator.build_draft_attn_metadatas(4, 8, is_draft_model_prefill=True)
 
-    assert actual["draft.layer"] is metadata
+    assert actual["draft.layer"] is draft_metadata
     speculator.block_tables.gather_block_tables.assert_not_called()
     speculator.block_tables.compute_slot_mappings.assert_not_called()
-    speculator._build_draft_attn_metadata.assert_not_called()
+    speculator.block_tables.get_dummy_block_tables.assert_called_once_with(4)
+    speculator.block_tables.get_dummy_slot_mappings.assert_called_once_with(8)
+    build_slots.assert_called_once_with(
+        speculator.block_tables.get_dummy_slot_mappings.return_value, speculator.kv_cache_config
+    )
+    kwargs = speculator._build_attn_metadata.call_args.kwargs
+    assert kwargs["num_reqs"] == 2
+    assert kwargs["step"] == 0
+    assert kwargs["query_start_loc_np"] is speculator.input_batch.query_start_loc_np
+    assert kwargs["seq_lens_cpu_upper_bound"] is speculator.input_batch.seq_lens_cpu_upper_bound
+
+
+@pytest.mark.parametrize("replicated", [False, True])
+def test_capture_preserves_prepared_prefill_inputs(replicated: bool) -> None:
+    speculator = object.__new__(AscendMTPSpeculator)
+    speculator.replicated_pcp = replicated
+    speculator.pcp_manager = object()
+    speculator.model_state = SimpleNamespace(pcp_manager=speculator.pcp_manager)
+    speculator.last_token_indices = torch.ones(2, dtype=torch.int32)
+    speculator.num_speculative_steps = 1
+    speculator.prefill_cudagraph_manager = MagicMock(use_breakable_cg=False)
+    speculator.target_input_buffers = object()
+    speculator.block_tables = object()
+    speculator.attn_groups = []
+    speculator.target_attn_groups = []
+    speculator.kv_cache_config = object()
+    speculator._prefill = MagicMock()
+    metadata, slots = object(), object()
+
+    def capture(forward, *args, **kwargs):
+        metadata_context.__enter__.assert_called_once()
+        metadata_context.__exit__.assert_not_called()
+        assert (speculator.model_state.pcp_manager is None) is replicated
+        forward(metadata, slots)
+
+    speculator.prefill_cudagraph_manager.capture.side_effect = capture
+    with (
+        patch.object(speculator_module, "build_attn_metadata_wrapper") as metadata_wrapper,
+        patch.object(speculator_module.AutoRegressiveSpeculator, "_prefill") as upstream_prefill,
+    ):
+        metadata_context = metadata_wrapper.return_value
+        speculator.capture()
+        chosen = upstream_prefill if replicated else speculator._prefill
+        chosen.assert_called_once_with(metadata, slots)
+        unused = speculator._prefill if replicated else upstream_prefill
+        unused.assert_not_called()
+    metadata_context.__exit__.assert_called_once()
+    assert speculator.model_state.pcp_manager is speculator.pcp_manager
 
 
 @pytest.mark.parametrize(
@@ -617,3 +753,72 @@ def test_propose_preserves_dp_sync_state() -> None:
     ):
         speculator.propose(input_batch, *[MagicMock() for _ in range(10)], dp_sync)
     assert parent.call_args.args[11] is dp_sync
+
+
+@pytest.mark.parametrize(("enabled", "legacy"), [(True, False), ("yes", True)])
+def test_disable_profiling_chunk_for_draft_accepts_pydantic_true_values(enabled, legacy):
+    profiling_chunk = {"enabled": enabled, "min_chunk": 128}
+    if legacy:
+        additional_config = {"profiling_chunk_config": profiling_chunk, "enable_cpu_binding": True}
+    else:
+        additional_config = {
+            "scheduler_config": {"profiling_chunk_config": profiling_chunk},
+            "enable_cpu_binding": True,
+        }
+    config = _config(additional_config)
+
+    with disable_profiling_chunk_for_draft(config):
+        draft_additional_config = config.additional_config
+        draft_profiling_chunk = (
+            draft_additional_config["profiling_chunk_config"]
+            if legacy
+            else draft_additional_config["scheduler_config"]["profiling_chunk_config"]
+        )
+        assert draft_profiling_chunk == {"enabled": False, "min_chunk": 128}
+        assert draft_additional_config is not additional_config
+        assert draft_profiling_chunk is not profiling_chunk
+
+    assert config.additional_config is additional_config
+    assert profiling_chunk["enabled"] == enabled
+
+
+@pytest.mark.parametrize(("pp_size", "enabled"), [(1, True), (2, "off")])
+def test_disable_profiling_chunk_for_draft_noop(pp_size, enabled):
+    additional_config = {"profiling_chunk_config": {"enabled": enabled}}
+    config = _config(additional_config, pp_size=pp_size)
+
+    with disable_profiling_chunk_for_draft(config):
+        assert config.additional_config is additional_config
+
+
+def test_disable_profiling_chunk_for_draft_uses_nested_precedence():
+    additional_config = {
+        "scheduler_config": {"profiling_chunk_config": {"enabled": False}},
+        "profiling_chunk_config": {"enabled": True},
+    }
+    config = _config(additional_config)
+
+    with disable_profiling_chunk_for_draft(config):
+        assert config.additional_config is additional_config
+
+
+def test_disable_profiling_chunk_for_draft_restores_after_failure():
+    additional_config = {"scheduler_config": {"profiling_chunk_config": {"enabled": True}}}
+    config = _config(additional_config)
+    expected_context = pytest.raises(RuntimeError, match="draft failed")
+
+    with expected_context, disable_profiling_chunk_for_draft(config):
+        assert config.additional_config is not additional_config
+        raise RuntimeError("draft failed")
+
+    assert config.additional_config is additional_config
+
+
+def test_disable_profiling_chunk_for_draft_rejects_invalid_boolean():
+    config = _config({"profiling_chunk_config": {"enabled": "sometimes"}})
+
+    with (
+        pytest.raises(ValueError, match="additional_config.profiling_chunk_config.enabled must be a boolean"),
+        disable_profiling_chunk_for_draft(config),
+    ):
+        pass
