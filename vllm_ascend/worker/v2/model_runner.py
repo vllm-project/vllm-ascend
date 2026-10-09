@@ -290,6 +290,11 @@ class NPUModelRunner(GPUModelRunner):
         aux_layers = get_pd_dspark_aux_layer_ids(self.vllm_config)
         super().load_model(load_dummy_weights, *args, **kwargs)
         self.pd_dspark_aux_layer_ids = aux_layers
+        # In cudagraph modes the dumper must be started before graph capture so
+        # that aclgraph capture/replay is instrumented (v1 parity: v1 starts
+        # the dumper at the end of load_model).
+        if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+            self._start_dump_data()
 
     def _restore_replicated_draft_target_states(self) -> None:
         """Restore target states consumed by a replicated PCP draft."""
@@ -361,14 +366,6 @@ class NPUModelRunner(GPUModelRunner):
         # path (v1 parity: v1 finalizes at the end of sample_tokens).
         self._finalize_dump_data()
         return output
-
-    def load_model(self) -> None:
-        super().load_model()
-        # In cudagraph modes the dumper must be started before graph capture so
-        # that aclgraph capture/replay is instrumented (v1 parity: v1 starts
-        # the dumper at the end of load_model).
-        if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
-            self._start_dump_data()
 
     def pool(self):
         output = super().pool()
