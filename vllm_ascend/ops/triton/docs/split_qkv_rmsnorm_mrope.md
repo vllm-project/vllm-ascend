@@ -1,0 +1,82 @@
+# Split-QKV RMSNorm MRoPE
+
+## Description
+
+- **Function**: Split a fused Q/K/V projection, apply per-head RMSNorm and multimodal RoPE to Q and K, and copy V and an optional Q gate to separate outputs. The public op is used by the Qwen3-VL and Qwen3.5 multimodal attention paths; it is not the TP-global RMSNorm operator.
+- **Formula**: For each Q or K head `x` of width `D`, compute `rstd = rsqrt(sum(x^2) / D + eps)` in fp32 and `y = x * rstd * weight [+ bias]`. MRoPE selects temporal, height, and width cos/sin lanes from `cos_sin` according to `mrope_section`, then rotates the first `R = rope_dim` elements of `y` in two halves: `[y_1 * cos - y_2 * sin, y_2 * cos + y_1 * sin]`. Elements beyond `R` remain unrotated. V and the optional gate are copied, not normalized or rotated.
+- **Algorithm flow** (tokens and heads are independent):
+  1. The wrapper partitions `T = qkv.shape[0]` tokens across the initialized vector-core count `P`. Each active core owns a contiguous token range; the public op allocates Q, K, V, and gate outputs and launches one kernel instance.
+  2. With the default `BLOCK_M=2` request, a scalar selector checks the input/layout contract (G1), compares a shape-derived UB demand estimate with the target-bound backend capacity (G2), and checks that there is enough pair work per active core (G3). Failed gates select the original M1 single-row execution path.
+  3. A selected pair-capable M2 instance handles two token rows per loop iteration. It bounds the Q head tile to `min(num_q_heads, 12)` and processes full head tiles separately. An odd token uses the single-row tail path. The M1 path processes one complete row per iteration. Both paths preserve the same Q/K normalization, MRoPE, V, and gate semantics.
+- **Supported modes**: This is a vLLM-Ascend Triton NPU op called from the Qwen3-VL and Qwen3.5 multimodal paths with optional gate, optional paired Q/K biases, partial RoPE, and interleaved or contiguous MRoPE sections. The adaptive M2 screening domain is bf16/fp16. Bounded single-operator numerical and performance evidence in this PR comes from one Ascend910B3/P40 (Atlas A2) environment; Atlas A3/950, other dtypes, and model/graph execution are not qualified by those measurements. Dispatch does not use a SoC-name or CANN-version allowlist.
+
+## Parameters
+
+| Parameter | Input/Output/Attribute | Description | Data type | Data format |
+| --- | --- | --- | --- | --- |
+| `qkv` | Input | Fused projection `[T, (1 + has_gate) * Q + 2 * KV]`, where `Q = num_q_heads * head_size` and `KV = num_kv_heads * head_size`; with a gate, each Q head is followed by its gate head | Floating point | 2D ND, contiguous layout for M2 |
+| `q_weight` | Input | Per-head Q RMSNorm scale `[head_size]` | Floating point | 1D ND |
+| `k_weight` | Input | Per-head K RMSNorm scale `[head_size]` | Floating point | 1D ND |
+| `cos_sin` | Input | Three MRoPE planes `[3, T, rope_dim]`, each containing cos and sin halves | Floating point | 3D ND |
+| `num_q_heads` | Attribute | Local Q head count | Integer | Scalar |
+| `num_kv_heads` | Attribute | Local K/V head count | Integer | Scalar |
+| `head_size` | Attribute | Q/K/V head width and RMSNorm reduction width | Integer | Scalar |
+| `eps` | Attribute | Positive RMSNorm stability constant | Float | Scalar |
+| `mrope_section` | Attribute | Temporal, height, and width half-RoPE section lengths | Three integers | 1D list |
+| `is_interleaved` | Attribute | Select interleaved rather than contiguous MRoPE frequency layout | Boolean | Scalar |
+| `rope_dim` | Optional attribute | Rotated prefix width; defaults to `head_size` | Integer or `None` | Scalar |
+| `q_bias` | Optional input | Post-norm Q bias `[head_size]` | Floating point or `None` | 1D ND |
+| `k_bias` | Optional input | Post-norm K bias `[head_size]` | Floating point or `None` | 1D ND |
+| `has_gate` | Attribute | Whether each Q head has a corresponding gate head in `qkv` | Boolean | Scalar |
+| `q_output` | Output | Normalized and rotated Q `[T, Q]` | Same as `qkv` | 2D ND |
+| `k_output` | Output | Normalized and rotated K `[T, KV]` | Same as `qkv` | 2D ND |
+| `v_output` | Output | Unmodified V `[T, KV]` | Same as `qkv` | 2D ND |
+| `gate_output` | Output | Unmodified gate `[T, Q]`, or `[T, 0]` when absent | Same as `qkv` | 2D ND |
+
+## Constraints
+
+- `num_q_heads`, `num_kv_heads`, and `head_size` are positive. `rope_dim` is positive, even, and no greater than `head_size`; `2 * sum(mrope_section) == rope_dim`. `eps` is finite and positive. Positions have already been gathered into the three-plane `cos_sin` tensor by the caller.
+- `q_bias` and `k_bias` must be supplied together or both omitted. The kernel enables both bias loads when `q_bias` is not `None`. The M2 selector checks the live tensor layout contract; an invalid layout falls back to M1, which is not a promise that arbitrary malformed inputs are valid for the original kernel.
+- `VLLM_ASCEND_SPLIT_QKV_RMSNORM_MROPE_BLOCK_M` defaults to `2` and is read on each public call. Values `1` and `4` explicitly use the legacy kernel paths without the adaptive M2 resource/workload screen; `4` is retained for compatibility, not a qualified default optimization. The variable is defined in `vllm_ascend/envs.py` and is not sensitive.
+- For the default request, G1 checks the semantic/layout and compiler identity. G2 uses the target-bound `triton.backends.ascend.runtime.utils.ub_size_in_kbytes` observation and a shape-derived *screening estimate*. `get_device_properties().max_shared_mem` is diagnostic only; if the backend capacity is unavailable, the selector uses M1. It also uses M1 when the estimated demand is at or above capacity. The estimate and its difference from capacity are **not measured UB usage or free headroom**.
+- Until boundary liveness is calibrated, pair-capable M2 requires `num_q_heads` to be divisible by `min(num_q_heads, 12)`; a positive remainder selects M1. This structural guard follows an Hq16/D256 allocator overflow in a simulator compile probe. An Hq16/D128 boundary compiled in a separate simulator probe, so the guard is intentionally conservative rather than a claim that every boundary shape overflows on device.
+- G3 selects M1 for tail-only work or when `floor(min_active_tokens_per_core / 2) < 12`; otherwise a G1/G2-cleared pair path selects M2. At `P=40`, `T=959` falls below this trial threshold and `T=960` reaches it. This is a workload policy supported by bounded tests, not a universal optimal crossover. A one-token call remains on M1.
+- The M2 launch uses `PAIR_CAPABLE=True`, `multibuffer=False`, `num_stages=1`, and `num_warps=32`. An M1 fallback uses the original kernel/backend default. The empty evidence registry is diagnostic and does not gate runtime selection; unknown SoC identity alone does not force fallback. No route is claimed fastest for every supported input or hardware configuration.
+
+## Origin and Differences
+
+- **Origin**: The pre-existing `vllm_ascend/ops/triton/linearnorm/split_qkv_rmsnorm_mrope.py` public operator and its Qwen3-VL/Qwen3.5 callers. This PR combines the Phase 1 kernel work with WP1 adaptive dispatch; it does not introduce a second public operator.
+- **Differences**:
+    - Pair two token rows on suitable long partitions and bound Q head tiles to reduce the per-instance live tensor extent; preserve the single-row M1 path for unsupported or less useful work.
+    - Separate semantic/layout, resource feasibility, and workload-benefit decisions. The resource guard prevents selecting the known-unsafe D256 pair-boundary class without converting measured cases, SoC names, or toolchain versions into an enablement whitelist.
+    - Preserve the public call signature and output contract while allowing the selected kernel instance and launch configuration to change.
+
+## Test Cases
+
+- Host-only selector tests check representative B3 routes, the Hq24/T960 long-partition boundary, singleton partitions, unknown capacity, invalid layout, and the centralized override without importing an NPU runtime:
+
+  ```bash
+  python3 -m unittest discover -s tests/ut/ops -p test_split_qkv_rmsnorm_mrope_dispatch.py
+  ```
+
+- The pre-existing single-card accuracy suite covers bf16/fp16, gate/no-gate, interleaved/contiguous MRoPE, two token counts, and two head configurations. It was not run on the exact current PR head in this work:
+
+  ```bash
+  pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_split_qkv_rmsnorm_mrope.py
+  ```
+
+## Bounded offline validation
+
+- On one Ascend910B3/P40 device in the `v0.23.0rc1` image, parent commit `c1469f99` completed `HQ24_T1024_B3` through the public entry (`run_20261009T022037682885Z_numerics_20830d57`). With the override unset, the wrapper selected M2 pair-capable and produced a compiled object. Q/K passed `atol=rtol=0.02` against the frozen CPU reference; V/Gate were byte-exact. This one-item run has no timing result. The later `de2b1605` commit changes only the policy's approved `regex` import and a docstring spelling; its exact policy bytes were not rerun on device.
+- An earlier port source, `fd671ea7`, completed a seven-point B3 numerical matrix and the separate `run_20261008T073722771387Z_all_9e4872ed` paired long-workload run. The latter used frozen M1/on as A and the ported public wrapper as B, with the same inputs, six valid pairs per point (18/18 total), three ABBA/BAAB/ABBA blocks, five warm-ups, and one profiled target-kernel launch. The metric below is the median of individual A/B device-duration ratios; above 1 favors B.
+
+  All three sampled inputs are bf16, `head_size=256`, `rope_dim=64`, `mrope_section=(11, 11, 10)`, with gate enabled, interleaved Q/gate layout, interleaved MRoPE, and no Q/K bias. They use 40 active vector cores. T1024 and P4 use six local Q heads and one KV head; P5 uses four local Q heads and one KV head. The frozen T1024/P4 B4 input definitions were overlaid to B3 by changing only the case ID and execution SoC; P5 originated as a B3 input.
+
+  | Case | Tokens | Q/KV heads | A / B median duration (us) | Valid pairs | Median paired A/B | Interpretation |
+  | --- | ---: | ---: | ---: | ---: | ---: | --- |
+  | T1024 | 1,024 | 6 / 1 | 59.210 / 56.670 | 6/6 | 1.0447x | `no_clear_change`; below the pre-registered 1.05x gain threshold |
+  | P4 | 4,096 | 6 / 1 | 185.130 / 156.160 | 6/6 | 1.1861x | `faster` at this sampled shape |
+  | P5 | 8,192 | 4 / 1 | 347.070 / 283.090 | 6/6 | 1.2269x | `faster` at this sampled shape |
+
+- All six numerical items in that paired run passed; no failure or diagnostic was reported. These timings belong to the **earlier source and that B3 runtime**, not to the exact current PR head or a model-throughput claim. The full target result tree was not copied locally; the received compact handoff, target-side committed status, and mutation-free handoff form report-level evidence. The target-side original result remains the source for independent checksum review.
+- The exact current PR head has host-only tests but no matching-main NPU Nightly, model/graph-replay test, or fresh paired performance run. The trial workload threshold and conservative boundary guard remain explicit qualification limits.
