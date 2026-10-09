@@ -9,19 +9,20 @@ import torch
 
 
 @pytest.mark.parametrize("id_dtype", [torch.int32, torch.int64])
-def test_urma_cube_bytes_projection_and_graph(monkeypatch, id_dtype):
+def test_urma_cube_bytes_projection_and_graph(id_dtype):
     try:
         subprocess.run(["npu-smi", "info"], capture_output=True, check=True)
     except (FileNotFoundError, subprocess.CalledProcessError):
         pytest.skip("Requires Ascend 950 and the built URMA extension")
     import torch_npu
 
+    # Match worker startup: register Ascend ops before importing device adaptors.
+    import vllm_ascend.ops  # noqa: F401
     from vllm_ascend.models.deepseek_v41.engram import npu
     from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
 
     if torch_npu.npu.get_soc_version() != 260:
         pytest.skip("Requires Ascend 950")
-    monkeypatch.setattr(npu.DeviceOperator, "host_register_flags", staticmethod(lambda: 0x2))
     torch.npu.set_device(0)
     source = npu.HostUvaBuffer((256, 256), torch.float8_e4m3fn, torch.device("npu:0"))
     lookup = npu.EngramUrmaCubeLookup()
