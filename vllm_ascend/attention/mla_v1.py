@@ -34,6 +34,11 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     get_pcp_num_replicated_tokens,
     is_pcp_decode_sharding_enabled,
 )
+from vllm_ascend.attention.mla_static import (
+    MLAPO_WEIGHT_BLOCK_SIZE,
+    StaticMLAPOWeights,
+    prepare_static_mlapo_weights,
+)
 from vllm_ascend.attention.utils import (
     MLAPO_MAX_SUPPORTED_TOKENS,
     AscendCommonAttentionMetadata,
@@ -67,6 +72,8 @@ from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_ND,
     ACL_FORMAT_FRACTAL_NZ,
+    ASCEND_QUANTIZATION_METHOD,
+    enable_custom_op,
     is_pd_decode_recompute_scheduler_enabled,
     maybe_trans_nz,
     weak_ref_tensors,
@@ -82,6 +89,14 @@ BUILD_METADATA_STEP_DECODE = 1
 
 # Exclusive batch * K limit of the fused op with perm_x1=(1, 0, 2).
 TRANSPOSE_BMM_MAX_SUPPORTED_DIM = 65536
+
+# Bounds of the legacy BF16 MLAPO kernel's norm/UB and RoPE tiling.
+STATIC_MLAPO_MAX_HIDDEN_SIZE = 7168
+STATIC_MLAPO_MAX_Q_LORA_RANK = 1536
+STATIC_MLAPO_KV_LORA_RANK = 512
+STATIC_MLAPO_NOPE_HEAD_DIM = 128
+STATIC_MLAPO_ROPE_HEAD_DIM = 64
+STATIC_MLAPO_NORM_EPSILON = 1e-6
 
 
 class AscendMLABackend(AttentionBackend):
@@ -853,6 +868,7 @@ class AscendMLAImpl(MLAAttentionImpl):
     W_UV: torch.Tensor
     W_UK_T: torch.Tensor
     _dcp_current_kv_buffers: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None
+    _static_mlapo_weights: StaticMLAPOWeights | None
 
     def __init__(
         self,
@@ -925,6 +941,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.mlapo_num_heads = self.num_heads
         self.mlapo_weight_quant_mode = 3
         self._mlapo_uses_native_weights = False
+        self._static_mlapo_weights = None
 
     @staticmethod
     def update_graph_params(
@@ -1092,6 +1109,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         return None
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
+        self._static_mlapo_weights = None
         # NOTE: We currently do not support quant kv_b_proj.
         assert isinstance(self.kv_b_proj.quant_method, UnquantizedLinearMethod)
         # NOTE: Weight will be reshaped next, we need to revert and transpose it.
@@ -1160,14 +1178,15 @@ class AscendMLAImpl(MLAAttentionImpl):
             ) and isinstance(layer_quant_method, UnquantizedLinearMethod)
 
             if isinstance(quant_method, AscendW8A8LinearMethod) and not self.fa_quant_layer:
-                # Static quant_bias can include ModelSlim M4 affine compensation,
-                # not just the activation zero-point correction. The dynamic
-                # prolog drops it, so retain the original projections and norms.
-                self.enable_mlapo = False
-                logger.warning_once(
-                    "MLAPO does not preserve static W8A8 quantization bias. "
-                    "Using unfused MLA preprocessing for non-FA-quant layers."
-                )
+                # The dynamic prolog drops static M4 affine compensation.
+                # Use the static ABI that consumes both accumulator biases.
+                reasons = self._get_static_mlapo_unsupported_reasons(act_dtype)
+                if reasons:
+                    self.enable_mlapo = False
+                    logger.warning_once("Using native static W8A8 MLA preprocessing: %s", "; ".join(reasons))
+                else:
+                    self._process_weights_for_static_mlapo(act_dtype)
+                    logger.info_once("Using static W8A8 MLAPO with quantization bias and Q norm beta.")
             elif self.fused_qkv_a_proj is None or not (supports_quantized_weights or supports_native_weights):
                 self.enable_mlapo = False
                 logger.warning_once(
@@ -1176,11 +1195,161 @@ class AscendMLAImpl(MLAAttentionImpl):
                     "floating-point weights on A5. Some layers use an "
                     "unsupported weight type, so MLAPO is disabled for these layers."
                 )
-        if self.enable_mlapo or self.fa_quant_layer:
-            self._process_weights_for_fused(act_dtype)
-        else:
-            # if mlapo, W_UK_T can't trans nz
-            self.W_UK_T = maybe_trans_nz(self.W_UK_T)
+        # Static MLAPO retains source projections for native batch fallback.
+        if self._static_mlapo_weights is None:
+            if self.enable_mlapo or self.fa_quant_layer:
+                self._process_weights_for_fused(act_dtype)
+            else:
+                # if mlapo, W_UK_T can't trans nz
+                self.W_UK_T = maybe_trans_nz(self.W_UK_T)
+
+    def _get_static_mlapo_unsupported_reasons(self, act_dtype: torch.dtype) -> list[str]:
+        if not get_current_hardware_profile().supports(HardwareCapability.MLAPO_STATIC_W8A8):
+            return ["the static MLAPO ABI is unavailable on this hardware"]
+        if act_dtype != torch.bfloat16:
+            return ["static MLAPO requires BF16 activations"]
+        if any(
+            getattr(self, name, None) is None
+            for name in ("fused_qkv_a_proj", "q_proj", "q_a_layernorm", "kv_a_layernorm")
+        ):
+            return ["static MLAPO requires fused QKV projections and both norms"]
+
+        reasons = []
+        config = self.vllm_config
+        if getattr(config.model_config, "enable_sleep_mode", False):
+            reasons.append("static MLAPO does not support sleep mode")
+        if getattr(getattr(get_ascend_config(), "rl_config", None), "enabled", False):
+            reasons.append("static MLAPO does not support weight reload")
+        if getattr(config, "lora_config", None) is not None:
+            reasons.append("static MLAPO does not support LoRA")
+        if (
+            config.parallel_config.prefill_context_parallel_size > 1
+            or config.parallel_config.decode_context_parallel_size > 1
+        ):
+            reasons.append("static MLAPO does not support context parallelism")
+        if self.enable_kv_nz or self.dtype != act_dtype:
+            reasons.append("static MLAPO requires unquantized ND BF16 caches")
+        if not self.use_mla_rope:
+            reasons.append("static MLAPO requires RoPE")
+        if (
+            self.kv_lora_rank != STATIC_MLAPO_KV_LORA_RANK
+            or self.qk_rope_head_dim != STATIC_MLAPO_ROPE_HEAD_DIM
+            or self.qk_nope_head_dim != STATIC_MLAPO_NOPE_HEAD_DIM
+            or self.num_kv_heads != 1
+            or self.num_heads < 1
+            or self.head_padding != 0
+            or self.q_lora_rank is None
+            or not 0 < self.q_lora_rank <= STATIC_MLAPO_MAX_Q_LORA_RANK
+        ):
+            reasons.append("static MLAPO model dimensions are unsupported")
+        for name, projection in (("QKV down", self.fused_qkv_a_proj), ("Q up", self.q_proj)):
+            scheme = getattr(projection.quant_method, "quant_method", None)
+            if not isinstance(scheme, AscendW8A8LinearMethod) or scheme.quant_method != ASCEND_QUANTIZATION_METHOD:
+                reasons.append(f"{name} must use ModelSlim static W8A8")
+        for name, norm in (("Q", self.q_a_layernorm), ("KV", self.kv_a_layernorm)):
+            if norm.variance_epsilon != STATIC_MLAPO_NORM_EPSILON:
+                reasons.append(f"{name} norm epsilon must be {STATIC_MLAPO_NORM_EPSILON}")
+        if reasons:
+            return reasons
+        reasons = self._get_static_mlapo_parameter_unsupported_reasons(act_dtype)
+        if not reasons and (not enable_custom_op() or not hasattr(torch.ops._C_ascend, "mla_preprocess")):
+            reasons.append("the static MLAPO custom operator is not loaded")
+        return reasons
+
+    def _get_static_mlapo_parameter_unsupported_reasons(self, act_dtype: torch.dtype) -> list[str]:
+        assert self.fused_qkv_a_proj is not None
+        assert self.q_a_layernorm is not None and self.kv_a_layernorm is not None
+        output_alignment, input_alignment = MLAPO_WEIGHT_BLOCK_SIZE
+        qkv_width = self.q_lora_rank + self.kv_lora_rank + self.qk_rope_head_dim
+        q_width = self.num_heads * (self.qk_nope_head_dim + self.qk_rope_head_dim)
+        hidden_size = self.fused_qkv_a_proj.weight.shape[0]
+        if (
+            not 0 < hidden_size <= STATIC_MLAPO_MAX_HIDDEN_SIZE
+            or hidden_size % input_alignment
+            or self.q_lora_rank % input_alignment
+            or qkv_width % output_alignment
+            or q_width % output_alignment
+        ):
+            return ["static MLAPO weight dimensions exceed the kernel bounds or alignment"]
+
+        reasons = []
+        device = self.fused_qkv_a_proj.weight.device
+        for name, projection, shape in (
+            ("QKV down", self.fused_qkv_a_proj, (hidden_size, qkv_width)),
+            ("Q up", self.q_proj, (self.q_lora_rank, q_width)),
+        ):
+            if (
+                projection.weight.shape != shape
+                or projection.weight.dtype != torch.int8
+                or projection.weight.device != device
+            ):
+                reasons.append(f"{name} weight must be INT8 with shape {shape}")
+            for parameter_name, size, dtype in (
+                ("deq_scale", shape[1], torch.float32),
+                ("quant_bias", shape[1], torch.int32),
+                ("input_scale", 1, act_dtype),
+                ("input_offset", 1, torch.int8),
+            ):
+                parameter = getattr(projection, parameter_name, None)
+                if (
+                    not isinstance(parameter, torch.Tensor)
+                    or parameter.numel() != size
+                    or parameter.dtype != dtype
+                    or parameter.device != device
+                ):
+                    reasons.append(f"{name} {parameter_name} has an unsupported shape/dtype/device")
+            if not reasons:
+                # Inspect scalar values once at load time, never during decode.
+                scale = projection.input_scale.detach().float().cpu()
+                if not bool(torch.isfinite(scale).all() & (scale > 0).all()):
+                    reasons.append(f"{name} input_scale must be finite and positive")
+        for name, norm, width in (
+            ("Q", self.q_a_layernorm, self.q_lora_rank),
+            ("KV", self.kv_a_layernorm, self.kv_lora_rank),
+        ):
+            if (
+                norm.weight.shape != (width,)
+                or norm.weight.dtype != act_dtype
+                or norm.weight.device != device
+                or not norm.weight.is_contiguous()
+            ):
+                reasons.append(f"{name} norm weight has an unsupported shape/dtype/device")
+            if getattr(norm, "bias_loaded", False):
+                beta = norm.bias
+                if beta is None or beta.shape != (width,) or beta.device != device:
+                    reasons.append(f"{name} norm beta has an unsupported shape/device")
+                elif name == "KV" and bool(beta.detach().cpu().ne(0).any()):
+                    reasons.append("the static MLAPO ABI does not support KV norm beta")
+                elif name == "Q" and beta.dtype != act_dtype:
+                    reasons.append("Q norm beta must have the activation dtype")
+        return reasons
+
+    def _process_weights_for_static_mlapo(self, act_dtype: torch.dtype) -> None:
+        assert self.fused_qkv_a_proj is not None and self.q_a_layernorm is not None
+        down, up = self.fused_qkv_a_proj, self.q_proj
+        weights = prepare_static_mlapo_weights(
+            torch_npu.npu_format_cast(down.weight.data, ACL_FORMAT_FRACTAL_ND),
+            down.deq_scale.data.reshape(-1),
+            down.quant_bias.data.reshape(-1),
+            torch_npu.npu_format_cast(up.weight.data, ACL_FORMAT_FRACTAL_ND),
+            up.deq_scale.data.reshape(-1),
+            up.quant_bias.data.reshape(-1),
+            q_lora_rank=self.q_lora_rank,
+            kv_lora_rank=self.kv_lora_rank,
+            num_heads=self.num_heads,
+            qk_nope_head_dim=self.qk_nope_head_dim,
+            qk_rope_head_dim=self.qk_rope_head_dim,
+        )
+        self._static_mlapo_weights = weights._replace(
+            wd_qkv=torch_npu.npu_format_cast(weights.wd_qkv, ACL_FORMAT_FRACTAL_NZ),
+            wu_q=torch_npu.npu_format_cast(weights.wu_q, ACL_FORMAT_FRACTAL_NZ),
+        )
+        self._static_mlapo_q_beta = (
+            self.q_a_layernorm.bias.data.contiguous()
+            if getattr(self.q_a_layernorm, "bias_loaded", False)
+            else torch.zeros_like(self.q_a_layernorm.weight, dtype=act_dtype)
+        )
+        self._static_mlapo_unit_scale = torch.ones(1, dtype=act_dtype, device=down.weight.device)
 
     def _load_fa_quant_scales(self):
         layer = self.vllm_config.compilation_config.static_forward_context[self.layer_name]
@@ -1955,7 +2124,107 @@ class AscendMLAImpl(MLAAttentionImpl):
             decode_q_pe = decode_q_pe[:, : self.num_heads]
         return decode_q_nope, decode_q_pe
 
+    def _can_use_static_mlapo(self, hidden_states, kv_cache, attn_metadata) -> bool:
+        num_tokens = attn_metadata.num_decode_tokens
+        if (
+            hidden_states.ndim != 2
+            or not 0 < num_tokens <= hidden_states.shape[0] <= MLAPO_MAX_SUPPORTED_TOKENS
+            or hidden_states.dtype != torch.bfloat16
+            or not hidden_states.is_contiguous()
+            or hidden_states.shape[1] != self.fused_qkv_a_proj.weight.shape[0]
+            or attn_metadata.num_prefills != 0
+            or attn_metadata.slot_mapping.ndim != 1
+            or not attn_metadata.slot_mapping.is_contiguous()
+            or attn_metadata.slot_mapping.numel() < num_tokens
+            or attn_metadata.slot_mapping.dtype not in (torch.int32, torch.int64)
+            or attn_metadata.slot_mapping.device != hidden_states.device
+            or len(kv_cache) != 2
+        ):
+            return False
+        for cache, width in zip(kv_cache, (self.kv_lora_rank, self.qk_rope_head_dim)):
+            if (
+                cache.ndim not in (3, 4)
+                or cache.shape[-1] != width
+                or (cache.ndim == 4 and cache.shape[2] != 1)
+                or cache.dtype != hidden_states.dtype
+                or cache.device != hidden_states.device
+                or cache.shape[0] == 0
+                or cache.shape[1] == 0
+            ):
+                return False
+            block_elements = 1
+            for size, stride in zip(reversed(cache.shape[1:]), reversed(cache.stride()[1:])):
+                if size > 1 and stride != block_elements:
+                    return False
+                block_elements *= size
+            if cache.stride(0) < block_elements:
+                return False
+        if kv_cache[0].shape[:2] != kv_cache[1].shape[:2]:
+            return False
+        for rope in (attn_metadata.decode.cos, attn_metadata.decode.sin):
+            if (
+                rope is None
+                or rope.ndim < 2
+                or rope.shape[0] < num_tokens
+                or rope.numel() != rope.shape[0] * self.qk_rope_head_dim
+                or rope.dtype != hidden_states.dtype
+                or rope.device != hidden_states.device
+            ):
+                return False
+        return True
+
+    def mla_preprocess_static_only_decode(self, hidden_states, kv_cache, attn_metadata):
+        weights = self._static_mlapo_weights
+        assert weights is not None
+        assert self.fused_qkv_a_proj is not None and self.q_a_layernorm is not None
+        num_tokens = attn_metadata.num_decode_tokens
+        hidden_states = hidden_states[:num_tokens]
+        q_nope = torch.empty(
+            (num_tokens, self.num_heads, self.kv_lora_rank), dtype=hidden_states.dtype, device=hidden_states.device
+        )
+        q_pe = torch.empty(
+            (num_tokens, self.num_heads, self.qk_rope_head_dim), dtype=hidden_states.dtype, device=hidden_states.device
+        )
+        # The registered schema requires this output even when it is disabled.
+        inner_out = torch.empty((num_tokens, self.q_lora_rank), dtype=hidden_states.dtype, device=hidden_states.device)
+        torch.ops._C_ascend.mla_preprocess(
+            hidden_states,
+            weights.wd_qkv,
+            weights.deq_scale_qkv,
+            self.q_a_layernorm.weight.data,
+            self._static_mlapo_q_beta,
+            weights.wu_q,
+            weights.qb_deq_scl,
+            self.kv_a_layernorm.weight.data,
+            attn_metadata.decode.cos.reshape(-1, self.qk_rope_head_dim)[:num_tokens].contiguous(),
+            attn_metadata.decode.sin.reshape(-1, self.qk_rope_head_dim)[:num_tokens].contiguous(),
+            self.W_UK_T,
+            kv_cache[0],
+            kv_cache[1],
+            attn_metadata.slot_mapping[:num_tokens],
+            quant_scale0=self.fused_qkv_a_proj.input_scale.data,
+            quant_offset0=self.fused_qkv_a_proj.input_offset.data,
+            bias0=weights.quant_bias_qkv,
+            quant_scale1=self.q_proj.input_scale.data,
+            quant_offset1=self.q_proj.input_offset.data,
+            bias1=weights.qb_qt_bias,
+            ctkv_scale=self._static_mlapo_unit_scale,
+            q_nope_scale=self._static_mlapo_unit_scale,
+            cache_mode="krope_ctkv",
+            quant_mode="per_tensor_quant_asymm",
+            enable_inner_out=False,
+            q_out0=q_nope,
+            kv_cache_out0=kv_cache[0],
+            q_out1=q_pe,
+            kv_cache_out1=kv_cache[1],
+            inner_out=inner_out,
+        )
+        notify_kv_cache_written(self.layer_name)
+        return DecodeMLAPreprocessResult(q_nope, q_pe, kv_cache[0], kv_cache[1]), None
+
     def mla_preprocess_only_decode(self, hidden_states, kv_cache, attn_metadata):
+        if getattr(self, "_static_mlapo_weights", None) is not None:
+            return self.mla_preprocess_static_only_decode(hidden_states, kv_cache, attn_metadata)
         from cann_ops_transformer import mla_prolog  # type: ignore[import-not-found,import-untyped]  # noqa: PLC0415
 
         bsz = attn_metadata.num_decode_tokens
@@ -2310,6 +2579,10 @@ class AscendMLAImpl(MLAAttentionImpl):
             and not self.is_pcp_decode_sharded
             and attn_metadata.num_decode_tokens <= MLAPO_MAX_SUPPORTED_TOKENS
             and attn_metadata.num_prefills == 0
+            and (
+                getattr(self, "_static_mlapo_weights", None) is None
+                or self._can_use_static_mlapo(hidden_states, kv_cache, attn_metadata)
+            )
         ):
             if self.layerwise_kv_cache_hook is not None:
                 self.layerwise_kv_cache_hook.wait_for_layer(layer_name)

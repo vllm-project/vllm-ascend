@@ -228,7 +228,8 @@ def test_mla_nz_management_respects_hardware_profile(device_type, enable_mlapo, 
 
     if device_type not in (AscendDeviceType.A2, AscendDeviceType.A3) or scheme_type is not AscendW8A8LinearMethod:
         return
-    # Isolating the NZ marker must not disable the existing W8A8/FA prolog.
+    # FA keeps its existing prolog. Static layers with unsupported model
+    # dimensions retain native weights rather than entering dynamic MLAPO.
     impl.kv_lora_rank = 4
     impl.num_heads = 1
     impl.qk_nope_head_dim = 2
@@ -241,8 +242,8 @@ def test_mla_nz_management_respects_hardware_profile(device_type, enable_mlapo, 
         patch.object(impl, "_process_weights_for_fused") as fused,
     ):
         impl.process_weights_after_loading(torch.bfloat16)
-    assert impl.enable_mlapo == enable_mlapo
-    assert fused.call_count == int(enable_mlapo or fa_quant_layer)
+    assert impl.enable_mlapo == (enable_mlapo and fa_quant_layer)
+    assert fused.call_count == int(fa_quant_layer)
 
 
 @pytest.mark.parametrize(
@@ -2325,9 +2326,7 @@ class TestAscendMLAImpl(TestBase):
         mock_fused_qkv_a_proj = MagicMock()
         mock_quant_method = MagicMock()
 
-        from vllm_ascend.attention.mla_v1 import AscendW8A8LinearMethod
-
-        mock_quant_method.quant_method = MagicMock(spec=AscendW8A8LinearMethod)
+        mock_quant_method.quant_method = MagicMock(spec=AscendW8A8MXFP8DynamicLinearMethod)
         mock_fused_qkv_a_proj.quant_method = mock_quant_method
         self.impl.fused_qkv_a_proj = mock_fused_qkv_a_proj
 
@@ -2367,9 +2366,7 @@ class TestAscendMLAImpl(TestBase):
 
         mock_fused_qkv_a_proj = MagicMock()
         mock_quant_method = MagicMock()
-        from vllm_ascend.attention.mla_v1 import AscendW8A8LinearMethod
-
-        mock_quant_method.quant_method = MagicMock(spec=AscendW8A8LinearMethod)
+        mock_quant_method.quant_method = AscendW8A8DynamicLinearMethod.__new__(AscendW8A8DynamicLinearMethod)
         mock_fused_qkv_a_proj.quant_method = mock_quant_method
         self.impl.fused_qkv_a_proj = mock_fused_qkv_a_proj
 
