@@ -18,6 +18,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pytest
 import torch
 from vllm.config import CUDAGraphMode
 from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
@@ -134,6 +135,7 @@ class TestNPUModelRunner310(TestBase):
         runner.pin_memory = False
         runner.is_pooling_model = False
         runner.model_config = SimpleNamespace(max_model_len=512, get_vocab_size=lambda: 32000)
+        runner.block_size = 128
         runner.cache_config = SimpleNamespace(block_size=128, enable_prefix_caching=True)
         runner.parallel_config = SimpleNamespace(cp_kv_cache_interleave_size=4)
         runner.vllm_config = SimpleNamespace(speculative_config=None)
@@ -177,3 +179,67 @@ class TestNPUModelRunner310(TestBase):
         self.assertEqual(kwargs["max_num_blocks_per_req"], [4, 6])
         self.assertIs(kwargs["kv_cache_groups"], kv_cache_config.kv_cache_groups)
         self.assertEqual(kwargs["cp_kv_cache_interleave_size"], 4)
+
+
+@pytest.mark.parametrize(
+    ("physical_block_size", "head_size", "expected_kernel_sizes"),
+    [(64, 128, [64]), (128, 128, [128, 64]), (128, 256, [64]), (256, 128, [128, 64])],
+)
+def test_attention_kernel_blocks_match_input_batch_and_cache_shape(
+    physical_block_size, head_size, expected_kernel_sizes
+) -> None:
+    runner = object.__new__(NPUModelRunner310)
+    runner.max_num_reqs = 8
+    runner.max_model_len = 512
+    runner.max_encoder_len = 0
+    runner.max_num_tokens = 1024
+    runner.device = torch.device("cpu")
+    runner.pin_memory = False
+    runner.is_pooling_model = False
+    runner.model_config = SimpleNamespace(get_vocab_size=lambda: 32000)
+    runner.block_size = 128
+    runner.cache_config = SimpleNamespace(block_size=128, enable_prefix_caching=False)
+    runner.parallel_config = SimpleNamespace(cp_kv_cache_interleave_size=1)
+    runner.vllm_config = SimpleNamespace(speculative_config=None)
+    runner.offload_config = SimpleNamespace(uva=SimpleNamespace(cpu_offload_gb=0))
+    runner.input_batch = SimpleNamespace(logitsprocs=MagicMock())
+    runner.attn_backend = MagicMock()
+    runner.attn_backend.get_supported_kernel_block_sizes.return_value = [128, 64]
+    runner.attn_backend.get_kv_cache_shape.side_effect = lambda n, b, h, d: (2, n, h * d // 16, b, 16)
+    runner.attn_groups = [[SimpleNamespace(backend=runner.attn_backend)]]
+    runner.runner_only_attn_layers = set()
+    runner._acl_format = 0
+    spec = AttentionSpec(block_size=physical_block_size, num_kv_heads=2, head_size=head_size, dtype=torch.float16)
+    cache_tensor = SimpleNamespace(size=4 * spec.page_size_bytes)
+    cache_config = SimpleNamespace(
+        num_blocks=4,
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec, layer_names=["model.attn"])],
+        kv_cache_tensors=[cache_tensor],
+    )
+    with (
+        patch("vllm_ascend._310p.model_runner_310p.NPUInputBatch") as input_batch,
+        patch("vllm_ascend._310p.model_runner_310p.get_decode_context_model_parallel_world_size", return_value=1),
+    ):
+        runner.may_reinitialize_input_batch(cache_config)
+    assert input_batch.call_args.kwargs["kernel_block_sizes"] == [expected_kernel_sizes]
+    assert input_batch.call_args.kwargs["block_sizes"] == [physical_block_size]
+    # The parent input batch now takes only the first candidate for each group.
+    assert physical_block_size % expected_kernel_sizes[0] == 0
+
+    with (
+        patch("vllm_ascend._310p.model_runner_310p.get_kv_cache_tensor_layers", return_value=["model.attn"]),
+        patch("vllm_ascend._310p.model_runner_310p.torch_npu.empty_with_format", create=True) as allocate,
+    ):
+        caches = runner._allocate_kv_cache_tensors(cache_config)
+    kernel_size = expected_kernel_sizes[0]
+    runner.attn_backend.get_kv_cache_shape.assert_called_once_with(
+        4 * physical_block_size // kernel_size, kernel_size, 2, head_size
+    )
+    assert allocate.call_count == 2
+    assert allocate.call_args.kwargs["size"] == (
+        4 * physical_block_size // kernel_size,
+        2 * head_size // 16,
+        kernel_size,
+        16,
+    )
+    assert set(caches) == {"model.attn"}

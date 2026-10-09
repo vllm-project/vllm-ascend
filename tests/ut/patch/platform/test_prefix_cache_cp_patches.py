@@ -32,8 +32,10 @@ from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 import vllm_ascend.patch.platform.patch_kv_cache_utils as kv_cache_utils_patch
 from vllm_ascend.core.kv_cache_interface import (
+    AscendCircularBufferSpec,
     AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,
+    AscendSlidingWindowMLASpec,
     register_ascend_kv_cache_specs,
 )
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
@@ -48,6 +50,53 @@ from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     group_and_unify_kv_cache_specs,
 )
 from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
+
+
+def test_packed_cache_reuses_global_capacity_and_records_recycled_state_pages():
+    register_all_kvcache_specs(None)
+    register_ascend_kv_cache_specs()
+    specs = [
+        FullAttentionSpec(block_size=32, num_kv_heads=1, head_size=16, dtype=torch.bfloat16),
+        AscendSlidingWindowMLASpec(
+            block_size=32,
+            num_kv_heads=1,
+            head_size=544,
+            dtype=torch.uint8,
+            sliding_window=128,
+            cache_dtype_str="a5_mxfp8_bf16_scale",
+            model_version="deepseek_v41",
+            alignment=None,
+        ),
+        AscendCircularBufferSpec(block_size=32, num_kv_heads=1, head_size=16, head_size_v=0, dtype=torch.float32),
+    ]
+    cfg = KVCacheConfig(
+        num_blocks=9,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec([f"group{i}"], spec) for i, spec in enumerate(specs)],
+    )
+    assert cfg.needs_kv_cache_zeroing
+    coordinator = get_kv_cache_coordinator(
+        cfg,
+        max_model_len=1024,
+        use_eagle=False,
+        enable_caching=False,
+        scheduler_block_size=32,
+        hash_block_size=32,
+    )
+    pool = coordinator.block_pool
+    capacity = pool.get_num_free_blocks()
+    # Switching from a long-context batch to window/state work must not strand
+    # free pages. The shared upstream pool owns page liveness across groups.
+    expected_ids = None
+    for manager in coordinator.single_type_managers:
+        blocks = manager.block_pool.get_new_blocks(capacity)
+        ids = {block.block_id for block in blocks}
+        if expected_ids is not None:
+            assert ids == expected_ids
+        expected_ids = ids
+        manager.block_pool.free_blocks(blocks)
+        assert pool.get_num_free_blocks() == capacity
+    assert coordinator.single_type_managers[-1]._record_new_block_ids
 
 
 @pytest.mark.parametrize("with_private_tail", [False, True])

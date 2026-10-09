@@ -415,6 +415,9 @@ class MemcacheBackend(Backend):
             raise BatchResultShapeError(f"batch_get_key_info returned {len(key_infos)} results for {len(keys)} keys")
         readable = []
         for key_info in key_infos:
+            if key_info is None:
+                readable.append(False)
+                continue
             try:
                 size = int(key_info.size())
                 gvas = key_info.gva_list()

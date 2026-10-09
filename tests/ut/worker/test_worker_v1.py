@@ -156,6 +156,32 @@ class TestNPUWorker(TestBase):
         self.assertEqual((num_layers, num_slots), (7, 3))
         self.assertEqual(factor, expected_logical_bytes / expected_physical_bytes)
 
+    def test_layer_reuse_budget_keeps_dspark_pages_persistent(self):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        worker = NPUWorker.__new__(NPUWorker)
+        worker.model_config = MagicMock()
+        worker.parallel_config = MagicMock()
+        worker.model_config.get_num_layers.return_value = 6
+        target = FullAttentionSpec(block_size=2, num_kv_heads=1, head_size=8, dtype=torch.int8)
+        draft = MLAAttentionSpec(block_size=2, num_kv_heads=1, head_size=8, dtype=torch.bfloat16)
+        draft_names = {f"draft.model.layers.{layer}.self_attn.attn" for layer in range(5)}
+        specs = {
+            **{f"model.layers.{layer}.self_attn.attn": target for layer in range(6)},
+            **{name: draft for name in draft_names},
+        }
+
+        _, _, factor = worker._get_layerwise_kv_cache_memory_info(
+            specs, {"layerwise_num_shared_buffers": 2}, excluded_layer_names=draft_names
+        )
+
+        logical = 6 * target.page_size_bytes + 5 * draft.page_size_bytes
+        physical = 3 * target.page_size_bytes + 5 * draft.page_size_bytes
+        self.assertEqual(factor, logical / physical)
+        # The planner must advertise exactly the bytes its target scratch and
+        # five persistent draft allocations will consume, not target-only reuse.
+        self.assertEqual(logical / factor, physical)
+
     def test_incomplete_layer_layout_does_not_scale_memory_budget(self):
         from vllm_ascend.worker.worker import NPUWorker
 
@@ -662,8 +688,8 @@ class TestNPUWorker(TestBase):
         mock_mem_get_info.return_value = (1000, 2000)
         profile = get_hardware_profile(AscendDeviceType.A2)
         mock_get_device_type.return_value = MagicMock(wraps=profile)
-        mock_get_device_type.return_value.supports.side_effect = (
-            lambda capability: capability == HardwareCapability.LOCAL_KV_COMM_RESOURCE or profile.supports(capability)
+        mock_get_device_type.return_value.supports.side_effect = lambda capability: (
+            capability == HardwareCapability.LOCAL_KV_COMM_RESOURCE or profile.supports(capability)
         )
 
         # Mock MemorySnapshot

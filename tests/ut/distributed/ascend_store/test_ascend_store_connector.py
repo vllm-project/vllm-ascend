@@ -113,6 +113,38 @@ class TestLookupKeyServer(unittest.TestCase):
         pool_worker.lookup_scheduler.assert_called_once()
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.threading.Thread")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.zmq.Poller")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.make_zmq_socket")
+    def test_receive_error_does_not_send_reply(self, mock_make_socket, mock_poller_cls, mock_thread_cls):
+        config = MagicMock()
+        config.parallel_config.data_parallel_rank = 0
+        config.kv_transfer_config.kv_connector_extra_config = {}
+
+        mock_socket = MagicMock()
+        mock_make_socket.return_value = mock_socket
+        server_holder = {}
+
+        def fail_receive(*_args, **_kwargs):
+            server_holder["server"].running = False
+            raise RuntimeError("receive failed")
+
+        mock_socket.recv_multipart.side_effect = fail_receive
+        mock_poller = MagicMock()
+        mock_poller.poll.return_value = [(mock_socket, 1)]
+        mock_poller_cls.return_value = mock_poller
+        mock_thread_cls.return_value = MagicMock()
+
+        server = LookupKeyServer(MagicMock(), config)
+        server_holder["server"] = server
+        target = mock_thread_cls.call_args.kwargs["target"]
+
+        target()
+
+        mock_socket.send.assert_not_called()
+        mock_socket.close.assert_called_once_with(linger=0)
+
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.threading.Thread")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.make_zmq_socket")
     def test_close_stops_and_joins_thread(self, mock_make_socket, mock_thread_cls):
         config = MagicMock()

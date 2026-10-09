@@ -29,7 +29,7 @@ from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.config_utils import config
-from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability, get_current_hardware_profile
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -424,6 +424,7 @@ class AscendConfig:
             "refresh": false,
             "enable_cpu_binding": true,
             "multistream_dsv4_dsa_overlap": true,
+            "multistream_engram_overlap": true,
             "enable_prefill_mc2": false,
             "multistream_overlap_shared_expert": false,
             "enable_kv_nz": false,
@@ -566,6 +567,13 @@ class AscendConfig:
     # ---- user-input switches: bool/int/list/str, auto type validation ----
     enable_cpu_binding: bool = True
     multistream_dsv4_dsa_overlap: bool = True
+    # Prepare Engram hashes, lookups and DP/TP exchanges on an auxiliary stream;
+    # FULL graphs wait on descriptor-specific external events at consumers.
+    # Default to overlap on A5 only; explicit settings override this policy.
+    multistream_engram_overlap: bool = dataclasses.field(
+        default_factory=lambda: get_current_hardware_profile().device_adaptor_family
+        == DeviceAdaptorFamily.FP8_OPTIMIZED
+    )
     enable_prefill_mc2: bool = False
     multistream_overlap_shared_expert: bool = False
     enable_kv_nz: bool = False
@@ -675,6 +683,16 @@ class AscendConfig:
     # the max_num_batched_tokens that sequence-parallel writeback corrected).
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
         vc = vllm_config
+        engram_config = getattr(vc, "engram_config", None)
+        if (
+            engram_config is not None
+            and not engram_config.dp_shared_memory
+            and vc.use_v2_model_runner
+            and vc.parallel_config.data_parallel_size > 1
+        ):
+            # DP-dummy ranks have no hash work in MRV2. Share host tables so
+            # replicas do not require matching embedding collectives each step.
+            engram_config.dp_shared_memory = True
         if (
             self.enable_force_eplb
             and self.eplb_config.dynamic_eplb
@@ -1729,22 +1747,15 @@ class SparseKVOffloadConfig:
                     "and can only be used in D node. For debugging in PD colocate scenario, "
                     "you can enable keep_device_kv_cache."
                 )
-        if vllm_config.use_v2_model_runner:
-            raise ValueError("Sparse KV offload doesn't support model_runner_v2 now.")
-
         self.topk = vllm_config.model_config.hf_text_config.index_topk
-        if self.use_fused_copy_sfa:
-            if vllm_config.speculative_config and vllm_config.speculative_config.method == "dspark":
-                raise ValueError("fused_copy_sfa does not support DSpark speculative decoding")
-            width = 1 + (vllm_config.speculative_config.num_speculative_tokens if vllm_config.speculative_config else 0)
-            if self.topk != 2048 or not 1 <= width <= 7:
-                raise ValueError("fused_copy_sfa serving requires TopK=2048 and 1–7 query rows per request")
-            if not width * self.topk <= self.topk_buffer_size <= 16256 or self.topk_buffer_size % 256:
-                raise ValueError(
-                    "fused_copy_sfa hot budget must be 256-aligned in [Q_max*2048, 16128]: "
-                    "the dense short-sequence layout only lines up with the circular "
-                    "tail slots when topk_buffer_size is a multiple of 256"
-                )
+        speculative = getattr(vllm_config, "speculative_config", None)
+        if (
+            speculative is not None
+            and speculative.method == "dspark"
+            and not getattr(vllm_config, "use_v2_model_runner", False)
+        ):
+            # Only V2 initializes the resident draft KV from remote prompt context.
+            raise ValueError("Sparse KV offload with DSpark requires V2 remote prompt-context initialization")
         if self.topk_buffer_size < self.topk:
             raise ValueError(
                 "sparse_kv_offload_config.topk_buffer_size must be >= topk, "

@@ -92,8 +92,8 @@ multi-node-tests:
           config_file_path: DeepSeek-V3.yaml
           config_base_path: tests/e2e/cases/models/configs/DeepSeek
           size: 2
-        - name: multi-node-qwen3-dp
-          config_file_path: Qwen3-235B-A22B.yaml
+        - name: multi-node-qwen3-vl-dp
+          config_file_path: Qwen3-VL-235B-disagg-pd.yaml
           config_base_path: tests/e2e/cases/models/configs/Qwen
           size: 2
         - name: GLM5_1-W8A8-EP-external
@@ -378,13 +378,13 @@ Install AISBench on the first host, which is the node with
 `LWS_WORKER_INDEX=0`:
 
 ```bash
-export AIS_BENCH_TAG="v3.1-20260330-master"
+export AIS_BENCH_TAG="v3.1-20260912-master"
 export AIS_BENCH_URL="https://github.com/AISBench/benchmark.git"
 export BENCHMARK_HOME=/vllm-workspace/vllm-ascend/benchmark
 
 git clone -b ${AIS_BENCH_TAG} --depth 1 ${AIS_BENCH_URL} $BENCHMARK_HOME
 cd $BENCHMARK_HOME
-pip install -e . -r requirements/api.txt -r requirements/extra.txt
+pip install -e . -r requirements/api.txt -r requirements/extra.txt -r requirements/response_anomaly.txt
 ```
 
 If your local image already contains the model, benchmark data, Ascend runtime,
@@ -461,13 +461,13 @@ python3 -m pip install -r requirements-dev.txt
 Install AISBench on node 0:
 
 ```bash
-export AIS_BENCH_TAG="v3.1-20260330-master"
+export AIS_BENCH_TAG="v3.1-20260912-master"
 export AIS_BENCH_URL="https://github.com/AISBench/benchmark.git"
 export BENCHMARK_HOME=/vllm-workspace/vllm-ascend/benchmark
 
 git clone -b ${AIS_BENCH_TAG} --depth 1 ${AIS_BENCH_URL} $BENCHMARK_HOME
 cd $BENCHMARK_HOME
-pip install -e . -r requirements/api.txt -r requirements/extra.txt
+pip install -e . -r requirements/api.txt -r requirements/extra.txt -r requirements/response_anomaly.txt
 ```
 
 If your local image already contains the model, benchmark data, Ascend runtime,
