@@ -12,6 +12,8 @@ import os
 import sys
 import unittest
 from pathlib import Path
+from types import ModuleType
+from typing import ClassVar, cast
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -22,7 +24,7 @@ ENV_NAME = "VLLM_ASCEND_SPLIT_QKV_RMSNORM_MROPE_BLOCK_M"
 FINGERPRINT = "torch==2.10.0+cpu;triton==3.5.0;torch-npu==2.10.0.post2"
 
 
-def _load_source_module(name: str, path: Path):
+def _load_source_module(name: str, path: Path) -> ModuleType:
     spec = importlib.util.spec_from_file_location(name, path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -71,6 +73,9 @@ def _decision(policy, *, q_heads: int, kv_heads: int, tokens: int, capacity=None
 
 
 class SplitQKVMRoPEDispatchTests(unittest.TestCase):
+    policy: ClassVar[ModuleType]
+    envs: ClassVar[ModuleType]
+
     @classmethod
     def setUpClass(cls):
         cls.policy = _load_source_module("test_split_qkv_mrope_policy", OP_DIR / "ac_dispatch_policy.py")
@@ -95,8 +100,9 @@ class SplitQKVMRoPEDispatchTests(unittest.TestCase):
             and node.func.value.id == "launch_kernel"
         ]
         self.assertEqual(len(launches), 1)
-        self.assertIsInstance(launches[0].args[-1], ast.Name)
-        self.assertEqual(launches[0].args[-1].id, "pair_capable")
+        pair_arg = launches[0].args[-1]
+        self.assertIsInstance(pair_arg, ast.Name)
+        self.assertEqual(cast(ast.Name, pair_arg).id, "pair_capable")
         self.assertEqual(
             OP_PATH.read_text(encoding="utf-8").count('op_name="triton_split_qkv_rmsnorm_mrope"'),
             1,
