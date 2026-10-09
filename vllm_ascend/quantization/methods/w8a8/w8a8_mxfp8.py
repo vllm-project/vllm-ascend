@@ -577,7 +577,9 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
 class AscendW8A8MXFP8DSDynamicLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
     """Linear method for DS original W8A8 mxfp(blocksize: 128 * 128) quantization.
 
-    scales are reorganize as blocksize 32 * 1 in process_weights_after_loading
+    Checkpoint block scales are expanded to the per-output, per-32 layout
+    consumed by ``npu_quant_matmul``. Both the original 128x128 export and
+    newer 32x32 DeepSeek V4.1 exports are supported.
     """
 
     model_dtype = None
@@ -594,11 +596,7 @@ class AscendW8A8MXFP8DSDynamicLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
     def __init__(self, weight_block_size):
         super().__init__()
         self.block_size = weight_block_size[0]
-        vllm_config = get_current_vllm_config()
-        tp_size = vllm_config.parallel_config.tensor_parallel_size
-        hf_config = vllm_config.model_config.hf_config
-        self.n_groups = hf_config.o_groups
-        self.n_local_groups = self.n_groups // tp_size
+        hf_config = get_current_vllm_config().model_config.hf_config
         self.o_lora_rank = hf_config.o_lora_rank
 
     def get_pergroup_param(
@@ -618,19 +616,30 @@ class AscendW8A8MXFP8DSDynamicLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
         else:
             layer.weight_scale.data = layer.weight_scale.data.view(torch.int32) >> 23 & 0xFF
             layer.weight_scale.data = layer.weight_scale.data.to(torch.uint8)
-        layer.weight_scale.data = layer.weight_scale.data.repeat_interleave(4, dim=1).repeat_interleave(128, dim=0)
+        if self.block_size % self.group_size != 0:
+            raise ValueError(
+                "MXFP8 weight block size must be divisible by the "
+                f"runtime group size, got block_size={self.block_size}, "
+                f"group_size={self.group_size}"
+            )
+        input_repeat = self.block_size // self.group_size
+        layer.weight_scale.data = layer.weight_scale.data.repeat_interleave(input_repeat, dim=1)
+        layer.weight_scale.data = layer.weight_scale.data.repeat_interleave(self.block_size, dim=0)
         n_dim, k_dim = layer.weight_scale.data.shape
         layer.weight_scale.data = layer.weight_scale.data.reshape(n_dim, k_dim // 2, 2)
         layer.weight.data = layer.weight.data.transpose(0, 1)
         layer.weight_scale.data = layer.weight_scale.data.transpose(0, 1)
 
         if layer.prefix.endswith("wo_a"):
+            # The layer may use OTP instead of the model's ordinary TP group.
+            # Derive the group count from the loaded output shard.
+            n_local_groups = layer.weight.shape[1] // self.o_lora_rank
             layer.weight.data = (
-                layer.weight.data.T.reshape(self.n_local_groups, self.o_lora_rank, -1).transpose(1, 2).contiguous()
+                layer.weight.data.T.reshape(n_local_groups, self.o_lora_rank, -1).transpose(1, 2).contiguous()
             )
             layer.weight_scale.data = (
                 layer.weight_scale.data.transpose(0, 1)
-                .reshape(self.n_local_groups, self.o_lora_rank, -1, 2)
+                .reshape(n_local_groups, self.o_lora_rank, -1, 2)
                 .transpose(1, 2)
                 .contiguous()
             )

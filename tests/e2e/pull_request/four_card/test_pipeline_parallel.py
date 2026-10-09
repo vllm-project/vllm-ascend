@@ -14,12 +14,9 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-import os
-from unittest.mock import patch
-
 import pytest
 
-from tests.e2e.conftest import DPVllmRunner, VllmRunner, wait_until_npu_memory_free
+from tests.e2e.conftest import DPVllmRunner, wait_until_npu_memory_free
 from tests.e2e.model_utils import check_outputs_equal
 
 DS3 = "deepseek-ai/DeepSeek-V2-Lite-Chat"
@@ -31,7 +28,6 @@ MOE_MODELS = [
 ]
 
 DATA_PARALLELS = [2]
-TENSOR_PARALLELS = [1]
 PIPELINE_PARALLELS = [2]
 DIST_EXECUTOR_BACKEND = ["mp", "ray"]
 
@@ -39,65 +35,11 @@ prompts = [
     "Hello, my name is",
     "The future of AI is",
 ]
-GOLDEN = [
-    (
-        [
-            17464,
-            11,
-            601,
-            1210,
-            317,
-            459,
-            6946,
-            29,
-            32,
-            1568,
-            32092,
-            535,
-            6946,
-            29,
-            285,
-            304,
-            6,
-            76,
-            245,
-            459,
-            6946,
-        ],
-        "Hello, my name is <strong>Alessandro</strong> and I'm a <strong",
-    ),
-    (
-        [
-            549,
-            3680,
-            280,
-            20838,
-            317,
-            6464,
-            11,
-            285,
-            359,
-            487,
-            82,
-            1872,
-            276,
-            330,
-            245,
-            2624,
-            12,
-            73309,
-            279,
-            254,
-            1843,
-        ],
-        "The future of AI is bright, and it’s going to be a game-changer in the world",
-    ),
-]
 
 # After #15299, routing weights are preserved without intermediate dtype
 # casts, which deterministically changes greedy decoding for the DP2+PP2
-# path of DeepSeek-V2-Lite-Chat. Keep a separate baseline so the TP2+PP2
-# golden above stays unaffected.
+# path of DeepSeek-V2-Lite-Chat. The TP1+PP2 baseline lives in
+# tests/e2e/pull_request/two_card/test_pipeline_parallel.py.
 DP_GOLDEN = [
     (
         [
@@ -152,33 +94,6 @@ DP_GOLDEN = [
         "The future of AI is bright, and it’s going to be a game-changer in the world",
     ),
 ]
-
-
-@pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("tp_size", TENSOR_PARALLELS)
-@pytest.mark.parametrize("pp_size", PIPELINE_PARALLELS)
-@pytest.mark.parametrize("distributed_executor_backend", DIST_EXECUTOR_BACKEND)
-@patch.dict(os.environ, {"OMP_NUM_THREADS": "1"})
-@wait_until_npu_memory_free(target_free_percentage=0.6)
-def test_models_pp2_tp2(model: str, tp_size: int, pp_size: int, distributed_executor_backend: str) -> None:
-    with VllmRunner(
-        model,
-        tensor_parallel_size=tp_size,
-        pipeline_parallel_size=pp_size,
-        compilation_config={
-            "cudagraph_capture_sizes": [1, 2, 4],
-        },
-        distributed_executor_backend=distributed_executor_backend,
-        gpu_memory_utilization=0.7,
-        enable_expert_parallel=model in MOE_MODELS,
-    ) as vllm_model:
-        outputs = vllm_model.generate_greedy(prompts, 16)
-        check_outputs_equal(
-            outputs_0_lst=outputs,
-            outputs_1_lst=GOLDEN,
-            name_0=f"{model}-tp{tp_size}pp{pp_size}",
-            name_1="GOLDEN",
-        )
 
 
 @pytest.mark.parametrize("model", MODELS)

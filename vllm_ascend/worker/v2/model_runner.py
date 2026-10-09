@@ -18,6 +18,7 @@
 #
 
 from contextlib import AbstractContextManager, contextmanager, nullcontext
+from copy import deepcopy
 from typing import Any
 
 import numpy as np
@@ -30,7 +31,8 @@ from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import async_tensor_h2d as async_copy_to_gpu
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
+from vllm.v1.worker.dp_utils import skip_dp_coordination
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.eplb_utils import step_eplb_after
@@ -45,6 +47,7 @@ from vllm.v1.worker.gpu.model_runner import (
     ExecuteModelState,
     GPUModelRunner,
 )
+from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import (
@@ -62,14 +65,37 @@ from vllm_ascend.core.profiling_chunk_predictor import (
     _finish_profiling_chunk_timing,
     _start_profiling_chunk_timing,
 )
+from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
+    bind_dspark_context_receiver,
+    configure_dspark_kv_transfer,
+    find_dspark_context_connector,
+    find_dspark_prefix_connector,
+    get_pd_dspark_aux_layer_ids,
+    send_dspark_prefill_kv,
+)
+from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_kv import (
+    apply_dspark_resident_kv_specs,
+    get_resident_dspark_layer_names,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
+    apply_layerwise_kv_cache_plan,
+)
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
+    allocate_kv_offload_topk_profile_buffers,
+    init_sparse_kv_offload_manager,
+)
+from vllm_ascend.models.deepseek_v41.cache_config import uses_a5_packed_cache
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import (
+    is_deepseek_v41,
     is_pd_decode_recompute_scheduler_enabled,
     lmhead_tp_enable,
     lmhead_tp_max_num_logits,
     lmhead_tp_pad_rows,
     set_potential_max_tokens,
+    should_skip_allreduce_across_dp_group,
 )
+from vllm_ascend.worker.device_metadata import TargetDeviceMetadata
 from vllm_ascend.worker.utils import disable_compilation
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import (
@@ -80,7 +106,7 @@ from vllm_ascend.worker.v2.eplb import AscendEPLBController
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
-from vllm_ascend.worker.v2.pp_utils import (
+from vllm_ascend.worker.v2.pp_transport import (
     bypass_upstream_spec_pp_guard,
     resolve_spec_pp_support,
     restore_pp_after_upstream_init,
@@ -110,6 +136,7 @@ class NPUModelRunner(GPUModelRunner):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
+        self.sparse_kv_offload_manager = None
         self.kvpp = KVPPRuntime()
         # Adaptive verification uses this flag to apply FIA-specific query
         # boundary and sequence length padding during FULL graph execution.
@@ -181,6 +208,8 @@ class NPUModelRunner(GPUModelRunner):
         # init_speculator will return AscendEagleSpeculator when eagle is used.
         # so here we just call init_speculator to reinitialize speculator.
         self.speculator: AscendEagleSpeculator | None = None
+        self.pd_dspark_aux_layer_ids: tuple[int, ...] = ()
+        self._dspark_prefill_progress: dict[str, tuple[str, int]] = {}
         if self.speculative_config is not None and self.is_last_pp_rank:
             self.speculator = init_speculator(self.vllm_config, self.device)
             # Shared update_stream: main model (ModelAclGraphManager) and draft
@@ -236,6 +265,11 @@ class NPUModelRunner(GPUModelRunner):
     @property
     def pcp_manager_cls(self) -> type[AscendPCPManager]:
         return AscendPCPManager
+
+    def load_model(self, load_dummy_weights: bool = False, *args, **kwargs) -> None:
+        aux_layers = get_pd_dspark_aux_layer_ids(self.vllm_config)
+        super().load_model(load_dummy_weights, *args, **kwargs)
+        self.pd_dspark_aux_layer_ids = aux_layers
 
     def _restore_replicated_draft_target_states(self) -> None:
         """Restore target states consumed by a replicated PCP draft."""
@@ -305,11 +339,49 @@ class NPUModelRunner(GPUModelRunner):
             self.pp_handler.broadcast_drafts()
         return output
 
+    def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
+        return apply_dspark_resident_kv_specs(
+            super().get_kv_cache_spec(),
+            self.vllm_config,
+            self.speculator,
+            sparse_offload_enabled=self.ascend_config.sparse_kv_offload_config.enabled,
+            is_last_pp_rank=self.is_last_pp_rank,
+            shared_kv_cache_layers=getattr(self, "shared_kv_cache_layers", None),
+        )
+
     def initialize_kv_cache(
         self,
         kv_cache_config: KVCacheConfig,
         kv_cache_allocation_context: AbstractContextManager | None = None,
     ) -> None:
+        # Match V1's physical buffer plan without mutating the scheduler's
+        # logical cache configuration. Allocation must honor zero-stride aliases.
+        kv_cache_config = deepcopy(kv_cache_config)
+        sparse_cfg = self.ascend_config.sparse_kv_offload_config
+        configure_dspark_kv_transfer(
+            self.vllm_config, self.speculator, kv_cache_config, is_last_pp_rank=self.is_last_pp_rank
+        )
+        resident_draft_names = get_resident_dspark_layer_names(
+            self.vllm_config,
+            self.speculator,
+            sparse_offload_enabled=sparse_cfg.enabled,
+            is_last_pp_rank=self.is_last_pp_rank,
+            shared_kv_cache_layers=getattr(self, "shared_kv_cache_layers", None),
+        )
+        # P also needs persistent prompt draft KV until D acknowledges its
+        # transfer. It must never alias target layerwise scratch buffers.
+        persistent_draft_names = resident_draft_names | set(getattr(kv_cache_config, "dspark_draft_layer_names", ()))
+        apply_layerwise_kv_cache_plan(kv_cache_config, self.vllm_config, excluded_layer_names=persistent_draft_names)
+        if sparse_cfg.enabled:
+            self.sparse_kv_offload_manager = init_sparse_kv_offload_manager(
+                self.vllm_config, kv_cache_config, sparse_cfg
+            )
+            self.model_state._offload_live_req_ids = self.req_states.req_id_to_index
+            self.model_state._offload_draft_layer_names = (
+                getattr(self.speculator, "draft_attn_layer_names", set[str]()) - resident_draft_names
+                if sparse_cfg.use_fused_copy_sfa
+                else set()
+            )
         with graph_manager_wrapper(self):
             super().initialize_kv_cache(
                 kv_cache_config,
@@ -322,6 +394,17 @@ class NPUModelRunner(GPUModelRunner):
                 self.model_state.pcp_manager = self.pcp_manager
                 if self.speculator is not None:
                     self.speculator.pcp_manager = self.pcp_manager
+        bind_dspark_context_receiver(
+            self.vllm_config,
+            sparse_offload_enabled=sparse_cfg.enabled,
+            is_last_pp_rank=self.is_last_pp_rank,
+            max_requests=self.max_num_reqs,
+        )
+        if sparse_cfg.enabled and self.speculator is not None:
+            # Resident MLA DSpark has no host-pool LRU or LIM tail state.
+            self.model_state._offload_draft_attn_groups = (
+                [] if resident_draft_names else getattr(self.speculator, "attn_groups", [])
+            )
         if any(is_circular_kv_cache_spec(group.kv_cache_spec) for group in self.kv_cache_config.kv_cache_groups):
             from vllm_ascend.models.deepseek_v41.compressor import DeepseekV41Compressor
 
@@ -329,6 +412,13 @@ class NPUModelRunner(GPUModelRunner):
                 if isinstance(module, DeepseekV41Compressor) and module.ratio == 2:
                     module.prepare_ring_compressor(self.max_num_tokens, self.device)
         prepare_v41_source_rope(self)
+        # Recreate along with KV initialization: profiling capture owns a
+        # throwaway model state and must not leak event/buffer bindings.
+        self.model_state.device_metadata = (
+            TargetDeviceMetadata()
+            if uses_a5_packed_cache() and self.model_config.architecture == "DeepseekV41ForCausalLM"
+            else None
+        )
 
         # Upstream has bound every local cache; publish sealed plans before
         # the worker can warm up, capture graphs or execute prefill requests.
@@ -361,6 +451,36 @@ class NPUModelRunner(GPUModelRunner):
         )
         self.model_state.kvpp_runtime = self.kvpp
 
+    def _register_sparse_kv_caches(self, kv_caches: dict[str, Any]) -> None:
+        """Bind host pools before the V2 KV connector registers its destinations."""
+        manager = self.sparse_kv_offload_manager
+        if manager is None:
+            return
+        manager.register_kv_caches(kv_caches)
+        if not self.ascend_config.sparse_kv_offload_config.use_fused_copy_sfa:
+            return
+
+        from vllm_ascend.attention.sfa_kv_offload import AscendSFAKVOffloadImpl
+
+        owners: dict[int, AscendSFAKVOffloadImpl] = {}
+        for layer in self.compilation_config.static_forward_context.values():
+            impl = getattr(layer, "impl", None)
+            if not isinstance(impl, AscendSFAKVOffloadImpl):
+                continue
+            shared = impl.topk_indices_buffer
+            if shared is None:
+                continue
+            key = shared.data_ptr()
+            if impl.skip_topk:
+                if key not in owners:
+                    raise RuntimeError("fused_copy_sfa shared attention precedes its indexer owner")
+                impl.lim_indexer_owner = owners[key]
+            else:
+                owners[key] = impl
+        for layer_name in manager.offload_layer_names:
+            layer = self.compilation_config.static_forward_context[layer_name]
+            layer.impl.bind_copy_sfa_kv_cache(manager, layer_name)
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -387,15 +507,28 @@ class NPUModelRunner(GPUModelRunner):
             get_kv_transfer_group().handle_preemptions(kv_connector_metadata)
 
         self.model_state.kvpp_is_dummy_run = dummy_run or is_profile
-        output = super().execute_model(
-            scheduler_output,
-            intermediate_tensors=intermediate_tensors,
-            dummy_run=dummy_run,
-            skip_attn_for_dummy_run=skip_attn_for_dummy_run,
-            is_profile=is_profile,
-            context_len=context_len,
-            valid_dummy_state_slots=valid_dummy_state_slots,
+        dp_coordination_context = (
+            skip_dp_coordination() if should_skip_allreduce_across_dp_group(self.vllm_config) else nullcontext()
         )
+        forward_failed = True
+        with dp_coordination_context:
+            try:
+                output = super().execute_model(
+                    scheduler_output,
+                    intermediate_tensors=intermediate_tensors,
+                    dummy_run=dummy_run,
+                    skip_attn_for_dummy_run=skip_attn_for_dummy_run,
+                    is_profile=is_profile,
+                    context_len=context_len,
+                    valid_dummy_state_slots=valid_dummy_state_slots,
+                )
+                forward_failed = False
+            finally:
+                finish_execution = getattr(self.model_state, "finish_execution", None)
+                if finish_execution is not None:
+                    finish_execution(failed=forward_failed)
+        if not dummy_run and not is_profile:
+            self._maybe_send_draft_kv(scheduler_output)
         self.model_state.kvpp_is_dummy_run = False
         if dummy_run and lmhead_tp_enable() and not is_profile and self.is_last_pp_rank:
             # lmhead TP: idle ranks never call sample(); join the target head
@@ -418,6 +551,34 @@ class NPUModelRunner(GPUModelRunner):
         )
         return output
 
+    def _maybe_send_draft_kv(self, scheduler_output: SchedulerOutput) -> None:
+        """Write draft KV on P, then let D pull the exact allocated cache pages."""
+        if not getattr(self, "pd_dspark_aux_layer_ids", ()) or not self.is_last_pp_rank:
+            return
+        connector, metadata = find_dspark_context_connector(
+            get_kv_transfer_group(), scheduler_output.kv_connector_metadata
+        )
+        requests = getattr(metadata, "requests", {})
+        if not any(getattr(req_meta, "dspark_context_generation", None) for req_meta in requests.values()):
+            return
+        state = self.execute_model_state
+        if state is None or state.aux_hidden_states is None:
+            if scheduler_output.total_num_scheduled_tokens:
+                raise RuntimeError("P produced no target auxiliary states for an active remote DSpark request")
+            return
+        prefix_store = find_dspark_prefix_connector(get_kv_transfer_group(), scheduler_output.kv_connector_metadata)
+        send_dspark_prefill_kv(
+            self.speculator,
+            state.input_batch,
+            state.aux_hidden_states,
+            requests,
+            connector,
+            self._dspark_prefill_progress,
+            getattr(scheduler_output, "finished_req_ids", ()) or (),
+            prefix_connector=prefix_store[0] if prefix_store is not None else None,
+            prefix_metadata=prefix_store[1] if prefix_store is not None else None,
+        )
+
     @torch.inference_mode()
     def profile_run(self) -> None:
         """Override GPUModelRunner.profile_run for Ascend NPUs.
@@ -425,6 +586,9 @@ class NPUModelRunner(GPUModelRunner):
         necessary HCCL buffer for the MC2 operator before standard `profile_run`. Additionally, we set
         override_mrv2_in_profile_run to True to force moe load to be balanced when executing `profile_run`
         """
+        sparse_cfg = self.ascend_config.sparse_kv_offload_config
+        if sparse_cfg.enabled:
+            allocate_kv_offload_topk_profile_buffers(self.get_kv_cache_spec(), self.vllm_config, sparse_cfg)
         mc2_tokens_capacity = get_mc2_tokens_capacity()
         with override_mrv2_in_profile_run(True):
             if (
@@ -847,6 +1011,16 @@ class NPUModelRunner(GPUModelRunner):
         npu attention backends need seq_lens_cpu to work.
         so we need to copy num_computed_tokens back to cpu here.
         """
+        if (
+            self.use_pp
+            and not self.is_last_pp_rank
+            and isinstance(self.model_state, MambaHybridModelState)
+            and self.cache_config.mamba_cache_mode == "align"
+        ):
+            # Deferred PP results belong to an older batch than input_block_tables.
+            # Restore its rows before Mamba aligns the accepted recurrent state.
+            # Postprocess skips -1 (freed/unsampled) rows; gather needs valid indices.
+            self.block_tables.gather_block_tables(idx_mapping.clamp_min(0), idx_mapping.shape[0])
         super().postprocess_sampled(
             idx_mapping,
             sampled_tokens,
@@ -855,8 +1029,13 @@ class NPUModelRunner(GPUModelRunner):
             query_start_loc,
         )
 
+        # TODO: Gate CPU length synchronization by backend requirements, not
+        # speculative decoding alone. V4.1 uses device lengths; extend this
+        # exemption to other backends that do not need exact CPU seq_lens.
         # Non-last PP stages receive rejections without owning a speculator.
-        if self.speculator is not None or self.sync_spec_pp_cpu_counts:
+        if (
+            self.speculator is not None and not is_deepseek_v41(self.model_config.hf_config)
+        ) or self.sync_spec_pp_cpu_counts:
             self._copy_num_computed_tokens_to_cpu()
 
     def postprocess_num_computed_tokens(self, input_batch: AscendInputBatch) -> None:
@@ -890,14 +1069,17 @@ class NPUModelRunner(GPUModelRunner):
         # Speculative decoding needs corrected num_computed_tokens after rejection.
         # req_states.num_computed_tokens_cpu shares storage with its NumPy view,
         # so this update also corrects the num_computed_tokens_np used by PCP.
-        if self.speculator is not None or self.sync_spec_pp_cpu_counts:
+        if (
+            self.speculator is not None and not is_deepseek_v41(self.model_config.hf_config)
+        ) or self.sync_spec_pp_cpu_counts:
             # Blocks CPU submission until D2H completes; may stall the async pipeline.
             self.num_computed_tokens_event.synchronize()
             for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
                 req_index = self.req_states.req_id_to_index[req_id]
                 self.req_states.num_computed_tokens_cpu[req_index] = self.num_computed_tokens_cpu[req_index]
 
-        # update seq_lens_cpu
+        # Without a CPU consumer, retain the upstream optimistic upper bound.
+        # prepare_pos_seq_lens still reads exact rejection-corrected NPU state.
         for i, req_id in enumerate(req_ids):  # type: ignore
             req_index = self.req_states.req_id_to_index[req_id]
             num_computed_tokens = self.req_states.num_computed_tokens_cpu[req_index]

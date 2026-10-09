@@ -48,6 +48,7 @@ TILING_DATA_FIELD_DEF(int64_t, hcMult);
 TILING_DATA_FIELD_DEF(int64_t, d);
 TILING_DATA_FIELD_DEF(int64_t, hcMultAlign);
 TILING_DATA_FIELD_DEF(int64_t, rowOfFormerBlock);
+TILING_DATA_FIELD_DEF(int64_t, rowOfTailBlock);
 TILING_DATA_FIELD_DEF(int64_t, rowLoopOfFormerBlock);
 TILING_DATA_FIELD_DEF(int64_t, rowLoopOfTailBlock);
 TILING_DATA_FIELD_DEF(int64_t, rowFactor);

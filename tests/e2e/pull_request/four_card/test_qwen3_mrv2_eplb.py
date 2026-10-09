@@ -10,7 +10,7 @@ import regex as re
 from vllm import SamplingParams
 
 from tests.e2e.conftest import DPVllmRunner, wait_until_npu_memory_free
-from vllm_ascend.distributed.eplb.state import ASYNC_EPLB_CYCLE_COMMITTED_LOG
+from vllm_ascend.distributed.eplb.eplb_state import ASYNC_EPLB_CYCLE_COMMITTED_LOG
 
 MODEL = os.environ.get("QWEN3_MRV2_EPLB_MODEL_PATH", "vllm-ascend/Qwen3-30B-A3B-W8A8")
 PROMPTS = [

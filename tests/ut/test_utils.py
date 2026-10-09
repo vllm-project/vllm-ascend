@@ -66,6 +66,19 @@ def test_register_customop_selects_gdn_before_import(device_type):
         assert register.call_count == len(utils.REGISTERED_ASCEND_OPS)
 
 
+def test_cp_decode_stream_is_cached_and_separate_from_chunked_prefill():
+    decode_stream, prefill_stream = object(), object()
+    with (
+        mock.patch.object(utils, "_CP_DECODE_COMM_STREAM", None),
+        mock.patch.object(utils, "_CP_CHUNKEDPREFILL_COMM_STREAM", None),
+        mock.patch.object(utils.torch_npu.npu, "Stream", side_effect=[decode_stream, prefill_stream]),
+    ):
+        assert utils.cp_decode_comm_stream() is decode_stream
+        assert utils.cp_decode_comm_stream() is decode_stream
+        assert utils.cp_chunkedprefill_comm_stream() is prefill_stream
+        assert utils.cp_chunkedprefill_comm_stream() is prefill_stream
+
+
 class TestUtils(TestBase):
     def setUp(self):
         import importlib
@@ -739,6 +752,13 @@ def test_is_pd_decode_recompute_scheduler_enabled_decode_consumer_disabled():
     ascend_config.scheduler_config.recompute_scheduler_enable = False
     with mock.patch("vllm_ascend.utils.get_ascend_config", return_value=ascend_config):
         assert utils.is_pd_decode_recompute_scheduler_enabled(vllm_config) is False
+
+
+def test_should_reuse_topk_keeps_frequency_logic():
+    config = SimpleNamespace(index_topk_freq=4, index_skip_topk_offset=3)
+
+    assert not utils.should_reuse_topk(config, 2)
+    assert utils.should_reuse_topk(config, 3)
 
 
 def test_check_gdn_layer_supports_kimi_linear_config_property():

@@ -32,6 +32,7 @@ from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.attention.attention_c8_mxfp import (
     AscendC8MXFPAttentionBackendImpl,
     mxfp_cache_spec,
+    mxfp_paged_cache_views,
     mxfp_v_scale_cache_shape,
 )
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
@@ -1152,6 +1153,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner.use_hybrid_blocks = False
         runner.hybrid_with_attn_and_mamba = False
         runner.sfa_dcp_replicated_indexer_size = 1
+        runner.dcp_size = 1
         runner.runner_only_attn_layers = set()
         runner.is_kv_consumer = False
         runner.sparse_kv_offload_enabled = False
@@ -1278,8 +1280,11 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             [4, 8],
         )
 
-        assert caches["full_attn"].shape == (2, 4, 4, 1, 2)
-        assert caches["full_attn"].stride() == (8, 16, 2, 2, 1)
+        assert isinstance(caches["full_attn"], tuple)
+        assert len(caches["full_attn"]) == 2
+        for cache in caches["full_attn"]:
+            assert cache.shape == (4, 4, 1, 2)
+            assert cache.stride() == (16, 2, 2, 1)
         conv_state, ssm_state = caches["linear_attn"]
         assert conv_state.shape == (2, 3)
         assert ssm_state.shape == (2, 5)
@@ -1300,6 +1305,9 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
     def test_paged_attention_uses_contiguous_kv_cache(self):
         self._check_gqa_cache_layout(xlite_enabled=False, pa_enabled=True)
 
+    def test_dcp_uses_separate_contiguous_kv_cache(self):
+        self._check_gqa_cache_layout(xlite_enabled=False, dcp_size=2)
+
     def test_xlite_uses_separate_contiguous_kv_cache(self):
         self._check_gqa_cache_layout(xlite_enabled=True)
 
@@ -1309,8 +1317,9 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
     def test_sparse_backend_uses_separate_contiguous_kv_cache(self):
         self._check_gqa_cache_layout(xlite_enabled=False, backend=SparseAttentionBackend)
 
-    def _check_gqa_cache_layout(self, xlite_enabled, backend=AscendAttentionBackend, pa_enabled=False):
+    def _check_gqa_cache_layout(self, xlite_enabled, backend=AscendAttentionBackend, pa_enabled=False, dcp_size=1):
         runner = self._build_runner()
+        runner.dcp_size = dcp_size
         runner.ascend_config.xlite_graph_config.enabled = xlite_enabled
         runner.model_config.use_mla = False
         layer_name = "model.layers.0.self_attn.attn"
@@ -1347,7 +1356,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         with patch("vllm_ascend.worker.model_runner_v1.requires_contiguous_pa_kv_cache", return_value=pa_enabled):
             raw_caches = runner._allocate_kv_cache_tensors(kv_cache_config)
 
-        uses_contiguous_cache = xlite_enabled or backend.is_sparse() or pa_enabled
+        uses_contiguous_cache = xlite_enabled or backend.is_sparse() or pa_enabled or dcp_size > 1
         assert isinstance(raw_caches[layer_name], tuple if uses_contiguous_cache else torch.Tensor)
         cache = runner._reshape_kv_cache_tensors(
             kv_cache_config,
@@ -1361,10 +1370,23 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                 assert tensor.shape == (2, 8, 2, 2)
                 assert tensor.is_contiguous()
             return
-        assert cache.shape == (2, 2, 8, 2, 2)
-        assert cache.stride() == (32, 64, 4, 2, 1)
-        assert not cache[0].is_contiguous()
-        assert not cache[1].is_contiguous()
+        assert isinstance(cache, tuple)
+        assert len(cache) == 2
+        key, value = cache
+        for tensor in cache:
+            assert tensor.shape == (2, 8, 2, 2)
+            assert tensor.stride() == (64, 4, 2, 1)
+            assert not tensor.is_contiguous()
+            assert tensor.untyped_storage().data_ptr() == raw_caches[layer_name].untyped_storage().data_ptr()
+        assert key.data_ptr() == raw_caches[layer_name].data_ptr()
+        assert value.data_ptr() - key.data_ptr() == 32 * key.element_size()
+        # Component writes must preserve the other component and block.
+        key[0].fill_(3)
+        value[1].fill_(5)
+        assert torch.all(key[0] == 3)
+        assert torch.all(value[1] == 5)
+        assert torch.count_nonzero(value[0]) == 0
+        assert torch.count_nonzero(key[1]) == 0
 
     def test_full_attention_allocator_selects_layout_per_backend(self):
         self._check_full_attention_allocator_selects_layout_per_backend(
@@ -3493,6 +3515,7 @@ class TestC8MXFPVScaleCacheFill(unittest.TestCase):
 
     def _runner(self, layers):
         runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.kv_cache_config = SimpleNamespace(num_blocks=self.NUM_BLOCKS)
         runner.compilation_config = SimpleNamespace(static_forward_context=layers)
         runner.vllm_config = SimpleNamespace(
             cache_config=SimpleNamespace(cache_dtype="mxfp8"),
@@ -3556,6 +3579,57 @@ class TestC8MXFPVScaleCacheFill(unittest.TestCase):
             returned["layer.0"][3][0, :, :, 0, :, 0].reshape(-1).tolist(),
             layers["layer.0"].v_cache_scale.tolist(),
         )
+
+    def test_reassigned_hybrid_page_restores_only_its_static_v_scales(self):
+        # Overlay a Mamba-like write onto the complete physical page. Static
+        # checkpoint data is no longer present when that ID becomes C8 again.
+        # Use real packet views, padding and a nonzero storage offset; verify
+        # the complete backing so K/V, K scales, guards and other pages survive.
+        for ratio in (1, 2, 4, 8):
+            with self.subTest(kernel_blocks_per_page=ratio):
+                block_size, heads, dim = 512, 2, 64
+                pitch = heads * block_size * (2 * dim + 2 * dim // 32) + 256
+                raw = torch.full((128 + self.NUM_BLOCKS * ratio * pitch + 128,), 37, dtype=torch.int8)
+                cache = mxfp_paged_cache_views(
+                    raw[128:-128],
+                    self.NUM_BLOCKS * ratio,
+                    heads,
+                    dim,
+                    dim,
+                    block_size,
+                    page_stride_bytes=pitch,
+                )
+                layer = self._c8_layer()
+                runner = self._runner({"attn": layer})
+                runner._fill_c8_mxfp_v_scale_caches({"attn": cache})
+                # Page 1 was used by a different cache group after initialization.
+                raw[128 + ratio * pitch : 128 + 2 * ratio * pitch].fill_(73)
+                before = raw.clone()
+                expected = before.clone()
+                expected_cache = mxfp_paged_cache_views(
+                    expected[128:-128],
+                    self.NUM_BLOCKS * ratio,
+                    heads,
+                    dim,
+                    dim,
+                    block_size,
+                    page_stride_bytes=pitch,
+                )
+                scales = layer.v_cache_scale.view(heads, dim // 16, 1, 16, 1)
+                expected_cache[3][ratio:].copy_(scales)
+                # No KV zeroer is installed, matching MRV1 without speculation.
+                runner._zero_block_ids([1])
+                self.assertTrue(torch.equal(raw, expected))
+                self.assertFalse(torch.equal(raw, before))
+                unchanged = raw.clone()
+                runner._zero_block_ids([])
+                self.assertTrue(torch.equal(raw, unchanged))
+
+    def test_non_c8_zeroing_still_delegates_without_scale_views(self):
+        runner = self._runner({})
+        runner._kv_block_zeroer = MagicMock()
+        runner._zero_block_ids([1])
+        runner._kv_block_zeroer.zero_block_ids.assert_called_once_with([1])
 
     def test_v1_reshape_uses_flat_kernel_size_and_physical_page_padding(self):
         runner = self._runner({})

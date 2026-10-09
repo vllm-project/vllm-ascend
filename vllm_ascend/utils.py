@@ -68,6 +68,7 @@ _CURRENT_STREAM = None
 _GLOBAL_STREAM = None
 _SHARED_EXPERTS_CALCULATION_STREAM = None
 _CP_CHUNKEDPREFILL_COMM_STREAM = None
+_CP_DECODE_COMM_STREAM = None
 _ASCEND_CUSTOMOP_IS_REIGISTERED = False
 _DEFAULT_BUFFER_SIZE = 200
 _MIN_DP_BUFFER_SIZE = 50
@@ -205,6 +206,16 @@ def model_uses_sfa_sparse(model_config: Any | None) -> bool:
         and not hasattr(hf_text_config, "compress_ratios")
         and not hasattr(hf_config, "compress_ratios")
     )
+
+
+def should_reuse_topk(config: Any, layer_id: int) -> bool:
+    """Return whether a layer reuses Top-K indices computed earlier."""
+    index_topk_pattern = getattr(config, "index_topk_pattern", None)
+    if index_topk_pattern is None:
+        index_topk_freq = getattr(config, "index_topk_freq", 1)
+        index_skip_topk_offset = getattr(config, "index_skip_topk_offset", 2)
+        return max(layer_id - index_skip_topk_offset + 1, 0) % index_topk_freq != 0
+    return 0 <= layer_id < len(index_topk_pattern) and index_topk_pattern[layer_id] == "S"
 
 
 def enable_sfa_dcp_replicated_indexer(vllm_config: VllmConfig | None = None) -> bool:
@@ -644,6 +655,13 @@ def cp_chunkedprefill_comm_stream() -> torch.npu.Stream:
     if _CP_CHUNKEDPREFILL_COMM_STREAM is None:
         _CP_CHUNKEDPREFILL_COMM_STREAM = torch_npu.npu.Stream()
     return _CP_CHUNKEDPREFILL_COMM_STREAM
+
+
+def cp_decode_comm_stream() -> torch.npu.Stream:
+    global _CP_DECODE_COMM_STREAM
+    if _CP_DECODE_COMM_STREAM is None:
+        _CP_DECODE_COMM_STREAM = torch_npu.npu.Stream()
+    return _CP_DECODE_COMM_STREAM
 
 
 def attention_calculation_stream() -> torch.npu.Stream:
@@ -1760,9 +1778,13 @@ def get_compressed_pos_and_indices(
 def kv_cache_spec_uses_sparse_sfa_c8(kv_cache_spec) -> bool:
     from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 
-    return isinstance(kv_cache_spec, AscendMLAAttentionSpec) and bool(
-        getattr(kv_cache_spec, "cache_sparse_sfa_c8", False)
-    )
+    return isinstance(kv_cache_spec, AscendMLAAttentionSpec) and bool(kv_cache_spec.cache_sparse_sfa_c8)
+
+
+def kv_cache_spec_uses_packed_sfa_main_cache(kv_cache_spec) -> bool:
+    from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+
+    return isinstance(kv_cache_spec, AscendMLAAttentionSpec) and bool(kv_cache_spec.uses_packed_sfa_main_cache)
 
 
 def is_hidden_state_cache_spec(spec) -> bool:

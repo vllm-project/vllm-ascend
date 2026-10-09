@@ -10,7 +10,7 @@ from bisect import bisect_left, bisect_right
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 
 import pytest
 import torch
@@ -216,18 +216,35 @@ def runtime(monkeypatch):
     }
     # Transport and sharding use the repository implementations, including
     # multi-dimensional residuals and zero-length token tensors.
-    transport = ast.parse((ROOT / "vllm_ascend/worker/v2/pp_utils.py").read_text())
+    transport = ast.parse((ROOT / "vllm_ascend/worker/v2/pp_transport.py").read_text())
     enum_node = next(node for node in transport.body if getattr(node, "name", None) == "PPTransportDataType")
-    exec(compile(ast.Module(body=[enum_node], type_ignores=[]), "pp_utils.py", "exec"), namespace)
+    exec(compile(ast.Module(body=[enum_node], type_ignores=[]), "pp_transport.py", "exec"), namespace)
     load_definitions(
-        "vllm_ascend/worker/v2/pp_utils.py",
+        "vllm_ascend/worker/v2/pp_transport.py",
         {
             "_get_transport_key_prefix",
             "get_pp_transport_tensors",
             "add_pp_transport_tensors",
             "add_pp_transport_buffers",
             "make_empty_intermediate_tensors",
+            "_add_aux_hidden_state_buffers",
+            "_add_topk_indices_buffer",
         },
+        namespace,
+    )
+    namespace["MappingProxyType"] = MappingProxyType
+    factories_node = next(
+        node
+        for node in transport.body
+        if isinstance(node, ast.AnnAssign) and getattr(node.target, "id", None) == "_PP_TRANSPORT_BUFFER_FACTORIES"
+    )
+    exec(
+        compile(
+            ast.Module(body=[factories_node], type_ignores=[]),
+            "pp_transport.py",
+            "exec",
+            flags=__future__.annotations.compiler_flag,
+        ),
         namespace,
     )
     namespace["make_pp_empty_intermediate_tensors"] = namespace["make_empty_intermediate_tensors"]
@@ -544,7 +561,8 @@ def test_host_positions_after_rejection_or_chunk(
             events.append("copy")
             self.num_computed_tokens_cpu.copy_(self.req_states.num_computed_tokens.gpu)
 
-    namespace = {"BaseStateRunner": BaseStateRunner}
+    namespace = {"BaseStateRunner": BaseStateRunner, "MambaHybridModelState": type("MambaHybridModelState", (), {})}
+    load_definitions("vllm_ascend/utils.py", {"is_deepseek_v41"}, namespace)
     load_definitions(
         "vllm_ascend/worker/v2/model_runner.py",
         {"NPUModelRunner"},
@@ -556,8 +574,12 @@ def test_host_positions_after_rejection_or_chunk(
     runner.speculator = object() if owns_speculator else None
     runner.use_spec_pp = use_pp and num_speculative_steps > 0 and legacy_transport
     runner.use_pp = use_pp
+    runner.is_last_pp_rank = not use_pp
+    runner.model_state = object()
     runner.num_speculative_steps = num_speculative_steps
-    runner.model_config = SimpleNamespace(architecture=architecture)
+    runner.model_config = SimpleNamespace(
+        architecture=architecture, hf_config=SimpleNamespace(architectures=[architecture])
+    )
     initialize_pp_cpu_count_sync(runner)
     runner.req_states = SimpleNamespace(
         req_id_to_index={"r": 0},

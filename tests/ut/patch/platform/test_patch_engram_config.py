@@ -29,6 +29,7 @@ def test_engram_patch_is_noop_without_upstream_config(monkeypatch):
 def engram_config():
     config_module = pytest.importorskip("vllm.config.engram")
     return SimpleNamespace(
+        use_v2_model_runner=False,
         model_config=SimpleNamespace(
             architecture="DeepseekV41ForCausalLM", hf_text_config=SimpleNamespace(engram_layer_ids=[1])
         ),

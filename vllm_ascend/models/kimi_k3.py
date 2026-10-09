@@ -86,12 +86,12 @@ from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention  # type: ignore[
 from vllm_ascend.ops.linear_op import KimiOProjMMReduceScatterOp
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
 from vllm_ascend.utils import get_rotation_path, is_950
-from vllm_ascend.worker.v2.pp_utils import (
+from vllm_ascend.worker.v2.pp_transport import (
     PPTransportDataType,
     add_pp_transport_tensors,
     get_pp_transport_tensors,
 )
-from vllm_ascend.worker.v2.pp_utils import (
+from vllm_ascend.worker.v2.pp_transport import (
     make_empty_intermediate_tensors as make_pp_empty_intermediate_tensors,
 )
 
@@ -675,11 +675,11 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
     """Kimi text model assembled from the Ascend decoder layer."""
 
     # The Ascend forward path carries cumulative auxiliary states across PP
-    # via IntermediateTensors (see pp_utils.PPTransportDataType).
+    # via IntermediateTensors (see pp_transport.PPTransportDataType).
     supports_aux_hidden_states_over_pp = True
     # Upstream's reserve_aux_intermediate_tensor_slots / relay_aux_hidden_states
     # read this via getattr to name and forward the receive-buffer aux slots;
-    # it must equal pp_utils' transport key prefix so both sides agree.
+    # it must equal pp_transport's transport key prefix so both sides agree.
     AUX_HIDDEN_STATE_KEY = "pp_transport_aux_hidden_states_"
 
     packed_modules_mapping = {

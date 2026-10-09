@@ -30,6 +30,10 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.context_parallel.common_cp import (
+    get_pcp_num_replicated_tokens,
+    is_pcp_decode_sharding_enabled,
+)
 from vllm_ascend.attention.utils import (
     MLAPO_MAX_SUPPORTED_TOKENS,
     AscendCommonAttentionMetadata,
@@ -170,8 +174,6 @@ class AscendMLAPrefillMetadata:
     cos: torch.Tensor = None
     actual_seq_lengths_q: list[int] | None = None
     pcp_local_num_input_tokens: int | None = None
-    pcp_local_prefill_start: int | None = None
-    pcp_local_prefill_end: int | None = None
 
 
 @dataclass
@@ -237,6 +239,10 @@ class AscendMLAMetadata:
     decode: AscendMLADecodeMetadata | None = None
     prefill: AscendMLAPrefillMetadata | None = None
     reshape_cache_event: torch.npu.Event = None
+    # RoPE of every rank-local input token, including padding, for the
+    # sharded-decode PCP KV gather.
+    pcp_cos: torch.Tensor | None = None
+    pcp_sin: torch.Tensor | None = None
 
     def __post_init__(self):
         pass
@@ -278,10 +284,8 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         )
         self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
         self.pcp_enabled = self.pcp_size > 1
+        self.is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(vllm_config)
         self.dcp_enabled = enable_dcp()
-        self.pcp_rank = 0
-        if self.pcp_enabled:
-            self.pcp_rank = get_pcp_group().rank_in_group
 
         scheduler_config = vllm_config.scheduler_config
 
@@ -470,7 +474,12 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
         fast_build: bool = False,
+        *,
+        pcp_context=None,
+        pcp_cache_group_idx: int | None = None,
     ) -> AscendMLAMetadata:
+        self._pcp_context = pcp_context
+        self._pcp_cache_group_idx = pcp_cache_group_idx
         expanded_slot_mapping = common_attn_metadata.slot_mapping if self.pcp_enabled else None
         num_reqs = common_attn_metadata.num_reqs
         query_start_loc = common_attn_metadata.query_start_loc
@@ -539,6 +548,12 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         if self.pcp_enabled:
             assert expanded_slot_mapping is not None
             self._finalize_pcp_metadata(metadata, expanded_slot_mapping)
+            if self.is_pcp_decode_sharded:
+                # Decode rows lead the local positions, so a decode-only batch
+                # can refresh the graph-stable RoPE buffer that decode uses.
+                metadata.pcp_cos, metadata.pcp_sin = get_cos_and_sin_mla(
+                    common_attn_metadata.positions.long(), use_cache=self.num_prefills == 0
+                )
         return metadata
 
     def _finalize_pcp_metadata(
@@ -559,17 +574,11 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
                 f"{metadata.num_actual_tokens} > {local_num_input_tokens}."
             )
 
-        local_prefill_capacity = local_num_input_tokens - metadata.num_decode_tokens
         metadata.slot_mapping = expanded_slot_mapping
         if metadata.num_prefills > 0:
             prefill_metadata = metadata.prefill
             assert prefill_metadata is not None
             prefill_metadata.pcp_local_num_input_tokens = local_num_input_tokens
-            local_prefill_start = self.pcp_rank * local_prefill_capacity
-            prefill_metadata.pcp_local_prefill_start = local_prefill_start
-            prefill_metadata.pcp_local_prefill_end = (
-                local_prefill_start + metadata.num_actual_tokens - metadata.num_decode_tokens
-            )
             # PCP partitions prefill tokens into rank-local chunks, including
             # continued prefills whose uncached suffix contains only one token.
             # Keep decode-only batches on their graph path, but route every batch
@@ -580,6 +589,9 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         self,
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
+        *,
+        chunk_plan_lens_cpu: torch.Tensor | None = None,
+        chunk_workspace_size: int | None = None,
     ):
         if not self.chunked_prefill_enabled:
             return None
@@ -589,14 +601,25 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         reqs_start = self.num_decodes  # prefill_start
 
         self.context_lens_cpu = num_computed_tokens_cpu[reqs_start:num_reqs]
-        max_context_len_cpu = self.context_lens_cpu.max().item()
+        # PCP-local fragments already carry their own computed lengths. A shared
+        # plan changes only the workspace budget and the number of iterations.
+        chunk_plan_lens = self.context_lens_cpu if chunk_plan_lens_cpu is None else chunk_plan_lens_cpu
+        max_context_len_cpu = chunk_plan_lens.max().item()
         if not max_context_len_cpu > 0:
             return None
-        num_prefills_with_context_cpu = (self.context_lens_cpu > 0).sum().item()
-        self.max_context_chunk = self.chunked_prefill_workspace_size // num_prefills_with_context_cpu
+        num_prefills_with_context_cpu = (chunk_plan_lens > 0).sum().item()
+        workspace_size = self.chunked_prefill_workspace_size if chunk_workspace_size is None else chunk_workspace_size
+        self.max_context_chunk = workspace_size // num_prefills_with_context_cpu
         self.max_context_chunk = round_down(self.max_context_chunk, self.block_size)
 
-        assert self.max_context_chunk > 0
+        if self.max_context_chunk <= 0:
+            raise ValueError(
+                "MLA chunked prefill workspace is too small for one aligned chunk per request: "
+                f"workspace_size={workspace_size}, "
+                f"num_prefills_with_context={num_prefills_with_context_cpu}, "
+                f"block_size={self.block_size}, "
+                f"minimum_workspace_size={num_prefills_with_context_cpu * self.block_size}."
+            )
         self.num_chunks = cdiv(max_context_len_cpu, self.max_context_chunk)
         chunk_starts = (
             torch.arange(self.num_chunks, dtype=torch.int32).unsqueeze(1).expand(-1, self.num_prefills)
@@ -759,13 +782,23 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         )
         return decode_metadata
 
-    def build_for_cudagraph_capture(self, common_attn_metadata: AscendCommonAttentionMetadata):
+    def build_for_cudagraph_capture(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        **kwargs: Any,
+    ):
+        # Preserve upstream decode-only validation while forwarding PCP inputs.
+        assert common_attn_metadata.num_reqs <= (
+            common_attn_metadata.num_actual_tokens * self.reorder_batch_threshold
+        ), "MLA only supports decode-only full CUDAGraph capture."
+        assert common_attn_metadata.max_query_len <= self.reorder_batch_threshold
         capture_metadata = copy(common_attn_metadata)
         if capture_metadata.attn_state is None:
             capture_metadata.attn_state = AscendAttentionState.ChunkedPrefill
         if self.dcp_enabled and capture_metadata.is_prefilling is None:
             capture_metadata.is_prefilling = torch.zeros(capture_metadata.num_reqs, dtype=torch.bool)
-        return super().build_for_cudagraph_capture(capture_metadata)
+        # Keep backend-specific PCP context on the same build path as replay.
+        return self.build(0, capture_metadata, **kwargs)
 
     def build_for_graph_capture(
         self,
@@ -861,6 +894,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.use_mla_rope = kwargs.get("use_mla_rope", True)
         self.vllm_config = get_current_vllm_config()
         self.pcp_enabled = self.vllm_config.parallel_config.prefill_context_parallel_size > 1
+        self.is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(self.vllm_config)
         self.kv_a_proj_with_mqa = kwargs.get("kv_a_proj_with_mqa")
         self.kv_a_layernorm = kwargs.get("kv_a_layernorm")
         self.q_a_layernorm = kwargs.get("q_a_layernorm")
@@ -1208,6 +1242,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             and self.enable_mlapo
             # DCP causal decode needs the unfused projections for current KV.
             and not enable_dcp()
+            # Sharded PCP uses the unfused projections to gather current KV.
+            and not self.is_pcp_decode_sharded
             and self.vllm_config.kv_transfer_config is not None
             and self.vllm_config.kv_transfer_config.is_kv_consumer
             and self.vllm_config.scheduler_config.max_num_batched_tokens <= MLAPO_MAX_SUPPORTED_TOKENS
@@ -1220,6 +1256,11 @@ class AscendMLAImpl(MLAAttentionImpl):
             self.q_proj.deq_scale = None
             self.q_proj.quant_bias = None
             torch.npu.empty_cache()
+
+    def get_context_block_table(self, attn_metadata: AscendMLAMetadata) -> torch.Tensor:
+        """Return the local request table for prefill KV loading."""
+        assert attn_metadata.prefill is not None
+        return attn_metadata.prefill.block_table
 
     def get_context_seq_len_npu(self, index: int, attn_metadata: AscendMLAMetadata):
         prefill_metadata = attn_metadata.prefill
@@ -1255,6 +1296,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         if prefill_metadata is None or prefill_metadata.chunked_context is None:
             return prefix_output, prefix_lse
 
+        context_table = self.get_context_block_table(attn_metadata)
+        current_attn_result = prefix_output, prefix_lse
         iters = len(prefill_metadata.chunked_context.seq_tot)
         cache_kv_c = kv_c_and_k_pe_cache[0]
         cache_k_pe = kv_c_and_k_pe_cache[1]
@@ -1311,7 +1354,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             DeviceOperator.kv_cache_load(
                 cache_kv_c,
                 pe_cache,
-                prefill_metadata.block_table,
+                context_table,
                 context_seq_len_npu,
                 prefill_metadata.chunked_context.starts[i],
                 key=kv_c_normed,
@@ -1326,6 +1369,8 @@ class AscendMLAImpl(MLAAttentionImpl):
                 chunk_idx=i,
                 toks=toks,
             )
+            if kv_c_normed.numel() == 0:
+                continue
             kv_c_normed = kv_c_normed.squeeze()
             if self.fa_quant_layer and self.support_fp8_attention:
                 kv_c_normed = torch.mul(kv_c_normed.to(self.fak_descale_float.dtype), self.fak_descale_float).to(
@@ -1361,6 +1406,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             out_list.append(chunk_out.reshape(num_tokens * H, D))
             lse_list.append(chunk_lse.reshape(num_tokens * H))
 
+        if len(out_list) == 1:
+            return current_attn_result
         output_final, _ = torch_npu.npu_attention_update(tuple(lse_list), tuple(out_list), 0)
         return output_final.view(num_tokens, H, D), None
 
@@ -1468,7 +1515,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         )
         return k_pe, kv_c_normed
 
-    def _exec_kv_mla_nope(self, kv_no_split, kv_cache, slots, is_prefill: bool):
+    def _exec_kv_mla_nope(self, kv_no_split, kv_cache, slots, is_prefill: bool, skip_padding_slots: bool = False):
         # GLM MLA-NoPE: qk_rope_head_dim==0. KvRmsNormRopeCache rejects empty cos.
         B, N, S, _ = kv_no_split.shape
         assert self.kv_a_layernorm is not None
@@ -1482,6 +1529,11 @@ class AscendMLAImpl(MLAAttentionImpl):
         cache = kv_cache[0]
         idx = slots.to(torch.int64)
         token = k_nope.reshape(-1, cache.shape[-1]).to(cache.dtype)
+        if skip_padding_slots:
+            # Unlike reshape_and_cache, these writes do not skip slot -1; it
+            # addresses the last cache entry. Boolean masking is eager-only.
+            valid = idx >= 0
+            idx, token = idx[valid], token[valid]
         if cache.is_contiguous():
             cache.view(-1, cache.shape[-1]).index_copy_(0, idx, token)
         else:
@@ -1551,74 +1603,78 @@ class AscendMLAImpl(MLAAttentionImpl):
         *,
         attn_metadata: AscendMLAMetadata | None = None,
     ):
-        if not self.use_mla_rope:
-            return self._exec_kv_no_rope(kv_no_split, kv_cache, slots)
-
-        pcp_prefill_range = None
+        pcp_local_range = None
         if self.pcp_enabled:
             assert attn_metadata is not None
-            prefill_metadata = attn_metadata.prefill
-            assert prefill_metadata is not None
-            local_num_input_tokens = prefill_metadata.pcp_local_num_input_tokens
-            local_prefill_start = prefill_metadata.pcp_local_prefill_start
-            local_prefill_end = prefill_metadata.pcp_local_prefill_end
-            assert (
-                local_num_input_tokens is not None and local_prefill_start is not None and local_prefill_end is not None
-            ), "PCP MLA metadata must be finalized before execution."
-
-            num_decode_tokens = attn_metadata.num_decode_tokens
-            local_prefill_capacity = local_num_input_tokens - num_decode_tokens
-            if not (kv_no_split.shape[0] == cos.shape[0] == sin.shape[0] == local_prefill_capacity):
+            # Gather before any RoPE-specific writer. use_mla_rope=False used
+            # to return first and store rank-local KV with the expanded slots.
+            # Inputs cover this rank's padded tokens after its replicated rows
+            # (none when decode is sharded); every rank writes the same
+            # gathered KV to its cache.
+            pcp_group = get_pcp_group()
+            local_num_input_tokens = attn_metadata.slot_mapping.numel() // pcp_group.world_size
+            num_replicated_tokens = get_pcp_num_replicated_tokens(
+                attn_metadata.num_decode_tokens, self.is_pcp_decode_sharded
+            )
+            local_capacity = local_num_input_tokens - num_replicated_tokens
+            if (
+                cos is None
+                or sin is None
+                or not (kv_no_split.shape[0] == cos.shape[0] == sin.shape[0] == local_capacity)
+            ):
                 raise RuntimeError(
-                    "PCP MLA prefill input length mismatch: "
-                    f"kv={kv_no_split.shape[0]}, cos={cos.shape[0]}, "
-                    f"sin={sin.shape[0]}, expected={local_prefill_capacity}."
+                    "PCP MLA KV input length mismatch: "
+                    f"kv={kv_no_split.shape[0]}, "
+                    f"cos={None if cos is None else cos.shape[0]}, "
+                    f"sin={None if sin is None else sin.shape[0]}, "
+                    f"expected={local_capacity}."
                 )
 
-            pcp_group = get_pcp_group()
-            rank_slot_mappings = attn_metadata.slot_mapping.view(
-                pcp_group.world_size,
-                local_num_input_tokens,
-            )
-            # Remove the decoding area and flatten it.
-            expanded_prefill_slots = rank_slot_mappings[:, num_decode_tokens:].flatten()
+            rank_slot_mappings = attn_metadata.slot_mapping.view(pcp_group.world_size, local_num_input_tokens)
             (kv_no_split, cos, sin), slots = _gather_prefill_cache_inputs(
                 (kv_no_split, cos, sin),
-                expanded_prefill_slots,
+                rank_slot_mappings[:, num_replicated_tokens:].flatten(),
                 num_decode_tokens=0,
             )
-            pcp_prefill_range = (local_prefill_start, local_prefill_end)
+            local_start = pcp_group.rank_in_group * local_capacity
+            pcp_local_range = (local_start, local_start + attn_metadata.num_actual_tokens - num_replicated_tokens)
 
-        assert self.kv_a_layernorm is not None
-        B = kv_no_split.shape[0]
-        N = self.num_kv_heads
-        S = 1
-        # npu_kv_rmsnorm_rope_cache needs [B, N, S, D]
-        kv_no_split = kv_no_split.view(B, N, S, self.kv_lora_rank + self.qk_rope_head_dim)
-        if self.qk_rope_head_dim == 0:
-            k_pe, k_nope = self._exec_kv_mla_nope(kv_no_split, kv_cache, slots, is_prefill=True)
+        if not self.use_mla_rope:
+            k_pe, k_nope = self._exec_kv_no_rope(kv_no_split, kv_cache, slots)
         else:
-            cache_mode = "PA"
-            c_kv_scale = None
-            if self.support_fp8_attention and self.fa_quant_layer:
-                c_kv_scale = self.fak_descale_reciprocal
-            _, _, k_pe, k_nope = torch_npu.npu_kv_rmsnorm_rope_cache(
-                kv_no_split,
-                self.kv_a_layernorm.weight,  # type: ignore[union-attr]
-                cos,
-                sin,
-                slots.to(torch.int64),
-                kv_cache[1],
-                kv_cache[0],
-                c_kv_scale=c_kv_scale,
-                epsilon=self.kv_a_layernorm.variance_epsilon,  # type: ignore[union-attr]
-                cache_mode=cache_mode,
-                is_output_kv=True,
-            )
-        if pcp_prefill_range is not None:
+            assert self.kv_a_layernorm is not None
+            B = kv_no_split.shape[0]
+            N = self.num_kv_heads
+            S = 1
+            # npu_kv_rmsnorm_rope_cache needs [B, N, S, D]
+            kv_no_split = kv_no_split.view(B, N, S, self.kv_lora_rank + self.qk_rope_head_dim)
+            if self.qk_rope_head_dim == 0:
+                # The PCP gather carries rank padding with slot -1.
+                k_pe, k_nope = self._exec_kv_mla_nope(
+                    kv_no_split, kv_cache, slots, is_prefill=True, skip_padding_slots=self.pcp_enabled
+                )
+            else:
+                cache_mode = "PA"
+                c_kv_scale = None
+                if self.support_fp8_attention and self.fa_quant_layer:
+                    c_kv_scale = self.fak_descale_reciprocal
+                _, _, k_pe, k_nope = torch_npu.npu_kv_rmsnorm_rope_cache(
+                    kv_no_split,
+                    self.kv_a_layernorm.weight,  # type: ignore[union-attr]
+                    cos,
+                    sin,
+                    slots.to(torch.int64),
+                    kv_cache[1],
+                    kv_cache[0],
+                    c_kv_scale=c_kv_scale,
+                    epsilon=self.kv_a_layernorm.variance_epsilon,  # type: ignore[union-attr]
+                    cache_mode=cache_mode,
+                    is_output_kv=True,
+                )
+        if pcp_local_range is not None:
             # Due to the fused RMSNorm/RoPE/cache operator, KV normalization is
             # repeated after gather; trim outputs back to this rank's real range.
-            local_start, local_end = pcp_prefill_range
+            local_start, local_end = pcp_local_range
             k_pe = k_pe[local_start:local_end]
             k_nope = k_nope[local_start:local_end]
         return k_pe, k_nope
@@ -2028,7 +2084,9 @@ class AscendMLAImpl(MLAAttentionImpl):
             return local_num_input_tokens - attn_metadata.num_decode_tokens
         return attn_metadata.num_actual_tokens - attn_metadata.num_decode_tokens
 
-    def mla_preprocess_prefill(self, q_c, kv_no_split, kv_cache, attn_metadata):
+    def mla_preprocess_prefill(self, q_c, kv_no_split, kv_cache, attn_metadata, written_kv=None):
+        """``written_kv`` holds normalized (k_pe, k_nope) of every local token
+        when the caller has already written this step's KV cache."""
         num_decode_tokens = attn_metadata.num_decode_tokens
         num_actual_tokens = attn_metadata.num_actual_tokens
         num_actual_prefill_tokens = num_actual_tokens - num_decode_tokens
@@ -2046,24 +2104,29 @@ class AscendMLAImpl(MLAAttentionImpl):
             cos[:num_actual_prefill_tokens] if cos is not None else None,
             sin[:num_actual_prefill_tokens] if sin is not None else None,
         )
-        prefill_k_pe, prefill_k_c_normed = self.exec_kv_prefill(
-            prefill_kv_no_split,
-            cos[:num_prefill_kv_tokens] if cos is not None else None,
-            sin[:num_prefill_kv_tokens] if sin is not None else None,
-            kv_cache,
-            prefill_slots,
-            attn_metadata=attn_metadata,
-        )
+        if written_kv is None:
+            prefill_k_pe, prefill_k_c_normed = self.exec_kv_prefill(
+                prefill_kv_no_split,
+                cos[:num_prefill_kv_tokens] if cos is not None else None,
+                sin[:num_prefill_kv_tokens] if sin is not None else None,
+                kv_cache,
+                prefill_slots,
+                attn_metadata=attn_metadata,
+            )
+        else:
+            prefill_k_pe, prefill_k_c_normed = (kv[num_decode_tokens:num_actual_tokens] for kv in written_kv)
         prefill_k_nope, prefill_value = (
             self.kv_b_proj(prefill_k_c_normed)[0]
             .view(-1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
             .split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
         )
-        prefill_k_pe = prefill_k_pe.view(prefill_q_c.shape[0], self.num_kv_heads, -1)
+        prefill_k_pe = prefill_k_pe.view(prefill_q_c.shape[0], self.num_kv_heads, self.qk_rope_head_dim)
         prefill_k_pe = prefill_k_pe.expand((*prefill_k_nope.shape[:-1], -1))
         return PrefillMLAPreprocessResult(prefill_q_nope, prefill_q_pe, prefill_k_nope, prefill_k_pe, prefill_value)
 
-    def mla_preprocess_decode(self, q_c, kv_no_split, kv_cache, attn_metadata):
+    def mla_preprocess_decode(self, q_c, kv_no_split, kv_cache, attn_metadata, written_kv=None):
+        """``written_kv`` holds normalized (k_pe, k_nope) of every local token
+        when the caller has already written this step's KV cache."""
         num_decode_tokens = attn_metadata.num_decode_tokens
         decode_q_c = q_c[:num_decode_tokens]
         cos = attn_metadata.decode.cos
@@ -2083,14 +2146,17 @@ class AscendMLAImpl(MLAAttentionImpl):
         decode_slots = attn_metadata.slot_mapping[:num_decode_tokens:1]
         decode_kv_no_split = kv_no_split[:num_decode_tokens]
         return_current_kv = self._decode_requires_current_kv(attn_metadata)
-        kv_result = self.exec_kv_decode(
-            decode_kv_no_split,
-            cos,
-            sin,
-            kv_cache,
-            decode_slots,
-            return_current_kv=return_current_kv,
-        )
+        if written_kv is None:
+            kv_result = self.exec_kv_decode(
+                decode_kv_no_split,
+                cos,
+                sin,
+                kv_cache,
+                decode_slots,
+                return_current_kv=return_current_kv,
+            )
+        else:
+            kv_result = (kv_cache[1], kv_cache[0], *(kv[:num_decode_tokens] for kv in written_kv))
         decode_k_pe, decode_k_nope = kv_result[:2]
         current_k_pe, current_k_nope = kv_result[2:] if return_current_kv else (None, None)
         return DecodeMLAPreprocessResult(
@@ -2112,8 +2178,11 @@ class AscendMLAImpl(MLAAttentionImpl):
         # decode_ql_nope, decode_q_pe, decode_k_pe, decode_k_nope
         # 3. Preprocess prefill tokens, write kv cache and get:
         # prefill_q_nope, prefill_q_pe, prefill_k_nope, prefill_k_pe, prefill_value
-        has_decode = attn_metadata.num_decodes > 0
-        has_prefill = attn_metadata.num_prefills > 0
+        # A sharded-decode PCP rank can own no request; its placeholder request
+        # has no query tokens.
+        has_local_query = attn_metadata.num_actual_tokens > 0
+        has_decode = has_local_query and attn_metadata.num_decodes > 0
+        has_prefill = has_local_query and attn_metadata.num_prefills > 0
         if self.fused_qkv_a_proj is not None:
             qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
             q_c, kv_no_split = qkv_lora.split(
@@ -2128,18 +2197,32 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         decode_preprocess_res = None
         prefill_preprocess_res = None
+        # Sharded decode writes other ranks' KV even without local queries.
+        should_write_kv_cache = has_decode or has_prefill or self.is_pcp_decode_sharded
         if has_prefill:
             wait_for_kv_layer_from_connector(layer_name)
-        if self.layerwise_kv_cache_hook is not None and (has_decode or has_prefill):
+        if self.layerwise_kv_cache_hook is not None and should_write_kv_cache:
             # Q/KV projections above overlap the full-layer KV cache broadcast.
             # Wait for the broadcast before reading or updating the cache.
             self.layerwise_kv_cache_hook.wait_for_layer(layer_name)
+        written_kv = None
+        if self.is_pcp_decode_sharded:
+            # No local token is replicated, so decode and prefill rows share
+            # one PCP gather and cache write.
+            written_kv = self.exec_kv_prefill(
+                kv_no_split,
+                attn_metadata.pcp_cos,
+                attn_metadata.pcp_sin,
+                kv_cache,
+                attn_metadata.slot_mapping,
+                attn_metadata=attn_metadata,
+            )
         # Preprocess for decode tokens
         if has_decode:
-            decode_preprocess_res = self.mla_preprocess_decode(q_c, kv_no_split, kv_cache, attn_metadata)
+            decode_preprocess_res = self.mla_preprocess_decode(q_c, kv_no_split, kv_cache, attn_metadata, written_kv)
         # Preprocess for prefill tokens
         if has_prefill:
-            prefill_preprocess_res = self.mla_preprocess_prefill(q_c, kv_no_split, kv_cache, attn_metadata)
+            prefill_preprocess_res = self.mla_preprocess_prefill(q_c, kv_no_split, kv_cache, attn_metadata, written_kv)
         # Let the connector record any sync primitive it needs once the paged KV
         # cache for this layer has been written. No-op for connectors that don't
         # implement on_kv_cache_written; the decision to actually transfer is made
@@ -2213,6 +2296,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         if (
             (self.fa_quant_layer or self.enable_mlapo)
             and (not requires_current_kv or can_use_dcp_prolog)
+            # The fused prolog writes only local KV, while sharded decode must gather it.
+            and not self.is_pcp_decode_sharded
             and attn_metadata.num_decode_tokens <= MLAPO_MAX_SUPPORTED_TOKENS
             and attn_metadata.num_prefills == 0
         ):

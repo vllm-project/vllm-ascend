@@ -179,11 +179,16 @@ class ModelAclGraphManager(ModelCudaGraphManager):
             attn_backend = _get_graph_update_backend(self.model_runner.attn_groups)
         attn_metadata = self.model_runner.model_state.attn_metadata
 
-        if use_updatable_graph(attn_backend):
-            return self._updatable_graph_replay(desc, attn_metadata)
-        else:
-            # This will be removed once the refactoring is fully complete.
-            return self._graph_relay(attn_backend, desc, num_tokens, attn_metadata)
+        metadata = getattr(self.model_runner.model_state, "device_metadata", None)
+        try:
+            if use_updatable_graph(attn_backend):
+                return self._updatable_graph_replay(desc, attn_metadata)
+            else:
+                # This will be removed once the refactoring is fully complete.
+                return self._graph_relay(attn_backend, desc, num_tokens, attn_metadata)
+        finally:
+            if metadata is not None:
+                metadata.finish_replay()
 
     def _graph_relay(self, attn_backend, desc, num_tokens, attn_metadata):
         self.update_stream.wait_stream(torch.npu.current_stream())
@@ -249,28 +254,34 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         pcp_manager: Any = None,
     ) -> None:
         """Capture CUDA graphs for model forward pass."""
-        model = ModelWithContext(model)
+        metadata = getattr(model_state, "device_metadata", None)
+        model = ModelWithContext(model, device_metadata=metadata)
         pcp_manager = getattr(self.model_runner, "pcp_manager", None)
         if pcp_manager is not None:
             cudagraph_utils.prepare_inputs_to_capture = partial(
                 _prepare_pcp_inputs_to_capture,
                 pcp_manager=pcp_manager,
             )
-        with communicator_switch():
-            return super().capture(
-                model,
-                model_state,
-                input_buffers,
-                intermediate_tensors,
-                block_tables,
-                attn_groups,
-                kv_cache_config,
-                pcp_manager=pcp_manager,
-                has_lora=has_lora,
-                use_aux_hidden_state_outputs=use_aux_hidden_state_outputs,
-                lora_capture_hook=lora_capture_hook,
-                progress_bar_desc=progress_bar_desc,
-            )
+        try:
+            with communicator_switch():
+                return super().capture(
+                    model,
+                    model_state,
+                    input_buffers,
+                    intermediate_tensors,
+                    block_tables,
+                    attn_groups,
+                    kv_cache_config,
+                    pcp_manager=pcp_manager,
+                    has_lora=has_lora,
+                    use_aux_hidden_state_outputs=use_aux_hidden_state_outputs,
+                    lora_capture_hook=lora_capture_hook,
+                    progress_bar_desc=progress_bar_desc,
+                )
+        finally:
+            # Input preparation can fail before ModelWithContext.forward runs.
+            if metadata is not None:
+                metadata.finish()
 
 
 class ModelWithContext(nn.Module):
@@ -278,11 +289,12 @@ class ModelWithContext(nn.Module):
     so we can inherit vllm's CudaGraphManager._capture_full_graph.
     """
 
-    def __init__(self, original_model, is_draft_model=False, is_draft_model_prefill=False):
+    def __init__(self, original_model, is_draft_model=False, is_draft_model_prefill=False, device_metadata=None):
         super().__init__()
         self.original_model = original_model
         self.is_draft_model = is_draft_model
         self.is_draft_model_prefill = is_draft_model_prefill
+        self.device_metadata = device_metadata
 
     def forward(self, *args, **kwargs):
         forward_context = get_forward_context()
@@ -297,7 +309,16 @@ class ModelWithContext(nn.Module):
         if self.is_draft_model_prefill:
             _EXTRA_CTX.is_draft_model_prefill = True
 
-        return self.original_model(*args, **kwargs)
+        try:
+            if self.device_metadata is not None:
+                self.device_metadata.begin_forward()
+            return self.original_model(*args, **kwargs)
+        finally:
+            # Warmup and actual capture receive separate prepare_attn calls.
+            # Retire each submission, including unused producers, after its
+            # consumers; do not wait for metadata at graph entry.
+            if self.device_metadata is not None:
+                self.device_metadata.finish()
 
     def get_original_model(self):
         return self.original_model

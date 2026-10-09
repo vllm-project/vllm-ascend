@@ -25,6 +25,7 @@
 #include <torch_npu/csrc/core/npu/NPUStream.h>
 #include <torch_npu/csrc/framework/OpCommand.h>
 #include <torch_npu/csrc/framework/utils/OpPreparation.h>
+#include <torch_npu/csrc/aten/common/from_blob.h>
 #include "torch_npu/csrc/core/npu/NPUGuard.h"
 #include <torch_npu/csrc/npu/Module.h>
 #include "ops.h"
@@ -41,6 +42,7 @@
 #include "moe/moe_gating_top_k/moe_gating_top_k_torch_adpt.h"
 #include "attention/sparse_flash_attention/sparse_flash_attention_torch_adpt.h"
 #include "attention/sparse_flash_mla/sparse_flash_mla_torch_adpt.h"
+#include "attention/kv_compress_epilog_v2/kv_compress_epilog_v2_torch_adpt.h"
 #include "attention/quant_lightning_indexer_v2/quant_lightning_indexer_v2_torch_adpt.h"
 #include "attention/kv_quant_sparse_flash_attention_vllm/kv_quant_sparse_flash_attention_vllm_torch_adpt.h"
 #include "attention/fused_sparse_attention_overlap/fused_sparse_attention_overlap_torch_adpt.h"
@@ -50,7 +52,7 @@
 #include "attention/fused_quant_lightning_indexer_manage/fused_quant_lightning_indexer_manage_torch_adpt.h"
 #include "moe/causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
 #include "attention/attn_res_fwd/attn_res_fwd_torch_adpt.h"
-#include "attention/kda_gate_cumsum/kda_gate_cumsum_torch_adpt.h"
+#include "attention/kda_gate_cumsum_vllm/kda_gate_cumsum_vllm_torch_adpt.h"
 #include "attention/kda_layout_swap12/kda_layout_swap12_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
 #include "attention/k2q_csr/k2q_csr_torch_adpt.h"
@@ -83,6 +85,40 @@
 #include <vector>
 
 namespace vllm_ascend {
+
+c10::optional<at::Tensor> get_npu_view_from_cpu_tensor(const at::Tensor& cpu_tensor)
+{
+    TORCH_CHECK(cpu_tensor.defined(), "UVA view requires a defined CPU tensor");
+    TORCH_CHECK(cpu_tensor.device().is_cpu(), "UVA view requires a CPU tensor");
+    TORCH_CHECK(cpu_tensor.layout() == at::kStrided, "UVA view requires strided layout");
+
+    const c10::Device npu_device(c10::DeviceType::PrivateUse1, c10_npu::current_device());
+    const auto options = at::TensorOptions().dtype(cpu_tensor.scalar_type()).device(npu_device);
+    if (cpu_tensor.numel() == 0) {
+        return at::empty_strided(cpu_tensor.sizes(), cpu_tensor.strides(), options);
+    }
+
+    if (!cpu_tensor.is_pinned()) {
+        return c10::nullopt;
+    }
+    // Query the registered storage base, then apply the logical tensor offset.
+    // torch_npu's host allocator remains the sole register/unregister owner.
+    const auto* host_base = cpu_tensor.storage().data_ptr().get();
+    if (host_base == nullptr) {
+        return c10::nullopt;
+    }
+    c10_npu::NPUGuard guard(npu_device);
+    void* mapped_base = nullptr;
+    const aclError ret = aclrtHostGetDevicePointer(const_cast<void*>(host_base), &mapped_base, 0);
+    if (ret != ACL_SUCCESS || mapped_base == nullptr) {
+        return c10::nullopt;
+    }
+    auto* mapped_data = static_cast<char*>(mapped_base) +
+                        cpu_tensor.storage_offset() * cpu_tensor.element_size();
+    auto keep_cpu_alive = [base = cpu_tensor](void*) mutable {};
+    return at_npu::native::from_blob(mapped_data, cpu_tensor.sizes(), cpu_tensor.strides(),
+                                     0, keep_cpu_alive, options, npu_device);
+}
 
 // user_device_id is the ordinal passed to torch.npu.set_device/aclrtSetDevice,
 // not a vLLM local rank or an ASCEND_RT_VISIBLE_DEVICES entry.
@@ -1943,7 +1979,7 @@ void npu_scatter_nd_update_sk(
     return;
 }
 
-std::tuple<at::Tensor, at::Tensor, at::Tensor> chunk_gated_delta_rule_fwd_h(
+std::tuple<at::Tensor, at::Tensor, at::Tensor> chunk_gated_delta_rule_fwd_h_vllm(
     const at::Tensor & k,
     const at::Tensor & w,
     const at::Tensor & u,
@@ -1996,7 +2032,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> chunk_gated_delta_rule_fwd_h(
     bool transpose_state_layout_ = transpose_state_layout.value_or(false);
 
     EXEC_NPU_CMD(
-        aclnnChunkGatedDeltaRuleFwdH,
+        aclnnChunkGatedDeltaRuleFwdHVllm,
         k, w, u, g_,
         gk_, initial_state_, output_final_state_, chunk_size_, save_new_value_,
         cu_seqlens, chunk_indices, use_exp2_, transpose_state_layout_,
@@ -2776,6 +2812,9 @@ at::Tensor restore_tensor(uintptr_t ptr_val, const std::vector<int64_t>& shape,
 // Pybind on Ascend 310P
 TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 {
+    ops.def("get_npu_view_from_cpu_tensor(Tensor cpu_tensor) -> Tensor?");
+    ops.impl("get_npu_view_from_cpu_tensor", c10::DispatchKey::CompositeExplicitAutograd,
+             &vllm_ascend::get_npu_view_from_cpu_tensor);
     ops.def("get_physical_device_id(int user_device_id) -> int");
     ops.impl("get_physical_device_id", c10::DispatchKey::CompositeExplicitAutograd,
              &vllm_ascend::get_physical_device_id);
@@ -2808,9 +2847,9 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("npu_recurrent_gated_delta_rule_310", torch::kPrivateUse1, &vllm_ascend::npu_recurrent_gated_delta_rule_310);
 
     ops.def(
-        "chunk_gated_delta_rule_fwd_h(Tensor k, Tensor w, Tensor u, Tensor? g=None, *, Tensor? gk=None, Tensor? initial_state=None, bool? output_final_state=False, int? chunk_size=None, bool? save_new_value=True, int[]? cu_seqlens=None, int[]? chunk_indices=None, bool? use_exp2=False, bool? transpose_state_layout=False) -> (Tensor h_out, Tensor v_new_out, Tensor final_state_out)"
+        "chunk_gated_delta_rule_fwd_h_vllm(Tensor k, Tensor w, Tensor u, Tensor? g=None, *, Tensor? gk=None, Tensor? initial_state=None, bool? output_final_state=False, int? chunk_size=None, bool? save_new_value=True, int[]? cu_seqlens=None, int[]? chunk_indices=None, bool? use_exp2=False, bool? transpose_state_layout=False) -> (Tensor h_out, Tensor v_new_out, Tensor final_state_out)"
     );
-    ops.impl("chunk_gated_delta_rule_fwd_h", torch::kPrivateUse1, &vllm_ascend::chunk_gated_delta_rule_fwd_h);
+    ops.impl("chunk_gated_delta_rule_fwd_h_vllm", torch::kPrivateUse1, &vllm_ascend::chunk_gated_delta_rule_fwd_h_vllm);
 
     ops.def(
         "chunk_fwd_o_vllm(Tensor q, Tensor k, Tensor v, Tensor h, float scale, *, Tensor? g=None, Tensor? g_gamma=None, int[]? cu_seqlens=None, int[]? chunk_indices=None, int? chunk_size=None, bool? transpose_state_layout=False) -> Tensor"
@@ -2818,9 +2857,9 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("chunk_fwd_o_vllm", torch::kPrivateUse1, &vllm_ascend::chunk_fwd_o_vllm);
 
     ops.def(
-        "kda_gate_cumsum(Tensor g, int chunk_size, *, Tensor? A_log=None, Tensor? dt_bias=None, int[]? cu_seqlens=None, bool? use_gate_in_kernel=False, bool? safe_gate=False, float? lower_bound=-5.0, str layout=\"BSND\") -> Tensor"
+        "kda_gate_cumsum_vllm(Tensor g, int chunk_size, *, Tensor? A_log=None, Tensor? dt_bias=None, int[]? cu_seqlens=None, bool? use_gate_in_kernel=False, bool? safe_gate=False, float? lower_bound=-5.0, str layout=\"BSND\") -> Tensor"
     );
-    ops.impl("kda_gate_cumsum", torch::kPrivateUse1, &vllm_ascend::kda_gate_cumsum);
+    ops.impl("kda_gate_cumsum_vllm", torch::kPrivateUse1, &vllm_ascend::kda_gate_cumsum_vllm);
 
     ops.def(
         "kda_layout_swap12(Tensor x, *, Tensor? dependency=None) -> Tensor"
@@ -2831,6 +2870,9 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 // Pybind on other platform
 TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 {
+    ops.def("get_npu_view_from_cpu_tensor(Tensor cpu_tensor) -> Tensor?");
+    ops.impl("get_npu_view_from_cpu_tensor", c10::DispatchKey::CompositeExplicitAutograd,
+             &vllm_ascend::get_npu_view_from_cpu_tensor);
     ops.def("get_physical_device_id(int user_device_id) -> int");
     ops.impl("get_physical_device_id", c10::DispatchKey::CompositeExplicitAutograd,
              &vllm_ascend::get_physical_device_id);
@@ -3441,6 +3483,14 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("kv_compress_epilog", torch::kPrivateUse1, &vllm_ascend::kv_compress_epilog_npu);
 
     ops.def(
+        "kv_compress_epilog_v2(Tensor(a!) cache, Tensor x, Tensor slot_mapping, *, "
+        "int quant_group_size=32, str quant_mode='mxfp8_bf16', "
+        "bool round_scale=True, float x_scale=1.0) -> ()"
+    );
+    ops.impl("kv_compress_epilog_v2", torch::kPrivateUse1,
+             &vllm_ascend::kv_compress_v2::KvCompressEpilogV2Npu);
+
+    ops.def(
         "npu_kv_quant_sparse_attn_sharedkv("
             "Tensor q, "
             "int kv_quant_mode, "
@@ -3566,9 +3616,9 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("npu_lightning_indexer_quant", torch::kPrivateUse1, &vllm_ascend::npu_lightning_indexer_quant);
 
     ops.def(
-        "chunk_gated_delta_rule_fwd_h(Tensor k, Tensor w, Tensor u, Tensor? g=None, *, Tensor? gk=None, Tensor? initial_state=None, bool? output_final_state=False, int? chunk_size=None, bool? save_new_value=True, int[]? cu_seqlens=None, int[]? chunk_indices=None, bool? use_exp2=False, bool? transpose_state_layout=False) -> (Tensor h_out, Tensor v_new_out, Tensor final_state_out)"
+        "chunk_gated_delta_rule_fwd_h_vllm(Tensor k, Tensor w, Tensor u, Tensor? g=None, *, Tensor? gk=None, Tensor? initial_state=None, bool? output_final_state=False, int? chunk_size=None, bool? save_new_value=True, int[]? cu_seqlens=None, int[]? chunk_indices=None, bool? use_exp2=False, bool? transpose_state_layout=False) -> (Tensor h_out, Tensor v_new_out, Tensor final_state_out)"
     );
-    ops.impl("chunk_gated_delta_rule_fwd_h", torch::kPrivateUse1, &vllm_ascend::chunk_gated_delta_rule_fwd_h);
+    ops.impl("chunk_gated_delta_rule_fwd_h_vllm", torch::kPrivateUse1, &vllm_ascend::chunk_gated_delta_rule_fwd_h_vllm);
 
     ops.def(
         "chunk_fwd_o_vllm(Tensor q, Tensor k, Tensor v, Tensor h, float scale, *, Tensor? g=None, Tensor? g_gamma=None, int[]? cu_seqlens=None, int[]? chunk_indices=None, int? chunk_size=None, bool? transpose_state_layout=False) -> Tensor"
@@ -3576,9 +3626,9 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("chunk_fwd_o_vllm", torch::kPrivateUse1, &vllm_ascend::chunk_fwd_o_vllm);
 
     ops.def(
-        "kda_gate_cumsum(Tensor g, int chunk_size, *, Tensor? A_log=None, Tensor? dt_bias=None, int[]? cu_seqlens=None, bool? use_gate_in_kernel=False, bool? safe_gate=False, float? lower_bound=-5.0, str layout=\"BSND\") -> Tensor"
+        "kda_gate_cumsum_vllm(Tensor g, int chunk_size, *, Tensor? A_log=None, Tensor? dt_bias=None, int[]? cu_seqlens=None, bool? use_gate_in_kernel=False, bool? safe_gate=False, float? lower_bound=-5.0, str layout=\"BSND\") -> Tensor"
     );
-    ops.impl("kda_gate_cumsum", torch::kPrivateUse1, &vllm_ascend::kda_gate_cumsum);
+    ops.impl("kda_gate_cumsum_vllm", torch::kPrivateUse1, &vllm_ascend::kda_gate_cumsum_vllm);
 
     ops.def(
         "kda_layout_swap12(Tensor x, *, Tensor? dependency=None) -> Tensor"
