@@ -19,6 +19,7 @@ from functools import wraps
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
+from weakref import ref
 
 import pytest
 import torch
@@ -266,7 +267,7 @@ def test_fallback_cleanup_context_releases_references_and_restores_state(monkeyp
     failed_model.add_module("draft", draft_layer)
     failed_model.add_module("compiled", compile_wrapper)
     shared_moe_layers = [target_layer]
-    eplb_layers = [target_layer]
+    eplb_layers = [ref(target_layer)]
     passed_config = SimpleNamespace(
         compilation_config=SimpleNamespace(
             static_forward_context={"target.layer": target_layer, "stale.layer": stale_layer},
@@ -303,7 +304,7 @@ def test_fallback_cleanup_context_releases_references_and_restores_state(monkeyp
     passed_config.compilation_config.static_forward_context["draft.layer"] = draft_layer
     current_config.compilation_config.static_forward_context["current.draft"] = draft_layer
     shared_moe_layers.append(draft_layer)
-    eplb_layers.append(draft_layer)
+    eplb_layers.append(ref(draft_layer))
     rope_cache[draft_key] = object()
 
     failed_model_ref = ModelNetLoaderElastic._release_failed_model_references(
@@ -313,7 +314,7 @@ def test_fallback_cleanup_context_releases_references_and_restores_state(monkeyp
     assert passed_config.compilation_config.static_forward_context == {"target.layer": target_layer}
     assert current_config.compilation_config.static_forward_context == {"current.target": target_layer}
     assert shared_moe_layers == [target_layer]
-    assert eplb_layers == [target_layer]
+    assert [layer_ref() for layer_ref in eplb_layers] == [target_layer]
     assert rope_cache == {target_key: target_rope}
     assert cleanup_context.memory_baseline == (100, 200)
     assert failed_model_ref() is failed_model

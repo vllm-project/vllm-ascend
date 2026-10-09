@@ -5,6 +5,7 @@ import logging
 import sys
 from contextlib import nullcontext
 from types import SimpleNamespace
+from weakref import ref
 
 import pytest
 from torch.nn import Module
@@ -162,8 +163,8 @@ def test_fallback_reset_restores_ascend_globals_and_only_removes_new_dynamo_hook
             pass
 
     adaptor = rfork_helpers.adaptor_module.VllmEplbAdaptor
-    baseline_layer = object()
-    baseline_registry = [baseline_layer]
+    baseline_layer = Module()
+    baseline_registry = [ref(baseline_layer)]
     adaptor._registered_moe_layers = baseline_registry
     rfork_helpers.routed_experts_module.AscendRoutedExperts.moe_counter = 17
 
@@ -196,7 +197,7 @@ def test_fallback_reset_restores_ascend_globals_and_only_removes_new_dynamo_hook
     rfork_helpers.loader._reset_process_global_model_state(vllm_config, snapshot=snapshot)
 
     assert adaptor._registered_moe_layers is baseline_registry
-    assert adaptor._registered_moe_layers == [baseline_layer]
+    assert [layer_ref() for layer_ref in adaptor._registered_moe_layers] == [baseline_layer]
     assert rfork_helpers.routed_experts_module.AscendRoutedExperts.moe_counter == 17
     assert (
         rfork_helpers.rotary_module._cos_sin_cache,

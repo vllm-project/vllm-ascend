@@ -18,6 +18,7 @@
 import json
 from inspect import getattr_static
 from typing import Any
+from weakref import ReferenceType, ref
 
 import torch
 import torch.distributed as dist
@@ -67,7 +68,7 @@ EPLB_EXPERT_WEIGHT_NAMES = {
 
 
 class VllmEplbAdaptor:
-    _registered_moe_layers: list["torch.nn.Module"] = []
+    _registered_moe_layers: list[ReferenceType["torch.nn.Module"]] = []
 
     @staticmethod
     def register_layer(layer: "torch.nn.Module") -> None:
@@ -76,7 +77,23 @@ class VllmEplbAdaptor:
         Only real layers call this; PPMissingLayer won't, so the registry
         naturally contains only layers on this PP rank.
         """
-        VllmEplbAdaptor._registered_moe_layers.append(layer)
+        registry = VllmEplbAdaptor._registered_moe_layers
+        registry[:] = [layer_ref for layer_ref in registry if layer_ref() is not None]
+        registry.append(ref(layer))
+
+    @staticmethod
+    def get_registered_layers() -> list["torch.nn.Module"]:
+        """Snapshot live layers in registration order, including shared layers."""
+        registry = VllmEplbAdaptor._registered_moe_layers
+        live_refs = []
+        layers = []
+        for layer_ref in registry:
+            layer = layer_ref()
+            if layer is not None:
+                live_refs.append(layer_ref)
+                layers.append(layer)
+        registry[:] = live_refs
+        return layers
 
     def __init__(self, model, **args):
         super().__init__(**args)
@@ -90,7 +107,7 @@ class VllmEplbAdaptor:
         self.world_size = dist.get_world_size()
         self.num_dense_layers = getattr(self.config, "first_k_dense_replace", 0)
 
-        self.moe_layers = VllmEplbAdaptor._registered_moe_layers
+        self.moe_layers = self.get_registered_layers()
         self.num_moe_layers = len(self.moe_layers)
 
         self.expert_map_per_layer_cpu = dict()  # copy of expert map on CPU to avoid device synchronize frequently

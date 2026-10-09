@@ -177,6 +177,7 @@ class TestVllmAdaptor(unittest.TestCase):
 
         VllmEplbAdaptor._registered_moe_layers = []
         num_local_experts = 2
+        layers = []
         for weight_shape in [(2, 2), (3, 2)]:
             layer = MagicMock()
             layer.local_num_experts = num_local_experts
@@ -189,6 +190,7 @@ class TestVllmAdaptor(unittest.TestCase):
             layer.moe_load = torch.zeros(num_local_experts)
             layer.global_expert_map = torch.arange(num_local_experts * 4).reshape(num_local_experts, 4)
             layer.get_log2phy_map.return_value = torch.arange(4)
+            layers.append(layer)
             VllmEplbAdaptor.register_layer(layer)
 
         model = MagicMock()
