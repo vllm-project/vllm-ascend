@@ -121,7 +121,9 @@ For either method, remove `--enforce-eager` and add the following option to use 
 - Full graph execution with PCP is limited to `FULL_DECODE_ONLY`.
 - Pipeline parallelism, encoder-decoder models, multimodal inputs, and LoRA are not supported with MRV2 PCP.
 - SFA draft attention is not supported with PCP speculative decoding.
-- PCP and DCP cannot be enabled simultaneously.
+- PCP and DCP can be stacked for MLA, SFA, and GQA. MLA and SFA support DCP
+  equal to PCP or TP x PCP. GQA stacking supports only equal
+  prefill_context_parallel_size and decode_context_parallel_size.
 - Adaptive verification is not supported with PCP speculative decoding.
 - Dynamic draft lengths are outside the currently validated scope.
 - PCP and [DSA-CP](#dsa-cp) cannot be enabled simultaneously with the DSA backend.
