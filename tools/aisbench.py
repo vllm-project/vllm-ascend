@@ -64,6 +64,8 @@ class AisbenchRunner:
             ]
         if self.num_prompts:
             aisbench_cmd.extend(["--num-prompts", str(self.num_prompts)])
+        if self.response_anomaly:
+            aisbench_cmd.append("--response-anomaly")
         self.stdout_file = f"output_{self.task_type}.txt"
         aisbench_cmd = " ".join(aisbench_cmd) + f" --debug > {self.stdout_file} 2>&1 &"
         print(f"running aisbench cmd: {aisbench_cmd}")
@@ -98,6 +100,9 @@ class AisbenchRunner:
         self.presence_penalty = aisbench_config.get("presence_penalty")
         self.repetition_penalty = aisbench_config.get("repetition_penalty")
         self.no_pred = aisbench_config.get("no_pred")
+        self.response_anomaly = False
+        if self.task_type == "accuracy":
+            self.response_anomaly = aisbench_config.get("response_anomaly", True)
         self.thinking = aisbench_config.get("thinking")
         self.reasoning_effort = aisbench_config.get("reasoning_effort")
         self.input_throughput_threshold = aisbench_config.get("input_throughput_threshold")
@@ -193,6 +198,8 @@ class AisbenchRunner:
             content = re.sub(r"temperature.*", f"temperature={self.temperature},", content)
         if self.no_pred:
             content = re.sub(r"pred_postprocessor.*", "#pred_postprocessor", content)
+        if self.response_anomaly:
+            content = re.sub(r"path=.*", f'path="{self.model_path}",', content)
         conf_path_new = os.path.join(REQUEST_CONF_DIR, f"{self.request_conf}_custom.py")
         with open(conf_path_new, "w", encoding="utf-8") as f:
             f.write(content)
