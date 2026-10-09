@@ -14,9 +14,9 @@ from typing import ClassVar
 import regex as re
 
 ROOT = Path(__file__).resolve().parents[3]
-OP_KERNEL = ROOT / "csrc/moe/chunk_gated_delta_rule_fwd_h/op_kernel"
-LAUNCHER = OP_KERNEL / "chunk_gated_delta_rule_fwd_h.cpp"
-OP_DEF = OP_KERNEL.parent / "op_host/chunk_gated_delta_rule_fwd_h_def.cpp"
+OP_KERNEL = ROOT / "csrc/moe/chunk_gated_delta_rule_fwd_h_vllm/op_kernel"
+LAUNCHER = OP_KERNEL / "chunk_gated_delta_rule_fwd_h_vllm.cpp"
+OP_DEF = OP_KERNEL.parent / "op_host/chunk_gated_delta_rule_fwd_h_vllm_def.cpp"
 
 
 def entry_parameters() -> list[str]:
@@ -37,7 +37,7 @@ HOST_STUB = """
 using GM_ADDR = void*;
 using half = float;
 using bfloat16_t = double;
-struct ChunkGatedDeltaRuleFwdHTilingData {
+struct ChunkGatedDeltaRuleFwdHVllmTilingData {
     int dataType;
     int stateDataType;
     int gDataType;
@@ -82,7 +82,7 @@ def render_host_stub(source):
     # Quoted includes are checked separately against the real source tree.
     body = re.sub(r'^#include\s+"[^"\n]+"\s*$', "", source, flags=re.MULTILINE)
     arguments = ", ".join("nullptr" for _ in entry_parameters())
-    wrapper = f"\nvoid generated_wrapper() {{ chunk_gated_delta_rule_fwd_h({arguments}); }}\n"
+    wrapper = f"\nvoid generated_wrapper() {{ chunk_gated_delta_rule_fwd_h_vllm({arguments}); }}\n"
     return HOST_STUB + body + wrapper
 
 
@@ -150,7 +150,7 @@ class FwdHLauncherContractTests(unittest.TestCase):
         for architecture in (200, 220, 310, None):
             with self.subTest(architecture=architecture):
                 source = self.preprocess_source(architecture)
-                entries = re.findall(r"\bvoid\s+chunk_gated_delta_rule_fwd_h\((.*?)\)", source, re.DOTALL)
+                entries = re.findall(r"\bvoid\s+chunk_gated_delta_rule_fwd_h_vllm\((.*?)\)", source, re.DOTALL)
                 self.assertEqual(len(entries), 1)
                 names = [argument.strip().split()[-1] for argument in entries[0].split(",")]
                 self.assertEqual(names, entry_parameters())
@@ -158,9 +158,9 @@ class FwdHLauncherContractTests(unittest.TestCase):
     def test_tile_shape_dispatch_is_non_310p_only(self):
         source = self.preprocess_source(200)
         self.assertNotIn("GDNFwdHTileShapes", source)
-        self.assertNotIn("ChunkGatedDeltaRuleFwdHDispatch", source)
+        self.assertNotIn("ChunkGatedDeltaRuleFwdHVllmDispatch", source)
         for architecture in (220, 310, None):
-            self.assertIn("ChunkGatedDeltaRuleFwdHDispatch", self.preprocess_source(architecture))
+            self.assertIn("ChunkGatedDeltaRuleFwdHVllmDispatch", self.preprocess_source(architecture))
 
     def test_host_stub_syntax_for_all_existing_architecture_routes(self):
         for architecture in (200, 220, 310, None):
