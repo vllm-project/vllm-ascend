@@ -7,28 +7,14 @@ rules (A1/A2/A3) are assumptions the compiler allocator remains the authority
 over.  ``estimated_margin`` is always just the difference estimate-vs-budget,
 never a measured UB headroom.
 
-Capacity sources are resolved by :func:`capacity_resolve`:
-
-  * C1 -- ``get_device_properties().max_shared_mem``: **diagnostic only**.
-    ``1`` is a known placeholder on the frozen image; even a 64 KiB..1 MiB
-    integer from another backend does NOT establish that it means UB, so C1
-    never participates in the envelope and only leaves an audit trail.
-  * C2 -- the frozen-image backend's internal UB-budget field
-    ``triton.backends.ascend.runtime.utils.ub_size_in_kbytes`` (KiB, chosen by
-    the current Triton target), observed best-effort through a small local
-    encapsulation in the wrapper and recorded **bound to the current compile
-    target**.  It is an internal interface, not a stable public API: the value
-    is unit-validated and target-bound, and a failure is an ``unknown``
-    source, never a fabricated value.
-  * There is **no** version-combo capacity whitelist (no curated table keyed
-    by a torch/triton/torch-npu fingerprint): a toolchain version string is
-    never a capacity source.  If C2 cannot be observed the capacity is
-    ``unknown`` -- the caller must NOT pretend a capacity is known; the
-    resource gate then conservatively fails closed to M1 (reason ``resource:
-    capacity unknown``).  The only documented conservative capacity class is
-    the 196,608 B observed on the Ascend 910B4 frozen image (allocator error
-    string ``1,572,864 bits available``); it is an audit/calibration note with
-    an applicability boundary, not a runtime lookup.
+Capacity is supplied by the community `get_ub_size_bytes()` helper in the
+wrapper, sharing LayerNorm/RMSNorm's initialized device properties, documented
+default and environment override. The existing scalar observation ABI calls
+this slot C2; C1 remains diagnostic-only and is no longer probed by this
+wrapper. No private backend API or local fallback is used. A helper-reported
+capacity is a routing input, not a measured allocator budget or free UB.
+Invalid/unavailable helper values leave capacity unknown and select M1.
+There is no case/SoC/toolchain capacity whitelist.
 
 The demand estimate covers the three dataflow paths of the integrated kernel
 (m1_row, pair_tile, tail_row) and reproduces, at ``BHQ == Hq``, the old
@@ -135,8 +121,8 @@ def capacity_resolve(
     """Resolve a conservative capacity envelope from observed candidates.
 
     ``c1`` (device properties) is diagnostic-only and never contributes.
-    ``c2`` (backend runtime internal budget) contributes only when valid AND
-    bound to the same compile target (``c2["target"] == toolchain_fingerprint``).
+    ``c2`` (community helper capacity) contributes only when valid AND
+    carrying the same observation context (``c2["target"] == toolchain_fingerprint``).
     There is no version-combo capacity whitelist: no fingerprint-keyed curated
     table participates.
 
@@ -165,31 +151,31 @@ def capacity_resolve(
     )
     valid_values: list[tuple[int, str]] = []
 
-    # C2: backend runtime internal budget, target-bound.
+    # C2: community helper capacity, with matching observation context.
     c2_state = c2.get("state", "unknown")
     c2_value = c2.get("value")
     c2_reason = c2.get("reason") or "not observed"
     c2_target_ok = c2.get("target") == toolchain_fingerprint
     if c2_state == "valid" and _valid_int_capacity(c2_value) and c2_target_ok:
-        valid_values.append((int(c2_value), "backend_runtime_budget"))
+        valid_values.append((int(c2_value), "community_ub_capacity"))
         sources_seen.append(
             {
-                "name": "backend_runtime_budget",
+                "name": "community_ub_capacity",
                 "value": c2_value,
                 "state": "valid",
                 "role": "source",
                 "target": toolchain_fingerprint,
-                "reason": "observed internal runtime budget, target-bound",
+                "reason": c2_reason,
             }
         )
     else:
         if c2_state == "valid" and not c2_target_ok:
-            c2_reason = "observed value is not bound to the current compile target"
+            c2_reason = "value does not match the current observation context"
         elif c2_state == "valid" and not _valid_int_capacity(c2_value):
             c2_reason = "observed value is outside the accepted capacity range"
         sources_seen.append(
             {
-                "name": "backend_runtime_budget",
+                "name": "community_ub_capacity",
                 "value": c2_value,
                 "state": c2_state if c2_state != "valid" else "invalid",
                 "role": "source",

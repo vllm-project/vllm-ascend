@@ -27,7 +27,7 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend import envs
-from vllm_ascend.ops.triton.triton_utils import extract_slice, get_vectorcore_num, insert_slice
+from vllm_ascend.ops.triton.triton_utils import extract_slice, get_ub_size_bytes, get_vectorcore_num, insert_slice
 
 
 @triton.jit(
@@ -66,6 +66,7 @@ def split_qkv_rmsnorm_mrope_kernel(
     BLOCK_M: tl.constexpr,
     PAIR_CAPABLE: tl.constexpr,
 ):
+    tl.static_assert(BLOCK_M == 1 or BLOCK_M == 2, "BLOCK_M must be 1 or 2")
     block_idx = tl.program_id(0)
 
     loop_num = num_tokens_each_front_core
@@ -259,8 +260,8 @@ def split_qkv_rmsnorm_mrope_kernel(
         # discipline — scalar row addressing, 1D unmasked loads/stores,
         # rank-1 plane/head masks, tail_-prefixed independent namespace — so
         # the P2 five-token cores' third group becomes a real single-row tail
-        # instead of a half-empty M2 group.  M1 (BLOCK_M == 1) and M4 (else)
-        # branches are unchanged.  Design intent (tail lowers to a single
+        # instead of a half-empty M2 group.  M1 (BLOCK_M == 1) is unchanged.
+        # Design intent (tail lowers to a single
         # row; live ranges stay disjoint; no new large allocation) is
         # verified only by an authorized compile/allocation probe, not by
         # this source or its AST tests.
@@ -757,275 +758,24 @@ def split_qkv_rmsnorm_mrope_kernel(
             if gate_size > 0:
                 tail_out_gate_offset = out_gate_ptr + tail_row * gate_size
                 tl.store(tail_out_gate_offset + tl.arange(0, gate_size), tail_in_gate_tensor)
-    else:
-        NQ: tl.constexpr = BLOCK_M * num_q_heads
-        NK: tl.constexpr = BLOCK_M * num_kv_heads  # type: ignore[no-redef]
-        n_iter = (loop_num + BLOCK_M - 1) // BLOCK_M
-        for index in range(n_iter):
-            ## load ##
-            tok = index * BLOCK_M + tl.arange(0, BLOCK_M)
-            valid = tok < loop_num
-            rows = (block_offset + tok)[:, None]
-            row_stride = q_size + gate_size + 2 * kv_size
-
-            # q (+ gate) — 2D, row-masked, exact constexpr column width
-            in_q_gate_block = tl.load(
-                in_qkv_ptr + rows * row_stride + tl.arange(0, q_size + gate_size)[None, :],
-                mask=valid[:, None],
-                other=0,
-            )
-            in_k_block = tl.load(
-                in_qkv_ptr + rows * row_stride + (q_size + gate_size) + tl.arange(0, kv_size)[None, :],
-                mask=valid[:, None],
-                other=0,
-            )
-            in_v_block = tl.load(
-                in_qkv_ptr + rows * row_stride + (q_size + gate_size + kv_size) + tl.arange(0, kv_size)[None, :],
-                mask=valid[:, None],
-                other=0,
-            )
-
-            # cos, sin — per-plane (BLOCK_M, half_rope_dim) 2D masked loads
-            cos_offsets = tl.arange(0, half_rope_dim)
-            if is_interleaved:
-                h_mask = ((cos_offsets % 3) == 1) & (cos_offsets <= 3 * mrope_section_h)
-                w_mask = ((cos_offsets % 3) == 2) & (cos_offsets <= 3 * mrope_section_w)
-                t_mask = ~(h_mask | w_mask)
-            else:
-                t_mask = cos_offsets < mrope_section_t
-                h_mask = (mrope_section_t - 1 < cos_offsets) & (cos_offsets < mrope_section_t + mrope_section_h)
-                w_mask = (mrope_section_t + mrope_section_h - 1 < cos_offsets) & (
-                    cos_offsets < mrope_section_t + mrope_section_h + mrope_section_w
-                )
-
-            # rows already carries the full per-token row offset
-            # (block_offset + index*BLOCK_M + arange); applying the extra
-            # (block_offset + index*BLOCK_M) term again would read the wrong
-            # cos/sin rows for every block except the first. Use rows * rope_dim.
-            cos_base = cos_sin_ptr + rows * rope_dim
-            t_cos_tensor = tl.load(
-                cos_base + cos_offsets[None, :],
-                mask=valid[:, None] & t_mask[None, :],
-                other=0,
-            )
-            h_cos_tensor = tl.load(
-                cos_base + num_tokens * rope_dim + cos_offsets[None, :],
-                mask=valid[:, None] & h_mask[None, :],
-                other=0,
-            )
-            w_cos_tensor = tl.load(
-                cos_base + 2 * num_tokens * rope_dim + cos_offsets[None, :],
-                mask=valid[:, None] & w_mask[None, :],
-                other=0,
-            )
-            t_sin_tensor = tl.load(
-                cos_base + half_rope_dim + cos_offsets[None, :],
-                mask=valid[:, None] & t_mask[None, :],
-                other=0,
-            )
-            h_sin_tensor = tl.load(
-                cos_base + num_tokens * rope_dim + half_rope_dim + cos_offsets[None, :],
-                mask=valid[:, None] & h_mask[None, :],
-                other=0,
-            )
-            w_sin_tensor = tl.load(
-                cos_base + 2 * num_tokens * rope_dim + half_rope_dim + cos_offsets[None, :],
-                mask=valid[:, None] & w_mask[None, :],
-                other=0,
-            )
-
-            cos_half = (t_cos_tensor + h_cos_tensor + w_cos_tensor).to(tl.float32)
-            sin_half = (t_sin_tensor + h_sin_tensor + w_sin_tensor).to(tl.float32)
-
-            ## compute ##
-            # token folded into the head axis: NQ / NK rows
-            if gate_size > 0:
-                q_gate = in_q_gate_block.to(tl.float32).reshape(NQ, head_size * 2)
-                in_q_tensor = extract_slice(
-                    q_gate,
-                    offsets=(0, 0),
-                    sizes=(NQ, head_size),
-                    strides=(1, 1),
-                )
-                in_gate_tensor = extract_slice(
-                    q_gate,
-                    offsets=(0, head_size),
-                    sizes=(NQ, head_size),
-                    strides=(1, 1),
-                )
-            else:
-                in_q_tensor = in_q_gate_block.to(tl.float32).reshape(NQ, head_size)
-            in_k_tensor = in_k_block.to(tl.float32).reshape(NK, head_size)
-
-            # head replication of cos/sin (the only rank-3 intermediates: broadcast_to + reshape)
-            cos_q = tl.broadcast_to(cos_half[:, None, :], (BLOCK_M, num_q_heads, half_rope_dim)).reshape(
-                NQ, half_rope_dim
-            )
-            sin_q = tl.broadcast_to(sin_half[:, None, :], (BLOCK_M, num_q_heads, half_rope_dim)).reshape(
-                NQ, half_rope_dim
-            )
-            cos_k = tl.broadcast_to(cos_half[:, None, :], (BLOCK_M, num_kv_heads, half_rope_dim)).reshape(
-                NK, half_rope_dim
-            )
-            sin_k = tl.broadcast_to(sin_half[:, None, :], (BLOCK_M, num_kv_heads, half_rope_dim)).reshape(
-                NK, half_rope_dim
-            )
-
-            # q-rmsnorm
-            squares = in_q_tensor * in_q_tensor
-            variances = tl.sum(squares, axis=1) / head_size
-            reciprocal_std = (1 / tl.sqrt(variances + eps)).reshape(NQ, 1)
-            q_normalized = in_q_tensor * reciprocal_std
-            q_normalized = q_normalized * q_rmsnorm_weight
-            if has_bias:
-                q_normalized = q_normalized + q_bias
-
-            # k-rmsnorm
-            squares = in_k_tensor * in_k_tensor
-            variances = tl.sum(squares, axis=1) / head_size
-            reciprocal_std = (1 / tl.sqrt(variances + eps)).reshape(NK, 1)
-            k_normalized = in_k_tensor * reciprocal_std
-            k_normalized = k_normalized * k_rmsnorm_weight
-            if has_bias:
-                k_normalized = k_normalized + k_bias
-
-            # q-mrope
-            x1 = extract_slice(
-                q_normalized,
-                offsets=(0, 0),
-                sizes=(NQ, half_rope_dim),
-                strides=(1, 1),
-            )
-            x2 = extract_slice(
-                q_normalized,
-                offsets=(0, half_rope_dim),
-                sizes=(NQ, half_rope_dim),
-                strides=(1, 1),
-            )
-            roped_q = insert_slice(
-                q_normalized,
-                x1 * cos_q - x2 * sin_q,
-                offsets=(0, 0),
-                sizes=(NQ, half_rope_dim),
-                strides=(1, 1),
-            )
-            roped_q = insert_slice(
-                roped_q,
-                x2 * cos_q + x1 * sin_q,
-                offsets=(0, half_rope_dim),
-                sizes=(NQ, half_rope_dim),
-                strides=(1, 1),
-            )
-
-            # k-mrope
-            y1 = extract_slice(
-                k_normalized,
-                offsets=(0, 0),
-                sizes=(NK, half_rope_dim),
-                strides=(1, 1),
-            )
-            y2 = extract_slice(
-                k_normalized,
-                offsets=(0, half_rope_dim),
-                sizes=(NK, half_rope_dim),
-                strides=(1, 1),
-            )
-            roped_k = insert_slice(
-                k_normalized,
-                y1 * cos_k - y2 * sin_k,
-                offsets=(0, 0),
-                sizes=(NK, half_rope_dim),
-                strides=(1, 1),
-            )
-            roped_k = insert_slice(
-                roped_k,
-                y2 * cos_k + y1 * sin_k,
-                offsets=(0, half_rope_dim),
-                sizes=(NK, half_rope_dim),
-                strides=(1, 1),
-            )
-
-            q_normalized = roped_q
-            k_normalized = roped_k
-
-            ## store ##
-            # out_q
-            tl.store(
-                out_q_ptr + rows * q_size + tl.arange(0, q_size)[None, :],
-                roped_q.reshape(BLOCK_M, q_size),
-                mask=valid[:, None],
-            )
-            # out_k
-            tl.store(
-                out_k_ptr + rows * kv_size + tl.arange(0, kv_size)[None, :],
-                roped_k.reshape(BLOCK_M, kv_size),
-                mask=valid[:, None],
-            )
-            # out_v
-            tl.store(
-                out_v_ptr + rows * kv_size + tl.arange(0, kv_size)[None, :],
-                in_v_block,
-                mask=valid[:, None],
-            )
-            # out_gate
-            if gate_size > 0:
-                tl.store(
-                    out_gate_ptr + rows * gate_size + tl.arange(0, gate_size)[None, :],
-                    in_gate_tensor.reshape(BLOCK_M, gate_size),
-                    mask=valid[:, None],
-                )
 
 
 # ---------------------------------------------------------------------------
-# A+C dispatch integration (independent G3 workload candidate).
+# A+C dispatch integration.
 #
-# The kernel above is byte-identical to the parent
-# wp1_ac_integrated_pair_capable_dispatch_0001 (kernel region untouched).  The
-# wrapper below adds the "C" safety layer: when BLOCK_M == 2 it consults the
-# stdlib-only dispatch policy (ac_dispatch_policy.py in this directory) with a
-# live identity fingerprint (shape, per-core partition, layout contract, SoC,
-# resource profile) and a best-effort capacity observation.  The selected
-# PAIR_CAPABLE instance is passed to the kernel through the last constexpr
-# argument as a dispatch-derived Name (never a literal), so the True/False
-# instances are compiled separately and selected per call.
+# M1 and tiled M2 preserve the direct-half RoPE computation. The unqualified
+# legacy multi-row branch is deliberately removed: only BLOCK_M=1/2 is supported.
+# For the default request of 2, G1 checks semantics/layout, G2 compares the
+# screening estimate with the shared UB helper's capacity and retains the
+# uncalibrated pair-boundary guard, and G3 requires enough pair work per core.
+# G3's min_active_tokens // 2 >= 12 threshold is provisional, not a universal
+# performance optimum. There is no case/SoC/toolchain evidence allowlist.
 #
-# This successor keeps the frozen G1 semantic/layout and G2 resource gates,
-# then adds a G3 workload choice for requested BLOCK_M == 2 (including unset):
-#   - tail-only work selects simple M1;
-#   - pair work selects M1 when min_active_tokens // 2 < 12, otherwise it
-#     retains the G2-feasible M2 pair instance;
-#   - a G3 M1 choice preserves G2 capacity, demand, margin, and feasible-variant
-#     diagnostics.  The threshold is a host-replay hypothesis, not a validated
-#     universal performance rule or a case/SoC/toolchain whitelist.
-# G1/G2 failures retain priority. The registry remains diagnostic only.
-#
-# Capacity observation:
-#   - C1 (get_device_properties().max_shared_mem) is DIAGNOSTIC ONLY: ``1`` is
-#     a known placeholder on the frozen image, and even another backend's
-#     64 KiB..1 MiB integer does not establish that it means UB, so C1 never
-#     becomes a capacity source -- it only leaves an audit trail.
-#   - C2 is the frozen-image backend's internal UB-budget field
-#     ``triton.backends.ascend.runtime.utils.ub_size_in_kbytes`` (KiB, chosen
-#     by the current Triton target).  It is an internal interface read through
-#     a small local encapsulation (import + unit validation + target binding),
-#     best-effort: a failure is an ``unknown`` source, never a fabricated
-#     value.  There is NO version-combo capacity whitelist (no curated
-#     torch/triton/torch-npu fingerprint table); ``capacity_state == "unknown"``
-#     fails closed to M1 with an auditable reason.
-#
-# Fail-closed rules:
-#   - any G1 / G2 failure -> M1 (block_m demoted to 1, pair_capable False,
-#     original kernel emitted);
-#   - BLOCK_M == 2 with a tail-only instance (PAIR_CAPABLE == False) raises
-#     when any active core has loop_num >= 2: the pair loop is compiled out
-#     and tokens would be silently dropped (correctness boundary mirroring the
-#     historical False-only applicability guard).
-#
-# Performance posture: G3 is a separate, provisional selection hypothesis
-# informed by the recorded B3 reports. It does not establish numerical
-# correctness, compiled behavior, or performance on untested geometry or
-# devices. When BLOCK_M is unset, the G1/G2/G3 policy is consulted by
-# default; explicit BLOCK_M == 1 and == 4 retain their legacy paths.
+# Capacity comes from the worker-initialized community get_ub_size_bytes()
+# helper, including its documented default and environment override. It is a
+# routing input, not measured free UB or a proven compiler allocator budget.
+# Helper errors/invalid values still yield unknown capacity and an M1 fallback.
+# Explicit BLOCK_M=1 bypasses the adaptive M2 screen.
 # ---------------------------------------------------------------------------
 _AC_CANDIDATE_DIR = Path(__file__).resolve().parent
 _AC_POLICY_PATH = _AC_CANDIDATE_DIR / "ac_dispatch_policy.py"
@@ -1067,7 +817,7 @@ def _ac_so_identity() -> str:
 @functools.lru_cache(maxsize=1)
 def _ac_toolchain_fingerprint() -> str:
     # Best-effort toolchain identity (torch/triton/torch-npu versions).  It is
-    # used ONLY for the C2 capacity observation's target binding and for
+    # used ONLY for the capacity observation's diagnostic context and for
     # diagnostics; it is never a selection gate and never a capacity whitelist.
     import importlib.metadata
 
@@ -1087,105 +837,44 @@ def _ac_resource_profile(soc: str, vector_core_count: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Capacity observation (best-effort; the policy resolves the envelope).
-#
-# C1 (get_device_properties().max_shared_mem) is DIAGNOSTIC ONLY: ``1`` is a
-# known placeholder on the frozen image, and even another backend's
-# 64 KiB..1 MiB integer does not establish that it means UB, so C1 never
-# becomes a capacity source -- it only leaves an audit trail.
-#
-# C2 is the frozen-image backend's internal UB-budget field
-# ``triton.backends.ascend.runtime.utils.ub_size_in_kbytes`` (KiB, chosen by
-# the current Triton target).  It is an INTERNAL interface, so it is read
-# through a small local encapsulation (import + unit validation + target
-# binding) and never treated as a stable public API.  It is observed
-# best-effort and recorded BOUND TO the current compile target (the toolchain
-# fingerprint at observation time); a failure is an ``unknown`` source, never
-# a fabricated value.  There is NO version-combo capacity whitelist.
-#
-# The observation is deliberately not cached: capacity depends on the device
-# and compile target, and a process-wide cache could reuse a stale budget.
+# Capacity observation reuses the same public helper as LayerNorm and RMSNorm.
+# Its byte-valued result may be detected, defaulted, or user-overridden; we do
+# not claim to distinguish those sources or measure the allocator's free space.
+# The helper owns device-property initialization/caching. No private backend
+# imports, duplicate property probing, or local capacity fallback are needed.
 # ---------------------------------------------------------------------------
-_UB_KB_MIN = 64
-_UB_KB_MAX = 1024
+_UB_BYTES_MIN = 64 * 1024
+_UB_BYTES_MAX = 1024 * 1024
 
 
-def _ac_observe_backend_ub_budget(toolchain_fingerprint: str) -> dict:
-    """C2: best-effort read of the frozen-image backend internal UB budget.
-
-    Local encapsulation of ``triton.backends.ascend.runtime.utils
-    .ub_size_in_kbytes``: the import is wrapped, the field is unit-validated
-    (a KiB integer in [64, 1024]) and the observation is target-bound to the
-    fingerprint it was taken under.  ``max_shared_mem == 1`` (C1) is never used
-    as UB.
-    """
+def _ac_observe_capacity(toolchain_fingerprint: str) -> dict:
+    # Keep the existing scalar observation ABI; c2 now carries the community
+    # helper's byte capacity, not an internal backend KiB field. The fingerprint
+    # is diagnostic context, never a toolchain allowlist or capacity source.
     c2: dict = {
         "value": None,
         "state": "unknown",
         "target": toolchain_fingerprint,
-        "reason": "not observed",
+        "reason": "community UB helper unavailable",
     }
     try:
-        # Internal backend interface -- best-effort only; not assumed to exist.
-        from triton.backends.ascend.runtime import (  # type: ignore[import-not-found,import-untyped]
-            utils as _backend_runtime_utils,
-        )
-
-        kb = getattr(_backend_runtime_utils, "ub_size_in_kbytes", None)
-        if type(kb) is int and _UB_KB_MIN <= kb <= _UB_KB_MAX:
-            c2 = {
-                "value": kb * 1024,
-                "state": "valid",
-                "target": toolchain_fingerprint,
-                "reason": ("observed triton.backends.ascend.runtime.utils ub_size_in_kbytes (target-bound)"),
-            }
-        else:
-            c2 = {
-                "value": kb,
-                "state": "invalid",
-                "target": toolchain_fingerprint,
-                "reason": (
-                    f"backend ub_size_in_kbytes is not a valid KiB integer in [{_UB_KB_MIN}, {_UB_KB_MAX}]: {kb!r}"
-                ),
-            }
-    except Exception as exc:  # noqa: BLE001 - best-effort observation
+        capacity_bytes = get_ub_size_bytes()
         c2 = {
-            "value": None,
-            "state": "unknown",
+            "value": capacity_bytes,
+            "state": (
+                "valid"
+                if type(capacity_bytes) is int and _UB_BYTES_MIN <= capacity_bytes <= _UB_BYTES_MAX
+                else "invalid"
+            ),
             "target": toolchain_fingerprint,
-            "reason": f"backend runtime budget unavailable: {exc}",
-        }
-    return c2
-
-
-def _ac_observe_capacity(toolchain_fingerprint: str) -> dict:
-    # Diagnostic-only C1.
-    c1: dict = {
-        "value": None,
-        "state": "unknown",
-        "reason": "not observed",
-    }
-    try:
-        props = triton.runtime.driver.active.utils.get_device_properties(torch.npu.current_device())
-        value = props.get("max_shared_mem")
-        c1 = {
-            "value": value,
-            "state": "valid" if isinstance(value, int) and value != 1 else "invalid",
             "reason": (
-                "diagnostic-only: max_shared_mem is a placeholder (==1) on the "
-                "frozen image and is not a verified UB source"
+                "get_ub_size_bytes routing capacity (may use shared default/override; "
+                "not measured free UB or a proven allocator budget)"
             ),
         }
-    except Exception as exc:  # noqa: BLE001 - best-effort observation
-        c1 = {
-            "value": None,
-            "state": "unknown",
-            "reason": f"diagnostic-only, unavailable: {exc}",
-        }
-
-    c2 = _ac_observe_backend_ub_budget(toolchain_fingerprint)
-
-    return {"c1": c1, "c2": c2, "toolchain_fingerprint": toolchain_fingerprint}
+    except Exception as exc:  # noqa: BLE001 - best-effort capacity input
+        c2["reason"] = f"community UB helper unavailable: {exc}"
+    return {"c1": {}, "c2": c2, "toolchain_fingerprint": toolchain_fingerprint}
 
 
 # The normalized frozen-ABI layout/pointer contract (shape + contiguity +
@@ -1259,10 +948,10 @@ def triton_split_qkv_rmsnorm_mrope(
     has_bias = q_bias is not None
 
     # The centralized env getter is evaluated on each call, preserving the
-    # tested default request of 2 and the explicit 1/2/4 diagnostic paths.
+    # tested default request of 2 and the explicit M1 diagnostic path.
     block_m = envs.VLLM_ASCEND_SPLIT_QKV_RMSNORM_MROPE_BLOCK_M
 
-    # A+C dispatch (C layer).  BLOCK_M == 1 and BLOCK_M == 4 keep the legacy
+    # A+C dispatch (C layer).  BLOCK_M == 1 keeps the single-row
     # path: the original kernel is emitted with pair_capable at its initial
     # False.  BLOCK_M == 2 consults the dispatch policy with the live identity
     # fingerprint and the best-effort capacity observation; semantic (G1) or

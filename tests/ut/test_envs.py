@@ -38,7 +38,7 @@ class TestEnvVariables(TestBase):
                     if var_name == "VLLM_ASCEND_KVPOOL_RANGE_DEBUG":
                         test_vals = ["0", "1"]
                     elif var_name == "VLLM_ASCEND_SPLIT_QKV_RMSNORM_MROPE_BLOCK_M":
-                        test_vals = ["1", "2", "4"]
+                        test_vals = ["1", "2"]
                     elif "int(" in handler_source:
                         test_vals = ["123", "456"]
                     elif "bool(int(" in handler_source:
@@ -87,11 +87,11 @@ class TestEnvVariables(TestBase):
         original_val = os.environ.pop(name, None)
         try:
             self.assertEqual(getattr(envs_ascend, name), 2)
-            for value in ("1", "2", "4"):
+            for value in ("1", "2"):
                 with self.subTest(value=value):
                     os.environ[name] = value
                     self.assertEqual(getattr(envs_ascend, name), int(value))
-            for value in ("", "0", "3", "-1", "123", "456", "not-an-integer"):
+            for value in ("", "0", "3", "4", "-1", "123", "456", "not-an-integer"):
                 with self.subTest(invalid=value):
                     os.environ[name] = value
                     with self.assertRaises(ValueError):

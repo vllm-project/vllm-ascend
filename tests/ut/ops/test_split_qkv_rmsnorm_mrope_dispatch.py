@@ -33,6 +33,24 @@ def _load_source_module(name: str, path: Path) -> ModuleType:
     return module
 
 
+def _capacity_from_helper(helper):
+    """Exercise the real observation function without importing an NPU runtime."""
+    tree = ast.parse(OP_PATH.read_text(encoding="utf-8"))
+    nodes: list[ast.stmt] = [
+        node
+        for node in tree.body
+        if (
+            isinstance(node, ast.FunctionDef)
+            and node.name == "_ac_observe_capacity"
+            or isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id.startswith("_UB_BYTES_") for target in node.targets)
+        )
+    ]
+    namespace = {"get_ub_size_bytes": helper}
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), str(OP_PATH), "exec"), namespace)
+    return namespace["_ac_observe_capacity"](FINGERPRINT)
+
+
 def _decision(policy, *, q_heads: int, kv_heads: int, tokens: int, capacity=None, layout_valid=True):
     if capacity is None:
         capacity = {
@@ -111,15 +129,90 @@ class SplitQKVMRoPEDispatchTests(unittest.TestCase):
     def test_centralized_block_m_env_is_lazy_and_strict(self):
         with mock.patch.dict(os.environ, {}, clear=True):
             self.assertEqual(getattr(self.envs, ENV_NAME), 2)
-        for raw, expected in (("1", 1), ("2", 2), ("4", 4)):
+        for raw, expected in (("1", 1), ("2", 2)):
             with self.subTest(raw=raw), mock.patch.dict(os.environ, {ENV_NAME: raw}):
                 self.assertEqual(getattr(self.envs, ENV_NAME), expected)
-        for raw in ("0", "3", "bogus"):
+        for raw in ("0", "3", "4", "bogus"):
             with self.subTest(raw=raw), mock.patch.dict(os.environ, {ENV_NAME: raw}), self.assertRaises(ValueError):
                 getattr(self.envs, ENV_NAME)
         wrapper_source = OP_PATH.read_text(encoding="utf-8")
         self.assertIn("block_m = envs.VLLM_ASCEND_SPLIT_QKV_RMSNORM_MROPE_BLOCK_M", wrapper_source)
         self.assertNotIn('os.environ.get("SPLIT_QKV_RMSNORM_MROPE_BLOCK_M"', wrapper_source)
+
+    def test_capacity_uses_public_byte_helper_without_backend_probe(self):
+        helper = mock.Mock(return_value=196608)
+        observed = _capacity_from_helper(helper)
+        helper.assert_called_once_with()
+        self.assertEqual(observed["c1"], {})
+        self.assertEqual(observed["c2"]["value"], 196608)
+        self.assertEqual(observed["c2"]["state"], "valid")
+        self.assertIn("shared default/override", observed["c2"]["reason"])
+        source = OP_PATH.read_text(encoding="utf-8")
+        self.assertNotIn("triton.backends.ascend.runtime", source)
+        self.assertNotIn("ub_size_in_kbytes", source)
+        self.assertNotIn("get_device_properties", source)
+        self.assertIn("get_ub_size_bytes", source)
+
+    def test_helper_capacity_changes_resource_choice_not_workload_gate(self):
+        for capacity_bytes, gate, block_m in (
+            (64 * 1024, "g2_resource", 1),
+            (192 * 1024, "shape_resource", 2),
+            (256 * 1024, "shape_resource", 2),
+        ):
+            with self.subTest(capacity_bytes=capacity_bytes):
+                observed = _capacity_from_helper(mock.Mock(return_value=capacity_bytes))
+                result = _decision(self.policy, q_heads=6, kv_heads=1, tokens=1024, capacity=observed)
+                self.assertEqual((result.gate, result.block_m), (gate, block_m))
+                self.assertEqual(result.envelope_bytes, capacity_bytes)
+        short = _decision(
+            self.policy,
+            q_heads=6,
+            kv_heads=1,
+            tokens=192,
+            capacity=_capacity_from_helper(mock.Mock(return_value=256 * 1024)),
+        )
+        self.assertEqual((short.gate, short.block_m), ("g3_workload", 1))
+
+    def test_invalid_or_unavailable_helper_capacity_falls_back(self):
+        helpers = [mock.Mock(return_value=value) for value in (1, 0, -1, True, 196608.0, None)]
+        helpers.append(mock.Mock(side_effect=AssertionError("device properties not initialized")))
+        for helper in helpers:
+            with self.subTest(helper=helper):
+                observed = _capacity_from_helper(helper)
+                self.assertNotEqual(observed["c2"]["state"], "valid")
+                result = _decision(self.policy, q_heads=6, kv_heads=1, tokens=1024, capacity=observed)
+                self.assertEqual((result.gate, result.block_m), ("g2_resource", 1))
+                self.assertIsNone(result.envelope_bytes)
+
+    def test_helper_reuses_budget_without_relaxing_boundary_guard(self):
+        observed = _capacity_from_helper(mock.Mock(return_value=256 * 1024))
+        result = _decision(self.policy, q_heads=16, kv_heads=4, tokens=1024, capacity=observed)
+        self.assertEqual((result.gate, result.block_m), ("g2_resource", 1))
+        self.assertEqual(result.feasible_variants, ())
+
+    def test_kernel_only_contains_m1_and_m2_paths(self):
+        tree = ast.parse(OP_PATH.read_text(encoding="utf-8"))
+        kernel = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "split_qkv_rmsnorm_mrope_kernel"
+        )
+        branches = [
+            node for node in kernel.body if isinstance(node, ast.If) and ast.unparse(node.test) == "BLOCK_M == 1"
+        ]
+        self.assertEqual(len(branches), 1)
+        m2 = branches[0].orelse
+        self.assertEqual(len(m2), 1)
+        self.assertIsInstance(m2[0], ast.If)
+        self.assertEqual(ast.unparse(cast(ast.If, m2[0]).test), "BLOCK_M == 2")
+        self.assertEqual(cast(ast.If, m2[0]).orelse, [])
+        assertions = [
+            node
+            for node in ast.walk(kernel)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "static_assert"
+        ]
+        self.assertEqual(len(assertions), 1)
+        self.assertEqual(ast.unparse(assertions[0].args[0]), "BLOCK_M == 1 or BLOCK_M == 2")
 
     def test_seven_b3_routes_without_case_allowlist(self):
         points = (

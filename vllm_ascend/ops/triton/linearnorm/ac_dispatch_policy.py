@@ -29,11 +29,11 @@ Relative to v1 (``wp1_ac_integrated_pair_capable_dispatch_0001``) it changes:
   * The old per-config G3 evidence/enablement gate is removed: registry
     coverage and performance reports do not gate selection. The registry
     remains diagnostic; the new G3 choice uses only the actual partition.
-  * Capacity is observed from C2 only (the frozen-image backend's
-    ``triton.backends.ascend.runtime.utils.ub_size_in_kbytes``, target-bound);
-    the version-combo capacity whitelist (C3) is removed.  ``capacity_state ==
-    "unknown"`` fails closed to M1 with an auditable reason -- never a
-    fabricated budget.
+  * Capacity is supplied by the community ``get_ub_size_bytes()`` helper
+    through the existing C2 scalar observation slot. Its shared default and
+    override are routing inputs, not measured allocator budgets. No private
+    backend API or version-combo capacity whitelist is used. Unavailable or
+    invalid helper values leave ``capacity_state == "unknown"`` and select M1.
   * Evidence classes and the registry loader remain as DIAGNOSTIC utilities
     (calibration anchors, experiment records); selection never consults them.
 
