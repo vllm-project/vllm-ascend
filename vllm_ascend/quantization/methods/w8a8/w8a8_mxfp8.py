@@ -643,6 +643,13 @@ class AscendW8A8MXFP8DSDynamicLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
                 .transpose(1, 2)
                 .contiguous()
             )
+            # Keep CP/PCP weight-gather paths in ND until their NZ buffer
+            # and collective semantics have been validated separately.
+            vllm_config = get_current_vllm_config()
+            if not get_ascend_config().enable_dsa_cp and vllm_config.parallel_config.prefill_context_parallel_size == 1:
+                # Convert only after forming the final [group, K, N] layout.
+                # Scale remains ND in [group, K // 64, N, 2].
+                layer.weight.data = maybe_trans_nz(layer.weight.data, customize_dtype=torch.float8_e4m3fn)
         elif layer.prefix.endswith("wo_b"):
             # DSA PCP gathers these tensors directly along the leading
             # dimension, which requires contiguous HCCL inputs.
