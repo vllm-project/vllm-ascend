@@ -31,18 +31,38 @@ on:
   workflow_dispatch:
     inputs:
       vllm_ascend_branch:
-        description: 'Branch to nightly test'
+        description: 'Branch or tag to nightly test'
         required: true
         default: 'main'
         type: choice
         options:
           - main
+          - releases/v0.30.0
+          - releases/v0.29.0rc
+          - releases/v0.28.0rc
+          - releases/v0.27.1rc
           - releases/v0.26.0rc
           - releases/v0.25.1rc
           - releases/v0.24.0rc
           - releases/v0.23.0
           - releases/v0.22.1rc
+          - releases/v0.21.0rc
+          - releases/v0.20.2rc
           - releases/v0.18.0
+          - v0.29.0.rc1
+          - v0.27.1rc1
+          - v0.26.0rc2
+          - v0.26.0rc1
+          - v0.25.1rc1
+          - v0.24.0rc1
+          - v0.23.0.post1
+          - v0.23.0
+          - v0.23.0rc1
+          - v0.22.1rc1
+          - v0.21.0rc1
+          - v0.20.2rc1
+          - v0.18.0
+          - v0.18.0rc1
       build_type:
         description: 'Build type: daily or release'
         required: false
@@ -63,13 +83,49 @@ on:
         type: string
 
 jobs:
+  resolve-ref:
+    if: ${{ github.event_name != 'pull_request' || github.event.label.name == 'nightly-image-build' }}
+    runs-on: linux-amd64-cpu-2-hk
+    outputs:
+      checkout_ref: ${{ steps.resolve.outputs.checkout_ref }}
+      base_image_ref: ${{ steps.resolve.outputs.base_image_ref }}
+    steps:
+      - name: Resolve checkout and base image refs
+        id: resolve
+        shell: bash
+        run: |
+          CHECKOUT_REF="${{ github.event.pull_request.head.sha || inputs.vllm_ascend_branch || 'main' }}"
+          BASE_IMAGE_REF="${{ github.event.pull_request.base.ref || inputs.vllm_ascend_branch || 'main' }}"
+
+          case "$BASE_IMAGE_REF" in
+            main|releases/*) ;;
+            v0.29.0.rc1) BASE_IMAGE_REF='releases/v0.29.0rc' ;;
+            v0.27.1rc1) BASE_IMAGE_REF='releases/v0.27.1rc' ;;
+            v0.26.0rc1|v0.26.0rc2) BASE_IMAGE_REF='releases/v0.26.0rc' ;;
+            v0.25.1rc1) BASE_IMAGE_REF='releases/v0.25.1rc' ;;
+            v0.24.0rc1) BASE_IMAGE_REF='releases/v0.24.0rc' ;;
+            v0.23.0|v0.23.0.post1|v0.23.0rc1) BASE_IMAGE_REF='releases/v0.23.0' ;;
+            v0.22.1rc1) BASE_IMAGE_REF='releases/v0.22.1rc' ;;
+            v0.21.0rc1) BASE_IMAGE_REF='releases/v0.21.0rc' ;;
+            v0.20.2rc1) BASE_IMAGE_REF='releases/v0.20.2rc' ;;
+            v0.18.0|v0.18.0rc1) BASE_IMAGE_REF='releases/v0.18.0' ;;
+            *)
+              echo "Unsupported branch or tag: $BASE_IMAGE_REF" >&2
+              exit 1
+              ;;
+          esac
+
+          echo "checkout_ref=$CHECKOUT_REF" >> "$GITHUB_OUTPUT"
+          echo "base_image_ref=$BASE_IMAGE_REF" >> "$GITHUB_OUTPUT"
+
   build-a2:
+    needs: resolve-ref
     if: ${{ (github.event_name != 'pull_request' || github.event.label.name == 'nightly-image-build') && contains(fromJSON(inputs.chips || '["a2","a3","310p","a5"]'), 'a2') }}
     uses: ./.github/workflows/_nightly_image_build.yaml
     with:
       target: a2
-      vllm_ascend_branch: ${{ github.event.pull_request.head.sha || inputs.vllm_ascend_branch || 'main' }}
-      base_image_branch: ${{ github.event.pull_request.base.ref || inputs.vllm_ascend_branch || 'main' }}
+      vllm_ascend_branch: ${{ needs.resolve-ref.outputs.checkout_ref }}
+      base_image_branch: ${{ needs.resolve-ref.outputs.base_image_ref }}
       build_type: ${{ inputs.build_type || 'release' }}
       should_push: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' }}
       soc: '910b'
@@ -81,12 +137,13 @@ jobs:
       SYNC_TOOLS_TOKEN: ${{ secrets.SYNC_TOOLS_TOKEN }}
 
   build-a3:
+    needs: resolve-ref
     if: ${{ (github.event_name != 'pull_request' || github.event.label.name == 'nightly-image-build') && contains(fromJSON(inputs.chips || '["a2","a3","310p","a5"]'), 'a3') }}
     uses: ./.github/workflows/_nightly_image_build.yaml
     with:
       target: a3
-      vllm_ascend_branch: ${{ github.event.pull_request.head.sha || inputs.vllm_ascend_branch || 'main' }}
-      base_image_branch: ${{ github.event.pull_request.base.ref || inputs.vllm_ascend_branch || 'main' }}
+      vllm_ascend_branch: ${{ needs.resolve-ref.outputs.checkout_ref }}
+      base_image_branch: ${{ needs.resolve-ref.outputs.base_image_ref }}
       build_type: ${{ inputs.build_type || 'release' }}
       should_push: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' }}
       soc: 'a3'
@@ -98,12 +155,13 @@ jobs:
       SYNC_TOOLS_TOKEN: ${{ secrets.SYNC_TOOLS_TOKEN }}
 
   build-310p:
+    needs: resolve-ref
     if: ${{ (github.event_name != 'pull_request' || github.event.label.name == 'nightly-image-build') && contains(fromJSON(inputs.chips || '["a2","a3","310p","a5"]'), '310p') }}
     uses: ./.github/workflows/_nightly_image_build.yaml
     with:
       target: 310p
-      vllm_ascend_branch: ${{ github.event.pull_request.head.sha || inputs.vllm_ascend_branch || 'main' }}
-      base_image_branch: ${{ github.event.pull_request.base.ref || inputs.vllm_ascend_branch || 'main' }}
+      vllm_ascend_branch: ${{ needs.resolve-ref.outputs.checkout_ref }}
+      base_image_branch: ${{ needs.resolve-ref.outputs.base_image_ref }}
       build_type: ${{ inputs.build_type || 'release' }}
       should_push: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' }}
       soc: '310p'
@@ -114,12 +172,13 @@ jobs:
       SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
       SYNC_TOOLS_TOKEN: ${{ secrets.SYNC_TOOLS_TOKEN }}
   build-a5:
+    needs: resolve-ref
     if: ${{ (github.event_name != 'pull_request' || github.event.label.name == 'nightly-image-build') && contains(fromJSON(inputs.chips || '["a2","a3","310p","a5"]'), 'a5') }}
     uses: ./.github/workflows/_nightly_image_build.yaml
     with:
       target: a5
-      vllm_ascend_branch: ${{ github.event.pull_request.head.sha || inputs.vllm_ascend_branch || 'main' }}
-      base_image_branch: ${{ github.event.pull_request.base.ref || inputs.vllm_ascend_branch || 'main' }}
+      vllm_ascend_branch: ${{ needs.resolve-ref.outputs.checkout_ref }}
+      base_image_branch: ${{ needs.resolve-ref.outputs.base_image_ref }}
       build_type: ${{ inputs.build_type || 'release' }}
       should_push: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' }}
       soc: '950'
