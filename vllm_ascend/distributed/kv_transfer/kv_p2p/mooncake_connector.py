@@ -3734,7 +3734,11 @@ class MooncakeConnectorWorker:
                 decode_tp_rank,
             )
             for remote_rank in remote_ranks:
-                remote_port_send_num[meta.remote_port + remote_rank]["num"] += 1
+                port = meta.remote_port + remote_rank
+                if port in remote_port_send_num:
+                    remote_port_send_num[port]["num"] += 1
+                else:
+                    logger.warning("remote_rank %d is out of prefill workers range", remote_rank)
 
         return remote_port_send_num
 

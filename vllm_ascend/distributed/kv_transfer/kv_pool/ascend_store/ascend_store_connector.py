@@ -50,11 +50,11 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
     AscendStorePromMetrics,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import (
-    KVPoolScheduler,
     LOOKUP_MSG,
     RESET_MSG,
     RESP_ERR,
     RESP_OK,
+    KVPoolScheduler,
     get_zmq_rpc_path_lookup,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
@@ -486,39 +486,43 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
 
 def dispatch_lookup_request(pool_worker: KVPoolWorker, decoder: MsgpackDecoder, all_frames) -> bytes:
     """Handle one LookupKey request. Frame 0 is a message tag."""
-    msg_type = bytes(all_frames[0])
+    try:
+        if not all_frames:
+            return RESP_ERR
+        msg_type = bytes(all_frames[0])
 
-    if msg_type == LOOKUP_MSG:
-        token_len = int.from_bytes(all_frames[1], byteorder="big")
-        kv_group_ids = decoder.decode([all_frames[2]])
-        hbm_hit_tokens = int.from_bytes(all_frames[3], byteorder="big")
-        hashes_str = decoder.decode(all_frames[4:])
-        result = pool_worker.lookup_scheduler(
-            token_len,
-            hashes_str,
-            kv_group_ids,
-            use_layerwise=False,
-            hbm_hit_tokens=hbm_hit_tokens,
-        )
-        logger.debug(
-            "KV pool lookup response token_len=%d groups=%s hit_tokens=%d",
-            token_len,
-            kv_group_ids,
-            result,
-        )
-        return result.to_bytes(4, "big")
+        if msg_type == LOOKUP_MSG:
+            if len(all_frames) < 5:
+                return RESP_ERR
+            token_len = int.from_bytes(all_frames[1], byteorder="big")
+            kv_group_ids = decoder.decode([all_frames[2]])
+            hbm_hit_tokens = int.from_bytes(all_frames[3], byteorder="big")
+            hashes_str = decoder.decode(all_frames[4:])
+            result = pool_worker.lookup_scheduler(
+                token_len,
+                hashes_str,
+                kv_group_ids,
+                use_layerwise=False,
+                hbm_hit_tokens=hbm_hit_tokens,
+            )
+            logger.debug(
+                "KV pool lookup response token_len=%d groups=%s hit_tokens=%d",
+                token_len,
+                kv_group_ids,
+                result,
+            )
+            return result.to_bytes(4, "big")
 
-    elif msg_type == RESET_MSG:
-        try:
+        elif msg_type == RESET_MSG:
             pool_worker.reset_store()
             logger.info("AscendStore reset via remove_all succeeded.")
             return RESP_OK
-        except Exception as e:
-            logger.error("AscendStore remove_all failed: %s", e)
-            return RESP_ERR
 
-    logger.warning("LookupKeyServer received unknown msg_type: %r", msg_type)
-    return RESP_ERR
+        logger.warning("LookupKeyServer received unknown msg_type: %r", msg_type)
+        return RESP_ERR
+    except Exception as e:
+        logger.error("Error handling lookup request: %s", e)
+        return RESP_ERR
 
 
 class LookupKeyServer:
