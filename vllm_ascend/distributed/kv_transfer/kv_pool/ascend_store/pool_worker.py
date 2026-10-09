@@ -3316,6 +3316,16 @@ class KVPoolWorker:
         if ensure_initialized is not None:
             ensure_initialized()
 
+    def reset_store(self) -> None:
+        """Drain queued puts, then wipe the backend.
+
+        Join first so a put already on the send thread cannot land after
+        ``remove_all`` and repopulate the pool with the previous weights.
+        """
+        if self.kv_send_thread is not None:
+            self.kv_send_thread.request_queue.join()
+        self.m_store.remove_all()
+
     def _build_lookup_keys(
         self,
         token_len: int,

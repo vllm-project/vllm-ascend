@@ -129,6 +129,7 @@ _base_mod.KVConnectorBase_V1 = type(  # type: ignore[attr-defined]
     (),
     {
         "__init__": lambda self, **kw: None,
+        "role": property(lambda self: self._role),
         "bind_connector_metadata": lambda self, metadata: setattr(self, "_connector_metadata", metadata),
         "_get_connector_metadata": lambda self: self._connector_metadata,
     },

@@ -336,6 +336,12 @@ class MooncakeBackend(Backend):
         assert self.store is not None
         return self.store.batch_is_exist(keys)
 
+    def remove_all(self) -> None:
+        """Delete every object on the Mooncake master. The client stays open."""
+        if not self._store_initialized or self.store is None:
+            return
+        self.store.remove_all(force=True)
+
     def batch_is_readable(self, keys: list[str]) -> list[bool]:
         """Map committed Mooncake objects to the common readability contract."""
         states = require_aligned_batch_results("batch_is_exist", keys, self.batch_is_exist(keys))

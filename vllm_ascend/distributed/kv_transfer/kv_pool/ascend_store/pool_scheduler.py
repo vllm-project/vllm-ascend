@@ -1182,8 +1182,48 @@ class KVPoolScheduler:
         if finished_recving:
             self._loading_req_ids.difference_update(finished_recving)
 
+    def reset_store(self) -> bool:
+        """Ask worker rank 0 to drain its send queue and ``remove_all``.
+
+        Caller must already have paused generation. Pending scheduler
+        bookkeeping is logged and left in place; clearing it here would
+        race with block references still held for in-flight saves.
+        """
+        pending = [
+            name
+            for name, state in (
+                ("sending_events", self.sending_events),
+                ("sending_blocks", self.sending_blocks),
+                ("loading_req_ids", self._loading_req_ids),
+            )
+            if state
+        ]
+        if pending:
+            logger.warning(
+                "AscendStore reset_store while scheduler still tracks %s. Caller must pause generation before reset.",
+                pending,
+            )
+        if self.client is None:
+            self.client = LookupKeyClient(self.vllm_config)
+        try:
+            ok = self.client.reset()
+            if ok:
+                logger.info("AscendStore reset via remove_all succeeded.")
+            else:
+                logger.warning("AscendStore reset returned NACK from worker.")
+            return ok
+        except Exception as e:
+            logger.error("AscendStore reset_store RPC failed: %s", e)
+            return False
+
     def get_stats(self) -> AscendStoreKVConnectorStats | None:
         return None
+
+
+LOOKUP_MSG = b"lookup"
+RESET_MSG = b"reset"
+RESP_OK = b"\x01"
+RESP_ERR = b"\x00"
 
 
 class LookupKeyClient:
@@ -1210,6 +1250,7 @@ class LookupKeyClient:
         hash_frames = self.encoder.encode(hash_strs)
         kv_group_frames = self.encoder.encode(kv_cache_group_ids)
         all_frames = [
+            LOOKUP_MSG,
             token_len.to_bytes(4, byteorder="big"),
             *kv_group_frames,
             hbm_hit_tokens.to_bytes(4, byteorder="big"),
@@ -1219,6 +1260,12 @@ class LookupKeyClient:
         resp = self.socket.recv()
         result = int.from_bytes(resp, "big")
         return result
+
+    def reset(self) -> bool:
+        """Ask rank 0 to drain queued puts, then ``remove_all(force=True)``."""
+        self.socket.send(RESET_MSG)
+        resp = self.socket.recv()
+        return bytes(resp) == RESP_OK
 
     def close(self):
         self.socket.close(linger=0)
