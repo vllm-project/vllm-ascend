@@ -725,7 +725,11 @@ class NPUModelRunner310(NPUModelRunner):
         bind_kv_cache(kv_caches, self.compilation_config.static_forward_context, self.kv_caches)
         return kv_caches
 
-    def _allocate_kv_cache_tensors(self, kv_cache_config: KVCacheConfig) -> dict[str, torch.Tensor]:
+    def _allocate_kv_cache_tensors(
+        self,
+        kv_cache_config: KVCacheConfig,
+        page_layouts: dict[str, int] | None = None,
+    ) -> dict[str, torch.Tensor]:
         """
         Initializes the KV cache size. The buffer needs to be reshaped to the desired shape before being used by
         the models.

@@ -2,6 +2,7 @@ import unittest
 from collections import deque
 from contextlib import nullcontext
 from dataclasses import fields, replace
+from itertools import product
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
@@ -12,6 +13,7 @@ from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.sampling_params import SamplingParams
 from vllm.v1.attention.backends.utils import reorder_batch_to_split_decodes_and_prefills
+from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -56,6 +58,7 @@ from vllm_ascend.patch.platform.patch_kv_cache_utils import (
 from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
 from vllm_ascend.utils import AscendDeviceType
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.worker.utils import AscendKVBlockZeroer, copy_kv_cache_blocks_inplace
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
 
 
@@ -1210,6 +1213,176 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                     caches = runner._reshape_kv_cache_tensors(cache_config, raw)
                 assert_attention_cache_views(caches, raw, packed)
 
+    def _make_shared_hybrid_page_case(self, split_ratio, padding_bytes, raw_relation):
+        runner = self._build_runner()
+        runner.hybrid_with_attn_and_mamba = True
+        runner.use_hybrid_blocks = True
+        runner.cache_config = SimpleNamespace(cache_dtype="auto")
+        num_blocks, logical_block_size, head_size = 3, 8, 2
+        dtype = torch.float32
+        dtype_size = dtype.itemsize
+        page_bytes = 2 * logical_block_size * head_size * dtype_size + padding_bytes
+        attn_spec = FullAttentionSpec(
+            block_size=logical_block_size,
+            num_kv_heads=1,
+            head_size=head_size,
+            dtype=dtype,
+            page_size_padded=page_bytes,
+        )
+        mamba_spec = MambaSpec(
+            block_size=logical_block_size,
+            shapes=((3,), (5,)),
+            dtypes=(dtype, dtype),
+            page_size_padded=page_bytes,
+            mamba_cache_mode="align",
+        )
+        names = ("full_attn", "linear_attn")
+        specs = (attn_spec, mamba_spec)
+        groups = [
+            SimpleNamespace(kv_cache_group_id=i, kv_cache_spec=spec, backend=runner.attn_backend, layer_names=[name])
+            for i, (name, spec) in enumerate(zip(names, specs))
+        ]
+        runner._kv_cache_spec_attn_group_iterator = lambda: iter(groups)
+        config = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(layer_names=[name], kv_cache_spec=spec) for name, spec in zip(names, specs)
+            ],
+        )
+        # 首尾保护区和不同页使用不同值，完整存储比较能发现越界及多余拷贝。
+        guard_elements = 4
+        page_elements = page_bytes // dtype_size
+        region_elements = num_blocks * page_elements
+        num_regions = 2 if raw_relation == "different_region" else 1
+        backing = torch.arange(2 * guard_elements + num_regions * region_elements, dtype=dtype)
+        byte_backing = backing.view(torch.uint8)
+        attn_base = guard_elements
+        mamba_base = attn_base + region_elements if num_regions == 2 else attn_base
+        attn_raw = byte_backing[attn_base * dtype_size : (attn_base + region_elements) * dtype_size]
+        mamba_raw = (
+            attn_raw
+            if raw_relation == "same_object"
+            else byte_backing[mamba_base * dtype_size : (mamba_base + region_elements) * dtype_size]
+        )
+        raw_caches = dict(zip(names, (attn_raw, mamba_raw)))
+        kernel_sizes = [logical_block_size // split_ratio, logical_block_size]
+        caches = runner._reshape_kv_cache_tensors(
+            config,
+            raw_caches,
+            kernel_sizes,
+            page_layouts=dict.fromkeys(names, page_bytes),
+        )
+        return SimpleNamespace(
+            backing=backing,
+            caches=caches,
+            raw_caches=raw_caches,
+            groups=groups,
+            kernel_sizes=kernel_sizes,
+            attn_base=attn_base,
+            mamba_base=mamba_base,
+            page_elements=page_elements,
+            num_blocks=num_blocks,
+            split_ratio=split_ratio,
+            payload_elements=logical_block_size * head_size // split_ratio,
+            kernel_stride_elements=page_elements // split_ratio,
+        )
+
+    def test_shared_hybrid_page_writes_preserve_other_blocks_and_padding(self):
+        for split_ratio, padding_bytes, raw_relation in product(
+            (1, 2, 4),
+            (0, 32),
+            ("same_object", "alias_slice", "different_region"),
+        ):
+            with self.subTest(split_ratio=split_ratio, padding_bytes=padding_bytes, raw_relation=raw_relation):
+                case = self._make_shared_hybrid_page_case(split_ratio, padding_bytes, raw_relation)
+                key, value = case.caches["full_attn"]
+                conv_state, ssm_state = case.caches["linear_attn"]
+                self.assertFalse(key.is_contiguous())
+                self.assertFalse(value.is_contiguous())
+                for name, tensors in case.caches.items():
+                    for tensor in tensors:
+                        self.assertEqual(tensor.untyped_storage().data_ptr(), case.backing.untyped_storage().data_ptr())
+                    self.assertEqual(tensors[0].data_ptr(), case.raw_caches[name].data_ptr())
+                if raw_relation == "alias_slice":
+                    self.assertIsNot(case.raw_caches["full_attn"], case.raw_caches["linear_attn"])
+                    self.assertEqual(case.raw_caches["full_attn"].data_ptr(), case.raw_caches["linear_attn"].data_ptr())
+                original = case.backing.clone()
+                for attention_first in (True, False):
+                    case.backing.copy_(original)
+                    expected = original.clone()
+                    # 两种写入顺序都必须保留其他组正在使用的物理页。
+                    phases = ("attention", "mamba") if attention_first else ("mamba", "attention")
+                    for phase in phases:
+                        if phase == "attention":
+                            start, end = split_ratio, 2 * split_ratio
+                            key[start:end].fill_(3)
+                            value[start:end].fill_(5)
+                            for subblock in range(split_ratio):
+                                offset = case.attn_base + case.page_elements + subblock * case.kernel_stride_elements
+                                expected[offset : offset + case.payload_elements] = 3
+                                expected[offset + case.payload_elements : offset + 2 * case.payload_elements] = 5
+                        else:
+                            for block_id in (0, 2):
+                                conv_state[block_id].fill_(11 + block_id)
+                                ssm_state[block_id].fill_(17 + block_id)
+                                offset = case.mamba_base + block_id * case.page_elements
+                                expected[offset : offset + 3] = 11 + block_id
+                                expected[offset + 3 : offset + 8] = 17 + block_id
+                        # 期望值按物理页契约定位，不使用被测张量的 stride。
+                        torch.testing.assert_close(case.backing, expected, rtol=0, atol=0)
+
+    def test_shared_hybrid_pages_support_block_copy_without_padding_writes(self):
+        for split_ratio, padding_bytes in product((1, 2, 4), (0, 32)):
+            with self.subTest(split_ratio=split_ratio, padding_bytes=padding_bytes):
+                case = self._make_shared_hybrid_page_case(split_ratio, padding_bytes, "alias_slice")
+                before = case.backing.clone()
+                expected = before.clone()
+                for subblock in range(split_ratio):
+                    src = case.attn_base + subblock * case.kernel_stride_elements
+                    dst = src + 2 * case.page_elements
+                    expected[dst : dst + 2 * case.payload_elements] = before[src : src + 2 * case.payload_elements]
+                src = case.mamba_base
+                dst = src + 2 * case.page_elements
+                expected[dst : dst + 8] = before[src : src + 8]
+                copy_kv_cache_blocks_inplace(
+                    case.caches.values(),
+                    case.num_blocks,
+                    [KVCacheBlockCopy(src_block_id=0, dst_block_id=2)],
+                )
+                torch.testing.assert_close(case.backing, expected, rtol=0, atol=0)
+
+    def test_shared_hybrid_page_zeroer_bounds_match_payloads(self):
+        for split_ratio, padding_bytes in product((1, 2, 4), (0, 32)):
+            with self.subTest(split_ratio=split_ratio, padding_bytes=padding_bytes):
+                case = self._make_shared_hybrid_page_case(split_ratio, padding_bytes, "alias_slice")
+                zeroer = AscendKVBlockZeroer(torch.device("cpu"), pin_memory=False)
+                zeroer.init_meta(
+                    case.groups,
+                    case.kernel_sizes,
+                    "auto",
+                    set(),
+                    {name: SimpleNamespace(kv_cache=tensors) for name, tensors in case.caches.items()},
+                )
+                addresses, sizes, *_ = zeroer._meta
+                strides = zeroer._seg_page_strides
+                for block_id in range(case.num_blocks):
+                    actual = sorted(
+                        ((int(address) - case.backing.data_ptr()) // 4 + block_id * stride, size)
+                        for address, stride, size in zip(addresses.tolist(), strides.tolist(), sizes.tolist())
+                    )
+                    expected = sorted(
+                        (
+                            case.attn_base
+                            + block_id * case.page_elements
+                            + subblock * case.kernel_stride_elements
+                            + component * case.payload_elements,
+                            case.payload_elements,
+                        )
+                        for subblock, component in product(range(split_ratio), range(2))
+                    )
+                    self.assertEqual(actual, expected)
+
     def test_hybrid_noncontiguous_reshape_uses_per_group_kernel_sizes(self):
         runner = self._build_runner()
         runner.hybrid_with_attn_and_mamba = True
@@ -1976,22 +2149,48 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
 
     @patch("vllm_ascend.worker.model_runner_v1.requires_contiguous_pa_kv_cache", return_value=True)
     def test_hybrid_backing_is_unchanged_when_pa_is_configured(self, _mock_requires_contiguous):
-        self.test_hybrid_descriptors_share_standardized_backing_allocation()
+        self._check_hybrid_descriptors_shared_backing(page_layout_enabled=False)
 
     def test_hybrid_descriptors_share_standardized_backing_allocation(self):
+        self._check_hybrid_descriptors_shared_backing()
+
+    @patch("vllm_ascend.worker.model_runner_v1.enable_fa_quant", return_value=True)
+    def test_shared_hybrid_page_layout_preserves_quantized_dtype_path(self, _mock_enable_fa_quant):
+        self._check_hybrid_descriptors_shared_backing(
+            page_layout_enabled=False,
+            page_size_padded=48,
+            expect_quant_dtype=True,
+        )
+
+    def test_shared_hybrid_page_layout_excludes_unequal_value_head_size(self):
+        self._check_hybrid_descriptors_shared_backing(
+            page_layout_enabled=False,
+            head_size_v=2,
+            page_size_padded=32,
+        )
+
+    def _check_hybrid_descriptors_shared_backing(
+        self,
+        page_layout_enabled=True,
+        head_size_v=4,
+        page_size_padded=None,
+        expect_quant_dtype=False,
+    ):
         attn_names = ["model.layers.0.self_attn.attn", "model.layers.2.self_attn.attn"]
         mamba_names = ["model.layers.1.linear_attn", "model.layers.3.linear_attn"]
         attn_spec = FullAttentionSpec(
             block_size=2,
             num_kv_heads=1,
             head_size=4,
-            head_size_v=4,
+            head_size_v=head_size_v,
             dtype=torch.float16,
+            page_size_padded=page_size_padded,
         )
         mamba_spec = MambaSpec(
             block_size=2,
             shapes=((2, 4),),
             dtypes=(torch.float32,),
+            page_size_padded=page_size_padded,
         )
         self.assertEqual(attn_spec.page_size_bytes, mamba_spec.page_size_bytes)
         num_blocks = 3
@@ -2029,11 +2228,46 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         ):
             with self.subTest(kv_transfer_config=kv_transfer_config):
                 runner = self._build_runner()
+                runner.use_hybrid_blocks = True
                 runner.vllm_config.kv_transfer_config = kv_transfer_config
+                runner.vllm_config.quant_config.get_kv_quant_dtype.return_value = (torch.float16, torch.float16)
+                groups = [
+                    SimpleNamespace(
+                        kv_cache_group_id=0,
+                        kv_cache_spec=attn_spec,
+                        backend=runner.attn_backend,
+                        layer_names=attn_names,
+                    ),
+                    SimpleNamespace(
+                        kv_cache_group_id=1, kv_cache_spec=mamba_spec, backend=MagicMock(), layer_names=mamba_names
+                    ),
+                ]
+                runner._kv_cache_spec_attn_group_iterator = lambda groups=groups: iter(groups)
                 layout = SimpleNamespace(is_layer_compact=True, is_block_compact=True)
                 runner.vllm_config.cache_config.get_resolved_kv_cache_layout.return_value = layout
 
-                raw_caches = runner._allocate_kv_cache_tensors(kv_cache_config)
+                page_layouts = {}
+                raw_caches = runner._allocate_kv_cache_tensors(kv_cache_config, page_layouts=page_layouts)
+                expected_layouts = (
+                    dict.fromkeys(attn_names + mamba_names, attn_spec.page_size_bytes)
+                    if page_layout_enabled and kv_transfer_config is None
+                    else {}
+                )
+                self.assertEqual(page_layouts, expected_layouts)
+                if not expected_layouts:
+                    # 特殊格式及 PD 传输保留原入口，不调用新的普通共享页构造器。
+                    with patch(
+                        "vllm_ascend.worker.model_runner_v1.reshape_combined_attention_kv_cache",
+                        side_effect=AssertionError("专用路径不能使用普通共享页构造器"),
+                    ):
+                        runner._reshape_kv_cache_tensors(
+                            kv_cache_config,
+                            raw_caches,
+                            [attn_spec.block_size, mamba_spec.block_size],
+                            page_layouts=page_layouts,
+                        )
+                    if expect_quant_dtype:
+                        self.assertEqual(runner.vllm_config.quant_config.get_kv_quant_dtype.call_count, len(attn_names))
                 storage_ptrs = {raw.untyped_storage().data_ptr() for raw in raw_caches.values()}
                 base_offset = raw_caches[attn_names[0]].storage_offset()
 
