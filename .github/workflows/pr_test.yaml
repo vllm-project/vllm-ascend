@@ -50,8 +50,8 @@ jobs:
       # Short hash used only for job-name display.
       main_commit_short: ${{ steps.vllm.outputs.main_commit_short }}
       release_tag: ${{ steps.vllm.outputs.release_tag }}
-      # JSON array of the vllm refs to test. Defaults to main_commit only;
-      # the main2main label widens it to the release_tag as well.
+      # JSON array of the vllm refs to test. Defaults to release_tag only;
+      # the main2main label widens it to the verified main commit as well.
       vllm_versions: ${{ steps.vllm.outputs.vllm_versions }}
       src: ${{ steps.filter.outputs.src }}
       ci_pipeline: ${{ steps.filter.outputs.ci_pipeline }}
@@ -115,7 +115,7 @@ jobs:
           if [ "${HAS_MAIN2MAIN}" = "true" ]; then
             echo "vllm_versions=[\"${main_commit}\",\"${release_tag}\"]" >> "$GITHUB_OUTPUT"
           else
-            echo "vllm_versions=[\"${main_commit}\"]" >> "$GITHUB_OUTPUT"
+            echo "vllm_versions=[\"${release_tag}\"]" >> "$GITHUB_OUTPUT"
           fi
 
       - name: cp problem matchers
