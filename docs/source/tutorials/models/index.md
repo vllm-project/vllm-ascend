@@ -22,6 +22,7 @@ Qwen3.5-27B-Qwen3.6-27B.md
 Qwen3.5-Dense.md
 Qwen3.5-397B-A17B.md
 Qwen3.6-35B-A3B.md
+Qwen3.8-27B.md
 DeepSeek-V3.1.md
 DeepSeek-V3.2.md
 DeepSeek-V4-Flash.md
