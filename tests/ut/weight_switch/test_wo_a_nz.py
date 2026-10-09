@@ -153,11 +153,13 @@ def test_weight_switch_values_formats_and_addresses(simulated_npu, dtype, clone,
     runtime = simulated_npu
     layer = make_layer(dtype)
     layer.weight.data = runtime.cast(layer.weight, 29)
+    original_pointer = layer.weight.data_ptr()
     cls = AscendUnquantizedLinearMethod if dtype == torch.bfloat16 else AscendW8A8MXFP8DSDynamicLinearMethod
     method = cls.__new__(cls)
     config = WeightSwitchConfig(group=SimpleNamespace(world_size=world_size), world_size=world_size, rank=0)
     state = method.enable_weight_switch(layer, config, clone_local_tensors=clone)
     part = state.gather_parts["weight"]
+    assert (part.local_tensor.data_ptr() != original_pointer) == clone
     pointers = (part.local_tensor.data_ptr(), part.full_tensor.data_ptr())
     assert part.is_nz_weight
     for value in (1, 4, 2):

@@ -471,24 +471,25 @@ class WeightSwitchMixin:
                 )
 
             is_nz_weight = _is_nz_batched_weight(layer, gather_spec.attr_name, tensor)
-            # Clone grouped NZ weights through ND: generic clone/copy_ paths
-            # cannot handle internal storage on Ascend 950.
-            if is_nz_weight and clone_local_tensors:
-                local_tensor = torch_npu.npu_format_cast(tensor, ACL_FORMAT_FRACTAL_ND).clone().detach().contiguous()
-                local_tensor = torch_npu.npu_format_cast(
-                    local_tensor, ACL_FORMAT_FRACTAL_NZ, customize_dtype=tensor.dtype
+            if is_nz_weight:
+                # Format casts allocate new storage. Reuse the ND conversion
+                # for communication and, when needed, an independent NZ clone.
+                # Generic NZ clone/copy_ is unsupported on Ascend 950.
+                communication_tensor = torch_npu.npu_format_cast(tensor.detach(), ACL_FORMAT_FRACTAL_ND)
+                local_tensor = (
+                    torch_npu.npu_format_cast(communication_tensor, ACL_FORMAT_FRACTAL_NZ, customize_dtype=tensor.dtype)
+                    if clone_local_tensors
+                    else tensor.detach()
                 )
             else:
                 local_tensor = tensor.clone().detach().contiguous() if clone_local_tensors else tensor.detach()
+                communication_tensor = local_tensor
             if clone_local_tensors:
                 with torch.no_grad():
                     tensor.set_(local_tensor)
             full_shape_list = list(local_tensor.shape)
             full_shape_list[dim] *= config.world_size
             full_shape = tuple(full_shape_list)
-            communication_tensor = (
-                torch_npu.npu_format_cast(local_tensor, ACL_FORMAT_FRACTAL_ND) if is_nz_weight else local_tensor
-            )
             if dim == 0:
                 gather_input = communication_tensor
             else:
