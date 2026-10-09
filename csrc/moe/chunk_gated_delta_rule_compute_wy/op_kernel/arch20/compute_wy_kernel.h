@@ -97,6 +97,10 @@ class KernelComputeWy {
     uKernelGm_.SetGlobalBuffer(reinterpret_cast<__gm__ half*>(uKernel));
     gKernelGm_.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(gKernel));
     iNzGm_.SetGlobalBuffer(const_cast<__gm__ float*>(WY_IDENTITY_NZ));
+    // Existing per-core A snapshot slot, disjoint from library A/B staging.
+    const uint64_t irCoreBase = tiling->workspaceOffset +
+        static_cast<uint64_t>(GetBlockIdx()) * perCoreWorkspaceBytes_;
+    irSnapshotGm_.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(workspace + irCoreBase + WY_CUBE_SNAP_OFF));
 
     const uint32_t localWsBytes = localWorkspaceSize_ == 0 ? (32 * 1024) : localWorkspaceSize_;
     pipe_->InitBuffer(mmLocalWsBuf_, localWsBytes);
@@ -543,16 +547,35 @@ class KernelComputeWy {
   // the torch WY forward substitution. A and R stay fp32 until the output cast.
   // Called once per pass (W in pass 1, U in pass 2); A is read-only here.
   __aicore__ inline void Fp32ForwardSubstitution(const LocalTensor<float> a, LocalTensor<float> r, uint32_t dim,
-                                                 uint32_t lda) const {
-    SyncEvent<HardEvent::V_S>(HardEvent::V_S);
-    for (uint32_t row = 1; row < FIXED_CHUNK_SIZE; ++row) {
-      const uint32_t aRowOffset = row * FIXED_CHUNK_SIZE;
-      const uint32_t rRowOffset = row * lda;
-      for (uint32_t col = 0; col < row; ++col) {
-        const float coefficient = a.GetValue(aRowOffset + col);
-        Axpy(r[rRowOffset], r[col * lda], coefficient, static_cast<int32_t>(dim));
-        PipeBarrier<PIPE_V>();
+                                                 uint32_t lda) {
+    // Column-oriented FP32 substitution: after column j-1 is complete, row j
+    // is solved. Broadcast that row into every destination below it. Each
+    // destination still sees columns 0..row-1 in exactly the original order.
+    // expG is dead on the fallback path; tmp is dead after the gate / beta
+    // scaling. Reuse these buffers without growing UB or touching betaLocal.
+    LocalTensor<float> coefficients = expGBuf_.Get<float>();
+    LocalTensor<float> broadcasts = tmpBuf_.Get<float>();
+    LocalTensor<uint32_t> offsets = lane0OffBuf_.Get<uint32_t>();
+    const BinaryRepeatParams rp{1, 1, 0, static_cast<uint8_t>(lda / FLOAT_PER_BLOCK), 0, 1};
+    PipeBarrier<PIPE_V>();
+    for (uint32_t col = 0; col + 1 < FIXED_CHUNK_SIZE; ++col) {
+      Gather(coefficients, a, offsets, col * static_cast<uint32_t>(sizeof(float)), FIXED_CHUNK_SIZE);
+      PipeBarrier<PIPE_V>();  // Gather writes coefficients -> Brcb reads them.
+      Brcb(broadcasts, coefficients, FIXED_CHUNK_SIZE / FLOAT_PER_BLOCK,
+           {1, static_cast<uint16_t>(FLOAT_PER_BLOCK)});
+      PipeBarrier<PIPE_V>();  // Brcb writes broadcasts -> vmla reads them.
+      const uint32_t first = col + 1;
+      const uint8_t rows = static_cast<uint8_t>(FIXED_CHUNK_SIZE - first);
+      for (uint32_t n0 = 0; n0 < dim; n0 += FLOAT_VEC_LEN) {
+        const uint32_t width = (dim - n0 < FLOAT_VEC_LEN) ? dim - n0 : FLOAT_VEC_LEN;
+        // dst/source row ranges are disjoint. src0RepStride=0 replays the
+        // solved row; src1BlkStride=0 replays one coefficient per repeat.
+        MulAddDst(r[first * lda + n0], r[col * lda + n0], broadcasts[first * FLOAT_PER_BLOCK],
+                  static_cast<uint64_t>(width), rows, rp);
       }
+      // Drain every update before reusing broadcast scratch or reading row
+      // col+1 as the next source. Also drains the final RHS before output cast.
+      PipeBarrier<PIPE_V>();
     }
   }
 
@@ -639,6 +662,181 @@ class KernelComputeWy {
   }
 
 
+  // Experimental mixed-precision refinement, only on the all-micro 128/128
+  // path. No extra UB or workspace: mmLocalWsBuf_ is idle because no library
+  // matmul runs here, so it holds the original 64x128 FP32 RHS. halfBuf_ is
+  // scratch until W finishes; V is loaded afterwards. Never reuse either
+  // buffer this way on the small-dimension library path.
+  __aicore__ inline void IrNdToNz(LocalTensor<float> dst, LocalTensor<float> src,
+                                  uint32_t srcLda, uint32_t column = 0) {
+    for (uint32_t j = 0; j < 4; ++j) {
+      Muls(dst[j * 64 * 16], src[column + j * 16], 1.0f, static_cast<uint64_t>(16), 64,
+           {1, 1, 2, static_cast<uint8_t>(srcLda / FLOAT_PER_BLOCK)});
+    }
+    PipeBarrier<PIPE_V>();
+  }
+
+  __aicore__ inline void IrNzToNd(LocalTensor<float> dst, LocalTensor<float> src) {
+    for (uint32_t j = 0; j < 4; ++j) {
+      Muls(dst[j * 16], src[j * 64 * 16], 1.0f, static_cast<uint64_t>(16), 64, {1, 1, 8, 2});
+    }
+    PipeBarrier<PIPE_V>();
+  }
+
+  __aicore__ inline float IrMaxAbs(LocalTensor<float> value) {
+    LocalTensor<float> reduce = negABuf_.Get<float>();
+    // Large reductions need more than the 64-float scalar-result buffer.
+    // The first half of qHalf is dead after staging; inverse uses the second.
+    LocalTensor<float> reductionWork = qHalfBuf_.Get<half>().ReinterpretCast<float>();
+    Abs(value, value, ATTEN_ELEMS);
+    PipeBarrier<PIPE_V>();
+    ReduceMax(reduce, value, reductionWork, ATTEN_ELEMS, false);
+    PipeBarrier<PIPE_V>();
+    ReduceSum(reduce[1], value, reductionWork, ATTEN_ELEMS);
+    SyncEvent<HardEvent::V_S>(HardEvent::V_S);
+    const float total = reduce.GetValue(1);
+    return (total >= 0.0f && total < 1.0e30f) ? reduce.GetValue(0) : 1.0e30f;
+  }
+
+  __aicore__ inline void IrResidual(LocalTensor<float> a, LocalTensor<float> x,
+                                    LocalTensor<float> original, uint32_t column) {
+    LocalTensor<float> residual = tmpBuf_.Get<float>();
+    LocalTensor<float> cubeScratch = storeBuf_.Get<half>().ReinterpretCast<float>();
+    LocalTensor<float> splitScratch = halfBuf_.Get<half>().ReinterpretCast<float>();
+    LocalTensor<half> splitHalf = qHalfBuf_.Get<half>();
+    // All input operands are fully staged before MmNz2 writes its aliased C.
+    IrNdToNz(cubeScratch, a, 64);
+    IrNdToNz(residual, x, 128, column);
+    microMm_.MmNz2(cubeScratch, cubeScratch, residual, splitHalf, splitScratch);
+    IrNzToNd(residual, cubeScratch);
+    // r = b - x + A*x. Cube multiplication uses hi/lo split operands with
+    // FP32 accumulation; lo*lo is omitted. This is not exact FP32 residual
+    // arithmetic, and requires independent numerical tests on all inputs.
+    const BinaryRepeatParams rp{1, 1, 1, 8, 8, 16};
+    Sub(residual, residual, x[column], static_cast<uint64_t>(64), 64, rp);
+    PipeBarrier<PIPE_V>();
+    Add(residual, residual, original[column], static_cast<uint64_t>(64), 64, rp);
+    PipeBarrier<PIPE_V>();
+  }
+
+  __aicore__ inline bool IrSolve(LocalTensor<float> a, LocalTensor<float> rhs) {
+    LocalTensor<float> original = mmLocalWsBuf_.Get<uint8_t>().ReinterpretCast<float>();
+    LocalTensor<float> residual = tmpBuf_.Get<float>();
+    LocalTensor<float> cNz = storeBuf_.Get<half>().ReinterpretCast<float>();
+    LocalTensor<float> correction = halfBuf_.Get<half>().ReinterpretCast<float>();
+    LocalTensor<half> halfFeed = halfBuf_.Get<half>();
+    LocalTensor<half> inverse = qHalfBuf_.Get<half>()[ATTEN_ELEMS];
+    Adds(original, rhs, 0.0f, 64 * 128);
+    PipeBarrier<PIPE_V>();
+    for (uint32_t column = 0; column < 128; column += 64) {
+      CastFloatRowsToHalfSized(halfFeed, original[column], 64, 64, 128);
+      microMm_.MmANz(rhs[column], inverse, halfFeed, cNz, 64, 128);
+    }
+    for (uint32_t iteration = 0; iteration < 1; ++iteration) {
+      for (uint32_t column = 0; column < 128; column += 64) {
+        IrResidual(a, rhs, original, column);
+        Cast(halfFeed, residual, RoundMode::CAST_NONE, ATTEN_ELEMS);
+        PipeBarrier<PIPE_V>();
+        microMm_.MmANz(correction, inverse, halfFeed, cNz, 64, 64);
+        Add(rhs[column], rhs[column], correction, static_cast<uint64_t>(64), 64,
+            {1, 1, 1, 16, 16, 8});
+        PipeBarrier<PIPE_V>();
+      }
+    }
+    // Conservative empirical convergence gate. Small backward residual alone
+    // is NOT a proof of forward accuracy for ill-conditioned systems; the
+    // standalone golden/real-input suite remains mandatory for this candidate.
+    float maxResidual = 0.0f;
+    float maxSolution = 0.0f;
+    for (uint32_t column = 0; column < 128; column += 64) {
+      IrResidual(a, rhs, original, column);
+      const float rMax = IrMaxAbs(residual);
+      if (rMax > maxResidual) maxResidual = rMax;
+      Muls(residual, rhs[column], 1.0f, static_cast<uint64_t>(64), 64, {1, 1, 8, 16});
+      PipeBarrier<PIPE_V>();
+      const float xMax = IrMaxAbs(residual);
+      if (xMax > maxSolution) maxSolution = xMax;
+    }
+    return maxSolution < 1.0e29f && maxResidual < 1.0e29f &&
+           (maxResidual == 0.0f || maxResidual * irInverseNorm_ <=
+            5.0e-4f * maxSolution * (1.0f - irDefectNorm_));
+  }
+
+  // Alternative rounding correction: retain FP32 T, split both T and RHS
+  // into hi/lo half operands, accumulate three products in FP32. No repeated
+  // residual matmuls. Finite/range checks are not accuracy certification:
+  // the same external CPU/per-chunk/every-repeat cosine gate is mandatory.
+  __aicore__ inline bool IrCompApply(LocalTensor<float> inverseNz, LocalTensor<float> rhs) {
+    LocalTensor<float> operand = tmpBuf_.Get<float>();
+    LocalTensor<float> resultNz = storeBuf_.Get<half>().ReinterpretCast<float>();
+    LocalTensor<float> splitScratch = halfBuf_.Get<half>().ReinterpretCast<float>();
+    LocalTensor<half> splitHalf = qHalfBuf_.Get<half>();
+    for (uint32_t column = 0; column < 128; column += 64) {
+      IrNdToNz(operand, rhs, 128, column);
+      microMm_.MmNz2(resultNz, inverseNz, operand, splitHalf, splitScratch);
+      IrNzToNd(operand, resultNz);
+      // Preserve signs in RHS before IrMaxAbs destroys the temporary operand.
+      Muls(rhs[column], operand, 1.0f, static_cast<uint64_t>(64), 64, {1, 1, 16, 8});
+      PipeBarrier<PIPE_V>();
+      if (!(IrMaxAbs(operand) < 60000.0f)) return false;
+    }
+    return true;
+  }
+
+  __aicore__ inline bool ProcessRefinedTask(uint32_t b, uint32_t kHeadIdx, uint32_t vHeadIdx,
+                                            uint32_t tokenStart) {
+    LocalTensor<float> a = attnBuf_.Get<float>();
+    LocalTensor<float> rhs = rhsBuf_.Get<float>();
+    LocalTensor<float> scratch = tmpBuf_.Get<float>();
+    LocalTensor<float> cScratch = storeBuf_.Get<half>().ReinterpretCast<float>();
+    LocalTensor<float> halfScratch = halfBuf_.Get<half>().ReinterpretCast<float>();
+    LocalTensor<half> qHalf = qHalfBuf_.Get<half>();
+    // Private alternative: solve (I-A)T=I in FP32 once at width64, rather
+    // than solving both128-wide W/U on the vector pipe. A remains read-only;
+    // no GM snapshot/save/reload needed. Use existing storeBuf for ND T,
+    // halfBuf for identity load, tmpBuf for the column solve's broadcasts.
+    SyncEvent<HardEvent::V_MTE2>(HardEvent::V_MTE2);
+    DataCopy(halfScratch, iNzGm_, ATTEN_ELEMS);
+    SyncEvent<HardEvent::MTE2_V>(HardEvent::MTE2_V);
+    IrNzToNd(cScratch, halfScratch);
+    Fp32ForwardSubstitution(a, cScratch, 64, 64);
+    // For exact T, error=T*residual. Estimate ||T||inf from the FP32
+    // inverse itself, not from rounded M and a Cube contraction estimate.
+    // FP32 inverse/residual arithmetic is still approximate: this empirical
+    // forward-error screen does NOT replace external per-chunk cosine tests.
+    NeedsFp32ForwardSubstitution(cScratch, scratch, expGBuf_.Get<float>(), negABuf_.Get<float>());
+    irInverseNorm_ = gateMaxRowSum_;
+    irDefectNorm_ = 0.0f;  // final screen uses ||T_fp32||inf directly
+    if (!(irInverseNorm_ < 60000.0f)) return false;
+    IrNdToNz(scratch, cScratch, 64);
+    // A is dead after the FP32 inverse. Keep T in its16KB buffer, freeing
+    // storeBuf for Cube results and tmpBuf for one RHS slice at a time.
+    Adds(a, scratch, 0.0f, ATTEN_ELEMS);
+    PipeBarrier<PIPE_V>();
+    if (!IrCompApply(a, rhs)) return false;
+    LocalTensor<half> output = storeBuf_.Get<half>();
+    Cast(output, rhs, RoundMode::CAST_NONE, chunkKElems_);
+    SyncEvent<HardEvent::V_MTE3>(HardEvent::V_MTE3);
+    StoreBhtdChunk(wKernelGm_, output, b, vHeadIdx, tokenStart, vNumHead_, 128, 128);
+    // Finish the W DMA before residuals reuse output staging. Later U failure
+    // retries the whole task and overwrites W before kernel completion.
+    SyncEvent<HardEvent::MTE3_MTE2>(HardEvent::MTE3_MTE2);
+    SyncEvent<HardEvent::V_MTE2>(HardEvent::V_MTE2);
+    LoadBthdChunk(vGm_, halfBuf_.Get<half>(), b, tokenStart, vHeadIdx, vNumHead_, 128, 128);
+    SyncEvent<HardEvent::MTE2_V>(HardEvent::MTE2_V);
+    Cast(rhs, halfBuf_.Get<half>(), RoundMode::CAST_NONE, chunkVElems_);
+    PipeBarrier<PIPE_V>();
+    BroadcastMulRowsFloat(rhs, rhs, rowBuf_.Get<float>(), scratch, 64, 128, 128, 128);
+    if (!IrCompApply(a, rhs)) return false;
+    Cast(output, rhs, RoundMode::CAST_NONE, chunkVElems_);
+    SyncEvent<HardEvent::V_MTE3>(HardEvent::V_MTE3);
+    StoreBhtdChunk(uKernelGm_, output, b, vHeadIdx, tokenStart, vNumHead_, 128, 128);
+    SyncEvent<HardEvent::MTE3_MTE2>(HardEvent::MTE3_MTE2);
+    if ((vHeadIdx % headGroups_) == 0) StoreQKKernel(b, kHeadIdx, tokenStart, qHalf);
+    PipeBarrier<PIPE_ALL>();
+    return true;
+  }
+
   __aicore__ inline void ProcessOneTask(uint32_t b, uint32_t kHeadIdx, uint32_t vHeadIdx, uint32_t chunkIdx) {
     // The compensated doubling can overflow half range on rare tasks whose T
     // outgrows the row-sum gate's estimate (real model data overflows below
@@ -646,6 +844,7 @@ class KernelComputeWy {
     // BEFORE any GM store; the retry re-derives everything from GM on the
     // exact scalar path, so a mis-predicted gate costs one task redo, not NaN.
     if (!ProcessOneTaskAttempt(b, kHeadIdx, vHeadIdx, chunkIdx, /*allowCompDoubling=*/true)) {
+      PipeBarrier<PIPE_ALL>();  // Drain the failed candidate before exact retry.
       ProcessOneTaskAttempt(b, kHeadIdx, vHeadIdx, chunkIdx, /*allowCompDoubling=*/false);
     }
   }
@@ -717,6 +916,9 @@ class KernelComputeWy {
     // betaLocal must survive for the pass-2 βV product.
     const bool useFp32ForwardSubstitution =
         NeedsFp32ForwardSubstitution(attnLocal, scratch, expGLocal, reduceScratch);
+    if (allowCompDoubling && useFp32ForwardSubstitution && kHeadDim_ == 128 && vHeadDim_ == 128) {
+      return ProcessRefinedTask(b, kHeadIdx, vHeadIdx, tokenStart);
+    }
     // Gate-tripped tasks on the all-micro path take the compensated doubling
     // (hi+lo split matmuls) instead of the ~50x slower scalar substitution;
     // small head dims keep the scalar fallback (their gram runs on the lib and
@@ -848,12 +1050,14 @@ class KernelComputeWy {
   bool valid_{false};
   // Max |row sum| of A from the last gate check; NaN when the data was NaN.
   float gateMaxRowSum_{0.0f};
+  float irInverseNorm_{0.0f}, irDefectNorm_{0.0f};
   uint32_t batch_{0}, seqlen_{0}, kNumHead_{0}, vNumHead_{0}, kHeadDim_{0}, vHeadDim_{0};
   uint32_t chunkSize_{0}, numChunks_{0}, headGroups_{0}, alignK_{0}, alignV_{0}, chunkKElems_{0}, chunkVElems_{0};
   uint32_t maxAlign_{0};
   uint32_t localWorkspaceSize_{0}, perCoreWorkspaceBytes_{0}, usedCoreNum_{1};
   GlobalTensor<half> qGm_, kGm_, vGm_, betaGm_, qKernelGm_, kKernelGm_, wKernelGm_, uKernelGm_;
   GlobalTensor<float> gGm_, gKernelGm_, iNzGm_;
+  GlobalTensor<float> irSnapshotGm_;
   WyCubeGemm cubeGemm_;
   WyMicroMm microMm_;
   TBuf<TPosition::VECCALC> halfBuf_, qHalfBuf_, rhsBuf_, attnBuf_, gBuf_,
