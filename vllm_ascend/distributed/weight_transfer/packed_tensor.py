@@ -118,10 +118,16 @@ def packed_broadcast_consumer(
         dtypes: list[torch.dtype],
         tensor_sizes: list[int],
     ) -> list[tuple[str, torch.Tensor]]:
-        """Unpack a packed uint8 tensor into a list of typed tensors."""
+        """Unpack a packed uint8 tensor into a list of typed tensors.
+
+        Each result is cloned out of ``packed_tensor``. Layerwise reload
+        keeps the unpacked tensors until the layer finishes, and the
+        consumer reuses a small set of staging buffers for later chunks.
+        A view into the buffer would be overwritten by the next broadcast.
+        """
         unpacked_tensors = packed_tensor.split(tensor_sizes)
         unpacked_list = [
-            (name, tensor.contiguous().view(dtype).view(*shape))
+            (name, tensor.contiguous().view(dtype).view(*shape).clone())
             for name, shape, dtype, tensor in zip(names, shapes, dtypes, unpacked_tensors)
         ]
         return unpacked_list
