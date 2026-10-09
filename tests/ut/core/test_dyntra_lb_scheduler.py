@@ -426,7 +426,7 @@ def test_dyntra_lb_reconciles_connector_hit_with_local_partial_tail(monkeypatch)
         block_size=block_size,
     )
     scheduler.add_request(request)
-    scheduler.connector.supports_divergent_local_hybrid_hits = True
+    assert scheduler.connector.supports_divergent_local_hybrid_hits is True
     empty_blocks = scheduler.kv_cache_manager.empty_kv_cache_blocks
     connector_local_token_counts = []
     truncate_calls = []
@@ -480,7 +480,11 @@ def test_dyntra_lb_uses_standard_lookup_without_divergent_hits(monkeypatch):
         block_size=block_size,
     )
     scheduler.add_request(request)
-    scheduler.connector.supports_divergent_local_hybrid_hits = False
+    monkeypatch.setattr(
+        type(scheduler.connector),
+        "supports_divergent_local_hybrid_hits",
+        property(lambda self: False),
+    )
     empty_blocks = scheduler.kv_cache_manager.empty_kv_cache_blocks
     connector_local_token_counts = []
     truncate_calls = []
@@ -1320,7 +1324,10 @@ def test_dyntra_lb_lifecycle_hooks_clear_paused_state(monkeypatch):
     )
     scheduler._preempt_request(stale, 1.0, drop_stale_output=True)
     scheduler._preempt_request(normal, 2.0)
-    assert preempt_calls == [("stale", (), {"drop_stale_output": True}), ("normal", (), {})]
+    assert preempt_calls == [
+        ("stale", (), {"drop_stale_output": True}),
+        ("normal", (), {"drop_stale_output": False}),
+    ]
     assert scheduler._lb_paused_req_ids == {"paused", "free"}
 
     paused = create_request(request_id=1)
