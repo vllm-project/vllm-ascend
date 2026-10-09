@@ -19,14 +19,13 @@ PCP support is experimental and available only with ModelRunner V2. The followin
 
 | Attention Backend | Basic PCP | Prefix Caching + PCP | Chunked Prefill + PCP | MLAPO + PCP | Speculative Decoding + PCP | P/D Disaggregation + PCP | KV Cache Pool + PCP | Sequence Parallelism (SP) + PCP |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| MLA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | 🟠 Partial compatibility (MTP, eager and `FULL_DECODE_ONLY`) | ✅ Full compatibility (`MooncakeConnectorV1`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ❌ No compatibility |
-| GQA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | — Not applicable | 🟠 Partial compatibility (Eagle3, eager and `FULL_DECODE_ONLY`) | ✅ Full compatibility (`MooncakeConnectorV1`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ❌ No compatibility |
-| SFA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ❌ No compatibility | ❌ No compatibility | ✅ Full compatibility (`MooncakeConnectorV1`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ❌ No compatibility |
-| DSA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | — Not applicable | 🟠 Partial compatibility (MTP and DSpark, eager and `FULL_DECODE_ONLY`) | ✅ Full compatibility (`MooncakeHybridConnector`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ❌ No compatibility |
+| MLA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | 🟠 Partial compatibility (MTP, eager and `FULL_DECODE_ONLY`) | ✅ Full compatibility (`MooncakeConnectorV1`, `MooncakeConnectorV2`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ✅ Full compatibility |
+| GQA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | — Not applicable | 🟠 Partial compatibility (Eagle3, eager and `FULL_DECODE_ONLY`) | ✅ Full compatibility (`MooncakeConnectorV1`, `MooncakeConnectorV2`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ✅ Full compatibility |
+| SFA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | 🟠 Partial compatibility (MTP, eager and `FULL_DECODE_ONLY`) | ✅ Full compatibility (`MooncakeConnectorV1`, `MooncakeConnectorV2`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ✅ Full compatibility |
+| DSA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | — Not applicable | 🟠 Partial compatibility (MTP and DSpark, eager and `FULL_DECODE_ONLY`) | ✅ Full compatibility (`MooncakeHybridConnector`, `MooncakeConnectorV2`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ✅ Full compatibility |
 
 - ✅ **Full compatibility**: The basic path or feature combination is supported.
 - 🟠 **Partial compatibility**: The basic path or feature combination is supported with the stated limitations.
-- ❌ **No compatibility**: The backend or feature combination is not supported by the current MRV2 PCP implementation.
 - **Not applicable**: The feature does not apply to the attention backend.
 
 ### Decode Context Parallel
@@ -121,7 +120,9 @@ For either method, remove `--enforce-eager` and add the following option to use 
 - Full graph execution with PCP is limited to `FULL_DECODE_ONLY`.
 - Pipeline parallelism, encoder-decoder models, multimodal inputs, and LoRA are not supported with MRV2 PCP.
 - SFA draft attention is not supported with PCP speculative decoding.
-- PCP and DCP cannot be enabled simultaneously.
+- PCP and DCP can be stacked for MLA, SFA, and GQA. MLA and SFA support DCP
+  equal to PCP or TP x PCP. GQA stacking supports only equal
+  prefill_context_parallel_size and decode_context_parallel_size.
 - Adaptive verification is not supported with PCP speculative decoding.
 - Dynamic draft lengths are outside the currently validated scope.
 - PCP and [DSA-CP](#dsa-cp) cannot be enabled simultaneously with the DSA backend.

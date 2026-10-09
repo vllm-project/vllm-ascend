@@ -2252,6 +2252,7 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
             dtype=torch.int64,
             device=device,
         )
+        self._global_rope_buffers: dict[tuple[str, str], tuple[torch.Tensor, torch.Tensor]] = {}
 
     @classmethod
     def get_cudagraph_support(
@@ -2426,7 +2427,9 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
         num_actual_reqs: int | None,
         common_ratio_to_sas_metadata: dict[Any, Any],
     ) -> dsa_v1.AscendDSAMetadata:
-        if local_common_attn_metadata.num_actual_tokens > 0:
+        # A captured graph still runs its padded queries, so their metadata
+        # must be refreshed even when this rank owns no tokens.
+        if local_common_attn_metadata.query_start_loc_cpu[-1] > 0:
             return super().build(
                 common_prefix_len,
                 local_common_attn_metadata,
@@ -2489,12 +2492,26 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
                 common_ratio_to_sas_metadata={},
                 can_use_rope_cache=False,
             )
+            if (
+                not has_prefill
+                and self._is_decode_sharded
+                and self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs()
+            ):
+                # Keep the global RoPE at graph-stable addresses of its own.
+                req_metadata = global_dsa_metadata.req_metadata
+                assert req_metadata is not None
+                req_metadata.cos, req_metadata.sin = req_metadata.cos.copy_to_buffers(
+                    self._global_rope_buffers, self._hidden_restore_idx_buffer.numel()
+                )
         local_common_attn_metadata = self._build_local_common_attn_metadata(
             pcp_context,
             common_attn_metadata,
             pcp_cache_group_idx,
             has_prefill,
         )
+        if local_common_attn_metadata.num_actual_tokens == 0:
+            # The placeholder request of an empty rank is graph padding too.
+            num_actual_reqs = 0
         local_common_attn_metadata = self._build_graph_common_attn_metadata(
             local_common_attn_metadata,
             num_actual_reqs,

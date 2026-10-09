@@ -4,6 +4,7 @@
 
 from dataclasses import replace
 
+import torch
 from vllm.config import VllmConfig
 from vllm.v1.core.kv_cache_utils import may_override_num_blocks
 from vllm.v1.kv_cache_interface import (
@@ -18,8 +19,107 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSlidingWindowMLASpec,
 )
+from vllm_ascend.device.hardware_profile import (
+    HardwareCapability,
+    get_current_hardware_profile,
+)
 
 STATE_RING_ROWS = 32
+
+# Fixed dimensions accepted by the packaged mixed-quant attention ABI.
+# The actual head sizes come from the model config; these bounds reject
+# unsupported layouts before allocating caches, rather than override config.
+MLA_HEAD_DIM = 512
+INDEX_HEAD_DIM = 128
+INDEX_FOLD_ROWS = 8
+
+
+def uses_a5_packed_cache() -> bool:
+    """Select the V4.1 cache ABI from the detected hardware profile."""
+    return get_current_hardware_profile().supports(HardwareCapability.DSV41_PACKED_CACHE)
+
+
+def make_swa_cache_spec(*, block_size, window_size, head_size, dtype, cache_dtype):
+    if uses_a5_packed_cache():
+        if head_size != MLA_HEAD_DIM:
+            raise ValueError(f"A5 DeepSeek V4.1 requires head size {MLA_HEAD_DIM}, got {head_size}")
+        # FP8 values followed by one BF16 scale per 32 values.
+        head_size += (head_size // 32) * torch.bfloat16.itemsize
+        dtype = torch.uint8
+        cache_dtype = "a5_mxfp8_bf16_scale"
+    return AscendSlidingWindowMLASpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=head_size,
+        dtype=dtype,
+        sliding_window=window_size,
+        cache_dtype_str=cache_dtype,
+        model_version="deepseek_v41",
+        alignment=None,
+    )
+
+
+def make_mla_cache_spec(*, block_size, head_size, compress_ratio):
+    if uses_a5_packed_cache():
+        if head_size != MLA_HEAD_DIM:
+            raise ValueError(f"A5 DeepSeek V4.1 requires head size {MLA_HEAD_DIM}, got {head_size}")
+        # Two FP4 values per byte, followed by one BF16 scale per 16 values.
+        head_size = head_size // 2 + (head_size // 16) * torch.bfloat16.itemsize
+        dtype = torch.uint8
+        scale_dtype = torch.bfloat16
+    else:
+        dtype = torch.bfloat16
+        scale_dtype = torch.int8
+    return AscendMLAAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=head_size,
+        dtype=dtype,
+        tokens_per_state=compress_ratio,
+        model_version="deepseek_v41",
+        storage_block_size=block_size // compress_ratio,
+        scale_dtype=scale_dtype,
+    )
+
+
+def make_index_cache_spec(*, block_size, head_size, compress_ratio):
+    if uses_a5_packed_cache():
+        if head_size != INDEX_HEAD_DIM:
+            raise ValueError(f"A5 DeepSeek V4.1 requires head size {INDEX_HEAD_DIM}, got {head_size}")
+        scale_dim = head_size // 32
+        head_size //= 2
+        dtype = torch.uint8
+        scale_dtype = torch.uint8
+    else:
+        dtype = torch.int8
+        scale_dim = 1
+        scale_dtype = torch.float16
+    return AscendMLAAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=head_size,
+        dtype=dtype,
+        tokens_per_state=compress_ratio,
+        model_version="deepseek_v41",
+        storage_block_size=block_size // compress_ratio,
+        scale_dim=scale_dim,
+        scale_dtype=scale_dtype,
+    )
+
+
+def make_folded_index_cache_spec(*, block_size):
+    """QSLI candidate-source view: eight K/scale rows per 544-byte row."""
+    if block_size % INDEX_FOLD_ROWS:
+        raise ValueError("A5 folded index page must contain full 8-token groups")
+    return AscendMLAAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=INDEX_FOLD_ROWS * (INDEX_HEAD_DIM // 2 + INDEX_HEAD_DIM // 32),
+        dtype=torch.uint8,
+        tokens_per_state=INDEX_FOLD_ROWS,
+        model_version="deepseek_v41",
+        storage_block_size=block_size // INDEX_FOLD_ROWS,
+    )
 
 
 def is_deepseek_v41_cache(specs_or_groups):
@@ -50,7 +150,7 @@ def get_layer_tuples(specs):
     state = sorted((name for name, spec in specs.items() if isinstance(spec, CircularBufferSpec)), key=_layer_number)
     swa = {name for name, spec in specs.items() if isinstance(spec, AscendSlidingWindowMLASpec)}
 
-    full = sorted((name for name in mla if not specs[name].scale_dim), key=_layer_number)
+    full = sorted((name for name in mla if name.endswith(".long_kv_cache")), key=_layer_number)
     target_swa = sorted((name for name in swa if ".mtp." not in f".{name}"), key=_layer_number)
     draft_swa = sorted((name for name in swa if ".mtp." in f".{name}"), key=_draft_layer_number)
 
@@ -59,18 +159,21 @@ def get_layer_tuples(specs):
     for slot_idx, kv_name in enumerate(full):
         prefix = kv_name.rsplit(".", 1)[0]
         index_name = prefix + ".indexer.k_cache"
+        folded_name = index_name + "_folded"
+        folded_spec = specs.get(folded_name)
         index_spec = specs[index_name]
         kv_spec = specs[kv_name]
         aliases = ([state[slot_idx]] if slot_idx < len(state) else []) + target_swa[slot_idx :: len(full)]
         kv_bytes = kv_spec.unpadded_page_size_bytes
         index_bytes = index_spec.unpadded_page_size_bytes
+        folded_bytes = folded_spec.unpadded_page_size_bytes if folded_spec is not None else 0
         if slot_idx < len(draft_swa):
             aliases.append(draft_swa[slot_idx])
         capacity = max(
-            kv_bytes + index_bytes,
+            kv_bytes + index_bytes + folded_bytes,
             *(specs[name].unpadded_page_size_bytes for name in aliases),
         )
-        layer_tuples.append((kv_name, index_name, *aliases))
+        layer_tuples.append((kv_name, index_name, *((folded_name,) if folded_spec is not None else ()), *aliases))
         page_sizes.append(capacity)
     return page_sizes, layer_tuples
 
@@ -80,10 +183,18 @@ def group_cache_specs(specs):
     page_sizes, layer_tuples = get_layer_tuples(specs)
     padded = {}
     for page_size, layer_tuple in zip(page_sizes, layer_tuples):
-        kv_name, index_name, *aliases = layer_tuple
+        kv_name, index_name, *rest = layer_tuple
+        folded_name = index_name + "_folded"
+        has_folded = folded_name in rest
+        aliases = rest[1:] if has_folded else rest
         kv_bytes = specs[kv_name].unpadded_page_size_bytes
+        index_bytes = specs[index_name].unpadded_page_size_bytes
         padded[kv_name] = replace(specs[kv_name], page_size_padded=kv_bytes)
-        padded[index_name] = replace(specs[index_name], page_size_padded=page_size - kv_bytes)
+        padded[index_name] = replace(
+            specs[index_name], page_size_padded=index_bytes if has_folded else page_size - kv_bytes
+        )
+        if has_folded:
+            padded[folded_name] = replace(specs[folded_name], page_size_padded=page_size - kv_bytes - index_bytes)
         padded.update((name, replace(specs[name], page_size_padded=page_size)) for name in aliases)
 
     mla_names = [name for name, spec in padded.items() if isinstance(spec, AscendMLAAttentionSpec)]

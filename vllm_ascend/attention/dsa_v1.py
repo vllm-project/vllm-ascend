@@ -67,7 +67,11 @@ if TYPE_CHECKING:
 
 if HAS_TRITON:
     from vllm_ascend.ops.triton.rms_norm import triton_q_rms  # noqa: F811
+    from vllm_ascend.ops.triton.spec_decode.dspark_swa_indices import (
+        build_dspark_swa_indices_triton,
+    )
 else:
+    build_dspark_swa_indices_triton = None  # type: ignore
     triton_q_rms = None  # type: ignore
 
 
@@ -457,6 +461,22 @@ def build_dspark_swa_indices(
         )
     if query_start_loc is None or seq_lens is None:
         raise ValueError("DSpark SWA query_start_loc and seq_lens must both be provided")
+
+    if (
+        use_logical_indices
+        and build_dspark_swa_indices_triton is not None
+        and query_start_loc.device.type == "npu"
+        and num_decode_tokens is not None
+        and indices_output is None
+        and buffer is None
+    ):
+        return build_dspark_swa_indices_triton(
+            query_start_loc,
+            seq_lens,
+            num_decode_tokens,
+            index_width,
+            window_size,
+        )
 
     query_lens = query_start_loc[1:] - query_start_loc[:-1]
     prefix_lens = seq_lens - query_lens
