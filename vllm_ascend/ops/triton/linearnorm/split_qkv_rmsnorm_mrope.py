@@ -276,13 +276,13 @@ def split_qkv_rmsnorm_mrope_kernel(
             if num_q_heads < 12:
                 BLOCK_H_Q: tl.constexpr = num_q_heads
             else:
-                BLOCK_H_Q: tl.constexpr = 12
+                BLOCK_H_Q: tl.constexpr = 12  # type: ignore[no-redef]
             # Per-head GM slot width inside the q(+gate) segment of each row:
             # [q_h | gate_h] = head_size * 2 with gate, [q_h] = head_size without.
             if gate_size == 0:
                 HEAD_SLOT: tl.constexpr = head_size
             else:
-                HEAD_SLOT: tl.constexpr = head_size * 2
+                HEAD_SLOT: tl.constexpr = head_size * 2  # type: ignore[no-redef]
             NQ_TILE: tl.constexpr = BLOCK_M * BLOCK_H_Q
             N_FULL_TILES: tl.constexpr = num_q_heads // BLOCK_H_Q
             N_BOUNDARY_HEADS: tl.constexpr = num_q_heads - N_FULL_TILES * BLOCK_H_Q
@@ -759,7 +759,7 @@ def split_qkv_rmsnorm_mrope_kernel(
                 tl.store(tail_out_gate_offset + tl.arange(0, gate_size), tail_in_gate_tensor)
     else:
         NQ: tl.constexpr = BLOCK_M * num_q_heads
-        NK: tl.constexpr = BLOCK_M * num_kv_heads
+        NK: tl.constexpr = BLOCK_M * num_kv_heads  # type: ignore[no-redef]
         n_iter = (loop_num + BLOCK_M - 1) // BLOCK_M
         for index in range(n_iter):
             ## load ##
@@ -1038,6 +1038,8 @@ def _ac_load_policy():
     # missing registration raises AttributeError during class creation.
     module_name = "wp1_ac_integrated_policy"
     spec = importlib.util.spec_from_file_location(module_name, _AC_POLICY_PATH)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load dispatch policy from {_AC_POLICY_PATH}")
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module
     spec.loader.exec_module(module)
@@ -1125,7 +1127,9 @@ def _ac_observe_backend_ub_budget(toolchain_fingerprint: str) -> dict:
     }
     try:
         # Internal backend interface -- best-effort only; not assumed to exist.
-        import triton.backends.ascend.runtime.utils as _backend_runtime_utils  # type: ignore[import-not-found]
+        from triton.backends.ascend.runtime import (  # type: ignore[import-not-found,import-untyped]
+            utils as _backend_runtime_utils,
+        )
 
         kb = getattr(_backend_runtime_utils, "ub_size_in_kbytes", None)
         if type(kb) is int and _UB_KB_MIN <= kb <= _UB_KB_MAX:

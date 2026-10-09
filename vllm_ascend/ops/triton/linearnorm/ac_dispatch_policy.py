@@ -94,6 +94,8 @@ def _load_demand() -> _Demand:
         return _DEMAND_CACHE
     module_name = "wp1_ac_integrated_g3_workload_demand"
     spec = importlib.util.spec_from_file_location(module_name, _POLICY_DIR / "ac_ub_demand.py")
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load demand module from {_POLICY_DIR / 'ac_ub_demand.py'}")
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module
     spec.loader.exec_module(module)
@@ -644,7 +646,7 @@ def _parse_class_from_dict(d: dict) -> EvidenceClass:
     toolchain_compat_raw = d.get("toolchain_compat")
     if type(toolchain_compat_raw) is not dict or not toolchain_compat_raw:
         raise ValueError("class toolchain_compat must be a non-empty object")
-    toolchain_compat = {}
+    toolchain_compat: dict[str, dict[str, tuple[int, int]]] = {}
     for name, interval in toolchain_compat_raw.items():
         if type(interval) is not dict:
             raise ValueError(f"class toolchain_compat[{name}] must be an object")

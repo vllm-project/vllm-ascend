@@ -46,7 +46,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypeGuard
 
 # ---------------------------------------------------------------------------
 # Capacity resolution
@@ -120,7 +120,7 @@ def parse_toolchain_fingerprint(fingerprint: str) -> dict[str, tuple[int, int]] 
     return parsed
 
 
-def _valid_int_capacity(value: object) -> bool:
+def _valid_int_capacity(value: object) -> TypeGuard[int]:
     if type(value) is not int:
         return False
     return _MIN_CAPACITY_BYTES <= value <= _MAX_CAPACITY_BYTES
@@ -437,6 +437,7 @@ def demand_estimate(
         has_bias=has_bias,
     )
 
+    assumptions: tuple[str, ...]
     if variant == "m1":
         path = "m1_row"
         peak = m1_peak
