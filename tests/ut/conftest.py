@@ -142,6 +142,8 @@ if not _npu_available:
     _default_npu_stream = _NpuStreamStub()
 
     torch.npu = MagicMock()
+    # Use the mock class so NPUGraph subclasses retain their Python methods.
+    torch.npu.NPUGraph = MagicMock
     torch.npu.is_available = MagicMock(return_value=False)
     torch.npu.Stream = _NpuStreamStub
     torch.npu.Event = MagicMock
