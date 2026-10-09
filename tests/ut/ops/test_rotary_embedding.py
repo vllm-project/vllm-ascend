@@ -108,10 +108,12 @@ class TestRopeForwardOOT:
         assert query_out.dtype == torch.float8_e4m3fn
         assert key_out.dtype == torch.float8_e4m3fn
 
+    @pytest.mark.parametrize("positions_dtype", [torch.int32, torch.int64])
     @pytest.mark.parametrize("is_neox_style,rotary_mode", [(True, "half"), (False, "interleave")])
     @patch("vllm_ascend.ops.rotary_embedding.torch_npu.npu_mrope", create=True)
-    def test_non_fp8_always_uses_asc(self, mock_npu_mrope, is_neox_style, rotary_mode):
+    def test_non_fp8_always_uses_asc(self, mock_npu_mrope, is_neox_style, rotary_mode, positions_dtype):
         positions, query, key = _make_tensors()
+        positions = positions.to(positions_dtype)
         cos_sin_cache = torch.empty(MAX_POS, ROTARY_DIM, dtype=query.dtype)
         mock_npu_mrope.return_value = query, key
 
@@ -123,6 +125,11 @@ class TestRopeForwardOOT:
         assert query_out.shape == query.shape
         assert key_out.shape == key.shape
         mock_npu_mrope.assert_called_once()
+        positions_arg = mock_npu_mrope.call_args.args[0]
+        assert positions_arg.dtype == torch.int64
+        torch.testing.assert_close(positions_arg, positions.to(torch.int64))
+        if positions_dtype == torch.int64:
+            assert positions_arg is positions
         assert mock_npu_mrope.call_args.kwargs["rotary_mode"] == rotary_mode
 
 
