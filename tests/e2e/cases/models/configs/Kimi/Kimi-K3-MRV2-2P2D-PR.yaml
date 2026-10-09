@@ -1,0 +1,410 @@
+# PR E2E Kimi K3 MRV2 external-DP 2P2D: nodes 0/1 are prefiller ranks and
+# nodes 2/3 are decoder ranks. The four-node allocation is intentional:
+# each rank owns one 16-NPU node, matching the validated K3 2P2D topology.
+#
+# Precision is a 60-sample GPQA evaluation. AISBench reads the answer key from
+# the dataset and computes the score; no model response is hard-coded here.
+# The score uses the same GPQA acceptance rule as the existing Kimi K3 A3
+# coverage: 90 percent baseline with a five-point tolerance. Performance uses
+# the shared 8K AISBench workload only. Its baseline remains a placeholder
+# until the first full-model calibration; the existing lower-bound check then
+# accepts optimizations above the baseline.
+# The chat_completion entry performs a real proxy request and checks that the
+# response contains generated text before AISBench starts.
+#
+# After the external proxy is ready, run the curl output check with:
+# SERVICE_URL=http://<proxy-node>:1999 \
+# MODEL_NAME=Eco-Tech/Kimi-K3-w4a8 \
+# tests/e2e/cases/models/kimi_k3_mrv2_2p2d_curl_smoke.sh
+
+test_name: "Kimi-K3-MRV2-2P2D-PR"
+model: "Eco-Tech/Kimi-K3-w4a8"
+num_nodes: 4
+npu_per_node: 16
+dp_load_balancing: external
+
+routing:
+  type: "disaggregated_prefill"
+  groups:
+    prefiller: [0, 1]
+    decoder: [2, 3]
+
+config:
+  - node_index: 0
+    port_start: 13700
+    dp_rpc_port: 13400
+    dp_size: 2
+    dp_size_local: 1
+    dp_rank_start: 0
+    tp_size: 16
+    dp_address: "${NODE_0_IP}"
+
+  - node_index: 1
+    port_start: 13700
+    dp_rpc_port: 13400
+    dp_size: 2
+    dp_size_local: 1
+    dp_rank_start: 1
+    tp_size: 16
+    dp_address: "${NODE_0_IP}"
+
+  - node_index: 2
+    port_start: 13701
+    dp_rpc_port: 13410
+    dp_size: 2
+    dp_size_local: 1
+    dp_rank_start: 0
+    tp_size: 16
+    dp_address: "${NODE_2_IP}"
+
+  - node_index: 3
+    port_start: 13701
+    dp_rpc_port: 13410
+    dp_size: 2
+    dp_size_local: 1
+    dp_rank_start: 1
+    tp_size: 16
+    dp_address: "${NODE_2_IP}"
+
+env_common: &env_common
+  VLLM_USE_V2_MODEL_RUNNER: "1"
+  VLLM_WORKER_MULTIPROC_METHOD: "spawn"
+  VLLM_USE_MODELSCOPE: "true"
+  VLLM_SERVER_DEV_MODE: "1"
+  SERVER_PORT: "${PORT}"
+  ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
+  VLLM_ENGINE_READY_TIMEOUT_S: "7200"
+  VLLM_RPC_TIMEOUT: "3600000"
+  VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "30000"
+  HCCL_EXEC_TIMEOUT: "2040"
+  HCCL_CONNECT_TIMEOUT: "1200"
+  HCCL_BUFFSIZE: "1024"
+  HCCL_OP_EXPANSION_MODE: "AIV"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  OMP_PROC_BIND: "false"
+  OMP_NUM_THREADS: "10"
+  TASK_QUEUE_ENABLE: "1"
+
+templates:
+  - node_index: 0
+    envs:
+      <<: *env_common
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - $SERVER_PORT
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-size-local
+      - ${DP_SIZE_LOCAL}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --enable-expert-parallel
+      - --enable-prefix-caching
+      - --prefill-context-parallel-size
+      - "1"
+      - --decode-context-parallel-size
+      - "16"
+      - --cp-kv-cache-interleave-size
+      - "384"
+      - --block-size
+      - "384"
+      - --mamba-cache-mode
+      - align
+      - --max-num-seqs
+      - "16"
+      - --max-model-len
+      - "10240"
+      - --max-num-batched-tokens
+      - "8192"
+      - --gpu-memory-utilization
+      - "0.92"
+      - --safetensors-load-strategy
+      - prefetch
+      - --quantization
+      - ascend
+      - --tokenizer-mode
+      - kimi_k3
+      - --reasoning-parser
+      - kimi_k3
+      - --tool-call-parser
+      - kimi_k3
+      - --enable-auto-tool-choice
+      - --async-scheduling
+      - --mm-encoder-tp-mode
+      - data
+      - --skip-mm-profiling
+      - --mm-processor-cache-gb
+      - "1"
+      - --limit-mm-per-prompt
+      - '{"vision_chunk":0}'
+      - --api-server-count
+      - "1"
+      - --allowed-local-media-path
+      - /
+      - --trust-remote-code
+      - --seed
+      - "1024"
+      - --enforce-eager
+      - --kv-transfer-config
+      - '{"kv_connector":"MultiConnector","kv_role":"kv_producer","kv_buffer_device":"npu","engine_id":"kimi-k3-prefill-0","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV1","kv_role":"kv_producer","kv_buffer_device":"npu","kv_port":50012,"kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":16},"decode":{"dp_size":2,"tp_size":16}}}]}}'
+
+  - node_index: 1
+    envs:
+      <<: *env_common
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - $SERVER_PORT
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-size-local
+      - ${DP_SIZE_LOCAL}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --enable-expert-parallel
+      - --enable-prefix-caching
+      - --prefill-context-parallel-size
+      - "1"
+      - --decode-context-parallel-size
+      - "16"
+      - --cp-kv-cache-interleave-size
+      - "384"
+      - --block-size
+      - "384"
+      - --mamba-cache-mode
+      - align
+      - --max-num-seqs
+      - "16"
+      - --max-model-len
+      - "10240"
+      - --max-num-batched-tokens
+      - "8192"
+      - --gpu-memory-utilization
+      - "0.92"
+      - --safetensors-load-strategy
+      - prefetch
+      - --quantization
+      - ascend
+      - --tokenizer-mode
+      - kimi_k3
+      - --reasoning-parser
+      - kimi_k3
+      - --tool-call-parser
+      - kimi_k3
+      - --enable-auto-tool-choice
+      - --async-scheduling
+      - --mm-encoder-tp-mode
+      - data
+      - --skip-mm-profiling
+      - --mm-processor-cache-gb
+      - "1"
+      - --limit-mm-per-prompt
+      - '{"vision_chunk":0}'
+      - --api-server-count
+      - "1"
+      - --allowed-local-media-path
+      - /
+      - --trust-remote-code
+      - --seed
+      - "1024"
+      - --enforce-eager
+      - --kv-transfer-config
+      - '{"kv_connector":"MultiConnector","kv_role":"kv_producer","kv_buffer_device":"npu","engine_id":"kimi-k3-prefill-1","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV1","kv_role":"kv_producer","kv_buffer_device":"npu","kv_port":50112,"kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":16},"decode":{"dp_size":2,"tp_size":16}}}]}}'
+
+  - node_index: 2
+    envs:
+      <<: *env_common
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - $SERVER_PORT
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-size-local
+      - ${DP_SIZE_LOCAL}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --enable-expert-parallel
+      - --enable-prefix-caching
+      - --prefill-context-parallel-size
+      - "1"
+      - --decode-context-parallel-size
+      - "16"
+      - --cp-kv-cache-interleave-size
+      - "384"
+      - --block-size
+      - "384"
+      - --mamba-cache-mode
+      - align
+      - --max-num-seqs
+      - "16"
+      - --max-model-len
+      - "10240"
+      - --max-num-batched-tokens
+      - "8192"
+      - --gpu-memory-utilization
+      - "0.92"
+      - --safetensors-load-strategy
+      - lazy
+      - --quantization
+      - ascend
+      - --tokenizer-mode
+      - kimi_k3
+      - --reasoning-parser
+      - kimi_k3
+      - --tool-call-parser
+      - kimi_k3
+      - --enable-auto-tool-choice
+      - --async-scheduling
+      - --mm-encoder-tp-mode
+      - data
+      - --skip-mm-profiling
+      - --mm-processor-cache-gb
+      - "1"
+      - --limit-mm-per-prompt
+      - '{"vision_chunk":0}'
+      - --api-server-count
+      - "1"
+      - --allowed-local-media-path
+      - /
+      - --trust-remote-code
+      - --seed
+      - "1024"
+      - --compilation-config
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[96]}'
+      - --additional-config
+      - '{"enable_mlapo":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":false}}'
+      - --kv-transfer-config
+      - '{"kv_connector":"MooncakeConnectorV1","kv_role":"kv_consumer","kv_buffer_device":"npu","kv_port":60000,"engine_id":"kimi-k3-decode-0","kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":16},"decode":{"dp_size":2,"tp_size":16}}}'
+
+  - node_index: 3
+    envs:
+      <<: *env_common
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - $SERVER_PORT
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-size-local
+      - ${DP_SIZE_LOCAL}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --enable-expert-parallel
+      - --enable-prefix-caching
+      - --prefill-context-parallel-size
+      - "1"
+      - --decode-context-parallel-size
+      - "16"
+      - --cp-kv-cache-interleave-size
+      - "384"
+      - --block-size
+      - "384"
+      - --mamba-cache-mode
+      - align
+      - --max-num-seqs
+      - "16"
+      - --max-model-len
+      - "10240"
+      - --max-num-batched-tokens
+      - "8192"
+      - --gpu-memory-utilization
+      - "0.92"
+      - --safetensors-load-strategy
+      - lazy
+      - --quantization
+      - ascend
+      - --tokenizer-mode
+      - kimi_k3
+      - --reasoning-parser
+      - kimi_k3
+      - --tool-call-parser
+      - kimi_k3
+      - --enable-auto-tool-choice
+      - --async-scheduling
+      - --mm-encoder-tp-mode
+      - data
+      - --skip-mm-profiling
+      - --mm-processor-cache-gb
+      - "1"
+      - --limit-mm-per-prompt
+      - '{"vision_chunk":0}'
+      - --api-server-count
+      - "1"
+      - --allowed-local-media-path
+      - /
+      - --trust-remote-code
+      - --seed
+      - "1024"
+      - --compilation-config
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[96]}'
+      - --additional-config
+      - '{"enable_mlapo":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":false}}'
+      - --kv-transfer-config
+      - '{"kv_connector":"MooncakeConnectorV1","kv_role":"kv_consumer","kv_buffer_device":"npu","kv_port":60100,"engine_id":"kimi-k3-decode-1","kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":16},"decode":{"dp_size":2,"tp_size":16}}}'
+
+test_content:
+  - chat_completion
+chat_prompts:
+  - "Reply with one short sentence explaining why prefix caching helps repeated prompts."
+api_keyword_args:
+  max_tokens: 128
+  temperature: 0.0
+
+benchmarks:
+  acc_gpqa_60:
+    case_type: accuracy
+    dataset_path: vllm-ascend/gpqa
+    request_conf: vllm_api_general_chat
+    dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
+    num_prompts: 60
+    max_out_len: 8192
+    batch_size: 8
+    thinking: true
+    temperature: 0.0
+    seed: 1024
+    baseline: 90
+    # Percentage points around the GPQA baseline, matching MRV1 coverage.
+    threshold: 5
+  perf_8k:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K-in3500-bs8000-qwen3
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 320
+    max_out_len: 1500
+    batch_size: 80
+    request_rate: 0
+    # Replace this placeholder with the calibrated 8K throughput before
+    # enabling a non-trivial performance gate.
+    baseline: 0
+    threshold: 0.97

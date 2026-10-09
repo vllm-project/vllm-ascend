@@ -1,0 +1,44 @@
+# Full-model Kimi K3 MRV2 coverage runs on the existing multi-node LWS path.
+# The regular pull-request runner is single-node; using the reusable
+# multi-node workflow keeps the 2P2D topology intact instead of silently
+# replacing it with a reduced-layer smoke test.
+name: Kimi-K3 MRV2 full-model E2E
+
+on:
+  pull_request:
+    branches:
+      - main
+      - '*-dev'
+      - 'releases/v*'
+    paths:
+      - '.github/workflows/pr_kimi_k3_mrv2_e2e.yaml'
+      - '.github/workflows/_e2e_nightly_multi_node.yaml'
+      - 'tests/e2e/common/multi_node/**'
+      - 'tests/e2e/cases/models/configs/Kimi/Kimi-K3-MRV2-2P2D.yaml'
+      - 'tests/e2e/cases/models/configs/Kimi/Kimi-K3-MRV2-2P2D-PR.yaml'
+      - 'tests/e2e/cases/models/kimi_k3_mrv2_2p2d_curl_smoke.sh'
+      - '.github/workflows/misc/model_dataset_list.json'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  kimi-k3-mrv2-2p2d:
+    uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
+    with:
+      soc_version: a3
+      runner: linux-aarch64-a3-800t-0
+      image: swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann:9.2.0_20260928212200-a3-ubuntu22.04-py3.12
+      config_file_path: Kimi-K3-MRV2-2P2D-PR.yaml
+      config_base_path: tests/e2e/cases/models/configs/Kimi
+      size: '4'
+      replicas: '1'
+      test_frequency: nightly
+      name: Kimi-K3-MRV2-2P2D-PR
+      vllm_ascend_remote_url: ${{ github.server_url }}/${{ github.repository }}.git
+      vllm_ascend_ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+      vllm_ascend_branch: main
+      request_id: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'manual' }}
+      should_run: true
+    secrets: inherit
