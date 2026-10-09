@@ -126,6 +126,7 @@ def test_mxfp8_post_load_preserves_scale_ownership(nz_runtime, mode, block, scal
     torch.testing.assert_close(layer.weight.float(), expected)
     assert nz_runtime.get_format(layer.weight) == (29 if mode else 2)
     assert nz_runtime.get_format(layer.weight_scale) == 2
+    assert layer.weight.is_contiguous() and layer.weight_scale.is_contiguous()
     expected_scales = codes.repeat_interleave(block, 0).repeat_interleave(block // 32, 1)
     expected_scales = expected_scales.reshape(2, 128, 4, 2).transpose(1, 2).contiguous()
     torch.testing.assert_close(layer.weight_scale, expected_scales)

@@ -22,8 +22,7 @@ from typing import Any, ClassVar, Literal
 import torch
 import torch_npu
 
-ACL_FORMAT_ND = 2
-ACL_FORMAT_FRACTAL_NZ = 29
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ
 
 
 def _is_nz_batched_weight(layer: torch.nn.Module, attr_name: str, tensor: torch.Tensor) -> bool:
@@ -33,7 +32,7 @@ def _is_nz_batched_weight(layer: torch.nn.Module, attr_name: str, tensor: torch.
         and getattr(layer, "prefix", "").endswith("wo_a")
         and tensor.ndim == 3
         and tensor.device.type == "npu"
-        and torch_npu.get_npu_format(tensor) != ACL_FORMAT_ND
+        and torch_npu.get_npu_format(tensor) != ACL_FORMAT_FRACTAL_ND
     )
 
 
@@ -475,7 +474,7 @@ class WeightSwitchMixin:
             # Clone grouped NZ weights through ND: generic clone/copy_ paths
             # cannot handle internal storage on Ascend 950.
             if is_nz_weight and clone_local_tensors:
-                local_tensor = torch_npu.npu_format_cast(tensor, ACL_FORMAT_ND).clone().detach().contiguous()
+                local_tensor = torch_npu.npu_format_cast(tensor, ACL_FORMAT_FRACTAL_ND).clone().detach().contiguous()
                 local_tensor = torch_npu.npu_format_cast(
                     local_tensor, ACL_FORMAT_FRACTAL_NZ, customize_dtype=tensor.dtype
                 )
@@ -488,7 +487,7 @@ class WeightSwitchMixin:
             full_shape_list[dim] *= config.world_size
             full_shape = tuple(full_shape_list)
             communication_tensor = (
-                torch_npu.npu_format_cast(local_tensor, ACL_FORMAT_ND) if is_nz_weight else local_tensor
+                torch_npu.npu_format_cast(local_tensor, ACL_FORMAT_FRACTAL_ND) if is_nz_weight else local_tensor
             )
             if dim == 0:
                 gather_input = communication_tensor
@@ -573,7 +572,7 @@ class WeightSwitchMixin:
             raise RuntimeError("Weight all-gather is still pending; wait before launching another one.")
         for part in state.gather_parts.values():
             if part.is_nz_weight:
-                local_nd = torch_npu.npu_format_cast(part.local_tensor, ACL_FORMAT_ND)
+                local_nd = torch_npu.npu_format_cast(part.local_tensor, ACL_FORMAT_FRACTAL_ND)
                 dim = part.spec.gather_dim
                 part.gather_input.copy_(torch.movedim(local_nd, dim, 0).contiguous())
             _, handle = all_gather_async(
