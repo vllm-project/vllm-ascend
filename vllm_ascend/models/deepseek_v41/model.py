@@ -72,7 +72,6 @@ from vllm_ascend.utils import (
     enable_dsa_cp,
     get_rotation_path,
     normalize_deepseek_v41_config,
-    own_as_non_persistent_buffer,
 )
 
 from .cache_config import (
@@ -405,7 +404,6 @@ def init_attention_projections(self, config, quant_config, prefix, reduce_result
     )
     self.q_norm = RMSNorm(self.q_lora_rank, eps=config.rms_norm_eps)
     self.q_norm_without_weight = RMSNorm(self.head_dim, eps=config.rms_norm_eps, has_weight=False)
-    own_as_non_persistent_buffer(self.q_norm_without_weight, "weight")
     wq_b_cls = ReplicatedLinear if self.enable_dsa_cp else ColumnParallelLinear
     self.wq_b = wq_b_cls(
         self.q_lora_rank,

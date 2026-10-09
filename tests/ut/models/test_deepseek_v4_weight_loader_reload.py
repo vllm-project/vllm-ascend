@@ -1,213 +1,185 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
-"""Attention sinks must be applied through the parameter's weight loader.
+"""Exercise real Sink loaders, checkpoint mappings and layerwise reload on CPU.
 
-A live weight update runs inside vLLM's layerwise reload: the layer is parked on
-the meta device and only writes made through ``param.weight_loader`` are
-buffered and replayed onto the materialized layer by
-``finalize_layerwise_reload``. Writing the sink with a direct
-``param.data.copy_`` therefore lands on the meta tensor and is dropped, which
-left the attention sinks at their dummy initialisation after every update.
-
-The sink is a plain parameter, so it resolves to vLLM's
-``default_weight_loader``, which only asserts the shapes and copies. The tensor
-parallel sharding stays owned by ``load_weights``: the checkpoint ships one sink
-per head and each rank must receive exactly ``num_attention_heads // tp_size``
-consecutive heads starting at ``tp_rank * heads_per_rank``. These tests pin that
-offset at TP > 1 so a future rank-aware loader (``row_parallel_weight_loader``
-narrows 1-D parameters as well) cannot silently double-shard the sink.
+TP sharding belongs to load_weights, before the parameter's current loader is
+called. DSA CP keeps the full Sink. Direct copy_ bypasses the reload wrapper and
+loses updates made while the parameter is on meta.
 """
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock
 
 import pytest
 import torch
 from torch import nn
+from vllm.model_executor.model_loader.reload.layerwise import (
+    finalize_layerwise_reload,
+    initialize_layerwise_reload,
+    record_metadata_for_reloading,
+)
 
-from vllm_ascend.models.deepseek_v4 import model as deepseek_v4_module
+from vllm_ascend.models.deepseek_v4 import dspark as dspark_module
+from vllm_ascend.models.deepseek_v4 import model as target_module
 from vllm_ascend.models.deepseek_v4 import mtp as mtp_module
 
 TOTAL_HEADS = 16
-# The served parameter keeps the checkpoint's ``attn_sink`` leaf name; only the
-# container module differs (``layers.N.attn.attn_sink`` in the checkpoint vs
-# ``model.layers.N.self_attn.attn_sink`` in the model).
-SINK_PARAM_NAME = "model.layers.0.self_attn.attn_sink"
-SINK_WEIGHT_NAME = "model.layers.0.self_attn.attn_sink"
-MTP_SINK_PARAM_NAME = "model.layers.0.self_attn.attn_sink"
-MTP_SINK_WEIGHT_NAME = "mtp.0.attn.attn_sink"
-
-# (tp_size, tp_rank) pairs covering TP=1 and every rank of TP=2/4/8.
+TARGET_LAYER_IDX = 3
+DSPARK_STAGE = 1
+# TP=1 and every rank of TP=2/4/8, including nonzero offsets.
 TP_RANKS = [(1, 0)] + [(size, rank) for size in (2, 4, 8) for rank in range(size)]
 
 
-class _SinkLayer(nn.Module):
-    """Minimal stand-in for the decoder layer holding only the attention sink."""
-
-    def __init__(self, *, with_weight_loader: bool, heads_per_rank: int) -> None:
-        super().__init__()
-        self.self_attn = _SinkAttention(with_weight_loader=with_weight_loader, heads_per_rank=heads_per_rank)
-
-    @property
-    def attn_sink(self) -> nn.Parameter:
-        return self.self_attn.attn_sink
-
-    @property
-    def loader_calls(self) -> list[tuple[torch.Tensor, torch.Tensor]]:
-        return self.self_attn.loader_calls
-
-
 class _SinkAttention(nn.Module):
-    """Minimal stand-in for ``DeepseekV4Attention`` holding only the sink."""
-
-    def __init__(self, *, with_weight_loader: bool, heads_per_rank: int) -> None:
+    def __init__(self, num_heads: int, with_weight_loader: bool) -> None:
         super().__init__()
-        self.attn_sink = nn.Parameter(torch.zeros(heads_per_rank, dtype=torch.float32))
-        self.loader_calls: list[tuple[torch.Tensor, torch.Tensor]] = []
+        self.attn_sink = nn.Parameter(torch.full((num_heads,), -1.0), requires_grad=False)
+        self.loader_calls: list[tuple[nn.Parameter, torch.Tensor]] = []
         if with_weight_loader:
+            self.attn_sink.weight_loader = self.record_load
 
-            def _record(weight: torch.Tensor, loaded_weight: torch.Tensor) -> None:
-                self.loader_calls.append((weight, loaded_weight.clone()))
-
-            self.attn_sink.weight_loader = _record  # type: ignore[assignment]
+    def record_load(self, param: nn.Parameter, loaded_weight: torch.Tensor) -> None:
+        # Deliberately do not copy: load_weights must leave the parameter alone.
+        self.loader_calls.append((param, loaded_weight.clone()))
 
 
 class _SinkOnlyModel(nn.Module):
-    """``ForCausalLM`` stub whose parameter set is exactly one sink.
+    """Minimal hierarchy needed by the production load_weights methods."""
 
-    ``load_weights`` walks ``self.model`` and looks the sink up as
-    ``model.layers.{i}.self_attn.attn_sink``, so the stub mirrors that
-    hierarchy: ``model`` -> ``layers`` -> ``{i}`` -> ``self_attn`` -> sink.
-    """
-
-    def __init__(self, layer: _SinkLayer) -> None:
+    def __init__(self, attention: _SinkAttention, path: str) -> None:
         super().__init__()
-        self.model = nn.ModuleDict({"layers": nn.ModuleDict({"0": layer})})
-        # The sink branch only reads ``num_attention_heads`` from the config.
-        self.config = SimpleNamespace(num_attention_heads=TOTAL_HEADS, n_routed_experts=8, n_shared_experts=1)
+        layer = nn.Module()
+        if path == "mtp":
+            layer.mtp_block = nn.Module()
+            layer.mtp_block.self_attn = attention
+        else:
+            layer.self_attn = attention
+        layer_idx = TARGET_LAYER_IDX + DSPARK_STAGE if path == "dspark" else 0
+        self.model = nn.Module()
+        self.model.layers = nn.ModuleDict({str(layer_idx): layer})
+        self.model.num_dspark_layers = 2
+        self.model.get_expert_mapping = lambda: []
+        self.config = SimpleNamespace(
+            num_attention_heads=TOTAL_HEADS,
+            num_hidden_layers=TARGET_LAYER_IDX,
+            n_routed_experts=8,
+            n_shared_experts=1,
+        )
         self.num_redundant_experts = 0
-
-
-class _SinkOnlyMtp(nn.Module):
-    """``DeepSeekV4MTP`` stub.
-
-    The MTP checkpoint name ``mtp.0.attn.attn_sink`` is rewritten by
-    ``load_weights`` onto ``model.layers.0.self_attn.attn_sink``, which is what
-    the oracle's ``deepseek_v4_checkpoint_name`` produces for the MTP layers too.
-    """
-
-    def __init__(self, layer: _SinkLayer) -> None:
-        super().__init__()
-        self.model = nn.ModuleDict({"layers": nn.ModuleDict({"0": layer})})
-        self.config = SimpleNamespace(num_attention_heads=TOTAL_HEADS, n_routed_experts=8, n_shared_experts=1)
         self.quant_config = None
-        self.num_redundant_experts = 0
+        self.rotation_path = None
 
-    def no_mtp_block_in_name(self, layer_name: str) -> bool:
-        # Mirrors the real predicate for the ``mtp.0.attn.attn_sink`` name shape.
-        return True
-
-
-@pytest.fixture
-def parallel_rank(monkeypatch):
-    """Force the TP world size/rank the loaders read at call time.
-
-    ``load_weights`` imports both helpers into its own module namespace, so the
-    patch has to land on the imported name rather than on ``vllm.distributed``.
-    """
-
-    def _set(tp_size: int, tp_rank: int) -> None:
-        monkeypatch.setattr(deepseek_v4_module, "get_tensor_model_parallel_world_size", lambda: tp_size)
-        monkeypatch.setattr(deepseek_v4_module, "get_tensor_model_parallel_rank", lambda: tp_rank)
-        monkeypatch.setattr(mtp_module, "get_tensor_model_parallel_world_size", lambda: tp_size)
-        monkeypatch.setattr(mtp_module, "get_tensor_model_parallel_rank", lambda: tp_rank)
-
-    return _set
+    # Keep the actual predicates/mappings, including the MTP block container.
+    no_mtp_block_in_name = mtp_module.DeepSeekV4MTP.no_mtp_block_in_name
+    _remap_dspark_name = dspark_module.DSparkDeepseekV4ForCausalLM._remap_dspark_name
 
 
-@pytest.fixture
-def load_sink(monkeypatch, parallel_rank):
-    """Drive the real ``load_weights`` over a model holding only a sink."""
-    monkeypatch.setattr(deepseek_v4_module, "enable_dsa_cp", lambda: False)
-    monkeypatch.setattr(deepseek_v4_module, "is_pp_missing_parameter", lambda *_: False)
-    monkeypatch.setattr(deepseek_v4_module, "get_spec_layer_idx_from_weight_name", lambda *_: None)
-    monkeypatch.setattr(deepseek_v4_module, "fused_moe_make_expert_params_mapping", lambda *_, **__: [])
-    monkeypatch.setattr(deepseek_v4_module, "get_ascend_config", lambda: MagicMock(mix_placement=False))
+@pytest.fixture(params=["target", "mtp", "dspark"])
+def sink_path(request, monkeypatch):
+    """Patch distributed/config dependencies, keeping real loaders and mappings."""
+    path = request.param
+    modules = {"target": target_module, "mtp": mtp_module, "dspark": dspark_module}
+    loaders = {
+        "target": target_module.AscendDeepseekV4ForCausalLM.load_weights,
+        "mtp": mtp_module.DeepSeekV4MTP.load_weights,
+        "dspark": dspark_module.DSparkDeepseekV4ForCausalLM.load_weights,
+    }
+    checkpoint_names = {
+        "target": "model.layers.0.attn.attn_sink",
+        "mtp": "mtp.0.attn.attn_sink",
+        "dspark": f"mtp.{DSPARK_STAGE}.attn.attn_sink",
+    }
+    parameter_names = {
+        "target": "model.layers.0.self_attn.attn_sink",
+        "mtp": "model.layers.0.mtp_block.self_attn.attn_sink",
+        "dspark": f"model.layers.{TARGET_LAYER_IDX + DSPARK_STAGE}.self_attn.attn_sink",
+    }
+    for module in (target_module, mtp_module):
+        monkeypatch.setattr(module, "fused_moe_make_expert_params_mapping", lambda *_, **__: [])
+        monkeypatch.setattr(module, "get_ascend_config", lambda: SimpleNamespace(mix_placement=False))
+    monkeypatch.setattr(target_module, "is_pp_missing_parameter", lambda *_: False)
+    monkeypatch.setattr(dspark_module, "process_eagle_weight", lambda *_: None)
 
-    def _run(layer: _SinkLayer, sink: torch.Tensor, *, tp_size: int, tp_rank: int) -> set[str]:
-        parallel_rank(tp_size, tp_rank)
-        loader = deepseek_v4_module.AscendDeepseekV4ForCausalLM.load_weights.__get__(_SinkOnlyModel(layer))
-        return loader([(SINK_WEIGHT_NAME, sink)])
+    def build(*, tp_size, tp_rank, dsa_cp=False, with_weight_loader=False):
+        module = modules[path]
+        monkeypatch.setattr(module, "get_tensor_model_parallel_world_size", lambda: tp_size)
+        monkeypatch.setattr(module, "get_tensor_model_parallel_rank", lambda: tp_rank)
+        monkeypatch.setattr(module, "enable_dsa_cp", lambda: dsa_cp)
+        attention = _SinkAttention(TOTAL_HEADS if dsa_cp else TOTAL_HEADS // tp_size, with_weight_loader)
+        model = _SinkOnlyModel(attention, path)
+        load_weights = loaders[path].__get__(model)
+        return SimpleNamespace(
+            model=model,
+            attention=attention,
+            parameter_name=parameter_names[path],
+            load=lambda weight: load_weights([(checkpoint_names[path], weight)]),
+        )
 
-    return _run
-
-
-@pytest.fixture
-def load_mtp_sink(monkeypatch, parallel_rank):
-    """Same, for ``DeepSeekV4MTP.load_weights`` and its own name mapping."""
-    monkeypatch.setattr(mtp_module, "enable_dsa_cp", lambda: False)
-    monkeypatch.setattr(mtp_module, "get_spec_layer_idx_from_weight_name", lambda *_: 0)
-    monkeypatch.setattr(mtp_module, "fused_moe_make_expert_params_mapping", lambda *_, **__: [])
-    monkeypatch.setattr(mtp_module, "get_ascend_config", lambda: MagicMock(mix_placement=False))
-
-    def _run(layer: _SinkLayer, sink: torch.Tensor, *, tp_size: int, tp_rank: int) -> set[str]:
-        parallel_rank(tp_size, tp_rank)
-        loader = mtp_module.DeepSeekV4MTP.load_weights.__get__(_SinkOnlyMtp(layer))
-        return loader([(MTP_SINK_WEIGHT_NAME, sink)])
-
-    return _run
+    return build
 
 
-def _narrow_reference(sink: torch.Tensor, tp_size: int, tp_rank: int) -> torch.Tensor:
+def _expected_sink(weight, tp_size, tp_rank, dsa_cp):
+    if dsa_cp:
+        return weight
     heads_per_rank = TOTAL_HEADS // tp_size
-    return sink[tp_rank * heads_per_rank : (tp_rank + 1) * heads_per_rank]
+    return weight[tp_rank * heads_per_rank : (tp_rank + 1) * heads_per_rank]
 
 
-@pytest.mark.parametrize(("tp_size", "tp_rank"), TP_RANKS, ids=lambda value: str(value))
-def test_mtp_attention_sink_goes_through_its_weight_loader(load_mtp_sink, tp_size, tp_rank):
-    """The MTP copy of the sink branch must shard and route identically."""
-    heads_per_rank = TOTAL_HEADS // tp_size
-    layer = _SinkLayer(with_weight_loader=True, heads_per_rank=heads_per_rank)
-    sink = torch.arange(TOTAL_HEADS, dtype=torch.float32)
+def _check_load(case, *, tp_size, tp_rank, dsa_cp, with_weight_loader):
+    weight = torch.arange(TOTAL_HEADS, dtype=torch.float32)
+    param = case.attention.attn_sink
+    original_value = param.detach().clone()
+    expected = _expected_sink(weight, tp_size, tp_rank, dsa_cp)
 
-    loaded = load_mtp_sink(layer, sink, tp_size=tp_size, tp_rank=tp_rank)
-
-    assert loaded == {MTP_SINK_PARAM_NAME}
-    assert len(layer.loader_calls) == 1, "the sink must be applied exactly once"
-    weight, written = layer.loader_calls[0]
-    assert weight is layer.attn_sink
-    assert written.shape == layer.attn_sink.shape
-    torch.testing.assert_close(written, _narrow_reference(sink, tp_size, tp_rank))
-
-
-@pytest.mark.parametrize(("tp_size", "tp_rank"), TP_RANKS, ids=lambda value: str(value))
-def test_attention_sink_goes_through_its_weight_loader(load_sink, tp_size, tp_rank):
-    """A loader-backed sink must reach the loader with this rank's head slice."""
-    heads_per_rank = TOTAL_HEADS // tp_size
-    layer = _SinkLayer(with_weight_loader=True, heads_per_rank=heads_per_rank)
-    sink = torch.arange(TOTAL_HEADS, dtype=torch.float32)
-
-    loaded = load_sink(layer, sink, tp_size=tp_size, tp_rank=tp_rank)
-
-    assert loaded == {SINK_PARAM_NAME}
-    assert len(layer.loader_calls) == 1, "the sink must be applied exactly once"
-    weight, written = layer.loader_calls[0]
-    assert weight is layer.attn_sink
-    # The slice matches the parameter, so ``default_weight_loader``'s shape
-    # assertion holds and no rank re-partitions the weight a second time.
-    assert written.shape == layer.attn_sink.shape
-    torch.testing.assert_close(written, _narrow_reference(sink, tp_size, tp_rank))
+    assert case.load(weight) == {case.parameter_name}
+    assert dict(case.model.named_parameters())[case.parameter_name] is param
+    if with_weight_loader:
+        assert len(case.attention.loader_calls) == 1
+        destination, received = case.attention.loader_calls[0]
+        assert destination is param
+        assert received.shape == param.shape
+        torch.testing.assert_close(received, expected)
+        torch.testing.assert_close(param.detach(), original_value)
+    else:
+        assert not case.attention.loader_calls
+        torch.testing.assert_close(param.detach(), expected)
 
 
-@pytest.mark.parametrize(("tp_size", "tp_rank"), TP_RANKS, ids=lambda value: str(value))
-def test_attention_sink_falls_back_to_the_default_loader(load_sink, tp_size, tp_rank):
-    """A plain parameter keeps the previous direct-copy semantics."""
-    heads_per_rank = TOTAL_HEADS // tp_size
-    layer = _SinkLayer(with_weight_loader=False, heads_per_rank=heads_per_rank)
-    sink = torch.arange(TOTAL_HEADS, dtype=torch.float32)
+@pytest.mark.parametrize(("tp_size", "tp_rank"), TP_RANKS)
+@pytest.mark.parametrize("with_weight_loader", [True, False], ids=["custom", "default"])
+def test_attention_sink_tp_loading(sink_path, tp_size, tp_rank, with_weight_loader):
+    case = sink_path(tp_size=tp_size, tp_rank=tp_rank, with_weight_loader=with_weight_loader)
+    _check_load(case, tp_size=tp_size, tp_rank=tp_rank, dsa_cp=False, with_weight_loader=with_weight_loader)
 
-    loaded = load_sink(layer, sink, tp_size=tp_size, tp_rank=tp_rank)
 
-    assert loaded == {SINK_PARAM_NAME}
-    assert not layer.loader_calls
-    torch.testing.assert_close(layer.attn_sink.detach(), _narrow_reference(sink, tp_size, tp_rank))
+@pytest.mark.parametrize("with_weight_loader", [True, False], ids=["custom", "default"])
+def test_attention_sink_dsa_cp_loading(sink_path, with_weight_loader):
+    # A nonzero rank distinguishes the complete Sink from the ordinary TP slice.
+    case = sink_path(tp_size=2, tp_rank=1, dsa_cp=True, with_weight_loader=with_weight_loader)
+    _check_load(case, tp_size=2, tp_rank=1, dsa_cp=True, with_weight_loader=with_weight_loader)
+
+
+@pytest.mark.parametrize("dsa_cp", [False, True], ids=["tp", "dsa_cp"])
+def test_attention_sink_layerwise_reload(sink_path, dsa_cp):
+    """The real upstream wrapper must replay two updates into original storage."""
+    case = sink_path(tp_size=2, tp_rank=1, dsa_cp=dsa_cp)
+    initial_weight = torch.arange(TOTAL_HEADS, dtype=torch.float32)
+    assert case.load(initial_weight) == {case.parameter_name}
+    original_param = case.attention.attn_sink
+    original_value = original_param.detach().clone()
+    storage_ptr = original_param.untyped_storage().data_ptr()
+    torch.testing.assert_close(original_value, _expected_sink(initial_weight, 2, 1, dsa_cp))
+    record_metadata_for_reloading(case.model)
+
+    for offset in (100, 200):
+        initialize_layerwise_reload(case.model)
+        assert case.attention.attn_sink.is_meta
+        assert case.attention.attn_sink.weight_loader.__name__ == "online_process_loader"
+        new_weight = initial_weight + offset
+        assert case.load(new_weight) == {case.parameter_name}
+        finalize_layerwise_reload(case.model, SimpleNamespace(dtype=torch.float32))
+        sink = case.attention.attn_sink
+        assert sink.device.type == "cpu"
+        assert sink.untyped_storage().data_ptr() == storage_ptr
+        torch.testing.assert_close(sink.detach(), _expected_sink(new_weight, 2, 1, dsa_cp))
+        torch.testing.assert_close(original_param.detach(), sink.detach())
+    assert not torch.equal(original_param.detach(), original_value)
