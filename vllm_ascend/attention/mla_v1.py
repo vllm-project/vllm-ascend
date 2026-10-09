@@ -24,7 +24,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID  # type: ignore
 from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
@@ -109,6 +109,15 @@ class AscendMLABackend(AttentionBackend):
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
         return num_blocks, block_size, num_kv_heads, head_size
+
+    @classmethod
+    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
+        # Ascend MLA splits a manager block into kernel blocks and stores the
+        # NoPE/RoPE components inside one dense page. Block-outermost packed
+        # layouts interleave other layers between those kernel blocks, so the
+        # page-strided views cannot be represented with a single first-axis
+        # stride.
+        return (KVCacheLayout.LBNHC,)
 
     @staticmethod
     def get_impl_cls() -> type["MLAAttentionImpl"]:

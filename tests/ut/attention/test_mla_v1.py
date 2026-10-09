@@ -6,6 +6,7 @@ import torch
 from vllm.config import CacheConfig, SchedulerConfig, VllmConfig
 from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
+from vllm.v1.kv_cache_layout import KVCacheLayout
 
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import init_ascend_config
@@ -29,6 +30,10 @@ from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod, Asce
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
 from vllm_ascend.quantization.methods.w8a8.w8a8fp8_dynamic import AscendW8A8FP8DynamicLinearMethod
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ
+
+
+def test_mla_backend_requires_layer_compact_kv_cache_layout():
+    assert AscendMLABackend.supported_kv_cache_layouts() == (KVCacheLayout.LBNHC,)
 
 
 @pytest.mark.parametrize("num_tokens", [1, 3])
