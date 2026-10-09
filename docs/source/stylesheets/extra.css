@@ -81,3 +81,143 @@
 .github-button {
   margin: 0 4px;
 }
+
+/* Table fullscreen controls do not change the table's normal scroll container. */
+.table-fullscreen-button {
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.table-fullscreen-button:not([hidden]) {
+  display: flex;
+}
+
+.table-fullscreen-button:focus-visible,
+.table-fullscreen-scroll:focus-visible {
+  outline: 0.1rem solid var(--md-accent-fg-color);
+  outline-offset: -0.1rem;
+}
+
+.table-fullscreen-button svg {
+  width: 1.125rem;
+  height: 1.125rem;
+  fill: currentColor;
+}
+
+.table-fullscreen-wrapper {
+  position: relative;
+}
+
+/* Match Material's clipboard action: always visible, with quiet theme colors. */
+.table-fullscreen-open {
+  position: absolute;
+  top: 0.4rem;
+  right: 0.4rem;
+  z-index: 1;
+  width: 1.5rem;
+  height: 1.5rem;
+  border-radius: 0.1rem;
+  color: var(--md-default-fg-color--lightest);
+  transition: color 0.25s;
+}
+
+.table-fullscreen-wrapper:hover > .table-fullscreen-open {
+  color: var(--md-default-fg-color--light);
+}
+
+.table-fullscreen-wrapper > .table-fullscreen-open:hover,
+.table-fullscreen-wrapper > .table-fullscreen-open:focus {
+  color: var(--md-accent-fg-color);
+}
+
+html.table-fullscreen-active,
+html.table-fullscreen-active body {
+  overflow: hidden;
+}
+
+.table-fullscreen-dialog {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: var(--md-default-bg-color);
+  color: var(--md-default-fg-color);
+}
+
+.table-fullscreen-dialog[open] {
+  display: flex;
+  flex-direction: column;
+}
+
+.table-fullscreen-toolbar {
+  display: flex;
+  flex: none;
+  justify-content: flex-end;
+  padding: 0.4rem;
+  border-bottom: 0.05rem solid var(--md-typeset-table-color);
+}
+
+.table-fullscreen-toolbar > .table-fullscreen-button {
+  width: 2rem;
+  height: 2rem;
+  padding: 0.3rem;
+  border: 0.05rem solid var(--md-default-fg-color--lighter);
+  border-radius: 0.2rem;
+  background: var(--md-default-bg-color);
+  color: var(--md-default-fg-color);
+  font-size: 1.4rem;
+  line-height: 1;
+}
+
+.table-fullscreen-toolbar > .table-fullscreen-button:hover {
+  color: var(--md-accent-fg-color);
+  border-color: var(--md-accent-fg-color);
+}
+
+.table-fullscreen-scroll {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.table-fullscreen-dialog.md-typeset table {
+  display: table;
+  max-width: none;
+  margin: 0;
+  overflow: visible;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+.table-fullscreen-dialog thead {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+.table-fullscreen-dialog thead th,
+.table-fullscreen-dialog .table-fullscreen-first-column {
+  background: var(--md-default-bg-color);
+}
+
+.table-fullscreen-dialog .table-fullscreen-first-column {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  box-shadow: 0.05rem 0 0 var(--md-typeset-table-color);
+}
+
+@media print {
+  .table-fullscreen-button,
+  .table-fullscreen-dialog {
+    display: none !important;
+  }
+}
