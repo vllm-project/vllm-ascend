@@ -9,7 +9,7 @@ import torch_npu
 from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
 from vllm.distributed import get_pcp_group, get_tp_group, tensor_model_parallel_all_gather
 from vllm.logger import logger
-from vllm.triton_utils import HAS_TRITON, triton
+from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionImplBase, AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -47,7 +47,7 @@ from vllm_ascend.models.deepseek_v4.indexer import AscendIndexerMetadata
 from vllm_ascend.ops.cv_linear import CVLinearWrapper
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.ops.rope_dsv4 import RopeDataProxy, get_cos_and_sin_dsa, get_full_cos_and_sin_dsa
-from vllm_ascend.ops.triton.dsa_cp import BUILD_LOCAL_METADATA_BLOCK_SIZE, build_local_metadata_triton
+from vllm_ascend.ops.triton.dsa_local_metadata import build_local_metadata
 from vllm_ascend.quantization.methods import AscendLinearScheme, AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import enable_dsa_cp_full_o_proj, enable_pcp_o_proj_weight_sharding
 from vllm_ascend.weight_switch import (
@@ -293,6 +293,10 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             max_padded_reqs = max(max_padded_reqs, compilation_config.max_cudagraph_capture_size)
         # +1 holds the FIA dummy request inserted by mixed-batch padding.
         max_padded_reqs += 1
+        # The local-metadata kernel folds its cumsum into an 8-column view,
+        # so the capacity it derives from these buffers must be a multiple
+        # of 8 (asserted in dsa_local_metadata.build_local_metadata).
+        max_padded_reqs = (max_padded_reqs + 7) // 8 * 8
         self.start_pos_prefill = torch.zeros(max_padded_reqs, dtype=torch.int32, device=self.device)
         self.req_sas_metadata = torch.zeros(SAS_METADATA_SIZE, dtype=torch.int32, device=self.device)
         self.req_qli_metadata = torch.zeros(SAS_METADATA_SIZE, dtype=torch.int32, device=self.device)
@@ -1173,14 +1177,15 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         # every rank's local slice the same length, which simplifies CP kernels.
         local_start, local_end, tokens_per_rank, num_tokens_pad = self._local_token_range(num_input_tokens)
 
-        if local_query_start_loc is not None:
-            local_query_start_loc.fill_(0)
-            local_seq_lens.fill_(0)
-
         if query_start_loc.device.type != "cpu" and HAS_TRITON:
             assert local_query_start_loc is not None and local_seq_lens is not None
-            grid = (triton.cdiv(num_reqs, BUILD_LOCAL_METADATA_BLOCK_SIZE),)
-            build_local_metadata_triton[grid](
+            # Fixed-capacity fused kernel: one cached binary per
+            # COMPUTE_START_POS variant (no re-JIT when num_reqs changes,
+            # unlike the previous next_power_of_2(num_reqs) blocking). The
+            # kernel overwrites every lane of the capacity-sized output
+            # buffers (tail beyond num_reqs stores 0), so the pre-zeroing
+            # fill_(0) calls are not needed on this path.
+            build_local_metadata(
                 query_start_loc,
                 seq_lens,
                 local_query_start_loc,
@@ -1188,10 +1193,13 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 local_start,
                 local_end,
                 num_reqs,
-                start_pos_out if start_pos_out is not None else self._zero_i32,
-                COMPUTE_START_POS=start_pos_out is not None,
+                start_pos_out=start_pos_out,
+                block=local_query_start_loc.numel() - 1,
             )
         else:
+            if local_query_start_loc is not None:
+                local_query_start_loc.fill_(0)
+                local_seq_lens.fill_(0)
             # torch fallback.
             # Intersect each request's global token interval with this rank's local
             # token interval, then build the per-rank query_start_loc from lengths.
