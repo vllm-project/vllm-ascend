@@ -238,8 +238,9 @@ def rope_forward_oot(
         # it splits query into queryRot[..., :rotary_dim] and queryPass[..., rotary_dim:],
         # where rotary_dim is inferred from cos_sin_cache.shape[-1].
         rotary_mode = "half" if is_neox_style else "interleave"
+        # npu_mrope requires INT64 position indices.
         query, key = torch_npu.npu_mrope(
-            positions,
+            positions.to(torch.int64),
             query.contiguous().view(query.shape[0], -1),
             key.contiguous().view(key.shape[0], -1),
             cos_sin_cache,

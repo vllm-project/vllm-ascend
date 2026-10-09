@@ -29,15 +29,16 @@ def _reference_rope(
     return result
 
 
+@pytest.mark.parametrize("positions_dtype", [torch.int32, torch.int64])
 @pytest.mark.parametrize("head_dim,rotary_dim", [(64, 32), (128, 96), (128, 128)])
 @pytest.mark.parametrize("is_neox_style", [True, False])
 @pytest.mark.parametrize("num_tokens", [1, 17])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @torch.inference_mode()
-def test_asc_rope_matches_reference(head_dim, rotary_dim, is_neox_style, num_tokens, dtype):
+def test_asc_rope_matches_reference(head_dim, rotary_dim, is_neox_style, num_tokens, dtype, positions_dtype):
     device = "npu:0"
     torch.manual_seed(0)
-    positions = torch.arange(num_tokens, device=device, dtype=torch.int64)
+    positions = torch.arange(num_tokens, device=device, dtype=positions_dtype)
     inv_freq = 1.0 / (10000 ** (torch.arange(0, rotary_dim, 2, device=device).float() / rotary_dim))
     freqs = torch.outer(positions.float(), inv_freq)
     cos, sin = freqs.cos().to(dtype), freqs.sin().to(dtype)
