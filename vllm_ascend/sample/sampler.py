@@ -179,7 +179,7 @@ def _apply_top_k_top_p_ascend(
     the Triton kernel is considered.
     """
     if get_ascend_config().enable_reduce_sample or is_950():
-        return _apply_top_k_top_p_torch_npu(logits, k, p, top_k)
+        return _apply_top_k_top_p_torch_npu(logits, k, p)
     if p is None and k is None:
         return logits
     return apply_top_k_top_p_triton(logits, k, p)
