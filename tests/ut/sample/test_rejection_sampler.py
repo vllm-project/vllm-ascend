@@ -831,9 +831,7 @@ def test_forward_preserves_greedy_vocab_id_in_mixed_batch(other_temperature, dra
         patch("vllm_ascend.sample.rejection_sampler.HAS_TRITON", False),
         patch("vllm_ascend.sample.rejection_sampler.replace", _replace),
         patch("vllm_ascend.sample.rejection_sampler.get_ascend_config", return_value=config),
-        patch("vllm_ascend.sample.sampler.get_ascend_config", return_value=config),
         patch("vllm_ascend.sample.rejection_sampler.get_tp_group", return_value=tp_group),
-        patch("vllm_ascend.sample.sampler.get_tp_group", return_value=tp_group),
         patch("vllm_ascend.sample.rejection_sampler.apply_top_k_top_p", _apply_top_k_top_p_pytorch),
         patch("vllm_ascend.sample.rejection_sampler.generate_uniform_probs", return_value=torch.tensor([0.01, 0.01])),
         patch(
