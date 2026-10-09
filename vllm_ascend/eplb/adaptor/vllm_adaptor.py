@@ -209,8 +209,21 @@ class VllmEplbAdaptor:
             logger.debug("Expert tensor shape is :%s", expert_tensor.shape)
 
     def do_update_log2phy_map(self, layer_id, updated_log2phy_map):
-        if self.log2phy_map_per_layer[layer_id] is not None:
-            self.log2phy_map_per_layer[layer_id].copy_(updated_log2phy_map)
+        log2phy = self.log2phy_map_per_layer[layer_id]
+        if log2phy is None:
+            return
+        if updated_log2phy_map.device.type != "cpu":
+            log2phy.copy_(updated_log2phy_map, non_blocking=True)
+            return
+        # copy_ from a pageable CPU tensor with the default non_blocking=False
+        # enqueues the H2D copy and then blocks the host until the stream
+        # reaches it. This runs once per layer update with the whole forward
+        # still queued, so that wait drains the pipeline (60-100ms per layer
+        # in profiling). Stage through pinned memory and copy asynchronously;
+        # stream ordering publishes the new map before the expert-weight
+        # copies and the next forward read it.
+        staged = updated_log2phy_map.to(dtype=log2phy.dtype).pin_memory()
+        log2phy.copy_(staged, non_blocking=True)
 
     def get_global_expert_map(self):
         all_layer_global_expert_map = []
