@@ -103,9 +103,10 @@ class PreemptOffloadScheduler:
         # DCP>1 is supported: full-attention KV is sharded across DCP ranks while
         # logical block ids are shared by all ranks of a group, so the per-rank
         # worker copy stays correct; Mamba/replicated groups keep dcp=1 geometry
-        # via dcp_world_size_for_kv_cache_spec. PCP is prefill-side only and
-        # never applies on a decode node.
-        assert pcp_world_size == 1
+        # via dcp_world_size_for_kv_cache_spec. PCP is forwarded as-is: single
+        # group (UnitaryKVCacheCoordinator) honors it, while hybrid models hit
+        # the upstream "PCP not support hybrid attn now" assertion instead of a
+        # redundant local one.
         self.dcp_world_size = dcp_world_size
         scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
         self.cpu_coordinator: KVCacheCoordinator = get_kv_cache_coordinator(
