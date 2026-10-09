@@ -826,6 +826,10 @@ def build_prefill_request(req_data: dict) -> dict:
         "remote_host": None,
         "remote_port": None,
     }
+    # Preserve the business label when rebuilding transport-control parameters.
+    incoming = req_data.get("kv_transfer_params") or {}
+    if "kv_priority" in incoming:
+        payload["kv_transfer_params"]["kv_priority"] = incoming["kv_priority"]
     payload["stream"] = False
     payload["max_tokens"] = 1
     payload["min_tokens"] = 1

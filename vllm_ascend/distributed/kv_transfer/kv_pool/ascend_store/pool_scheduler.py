@@ -61,15 +61,19 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
     AscendStoreKVConnectorStats,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.qos import validate_qos_mode
 
 
 class KVPoolScheduler:
+    qos_policy = None
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
         use_layerwise,
         kv_cache_config: KVCacheConfig | None = None,
     ):
+        self.qos_policy = validate_qos_mode(vllm_config.kv_transfer_config.kv_connector_extra_config)
         self.vllm_config = vllm_config
         self.use_layerwise = use_layerwise
         self.kv_cache_config = kv_cache_config
@@ -1093,6 +1097,10 @@ class KVPoolScheduler:
                     self.touch_sending_mamba_blocks(req_meta)
                     meta.add_request(req_meta)
 
+        if self.qos_policy is not None:
+            for req_meta in meta.requests:
+                request = self._unfinished_requests[req_meta.req_id][0]
+                req_meta.kv_priority = self.qos_policy.request_priority(request)
         return meta
 
     def get_sending_event_id(self):

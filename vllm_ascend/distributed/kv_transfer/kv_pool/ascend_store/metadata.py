@@ -944,6 +944,8 @@ class ReqMeta:
 
     block_hashes: list[BlockHash]
 
+    kv_priority: int | None = None
+
     # First token that has not been saved before this metadata was built.
     save_start_token: int = 0
 
@@ -1004,6 +1006,7 @@ class ReqMeta:
         load_key_block_offset: int = 0,
         load_last_block_key: str | None = None,
         load_keys: list[str] | None = None,
+        kv_priority: int | None = None,
     ) -> None:
         if token_len_chunk is None:
             token_len_chunk = 0 if save_end_token is None else save_end_token
@@ -1045,6 +1048,7 @@ class ReqMeta:
         self.load_key_block_offset = load_key_block_offset
         self.load_last_block_key = load_last_block_key
         self.load_keys = [] if load_keys is None else list(load_keys)
+        self.kv_priority = kv_priority
 
     @property
     def block_ids(self) -> list[int]:

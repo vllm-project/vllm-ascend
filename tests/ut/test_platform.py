@@ -1,4 +1,6 @@
+import argparse
 import importlib
+import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -567,25 +569,24 @@ class TestNPUPlatform(TestBase):
     @patch("vllm_ascend.utils.adapt_patch")
     @patch("vllm_ascend.quantization.configs.modelslim_config.AscendModelSlimConfig")
     def test_pre_register_and_update_with_parser(self, mock_quant_config, mock_adapt_patch):
-        mock_parser = MagicMock()
-        mock_action = MagicMock()
-        mock_action.choices = ["awq", "gptq"]
-        dtype_action = MagicMock()
-        dtype_action.choices = ["auto"]
-        mock_parser._option_string_actions = {
-            "--quantization": mock_action,
-            "--kv-cache-dtype": dtype_action,
-        }
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--additional-config", type=json.loads, default={})
+        quant_action = parser.add_argument("--quantization", choices=["awq", "gptq"])
+        dtype_action = parser.add_argument("--kv-cache-dtype", choices=["auto"])
 
-        self.platform.pre_register_and_update(mock_parser)
+        self.platform.pre_register_and_update(parser)
 
         mock_adapt_patch.assert_called_once_with(is_global_patch=True)
 
-        self.assertTrue(ASCEND_QUANTIZATION_METHOD in mock_action.choices)
-        self.assertEqual(len(mock_action.choices), 3)  # original 2 + ascend
+        assert isinstance(quant_action.choices, list)
+        assert isinstance(dtype_action.choices, list)
+        self.assertTrue(ASCEND_QUANTIZATION_METHOD in quant_action.choices)
+        self.assertEqual(len(quant_action.choices), 3)  # original 2 + ascend
         self.assertIn("int8", dtype_action.choices)
         self.assertIn("mxfp8", dtype_action.choices)
         self.assertEqual(dtype_action.choices.count("auto"), 1)
+        args = parser.parse_args(["--ai-qos", '{"kv_transfer":{"default_priority":"high"}}'])
+        self.assertEqual(args.additional_config["ai_qos"]["kv_transfer"]["default_priority"], 7)
 
     @patch("vllm_ascend.utils.adapt_patch")
     @patch("vllm_ascend.quantization.configs.modelslim_config.AscendModelSlimConfig")
@@ -597,25 +598,26 @@ class TestNPUPlatform(TestBase):
     @patch("vllm_ascend.utils.adapt_patch")
     @patch("vllm_ascend.quantization.configs.modelslim_config.AscendModelSlimConfig")
     def test_pre_register_and_update_with_parser_no_quant_action(self, mock_quant_config, mock_adapt_patch):
-        mock_parser = MagicMock()
-        mock_parser._option_string_actions = {}
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--additional-config", type=json.loads, default={})
 
-        self.platform.pre_register_and_update(mock_parser)
+        self.platform.pre_register_and_update(parser)
 
         mock_adapt_patch.assert_called_once_with(is_global_patch=True)
+        self.assertIn("--ai-qos", parser._option_string_actions)
 
     @patch("vllm_ascend.utils.adapt_patch")
     @patch("vllm_ascend.quantization.configs.modelslim_config.AscendModelSlimConfig")
     def test_pre_register_and_update_with_existing_ascend_quant(self, mock_quant_config, mock_adapt_patch):
-        mock_parser = MagicMock()
-        mock_action = MagicMock()
-        mock_action.choices = ["awq", ASCEND_QUANTIZATION_METHOD]
-        mock_parser._option_string_actions = {"--quantization": mock_action}
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--additional-config", type=json.loads, default={})
+        quant_action = parser.add_argument("--quantization", choices=["awq", ASCEND_QUANTIZATION_METHOD])
 
-        self.platform.pre_register_and_update(mock_parser)
+        self.platform.pre_register_and_update(parser)
 
         mock_adapt_patch.assert_called_once_with(is_global_patch=True)
-        self.assertEqual(len(mock_action.choices), 2)
+        assert isinstance(quant_action.choices, list)
+        self.assertEqual(len(quant_action.choices), 2)
 
     def test_apply_config_platform_defaults_sets_ascend_default_max(self):
         test_cases = [
