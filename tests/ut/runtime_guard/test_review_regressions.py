@@ -1054,6 +1054,7 @@ def test_v18b_kv_drain_dumps_on_tp_ranks(tmp_path: Path, tp_rank: int):
             _kv_reader=KvCacheReader(runner),
             submit_heavy=None,
         ),
+        quota=MagicMock(),
     )
     jobs = [
         {

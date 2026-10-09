@@ -39,12 +39,18 @@ def bare_processor(*, boom_detectors: bool = False) -> RuntimeGuardProcessor:
     if boom_detectors:
         p.detectors.after_sample_hot_path = MagicMock(side_effect=RuntimeError("boom"))
         p.detectors.check_before_sample = MagicMock(side_effect=RuntimeError("boom"))
-    p.wave_tracker = None
-    p.runner = None
+    p.wave_tracker = MagicMock()
+    p.wave_tracker.current_wave.return_value = 0
+    p.runner = MagicMock()
     p._handle_alert = MagicMock()
     p._reap_finished_requests = MagicMock()
     p._last_input_batch = None
-    p.action_executor = None
+    p.action_executor = MagicMock()
+    p.quota = MagicMock()
+    p._kv_dump_jobs = []
+    p._deferred_kv_dump_jobs = []
+    p._bus_worker = MagicMock()
+    p._bus_worker.started = True
     # End-of-wave gate uses collectives; bare shells no-op it.
     p.runtime_config = MagicMock()
     p.end_of_wave_sync = MagicMock()  # type: ignore[method-assign]

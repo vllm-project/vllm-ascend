@@ -200,9 +200,8 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         self._tokenizer = None
         self._tokenizer_failed = False
         self.action_executor.start()
-        worker = getattr(self, "_bus_worker", None)
-        if worker is not None and not getattr(worker, "started", False):
-            worker.start()
+        if not self._bus_worker.started:
+            self._bus_worker.start()
 
     def shutdown(self) -> None:
         """Stop async workers (process teardown / tests)."""
@@ -211,9 +210,7 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
             # Bounded: a stuck collective (dead peer) must not hang teardown.
             with contextlib.suppress(Exception):
                 self._drain_merged_bus(warn_if_pending=False, timeout=_SHUTDOWN_BUS_DRAIN_TIMEOUT_S)
-            worker = getattr(self, "_bus_worker", None)
-            if worker is not None:
-                worker.stop()
+            self._bus_worker.stop()
         except Exception:
             logger.debug("[runtime_guard] bus worker stop failed", exc_info=True)
         try:
@@ -296,7 +293,7 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
                 # dump is active (shared gate → all ranks take the same branch).
                 if cfg.dump_enabled():
                     self._claim_dump_jobs_to_deferred_via_tp()
-                elif getattr(self, "_kv_dump_jobs", None):
+                elif self._kv_dump_jobs:
                     # Dump inactive: drop with per-arm refund (quota was
                     # consumed at arm time; no D2H will happen).
                     self._drop_pending_dump_jobs()
@@ -373,13 +370,7 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         RequestGuardStore.get().mark_finished(finished_req_ids, wave=self._current_wave())
 
     def _current_wave(self) -> int:
-        wave_tracker = self.wave_tracker
-        if wave_tracker is None:
-            return 0
-        try:
-            return int(wave_tracker.current_wave())
-        except (TypeError, ValueError):
-            return 0
+        return int(self.wave_tracker.current_wave())
 
     def _reap_finished_requests(self) -> None:
         """Clear reqs that are finished and drained."""
@@ -389,8 +380,7 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         if not reapable:
             return
         store.clear_many(reapable, detectors=self.detectors)
-        if self.wave_tracker is not None:
-            self.wave_tracker.discard_many(reapable)
+        self.wave_tracker.discard_many(reapable)
 
     def should_check_after_spec(self) -> bool:
         if not self.action_executor.can_run_detection():
@@ -398,15 +388,8 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         return self.detectors.any_enabled_for_spec()
 
     def needs_sample_phase_hooks(self) -> bool:
-        """True when sample-phase runtime_guard hooks must run (else pure ``sample_fn``).
-
-        Missing ``runtime_config`` (bare test doubles) defaults to True so
-        soft-fail / wiring tests still exercise the hook chain.
-        """
-        cfg = getattr(self, "runtime_config", None)
-        if cfg is None:
-            return True
-        return bool(cfg.needs_sample_phase_hooks())
+        """True when sample-phase runtime_guard hooks must run (else pure ``sample_fn``)."""
+        return bool(self.runtime_config.needs_sample_phase_hooks())
 
     def _soft_fail(self, hook: str, fn: Callable[[], Any]) -> Any:
         # Guard hooks are observational: any exception must stay inside the
@@ -603,28 +586,26 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         def _run() -> None:
             wave_by_req: dict[str, int] = {}
             wave_tracker = self.wave_tracker
-            runner = self.runner
-            async_sched = bool(getattr(runner, "use_async_scheduling", False)) if runner is not None else False
-            if wave_tracker is not None:
-                ids = list(req_ids) if req_ids else []
-                if async_sched and not ids:
-                    logger.warning_once(
-                        "[runtime_guard wave] async check_after_sample without req_ids; "
-                        "arm_wave will fall back to current_wave (may race advance_wave)"
+            async_sched = bool(getattr(self.runner, "use_async_scheduling", False))
+            ids = list(req_ids) if req_ids else []
+            if async_sched and not ids:
+                logger.warning_once(
+                    "[runtime_guard wave] async check_after_sample without req_ids; "
+                    "arm_wave will fall back to current_wave (may race advance_wave)"
+                )
+            for rid in ids:
+                if not rid:
+                    continue
+                rid_s = str(rid)
+                stamped = wave_tracker.take_sample_wave(rid_s)
+                if stamped is not None:
+                    wave_by_req[rid_s] = stamped
+                elif async_sched:
+                    logger.warning(
+                        "[runtime_guard wave] missing sample-wave stamp for req_id=%s under async "
+                        "scheduling; arm_wave falls back to current_wave (may be polluted)",
+                        rid_s,
                     )
-                for rid in ids:
-                    if not rid:
-                        continue
-                    rid_s = str(rid)
-                    stamped = wave_tracker.take_sample_wave(rid_s)
-                    if stamped is not None:
-                        wave_by_req[rid_s] = stamped
-                    elif async_sched:
-                        logger.warning(
-                            "[runtime_guard wave] missing sample-wave stamp for req_id=%s under async "
-                            "scheduling; arm_wave falls back to current_wave (may be polluted)",
-                            rid_s,
-                        )
             logits_alerts, snap = self.detectors.after_sample_hot_path(
                 sampled_token_ids,
                 req_ids=req_ids,
@@ -706,8 +687,6 @@ def log_sampling_meta_debug(runner: Any, req_ids: list[str] | None) -> None:
 
 
 def _emit_sampling_meta_debug(runner: Any, req_ids: list[str] | None) -> None:
-    if runner is None:
-        return
     # Process-group TP rank (v1 runners have no reliable ``tp_rank`` attr).
     if runner_tp_rank(runner) != 0:
         return

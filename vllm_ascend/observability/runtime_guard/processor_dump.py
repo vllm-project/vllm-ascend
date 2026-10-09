@@ -69,10 +69,7 @@ class RuntimeGuardDumpMixin:
             return False
         rid = str(job["req_id"])
         wave = job.get("wave")
-        pending: list[dict[str, Any]] | None = getattr(self, "_kv_dump_jobs", None)
-        if pending is None:
-            self._kv_dump_jobs = []
-            pending = self._kv_dump_jobs
+        pending = self._kv_dump_jobs
         for j in pending:
             if str(j.get("req_id") or "") != rid:
                 continue
@@ -102,8 +99,7 @@ class RuntimeGuardDumpMixin:
 
         if jobs:
             RequestGuardStore.get().finish_dump_jobs([j.get("req_id") for j in jobs if j.get("req_id")])
-        quota = getattr(self, "quota", None)
-        if quota is None or not jobs:
+        if not jobs:
             return
         try:
             is_tp0 = runner_tp_rank(self.runner) == 0
@@ -113,7 +109,7 @@ class RuntimeGuardDumpMixin:
             return
         arms = {str(j.get("arm_id") or f"job-{id(j)}") for j in jobs if j.get("consume_quota")}
         for _arm in arms:
-            quota.refund(consume_quota=True)
+            self.quota.refund(consume_quota=True)
         if arms:
             logger.info(
                 "[runtime_guard dump_kv] refunded %d dropped dump arm(s) (no D2H)",
@@ -127,9 +123,7 @@ class RuntimeGuardDumpMixin:
         arm and the next wave-head, or a wave-head bus failure after the
         queue was handed off.
         """
-        if not hasattr(self, "_kv_dump_jobs"):
-            return
-        jobs = list(self._kv_dump_jobs or [])
+        jobs = list(self._kv_dump_jobs)
         self._kv_dump_jobs.clear()
         self._refund_dropped_dump_arms(jobs)
 
@@ -174,9 +168,8 @@ class RuntimeGuardDumpMixin:
         if not self.runtime_config.dump_enabled():
             self._drop_pending_dump_jobs()
             return
-        payload = list(getattr(self, "_kv_dump_jobs", None) or [])
-        if hasattr(self, "_kv_dump_jobs"):
-            self._kv_dump_jobs.clear()
+        payload = list(self._kv_dump_jobs)
+        self._kv_dump_jobs.clear()
         try:
             tp_group = get_tp_group()
         except Exception:
@@ -209,13 +202,12 @@ class RuntimeGuardDumpMixin:
             self._deferred_kv_dump_jobs.extend(list(jobs))
 
     def _run_kv_dumps(self, jobs: list[dict[str, Any]]) -> None:
-        ex = getattr(self, "action_executor", None)
-        reader = getattr(ex, "_kv_reader", None) or KvCacheReader(self.runner)
-        submit = getattr(ex, "submit_heavy", None)
+        reader = self.action_executor._kv_reader
+        submit = self.action_executor.submit_heavy
         dump_root = Path(self.runtime_config.dump_root())
         rank_tag = dump_rank_tag(self.runner)
         store = RequestGuardStore.get()
-        quota = getattr(self, "quota", None)
+        quota = self.quota
         try:
             is_tp0 = runner_tp_rank(self.runner) == 0
         except Exception:
@@ -269,7 +261,7 @@ class RuntimeGuardDumpMixin:
                 if isinstance(armed_bids, list) and armed_bids:
                     block_ids = [int(x) for x in armed_bids]
                 else:
-                    block_ids = list(block_ids_for_request(self.runner, req_id, None) or [])
+                    block_ids = list(block_ids_for_request(self.runner, req_id, None))
                 if not block_ids:
                     logger.warning(
                         "[runtime_guard dump_kv] skip empty local block_ids req_id=%s rank=%s",
@@ -334,7 +326,7 @@ class RuntimeGuardDumpMixin:
                     out_dir,
                     finished_at,
                 )
-            if is_tp0 and quota is not None:
+            if is_tp0:
                 for meta in arms.values():
                     if meta["debited"] and not meta["ok"]:
                         quota.refund(consume_quota=True)

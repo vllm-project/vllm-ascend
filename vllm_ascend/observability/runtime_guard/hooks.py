@@ -207,14 +207,9 @@ def get_postprocess_sampled(runner: Any) -> tuple[Any, Any]:
 
 def need_pre_sample_hook(guard: Any) -> bool:
     """True when wrapping ``compute_logits`` is useful (detector on + gate open)."""
-    cfg = getattr(guard, "runtime_config", None)
-    if cfg is None:
+    if not bool(guard.runtime_config.detector_get("logits_finite", "enabled", False)):
         return False
-    if not bool(cfg.detector_get("logits_finite", "enabled", False)):
-        return False
-    executor = getattr(guard, "action_executor", None)
-    can = getattr(executor, "can_run_detection", None)
-    return not (callable(can) and not bool(can()))
+    return bool(guard.action_executor.can_run_detection())
 
 
 def check_before_sample_from_batch(

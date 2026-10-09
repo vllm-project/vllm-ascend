@@ -224,7 +224,7 @@ class _SampleRunner:
 
 def test_sample_tokens_orchestrates_guard_around_body():
     guard = MagicMock()
-    guard.runtime_config = None  # need_pre_sample_hook -> False
+    guard.runtime_config.detector_get.return_value = False  # need_pre_sample_hook -> False
     guard.needs_sample_phase_hooks.return_value = False
     runner = _SampleRunner(guard)
 
@@ -249,7 +249,7 @@ def test_sample_tokens_orchestrates_guard_around_body():
 
 def test_sample_tokens_passes_accepted_token_nums_fn_for_spec():
     guard = MagicMock()
-    guard.runtime_config = None
+    guard.runtime_config.detector_get.return_value = False  # need_pre_sample_hook -> False
     guard.needs_sample_phase_hooks.return_value = False
     runner = _SampleRunner(guard)
     runner.speculative_config = object()
