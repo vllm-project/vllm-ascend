@@ -10,7 +10,7 @@ from torch import nn
 
 from vllm_ascend.attention.mla_v1 import AscendMLAImpl
 from vllm_ascend.attention.utils import mark_fused_preprocess_weights
-from vllm_ascend.models import kimi_k3
+from vllm_ascend.models import kimi_k3, kimi_k3_dspark
 from vllm_ascend.models.kimi_k3 import (
     AscendKimiK3MultiModalProjector,
     AscendKimiLinearModel,
@@ -140,6 +140,25 @@ def test_k3_dspark_context_writer_splits_fused_mla_cache(monkeypatch):
     assert cache[1].untyped_storage() is fused_cache.untyped_storage()
     torch.testing.assert_close(cache[0], fused_cache[..., :4])
     torch.testing.assert_close(cache[1], fused_cache[..., 4:])
+
+
+def test_k3_dspark_cache_diagnostic_reports_view_bounds(monkeypatch):
+    fused_cache = torch.arange(36, dtype=torch.float32).reshape(2, 3, 1, 6)
+    normalized_cache = (fused_cache[..., :4], fused_cache[..., 4:])
+    slots = torch.tensor([0, 5])
+
+    monkeypatch.setenv("VLLM_ASCEND_DEBUG_DSPARK_MLA_CACHE", "1")
+    monkeypatch.setattr(kimi_k3_dspark, "get_flashmla_ops", lambda: (object(), object()))
+    with patch.object(kimi_k3_dspark.logger, "warning") as warning:
+        kimi_k3_dspark._log_dspark_mla_cache_diagnostic(0, fused_cache, normalized_cache, slots)
+
+    assert warning.call_count == 3
+    assert "original_type=Tensor" in warning.call_args_list[0].args[0]
+    assert "normalized_type=tuple" in warning.call_args_list[0].args[0]
+    assert "flashmla_ops=available" in warning.call_args_list[0].args[0]
+    assert "python_bound_ok=True" in warning.call_args_list[-1].args[0]
+    assert "exceeds_u32=False" in warning.call_args_list[-1].args[0]
+    assert "slots_bound_ok=True" in warning.call_args_list[-1].args[0]
 
 
 def test_kimi_mixed_kda_gate_weights_use_upstream_packed_loader(monkeypatch):

@@ -82,6 +82,9 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Emit per-layer KVPool ranged transfer audit events. Default: 0 (disabled).
     # Valid values: 0 or 1. This configuration is not sensitive.
     "VLLM_ASCEND_KVPOOL_RANGE_DEBUG": lambda: _strict_binary_env("VLLM_ASCEND_KVPOOL_RANGE_DEBUG"),
+    # Emit DSpark MLA cache layout diagnostics before context KV writes.
+    # Default: 0 (disabled). Valid values: 0 or 1.
+    "VLLM_ASCEND_DEBUG_DSPARK_MLA_CACHE": lambda: _strict_binary_env("VLLM_ASCEND_DEBUG_DSPARK_MLA_CACHE"),
     # Override the Unified Buffer (UB) size in KB for Triton kernel tile sizing.
     # 0 (default): auto-detect from device properties, falling back to 192 KB
     # (safe for Ascend 910B/A3). Set to a positive value to override when
