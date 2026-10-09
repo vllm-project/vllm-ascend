@@ -93,6 +93,7 @@ from .engram.embedding import (
     preflight_engram_checkpoint,
 )
 from .engram.layer import AscendEngram
+from .engram.npu import compressed_engram_views
 from .engram.parallel import gather_engram_hashes, resolve_dp_shared_memory
 from .indexer import DeepseekV41Indexer
 
@@ -1053,9 +1054,13 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                     head_sizes,
                     slot,
                     storage_dtype=storage_dtype,
+                    scale_on_device=get_ascend_config().engram_lookup_backend == "aicpu_urma_cube_hbm",
+                    aicpu_urma_cube=get_ascend_config().engram_lookup_backend == "aicpu_urma_cube_hbm",
                     cpu_offload=cpu_offload,
                     dp_shared_memory=self.engram_dp_shared_memory,
                 )
+                if getattr(embed, "compressed_lookup", False) and (embed.tp_size != 1 or self.use_sequence_parallel):
+                    raise ValueError("Direct Cube Engram currently requires TP1 without sequence parallelism")
                 embed.bind_checkpoint(self.engram_weight_root, f"layers.{layer_id}.engram.embed.weight")
                 self.layers[layer_id].engram.embed_tokens = embed
         self.engram_hash = None
@@ -1200,7 +1205,27 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             gathered = gather_engram_hashes(hashes, dp_shared_memory=self.engram_dp_shared_memory)
             for slot, (layer_id, table) in enumerate(zip(config.engram_layer_ids, tables)):
                 direct = output_buffers is not None and table.dp_size == 1 and table.tp_size == 1
-                if direct:
+                if getattr(table, "compressed_lookup", False):
+                    count = hashes.shape[0]
+                    target = (
+                        output_buffers[layer_id]
+                        if output_buffers is not None
+                        else torch.zeros(
+                            (count, table.n_hash_cols * (table.dim + table.dim // table.block_size)),
+                            dtype=torch.uint8,
+                            device=device,
+                        )
+                    )
+                    codes, scales = compressed_engram_views(target, table.n_hash_cols, table.dim)
+                    table.lookup_codes(
+                        gathered[:, slot].contiguous(),
+                        codes[:count].view(count * table.n_hash_cols, table.dim),
+                        scales[:count],
+                    )
+                    codes[count:output_tokens].zero_()
+                    scales[count:output_tokens].zero_()
+                    lookups[layer_id] = target
+                elif direct:
                     target = output_buffers[layer_id]
                     count = hashes.shape[0]
                     table.lookup(
@@ -1228,7 +1253,12 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                         device=device,
                     )
                 else:
-                    output_buffers[layer_id][:output_tokens].zero_()
+                    if getattr(table, "compressed_lookup", False):
+                        codes, scales = compressed_engram_views(output_buffers[layer_id], table.n_hash_cols, table.dim)
+                        codes[:output_tokens].zero_()
+                        scales[:output_tokens].zero_()
+                    else:
+                        output_buffers[layer_id][:output_tokens].zero_()
                     lookups[layer_id] = output_buffers[layer_id]
                 if ready_events is not None:
                     ready_events[layer_id].record(torch.npu.current_stream())
@@ -1329,21 +1359,18 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         if self._engram_input_buffers is None:
             capacity = self._engram_max_tokens
             device = self.engram_rotation.device
-            self._engram_input_buffers = (
-                {
-                    layer: torch.zeros(
-                        (
-                            capacity,
-                            self.layers[layer].engram.embed_tokens.n_hash_cols
-                            * self.layers[layer].engram.embed_tokens.dim,
-                        ),
-                        dtype=torch.bfloat16,
-                        device=device,
-                    )
-                    for layer in self.config.engram_layer_ids
-                },
-                torch.zeros(capacity, dtype=torch.bool, device=device),
-            )
+            buffers = {}
+            for layer in self.config.engram_layer_ids:
+                table = self.layers[layer].engram.embed_tokens
+                width = table.n_hash_cols * table.dim
+                if getattr(table, "compressed_lookup", False):
+                    width += width // table.block_size
+                buffers[layer] = torch.zeros(
+                    (capacity, width),
+                    dtype=torch.uint8 if getattr(table, "compressed_lookup", False) else torch.bfloat16,
+                    device=device,
+                )
+            self._engram_input_buffers = (buffers, torch.zeros(capacity, dtype=torch.bool, device=device))
         return self._engram_input_buffers
 
     def _get_engram_external_events(self, key, *, prime):
@@ -1566,6 +1593,14 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                 lookup = lookups[layer.layer_idx]
                 if use_sequence_parallel:
                     lookup = sp_shard(lookup)
+                engram_kwargs = {}
+                table = getattr(layer.engram, "embed_tokens", None)
+                if getattr(table, "compressed_lookup", False):
+                    codes, scales = compressed_engram_views(lookup, table.n_hash_cols, table.dim)
+                    engram_kwargs["compressed_rows"] = (
+                        codes[:n].view(torch.float8_e4m3fn),
+                        scales[:n].view(n, -1, 2).view(torch.float8_e8m0fnu),
+                    )
                 lookup = lookup[:n]
                 active_mask = token_mask[:n]
                 hidden_states[:n] = layer.engram(
@@ -1573,6 +1608,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                     lookup,
                     active_mask,
                     self.engram_rotation if self.engram_rotated else None,
+                    **engram_kwargs,
                 )
             hidden_states, pre_mix = layer(positions, hidden_states, pre_mix, None, input_ids=input_ids)
         assert last_layer is not None, "Hyper-connection collapse requires at least one decoder layer"

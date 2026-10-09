@@ -1,0 +1,9 @@
+{
+  "EngramUrmaGather": {
+    "opInfo": {
+      "functionName": "EngramUrmaGather",
+      "kernelSo": "libengram_aicpu.so",
+      "opKernelLib": "CUSTAICPUKernel"
+    }
+  }
+}
