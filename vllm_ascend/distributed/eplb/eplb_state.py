@@ -161,6 +161,8 @@ class AscendEplbState(_eplb_state.EplbState):
         self._suspended = False
         self._close_error: Exception | None = None
         self._rebuild_group: Any = None
+        self._sleep_saved_mappings: dict[str, torch.Tensor] | None = None
+        self._pending_checkpoint_reload: bool | None = None
         if self.cuda_device_index is None:
             self.cuda_device_index = torch.accelerator.current_device_index()
 
@@ -228,6 +230,10 @@ class AscendEplbState(_eplb_state.EplbState):
         if not self._suspended:
             return
         try:
+            if self._sleep_saved_mappings is not None or self._pending_checkpoint_reload is not None:
+                self._restore_model_state()
+                # HIXL and the background stream must see completed restoration.
+                torch.npu.synchronize()
             for model_state in self.model_states.values():
                 if isinstance(model_state.communicator, AscendHixlEplbCommunicator):
                     model_state.communicator = _eplb_state.create_eplb_communicator(
@@ -239,6 +245,80 @@ class AscendEplbState(_eplb_state.EplbState):
         self._suspended = False
         self._stop_async.clear()
         self.start_async_loop()
+
+    def lifecycle_tensors(self) -> Iterator[torch.Tensor]:
+        """Include metadata in partial-wake gating, even outside weights pools."""
+        if self.should_record_tensor is not None:
+            yield self.should_record_tensor
+        for model_state in self.model_states.values():
+            yield model_state.physical_to_logical_map_buffer
+            yield model_state.logical_to_physical_map
+            yield model_state.logical_replica_count
+            yield model_state.expert_load_pass_buffer
+            yield model_state.expert_load_window
+            yield from model_state.num_unpadded_tokens_tensors
+            for layer in model_state.model.moe_layers:
+                layer_state = layer.eplb_state
+                if isinstance(layer_state, AscendEplbLayerState):
+                    if layer_state.expert_replica_routing_table is not None:
+                        yield layer_state.expert_replica_routing_table
+
+    def save_sleep_state(self) -> None:
+        """Save placement after draining, before allocator mappings disappear."""
+        self._sleep_saved_mappings = {
+            key: model_state.physical_to_logical_map_buffer.cpu().clone()
+            for key, model_state in self.model_states.items()
+        }
+
+    def finish_weight_reload(self, is_checkpoint_format: bool) -> None:
+        # Partial wake can leave metadata unmapped. Apply this on resume only.
+        self._pending_checkpoint_reload = is_checkpoint_format
+
+    def _restore_model_state(self) -> None:
+        for key, model_state in self.model_states.items():
+            mapping = None if self._sleep_saved_mappings is None else self._sleep_saved_mappings[key]
+            if self._pending_checkpoint_reload:
+                model = model_state.model
+                token = EXPERT_MAPPING_EP_SIZE.set(get_ep_group().world_size)
+                try:
+                    initial = self.build_initial_global_physical_to_logical_map(
+                        model.num_routed_experts, model.num_redundant_experts
+                    )
+                finally:
+                    EXPERT_MAPPING_EP_SIZE.reset(token)
+                mapping = torch.full(
+                    model_state.physical_to_logical_map_buffer.shape, -1, dtype=torch.long, device="cpu"
+                )
+                mapping[:, : len(initial)] = torch.tensor(initial, device="cpu")
+            if mapping is not None:
+                model_state.physical_to_logical_map_buffer.copy_(mapping)
+                _eplb_state._commit_eplb_maps(model_state, mapping[:, : model_state.model.num_physical_experts])
+            model_state.expert_load_pass_buffer.zero_()
+            model_state.expert_load_window.zero_()
+            for tensor in model_state.num_unpadded_tokens_tensors:
+                tensor.zero_()
+            model_state.model.set_eplb_state(
+                model_state.expert_load_pass_buffer,
+                model_state.logical_to_physical_map,
+                model_state.logical_replica_count,
+            )
+            if self.uses_custom_load_stats:
+                self._initialize_load_stats_state(model_state)
+        if self.should_record_tensor is not None:
+            self.should_record_tensor.zero_()
+        self.expert_load_window_step = 0
+        self.expert_rearrangement_step = 0
+        self._has_fresh_recorded_load = False
+        self._is_load_sampling_step = False
+        self._should_collect_local_load = False
+        if self.uses_custom_load_stats:
+            self._local_load_collection_mask.zero_()
+            self._physical_load_sample_slots.fill_(-1)
+            self._num_recorded_load_steps = 0
+            self._load_stats_window_start_index = 0
+            self._load_stats_window_write_index = 0
+        self._sleep_saved_mappings = None
+        self._pending_checkpoint_reload = None
 
     def create_communicator(self, model_config, group_coordinator):
         """Defer elastic EP registration until the final weight views exist.

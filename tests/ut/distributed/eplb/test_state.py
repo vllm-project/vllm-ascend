@@ -298,6 +298,8 @@ def _lifecycle_state():
     state._stop_async = threading.Event()
     state._close_error = None
     state._rebuild_group = None
+    state._sleep_saved_mappings = None
+    state._pending_checkpoint_reload = None
     state.is_async = True
     state.async_worker = None
     state.model_states = {}
