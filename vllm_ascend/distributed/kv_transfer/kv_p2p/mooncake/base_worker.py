@@ -12,6 +12,7 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_pcp_group
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
+    KVConnectorTransferResults,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.distributed.parallel_state import (
@@ -338,7 +339,12 @@ class MooncakeBaseConnectorWorker:
         )
 
     def get_finished(self) -> tuple[set[str], set[str]]:
-        """Return requests with completed receive and send operations."""
+        """Compatibility wrapper for the legacy completion API."""
+        results = self.get_transfer_results()
+        return results.finished_sending, results.finished_recving
+
+    def get_transfer_results(self) -> KVConnectorTransferResults:
+        """Return completed transfers and receive failures together."""
         raise NotImplementedError
 
     def get_block_ids_with_load_errors(self) -> set[int]:
