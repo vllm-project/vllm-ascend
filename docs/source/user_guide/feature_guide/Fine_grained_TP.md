@@ -21,16 +21,16 @@ In the measured DeepSeek-R1-W8A8 deployment below, the four knobs together saved
 All four knobs shard weights over a process group built along the DP axis, and every rank of that group joins the exchange on every engine step. The four components fall into two families with different exchange contracts, and the family a knob belongs to determines where it can run:
 
 - **embedding / LM head (fixed-capacity exchanges)**: the exchange always runs at a fixed, deployment-wide capacity regardless of the real per-step token count, and the padding tail is trimmed afterwards. For embedding, the op pads token IDs to `max(potential_max_tokens, max_num_batched_tokens)` before an `all_gather`, looks up its vocabulary shard, and `reduce_scatter`s the embeddings back to the original owners — prefill-sized steps included. For the LM head, the runner pads the sampled hidden-state rows to `max_num_reqs * decode_query_len` before `all_gather → vocab-sharded GEMM → all_to_all`, and idle DP ranks join through a dummy `compute_logits` at the same capacity. Because the collective shapes never depend on the step, these knobs work in eager and graph mode, in both prefill and decode.
-- **o_proj / MLP (per-step exchanges that require decode-shaped steps)**: the exchange is sized by the actual step. MLP runs plain `all_gather` (gate_up) / `reduce_scatter` (down) whose shapes follow the real token count, so every rank in the group must forward the same number of tokens on every step. o_proj pads to a static capacity — `potential_max_tokens`, the deployment-wide step bound (the largest cudagraph capture size, and at least the largest decode-shaped step) — and fails explicitly beyond it. These knobs are supported only in graph-dispatched P/D decode deployments, where steps stay decode-shaped and aligned across the DP group — hence the [preconditions](#preconditions-for-o_proj--mlp-tp) and the eager-step guard.
+- **o_proj / MLP (per-step exchanges that require decode-shaped steps)**: the exchange is sized by the actual step. MLP runs plain `all_gather` (gate_up) / `reduce_scatter` (down) whose shapes follow the real token count, so every rank in the group must forward the same number of tokens on every step. o_proj pads to a static capacity — `potential_max_tokens`, the deployment-wide step bound (the largest cudagraph capture size, and at least the largest decode-shaped step) — and fails explicitly beyond it. These knobs are supported only in graph-dispatched P/D decode deployments, where steps stay decode-shaped and aligned across the DP group — see the [preconditions](#preconditions-for-o_proj--mlp-tp) and the runtime guard against eagerly dispatched steps.
 
 ### Usage Scenarios
 
-The four knobs are freely combinable — on a PD decode node all four can be enabled together (this is the configuration measured in [Experimental Results](#experimental-results)); each knob only needs to satisfy its own family's constraints. All four knobs currently cannot be combined with pipeline parallelism (`pipeline_parallel_size > 1`).
+The four knobs are freely combinable — on a PD decode node all four can be enabled together (this is the configuration measured in [Experimental Results](#experimental-results)); each knob only needs to satisfy its own family's constraints.
 
 | Scenario | Components that can be enabled | Applicable Conditions |
 |----------|-------------------------------|------------------------|
-| All-DP MoE serving (standalone, or the decode side of PD separation) | embedding / LM head — o_proj and MLP TP additionally require a PD decode node | MoE model, `tensor_parallel_size == 1`, sizes evenly divide `data_parallel_size` |
-| P/D-disaggregated decode (D) node | all four together: o_proj / MLP / embedding / LM head | The o_proj / MLP knobs require the full [preconditions for o_proj / MLP TP](#preconditions-for-o_proj--mlp-tp) |
+| All-DP MoE serving — standalone, or a PD decode node using embedding / LM head TP only | embedding / LM head | MoE model, `tensor_parallel_size == 1`, sizes evenly divide `data_parallel_size` |
+| P/D-disaggregated decode (D) node with all four knobs | o_proj / MLP / embedding / LM head | The o_proj / MLP knobs require the full [preconditions for o_proj / MLP TP](#preconditions-for-o_proj--mlp-tp) |
 
 #### Component & Execution Mode Support
 
@@ -41,10 +41,10 @@ The four knobs are freely combinable — on a PD decode node all four can be ena
 | **mlp**       | ❌     | ✅     | ❌       | ✅      |
 | **LM head**   | ✅     | ✅     | ✅       | ✅      |
 
-> ⚠️ Note:  
->
-> - Both `o_proj` TP and MLP TP additionally require `tensor_parallel_size == 1` (enforced at config load); see [Standard Tensor Parallelism Requirement](#standard-tensor-parallelism-requirement) below.
-> - LM head TP can be combined with speculative decoding (EAGLE, DFlash, and DSpark draft models).
+```{note}
+- Both `o_proj` TP and MLP TP additionally require `tensor_parallel_size == 1` (enforced at config load); see [Standard Tensor Parallelism Requirement](#standard-tensor-parallelism-requirement).
+- LM head TP can be combined with speculative decoding (EAGLE, DFlash, and DSpark draft models); see [LM Head TP and Speculative Decoding](#lm-head-tp-and-speculative-decoding).
+```
 
 ### Constraints and Limitations
 
@@ -53,7 +53,7 @@ The four knobs are freely combinable — on a PD decode node all four can be ena
 | Model | MoE models only — see [Models](#models) for how to check a checkpoint |
 | Deployment Scenario | embedding / LM head TP: all-DP MoE serving or PD decode nodes; o_proj / MLP TP: P/D-disaggregated decode nodes only |
 | Standard TP | Fine-grained sizes require, or are only effective under, `tensor_parallel_size == 1`; see [Standard Tensor Parallelism Requirement](#standard-tensor-parallelism-requirement) |
-| Feature Mutual Exclusion | `prefill_context_parallel_size > 1` cannot be combined with o_proj / MLP TP; PCP embedding / LM-head weight sharding (`enable_pcp_embedding_lmhead_weight_sharding`, on by default when PCP > 1) cannot be combined with embedding / LM head TP |
+| Feature Mutual Exclusion | Pipeline parallelism (`pipeline_parallel_size > 1`) cannot be combined with any of the four knobs; `prefill_context_parallel_size > 1` cannot be combined with o_proj / MLP TP; PCP embedding / LM-head weight sharding (`enable_pcp_embedding_lmhead_weight_sharding`, on by default when PCP > 1) cannot be combined with embedding / LM head TP |
 | Hardware | No config-enforced hardware restriction; the performance data in this guide was measured on Atlas A2 (see [Experimental Results](#experimental-results)) |
 
 #### Models
@@ -64,7 +64,7 @@ To check whether a checkpoint qualifies, look at its `config.json`: the model co
 
 The restriction comes from the sharding axis: fine-grained TP shards weights across the data-parallel (DP) dimension, and only MoE deployments keep a cross-rank DP group — for a dense model, every DP rank runs as an independent DP=1 engine, leaving no group to shard across.
 
-Within a qualifying MoE model, `mlp_tensor_parallel_size` shards the dense FFN layers — for example, the first three dense layers of DeepSeek-R1; the routed experts of the MoE layers are sharded by expert parallel instead.
+Within a qualifying MoE model, `mlp_tensor_parallel_size` shards the dense FFN layers — for example, the first three dense layers of DeepSeek-R1; the routed experts of the MoE layers are sharded by expert parallel instead, and shared experts stay replicated.
 
 #### Preconditions for o_proj / MLP TP
 
@@ -72,12 +72,12 @@ Within a qualifying MoE model, `mlp_tensor_parallel_size` shards the dense FFN l
 
 - a MoE model with `tensor_parallel_size == 1` (and a `data_parallel_size` that the TP size evenly divides);
 - a P/D-disaggregated deployment, on the decode (D) node only (`kv_role = kv_consumer`);
-- the recompute scheduler: `scheduler_config.recompute_scheduler_enable = true` in `--additional-config`;
-- `PreemptOffloadConnector` in the KV connector chain — combine the P/D transfer connector (e.g. `MooncakeConnectorV1`) and `PreemptOffloadConnector` via `MultiConnector` (see the [Preempt Offload Guide](preempt_offload_connector.md));
+- the recompute scheduler: `scheduler_config.recompute_scheduler_enable = true` in `--additional-config` (it keeps decode-node steps decode-shaped);
+- `PreemptOffloadConnector` in the KV connector chain — combine the P/D transfer connector (e.g. `MooncakeConnectorV1`) and `PreemptOffloadConnector` via `MultiConnector` (a preempted request must not return to the prefill node, whose recomputed KV loses precision); see the [Preempt Offload Guide](preempt_offload_connector.md);
 - a graph mode: do not start the instance with `--enforce-eager`;
 - `prefill_context_parallel_size == 1`.
 
-If the largest cudagraph capture size does not cover the largest possible step (`min(max_num_batched_tokens, max_num_seqs * (1 + num_speculative_tokens))`), both `oproj_tensor_parallel_size` and `mlp_tensor_parallel_size` are **disabled automatically at startup with a warning**, and the deployment still starts without them; raise `max_cudagraph_capture_size` to re-enable. At runtime, a step dispatched outside the captured graphs fails loudly with an explicit error instead of silently hanging the cross-DP collectives.
+If the largest cudagraph capture size does not cover the largest decode-shaped step (`min(max_num_batched_tokens, max_num_seqs * (1 + num_speculative_tokens))`), both `oproj_tensor_parallel_size` and `mlp_tensor_parallel_size` are **disabled automatically at startup with a warning**, and the deployment still starts without them; raise `max_cudagraph_capture_size` to re-enable. At runtime, a step dispatched outside the captured graphs fails loudly with an explicit error instead of silently hanging the cross-DP collectives.
 
 #### LM Head TP and Speculative Decoding
 
@@ -86,8 +86,9 @@ LM head TP works with EAGLE, DFlash, and DSpark draft models. A few combinations
 - DFlash2 draft models;
 - `draft_sample_method = "probabilistic"`;
 - `use_local_argmax_reduction`;
-- `enable_adaptive_verification`;
-- prompt logprobs.
+- `enable_adaptive_verification`.
+
+Prompt logprobs is also not supported with LM head TP: a request asking for prompt logprobs fails with an explicit error at sampling time.
 
 #### Configuration Limit
 
@@ -104,10 +105,8 @@ Fine-grained TP shards the configured layer **across the data-parallel (DP) dime
 
 | Component | Behavior with `tensor_parallel_size > 1` |
 |-----------|------------------------------------------|
-| `o_proj` / `mlp` | **Not supported.** For `o_proj`, the DSA attention output is reshaped with `n_local_groups = n_groups // tp_size` (standard TP), while the wo_a/wo_b weights are sharded by the OTP group (DP dimension); the two axes no longer align. Both knobs are therefore rejected at config load unless `tensor_parallel_size == 1`. |
-| `embedding` / LM head | **Supported, but only effective under `tensor_parallel_size == 1`.** Both components are sharded along the fine-grained (DP-realm) group, whose process group is built along the DP axis at a fixed `tp_idx` — orthogonal to the standard TP axis. When `tensor_parallel_size > 1`, the standard TP sharding and the fine-grained sharding operate on different axes of the rank grid and can no longer compose: the fine-grained group's ranks all share the same standard-TP weight shard, so fine-grained TP cannot deliver additional sharding. In other words, these components are designed for the all-DP (`tensor_parallel_size == 1`) decode scenario; under `tensor_parallel_size > 1` the standard TP dimension takes over and the fine-grained configuration does not take effect. |
-
----
+| `o_proj` / `mlp` | **Not supported.** For `o_proj`, the DSA attention output is reshaped with `n_local_groups = n_groups // tp_size` (standard TP), while the wo_a/wo_b weights are sharded by the OTP group (DP dimension); the two axes no longer align (for MLP, the combination is simply untested). Both knobs are therefore rejected at config load unless `tensor_parallel_size == 1`. |
+| `embedding` / LM head | **Supported, but only effective under `tensor_parallel_size == 1`.** Both components are sharded along the fine-grained (DP-realm) group, whose process group is built along the DP axis at a fixed `tp_idx` — orthogonal to the standard TP axis. When `tensor_parallel_size > 1`, the standard TP sharding and the fine-grained sharding operate on different axes of the rank grid and can no longer compose: the fine-grained group's ranks all share the same standard-TP weight shard, so fine-grained TP cannot deliver additional sharding. In other words, these components are designed for all-DP (`tensor_parallel_size == 1`) deployments; under `tensor_parallel_size > 1` the standard TP dimension takes over and the fine-grained configuration does not take effect. |
 
 ## Feature Usage
 
@@ -172,11 +171,11 @@ vllm serve deepseek-ai/DeepSeek-R1 \
     }'
 ```
 
-> ⚠️ Note:  
->
-> - Scenario 2 must run in graph mode (do not pass `--enforce-eager`), and its prefill node keeps a plain producer configuration (e.g. `MooncakeConnectorV1` with `kv_role = kv_producer`). See the [Preempt Offload Guide](preempt_offload_connector.md) for the `PreemptOffloadConnector` parameters and the P/D disaggregation tutorials for the end-to-end deployment.
+```{note}
+Scenario 2 must run in graph mode (do not pass `--enforce-eager`), and its prefill node keeps a plain producer configuration (e.g. `MooncakeConnectorV1` with `kv_role = kv_producer`). See the [Preempt Offload Guide](preempt_offload_connector.md) for the `PreemptOffloadConnector` parameters and the P/D disaggregation tutorials for the end-to-end deployment.
+```
 
-## Verifying the Feature
+### Verifying the Feature
 
 After the instance starts, check which knobs passed startup validation:
 
@@ -206,7 +205,7 @@ After the instance starts, check which knobs passed startup validation:
    grep "Disabling oproj_tensor_parallel_size" <serve-log>
    ```
 
-   It fires when the largest cudagraph capture size does not cover the largest possible step; raise `max_cudagraph_capture_size` to re-enable both knobs.
+   It fires when the largest cudagraph capture size does not cover the largest decode-shaped step; raise `max_cudagraph_capture_size` to re-enable both knobs.
 
 3. Send an inference request to confirm the service serves normally with the knobs on (any standard client works):
 
@@ -229,8 +228,6 @@ All knobs live under `finegrained_tp_config` inside `--additional-config`. The d
 | `embedding_tensor_parallel_size` | int | 0 | No | 0, or a divisor of `data_parallel_size` | TP size of the token embedding table. |
 | `mlp_tensor_parallel_size` | int | 0 | No | 0, or a divisor of `data_parallel_size` | TP size of the MLP (feed-forward) blocks. Values > 1 require the [o_proj / MLP preconditions](#preconditions-for-o_proj--mlp-tp). |
 
----
-
 ## Experimental Results
 
 To evaluate the effectiveness of fine-grained TP in large-scale service scenarios, we use the model **DeepSeek-R1-W8A8**, deploy PD separated decode instances in an environment of 32 cards of Ascend Atlas A2 inference products (64 GB per card), with parallel configuration as DP32+EP32, and fine-grained TP size of 8; the performance data is as follows.
@@ -239,19 +236,15 @@ To evaluate the effectiveness of fine-grained TP in large-scale service scenario
 | ---------------- | -------------- | ------------------------- |
 | o_proj TP = 8    | 5.8 GB         | **+1.5 ms** (degradation) |
 | LM head TP = 8   | 1.51 GB        | **−1.2 ms** (improvement) |
-|  FFN TP = 8 | 0.9 GB         | **−1.0 ms** (improvement) |
+| MLP TP = 8 | 0.9 GB         | **−1.0 ms** (improvement) |
 | Embedding TP = 8 | 1.51 GB        | **−1.0 ms** (improvement) |
 | **Total**        | **9.72 GB**    | —                         |
 
 - Memory savings per card are the primary gain; TPOT sees a small net improvement.
 
----
-
 ## Deployment Recommendations
 
 Fine-grained TP is the **most effective** in the **decode instance** of PD separation, where models are typically deployed in all-DP mode. In this setup, sharding weight-heavy layers reduces redundant storage and memory pressure. Accordingly, `o_proj` TP and MLP TP are validated for — and limited to — P/D-disaggregated decode nodes (see [Preconditions for o_proj / MLP TP](#preconditions-for-o_proj--mlp-tp)), while embedding and LM head TP are also applicable to all-DP deployments without PD.
-
----
 
 ## FAQs
 
@@ -267,13 +260,13 @@ Fine-grained TP is the **most effective** in the **decode instance** of PD separ
 
 **Problem Description**: The service starts normally, but the startup summary only lists embedding / LM head (or is empty) although `oproj_tensor_parallel_size` / `mlp_tensor_parallel_size` were configured.
 
-**Cause Analysis**: The largest cudagraph capture size does not cover the largest possible step, so both knobs were auto-disabled with a warning.
+**Cause Analysis**: The largest cudagraph capture size does not cover the largest decode-shaped step, so both knobs were auto-disabled with a warning.
 
 **Solution Steps**: Raise `max_cudagraph_capture_size` (or lower `max_num_batched_tokens` / `max_num_seqs`) so the capture bound covers `min(max_num_batched_tokens, max_num_seqs * (1 + num_speculative_tokens))`, then restart.
 
 ### Startup fails on an o_proj / MLP precondition error
 
-**Problem Description**: With `oproj_tensor_parallel_size > 1` or `mlp_tensor_parallel_size > 1`, configuration load raises an error about graph mode, the PD scenario, the recompute scheduler, or `PreemptOffloadConnector`.
+**Problem Description**: With `oproj_tensor_parallel_size > 1` or `mlp_tensor_parallel_size > 1`, configuration load raises an error about one of the preconditions (graph mode, the PD scenario, the recompute scheduler, `PreemptOffloadConnector`, `tensor_parallel_size`, or PCP).
 
 **Cause Analysis**: One or more of the [preconditions for o_proj / MLP TP](#preconditions-for-o_proj--mlp-tp) are not met.
 
