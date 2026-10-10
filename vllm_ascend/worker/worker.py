@@ -84,6 +84,7 @@ from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.device_allocator.sleep_mem_optimized import SleepWakeupManager
+from vllm_ascend.distributed.eplb.eplb_state import AscendEplbState
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import uses_sfa_dspark_kv_transfer
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
     build_layerwise_cache_layout,
@@ -244,6 +245,23 @@ class NPUWorker(WorkerBase):
                     return
 
     def sleep(self, level: int = 1) -> None:
+        state = getattr(self.model_runner, "eplb_state", None)
+        if isinstance(state, AscendEplbState):
+            allocator = CaMemAllocator.get_instance()
+            regions = [
+                region
+                for ms in state.model_states.values()
+                for region in getattr(ms.communicator, "_registered_regions", [])
+            ]
+            self._eplb_pending_wake_tags = {
+                data.tag
+                for data in allocator.pointer_to_data.values()
+                if data.tag != CaMemAllocator.sleep_persistent_tag
+                and any(
+                    start < data.handle[2] + data.handle[1] and data.handle[2] < start + size for start, size in regions
+                )
+            }
+            state.close()
         free_bytes_before_sleep = torch.npu.mem_get_info()[0]
         # Level-1 only offloads the weights pool. Persistent metadata such as
         # the DSA Hadamard matrix is allocated outside the kv_cache pool, so it
@@ -274,6 +292,9 @@ class NPUWorker(WorkerBase):
         )
 
     def wake_up(self, tags: list[str] | None = None) -> None:
+        state = getattr(self.model_runner, "eplb_state", None)
+        if isinstance(state, AscendEplbState):
+            state.raise_if_close_failed()
         nz_mode = get_ascend_config().weight_nz_mode
         if nz_mode:
             raise ValueError(
@@ -297,6 +318,18 @@ class NPUWorker(WorkerBase):
         cleanup_enabled = rl_config.enabled and rl_config.sleep_mode_extra_cleanup
         if cleanup_enabled:
             self.sleep_wakeup_manager.wakeup(tags)
+
+        pending_tags = getattr(self, "_eplb_pending_wake_tags", None)
+        if pending_tags is not None:
+            if tags is None:
+                pending_tags.clear()
+            else:
+                pending_tags.difference_update(tags)
+            if not pending_tags:
+                state = getattr(self.model_runner, "eplb_state", None)
+                if isinstance(state, AscendEplbState):
+                    state.resume()
+                del self._eplb_pending_wake_tags
 
     def _check_weight_transfer_engine(self) -> None:
         if self.weight_transfer_engine is None:
@@ -363,6 +396,9 @@ class NPUWorker(WorkerBase):
         self._weight_update_active = False
 
     def shutdown(self) -> None:
+        state = getattr(getattr(self, "model_runner", None), "eplb_state", None)
+        if isinstance(state, AscendEplbState):
+            state.close()
         if ensure_kv_transfer_shutdown is not None:
             ensure_kv_transfer_shutdown()
 
@@ -1302,7 +1338,20 @@ class NPUWorker(WorkerBase):
         self.model_runner.update_config(overrides)
 
     def reload_weights(self, *args, **kwargs) -> None:
+        state = getattr(self.model_runner, "eplb_state", None)
+        if isinstance(state, AscendEplbState):
+            state.close()
         self.model_runner.reload_weights(*args, **kwargs)
+        if isinstance(state, AscendEplbState):
+            for model_state in state.model_states.values():
+                # Layerwise quantization reload can replace parameter storage.
+                # Recollect views through the model's existing EPLB contract.
+                model_state.model.set_eplb_state(
+                    model_state.expert_load_pass_buffer,
+                    model_state.logical_to_physical_map,
+                    model_state.logical_replica_count,
+                )
+            state.resume()
 
     def check_health(self) -> None:
         import subprocess

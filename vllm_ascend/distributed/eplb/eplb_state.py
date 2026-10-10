@@ -4,11 +4,13 @@
 """Ascend-owned extensions for the upstream EPLB state."""
 
 import inspect
+import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import fields
+from datetime import timedelta
 from typing import Any
 
 import numpy as np
@@ -18,11 +20,15 @@ from vllm.distributed import get_ep_group, get_eplb_group
 from vllm.distributed.eplb import eplb_state as _eplb_state
 from vllm.distributed.eplb.policy import AbstractEplbPolicy
 from vllm.distributed.parallel_state import in_the_same_node_as
+from vllm.logger import logger
 
+from vllm_ascend.distributed.eplb.eplb_communicator import AscendHixlEplbCommunicator
 from vllm_ascend.distributed.eplb.policy import PreparedLoadStats
 from vllm_ascend.ops.fused_moe import eplb as _eplb_ops
 
 ASYNC_EPLB_CYCLE_COMMITTED_LOG = "Ascend async EPLB cycle committed"
+_EPLB_CLOSE_TIMEOUT_SECONDS = 300
+_EPLB_EVENT_POLL_SECONDS = 0.1
 EXPERT_MAPPING_EP_SIZE: ContextVar[int] = ContextVar("vllm_ascend_expert_mapping_ep_size", default=1)
 
 
@@ -136,6 +142,7 @@ class AscendEplbState(_eplb_state.EplbState):
     """Keep Ascend routing and load-recording state around upstream EPLB."""
 
     cuda_device_index: int | None
+    async_worker: threading.Thread | None
 
     def __init__(
         self,
@@ -150,6 +157,10 @@ class AscendEplbState(_eplb_state.EplbState):
         self._has_fresh_recorded_load = False
         self._is_load_sampling_step = False
         self._should_collect_local_load = False
+        self._stop_async = threading.Event()
+        self._suspended = False
+        self._close_error: Exception | None = None
+        self._rebuild_group: Any = None
         if self.cuda_device_index is None:
             self.cuda_device_index = torch.accelerator.current_device_index()
 
@@ -171,6 +182,97 @@ class AscendEplbState(_eplb_state.EplbState):
             EXPERT_MAPPING_EP_SIZE.reset(token)
         if self.uses_custom_load_stats:
             self._initialize_load_stats_state(self.model_states[model_config.compute_hash()])
+
+    def wait_for_rearrangement(self, stream) -> bool:
+        """Allow an idle worker to stop without recording a fake device event."""
+        while not self.rearrange_event._recorded.wait(_EPLB_EVENT_POLL_SECONDS):
+            if self._stop_async.is_set():
+                return False
+        self.rearrange_event.wait(stream=stream)
+        return True
+
+    def close(self) -> None:
+        """Close EPLB while its CPU groups and NPU mappings are still alive."""
+        self.raise_if_close_failed()
+        try:
+            self._suspended = True
+            worker = self.async_worker
+            if worker is not None:
+                # Acknowledge real completed results before stopping the idle loop.
+                # This also handles the worker waiting for consumed_event.
+                self.drain_async()
+                self._stop_async.set()
+                worker.join(timeout=_EPLB_CLOSE_TIMEOUT_SECONDS)
+                if worker.is_alive():
+                    raise TimeoutError("EPLB background worker could not be stopped; worker must terminate")
+                self.async_worker = None
+            for model_state in self.model_states.values():
+                if isinstance(model_state.communicator, AscendHixlEplbCommunicator):
+                    model_state.communicator.close()
+        except Exception as error:
+            self._close_error = error
+            self.raise_if_close_failed()
+
+    def raise_if_close_failed(self) -> None:
+        if self._close_error is not None:
+            logger.error("EPLB lifecycle failed; terminating the worker: %s", self._close_error)
+            # Ordinary RPC exceptions are caught by the upstream worker loop.
+            # SystemExit reaches its process-death monitor and engine shutdown.
+            raise SystemExit(
+                "EPLB lifecycle failed; worker must terminate before rebuilding or unmapping memory"
+            ) from self._close_error
+
+    def resume(self) -> None:
+        """Create fresh registrations after all required memory is restored."""
+        self.raise_if_close_failed()
+        if not self._suspended:
+            return
+        try:
+            for model_state in self.model_states.values():
+                if isinstance(model_state.communicator, AscendHixlEplbCommunicator):
+                    model_state.communicator = _eplb_state.create_eplb_communicator(
+                        get_eplb_group(), "hixl", model_state.model.expert_weights, model_state.expert_buffer
+                    )
+        except Exception as error:
+            self._close_error = error
+            self.raise_if_close_failed()
+        self._suspended = False
+        self._stop_async.clear()
+        self.start_async_loop()
+
+    def create_communicator(self, model_config, group_coordinator):
+        """Defer elastic EP registration until the final weight views exist.
+
+        Upstream stages a communicator before switching groups/quant methods.
+        Reuse the old object as the staging token and register the final views
+        in update_communicator, after the old generation has been closed.
+        """
+        communicator = self.model_states[model_config.compute_hash()].communicator
+        if not isinstance(communicator, AscendHixlEplbCommunicator):
+            return super().create_communicator(model_config, group_coordinator)
+        self._rebuild_group = group_coordinator
+        return communicator
+
+    def update_communicator(self, model_config, communicator) -> None:
+        self.raise_if_close_failed()
+        if self._rebuild_group is not None:
+            self.close()
+            model_state = self.model_states[model_config.compute_hash()]
+            try:
+                communicator = _eplb_state.create_eplb_communicator(
+                    self._rebuild_group, "hixl", model_state.model.expert_weights, model_state.expert_buffer
+                )
+            except Exception as error:
+                self._close_error = error
+                self.raise_if_close_failed()
+            self._rebuild_group = None
+        super().update_communicator(model_config, communicator)
+        self._suspended = False
+        self._stop_async.clear()
+
+    def start_async_loop(self, *args, **kwargs) -> None:
+        if not self._suspended:
+            super().start_async_loop(*args, **kwargs)
 
     def _initialize_load_stats_state(self, model_state: Any) -> None:
         model_state._last_committed_mean_ratios = np.full(
@@ -393,7 +495,10 @@ class AscendEplbState(_eplb_state.EplbState):
         self,
         is_profile: bool = False,
         rank_mapping: dict[int, int] | None = None,
+        use_last_expert_load: bool = False,
     ) -> torch.Tensor | None:
+        if self._suspended:
+            return None
         use_custom_async_stats = (
             self.is_async and not is_profile and rank_mapping is None and self.uses_custom_load_stats
         )
@@ -412,10 +517,10 @@ class AscendEplbState(_eplb_state.EplbState):
                 self.publish_async_load_stats(global_load_stats)
             result = None
         else:
-            result = super().rearrange(
-                is_profile=is_profile,
-                rank_mapping=rank_mapping,
-            )
+            kwargs: dict[str, Any] = dict(is_profile=is_profile, rank_mapping=rank_mapping)
+            if use_last_expert_load:
+                kwargs["use_last_expert_load"] = True
+            result = super().rearrange(**kwargs)
         if not is_profile and not self.is_async:
             for model_state in self.model_states.values():
                 refresh_model_routing_tables(model_state)
@@ -427,9 +532,17 @@ class AscendEplbState(_eplb_state.EplbState):
         """Acknowledge changed-layer and no-op results through one lifecycle."""
         if not self.is_async:
             return
+        deadline = time.monotonic() + _EPLB_CLOSE_TIMEOUT_SECONDS
         for model_state in self.model_states.values():
+            work = getattr(model_state, "_eplb_ready_work", None)
+            if work is not None:
+                work.wait(timeout=timedelta(seconds=_EPLB_CLOSE_TIMEOUT_SECONDS))
+                del model_state._eplb_ready_work
+                del model_state._eplb_ready_flag
             while model_state.rebalanced:
                 _raise_if_async_worker_stopped(self)
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("EPLB migration could not be drained; worker must terminate")
                 result = model_state.pending_result
                 if result is not None:
                     if getattr(
