@@ -88,6 +88,7 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.triton_utils import HAS_TRITON
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -470,11 +471,79 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         topk_idx = self.indexer(index_query)
         self.impl.forward(self, query, self.kv_cache, topk_idx, attn_output)
 
+    def _can_fuse_sparse_prepare(self, positions: torch.Tensor, hidden_states: torch.Tensor) -> bool:
+        # Direct cache stores benefit decode batches; retain the existing path
+        # for larger batches where per-token programs become more expensive.
+        max_fused_tokens = 512
+        return (
+            HAS_TRITON
+            and hidden_states.shape[0] <= max_fused_tokens
+            and hidden_states.device.type == "npu"
+            and hidden_states.dtype == torch.bfloat16
+            and positions.ndim == 1
+            and self.head_dim == self.idx_head_dim == 128
+            and getattr(self.rotary_emb, "is_neox_style", False)
+            and 0 < self.rotary_emb.rotary_dim <= self.head_dim
+            and self.rotary_emb.rotary_dim % 2 == 0
+            and self.q_norm.variance_epsilon
+            == self.k_norm.variance_epsilon
+            == self.index_q_norm.variance_epsilon
+            == self.index_k_norm.variance_epsilon
+        )
+
+    def _run_fused_sparse_attention(
+        self,
+        qkv: torch.Tensor,
+        positions: torch.Tensor,
+        attn_output: torch.Tensor,
+        index_qk: torch.Tensor | None = None,
+    ) -> None:
+        # Lazy-load Triton only for the supported NPU path. Cache access stays
+        # inside the opaque attention op, like _run_sparse_attention.
+        from vllm_ascend.ops.triton.linearnorm.minimax_qknorm_rope_cache import minimax_qknorm_rope_cache
+
+        metadata = get_forward_context().attn_metadata
+        main_meta = metadata[self.layer_name]
+        index_meta = metadata[self.indexer.index_cache.prefix]
+        key_cache, value_cache = self.kv_cache
+        index_cache = self.indexer.index_cache.kv_cache
+        if isinstance(index_cache, (tuple, list)):
+            index_cache = index_cache[0]
+        query, index_query = minimax_qknorm_rope_cache(
+            qkv,
+            self.rotary_emb.cos_sin_cache,
+            positions,
+            self.q_norm.weight,
+            self.k_norm.weight,
+            self.index_q_norm.weight,
+            self.index_k_norm.weight,
+            key_cache,
+            value_cache,
+            index_cache,
+            main_meta.slot_mapping,
+            index_meta.slot_mapping,
+            main_meta.num_actual_tokens,
+            self.num_heads,
+            self.num_kv_heads,
+            self.num_idx_heads,
+            self.q_norm.variance_epsilon,
+            index_packed=index_qk,
+        )
+        topk_idx = self.indexer(index_query)
+        self.impl.forward(self, query, self.kv_cache, topk_idx, attn_output)
+
     def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
+        if self._can_fuse_sparse_prepare(positions, hidden_states):
+            qkv, _ = self.qkv_proj(hidden_states)
+            index_qk = self.indexer_proj(hidden_states)[0] if self.indexer_proj is not None else None
+            attn_out = hidden_states.new_empty((hidden_states.shape[0], self.q_size))
+            torch.ops.vllm.minimax_m3_fused_sparse_forward(qkv, positions, attn_out, self.layer_name, index_qk)
+            projected, _ = self.o_proj(attn_out)
+            return projected
         q, k, v, index_q, index_k = self._sparse_prepare(positions, hidden_states)
         attn_out = torch.empty_like(q)
         torch.ops.vllm.minimax_m3_sparse_forward(
