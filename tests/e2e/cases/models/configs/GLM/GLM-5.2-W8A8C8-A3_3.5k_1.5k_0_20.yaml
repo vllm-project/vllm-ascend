@@ -70,7 +70,7 @@ deployment:
       --max-model-len 16384
       --max-num-batched-tokens 8192
       --trust-remote-code
-      --gpu-memory-utilization 0.95
+      --gpu-memory-utilization 0.92
       --quantization ascend
       --enable-chunked-prefill
       --no-enable-prefix-caching
