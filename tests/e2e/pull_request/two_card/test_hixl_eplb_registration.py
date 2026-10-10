@@ -187,7 +187,9 @@ def _failed_initialization_worker(rank: int, port: int) -> None:
     try:
         WorkerProc._execute_worker_rpc(rpc, ("rebuild", (), {}, None))
     except SystemExit as error:
-        owner = error.__cause__.hixl_communicator
+        cause = error.__cause__
+        assert cause is not None and hasattr(cause, "hixl_communicator")
+        owner = cause.hixl_communicator
         assert owner._engine is not None
         assert owner._storage_refs
         if rank == 0:

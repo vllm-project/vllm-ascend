@@ -429,11 +429,14 @@ def test_initialization_rollback_failure_bypasses_rpc_and_retains_storage(monkey
         with pytest.raises(SystemExit, match="worker must terminate") as fatal:
             WorkerProc._execute_worker_rpc(rpc, ("rebuild", (), {}, None))
         rpc.handle_output.assert_not_called()
-        owner = fatal.value.__cause__.hixl_communicator
+        cause = fatal.value.__cause__
+        assert cause is not None and hasattr(cause, "hixl_communicator")
+        owner = cause.hixl_communicator
         assert owner._engine is not None
         assert owner._registered_handles == [1]
         del rpc, communicator, owner
         gc.collect()
+        assert storage_ref is not None
         assert storage_ref() is not None
     else:
         WorkerProc._execute_worker_rpc(rpc, ("rebuild", (), {}, None))

@@ -89,8 +89,9 @@ def _migrate_last_slot(state, rank):
     ms = state.model_states["model"]
     communicator = ms.communicator
     communicator.set_stream(None)
-    communicator.set_transfer_context(ms.physical_to_logical_map[0].cpu().numpy(), layer_idx=0)
-    communicator.add_recv([ms.expert_buffer[0][0]], src_rank=1 - rank, expert_id=5 - 3 * rank)
+    placement = ms.physical_to_logical_map[0].cpu().numpy()
+    communicator.set_transfer_context(placement, layer_idx=0)
+    communicator.add_recv([ms.expert_buffer[0][0]], src_rank=1 - rank, expert_id=int(placement[5 - 3 * rank]))
     communicator.execute()
     # This is the existing receive-buffer -> final-slot commit, not an added
     # registration workaround or staging allocation.
