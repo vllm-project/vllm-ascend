@@ -128,7 +128,6 @@ tables below mirror the current contents of that file.
 
 | Test name | Description |
 |-----------|-------------|
-| `test_custom_op_multi_card` | Custom operator tests (multi card) |
 | `qwen3-vl-32b-instruct-w8a8` | Qwen3-VL-32B-Instruct W8A8 |
 | `qwen3-32b-int8` | Qwen3-32B INT8 quantization |
 | `Qwen3.5-27B-w8a8-A2` | Qwen3.5-27B W8A8 |
@@ -213,16 +212,16 @@ Run all available nightly tests against your PR:
 /nightly
 ```
 
-Run only the custom operator multi-card test:
+Run only the multi-card accuracy test:
 
 ```text
-/nightly test_custom_op_multi_card
+/nightly qwen3-30b-acc
 ```
 
 Run two specific tests at once (one per SoC):
 
 ```text
-/nightly test_custom_op_multi_card mtpx-deepseek-r1-0528-w8a8
+/nightly qwen3-32b-int8 mtpx-deepseek-r1-0528-w8a8
 ```
 
 Run a single accuracy group (with all of its models):
