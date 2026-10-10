@@ -129,9 +129,10 @@ class KVPoolScheduler:
         if (
             self.use_layerwise
             and self.backend_name != "memcache"
+            and not self.use_block_key_layerwise
             and len(cacheable_block_sizes) != len(self.original_block_size)
         ):
-            raise ValueError("AscendStore private KV state requires non-layerwise transfer")
+            raise ValueError("AscendStore private KV state requires Mooncake block-key or non-layerwise transfer")
         self.grouped_block_size = [block_size * self.dcp_size for block_size in self.original_block_size]
         requested_hash_block_size = vllm_config.cache_config.prefix_match_unit
         if not isinstance(requested_hash_block_size, int):

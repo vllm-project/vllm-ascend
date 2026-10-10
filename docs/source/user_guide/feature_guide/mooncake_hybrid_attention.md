@@ -177,6 +177,53 @@ not a verified DeepSeek-V4 deployment recipe or a memory-capacity guarantee.
 
 ## Validation
 
+### GLM-5.3-Flash
+
+GLM-5.3-Flash combines MLA/indexer caches, TP-sharded KDA state and a
+request-owned K-pool tail. Mooncake layerwise excludes non-prefix-cacheable
+groups from token hashing, sessions and payload transfers. The scheduler keeps
+the existing aligned resume boundary so the incomplete tail is rebuilt locally.
+The private ring capacity does not enter the token-page alignment calculation.
+For a full prompt hit, the worker loads the state at the recomputation boundary;
+the larger pooled extent is used only to avoid overwriting committed objects.
+
+KDA loads finish before convolution/recurrent state access and deferred Mamba
+state copies. Saves run after state updates, including pure speculative decode
+and direct-output decode. Unlike replicated MLA caches, every TP rank publishes
+its own KDA state, and a scheduler hit requires all of those rank keys.
+
+Keep the model, quantization, TP/EP, memory and Mooncake environment settings
+from a working non-layerwise deployment. Use the following connector settings:
+
+```bash
+--kv-transfer-config '{"kv_connector":"AscendStoreConnector","kv_role":"kv_both","kv_connector_extra_config":{"backend":"mooncake","use_layerwise":true,"layerwise_prefetch_layers":2}}'
+```
+
+KDA requires `--mamba-cache-mode align`. Validate first with `--enforce-eager`
+and the same MTP settings as the deployment, then test graph execution with
+`--compilation-config '{"cudagraph_mode":"PIECEWISE"}'`. The connector declares
+that layerwise hooks require piecewise graphs; vLLM normally overrides
+`FULL_DECODE_ONLY` accordingly. Draft `enforce_eager=true` applies to the draft
+model and does not select eager execution for the target model.
+
+On a dedicated validation server with a range/session-capable Mooncake client,
+run this opt-in smoke from the repository root:
+
+```bash
+python tests/e2e/common/single_node/glm53_mooncake_layerwise.py \
+  --base-url http://127.0.0.1:9000 --model glm --chunk-size 8192
+```
+
+It sends a unique multi-chunk prompt, resets only the local prefix cache, and
+requires equal cold/warm greedy token IDs plus positive remote GET metrics.
+It writes both responses to `glm53-layerwise-smoke.json`. The server must expose
+`/reset_prefix_cache` and `/metrics`; do not run it against a shared production
+server. Run separately with and without MTP, and in eager and piecewise modes.
+NPU execution, graph replay and performance remain subject to hardware
+validation; CPU byte-copy and hook-order tests do not establish those results.
+
+### General hybrid validation
+
 CPU/mock unit tests cover group-aware byte round trips, different block sizes,
 unequal cache-entry counts, sparse masks, independent commit boundaries, group
 session ownership, continuation with remapped local blocks, negative transfer
