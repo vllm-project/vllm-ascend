@@ -374,6 +374,13 @@ class ServerCommandBuilder:
             "VISIBLE_DEVICES": rank.visible_devices,
             "NODE_INDEX": str(rank.node_index),
             "CONFIG_INDEX": str(rank.node_index),
+            #修改
+            "PP_LAYER_PARTITION": rank.pp_layer_partition,
+            "NNODES": str(rank.nnodes),
+            "NODE_RANK": str(rank.node_rank),
+            "MASTER_ADDR": rank.master_addr,
+            "MASTER_PORT": str(rank.master_port),
+            "DISTRIBUTED_EXECUTOR_BACKEND": rank.distributed_executor_backend,
         }
 
     def _render_envs(
@@ -468,6 +475,15 @@ class ExternalDPServerManager:
 
     def start_current_node(self) -> None:
         local_ranks = [rank for rank in self.ranks if rank.node_index == self.current_node_index]
+        # PP worker 等 master 就绪
+        # pp_workers = [r for r in local_ranks if r.is_headless and r.nnodes > 1]
+        # if pp_workers:
+        #     master_rank = next(
+        #         r for r in self.ranks
+        #         if r.role == "prefiller" and not r.is_headless and r.nnodes > 1
+        #     )
+        #     logger.info("PP worker waiting for master %s", rank_health_url(master_rank))
+        #     wait_http_ready(rank_health_url(master_rank), timeout=SERVER_READY_TIMEOUT_SECONDS)
         logger.info("Starting %d external DP ranks on node %d", len(local_ranks), self.current_node_index)
         try:
             for rank in local_ranks:
@@ -581,8 +597,9 @@ def build_proxy_server_cmd(config: ExternalDPConfig, ranks: list[RankInfo]) -> l
     cmd = [sys.executable, routing.proxy_script, "--host", routing.proxy_host, "--port", str(routing.proxy_port)]
 
     if routing.type == ROUTING_DISAGGREGATED_PREFILL:
-        prefiller_ranks = [rank for rank in ranks if rank.role == "prefiller"]
-        decoder_ranks = [rank for rank in ranks if rank.role == "decoder"]
+        #修改
+        prefiller_ranks = [r for r in ranks if r.role == "prefiller" and not r.is_headless]
+        decoder_ranks = [r for r in ranks if r.role == "decoder"]
         if not prefiller_ranks or not decoder_ranks:
             raise ValueError("disaggregated_prefill proxy requires prefiller and decoder ranks")
         cmd.extend(["--prefiller-hosts", *[rank.host for rank in prefiller_ranks]])
@@ -650,6 +667,11 @@ def wait_ranks_ready(
 ) -> None:
     ranks = list(ranks)
     rank_ready = {rank: False for rank in ranks}
+    http_ranks = [rank for rank in ranks if not rank.is_headless]
+    for rank in ranks:
+        if rank.is_headless:
+            rank_ready[rank] = True
+
     deadline = time.monotonic() + timeout
     last_log_time = 0.0
 
@@ -659,7 +681,8 @@ def wait_ranks_ready(
         all_ready = True
         unhealthy_after_ready = []
 
-        for rank in ranks:
+        # ← 改这里：ranks → http_ranks，只检查非 headless 节点
+        for rank in http_ranks:
             is_ready = is_http_ready(rank_health_url(rank), timeout=1.0)
             if is_ready:
                 if not rank_ready[rank]:

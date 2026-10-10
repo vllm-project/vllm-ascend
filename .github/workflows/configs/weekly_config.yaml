@@ -139,8 +139,16 @@ a3:
         config_file_path: GLM-5.2-W4A8C8-1M-PD-DCP.yaml
         config_base_path: tests/e2e/cases/models/configs/GLM
         size: 4
+      - name: GLM-5.1-Memcache-no-Layerwise-PD
+        config_file_path: GLM-5.1-Memcache-no-Layerwise-PD.yaml
+        config_base_path: tests/e2e/cases/models/configs/GLM
+        size: 4
       - name: GLM-5.2-W8A8C8-A3-Memcache-PD
         config_file_path: GLM-5.2-W8A8C8-A3-Memcache-PD.yaml
+        config_base_path: tests/e2e/cases/features/kv_pool
+        size: 4
+      - name: DSv4-Flash-DSpark-Memcache-PD
+        config_file_path: DSv4-Flash-DSpark-Memcache-PD.yaml
         config_base_path: tests/e2e/cases/features/kv_pool
         size: 4
   double_node:
