@@ -5,7 +5,10 @@ import torch
 
 from tests.ut.base import TestBase
 from tests.ut.quantization.conftest_quantization import identity
-from vllm_ascend.quantization.methods.w4a8.w4a8 import AscendW4A8DynamicFusedMoEMethod
+from vllm_ascend.quantization.methods.w4a8.w4a8 import (
+    AscendW4A8DynamicFusedMoEMethod,
+    _gmm_dequant_situ_quant_fusion_supported,
+)
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD
 
 
@@ -303,3 +306,54 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         mock_comm.fused_experts.assert_called_once()
         self.assertEqual(mock_comm.fused_experts.call_args.kwargs["fused_experts_input"], mock_fused_input)
         self.assertTrue(torch.equal(output, expected_output))
+
+
+class TestGmmDequantSituQuantFusionGate(TestBase):
+    """The fusion gate must mirror the kernel's M-block/expert metadata limits.
+
+    A batch whose padded M-block count exceeds the kernel limit must take the
+    npu_grouped_matmul fallback instead of raising inside
+    torch.ops._C_ascend.gmm_dequant_situ_quant and killing the engine.
+    """
+
+    experts = 8
+    k = 64  # multiple of GMSQ_BK
+    n = 1024  # multiple of GMSQ_BN
+
+    def _fusion_supported(self, num_rows: int, num_experts: int | None = None) -> bool:
+        num_experts = num_experts if num_experts is not None else self.experts
+        hidden_states = torch.zeros(num_rows, self.k, dtype=torch.int8)
+        x_scale = torch.zeros(num_rows, dtype=torch.float32)
+        w1 = [torch.zeros(self.k, self.n // 8, dtype=torch.int32) for _ in range(num_experts)]
+        w1_scale = torch.zeros(num_experts, self.n, dtype=torch.int64)
+        group_list = torch.zeros(num_experts, dtype=torch.int64)
+        with patch(
+            "vllm_ascend.quantization.methods.w4a8.w4a8.get_current_hardware_profile"
+        ) as mock_profile:
+            mock_profile.return_value.supports.return_value = True
+            return _gmm_dequant_situ_quant_fusion_supported(
+                hidden_states=hidden_states,
+                w1=w1,
+                w1_scale=w1_scale,
+                group_list_type=1,
+                group_list=group_list,
+                x_scale=x_scale,
+            )
+
+    def test_small_batch_uses_fused_kernel(self):
+        self.assertTrue(self._fusion_supported(num_rows=512))
+
+    def test_m_block_boundary_is_inclusive(self):
+        # experts(8) + (31752-8)//128 == 256 -> exactly at the limit, allowed.
+        self.assertTrue(self._fusion_supported(num_rows=31752))
+        # One more M-block (257) must fall back.
+        self.assertFalse(self._fusion_supported(num_rows=31880))
+
+    def test_oversized_recompute_step_falls_back(self):
+        # 8064-token preempt-recompute step x top-8 routing -> 64512 padded
+        # rows -> 511 M-blocks: the crash case observed on a 4-node
+        # internal-DP Kimi K3 W4A8 deployment.
+        self.assertFalse(self._fusion_supported(num_rows=8064 * 8))
+
+    def test_too_many_experts_falls_back(self):
+        self.assertFalse(self._fusion_supported(num_rows=512, num_experts=129))
