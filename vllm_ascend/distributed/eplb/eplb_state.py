@@ -272,7 +272,8 @@ class AscendEplbState(_eplb_state.EplbState):
 
     def finish_weight_reload(self, is_checkpoint_format: bool) -> None:
         # Partial wake can leave metadata unmapped. Apply this on resume only.
-        self._pending_checkpoint_reload = is_checkpoint_format
+        # A subsequent kernel reload preserves the checkpoint's new slots.
+        self._pending_checkpoint_reload = is_checkpoint_format or self._pending_checkpoint_reload is True
 
     def _restore_model_state(self) -> None:
         for key, model_state in self.model_states.items():

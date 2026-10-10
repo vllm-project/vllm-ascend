@@ -96,6 +96,44 @@ def test_failed_reload_does_not_resume_migration(monkeypatch):
     state.resume.assert_not_called()
 
 
+def test_partial_wake_restores_named_buffer_only_after_its_pool_is_mapped(monkeypatch):
+    worker, _, allocator = _worker(monkeypatch)
+    value = torch.tensor([7.0])
+    mapped = True
+
+    def restore(backup):
+        assert mapped, "named buffer must not be written while unmapped"
+        value.copy_(backup)
+
+    buffer = SimpleNamespace(
+        device=SimpleNamespace(type="npu"), data_ptr=value.data_ptr, cpu=lambda: value, copy_=restore
+    )
+    worker.model_runner.model = SimpleNamespace(named_buffers=lambda: [("weights_buffer", buffer)])
+    allocator.pointer_to_data[value.data_ptr()] = SimpleNamespace(
+        tag="weights", handle=(0, value.nbytes, value.data_ptr(), 0)
+    )
+
+    def unmap(**_kwargs):
+        nonlocal mapped
+        mapped = False
+        value.zero_()
+
+    def remap(tags):
+        nonlocal mapped
+        if tags is None or "weights" in tags:
+            mapped = True
+
+    allocator.sleep.side_effect = unmap
+    allocator.wake_up.side_effect = remap
+    worker.sleep(level=2)
+    worker.wake_up(tags=["kv_cache"])
+    assert not mapped and value.item() == 0
+    assert "weights_buffer" in worker._sleep_saved_buffers
+    worker.wake_up(tags=["weights"])
+    assert mapped and value.item() == 7
+    assert worker._sleep_saved_buffers == {}
+
+
 class _ExpertLayer(torch.nn.Module):
     def __init__(self):
         super().__init__()
@@ -237,4 +275,26 @@ def test_level_two_sleep_restores_unregistered_metadata_before_resume(monkeypatc
     assert ms.model.moe_layers[0].eplb_state.expert_replica_routing_table is table
     assert not ms.expert_load_window.any()
     assert not hasattr(worker, "_eplb_pending_wake_tags")
+    factory.assert_called_once()
+
+
+def test_partial_wake_kernel_reload_preserves_pending_checkpoint_placement(monkeypatch):
+    worker, state, ms, _, factory = _live_worker(monkeypatch)
+    worker.sleep(level=2)
+    worker.wake_up(tags=["weights"])
+
+    def reload(**kwargs):
+        ms.model.moe_layers[0].weight.copy_(
+            torch.tensor([[10.0], [20.0]]) if kwargs["is_checkpoint_format"] else torch.tensor([[30.0], [40.0]])
+        )
+
+    worker.model_runner.reload_weights = reload
+    worker.reload_weights()
+    worker.reload_weights(is_checkpoint_format=False)
+    factory.assert_not_called()
+    assert state._pending_checkpoint_reload is True
+    worker.wake_up(tags=["metadata"])
+    assert ms.physical_to_logical_map.tolist() == [[0, 1]]
+    assert ms.model.logical_weight(0) == 30
+    assert state._pending_checkpoint_reload is None
     factory.assert_called_once()
