@@ -393,14 +393,13 @@ class HybridReachability:
         return tuple([True] * num_chunks if mask is None else mask for num_chunks, mask in masks)
 
     def lookup_mask(self, aligned_token_len: int) -> tuple[list[bool] | None, ...]:
+        # Store retention cannot exclude readable windows left at prompt tails or by other writers.
+        # Keep the upstream geometry mask, but observe every potentially reusable object.
         # Lookup reports Backend readability. Scheduler-only policies such as
         # EAGLE block drop are applied after RPC so the raw Store-skip frontier
         # is not erased or trimmed twice.
         masks = self._reachable_masks(
-            aligned_token_len,
-            self.retention_interval,
-            None,
-            apply_eagle=False,
+            aligned_token_len, retention_interval=None, num_prompt_tokens=None, apply_eagle=False
         )
         for num_chunks, mask in masks:
             if mask is not None:
