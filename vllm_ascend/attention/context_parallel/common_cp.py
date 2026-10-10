@@ -17,10 +17,7 @@ def is_pcp_decode_sharding_enabled(vllm_config) -> bool:
     ``ParallelConfig`` with ``replace()`` remains supported.
     """
     parallel_config = vllm_config.parallel_config
-    return (
-        parallel_config.prefill_context_parallel_size > 1
-        and parallel_config.decode_context_parallel_size == 1
-    )
+    return parallel_config.prefill_context_parallel_size > 1 and parallel_config.decode_context_parallel_size == 1
 
 
 def get_pcp_num_replicated_tokens(num_decode_tokens: int, is_decode_sharded: bool) -> int:
