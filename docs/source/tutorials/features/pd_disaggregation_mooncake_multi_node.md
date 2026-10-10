@@ -276,12 +276,16 @@ settings. Restart the serving processes after changing P/D QoS.
 
 ### kv_port Configuration Guide
 
-On Ascend NPU, Mooncake uses AscendDirectTransport for RDMA data transfer, which randomly allocates ports within range `[20000, 20000 + npu_per_node × 1000)`. If `kv_port` overlaps with this range, intermittent port conflicts may occur. To avoid this, configure `kv_port` according to the table below:
+On Ascend NPU, Mooncake uses AscendDirectTransport for RDMA data transfer. Its [port allocation helper](https://github.com/kvcache-ai/Mooncake/blob/b4ccdc3082d2def865ecf1b5e68bc511025da40e/mooncake-transfer-engine/src/transport/ascend_transport/ascend_direct_transport/utils.cpp) uses a stride of **100** per physical NPU device ID: device `d` can select any port from `base_port + d × 100` through `base_port + (d + 1) × 100`, **including both endpoints**. The default `base_port` is `20000`; Mooncake's `ASCEND_BASE_PORT` environment variable overrides it.
 
-| NPUs per Node | Reserved Port Range | Recommended kv_port |
-|---------------|---------------------|---------------------|
-| 8             | 20000 - 27999       | >= 28000            |
-| 16            | 20000 - 35999       | >= 36000            |
+Keep `kv_port` and all of its worker listener ports outside the transport's allocation intervals. The table below assumes the default base port and contiguous physical device IDs starting at `0`:
+
+| Physical NPU Device IDs | Reserved Port Range (Inclusive) | Recommended kv_port |
+|-------------------------|---------------------------------|---------------------|
+| 0 - 7                   | 20000 - 20800                   | >= 20801            |
+| 0 - 15                  | 20000 - 21600                   | >= 21601            |
+
+Use physical device IDs rather than board counts or process-local logical IDs. If the IDs are non-contiguous, or `ASCEND_BASE_PORT` is changed, calculate the intervals with the formula above instead of using the table.
 
 !!! warning
 
