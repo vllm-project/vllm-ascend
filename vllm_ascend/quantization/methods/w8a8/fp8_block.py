@@ -90,17 +90,26 @@ def resolve_block_scales(
         )
 
     resolved = torch.empty((out_features, in_features), dtype=out_dtype, device=weight.device)
+    # On pre-950 NPUs, the FP8 -> FP32 device cast is not supported by every
+    # CANN build. Raw FP8 D2H copies do work, so resolve each bounded chunk on
+    # CPU and transfer only the model-dtype result back to the NPU.
+    cpu_dequant = weight.device.type == "npu" and not is_950()
     rows_per_step = max(block_n, _ROWS_PER_DEQUANT_STEP // block_n * block_n)
     for row_start in range(0, out_features, rows_per_step):
         row_end = min(row_start + rows_per_step, out_features)
-        # Keep dtype conversion on the weight device so a CPU-resident scale
-        # cannot multiply an NPU weight. Same-device `.to()` is a no-op.
-        row_scales = scale_inv[row_start // block_n : cdiv(row_end, block_n)].to(
-            device=weight.device, dtype=torch.float32
-        )
+        row_weight = weight[row_start:row_end]
+        row_scales = scale_inv[row_start // block_n : cdiv(row_end, block_n)]
+        if cpu_dequant:
+            row_weight = row_weight.cpu()
+            row_scales = row_scales.cpu()
+        else:
+            row_scales = row_scales.to(device=weight.device)
+        row_scales = row_scales.to(dtype=torch.float32)
         row_scales = row_scales.repeat_interleave(block_n, dim=0)[: row_end - row_start]
         row_scales = row_scales.repeat_interleave(block_k, dim=1)[:, :in_features]
-        resolved[row_start:row_end] = weight[row_start:row_end].to(torch.float32) * row_scales
+        resolved[row_start:row_end] = (row_weight.to(torch.float32) * row_scales).to(
+            dtype=out_dtype, device=weight.device
+        )
     return resolved
 
 
@@ -210,6 +219,11 @@ class AscendFp8BlockLinearMethod(AscendLinearScheme):
             # splits this layer and disposes of it, so apply() is never reached
             # and nothing about this layer should speak for any other.
             layer.weight = torch.nn.Parameter(maybe_trans_nz(resolved), requires_grad=False)
+            # MLA consumes this BF16 matrix and checks the linear method type.
+            # Import lazily to avoid a quantization-registry/linear-op cycle.
+            from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
+
+            layer.quant_method = AscendUnquantizedLinearMethod()
             return
 
         if self.mxfp8_method is not None and not _supports_mx_regroup(resolved.shape[1], self.mxfp8_method.group_size):
