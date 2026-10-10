@@ -613,12 +613,6 @@ exec vllm serve "${MODEL_PATH}" \
     }'
 ```
 
-Run the following command on P0 in its own terminal:
-
-```shell
-bash run_p0.sh
-```
-
 #### 5.2.4 P1 Prefill Node
 
 Save the following complete script as `run_p1.sh` on P1.
@@ -712,12 +706,6 @@ exec vllm serve "${MODEL_PATH}" \
     --headless
 ```
 
-Run the following command on P1 in its own terminal:
-
-```shell
-bash run_p1.sh
-```
-
 #### 5.2.5 D0 Decode Node
 
 Save the following complete script as `run_d0.sh` on D0.
@@ -801,15 +789,6 @@ exec vllm serve "${MODEL_PATH}" \
             "decode": {"dp_size": 16, "tp_size": 2}
         }
     }'
-```
-
-Run the following command on D0 in its own terminal:
-
-```shell
-python launch_online_dp.py --script ./run_d0.sh \
-    --dp-size 16 --tp-size 2 --dp-size-local 8 --dp-rank-start 0 \
-    --dp-address "<D0_IP>" --dp-rpc-port 16600 \
-    --vllm-start-port 9900
 ```
 
 #### 5.2.6 D1 Decode Node
@@ -897,19 +876,45 @@ exec vllm serve "${MODEL_PATH}" \
     }'
 ```
 
-Run the following command on D1 in its own terminal:
+#### 5.2.7 Start the Engines
 
-```shell
-python launch_online_dp.py --script ./run_d1.sh \
-    --dp-size 16 --tp-size 2 --dp-size-local 8 --dp-rank-start 8 \
-    --dp-address "<D0_IP>" --dp-rpc-port 16600 \
-    --vllm-start-port 9900
-```
+Once the preparation is done, start the servers with the following
+commands on their respective nodes, in separate terminals:
 
-#### 5.2.7 Start the Proxy
+1. Prefill node 0 (P0)
+
+    ```shell
+    bash run_p0.sh
+    ```
+
+2. Prefill node 1 (P1)
+
+    ```shell
+    bash run_p1.sh
+    ```
+
+3. Decode node 0 (D0)
+
+    ```shell
+    python launch_online_dp.py --script ./run_d0.sh \
+        --dp-size 16 --tp-size 2 --dp-size-local 8 --dp-rank-start 0 \
+        --dp-address "<D0_IP>" --dp-rpc-port 16600 \
+        --vllm-start-port 9900
+    ```
+
+4. Decode node 1 (D1)
+
+    ```shell
+    python launch_online_dp.py --script ./run_d1.sh \
+        --dp-size 16 --tp-size 2 --dp-size-local 8 --dp-rank-start 8 \
+        --dp-address "<D0_IP>" --dp-rpc-port 16600 \
+        --vllm-start-port 9900
+    ```
+
+#### 5.2.8 Start the Proxy
 
 Replace each node's IP and installation-path placeholders before starting.
-Run the four node-specific commands above in separate terminals. Keep the
+Run the four commands in Section 5.2.7 in separate terminals. Keep the
 master processes running while the other nodes join; start both nodes of
 each group before waiting for the group to become healthy.
 
@@ -973,7 +978,8 @@ of the Python installation actually used by vLLM on each node.
 #### 5.3.2 Prepare Each Node
 
 Use the following complete pooled scripts on P0, P1, D0, and D1,
-respectively. Each node has its own script and startup command. Reuse the
+respectively. Prepare all four scripts before running the commands in Section 5.3.3.
+Reuse the
 Decode launcher from Section 5.2.2. The scripts retain the supplied pool
 environment variables and role-specific serving configuration.
 
@@ -1091,12 +1097,6 @@ exec vllm serve "${MODEL_PATH}" \
     }'
 ```
 
-Run the following command on P0 in its own terminal:
-
-```shell
-bash run_p0.sh
-```
-
 **P1: save as `run_p1.sh` on this node**
 
 P1 uses P0 as the PP master and runs PP node rank 1 with `--headless`.
@@ -1212,12 +1212,6 @@ exec vllm serve "${MODEL_PATH}" \
     --headless
 ```
 
-Run the following command on P1 in its own terminal:
-
-```shell
-bash run_p1.sh
-```
-
 **D0: save as `run_d0.sh` on this node**
 
 D0 runs DP ranks 0-7 on devices 0-15. Both Decode nodes use D0 as their DP master.
@@ -1325,15 +1319,6 @@ exec vllm serve "${MODEL_PATH}" \
             ]
         }
     }'
-```
-
-Run the following command on D0 in its own terminal:
-
-```shell
-python launch_online_dp.py --script ./run_d0.sh \
-    --dp-size 16 --tp-size 2 --dp-size-local 8 --dp-rank-start 0 \
-    --dp-address "<D0_IP>" --dp-rpc-port 16600 \
-    --vllm-start-port 9900
 ```
 
 **D1: save as `run_d1.sh` on this node**
@@ -1445,15 +1430,6 @@ exec vllm serve "${MODEL_PATH}" \
     }'
 ```
 
-Run the following command on D1 in its own terminal:
-
-```shell
-python launch_online_dp.py --script ./run_d1.sh \
-    --dp-size 16 --tp-size 2 --dp-size-local 8 --dp-rank-start 8 \
-    --dp-address "<D0_IP>" --dp-rpc-port 16600 \
-    --vllm-start-port 9900
-```
-
 The pooled configuration uses base KV ports 30000 on Prefill and
 30200 on Decode. The outer `engine_id` is unique per engine and is
 inherited by the child connectors. This differs from the supplied pooled
@@ -1463,12 +1439,50 @@ also includes the DP rank, and P/D run on separate hosts. It is not a TCP
 listener on port zero. `backend="memcache"` and `use_layerwise=false`
 are set on both sides.
 
-#### 5.3.3 Start and Verify Pooling
+#### 5.3.3 Start the Engines
+
+Start the MemCache metadata service and complete its configuration on all
+four nodes before starting vLLM.
+
+Once the preparation is done, start the servers with the following
+commands on their respective nodes, in separate terminals:
+
+1. Prefill node 0 (P0)
+
+    ```shell
+    bash run_p0.sh
+    ```
+
+2. Prefill node 1 (P1)
+
+    ```shell
+    bash run_p1.sh
+    ```
+
+3. Decode node 0 (D0)
+
+    ```shell
+    python launch_online_dp.py --script ./run_d0.sh \
+        --dp-size 16 --tp-size 2 --dp-size-local 8 --dp-rank-start 0 \
+        --dp-address "<D0_IP>" --dp-rpc-port 16600 \
+        --vllm-start-port 9900
+    ```
+
+4. Decode node 1 (D1)
+
+    ```shell
+    python launch_online_dp.py --script ./run_d1.sh \
+        --dp-size 16 --tp-size 2 --dp-size-local 8 --dp-rank-start 8 \
+        --dp-address "<D0_IP>" --dp-rpc-port 16600 \
+        --vllm-start-port 9900
+    ```
+
+#### 5.3.4 Start the Proxy and Verify Pooling
 
 1. Start the MemCache metadata service and complete its configuration on
    all four nodes before starting vLLM.
-2. Start P0, P1, D0, and D1 with their individual commands in
-   Section 5.3.2. Both Prefill scripts already specify port 8000.
+2. Start P0, P1, D0, and D1 with the commands in
+   Section 5.3.3. Both Prefill scripts already specify port 8000.
 3. Wait for P0:8000 and all sixteen Decode APIs to become healthy. Start
    the same proxy, replacing `--prefiller-ports 8077` with
    `--prefiller-ports 8000`. Its public port remains 8081.
