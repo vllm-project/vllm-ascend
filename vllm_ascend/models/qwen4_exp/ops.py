@@ -222,11 +222,12 @@ def qsa_select_paged_tokens(
     compress_ratio: int,
     out: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Select QSA token indices with portable Torch operators."""
+    """Select compact QSA groups and residual tokens with Torch operators."""
     if token_topk % compress_ratio:
         raise ValueError("QSA token top-k must be divisible by compression ratio")
     row_count = query.shape[0]
-    output_width = token_topk + compress_ratio - 1
+    block_topk = token_topk // compress_ratio
+    output_width = block_topk + compress_ratio - 1
     if out is None:
         out = torch.empty((row_count, output_width), dtype=torch.int32, device=query.device)
     compressed_capacity = block_table.shape[1] * compressed_key_cache.shape[1]
@@ -263,22 +264,21 @@ def qsa_select_paged_tokens(
         scores.masked_fill_(~(visible_mask & valid_cache), -torch.inf)
         selected_blocks = torch.topk(scores, block_topk, dim=-1).indices
 
-        output_columns = torch.arange(output_width, device=query.device)
-        block_rank = torch.div(output_columns, compress_ratio, rounding_mode="floor")
-        offsets = output_columns.remainder(compress_ratio)
-        safe_rank = block_rank.clamp_max(block_topk - 1)
-        expanded = selected_blocks[:, safe_rank] * compress_ratio + offsets
         complete_blocks = visible.clamp_max(block_topk)
-        expanded_count = complete_blocks * compress_ratio
+        group_columns = torch.arange(block_topk, device=query.device)
+        valid_groups = group_columns.unsqueeze(0) < complete_blocks.unsqueeze(1)
+        out[row_slice, :block_topk].copy_(
+            torch.where(valid_groups, selected_blocks, -1).to(torch.int32)
+        )
         tail_start = ((query_positions[row_slice].long() + 1) // compress_ratio) * compress_ratio
-        tail_offset = output_columns.unsqueeze(0) - expanded_count.unsqueeze(1)
+        tail_offset = torch.arange(compress_ratio - 1, device=query.device).unsqueeze(0)
         tail_count = query_positions[row_slice].long() + 1 - tail_start
-        is_expanded = output_columns.unsqueeze(0) < expanded_count.unsqueeze(1)
-        is_tail = (tail_offset >= 0) & (tail_offset < tail_count.unsqueeze(1)) & (tail_offset < compress_ratio - 1)
-        tokens = torch.where(is_expanded, expanded, tail_start.unsqueeze(1) + tail_offset)
+        tokens = tail_start.unsqueeze(1) + tail_offset
         request_lengths = sequence_lengths.index_select(0, safe_requests).long()
-        valid_tokens = (is_expanded | is_tail) & (tokens < request_lengths.unsqueeze(1))
-        out[row_slice].copy_(torch.where(valid_tokens, tokens, -1).to(torch.int32))
+        valid_tokens = (tail_offset < tail_count.unsqueeze(1)) & (tokens < request_lengths.unsqueeze(1))
+        out[row_slice, block_topk:].copy_(
+            torch.where(valid_tokens, tokens, -1).to(torch.int32)
+        )
     return out
 
 
