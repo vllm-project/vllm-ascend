@@ -37,6 +37,15 @@ _STREAM_RESOURCE_ERROR_MARKERS = (
     "stream resources are insufficient",
 )
 _OLD_HDK_CAPTURE_ERROR_MARKERS = ("alloc sq cq fail",)
+# MTE "DDR address ... out of range" surfaces as CANN error code 507015 when
+# graph capture exhausts device memory (large W8A8 model + high
+# gpu-memory-utilization): the KV-cache reservation and the capture working
+# memory compete, and an MTE instruction addresses out-of-range DDR.
+_MTE_ADDRESS_ERROR_CODE = "507015"
+_MTE_ADDRESS_ERROR_MARKERS = (
+    "mte instruction is out of range",
+    "ddr address of the mte",
+)
 
 
 def _is_stream_resource_capture_error(exc: RuntimeError) -> bool:
@@ -50,6 +59,14 @@ def _is_stream_resource_capture_error(exc: RuntimeError) -> bool:
 def _is_old_hdk_capture_error(exc: RuntimeError) -> bool:
     message = str(exc).lower()
     return any(marker in message for marker in _OLD_HDK_CAPTURE_ERROR_MARKERS)
+
+
+def _is_mte_address_capture_error(exc: RuntimeError) -> bool:
+    message = str(exc)
+    lowered_message = message.lower()
+    has_error_code = _MTE_ADDRESS_ERROR_CODE in message
+    has_mte_marker = any(marker in lowered_message for marker in _MTE_ADDRESS_ERROR_MARKERS)
+    return has_mte_marker or (has_error_code and "out of range" in lowered_message)
 
 
 @dataclasses.dataclass
@@ -239,6 +256,18 @@ class ACLGraphWrapper:
                             "max_cudagraph_capture_size, preferring FULL or FULL_DECODE_ONLY for "
                             "mostly uniform decode workloads, or temporarily disabling graph mode "
                             "to confirm the failure is capture-related.\n"
+                            f"Original error:\n{exc}"
+                        ) from exc
+                    elif _is_mte_address_capture_error(exc):
+                        raise RuntimeError(
+                            "ACL graph capture failed because an MTE instruction addressed "
+                            "out-of-range DDR (CANN error 507015), which typically means device "
+                            "memory was exhausted during capture: the KV-cache reservation and the "
+                            "capture working memory compete for the remaining HBM. Try lowering "
+                            "--gpu-memory-utilization (e.g. 0.85) or reducing "
+                            "cudagraph_capture_sizes. This is a capture-time resource limit, not a "
+                            "model/functional error — --enforce-eager avoids it at the cost of "
+                            "graph-mode throughput.\n"
                             f"Original error:\n{exc}"
                         ) from exc
                     raise
