@@ -164,7 +164,7 @@ For A5 PD deployment, the host must already have the platform-generated HCCL/HIX
     -it $IMAGE bash
     ```
 
-After starting the detached A5 container, enter it with `docker exec -it vllm-ascend bash`. Run the deployment commands inside the container on every node.
+If you want to deploy multi-node environment, you need to set up environment on each node.
 
 ### 4.2 Version Compatibility
 
