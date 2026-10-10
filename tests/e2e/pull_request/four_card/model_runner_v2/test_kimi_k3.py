@@ -17,10 +17,10 @@ from tests.e2e.pull_request.four_card.test_kimi_k3 import (
     _generate,
     _prompt,
     k3_models,
-    test_k3_gqa_w4a8_dp2_tp2 as _test_k3_gqa_w4a8_dp2_tp2,
-    test_k3_mla_block5_tp4 as _test_k3_mla_block5_tp4,
-    test_k3_mla_pd_tp2 as _test_k3_mla_pd_tp2,
-    test_k3_mtp_image_tp4 as _test_k3_mtp_image_tp4,
+    run_k3_gqa_w4a8_dp2_tp2,
+    run_k3_mla_block5_tp4,
+    run_k3_mla_pd_tp2,
+    run_k3_mtp_image_tp4,
 )
 
 
@@ -40,25 +40,25 @@ def k3_runtime_v2(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_k3_mla_block5_tp4(k3_models: dict[str, str]) -> None:
     """Reuse MLA Block5, prefix-cache, and D-Spark coverage with MRV2."""
 
-    _test_k3_mla_block5_tp4(k3_models)
+    run_k3_mla_block5_tp4(k3_models)
 
 
 def test_k3_gqa_w4a8_dp2_tp2(k3_models: dict[str, str]) -> None:
     """Reuse quantized GQA and local DP coverage with MRV2."""
 
-    _test_k3_gqa_w4a8_dp2_tp2(k3_models)
+    run_k3_gqa_w4a8_dp2_tp2(k3_models)
 
 
 def test_k3_mtp_image_tp4(k3_models: dict[str, str]) -> None:
     """Reuse MTP and multimodal image coverage with MRV2."""
 
-    _test_k3_mtp_image_tp4(k3_models)
+    run_k3_mtp_image_tp4(k3_models)
 
 
 def test_k3_mla_pd_tp2(k3_models: dict[str, str]) -> None:
     """Reuse same-host P/D and Mooncake KV-transfer coverage with MRV2."""
 
-    _test_k3_mla_pd_tp2(k3_models)
+    run_k3_mla_pd_tp2(k3_models)
 
 
 def test_k3_mrv2_basic_generate_tp4(k3_models: dict[str, str]) -> None:
