@@ -174,26 +174,24 @@ class BisectOptions:
     # Verify the endpoints before searching (good must PASS, bad must FAIL).
     verify_good: bool = True
     verify_bad: bool = True
-    # Editable reinstall command pieces. --no-input avoids any interactive
-    # prompt that could hang the (silent, log-redirected) build step.
+    # Match the nightly install path when a candidate needs rebuilding.
     pip_install_cmd: list[str] = field(
         default_factory=lambda: [
+            "uv",
             "pip",
             "install",
             "-e",
             ".",
-            "--no-input",
-            "--disable-pip-version-check",
+            "--no-deps",
         ]
     )
     pip_requirements_cmd: list[str] = field(
         default_factory=lambda: [
+            "uv",
             "pip",
             "install",
             "-r",
             "requirements-dev.txt",
-            "--no-input",
-            "--disable-pip-version-check",
         ]
     )
     # The nightly container is already built+installed at its current HEAD (the

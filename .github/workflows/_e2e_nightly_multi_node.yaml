@@ -569,6 +569,33 @@ jobs:
             --vllm-ascend-version "${{ steps.stream_logs.outputs.vllm_ascend_hash }}" \
             --vllm-version "${{ steps.stream_logs.outputs.vllm_hash }}"
 
+      - name: Collect AOP bisect diagnostics
+        if: ${{ always() && inputs.aop_multi_enabled }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          DEST=/tmp/aop-bisect-diagnostics
+          mkdir -p "$DEST"
+          SRC="${LOG_PREFIX}/nightly_bisect_runs"
+          if [ -d "$SRC" ]; then
+            cp -a "$SRC" "$DEST/bisect_runs"
+          fi
+          for log in "${LOG_PREFIX}"/node_*_pytest.log; do
+            if [ -f "$log" ]; then
+              cp "$log" "$DEST/"
+            fi
+          done
+
+      - name: Upload AOP bisect diagnostics (GitHub Artifacts)
+        if: ${{ always() && inputs.aop_multi_enabled }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.vars.outputs.artifact_name }}-aop-bisect
+          path: /tmp/aop-bisect-diagnostics/
+          if-no-files-found: warn
+          retention-days: 7
+
       - name: Fetch benchmark results from PVC
         if: always()
         run: |
