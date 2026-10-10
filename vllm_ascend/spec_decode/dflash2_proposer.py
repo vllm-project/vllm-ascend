@@ -69,6 +69,23 @@ class AscendDflash2Proposer(AscendDflashProposer):
         self._anchor_indices = (
             torch.arange(self.max_batch_size, device=self.device, dtype=torch.int64) * num_query_per_req
         )
+        self._selector_input_buffers = None
+        if self.use_cuda_graph and self.compilation_config.cudagraph_mode.has_piecewise_cudagraphs():
+            # The selector is compiled independently of the draft forward.
+            # Top-k, hidden-state indexing and anchor gathering produce fresh
+            # tensors each step, but piecewise graph replay keeps capture-time
+            # addresses. Stage all four inputs in proposer-owned buffers.
+            candidate_shape = (self.max_batch_size, self.num_speculative_tokens, self.selector_top_k)
+            self._selector_input_buffers = (
+                torch.empty(candidate_shape, dtype=torch.int64, device=self.device),
+                torch.empty(candidate_shape, dtype=torch.float32, device=self.device),
+                torch.empty(
+                    (self.max_batch_size, self.num_speculative_tokens, self.hidden_size),
+                    dtype=self.dtype,
+                    device=self.device,
+                ),
+                torch.empty(self.max_batch_size, dtype=self.input_ids.dtype, device=self.device),
+            )
 
     def _maybe_share_lm_head(self, model: nn.Module) -> None:
         if getattr(self.model, "draft_id_to_target_id", None) is not None:
@@ -98,6 +115,15 @@ class AscendDflash2Proposer(AscendDflashProposer):
         candidate_ids = candidate_ids.view(num_reqs, num_steps, self.selector_top_k)
         unary_logits = unary_logits.view_as(candidate_ids)
         anchor_token_ids = self.input_ids[self._anchor_indices[:num_reqs]]
+        if self._selector_input_buffers is not None:
+            candidate_ids, unary_logits, hidden, anchor_token_ids = (
+                buffer[:num_reqs].copy_(value)
+                for buffer, value in zip(
+                    self._selector_input_buffers,
+                    (candidate_ids, unary_logits, hidden, anchor_token_ids),
+                    strict=True,
+                )
+            )
         scores = self.model.model.candidate_selector(
             candidate_ids,
             unary_logits,

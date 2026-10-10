@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from vllm.config import CUDAGraphMode
 
 from vllm_ascend.models.qwen3_dflash2 import (
     DFlash2Qwen3DecoderLayer,
@@ -16,6 +17,7 @@ from vllm_ascend.spec_decode.dflash2_proposer import (
     greedy_select_path,
     is_dflash2_draft,
 )
+from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
 
 
 @pytest.fixture(autouse=True)
@@ -198,6 +200,7 @@ def test_compute_draft_token_ids_uses_selector_and_anchor(monkeypatch):
     proposer.num_speculative_tokens = num_steps
     proposer.selector_top_k = top_k
     proposer.device = device
+    proposer._selector_input_buffers = None
     # __init__ is bypassed, so seed the prebuilt anchor indices directly.
     proposer._anchor_indices = torch.arange(num_reqs, dtype=torch.int64) * (1 + num_steps)
     proposer.input_ids = torch.arange(num_reqs * (1 + num_steps), dtype=torch.int64)
@@ -238,3 +241,82 @@ def test_compute_draft_token_ids_uses_selector_and_anchor(monkeypatch):
     # Greedy walk always takes cand 0 when that column is 1.
     expected = candidate_ids.view(num_reqs, num_steps, top_k)[:, :, 0].reshape(-1)
     torch.testing.assert_close(tokens, expected)
+
+
+@pytest.mark.parametrize("num_steps", [1, 2, 8])
+def test_selector_inputs_keep_addresses_and_refresh_values(monkeypatch, num_steps):
+    max_reqs, top_k, hidden_size = 3, 4, 8
+    proposer = AscendDflash2Proposer.__new__(AscendDflash2Proposer)
+    proposer.num_speculative_tokens = num_steps
+    proposer.selector_top_k = top_k
+    proposer._anchor_indices = torch.arange(max_reqs) * (1 + num_steps)
+    proposer.input_ids = torch.arange(max_reqs * (1 + num_steps), dtype=torch.int32)
+    shape = (max_reqs, num_steps, top_k)
+    proposer._selector_input_buffers = (
+        torch.empty(shape, dtype=torch.int64),
+        torch.empty(shape, dtype=torch.float32),
+        torch.empty(max_reqs, num_steps, hidden_size),
+        torch.empty(max_reqs, dtype=torch.int32),
+    )
+    addresses = [buffer.data_ptr() for buffer in proposer._selector_input_buffers]
+    proposer.model = MagicMock()
+    monkeypatch.setattr(
+        "vllm_ascend.spec_decode.dflash2_proposer.greedy_select_path",
+        lambda candidates, scores: candidates[..., 0].clone(),
+    )
+
+    # Allocate new inputs and change batch size between calls, as happens
+    # between graph warmup, prefill and subsequent decode steps.
+    for step, num_reqs in enumerate([3, 1, 2, 1]):
+        candidates = torch.arange(num_reqs * num_steps * top_k).view(-1, top_k) + step * 100
+        unary = torch.full(candidates.shape, float(step))
+        hidden = torch.full((num_reqs * num_steps, hidden_size), float(step + 1))
+        proposer.input_ids.add_(1)
+        proposer.model.compute_candidates.return_value = (candidates, unary)
+        tokens, probs = proposer.compute_draft_token_ids(hidden)
+        inputs = proposer.model.model.candidate_selector.call_args.args
+        assert [value.data_ptr() for value in inputs] == addresses
+        expected = (
+            candidates.view(num_reqs, num_steps, top_k),
+            unary.view(num_reqs, num_steps, top_k),
+            hidden.view(num_reqs, num_steps, hidden_size),
+            proposer.input_ids[proposer._anchor_indices[:num_reqs]],
+        )
+        for actual, reference in zip(inputs, expected, strict=True):
+            torch.testing.assert_close(actual, reference)
+        torch.testing.assert_close(tokens, candidates[:, 0])
+        assert probs is None
+
+
+@pytest.mark.parametrize(
+    "use_graph,mode,expected",
+    [
+        (False, CUDAGraphMode.PIECEWISE, False),
+        (True, CUDAGraphMode.FULL, False),
+        (True, CUDAGraphMode.PIECEWISE, True),
+        (True, CUDAGraphMode.FULL_AND_PIECEWISE, True),
+    ],
+)
+def test_selector_staging_allocated_only_for_piecewise(monkeypatch, use_graph, mode, expected):
+    def init_base(self, vllm_config, device, runner=None):
+        self.speculative_config = SimpleNamespace(draft_sample_method="greedy")
+        self.draft_model_config = SimpleNamespace(hf_config=SimpleNamespace(dflash_config={"selector_top_k": 4}))
+        self.num_speculative_tokens = 1
+        self.max_batch_size = 3
+        self.hidden_size = 8
+        self.dtype = torch.bfloat16
+        self.device = device
+        self.input_ids = torch.zeros(6, dtype=torch.int32)
+        self.use_cuda_graph = use_graph
+        self.compilation_config = SimpleNamespace(cudagraph_mode=mode)
+
+    monkeypatch.setattr(AscendDflashProposer, "__init__", init_base)
+    config = SimpleNamespace(speculative_config=SimpleNamespace(draft_sample_method="greedy"))
+    proposer = AscendDflash2Proposer(config, torch.device("cpu"))
+    buffers = proposer._selector_input_buffers
+    if not expected:
+        assert buffers is None
+    else:
+        assert buffers is not None
+        assert [tuple(buffer.shape) for buffer in buffers] == [(3, 1, 4), (3, 1, 4), (3, 1, 8), (3,)]
+        assert [buffer.dtype for buffer in buffers] == [torch.int64, torch.float32, torch.bfloat16, torch.int32]
