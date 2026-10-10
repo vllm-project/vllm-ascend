@@ -233,6 +233,7 @@ from vllm_ascend.worker.device_metadata import (
     DeviceMetadataTask,
     DeviceMetadataTaskProvider,
 )
+from vllm_ascend.worker.kv_cache_layout import reshape_combined_attention_kv_cache
 from vllm_ascend.worker.kvpp_cache import allocate_kvpp_cache
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.utils import (
@@ -4736,11 +4737,12 @@ class NPUModelRunner(GPUModelRunner):
             corresponding memory buffer for KV cache.
         """
         allocation_context = kv_cache_allocation_context or nullcontext()
+        page_layouts: dict[str, int] = {}
         with allocation_context:
-            kv_cache_raw_tensors = self._allocate_kv_cache_tensors(kv_cache_config)
+            kv_cache_raw_tensors = self._allocate_kv_cache_tensors(kv_cache_config, page_layouts=page_layouts)
         # Change the memory buffer to the desired shape
         kv_caches = self._reshape_kv_cache_tensors(
-            kv_cache_config, kv_cache_raw_tensors, kernel_block_sizes
+            kv_cache_config, kv_cache_raw_tensors, kernel_block_sizes, page_layouts=page_layouts
         )
 
         # Set up cross-layer KV cache sharing
@@ -4923,7 +4925,54 @@ class NPUModelRunner(GPUModelRunner):
 
         return dsa_k_tensor, dsa_k_scale_tensor
 
-    def _allocate_kv_cache_tensors(self, kv_cache_config: KVCacheConfig) -> dict[str, torch.Tensor]:
+    def _record_shared_page_layouts(
+        self,
+        regions: list[tuple[str, int, int]],
+        specs: dict[str, KVCacheSpec],
+        backends: dict[str, Any],
+        strided_attention_layers: set[str],
+        page_layouts: dict[str, int] | None,
+    ) -> None:
+        """为所有兼容的共享区域消费者记录同一物理页契约。"""
+        if page_layouts is None or self.vllm_config.kv_transfer_config is not None:
+            return
+        if enable_fa_quant(self.vllm_config):
+            return
+        eligible_attention = set()
+        for name in strided_attention_layers:
+            spec = specs[name]
+            if spec.dtype not in (torch.float16, torch.bfloat16, torch.float32):
+                continue
+            if getattr(spec, "head_size_v", None) not in (None, spec.head_size):
+                continue
+            shape = backends[name].get_kv_cache_shape(1, spec.block_size, spec.num_kv_heads, spec.head_size)
+            if len(shape) == 5 and shape[0] == 2:
+                eligible_attention.add(name)
+        by_region: dict[tuple[int, int], list[str]] = {}
+        for name, start, size in regions:
+            by_region.setdefault((start, size), []).append(name)
+        for (start, size), names in by_region.items():
+            if any(
+                other_start < start + size and start < other_start + other_size
+                for other_start, other_size in by_region
+                if (other_start, other_size) != (start, size)
+            ):
+                continue
+            if not any(name in eligible_attention for name in names):
+                continue
+            if not any(isinstance(specs[name], MambaSpec) for name in names):
+                continue
+            if any(name not in eligible_attention and not isinstance(specs[name], MambaSpec) for name in names):
+                continue
+            page_sizes = {specs[name].page_size_bytes for name in names}
+            if len(page_sizes) == 1:
+                page_layouts.update(dict.fromkeys(names, page_sizes.pop()))
+
+    def _allocate_kv_cache_tensors(
+        self,
+        kv_cache_config: KVCacheConfig,
+        page_layouts: dict[str, int] | None = None,
+    ) -> dict[str, torch.Tensor]:
         """
         Initializes the KV cache buffer with the correct size. The buffer needs
         to be reshaped to the desired shape before being used by the models.
@@ -4968,6 +5017,7 @@ class NPUModelRunner(GPUModelRunner):
             isinstance(spec, MambaSpec) for spec in layer_kv_cache_spec.values()
         ) and any(isinstance(spec, AttentionSpec) for spec in layer_kv_cache_spec.values())
         strided_attention_cache_layers: set[str] = set()
+        layer_backends: dict[str, Any] = {}
         if (
             not self.use_dcp
             and not self.use_sparse
@@ -5111,6 +5161,13 @@ class NPUModelRunner(GPUModelRunner):
                     )
                     for layer_name, start, layer_size in regions:
                         kv_cache_raw_tensors[layer_name] = backing[start : start + layer_size]
+                    self._record_shared_page_layouts(
+                        regions,
+                        layer_kv_cache_spec,
+                        layer_backends,
+                        strided_attention_cache_layers,
+                        page_layouts,
+                    )
 
         layerwise_reuse = get_layerwise_reuse_config(self.vllm_config.kv_transfer_config) is not None
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
@@ -5345,6 +5402,7 @@ class NPUModelRunner(GPUModelRunner):
         kv_cache_config: KVCacheConfig,
         kv_cache_raw_tensors: dict[str, torch.Tensor],
         kernel_block_sizes: list[int] | None = None,
+        page_layouts: dict[str, int] | None = None,
     ) -> dict[str, torch.Tensor]:
         """
         Reshape the KV cache tensors to the desired shape and dtype.
@@ -5692,6 +5750,16 @@ class NPUModelRunner(GPUModelRunner):
                         current_kv_cache_spec.num_kv_heads,
                         current_kv_cache_spec.head_size,
                     )
+                    if page_layouts is not None and layer_name in page_layouts:
+                        # 共享池按页放置 K/V，不再从整个池头部集中裁剪 padding。
+                        kv_caches[layer_name] = reshape_combined_attention_kv_cache(
+                            raw_k_tensor,
+                            kv_cache_shape,
+                            current_kv_cache_spec.dtype,
+                            page_layouts[layer_name],
+                            block_size_chunk,
+                        )
+                        continue
                     if (
                         raw_kv_is_combined
                         and len(kv_cache_shape) == 5
@@ -5845,6 +5913,15 @@ class NPUModelRunner(GPUModelRunner):
                     assert raw_tensor.numel() % current_kv_cache_spec.page_size_bytes == 0
                     num_blocks = raw_tensor.numel() // current_kv_cache_spec.page_size_bytes
                     assert num_blocks >= kv_cache_config.num_blocks
+                    if page_layouts is not None and layer_name in page_layouts:
+                        # 与同一共享区域的 Attention 使用同一个物理页跨度。
+                        kv_caches[layer_name] = self._adjust_kv_layout(
+                            raw_tensor,
+                            [(num_blocks, *shape) for shape in current_kv_cache_spec.shapes],
+                            current_kv_cache_spec.dtypes,
+                            page_layouts[layer_name],
+                        )
+                        continue
                     if uses_padded_page_layout:
                         # Recurrent state shares its physical pages with the
                         # block-strided attention caches of the same pool. Both

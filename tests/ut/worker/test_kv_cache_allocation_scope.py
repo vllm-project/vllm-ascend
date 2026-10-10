@@ -37,14 +37,21 @@ def test_mrv1_kv_pool_only_wraps_backing_allocation() -> None:
     runner.model_config = SimpleNamespace(hf_text_config=SimpleNamespace(model_type="llama"))
     runner.compilation_config = SimpleNamespace(static_forward_context={})
 
-    def allocate(_kv_cache_config):
+    recorded_layouts = None
+
+    def allocate(_kv_cache_config, *, page_layouts):
+        nonlocal recorded_layouts
         assert scope.active
+        recorded_layouts = page_layouts
+        page_layouts["layer"] = 128
         return raw_tensors
 
-    def reshape(_kv_cache_config, tensors, kernel_block_sizes):
+    def reshape(_kv_cache_config, tensors, kernel_block_sizes, *, page_layouts):
         assert not scope.active
         assert tensors is raw_tensors
         assert kernel_block_sizes is None
+        assert page_layouts is recorded_layouts
+        assert page_layouts == {"layer": 128}
         return reshaped
 
     def bind(*_args, **_kwargs):
