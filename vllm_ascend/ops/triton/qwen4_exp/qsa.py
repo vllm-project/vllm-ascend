@@ -213,6 +213,65 @@ def _expand_qsa_indices_kernel(
 
 
 @triton.jit
+def _pack_qsa_group_indices_kernel(
+    block_indices_ptr,
+    query_positions_ptr,
+    sequence_lengths_ptr,
+    token_to_req_ptr,
+    output_ptr,
+    stride_blocks_row,
+    stride_blocks_column,
+    stride_output_row,
+    stride_output_column,
+    rows,
+    num_requests,
+    BLOCK_TOPK: tl.constexpr,
+    COMPRESS_RATIO: tl.constexpr,
+    OUTPUT_WIDTH: tl.constexpr,
+) -> None:
+    row = tl.program_id(0)
+    columns = tl.arange(0, OUTPUT_WIDTH)
+    query_position = tl.load(query_positions_ptr + row)
+    request = tl.load(token_to_req_ptr + row)
+    safe_request = tl.minimum(tl.maximum(request, 0), num_requests - 1)
+    sequence_length = tl.load(
+        sequence_lengths_ptr + safe_request,
+        mask=(request >= 0) & (request < num_requests),
+        other=0,
+    )
+    complete_groups = tl.minimum(
+        tl.minimum(
+            (query_position + 1) // COMPRESS_RATIO,
+            sequence_length // COMPRESS_RATIO,
+        ),
+        BLOCK_TOPK,
+    )
+    is_group = columns < BLOCK_TOPK
+    safe_group_column = tl.minimum(columns, BLOCK_TOPK - 1)
+    group = tl.load(
+        block_indices_ptr + row * stride_blocks_row + safe_group_column * stride_blocks_column,
+        mask=is_group & (columns < complete_groups),
+        other=-1,
+    )
+    tail_offset = columns - BLOCK_TOPK
+    tail_start = ((query_position + 1) // COMPRESS_RATIO) * COMPRESS_RATIO
+    tail_count = tl.minimum((query_position + 1) - tail_start, COMPRESS_RATIO - 1)
+    tail = tail_start + tail_offset
+    valid_tail = (
+        (~is_group)
+        & (tail_offset >= 0)
+        & (tail_offset < tail_count)
+        & (tail < sequence_length)
+    )
+    packed = tl.where(is_group, group, tl.where(valid_tail, tail, -1))
+    tl.store(
+        output_ptr + row * stride_output_row + columns * stride_output_column,
+        packed,
+        mask=(row < rows) & (columns < OUTPUT_WIDTH),
+    )
+
+
+@triton.jit
 def _qsa_sparse_paged_gqa_splitk_kernel(
     q_ptr,
     k_cache_ptr,
@@ -246,6 +305,9 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
     NUM_QUERY_HEADS: tl.constexpr,
     NUM_SPLITS: tl.constexpr,
     NUM_TILES: tl.constexpr,
+    BLOCK_TOPK: tl.constexpr,
+    COMPRESS_RATIO: tl.constexpr,
+    LOGICAL_TOPK: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ) -> None:
@@ -275,11 +337,22 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
     split_tile_end = (split_id + 1) * NUM_TILES // NUM_SPLITS
     for tile in range(split_tile_start, split_tile_end):
         columns = tile * BLOCK_N + column_offsets
-        logical_token = tl.load(
-            indices_ptr + row * stride_indices_row + columns,
-            mask=columns < TOPK,
+        is_group_token = columns < LOGICAL_TOPK
+        group_rank = columns // COMPRESS_RATIO
+        group_offset = columns % COMPRESS_RATIO
+        safe_group_rank = tl.minimum(group_rank, BLOCK_TOPK - 1)
+        group = tl.load(
+            indices_ptr + row * stride_indices_row + safe_group_rank,
+            mask=is_group_token,
             other=-1,
         )
+        tail_column = BLOCK_TOPK + (columns - LOGICAL_TOPK)
+        tail = tl.load(
+            indices_ptr + row * stride_indices_row + tail_column,
+            mask=(columns >= LOGICAL_TOPK) & (columns < TOPK),
+            other=-1,
+        )
+        logical_token = tl.where(is_group_token, group * COMPRESS_RATIO + group_offset, tail)
         safe_token = tl.maximum(logical_token, 0)
         logical_page = safe_token // PAGE_SIZE
         page_offset = safe_token % PAGE_SIZE
@@ -710,6 +783,57 @@ def expand_qsa_block_indices_npu(
         raise ValueError("QSA expansion output has an invalid shape")
     if not block_indices.shape[0]:
         return out
+
+
+def pack_qsa_group_indices_npu(
+    block_indices: torch.Tensor,
+    query_positions: torch.Tensor,
+    sequence_lengths: torch.Tensor,
+    token_to_req: torch.Tensor,
+    compress_ratio: int,
+    token_topk: int,
+    out: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Pack compressed groups and the open-group tail into one fixed buffer."""
+
+    if block_indices.device.type != "npu" or not HAS_TRITON:
+        raise RuntimeError("QSA NPU compact packing requires Triton")
+    if token_topk % compress_ratio:
+        raise ValueError("QSA token top-k must be divisible by compression ratio")
+    block_topk = token_topk // compress_ratio
+    output_width = block_topk + compress_ratio - 1
+    if block_indices.shape != (query_positions.numel(), block_topk):
+        raise ValueError("QSA compressed top-k has an invalid shape")
+    if token_to_req.shape != query_positions.shape:
+        raise ValueError("QSA request mapping must match query positions")
+    if out is None:
+        out = torch.empty(
+            (block_indices.shape[0], output_width),
+            dtype=torch.int32,
+            device=block_indices.device,
+        )
+    elif out.shape != (block_indices.shape[0], output_width):
+        raise ValueError("QSA compact selection output has an invalid shape")
+    if not block_indices.shape[0]:
+        return out
+    _pack_qsa_group_indices_kernel[(block_indices.shape[0],)](
+        block_indices,
+        query_positions,
+        sequence_lengths,
+        token_to_req,
+        out,
+        block_indices.stride(0),
+        block_indices.stride(1),
+        out.stride(0),
+        out.stride(1),
+        block_indices.shape[0],
+        sequence_lengths.shape[0],
+        BLOCK_TOPK=block_topk,
+        COMPRESS_RATIO=compress_ratio,
+        OUTPUT_WIDTH=output_width,
+        num_warps=1,
+    )
+    return out
     column_block = 256
     _expand_qsa_indices_kernel[(block_indices.shape[0], triton.cdiv(output_width, column_block))](
         block_indices,
@@ -788,10 +912,11 @@ def qsa_select_paged_tokens(
     *,
     use_e3: bool = False,
 ) -> torch.Tensor:
-    """Score, select, and expand QSA indices without host synchronization."""
+    """Score and pack QSA group indices without host synchronization."""
 
     rows = q.shape[0]
-    output_width = token_topk + compress_ratio - 1
+    block_topk = token_topk // compress_ratio
+    output_width = block_topk + compress_ratio - 1
     if out is None:
         out = torch.empty((rows, output_width), dtype=torch.int32, device=q.device)
     if out.shape != (rows, output_width):
@@ -830,26 +955,15 @@ def qsa_select_paged_tokens(
         )
         blocks = blocks_buffer[: row_end - row_start]
         blocks[:, :select_k].copy_(torch.topk(logits, select_k, dim=-1).indices.to(torch.int32))
-        if use_e3:
-            expand_qsa_block_indices_e3(
-                blocks,
-                query_positions[row_slice],
-                sequence_lengths,
-                token_to_req[row_slice],
-                compress_ratio,
-                token_topk,
-                out[row_slice],
-            )
-        else:
-            expand_qsa_block_indices_npu(
-                blocks,
-                query_positions[row_slice],
-                sequence_lengths,
-                token_to_req[row_slice],
-                compress_ratio,
-                token_topk,
-                out[row_slice],
-            )
+        pack_qsa_group_indices_npu(
+            blocks,
+            query_positions[row_slice],
+            sequence_lengths,
+            token_to_req[row_slice],
+            compress_ratio,
+            token_topk,
+            out[row_slice],
+        )
     return out
 
 
@@ -916,7 +1030,11 @@ def qsa_sparse_paged_attention(
     else:
         block_n, target_splits, partial_warps = 64, 1, 2
 
-    num_tiles = triton.cdiv(logical_indices.shape[1], block_n)
+    compress_ratio = 4
+    block_topk = logical_indices.shape[1] - compress_ratio + 1
+    logical_topk = block_topk * compress_ratio
+    expanded_width = logical_topk + compress_ratio - 1
+    num_tiles = triton.cdiv(expanded_width, block_n)
     # Avoid empty splits when the selection width is smaller than the profile.
     max_useful_splits = 1 << (num_tiles.bit_length() - 1)
     num_splits = min(max_useful_splits, target_splits)
@@ -961,7 +1079,7 @@ def qsa_sparse_paged_attention(
         q.shape[0],
         k_cache.shape[0],
         block_table.shape[0],
-        TOPK=logical_indices.shape[1],
+        TOPK=expanded_width,
         PAGE_SIZE=k_cache.shape[1],
         PAGE_TABLE_WIDTH=block_table.shape[1],
         GROUP_SIZE=group_size,
@@ -969,6 +1087,9 @@ def qsa_sparse_paged_attention(
         NUM_QUERY_HEADS=q.shape[1],
         NUM_SPLITS=num_splits,
         NUM_TILES=num_tiles,
+        BLOCK_TOPK=block_topk,
+        COMPRESS_RATIO=compress_ratio,
+        LOGICAL_TOPK=logical_topk,
         BLOCK_M=block_m,
         BLOCK_N=block_n,
         num_warps=partial_warps,
@@ -1148,6 +1269,7 @@ def qsa_compress_groups_with_ratio(
 
 __all__ = [
     "expand_qsa_block_indices_npu",
+    "pack_qsa_group_indices_npu",
     "qsa_compress_groups_with_ratio",
     "qsa_mqa_paged",
     "qsa_select_paged_tokens",

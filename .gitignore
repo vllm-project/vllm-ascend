@@ -238,3 +238,6 @@ csrc/third_party/
 
 # local build cache
 .vllm_ascend/
+
+# local CMake snapshot created before GBSA integration
+/csrc/build.pre_gbsa_integration/

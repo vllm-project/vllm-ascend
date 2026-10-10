@@ -258,7 +258,7 @@ function(add_ops_info_target)
     set(OPS_INFO_INNER_INI    ${base_aclnn_binary_dir}/inner/aic-${OPINFO_COMPUTE_UNIT}-ops-info.ini)
     set(OPS_INFO_EXCLUDE_INI  ${base_aclnn_binary_dir}/exc/aic-${OPINFO_COMPUTE_UNIT}-ops-info.ini)
 
-    add_custom_command(OUTPUT ${OPS_INFO_JSON}
+    add_custom_target(${OPS_INFO_TARGET} ALL
             COMMAND ${HI_PYTHON} ${ASCENDC_CMAKE_UTIL_DIR}/parse_ini_to_json.py
             ${OPS_INFO_INI}
             ${OPS_INFO_INNER_INI}
@@ -266,10 +266,7 @@ function(add_ops_info_target)
             ${OPS_INFO_JSON}
             COMMAND mkdir -p ${CUSTOM_OPS_INFO_DIR}
             COMMAND cp -f ${OPS_INFO_JSON} ${CUSTOM_OPS_INFO_DIR}
-    )
-
-    add_custom_target(${OPS_INFO_TARGET} ALL
-            DEPENDS ${OPS_INFO_JSON}
+            BYPRODUCTS ${OPS_INFO_JSON}
     )
 
     add_dependencies(${OPS_INFO_TARGET} opbuild_gen_default opbuild_gen_inner opbuild_gen_exc)
