@@ -141,6 +141,14 @@ vLLM Ascend includes two branches: main and dev.
 
 Commits should typically be merged into the main branch first, and only then backported to the dev branch, to reduce maintenance costs as much as possible.
 
+### Release branch package versions
+
+Build release nightlies from a named `releases/vX.Y.Z` or `releases/vX.Y.Zrc` checkout. Package version selection uses reachable tags for that exact release family. If several tags point to the nearest tagged commit, the highest PEP 440 version wins, so a real `rc1`, final or post-release tag supersedes an `rc0` baseline at the same commit.
+
+Before the first tag for the release family, setuptools-scm uses a virtual `X.Y.Zrc0` baseline and retains the commit distance, hash and dirty-worktree marker from its usual Git description. For example, a fresh `releases/v0.26.0rc` checkout one commit beyond an old `v0.19.1rc1` tag reports `0.26.0rc1.dev1+g<hash>`. No baseline tag or branch commit needs to be created.
+
+Main, other branches, detached checkouts and source distributions retain the default setuptools-scm behavior. A detached checkout cannot identify the intended release family when multiple branches share its commit; use a named branch for release nightly builds. Fetch the full history and tags to retain accurate commit distances. Builds from older release commits require this packaging change to be backported.
+
 ### Maintenance branch and EOL
 
 The table below lists branch states.
