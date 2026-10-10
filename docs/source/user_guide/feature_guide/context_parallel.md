@@ -162,15 +162,21 @@ DCP reuses the TP devices and does not increase the world size.
 
 ### DSA-CP
 
+DSA-CP is supported only with ModelRunner V1. Set
+`VLLM_USE_V2_MODEL_RUNNER=0` when enabling `enable_dsa_cp`. Enabling DSA-CP
+with ModelRunner V2 raises a configuration error; use PCP instead.
+
 DSA-CP will be fully deprecated once PCP is ready. PCP is currently experimental,
 with support for some feature combinations still in progress.
 
-To try PCP with the same world size, replace TP size `N > 1` with
+To try PCP with the same world size, set `VLLM_USE_V2_MODEL_RUNNER=1`, replace TP size `N > 1` with
 `--tensor-parallel-size 1 --prefill-context-parallel-size N` and remove
 `enable_dsa_cp` from `additional_config`. With TP size 1, PCP requires additional
 ranks. Check the compatibility and limitations above before migrating.
 
 ```bash
+export VLLM_USE_V2_MODEL_RUNNER=0
+
 vllm serve <glm-5.2-model> \
   --tensor-parallel-size <N> \
   --block-size <B> \
