@@ -1,5 +1,6 @@
 from unittest.mock import MagicMock
 
+import pytest
 import torch
 
 from vllm_ascend.worker.model_runner_v1 import _zero_static_kv_buffers
@@ -47,60 +48,43 @@ def test_zero_static_kv_buffers_tolerates_empty_context():
     _zero_static_kv_buffers(_make_runner(None))
 
 
-def test_zero_static_kv_buffers_falls_back_for_dtypes_without_zero():
-    calls = []
-
-    class _NoZeroTensor(torch.Tensor):
-        def zero_(self):
-            if self.dtype != torch.int8:
-                calls.append("zero_")
-                raise RuntimeError("zero_ not implemented for this dtype")
-            return super().zero_()
-
-    t = torch.ones(4).as_subclass(_NoZeroTensor)
+def test_zero_static_kv_buffers_fp8_via_int8_view():
+    # fp8 storages may not implement zero_(); the runner zeroes them through
+    # an int8 reinterpretation of the same bytes.
+    t = torch.ones(4, dtype=torch.uint8).view(torch.float8_e4m3fn)
     ctx = {"layer0": _FakeAttnModule([t])}
     _zero_static_kv_buffers(_make_runner(ctx))
-    assert calls == ["zero_"]
-    assert torch.count_nonzero(t).item() == 0
+    assert torch.count_nonzero(t.view(torch.int8)).item() == 0
 
 
-def test_zero_static_kv_buffers_falls_back_for_non_contiguous():
-    calls = []
-
-    class _NoZeroTensor(torch.Tensor):
-        def zero_(self):
-            if self.dtype != torch.int8:
-                calls.append("zero_")
-                raise RuntimeError("zero_ not implemented for this dtype")
-            return super().zero_()
-
-    t = torch.ones(4, 4).as_subclass(_NoZeroTensor).t()
-    assert not t.is_contiguous()
-    ctx = {"layer0": _FakeAttnModule([t])}
-    _zero_static_kv_buffers(_make_runner(ctx))
-    assert calls == ["zero_"]
-    assert torch.count_nonzero(t).item() == 0
-
-
-def test_zero_static_kv_buffers_fallback_copies_scalar_not_full_buffer():
+def test_zero_static_kv_buffers_fp8_non_contiguous_copies_scalar_not_full_buffer():
     # Regression test for the CI OOM on a nearly-full card: the fallback for
-    # non-contiguous buffers must broadcast a scalar zero and must never
+    # non-contiguous fp8 buffers must broadcast a scalar zero and must never
     # allocate a zeros_like() buffer the size of the resident KV pool.
     copy_src_shapes = []
 
-    class _NoZeroTensor(torch.Tensor):
-        def zero_(self):
-            if self.dtype != torch.int8:
-                raise RuntimeError("zero_ not implemented for this dtype")
-            return super().zero_()
-
+    class _CopyRecorder(torch.Tensor):
         def copy_(self, src):
             copy_src_shapes.append(tuple(src.shape))
             return super().copy_(src)
 
-    t = torch.ones(4, 4).as_subclass(_NoZeroTensor).t()
+    t = torch.ones(4, 4, dtype=torch.uint8).view(torch.float8_e4m3fn).as_subclass(_CopyRecorder).t()
     assert not t.is_contiguous()
     ctx = {"layer0": _FakeAttnModule([t])}
     _zero_static_kv_buffers(_make_runner(ctx))
     assert copy_src_shapes == [()]
-    assert torch.count_nonzero(t).item() == 0
+    assert torch.count_nonzero(t.contiguous().view(torch.int8)).item() == 0
+
+
+def test_zero_static_kv_buffers_propagates_unexpected_errors():
+    # RuntimeError from zero_() on ordinary dtypes is not a recoverable
+    # dtype/layout issue: it must abort startup instead of leaving a
+    # poisoned buffer behind.
+    class _NoZeroTensor(torch.Tensor):
+        def zero_(self):
+            raise RuntimeError("zero_ not implemented for this dtype")
+
+    t = torch.ones(4).as_subclass(_NoZeroTensor)
+    ctx = {"layer0": _FakeAttnModule([t])}
+    with pytest.raises(RuntimeError, match="zero_ not implemented"):
+        _zero_static_kv_buffers(_make_runner(ctx))

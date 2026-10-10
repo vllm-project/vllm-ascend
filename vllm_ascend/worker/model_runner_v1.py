@@ -372,41 +372,34 @@ def _iter_kv_tensors(kv_cache: Any) -> Iterator[torch.Tensor]:
             yield from _iter_kv_tensors(item)
 
 
+# fp8 storages may not implement zero_(); they are zeroed through an int8
+# reinterpretation (or a scalar broadcast when not contiguous) instead.
+_FP8_DTYPES = frozenset(
+    getattr(torch, name)
+    for name in ("float8_e4m3fn", "float8_e5m2", "float8_e4m3fnuz", "float8_e5m2fnuz")
+    if hasattr(torch, name)
+)
+
+
 def _zero_tensor(t: torch.Tensor) -> None:
     """Zero a tensor in place without allocating a same-size buffer.
 
-    fp8 storages may not implement zero_(), and view(dtype) requires the
-    last dimension to be contiguous. The fallback must never materialize a
+    Dispatch on dtype/layout instead of catching RuntimeError blindly: an
+    unexpected failure must abort startup loudly rather than leave a
+    poisoned buffer behind. The fp8 fallbacks must never materialize a
     zeros_like() copy: doubling a resident buffer OOMed a nearly-full card
     in CI (a2 mamba SSM state, 6.13 GiB with only 4.32 GiB free).
     """
-    try:
+    if t.dtype not in _FP8_DTYPES:
         t.zero_()
         return
-    except RuntimeError:
-        pass
-    try:
+    if t.is_contiguous():
         # fp8 storages may not implement zero_(); reinterpret as int8.
         t.view(torch.int8).zero_()
         return
-    except RuntimeError:
-        pass
-    logger.warning(
-        "zeroing kv buffer of shape=%s dtype=%s device=%s via scalar "
-        "broadcast because zero_() and view(int8) both failed",
-        tuple(t.shape), t.dtype, t.device)
-    try:
-        # Broadcast a scalar zero instead of allocating a zeros_like() copy.
-        t.copy_(torch.zeros((), dtype=t.dtype, device=t.device))
-        return
-    except RuntimeError:
-        pass
-    if t.dim() == 0:
-        raise RuntimeError(f"cannot zero kv buffer of dtype {t.dtype} on {t.device}")
-    # Last resort: recurse over dim-0 slices, which may accept the fast
-    # paths above even when the whole tensor does not.
-    for i in range(t.shape[0]):
-        _zero_tensor(t[i])
+    # Non-contiguous fp8: broadcast a scalar zero instead of allocating a
+    # zeros_like() copy.
+    t.copy_(torch.zeros((), dtype=t.dtype, device=t.device))
 
 
 def _zero_static_kv_buffers(runner) -> None:
