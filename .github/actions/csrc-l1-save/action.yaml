@@ -4,6 +4,7 @@ description: Persist the updated content-addressed local csrc cache.
 inputs:
   cache-dir:
     required: true
+    description: Same workspace-relative transport path used by the restore action.
   primary-key:
     required: true
   access-key-id:
