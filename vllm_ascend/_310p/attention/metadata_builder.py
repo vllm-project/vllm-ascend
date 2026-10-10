@@ -34,11 +34,21 @@ from vllm_ascend.attention.attention_v1 import (
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 
 QUERY_LENS_CPU_ATTR = "query_lens_cpu"
+SPLITFUSE_MASK_NZ_ATTR = "splitfuse_mask_nz"
+
+# Batches at or below this token count may be graph-captured (spec-decode /
+# decode sizes); their mask must live in a stable-address buffer the builder
+# refreshes before every replay. Larger (eager-only) batches skip the copy.
+_MASK_PERSISTENT_MAX_TOKENS = 64
 
 
 def set_query_lens_cpu(attn_metadata: AscendMetadata, query_lens_cpu: torch.Tensor) -> None:
     """Attach host qLens for ATB splitfuse without extending upstream AscendMetadata."""
     setattr(attn_metadata, QUERY_LENS_CPU_ATTR, query_lens_cpu)
+
+
+def get_splitfuse_mask_nz(attn_metadata: AscendMetadata) -> torch.Tensor | None:
+    return getattr(attn_metadata, SPLITFUSE_MASK_NZ_ATTR, None)
 
 
 def get_query_lens_cpu(attn_metadata: AscendMetadata) -> torch.Tensor | None:
@@ -84,6 +94,8 @@ class AscendAttentionMetadataBuilder310(AscendAttentionMetadataBuilder):
         if device.type != "cpu":
             max_num_seqs = vllm_config.scheduler_config.max_num_seqs
             self._query_lens_cpu_buffer = torch.empty(max_num_seqs, dtype=torch.int32, device="cpu", pin_memory=True)
+        # Stable-address NZ mask buffers, one per captured batch size (see build()).
+        self._splitfuse_mask_bufs: dict[int, torch.Tensor] = {}
 
     def _fill_query_lens_cpu(
         self, num_reqs: int, query_start_loc_cpu: torch.Tensor, is_drafting: bool = False
@@ -144,6 +156,29 @@ class AscendAttentionMetadataBuilder310(AscendAttentionMetadataBuilder):
 
         if is_compressed_mask_supported():
             attn_metadata.attn_mask = AttentionMaskBuilder310.get_compressed_splitfuse_mask(self.device)
+        else:
+            # Build the per-step splitfuse mask here, outside the forward: the
+            # forward-time get_splitfuse_mask does sync D2H/H2D copies that abort
+            # an ACL graph capture. For capture-sized batches the mask content is
+            # copied into a stable-address buffer so replays see fresh values.
+            q_list = get_query_lens_cpu(attn_metadata).tolist()
+            num_tokens = int(sum(q_list))
+            seq_lens_cpu = common_attn_metadata.seq_lens_cpu
+            if seq_lens_cpu is None:
+                # Capture dummy_run path: build() runs before the captured region,
+                # so this D2H is legal; mask content is refreshed by real builds.
+                seq_lens_cpu = attn_metadata.seq_lens.cpu()
+            c_list = seq_lens_cpu[:num_reqs].tolist()
+            mask_nz = AttentionMaskBuilder310.build_splitfuse_mask_nz_from_host(q_list, c_list, self.device)
+            if num_tokens <= _MASK_PERSISTENT_MAX_TOKENS:
+                buf = self._splitfuse_mask_bufs.get(num_tokens)
+                if buf is None:
+                    buf = mask_nz
+                    self._splitfuse_mask_bufs[num_tokens] = buf
+                else:
+                    buf.copy_(mask_nz)
+                mask_nz = buf
+            setattr(attn_metadata, SPLITFUSE_MASK_NZ_ATTR, mask_nz)
 
         return attn_metadata
 
