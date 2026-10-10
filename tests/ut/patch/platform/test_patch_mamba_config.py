@@ -26,6 +26,7 @@ from vllm.platforms.interface import Platform
 
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
 from vllm_ascend.patch.platform.patch_mamba_config import (
+    _align_contiguous_hybrid_cache,
     _get_sparse_index_kpool,
     _using_kv_store,
 )
@@ -91,13 +92,21 @@ def _config(
         kv_transfer_config=connector,
         speculative_config=(None if speculative_method is None else SimpleNamespace(method=speculative_method)),
         cache_config=SimpleNamespace(
+            cache_dtype="auto",
             block_size=128,
             mamba_page_size_padded=8192,
             mamba_cache_mode=mamba_cache_mode,
             enable_prefix_caching=prefix_caching,
             mamba_block_size=None,
         ),
-        model_config=SimpleNamespace(max_model_len=4096),
+        model_config=SimpleNamespace(
+            architecture="Qwen3_5ForCausalLM",
+            is_hybrid=True,
+            use_mla=False,
+            max_model_len=4096,
+            hf_text_config=SimpleNamespace(layer_types=["linear_attention", "full_attention"]),
+            hf_config=SimpleNamespace(),
+        ),
     )
 
 
@@ -115,6 +124,157 @@ def test_hybrid_config_preserves_noncontiguous_page_sizes():
     assert config.cache_config.block_size == 128
     assert config.cache_config.mamba_page_size_padded == 8192
     assert config.cache_config.mamba_block_size == 4096
+
+
+def _contiguous_hybrid_config(*, cache_dtype="auto", block_size=128):
+    config = _config(prefix_caching=True, mamba_cache_mode="align")
+    config.cache_config.cache_dtype = cache_dtype
+    config.cache_config.block_size = block_size
+    config.parallel_config = SimpleNamespace(tensor_parallel_size=1)
+    config.model_config = SimpleNamespace(
+        architecture="UnlistedHybridForCausalLM",
+        is_hybrid=True,
+        use_mla=False,
+        dtype=torch.bfloat16,
+        max_model_len=4096,
+        hf_text_config=SimpleNamespace(layer_types=["linear_attention", "full_attention"]),
+        hf_config=SimpleNamespace(),
+        get_num_kv_heads=lambda _parallel_config: 1,
+        get_head_size=lambda: 128,
+    )
+    return config
+
+
+def _contiguous_model_cls(*, ssm_shape=(1, 128, 128), conv=True):
+    shapes = ((3, 16), ssm_shape) if conv else (ssm_shape,)
+    dtypes = (torch.bfloat16, torch.float32) if conv else (torch.float32,)
+    return SimpleNamespace(
+        get_mamba_state_shape_from_config=lambda _config: shapes,
+        get_mamba_state_dtype_from_config=lambda _config: dtypes,
+    )
+
+
+@pytest.mark.parametrize("cache_dtype,expected_block_size", [("auto", 256), ("int8", 512), ("fp8", 512)])
+@pytest.mark.parametrize("block_size", [None, 128])
+@pytest.mark.parametrize("conv", [False, True])
+def test_unlisted_hybrid_preserves_contiguous_k_ssm_alignment(cache_dtype, expected_block_size, block_size, conv):
+    config = _contiguous_hybrid_config(cache_dtype=cache_dtype, block_size=block_size)
+    model_cls = _contiguous_model_cls(conv=conv)
+
+    with patch(
+        "vllm_ascend.patch.platform.patch_mamba_config.ModelRegistry.resolve_model_cls",
+        return_value=(model_cls, None),
+    ) as resolve:
+        _run(config)
+
+    resolve.assert_called_once_with(config.model_config.architecture, model_config=config.model_config)
+    ssm_page_bytes = 1 * 128 * 128 * torch.tensor([], dtype=torch.float32).element_size()
+    k_element_size = 2 if cache_dtype == "auto" else 1
+    k_page_bytes = expected_block_size * 128 * k_element_size
+    assert k_page_bytes == ssm_page_bytes
+    conv_page_bytes = 3 * 16 * 2 if conv else 0
+    assert config.cache_config.block_size == expected_block_size
+    assert config.cache_config.mamba_page_size_padded == 2 * k_page_bytes + conv_page_bytes
+    assert config.cache_config.mamba_block_size == expected_block_size
+
+
+def test_backend_alignment_keeps_unlisted_hybrid_contiguous_geometry():
+    config = _contiguous_hybrid_config()
+    model_cls = _contiguous_model_cls()
+
+    with (
+        patch(
+            "vllm_ascend.patch.platform.patch_mamba_config.ModelRegistry.resolve_model_cls",
+            return_value=(model_cls, None),
+        ),
+        patch.object(Platform, "_align_hybrid_block_size") as upstream,
+    ):
+        _run(config)
+        for _ in range(2):
+            # Backend selection resets its preferred size before alignment.
+            config.cache_config.block_size = 128
+            config.cache_config.mamba_page_size_padded = None
+            NPUPlatform._align_hybrid_block_size(config, SimpleNamespace())
+            assert config.cache_config.block_size == 256
+            assert config.cache_config.mamba_page_size_padded == 2 * 65536 + 96
+            assert config.cache_config.mamba_block_size == 256
+
+    upstream.assert_not_called()
+
+
+def test_backend_alignment_leaves_supported_qwen_to_upstream():
+    config = _config()
+
+    with (
+        patch("vllm_ascend.patch.platform.patch_mamba_config.ModelRegistry.resolve_model_cls") as resolve,
+        patch.object(Platform, "_align_hybrid_block_size") as upstream,
+    ):
+        NPUPlatform._align_hybrid_block_size(config, SimpleNamespace())
+
+    resolve.assert_not_called()
+    upstream.assert_called_once()
+    assert config.cache_config.block_size == 128
+    assert config.cache_config.mamba_page_size_padded == 8192
+
+
+def test_contiguous_hybrid_rejects_larger_attention_blocks():
+    config = _contiguous_hybrid_config(block_size=512)
+
+    with (
+        patch(
+            "vllm_ascend.patch.platform.patch_mamba_config.ModelRegistry.resolve_model_cls",
+            return_value=(_contiguous_model_cls(), None),
+        ),
+        pytest.raises(ValueError, match="requires block_size=256.*got 512"),
+    ):
+        _run(config)
+
+
+def test_contiguous_hybrid_rejects_unalignable_ssm_rows():
+    config = _contiguous_hybrid_config()
+    model_cls = _contiguous_model_cls(ssm_shape=(1, 127, 128))
+
+    with (
+        patch(
+            "vllm_ascend.patch.platform.patch_mamba_config.ModelRegistry.resolve_model_cls",
+            return_value=(model_cls, None),
+        ),
+        pytest.raises(ValueError, match="equal K-block and SSM-row sizes"),
+    ):
+        _run(config)
+
+
+@pytest.mark.parametrize("is_hybrid,layer_types", [(False, None), (True, ["linear_attention", "linear_attention"])])
+def test_pure_ssm_models_skip_contiguous_hybrid_alignment(is_hybrid, layer_types):
+    config = _contiguous_hybrid_config()
+    config.model_config.is_hybrid = is_hybrid
+    config.model_config.hf_text_config.layer_types = layer_types
+
+    with patch("vllm_ascend.patch.platform.patch_mamba_config.ModelRegistry.resolve_model_cls") as resolve:
+        assert not _align_contiguous_hybrid_cache(config)
+
+    resolve.assert_not_called()
+    assert config.cache_config.block_size == 128
+    assert config.cache_config.mamba_page_size_padded == 8192
+
+
+@pytest.mark.parametrize("specialized_cache", ["mla", "mxfp8", "kpool"])
+def test_specialized_hybrid_layout_skips_legacy_alignment(specialized_cache):
+    config = _contiguous_hybrid_config()
+    if specialized_cache == "mla":
+        config.model_config.use_mla = True
+    elif specialized_cache == "mxfp8":
+        config.cache_config.cache_dtype = "mxfp8"
+    else:
+        config.model_config.hf_text_config.index_topk = 2048
+        config.model_config.hf_text_config.index_kpool = 4
+
+    with patch("vllm_ascend.patch.platform.patch_mamba_config.ModelRegistry.resolve_model_cls") as resolve:
+        assert not _align_contiguous_hybrid_cache(config)
+
+    resolve.assert_not_called()
+    assert config.cache_config.block_size == 128
+    assert config.cache_config.mamba_page_size_padded == 8192
 
 
 @pytest.mark.parametrize("cache_dtype", ["fp8", "int8", "auto"])
@@ -225,7 +385,10 @@ def test_backend_alignment_delegates_regular_cache_geometry(use_mla, cache_dtype
     config = _config()
     config.cache_config.cache_dtype = cache_dtype
     config.model_config.use_mla = use_mla
-    config.model_config.hf_text_config = SimpleNamespace(**({"index_kpool": 4} if kpool else {}))
+    config.model_config.hf_text_config = SimpleNamespace(
+        layer_types=["linear_attention", "full_attention"],
+        **({"index_kpool": 4} if kpool else {}),
+    )
     backend = SimpleNamespace()
 
     with patch.object(Platform, "_align_hybrid_block_size") as upstream:

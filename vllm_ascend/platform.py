@@ -399,6 +399,12 @@ class NPUPlatform(Platform):
             HybridAttentionMambaModelConfig.verify_and_update_config(vllm_config)
             return
 
+        from vllm_ascend.patch.platform.patch_mamba_config import _align_contiguous_hybrid_cache
+
+        # Backend block-size selection must not replace the legacy K/SSM
+        # geometry used by non-opted-in hybrid models' contiguous state views.
+        if _align_contiguous_hybrid_cache(vllm_config):
+            return
         super()._align_hybrid_block_size(vllm_config, backend_cls)
 
     @classmethod

@@ -220,6 +220,7 @@ from vllm_ascend.utils import (
     model_uses_kpool_indexer,
     set_potential_max_tokens,
     should_skip_allreduce_across_dp_group,
+    supports_non_contiguous_kv_cache,
     weak_ref_tensor,
     weak_ref_tensors,
 )
@@ -4969,7 +4970,8 @@ class NPUModelRunner(GPUModelRunner):
         ) and any(isinstance(spec, AttentionSpec) for spec in layer_kv_cache_spec.values())
         strided_attention_cache_layers: set[str] = set()
         if (
-            not self.use_dcp
+            supports_non_contiguous_kv_cache(self.vllm_config)
+            and not self.use_dcp
             and not self.use_sparse
             and not self.use_compress
             and not self.sparse_kv_offload_enabled
@@ -5136,6 +5138,7 @@ class NPUModelRunner(GPUModelRunner):
                     "linear_attn" in layer_name
                     or self.hybrid_with_attn_and_mamba
                     or layer_name in strided_attention_cache_layers
+                    or self._is_c8_mxfp_kv_cache(layer_kv_cache_spec[layer_name])
                     or "cache_only_layers" in layer_name
                     or is_hidden_state_cache_spec(layer_kv_cache_spec.get(layer_name))
                 ) and layer_name not in kv_cache_raw_tensors:
@@ -5216,7 +5219,11 @@ class NPUModelRunner(GPUModelRunner):
                             kv_cache_raw_tensors[layer_name_inner] = (
                                 self._allocate_int8_cache_tensor(k_tensor_size, alignment),
                             )
-                elif "attn" in layer_name and layer_name not in kv_cache_raw_tensors and not use_mamba:
+                elif (
+                    ("attn" in layer_name or type(layer_kv_cache_spec[layer_name]) is FullAttentionSpec)
+                    and layer_name not in kv_cache_raw_tensors
+                    and not use_mamba
+                ):
                     # NOTE: We need to init k cache tensor (nope cache tensor in mla) and
                     # v cache tensor (rope cache tensor in mla) separately to support prefill disaggregation,
                     # as it only support the 0-dim of kv_cache is `num_blocks`.
@@ -5275,7 +5282,10 @@ class NPUModelRunner(GPUModelRunner):
                     # private (k, v) so block indices don't collide across layers.
                     for layer_name_inner in allocation_layers:
                         if (
-                            "attn" in layer_name_inner
+                            (
+                                "attn" in layer_name_inner
+                                or type(layer_kv_cache_spec[layer_name_inner]) is FullAttentionSpec
+                            )
                             and "linear_attn" not in layer_name_inner
                             and layer_name_inner not in strided_attention_cache_layers
                             and layer_name_inner not in kv_cache_raw_tensors
@@ -5693,7 +5703,9 @@ class NPUModelRunner(GPUModelRunner):
                         current_kv_cache_spec.head_size,
                     )
                     if (
-                        raw_kv_is_combined
+                        supports_non_contiguous_kv_cache(self.vllm_config)
+                        and type(current_kv_cache_spec) is FullAttentionSpec
+                        and raw_kv_is_combined
                         and len(kv_cache_shape) == 5
                         and kv_cache_shape[0] == 2
                     ):
@@ -5876,6 +5888,11 @@ class NPUModelRunner(GPUModelRunner):
                     )
                     if (
                         self.hybrid_with_attn_and_mamba
+                        and (
+                            supports_non_contiguous_kv_cache(self.vllm_config)
+                            or is_c8_mxfp_kv_quant(self.vllm_config)
+                            or self.model_config.use_mla
+                        )
                         and not uses_same_raw_tensor
                     ):
                         shapes_with_blocks = tuple(
