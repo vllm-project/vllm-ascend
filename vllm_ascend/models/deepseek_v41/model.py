@@ -1065,6 +1065,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         # context, so it keys by the padded token count (the FULL graph bucket).
         self._engram_graph_events = {}
         self._engram_prepare_stream = None
+        self._engram_projection_buffers = None
         self._engram_capture_stream = None
         self._engram_capture_events = None
         self._engram_overlap_enabled = get_ascend_config().multistream_engram_overlap
@@ -1114,6 +1115,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         mask_output_buffer=None,
         mask_ready_event=None,
         valid_token_count=None,
+        projection_buffers=None,
     ):
         """Hash on device with upstream NgramHashState, then look up head shards.
 
@@ -1223,8 +1225,11 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                         output_buffers[layer_id][: values.shape[0]].copy_(values)
                         output_buffers[layer_id][values.shape[0] : output_tokens].zero_()
                         lookups[layer_id] = output_buffers[layer_id]
+                if projection_buffers is not None and layer_id in projection_buffers:
+                    projected = self.layers[layer_id].engram.project(lookups[layer_id][:output_tokens])
+                    projection_buffers[layer_id][:output_tokens].copy_(projected)
                 if ready_events is not None:
-                    # Rows include DP AllToAll, TP head gather and padding.
+                    # The event covers lookup and its optional projection.
                     ready_events[layer_id].record(torch.npu.current_stream())
         else:
             for layer_id, table in zip(config.engram_layer_ids, tables):
@@ -1237,6 +1242,9 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                 else:
                     output_buffers[layer_id][:output_tokens].zero_()
                     lookups[layer_id] = output_buffers[layer_id]
+                if projection_buffers is not None and layer_id in projection_buffers:
+                    projected = self.layers[layer_id].engram.project(lookups[layer_id][:output_tokens])
+                    projection_buffers[layer_id][:output_tokens].copy_(projected)
                 if ready_events is not None:
                     ready_events[layer_id].record(torch.npu.current_stream())
         return lookups, mask if mask_output_buffer is None else mask_output_buffer
@@ -1306,9 +1314,11 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                     mask_output_buffer=mask_buffer,
                     mask_ready_event=mask_ready,
                     valid_token_count=valid_token_count,
+                    projection_buffers=self._engram_projection_buffers,
                 )
             yield {
                 "engram_lookups": buffers,
+                "engram_projections": self._engram_projection_buffers,
                 "engram_mask": mask_buffer,
                 "engram_pending": events,
                 "engram_mask_ready_event": mask_ready,
@@ -1351,6 +1361,15 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                 },
                 torch.zeros(capacity, dtype=torch.bool, device=device),
             )
+            self._engram_projection_buffers = {}
+            for layer in self.config.engram_layer_ids:
+                engram = self.layers[layer].engram
+                if engram is not None and hasattr(engram, "project"):
+                    self._engram_projection_buffers[layer] = torch.zeros(
+                        (capacity, (engram.hc_mult + 1) * engram.dim),
+                        dtype=torch.bfloat16,
+                        device=device,
+                    )
         return self._engram_input_buffers
 
     def _get_engram_external_events(self, key, *, prime):
@@ -1441,6 +1460,8 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                 engram_pending={layer: torch.npu.Event() for layer in self.config.engram_layer_ids},
                 engram_mask_ready_event=torch.npu.Event(),
             )
+        if overlap:
+            graph_inputs["engram_projections"] = self._engram_projection_buffers
         prepare = partial(
             self.prepare_engram,
             input_ids,
@@ -1456,6 +1477,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             output_tokens=output_tokens,
             mask_output_buffer=graph_inputs["engram_mask"],
             mask_ready_event=graph_inputs.get("engram_mask_ready_event"),
+            projection_buffers=graph_inputs.get("engram_projections"),
         )
         if not overlap:
             prepare()
@@ -1480,7 +1502,11 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             ):
                 if isinstance(tensor, torch.Tensor) and tensor.device.type == "npu":
                     tensor.record_stream(stream)
-            for tensor in (*graph_inputs["engram_lookups"].values(), graph_inputs["engram_mask"]):
+            for tensor in (
+                *graph_inputs["engram_lookups"].values(),
+                *graph_inputs.get("engram_projections", {}).values(),
+                graph_inputs["engram_mask"],
+            ):
                 tensor.record_stream(stream)
             with torch.npu.stream(stream):
                 prepare()
@@ -1492,7 +1518,11 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
     def prepare_engram_graph_inputs(self, padded_tokens=None, *, prime=True):
         """Capture fixed-address buffers without CPU history or routing work."""
         if not self.has_engram:
-            return {"engram_lookups": {}, "engram_mask": self.engram_rotation.new_empty(0, dtype=torch.bool)}
+            return {
+                "engram_lookups": {},
+                "engram_projections": {},
+                "engram_mask": self.engram_rotation.new_empty(0, dtype=torch.bool),
+            }
         if padded_tokens is not None and not padded_tokens <= self._engram_max_tokens:
             raise ValueError("Engram token count exceeds the output buffer capacity")
         buffers, mask_buffer = self._get_engram_input_buffers()
@@ -1511,6 +1541,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         intermediate_tensors,
         inputs_embeds=None,
         engram_lookups=None,
+        engram_projections=None,
         engram_mask=None,
         engram_pending=None,
         engram_graph_events=False,
@@ -1585,11 +1616,21 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                     lookup = sp_shard(lookup)
                 lookup = lookup[:n]
                 active_mask = token_mask[:n]
-                hidden_states[:n] = layer.engram(
+                projected_kv = (
+                    None
+                    if engram_projections is None or layer.layer_idx not in engram_projections
+                    else engram_projections[layer.layer_idx][:n]
+                )
+                engram_args = (
                     hidden_states[:n],
                     lookup,
                     active_mask,
                     self.engram_rotation if self.engram_rotated else None,
+                )
+                hidden_states[:n] = (
+                    layer.engram(*engram_args)
+                    if projected_kv is None
+                    else layer.engram(*engram_args, projected_kv=projected_kv)
                 )
             hidden_states, pre_mix = layer(positions, hidden_states, pre_mix, None, input_ids=input_ids)
         assert last_layer is not None, "Hyper-connection collapse requires at least one decoder layer"
@@ -1702,6 +1743,7 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
         intermediate_tensors=None,
         inputs_embeds=None,
         engram_lookups=None,
+        engram_projections=None,
         engram_mask=None,
         engram_pending=None,
         engram_graph_events=False,
@@ -1728,6 +1770,7 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
             intermediate_tensors,
             inputs_embeds,
             engram_lookups=engram_lookups,
+            engram_projections=engram_projections,
             engram_mask=engram_mask,
             engram_pending=engram_pending,
             engram_graph_events=engram_graph_events,
