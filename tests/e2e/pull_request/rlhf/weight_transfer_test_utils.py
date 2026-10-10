@@ -50,6 +50,10 @@ class WeightUpdateModelCase:
     the case so the report says which prerequisite is missing.
     """
 
+    max_model_len: int = 1024
+    max_num_seqs: int | None = None
+    max_num_batched_tokens: int | None = None
+
     def server_args(self) -> list[str]:
         # Run the worker out-of-process. With a single-process executor the
         # worker shares the engine core's ``VllmConfig``, and ``EngineCoreProc``
@@ -446,7 +450,7 @@ class FixedRandomWeightSource(WeightSource):
         save_file(state, str(target / "model.safetensors"), metadata={"format": "pt"})
 
 
-def packed_buffer_size_for(source: FixedRandomWeightSource) -> int:
+def packed_buffer_size_for(source: WeightSource) -> int:
     """Size a packed transfer buffer so every single tensor fits.
 
     Both engines default to 1 GiB, which is smaller than the largest tensor of
@@ -490,7 +494,7 @@ def _common_serve_args(
         # very same allocation pool; the reference itself never sleeps.
         "--enable-sleep-mode",
         "--max-model-len",
-        "1024",
+        str(case.max_model_len),
         "--gpu-memory-utilization",
         str(gpu_memory_utilization),
         "--tensor-parallel-size",
@@ -501,6 +505,12 @@ def _common_serve_args(
         "--additional-config",
         '{"weight_nz_mode": 0}',
         *case.server_args(),
+        *(["--max-num-seqs", str(case.max_num_seqs)] if case.max_num_seqs is not None else []),
+        *(
+            ["--max-num-batched-tokens", str(case.max_num_batched_tokens)]
+            if case.max_num_batched_tokens is not None
+            else []
+        ),
     ]
 
 
@@ -555,9 +565,13 @@ def reference_serve_args(
 
 
 @contextlib.contextmanager
-def fixed_startup_checkpoint(source: FixedRandomWeightSource) -> Iterator[str]:
+def fixed_startup_checkpoint(source: WeightSource) -> Iterator[str]:
     """Expose the source's payload as a throwaway startup-load checkpoint."""
-    directory = tempfile.mkdtemp(prefix=f"fixed-startup-{source.case_id}-")
+    checkpoint = getattr(source, "checkpoint_directory", None)
+    if isinstance(checkpoint, (str, Path)):
+        yield str(checkpoint)
+        return
+    directory = tempfile.mkdtemp(prefix=f"fixed-startup-{getattr(source, 'case_id', 'weights')}-")
     try:
         source.write_checkpoint(directory)
         yield directory
@@ -607,7 +621,7 @@ _REFERENCE_SIGNATURES: dict[tuple[str, float, int], list[tuple[str, tuple[float,
 
 
 def reference_signature(
-    source: FixedRandomWeightSource,
+    source: WeightSource,
     case: WeightUpdateModelCase,
     *,
     port: int,
@@ -616,6 +630,7 @@ def reference_signature(
     device_index: int,
     env_dict: dict[str, str] | None = None,
     server_host: str = "127.0.0.1",
+    prompts: list[str | list[int]] | None = None,
 ) -> list[tuple[str, tuple[float, ...]]]:
     """Signature of a server that loaded the payload at normal startup.
 
@@ -628,7 +643,9 @@ def reference_signature(
     from tests.e2e.conftest import RemoteOpenAIServer
 
     cache_key = (case.id, gpu_memory_utilization, tensor_parallel_size)
-    cached = _REFERENCE_SIGNATURES.get(cache_key)
+    direct_checkpoint = isinstance(getattr(source, "checkpoint_directory", None), (str, Path))
+    use_cache = not direct_checkpoint and prompts is None
+    cached = _REFERENCE_SIGNATURES.get(cache_key) if use_cache else None
     if cached is not None:
         return cached
 
@@ -649,9 +666,16 @@ def reference_signature(
             auto_port=False,
         ) as server,
     ):
-        signature = generation_signature(server.get_client(), case.model)
+        if direct_checkpoint:
+            from tests.e2e.pull_request.rlhf.qwen38_weight_transfer_utils import worker_rpc
 
-    _REFERENCE_SIGNATURES[cache_key] = signature
+            worker_rpc(server, "install_no_ple_probe")
+        signature = generation_signature(server.get_client(), case.model, prompts=prompts)
+        if direct_checkpoint:
+            worker_rpc(server, "check_no_ple_execution")
+
+    if use_cache:
+        _REFERENCE_SIGNATURES[cache_key] = signature
     return signature
 
 
@@ -661,10 +685,14 @@ PROMPTS = [
 ]
 
 
-def generation_signature(client, model: str) -> list[tuple[str, tuple[float, ...]]]:
+def generation_signature(
+    client, model: str, *, prompts: list[str | list[int]] | None = None
+) -> list[tuple[str, tuple[float, ...]]]:
     """Capture deterministic text and logprobs for exact reload comparison."""
     signature = []
-    for prompt in PROMPTS:
+    if prompts is None:
+        prompts = list(PROMPTS)
+    for prompt in prompts:
         response = client.completions.create(
             model=model,
             prompt=prompt,
@@ -676,6 +704,9 @@ def generation_signature(client, model: str) -> list[tuple[str, tuple[float, ...
         choice = response.choices[0]
         token_logprobs = tuple(choice.logprobs.token_logprobs or ())
         assert token_logprobs, f"{model}: generation returned no token logprobs"
+        assert all(value is not None and math.isfinite(value) for value in token_logprobs), (
+            f"{model}: generation returned invalid token logprobs"
+        )
         signature.append((choice.text, token_logprobs))
     return signature
 

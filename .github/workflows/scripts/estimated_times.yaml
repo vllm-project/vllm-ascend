@@ -9,6 +9,9 @@
 # do not trigger the full CI suite.
 
 estimated_times:
+  # Provisional budgets for the unpublished no-PLE profile; replace after A3 measurement.
+  tests/e2e/pull_request/two_card/rlhf/state_transitions/test_qwen38_no_ple_hccl_weight_transfer.py: 2400
+  tests/e2e/pull_request/two_card/rlhf/state_transitions/test_qwen38_no_ple_npu_ipc_weight_transfer.py: 2400
   tests/e2e/pull_request/four_card/model_runner_v2/test_kvpp_pp.py: 300
   tests/e2e/pull_request/four_card/test_kvpp_pd.py: 230
   tests/e2e/pull_request/two_card/test_kvpp.py: 290
