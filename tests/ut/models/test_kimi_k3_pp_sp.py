@@ -16,7 +16,20 @@ import pytest
 import torch
 from torch import nn
 
+from vllm_ascend.utils import vllm_version_is
+
 ROOT = Path(__file__).resolve().parents[3]
+
+
+def _keep_definition(item, allowed):
+    if getattr(item, "name", None) in allowed:
+        return True
+    if isinstance(item, ast.If):
+        # Version gates wrap the production method in an if/else at class scope;
+        # keep the whole gate so exec selects the branch matching the installed
+        # vLLM (requires ``vllm_version_is`` in the target namespace).
+        return any(_keep_definition(stmt, allowed) for stmt in (*item.body, *item.orelse))
+    return False
 
 
 def load_definitions(path, names, namespace, *, bases=None, methods=None):
@@ -27,7 +40,7 @@ def load_definitions(path, names, namespace, *, bases=None, methods=None):
         if isinstance(node, ast.ClassDef):
             node.bases = [ast.Name(id=bases[node.name], ctx=ast.Load())]
             node.decorator_list = []
-            node.body = [item for item in node.body if getattr(item, "name", None) in methods[node.name]]
+            node.body = [item for item in node.body if _keep_definition(item, methods[node.name])]
     module = ast.fix_missing_locations(ast.Module(body=nodes, type_ignores=[]))
     exec(compile(module, str(ROOT / path), "exec", flags=__future__.annotations.compiler_flag), namespace)
 
@@ -214,6 +227,7 @@ def runtime(monkeypatch):
         "get_pp_group": lambda: context.pp,
         "get_tensor_model_parallel_world_size": lambda: context.tp,
         "get_tensor_model_parallel_rank": lambda: context.rank,
+        "vllm_version_is": vllm_version_is,
     }
     # Transport and sharding use the repository implementations, including
     # multi-dimensional residuals and zero-length token tensors.

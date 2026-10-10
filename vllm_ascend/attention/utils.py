@@ -21,10 +21,26 @@ from vllm_ascend.utils import (
     _is_glm_model,
     get_ascend_config,
     is_pd_decode_recompute_scheduler_enabled,
+    vllm_version_is,
 )
 
 SFA_QSFA_TILE_SIZE = 128
 MLAPO_MAX_SUPPORTED_TOKENS = 1024
+
+
+def supports_kernel_block_spec(func: Callable[[], list[int]]) -> staticmethod:
+    """Keep get_supported_kernel_block_sizes compatible across vLLM versions.
+
+    vLLM #53175 added an optional ``kv_cache_spec`` argument on main; the
+    v0.30.0 release still calls it with no arguments.
+    """
+    if vllm_version_is("0.30.0"):
+        return staticmethod(func)
+
+    def _accept_kv_cache_spec(kv_cache_spec=None):
+        return func()
+
+    return staticmethod(_accept_kv_cache_spec)
 
 
 class PreprocessType(enum.Enum):

@@ -192,6 +192,12 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 if isinstance(manager, MambaManager):
                     manager.drop_eagle_checkpoint_block = True
 
+        # Upstream KVCacheCoordinator.__init__ exposes the per-group resolved
+        # block sizes; SimpleCPUOffloadScheduler reads them. This subclass
+        # builds the managers itself instead of calling super().__init__, so
+        # mirror the attribute here.
+        self.group_block_sizes = tuple(manager.block_size for manager in self.single_type_managers)
+
         # hash_block_size: the block size used to compute block hashes.
         # The actual block size usually equals hash_block_size, but in cases where
         # different KV cache groups have different block sizes, the actual block size
