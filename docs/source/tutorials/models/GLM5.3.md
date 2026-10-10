@@ -130,19 +130,13 @@ If you don't want to use the docker image as above, you can also build all from 
 
 ## 5 Online Service Deployment
 
-The multi-node co-located examples are organized by context window size (below 1M) and hardware (Atlas 800 A3 / A2). Sections 5.2 and 5.3 add A3 PP2 Prefill-Decode disaggregation with and without MemCache KV pooling. Version requirements and key parameters are described with each scenario.
+### 5.1 Multi-node Deployment
 
-!!! note
-
-    Do not set `enable_thinking: false` / `thinking: false` for GLM-5.3, otherwise the output quality may degrade.
+If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../getting_started/installation.md#installation-multi-node-interconnect).
 
 !!! warning
 
     - The scripts in Section 5.1 were tested on **v0.23.0**. Parameters may have changed in the main branch. For Section 5.2, follow the version requirements in that section.
-
-### 5.1 Multi-node Deployment
-
-If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../getting_started/installation.md#installation-multi-node-interconnect).
 
 Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md).
 
