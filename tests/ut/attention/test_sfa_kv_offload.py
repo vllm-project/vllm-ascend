@@ -159,9 +159,12 @@ def test_mtp_rewrite_invalidates_membership_slot_map():
         req_ids_tensor=torch.tensor([7], dtype=torch.int64),
     )
 
-    with patch(
-        "vllm_ascend.attention.sfa_kv_offload.get_forward_context",
-        return_value=SimpleNamespace(capturing=False),
+    with (
+        patch(
+            "vllm_ascend.attention.sfa_kv_offload.get_forward_context",
+            return_value=SimpleNamespace(capturing=False),
+        ),
+        patch("vllm_ascend.attention.sfa_kv_offload._EXTRA_CTX", SimpleNamespace(capturing=False)),
     ):
         impl._invalidate_fused_overlap_selection_rows(
             selection_status,
@@ -258,6 +261,7 @@ def test_fused_overlap_external_plan_passes_raw_topk_and_full_selection_state():
             "vllm_ascend.attention.sfa_kv_offload.get_forward_context",
             return_value=SimpleNamespace(capturing=False),
         ),
+        patch("vllm_ascend.attention.sfa_kv_offload._EXTRA_CTX", SimpleNamespace(capturing=False)),
     ):
         output = impl._execute_fused_overlap_offload_decode(
             ql_nope,
@@ -332,9 +336,12 @@ def test_fused_overlap_common_inputs_are_reused_only_within_one_forward():
     second_forward = SimpleNamespace(capturing=False)
     current_forward = [first_forward]
 
-    with patch(
-        "vllm_ascend.attention.sfa_kv_offload.get_forward_context",
-        side_effect=lambda: current_forward[0],
+    with (
+        patch(
+            "vllm_ascend.attention.sfa_kv_offload.get_forward_context",
+            side_effect=lambda: current_forward[0],
+        ),
+        patch("vllm_ascend.attention.sfa_kv_offload._EXTRA_CTX", SimpleNamespace(capturing=False)),
     ):
         first = impl._prepare_fused_overlap_decode_common_inputs(
             metadata,

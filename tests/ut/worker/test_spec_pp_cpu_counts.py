@@ -58,7 +58,11 @@ def runner_cls(mamba_state_cls):
             self.events.append("copy")
 
     namespace = {"Parent": Parent, "MambaHybridModelState": mamba_state_cls}
-    module = ast.fix_missing_locations(ast.Module(body=[cls], type_ignores=[]))
+    utils = ast.parse((source.parents[2] / "utils.py").read_text())
+    predicate = next(
+        node for node in utils.body if isinstance(node, ast.FunctionDef) and node.name == "is_deepseek_v41"
+    )
+    module = ast.fix_missing_locations(ast.Module(body=[predicate, cls], type_ignores=[]))
     exec(compile(module, str(source), "exec", flags=__future__.annotations.compiler_flag), namespace)
     return namespace["NPUModelRunner"]
 
@@ -85,7 +89,9 @@ def test_exact_counts_after_rejection_or_chunk(
     runner.is_last_pp_rank = False
     runner.model_state = object()
     runner.num_speculative_steps = steps
-    runner.model_config = SimpleNamespace(architecture=architecture)
+    runner.model_config = SimpleNamespace(
+        architecture=architecture, hf_config=SimpleNamespace(architectures=[architecture])
+    )
     runner.__init__(None, None)
     assert runner.sync_spec_pp_cpu_counts == (enabled and use_pp and steps > 0)
     runner.speculator = object() if owns_speculator else None

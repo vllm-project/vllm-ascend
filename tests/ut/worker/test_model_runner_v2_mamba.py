@@ -889,7 +889,7 @@ def test_init_model_state_uses_override_then_default():
     ):
         state = init_asecnd_model_state(
             vllm_config,
-            MagicMock(spec=["forward"]),
+            MagicMock(spec=["forward", "modules"]),
             encoder_cache,
             device,
         )

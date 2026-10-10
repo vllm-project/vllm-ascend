@@ -42,6 +42,7 @@
 #include "moe/moe_gating_top_k/moe_gating_top_k_torch_adpt.h"
 #include "attention/sparse_flash_attention/sparse_flash_attention_torch_adpt.h"
 #include "attention/sparse_flash_mla/sparse_flash_mla_torch_adpt.h"
+#include "attention/kv_compress_epilog_v2/kv_compress_epilog_v2_torch_adpt.h"
 #include "attention/quant_lightning_indexer_v2/quant_lightning_indexer_v2_torch_adpt.h"
 #include "attention/kv_quant_sparse_flash_attention_vllm/kv_quant_sparse_flash_attention_vllm_torch_adpt.h"
 #include "attention/fused_sparse_attention_overlap/fused_sparse_attention_overlap_torch_adpt.h"
@@ -3480,6 +3481,14 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         ") -> ()"
     );
     ops.impl("kv_compress_epilog", torch::kPrivateUse1, &vllm_ascend::kv_compress_epilog_npu);
+
+    ops.def(
+        "kv_compress_epilog_v2(Tensor(a!) cache, Tensor x, Tensor slot_mapping, *, "
+        "int quant_group_size=32, str quant_mode='mxfp8_bf16', "
+        "bool round_scale=True, float x_scale=1.0) -> ()"
+    );
+    ops.impl("kv_compress_epilog_v2", torch::kPrivateUse1,
+             &vllm_ascend::kv_compress_v2::KvCompressEpilogV2Npu);
 
     ops.def(
         "npu_kv_quant_sparse_attn_sharedkv("

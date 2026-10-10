@@ -3,9 +3,6 @@
 # Based on the mixed-deployment configuration from upstream PR #14923.
 # Nightly: retain the MRV1 full GPQA and 16K prefix0 benchmark suite.
 # Local runs: set cluster_hosts to the four node IPs in rank order.
-# After startup, run the output check against Node 0:
-# SERVICE_URL=http://<node0-ip>:8080 bash tests/e2e/cases/models/kimi_k3_mrv2_curl_smoke.sh
-
 test_name: "Kimi-K3-MRV2-A3"
 model: "Eco-Tech/Kimi-K3-w4a8"
 num_nodes: 4

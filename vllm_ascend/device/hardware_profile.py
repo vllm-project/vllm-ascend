@@ -80,6 +80,12 @@ class HardwareCapability(Enum):
     DSA_C128_STATE_SMALL_BLOCK_SIZES = auto()
     # Use the DeepSeek-V4/DSA compressed-KV-cache layout and compressor/indexer flow.
     DSV4_COMPRESSED_CACHE = auto()
+    # Use the DeepSeek-V4.1 mixed-quant cache and packaged QLI/QSMLA ABI.
+    DSV41_PACKED_CACHE = auto()
+    # Triton RMS/dot/gate/residual fusion for unrotated Engram inputs.
+    ENGRAM_UNROTATED_GATE = auto()
+    # Decode native FP8 codes and E8M0 group scales in Engram table lookups.
+    ENGRAM_MXFP8 = auto()
     # Enable dynamic-MX norm fusion and the associated ``wo_a`` weight-layout contract.
     DYNAMIC_MX_QUANT_FUSION = auto()
     # Select DynamicMxQuantV3 ``scale_alg=1`` for model paths that require it.
@@ -138,6 +144,8 @@ class HardwareCapability(Enum):
     PAGED_ATTENTION = auto()
     # Inspect PCIe topology to distinguish 310P Root-Complex and endpoint deployments.
     RC_DEVICE_DISCOVERY = auto()
+    # Fused RMSNorm+cast is available for the A3/CANN 9.1 path only.
+    RMS_NORM_CAST = auto()
     # Import and register the compiled vLLM-Ascend custom-op library at runtime.
     # This is independent of whether custom ops are enabled by default.
     RUNTIME_CUSTOM_OPS = auto()
@@ -270,6 +278,7 @@ _STANDARD_CAPABILITIES = frozenset(
 _A3_CAPABILITIES = _STANDARD_CAPABILITIES | {
     HardwareCapability.GMM_DEQUANT_SITU_QUANT,
     HardwareCapability.MC2_FULLMESH_V2_COMM,
+    HardwareCapability.RMS_NORM_CAST,
 }
 _DEFAULT_WORKER_CLS = "vllm_ascend.worker.worker.NPUWorker"
 _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyType(
@@ -348,6 +357,9 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.CLUSTER_CPU_TOPOLOGY,
                     HardwareCapability.DSA_C128_STATE_SMALL_BLOCK_SIZES,
                     HardwareCapability.DSV4_COMPRESSED_CACHE,
+                    HardwareCapability.DSV41_PACKED_CACHE,
+                    HardwareCapability.ENGRAM_UNROTATED_GATE,
+                    HardwareCapability.ENGRAM_MXFP8,
                     HardwareCapability.DYNAMIC_MX_QUANT_FUSION,
                     HardwareCapability.DYNAMIC_MX_QUANT_SCALE_ALG_ONE,
                     HardwareCapability.FLA_GDN_PREFILL,
@@ -361,6 +373,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
                     HardwareCapability.MOE_DISPATCH_SHARED_EXPERT_ARGS,
                     HardwareCapability.MM_REDUCE_SCATTER_AI_CPU_INFERENCE,
+                    HardwareCapability.MOE_GATING_TOP_K_HASH_VISION,
                     HardwareCapability.NPUGRAPH_EX,
                     HardwareCapability.STANDARD_MAMBA_PATCH,
                     HardwareCapability.STANDARD_WORKER_PATCHES,

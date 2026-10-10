@@ -1,0 +1,72 @@
+# DeepSeek-V4-Flash Single Node Hybrid Deployment Performance/Accuracy Testing
+test_cases:
+  - name: "DeepSeek-V4-Flash-w8a8-sleep-wakeup"
+    model: "Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp"
+    envs:
+      PYTHONHASHSEED: "0"
+      OMP_PROC_BIND: "false"
+      OMP_NUM_THREADS: "10"
+      LD_PRELOAD: "/usr/lib/aarch64-linux-gnu/libjemalloc.so.2"
+      HCCL_BUFFSIZE: "1024"
+      TASK_QUEUE_ENABLE: "1"
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      VLLM_PREFIX_CACHE_RETENTION_INTERVAL: "4096"
+      SERVER_PORT: "8900"
+      VLLM_SERVER_DEV_MODE: "1"
+    server_cmd:
+      - "--data-parallel-size"
+      - "4"
+      - "--tensor-parallel-size"
+      - "4"
+      - "--enable-expert-parallel"
+      - "--enable-sleep-mode"
+      - "--port"
+      - "$SERVER_PORT"
+      - "--max-model-len"
+      - "1048576"
+      - "--max-num-batched-tokens"
+      - "10240"
+      - "--max-num-seqs"
+      - "64"
+      - "--gpu-memory-utilization"
+      - "0.9"
+      - "--block-size"
+      - "32"
+      - "--quantization"
+      - "ascend"
+      - "--tokenizer-mode"
+      - "deepseek_v4"
+      - "--tool-call-parser"
+      - "deepseek_v4"
+      - "--enable-auto-tool-choice"
+      - "--reasoning-parser"
+      - "deepseek_v4"
+      - "--api-server-count"
+      - "1"
+      - "--attention_config.indexer_kv_dtype"
+      - "int8"
+      - "--model-loader-extra-config"
+      - '{"enable_multithread_load": true, "num_threads": 128}'
+      - "--speculative-config"
+      - '{"num_speculative_tokens": 1,"method": "mtp","enforce_eager": true}'
+      - "--compilation-config"
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      - "--additional-config"
+      - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"rl_config": {"enabled": true, "sleep_mode_extra_cleanup": true}}'
+    benchmarks:
+      sleep_and_wakeup:
+        case_type: curl_cmd
+        cmds:
+          - 'curl -f -X POST "http://127.0.0.1:${SERVER_PORT}/sleep?level=1"'
+          - 'curl -f http://127.0.0.1:${SERVER_PORT}/is_sleeping'
+          - 'curl -f -X POST "http://127.0.0.1:${SERVER_PORT}/wake_up"'
+          - 'curl -f http://127.0.0.1:${SERVER_PORT}/is_sleeping'
+      acc:
+        case_type: accuracy
+        dataset_path: vllm-ascend/gsm8k
+        request_conf: vllm_api_general_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
+        max_out_len: 32768
+        batch_size: 32
+        baseline: 100
+        threshold: 20
