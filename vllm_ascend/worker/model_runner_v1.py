@@ -4979,6 +4979,7 @@ class NPUModelRunner(GPUModelRunner):
         self.hybrid_with_attn_and_mamba = any(
             isinstance(spec, MambaSpec) for spec in layer_kv_cache_spec.values()
         ) and any(isinstance(spec, AttentionSpec) for spec in layer_kv_cache_spec.values())
+        contiguous_attention_cache_layers: set[str] = set()
         strided_attention_cache_layers: set[str] = set()
         if (
             not self.use_dcp
@@ -5002,6 +5003,22 @@ class NPUModelRunner(GPUModelRunner):
                 and not layer_backends[layer_name].is_sparse()
                 and not requires_contiguous_pa_kv_cache(attn_layers.get(layer_name), self.vllm_config, spec)
             }
+
+        # Restore separate K/V for unpadded GQA layers, including layers already
+        # using contiguous PA/DCP/XLite paths, without changing auxiliary caches.
+        model_config = getattr(self, "model_config", None)
+        if (
+            getattr(model_config, "is_hybrid", None) is False
+            and not self.hybrid_with_attn_and_mamba
+            and getattr(model_config, "use_mla", None) is False
+            and not is_c8_mxfp_kv_quant(self.vllm_config)
+        ):
+            contiguous_attention_cache_layers = {
+                layer_name
+                for layer_name, spec in layer_kv_cache_spec.items()
+                if type(spec) is FullAttentionSpec and spec.page_size_bytes == spec.real_page_size_bytes
+            }
+            strided_attention_cache_layers -= contiguous_attention_cache_layers
 
         # GLM-Next emits one descriptor for each physical cache slot. Layers
         # listed by a descriptor deliberately alias that slot even when they
@@ -5228,7 +5245,11 @@ class NPUModelRunner(GPUModelRunner):
                             kv_cache_raw_tensors[layer_name_inner] = (
                                 self._allocate_int8_cache_tensor(k_tensor_size, alignment),
                             )
-                elif "attn" in layer_name and layer_name not in kv_cache_raw_tensors and not use_mamba:
+                elif (
+                    (layer_name in contiguous_attention_cache_layers or "attn" in layer_name)
+                    and layer_name not in kv_cache_raw_tensors
+                    and not use_mamba
+                ):
                     # NOTE: We need to init k cache tensor (nope cache tensor in mla) and
                     # v cache tensor (rope cache tensor in mla) separately to support prefill disaggregation,
                     # as it only support the 0-dim of kv_cache is `num_blocks`.
@@ -5287,7 +5308,7 @@ class NPUModelRunner(GPUModelRunner):
                     # private (k, v) so block indices don't collide across layers.
                     for layer_name_inner in allocation_layers:
                         if (
-                            "attn" in layer_name_inner
+                            (layer_name_inner in contiguous_attention_cache_layers or "attn" in layer_name_inner)
                             and "linear_attn" not in layer_name_inner
                             and layer_name_inner not in strided_attention_cache_layers
                             and layer_name_inner not in kv_cache_raw_tensors
