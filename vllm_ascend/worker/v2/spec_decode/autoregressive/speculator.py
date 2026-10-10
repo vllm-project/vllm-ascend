@@ -225,6 +225,9 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
             return attn_metadata, slot_mappings
 
         assert isinstance(input_batch, AscendInputBatch)
+        num_reqs = input_batch.num_reqs
+        query_start_loc_np = input_batch.query_start_loc_np
+        seq_lens_cpu_upper_bound = input_batch.seq_lens_cpu_upper_bound
         if input_batch.is_dummy:
             # Replicated drafts need local dummy slots instead of target PCP slots.
             self.block_tables.get_dummy_block_tables(num_reqs_padded)
@@ -241,9 +244,8 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
                 input_batch.positions,
                 num_tokens_padded=num_tokens_padded,
             )
-            # TODO: Remove this early return once FIA supports padded Query tensors
-            # whose token count exceeds the cumulative query length. Keep the
-            # mapping refresh above when unifying metadata construction.
+            # Only replicated targets can reuse FULL graph metadata. Sharded
+            # targets continue through the global draft metadata builder below.
             if cudagraph_runtime_mode == CUDAGraphMode.FULL and self.attn_architecture in ("MLA", "GQA"):
                 pcp_manager = getattr(self, "pcp_manager", None)
                 if pcp_manager is None or not pcp_manager.is_decode_sharded:
@@ -252,21 +254,18 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
                 # The replicated draft graph needs the global query width,
                 # including dummy requests which own its graph padding.
                 query_width = num_tokens_padded // num_reqs_padded
-                query_start_loc_np = np.arange(num_reqs_padded + 1, dtype=np.int32) * query_width
-                seq_lens_cpu = torch.zeros_like(input_batch.seq_lens_cpu_upper_bound[:num_reqs_padded])
-                seq_lens_cpu[: input_batch.num_reqs].copy_(input_batch.seq_lens_cpu_upper_bound[: input_batch.num_reqs])
-                attn_metadata = self._build_attn_metadata(
-                    num_reqs=num_reqs_padded,
-                    batch_desc=BatchExecutionDescriptor(
-                        cg_mode=cudagraph_runtime_mode,
-                        num_tokens=num_tokens_padded,
-                        num_reqs=num_reqs_padded,
-                    ),
-                    query_start_loc_np=query_start_loc_np,
-                    seq_lens_cpu_upper_bound=seq_lens_cpu,
-                    step=0,
+                query_start_loc_np = np.empty(num_reqs_padded + 1, dtype=np.int32)
+                query_start_loc_np[: input_batch.num_reqs + 1] = input_batch.query_start_loc_np[
+                    : input_batch.num_reqs + 1
+                ]
+                query_start_loc_np[input_batch.num_reqs + 1 :] = query_start_loc_np[input_batch.num_reqs] + (
+                    np.arange(1, num_reqs_padded - input_batch.num_reqs + 1, dtype=np.int32) * query_width
                 )
-                return attn_metadata, build_slot_mappings_by_layer(slot_mappings_tensor, self.kv_cache_config)
+                assert int(query_start_loc_np[-1]) == num_tokens_padded
+                seq_lens_cpu = input_batch.seq_lens_cpu_upper_bound.new_zeros(num_reqs_padded)
+                seq_lens_cpu[: input_batch.num_reqs].copy_(input_batch.seq_lens_cpu_upper_bound[: input_batch.num_reqs])
+                num_reqs = num_reqs_padded
+                seq_lens_cpu_upper_bound = seq_lens_cpu
 
         slot_mappings = build_slot_mappings_by_layer(
             slot_mappings_tensor,
@@ -275,14 +274,14 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         # This is draft prefill, not the later one-token-per-request decode.
         # Query lengths may differ, so do not use _build_uniform_attn_metadata.
         attn_metadata = self._build_attn_metadata(
-            num_reqs=input_batch.num_reqs,
+            num_reqs=num_reqs,
             batch_desc=BatchExecutionDescriptor(
                 cg_mode=cudagraph_runtime_mode,
                 num_tokens=num_tokens_padded,
                 num_reqs=num_reqs_padded,
             ),
-            query_start_loc_np=input_batch.query_start_loc_np,
-            seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound,
+            query_start_loc_np=query_start_loc_np,
+            seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             step=0,
         )
         return attn_metadata, slot_mappings
