@@ -181,7 +181,7 @@ Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md
     # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-w8a8c8 \
         --host 0.0.0.0 \
-        --port 8077 \
+        --port 8000 \
         --safetensors-load-strategy prefetch \
         --api-server-count 1 \
         --data-parallel-size 8 \
@@ -237,7 +237,7 @@ Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md
     # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-w8a8c8 \
         --host 0.0.0.0 \
-        --port 8077 \
+        --port 8000 \
         --headless \
         --data-parallel-size 8 \
         --data-parallel-start-rank 4 \
@@ -304,7 +304,7 @@ Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md
     # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-w8a8c8 \
         --host 0.0.0.0 \
-        --port 8077 \
+        --port 8000 \
         --max-model-len 135000 \
         --data-parallel-size 4 \
         --data-parallel-size-local 1 \
@@ -366,7 +366,7 @@ Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md
     # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-w8a8c8 \
         --host 0.0.0.0 \
-        --port 8077 \
+        --port 8000 \
         --headless \
         --max-model-len 135000 \
         --data-parallel-size 4 \
@@ -437,7 +437,7 @@ Section 5.3 adds MemCache KV pooling to the same deployment.
 
 Each container exposes devices 0-15. P0 exposes the only Prefill API;
 P1 runs the second PP stage without an API server. Decode ranks 0-7 run
-on D0 and ranks 8-15 on D1, with API ports 9900-9907 on each node.
+on D0 and ranks 8-15 on D1, with API ports 8000-8007 on each node.
 
 !!! warning "Version requirements"
 
@@ -456,7 +456,7 @@ on D0 and ranks 8-15 on D1, with API ports 9900-9907 on each node.
    Set `NIC_NAME="<NETWORK_INTERFACE>"` to its matching interface and
    `MODEL_PATH="<YOUR_MODEL_PATH>"` to its model weight directory.
 3. Reserve the PP master port 7060, Decode DP RPC port 16600, API ports,
-   proxy port 8081, and the topology-derived Mooncake transfer/handshake ports.
+   proxy port 8000, and the topology-derived Mooncake transfer/handshake ports.
    Prefill and Decode run on separate node groups.
 4. Keep the 78-layer PP partition `42,36` consistent in the Prefill
    environment and both roles' connector topology. Both roles explicitly
@@ -494,7 +494,7 @@ Before you start, please
         parser.add_argument("--dp-rank-start", type=int, required=True)
         parser.add_argument("--dp-address", required=True)
         parser.add_argument("--dp-rpc-port", type=int, default=16600)
-        parser.add_argument("--vllm-start-port", type=int, default=9900)
+        parser.add_argument("--vllm-start-port", type=int, default=8000)
         parser.add_argument("--script", default="./run_dp_template.sh")
         args = parser.parse_args()
         if min(args.dp_size, args.tp_size, args.dp_size_local) <= 0:
@@ -561,7 +561,7 @@ Before you start, please
 
         exec vllm serve "${MODEL_PATH}" \
             --host 0.0.0.0 \
-            --port 8077 \
+            --port 8000 \
             --tensor-parallel-size 16 \
             --enable-expert-parallel \
             --pipeline-parallel-size 2 \
@@ -649,7 +649,7 @@ Before you start, please
 
         exec vllm serve "${MODEL_PATH}" \
             --host 0.0.0.0 \
-            --port 8077 \
+            --port 8000 \
             --tensor-parallel-size 16 \
             --enable-expert-parallel \
             --pipeline-parallel-size 2 \
@@ -878,14 +878,14 @@ Once the preparation is done, you can start the server with the following comman
 
     ```shell
     D0_IP="<DECODE_NODE0_IP>"
-    python launch_online_dp.py --dp-size 16 --tp-size 2 --dp-size-local 8 --dp-rank-start 0 --dp-address "$D0_IP" --dp-rpc-port 16600 --vllm-start-port 9900
+    python launch_online_dp.py --dp-size 16 --tp-size 2 --dp-size-local 8 --dp-rank-start 0 --dp-address "$D0_IP" --dp-rpc-port 16600 --vllm-start-port 8000
     ```
 
 4. Decode node 1
 
     ```shell
     D0_IP="<DECODE_NODE0_IP>"
-    python launch_online_dp.py --dp-size 16 --tp-size 2 --dp-size-local 8 --dp-rank-start 8 --dp-address "$D0_IP" --dp-rpc-port 16600 --vllm-start-port 9900
+    python launch_online_dp.py --dp-size 16 --tp-size 2 --dp-size-local 8 --dp-rank-start 8 --dp-address "$D0_IP" --dp-rpc-port 16600 --vllm-start-port 8000
     ```
 
 #### 5.2.4 Start the Proxy
@@ -895,11 +895,14 @@ Run the four commands in Section 5.2.3 in separate terminals. Keep the
 master processes running while the other nodes join; start both nodes of
 each group before waiting for the group to become healthy.
 
-After the Prefill API on P0:8077 and all sixteen Decode APIs answer
+After the Prefill API on P0:8000 and all sixteen Decode APIs answer
 `curl http://<node_ip>:<port>/v1/models`, start the
 [PD load-balancing proxy](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
-from the matching checkout. Register P0 once and all sixteen Decode
-endpoints. P1 is not a separate Prefill API endpoint.
+from the matching checkout on a separate host that can reach all P/D
+API endpoints. The proxy listens on port 8000; using a separate host
+avoids a port conflict with P0:8000 and the Decode APIs on 8000-8007.
+Register P0 once and all sixteen Decode endpoints. P1 is not a separate
+Prefill API endpoint.
 
 ```shell
 P0_IP="<P0_IP>"
@@ -907,14 +910,14 @@ D0_IP="<D0_IP>"
 D1_IP="<D1_IP>"
 
 python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
-    --host 0.0.0.0 --port 8081 \
-    --prefiller-hosts "$P0_IP" --prefiller-ports 8077 \
+    --host 0.0.0.0 --port 8000 \
+    --prefiller-hosts "$P0_IP" --prefiller-ports 8000 \
     --decoder-hosts "$D0_IP" "$D0_IP" "$D0_IP" "$D0_IP" \
         "$D0_IP" "$D0_IP" "$D0_IP" "$D0_IP" \
         "$D1_IP" "$D1_IP" "$D1_IP" "$D1_IP" \
         "$D1_IP" "$D1_IP" "$D1_IP" "$D1_IP" \
-    --decoder-ports 9900 9901 9902 9903 9904 9905 9906 9907 \
-        9900 9901 9902 9903 9904 9905 9906 9907
+    --decoder-ports 8000 8001 8002 8003 8004 8005 8006 8007 \
+        8000 8001 8002 8003 8004 8005 8006 8007
 ```
 
 Key parameters:
@@ -1432,14 +1435,14 @@ Once the preparation is done, you can start the server with the following comman
 
     ```shell
     D0_IP="<DECODE_NODE0_IP>"
-    python launch_online_dp.py --dp-size 16 --tp-size 2 --dp-size-local 8 --dp-rank-start 0 --dp-address "$D0_IP" --dp-rpc-port 16600 --vllm-start-port 9900
+    python launch_online_dp.py --dp-size 16 --tp-size 2 --dp-size-local 8 --dp-rank-start 0 --dp-address "$D0_IP" --dp-rpc-port 16600 --vllm-start-port 8000
     ```
 
 4. Decode node 1
 
     ```shell
     D0_IP="<DECODE_NODE0_IP>"
-    python launch_online_dp.py --dp-size 16 --tp-size 2 --dp-size-local 8 --dp-rank-start 8 --dp-address "$D0_IP" --dp-rpc-port 16600 --vllm-start-port 9900
+    python launch_online_dp.py --dp-size 16 --tp-size 2 --dp-size-local 8 --dp-rank-start 8 --dp-address "$D0_IP" --dp-rpc-port 16600 --vllm-start-port 8000
     ```
 
 #### 5.3.4 Start the Proxy and Verify Pooling
@@ -1449,12 +1452,12 @@ Once the preparation is done, you can start the server with the following comman
 2. Start P0, P1, D0, and D1 with the commands in
    Section 5.3.3. Both Prefill scripts already specify port 8000.
 3. Wait for P0:8000 and all sixteen Decode APIs to become healthy. Start
-   the same proxy, replacing `--prefiller-ports 8077` with
-   `--prefiller-ports 8000`. Its public port remains 8081.
+   the proxy from Section 5.2.4 on a separate host, using the same
+   Prefill endpoint and Decode ports 8000-8007. Its public port is 8000.
 4. Send requests to the proxy using the served model name `glm5`:
 
 ```shell
-curl "http://<proxy_ip>:8081/v1/chat/completions" \
+curl "http://<proxy_ip>:8000/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -d '{
         "model": "glm5",
