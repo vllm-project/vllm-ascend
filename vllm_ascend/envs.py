@@ -87,6 +87,29 @@ env_variables: dict[str, Callable[[], Any]] = {
     # (safe for Ascend 910B/A3). Set to a positive value to override when
     # auto-detection is unavailable or for debugging UB overflow issues.
     "VLLM_ASCEND_ROPE_UB_SIZE_KB": lambda: int(os.getenv("VLLM_ASCEND_ROPE_UB_SIZE_KB") or 0),
+    # Whether to enable BigTensorLoader v2 snapshot fast-restore. When enabled,
+    # the first startup loads + processes weights and saves a snapshot to
+    # VLLM_ASCEND_CHECKPOINT_PATH; subsequent startups restore from the
+    # snapshot, skipping process_weights_after_loading.
+    "VLLM_ASCEND_BIGTENSOR_FAST_RESTORE": lambda: os.getenv("VLLM_ASCEND_BIGTENSOR_FAST_RESTORE", "0") == "1",
+    # Directory where BigTensorLoader snapshots ({rank}.json +
+    # {rank}.snapshot) are stored. Must be writable during convert and
+    # readable during restore. Required when VLLM_ASCEND_BIGTENSOR_FAST_RESTORE=1.
+    "VLLM_ASCEND_CHECKPOINT_PATH": lambda: os.getenv("VLLM_ASCEND_CHECKPOINT_PATH", None),
+    # Blob integrity verification level for BigTensorLoader restore:
+    # "size" (default): per-tensor bounds check only (<1ms), catches
+    #   truncated/half-written snapshots.
+    # "sha256": bounds + whole-blob sha256 (tens of seconds for 31GB), use
+    #   for audits / untrusted storage / after copying snapshots.
+    # "none": no verification.
+    "VLLM_ASCEND_BIGTENSOR_VERIFY": lambda: os.getenv("VLLM_ASCEND_BIGTENSOR_VERIFY", "size"),
+    # When enabled, BigTensorLoader restores weights via bulk H2D
+    # (GB-level chunks) instead of per-tensor H2D. Reduces peak memory
+    # from ~2x weights to weights + one chunk.
+    "VLLM_ASCEND_BIGTENSOR_BULK_H2D": lambda: os.getenv("VLLM_ASCEND_BIGTENSOR_BULK_H2D", "0") == "1",
+    # Chunk size in MB for bulk H2D transfer. Default 8192 (8GB). Values
+    # <= 0 are absorbed into per-tensor mode (each tensor gets its own chunk).
+    "VLLM_ASCEND_BIGTENSOR_BULK_CHUNK_MB": lambda: int(os.getenv("VLLM_ASCEND_BIGTENSOR_BULK_CHUNK_MB", "8192")),
 }
 
 # end-env-vars-definition
