@@ -18,7 +18,8 @@
 # Unit-level tests for the Triton apply_top_k_top_p op
 # (vllm_ascend.ops.triton.apply_top_k_top_p, CANN npu_top_k_top_p semantics
 # + optional fused softmax) and its wiring into
-# AscendTopKTopPSampler.forward_native (VLLM_ASCEND_USE_TRITON_APPLY_TOPK_TOPP).
+# AscendTopKTopPSampler.forward_native
+# (additional_config enable_triton_apply_topk_topp).
 
 import pytest
 import torch
@@ -32,8 +33,6 @@ from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.utils import enable_custom_op
 
 enable_custom_op()
-
-_TRITON_SWITCH = "VLLM_ASCEND_USE_TRITON_APPLY_TOPK_TOPP"
 
 
 def cann_masked(logits, k_t, p_t):
@@ -59,16 +58,18 @@ def setup_seed():
 @pytest.mark.parametrize("B,V", [(4, 1000), (8, 4096), (4, 4097), (8, 32000)])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_masked_logits_bit_exact_cann(B, V, dtype):
-    """masked logits 与 CANN npu_top_k_top_p 位精确一致（含逐请求混合 k/p）。"""
+    """Masked logits are bit-exact vs CANN npu_top_k_top_p, including
+    batches with per-request mixed k/p."""
     init_device_properties_triton()
     logits = (torch.randn(B, V, device="npu") * 4).to(dtype)
     k = torch.randint(1, V + 1, (B,), dtype=torch.int32, device="npu")
-    k[0] = V  # 禁用 top-k 的行
+    k[0] = V  # row with top-k disabled
     p = torch.rand(B, device="npu") * 0.9 + 0.05
-    p[1] = 1.0  # 禁用 top-p 的行
+    p[1] = 1.0  # row with top-p disabled
 
-    # CANN 要求 p 与 logits 同 dtype（低精度下 p 被舍入）；本算子内部统一
-    # fp32 计算，传入对齐后的有效 p 值保证两边输入一致。
+    # CANN requires p to match the logits dtype (p is rounded at low
+    # precision); the op computes in fp32 internally, so pass the aligned
+    # effective p value to keep both inputs identical.
     out = apply_top_k_top_p(logits, k, p.to(dtype).float())
     ref = cann_masked(logits, k, p)
     assert torch.equal(out, ref)
@@ -76,8 +77,9 @@ def test_masked_logits_bit_exact_cann(B, V, dtype):
 
 @pytest.mark.parametrize("B,V", [(4, 1000), (8, 4096), (8, 32000), (8, 151936)])
 def test_fused_probs_vs_cann_softmax(B, V):
-    """融合 softmax 输出 vs CANN masked logits + torch.softmax(fp32):
-    kept 集合(零值位置)位精确一致, 概率值 ulp 级一致, 行和为 1。"""
+    """Fused-softmax output vs CANN masked logits + torch.softmax(fp32):
+    the kept set (zero positions) is bit-exact, probabilities match at the
+    ulp level, and each row sums to 1."""
     init_device_properties_triton()
     logits = torch.randn(B, V, device="npu") * 4.0
     k = torch.randint(1, min(V, 2000), (B,), dtype=torch.int32, device="npu")
@@ -87,13 +89,13 @@ def test_fused_probs_vs_cann_softmax(B, V):
     ref = cann_masked(logits, k, p).softmax(dim=-1, dtype=torch.float32)
 
     assert probs.dtype == torch.float32
-    assert torch.equal(probs == 0, ref == 0)  # kept 集合精确一致
+    assert torch.equal(probs == 0, ref == 0)  # exact kept set
     torch.testing.assert_close(probs, ref, atol=1e-7, rtol=1e-5)
     torch.testing.assert_close(probs.sum(-1), torch.ones(B, device="npu"), atol=1e-6, rtol=0)
 
 
 def test_scalar_and_none_variants():
-    """标量 k/p 与 None(禁用) 组合。"""
+    """Scalar k/p combined with None (disabled)."""
     init_device_properties_triton()
     B, V = 4, 8192
     logits = torch.randn(B, V, device="npu") * 4.0
@@ -107,7 +109,7 @@ def test_scalar_and_none_variants():
 
 
 # -----------------------------------------------------------------------------
-# Sampler wiring (VLLM_ASCEND_USE_TRITON_APPLY_TOPK_TOPP)
+# Sampler wiring (additional_config enable_triton_apply_topk_topp)
 # -----------------------------------------------------------------------------
 
 
@@ -116,14 +118,20 @@ class _StubAscendConfig:
 
     enable_reduce_sample = False
     enable_async_exponential = False
+    enable_triton_apply_topk_topp = True
+
+
+class _StubAscendConfigStock(_StubAscendConfig):
+    """Same stub with the Triton apply path disabled (stock CANN path)."""
+
+    enable_triton_apply_topk_topp = False
 
 
 @pytest.fixture
 def sampler_module(monkeypatch):
-    """vllm_ascend.sample.sampler with the apply_top_k_top_p path force-enabled."""
+    """vllm_ascend.sample.sampler with the apply_top_k_top_p path enabled."""
     from vllm_ascend.sample import sampler as module
 
-    monkeypatch.setenv(_TRITON_SWITCH, "1")
     monkeypatch.setattr(module, "get_ascend_config", lambda: _StubAscendConfig())
     return module
 
@@ -146,8 +154,8 @@ def test_sampler_apply_path_topk1(sampler_module):
 
 
 def test_sampler_apply_path_processed_logits_matches_stock(sampler_module):
-    """processed_logits 模式返回 masked logits, 必须与 stock(CANN) 路径
-    位精确一致(逐请求混合 k/p)。"""
+    """processed_logits mode returns masked logits, which must be bit-exact
+    vs the stock (CANN) path, including per-request mixed k/p."""
     init_device_properties_triton()
     B, V = 4, 8192
     logits = torch.randn(B, V, dtype=torch.float32, device="npu") * 4.0
@@ -163,8 +171,9 @@ def test_sampler_apply_path_processed_logits_matches_stock(sampler_module):
 
 
 def test_sampler_apply_path_mixed_kp_sampling(sampler_module, monkeypatch):
-    """raw 模式 + 逐请求混合 k/p: 采样结果落在 kept 集合内(概率 0 的位置
-    永不被采到), 且与 stock 路径同种子采样结果一致。"""
+    """raw mode + per-request mixed k/p: sampled tokens always fall inside
+    the kept set (zero-probability positions are never sampled), and the
+    result matches the stock path under the same RNG seed."""
     init_device_properties_triton()
     B, V = 4, 32000
     logits = torch.randn(B, V, dtype=torch.float32, device="npu") * 4.0
@@ -176,13 +185,13 @@ def test_sampler_apply_path_mixed_kp_sampling(sampler_module, monkeypatch):
     next_tokens, _ = sampler.forward_native(logits.clone(), {}, k, p)
     torch.npu.synchronize()
 
-    # kept 集合 = CANN masked logits 的 finite 位置
+    # The kept set is the finite positions of the CANN masked logits.
     ref_masked = cann_masked(logits, k, p)
     kept = torch.isfinite(ref_masked)
     assert kept.gather(1, next_tokens.unsqueeze(1)).all()
 
-    # 同种子下 stock 路径应给出相同采样结果
-    monkeypatch.setenv(_TRITON_SWITCH, "0")
+    # The stock path with the same seed must give the same sampling result.
+    monkeypatch.setattr(sampler_module, "get_ascend_config", lambda: _StubAscendConfigStock())
     stock_sampler = sampler_module.AscendTopKTopPSampler(logprobs_mode="raw_logprobs")
     torch.manual_seed(7)
     stock_tokens, _ = stock_sampler.forward_native(logits.clone(), {}, k, p)
@@ -191,12 +200,12 @@ def test_sampler_apply_path_mixed_kp_sampling(sampler_module, monkeypatch):
 
 
 def test_sampler_stock_still_works(monkeypatch):
-    """回归: 开关关闭(默认)时 stock 路径不受影响。"""
+    """Regression: the stock path is unaffected when the switch is off
+    (default)."""
     init_device_properties_triton()
     from vllm_ascend.sample import sampler as module
 
-    monkeypatch.delenv(_TRITON_SWITCH, raising=False)
-    monkeypatch.setattr(module, "get_ascend_config", lambda: _StubAscendConfig())
+    monkeypatch.setattr(module, "get_ascend_config", lambda: _StubAscendConfigStock())
 
     B, V = 8, 1024
     logits = torch.randn(B, V, dtype=torch.float32, device="npu")
