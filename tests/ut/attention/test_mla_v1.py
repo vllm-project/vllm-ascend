@@ -2894,6 +2894,46 @@ class TestAscendMLAImpl(TestBase):
         self.assertIsNotNone(decode_res)
         self.assertIsNotNone(prefill_res)
 
+    def test_mla_preprocess_prefill_pcp_empty_rank(self):
+        self.impl.pcp_enabled = True
+        self.impl.num_heads = 2
+        self.impl.num_kv_heads = 1
+        self.impl.rope_single = MagicMock(side_effect=lambda x, cos, sin: x)
+        self.impl.exec_kv_prefill = MagicMock()
+
+        for num_tokens in (0, 1, 3):
+            with self.subTest(num_tokens=num_tokens):
+                padded_tokens = max(1, num_tokens)
+                q_c = torch.zeros(padded_tokens, self.impl.q_lora_rank)
+                kv = torch.zeros(padded_tokens, self.impl.kv_lora_rank + self.impl.qk_rope_head_dim)
+                metadata = SimpleNamespace(
+                    num_decode_tokens=0,
+                    num_actual_tokens=num_tokens,
+                    slot_mapping=torch.arange(2 * padded_tokens),
+                    prefill=SimpleNamespace(
+                        cos=torch.zeros(padded_tokens, self.impl.qk_rope_head_dim),
+                        sin=torch.zeros(padded_tokens, self.impl.qk_rope_head_dim),
+                        pcp_local_num_input_tokens=padded_tokens,
+                    ),
+                )
+                self.impl.q_proj.return_value = (torch.zeros(num_tokens, 2 * self.impl.qk_head_dim),)
+                self.impl.kv_b_proj.return_value = (
+                    torch.zeros(num_tokens, 2 * (self.impl.qk_nope_head_dim + self.impl.v_head_dim)),
+                )
+                self.impl.exec_kv_prefill.return_value = (
+                    torch.ones(num_tokens, 1, 1, self.impl.qk_rope_head_dim),
+                    torch.zeros(num_tokens, 1, 1, self.impl.kv_lora_rank),
+                )
+
+                result = self.impl.mla_preprocess_prefill(q_c, kv, (), metadata)
+
+                self.assertEqual(self.impl.exec_kv_prefill.call_args.args[0].shape[0], padded_tokens)
+                self.assertEqual(result.q_nope.shape, (num_tokens, 2, self.impl.qk_nope_head_dim))
+                self.assertEqual(result.q_pe.shape, (num_tokens, 2, self.impl.qk_rope_head_dim))
+                self.assertEqual(result.k_nope.shape, (num_tokens, 2, self.impl.qk_nope_head_dim))
+                self.assertEqual(result.value.shape, (num_tokens, 2, self.impl.v_head_dim))
+                torch.testing.assert_close(result.k_pe, torch.ones(num_tokens, 2, self.impl.qk_rope_head_dim))
+
     @patch("vllm_ascend.attention.mla_v1.DeviceOperator.reshape_and_cache")
     @patch("torch_npu.npu_interleave_rope")
     @patch("torch_npu.npu_kv_rmsnorm_rope_cache")
