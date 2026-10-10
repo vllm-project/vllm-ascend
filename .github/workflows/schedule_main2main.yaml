@@ -409,7 +409,6 @@ jobs:
       - name: Install opencode + main2main-flow
         env:
           NODE_VERSION: 24.18.0
-        env:
           FLOW_SHA: ${{ needs.interface-report.outputs.flow_sha }}
         run: |
           set -euxo pipefail
@@ -576,7 +575,7 @@ jobs:
       - name: Restore incremental cache for Main2Main fallback
         id: main2main-l1
         if: ${{ steps.cache-csrc.outputs.cache-hit != 'true' }}
-        uses: $/.github/actions/csrc-l1-restore
+        uses: ./.github/actions/csrc-l1-restore
         with:
           cache-dir: ${{ runner.temp }}/vllm-ascend-incremental-build-cache
           architecture: ${{ runner.arch }}
