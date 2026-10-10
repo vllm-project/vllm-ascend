@@ -24,6 +24,30 @@ The following speculative decoding methods are supported:
 | `draft_model` | Generic external draft LLM |
 | `extract_hidden_states` | Extract hidden states for EAGLE training |
 
+### External draft models with Model Runner V2
+
+MRv2 external drafting was introduced by upstream PR [#43091](https://github.com/vllm-project/vllm/pull/43091).
+This Ascend integration targets the current upstream `standalone_ar.StandaloneARSpeculator`
+API. Enable it as follows:
+
+```shell
+VLLM_USE_V2_MODEL_RUNNER=1 vllm serve Qwen/Qwen3-1.7B \
+  --speculative-config '{"method": "draft_model", "model": "Qwen/Qwen3-0.6B", "num_speculative_tokens": 3}'
+```
+
+The MRv2 Ascend path requires a dense, text-only decoder draft model with
+self-attention caches, PP=PCP=DCP=1,
+and matching target/draft tensor parallel sizes. Ascend 310P is not supported by
+this path. Use draft and target models with compatible tokenizers and token IDs.
+Greedy and probabilistic draft sampling use the existing Ascend rejection sampler.
+
+The target model can use ACL graphs; the independent draft model runs eagerly,
+matching upstream's current standalone draft implementation. FIA requires exact
+CPU sequence lengths, so each proposal performs one batched device-to-host copy
+before draft prefill. Decode steps reuse those CPU lengths with the rejected-token
+count subtracted. Measure acceptance rate and latency on your target hardware:
+an external draft model does not guarantee a speedup for every batch size.
+
 ## Common Configuration
 
 All speculative decoding methods are configured through the `speculative_config` parameter when initializing the model or starting the server:
