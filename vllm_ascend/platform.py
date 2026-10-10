@@ -958,6 +958,13 @@ def _validate_model_runner_config(vllm_config: VllmConfig) -> None:
 
 
 def _validate_eplb_config(vllm_config: VllmConfig) -> None:
+    if vllm_config.parallel_config.enable_eplb:
+        offload = vllm_config.offload_config
+        if offload.uva.cpu_offload_gb > 0 or offload.prefetch.offload_group_size > 0:
+            raise ValueError(
+                "EPLB is incompatible with weight offload/prefetch on Ascend. "
+                "Set cpu_offload_gb=0 and offload_group_size=0, or disable EPLB."
+            )
     additional_config = vllm_config.additional_config or {}
     eplb_config = additional_config.get("eplb_config", {})
     if not isinstance(eplb_config, dict):

@@ -308,3 +308,34 @@ class TestUnwrapMoe(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_prepare_load_closes_old_state_before_constructing_replacement():
+    controller = TestAscendEPLBController._make_controller()
+    old = MagicMock()
+    controller.state = old
+    replacement = object()
+
+    def make_state(*_args):
+        old.close.assert_called_once_with()
+        return replacement
+
+    with patch("vllm_ascend.worker.v2.eplb.AscendEplbState", side_effect=make_state):
+        controller.prepare_load()
+    assert controller.state is replacement
+
+
+def test_failed_close_blocks_model_reload():
+    controller = TestAscendEPLBController._make_controller()
+    old = MagicMock()
+    old.close.side_effect = RuntimeError("still registered")
+    controller.state = old
+    with patch("vllm_ascend.worker.v2.eplb.AscendEplbState") as factory:
+        try:
+            controller.prepare_load()
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("reload must fail")
+    factory.assert_not_called()
+    assert controller.state is old

@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
+import threading
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -10,6 +11,7 @@ from vllm.distributed.eplb import eplb_state as upstream_eplb_state
 
 from vllm_ascend.ascend_config import StairConfig
 from vllm_ascend.distributed.eplb import eplb_state
+from vllm_ascend.distributed.eplb.eplb_communicator import AscendHixlEplbCommunicator
 from vllm_ascend.distributed.eplb.eplb_state import (
     AscendEplbLayerState,
     AscendEplbState,
@@ -18,7 +20,11 @@ from vllm_ascend.distributed.eplb.policy.stair import StairEplbPolicy
 
 
 def test_uses_upstream_policy_and_async_worker_lifecycle():
-    assert AscendEplbState.start_async_loop is upstream_eplb_state.EplbState.start_async_loop
+    state = AscendEplbState.__new__(AscendEplbState)
+    state._suspended = False
+    with patch.object(upstream_eplb_state.EplbState, "start_async_loop") as start:
+        state.start_async_loop()
+    start.assert_called_once_with()
 
 
 def test_result_readiness_defers_incomplete_transfer(monkeypatch):
@@ -150,6 +156,7 @@ def test_sync_rearrange_refreshes_all_model_routing_tables(monkeypatch):
     )
     monkeypatch.setattr(eplb_state, "refresh_model_routing_tables", refresh)
     state = AscendEplbState.__new__(AscendEplbState)
+    state._suspended = False
     state.is_async = False
     state.model_states = model_states
 
@@ -168,6 +175,7 @@ def test_async_rearrange_defers_routing_refresh_to_workspace_hook(monkeypatch):
     refresh = MagicMock()
     monkeypatch.setattr(eplb_state, "refresh_model_routing_tables", refresh)
     state = AscendEplbState.__new__(AscendEplbState)
+    state._suspended = False
     state.is_async = True
     state.model_states = {"model": object()}
 
@@ -282,3 +290,87 @@ def test_init_sets_cuda_device_index_for_npu(monkeypatch):
     state = AscendEplbState(parallel_config, torch.device("cpu"))
 
     assert state.cuda_device_index == 5
+
+
+def _lifecycle_state():
+    state = AscendEplbState.__new__(AscendEplbState)
+    state._suspended = False
+    state._stop_async = threading.Event()
+    state._close_error = None
+    state._rebuild_group = None
+    state.is_async = True
+    state.async_worker = None
+    state.model_states = {}
+    return state
+
+
+def test_close_wakes_idle_worker_without_fake_device_event():
+    state = _lifecycle_state()
+    recorded = threading.Event()
+    event_wait = MagicMock()
+    state.rearrange_event = SimpleNamespace(_recorded=recorded, wait=event_wait)
+    state.async_worker = threading.Thread(target=state.wait_for_rearrangement, args=(None,))
+    state.async_worker.start()
+    state.close()
+    assert state.async_worker is None
+    assert state._suspended
+    assert not recorded.is_set()
+    event_wait.assert_not_called()
+
+
+def test_elastic_registration_uses_final_weight_views(monkeypatch):
+    state = _lifecycle_state()
+    old = MagicMock(spec=AscendHixlEplbCommunicator)
+    model = SimpleNamespace(expert_weights=[object()])
+    ms = SimpleNamespace(communicator=old, model=model, expert_buffer=[object()])
+    state.model_states = {"model": ms}
+    config = SimpleNamespace(compute_hash=lambda: "model")
+    group = object()
+    factory = MagicMock(return_value=object())
+    monkeypatch.setattr(upstream_eplb_state, "create_eplb_communicator", factory)
+
+    token = state.create_communicator(config, group)
+    assert token is old
+    factory.assert_not_called()
+    old.close.assert_not_called()
+    state.close()
+    new_weights = [object()]
+    model.expert_weights = new_weights
+    state.update_communicator(config, token)
+    factory.assert_called_once_with(group, "hixl", new_weights, ms.expert_buffer)
+    assert ms.communicator is factory.return_value
+    assert not state._suspended
+
+
+def test_close_failure_keeps_communicator_owner():
+    state = _lifecycle_state()
+    communicator = MagicMock(spec=AscendHixlEplbCommunicator)
+    communicator.close.side_effect = RuntimeError("still bound")
+    state.model_states = {"model": SimpleNamespace(communicator=communicator)}
+    with pytest.raises(SystemExit, match="worker must terminate"):
+        state.close()
+    assert state.model_states["model"].communicator is communicator
+    assert state._suspended
+
+
+def test_failed_close_blocks_resume():
+    state = _lifecycle_state()
+    state._close_error = RuntimeError("still bound")
+    with pytest.raises(SystemExit, match="worker must terminate"):
+        state.resume()
+
+
+def test_failed_resume_is_fatal_and_preserves_initialization_error(monkeypatch):
+    state = _lifecycle_state()
+    state._suspended = True
+    communicator = MagicMock(spec=AscendHixlEplbCommunicator)
+    state.model_states = {
+        "model": SimpleNamespace(communicator=communicator, model=SimpleNamespace(expert_weights=[]), expert_buffer=[])
+    }
+    monkeypatch.setattr(eplb_state, "get_eplb_group", lambda: object())
+    error = RuntimeError("registration rollback failed")
+    monkeypatch.setattr(upstream_eplb_state, "create_eplb_communicator", MagicMock(side_effect=error))
+    with pytest.raises(SystemExit, match="worker must terminate"):
+        state.resume()
+    assert state._close_error is error
+    assert state.model_states["model"].communicator is communicator

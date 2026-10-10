@@ -37,6 +37,8 @@ def _unwrap_moe(model: nn.Module) -> nn.Module:
 class AscendEPLBController(EPLBController):
     """Construct Ascend state and apply phase-filtered load collection."""
 
+    state: AscendEplbState | None
+
     def __init__(
         self,
         parallel_config: Any,
@@ -60,6 +62,8 @@ class AscendEPLBController(EPLBController):
         self._load_collection_phase_matched = True
 
     def prepare_load(self) -> None:
+        if self.state is not None:
+            self.state.close()
         self.state = None
         self._has_registered_models = False
         if self.parallel_config.enable_eplb:
@@ -112,6 +116,8 @@ class AscendEPLBController(EPLBController):
         expanded_physical_to_logical: torch.Tensor,
         old_num_physical_experts: int | None = None,
     ) -> None:
+        if self.state is not None:
+            self.state.close()
         model = _unwrap_moe(model)
         assert is_mixture_of_experts(model)
         from_mapping_kwargs: dict[str, Any] = dict(
