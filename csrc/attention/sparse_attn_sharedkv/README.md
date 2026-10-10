@@ -76,7 +76,7 @@
 - `metadata`为算子实际需要使用的分核结果，目前该参数必传，shape大小固定为[1024]。
 - `layout_kv`仅支持输入PA_ND，故设置`cu_seqlens_ori_kv`和`cu_seqlens_cmp_kv`无效。
 - 目前暂不支持返回`softmax_lse`，`return_softmax_lse`仅支持输入False，返回值`softmax_lse`为无效值。
-- ori_mask_mode及cmp_mask_mode所表示的mask模式的详细介绍见[sparse_mode参数说明](../../../docs/zh/context/sparse_mode参数说明.md)。
+- ori_mask_mode及cmp_mask_mode所表示的mask模式的详细介绍见[sparse_mode参数说明](../common/sparse_mode.md)。
 - 目前暂不支持指定`q`中参与运算的token数，因此设置`seqused_q`无效。
 - 目前暂不支持对`ori_kv`进行稀疏计算，因此设置`ori_sparse_indices`无效。
 - 目前所有输入不支持传入空tensor。

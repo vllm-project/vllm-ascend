@@ -70,6 +70,6 @@
 - 参数seqused\_q及seqused\_kv维度为B，要求其值表示每个Batch中的有效token数。
 - 参数ori\_block\_table的shape为2维，其中第一维长度为B，第二维长度不小于所有Batch中最大的S2对应的block数量，即S2\_max / block\_size1向上取整。
 - 参数cmp\_block\_table的shape为2维，其中第一维长度为B，第二维长度不小于floor(S2\_max \/ cmp\_ratio)对应的block数量，即floor(S2\_max \/ cmp\_ratio) \/ block\_size2向上取整。
-- ori\_mask\_mode及cmp\_mask\_mode所表示的mask模式的详细介绍见[sparse_mode参数说明](https://gitcode.com/cann/ops-transformer/blob/master/docs/zh/context/sparse_mode%E5%8F%82%E6%95%B0%E8%AF%B4%E6%98%8E.md)。
+- ori\_mask\_mode及cmp\_mask\_mode所表示的mask模式的详细介绍见[sparse_mode参数说明](../common/sparse_mode.md)。
 - q、ori_kv、cmp_kv参数维度含义：B（Batch Size）表示输入样本批量大小、S（Sequence Length）表示输入样本序列长度、H（Hidden Size）表示hidden层的大小、N（Head Num）表示多头数、D（Head Dim）表示hidden层最小的单元尺寸，且满足D=H/N、T表示所有Batch输入样本序列长度的累加和。
 - Q\_S和S1表示q shape中的S，S2表示ori\_kv shape中的S，Q\_N和N1表示num\_q\_heads，KV\_N和N2表示num\_ori\_kv\_heads和num\_cmp\_kv\_heads；T1表示q shape中的T。
