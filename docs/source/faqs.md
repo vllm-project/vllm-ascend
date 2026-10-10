@@ -2,6 +2,7 @@
 
 ## Version Specific FAQs
 
+- [[v0.30.0] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/17748)
 - [[v0.26.0rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/14766)
 - [[v0.23.0] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/12916)
 - [[v0.23.0rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/12238)
@@ -81,7 +82,7 @@ There are many channels that you can communicate with our community developers /
 
 - Submit a GitHub [<u>issue</u>](https://github.com/vllm-project/vllm-ascend/issues?page=1).
 - Join our [<u>weekly meeting</u>](https://docs.google.com/document/d/1hCSzRTMZhIB8vRq1_qOOjx4c9uYUxvdQvDsMV2JcSrw/edit?tab=t.0#heading=h.911qu8j8h35z) and share your ideas.
-- Join our [<u>WeChat</u>](https://github.com/vllm-project/vllm-ascend/issues/227) group and ask your questions.
+- Join our [<u>WeChat</u>](https://github.com/vllm-project/vllm-ascend/issues/17748) group and ask your questions.
 - Join our ascend channel in [<u>vLLM forums</u>](https://discuss.vllm.ai/c/hardware-support/vllm-ascend-support/6) and publish your topics.
 
 ### 5. What features does vllm-ascend V1 support?
