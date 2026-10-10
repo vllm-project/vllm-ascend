@@ -207,7 +207,11 @@ class ACLGraphWrapper:
                 get_offloader().sync_prev_onload()
                 forward_context.capturing = True
                 try:
-                    with torch.npu.graph(aclgraph, pool=self.graph_pool):
+                    with torch.npu.graph(
+                        aclgraph,
+                        pool=self.graph_pool,
+                        capture_error_mode="global",
+                    ):
                         # `output` is managed by pytorch's aclgraph pool
                         with super_kernel_scope("full_model", self.enable_super_kernel):
                             output = self.runnable(*args, **kwargs)

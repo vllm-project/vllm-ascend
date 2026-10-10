@@ -30,6 +30,62 @@ class _EpGroupRank0(_EpGroup):
     rank_in_group = 0
 
 
+def test_mmrs_temporarily_relaxes_capture_mode(monkeypatch):
+    calls = []
+    output = torch.empty(2, 4)
+
+    def exchange_capture_mode(mode):
+        calls.append(mode)
+        return 0
+
+    monkeypatch.setattr(custom_ops, "get_tp_group", lambda: SimpleNamespace(unique_name="tp:0"))
+    monkeypatch.setattr(custom_ops, "_tp_hccl_comm_name", lambda: "comm")
+    monkeypatch.setattr(torch.npu, "is_current_stream_capturing", lambda: True)
+    monkeypatch.setattr(custom_ops, "_exchange_capture_mode", exchange_capture_mode)
+    monkeypatch.setattr(custom_ops.DeviceOperator, "npu_mm_reduce_scatter_base", lambda *args, **kwargs: output)
+
+    result = custom_ops._npu_matmul_reduce_scatter_impl(torch.empty(4, 8), torch.empty(4, 8), 2, "tp:0")
+
+    assert result is output
+    assert calls == [custom_ops._CAPTURE_MODE_RELAXED, 0]
+
+
+def test_mmrs_restores_capture_mode_on_failure(monkeypatch):
+    calls = []
+
+    def exchange_capture_mode(mode):
+        calls.append(mode)
+        return 0
+
+    monkeypatch.setattr(custom_ops, "get_tp_group", lambda: SimpleNamespace(unique_name="tp:0"))
+    monkeypatch.setattr(custom_ops, "_tp_hccl_comm_name", lambda: "comm")
+    monkeypatch.setattr(torch.npu, "is_current_stream_capturing", lambda: True)
+    monkeypatch.setattr(custom_ops, "_exchange_capture_mode", exchange_capture_mode)
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("MMRS failed")
+
+    monkeypatch.setattr(custom_ops.DeviceOperator, "npu_mm_reduce_scatter_base", fail)
+
+    with pytest.raises(RuntimeError, match="MMRS failed"):
+        custom_ops._npu_matmul_reduce_scatter_impl(torch.empty(4, 8), torch.empty(4, 8), 2, "tp:0")
+
+    assert calls == [custom_ops._CAPTURE_MODE_RELAXED, 0]
+
+
+def test_mmrs_eager_path_keeps_capture_mode(monkeypatch):
+    output = torch.empty(2, 4)
+    monkeypatch.setattr(custom_ops, "get_tp_group", lambda: SimpleNamespace(unique_name="tp:0"))
+    monkeypatch.setattr(custom_ops, "_tp_hccl_comm_name", lambda: "comm")
+    monkeypatch.setattr(torch.npu, "is_current_stream_capturing", lambda: False)
+    monkeypatch.setattr(custom_ops, "_exchange_capture_mode", lambda mode: pytest.fail("unexpected exchange"))
+    monkeypatch.setattr(custom_ops.DeviceOperator, "npu_mm_reduce_scatter_base", lambda *args, **kwargs: output)
+
+    result = custom_ops._npu_matmul_reduce_scatter_impl(torch.empty(4, 8), torch.empty(4, 8), 2, "tp:0")
+
+    assert result is output
+
+
 def _patch_sp_ep_context(monkeypatch):
     context = SimpleNamespace(
         dp_metadata=SimpleNamespace(
