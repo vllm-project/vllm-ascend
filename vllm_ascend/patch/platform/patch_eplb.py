@@ -24,6 +24,7 @@ from vllm.model_executor.layers.fused_moe import routed_experts as _routed_exper
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import PIN_MEMORY
 
+from vllm_ascend.distributed.eplb import expert_copy as _expert_copy
 from vllm_ascend.distributed.eplb.eplb_communicator import (
     AscendGlooEplbCommunicator,
     AscendHixlEplbCommunicator,
@@ -663,7 +664,7 @@ def _move_changed_layer_to_workspace(model_state, ep_rank: int) -> None:
         assert result.new_physical_to_logical_map is not None
         assert result.new_logical_to_physical_map is not None
         assert result.new_logical_replica_count is not None
-        _eplb_state.move_from_buffer(
+        _expert_copy.move_from_buffer(
             expert_weights=model_state.model.expert_weights[result.layer_idx],
             expert_weights_buffers=model_state.expert_buffer,
             transfer_metadata=result.transfer_metadata,
