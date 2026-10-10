@@ -11,7 +11,7 @@ Take the DeepSeek-r1-w8a8 model as an example, use 4 Atlas 800T A3 servers to de
 ### Physical Layer Requirements
 
 - The physical machines must be located on the same LAN, with network connectivity.
-- All NPUs must be interconnected. On A2/A3, intra-node connectivity is via HCCS, and inter-node connectivity is via RDMA. For A5 (950DT/950PR), see [Atlas 850/850E/950 SuperPod Communication Configuration](#atlas-850850e950-superpod-communication-configuration).
+- All NPUs must be interconnected. On A2/A3, intra-node connectivity is via HCCS, and inter-node connectivity is via RDMA. For Atlas 850/850E/950 SuperPod (950PR/950DT), see [Atlas 850/850E/950 SuperPod Communication Configuration](#atlas-850850e950-superpod-communication-configuration).
 
 ### Verification Process
 
@@ -122,7 +122,7 @@ Execute the following commands on each node in sequence. The results must all be
 
 ### Atlas 850/850E/950 SuperPod Communication Configuration
 
-For Atlas 850/850E/950 SuperPod (Ascend 950PR/950DT), PD disaggregation uses the super plane (based on UB port and UBC protocol) by default. No additional network configuration is required for this default path. Set the following environment variable in both the prefiller and decoder serving environments to generate the communication configuration automatically:
+For Atlas 850/850E/950 SuperPod (950PR/950DT), PD disaggregation uses the super plane (based on UB port and UBC protocol) by default. No additional network configuration is required for this default path. Set the following environment variable in both the prefiller and decoder serving environments to generate the communication configuration automatically:
 
 ```bash
 export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
@@ -231,9 +231,9 @@ docker run --rm \
 -it $IMAGE bash
 ```
 
-### A5 Container Requirements
+### Atlas 850/850E/950 SuperPod (950PR/950DT) Container Requirements
 
-For A5 (950DT/950PR), adapt the device mappings and mounts to the host and selected transport. For automatically generated UB communication configuration, include the following options in your `docker run` command, before the image name:
+For Atlas 850/850E/950 SuperPod (950PR/950DT), adapt the device mappings and mounts to the host and selected transport. For automatically generated UB communication configuration, include the following options in your `docker run` command, before the image name:
 
 ```bash
 --device=/dev/ummu \
@@ -241,7 +241,7 @@ For A5 (950DT/950PR), adapt the device mappings and mounts to the host and selec
 -v /usr/bin/urma_admin:/usr/bin/urma_admin \
 ```
 
-Mounting `/lib/route.conf` is optional. If you choose to mount it manually, generate the file on the host before starting the container. See the [A5 LocalCommRes Configuration Guide](https://gitcode.com/cann/hixl/wiki/A5%20LocalCommRes%E9%85%8D%E7%BD%AE%E6%8C%87%E5%8D%97.md) for generation and configuration instructions, then add:
+Mounting `/lib/route.conf` is optional. If you choose to mount it manually, generate the file on the host before starting the container. See the [LocalCommRes Configuration Guide](https://gitcode.com/cann/hixl/wiki/A5%20LocalCommRes%E9%85%8D%E7%BD%AE%E6%8C%87%E5%8D%97.md) for generation and configuration instructions, then add:
 
 ```bash
 -v /lib/route.conf:/lib/route.conf \
