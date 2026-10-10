@@ -26,7 +26,7 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 |  Weight Version          | Hardware Requirements                                         | Download Links |
 |--------------------------|---------------------------------------------------------------|----------------|
-|  `GLM-5.3-w8a8c8`        | 2 Atlas 800 A3 (128GB × 8) node or 4 Atlas 800 A2 (64GB × 32) | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-w8a8c8) |
+|  `GLM-5.3-w8a8c8`        | 2 Atlas 800 A3 (128GB × 8) node or 4 Atlas 800 A2 (64GB × 8) | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-w8a8c8) |
 
 - You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to quantize the model directly.
 
@@ -269,7 +269,7 @@ Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md
 
 === "A2 series"
 
-    - `GLM-5.3-w8a8c8`: can be deployed on 4 Atlas 800 A2 (64GB × 32).
+    - `GLM-5.3-w8a8c8`: can be deployed on 4 Atlas 800 A2 (64GB × 8).
 
     Run the following scripts on four nodes respectively.
 
