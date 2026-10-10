@@ -59,6 +59,17 @@ def test_valid_and_empty_patch():
     validate_sparse_patch(make_patch(indices=torch.empty(0, dtype=torch.int32), values=torch.empty(0)))
 
 
+def test_large_checkpoint_bounds_do_not_wrap_int32():
+    validate_sparse_patch(
+        make_patch(
+            full_shape=(65536, 32768),
+            indices=torch.tensor([0, 2147483647], dtype=torch.int32),
+        )
+    )
+    with pytest.raises(ValueError, match="int64"):
+        validate_sparse_patch(make_patch(full_shape=(1 << 63,)))
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [

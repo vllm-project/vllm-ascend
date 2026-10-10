@@ -38,14 +38,20 @@ def validate_sparse_patch(patch: SparseWeightPatch) -> None:
         raise ValueError(f"Sparse indices and values must have matching lengths: {patch.name}")
     if patch.values.dtype not in SPARSE_HCCL_VALUE_DTYPES:
         raise ValueError(f"Sparse values require an HCCL-supported floating dtype: {patch.name}")
+    numel = math.prod(patch.full_shape)
+    if numel > torch.iinfo(torch.int64).max:
+        raise ValueError(f"Checkpoint shape exceeds int64 indexing: {patch.name}")
     # Host reads are required before workers enter HCCL.
     # Keep the bounds/duplicate checks together instead of reading each index.
     indices = patch.indices
     if indices.numel():
         ordered = indices.sort().values
+        # Comparing an int32 tensor with a larger Python scalar wraps the
+        # scalar into int32. Keep the wire dtype, but widen bounds arithmetic.
+        wide_indices = indices.to(dtype=torch.int64)
         invalid = torch.stack(
             [
-                ((indices < 0) | (indices >= math.prod(patch.full_shape))).any(),
+                ((wide_indices < 0) | (wide_indices >= numel)).any(),
                 (ordered[1:] == ordered[:-1]).any(),
             ]
         ).any()
