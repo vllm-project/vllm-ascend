@@ -21,6 +21,7 @@ import torch
 from einops import rearrange
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
+from vllm.logger import logger
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
@@ -38,7 +39,9 @@ from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_s
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states, prepare_chunk_indices
 from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
 
-_FLA_CHUNK_SIZE = 128
+_FLA_CHUNK_SIZE = envs.VLLM_ASCEND_FLA_CHUNK_SIZE
+if _FLA_CHUNK_SIZE not in (64, 128):
+    raise ValueError("VLLM_ASCEND_FLA_CHUNK_SIZE must be 64 or 128")
 
 
 @functools.lru_cache(maxsize=32)
@@ -106,7 +109,8 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             )
             torch.npu.synchronize()
             cls._fused_chunk_available = True
-        except Exception:
+        except Exception as exc:
+            logger.warning("GDN FLA prefill probe failed; trying torch_npu: %s", exc, exc_info=True)
             cls._fused_chunk_available = False
         return cls._fused_chunk_available
 
@@ -170,6 +174,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         import torch_npu
 
         if not hasattr(torch_npu, "npu_chunk_gated_delta_rule"):
+            logger.warning("GDN torch_npu prefill unavailable: npu_chunk_gated_delta_rule is missing")
             cls._torch_chunk_available = False
             return False
 
@@ -198,7 +203,8 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             )
             torch.npu.synchronize()
             cls._torch_chunk_available = True
-        except Exception:
+        except Exception as exc:
+            logger.warning("GDN torch_npu prefill probe failed: %s", exc, exc_info=True)
             cls._torch_chunk_available = False
         return cls._torch_chunk_available
 
@@ -632,6 +638,14 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 pcp_size == 1 and envs.VLLM_ASCEND_ENABLE_FLA_GDN and AscendGatedDeltaNetAttention._probe_fused_chunk()
             )
             use_torch = pcp_size == 1 and not use_fla and AscendGatedDeltaNetAttention._probe_torch_chunk()
+            backend = "FLA" if use_fla else "torch_npu" if use_torch else "Triton" if pcp_size > 1 else "unavailable"
+            logger.info_once(
+                "GDN prefill backend=%s, pcp_size=%s, enable_fla=%s, fla_chunk_size=%s",
+                backend,
+                pcp_size,
+                envs.VLLM_ASCEND_ENABLE_FLA_GDN,
+                _FLA_CHUNK_SIZE if use_fla else None,
+            )
             if use_fla or use_torch:
                 # The wrapper converts cache states to/from the FLA layout.
                 # Advanced indexing returns a copy, safe to clear in place.

@@ -28,6 +28,9 @@ from typing import Any
 # begin-env-vars-definition
 
 env_variables: dict[str, Callable[[], Any]] = {
+    # FLA GDN prefill chunk size. Valid values: 64 or 128; default: 128.
+    # Not sensitive. Set before starting the worker.
+    "VLLM_ASCEND_FLA_CHUNK_SIZE": lambda: int(os.getenv("VLLM_ASCEND_FLA_CHUNK_SIZE", "128")),
     # GDN fused prefill backend: 1 selects FLA NPU (default), 0 selects
     # torch_npu. Both fall back to Triton when unavailable or under PCP.
     # Not sensitive. Set before starting the worker.
