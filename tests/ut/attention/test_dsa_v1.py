@@ -261,6 +261,51 @@ def test_metadata_builder_accepts_compression_ratio_aliases(
     assert builder.compressor_ratio == 4
 
 
+def test_dsv4_hadamard_is_one_shared_tensor(monkeypatch: pytest.MonkeyPatch) -> None:
+    import sys
+    import types
+
+    linalg = types.ModuleType("scipy.linalg")
+    linalg.hadamard = lambda n, dtype=float: np.eye(n, dtype=float)  # type: ignore[attr-defined]
+    scipy_mod = types.ModuleType("scipy")
+    scipy_mod.linalg = linalg  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "scipy", scipy_mod)
+    monkeypatch.setitem(sys.modules, "scipy.linalg", linalg)
+
+    vllm_config = _make_vllm_config()
+    vllm_config.model_config.hf_config.model_type = "deepseek_v4"
+    vllm_config.model_config.hf_config.index_head_dim = 4
+    kv_cache_spec = _make_kv_cache_spec(4)
+    AscendDSAMetadataBuilder._shared_hadamard.clear()
+    AscendDSACPMetadataBuilder._shared_hadamard.clear()
+
+    first = AscendDSAMetadataBuilder(
+        kv_cache_spec=kv_cache_spec,
+        layer_names=["model.layers.0.self_attn.attn"],
+        vllm_config=vllm_config,
+        device=torch.device("cpu"),
+    )
+    second = AscendDSAMetadataBuilder(
+        kv_cache_spec=kv_cache_spec,
+        layer_names=["model.layers.1.self_attn.attn"],
+        vllm_config=vllm_config,
+        device=torch.device("cpu"),
+    )
+    cp_builder = AscendDSACPMetadataBuilder(
+        kv_cache_spec=kv_cache_spec,
+        layer_names=["model.layers.0.self_attn.attn"],
+        vllm_config=vllm_config,
+        device=torch.device("cpu"),
+    )
+
+    assert first.hadamard is second.hadamard
+    assert first.hadamard is not None
+    assert first.hadamard.dtype == torch.bfloat16
+    assert first.hadamard.shape == (4, 4)
+    assert cp_builder.hadamard is not None
+    assert cp_builder.hadamard is not first.hadamard
+
+
 @pytest.mark.parametrize(
     ("compressor_ratio", "num_tokens", "num_reqs", "expected_rows"),
     [

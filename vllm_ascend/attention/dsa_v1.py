@@ -30,7 +30,6 @@ from vllm_ascend.attention.dsa_attn_kv_plan import (
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     enable_pcp,
-    get_or_register_attention_buffer,
     maybe_save_kv_layer_to_connector,
     notify_kv_cache_written,
     split_decodes_and_prefills,
@@ -619,6 +618,10 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
     """
 
     _request_capacity_factor: ClassVar[int] = 1
+    # One matrix per model and head size. Metadata builders for the same
+    # config, including the PCP global builder, share it. The tensor is
+    # created outside the sleep mem-pools, so it is not a module buffer.
+    _shared_hadamard: ClassVar[dict[tuple[int, int, str], torch.Tensor]] = {}
 
     def __init__(
         self,
@@ -704,7 +707,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         # vLLM assigns the builder result to every layer in an attention group.
         self.cache_group_key = layer_names[0]
         self.hadamard = None
-        self._init_hadamard(layer_names)
+        self._init_hadamard()
         max_num_reqs = scheduler_config.max_num_seqs * self._request_capacity_factor
         self.start_pos_prefill: torch.Tensor = torch.zeros(max_num_reqs, dtype=torch.int32, device=self.device)
         self.sas_metadata_buffer: torch.Tensor = torch.zeros(
@@ -736,26 +739,26 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.slot_mapping = torch.zeros(self.slot_mapping_shape, dtype=torch.int32, device=self.device)
         self.compressor_metadata_buffers: CompressorMetadataOutput | None = None
 
-    def _init_hadamard(self, layer_names: list[str]) -> None:
+    def _init_hadamard(self) -> None:
         hf_config = self.model_config.hf_config
         if hf_config.model_type != "deepseek_v4":
             return
 
         indexer_head_dim = hf_config.index_head_dim
-        try:
-            from scipy.linalg import hadamard  # type: ignore[import-untyped]
-        except ImportError as e:
-            raise ImportError("Please install scipy") from e
         log_dim = math.ceil(math.log2(indexer_head_dim))
         dim_padded = 2**log_dim
-        self.hadamard = get_or_register_attention_buffer(
-            self.vllm_config,
-            layer_names,
-            "_dsa_hadamard",
-            lambda: torch.tensor(hadamard(dim_padded, dtype=float), dtype=torch.float, device=self.device).to(
+        cache_key = (id(self.vllm_config), dim_padded, str(self.device))
+        shared = AscendDSAMetadataBuilder._shared_hadamard.get(cache_key)
+        if shared is None:
+            try:
+                from scipy.linalg import hadamard  # type: ignore[import-untyped]
+            except ImportError as e:
+                raise ImportError("Please install scipy") from e
+            shared = torch.tensor(hadamard(dim_padded, dtype=float), dtype=torch.float, device=self.device).to(
                 torch.bfloat16
-            ),
-        )
+            )
+            AscendDSAMetadataBuilder._shared_hadamard[cache_key] = shared
+        self.hadamard = shared
 
     @classmethod
     def get_cudagraph_support(
