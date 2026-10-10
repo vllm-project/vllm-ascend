@@ -88,10 +88,11 @@ def _make_pcp_config(
     "cudagraph_mode,speculative,pcp_size,dcp_size,expected_sharding",
     [
         (CUDAGraphMode.NONE, False, 2, 1, True),
-        (CUDAGraphMode.NONE, True, 2, 1, False),
+        (CUDAGraphMode.NONE, True, 2, 1, True),
         (CUDAGraphMode.NONE, False, 1, 1, False),
         (CUDAGraphMode.NONE, False, 2, 2, False),
         (CUDAGraphMode.FULL_DECODE_ONLY, False, 2, 1, True),
+        (CUDAGraphMode.FULL_DECODE_ONLY, True, 2, 1, True),
     ],
 )
 def test_decode_sharding_uses_parallel_config(cudagraph_mode, speculative, pcp_size, dcp_size, expected_sharding):
@@ -138,7 +139,7 @@ def test_decode_sharding_does_not_add_a_parallel_config_field():
 
     assert not hasattr(parallel_config, "pcp_shard_decode_requests")
     replace(parallel_config)
-    assert is_pcp_decode_sharding_enabled(config) is False
+    assert is_pcp_decode_sharding_enabled(config) is True
 
 
 def test_validate_config_allows_sparse_mla_full_decode_only():
@@ -362,9 +363,16 @@ def test_full_decode_request_layout_is_token_sized_only_without_drafts():
     assert manager._full_decode_requests_are_token_sized(decode_batch) is False
 
 
+class _ReplicatedPCPManager(AscendPCPManager):
+    """Exercise replicated layouts explicitly, independently of speculation."""
+
+    @property
+    def is_decode_sharded(self):
+        return False
+
+
 def _make_replicated_pcp_manager():
-    manager = AscendPCPManager(2, 0, torch.device("cpu"), max_num_reqs=8, max_num_tokens=32)
-    # Graph execution with speculation stays replicated.
+    manager = _ReplicatedPCPManager(2, 0, torch.device("cpu"), max_num_reqs=8, max_num_tokens=32)
     manager.vllm_config = _make_pcp_config(
         CUDAGraphMode.FULL_DECODE_ONLY,
         speculative_config=SimpleNamespace(num_speculative_tokens=3),
@@ -627,7 +635,7 @@ def test_partition_batch_preserves_fia_dummy_layout() -> None:
         prefill_len=SimpleNamespace(gpu=torch.zeros(2, dtype=torch.int32)),
         draft_tokens=torch.empty((2, 0), dtype=torch.int64),
     )
-    manager = AscendPCPManager(
+    manager = _ReplicatedPCPManager(
         pcp_world_size=2,
         pcp_rank=0,
         device=torch.device("cpu"),
@@ -718,7 +726,7 @@ def test_partition_batch_preserves_speculative_target_inputs(pcp_rank) -> None:
     global_batch.attn_state = build_attn_state(
         config, global_batch.seq_lens_np, 2, global_batch.num_scheduled_tokens, np.ones(2, dtype=np.int32)
     )
-    manager = AscendPCPManager(2, pcp_rank, torch.device("cpu"), max_num_reqs=2, max_num_tokens=5)
+    manager = _ReplicatedPCPManager(2, pcp_rank, torch.device("cpu"), max_num_reqs=2, max_num_tokens=5)
     manager.vllm_config = config
 
     with (
@@ -773,6 +781,29 @@ def test_request_state_cpu_and_numpy_tokens_share_storage() -> None:
     assert state.num_computed_tokens_cpu[0].item() == 17
     state.num_computed_tokens_cpu[1] = 23
     assert state.num_computed_tokens_np[1] == 23
+
+
+def test_sampling_restore_exposes_unpadded_global_view() -> None:
+    manager = AscendPCPManager.__new__(AscendPCPManager)
+    batch = _make_global_pcp_batch()
+    batch.is_dummy = False
+    batch.num_tokens = 12
+    batch.num_tokens_after_padding = 16
+    batch.query_start_loc_np = np.array([0, 12, 16], dtype=np.int32)
+    batch.query_start_loc = torch.tensor([0, 12, 16], dtype=torch.int32)
+    manager._global_batch = batch
+    manager._sampling_hidden_restored = True
+    hidden_states = torch.arange(32).reshape(16, 2)
+    with patch.object(AscendPCPManager, "_restore_unpadded_global_batch", return_value=True):
+        restored_hidden, restored_batch = manager.restore_for_sampling(hidden_states)
+    assert restored_batch is not batch
+    assert restored_batch.num_tokens_after_padding == 12
+    assert restored_batch.query_start_loc.tolist() == [0, 12]
+    assert restored_batch.query_start_loc_np.tolist() == [0, 12]
+    assert restored_hidden.shape == (12, 2)
+    assert restored_hidden.data_ptr() == hidden_states.data_ptr()
+    assert batch.num_tokens_after_padding == 16
+    assert batch.query_start_loc.tolist() == [0, 12, 16]
 
 
 def test_pcp_manager_restores_model_owned_hidden_buffer() -> None:
@@ -1101,8 +1132,8 @@ def test_validate_config_pcp_dp_graph_modes(dp_size, cudagraph_mode, allowed):
 @pytest.mark.parametrize("pcp_rank", [0, 1])
 @pytest.mark.parametrize("has_stale_batch", [False, True])
 def test_dummy_attention_context_uses_current_batch(pcp_rank, has_stale_batch):
-    manager = AscendPCPManager(2, pcp_rank, torch.device("cpu"))
-    # Speculative decoding keeps the dummy batch on the replicated path.
+    manager = _ReplicatedPCPManager(2, pcp_rank, torch.device("cpu"))
+    # Exercise the replicated dummy layout explicitly.
     manager.vllm_config = _make_pcp_config(
         CUDAGraphMode.NONE,
         speculative_config=SimpleNamespace(num_speculative_tokens=3),
@@ -1197,7 +1228,7 @@ def test_speculative_decode_keeps_draft_tokens_on_pcp_ranks(pcp_rank):
     batch.is_padding = torch.zeros(4, dtype=torch.bool)
     batch.num_draft_tokens = 3
     batch.num_draft_tokens_per_req = np.array([3], dtype=np.int32)
-    manager = AscendPCPManager(8, pcp_rank, torch.device("cpu"), max_num_reqs=1, max_num_tokens=32)
+    manager = _ReplicatedPCPManager(8, pcp_rank, torch.device("cpu"), max_num_reqs=1, max_num_tokens=32)
     manager.vllm_config = _make_pcp_config(CUDAGraphMode.FULL_DECODE_ONLY)
     manager.vllm_config.speculative_config = SimpleNamespace(num_speculative_tokens=3)
     with (
@@ -1206,7 +1237,7 @@ def test_speculative_decode_keeps_draft_tokens_on_pcp_ranks(pcp_rank):
     ):
         local = manager.partition_batch(batch)
     assert manager.get_num_tokens_for_dispatch(batch.num_scheduled_tokens, batch.is_prefilling_np) == 4
-    # FULL_DECODE_ONLY with speculation stays replicated, so every rank keeps the tokens.
+    # Replicated layouts keep the target verification tokens on every rank.
     assert local.num_tokens == 4
     assert local.req_ids == batch.req_ids
     assert batch.num_draft_tokens_per_req.tolist() == [3]
