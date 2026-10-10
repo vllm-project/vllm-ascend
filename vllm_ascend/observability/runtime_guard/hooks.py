@@ -57,10 +57,11 @@ _SCHEDULER_OUTPUT_ATTR = "_pending_scheduler_output"
 def runtime_guard_step(execute_model_fn):
     """Wave-level runtime_guard sync for ``execute_model`` (v2).
 
-    - before the step body: ``sync_for_step`` (config bus, wave arm, reap)
+    - before the step body: ``sync_for_step`` (config bus, wave arm, reap;
+      no-op on non-last PP)
     - ``finally``: ``end_of_wave_sync(allow_manual_dump=False)`` on no-sample paths
-      (early return / exception / dummy wave) so the lockstep collectives can
-      never be skipped.
+      (early return / exception / dummy wave) so last-PP lockstep collectives
+      can never be skipped.
 
     Must be listed BELOW ``@torch.inference_mode()``.
     """
@@ -85,9 +86,9 @@ def runtime_guard_step(execute_model_fn):
 def runtime_guard_idle_step(dummy_batch_fn):
     """Worker-level wave sync for idle DP ranks (``execute_dummy_batch``).
 
-    Same lockstep gate as ``runtime_guard_step`` — do not soft-fail
-    ``sync_for_step`` (busy ranks take the same collectives). Guard lives on
-    ``self.model_runner`` when v2 is bound; v1 runners have no guard yet.
+    Same last-PP lockstep gate as ``runtime_guard_step`` — do not soft-fail
+    ``sync_for_step`` (busy last-PP TP ranks take the same collectives). Guard
+    lives on ``self.model_runner`` when v2 is bound; v1 runners have no guard yet.
     """
 
     @functools.wraps(dummy_batch_fn)

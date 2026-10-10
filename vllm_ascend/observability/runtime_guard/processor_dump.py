@@ -37,6 +37,7 @@ from vllm_ascend.observability.runtime_guard.rank_gate import (
     dump_rank_tag,
     runner_tp_rank,
     should_dump_kv_on_rank,
+    should_run_wave_sync_on_rank,
 )
 from vllm_ascend.observability.runtime_guard.state import RequestGuardStore
 
@@ -132,9 +133,12 @@ class RuntimeGuardDumpMixin:
 
         Async last-PP TP path: wave-head only submitted the due broadcast;
         collectives finish here (ideally already done during forward). Sync /
-        file paths have nothing inflight — drain is a no-op.
+        file paths have nothing inflight — drain is a no-op. Non-last PP
+        returns immediately (same gate as ``sync_for_step``).
         ``allow_manual_dump``: False on dummy / no-sample (do not burn manual_dump).
         """
+        if not should_run_wave_sync_on_rank():
+            return
         try:
             self._drain_merged_bus(warn_if_pending=True)
         except Exception as exc:

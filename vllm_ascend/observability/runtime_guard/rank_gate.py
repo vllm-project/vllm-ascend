@@ -142,6 +142,20 @@ def should_dump_kv_on_rank() -> bool:
         return False
 
 
+def should_run_wave_sync_on_rank() -> bool:
+    """True when this rank should run ``sync_for_step`` / ``end_of_wave_sync``.
+
+    Config bus + KV dump live on last PP only. Early PP stages already no-op
+    detect/dump via other gates; skipping the wave entry avoids empty local
+    poll / wave advance. If the PP group is unavailable, keep sync (fail-open)
+    so single-process / pre-init paths behave as before.
+    """
+    try:
+        return bool(get_pp_group().is_last_rank)
+    except Exception:
+        return True
+
+
 def is_action_leader_rank(runner: Any) -> bool:
     """Rank that writes reports and arms dump (last-PP TP0).
 

@@ -39,7 +39,10 @@ from vllm_ascend.observability.runtime_guard.io import RequestIoSnapshotManager
 from vllm_ascend.observability.runtime_guard.processor_bus import RuntimeGuardBusMixin
 from vllm_ascend.observability.runtime_guard.processor_dump import RuntimeGuardDumpMixin
 from vllm_ascend.observability.runtime_guard.processor_report import RuntimeGuardReportMixin
-from vllm_ascend.observability.runtime_guard.rank_gate import runner_tp_rank
+from vllm_ascend.observability.runtime_guard.rank_gate import (
+    runner_tp_rank,
+    should_run_wave_sync_on_rank,
+)
 from vllm_ascend.observability.runtime_guard.report import ReportWriter
 from vllm_ascend.observability.runtime_guard.state import DumpQuota, RequestGuardStore, WaveTracker
 
@@ -259,15 +262,19 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         Wave-head: merged config+dump TP0 due-broadcast (idle pays only that).
         End-of-wave: deferred auto D2H + local manual dump (no dump collective).
 
-        Must run on every rank of that EngineCore each wave — including idle
-        DP ranks that take ``execute_dummy_batch`` and skip ``execute_model``.
-        Do not put this inside ``_dummy_run``: ``execute_model`` may already
-        sync then call ``_dummy_run``. Never use a cross-DP full-world
-        collective for config hot-reload.
+        Must run on every **last-PP** rank of that EngineCore each wave —
+        including idle DP ranks that take ``execute_dummy_batch`` and skip
+        ``execute_model``. Non-last PP returns immediately (no cross-PP bus;
+        detect/dump already gated elsewhere). Do not put this inside
+        ``_dummy_run``: ``execute_model`` may already sync then call
+        ``_dummy_run``. Never use a cross-DP full-world collective for config
+        hot-reload.
 
         ``scheduler_output`` (optional): lets MRV2 see scheduled tokens for
         later manual dump at end-of-wave after prepare.
         """
+        if not should_run_wave_sync_on_rank():
+            return
         # Rank introspection for debug logs only: skip the getattrs and the
         # get_pp_group() try/except when DEBUG is off (guard-all-off zero cost).
         debug_on = logger.isEnabledFor(logging.DEBUG)

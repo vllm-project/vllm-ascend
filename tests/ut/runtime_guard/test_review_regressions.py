@@ -2213,6 +2213,32 @@ def test_v28e_static_idle_drop_refunds_quota(monkeypatch):
     assert p._kv_dump_jobs == []
 
 
+def test_v28f_non_last_pp_skips_wave_sync_and_end_of_wave(monkeypatch):
+    """Early PP: sync_for_step / end_of_wave_sync return at the entrance gate."""
+    from vllm_ascend.observability.runtime_guard import processor as processor_mod
+    from vllm_ascend.observability.runtime_guard import processor_dump
+
+    monkeypatch.setattr(processor_mod, "should_run_wave_sync_on_rank", lambda: False)
+    monkeypatch.setattr(processor_dump, "should_run_wave_sync_on_rank", lambda: False)
+
+    p = _bare_processor()
+    p.wave_tracker = MagicMock()
+    p.runtime_config = MagicMock()
+    p.refresh_config = MagicMock()  # type: ignore[method-assign]
+    p._drain_merged_bus = MagicMock()  # type: ignore[method-assign]
+    p._maybe_fire_manual_local = MagicMock()  # type: ignore[method-assign]
+    # Restore real end_of_wave_sync (bare_processor stubs it).
+    p.end_of_wave_sync = RuntimeGuardProcessor.end_of_wave_sync.__get__(p)  # type: ignore[method-assign]
+
+    RuntimeGuardProcessor.sync_for_step(p, allow_manual_dump=True)
+    p.wave_tracker.advance.assert_not_called()
+    p.refresh_config.assert_not_called()
+
+    RuntimeGuardProcessor.end_of_wave_sync(p, allow_manual_dump=True)
+    p._drain_merged_bus.assert_not_called()
+    p._maybe_fire_manual_local.assert_not_called()
+
+
 # ------------------------------------------------- V29 (reap finished index)
 
 
