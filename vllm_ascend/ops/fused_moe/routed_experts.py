@@ -15,6 +15,7 @@
 # limitations under the License.
 #
 from collections.abc import Iterable
+from contextlib import contextmanager
 from copy import copy
 from types import SimpleNamespace
 
@@ -99,6 +100,34 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
     def supports_fused_activation(self, activation) -> bool:
         return False
+
+    @staticmethod
+    def validate_checkpoint_weight_loader_view(layer):
+        parameters = [getattr(layer, name, None) for name in ("w13_weight", "w2_weight")]
+        if any(parameter is None for parameter in parameters):
+            raise NotImplementedError("Checkpoint sparse updates require unsplit ND expert weights")
+        if any(torch_npu.get_npu_format(parameter) not in (0, 2) for parameter in parameters):
+            raise NotImplementedError("Checkpoint sparse updates require ND expert weights")
+
+    @contextmanager
+    def checkpoint_weight_loader_view(self, layer):
+        """Temporarily undo the inference transpose without replacing storage.
+
+        The upstream expert loader expects [expert, output, input], whereas
+        Ascend GMM consumes [expert, input, output]. Restoring the original
+        views in finally also preserves graph addresses and parameter loaders.
+        Split expert lists and NZ tensors need a different update mechanism.
+        """
+        self.validate_checkpoint_weight_loader_view(layer)
+        parameters = [layer.w13_weight, layer.w2_weight]
+        originals = [parameter.data for parameter in parameters]
+        try:
+            for parameter, original in zip(parameters, originals):
+                parameter.data = original.transpose(1, 2)
+            yield
+        finally:
+            for parameter, original in zip(parameters, originals):
+                parameter.data = original
 
     def process_weights_after_loading(self, layer):
         super(UnquantizedFusedMoEMethod, self).process_weights_after_loading(layer)
