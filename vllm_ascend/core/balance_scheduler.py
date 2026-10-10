@@ -1,41 +1,72 @@
-#
-# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-# This file is a part of the vllm-ascend project.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-#
-"""Scheduler subclass with profiling-based dynamic chunk sizing.
+# mypy: ignore-errors
+"""Balance scheduler implementations.
 
-The ``schedule()`` override below is based on the ``Scheduler.schedule()``
-from the vLLM commit pinned by ``.github/vllm-main-verified.commit``. When the
-pin advances, this override must be synchronized again.
+Keeps running-request counts even across DP ranks: every step an all-gather
+of each rank's ``len(running)`` runs once via ``BalanceScheduler.balance_gather``
+(invoked from the engine core, NOT from inside ``schedule()``); if any rank
+was at the running cap at the end of the previous step, every rank stops
+admitting new WAITING requests (``any-rank-at-cap => global freeze``). Each
+rank reaches that decision independently from the same gathered snapshot --
+there is no leader. See ``docs/.../balance_schedule_refactor.md`` for the
+design.
+
+The ``schedule()`` body is synchronized with ``Scheduler.schedule()`` from the
+vLLM commit pinned by ``.github/vllm-main-verified.commit`` (currently
+``ced6857afa0ea7b2e3f0846a62e1394e90f15607``), plus exactly two balance
+deltas: (1) the ``balance_flag`` break inside the WAITING loop
+(``any-rank-at-cap => global freeze``), and (2) ``if request_queue is None:
+break`` in place of upstream's ``assert request_queue is not None`` (so a
+drained-rank schedule does not assert when balance defers admission).
+
+The engine-core side is NOT copied: ``BalanceDPEngineCoreProc`` hooks
+``_has_global_unfinished_reqs`` (called every iteration by upstream's
+``run_busy_loop`` on every non-idle path) to inject the DP group and run
+``balance_gather`` once per step. The gather lives in the engine core, NOT
+inside ``schedule()``: a rank that has drained its local requests never enters
+``schedule()`` (it runs a dummy batch instead), so an ``all_gather`` in
+``schedule()`` would be skipped by that rank while busy ranks call it -- a
+collective mismatch that deadlocks.
+
+The gather is hooked IMMEDIATELY AFTER ``super()._has_global_unfinished_reqs()``
+(not inside ``_process_engine_step``). ``_has_global_unfinished_reqs`` is
+itself a cross-rank collective (an all-reduce every 32 steps internally) and is
+the only point in the busy loop that re-synchronizes ranks on wave/idle state.
+Hooking gather right after it keeps the every-step all-gather in the same
+lock-stepped region, so ranks enter the gather having just agreed on
+``engines_running``. Hooking it earlier -- inside ``_process_engine_step``,
+before that sync and before the idle ``continue`` gate -- decouples the gather
+from the synchronization: at wave boundaries one rank can reach the gather
+while another is still blocked in ``_process_input_queue`` or
+``future.result()``, deadlocking the all-gather. The stuck EngineCore then
+can't drain its worker shm channel, the worker's ``sample_tokens`` response
+has nowhere to land, and after 60s the engine dies with
+``RPC call to sample_tokens timed out``. ``_has_global_unfinished_reqs`` is
+only called on iterations that did NOT take the idle ``continue``, so gather
+is skipped consistently by every rank when all are idle -- no rank does an
+extra gather.
+
+The engine core class is swapped via the module-level ``DPEngineCoreProc``
+reference. This works ONLY because upstream's ``run_engine_core`` resolves
+that name at call time rather than binding it at import -- if upstream ever
+switches to an import-time binding the swap silently stops taking effect, so
+the call-time lookup is a load-bearing assumption. The swap is done ONLY when
+balance scheduling is enabled (conditional activation, so balance does not
+touch configs that do not use it, e.g. PD-disaggregated recompute). The
+scheduler class itself is selected explicitly through
+``scheduler_config.scheduler_cls``.
 """
 
-import inspect
 import time
 
-from vllm.config import VllmConfig
+import torch
+import torch.distributed as dist
 from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
 from vllm.logger import logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.interface import PauseState
-from vllm.v1.core.sched.output import (
-    KVConnectorBlockState,
-    NewRequestData,
-    SchedulerOutput,
-)
+from vllm.v1.core.sched.output import KVConnectorBlockState, NewRequestData, SchedulerOutput
 from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import EngineCoreEventType
@@ -44,27 +75,16 @@ from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
-from vllm_ascend.core.profiling_chunk_predictor import ProfilingChunkManager
+from vllm_ascend.ascend_config import init_ascend_config
 
 
-class ProfilingChunkScheduler(Scheduler):
-    """Scheduler with profiling-based dynamic chunk sizing.
-
-    During initialization, the scheduler profiles prefill latency at various
-    chunk sizes by calling ``profile_prefill_latency`` on each worker via
-    ``collective_rpc``.  A quadratic latency model is then fitted, and during
-    scheduling the model predicts the optimal chunk size for each waiting
-    request based on its ``num_computed_tokens``.
-    """
-
+class BalanceScheduler(Scheduler):
     def __init__(
         self,
-        vllm_config: VllmConfig,
+        vllm_config,
         kv_cache_config: KVCacheConfig,
         structured_output_manager: StructuredOutputManager,
         block_size: int,
-        # `hash_block_size` was added in vLLM #40946; keep it optional so the
-        # subclass works on both pinned vllm and main.
         hash_block_size: int | None = None,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         include_finished_set: bool = False,
@@ -75,270 +95,46 @@ class ProfilingChunkScheduler(Scheduler):
             kv_cache_config,
             structured_output_manager,
             block_size,
-            hash_block_size=hash_block_size,
-            mm_registry=mm_registry,
-            include_finished_set=include_finished_set,
-            log_stats=log_stats,
+            hash_block_size,
+            mm_registry,
+            include_finished_set,
+            log_stats,
         )
-
-        from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
-
-        init_ascend_config(vllm_config)
-        scheduler_extension_config = get_ascend_config().scheduler_config
-
-        profiling_cfg = scheduler_extension_config.profiling_chunk_config
-        self.profiling_chunk_config = profiling_cfg
-
-        short_request_first_config = scheduler_extension_config.short_request_first_config
-
+        short_request_first_config = init_ascend_config(vllm_config).scheduler_config.short_request_first_config
         if short_request_first_config.enabled:
-            from vllm_ascend.core.short_request_first_scheduler import (
-                install_short_request_first_waiting_queue,
-            )
+            from vllm_ascend.core.short_request_first_scheduler import install_short_request_first_waiting_queue
 
             install_short_request_first_waiting_queue(
                 self,
                 threshold=short_request_first_config.threshold,
                 long_max_wait_ms=short_request_first_config.long_max_wait_ms,
             )
-        base_chunk = self.max_num_scheduled_tokens
+        # Injected by BalanceDPEngineCoreProc._has_global_unfinished_reqs
+        # before the first gather.
+        self.dp_group = None
+        self.balance_queue = [
+            torch.tensor([0], dtype=torch.int, device="cpu")
+            for _ in range(self.vllm_config.parallel_config.data_parallel_size)
+        ]
 
-        self.profiling_chunk_manager = ProfilingChunkManager(
-            base_chunk_size=base_chunk,
-            page_size=self.cache_config.block_size,
-            smooth_factor=profiling_cfg.smooth_factor,
-            min_chunk=profiling_cfg.min_chunk,
-            max_fit_chunk=profiling_cfg.max_fit_chunk,
-        )
-        self._profiling_initialized = False
-        # DP prefill balancing state for the throttle_prefills path; updated
-        # at the end of every schedule() step that admits prefills.
-        self.prefill_capacity_bound: bool = False
+    def balance_gather(self):
+        """All-gather per-rank running counts into ``self.balance_queue``.
 
-        logger.info(
-            "[ProfilingChunk] Scheduler initialized. base_chunk=%d, page_size=%d, smooth_factor=%.2f, min_chunk=%d",
-            base_chunk,
-            self.cache_config.block_size,
-            profiling_cfg.smooth_factor,
-            profiling_cfg.min_chunk,
-        )
-
-    # ------------------------------------------------------------------
-    # Profiling initialization
-    # ------------------------------------------------------------------
-
-    def run_profiling_chunk_init(self, model_executor) -> None:
-        """Profile prefill latency using real model forward passes.
-
-        Called by EngineCore after model_executor is ready.  Collects latency
-        samples at different chunk sizes and fits the quadratic model.
+        Called once per busy-loop iteration from
+        ``BalanceDPEngineCoreProc._has_global_unfinished_reqs`` (immediately
+        after the cross-rank all-reduce, which runs after ``schedule()`` +
+        execute + ``update_from_output()``). This MUST be invoked on every
+        rank every non-idle iteration, including dummy-batch iterations where
+        a drained rank never enters ``schedule()`` --
+        ``all_gather`` is a collective, so any rank skipping it deadlocks
+        the busy ranks. Returns early until the DP group has been injected.
         """
-        if self._profiling_initialized:
+        if self.dp_group is None:
             return
-        self._profiling_initialized = True
+        running_tensor = torch.tensor([len(self.running)], dtype=torch.int, device="cpu")
+        dist.all_gather(self.balance_queue, running_tensor, group=self.dp_group)
 
-        if model_executor is None:
-            logger.warning("[ProfilingChunk] No model_executor provided, skipping profiling")
-            return
-
-        logger.info("[ProfilingChunk] Running startup profiling with real model forward...")
-
-        seq_lens: list[int] = []
-        latencies: list[float] = []
-
-        base_chunk_size = self.profiling_chunk_manager.base_chunk_size
-        num_samples = 64
-
-        # Determine unique_reply_rank for PP setups
-        rpc_kwargs = self._build_rpc_kwargs(model_executor)
-
-        total_steps = num_samples + 1
-        log_interval = max(1, total_steps // 10)
-        t_start = time.perf_counter()
-
-        for i in range(total_steps):
-            chunk_size = int(base_chunk_size - (i - 1) * (base_chunk_size / num_samples))
-            if chunk_size <= 0:
-                break
-
-            if i % log_interval == 0 or i == total_steps - 1:
-                elapsed = time.perf_counter() - t_start
-                logger.info(
-                    "[ProfilingChunk] Profiling prefill latency: %d/%d samples done (chunk=%d, elapsed=%.1fs)",
-                    max(i - 1, 0),
-                    num_samples,
-                    chunk_size,
-                    elapsed,
-                )
-
-            try:
-                result = model_executor.collective_rpc(
-                    "profile_prefill_latency",
-                    args=(chunk_size,),
-                    **rpc_kwargs,
-                )
-
-                # First iteration is warm-up
-                if i == 0:
-                    continue
-
-                latency_ms = self._extract_latency(result)
-                if latency_ms is None:
-                    continue
-
-                seq_lens.append(chunk_size)
-                latencies.append(latency_ms)
-
-            except Exception as e:
-                logger.debug(
-                    "[ProfilingChunk] Forward failed for chunk=%d: %s",
-                    chunk_size,
-                    e,
-                )
-                continue
-
-        if len(seq_lens) < 8:
-            logger.warning(
-                "[ProfilingChunk] Profiling failed: only %d/8 samples collected",
-                len(seq_lens),
-            )
-            return
-
-        logger.info(
-            "[ProfilingChunk] Collected %d samples. Latency range: [%.2f, %.2f] ms",
-            len(seq_lens),
-            min(latencies),
-            max(latencies),
-        )
-
-        predictor = self.profiling_chunk_manager.predictor
-        if not predictor.fit(seq_lens, latencies):
-            return
-
-        predictor.set_target_latency(base_chunk_size)
-        predictor.is_ready = True
-        self.profiling_chunk_manager._profiling_done = True
-
-        logger.info("[ProfilingChunk] Profiling completed successfully")
-
-    @staticmethod
-    def _build_rpc_kwargs(model_executor) -> dict:
-        """Build kwargs for collective_rpc, handling PP unique_reply_rank."""
-        kwargs: dict = {}
-        if not hasattr(model_executor, "collective_rpc"):
-            return kwargs
-
-        sig = inspect.signature(model_executor.collective_rpc)
-        if "unique_reply_rank" not in sig.parameters:
-            return kwargs
-
-        try:
-            pc = model_executor.vllm_config.parallel_config
-            output_rank = pc.world_size - pc.tensor_parallel_size * pc.prefill_context_parallel_size
-            kwargs["unique_reply_rank"] = output_rank
-        except AttributeError:
-            pass
-
-        return kwargs
-
-    @staticmethod
-    def _extract_latency(result) -> float | None:
-        """Extract latency value from collective_rpc result."""
-        if isinstance(result, (int, float)):
-            return float(result)
-        if isinstance(result, list) and len(result) > 0:
-            return float(result[0])
-        return None
-
-    def _record_execution_timing(self, scheduler_output, model_output) -> None:
-        """Record execution timing for online model refinement."""
-        profiling_mgr = self.profiling_chunk_manager
-        set_time_count = 3
-        if not profiling_mgr.is_ready:
-            return
-
-        # Once both the target latency and history model are calibrated,
-        # stop collecting timing data and disable the synchronize-and-time
-        # calls in the model runner to avoid unnecessary pipeline stalls.
-        if profiling_mgr._set_time_done and profiling_mgr.predictor.history_fitted:
-            try:
-                from vllm_ascend.ascend_config import get_ascend_config
-
-                get_ascend_config().scheduler_config.profiling_chunk_config.need_timing = False
-            except RuntimeError:
-                pass
-            # Propagate this state through the next SchedulerOutput so the
-            # worker process disables its process-local timing as well.
-            self._profiling_timing_done = True
-            return
-
-        elapsed_time_ms = getattr(model_output, "execution_time_ms", 0.0)
-        if elapsed_time_ms <= 0:
-            return
-        elapsed_time = elapsed_time_ms / 1000.0
-
-        try:
-            total_tokens = getattr(scheduler_output, "total_num_scheduled_tokens", 0)
-            if total_tokens <= 0:
-                return
-
-            num_scheduled_tokens = getattr(scheduler_output, "num_scheduled_tokens", {})
-            request_chunks = []
-
-            total_hist_tokens = 0
-            new_reqs = getattr(scheduler_output, "scheduled_new_reqs", [])
-            for req in new_reqs:
-                req_id = getattr(req, "request_id", None) or getattr(req, "req_id", None)
-                if req_id and req_id in num_scheduled_tokens:
-                    chunk_size = num_scheduled_tokens[req_id]
-                    hist_seq_len = getattr(req, "num_computed_tokens", 0)
-                    total_hist_tokens += hist_seq_len
-                    if chunk_size > 0:
-                        request_chunks.append((chunk_size, hist_seq_len))
-
-            cached_reqs = getattr(scheduler_output, "scheduled_cached_reqs", None)
-            if cached_reqs is not None:
-                req_ids = getattr(cached_reqs, "req_ids", [])
-                computed_tokens_list = getattr(cached_reqs, "num_computed_tokens", [])
-                for i, req_id in enumerate(req_ids):
-                    if req_id in num_scheduled_tokens:
-                        chunk_size = num_scheduled_tokens[req_id]
-                        hist_seq_len = computed_tokens_list[i] if i < len(computed_tokens_list) else 0
-                        total_hist_tokens += hist_seq_len
-                        if chunk_size > 0:
-                            request_chunks.append((chunk_size, hist_seq_len))
-
-            # Collect three first-chunk samples before marking calibration done.
-            if total_hist_tokens == 0 and not profiling_mgr._set_time_done:
-                profiling_mgr.predictor.set_target_latency(0, elapsed_time * 1000)
-                profiling_mgr._set_time_count += 1
-                if profiling_mgr._set_time_count >= set_time_count:
-                    profiling_mgr._set_time_done = True
-
-            if not request_chunks:
-                logger.debug("[ProfilingChunk] Skipping timing sample: unable to extract per-request chunk info")
-                return
-
-            if not profiling_mgr.predictor.history_fitted:
-                profiling_mgr.record_batch_execution_time(request_chunks, elapsed_time)
-
-        except (AttributeError, TypeError) as e:
-            logger.debug("Failed to record execution timing: %s", e)
-
-    def update_from_output(self, scheduler_output, model_output):
-        self._record_execution_timing(scheduler_output, model_output)
-        return super().update_from_output(scheduler_output, model_output)
-
-    # ------------------------------------------------------------------
-    # schedule() override
-    # ------------------------------------------------------------------
-    # The method below is based on the upstream Scheduler.schedule()
-    # with profiling-based chunk sizing applied to both RUNNING requests
-    # (chunked prefill continuation) and WAITING requests (new prefill).
-    # Modified sections are marked with ">>> PROFILING CHUNK" comments.
-    # ------------------------------------------------------------------
-
-    def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:  # noqa: C901
+    def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
@@ -358,10 +154,6 @@ class ProfilingChunkScheduler(Scheduler):
 
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
-        # >>> PROFILING CHUNK >>>
-        target_latency = self.profiling_chunk_manager.predictor.target_latency
-        time_budget = target_latency if target_latency is not None else float("inf")
-        # <<< PROFILING CHUNK <<<
         token_budget = self.max_num_scheduled_tokens
         spec = self.vllm_config.speculative_config
         draft_slots = spec.max_num_new_slots_for_drafting if spec is not None else 0
@@ -393,9 +185,7 @@ class ProfilingChunkScheduler(Scheduler):
 
         # First, schedule the RUNNING requests.
         req_index = 0
-        # >>> PROFILING CHUNK >>>
-        while req_index < len(self.running) and token_budget > 0 and time_budget > 0:
-            # <<< PROFILING CHUNK <<<
+        while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
             if input_budget <= draft_slots:
                 break
@@ -499,38 +289,6 @@ class ProfilingChunkScheduler(Scheduler):
                 req_index += 1
                 continue
 
-            # >>> PROFILING CHUNK: dynamic chunk sizing for RUNNING >>>
-            if (
-                self.profiling_chunk_manager is not None
-                and self.profiling_chunk_manager.is_ready
-                and request.num_computed_tokens < request.num_prompt_tokens
-                and (request.num_computed_tokens > 0 or not self.profiling_chunk_config.need_timing)
-            ):
-                predicted_chunk = self.profiling_chunk_manager.predict_chunk_size(
-                    num_computed_tokens=request.num_computed_tokens,
-                    target_time=time_budget,
-                )
-                if predicted_chunk is not None and predicted_chunk > 0:
-                    logger.debug(
-                        "[ProfilingChunk] Dynamic chunk for %s: %s -> %s (predicted=%s)",
-                        request.request_id,
-                        num_new_tokens,
-                        min(predicted_chunk, num_new_tokens),
-                        predicted_chunk,
-                    )
-                    num_new_tokens = min(predicted_chunk, num_new_tokens)
-                elif self.profiling_chunk_config.need_timing:
-                    logger.info("[Dynamic Chunk] Online calibration stage. Long requests are better")
-                elif time_budget == target_latency:
-                    logger.warning_once(
-                        "[Dynamic Chunk] Profiling failed; falling back to a "
-                        "fixed chunk size. Increase max_fit_chunk to profile "
-                        "more data."
-                    )
-                else:
-                    break
-            # <<< PROFILING CHUNK <<<
-
             # Schedule newly needed KV blocks for the request.
             with record_function_or_nullcontext("schedule: allocate_slots"):
                 while True:
@@ -608,12 +366,6 @@ class ProfilingChunkScheduler(Scheduler):
             num_scheduled_tokens[request_id] = num_new_tokens
             token_budget -= num_new_tokens
             input_budget -= num_new_tokens + draft_slots
-            # >>> PROFILING CHUNK >>>
-            # Decode requests (num_new_tokens == 1) have negligible latency;
-            # skip time_budget accounting so they don't starve other requests.
-            if request.num_computed_tokens < request.num_prompt_tokens:
-                time_budget -= self.profiling_chunk_manager.predict_time(num_new_tokens, request.num_computed_tokens)
-            # <<< PROFILING CHUNK <<<
             req_index += 1
 
             # Speculative decode related.
@@ -660,9 +412,7 @@ class ProfilingChunkScheduler(Scheduler):
         if not preempted_reqs and self._pause_state == PauseState.UNPAUSED:
             step_skipped_waiting = create_request_queue(self.policy)
 
-            # >>> PROFILING CHUNK >>>
-            while (self.waiting or self.skipped_waiting) and token_budget > 0 and time_budget > 0:
-                # <<< PROFILING CHUNK <<<
+            while (self.waiting or self.skipped_waiting) and token_budget > 0:
                 if input_budget <= draft_slots:
                     break
                 # Paused streaming sessions (WAITING_FOR_STREAMING_REQ) are not
@@ -671,8 +421,17 @@ class ProfilingChunkScheduler(Scheduler):
                 if num_running >= self.max_num_running_reqs:
                     break
 
+                # delta for balance scheduling: if any rank was at
+                # the running cap after the previous step, stop admitting new
+                # waiting requests on every rank.
+                if max(t.item() for t in self.balance_queue) == self.max_num_running_reqs:
+                    break
+
                 request_queue = self._select_waiting_queue_for_scheduling()
-                assert request_queue is not None
+                # delta for balance scheduling: a drained rank has no queue
+                # while admission is deferred, so do not assert as upstream does.
+                if request_queue is None:
+                    break
 
                 request = request_queue.peek_request()
                 request_id = request.request_id
@@ -859,31 +618,6 @@ class ProfilingChunkScheduler(Scheduler):
                     if 0 < threshold < num_new_tokens:
                         num_new_tokens = threshold
 
-                    # >>> PROFILING CHUNK: dynamic chunk sizing >>>
-                    if (
-                        self.profiling_chunk_manager is not None
-                        and self.profiling_chunk_manager.is_ready
-                        and request.num_computed_tokens < request.num_prompt_tokens
-                        and (request.num_computed_tokens > 0 or not self.profiling_chunk_config.need_timing)
-                    ):
-                        predicted_chunk = self.profiling_chunk_manager.predict_chunk_size(
-                            num_computed_tokens=num_computed_tokens,
-                            target_time=time_budget,
-                        )
-                        if predicted_chunk is not None and predicted_chunk > 0:
-                            num_new_tokens = min(num_new_tokens, predicted_chunk)
-                        elif self.profiling_chunk_config.need_timing:
-                            logger.info("[Dynamic Chunk] Online calibration stage. Long requests are better")
-                        elif time_budget == target_latency:
-                            logger.warning_once(
-                                "[Dynamic Chunk] Profiling failed; falling back "
-                                "to a fixed chunk size. Increase max_fit_chunk "
-                                "to profile more data."
-                            )
-                        else:
-                            break
-                    # <<< PROFILING CHUNK <<<
-
                     # chunked prefill has to be enabled explicitly to allow
                     # pooling requests to be chunked
                     if not self.scheduler_config.enable_chunked_prefill and num_new_tokens > request_token_budget:
@@ -1052,14 +786,6 @@ class ProfilingChunkScheduler(Scheduler):
                 num_scheduled_tokens[request_id] = num_new_tokens
                 token_budget -= num_new_tokens
                 input_budget -= num_new_tokens + draft_slots
-                # >>> PROFILING CHUNK >>>
-                # Decode requests (num_new_tokens == 1) have negligible latency;
-                # skip time_budget accounting so they don't starve other requests.
-                if request.num_computed_tokens < request.num_prompt_tokens:
-                    time_budget -= self.profiling_chunk_manager.predict_time(
-                        num_new_tokens, request.num_computed_tokens
-                    )
-                # <<< PROFILING CHUNK <<<
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
                 if pad_spec_decode:
@@ -1233,24 +959,8 @@ class ProfilingChunkScheduler(Scheduler):
 
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
-        # >>> PROFILING CHUNK: propagate timing completion to workers >>>
-        if getattr(self, "_profiling_timing_done", False) and scheduler_output is not None:
-            scheduler_output.disable_profiling_timing = True
-        # <<< PROFILING CHUNK <<<
         return scheduler_output
 
 
-class ProfilingChunkAsyncScheduler(AsyncScheduler, ProfilingChunkScheduler):
-    """Profiling-chunk scheduler variant for async scheduling.
-
-    MRO: ``AsyncScheduler`` contributes the output-placeholder accounting
-    (``_update_after_schedule`` / ``_update_request_with_output``);
-    ``ProfilingChunkScheduler`` contributes ``__init__`` and the copied
-    ``schedule()``, which dispatches ``self._update_after_schedule()`` to
-    the async implementation.
-
-    Dynamic chunk sizing stays exact under async scheduling: upstream does
-    not add output placeholders to prefill-chunk requests, so the
-    ``num_computed_tokens`` read by the chunk predictor is the true prefix
-    length for every request still in prefill.
-    """
+class AsyncBalanceScheduler(AsyncScheduler, BalanceScheduler):
+    """Balance scheduler with vLLM asynchronous output handling."""

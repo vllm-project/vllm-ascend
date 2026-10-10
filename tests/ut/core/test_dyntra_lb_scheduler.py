@@ -394,25 +394,23 @@ def test_dyntra_lb_does_not_resume_deliverable_stale_output():
     assert request.request_id in resumed_output.num_scheduled_tokens
 
 
-def test_dyntra_lb_v026_waits_for_paused_in_flight_output():
-    scheduler = SimpleNamespace(_lb_paused_req_ids={"paused"})
-    paused_request = SimpleNamespace(
-        request_id="paused",
-        num_in_flight_tokens=1,
+def test_dyntra_lb_resumes_when_stale_output_is_dropped():
+    vllm_config = make_dyntra_test_config()
+    vllm_config.kv_transfer_config = None
+    scheduler = create_dyntra_lb_scheduler(
+        vllm_config,
+        scheduler_cls=DyntraLBScheduler,
     )
-    normally_preempted_request = SimpleNamespace(
-        request_id="other",
-        num_in_flight_tokens=1,
-    )
+    request = create_request(request_id=1)
+    scheduler.add_request(request)
+    request.num_stale_output_tokens = 1
+    request.drop_stale_output = True
 
-    assert DyntraLBPolicyMixin._has_pending_deliverable_output(
-        scheduler,
-        paused_request,
-    )
-    assert not DyntraLBPolicyMixin._has_pending_deliverable_output(
-        scheduler,
-        normally_preempted_request,
-    )
+    scheduler_output = scheduler.schedule()
+
+    assert request in scheduler.running
+    assert request not in scheduler.skipped_waiting
+    assert request.request_id in scheduler_output.num_scheduled_tokens
 
 
 def test_dyntra_lb_reconciles_connector_hit_with_local_partial_tail(monkeypatch):
@@ -428,6 +426,11 @@ def test_dyntra_lb_reconciles_connector_hit_with_local_partial_tail(monkeypatch)
         block_size=block_size,
     )
     scheduler.add_request(request)
+    monkeypatch.setattr(
+        type(scheduler.connector),
+        "supports_divergent_local_hybrid_hits",
+        property(lambda self: True),
+    )
     empty_blocks = scheduler.kv_cache_manager.empty_kv_cache_blocks
     connector_local_token_counts = []
     truncate_calls = []
@@ -468,7 +471,7 @@ def test_dyntra_lb_reconciles_connector_hit_with_local_partial_tail(monkeypatch)
     assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
 
 
-def test_dyntra_lb_v026_uses_release_connector_lookup(monkeypatch):
+def test_dyntra_lb_uses_standard_lookup_without_divergent_hits(monkeypatch):
     block_size = 16
     vllm_config = make_dyntra_test_config(block_size=block_size)
     scheduler = create_dyntra_lb_scheduler(
@@ -481,31 +484,38 @@ def test_dyntra_lb_v026_uses_release_connector_lookup(monkeypatch):
         block_size=block_size,
     )
     scheduler.add_request(request)
+    monkeypatch.setattr(
+        type(scheduler.connector),
+        "supports_divergent_local_hybrid_hits",
+        property(lambda self: False),
+    )
     empty_blocks = scheduler.kv_cache_manager.empty_kv_cache_blocks
     connector_local_token_counts = []
+    truncate_calls = []
 
-    monkeypatch.setattr(
-        scheduler.kv_cache_manager,
-        "get_computed_blocks_for_connector",
-        None,
-        raising=False,
-    )
-    monkeypatch.setattr(
-        scheduler.kv_cache_manager,
-        "truncate_computed_blocks",
-        None,
-        raising=False,
-    )
-    monkeypatch.setattr(
-        scheduler.kv_cache_manager,
-        "record_prefix_cache_stats",
-        None,
-        raising=False,
-    )
     monkeypatch.setattr(
         scheduler.kv_cache_manager,
         "get_computed_blocks",
         lambda request: (empty_blocks, 5, 0),
+    )
+
+    def unexpected_connector_lookup(request):
+        raise AssertionError("connector-specific lookup must not be used")
+
+    monkeypatch.setattr(
+        scheduler.kv_cache_manager,
+        "get_computed_blocks_for_connector",
+        unexpected_connector_lookup,
+    )
+
+    def truncate_computed_blocks(blocks, num_tokens):
+        truncate_calls.append((blocks, num_tokens))
+        return empty_blocks
+
+    monkeypatch.setattr(
+        scheduler.kv_cache_manager,
+        "truncate_computed_blocks",
+        truncate_computed_blocks,
     )
 
     def get_num_new_matched_tokens(request, num_local_tokens):
@@ -520,8 +530,9 @@ def test_dyntra_lb_v026_uses_release_connector_lookup(monkeypatch):
 
     scheduler.schedule()
 
-    assert connector_local_token_counts == [5]
-    assert request.num_computed_tokens == 13
+    assert connector_local_token_counts == [0]
+    assert truncate_calls == [(empty_blocks, 0)]
+    assert request.num_computed_tokens == 8
     assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
 
 
@@ -577,51 +588,23 @@ def test_dyntra_lb_forwards_block_state_and_encoder_cache_metadata(monkeypatch):
     assert scheduler_output.ec_manager_metadata is encoder_cache_metadata
 
 
-def test_dyntra_lb_omits_unsupported_encoder_cache_metadata(monkeypatch):
+def test_dyntra_lb_scheduler_output_uses_current_metadata_fields(monkeypatch):
     vllm_config = make_dyntra_test_config()
     scheduler = create_dyntra_lb_scheduler(
         vllm_config,
         scheduler_cls=DyntraLBScheduler,
     )
-
-    class V026SchedulerOutput(SimpleNamespace):
-        __dataclass_fields__ = {}
-
-        def __init__(self, **kwargs):
-            assert "partial_tail_offloads" not in kwargs
-            assert "ec_manager_metadata" not in kwargs
-            super().__init__(**kwargs)
-
-    def unexpected_call():
-        raise AssertionError("unsupported v0.26 extension was called")
-
-    monkeypatch.setattr(
-        dyntra_lb_scheduler_module,
-        "SchedulerOutput",
-        V026SchedulerOutput,
-    )
-    monkeypatch.setattr(
-        scheduler.kv_cache_manager,
-        "take_partial_tail_offloads",
-        unexpected_call,
-        raising=False,
-    )
+    encoder_cache_metadata = object()
     monkeypatch.setattr(
         scheduler.encoder_cache_manager,
         "get_manager_metadata",
-        unexpected_call,
-        raising=False,
-    )
-    monkeypatch.setattr(
-        scheduler,
-        "_build_kv_connector_meta",
-        lambda connector, scheduler_output: None,
+        lambda: encoder_cache_metadata,
     )
 
     scheduler_output = scheduler.schedule()
 
+    assert scheduler_output.ec_manager_metadata is encoder_cache_metadata
     assert not hasattr(scheduler_output, "partial_tail_offloads")
-    assert not hasattr(scheduler_output, "ec_manager_metadata")
 
 
 def test_dyntra_lb_refreshes_blocked_waiting_requests(monkeypatch):
@@ -1335,8 +1318,8 @@ def test_dyntra_lb_freeze_and_newly_added_out_blk():
 def test_dyntra_lb_lifecycle_hooks_clear_paused_state(monkeypatch):
     scheduler = _sync_scheduler()
     stale = SimpleNamespace(request_id="stale", num_stale_output_tokens=1)
-    legacy = SimpleNamespace(request_id="legacy")
-    scheduler._lb_paused_req_ids = {"stale", "legacy", "paused", "free"}
+    normal = SimpleNamespace(request_id="normal", num_stale_output_tokens=0)
+    scheduler._lb_paused_req_ids = {"stale", "normal", "paused", "free"}
     preempt_calls = []
     monkeypatch.setattr(
         Scheduler,
@@ -1344,8 +1327,11 @@ def test_dyntra_lb_lifecycle_hooks_clear_paused_state(monkeypatch):
         lambda self, request, timestamp, *args, **kwargs: preempt_calls.append((request.request_id, args, kwargs)),
     )
     scheduler._preempt_request(stale, 1.0, drop_stale_output=True)
-    scheduler._preempt_request(legacy, 2.0)
-    assert preempt_calls == [("stale", (), {"drop_stale_output": True}), ("legacy", (), {})]
+    scheduler._preempt_request(normal, 2.0)
+    assert preempt_calls == [
+        ("stale", (), {"drop_stale_output": True}),
+        ("normal", (), {"drop_stale_output": False}),
+    ]
     assert scheduler._lb_paused_req_ids == {"paused", "free"}
 
     paused = create_request(request_id=1)

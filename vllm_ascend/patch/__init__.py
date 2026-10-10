@@ -137,6 +137,7 @@
 #      wrapper)
 #   3. `vllm.v1.engine.core.EngineCore.post_step` (pp-mtp patch, invocation
 #      moved here from patch_pp_mtp.py)
+#   4. `vllm.v1.engine.core.EngineCore.__init__` (profiling startup hook)
 #    Why:
 #       Previously patch_balance_schedule, patch_dyntra_lb_core and
 #       patch_profiling_chunk each wrapped `EngineCoreProc.run_engine_core`
@@ -148,11 +149,12 @@
 #       late, or on the Ray engine-core path.
 #    How：
 #       Install the single `run_engine_core` wrapper: initialize the ascend
-#       config, re-apply the profiling patches when profiling chunk sizing is
-#       enabled, select `DyntraLBDPEngineCoreProc` (dyntra-lb enabled) or
-#       `BalanceDPEngineCoreProc` (balance enabled) at runtime via an explicit
-#       if/elif, then delegate to the pristine upstream entry point stashed at
-#       import. In `spawn` children, unpickling this wrapper imports this
+#       config, select `DyntraLBDPEngineCoreProc` (dyntra-lb enabled) or
+#       `BalanceDPEngineCoreProc` (balance enabled) at runtime, then delegate
+#       to the pristine upstream entry point stashed at import. Also patch
+#       `EngineCore.__init__` once so schedulers exposing
+#       `run_profiling_chunk_init` can start profiling after the model executor
+#       is ready. In `spawn` children, unpickling the run-engine wrapper imports this
 #       module, deterministically re-applying all engine-core-level patches
 #       before any `EngineCore` is instantiated.
 #    Related PR (if no, explain why):
@@ -642,34 +644,6 @@
 #       Remove this patch once upstream vLLM's `ModelConfig.verify_with_parallel_config`
 #       supports local drafter models with PP > 1, or moves the PP validation to a
 #       separate hook that can be overridden per-model-type.
-#
-# ** 18. File: platform/patch_profiling_chunk.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.engine.core.EngineCore.__init__`
-#   2. `Scheduler.update_from_output` (scheduler class, wrapped when profiling chunk is enabled)
-#    Why:
-#       Profiling-based dynamic chunk sizing needs to run a one-shot profiling pass
-#       after `model_executor` is ready, and to feed per-step execution latency back
-#       into `ProfilingChunkManager` so the history-aware chunk predictor can refine
-#       online. In multiprocessing `spawn` mode the child process starts a fresh
-#       interpreter, so monkey-patches applied in the parent are lost unless the
-#       subprocess entry point re-applies them before any `EngineCore` is created.
-#    How：
-#       Replace `EngineCore.__init__` to call `scheduler.run_profiling_chunk_init`
-#       when present, then wrap `scheduler.update_from_output` once per process to
-#       read `model_output.execution_time_ms` and `scheduler_output` token/chunk
-#       metadata and call `ProfilingChunkManager.record_batch_execution_time` (and
-#       bootstrap target latency for the first chunk when needed). In `spawn`
-#       children, the module-level `_apply_profiling_patches()` re-runs the
-#       idempotent patch helper when this module is imported; `patch_engine_core.py`
-#       imports this module and additionally invokes the helper when profiling
-#       chunk sizing is enabled.
-#    Related PR (if no, explain why):
-#       No, vllm-ascend-specific profiling / scheduling integration.
-#    Future Plan:
-#       Remove or narrow this patch if upstream exposes stable hooks for backend
-#       profiling startup and per-step timing callbacks without monkey-patching
-#       `EngineCore` and the multiprocess entry point.
 #
 # ** 19. File: platform/patch_speculative_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
