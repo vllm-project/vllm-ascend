@@ -70,7 +70,7 @@ env_common: &env_common
   HCCL_EXEC_TIMEOUT: "1800"
   HCCL_CONNECT_TIMEOUT: "1800"
   ASCEND_TRANSFER_TIMEOUT: "10000"
-
+  VLLM_USE_MODELSCOPE: true
 env_prefill: &env_prefill
   <<: *env_common
   VLLM_USE_FASTOKENS: "1"
