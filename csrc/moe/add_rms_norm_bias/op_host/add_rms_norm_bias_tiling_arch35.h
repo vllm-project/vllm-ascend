@@ -9,21 +9,17 @@
  */
 
 /*!
- * \file add_rms_norm_bias_tiling_arch35.cpp
+ * \file add_rms_norm_bias_tiling_arch35.h
  * \brief
  */
-// Adapted from cann/ops-nn v9.2.0-beta.2 @ 30ef7dd563c8a4b74c3161835c8e47d1d96f87b6.
-// Preserve upstream tiling; add independent beta storage and local platform/logging adapters.
+#ifndef OPS_BUILT_IN_OP_TILING_RUNTIME_ADD_RMS_NORM_BIAS_ARCH35_H_
+#define OPS_BUILT_IN_OP_TILING_RUNTIME_ADD_RMS_NORM_BIAS_ARCH35_H_
 
-#include <algorithm>
-#include <map>
-#include "register/op_impl_registry.h"
+#include <iostream>
 #include "add_rms_norm_bias_tiling.h"
-#include "log/ops_log.h"
 
 namespace optiling {
 namespace addRmsNormBiasRegbase {
-constexpr uint32_t ULONG_BIT_LEN = 64;
 constexpr uint32_t DTYPE_KEY_FP16 = 1;
 constexpr uint32_t DTYPE_KEY_FP32 = 2;
 constexpr uint32_t DTYPE_KEY_BF16 = 3;
@@ -32,19 +28,16 @@ constexpr uint32_t FLOAT_PER_REAPEAT = 64;
 constexpr uint32_t BYTE_SIZE_2_BLOCK_ALIGN_NUM = 16;
 constexpr uint32_t X_INDEX = 0;
 constexpr uint32_t GAMMA_INDEX = 2;
-// A5-only dispatch; matches the copied Device platform helpers.
-constexpr uint64_t UB_BLOCK_BYTES = 32;
-constexpr uint64_t VECTOR_REGISTER_BYTES = 256;
 constexpr uint32_t FLOAT_BYTE_SIZE = 4;
 constexpr uint32_t UB_USED = 1024;
-constexpr uint32_t UB_RESERVE_FOR_RSTDALIGN = 1024;
-constexpr uint32_t MODE_NORMAL = 1000;
-constexpr uint32_t MODE_SPLIT_D = 2000;
+constexpr uint32_t KEY_WEIGHT = 1000;
+constexpr uint32_t MODE_NORMAL = 0;
+constexpr uint32_t MODE_SPLIT_D = 1;
 constexpr uint32_t QUE_NUM = 5;
-constexpr uint32_t QUE_MODE_NORMAL_NUM = 4;
-constexpr uint64_t ALING_FACTOR_256 = 256;
-constexpr uint64_t ALING_FACTOR_512 = 512;
+
+constexpr uint32_t ALING_FACTOR_512 = 512;
 constexpr uint32_t RETAINED_SIZE = 5120; // 256 * 5 * 4;
+constexpr uint32_t LOG_2 = 2;
 constexpr uint32_t DOUBLE_BUFFER_NUM = 2;
 constexpr uint32_t MULTI_FACTOR_2 = 2;
 constexpr uint32_t NUM_2 = 2;
@@ -92,12 +85,12 @@ uint32_t ComputeTotalBufSize(uint32_t bufferNum, ge::DataType dtype, uint32_t dt
         // 普通场景下：如果是float16及bfloat16数据类型，需要一块：转FP32
         tmpBufSzie = length * FLOAT_BYTE_SIZE;
     }
-    uint32_t betaBufSize = bufferNum * length * dtypeSize;
-    return queBufSize + betaBufSize + tmpBufSzie + RETAINED_SIZE;
+    return queBufSize + tmpBufSzie + RETAINED_SIZE;
 }
 
 ge::graphStatus TilingAddRmsNormBiasRegbase(gert::TilingContext* context)
 {
+    AddRMSNormBiasRegbaseTilingData tiling;
     OP_LOGD(context, " TilingAddRmsNormBiasRegbase");
     auto ptrCompileInfo = reinterpret_cast<const AddRmsNormBiasCompileInfo*>(context->GetCompileInfo());
     uint32_t numCore;
@@ -119,11 +112,11 @@ ge::graphStatus TilingAddRmsNormBiasRegbase(gert::TilingContext* context)
     const float* epsilon = attrs->GetFloat(0);
     OP_CHECK_NULL_WITH_CONTEXT(context, epsilon);
     OP_CHECK_IF(*epsilon < 0, OP_LOGE(context, "Epsilon less than zero, please check."), return ge::GRAPH_FAILED);
-    uint64_t numCol = gammaShape.GetShapeSize();
+    uint32_t numCol = gammaShape.GetShapeSize();
     float avgFactor = (numCol == 0U) ? 0.0f : 1.0f / static_cast<float>(numCol);
     size_t xDimNum = xShape.GetDimNum();
     size_t gammaDimNum = gammaShape.GetDimNum();
-    uint64_t numRow = 1;
+    uint32_t numRow = 1;
     for (size_t i = 0; i < xDimNum - gammaDimNum; i++) {
         numRow *= xShape.GetDim(i);
     }
@@ -139,24 +132,32 @@ ge::graphStatus TilingAddRmsNormBiasRegbase(gert::TilingContext* context)
     size_t sysWorkspaceSize = 16UL * 1024UL * 1024UL;
     size_t* currentWorkspace = context->GetWorkspaceSizes(1);
     currentWorkspace[0] = usrSize + sysWorkspaceSize;
-    uint64_t numColAlign = 0;
-    uint64_t ubBlockSize = UB_BLOCK_BYTES;
-    uint64_t ubfp32 = ubBlockSize / sizeof(float);
-    uint64_t vlfp32 = VECTOR_REGISTER_BYTES / sizeof(float);
-    uint64_t binaryAddElemtMaxLen = vlfp32 * vlfp32 * NUM_2 * NUM_2;
-    uint64_t blockFactor;
-    uint64_t ubFactor;
-    uint64_t rowFactor = 0;
+    uint32_t numColAlign = 0;
+    uint32_t blockFactor;
+    uint32_t ubFactor;
+    uint32_t rowFactor;
+    uint32_t modeKey = MODE_NORMAL;
     uint32_t ubLoop{0};
-    uint64_t colBuferLength{0};
-    uint64_t multiNNum{0};
+    uint32_t colBuferLength{0};
+    uint32_t multiNNum{0};
 
     ubSize = ubSize - UB_USED;
     uint32_t dataPerBlock;
     SetByDtype(dataType, dtypeKey, dataPerBlock);
+    numColAlign = CeilDiv(numCol, dataPerBlock) * dataPerBlock;
+
+    rowFactor = FLOAT_PER_REAPEAT;
+
+    if (dataType == ge::DT_FLOAT) {
+        dtypeKey = DTYPE_KEY_FP32;
+    } else if (dataType == ge::DT_BF16) {
+        dtypeKey = DTYPE_KEY_BF16;
+    } else {
+        dtypeKey = DTYPE_KEY_FP16;
+    }
 
     blockFactor = static_cast<uint32_t>(1);
-    uint64_t tileNum = CeilDiv(numRow, static_cast<uint64_t>(numCore));
+    uint32_t tileNum = CeilDiv(numRow, numCore);
     blockFactor *= tileNum;
     uint32_t useCoreNum = CeilDiv(numRow, blockFactor);
     context->SetBlockDim(useCoreNum);
@@ -165,46 +166,22 @@ ge::graphStatus TilingAddRmsNormBiasRegbase(gert::TilingContext* context)
     OP_CHECK_IF(dtypeByteIterator == dTypeByteMap.end(), OP_LOGE(context, "Fail to get dtype factor."),
                 return ge::GRAPH_FAILED);
     uint32_t curElementByte = dtypeByteIterator->second;
-    numColAlign = CeilDiv(numCol * curElementByte, ubBlockSize) * ubBlockSize / curElementByte;
+    numColAlign = CeilDiv(numCol * curElementByte, ALING_FACTOR_512) * ALING_FACTOR_512 / curElementByte;
 
-    // 计算 二分累加 分界点
-    uint64_t binAddQuotient = numColAlign == 0 ? 1 : (1L << (ULONG_BIT_LEN - 1 - __builtin_clzl(numColAlign)));
-    binAddQuotient = (binAddQuotient == numColAlign) ? binAddQuotient / NUM_2 : binAddQuotient;
-    uint64_t binAddBufferOneline = CeilDiv((binAddQuotient + vlfp32 - 1) / vlfp32, ubfp32) * ubfp32;
-
-    // 可以全载的行数
-    int64_t tmpSize = static_cast<int64_t>(ubSize) - UB_RESERVE_FOR_RSTDALIGN - (numColAlign * curElementByte * NUM_2);
-    if (tmpSize > 0 && numColAlign <= binaryAddElemtMaxLen) {
-        rowFactor = tmpSize / (numColAlign * curElementByte * DOUBLE_BUFFER_NUM * QUE_MODE_NORMAL_NUM +
-                               numColAlign * sizeof(float) + sizeof(float) * (DOUBLE_BUFFER_NUM + 1) +
-                               binAddBufferOneline * sizeof(float));
+    uint32_t total = ComputeTotalBufSize(DOUBLE_BUFFER_NUM, dataType, curElementByte, numColAlign, false);
+    modeKey = total < ubSize ? MODE_NORMAL : MODE_SPLIT_D;
+    if (total == 0U) {
+        OP_LOGE(context, "total is zero.");
+        return ge::GRAPH_FAILED;
     }
-    if (rowFactor >= 1) {
-        // R能够全载
-        rowFactor = std::min(rowFactor, blockFactor); // 实际需要全载的行数
-        AddRMSNormBiasRegbaseRFullLoadTilingData tiling;
-        tiling.set_numRow(numRow);
-        tiling.set_numCol(numCol);
-        tiling.set_numColAlign(numColAlign);
-        tiling.set_blockFactor(blockFactor);
-        tiling.set_rowFactor(rowFactor);
-        tiling.set_binAddQuotient(binAddQuotient);
-        tiling.set_epsilon(*epsilon);
-        tiling.set_avgFactor(avgFactor);
-        OP_LOGI(context,
-                "TilingData numCore: %u, ubSize: %lu, numRow: %u, numCol: %u, numColAlign: %u, "
-                "blockFactor: %u, rowFactor: %u, binAddQuotient: %u, "
-                "epsilon: %f, avgFactor: %f",
-                numCore, ubSize, tiling.get_numRow(), tiling.get_numCol(), tiling.get_numColAlign(),
-                tiling.get_blockFactor(), tiling.get_rowFactor(), tiling.get_binAddQuotient(), tiling.get_epsilon(),
-                tiling.get_avgFactor());
+    multiNNum = static_cast<uint32_t>(ubSize) / total;
+    uint32_t powerFactor = std::floor(std::log(numColAlign) / std::log(2));
+    powerFactor = std::pow(LOG_2, powerFactor);
 
-        tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
-        context->SetTilingKey(MODE_NORMAL);
-        context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    if (modeKey == MODE_NORMAL) {
+        ubFactor = powerFactor;
+        colBuferLength = numColAlign;
     } else {
-        numColAlign = CeilDiv(numCol * curElementByte, ALING_FACTOR_512) * ALING_FACTOR_512 / curElementByte;
-        rowFactor = FLOAT_PER_REAPEAT;
         ubFactor = 1U;
         while (ComputeTotalBufSize(DOUBLE_BUFFER_NUM, dataType, curElementByte, ubFactor * MULTI_FACTOR_2, true) <
                ubSize) {
@@ -215,35 +192,38 @@ ge::graphStatus TilingAddRmsNormBiasRegbase(gert::TilingContext* context)
             ubLoop *= MULTI_FACTOR_2;
         }
         colBuferLength = ubFactor;
-        uint32_t isNddma = numCol >= NDDMA_BETTER_STAGE ? 0U : 1U;
-
-        AddRMSNormBiasRegbaseTilingData tiling;
-        tiling.set_numRow(numRow);
-        tiling.set_numCol(numCol);
-        tiling.set_numColAlign(numColAlign);
-        tiling.set_blockFactor(blockFactor);
-        tiling.set_rowFactor(rowFactor);
-        tiling.set_ubFactor(ubFactor);
-        tiling.set_epsilon(*epsilon);
-        tiling.set_avgFactor(avgFactor);
-        tiling.set_ubLoop(ubLoop);
-        tiling.set_colBuferLength(colBuferLength);
-        tiling.set_multiNNum(multiNNum);
-        tiling.set_isNddma(isNddma);
-        OP_LOGI(context,
-                "TilingData numCore: %u, ubSize: %lu, numRow: %u, numCol: %u, numColAlign: %u, colBuferLength: %u, "
-                "blockFactor: %u, rowFactor: %u, ubFactor: %u, "
-                "epsilon: %f, avgFactor: %f, ubLoop: %u, multiNNum: %u, isNddma: %u.",
-                numCore, ubSize, tiling.get_numRow(), tiling.get_numCol(), tiling.get_numColAlign(),
-                tiling.get_colBuferLength(), tiling.get_blockFactor(), tiling.get_rowFactor(), tiling.get_ubFactor(),
-                tiling.get_epsilon(), tiling.get_avgFactor(), tiling.get_ubLoop(), tiling.get_multiNNum(),
-                tiling.get_isNddma());
-
-        tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
-        context->SetTilingKey(MODE_SPLIT_D);
-        context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
     }
+    uint32_t isNddma = numCol >= NDDMA_BETTER_STAGE ? 0U : 1U;
+
+    uint32_t tilingKey = dtypeKey + KEY_WEIGHT * modeKey;
+    context->SetTilingKey(tilingKey);
+
+    tiling.set_numRow(numRow);
+    tiling.set_numCol(numCol);
+    tiling.set_numColAlign(numColAlign);
+    tiling.set_blockFactor(blockFactor);
+    tiling.set_rowFactor(rowFactor);
+    tiling.set_ubFactor(ubFactor);
+    tiling.set_epsilon(*epsilon);
+    tiling.set_avgFactor(avgFactor);
+    tiling.set_ubLoop(ubLoop);
+    tiling.set_colBuferLength(colBuferLength);
+    tiling.set_multiNNum(multiNNum);
+    tiling.set_isNddma(isNddma);
+    OP_LOGI(context,
+            "TilingData numCore: %u, ubSize: %lu, numRow: %u, numCol: %u, numColAlign: %u, colBuferLength: %u, "
+            "blockFactor: %u, rowFactor: %u, ubFactor: %u, "
+            "epsilon: %f, avgFactor: %f, ubLoop: %u, multiNNum: %u, isNddma: %u.",
+            numCore, ubSize, tiling.get_numRow(), tiling.get_numCol(), tiling.get_numColAlign(),
+            tiling.get_colBuferLength(), tiling.get_blockFactor(), tiling.get_rowFactor(), tiling.get_ubFactor(),
+            tiling.get_epsilon(), tiling.get_avgFactor(), tiling.get_ubLoop(), tiling.get_multiNNum(),
+            tiling.get_isNddma());
+
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
     return ge::GRAPH_SUCCESS;
 }
 } // namespace addRmsNormBiasRegbase
 } // namespace optiling
+
+#endif // OPS_BUILT_IN_OP_TILING_RUNTIME_ADD_RMS_NORM_BIAS_ARCH35_H_

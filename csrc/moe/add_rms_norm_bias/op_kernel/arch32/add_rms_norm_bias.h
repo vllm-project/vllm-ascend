@@ -14,7 +14,7 @@
  */
 #ifndef ADD_RMS_NORM_H_
 #define ADD_RMS_NORM_H_
-#include "./rms_norm_base.h"
+#include "rms_norm_base.h"
 
 using namespace AscendC;
 using namespace RmsNorm;
@@ -37,8 +37,6 @@ public:
         this->ubFactor = tiling->ub_factor;
         this->epsilon = tiling->epsilon;
         this->avgFactor = (numCol != 0) ? (float)1.0 / numCol : 0;
-        this->nullptrBeta = tiling->nullptr_beta;
-
         blockIdx_ = GetBlockIdx();
         if (blockIdx_ < GetBlockNum() - 1) {
             this->rowWork = blockFactor;
@@ -49,9 +47,7 @@ public:
         x1Gm.SetGlobalBuffer((__gm__ T*)x1 + blockIdx_ * blockFactor * numCol, rowWork * numCol);
         x2Gm.SetGlobalBuffer((__gm__ T*)x2 + blockIdx_ * blockFactor * numCol, rowWork * numCol);
         gammaGm.SetGlobalBuffer((__gm__ T*)gamma, numCol);
-        if (!this->nullptrBeta) {
-            betaGm.SetGlobalBuffer((__gm__ T*)beta, numCol);
-        }
+        betaGm.SetGlobalBuffer((__gm__ T*)beta, numCol);
         yGm.SetGlobalBuffer((__gm__ T*)y + blockIdx_ * blockFactor * numCol, rowWork * numCol);
         rstdGm.SetGlobalBuffer((__gm__ float*)rstd + blockIdx_ * blockFactor, blockFactor);
         xGm.SetGlobalBuffer((__gm__ T*)x + blockIdx_ * blockFactor * numCol, rowWork * numCol);
@@ -59,9 +55,7 @@ public:
         // pipe alloc memory to queue, the unit is Bytes
         Ppipe->InitBuffer(inQueueX, BUFFER_NUM, ubFactor * sizeof(T));
         Ppipe->InitBuffer(inQueueGamma, BUFFER_NUM, ubFactor * sizeof(T));
-        if (!this->nullptrBeta) {
-            Ppipe->InitBuffer(inQueueBeta, BUFFER_NUM, ubFactor * sizeof(T));
-        }
+        Ppipe->InitBuffer(inQueueBeta, BUFFER_NUM, ubFactor * sizeof(T));
         Ppipe->InitBuffer(outQueueY, BUFFER_NUM, ubFactor * sizeof(T));
         Ppipe->InitBuffer(outQueueRstd, BUFFER_NUM, rowFactor * sizeof(float));
 
@@ -76,10 +70,7 @@ public:
     {
         CopyInGammaBeta();
         LocalTensor<T> gammaLocal = inQueueGamma.DeQue<T>();
-        LocalTensor<T> betaLocal;
-        if (!this->nullptrBeta) {
-            betaLocal = inQueueBeta.DeQue<T>();
-        }
+        LocalTensor<T> betaLocal = inQueueBeta.DeQue<T>();
         uint32_t i_o_max = RmsNorm::CeilDiv(rowWork, rowFactor);
         uint32_t row_tail = rowWork - (i_o_max - 1) * rowFactor;
 
@@ -88,9 +79,7 @@ public:
         }
         SubProcess(i_o_max - 1, row_tail, gammaLocal, betaLocal);
         inQueueGamma.FreeTensor(gammaLocal);
-        if (!this->nullptrBeta) {
-            inQueueBeta.FreeTensor(betaLocal);
-        }
+        inQueueBeta.FreeTensor(betaLocal);
     }
 
     __aicore__ inline void SubProcess(uint32_t i_o, uint32_t calc_row_num, LocalTensor<T>& gammaLocal, LocalTensor<T>& betaLocal)
@@ -157,11 +146,9 @@ private:
         LocalTensor<T> gammaLocal = inQueueGamma.AllocTensor<T>();
         DataCopyCustom<T>(gammaLocal, gammaGm, numCol);
         inQueueGamma.EnQue(gammaLocal);
-        if (!this->nullptrBeta) {
-            LocalTensor<T> betaLocal = inQueueBeta.AllocTensor<T>();
-            DataCopyCustom<T>(betaLocal, betaGm, numCol);
-            inQueueBeta.EnQue(betaLocal);
-        }
+        LocalTensor<T> betaLocal = inQueueBeta.AllocTensor<T>();
+        DataCopyCustom<T>(betaLocal, betaGm, numCol);
+        inQueueBeta.EnQue(betaLocal);
     }
 
     __aicore__ inline void Compute(uint32_t inner_progress, LocalTensor<float> gammaLocal, LocalTensor<float> betaLocal, LocalTensor<float> rstdLocal)
@@ -199,10 +186,8 @@ private:
         inQueueX.FreeTensor(xLocal);
         PipeBarrier<PIPE_V>();
         Mul(yLocal, gammaLocal, yLocal, numCol);
-        if (!this->nullptrBeta) {
-            PipeBarrier<PIPE_V>();
-            Add(yLocal, betaLocal, yLocal, numCol);
-        }
+        PipeBarrier<PIPE_V>();
+        Add(yLocal, betaLocal, yLocal, numCol);
         PipeBarrier<PIPE_V>();
         outQueueY.EnQue<float>(yLocal);
     }
@@ -249,12 +234,10 @@ private:
         Cast(sqx, gammaLocal, RoundMode::CAST_NONE, numCol); // gamma_fp32 reuse sqx
         PipeBarrier<PIPE_V>();
         Mul(x_fp32, x_fp32, sqx, numCol);
-        if (!this->nullptrBeta) {
-            PipeBarrier<PIPE_V>();
-            Cast(sqx, betaLocal, RoundMode::CAST_NONE, numCol);
-            PipeBarrier<PIPE_V>();
-            Add(x_fp32, x_fp32, sqx, numCol);
-        }
+        PipeBarrier<PIPE_V>();
+        Cast(sqx, betaLocal, RoundMode::CAST_NONE, numCol);
+        PipeBarrier<PIPE_V>();
+        Add(x_fp32, x_fp32, sqx, numCol);
         PipeBarrier<PIPE_V>();
         Cast(yLocal, x_fp32, RoundMode::CAST_RINT, numCol);
         PipeBarrier<PIPE_V>();
@@ -309,10 +292,8 @@ private:
 
         PipeBarrier<PIPE_V>();
         Mul(yLocal, gammaLocal, yLocal, numCol);
-        if (!this->nullptrBeta) {
-            PipeBarrier<PIPE_V>();
-            Add(yLocal, betaLocal, yLocal, numCol);
-        }
+        PipeBarrier<PIPE_V>();
+        Add(yLocal, betaLocal, yLocal, numCol);
         PipeBarrier<PIPE_V>();
         outQueueY.EnQue<half>(yLocal);
     }
@@ -363,6 +344,5 @@ private:
     float avgFactor;
     int32_t blockIdx_;
     uint32_t rowWork = 1;
-    uint32_t nullptrBeta = 0;
 };
 #endif // ADD_RMS_NORM_BIAS_H_

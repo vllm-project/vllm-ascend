@@ -20,11 +20,11 @@
 #ifndef ADD_RMS_NORM_BIAS_REGBASE_H
 #define ADD_RMS_NORM_BIAS_REGBASE_H
 #include "add_rms_norm_bias_regbase_common.h"
-#include "../rms_norm_base.h"
+#include "../common/rms_norm_base.h"
 #include "kernel_operator.h"
 #include "deps/reduce_common_regbase.h"
 
-namespace AddRmsNormBiasA5 {
+namespace AddRmsNorm {
 using namespace AscendC;
 constexpr uint64_t ALIGN_32_FACTOR = 32;
 constexpr int32_t CONST_FACTOR_2 = 2;
@@ -34,7 +34,6 @@ constexpr int32_t UNROLL_NUM = 2;
 constexpr int32_t NUM_ONE = 1;
 constexpr int32_t NUM_TWO = 2;
 
-using RmsNorm::DataCopyCustom;
 using RmsNorm::DataCopyImpl;
 
 using AscendC::MicroAPI::LoadDist;
@@ -66,7 +65,6 @@ public:
         epsilon = tiling->epsilon;
         numColAlign = tiling->numColAlign;
         avgFactor = tiling->avgFactor;
-        nullptrBeta = tiling->nullptr_beta;
         rowWork = (GetBlockIdx() < GetBlockNum() - 1) ? blockFactor : numRow - (GetBlockNum() - 1) * blockFactor;
         uint64_t rstdUbSizeAlignSize = CeilAlign(rowFactor, static_cast<uint64_t>(VL_FP32)) * sizeof(float);
         uint16_t binaryAddQuotientLoop = (binAddQuotient + VL_FP32 - 1) / VL_FP32;
@@ -76,10 +74,8 @@ public:
         xGm1.SetGlobalBuffer((__gm__ T*)x1 + GetBlockIdx() * blockFactor * numCol, rowWork * numCol);
         xGm2.SetGlobalBuffer((__gm__ T*)x2 + GetBlockIdx() * blockFactor * numCol, rowWork * numCol);
         gammaGm.SetGlobalBuffer((__gm__ T*)gamma, numCol);
-        if (!nullptrBeta) {
-            betaGm.SetGlobalBuffer((__gm__ T*)beta, numCol);
-            pPipe->InitBuffer(inQueueBeta, BUFFER_NUM, numColAlign * sizeof(T));
-        }
+        betaGm.SetGlobalBuffer((__gm__ T*)beta, numCol);
+        pPipe->InitBuffer(inQueueBeta, BUFFER_NUM, numColAlign * sizeof(T));
         yGm.SetGlobalBuffer((__gm__ T*)y + GetBlockIdx() * blockFactor * numCol, rowWork * numCol);
         rstdGm.SetGlobalBuffer((__gm__ float*)rstd + GetBlockIdx() * blockFactor, blockFactor);
         xOutGm.SetGlobalBuffer((__gm__ T*)x + GetBlockIdx() * blockFactor * numCol, rowWork * numCol);
@@ -88,7 +84,7 @@ public:
         pPipe->InitBuffer(inQueueX2, DOUBLE_BUFFER_NUM, numColAlign * sizeof(T) * rowFactor);
         pPipe->InitBuffer(inQueueGamma, BUFFER_NUM, numColAlign * sizeof(T));
         pPipe->InitBuffer(outQueueY, DOUBLE_BUFFER_NUM, numColAlign * sizeof(T) * rowFactor);
-        pPipe->InitBuffer(outQueueX, nullptrBeta ? DOUBLE_BUFFER_NUM : BUFFER_NUM, numColAlign * sizeof(T) * rowFactor);
+        pPipe->InitBuffer(outQueueX, DOUBLE_BUFFER_NUM, numColAlign * sizeof(T) * rowFactor);
         pPipe->InitBuffer(outQueueRstd, DOUBLE_BUFFER_NUM, rstdUbSizeAlignSize);
         pPipe->InitBuffer(xReduceBuff, rstdUbSizeAlignSize);
         pPipe->InitBuffer(xFp32Buff, numColAlign * sizeof(float) * rowFactor);
@@ -99,11 +95,8 @@ public:
     {
         CopyInGamma();
         LocalTensor<T> gammaLocal = inQueueGamma.DeQue<T>();
-        LocalTensor<T> betaLocal;
-        if (!nullptrBeta) {
-            CopyInBeta();
-            betaLocal = inQueueBeta.DeQue<T>();
-        }
+        CopyInBeta();
+        LocalTensor<T> betaLocal = inQueueBeta.DeQue<T>();
         uint32_t rowLoopCount = CeilDiv(rowWork, rowFactor);
         for (uint32_t rowLoopIdx = 0; rowLoopIdx < rowLoopCount; rowLoopIdx++) {
             uint64_t rowLoopOffset = rowLoopIdx * rowFactor * numCol;
@@ -111,9 +104,7 @@ public:
             Compute(rowLoopIdx, gammaLocal, betaLocal, curRows, rowLoopOffset);
         }
         inQueueGamma.FreeTensor(gammaLocal);
-        if (!nullptrBeta) {
-            inQueueBeta.FreeTensor(betaLocal);
-        }
+        inQueueBeta.FreeTensor(betaLocal);
     }
 
 private:
@@ -146,11 +137,7 @@ private:
         DataCopyPad(rstdGm[rowLoopIdx * rowFactor], rstdLocal, rstdCopyParams);
 
         LocalTensor<T> yLocal = outQueueY.AllocTensor<T>();
-        if (nullptrBeta) {
-            CalculateY<false>(xFp32Local, gammaLocal, betaLocal, yLocal, rstdLocal, curRows, numColAlign, numCol);
-        } else {
-            CalculateY<true>(xFp32Local, gammaLocal, betaLocal, yLocal, rstdLocal, curRows, numColAlign, numCol);
-        }
+        CalculateY(xFp32Local, gammaLocal, betaLocal, yLocal, rstdLocal, curRows, numColAlign, numCol);
         outQueueRstd.FreeTensor(rstdLocal);
         outQueueY.EnQue<T>(yLocal);
         CopyOutY(rowLoopOffset, curRows, numColAlign);
@@ -185,7 +172,6 @@ private:
         }
     }
 
-    template <bool HAS_BETA>
     __aicore__ inline void CalculateY(LocalTensor<float>& xFp32Local, LocalTensor<T>& gammaLocal,
                                       LocalTensor<T>& betaLocal,
                                       LocalTensor<T>& yLocal, LocalTensor<float>& rstdLocal, uint32_t curRows,
@@ -195,10 +181,7 @@ private:
         __ubuf__ T* gammaInUb = (__ubuf__ T*)gammaLocal.GetPhyAddr();
         __ubuf__ T* yInUb = (__ubuf__ T*)yLocal.GetPhyAddr();
         __ubuf__ float* rstdInUb = (__ubuf__ float*)rstdLocal.GetPhyAddr();
-        __ubuf__ T* betaInUb = nullptr;
-        if constexpr (HAS_BETA) {
-            betaInUb = (__ubuf__ T*)betaLocal.GetPhyAddr();
-        }
+        __ubuf__ T* betaInUb = (__ubuf__ T*)betaLocal.GetPhyAddr();
 
         uint16_t loopRows = static_cast<uint16_t>(curRows);
         uint16_t loopCols = static_cast<uint16_t>((reduceNum + VL_FP32 - 1) / VL_FP32);
@@ -233,11 +216,9 @@ private:
                     LoadRegForDtype<T>(gammaInUb, gammaReg, regCurLoop, r * VL_FP32);
                     Mul(mul2Reg, mul1Reg, gammaReg, regCurLoop);
                     Mul(mul2UnrollReg, mul1UnrollReg, gammaReg, regCurLoop);
-                    if constexpr (HAS_BETA) {
-                        LoadRegForDtype<T>(betaInUb, betaReg, regCurLoop, r * VL_FP32);
-                        Add(mul2Reg, mul2Reg, betaReg, regCurLoop);
-                        Add(mul2UnrollReg, mul2UnrollReg, betaReg, regCurLoop);
-                    }
+                    LoadRegForDtype<T>(betaInUb, betaReg, regCurLoop, r * VL_FP32);
+                    Add(mul2Reg, mul2Reg, betaReg, regCurLoop);
+                    Add(mul2UnrollReg, mul2UnrollReg, betaReg, regCurLoop);
                     StoreRegForDtype<T>(yInUb, mul2Reg, regCurLoop, offset1);
                     StoreRegForDtype<T>(yInUb, mul2UnrollReg, regCurLoop, offset2);
                 }
@@ -252,10 +233,8 @@ private:
                     Mul(mul1Reg, x1Reg, rstd1Reg, regCurLoop);
                     LoadRegForDtype<T>(gammaInUb, gammaReg, regCurLoop, r * VL_FP32);
                     Mul(mul2Reg, mul1Reg, gammaReg, regCurLoop);
-                    if constexpr (HAS_BETA) {
-                        LoadRegForDtype<T>(betaInUb, betaReg, regCurLoop, r * VL_FP32);
-                        Add(mul2Reg, mul2Reg, betaReg, regCurLoop);
-                    }
+                    LoadRegForDtype<T>(betaInUb, betaReg, regCurLoop, r * VL_FP32);
+                    Add(mul2Reg, mul2Reg, betaReg, regCurLoop);
                     StoreRegForDtype<T>(yInUb, mul2Reg, regCurLoop, offset);
                 }
             }
@@ -372,8 +351,7 @@ private:
     uint64_t binAddQuotient;
     float epsilon;
     float avgFactor;
-    uint32_t nullptrBeta{1};
     uint64_t rowWork{1};
 };
-} // namespace AddRmsNormBiasA5
+} // namespace AddRmsNorm
 #endif // ADD_RMS_NORM_BIAS_REGBASE_H

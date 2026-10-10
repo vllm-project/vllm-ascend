@@ -22,7 +22,7 @@
 #include "arch35/add_rms_norm_bias_regbase_split_d.h"
 
 using namespace AscendC;
-using namespace AddRmsNormBiasA5;
+using namespace AddRmsNorm;
 
 extern "C" __global__ __aicore__ void add_rms_norm_bias(
     GM_ADDR x1, GM_ADDR x2, GM_ADDR gamma, GM_ADDR beta, GM_ADDR y, GM_ADDR rstd,
