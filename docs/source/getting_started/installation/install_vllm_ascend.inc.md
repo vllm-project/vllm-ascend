@@ -146,8 +146,9 @@ Choose one of the following methods to install `vllm` and `vllm-ascend`. PyTorch
         rm -rf csrc/build csrc/build_out csrc/build_cache build
 
         # Rebuild custom kernels and reinstall vLLM Ascend.
-        COMPILE_CUSTOM_KERNELS=1 python -m pip install \
-            --no-build-isolation --force-reinstall -e .
+        pip install -e . \
+            --extra-index-url https://download.pytorch.org/whl/cpu/ \
+            --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
         ```
 
         **Note:** If `VLLM_ASCEND_BUILD_CACHE_DIR` is set, the build cache
