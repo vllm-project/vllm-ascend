@@ -699,7 +699,6 @@
       "vllm-ascend/GSM8K_prefix90_in198656_bs10_glm5",
       "vllm-ascend/GSM8K_prefix90_in131072_bs512_ds_prefix",
       "vllm-ascend/GSM8K_prefix90_in131072_bs512_ds",
-      "vllm-ascend/GSM8K_prefix90_in32768_bs128_qwen",
       "vllm-ascend/GSM8K_prefix90_in32768_bs128_qwen_prefix",
       "vllm-ascend/GSM8K_prefix90_in32768_bs128_qwen"
     ]
