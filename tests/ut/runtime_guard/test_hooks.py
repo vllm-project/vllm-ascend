@@ -132,6 +132,25 @@ def test_step_flushes_on_body_exception():
     guard.end_of_wave_sync.assert_called_once_with(allow_manual_dump=False)
 
 
+def test_step_guardless_keeps_bare_path():
+    """UT shells built with ``__new__`` omit ``runtime_guard`` — run bare body."""
+
+    class _Bare:
+        def __init__(self):
+            self.body_ran = False
+            self.execute_model_state = None
+
+        @torch.inference_mode()
+        @runtime_guard_step
+        def execute_model(self, scheduler_output, *args, **kwargs):
+            self.body_ran = True
+            return "ok"
+
+    runner = _Bare()
+    assert runner.execute_model(_scheduler_output()) == "ok"
+    assert runner.body_ran
+
+
 class _IdleWorker:
     """Minimal stand-in exercising runtime_guard_idle_step on the worker."""
 
@@ -235,6 +254,22 @@ def test_sample_tokens_orchestrates_guard_around_body():
         "use_async": False,
         "accepted_token_nums_fn": None,
     }
+
+
+def test_sample_tokens_guardless_keeps_bare_path():
+    class _Bare:
+        def __init__(self):
+            self.order: list[str] = []
+
+        @runtime_guard_sample_tokens
+        def sample_tokens(self, grammar_output):
+            self.order.append("body")
+            return SimpleNamespace(sampled_token_ids=[[1]])
+
+    runner = _Bare()
+    out = runner.sample_tokens("grammar")
+    assert out.sampled_token_ids == [[1]]
+    assert runner.order == ["body"]
 
 
 def test_sample_tokens_passes_accepted_token_nums_fn_for_spec():

@@ -64,11 +64,15 @@ def runtime_guard_step(execute_model_fn):
       can never be skipped.
 
     Must be listed BELOW ``@torch.inference_mode()``.
+    Production runners always ``bind``; UT shells built with ``__new__`` may
+    omit the attribute — skip the guard and run the bare body.
     """
 
     @functools.wraps(execute_model_fn)
     def wrapper(self, scheduler_output, *args, **kwargs):
-        guard = self.runtime_guard
+        guard = getattr(self, "runtime_guard", None)
+        if guard is None:
+            return execute_model_fn(self, scheduler_output, *args, **kwargs)
         setattr(self, _SCHEDULER_OUTPUT_ATTR, scheduler_output)
         dummy_run = kwargs.get("dummy_run", args[1] if len(args) > 1 else False)
         allow_manual_dump = int(getattr(scheduler_output, "total_num_scheduled_tokens", 0) or 0) > 0
@@ -138,7 +142,10 @@ def runtime_guard_sample_tokens(sample_tokens_fn):
 
     @functools.wraps(sample_tokens_fn)
     def wrapper(self, grammar_output):
-        guard = self.runtime_guard
+        guard = getattr(self, "runtime_guard", None)
+        if guard is None:
+            # UT shells / unbound runners: keep the bare sample path.
+            return sample_tokens_fn(self, grammar_output)
         note_postprocess_sampled(self, None, None)  # clear prior-step stash
         # Peek before the method pops execute_model_state (inside the parent
         # sample_tokens). The method's PCP swap rewrites input_batch on
