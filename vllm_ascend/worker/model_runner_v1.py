@@ -6498,6 +6498,11 @@ class NPUModelRunner(GPUModelRunner):
         finally:
             self._engram_capture_active = False
 
+        # Capture runs dummy forwards that can leave garbage in the static
+        # KV/state buffers (e.g. GLM-5.3-Flash: KDA dummy state lands in the
+        # aliased SFA fp8 pool and reads back as NaN). Zero them once here so
+        # real requests start from the logically-empty state the engine
+        # assumes. See _zero_static_kv_buffers for the full story.
         _zero_static_kv_buffers(self)
 
         mgr = self.encoder_cudagraph_manager
