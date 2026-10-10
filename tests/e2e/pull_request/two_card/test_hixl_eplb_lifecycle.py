@@ -57,6 +57,7 @@ class _ExpertModel(torch.nn.Module):
         super().__init__()
         self.rank = rank
         self.moe_layers = torch.nn.ModuleList([_ExpertLayer(rank)])
+        self.register_buffer("routing_marker", torch.tensor([7.0]))
 
     def load_weights(self, weights):
         # Checkpoint experts have logical identities; use the same initial
@@ -74,10 +75,11 @@ class _ExpertModel(torch.nn.Module):
         local_ids = physical_ids - self.rank * self.num_local_physical_experts
         owned = (local_ids >= 0) & (local_ids < self.num_local_physical_experts)
         values = layer.weight.index_select(0, local_ids.clamp(0, self.num_local_physical_experts - 1)).mean(-1)
-        return values, owned
+        return values + self.routing_marker - 7, owned
 
 
 def _assert_identity(model, model_state, logical_ids, output=None):
+    assert model.routing_marker.item() == 7
     local_map = model_state.physical_to_logical_map[0, model.rank * 3 : (model.rank + 1) * 3]
     torch.testing.assert_close(model.moe_layers[0].weight[:, 0], (local_map + 1).float())
     values, owned = model(logical_ids) if output is None else output
@@ -140,6 +142,7 @@ def _lifecycle_worker(rank, port, binding):
             with allocator.use_memory_pool("weights"):
                 model = _ExpertModel(rank)
                 record_metadata_for_reloading(model)
+            with allocator.use_memory_pool("metadata"):
                 state = AscendEplbState(parallel, torch.device(f"npu:{rank}"))
                 state.add_model(model, config)
             with allocator.use_memory_pool("kv_cache"):
@@ -163,6 +166,7 @@ def _lifecycle_worker(rank, port, binding):
             pointers = [tensor.data_ptr() for tensor in state.lifecycle_tensors()]
             weight_ptr = model.moe_layers[0].weight.data_ptr()
             buffer_ptr = ms.expert_buffer[0].data_ptr()
+            marker_ptr = model.routing_marker.data_ptr()
             graph = torch.npu.NPUGraph()
             capture_stream = torch.npu.Stream()
             capture_stream.wait_stream(torch.npu.current_stream())
@@ -192,22 +196,35 @@ def _lifecycle_worker(rank, port, binding):
             _assert_identity(model, ms, logical_ids)
 
             for level in (1, 2):
+                if level == 2:
+                    _migrate_last_slot(state, rank)
                 placement = ms.physical_to_logical_map.cpu().clone()
-                physical_weights = model.moe_layers[0].weight.detach().cpu().clone()
                 old = ms.communicator
                 worker.sleep(level=level)
                 assert old._engine is None
                 worker.wake_up(tags=["kv_cache"])
                 assert state._suspended
+                if level == 2:
+                    assert "routing_marker" in worker._sleep_saved_buffers
                 worker.wake_up(tags=["weights"])
+                assert state._suspended
+                assert "routing_marker" not in worker._sleep_saved_buffers
+                if level == 2:
+                    # Consecutive reloads while metadata is still unmapped
+                    # must preserve the pending checkpoint placement reset.
+                    worker.reload_weights(weights_iterator=iter(checkpoint))
+                    worker.reload_weights(
+                        weights_iterator=iter(
+                            [("moe_layers.0.weight", model.moe_layers[0].weight.detach().cpu().clone())]
+                        ),
+                        is_checkpoint_format=False,
+                    )
+                    placement = torch.tensor(
+                        [upstream_state.EplbState.build_initial_global_physical_to_logical_map(4, 2)], device="cpu"
+                    )
+                worker.wake_up(tags=["metadata"])
                 assert not state._suspended
                 torch.testing.assert_close(ms.physical_to_logical_map.cpu(), placement)
-                if level == 2:
-                    # Level 2 deliberately discards weights. Restore kernel
-                    # format first to preserve the saved placement contract.
-                    worker.reload_weights(
-                        weights_iterator=iter([("moe_layers.0.weight", physical_weights)]), is_checkpoint_format=False
-                    )
                 _assert_identity(model, ms, logical_ids)
                 graph.replay()
                 torch.npu.synchronize()
@@ -215,6 +232,7 @@ def _lifecycle_worker(rank, port, binding):
                 assert [tensor.data_ptr() for tensor in state.lifecycle_tensors()] == pointers
                 assert model.moe_layers[0].weight.data_ptr() == weight_ptr
                 assert ms.expert_buffer[0].data_ptr() == buffer_ptr
+                assert model.routing_marker.data_ptr() == marker_ptr
                 _migrate_last_slot(state, rank)
                 _assert_identity(model, ms, logical_ids)
             state.close()

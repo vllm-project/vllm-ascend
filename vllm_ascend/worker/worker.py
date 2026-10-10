@@ -177,7 +177,7 @@ class NPUWorker(WorkerBase):
         self.npugraph_memory_bytes = 0
         if vllm_config.model_config and vllm_config.model_config.enable_sleep_mode:
             # Buffers saved before sleep
-            self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
+            self._sleep_saved_buffers: dict[str, tuple[torch.Tensor, str | None]] = {}
         self.sleep_wakeup_manager = SleepWakeupManager(vllm_config, self, lambda: getattr(self, "model_runner", None))
 
         # Weight transfer engine is created in `load_model` once the model
@@ -247,8 +247,8 @@ class NPUWorker(WorkerBase):
 
     def sleep(self, level: int = 1) -> None:
         state = getattr(self.model_runner, "eplb_state", None)
+        allocator = CaMemAllocator.get_instance()
         if isinstance(state, AscendEplbState):
-            allocator = CaMemAllocator.get_instance()
             regions = [
                 region
                 for ms in state.model_states.values()
@@ -273,14 +273,28 @@ class NPUWorker(WorkerBase):
             self._sleep_saved_buffers = {}
         else:
             model = self.model_runner.model
-            self._sleep_saved_buffers = {name: buffer.cpu().clone() for name, buffer in model.named_buffers()}
+            self._sleep_saved_buffers = {
+                name: (
+                    buffer.cpu().clone(),
+                    next(
+                        (
+                            data.tag
+                            for data in allocator.pointer_to_data.values()
+                            if buffer.device.type == "npu"
+                            and data.tag != CaMemAllocator.sleep_persistent_tag
+                            and data.handle[2] <= buffer.data_ptr() < data.handle[2] + data.handle[1]
+                        ),
+                        None,
+                    ),
+                )
+                for name, buffer in model.named_buffers()
+            }
 
         rl_config = get_ascend_config().rl_config
         cleanup_enabled = rl_config.enabled and rl_config.sleep_mode_extra_cleanup
         if cleanup_enabled:
             self.sleep_wakeup_manager.sleep()
 
-        allocator = CaMemAllocator.get_instance()
         allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
         free_bytes_after_sleep, total = torch.npu.mem_get_info()
         freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
@@ -313,9 +327,10 @@ class NPUWorker(WorkerBase):
         if len(self._sleep_saved_buffers):
             model = self.model_runner.model
             for name, buffer in model.named_buffers():
-                if name in self._sleep_saved_buffers:
-                    buffer.data.copy_(self._sleep_saved_buffers[name].data)
-            self._sleep_saved_buffers = {}
+                saved = self._sleep_saved_buffers.get(name)
+                if saved is not None and (tags is None or saved[1] is None or saved[1] in tags):
+                    buffer.copy_(saved[0])
+                    del self._sleep_saved_buffers[name]
 
         rl_config = get_ascend_config().rl_config
         cleanup_enabled = rl_config.enabled and rl_config.sleep_mode_extra_cleanup
