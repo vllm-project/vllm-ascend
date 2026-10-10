@@ -149,17 +149,16 @@ def test_aux_relay_matches_unpartitioned_forward(monkeypatch, native, boundaries
         torch.testing.assert_close(actual, expected)
 
 
-@pytest.mark.parametrize("legacy,v2", [(True, True), (False, True), (False, False)])
-def test_aux_buffer_factory_uses_one_protocol(monkeypatch, legacy, v2):
+@pytest.mark.parametrize("v2", [False, True])
+def test_aux_buffer_factory_uses_one_protocol(monkeypatch, v2):
     factory = object()
     model = SimpleNamespace(layers=[], make_empty_intermediate_tensors=factory)
     monkeypatch.setattr(patch_deepseek_v2, "_original_deepseek_v2_model_init", lambda *args, **kwargs: None)
-    monkeypatch.setattr(patch_deepseek_v2.pp_transport, "use_legacy_spec_pp", lambda: legacy)
     wrapped = object()
     wrap_factory = Mock(return_value=wrapped)
     monkeypatch.setattr(patch_deepseek_v2.pp_transport, "make_empty_intermediate_tensors", wrap_factory)
     patch_deepseek_v2._patched_deepseek_v2_model_init(model, vllm_config=SimpleNamespace(use_v2_model_runner=v2))
-    assert model._use_upstream_aux_relay is (v2 and not legacy)
+    assert model._use_upstream_aux_relay is v2
     expected_data_types: tuple[PPTransportDataType, ...] = (PPTransportDataType.TOPK_INDICES,)
     if not model._use_upstream_aux_relay:
         expected_data_types = (PPTransportDataType.AUX_HIDDEN_STATES, *expected_data_types)
@@ -201,7 +200,6 @@ def test_model_init_adds_pp_topk_receive_buffer(monkeypatch):
         "_original_deepseek_v2_model_init",
         original_init,
     )
-    monkeypatch.setattr(patch_deepseek_v2.pp_transport, "use_legacy_spec_pp", lambda: False)
     model = SimpleNamespace()
 
     _patched_deepseek_v2_model_init(

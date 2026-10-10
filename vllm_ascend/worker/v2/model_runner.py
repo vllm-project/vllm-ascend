@@ -106,12 +106,7 @@ from vllm_ascend.worker.v2.eplb import AscendEPLBController
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
-from vllm_ascend.worker.v2.pp_transport import (
-    bypass_upstream_spec_pp_guard,
-    resolve_spec_pp_support,
-    restore_pp_after_upstream_init,
-    use_legacy_spec_pp,
-)
+from vllm_ascend.worker.v2.pp_transport import resolve_spec_pp_support
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 from vllm_ascend.worker.v2.states import AscendRequestState
@@ -146,16 +141,9 @@ class NPUModelRunner(GPUModelRunner):
         set_potential_max_tokens(vllm_config)
         parallel_config = vllm_config.parallel_config
 
-        # Only release versions need PP hidden during upstream initialization.
         spec_pp_support = resolve_spec_pp_support(vllm_config)
         with torch_cuda_wrapper():
-            with bypass_upstream_spec_pp_guard(vllm_config, spec_pp_support) as pp_disabled:
-                super().__init__(vllm_config, device)
-            if pp_disabled:
-                restore_pp_after_upstream_init(self, vllm_config)
-        # Native PP owns token broadcast/writeback; only releases use our packing.
-        # Legacy Spec+PP transport (0.28/0.29 only); deleted when 0.30+ is the floor.
-        self.use_spec_pp = spec_pp_support is not None and use_legacy_spec_pp()
+            super().__init__(vllm_config, device)
         # These FIA models need post-rejection host counts on every PP stage.
         # TODO: Remove this extra PP sync when FIA and its metadata builders
         # use device lengths instead of exact CPU lengths.
@@ -226,13 +214,6 @@ class NPUModelRunner(GPUModelRunner):
             vocab_size=self.vocab_size,
             device=self.device,
         )
-        if self.use_spec_pp:
-            from vllm_ascend.patch.worker.patch_v2.patch_spec_pp import (
-                install_upstream_spec_pp_protocol,
-            )
-
-            assert self.pp_handler is not None
-            install_upstream_spec_pp_protocol(self.pp_handler, self.req_states, self.num_speculative_steps)
         # AscendInputBuffers has extra `seq_lens_cpu` attribute.
         # so reinitialize input_buffers here.
         self.input_buffers: AscendInputBuffers = AscendInputBuffers(
@@ -333,11 +314,7 @@ class NPUModelRunner(GPUModelRunner):
         if pcp_manager is not None and isinstance(pcp_manager, AscendPCPManager):
             pcp_manager._sampling_hidden_restored = False
         self._restore_replicated_draft_target_states()
-        output = super().sample_tokens(grammar_output)
-        if self.use_spec_pp and self.is_last_pp_rank:
-            assert self.pp_handler is not None
-            self.pp_handler.broadcast_drafts()
-        return output
+        return super().sample_tokens(grammar_output)
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return apply_dspark_resident_kv_specs(
