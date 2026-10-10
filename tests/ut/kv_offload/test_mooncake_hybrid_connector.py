@@ -60,6 +60,9 @@ class TestHybridKVCacheRecvingThreadDispatch(unittest.TestCase):
         thread.request_task_counts = defaultdict(int)
         thread.finished_request_markers = set()
         thread.request_task_counts_lock = threading.Lock()
+        thread.failed_recv_requests = set()
+        thread.invalid_block_ids = set()
+        thread.failed_recv_requests_lock = threading.Lock()
         return thread
 
     def test_group_transfer_and_completion(self):
@@ -128,10 +131,14 @@ class TestHybridKVCacheRecvingThreadDispatch(unittest.TestCase):
                 thread._send_done_recv_signal.assert_called_once_with(remote_request_id, "192.0.2.1", 31002, {})
                 self.assertEqual(thread.get_and_clear_finished_requests(), {request_id})
                 self.assertEqual(thread.get_and_clear_finished_requests(), set())
+                expected_errors = {2, 3, 4} if outcome == "failure" else set()
+                self.assertEqual(thread.get_and_clear_invalid_block_ids(), expected_errors)
+                self.assertEqual(thread.get_and_clear_invalid_block_ids(), set())
                 self.assertFalse(thread.task_tracker.reqs_to_process)
                 self.assertFalse(thread.request_task_counts)
                 self.assertFalse(thread.finished_request_markers)
                 self.assertFalse(thread.proc_not_transfer_request)
+                self.assertFalse(thread.failed_recv_requests)
                 self.assertEqual(thread.request_queue.unfinished_tasks, 0)
 
     def test_executor_workers_bind_kv_cache_device_before_handling_requests(self):
