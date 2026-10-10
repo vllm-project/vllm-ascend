@@ -77,6 +77,15 @@
   padding: 0 0.6em;
 }
 
+/* Keep table scroll regions inside bordered content tabs. */
+.md-typeset .tabbed-content .md-typeset__scrollwrap {
+  margin-inline: 0;
+}
+
+.md-typeset .tabbed-content .md-typeset__table {
+  padding-inline: 0;
+}
+
 /* GitHub button styling */
 .github-button {
   margin: 0 4px;
