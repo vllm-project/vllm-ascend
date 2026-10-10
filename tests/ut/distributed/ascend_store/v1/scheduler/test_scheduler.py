@@ -236,6 +236,46 @@ def test_resumed_prefill_frontier_survives_multiple_running_chunks() -> None:
     assert decode.store.commands == ()
 
 
+@pytest.mark.parametrize("scheduler_type", (SynchronousBulkScheduler, AsynchronousBulkScheduler, LayerwiseScheduler))
+@pytest.mark.parametrize("save_decode", (False, True))
+def test_store_uses_confirmed_hashes_and_current_progress_after_draft_rejection(scheduler_type, save_decode) -> None:
+    scheduler = scheduler_type(make_config(load=False, store=True, save_decode=save_decode), FakeRemoteLookup())
+    scheduler.bind_gpu_block_pool(FakeBlockPool())
+    request = make_request(prompt_tokens=8, hashes=2)
+    scheduler.confirm_allocation(request, FakeBlocks([1, 2, 3, 4]), 0)
+    commands = []
+    try:
+        initial = scheduler.build_step(
+            make_output(new=(new_request_data("request", ([1, 2, 3, 4],), 0),), scheduled_tokens={"request": 12})
+        )
+        commands.extend(initial.store.commands)
+        assert [command.store_range for command in initial.store.commands] == [TokenRange(0, 8)]
+
+        request.num_tokens = 13
+        # Scheduling reaches a third block, but its confirmed hash is not available yet.
+        unhashed = scheduler.build_step(make_output(cached=(("request", None, 8),), scheduled_tokens={"request": 5}))
+        assert unhashed.store.commands == ()
+
+        request.block_hashes.append(b"accepted")
+        # vLLM has rejected part of the previous draft and supplies the rolled-back position.
+        rejected = scheduler.build_step(make_output(cached=(("request", None, 9),), scheduled_tokens={"request": 2}))
+        assert rejected.store.commands == ()
+
+        completed = scheduler.build_step(make_output(cached=(("request", None, 11),), scheduled_tokens={"request": 1}))
+        commands.extend(completed.store.commands)
+        assert [command.store_range for command in completed.store.commands] == (
+            [TokenRange(8, 12)] if save_decode else []
+        )
+        if save_decode:
+            assert completed.store.commands[0].block_hashes[-1] == b"accepted"
+        repeated = scheduler.build_step(make_output(cached=(("request", None, 12),), scheduled_tokens={"request": 1}))
+        assert repeated.store.commands == ()
+    finally:
+        for command in commands:
+            scheduler.accept_worker_metadata(StoreSourceReleaseMetadata({command.store_job_id: 1}))
+        scheduler.close()
+
+
 def test_step_checkpoint_is_source_ready_and_preserves_exact_source() -> None:
     scheduler = SynchronousBulkScheduler(
         make_config(groups=(0, 1), align_groups=frozenset((1,)), load=False, store=True),
@@ -360,6 +400,32 @@ def test_zero_external_match_never_advertises_async_loading() -> None:
     request = make_request(prompt_tokens=4)
 
     assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
+
+
+@pytest.mark.parametrize(
+    "prompt_tokens,readable_end,local_tokens,eagle,safe_end,load_end",
+    (
+        (8, 8, 0, True, 4, 4),
+        (8, 8, 0, False, 7, 8),
+        (9, 8, 0, True, 8, 8),
+        (12, 8, 0, True, 8, 8),
+        (8, 8, 6, True, 6, 0),
+    ),
+)
+def test_speculative_lookup_recomputes_only_the_prompt_tail(
+    prompt_tokens, readable_end, local_tokens, eagle, safe_end, load_end
+) -> None:
+    scheduler = SynchronousBulkScheduler(make_config(eagle=eagle), FakeRemoteLookup(readable_end))
+    request = make_request(prompt_tokens=prompt_tokens)
+    try:
+        assert scheduler.get_num_new_matched_tokens(request, local_tokens) == (safe_end - local_tokens, False)
+        scheduler.confirm_allocation(request, FakeBlocks([1, 2, 3]), safe_end - local_tokens)
+        step = scheduler.build_step(
+            make_output(new=(new_request_data("request", ([1, 2, 3],), safe_end),), scheduled_tokens={"request": 0})
+        )
+        assert [command.load_range for command in step.load.commands] == ([TokenRange(0, load_end)] if load_end else [])
+    finally:
+        scheduler.close()
 
 
 @pytest.mark.parametrize(
