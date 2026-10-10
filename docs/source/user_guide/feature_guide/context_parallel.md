@@ -23,6 +23,7 @@ PCP support is experimental and available only with ModelRunner V2. The followin
 | GQA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | — Not applicable | 🟠 Partial compatibility (Eagle3, eager and `FULL_DECODE_ONLY`) | ✅ Full compatibility (`MooncakeConnectorV1`, `MooncakeConnectorV2`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ✅ Full compatibility |
 | SFA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | 🟠 Partial compatibility (MTP, eager and `FULL_DECODE_ONLY`) | ✅ Full compatibility (`MooncakeConnectorV1`, `MooncakeConnectorV2`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ✅ Full compatibility |
 | DSA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | — Not applicable | 🟠 Partial compatibility (MTP and DSpark, eager and `FULL_DECODE_ONLY`) | ✅ Full compatibility (`MooncakeHybridConnector`, `MooncakeConnectorV2`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ✅ Full compatibility |
+| DSA V4.1 | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | — Not applicable | 🟠 Partial compatibility (DSpark, eager and `FULL_DECODE_ONLY`) | ✅ Full compatibility (`MooncakeHybridConnector`, `MooncakeConnectorV2`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ✅ Full compatibility |
 
 - ✅ **Full compatibility**: The basic path or feature combination is supported.
 - 🟠 **Partial compatibility**: The basic path or feature combination is supported with the stated limitations.
@@ -69,9 +70,9 @@ With PCP enabled, O-projection weight sharding is on by default for SFA-PCP O-pr
 
 #### Speculative Decoding
 
-MRV2 PCP supports MTP with MLA and DSA models, Eagle3 with GQA models, and
-DSpark with DeepSeek-V4 DSA models. The target model runs with the
-configured PCP topology, while the draft model is replicated on every PCP rank
+MRV2 PCP supports MTP with MLA and DeepSeek-V4 DSA models, Eagle3 with GQA
+models, and DSpark with DeepSeek-V4 and DeepSeek-V4.1 DSA models. The target
+model runs with the configured PCP topology, while the draft model is replicated on every PCP rank
 and runs with a logical PCP size of `1`. Configure PCP only for the target
 model.
 
@@ -114,8 +115,8 @@ For either method, remove `--enforce-eager` and add the following option to use 
 - PCP is supported only with ModelRunner V2.
 - In P/D disaggregation, enable PCP only on the prefill (`kv_producer`) engine; the decode (`kv_consumer`) engine must use `prefill_context_parallel_size=1`.
 - KV cache pooling with PCP supports only `AscendStoreConnector` with `use_layerwise=false`.
-- PCP speculative decoding supports MTP with MLA and DSA models, Eagle3 with
-  GQA models, and DSpark with DeepSeek-V4 DSA models.
+- PCP speculative decoding supports MTP with MLA and DeepSeek-V4 DSA models,
+  Eagle3 with GQA models, and DSpark with DeepSeek-V4 and DeepSeek-V4.1 DSA models.
 - Draft sampling must use the greedy method.
 - Full graph execution with PCP is limited to `FULL_DECODE_ONLY`.
 - Pipeline parallelism, encoder-decoder models, multimodal inputs, and LoRA are not supported with MRV2 PCP.
@@ -125,7 +126,8 @@ For either method, remove `--enforce-eager` and add the following option to use 
   prefill_context_parallel_size and decode_context_parallel_size.
 - Adaptive verification is not supported with PCP speculative decoding.
 - Dynamic draft lengths are outside the currently validated scope.
-- PCP and [DSA-CP](#dsa-cp) cannot be enabled simultaneously with the DSA backend.
+- PCP and [DSA-CP](#dsa-cp) cannot be enabled simultaneously with the DSA or
+  DSA V4.1 backend.
 
 ### Decode Context Parallel
 
