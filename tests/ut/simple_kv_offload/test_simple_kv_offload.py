@@ -164,7 +164,7 @@ def test_register_kv_caches_keeps_separate_kv_and_initializes_backend(
 
     key_cache = torch.empty(4, 6, dtype=torch.uint8)
     value_cache = torch.empty(4, 6, dtype=torch.uint8)
-    worker.register_kv_caches({"layer": (key_cache, value_cache)})
+    worker.register_kv_caches({"layer": (key_cache, value_cache), "alias": key_cache.view_as(key_cache)})
 
     assert worker.num_cpu_blocks == 8
     assert list(worker.gpu_kv_caches) == ["layer", "layer.1"]
@@ -181,7 +181,94 @@ def test_register_kv_caches_keeps_separate_kv_and_initializes_backend(
     )
 
 
-def test_get_finished_records_store_barrier_on_npu(
+def test_register_kv_caches_keeps_kv_views_of_one_allocation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Model Runner V2 slices K and V out of a single allocation.
+
+    Both views have to be registered: deduplicating by storage pointer alone
+    drops every V cache, so a reloaded prefix cache would miss half of it.
+    """
+
+    class FakeBackend:
+        def __init__(self) -> None:
+            self.init_args: tuple[object, ...] | None = None
+
+        def init(self, *args) -> None:
+            self.init_args = args
+
+    monkeypatch.setattr(
+        torch,
+        "npu",
+        SimpleNamespace(Stream=lambda: object()),
+        raising=False,
+    )
+    monkeypatch.setattr(worker_module, "is_pin_memory_available", lambda: False)
+
+    worker = SimpleCPUOffloadNPUWorker.__new__(SimpleCPUOffloadNPUWorker)
+    worker.kv_cache_config = SimpleNamespace(num_blocks=4)
+    worker.cpu_capacity_bytes = 96
+    worker._backend = FakeBackend()
+
+    num_blocks, page_elems = 4, 6
+    backing = torch.empty(2 * num_blocks * page_elems, dtype=torch.uint8)
+    key_cache = backing[: num_blocks * page_elems].view(num_blocks, page_elems)
+    value_cache = backing[num_blocks * page_elems :].view(num_blocks, page_elems)
+    assert key_cache.untyped_storage().data_ptr() == value_cache.untyped_storage().data_ptr()
+
+    worker.register_kv_caches({"layer": (key_cache, value_cache), "alias": key_cache.view_as(key_cache)})
+
+    assert list(worker.gpu_kv_caches) == ["layer", "layer.1"]
+    assert worker.num_cpu_blocks == 8
+    assert worker.cpu_kv_caches["layer"].shape == (8, page_elems)
+    assert worker.cpu_kv_caches["layer.1"].shape == (8, page_elems)
+
+
+def test_offload_copies_packed_page_once_and_matches_pool_capacity(monkeypatch):
+    """Latent/RoPE views and overlay aliases must not duplicate physical pages."""
+    monkeypatch.setattr(torch, "npu", SimpleNamespace(Stream=lambda: object()), raising=False)
+    monkeypatch.setattr(worker_module, "is_pin_memory_available", lambda: False)
+    worker = SimpleCPUOffloadNPUWorker.__new__(SimpleCPUOffloadNPUWorker)
+    worker._backend = SimpleNamespace(init=lambda *args: None)
+    worker.cpu_capacity_bytes = 256
+    descriptor = SimpleNamespace(layers=["packed", "overlay"], block_stride=16, size=128, offset=0, layer_stride=0)
+    worker.kv_cache_config = SimpleNamespace(
+        num_blocks=4,
+        kv_cache_tensors=[descriptor],
+    )
+    # Leading alignment padding, four 16-byte pages, and unused tuple padding.
+    backing = torch.arange(160, dtype=torch.uint8)
+    latent = backing.as_strided((4, 8), (16, 1), storage_offset=16)
+    rope = backing.as_strided((4, 8), (16, 1), storage_offset=24)
+    worker.register_kv_caches({"packed": (latent, rope), "overlay": (latent, rope)})
+    assert list(worker.gpu_kv_caches) == ["packed"]
+    assert torch.equal(worker.gpu_kv_caches["packed"].view(torch.uint8), backing[16:80].view(4, 16))
+    # The scheduler budgets the whole 128-byte backing, including tuple padding.
+    assert worker.num_cpu_blocks == 4 * 256 // 128
+    assert worker.cpu_kv_caches["packed"].shape == (8, 16)
+
+
+def test_descriptor_path_does_not_merge_separately_allocated_components(monkeypatch):
+    monkeypatch.setattr(torch, "npu", SimpleNamespace(Stream=lambda: object()), raising=False)
+    monkeypatch.setattr(worker_module, "is_pin_memory_available", lambda: False)
+    worker = SimpleCPUOffloadNPUWorker.__new__(SimpleCPUOffloadNPUWorker)
+    worker._backend = SimpleNamespace(init=lambda *args: None)
+    worker.cpu_capacity_bytes = 256
+    worker.kv_cache_config = SimpleNamespace(
+        num_blocks=4,
+        kv_cache_tensors=[SimpleNamespace(layers=["layer"], size=64, offset=0, layer_stride=0, block_stride=8)],
+    )
+    # Padding in two independent allocations must not make them one packed page.
+    key = torch.zeros(64, dtype=torch.uint8)[:32].view(4, 8)
+    value = torch.ones(64, dtype=torch.uint8)[:32].view(4, 8)
+    worker.register_kv_caches({"layer": (key, value)})
+    assert list(worker.gpu_kv_caches) == ["layer", "layer.1"]
+    assert worker.num_cpu_blocks == 16
+    assert torch.equal(worker.gpu_kv_caches["layer"], key)
+    assert torch.equal(worker.gpu_kv_caches["layer.1"], value)
+
+
+def test_transfer_hooks_record_store_barrier_once_on_npu(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class FakeEvent:
@@ -208,7 +295,7 @@ def test_get_finished_records_store_barrier_on_npu(
 
     worker = SimpleCPUOffloadNPUWorker.__new__(SimpleCPUOffloadNPUWorker)
     worker._backend = RecordingBackend()
-    worker._connector_metadata = SimpleCPUOffloadMetadata(
+    metadata = SimpleCPUOffloadMetadata(
         load_event=1,
         load_gpu_blocks=[2],
         load_cpu_blocks=[3],
@@ -223,7 +310,17 @@ def test_get_finished_records_store_barrier_on_npu(
     worker._pending_store_event_indices = set()
     worker._completed_store_events = {}
 
+    worker.bind_connector_metadata(metadata)
+    # Completion polling must not submit transfers. The engine invokes the
+    # load and store hooks separately from get_finished.
+    worker._pending_load_event_indices.clear()
+    worker._pending_store_event_indices.clear()
     assert worker.get_finished(set()) == (None, None)
+    assert worker._backend.calls == []
+    worker.start_load_kv()
+    worker.wait_for_save()
+    worker.wait_for_save()
+    worker.clear_connector_metadata()
 
     load_call, store_call = worker._backend.calls
     assert load_call["is_store"] is False
@@ -232,3 +329,96 @@ def test_get_finished_records_store_barrier_on_npu(
     store_event = store_call["wait_event"]
     assert isinstance(store_event, FakeEvent)
     assert store_event.recorded_stream is current_stream
+    worker.bind_connector_metadata(metadata)
+    worker.wait_for_save()
+    assert len(worker._backend.calls) == 3
+
+
+@pytest.mark.parametrize("padding", [0, 16])
+def test_offload_interleaved_layers_share_one_page_and_pool_capacity(monkeypatch, padding):
+    """A block-outermost descriptor must copy both layers once without resizing."""
+    monkeypatch.setattr(torch, "npu", SimpleNamespace(Stream=lambda: object()), raising=False)
+    monkeypatch.setattr(worker_module, "is_pin_memory_available", lambda: False)
+    worker = SimpleCPUOffloadNPUWorker.__new__(SimpleCPUOffloadNPUWorker)
+    worker._backend = SimpleNamespace(init=lambda *args: None)
+    worker.cpu_capacity_bytes = 256
+    worker.kv_cache_config = SimpleNamespace(
+        num_blocks=4,
+        kv_cache_tensors=[SimpleNamespace(layers=["a", "b"], size=64, offset=0, layer_stride=8, block_stride=16)],
+    )
+    backing = torch.arange(64 + padding, dtype=torch.uint8)
+    caches = {
+        name: backing.as_strided((4, 8), (16, 1), storage_offset=padding + offset)
+        for name, offset in (("a", 0), ("b", 8))
+    }
+    original_size = backing.untyped_storage().nbytes()
+    worker.register_kv_caches(caches)
+    assert worker.num_cpu_blocks == 16
+    assert len(worker.gpu_kv_caches) == 1
+    assert backing.untyped_storage().nbytes() == original_size
+    page = next(iter(worker.gpu_kv_caches.values()))
+    assert torch.equal(page.view(torch.uint8), backing[padding:].view(4, 16))
+    mirror = next(iter(worker.cpu_kv_caches.values()))
+    mirror[0].copy_(page[2])
+    saved = page[2].clone()
+    page[2].zero_()
+    page[2].copy_(mirror[0])
+    assert torch.equal(page[2], saved)
+
+
+def test_offload_rejects_view_past_storage_without_resizing():
+    backing = torch.zeros(64, dtype=torch.uint8)
+    cache = backing.as_strided((4, 8), (16, 1), storage_offset=8)
+    with pytest.raises(ValueError, match="exceeds its backing storage"):
+        SimpleCPUOffloadNPUWorker._build_block_views("interleaved", cache, 4)
+    assert backing.untyped_storage().nbytes() == 64
+
+
+@pytest.mark.parametrize("padding", [0, 16])
+@pytest.mark.parametrize("split_components", [False, True])
+@pytest.mark.parametrize("num_layers", [1, 2])
+def test_offload_interleaved_kv_tensor_copies_each_physical_page_once(
+    monkeypatch, padding, split_components, num_layers
+):
+    """MRV1 exposes (K/V, blocks, ...) with K and V interleaved per block."""
+    monkeypatch.setattr(torch, "npu", SimpleNamespace(Stream=lambda: object()), raising=False)
+    monkeypatch.setattr(worker_module, "is_pin_memory_available", lambda: False)
+    worker = SimpleCPUOffloadNPUWorker.__new__(SimpleCPUOffloadNPUWorker)
+    worker._backend = SimpleNamespace(init=lambda *args: None)
+    worker.cpu_capacity_bytes = 256
+    names = [f"layer{i}" for i in range(num_layers)]
+    worker.kv_cache_config = SimpleNamespace(
+        num_blocks=4,
+        kv_cache_tensors=[
+            SimpleNamespace(layers=names, size=64 * num_layers, offset=0, layer_stride=64, block_stride=16)
+        ],
+    )
+    backings = [torch.arange(64 + padding, dtype=torch.uint8) for _ in names]
+    caches = [backing.as_strided((2, 4, 8), (8, 16, 1), storage_offset=padding) for backing in backings]
+    worker.register_kv_caches(
+        {name: tuple(cache.unbind(0)) if split_components else cache for name, cache in zip(names, caches)}
+    )
+    assert len(worker.gpu_kv_caches) == num_layers
+    assert worker.num_cpu_blocks == 16 // num_layers
+    for name, backing, cache in zip(names, backings, caches):
+        page = worker.gpu_kv_caches[name]
+        assert torch.equal(page.view(torch.uint8), backing[padding:].view(4, 16))
+        assert backing.untyped_storage().nbytes() == 64 + padding
+        mirror = worker.cpu_kv_caches[name]
+        expected = cache[:, 2].clone()
+        mirror[0].copy_(page[2])
+        cache[:, 2].zero_()
+        page[2].copy_(mirror[0])
+        assert torch.equal(cache[:, 2], expected)
+
+
+def test_offload_rejects_fallback_larger_than_scheduler_budget():
+    worker = SimpleCPUOffloadNPUWorker.__new__(SimpleCPUOffloadNPUWorker)
+    worker.cpu_capacity_bytes = 256
+    worker.kv_cache_config = SimpleNamespace(
+        num_blocks=4,
+        kv_cache_tensors=[SimpleNamespace(layers=["layer"], size=32, offset=0, layer_stride=0, block_stride=8)],
+    )
+    caches = (torch.zeros(4, 8, dtype=torch.uint8), torch.zeros(4, 8, dtype=torch.uint8))
+    with pytest.raises(ValueError, match="scheduler block budget"):
+        worker.register_kv_caches({"layer": caches})
