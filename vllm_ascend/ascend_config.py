@@ -303,16 +303,17 @@ class EplbConfig:
     def _validate_config(self):
         if self.expert_map_path is not None:
             logger.info("The expert_map is %s", self.expert_map_path)
-            if self.expert_map_path[-5:] != ".json":
+            if not self.expert_map_path.endswith(".json"):
                 raise TypeError("The expert_map is not json.")
             if not (os.path.exists(self.expert_map_path) and os.access(self.expert_map_path, os.R_OK)):
                 raise ValueError("The expert_map is not exist.")
         if self.expert_map_record_path is not None:
             self.dynamic_eplb = True
-            if self.expert_map_record_path[-5:] != ".json":
+            if not self.expert_map_record_path.endswith(".json"):
                 raise TypeError("The expert_map_record_path is not json.")
             dirname = os.path.dirname(self.expert_map_record_path)
-            os.makedirs(dirname, exist_ok=True)
+            if dirname:
+                os.makedirs(dirname, exist_ok=True)
         for key in ["expert_heat_collection_interval", "algorithm_execution_interval", "num_redundant_experts"]:
             value = getattr(self, key)
             if not isinstance(value, int):
