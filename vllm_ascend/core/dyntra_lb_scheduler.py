@@ -573,6 +573,15 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
                             self.running,
                             key=lambda r: (r.priority, r.arrival_time),
                         )
+                    else:
+                        preempted_req = self.running[-1]
+
+                    # A deferred free will not help with immediate allocation.
+                    # Check before removing the victim from the running queue.
+                    if not self._request_blocks_can_be_freed(preempted_req):
+                        break
+
+                    if self.policy == SchedulingPolicy.PRIORITY:
                         self.running.remove(preempted_req)
                         if preempted_req in scheduled_running_reqs:
                             preempted_req_id = preempted_req.request_id
