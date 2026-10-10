@@ -1,0 +1,26 @@
+model_name: "baichuan-inc/baichuan-7B"
+model_type: "vllm"
+hardware: "Atlas A2 Series"
+
+serve:
+  tensor_parallel_size: 1
+  dtype: bfloat16
+  max_model_len: 4096
+  gpu_memory_utilization: 0.9
+  trust_remote_code: true
+  max-num-seqs: 16 
+  max-num-batched-tokens: 65536
+  no-enable-prefix-caching: ""
+  compilation-config: '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+
+
+tasks:
+- name: "c-eval(computer science)"
+  metrics:
+  - name: "accuracy"
+    value: 5.26
+
+num_fewshot: 5
+apply_chat_template: false
+fewshot_as_multiturn: false
+batch_size: "auto"
