@@ -449,8 +449,10 @@ on D0 and ranks 8-15 on D1, with API ports 9900-9907 on each node.
    and `PYTHON_LIB_DIR` in each role script to the installed paths. Install
    `fastokens` on Prefill nodes for `VLLM_USE_FASTOKENS=1`.
 2. Verify [multi-node communication](../../getting_started/installation.md#installation-multi-node-interconnect).
-   Replace all IP placeholders. The scripts obtain the matching NIC through
-   `ifconfig`; ensure it is installed and the selected interface is correct.
+   Set `LOCAL_IP="<PREFILL_NODE_IP>"` on each Prefill node and
+   `LOCAL_IP="<DECODE_NODE_IP>"` on each Decode node to that node's IP.
+   Set `NIC_NAME="<NETWORK_INTERFACE>"` to its matching interface and
+   `MODEL_PATH="<YOUR_MODEL_PATH>"` to its model weight directory.
 3. Reserve the PP master port 7060, Decode DP RPC port 16600, API ports,
    proxy port 8081, and the topology-derived Mooncake transfer/handshake ports.
    Prefill and Decode run on separate node groups.
@@ -478,7 +480,7 @@ def run_command(args, local_rank):
     subprocess.run([
         "bash", args.script, devices, str(args.vllm_start_port + local_rank),
         str(args.dp_size), str(dp_rank), args.dp_address,
-        str(args.dp_rpc_port), str(args.tp_size), args.local_ip,
+        str(args.dp_rpc_port), str(args.tp_size),
     ], check=True)
 
 
@@ -491,7 +493,6 @@ def main():
     parser.add_argument("--dp-address", required=True)
     parser.add_argument("--dp-rpc-port", type=int, default=16600)
     parser.add_argument("--vllm-start-port", type=int, default=9900)
-    parser.add_argument("--local-ip", required=True)
     parser.add_argument("--script", required=True)
     args = parser.parse_args()
     if min(args.dp_size, args.tp_size, args.dp_size_local) <= 0:
@@ -516,7 +517,7 @@ if __name__ == "__main__":
 
 The launcher passes `$1` = visible devices, `$2` = API port, `$3` =
 global DP size, `$4` = global DP rank, `$5` = DP master address, `$6` = DP
-RPC port, `$7` = TP size, and `$8` = the current node IP to the
+RPC port, and `$7` = TP size to the
 node-specific Decode script (`run_d0.sh` or `run_d1.sh`).
 Every local rank receives a disjoint pair of devices.
 
@@ -529,7 +530,9 @@ P0 hosts the Prefill API and PP master.
 ```shell
 #!/usr/bin/env bash
 
-MODEL_PATH=/path/to/GLM-5.3-W8A8C8
+LOCAL_IP="<PREFILL_NODE_IP>"
+NIC_NAME="<NETWORK_INTERFACE>"
+MODEL_PATH="<YOUR_MODEL_PATH>"
 PYTHON_LIB_DIR=/path/to/python/lib
 
 # Set the current node IP and shared P0 master IP before starting.
@@ -539,15 +542,13 @@ export HCCL_EXEC_TIMEOUT=1800
 export HCCL_CONNECT_TIMEOUT=1800
 export ASCEND_TRANSFER_TIMEOUT=10000
 
-local_ip="<P0_IP>"
-node_p0_ip="<P0_IP>"
-nic_name=$(ifconfig | grep -B1 "inet.*$local_ip" | head -1 | awk '{print $1}' | sed 's/://')
+NODE_P0_IP="$LOCAL_IP"
 
-export VLLM_HOST_IP=$local_ip
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
+export VLLM_HOST_IP="$LOCAL_IP"
+export HCCL_IF_IP="$LOCAL_IP"
+export GLOO_SOCKET_IFNAME="$NIC_NAME"
+export TP_SOCKET_IFNAME="$NIC_NAME"
+export HCCL_SOCKET_IFNAME="$NIC_NAME"
 
 export LD_LIBRARY_PATH="${PYTHON_LIB_DIR}:/usr/local/lib:${LD_LIBRARY_PATH}"
 
@@ -571,7 +572,7 @@ exec vllm serve "${MODEL_PATH}" \
     --enable-expert-parallel \
     --pipeline-parallel-size 2 \
     --distributed-executor-backend mp \
-    --master-addr "$node_p0_ip" \
+    --master-addr "$NODE_P0_IP" \
     --master-port 7060 \
     --nnodes 2 \
     --node-rank 0 \
@@ -627,7 +628,9 @@ P1 uses P0 as the PP master and runs PP node rank 1 with `--headless`.
 ```shell
 #!/usr/bin/env bash
 
-MODEL_PATH=/path/to/GLM-5.3-W8A8C8
+LOCAL_IP="<PREFILL_NODE_IP>"
+NIC_NAME="<NETWORK_INTERFACE>"
+MODEL_PATH="<YOUR_MODEL_PATH>"
 PYTHON_LIB_DIR=/path/to/python/lib
 
 # Set the current node IP and shared P0 master IP before starting.
@@ -637,15 +640,13 @@ export HCCL_EXEC_TIMEOUT=1800
 export HCCL_CONNECT_TIMEOUT=1800
 export ASCEND_TRANSFER_TIMEOUT=10000
 
-local_ip="<P1_IP>"
-node_p0_ip="<P0_IP>"
-nic_name=$(ifconfig | grep -B1 "inet.*$local_ip" | head -1 | awk '{print $1}' | sed 's/://')
+NODE_P0_IP="<PREFILL_NODE0_IP>"
 
-export VLLM_HOST_IP=$local_ip
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
+export VLLM_HOST_IP="$LOCAL_IP"
+export HCCL_IF_IP="$LOCAL_IP"
+export GLOO_SOCKET_IFNAME="$NIC_NAME"
+export TP_SOCKET_IFNAME="$NIC_NAME"
+export HCCL_SOCKET_IFNAME="$NIC_NAME"
 
 export LD_LIBRARY_PATH="${PYTHON_LIB_DIR}:/usr/local/lib:${LD_LIBRARY_PATH}"
 
@@ -669,7 +670,7 @@ exec vllm serve "${MODEL_PATH}" \
     --enable-expert-parallel \
     --pipeline-parallel-size 2 \
     --distributed-executor-backend mp \
-    --master-addr "$node_p0_ip" \
+    --master-addr "$NODE_P0_IP" \
     --master-port 7060 \
     --nnodes 2 \
     --node-rank 1 \
@@ -726,24 +727,24 @@ D0 runs DP ranks 0-7 on devices 0-15. Both Decode nodes use D0 as their DP maste
 ```shell
 #!/usr/bin/env bash
 
-MODEL_PATH=/path/to/GLM-5.3-W8A8C8
+LOCAL_IP="<DECODE_NODE_IP>"
+NIC_NAME="<NETWORK_INTERFACE>"
+MODEL_PATH="<YOUR_MODEL_PATH>"
 PYTHON_LIB_DIR=/path/to/python/lib
 
-# Arguments $1-$8 are supplied by launch_online_dp.py.
+# Arguments $1-$7 are supplied by launch_online_dp.py.
 
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
 export HCCL_EXEC_TIMEOUT=1800
 export HCCL_CONNECT_TIMEOUT=1800
 export ASCEND_TRANSFER_TIMEOUT=10000
 
-local_ip=$8
-nic_name=$(ifconfig | grep -B1 "inet.*$local_ip" | head -1 | awk '{print $1}' | sed 's/://')
 
-export VLLM_HOST_IP=$local_ip
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
+export VLLM_HOST_IP="$LOCAL_IP"
+export HCCL_IF_IP="$LOCAL_IP"
+export GLOO_SOCKET_IFNAME="$NIC_NAME"
+export TP_SOCKET_IFNAME="$NIC_NAME"
+export HCCL_SOCKET_IFNAME="$NIC_NAME"
 
 export LD_LIBRARY_PATH="${PYTHON_LIB_DIR}:/usr/local/lib:${LD_LIBRARY_PATH}"
 
@@ -808,7 +809,7 @@ Run the following command on D0 in its own terminal:
 python launch_online_dp.py --script ./run_d0.sh \
     --dp-size 16 --tp-size 2 --dp-size-local 8 --dp-rank-start 0 \
     --dp-address "<D0_IP>" --dp-rpc-port 16600 \
-    --vllm-start-port 9900 --local-ip "<D0_IP>"
+    --vllm-start-port 9900
 ```
 
 #### 5.2.6 D1 Decode Node
@@ -820,24 +821,24 @@ D1 runs DP ranks 8-15 on devices 0-15. Both Decode nodes use D0 as their DP mast
 ```shell
 #!/usr/bin/env bash
 
-MODEL_PATH=/path/to/GLM-5.3-W8A8C8
+LOCAL_IP="<DECODE_NODE_IP>"
+NIC_NAME="<NETWORK_INTERFACE>"
+MODEL_PATH="<YOUR_MODEL_PATH>"
 PYTHON_LIB_DIR=/path/to/python/lib
 
-# Arguments $1-$8 are supplied by launch_online_dp.py.
+# Arguments $1-$7 are supplied by launch_online_dp.py.
 
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
 export HCCL_EXEC_TIMEOUT=1800
 export HCCL_CONNECT_TIMEOUT=1800
 export ASCEND_TRANSFER_TIMEOUT=10000
 
-local_ip=$8
-nic_name=$(ifconfig | grep -B1 "inet.*$local_ip" | head -1 | awk '{print $1}' | sed 's/://')
 
-export VLLM_HOST_IP=$local_ip
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
+export VLLM_HOST_IP="$LOCAL_IP"
+export HCCL_IF_IP="$LOCAL_IP"
+export GLOO_SOCKET_IFNAME="$NIC_NAME"
+export TP_SOCKET_IFNAME="$NIC_NAME"
+export HCCL_SOCKET_IFNAME="$NIC_NAME"
 
 export LD_LIBRARY_PATH="${PYTHON_LIB_DIR}:/usr/local/lib:${LD_LIBRARY_PATH}"
 
@@ -902,7 +903,7 @@ Run the following command on D1 in its own terminal:
 python launch_online_dp.py --script ./run_d1.sh \
     --dp-size 16 --tp-size 2 --dp-size-local 8 --dp-rank-start 8 \
     --dp-address "<D0_IP>" --dp-rpc-port 16600 \
-    --vllm-start-port 9900 --local-ip "<D1_IP>"
+    --vllm-start-port 9900
 ```
 
 #### 5.2.7 Start the Proxy
@@ -983,7 +984,9 @@ P0 hosts the Prefill API and PP master.
 ```shell
 #!/usr/bin/env bash
 
-MODEL_PATH=/path/to/GLM-5.3-W8A8C8
+LOCAL_IP="<PREFILL_NODE_IP>"
+NIC_NAME="<NETWORK_INTERFACE>"
+MODEL_PATH="<YOUR_MODEL_PATH>"
 PYTHON_LIB_DIR=/path/to/python/lib
 MEMCACHE_ROOT=/path/to/site-packages/memcache_hybrid
 
@@ -994,15 +997,13 @@ export HCCL_EXEC_TIMEOUT=1800
 export HCCL_CONNECT_TIMEOUT=1800
 export ASCEND_TRANSFER_TIMEOUT=10000
 
-local_ip="<P0_IP>"
-node_p0_ip="<P0_IP>"
-nic_name=$(ifconfig | grep -B1 "inet.*$local_ip" | head -1 | awk '{print $1}' | sed 's/://')
+NODE_P0_IP="$LOCAL_IP"
 
-export VLLM_HOST_IP=$local_ip
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
+export VLLM_HOST_IP="$LOCAL_IP"
+export HCCL_IF_IP="$LOCAL_IP"
+export GLOO_SOCKET_IFNAME="$NIC_NAME"
+export TP_SOCKET_IFNAME="$NIC_NAME"
+export HCCL_SOCKET_IFNAME="$NIC_NAME"
 
 export LD_LIBRARY_PATH="${PYTHON_LIB_DIR}:/usr/local/lib:${LD_LIBRARY_PATH}"
 
@@ -1031,7 +1032,7 @@ exec vllm serve "${MODEL_PATH}" \
     --enable-expert-parallel \
     --pipeline-parallel-size 2 \
     --distributed-executor-backend mp \
-    --master-addr "$node_p0_ip" \
+    --master-addr "$NODE_P0_IP" \
     --master-port 7060 \
     --nnodes 2 \
     --node-rank 0 \
@@ -1103,7 +1104,9 @@ P1 uses P0 as the PP master and runs PP node rank 1 with `--headless`.
 ```shell
 #!/usr/bin/env bash
 
-MODEL_PATH=/path/to/GLM-5.3-W8A8C8
+LOCAL_IP="<PREFILL_NODE_IP>"
+NIC_NAME="<NETWORK_INTERFACE>"
+MODEL_PATH="<YOUR_MODEL_PATH>"
 PYTHON_LIB_DIR=/path/to/python/lib
 MEMCACHE_ROOT=/path/to/site-packages/memcache_hybrid
 
@@ -1114,15 +1117,13 @@ export HCCL_EXEC_TIMEOUT=1800
 export HCCL_CONNECT_TIMEOUT=1800
 export ASCEND_TRANSFER_TIMEOUT=10000
 
-local_ip="<P1_IP>"
-node_p0_ip="<P0_IP>"
-nic_name=$(ifconfig | grep -B1 "inet.*$local_ip" | head -1 | awk '{print $1}' | sed 's/://')
+NODE_P0_IP="<PREFILL_NODE0_IP>"
 
-export VLLM_HOST_IP=$local_ip
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
+export VLLM_HOST_IP="$LOCAL_IP"
+export HCCL_IF_IP="$LOCAL_IP"
+export GLOO_SOCKET_IFNAME="$NIC_NAME"
+export TP_SOCKET_IFNAME="$NIC_NAME"
+export HCCL_SOCKET_IFNAME="$NIC_NAME"
 
 export LD_LIBRARY_PATH="${PYTHON_LIB_DIR}:/usr/local/lib:${LD_LIBRARY_PATH}"
 
@@ -1151,7 +1152,7 @@ exec vllm serve "${MODEL_PATH}" \
     --enable-expert-parallel \
     --pipeline-parallel-size 2 \
     --distributed-executor-backend mp \
-    --master-addr "$node_p0_ip" \
+    --master-addr "$NODE_P0_IP" \
     --master-port 7060 \
     --nnodes 2 \
     --node-rank 1 \
@@ -1224,25 +1225,25 @@ D0 runs DP ranks 0-7 on devices 0-15. Both Decode nodes use D0 as their DP maste
 ```shell
 #!/usr/bin/env bash
 
-MODEL_PATH=/path/to/GLM-5.3-W8A8C8
+LOCAL_IP="<DECODE_NODE_IP>"
+NIC_NAME="<NETWORK_INTERFACE>"
+MODEL_PATH="<YOUR_MODEL_PATH>"
 PYTHON_LIB_DIR=/path/to/python/lib
 MEMCACHE_ROOT=/path/to/site-packages/memcache_hybrid
 
-# Arguments $1-$8 are supplied by launch_online_dp.py.
+# Arguments $1-$7 are supplied by launch_online_dp.py.
 
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
 export HCCL_EXEC_TIMEOUT=1800
 export HCCL_CONNECT_TIMEOUT=1800
 export ASCEND_TRANSFER_TIMEOUT=10000
 
-local_ip=$8
-nic_name=$(ifconfig | grep -B1 "inet.*$local_ip" | head -1 | awk '{print $1}' | sed 's/://')
 
-export VLLM_HOST_IP=$local_ip
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
+export VLLM_HOST_IP="$LOCAL_IP"
+export HCCL_IF_IP="$LOCAL_IP"
+export GLOO_SOCKET_IFNAME="$NIC_NAME"
+export TP_SOCKET_IFNAME="$NIC_NAME"
+export HCCL_SOCKET_IFNAME="$NIC_NAME"
 
 export LD_LIBRARY_PATH="${PYTHON_LIB_DIR}:/usr/local/lib:${LD_LIBRARY_PATH}"
 
@@ -1332,7 +1333,7 @@ Run the following command on D0 in its own terminal:
 python launch_online_dp.py --script ./run_d0.sh \
     --dp-size 16 --tp-size 2 --dp-size-local 8 --dp-rank-start 0 \
     --dp-address "<D0_IP>" --dp-rpc-port 16600 \
-    --vllm-start-port 9900 --local-ip "<D0_IP>"
+    --vllm-start-port 9900
 ```
 
 **D1: save as `run_d1.sh` on this node**
@@ -1342,25 +1343,25 @@ D1 runs DP ranks 8-15 on devices 0-15. Both Decode nodes use D0 as their DP mast
 ```shell
 #!/usr/bin/env bash
 
-MODEL_PATH=/path/to/GLM-5.3-W8A8C8
+LOCAL_IP="<DECODE_NODE_IP>"
+NIC_NAME="<NETWORK_INTERFACE>"
+MODEL_PATH="<YOUR_MODEL_PATH>"
 PYTHON_LIB_DIR=/path/to/python/lib
 MEMCACHE_ROOT=/path/to/site-packages/memcache_hybrid
 
-# Arguments $1-$8 are supplied by launch_online_dp.py.
+# Arguments $1-$7 are supplied by launch_online_dp.py.
 
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
 export HCCL_EXEC_TIMEOUT=1800
 export HCCL_CONNECT_TIMEOUT=1800
 export ASCEND_TRANSFER_TIMEOUT=10000
 
-local_ip=$8
-nic_name=$(ifconfig | grep -B1 "inet.*$local_ip" | head -1 | awk '{print $1}' | sed 's/://')
 
-export VLLM_HOST_IP=$local_ip
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
+export VLLM_HOST_IP="$LOCAL_IP"
+export HCCL_IF_IP="$LOCAL_IP"
+export GLOO_SOCKET_IFNAME="$NIC_NAME"
+export TP_SOCKET_IFNAME="$NIC_NAME"
+export HCCL_SOCKET_IFNAME="$NIC_NAME"
 
 export LD_LIBRARY_PATH="${PYTHON_LIB_DIR}:/usr/local/lib:${LD_LIBRARY_PATH}"
 
@@ -1450,7 +1451,7 @@ Run the following command on D1 in its own terminal:
 python launch_online_dp.py --script ./run_d1.sh \
     --dp-size 16 --tp-size 2 --dp-size-local 8 --dp-rank-start 8 \
     --dp-address "<D0_IP>" --dp-rpc-port 16600 \
-    --vllm-start-port 9900 --local-ip "<D1_IP>"
+    --vllm-start-port 9900
 ```
 
 The pooled configuration uses base KV ports 30000 on Prefill and
