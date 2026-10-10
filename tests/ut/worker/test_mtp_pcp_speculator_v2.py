@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 
+import json
 from contextlib import nullcontext
 from dataclasses import replace as dataclass_replace
 from types import SimpleNamespace
@@ -10,9 +11,23 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 import torch
-from vllm.config import CUDAGraphMode, EngramConfig
+from vllm.config import (
+    CUDAGraphMode,
+    DeviceConfig,
+    EngramConfig,
+    EPLBConfig,
+    ModelConfig,
+    ParallelConfig,
+    SchedulerConfig,
+    SpeculativeConfig,
+    VllmConfig,
+    replace,
+)
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.gpu import dp_utils
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
+from vllm.v1.worker.gpu.spec_decode import utils as spec_utils
+from vllm.v1.worker.gpu.spec_decode.eagle import utils as eagle_utils
 from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator
 from vllm.v1.worker.gpu.spec_decode.mtp.speculator import MTPSpeculator
 
@@ -31,6 +46,7 @@ from vllm_ascend.worker.v2.spec_decode.mtp.speculator import (
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
     disable_profiling_chunk_for_draft,
     disable_target_pcp_for_replicated_draft,
+    prepare_replicated_pcp_config,
 )
 
 
@@ -86,14 +102,21 @@ def _make_padded_input_batch() -> MagicMock:
 
 
 @pytest.mark.parametrize(
-    ("target_pcp_size", "dcp_size", "dp_size", "engram"),
-    [(2, 4, 2, False), (2, 8, 2, False), (1, 4, 2, False), (2, 1, 1, True), (2, 1, 2, True)],
+    ("target_pcp_size", "dcp_size", "dp_size", "engram", "expected_draft_eplb"),
+    [
+        (2, 4, 2, False, True),
+        (2, 8, 2, False, True),
+        (1, 4, 2, False, True),
+        (2, 1, 1, True, False),
+        (2, 1, 2, True, True),
+    ],
 )
 def test_draft_runtime_config_preserves_target_worker_topology(
     target_pcp_size: int,
     dcp_size: int,
     dp_size: int,
     engram: bool,
+    expected_draft_eplb: bool,
 ) -> None:
     draft_parallel_config = SimpleNamespace(
         prefill_context_parallel_size=2,
@@ -104,11 +127,13 @@ def test_draft_runtime_config_preserves_target_worker_topology(
         rank=0,
     )
     target_parallel_config = SimpleNamespace(
+        tensor_parallel_size=1,
         prefill_context_parallel_size=target_pcp_size,
         cp_kv_cache_interleave_size=128,
         decode_context_parallel_size=dcp_size,
         enable_expert_parallel=True,
         enable_eplb=True,
+        eplb_config=EPLBConfig(num_redundant_experts=0),
         rank=7,
         data_parallel_size=dp_size,
         data_parallel_rank=dp_size - 1,
@@ -208,7 +233,7 @@ def test_draft_runtime_config_preserves_target_worker_topology(
     else:
         assert "reconstruction_dcp_size" not in captured
     assert execution_parallel_config.enable_expert_parallel
-    assert execution_parallel_config.enable_eplb
+    assert execution_parallel_config.enable_eplb is expected_draft_eplb
     assert execution_parallel_config.rank == target_parallel_config.rank
     assert execution_parallel_config.data_parallel_size == dp_size
     assert execution_parallel_config.data_parallel_rank == dp_size - 1
@@ -235,6 +260,148 @@ def test_draft_runtime_config_preserves_target_worker_topology(
         target_parallel_config.pipeline_parallel_size == 1
     )
     assert target_config.additional_config["scheduler_config"]["profiling_chunk_config"]["enabled"] is True
+
+
+@pytest.fixture
+def eplb_worker_config(tmp_path):
+    # Exercise real config validation without downloading metadata or weights.
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": ["DeepseekV3ForCausalLM"],
+                "model_type": "deepseek_v3",
+                "num_nextn_predict_layers": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    # Static capabilities avoid registry inspection in an NPU-dependent subprocess.
+    model_info = SimpleNamespace(
+        architecture="DeepseekV3ForCausalLM",
+        is_text_generation_model=True,
+        is_pooling_model=False,
+        attn_type="decoder",
+        default_seq_pooling_type=None,
+        default_tok_pooling_type=None,
+        score_type=None,
+        supports_multimodal=False,
+        supports_multimodal_raw_input_only=False,
+        requires_raw_input_tokens=False,
+        supports_multimodal_encoder_tp_data=False,
+        supports_pp=True,
+        has_inner_state=False,
+        is_attention_free=False,
+        is_hybrid=False,
+        has_noops=False,
+        supports_mamba_prefix_caching=False,
+        supports_replayssm=False,
+        supports_transcription=False,
+        supports_transcription_only=False,
+        supported_video_pruning_methods=(),
+    )
+    # Validate MRV2 PCP/EPLB config without requiring accelerator kernels on CPU.
+    with (
+        patch(
+            "vllm.model_executor.models.ModelRegistry.inspect_model_cls",
+            return_value=(model_info, model_info.architecture),
+        ),
+        patch("vllm.envs.VLLM_USE_V2_MODEL_RUNNER", True),
+        patch("vllm.config.vllm.HAS_TRITON", True),
+        patch("vllm.config.parallel.current_platform.is_cuda_alike", return_value=True),
+    ):
+        model_config = ModelConfig(
+            model=str(tmp_path), skip_tokenizer_init=True, dtype="float32", enforce_eager=True, max_model_len=128
+        )
+        parallel_config = ParallelConfig(
+            prefill_context_parallel_size=8,
+            enable_expert_parallel=True,
+            enable_eplb=True,
+            distributed_executor_backend="mp",
+        )
+        # Mirror the runtime marker added by communicator auto-selection.
+        parallel_config.eplb_config.__dict__["_vllm_ascend_eplb_auto_selected"] = True
+        yield VllmConfig(
+            model_config=model_config,
+            parallel_config=parallel_config,
+            speculative_config=SpeculativeConfig(
+                method="mtp",
+                num_speculative_tokens=2,
+                target_model_config=model_config,
+                target_parallel_config=parallel_config,
+            ),
+            scheduler_config=SchedulerConfig(
+                max_model_len=128, max_num_batched_tokens=128, max_num_seqs=4, is_encoder_decoder=False
+            ),
+            device_config=DeviceConfig(device="cpu"),
+        )
+
+
+@pytest.mark.parametrize(
+    ("tp_size", "pcp_size", "dp_size", "enabled", "redundant", "expected"),
+    [
+        (1, 8, 1, True, 0, False),
+        (1, 8, 1, True, 8, False),
+        (2, 8, 1, True, 0, True),
+        (1, 8, 2, True, 0, True),
+        (2, 1, 1, True, 0, True),
+        (1, 8, 1, False, 0, False),
+    ],
+)
+def test_replicated_pcp_draft_eplb_policy(eplb_worker_config, tp_size, pcp_size, dp_size, enabled, redundant, expected):
+    config = replace(
+        eplb_worker_config,
+        parallel_config=replace(
+            eplb_worker_config.parallel_config,
+            tensor_parallel_size=tp_size,
+            prefill_context_parallel_size=pcp_size,
+            data_parallel_size=dp_size,
+            enable_eplb=enabled,
+            eplb_config=dataclass_replace(
+                eplb_worker_config.parallel_config.eplb_config, num_redundant_experts=redundant
+            ),
+        ),
+    )
+    draft, replicated = prepare_replicated_pcp_config(config)
+    assert replicated == (pcp_size > 1)
+    assert draft.parallel_config.prefill_context_parallel_size == 1
+    assert draft.parallel_config.enable_expert_parallel
+    assert draft.parallel_config.enable_eplb == expected
+    assert draft.parallel_config.eplb_config.num_redundant_experts == (redundant if expected else 0)
+    assert config.parallel_config.prefill_context_parallel_size == pcp_size
+    assert config.parallel_config.enable_eplb == enabled
+    assert config.parallel_config.eplb_config.num_redundant_experts == redundant
+
+
+def test_pcp_only_eplb_draft_reaches_inherited_loader(eplb_worker_config):
+    spec_config = eplb_worker_config.speculative_config
+    # Exercise every loader override that reconstructs the config.
+    spec_config.moe_backend = "auto"
+    spec_config.kv_cache_dtype = "bfloat16"
+    spec_config.attention_backend = AttentionBackendEnum.CUSTOM
+    eplb_worker_config.load_config = replace(eplb_worker_config.load_config, load_format="fastsafetensors")
+    speculator = object.__new__(AscendMTPSpeculator)
+    speculator.vllm_config, speculator.replicated_pcp = prepare_replicated_pcp_config(eplb_worker_config)
+    speculator.draft_model_config = spec_config.draft_model_config
+    speculator.speculative_config = spec_config
+    speculator.draft_vllm_config = speculator._create_draft_vllm_config()
+    with (
+        patch.object(spec_utils, "get_pp_group", return_value=SimpleNamespace(world_size=2)),
+        patch.object(eagle_utils, "get_model", side_effect=RuntimeError("reached model construction")) as get_model,
+        pytest.raises(RuntimeError, match="reached model construction"),
+    ):
+        speculator.load_draft_model(torch.nn.Module(), set())
+    loading_config = get_model.call_args.kwargs["vllm_config"]
+    assert not loading_config.parallel_config.enable_eplb
+    assert loading_config.parallel_config.enable_expert_parallel
+    assert loading_config.parallel_config.prefill_context_parallel_size == 1
+    assert loading_config.kernel_config.moe_backend == "auto"
+    assert loading_config.cache_config.cache_dtype == "bfloat16"
+    assert loading_config.attention_config.backend == AttentionBackendEnum.CUSTOM
+    assert loading_config.load_config.load_format == "auto"
+    assert not speculator.draft_vllm_config.parallel_config.enable_eplb
+    assert eplb_worker_config.parallel_config.enable_eplb
+    assert eplb_worker_config.parallel_config.prefill_context_parallel_size == 8
+    assert eplb_worker_config.parallel_config.eplb_config.__dict__["_vllm_ascend_eplb_auto_selected"]
 
 
 def test_eagle_draft_config_disables_profiling_chunk() -> None:
