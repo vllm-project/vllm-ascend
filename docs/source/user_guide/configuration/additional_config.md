@@ -314,7 +314,7 @@ llm = LLM(
 
 ### Example
 
-An example of additional configuration is as follows (see [Fine-Grained Tensor Parallelism](../feature_guide/Fine_grained_TP.md) for the requirements of each `finegrained_tp_config` knob; `oproj` / `mlp` tensor parallel sizes require a P/D-disaggregated decode deployment):
+An example of additional configuration is as follows:
 
 ```python
 {
