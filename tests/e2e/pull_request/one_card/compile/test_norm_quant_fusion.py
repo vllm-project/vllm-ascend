@@ -189,3 +189,108 @@ def test_rmsnorm_quant_fusion(
         print("=== Checking operator fusion ===")
         backend.check_before_ops(model.ops_in_model_before(), fully_replaced=True)
         backend.check_after_ops(model.ops_in_model_after())
+
+
+class TestModelDynamicQuant(nn.Module):
+    """AddRMSNorm via npu_add_rms_norm_bias, then npu_dynamic_quant.
+
+    This is the sequence AscendRMSNorm and W8A8 dynamic linear emit.
+    ``bias is None`` is the common checkpoint; W8A8 passes dst_type=int8.
+    """
+
+    def __init__(
+        self,
+        hidden_size: int,
+        dtype: torch.dtype,
+        eps: float = 1e-6,
+        device="npu",
+        use_bias: bool = False,
+        dst_type: torch.dtype | None = None,
+    ):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.eps = eps
+        self.use_bias = use_bias
+        self.dst_type = dst_type
+        self.rms_norm_weight = nn.Parameter(torch.randn(hidden_size, device=device, dtype=dtype))
+        if use_bias:
+            self.bias = nn.Parameter(torch.randn(hidden_size, device=device, dtype=dtype))
+
+    def forward(self, x):
+        residual = torch.zeros_like(x)
+        bias = self.bias if self.use_bias else None
+        norm_output, _, new_residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
+            x, residual, self.rms_norm_weight, bias, self.eps
+        )
+        if self.dst_type is None:
+            quantized_output, pertoken_scale = torch.ops.npu.npu_dynamic_quant(norm_output)
+        else:
+            quantized_output, pertoken_scale = torch.ops.npu.npu_dynamic_quant(norm_output, dst_type=self.dst_type)
+        return quantized_output, pertoken_scale, new_residual
+
+    def ops_in_model_before(self) -> list[OpOverload]:
+        return [
+            torch.ops._C_ascend.npu_add_rms_norm_bias.default,
+            torch.ops.npu.npu_dynamic_quant.default,
+        ]
+
+    def ops_in_model_after(self) -> list[OpOverload]:
+        return [torch.ops.npu.npu_add_rms_norm_dynamic_quant.default]
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("hidden_size", [64])
+@pytest.mark.parametrize("num_tokens", [257])
+@pytest.mark.parametrize("eps", [1e-5, 1e-6])
+@pytest.mark.parametrize("use_bias", [False, True])
+@pytest.mark.parametrize("dst_type", [None, torch.int8])
+def test_rmsnorm_dynamic_quant_fusion(
+    dtype: torch.dtype,
+    hidden_size: int,
+    num_tokens: int,
+    eps: float,
+    use_bias: bool,
+    dst_type: torch.dtype | None,
+):
+    """Fuse npu_add_rms_norm_bias + npu_dynamic_quant into npu_add_rms_norm_dynamic_quant."""
+    if not enable_custom_op():
+        pytest.skip("Custom ops not available, skipping dynamic quant fusion test")
+    if not hasattr(torch.ops.npu, "npu_add_rms_norm_dynamic_quant"):
+        pytest.skip("Fusion operator npu_add_rms_norm_dynamic_quant not available, skipping test")
+    if not hasattr(torch.ops._C_ascend, "npu_add_rms_norm_bias"):
+        pytest.skip("Operator npu_add_rms_norm_bias not available, skipping test")
+
+    torch.set_default_dtype(dtype)
+    torch.manual_seed(1)
+
+    vllm_config = VllmConfig(model_config=ModelConfig(dtype=dtype))
+
+    with vllm.config.set_current_vllm_config(vllm_config):
+        update_environment_variables(
+            {
+                "RANK": "0",
+                "LOCAL_RANK": "0",
+                "WORLD_SIZE": "1",
+                "MASTER_ADDR": "localhost",
+                "MASTER_PORT": "12345",
+            }
+        )
+        init_distributed_environment()
+        ensure_model_parallel_initialized(1, 1)
+
+    with vllm.config.set_current_vllm_config(vllm_config), set_ascend_forward_context(None, vllm_config):
+        backend = get_or_create_backend(vllm_config)
+        model = TestModelDynamicQuant(
+            hidden_size, dtype, eps, device="npu", use_bias=use_bias, dst_type=dst_type
+        ).to("npu")
+        x = torch.rand(num_tokens, hidden_size, device="npu", dtype=dtype, requires_grad=False)
+
+        result_unfused = model(x)
+        model_fused = torch.compile(model, backend=backend)
+        result_fused = model_fused(x)
+
+        for unfused, fused in zip(result_unfused, result_fused):
+            assert unfused.shape == fused.shape
+
+        backend.check_before_ops(model.ops_in_model_before(), fully_replaced=True)
+        backend.check_after_ops(model.ops_in_model_after())
