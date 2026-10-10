@@ -1,4 +1,5 @@
 import importlib
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -30,6 +31,78 @@ from vllm_ascend.utils import (
     AscendDeviceType,
     dsv4_skips_indexer_topk,
 )
+
+
+@pytest.mark.parametrize(
+    "architecture",
+    ["MiniMaxM3SparseForCausalLM", "MiniMaxM3SparseForConditionalGeneration"],
+)
+@pytest.mark.parametrize("cache_dtype", ["fp8", "fp8_e4m3"])
+def test_minimax_m3_mixed_kv_preserves_indexer_block_size(architecture, cache_dtype):
+    config, backend = _mixed_kv_alignment_config(architecture, cache_dtype)
+    with (
+        patch(
+            "vllm_ascend.platform.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A5)
+        ),
+        patch("vllm.config.vllm.set_current_vllm_config", return_value=nullcontext()),
+        patch.object(NPUPlatform, "_find_non_ssm_backend", return_value=backend),
+    ):
+        # Configuration can be aligned more than once during initialization.
+        for _ in range(2):
+            NPUPlatform.update_block_size_for_backend(config)
+            assert config.cache_config.block_size == 128
+            assert config.cache_config.skip_page_size_padded is None
+
+
+@pytest.mark.parametrize(
+    "architecture,cache_dtype,hardware,expected_block_size",
+    [
+        ("OtherForCausalLM", "fp8", "A5", 256),
+        ("MiniMaxM3SparseForCausalLM", "fp8", "A3", 256),
+        ("MiniMaxM3SparseForCausalLM", "auto", "A5", 128),
+    ],
+)
+def test_mixed_kv_alignment_delegates_other_layouts(architecture, cache_dtype, hardware, expected_block_size):
+    config, backend = _mixed_kv_alignment_config(architecture, cache_dtype)
+    with (
+        patch(
+            "vllm_ascend.platform.get_current_hardware_profile",
+            return_value=get_hardware_profile(AscendDeviceType[hardware]),
+        ),
+        patch("vllm.config.vllm.set_current_vllm_config", return_value=nullcontext()),
+    ):
+        NPUPlatform._align_heterogeneous_kv_block_size(config, backend)
+    assert config.cache_config.block_size == expected_block_size
+    assert config.cache_config.skip_page_size_padded == (131072 if expected_block_size == 256 else None)
+
+
+def _mixed_kv_alignment_config(architecture, cache_dtype):
+    model_config = MagicMock()
+    model_config.hf_config.architectures = [architecture]
+    model_config.dtype = torch.bfloat16
+    model_config.is_hybrid = False
+    model_config.get_num_kv_heads.return_value = 2
+    model_config.get_head_size.return_value = 128
+    config = SimpleNamespace(
+        model_config=model_config,
+        parallel_config=MagicMock(),
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=True),
+        kv_transfer_config=None,
+        cache_config=SimpleNamespace(
+            cache_dtype=cache_dtype,
+            block_size=128,
+            user_specified_block_size=False,
+            enable_prefix_caching=True,
+            kv_cache_dtype_skip_layers=["0", "1", "2"],
+            skip_page_size_padded=None,
+            mamba_page_size_padded=None,
+        ),
+    )
+    backend = MagicMock()
+    backend.customize_spec.side_effect = lambda spec: spec
+    backend.get_preferred_block_size.return_value = 128
+    backend.get_supported_kernel_block_sizes.return_value = [128]
+    return config, backend
 
 
 @pytest.mark.parametrize(
