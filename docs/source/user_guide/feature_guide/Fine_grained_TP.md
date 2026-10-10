@@ -247,7 +247,7 @@ To evaluate the effectiveness of fine-grained TP in large-scale service scenario
 
 ---
 
-## ✅ Deployment Recommendations  
+## Deployment Recommendations
 
 Fine-grained TP is the **most effective** in the **decode instance** of PD separation, where models are typically deployed in all-DP mode. In this setup, sharding weight-heavy layers reduces redundant storage and memory pressure. Accordingly, `o_proj` TP and MLP TP are validated for — and limited to — P/D-disaggregated decode nodes (see [Preconditions for o_proj / MLP TP](#preconditions-for-o_proj--mlp-tp)), while embedding and LM head TP are also applicable to all-DP deployments without PD.
 
