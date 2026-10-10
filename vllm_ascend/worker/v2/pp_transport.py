@@ -2,16 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 """Common Model Runner V2 pipeline-parallel utilities."""
 
-from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Protocol
-from unittest.mock import patch
 
 import torch
-import vllm.envs as vllm_envs
 from vllm.config import VllmConfig
 from vllm.sequence import IntermediateTensors
 
@@ -19,19 +16,8 @@ from vllm_ascend.utils import should_reuse_topk
 
 if TYPE_CHECKING:
     from transformers import PretrainedConfig
-    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 _PP_TRANSPORT_PREFIX = "pp_transport"
-
-
-def use_legacy_spec_pp() -> bool:
-    """Whether Ascend's legacy Spec+PP transport workaround is required.
-
-    The supported release (v0.30.0) and the pinned main commit share the
-    upstream sampled-token protocol, so the Ascend transport and loader
-    bypasses are no longer used.
-    """
-    return False
 
 
 class _PPTransportModel(Protocol):
@@ -50,8 +36,6 @@ class SpecPPSupport:
 
     architectures: frozenset[str] | None = None
     needs_aux_hidden_states: bool = False
-    bypass_upstream_pp_guard: bool = False
-    unsupported_feature: str | None = None
 
 
 _SPEC_PP_SUPPORT_BY_METHOD: Mapping[str, SpecPPSupport] = MappingProxyType(
@@ -65,8 +49,6 @@ _SPEC_PP_SUPPORT_BY_METHOD: Mapping[str, SpecPPSupport] = MappingProxyType(
                 }
             ),
             needs_aux_hidden_states=True,
-            bypass_upstream_pp_guard=True,
-            unsupported_feature="EAGLE3 with pipeline parallelism",
         ),
         "dspark": SpecPPSupport(
             architectures=frozenset(
@@ -79,7 +61,6 @@ _SPEC_PP_SUPPORT_BY_METHOD: Mapping[str, SpecPPSupport] = MappingProxyType(
                 }
             ),
             needs_aux_hidden_states=True,
-            bypass_upstream_pp_guard=True,
         ),
     }
 )
@@ -101,49 +82,6 @@ def resolve_spec_pp_support(vllm_config: VllmConfig) -> SpecPPSupport | None:
     ):
         return None
     return support
-
-
-@contextmanager
-def bypass_upstream_spec_pp_guard(
-    vllm_config: VllmConfig,
-    support: SpecPPSupport | None,
-) -> Iterator[bool]:
-    """Bypass the legacy Spec+PP guard, leaving native PP initialization intact."""
-    bypass_guard = support.bypass_upstream_pp_guard if support is not None else False
-    if not bypass_guard or not use_legacy_spec_pp():
-        yield False
-        return
-
-    parallel_config = vllm_config.parallel_config
-    original_pp_size = parallel_config.pipeline_parallel_size
-    parallel_config.pipeline_parallel_size = 1
-    try:
-        # The unsharded draft must not inherit the target's manual PP split.
-        with patch.object(vllm_envs, "VLLM_PP_LAYER_PARTITION", None):
-            yield True
-    finally:
-        parallel_config.pipeline_parallel_size = original_pp_size
-
-
-def restore_pp_after_upstream_init(
-    model_runner: "GPUModelRunner",
-    vllm_config: VllmConfig,
-) -> None:
-    """Restore PP state skipped while the upstream runner initialized as PP=1."""
-    from vllm.v1.worker.gpu.buffer_utils import set_default_max_concurrency
-    from vllm.v1.worker.gpu.pp_utils import PPHandler
-
-    model_runner.use_pp = vllm_config.parallel_config.pipeline_parallel_size > 1
-    assert model_runner.use_pp and model_runner.pp_handler is None
-
-    # The parent sizes UVA pools before constructing request state and the
-    # speculator. Ascend rebuilds both after this helper returns.
-    set_default_max_concurrency(vllm_config.max_concurrent_batches)
-    model_runner.pp_handler = PPHandler(
-        max_num_reqs=model_runner.max_num_reqs,
-        num_speculative_steps=model_runner.num_speculative_steps,
-        device=model_runner.device,
-    )
 
 
 class PPTransportDataType(str, Enum):
