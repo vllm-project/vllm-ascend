@@ -25,7 +25,10 @@ Please refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for
 | `Qwen3.6-27B` (BF16 version) | 1 950DT Products(96GB × 8) node or 1 Atlas 800 A3 (64GB × 16) node or 1 Atlas 800 A2 (64GB × 8) node or Atlas 300I DUO | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3.6-27B) \| [Hugging Face](https://huggingface.co/Qwen/Qwen3.6-27B) |
 | `Qwen3.6-27B-w8a8` (Quantized version) | 1 Atlas 800 A3 (64GB × 16) node or 1 Atlas 800 A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-27B-w8a8) |
 | `Qwen3.6-27B-w8a8-mxfp8` (Quantized version) | 1 950DT Products (96GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-27B-w8a8-mxfp8) |
+| `Qwen3.6-27B-w8a8c8-mxfp8` (Quantized version) | 1 950DT Products (96GB × 8) or 1 950PR Products (128GB × 8) node |  |
 | `Qwen3.6-27B-w8a8-310p`(Quantized version) | 1 Atlas 300I DUO | [ModelScope](https://modelscope.cn/models/Eco-Tech/Qwen3.6-27B-W8A8-310P) |
+
+- `Qwen3.6-27B-w8a8c8-mxfp8` (W8A8 MXFP8 quantization with C8 MXFP8 KV cache): serve it with `--kv-cache-dtype mxfp8`; recommended for long-sequence scenarios.
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
@@ -218,7 +221,7 @@ Expected result: The version information of `vllm-ascend` is displayed, confirmi
 
 ### 5.1 Single-Node Online Deployment
 
-Single-node deployment completes both Prefill and Decode within the same node, suitable for development, testing, and medium-scale inference scenarios. The `Qwen3.5-27B`, `Qwen3.5-27B-w8a8`, `Qwen3.6-27B`, and `Qwen3.6-27B-w8a8` models can all be deployed on 1 Atlas 800 A3 (64GB × 16), 1 Atlas 800 A2 (64GB × 8). On Atlas 300I DUO, at least 2 devices are required. The `Qwen3.6-27B`, and `Qwen3.6-27B-w8a8-mxfp8` models can all be deployed on 1 950DT Products (96GB × 8). The quantized versions need to start with the `--quantization ascend` parameter.
+Single-node deployment completes both Prefill and Decode within the same node, suitable for development, testing, and medium-scale inference scenarios. The `Qwen3.5-27B`, `Qwen3.5-27B-w8a8`, `Qwen3.6-27B`, and `Qwen3.6-27B-w8a8` models can all be deployed on 1 Atlas 800 A3 (64GB × 16), 1 Atlas 800 A2 (64GB × 8). On Atlas 300I DUO, at least 2 devices are required. The `Qwen3.6-27B`, `Qwen3.6-27B-w8a8-mxfp8`, and `Qwen3.6-27B-w8a8c8-mxfp8` models can all be deployed on 1 950DT Products (96GB × 8). The quantized versions need to start with the `--quantization ascend` parameter.
 
 Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwen3_5_mtp` speculative decoding method can be used for both.
 
@@ -395,21 +398,23 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
 
     The following example is for 950DT Products. Quantized versions need `--quantization ascend`.
 
-    === "Qwen3.6-27B-w8a8-mxfp8"
+    === "Qwen3.6-27B-w8a8c8-mxfp8"
 
         Startup Command:
 
         ```bash
         #!/bin/sh
         # Load model from ModelScope to speed up download
-        export MODEL_PATH=Eco-Tech/Qwen3.6-27B-w8a8-mxfp8
+        export MODEL_PATH=Eco-Tech/Qwen3.6-27B-w8a8c8-mxfp8
         export VLLM_USE_MODELSCOPE=True
+        # C8 quantization is not yet adapted to model runner V2; use V1
+        export VLLM_USE_V2_MODEL_RUNNER=0
         export HCCL_BUFFSIZE=512
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         # To reduce memory fragmentation and avoid out of memory
         # Size of the shared buffer (in MB) used by HCCL for NPU-to-NPU collective communication
 
-        # Model weight path; can be a ModelScope model id (e.g., Eco-Tech/Qwen3.6-27B-w8a8-mxfp8) or a local directory path
+        # Model weight path; can be a ModelScope model id (e.g., Eco-Tech/Qwen3.6-27B-w8a8c8-mxfp8) or a local directory path
         # Ensure the model path matches the directory recorded during download
 
         vllm serve $MODEL_PATH \
@@ -419,6 +424,7 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
             --tensor-parallel-size 1 \
             --seed 1024 \
             --quantization ascend \
+            --kv-cache-dtype mxfp8 \
             --served-model-name qwen3.6 \
             --max-num-seqs 32 \
             --max-model-len 262144 \
@@ -443,6 +449,9 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
     - `--gpu-memory-utilization` represents the proportion of HBM that vLLM will use for actual inference. Its essential function is to calculate the available kv_cache size. During the warm-up phase (referred to as profile run in vLLM), vLLM records the peak HBM memory usage during an inference process with an input size of `--max-num-batched-tokens`. The available kv_cache size is then calculated as: `--gpu-memory-utilization` * HBM size - peak HBM memory usage. Therefore, the larger the value of `--gpu-memory-utilization`, the more kv_cache can be used. However, since the HBM memory usage during the warm-up phase may differ from that during actual inference (e.g., due to uneven EP load), setting `--gpu-memory-utilization` too high may lead to OOM (Out of Memory) issues during actual inference. The default value is `0.9`.
     - `--no-enable-prefix-caching` indicates that prefix caching is disabled. The current implementation of hybrid kv cache for Qwen3.6-27B may result in a very large effective `block_size` when prefix caching is enabled (e.g., 2048), which means any prefix shorter than `block_size` will never be cached. If your workload has many short repeated prefixes, consider keeping prefix caching disabled. For related issues, see the [Public FAQs](../../faqs.md).
     - `--quantization ascend` indicates that quantization is used. To disable quantization, remove this option.
+    - `--kv-cache-dtype mxfp8` enables the C8 (MXFP8 KV cache) and is required by the `Qwen3.6-27B-w8a8c8-mxfp8` weights. It stores the KV cache of the full-attention layers as FP8 (E4M3) with E8M0 scales, and runs the full-attention layers on the dedicated QFA (quant flash attention) kernel. The W8A8C8 weights bring performance gains in long-sequence scenarios. With this option, `--block-size` must be a multiple of `512` (it defaults to `512` if unset).
+    - `VLLM_USE_V2_MODEL_RUNNER=0` explicitly selects model runner V1. Keep this value at `0` when serving the C8 weights: C8 quantization is not yet adapted to model runner V2, so only model runner V1 can be used while `--kv-cache-dtype mxfp8` is enabled.
+    - For short-sequence scenarios (e.g., 16K input length), the W8A8 weights (e.g., `Qwen3.6-27B-w8a8-mxfp8`) are recommended instead. When serving a W8A8 weight, remove `--kv-cache-dtype mxfp8` from the startup command. Note that C8 quantization is only supported on A5 machines (950DT and 950PR Products).
     - `--speculative-config` uses `qwen3_5_mtp` for `Qwen3.6-27B` because it shares the same MTP head design as `Qwen3.5-27B`.
     - `--compilation-config` contains configurations related to the aclgraph graph mode. The most significant configurations are `"cudagraph_mode"` and `"cudagraph_capture_sizes"`, which have the following meanings:
         - `"cudagraph_mode"`: represents the specific graph mode. Currently, `"PIECEWISE"` and `"FULL_DECODE_ONLY"` are supported. The graph mode is mainly used to reduce the cost of operator dispatch. Currently, `"FULL_DECODE_ONLY"` is recommended.
