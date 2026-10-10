@@ -162,7 +162,10 @@ a3:
         config_file_path: GLM-5.1-W8A8C8-A3_128k_90_50.yaml
         config_base_path: tests/e2e/cases/models/configs/GLM
         size: 2
-
+      - name: GLM-5.3-Flash-W8A8-130k-PD
+        config_file_path: GLM-5.3-Flash-W8A8-130k-PD.yaml
+        config_base_path: tests/e2e/cases/models/configs/GLM
+        size: 2
 a3-560t:
   single_node:
     test_config:
