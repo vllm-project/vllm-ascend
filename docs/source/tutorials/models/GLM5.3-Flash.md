@@ -1017,7 +1017,7 @@ with the same TP8 layout; it does not load TP8 pool entries directly into TP1
 Decode engines.
 
 For backend installation, hardware dependencies, memory sizing, eviction,
-and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md).
+and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_guide/feature_guide/kv_pool.md).
 
 === "Atlas 800 A3 series"
 
@@ -1028,7 +1028,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
 
     Install the Mooncake backend according to the KV Cache Pool Deployment Guide.
     For A3 HCCS pooling, check the HDK, CANN, and LingQu Computing Network
-    requirements in its [HDK and CANN Version Compatibility Reference](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#hdk_and_cann_version_compatibility_reference).
+    requirements in its [HDK and CANN Version Compatibility Reference](../../user_guide/feature_guide/kv_pool.md#ascend_global_resource_config).
     Add the following mount to the A3 Docker command in Section 4.1 on both nodes:
 
     ```shell
@@ -1229,7 +1229,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     and the `ascend` protocol, and the A3 fabric-memory exports do not apply.
 
     For backend installation, memory sizing, eviction, and tenant options, refer
-    to the [KV Cache Pool Deployment Guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md).
+    to the [KV Cache Pool Deployment Guide](../../user_guide/feature_guide/kv_pool.md).
 
     **Prepare the Mooncake Configuration**
 
