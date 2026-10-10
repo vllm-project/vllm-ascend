@@ -169,10 +169,7 @@ with ModelRunner V2 raises a configuration error; use PCP instead.
 DSA-CP will be fully deprecated once PCP is ready. PCP is currently experimental,
 with support for some feature combinations still in progress.
 
-To try PCP with the same world size, set `VLLM_USE_V2_MODEL_RUNNER=1`, replace TP size `N > 1` with
-`--tensor-parallel-size 1 --prefill-context-parallel-size N` and remove
-`enable_dsa_cp` from `additional_config`. With TP size 1, PCP requires additional
-ranks. Check the compatibility and limitations above before migrating.
+For DSA-CP with ModelRunner V1:
 
 ```bash
 export VLLM_USE_V2_MODEL_RUNNER=0
@@ -182,5 +179,11 @@ vllm serve <glm-5.2-model> \
   --block-size <B> \
   --additional-config '{"enable_dsa_cp": true}'
 ```
+
+To migrate to PCP with ModelRunner V2 and the same world size, set
+`VLLM_USE_V2_MODEL_RUNNER=1`, replace TP size `N > 1` with
+`--tensor-parallel-size 1 --prefill-context-parallel-size N` and remove
+`enable_dsa_cp` from `additional_config`. With TP size 1, PCP requires additional
+ranks. Check the compatibility and limitations above before migrating.
 
 For implementation details, see the [Context Parallel design document](../../developer_guide/Design_Documents/context_parallel.md).
