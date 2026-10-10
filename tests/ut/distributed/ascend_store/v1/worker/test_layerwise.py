@@ -7,6 +7,7 @@ import threading
 from dataclasses import replace
 
 import pytest
+import torch
 
 from tests.ut.distributed.ascend_store.v1.helpers import (
     FakeBackend,
@@ -17,7 +18,7 @@ from tests.ut.distributed.ascend_store.v1.helpers import (
     make_topology,
     make_worker,
 )
-from tests.ut.distributed.ascend_store.v1.worker.bulk_fixtures import make_multi_spec_caches
+from tests.ut.distributed.ascend_store.v1.worker.bulk_fixtures import make_multi_spec_caches, make_sparse_group_topology
 from tests.ut.distributed.ascend_store.v1.worker.gva_fixtures import (
     FakeGVABackend,
     make_gva_spec,
@@ -45,6 +46,71 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.resource
     GVAObjectLayout,
     KVPoolResources,
 )
+
+
+@pytest.mark.parametrize("use_gva", (False, True), ids=("key_range", "gva"))
+@pytest.mark.parametrize(
+    "retention_interval,stored_swa_boundaries,middle_end", ((0, (80, 96), 0), (64, (48, 64, 80, 96), 80))
+)
+def test_layerwise_lookup_recovers_sparse_objects_after_publication(
+    use_gva, retention_interval, stored_swa_boundaries, middle_end
+) -> None:
+    class PublishedKeyRangeBackend(FakeBackend):
+        def __init__(self) -> None:
+            super().__init__()
+            self.readable_keys: set[str] = set()
+
+        def exists(self, keys):
+            self.calls.append(("exists", tuple(keys)))
+            return [int(key in self.readable_keys) for key in keys]
+
+        def commit_key_range_store(self, keys):
+            codes = super().commit_key_range_store(keys)
+            self.readable_keys.update(key for key, code in zip(keys, codes, strict=True) if code == 0)
+            return codes
+
+    topology = make_sparse_group_topology(block_size=16, sliding_window=33)
+    backend = FakeGVABackend() if use_gva else PublishedKeyRangeBackend()
+    backend_spec = make_gva_spec() if use_gva else make_backend_spec(requires_exists_before_put=True)
+    resources = KVPoolResources(
+        backend,
+        backend_spec,
+        8,
+        topology.transfer_groups,
+        gva_layout=GVAObjectLayout(0, 2, 0, 1, 1) if use_gva else None,
+    )
+    binder_type = GVALayerwiseProjectionBinder if use_gva else KeyRangeLayerwiseProjectionBinder
+    binder = binder_type(
+        topology, 256, lambda group, value, head, stage: f"g{group}:{value}", retention_interval=retention_interval
+    )
+    worker_type = GVALayerwiseWorker if use_gva else KeyRangeLayerwiseWorker
+    worker = worker_type(topology, binder, resources, source_ready_event_factory=FakeEvent)
+    block_hashes = tuple(bytes([index]) for index in range(1, 9))
+    caches = {group.layer_names[0]: torch.zeros((8, 2, 16, 1, 1)) for group in topology.transfer_groups}
+    try:
+        worker.bind_kv_caches(caches)
+        command = RangeStoreCommand(
+            "producer", TokenRange(0, 96), ((), (1, 2, 3, 4, 5, 6), (), (1, 2, 3, 4, 5, 6)), block_hashes[:6], 97, 17
+        )
+        begin_step(worker, store=(command,))
+        for group in topology.transfer_groups:
+            worker.save_layer(group.layer_names[0])
+        worker.finish_step()
+        assert worker.take_released_store_job_ids() == {17}
+        worker.end_step()
+        if isinstance(backend, FakeGVABackend):
+            assert backend.native_store is not None
+            readable_keys = {key for key, region in backend.native_store.objects.items() if region[2]}
+        else:
+            readable_keys = backend.readable_keys
+        swa_keys = tuple(key for key in readable_keys if key.startswith("g3:"))
+        assert sorted(int(key.split(":")[1], 16) * 16 for key in swa_keys) == list(stored_swa_boundaries)
+        for start, end, expected_end in ((0, 128, 96), (0, 80, middle_end), (64, 128, 96)):
+            result = worker.lookup(LookupRequest(TokenRange(start, end), (1, 3), block_hashes))
+            assert result.available_end_token == expected_end
+    finally:
+        worker.close()
+    assert backend.closed
 
 
 @pytest.mark.parametrize("use_gva", (False, True), ids=("key_range", "gva"))

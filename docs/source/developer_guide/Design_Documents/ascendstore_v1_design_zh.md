@@ -53,6 +53,8 @@ ModelRunner 分配缓存后，Worker 接收 Tensor/view，提取基址、块长�
 
 Lookup 使用前缀 hash 和缓存身份查询远端对象。Worker 收集各组的可用性，再由 Reachability 计算共同恢复位置。FullAttention 需要相应历史 KV，Mamba 需要准确位置的状态；共同终点必须同时满足这些需求。
 
+稀疏保留仅控制 Store。Lookup 不按写入间隔过滤候选，避免漏掉输入末端和其他请求留下的恢复数据；哪些对象能支持恢复，仍由上游 manager 根据缓存类型和实际可用对象判断。
+
 Lookup 返回的是恢复候选。vLLM 确认采用并分配目标块后，Scheduler 才能将它交接成 Load 命令。命令携带范围、完整分组 block 表和内容身份，Worker 据此选择目标位置。
 
 下面用一个普通 Prefill 例子串起范围。Prefill 是为已有输入计算缓存的阶段。本例输入长 25 token，采用同步 Bulk、单 FullAttention group，TP、PP、PCP、DCP 均为 1，块和 hash 粒度均为 4；普通保存丢弃不足整块的尾部。
