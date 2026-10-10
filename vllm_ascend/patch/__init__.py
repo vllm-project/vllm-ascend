@@ -671,6 +671,31 @@
 #       profiling startup and per-step timing callbacks without monkey-patching
 #       `EngineCore` and the multiprocess entry point.
 #
+# ** 18a. File: platform/patch_shm_broadcast.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.distributed.device_communicators.shm_broadcast.MessageQueue.enqueue`
+#   2. `vllm.distributed.device_communicators.shm_broadcast.MessageQueue.recv`
+#    Why:
+#       Out-of-band pickle buffers can alias live tensor/array memory. Reusing
+#       that memory after enqueue returns races asynchronous zero-copy ZMQ sends
+#       and can corrupt messages sent to remote readers or local overflow readers.
+#    How:
+#       Replace enqueue and copy buffers of at least 1 MiB into owned bytes before
+#       sending. Preserve upstream tensor reducers, wire format, shared-memory
+#       writes, timeouts, and reader notifications. Load through both platform
+#       and worker patches, including spawned EngineCore processes importing the
+#       existing patched run_engine_core entry point.
+#       On enqueue or ZMQ deserialization failures, log one bounded summary with
+#       the stage, object/exception type, frame count, total bytes, and up to eight
+#       frame sizes. Successful operations and polling/backpressure timeouts stay
+#       quiet. Preserve the original exception without logging payloads or another
+#       traceback; undecodable messages have an unknown object type.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/53217
+#    Future Plan:
+#       Remove the patch and both imports once the supported vLLM version includes
+#       the upstream out-of-band buffer copy fix and equivalent failure diagnostics.
+#
 # ** 19. File: platform/patch_speculative_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.speculative.SpeculativeConfig.hf_config_override`
