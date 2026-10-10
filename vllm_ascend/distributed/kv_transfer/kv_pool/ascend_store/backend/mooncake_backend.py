@@ -239,11 +239,15 @@ class MooncakeBackend(Backend):
         store = MooncakeDistributedStore()
         local_hostname = get_ip()
         ssd_kwargs = _ssd_setup_kwargs(self.config)
+        # Scheduler-only clients must not register SSD storage with Mooncake,
+        # which would inflate the active client count and reported SSD usage.
+        if not self._contribute_memory:
+            ssd_kwargs = {}
         # Each rank that contributes memory to the pool uses its own SSD
         # directory to avoid bucket file collisions. Key by the globally unique
         # rank so that DP/TP/PP/CP replicas never share a directory (dense and
         # MoE alike); only ranks that contribute memory need an offload dir.
-        if ssd_kwargs and ssd_kwargs.get("ssd_offload_path") and self._contribute_memory:
+        if ssd_kwargs and ssd_kwargs.get("ssd_offload_path"):
             global_rank = get_global_rank(self.parallel_config)
             rank_path = os.path.join(str(ssd_kwargs["ssd_offload_path"]), f"rank_{global_rank}")
             try:
