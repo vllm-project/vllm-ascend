@@ -194,7 +194,7 @@ Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md
         --seed 1024 \
         --served-model-name glm-5 \
         --tool-call-parser glm47 \
-        --reasoning-parser glm45 \
+        --reasoning-parser glm47 \
         --enable-auto-tool-choice \
         --max-num-seqs 6 \
         --max-model-len 202752 \
@@ -249,7 +249,7 @@ Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md
         --seed 1024 \
         --served-model-name glm-5 \
         --tool-call-parser glm47 \
-        --reasoning-parser glm45 \
+        --reasoning-parser glm47 \
         --enable-auto-tool-choice \
         --max-num-seqs 6 \
         --max-model-len 202752 \
@@ -315,6 +315,7 @@ Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md
         --enable-expert-parallel \
         --seed 1024 \
         --served-model-name glm-5 \
+        --reasoning-parser glm47 \
         --safetensors-load-strategy prefetch \
         --max-num-seqs 128 \
         --max-num-batched-tokens 8192 \
@@ -377,6 +378,7 @@ Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md
         --enable-expert-parallel \
         --seed 1024 \
         --served-model-name glm-5 \
+        --reasoning-parser glm47 \
         --safetensors-load-strategy prefetch \
         --max-num-seqs 128 \
         --max-num-batched-tokens 8192 \
@@ -1571,7 +1573,7 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 
   ```shell
   --tool-call-parser glm47 \
-  --reasoning-parser glm45 \
+  --reasoning-parser glm47 \
   --enable-auto-tool-choice \
   ```
 
