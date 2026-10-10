@@ -313,10 +313,26 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         y = y.view(-1, y.shape[-1])
         offset_left = offset_start
         for slice_idx in range(len(lora_b_stacked)):
+            x_i = x[slice_idx]
+            w_i = lora_b_stacked[slice_idx]
+            # For MergedColumn (QKV/GDN) modules under TP>1, the LoRA shrink
+            # buffer is all-gathered along the rank axis (dim=-1) and produces
+            # a [TP*rank] concatenation. Because lora_A is replicated across
+            # ranks, every chunk along that axis is identical, so the gathered
+            # input width (TP*rank) can exceed the per-rank output slice width.
+            # The Ascend sgmv_expand kernel enforces x.size(1) <= slice_size,
+            # which would otherwise fail for small output slices (e.g. GDN
+            # in_proj_ba). Narrowing x to lora_B's hidden_in is a mathematically
+            # equivalent transformation (the extra gathered columns are
+            # redundant replicas). The result is also forced contiguous, since
+            # the kernel binds via a raw data_ptr() and a non-contiguous view
+            # would cause an illegal memory access (device freeze + HCCL hang).
+            if x_i.shape[-1] != w_i.shape[-1]:
+                x_i = x_i[..., : w_i.shape[-1]].contiguous()
             self._apply_expand(
                 y,
-                x[slice_idx],
-                lora_b_stacked[slice_idx],
+                x_i,
+                w_i,
                 offset_left,
                 output_slices[slice_idx],
                 add_inputs=add_inputs,
