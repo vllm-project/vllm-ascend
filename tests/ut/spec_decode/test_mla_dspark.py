@@ -28,6 +28,7 @@ from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpec
 def make_speculator():
     spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
     spec.attn_architecture = "MLA"
+    spec.enable_adaptive_verification = False
     spec.use_dcp = False
     spec.requires_non_causal = True
     spec.vllm_config = SimpleNamespace(

@@ -69,8 +69,20 @@ def test_av_propose_resyncs_without_target_dummy_capacity(
         vllm_config=SimpleNamespace(parallel_config=object()),
     )
     result = speculator.propose(
-        batch, {}, {}, None, None, None, None, None, None, None, None,
-        dp_sync=target_sync, dummy_run=dummy, is_profile=profile,
+        batch,
+        {},
+        {},
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        dp_sync=target_sync,
+        dummy_run=dummy,
+        is_profile=profile,
         skip_attn_for_dummy_run=skip_attention,
     )
     forwarded = parent.call_args.args
