@@ -65,7 +65,9 @@ from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder
 from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import (
+    MLA_FLASH_SUPPORTED_Q_HEADS,
     AscendCommonAttentionMetadata,
+    get_flashmla_ops,
     get_sfa_qsfa_packed_head_dim,
     get_tq_fused_slot_bytes,
     requires_contiguous_pa_kv_cache,
@@ -77,6 +79,7 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendSlidingWindowMLASpec,
     get_kv_cache_compression_ratio,
     get_storage_block_size,
+    supports_component_major_mla_pd,
 )
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import get_layerwise_reuse_config
@@ -97,6 +100,10 @@ from vllm_ascend.utils import (
     kv_cache_spec_uses_packed_sfa_main_cache,
 )
 from vllm_ascend.worker.kvpp_cache import allocate_kvpp_cache
+from vllm_ascend.worker.utils import (
+    get_single_raw_mla_backing,
+    make_page_strided_cache_view,
+)
 
 if TYPE_CHECKING:
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
@@ -256,6 +263,15 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             ratio_kwargs: dict[str, Any] = {"tokens_per_state": compression_ratio}
             spec = AscendMLAAttentionSpec(
                 block_size=spec.block_size,
+                # ``num_heads`` describes physical cache head slots, not query
+                # heads. Kimi K3 publishes one latent KV slot per token; using
+                # the query-head count here makes vLLM's generic planner inflate
+                # each page by the local query-head count.
+                num_heads=(
+                    spec.num_heads
+                    if getattr(vllm_config.model_config.hf_text_config, "model_type", None) == "kimi_linear"
+                    else attn_module.num_heads
+                ),
                 num_kv_heads=spec.num_kv_heads,
                 head_size=head_size,
                 dtype=dtype,
@@ -868,11 +884,46 @@ def _allocate_sparse_c8_indexer_tensors(
     return dsa_k_tensor, dsa_k_scale_tensor
 
 
+def _uses_single_raw_mla_cache(
+    vllm_config: VllmConfig,
+    layer_name: str,
+    kv_cache_spec: KVCacheSpec,
+) -> bool:
+    """Whether an MLA layer uses the Ascend single raw backing protocol."""
+    if not isinstance(kv_cache_spec, AscendMLAAttentionSpec):
+        return False
+    if not kv_cache_spec.supports_single_raw_backing:
+        return False
+    if not supports_component_major_mla_pd(vllm_config) or enable_sfa(vllm_config):
+        return False
+
+    attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase, [layer_name])
+    attn_module = attn_layers.get(layer_name)
+    if attn_module is None:
+        return False
+    if not isinstance(attn_module, MLAAttention):
+        return False
+    if getattr(attn_module, "indexer", None) is not None:
+        return False
+    impl = getattr(attn_module, "impl", None)
+    if getattr(impl, "fa_quant_layer", False):
+        return False
+    if getattr(impl, "enable_kv_nz", False):
+        # NZ decode reshapes each component with .view(). A5 token-fused
+        # NoPE/RoPE slices are separated by the other component's lanes, so
+        # keep the legacy component-dense allocation for this mode.
+        return False
+    supports_prolog_quantization = getattr(impl, "supports_prolog_v3_quantization", None)
+    if supports_prolog_quantization is not None and not supports_prolog_quantization():
+        return False
+    return not getattr(getattr(impl, "q_proj", None), "_chunk_size", 0)
+
+
 def _allocate_kv_cache(
     kv_cache_config: KVCacheConfig,
     shared_layers: dict[str, str],
     device: torch.device,
-) -> dict[str, Any]:
+) -> dict[str, torch.Tensor | tuple[torch.Tensor, ...]]:
     """
     Initialize the KV cache buffer with the correct size. The buffer needs to be
     reshaped to the desired shape before being used by the models.
@@ -1127,6 +1178,15 @@ def _allocate_kv_cache(
                         _allocate_int8_cache_tensor(k_tensor_size, alignment, device),
                     )
 
+            continue
+
+        if all(
+            _uses_single_raw_mla_cache(vllm_config, layer_name, layer_kv_cache_spec[layer_name])
+            for layer_name in shared_names
+        ):
+            for layer_name in shared_names:
+                raw_size = kv_cache_config.num_blocks * layer_kv_cache_spec[layer_name].page_size_bytes
+                kv_cache_raw_tensors[layer_name] = (_allocate_int8_cache_tensor(raw_size, alignment, device),)
             continue
 
         # vLLM #51718 packs all group layers into one tensor on main; the
@@ -1550,6 +1610,55 @@ def _reshape_kv_cache_v2(
                     [tensor.stride() for tensor in mamba_cache],
                     [tensor.is_contiguous() for tensor in mamba_cache],
                 )
+                continue
+
+            single_raw_mla_cache = get_single_raw_mla_backing(raw_cache)
+
+            if single_raw_mla_cache is not None and _uses_single_raw_mla_cache(vllm_config, layer_name, kv_cache_spec):
+                kernel_blocks_per_manager = kv_cache_spec.block_size // kernel_block_size
+                slot_bytes = kv_cache_spec.page_size_bytes // kernel_blocks_per_manager
+                component_shape = (
+                    kv_cache_config.num_blocks * kernel_blocks_per_manager,
+                    kernel_block_size,
+                    kv_cache_spec.num_kv_heads,
+                )
+                nope_dim, rope_dim = _get_attention_kv_cache_dims(layer_name, kv_cache_spec)
+                fused_dim = nope_dim + rope_dim
+
+                if (
+                    get_current_hardware_profile().supports(HardwareCapability.MLA_FLASH)
+                    and kv_cache_spec.num_heads in MLA_FLASH_SUPPORTED_Q_HEADS
+                    and get_flashmla_ops() is not None
+                ):
+                    # Preserve the V1 A5 protocol: one token-fused tensor with
+                    # [nope | rope] in the trailing 576 lanes of every token.
+                    fused_cache = make_page_strided_cache_view(
+                        single_raw_mla_cache,
+                        (*component_shape, fused_dim),
+                        kv_cache_spec.dtype,
+                        slot_bytes,
+                    )
+                    kv_caches[layer_name] = fused_cache
+                    continue
+
+                # A3/FIA keeps each component internally contiguous and puts
+                # the hybrid-page padding only in the leading block stride.
+                nope_cache = make_page_strided_cache_view(
+                    single_raw_mla_cache,
+                    (*component_shape, nope_dim),
+                    kv_cache_spec.dtype,
+                    slot_bytes,
+                )
+                rope_cache = make_page_strided_cache_view(
+                    single_raw_mla_cache,
+                    (*component_shape, rope_dim),
+                    kv_cache_spec.dtype,
+                    slot_bytes,
+                    offset_bytes=(
+                        kernel_block_size * kv_cache_spec.num_kv_heads * nope_dim * get_dtype_size(kv_cache_spec.dtype)
+                    ),
+                )
+                kv_caches[layer_name] = (nope_cache, rope_cache)
                 continue
 
             if not isinstance(kv_cache_spec, AttentionSpec):

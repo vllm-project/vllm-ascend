@@ -8,15 +8,17 @@ import torch
 from safetensors.torch import save_file
 from torch import nn
 
+import vllm_ascend.attention.mla_v1 as mla_v1
 from vllm_ascend.attention.mla_v1 import AscendMLAImpl
 from vllm_ascend.attention.utils import mark_fused_preprocess_weights
-from vllm_ascend.models import kimi_k3
+from vllm_ascend.models import kimi_k3, kimi_k3_dspark
 from vllm_ascend.models.kimi_k3 import (
     AscendKimiK3MultiModalProjector,
     AscendKimiLinearModel,
 )
 from vllm_ascend.models.kimi_k3_dspark import (
     AscendK3DSparkForCausalLM,
+    AscendK3DSparkModel,
 )
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
 
@@ -106,6 +108,182 @@ def test_k3_dspark_reports_draft_attention_causality():
 
     model.config = SimpleNamespace()
     assert model.get_draft_attn_causal() == [False, False, False]
+
+
+def test_k3_dspark_context_writer_splits_fused_mla_cache(monkeypatch):
+    model = AscendK3DSparkModel.__new__(AscendK3DSparkModel)
+    nn.Module.__init__(model)
+
+    fused_cache = torch.arange(36, dtype=torch.float32).reshape(2, 3, 1, 6)
+    attn = SimpleNamespace(
+        fused_qkv_a_proj=MagicMock(return_value=(torch.randn(3, 8),)),
+        q_lora_rank=2,
+        kv_cache=fused_cache,
+        impl=SimpleNamespace(kv_lora_rank=4, exec_kv_prefill=MagicMock()),
+    )
+    model.layers = [SimpleNamespace(self_attn=attn)]
+    monkeypatch.setattr(
+        "vllm_ascend.models.kimi_k3_dspark.get_cos_and_sin_mla",
+        lambda positions: (torch.ones(3, 2), torch.zeros(3, 2)),
+    )
+
+    model.precompute_and_store_context_kv(
+        context_states=torch.randn(3, 8),
+        context_positions=torch.tensor([0, 1, 2]),
+        context_slot_mapping=torch.tensor([0, 1, 2]),
+    )
+
+    cache = attn.impl.exec_kv_prefill.call_args.args[3]
+    assert isinstance(cache, tuple)
+    assert cache[0].shape == (2, 3, 1, 4)
+    assert cache[1].shape == (2, 3, 1, 2)
+    assert cache[0].untyped_storage() is fused_cache.untyped_storage()
+    assert cache[1].untyped_storage() is fused_cache.untyped_storage()
+    torch.testing.assert_close(cache[0], fused_cache[..., :4])
+    torch.testing.assert_close(cache[1], fused_cache[..., 4:])
+
+
+def _make_component_major_strided_cache() -> tuple[torch.Tensor, torch.Tensor]:
+    backing = torch.empty(14, dtype=torch.float32)
+    nope = torch.as_strided(backing, size=(2, 2, 1, 2), stride=(6, 2, 2, 1), storage_offset=0)
+    rope = torch.as_strided(backing, size=(2, 2, 1, 1), stride=(6, 1, 1, 1), storage_offset=2)
+    return nope, rope
+
+
+def test_k3_dspark_context_writer_routes_first_axis_strided_cache_to_prolog_v3(monkeypatch):
+    model = AscendK3DSparkModel.__new__(AscendK3DSparkModel)
+    nn.Module.__init__(model)
+    cache = _make_component_major_strided_cache()
+    prolog = MagicMock()
+    fused_qkv_a_proj = MagicMock()
+    attn = SimpleNamespace(
+        fused_qkv_a_proj=fused_qkv_a_proj,
+        q_lora_rank=2,
+        kv_cache=cache,
+        impl=SimpleNamespace(exec_context_kv_prolog_v3=prolog, exec_kv_prefill=MagicMock()),
+    )
+    model.layers = [SimpleNamespace(self_attn=attn)]
+    context_states = torch.randn(4, 8)
+    monkeypatch.setattr(
+        "vllm_ascend.models.kimi_k3_dspark.get_cos_and_sin_mla",
+        lambda positions: (torch.ones(4, 1, 1, 1), torch.zeros(4, 1, 1, 1)),
+    )
+
+    model.precompute_and_store_context_kv(
+        context_states=context_states,
+        context_positions=torch.arange(4),
+        context_slot_mapping=torch.tensor([0, 1, 2, 3], dtype=torch.int32),
+    )
+
+    assert kimi_k3_dspark._uses_prolog_v3_context_writer(cache)
+    assert prolog.call_count == 1
+    assert prolog.call_args.args[0] is context_states
+    assert prolog.call_args.args[3] is cache
+    assert prolog.call_args.args[4].dtype is torch.int32
+    assert fused_qkv_a_proj.call_count == 0
+    attn.impl.exec_kv_prefill.assert_not_called()
+
+
+def test_k3_dspark_prolog_v3_context_writer_uses_pa_bsnd_and_strided_caches(monkeypatch):
+    impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    impl.use_mla_rope = True
+    impl.fa_quant_layer = False
+    impl.num_kv_heads = 1
+    impl.kv_lora_rank = 2
+    impl.qk_rope_head_dim = 1
+    impl.mlapo_W_UK_T = torch.empty(1, 2, 2)
+    impl.q_a_layernorm = SimpleNamespace(
+        weight=torch.ones(2),
+        variance_epsilon=1e-5,
+    )
+    impl.kv_a_layernorm = SimpleNamespace(
+        weight=torch.ones(2),
+        variance_epsilon=1e-6,
+    )
+    impl._prepare_prolog_v3_weights = lambda: {
+        "quant_type": None,
+        "weight_dq": object(),
+        "weight_dkv_kr": object(),
+        "weight_uq_qr": object(),
+        "weight_uk": object(),
+    }
+    cache = _make_component_major_strided_cache()
+    calls = []
+
+    def fake_prolog(**kwargs):
+        calls.append(kwargs)
+
+    monkeypatch.setattr(mla_v1.torch_npu, "npu_mla_prolog_v3", fake_prolog)
+    context_states = torch.randn(4, 8)
+    cos = torch.ones(4, 1, 1, 1)
+    sin = torch.zeros(4, 1, 1, 1)
+
+    impl.exec_context_kv_prolog_v3(
+        context_states,
+        cos,
+        sin,
+        cache,
+        torch.tensor([0, 1, 2, 3], dtype=torch.int32),
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["cache_mode"] == "PA_BSND"
+    assert calls[0]["kv_cache"] is cache[0]
+    assert calls[0]["kr_cache"] is cache[1]
+    assert calls[0]["cache_index"].dtype is torch.int64
+    assert calls[0]["rope_cos"].shape == (4, 1)
+    assert calls[0]["rope_sin"].shape == (4, 1)
+    assert calls[0]["weight_quant_mode"] == 0
+    assert calls[0]["kv_cache_quant_mode"] == 0
+
+
+def test_k3_dspark_prolog_v3_prepares_native_weights_without_mutating_source(monkeypatch):
+    impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    impl.q_lora_rank = 2
+    impl.q_a_layernorm = SimpleNamespace(weight=torch.ones(2), variance_epsilon=1e-5)
+    impl.kv_a_layernorm = SimpleNamespace(weight=torch.ones(2), variance_epsilon=1e-6)
+    fused = nn.Module()
+    fused.quant_method = SimpleNamespace(quant_method=None)
+    fused.weight = nn.Parameter(torch.arange(20, dtype=torch.float32).reshape(5, 4), False)
+    q_proj = nn.Module()
+    q_proj.quant_method = SimpleNamespace(quant_method=None)
+    q_proj.weight = nn.Parameter(torch.arange(6, dtype=torch.float32).reshape(3, 2), False)
+    impl.fused_qkv_a_proj = fused
+    impl.q_proj = q_proj
+    impl.mlapo_W_UK_T = torch.empty(1, 2, 2)
+    monkeypatch.setattr(mla_v1.torch_npu, "npu_format_cast", lambda tensor, _: tensor)
+
+    prepared = impl._prepare_prolog_v3_weights()
+
+    assert prepared["quant_type"] is None
+    assert prepared["weight_dq"].shape == (4, 2)
+    assert prepared["weight_dkv_kr"].shape == (4, 3)
+    assert prepared["weight_uq_qr"].shape == (2, 3)
+    assert fused.weight.shape == (5, 4)
+    assert q_proj.weight.shape == (3, 2)
+
+
+def test_k3_dspark_cache_diagnostic_reports_view_bounds(monkeypatch):
+    fused_cache = torch.arange(36, dtype=torch.float32).reshape(2, 3, 1, 6)
+    normalized_cache = (fused_cache[..., :4], fused_cache[..., 4:])
+    slots = torch.tensor([0, 5])
+
+    monkeypatch.setenv("VLLM_ASCEND_DEBUG_DSPARK_MLA_CACHE", "1")
+    monkeypatch.setattr(kimi_k3_dspark, "get_flashmla_ops", lambda: (object(), object()))
+    with patch.object(kimi_k3_dspark.logger, "warning") as warning:
+        kimi_k3_dspark._log_dspark_mla_cache_diagnostic(0, fused_cache, normalized_cache, slots)
+
+    def rendered(call):
+        args = call.args
+        return args[0] % args[1:]
+
+    assert warning.call_count == 3
+    assert "original_type=Tensor" in rendered(warning.call_args_list[0])
+    assert "normalized_type=tuple" in rendered(warning.call_args_list[0])
+    assert "flashmla_ops=available" in rendered(warning.call_args_list[0])
+    assert "python_bound_ok=True" in rendered(warning.call_args_list[-1])
+    assert "exceeds_u32=False" in rendered(warning.call_args_list[-1])
+    assert "slots_bound_ok=True" in rendered(warning.call_args_list[-1])
 
 
 def test_kimi_mixed_kda_gate_weights_use_upstream_packed_loader(monkeypatch):
