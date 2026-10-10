@@ -1,5 +1,6 @@
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from functools import partial
 from typing import Any, NamedTuple, TypeVar, cast
 
 import torch
@@ -20,6 +21,7 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     DCPMetadataBuilderMixin,
     build_pcp_ordered_slot_mapping,
     get_cp_local_query_key_lens,
+    get_pcp_num_replicated_tokens,
 )
 from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
     build_sfa_dcp_replicated_block_table,
@@ -33,6 +35,8 @@ from vllm_ascend.attention.sfa_v1 import (
     AscendSFAMetadata,
     AscendSFAMetadataBuilder,
     SFAForwardContext,
+    SparseMLAMetadataState,
+    needs_pcp_kv_gather,
 )
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
@@ -211,23 +215,70 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         torch.Tensor | tuple[torch.Tensor, torch.Tensor] | None,
     ]:
         assert attn_metadata is not None, "PCP PROLOG_V3 requires attention metadata."
-        num_tokens = hidden_states.shape[0]
-        num_decode_tokens = attn_metadata.num_decode_tokens or 0
-        # Graph padding is not included in num_decode_tokens.
-        if attn_metadata.num_prefills == 0 and not attn_metadata.pcp_has_global_prefill:
-            return super()._sfa_preprocess_prolog_v3(hidden_states, kv_cache, cos, sin, slot_mapping[:num_tokens])
+        return self._fused_preprocess_with_pcp_kv(
+            partial(super()._sfa_preprocess_prolog_v3, hidden_states, kv_cache, cos, sin),
+            slot_mapping[: hidden_states.shape[0]],
+            kv_cache,
+            attn_metadata,
+        )
+
+    def _sfa_preprocess_mlapo(
+        self,
+        hidden_states: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, ...],
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        *,
+        num_input_tokens: int = 0,
+        attn_metadata: M | None = None,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor | tuple[torch.Tensor, torch.Tensor] | None,
+    ]:
+        assert attn_metadata is not None, "PCP MLAPO requires attention metadata."
+        return self._fused_preprocess_with_pcp_kv(
+            partial(
+                super()._sfa_preprocess_mlapo, hidden_states, kv_cache, cos, sin, num_input_tokens=num_input_tokens
+            ),
+            slot_mapping,
+            kv_cache,
+            attn_metadata,
+        )
+
+    def _fused_preprocess_with_pcp_kv(
+        self,
+        preprocess: Callable[[torch.Tensor], Any],
+        slot_mapping: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, ...],
+        attn_metadata: M,
+    ) -> Any:
+        """Run a fused Q/KV preprocess, then share its KV writes across PCP.
+
+        The fused operators write the cache only for rank-local tokens. When a
+        batch needs the PCP KV gather, they write this rank's slots, and the
+        packed cache rows are then gathered into every rank's cache.
+        """
+        if not needs_pcp_kv_gather(attn_metadata, self.is_pcp_decode_sharded):
+            return preprocess(slot_mapping)
         local_slots = attn_metadata.pcp_prolog_local_slots
-        assert local_slots is not None, "PCP PROLOG_V3 requires local slots prepared by the metadata builder."
         global_slots = attn_metadata.pcp_prolog_global_slots
-        assert global_slots is not None, "PCP PROLOG_V3 requires global slots prepared by the metadata builder."
-        result = super()._sfa_preprocess_prolog_v3(hidden_states, kv_cache, cos, sin, local_slots)
+        assert local_slots is not None and global_slots is not None, (
+            "PCP fused preprocessing requires slots prepared by the metadata builder."
+        )
+        result = preprocess(local_slots)
         if not global_slots.numel():
             return result
+        num_replicated_tokens = get_pcp_num_replicated_tokens(
+            attn_metadata.num_decode_tokens or 0, self.is_pcp_decode_sharded
+        )
         # Same stream orders the fused cache write, pack, collective and scatter.
         # C8 packs quantized K, BF16 RoPE and scales into the first cache.
         # The remaining tensors belong to the indexer and synchronize separately.
         main_cache = kv_cache[:1] if self.enable_sparse_sfa_c8 else kv_cache[:2]
-        packed = copy_pcp_kv_cache(main_cache, local_slots[num_decode_tokens:])
+        packed = copy_pcp_kv_cache(main_cache, local_slots[num_replicated_tokens:])
         group = get_pcp_group()
         gathered = group.all_gather(packed, dim=0)
         if self.enable_sparse_sfa_c8:
@@ -259,10 +310,14 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         slots: torch.Tensor,
         attn_metadata: M,
     ):
-        if attn_metadata.num_prefills == 0 and not attn_metadata.pcp_has_global_prefill:
+        if not needs_pcp_kv_gather(attn_metadata, self.is_pcp_decode_sharded):
             return super().exec_kv(kv_no_split, cos, sin, kv_cache, slots[: kv_no_split.shape[0]], attn_metadata)
-        num_decode_tokens = attn_metadata.num_decode_tokens or 0
-        (kv_no_split, cos, sin), slots = _gather_prefill_cache_inputs((kv_no_split, cos, sin), slots, num_decode_tokens)
+        num_replicated_tokens = get_pcp_num_replicated_tokens(
+            attn_metadata.num_decode_tokens or 0, self.is_pcp_decode_sharded
+        )
+        (kv_no_split, cos, sin), slots = _gather_prefill_cache_inputs(
+            (kv_no_split, cos, sin), slots, num_replicated_tokens
+        )
         assert slots.numel() == kv_no_split.shape[0], (
             "SFA PCP cache write requires one slot per gathered token: "
             f"tokens={kv_no_split.shape[0]}, slots={slots.numel()}."
@@ -281,6 +336,7 @@ class DSACPContext:
     slot_mapping_cp: torch.Tensor
     actual_seq_lengths_query: torch.Tensor
     actual_seq_lengths_key: torch.Tensor
+    query_start_loc: torch.Tensor
 
 
 @dataclass
@@ -288,6 +344,7 @@ class AscendSFADSACPMetadata(AscendSFAMetadata):
     """SFA metadata fields used only by the DSA-CP execution path."""
 
     dsa_cp_context: DSACPContext | None = None
+    nope_metadata: AscendSFAMetadata | None = None
 
 
 class DCPGatherContext(NamedTuple):
@@ -345,7 +402,8 @@ class AscendSFADSACPMetadataBuilder(AscendSFAMetadataBuilder):
             metadata_cls or AscendSFADSACPMetadata,
             supports_dcp_with_varlen,
         )
-        max_num_reqs = vllm_config.scheduler_config.max_num_seqs
+        # Mixed FULL graphs may append a dummy request after a full batch.
+        max_num_reqs = vllm_config.scheduler_config.max_num_seqs + 1
         self.dsa_cp_actual_seq_lengths_query = torch.zeros(max_num_reqs + 1, dtype=torch.int32, device=device)
         self.dsa_cp_actual_seq_lengths_key = torch.empty_like(self.dsa_cp_actual_seq_lengths_query)
         self.dsa_cp_spec_actual_seq_lengths_query: list[torch.Tensor] | None = None
@@ -388,11 +446,15 @@ class AscendSFADSACPMetadataBuilder(AscendSFAMetadataBuilder):
         local_end_with_pad = local_start + num_tokens_per_device
         local_end = min(local_end_with_pad, common_attn_metadata.num_actual_tokens)
 
-        assert cos.shape == sin.shape, f"cos.shape must equal sin.shape, got {cos.shape} and {sin.shape}"
-        pad_size = num_tokens_pad - cos.shape[0]
-        if pad_size > 0:
-            cos = nn.functional.pad(cos, (0, 0, 0, 0, 0, 0, 0, pad_size))
-            sin = nn.functional.pad(sin, (0, 0, 0, 0, 0, 0, 0, pad_size))
+        if cos is not None:
+            assert sin is not None and cos.shape == sin.shape
+            pad_size = num_tokens_pad - cos.shape[0]
+            if pad_size > 0:
+                cos = nn.functional.pad(cos, (0, 0, 0, 0, 0, 0, 0, pad_size))
+                sin = nn.functional.pad(sin, (0, 0, 0, 0, 0, 0, 0, pad_size))
+            cos = cos[local_start:local_end_with_pad]
+            sin = sin[local_start:local_end_with_pad]
+            assert cos.shape[0] == num_tokens_per_device
         pad_size_slot = num_tokens_pad - slot_mapping.shape[0]
         if pad_size_slot > 0:
             slot_mapping = nn.functional.pad(slot_mapping, (0, pad_size_slot), value=-1)
@@ -400,9 +462,6 @@ class AscendSFADSACPMetadataBuilder(AscendSFAMetadataBuilder):
             slot_mapping = slot_mapping[:num_tokens_pad]
 
         slot_mapping_cp = slot_mapping[local_start:local_end_with_pad]
-        cos = cos[local_start:local_end_with_pad]
-        sin = sin[local_start:local_end_with_pad]
-        assert cos.shape[0] == num_tokens_per_device
         assert slot_mapping_cp.shape[0] == num_tokens_per_device
         assert slot_mapping.shape[0] == num_tokens_pad
 
@@ -423,7 +482,8 @@ class AscendSFADSACPMetadataBuilder(AscendSFAMetadataBuilder):
             local_start,
             local_end_with_pad,
         )
-        actual_seq_lengths_query[:num_segs] = local_query_lens
+        actual_seq_lengths_query[0] = 0
+        actual_seq_lengths_query[1 : num_segs + 1] = local_query_lens
         actual_seq_lengths_key[:num_segs] = local_key_lens
 
         extra["dsa_cp_context"] = DSACPContext(
@@ -433,10 +493,40 @@ class AscendSFADSACPMetadataBuilder(AscendSFAMetadataBuilder):
             local_end=local_end,
             local_end_with_pad=local_end_with_pad,
             slot_mapping_cp=slot_mapping_cp,
-            actual_seq_lengths_query=actual_seq_lengths_query[: common_attn_metadata.num_reqs],
+            actual_seq_lengths_query=actual_seq_lengths_query[1 : common_attn_metadata.num_reqs + 1],
             actual_seq_lengths_key=actual_seq_lengths_key[: common_attn_metadata.num_reqs],
+            query_start_loc=actual_seq_lengths_query[: common_attn_metadata.num_reqs + 1],
         )
         return cos, sin, slot_mapping, extra
+
+    def _prepare_nope_metadata(self, metadata: AscendSFAMetadata, draft_index: int | None) -> None:
+        metadata = cast(AscendSFADSACPMetadata, metadata)
+        context = metadata.dsa_cp_context
+        assert context is not None
+        assert metadata.positions is not None
+        positions = nn.functional.pad(metadata.positions, (0, context.num_tokens_pad - metadata.positions.shape[0]))
+        # Preserve the global metadata for KV writes and output restoration.
+        # Only the NoPE operator consumes this token-local view.
+        local_metadata = replace(
+            metadata,
+            num_input_tokens=context.local_end_with_pad - context.local_start,
+            num_actual_tokens=max(context.local_end - context.local_start, 0),
+            query_start_loc=context.query_start_loc,
+            cum_query_lens=context.actual_seq_lengths_query,
+            seq_lens=context.actual_seq_lengths_key,
+            seq_lens_cpu=None,
+            positions=positions[context.local_start : context.local_end_with_pad],
+        )
+        if draft_index not in self.nope_states:
+            self.nope_states[draft_index] = SparseMLAMetadataState(
+                self.kv_cache_spec,
+                self.vllm_config,
+                self.device,
+                self.nope_indexer,
+                self.kernel_block_size,
+                num_heads=self.model_config.hf_text_config.num_attention_heads,
+            )
+        metadata.nope_metadata = self.nope_states[draft_index].prepare(local_metadata)
 
     def _update_parallel_slot_mapping(
         self,
@@ -537,6 +627,10 @@ class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         slots: torch.Tensor,
         attn_metadata: M,
     ):
+        if self.qk_rope_head_dim == 0 and not self.uses_packed_sfa_main_cache:
+            assert self.kv_a_layernorm is not None
+            # Normalize locally, then replicate the complete latent KV below.
+            return None, self.kv_a_layernorm(kv_no_split.reshape(-1, self.kv_lora_rank)), None
         if self.uses_packed_sfa_main_cache:
             return super().exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
         kv_a_layernorm = self.kv_a_layernorm
@@ -564,17 +658,20 @@ class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         knope_scale,
         full_gather_o_proj_enabled,
     ):
-        assert k_pe is not None and k_nope is not None
+        assert k_nope is not None
         async_op = full_gather_o_proj_enabled
         handles: list[torch.distributed.Work] = []
-        if self.uses_packed_sfa_main_cache:
+        if self.qk_rope_head_dim == 0 and not self.uses_packed_sfa_main_cache:
+            parts = [k_nope]
+        elif self.uses_packed_sfa_main_cache:
             assert knope_scale is not None
-            parts = [
-                k_nope.view(-1, k_nope.shape[-1]),
-                k_pe.view(-1, k_pe.shape[-1]),
-                knope_scale.view(-1, knope_scale.shape[-1]),
-            ]
+            parts = [k_nope.view(-1, k_nope.shape[-1])]
+            if self.qk_rope_head_dim:
+                assert k_pe is not None
+                parts.append(k_pe.view(-1, k_pe.shape[-1]))
+            parts.append(knope_scale.view(-1, knope_scale.shape[-1]))
         else:
+            assert k_pe is not None
             # With the indexer k computed inside ``indexer.forward`` right
             # before the cache write, k_li no longer joins this fused gather:
             # the indexer backend gathers it separately.
@@ -603,6 +700,14 @@ class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
 
         if kv_cache is not None:
             assert fused_kv_no_split is not None
+            if self.qk_rope_head_dim == 0 and not self.uses_packed_sfa_main_cache:
+                values = fused_kv_no_split[: attn_metadata.num_actual_tokens]
+                torch_npu.npu_scatter_nd_update_(
+                    kv_cache[0].view(-1, self.kv_lora_rank),
+                    slot_mapping_sfa[: values.shape[0]].view(-1, 1),
+                    values.to(kv_cache[0].dtype),
+                )
+                return None, None
             if self.uses_packed_sfa_main_cache:
                 DeviceOperator.scatter_cache(
                     kv_cache[0].view(-1, fused_kv_no_split.shape[-1]),
@@ -624,6 +729,31 @@ class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
                     slot_mapping=slot_mapping_sfa[: attn_metadata.num_actual_tokens],
                 )
         return k_pe, k_nope
+
+    def _execute_sparse_flash_attention_process(
+        self,
+        ql_nope,
+        q_pe,
+        kv_cache,
+        topk_indices,
+        attn_metadata,
+        actual_seq_lengths_query,
+        actual_seq_lengths_key,
+        block_table=None,
+    ):
+        if self.qk_rope_head_dim == 0:
+            assert attn_metadata.nope_metadata is not None
+            attn_metadata = attn_metadata.nope_metadata
+        return super()._execute_sparse_flash_attention_process(
+            ql_nope,
+            q_pe,
+            kv_cache,
+            topk_indices,
+            attn_metadata,
+            actual_seq_lengths_query,
+            actual_seq_lengths_key,
+            block_table,
+        )
 
     def _apply_o_proj_full_weight(self, attn_output: torch.Tensor) -> torch.Tensor:
         return self._get_o_proj_weight_switch_method().apply(self.o_proj, attn_output)

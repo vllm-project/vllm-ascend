@@ -39,7 +39,7 @@ from vllm_ascend.attention.dsa_v1 import (
     AscendDSAMetadataBuilder,
     AscendDSASWABackend,
 )
-from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
+from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, AscendSFAMetadataBuilder
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
@@ -54,6 +54,7 @@ from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _get_kv_cache_config_deepseek_v4_main,
 )
 from vllm_ascend.worker.v2 import attn_utils
+from vllm_ascend.worker.v2.model_states import default as model_state_module
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
 
@@ -157,7 +158,7 @@ def test_main_allocator_attention_layout(
     impl = impl_cls.__new__(impl_cls)
     impl.sliding_window = extra_args.get("sliding_window")
     layer = SimpleNamespace(
-        get_attn_backend=lambda: (SparseAttentionBackend if cache_kind == "full_sparse" else AscendAttentionBackend),
+        get_attn_backend=lambda: SparseAttentionBackend if cache_kind == "full_sparse" else AscendAttentionBackend,
         kv_sharing_target_layer_name=None,
         num_heads=8,
         impl=impl,
@@ -173,6 +174,7 @@ def test_main_allocator_attention_layout(
         cache_config=SimpleNamespace(cache_dtype="auto"),
         kv_transfer_config=object() if kv_transfer else None,
         model_config=SimpleNamespace(hf_config=SimpleNamespace()),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=2 if cache_kind == "dcp" else 1),
         quant_config=None,
     )
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
@@ -205,7 +207,7 @@ def test_main_allocator_attention_layout(
     assert second_key.shape == expected_shape
     assert second_value.shape == expected_shape
     block_elements = kernel_block_size * spec.num_kv_heads * spec.head_size
-    if cache_kind in ("c8", "dcp") or (cache_kind in ("full", "mixed") and not pa_enabled):
+    if cache_kind == "c8" or (cache_kind in ("full", "mixed") and not pa_enabled):
         assert not key_cache.is_contiguous()
         assert not value_cache.is_contiguous()
         assert key_cache.stride(0) == value_cache.stride(0) == 2 * block_elements
@@ -235,6 +237,63 @@ def test_main_allocator_attention_layout(
     assert torch.count_nonzero(value_cache[3:]) == 0
     assert torch.count_nonzero(second_key) == 0
     assert torch.count_nonzero(second_value) == 0
+
+
+def test_sparse_offload_allocator_uses_host_main_cache_and_device_resident_buffer(monkeypatch):
+    name = "model.layers.0.self_attn.attn"
+    spec = AscendMLAAttentionSpec(
+        block_size=2,
+        num_kv_heads=1,
+        head_size=6,
+        dtype=torch.bfloat16,
+        store_on_host=True,
+    )
+    config = KVCacheConfig(
+        num_blocks=3,
+        kv_cache_tensors=[_make_kv_cache_tensor(3 * spec.page_size_bytes, [name], spec.page_size_bytes)],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=[name], kv_cache_spec=spec)],
+    )
+    layer = SimpleNamespace(
+        get_attn_backend=lambda: SparseAttentionBackend,
+        kv_sharing_target_layer_name=None,
+        num_heads=8,
+    )
+    sparse_cfg = SimpleNamespace(keep_device_kv_cache=False)
+    vllm_config = SimpleNamespace(
+        additional_config={},
+        cache_config=SimpleNamespace(cache_dtype="auto"),
+        kv_transfer_config=object(),
+        model_config=SimpleNamespace(hf_config=SimpleNamespace()),
+        parallel_config=SimpleNamespace(),
+    )
+    calls = []
+    raw_cache = (None, None, torch.empty(48, dtype=torch.int8), torch.empty(24, dtype=torch.int8), 72)
+    marker = object()
+
+    def allocate(k_size, v_size, alignment, tp_rank, keep_device, allocate_npu):
+        calls.append((k_size, v_size, alignment, tp_rank, keep_device))
+        return raw_cache
+
+    def reshape(raw, layer_spec, backend, tp_rank, config, offload_config):
+        assert raw is raw_cache
+        assert layer_spec is spec
+        assert backend is SparseAttentionBackend
+        assert tp_rank == 0
+        assert config is vllm_config
+        assert offload_config is sparse_cfg
+        return marker
+
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args, **_kwargs: {name: layer})
+    monkeypatch.setattr(attn_utils, "get_ascend_config", lambda: SimpleNamespace(sparse_kv_offload_config=sparse_cfg))
+    monkeypatch.setattr(attn_utils, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(attn_utils, "_get_attention_kv_cache_dims", lambda *_args: (4, 2))
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda *_args: True)
+    monkeypatch.setattr(attn_utils, "allocate_kv_cache_tensors_for_sparse_kv_offload", allocate)
+    monkeypatch.setattr(attn_utils, "reshape_kv_cache_tensors_for_sparse_kv_offload", reshape)
+
+    assert attn_utils.allocate_kv_cache_main(config, torch.device("cpu"), None, [2])[name] is marker
+    assert calls == [(48, 24, 2 * 1024 * 1024, 0, False)]
 
 
 @pytest.mark.parametrize("pa_enabled", [False, True])
@@ -561,6 +620,7 @@ def test_build_attn_metadata_factory_applies_state(monkeypatch, state_kwargs, fa
         pad=5,
         is_prefilling=is_prefilling,
         attn_state=factory_state,
+        offload_kwargs={"copy_sfa_draft_index": 2},
     ):
         metadata = attn_utils._BUILD_ATTN_METADATA_MODULE.build_attn_metadata(**state_kwargs)
 
@@ -568,6 +628,47 @@ def test_build_attn_metadata_factory_applies_state(monkeypatch, state_kwargs, fa
     torch.testing.assert_close(captured_kwargs["positions"], positions[:5])
     assert captured_kwargs["is_prefilling"] is is_prefilling
     assert captured_kwargs["attn_state"] == factory_state
+    assert captured_kwargs["copy_sfa_draft_index"] == 2
+
+
+@pytest.mark.parametrize("dcp_size", [2])
+def test_gqa_pcp_dcp_cache_keeps_tp_local_kv_heads(monkeypatch, dcp_size):
+    source_spec = FullAttentionSpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+    )
+    layer = SimpleNamespace(
+        kv_sharing_target_layer_name=None,
+        align_kv_cache_with_mamba=True,
+        get_kv_cache_spec=lambda _config: source_spec,
+    )
+    model_config = SimpleNamespace(
+        use_mla=False,
+        dtype=torch.bfloat16,
+        get_total_num_kv_heads=lambda: 4,
+    )
+    vllm_config = SimpleNamespace(
+        model_config=model_config,
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=8,
+            prefill_context_parallel_size=2,
+            decode_context_parallel_size=dcp_size,
+        ),
+        attention_config=SimpleNamespace(indexer_kv_dtype="auto"),
+        cache_config=SimpleNamespace(cache_dtype="auto", block_size=128),
+    )
+    monkeypatch.setattr(
+        attn_utils,
+        "get_layers_from_vllm_config",
+        lambda *_args, **_kwargs: {"model.layers.0.self_attn.attn": layer},
+    )
+    monkeypatch.setattr(attn_utils, "enable_sfa_dcp_replicated_indexer", lambda _config: False)
+
+    specs = attn_utils.get_kv_cache_spec(vllm_config)
+
+    assert specs["model.layers.0.self_attn.attn"].num_kv_heads == 1
 
 
 @pytest.mark.parametrize(
@@ -575,9 +676,10 @@ def test_build_attn_metadata_factory_applies_state(monkeypatch, state_kwargs, fa
     [(False, 1), (True, 4)],
 )
 @pytest.mark.parametrize("li_c8", [False, True])
+@pytest.mark.parametrize("li_c4", [False, True])
 @pytest.mark.parametrize("owner", ["unpaired", "static_shared", "mtp", "regular"])
 def test_sfa_indexer_cache_spec_runtime_ownership_and_dcp_replication(
-    monkeypatch, replicated_indexer, expected_size, li_c8, owner
+    monkeypatch, replicated_indexer, expected_size, li_c8, li_c4, owner
 ):
     layer_name = "model.layers.0.self_attn.indexer.k_cache"
     indexer_module = DeepseekV32IndexerCache.__new__(DeepseekV32IndexerCache)
@@ -625,7 +727,10 @@ def test_sfa_indexer_cache_spec_runtime_ownership_and_dcp_replication(
     monkeypatch.setattr(
         attn_utils,
         "get_ascend_config",
-        lambda: SimpleNamespace(is_sparse_li_c8_layer=lambda _layer_name: li_c8),
+        lambda: SimpleNamespace(
+            is_sparse_li_c8_layer=lambda _layer_name: li_c8,
+            is_sparse_li_c4_layer=lambda _layer_name: li_c4,
+        ),
     )
 
     specs = attn_utils.get_kv_cache_spec(vllm_config)
@@ -636,8 +741,18 @@ def test_sfa_indexer_cache_spec_runtime_ownership_and_dcp_replication(
 
     assert isinstance(spec, AscendSFAIndexerCacheSpec)
     assert spec.sfa_dcp_replicated_indexer_size == expected_size
-    assert spec.dtype == (torch.int8 if li_c8 else torch.bfloat16)
-    assert spec.scale_dim == (1 if li_c8 else 0)
+    if li_c4:
+        assert spec.head_size == 128 // 2
+        assert spec.dtype == torch.uint8
+        assert spec.scale_dim == 128 // 64 * 2
+        assert spec.scale_dtype == torch.float8_e8m0fnu
+        assert spec.cache_sparse_li_c4 is True
+    elif li_c8:
+        assert spec.dtype == torch.int8
+        assert spec.scale_dim == 1
+    else:
+        assert spec.dtype == torch.bfloat16
+        assert spec.scale_dim == 0
 
 
 @pytest.mark.parametrize(
@@ -920,6 +1035,8 @@ def _make_dsa_metadata_groups(builder_cls=_RecordingDSAMetadataBuilder):
 def test_draft_metadata_uses_per_request_cpu_upper_bounds():
     _, _, calls, attn_groups, kv_cache_config = _make_dsa_metadata_groups()
     upper_bounds = torch.tensor([13, 27], dtype=torch.int32)
+    req_ids = torch.tensor([17, 23], dtype=torch.int64)
+    token_to_req = torch.tensor([0, 1], dtype=torch.int32)
 
     attn_utils.build_attn_metadata(
         attn_groups=attn_groups,
@@ -934,6 +1051,9 @@ def test_draft_metadata_uses_per_request_cpu_upper_bounds():
         slot_mappings=(torch.zeros(2, dtype=torch.int32),) * 2,
         kv_cache_config=kv_cache_config,
         seq_lens_cpu_upper_bound=upper_bounds,
+        req_ids_tensor=req_ids,
+        token_to_req=token_to_req,
+        offload_dummy=True,
     )
 
     assert len(calls) == 2
@@ -941,6 +1061,127 @@ def test_draft_metadata_uses_per_request_cpu_upper_bounds():
         common_metadata = call["common_attn_metadata"]
         torch.testing.assert_close(common_metadata.seq_lens_cpu, upper_bounds)
         torch.testing.assert_close(common_metadata.seq_lens, torch.tensor([11, 25], dtype=torch.int32))
+        assert common_metadata.req_ids_tensor is req_ids
+        assert common_metadata.token_to_req is token_to_req
+        assert common_metadata.offload_dummy
+
+
+@pytest.mark.parametrize("for_capture", [False, True])
+def test_v2_fused_offload_splits_target_and_draft_metadata_in_one_sfa_group(for_capture):
+    class RecordingSFABuilder(AscendSFAMetadataBuilder):
+        def __init__(self):
+            self.calls = []
+
+        def build(self, common_prefix_len, common_attn_metadata, **kwargs):
+            self.calls.append(common_attn_metadata)
+            return SimpleNamespace(common=common_attn_metadata)
+
+        def build_for_cudagraph_capture(self, common_attn_metadata, **kwargs):
+            return self.build(0, common_attn_metadata, **kwargs)
+
+    builder = RecordingSFABuilder()
+    group = SimpleNamespace(
+        layer_names=["target.layer", "draft.layer"],
+        get_metadata_builder=lambda _: builder,
+    )
+    metadata = attn_utils.build_attn_metadata(
+        attn_groups=[[group]],
+        num_reqs=1,
+        num_tokens=1,
+        query_start_loc_gpu=torch.tensor([0, 1], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, 1], dtype=torch.int32),
+        max_query_len=1,
+        seq_lens=torch.tensor([129], dtype=torch.int32),
+        max_seq_len=4096,
+        block_tables=(torch.zeros((1, 1), dtype=torch.int32),),
+        slot_mappings=(torch.zeros(1, dtype=torch.int32),),
+        kv_cache_config=SimpleNamespace(kv_cache_groups=[SimpleNamespace()]),
+        seq_lens_np=np.array([129], dtype=np.int32),
+        draft_layer_names={"draft.layer"},
+        copy_sfa_restore_tails=True,
+        for_cudagraph_capture=for_capture,
+    )
+
+    assert len(builder.calls) == 2
+    assert builder.calls[0].copy_sfa_draft_index is None
+    assert builder.calls[0].copy_sfa_restore_tails
+    assert builder.calls[1].copy_sfa_draft_index == 0
+    assert not builder.calls[1].copy_sfa_restore_tails
+    assert metadata["target.layer"].common is builder.calls[0]
+    assert metadata["draft.layer"].common is builder.calls[1]
+
+
+def test_v2_fused_offload_prepares_request_ownership_and_restores_tails(monkeypatch):
+    state = AscendModelState.__new__(AscendModelState)
+    state.vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=1),
+        cache_config=SimpleNamespace(block_size=128),
+    )
+    state.max_model_len = 4096
+    state.pcp_manager = None
+    state._offload_live_req_ids = {"request-1": 0}
+    state._offload_draft_attn_groups = []
+    state._offload_draft_layer_names = {"draft.layer"}
+    state._offload_req_ids = SimpleNamespace(gpu=torch.zeros(2, dtype=torch.int64))
+    state._offload_token_to_req = SimpleNamespace(gpu=torch.zeros(4, dtype=torch.int32))
+    state._offload_pool_slots = SimpleNamespace(np=np.zeros(4, dtype=np.int32), cpu=torch.zeros(4, dtype=torch.int32))
+    state._offload_pool_active = SimpleNamespace(np=np.zeros(4, dtype=np.bool_), cpu=torch.zeros(4, dtype=torch.bool))
+    state._offload_request_states = MagicMock()
+    state._offload_request_states.prepare.return_value = (True, {0: (0, 128)}, ())
+    metadata = SimpleNamespace(copy_sfa_copy_src_offsets=torch.zeros(1, dtype=torch.int32))
+    built = {}
+
+    def build_metadata(**kwargs):
+        built.update(kwargs)
+        return {"main.layer": metadata}
+
+    manager = MagicMock()
+    update = MagicMock()
+    monkeypatch.setattr(model_state_module, "build_attn_metadata", build_metadata)
+    monkeypatch.setattr(model_state_module, "update_sparse_kv_offload_metadata", update)
+    monkeypatch.setattr(model_state_module, "get_prebound_copy_sfa_slots", lambda: {"request-1": 0})
+    monkeypatch.setattr(model_state_module, "get_sparse_kv_offload_manager", lambda: manager)
+    monkeypatch.setattr(
+        model_state_module,
+        "get_ascend_config",
+        lambda: SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(topk_buffer_size=4096)),
+    )
+    batch = SimpleNamespace(
+        num_reqs=1,
+        num_tokens=1,
+        query_start_loc_np=np.array([0, 1], dtype=np.int32),
+        query_start_loc=torch.tensor([0, 1], dtype=torch.int32),
+        req_ids=["request-1"],
+        num_computed_tokens_np=np.array([128], dtype=np.int32),
+        is_prefilling_np=np.array([False]),
+        num_scheduled_tokens=torch.tensor([1], dtype=torch.int32),
+        seq_lens=torch.tensor([129], dtype=torch.int32),
+        seq_lens_np=np.array([129], dtype=np.int32),
+        dcp_local_seq_lens=None,
+        positions=torch.tensor([128], dtype=torch.int32),
+        attn_state=None,
+        is_dummy=False,
+    )
+    block_table = torch.zeros((1, 1), dtype=torch.int32)
+    result = state.prepare_attn(
+        batch,
+        CUDAGraphMode.NONE,
+        (block_table,),
+        torch.zeros((1, 1), dtype=torch.int32),
+        [],
+        SimpleNamespace(),
+    )
+
+    assert result == {"main.layer": metadata}
+    update.assert_called_once()
+    prepared = state._offload_request_states.prepare.call_args.kwargs
+    assert prepared["prebound_slots"] == {"request-1": 0}
+    assert prepared["live_req_ids"] is state._offload_live_req_ids
+    assert built["copy_sfa_restore_tails"]
+    assert built["draft_layer_names"] == {"draft.layer"}
+    assert built["req_topk_buffer_slots"].shape == (1,)
+    assert manager.dense_fill_copy_sfa_rows.call_args.kwargs["block_table"] is block_table
+    manager.restore_copy_sfa_tails.assert_called_once_with(metadata)
 
 
 @pytest.mark.parametrize("splits", [1, 9, 16])
@@ -1339,6 +1580,33 @@ class _CaptureStateBuilder(_PrefillStateBuilder):
         return common_attn_metadata.is_prefilling
 
 
+@pytest.mark.parametrize("capture", [False, True])
+@pytest.mark.parametrize("full_graph", [False, True])
+def test_v41_capture_keeps_compressed_indexer_branches(monkeypatch, capture, full_graph):
+    monkeypatch.setattr(attn_utils, "AscendDSAV41MetadataBuilder", _CaptureStateBuilder)
+    builder = _CaptureStateBuilder()
+    group = SimpleNamespace(layer_names=["layer.0"], get_metadata_builder=lambda _: builder)
+    attn_utils.build_attn_metadata(
+        attn_groups=[[group]],
+        num_reqs=1,
+        num_tokens=1,
+        query_start_loc_gpu=torch.tensor([0, 1], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, 1], dtype=torch.int32),
+        max_query_len=1,
+        seq_lens=torch.tensor([1], dtype=torch.int32),
+        max_seq_len=1,
+        block_tables=(torch.zeros((1, 1), dtype=torch.int32),),
+        slot_mappings=(torch.zeros(1, dtype=torch.int64),),
+        kv_cache_config=SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=object())]),
+        seq_lens_np=np.array([1], dtype=np.int32),
+        positions=torch.tensor([0], dtype=torch.int64),
+        for_cudagraph_capture=capture,
+        full_graph_mode=full_graph,
+    )
+    assert builder.extra_kwargs is not None
+    assert builder.extra_kwargs["full_graph_mode"] is (capture or full_graph)
+
+
 @pytest.mark.parametrize("cache_only_backend", [False, True])
 @pytest.mark.parametrize("for_cudagraph_capture", [False, True])
 def test_build_attn_metadata_propagates_prefill_and_pcp_context(monkeypatch, for_cudagraph_capture, cache_only_backend):
@@ -1441,6 +1709,30 @@ def _make_mla_layer(*, fa_quant: bool = False, sparse_c8: bool = False):
     return layer
 
 
+def test_v2_sparse_offload_marks_main_mla_cache_host_resident(monkeypatch):
+    layer_name = "model.layers.0.self_attn.attn"
+    vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        cache_config=SimpleNamespace(block_size=16, cache_dtype="auto"),
+        attention_config=SimpleNamespace(indexer_kv_dtype="int8"),
+        model_config=SimpleNamespace(
+            dtype=torch.bfloat16,
+            hf_text_config=SimpleNamespace(kv_lora_rank=128, qk_rope_head_dim=64),
+        ),
+    )
+    sparse_cfg = SimpleNamespace(enabled=True)
+    monkeypatch.setattr(
+        attn_utils, "get_layers_from_vllm_config", lambda *_args, **_kwargs: {layer_name: _make_mla_layer()}
+    )
+    monkeypatch.setattr(attn_utils, "enable_sfa_dcp_replicated_indexer", lambda _cfg: False)
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda _cfg: True)
+    monkeypatch.setattr(attn_utils, "get_ascend_config", lambda: SimpleNamespace(sparse_kv_offload_config=sparse_cfg))
+
+    assert attn_utils.get_kv_cache_spec(vllm_config)[layer_name].store_on_host
+    sparse_cfg.enabled = False
+    assert not attn_utils.get_kv_cache_spec(vllm_config)[layer_name].store_on_host
+
+
 def test_sfa_indexer_allocates_and_reshapes_scale_views(monkeypatch):
     layer_name = "model.layers.0.self_attn.indexer.k_cache"
     spec = AscendSFAIndexerCacheSpec(
@@ -1507,6 +1799,78 @@ def test_sfa_indexer_allocates_and_reshapes_scale_views(monkeypatch):
     assert indexer_k.shape == (num_blocks, spec.block_size, spec.num_kv_heads, spec.head_size)
     assert indexer_scale.shape == (num_blocks, spec.block_size, spec.num_kv_heads, spec.scale_dim)
     assert caches["alias"] is caches[layer_name]
+
+
+def test_sfa_indexer_li_c4_allocates_and_reshapes_scale_views(monkeypatch):
+    layer_name = "model.layers.0.self_attn.indexer.k_cache"
+    index_head_dim = 128
+    spec = AscendSFAIndexerCacheSpec(
+        block_size=2,
+        num_kv_heads=1,
+        head_size=index_head_dim // 2,
+        dtype=torch.uint8,
+        scale_dim=index_head_dim // 64 * 2,
+        scale_dtype=torch.float8_e8m0fnu,
+        cache_sparse_li_c4=True,
+        cache_sparse_li_c8=False,
+        sfa_dcp_replicated_indexer_size=1,
+    )
+    num_blocks = 2
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            _make_kv_cache_tensor(
+                num_blocks * spec.page_size_bytes,
+                [layer_name],
+                spec.page_size_bytes,
+            )
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=[layer_name], kv_cache_spec=spec)],
+    )
+    vllm_config = SimpleNamespace(
+        additional_config={},
+        kv_transfer_config=None,
+        model_config=SimpleNamespace(hf_config=SimpleNamespace()),
+        cache_config=SimpleNamespace(cache_dtype="auto"),
+        parallel_config=SimpleNamespace(tensor_parallel_size=1),
+    )
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda _cfg: False)
+
+    raw = attn_utils._allocate_kv_cache(kv_cache_config, shared_layers={}, device=torch.device("cpu"))
+    raw_k, raw_scale = raw[layer_name]
+    assert raw_k.dtype == torch.int8
+    assert raw_scale.dtype == torch.int8
+
+    backend = SimpleNamespace(
+        get_kv_cache_shape=lambda num_blocks_, block_size, num_kv_heads, head_size: (
+            num_blocks_,
+            block_size,
+            num_kv_heads,
+            head_size,
+        )
+    )
+    caches = attn_utils._reshape_kv_cache_v2(
+        attn_groups=[
+            SimpleNamespace(
+                kv_cache_group_id=0,
+                kv_cache_spec=spec,
+                layer_names=[layer_name],
+                backend=backend,
+            ),
+        ],
+        kv_cache_raw_tensors=raw,
+        cache_dtype="auto",
+        kernel_block_sizes=[spec.block_size],
+        shared_kv_cache_layers={},
+        kv_cache_config=kv_cache_config,
+    )
+    indexer_k, indexer_scale = caches[layer_name]
+    # indexer k: (num_blocks, block_size, 1, head_size)
+    assert indexer_k.shape == (num_blocks, spec.block_size, 1, index_head_dim // 2)
+    assert indexer_k.dtype == torch.uint8
+    assert indexer_scale.shape == (num_blocks, spec.block_size, 1, 2, 2)
+    assert indexer_scale.dtype == torch.float8_e8m0fnu
 
 
 def test_attn_state_mla_spec_and_metadata_wrappers(monkeypatch):
@@ -1591,6 +1955,11 @@ def test_attn_state_mla_spec_and_metadata_wrappers(monkeypatch):
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args, **_kwargs: layers)
     monkeypatch.setattr(attn_utils, "enable_sfa_dcp_replicated_indexer", lambda _cfg: False)
     monkeypatch.setattr(attn_utils, "enable_sfa", lambda _cfg: True)
+    monkeypatch.setattr(
+        attn_utils,
+        "get_ascend_config",
+        lambda: SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(enabled=False)),
+    )
     monkeypatch.setattr(
         attn_utils,
         "get_current_hardware_profile",

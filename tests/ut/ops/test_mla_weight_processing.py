@@ -85,6 +85,7 @@ def test_impl_post_load_called_once(is_sfa, act_dtype):
 @pytest.mark.parametrize("is_kv_consumer", [False, True])
 def test_mlapo_post_load_does_not_reprocess_released_weights(is_kv_consumer):
     impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    impl.is_pcp_decode_sharded = False
     impl.fa_quant_layer = False
     impl.enable_mlapo = True
     impl._mlapo_uses_native_weights = False

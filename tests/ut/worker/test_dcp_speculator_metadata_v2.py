@@ -76,6 +76,9 @@ def _speculator(monkeypatch, kind, architecture, width, padded, step, use_dcp=Tr
     manager.vllm_config = config
     cls = AscendDSparkSpeculator if kind == "dspark" else AscendMTPSpeculator
     spec = object.__new__(cls)
+    if kind == "mtp":
+        spec._sparse_kv_offload_metadata = SimpleNamespace(build_kwargs=lambda *args: None)
+        spec.model_state = object()
     spec.attn_architecture = architecture
     spec.use_dcp = use_dcp
     spec.dcp_manager = manager
@@ -244,7 +247,11 @@ def test_non_dcp_uses_per_request_length_bounds(monkeypatch, kind, architecture,
     common = result["draft.layer"].common
     assert _dcp_local_cpu(common) is None
     assert common.dcp_local_seq_lens is None
-    if kind == "dspark" and architecture == "SFA" and not full_rebuild:
+    if kind == "dspark" and architecture == "MLA":
+        # Non-causal MLA consumes the initialized draft KV lengths, not the
+        # target's optimistic bound plus another query block.
+        assert common.seq_lens_cpu.tolist() == device_lengths[:2].tolist()
+    elif kind == "dspark" and architecture == "SFA" and not full_rebuild:
         # Upstream derives its CPU view from the device lengths; the deprecated
         # seq_lens_cpu property was removed in vLLM main.
         torch.testing.assert_close(common.seq_lens, device_lengths[:2])
@@ -354,7 +361,9 @@ def test_dspark_propose_passes_cpu_lengths_through_existing_factory(monkeypatch,
     monkeypatch.setattr(DSparkSpeculator, "propose", propose)
     result = spec.propose(spec.input_batch, {}, {}, None, None, None, None, None, None, None, None)
     common = result["draft.layer"].common
-    expected = [34, 128] + [0] * (padded - 2)
+    expected = (
+        device_lengths[:padded].tolist() if architecture == "MLA" and not use_dcp else [34, 128] + [0] * (padded - 2)
+    )
     assert common.seq_lens_cpu.tolist() == expected
     if use_dcp:
         torch.testing.assert_close(common.dcp_local_seq_lens_cpu, _local(expected))

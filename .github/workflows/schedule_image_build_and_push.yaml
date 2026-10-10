@@ -32,6 +32,9 @@ on:
         type: choice
         options:
           - 'main'
+          - 'releases/v0.30.0'
+          - 'releases/v0.29.0rc'
+          - 'releases/v0.28.0rc'
           - 'releases/v0.27.1rc'
           - 'releases/v0.26.0rc'
           - 'releases/v0.25.1rc'
@@ -151,7 +154,7 @@ jobs:
       # Final multi-arch images are pushed to swr.cn-north-12 with the same repo
       # path as quay.io; the sync tool then mirrors them to quay.io.
       swr_registry: 'swr.cn-north-12.myhuaweicloud.com'
-      swr_repo: ${{ needs.setup-matrix.outputs.build_type == 'daily' && 'swr.cn-north-12.myhuaweicloud.com/atlas_inference/vllm-ascend' || 'swr.cn-north-12.myhuaweicloud.com/ascend/vllm-ascend' }}
+      swr_repo: ${{ needs.setup-matrix.outputs.build_type == 'daily' && 'swr.cn-north-12.myhuaweicloud.com/atlas_ci/vllm-ascend' || 'swr.cn-north-12.myhuaweicloud.com/ascend/vllm-ascend' }}
       swr_temp_repo: ${{ needs.setup-matrix.outputs.build_type == 'daily' && 'swr.cn-north-12.myhuaweicloud.com/atlas_inference/vllm-atlas-temp' || 'swr.cn-north-12.myhuaweicloud.com/atlas_ci/vllm-atlas-temp' }}
       # ======================================================================
       

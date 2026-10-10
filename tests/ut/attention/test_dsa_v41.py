@@ -1,15 +1,60 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Regression test for an empty DSA index during FULL graph capture."""
+"""Regression tests for V4.1 index selection and compressor scheduling."""
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from vllm_ascend.attention import dsa_v41
-from vllm_ascend.attention.dsa_v41 import AscendDSAV41Impl
+from vllm_ascend.attention.context_parallel import dsa_v41_cp
+from vllm_ascend.attention.dsa_v41 import AscendDSAV41Impl, DeepseekV41PreparedIndexer
+from vllm_ascend.models.deepseek_v41 import mixed_quant_attention as a5_indexer
 
 TOKENS, TOPK = 4, 512
+
+
+@pytest.mark.parametrize("in_graph", [False, True])
+def test_cp_defer_scope_forwards_graph_mode_and_restores_both_builders(monkeypatch, in_graph):
+    base = dsa_v41.AscendDSAV41MetadataBuilder
+    cp = dsa_v41_cp._ReplicatedCacheMetadataBuilder.__new__(dsa_v41_cp._ReplicatedCacheMetadataBuilder)
+    cp._global_builder = base.__new__(base)
+    for builder in (cp, cp._global_builder):
+        builder._device_metadata_enabled = False
+        builder._device_metadata_in_graph = False
+        builder._uses_a5_packed_cache = True
+    monkeypatch.setattr(base, "prepare_source_rope", lambda self: None)
+    with cp.defer_device_metadata(in_graph=in_graph):
+        for builder in (cp, cp._global_builder):
+            assert builder._device_metadata_enabled
+            assert builder._device_metadata_in_graph == in_graph
+    for builder in (cp, cp._global_builder):
+        assert not builder._device_metadata_enabled
+        assert not builder._device_metadata_in_graph
+
+
+@pytest.mark.parametrize("in_graph", [False, True])
+@pytest.mark.parametrize("stage", list(dsa_v41.DeviceMetadataStage))
+def test_deferred_metadata_keeps_compressor_state_outside_graph(in_graph, stage):
+    builder = dsa_v41.AscendDSAV41MetadataBuilder.__new__(dsa_v41.AscendDSAV41MetadataBuilder)
+    builder._device_metadata_enabled = True
+    builder._device_metadata_in_graph = in_graph
+    builder._device_metadata_tasks = ()
+    shared: dict[str, torch.Tensor] = {}
+    calls = []
+    buffer = torch.zeros(1)
+    assert builder._publish_task(shared, "shared", buffer, stage, lambda: calls.append(stage)) is buffer
+    assert builder._publish_task(shared, "shared", torch.ones(1), stage, lambda: pytest.fail("duplicate")) is buffer
+    tasks = builder.take_device_metadata_tasks()
+    inline = in_graph and stage == dsa_v41.DeviceMetadataStage.COMPRESSOR
+    assert len(tasks) == (0 if inline else 1)
+    assert calls == ([stage] if inline else [])
+    for task in tasks:
+        assert task.group_id == id(buffer)
+        task.run()
+    assert calls == [stage]
+    assert builder.take_device_metadata_tasks() == ()
 
 
 def _impl(role):
@@ -24,19 +69,29 @@ def _attn(selected):
     shared = SimpleNamespace(
         topk_indices=torch.full((TOKENS, TOPK), 7, dtype=torch.int32),
         candidates=torch.full((TOKENS, 1, 8), 7, dtype=torch.int32),
+        candidate_lengths=None,
+        topk_lengths=None,
     )
-    indexer = SimpleNamespace(select=lambda *args, **kwargs: (selected, None))
+
+    def select_projected(*args, indices_output, **kwargs):
+        if selected.shape[1] != 0:
+            indices_output.copy_(selected)
+            return indices_output, None
+        return selected, None
+
+    indexer = SimpleNamespace(select_projected=select_projected)
     return SimpleNamespace(shared_state=shared, indexer=indexer), shared
 
 
-def test_empty_cache_selection_publishes_no_slot(monkeypatch):
+@pytest.mark.parametrize("empty_cache", [True, False])
+def test_index_selection_publishes_shared_output(monkeypatch, empty_cache):
     prefix = "model.layers.2.attn"
     monkeypatch.setattr(
         dsa_v41,
         "get_forward_context",
         lambda: SimpleNamespace(no_compile_layers={prefix: SimpleNamespace(kv_cache=[None])}),
     )
-    selected = torch.full((TOKENS, 0), -1, dtype=torch.int32)
+    selected = torch.full((TOKENS, 0 if empty_cache else TOPK), 3, dtype=torch.int32)
     attn, shared = _attn(selected)
     impl = _impl(
         SimpleNamespace(
@@ -58,8 +113,105 @@ def test_empty_cache_selection_publishes_no_slot(monkeypatch):
             swa=SimpleNamespace(num_actual_tokens=TOKENS),
             indexer=SimpleNamespace(cache=object()),
         ),
+        DeepseekV41PreparedIndexer(
+            query=torch.zeros(TOKENS, 1, 8),
+            weights=torch.zeros(TOKENS, 1),
+        ),
     )
 
     assert shared.topk_indices.shape == (TOKENS, TOPK)
-    assert torch.all(shared.topk_indices == -1)
+    assert torch.all(shared.topk_indices == (-1 if empty_cache else 3))
     assert out is not None and out.shape == (TOKENS, TOPK)
+
+
+@pytest.mark.parametrize("ratio", [1, 2])
+@pytest.mark.parametrize("c2_group", [None, 0])
+def test_compressor_input_ready_before_query_quantization(monkeypatch, ratio, c2_group):
+    hidden_states = torch.zeros(TOKENS, 8, dtype=torch.bfloat16)
+    latent = torch.zeros(TOKENS, 8, dtype=torch.bfloat16)
+    positions = torch.arange(TOKENS)
+    cos, sin = torch.ones(TOKENS, 4), torch.zeros(TOKENS, 4)
+    calls = []
+    original_float = torch.Tensor.float
+
+    def cast(value, *args, **kwargs):
+        result = original_float(value, *args, **kwargs)
+        if value is hidden_states:
+            calls.append("input_cast")
+        return result
+
+    def project_kv(value):
+        calls.append("wkv")
+        assert value.dtype == (torch.float32 if ratio == 2 else torch.bfloat16)
+        return latent
+
+    monkeypatch.setattr(torch.Tensor, "float", cast)
+    monkeypatch.setattr(AscendDSAV41Impl, "_quantize_indexer_query", lambda *args: calls.append("query_quantization"))
+    metadata_waits = []
+    monkeypatch.setattr(dsa_v41, "wait_for_device_metadata", lambda *args: metadata_waits.append(args))
+    monkeypatch.setattr(dsa_v41, "scatter_cache_sk", lambda *args: None)
+    monkeypatch.setattr(AscendDSAV41Impl, "_apply_rotary", lambda *args, **kwargs: None)
+    cache = SimpleNamespace(slot_mapping=positions)
+    metadata = SimpleNamespace(
+        indexer=SimpleNamespace(cache=cache),
+        compressor=SimpleNamespace(
+            cache=cache,
+            state=SimpleNamespace(c2_metadata_group_id=c2_group, c2_source_cos=cos, c2_source_sin=sin),
+        ),
+    )
+
+    class Compressor:
+        def __call__(self, value):
+            return project_kv(value)
+
+        wkv = staticmethod(project_kv)
+        wgate = staticmethod(lambda value: torch.zeros_like(value[:, :8]))
+        pool_projected = staticmethod(lambda *args: latent)
+
+    attn = SimpleNamespace(
+        compressor=Compressor(),
+        indexer=SimpleNamespace(update_keys=lambda *args: None),
+        long_kv_cache=SimpleNamespace(kv_cache=[None]),
+        head_dim=8,
+        nope_head_dim=4,
+    )
+    impl = _impl(SimpleNamespace(compress_ratio=ratio))
+    impl._write_compressed_source(attn, hidden_states, positions, cos, sin, metadata, prepared_indexer=object())
+
+    assert calls.count("query_quantization") == calls.count("wkv") == 1
+    assert calls.index("query_quantization") < calls.index("wkv")
+    if ratio == 2:
+        assert calls.index("input_cast") < calls.index("query_quantization")
+    assert metadata_waits == (
+        [(dsa_v41.DeviceMetadataStage.COMPRESSOR, c2_group)] if ratio == 2 and c2_group is not None else []
+    )
+
+
+def test_a5_indexer_uses_prequantized_query(monkeypatch):
+    monkeypatch.setattr(a5_indexer, "wait_for_device_metadata", lambda *args: None)
+    monkeypatch.setattr(
+        a5_indexer,
+        "quantize_mxfp4_indexer",
+        lambda query: pytest.fail("query must not be quantized twice"),
+    )
+    query = torch.zeros(2, 1, 128)
+    quantized = torch.zeros(2, 1, 64, dtype=torch.uint8)
+    scale = torch.zeros(2, 1, 4, dtype=torch.uint8)
+    source_metadata = SimpleNamespace(
+        qli_metadata=torch.zeros(1),
+        query_start_loc=torch.zeros(1),
+        cache_seq_lens=torch.zeros(1),
+        cmp_residual=None,
+        block_table=torch.zeros(1),
+    )
+    result = a5_indexer._common(
+        query,
+        torch.ones(2, 1),
+        (torch.zeros(1), torch.zeros(2, 1, 4)),
+        source_metadata,
+        1,
+        quantized,
+        scale,
+    )
+    assert result[0] is quantized
+    assert result[1].shape == (2, 1, 2, 2)
