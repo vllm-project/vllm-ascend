@@ -476,11 +476,38 @@ class AscendPCPManager(PCPManager):
         Target graph padding stays private to target attention/capture views.
         The draft chooses its own execution padding after restoration.
         """
+        global_batch = self._global_batch
         return (
-            getattr(getattr(self, "vllm_config", None), "speculative_config", None) is not None
+            global_batch is not None
+            and not global_batch.is_dummy
+            and self.vllm_config.speculative_config is not None
             and self.is_decode_sharded
-            and self._global_batch is not None
-            and not self._global_batch.is_dummy
+        )
+
+    @staticmethod
+    def _unpadded_global_batch(global_batch: AscendInputBatch) -> AscendInputBatch:
+        """Return a consistent view of the scheduled requests and tokens only.
+
+        Every token-length field is cut to ``num_tokens`` and every
+        request-length field to ``num_reqs``; the target batch is not mutated.
+        """
+        num_reqs = global_batch.num_reqs
+        num_tokens = global_batch.num_tokens
+        return replace(
+            global_batch,
+            num_reqs_after_padding=num_reqs,
+            num_tokens_after_padding=num_tokens,
+            query_start_loc=global_batch.query_start_loc[: num_reqs + 1],
+            query_start_loc_np=global_batch.query_start_loc_np[: num_reqs + 1],
+            seq_lens=global_batch.seq_lens[:num_reqs],
+            seq_lens_cpu_upper_bound=global_batch.seq_lens_cpu_upper_bound[:num_reqs],
+            seq_lens_np=None if global_batch.seq_lens_np is None else global_batch.seq_lens_np[:num_reqs],
+            dcp_local_seq_lens=(
+                None if global_batch.dcp_local_seq_lens is None else global_batch.dcp_local_seq_lens[:num_reqs]
+            ),
+            input_ids=global_batch.input_ids[:num_tokens],
+            positions=global_batch.positions[:num_tokens],
+            is_padding=global_batch.is_padding[:num_tokens],
         )
 
     def restore_for_sampling(
@@ -504,14 +531,9 @@ class AscendPCPManager(PCPManager):
             hidden_states = self.restore_hidden_states(hidden_states)
         global_batch = self._global_batch
         if self._restore_unpadded_global_batch():
-            # Preserve the target's batch; expose real request boundaries and
-            # token extent at the global restoration boundary.
-            global_batch = replace(
-                global_batch,
-                num_tokens_after_padding=global_batch.num_tokens,
-                query_start_loc=global_batch.query_start_loc[: global_batch.num_reqs + 1],
-                query_start_loc_np=global_batch.query_start_loc_np[: global_batch.num_reqs + 1],
-            )
+            # Preserve the target's batch; expose only scheduled requests and
+            # tokens at the global restoration boundary.
+            global_batch = self._unpadded_global_batch(global_batch)
             hidden_states = hidden_states[: global_batch.num_tokens]
         return hidden_states, global_batch
 
@@ -523,7 +545,13 @@ class AscendPCPManager(PCPManager):
         assert self._padded_gather_idx is not None
         local_num_tokens_padded = self._padded_gather_idx.shape[0] // self.pcp_world_size
         restored_hidden_states = self.restore_hidden_states(hidden_states[:local_num_tokens_padded])
-        hidden_states[: restored_hidden_states.shape[0]].copy_(restored_hidden_states)
+        num_restored = restored_hidden_states.shape[0]
+        hidden_states[:num_restored].copy_(restored_hidden_states)
+        if self._global_batch is not None:
+            # An unpadded restore returns only scheduled rows; clear the rest of
+            # the global padded extent so no rank-local rows remain behind.
+            padded_end = min(self._global_batch.num_tokens_after_padding, hidden_states.shape[0])
+            hidden_states[num_restored:padded_end].zero_()
 
     def get_dummy_block_tables(self, num_reqs: int) -> tuple[torch.Tensor, ...]:
         """Return capture views backed by the persistent PCP-local tables.

@@ -783,27 +783,116 @@ def test_request_state_cpu_and_numpy_tokens_share_storage() -> None:
     assert state.num_computed_tokens_np[1] == 23
 
 
+def _make_padded_sharded_global_batch() -> AscendInputBatch:
+    """One scheduled 12-token request padded by the target graph to 2 rows / 16 tokens."""
+    batch = _make_global_pcp_batch()
+    return replace(
+        batch,
+        is_dummy=False,
+        num_reqs=1,
+        num_reqs_after_padding=2,
+        num_tokens=12,
+        num_tokens_after_padding=16,
+        query_start_loc=torch.tensor([0, 12, 16], dtype=torch.int32),
+        query_start_loc_np=np.array([0, 12, 16], dtype=np.int32),
+        seq_lens=torch.tensor([12, 0], dtype=torch.int32),
+        seq_lens_cpu_upper_bound=torch.tensor([12, 0], dtype=torch.int32),
+        seq_lens_np=np.array([12, 0, 0, 0], dtype=np.int32),
+        dcp_local_seq_lens=torch.tensor([6, 0], dtype=torch.int32),
+        input_ids=torch.arange(16, dtype=torch.int32),
+        positions=torch.arange(16, dtype=torch.int64),
+        is_padding=torch.arange(16) >= 12,
+    )
+
+
 def test_sampling_restore_exposes_unpadded_global_view() -> None:
     manager = AscendPCPManager.__new__(AscendPCPManager)
-    batch = _make_global_pcp_batch()
-    batch.is_dummy = False
-    batch.num_tokens = 12
-    batch.num_tokens_after_padding = 16
-    batch.query_start_loc_np = np.array([0, 12, 16], dtype=np.int32)
-    batch.query_start_loc = torch.tensor([0, 12, 16], dtype=torch.int32)
+    batch = _make_padded_sharded_global_batch()
     manager._global_batch = batch
     manager._sampling_hidden_restored = True
     hidden_states = torch.arange(32).reshape(16, 2)
     with patch.object(AscendPCPManager, "_restore_unpadded_global_batch", return_value=True):
         restored_hidden, restored_batch = manager.restore_for_sampling(hidden_states)
     assert restored_batch is not batch
-    assert restored_batch.num_tokens_after_padding == 12
+    # Every padded extent collapses to the scheduled requests and tokens.
+    assert restored_batch.num_reqs_after_padding == restored_batch.num_reqs == 1
+    assert restored_batch.num_tokens_after_padding == restored_batch.num_tokens == 12
     assert restored_batch.query_start_loc.tolist() == [0, 12]
     assert restored_batch.query_start_loc_np.tolist() == [0, 12]
+    assert restored_batch.seq_lens.tolist() == [12]
+    assert restored_batch.seq_lens_cpu_upper_bound.tolist() == [12]
+    assert restored_batch.seq_lens_np.tolist() == [12]
+    assert restored_batch.dcp_local_seq_lens.tolist() == [6]
+    assert restored_batch.idx_mapping.tolist() == [3]
+    for tokens in (restored_batch.input_ids, restored_batch.positions, restored_batch.is_padding):
+        assert tokens.shape[0] == 12
+    assert not bool(restored_batch.is_padding.any())
     assert restored_hidden.shape == (12, 2)
     assert restored_hidden.data_ptr() == hidden_states.data_ptr()
+    # The target batch keeps its graph layout.
+    assert batch.num_reqs_after_padding == 2
     assert batch.num_tokens_after_padding == 16
     assert batch.query_start_loc.tolist() == [0, 12, 16]
+    assert batch.seq_lens.tolist() == [12, 0]
+    assert batch.input_ids.shape[0] == 16
+
+
+def test_unpadded_restore_trims_hidden_and_auxiliary_states() -> None:
+    # Upstream restores EAGLE auxiliary states through restore_hidden_states,
+    # so they share the scheduled-token extent with the main hidden states.
+    manager = AscendPCPManager.__new__(AscendPCPManager)
+    manager._global_batch = _make_padded_sharded_global_batch()
+    gathered = torch.ones(16, 4)
+    with (
+        patch(
+            "vllm_ascend.worker.v2.pcp_manager.get_pp_group",
+            return_value=SimpleNamespace(is_last_rank=True),
+        ),
+        patch.object(PCPManager, "restore_hidden_states", side_effect=lambda value: gathered.clone()),
+        patch.object(AscendPCPManager, "_restore_unpadded_global_batch", return_value=True),
+    ):
+        hidden = manager.restore_hidden_states(torch.empty(8, 4))
+        auxiliary = manager.restore_hidden_states(torch.empty(8, 4))
+    assert hidden.shape == auxiliary.shape == (12, 4)
+
+
+def test_restore_unpadded_global_batch_policy() -> None:
+    manager = AscendPCPManager.__new__(AscendPCPManager)
+    manager.vllm_config = SimpleNamespace(speculative_config=object())
+    manager._global_batch = _make_padded_sharded_global_batch()
+    with patch.object(AscendPCPManager, "is_decode_sharded", new=True):
+        assert manager._restore_unpadded_global_batch()
+        manager._global_batch.is_dummy = True
+        assert not manager._restore_unpadded_global_batch()
+        manager._global_batch.is_dummy = False
+        manager.vllm_config.speculative_config = None
+        assert not manager._restore_unpadded_global_batch()
+    manager.vllm_config.speculative_config = object()
+    with patch.object(AscendPCPManager, "is_decode_sharded", new=False):
+        assert not manager._restore_unpadded_global_batch()
+
+
+def test_unpadded_buffer_restore_zeroes_padded_tail() -> None:
+    # Rank-local rows beyond the scheduled tokens must not survive restoration.
+    hidden_states = torch.full((6, 2), -1.0)
+    restored = torch.tensor([[1.0, 1.0], [2.0, 2.0], [3.0, 3.0], [9.0, 9.0]])
+    manager = AscendPCPManager.__new__(AscendPCPManager)
+    manager.pcp_world_size = 2
+    manager._padded_gather_idx = torch.empty(4, dtype=torch.int64)
+    manager._global_batch = SimpleNamespace(num_tokens=3, num_tokens_after_padding=4, is_dummy=False)
+    with (
+        patch(
+            "vllm_ascend.worker.v2.pcp_manager.get_pp_group",
+            return_value=SimpleNamespace(is_last_rank=True),
+        ),
+        patch.object(PCPManager, "restore_hidden_states", side_effect=lambda value: restored.clone()),
+        patch.object(AscendPCPManager, "_restore_unpadded_global_batch", return_value=True),
+    ):
+        manager.restore_hidden_state_buffer(hidden_states)
+    torch.testing.assert_close(hidden_states[:3], restored[:3])
+    torch.testing.assert_close(hidden_states[3], torch.zeros(2))
+    # Rows past the global padded extent are not owned by this restore.
+    torch.testing.assert_close(hidden_states[4:], torch.full((2, 2), -1.0))
 
 
 def test_pcp_manager_restores_model_owned_hidden_buffer() -> None:
@@ -815,7 +904,9 @@ def test_pcp_manager_restores_model_owned_hidden_buffer() -> None:
     manager._global_batch = SimpleNamespace(
         num_tokens=3,
         num_tokens_after_padding=4,
+        is_dummy=False,
     )
+    manager.vllm_config = SimpleNamespace(speculative_config=None)
 
     captured_local_hidden_states = []
 
