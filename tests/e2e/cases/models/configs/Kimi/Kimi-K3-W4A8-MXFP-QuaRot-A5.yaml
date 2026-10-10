@@ -1,7 +1,3 @@
-# REVIEW DRAFT: A5 accuracy/performance gates are not calibrated.
-# Do not enable as a regression gate: the current runner uses defaults when
-# baseline/threshold are absent. Supply measured A5 gates before execution.
-# DP4 / TP8 / EP32; internal-DP mixed serving, no PD runtime changes.
 test_name: "test Kimi-K3-W4A8-MXFP-QuaRot A5 four-node mixed deployment"
 model: "Eco-Tech/Kimi-K3-w4a8-mxfp-quarot"
 num_nodes: 4
@@ -143,8 +139,6 @@ deployment:
         --reasoning-parser kimi_k3
         --tool-call-parser kimi_k3
 
-# Dataset IDs match PR #14923. Sampling/load settings below are draft settings,
-# not measured A5 results or a requirement to reproduce the A3 experiment.
 benchmarks:
   acc_gpqa:
     case_type: accuracy
