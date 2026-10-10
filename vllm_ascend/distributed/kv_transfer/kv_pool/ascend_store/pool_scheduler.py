@@ -110,7 +110,8 @@ class KVPoolScheduler:
         self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get("load_async", False)
         kv_event_config = vllm_config.kv_events_config
         self.enable_kv_events = bool(kv_event_config and kv_event_config.enable_kv_cache_events)
-        self.retention_interval = vllm_config.cache_config.prefix_cache_retention_interval
+        retention_interval = getattr(envs, "VLLM_PREFIX_CACHE_RETENTION_INTERVAL", None)
+        self.retention_interval = retention_interval if isinstance(retention_interval, int) else None
         self.save_decode_cache = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "save_decode_cache", False
         )
@@ -1042,6 +1043,12 @@ class KVPoolScheduler:
         meta = AscendConnectorMetadata(
             scheduler_output.preempted_req_ids,
             self._loading_req_ids.copy(),
+        )
+        # Immediate block free: requests finished in the previous output
+        # processing and requests preempted by this schedule released their
+        # blocks; the worker fences their queued saves before reuse.
+        meta.released_req_ids = set(scheduler_output.preempted_req_ids or ()) | set(
+            scheduler_output.finished_req_ids or ()
         )
 
         for request in scheduler_output.scheduled_new_reqs:

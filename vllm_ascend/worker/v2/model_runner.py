@@ -391,6 +391,7 @@ class NPUModelRunner(GPUModelRunner):
                 assert isinstance(self.pcp_manager, AscendPCPManager)
                 self.pcp_manager.vllm_config = self.vllm_config
                 self.pcp_manager.kv_cache_config = kv_cache_config
+                self.pcp_manager.global_input_buffers = self.input_buffers
                 self.model_state.pcp_manager = self.pcp_manager
                 if self.speculator is not None:
                     self.speculator.pcp_manager = self.pcp_manager
@@ -648,6 +649,13 @@ class NPUModelRunner(GPUModelRunner):
         self._check_finegrained_tp_graph_step(batch_desc.cg_mode)
         num_tokens = batch_req_state.num_tokens
         num_tokens_after_padding = max(num_tokens, batch_desc.num_tokens)
+        graph_num_reqs = batch_desc.num_reqs
+        global_graph_num_reqs = (
+            self.pcp_manager.get_global_graph_num_reqs(batch_desc) if self.pcp_manager is not None else None
+        )
+        if global_graph_num_reqs is not None:
+            graph_num_reqs = global_graph_num_reqs
+            num_tokens_after_padding = global_graph_num_reqs * batch_desc.uniform_token_count
         assert num_tokens > 0
 
         req_ids = batch_req_state.req_ids
@@ -715,7 +723,8 @@ class NPUModelRunner(GPUModelRunner):
         # Get query_start_loc.
         # NOTE: For FULL mode we change +1 to +2 to reserve extra space for padding.
         # See _pad_query_start_loc_for_fia.
-        num_reqs_padded = batch_desc.num_reqs or num_reqs
+        # Inputs are still global here; eager PCP descriptors carry local counts.
+        num_reqs_padded = max(num_reqs, graph_num_reqs or 0)
         query_start_loc_np = np.empty(self.max_num_reqs + 2, dtype=np.int32)
         query_start_loc_np[0] = 0
         np.cumsum(num_scheduled_tokens_np, out=query_start_loc_np[1 : num_reqs + 1])
@@ -731,7 +740,8 @@ class NPUModelRunner(GPUModelRunner):
                 num_reqs,
                 query_start_loc_np,
                 batch_desc.cg_mode,
-                batch_desc.num_reqs,
+                graph_num_reqs,
+                uniform_query_len=batch_desc.uniform_token_count,
             )
 
         query_start_loc = self.input_buffers.query_start_loc
@@ -797,7 +807,7 @@ class NPUModelRunner(GPUModelRunner):
             self.input_buffers.seq_lens_np[:num_reqs] = seq_lens[:num_reqs].cpu().numpy()
 
         # Pad for full CUDA graph mode.
-        self.input_buffers.seq_lens_np[num_reqs_padded:] = 0
+        self.input_buffers.seq_lens_np[num_reqs:] = 0
 
         dcp_local_seq_lens = None
         # Main computes DCP lengths in the inherited execute_model after PCP
@@ -891,7 +901,14 @@ class NPUModelRunner(GPUModelRunner):
             valid_state_slots=valid_state_slots,
         )
         prepare_v41_dummy_ring_state(self, input_batch.num_reqs)
+        slot_mappings = self._maybe_extend_slot_mappings(input_batch, slot_mappings)
         return block_tables, slot_mappings
+
+    def _maybe_extend_slot_mappings(self, input_batch: AscendInputBatch, slot_mappings: torch.Tensor) -> torch.Tensor:
+        if input_batch.num_tokens_after_padding > input_batch.num_tokens:
+            # The parent already filled the entire persistent slot buffer.
+            slot_mappings = self.block_tables.slot_mappings[:, : input_batch.num_tokens_after_padding]
+        return slot_mappings
 
     def _lmhead_tp_max_num_logits(self) -> int:
         """Logits row capacity every rank agrees on (config-derived:
@@ -947,9 +964,7 @@ class NPUModelRunner(GPUModelRunner):
 
     @contextmanager
     def _cap_parallel_draft_dummy_reqs(self, uniform_decode: bool):
-        # TODO: Remove this context and its use once main2main includes
-        # https://github.com/vllm-project/vllm/pull/56448. Until then,
-        # profiling can exceed the speculator's query buffer.
+        # Profiling can exceed the speculator's query buffer.
         original_max_num_reqs = self.max_num_reqs
         if self.speculator is not None and not uniform_decode:
             # Other speculators use one query row per request in vLLM v0.30.0.
@@ -959,6 +974,28 @@ class NPUModelRunner(GPUModelRunner):
             yield
         finally:
             self.max_num_reqs = original_max_num_reqs
+
+    @contextmanager
+    def _preserve_dummy_query_tokens(self, num_tokens: int, uniform_decode: bool):
+        dummy_query_tokens: int | None = None
+        if (
+            # FULL modes can also pad requests; only change token-only PIECEWISE padding.
+            self.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
+            # PCP prepares and partitions its own dummy input layout.
+            and self.pcp_manager is None
+            # Hybrid models also need recurrent-state metadata to stay aligned.
+            # TODO: Verify whether this hybrid-model guard can be removed.
+            and not self.model_config.is_hybrid
+        ):
+            # Match the logical token count in the upstream dummy scheduler.
+            dummy_query_tokens = max(num_tokens, self.decode_query_len) if uniform_decode else num_tokens
+
+        previous_dummy_tokens = self.input_buffers.dummy_num_tokens
+        self.input_buffers.dummy_num_tokens = dummy_query_tokens
+        try:
+            yield
+        finally:
+            self.input_buffers.dummy_num_tokens = previous_dummy_tokens
 
     @step_eplb_after(is_dummy=True)
     def _dummy_run(
@@ -987,7 +1024,15 @@ class NPUModelRunner(GPUModelRunner):
                 "the profile-run marker, which makes XLite bypass its graph path."
             )
         load_balance_ctx = override_mrv2_in_profile_run(True) if profile_adaptive_tail else nullcontext()
-        with self._cap_parallel_draft_dummy_reqs(uniform_decode), skip_ring_state_update(skip_ring), load_balance_ctx:
+        with (
+            # Preserve scheduled query tokens before PIECEWISE graph padding.
+            self._preserve_dummy_query_tokens(num_tokens, uniform_decode),
+            # TODO: Remove this context and its use after the next main2main
+            # includes https://github.com/vllm-project/vllm/pull/56448.
+            self._cap_parallel_draft_dummy_reqs(uniform_decode),
+            skip_ring_state_update(skip_ring),
+            load_balance_ctx,
+        ):
             return super()._dummy_run(
                 num_tokens,
                 *args,
@@ -1093,6 +1138,7 @@ class NPUModelRunner(GPUModelRunner):
         query_start_loc_np: np.ndarray,
         cudagraph_runtime_mode: CUDAGraphMode | None = None,
         batch_desc_num_reqs: int | None = None,
+        uniform_query_len: int | None = None,
     ) -> tuple[np.ndarray, int]:
         """
         This function is only designed to satisfied the constraint that when the layout is TND,
@@ -1101,11 +1147,12 @@ class NPUModelRunner(GPUModelRunner):
         # TODO: need refactor later, related to vllm PR #34043 this pr delete func
         # relax_for_mixed_batch_cudagraphs, num_reqs no longer equals the actual number of requests.
         descriptor_num_reqs = batch_desc_num_reqs if batch_desc_num_reqs is not None else num_reqs_padded
+        query_len = uniform_query_len or self.decode_query_len
         # This checks query lengths, not request phase: short prefills can also
         # match. Graph dispatch is responsible for excluding incompatible prefills.
-        has_uniform_decode_query_lens = np.all(np.diff(query_start_loc_np[: num_reqs + 1]) == self.decode_query_len)
+        has_uniform_decode_query_lens = np.all(np.diff(query_start_loc_np[: num_reqs + 1]) == query_len)
         matches_uniform_decode_graph_shape = (
-            has_uniform_decode_query_lens and num_tokens_padded == descriptor_num_reqs * self.decode_query_len
+            has_uniform_decode_query_lens and num_tokens_padded == descriptor_num_reqs * query_len
         )
         if (
             cudagraph_runtime_mode == CUDAGraphMode.FULL
@@ -1120,13 +1167,13 @@ class NPUModelRunner(GPUModelRunner):
             # topology between capture and replay.
             num_reqs_padded = descriptor_num_reqs
 
-        if has_uniform_decode_query_lens and num_tokens_padded == num_reqs_padded * self.decode_query_len:
+        if has_uniform_decode_query_lens and num_tokens_padded == num_reqs_padded * query_len:
             # Uniform-batch case: num_reqs must be no greater than num_reqs_padded
             assert num_reqs <= num_reqs_padded
 
             last_loc = query_start_loc_np[num_reqs]
             query_start_loc_np[num_reqs + 1 : num_reqs_padded + 1] = (
-                np.arange(1, num_reqs_padded + 1 - num_reqs) * self.decode_query_len + last_loc
+                np.arange(1, num_reqs_padded + 1 - num_reqs) * query_len + last_loc
             )
         else:
             # Mixed-batch case: num_reqs must equal num_reqs_padded

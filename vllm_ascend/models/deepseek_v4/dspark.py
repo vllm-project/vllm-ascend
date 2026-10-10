@@ -213,7 +213,17 @@ class DeepseekV4DSparkModel(nn.Module):
         while isinstance(swa_kv_cache, (list, tuple)) and len(swa_kv_cache) == 1:
             swa_kv_cache = swa_kv_cache[0]
 
-        from vllm_ascend.attention.dsa_attn_kv_plan import get_dsa_attn_kv_plan
+        from vllm_ascend.attention.dsa_attn_kv_plan import get_dsa_attn_kv_plan, write_dsa_cache
+
+        dsa_impl = attn.dsa_attn.dsa_attn.impl
+        turboquant = dsa_impl.turboquant
+        if turboquant is not None:
+            # Draft queries and context KV must use the same rotated basis.
+            shared_kv = turboquant.forward(shared_kv)
+            if slot_mapping.ndim == 1:
+                slot_mapping = dsa_impl.get_kv_plan().format_dsa_slot_mapping(slot_mapping, swa_cache_layer.block_size)
+            write_dsa_cache(swa_kv_cache, shared_kv, slot_mapping)
+            return
 
         if slot_mapping.ndim == 1:
             slot_mapping = get_dsa_attn_kv_plan(self.vllm_config).format_dsa_slot_mapping(

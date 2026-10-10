@@ -10,7 +10,7 @@ from vllm.config.model import ModelConfig
 from vllm.config.speculative import SpeculativeConfig
 from vllm.transformers_utils.configs.speculators import SpeculatorsConfig
 
-from vllm_ascend.utils import is_deepseek_v41
+from vllm_ascend.utils import is_deepseek_v41, is_gqa_pcp_dcp_config
 
 _orig_post_init = SpeculativeConfig.__post_init__
 _orig_hf_config_override = SpeculativeConfig.hf_config_override
@@ -248,6 +248,12 @@ _orig_verify_with_parallel_config = ModelConfig.verify_with_parallel_config
 def _ascend_verify_with_parallel_config(self, parallel_config):
     if parallel_config.enable_expert_parallel and not self.is_moe and getattr(self, "runner_type", None) == "draft":
         return
+    # TODO: Remove this guard once upstream GQA/MQA DCP validation supports
+    # PCP-based KV-head replica groups.
+    if is_gqa_pcp_dcp_config(self, parallel_config):
+        guard_parallel_config = copy(parallel_config)
+        guard_parallel_config.decode_context_parallel_size = 1
+        return _orig_verify_with_parallel_config(self, guard_parallel_config)
     return _orig_verify_with_parallel_config(self, parallel_config)
 
 
