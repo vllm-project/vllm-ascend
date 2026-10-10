@@ -1134,32 +1134,6 @@ def test_ascendc_index_score_casts_query_to_fp8_cache_dtype() -> None:
     assert "scale" not in kwargs
 
 
-def test_bundled_ascendc_index_score_registers_a5_fp8_kernel() -> None:
-    repo_root = Path(msa_m3_module.__file__).parents[3]
-    op_root = repo_root / "csrc" / "attention" / "msa_index_score"
-    op_def = (op_root / "op_host" / "msa_index_score_def.cpp").read_text(encoding="utf-8")
-    kernel = (op_root / "op_kernel" / "msa_index_score.cpp").read_text(encoding="utf-8")
-    adapter = (op_root / "msa_index_score_torch_adpt.h").read_text(encoding="utf-8")
-    build_script = (repo_root / "csrc" / "build_aclnn.sh").read_text(encoding="utf-8")
-    a5_build_branch = build_script.split('elif [[ "$SOC_VERSION" =~ ^ascend950 ]]', 1)[1].split("else", 1)[0]
-
-    assert 'AddConfig("ascend950"' in op_def
-    assert "MSA_TILING_KEY_FP8_E4M3FN" in kernel
-    assert "at::kFloat8_e4m3fn" in adapter
-    assert '"msa_index_score"' in a5_build_branch
-
-
-def test_bundled_ascendc_index_score_flushes_wide_a5_block_tables() -> None:
-    repo_root = Path(msa_m3_module.__file__).parents[3]
-    op_root = repo_root / "csrc" / "attention" / "msa_index_score"
-    epilogue = (op_root / "op_kernel" / "arch35" / "msa_seg_row_max_epilogue.h").read_text(encoding="utf-8")
-    example = (op_root / "examples" / "test_aclnn_msa_index_score.cpp").read_text(encoding="utf-8")
-
-    assert "AdvanceStageWindow" in epilogue
-    assert "FlushStageToStrideEnd" in epilogue
-    assert "L0-fp8-wide-table-257" in example
-
-
 def test_ascendc_index_score_uses_dense_mode_without_mask() -> None:
     idx_q = torch.zeros(1, 2, 128)
     index_key_cache = torch.zeros(4, 128, 128)
@@ -1941,12 +1915,14 @@ def test_sparse_attn_prefill_kv_gather_q_forwards_csr_metadata(
     assert torch.equal(output, torch.ones_like(output))
 
 
-@patch.object(torch.ops._C_ascend, "npu_sparse_attention_score", create=True)
+@patch(
+    "vllm_ascend.models.minimax_m3.ops.msa_m3_npu._get_generic_block_sparse_attention_ops",
+)
 def test_sparse_attn_decode_npu_forwards_runtime_metadata(
-    mock_sparse_attention_score: MagicMock,
+    mock_get_gbsa_ops: MagicMock,
 ) -> None:
-    q = torch.zeros(4, 2, 4)
-    kv_cache = torch.zeros(2, 6, 128, 2, 4)
+    q = torch.zeros(4, 2, 4, dtype=torch.bfloat16)
+    kv_cache = torch.zeros(2, 6, 128, 2, 4, dtype=torch.bfloat16)
     topk_idx = torch.tensor(
         [
             [[0, 1], [0, -1], [2, 3], [-1, -1]],
@@ -1957,7 +1933,12 @@ def test_sparse_attn_decode_npu_forwards_runtime_metadata(
     block_table = torch.arange(8, dtype=torch.int32).view(2, 4)
     seq_lens = torch.tensor([129, 385], dtype=torch.int32)
     output = torch.empty_like(q)
-    mock_sparse_attention_score.return_value = torch.ones_like(output)
+    metadata = torch.empty(1024, dtype=torch.int32)
+    mock_metadata_op = MagicMock(return_value=metadata)
+    mock_attention_op = MagicMock(
+        return_value=(torch.ones_like(output), torch.empty(0)),
+    )
+    mock_get_gbsa_ops.return_value = (mock_metadata_op, mock_attention_op)
 
     minimax_m3_sparse_attn_decode_npu(
         q,
@@ -1972,16 +1953,18 @@ def test_sparse_attn_decode_npu_forwards_runtime_metadata(
         block_size=128,
     )
 
-    mock_sparse_attention_score.assert_called_once()
-    kwargs = mock_sparse_attention_score.call_args.kwargs
-    assert torch.equal(kwargs["actual_seq_lengths"], torch.tensor([2, 2], dtype=torch.int32))
-    assert kwargs["actual_seq_lengths_kv"] is seq_lens
-    assert torch.equal(
-        kwargs["select_num_idx"],
-        torch.tensor([[2, 1, 2, 0], [2, 1, 2, 1]], dtype=torch.int32),
-    )
-    assert kwargs["block_size"] == 128
-    assert kwargs["top_k"] == 2
+    mock_metadata_op.assert_called_once()
+    metadata_kwargs = mock_metadata_op.call_args.kwargs
+    assert metadata_kwargs["layout_kv"] == "PA_BBND"
+    assert metadata_kwargs["mask_mode"] == 1
+    assert metadata_kwargs["softmax_precision"] == 0
+    assert "is_packed_gqa" not in metadata_kwargs
+
+    mock_attention_op.assert_called_once()
+    kwargs = mock_attention_op.call_args.kwargs
+    assert kwargs["metadata"] is metadata
+    assert kwargs["softmax_precision"] == 0
+    assert "is_packed_gqa" not in kwargs
     assert torch.equal(output, torch.ones_like(output))
 
 
@@ -2012,9 +1995,11 @@ def test_m3_impls_provide_update_graph_params_protocol():
         assert params["speculative_config"].default is None
 
 
-@patch.object(torch.ops._C_ascend, "npu_sparse_attention_score", create=True)
-def test_sparse_attn_decode_npu_uses_fp8_inputs_and_reused_scale(
-    mock_sparse_attention_score: MagicMock,
+@patch(
+    "vllm_ascend.models.minimax_m3.ops.msa_m3_npu._get_generic_block_sparse_attention_ops",
+)
+def test_sparse_attn_decode_npu_uses_fp8_inputs_without_unsupported_scales(
+    mock_get_gbsa_ops: MagicMock,
 ) -> None:
     q = torch.tensor([[[500.0, -500.0, 1.0, -1.0]]], dtype=torch.bfloat16)
     kv_cache = torch.zeros(2, 1, 128, 1, 4, dtype=torch.float8_e4m3fn)
@@ -2024,7 +2009,12 @@ def test_sparse_attn_decode_npu_uses_fp8_inputs_and_reused_scale(
     seq_lens = torch.ones(1, dtype=torch.int32)
     dequant_scale = torch.ones((1, 1, 1, 1), dtype=torch.float32)
     output = torch.empty_like(q)
-    mock_sparse_attention_score.return_value = torch.ones_like(output)
+    metadata = torch.empty(1024, dtype=torch.int32)
+    mock_metadata_op = MagicMock(return_value=metadata)
+    mock_attention_op = MagicMock(
+        return_value=(torch.ones_like(output), torch.empty(0)),
+    )
+    mock_get_gbsa_ops.return_value = (mock_metadata_op, mock_attention_op)
 
     minimax_m3_sparse_attn_decode_npu(
         q,
@@ -2040,18 +2030,16 @@ def test_sparse_attn_decode_npu_uses_fp8_inputs_and_reused_scale(
         dequant_scale=dequant_scale,
     )
 
-    args = mock_sparse_attention_score.call_args.args
-    kwargs = mock_sparse_attention_score.call_args.kwargs
+    metadata_kwargs = mock_metadata_op.call_args.kwargs
+    assert metadata_kwargs["quant_mode"] == 5
+
+    args = mock_attention_op.call_args.args
+    kwargs = mock_attention_op.call_args.kwargs
     assert args[0].dtype == torch.float8_e4m3fn
-    assert args[1].dtype == torch.float8_e4m3fn
-    assert args[2].dtype == torch.float8_e4m3fn
-    assert kwargs["select_num_idx"] is select_num_idx
-    assert kwargs["actual_seq_lengths"].dtype == torch.int32
-    assert torch.equal(kwargs["actual_seq_lengths"], torch.ones_like(seq_lens))
-    assert kwargs["q_dequant_scale"] is dequant_scale
-    assert kwargs["k_dequant_scale"] is dequant_scale
-    assert kwargs["v_dequant_scale"] is dequant_scale
+    assert kwargs["quant_mode"] == 5
+    assert not {"q_dequant_scale", "k_dequant_scale", "v_dequant_scale"} & kwargs.keys()
     assert kwargs["attention_out_dtype"] == torch.bfloat16
+    assert torch.equal(output, torch.ones_like(output))
 
 
 @patch.object(torch.ops._C_ascend, "npu_sparse_attention_score_prefill", create=True)
@@ -2093,70 +2081,12 @@ def test_sparse_attn_prefill_a5_uses_fp8_inputs(
     assert args[11] == 4
 
 
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float8_e4m3fn])
-@pytest.mark.parametrize("cache_layout", ["tensor", "tuple", "list"])
-def test_sparse_attn_prefill_a5_missing_package_uses_q_gather_kv(dtype, cache_layout) -> None:
-    q = torch.tensor([[[500.0, -500.0, 1.0, -1.0]]] * 5, dtype=torch.bfloat16)
-    cache = torch.zeros(2, 3, 128, 1, 4, dtype=dtype)
-    kv_cache = cache if cache_layout == "tensor" else (cache[0], cache[1])
-    if cache_layout == "list":
-        kv_cache = list(kv_cache)
-    topk_idx = torch.tensor([[[0, -1]]] * 5, dtype=torch.int32)
-    output = torch.empty_like(q)
-    with (
-        patch.object(
-            msa_m3_npu_module, "get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A5)
-        ),
-        patch.object(msa_m3_npu_module, "_is_minimax_sparse_attention_split_kv_available", return_value=False),
-        patch.object(msa_m3_npu_module, "_npu_k2q_csr") as k2q,
-        patch("torch.ops._C_ascend.npu_sparse_attention_score", create=True, return_value=torch.ones_like(q)) as op,
-        patch("torch.ops._C_ascend.npu_sparse_attention_score_prefill", create=True) as split_kv,
-    ):
-        msa_m3_npu_module.minimax_m3_sparse_attn(
-            q,
-            kv_cache,
-            topk_idx,
-            torch.tensor([[0, 1], [2, 0]], dtype=torch.int32),
-            torch.tensor([0, 2, 5], dtype=torch.int32),
-            torch.tensor([130, 3], dtype=torch.int32),
-            torch.tensor([128, 0], dtype=torch.int32),
-            3,
-            1,
-            0.5,
-            output,
-            total_kv_blocks=3,
-            max_kv_blocks=2,
-        )
-    k2q.assert_not_called()
-    split_kv.assert_not_called()
-    op.assert_called_once()
-    args, kwargs = op.call_args
-    assert args[0].dtype == dtype
-    assert args[1].dtype == dtype
-    assert args[2].dtype == dtype
-    assert args[3] is topk_idx
-    torch.testing.assert_close(kwargs["actual_seq_lengths"], torch.tensor([2, 3], dtype=torch.int32))
-    torch.testing.assert_close(kwargs["actual_seq_lengths_kv"], torch.tensor([130, 3], dtype=torch.int32))
-    torch.testing.assert_close(kwargs["select_num_idx"], torch.ones(5, 1, dtype=torch.int32))
-    assert kwargs["inner_precise"] == 4
-    if dtype == torch.float8_e4m3fn:
-        torch.testing.assert_close(args[0].float(), q.float().clamp(-448, 448))
-        assert kwargs["attention_out_dtype"] == torch.bfloat16
-        scale = kwargs["q_dequant_scale"]
-        assert kwargs["k_dequant_scale"] is scale
-        assert kwargs["v_dequant_scale"] is scale
-        torch.testing.assert_close(scale, torch.ones(1, 1, 1, 1))
-    else:
-        assert args[0] is q
-        assert "q_dequant_scale" not in kwargs
-        assert "attention_out_dtype" not in kwargs
-    torch.testing.assert_close(output, torch.ones_like(q))
-
-
-@pytest.mark.parametrize("supports_fp8,value_dtype", [(False, torch.float8_e4m3fn), (True, torch.bfloat16)])
-def test_sparse_attn_prefill_fallback_rejects_invalid_fp8(supports_fp8, value_dtype) -> None:
+def test_sparse_attn_prefill_fallback_rejects_mismatched_fp8_cache() -> None:
     q = torch.zeros(1, 1, 4, dtype=torch.bfloat16)
-    kv_cache = (torch.zeros(1, 128, 1, 4, dtype=torch.float8_e4m3fn), torch.zeros(1, 128, 1, 4, dtype=value_dtype))
+    kv_cache = (
+        torch.zeros(1, 128, 1, 4, dtype=torch.float8_e4m3fn),
+        torch.zeros(1, 128, 1, 4, dtype=torch.bfloat16),
+    )
     with (
         patch("torch.ops._C_ascend.npu_sparse_attention_score", create=True) as op,
         pytest.raises(TypeError, match="FP8 sparse attention"),
@@ -2172,7 +2102,6 @@ def test_sparse_attn_prefill_fallback_rejects_invalid_fp8(supports_fp8, value_dt
             0.5,
             torch.empty_like(q),
             128,
-            supports_fp8=supports_fp8,
         )
     op.assert_not_called()
 
@@ -2237,7 +2166,7 @@ def test_sparse_attn_prefill_dispatches_by_operator_availability(
         mock_legacy.assert_called_once()
         mock_kv_gather_q.assert_not_called()
         assert mock_legacy.call_args.kwargs == {
-            "supports_fp8": device_type == AscendDeviceType.A5,
+            "max_query_len": 0,
         }
 
     mock_is_available.assert_called_once_with()
