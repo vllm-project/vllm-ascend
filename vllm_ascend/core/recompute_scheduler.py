@@ -42,6 +42,10 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.utils import record_function_or_nullcontext
 
+from vllm_ascend.core.disagg_stats import (
+    DisaggPrefillStatsMixin,
+    adjust_disagg_prefill_stats,
+)
 from vllm_ascend.core.dyntra_lb_scheduler import (
     DyntraLBPolicyMixin,
     print_scheduler_summary,
@@ -82,7 +86,11 @@ class RecomputeSchedulerOutput(SchedulerOutput):
     recomputed_reqs: list[RecomputeReqInfo] | None = None
 
 
-class RecomputeScheduler(Scheduler):
+# NOTE: DisaggPrefillStatsMixin must stay LAST here: at class-creation time
+# the platform patch has already rebound ``Scheduler`` to BalanceScheduler,
+# which itself inherits the mixin — mixin-first would create an inconsistent
+# MRO. Correctness depends on platform patches loading before this module.
+class RecomputeScheduler(Scheduler, DisaggPrefillStatsMixin):
     """Use vLLM scheduling with best-effort decode-side preemption offload.
 
     This keeps a local copy of vLLM's schedule() only to pad the first decode
@@ -605,6 +613,11 @@ class RecomputeScheduler(Scheduler):
                             num_prompt_tokens=request.num_prompt_tokens,
                             num_local_cached_tokens=num_new_local_computed_tokens,
                             num_external_cached_tokens=num_external_computed_tokens,
+                        )
+                        connector_prefix_cache_hits = adjust_disagg_prefill_stats(
+                            request,
+                            num_new_local_computed_tokens,
+                            connector_prefix_cache_hits,
                         )
                 else:
                     # KVTransfer: WAITING reqs have num_computed_tokens > 0

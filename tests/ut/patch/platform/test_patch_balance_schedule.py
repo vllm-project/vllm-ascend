@@ -102,9 +102,12 @@ from vllm_ascend.patch.platform.patch_balance_schedule import (  # noqa: E402
 
 # Importing any vLLM module can activate the Ascend platform plugin before this
 # test module finishes importing, so a direct ``Scheduler`` import may already
-# resolve to ``BalanceScheduler``. Its base class is the installed upstream
-# scheduler and remains unmodified by the BalanceScheduler class replacement.
-_UpstreamScheduler = BalanceScheduler.__bases__[0]
+# resolve to ``BalanceScheduler``. Its upstream base is the installed upstream
+# scheduler and remains unmodified by the BalanceScheduler class replacement;
+# skip the DisaggPrefillStatsMixin base that the cached_tokens fix adds.
+_UpstreamScheduler = next(
+    base for base in BalanceScheduler.__mro__ if base.__module__ == "vllm.v1.core.sched.scheduler"
+)
 
 # ---------------------------------------------------------------------------
 # Scheduler config compatibility
@@ -169,7 +172,7 @@ def test_balance_scheduler_installs_short_request_first_queue(monkeypatch, balan
             ),
         )
     )
-    monkeypatch.setattr(BalanceScheduler.__bases__[0], "__init__", fake_scheduler_init)
+    monkeypatch.setattr(_UpstreamScheduler, "__init__", fake_scheduler_init)
 
     with (
         patch(
@@ -208,7 +211,7 @@ def test_balance_scheduler_does_not_import_sfr_when_disabled(monkeypatch):
             short_request_first_config=SimpleNamespace(enabled=False),
         )
     )
-    monkeypatch.setattr(BalanceScheduler.__bases__[0], "__init__", fake_scheduler_init)
+    monkeypatch.setattr(_UpstreamScheduler, "__init__", fake_scheduler_init)
 
     with (
         patch(
