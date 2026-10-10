@@ -35,6 +35,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     LayerTransferTask,
     LoadSpec,
     ReqMeta,
+    RequestTracker,
     SharedBlockData,
     get_partial_block_index,
 )
@@ -2199,6 +2200,46 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         self.assertEqual(request.load_block_gvas_by_group_np[0].tolist(), [0])
         self.assertEqual(request.load_keys, [])
         self.assertEqual(worker.get_block_ids_with_load_errors(), {7})
+
+    def test_partial_hit_prepares_suffix_save_only_after_valid_load(self):
+        for gva, lease in ((201, 0), (0, 0), (201, -1)):
+            with self.subTest(gva=gva, lease=lease):
+                worker = self._make_gva_worker()
+                worker.layerwise_offload = False
+                worker.group_num_layers = {0: worker.num_layers}
+                info = MagicMock()
+                info.size.return_value = 64 if gva else 0
+                info.gva_list.return_value = [gva]
+                worker.m_store.batch_get_key_info.return_value = [info]
+                worker.m_store.batch_add_lease.return_value = [lease]
+                worker.m_store.batch_alloc.return_value = [301, 302, 303, 304, 305]
+                tracker = RequestTracker("r1", 96, allocated_block_ids=list(range(6)))
+                request = ReqMeta.from_request_tracker(
+                    tracker,
+                    16,
+                    load_spec=LoadSpec(0, 16, can_load=True),
+                    block_hashes=[f"h{i}" for i in range(6)],
+                    allow_save_with_load=True,
+                )
+
+                worker.process_layer_data([request])
+
+                if not gva or lease:
+                    self.assertFalse(request.can_save)
+                    self.assertTrue(all(not tasks for tasks in worker.layer_save_tasks))
+                    worker.m_store.batch_alloc.assert_not_called()
+                    self.assertEqual(worker.get_block_ids_with_load_errors(), {0})
+                else:
+                    self.assertTrue(request.can_save)
+                    self.assertEqual(request.block_gvas_np.tolist(), [0, 301, 302, 303, 304, 305])
+                    self.assertEqual(request.load_block_gvas_np.tolist(), [201, 0, 0, 0, 0, 0])
+                    for saves, loads in zip(worker.layer_save_tasks, worker.layer_load_tasks):
+                        self.assertEqual(
+                            (saves[0].block_ranges[0].start_block, saves[0].block_ranges[0].end_block), (1, 6)
+                        )
+                        self.assertEqual(
+                            (loads[0].block_ranges[0].start_block, loads[0].block_ranges[0].end_block), (0, 1)
+                        )
 
     def test_partial_lease_retries_until_snapshot_is_readable(self):
         worker = self._make_gva_worker()
