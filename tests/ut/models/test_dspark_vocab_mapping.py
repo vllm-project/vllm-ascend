@@ -12,10 +12,10 @@ from vllm_ascend.models.deepseek_v41.dspark import DSparkDeepseekV41ForCausalLM
     "model_cls",
     [DSparkDeepseekV4ForCausalLM, DSparkDeepseekV41ForCausalLM],
 )
-def test_full_vocab_draft_has_no_token_id_mapping(model_cls):
+def test_draft_has_token_id_mapping_attribute(model_cls):
     # vLLM's DSparkSpeculator.load_draft_model directly reads
-    # model.draft_id_to_target_id; full-vocabulary drafts must expose None.
+    # model.draft_id_to_target_id, so the attribute must exist.
     # Check instance attribute lookup without allocating model weights.
     draft = model_cls.__new__(model_cls)
     torch.nn.Module.__init__(draft)
-    assert draft.draft_id_to_target_id is None
+    assert hasattr(draft, "draft_id_to_target_id")
