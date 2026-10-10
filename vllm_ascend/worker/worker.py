@@ -61,6 +61,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.utils import report_usage_stats
+from vllm.v1.worker.gpu.warmup import warmup_kernels
 from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
 from vllm.v1.worker.startup_plan import (
     maybe_apply_startup_plan,
@@ -887,6 +888,17 @@ class NPUWorker(WorkerBase):
         from vllm_ascend.model_executor.warmup.kernel_warmup import kernel_warmup
 
         kernel_warmup(self)
+
+        if self.use_v2_model_runner:
+            # Exercise scheduler inputs, speculative sampling, and request-state
+            # updates that model-only dummy runs do not reach. Keep this before
+            # graph capture so first-request Triton compilation happens at startup.
+            warmup_kernels(self.model_runner, self.execute_model, self.sample_tokens)
+            from vllm_ascend.model_executor.warmup.v2_rejection_sampler_warmup import (
+                warmup_v2_model_dtype_rejection_sampler,
+            )
+
+            warmup_v2_model_dtype_rejection_sampler(self.model_runner)
 
         npugraph_memory_bytes = 0
         if not self.model_config.enforce_eager:
