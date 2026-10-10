@@ -257,6 +257,8 @@ def test_prefill_filters_target_only_metadata():
 def test_build_uniform_attn_metadata_sets_decode_only():
     """Test uniform attention metadata is marked decode-only."""
     speculator = AscendAutoRegressiveSpeculator.__new__(AscendAutoRegressiveSpeculator)
+    speculator._sparse_kv_offload_metadata = SimpleNamespace(build_kwargs=MagicMock(return_value=None))
+    speculator.model_state = object()
     metadata = SimpleNamespace(attn_state=None)
     speculator.arange_np = np.arange(3, dtype=np.int32)
     speculator.input_batch = SimpleNamespace(is_prefilling_np=np.array([False, False]))
@@ -288,6 +290,7 @@ def test_build_uniform_attn_metadata_sets_decode_only():
 
     assert result == {"draft": metadata}
     assert metadata.attn_state == AscendAttentionState.DecodeOnly
+    speculator._sparse_kv_offload_metadata.build_kwargs.assert_called_once()
     speculator._update_decode_attn_metadata.assert_called_once_with(
         {"draft": metadata},
         1,
@@ -298,6 +301,8 @@ def test_build_uniform_attn_metadata_sets_decode_only():
 def test_build_attn_metadata_sets_decode_only():
     """Test attention metadata is marked decode-only."""
     speculator = AscendAutoRegressiveSpeculator.__new__(AscendAutoRegressiveSpeculator)
+    speculator._sparse_kv_offload_metadata = SimpleNamespace(build_kwargs=MagicMock(return_value=None))
+    speculator.model_state = object()
     metadata = SimpleNamespace(attn_state=None)
     speculator.input_batch = SimpleNamespace(is_prefilling_np=np.array([False, False]))
     speculator.input_buffers = SimpleNamespace(positions=torch.tensor([0, 1]))
@@ -330,11 +335,55 @@ def test_build_attn_metadata_sets_decode_only():
     assert result == {"draft": metadata}
     assert metadata.attn_state == AscendAttentionState.DecodeOnly
     parent_build.assert_called_once()
+    speculator._sparse_kv_offload_metadata.build_kwargs.assert_called_once()
     speculator._update_decode_attn_metadata.assert_called_once_with(
         {"draft": metadata},
         1,
         2,
     )
+
+
+def test_build_attn_metadata_delegates_offload_kwargs_once():
+    """Pass the helper's exact result to the factory before the parent build."""
+    speculator = AscendAutoRegressiveSpeculator.__new__(AscendAutoRegressiveSpeculator)
+    offload_kwargs = {"req_ids_tensor": torch.tensor([7, 8]), "copy_sfa_draft_index": 1}
+    calls = []
+
+    def prepare(*args):
+        calls.append("offload")
+        return offload_kwargs
+
+    def factory(*args, **kwargs):
+        calls.append("factory")
+        assert kwargs["offload_kwargs"] is offload_kwargs
+        return nullcontext()
+
+    def parent(*args, **kwargs):
+        calls.append("parent")
+        return None
+
+    build_kwargs = MagicMock(side_effect=prepare)
+    speculator._sparse_kv_offload_metadata = SimpleNamespace(build_kwargs=build_kwargs)
+    speculator.model_state = object()
+    speculator.input_batch = SimpleNamespace(is_prefilling_np=np.array([False, False]))
+    speculator.input_buffers = SimpleNamespace(positions=torch.tensor([0, 1]))
+    speculator.use_dcp = False
+    speculator.draft_vllm_config = SimpleNamespace(parallel_config=object())
+    batch_desc = SimpleNamespace(num_tokens=2)
+    query_start = np.array([0, 1, 2], dtype=np.int32)
+    seq_lens = torch.tensor([10, 20], dtype=torch.int32)
+
+    with (
+        patch(
+            "vllm_ascend.worker.v2.spec_decode.autoregressive.speculator.build_attn_metadata_factory",
+            side_effect=factory,
+        ),
+        patch.object(AutoRegressiveSpeculator, "_build_attn_metadata", side_effect=parent),
+    ):
+        assert speculator._build_attn_metadata(2, batch_desc, query_start, seq_lens, 1) is None
+
+    build_kwargs.assert_called_once_with(speculator.input_batch, speculator.model_state, 2, batch_desc, query_start, 1)
+    assert calls == ["offload", "factory", "parent"]
 
 
 def test_build_draft_attn_metadatas_prefill():
@@ -380,6 +429,7 @@ def test_init_decode_draft_attn_metadatas_gqa():
     """Test draft decode metadata initialization for GQA."""
     speculator = AscendAutoRegressiveSpeculator.__new__(AscendAutoRegressiveSpeculator)
     speculator.attn_architecture = "GQA"
+    speculator.use_dcp = False
     speculator.input_batch = SimpleNamespace(
         num_reqs=2,
         seq_lens_cpu_upper_bound=torch.tensor([10, 20]),
@@ -433,6 +483,7 @@ def test_build_fia_params_prefill():
     speculator = AscendAutoRegressiveSpeculator.__new__(AscendAutoRegressiveSpeculator)
     block_table = torch.arange(12).reshape(4, 3)
     metadata = SimpleNamespace(block_tables=block_table, actual_seq_lengths_q=[1, 2], seq_lens_list=[10, 20])
+    speculator.use_dcp = False
     speculator.model_state = SimpleNamespace(attn_metadata={"draft": metadata})
     speculator.draft_attn_layer_names = {"draft"}
     result = speculator.build_fia_params(3, {"draft": metadata}, True)
@@ -446,6 +497,7 @@ def test_build_fia_params_prefill():
 def test_build_fia_params_decode():
     """Test building FIA parameters for decode."""
     speculator = AscendAutoRegressiveSpeculator.__new__(AscendAutoRegressiveSpeculator)
+    speculator.use_dcp = False
     metadata = SimpleNamespace(block_tables=torch.arange(12).reshape(4, 3))
     speculator.model_state = SimpleNamespace(attn_metadata={"draft": metadata})
     speculator.draft_attn_layer_names = {"draft"}

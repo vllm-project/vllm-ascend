@@ -5,7 +5,7 @@
 
 from collections.abc import Sequence
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import wraps
 from inspect import signature
 from typing import Any, Literal, get_args
@@ -13,23 +13,29 @@ from typing import Any, Literal, get_args
 import numpy as np
 import torch
 from pydantic.dataclasses import rebuild_dataclass
+from vllm.config import get_current_vllm_config
 from vllm.config import parallel as _parallel_config
+from vllm.distributed import get_eplb_group
 from vllm.distributed.eplb import async_worker as _async_worker
 from vllm.distributed.eplb import eplb_communicator as _eplb_communicator
 from vllm.distributed.eplb import eplb_state as _eplb_state
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import routed_experts as _routed_experts
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.utils.torch_utils import PIN_MEMORY
 
-from vllm_ascend.distributed.eplb.communicator import AscendGlooEplbCommunicator
-from vllm_ascend.distributed.eplb.explicit_transfer import stage_explicit_layer_transfer
-from vllm_ascend.distributed.eplb.policy import PreparedLoadStats
-from vllm_ascend.distributed.eplb.state import (
+from vllm_ascend.distributed.eplb.eplb_communicator import (
+    AscendGlooEplbCommunicator,
+    AscendHixlEplbCommunicator,
+)
+from vllm_ascend.distributed.eplb.eplb_state import (
     ASYNC_EPLB_CYCLE_COMMITTED_LOG,
     EXPERT_MAPPING_EP_SIZE,
     AscendEplbState,
     refresh_model_routing_tables,
 )
+from vllm_ascend.distributed.eplb.explicit_transfer import stage_explicit_layer_transfer
+from vllm_ascend.distributed.eplb.policy import PreparedLoadStats
 
 _PATCH_MARKER = "_vllm_ascend_eplb_patch"
 # Old async APIs pass one target layer at a time. Preserve the augmented full
@@ -42,6 +48,8 @@ _ASCEND_EPLB_POLICIES = ("default", "stair")
 class _AscendAsyncLayerResult:
     layer_idx: int | None
     new_physical_to_logical_map: torch.Tensor | None
+    new_logical_to_physical_map: torch.Tensor | None
+    new_logical_replica_count: torch.Tensor | None
     transfer_metadata: Any
     consumed_event: Any
     is_last_result: bool
@@ -84,10 +92,192 @@ def _is_npu_platform(platform) -> bool:
     return getattr(platform, "device_type", None) == "npu"
 
 
+def _probe_local_hixl_binding() -> tuple[str, str | None]:
+    """Return the locally usable HIXL binding and why HIXL is unavailable.
+
+    The binding is ``official`` (the ``hixl`` Python package shipped with
+    newer CANN distributions), ``ctypes`` (the vllm_ascend fallback that
+    drives ``libcann_hixl.so`` directly), or ``none``.
+    """
+    try:
+        import hixl  # type: ignore[import-not-found]
+
+        if hasattr(hixl, "Hixl"):
+            return "official", None
+        package_reason = "the hixl package has no Hixl binding"
+    except ImportError as error:
+        package_reason = str(error) or "the hixl package is missing"
+
+    from vllm_ascend.distributed.eplb import hixl_compat
+
+    try:
+        hixl_compat.ensure_available()
+        return "ctypes", None
+    except Exception as error:
+        return "none", f"{package_reason}; ctypes fallback: {error}"
+
+
+_BINDING_CONSENSUS_RANK = {"none": 0, "ctypes": 1, "official": 2}
+_STAIR_TRANSFER_LIMIT_KEYS = ("rank_transfer_limit", "cross_node_transfer_limit")
+
+
+def _group_hixl_binding_consensus() -> str:
+    """Reduce the per-rank HIXL bindings to one group-wide decision.
+
+    Returns ``official`` when every rank resolved the official package,
+    ``ctypes`` when every rank at least resolved the ctypes fallback,
+    ``mixed`` when the ranks resolved different binding classes, and
+    ``none`` when at least one rank has no usable HIXL binding. Mixed
+    bindings and ``none`` both degrade the whole group to torch_gloo:
+    HIXL engines only interoperate over one CANN line protocol, and the
+    sender/receiver roles must agree on the transfer path.
+    """
+    local_binding, local_reason = _probe_local_hixl_binding()
+    group = get_eplb_group().cpu_group
+    local_rank = _BINDING_CONSENSUS_RANK[local_binding]
+    lowest_flag = torch.tensor([local_rank], dtype=torch.int32)
+    highest_flag = torch.tensor([local_rank], dtype=torch.int32)
+    torch.distributed.all_reduce(lowest_flag, group=group, op=torch.distributed.ReduceOp.MIN)
+    torch.distributed.all_reduce(highest_flag, group=group, op=torch.distributed.ReduceOp.MAX)
+    lowest, highest = int(lowest_flag.item()), int(highest_flag.item())
+    if local_reason is not None and local_binding == "none":
+        logger.info("HIXL EPLB unavailable on this rank (%s).", local_reason)
+    if lowest == 0:
+        return "none"
+    if lowest != highest:
+        return "mixed"
+    return "official" if lowest == 2 else "ctypes"
+
+
+def _clamp_stair_limits_for_gloo_fallback(ascend_eplb_config) -> Any:
+    """Clamp only the STAIR transfer limits the user left unset.
+
+    An automatic Gloo fallback must not override explicitly configured
+    limits (for example ``cross_node_transfer_limit: 0`` disables
+    cross-node transfers on purpose); unset limits default to unlimited
+    and are clamped to one because CPU-staged transfers cannot sustain a
+    migration storm.
+    """
+    vllm_config = get_current_vllm_config()
+    additional_config = vllm_config.additional_config if isinstance(vllm_config.additional_config, dict) else {}
+    eplb_config = additional_config.get("eplb_config", {})
+    stair_config = eplb_config.get("stair_config", {}) if isinstance(eplb_config, dict) else {}
+    stair_config = stair_config if isinstance(stair_config, dict) else {}
+    unset_keys = [key for key in _STAIR_TRANSFER_LIMIT_KEYS if key not in stair_config]
+    if unset_keys:
+        stair_config = {**stair_config, **dict.fromkeys(unset_keys, 1)}
+        eplb_config = {**eplb_config, "stair_config": stair_config}
+        vllm_config.additional_config = {**additional_config, "eplb_config": eplb_config}
+        logger.info(
+            "Ascend EPLB fell back to torch_gloo; STAIR %s clamped to 1.",
+            " and ".join(unset_keys),
+        )
+    preserved_keys = [key for key in _STAIR_TRANSFER_LIMIT_KEYS if key not in unset_keys]
+    if preserved_keys:
+        logger.warning(
+            "Ascend EPLB fell back to torch_gloo; keeping the explicitly configured STAIR %s.",
+            " and ".join(preserved_keys),
+        )
+    clamped_fields = {key: 1 for key in unset_keys}
+    if clamped_fields:
+        return replace(ascend_eplb_config.stair_config, **clamped_fields)
+    return ascend_eplb_config.stair_config
+
+
+# Provisional auto-selection marker set on an EPLBConfig instance by the
+# ParallelConfig post-init hook (config stage, per-process probe). The
+# worker-stage consensus in resolve_ascend_eplb_communicator() consumes it:
+# auto-selected communicators are re-validated group-wide, explicit user
+# settings are never touched.
+_AUTO_SELECTED_ATTRIBUTE = "_vllm_ascend_eplb_auto_selected"
+
+
+def _mark_auto_selected(eplb_config) -> None:
+    eplb_config.__dict__.pop(_AUTO_SELECTED_ATTRIBUTE, None)
+    eplb_config.__dict__[_AUTO_SELECTED_ATTRIBUTE] = True
+
+
+def _clear_auto_selected(eplb_config) -> None:
+    eplb_config.__dict__.pop(_AUTO_SELECTED_ATTRIBUTE, None)
+
+
+def resolve_ascend_eplb_communicator(parallel_config, ascend_eplb_config) -> Any:
+    """Confirm or correct the provisional communicator by group consensus.
+
+    Called once per rank before the EPLB policy and state are built, when
+    the EPLB group exists but neither the policy nor the communicator has
+    been constructed. The config stage already set a provisional decision
+    (marked auto-selected) from the local probe; this consensus re-validates
+    it group-wide because HIXL engines only interoperate over one CANN line
+    protocol and the transfer path must agree on every rank. An explicit
+    ``communicator`` setting (no marker) skips the consensus entirely.
+    Falls back to torch_gloo — clamping the STAIR transfer limits the user
+    left unset — when any rank lacks a usable HIXL binding or when the
+    binding classes differ between ranks.
+    """
+    eplb_config = parallel_config.eplb_config
+    auto_selected = bool(getattr(eplb_config, _AUTO_SELECTED_ATTRIBUTE, False))
+    if eplb_config.communicator is not None and not auto_selected:
+        return ascend_eplb_config.stair_config
+    _clear_auto_selected(eplb_config)
+    binding = _group_hixl_binding_consensus()
+    if binding in ("official", "ctypes"):
+        if eplb_config.communicator != "hixl":
+            logger.info(
+                "Ascend EPLB consensus corrected communicator %s -> hixl: every EPLB rank resolved the %s binding.",
+                eplb_config.communicator,
+                binding,
+            )
+        eplb_config.communicator = "hixl"
+        logger.info("Ascend EPLB selected hixl: every EPLB rank resolved the %s binding.", binding)
+        return ascend_eplb_config.stair_config
+    eplb_config.communicator = "torch_gloo"
+    if binding == "mixed":
+        logger.info("Ascend EPLB selected torch_gloo: HIXL binding classes differ between EPLB ranks.")
+    else:
+        logger.info("Ascend EPLB selected torch_gloo: HIXL is unavailable on at least one EPLB rank.")
+    return _clamp_stair_limits_for_gloo_fallback(ascend_eplb_config)
+
+
 def _patch_parallel_config() -> None:
     platform = _parallel_config.current_platform
     if not isinstance(platform, _CudaAlikeEplbPlatformProxy):
         _parallel_config.current_platform = _CudaAlikeEplbPlatformProxy(platform)
+
+    original_post_init = _parallel_config.ParallelConfig.__post_init__
+    if getattr(original_post_init, _PATCH_MARKER, False):
+        return
+
+    @wraps(original_post_init)
+    def _post_init(config):
+        if (
+            _is_npu_platform(_parallel_config.current_platform)
+            and config.enable_eplb
+            and config.eplb_config.communicator is None
+        ):
+            # Provisional per-process decision; must precede the upstream
+            # auto-selection below so it is not preempted by nixl/gloo.
+            binding, reason = _probe_local_hixl_binding()
+            if binding != "none":
+                config.eplb_config.communicator = "hixl"
+                logger.info(
+                    "Ascend EPLB provisionally selected hixl (%s binding); "
+                    "pending group-wide consensus at worker init.",
+                    binding,
+                )
+            else:
+                config.eplb_config.communicator = "torch_gloo"
+                logger.info(
+                    "Ascend EPLB provisionally selected torch_gloo: HIXL is unavailable (%s); "
+                    "pending group-wide consensus at worker init.",
+                    reason,
+                )
+            _mark_auto_selected(config.eplb_config)
+        original_post_init(config)
+
+    setattr(_post_init, _PATCH_MARKER, True)
+    _parallel_config.ParallelConfig.__post_init__ = _post_init
+    rebuild_dataclass(_parallel_config.ParallelConfig, force=True)
 
 
 def _patch_eplb_policy_config() -> None:
@@ -122,6 +312,23 @@ def _patch_eplb_policy_config() -> None:
     policy_field.type = policy_type
     policy_field.default = "stair"
     validator.func = _validate_with_stair
+
+
+def _patch_eplb_communicator_config() -> None:
+    """Add HIXL to the upstream selector while retaining automatic selection."""
+    config_cls = _parallel_config.EPLBConfig
+    communicator_field = getattr(config_cls, "__dataclass_fields__", {}).get("communicator")
+    if communicator_field is None:
+        raise RuntimeError("Unsupported vLLM EPLB contract: communicator field is missing.")
+    communicator_type = Literal["torch_nccl", "torch_gloo", "nixl", "pynccl", "hixl"] | None
+    if communicator_field.type == communicator_type and communicator_field.default is None:
+        return
+
+    if communicator_field.type != communicator_type:
+        _parallel_config.EPLBCommunicatorBackend = Literal["torch_nccl", "torch_gloo", "nixl", "pynccl", "hixl"]
+        config_cls.__annotations__["communicator"] = communicator_type
+        communicator_field.type = communicator_type
+    communicator_field.default = None
     rebuild_dataclass(config_cls, force=True)
     rebuild_dataclass(_parallel_config.ParallelConfig, force=True)
 
@@ -134,9 +341,18 @@ def _wrap_communicator_factory(original_factory):
     @wraps(original_factory)
     def _create_eplb_communicator(*args, **kwargs):
         bound = factory_signature.bind(*args, **kwargs)
-        return AscendGlooEplbCommunicator(
-            cpu_group=bound.arguments["group_coordinator"].cpu_group,
-        )
+        backend = bound.arguments["backend"]
+        if backend == "torch_gloo":
+            return AscendGlooEplbCommunicator(
+                cpu_group=bound.arguments["group_coordinator"].cpu_group,
+            )
+        if backend == "hixl":
+            return AscendHixlEplbCommunicator(
+                cpu_group=bound.arguments["group_coordinator"].cpu_group,
+                all_expert_weights=bound.arguments["expert_weights"],
+                expert_buffer=bound.arguments["expert_buffer"],
+            )
+        return original_factory(*bound.args, **bound.kwargs)
 
     setattr(_create_eplb_communicator, _PATCH_MARKER, True)
     return _create_eplb_communicator
@@ -385,10 +601,23 @@ def _wrap_async_worker(original_worker):
                         model_state.rebalanced = False
                         continue
                     consumed_event = _async_worker.CpuGpuEvent()
-                    model_state.pending_result = _AscendAsyncLayerResult(None, None, None, consumed_event, True)
+                    model_state.pending_result = _AscendAsyncLayerResult(
+                        layer_idx=None,
+                        new_physical_to_logical_map=None,
+                        new_logical_to_physical_map=None,
+                        new_logical_replica_count=None,
+                        transfer_metadata=None,
+                        consumed_event=consumed_event,
+                        is_last_result=True,
+                    )
                     consumed_event.wait(stream=stream)
                     assert model_state.pending_result is None
                     continue
+
+                new_mapping, new_logical_map, new_replica_count = _prepare_commit_maps(
+                    model_state,
+                    new_mapping,
+                )
 
                 for index, layer_idx in enumerate(changed_layers):
                     flag = torch.tensor([int(model_state.rebalanced)], dtype=torch.int32, device="cpu")
@@ -412,11 +641,13 @@ def _wrap_async_worker(original_worker):
                         stream.synchronize()
                     consumed_event = _async_worker.CpuGpuEvent()
                     model_state.pending_result = _AscendAsyncLayerResult(
-                        layer_idx,
-                        new_mapping[layer_idx],
-                        metadata,
-                        consumed_event,
-                        index == len(changed_layers) - 1,
+                        layer_idx=layer_idx,
+                        new_physical_to_logical_map=new_mapping[layer_idx],
+                        new_logical_to_physical_map=new_logical_map[layer_idx],
+                        new_logical_replica_count=new_replica_count[layer_idx],
+                        transfer_metadata=metadata,
+                        consumed_event=consumed_event,
+                        is_last_result=index == len(changed_layers) - 1,
                     )
                     consumed_event.wait(stream=stream)
                     assert model_state.pending_result is None
@@ -429,6 +660,9 @@ def _move_changed_layer_to_workspace(model_state, ep_rank: int) -> None:
     result = model_state.pending_result
     assert result is not None
     if result.layer_idx is not None:
+        assert result.new_physical_to_logical_map is not None
+        assert result.new_logical_to_physical_map is not None
+        assert result.new_logical_replica_count is not None
         _eplb_state.move_from_buffer(
             expert_weights=model_state.model.expert_weights[result.layer_idx],
             expert_weights_buffers=model_state.expert_buffer,
@@ -436,15 +670,69 @@ def _move_changed_layer_to_workspace(model_state, ep_rank: int) -> None:
             new_indices=result.new_physical_to_logical_map.numpy(),
             ep_rank=ep_rank,
         )
-        _eplb_state._commit_eplb_maps_for_layer(
+        _commit_ascend_maps_for_layer(
             model_state,
-            new_physical_to_logical_map=result.new_physical_to_logical_map,
-            layer=result.layer_idx,
+            result.new_physical_to_logical_map,
+            result.new_logical_to_physical_map,
+            result.new_logical_replica_count,
+            result.layer_idx,
         )
     if result.is_last_result:
         model_state.rebalanced = False
     model_state.pending_result = None
     result.consumed_event.record()
+
+
+def _pin_host_map(src: torch.Tensor) -> torch.Tensor:
+    if PIN_MEMORY and src.is_cpu and not src.is_pinned():
+        return src.pin_memory()
+    return src
+
+
+def _prepare_commit_maps(
+    model_state,
+    physical_map: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    logical_map, replica_count = _eplb_state.compute_logical_maps(
+        physical_map,
+        model_state.logical_to_physical_map.shape[1],
+    )
+    padding = model_state.logical_to_physical_map.shape[-1] - logical_map.shape[-1]
+    if padding < 0:
+        raise ValueError("Async EPLB produced more replicas than the configured capacity")
+    if padding:
+        logical_map = torch.nn.functional.pad(logical_map, (0, padding), value=-1)
+    return (
+        _pin_host_map(physical_map),
+        _pin_host_map(logical_map),
+        _pin_host_map(replica_count),
+    )
+
+
+def _copy_host_map(src: torch.Tensor, dst: torch.Tensor) -> None:
+    dst.copy_(src, non_blocking=True)
+
+
+def _commit_ascend_maps_for_layer(
+    model_state,
+    physical_to_logical_map: torch.Tensor,
+    logical_to_physical_map: torch.Tensor,
+    logical_replica_count: torch.Tensor,
+    layer_idx: int,
+) -> None:
+    physical_dst = model_state.physical_to_logical_map[layer_idx]
+    if physical_to_logical_map.shape != physical_dst.shape:
+        raise ValueError("Async EPLB cannot change the number of physical experts")
+    _copy_host_map(physical_to_logical_map, physical_dst)
+
+    logical_dst = model_state.logical_to_physical_map[layer_idx]
+    if logical_to_physical_map.shape != logical_dst.shape:
+        raise ValueError("Prepared logical map does not match the configured capacity")
+    _copy_host_map(logical_to_physical_map, logical_dst)
+    _copy_host_map(
+        logical_replica_count,
+        model_state.logical_replica_count[layer_idx],
+    )
 
 
 def _patch_changed_layer_transfer() -> None:
@@ -537,6 +825,28 @@ def _wrap_move_to_workspace(original_move):
                                 rank_transfers,
                                 cross_node_transfers,
                             )
+                hixl_timings = getattr(model_state.communicator, "_eplb_hixl_phase_timings", [])
+                if hixl_timings and bound.arguments["ep_rank"] == 0:
+                    logger.info(
+                        "HIXL EPLB transfer: model=%s rank=%d launch_ms=%.3f background_transfer_ms=%.3f "
+                        "confirmation_ms=%.3f foreground_wait_ms=%.3f requests=%d bytes=%d layers=%d "
+                        "migration_span_steps=%d migration_deferred_steps=%d",
+                        model_state.model_name,
+                        bound.arguments["ep_rank"],
+                        sum(timing.launch_ms for timing in hixl_timings),
+                        sum(timing.transfer_ms for timing in hixl_timings),
+                        sum(timing.confirmation_ms for timing in hixl_timings),
+                        getattr(model_state, "_eplb_foreground_wait_ms", 0.0),
+                        sum(timing.request_count for timing in hixl_timings),
+                        sum(timing.transfer_bytes for timing in hixl_timings),
+                        len(hixl_timings),
+                        getattr(model_state, "_eplb_migration_span_steps", 0),
+                        getattr(model_state, "_eplb_migration_deferred_steps", 0),
+                    )
+                model_state.communicator.__dict__.pop("_eplb_hixl_phase_timings", None)
+                model_state.__dict__.pop("_eplb_migration_span_steps", None)
+                model_state.__dict__.pop("_eplb_migration_deferred_steps", None)
+                model_state.__dict__.pop("_eplb_foreground_wait_ms", None)
         finally:
             if pending_result is not None and consumed_event is not None:
                 pending_result.consumed_event = consumed_event
@@ -555,6 +865,7 @@ def _patch_async_move_to_workspace() -> None:
 
 
 _patch_eplb_policy_config()
+_patch_eplb_communicator_config()
 _patch_parallel_config()
 _patch_initial_expert_layout()
 _patch_communicator_factory()

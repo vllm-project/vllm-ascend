@@ -19,14 +19,14 @@ PCP support is experimental and available only with ModelRunner V2. The followin
 
 | Attention Backend | Basic PCP | Prefix Caching + PCP | Chunked Prefill + PCP | MLAPO + PCP | Speculative Decoding + PCP | P/D Disaggregation + PCP | KV Cache Pool + PCP | Sequence Parallelism (SP) + PCP |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| MLA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | 🟠 Partial compatibility (MTP, eager and `FULL_DECODE_ONLY`) | ✅ Full compatibility (`MooncakeConnectorV1`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ❌ No compatibility |
-| GQA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | — Not applicable | 🟠 Partial compatibility (Eagle3, eager and `FULL_DECODE_ONLY`) | ✅ Full compatibility (`MooncakeConnectorV1`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ❌ No compatibility |
-| SFA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ❌ No compatibility | ❌ No compatibility | ✅ Full compatibility (`MooncakeConnectorV1`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ❌ No compatibility |
-| DSA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | — Not applicable | 🟠 Partial compatibility (MTP and DSpark, eager and `FULL_DECODE_ONLY`) | ✅ Full compatibility (`MooncakeHybridConnector`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ❌ No compatibility |
+| MLA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | 🟠 Partial compatibility (MTP, eager and `FULL_DECODE_ONLY`) | ✅ Full compatibility (`MooncakeConnectorV1`, `MooncakeConnectorV2`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ✅ Full compatibility |
+| GQA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | — Not applicable | 🟠 Partial compatibility (Eagle3, eager and `FULL_DECODE_ONLY`) | ✅ Full compatibility (`MooncakeConnectorV1`, `MooncakeConnectorV2`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ✅ Full compatibility |
+| SFA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | 🟠 Partial compatibility (MTP, eager and `FULL_DECODE_ONLY`) | ✅ Full compatibility (`MooncakeConnectorV1`, `MooncakeConnectorV2`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ✅ Full compatibility |
+| DSA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | — Not applicable | 🟠 Partial compatibility (MTP and DSpark, eager and `FULL_DECODE_ONLY`) | ✅ Full compatibility (`MooncakeHybridConnector`, `MooncakeConnectorV2`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ✅ Full compatibility |
+| DSA V4.1 | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | — Not applicable | 🟠 Partial compatibility (DSpark, eager and `FULL_DECODE_ONLY`) | ✅ Full compatibility (`MooncakeHybridConnector`, `MooncakeConnectorV2`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ✅ Full compatibility |
 
 - ✅ **Full compatibility**: The basic path or feature combination is supported.
 - 🟠 **Partial compatibility**: The basic path or feature combination is supported with the stated limitations.
-- ❌ **No compatibility**: The backend or feature combination is not supported by the current MRV2 PCP implementation.
 - **Not applicable**: The feature does not apply to the attention backend.
 
 ### Decode Context Parallel
@@ -66,11 +66,13 @@ Unlike DCP, PCP adds extra ranks: `world_size_with_pcp = prefill_context_paralle
 
 When PCP size is greater than 1, PCP stores embedding and LM Head weights as TP×PCP resident shards by default for every supported attention backend. Set `enable_pcp_embedding_lmhead_weight_sharding` to `false` to disable this behavior.
 
+With PCP enabled, O-projection weight sharding is on by default for SFA-PCP O-projection and DSA-PCP two-stage O-projection (`wo_a`/`wo_b`). If the weight method or PCP partition does not support sharding, the option is disabled with a warning. Set `enable_pcp_o_proj_weight_sharding` to `false` to disable it. Other attention backends do not use this option. O-projection sharding is incompatible with fine-grained TP for the same modules.
+
 #### Speculative Decoding
 
-MRV2 PCP supports MTP with MLA and DSA models, Eagle3 with GQA models, and
-DSpark with DeepSeek-V4 DSA models. The target model runs with the
-configured PCP topology, while the draft model is replicated on every PCP rank
+MRV2 PCP supports MTP with MLA and DeepSeek-V4 DSA models, Eagle3 with GQA
+models, and DSpark with DeepSeek-V4 and DeepSeek-V4.1 DSA models. The target
+model runs with the configured PCP topology, while the draft model is replicated on every PCP rank
 and runs with a logical PCP size of `1`. Configure PCP only for the target
 model.
 
@@ -113,16 +115,19 @@ For either method, remove `--enforce-eager` and add the following option to use 
 - PCP is supported only with ModelRunner V2.
 - In P/D disaggregation, enable PCP only on the prefill (`kv_producer`) engine; the decode (`kv_consumer`) engine must use `prefill_context_parallel_size=1`.
 - KV cache pooling with PCP supports only `AscendStoreConnector` with `use_layerwise=false`.
-- PCP speculative decoding supports MTP with MLA and DSA models, Eagle3 with
-  GQA models, and DSpark with DeepSeek-V4 DSA models.
+- PCP speculative decoding supports MTP with MLA and DeepSeek-V4 DSA models,
+  Eagle3 with GQA models, and DSpark with DeepSeek-V4 and DeepSeek-V4.1 DSA models.
 - Draft sampling must use the greedy method.
 - Full graph execution with PCP is limited to `FULL_DECODE_ONLY`.
 - Pipeline parallelism, encoder-decoder models, multimodal inputs, and LoRA are not supported with MRV2 PCP.
 - SFA draft attention is not supported with PCP speculative decoding.
-- PCP and DCP cannot be enabled simultaneously.
+- PCP and DCP can be stacked for MLA, SFA, and GQA. MLA and SFA support DCP
+  equal to PCP or TP x PCP. GQA stacking supports only equal
+  prefill_context_parallel_size and decode_context_parallel_size.
 - Adaptive verification is not supported with PCP speculative decoding.
 - Dynamic draft lengths are outside the currently validated scope.
-- PCP and [DSA-CP](#dsa-cp) cannot be enabled simultaneously with the DSA backend.
+- PCP and [DSA-CP](#dsa-cp) cannot be enabled simultaneously with the DSA or
+  DSA V4.1 backend.
 
 ### Decode Context Parallel
 

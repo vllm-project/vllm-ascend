@@ -70,6 +70,82 @@ def test_query_start_loc_arange_keeps_sufficient_buffer():
     assert proposer.arange is arange
 
 
+@pytest.mark.parametrize(
+    "target_use_mla,draft_use_mla,dcp_size,expected_rows",
+    [
+        pytest.param(True, False, 1, 1, id="mla-target-gqa-draft"),
+        pytest.param(False, False, 1, 1, id="gqa-target-gqa-draft"),
+        pytest.param(True, True, 1, 4, id="mla-target-mla-draft"),
+        pytest.param(False, True, 1, 4, id="gqa-target-mla-draft"),
+        pytest.param(True, False, 2, 4, id="mla-target-dcp"),
+        pytest.param(False, False, 2, 4, id="gqa-target-dcp"),
+    ],
+)
+def test_eager_propose_aligns_block_table_to_draft_batch(target_use_mla, draft_use_mla, dcp_size, expected_rows):
+    """Target graph padding must not add requests to an eager GQA draft."""
+    proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
+    proposer.method = "dflash"
+    proposer.model = SimpleNamespace(combine_hidden_states=lambda states: states)
+    proposer.hidden_size = 4
+    proposer.use_cuda_graph = False
+    proposer.parallel_drafting = True
+    proposer.dcp_size = dcp_size
+    proposer.vllm_config = SimpleNamespace(model_config=SimpleNamespace(use_mla=target_use_mla))
+    proposer.draft_model_config = SimpleNamespace(use_mla=draft_use_mla)
+    proposer.draft_window_size = None
+    proposer.supports_mm_inputs = False
+    proposer.slot_mapping_group = [torch.zeros(6, dtype=torch.int32)]
+    proposer.seq_lens_group = [torch.zeros(1, dtype=torch.int32)]
+    proposer.query_start_loc_group = [torch.zeros(2, dtype=torch.int32)]
+    proposer._pad_draft_buffers = MagicMock()
+    proposer.runner = SimpleNamespace(
+        dcp_manager=None,
+        input_batch=SimpleNamespace(lora_id_to_lora_request={}),
+        _sync_metadata_across_dp=lambda num_tokens, **kwargs: (num_tokens, None, None),
+    )
+    block_table = torch.arange(1, 13, dtype=torch.int32).reshape(4, 3)
+    query_start_loc = torch.tensor([0, 6], dtype=torch.int32)
+    metadata = SimpleNamespace(
+        batch_size=lambda: 1,
+        num_reqs=1,
+        query_start_loc=query_start_loc,
+        query_start_loc_cpu=query_start_loc,
+        seq_lens=torch.tensor([16], dtype=torch.int32),
+        block_table_tensor=block_table,
+        slot_mapping=torch.arange(6, dtype=torch.int32),
+    )
+    sample_indices = torch.arange(1, 6, dtype=torch.int32)
+    proposer.set_inputs_first_pass = MagicMock(return_value=(6, sample_indices, metadata, None))
+
+    class MetadataChecked(Exception):
+        pass
+
+    def check_metadata(common_metadata, num_input_tokens, num_actual_tokens):
+        assert num_input_tokens == num_actual_tokens == 6
+        assert common_metadata.num_reqs == 1
+        assert torch.equal(common_metadata.query_start_loc, query_start_loc)
+        assert common_metadata.seq_lens.tolist() == [16]
+        assert torch.equal(common_metadata.block_table_tensor, block_table[:expected_rows])
+        raise MetadataChecked
+
+    proposer.build_draft_attn_metadata = check_metadata
+    with (
+        patch("vllm_ascend.spec_decode.llm_base_proposer._HIDDEN_STATE_DRAFTER_TYPES", (object,)),
+        pytest.raises(MetadataChecked),
+    ):
+        proposer._propose(
+            5,
+            target_token_ids=torch.ones(1, dtype=torch.int64),
+            target_positions=torch.zeros(1, dtype=torch.int32),
+            target_hidden_states=torch.ones((1, 4)),
+            next_token_ids=torch.ones(1, dtype=torch.int64),
+            token_indices_to_sample=sample_indices,
+            common_attn_metadata=metadata,
+            target_model_batch_desc=SimpleNamespace(uniform=True),
+            sampling_metadata=MagicMock(),
+        )
+
+
 class TestMultimodalImageTokenIndex:
     @pytest.mark.parametrize(
         "model_name",
@@ -232,8 +308,11 @@ def test_load_model_reads_validated_draft_window_size():
     mock_adapter.assert_called_once_with(4096, 16, 8, 4, "cpu")
 
 
-@pytest.mark.parametrize("method,has_post_process", [("dspark", True), ("dspark", False), ("eagle3", True)])
-def test_load_model_aligns_dspark_before_precomputing_hidden_states(method, has_post_process):
+@pytest.mark.parametrize(
+    "method,has_post_process",
+    [("dspark", True), ("dspark", False), ("dflash", True), ("dflash", False), ("eagle3", True), ("mtp", True)],
+)
+def test_load_model_aligns_draft_after_sharing_before_precomputing_hidden_states(method, has_post_process):
     proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
     proposer.vllm_config = SimpleNamespace(quant_config=object())
     proposer.maybe_eager_context = nullcontext()
@@ -274,11 +353,12 @@ def test_load_model_aligns_dspark_before_precomputing_hidden_states(method, has_
             side_effect=[{}, {"draft": draft_layer}, {"draft": draft_layer}],
         ),
         patch("vllm_ascend.ascend_config.get_ascend_config", return_value=SimpleNamespace(draft_window_size=None)),
+        patch(f"{module}.get_ascend_config", return_value=SimpleNamespace(draft_window_size=None)),
         patch(f"{module}.supports_multimodal", return_value=False),
     ):
         proposer.load_model(MagicMock())
 
-    should_process = method == "dspark" and has_post_process
+    should_process = method in ("dspark", "dflash") and has_post_process
     expected = ["embeddings", "indices", "lm_head"]
     if should_process:
         expected.append("post_process")
@@ -468,3 +548,90 @@ class TestDraftEmbedMmSupport:
             fake_inspect.signature.side_effect = error
 
             assert _draft_embed_accepts_mm(embed_input_ids) is False
+
+
+@pytest.mark.parametrize(
+    "dcp_size,draft_index,parallel_drafting,normalize",
+    [
+        (1, 1, False, False),
+        (2, 0, False, False),
+        (2, 1, False, True),
+        (2, 2, False, True),
+        (2, 1, True, False),
+    ],
+)
+def test_dcp_draft_capture_query_layout(dcp_size, draft_index, parallel_drafting, normalize):
+    from vllm_ascend.attention.context_parallel.common_cp import use_history_current_split_decode
+
+    proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
+    proposer.dcp_size = dcp_size
+    proposer.parallel_drafting = parallel_drafting
+    proposer.draft_model_config = SimpleNamespace(use_mla=False)
+    proposer.query_start_loc_group = [torch.zeros(9, dtype=torch.int32) for _ in range(3)]
+    proposer.seq_lens_group = [torch.tensor([32, 48, 0, 0, 0, 0, 0, 0], dtype=torch.int32) for _ in range(3)]
+    device_buffer = proposer.query_start_loc_group[draft_index][:3]
+    device_buffer.copy_(torch.tensor([0, 4, 8], dtype=torch.int32))
+    cpu_buffer = device_buffer.clone()
+    common = SimpleNamespace(
+        num_reqs=2,
+        num_actual_tokens=8,
+        num_input_tokens=8,
+        max_query_len=4,
+        query_start_loc_cpu=cpu_buffer,
+        query_start_loc=device_buffer,
+        seq_lens_cpu=torch.tensor([32, 48]),
+        _seq_lens_cpu=torch.tensor([32, 48]),
+    )
+    proposer._prepare_dcp_draft_dummy_metadata(common, draft_index)
+
+    assert common.query_start_loc.data_ptr() == device_buffer.data_ptr()
+    assert cpu_buffer.tolist() == [0, 4, 8]
+    expected = list(range(9)) if normalize else [0, 4, 8]
+    assert common.num_reqs == (8 if normalize else 2)
+    if normalize:
+        assert common.seq_lens.tolist() == [32, 48, 0, 0, 0, 0, 0, 0]
+        assert common.seq_lens_cpu.tolist() == [32, 48, 0, 0, 0, 0, 0, 0]
+        assert common._seq_lens_cpu.tolist() == [32, 48, 0, 0, 0, 0, 0, 0]
+    assert common.query_start_loc.tolist() == expected
+    assert common.query_start_loc_cpu.tolist() == expected
+    assert common.num_actual_tokens == (2 if normalize else 8)
+    assert common.num_input_tokens == 8
+    assert common.max_query_len == (1 if normalize else 4)
+    if normalize:
+        proposer._prepare_dcp_draft_dummy_metadata(common, 2)
+        assert common.num_reqs == 8
+        assert common.num_actual_tokens == 2
+        assert common.query_start_loc.tolist() == list(range(9))
+        assert common.seq_lens_cpu.tolist() == [32, 48, 0, 0, 0, 0, 0, 0]
+    metadata = SimpleNamespace(causal=True, decode=SimpleNamespace(actual_seq_lengths_q=expected[1:]))
+    assert use_history_current_split_decode(metadata, is_draft_model=True) == (not normalize)
+
+
+@pytest.mark.parametrize("draft_index", [1, 2])
+def test_mla_dcp_draft_dummy_metadata_preserves_existing_layout(draft_index):
+    proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
+    proposer.dcp_size = 2
+    proposer.parallel_drafting = False
+    proposer.draft_model_config = SimpleNamespace(use_mla=True)
+    query_start_loc = torch.tensor([0, 4, 8], dtype=torch.int32)
+    seq_lens = torch.tensor([32, 48], dtype=torch.int32)
+    common = SimpleNamespace(
+        num_reqs=2,
+        num_actual_tokens=8,
+        num_input_tokens=8,
+        max_query_len=4,
+        query_start_loc_cpu=query_start_loc.clone(),
+        query_start_loc=query_start_loc,
+        seq_lens=seq_lens,
+        seq_lens_cpu=seq_lens.clone(),
+        _seq_lens_cpu=seq_lens.clone(),
+        seq_lens_cpu_upper_bound=seq_lens.clone(),
+        num_computed_tokens_cpu=torch.tensor([28, 44], dtype=torch.int32),
+    )
+    before = vars(common).copy()
+    tensor_values = {key: value.clone() for key, value in before.items() if isinstance(value, torch.Tensor)}
+    proposer._prepare_dcp_draft_dummy_metadata(common, draft_index)
+    for key, value in before.items():
+        assert getattr(common, key) is value
+    for key, value in tensor_values.items():
+        torch.testing.assert_close(getattr(common, key), value)

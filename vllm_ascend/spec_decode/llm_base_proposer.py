@@ -12,6 +12,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config, set_current_vllm_config
 from vllm.distributed.parallel_state import (
+    get_dcp_group,
     get_pp_group,
     get_tp_group,
     get_world_group,
@@ -468,7 +469,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self._maybe_share_lm_head(target_language_model)
 
         # Align draft weights before precomputing draft hidden states.
-        if self.method == "dspark" and hasattr(self.model, "post_process"):
+        if self.method in ("dspark", "dflash") and hasattr(self.model, "post_process"):
             self.model.post_process(self.vllm_config)
 
         if (
@@ -658,8 +659,22 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     def _maybe_update_metadata(self, att_backend, multi_steps_attn_metadata):
         if use_updatable_graph(att_backend):
             update_params = []
-            for per_step_metadata in multi_steps_attn_metadata:
+            for draft_step, per_step_metadata in enumerate(multi_steps_attn_metadata):
                 for layer_name, metadata in per_step_metadata.items():
+                    if self.dcp_size > 1:
+                        # Import lazily: attention backends also import spec-decode utilities.
+                        from vllm_ascend.attention.context_parallel.attention_cp import build_dcp_fia_params
+
+                        update_params.extend(
+                            build_dcp_fia_params(
+                                layer_name,
+                                metadata,
+                                get_dcp_group().rank_in_group,
+                                is_draft_model=True,
+                                is_draft_model_prefill=draft_step == 0,
+                            )
+                        )
+                        continue
                     update_params.append(
                         {
                             "layer_name": layer_name,
@@ -670,6 +685,26 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     )
             self._runnable.update_draft_model_metadata(update_params)  # type: ignore
             self._runnable.set_attn_backend(att_backend)  # type: ignore
+
+    def _prepare_dcp_draft_dummy_metadata(self, common_attn_metadata, draft_index: int) -> None:
+        """Match later GQA autoregressive capture steps, including graph padding."""
+        if self.dcp_size <= 1 or draft_index == 0 or self.parallel_drafting:
+            return
+        if self.draft_model_config.use_mla:
+            return
+        num_actual_reqs = min(common_attn_metadata.num_reqs, common_attn_metadata.num_actual_tokens)
+        num_reqs = common_attn_metadata.num_input_tokens
+        common_attn_metadata.num_reqs = num_reqs
+        common_attn_metadata.num_actual_tokens = num_actual_reqs
+        common_attn_metadata.max_query_len = 1
+        common_attn_metadata.query_start_loc_cpu = torch.arange(num_reqs + 1, dtype=torch.int32)
+        common_attn_metadata.query_start_loc = self.query_start_loc_group[draft_index][: num_reqs + 1]
+        common_attn_metadata.query_start_loc.copy_(common_attn_metadata.query_start_loc_cpu)
+        common_attn_metadata.seq_lens = self.seq_lens_group[draft_index][:num_reqs]
+        for field in ("seq_lens_cpu", "_seq_lens_cpu", "seq_lens_cpu_upper_bound", "num_computed_tokens_cpu"):
+            values = getattr(common_attn_metadata, field, None)
+            if values is not None:
+                setattr(common_attn_metadata, field, self._adjust_tensor(values[:num_actual_reqs], num_reqs))
 
     def _maybe_share_topk_indices(self, target_language_model: nn.Module) -> None:
         self._lim_topk_compactors = []
@@ -788,10 +823,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 self.query_start_loc.cpu[: num_reqs + 1].copy_(self.runner.query_start_loc.cpu[: num_reqs + 1])
                 self.query_start_loc.copy_to_gpu()
                 if self.runner._offload_pool_slots is not None:
-                    assert self.runner._offload_pool_generations is not None
+                    assert self.runner._offload_pool_active is not None
                     prepare_copy_sfa_dummy_slots(
                         self.runner._offload_pool_slots.np,
-                        self.runner._offload_pool_generations.np,
+                        self.runner._offload_pool_active.np,
                         num_reqs,
                     )
                     self.runner._copy_sfa_need_eager_tail_restore = False
@@ -835,9 +870,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         if self.runner._offload_pool_slots is not None
                         else None
                     ),
-                    req_topk_buffer_generations=(
-                        self.runner._offload_pool_generations.cpu[:num_reqs]
-                        if self.runner._offload_pool_generations is not None
+                    req_topk_buffer_active=(
+                        self.runner._offload_pool_active.cpu[:num_reqs]
+                        if self.runner._offload_pool_active is not None
                         else None
                     ),
                     offload_dummy=True,
@@ -870,7 +905,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     self.query_start_loc_group[draft_index][: num_reqs + 1].copy_(common_attn_metadata.query_start_loc)
                     self.query_start_loc_group[draft_index][num_reqs + 1 :].fill_(0)
                     common_attn_metadata.query_start_loc = self.query_start_loc_group[draft_index][: num_reqs + 1]
+                    self._prepare_dcp_draft_dummy_metadata(common_attn_metadata, draft_index)
                     if self.dcp_size > 1 and draft_index > 0:
+                        num_reqs = common_attn_metadata.num_reqs
                         assert self.block_table_tensor_clone is not None, "block_table_tensor_clone is not init"
                         common_attn_metadata.block_table_tensor = self.block_table_tensor_clone[:num_reqs]
                     if dcp_manager is not None:
@@ -1137,7 +1174,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             num_reqs_padded = common_attn_metadata.num_reqs
             # In the below scenario, padding has been applied by _pad_query_start_loc_for_fia in the model runner.
             # We need to unpad here for eager mode to maintain compatibility.
-            if not self.vllm_config.model_config.use_mla and self.dcp_size == 1:
+            if not self.draft_model_config.use_mla and self.dcp_size == 1:
                 common_attn_metadata.block_table_tensor = self._adjust_tensor(
                     common_attn_metadata.block_table_tensor, num_reqs_padded
                 )
@@ -2128,9 +2165,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             dcp_manager.prepare_spec_decode_drafting_cp_metadata(
                 common_attn_metadata=common_attn_metadata,
                 kv_cache_spec=kv_cache_spec,
-                seq_lens=ori_seq_len,
-                draft_index=draft_index,
-                seq_lens_cpu=ori_seq_len_cpu,
             )
         group_common_attn_metadata = self._common_attn_metadata_for_draft_group(
             common_attn_metadata,
@@ -2150,7 +2184,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 kv_cache_spec=kv_cache_spec,
                 seq_lens=ori_seq_len,
                 draft_index=draft_index,
-                seq_lens_cpu=ori_seq_len_cpu,
                 attn_metadata_builder=attn_metadata_builder,
             )
 
@@ -2346,7 +2379,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             group_key_idx=common_attn_metadata.group_key_idx,
             group_key_cache_idx=common_attn_metadata.group_key_cache_idx,
             req_topk_buffer_slots=common_attn_metadata.req_topk_buffer_slots,
-            req_topk_buffer_generations=common_attn_metadata.req_topk_buffer_generations,
+            req_topk_buffer_active=common_attn_metadata.req_topk_buffer_active,
             offload_dummy=common_attn_metadata.offload_dummy,
             req_ids_tensor=common_attn_metadata.req_ids_tensor,
             token_to_req=token_to_req,
@@ -2446,7 +2479,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             group_key_idx=common_attn_metadata.group_key_idx,
             group_key_cache_idx=common_attn_metadata.group_key_cache_idx,
             req_topk_buffer_slots=common_attn_metadata.req_topk_buffer_slots,
-            req_topk_buffer_generations=common_attn_metadata.req_topk_buffer_generations,
+            req_topk_buffer_active=common_attn_metadata.req_topk_buffer_active,
             offload_dummy=common_attn_metadata.offload_dummy,
             req_ids_tensor=common_attn_metadata.req_ids_tensor,
             token_to_req=common_attn_metadata.token_to_req,

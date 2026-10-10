@@ -26,6 +26,7 @@ def test_native_main_c8_cache_preserves_packing_and_padding(tokens):
     slots[tokens:] = -1
     impl = AscendSFAImpl.__new__(AscendSFAImpl)
     impl.enable_sparse_sfa_c8 = True
+    impl.enable_sparse_sfa_turboquant = False
     impl.sfa_qsfa_packed_kv_head_dim = 656
     impl._store_parallel_kv(
         k_pe, k_nope, scale, None, [], (cache,), slots, SimpleNamespace(num_actual_tokens=tokens), False
@@ -82,6 +83,7 @@ def test_missing_fast_operator_preserves_fallback_with_negative_slots():
     slots[-3:] = -1
     impl = AscendSFADSACPImpl.__new__(AscendSFADSACPImpl)
     impl.enable_sparse_sfa_c8 = True
+    impl.enable_sparse_sfa_turboquant = False
     impl.is_kv_producer, impl.is_kv_consumer = True, False
     with patch.object(torch.ops._C_ascend, "npu_scatter_nd_update_sk", None):
         impl._store_parallel_kv(None, None, None, key, [], (cache,), slots, meta, False)

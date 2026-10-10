@@ -222,7 +222,9 @@ def test_fp8_cache_dispatch_preserves_bytes(monkeypatch, family, dtype, layout):
 @pytest.mark.parametrize("producer,consumer", [(False, False), (True, False), (False, True), (True, True)])
 def test_main_cache_write_delegates_with_own_slots(tokens, state, producer, consumer):
     impl = AscendSFADSACPImpl.__new__(AscendSFADSACPImpl)
+    impl.qk_rope_head_dim = 128
     impl.enable_sparse_sfa_c8 = True
+    impl.enable_sparse_sfa_turboquant = False
     impl.is_kv_producer, impl.is_kv_consumer = producer, consumer
     key = torch.empty(2056, 656, dtype=torch.int8)
     cache = torch.empty(32, 128, 1, 656, dtype=torch.int8)
@@ -251,6 +253,7 @@ def test_main_cache_write_delegates_with_own_slots(tokens, state, producer, cons
 def test_native_main_c8_cache_packs_all_rows_and_preserves_padding(monkeypatch, tokens, fast_available):
     impl = AscendSFAImpl.__new__(AscendSFAImpl)
     impl.enable_sparse_sfa_c8 = True
+    impl.enable_sparse_sfa_turboquant = False
     impl.sfa_qsfa_packed_kv_head_dim = 656
     packed = (torch.arange(4 * 656).reshape(4, 656) % 251 - 125).to(torch.int8)
     k_nope, k_pe, scale = packed.split([512, 128, 16], dim=-1)
@@ -324,6 +327,8 @@ def test_indexer_cache_writes_all_gathered_rows(monkeypatch, family, key_dtype, 
     monkeypatch.setattr(torch_npu, "npu_scatter_pa_cache", pa if fast_available else None, raising=False)
     indexer = SimpleNamespace(
         enable_sparse_li_c8=scale_dtype is not None,
+        enable_sparse_li_c4=False,
+        enable_sparse_li_quant=scale_dtype is not None,
         k_cache=SimpleNamespace(kv_cache=tuple(caches)),
         _use_c8_reshape_optim=lambda: False,
     )
@@ -347,6 +352,8 @@ def test_indexer_grouped_cache_write_keeps_store_kv_block(monkeypatch):
     caches = (torch.empty(2, 4, 1, 128, dtype=key.dtype), torch.empty(2, 4, 1, 1, dtype=scale.dtype))
     indexer = SimpleNamespace(
         enable_sparse_li_c8=True,
+        enable_sparse_li_c4=False,
+        enable_sparse_li_quant=True,
         k_cache=SimpleNamespace(kv_cache=caches),
         _use_c8_reshape_optim=lambda: True,
     )

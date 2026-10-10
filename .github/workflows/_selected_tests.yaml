@@ -89,8 +89,15 @@ jobs:
       matrix:
         group: ${{ fromJSON(inputs.test_groups) }}
     runs-on: ${{ matrix.group.runner }}
+    env:
+      RUNS_ON_S3_BUCKET_CACHE: ascend-ci-cache-hk
+      RUNS_ON_S3_BUCKET_ENDPOINT: https://obs.ap-southeast-1.myhuaweicloud.com
+      RUNS_ON_S3_FORCE_PATH_STYLE: "false"
+      AWS_S3_FORCE_PATH_STYLE: "false"
+      AWS_REGION: ap-southeast-1
+      RUNS_ON_RUNNER_NAME: ""
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.group.image_tag }}
+      image: swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann:${{ matrix.group.image_tag }}
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
@@ -205,6 +212,17 @@ jobs:
           # Restore fail-on-cache-miss to true after the transition period.
           fail-on-cache-miss: false
 
+      - name: Restore incremental cache
+        id: fallback-l1
+        if: ${{ matrix.group.npu_type != 'cpu' && steps.cache-csrc.outputs.cache-hit != 'true' }}
+        uses: $/.github/actions/csrc-l1-restore
+        with:
+          cache-dir: ${{ runner.temp }}/vllm-ascend-incremental-build-cache
+          architecture: ${{ steps.get_arch.outputs.arch }}
+          soc-version: ${{ matrix.group.npu_type }}
+          source-root: .
+          csrc-hash: ${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+
       - name: Install Mooncake wheel
         if: ${{ matrix.group.npu_type != 'cpu' }}
         run: |
@@ -292,20 +310,20 @@ jobs:
           python3 -c "import fla_npu.ops.ascendc"
           rm -f "/tmp/$FLA_WHL"
 
-      - name: Verify required AscendC custom ops are registered (310p)
-        if: ${{ matrix.group.npu_type == '310p' }}
+      - name: Verify required AscendC custom ops are registered
+        if: ${{ matrix.group.npu_type != 'cpu' }}
         run: |
           python - <<'PY'
           import sys, torch
           import vllm_ascend.vllm_ascend_C  # noqa: F401
           ops = torch.ops._C_ascend
-          missing = [n for n in ("chunk_gated_delta_rule_fwd_h", "chunk_fwd_o_vllm") if not hasattr(ops, n)]
+          missing = [n for n in ("chunk_gated_delta_rule_fwd_h_vllm", "chunk_fwd_o_vllm") if not hasattr(ops, n)]
           if missing:
               print(f"::error::Missing AscendC ops after install: {missing}. "
                     f"Cache contents are stale or build skipped registration.", file=sys.stderr)
               sys.exit(1)
           print("AscendC chunk-gdr ops registered:",
-                [n for n in ("chunk_gated_delta_rule_fwd_h", "chunk_fwd_o_vllm") if hasattr(ops, n)])
+                [n for n in ("chunk_gated_delta_rule_fwd_h_vllm", "chunk_fwd_o_vllm") if hasattr(ops, n)])
           PY
 
       - name: Install vllm-project/vllm-ascend no device

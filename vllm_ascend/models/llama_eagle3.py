@@ -60,10 +60,12 @@ def load_quarot_target_layer(
     layer: nn.Module,
     target_model_path: Path | str,
     weight_names: tuple[str, ...],
-    rotation: torch.Tensor,
+    rotation: torch.Tensor | None,
     label: str,
 ) -> None:
-    """Load one target vocab shard into the draft's unrotated hidden basis."""
+    """Load one target vocab shard into the draft's unrotated hidden basis.
+
+    ``rotation=None`` loads the shard unchanged (no QuaRot alignment)."""
     target_model_path = Path(target_model_path)
     shard_path, weight_name = _find_safetensors_weight(
         target_model_path,
@@ -80,15 +82,23 @@ def load_quarot_target_layer(
     with safe_open(shard_path, framework="pt", device="cpu") as shard:
         target_weight = shard.get_slice(weight_name)[start_index:end_index]
 
-    rotation = rotation.to(
-        device=layer.weight.device,
-        dtype=torch.float32,
-    )
-    target_weight = target_weight.to(
-        device=layer.weight.device,
-        dtype=torch.float32,
-    )
-    aligned_weight = torch.matmul(target_weight, rotation.T)
+    if rotation is not None:
+        rotation = rotation.to(
+            device=layer.weight.device,
+            dtype=torch.float32,
+        )
+        target_weight = target_weight.to(
+            device=layer.weight.device,
+            dtype=torch.float32,
+        )
+        aligned_weight = torch.matmul(target_weight, rotation.T)
+    else:
+        # No rotation: plain shard copy for drafts that cannot alias the
+        # target layer (e.g. the target embedding on a later PP stage).
+        aligned_weight = target_weight.to(
+            device=layer.weight.device,
+            dtype=layer.weight.dtype,
+        )
     loaded_rows = aligned_weight.shape[0]
     layer.weight.data[:loaded_rows].copy_(aligned_weight.to(layer.weight.dtype))
     layer.weight.data[loaded_rows:].zero_()

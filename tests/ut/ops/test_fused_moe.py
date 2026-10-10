@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import weakref
 from contextlib import contextmanager, nullcontext
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, call, patch
@@ -14,7 +15,7 @@ from vllm.model_executor.layers.activation import SituAndMul
 
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.device.hardware import AscendDeviceType
-from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_hardware_profile
 from vllm_ascend.ops import register_custom_ops as custom_ops
 from vllm_ascend.ops.fused_moe import fused_moe as fused_moe_module
 from vllm_ascend.ops.fused_moe import routed_experts as routed_experts_module
@@ -24,6 +25,7 @@ from vllm_ascend.ops.fused_moe.dataclass.shared_experts import (
     RoutedMoEMilestones,
 )
 from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
+from vllm_ascend.ops.fused_moe.gate_linear import AscendGateLinear
 from vllm_ascend.ops.fused_moe.routed_experts import (
     AscendRoutedExperts,
     AscendUnquantizedFusedMoEMethod,
@@ -732,6 +734,7 @@ def test_hash_router_preserves_fp32_weights_and_explicit_input_ids(monkeypatch, 
     assert weights is topk_weights
     assert weights.dtype == torch.float32
     assert ids is topk_ids
+    # The upstream router normalizes padding after gathering token IDs.
     torch.testing.assert_close(hash_op.call_args.kwargs["input_ids"], torch.tensor([22, 0], dtype=torch.int64))
     prepare_finalize.all_gather_input_ids.assert_called_once()
     actual_input_ids = prepare_finalize.all_gather_input_ids.call_args.args[0]
@@ -743,7 +746,7 @@ def test_hash_router_preserves_fp32_weights_and_explicit_input_ids(monkeypatch, 
 
 @pytest.mark.parametrize("image_sentinel_lo", [129257, 129264])
 @pytest.mark.parametrize("renormalize", [True, False])
-def test_vision_router_preserves_reference_routing_on_a5(monkeypatch, image_sentinel_lo, renormalize):
+def test_vision_router_preserves_reference_routing_without_native_vision(monkeypatch, image_sentinel_lo, renormalize):
     input_ids = torch.tensor([-1, image_sentinel_lo], dtype=torch.int32)
     hidden_states = torch.randn(2, 4)
     router_logits = torch.randn(2, 4, dtype=torch.float32)
@@ -758,10 +761,12 @@ def test_vision_router_preserves_reference_routing_on_a5(monkeypatch, image_sent
             moe_comm_method=SimpleNamespace(prepare_finalize=prepare_finalize),
         ),
     )
+    profile = get_hardware_profile(AscendDeviceType.A5)
+    profile = replace(profile, capabilities=profile.capabilities - {HardwareCapability.MOE_GATING_TOP_K_HASH_VISION})
     monkeypatch.setattr(
         fused_topk_router_module,
         "get_current_hardware_profile",
-        lambda: get_hardware_profile(AscendDeviceType.A5),
+        lambda: profile,
     )
     hash_op = MagicMock(side_effect=AssertionError("Vision routing must not call the hash kernel"))
     monkeypatch.setattr(
@@ -2487,7 +2492,7 @@ def test_forward_impl_keeps_full_width_input_for_shared_experts(monkeypatch):
     assert result[1] is routed_out
 
 
-def _stub_moe_runner_init(monkeypatch, *, gate=None, shared_experts=None):
+def _stub_moe_runner_init(monkeypatch, *, gate=None, shared_experts=None, fused_mc2_comm=None):
     """Construct AscendMoERunner with a lightweight MoERunner.__init__ stub."""
     moe_config = SimpleNamespace(hidden_dim=4, ep_size=1)
     routed_experts = SimpleNamespace(
@@ -2528,7 +2533,16 @@ def _stub_moe_runner_init(monkeypatch, *, gate=None, shared_experts=None):
     monkeypatch.setattr(fused_moe_module, "get_tp_group", MagicMock(return_value=object()))
     monkeypatch.setattr(fused_moe_module, "get_dp_group", MagicMock(return_value=object()))
     monkeypatch.setattr(fused_moe_module, "setup_moe_comm_method", MagicMock())
-    monkeypatch.setattr(fused_moe_module, "get_moe_comm_method", MagicMock(return_value=None))
+
+    def get_comm_method(kind, config):
+        assert config is moe_config
+        return fused_mc2_comm if kind == MoECommType.FUSED_MC2 else None
+
+    monkeypatch.setattr(
+        fused_moe_module,
+        "get_moe_comm_method",
+        get_comm_method,
+    )
 
     return AscendMoERunner(
         "model.layers.0.mlp",
@@ -2540,13 +2554,25 @@ def _stub_moe_runner_init(monkeypatch, *, gate=None, shared_experts=None):
     )
 
 
-def test_runner_sets_precast_fp32_weight(monkeypatch):
-    """Init sets precast so load materializes weight_fp32."""
+def test_runner_keeps_mega_moe_activation_with_each_layer(monkeypatch):
+    first_kwargs = {"activation": "situglu", "activation_params": {"beta": 4.0, "linear_beta": 25.0}}
+    first = _stub_moe_runner_init(monkeypatch, fused_mc2_comm=SimpleNamespace(mega_moe_activation_kwargs=first_kwargs))
+    second_kwargs = {"activation_clamp": None}
+    second = _stub_moe_runner_init(
+        monkeypatch, fused_mc2_comm=SimpleNamespace(mega_moe_activation_kwargs=second_kwargs)
+    )
+    assert first.routed_experts.mega_moe_activation_kwargs is first_kwargs
+    assert second.routed_experts.mega_moe_activation_kwargs is second_kwargs
+
+
+def test_runner_does_not_force_precast_fp32_weight(monkeypatch):
+    """Init must not force precast: without a model-side forced fp32 weight,
+    the gate routes through its own forward (AscendGateLinear)."""
     gate = SimpleNamespace(weight=torch.randn(8, 4, dtype=torch.float16))
     runner = _stub_moe_runner_init(monkeypatch, gate=gate)
 
     assert runner._gate is gate
-    assert gate.precast_fp32_weight is True
+    assert not hasattr(gate, "precast_fp32_weight")
     assert not hasattr(gate, "weight_fp32")
 
 
@@ -2564,7 +2590,8 @@ def test_runner_skips_precast_without_internal_router(monkeypatch):
 
 
 def test_forward_impl_uses_gate_weight_fp32(monkeypatch):
-    """Hot path only reads gate.weight_fp32; judgment lives in __init__."""
+    """Hot path only reads gate.weight_fp32; the forced-fp32 judgment lives
+    in the model (precast_fp32_weight), not in the runner."""
     runner = AscendMoERunner.__new__(AscendMoERunner)
     nn.Module.__init__(runner)
     hidden_states = torch.randn(2, 4, dtype=torch.float16)
@@ -2601,6 +2628,53 @@ def test_forward_impl_uses_gate_weight_fp32(monkeypatch):
     runner.routed_experts.forward_impl.assert_called_once_with(
         hidden_states=hidden_states,
         router_logits=recomputed_logits,
+        input_ids=None,
+    )
+
+
+def test_forward_impl_routes_gate_without_weight_fp32(monkeypatch):
+    """Gates without weight_fp32 (no forced fp32 conversion) route through
+    the gate's own forward, letting AscendGateLinear self-manage precision."""
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    nn.Module.__init__(runner)
+    hidden_states = torch.randn(2, 4, dtype=torch.bfloat16)
+    # vllm#51838 wiring: internal-router models pass hidden_states as the
+    # router_logits placeholder.
+    router_logits = hidden_states
+    gate_logits = torch.randn(2, 3, dtype=torch.float32)
+    routed_out = torch.randn(2, 4)
+    # spec restricts attribute access to the real class surface: a bare
+    # MagicMock auto-creates weight_fp32, which would flip the runner into
+    # the forced-fp32 branch.
+    gate = MagicMock(spec=AscendGateLinear, return_value=(gate_logits, None))
+
+    runner._gate = gate
+    runner.gate = gate
+    runner.ascend_shared_experts = None
+    runner.routed_experts = SimpleNamespace(forward_impl=MagicMock(return_value=routed_out))
+    runner._sequence_parallel_context = MagicMock(return_value=nullcontext())
+    monkeypatch.setattr(
+        fused_moe_module.F,
+        "linear",
+        MagicMock(side_effect=AssertionError("fp32 F.linear path must not run")),
+    )
+
+    result = runner._forward_impl(
+        hidden_states,
+        router_logits,
+        shared_experts_input=None,
+        input_ids=None,
+    )
+
+    assert result is routed_out
+    gate.assert_called_once()
+    # mock's argument equality is unreliable for torch tensors on some
+    # Python versions (tensor.__eq__ returns a Tensor, not a bool);
+    # compare by identity instead.
+    assert gate.call_args[0][0] is hidden_states
+    runner.routed_experts.forward_impl.assert_called_once_with(
+        hidden_states=hidden_states,
+        router_logits=gate_logits,
         input_ids=None,
     )
 

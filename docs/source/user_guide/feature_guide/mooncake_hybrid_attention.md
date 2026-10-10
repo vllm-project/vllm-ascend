@@ -210,7 +210,7 @@ On a dedicated validation server with a range/session-capable Mooncake client,
 run this opt-in smoke from the repository root:
 
 ```bash
-python tests/e2e/nightly/single_node/models/scripts/glm53_mooncake_layerwise.py \
+python tests/e2e/common/single_node/glm53_mooncake_layerwise.py \
   --base-url http://127.0.0.1:9000 --model glm --chunk-size 8192
 ```
 

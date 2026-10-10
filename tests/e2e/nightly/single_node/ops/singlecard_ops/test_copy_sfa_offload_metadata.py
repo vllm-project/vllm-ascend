@@ -12,8 +12,8 @@ import torch_npu  # noqa: F401
 from vllm_ascend.attention.indexer import AscendSFAIndexerMetadataBuilder
 from vllm_ascend.attention.sfa_kv_offload import AscendSFAKVOffloadImpl, AscendSFAKVOffloadMetadataBuilder
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots import (
+    CopySfaRequestStates,
     prepare_copy_sfa_dummy_slots,
-    prepare_copy_sfa_request_slots,
 )
 
 MODULE = "vllm_ascend.attention.sfa_kv_offload"
@@ -44,7 +44,7 @@ def make_builder(num_mtp_layers=1):
     return builder
 
 
-def common(ends, lengths, pools=(1, 0), generations=(11, 12)):
+def common(ends, lengths, pools=(1, 0), active=(True, True)):
     count = len(lengths)
     return SimpleNamespace(
         query_start_loc=torch.tensor([0, *ends], dtype=torch.int32, device="npu"),
@@ -57,7 +57,7 @@ def common(ends, lengths, pools=(1, 0), generations=(11, 12)):
         # Most geometry tests exercise the optional restore descriptors too.
         copy_sfa_restore_tails=True,
         req_topk_buffer_slots=torch.tensor(pools, dtype=torch.int32),
-        req_topk_buffer_generations=torch.tensor(generations, dtype=torch.int64),
+        req_topk_buffer_active=torch.tensor(active, dtype=torch.bool),
         block_table_tensor=torch.arange(count * 128, dtype=torch.int32, device="npu").reshape(count, 128),
         slot_mapping=torch.arange(16, dtype=torch.int64, device="npu") + 128,
         req_ids_tensor=None,
@@ -130,26 +130,71 @@ def test_device_lengths_tail_geometry_and_rejection():
     assert revised.copy_sfa_prefix_lens.cpu().tolist() == [10112, 8320]
 
 
-def test_generation_compaction_and_prefix_rollback_reset():
+def test_slot_invalidation_compaction_and_prefix_rollback_reset():
     builder = make_builder()
     cm = common([4, 8], [10371, 8324])
     metadata = populate(builder, cm)
     assert metadata.lim_request_state.cpu().tolist() == [-2, -2]
     assert populate(builder, cm).lim_request_state.cpu().tolist() == [-1, -1]
-    # Swap batch order, keeping request-owned pool and generation together.
-    cm = common([4, 8], [8324, 10371], pools=(0, 1), generations=(12, 11))
+    # Swap batch order, keeping request-owned pool together.
+    cm = common([4, 8], [8324, 10371], pools=(0, 1), active=(True, True))
     metadata = populate(builder, cm)
     assert metadata.lim_request_state.cpu().tolist() == [-1, -1]
-    # New generation and rollback independently force cold fill.
-    cm.req_topk_buffer_generations[0] = 13
+    # Slot invalidation and rollback independently force cold fill.
+    builder.lim_last_cache[:, [0]] = -1
     cm.seq_lens[1] = 10243
     assert populate(builder, cm).lim_request_state.cpu().tolist() == [-2, -2]
+
+
+def test_slot_reassignment_invalidates_all_banks_without_resetting_other_slots():
+    builder = make_builder(num_mtp_layers=2)
+    cm = common([4, 8], [10371, 10371])
+    for step in (None, 0, 1):
+        assert populate(builder, cm, draft_index=step, reuse_topk=False).lim_request_state.cpu().tolist() == [-2, -2]
+        assert populate(builder, cm, draft_index=step, reuse_topk=False).lim_request_state.cpu().tolist() == [-1, -1]
+    builder.lim_last_cache[:, [1]] = -1
+    # Equal geometry cannot make a recycled owner a hit. Building target
+    # metadata must not consume the invalidation of either draft bank.
+    for step in (None, 0, 1):
+        assert populate(builder, cm, draft_index=step, reuse_topk=False).lim_request_state.cpu().tolist() == [-2, -1]
+        assert populate(builder, cm, draft_index=step, reuse_topk=False).lim_request_state.cpu().tolist() == [-1, -1]
+
+
+def test_prepare_resets_target_and_draft_histories():
+    states = CopySfaRequestStates()
+    cm = common([4], [10371], pools=(0,), active=(True,))
+    target, draft = make_builder(), make_builder()
+
+    def prepare():
+        states.prepare(
+            req_ids=["request"],
+            live_req_ids=["request"],
+            slots=cm.req_topk_buffer_slots.numpy(),
+            active=cm.req_topk_buffer_active.numpy(),
+            prebound_slots={},
+            computed_tokens=None,
+            padded_reqs=1,
+            block_size=128,
+            hot_tokens=8192,
+            dummy=False,
+            lim_cache_histories=(target.lim_last_cache, draft.lim_last_cache),
+        )
+
+    # Initial assignment and reassignment both force cold metadata.
+    prepare()
+    for builder, step in ((target, None), (draft, 0)):
+        assert populate(builder, cm, draft_index=step).lim_request_state.cpu().tolist() == [-2]
+        assert populate(builder, cm, draft_index=step).lim_request_state.cpu().tolist() == [-1]
+    states.remove_request("request")
+    prepare()
+    for builder, step in ((target, None), (draft, 0)):
+        assert populate(builder, cm, draft_index=step).lim_request_state.cpu().tolist() == [-2]
 
 
 def test_builder_histories_are_independent():
     target_builder = make_builder()
     draft_builder = make_builder()
-    cm = common([4], [10371], pools=(1,), generations=(11,))
+    cm = common([4], [10371], pools=(1,), active=(True,))
     first = populate(target_builder, cm)
     draft = populate(draft_builder, cm, draft_index=0)
     assert first.lim_request_state.cpu().tolist() == [-2]
@@ -162,23 +207,23 @@ def test_builder_histories_are_independent():
 
 def test_target_and_draft_history_are_separate_and_reuse_does_not_advance_it():
     builder = make_builder()
-    target = populate(builder, common([4], [10371], pools=(1,), generations=(11,)))
-    draft = populate(builder, common([4], [10371], pools=(1,), generations=(11,)), draft_index=0)
+    target = populate(builder, common([4], [10371], pools=(1,), active=(True,)))
+    draft = populate(builder, common([4], [10371], pools=(1,), active=(True,)), draft_index=0)
     assert target.lim_request_state.cpu().tolist() == [-2]
     assert draft.lim_request_state.cpu().tolist() == [-2]
     assert target.lim_request_state.data_ptr() != draft.lim_request_state.data_ptr()
     # Later Q1 steps cross a block boundary, but skip LIM entirely.
-    populate(builder, common([1], [10380], pools=(1,), generations=(11,)), draft_index=1, reuse_topk=True)
-    populate(builder, common([1], [10381], pools=(1,), generations=(11,)), draft_index=2, reuse_topk=True)
+    populate(builder, common([1], [10380], pools=(1,), active=(True,)), draft_index=1, reuse_topk=True)
+    populate(builder, common([1], [10381], pools=(1,), active=(True,)), draft_index=2, reuse_topk=True)
     assert builder.lim_last_prefix[1, 1].item() == 10240
     assert draft.lim_request_state.cpu().tolist() == [-2]
-    next_draft = populate(builder, common([4], [10371], pools=(1,), generations=(11,)), draft_index=0)
+    next_draft = populate(builder, common([4], [10371], pools=(1,), active=(True,)), draft_index=0)
     assert next_draft.lim_request_state.cpu().tolist() == [-1]
 
 
 def test_fallback_resets_only_the_affected_model_history():
     builder = make_builder()
-    cm = common([4], [10371], pools=(1,), generations=(11,))
+    cm = common([4], [10371], pools=(1,), active=(True,))
     populate(builder, cm)
     populate(builder, cm, draft_index=0)
     cm.copy_sfa_draft_index = None
@@ -191,7 +236,7 @@ def test_fallback_resets_only_the_affected_model_history():
 def test_physical_mtp_layers_have_independent_history():
     builder = make_builder(num_mtp_layers=2)
     for step, expected in ((0, -2), (1, -2), (2, -1)):
-        cm = common([1], [10371], pools=(1,), generations=(11,))
+        cm = common([1], [10371], pools=(1,), active=(True,))
         md = populate(builder, cm, draft_index=step, reuse_topk=False)
         assert md.lim_request_state.cpu().tolist() == [expected]
 
@@ -199,7 +244,7 @@ def test_physical_mtp_layers_have_independent_history():
 @pytest.mark.parametrize("draft_index", [None, 0, 1, 2], ids=["target", "draft0", "draft1", "draft2"])
 def test_lim_consumes_shared_state_without_modifying_it(draft_index):
     builder = make_builder()
-    cm = common([4, 8, 12], [10371, 500, 0], pools=(1, 0, 0), generations=(11, 12, -1))
+    cm = common([4, 8, 12], [10371, 500, 0], pools=(1, 0, 0), active=(True, True, False))
     populate(builder, cm, draft_index=draft_index)
     metadata = populate(builder, cm, draft_index=draft_index)
     assert metadata.lim_request_state.cpu().tolist() == [-1, -3, -3]
@@ -229,7 +274,7 @@ def test_lim_consumes_shared_state_without_modifying_it(draft_index):
         assert lim.call_args.args[10].data_ptr() == metadata.lim_request_state.data_ptr()
         assert metadata.lim_request_state.cpu().tolist() == [-1, -3, -3]
     bank = 0 if draft_index is None else 1
-    assert builder.lim_last_generation[bank, 1].item() == 11
+    assert builder.lim_last_cache[bank, 1].item() == 8192
     if draft_index == 0:
         assert impl.lim_reuse_request_count == 3
         assert impl.copy_sfa_reuse_logical_lens.cpu().tolist() == [8192, 500, 0]
@@ -244,7 +289,7 @@ def test_reuse_extent_is_prepared_once_per_draft_round():
     builder = make_builder()
     storage = builder.copy_sfa_vectors["reuse_logical_lens"]
     storage.fill_(-999)
-    cm = common([4, 8, 12], [500, 10371, 0], pools=(1, 0, 0), generations=(11, 12, -1))
+    cm = common([4, 8, 12], [500, 10371, 0], pools=(1, 0, 0), active=(True, True, False))
     target = populate(builder, cm)
     assert target.copy_sfa_reuse_logical_lens is None
     assert (storage == -999).all().item()
@@ -256,7 +301,7 @@ def test_reuse_extent_is_prepared_once_per_draft_round():
     for step in (1, 2):
         later = populate(
             builder,
-            common([1, 2, 3], [500 + step, 10371 + step, 0], pools=(1, 0, 0), generations=(11, 12, -1)),
+            common([1, 2, 3], [500 + step, 10371 + step, 0], pools=(1, 0, 0), active=(True, True, False)),
             draft_index=step,
             reuse_topk=True,
         )
@@ -264,10 +309,10 @@ def test_reuse_extent_is_prepared_once_per_draft_round():
         torch.testing.assert_close(storage, saved)
 
     # A new round refreshes step 0 in place, including changed activity.
-    next_cm = common([4, 8, 12], [504, 10375, 0], pools=(1, 0, 0), generations=(11, 12, -1))
+    next_cm = common([4, 8, 12], [504, 10375, 0], pools=(1, 0, 0), active=(True, True, False))
     assert populate(builder, next_cm).copy_sfa_reuse_logical_lens is None
     torch.testing.assert_close(storage, saved)
-    next_cm.req_topk_buffer_generations[1] = -1
+    next_cm.req_topk_buffer_active[1] = False
     next_first = populate(builder, next_cm, draft_index=0)
     assert next_first.copy_sfa_reuse_logical_lens.data_ptr() == address
     assert next_first.copy_sfa_reuse_logical_lens.cpu().tolist() == [504, 0, 0]
@@ -306,7 +351,7 @@ def test_short_lifecycle_minus3_minus2_minus1():
     builder = make_builder()
     # Short rows always run -3 (dense, C == 0): the row content is provided
     # by the PD dense D2D / the eager full-row fill, not by a -2 rebuild.
-    cm = common([4], [5000], pools=(1,), generations=(11,))
+    cm = common([4], [5000], pools=(1,), active=(True,))
     for _ in range(3):
         assert populate(builder, cm).lim_request_state.cpu().tolist() == [-3]
     # Growth past the hot budget: the cache flip (0 -> hot) forces the -2
@@ -324,7 +369,7 @@ def test_tiny_row_stays_minus3_without_legal_init():
     builder = make_builder()
     # L < 2048 has no legal -2 (operator contract), so the row must stay -3;
     # in PD the read thread has already populated the dense content.
-    cm = common([4], [500], pools=(1,), generations=(11,))
+    cm = common([4], [500], pools=(1,), active=(True,))
     for _ in range(3):
         assert populate(builder, cm).lim_request_state.cpu().tolist() == [-3]
 
@@ -332,7 +377,7 @@ def test_tiny_row_stays_minus3_without_legal_init():
 @pytest.mark.parametrize("draft_index", [None, 0], ids=["target", "draft0"])
 def test_inactive_capture_becomes_active_on_graph_replay(draft_index):
     builder = make_builder()
-    cm = common([4, 8], [0, 0], pools=(0, 0), generations=(-1, -1))
+    cm = common([4, 8], [0, 0], pools=(0, 0), active=(False, False))
     metadata = populate(builder, cm, draft_index=draft_index)
     # Private pools 4 and 5; positive cache budgets avoid copy-SFA's cold-fill predicate.
     assert metadata.copy_sfa_pool_entries.cpu().tolist() == [4, 5]
@@ -361,7 +406,7 @@ def test_inactive_capture_becomes_active_on_graph_replay(draft_index):
     assert observed.cpu().tolist() == [[-3, -3], [0, 0], [0, 0]]
     assert observed_slots.cpu().tolist() == [-1] * 8
     cm.seq_lens.copy_(torch.tensor([10371, 0], dtype=torch.int32, device="npu"))
-    cm.req_topk_buffer_generations[0] = 11
+    cm.req_topk_buffer_active[0] = True
     cm.req_topk_buffer_slots[0] = 1
     # Real scheduling regenerates mappings before metadata preparation.
     cm.slot_mapping.copy_(torch.arange(16, dtype=torch.int64, device="npu") + 256)
@@ -373,13 +418,13 @@ def test_inactive_capture_becomes_active_on_graph_replay(draft_index):
     populate(builder, cm, draft_index=draft_index)
     graph.replay()
     assert observed.cpu().tolist() == [[-1, -3], [8323, 0], reuse]
-    cm.req_topk_buffer_generations.fill_(-1)
+    cm.req_topk_buffer_active.fill_(False)
     populate(builder, cm, draft_index=draft_index)
     graph.replay()
     assert observed.cpu().tolist() == [[-3, -3], [0, 0], [0, 0]]
     assert observed_slots.cpu().tolist() == [-1] * 8
     bank = 0 if draft_index is None else 1
-    assert builder.lim_last_generation[bank, 1].item() == 11
+    assert builder.lim_last_cache[bank, 1].item() == 8192
 
 
 def test_eager_sp_padding_uses_private_tail_and_exact_query_count():
@@ -398,7 +443,7 @@ def test_main_and_indexer_slots_preserve_independent_layouts():
     builder = make_builder()
     # An inactive row between two real rows plus SP padding: validity must
     # follow request ownership, not a contiguous real-token prefix.
-    cm = common([2, 4, 5], [10371, 0, 500], pools=(1, 0, 0), generations=(11, -1, 12))
+    cm = common([2, 4, 5], [10371, 0, 500], pools=(1, 0, 0), active=(True, False, True))
     cm.num_input_tokens = 8
     index_slots = torch.arange(8, dtype=torch.int64, device="npu") + 1024
     index_address = index_slots.data_ptr()
@@ -419,7 +464,7 @@ def test_main_and_indexer_slots_preserve_independent_layouts():
     assert metadata.copy_sfa_tail_lengths[1].count_nonzero().item() == 0
 
     # Without fused_copy_sfa request ownership the normal indexer is unchanged.
-    cm.req_topk_buffer_generations = None
+    cm.req_topk_buffer_active = None
     index_slots.fill_(7)
     with patch(
         "vllm_ascend.attention.indexer.get_ascend_config",
@@ -433,51 +478,46 @@ def test_pool_ownership_survives_compaction_and_dummy_run():
     import numpy as np
 
     slots = np.zeros(4, dtype=np.int32)
-    generations = np.zeros(4, dtype=np.int64)
-    request_slots: dict[str, int] = {}
-    generation = 0
-    slot_generations: dict[int, int] = {}
-    last_prefixes: dict[int, int] = {}
+    active = np.zeros(4, dtype=np.bool_)
+    states = CopySfaRequestStates()
 
     def prepare(req_ids, *, dummy=False):
-        nonlocal request_slots, generation
-        request_slots, generation, restore_tails, dense_fills = prepare_copy_sfa_request_slots(
+        restore_tails, dense_fills, invalidated = states.prepare(
             req_ids=req_ids,
             live_req_ids=req_ids,
             slots=slots,
-            generations=generations,
-            request_slots=request_slots,
-            slot_generations=slot_generations,
-            last_prefixes=last_prefixes,
-            generation=generation,
+            active=active,
             prebound_slots={},
             computed_tokens=None,
             padded_reqs=3,
             block_size=128,
             hot_tokens=8192,
             dummy=dummy,
+            lim_cache_histories=(),
         )
         assert restore_tails is False
         assert dense_fills == {}
+        return invalidated
 
-    prepare(["a", "b"])
+    assert prepare(["a", "b"]) == (0, 1)
     assert slots[:3].tolist() == [0, 1, 6]
-    assert generations[:3].tolist() == [1, 2, -1]
-    # Removing a compacts b; new c may reuse a's slot, with a new generation.
-    prepare(["b", "c"])
+    assert active[:3].tolist() == [True, True, False]
+    # Removing a compacts b; new c may reuse a's slot, with explicit invalidation.
+    assert prepare(["b", "c"]) == (0,)
     assert slots[:3].tolist() == [1, 0, 6]
-    assert generations[:3].tolist() == [2, 3, -1]
+    assert active[:3].tolist() == [True, True, False]
     prepare(["b", "c"], dummy=True)
     assert slots[:3].tolist() == [4, 5, 6]
-    assert generations[:3].tolist() == [-1, -1, -1]
-    assert request_slots == {"b": 1, "c": 0}
+    assert active[:3].tolist() == [False, False, False]
     prepare(["b", "c"])
-    assert generations[:3].tolist() == [2, 3, -1]
+    assert active[:3].tolist() == [True, True, False]
     # The draft-only dummy path needs no ownership maps or model runner.
-    prepare_copy_sfa_dummy_slots(slots, generations, 3)
+    prepare_copy_sfa_dummy_slots(slots, active, 3)
     assert slots[:3].tolist() == [4, 5, 6]
-    assert generations[:3].tolist() == [-1, -1, -1]
-    assert request_slots == {"b": 1, "c": 0}
+    assert active[:3].tolist() == [False, False, False]
+    prepare(["b", "c"])
+    assert slots[:2].tolist() == [1, 0]
+    assert active[:2].tolist() == [True, True]
 
 
 def test_draft_metadata_remains_valid_until_its_step_executes():
@@ -520,7 +560,7 @@ def test_draft_metadata_remains_valid_until_its_step_executes():
 
 def test_normal_decode_skips_restore_descriptors_and_reuses_block_table():
     builder = make_builder()
-    cm = common([4], [10371], pools=(1,), generations=(11,))
+    cm = common([4], [10371], pools=(1,), active=(True,))
     cm.copy_sfa_restore_tails = False
     md = populate(builder, cm)
     assert md.copy_sfa_copy_src_offsets is None
@@ -536,7 +576,7 @@ def test_normal_decode_skips_restore_descriptors_and_reuses_block_table():
 
 def test_host_buffers_are_persistent_and_device_lengths_are_authoritative():
     builder = make_builder()
-    cm = common([4], [10371], pools=(1,), generations=(11,))
+    cm = common([4], [10371], pools=(1,), active=(True,))
     md = populate(builder, cm)
     addresses = {
         name: (buffers[0].cpu.data_ptr(), buffers[0].gpu.data_ptr()) for name, buffers in builder.copy_sfa_host.items()
@@ -557,7 +597,7 @@ def test_host_buffers_are_persistent_and_device_lengths_are_authoritative():
 
 def test_copy_sfa_host_inputs_never_fall_back_to_device_to_host_copy():
     builder = make_builder()
-    cm = common([4], [10371], pools=(1,), generations=(11,))
+    cm = common([4], [10371], pools=(1,), active=(True,))
     cm.req_topk_buffer_slots = cm.req_topk_buffer_slots.to("npu")
     with pytest.raises(RuntimeError, match="must be CPU tensors"):
         populate(builder, cm)

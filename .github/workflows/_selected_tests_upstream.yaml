@@ -89,14 +89,21 @@ env:
 jobs:
     e2e-upstream_pr:
         runs-on: linux-aarch64-a2b3-1
+        env:
+          RUNS_ON_S3_BUCKET_CACHE: ascend-ci-cache-hk
+          RUNS_ON_S3_BUCKET_ENDPOINT: https://obs.ap-southeast-1.myhuaweicloud.com
+          RUNS_ON_S3_FORCE_PATH_STYLE: "false"
+          AWS_S3_FORCE_PATH_STYLE: "false"
+          AWS_REGION: ap-southeast-1
+          RUNS_ON_RUNNER_NAME: ""
         strategy:
           fail-fast: false
           matrix:
             part: [0]
-            image_tag: [9.1.0-910b-ubuntu22.04-py3.12]
+            image_tag: [9.2.0_20260928212200-910b-ubuntu22.04-py3.12]
             num_npus: [1]
         container:
-          image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.image_tag }}
+          image: swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann:${{ matrix.image_tag }}
           env:
             VLLM_LOGGING_LEVEL: ERROR
             HF_HUB_OFFLINE: 1
