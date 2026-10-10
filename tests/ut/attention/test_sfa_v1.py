@@ -1567,6 +1567,14 @@ class TestAscendSFAImpl(TestBase):
         self.impl.enable_sparse_sfa_c8 = True
         self.assertEqual(self.impl._resolve_preprocess_type(torch.bfloat16), PreprocessType.NATIVE)
 
+    def test_quantized_prolog_with_missing_indexer_projection_uses_native(self):
+        self._set_quant(AscendW8A8DynamicLinearMethod)
+        self.impl.has_indexer = True
+        self.impl.indexer = SimpleNamespace()
+        self.impl.enable_sparse_sfa_turboquant = False
+        self.impl.enable_sparse_sfa_c8 = True
+        self.assertEqual(self.impl._resolve_preprocess_type(torch.bfloat16), PreprocessType.NATIVE)
+
     def test_quantized_prolog_with_quantized_indexer_stays_fused(self):
         self._set_quant(AscendW8A8DynamicLinearMethod)
         self.impl.has_indexer = True

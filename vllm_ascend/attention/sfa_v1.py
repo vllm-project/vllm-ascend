@@ -1102,8 +1102,10 @@ class AscendSFAImpl(MLAAttentionImpl):
             # Prolog's indexer query can carry quantization scales independently
             # of the MLA weight type. Preserve the native query for an
             # unquantized indexer, including layers that later toggle skip_topk.
-            if self.has_indexer and not hasattr(self.indexer.wq_b, "weight_scale"):
-                reasons.append("PROLOG_V3 requires a quantized indexer query projection.")
+            if self.has_indexer:
+                wq_b = getattr(self.indexer, "wq_b", None)
+                if not hasattr(wq_b, "weight_scale"):
+                    reasons.append("PROLOG_V3 requires a quantized indexer query projection.")
             if self.enable_sparse_sfa_turboquant:
                 reasons.append("PROLOG_V3 does not support the TurboQuant 4-bit latent cache.")
             if qt is None and self.enable_sparse_sfa_c8:
