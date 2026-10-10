@@ -745,6 +745,39 @@ def test_graph_prefill_refreshes_captured_cache_buffers(attn_architecture: str) 
         assert (captured_blocks.data_ptr(), captured_slots.data_ptr()) == (block_ptr, slot_ptr)
 
 
+@pytest.mark.parametrize("attn_architecture", ["GQA", "MLA"])
+def test_sharded_target_graph_prefill_uses_global_query_width(attn_architecture: str) -> None:
+    speculator = object.__new__(AscendMTPSpeculator)
+    speculator.replicated_pcp = True
+    speculator.pcp_manager = SimpleNamespace(is_decode_sharded=True)
+    speculator.attn_architecture = attn_architecture
+    batch = _make_padded_input_batch()
+    batch.is_dummy = False
+    batch.num_reqs, batch.num_tokens = 1, 4
+    batch.query_start_loc_np = np.array([0, 4], dtype=np.int32)
+    batch.seq_lens_cpu_upper_bound = torch.tensor([9, 99], dtype=torch.int32)
+    speculator.input_batch = batch
+    speculator.block_tables = MagicMock()
+    speculator.kv_cache_config = object()
+    global_metadata = {"draft.layer": object()}
+    speculator._build_attn_metadata = MagicMock(return_value=global_metadata)
+    with patch.object(speculator_module, "build_slot_mappings_by_layer", return_value={}) as build_slots:
+        metadata, _ = speculator._prepare_replicated_prefill_attn(
+            {"draft.layer": SimpleNamespace(actual_seq_lengths_q=[2, 4])},
+            {},
+            2,
+            8,
+            CUDAGraphMode.FULL,
+        )
+    assert metadata is global_metadata
+    kwargs = speculator._build_attn_metadata.call_args.kwargs
+    np.testing.assert_array_equal(kwargs["query_start_loc_np"], [0, 4, 8])
+    torch.testing.assert_close(kwargs["seq_lens_cpu_upper_bound"], torch.tensor([9, 0], dtype=torch.int32))
+    assert kwargs["num_reqs"] == 2
+    assert kwargs["batch_desc"].num_tokens == 8
+    build_slots.assert_called_once()
+
+
 @pytest.mark.parametrize("guard", ["non_pcp", "no_batch", "no_metadata"])
 def test_prepare_replicated_prefill_preserves_bypass(guard: str) -> None:
     speculator = object.__new__(AscendMTPSpeculator)
@@ -852,7 +885,7 @@ def test_propose_sync_follows_draft_token_layout(speculator_cls, parent_cls, rep
     speculator = object.__new__(speculator_cls)
     speculator.replicated_pcp = replicated_pcp
     speculator.input_batch = None
-    speculator.pcp_manager = MagicMock()
+    speculator.pcp_manager = MagicMock(is_decode_sharded=False)
     speculator.model_state = SimpleNamespace(
         pcp_manager=speculator.pcp_manager,
     )
