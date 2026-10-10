@@ -747,6 +747,9 @@ Optional request fields such as `temperature`, `top_k`, and `top_p` are passed t
 - Assign every external config index to exactly one routing group.
 - Keep `dp_rank_start + dp_size_local <= dp_size`.
 - Keep `dp_size_local * tp_size * cp_size * sp_size * pp_size` within `npu_per_node`.
+- Set `headless: true` on cross-node pipeline-parallel peers without an HTTP endpoint.
+  Headless ranks are excluded from proxy routing and HTTP readiness checks, while
+  their local processes remain monitored during startup.
 - Use one DP master address for all members of the same DP group.
 - Give producer and consumer connectors the correct PD roles.
 - Set `--max-model-len` large enough for benchmark input tokens plus `max_out_len`.
