@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import unittest
+from contextlib import ExitStack
+from itertools import product
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
@@ -345,3 +348,50 @@ def test_make_empty_intermediate_tensors_aux_and_topk(monkeypatch, topk_mode):
     topk = get_pp_transport_tensors(result, PPTransportDataType.TOPK_INDICES)
     assert len(aux) == 2 and len(topk) == 1
     assert topk[0].data_ptr() == topk_buffer.data_ptr()
+
+
+class TestDCPQReplicationProjectionSelection(unittest.TestCase):
+    def test_q_replication_selects_both_projection_branches(self):
+        for enabled, input_size, q_rank in product([False, True], [None, 7], [None, 4]):
+            with self.subTest(enabled=enabled, input_size=input_size, q_rank=q_rank):
+                self._check_q_replication_selects_both_projection_branches(enabled, input_size, q_rank)
+
+    def _check_q_replication_selects_both_projection_branches(self, enabled, input_size, q_rank):
+        with ExitStack() as patches:
+            """Run the patched model constructor, including Eagle's wider input."""
+            ordinary, replicated = Mock(), Mock()
+            patches.enter_context(patch.object(patch_deepseek_v2, "ColumnParallelLinear", ordinary))
+            patches.enter_context(patch.object(patch_deepseek_v2, "AscendDCPGroupColumnParallelLinear", replicated))
+            patches.enter_context(patch.object(patch_deepseek_v2, "use_dcp_q_replicate", lambda *args: enabled))
+            for name in (
+                "ReplicatedLinear",
+                "RowParallelLinear",
+                "DeepSeekV2FusedQkvAProjLinear",
+                "RMSNorm",
+                "get_rope",
+            ):
+                patches.enter_context(patch.object(patch_deepseek_v2, name, Mock()))
+            patches.enter_context(patch.object(patch_deepseek_v2, "get_tensor_model_parallel_world_size", lambda: 4))
+            wrapper = Mock()
+            patches.enter_context(patch.object(patch_deepseek_v2, "MultiHeadLatentAttentionWrapper", wrapper))
+            model = torch.nn.Module()
+            patch_deepseek_v2._deepseek_v2_mla_attention_init(
+                model,
+                SimpleNamespace(),
+                _config(rms_norm_eps=1e-6, rope_parameters={"rope_type": "default"}),
+                hidden_size=8,
+                num_heads=8,
+                qk_nope_head_dim=3,
+                qk_rope_head_dim=2,
+                v_head_dim=3,
+                q_lora_rank=q_rank,
+                kv_lora_rank=2,
+                input_size=input_size,
+                prefix="model.layers.0.self_attn",
+            )
+            projection = replicated if enabled else ordinary
+            call = next(c for c in projection.call_args_list if c.kwargs["prefix"].endswith((".q_proj", ".q_b_proj")))
+            self.assertEqual(call.args, (q_rank if q_rank is not None else input_size or 8, 40))
+            modules = wrapper.call_args.args[8]
+            self.assertIs(modules.q_proj if q_rank is None else modules.q_b_proj, projection.return_value)
+            self.assertIs(modules.q_b_proj if q_rank is None else modules.q_proj, None)

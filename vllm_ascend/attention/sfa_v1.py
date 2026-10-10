@@ -6,7 +6,7 @@ import torch
 import torch_npu
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
-from vllm.distributed import get_pcp_group, get_tensor_model_parallel_world_size
+from vllm.distributed import get_dcp_group, get_pcp_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadataBuilder
@@ -831,6 +831,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.qk_head_dim = kwargs["qk_head_dim"]
         self.v_head_dim = kwargs["v_head_dim"]
         self.q_proj = kwargs["q_proj"] if self.q_lora_rank is None else kwargs["q_b_proj"]
+        self.dcp_q_replicate_enabled = getattr(self.q_proj, "qrep_active", False) is True
         self.fused_qkv_a_proj = kwargs.get("fused_qkv_a_proj")
         self.kv_b_proj = kwargs["kv_b_proj"]
         self.o_proj = kwargs["o_proj"]
@@ -1008,11 +1009,16 @@ class AscendSFAImpl(MLAAttentionImpl):
             prefer_copy=True,
         )
 
+        if self.dcp_q_replicate_enabled:
+            group_weight = get_dcp_group().all_gather(W_UK.permute(1, 2, 0).contiguous(), dim=0)
+            group_weight = maybe_trans_nz(group_weight)
+            replace_parameter(self, "W_UK_T_dcp_group", group_weight, prefer_copy=True)
+
         # Dispose kv_b_proj since it is replaced by W_UV and W_UK_T to save memory.
         # RL keeps it: it is the only source of W_UV/W_UK_T, so every weight
         # update re-derives them from this parameter and the parameter must stay
         # loadable (#15463).
-        if not self.rl_weight_update_enabled:
+        if not self.rl_weight_update_enabled and not self.dcp_q_replicate_enabled:
             dispose_layer(self.kv_b_proj)
         self.preprocess_type = self._resolve_preprocess_type(act_dtype)
 
@@ -1342,10 +1348,16 @@ class AscendSFAImpl(MLAAttentionImpl):
         return None, None
 
     # Return `ql_nope`, `q_pe`
-    def _q_proj_and_k_up_proj(self, x):
+    def _q_proj_and_k_up_proj(self, x, *, local_q=False):
+        dcp_q_replicate_enabled = self.dcp_q_replicate_enabled
+        group_q = dcp_q_replicate_enabled and not local_q
+        projection_heads = self.local_num_heads * (self.q_proj.group_size if group_q else 1)
+        weight = self.W_UK_T_dcp_group if group_q else self.W_UK_T
+        # Prefill and mixed batches use local heads for both GEMMs.
+        project = self.q_proj.forward_local if dcp_q_replicate_enabled and local_q else self.q_proj
         q_nope, q_pe = (
-            self.q_proj(x)[0]
-            .view(-1, self.local_num_heads, self.qk_head_dim)
+            project(x)[0]
+            .view(x.shape[0], projection_heads, self.qk_head_dim)
             .split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
         )
 
@@ -1358,7 +1370,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             # (N, B, P) x (N, P, L) -> (B, N, L)
             ql_nope = torch_npu.npu_transpose_batchmatmul(
                 q_nope,
-                self.W_UK_T,
+                weight,
                 perm_x1=(1, 0, 2),
                 perm_x2=(0, 1, 2),
                 perm_y=(1, 0, 2),
@@ -1369,7 +1381,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             # Convert from (B, N, P) to (N, B, P)
             q_nope = q_nope.transpose(0, 1)
             # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
-            ql_nope = torch.bmm(q_nope, self.W_UK_T)
+            ql_nope = torch.bmm(q_nope, weight)
             # Convert from (N, B, L) to (B, N, L)
             ql_nope = ql_nope.transpose(0, 1)
         return ql_nope, q_pe
@@ -2051,7 +2063,10 @@ class AscendSFAImpl(MLAAttentionImpl):
                 parallel_context.gather_full_o_proj,
             )
 
-            ql_nope, q_pe = self._q_proj_and_k_up_proj(q_c)
+            ql_nope, q_pe = self._q_proj_and_k_up_proj(
+                q_c,
+                local_q=self.dcp_q_replicate_enabled and attn_metadata.num_prefills > 0,
+            )
             if self.qk_rope_head_dim:
                 q_pe = self.rope_single(q_pe, cos, sin)
             self._record_query_gather_context(

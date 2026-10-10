@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 import torch_npu
 from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.distributed.parallel_state import get_pcp_group
+from vllm.distributed.parallel_state import get_dcp_group, get_pcp_group
 from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import (
     MLAAttention,
@@ -887,6 +887,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.rotary_emb = kwargs["rotary_emb"]
         self.fused_qkv_a_proj = kwargs.get("fused_qkv_a_proj")
         self.q_proj = kwargs["q_proj"] if self.q_lora_rank is None else kwargs["q_b_proj"]
+        self.dcp_q_replicate_enabled = getattr(self.q_proj, "qrep_active", False) is True
+        self.q_projection_heads = num_heads * (self.q_proj.group_size if self.dcp_q_replicate_enabled else 1)
         self.kv_b_proj = kwargs["kv_b_proj"]
         self.o_proj = kwargs["o_proj"]
         self.g_proj = kwargs.get("g_proj")
@@ -911,6 +913,9 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         self.layer_name = kwargs.get("layer_name")
         self.fa_quant_layer = enable_fa_quant(self.vllm_config, self.layer_name)
+        # These preprocessing paths require local Q/UK heads.
+        if self.dcp_q_replicate_enabled and (self.enable_mlapo or self.fa_quant_layer):
+            raise ValueError("Ascend dcp_q_replicate requires non-fused, unquantized MLA preprocessing")
         self.dtype = kv_cache_dtype_str_to_dtype(
             self.vllm_config.cache_config.cache_dtype, self.vllm_config.model_config
         )
@@ -1069,14 +1074,15 @@ class AscendMLAImpl(MLAAttentionImpl):
     def _q_proj_and_k_up_proj(self, x):
         q_nope, q_pe = (
             self.q_proj(x)[0]
-            .view(-1, self.num_heads, self.qk_head_dim)
+            .view(x.shape[0], self.q_projection_heads, self.qk_head_dim)
             .split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
         )
 
         # Convert from (B, N, P) to (N, B, P)
         q_nope = q_nope.transpose(0, 1)
         # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
-        ql_nope = torch.bmm(q_nope, self.W_UK_T)
+        weight = self.W_UK_T_dcp_group if self.dcp_q_replicate_enabled else self.W_UK_T
+        ql_nope = torch.bmm(q_nope, weight)
         # Convert from (N, B, L) to (B, N, L)
         return ql_nope.transpose(0, 1), q_pe
 
@@ -1136,6 +1142,10 @@ class AscendMLAImpl(MLAAttentionImpl):
             W_UK.permute(1, 2, 0).contiguous(),  # (L, N, P) -> (N, P, L)
             prefer_copy=True,
         )
+        if self.dcp_q_replicate_enabled:
+            group_weight = get_dcp_group().all_gather(W_UK.permute(1, 2, 0).contiguous(), dim=0)
+            group_weight = maybe_trans_nz(group_weight)
+            replace_parameter(self, "W_UK_T_dcp_group", group_weight, prefer_copy=True)
         self.mlapo_W_UK_T = self.W_UK_T
 
         if self.enable_mlapo:
@@ -2093,7 +2103,12 @@ class AscendMLAImpl(MLAAttentionImpl):
         num_prefill_kv_tokens = self._get_num_prefill_kv_tokens(attn_metadata)
         prefill_kv_no_split = kv_no_split[num_decode_tokens : num_decode_tokens + num_prefill_kv_tokens]
         prefill_q_c = q_c[num_decode_tokens:num_actual_tokens]
-        prefill_q = self.q_proj(prefill_q_c)[0].view(-1, self.num_heads, self.qk_head_dim)
+        if self.dcp_q_replicate_enabled:
+            # Preserve the local GEMM width and its rounding behavior.
+            prefill_q = self.q_proj.forward_local(prefill_q_c)[0]
+        else:
+            prefill_q = self.q_proj(prefill_q_c)[0]
+        prefill_q = prefill_q.view(prefill_q_c.shape[0], self.num_heads, self.qk_head_dim)
         prefill_q_pe = prefill_q[..., self.qk_nope_head_dim :]
         prefill_q_nope = prefill_q[..., : self.qk_nope_head_dim]
         cos = attn_metadata.prefill.cos
