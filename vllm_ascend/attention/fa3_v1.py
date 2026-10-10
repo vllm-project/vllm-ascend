@@ -8,6 +8,28 @@ from vllm_ascend.attention.attention_v1 import (
 )
 
 
+def _as_fa3_paged_cache(cache: torch.Tensor) -> tuple[torch.Tensor, int]:
+    """Expose strided physical pages to FA3 without copying the KV cache.
+
+    FA3 addresses pages as contiguous storage, ignoring tensor block strides.
+    Ascend can interleave K/V pages, or pad pages, so expose the intervening
+    storage as unused pages and scale the page table by the physical stride.
+    The final view ends at the last valid page, not the end of its padding.
+    """
+    num_blocks, block_size, num_heads, head_size = cache.shape
+    if num_blocks == 0:
+        return cache, 1
+    page_elements = block_size * num_heads * head_size
+    inner_strides = (num_heads * head_size, head_size, 1)
+    page_step, remainder = divmod(cache.stride(0), page_elements)
+    if remainder or page_step < 1 or cache.stride()[1:] != inner_strides:
+        raise ValueError("FA3 requires dense inner pages and a block stride divisible by the page size")
+    if page_step == 1:
+        return cache, page_step
+    shape = ((num_blocks - 1) * page_step + 1, block_size, num_heads, head_size)
+    return cache.as_strided(shape, (page_elements, *inner_strides)), page_step
+
+
 class AscendFABackend(AttentionBackend):
     def __init__(self):
         super().__init__()
@@ -75,6 +97,14 @@ class AscendFAImpl(AscendAttentionBackendImpl):
             num_block, block_size, self.num_kv_heads, self.head_size
         )
 
+        key_fa_blk, key_page_step = _as_fa3_paged_cache(key_fa_blk)
+        value_fa_blk, value_page_step = _as_fa3_paged_cache(value_fa_blk)
+        if key_page_step != value_page_step:
+            raise ValueError("FA3 requires matching K and V physical page strides")
+        if key_page_step != 1:
+            # Preserve padding/sentinel entries; only valid page IDs are mapped.
+            block_table = torch.where(block_table >= 0, block_table * key_page_step, block_table)
+
         attn_output = _fa3_fn(
             query,
             key_fa_blk,
@@ -119,17 +149,24 @@ class AscendFAImpl(AscendAttentionBackendImpl):
                     attn_metadata.block_tables[:num_decodes, :],
                     attn_metadata.query_start_loc[: num_decodes + 1],
                     attn_metadata.seq_lens[:num_decodes].npu(),
-                    False,
+                    # Speculative decode verifies multiple tokens per request;
+                    # earlier queries must not attend to later draft tokens.
+                    num_decode_tokens > num_decodes,
                     max(attn_metadata.seq_lens[:num_decodes]),
                 )
             )
 
         if num_prefills > 0:
+            prefill_query_start_loc = attn_metadata.query_start_loc
+            if num_decode_tokens > 0:
+                # Query was sliced above. Rebase only mixed batches; pure
+                # prefill already starts at zero and needs no device operation.
+                prefill_query_start_loc = prefill_query_start_loc[num_decodes:] - num_decode_tokens
             outputs.append(
                 self._flash_attn_with_kvcache(
                     query[num_decode_tokens:],
-                    attn_metadata.block_tables[num_decode_tokens:, :],
-                    attn_metadata.query_start_loc[num_decodes:],
+                    attn_metadata.block_tables[num_decodes:, :],
+                    prefill_query_start_loc,
                     attn_metadata.seq_lens[num_decodes:].npu(),
                     True,  # enable causal for prefill
                     max(attn_metadata.seq_lens[num_decodes:]),
