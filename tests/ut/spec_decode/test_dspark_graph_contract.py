@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from contextlib import contextmanager, nullcontext
+from dataclasses import dataclass
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -31,6 +32,66 @@ def _speculator(**attributes):
     for name, value in attributes.items():
         setattr(speculator, name, value)
     return speculator
+
+
+@pytest.mark.parametrize(
+    "av,dummy,profile,skip_attention,expected_requests,reuse_sync",
+    [
+        (True, False, False, False, 16, False),
+        (True, True, False, False, 1, False),
+        (False, False, False, False, 16, True),
+        (False, True, False, False, 96, True),
+        (True, True, True, False, 96, True),
+        (True, True, True, True, 96, False),
+    ],
+)
+def test_av_propose_resyncs_without_target_dummy_capacity(
+    monkeypatch, av, dummy, profile, skip_attention, expected_requests, reuse_sync
+):
+    @dataclass
+    class Batch:
+        num_reqs: int
+        num_tokens: int
+        is_prefilling_np: np.ndarray
+
+    batch = Batch(96 if dummy else 16, 96, np.zeros(96, dtype=np.bool_))
+    target_sync = object()
+    parent = MagicMock(return_value="draft")
+    monkeypatch.setattr(DSparkSpeculator, "propose", parent)
+    monkeypatch.setattr(speculator_module, "build_attn_metadata_wrapper", nullcontext)
+    monkeypatch.setattr(speculator_module, "build_attn_metadata_factory", lambda *a, **kw: nullcontext())
+    monkeypatch.setattr(AscendDSparkSpeculator, "attn_vllm_config", property(lambda self: self.vllm_config))
+    speculator = _speculator(
+        enable_adaptive_verification=av,
+        use_dcp=False,
+        max_num_tokens=512,
+        input_buffers=SimpleNamespace(positions=object()),
+        vllm_config=SimpleNamespace(parallel_config=object()),
+    )
+    result = speculator.propose(
+        batch,
+        {},
+        {},
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        dp_sync=target_sync,
+        dummy_run=dummy,
+        is_profile=profile,
+        skip_attn_for_dummy_run=skip_attention,
+    )
+    forwarded = parent.call_args.args
+    assert result == "draft"
+    assert forwarded[0].num_reqs == expected_requests
+    assert forwarded[0].num_tokens == 96
+    assert forwarded[11] is (target_sync if reuse_sync else None)
+    assert batch.num_reqs == (96 if dummy else 16)
+    assert forwarded[12] is dummy
 
 
 def test_set_attn_preserves_cache_group_order(monkeypatch):

@@ -16,6 +16,7 @@
 # This file is a part of the vllm-ascend project.
 #
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from typing import Any, cast
 
 import numpy as np
@@ -421,9 +422,15 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: bool = False,
     ) -> torch.Tensor:
+        sync_state = dp_sync
+        if self.enable_adaptive_verification and not is_profile:
+            # AV target graphs pad request capacity independently of real requests.
+            # Let the draft negotiate its own shape instead of reusing that capacity.
+            sync_state = None
+            if dummy_run and not skip_attn_for_dummy_run:
+                input_batch = replace(input_batch, num_reqs=1)
         self.input_batch = input_batch
         assert self.input_batch is not None
-        sync_state = dp_sync
         if dummy_run and skip_attn_for_dummy_run:
             # Profiling runs the draft with its own query token count, which
             # can differ from the target batch. Let forward_context coordinate
