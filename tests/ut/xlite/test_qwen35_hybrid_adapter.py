@@ -169,6 +169,9 @@ def _hybrid_self():
         hidden_states=torch.zeros(1, 16, dtype=torch.float32),
         device="cpu",
         _xlite_hybrid_state_refs=[],
+        # referenced by the completion log on branches that carry the
+        # decode-only prototype state
+        _xlite_native_gdn_groups=[],
     )
 
 
@@ -184,14 +187,23 @@ def test_adapt_hybrid_kv_caches_layout():
         torch.zeros(3, cfg.block_size, cfg.n_kv_heads, cfg.head_dim),
     ]
     caches = [
-        [],  # unused for the GDN layer in the batch-major layout
+        [],  # unused for the GDN layer; the adapter builds slot-major states
         full_kv,
     ]
     adapted = XliteWrapper._adapt_hybrid_kv_caches(self, caches)
 
     assert len(adapted) == 2
-    conv, ssm = adapted[0]
-    assert conv.shape == (cfg.max_batch_size, conv_dim, cfg.linear_conv_kernel_dim)
-    assert ssm.shape == (cfg.max_batch_size, cfg.linear_num_v_heads, cfg.linear_key_head_dim, cfg.linear_value_head_dim)
+    conv_b, ssm_b = adapted[0]
+    assert conv_b.shape == (cfg.max_batch_size, conv_dim, cfg.linear_conv_kernel_dim)
+    assert ssm_b.shape == (cfg.max_batch_size, cfg.linear_num_v_heads, cfg.linear_key_head_dim, cfg.linear_value_head_dim)
     assert adapted[1][0].data_ptr() == caches[1][0].data_ptr()  # full layers pass through
-    assert len(self._xlite_hybrid_state_refs) == 2  # conv + ssm kept alive
+    # Slot-major pool: slot 0 is NULL, so the persistent pool is max_batch+1 rows.
+    num_slots = cfg.max_batch_size + 1
+    assert len(self._xlite_hybrid_persistent) == 1  # one GDN layer group
+    conv_p, ssm_p = self._xlite_hybrid_persistent[0]
+    assert conv_p.shape == (num_slots, conv_dim, cfg.linear_conv_kernel_dim)
+    assert ssm_p.shape == (num_slots, cfg.linear_num_v_heads, cfg.linear_key_head_dim, cfg.linear_value_head_dim)
+    assert self._xlite_hybrid_free_slots == list(range(1, num_slots))
+    assert self._xlite_hybrid_block_to_slot == {}
+    # Everything stays alive for the C++ runtime.
+    assert len(self._xlite_hybrid_state_refs) == 4  # persistent + batch, conv + ssm
