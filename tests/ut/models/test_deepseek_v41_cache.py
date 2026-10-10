@@ -31,6 +31,7 @@ from tests.deepseek_v41_utils import (
     select_index_topk,
 )
 from vllm_ascend.attention import dsa_v41
+from vllm_ascend.attention.context_parallel import dsa_cp, dsa_v41_cp
 from vllm_ascend.attention.dsa_v41 import (
     AscendDSAV41Impl,
     AscendDSAV41MetadataBuilder,
@@ -51,6 +52,7 @@ from vllm_ascend.models.deepseek_v41.cache_config import (
     group_cache_specs,
     is_deepseek_v41_cache,
     make_cache_groups,
+    make_folded_index_cache_spec,
 )
 from vllm_ascend.models.deepseek_v41.compressor import DeepseekV41Compressor
 from vllm_ascend.models.deepseek_v41.model import build_layer_plan
@@ -66,9 +68,11 @@ def mock_npu_rms_norm(monkeypatch):
 
     monkeypatch.setattr(torch_npu, "npu_rms_norm", rms_norm)
     monkeypatch.setattr(torch.Tensor, "pin_memory", lambda self: self)
+    monkeypatch.setattr(dsa_v41, "get_ascend_config", lambda: SimpleNamespace(multistream_dsv4_dsa_overlap=True))
     vllm_config = MagicMock()
     vllm_config.compilation_config.custom_ops = ["all"]
     vllm_config.quant_config = None
+    vllm_config.parallel_config.prefill_context_parallel_size = 1
     with set_current_vllm_config(vllm_config):
         yield
 
@@ -131,7 +135,11 @@ def collect_specs(runtime, prefix="model"):
     return build_v41_cache_specs(runtime.model_config.hf_text_config, runtime, prefix)
 
 
-def test_compressor_registers_state_cache_and_preserves_norm_weights(config, runtime):
+@pytest.mark.parametrize("packed", [False, True])
+def test_compressor_registers_state_cache_and_preserves_norm_weights(config, runtime, monkeypatch, packed):
+    from vllm_ascend.core.kv_cache_interface import AscendCircularBufferSpec
+
+    monkeypatch.setattr("vllm_ascend.models.deepseek_v41.compressor.uses_a5_packed_cache", lambda: packed)
     runtime.scheduler_config.max_num_batched_tokens = 8
     compressor = DeepseekV41Compressor(config, 2, runtime, prefix="compressor")
     state = compressor.state_cache
@@ -141,6 +149,7 @@ def test_compressor_registers_state_cache_and_preserves_norm_weights(config, run
     assert spec.dtype == torch.float32
     assert spec.block_size == 32
     assert spec.head_size == 2 * config.head_dim
+    assert type(spec) is (AscendCircularBufferSpec if packed else CircularBufferSpec)
     assert compressor.norm.weight.dtype == torch.bfloat16
     assert set(compressor.state_dict()) == {"wkv.weight", "wgate.weight", "norm.weight"}
 
@@ -210,6 +219,56 @@ def test_twelve_groups_share_four_layer_slots(config, runtime):
                 assert key.dtype == torch.int8 and scale.dtype == torch.float16
                 assert scale.data_ptr() - key.data_ptr() == storage_block_size * spec.head_size
                 assert scale.shape == (blocks, storage_block_size, 1, 1)
+
+
+def test_candidate_source_folded_index_cache_is_in_same_physical_slot(runtime):
+    specs = collect_specs(runtime)
+    name = "model.layers.20.self_attn.indexer.k_cache_folded"
+    specs[name] = make_folded_index_cache_spec(block_size=runtime.cache_config.block_size)
+    index_name = name.removesuffix("_folded")
+    long_name = name.removesuffix(".indexer.k_cache_folded") + ".long_kv_cache"
+    page_sizes, tuples = get_layer_tuples(specs)
+    source_slot = next(i for i, slot in enumerate(tuples) if long_name in slot)
+    assert tuples[source_slot][:3] == (long_name, index_name, name)
+    assert page_sizes[source_slot] >= sum(specs[layer].unpadded_page_size_bytes for layer in tuples[source_slot][:3])
+    groups = make_cache_groups(group_cache_specs(specs))
+    planned = get_deepseek_v41_kv_cache_config(runtime, groups, get_deepseek_v41_pool_bytes_per_block(groups) * 2)
+    assert planned.kv_cache_tensors[source_slot].layers[:3] == [long_name, index_name, name]
+    assert planned.kv_cache_tensors[source_slot].block_stride == page_sizes[source_slot]
+
+
+@pytest.mark.parametrize("block_size", [32, 64, 128])
+def test_mrv2_folded_indexer_view_does_not_alias_long_kv(runtime, monkeypatch, block_size):
+    from vllm_ascend.worker.v2 import attn_utils
+
+    runtime.cache_config.block_size = block_size
+    specs = collect_specs(runtime)
+    folded = "model.layers.20.self_attn.indexer.k_cache_folded"
+    index = folded.removesuffix("_folded")
+    long_kv = folded.removesuffix(".indexer.k_cache_folded") + ".long_kv_cache"
+    specs[folded] = make_folded_index_cache_spec(block_size=runtime.cache_config.block_size)
+    groups = make_cache_groups(group_cache_specs(specs))
+    planned = get_deepseek_v41_kv_cache_config(runtime, groups, get_deepseek_v41_pool_bytes_per_block(groups) * 2)
+    layer_specs = attn_utils._get_layer_kv_cache_specs(planned)
+    allocation = next(d for d in planned.kv_cache_tensors if folded in d.layers)
+    backing = torch.zeros(allocation.size, dtype=torch.int8)
+    backend = SimpleNamespace(get_kv_cache_shape=lambda *shape: shape)
+    names = [long_kv, index, folded]
+    attn_groups = [
+        SimpleNamespace(kv_cache_group_id=i, kv_cache_spec=layer_specs[name], layer_names=[name], backend=backend)
+        for i, name in enumerate(names)
+    ]
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: runtime)
+    monkeypatch.setattr(attn_utils, "_is_dsv4_model", lambda _: False)
+    views = attn_utils._reshape_kv_cache_v2(
+        attn_groups, dict.fromkeys(names, backing), "auto", [runtime.cache_config.block_size] * 3, {}, planned
+    )
+    expected_offset = layer_specs[long_kv].unpadded_page_size_bytes + layer_specs[index].unpadded_page_size_bytes
+    assert views[folded].data_ptr() - backing.data_ptr() == expected_offset
+    assert views[folded].stride(0) * views[folded].element_size() == allocation.block_stride
+    views[folded].fill_(7)
+    assert torch.count_nonzero(views[long_kv]) == 0
+    assert all(torch.count_nonzero(part) == 0 for part in views[index])
 
 
 def test_production_layout_matches_design(config, runtime):
@@ -786,6 +845,41 @@ def test_full_graph_capture_keeps_empty_compressed_descriptor_nonzero(runtime, n
 
 
 @pytest.mark.parametrize("deferred", [False, True])
+@pytest.mark.parametrize("seq_len", [1, 2, 3])
+def test_async_compressed_lengths_use_device_values_at_rejection_boundary(runtime, deferred, seq_len):
+    spec = collect_specs(runtime)["model.layers.2.self_attn.long_kv_cache"]
+    builder = AscendDSAV41MetadataBuilder(spec, [], runtime, torch.device("cpu"))
+    if deferred:
+        builder.enable_device_metadata()
+    common = SimpleNamespace(
+        slot_mapping=torch.tensor([seq_len - 1]),
+        block_table_tensor=torch.tensor([[0], [1]]),
+        query_start_loc=torch.tensor([0, 1, 1]),
+        query_start_loc_cpu=torch.tensor([0, 1, 1]),
+        seq_lens=torch.tensor([seq_len, 999]),
+        seq_lens_cpu=None,
+        _seq_lens_cpu=torch.tensor([seq_len + 5, 999]),
+        positions=torch.tensor([seq_len - 1]),
+        num_reqs=2,
+        num_actual_tokens=1,
+        num_input_tokens=1,
+        max_query_len=1,
+        max_seq_len=seq_len + 5,
+        is_prefilling=torch.tensor([False, False]),
+    )
+    metadata = builder.build(0, common, num_actual_reqs=1)
+    for task in builder.take_device_metadata_tasks():
+        task.run()
+
+    # An optimistic C2 bound can be nonzero while no complete pair exists.
+    # Padding and rejected tokens must never become readable cache entries.
+    assert metadata.max_cache_seq_len == (seq_len + 5) // 2
+    assert metadata.seq_lens.tolist() == [seq_len, 0]
+    assert metadata.cache_seq_lens.tolist() == [seq_len // 2, 0]
+    assert metadata.cmp_residual.tolist() == [seq_len % 2, 0]
+
+
+@pytest.mark.parametrize("deferred", [False, True])
 @pytest.mark.parametrize("query_len", [1, 3])
 def test_batch_metadata_reuses_work_and_keeps_group_slots_separate(runtime, monkeypatch, deferred, query_len):
     groups = make_cache_config(17).kv_cache_groups
@@ -1099,8 +1193,10 @@ def test_ring_source_reuses_prepared_store_coordinates(monkeypatch, num_tokens, 
         compressor=SimpleNamespace(cache=cache, state=state),
         indexer=SimpleNamespace(cache=cache),
     )
+    impl = object.__new__(AscendDSAV41Impl)
+    impl.role = SimpleNamespace(compress_ratio=2)
     AscendDSAV41Impl._write_compressed_source(
-        SimpleNamespace(role=SimpleNamespace(compress_ratio=2)),
+        impl,
         attn,
         hidden_states,
         positions,
@@ -1386,45 +1482,68 @@ def test_v41_cp_builds_device_controls_only_on_consuming_side(runtime, monkeypat
         assert builder.take_device_metadata_tasks() == ()
 
 
-@pytest.mark.parametrize("local_tokens", [0, 1, 2])
-@pytest.mark.parametrize("num_tokens", [3, 4])
-def test_v41_cp_output_exchange_only_pads_partial_ranks(monkeypatch, local_tokens, num_tokens):
-    from vllm_ascend.attention.context_parallel.dsa_v41_cp import AscendDSAV41CPImpl
+@pytest.mark.parametrize("async_metadata", [False, True])
+def test_v41_cp_source_rope_initializes_global_compressor(runtime, monkeypatch, async_metadata):
+    from vllm_ascend.attention.context_parallel.dsa_v41_cp import AscendDSAV41CPMetadataBuilder
 
-    impl = AscendDSAV41CPImpl("layer", SimpleNamespace(is_kv_source=False), None, None, None)
-    calls = []
-    monkeypatch.setattr("vllm_ascend.attention.context_parallel.dsa_v41_cp.get_tp_group", lambda: None)
-
-    def exchange(tensor, group):
-        calls.append(tensor)
-        return torch.ones((4, 2, 3))
-
-    monkeypatch.setattr("vllm_ascend.attention.context_parallel.dsa_v41_cp.restore_tp_heads", exchange)
-
-    def project(tensor, output):
-        assert output is destination
-        assert tensor.shape == (num_tokens, 2, 3)
-        output.copy_(tensor.flatten(1))
-
-    projection = SimpleNamespace(_forward_o_proj=project)
-    attn = SimpleNamespace(dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=projection)))
-    destination = torch.empty((num_tokens, 6))
-    local_output = torch.ones((local_tokens, 4, 3))
-    output = impl._project_output(
-        attn,
-        local_output,
-        torch.empty((num_tokens, 6)),
-        SimpleNamespace(swa=SimpleNamespace(cp_token_range=(0, 2, 2, 4))),
-        projected=destination,
+    spec = collect_specs(runtime)["model.layers.2.self_attn.compressor.state_cache"]
+    builder = AscendDSAV41CPMetadataBuilder(
+        spec, ["model.layers.2.self_attn.compressor.state_cache"], runtime, torch.device("cpu")
     )
-    assert output.data_ptr() == destination.data_ptr()
-    assert len(calls) == 1
-    assert calls[0].shape == (2, 4, 3)
-    assert (calls[0] is local_output) == (local_tokens == 2)
-    torch.testing.assert_close(calls[0][:local_tokens], local_output)
-    assert torch.count_nonzero(calls[0][local_tokens:]) == 0
-    assert output.shape == (num_tokens, 6)
-    torch.testing.assert_close(output, torch.ones_like(destination))
+    tables = (torch.ones(4, 2), torch.zeros(4, 2))
+    monkeypatch.setattr(dsa_v41, "get_full_cos_and_sin_dsa_for_layer", lambda _: tables)
+    if async_metadata:
+        builder.enable_device_metadata()
+    else:
+        builder.prepare_source_rope()
+    assert builder._global_builder._c2_full_source_rope is tables
+    assert builder._c2_full_source_rope is None  # Local Q does not own compression.
+    assert builder._device_metadata_enabled is async_metadata
+    assert builder._global_builder._device_metadata_enabled is async_metadata
+
+
+@pytest.mark.parametrize(
+    "world,rank,live_tokens,extra_padding",
+    [(2, 0, 5, 0), (2, 1, 5, 1), (4, 0, 5, 3), (4, 3, 5, 1), (2, 1, 0, 2), (4, 3, 0, 2)],
+)
+def test_v41_cp_preserves_tp_heads_and_flashcomm_output_extent(monkeypatch, world, rank, live_tokens, extra_padding):
+    rank %= world
+    per_rank = (live_tokens + world - 1) // world
+    token_extent = world * (per_rank + extra_padding)
+    heads, width = 2 * world, 2
+    canonical = torch.arange(live_tokens * heads * width, dtype=torch.float32).view(live_tokens, heads, width) + 1
+    peers = torch.zeros(world * per_rank, heads, width)
+    peers[:live_tokens] = canonical
+    local = peers[rank * per_rank : min((rank + 1) * per_rank, live_tokens)]
+    group = SimpleNamespace(world_size=world, device_group=object())
+
+    def exchange(recv, send, *, group):
+        # Emulate peers' all-to-all sends, while running restore_tp_heads
+        # itself unmocked to test the token/head coordinate change.
+        expected_send = peers[rank * per_rank : (rank + 1) * per_rank]
+        expected_send = torch.cat(expected_send.split(2, dim=1), dim=0)
+        torch.testing.assert_close(send, expected_send)
+        recv.copy_(peers[:, rank * 2 : (rank + 1) * 2])
+
+    def project(value, output):
+        expected = torch.zeros(token_extent, 2, width)
+        expected[:live_tokens] = canonical[:, rank * 2 : (rank + 1) * 2]
+        torch.testing.assert_close(value, expected)
+        # FlashComm reduce-scatter keeps a TP-local token buffer.
+        output.copy_(value.flatten(1).chunk(world, dim=0)[rank])
+
+    monkeypatch.setattr(dsa_v41_cp, "get_tp_group", lambda: group)
+    monkeypatch.setattr(dsa_cp.dist, "all_to_all_single", exchange)
+    impl = dsa_v41_cp.AscendDSAV41CPImpl.__new__(dsa_v41_cp.AscendDSAV41CPImpl)
+    attn = SimpleNamespace(
+        dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=SimpleNamespace(_forward_o_proj=project)))
+    )
+    output = torch.full((token_extent // world, 4), -777.0)
+    metadata = SimpleNamespace(swa=SimpleNamespace(cp_token_range=(0, 0, per_rank, 0)))
+    assert impl._project_output(attn, local, torch.empty(token_extent, 4), metadata, projected=output) is output
+    full = torch.zeros(token_extent, 4)
+    full[:live_tokens] = canonical[:, rank * 2 : (rank + 1) * 2].flatten(1)
+    torch.testing.assert_close(output, full.chunk(world)[rank])
 
 
 def test_v41_cp_consumers_reuse_local_topk_and_candidates():
@@ -1448,19 +1567,6 @@ def test_v41_cp_consumers_reuse_local_topk_and_candidates():
     assert actual.data_ptr() == indices.data_ptr()
     torch.testing.assert_close(actual, indices)
     assert shared.candidates is candidates
-
-
-@pytest.mark.parametrize("cp", [False, True])
-def test_v41_backend_routes_metadata_and_execution_together(monkeypatch, cp):
-    from vllm_ascend.attention.context_parallel import dsa_v41_cp
-    from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheBackend
-
-    monkeypatch.setattr(dsa_v41_cp, "enable_dsa_cp", lambda: cp)
-    builder, impl = dsa_v41_cp.get_v41_cp_classes()
-    assert DeepseekV41CacheBackend.get_builder_cls() is builder
-    assert not DeepseekV41CacheBackend.supports_pcp()
-    if cp:
-        assert issubclass(impl, dsa_v41_cp.AscendDSAV41CPImpl)
 
 
 def test_v41_cp_accepts_async_seq_lens_mirror(runtime, monkeypatch):
@@ -1497,73 +1603,34 @@ def test_v41_cp_resolves_own_planes_with_native_draft_metadata_present():
     assert impl._global_layer_metadata(metadata).swa is global_swa
 
 
-@pytest.mark.parametrize("overlap", [False, True])
-def test_v41_query_preparation_uses_multistream(overlap):
-    from unittest.mock import Mock
-
-    from vllm_ascend.attention.dsa_v41 import AscendDSAV41Impl
-
-    impl = AscendDSAV41Impl.__new__(AscendDSAV41Impl)
-    impl.role = SimpleNamespace(is_kv_source=True)
-    impl.multistream_preprocess = Mock(return_value=("q", "qr"))
-    impl._write_compressed_source = Mock()
-    attn = SimpleNamespace(
-        dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=SimpleNamespace(multistream_dsv4_dsa_overlap=overlap)))
+def test_dspark_v41_indices_keep_capture_addresses(runtime):
+    runtime.speculative_config = SimpleNamespace(num_speculative_tokens=3)
+    spec = AscendSlidingWindowMLASpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.bfloat16,
+        sliding_window=128,
+        cache_dtype_str="bfloat16",
+        model_version="deepseek_v41",
     )
-    metadata = SimpleNamespace(swa=SimpleNamespace(num_actual_tokens=6))
-    assert impl._prepare_queries(attn, "hidden", "positions", "cos", "sin", metadata) == ("q", "qr")
-    impl.multistream_preprocess.assert_called_once_with(attn, "hidden", "cos", "sin", metadata.swa)
-    impl._write_compressed_source.assert_called_once_with(attn, "hidden", "positions", "cos", "sin", metadata)
-
-
-@pytest.mark.parametrize("overlap", [False, True])
-def test_v41_cp_query_preparation_uses_full_inputs(overlap):
-    from unittest.mock import Mock
-
-    from vllm_ascend.attention.context_parallel.dsa_v41_cp import AscendDSAV41CPImpl
-
-    impl = AscendDSAV41CPImpl.__new__(AscendDSAV41CPImpl)
-    impl.multistream_preprocess = Mock(return_value=("q", "qr"))
-    impl._write_compressed_source = Mock()
-    attn = SimpleNamespace(
-        dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=SimpleNamespace(multistream_dsv4_dsa_overlap=overlap)))
+    builder = AscendDSAV41MetadataBuilder(spec, [], runtime, torch.device("cpu"))
+    common = _cp_common().replace(causal=False)
+    first = builder.build_for_drafting(common, 1)
+    indices_ptr = first.ori_sparse_indices.data_ptr()
+    lengths_ptr = first.ori_topk_length.data_ptr()
+    old_indices = first.ori_sparse_indices.clone()
+    common = common.replace(
+        seq_lens=torch.tensor([260, 5], dtype=torch.int32),
+        seq_lens_cpu=torch.tensor([260, 5], dtype=torch.int32),
+        max_seq_len=260,
     )
-    metadata = SimpleNamespace(swa=SimpleNamespace(num_actual_tokens=2, cp_token_range=(2, 4, 2, 6)))
-    assert impl._prepare_queries(attn, "abcdef", "positions", "cos", "sin", metadata) == ("q", "qr")
-    impl.multistream_preprocess.assert_called_once_with(attn, "abcdef", "cos", "sin", metadata.swa)
-    impl._write_compressed_source.assert_not_called()
-
-
-@pytest.mark.parametrize("overlap", [False, True])
-@pytest.mark.parametrize("local_tokens", [0, 2])
-def test_v41_cp_input_preparation_updates_empty_rank_cache(overlap, local_tokens):
-    from unittest.mock import Mock
-
-    from vllm_ascend.attention.context_parallel.dsa_v41_cp import AscendDSAV41CPImpl
-
-    impl = AscendDSAV41CPImpl.__new__(AscendDSAV41CPImpl)
-    full = torch.arange(24).reshape(6, 4)
-    global_metadata = SimpleNamespace(swa=SimpleNamespace(num_actual_tokens=5))
-    impl._global_layer_metadata = Mock(return_value=global_metadata)
-    impl._update_caches = Mock()
-    attn = SimpleNamespace(
-        dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=SimpleNamespace(multistream_dsv4_dsa_overlap=overlap)))
-    )
-    metadata = SimpleNamespace(swa=SimpleNamespace(cp_token_range=(3, 6, 3, 6), num_actual_tokens=local_tokens))
-    assert impl._prepare_inputs_and_caches(attn, full, metadata, {}) is None
-    if local_tokens == 0:
-        impl._update_caches.assert_called_once()
-        assert torch.equal(impl._update_caches.call_args.args[1], full[:5])
-        assert impl._update_caches.call_args.args[2] is global_metadata
-    else:
-        impl._update_caches.assert_not_called()
-
-
-def test_v41_cp_inherits_forward():
-    from vllm_ascend.attention.context_parallel.dsa_v41_cp import AscendDSAV41CPImpl
-    from vllm_ascend.attention.dsa_v41 import AscendDSAV41Impl
-
-    assert AscendDSAV41CPImpl.forward is AscendDSAV41Impl.forward
+    second = builder.build_for_drafting(common, 1)
+    assert second.ori_sparse_indices.data_ptr() == indices_ptr
+    assert second.ori_topk_length.data_ptr() == lengths_ptr
+    assert not torch.equal(old_indices, second.ori_sparse_indices)
+    assert second.ori_sparse_indices[0, 0, 0] == 129
+    assert first.ori_topk_length.tolist() == [131, 131, 131, 5]
 
 
 @pytest.mark.parametrize("rank", [None, 0, 1, 7])
@@ -1598,7 +1665,7 @@ def test_dspark_v41_noncausal_metadata_preserves_full_visible_block(runtime, mon
     full = builder.build_for_drafting(common, 1)
     torch.testing.assert_close(
         native.call_args.kwargs["ori_topk_length"],
-        (full.ori_sparse_indices >= 0).sum(-1, dtype=torch.int32),
+        (full.ori_sparse_indices >= 0).sum((-1, -2), dtype=torch.int32),
     )
     assert full.ori_topk_length is native.call_args.kwargs["ori_topk_length"]
     assert full.ori_mask_mode == 0
@@ -1609,7 +1676,7 @@ def test_dspark_v41_noncausal_metadata_preserves_full_visible_block(runtime, mon
     assert full.ori_sparse_indices[0, 0, : len(expected)].tolist() == expected
     assert torch.all(full.ori_sparse_indices[0, 0, len(expected) :] == -1)
     assert full.ori_sparse_indices[3, 0, :5].tolist() == list(range(5))
-    assert full.ori_topk_length[:, 0].tolist() == [len(expected)] * 3 + [5]
+    assert full.ori_topk_length.tolist() == [len(expected)] * 3 + [5]
     if rank is None:
         return
     monkeypatch.setattr(

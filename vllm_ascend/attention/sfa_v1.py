@@ -267,7 +267,7 @@ class SparseMLAMetadataState:
     remain entirely outside attention metadata and operator dispatch.
     """
 
-    def __init__(self, kv_cache_spec, vllm_config, device, indexer, kernel_block_size=128):
+    def __init__(self, kv_cache_spec, vllm_config, device, indexer, kernel_block_size=128, num_heads=None):
         block_size = kv_cache_spec.block_size
         if block_size <= 0 or block_size % kernel_block_size:
             raise ValueError("Sparse MLA block size must be a positive multiple of the SFA kernel block size.")
@@ -279,7 +279,8 @@ class SparseMLAMetadataState:
         expand_factor = max(cache_block_size // kernel_block_size, 1)
         table_width = cdiv(vllm_config.model_config.max_model_len, cache_block_size) * expand_factor
         self.block_table_buffer = torch.empty(
-            vllm_config.scheduler_config.max_num_seqs,
+            # Mixed FULL graphs can append one padding request.
+            vllm_config.scheduler_config.max_num_seqs + 1,
             table_width,
             dtype=torch.int32,
             device=device,
@@ -289,7 +290,11 @@ class SparseMLAMetadataState:
             if indexer is None:
                 raise ValueError("A5 NoPE sparse MLA requires an indexer to supply visible top-k lengths.")
             config = vllm_config.model_config.hf_text_config
-            self.num_heads = config.num_attention_heads // vllm_config.parallel_config.tensor_parallel_size
+            self.num_heads = (
+                config.num_attention_heads // vllm_config.parallel_config.tensor_parallel_size
+                if num_heads is None
+                else num_heads
+            )
             self.head_dim = config.kv_lora_rank
             self.metadata_buffer = torch.empty(SMLA_METADATA_SIZE, dtype=torch.int32, device=device)
             self.length_buffer = torch.empty(
@@ -746,12 +751,15 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             treat_short_extends_as_decodes=not self.use_pcp,
         )
         if self.nope:
-            if draft_index not in self.nope_states:
-                self.nope_states[draft_index] = SparseMLAMetadataState(
-                    self.kv_cache_spec, self.vllm_config, self.device, self.nope_indexer, self.kernel_block_size
-                )
-            self.nope_states[draft_index].prepare(metadata)
+            self._prepare_nope_metadata(metadata, draft_index)
         return metadata
+
+    def _prepare_nope_metadata(self, metadata: AscendSFAMetadata, draft_index: int | None) -> None:
+        if draft_index not in self.nope_states:
+            self.nope_states[draft_index] = SparseMLAMetadataState(
+                self.kv_cache_spec, self.vllm_config, self.device, self.nope_indexer, self.kernel_block_size
+            )
+        self.nope_states[draft_index].prepare(metadata)
 
     def build_for_cudagraph_capture(
         self,
@@ -1959,15 +1967,18 @@ class AscendSFAImpl(MLAAttentionImpl):
         # eager-mode PyTorch. Even view and slice operations can add CPU
         # overhead without launching NPU kernels. Minimize PyTorch operations
         # in this method and benchmark changes to avoid regressions.
-        if fused_type == PreprocessType.NATIVE:
-            hidden_states = self._prepare_native_hidden_states(hidden_states, attn_metadata)
-
         # Inputs and outputs may contain DP or graph padding. Keep the
         # preallocated output for the caller while running attention only on
         # the token rows described by metadata, matching upstream backends.
         hidden_states = hidden_states[:num_input_tokens]
         if gate_hidden_states is not None:
             gate_hidden_states = gate_hidden_states[:num_input_tokens]
+
+        if fused_type == PreprocessType.NATIVE:
+            # Trim in the input layout before CP adds padding and shards it.
+            hidden_states = self._prepare_native_hidden_states(hidden_states, attn_metadata)
+            if gate_hidden_states is not None:
+                gate_hidden_states = hidden_states
 
         if fused_type != PreprocessType.NATIVE:
             # Keep the raw hidden states for the indexer's k path: the fused

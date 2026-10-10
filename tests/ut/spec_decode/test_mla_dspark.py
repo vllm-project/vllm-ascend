@@ -39,7 +39,9 @@ def make_speculator():
     )
     spec.vllm_config.speculative_config = SimpleNamespace(draft_model_config=spec.draft_model_config)
     spec.num_query_per_req = 5
-    spec.input_buffers = SimpleNamespace(positions=torch.arange(20))
+    spec.input_buffers = SimpleNamespace(
+        positions=torch.arange(20), seq_lens=torch.tensor([5, 0, 0, 0], dtype=torch.int32)
+    )
     return spec
 
 
@@ -306,7 +308,10 @@ def test_replay_metadata_preserves_architecture_behavior(monkeypatch, architectu
 
     @contextmanager
     def factory(positions, pad, is_prefilling, seq_lens_cpu=None, *, attn_state=None, parallel_config=None):
-        assert seq_lens_cpu is None
+        if architecture == "MLA":
+            assert seq_lens_cpu.tolist() == [5, 0]
+        else:
+            assert seq_lens_cpu is None
         assert parallel_config is spec.vllm_config.parallel_config
         captured.update(pad=pad, is_prefilling=is_prefilling, attn_state=attn_state)
         yield

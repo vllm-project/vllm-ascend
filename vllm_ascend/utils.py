@@ -68,6 +68,7 @@ _CURRENT_STREAM = None
 _GLOBAL_STREAM = None
 _SHARED_EXPERTS_CALCULATION_STREAM = None
 _CP_CHUNKEDPREFILL_COMM_STREAM = None
+_CP_DECODE_COMM_STREAM = None
 _ASCEND_CUSTOMOP_IS_REIGISTERED = False
 _DEFAULT_BUFFER_SIZE = 200
 _MIN_DP_BUFFER_SIZE = 50
@@ -84,6 +85,15 @@ _CUSTOM_OP_BASE_DIR = (
     os.path.dirname(__file__) if os.path.isabs(__file__) else os.path.abspath(os.path.dirname(__file__))
 )
 _IS_ROT_WEIGHT_USED = None
+
+
+def is_gqa_pcp_dcp_config(model_config: Any, parallel_config: Any) -> bool:
+    """Whether a GQA/MQA model enables both PCP and DCP."""
+    return (
+        parallel_config.decode_context_parallel_size > 1
+        and parallel_config.prefill_context_parallel_size > 1
+        and not model_config.use_mla
+    )
 
 
 def extract_dsv4_layer_index(config: Any, layer_name: str) -> int:
@@ -654,6 +664,13 @@ def cp_chunkedprefill_comm_stream() -> torch.npu.Stream:
     if _CP_CHUNKEDPREFILL_COMM_STREAM is None:
         _CP_CHUNKEDPREFILL_COMM_STREAM = torch_npu.npu.Stream()
     return _CP_CHUNKEDPREFILL_COMM_STREAM
+
+
+def cp_decode_comm_stream() -> torch.npu.Stream:
+    global _CP_DECODE_COMM_STREAM
+    if _CP_DECODE_COMM_STREAM is None:
+        _CP_DECODE_COMM_STREAM = torch_npu.npu.Stream()
+    return _CP_DECODE_COMM_STREAM
 
 
 def attention_calculation_stream() -> torch.npu.Stream:

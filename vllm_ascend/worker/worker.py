@@ -84,6 +84,7 @@ from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.device_allocator.sleep_mem_optimized import SleepWakeupManager
+from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import uses_sfa_dspark_kv_transfer
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
     build_layerwise_cache_layout,
     build_layerwise_reuse_layout,
@@ -1068,16 +1069,22 @@ class NPUWorker(WorkerBase):
         self,
         kv_cache_spec: dict[str, KVCacheSpec],
         extra_config: dict[str, Any],
+        *,
+        excluded_layer_names: set[str] | None = None,
     ) -> tuple[int, int, float]:
         if not kv_cache_spec:
             return 0, 0, 1.0
+        # Match the allocation planner: persistent draft pages are not target
+        # scratch slots and must be counted once each in the physical budget.
+        excluded_layer_names = (excluded_layer_names or set()) & kv_cache_spec.keys()
+        target_specs = {name: spec for name, spec in kv_cache_spec.items() if name not in excluded_layer_names}
         base_layers = self.model_config.get_num_layers(self.parallel_config)
-        physical_layers = {get_layerwise_physical_layer_index(layer_name, base_layers) for layer_name in kv_cache_spec}
+        physical_layers = {get_layerwise_physical_layer_index(layer_name, base_layers) for layer_name in target_specs}
         num_layers = len(physical_layers)
         if num_layers < base_layers:
             return num_layers, num_layers, 1.0
         reuse_layout = build_layerwise_reuse_layout(
-            kv_cache_spec,
+            target_specs,
             base_layers,
             extra_config,
         )
@@ -1086,7 +1093,7 @@ class NPUWorker(WorkerBase):
         num_buffer_assignments = len(reuse_layout.buffer_slots)
 
         logical_page_bytes = sum(spec.page_size_bytes for spec in kv_cache_spec.values())
-        physical_page_bytes = 0
+        physical_page_bytes = sum(kv_cache_spec[name].page_size_bytes for name in excluded_layer_names)
         for slot in reuse_layout.buffer_slots:
             physical_page_bytes += reuse_layout.layer_cache_specs[slot[0]].main.spec.page_size_bytes
             for layer in slot:
@@ -1100,9 +1107,17 @@ class NPUWorker(WorkerBase):
         kv_cache_spec = self.model_runner.get_kv_cache_spec()
         extra_config = get_layerwise_reuse_config(self.vllm_config.kv_transfer_config)
         if extra_config is not None:
+            speculator = getattr(self.model_runner, "speculator", None)
+            speculative = self.vllm_config.speculative_config
+            draft_names = (
+                set(speculator.draft_attn_layer_names)
+                if speculative is not None and speculative.method == "dspark" and speculator is not None
+                else set()
+            )
             self._gva_layerwise_memory_info = self._get_layerwise_kv_cache_memory_info(
                 kv_cache_spec,
                 extra_config,
+                excluded_layer_names=draft_names,
             )
         kvpp_config = KVPPConfig.from_vllm_config(self.vllm_config)
         if kvpp_config.size > 1:
@@ -1158,6 +1173,20 @@ class NPUWorker(WorkerBase):
 
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate NPU KV cache with the specified kv_cache_config."""
+        speculator = getattr(self.model_runner, "speculator", None)
+        speculative = self.vllm_config.speculative_config
+        if (
+            speculative is not None
+            and speculative.method == "dspark"
+            and speculator is not None
+            and (
+                uses_sfa_dspark_kv_transfer(self.vllm_config)
+                or get_layerwise_reuse_config(self.vllm_config.kv_transfer_config) is not None
+            )
+        ):
+            # Connector construction must see loader-owned draft caches before
+            # planning target layerwise scratch buffers or pool transfers.
+            kv_cache_config.dspark_draft_layer_names = tuple(sorted(speculator.draft_attn_layer_names))
         ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
         # Restrict the discardable kv_cache pool to backing cache allocations.
         # Persistent metadata created during initialize_kv_cache must stay
@@ -1243,13 +1272,21 @@ class NPUWorker(WorkerBase):
         init_distributed_environment(
             self.parallel_config.world_size, self.rank, self.distributed_init_method, self.local_rank, "hccl"
         )
-        ensure_model_parallel_initialized(
-            self.parallel_config.tensor_parallel_size,
-            self.parallel_config.pipeline_parallel_size,
-            self.parallel_config.prefill_context_parallel_size,
-            self.parallel_config.decode_context_parallel_size,
-        )
-        init_ascend_model_parallel(self.parallel_config)
+        group_config = self.vllm_config
+        if group_config.engram_config is not None and self.parallel_config.prefill_context_parallel_size > 1:
+            # Skip upstream's DP-only Engram group so Ascend can create
+            # _ENGRAM_DP once with DP x PCP ranks. Copy the config to preserve
+            # the original Engram settings for Ascend and model initialization.
+            group_config = copy.copy(group_config)
+            group_config.engram_config = None
+        with set_current_vllm_config(group_config):
+            ensure_model_parallel_initialized(
+                self.parallel_config.tensor_parallel_size,
+                self.parallel_config.pipeline_parallel_size,
+                self.parallel_config.prefill_context_parallel_size,
+                self.parallel_config.decode_context_parallel_size,
+            )
+        init_ascend_model_parallel(self.parallel_config, self.vllm_config.engram_config)
         ensure_ec_transfer_initialized(self.vllm_config)
 
     def get_supported_pooling_tasks(self):

@@ -567,6 +567,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
 
     ```bash
     unset http_proxy https_proxy ftp_proxy
+    export VLLM_USE_V2_MODEL_RUNNER=1
 
     nic_name="xxxx"                 # NIC corresponding to local_ip
     local_ip="xxxx"                 # Prefill node IP
@@ -632,6 +633,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
 
     ```bash
     unset http_proxy https_proxy ftp_proxy
+    export VLLM_USE_V2_MODEL_RUNNER=1
 
     nic_name="xxxx"                 # NIC corresponding to local_ip
     local_ip="xxxx"                 # Decode node IP
@@ -669,7 +671,8 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
         --max-num-batched-tokens 32768 \
         --trust-remote-code \
         --quantization ascend \
-        --max-num-seqs 64 \
+        --max-num-seqs 128 \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --gpu-memory-utilization 0.92 \
         --limit-mm-per-prompt '{"image":1,"video":0}' \
         --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true}' \
@@ -929,14 +932,16 @@ Key Parameter Descriptions:
 
 **Prefill node-specific configurations:**
 
+- `--language-model-only` (optional): For text-only tests, add this flag as needed based on the available KV cache capacity to avoid reserving memory for multimodal processing. Follow the FLASHCOMM1 compatibility guidance in [Section 5.5](#55-multimodal-and-vit-dp-optional) when enabling this flag.
 - `--pipeline-parallel-size` (A3 Prefill: `2`): Splits the 60 MiniMax-M3 layers across two pipeline stages. A3 sets `VLLM_PP_LAYER_PARTITION=30,30` and also writes `pp_layer_partition` into the Mooncake extra config. The 950DT products launch uses `--pp-size 1` on both Prefill and Decode (no pipeline parallel), so no layer partition is needed.
 - `--enforce-eager`: Prefill nodes do not capture CUDA/ACL graphs.
 - `--speculative-config '{"method":"eagle3", ...}'`: Enables the `MiniMax-M3-EAGLE3-GQA` draft model. Do not replace this with GLM MTP options.
 
 **Decode node-specific configurations:**
 
+- `--language-model-only` (optional): For text-only tests, add this flag as needed based on the available KV cache capacity to avoid reserving memory for multimodal processing.
 - `"max_cudagraph_capture_size"` (optional, omitted by default): Limits the maximum decode batch size covered by ACL graph capture and the graph memory reserved for it; the program default is `512`. With EAGLE3 speculative decoding, each request is expanded to `1 + num_speculative_tokens` tokens in one decode step (`4` tokens when `num_speculative_tokens=3`). Since DP distributes requests per rank, the per-rank batch size matters: for example, with `DP2` and `--max-num-seqs 256`, each DP rank handles 128 requests, producing `4 × 128 = 512` tokens per step — exactly at the default limit. If concurrency rises to 257, one DP rank handles 129 requests, giving `4 × 129 = 516 > 512`; batches above 512 skip graph capture and fall back to eager execution, lowering decode throughput. In that case set `"max_cudagraph_capture_size":1024` in `--compilation-config` (e.g., `--compilation-config '{"max_cudagraph_capture_size":1024}'`). Because a larger capture size reserves additional NPU memory, the configurations in this tutorial keep the default; add this option only when your target concurrency requires it.
-- `--max-num-seqs 256`: Decode concurrency used by the verified 950DT products 1P1D launch. A3 uses `64`.
+- `--max-num-seqs 256`: Decode concurrency used by the verified 950DT products 1P1D launch. A3 uses `128`.
 
 **Mooncake KV transfer configuration (`--kv-transfer-config`):**
 
@@ -1071,6 +1076,7 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
 
     ```bash
     unset http_proxy https_proxy ftp_proxy
+    export VLLM_USE_V2_MODEL_RUNNER=1
 
     nic_name="xxxx"                 # NIC corresponding to local_ip
     local_ip="xxxx"                 # Prefill node IP
@@ -1156,6 +1162,7 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
 
     ```bash
     unset http_proxy https_proxy ftp_proxy
+    export VLLM_USE_V2_MODEL_RUNNER=1
 
     nic_name="xxxx"                 # NIC corresponding to local_ip
     local_ip="xxxx"                 # Decode node IP
@@ -1197,7 +1204,8 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
         --max-num-batched-tokens 32768 \
         --trust-remote-code \
         --quantization ascend \
-        --max-num-seqs 64 \
+        --max-num-seqs 128 \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --gpu-memory-utilization 0.92 \
         --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true}' \
         --speculative-config '{"method":"eagle3","model":"${EAGLE3_WEIGHT_PATH}","num_speculative_tokens":3}' \

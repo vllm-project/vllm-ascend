@@ -1374,6 +1374,29 @@ class TestMemcacheBackendMethods(unittest.TestCase):
 
         self.assertEqual(b.batch_is_readable(["k1", "k2", "k3"]), [True, False, False])
 
+    def test_batch_is_readable_treats_absent_key_as_miss(self):
+        b = self._make_backend()
+        readable = SimpleNamespace(size=lambda: 64, gva_list=lambda: [0x1000])
+        writing = SimpleNamespace(size=lambda: 64, gva_list=lambda: [0])
+        b.store.batch_get_key_info.return_value = [readable, None, writing]
+
+        self.assertEqual(b.batch_is_readable(["hit", "missing", "writing"]), [True, False, False])
+        b.store.batch_get_key_info.assert_called_once_with(["hit", "missing", "writing"])
+        b.store.batch_get_into.assert_not_called()
+
+    def test_batch_is_readable_rejects_malformed_non_null_metadata(self):
+        for info in (
+            object(),
+            SimpleNamespace(size=lambda: "invalid", gva_list=lambda: [0x1000]),
+            SimpleNamespace(size=lambda: 64, gva_list=lambda: ["invalid"]),
+        ):
+            with self.subTest(info=info):
+                b = self._make_backend()
+                b.store.batch_get_key_info.return_value = [None, info]
+
+                with self.assertRaises(backend_base.BatchResultShapeError):
+                    b.batch_is_readable(["missing", "malformed"])
+
     def test_batch_is_readable_rejects_misaligned_metadata(self):
         b = self._make_backend()
         b.store.batch_get_key_info.return_value = []
