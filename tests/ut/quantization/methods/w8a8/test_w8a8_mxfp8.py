@@ -293,10 +293,13 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
                 self.assertEqual(len(experts), self.num_experts)
                 for expert, expected in zip(experts, original.unbind(0)):
                     if name.endswith("scale"):
-                        expected = expected.reshape(expected.shape[0], -1, 2)
+                        expected = expected.reshape(expected.shape[0], -1, 2).view(torch.float8_e8m0fnu)
                     self.assertEqual(expert.dtype, expected.dtype)
                     self.assertTrue(expert.is_contiguous())
-                    torch.testing.assert_close(expert.float(), expected.float(), rtol=0, atol=0)
+                    if name.endswith("scale"):
+                        torch.testing.assert_close(expert.view(torch.uint8), expected.view(torch.uint8), rtol=0, atol=0)
+                    else:
+                        torch.testing.assert_close(expert.float(), expected.float(), rtol=0, atol=0)
         self.scheme.process_weights_after_loading(layer)
         self.assertIs(layer.cann_mega_moe_w13_weight_list, weights.w1)
 

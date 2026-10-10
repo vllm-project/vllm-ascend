@@ -391,15 +391,6 @@ class NPUModelRunner(GPUModelRunner):
             self.max_num_reqs + 2,  # type: ignore[has-type]
             dtype=torch.int32,
         )
-        self.group_len = self._make_buffer(
-            vllm_config.scheduler_config.max_num_batched_tokens , dtype=torch.int32
-        )        
-        self.group_key_idx = self._make_buffer(
-           vllm_config.scheduler_config.max_num_batched_tokens , dtype=torch.int32
-        )        
-        self.group_key_cache_idx = self._make_buffer(
-            vllm_config.scheduler_config.max_num_batched_tokens, dtype=torch.int32
-        )
 
         # Now, query_start_loc is padded.
         # But gdn needs an unpadded one.
@@ -3674,9 +3665,6 @@ class NPUModelRunner(GPUModelRunner):
             attn_state=self.attn_state,
             decode_token_per_req=self.decode_token_per_req,
             context_parallel_metadata=self.long_seq_metadata,
-            group_len = self.group_len.gpu[:num_reqs_padded],
-            group_key_idx = self.group_key_idx.gpu[:num_reqs_padded],
-            group_key_cache_idx = self.group_key_cache_idx.gpu[:num_reqs_padded],
             req_ids_tensor=(
                 self._offload_req_ids_tensor.gpu[:num_reqs_padded]
                 if self._offload_req_ids_tensor is not None

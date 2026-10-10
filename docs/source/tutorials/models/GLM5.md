@@ -562,7 +562,7 @@ In addition to all single-node parameters described in [Single-Node Online Deplo
 
 We'd like to show the deployment guide of `GLM-5` on multi-node environment with Prefill-Decode (PD) disaggregation for better performance. *Prefill-Decode Disaggregation* refers to the separation of the prefill stage and the decode stage across different nodes to improve throughput and latency.
 
-In the PD disaggregation scenario, Mooncake is used as the KV cache transfer connector between the prefill and decode nodes. Please refer to [KV Cache Pool (Ascend Store) Deployment Guide](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/user_guide/feature_guide/kv_pool.md) for the Mooncake configuration.
+In the PD disaggregation scenario, Mooncake is used as the KV cache transfer connector between the prefill and decode nodes. Please refer to [KV Cache Pool (Ascend Store) Deployment Guide](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/user_guide/feature_guide/kv_cache_pool_ascend_store.md) for the Mooncake configuration.
 
 #### 5.3.1 Prefill-Decode Disaggregation (950DT Products)
 
@@ -1080,7 +1080,7 @@ if __name__ == "__main__":
             --max-model-len 202752 \
             --kv-cache-dtype int8 \
             --attention_config.indexer_kv_dtype int8 \
-            --additional-config '{"fuse_muls_add": true, "recompute_scheduler_enable": false, "multistream_overlap_shared_expert": true, "enable_dsa_cp": true, "c8_enable_reshape_optim": true, "enable_flashcomm1": true, "enable_fused_mc2": true}' \
+            --additional-config '{"fuse_muls_add": true, "recompute_scheduler_enable": false, "multistream_overlap_shared_expert": true, "enable_dsa_cp": true, "enable_flashcomm1": true, "enable_fused_mc2": true}' \
             --max-num-batched-tokens 16384 \
             --trust-remote-code \
             --enable-prefix-caching \
@@ -1142,7 +1142,7 @@ if __name__ == "__main__":
             --max-model-len 202752 \
             --kv-cache-dtype int8 \
             --attention_config.indexer_kv_dtype int8 \
-            --additional-config '{"fuse_muls_add": true, "recompute_scheduler_enable": false, "multistream_overlap_shared_expert": true, "enable_dsa_cp": true, "c8_enable_reshape_optim": true, "enable_flashcomm1": true, "enable_fused_mc2": true}' \
+            --additional-config '{"fuse_muls_add": true, "recompute_scheduler_enable": false, "multistream_overlap_shared_expert": true, "enable_dsa_cp": true, "enable_flashcomm1": true, "enable_fused_mc2": true}' \
             --max-num-batched-tokens 16384 \
             --trust-remote-code \
             --enable-prefix-caching \
