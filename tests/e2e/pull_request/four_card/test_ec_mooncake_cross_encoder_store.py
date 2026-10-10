@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 # This file is a part of the vllm-ascend project.
 # SPDX-License-Identifier: Apache-2.0
-"""Two-card service E2E for Ascend Mooncake encoder-output transfer."""
+"""Four-card regression for cross-Encoder Mooncake Store transfers."""
 
 from __future__ import annotations
 
@@ -36,12 +36,10 @@ MODEL = "Qwen/Qwen3.5-9B"
 MAX_MODEL_LEN = 4096
 MAX_NUM_SEQS = 2
 NORMAL_STAGING_BYTES = 128 * 1024 * 1024
-FORCED_FALLBACK_STAGING_BYTES = 1
 CONSUMER_BUFFER_BYTES = 256 * 1024 * 1024
 BOUNCE_ARENA_BYTES = 2 * 1024 * 1024
 REQUEST_TIMEOUT_SECONDS = 600
-STORE_RETRY_DELAY_SECONDS = 1
-STORE_PUT_TIMEOUT_SECONDS = 30
+STORE_LOG_TIMEOUT_SECONDS = 30
 STORE_MASTER_START_TIMEOUT_SECONDS = 30
 STORE_MASTER_STOP_TIMEOUT_SECONDS = 10
 STORE_PUT_LOG = "Stored encoder output in Mooncake Store"
@@ -65,11 +63,17 @@ class _CapturingEPDServer(RemoteEPDServer):
                     self.output_lines.append(rendered)
                     print(rendered, end="")
 
-    def has_store_hit(self) -> bool:
-        return any(STORE_HIT_LOG in line for line in self.output_lines)
-
-    def has_store_put(self) -> bool:
-        return any(STORE_PUT_LOG in line for line in self.output_lines)
+    def wait_for_output(self, marker: str, process_prefix: str | None = None) -> bool:
+        deadline = time.monotonic() + STORE_LOG_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            if any(
+                marker in line
+                and (process_prefix is None or process_prefix in line)
+                for line in self.output_lines
+            ):
+                return True
+            time.sleep(0.1)
+        return False
 
 
 def _wait_for_mooncake_master(
@@ -376,109 +380,6 @@ def _common_server_args() -> list[str]:
     ]
 
 
-def _run_epd(
-    baseline_outputs: dict[str, str],
-    producer_staging_bytes: int,
-    repeat: int,
-    cross_encoder_cache: bool = False,
-    mooncake_config_path: str | None = None,
-) -> None:
-    encode_port = get_open_port()
-    pd_port = get_open_port()
-    reservation_port = get_open_port()
-
-    producer_extra_config: dict[str, Any] = {
-        "mooncake_protocol": "ascend",
-        "ascend_mooncake_bounce_arena_size": BOUNCE_ARENA_BYTES,
-    }
-    if cross_encoder_cache:
-        producer_extra_config.update(
-            {
-                "cross_encoder_cache": True,
-                # Isolate this run so its first request must publish a miss.
-                "embedding_cache_prefix": f"e2e-{uuid.uuid4().hex}",
-            }
-        )
-
-    producer_config = {
-        "ec_connector": "ECMooncakeConnector",
-        "ec_role": "ec_producer",
-        "ec_buffer_size": producer_staging_bytes,
-        "ec_buffer_device": "npu",
-        "ec_connector_extra_config": producer_extra_config,
-    }
-    consumer_config = {
-        "ec_connector": "ECMooncakeConnector",
-        "ec_role": "ec_consumer",
-        "ec_ip": "127.0.0.1",
-        "ec_port": reservation_port,
-        "ec_buffer_size": CONSUMER_BUFFER_BYTES,
-        "ec_buffer_device": "npu",
-        "ec_connector_extra_config": {"mooncake_protocol": "ascend"},
-    }
-    common_args = _common_server_args()
-    server_args = [
-        [
-            "--port",
-            str(encode_port),
-            *common_args,
-            "--gpu-memory-utilization",
-            "0.1",
-            "--enable-request-id-headers",
-            "--ec-transfer-config",
-            json.dumps(producer_config),
-        ],
-        [
-            "--port",
-            str(pd_port),
-            *common_args,
-            "--gpu-memory-utilization",
-            "0.7",
-            "--enable-mm-embeds",
-            "--enable-request-id-headers",
-            "--ec-transfer-config",
-            json.dumps(consumer_config),
-        ],
-    ]
-    env_dict = {
-        "EC_MOONCAKE_RESERVATION_PORT": str(reservation_port),
-        "MOONCAKE_EC_PROTOCOL": "ascend",
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
-    }
-    if cross_encoder_cache:
-        assert mooncake_config_path is not None
-        env_dict["MOONCAKE_CONFIG_PATH"] = mooncake_config_path
-        env_dict["VLLM_SERVER_DEV_MODE"] = "1"
-
-    with _CapturingEPDServer(vllm_serve_args=server_args, env_dict=env_dict) as server:
-        for attempt in range(repeat):
-            assert _run_epd_requests(encode_port, pd_port, reservation_port) == baseline_outputs
-            if cross_encoder_cache:
-                time.sleep(STORE_RETRY_DELAY_SECONDS)
-                if server.has_store_hit():
-                    return
-                if attempt == 0:
-                    deadline = time.monotonic() + STORE_PUT_TIMEOUT_SECONDS
-                    while not server.has_store_put() and time.monotonic() < deadline:
-                        time.sleep(0.1)
-                    if not server.has_store_put():
-                        pytest.fail(
-                            "initial requests never stored an encoder output "
-                            "in Mooncake Store"
-                        )
-                if attempt + 1 < repeat:
-                    response = requests.post(
-                        f"http://127.0.0.1:{encode_port}/reset_encoder_cache",
-                        timeout=REQUEST_TIMEOUT_SECONDS,
-                    )
-                    response.raise_for_status()
-    if cross_encoder_cache:
-        pytest.fail(
-            "successful Store PUT was observed, but repeated requests never "
-            "loaded an encoder output from Mooncake Store"
-        )
-
-
 @pytest.fixture(scope="module")
 def baseline_outputs() -> dict[str, str]:
     """Run the single-server reference once for both EPD paths."""
@@ -513,22 +414,58 @@ def baseline_outputs() -> dict[str, str]:
         return _run_requests(baseline_server)
 
 
-@pytest.mark.e2e_model(MODEL)
-@pytest.mark.e2e_coverage(
-    arch="multimodal",
-    feature="",
-    parallel="",
-    deploy="epd",
-    hardware="A3",
-    quantization="BF16",
-    graph_mode="eager",
-)
-@wait_until_npu_memory_free()
-def test_mooncake_staging_matches_single_server(
-    baseline_outputs: dict[str, str],
-) -> None:
-    """Validate the production-shaped staging-first transfer path."""
-    _run_epd(baseline_outputs, NORMAL_STAGING_BYTES, repeat=1)
+def _producer_config(cache_prefix: str) -> dict[str, Any]:
+    return {
+        "ec_connector": "ECMooncakeConnector",
+        "ec_role": "ec_producer",
+        "ec_buffer_size": NORMAL_STAGING_BYTES,
+        "ec_buffer_device": "npu",
+        "ec_connector_extra_config": {
+            "mooncake_protocol": "ascend",
+            "ascend_mooncake_bounce_arena_size": BOUNCE_ARENA_BYTES,
+            "cross_encoder_cache": True,
+            "embedding_cache_prefix": cache_prefix,
+        },
+    }
+
+
+def _consumer_config(reservation_port: int) -> dict[str, Any]:
+    return {
+        "ec_connector": "ECMooncakeConnector",
+        "ec_role": "ec_consumer",
+        "ec_ip": "127.0.0.1",
+        "ec_port": reservation_port,
+        "ec_buffer_size": CONSUMER_BUFFER_BYTES,
+        "ec_buffer_device": "npu",
+        "ec_connector_extra_config": {"mooncake_protocol": "ascend"},
+    }
+
+
+def _producer_args(port: int, cache_prefix: str) -> list[str]:
+    return [
+        "--port",
+        str(port),
+        *_common_server_args(),
+        "--gpu-memory-utilization",
+        "0.1",
+        "--enable-request-id-headers",
+        "--ec-transfer-config",
+        json.dumps(_producer_config(cache_prefix)),
+    ]
+
+
+def _consumer_args(port: int, reservation_port: int) -> list[str]:
+    return [
+        "--port",
+        str(port),
+        *_common_server_args(),
+        "--gpu-memory-utilization",
+        "0.7",
+        "--enable-mm-embeds",
+        "--enable-request-id-headers",
+        "--ec-transfer-config",
+        json.dumps(_consumer_config(reservation_port)),
+    ]
 
 
 @pytest.mark.e2e_model(MODEL)
@@ -542,18 +479,62 @@ def test_mooncake_staging_matches_single_server(
     graph_mode="eager",
 )
 @wait_until_npu_memory_free()
-def test_mooncake_forced_fallback_matches_single_server(
+def test_cross_encoder_store_put_then_remote_hit(
     baseline_outputs: dict[str, str],
     mooncake_store_config: str,
 ) -> None:
-    """Validate fallback reuse and the Store round trip."""
-    # One byte is deliberate fault injection used only by this case. It makes
-    # stage() reject every non-empty encoder output and proves the insurance
-    # path without depending on a particular model's encoder-output size.
-    _run_epd(
-        baseline_outputs,
-        FORCED_FALLBACK_STAGING_BYTES,
-        repeat=4,
-        cross_encoder_cache=True,
-        mooncake_config_path=mooncake_store_config,
-    )
+    """E0 publishes outputs that E1 reuses through the shared Store."""
+    encoder0_port = get_open_port()
+    encoder1_port = get_open_port()
+    pd0_port = get_open_port()
+    pd1_port = get_open_port()
+    pd0_reservation_port = get_open_port()
+    pd1_reservation_port = get_open_port()
+    cache_prefix = f"cross-encoder-e2e-{uuid.uuid4().hex}"
+
+    server_args = [
+        _producer_args(encoder0_port, cache_prefix),
+        _producer_args(encoder1_port, cache_prefix),
+        _consumer_args(pd0_port, pd0_reservation_port),
+        _consumer_args(pd1_port, pd1_reservation_port),
+    ]
+    env_dict = {
+        "ASCEND_ENABLE_USE_FABRIC_MEM": "1",
+        "MOONCAKE_CONFIG_PATH": mooncake_store_config,
+        "MOONCAKE_EC_PROTOCOL": "ascend",
+        "VLLM_SERVER_DEV_MODE": "1",
+        "VLLM_USE_V2_MODEL_RUNNER": "1",
+    }
+
+    with _CapturingEPDServer(
+        vllm_serve_args=server_args,
+        env_dict=env_dict,
+    ) as server:
+        first_outputs = _run_epd_requests(
+            encoder0_port,
+            pd0_port,
+            pd0_reservation_port,
+        )
+        assert first_outputs == baseline_outputs
+        if not server.wait_for_output(STORE_PUT_LOG, "[VLLM_0]"):
+            pytest.fail("E0 never completed its Mooncake Store PUT")
+
+        # E1 has not encoded these images. Clearing it makes that invariant
+        # explicit and prevents a future eager/local population change from
+        # silently weakening this regression.
+        response = requests.post(
+            f"http://127.0.0.1:{encoder1_port}/reset_encoder_cache",
+            timeout=REQUEST_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+
+        second_outputs = _run_epd_requests(
+            encoder1_port,
+            pd1_port,
+            pd1_reservation_port,
+        )
+        assert second_outputs == baseline_outputs
+        if not server.wait_for_output(STORE_HIT_LOG, "[VLLM_1]"):
+            pytest.fail("E1 never loaded E0's encoder output from Mooncake Store")
+
+
