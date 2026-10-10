@@ -39,7 +39,7 @@ if TYPE_CHECKING:
 
 ACL_HOST_REG_MAPPED = 0x2
 ACL_HOST_REG_PINNED = 0x10000000
-
+INT64_MAX = torch.iinfo(torch.int64).max
 
 if HAS_TRITON:
     from vllm_ascend.ops.triton.rms_norm import triton_q_rms  # noqa: F811
@@ -269,7 +269,7 @@ class BaseDeviceAdaptor:
         eps: float = 1e-20,
         bias_opt: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        topk_weights, topk_ids, out = torch.ops._C_ascend.moe_gating_top_k(
+        topk_weights, topk_ids, out = torch_npu.npu_moe_gating_top_k(
             x,
             k=k,
             k_group=k_group,
@@ -280,7 +280,7 @@ class BaseDeviceAdaptor:
             out_flag=out_flag,
             routed_scaling_factor=routed_scaling_factor,
             eps=eps,
-            bias_opt=bias_opt,
+            bias=bias_opt,
         )
         return topk_weights, topk_ids.to(torch.int32), out
 
@@ -482,7 +482,7 @@ class BaseDeviceAdaptor:
             assert q_li_scale is not None
             assert q_li_shape_ori is not None
             weights = weights.to(torch.float16)
-            topk_indices = torch.ops._C_ascend.npu_lightning_indexer_quant(
+            topk_indices = torch_npu.npu_quant_lightning_indexer(
                 query=q_li.view(q_li_shape_ori),
                 key=kv_cache[indexer_cache_idx],
                 weights=weights,
@@ -497,6 +497,8 @@ class BaseDeviceAdaptor:
                 layout_key="PA_BSND",
                 sparse_count=2048,
                 sparse_mode=3,
+                pre_tokens=INT64_MAX,
+                next_tokens=INT64_MAX,
             )
         else:
             topk_indices, _ = torch_npu.npu_lightning_indexer(
@@ -1763,6 +1765,8 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                     layout_key="PA_BSND",
                     sparse_count=2048,
                     sparse_mode=3,
+                    pre_tokens=INT64_MAX,
+                    next_tokens=INT64_MAX,
                 )
             else:
                 topk_indices, _ = torch_npu.npu_lightning_indexer(
