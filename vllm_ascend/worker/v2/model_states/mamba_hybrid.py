@@ -46,25 +46,6 @@ _COPY_BLOCK_SIZE = 1024
 _PREPROCESS_BLOCK_SIZE = 256
 
 
-class _CombinedAttnMetadata(ModelSpecificAttnMetadata):
-    """Compose Mamba metadata with optional metadata supplied by a model state."""
-
-    def __init__(self, *metadata: ModelSpecificAttnMetadata):
-        self.metadata = metadata
-
-    def get_extra_common_attn_kwargs(self, kv_cache_group_id: int, num_reqs: int) -> dict[str, Any]:
-        kwargs: dict[str, Any] = {}
-        for item in self.metadata:
-            kwargs.update(item.get_extra_common_attn_kwargs(kv_cache_group_id, num_reqs))
-        return kwargs
-
-    def get_extra_attn_kwargs(self, attn_metadata_builder: Any, num_reqs: int) -> dict[str, Any]:
-        kwargs: dict[str, Any] = {}
-        for item in self.metadata:
-            kwargs.update(item.get_extra_attn_kwargs(attn_metadata_builder, num_reqs))
-        return kwargs
-
-
 @dataclass
 class _LayerwiseMambaCopyState:
     """Per-step bookkeeping for the deferred mamba align pre-copy.
@@ -318,13 +299,13 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
                         num_decode_draft_tokens_np[input_batch.num_reqs :] = padded_query_lens - 1
             num_decode_draft_tokens_cpu = torch.from_numpy(num_decode_draft_tokens_np)
 
-        model_specific_metadata: ModelSpecificAttnMetadata = MambaHybridAttnMetadata(
+        model_specific_metadata = MambaHybridAttnMetadata(
             is_prefilling=is_prefilling,
             num_accepted_tokens=num_accepted_tokens,
             num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
         )
-        if model_specific_attn_metadata is not None:
-            model_specific_metadata = _CombinedAttnMetadata(model_specific_metadata, model_specific_attn_metadata)
+        # The Mamba model state builds its own complete attention metadata.
+        # The optional argument is accepted to match AscendModelState's API.
         self.attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,
