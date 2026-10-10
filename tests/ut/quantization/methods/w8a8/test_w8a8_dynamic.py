@@ -239,3 +239,48 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
         self.assertIs(weight_views[1], layer.w2_weight_list)
         self.assertIs(weight_views[-2], layer.fused_w1_scale_list)
         self.assertIs(weight_views[-1], layer.fused_w2_scale_list)
+
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_dynamic.use_cann_megamoe", return_value=True)
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_dynamic.get_current_vllm_config")
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_dynamic.get_ascend_config")
+    def test_process_weights_after_loading_megamoe_frees_fp32_scale(
+        self, mock_get_config, mock_vllm_config, mock_megamoe
+    ):
+        mock_config = MagicMock()
+        mock_config.enable_fused_mc2 = 1
+        mock_get_config.return_value = mock_config
+        self.quant_method.use_expert_weight_list = False
+        layer = create_moe_layer(
+            num_experts=self.num_experts, hidden_size=self.hidden_size, intermediate_size=self.intermediate_size
+        )
+        with patch("vllm_ascend.quantization.methods.w8a8.w8a8_dynamic.maybe_trans_nz", side_effect=lambda x: x):
+            self.quant_method.process_weights_after_loading(layer)
+
+        # Per-expert MegaMoe lists are built from the fused int64 scales.
+        self.assertEqual(len(layer.cann_mega_moe_w13_weight_list), self.num_experts)
+        self.assertEqual(len(layer.cann_mega_moe_w2_weight_list), self.num_experts)
+        self.assertEqual(len(layer.cann_mega_moe_fused_w1_scale_list), self.num_experts)
+        self.assertEqual(len(layer.cann_mega_moe_fused_w2_scale_list), self.num_experts)
+        self.assertTrue(all(scale.dtype == torch.int64 for scale in layer.cann_mega_moe_fused_w1_scale_list))
+        # The float32 scale copy is dead under MegaMoe and must be released.
+        self.assertFalse(hasattr(layer, "w13_weight_scale_fp32"))
+
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_dynamic.use_cann_megamoe", return_value=True)
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_dynamic.get_current_vllm_config")
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_dynamic.get_ascend_config")
+    def test_process_weights_after_loading_megamoe_keeps_swigluoai_scale(
+        self, mock_get_config, mock_vllm_config, mock_megamoe
+    ):
+        mock_config = MagicMock()
+        mock_config.enable_fused_mc2 = 1
+        mock_get_config.return_value = mock_config
+        self.quant_method.use_expert_weight_list = False
+        layer = create_moe_layer(
+            num_experts=self.num_experts, hidden_size=self.hidden_size, intermediate_size=self.intermediate_size
+        )
+        layer.activation = "swigluoai_uninterleave"
+        with patch("vllm_ascend.quantization.methods.w8a8.w8a8_dynamic.maybe_trans_nz", side_effect=lambda x: x):
+            self.quant_method.process_weights_after_loading(layer)
+
+        # The non-fused activation path still consumes the fp32 scale copy.
+        self.assertTrue(hasattr(layer, "w13_weight_scale_fp32"))

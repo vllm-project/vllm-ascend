@@ -1787,9 +1787,14 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                     self.vllm_config.scheduler_config.max_num_batched_tokens,
                 )
             if exchange_num_tokens < num_tokens:
+                scheduler_config = self.vllm_config.scheduler_config
                 raise ValueError(
-                    "oproj static exchange capacity must cover local tokens, "
-                    f"got {exchange_num_tokens} and {num_tokens}."
+                    f"oproj static exchange capacity ({exchange_num_tokens}) must cover "
+                    f"local tokens ({num_tokens}). Fine-grained oproj TP requires "
+                    "capacity >= max_num_batched_tokens. Please set --max-num-batched-"
+                    "tokens to max_num_seqs * decode_query_len "
+                    f"(currently max_num_seqs={scheduler_config.max_num_seqs}), or "
+                    "raise the largest cudagraph_capture_sizes entry."
                 )
             # Lazily allocate static send/recv buffers on first call. The
             # profiling run hits this path before ACL graph capture, so the
