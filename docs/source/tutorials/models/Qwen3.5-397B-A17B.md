@@ -740,17 +740,17 @@ Common Issues Tip: If decode node 0 fails to initialize, check that `--data-para
 
 ### 5.6 Request Forwarding
 
-Run a proxy server on the same node as the prefiller service instance. You can get the proxy program in the repository examples: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py).
+Run a proxy server on the same node as the prefiller service instance. Match the script to the connector configured above: use [load_balance_proxy_layerwise_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py) for the A3 `MooncakeLayerwiseConnector` configuration, and [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py) for the 950DT `MooncakeConnector` configuration.
 
 === "A3 series"
 
-    For A3 PD disaggregation (1P1D), the proxy forwards requests to 1 prefill node and 1 decode node. Use the layerwise proxy script.
+    For A3 PD disaggregation (1P1D), the proxy forwards requests to 1 prefill node and 1 decode node. The layerwise proxy provides the `/v1/metaserver` endpoint required by `MooncakeLayerwiseConnector`.
 
     ```shell
     unset ftp_proxy
     unset https_proxy
     unset http_proxy
-    python3 load_balance_proxy_server_example.py \
+    python3 load_balance_proxy_layerwise_server_example.py \
       --prefiller-hosts 192.xx.xx.1 \
       --prefiller-ports 30060 \
       --decoder-hosts 192.xx.xx.2 \
@@ -768,13 +768,13 @@ Run a proxy server on the same node as the prefiller service instance. You can g
 
 === "950DT Products"
 
-    For 950DT Products PD disaggregation (1P1D), the proxy forwards requests to 1 prefill node and 1 decode node. Use the layerwise proxy script.
+    For 950DT Products PD disaggregation (1P1D), the proxy forwards requests to 1 prefill node and 1 decode node. The standard proxy forwards the prefill response's KV transfer metadata to decode, as required by `MooncakeConnector`.
 
     ```shell
     unset ftp_proxy
     unset https_proxy
     unset http_proxy
-    python3 load_balance_proxy_layerwise_server_example.py \
+    python3 load_balance_proxy_server_example.py \
       --prefiller-hosts 192.xx.xx.1 \
       --prefiller-ports 30060 \
       --decoder-hosts 192.xx.xx.2 \
