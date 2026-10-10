@@ -16,6 +16,7 @@ from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import AutoRegress
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel import sfa_cp
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadata, AscendSFADCPMetadataBuilder
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.dcp_utils import DCPManager
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
@@ -82,6 +83,8 @@ def _speculator(monkeypatch, kind, architecture, width, padded, step, use_dcp=Tr
     spec.attn_architecture = architecture
     spec.use_dcp = use_dcp
     spec.dcp_manager = manager
+    # vLLM main (#56723) reads speculator.dcp_size in _build_attn_metadata.
+    spec.dcp_size = config.parallel_config.decode_context_parallel_size
     spec.max_model_len = 128
     spec.draft_max_seq_len = 128
     spec.num_query_per_req = width
@@ -120,6 +123,9 @@ def _speculator(monkeypatch, kind, architecture, width, padded, step, use_dcp=Tr
     spec.kv_cache_config = SimpleNamespace(kv_cache_groups=[None])
 
     class RecordingBuilder:
+        # vLLM main inspects this on the builder before building metadata.
+        supports_update_block_table = False
+
         def build(self, common_prefix_len, common_attn_metadata):
             common = common_attn_metadata
             decode = FakeDecodeMetadata(common.query_start_loc_cpu[1:].tolist())
@@ -177,7 +183,10 @@ def test_dspark_common_dcp_preparation(monkeypatch, architecture, padded, width,
         # field names/values apply (upstream now forwards is_prefilling).
         torch.testing.assert_close(common.seq_lens, device_lengths[:padded])
         assert _dcp_local_cpu(common) is None
-        assert common.is_prefilling.tolist() == [False, False]
+        # v0.30.0 slices is_prefilling to the real request count; vLLM main
+        # slices to the padded request count.
+        expected_is_prefilling = [False, False] if vllm_version_is("0.30.0") else [False] * padded
+        assert common.is_prefilling.tolist() == expected_is_prefilling
     else:
         expected = [31 + width, 128] + [0] * (padded - 2)
         assert common.seq_lens_cpu.tolist() == expected

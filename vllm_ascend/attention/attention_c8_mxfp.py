@@ -43,7 +43,12 @@ from vllm_ascend.attention.attention_v1 import (
     AscendAttentionMetadataBuilder,
     AscendMetadata,
 )
-from vllm_ascend.attention.utils import enable_dcp, enable_pcp, notify_kv_cache_written
+from vllm_ascend.attention.utils import (
+    enable_dcp,
+    enable_pcp,
+    notify_kv_cache_written,
+    supports_kernel_block_spec,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
     record_attention_compute_start,
 )
@@ -394,8 +399,8 @@ class AscendC8MXFPAttentionBackend(AscendAttentionBackend):
             raise NotImplementedError("C8_MXFP attention does not support PCP/DCP yet.")
         return AscendC8MXFPMetadataBuilder
 
-    @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int]:
+    @supports_kernel_block_spec
+    def get_supported_kernel_block_sizes() -> list[int]:  # type: ignore[misc]
         return [512]
 
 
