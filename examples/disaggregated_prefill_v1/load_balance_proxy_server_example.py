@@ -12,13 +12,12 @@
 # Features:
 # - Load balances requests to multiple prefiller and decoder servers.
 # - Supports OpenAI-compatible /v1/completions and /v1/chat/completions endpoints.
-# - Also supports Anthropic /v1/messages and OpenAI /v1/responses. Those two
-#   responses have no OpenAI ``choices``, so they are streamed through without
-#   the recompute parser. Responses prefill uses max_output_tokens=1.
+# - Forwards native Anthropic /v1/messages and OpenAI /v1/responses APIs.
 # - Streams responses from backend servers to clients.
 #
 # Prerequisites:
 # - Python 3.10+
+# - Both backends must expose any Messages/Responses API used through the proxy.
 # - Install dependencies:
 #     pip install fastapi<0.124.0 httpx uvicorn vllm
 #
