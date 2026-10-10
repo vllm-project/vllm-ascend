@@ -8,7 +8,6 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
 from vllm.v1.sample.sampler import Sampler
 
-from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.triton.apply_top_k_top_p import (
@@ -160,7 +159,7 @@ class AscendTopKTopPSampler(TopKTopPSampler):
             # CANN npu_top_k_top_p semantics + optional in-kernel fused
             # softmax; per-request [B] k/p tensors are passed through
             # directly (no .item() CPU sync, no uniform-batch restriction).
-            if ascend_envs.VLLM_ASCEND_USE_TRITON_APPLY_TOPK_TOPP and HAS_TRITON and (p is not None or k is not None):
+            if get_ascend_config().enable_triton_apply_topk_topp and HAS_TRITON and (p is not None or k is not None):
                 logger.info_once(
                     "[sample/sampler] Using Triton apply_top_k_top_p op "
                     "(vllm_ascend.ops.triton.apply_top_k_top_p, CANN "

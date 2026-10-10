@@ -326,6 +326,7 @@ class AscendConfig:
             "enable_kv_nz": false,
             "enable_mc2_hierarchy_comm": false,
             "enable_reduce_sample": false,
+            "enable_triton_apply_topk_topp": false,
             "enable_dsa_cp": false,
             "sfa_dcp_force_tmajor_restore": false,
             "enable_force_eplb": false,
@@ -462,6 +463,10 @@ class AscendConfig:
     enable_kv_nz: bool = False
     enable_mc2_hierarchy_comm: bool = False  # deprecated, will be replaced by mc2_comm_alg = "hierarchy"
     enable_reduce_sample: bool = False
+    # Use the Triton apply_top_k_top_p fused op for top-k/top-p sampling
+    # (vllm_ascend.ops.triton.apply_top_k_top_p, CANN npu_top_k_top_p
+    # semantics + optional in-kernel softmax). Default False (stock path).
+    enable_triton_apply_topk_topp: bool = False
     enable_dsa_cp: bool = False
     sfa_dcp_force_tmajor_restore: bool = False
     enable_force_eplb: bool = False
