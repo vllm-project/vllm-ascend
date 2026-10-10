@@ -972,6 +972,8 @@ def test_recompute_scheduler_remote_kv_restore_keeps_exact_token_position():
     scheduler.failed_recving_kv_req_ids = set()
     scheduler.finished_recving_kv_req_ids = {"req-1"}
     scheduler.kv_cache_manager = MagicMock()
+    # vLLM main tracks prefix-replay bookkeeping on the scheduler.
+    scheduler.prefix_replay_tokens = 0
 
     request = SimpleNamespace(
         request_id="req-1",
@@ -995,11 +997,14 @@ def test_recompute_scheduler_remote_kv_restore_frees_failed_empty_load():
     scheduler.failed_recving_kv_req_ids = {"req-1"}
     scheduler.finished_recving_kv_req_ids = {"req-1"}
     scheduler.kv_cache_manager = MagicMock()
-
     request = SimpleNamespace(
         request_id="req-1",
         num_computed_tokens=0,
     )
+    # vLLM main tracks prefix-replay bookkeeping on the scheduler and
+    # reads request.num_tokens to decide the full-prompt-hit rewind.
+    scheduler.prefix_replay_tokens = 0
+    request.num_tokens = 8
 
     scheduler._update_waiting_for_remote_kv(request)
 

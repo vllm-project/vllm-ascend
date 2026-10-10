@@ -281,4 +281,4 @@ def test_init_sets_cuda_device_index_for_npu(monkeypatch):
 
     state = AscendEplbState(parallel_config, torch.device("cpu"))
 
-    assert state.cuda_device_index == 5
+    assert state.device_index == 5

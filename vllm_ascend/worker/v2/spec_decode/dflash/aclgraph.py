@@ -68,6 +68,7 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         kv_cache_config: KVCacheConfig,
         max_model_len: int,
         causal: bool | Mapping[int, bool] = False,
+        precompute_context_kv: Callable[[int], None] | None = None,
         progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:
         """Capture ACL graphs for DFlash."""
@@ -79,8 +80,9 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
                 attn_groups,
                 kv_cache_config,
                 max_model_len,
-                causal,
-                progress_bar_desc,
+                causal=causal,
+                precompute_context_kv=precompute_context_kv,
+                progress_bar_desc=progress_bar_desc,
             )
 
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:

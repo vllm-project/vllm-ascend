@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import itertools
 import time
+from collections import deque
 from typing import TYPE_CHECKING, Any
 
 from vllm.config import VllmConfig
@@ -21,7 +22,6 @@ from vllm.v1.core.sched.output import (
 )
 from vllm.v1.core.sched.request_queue import (
     SchedulingPolicy,
-    create_request_queue,
 )
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import EngineCoreEventType
@@ -69,7 +69,7 @@ def diagnostics_enabled(vllm_config: Any) -> bool:
 
 
 def print_scheduler_summary(scheduler: Any, scheduler_output: Any) -> None:
-    waiting_reqs = list(itertools.chain(scheduler.waiting, scheduler.skipped_waiting))
+    waiting_reqs = list(itertools.chain(scheduler.waiting, scheduler.kv_holding_waiting))
     lb_paused_req_ids: set[str] = getattr(
         scheduler,
         "_lb_paused_req_ids",
@@ -144,28 +144,12 @@ class DyntraLBPolicyMixin(_SchedulerBase):
         self._lb_admit_req_ids: set[str] | None = None
 
     def _waiting_requests_in_schedule_order(self) -> list[Request]:
-        if self.policy == SchedulingPolicy.FCFS:
-            return [*self.skipped_waiting, *self.waiting]
-
-        waiting = list(self.waiting)
-        skipped = list(self.skipped_waiting)
-        ordered: list[Request] = []
-        waiting_idx = skipped_idx = 0
-        while waiting_idx < len(waiting) and skipped_idx < len(skipped):
-            if waiting[waiting_idx] < skipped[skipped_idx]:
-                ordered.append(waiting[waiting_idx])
-                waiting_idx += 1
-            else:
-                ordered.append(skipped[skipped_idx])
-                skipped_idx += 1
-        ordered.extend(waiting[waiting_idx:])
-        ordered.extend(skipped[skipped_idx:])
-        return ordered
+        return [*self.kv_holding_waiting, *self.waiting]
 
     def _refresh_blocked_waiting_requests(self) -> None:
-        for request in list(self.skipped_waiting):
+        for request in self._waiting_requests_in_schedule_order():
             if self._is_blocked_waiting_status(request.status):
-                self._try_promote_blocked_waiting_request(request)
+                self._handle_blocked_waiting_request(request)
 
     def _run_lb_kv_prefetch(self) -> set[str]:
         if self.connector is None or not self._lb_kv_prefetch_enabled:
@@ -231,7 +215,7 @@ class DyntraLBPolicyMixin(_SchedulerBase):
         if requests_to_move:
             self.waiting.remove_requests(requests_to_move)
             for request in requests_to_move:
-                self.skipped_waiting.add_request(request)
+                self._enqueue_waiting_request(request)
         return kv_not_ready_req_ids
 
     def prepare_dyntra_lb_step(self) -> list[Request]:
@@ -391,13 +375,14 @@ class DyntraLBPolicyMixin(_SchedulerBase):
             logger.info("DYNTRA_LB_PAUSE request_id=%s", request.request_id)
         if self.log_stats:
             request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
-        self.waiting.prepend_request(request)
+        self.kv_holding_waiting.prepend_request(request)
 
     def _handle_stopped_request(self, request: Request) -> bool:
         was_preempted = request.status != RequestStatus.RUNNING
         finished = super()._handle_stopped_request(request)
         if was_preempted:
-            self.skipped_waiting.remove_requests((request,))
+            self.kv_holding_waiting.remove_requests((request,))
+            self.deferred_waiting.discard(request)
         return finished
 
     def _update_after_schedule(
@@ -661,46 +646,50 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
 
         # Next, schedule the WAITING requests.
         if not preempted_reqs and self._pause_state == PauseState.UNPAUSED:
-            step_skipped_waiting = create_request_queue(self.policy)
+            step_skipped_waiting: deque[Request] = deque()
+            step_skipped_kv_holding: deque[Request] = deque()
 
-            while (self.waiting or self.skipped_waiting) and token_budget > 0:
+            def skip_request(from_queue) -> None:
+                request_to_skip = from_queue.pop_request()
+                self.deferred_waiting.add(request_to_skip)
+                if self._holds_kv_blocks(request_to_skip):
+                    step_skipped_kv_holding.appendleft(request_to_skip)
+                else:
+                    step_skipped_waiting.appendleft(request_to_skip)
+
+            while (self.waiting or self.kv_holding_waiting) and token_budget > 0:
                 # Paused streaming sessions (WAITING_FOR_STREAMING_REQ) are not
                 # in `running` but still hold a model-runner request slot.
                 num_running = len(self.running) + self.num_waiting_for_streaming_input
                 if num_running >= self.max_num_running_reqs:
                     break
 
-                request_queue = self._select_waiting_queue_for_scheduling()
+                request_queue = self.kv_holding_waiting or self.waiting
                 assert request_queue is not None
 
                 request = request_queue.peek_request()
                 request_id = request.request_id
 
                 # try to promote blocked statuses while traversing skipped queue.
-                if self._is_blocked_waiting_status(request.status) and not self._try_promote_blocked_waiting_request(
-                    request
-                ):
+                if not self._handle_blocked_waiting_request(request):
                     if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                         logger.debug(
                             "%s is still in WAITING_FOR_REMOTE_KVS state.",
                             request_id,
                         )
-                    request_queue.pop_request()
-                    step_skipped_waiting.prepend_request(request)
+                    skip_request(request_queue)
                     continue
 
                 if self._has_pending_deliverable_output(request):
                     # Deliverable stale output still in flight: resuming now
                     # could resample a position that output later delivers.
                     # It drains within the pipeline depth.
-                    request_queue.pop_request()
-                    step_skipped_waiting.prepend_request(request)
+                    skip_request(request_queue)
                     continue
 
                 # delta for dyntra_lb: admit requests selected by the load-balancing plan.
                 if not self._can_admit_waiting_request(request):
-                    request_queue.pop_request()
-                    step_skipped_waiting.prepend_request(request)
+                    skip_request(request_queue)
                     continue
 
                 # Check that adding the request still respects the max_loras
@@ -714,8 +703,7 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
                     )
                 ):
                     # Scheduling would exceed max_loras, skip.
-                    request_queue.pop_request()
-                    step_skipped_waiting.prepend_request(request)
+                    skip_request(request_queue)
                     continue
 
                 num_external_computed_tokens = 0
@@ -761,8 +749,7 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
                             # The request cannot be scheduled because
                             # the KVConnector couldn't determine
                             # the number of matched tokens.
-                            request_queue.pop_request()
-                            step_skipped_waiting.prepend_request(request)
+                            skip_request(request_queue)
                             continue
 
                         if partial_tail and ext_tokens > partial_tail:
@@ -809,8 +796,7 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
                         and request.mm_features
                         and not self.ec_connector.ensure_cache_available(request, num_computed_tokens)
                     ):
-                        request_queue.pop_request()
-                        step_skipped_waiting.prepend_request(request)
+                        skip_request(request_queue)
                         continue
 
                     # Track first scheduled prefill, not post-preemption repeat prefills
@@ -972,12 +958,10 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
                         num_new_local_computed_tokens,
                     )
 
-                request = request_queue.pop_request()
                 if load_kv_async:
                     # If loading async, allocate memory and put request
                     # into the WAITING_FOR_REMOTE_KV state.
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
-                    step_skipped_waiting.prepend_request(request)
                     # Set num_computed_tokens even though KVs are not yet loaded.
                     # request.num_computed_tokens will not be used anywhere until
                     # the request finished the KV transfer.
@@ -1003,8 +987,11 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
                                 num_computed_tokens,
                             )
                         )
+                    skip_request(request_queue)
                     continue
 
+                request = request_queue.pop_request()
+                self.deferred_waiting.discard(request)
                 self.running.append(request)
                 if self.log_stats:
                     request.record_event(EngineCoreEventType.SCHEDULED, scheduled_timestamp)
@@ -1044,13 +1031,16 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
                             self.ec_connector.update_state_after_alloc(request, i)
 
             # re-queue requests skipped in this pass ahead of older skipped items.
+            if step_skipped_kv_holding:
+                self.kv_holding_waiting.prepend_requests(step_skipped_kv_holding)
             if step_skipped_waiting:
-                self.skipped_waiting.prepend_requests(step_skipped_waiting)
+                self.waiting.prepend_requests(step_skipped_waiting)
 
             # DP prefill balancing: on a step that admitted prefills (release),
             # record whether it was capacity-bound.
             if not defer_prefills:
-                self.prefill_capacity_bound = bool(self.waiting)
+                _, num_waiting = self.get_request_counts()
+                self.prefill_capacity_bound = num_waiting > len(self.deferred_waiting)
 
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())

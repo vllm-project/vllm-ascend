@@ -3,6 +3,7 @@
 
 import sys
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -25,6 +26,14 @@ from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
+
+
+def _add_request(sampler, req_idx, prompt_len, sampling_params):
+    """Call ``Ascend310PSampler.add_request`` across vLLM versions.
+
+    vLLM main (#56497) dropped the ``prompt_len`` argument.
+    """
+    sampler.add_request(req_idx, sampling_params)
 
 
 def _make_vllm_config(**overrides):
@@ -364,8 +373,12 @@ def test_prepare_inputs_dispatches_to_310p_implementation() -> None:
     batch_desc = MagicMock()
     expected = object()
 
+    args: tuple[Any, ...] = (scheduler_output, MagicMock(), batch_desc)
+    # vLLM main (#56456) added the trailing num_active_loras positional.
+    args = (*args, 0)
+
     with patch.object(runner, "_prepare_inputs_310p", return_value=expected) as prepare_inputs_310p:
-        result = runner.prepare_inputs(scheduler_output, MagicMock(), batch_desc)
+        result = runner.prepare_inputs(*args)
 
     assert result is expected
     prepare_inputs_310p.assert_called_once_with(scheduler_output, batch_desc)
@@ -545,14 +558,14 @@ def test_copy_kv_cache_blocks_flattens_mamba_lists() -> None:
 
 def test_sampler_accepts_temperature_and_rejects_penalties() -> None:
     sampler = Ascend310PSampler(max_num_reqs=4, device="cpu", vocab_size=16)
-    sampler.add_request(0, 4, SamplingParams(temperature=0))
-    sampler.add_request(1, 4, SamplingParams(temperature=0.8, top_p=0.9, top_k=8, seed=7))
+    _add_request(sampler, 0, 4, SamplingParams(temperature=0))
+    _add_request(sampler, 1, 4, SamplingParams(temperature=0.8, top_p=0.9, top_k=8, seed=7))
     sampler.apply_staged_writes()
     assert sampler.sampling_states.temperature.gpu[1].item() == pytest.approx(0.8)
     assert sampler.sampling_states.top_p.gpu[1].item() == pytest.approx(0.9)
     assert int(sampler.sampling_states.top_k.gpu[1].item()) == 8
     with pytest.raises(NotImplementedError, match="Unsupported sampling parameters"):
-        sampler.add_request(2, 4, SamplingParams(temperature=0, frequency_penalty=0.5))
+        _add_request(sampler, 2, 4, SamplingParams(temperature=0, frequency_penalty=0.5))
 
 
 def test_sampler_temperature_scales_logits_before_argmax() -> None:
@@ -569,7 +582,7 @@ def test_sampler_temperature_scales_logits_before_argmax() -> None:
 
 def test_sampler_greedy_call_returns_argmax() -> None:
     sampler = Ascend310PSampler(max_num_reqs=2, device="cpu", vocab_size=4)
-    sampler.add_request(0, 2, SamplingParams(temperature=0))
+    _add_request(sampler, 0, 2, SamplingParams(temperature=0))
     logits = torch.tensor([[0.1, 3.0, 0.2, 0.0]], dtype=torch.float32)
     input_batch = SimpleNamespace(
         expanded_idx_mapping=torch.tensor([0], dtype=torch.int32),
@@ -632,7 +645,7 @@ def test_sampler_top_k_restricts_softmax_mass() -> None:
     import vllm_ascend._310p.worker.v2.sampler as sampler_mod
 
     sampler = Ascend310PSampler(max_num_reqs=1, device="cpu", vocab_size=5)
-    sampler.add_request(0, 2, SamplingParams(temperature=0.8, top_k=2, top_p=1.0, seed=7))
+    _add_request(sampler, 0, 2, SamplingParams(temperature=0.8, top_k=2, top_p=1.0, seed=7))
     sampler.apply_staged_writes()
     # max at idx1, second at idx2; top_k=2 must keep only {1,2}
     logits = torch.tensor([[1.0, 5.0, 4.0, 0.0, -2.0]], dtype=torch.float32)
@@ -658,7 +671,7 @@ def test_sampler_top_k_one_matches_argmax_with_temperature() -> None:
     import vllm_ascend._310p.worker.v2.sampler as sampler_mod
 
     sampler = Ascend310PSampler(max_num_reqs=1, device="cpu", vocab_size=5)
-    sampler.add_request(0, 2, SamplingParams(temperature=0.9, top_k=1, top_p=1.0, seed=3))
+    _add_request(sampler, 0, 2, SamplingParams(temperature=0.9, top_k=1, top_p=1.0, seed=3))
     sampler.apply_staged_writes()
     logits = torch.tensor([[0.2, 0.1, 3.0, 1.5, -1.0]], dtype=torch.float32)
 
@@ -676,7 +689,7 @@ def test_sampler_top_p_restricts_softmax_mass() -> None:
     import vllm_ascend._310p.worker.v2.sampler as sampler_mod
 
     sampler = Ascend310PSampler(max_num_reqs=1, device="cpu", vocab_size=5)
-    sampler.add_request(0, 2, SamplingParams(temperature=0.8, top_k=-1, top_p=0.5, seed=11))
+    _add_request(sampler, 0, 2, SamplingParams(temperature=0.8, top_k=-1, top_p=0.5, seed=11))
     sampler.apply_staged_writes()
     logits = torch.tensor([[5.0, 4.0, 1.0, 0.0, -1.0]], dtype=torch.float32)
     captured: dict[str, torch.Tensor] = {}

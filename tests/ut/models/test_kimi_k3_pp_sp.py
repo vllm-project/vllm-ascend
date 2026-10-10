@@ -19,6 +19,15 @@ from torch import nn
 ROOT = Path(__file__).resolve().parents[3]
 
 
+def _keep_definition(item, allowed):
+    if getattr(item, "name", None) in allowed:
+        return True
+    if isinstance(item, ast.If):
+        # Keep requested definitions nested in class-scope conditionals.
+        return any(_keep_definition(stmt, allowed) for stmt in (*item.body, *item.orelse))
+    return False
+
+
 def load_definitions(path, names, namespace, *, bases=None, methods=None):
     tree = ast.parse((ROOT / path).read_text(encoding="utf-8"))
     nodes = [node for node in tree.body if getattr(node, "name", None) in names]
@@ -27,7 +36,7 @@ def load_definitions(path, names, namespace, *, bases=None, methods=None):
         if isinstance(node, ast.ClassDef):
             node.bases = [ast.Name(id=bases[node.name], ctx=ast.Load())]
             node.decorator_list = []
-            node.body = [item for item in node.body if getattr(item, "name", None) in methods[node.name]]
+            node.body = [item for item in node.body if _keep_definition(item, methods[node.name])]
     module = ast.fix_missing_locations(ast.Module(body=nodes, type_ignores=[]))
     exec(compile(module, str(ROOT / path), "exec", flags=__future__.annotations.compiler_flag), namespace)
 

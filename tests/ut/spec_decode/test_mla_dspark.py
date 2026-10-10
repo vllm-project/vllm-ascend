@@ -231,20 +231,26 @@ def test_capture_delegates_and_restores_contexts(monkeypatch, architecture, fail
         return context("model")
 
     monkeypatch.setattr(graph, "model_capture_wrapper", model_context)
-    args: tuple[Any, ...] = (
+    forward_args: tuple[Any, ...] = (
         MagicMock(),
         SimpleNamespace(positions=torch.arange(20)),
         object(),
         [],
         object(),
         128,
-        False,
-        "capture",
     )
+    args = (*forward_args, False, "capture")
+    expected_kwargs = {
+        "causal": False,
+        "precompute_context_kv": "capture",
+        "progress_bar_desc": "Capturing CUDA graphs",
+    }
 
-    def capture(self, *received):
+    def capture(self, *received, **kwargs):
         assert self is manager
-        assert received == args
+        assert received == forward_args
+        # The Ascend wrapper forwards the trailing options as keywords.
+        assert kwargs == expected_kwargs
         assert events == ["enter communicator", "enter model"]
         events.append("capture")
         if fail:

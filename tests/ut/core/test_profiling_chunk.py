@@ -665,7 +665,7 @@ class TestProfilingChunkScheduler(TestBase):
         scheduler3.encoder_cache_manager.allocate = MagicMock()
         scheduler3.is_encoder_decoder = True
         scheduler3._is_blocked_waiting_status = lambda status: status == RequestStatus.WAITING_FOR_REMOTE_KVS
-        scheduler3._try_promote_blocked_waiting_request = MagicMock(return_value=False)
+        scheduler3._handle_blocked_waiting_request = MagicMock(return_value=False)
         scheduler3.max_num_running_reqs = 2
 
         edge_reqs = create_requests(num_requests=4, num_tokens=40, max_tokens=16)

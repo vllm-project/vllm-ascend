@@ -82,7 +82,10 @@ def test_native_engram_resolution_on_npu(engram_config, draft, shared, dp, pcp):
     assert type(config.engram_config) is EngramConfig
     if original is not None:
         assert config.engram_config is original
-    assert config.engram_config.dp_shared_memory == bool(shared)
+    # vLLM main resolves the default to True when the caller leaves it unset;
+    # v0.30.0 keeps the unset value as False.
+    expected_dp_shared_memory = True if shared is None else bool(shared)
+    assert config.engram_config.dp_shared_memory == expected_dp_shared_memory
 
 
 @pytest.mark.parametrize(

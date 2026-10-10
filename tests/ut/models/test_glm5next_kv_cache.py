@@ -130,7 +130,7 @@ def test_tail_manager_retains_one_private_block_until_free():
     pool = BlockPool(12, True, 4)
     manager = KpoolTailManager(spec, pool, True, 1, scheduler_block_size=16)
     initially_free = pool.get_num_free_blocks()
-    assert manager.get_num_blocks_to_allocate("a", 1000, [], 0, 0, 1000) == 1
+    assert manager.get_num_blocks_to_allocate("a", 1000, [], 0, 0, 1000, prefill_end=1000) == 1
     a = manager.allocate_new_blocks("a", 1000, 1000)
     b = manager.allocate_new_blocks("b", 3, 3)
     assert len(a) == len(b) == 1
@@ -139,7 +139,9 @@ def test_tail_manager_retains_one_private_block_until_free():
         assert manager.allocate_new_blocks("a", tokens, tokens) == []
         manager.remove_skipped_blocks("a", tokens)
         assert manager.req_to_blocks["a"] == a
-        assert manager.get_num_blocks_to_allocate("a", tokens, [], tokens - 1, tokens - 1, tokens) == 0
+        assert (
+            manager.get_num_blocks_to_allocate("a", tokens, [], tokens - 1, tokens - 1, tokens, prefill_end=1000) == 0
+        )
     request = SimpleNamespace(request_id="a")
     manager.cache_blocks(request, 131072)
     manager.cache_blocks(request, 131072, replay_boundary=16)

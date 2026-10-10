@@ -6,6 +6,7 @@ from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackendImpl,
     AscendAttentionMetadataBuilder,
 )
+from vllm_ascend.attention.utils import supports_kernel_block_spec
 
 
 class AscendFABackend(AttentionBackend):
@@ -34,8 +35,8 @@ class AscendFABackend(AttentionBackend):
     ) -> tuple[int, ...]:
         return (2, num_blocks, block_size, num_kv_heads, head_size)
 
-    @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int]:
+    @supports_kernel_block_spec
+    def get_supported_kernel_block_sizes() -> list[int]:  # type: ignore[misc]
         return [128]
 
 

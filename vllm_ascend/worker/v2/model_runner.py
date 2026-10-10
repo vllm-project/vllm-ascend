@@ -295,11 +295,17 @@ class NPUModelRunner(GPUModelRunner):
 
         # vLLM main captures draft_hidden_states before maybe_restore_pcp_for_sampling,
         # so a replicated draft would read the PCP-local target output. Restore
-        # it to the global layout up front. aux_hidden_states need no handling
-        # here: upstream sample_tokens (#56107) already restores them, per
-        # tensor, before speculator.propose.
+        # it to the global layout up front.
         if state.hidden_states is not None:
-            state = state._replace(hidden_states=pcp_manager.restore_hidden_states(state.hidden_states))
+            replacements: dict[str, Any] = {"hidden_states": pcp_manager.restore_hidden_states(state.hidden_states)}
+            # vLLM #57980 folded the aux-hidden restore into
+            # restore_for_sampling. The replicated-PCP fast path below bypasses
+            # that call, so restore aux here too.
+            if state.aux_hidden_states is not None:
+                replacements["aux_hidden_states"] = [
+                    pcp_manager.restore_hidden_states(aux) for aux in state.aux_hidden_states
+                ]
+            state = state._replace(**replacements)
             # Tell restore_for_sampling to skip its second all-gather for this
             # step. The layout is tracked explicitly because a length match is
             # ambiguous under piecewise/FULL graphs: every rank pads its local
@@ -311,11 +317,15 @@ class NPUModelRunner(GPUModelRunner):
         if (
             lmhead_tp_enable()
             and self.prompt_logprobs_worker is not None
-            and self.prompt_logprobs_worker.uses_prompt_logprobs.any()
+            and (self.prompt_logprobs_worker.uses_prompt_logprobs.any() or self.prompt_logprobs_worker.token_id_scores)
         ):
             # The prompt-logprobs worker issues a second compute_logits with
             # unpadded rows that desyncs the LM-head collectives and hangs.
-            raise NotImplementedError("prompt_logprobs is not supported with lmhead TP.")
+            # vLLM #54335 adds fixed-token scoring through the same unpadded
+            # compute_logits path, so it has the same collective restriction.
+            raise NotImplementedError(
+                "prompt logprobs and fixed-token prompt scoring are not supported with lmhead TP."
+            )
 
         pcp_manager = self.pcp_manager
         if pcp_manager is not None and not self.is_last_pp_rank and self.execute_model_state is not None:
@@ -492,6 +502,7 @@ class NPUModelRunner(GPUModelRunner):
         is_profile: bool = False,
         context_len: int = 0,
         valid_dummy_state_slots: bool = False,
+        randomize_inputs: bool = False,
     ):
         self._cpp_execution_time_ms = None
         profiling_config = self.ascend_config.scheduler_config.profiling_chunk_config
@@ -522,6 +533,7 @@ class NPUModelRunner(GPUModelRunner):
                     is_profile=is_profile,
                     context_len=context_len,
                     valid_dummy_state_slots=valid_dummy_state_slots,
+                    randomize_inputs=randomize_inputs,
                 )
                 forward_failed = False
             finally:
@@ -581,7 +593,7 @@ class NPUModelRunner(GPUModelRunner):
         )
 
     @torch.inference_mode()
-    def profile_run(self) -> None:
+    def profile_run(self, randomize_inputs: bool = False) -> None:
         """Override GPUModelRunner.profile_run for Ascend NPUs.
         When running moe models, we need an extra dummy run with mc2_tokens_capacity tokens to reserve
         necessary HCCL buffer for the MC2 operator before standard `profile_run`. Additionally, we set
@@ -600,8 +612,14 @@ class NPUModelRunner(GPUModelRunner):
             ):
                 # Use a call-scoped bypass because skip_compiled would require runner-specific ForwardContext plumbing.
                 with disable_compilation(self.get_model()):
-                    self._dummy_run(mc2_tokens_capacity, skip_attn=True, skip_eplb=True, is_profile=True)
-            super().profile_run()
+                    self._dummy_run(
+                        mc2_tokens_capacity,
+                        skip_attn=True,
+                        skip_eplb=True,
+                        is_profile=True,
+                        randomize_inputs=randomize_inputs,
+                    )
+            super().profile_run(randomize_inputs=randomize_inputs)
 
     def gather_batch_req_state(self, scheduler_output: SchedulerOutput, dummy_run: bool):
         batch_state, uniform_token_count = super().gather_batch_req_state(scheduler_output, dummy_run)
@@ -617,12 +635,18 @@ class NPUModelRunner(GPUModelRunner):
             )
             if np.any(pd_decode_recompute):
                 batch_state.is_prefilling_np[pd_decode_recompute] = False
-                batch_state = batch_state._replace(has_prefill=bool(batch_state.is_prefilling_np.any()))
+                has_prefill = bool(batch_state.is_prefilling_np.any())
+                decode_graph_eligible = not has_prefill
+                if batch_state.prefill_runs_as_decode_np is not None:
+                    decode_graph_eligible = bool(
+                        (batch_state.prefill_runs_as_decode_np | ~batch_state.is_prefilling_np).all()
+                    )
+                batch_state = batch_state._replace(has_prefill=has_prefill, decode_graph_eligible=decode_graph_eligible)
                 uniform_token_count = vllm_model_runner.get_uniform_decode_token_count(
                     len(batch_state.req_ids),
                     batch_state.num_tokens,
                     int(batch_state.num_scheduled_tokens.max()),
-                    batch_state.has_prefill,
+                    batch_state.decode_graph_eligible,
                 )
         return batch_state, uniform_token_count
 
@@ -636,15 +660,16 @@ class NPUModelRunner(GPUModelRunner):
                 "scheduled locally — a request sent directly to the decode node)."
             )
 
-    def prepare_inputs(  # type: ignore[misc]
+    def _prepare_inputs_impl(
         self,
         scheduler_output: SchedulerOutput,
         batch_req_state: BatchReqState,
         batch_desc: BatchExecutionDescriptor,
     ) -> AscendInputBatch:
-        """Override GPUModelRunner.prepare_inputs for Ascend NPUs.
-        npu attention backends need seq_lens_cpu to work.
-        so we need to prepare seq_lens_cpu here.
+        """Shared implementation for GPUModelRunner.prepare_inputs on Ascend.
+
+        npu attention backends need seq_lens_cpu to work, so we prepare
+        seq_lens_cpu here.
         """
         self._check_finegrained_tp_graph_step(batch_desc.cg_mode)
         num_tokens = batch_req_state.num_tokens
@@ -867,6 +892,9 @@ class NPUModelRunner(GPUModelRunner):
             num_computed_prefill_tokens_np=batch_req_state.num_computed_prefill_tokens_np,
             is_prefilling_np=batch_req_state.is_prefilling_np,
             has_prefill=batch_req_state.has_prefill,
+            decode_graph_eligible=batch_req_state.decode_graph_eligible,
+            prefill_runs_as_decode_np=batch_req_state.prefill_runs_as_decode_np,
+            max_seq_len_np=batch_req_state.max_seq_len_np,
             input_ids=self.input_buffers.input_ids[:num_tokens_after_padding],
             positions=self.input_buffers.positions[:num_tokens_after_padding],
             is_padding=self.input_buffers.is_padding[:num_tokens_after_padding],
@@ -880,18 +908,26 @@ class NPUModelRunner(GPUModelRunner):
             seq_lens_np=self.input_buffers.seq_lens_np,
             attn_state=attn_state,
         )
-        # vLLM main (#53867) changed maybe_partition_pcp_batch to take the
-        # whole batch descriptor instead of padded_num_tokens.
-        input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(
-            self.pcp_manager,
-            input_batch,
-            batch_desc=batch_desc,
-        )
+        # vLLM main (#57980) dropped the module-level maybe_partition_pcp_batch
+        # helper; PCPManager.partition_batch now takes the batch descriptor.
+        if self.pcp_manager is not None:
+            input_batch = self.pcp_manager.partition_batch(input_batch, batch_desc)
 
         # For mla/sfa, update cos/sin. Here is for execute_model.
         update_cos_sin(input_batch.positions)
 
         return input_batch
+
+    def prepare_inputs(
+        self,
+        scheduler_output: SchedulerOutput,
+        batch_req_state: BatchReqState,
+        batch_desc: BatchExecutionDescriptor,
+        num_active_loras: int,  # noqa: ARG002
+    ) -> AscendInputBatch:
+        # vLLM #56456 added num_active_loras to prepare_inputs on main; it
+        # only feeds FastPrefillHelper, which this Ascend path does not use.
+        return self._prepare_inputs_impl(scheduler_output, batch_req_state, batch_desc)
 
     def prepare_dummy_attn(
         self, input_batch: AscendInputBatch, valid_state_slots: bool = False

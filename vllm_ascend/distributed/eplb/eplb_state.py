@@ -136,6 +136,7 @@ class AscendEplbState(_eplb_state.EplbState):
     """Keep Ascend routing and load-recording state around upstream EPLB."""
 
     cuda_device_index: int | None
+    device_index: int | None
 
     def __init__(
         self,
@@ -150,8 +151,11 @@ class AscendEplbState(_eplb_state.EplbState):
         self._has_fresh_recorded_load = False
         self._is_load_sampling_step = False
         self._should_collect_local_load = False
-        if self.cuda_device_index is None:
-            self.cuda_device_index = torch.accelerator.current_device_index()
+        # vLLM main renamed ``EplbState.cuda_device_index`` to ``device_index``
+        # (and passes it to EplbModelState on add_model), so keep both lanes
+        # pointing at the attribute upstream actually reads.
+        if self.device_index is None:
+            self.device_index = torch.accelerator.current_device_index()
 
     @property
     def uses_custom_load_stats(self) -> bool:

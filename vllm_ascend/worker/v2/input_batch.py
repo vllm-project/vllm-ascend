@@ -86,6 +86,7 @@ class AscendInputBatch(InputBatch):
         num_tokens: int,
         input_buffers: AscendInputBuffers,
         max_query_len: int | None = None,
+        is_padding: bool = True,
     ) -> "AscendInputBatch":
         """Override the make_dummy method to calculate seq_lens_np."""
         # The incoming count includes graph padding. Save it for the model input
@@ -101,6 +102,7 @@ class AscendInputBatch(InputBatch):
             num_tokens,
             input_buffers,
             max_query_len=max_query_len,
+            is_padding=is_padding,
         )
         if num_tokens_after_padding != num_tokens:
             input_batch.num_tokens_after_padding = num_tokens_after_padding

@@ -175,6 +175,7 @@ def _make_vllm_config(
             max_cudagraph_capture_size=None,
         ),
         speculative_config=speculative_config,
+        use_v2_model_runner=False,
         scheduler_config=SimpleNamespace(
             max_num_seqs=max_num_seqs,
             max_num_batched_tokens=max_num_batched_tokens,

@@ -27,6 +27,15 @@ SFA_QSFA_TILE_SIZE = 128
 MLAPO_MAX_SUPPORTED_TOKENS = 1024
 
 
+def supports_kernel_block_spec(func: Callable[[], list[int]]) -> staticmethod:
+    """Accept the optional ``kv_cache_spec`` argument used by vLLM 0.31.0."""
+
+    def _accept_kv_cache_spec(kv_cache_spec=None):
+        return func()
+
+    return staticmethod(_accept_kv_cache_spec)
+
+
 class PreprocessType(enum.Enum):
     NATIVE = "native"
     PROLOG_V3 = "prolog_v3"

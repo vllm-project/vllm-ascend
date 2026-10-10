@@ -26,6 +26,7 @@ import torch
 from vllm.config import CUDAGraphMode, ParallelConfig
 from vllm.config.utils import replace
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
@@ -82,6 +83,17 @@ def _make_pcp_config(
         speculative_config=speculative_config,
         compilation_config=SimpleNamespace(cudagraph_mode=cudagraph_mode),
     )
+
+
+def _partition_batch(manager, batch, *, padded_num_tokens=None, batch_desc=None):
+    """Use the 0.31 descriptor API, without token/request padding by default."""
+    if batch_desc is None:
+        batch_desc = BatchExecutionDescriptor(
+            CUDAGraphMode.NONE,
+            int(getattr(batch, "num_tokens", 0)),
+            None,
+        )
+    return manager.partition_batch(batch, batch_desc)
 
 
 @pytest.mark.parametrize(
@@ -311,7 +323,12 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
             return_value=local_attn_state,
         ) as build_attn_state,
     ):
-        result = manager.partition_batch(global_batch, padded_num_tokens=12)
+        result = _partition_batch(
+            manager,
+            global_batch,
+            padded_num_tokens=12,
+            batch_desc=BatchExecutionDescriptor(CUDAGraphMode.PIECEWISE, 12, None),
+        )
 
     assert isinstance(result, AscendInputBatch)
     assert result is not global_batch
@@ -440,6 +457,7 @@ def test_partition_batch_pads_decode_requests_when_tokens_are_already_padded():
     manager._hidden_restore_idx = torch.arange(4, dtype=torch.int64)
     # Upstream replace() preserves the global attention state.
     local_batch.attn_state = global_batch.attn_state
+    batch_desc = BatchExecutionDescriptor(CUDAGraphMode.FULL_DECODE_ONLY, 4, None)
 
     with (
         patch.object(
@@ -455,9 +473,9 @@ def test_partition_batch_pads_decode_requests_when_tokens_are_already_padded():
             side_effect=_mock_async_copy_to_cpu,
         ),
     ):
-        result = manager.partition_batch(global_batch, padded_num_tokens=4)
+        result = _partition_batch(manager, global_batch, padded_num_tokens=4, batch_desc=batch_desc)
 
-    upstream_partition.assert_called_once_with(global_batch, padded_num_tokens=4, padded_num_reqs=None)
+    upstream_partition.assert_called_once_with(global_batch, batch_desc)
     assert result.num_reqs == 3
     assert result.num_reqs_after_padding == 4
     assert result.num_tokens == 3
@@ -493,6 +511,7 @@ def test_partition_batch_keeps_piecewise_request_extent():
         CUDAGraphMode.PIECEWISE,
         speculative_config=SimpleNamespace(num_speculative_tokens=3),
     )
+    batch_desc = BatchExecutionDescriptor(CUDAGraphMode.PIECEWISE, 4, None)
 
     with (
         patch.object(
@@ -502,9 +521,9 @@ def test_partition_batch_keeps_piecewise_request_extent():
         ) as upstream_partition,
         patch("vllm_ascend.worker.v2.pcp_manager.build_attn_state"),
     ):
-        result = manager.partition_batch(batch, padded_num_tokens=4)
+        result = _partition_batch(manager, batch, padded_num_tokens=4, batch_desc=batch_desc)
 
-    upstream_partition.assert_called_once_with(batch, padded_num_tokens=4, padded_num_reqs=None)
+    upstream_partition.assert_called_once_with(batch, batch_desc)
     assert result.num_reqs_after_padding == 2
     assert torch.equal(result.query_start_loc, torch.tensor([0, 1, 2], dtype=torch.int32))
     np.testing.assert_array_equal(result.query_start_loc_np, np.array([0, 1, 2], dtype=np.int32))
@@ -660,7 +679,7 @@ def test_partition_batch_preserves_fia_dummy_layout() -> None:
             return_value=object(),
         ),
     ):
-        local_batch = manager.partition_batch(global_batch)
+        local_batch = _partition_batch(manager, global_batch)
 
     assert local_batch.num_reqs == 1
     assert local_batch.num_reqs_after_padding == 2
@@ -725,7 +744,7 @@ def test_partition_batch_preserves_speculative_target_inputs(pcp_rank) -> None:
         patch("vllm.v1.worker.gpu.pcp_manager.async_tensor_h2d", side_effect=_mock_async_copy_to_cpu),
         patch("vllm_ascend.worker.v2.pcp_manager.build_attn_state") as recompute,
     ):
-        result = manager.partition_batch(global_batch)
+        result = _partition_batch(manager, global_batch)
 
     assert manager.global_batch is global_batch
     assert global_batch.num_draft_tokens == 3
@@ -894,7 +913,7 @@ def test_main_pcp_capture_does_not_repartition_local_dummy_batch() -> None:
     slot_mappings = torch.arange(8)
     slot_mappings_by_layer = object()
     attn_metadata = object()
-    block_tables = MagicMock(cp_size=1, cp_rank=0, cp_interleave=1)
+    block_tables = MagicMock(cp_size=2, cp_rank=0, cp_interleave=1)
     pcp_manager = MagicMock()
     pcp_manager.get_dummy_block_tables.return_value = input_block_tables
     pcp_manager.get_dummy_slot_mappings.return_value = slot_mappings
@@ -913,7 +932,7 @@ def test_main_pcp_capture_does_not_repartition_local_dummy_batch() -> None:
             return_value=slot_mappings_by_layer,
         ),
         patch(
-            "vllm_ascend.worker.v2.aclgraph_utils.maybe_prepare_dcp_local_seq_lens",
+            "vllm_ascend.worker.v2.aclgraph_utils._prepare_dcp_local_seq_lens",
             return_value=dcp_local_seq_lens,
         ) as prepare_dcp_local_seq_lens,
     ):
@@ -940,7 +959,7 @@ def test_main_pcp_capture_does_not_repartition_local_dummy_batch() -> None:
         input_buffers.dcp_local_seq_lens,
         input_batch.seq_lens,
         input_batch.num_reqs,
-        1,
+        2,
         0,
         1,
         num_reqs_padded=input_batch.num_reqs_after_padding,
@@ -1007,7 +1026,6 @@ def test_sample_tokens_uses_global_batch_only_on_non_last_pp_rank(
         aux_hidden_states=None,
         finished_req_ids=set(),
         ec_connector_output=None,
-        routed_experts=None,
         **state_kwargs,
     )
     grammar_output = object()
@@ -1071,7 +1089,7 @@ def test_partition_batch_clears_padded_dcp_local_seq_lens() -> None:
             side_effect=_mock_async_copy_to_cpu,
         ),
     ):
-        result = manager.partition_batch(global_batch)
+        result = _partition_batch(manager, global_batch)
 
     assert result.dcp_local_seq_lens is not None
     torch.testing.assert_close(
@@ -1204,7 +1222,7 @@ def test_speculative_decode_keeps_draft_tokens_on_pcp_ranks(pcp_rank):
         patch("vllm.v1.worker.gpu.pcp_manager.async_tensor_h2d", side_effect=_mock_async_copy_to_cpu),
         patch("vllm_ascend.worker.v2.pcp_manager.build_attn_state"),
     ):
-        local = manager.partition_batch(batch)
+        local = _partition_batch(manager, batch)
     assert manager.get_num_tokens_for_dispatch(batch.num_scheduled_tokens, batch.is_prefilling_np) == 4
     # FULL_DECODE_ONLY with speculation stays replicated, so every rank keeps the tokens.
     assert local.num_tokens == 4

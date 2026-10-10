@@ -321,6 +321,13 @@ class NPUModelRunner310V2(NPUModelRunner):
         num_computed_prefill_tokens_np = self.req_states.num_computed_prefill_tokens[idx_mapping_np]
         is_prefilling_np = num_computed_prefill_tokens_np < prefill_len_np
         batch_has_prefill = bool(np.any(is_prefilling_np))
+        prefill_runs_as_decode_np = None
+        decode_graph_eligible = not batch_has_prefill
+        if batch_has_prefill:
+            prefill_runs_as_decode_np = (
+                is_prefilling_np & (num_valid_tokens == 1) & (num_computed_prefill_tokens_np > 0)
+            )
+            decode_graph_eligible = bool((prefill_runs_as_decode_np | ~is_prefilling_np).all())
         self.eplb.set_batch_phase(batch_has_prefill)
         self._prepare_token_inputs_cpu(
             idx_mapping,
@@ -400,6 +407,8 @@ class NPUModelRunner310V2(NPUModelRunner):
             logits_indices_np=logits_indices_np,
         )
         input_batch_kwargs["has_prefill"] = batch_has_prefill
+        input_batch_kwargs["decode_graph_eligible"] = decode_graph_eligible
+        input_batch_kwargs["prefill_runs_as_decode_np"] = prefill_runs_as_decode_np
         input_batch = Ascend310PInputBatch(**input_batch_kwargs)
         # MRoPE positions are built in ``model_state.prepare_inputs``; the 1D
         # arange buffer above is only for slot-mapping / non-MRoPE paths.
@@ -582,6 +591,7 @@ class NPUModelRunner310V2(NPUModelRunner):
         is_profile: bool = False,
         context_len: int = 0,
         valid_dummy_state_slots: bool = False,
+        randomize_inputs: bool = False,
     ):
         self._force_eager_pc_batch = False
         self._force_eager_spec_batch = False
@@ -597,6 +607,7 @@ class NPUModelRunner310V2(NPUModelRunner):
                 is_profile=is_profile,
                 context_len=context_len,
                 valid_dummy_state_slots=valid_dummy_state_slots,
+                randomize_inputs=randomize_inputs,
             )
         finally:
             self._force_eager_pc_batch = False
@@ -607,7 +618,10 @@ class NPUModelRunner310V2(NPUModelRunner):
         scheduler_output: SchedulerOutput,
         batch_req_state: BatchReqState,
         batch_desc: BatchExecutionDescriptor,
+        num_active_loras: int,  # noqa: ARG002
     ) -> Ascend310PInputBatch:
+        # vLLM #56456 added the trailing num_active_loras positional
+        # argument; the 310P path does not use it.
         del batch_req_state
         return self._prepare_inputs_310p(scheduler_output, batch_desc)
 

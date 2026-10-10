@@ -32,7 +32,7 @@ from tests.ut.kv_offload.utils import (
 
 
 def _num_waiting_requests(scheduler) -> int:
-    return len(scheduler.waiting) + len(scheduler.skipped_waiting)
+    return len(scheduler.waiting) + len(scheduler.kv_holding_waiting)
 
 
 def test_basic_lifecycle():
@@ -62,7 +62,7 @@ def test_basic_lifecycle():
     assert scheduler_output.total_num_scheduled_tokens == 0
 
     assert _num_waiting_requests(scheduler) == 1
-    assert request in scheduler.skipped_waiting
+    assert request in scheduler.kv_holding_waiting
     assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
     assert request.num_computed_tokens == NUM_TOKENS
 

@@ -502,6 +502,7 @@ class NPUPlatform(Platform):
         _validate_draft_decode_context_parallel_config(vllm_config)
         _validate_parallel_config(vllm_config)
         _validate_engram_config(vllm_config)
+        _validate_aux_output_config(vllm_config)
 
         # 3.Auto detect quantization method and verify cache dtype
         maybe_auto_detect_quantization(vllm_config)
@@ -1709,6 +1710,25 @@ def _validate_pcp_dcp_config(vllm_config: VllmConfig) -> None:
         parallel_config.prefill_context_parallel_size,
         parallel_config.decode_context_parallel_size,
     )
+
+
+def _validate_aux_output_config(vllm_config: VllmConfig) -> None:
+    """Reject AuxOutput configurations the Ascend runner cannot service.
+
+    vLLM main moved routed-experts output to the AuxOutput connector and
+    requires Model Runner V2 for it. Ascend is an out-of-tree platform, so the
+    upstream check is skipped and only the V2 NPUModelRunner wires the worker
+    connector up. Without this guard a V1 run enables the scheduler-side
+    connector and crashes with "auxiliary output worker output is missing".
+    """
+    if getattr(vllm_config, "aux_output_config", None) is None:
+        return
+    if vllm_config.aux_output_config.enabled and not vllm_config.use_v2_model_runner:
+        raise ValueError(
+            "enable_return_routed_experts (AuxOutput Connector) is only "
+            "supported by Model Runner V2 on Ascend. Set "
+            "VLLM_USE_V2_MODEL_RUNNER=1."
+        )
 
 
 def _validate_draft_decode_context_parallel_config(vllm_config: VllmConfig) -> None:
