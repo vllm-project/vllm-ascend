@@ -4,7 +4,7 @@
 
 Fine-Grained Tensor Parallelism (Fine-grained TP) extends standard tensor parallelism by enabling **independent tensor-parallel sizes for different model components**. Instead of applying a single global `tensor_parallel_size` to all layers, Fine-grained TP allows users to configure separate TP sizes for key modules — such as embedding, LM head, attention output projection (o_proj), and MLP blocks — via the `finegrained_tp_config` parameter.
 
-This capability supports heterogeneous parallelism strategies within a single model, providing finer control over weight distribution, memory layout, and communication patterns across devices. The feature is compatible with MoE transformer architectures and integrates seamlessly into vLLM’s serving pipeline.
+This capability supports heterogeneous parallelism strategies within a single model, providing finer control over weight distribution, memory layout, and communication patterns across devices. The feature is compatible with MoE transformer architectures and integrates into vLLM’s serving pipeline.
 
 Fine-grained TP delivers two primary performance advantages through targeted weight sharding:
 
@@ -14,18 +14,18 @@ Fine-grained TP delivers two primary performance advantages through targeted wei
 - **Faster Memory Access in GEMMs**:  
   In decode-heavy workloads, GEMM performance is often memory-bound. Weight sharding reduces per-device weight fetch volume, cutting DRAM traffic and improving bandwidth efficiency, especially for latency-sensitive layers like LM head and o_proj.
 
-In the measured DeepSeek-R1-W8A8 deployment below, the four knobs together saved **9.72 GB per card** with a net TPOT improvement (see [Experimental Results](#experimental-results)). This guide reflects the feature on the v0.30.0 release line (current main).
+In the measured DeepSeek-R1-W8A8 deployment below, the four knobs together saved **9.72 GB per card** with a net TPOT improvement (see [Experimental Results](#experimental-results)). This guide reflects the feature on current main.
 
 ### Working Principle
 
 All four knobs shard weights over a process group built along the DP axis, and every rank of that group joins the exchange on every engine step. The four components fall into two families with different exchange contracts, and the family a knob belongs to determines where it can run:
 
 - **embedding / LM head (fixed-capacity exchanges)**: the exchange always runs at a fixed, deployment-wide capacity regardless of the real per-step token count, and the padding tail is trimmed afterwards. For embedding, the op pads token IDs to `max(potential_max_tokens, max_num_batched_tokens)` before an `all_gather`, looks up its vocabulary shard, and `reduce_scatter`s the embeddings back to the original owners — prefill-sized steps included. For the LM head, the runner pads the sampled hidden-state rows to `max_num_reqs * decode_query_len` before `all_gather → vocab-sharded GEMM → all_to_all`, and idle DP ranks join through a dummy `compute_logits` at the same capacity. Because the collective shapes never depend on the step, these knobs work in eager and graph mode, in both prefill and decode.
-- **o_proj / MLP (per-step exchanges that require decode-shaped steps)**: the exchange is sized by the actual step. MLP runs plain `all_gather` (gate_up) / `reduce_scatter` (down) whose shapes follow the real token count, so every rank in the group must forward the same number of tokens on every step. o_proj pads to a static capacity sized for the largest decode-shaped step (`potential_max_tokens`) and fails explicitly beyond it. A deployment in which every step is decode-shaped and uniformly sized across DP ranks is only guaranteed by graph dispatch on a P/D-disaggregated decode node — hence the [preconditions](#preconditions-for-o_proj--mlp-tp) and the eager-step fail-fast guard.
+- **o_proj / MLP (per-step exchanges that require decode-shaped steps)**: the exchange is sized by the actual step. MLP runs plain `all_gather` (gate_up) / `reduce_scatter` (down) whose shapes follow the real token count, so every rank in the group must forward the same number of tokens on every step. o_proj pads to a static capacity — `potential_max_tokens`, the deployment-wide step bound (the largest cudagraph capture size, and at least the largest decode-shaped step) — and fails explicitly beyond it. These knobs are supported only in graph-dispatched P/D decode deployments, where steps stay decode-shaped and aligned across the DP group — hence the [preconditions](#preconditions-for-o_proj--mlp-tp) and the eager-step guard.
 
 ### Usage Scenarios
 
-The four knobs are freely combinable — on a PD decode node all four can be enabled together (this is the configuration measured in [Experimental Results](#experimental-results)); each knob only needs to satisfy its own family's constraints.
+The four knobs are freely combinable — on a PD decode node all four can be enabled together (this is the configuration measured in [Experimental Results](#experimental-results)); each knob only needs to satisfy its own family's constraints. All four knobs additionally require `pipeline_parallel_size == 1`.
 
 | Scenario | Components that can be enabled | Applicable Conditions |
 |----------|-------------------------------|------------------------|
@@ -34,12 +34,12 @@ The four knobs are freely combinable — on a PD decode node all four can be ena
 
 #### Component & Execution Mode Support
 
-| TP config     | Eager | Graph | Hybrid | Prefill | Decode |
-| ------------- | ----- | ----- | ------ | ------- | ------ |
-| **embedding** | ✅     | ✅     | ✅      | ✅       | ✅      |
-| **o_proj**    | ❌     | ✅     | ❌      | ❌       | ✅      |
-| **mlp**       | ❌     | ✅     | ❌      | ❌       | ✅      |
-| **LM head**   | ✅     | ✅     | ✅      | ✅       | ✅      |
+| TP config     | Eager | Graph | Prefill | Decode |
+| ------------- | ----- | ----- | ------- | ------ |
+| **embedding** | ✅     | ✅     | ✅       | ✅      |
+| **o_proj**    | ❌     | ✅     | ❌       | ✅      |
+| **mlp**       | ❌     | ✅     | ❌       | ✅      |
+| **LM head**   | ✅     | ✅     | ✅       | ✅      |
 
 > ⚠️ Note:  
 >
@@ -58,13 +58,13 @@ The four knobs are freely combinable — on a PD decode node all four can be ena
 
 #### Models
 
-Fine-grained TP currently supports **MoE models only**. The constraint is enforced at configuration load: a non-MoE model fails at startup with `The finegrained tp sizes can be enabled only for MOE models`.
+Fine-grained TP currently supports **MoE models only**. The constraint is enforced at configuration load: a non-MoE model fails at startup with `The finegrained tp sizes can be enabled only for MOE models.`
 
 To check whether a checkpoint qualifies, look at its `config.json`: the model counts as a MoE model when the config exposes routed experts through any of the fields `n_routed_experts` (DeepSeek-style), `num_local_experts` (Mixtral-style), `num_experts`, `moe_num_experts`, or MoE blocks under `block_configs`. Checkpoints such as DeepSeek-V3/R1, the Qwen3 MoE series, GLM MoE variants, Kimi-K2, and MiniMax-M3 qualify; dense checkpoints such as Llama or the dense Qwen series do not.
 
 The restriction comes from the sharding axis: fine-grained TP shards weights across the data-parallel (DP) dimension, and only MoE deployments keep a cross-rank DP group — for a dense model, every DP rank runs as an independent DP=1 engine, leaving no group to shard across.
 
-Within a qualifying MoE model, the sharded components may include the dense layers — for example, the first three dense layers of DeepSeek-R1 are sharded by `mlp_tensor_parallel_size` like the other MLP layers.
+Within a qualifying MoE model, `mlp_tensor_parallel_size` shards the dense FFN layers — for example, the first three dense layers of DeepSeek-R1; the routed experts of the MoE layers are sharded by expert parallel instead.
 
 #### Preconditions for o_proj / MLP TP
 
@@ -77,7 +77,7 @@ Within a qualifying MoE model, the sharded components may include the dense laye
 - a graph mode: do not start the instance with `--enforce-eager`;
 - `prefill_context_parallel_size == 1`.
 
-If the largest cudagraph capture size does not cover the largest possible step (`min(max_num_batched_tokens, max_num_seqs * (1 + num_speculative_tokens))`), both `oproj_tensor_parallel_size` and `mlp_tensor_parallel_size` are **disabled automatically at startup with a warning**, and the deployment still starts without them; raise `max_cudagraph_capture_size` to re-enable. At runtime, a step dispatched outside the captured graphs fails the affected request with an explicit error instead of hanging the cross-DP collectives.
+If the largest cudagraph capture size does not cover the largest possible step (`min(max_num_batched_tokens, max_num_seqs * (1 + num_speculative_tokens))`), both `oproj_tensor_parallel_size` and `mlp_tensor_parallel_size` are **disabled automatically at startup with a warning**, and the deployment still starts without them; raise `max_cudagraph_capture_size` to re-enable. At runtime, a step dispatched outside the captured graphs fails loudly with an explicit error instead of silently hanging the cross-DP collectives.
 
 #### Configuration Limit
 
@@ -86,7 +86,7 @@ The Fine-Grained TP size for any component must:
 - Be **≤ the data-parallel (DP) size**, and  
 - **Evenly divide the DP size** (i.e., `dp_size % tp_size == 0`) to ensure valid device assignment and communication grouping.
 
-Violating these constraints fails at configuration load with `finegrained tp sizes must divide by data_parallel_size`.
+Violating these constraints fails at configuration load with `finegrained tp sizes must divide by data_parallel_size.`
 
 #### Standard Tensor Parallelism Requirement
 
@@ -168,7 +168,7 @@ vllm serve deepseek-ai/DeepSeek-R1 \
 
 ## Verifying the Feature
 
-After the instance starts, confirm which knobs actually took effect:
+After the instance starts, check which knobs passed startup validation:
 
 1. Check the startup log for the enabled-knob summary:
 
@@ -188,7 +188,7 @@ After the instance starts, confirm which knobs actually took effect:
    finegrained_tp_config enabled: oproj_tensor_parallel_size=8, mlp_tensor_parallel_size=8, lmhead_tensor_parallel_size=8, embedding_tensor_parallel_size=8
    ```
 
-   Only the knobs that survived validation are listed; the format is `knob=size`.
+   Only the knobs that survived validation are listed; the format is `knob=size`. Note that under `tensor_parallel_size > 1`, embedding / LM head TP still appears in this line but does not actually take effect (see [Standard Tensor Parallelism Requirement](#standard-tensor-parallelism-requirement)).
 
 2. If `oproj_tensor_parallel_size` / `mlp_tensor_parallel_size` are missing from that line, check for the capture-bound auto-disable warning:
 
@@ -223,7 +223,7 @@ All knobs live under `finegrained_tp_config` inside `--additional-config`. The d
 
 ## Experimental Results
 
-To evaluate the effectiveness of fine-grained TP in large-scale service scenarios, we use the model **DeepSeek-R1-W8A8**, deploy PD separated decode instances in an environment of 32 cards Ascend Atlas A2 inference products*64GB (A2), with parallel configuration as DP32+EP32, and fine-grained TP size of 8; the performance data is as follows.
+To evaluate the effectiveness of fine-grained TP in large-scale service scenarios, we use the model **DeepSeek-R1-W8A8**, deploy PD separated decode instances in an environment of 32 cards of Ascend Atlas A2 inference products (64 GB per card), with parallel configuration as DP32+EP32, and fine-grained TP size of 8; the performance data is as follows.
 
 | Module           | Memory Savings | TPOT Impact (batch=24)    |
 | ---------------- | -------------- | ------------------------- |
@@ -233,7 +233,7 @@ To evaluate the effectiveness of fine-grained TP in large-scale service scenario
 | Embedding TP = 8 | 1.51 GB        | **−1.0 ms** (improvement) |
 | **Total**        | **9.72 GB**    | —                         |
 
-- We achieved significant gains in terms of high memory capacity on a single card, as well as the benefits of TPOT.
+- Memory savings per card are the primary gain; TPOT sees a small net improvement.
 
 ---
 
@@ -245,7 +245,7 @@ Fine-grained TP is the **most effective** in the **decode instance** of PD separ
 
 ## FAQs
 
-### Startup fails with "The finegrained tp sizes can be enabled only for MOE models"
+### Startup fails with "The finegrained tp sizes can be enabled only for MOE models."
 
 **Problem Description**: With any `finegrained_tp_config` size set, the instance fails at configuration load with this error.
 
