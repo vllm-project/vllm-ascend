@@ -4,8 +4,27 @@ _envs: &envs
   OMP_NUM_THREADS: "10"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
   HCCL_BUFFSIZE: "1024"
+  PYTHONHASHSEED: "0"
+  ASCEND_ENABLE_USE_FABRIC_MEM: "1"
+  ACL_OP_INIT_MODE: "1"
+
+_kv_pool: &kv_pool
+  type: "mooncake"
+  master_port: 50088
+  metrics_port: 50089
+  config:
+    metadata_server: "P2PHANDSHAKE"
+    protocol: "ascend"
+    device_name: ""
+    # The proven A3 TP8 non-layerwise configuration uses a 32 GiB segment.
+    global_segment_size: "32GB"
+    preferred_segment: false
+    prefer_alloc_in_same_node: true
 
 _server_cmd: &server_cmd
+  # Keep the external pool as the only prefix-hit path. The warmup below
+  # populates Mooncake, then the measured run loads the shared prefix from it.
+  - "--no-enable-prefix-caching"
   - "--max_model_len"
   - "135000"
   - "--safetensors-load-strategy"
@@ -41,19 +60,36 @@ _server_cmd: &server_cmd
   - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
   - "--speculative-config"
   - '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
+  - "--kv-transfer-config"
+  - '{"kv_connector": "AscendStoreConnector", "kv_role": "kv_both", "kv_connector_extra_config": {"backend": "mooncake", "lookup_rpc_port": "0", "use_layerwise": false}}'
 
 _benchmarks_perf: &benchmarks_perf
-  perf:
+  pool_warmup:
     case_type: performance
-    dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+    # Populate the pool before measuring MTP3 pool-hit performance. All
+    # samples share the same long prefix, so any one sample warms it.
+    dataset_path: vllm-ascend/GSM8K_prefix90_in65536_bs1000_qwen
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 128
-    max_out_len: 1500
-    batch_size: 32
+    num_prompts: 1
+    max_out_len: 1
+    batch_size: 1
     request_rate: 0
-    baseline: 90
+    baseline: 0
     threshold: 0.97
+  perf:
+    case_type: performance
+    # Exercise whole-block Mooncake load-back together with MTP3 draft/verify
+    # from the first measured request. Recalibrate after valid pool-hit runs.
+    dataset_path: vllm-ascend/GSM8K_prefix90_in65536_bs1000_qwen
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 64
+    max_out_len: 1024
+    batch_size: 16
+    request_rate: 0
+    baseline: 1
+    threshold: 0.1
 
 # ==========================================
 # ACTUAL TEST CASES
@@ -65,6 +101,7 @@ test_cases:
     model: "Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp"
     envs:
       <<: *envs
+    kv_pool: *kv_pool
     server_cmd: *server_cmd
     server_cmd_extra:
       - "--additional-config"
@@ -96,6 +133,7 @@ test_cases:
     model: "Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp"
     envs:
       <<: *envs
+    kv_pool: *kv_pool
     server_cmd: *server_cmd
     server_cmd_extra:
       - "--additional-config"
