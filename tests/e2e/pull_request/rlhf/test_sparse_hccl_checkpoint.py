@@ -14,6 +14,10 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 import pytest
 import requests
@@ -112,6 +116,10 @@ def write_checkpoint(path):
 
 class SparseCheckpointOracle:
     """Test-only worker extension comparing complete runtime parameter state."""
+
+    if TYPE_CHECKING:
+        # vLLM mixes this extension into its worker class at runtime.
+        get_model: Callable[[], torch.nn.Module]
 
     def sparse_digest(self):
         hashes = {}
