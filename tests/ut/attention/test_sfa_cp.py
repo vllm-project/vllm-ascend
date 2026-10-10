@@ -1090,7 +1090,8 @@ def test_sfa_dcp_slot_mapping_matches_parallel_layout(impl_cls, local_prefill, g
 
 
 @pytest.mark.parametrize("is_kv_consumer,sfa_c8", [(False, False), (True, True)])
-def test_sfa_pcp_keeps_prolog_v3_enabled(is_kv_consumer, sfa_c8):
+@pytest.mark.parametrize("quantized_indexer", [False, True])
+def test_sfa_pcp_keeps_prolog_v3_enabled(is_kv_consumer, sfa_c8, quantized_indexer):
     impl = AscendSFAPCPImpl.__new__(AscendSFAPCPImpl)
     impl.is_pcp_decode_sharded = False
     quant_cls = AscendW8A8DynamicLinearMethod
@@ -1103,9 +1104,17 @@ def test_sfa_pcp_keeps_prolog_v3_enabled(is_kv_consumer, sfa_c8):
     impl.enable_sparse_sfa_c8 = sfa_c8
     impl.enable_sparse_sfa_turboquant = False
     impl.enable_mlapo = False
+    impl.has_indexer = True
+    impl.indexer = SimpleNamespace(
+        wq_b=SimpleNamespace(weight_scale=torch.ones(1)) if quantized_indexer else SimpleNamespace()
+    )
     with patch.object(impl, "_try_enable_type", return_value=True) as prepare_weights:
-        assert impl._resolve_preprocess_type(torch.bfloat16) == PreprocessType.PROLOG_V3
-    prepare_weights.assert_called_once_with(PreprocessType.PROLOG_V3, torch.bfloat16)
+        expected = PreprocessType.PROLOG_V3 if quantized_indexer else PreprocessType.NATIVE
+        assert impl._resolve_preprocess_type(torch.bfloat16) == expected
+    if quantized_indexer:
+        prepare_weights.assert_called_once_with(PreprocessType.PROLOG_V3, torch.bfloat16)
+    else:
+        prepare_weights.assert_not_called()
 
 
 @pytest.mark.parametrize(
