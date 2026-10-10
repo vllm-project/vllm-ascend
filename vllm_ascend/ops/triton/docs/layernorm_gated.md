@@ -35,6 +35,22 @@
 - Route selection depends on shape, group count, and the initialized vector-core count, not on tensor values. No claim is made here that every route is faster on every supported device or dtype.
 - Final unforced public HOIST32 at B4/P40, N128, BF16 RMSNorm with gate before normalization (`norm_before_gate=False`), had median BASE16/candidate paired ratios of 1.033535 at M289 and 1.078332 at M639. Against the former PERSIST32 path the ratios were 0.998504 and 0.996091, with mixed directions. These controls describe simplification and the sampled selector boundary; BASE16 and PERSIST32 are not the frozen upstream BASE64 comparator, and the threshold is not an optimal crossover claim.
 
+## Model input shapes
+
+vLLM's [Qwen3.5 linear-attention layers](https://github.com/vllm-project/vllm/blob/ced6857afa0ea7b2e3f0846a62e1394e90f15607/vllm/model_executor/models/qwen3_5.py#L144-L151) use Qwen GDN. Its [output norm](https://github.com/vllm-project/vllm/blob/ced6857afa0ea7b2e3f0846a62e1394e90f15607/vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py#L487-L494) uses `group_size=None`, `norm_before_gate=True`, and RMSNorm with a gate and no bias. On Ascend, the [output-projection path](https://github.com/c5566b/vllm-ascend/blob/1097a8d766ec8abb4e3bfb9fba72b10bbe0beeb2/vllm_ascend/ops/gdn.py#L333-L341) reshapes `[T, H_local, D_v]` to `[M, N]`, where:
+
+- `T` is the number of token rows entering this projection on the current rank.
+- `H_local` is its local value-head count (`num_v_heads / TP` in this path).
+- `M = T * H_local`, and `N = D_v`, the value-head width.
+- `group_size=None` gives `N_group=N` and `G=1`: model heads have been folded into the row dimension, rather than becoming normalization groups.
+
+| Model | Value-head width `D_v` | Value heads at TP1 `H_local` | Flattened row count at TP1 |
+| --- | ---: | ---: | --- |
+| [Qwen3.5-27B](https://huggingface.co/Qwen/Qwen3.5-27B/blob/af65380a20d418eeb0a2bcb784dd43e9b76c4a2e/config.json) | 128 | 48 | `M=48*T` |
+| [Qwen3.5-35B-A3B](https://huggingface.co/Qwen/Qwen3.5-35B-A3B/blob/41adbc1e50345066ac5153217957e9910204e632/config.json) | 128 | 32 | `M=32*T` |
+
+For example, four token rows at TP1 give `M=192` for Qwen3.5-27B and `M=128` for Qwen3.5-35B-A3B. Both configurations use `rms_norm_eps=1e-6`. Operator performance cases are stated in flattened `[M,N]` coordinates; boundary and tail controls need not map to an integer token count for a particular model. They are single-operator measurements, not model-throughput measurements.
+
 ## Origin and Differences
 
 - **Origin**: The existing `layernorm_gated.py` implementation is adapted from Flash Linear Attention's gated LayerNorm and the Triton LayerNorm tutorial. PR1 reuses the original BASE kernel's normalization and gating math.
