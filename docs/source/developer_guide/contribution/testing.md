@@ -6,6 +6,49 @@ This document explains how to write unit tests, E2E tests, and nightly tests to 
 
 The fastest way to set up a test environment is to use the main branch's container image:
 
+### Before you start
+
+A few details are easy to miss when following the container steps below:
+
+- The nightly image already ships both vLLM and vLLM Ascend, so only `requirements-dev.txt`
+  has to be installed. Building vLLM manually, as shown in [Run CI locally](./index.md#run-ci-locally),
+  is only needed when you work outside the image.
+- If you mount your own checkout over `/vllm-workspace/vllm-ascend`, the mount hides the copy
+  that ships inside the image, so install the mounted source again. The image already provides
+  the build dependencies, which is what `--no-build-isolation` reuses:
+
+    ```bash
+    cd /vllm-workspace/vllm-ascend/
+    pip install -v --no-build-isolation -e .
+    ```
+
+  The build generates `vllm_ascend/_build_info.py`; check it after the install, expecting the
+  device type of your cards (for example `A2`):
+
+    ```bash
+    python -c "from vllm_ascend._build_info import __device_type__; print(__device_type__)"
+    ```
+
+- Source the CANN toolkit and NNAL inside the container before building or running tests.
+  With the default installation paths:
+
+    ```bash
+    source /usr/local/Ascend/ascend-toolkit/set_env.sh
+    source /usr/local/Ascend/nnal/atb/set_env.sh
+    ```
+
+  If either component is installed somewhere else, source the corresponding `set_env.sh`
+  instead; see [Installation](../../getting_started/installation.md) for non-default layouts.
+- If `npu-smi` cannot report the chip inside the container, set `SOC_VERSION` explicitly, for
+  example `export SOC_VERSION=ascend910b1` for A2. Without it, package builds that query the
+  chip through `npu-smi` may fail.
+- On a machine without an NPU, where only unit tests are run, build with
+  `export COMPILE_CUSTOM_KERNELS=0`. `vllm_ascend/envs.py` documents this option as the
+  unit-test-only setting for NPU-less environments; the complete recipe is in
+  [Installation](../../getting_started/installation.md).
+- If the package mirror configured below is not reachable from your network, switch to the
+  Huawei Cloud package index that the "Local (CPU)" tab above configures.
+
 === "Local (CPU)"
 
     You can run the unit tests on CPUs with the following steps:
@@ -146,6 +189,8 @@ There are several principles to follow when writing unit tests:
 - The vLLM Ascend test uses unittest framework. See [the Python unittest documentation](https://docs.python.org/3/library/unittest.html#module-unittest) to understand how to write unit tests.
 - All unit tests can be run on CPUs, so you must mock the device-related functions on the host.
 - Example: [tests/ut/test_ascend_config.py](https://github.com/vllm-project/vllm-ascend/blob/main/tests/ut/test_ascend_config.py).
+- The commands below assume the setup described in [Before you start](#before-you-start): CANN and NNAL
+  sourced, and `COMPILE_CUSTOM_KERNELS=0` on unit-test machines without an NPU.
 - You can run the unit tests using `pytest`:
 
 === "Local (CPU)"
