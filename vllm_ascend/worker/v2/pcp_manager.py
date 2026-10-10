@@ -238,10 +238,6 @@ class AscendPCPManager(PCPManager):
                 raise NotImplementedError(
                     "Ascend MRV2 PCP supports speculative decoding only with MTP, Eagle3 and DSpark."
                 )
-            if speculative_config.draft_sample_method != "greedy":
-                raise NotImplementedError(
-                    "Ascend MRV2 PCP speculative decoding currently requires greedy draft sampling."
-                )
         is_sparse_mla = hasattr(model_config.hf_text_config, "index_topk")
         cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
         if parallel_config.data_parallel_size > 1 and cudagraph_mode not in {
