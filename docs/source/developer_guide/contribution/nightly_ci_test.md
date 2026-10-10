@@ -241,6 +241,79 @@ Re-trigger after fixing an issue: just push a new commit. The `synchronize` even
 re-runs the workflow and picks up the existing `/nightly` comment automatically — no
 need to post a new comment.
 
+## Collecting single-node NPU profiles
+
+Profiling is opt-in for a YAML-driven benchmark. Enable the server profiler and
+add a `profiling` mapping to the test case in your diagnostic PR:
+
+```yaml
+server_cmd_extra:
+  - "--profiler-config"
+  - '{"profiler":"torch","torch_profiler_dir":"/vllm-workspace/vllm-ascend/profiling/qwen3-bf16","torch_profiler_with_stack":false,"torch_profiler_with_memory":false,"ignore_frontend":true,"delay_iterations":1024,"max_iterations":256}'
+profiling:
+  benchmark_key: perf
+  delay_iterations: 1024
+  max_iterations: 256
+  output_dir: profiling/qwen3-bf16
+  timeout_seconds: 300
+  expected_workers: 4
+```
+
+Keep existing `server_cmd_extra` arguments, such as W8A8 quantization, when
+adding the profiler option. The directory and iteration limits in the mapping
+must match `--profiler-config`. Use a separate output directory for each test
+case, and an empty directory for each new capture.
+
+The harness arms `/start_profile` immediately before the selected benchmark
+and calls `/stop_profile` before the server is closed, including on benchmark
+failure. Other benchmarks, such as `perf-warm`, run without an active capture.
+`delay_iterations` counts worker model execution calls, so AISBench startup
+without model execution does not consume the delay. `max_iterations` limits
+the number of recorded model calls; these counts are not seconds or output
+tokens. The first capture should be checked for prefill and decode composition
+before interpreting it as a steady decode window.
+
+Keep `FULL_DECODE_ONLY` when investigating graph decode performance. The
+profiler records NPU kernel activity during graph replay, while Python-level
+call attribution can be less detailed than eager execution. The Ascend wrapper
+uses `delay_iterations` and `max_iterations`; upstream torch profiler schedule
+options such as `active_iterations` do not control this capture window.
+
+The harness waits for the stop RPC to return, records a manifest in the output
+directory, and checks for the requested number of worker traces containing
+kernel/task rows. An HTTP 200 alone is not accepted as evidence of a usable
+capture. Trace validation failures fail the diagnostic test; a benchmark
+exception remains the primary error if stopping or validation also fails.
+
+Trigger the existing model names from the diagnostic PR, for example:
+
+```text
+/nightly qwen3-30b-a3b-bf16-a2-performance qwen3-30b-a3b-w8a8-a2-performance
+```
+
+There is no `/nightly --profile` option. The comment author needs repository
+Triage permission or higher. The comment dispatcher runs workflows at `main`,
+while checking out the PR's test code and model configurations. Consequently,
+the profiling upload support must already be merged into `main` before this
+comment can upload traces; changing only a workflow in the diagnostic PR does
+not activate that upload step. Keep profiling configuration changes in a
+diagnostic PR rather than enabling them in normal nightly performance guards.
+
+Download `profiling-*` from the Actions run's **Artifacts** section, or use:
+
+```bash
+gh run download RUN_ID -R vllm-project/vllm-ascend \
+  -p 'profiling-*' -D ./ci-profiles
+```
+
+Artifacts are retained for seven days and include the manifest and TP worker
+`*_ascend_pt` directories with `ASCEND_PROFILER_OUTPUT/trace_view.json`,
+`kernel_details.csv` or `task_time.csv`, and other exporter output. Upload runs
+after test failures, so a performance guard failure does not discard a trace.
+Profiling overhead affects throughput; use a separate run without profiling
+for performance pass/fail comparisons. The comment path reuses the current CI
+image, so confirm the actual CANN version in the job logs when comparing stacks.
+
 ## AOP Hooks (Bisect)
 
 Add `--aop_enabled` to any `/nightly` command to enable the AOP pipeline:
