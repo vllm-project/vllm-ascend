@@ -1367,6 +1367,57 @@ def has_layer_idx(model_instance: torch.nn.Module) -> bool:
     return hasattr(model_instance, "model") and hasattr(model_instance.model, "start_layer")
 
 
+def supports_non_contiguous_kv_cache(vllm_config: VllmConfig) -> bool:
+    """Limit the generic strided layout to explicitly supported model families.
+
+    A dense FullAttentionSpec describes a layer, not the whole model: it can
+    also occur in GQA/MSA hybrids. Use the resolved architecture so every PP
+    rank makes the same decision. Unknown architectures keep the legacy layout.
+    """
+    model_config = getattr(vllm_config, "model_config", None)
+    architecture = getattr(model_config, "architecture", None)
+    dense_architectures = (
+        "Qwen2ForCausalLM",
+        "Qwen3ForCausalLM",
+        "Qwen3MoeForCausalLM",
+        "Qwen3_5MTP",
+        "Qwen3_5MoeMTP",
+    )
+    hybrid_architectures = (
+        "Qwen3NextForCausalLM",
+        "Qwen3_5ForCausalLM",
+        "Qwen3_5MoeForCausalLM",
+        "Qwen3_5ForConditionalGeneration",
+        "Qwen3_5MoeForConditionalGeneration",
+    )
+    if architecture not in dense_architectures + hybrid_architectures or getattr(model_config, "use_mla", False):
+        return False
+    text_config = getattr(model_config, "hf_text_config", None)
+    if text_config is None:
+        return False
+    if (
+        getattr(text_config, "use_sliding_window", False)
+        or getattr(text_config, "index_topk", None) is not None
+        or getattr(text_config, "sparse_attention_config", None)
+    ):
+        return False
+    # MTP uses Full Attention even when its text config describes the target's
+    # recurrent layers. Its cache must follow the target's supported layout.
+    if architecture in ("Qwen3_5MTP", "Qwen3_5MoeMTP"):
+        return True
+    layer_types = getattr(text_config, "layer_types", None)
+    if layer_types is not None:
+        if not isinstance(layer_types, (list, tuple)) or not layer_types:
+            return False
+        if "full_attention" not in layer_types:
+            return False
+        allowed_types = (
+            ("full_attention", "linear_attention") if architecture in hybrid_architectures else ("full_attention",)
+        )
+        return all(layer_type in allowed_types for layer_type in layer_types)
+    return architecture in dense_architectures
+
+
 # C8_MXFP (FP8 KV + E8M0 scales) on Ascend A5 uses 512-token kernel blocks for
 # the QFA path (the QFA D=256 requirement doc allows block sizes 512/1024).
 A5_C8_MXFP_KV_CACHE_BLOCK_SIZE = 512

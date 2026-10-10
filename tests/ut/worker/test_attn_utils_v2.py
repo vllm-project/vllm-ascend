@@ -50,6 +50,7 @@ from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.models.deepseek_v4 import compressor as deepseek_v4_compressor
 from vllm_ascend.models.deepseek_v4 import indexer as deepseek_v4_indexer
 from vllm_ascend.models.deepseek_v4 import model as deepseek_v4_model
+from vllm_ascend.models.minimax_m3.msa_m3 import AscendMiniMaxM3SparseBackend
 from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _get_kv_cache_config_deepseek_v4_main,
 )
@@ -92,6 +93,18 @@ def _make_dsv4_mla_spec(block_size: int, compress_ratio: int) -> AscendMLAAttent
 def _spec_compress_ratio(spec) -> int:
     """Compression ratio of an MLA spec on either vLLM lane."""
     return spec.tokens_per_state
+
+
+def _scope_model_config(architecture: str | None = "Qwen3ForCausalLM", hybrid: bool = False):
+    """Declare resolved model identity without mocking the layout policy."""
+    return SimpleNamespace(
+        architecture=architecture,
+        hf_config=SimpleNamespace(architectures=[architecture] if architecture is not None else []),
+        hf_text_config=SimpleNamespace(
+            layer_types=["full_attention", "linear_attention"] if hybrid else ["full_attention"]
+        ),
+        use_mla=False,
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -173,7 +186,7 @@ def test_main_allocator_attention_layout(
         additional_config={},
         cache_config=SimpleNamespace(cache_dtype="auto"),
         kv_transfer_config=object() if kv_transfer else None,
-        model_config=SimpleNamespace(hf_config=SimpleNamespace()),
+        model_config=_scope_model_config(),
         parallel_config=SimpleNamespace(decode_context_parallel_size=2 if cache_kind == "dcp" else 1),
         quant_config=None,
     )
@@ -296,6 +309,184 @@ def test_sparse_offload_allocator_uses_host_main_cache_and_device_resident_buffe
     assert calls == [(48, 24, 2 * 1024 * 1024, 0, False)]
 
 
+@pytest.mark.parametrize(
+    ("architecture", "supported"),
+    [
+        ("Qwen3ForCausalLM", True),
+        ("MiniMaxM3SparseForCausalLM", False),
+        ("MiniMaxM3SparseForConditionalGeneration", False),
+        ("UnregisteredForCausalLM", False),
+    ],
+)
+@pytest.mark.parametrize("padded", [False, True])
+@pytest.mark.parametrize("kv_transfer", [False, True])
+def test_dense_attention_layout_uses_whole_model_scope(monkeypatch, architecture, supported, padded, kv_transfer):
+    """Exclude an MSA model even when this PP rank sees only a dense layer."""
+    name = "model.layers.0.self_attn.attn"
+    spec = FullAttentionSpec(block_size=2, num_kv_heads=1, head_size=4, dtype=torch.float16)
+    if padded:
+        spec = replace(spec, page_size_padded=2 * spec.page_size_bytes)
+    config = KVCacheConfig(
+        num_blocks=3,
+        kv_cache_tensors=[_make_kv_cache_tensor(3 * spec.page_size_bytes, [name], spec.page_size_bytes)],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=[name], kv_cache_spec=spec)],
+    )
+    vllm_config = SimpleNamespace(
+        additional_config={},
+        model_config=_scope_model_config(architecture),
+        cache_config=SimpleNamespace(cache_dtype="auto"),
+        kv_transfer_config=object() if kv_transfer else None,
+        quant_config=None,
+    )
+    layer = SimpleNamespace(get_attn_backend=lambda: AscendAttentionBackend)
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args: {name: layer})
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda *_args: False)
+    monkeypatch.setattr(attn_utils, "enable_fa_quant", lambda *_args: False)
+    assert attn_utils.supports_non_contiguous_kv_cache(vllm_config) is supported
+    raw = attn_utils._allocate_kv_cache(config, {}, torch.device("cpu"))
+    assert isinstance(raw[name], torch.Tensor if supported else tuple)
+    raw_parts = [raw[name]] if supported else list(raw[name])
+    assert sum(part.numel() for part in raw_parts) == 3 * spec.page_size_bytes
+    group = AttentionGroup(backend=AscendAttentionBackend, layer_names=[name], kv_cache_spec=spec, kv_cache_group_id=0)
+    key, value = attn_utils._reshape_kv_cache_v2([group], raw, "auto", [1], {}, config)[name]
+    assert key.shape == value.shape == (6, 1, 1, 4)
+    assert key.is_contiguous() is (not supported)
+    assert value.is_contiguous() is (not supported)
+    assert (key.untyped_storage().data_ptr() == value.untyped_storage().data_ptr()) is supported
+    for part in raw_parts:
+        assert part.untyped_storage().nbytes() == part.numel() + (2 * 1024 * 1024 if kv_transfer else 0)
+        if kv_transfer:
+            assert part.data_ptr() % (2 * 1024 * 1024) == 0
+    key[1].fill_(3)
+    value[3].fill_(5)
+    assert torch.all(key[1] == 3) and torch.all(value[3] == 5)
+    assert torch.count_nonzero(key[:1]) == torch.count_nonzero(key[2:]) == 0
+    assert torch.count_nonzero(value[:3]) == torch.count_nonzero(value[4:]) == 0
+    if not supported:
+        for part, view in zip(raw_parts, (key, value)):
+            assert torch.count_nonzero(part[view.numel() * view.element_size() :]) == 0
+
+
+@pytest.mark.parametrize("architecture", ["MiniMaxM3SparseForCausalLM", "MiniMaxM3SparseForConditionalGeneration"])
+@pytest.mark.parametrize("native_fp8", [False, True])
+def test_minimax_m3_dense_and_actual_msa_backend_keep_contiguous_cache(monkeypatch, architecture, native_fp8):
+    """Keep dense GQA and the real MSA backend outside the generic layout."""
+    dense_name, sparse_name = "model.layers.0.self_attn.attn", "model.layers.1.self_attn.attn"
+    dense_spec = FullAttentionSpec(block_size=128, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)
+    sparse_dtype = torch.float8_e4m3fn if native_fp8 else torch.bfloat16
+    sparse_spec = replace(dense_spec, dtype=sparse_dtype)
+    specs = {dense_name: dense_spec, sparse_name: sparse_spec}
+    config = KVCacheConfig(
+        num_blocks=3,
+        kv_cache_tensors=[
+            _make_kv_cache_tensor(3 * spec.page_size_bytes, [name], spec.page_size_bytes)
+            for name, spec in specs.items()
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=[name], kv_cache_spec=spec) for name, spec in specs.items()],
+    )
+    vllm_config = SimpleNamespace(
+        additional_config={},
+        model_config=_scope_model_config(architecture),
+        cache_config=SimpleNamespace(cache_dtype="fp8" if native_fp8 else "auto"),
+        kv_transfer_config=None,
+        quant_config=None,
+    )
+    backends = {dense_name: AscendAttentionBackend, sparse_name: AscendMiniMaxM3SparseBackend}
+    layers = {
+        name: SimpleNamespace(get_attn_backend=lambda backend=backend: backend) for name, backend in backends.items()
+    }
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args: layers)
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda *_args: False)
+    monkeypatch.setattr(attn_utils, "enable_fa_quant", lambda *_args: False)
+    raw = attn_utils._allocate_kv_cache(config, {}, torch.device("cpu"))
+    assert all(isinstance(cache, tuple) for cache in raw.values())
+    groups = [
+        AttentionGroup(backend=backends[name], layer_names=[name], kv_cache_spec=spec, kv_cache_group_id=group_id)
+        for group_id, (name, spec) in enumerate(specs.items())
+    ]
+    caches = attn_utils._reshape_kv_cache_v2(groups, raw, vllm_config.cache_config.cache_dtype, [64, 128], {}, config)
+    assert all(view.is_contiguous() for views in caches.values() for view in views)
+    assert caches[dense_name][0].shape == (6, 64, 1, 128)
+    assert caches[sparse_name][0].shape == (3, 128, 1, 128)
+    assert len({view.untyped_storage().data_ptr() for views in caches.values() for view in views}) == 4
+    for name, spec in specs.items():
+        assert sum(part.numel() for part in raw[name]) == 3 * spec.page_size_bytes
+        assert all(view.dtype == spec.dtype for view in caches[name])
+        key, value = caches[name]
+        key.view(torch.uint8)[1].fill_(3)
+        value.view(torch.uint8)[2].fill_(5)
+        assert torch.all(key.view(torch.uint8)[1] == 3)
+        assert torch.all(value.view(torch.uint8)[2] == 5)
+        assert torch.count_nonzero(key.view(torch.uint8)[:1]) == 0
+        assert torch.count_nonzero(key.view(torch.uint8)[2:]) == 0
+        assert torch.count_nonzero(value.view(torch.uint8)[:2]) == 0
+        assert torch.count_nonzero(value.view(torch.uint8)[3:]) == 0
+
+
+@pytest.mark.parametrize("architecture", ["MambaForCausalLM", None])
+def test_pure_mamba_and_unknown_model_use_contiguous_state_views(monkeypatch, architecture):
+    name = "model.layers.0.mamba"
+    spec = MambaSpec(block_size=1, shapes=((4,), (2,)), dtypes=(torch.float16, torch.float32), page_size_padded=32)
+    config = KVCacheConfig(
+        num_blocks=3,
+        kv_cache_tensors=[_make_kv_cache_tensor(3 * spec.page_size_bytes, [name], spec.page_size_bytes)],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=[name], kv_cache_spec=spec)],
+    )
+    vllm_config = SimpleNamespace(
+        additional_config={},
+        model_config=_scope_model_config(architecture),
+        cache_config=SimpleNamespace(cache_dtype="auto"),
+        kv_transfer_config=None,
+    )
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
+    raw = attn_utils._allocate_kv_cache(config, {}, torch.device("cpu"))
+    group = AttentionGroup(backend=AscendAttentionBackend, layer_names=[name], kv_cache_spec=spec, kv_cache_group_id=0)
+    conv, ssm = attn_utils._reshape_kv_cache_v2([group], raw, "auto", [1], {}, config)[name]
+    assert conv.shape == (3, 4) and ssm.shape == (3, 2)
+    assert conv.is_contiguous() and ssm.is_contiguous()
+    assert conv.stride() == (4, 1) and ssm.stride() == (2, 1)
+    assert ssm.storage_offset() * ssm.element_size() == conv.numel() * conv.element_size()
+    conv[1].fill_(1)
+    ssm[2].fill_(2)
+    assert torch.count_nonzero(conv[:1]) == torch.count_nonzero(conv[2:]) == 0
+    assert torch.count_nonzero(ssm[:2]) == 0
+    logical_bytes = conv.numel() * conv.element_size() + ssm.numel() * ssm.element_size()
+    assert torch.count_nonzero(raw[name][logical_bytes:]) == 0
+
+
+def test_glm5_next_mamba_state_retains_special_page_stride(monkeypatch):
+    """The specialized spec marker must override the generic model policy."""
+    name = "model.layers.0.linear_attn"
+    spec = MambaSpec(block_size=1, shapes=((4,), (2,)), dtypes=(torch.float16, torch.float32), page_size_padded=32)
+    glm_spec = AscendMLAAttentionSpec(
+        block_size=2, num_kv_heads=1, head_size=4, dtype=torch.float16, model_version="glm5_next"
+    )
+    config = KVCacheConfig(
+        num_blocks=3,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(layer_names=["glm.attn"], kv_cache_spec=glm_spec),
+            KVCacheGroupSpec(layer_names=[name], kv_cache_spec=spec),
+        ],
+    )
+    vllm_config = SimpleNamespace(model_config=_scope_model_config(None))
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
+    assert not attn_utils.supports_non_contiguous_kv_cache(vllm_config)
+    raw = torch.zeros(3 * spec.page_size_bytes, dtype=torch.int8)
+    group = AttentionGroup(backend=AscendAttentionBackend, layer_names=[name], kv_cache_spec=spec, kv_cache_group_id=1)
+    conv, ssm = attn_utils._reshape_kv_cache_v2([group], {name: raw}, "auto", [2, 1], {}, config)[name]
+    assert conv.stride() == (16, 1) and ssm.stride() == (8, 1)
+    assert not conv.is_contiguous() and not ssm.is_contiguous()
+    assert ssm.storage_offset() * ssm.element_size() == 8
+    conv[1].fill_(1)
+    ssm[2].fill_(2)
+    assert torch.count_nonzero(raw[:32]) == 0
+    assert torch.count_nonzero(raw[40:64]) == 0
+    assert torch.count_nonzero(raw[80:]) == 0
+
+
 @pytest.mark.parametrize("pa_enabled", [False, True])
 def test_hybrid_allocator_keeps_shared_backing_with_pa_configured(monkeypatch, pa_enabled):
     attn_name = "model.layers.0.self_attn.attn"
@@ -327,7 +518,7 @@ def test_hybrid_allocator_keeps_shared_backing_with_pa_configured(monkeypatch, p
     vllm_config = SimpleNamespace(
         additional_config={},
         kv_transfer_config=None,
-        model_config=SimpleNamespace(hf_config=SimpleNamespace()),
+        model_config=_scope_model_config("Qwen3_5ForConditionalGeneration", hybrid=True),
         cache_config=SimpleNamespace(cache_dtype="auto"),
         quant_config=None,
     )
@@ -352,7 +543,7 @@ def test_hybrid_attention_layout_preserves_padding(monkeypatch):
     )
     group = SimpleNamespace(kv_cache_group_id=0, kv_cache_spec=spec, backend=AscendAttentionBackend, layer_names=[name])
     vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(hf_config=SimpleNamespace()),
+        model_config=_scope_model_config("Qwen3_5ForConditionalGeneration", hybrid=True),
         cache_config=SimpleNamespace(cache_dtype="auto"),
     )
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
@@ -402,7 +593,7 @@ def test_padded_full_attention_allocation_preserves_backend_behavior(monkeypatch
     vllm_config = SimpleNamespace(
         additional_config={},
         kv_transfer_config=None,
-        model_config=SimpleNamespace(hf_config=SimpleNamespace()),
+        model_config=_scope_model_config(),
         cache_config=SimpleNamespace(cache_dtype="auto"),
         quant_config=None,
     )
@@ -436,7 +627,7 @@ def test_mrv2_mamba_views_skip_physical_page_padding():
     )
     raw = torch.zeros(3 * 32, dtype=torch.int8)
 
-    conv_state, ssm_state = attn_utils._reshape_mamba_kv_cache(raw, spec)
+    conv_state, ssm_state = attn_utils._reshape_mamba_kv_cache(raw, spec, use_non_contiguous=True)
 
     assert conv_state.shape == (3, 4)
     assert ssm_state.shape == (3, 2)

@@ -1178,6 +1178,16 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner.attn_backend = backend
         return runner
 
+    @staticmethod
+    def _set_cache_architecture(runner, architecture="Qwen3ForCausalLM", layer_types=None):
+        """Use resolved model metadata without bypassing the layout scope gate."""
+        runner.model_config.architecture = architecture
+        runner.model_config.use_mla = False
+        runner.model_config.hf_text_config = SimpleNamespace()
+        if layer_types is not None:
+            runner.model_config.hf_text_config.layer_types = layer_types
+        runner.vllm_config.model_config = runner.model_config
+
     def test_kvpp_allocate_and_reshape_views(self):
         from tests.ut.kvpp_utils import assert_attention_cache_views, make_attention_cache_case, make_cache_config
         from vllm_ascend.core import kv_cache_placement
@@ -1211,7 +1221,15 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                 assert_attention_cache_views(caches, raw, packed)
 
     def test_hybrid_noncontiguous_reshape_uses_per_group_kernel_sizes(self):
+        self._check_hybrid_cache_layout("Qwen3_5ForConditionalGeneration", expect_strided=True)
+
+    def test_unlisted_hybrid_states_keep_contiguous_component_layout(self):
+        self._check_hybrid_cache_layout("UnknownHybridForCausalLM", expect_strided=False)
+
+    def _check_hybrid_cache_layout(self, architecture, expect_strided):
+        """Keep Attention and recurrent states under the same model-level gate."""
         runner = self._build_runner()
+        self._set_cache_architecture(runner, architecture, ["full_attention", "linear_attention"])
         runner.hybrid_with_attn_and_mamba = True
         runner.use_hybrid_blocks = True
         runner.cache_config = SimpleNamespace(cache_dtype="auto")
@@ -1284,14 +1302,21 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         assert len(caches["full_attn"]) == 2
         for cache in caches["full_attn"]:
             assert cache.shape == (4, 4, 1, 2)
-            assert cache.stride() == (16, 2, 2, 1)
+            assert cache.stride() == ((16 if expect_strided else 8), 2, 2, 1)
+            assert cache.is_contiguous() != expect_strided
         conv_state, ssm_state = caches["linear_attn"]
         assert conv_state.shape == (2, 3)
         assert ssm_state.shape == (2, 5)
-        assert conv_state.stride() == (16, 1)
-        assert ssm_state.stride() == (16, 1)
+        assert conv_state.stride() == ((16 if expect_strided else 3), 1)
+        assert ssm_state.stride() == ((16 if expect_strided else 5), 1)
         assert conv_state.storage_offset() == 0
-        assert ssm_state.storage_offset() == 3
+        assert ssm_state.storage_offset() == (3 if expect_strided else 6)
+        assert conv_state.is_contiguous() != expect_strided
+        assert ssm_state.is_contiguous() != expect_strided
+        conv_state[0].fill_(3)
+        ssm_state[1].fill_(5)
+        assert torch.count_nonzero(conv_state[1]) == 0
+        assert torch.count_nonzero(ssm_state[0]) == 0
         attention_backend.get_kv_cache_shape.assert_any_call(
             4,
             4,
@@ -1317,18 +1342,60 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
     def test_sparse_backend_uses_separate_contiguous_kv_cache(self):
         self._check_gqa_cache_layout(xlite_enabled=False, backend=SparseAttentionBackend)
 
-    def _check_gqa_cache_layout(self, xlite_enabled, backend=AscendAttentionBackend, pa_enabled=False, dcp_size=1):
+    def test_unlisted_model_dense_layers_use_contiguous_cache(self):
+        """A PP rank with only dense layers must not admit a mixed model."""
+        for architecture in (
+            "MiniMaxM3SparseForCausalLM",
+            "MiniMaxM3SparseForConditionalGeneration",
+            "UnknownForCausalLM",
+            None,
+        ):
+            for page_padding in (0, 32):
+                for kv_transfer in (False, True):
+                    with self.subTest(architecture=architecture, page_padding=page_padding, kv_transfer=kv_transfer):
+                        self._check_gqa_cache_layout(
+                            xlite_enabled=False,
+                            architecture=architecture,
+                            page_padding=page_padding,
+                            kv_transfer=kv_transfer,
+                            layer_name="model.layers.0.attention",
+                        )
+
+    def test_supported_gqa_without_attn_layer_name_keeps_strided_cache(self):
+        for kv_transfer in (False, True):
+            with self.subTest(kv_transfer=kv_transfer):
+                self._check_gqa_cache_layout(
+                    xlite_enabled=False,
+                    kv_transfer=kv_transfer,
+                    layer_name="model.layers.0.attention",
+                )
+
+    def _check_gqa_cache_layout(
+        self,
+        xlite_enabled,
+        backend=AscendAttentionBackend,
+        pa_enabled=False,
+        dcp_size=1,
+        architecture="Qwen3ForCausalLM",
+        page_padding=0,
+        kv_transfer=False,
+        layer_name="model.layers.0.self_attn.attn",
+    ):
+        """Exercise raw allocation, view geometry, and component isolation."""
         runner = self._build_runner()
+        self._set_cache_architecture(runner, architecture)
         runner.dcp_size = dcp_size
         runner.ascend_config.xlite_graph_config.enabled = xlite_enabled
-        runner.model_config.use_mla = False
-        layer_name = "model.layers.0.self_attn.attn"
+        if kv_transfer:
+            runner.vllm_config.kv_transfer_config = SimpleNamespace(kv_connector="MooncakeConnectorV2")
         spec = FullAttentionSpec(
             block_size=8,
             num_kv_heads=2,
             head_size=2,
             dtype=torch.float16,
         )
+        if page_padding:
+            spec = replace(spec, page_size_padded=spec.page_size_bytes + page_padding)
         group = SimpleNamespace(
             kv_cache_group_id=0,
             kv_cache_spec=spec,
@@ -1356,7 +1423,9 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         with patch("vllm_ascend.worker.model_runner_v1.requires_contiguous_pa_kv_cache", return_value=pa_enabled):
             raw_caches = runner._allocate_kv_cache_tensors(kv_cache_config)
 
-        uses_contiguous_cache = xlite_enabled or backend.is_sparse() or pa_enabled or dcp_size > 1
+        uses_contiguous_cache = (
+            architecture != "Qwen3ForCausalLM" or xlite_enabled or backend.is_sparse() or pa_enabled or dcp_size > 1
+        )
         assert isinstance(raw_caches[layer_name], tuple if uses_contiguous_cache else torch.Tensor)
         cache = runner._reshape_kv_cache_tensors(
             kv_cache_config,
@@ -1369,6 +1438,14 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             for tensor in cache:
                 assert tensor.shape == (2, 8, 2, 2)
                 assert tensor.is_contiguous()
+            key, value = cache
+            key[0].fill_(3)
+            value[1].fill_(5)
+            assert torch.count_nonzero(value[0]) == 0
+            assert torch.count_nonzero(key[1]) == 0
+            if kv_transfer:
+                assert key.data_ptr() % (2 * 1024 * 1024) == 0
+                assert value.data_ptr() % (2 * 1024 * 1024) == 0
             return
         assert isinstance(cache, tuple)
         assert len(cache) == 2
@@ -1398,8 +1475,9 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             [SparseAttentionBackend, AscendAttentionBackend]
         )
 
-    def _check_full_attention_allocator_selects_layout_per_backend(self, backends):
+    def _check_full_attention_allocator_selects_layout_per_backend(self, backends, architecture="Qwen3ForCausalLM"):
         runner = self._build_runner()
+        self._set_cache_architecture(runner, architecture)
         spec = FullAttentionSpec(block_size=8, num_kv_heads=2, head_size=2, dtype=torch.float16)
         names = ["model.layers.0.self_attn.attn", "model.layers.1.self_attn.attn"]
         groups = [
@@ -1421,10 +1499,12 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         raw = runner._allocate_kv_cache_tensors(config)
         supported_name = names[backends.index(AscendAttentionBackend)]
         unsupported_name = names[backends.index(SparseAttentionBackend)]
-        assert isinstance(raw[supported_name], torch.Tensor)
+        is_supported_model = architecture == "Qwen3ForCausalLM"
+        assert isinstance(raw[supported_name], torch.Tensor if is_supported_model else tuple)
         assert isinstance(raw[unsupported_name], tuple)
         caches = runner._reshape_kv_cache_tensors(config, raw, [spec.block_size])
-        assert not caches[supported_name][0].is_contiguous()
+        assert caches[supported_name][0].is_contiguous() != is_supported_model
+        assert caches[supported_name][1].is_contiguous() != is_supported_model
         key, value = caches[unsupported_name]
         assert key.is_contiguous() and value.is_contiguous()
         key[1].fill_(3)
@@ -1435,6 +1515,20 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         assert torch.count_nonzero(caches[supported_name][0]) == 0
         assert torch.count_nonzero(caches[supported_name][1]) == 0
         assert key.numel() * key.element_size() + value.numel() * value.element_size() == 3 * spec.page_size_bytes
+
+    def test_mixed_model_keeps_dense_and_sparse_layers_contiguous(self):
+        """Reject the whole mixed model rather than its sparse layers alone."""
+        for architecture in (
+            "MiniMaxM3SparseForCausalLM",
+            "MiniMaxM3SparseForConditionalGeneration",
+            "UnknownMixedForCausalLM",
+        ):
+            for backends in (
+                [AscendAttentionBackend, SparseAttentionBackend],
+                [SparseAttentionBackend, AscendAttentionBackend],
+            ):
+                with self.subTest(architecture=architecture, backends=backends):
+                    self._check_full_attention_allocator_selects_layout_per_backend(backends, architecture)
 
     def test_hybrid_reshape_skips_groups_without_kernel_size(self):
         runner = self._build_runner()
@@ -1661,6 +1755,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
 
     def test_allocate_kv_cache_uses_layer_spec_for_draft_gqa(self):
         runner = self._build_runner()
+        self._set_cache_architecture(runner, "Qwen3_5MTP")
         runner.sparse_kv_offload_enabled = False
         kv_cache_spec = FullAttentionSpec(
             block_size=16,
@@ -2029,6 +2124,9 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         ):
             with self.subTest(kv_transfer_config=kv_transfer_config):
                 runner = self._build_runner()
+                self._set_cache_architecture(
+                    runner, "Qwen3_5ForConditionalGeneration", ["full_attention", "linear_attention"]
+                )
                 runner.vllm_config.kv_transfer_config = kv_transfer_config
                 layout = SimpleNamespace(is_layer_compact=True, is_block_compact=True)
                 runner.vllm_config.cache_config.get_resolved_kv_cache_layout.return_value = layout
@@ -2159,6 +2257,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
 
     def test_reshape_kv_cache_uses_layer_spec_for_draft_gqa(self):
         runner = self._build_runner()
+        self._set_cache_architecture(runner, "Qwen3_5MTP")
         runner.sparse_kv_offload_enabled = False
         kv_cache_spec = FullAttentionSpec(
             block_size=16,
@@ -2319,6 +2418,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
     def test_reshape_hybrid_attention_strips_padding_without_block_splitting(self):
         """vLLM #51718 pads hybrid pages independently of kernel splitting."""
         runner = self._build_runner()
+        self._set_cache_architecture(runner, "Qwen3_5ForConditionalGeneration", ["full_attention", "linear_attention"])
         runner.use_hybrid_blocks = False
         runner.cache_config = SimpleNamespace(cache_dtype="auto")
         layer_name = "model.layers.0.self_attn.attn"

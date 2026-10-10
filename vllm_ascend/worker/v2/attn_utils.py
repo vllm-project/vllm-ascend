@@ -95,6 +95,7 @@ from vllm_ascend.utils import (
     get_kv_cache_tensor_layers,
     is_hidden_state_cache_spec,
     kv_cache_spec_uses_packed_sfa_main_cache,
+    supports_non_contiguous_kv_cache,
 )
 from vllm_ascend.worker.kvpp_cache import allocate_kvpp_cache
 
@@ -877,8 +878,8 @@ def _allocate_kv_cache(
     Initialize the KV cache buffer with the correct size. The buffer needs to be
     reshaped to the desired shape before being used by the models.
 
-    FullAttention caches use a combined allocation for block-strided K/V
-    views. Specialized caches keep their existing allocation layouts.
+    Supported models use combined FullAttention allocations for block-strided
+    K/V views. Other models and specialized caches keep their existing layouts.
     KV transfer aligns each raw allocation to 2 MiB.
 
     Args:
@@ -888,6 +889,7 @@ def _allocate_kv_cache(
         Raw cache tensors or K/V tensor pairs, indexed by layer name.
     """
     vllm_config = get_current_vllm_config()
+    use_non_contiguous = supports_non_contiguous_kv_cache(vllm_config)
     if KVPPConfig.from_vllm_config(vllm_config).size > 1:
         caches = allocate_kvpp_cache(vllm_config, kv_cache_config, device)
         specs = _get_layer_kv_cache_specs(kv_cache_config)
@@ -1168,14 +1170,15 @@ def _allocate_kv_cache(
                 # TODO: Remove this DCP guard once DCP KV loading supports
                 # the generic packed K/V cache layout.
                 use_dcp = getattr(getattr(vllm_config, "parallel_config", None), "decode_context_parallel_size", 1) > 1
-                if (
-                    (backend is None or not backend.is_sparse())
-                    and not use_dcp
-                    and not requires_contiguous_pa_kv_cache(layer, vllm_config, layer_spec)
-                ):
+                requires_contiguous = (
+                    (backend is not None and backend.is_sparse())
+                    or use_dcp
+                    or requires_contiguous_pa_kv_cache(layer, vllm_config, layer_spec)
+                )
+                if (use_non_contiguous or vllm_config.cache_config.cache_dtype == "mxfp8") and not requires_contiguous:
                     kv_cache_raw_tensors[layer_name] = _allocate_int8_cache_tensor(layer_size, alignment, device)
                     continue
-                if layer_spec.page_size_bytes != layer_spec.real_page_size_bytes:
+                if layer_spec.page_size_bytes != layer_spec.real_page_size_bytes and requires_contiguous:
                     raise ValueError(
                         f"Sparse Attention backend for {layer_name} requires "
                         "unpadded FullAttention pages for contiguous K/V cache."
@@ -1281,8 +1284,9 @@ def allocate_kv_cache_main(
 def _reshape_mamba_kv_cache(
     raw_cache: torch.Tensor,
     kv_cache_spec: MambaSpec,
+    use_non_contiguous: bool = True,
 ) -> list[torch.Tensor]:
-    """Create logical state views over padded physical hybrid pages."""
+    """Create page-strided or legacy contiguous per-state cache views."""
     physical_page_size = (
         kv_cache_spec.page_size_padded if kv_cache_spec.page_size_padded is not None else kv_cache_spec.page_size_bytes
     )
@@ -1290,6 +1294,16 @@ def _reshape_mamba_kv_cache(
         raise ValueError("Mamba cache allocation is not a whole number of physical pages.")
     num_blocks = raw_cache.numel() // physical_page_size
     cache_shapes = [(num_blocks, *shape) for shape in kv_cache_spec.shapes]
+    if not use_non_contiguous:
+        states: list[torch.Tensor] = []
+        offset_bytes = 0
+        for shape, dtype in zip(cache_shapes, kv_cache_spec.dtypes):
+            end_bytes = offset_bytes + math.prod(shape) * get_dtype_size(dtype)
+            if end_bytes > raw_cache.numel():
+                raise ValueError("Mamba state views exceed their cache allocation.")
+            states.append(raw_cache[offset_bytes:end_bytes].view(dtype).view(shape))
+            offset_bytes = end_bytes
+        return states
     return _adjust_dsv4_kv_layout(
         raw_cache,
         cache_shapes,
@@ -1310,8 +1324,10 @@ def _reshape_kv_cache_v2(
         raise ValueError("Reshape KV cache requires KVCacheConfig.")
 
     vllm_config = get_current_vllm_config()
+    use_non_contiguous = supports_non_contiguous_kv_cache(vllm_config)
     is_dsv4_model = _is_dsv4_model(vllm_config)
     layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config)
+    is_glm5_next = any(getattr(spec, "model_version", None) == "glm5_next" for spec in layer_kv_cache_spec.values())
     kv_caches: dict[str, Any] = {}
     layer_tuple_strides: dict[str, int] = {}
     if is_deepseek_v41_cache(layer_kv_cache_spec):
@@ -1535,7 +1551,13 @@ def _reshape_kv_cache_v2(
             if isinstance(kv_cache_spec, MambaSpec):
                 if not isinstance(raw_cache, torch.Tensor):
                     raise ValueError(f"Mamba cache for {layer_name} must use one raw tensor.")
-                mamba_cache = _reshape_mamba_kv_cache(raw_cache, kv_cache_spec)
+                use_strided_mamba = (
+                    use_non_contiguous
+                    or is_glm5_next
+                    or getattr(getattr(vllm_config, "model_config", None), "use_mla", False)
+                    or cache_dtype == "mxfp8"
+                )
+                mamba_cache = _reshape_mamba_kv_cache(raw_cache, kv_cache_spec, use_strided_mamba)
                 if mamba_cache[0].shape[0] < kv_cache_config.num_blocks:
                     raise ValueError(f"Mamba cache for {layer_name} has fewer blocks than KVCacheManager.")
                 kv_caches[layer_name] = mamba_cache
@@ -1639,6 +1661,19 @@ def _reshape_kv_cache_v2(
                 kv_caches[layer_name] = (k_cache,)
             elif isinstance(raw_cache, tuple):
                 raw_k_tensor, raw_v_tensor = raw_cache
+                if (
+                    not use_non_contiguous
+                    and type(kv_cache_spec) is FullAttentionSpec
+                    and kv_cache_spec.page_size_bytes != kv_cache_spec.real_page_size_bytes
+                ):
+                    # Keep physical page padding in the allocation budget, but
+                    # expose only the contiguous logical K/V payload.
+                    k_bytes = math.prod(k_shape) * get_dtype_size(k_dtype)
+                    v_bytes = math.prod(v_shape) * get_dtype_size(v_dtype)
+                    if raw_k_tensor.numel() < k_bytes or raw_v_tensor.numel() < v_bytes:
+                        raise ValueError(f"Attention cache views exceed the allocation for {layer_name}.")
+                    raw_k_tensor = raw_k_tensor[:k_bytes]
+                    raw_v_tensor = raw_v_tensor[:v_bytes]
                 k_cache = raw_k_tensor.view(k_dtype).view(k_shape)
                 v_cache = raw_v_tensor.view(v_dtype).view(v_shape)
                 kv_caches[layer_name] = (k_cache, v_cache)
@@ -1656,7 +1691,7 @@ def _reshape_kv_cache_v2(
                     padding_elements = typed_cache.numel() - k_elements - v_elements
                     k_cache = typed_cache[padding_elements : padding_elements + k_elements].view(k_shape)
                     v_cache = typed_cache[padding_elements + k_elements :].view(v_shape)
-                else:
+                elif use_non_contiguous or cache_dtype == "mxfp8":
                     k_cache, v_cache = _reshape_combined_attention_kv_cache(
                         raw_cache,
                         kv_cache_shape,
@@ -1664,6 +1699,16 @@ def _reshape_kv_cache_v2(
                         page_stride_bytes,
                         num_blocks_per_kv_block,
                     )
+                else:
+                    # Keep legacy hybrid K/V in contiguous regions at the tail
+                    # of the shared buffer. Specialized paths above are unchanged.
+                    k_bytes = math.prod(k_shape) * get_dtype_size(k_dtype)
+                    v_bytes = math.prod(v_shape) * get_dtype_size(v_dtype)
+                    kv_start = raw_cache.numel() - k_bytes - v_bytes
+                    if kv_start < 0:
+                        raise ValueError(f"Attention cache views exceed the allocation for {layer_name}.")
+                    k_cache = raw_cache[kv_start : kv_start + k_bytes].view(k_dtype).view(k_shape)
+                    v_cache = raw_cache[kv_start + k_bytes :].view(v_dtype).view(v_shape)
                 kv_caches[layer_name] = (k_cache, v_cache)
                 logger.debug(
                     "[non-contiguous-kv-cache][mrv2] attention layer=%s "

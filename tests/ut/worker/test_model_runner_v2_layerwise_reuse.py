@@ -45,7 +45,11 @@ def test_real_allocator_aliases_only_planned_slots(monkeypatch, reuse_enabled, z
         ],
         kv_cache_groups=[KVCacheGroupSpec(layer_names=names, kv_cache_spec=spec)],
     )
-    vllm_config = SimpleNamespace(kv_transfer_config=None)
+    vllm_config = SimpleNamespace(
+        kv_transfer_config=None,
+        cache_config=SimpleNamespace(cache_dtype="auto"),
+        model_config=SimpleNamespace(architecture="Qwen3ForCausalLM", hf_text_config=SimpleNamespace()),
+    )
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
     monkeypatch.setattr(attn_utils.KVPPConfig, "from_vllm_config", lambda _: SimpleNamespace(size=1))
     monkeypatch.setattr(attn_utils, "_is_dsv4_model", lambda _: False)

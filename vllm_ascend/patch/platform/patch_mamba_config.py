@@ -57,11 +57,62 @@ def _using_kv_store(vllm_config) -> bool:
     return False
 
 
+def _align_contiguous_hybrid_cache(vllm_config) -> bool:
+    """Preserve the legacy K/SSM row geometry for contiguous hybrid views."""
+    cache_config = vllm_config.cache_config
+    model_config = vllm_config.model_config
+    from vllm_ascend.utils import is_c8_mxfp_kv_quant, supports_non_contiguous_kv_cache
+
+    if (
+        not getattr(model_config, "is_hybrid", False)
+        or getattr(model_config, "use_mla", False)
+        or is_c8_mxfp_kv_quant(vllm_config)
+        or _get_sparse_index_kpool(model_config) is not None
+        or supports_non_contiguous_kv_cache(vllm_config)
+    ):
+        return False
+    layer_types = getattr(getattr(model_config, "hf_text_config", None), "layer_types", None)
+    if layer_types is not None and "full_attention" not in layer_types:
+        return False
+    kv_cache_dtype = (
+        model_config.dtype if cache_config.cache_dtype == "auto" else STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
+    )
+    model_cls, _ = ModelRegistry.resolve_model_cls(
+        model_config.architecture,
+        model_config=model_config,
+    )
+    mamba_shapes = model_cls.get_mamba_state_shape_from_config(vllm_config)
+    mamba_dtypes = model_cls.get_mamba_state_dtype_from_config(vllm_config)
+    state_sizes = [math.prod(shape) * get_dtype_size(dtype) for shape, dtype in zip(mamba_shapes, mamba_dtypes)]
+    ssm_page_size = max(state_sizes)
+    conv_page_size = min(state_sizes)
+    if len(mamba_shapes) == 1 and len(mamba_shapes[0]) == 3:
+        conv_page_size = 0
+    k_token_size = (
+        model_config.get_head_size()
+        * model_config.get_num_kv_heads(vllm_config.parallel_config)
+        * get_dtype_size(kv_cache_dtype)
+    )
+    kernel_block_size = 128
+    attn_block_size = kernel_block_size * cdiv(ssm_page_size, kernel_block_size * k_token_size)
+    if k_token_size * attn_block_size != ssm_page_size:
+        raise ValueError("Contiguous hybrid cache requires equal K-block and SSM-row sizes.")
+    if cache_config.block_size is not None and cache_config.block_size > attn_block_size:
+        raise ValueError(
+            f"Contiguous hybrid cache requires block_size={attn_block_size} to align K and SSM rows, "
+            f"but got {cache_config.block_size}."
+        )
+    if cache_config.block_size is None or cache_config.block_size < attn_block_size:
+        cache_config.block_size = attn_block_size
+    cache_config.mamba_page_size_padded = cache_config.block_size * 2 * k_token_size + conv_page_size
+    return True
+
+
 @classmethod
 def verify_and_update_config(cls, vllm_config) -> None:
     """
-    Update Hybrid Attention/Mamba cache configuration without forcing
-    attention and Mamba cache page sizes to be equal.
+    Keep independent pages for supported non-contiguous hybrid models and
+    preserve the legacy K/SSM alignment for other ordinary hybrid models.
 
     Args:
         vllm_config: vLLM configuration.
@@ -152,6 +203,8 @@ def verify_and_update_config(cls, vllm_config) -> None:
                 "Padding mamba page size by %.2f%% to align the sparse indexer and recurrent-state cache pages.",
                 mamba_padding_pct,
             )
+    else:
+        _align_contiguous_hybrid_cache(vllm_config)
     # The extract_hidden_states connector (ExampleHiddenStatesConnector) only
     # manages the dedicated hidden-state cache-only layer; it does not migrate
     # mamba KV blocks across instances, so it does not require the block-aligned
