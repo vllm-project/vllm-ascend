@@ -395,6 +395,44 @@ class RlConfig:
         os.environ["VLLM_SERVER_DEV_MODE"] = "1"
 
 
+HCCL_QOS_BY_PRIORITY = {
+    "low": 2,
+    "medium": 4,
+    "high": 6,
+}
+
+
+@config
+class CollectiveCommunicationQosConfig:
+    """QoS configuration for HCCL collective communication groups."""
+
+    enabled: bool = False
+    default_priority: Literal["low", "medium", "high"] = "medium"
+    manual: dict[str, Literal["low", "medium", "high"]] = dataclasses.field(default_factory=dict)
+
+    @field_validator("manual")
+    @classmethod
+    def _validate_group_names(cls, manual: dict[str, str]) -> dict[str, str]:
+        if any(not group_name for group_name in manual):
+            raise ValueError("ai_qos.collective_communication.manual group names must be non-empty strings")
+        return manual
+
+    def get_qos(self, group_name: str) -> int | None:
+        if not self.enabled:
+            return None
+        priority = self.manual.get(group_name, self.default_priority)
+        return HCCL_QOS_BY_PRIORITY[priority]
+
+
+@config
+class AiQosConfig:
+    """Ascend AI QoS configuration."""
+
+    collective_communication: CollectiveCommunicationQosConfig = dataclasses.field(
+        default_factory=CollectiveCommunicationQosConfig
+    )
+
+
 @config
 class AscendConfig:
     """Configuration Object for additional_config from vllm.configs.
@@ -623,6 +661,7 @@ class AscendConfig:
     eplb_config: EplbConfig = dataclasses.field(default_factory=EplbConfig)
     rejection_sampler_config: RejectionSamplerConfig = dataclasses.field(default_factory=RejectionSamplerConfig)
     rl_config: RlConfig = dataclasses.field(default_factory=RlConfig)
+    ai_qos: AiQosConfig = dataclasses.field(default_factory=AiQosConfig)
 
     # ---- sub-configs declared later in this module ----
     # Lambdas defer class lookup until construction, after module initialization.
