@@ -31,6 +31,7 @@ import ctypes
 import glob
 import os
 import struct
+import sys
 import threading
 from collections.abc import Callable
 from enum import IntEnum
@@ -461,6 +462,8 @@ class Hixl:
             self._engine = None
 
     def __del__(self) -> None:
+        if sys.is_finalizing():
+            return
         # contextlib may already be cleared during interpreter shutdown.
         try:  # noqa: SIM105
             self._close()
