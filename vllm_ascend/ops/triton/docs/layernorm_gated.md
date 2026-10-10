@@ -35,7 +35,7 @@
 - Statistics use group-major indexing `group*M+row`. Caller-provided `out` is reused.
 - Multi-group inputs retain BASE64. Single-group NPU inputs below width 128 use BASE16; width 128 uses HOIST32 when `4*ceil(M/32)>=P`, otherwise BASE16, where `P` is the initialized vector-core count. Widths 129–512 use BASE16 when the UB getter reports at least 192 KiB; other inputs retain BASE64.
 - Single-group NPU calls require device properties initialized through the existing `init_device_properties_triton()` contract. The UB getter may use its existing compatibility default or debugging override. Grouped calls do not query these properties.
-- BASE retains the `65536 / element_size` feature-width guard. Passing that guard or falling back to BASE64 does not guarantee that the full tile fits the compiler's UB budget. HOIST32 is selected only for single-group width 128.
+- The single-group BASE16 resource envelope ends at `N_group=512` (`BLOCK_N<=512`). Wider groups retain BASE64 and may still overflow UB; this change does not make them resource-safe. The limit applies to per-group width, not total `N`. BASE's existing `65536 / element_size` feature-width guard is separate from the compiler's full-tile UB limit.
 - Forward inference only. Graph replay and full-model qualification are not established by the recorded single-operator tests.
 
 ## Origin and Differences
