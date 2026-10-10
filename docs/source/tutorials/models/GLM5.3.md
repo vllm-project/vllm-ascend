@@ -134,9 +134,7 @@ If you don't want to use the docker image as above, you can also build all from 
 
 If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../getting_started/installation.md#installation-multi-node-interconnect).
 
-!!! warning
-
-    - The scripts in Section 5.1 were tested on **v0.23.0**. Parameters may have changed in the main branch. For Section 5.2, follow the version requirements in that section.
+- The scripts in Section 5.1 were tested on **v0.23.0**.
 
 Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md).
 
