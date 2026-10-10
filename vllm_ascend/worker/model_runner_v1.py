@@ -5095,10 +5095,11 @@ class NPUModelRunner(GPUModelRunner):
         if (
             not is_dsv4_main
             and not uses_padded_page_layout
-            and self.hybrid_with_attn_and_mamba
+            and kv_cache_config.kv_cache_tensors
+            and (self.hybrid_with_attn_and_mamba
+                 or len(kv_cache_config.kv_cache_tensors) > 1)
             and not self.use_sparse
             and not self.use_compress
-            and kv_cache_config.kv_cache_tensors
         ):
             layout = self.vllm_config.cache_config.get_resolved_kv_cache_layout()
             tensor_sizes = {tensor.size for tensor in kv_cache_config.kv_cache_tensors}
