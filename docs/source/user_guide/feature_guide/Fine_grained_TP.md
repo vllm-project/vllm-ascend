@@ -14,7 +14,7 @@ Fine-grained TP delivers two primary performance advantages through targeted wei
 - **Faster Memory Access in GEMMs**:  
   In decode-heavy workloads, GEMM performance is often memory-bound. Weight sharding reduces per-device weight fetch volume, cutting DRAM traffic and improving bandwidth efficiency, especially for latency-sensitive layers like LM head and o_proj.
 
-In the measured DeepSeek-R1-W8A8 deployment below, the four knobs together saved **9.72 GB per card** with a net TPOT improvement (see [Experimental Results](#experimental-results)). This guide reflects the feature on current main.
+In the measured DeepSeek-R1-W8A8 deployment below, the four knobs together saved **9.72 GB per card** with a net TPOT improvement (see [Experimental Results](#experimental-results)).
 
 ### Working Principle
 
@@ -25,7 +25,7 @@ All four knobs shard weights over a process group built along the DP axis, and e
 
 ### Usage Scenarios
 
-The four knobs are freely combinable — on a PD decode node all four can be enabled together (this is the configuration measured in [Experimental Results](#experimental-results)); each knob only needs to satisfy its own family's constraints. All four knobs additionally require `pipeline_parallel_size == 1`.
+The four knobs are freely combinable — on a PD decode node all four can be enabled together (this is the configuration measured in [Experimental Results](#experimental-results)); each knob only needs to satisfy its own family's constraints. All four knobs currently cannot be combined with pipeline parallelism (`pipeline_parallel_size > 1`).
 
 | Scenario | Components that can be enabled | Applicable Conditions |
 |----------|-------------------------------|------------------------|
@@ -53,7 +53,7 @@ The four knobs are freely combinable — on a PD decode node all four can be ena
 | Model | MoE models only — see [Models](#models) for how to check a checkpoint |
 | Deployment Scenario | embedding / LM head TP: all-DP MoE serving or PD decode nodes; o_proj / MLP TP: P/D-disaggregated decode nodes only |
 | Standard TP | Fine-grained sizes require, or are only effective under, `tensor_parallel_size == 1`; see [Standard Tensor Parallelism Requirement](#standard-tensor-parallelism-requirement) |
-| Feature Mutual Exclusion | `prefill_context_parallel_size > 1` cannot be combined with o_proj / MLP TP |
+| Feature Mutual Exclusion | `prefill_context_parallel_size > 1` cannot be combined with o_proj / MLP TP; PCP embedding / LM-head weight sharding (`enable_pcp_embedding_lmhead_weight_sharding`, on by default when PCP > 1) cannot be combined with embedding / LM head TP |
 | Hardware | No config-enforced hardware restriction; the performance data in this guide was measured on Atlas A2 (see [Experimental Results](#experimental-results)) |
 
 #### Models
@@ -78,6 +78,16 @@ Within a qualifying MoE model, `mlp_tensor_parallel_size` shards the dense FFN l
 - `prefill_context_parallel_size == 1`.
 
 If the largest cudagraph capture size does not cover the largest possible step (`min(max_num_batched_tokens, max_num_seqs * (1 + num_speculative_tokens))`), both `oproj_tensor_parallel_size` and `mlp_tensor_parallel_size` are **disabled automatically at startup with a warning**, and the deployment still starts without them; raise `max_cudagraph_capture_size` to re-enable. At runtime, a step dispatched outside the captured graphs fails loudly with an explicit error instead of silently hanging the cross-DP collectives.
+
+#### LM Head TP and Speculative Decoding
+
+LM head TP works with EAGLE, DFlash, and DSpark draft models. A few combinations are not aligned with the group-row padding yet and fail fast at construction with an explicit error stating the reason — these are current scope decisions rather than defects:
+
+- DFlash2 draft models;
+- `draft_sample_method = "probabilistic"`;
+- `use_local_argmax_reduction`;
+- `enable_adaptive_verification`;
+- prompt logprobs.
 
 #### Configuration Limit
 
