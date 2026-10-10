@@ -1,0 +1,38 @@
+{
+  "name": "vllm-ascend Dev Container (NPU A2)",
+  "workspaceFolder": "/workspace/vllm-ascend",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace/vllm-ascend,type=bind,consistency=cached",
+  "remoteUser": "root",
+  "image": "m.daocloud.io/quay.io/ascend/vllm-ascend:nightly-main",
+  "runArgs": [
+    "--shm-size=1g",
+    "--device=/dev/davinci0",
+    "--device=/dev/davinci_manager",
+    "--device=/dev/devmm_svm",
+    "--device=/dev/hisi_hdc",
+    "--publish=8000:8000"
+  ],
+  "mounts": [
+    "source=/usr/local/dcmi,target=/usr/local/dcmi,type=bind,consistency=cached",
+    "source=/usr/local/bin/npu-smi,target=/usr/local/bin/npu-smi,type=bind,consistency=cached",
+    "source=/usr/local/Ascend/driver/lib64,target=/usr/local/Ascend/driver/lib64,type=bind,consistency=cached",
+    "source=/usr/local/Ascend/driver/version.info,target=/usr/local/Ascend/driver/version.info,type=bind,consistency=cached",
+    "source=/etc/ascend_install.info,target=/etc/ascend_install.info,type=bind,consistency=cached",
+    "source=${localEnv:HOME}/.cache,target=/root/.cache,type=bind,consistency=cached"
+  ],
+  "postCreateCommand": "bash .devcontainer/a2/postCreateCommand.sh",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "charliermarsh.ruff",
+        "redhat.vscode-yaml"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/bin/python3",
+        "terminal.integrated.defaultProfile.linux": "bash"
+      }
+    }
+  }
+}
