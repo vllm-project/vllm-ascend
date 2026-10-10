@@ -254,6 +254,39 @@ def test_packed_broadcast_consumer_single_tensor():
     assert torch.equal(tensor.cpu(), original)
 
 
+def test_packed_broadcast_consumer_does_not_alias_staging_buffer():
+    """Unpacked weights must own storage separate from the staging buffer.
+
+    Layerwise reload holds the delivered tensors until a layer is complete.
+    The consumer reuses its staging buffers, so a view into the buffer is
+    overwritten when the next chunk is broadcast.
+    """
+    original = torch.arange(12, dtype=torch.float32)
+    packed = original.view(torch.uint8).view(-1).clone()
+    group = _make_group_mock()
+    staging: list[torch.Tensor] = []
+
+    def _broadcast(tensor, **kw):
+        staging.append(tensor)
+        tensor.copy_(packed)
+        return tensor
+
+    group.broadcast = MagicMock(side_effect=_broadcast)
+    received: list[tuple[str, torch.Tensor]] = []
+    packed_broadcast_consumer(
+        iterator=iter([("w", ([12], torch.float32))]),
+        group=group,
+        src=0,
+        post_unpack_func=lambda weights: received.extend(weights),
+    )
+
+    assert len(staging) == 1
+    _, tensor = received[0]
+    assert tensor.untyped_storage().data_ptr() != staging[0].untyped_storage().data_ptr()
+    staging[0].fill_(0)
+    assert torch.equal(tensor.cpu(), original)
+
+
 def test_packed_broadcast_consumer_multiple_tensors_one_buffer():
     """Consumer unpacks multiple tensors from one packed buffer."""
     a = torch.full((4,), 1.0, dtype=torch.float32)
