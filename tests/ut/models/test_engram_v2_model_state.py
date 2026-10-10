@@ -311,9 +311,9 @@ def test_state_gathers_lookback_and_overlaps_engram(runtime, monkeypatch):
     input_batch = SimpleNamespace(
         input_ids=torch.ones(4, dtype=torch.int32),
         positions=torch.arange(4),
-        num_tokens_after_padding=4,
         num_tokens=4,
         num_reqs=2,
+        num_tokens_after_padding=4,
         idx_mapping=torch.tensor([0, 1], dtype=torch.int32),
         query_start_loc=torch.tensor([0, 2, 4]),
         is_dummy=False,
@@ -334,6 +334,7 @@ def test_state_gathers_lookback_and_overlaps_engram(runtime, monkeypatch):
     assert kwargs["padded_tokens"] == 4 and kwargs["lookback_token_ids"] is window
     assert kwargs["query_start_loc"].tolist() == input_batch.query_start_loc.tolist()
     assert kwargs["cg_mode"] == CUDAGraphMode.FULL and kwargs["force_dummy"] is False
+    assert kwargs["token_indices"] is None
 
 
 def test_state_dummy_capture_primes_and_refills_window(runtime, monkeypatch):
@@ -400,9 +401,9 @@ def test_graph_capable_state_keeps_eager_preparation(runtime, monkeypatch):
         input_ids=torch.arange(2),
         positions=torch.arange(2),
         idx_mapping=torch.tensor([0]),
-        num_tokens_after_padding=2,
         num_tokens=2,
         num_reqs=1,
+        num_tokens_after_padding=2,
         query_start_loc=torch.tensor([0, 2]),
         is_dummy=False,
     )
@@ -414,6 +415,87 @@ def test_graph_capable_state_keeps_eager_preparation(runtime, monkeypatch):
     model.prepare_engram_inputs.assert_not_called()
     assert state.prepare_engram()["legacy"] is True
     model.prepare_engram_inputs.assert_called_once()
+
+
+@pytest.mark.parametrize("overlap", [False, True])
+@pytest.mark.parametrize("indices", [[0, 1, 8, 9], []])
+def test_pcp_global_history_feeds_local_padded_lookup_buffers(runtime, monkeypatch, overlap, indices):
+    calls, _, _, context_available = runtime
+    model = make_model()
+    model._engram_overlap_enabled = overlap
+    model.engram_hash = Mock(use_slot_cache=False, lookback_depth=2)
+    model.engram_hash.ensure_cache.return_value = True
+    model._engram_max_tokens = 8
+    state = make_state(model, monkeypatch)
+    state._cg_mode = CUDAGraphMode.NONE
+    history = torch.arange(32, dtype=torch.int32).reshape(4, 8)
+    req_states = SimpleNamespace(
+        all_token_ids=SimpleNamespace(gpu=history),
+        num_computed_tokens=SimpleNamespace(gpu=torch.tensor([3, 0, 5, 0])),
+    )
+    global_batch = SimpleNamespace(
+        input_ids=torch.tensor([10, 999, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]),
+        positions=torch.tensor([5, 6, 7, 8, 9, 10, 11, 12, 3, 4, 5, 6]),
+        idx_mapping=torch.tensor([2, 0]),
+        query_start_loc=torch.tensor([0, 8, 12]),
+        num_tokens=12,
+        num_reqs=2,
+    )
+    token_indices = torch.tensor(indices, dtype=torch.int64)
+    state.pcp_context = SimpleNamespace(global_batch=global_batch, local_token_indices=token_indices)
+    local_batch = SimpleNamespace(
+        num_tokens_after_padding=6,
+        is_dummy=False,
+    )
+
+    def gather(window, mapping, computed, tokens, stride, num_reqs, **kwargs):
+        assert num_reqs == 2
+        window.fill_(-1)
+        for row, req in enumerate(mapping):
+            cursor = int(computed[req])
+            window[row].copy_(tokens[req, cursor - 2 : cursor].flip(0))
+
+    engram_lookback._gather_lookback_kernel.__getitem__.side_effect = lambda grid: gather
+    hashes = torch.arange(12 * 2 * 4).reshape(12, 2, 4)
+
+    def hash_ids(tokens, positions, query, dead, lookback, *args):
+        torch.testing.assert_close(tokens, global_batch.input_ids)
+        torch.testing.assert_close(query, global_batch.query_start_loc)
+        torch.testing.assert_close(lookback[:2], torch.tensor([[20, 19], [2, 1]], dtype=torch.int32))
+        calls.append(("global_hash",))
+        return hashes
+
+    model.engram_hash.side_effect = hash_ids
+    monkeypatch.setattr(model_mod, "gather_engram_hashes", lambda ids, **kwargs: ids)
+    for slot, layer in enumerate((1, 2)):
+        table = model.layers[layer].engram.embed_tokens
+        table.dp_size, table.tp_size = 1, 1
+        table.lookup = lambda ids, output: output.copy_(ids[:, :, None].expand(-1, -1, 2))
+    result = state.prepare_engram_inputs(local_batch, req_states)
+    model.engram_hash.assert_not_called()
+    context_available[0] = True
+    result.update(state.prepare_engram())
+    expected_hashes = hashes.index_select(0, token_indices)
+    for slot, layer in enumerate((1, 2)):
+        rows = result["engram_lookups"][layer]
+        expected = expected_hashes[:, slot, :, None].expand(-1, -1, 2).flatten(1).bfloat16()
+        torch.testing.assert_close(rows[: len(indices)], expected)
+        assert not rows[len(indices) : 6].any()
+    expected_mask = (global_batch.input_ids != 999).index_select(0, token_indices)
+    torch.testing.assert_close(result["engram_mask"][: len(indices)], expected_mask)
+    assert not result["engram_mask"][len(indices) : 6].any()
+    assert calls.count(("global_hash",)) == 1
+    pointers = [tensor.data_ptr() for tensor in result["engram_lookups"].values()]
+    # Verification may roll the device cursor back; the next step must reread it.
+    req_states.num_computed_tokens.gpu[2] = 3
+    model.engram_hash.side_effect = lambda *args: hashes
+    state.finish_execution(failed=False)
+    context_available[0] = False
+    replay = state.prepare_engram_inputs(local_batch, req_states)
+    context_available[0] = True
+    replay.update(state.prepare_engram())
+    assert state.lookback_token_ids[0].tolist() == [18, 17]
+    assert [tensor.data_ptr() for tensor in replay["engram_lookups"].values()] == pointers
 
 
 @pytest.mark.parametrize("failure", [None, "producer", "consumer"])

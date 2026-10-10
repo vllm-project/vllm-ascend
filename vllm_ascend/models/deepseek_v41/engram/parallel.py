@@ -22,12 +22,12 @@ from vllm_ascend.utils import get_potential_max_tokens, is_pd_decode_recompute_s
 
 
 def resolve_dp_shared_memory(requested: bool) -> bool:
-    """A node with one DP replica uses ordinary TP shards, without sharing."""
+    """Share a TP shard when local DP or PCP peers map the same host table."""
     return requested and get_engram_dp_size() > 1
 
 
 def engram_gathered_num_tokens() -> int:
-    """Per-replica token slot for the node-local Engram DP group."""
+    """Per-rank token slot for the node-local Engram DP x PCP group."""
     context = get_forward_context()
     if (
         not getattr(context, "in_profile_run", False)
@@ -56,7 +56,7 @@ def engram_gathered_num_tokens() -> int:
 
 
 def gather_engram_hashes(hash_ids: torch.Tensor, *, dp_shared_memory: bool = False) -> torch.Tensor:
-    """Collect the n-gram ids of every DP replica sharing one table.
+    """Collect the n-gram ids of every DP x PCP rank using one split table.
 
     Replicas are padded to a common token slot, including when recompute
     decode skips DP metadata synchronization and local graph sizes differ.
@@ -74,7 +74,7 @@ def gather_engram_hashes(hash_ids: torch.Tensor, *, dp_shared_memory: bool = Fal
 
 
 def exchange_engram_rows(staged: torch.Tensor, num_tokens: int) -> torch.Tensor:
-    """Send each padded DP token block directly to its owning replica.
+    """Send each padded DP x PCP token block directly to its owning rank.
 
     Input is [EDP * slot, local_heads, dim], in destination-rank order.
     Each destination receives only its token block from every head owner,

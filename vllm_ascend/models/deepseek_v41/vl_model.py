@@ -232,6 +232,7 @@ class AscendDeepseekV41ForCausalLM(
         slot_mapping=None,
         block_table=None,
         *,
+        token_indices=None,
         force_dummy=False,
         cg_mode=None,
     ):
@@ -243,6 +244,7 @@ class AscendDeepseekV41ForCausalLM(
             query_start_loc,
             slot_mapping,
             block_table,
+            token_indices=token_indices,
             force_dummy=force_dummy,
             cg_mode=cg_mode,
         )
