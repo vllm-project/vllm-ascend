@@ -26,17 +26,23 @@ data correctness is verified end-to-end.
 from __future__ import annotations
 
 import types
+import weakref
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 
+import vllm_ascend.distributed.weight_transfer.packed_tensor as packed_tensor_module
 from vllm_ascend.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
+    PackedIpcChunk,
+    pack_tensors,
     packed_broadcast_consumer,
     packed_broadcast_producer,
+    packed_ipc_producer,
     packed_npu_ipc_consumer,
     packed_npu_ipc_producer,
+    unpack_tensor,
 )
 
 _MODULE = "vllm_ascend.distributed.weight_transfer.packed_tensor"
@@ -79,6 +85,7 @@ def _stub_torch_npu():
     fake_npu = types.SimpleNamespace(
         Stream=_FakeNpuStream,
         current_stream=_FakeNpuStream,
+        device=lambda *_args, **_kwargs: _FakeNpuStream(),
         synchronize=lambda *a, **kw: None,
         # ``torch.npu.stream(s)`` returns a context manager; the fake stream
         # already implements ``__enter__``/``__exit__`` so just return it.
@@ -91,8 +98,22 @@ def _stub_torch_npu():
             kwargs["device"] = "cpu"
         return original_empty(*args, **kwargs)
 
-    with patch.object(torch, "npu", fake_npu, create=True), patch.object(torch, "empty", _fake_empty):
+    with (
+        patch.object(torch, "npu", fake_npu, create=True),
+        patch.object(torch, "empty", _fake_empty),
+        patch.object(torch.accelerator, "current_device_index", return_value=0),
+    ):
         yield
+
+
+def test_missing_npu_context_fails_explicitly():
+    """A missing NPU context must not silently switch the transfer to CPU."""
+    with (
+        patch.object(torch, "npu", types.SimpleNamespace(), create=True),
+        pytest.raises(AttributeError, match="device"),
+    ):
+        packed_tensor_module._get_streams.cache_clear()
+        packed_tensor_module._get_streams(0, 1)
 
 
 # ---------------------------------------------------------------------------
@@ -345,7 +366,7 @@ def _install_fake_reduce_tensor():
 
 
 def test_packed_npu_ipc_producer_single_chunk():
-    """A small tensor fits in one chunk; one dict is yielded."""
+    """A small tensor fits in one chunk; one typed chunk is yielded."""
     patcher, args_sentinel = _install_fake_reduce_tensor()
     with patcher:
         tensor = torch.full((4,), 1.5, dtype=torch.float32)
@@ -360,11 +381,29 @@ def test_packed_npu_ipc_producer_single_chunk():
 
     assert len(chunks) == 1
     chunk = chunks[0]
+    assert isinstance(chunk, dict)
     assert chunk["names"] == ["w"]
     assert chunk["shapes"] == [[4]]
     assert chunk["dtype_names"] == ["float32"]
     assert chunk["tensor_sizes"] == [16]  # 4 float32 = 16 bytes
     assert chunk["ipc_handle"] == {"node-0": args_sentinel}
+
+
+def test_packed_ipc_producer_returns_typed_chunk():
+    patcher, args_sentinel = _install_fake_reduce_tensor()
+    with patcher:
+        chunks = list(
+            packed_ipc_producer(
+                iterator=iter([("w", torch.ones(4, dtype=torch.float32))]),
+                npu_uuid="node-0",
+                post_iter_func=lambda item: item[1],
+            )
+        )
+
+    assert len(chunks) == 1
+    assert isinstance(chunks[0], PackedIpcChunk)
+    assert chunks[0].names == ["w"]
+    assert chunks[0].ipc_handle == {"node-0": args_sentinel}
 
 
 def test_packed_npu_ipc_producer_empty_iterator():
@@ -553,6 +592,28 @@ def test_packed_npu_ipc_consumer_clones_slices():
         )
     # Each returned tensor must have its own storage (not a view into ``packed``).
     assert weights[0][1].storage().data_ptr() != weights[1][1].storage().data_ptr()
+
+
+def test_packed_npu_ipc_consumer_does_not_clone_owned_slices_twice():
+    """The consumer returns the owned tensors produced by ``unpack_tensor``."""
+    owned = MagicMock()
+    rebuild = MagicMock(return_value=torch.zeros(4, dtype=torch.uint8))
+    fake_args = ("uuid", 4, 0, 0, 0, 0, 0)
+
+    with patch(f"{_MODULE}.unpack_tensor", return_value=[("w", owned)]):
+        weights = packed_npu_ipc_consumer(
+            ipc_handle={"node-0": fake_args},
+            physical_npu_id="node-0",
+            names=["w"],
+            shapes=[[1]],
+            dtype_names=["float32"],
+            tensor_sizes=[4],
+            device_index=0,
+            rebuild_func=lambda *_args: rebuild(),
+        )
+
+    assert weights == [("w", owned)]
+    owned.clone.assert_not_called()
 
 
 def test_packed_npu_ipc_consumer_truncates_to_content_size():
@@ -889,3 +950,215 @@ def test_packed_npu_ipc_consumer_clones_each_slice_independently():
 
     ptrs = [w[1].storage().data_ptr() for w in weights]
     assert len(set(ptrs)) == 3, f"expected 3 distinct storage ptrs, got {ptrs}"
+
+
+@pytest.mark.parametrize(
+    ("dtype", "value"),
+    [
+        (torch.float32, 1.25),
+        (torch.bfloat16, -2.5),
+        (torch.int64, 7),
+    ],
+)
+def test_pack_tensors_roundtrip_scalar(dtype, value):
+    original = torch.tensor(value, dtype=dtype)
+    chunk = pack_tensors(
+        iter([("scalar", original)]),
+        lambda item: item[1],
+        buffer_size_bytes=64,
+    )
+
+    assert chunk is not None
+    assert chunk.shapes == [[]]
+    restored = unpack_tensor(
+        chunk.packed_tensor,
+        chunk.names,
+        chunk.shapes,
+        chunk.dtypes,
+        chunk.tensor_sizes,
+    )[0][1]
+    assert restored.shape == torch.Size([])
+    assert restored.dtype == dtype
+    assert torch.equal(restored.cpu(), original.cpu())
+
+
+def test_pack_tensors_rejects_post_iter_dtype_change():
+    original = torch.ones(1, dtype=torch.float32)
+    with pytest.raises(ValueError, match="materialized with dtype"):
+        pack_tensors(
+            iter([("w", original)]),
+            lambda item: item[1].to(torch.int32),
+            buffer_size_bytes=64,
+        )
+
+
+@pytest.mark.parametrize(
+    ("dtype", "value"),
+    [
+        (torch.float32, 1.25),
+        (torch.bfloat16, -2.5),
+        (torch.int64, 7),
+    ],
+)
+def test_packed_npu_ipc_roundtrip_scalar(dtype, value):
+    original = torch.tensor(value, dtype=dtype)
+    captured = {}
+
+    def fake_reduce(tensor):
+        captured["buffer"] = tensor
+        return "rebuild", ("uuid", 64, 0, 0, 0, 0, 0, None)
+
+    with patch(f"{_MODULE}.reduce_tensor", side_effect=fake_reduce):
+        chunks = list(
+            packed_npu_ipc_producer(
+                iterator=iter([("scalar", original)]),
+                npu_uuid="node-0",
+                post_iter_func=lambda item: item[1],
+                buffer_size_bytes=64,
+            )
+        )
+
+    weights = packed_npu_ipc_consumer(
+        ipc_handle=chunks[0]["ipc_handle"],
+        physical_npu_id="node-0",
+        names=chunks[0]["names"],
+        shapes=chunks[0]["shapes"],
+        dtype_names=chunks[0]["dtype_names"],
+        tensor_sizes=chunks[0]["tensor_sizes"],
+        device_index=0,
+        rebuild_func=lambda *_args: captured["buffer"],
+    )
+
+    restored = weights[0][1]
+    assert restored.shape == torch.Size([])
+    assert restored.dtype == dtype
+    assert torch.equal(restored.cpu(), original.cpu())
+
+
+def test_packed_broadcast_consumer_retains_each_slot_until_stream_sync():
+    class TrackingStream(_FakeNpuStream):
+        def __init__(self):
+            self.last_broadcast_ref = None
+            self.pending_unpack_ref = None
+            self.protected_checks = 0
+
+        def synchronize(self):
+            if self.pending_unpack_ref is not None:
+                assert self.pending_unpack_ref() is not None
+                self.protected_checks += 1
+                self.pending_unpack_ref = None
+
+    class LifetimeGroup:
+        @staticmethod
+        def broadcast(tensor, *, src, stream):
+            del src
+            stream.last_broadcast_ref = weakref.ref(tensor)
+
+    def tracked_unpack(packed, *args):
+        del args
+        stream = next(
+            stream
+            for stream in streams
+            if stream.last_broadcast_ref is not None and stream.last_broadcast_ref() is packed
+        )
+        stream.pending_unpack_ref = weakref.ref(packed)
+        return []
+
+    streams = (TrackingStream(), TrackingStream())
+    metadata = [(f"w{i}", ([1], torch.float32)) for i in range(3)]
+    with (
+        patch(f"{_MODULE}._get_streams", return_value=streams),
+        patch(f"{_MODULE}.unpack_tensor", new=tracked_unpack),
+    ):
+        packed_broadcast_consumer(
+            iterator=iter(metadata),
+            group=LifetimeGroup(),
+            src=0,
+            post_unpack_func=lambda _: None,
+            buffer_size_bytes=1,
+            num_buffers=2,
+        )
+
+    assert streams[0].protected_checks >= 2
+    assert streams[1].protected_checks >= 1
+
+
+def test_packed_broadcast_consumer_drains_buffer_before_reraising_loader_error():
+    class TrackingStream(_FakeNpuStream):
+        def __init__(self):
+            self.pending_unpack_ref = None
+            self.completed_unpack = False
+
+        def synchronize(self):
+            if self.pending_unpack_ref is not None:
+                assert self.pending_unpack_ref() is not None
+                self.completed_unpack = True
+                self.pending_unpack_ref = None
+
+    stream = TrackingStream()
+
+    def tracked_unpack(packed, *args):
+        del args
+        stream.pending_unpack_ref = weakref.ref(packed)
+        return []
+
+    with (
+        patch(f"{_MODULE}._get_streams", return_value=(stream,)),
+        patch(f"{_MODULE}.unpack_tensor", new=tracked_unpack),
+        pytest.raises(ValueError, match="loader rejected weights"),
+    ):
+        packed_broadcast_consumer(
+            iterator=iter([("w", ([1], torch.float32))]),
+            group=MagicMock(),
+            src=0,
+            post_unpack_func=MagicMock(side_effect=ValueError("loader rejected weights")),
+            buffer_size_bytes=4,
+            num_buffers=1,
+        )
+
+    assert stream.completed_unpack
+
+
+def test_drain_preserves_original_error_when_diagnostic_logging_fails():
+    class FailingCleanupStream:
+        def __init__(self):
+            self.calls = 0
+
+        def synchronize(self):
+            self.calls += 1
+            if self.calls == 2:
+                raise RuntimeError("stream drain failed")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return None
+
+    stream = FailingCleanupStream()
+    group = MagicMock()
+    group.broadcast.side_effect = ValueError("loader rejected weights")
+    packed_tensor_module._UNSYNCHRONIZED_BUFFERS.clear()
+    try:
+        with (
+            patch(f"{_MODULE}._get_streams", return_value=(stream,)),
+            patch.object(
+                packed_tensor_module.logger,
+                "warning",
+                side_effect=RuntimeError("logging failed"),
+            ),
+            pytest.raises(ValueError) as exc_info,
+        ):
+            packed_broadcast_producer(
+                iterator=iter([("w", torch.ones(1))]),
+                group=group,
+                src=0,
+                post_iter_func=lambda item: item[1],
+                buffer_size_bytes=4,
+                num_buffers=1,
+            )
+
+        assert str(exc_info.value) == "loader rejected weights"
+        assert len(packed_tensor_module._UNSYNCHRONIZED_BUFFERS) == 1
+    finally:
+        packed_tensor_module._UNSYNCHRONIZED_BUFFERS.clear()
