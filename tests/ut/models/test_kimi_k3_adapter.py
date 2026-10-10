@@ -200,11 +200,12 @@ def test_k3_dspark_prolog_v3_context_writer_uses_pa_bsnd_and_strided_caches(monk
         weight=torch.ones(2),
         variance_epsilon=1e-6,
     )
-    impl._prepare_context_prolog_v3_weights = lambda: {
+    impl._prepare_prolog_v3_weights = lambda: {
         "quant_type": None,
         "weight_dq": object(),
         "weight_dkv_kr": object(),
         "weight_uq_qr": object(),
+        "weight_uk": object(),
     }
     cache = _make_component_major_strided_cache()
     calls = []
@@ -249,9 +250,10 @@ def test_k3_dspark_prolog_v3_prepares_native_weights_without_mutating_source(mon
     q_proj.weight = nn.Parameter(torch.arange(6, dtype=torch.float32).reshape(3, 2), False)
     impl.fused_qkv_a_proj = fused
     impl.q_proj = q_proj
+    impl.mlapo_W_UK_T = torch.empty(1, 2, 2)
     monkeypatch.setattr(mla_v1.torch_npu, "npu_format_cast", lambda tensor, _: tensor)
 
-    prepared = impl._prepare_context_prolog_v3_weights()
+    prepared = impl._prepare_prolog_v3_weights()
 
     assert prepared["quant_type"] is None
     assert prepared["weight_dq"].shape == (4, 2)

@@ -639,6 +639,27 @@ def test_v2_single_raw_mla_path_excludes_unsupported_modes(monkeypatch):
     assert not attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
     attn_module.impl.fa_quant_layer = False
 
+    attn_module.impl.enable_kv_nz = True
+    assert not attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
+    attn_module.impl.enable_kv_nz = False
+
+    attn_module.impl.supports_prolog_v3_quantization = lambda: False
+    assert not attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
+    attn_module.impl.supports_prolog_v3_quantization = lambda: True
+    assert attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
+
+    attn_module.impl.q_proj = SimpleNamespace(_chunk_size=2)
+    assert not attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
+    attn_module.impl.q_proj._chunk_size = 0
+    assert attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
+
+    monkeypatch.setattr(
+        attn_utils,
+        "get_layers_from_vllm_config",
+        lambda *_args, **_kwargs: {layer_name: SimpleNamespace()},
+    )
+    assert not attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
+
     blocked_spec = replace(spec, indexes_kv_by_block_stride=True)
     assert not blocked_spec.supports_single_raw_backing
     assert not replace(spec, tokens_per_state=2).supports_single_raw_backing

@@ -1269,6 +1269,55 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         self.assertEqual(rope.storage_offset() - nope.storage_offset(), 65536)
         self.assertIs(nope.untyped_storage(), rope.untyped_storage())
 
+    def test_mla_single_raw_backing_excludes_unsupported_prolog_quantization(self):
+        runner = self._build_runner()
+        layer_name = "model.layers.0.self_attn.attn"
+        spec = AscendMLAAttentionSpec(
+            block_size=384,
+            num_heads=64,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.bfloat16,
+        )
+        attn_module = MLAAttention.__new__(MLAAttention)
+        torch.nn.Module.__init__(attn_module)
+        attn_module.impl = SimpleNamespace(
+            fa_quant_layer=False,
+            enable_kv_nz=True,
+            supports_prolog_v3_quantization=lambda: False,
+            q_proj=SimpleNamespace(_chunk_size=0),
+        )
+        runner.compilation_config = SimpleNamespace(static_forward_context={layer_name: attn_module})
+
+        with patch(
+            "vllm_ascend.worker.model_runner_v1.supports_component_major_mla_pd",
+            return_value=True,
+        ):
+            self.assertFalse(runner._uses_single_raw_mla_cache(layer_name, spec, attn_module))
+
+        attn_module.impl.enable_kv_nz = False
+        with patch(
+            "vllm_ascend.worker.model_runner_v1.supports_component_major_mla_pd",
+            return_value=True,
+        ):
+            self.assertFalse(runner._uses_single_raw_mla_cache(layer_name, spec, attn_module))
+
+        attn_module.impl.supports_prolog_v3_quantization = lambda: True
+        with patch(
+            "vllm_ascend.worker.model_runner_v1.supports_component_major_mla_pd",
+            return_value=True,
+        ):
+            self.assertTrue(runner._uses_single_raw_mla_cache(layer_name, spec, attn_module))
+
+        self.assertFalse(runner._uses_single_raw_mla_cache(layer_name, spec, SimpleNamespace()))
+
+        attn_module.impl.q_proj._chunk_size = 2
+        with patch(
+            "vllm_ascend.worker.model_runner_v1.supports_component_major_mla_pd",
+            return_value=True,
+        ):
+            self.assertFalse(runner._uses_single_raw_mla_cache(layer_name, spec, attn_module))
+
     def test_kvpp_allocate_and_reshape_views(self):
         from tests.ut.kvpp_utils import assert_attention_cache_views, make_attention_cache_case, make_cache_config
         from vllm_ascend.core import kv_cache_placement
@@ -1322,15 +1371,11 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         )
         attention_backend = MagicMock()
         attention_backend.is_sparse.return_value = False
-        attention_backend.get_kv_cache_shape.side_effect = (
-            lambda num_blocks, block_size, num_kv_heads, head_size, **_: (
-                2,
-                num_blocks,
-                block_size,
-                num_kv_heads,
-                head_size,
-            )
-        )
+
+        def attention_cache_shape(num_blocks, block_size, num_kv_heads, head_size, **_kwargs):
+            return (2, num_blocks, block_size, num_kv_heads, head_size)
+
+        attention_backend.get_kv_cache_shape.side_effect = attention_cache_shape
         groups = [
             SimpleNamespace(
                 kv_cache_group_id=0,
