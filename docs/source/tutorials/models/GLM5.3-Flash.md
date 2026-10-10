@@ -1016,7 +1016,7 @@ KV cache blocks to pool memory. This configuration reuses pooled prefixes among 
 with the same TP8 layout; it does not load TP8 pool entries directly into TP1
 Decode engines.
 
-For backend installation, hardware dependencies, and an explanation of the pooling-related configuration parameters (such as memory sizing, eviction, and tenant options), refer to the [KV Cache Pool Deployment Guide](../../user_guide/feature_guide/kv_pool.md).
+For backend installation, hardware dependencies, and an explanation of the pooling-related configuration parameters (such as memory sizing, eviction, and tenant options), refer to the [KV Cache Pool Deployment Guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md).
 
 === "Atlas 800 A3 series"
 
@@ -1027,7 +1027,7 @@ For backend installation, hardware dependencies, and an explanation of the pooli
 
     Install the Mooncake backend according to the KV Cache Pool Deployment Guide.
     For A3 HCCS pooling, check the HDK, CANN, and LingQu Computing Network
-    requirements in its [Hardware Dependency Quick Reference](../../user_guide/feature_guide/kv_pool.md#ascend_global_resource_config).
+    requirements in its [Hardware Dependency Quick Reference](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#hdk-and-cann-version-compatibility-reference).
     Add the following mount to the A3 Docker command in Section 4.1 on both nodes:
 
     ```shell
@@ -1227,7 +1227,7 @@ For backend installation, hardware dependencies, and an explanation of the pooli
     pool runs over the A2 RoCE network with the `P2PHANDSHAKE` metadata server
     and the `ascend` protocol, and the A3 fabric-memory exports do not apply.
 
-    For backend installation, hardware dependencies, and an explanation of the pooling-related configuration parameters (such as memory sizing, eviction, and tenant options), refer to the [KV Cache Pool Deployment Guide](../../user_guide/feature_guide/kv_pool.md).
+    For backend installation, hardware dependencies, and an explanation of the pooling-related configuration parameters (such as memory sizing, eviction, and tenant options), refer to the [KV Cache Pool Deployment Guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md).
 
     **Prepare the Mooncake Configuration**
 
