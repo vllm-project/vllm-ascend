@@ -108,6 +108,7 @@ def test_gdn_chunk_call_passes_native_head_layout(monkeypatch):
     monkeypatch.setattr(torch.npu, "synchronize", MagicMock(), raising=False)
 
     w = _wrapper()
+    state_before = state.clone()
     ok = XliteWrapper._gdn_chunk_call(w, q, k, v, beta, g, state, out, cu_seqlens, [3, 3])
 
     assert ok is True
@@ -119,7 +120,7 @@ def test_gdn_chunk_call_passes_native_head_layout(monkeypatch):
     assert captured["g_dtype"] == torch.float32
     # xlite keeps state as [B, H, K, V]; the op expects [B, H, V, K].
     assert captured["state_vk"].shape == (B, H, V, K)
-    assert torch.equal(captured["state_vk"], state.transpose(-1, -2))
+    assert torch.equal(captured["state_vk"], state_before.transpose(-1, -2))
     assert captured["asl"] == [3, 3]
     assert captured["scale"] == pytest.approx(K**-0.5)
     # Outputs written back: out in token-major [T, H*V]; state transposed back.
