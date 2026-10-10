@@ -1,6 +1,6 @@
 # Fine-Grained Tensor Parallelism (Fine-grained TP)
 
-## Feature Introduction
+## Overview
 
 Fine-Grained Tensor Parallelism (Fine-grained TP) extends standard tensor parallelism by enabling **independent tensor-parallel sizes for different model components**. Instead of applying a single global `tensor_parallel_size` to all layers, Fine-grained TP allows users to configure separate TP sizes for key modules—such as embedding, LM head, attention output projection (o_proj), and MLP blocks—via the `finegrained_tp_config` parameter.
 
@@ -14,16 +14,16 @@ Fine-grained TP delivers two primary performance advantages through targeted wei
 - **Faster Memory Access in GEMMs**:  
   In decode-heavy workloads, GEMM performance is often memory-bound. Weight sharding reduces per-device weight fetch volume, cutting DRAM traffic and improving bandwidth efficiency—especially for latency-sensitive layers like LM head and o_proj.
 
-In the measured DeepSeek-R1-W8A8 deployment below, the four knobs together saved **9.72 GB per card** with a net TPOT improvement (see [Experimental Results](#experimental-results)). The individual knobs have shipped across earlier releases; the support matrix, preconditions, and examples in this guide reflect the behavior of the v0.30.0 release line (current main).
+In the measured DeepSeek-R1-W8A8 deployment below, the four knobs together saved **9.72 GB per card** with a net TPOT improvement (see [Experimental Results](#experimental-results)). This guide reflects the feature on the v0.30.0 release line (current main).
 
-### Working Principle
+## How It Works
 
 The four components fall into two families with different communication contracts, and the family a knob belongs to determines where it can run:
 
 - **embedding / LM head (capacity-based exchanges)**: the cross-DP exchange pads every step to a fixed capacity before the collectives and trims afterwards, so these components are independent of the per-step token count and work in eager and graph mode, in both prefill and decode.
 - **o_proj / MLP (uniform-token exchanges)**: the cross-DP exchange requires every rank in the group to forward the same number of tokens on every step. This count is only guaranteed by graph dispatch in a P/D-disaggregated decode deployment, so `oproj_tensor_parallel_size > 1` and `mlp_tensor_parallel_size > 1` are only supported in graph mode during decode and carry the deployment preconditions listed [below](#preconditions-for-o_proj--mlp-tp). For `o_proj`, dummy_run in eager mode additionally never triggers o_proj.
 
-### Usage Scenarios
+## Supported Scenarios
 
 The four knobs are freely combinable — on a PD decode node all four can be enabled together (this is the configuration measured in [Experimental Results](#experimental-results)); each knob only needs to satisfy its own family's constraints.
 
@@ -32,28 +32,7 @@ The four knobs are freely combinable — on a PD decode node all four can be ena
 | All-DP MoE serving (standalone, or the decode side of PD separation) | embedding / LM head — o_proj and MLP TP additionally require a PD decode node | MoE model, `tensor_parallel_size == 1`, sizes evenly divide `data_parallel_size` |
 | P/D-disaggregated decode (D) node | all four together: o_proj / MLP / embedding / LM head | The o_proj / MLP knobs require the full [preconditions for o_proj / MLP TP](#preconditions-for-o_proj--mlp-tp) |
 
-### Constraints and Limitations
-
-| Category | Description |
-|----------|-------------|
-| Model | MoE models only — see [Models](#models) for how to check a checkpoint |
-| Deployment Scenario | embedding / LM head TP: all-DP MoE serving or PD decode nodes; o_proj / MLP TP: P/D-disaggregated decode nodes only |
-| Standard TP | Fine-grained sizes require, or are only effective under, `tensor_parallel_size == 1`; see [Standard Tensor Parallelism Requirement](#standard-tensor-parallelism-requirement) |
-| Feature Mutual Exclusion | `prefill_context_parallel_size > 1` cannot be combined with o_proj / MLP TP |
-| Engine | vLLM-Ascend |
-| Hardware | No config-enforced hardware restriction; the performance data in this guide was measured on Atlas A2 (see [Experimental Results](#experimental-results)) |
-
-#### Models
-
-Fine-grained TP currently supports **MoE models only**. The constraint is enforced at configuration load: a non-MoE model fails at startup with `The finegrained tp sizes can be enabled only for MOE models`.
-
-To check whether a checkpoint qualifies, look at its `config.json`: the model counts as a MoE model when the config exposes routed experts through any of the fields `n_routed_experts` (DeepSeek-style), `num_local_experts` (Mixtral-style), `num_experts`, `moe_num_experts`, or MoE blocks under `block_configs`. Checkpoints such as DeepSeek-V3/R1, the Qwen3 MoE series, GLM MoE variants, Kimi-K2, and MiniMax-M3 qualify; dense checkpoints such as Llama or the dense Qwen series do not.
-
-The restriction comes from the sharding axis: fine-grained TP shards weights across the data-parallel (DP) dimension, and only MoE deployments keep a cross-rank DP group — for a dense model, every DP rank runs as an independent DP=1 engine, leaving no group to shard across.
-
-Within a qualifying MoE model, the sharded components may include the dense layers — for example, the first three dense layers of DeepSeek-R1 are sharded by `mlp_tensor_parallel_size` like the other MLP layers.
-
-#### Component & Execution Mode Support
+### Component & Execution Mode Support
 
 | TP config     | Eager | Graph | Hybrid | Prefill | Decode |
 | ------------- | ----- | ----- | ------ | ------- | ------ |
@@ -67,7 +46,27 @@ Within a qualifying MoE model, the sharded components may include the dense laye
 > - Both `o_proj` TP and MLP TP additionally require `tensor_parallel_size == 1` (enforced at config load); see [Standard Tensor Parallelism Requirement](#standard-tensor-parallelism-requirement) below.
 > - LM head TP can be combined with speculative decoding (EAGLE, DFlash, and DSpark draft models).
 
-#### Preconditions for o_proj / MLP TP
+## Constraints and Limitations
+
+| Category | Description |
+|----------|-------------|
+| Model | MoE models only — see [Models](#models) for how to check a checkpoint |
+| Deployment Scenario | embedding / LM head TP: all-DP MoE serving or PD decode nodes; o_proj / MLP TP: P/D-disaggregated decode nodes only |
+| Standard TP | Fine-grained sizes require, or are only effective under, `tensor_parallel_size == 1`; see [Standard Tensor Parallelism Requirement](#standard-tensor-parallelism-requirement) |
+| Feature Mutual Exclusion | `prefill_context_parallel_size > 1` cannot be combined with o_proj / MLP TP |
+| Hardware | No config-enforced hardware restriction; the performance data in this guide was measured on Atlas A2 (see [Experimental Results](#experimental-results)) |
+
+### Models
+
+Fine-grained TP currently supports **MoE models only**. The constraint is enforced at configuration load: a non-MoE model fails at startup with `The finegrained tp sizes can be enabled only for MOE models`.
+
+To check whether a checkpoint qualifies, look at its `config.json`: the model counts as a MoE model when the config exposes routed experts through any of the fields `n_routed_experts` (DeepSeek-style), `num_local_experts` (Mixtral-style), `num_experts`, `moe_num_experts`, or MoE blocks under `block_configs`. Checkpoints such as DeepSeek-V3/R1, the Qwen3 MoE series, GLM MoE variants, Kimi-K2, and MiniMax-M3 qualify; dense checkpoints such as Llama or the dense Qwen series do not.
+
+The restriction comes from the sharding axis: fine-grained TP shards weights across the data-parallel (DP) dimension, and only MoE deployments keep a cross-rank DP group — for a dense model, every DP rank runs as an independent DP=1 engine, leaving no group to shard across.
+
+Within a qualifying MoE model, the sharded components may include the dense layers — for example, the first three dense layers of DeepSeek-R1 are sharded by `mlp_tensor_parallel_size` like the other MLP layers.
+
+### Preconditions for o_proj / MLP TP
 
 `oproj_tensor_parallel_size > 1` and `mlp_tensor_parallel_size > 1` are validated at startup and require all of the following (invalid configurations fail at config load with an explicit error):
 
@@ -80,7 +79,7 @@ Within a qualifying MoE model, the sharded components may include the dense laye
 
 If the largest cudagraph capture size does not cover the largest possible step (`min(max_num_batched_tokens, max_num_seqs * (1 + num_speculative_tokens))`), both `oproj_tensor_parallel_size` and `mlp_tensor_parallel_size` are **disabled automatically at startup with a warning**, and the deployment still starts without them; raise `max_cudagraph_capture_size` to re-enable. At runtime, a step dispatched outside the captured graphs fails the affected request with an explicit error instead of hanging the cross-DP collectives.
 
-#### Configuration Limit
+### Configuration Limit
 
 The Fine-Grained TP size for any component must:
 
@@ -89,7 +88,7 @@ The Fine-Grained TP size for any component must:
 
 Violating these constraints fails at configuration load with `finegrained tp sizes must divide by data_parallel_size`.
 
-#### Standard Tensor Parallelism Requirement
+### Standard Tensor Parallelism Requirement
 
 Fine-grained TP shards the configured layer **across the data-parallel (DP) dimension**, not the standard tensor-parallel (TP) dimension. Its interplay with the standard `tensor_parallel_size` therefore differs per component:
 
@@ -100,11 +99,9 @@ Fine-grained TP shards the configured layer **across the data-parallel (DP) dime
 
 ---
 
-## Feature Usage
+## Usage
 
-### Usage Example
-
-**Scenario 1 — embedding + LM head TP (all-DP MoE serving):**
+### Scenario 1 — embedding + LM head TP (all-DP MoE serving)
 
 ```bash
 vllm serve deepseek-ai/DeepSeek-R1 \
@@ -119,7 +116,7 @@ vllm serve deepseek-ai/DeepSeek-R1 \
     }'
 ```
 
-**Scenario 2 — all four knobs on a P/D-disaggregated decode node:**
+### Scenario 2 — all four knobs on a P/D-disaggregated decode node
 
 ```bash
 vllm serve deepseek-ai/DeepSeek-R1 \
@@ -167,7 +164,7 @@ vllm serve deepseek-ai/DeepSeek-R1 \
 >
 > - Scenario 2 must run in graph mode (do not pass `--enforce-eager`), and its prefill node keeps a plain producer configuration (e.g. `MooncakeConnectorV1` with `kv_role = kv_producer`). See the [Preempt Offload Guide](preempt_offload_connector.md) for the `PreemptOffloadConnector` parameters and the P/D disaggregation tutorials for the end-to-end deployment.
 
-### Verifying the Feature
+## Verifying the Feature
 
 After the instance starts, confirm which knobs actually took effect:
 
@@ -209,8 +206,6 @@ After the instance starts, confirm which knobs actually took effect:
 
    Expected result: HTTP 200 with a `choices` field in the response.
 
----
-
 ## Configuration Parameters
 
 All knobs live under `finegrained_tp_config` inside `--additional-config`. The default `0` disables a knob.
@@ -246,7 +241,7 @@ Fine-grained TP is the **most effective** in the **decode instance** of PD separ
 
 ---
 
-## FAQs
+## FAQ
 
 ### Startup fails with "The finegrained tp sizes can be enabled only for MOE models"
 
