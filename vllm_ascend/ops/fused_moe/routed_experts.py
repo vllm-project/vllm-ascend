@@ -46,7 +46,7 @@ from vllm_ascend.ops.fused_moe.moe_comm_method import (
 )
 from vllm_ascend.ops.fused_moe.moe_utils import get_moe_num_logical_experts
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
 
 
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
@@ -356,64 +356,32 @@ def _record_v2_eplb_load(router: FusedMoERouter, result: FusedExpertsResult) -> 
     )
 
 
-def _empty_like_preserving_npu_format(
-    tensor: torch.Tensor,
-    **kwargs,
-) -> torch.Tensor:
+def _empty_like_preserving_npu_format(tensor: torch.Tensor) -> torch.Tensor:
     """Allocate an EPLB buffer with the source tensor's NPU storage format."""
-    # EPLB transfer for quantized expert weights (integer payloads such as
-    # int8/int32) is only supported from the NZ storage format, while float
-    # weights may be ND or NZ. Fail fast when a quantized payload is still
-    # in ND; allocating an ND buffer here would silently break the transfer.
-    if tensor.device.type == "npu" and not tensor.dtype.is_floating_point:
-        source_format = int(torch_npu.get_npu_format(tensor))
-        if source_format == ACL_FORMAT_FRACTAL_ND:
-            raise ValueError(
-                "EPLB requires quantized expert weights to be stored in the NZ "
-                f"format before buffer allocation, but got a {tensor.dtype} "
-                "tensor in ND format. Cast the expert weights to NZ (e.g. via "
-                "maybe_trans_nz) after loading."
-            )
-
-    target_dtype = kwargs.get("dtype") or tensor.dtype
-    target_layout = kwargs.get("layout") or tensor.layout
-    target_device = kwargs.get("device") or tensor.device
-    memory_format = kwargs.get("memory_format", torch.preserve_format)
+    if tensor.device.type != "npu":
+        return torch.empty_like(tensor)
 
     # ACLNN-only devices force allow_internal_format=False, so torch.empty_like
     # silently converts internal formats such as FRACTAL_NZ_C0_16 to ND. Use
-    # the explicit NPU allocator when the source layout is requested unchanged.
-    if (
-        tensor.device.type == "npu"
-        and torch.device(target_device).type == "npu"
-        and target_dtype == tensor.dtype
-        and target_layout == tensor.layout
-        and memory_format == torch.preserve_format
-    ):
-        assert tensor.storage_offset() == 0, (
-            "EPLB expert buffer allocation requires an offset-0 source "
-            f"tensor, but got storage_offset={tensor.storage_offset()}"
-        )
+    # the explicit NPU allocator to preserve the expert's storage format.
+    assert tensor.storage_offset() == 0, (
+        "EPLB expert buffer allocation requires an offset-0 source "
+        f"tensor, but got storage_offset={tensor.storage_offset()}"
+    )
 
-        result = torch_npu.empty_with_format(
-            size=tensor.size(),
-            dtype=target_dtype,
-            layout=target_layout,
-            device=target_device,
-            pin_memory=kwargs.get("pin_memory", False),
-            acl_format=int(torch_npu.get_npu_format(tensor)),
-        )
+    result = torch_npu.empty_with_format(
+        size=tensor.size(),
+        dtype=tensor.dtype,
+        layout=tensor.layout,
+        device=tensor.device,
+        acl_format=int(torch_npu.get_npu_format(tensor)),
+    )
 
-        assert result.stride() == tensor.stride(), (
-            "EPLB expert buffer allocation must preserve the source stride, "
-            f"but got source={tensor.stride()} and buffer={result.stride()}"
-        )
-
-        if kwargs.get("requires_grad", False):
-            result.requires_grad_(True)
-        return result
-
-    return torch.empty_like(tensor, **kwargs)
+    assert result.stride() == tensor.stride(), (
+        "EPLB expert buffer allocation must preserve the source stride, "
+        f"but got source={tensor.stride()} and buffer={result.stride()}"
+    )
+    return result
 
 
 class EplbExpertTensorList(list[torch.Tensor]):
@@ -425,9 +393,9 @@ class EplbExpertTensorList(list[torch.Tensor]):
 
     @classmethod
     def __torch_function__(cls, func, types, args=(), kwargs=None):
-        if func is torch.empty_like:
+        if func is torch.empty_like and not kwargs:
             source = args[0]
-            return cls(_empty_like_preserving_npu_format(tensor, **(kwargs or {})) for tensor in source)
+            return cls(_empty_like_preserving_npu_format(tensor) for tensor in source)
         return NotImplemented
 
 
