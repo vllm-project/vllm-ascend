@@ -2,17 +2,17 @@
 
 ## Overview
 
-Fine-Grained Tensor Parallelism (Fine-grained TP) extends standard tensor parallelism by enabling **independent tensor-parallel sizes for different model components**. Instead of applying a single global `tensor_parallel_size` to all layers, Fine-grained TP allows users to configure separate TP sizes for key modules—such as embedding, LM head, attention output projection (o_proj), and MLP blocks—via the `finegrained_tp_config` parameter.
+Fine-Grained Tensor Parallelism (Fine-grained TP) extends standard tensor parallelism by enabling **independent tensor-parallel sizes for different model components**. Instead of applying a single global `tensor_parallel_size` to all layers, Fine-grained TP allows users to configure separate TP sizes for key modules — such as embedding, LM head, attention output projection (o_proj), and MLP blocks — via the `finegrained_tp_config` parameter.
 
 This capability supports heterogeneous parallelism strategies within a single model, providing finer control over weight distribution, memory layout, and communication patterns across devices. The feature is compatible with MoE transformer architectures and integrates seamlessly into vLLM’s serving pipeline.
 
 Fine-grained TP delivers two primary performance advantages through targeted weight sharding:
 
 - **Reduced Per-Device Memory Footprint**:  
-  Fine-grained TP shards large weight matrices (e.g., LM head, o_proj) across devices, lowering peak memory usage and enabling larger batches or deployment on memory-limited hardware—without quantization.
+  Fine-grained TP shards large weight matrices (e.g., LM head, o_proj) across devices, lowering peak memory usage and enabling larger batches or deployment on memory-limited hardware, all without quantization.
   
 - **Faster Memory Access in GEMMs**:  
-  In decode-heavy workloads, GEMM performance is often memory-bound. Weight sharding reduces per-device weight fetch volume, cutting DRAM traffic and improving bandwidth efficiency—especially for latency-sensitive layers like LM head and o_proj.
+  In decode-heavy workloads, GEMM performance is often memory-bound. Weight sharding reduces per-device weight fetch volume, cutting DRAM traffic and improving bandwidth efficiency, especially for latency-sensitive layers like LM head and o_proj.
 
 In the measured DeepSeek-R1-W8A8 deployment below, the four knobs together saved **9.72 GB per card** with a net TPOT improvement (see [Experimental Results](#experimental-results)). This guide reflects the feature on the v0.30.0 release line (current main).
 
