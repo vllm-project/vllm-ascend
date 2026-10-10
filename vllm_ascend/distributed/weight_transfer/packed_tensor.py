@@ -76,10 +76,19 @@ def packed_broadcast_producer(
             # No more tensors — nothing left to broadcast
             break
 
-        # torch.cat runs on the custom stream.  Synchronize before
-        # broadcasting on the default stream so the packed data is ready.
+        # torch.cat runs on the custom stream. Synchronize before broadcasting
+        # so the packed data is ready, then keep the exact communication stream
+        # for both HCCL and allocator lifetime tracking.
         streams[buffer_idx].synchronize()
-        group.broadcast(packed_tensors[buffer_idx], src=src)
+        communication_stream = torch.npu.current_stream()
+        group.broadcast(packed_tensors[buffer_idx], src=src, stream=communication_stream)
+        # HCCL enqueues an asynchronous read of the packed buffer on the
+        # current stream but does not retain the Python tensor object. The
+        # producer rotates this slot immediately, so register the buffer with
+        # the communication stream before the local reference can be dropped.
+        # Otherwise the allocator may recycle the storage while HCCL is still
+        # reading it, corrupting a later packed reload.
+        packed_tensors[buffer_idx].record_stream(communication_stream)
 
         # Move to the next buffer
         buffer_idx = (buffer_idx + 1) % num_buffers

@@ -8,6 +8,7 @@ from vllm.v1.sample.sampler import Sampler
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.sample.penalties import apply_all_penalties
+from vllm_ascend.sample.topk_topp import apply_top_k_top_p_with_fallback
 from vllm_ascend.utils import global_stream, npu_stream_switch
 
 DEFAULT_LOGPROBS_MODE = "raw_logprobs"
@@ -160,8 +161,24 @@ def _apply_top_k_top_p_torch_npu(
     return _apply_top_k_top_p_pytorch(logits, k, p)
 
 
-apply_top_k_top_p = (
-    _apply_top_k_top_p_torch_npu
-    if get_current_hardware_profile().supports(HardwareCapability.NPU_TOP_K_TOP_P)
-    else _apply_top_k_top_p_pytorch
-)
+def _apply_top_k_top_p_ascend(
+    logits: torch.Tensor,
+    k: torch.Tensor | None,
+    p: torch.Tensor | None,
+) -> torch.Tensor:
+    """Use Qrita on A2/A3, retaining the sort-based fallback."""
+    return apply_top_k_top_p_with_fallback(logits, k, p, _apply_top_k_top_p_torch_npu)
+
+
+def _apply_top_k_top_p_dispatch():
+    # batch_invariant mode must keep vLLM's own top-k/top-p masking (see
+    # AscendTopKTopPSampler.forward_native), so the Triton kernel is
+    # bypassed entirely when it is active.
+    if HAS_TRITON and not envs.VLLM_BATCH_INVARIANT:
+        return _apply_top_k_top_p_ascend
+    if get_current_hardware_profile().supports(HardwareCapability.NPU_TOP_K_TOP_P):
+        return _apply_top_k_top_p_torch_npu
+    return _apply_top_k_top_p_pytorch
+
+
+apply_top_k_top_p = _apply_top_k_top_p_dispatch()
