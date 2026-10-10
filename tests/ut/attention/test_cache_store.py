@@ -222,6 +222,7 @@ def test_fp8_cache_dispatch_preserves_bytes(monkeypatch, family, dtype, layout):
 @pytest.mark.parametrize("producer,consumer", [(False, False), (True, False), (False, True), (True, True)])
 def test_main_cache_write_delegates_with_own_slots(tokens, state, producer, consumer):
     impl = AscendSFADSACPImpl.__new__(AscendSFADSACPImpl)
+    impl.qk_rope_head_dim = 128
     impl.enable_sparse_sfa_c8 = True
     impl.enable_sparse_sfa_turboquant = False
     impl.is_kv_producer, impl.is_kv_consumer = producer, consumer

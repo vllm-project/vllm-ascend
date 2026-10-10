@@ -294,7 +294,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                     if use_turboquant
                     else "auto"
                 ),
-                scale_dim=head_dim // 64 * 2 if cache_sparse_li_c4 else 1 if cache_sparse_li_c8 else 0,
+                scale_dim=head_dim // 32 if cache_sparse_li_c4 else 1 if cache_sparse_li_c8 else 0,
                 scale_dtype=torch.float8_e8m0fnu
                 if cache_sparse_li_c4
                 else c8_k_scale_cache_dtype
@@ -1435,7 +1435,7 @@ def _reshape_kv_cache_v2(
                         group_spec.scale_dim,
                     )
                     if group_spec.cache_sparse_li_c4:
-                        indexer_scale_cache_shape = (*indexer_scale_cache_shape[:-1], group_spec.head_size * 2 // 64, 2)
+                        indexer_scale_cache_shape = (*indexer_scale_cache_shape[:-1], group_spec.scale_dim // 2, 2)
                     indexer_scale_cache = raw_scale_tensor.view(group_spec.scale_dtype).view(indexer_scale_cache_shape)
                     kv_caches[layer_name] = (indexer_k_cache, indexer_scale_cache)
 

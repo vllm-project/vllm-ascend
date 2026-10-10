@@ -194,7 +194,6 @@ def make_config(kv_role="kv_producer", extra_config=None, block_size=16):
     config.parallel_config.world_size = 1
     config.cache_config.block_size = block_size
     config.cache_config.hash_block_size = block_size
-    config.cache_config.prefix_cache_retention_interval = 0
     config.model_config.model = "org/llama-7b"
     config.model_config.use_mla = False
     config.model_config.hf_text_config = MagicMock(spec=[])
@@ -247,14 +246,6 @@ class TestGetZmqRpcPathLookup(unittest.TestCase):
 class TestKVPoolScheduler(unittest.TestCase):
     def _make_config(self, kv_role="kv_producer", extra_config=None, block_size=16):
         return make_config(kv_role, extra_config, block_size)
-
-    def test_retention_interval_comes_from_resolved_cache_config(self):
-        for retention_interval in (None, 0, 4096):
-            with self.subTest(retention_interval=retention_interval):
-                config = self._make_config()
-                config.cache_config.prefix_cache_retention_interval = retention_interval
-                scheduler = KVPoolScheduler(config, use_layerwise=False)
-                self.assertEqual(scheduler.retention_interval, retention_interval)
 
     def test_pcp_query_keys_and_worker_count(self):
         for pcp_size, dcp_size in ((1, 1), (2, 1), (4, 1), (1, 2)):
@@ -888,6 +879,32 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
 
         _meta = scheduler.build_connector_meta(sched_output)
         self.assertNotIn("r1", scheduler._request_trackers)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_build_connector_meta_released_req_ids_union(self, mock_client_cls):
+        config = self._make_config()
+        scheduler = KVPoolScheduler(config, use_layerwise=False)
+
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import RequestTracker
+
+        for req_id in ("f1", "f2", "p1"):
+            scheduler._request_trackers[req_id] = RequestTracker(
+                req_id=req_id,
+                token_len=32,
+                allocated_block_ids=[0, 1],
+            )
+            scheduler._unfinished_requests[req_id] = (MagicMock(), [0, 1])
+
+        sched_output = MagicMock()
+        sched_output.finished_req_ids = {"f1", "f2"}
+        sched_output.preempted_req_ids = {"p1"}
+        sched_output.scheduled_new_reqs = []
+        sched_output.num_scheduled_tokens = {}
+        sched_output.scheduled_cached_reqs = MagicMock()
+        sched_output.scheduled_cached_reqs.req_ids = []
+
+        meta = scheduler.build_connector_meta(sched_output)
+        self.assertEqual(meta.released_req_ids, {"f1", "f2", "p1"})
 
 
 class TestLookupKeyClient(unittest.TestCase):

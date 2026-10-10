@@ -80,8 +80,8 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
             if group is None or group.world_size <= 1:
                 raise ValueError("dp_shared_memory needs a node-local sharing group with more than one rank")
             self._shared_group = group
-            # Sharing replaces the per-step DP lookup collectives: every
-            # replica looks up its own tokens over the mapped table.
+            # DP x PCP peers map the same TP shard and look up their own
+            # tokens without per-step DP lookup collectives.
             self.dp_size = 1
         else:
             self.dp_size = max(get_engram_dp_size(), 1)
@@ -215,7 +215,7 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
     def load_checkpoint(self, model_path, key, chunk_rows=65536):
         """Stream assigned rows, preserving BF16 in non-quantized models.
 
-        Shared head slices have one writer per EDP group. The final CPU
+        Shared head slices have one writer per DP x PCP group. The final CPU
         collective synchronizes writes and propagates loading failures.
         """
         if self._shared_group is None:
