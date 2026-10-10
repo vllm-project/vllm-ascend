@@ -1,0 +1,174 @@
+# Four A3 nodes, 16 NPUs per node: internal DP4 / TP16 / EP64.
+# Each DP rank runs both prefill and decode; Node 0 exposes the API.
+# Based on the mixed-deployment configuration from upstream PR #14923.
+# Nightly: retain the MRV1 full GPQA and 16K prefix0 benchmark suite.
+# Local runs: set cluster_hosts to the four node IPs in rank order.
+test_name: "Kimi-K3-MRV2-A3"
+model: "Eco-Tech/Kimi-K3-w4a8"
+num_nodes: 4
+npu_per_node: 16
+dp_load_balancing: internal
+
+env_common: &env_common
+  VLLM_USE_V2_MODEL_RUNNER: "1"
+  VLLM_USE_MODELSCOPE: true
+  HCCL_BUFFSIZE: 800
+  PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+  OMP_PROC_BIND: false
+  OMP_NUM_THREADS: 1
+  TASK_QUEUE_ENABLE: 1
+  VLLM_ENGINE_READY_TIMEOUT_S: 7200
+  SERVER_PORT: 8080
+
+deployment:
+  - envs:
+      <<: *env_common
+    server_cmd: >
+      env -u HCCL_OP_EXPANSION_MODE -u LD_PRELOAD vllm serve Eco-Tech/Kimi-K3-w4a8
+        --host 0.0.0.0
+        --port $SERVER_PORT
+        --quantization ascend
+        --allowed-local-media-path /
+        --trust-remote-code
+        --tokenizer-mode kimi_k3
+        --tensor-parallel-size 16
+        --data-parallel-size 4
+        --data-parallel-size-local 1
+        --data-parallel-start-rank 0
+        --data-parallel-address $LOCAL_IP
+        --data-parallel-rpc-port 13389
+        --enable-expert-parallel
+        --enable-prefix-caching
+        --max-num-seqs 16
+        --max-model-len 133120
+        --max-num-batched-tokens 8192
+        --gpu-memory-utilization 0.9
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+        --additional-config '{"enable_cpu_binding":true,"enable_flashcomm1":true}'
+        --mm-processor-cache-gb 0
+        --mm-encoder-tp-mode data
+        --limit-mm-per-prompt '{"vision_chunk":2}'
+        --enable-auto-tool-choice
+        --reasoning-parser kimi_k3
+        --tool-call-parser kimi_k3
+
+  - envs:
+      <<: *env_common
+    server_cmd: >
+      env -u HCCL_OP_EXPANSION_MODE -u LD_PRELOAD vllm serve Eco-Tech/Kimi-K3-w4a8
+        --host 0.0.0.0
+        --port $SERVER_PORT
+        --quantization ascend
+        --allowed-local-media-path /
+        --trust-remote-code
+        --tokenizer-mode kimi_k3
+        --tensor-parallel-size 16
+        --data-parallel-size 4
+        --data-parallel-size-local 1
+        --data-parallel-start-rank 1
+        --data-parallel-address $MASTER_IP
+        --data-parallel-rpc-port 13389
+        --enable-expert-parallel
+        --enable-prefix-caching
+        --max-num-seqs 16
+        --max-model-len 133120
+        --max-num-batched-tokens 8192
+        --gpu-memory-utilization 0.9
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+        --additional-config '{"enable_cpu_binding":true,"enable_flashcomm1":true}'
+        --mm-processor-cache-gb 0
+        --mm-encoder-tp-mode data
+        --limit-mm-per-prompt '{"vision_chunk":2}'
+        --enable-auto-tool-choice
+        --reasoning-parser kimi_k3
+        --tool-call-parser kimi_k3
+
+  - envs:
+      <<: *env_common
+    server_cmd: >
+      env -u HCCL_OP_EXPANSION_MODE -u LD_PRELOAD vllm serve Eco-Tech/Kimi-K3-w4a8
+        --host 0.0.0.0
+        --port $SERVER_PORT
+        --quantization ascend
+        --allowed-local-media-path /
+        --trust-remote-code
+        --tokenizer-mode kimi_k3
+        --tensor-parallel-size 16
+        --data-parallel-size 4
+        --data-parallel-size-local 1
+        --data-parallel-start-rank 2
+        --data-parallel-address $MASTER_IP
+        --data-parallel-rpc-port 13389
+        --enable-expert-parallel
+        --enable-prefix-caching
+        --max-num-seqs 16
+        --max-model-len 133120
+        --max-num-batched-tokens 8192
+        --gpu-memory-utilization 0.9
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+        --additional-config '{"enable_cpu_binding":true,"enable_flashcomm1":true}'
+        --mm-processor-cache-gb 0
+        --mm-encoder-tp-mode data
+        --limit-mm-per-prompt '{"vision_chunk":2}'
+        --enable-auto-tool-choice
+        --reasoning-parser kimi_k3
+        --tool-call-parser kimi_k3
+
+  - envs:
+      <<: *env_common
+    server_cmd: >
+      env -u HCCL_OP_EXPANSION_MODE -u LD_PRELOAD vllm serve Eco-Tech/Kimi-K3-w4a8
+        --host 0.0.0.0
+        --port $SERVER_PORT
+        --quantization ascend
+        --allowed-local-media-path /
+        --trust-remote-code
+        --tokenizer-mode kimi_k3
+        --tensor-parallel-size 16
+        --data-parallel-size 4
+        --data-parallel-size-local 1
+        --data-parallel-start-rank 3
+        --data-parallel-address $MASTER_IP
+        --data-parallel-rpc-port 13389
+        --enable-expert-parallel
+        --enable-prefix-caching
+        --max-num-seqs 16
+        --max-model-len 133120
+        --max-num-batched-tokens 8192
+        --gpu-memory-utilization 0.9
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+        --additional-config '{"enable_cpu_binding":true,"enable_flashcomm1":true}'
+        --mm-processor-cache-gb 0
+        --mm-encoder-tp-mode data
+        --limit-mm-per-prompt '{"vision_chunk":2}'
+        --enable-auto-tool-choice
+        --reasoning-parser kimi_k3
+        --tool-call-parser kimi_k3
+
+benchmarks:
+  acc_gpqa:
+    case_type: accuracy
+    dataset_path: vllm-ascend/gpqa
+    request_conf: vllm_api_general_chat
+    dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
+    max_out_len: 65536
+    batch_size: 32
+    work_dir: /root/.cache/benchmark_results/${BENCHMARK_JOB_NAME}/aisbench
+    thinking: true
+    temperature: 1.0
+    top_p: 1.0
+    baseline: 90
+    threshold: 5
+  perf_16k_prefix0:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs200_kimi
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 16
+    max_out_len: 1024
+    batch_size: 4
+    request_rate: 0
+    # Reuse the MRV1 nightly performance baseline until MRV2 is recalibrated.
+    baseline: 40
+    threshold: 0.95
+    tpot_threshold: 90
