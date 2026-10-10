@@ -22,6 +22,8 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get feature
 |------------------|-----------------------|----------------|
 | `Qwen3.6-35B-A3B` (BF16 version) | 1 Atlas A3 inference products (64GB x 16) node, 1 Atlas A2 inference products (64GB x 8) node, or Atlas 300I DUO | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3.6-35B-A3B) |
 | `Qwen3.6-35B-A3B-w8a8` (quantized version) | 1 Atlas A3 inference products (64GB x 16) node, 1 Atlas A2 inference products (64GB x 8) node, or Atlas 300I DUO | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-35B-A3B-w8a8) |
+| `Qwen3.6-35B-A3B-w8a8-mxfp8` (quantized version) | 1 950DT Products(96GB x 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-35B-A3B-w8a8-mxfp8) |
+| `Qwen3.6-35B-A3B-w8a8c8-mxfp8` (quantized version) | 1 950DT Products(96GB x 8) node |  |
 
 It is recommended to download the model weight to `/root/.cache/`.
 
@@ -164,7 +166,68 @@ You can also build and install `vllm-ascend` from source. Refer to [set up using
 
 ### 5.1 Single-Node Online Deployment
 
-Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-35B-A3B-w8a8` can be deployed on 1 Atlas A3 inference products (64G x 16) or 1 Atlas A2 inference products (64G x 8), or Atlas 300I DUO. The W8A8 version needs `--quantization ascend`.
+Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-35B-A3B-w8a8` can be deployed on 1 Atlas A3 inference products (64G x 16) or 1 Atlas A2 inference products (64G x 8), or Atlas 300I DUO. `Qwen3.6-35B-A3B-w8a8-mxfp8` can be deployed on a single NPU of a 950DT Products (96GB x 8) node. The quantized versions need `--quantization ascend`.
+
+=== "950DT Products"
+
+    Run the following script to execute online inference with up to 135168 context length on a single NPU of a 950DT Products (96GB x 8) node using `Qwen3.6-35B-A3B-w8a8-mxfp8`.
+
+    ```shell
+    #!/bin/bash
+    export VLLM_USE_MODELSCOPE=True
+    export ASCEND_RT_VISIBLE_DEVICES=0
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=1
+    export OPENBLAS_NUM_THREADS=1
+    export TASK_QUEUE_ENABLE=1
+
+    vllm serve Eco-Tech/Qwen3.6-35B-A3B-w8a8-mxfp8 \
+      --host 0.0.0.0 \
+      --port 8000 \
+      --served-model-name qwen3.6 \
+      --trust-remote-code \
+      --quantization ascend \
+      --safetensors-load-strategy lazy \
+      --tensor-parallel-size 1 \
+      --data-parallel-size 1 \
+      --max-model-len 135168 \
+      --max-num-seqs 128 \
+      --max-num-batched-tokens 16384 \
+      --gpu-memory-utilization 0.90 \
+      --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3}' \
+      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+      --additional-config '{"enable_cpu_binding":true,"enable_fused_mc2":2,"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}' \
+      --enable-prefix-caching
+    ```
+
+    !!! note
+
+        When using the C8 weights (`Qwen3.6-35B-A3B-w8a8c8-mxfp8`), add the following options to the `vllm serve` deployment command:
+
+        ```shell
+        --kv-cache-dtype mxfp8 \
+        --prefix-match-unit 512 \
+        --enable-mamba-fine-grained-prefix-cache \
+        ```
+
+    **Key parameters:**
+
+    - `ASCEND_RT_VISIBLE_DEVICES=0`, `--tensor-parallel-size 1`, and `--data-parallel-size 1` run a single model instance on the selected NPU without tensor or data parallelism. Adjust the visible device according to the available NPUs.
+    - `VLLM_USE_V2_MODEL_RUNNER=1` selects Model Runner V2 for this deployment example.
+    - `--quantization ascend` enables Ascend quantization for the W8A8 MXFP8 model.
+    - `--safetensors-load-strategy lazy` uses lazy loading for Safetensors model weights.
+    - `--max-model-len 135168` sets the maximum input plus output length for a single request. Ensure enough KV cache is available for the required context length.
+    - `--max-num-seqs 128` sets the maximum number of active requests scheduled concurrently. Reduce it if KV cache or graph capture memory is insufficient.
+    - `--max-num-batched-tokens 16384` limits the number of tokens processed in one scheduler step. A larger value can improve prefill efficiency but consumes more activation memory.
+    - `--gpu-memory-utilization 0.90` sets the fraction of device memory available to the model executor when calculating KV cache capacity. Reduce it if startup or runtime requests report OOM.
+    - `--speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3}'` enables Qwen3.5-style MTP speculative decoding with three draft tokens per step. Tune the number of speculative tokens based on acceptance rate, request concurrency, and measured latency and throughput.
+    - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` enables full decode ACLGraph replay to reduce dispatch overhead.
+    - `--additional-config` with `"enable_cpu_binding":true` enables Ascend-native CPU binding. `"enable_fused_mc2":2` selects the CANN MegaMoe path when the required operator dependencies and model configuration support it.
+    - `ascend_compilation_config` enables npugraph_ex and static kernel generation. `"enable_super_kernel":false` explicitly disables Super Kernel; keep this setting because omitting it when `enable_static_kernel` is set makes it inherit the static kernel setting.
+    - `--enable-prefix-caching` enables reuse of cached KV blocks for requests with shared prefixes. Monitor KV cache usage for long-context workloads.
 
 === "Atlas A2 inference products / Atlas A3 inference products"
 
@@ -223,35 +286,52 @@ Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-3
 
     ```shell
     export VLLM_USE_MODELSCOPE=True
-    export ASCEND_RT_VISIBLE_DEVICES=0,1
+    export ASCEND_RT_VISIBLE_DEVICES=0
+    export VLLM_SERVER_DEV_MODE=1
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=1
+    export OPENBLAS_NUM_THREADS=1
+    export TASK_QUEUE_ENABLE=1
     
     # Ensure the model path matches the directory recorded during download
     vllm serve Eco-Tech/Qwen3.6-35B-A3B-w8a8 \
       --host 127.0.0.1 \
       --port 8080 \
-      --tensor-parallel-size 2 \
+      --trust-remote-code \
+      --safetensors-load-strategy lazy \
+      --tensor-parallel-size 1 \
+      --data-parallel-size 1 \
+      --max-model-len 135168 \
+      --max-num-seqs 128 \
+      --max-num-batched-tokens 16384 \
       --gpu-memory-utilization 0.90 \
-      --max-num-seqs 16 \
+      --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3}' \
       --served-model-name qwen3.6 \
       --dtype float16 \
-      --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex":false}}' \
-      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,8]}' \
+      --additional-config '{"enable_cpu_binding":true}' \
+      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
       --quantization ascend \
-      --max-model-len 20480 \
-      --no-enable-prefix-caching
+      --enable-prefix-caching
     ```
 
     **Key parameters:**
 
-    - `--tensor-parallel-size 2` maps the model across two Atlas inference devices. Adjust it together with `ASCEND_RT_VISIBLE_DEVICES` according to the available devices and memory.
+    - `ASCEND_RT_VISIBLE_DEVICES=0`, `--tensor-parallel-size 1`, and `--data-parallel-size 1` run a single model instance on the selected Atlas inference device without tensor or data parallelism.
+    - `VLLM_USE_V2_MODEL_RUNNER=1` selects Model Runner V2 for this deployment example.
+    - `--safetensors-load-strategy lazy` uses lazy loading for Safetensors model weights.
     - `--dtype float16` is used for Atlas 300I DUO to match the Atlas inference execution path.
-    - `--max-num-seqs 16` limits concurrent active requests to reduce KV cache and graph capture pressure on Atlas 300I DUO.
-    - `--gpu-memory-utilization` controls KV cache capacity. Reduce it if startup or runtime requests report OOM.
-    - `--additional-config` with `"ascend_compilation_config": {"enable_npugraph_ex": false}` is required because `enable_npugraph_ex` is not supported on Atlas 300I DUO.
-    - `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16]}'` enables decode ACLGraph replay and explicitly limits capture sizes for Atlas 300I DUO.
-    - `--no-enable-prefix-caching` is the default recommendation for this Atlas 300I DUO example to reduce memory pressure.
+    - `--max-model-len 135168` sets the maximum input plus output length for a single request. Ensure enough KV cache is available for the required context length.
+    - `--max-num-seqs 128` sets the maximum number of active requests scheduled concurrently. Reduce it if KV cache or graph capture memory is insufficient.
+    - `--max-num-batched-tokens 16384` limits the number of tokens processed in one scheduler step. A larger value can improve prefill efficiency but consumes more activation memory.
+    - `--gpu-memory-utilization 0.90` sets the fraction of device memory available to the model executor when calculating KV cache capacity. Reduce it if startup or runtime requests report OOM.
+    - `--additional-config '{"enable_cpu_binding":true}'` enables Ascend-native CPU binding to reduce CPU scheduling overhead.
+    - `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'` enables full decode ACLGraph replay to reduce dispatch overhead.
+    - `--enable-prefix-caching` enables reuse of cached KV blocks for requests with shared prefixes. Monitor KV cache usage for long-context workloads.
     - `--quantization ascend` enables Ascend quantization for the W8A8 model. Remove this option when deploying the BF16 model.
-    - To enable MTP speculative decoding, use --speculative_config '{"method": "mtp", "num_speculative_tokens": 1}'. We recommend setting num_speculative_tokens to 1. If your usage scenario involves fewer than two concurrent requests, it is recommended to enable MTP. Otherwise, it is recommended not to enable MTP.
+    - `--speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3}'` enables Qwen3.5-style MTP speculative decoding with three draft tokens per step. Tune the number of speculative tokens based on acceptance rate, request concurrency, and measured latency and throughput.
 
 Common Issues Tip: If the service fails to start, HBM is insufficient, or requests are not scheduled as expected, refer to [Public FAQs](../../faqs.md) first, and then check the model-specific FAQ in Section 10.
 
