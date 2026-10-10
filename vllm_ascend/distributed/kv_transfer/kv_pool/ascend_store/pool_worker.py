@@ -331,6 +331,8 @@ class KVPoolWorker:
         self.peer_tp_size = tp_mismatch_info.peer_tp_size
         self.effective_tp_size = tp_mismatch_info.effective_tp_size
         self.tp_mismatch = tp_mismatch_info.enabled
+        if self.tp_mismatch and self.vllm_config.kv_transfer_config.kv_connector_extra_config.get("kv_qos") is not None:
+            raise ValueError("request KV QoS does not support Store TP mismatch")
         if self.tp_mismatch:
             if self.use_sparse:
                 raise ValueError(
@@ -1348,7 +1350,12 @@ class KVPoolWorker:
                 key_list_c[:3],
             )
             load_get_start = time.perf_counter()
-            ret = self.m_store.get(key_list_c, addr_list_c, size_list_c)
+            if request.kv_priority is None:
+                ret = self.m_store.get(key_list_c, addr_list_c, size_list_c)
+            else:
+                ret = self.m_store.get_request(
+                    request.req_id, request.kv_priority, key_list_c, addr_list_c, size_list_c
+                )
             self._record_kv_connector_operation(
                 "load_get",
                 time.perf_counter() - load_get_start,

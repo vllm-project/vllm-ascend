@@ -157,6 +157,16 @@ class Backend(ABC):
     def batch_get_end(self, keys: list[str]) -> int:
         raise NotImplementedError(f"{type(self).__name__} does not support batch_get_end")
 
+    def put_request(self, request_id, priority, keys, addrs, sizes):
+        if priority is not None:
+            raise ValueError("backend does not support request KV QoS")
+        return self.put(keys, addrs, sizes)
+
+    def get_request(self, request_id, priority, keys, addrs, sizes):
+        if priority is not None:
+            raise ValueError("backend does not support request KV QoS")
+        return self.get(keys, addrs, sizes)
+
     @abstractmethod
     def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
         pass
