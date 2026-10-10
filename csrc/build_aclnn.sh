@@ -232,10 +232,8 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
     SOC_ARG="ascend950"
 else
-    # others
-    # currently, no custom aclnn ops for other series
-    log "no custom ACLNN ops configured for SOC_VERSION=${SOC_VERSION}; skip build_aclnn"
-    exit 0
+    log "ERROR: Unsupported SOC_VERSION=${SOC_VERSION:-<unset>}. Expected a lowercase SOC_VERSION starting with ascend310, ascend910b, ascend910_93, or ascend950." >&2
+    exit 1
 fi
 
 log_selected_ops
