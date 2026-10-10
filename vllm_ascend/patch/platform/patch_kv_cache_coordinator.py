@@ -186,6 +186,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             )
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )
+        self.group_block_sizes = tuple(manager.block_size for manager in self.single_type_managers)
         # vLLM #53614 aligns exported Mamba checkpoints with EAGLE replay.
         if use_eagle:
             for manager in self.single_type_managers:
@@ -257,6 +258,23 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         if self.dcp_world_size > 1:
             block_size *= self.dcp_world_size
         return block_size
+
+    def get_replay_boundaries(self, request) -> tuple[int, ...]:
+        boundaries = super().get_replay_boundaries(request)
+        if not self.eagle_group_ids or self.enable_partial_hash_hits:
+            return boundaries
+        # The lookup drops one physical EAGLE page, which can be smaller
+        # than the joint hit alignment. Retain that reachable checkpoint too;
+        # subtracting an entire scheduler block loses it under sparse retention.
+        peek_size = max(self.group_block_sizes[gid] for gid in self.eagle_group_ids)
+        alignment = self._cache_hit_alignment_tokens
+        if peek_size >= alignment:
+            return boundaries
+        reachable = {
+            max(0, (length - peek_size) // alignment * alignment)
+            for length in (request.num_prompt_tokens - 1, request.num_prompt_tokens)
+        }
+        return tuple(sorted(set(boundaries) | reachable))
 
     def verify_and_split_kv_cache_groups(self) -> None:
         """
