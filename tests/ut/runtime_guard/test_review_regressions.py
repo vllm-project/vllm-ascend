@@ -1581,7 +1581,8 @@ def test_v19d_dump_kv_queues_jobs_on_leader():
     job = guard.queue_kv_dump.call_args[0][0]
     assert job["req_id"] == "r1"
     assert job["incident_type"] == "token_repeat"
-    assert "block_ids" not in job
+    # Arm freezes block_ids so end-of-wave D2H still works after finish/reap.
+    assert job["block_ids"] == [0]
 
 
 def test_v19e_queue_fail_refunds_quota():
@@ -1602,8 +1603,8 @@ def test_v19e_queue_fail_refunds_quota():
         kv_reader,
         quota,
     )
-    # Drop queue so _queue_kv_dumps returns False after try_consume.
-    ctx.runner.runtime_guard = SimpleNamespace()
+    # queue_kv_dump returns False after try_consume → refund.
+    ctx.runner.runtime_guard = SimpleNamespace(queue_kv_dump=lambda *_a, **_k: False)
     with patch(
         "vllm_ascend.observability.runtime_guard.action.actions.runner_tp_rank",
         return_value=0,

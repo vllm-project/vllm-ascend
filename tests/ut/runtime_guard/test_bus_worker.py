@@ -140,6 +140,8 @@ def test_async_merged_bus_submit_then_drain_applies_config():
         _pending_merged_bus_dump_jobs=[],
         _pending_merged_bus_can_dump=False,
         _pending_merged_bus_is_first=False,
+        _bus_wave_seq=0,
+        _merged_bus_warn_ts=0.0,
         _refund_dropped_dump_arms=MagicMock(),
         _drop_pending_dump_jobs=MagicMock(),
     )
@@ -204,6 +206,8 @@ def test_async_merged_bus_warns_when_drain_waits():
         _pending_merged_bus_dump_jobs=[],
         _pending_merged_bus_can_dump=False,
         _pending_merged_bus_is_first=False,
+        _bus_wave_seq=0,
+        _merged_bus_warn_ts=0.0,
         _refund_dropped_dump_arms=MagicMock(),
         _drop_pending_dump_jobs=MagicMock(),
     )

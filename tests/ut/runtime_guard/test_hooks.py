@@ -132,16 +132,6 @@ def test_step_flushes_on_body_exception():
     guard.end_of_wave_sync.assert_called_once_with(allow_manual_dump=False)
 
 
-def test_step_guardless_keeps_bare_path():
-    runner = _StepRunner(None)
-    runner.execute_model_state = object()
-    so = _scheduler_output()
-
-    assert runner.execute_model(so) == "output"
-    assert runner.body_ran
-    assert getattr(runner, _PENDING_SO_ATTR) is so
-
-
 class _IdleWorker:
     """Minimal stand-in exercising runtime_guard_idle_step on the worker."""
 
@@ -267,13 +257,3 @@ def test_sample_tokens_passes_accepted_token_nums_fn_for_spec():
     runner.sample_tokens(None)
     # Full data flow: body postprocess -> wrap stash -> nums_fn.
     assert get_postprocess_sampled(runner) == ([[7]], [1])
-
-
-def test_sample_tokens_guardless_is_bare_method_call():
-    runner = _SampleRunner(None)
-
-    out = runner.sample_tokens("grammar")
-    assert out.sampled_token_ids == [[7]]
-    # Guardless path is a bare method call — zero guard work, no stash.
-    assert runner.order == ["body", "postprocess"]
-    assert get_postprocess_sampled(runner) == (None, None)

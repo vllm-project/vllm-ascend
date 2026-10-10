@@ -19,15 +19,14 @@
 
 Goal: keep ModelRunner/Worker free of runtime_guard types and ``_rg_*``
 protocol methods where practical, and keep every decorator pure
-observability — deleting any of them must leave the functional path
-byte-identical (worker ``execute_dummy_batch`` pattern): the decorated
-methods keep their original functional bodies, and the decorators only
-add wave sync / sample-phase orchestration around them.
+observability — the decorated methods keep their original functional bodies,
+and the decorators only add wave sync / sample-phase orchestration around them.
 
 v2 uses :func:`runtime_guard_step` on ``execute_model`` and
 :func:`runtime_guard_sample_tokens` on ``sample_tokens`` (pre-sample logits
 wrap + SamplePhaseResult assembly + async after-sample wrap). ModelRunner
-v1 is **not** wired — runtime_guard is v2-only.
+v1 is **not** wired — runtime_guard is v2-only. Decorated v2 runners always
+have ``runtime_guard`` from ``RuntimeGuardProcessor.bind``.
 
 Decorator placement: guard step decorators must sit INSIDE
 ``@torch.inference_mode()`` so wave sync stays in that context. The worker
@@ -68,10 +67,8 @@ def runtime_guard_step(execute_model_fn):
 
     @functools.wraps(execute_model_fn)
     def wrapper(self, scheduler_output, *args, **kwargs):
-        guard = getattr(self, "runtime_guard", None)
+        guard = self.runtime_guard
         setattr(self, _SCHEDULER_OUTPUT_ATTR, scheduler_output)
-        if guard is None:
-            return execute_model_fn(self, scheduler_output, *args, **kwargs)
         dummy_run = kwargs.get("dummy_run", args[1] if len(args) > 1 else False)
         allow_manual_dump = int(getattr(scheduler_output, "total_num_scheduled_tokens", 0) or 0) > 0
         guard.sync_for_step(scheduler_output=scheduler_output, allow_manual_dump=allow_manual_dump)
@@ -90,13 +87,13 @@ def runtime_guard_idle_step(dummy_batch_fn):
 
     Same lockstep gate as ``runtime_guard_step`` — do not soft-fail
     ``sync_for_step`` (busy ranks take the same collectives). Guard lives on
-    ``self.model_runner`` (v2).
+    ``self.model_runner`` when v2 is bound; v1 runners have no guard yet.
     """
 
     @functools.wraps(dummy_batch_fn)
     def wrapper(self, *args, **kwargs):
-        runner = getattr(self, "model_runner", None)
-        guard = getattr(runner, "runtime_guard", None)
+        # Worker may still construct unwired v1 runners — skip when unbound.
+        guard = getattr(self.model_runner, "runtime_guard", None)
         if guard is not None:
             guard.sync_for_step(allow_manual_dump=False)
         return dummy_batch_fn(self, *args, **kwargs)
@@ -133,23 +130,14 @@ def _build_sample_phase_result(runner: Any, output: Any, input_batch: Any, finis
 def runtime_guard_sample_tokens(sample_tokens_fn):
     """Guard orchestration for v2 ``sample_tokens`` — pure observability.
 
-    Worker pattern: the decorated method keeps its original functional body
-    (PCP swap, spec-PP draft broadcast), so deleting this decorator restores
-    the pre-guard method byte-identically. This wrapper only adds guard
-    orchestration:
-
-    - guardless → bare method call (zero guard work);
-    - guard → ``run_sample_phase`` around the method, reading the
-      ``postprocess_sampled`` stash (``note_postprocess_sampled``)
-      and the pre-pop ``execute_model_state`` peek.
+    The decorated method keeps its original functional body (PCP swap, spec-PP
+    draft broadcast). This wrapper adds ``run_sample_phase`` around it, reading
+    the ``postprocess_sampled`` stash and the pre-pop ``execute_model_state`` peek.
     """
 
     @functools.wraps(sample_tokens_fn)
     def wrapper(self, grammar_output):
-        guard = getattr(self, "runtime_guard", None)
-        if guard is None:
-            return sample_tokens_fn(self, grammar_output)
-
+        guard = self.runtime_guard
         note_postprocess_sampled(self, None, None)  # clear prior-step stash
         # Peek before the method pops execute_model_state (inside the parent
         # sample_tokens). The method's PCP swap rewrites input_batch on
@@ -218,10 +206,9 @@ def check_before_sample_from_batch(
     input_batch: Any,
 ) -> None:
     """Pack batch fields and call :meth:`RuntimeGuardProcessor.check_before_sample`."""
-    runner = getattr(guard, "runner", None)
     logits_indices = getattr(input_batch, "logits_indices", None)
     if logits_indices is None:
-        logits_indices = getattr(runner, "logits_indices", None)
+        logits_indices = getattr(guard.runner, "logits_indices", None)
     guard.check_before_sample(
         logits=logits,
         logits_indices=logits_indices,
@@ -289,10 +276,7 @@ def wrap_postprocess_sampled(runner: Any) -> Iterator[None]:
     bound method for the duration of the sample phase so the runner body
     keeps zero guard footprint (worker pattern). Restored in ``finally``.
     """
-    orig = getattr(runner, "postprocess_sampled", None)
-    if orig is None:
-        yield
-        return
+    orig = runner.postprocess_sampled
     # Prefer deleting the instance override so the class method is restored.
     had_instance_attr = "postprocess_sampled" in getattr(runner, "__dict__", {})
 

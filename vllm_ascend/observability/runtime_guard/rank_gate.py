@@ -31,8 +31,6 @@ def anomaly_check_rank_skip_reason(runner: Any) -> str | None:
     executor path. Forcing ``get_output()`` on those ranks to spread detectors
     stalls the next ``execute_model`` TP collective.
     """
-    if runner is None:
-        return "no runner"
     try:
         if not get_pp_group().is_last_rank:
             return "not last PP rank"

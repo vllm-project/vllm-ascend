@@ -352,7 +352,7 @@ def _resolve_dump_targets(
         if rid == str(ctx.incident.req_id or "") and ctx.incident.block_ids:
             bids = list(ctx.incident.block_ids)
         else:
-            bids = list(block_ids_for_request(ctx.runner, rid, req_idx) or [])
+            bids = list(block_ids_for_request(ctx.runner, rid, req_idx))
         targets.append((rid, bids))
     return targets
 
@@ -422,9 +422,7 @@ def _queue_kv_dumps(
     """
     if runner_tp_rank(ctx.runner) != 0:
         return set()
-    queue = getattr(getattr(ctx.runner, "runtime_guard", None), "queue_kv_dump", None)
-    if not callable(queue):
-        return set()
+    queue = ctx.runner.runtime_guard.queue_kv_dump
     import uuid
 
     from vllm_ascend.observability.runtime_guard.state import RequestGuardStore
@@ -544,11 +542,10 @@ class ActionExecutor:
     ) -> tuple[list[str], dict[str, Any]]:
         if override is not None:
             names = list(override)
-            overrides = self._runtime_config.detector_section(incident_type) or {}
-            return names, dict(overrides) if isinstance(overrides, dict) else {}
+            return names, dict(self._runtime_config.detector_section(incident_type))
 
         defaults = self._runtime_config.actions_default_on_trigger()
-        det = self._runtime_config.detector_section(incident_type) or {}
+        det = self._runtime_config.detector_section(incident_type)
         raw = det.get("on_trigger")
         if raw is None:
             names = list(defaults or _DEFAULT_ACTIONS)

@@ -63,13 +63,20 @@ def _bind(cfg: RuntimeConfig, *, runner: MagicMock | None = None) -> RuntimeGuar
         self.quota = MagicMock()
         self.wave_tracker = MagicMock()
         # Fields that end_of_wave_sync / drain read directly (no getattr defense).
-        self._bus_worker = None
+        self._bus_worker = MagicMock()
+        self._bus_worker.started = True
+        self._bus_worker.poll_ready.return_value = True
+        self._bus_worker.wait_result.return_value = None
         self._merged_bus_inflight = False
         self._pending_merged_bus_dump_jobs = []
         self._pending_merged_bus_can_dump = False
         self._pending_merged_bus_is_first = False
         self._kv_dump_jobs = []
         self._deferred_kv_dump_jobs = []
+        self._scheduler_output_for_step = None
+        self._last_input_batch = None
+        self._bus_wave_seq = 0
+        self._merged_bus_warn_ts = 0.0
         self._tokenizer = None
         self._tokenizer_failed = False
 

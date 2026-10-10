@@ -168,8 +168,6 @@ class LogitsFiniteDetector(ConfigBackedDetector):
         if logits.numel() == 0:
             return []
         runner = self._runner
-        if runner is None:
-            return []
 
         skip = set(skip_req_ids or set())
         if input_batch is None:

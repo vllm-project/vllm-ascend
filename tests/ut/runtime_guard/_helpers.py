@@ -49,8 +49,16 @@ def bare_processor(*, boom_detectors: bool = False) -> RuntimeGuardProcessor:
     p.quota = MagicMock()
     p._kv_dump_jobs = []
     p._deferred_kv_dump_jobs = []
+    p._scheduler_output_for_step = None
+    p._last_input_batch = None
     p._bus_worker = MagicMock()
     p._bus_worker.started = True
+    p._merged_bus_inflight = False
+    p._pending_merged_bus_dump_jobs = []
+    p._pending_merged_bus_can_dump = False
+    p._pending_merged_bus_is_first = False
+    p._bus_wave_seq = 0
+    p._merged_bus_warn_ts = 0.0
     # End-of-wave gate uses collectives; bare shells no-op it.
     p.runtime_config = MagicMock()
     p.end_of_wave_sync = MagicMock()  # type: ignore[method-assign]
@@ -96,6 +104,10 @@ def attach_bus_worker(proc: Any, *, name: str = "ut-bus") -> Any:
     proc._pending_merged_bus_dump_jobs = []
     proc._pending_merged_bus_can_dump = False
     proc._pending_merged_bus_is_first = False
+    if not hasattr(proc, "_bus_wave_seq"):
+        proc._bus_wave_seq = 0
+    if not hasattr(proc, "_merged_bus_warn_ts"):
+        proc._merged_bus_warn_ts = 0.0
     # Bind mixin helpers used by SimpleNamespace stand-ins.
     for method_name in (
         "_prepare_merged_bus_locals",

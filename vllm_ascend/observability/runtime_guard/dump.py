@@ -236,7 +236,7 @@ def block_ids_for_request(
     end-of-wave dump often has no live ``input_batch``. Fall back to persistent
     ``req_states`` + ``runner.block_tables`` (BUG-4).
     """
-    if not req_id or runner is None:
+    if not req_id:
         return []
 
     requests = getattr(runner, "requests", None)

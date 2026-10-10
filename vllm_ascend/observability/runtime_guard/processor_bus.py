@@ -113,15 +113,14 @@ class RuntimeGuardBusMixin:
         dump_due_local = False
         can_dump = should_dump_kv_on_rank()
         if can_dump:
-            dump_jobs = list(getattr(self, "_kv_dump_jobs", None) or [])
-            if hasattr(self, "_kv_dump_jobs"):
-                self._kv_dump_jobs.clear()
+            dump_jobs = list(self._kv_dump_jobs)
+            self._kv_dump_jobs.clear()
             try:
                 is_src = int(sync_group.rank_in_group) == 0
             except Exception:
                 is_src = bool(getattr(sync_group, "is_first_rank", False))
             dump_due_local = bool(is_src and dump_jobs)
-        elif hasattr(self, "_kv_dump_jobs"):
+        else:
             self._drop_pending_dump_jobs()
 
         try:
@@ -135,21 +134,12 @@ class RuntimeGuardBusMixin:
         ``DueBitsBusWorker``.
 
         Always asynchronous: returns ``False`` immediately; apply/stash happens in
-        :meth:`_drain_merged_bus` at end-of-wave (overlaps forward). Lazily
-        starts the worker if missing (tests that forgot ``attach_bus_worker``).
+        :meth:`_drain_merged_bus` at end-of-wave (overlaps forward).
         """
         config_due_local, dump_due_local, dump_jobs, can_dump, is_first = (
             RuntimeGuardBusMixin._prepare_merged_bus_locals(self, sync_group)
         )
-        worker = getattr(self, "_bus_worker", None)
-        if worker is None or not getattr(worker, "started", False):
-            from vllm_ascend.observability.runtime_guard.bus_worker import DueBitsBusWorker
-
-            if worker is None:
-                worker = DueBitsBusWorker()
-                self._bus_worker = worker
-            if not worker.started:
-                worker.start()
+        worker = self._bus_worker
 
         # Previous wave must already be drained at end-of-wave; belt-and-suspenders.
         RuntimeGuardBusMixin._drain_merged_bus(self, warn_if_pending=True)
@@ -158,8 +148,8 @@ class RuntimeGuardBusMixin:
         self._pending_merged_bus_dump_jobs = list(dump_jobs)
         self._pending_merged_bus_can_dump = can_dump
         self._pending_merged_bus_is_first = is_first
-        wave_seq = int(getattr(self, "_bus_wave_seq", 0)) + 1
-        self._bus_wave_seq = wave_seq
+        self._bus_wave_seq = int(self._bus_wave_seq) + 1
+        wave_seq = self._bus_wave_seq
         try:
             worker.submit(
                 MergedBusRequest(
@@ -199,13 +189,10 @@ class RuntimeGuardBusMixin:
         if not self._merged_bus_inflight:
             return False
         worker = self._bus_worker
-        if worker is None:
-            self._merged_bus_inflight = False
-            return False
 
         if warn_if_pending and not worker.poll_ready():
             now = time.monotonic()
-            if now - getattr(self, "_merged_bus_warn_ts", 0.0) >= _BUS_WARN_INTERVAL_S:
+            if now - self._merged_bus_warn_ts >= _BUS_WARN_INTERVAL_S:
                 self._merged_bus_warn_ts = now
                 logger.warning(
                     "[runtime_guard sync] merged bus not finished before end-of-wave; "
@@ -214,7 +201,7 @@ class RuntimeGuardBusMixin:
         try:
             result = worker.wait_result(timeout=timeout)
         except Exception:
-            jobs = list(self._pending_merged_bus_dump_jobs or [])
+            jobs = list(self._pending_merged_bus_dump_jobs)
             self._pending_merged_bus_dump_jobs = []
             self._pending_merged_bus_can_dump = False
             self._pending_merged_bus_is_first = False
@@ -223,7 +210,7 @@ class RuntimeGuardBusMixin:
             raise
 
         self._merged_bus_inflight = False
-        pending_jobs = list(self._pending_merged_bus_dump_jobs or [])
+        pending_jobs = list(self._pending_merged_bus_dump_jobs)
         can_dump = bool(self._pending_merged_bus_can_dump)
         is_first = bool(self._pending_merged_bus_is_first)
         self._pending_merged_bus_dump_jobs = []

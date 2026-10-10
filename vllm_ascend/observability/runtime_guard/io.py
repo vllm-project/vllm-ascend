@@ -86,10 +86,8 @@ def decode_token_ids(tokenizer: Any, token_ids: list[int]) -> str:
 def load_model_tokenizer(runner: Any) -> Any | None:
     """Load model tokenizer via ``cached_tokenizer_from_config``.
 
-    Returns ``None`` if runner/config missing; raises if the load itself fails.
+    Returns ``None`` if config missing; raises if the load itself fails.
     """
-    if runner is None:
-        return None
     from vllm.tokenizers import cached_tokenizer_from_config
 
     vllm_config = getattr(runner, "vllm_config", None)
@@ -103,8 +101,6 @@ def load_model_tokenizer(runner: Any) -> Any | None:
 
 
 def _raw_output_token_ids(runner: Any, req_id: str, req_idx: int | None) -> Any:
-    if runner is None:
-        return None
     input_batch = getattr(runner, "input_batch", None)
     req_output_token_ids = getattr(input_batch, "req_output_token_ids", None) if input_batch else None
     if req_output_token_ids is not None and req_idx is not None and 0 <= int(req_idx) < len(req_output_token_ids):
@@ -501,8 +497,6 @@ def _prompt_ids_from_scheduler_output(
             continue
         ids = getattr(req, "prompt_token_ids", None)
         if ids is None:
-            ids = getattr(req, "prefill_token_ids", None)
-        if ids is None:
             return None
         return [int(x) for x in ids]
     return None
@@ -518,8 +512,6 @@ def prompt_token_ids_for_request(
     st = RequestGuardStore.get().get_state(req_id)
     if st is not None and st.prompt_token_ids is not None:
         return list(st.prompt_token_ids)
-    if runner is None:
-        return None
 
     requests = getattr(runner, "requests", None)
     if isinstance(requests, dict):

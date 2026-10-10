@@ -140,8 +140,6 @@ class SpecAcceptanceDetector(ConfigBackedDetector):
                     "[runtime_guard: spec short] skip: detector.spec_acceptance.enabled=false in live runtime config"
                 )
             return []
-        if runner is None:
-            return []
         # Spec check needs speculative decoding, not only MambaSpec
         # (``need_accepted_tokens``). Plain MTP / Eagle also produce accept stats.
         if getattr(runner, "speculative_config", None) is None:

@@ -173,11 +173,14 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         self._tokenizer: Any | None = None
         self._tokenizer_failed = False
         self._scheduler_output_for_step: Any | None = None
+        self._last_input_batch: Any | None = None
         self._kv_dump_jobs: list[dict[str, Any]] = []
         # Auto dump jobs delivered at wave-head bcast; D2H runs at end-of-wave
         # (after prepare). Same-wave detector arms wait in ``_kv_dump_jobs``
         # until the *next* wave head (accepted +1 wave latency).
         self._deferred_kv_dump_jobs: list[dict[str, Any]] = []
+        self._bus_wave_seq = 0
+        self._merged_bus_warn_ts = 0.0
         self.detectors = DetectorManager(
             runtime_config=runtime_config,
             runner=runner,
@@ -231,7 +234,7 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         ``end_of_wave_sync(allow_manual_dump=…)``, not by this method.
         """
         logger.debug("[runtime_guard sync] enter stage=refresh_config")
-        prev_so = getattr(self, "_scheduler_output_for_step", None)
+        prev_so = self._scheduler_output_for_step
         so = scheduler_output if scheduler_output is not None else prev_so
         self._scheduler_output_for_step = so
         try:
@@ -348,8 +351,6 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
             if not req_id:
                 continue
             ids = getattr(req, "prompt_token_ids", None)
-            if ids is None:
-                ids = getattr(req, "prefill_token_ids", None)
             if ids is None:
                 continue
             store.set_prompt_token_ids(str(req_id), ids)

@@ -145,7 +145,7 @@ class RuntimeGuardDumpMixin:
                 exc,
             )
             raise
-        deferred = list(self._deferred_kv_dump_jobs or [])
+        deferred = list(self._deferred_kv_dump_jobs)
         self._deferred_kv_dump_jobs.clear()
         if deferred and should_dump_kv_on_rank():
             self._run_kv_dumps(deferred)

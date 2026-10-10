@@ -156,7 +156,7 @@ class RuntimeGuardReportMixin:
                 self.runner,
                 alert.req_id,
                 alert.req_idx,
-                input_batch=getattr(self, "_last_input_batch", None),
+                input_batch=self._last_input_batch,
             )
         if arm_wave is not None:
             alert.wave = arm_wave
@@ -175,7 +175,7 @@ class RuntimeGuardReportMixin:
             alert.req_idx,
             include_token_ids=include_ids,
             use_cache=False,
-            scheduler_output=getattr(self, "_scheduler_output_for_step", None),
+            scheduler_output=self._scheduler_output_for_step,
         )
         detail = io_mgr.merge_into_detail(detail, snap)
         detail = self._enrich_detail_with_block_meta(
@@ -210,7 +210,7 @@ class RuntimeGuardReportMixin:
         batch_rows = self._batch_request_io_rows()
         include_ids = self.runtime_config.report_save_sensitive_info()
         io_mgr = RequestIoSnapshotManager.get()
-        so = getattr(self, "_scheduler_output_for_step", None)
+        so = self._scheduler_output_for_step
         requests_detail: list[dict[str, Any]] = []
         for req_id, req_idx in batch_rows:
             snap = io_mgr.snapshot(
@@ -300,7 +300,7 @@ class RuntimeGuardReportMixin:
             self.runner,
             req_id,
             req_idx,
-            input_batch=getattr(self, "_last_input_batch", None),
+            input_batch=self._last_input_batch,
         )
         return out
 
@@ -308,7 +308,7 @@ class RuntimeGuardReportMixin:
         """``(req_id, req_idx)`` for every request currently in the local batch."""
         return iter_local_request_rows(
             self.runner,
-            getattr(self, "_scheduler_output_for_step", None),
+            self._scheduler_output_for_step,
         )
 
     def _get_detector_tokenizer(self) -> Any | None:
@@ -317,9 +317,8 @@ class RuntimeGuardReportMixin:
             return self._tokenizer
         if self._tokenizer_failed:
             return None
-        runner = getattr(self, "runner", None)
         try:
-            tok = load_model_tokenizer(runner)
+            tok = load_model_tokenizer(self.runner)
         except Exception as exc:
             self._tokenizer_failed = True
             logger.warning("[runtime_guard] tokenizer load failed error=%s", exc)
