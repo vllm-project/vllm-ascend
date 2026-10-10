@@ -311,8 +311,7 @@ if("${ASCEND_OP_NAME}" STREQUAL "all_gather_add")
     list(APPEND OP_DIR_LIST ${CMAKE_CURRENT_SOURCE_DIR}/examples/mc2/${ASCEND_OP_NAME})
 endif()
 
-list(APPEND OP_LIST ${COMPILED_OPS})
-list(APPEND OP_DIR_LIST ${COMPILED_OP_DIRS})
+append_compiled_ops(OP_LIST OP_DIR_LIST)
 
 if(ENABLE_TEST)
     foreach (OP_DIR ${OP_DIR_LIST})

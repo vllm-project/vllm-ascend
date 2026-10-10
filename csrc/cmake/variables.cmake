@@ -29,10 +29,6 @@ add_library(${OPHOST_NAME}_aclnn_exclude_headers INTERFACE)
 # interface, 用于收集ops proto头文件
 add_library(${GRAPH_PLUGIN_NAME}_proto_headers INTERFACE)
 
-# global variables
-set(COMPILED_OPS CACHE STRING "Compiled Ops" FORCE)
-set(COMPILED_OP_DIRS CACHE STRING "Compiled Ops Dirs" FORCE)
-
 # src path
 get_filename_component(OPS_TRANSFORMER_CMAKE_DIR           "${OPS_TRANSFORMER_DIR}/cmake"                               REALPATH)
 get_filename_component(OPS_TRANSFORMER_COMMON_INC          "${OPS_TRANSFORMER_DIR}/common/include"                      REALPATH)

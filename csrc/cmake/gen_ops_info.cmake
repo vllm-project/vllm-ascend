@@ -287,6 +287,7 @@ function(gen_ops_info_and_python)
     return()
   endif()
 
+  get_compiled_ops(COMPILED_OPS COMPILED_OP_DIRS)
   kernel_src_copy(
     TARGET ascendc_kernel_src_copy
     OP_LIST ${COMPILED_OPS}
