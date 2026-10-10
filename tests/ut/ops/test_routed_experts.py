@@ -18,11 +18,12 @@ class _FakeNpuTensor:
         shape,
         npu_format,
         *,
+        dtype=torch.float16,
         storage_offset=0,
         stride=None,
     ):
         self.shape = torch.Size(shape)
-        self.dtype = torch.float16
+        self.dtype = dtype
         self.layout = torch.strided
         self.device = torch.device("npu")
         self.npu_format = npu_format
@@ -227,6 +228,104 @@ def test_eplb_expert_buffer_rejects_stride_mismatch(monkeypatch):
         routed_experts_module._empty_like_preserving_npu_format(
             source,
         )
+
+
+@pytest.mark.parametrize("dtype", [torch.int8, torch.int32])
+@pytest.mark.parametrize("npu_format", [29, 50])
+def test_eplb_quantized_weight_buffer_keeps_nz_source_format(
+    monkeypatch,
+    dtype,
+    npu_format,
+):
+    source = _FakeNpuTensor((3, 4), npu_format, dtype=dtype)
+    allocations = []
+
+    def fake_get_npu_format(tensor):
+        return tensor.npu_format
+
+    def fake_empty_with_format(**kwargs):
+        allocations.append(kwargs)
+        # The CPU tensor stands in for the allocated NPU tensor.
+        return torch.empty(kwargs["size"], dtype=torch.float16)
+
+    monkeypatch.setattr(
+        routed_experts_module.torch_npu,
+        "get_npu_format",
+        fake_get_npu_format,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        routed_experts_module.torch_npu,
+        "empty_with_format",
+        fake_empty_with_format,
+        raising=False,
+    )
+
+    routed_experts_module._empty_like_preserving_npu_format(source)
+
+    assert allocations == [
+        {
+            "size": torch.Size((3, 4)),
+            "dtype": dtype,
+            "layout": torch.strided,
+            "device": torch.device("npu"),
+            "pin_memory": False,
+            "acl_format": npu_format,
+        }
+    ]
+
+
+@pytest.mark.parametrize("dtype", [torch.int8, torch.int32])
+def test_eplb_quantized_weight_rejects_nd_source(monkeypatch, dtype):
+    source = _FakeNpuTensor((3, 4), 2, dtype=dtype)
+
+    def fail_empty_with_format(**kwargs):
+        raise AssertionError("empty_with_format must not be called for an ND quantized source")
+
+    monkeypatch.setattr(
+        routed_experts_module.torch_npu,
+        "get_npu_format",
+        lambda tensor: tensor.npu_format,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        routed_experts_module.torch_npu,
+        "empty_with_format",
+        fail_empty_with_format,
+        raising=False,
+    )
+
+    with pytest.raises(ValueError, match="NZ format"):
+        routed_experts_module._empty_like_preserving_npu_format(source)
+
+
+def test_eplb_float_weight_allows_nd_source(monkeypatch):
+    source = _FakeNpuTensor((3, 4), 2)
+    allocations = []
+
+    def fake_get_npu_format(tensor):
+        return tensor.npu_format
+
+    def fake_empty_with_format(**kwargs):
+        allocations.append(kwargs)
+        return torch.empty(kwargs["size"], dtype=kwargs["dtype"])
+
+    monkeypatch.setattr(
+        routed_experts_module.torch_npu,
+        "get_npu_format",
+        fake_get_npu_format,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        routed_experts_module.torch_npu,
+        "empty_with_format",
+        fake_empty_with_format,
+        raising=False,
+    )
+
+    routed_experts_module._empty_like_preserving_npu_format(source)
+
+    assert allocations[0]["acl_format"] == 2
 
 
 def test_get_expert_weights_rejects_unsupported_quantization():

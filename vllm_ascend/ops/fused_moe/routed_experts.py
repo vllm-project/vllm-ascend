@@ -46,7 +46,7 @@ from vllm_ascend.ops.fused_moe.moe_comm_method import (
 )
 from vllm_ascend.ops.fused_moe.moe_utils import get_moe_num_logical_experts
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
 
 
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
@@ -361,6 +361,20 @@ def _empty_like_preserving_npu_format(
     **kwargs,
 ) -> torch.Tensor:
     """Allocate an EPLB buffer with the source tensor's NPU storage format."""
+    # EPLB transfer for quantized expert weights (integer payloads such as
+    # int8/int32) is only supported from the NZ storage format, while float
+    # weights may be ND or NZ. Fail fast when a quantized payload is still
+    # in ND; allocating an ND buffer here would silently break the transfer.
+    if tensor.device.type == "npu" and not tensor.dtype.is_floating_point:
+        source_format = int(torch_npu.get_npu_format(tensor))
+        if source_format == ACL_FORMAT_FRACTAL_ND:
+            raise ValueError(
+                "EPLB requires quantized expert weights to be stored in the NZ "
+                f"format before buffer allocation, but got a {tensor.dtype} "
+                "tensor in ND format. Cast the expert weights to NZ (e.g. via "
+                "maybe_trans_nz) after loading."
+            )
+
     target_dtype = kwargs.get("dtype") or tensor.dtype
     target_layout = kwargs.get("layout") or tensor.layout
     target_device = kwargs.get("device") or tensor.device
