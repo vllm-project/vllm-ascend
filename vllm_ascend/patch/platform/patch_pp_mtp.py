@@ -268,6 +268,16 @@ def _patch_scheduler_update_from_output() -> None:
                 if req_id in scheduler_output.num_scheduled_tokens
             }
 
+        # Snapshot per-request output token counts before the update so the
+        # fence release below can tell token-producing outputs apart from
+        # in-flight prefill/continuation outputs that carry none.
+        prev_num_output_tokens = {}
+        if use_pp_ipc_runtime_patch:
+            for req_id in scheduler_output.num_scheduled_tokens:
+                request = self.requests.get(req_id)
+                if request is not None:
+                    prev_num_output_tokens[req_id] = request.num_output_tokens
+
         engine_core_outputs = original_update_from_output(
             self,
             scheduler_output,
@@ -277,7 +287,16 @@ def _patch_scheduler_update_from_output() -> None:
         if use_pp_ipc_runtime_patch:
             for req_id in scheduler_output.num_scheduled_tokens:
                 request = self.requests.get(req_id)
-                if request is not None:
+                # Only a token-producing output may release the in-flight
+                # decode fence. Under VPP, outputs of older in-flight batches
+                # (e.g. intermediate prefill chunks or continuation no-ops)
+                # return after a later batch armed the fence; releasing it for
+                # any output lets the next decode run before its sampled token
+                # lands in `new_token_ids`, crashing the worker with an
+                # IndexError in `_update_states` (empty list indexed at -1).
+                if request is not None and (
+                    request.num_output_tokens > prev_num_output_tokens.get(req_id, 0)
+                ):
                     request.next_decode_eligible_step = 0
 
         if not use_pp_mtp_runtime_patch:
