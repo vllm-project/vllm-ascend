@@ -23,7 +23,9 @@ from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.distributed.eplb import eplb_communicator, eplb_state, hixl_compat
 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbLayerState, AscendEplbState, refresh_model_routing_tables
 from vllm_ascend.ops.fused_moe.eplb import map_to_physical
+from vllm_ascend.utils import adapt_patch
 from vllm_ascend.worker import worker as worker_module
+from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
 
 
 class _ExpertLayer(torch.nn.Module):
@@ -102,6 +104,8 @@ def _migrate_last_slot(state, rank):
 
 
 def _lifecycle_worker(rank, port, binding):
+    # Match NPUWorker initialization, including the upstream event adaptation.
+    adapt_patch()
     torch.npu.set_device(rank)
     if binding == "ctypes":
         eplb_communicator._resolve_hixl_module = lambda: hixl_compat
@@ -122,6 +126,7 @@ def _lifecycle_worker(rank, port, binding):
     )
     allocator = CaMemAllocator.get_instance()
     with (
+        torch_cuda_wrapper(),
         patch.object(eplb_state, "get_ep_group", return_value=group),
         patch.object(eplb_state, "get_eplb_group", return_value=group),
         patch.object(upstream_state, "get_ep_group", return_value=group),
