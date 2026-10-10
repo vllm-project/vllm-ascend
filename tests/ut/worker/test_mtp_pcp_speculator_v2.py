@@ -746,7 +746,8 @@ def test_graph_prefill_refreshes_captured_cache_buffers(attn_architecture: str) 
 
 
 @pytest.mark.parametrize("attn_architecture", ["GQA", "MLA"])
-def test_sharded_target_graph_prefill_uses_global_query_width(attn_architecture: str) -> None:
+@pytest.mark.parametrize("target_has_padding", [False, True])
+def test_sharded_target_graph_prefill_uses_global_query_width(attn_architecture: str, target_has_padding: bool) -> None:
     speculator = object.__new__(AscendMTPSpeculator)
     speculator.replicated_pcp = True
     speculator.pcp_manager = SimpleNamespace(is_decode_sharded=True)
@@ -755,7 +756,7 @@ def test_sharded_target_graph_prefill_uses_global_query_width(attn_architecture:
     batch.is_dummy = False
     batch.num_reqs, batch.num_tokens = 1, 4
     batch.query_start_loc_np = np.array([0, 4], dtype=np.int32)
-    batch.seq_lens_cpu_upper_bound = torch.tensor([9, 99], dtype=torch.int32)
+    batch.seq_lens_cpu_upper_bound = torch.tensor([9, 99] if target_has_padding else [9], dtype=torch.int32)
     speculator.input_batch = batch
     speculator.block_tables = MagicMock()
     speculator.kv_cache_config = object()
@@ -775,6 +776,8 @@ def test_sharded_target_graph_prefill_uses_global_query_width(attn_architecture:
     torch.testing.assert_close(kwargs["seq_lens_cpu_upper_bound"], torch.tensor([9, 0], dtype=torch.int32))
     assert kwargs["num_reqs"] == 2
     assert kwargs["batch_desc"].num_tokens == 8
+    np.testing.assert_array_equal(batch.query_start_loc_np, [0, 4])
+    assert batch.seq_lens_cpu_upper_bound.tolist() == ([9, 99] if target_has_padding else [9])
     build_slots.assert_called_once()
 
 
