@@ -93,6 +93,7 @@ from vllm_ascend.utils import (
     enable_sfa,
     enable_sfa_dcp_replicated_indexer,
     get_kv_cache_tensor_layers,
+    is_c8_mxfp_kv_quant,
     is_hidden_state_cache_spec,
     kv_cache_spec_uses_packed_sfa_main_cache,
 )
@@ -877,8 +878,8 @@ def _allocate_kv_cache(
     Initialize the KV cache buffer with the correct size. The buffer needs to be
     reshaped to the desired shape before being used by the models.
 
-    FullAttention caches use a combined allocation for block-strided K/V
-    views. Specialized caches keep their existing allocation layouts.
+    Unpadded pure-GQA caches use separate contiguous K/V allocations.
+    Specialized and hybrid caches keep their existing allocation layouts.
     KV transfer aligns each raw allocation to 2 MiB.
 
     Args:
@@ -1155,6 +1156,12 @@ def _allocate_kv_cache(
             for layer_name in shared_names:
                 kv_cache_raw_tensors[layer_name] = _allocate_int8_cache_tensor(k_size, alignment, device)
         elif type(example_spec) is FullAttentionSpec and not enable_sfa(vllm_config):
+            model_config = getattr(vllm_config, "model_config", None)
+            use_contiguous_gqa = (
+                getattr(model_config, "is_hybrid", None) is False
+                and getattr(model_config, "use_mla", None) is False
+                and not is_c8_mxfp_kv_quant(vllm_config)
+            )
             for layer_name in shared_names:
                 layer_spec = layer_kv_cache_spec[layer_name]
                 layer_size = kv_cache_config.num_blocks * layer_spec.page_size_bytes
@@ -1172,6 +1179,7 @@ def _allocate_kv_cache(
                     (backend is None or not backend.is_sparse())
                     and not use_dcp
                     and not requires_contiguous_pa_kv_cache(layer, vllm_config, layer_spec)
+                    and not (use_contiguous_gqa and layer_spec.page_size_bytes == layer_spec.real_page_size_bytes)
                 ):
                     kv_cache_raw_tensors[layer_name] = _allocate_int8_cache_tensor(layer_size, alignment, device)
                     continue
