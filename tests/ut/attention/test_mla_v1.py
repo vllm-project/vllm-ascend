@@ -2447,6 +2447,53 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(self.impl.W_UV.shape[1], self.impl.kv_lora_rank)
         self.assertEqual(self.impl.W_UV.shape[2], self.impl.v_head_dim)
 
+    def _make_kv_b_proj_layer(self):
+        layer = torch.nn.Linear(
+            self.impl.kv_lora_rank,
+            self.impl.num_heads * (self.impl.qk_nope_head_dim + self.impl.v_head_dim),
+            dtype=torch.float32,
+            bias=False,
+        )
+        layer.weight.requires_grad_(False)
+        layer.quant_method = MagicMock(spec=UnquantizedLinearMethod)
+        return layer
+
+    def _configure_kv_transfer(self, is_kv_consumer: bool, is_kv_producer: bool = False):
+        kv_transfer_config = MagicMock()
+        kv_transfer_config.is_kv_consumer = is_kv_consumer
+        kv_transfer_config.is_kv_producer = is_kv_producer
+        self.impl.vllm_config.kv_transfer_config = kv_transfer_config
+        self.impl.vllm_config.weight_transfer_config = None
+
+    @patch("torch_npu.npu_format_cast")
+    def test_process_weights_disposes_kv_b_proj_on_pure_kv_consumer(self, mock_format_cast):
+        layer = self._make_kv_b_proj_layer()
+        self.impl.kv_b_proj = layer
+        mock_format_cast.return_value = layer.weight
+        self.impl.enable_mlapo = False
+        self.impl.fa_quant_layer = False
+        self._configure_kv_transfer(is_kv_consumer=True)
+
+        self.impl.process_weights_after_loading(torch.bfloat16)
+
+        self.assertEqual(layer.weight.numel(), 0)
+
+    @patch("torch_npu.npu_format_cast")
+    def test_process_weights_keeps_kv_b_proj_on_hybrid_kv_node(self, mock_format_cast):
+        layer = self._make_kv_b_proj_layer()
+        self.impl.kv_b_proj = layer
+        mock_format_cast.return_value = layer.weight
+        self.impl.enable_mlapo = False
+        self.impl.fa_quant_layer = False
+        self._configure_kv_transfer(is_kv_consumer=True, is_kv_producer=True)
+
+        self.impl.process_weights_after_loading(torch.bfloat16)
+
+        expected_numel = (
+            self.impl.num_heads * (self.impl.qk_nope_head_dim + self.impl.v_head_dim) * self.impl.kv_lora_rank
+        )
+        self.assertEqual(layer.weight.numel(), expected_numel)
+
     @patch("torch_npu.npu_format_cast")
     def test_process_weights_after_loading_keeps_runtime_weight_address(self, mock_format_cast):
         """A weight update reload must refresh ``W_UV``/``W_UK_T`` in place.
