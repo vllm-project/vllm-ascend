@@ -85,20 +85,18 @@ class TransferStatus(IntEnum):
 
 
 class MemDesc(ctypes.Structure):
-    """Mirror of ``hixl::MemDesc``; ``remote_accessible`` defaults to true."""
+    """Mirror of CANN 9.1/9.2 ``hixl::MemDesc``, including zeroed reserved bytes."""
 
     _fields_ = [
         ("addr", ctypes.c_uint64),
         ("len", ctypes.c_uint64),
-        ("remote_accessible", ctypes.c_bool),
-        ("reserved", ctypes.c_uint8 * 127),
+        ("reserved", ctypes.c_uint8 * 128),
     ]
 
-    def __init__(self, address: int, size: int, remote_accessible: bool = True) -> None:
+    def __init__(self, address: int, size: int) -> None:
         super().__init__()
         self.addr = address
         self.len = size
-        self.remote_accessible = remote_accessible
 
 
 class TransferOpDesc(ctypes.Structure):

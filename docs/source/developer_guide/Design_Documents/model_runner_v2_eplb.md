@@ -5,7 +5,7 @@ Balancer (EPLB) control plane and adds a small Ascend-specific integration
 plane. Upstream code owns load windows, policy execution, placement state, and
 the rearrangement transaction. vLLM Ascend owns device routing, executed-load
 recording, quantized expert-weight views, and the asynchronous movement
-adapter (HIXL by default, Gloo CPU staging as fallback).
+adapter (HIXL by default, with explicit Gloo CPU staging available).
 
 This page describes the current asynchronous architecture. For the decisions
 behind this ownership model, see
@@ -38,7 +38,7 @@ flowchart LR
     E -->|"executed expert counts"| F["Load recorder"]
     F --> A
     A -->|"default-policy placement"| G["Quantization-owned weight views"]
-    G <-->|"HIXL direct transfer (Gloo fallback)"| H["Peer EP ranks"]
+    G <-->|"HIXL direct transfer"| H["Peer EP ranks"]
     G -->|"main-thread commit"| B
 ```
 
@@ -53,7 +53,7 @@ flowchart LR
 | Fused MoE EPLB helpers | Device lookup and post-compute physical load recording |
 | Quantization method | View of the expert tensors and metadata actually consumed by its kernel |
 | `AscendHixlEplbCommunicator` | Default upstream asynchronous communicator: receiver-initiated one-sided reads between NPU memory regions registered with the HIXL engine |
-| `AscendGlooEplbCommunicator` | Fallback communicator: upstream asynchronous contract implemented with CPU staging over Gloo |
+| `AscendGlooEplbCommunicator` | Explicit alternative: upstream asynchronous contract implemented with CPU staging over Gloo |
 | Platform patch | Capability adaptation, communicator selection consensus, and the narrow construction/commit hooks not exposed by upstream |
 
 The platform patch is an entry adapter. Runtime routing, state management, and
@@ -129,23 +129,20 @@ asynchronous communicator interface:
 
 - `AscendHixlEplbCommunicator` (default): receiver-initiated one-sided reads
   between NPU memory regions registered with the HIXL engine. Participating
-  expert weights and receive buffers are registered once per engine at
-  startup, whole allocator segments at a time.
-- `AscendGlooEplbCommunicator` (fallback): CPU-staged P2P over Gloo with
+  expert weights and receive buffers are registered as aligned, merged live tensor ranges. The communicator holds their underlying storage until deregistration succeeds. Unrelated allocator growth does not change these registrations.
+- `AscendGlooEplbCommunicator` (explicit selection): CPU-staged P2P over Gloo with
   pinned staging buffers.
 
-Communicator selection is a two-stage consensus. The config stage probes each
-rank locally and records a provisional choice; the EPLB controller then
+Communicator selection is a two-stage consensus. The config stage records a provisional HIXL choice; the EPLB controller then
 reduces the per-rank bindings (official `hixl` package, vllm_ascend ctypes
 binding, or none) across the EPLB group before the policy or state is built.
 The group uses HIXL only when every rank resolves the same binding class; a
-missing or differing binding degrades the whole group to Gloo and clamps the
-STAIR migration limits the user left unset (explicitly configured limits are
-preserved with a warning). An explicit `communicator` setting skips the
-consensus. HIXL initialization or runtime failures fail fast instead of
+missing or differing binding fails startup. Explicit HIXL selection also checks this consensus, while explicit Gloo selection bypasses it. HIXL initialization or runtime failures fail fast instead of
 falling back mid-flight: ranks may disagree on transfer progress and live
 slots may already be in transition (see
 [RFC #17572](https://github.com/vllm-project/vllm-ascend/issues/17572)).
+
+Initialization confirms engine creation, registration, metadata exchange, and connection across ranks. Explicit shutdown drains every submitted request, disconnects peers, confirms that incoming connections are gone, deregisters memory, and finalizes the engine. Failed cleanup retains the remaining handles and storage and blocks subsequent rebuild or unmap. Model reload and EPLB state replacement close the previous generation first. Sleep closes registration before physical unmap; partial wake waits for all registered allocation tags before rebuilding. Runtime weight offload/prefetch is rejected at configuration time.
 
 Only asynchronous EPLB is supported. The upstream worker publishes one layer
 at a time and waits for the model-runner thread to acknowledge consumption
