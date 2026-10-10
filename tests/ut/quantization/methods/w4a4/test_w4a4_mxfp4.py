@@ -209,6 +209,36 @@ class TestAscendW4A4MXFP4MoEMethod(TestBase):
         self.assertEqual(layer.w2_weight_scale.shape, (8, 6, 128, 2))
 
     @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.torch_npu")
+    @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.use_cann_megamoe", return_value=True)
+    @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.get_current_vllm_config")
+    def test_process_weights_megamoe_scale_lists_are_e8m0(self, mock_vllm, mock_use_cann_megamoe, mock_npu):
+        # npu_mega_moe validates the scale tensor dtype itself and rejects the raw uint8
+        # storage, so the per-expert lists must be tagged float8_e8m0fnu.
+        mock_npu.npu_format_cast.side_effect = lambda tensor, fmt, **kwargs: tensor.clone()
+        layer = nn.Module()
+        layer.w13_weight = nn.Parameter(torch.randint(0, 255, (8, 256, 64), dtype=torch.uint8), requires_grad=False)
+        layer.w2_weight = nn.Parameter(torch.randint(0, 255, (8, 128, 128), dtype=torch.uint8), requires_grad=False)
+        layer.w13_weight_scale = nn.Parameter(
+            torch.randint(0, 255, (8, 256, 4), dtype=torch.uint8), requires_grad=False
+        )
+        layer.w2_weight_scale = nn.Parameter(torch.randint(0, 255, (8, 128, 8), dtype=torch.uint8), requires_grad=False)
+        # Captured before process_weights_after_loading disposes the original parameters.
+        expected_w13 = layer.w13_weight_scale.data.clone().reshape(self.num_experts, 256, 2, 2)
+        expected_w2 = layer.w2_weight_scale.data.clone().reshape(self.num_experts, 128, 4, 2)
+
+        self.scheme.process_weights_after_loading(layer)
+
+        self.assertEqual(len(layer.cann_mega_moe_w13_weight_scale_list), self.num_experts)
+        self.assertEqual(len(layer.cann_mega_moe_w2_weight_scale_list), self.num_experts)
+        for index in range(self.num_experts):
+            w13_scale = layer.cann_mega_moe_w13_weight_scale_list[index]
+            self.assertEqual(w13_scale.dtype, torch.float8_e8m0fnu)
+            self.assertTrue(torch.equal(w13_scale.view(torch.uint8), expected_w13[index]))
+            w2_scale = layer.cann_mega_moe_w2_weight_scale_list[index]
+            self.assertEqual(w2_scale.dtype, torch.float8_e8m0fnu)
+            self.assertTrue(torch.equal(w2_scale.view(torch.uint8), expected_w2[index]))
+
+    @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.torch_npu")
     @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4._EXTRA_CTX")
     def test_apply_full_params(self, mock_ctx, mock_npu):
         tokens = 4
