@@ -330,7 +330,6 @@ class TestMooncakeHybrid(unittest.TestCase):
                 use_hybrid=True,
                 grouped_block_size=scheduler.grouped_block_size,
             )
-        scheduler.layerwise_max_transfer_blocks = 1
         scheduler.store_scheduler = MagicMock()
         scheduler.cache_coordinator = MagicMock()
 
@@ -347,6 +346,15 @@ class TestMooncakeHybrid(unittest.TestCase):
         scheduler.store_scheduler.batch_get_key_info.assert_not_called()
         keys = scheduler.store_scheduler.batch_is_readable.call_args_list[0].args[0]
         self.assertEqual(keys[0], "model@mooncake_hybrid_v1:layout@group:0@block:16@6831@0")
+
+    def test_hit_query_submits_all_keys_and_preserves_block_boundaries(self):
+        scheduler = object.__new__(KVPoolScheduler)
+        scheduler.store_scheduler = MagicMock()
+        scheduler.store_scheduler.batch_is_readable.return_value = [True, True, False]
+
+        self.assertEqual(scheduler._query_layerwise_block_hits([["k0", "k1"], ["k2"]]), [True, False])
+        self.assertEqual(scheduler._query_layerwise_block_hits([]), [])
+        scheduler.store_scheduler.batch_is_readable.assert_called_once_with(["k0", "k1", "k2"])
 
     def save_prefix(self, worker, last_chunk=True):
         request = ReqMeta(

@@ -281,9 +281,6 @@ class KVPoolWorker:
         self.cache_transfer_granularity = infer_cache_transfer_granularity(
             self.grouped_block_size, self.lcm_block_size, self.cacheable_group_ids
         )
-        self.h2d_stagger_us = int(extra_config.get("h2d_stagger_us", 0))
-        self.layerwise_max_transfer_blocks = int(extra_config.get("layerwise_max_transfer_blocks", 0))
-        self.layerwise_max_transfer_bytes = int(extra_config.get("layerwise_max_transfer_bytes", 0))
 
         logger.info(
             "use_hybrid: %s, use_mamba: %s, num_kv_cache_groups: %s, hash_block_size: %s, lcm_block_size: %s",
@@ -760,8 +757,6 @@ class KVPoolWorker:
                     self.num_layers,
                     self.layer_save_finished_events,
                     self.sync_save_events,
-                    self.layerwise_max_transfer_blocks,
-                    self.layerwise_max_transfer_bytes,
                     group_builders=self._build_group_layer_builders(),
                     put_started_keys=self._put_started_keys,
                     put_started_keys_lock=self._put_started_keys_lock,
@@ -803,9 +798,6 @@ class KVPoolWorker:
                     self.layer_save_finished_events,
                     self.sync_save_events,
                     self.num_layers,
-                    self.h2d_stagger_us,
-                    self.layerwise_max_transfer_blocks,
-                    self.layerwise_max_transfer_bytes,
                     group_builders=self._build_group_layer_builders(),
                     external_slot_release_waiter=self.external_slot_release_waiter,
                     save_failure_checker=(
@@ -2146,10 +2138,6 @@ class KVPoolWorker:
         # GVA groups use stage-local indices too; PP offsets apply to pool keys and remote addresses.
         return self.physical_layer_to_group_layers.get(local_layer, [(0, local_layer)])
 
-    def _layerwise_key_batches(self, keys: list[str]) -> list[list[str]]:
-        batch_size = self.layerwise_max_transfer_blocks if self.layerwise_max_transfer_blocks > 0 else max(1, len(keys))
-        return [keys[start : start + batch_size] for start in range(0, len(keys), batch_size)]
-
     def _filter_pool_existing_keys(self, keys: list[str]) -> list[str]:
         """Drop keys whose block is already readable in the pool.
 
@@ -2176,48 +2164,33 @@ class KVPoolWorker:
         if not callable(exists):
             return keys
 
-        missing: list[str] = []
-        for key_batch in self._layerwise_key_batches(keys):
-            try:
-                states = exists(key_batch)
-                if len(states) != len(key_batch):
-                    raise RuntimeError(
-                        "Block-key pool existence check returned unexpected number of states: "
-                        f"expected={len(key_batch)}, actual={len(states)}"
-                    )
-                missing.extend(key for key, state in zip(key_batch, states, strict=True) if int(state) != 1)
-            except Exception as exc:
-                logger.error(
-                    "Block-key pool existence check failed keys=%d error=%s; treating all as missing",
-                    len(key_batch),
-                    exc,
+        try:
+            states = exists(keys)
+            if len(states) != len(keys):
+                raise RuntimeError(
+                    "Block-key pool existence check returned unexpected number of states: "
+                    f"expected={len(keys)}, actual={len(states)}"
                 )
-                missing.extend(key_batch)
-        return missing
+            return [key for key, state in zip(keys, states, strict=True) if int(state) != 1]
+        except Exception as exc:
+            logger.error(
+                "Block-key pool existence check failed keys=%d error=%s; treating all as missing",
+                len(keys),
+                exc,
+            )
+            return keys
 
     def _start_layerwise_put_keys(self, keys: list[str], object_size: int) -> list[int]:
-        results: list[int] = []
-        for key_batch in self._layerwise_key_batches(keys):
-            results.extend(
-                require_aligned_batch_results(
-                    "batch_put_start",
-                    key_batch,
-                    self.m_store.batch_put_start(key_batch, [object_size] * len(key_batch)),
-                )
-            )
-        return results
+        if not keys:
+            return []
+        return require_aligned_batch_results(
+            "batch_put_start", keys, self.m_store.batch_put_start(keys, [object_size] * len(keys))
+        )
 
     def _start_layerwise_get_keys(self, keys: list[str]) -> list[int]:
-        results: list[int] = []
-        for key_batch in self._layerwise_key_batches(keys):
-            results.extend(
-                require_aligned_batch_results(
-                    "batch_get_start",
-                    key_batch,
-                    self.m_store.batch_get_start(key_batch),
-                )
-            )
-        return results
+        if not keys:
+            return []
+        return require_aligned_batch_results("batch_get_start", keys, self.m_store.batch_get_start(keys))
 
     def _layerwise_object_size_bytes(self) -> int:
         group_block_len = getattr(self, "group_block_len", {}).get(0, [])
@@ -2238,13 +2211,15 @@ class KVPoolWorker:
                 self._put_started_keys.difference_update(keys)
 
     def _end_layerwise_load_keys(self, keys: list[str]) -> None:
-        for key_batch in self._layerwise_key_batches(list(dict.fromkeys(keys))):
-            try:
-                result = self.m_store.batch_get_end(key_batch)
-                if result != 0:
-                    logger.error("Layerwise batch_get_end failed keys=%s result=%s", key_batch, result)
-            except Exception as exc:
-                logger.error("Layerwise batch_get_end raised keys=%s error=%s", key_batch, exc)
+        if not keys:
+            return
+        keys = list(dict.fromkeys(keys))
+        try:
+            result = self.m_store.batch_get_end(keys)
+            if result != 0:
+                logger.error("Layerwise batch_get_end failed keys=%s result=%s", keys, result)
+        except Exception as exc:
+            logger.error("Layerwise batch_get_end raised keys=%s error=%s", keys, exc)
 
     def _release_layerwise_requests_for_retry(self, req_ids: set[str]) -> None:
         with self._load_session_lock:

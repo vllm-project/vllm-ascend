@@ -32,6 +32,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     LayerLoadTask,
     LayerBatchReqMeta,
     LayerPoolKey,
+    LayerRangeReqMeta,
     LayerTransferTask,
     LoadSpec,
     ReqMeta,
@@ -278,6 +279,28 @@ class TestGVALayerTransferFailures(unittest.TestCase):
         thread.request_queue.put([task])
         return thread, store, save_finished, task
 
+    def test_save_submits_all_addresses_in_one_copy(self):
+        thread, store, _, task = self._make_sending_thread()
+        meta = thread.group_builders[0].build_addrs.return_value
+        meta.gvas_array = np.asarray([100, 200])
+        meta.addr_array = np.asarray([10, 20])
+        meta.size_array = np.asarray([16, 32])
+
+        thread._handle_request([task])
+
+        store.store.batch_copy.assert_called_once_with([100, 200], [10, 20], [16, 32], 0)
+        store.batch_write_finish.assert_called_once_with(["k0"], [0])
+
+    def test_save_copy_failure_does_not_publish_keys(self):
+        thread, store, save_finished, task = self._make_sending_thread()
+        store.store.batch_copy.return_value = -1
+
+        with self.assertRaisesRegex(RuntimeError, "save batch_copy failed"):
+            thread._handle_request([task])
+
+        store.batch_write_finish.assert_not_called()
+        self.assertFalse(save_finished.is_set())
+
     def test_write_finish_failure_does_not_complete_layer(self):
         thread, store, save_finished, task = self._make_sending_thread()
         store.batch_write_finish.return_value = [1]
@@ -287,6 +310,15 @@ class TestGVALayerTransferFailures(unittest.TestCase):
 
         self.assertEqual(thread.get_and_clear_finished_requests(), set())
         self.assertFalse(save_finished.is_set())
+
+    def test_empty_save_skips_copy(self):
+        thread, store, _, task = self._make_sending_thread()
+        meta = thread.group_builders[0].build_addrs.return_value
+        meta.gvas_array = meta.addr_array = meta.size_array = np.asarray([], dtype=np.int64)
+
+        thread._handle_request([task])
+
+        store.store.batch_copy.assert_not_called()
 
     def test_write_finish_uses_last_actual_save_task(self):
         thread, store, _, task = self._make_sending_thread()
@@ -335,8 +367,36 @@ class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
         )
         return thread, load_finished, save_finished, sync_events
 
+    def test_range_load_submits_complete_segments_and_tracks_failed_blocks(self):
+        thread, _, _, _ = self._make_thread()
+        thread.m_store.batch_copy_get.return_value = [25, -1]
+        meta = LayerRangeReqMeta(
+            req_ids=["r1"],
+            layer_id=0,
+            block_ids=[1, 2],
+            keys=["k0", "k1"],
+            all_buffers=[[100], [200]],
+            all_sizes=[[25], [5]],
+            all_offsets=[[1000], [2000]],
+        )
+        shared = SharedBlockData(
+            block_ids_arr=np.asarray([1, 2]), block_gvas_arr=None, req_ids=["r1"], is_last_chunks=[False]
+        )
+
+        thread._handle_range_request(meta, shared)
+
+        thread.m_store.batch_copy_get.assert_called_once_with(
+            ["k0", "k1"], [[100], [200]], [[25], [5]], [[1000], [2000]]
+        )
+        self.assertEqual(thread._invalid_block_ids, {2})
+        self.assertEqual(thread._active_load_indices, {0})
+
     def test_handle_request_does_not_clear_worker_owned_tasks(self):
         thread, _, _, _ = self._make_thread()
+        meta = thread.group_builders[0].build_addrs.return_value
+        meta.gvas_array = np.asarray([100, 200])
+        meta.addr_array = np.asarray([10, 20])
+        meta.size_array = np.asarray([16, 32])
         task = LayerTransferTask(
             layer_id=1,
             block_ranges=[],
@@ -358,6 +418,7 @@ class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
         thread._handle_request(load_task)
 
         self.assertEqual(transfer_tasks, [task])
+        thread.m_store.store.batch_copy.assert_called_once_with([100, 200], [10, 20], [16, 32], 1)
 
     def test_empty_reuse_gate_waits_for_non_saving_rank_compute(self):
         thread, load_finished, save_finished, sync_events = self._make_thread()
@@ -403,7 +464,7 @@ class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
             call_order.append(("h2d", 1))
             return 0
 
-        thread._batch_copy_with_limits = MagicMock(side_effect=record_h2d)
+        thread.m_store.store.batch_copy.side_effect = record_h2d
         task = LayerTransferTask(
             layer_id=1,
             block_ranges=[],
