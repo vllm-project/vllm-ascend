@@ -25,7 +25,10 @@ Please refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for
 | `Qwen3.6-27B` (BF16 version) | 1 950DT Products(96GB × 8) node or 1 Atlas 800 A3 (64GB × 16) node or 1 Atlas 800 A2 (64GB × 8) node or Atlas 300I DUO | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3.6-27B) \| [Hugging Face](https://huggingface.co/Qwen/Qwen3.6-27B) |
 | `Qwen3.6-27B-w8a8` (Quantized version) | 1 Atlas 800 A3 (64GB × 16) node or 1 Atlas 800 A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-27B-w8a8) |
 | `Qwen3.6-27B-w8a8-mxfp8` (Quantized version) | 1 950DT Products (96GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-27B-w8a8-mxfp8) |
+| `Qwen3.6-27B-w8a8c8-mxfp8` (Quantized version) | 1 950DT Products (96GB × 8) or 1 950PR Products (128GB × 8) node |  |
 | `Qwen3.6-27B-w8a8-310p`(Quantized version) | 1 Atlas 300I DUO | [ModelScope](https://modelscope.cn/models/Eco-Tech/Qwen3.6-27B-W8A8-310P) |
+
+- `Qwen3.6-27B-w8a8c8-mxfp8` (W8A8 MXFP8 quantization with C8 MXFP8 KV cache): For how to use it, see the [W8A8C8 FAQ](#q-how-do-i-use-the-w8a8c8-quantized-weights).
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
@@ -915,4 +918,13 @@ Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_mat
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md).
+For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md); the following covers model-specific issues.
+
+### Q: How do I use the W8A8C8 quantized weights?
+
+A: `Qwen3.6-27B-w8a8c8-mxfp8` is served in the same way as `Qwen3.6-27B-w8a8-mxfp8` (see [Section 5.1](#5-online-service-deployment)), except that `--kv-cache-dtype mxfp8` must be added to the startup command to enable the C8 (MXFP8 KV cache).
+
+- When C8 is enabled, the KV cache of the full-attention layers is stored as FP8 (E4M3) with E8M0 scales (K quantized dynamically per 32-element group, V with the static per-channel scale carried in the checkpoint), which roughly halves the KV cache memory compared with the BF16 KV cache. The GDN layers of the hybrid architecture are not affected, as their Mamba SSM cache is controlled separately by `--mamba-ssm-cache-dtype`.
+- With C8 enabled, the full-attention layers run on the dedicated QFA (quant flash attention) kernel that computes attention directly on the MXFP8 KV cache. Together with the halved cache footprint, this brings performance gains in long-sequence scenarios: the same HBM capacity fits a longer context or more concurrent requests, and long-context attention is accelerated by the quantized kernel.
+- With `--kv-cache-dtype mxfp8`, the KV cache uses 512-token kernel blocks. If `--block-size` is explicitly set to a value that is not a multiple of `512`, startup fails with an error; if it is not set, the block size defaults to `512`.
+- If the service starts successfully, the log line `[quantization] C8 MXFP8 KV cache enabled (--kv-cache-dtype mxfp8).` confirms that C8 is in effect.
