@@ -103,7 +103,7 @@ class SelectorTests(unittest.TestCase):
                                 m.LaunchSpec("FT_BASE", 64),
                             )
 
-    def test_ft16_requires_qualified_ub_and_initialized_p(self):
+    def test_wide_base16_requires_qualified_ub_and_initialized_p(self):
         m = self.mod
         for ub_bytes in (None, 196607):
             with self.subTest(ub_bytes=ub_bytes):

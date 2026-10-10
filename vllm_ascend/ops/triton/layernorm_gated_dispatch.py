@@ -2,7 +2,7 @@
 
 The selector deliberately knows nothing about torch, devices, or resource
 queries. The wrapper supplies the initialized vector-core count for
-single-group NPU tensors and None otherwise. Wide FT16 selection also
+single-group NPU tensors and None otherwise. Wide BASE16 selection also
 receives the optional UB value from the initialized-properties getter.
 """
 
@@ -16,12 +16,11 @@ class LaunchSpec(NamedTuple):
     block_m: int
 
 
-BM_SMALL = 16
+BM_BASE16 = 16
 BM_HOIST = 32
 HOIST_QUARTER_WAVE_DIVISOR = 4
-BM_FT16 = 16
-FT16_MAX_N_GROUP = 512
-FT16_MIN_UB_BYTES = 196_608
+BASE16_MAX_N_GROUP = 512
+BASE16_MIN_UB_BYTES = 196_608
 
 
 class DispatchConfigError(ValueError):
@@ -55,24 +54,24 @@ def _select_layernorm_launch(
     Multiple groups or a missing runtime_p select the upstream BASE64 launch.
     Single-group NPU callers obtain the count through the existing
     initialized-device-properties contract.
-    Wide FT16 selection additionally requires a known UB value at or above
+    Wide BASE16 selection additionally requires a known UB value at or above
     the minimum qualified resource budget.
     """
     _validate_inputs(M, N_group, ngroups, runtime_p, ub_bytes)
     if ngroups > 1 or runtime_p is None:
         return LaunchSpec("FT_BASE", 64)
 
-    # FT16 is qualified only for the tested BN256/512 envelope. The wrapper
-    # supplies UB from the existing initialized-properties getter only here.
+    # For wide groups, BASE16 is qualified only for the tested BN256/512
+    # envelope. The wrapper supplies UB from the existing properties getter.
     if N_group > 128:
-        if N_group <= FT16_MAX_N_GROUP and ub_bytes is not None and ub_bytes >= FT16_MIN_UB_BYTES:
-            return LaunchSpec("FT_BASE", BM_FT16)
+        if N_group <= BASE16_MAX_N_GROUP and ub_bytes is not None and ub_bytes >= BASE16_MIN_UB_BYTES:
+            return LaunchSpec("FT_BASE", BM_BASE16)
         return LaunchSpec("FT_BASE", 64)
 
     if N_group < 128:
-        return LaunchSpec("FT_BASE", BM_SMALL)
+        return LaunchSpec("FT_BASE", BM_BASE16)
 
     hoist_tiles = (M + BM_HOIST - 1) // BM_HOIST
     if HOIST_QUARTER_WAVE_DIVISOR * hoist_tiles >= runtime_p:
         return LaunchSpec("FT_PERSIST_HOIST", BM_HOIST)
-    return LaunchSpec("FT_BASE", BM_SMALL)
+    return LaunchSpec("FT_BASE", BM_BASE16)

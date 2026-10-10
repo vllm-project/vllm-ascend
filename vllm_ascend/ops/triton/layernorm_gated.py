@@ -10,7 +10,7 @@ import torch
 from vllm.triton_utils import tl, triton
 
 from vllm_ascend.ops.triton.layernorm_gated_dispatch import (
-    FT16_MAX_N_GROUP,
+    BASE16_MAX_N_GROUP,
     DispatchConfigError,
     _select_layernorm_launch,
 )
@@ -223,7 +223,7 @@ def layer_norm_fwd_npu(
     ub_bytes = None
     if ngroups == 1 and getattr(getattr(x, "device", None), "type", None) == "npu":
         runtime_p = get_vectorcore_num()
-        if 128 < group_size <= FT16_MAX_N_GROUP:
+        if 128 < group_size <= BASE16_MAX_N_GROUP:
             ub_bytes = get_ub_size_bytes()
     spec = _select_layernorm_launch(
         M,
