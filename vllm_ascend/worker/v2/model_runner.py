@@ -286,6 +286,7 @@ class NPUModelRunner(GPUModelRunner):
         # the dumper at the end of load_model).
         if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
             self._start_dump_data()
+        self.model_state.prompt_logprobs_worker = self.prompt_logprobs_worker
 
     def _restore_replicated_draft_target_states(self) -> None:
         """Restore target states consumed by a replicated PCP draft."""

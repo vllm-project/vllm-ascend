@@ -3389,7 +3389,7 @@ class NPUModelRunner(GPUModelRunner):
         self._decoder_replay_counts = None
         if self.parallel_config.data_parallel_size > 1:
             agreed = torch.zeros((2, self.parallel_config.data_parallel_size), dtype=torch.int32)
-            agreed[:, self.parallel_config.data_parallel_rank] = torch.tensor([trims, self._decoder_replay_num_tokens])
+            agreed[:, get_dp_group().rank_in_group] = torch.tensor([trims, self._decoder_replay_num_tokens])
             if not should_skip_dp_coordination():
                 dist.all_reduce(agreed, group=get_dp_group().cpu_group)
             trims = bool(agreed[0].any())
@@ -3407,7 +3407,7 @@ class NPUModelRunner(GPUModelRunner):
         layers.context_factory = self._decoder_replay_context
         logger.debug(
             "Decoder bounded replay DP%d: %d -> %d tokens (%d padded).",
-            self.parallel_config.data_parallel_rank,
+            get_dp_group().rank_in_group,
             num_tokens,
             self._decoder_replay_num_actual_tokens,
             self._decoder_replay_num_tokens,
