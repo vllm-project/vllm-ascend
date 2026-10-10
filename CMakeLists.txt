@@ -27,7 +27,9 @@ if(NOT ${TORCH_VERSION} VERSION_EQUAL "2.10.0")
 endif()
 
 set(RUN_MODE "npu" CACHE STRING "cpu/sim/npu")
-set(SOC_VERSION ${SOC_VERSION})
+if(NOT SOC_VERSION)
+    message(FATAL_ERROR "SOC_VERSION is not set. Pass -DSOC_VERSION=<soc>, e.g. ascend910b1 / ascend310p1 / ascend950...")
+endif()
 message(STATUS "Detected SOC version: ${SOC_VERSION}")
 
 if (NOT CMAKE_BUILD_TYPE)
