@@ -156,9 +156,6 @@ Choose one of the following methods to install `vllm` and `vllm-ascend`. PyTorch
         Clear the custom cache separately after verifying it is safe to
         remove, especially if it is shared by other builds.
 
-        Ensure that the selected CANN and `torch_npu` versions are compatible
-        with vLLM Ascend. Rebuilding cannot resolve version incompatibilities.
-
 Finally, handle `triton` and `triton-ascend` according to the hardware:
 
 === "A2 / A3 / 950DT Products"
