@@ -935,11 +935,15 @@ def _run_vllm_runner_dp_worker(conn, llm_kwargs: dict[str, Any], dp_rank: int, d
                 break
 
             result: Any
-            if command == "generate":
+            if command in ("generate", "generate_raw"):
                 req_outputs = llm.generate(
                     request["inputs"], sampling_params=request["sampling_params"], **request["kwargs"]
                 )
-                result = VllmRunner._finalize_generate_outputs(req_outputs)
+                result = (
+                    req_outputs if command == "generate_raw" else VllmRunner._finalize_generate_outputs(req_outputs)
+                )
+            elif command == "collective_rpc":
+                result = llm.collective_rpc(request["method"], **request["kwargs"])
             elif command == "generate_w_logprobs":
                 req_outputs = llm.generate(
                     request["inputs"], sampling_params=request["sampling_params"], **request["kwargs"]
@@ -1508,6 +1512,27 @@ class DPVllmRunner(VllmRunner):
         self._dp_parent_conns.clear()
         self._dp_processes.clear()
 
+    def collective_rpc(self, method: str, **kwargs: Any) -> list[Any]:
+        """Run a read-only worker check on every DP rank and its TP workers."""
+        try:
+            for conn in self._dp_parent_conns:
+                conn.send({"command": "collective_rpc", "method": method, "kwargs": kwargs, "indices": []})
+            results = []
+            for rank, conn in enumerate(self._dp_parent_conns):
+                if not conn.poll(self._dp_request_timeout):
+                    raise TimeoutError(f"Timed out waiting for data parallel worker {rank} during `{method}`")
+                message = conn.recv()
+                if message["status"] != "ok":
+                    raise RuntimeError(
+                        f"Data parallel worker {rank} failed during `{method}`:\n"
+                        f"{message.get('traceback', 'unknown error')}"
+                    )
+                results.append(message["result"])
+            return results
+        except Exception:
+            self._stop_data_parallel_workers()
+            raise
+
     def _dispatch_prompt_command(
         self,
         command: str,
@@ -1606,6 +1631,26 @@ class DPVllmRunner(VllmRunner):
     ) -> list[tuple[list[list[int]], list[str]]]:
         return self._dispatch_prompt_command(
             "generate",
+            prompts,
+            images=images,
+            videos=videos,
+            audios=audios,
+            sampling_params=sampling_params,
+            kwargs=kwargs,
+        )
+
+    def generate_raw(
+        self,
+        prompts: list[str] | list[torch.Tensor] | list[list[int]],
+        sampling_params: SamplingParams,
+        images: PromptImageInput | None = None,
+        videos: PromptVideoInput | None = None,
+        audios: PromptAudioInput | None = None,
+        **kwargs: Any,
+    ) -> list[RequestOutput]:
+        """Return complete RequestOutput objects in the original prompt order."""
+        return self._dispatch_prompt_command(
+            "generate_raw",
             prompts,
             images=images,
             videos=videos,
