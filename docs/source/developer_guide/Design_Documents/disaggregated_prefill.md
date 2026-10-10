@@ -103,3 +103,93 @@ Under non-symmetric PD scenarios, validate the P-to-D tp ratio against expected 
 - Heterogeneous P and D nodes are not supported, for example, running P nodes on A2 and D nodes on A3.
 
 - In non-symmetric TP configurations, only cases where the P nodes have a higher TP degree than the D nodes and the P TP count is an integer multiple of the D TP count are supported (i.e., P_tp > D_tp and P_tp % D_tp = 0).
+
+## Mooncake Connector V2 KV leases
+
+Renewable producer KV retention is enabled by default with a 480-second lease.
+Override it on P through `kv_connector_extra_config`:
+
+```json
+{"kv_lease_duration": 480}
+```
+
+The value must be a finite number of at least 6 seconds. Omission selects 480
+seconds; `null` is rejected. V2 always uses this lease for retention and no
+longer reads `VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT`. Upgrade P and D
+together when using renewal. The proxy must preserve `kv_lease_version` and
+`kv_lease_duration` along with the other transfer parameters. D uses P's duration.
+
+With the default lease, each P engine receives a heartbeat every 80 seconds
+after the initial heartbeat. Each renewal extends its deadline to at least
+320 seconds after receipt, without shortening the existing deadline. Socket
+I/O timeouts remain 1000 ms by default; they are separate from the lease.
+
+D uses two independent scheduler child threads:
+
+- `MooncakeHeartbeatThread` registers requests on arrival, including requests
+  waiting for local blocks, and renews them every `duration / 6` seconds. It uses
+  a locked request table and an Event for wakeup, with network I/O outside the
+  lock. New requests and removals wake the thread without depending on model
+  forward calls or scheduler steps.
+- `MooncakeSchedulerRecvingThread` consumes `(host, port, P request ID)` tuples
+  from its DONE queue. Send and receive helpers attempt at most `done_max_attempts` times (default 3);
+  exhausted tasks are logged and dropped. ACK retries do not block heartbeats.
+
+The threads own separate sockets. Heartbeats use one send/receive attempt with
+`lease_io_timeout_ms` timeouts (default 1000 ms). A failed snapshot is discarded; the next interval uses the
+current active requests. After `heartbeat_max_attempts` consecutive failed
+heartbeat rounds (default 3: the initial attempt plus two retries at the regular
+interval), D stops renewing the
+affected requests. A successful ACK resets their failure counts. Requests added
+during an in-flight heartbeat do not inherit its failures. This only stops
+renewal; it does not fail D requests or send DONE. P eventually reclaims KV when
+the lease expires. An inaccessible P can still delay other P heartbeats.
+
+P uses monotonic deadlines and renews only existing, unexpired requests to
+`max(old_deadline, now + duration * 2 / 3)`. Expired, missing and completed
+requests are never resurrected. Expiration scans all leases, and actual block
+release follows the scheduler's `finished_sending` path.
+
+D stops heartbeats when reception completes, no remote read is needed, or the
+request finishes or aborts. Aggregate receive completion and zero-read paths
+send DONE; cancellation alone does not imply that outstanding reads have ended.
+A heartbeat already in flight may finish after removal, but P ignores renewals
+for completed requests. D's local request ID is used for membership; P's request
+ID and engine ID are used on the wire.
+
+This change only adds renewal. It does not add `failed_recving` reporting,
+completion-time lease validation, or automatic request failure on heartbeat
+errors. Existing transfer-error handling remains unchanged. A permanently hung
+read can continue renewing until cancellation. If a lease expires and P reuses
+its blocks, transfer success alone does not prove the KV still belongs to the
+request; lease-expiry failure handling remains follow-up work.
+
+D accepts these optional `kv_connector_extra_config` settings; omitted values
+preserve the defaults. All four values must be positive integers (not booleans).
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `control_io_timeout_ms` | 1000 | Each DONE socket send and receive timeout, in milliseconds |
+| `done_max_attempts` | 3 | Maximum attempts per DONE send/receive helper, including the first attempt |
+| `lease_io_timeout_ms` | 1000 | Each heartbeat socket send and receive timeout, in milliseconds |
+| `heartbeat_max_attempts` | 3 | Consecutive failed heartbeat rounds before stopping renewal, including the first attempt; a successful ACK resets the count |
+
+For example, configure the consumer with:
+
+```json
+{
+  "kv_connector": "MooncakeConnectorV2",
+  "kv_role": "kv_consumer",
+  "kv_connector_extra_config": {
+    "control_io_timeout_ms": 2000,
+    "done_max_attempts": 3,
+    "lease_io_timeout_ms": 1000,
+    "heartbeat_max_attempts": 3
+  }
+}
+```
+
+These settings apply to D's scheduler control threads, not worker KV transfer
+or metadata-fetch timeouts. `done_max_attempts` counts helper attempts rather
+than whole DONE/ACK round trips; receive retries do not resend DONE. Heartbeats
+still attempt once per interval. Configure `kv_lease_duration` on P separately.
