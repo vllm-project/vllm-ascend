@@ -1500,12 +1500,12 @@ Here are two accuracy evaluation methods.
 
 1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
 
-2. After execution, you can get the result. Here are the results of `GLM-5.3-w8a8c8` in `vllm-ascend:v0.23.0` for reference only.
+2. The following table shows the results of `GLM-5.3-w8a8c8` with Prefill-Decode disaggregation.
 
-| dataset | model | hardware | metric | mode | vllm-api-general-chat |
-| ----- | ----- | ----- | ----- | ----- | ----- |
-| GPQA Diamond | GLM-5.3-w8a8c8 | A3 | accuracy | gen | 92.42 |
-| GPQA Diamond | GLM-5.3-w8a8c8 | A2 | accuracy | gen | 90.40 |
+| dataset | model | hardware | deployment | metric | mode | vllm-api-general-chat |
+| ----- | ----- | ----- | ----- | ----- | ----- | ----- |
+| GPQA Diamond | GLM-5.3-w8a8c8 | A3 | PD disaggregation | accuracy | gen | 91.92 |
+| GPQA Diamond | GLM-5.3-w8a8c8 | A2 | PD disaggregation | accuracy | gen | 89.39 |
 
 ### 7.2 Using Language Model Evaluation Harness
 
