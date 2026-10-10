@@ -21,6 +21,7 @@ import copy
 import gc
 import inspect
 import logging
+from collections.abc import Iterable
 from contextlib import AbstractContextManager, nullcontext
 from types import NoneType
 from typing import Any
@@ -253,6 +254,7 @@ class NPUWorker(WorkerBase):
                 for ms in state.model_states.values()
                 for region in getattr(ms.communicator, "_registered_regions", [])
             ]
+            regions.extend((tensor.data_ptr(), tensor.nbytes) for tensor in state.lifecycle_tensors())
             self._eplb_pending_wake_tags = {
                 data.tag
                 for data in allocator.pointer_to_data.values()
@@ -262,6 +264,7 @@ class NPUWorker(WorkerBase):
                 )
             }
             state.close()
+            state.save_sleep_state()
         free_bytes_before_sleep = torch.npu.mem_get_info()[0]
         # Level-1 only offloads the weights pool. Persistent metadata such as
         # the DSA Hadamard matrix is allocated outside the kv_cache pool, so it
@@ -1337,21 +1340,22 @@ class NPUWorker(WorkerBase):
     def update_config(self, overrides: dict[str, Any]) -> None:
         self.model_runner.update_config(overrides)
 
-    def reload_weights(self, *args, **kwargs) -> None:
+    def reload_weights(
+        self,
+        weights_iterator: Iterable[tuple[str, torch.Tensor]] | None = None,
+        weights_path: str | None = None,
+        is_checkpoint_format: bool = True,
+    ) -> None:
         state = getattr(self.model_runner, "eplb_state", None)
         if isinstance(state, AscendEplbState):
             state.close()
-        self.model_runner.reload_weights(*args, **kwargs)
+        self.model_runner.reload_weights(
+            weights_iterator=weights_iterator, weights_path=weights_path, is_checkpoint_format=is_checkpoint_format
+        )
         if isinstance(state, AscendEplbState):
-            for model_state in state.model_states.values():
-                # Layerwise quantization reload can replace parameter storage.
-                # Recollect views through the model's existing EPLB contract.
-                model_state.model.set_eplb_state(
-                    model_state.expert_load_pass_buffer,
-                    model_state.logical_to_physical_map,
-                    model_state.logical_replica_count,
-                )
-            state.resume()
+            state.finish_weight_reload(is_checkpoint_format)
+            if not getattr(self, "_eplb_pending_wake_tags", None):
+                state.resume()
 
     def check_health(self) -> None:
         import subprocess

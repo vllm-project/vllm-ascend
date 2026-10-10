@@ -130,7 +130,7 @@ or the binding classes differ between ranks, startup fails. Explicit `hixl` sele
 STAIR leaves both per-rank and cross-node migration limits unrestricted by
 default (`-1`) so that HIXL can use the available bandwidth. Configured limits remain unchanged for both explicit and automatic communicator selection.
 
-Weight offload and prefetch are incompatible with upstream EPLB on Ascend. Enabling EPLB with `cpu_offload_gb > 0` or `offload_group_size > 0` raises a configuration error. Sleep/wake uses a separate lifecycle: EPLB closes its registrations before sleep and rebuilds them once all registered memory has been restored.
+Weight offload and prefetch are incompatible with upstream EPLB on Ascend. Enabling EPLB with `cpu_offload_gb > 0` or `offload_group_size > 0` raises a configuration error. Sleep/wake uses a separate lifecycle: EPLB saves placement and closes its registrations before sleep, then restores metadata and rebuilds registration after the required memory has been remapped. Level-2 sleep requires reloading weights before inference. Checkpoint reload resets placement to the checkpoint layout; kernel-format reload preserves physical-slot placement.
 
 Ascend extends the upstream `policy` field without adding a second selector.
 For example, use `--eplb-config.policy default` to run the upstream policy;

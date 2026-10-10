@@ -269,14 +269,14 @@ class AscendHixlEplbCommunicator(EplbCommunicator):
             self._connect_peers()
             self._usable = True
             self._initializing = False
-        except Exception as error:
+        except Exception:
             try:
                 self.close()
             except Exception as cleanup_error:
-                # The exception retains the owner until the worker terminates.
-                # Never discard still-registered storage after failed rollback.
+                # Keep the owner on the fatal exception chain until process exit.
+                # An ordinary RPC exception is serialized and then discarded.
                 cleanup_error.hixl_communicator = self  # type: ignore[attr-defined]
-                raise cleanup_error from error
+                raise SystemExit("HIXL initialization rollback failed; worker must terminate") from cleanup_error
             raise
 
     def _initialize_phase(self, operation: Callable[[], None], name: str) -> None:

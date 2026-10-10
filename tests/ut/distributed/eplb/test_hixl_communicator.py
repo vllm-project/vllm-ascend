@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
+import gc
 import sys
 import weakref
 from types import SimpleNamespace
@@ -9,6 +10,7 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 import torch
+from vllm.v1.executor.multiproc_executor import WorkerProc
 
 from vllm_ascend.distributed.eplb import eplb_communicator
 
@@ -374,3 +376,50 @@ def test_failed_cpu_group_is_not_reused_for_cleanup(monkeypatch):
         communicator.close()
     assert collective.call_count == 1
     assert communicator._engine is not None
+
+
+@pytest.mark.parametrize("rollback_fails", [False, True])
+def test_initialization_rollback_failure_bypasses_rpc_and_retains_storage(monkeypatch, rollback_fails):
+    communicator = _bare_communicator(monkeypatch)
+    monkeypatch.setitem(
+        sys.modules,
+        "acl",
+        SimpleNamespace(rt=SimpleNamespace(get_context=lambda: (None, 0), set_context=lambda _context: 0)),
+    )
+    monkeypatch.setattr(eplb_communicator, "get_ip", lambda: "192.0.2.1")
+    monkeypatch.setattr(eplb_communicator, "get_open_port", lambda: 12345)
+    communicator._validate_tensors = MagicMock()
+    storage_ref = None
+
+    def fail_registration(_tensors):
+        nonlocal storage_ref
+        storage = torch.empty(4).untyped_storage()
+        storage_ref = weakref.ref(storage)
+        communicator._storage_refs = [storage]
+        communicator._registered_handles = [1]
+        communicator._registered_regions = [(0, 2)]
+        raise RuntimeError("registration failed")
+
+    communicator._register_tensor_segments = fail_registration
+    if rollback_fails:
+        communicator._engine.deregister_mem = MagicMock(return_value=103900)
+    rpc = SimpleNamespace(
+        rank=0,
+        worker=SimpleNamespace(rebuild=lambda: communicator._initialize([], [])),
+        handle_output=MagicMock(),
+    )
+    if rollback_fails:
+        with pytest.raises(SystemExit, match="worker must terminate") as fatal:
+            WorkerProc._execute_worker_rpc(rpc, ("rebuild", (), {}, None))
+        rpc.handle_output.assert_not_called()
+        owner = fatal.value.__cause__.hixl_communicator
+        assert owner._engine is not None
+        assert owner._registered_handles == [1]
+        del rpc, communicator, owner
+        gc.collect()
+        assert storage_ref() is not None
+    else:
+        WorkerProc._execute_worker_rpc(rpc, ("rebuild", (), {}, None))
+        assert isinstance(rpc.handle_output.call_args.args[0], RuntimeError)
+        assert communicator._engine is None
+        assert communicator._storage_refs == []

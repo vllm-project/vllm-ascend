@@ -18,6 +18,7 @@ import torch.multiprocessing as mp
 import torch_npu  # noqa: F401
 from torch.multiprocessing.spawn import ProcessExitedException
 from vllm.utils.network_utils import get_open_port
+from vllm.v1.executor.multiproc_executor import WorkerProc
 
 from vllm_ascend.distributed.eplb import eplb_communicator, hixl_compat
 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbState
@@ -157,4 +158,48 @@ def test_failed_deregistration_terminates_workers(monkeypatch):
     monkeypatch.setenv("PYTORCH_NPU_ALLOC_CONF", "expandable_segments:True")
     with pytest.raises(ProcessExitedException) as error:
         mp.spawn(_failed_close_worker, args=(get_open_port(),), nprocs=2, join=True)
+    assert error.value.exit_code == 1
+
+
+def _failed_initialization_worker(rank: int, port: int) -> None:
+    torch.npu.set_device(rank)
+    eplb_communicator._resolve_hixl_module = lambda: hixl_compat
+    dist.init_process_group("gloo", init_method=f"tcp://127.0.0.1:{port}", rank=rank, world_size=2)
+    weights = torch.full((2, 1024), rank + 1, dtype=torch.float32, device=f"npu:{rank}")
+    buffers = [torch.empty_like(weights)]
+    register = eplb_communicator.AscendHixlEplbCommunicator._register_tensor_segments
+
+    def fail_after_registration(communicator, tensors):
+        register(communicator, tensors)
+        if rank == 0:
+            communicator._engine = _FailedDeregistration(communicator._engine, rank)
+            raise RuntimeError("injected initialization failure after real registration")
+
+    eplb_communicator.AscendHixlEplbCommunicator._register_tensor_segments = fail_after_registration
+
+    def rebuild():
+        eplb_communicator.AscendHixlEplbCommunicator(dist.group.WORLD, [[weights]], buffers)
+
+    def unexpected_response(_output):
+        raise AssertionError("failed rollback must bypass ordinary RPC error handling")
+
+    rpc = SimpleNamespace(worker=SimpleNamespace(rebuild=rebuild), rank=rank, handle_output=unexpected_response)
+    try:
+        WorkerProc._execute_worker_rpc(rpc, ("rebuild", (), {}, None))
+    except SystemExit as error:
+        owner = error.__cause__.hixl_communicator
+        assert owner._engine is not None
+        assert owner._storage_refs
+        if rank == 0:
+            assert owner._registered_handles
+        raise
+    raise AssertionError("failed initialization rollback must terminate the worker")
+
+
+def test_failed_initialization_rollback_terminates_workers_through_rpc(monkeypatch):
+    if torch.npu.device_count() < 2:
+        pytest.skip("requires two NPU devices")
+    monkeypatch.setenv("PYTORCH_NPU_ALLOC_CONF", "expandable_segments:True")
+    with pytest.raises(ProcessExitedException) as error:
+        mp.spawn(_failed_initialization_worker, args=(get_open_port(),), nprocs=2, join=True)
     assert error.value.exit_code == 1
