@@ -42,6 +42,26 @@ def _mock_speculator_module(monkeypatch, module_name, class_name):
     return speculator_cls
 
 
+@pytest.mark.parametrize("method", ["ngram", "ngram_gpu"])
+def test_init_speculator_ngram_uses_current_request_state(monkeypatch, method):
+    config = _make_config(method)
+    device = torch.device("cpu")
+    req_states = object()
+    speculator_cls = _mock_speculator_module(
+        monkeypatch,
+        "vllm.v1.worker.gpu.spec_decode.ngram.speculator",
+        "NgramGPUSpeculator",
+    )
+    result = init_speculator(config, device, req_states)
+    assert result is speculator_cls.return_value
+    speculator_cls.assert_called_once_with(config, device, req_states)
+
+
+def test_init_speculator_ngram_requires_request_state():
+    with pytest.raises(ValueError, match="requires request states"):
+        init_speculator(_make_config("ngram_gpu"), torch.device("cpu"))
+
+
 def test_init_speculator_extract_hidden_states(monkeypatch):
     """Test dispatching extract_hidden_states to the upstream speculator."""
     config = _make_config("extract_hidden_states")
