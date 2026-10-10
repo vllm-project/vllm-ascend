@@ -1,5 +1,8 @@
 [build-system]
-# Should be mirrored in requirements.txt
+# Build-time (PEP 517 isolation) dependencies. This is NOT a copy of
+# requirements.txt: see DependencyListConsistencyTest in
+# tests/ut/test_dependency_documentation.py for the enforced contract and for
+# the allowlist of intentional build-only / runtime-only entries.
 requires = [
     "attrs",
     "cmake>=3.26",
@@ -20,7 +23,7 @@ requires = [
     "transformers==5.14.1",
     "torch-npu==2.10.0.post4",
     "torch==2.10.0",
-    "torchvision",
+    "torchvision==0.25.0",
     "wheel",
     "msgpack",
     "quart",
