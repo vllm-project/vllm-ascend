@@ -114,6 +114,9 @@ class AscendW8A8DynamicFusedMoEMethod310(AscendMoEScheme):
         )
         return final_hidden_states
 
+    def supports_fused_activation(self, activation) -> bool:
+        return getattr(activation, "value", activation) in ("silu", "swiglu")
+
     def _get_group_list(self, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
         """Return the cumulative-sum group_list expected by 310P kernels."""
         group_list = mlp_compute_input.group_list

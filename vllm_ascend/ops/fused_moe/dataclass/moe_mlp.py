@@ -27,7 +27,7 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEFusedExpertsInput, MoEWeights
 from vllm_ascend.ops.fused_moe.dataclass.moe_quant import MoEQuantParams
 from vllm_ascend.ops.fused_moe.moe_utils import enable_fusion_gmmswigluquant
-from vllm_ascend.quantization.quant_type import QuantType
+from vllm_ascend.quantization.quant_type import MXFP_DEFAULT_GROUP_SIZE, QuantType
 
 if TYPE_CHECKING:
     from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import MoETokenDispatchOutput, TMoECombineMetadata
@@ -45,8 +45,6 @@ class MoEMlpComputeInput:
     weights: MoEWeights
     quant: MoEQuantParams
     fusion: bool
-    # Weight source for the gmm hooks (see MoEFusedExpertsInput.layer).
-    layer: torch.nn.Module | None = None
     activation: MoEActivation = MoEActivation.SILU
     need_trans: bool = False
     dynamic_eplb: bool = False
@@ -59,6 +57,8 @@ class MoEMlpComputeInput:
     topk_ids: torch.Tensor | None = None
     # Optional per-layer MoE LoRA state, propagated from MoEFusedExpertsInput.
     lora_context: Any = None
+    layer: torch.nn.Module | None = None
+    mxfp_group_size: int = MXFP_DEFAULT_GROUP_SIZE
 
 
 def build_mlp_compute_input(
@@ -75,9 +75,6 @@ def build_mlp_compute_input(
     activation = fused_experts_input.activation
     activation_situ_beta = None if moe_config is None else moe_config.activation_situ_beta
     activation_situ_linear_beta = None if moe_config is None else moe_config.activation_situ_linear_beta
-    # Prefer the per-layer swiglu params threaded through the fused-experts
-    # input when no moe_config is available (direct callers/tests); with a
-    # moe_config, upstream keeps reading the values from it.
     swiglu_limit = 0.0 if moe_config is None else getattr(moe_config, "swiglu_limit", 0.0) or 0.0
     swiglu_alpha = 1.0 if moe_config is None else getattr(moe_config, "swiglu_alpha", 1.0) or 1.0
     swiglu_beta = 0.0 if moe_config is None else getattr(moe_config, "swiglu_beta", 0.0) or 0.0
@@ -91,7 +88,6 @@ def build_mlp_compute_input(
         topk_scales=token_dispatch_output.topk_scales,
         weights=fused_experts_input.weights,
         quant=fused_experts_input.quant,
-        layer=fused_experts_input.layer,
         fusion=fused_experts_input.quant.quant_type
         in (
             QuantType.W8A8,
@@ -113,4 +109,6 @@ def build_mlp_compute_input(
         expanded_row_idx=expanded_row_idx,
         topk_ids=fused_experts_input.topk_ids,
         lora_context=fused_experts_input.lora_context,
+        layer=fused_experts_input.layer,
+        mxfp_group_size=fused_experts_input.mxfp_group_size,
     )

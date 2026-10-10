@@ -497,7 +497,7 @@ class TestAllGatherCommImpl310FusedExperts(TestBase):
 
         with (
             patch("vllm_ascend.ops.fused_moe.moe_comm_method._EXTRA_CTX") as mock_ctx,
-            patch("vllm_ascend.ops.fused_moe.moe_comm_method.apply_moe_mlp") as mock_apply_mlp,
+            patch("vllm_ascend._310p.fused_moe.moe_comm_method.apply_moe_mlp") as mock_apply_mlp,
             patch(
                 "vllm_ascend.ops.fused_moe.dataclass.moe_mlp.enable_fusion_gmmswigluquant",
                 return_value=False,

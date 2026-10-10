@@ -22,6 +22,8 @@ import QuantType without triggering heavy quantization package initialization.
 
 from enum import Enum
 
+MXFP_DEFAULT_GROUP_SIZE = 32
+
 
 class QuantType(Enum):
     """Quantization type enum for MoE schemes."""

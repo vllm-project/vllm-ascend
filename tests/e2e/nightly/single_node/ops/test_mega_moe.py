@@ -135,6 +135,10 @@ def main():
             topk_weights=probs,
             quant_type=QuantType.W4A8MXFP,
             layer=mega_layer,
+            w1=weights.w1,
+            w2=weights.w2,
+            w1_scale=weights.w1_scale,
+            w2_scale=weights.w2_scale,
             mxfp_act_quant_type=torch.float8_e4m3fn,
             mxfp_weight_quant_type=torch_npu.float4_e2m1fn_x2,
             mxfp_scale_dtype=torch_npu.float8_e8m0fnu,
@@ -143,7 +147,7 @@ def main():
             dynamic_eplb=False,
             activation=a.activation,
         )
-        return comm._apply_cann_mega_moe(inp, weights, is_decode_only_node=False)
+        return comm._apply_cann_mega_moe(inp, is_decode_only_node=False)
 
     def decomposed_chunk(x, ids, probs):
         expanded, scale, assist, counts, ep_counts, tp_counts, expanded_scales = (

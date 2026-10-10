@@ -25,7 +25,7 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from vllm_ascend.ops.fused_moe.dataclass.moe_quant import MoEQuantParams, build_quant_params
 from vllm_ascend.ops.fused_moe.dataclass.router_input import MoeRouterInput
-from vllm_ascend.quantization.quant_type import QuantType
+from vllm_ascend.quantization.quant_type import MXFP_DEFAULT_GROUP_SIZE, QuantType
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,11 +54,6 @@ class MoEFusedExpertsInput:
     weights: MoEWeights
     routing: MoeRouterInput
     quant: MoEQuantParams
-    # The routed-expert layer owning the weights. The MLP stage reads the
-    # quant-method-specific weights (e.g. ``w13_weight_list``) from here, so
-    # quant methods do not need to thread every weight tensor through
-    # ``build_fused_experts_input``.
-    layer: torch.nn.Module | None = None
     activation: MoEActivation | str = MoEActivation.SILU
     need_trans: bool = False
     dynamic_eplb: bool = False
@@ -66,6 +61,8 @@ class MoEFusedExpertsInput:
     # ``Any`` avoids coupling the core contracts to the LoRA module; only the
     # unquant MLP path reads it, and only when a LoRA adapter is active.
     lora_context: Any = None
+    layer: torch.nn.Module | None = None
+    mxfp_group_size: int = MXFP_DEFAULT_GROUP_SIZE
 
 
 def build_fused_experts_input(
@@ -73,11 +70,10 @@ def build_fused_experts_input(
     hidden_states: torch.Tensor,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
-    layer=None,
-    quant_type: QuantType,
-    dynamic_eplb: bool,
     w1: torch.Tensor | list[torch.Tensor] | None = None,
     w2: torch.Tensor | list[torch.Tensor] | None = None,
+    quant_type: QuantType,
+    dynamic_eplb: bool,
     expert_map: torch.Tensor | None = None,
     global_redundant_expert_num: int = 0,
     mc2_mask: torch.Tensor | None = None,
@@ -101,12 +97,13 @@ def build_fused_experts_input(
     w1_offset: torch.Tensor | None = None,
     w2_offset: torch.Tensor | None = None,
     lora_context=None,
+    layer: torch.nn.Module | None = None,
+    mxfp_group_size: int = MXFP_DEFAULT_GROUP_SIZE,
 ) -> MoEFusedExpertsInput:
     return MoEFusedExpertsInput(
         hidden_states=hidden_states,
         topk_weights=topk_weights,
         topk_ids=topk_ids,
-        # These params will be deprecated after 310p refactoring.
         weights=MoEWeights(
             w1=w1,
             w2=w2,
@@ -129,7 +126,6 @@ def build_fused_experts_input(
         activation=activation,
         need_trans=need_trans,
         dynamic_eplb=dynamic_eplb,
-        layer=layer,
         quant=build_quant_params(
             quant_type=quant_type,
             comm_quant_mode=comm_quant_mode,
@@ -141,4 +137,6 @@ def build_fused_experts_input(
             is_per_channel_weight=is_per_channel_weight,
         ),
         lora_context=lora_context,
+        layer=layer,
+        mxfp_group_size=mxfp_group_size,
     )

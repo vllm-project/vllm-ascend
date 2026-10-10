@@ -25,10 +25,7 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
-from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
-from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
-from vllm_ascend.ops.fused_moe.moe_utils import cumsum_group_list, maybe_normalize_mxfp_scale_layout
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, FP8_METHOD, dispose_tensor
 
@@ -39,9 +36,6 @@ from ..base import (
     WeightSwitchGatherSpec,
 )
 from ..registry import register_scheme
-
-# CANN uses 36 to select FP8 E4M3FN output for situ_mx_quant.
-SITU_MX_DST_TYPE_E4M3FN = 36
 
 
 @register_scheme("W4A8_MXFP", "linear")
@@ -148,8 +142,6 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
 
     supports_eplb = False
     quant_type: QuantType = QuantType.W4A8MXFP
-    act_quant_type: torch.dtype = torch.float8_e4m3fn
-    fused_activations = frozenset({"silu", "situ"})
 
     def __init__(self):
         vllm_config = get_current_vllm_config()
@@ -193,12 +185,15 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
         moe_comm_method = _EXTRA_CTX.moe_comm_method
+        weights = self.get_fused_mc2_weights(layer)
         return moe_comm_method.fused_experts(
             fused_experts_input=build_fused_experts_input(
+                layer=layer,
                 hidden_states=x,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                layer=layer,
+                w1=weights.w1,
+                w2=weights.w2,
                 quant_type=self.quant_type,
                 dynamic_eplb=self.dynamic_eplb,
                 expert_map=layer.ascend_expert_map,
@@ -207,13 +202,15 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
                 pertoken_scale=layer.ascend_pertoken_scale,
                 activation=layer.activation,
+                mxfp_group_size=self.group_size,
                 mxfp_act_quant_type=torch.float8_e4m3fn,
                 mxfp_weight_quant_type=torch_npu.float4_e2m1fn_x2,
                 mxfp_scale_dtype=torch_npu.float8_e8m0fnu,
                 mxfp_per_token_scale_dtype=torch_npu.float8_e8m0fnu,
                 mxfp_use_bf16=(x.dtype in [torch.bfloat16, torch.float8_e4m3fn]),
-            ),
-            quant_method=self,
+                w1_scale=weights.w1_scale,
+                w2_scale=weights.w2_scale,
+            )
         )
 
     def get_fused_mc2_weights(self, layer: torch.nn.Module) -> MoEWeights:
@@ -348,134 +345,6 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
             orig_shapes["w2_weight_scale"]
         )
         layer._mxfp4_transformed = False
-
-    def apply_gmm1_act_quant(self, mlp_compute_input: MoEMlpComputeInput):
-        hidden_states = mlp_compute_input.hidden_states
-        hidden_states, pertoken_scale = self._quant_hidden_states(hidden_states, mlp_compute_input.dynamic_scale)
-        layer = mlp_compute_input.layer
-        assert layer is not None
-        if (
-            mlp_compute_input.activation == MoEActivation.SITU
-            and mlp_compute_input.group_list_type in (0, 1)
-            and self.group_size == 32
-            and (mlp_compute_input.activation_situ_linear_beta or 0.0) > 0.0
-        ):
-            hidden_states, out_scale, _ = DeviceOperator.npu_grouped_matmul_situ_quant(
-                x=hidden_states,
-                weight=layer.w13_weight,
-                weight_scale=layer.w13_weight_scale,
-                x_scale=pertoken_scale,
-                group_list=mlp_compute_input.group_list,
-                group_list_type=mlp_compute_input.group_list_type,
-                beta=(
-                    1.0 if mlp_compute_input.activation_situ_beta is None else mlp_compute_input.activation_situ_beta
-                ),
-                linear_beta=mlp_compute_input.activation_situ_linear_beta or 0.0,
-                mxfp_quant_dtype=self.quant_type,
-            )
-            dispose_tensor(mlp_compute_input.hidden_states)
-            return hidden_states, maybe_normalize_mxfp_scale_layout(out_scale)
-        hidden_states = torch_npu.npu_grouped_matmul(
-            x=[hidden_states],
-            weight=[layer.w13_weight],
-            scale=None,
-            antiquant_scale=[layer.w13_weight_scale],
-            scale_dtype=None,
-            per_token_scale=[pertoken_scale],
-            per_token_scale_dtype=torch_npu.float8_e8m0fnu,
-            split_item=2,
-            group_type=0,
-            group_list=mlp_compute_input.group_list,
-            group_list_type=mlp_compute_input.group_list_type,
-            x_dtype=torch.float8_e4m3fn,
-            weight_dtype=torch_npu.float4_e2m1fn_x2,
-            output_dtype=torch.bfloat16,
-        )[0]
-        dispose_tensor(mlp_compute_input.hidden_states)
-        if mlp_compute_input.activation == MoEActivation.SITU:
-            # SituAndMul: run the dequantized gmm1 first, then fuse the situ
-            # activation with MXFP output quantization (Kimi K3 SITU activation).
-
-            hidden_states, swiglu_out_scale = torch.ops._C_ascend.situ_mx_quant(
-                x=hidden_states,
-                beta=1.0 if mlp_compute_input.activation_situ_beta is None else mlp_compute_input.activation_situ_beta,
-                linear_beta=mlp_compute_input.activation_situ_linear_beta or 0.0,
-                activate_left=True,
-                dst_type=SITU_MX_DST_TYPE_E4M3FN,
-            )
-            return hidden_states, maybe_normalize_mxfp_scale_layout(swiglu_out_scale)
-
-        # The `group_index` input for the `npu_swiglu_group_quant` operator
-        # currently only supports the `count` type. In the current version, the
-        # `npu_swiglu_group_quant` operator performs a summation calculation on
-        # `group_index`. Therefore, under the cumsum type, the last value is directly taken
-        # and Avoid executing two small operators.
-        if mlp_compute_input.group_list_type == 0:
-            group_index = mlp_compute_input.group_list[-1:]
-        else:
-            group_index = cumsum_group_list(mlp_compute_input.group_list, mlp_compute_input.group_list_type, 1)
-        hidden_states, out_scale, _ = torch.ops._C_ascend.npu_swiglu_group_quant(
-            hidden_states,
-            topk_weight=None,
-            group_index=group_index,
-            dst_type=torch.float8_e4m3fn,
-            quant_mode=2,
-            clamp_value=mlp_compute_input.swiglu_limit,
-        )
-        return hidden_states, maybe_normalize_mxfp_scale_layout(out_scale)
-
-    def apply_gmm1(self, mlp_compute_input: MoEMlpComputeInput):
-        hidden_states = mlp_compute_input.hidden_states
-        hidden_states, pertoken_scale = self._quant_hidden_states(hidden_states, mlp_compute_input.dynamic_scale)
-        layer = mlp_compute_input.layer
-        assert layer is not None
-        hidden_states = torch_npu.npu_grouped_matmul(
-            x=[hidden_states],
-            weight=[layer.w13_weight],
-            scale=[layer.w13_weight_scale],
-            per_token_scale=[pertoken_scale],
-            bias=None,
-            split_item=2,
-            group_type=0,
-            group_list=mlp_compute_input.group_list,
-            group_list_type=mlp_compute_input.group_list_type,
-            output_dtype=torch.bfloat16,
-            scale_dtype=torch_npu.float8_e8m0fnu,
-            per_token_scale_dtype=torch_npu.float8_e8m0fnu,
-        )[0]
-        dispose_tensor(mlp_compute_input.hidden_states)
-        return hidden_states
-
-    def apply_act_quant(self, mlp_compute_input: MoEMlpComputeInput, hidden_states: torch.Tensor):
-        hidden_states, dynamic_scale = torch_npu.npu_dynamic_mx_quant(hidden_states, dst_type=torch.float8_e4m3fn)
-        return hidden_states, maybe_normalize_mxfp_scale_layout(dynamic_scale)
-
-    def apply_gmm2(self, mlp_compute_input: MoEMlpComputeInput, hidden_states, act_out_scale):
-        layer = mlp_compute_input.layer
-        assert layer is not None
-        input_dtype = mlp_compute_input.hidden_states.dtype
-        use_bf16 = input_dtype in [torch.bfloat16, torch.float8_e4m3fn]
-        output_dtype = (
-            input_dtype
-            if input_dtype in [torch.bfloat16, torch.float16]
-            else (torch.bfloat16 if use_bf16 else torch.float16)
-        )
-        return torch_npu.npu_grouped_matmul(
-            x=[hidden_states],
-            weight=[layer.w2_weight],
-            scale=None,
-            antiquant_scale=[layer.w2_weight_scale],
-            bias=None,
-            per_token_scale=[act_out_scale],
-            split_item=2,
-            group_list_type=mlp_compute_input.group_list_type,
-            group_type=0,
-            group_list=mlp_compute_input.group_list,
-            output_dtype=output_dtype,
-            per_token_scale_dtype=torch_npu.float8_e8m0fnu,
-            x_dtype=torch.float8_e4m3fn,
-            weight_dtype=torch_npu.float4_e2m1fn_x2,
-        )[0]
 
 
 @register_scheme(FP8_METHOD, "ds_w4a8_moe")

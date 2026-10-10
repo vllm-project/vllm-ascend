@@ -157,7 +157,7 @@ class TestMoECommMethod(TestBase):
         fused_input.routing.mc2_mask = torch.ones(2, dtype=torch.bool)
         fused_input.activation = "swigluoai_uninterleave"
         fused_input.layer.mega_moe_activation_kwargs = comm_impl.mega_moe_activation_kwargs
-        weights = MoEWeights(w1=[torch.zeros(8, 16)], w2=[torch.zeros(16, 8)])
+        fused_input.weights = MoEWeights(w1=[torch.zeros(8, 16)], w2=[torch.zeros(16, 8)])
 
         for device_type in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5):
             with (
@@ -171,7 +171,7 @@ class TestMoECommMethod(TestBase):
                     return_value=get_hardware_profile(device_type),
                 ),
             ):
-                comm_impl._apply_cann_mega_moe(fused_input, weights, is_decode_only_node=True)
+                comm_impl._apply_cann_mega_moe(fused_input, is_decode_only_node=True)
 
             self.assertEqual(captured["glu_alpha"], 1.702)
             self.assertEqual(captured["glu_bias"], 1.0)
@@ -213,7 +213,7 @@ class TestMoECommMethod(TestBase):
         inp.topk_weights = torch.ones(2, 2)
         inp.quant.quant_type = QuantType.W4A8MXFP
         inp.layer.mega_moe_activation_kwargs = comm.mega_moe_activation_kwargs
-        weights = MoEWeights(w1=[torch.empty(8, 8)], w2=[torch.empty(8, 8)])
+        inp.weights = MoEWeights(w1=[torch.empty(8, 8)], w2=[torch.empty(8, 8)])
         with (
             patch(
                 "vllm_ascend.ops.fused_moe.moe_utils.inspect.signature",
@@ -224,13 +224,13 @@ class TestMoECommMethod(TestBase):
                 return_value=get_hardware_profile(AscendDeviceType.A5),
             ),
         ):
-            comm._apply_cann_mega_moe(inp, weights, is_decode_only_node=False)
+            comm._apply_cann_mega_moe(inp, is_decode_only_node=False)
             # A shared communicator must use the current layer's bound params.
             inp.layer.mega_moe_activation_kwargs = {
                 "activation": "situglu",
                 "activation_params": {"beta": 2.0, "linear_beta": 17.0},
             }
-            comm._apply_cann_mega_moe(inp, weights, is_decode_only_node=False)
+            comm._apply_cann_mega_moe(inp, is_decode_only_node=False)
         self.assertEqual(len(calls), 2)
         for (activation, params, kwargs), expected in zip(
             calls, ({"beta": 4.0, "linear_beta": 25.0}, {"beta": 2.0, "linear_beta": 17.0})
@@ -376,10 +376,10 @@ class TestMoECommMethod(TestBase):
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.PrepareAndFinalizeWithAllGather")
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.TokenDispatcherWithAllGather")
-    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.apply_moe_mlp")
-    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.torch.npu.current_stream", MagicMock())
+    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.unified_apply_mlp")
+    @patch("torch.npu.current_stream", MagicMock())
     def test_fused_experts_method(
-        self, mock_apply_mlp, mock_token_dispatcher, mock_prepare_finalize, mock_get_forward_context
+        self, mock_unified_apply_mlp, mock_token_dispatcher, mock_prepare_finalize, mock_get_forward_context
     ):
         # Mock forward context
         mock_context = MagicMock()
@@ -413,9 +413,8 @@ class TestMoECommMethod(TestBase):
         mock_td_instance.token_combine.return_value = torch.randn(4, 8)
         mock_token_dispatcher.return_value = mock_td_instance
 
-        # Mock the unified MoE MLP orchestration returning (tensor, event).
-        mock_apply_mlp.return_value = (torch.randn(6, 8), MagicMock())
-        quant_method = MagicMock()
+        # Mock unified_apply_mlp returns (tensor, event) tuple
+        mock_unified_apply_mlp.return_value = (torch.randn(6, 8), MagicMock())
 
         # Create instance
         comm_impl = AllGatherCommImpl(self.moe_config)
@@ -451,8 +450,7 @@ class TestMoECommMethod(TestBase):
                 need_trans=False,
                 dynamic_eplb=False,
                 quant=MoEQuantParams(),
-            ),
-            quant_method=quant_method,
+            )
         )
 
         # Verify result shape
@@ -461,15 +459,14 @@ class TestMoECommMethod(TestBase):
         # Verify token_dispatch was called
         mock_td_instance.token_dispatch.assert_called_once()
 
-        # Verify the unified MoE MLP orchestration was called
-        mock_apply_mlp.assert_called_once()
-        mlp_compute_input = mock_apply_mlp.call_args.args[0]
+        # Verify unified_apply_mlp was called
+        mock_unified_apply_mlp.assert_called_once()
+        mlp_compute_input = mock_unified_apply_mlp.call_args.kwargs["mlp_compute_input"]
         self.assertFalse(mlp_compute_input.fusion)
         self.assertFalse(mlp_compute_input.quant.is_mxfp)
-        self.assertIs(mock_apply_mlp.call_args.args[1], quant_method)
 
         # Verify token_combine was called
         mock_td_instance.token_combine.assert_called_once_with(
-            hidden_states=mock_apply_mlp.return_value[0],
+            hidden_states=mock_unified_apply_mlp.return_value[0],
             combine_metadata=mock_td_instance.token_dispatch.return_value.combine_metadata,
         )
