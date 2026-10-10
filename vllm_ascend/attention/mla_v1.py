@@ -1593,6 +1593,193 @@ class AscendMLAImpl(MLAAttentionImpl):
             return k_pe, k_nope, current_k_pe, current_k_nope
         return k_pe, k_nope
 
+    @staticmethod
+    def _get_context_prolog_quant_method(layer: torch.nn.Module | None):
+        return getattr(getattr(layer, "quant_method", None), "quant_method", None)
+
+    def _prepare_context_prolog_v3_weights(self) -> dict[str, Any]:
+        """Prepare private PROLOG_V3 weights without changing the native path.
+
+        DSpark context KV generation is a bypass around the normal MLA forward.
+        Unlike the MLAPO path, it must keep ``fused_qkv_a_proj``/``q_proj``
+        available for the draft model's regular forward, so weights are copied
+        instead of being transposed or disposed in place.
+        """
+        prepared = getattr(self, "_context_prolog_v3_weights", None)
+        if prepared is not None:
+            return prepared
+
+        assert self.fused_qkv_a_proj is not None, "DSpark PROLOG_V3 requires fused_qkv_a_proj"
+        assert self.q_proj is not None, "DSpark PROLOG_V3 requires q_proj"
+        assert self.q_lora_rank is not None, "DSpark PROLOG_V3 requires q_lora_rank"
+        assert self.q_a_layernorm is not None, "DSpark PROLOG_V3 requires q_a_layernorm"
+        assert self.kv_a_layernorm is not None, "DSpark PROLOG_V3 requires kv_a_layernorm"
+        if getattr(self.q_proj, "_chunk_size", 0):
+            raise RuntimeError("PROLOG_V3 does not support chunked q_proj weights for DSpark context writes.")
+
+        quant_method = self._get_context_prolog_quant_method(self.fused_qkv_a_proj)
+        quant_type = type(quant_method) if quant_method is not None else None
+        if quant_type is not None and quant_type not in (
+            AscendW8A8DynamicLinearMethod,
+            AscendW8A8MXFP8DynamicLinearMethod,
+        ):
+            raise RuntimeError(
+                "PROLOG_V3 supports native, W8A8Dynamic, and W8A8MXFP8Dynamic DSpark projections, "
+                f"got {quant_type.__name__}."
+            )
+
+        fused_weight = self.fused_qkv_a_proj.weight.data
+        weight_uq_qr = self.q_proj.weight.data
+        if quant_type is None:
+            # Native Linear stores [out, in], while PROLOG_V3 consumes [in, out].
+            fused_weight = fused_weight.T
+            weight_uq_qr = weight_uq_qr.T
+
+        prepared = {
+            "quant_type": quant_type,
+            "weight_dq": torch_npu.npu_format_cast(
+                fused_weight[..., : self.q_lora_rank].contiguous(), ACL_FORMAT_FRACTAL_NZ
+            ),
+            "weight_dkv_kr": torch_npu.npu_format_cast(
+                fused_weight[..., self.q_lora_rank :].contiguous(), ACL_FORMAT_FRACTAL_NZ
+            ),
+            "weight_uq_qr": torch_npu.npu_format_cast(weight_uq_qr.contiguous(), ACL_FORMAT_FRACTAL_NZ),
+        }
+
+        if quant_type is AscendW8A8DynamicLinearMethod:
+            fused_scale = self.fused_qkv_a_proj.weight_scale  # type: ignore[union-attr]
+            prepared.update(
+                dequant_scale_w_dq=fused_scale[: self.q_lora_rank].view(1, -1).to(torch.float),
+                dequant_scale_w_dkv_kr=fused_scale[self.q_lora_rank :].view(1, -1).to(torch.float),
+                dequant_scale_w_uq_qr=self.q_proj.weight_scale.data.view(1, -1).to(torch.float),
+            )
+        elif quant_type is AscendW8A8MXFP8DynamicLinearMethod:
+            fused_scale = self.fused_qkv_a_proj.weight_scale.transpose(0, 1)  # type: ignore[union-attr]
+            fused_scale = fused_scale.reshape(-1, fused_scale.shape[1] * fused_scale.shape[2])
+            uq_scale = self.q_proj.weight_scale.data.transpose(0, 1)  # type: ignore[union-attr]
+            uq_scale = uq_scale.reshape(-1, uq_scale.shape[1] * uq_scale.shape[2])
+            prepared.update(
+                dequant_scale_w_dq=fused_scale[: self.q_lora_rank, ...],
+                dequant_scale_w_dkv_kr=fused_scale[self.q_lora_rank :, ...],
+                dequant_scale_w_uq_qr=uq_scale,
+            )
+
+        self._context_prolog_v3_weights = prepared
+        return prepared
+
+    def _validate_context_prolog_v3_cache(self, kv_cache: tuple[torch.Tensor, torch.Tensor]) -> None:
+        nope_cache, rope_cache = kv_cache
+        if nope_cache.dim() != 4 or rope_cache.dim() != 4:
+            raise RuntimeError(
+                "PROLOG_V3 DSpark caches must be 4-D, got "
+                f"nope={tuple(nope_cache.shape)} and rope={tuple(rope_cache.shape)}."
+            )
+        if self.num_kv_heads != 1 or nope_cache.shape[2] != 1 or rope_cache.shape[2] != 1:
+            raise RuntimeError("PROLOG_V3 DSpark context writes require one KV head.")
+        if nope_cache.shape[-1] != self.kv_lora_rank or rope_cache.shape[-1] != self.qk_rope_head_dim:
+            raise RuntimeError(
+                "PROLOG_V3 DSpark cache dimensions do not match MLA geometry: "
+                f"nope={tuple(nope_cache.shape)}, rope={tuple(rope_cache.shape)}, "
+                f"kv_lora_rank={self.kv_lora_rank}, rope_dim={self.qk_rope_head_dim}."
+            )
+
+        # PROLOG_V3 accepts a non-contiguous first axis, but all trailing axes
+        # must remain dense. This catches fused token-interleaved views before
+        # they reach the operator.
+        for name, cache in (("kv_cache", nope_cache), ("kr_cache", rope_cache)):
+            if cache.stride(3) != 1:
+                raise RuntimeError(f"PROLOG_V3 {name} must have a contiguous last axis.")
+            if cache.stride(2) != cache.shape[3]:
+                raise RuntimeError(f"PROLOG_V3 {name} must have a contiguous head axis.")
+            if cache.stride(1) != cache.shape[2] * cache.stride(2):
+                raise RuntimeError(f"PROLOG_V3 {name} must have a contiguous token axis.")
+
+    def exec_context_kv_prolog_v3(
+        self,
+        context_states: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, torch.Tensor],
+        slots: torch.Tensor,
+    ) -> None:
+        """Write DSpark context KV through the stride-aware PROLOG_V3 operator.
+
+        ``aclnnKvRmsNormRopeCache`` marks both cache references
+        ``AutoContiguous``.  PROLOG_V3 instead marks them
+        ``IgnoreContiguous`` and explicitly supports a non-contiguous first
+        axis on A2/A3, matching the component-major page-strided cache.
+        """
+        if not hasattr(torch_npu, "npu_mla_prolog_v3"):
+            raise RuntimeError("CANN does not expose npu_mla_prolog_v3 for DSpark context KV writes.")
+        if not self.use_mla_rope:
+            raise RuntimeError("DSpark PROLOG_V3 context writes require an MLA RoPE draft.")
+        if self.fa_quant_layer:
+            raise RuntimeError("DSpark PROLOG_V3 context writes do not support FA-quant caches yet.")
+        if context_states.shape[0] != slots.numel():
+            raise RuntimeError(
+                "PROLOG_V3 DSpark context requires one cache index per token, "
+                f"got context={context_states.shape[0]} and slots={slots.numel()}."
+            )
+        if cos is None or sin is None:
+            raise RuntimeError("PROLOG_V3 DSpark context writes require cos/sin.")
+
+        self._validate_context_prolog_v3_cache(kv_cache)
+        weights = self._prepare_context_prolog_v3_weights()
+        quant_type = weights["quant_type"]
+        token_x = context_states.contiguous()
+        branch: dict[str, Any] = {
+            "dequant_scale_x": None,
+            "dequant_scale_w_dq": None,
+            "dequant_scale_w_uq_qr": None,
+            "dequant_scale_w_dkv_kr": None,
+            "weight_quant_mode": 0,
+        }
+        if quant_type is AscendW8A8DynamicLinearMethod:
+            token_x, dequant_scale_x = torch_npu.npu_dynamic_quant(token_x)
+            branch.update(
+                dequant_scale_x=dequant_scale_x.view(-1, 1),
+                dequant_scale_w_dq=weights["dequant_scale_w_dq"],
+                dequant_scale_w_uq_qr=weights["dequant_scale_w_uq_qr"],
+                dequant_scale_w_dkv_kr=weights["dequant_scale_w_dkv_kr"],
+                weight_quant_mode=2,
+            )
+        elif quant_type is AscendW8A8MXFP8DynamicLinearMethod:
+            token_x, dynamic_scale = torch_npu.npu_dynamic_mx_quant(token_x, dst_type=torch.float8_e4m3fn)
+            branch.update(
+                dequant_scale_x=dynamic_scale.reshape(token_x.shape[0], -1).view(torch.float8_e8m0fnu),
+                dequant_scale_w_dq=weights["dequant_scale_w_dq"].view(torch.float8_e8m0fnu),
+                dequant_scale_w_uq_qr=weights["dequant_scale_w_uq_qr"].view(torch.float8_e8m0fnu),
+                dequant_scale_w_dkv_kr=weights["dequant_scale_w_dkv_kr"].view(torch.float8_e8m0fnu),
+                weight_quant_mode=3,
+            )
+
+        # PROLOG_V3 is an in-place cache writer. Query outputs are intentionally
+        # ignored: DSpark only needs the context KV side effect here.
+        torch_npu.npu_mla_prolog_v3(
+            token_x=token_x,
+            weight_dq=weights["weight_dq"],
+            weight_uq_qr=weights["weight_uq_qr"],
+            weight_uk=self.mlapo_W_UK_T,
+            weight_dkv_kr=weights["weight_dkv_kr"],
+            rmsnorm_gamma_cq=self.q_a_layernorm.weight.data,  # type: ignore[union-attr]
+            rmsnorm_gamma_ckv=self.kv_a_layernorm.weight.data,  # type: ignore[union-attr]
+            rope_sin=sin.contiguous().view(sin.shape[0], sin.shape[-1]),
+            rope_cos=cos.contiguous().view(cos.shape[0], cos.shape[-1]),
+            kv_cache=kv_cache[0],
+            kr_cache=kv_cache[1],
+            cache_index=slots.view(-1).to(torch.int64).contiguous(),
+            rmsnorm_epsilon_cq=self.q_a_layernorm.variance_epsilon,  # type: ignore[union-attr]
+            rmsnorm_epsilon_ckv=self.kv_a_layernorm.variance_epsilon,  # type: ignore[union-attr]
+            cache_mode="PA_BSND",
+            query_norm_flag=False,
+            query_quant_mode=0,
+            kv_cache_quant_mode=0,
+            ckvkr_repo_mode=0,
+            quant_scale_repo_mode=0,
+            tile_size=128,
+            **branch,
+        )
+
     def exec_kv_prefill(
         self,
         kv_no_split: torch.Tensor,
@@ -2257,7 +2444,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         self,
         layer_name,
         hidden_states: torch.Tensor,  # query in unified attn
-        kv_cache: tuple[torch.Tensor],
+        kv_cache: torch.Tensor | tuple[torch.Tensor, ...],
         attn_metadata: M,
         output: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -2274,6 +2461,15 @@ class AscendMLAImpl(MLAAttentionImpl):
         )
 
         num_decode_tokens = attn_metadata.num_decode_tokens
+        # Fused MLA cache由runner保存为单一tensor。旧MLA实现仍按
+        # nope/rope两个logical tensor访问算子，因此在这里做零拷贝切片。
+        fused_mla_cache = isinstance(kv_cache, torch.Tensor)
+        if isinstance(kv_cache, torch.Tensor):
+            kv_cache = (
+                kv_cache[..., : self.kv_lora_rank],
+                kv_cache[..., self.kv_lora_rank :],
+            )
+
         # Inputs and outputs may be padded for CUDA graphs
         output_padded = output
         o_proj_input_shape = (_EXTRA_CTX.num_tokens, self.num_heads * self.v_head_dim)
@@ -2295,6 +2491,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         )
         if (
             (self.fa_quant_layer or self.enable_mlapo)
+            and not fused_mla_cache
             and (not requires_current_kv or can_use_dcp_prolog)
             # The fused prolog writes only local KV, while sharded decode must gather it.
             and not self.is_pcp_decode_sharded
