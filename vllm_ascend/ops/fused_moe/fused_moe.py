@@ -184,6 +184,16 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         if shared_experts_input is None:
             hidden_states, shared_experts_input = self.apply_routed_input_transform(hidden_states)
 
+        if self._megamoe_shared_expert_fused:
+            # The runner owns the effective routed_scaling_factor (with
+            # apply_routed_scale_to_output=True the router and the
+            # routed-experts layer both hold 1.0). MegaMoe combines routed +
+            # shared inside the operator, so the factor must be folded into
+            # the topk weights by the comm implementation; plumb it down
+            # through the routed-experts layer, which is the only module the
+            # comm implementation sees.
+            self.routed_experts.ascend_megamoe_fold_scale = self.routed_scaling_factor
+
         # Record before `_maybe_pad_hidden_states` pads activations to match
         # `moe_config.hidden_dim`, e.g. after `align_trtllm_fp4_moe_hidden_dim_for_fi`
         # so routed output can be trimmed before

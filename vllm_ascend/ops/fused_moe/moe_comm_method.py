@@ -557,7 +557,14 @@ class FusedMC2CommImpl(MoECommMethod):
             # routed_scaling_factor would scale the shared contribution too,
             # so fold the factor into the topk weights instead; the runner
             # skips its own scaling for the fused call (see FusedMoE.forward).
-            routed_scaling_factor = getattr(layer, "routed_scaling_factor", None)
+            # The factor must come from the runner: with
+            # apply_routed_scale_to_output=True (e.g. GLM MoE models on NPU)
+            # the router and the routed-experts layer both hold 1.0 and only
+            # the runner keeps the real value, so the runner plumbs it down
+            # as ``ascend_megamoe_fold_scale`` before dispatching.
+            routed_scaling_factor = getattr(layer, "ascend_megamoe_fold_scale", None)
+            if routed_scaling_factor is None:
+                routed_scaling_factor = getattr(layer, "routed_scaling_factor", None)
             if routed_scaling_factor is not None and routed_scaling_factor != 1.0:
                 topk_weights = topk_weights * routed_scaling_factor
         out, expert_tokens = self.mega_moe(
