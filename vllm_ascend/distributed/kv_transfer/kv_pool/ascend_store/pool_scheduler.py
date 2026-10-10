@@ -687,7 +687,7 @@ class KVPoolScheduler:
             else:
                 if num_computed_tokens >= token_len:
                     return 0, False
-                if self.client is None:
+                if self.client is None or self.client.closed is True:
                     self.client = LookupKeyClient(self.vllm_config)
                 num_external_hit_tokens = self.client.lookup(
                     token_len,
@@ -1203,6 +1203,8 @@ class LookupKeyClient:
             zmq.REQ,  # type: ignore[attr-defined]
             bind=False,
         )
+        self.socket.setsockopt(zmq.RCVTIMEO, 1000)  # type: ignore[attr-defined]
+        self._closed = False
 
     def lookup(
         self,
@@ -1221,13 +1223,24 @@ class LookupKeyClient:
             hbm_hit_tokens.to_bytes(4, byteorder="big"),
             *hash_frames,
         ]
-        self.socket.send_multipart(all_frames, copy=False)
-        resp = self.socket.recv()
-        result = int.from_bytes(resp, "big")
-        return result
+        try:
+            self.socket.send_multipart(all_frames, copy=False)
+            resp = self.socket.recv()
+        except zmq.ZMQError:  # type: ignore[attr-defined]
+            logger.exception("KV pool lookup failed")
+            self.close()
+            return 0
+
+        return int.from_bytes(resp, "big")
 
     def close(self):
-        self.socket.close(linger=0)
+        if not self._closed:
+            self.socket.close(linger=0)
+            self._closed = True
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
 
 
 def get_zmq_rpc_path_lookup(vllm_config: "VllmConfig") -> str:
