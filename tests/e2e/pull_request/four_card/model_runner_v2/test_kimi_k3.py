@@ -3,7 +3,7 @@
 """Kimi-K3 Model Runner V2 PR smoke coverage.
 
 The MRV1 Kimi-K3 tests already build the smallest useful local model and cover
-the model-specific execution paths.  Reuse those fixtures and test bodies here
+the model-specific execution paths.  Reuse the model builder and scenario helpers here
 so MRV1 and MRV2 keep the same functional coverage.  These are deliberately
 functional smoke tests: the local models use dummy weights and do not replace
 the full-checkpoint nightly GPQA or AISBench jobs.
@@ -16,15 +16,19 @@ from tests.e2e.pull_request.four_card.test_kimi_k3 import (
     _engine_args,
     _generate,
     _prompt,
-    k3_models,
+    build_k3_models,
     run_k3_gqa_w4a8_dp2_tp2,
     run_k3_mla_block5_tp4,
     run_k3_mla_pd_tp2,
     run_k3_mtp_image_tp4,
 )
 
-
 pytestmark = pytest.mark.e2e_model("Kimi-K3")
+
+
+@pytest.fixture(scope="module")
+def k3_models(tmp_path_factory: pytest.TempPathFactory) -> dict[str, str]:
+    return build_k3_models(tmp_path_factory.mktemp("k3-dummy"))
 
 
 @pytest.fixture(autouse=True)

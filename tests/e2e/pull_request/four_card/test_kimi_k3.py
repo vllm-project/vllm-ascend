@@ -301,9 +301,9 @@ def _write_w4a8_description(path: Path) -> None:
     (path / "quant_model_description.json").write_text(json.dumps(description), encoding="utf-8")
 
 
-@pytest.fixture(scope="module")
-def k3_models(tmp_path_factory: pytest.TempPathFactory) -> dict[str, str]:
-    tmp_path = tmp_path_factory.mktemp("k3-dummy")
+def build_k3_models(tmp_path: Path) -> dict[str, str]:
+    """Build reduced local models for both Model Runner versions."""
+
     models = {"target": _write_target(tmp_path / "target")}
     models["w4a8"] = _write_target(tmp_path / "w4a8")
     _write_w4a8_description(tmp_path / "w4a8")
@@ -311,6 +311,11 @@ def k3_models(tmp_path_factory: pytest.TempPathFactory) -> dict[str, str]:
     for variant in ("mla", "mla_block5", "gqa"):
         models[variant] = _write_config(tmp_path / variant, _draft_config(variant))
     return models
+
+
+@pytest.fixture(scope="module")
+def k3_models(tmp_path_factory: pytest.TempPathFactory) -> dict[str, str]:
+    return build_k3_models(tmp_path_factory.mktemp("k3-dummy"))
 
 
 @pytest.fixture(autouse=True)
