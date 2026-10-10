@@ -264,7 +264,8 @@ When using `--shm-size`, you may need to add the `--privileged=true` flag to you
 
 ### 21. How to set `SOC_VERSION` when building from source on a CPU-only machine?
 
-When building from source (e.g. `pip install -e .`), the build may try to infer the target chip via `npu-smi`. If `npu-smi` is not available (common in CPU-only build environments), you must set `SOC_VERSION` manually before installation.
+When building from source (e.g. `pip install -e .`), the build tries to infer the target chip via `npu-smi`. If `npu-smi` is not available (common in CPU-only build environments) but you
+are attempting to compile custom kernels (`COMPILE_CUSTOM_KERNELS=1`), you must set `SOC_VERSION` manually before installation; the build fails otherwise.
 
 You can use the defaults from `Dockerfile*` as a reference. For example:
 
@@ -281,6 +282,9 @@ export SOC_VERSION="ascend310p1"
 # 950PR&950DT Products
 export SOC_VERSION="<value starting with ascend950>"
 ```
+
+With `COMPILE_CUSTOM_KERNELS=0` the build instead defaults `SOC_VERSION` to a dummy value and logs a warning, which is enough to run `tests/ut`. This dummy `SOC_VERSION` is also recorded
+in `_build_info.py` and reported as the device type at runtime.
 
 ### 22. Why does TPOT increase drastically as concurrency grows?
 
