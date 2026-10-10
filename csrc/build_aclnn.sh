@@ -150,6 +150,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
     CUSTOM_OPS_ARRAY=(
         "chunk_gated_delta_rule_fwd_h_vllm"
         "scatter_nd_update_sk"
+        "blasst_attention_score"
         "grouped_matmul_swiglu_quant_weight_nz_tensor_list"
         "sparse_flash_attention"
         "kv_quant_sparse_flash_attention_vllm"
