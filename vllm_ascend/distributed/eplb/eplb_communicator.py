@@ -240,7 +240,7 @@ class AscendHixlEplbCommunicator(EplbCommunicator):
         local_engine = ""
 
         def initialize_engine() -> None:
-            import acl  # type: ignore[import-not-found]  # NPU worker runtime.
+            import acl  # type: ignore[import-not-found, import-untyped]  # NPU worker runtime.
 
             nonlocal local_engine
             torch.npu.set_device(self._device)
