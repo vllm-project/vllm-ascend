@@ -462,7 +462,7 @@ Before you start, please
         # Ensure the model path matches the directory recorded during download
         vllm serve <MODEL_PATH> \
             --host 0.0.0.0 \
-            --port $2 \
+            --port 8000 \
             --tensor-parallel-size 16 \
             --enable-expert-parallel \
             --pipeline-parallel-size 2 \
@@ -525,7 +525,7 @@ Before you start, please
         # Ensure the model path matches the directory recorded during download
         vllm serve <MODEL_PATH> \
             --host 0.0.0.0 \
-            --port $2 \
+            --port 8000 \
             --tensor-parallel-size 16 \
             --enable-expert-parallel \
             --pipeline-parallel-size 2 \
@@ -701,6 +701,8 @@ Once the preparation is done, you can start the server with the following comman
     bash run_dp_template.sh
     ```
 
+Note: The prefill nodes run PP2 as a single `vllm serve` process per node (see the scripts above), so they are started directly with `bash run_dp_template.sh` without positional parameters. The engine port is fixed to `8000` in the prefill scripts, which is the port the request-forwarding proxy points to. Only the decode nodes are started through `launch_online_dp.py`, which passes the positional parameters (`$1`-`$7`) used by the decode `run_dp_template.sh`.
+
 3. Decode node 0
 
     ```shell
@@ -727,7 +729,7 @@ python load_balance_proxy_server_example.py \
     --prefiller-hosts \
       $node_p0_ip \
     --prefiller-ports \
-      9081 \
+      8000 \
     --decoder-hosts \
       $node_d0_ip \
       $node_d0_ip \
