@@ -167,6 +167,44 @@ class TestGlm5MtpGraphMetadata(unittest.TestCase):
                     )
                 self.assertEqual(runner.cudagraph_dispatcher.dispatch.call_args.kwargs["uniform_decode"], expected)
 
+    def test_pd_recompute_hybrid_tail_dispatches_decode_graph(self):
+        cases = [
+            ([4095], [4096], True, False, 6, 6, True),
+            ([4095], [4096], False, False, 6, 6, False),
+            ([4092], [4096], True, False, 6, 6, False),  # incomplete prompt
+            ([0], [4096], True, False, 6, 6, False),  # no initial state
+            ([0], [1], True, False, 6, 6, False),  # N-1 still needs state
+            ([4096], [4096], False, False, 6, 6, True),
+            ([4100, 4095], [4096, 4096], True, False, 6, 6, True),
+            ([4095, 4092], [4096, 4096], True, False, 6, 6, False),
+            ([4095], [4096], True, True, 6, 6, False),  # retain DCP guard
+            ([4095], [4096], True, False, 6, 1, False),  # unpadded MTP tail
+            ([4095], [4096], True, False, 1, 1, True),  # non-spec decode
+        ]
+        for computed, prompts, enabled, dcp, graph_width, query_width, expected in cases:
+            with self.subTest(computed=computed, enabled=enabled, dcp=dcp, query_width=query_width):
+                runner = self._build_dispatch_runner(speculative=graph_width > 1)
+                runner.model_config.is_hybrid = True
+                runner.dcp_size = 2 if dcp else 1
+                runner.uniform_decode_query_len = graph_width
+                runner.input_batch.num_computed_tokens_cpu = np.array(computed + [0])
+                runner.input_batch.num_prompt_tokens = np.array(prompts + [999])
+                with (
+                    patch("vllm_ascend.worker.model_runner_v1.enable_sp", return_value=False),
+                    patch(
+                        "vllm_ascend.worker.model_runner_v1.is_pd_decode_recompute_scheduler_enabled",
+                        return_value=enabled,
+                    ),
+                ):
+                    runner._determine_batch_execution_and_padding(
+                        num_tokens=query_width * len(computed),
+                        num_reqs=len(computed),
+                        num_scheduled_tokens_np=np.full(len(computed), query_width),
+                        max_num_scheduled_tokens=query_width,
+                        use_cascade_attn=False,
+                    )
+                self.assertEqual(runner.cudagraph_dispatcher.dispatch.call_args.kwargs["uniform_decode"], expected)
+
 
 class TestDPPaddingPolicy(unittest.TestCase):
     @staticmethod
