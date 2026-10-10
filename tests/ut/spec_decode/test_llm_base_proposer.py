@@ -25,6 +25,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from vllm.config import CUDAGraphMode
+from vllm.model_executor.models.bailing_moe_v3_mtp import (
+    BailingMoeV3MTPModel,
+    BailingMoeV3MTPSharedHead,
+    BailingMoeV3MultiTokenPredictor,
+)
 
 from vllm_ascend.spec_decode.llm_base_proposer import (
     AscendSpecDecodeBaseProposer,
@@ -234,6 +239,7 @@ class TestMtpSharesTheTargetLmHead:
         mtp_layer = SimpleNamespace(shared_head=SimpleNamespace(head=SimpleNamespace(weight=draft_head_weight)))
 
         draft = MagicMock()
+        del draft.share_lm_head
         draft.model.layers = {"78": mtp_layer}
         if has_own_lm_head is None:
             del draft.has_own_lm_head
@@ -267,6 +273,73 @@ class TestMtpSharesTheTargetLmHead:
         proposer, target, mtp_layer = self._build(torch.ones(4, 2), has_own_lm_head=True)
         proposer._maybe_share_lm_head(target)
         assert mtp_layer.shared_head.head is target.lm_head
+
+    def test_bailing_draft_uses_share_lm_head_hook_without_traversing_layers(self):
+        class BailingDraft:
+            def __init__(self):
+                self.lm_head = None
+                self.model = SimpleNamespace(layers=MagicMock())
+                self.model.layers.items.side_effect = AssertionError("Bailing hook must bypass shared_head traversal")
+
+            def share_lm_head(self, lm_head):
+                self.lm_head = lm_head
+
+        target_lm_head = SimpleNamespace(weight=torch.ones(4, 2))
+        target = SimpleNamespace(lm_head=target_lm_head)
+        draft = BailingDraft()
+        proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
+        proposer.method = "mtp"
+        proposer.model = draft
+        proposer.use_cuda_graph = False
+        proposer.vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(is_deepseek_mla=True),
+            compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE),
+        )
+
+        proposer._maybe_share_lm_head(target)
+
+        assert draft.lm_head is target_lm_head
+        draft.model.layers.items.assert_not_called()
+
+    @pytest.mark.parametrize("spec_step_idx", [0, 1, 2])
+    def test_bailing_compute_logits_uses_target_head_for_every_mtp_step(self, spec_step_idx):
+        # Keep the real logits methods, without constructing attention or MoE.
+        predictor = BailingMoeV3MultiTokenPredictor.__new__(BailingMoeV3MultiTokenPredictor)
+        torch.nn.Module.__init__(predictor)
+        predictor.mtp_start_layer_idx = 7
+        predictor.num_mtp_layers = 2
+        predictor.layers = torch.nn.ModuleDict()
+        for layer_idx in (7, 8):
+            shared_head = BailingMoeV3MTPSharedHead.__new__(BailingMoeV3MTPSharedHead)
+            torch.nn.Module.__init__(shared_head)
+            shared_head.head = torch.nn.Linear(3, 5, bias=False)
+            torch.nn.init.zeros_(shared_head.head.weight)
+            layer = torch.nn.Module()
+            layer.shared_head = shared_head
+            predictor.layers[str(layer_idx)] = layer
+        predictor.logits_processor = MagicMock(side_effect=lambda head, states: head(states))
+
+        draft = BailingMoeV3MTPModel.__new__(BailingMoeV3MTPModel)
+        torch.nn.Module.__init__(draft)
+        draft.model = predictor
+        draft.lm_head = None
+        target_head = torch.nn.Linear(3, 5, bias=False)
+        torch.nn.init.ones_(target_head.weight)
+        hidden_states = torch.tensor([[1.0, 2.0, 3.0]])
+        torch.testing.assert_close(draft.compute_logits(hidden_states, spec_step_idx), torch.zeros(1, 5))
+
+        proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
+        proposer.method = "mtp"
+        proposer.model = draft
+        proposer.use_cuda_graph = False
+        proposer.vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(is_deepseek_mla=True),
+            compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE),
+        )
+        proposer._maybe_share_lm_head(SimpleNamespace(lm_head=target_head))
+
+        torch.testing.assert_close(draft.compute_logits(hidden_states, spec_step_idx), target_head(hidden_states))
+        assert predictor.logits_processor.call_args.args[0] is target_head
 
 
 def test_load_model_reads_validated_draft_window_size():
