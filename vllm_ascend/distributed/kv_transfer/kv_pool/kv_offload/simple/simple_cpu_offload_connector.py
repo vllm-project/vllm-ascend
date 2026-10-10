@@ -52,3 +52,13 @@ class AscendSimpleCPUOffloadConnector(SimpleCPUOffloadConnector):
                 "AscendSimpleCPUOffloadConnector: using NPU worker (per_rank=%.2f GB)",
                 cpu_capacity / (1024**3),
             )
+
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        # Upstream's connector does not implement this, so a failed H2D copy
+        # would otherwise be invisible to the engine. The NPU worker tracks the
+        # blocks its copy backend could not fill; reporting them here lets vLLM
+        # apply kv_load_failure_policy instead of attending over unwritten KV.
+        worker_handler = self.worker_handler
+        if not isinstance(worker_handler, SimpleCPUOffloadNPUWorker):
+            return set()
+        return worker_handler.get_block_ids_with_load_errors()
