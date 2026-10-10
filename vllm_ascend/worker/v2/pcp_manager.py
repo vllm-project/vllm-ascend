@@ -500,9 +500,9 @@ class AscendPCPManager(PCPManager):
         assert self._global_batch is not None
         if self._sampling_hidden_restored:
             self._sampling_hidden_restored = False
+            global_batch = self._global_batch
         else:
-            hidden_states = self.restore_hidden_states(hidden_states)
-        global_batch = self._global_batch
+            hidden_states, global_batch = super().restore_for_sampling(hidden_states)
         if self._restore_unpadded_global_batch():
             # Preserve the target's batch; expose real request boundaries and
             # token extent at the global restoration boundary.
