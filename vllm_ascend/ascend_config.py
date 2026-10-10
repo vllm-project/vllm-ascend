@@ -1361,7 +1361,8 @@ class FinegrainedTPConfig:
                     "require tensor_parallel_size == 1, got "
                     f"{vc.parallel_config.tensor_parallel_size}."
                 )
-            # Graph dispatch is the only lane that aligns DP token counts (eager keeps per-rank counts).
+            # Graph mode stays a deployment precondition; the self-padded static
+            # exchanges (linear_op.py) tolerate steps that degrade to eager.
             if vc.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
                 raise AssertionError(
                     "oproj_tensor_parallel_size / mlp_tensor_parallel_size are only supported in graph mode"
@@ -1377,39 +1378,52 @@ class FinegrainedTPConfig:
                     "oproj_tensor_parallel_size / mlp_tensor_parallel_size are not supported "
                     "with prefill_context_parallel_size > 1."
                 )
-            # decode_query_len mirrors _get_default_max_cudagraph_capture_size in platform.py.
-            decode_query_len = 1
-            speculative_config = vc.speculative_config
-            if speculative_config and speculative_config.num_speculative_tokens:
-                decode_query_len += speculative_config.num_speculative_tokens
-            max_step = min(
-                vc.scheduler_config.max_num_batched_tokens, vc.scheduler_config.max_num_seqs * decode_query_len
-            )
-            capture_bound = vc.compilation_config.max_cudagraph_capture_size
-            # An explicit sizes list is the bound until _set_cudagraph_sizes backfills the capture max.
-            if capture_bound is None:
-                capture_sizes = vc.compilation_config.cudagraph_capture_sizes
-                capture_bound = max(capture_sizes) if capture_sizes else None
-            # A step beyond the capture bound dispatches to eager and desyncs the cross-DP collectives.
-            if capture_bound is None or capture_bound < max_step:
-                logger.warning(
-                    "Disabling oproj_tensor_parallel_size=%d and mlp_tensor_parallel_size=%d: "
-                    "the largest cudagraph capture size (%s) does not cover the largest "
-                    "possible step (%d tokens); an oversized step would dispatch to eager "
-                    "and hang the cross-DP HCCL collectives. Raise max_cudagraph_capture_size "
-                    "to re-enable them.",
-                    self.oproj_tensor_parallel_size,
-                    self.mlp_tensor_parallel_size,
-                    str(capture_bound),
-                    max_step,
+            # The exchange buffers are sized once at the capacity, so every replayed
+            # bucket pays the same exchange; extra buckets only add capture graphs
+            # and their memory. Collapse to the recipe bucket instead of disabling
+            # the knobs (same adjust-and-warn pattern as the SP max_num_batched
+            # _tokens writeback above).
+            capture_sizes = vc.compilation_config.cudagraph_capture_sizes
+            if capture_sizes is None or len(capture_sizes) != 1:
+                decode_query_len = (
+                    1 if vc.speculative_config is None else 1 + vc.speculative_config.num_speculative_tokens
                 )
-                self.oproj_tensor_parallel_size = 0
-                self.mlp_tensor_parallel_size = 0
-            else:
-                if self.oproj_tensor_parallel_size > 1:
-                    enabled_configs.append(f"oproj_tensor_parallel_size={self.oproj_tensor_parallel_size}")
-                if self.mlp_tensor_parallel_size > 1:
-                    enabled_configs.append(f"mlp_tensor_parallel_size={self.mlp_tensor_parallel_size}")
+                # Floor to a decode_query_len multiple within mnbt: a bucket above
+                # mnbt is dropped by _set_cudagraph_sizes' clipping, which empties
+                # the list and aborts startup.
+                chosen = min(
+                    vc.scheduler_config.max_num_batched_tokens,
+                    vc.scheduler_config.max_num_seqs * decode_query_len,
+                )
+                chosen -= chosen % decode_query_len
+                if capture_sizes:
+                    chosen = max(chosen, max(capture_sizes))
+                chosen -= chosen % decode_query_len
+                chosen = min(chosen, vc.scheduler_config.max_num_batched_tokens)
+                vc.compilation_config.cudagraph_capture_sizes = [chosen]
+                vc.compilation_config.max_cudagraph_capture_size = chosen
+                # _setup_compile_backend would merge the platform's reduced cap
+                # back into the list and rebuild a multi-bucket ladder.
+                if getattr(vc.compilation_config, "reduced_cg_cap", None) is not None:
+                    delattr(vc.compilation_config, "reduced_cg_cap")
+                # warning_once caches its args in a set, so sizes must be hashable.
+                sizes_desc = "the default size ladder" if capture_sizes is None else str(capture_sizes)
+                logger.warning_once(
+                    "Fine-grained TP exchanges always run at the static capacity, "
+                    "so extra capture buckets do not shrink the exchange - they "
+                    "only add capture graphs and memory. Collapsing "
+                    "cudagraph_capture_sizes %s to [%d] (= min(max_num_batched_"
+                    "tokens, max_num_seqs * decode_query_len), floored to a "
+                    "decode_query_len multiple, guided by your largest bucket) "
+                    "so one bucket equals the exchange capacity. Set "
+                    "cudagraph_capture_sizes explicitly to silence this.",
+                    sizes_desc,
+                    chosen,
+                )
+            if self.oproj_tensor_parallel_size > 1:
+                enabled_configs.append(f"oproj_tensor_parallel_size={self.oproj_tensor_parallel_size}")
+            if self.mlp_tensor_parallel_size > 1:
+                enabled_configs.append(f"mlp_tensor_parallel_size={self.mlp_tensor_parallel_size}")
         if self.lmhead_tensor_parallel_size > 0:
             enabled_configs.append(f"lmhead_tensor_parallel_size={self.lmhead_tensor_parallel_size}")
         if self.embedding_tensor_parallel_size > 0:
