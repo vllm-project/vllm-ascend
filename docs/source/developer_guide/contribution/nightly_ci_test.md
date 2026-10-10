@@ -39,6 +39,25 @@ The comment itself triggers the workflow — no label is required.
     [CODEOWNERS](https://github.com/vllm-project/vllm-ascend/blob/main/.github/CODEOWNERS)
     file.
 
+### Maintenance window
+
+Maintainers can pause PR-triggered commands during a maintenance window by setting
+the repository variable `NIGHTLY_COMMAND_BLOCK_WINDOW`. The value is an optional
+switch followed by an `HH:MM-HH:MM` range in Beijing time (UTC+8):
+
+| Value | Behavior |
+|-------|----------|
+| `true 22:00-08:00` | Gate enabled; block inside the window |
+| `22:00-08:00` | Same as above (switch omitted) |
+| `false 22:00-08:00` | Gate explicitly disabled |
+| unset / invalid | Gate disabled (fail-open) |
+
+Switch aliases are `true/1/yes/on` and `false/0/no/off` (case-insensitive); a space
+or comma may separate the switch from the range. Cross-midnight ranges are
+supported. While the gate is enabled and the current Beijing time falls inside the
+range, `/nightly` and `/weekly` comments do not dispatch tests; the bot replies with
+the active window instead.
+
 ### 2. Wait for results
 
 GitHub Actions will trigger the `Nightly-A2` or `Nightly-A3` workflow. Only tests
@@ -143,19 +162,13 @@ The `pr-accuracy-group-*` entries only run on `/nightly` (PR-triggered) runs;
 
 | Test name | Description |
 |-----------|-------------|
-| `multi-node-deepseek-v3.2-W8A8-EP` | DeepSeek-V3.2-W8A8 with EP, 4-node |
 
 **Double-node tests** (`a3.double_node.test_config`, 2-node, run after multi-node):
 
 | Test name | Description |
 |-----------|-------------|
-| `multi-node-qwen3-dp` | Qwen3-235B-A22B, 2-node DP |
-| `multi-node-qwenw8a8-2node-eplb` | Qwen3-235B-W8A8 with EPLB, 2-node |
-| `multi-node-dpsk3.2-2node` | DeepSeek-V3.2-W8A8, 2-node |
-| `multi-node-qwen-disagg-pd` | Qwen3-235B disaggregated PD, 2-node |
 | `multi-node-qwen-vl-disagg-pd` | Qwen3-VL-235B disaggregated PD, 2-node |
 | `multi-node-deepseek-v3.1` | DeepSeek-V3.1-BF16, 2-node |
-| `multi-node-deepseek-v3.2-W8A8-EP` | DeepSeek-V3.2-W8A8 with EP, 4-node |
 | `multi-node-glm-5.2` | GLM-5.1-W8A8, 2-node |
 
 **Single-node tests** (`a3.single_node.test_config`):
@@ -167,10 +180,8 @@ The `pr-accuracy-group-*` entries only run on `/nightly` (PR-triggered) runs;
 | `kimi-k2-thinking` | Kimi-K2-Thinking |
 | `qwen3-vl-235b-a22b-instruct-w8a8` | Qwen3-VL-235B-A22B-Instruct-W8A8 |
 | `deepseek-r1-0528-w8a8-prefix-cache` | DeepSeek-R1-0528-W8A8 prefix cache |
-| `deepseek-v3-2-w8a8` | DeepSeek-V3.2-W8A8 |
 | `glm-4.7-w8a8` | GLM-4.7 W8A8 |
 | `kimi-k2.5` | Kimi-K2.5 |
-| `qwen3-235b-a22b-w8a8` | Qwen3-235B-A22B-W8A8 |
 | `Qwen3.5-397B-A17B-w8a8-mtp` | Qwen3.5-397B-A17B W8A8 + MTP |
 | `Qwen3.5-27B-w8a8-A3` | Qwen3.5-27B W8A8 |
 | `Qwen3.5-122B-A10B-W8A8-A3` | Qwen3.5-122B-A10B W8A8 |
@@ -288,6 +299,13 @@ The workflow will:
   users' comments are ignored.
 - To re-trigger after fixing an issue, simply push a new commit — the workflow will
   reuse the existing `/nightly` comment automatically.
+
+**My `/nightly` comment was ignored during the maintenance window.**
+
+- If the repository variable `NIGHTLY_COMMAND_BLOCK_WINDOW` is set and the current
+  Beijing time is inside the configured range, `/nightly` and `/weekly` are
+  intentionally blocked to protect the third-party scheduling tests. The bot replies
+  with the active window; retry after it ends.
 
 **Only some tests ran, not the ones I expected.**
 

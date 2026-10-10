@@ -40,6 +40,8 @@ from vllm_ascend.models.glm5next.cache_config import (
     get_glm5_next_pool_bytes_per_block,
 )
 from vllm_ascend.models.glm5next.kv_cache import is_glm5_next_cache_spec
+from vllm_ascend.quantization.methods.kv_cache.turboquant import TURBOQUANT_CACHE_DTYPE
+from vllm_ascend.quantization.methods.kv_cache.turboquant import cache as tq_cache
 
 _KIMI_K3_TARGET_LAYER_PREFIX = "language_model.model.layers."
 _KIMI_K3_DRAFT_LAYER_PREFIX = "model.layers."
@@ -287,6 +289,12 @@ def _get_kv_cache_groups_uniform_groups(
     Generate the KV cache groups from the grouped specs.
     """
     assert len(grouped_specs) > 0 and all(isinstance(spec, UniformTypeKVCacheSpecs) for spec in grouped_specs)
+    if any(
+        getattr(spec, "cache_dtype_str", None) == TURBOQUANT_CACHE_DTYPE
+        for group in grouped_specs
+        for spec in group.kv_cache_specs.values()
+    ):
+        return tq_cache.group_specs(grouped_specs)
     # For now, we restrict the first grouped_spec to be UniformTypeKVCacheSpecs
     # containing only MLAAttentionSpec.
     full_mla_spec = grouped_specs[0]
@@ -518,6 +526,8 @@ def _get_kv_cache_config_deepseek_v4_main(
     kv_cache_groups: list[KVCacheGroupSpec],
     available_memory: int,
 ) -> tuple[int, list[KVCacheTensor]]:
+    if tq_cache.uses_turboquant_groups(kv_cache_groups):
+        return tq_cache.cache_config(vllm_config, kv_cache_groups, available_memory)
     (
         page_sizes,
         bucketed,
@@ -603,6 +613,8 @@ def _ascend_pool_bytes_per_block(kv_cache_groups: list[KVCacheGroupSpec]) -> int
     layout, so using the upstream value changes ``num_blocks`` during the
     re-plan and leaves ranks inconsistent.
     """
+    if tq_cache.uses_turboquant_groups(kv_cache_groups):
+        return tq_cache.pool_bytes_per_block(kv_cache_groups)
     if is_deepseek_v41_cache(kv_cache_groups):
         return get_deepseek_v41_pool_bytes_per_block(kv_cache_groups)
     if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
@@ -619,6 +631,8 @@ def _ascend_max_memory_usage_bytes_from_groups(
     kv_cache_groups: list[KVCacheGroupSpec],
 ) -> int:
     """Keep the pre-#51718 DSV4 admission formula for its shared tuples."""
+    if tq_cache.uses_turboquant_groups(kv_cache_groups):
+        return tq_cache.max_memory_usage(vllm_config, kv_cache_groups)
     if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
         return get_glm5_next_max_memory_usage(vllm_config, kv_cache_groups)
     if not _is_deepseek_v4_groups(kv_cache_groups):
@@ -683,6 +697,30 @@ def _ascend_get_kv_cache_config_from_groups(
             prefix_cache_retention_interval=vllm_config.cache_config.prefix_cache_retention_interval,
         )
     kv_cache_config.kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+    speculative_config = getattr(vllm_config, "speculative_config", None)
+    if speculative_config is not None and speculative_config.method == "dspark":
+        from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import resident_mla_context_group_ids
+
+        # Upstream scheduler conversion keeps only the first spec in a uniform
+        # group, losing draft residency when target and draft share block IDs.
+        # Preserve the worker-derived ownership through that deepcopy. Remove
+        # this bridge once upstream KVCacheConfig carries per-layer ownership.
+        kv_cache_config.dspark_context_group_ids = resident_mla_context_group_ids(kv_cache_config.kv_cache_groups)
+        draft_only_group_ids = []
+        for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
+            group_spec = group.kv_cache_spec
+            specs = (
+                tuple(group_spec.kv_cache_specs.values())
+                if isinstance(group_spec, UniformTypeKVCacheSpecs)
+                else (group_spec,)
+            )
+            # Keep mixed target/draft groups in the ordinary target lookup.
+            # Empty PP-local layer names still carry the global group spec.
+            if specs and all(
+                isinstance(spec, MLAAttentionSpec) and spec.non_causal_multi_token_decode for spec in specs
+            ):
+                draft_only_group_ids.append(group_id)
+        kv_cache_config.dspark_draft_only_group_ids = tuple(draft_only_group_ids)
     return kv_cache_config
 
 

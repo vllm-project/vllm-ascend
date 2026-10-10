@@ -164,28 +164,22 @@
 #
 # ** 6. File: platform/patch_engram_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.engine.arg_utils.EngramConfig`
-#   2. `vllm.engine.arg_utils.get_kwargs`
-#   3. `vllm.config.vllm.VllmConfig._resolve_and_verify_engram_config`
+#   1. `vllm.config.engram.EngramConfig.verify_model_config`
 #    Why:
-#       The pinned vLLM 84030bbe does not define `dp_shared_memory` and only
-#       accepts CUDA Qwen Engram models. Its CLI schema is built from that
-#       config before the platform can supply an Ascend-specific subtype.
-#    How：
-#       Define an Ascend EngramConfig subtype with `dp_shared_memory`, use it
-#       for EngineArgs conversion and `--engram-config` JSON parsing, then
-#       resolve DeepSeek V4.1 target configs through that subtype. Keep model,
-#       topology, load-format and DBO validation in the subtype.
-#       Skip this patch when vLLM does not provide EngramConfig. External DP
-#       locality is checked on the initialized DP group because its
-#       data_parallel_size_local counts engines per launcher.
+#       Upstream Engram model validation requires CUDA before the platform hook.
+#    How:
+#       Keep upstream model/layer checks and lift only the CUDA requirement.
+#       Use the native EngramConfig and resolver. Ascend's normal platform hook
+#       supplies missing defaults and checks its model, topology and loader limits.
+#       Skip this patch when vLLM does not provide EngramConfig.
 #    Related PR (if no, explain why):
-#       No Ascend upstream PR. The required generic Engram behavior is
-#       selectively backported from vLLM commit f84b0c4bce:
-#       https://github.com/vllm-project/vllm/commit/f84b0c4bce
+#       https://github.com/vllm-project/vllm/pull/59171
+#       Tracks https://github.com/vllm-project/vllm/issues/59169.
+#       Removes CUDA-alike restrictions from model validation and defaults.
 #    Future Plan:
-#       Remove this patch when the pinned vLLM includes `dp_shared_memory` and
-#       exposes a platform hook for Engram config selection and validation.
+#       Once the pinned vLLM includes that change, remove this patch and
+#       platform-side default creation. Keep Ascend's
+#       model, topology and loader restrictions in the normal platform hook.
 #
 # ** 7. File: platform/patch_eplb.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -245,6 +239,28 @@
 #       Remove this DeepSeek-V4-specific argument bridge once upstream exposes
 #       a backend-neutral router configuration object or MoE factory extension
 #       hook that carries vision routing metadata into the Ascend runner.
+#
+# ** File: platform/patch_glm53_reasoning.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.parser.glm47_moe.Glm47MoeParser.__init__`
+#    Why:
+#       GLM-5.3 always generates reasoning, but the supported vLLM v0.30.0
+#       and verified main pin do not include PR #56994. Passing thinking=False
+#       or enable_thinking=False disables extraction and leaks reasoning into
+#       content, including for streamed responses.
+#    How:
+#       Detect the GLM-5.3 template using the upstream signature and normalize
+#       both switches on a copy of the parser kwargs before initialization.
+#       The shared GLM parser then enables reasoning for the glm45/glm47
+#       reasoning adapters and the glm47 tool adapter. Older GLM templates
+#       retain their thinking switch. Skip patching versions with the upstream
+#       helper, and do not wrap the constructor more than once.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/56994
+#       Original fix by Shijin Zhang (Dovis01), commit d95d1dcfb975.
+#    Future Plan:
+#       Remove this patch and its platform import once all supported vLLM
+#       release tags and verified main pins include the upstream fix.
 #
 # ** 7a. File: platform/patch_glm5next_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -814,29 +830,26 @@
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.vllm.VllmConfig.use_v2_model_runner`
 #    Why:
-#       Ascend uses the NPU v2 runner by default. Features that are not
-#       V2-ready (pooling KV, LoRA, VL encoder disaggregation,
-#       draft_window_size, enable_reduce_sample, suffix speculative decoding,
-#       ngram speculative decoding, parallel_drafting, and dflash2 graph)
-#       default to v1.
-#       Upstream GPU-specific architecture, feature, and Triton gates must not
-#       silently switch an
-#       Ascend request back to v1. VLLM_USE_V2_MODEL_RUNNER=0 remains the
-#       explicit v1 escape hatch.
+#       Upstream vLLM enables the v2 model runner not only via the
+#       VLLM_USE_V2_MODEL_RUNNER env var but also based on model
+#       architecture whitelists, Triton availability, and feature
+#       compatibility checks. On Ascend the NPU v2 runner is not yet
+#       compatible with all upstream-defaulted models and features, so
+#       enabling by model architecture can crash. We override the
+#       property to read only VLLM_USE_V2_MODEL_RUNNER, deferring
+#       model/framework checks to the NPU runner itself.
 #    How:
-#       Call apply_v2_model_runner_config_patch() to install the Ascend
-#       default-v2 use_v2_model_runner property (with the V2 feature
-#       blacklist) and neutralize upstream V2 validation. Keep
-#       additional patches for spec-PP unsupported features and
-#       Ascend-supported V1 features (dspark / dflash2).
+#       Monkey-patch VllmConfig.use_v2_model_runner to return
+#       envs.VLLM_USE_V2_MODEL_RUNNER (defaulting to False when unset).
 #       worker/patch_v2/patch_use_v2_model_runner.py reuses this platform
 #       patch so EngineCore and worker processes share the same behavior.
 #    Related PR (if no, explain why):
 #       1. https://github.com/vllm-project/vllm-ascend/pull/11389
-#       2. https://github.com/vllm-project/vllm-ascend/pull/11692
 #    Future Plan:
-#       Remove this patch once upstream exposes a platform-specific default
-#       runner-selection hook.
+#       Remove this patch once vllm-ascend fully supports the v2 model
+#       runner and can rely on upstream's default enablement heuristics
+#       (model architecture, Triton, feature checks) without crashes or
+#       degraded functionality.
 #
 #   2. `vllm.config.parallel.ParallelConfig._validate_parallel_config`
 #    Why:
@@ -1482,8 +1495,7 @@
 #    Why:
 #       EngineCore subprocesses only load global/platform patches, while workers
 #       also import this compatibility module. The actual monkey-patch is defined
-#       in `platform/patch_use_v2_model_runner.py` (default-v2 selection plus
-#       remaining V2/V1 feature patches).
+#       in `platform/patch_use_v2_model_runner.py`.
 #    How：
 #       Reuse the platform patch so EngineCore and worker processes share the
 #       same `use_v2_model_runner` behavior.
@@ -1581,6 +1593,19 @@
 #       Ascend layouts, including segmented Conv/SSM storage, shared views and
 #       multiple kernel blocks per scheduler block. If #17451 is integrated,
 #       consolidate the duplicate runner rebind into one patch module.
+#
+#   3. `vllm.v1.worker.gpu.model_runner.dispatch_cg_and_sync_dp`
+#    Why:
+#       With sharded PCP decode, the dispatch token count is rank-local, but
+#       the runner still passes the global request count, so no uniform decode
+#       graph matches.
+#    How:
+#       When `is_pcp_decode_sharding_enabled()` holds, derive the request
+#       count from the local tokens and the uniform query length.
+#    Related PR (if no, explain why):
+#       No upstream PR yet; vLLM #52162 still passes the global request count.
+#    Future Plan:
+#       Remove once upstream dispatches sharded PCP decode with local counts.
 #
 # ** 34. File: platform/patch_vision.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

@@ -43,10 +43,22 @@ defaults:
 env:
   UPSTREAM_REPO: vllm-project/vllm-ascend
   MAIN2MAIN_MODEL: ${{ github.event_name == 'workflow_dispatch' && inputs.model || 'deepseek/deepseek-flash' }}
+  RUNS_ON_S3_BUCKET_CACHE: ascend-ci-cache-hk
+  RUNS_ON_S3_BUCKET_ENDPOINT: https://obs.ap-southeast-1.myhuaweicloud.com
+  RUNS_ON_S3_FORCE_PATH_STYLE: "false"
+  AWS_S3_FORCE_PATH_STYLE: "false"
+  AWS_REGION: ap-southeast-1
+  RUNS_ON_RUNNER_NAME: ""
+  # Fork account used for baseline storage, flow commits and cross-repo PRs
+  # (consumed by the flow code as $HEAD_FORK). Defaults live here; override
+  # via repository Variables (Settings → Secrets and variables → Actions →
+  # Variables) without editing this file.
+  HEAD_FORK: ${{ vars.MAIN2MAIN_HEAD_FORK || 'submitter-dev/vllm-ascend' }}
+  MAIN2MAIN_GIT_NAME: ${{ vars.MAIN2MAIN_GIT_NAME || 'submitter-dev' }}
+  MAIN2MAIN_GIT_EMAIL: ${{ vars.MAIN2MAIN_GIT_EMAIL || '339081302+submitter-dev@users.noreply.github.com' }}
   # Accumulated adaptation state ref on HEAD_FORK, shared by resolve-source
   # (incremental mode base) and the push step (PR-success update).
   MAIN2MAIN_BASELINE_REF: main2main_baseline
-  
 
 jobs:
   resolve-source:
@@ -58,7 +70,6 @@ jobs:
       base_sha: ${{ steps.source.outputs.base_sha }}
     env:
       TARGET_COMMIT: ${{ github.event_name == 'workflow_dispatch' && inputs.target_commit || '' }}
-      HEAD_FORK: dev-submitter/vllm-ascend
     steps:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v7
@@ -82,8 +93,8 @@ jobs:
             exit 1
           fi
 
-          git config user.name "dev-submitter"
-          git config user.email "330005789+dev-submitter@users.noreply.github.com"
+          git config user.name "${MAIN2MAIN_GIT_NAME}"
+          git config user.email "${MAIN2MAIN_GIT_EMAIL}"
           # This fetch gates the whole run; retry transient failures.
           attempt=0
           until git fetch "https://github.com/${UPSTREAM_REPO}.git" main; do
@@ -160,6 +171,9 @@ jobs:
   ensure-csrc-cache:
     needs: resolve-source
     uses: ./.github/workflows/_ensure_csrc_cache.yaml
+    secrets:
+      HW_OBS_AK: ${{ secrets.HW_OBS_AK }}
+      HW_OBS_SK: ${{ secrets.HW_OBS_SK }}
     with:
       # No CPU csrc cache: csrc is compiled on the a3 NPU runner below.
       target_ids: '[]'
@@ -200,11 +214,12 @@ jobs:
         shell: bash -el {0}
     env:
       GH_TOKEN: ${{ secrets.DEV_SUBMITTER_TOKEN }}
+      OBS_CACHE_WRITE_ACCESS_KEY_ID: ${{ secrets.HW_OBS_AK }}
+      OBS_CACHE_WRITE_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_SK }}
       MAIN2MAIN_IMAGE_TAG: 9.1.0-a3-ubuntu22.04-py3.12
       TARGET_COMMIT: ${{ github.event_name == 'workflow_dispatch' && inputs.target_commit || '' }}
       PUSH_TO_GITHUB: 'true'
       GITHUB_REPO: vllm-project/vllm-ascend
-      HEAD_FORK: dev-submitter/vllm-ascend
       MAIN2MAIN_KEEP_BRANCH: 'true'
       MAIN2MAIN_WORKSPACE: /tmp/main2main_flow/workspace
       MAIN2MAIN_CASES_FILE: .github/workflows/scripts/main2main_tests.json
@@ -265,7 +280,6 @@ jobs:
           set -eu
           # Hide the nested vllm checkout from the ascend repo's git status.
           echo "vllm-upstream/" >> .git/info/exclude
-
           TARGET="${TARGET_COMMIT}"
           if [ -n "${TARGET}" ]; then
             if ! echo "${TARGET}" | grep -Eq '^[0-9a-f]{40}$'; then
@@ -274,8 +288,8 @@ jobs:
             fi
           fi
 
-          git config user.name "dev-submitter"
-          git config user.email "330005789+dev-submitter@users.noreply.github.com"
+          git config user.name "${MAIN2MAIN_GIT_NAME}"
+          git config user.email "${MAIN2MAIN_GIT_EMAIL}"
           gh --version
 
       - name: Load main2main test cases
@@ -467,6 +481,15 @@ jobs:
           VLLM_TARGET_DEVICE=empty uv pip install .
           pip uninstall -y triton
 
+      - name: Restore incremental cache for Main2Main fallback
+        id: main2main-l1
+        if: ${{ steps.cache-csrc.outputs.cache-hit != 'true' }}
+        uses: $/.github/actions/csrc-l1-restore
+        with:
+          cache-dir: ${{ runner.temp }}/vllm-ascend-incremental-build-cache
+          architecture: ${{ runner.arch }}
+          soc-version: a3
+          source-root: .
       - name: Install vllm-project/vllm-ascend
         working-directory: ${{ github.workspace }}
         env:
@@ -488,8 +511,16 @@ jobs:
 
       - name: Save vllm-ascend csrc cache
         # Persist the on-runner build for the next dispatch.
-        if: steps.cache-csrc.outputs.cache-hit != 'true'
+        if: >-
+          ${{
+            steps.cache-csrc.outputs.cache-hit != 'true' &&
+            env.OBS_CACHE_WRITE_ACCESS_KEY_ID != '' &&
+            env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY != ''
+          }}
         uses: runs-on/cache/save@v5
+        env:
+          AWS_ACCESS_KEY_ID: ${{ env.OBS_CACHE_WRITE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY }}
         with:
           path: |
             vllm_ascend/_cann_ops_custom
@@ -630,4 +661,3 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "::notice::final_status=${FINAL_STATUS}, reached_commit=${REACHED_COMMIT}, steps=${STEPS_COMPLETED}/${STEPS_TOTAL}, commit_count=${COMMIT_COUNT}"
           print_group_if_nonempty "main2main created commits" /tmp/main2main/created-commits.md
-

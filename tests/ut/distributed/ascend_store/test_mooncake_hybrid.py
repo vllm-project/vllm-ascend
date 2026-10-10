@@ -311,6 +311,8 @@ class TestMooncakeHybrid(unittest.TestCase):
 
     def test_coordinator_queries_all_heads_using_mooncake_existence(self):
         scheduler = object.__new__(KVPoolScheduler)
+        scheduler.dspark_prefix_keys = None
+        scheduler.num_speculative_blocks_by_group = {}
         scheduler.block_key_hybrid = True
         scheduler.layerwise_protocol = mooncake_layerwise
         scheduler.model_name = "model"

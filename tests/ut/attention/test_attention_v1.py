@@ -1,7 +1,10 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
+from vllm.config.compilation import CUDAGraphMode
+from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 import vllm_ascend.attention.attention_v1 as attn_module
 from tests.ut.base import TestBase
@@ -21,6 +24,7 @@ from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     cache_graph_workspace,
     needs_layer_aware_fia_graph_replay,
+    requires_contiguous_pa_kv_cache,
     using_paged_attention,
 )
 from vllm_ascend.device.device_op import A5DeviceAdaptor
@@ -32,6 +36,76 @@ LARGE_HEAD_PREFILL_PATH = "vllm_ascend.device.utils.npu_large_head_prefill_atten
 
 
 class TestAttentionGraphHelpers(TestBase):
+    @patch("vllm_ascend.attention.utils.using_paged_attention", return_value=True)
+    def test_pa_contiguous_cache_requirement_is_limited_to_normal_impl(self, mock_using_pa):
+        config = SimpleNamespace(model_config=SimpleNamespace(runner_type="generate"))
+        spec = FullAttentionSpec(block_size=8, num_kv_heads=2, head_size=128, dtype=torch.float16)
+        for impl_cls in (AscendAttentionBackendImpl, AscendC8AttentionBackendImpl, AscendAttentionDCPImpl):
+            with self.subTest(impl=impl_cls):
+                impl = impl_cls.__new__(impl_cls)
+                impl.sliding_window = None
+                self.assertEqual(
+                    requires_contiguous_pa_kv_cache(SimpleNamespace(impl=impl), config, spec),
+                    impl_cls is AscendAttentionBackendImpl,
+                )
+        impl = AscendAttentionBackendImpl.__new__(AscendAttentionBackendImpl)
+        impl.sliding_window = 128
+        self.assertFalse(requires_contiguous_pa_kv_cache(SimpleNamespace(impl=impl), config, spec))
+        self.assertFalse(requires_contiguous_pa_kv_cache(None, config, spec))
+        impl.sliding_window = None
+        config.model_config.runner_type = "pooling"
+        self.assertFalse(requires_contiguous_pa_kv_cache(SimpleNamespace(impl=impl), config, spec))
+        config.model_config.runner_type = "generate"
+        padded_spec = FullAttentionSpec(
+            block_size=8,
+            num_kv_heads=2,
+            head_size=128,
+            dtype=torch.float16,
+            page_size_padded=spec.real_page_size_bytes + 64,
+        )
+        self.assertFalse(requires_contiguous_pa_kv_cache(SimpleNamespace(impl=impl), config, padded_spec))
+        mock_using_pa.assert_called_once()
+
+    def test_paged_attention_allocation_checks_any_configured_shape(self):
+        config = SimpleNamespace(
+            speculative_config=None,
+            model_config=SimpleNamespace(is_hybrid=False),
+            compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY),
+        )
+        pa_config = SimpleNamespace(pa_shape_list=[32, 60])
+        with (
+            patch(
+                "vllm_ascend.attention.utils.get_current_hardware_profile",
+                return_value=get_hardware_profile(AscendDeviceType.A3),
+            ),
+            patch("vllm_ascend.attention.utils.get_ascend_config", return_value=pa_config),
+        ):
+            self.assertTrue(using_paged_attention(None, config, head_size=128))
+            self.assertTrue(using_paged_attention(60, config, head_size=128))
+            self.assertFalse(using_paged_attention(31, config, head_size=128))
+            config.model_config.is_hybrid = True
+            self.assertTrue(using_paged_attention(None, config, head_size=128))
+            self.assertTrue(using_paged_attention(60, config, head_size=128))
+            config.model_config.is_hybrid = False
+            pa_config.pa_shape_list = []
+            self.assertFalse(using_paged_attention(None, config, head_size=128))
+            pa_config.pa_shape_list = [60]
+            config.speculative_config = object()
+            self.assertFalse(using_paged_attention(None, config, head_size=128))
+            config.speculative_config = None
+            config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+            self.assertFalse(using_paged_attention(None, config, head_size=128))
+            self.assertTrue(using_paged_attention(None, config, head_size=512))
+            self.assertTrue(using_paged_attention(60, config, head_size=512))
+            config.speculative_config = object()
+            self.assertFalse(using_paged_attention(None, config, head_size=512))
+            config.speculative_config = None
+        with patch(
+            "vllm_ascend.attention.utils.get_current_hardware_profile",
+            return_value=get_hardware_profile(AscendDeviceType.A5),
+        ):
+            self.assertFalse(using_paged_attention(None, config, head_size=512))
+
     def test_cache_graph_workspace_keeps_first_workspace_by_default(self):
         graph_params = SimpleNamespace(workspaces={1: torch.empty(4)})
         candidate_workspace = torch.empty(8)
@@ -58,6 +132,7 @@ class TestAttentionGraphHelpers(TestBase):
             return_value=get_hardware_profile(AscendDeviceType.A2),
         ):
             self.assertTrue(using_paged_attention(1, vllm_config, head_size=FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE))
+            self.assertTrue(using_paged_attention(None, vllm_config, head_size=FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE))
 
 
 class TestAscendAttentionBackend(TestBase):
@@ -74,6 +149,8 @@ class TestAscendAttentionBackend(TestBase):
 
     def test_supports_pcp_only_for_main_implementation(self):
         with patch("vllm_ascend.attention.attention_v1.enable_dcp", return_value=False):
+            self.assertTrue(AscendAttentionBackend.supports_pcp())
+        with patch("vllm_ascend.attention.attention_v1.enable_dcp", return_value=True):
             self.assertTrue(AscendAttentionBackend.supports_pcp())
 
         class OtherAttentionBackend(AscendAttentionBackend):
@@ -228,8 +305,10 @@ def test_pcp_metadata_keeps_expanded_slot_mapping() -> None:
     assert metadata.attn_state == AscendAttentionState.ChunkedPrefill
 
 
-def test_pcp_cache_write_uses_gathered_inputs() -> None:
+@pytest.mark.parametrize("cache_write_error", [False, True], ids=["success", "cache-write-error"])
+def test_pcp_cache_write_uses_gathered_inputs_and_restores_metadata(cache_write_error) -> None:
     impl = AscendAttentionBackendImpl.__new__(AscendAttentionBackendImpl)
+    impl.is_pcp_decode_sharded = False
     impl.attn_type = attn_module.AttentionType.DECODER
     impl.key_cache = None
     impl.value_cache = None
@@ -265,14 +344,16 @@ def test_pcp_cache_write_uses_gathered_inputs() -> None:
         patch("vllm_ascend.attention.attention_v1.DeviceOperator.reshape_and_cache") as reshape_and_cache,
         patch("vllm_ascend.attention.attention_v1.notify_kv_cache_written"),
     ):
-        result = impl._reshape_and_cache_pcp(
-            query,
-            key,
-            value,
-            (key_cache, value_cache),
-            metadata,
-            output,
-        )
+
+        def write_cache():
+            return impl._reshape_and_cache_pcp(query, key, value, (key_cache, value_cache), metadata, output)
+
+        if cache_write_error:
+            reshape_and_cache.side_effect = RuntimeError("cache write failed")
+            with pytest.raises(RuntimeError, match="cache write failed"):
+                write_cache()
+        else:
+            result = write_cache()
 
     local_inputs, actual_slots, num_decode_tokens = gather_inputs.call_args.args
     torch.testing.assert_close(local_inputs[0], key)
@@ -286,10 +367,12 @@ def test_pcp_cache_write_uses_gathered_inputs() -> None:
     torch.testing.assert_close(cache_args["slot_mapping"], gathered_slots)
     assert metadata.slot_mapping is slot_mapping
     assert metadata.num_actual_tokens == 3
-    assert result[0] is query
-    assert result[1] is key
-    assert result[2] is value
-    assert result[3] is output
+    reshape_and_cache.assert_called_once()
+    if not cache_write_error:
+        assert result[0] is query
+        assert result[1] is gathered_key
+        assert result[2] is gathered_value
+        assert result[3] is output
 
 
 def test_pcp_builder_keeps_short_extend_in_prefill() -> None:
@@ -455,6 +538,45 @@ class TestAscendAttentionBackendImpl(TestBase):
             attn_type=self.attention_type.DECODER,
             kv_sharing_target_layer_name="producer_layer",
         )
+
+    def test_kv_cache_dtype_honors_layer_override(self):
+        self.mock_vllm_config.cache_config.cache_dtype = "fp8"
+        self.mock_vllm_config.model_config.dtype = torch.bfloat16
+        for recipe_c8 in (False, True):
+            self.mock_vllm_config.quant_config.enable_c8_quant = recipe_c8
+            for layer_dtype, expected in (("auto", torch.bfloat16), ("bfloat16", torch.bfloat16)):
+                with self.subTest(layer_dtype=layer_dtype, recipe_c8=recipe_c8):
+                    impl = AscendAttentionBackendImpl(
+                        num_heads=16,
+                        head_size=128,
+                        scale=128**-0.5,
+                        num_kv_heads=1,
+                        alibi_slopes=None,
+                        sliding_window=None,
+                        kv_cache_dtype=layer_dtype,
+                        logits_soft_cap=None,
+                        attn_type=self.attention_type.DECODER,
+                        kv_sharing_target_layer_name=None,
+                    )
+                    self.assertEqual(impl.kv_cache_dtype, expected)
+                    self.assertFalse(impl.enable_c8_quant)
+
+    def test_quantized_layer_still_requires_quantized_weights(self):
+        self.mock_vllm_config.cache_config.cache_dtype = "bfloat16"
+        self.mock_vllm_config.quant_config.enable_c8_quant = False
+        with self.assertRaisesRegex(ValueError, "corresponding quantized weights are required"):
+            AscendAttentionBackendImpl(
+                num_heads=16,
+                head_size=128,
+                scale=128**-0.5,
+                num_kv_heads=1,
+                alibi_slopes=None,
+                sliding_window=None,
+                kv_cache_dtype="fp8",
+                logits_soft_cap=None,
+                attn_type=self.attention_type.DECODER,
+                kv_sharing_target_layer_name=None,
+            )
 
     def test_hnd_layout_is_recorded_during_initialization(self):
         with patch.object(attn_module.envs_vllm, "VLLM_KV_CACHE_LAYOUT", "HND"):

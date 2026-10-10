@@ -31,6 +31,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     validate_layerwise_topology,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cache import DSparkPrefixKeys
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
     build_layerwise_cache_layout,
     build_layerwise_reuse_layout,
@@ -79,6 +80,8 @@ class KVPoolScheduler:
         self.layerwise_data_plane = get_layerwise_data_plane(self.layerwise_protocol)
         self.use_block_key_layerwise = self.use_layerwise and self.layerwise_data_plane == "block_key"
         self.use_layerwise_transfer = self.use_layerwise and self.layerwise_data_plane == "gva"
+        self.dspark_prefix_keys: DSparkPrefixKeys | None = None
+        self.dspark_draft_only_group_ids = frozenset(getattr(kv_cache_config, "dspark_draft_only_group_ids", ()))
         validate_layerwise_topology(self.layerwise_protocol, vllm_config.parallel_config, self.use_layerwise)
         hf_text_config = getattr(vllm_config.model_config, "hf_text_config", None)
         hf_config = getattr(vllm_config.model_config, "hf_config", hf_text_config)
@@ -123,7 +126,11 @@ class KVPoolScheduler:
         self.original_block_size = infer_group_block_sizes(vllm_config.cache_config.block_size, kv_cache_groups)
         self.cacheable_group_ids = infer_cacheable_group_ids(kv_cache_groups)
         cacheable_block_sizes = [self.original_block_size[i] for i in self.cacheable_group_ids]
-        if self.use_layerwise and len(cacheable_block_sizes) != len(self.original_block_size):
+        if (
+            self.use_layerwise
+            and self.backend_name != "memcache"
+            and len(cacheable_block_sizes) != len(self.original_block_size)
+        ):
             raise ValueError("AscendStore private KV state requires non-layerwise transfer")
         self.grouped_block_size = [block_size * self.dcp_size for block_size in self.original_block_size]
         requested_hash_block_size = vllm_config.cache_config.prefix_match_unit
@@ -383,7 +390,17 @@ class KVPoolScheduler:
         protocol helper enumerates all stages and head/TP ranks.
         """
         assert self.layerwise_keys is not None
-        return self.layerwise_keys.make_hit_check_keys(group_id, block_hash_hex, self.tp_size // self.put_step)
+        draft_keys = self.dspark_prefix_keys
+        if draft_keys is not None and group_id in self.dspark_draft_only_group_ids:
+            # Draft-only groups have no ordinary layerwise target object.
+            return draft_keys.make_hit_check_keys(block_hash_hex)
+        head_or_tp_ranks = (
+            self.tp_size if group_id in self.num_speculative_blocks_by_group else self.tp_size // self.put_step
+        )
+        keys = self.layerwise_keys.make_hit_check_keys(group_id, block_hash_hex, head_or_tp_ranks)
+        if draft_keys is not None:
+            keys.extend(draft_keys.make_hit_check_keys(block_hash_hex))
+        return keys
 
     def _get_layerwise_hit_tokens(
         self,
@@ -487,6 +504,10 @@ class KVPoolScheduler:
             # a sequential prefix scan (stop at first miss), so blocks whose
             # (group, hash) state is cached are resolved without any RPC.
             hit_cache = self._lw_block_hit_cache
+            if self.dspark_prefix_keys is not None:
+                # A paired prefix may be saved or evicted between requests.
+                # Recheck target and all draft replicas on every lookup.
+                hit_cache = {}
             now = time.monotonic()
             if len(hit_cache) > self._lw_hit_cache_max:
                 hit_cache.clear()
@@ -1022,6 +1043,12 @@ class KVPoolScheduler:
         meta = AscendConnectorMetadata(
             scheduler_output.preempted_req_ids,
             self._loading_req_ids.copy(),
+        )
+        # Immediate block free: requests finished in the previous output
+        # processing and requests preempted by this schedule released their
+        # blocks; the worker fences their queued saves before reuse.
+        meta.released_req_ids = set(scheduler_output.preempted_req_ids or ()) | set(
+            scheduler_output.finished_req_ids or ()
         )
 
         for request in scheduler_output.scheduled_new_reqs:

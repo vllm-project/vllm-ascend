@@ -24,6 +24,9 @@ from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 
+from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
+    DSparkContextReceiver,
+)
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.scheduler import (
     SFAPDRD2HProducerScheduler,
     SFAPDRD2HScheduler,
@@ -36,6 +39,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.worker import (
 if TYPE_CHECKING:
     from vllm.forward_context import ForwardContext
     from vllm.v1.attention.backend import AttentionMetadata
+    from vllm.v1.outputs import KVConnectorOutput
     from vllm.v1.request import Request
 
 _LAYER_IDX_RE = re.compile(r"layers\.(\d+)")
@@ -144,6 +148,11 @@ class SfaRemoteD2HConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished_all_groups(request, block_ids)
 
+    def update_connector_output(self, connector_output: "KVConnectorOutput") -> None:
+        if self.is_consumer:
+            assert self.connector_scheduler is not None
+            self.connector_scheduler.update_connector_output(connector_output)
+
     # ------------------------------------------------------------------
     # Worker side
     # ------------------------------------------------------------------
@@ -160,11 +169,44 @@ class SfaRemoteD2HConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
 
+    def bind_dspark_context_receiver(
+        self,
+        receiver: DSparkContextReceiver,
+    ) -> None:
+        if not self.is_consumer or self.connector_worker is None:
+            raise RuntimeError("DSpark prompt-context receiver can only bind on the Decode worker")
+        self.connector_worker.bind_dspark_context_receiver(receiver)
+
+    def configure_dspark_draft_layers(self, layer_names: tuple[str, ...]) -> None:
+        if self.connector_worker is None:
+            raise RuntimeError("DSpark draft caches can only be configured on a worker connector")
+        self.connector_worker.configure_dspark_draft_layers(layer_names)
+
+    def get_dspark_draft_block_ids(self, request_id: str) -> dict[int, tuple[int, ...]]:
+        if not self.is_consumer or self.connector_worker is None:
+            raise RuntimeError("Resident DSpark block tables exist only on the Decode worker")
+        return self.connector_worker.get_dspark_draft_block_ids(request_id)
+
+    def send_dspark_draft_kv(
+        self,
+        request_id: str,
+        descriptor: Any,
+        source_blocks_by_group: dict[int, tuple[int, ...]],
+    ) -> None:
+        if not self.is_producer or self.connector_worker is None:
+            raise RuntimeError("DSpark draft KV can only be sent by the Prefill worker")
+        self.connector_worker.send_dspark_draft_kv(request_id, descriptor, source_blocks_by_group)
+
+    def get_dspark_context_descriptor(self, request_id: str, prompt_tokens: int):
+        if not self.is_producer or self.connector_worker is None:
+            raise RuntimeError("DSpark context descriptors can only be created by the Prefill worker")
+        return self.connector_worker.get_dspark_context_descriptor(request_id, prompt_tokens)
+
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         assert self.connector_worker is not None
         if self.is_consumer:
             return self.connector_worker.get_finished(finished_req_ids)
-        return self.connector_worker.get_finished()
+        return self.connector_worker.get_finished(finished_req_ids)
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         assert self.connector_worker is not None

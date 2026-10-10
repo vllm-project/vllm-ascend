@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """NPU-side Engram storage, routing and lookup.
 
-Every layer is INT8 with group-32 FP32 scales, sharded into contiguous hash
+Tables are BF16, INT8/FP32 or native MXFP8/E8M0, sharded into contiguous hash
 head buckets.  With ``EngramConfig.cpu_offload`` the shard stays in host memory:
 ``aclrtHostRegisterV2`` pins it and ``aclrtHostGetDevicePointer`` publishes the
 address the NPU gather kernel reads, so an offloaded table needs neither an H2D
@@ -17,15 +17,14 @@ from unittest.mock import patch
 import torch
 import torch.distributed as dist
 from vllm.logger import logger
-from vllm.triton_utils import tl, triton
+
+from vllm_ascend.device.device_op import DeviceOperator
 
 SCALE_GROUP = 32
 # A 384M row table overflows the 32 bit offset arithmetic a single Triton tile
 # can express, so the device address of every group of rows is published
 # separately.
 CHUNK_ROWS = 1 << 22
-ACL_HOST_REG_MAPPED = 0x2
-ACL_HOST_REG_PINNED = 0x10000000
 
 
 def engram_cpu_offload(vllm_config) -> bool:
@@ -60,50 +59,9 @@ def dequantize_engram_rows(codes, scale):
     return decoded.flatten(-2).bfloat16()
 
 
-@triton.jit
-def _engram_int8_gather_dequant_kernel(
-    weight_ptr,
-    scale_ptr,
-    ids_ptr,
-    output_ptr,
-    rows,
-    vocab_start,
-    vocab_end,
-    ids_stride_t,
-    WIDTH: tl.constexpr,
-    GROUP: tl.constexpr,
-    HEAD_START: tl.constexpr,
-    LOCAL_HEADS: tl.constexpr,
-    PAD_HEADS: tl.constexpr,
-):
-    row = tl.program_id(0)
-    if row >= rows:
-        return
-    offsets = tl.arange(0, WIDTH)
-    # Row `row` is (token, local head); ids is [tokens, n_hash_cols] and this
-    # shard owns heads [HEAD_START, HEAD_START + LOCAL_HEADS). Local heads are
-    # written contiguously and the rest of PAD_HEADS stays untouched, so a
-    # narrower shard never writes into the padding other ranks read.
-    token = row // LOCAL_HEADS
-    local = row % LOCAL_HEADS
-    source_row = tl.load(ids_ptr + token * ids_stride_t + HEAD_START + local).to(tl.int64)
-    # Same last line of defence as the host-uva kernel, and the same contract
-    # as upstream's lookup: ids are global and only this shard's vocab range is
-    # owned; anything else reads row 0 and is masked back to zero.
-    owned = (source_row >= vocab_start) & (source_row < vocab_end)
-    local_row = tl.where(owned, source_row - vocab_start, 0)
-    codes = tl.load(weight_ptr + local_row * WIDTH + offsets).to(tl.float32)
-    scales = tl.load(scale_ptr + local_row * (WIDTH // GROUP) + offsets // GROUP)
-    result = (codes * scales).to(tl.bfloat16)
-    tl.store(
-        output_ptr + (token * PAD_HEADS + local) * WIDTH + offsets,
-        tl.where(owned, result, tl.zeros_like(result)),
-    )
-
-
 def gather_dequantize_engram_int8(
     weight: torch.Tensor,
-    scales: torch.Tensor,
+    scales: torch.Tensor | None,
     ids: torch.Tensor,
     width: int,
     *,
@@ -114,7 +72,7 @@ def gather_dequantize_engram_int8(
     vocab_start: int = 0,
     vocab_end: int | None = None,
 ) -> torch.Tensor:
-    """Gather this shard's head rows from a device table, dequantize in one kernel.
+    """Gather device rows, dequantizing INT8 or MXFP8 when scales are supplied.
 
     Returns ``[tokens * pad_heads, width]``; the head path views it as
     ``[tokens, pad_heads, width]``.
@@ -133,6 +91,8 @@ def gather_dequantize_engram_int8(
     if rows == 0:
         return output
     init_device_properties_triton()
+    from vllm_ascend.ops.triton.engram_lookup import _engram_int8_gather_dequant_kernel
+
     _engram_int8_gather_dequant_kernel[(rows,)](
         weight,
         scales,
@@ -147,6 +107,8 @@ def gather_dequantize_engram_int8(
         HEAD_START=head_start,
         LOCAL_HEADS=local_heads,
         PAD_HEADS=pad_heads,
+        QUANTIZED=scales is not None,
+        MXFP8=weight.dtype == torch.float8_e4m3fn,
         num_warps=4,
     )
     return output
@@ -186,7 +148,7 @@ class HostUvaBuffer:
         self.buffer = (ctypes.c_char * size).from_address(self.pointer.value)
         self.tensor = torch.frombuffer(self.buffer, dtype=dtype).reshape(shape)
         try:
-            rc = self.lib.aclrtHostRegisterV2(self.pointer, size, ACL_HOST_REG_MAPPED | ACL_HOST_REG_PINNED)
+            rc = self.lib.aclrtHostRegisterV2(self.pointer, size, DeviceOperator.host_register_flags())
             if rc:
                 raise RuntimeError(f"aclrtHostRegisterV2 failed: rc={rc} size={size}")
             address = ctypes.c_void_p()
@@ -231,50 +193,9 @@ class HostUvaBuffer:
         self.pointer = ctypes.c_void_p()
 
 
-@triton.jit
-def _engram_host_uva_gather_dequant_kernel(
-    codes_ptrs,
-    scales_ptrs,
-    ids,
-    output,
-    rows,
-    vocab_start,
-    vocab_end,
-    ids_stride_t,
-    CHUNK: tl.constexpr,
-    WIDTH: tl.constexpr,
-    GROUP: tl.constexpr,
-    HEAD_START: tl.constexpr,
-    LOCAL_HEADS: tl.constexpr,
-    PAD_HEADS: tl.constexpr,
-):
-    row = tl.program_id(0)
-    if row < rows:
-        token = row // LOCAL_HEADS
-        head_local = row % LOCAL_HEADS
-        index = tl.load(ids + token * ids_stride_t + HEAD_START + head_local).to(tl.int64)
-        # The kernel owns the last line of defence: an id outside this shard
-        # must not become an address the pointer table is indexed with, whoever
-        # computed it.
-        owned = (index >= vocab_start) & (index < vocab_end)
-        local_row = tl.where(owned, index - vocab_start, 0)
-        chunk = local_row // CHUNK
-        local = local_row % CHUNK
-        codes = tl.load(codes_ptrs + chunk).to(tl.pointer_type(tl.int8))
-        scales = tl.load(scales_ptrs + chunk).to(tl.pointer_type(tl.float32))
-        col = tl.arange(0, WIDTH)
-        value = tl.load(codes + local * WIDTH + col).to(tl.float32)
-        scale = tl.load(scales + local * (WIDTH // GROUP) + col // GROUP)
-        result = (value * scale).to(tl.bfloat16)
-        tl.store(
-            output + (token * PAD_HEADS + head_local) * WIDTH + col,
-            tl.where(owned, result, tl.zeros_like(result)),
-        )
-
-
 def gather_dequantize_host_uva(
     codes: HostUvaBuffer,
-    scales: HostUvaBuffer,
+    scales: HostUvaBuffer | None,
     ids: torch.Tensor,
     *,
     head_start: int = 0,
@@ -284,7 +205,7 @@ def gather_dequantize_host_uva(
     vocab_start: int = 0,
     vocab_end: int | None = None,
 ) -> torch.Tensor:
-    """Gather this shard's head rows from a registered host table on device.
+    """Gather registered host rows, preserving BF16 when scales are absent.
 
     Returns ``[tokens * pad_heads, width]``; the head path views it as
     ``[tokens, pad_heads, width]``.
@@ -302,10 +223,13 @@ def gather_dequantize_host_uva(
     if rows == 0:
         return output
     init_device_properties_triton()
+    # The kernel widens loaded IDs to int64; no extra cast/copy is needed here.
+    from vllm_ascend.ops.triton.engram_lookup import _engram_host_uva_gather_dequant_kernel
+
     _engram_host_uva_gather_dequant_kernel[(rows,)](
         codes.ptrs,
-        scales.ptrs,
-        ids.to(torch.int64),
+        scales.ptrs if scales is not None else None,
+        ids,
         output,
         rows,
         vocab_start,
@@ -317,6 +241,8 @@ def gather_dequantize_host_uva(
         HEAD_START=head_start,
         LOCAL_HEADS=local_heads,
         PAD_HEADS=pad_heads,
+        QUANTIZED=scales is not None,
+        MXFP8=codes.tensor.dtype == torch.float8_e4m3fn,
         num_warps=4,
     )
     return output
@@ -367,7 +293,7 @@ class SharedUvaBuffer:
                     self.shm = shared_memory.SharedMemory(name=name)
             assert self.shm.size >= size
             address_of_mapping = ctypes.c_void_p(ctypes.addressof(ctypes.c_char.from_buffer(self.shm.buf)))
-            rc = self.lib.aclrtHostRegisterV2(address_of_mapping, size, ACL_HOST_REG_MAPPED | ACL_HOST_REG_PINNED)
+            rc = self.lib.aclrtHostRegisterV2(address_of_mapping, size, DeviceOperator.host_register_flags())
             if rc:
                 raise RuntimeError(f"aclrtHostRegisterV2 failed: rc={rc} size={size}")
             # Registration succeeded: from here on the mapping owes exactly one

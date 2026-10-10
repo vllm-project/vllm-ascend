@@ -1,11 +1,65 @@
+from enum import Enum
 from typing import Any
 
 import torch
 import torch.distributed as dist
 import torch_npu
-from vllm.distributed import get_dcp_group
+from vllm.distributed import get_dcp_group, get_pcp_group, get_tp_group
 
+import vllm_ascend.ops.triton.dcp.dcp_a2a  # noqa: F401
 from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
+
+
+def is_pcp_decode_sharding_enabled(vllm_config) -> bool:
+    """Shard decode requests for PCP without speculation.
+
+    Graph execution follows the sharded path as well. Speculative decoding
+    stays on the replicated path in this change. The decision is derived from
+    declared vLLM fields so cloning a draft ``ParallelConfig`` with
+    ``replace()`` does not see an undeclared attribute.
+    """
+    parallel_config = vllm_config.parallel_config
+    return (
+        parallel_config.prefill_context_parallel_size > 1
+        and parallel_config.decode_context_parallel_size == 1
+        and vllm_config.speculative_config is None
+    )
+
+
+def get_pcp_num_replicated_tokens(num_decode_tokens: int, is_decode_sharded: bool) -> int:
+    """Return the leading rank-local tokens that every PCP rank computes identically.
+
+    Replicated decodes need no KV gather. A sharded decode belongs to one PCP
+    rank, so its KV is gathered together with the prefill tokens.
+    """
+    return 0 if is_decode_sharded else num_decode_tokens
+
+
+class CPKVScope(str, Enum):
+    """KV ranges used by context-parallel attention."""
+
+    HISTORY = "history"
+    CURRENT = "current"
+    FULL = "full"
+
+
+def use_history_current_split_decode(
+    attn_metadata: Any,
+    *,
+    is_draft_model: bool = False,
+    is_draft_model_prefill: bool = False,
+    use_spec_decode: bool = False,
+) -> bool:
+    """Choose one split policy for MLA and GQA decode attention."""
+    if not attn_metadata.causal or attn_metadata.decode is None:
+        return False
+    # Preserve the task layout of speculative target and draft-prefill graphs.
+    if is_draft_model_prefill or (use_spec_decode and not is_draft_model):
+        return True
+    decode = attn_metadata.decode
+    assert decode is not None and decode.actual_seq_lengths_q is not None
+    query_ends = decode.actual_seq_lengths_q
+    return any(end - start > 1 for start, end in zip([0] + query_ends[:-1], query_ends))
 
 
 def get_cp_local_query_key_lens(
@@ -117,6 +171,8 @@ class DCPImplMixin:
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.dcp_group = get_dcp_group()
+        self.pcp_group = get_pcp_group()
+        self.tp_group = get_tp_group()
         self.dcp_size = self.dcp_group.world_size
         self.dcp_rank = self.dcp_group.rank_in_group
         self.dcp_device_group = self.dcp_group.device_group if self.dcp_size > 1 else None
@@ -138,27 +194,53 @@ class DCPImplMixin:
         if not tensors:
             return ()
         split_sizes = [tensor.shape[-1] for tensor in tensors]
-        gathered = self._dcp_all_gather(
-            torch.cat(tensors, dim=-1),
-            dim,
-        )
+        pcp_group = getattr(self, "pcp_group", None)
+        if dim == 1 and pcp_group is not None and pcp_group.world_size > 1:
+            # Query heads are replicated across PCP ranks. Gather only
+            # distinct TP heads when DCP spans the full TP x PCP domain.
+            if self.dcp_size == pcp_group.world_size:
+                return tensors
+            gathered = self.tp_group.all_gather(torch.cat(tensors, dim=-1).contiguous(), dim=dim)
+        else:
+            gathered = self._dcp_all_gather(
+                torch.cat(tensors, dim=-1),
+                dim,
+            )
         return torch.split(gathered, split_sizes, dim=-1)
 
-    def _merge_dcp_attention_output(
-        self,
-        attn_output: torch.Tensor,
-        softmax_lse: torch.Tensor,
-        head_size: int,
-    ) -> torch.Tensor:
-        return _npu_attention_update(
-            head_size,
-            _process_attn_out_lse(
+    def _local_decode_query(self, *queries: torch.Tensor, num_heads: int) -> tuple[torch.Tensor, ...]:
+        """Select this TP rank's query heads after a DCP query gather."""
+        pcp_group = getattr(self, "pcp_group", None)
+        if pcp_group is not None and pcp_group.world_size > 1:
+            head_rank = self.tp_group.rank_in_group if self.dcp_size > pcp_group.world_size else 0
+        else:
+            head_rank = self.dcp_rank
+        head_start = head_rank * num_heads
+        head_end = head_start + num_heads
+        return tuple(query[:, head_start:head_end].contiguous() for query in queries)
+
+    def _merge_dcp_attention_output(self, attn_output, softmax_lse, *, defer_combine=False):
+        pcp_group = getattr(self, "pcp_group", None)
+        if pcp_group is not None and pcp_group.world_size > 1:
+            # Match SFA: TP exchanges distinct head shards, then PCP gathers
+            # all KV contributions for that TP-local head range.
+            tp_size = self.tp_group.world_size if self.dcp_size > pcp_group.world_size else 1
+            return torch.ops.vllm.dcp_a2a_fused(
                 attn_output,
                 softmax_lse,
-                dcp_size=self.dcp_size,
-                dcp_device_group=self.dcp_device_group,
-            ),
-            dcp_size=self.dcp_size,
+                tp_size,
+                1,
+                self.tp_group.unique_name,
+                pcp_group.unique_name,
+                defer_combine=defer_combine,
+            )
+        return torch.ops.vllm.dcp_a2a_fused(
+            attn_output,
+            softmax_lse,
+            self.dcp_size,
+            1,
+            self.dcp_group.unique_name if self.dcp_size > 1 else "",
+            defer_combine=defer_combine,
         )
 
 
