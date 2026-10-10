@@ -1,19 +1,6 @@
-#
-# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-# This file is a part of the vllm-ascend project.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-#
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Ascend weight-transfer backend registration."""
 
 from vllm.distributed.weight_transfer.factory import (
     WeightTransferEngineFactory,
@@ -21,7 +8,7 @@ from vllm.distributed.weight_transfer.factory import (
 )
 
 
-def register_engine():
+def register_engine() -> None:
     """Register Ascend weight transfer engines as vLLM plugins."""
     WeightTransferEngineFactory.register_engine(
         "hccl",
@@ -37,4 +24,9 @@ def register_engine():
         "npu_ipc",
         "vllm_ascend.distributed.weight_transfer.npu_ipc_engine",
         "NPUIPCTrainerWeightTransferEngine",
+    )
+    WeightTransferTrainerFactory.register_engine(
+        "hccl",
+        "vllm_ascend.distributed.weight_transfer.hccl_engine",
+        "HCCLTrainerWeightTransferEngine",
     )
