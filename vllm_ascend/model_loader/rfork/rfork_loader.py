@@ -314,7 +314,11 @@ def _reset_process_global_model_state(
         if snapshot is not None or not stale_module_ids:
             registry.clear()
         else:
-            registry[:] = [layer for layer in registry if id(layer) not in stale_module_ids]
+            registry[:] = [
+                layer_ref
+                for layer_ref in registry
+                if (layer := layer_ref()) is not None and id(layer) not in stale_module_ids
+            ]
 
     if snapshot is not None:
         routed_experts = getattr(
