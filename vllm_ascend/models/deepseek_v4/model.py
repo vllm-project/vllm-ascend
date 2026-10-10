@@ -89,7 +89,7 @@ from vllm_ascend.models.deepseek_v4.compressor import Compressor
 from vllm_ascend.models.deepseek_v4.indexer import DeepseekV4Indexer
 from vllm_ascend.ops.dsa import AscendDeepseekSparseAttention, DSAModules
 from vllm_ascend.ops.rope_dsv4 import ComplexExpRotaryEmbedding
-from vllm_ascend.ops.triton.mul_add import muls_add_triton
+from vllm_ascend.ops.triton.muls_add import muls_add_triton
 from vllm_ascend.quantization.methods.kv_cache.turboquant import is_turboquant
 from vllm_ascend.utils import (
     dsv4_skips_indexer_topk,
