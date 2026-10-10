@@ -20,8 +20,10 @@ from __future__ import annotations
 import torch
 from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
 from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 
 from vllm_ascend.ops.linear import AscendReplicatedLinear
+from vllm_ascend.utils import vllm_version_is
 
 
 class AscendGateLinear(GateLinear):
@@ -53,35 +55,70 @@ class AscendGateLinear(GateLinear):
     runner routes around this forward entirely.
     """
 
-    def __init__(
-        self,
-        input_size: int,
-        output_size: int,
-        bias: bool = False,
-        out_dtype: torch.dtype | None = None,
-        params_dtype: torch.dtype | None = None,
-        force_fp32_compute: bool = False,
-        prefix: str = "",
-    ):
-        # Mirror upstream GateLinear.__init__: with no NPU specialized
-        # kernel available, force_fp32_compute means storing the weight in
-        # fp32 so the fallback tier computes in fp32.
-        if force_fp32_compute:
-            params_dtype = torch.float32
-        # Skip GateLinear.__init__ (CUDA/ROCm GEMM probes); weights follow
-        # the model dtype unless explicitly upcast.
-        AscendReplicatedLinear.__init__(
+    if vllm_version_is("0.30.0"):
+
+        def __init__(
             self,
-            input_size,
-            output_size,
-            bias=bias,
-            params_dtype=params_dtype,
-            quant_config=None,
-            prefix=prefix,
-        )
-        # NPU default: fp32 logits when out_dtype is None (see class
-        # docstring); out_dtype is immutable afterwards.
-        self.out_dtype = out_dtype if out_dtype is not None else torch.float32
+            input_size: int,
+            output_size: int,
+            bias: bool = False,
+            out_dtype: torch.dtype | None = None,
+            params_dtype: torch.dtype | None = None,
+            force_fp32_compute: bool = False,
+            prefix: str = "",
+        ):
+            # Mirror upstream GateLinear.__init__: with no NPU specialized
+            # kernel available, force_fp32_compute means storing the weight in
+            # fp32 so the fallback tier computes in fp32.
+            if force_fp32_compute:
+                params_dtype = torch.float32
+            AscendReplicatedLinear.__init__(
+                self,
+                input_size,
+                output_size,
+                bias=bias,
+                params_dtype=params_dtype,
+                quant_config=None,
+                prefix=prefix,
+            )
+            # NPU default: fp32 logits when out_dtype is None (see class
+            # docstring); out_dtype is immutable afterwards.
+            self.out_dtype = out_dtype if out_dtype is not None else torch.float32
+
+    else:
+
+        def __init__(  # type: ignore[misc]
+            self,
+            input_size: int,
+            output_size: int,
+            bias: bool = False,
+            out_dtype: torch.dtype | None = None,
+            params_dtype: torch.dtype | None = None,
+            force_fp32_compute: bool = False,
+            skip_bias_add: bool = False,
+            quant_config: QuantizationConfig | None = None,
+            prefix: str = "",
+            return_bias: bool = True,
+        ):
+            # Mirror upstream GateLinear.__init__: with no NPU specialized
+            # kernel available, force_fp32_compute means storing the weight in
+            # fp32 so the fallback tier computes in fp32.
+            if force_fp32_compute:
+                params_dtype = torch.float32
+            AscendReplicatedLinear.__init__(
+                self,
+                input_size,
+                output_size,
+                bias=bias,
+                skip_bias_add=skip_bias_add,
+                params_dtype=params_dtype,
+                quant_config=quant_config,
+                prefix=prefix,
+                return_bias=return_bias,
+            )
+            # NPU default: fp32 logits when out_dtype is None (see class
+            # docstring); out_dtype is immutable afterwards.
+            self.out_dtype = out_dtype if out_dtype is not None else torch.float32
 
     def forward(self, x: torch.Tensor):
         # Tier 4: bf16 x bf16 -> fp32 accumulation. Eligibility mirrors
@@ -93,13 +130,19 @@ class AscendGateLinear(GateLinear):
             and self.out_dtype == torch.float32
             and self.bias is None
         ):
-            return torch.mm(x, self.weight.t(), out_dtype=torch.float32), None
+            output = torch.mm(x, self.weight.t(), out_dtype=torch.float32)
+            return output if not self.return_bias else (output, None)
         # Tier 5: cast x to the weight dtype, compute, cast the output to
         # out_dtype (upstream fallback semantics; out_dtype is always set
         # after __init__).
         if x.dtype != self.weight.dtype:
             x = x.to(self.weight.dtype)
-        output, output_bias = ReplicatedLinear.forward(self, x)
+        base_output = ReplicatedLinear.forward(self, x)
+        output_bias = None
+        if isinstance(base_output, tuple):
+            output, output_bias = base_output
+        else:
+            output = base_output
         if output.dtype != self.out_dtype:
             output = output.to(self.out_dtype)
-        return output, output_bias
+        return output if not self.return_bias else (output, output_bias)

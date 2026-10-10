@@ -28,6 +28,7 @@ from vllm.v1.kv_cache_interface import (
 import vllm_ascend.compilation.acl_graph as acl_graph
 from vllm_ascend.ascend_config import FinegrainedTPConfig
 from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
@@ -475,6 +476,9 @@ def test_stateful_handoff_preserves_decode_graph(
         lora_config=None,
         model_config=runner.model_config,
     )
+    if not vllm_version_is("0.30.0"):
+        # vLLM #45635 moved enable_return_routed_experts onto AuxOutputConfig.
+        runner.vllm_config.aux_output_config = SimpleNamespace(enable_return_routed_experts=False)
     runner.speculative_config = SimpleNamespace(num_speculative_tokens=num_spec_tokens) if num_spec_tokens > 0 else None
     runner.uniform_decode_query_len = 1 + num_spec_tokens
     runner.input_batch = SimpleNamespace(
