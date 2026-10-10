@@ -7,6 +7,8 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
 
+from vllm_ascend.core.kv_cache_interface import declared_kwarg
+
 
 class AscendGroupedTopKRouter(BaseRouter):
     def __init__(
@@ -39,13 +41,33 @@ class AscendGroupedTopKRouter(BaseRouter):
 
     @property
     def routing_method_type(self) -> RoutingMethodType:
+        # The scaling factor is a parameter of the vLLM main signature only, and
+        # it is not decoration: with it present, a sigmoid router that carries an
+        # e-score bias, renormalizes and groups no experts answers MiniMax2 only
+        # while the factor is ``None`` or ``1.0``. A baseline whose helper cannot
+        # take the keyword would answer MiniMax2 regardless -- so rule that case
+        # out here rather than pass a keyword it does not declare.
+        factor_kwargs = declared_kwarg(
+            get_routing_method_type, "routed_scaling_factor", self.routed_scaling_factor
+        )
+        num_expert_group = self.num_expert_group if self.use_grouped_topk else None
+        has_e_score_bias = self.e_score_correction_bias is not None
+        if (
+            not factor_kwargs
+            and has_e_score_bias
+            and self.scoring_func == "sigmoid"
+            and self.renormalize
+            and (num_expert_group or 0) <= 0
+            and self.routed_scaling_factor not in (None, 1.0)
+        ):
+            return RoutingMethodType.Unspecified
         return get_routing_method_type(
             scoring_func=self.scoring_func,
             top_k=self.top_k,
             renormalize=self.renormalize,
-            num_expert_group=self.num_expert_group if self.use_grouped_topk else None,
-            has_e_score_bias=self.e_score_correction_bias is not None,
-            routed_scaling_factor=self.routed_scaling_factor,
+            num_expert_group=num_expert_group,
+            has_e_score_bias=has_e_score_bias,
+            **factor_kwargs,
         )
 
     def _renormalize_topk_weights(
