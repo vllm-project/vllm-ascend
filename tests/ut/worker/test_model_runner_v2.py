@@ -9,10 +9,17 @@ import pytest
 import torch
 from vllm.config import CUDAGraphMode
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.worker.gpu import cudagraph_utils as vllm_cudagraph_utils
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.model_runner import BatchReqState, GPUModelRunner
 
 from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.compilation.acl_graph import (
+    ACLGraphWrapper,
+    get_graph_params,
+    reset_graph_params,
+    set_graph_params,
+)
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
@@ -742,11 +749,17 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture)
         kv_cache_groups=[],
     )
 
-    def _super(self, kv_cache_config, kv_cache_allocation_context=None):
+    def _super(
+        self,
+        kv_cache_config,
+        is_profiling=False,
+        kv_cache_allocation_context=None,
+    ):
         self.kv_cache_config = kv_cache_config
         self.attn_groups = []
         seen["factory"] = vllm_model_runner.ModelCudaGraphManager
         seen["cfg"] = kv_cache_config
+        seen["is_profiling"] = is_profiling
 
     def _prepare_kda(context, maximum):
         """Check that the parent bound cache before the startup hook runs."""
@@ -776,6 +789,7 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture)
     assert metadata_cls.call_count == int(a5 and architecture == "DeepseekV41ForCausalLM")
     assert seen["cfg"] == kv_cache_config
     assert seen["cfg"] is not kv_cache_config
+    assert seen["is_profiling"] is False
     assert vllm_model_runner.ModelCudaGraphManager is original
     acl_cls.assert_called_once()
     create_kvpp.assert_called_once()
@@ -838,6 +852,84 @@ def test_initialize_kv_cache_forwards_allocation_context():
     prepare_kda.assert_called_once_with(runner.compilation_config.static_forward_context, 8)
     assert called is True
     assert captured_kwargs["kv_cache_allocation_context"] is allocation_context
+
+
+def test_initialize_kv_cache_profiling_skips_kvpp_runtime():
+    runner = _make_runner()
+    runner.compilation_config = SimpleNamespace(static_forward_context={})
+    runner.vllm_config = SimpleNamespace(
+        compilation_config=runner.compilation_config, scheduler_config=SimpleNamespace(max_num_seqs=8)
+    )
+    runner.pcp_manager = None
+    runner.model_state = SimpleNamespace(kvpp_runtime=None)
+    runner.speculator = None
+    runner.max_num_reqs = 8
+    runner.model_config = SimpleNamespace(enable_return_routed_experts=False)
+    seen = {}
+    kv_cache_config = KVCacheConfig(
+        num_blocks=1,
+        kv_cache_tensors=[],
+        kv_cache_groups=[],
+    )
+
+    def _super(
+        self,
+        kv_cache_config,
+        is_profiling=False,
+        kv_cache_allocation_context=None,
+    ):
+        self.kv_cache_config = kv_cache_config
+        self.attn_groups = []
+        seen["is_profiling"] = is_profiling
+
+    with (
+        patch.object(GPUModelRunner, "initialize_kv_cache", _super),
+        patch("vllm_ascend.worker.v2.model_runner.apply_layerwise_kv_cache_plan"),
+        patch("vllm_ascend.worker.v2.model_runner.bind_dspark_context_receiver"),
+        patch("vllm_ascend.worker.v2.model_runner.KVPPRuntime.create_from_kv_cache") as create_kvpp,
+    ):
+        runner.initialize_kv_cache(kv_cache_config, is_profiling=True)
+
+    assert seen["is_profiling"] is True
+    create_kvpp.assert_not_called()
+    assert runner.model_state.kvpp_runtime is None
+
+
+def test_profile_cudagraph_memory_uses_acl_wrapper_and_cleans_on_error():
+    runner = _make_runner()
+    layer = SimpleNamespace(impl=SimpleNamespace(key_cache=object(), value_cache=object()))
+    runner.compilation_config = SimpleNamespace(static_forward_context={"layer": layer})
+    original_wrapper = vllm_cudagraph_utils.CUDAGraphWrapper
+    seen = {}
+
+    def _super(self):
+        seen["wrapper"] = vllm_cudagraph_utils.CUDAGraphWrapper
+        raise RuntimeError("profile failed")
+
+    reset_graph_params()
+    set_graph_params([1])
+    try:
+        with (
+            patch.object(GPUModelRunner, "profile_cudagraph_memory", _super),
+            patch(
+                "vllm_ascend.worker.v2.model_runner.torch_cuda_wrapper",
+                return_value=nullcontext(),
+            ),
+            patch("vllm_ascend.worker.v2.model_runner.gc.collect") as collect,
+            patch("vllm_ascend.worker.v2.model_runner.torch.accelerator.empty_cache") as empty_cache,
+            pytest.raises(RuntimeError, match="profile failed"),
+        ):
+            runner.profile_cudagraph_memory()
+
+        assert seen["wrapper"] is ACLGraphWrapper
+        assert vllm_cudagraph_utils.CUDAGraphWrapper is original_wrapper
+        assert get_graph_params() is None
+        assert layer.impl.key_cache is None
+        assert layer.impl.value_cache is None
+        collect.assert_called_once_with()
+        empty_cache.assert_called_once_with()
+    finally:
+        reset_graph_params()
 
 
 @pytest.mark.parametrize("moe_type", [MoECommType.MC2, MoECommType.FUSED_MC2])
