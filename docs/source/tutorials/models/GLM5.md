@@ -28,6 +28,7 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 | `GLM-5.1-w8a8`(Quantized version) | 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node | [Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.1-w8a8) |
 |`GLM-5.1-w8a8c8`(Quantized version)| The weights have been verified on Atlas 800 A3 and are recommended for use. |[Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.1-w8a8c8-MTP)|
 |`GLM-5.1-w4a4`(950DT Products mxfp4 Quantized)| The weights have been verified on 950DT Products and are recommended for use. |[ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.1-w4a4c8-mxfp4)|
+|`GLM-5.1-w8a8c8-mxfp8`(950DT Products mxfp8 Quantized)| The weights have been verified on 950DT Products and are recommended for use. |[ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.1-w8a8c8-mxfp8)|
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
