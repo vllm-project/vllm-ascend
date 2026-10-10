@@ -2877,5 +2877,35 @@ class TestKVPoolWorkerReachableMasks(unittest.TestCase):
         )
 
 
+class TestKVPoolWorkerResetStore(unittest.TestCase):
+    def test_joins_send_queue_before_remove_all(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+
+        worker = KVPoolWorker.__new__(KVPoolWorker)
+        order: list[str] = []
+        send_queue = MagicMock()
+        send_queue.join.side_effect = lambda: order.append("join")
+        send_thread = MagicMock()
+        send_thread.request_queue = send_queue
+        worker.kv_send_thread = send_thread
+        worker.m_store = MagicMock()
+        worker.m_store.remove_all.side_effect = lambda: order.append("remove_all")
+
+        worker.reset_store()
+
+        self.assertEqual(order, ["join", "remove_all"])
+
+    def test_remove_all_without_send_thread(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+
+        worker = KVPoolWorker.__new__(KVPoolWorker)
+        worker.kv_send_thread = None
+        worker.m_store = MagicMock()
+
+        worker.reset_store()
+
+        worker.m_store.remove_all.assert_called_once_with()
+
+
 if __name__ == "__main__":
     unittest.main()

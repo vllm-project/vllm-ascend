@@ -640,5 +640,115 @@ class TestAscendStoreConnectorLayerwise(unittest.TestCase):
             self.assertFalse(connector.prepare_mamba_state_copy(MagicMock()))
 
 
+def _scheduler_connector(backend="mooncake", use_layerwise=False):
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+
+    connector = AscendStoreConnector.__new__(AscendStoreConnector)
+    connector._role = KVConnectorRole.SCHEDULER
+    connector.backend_name = backend
+    connector.use_layerwise = use_layerwise
+    scheduler = MagicMock()
+    scheduler.load_specs = {"req-a": object()}
+    scheduler.sending_events = {}
+    scheduler.sending_blocks = {}
+    scheduler._loading_req_ids = set()
+    scheduler.reset_store.return_value = True
+    connector.connector_scheduler = scheduler
+    connector._kv_cache_events = MagicMock()
+    return connector
+
+
+class TestAscendStoreResetCache(unittest.TestCase):
+    def test_scheduler_mooncake_clears_refs_and_resets_store(self):
+        connector = _scheduler_connector()
+        self.assertTrue(connector.reset_cache())
+        self.assertEqual(connector.connector_scheduler.load_specs, {})
+        self.assertIsNone(connector._kv_cache_events)
+        connector.connector_scheduler.reset_store.assert_called_once_with()
+
+    def test_worker_role_returns_none(self):
+        from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+
+        connector = AscendStoreConnector.__new__(AscendStoreConnector)
+        connector._role = KVConnectorRole.WORKER
+        connector.backend_name = "mooncake"
+        connector.use_layerwise = False
+        self.assertIsNone(connector.reset_cache())
+
+    def test_mooncake_layerwise_returns_false(self):
+        connector = _scheduler_connector(use_layerwise=True)
+        self.assertFalse(connector.reset_cache())
+        connector.connector_scheduler.reset_store.assert_not_called()
+        self.assertIn("req-a", connector.connector_scheduler.load_specs)
+
+    def test_other_backend_returns_none(self):
+        connector = _scheduler_connector(backend="memcache")
+        self.assertIsNone(connector.reset_cache())
+        connector.connector_scheduler.reset_store.assert_not_called()
+
+
+class TestLookupDispatch(unittest.TestCase):
+    def test_reset_calls_worker_then_acks(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import (
+            dispatch_lookup_request,
+        )
+
+        worker = MagicMock()
+        resp = dispatch_lookup_request(worker, MagicMock(), [b"reset"])
+        worker.reset_store.assert_called_once_with()
+        self.assertEqual(resp, b"\x01")
+
+    def test_reset_nack_when_worker_fails(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import (
+            dispatch_lookup_request,
+        )
+
+        worker = MagicMock()
+        worker.reset_store.side_effect = RuntimeError("remove_all failed")
+        resp = dispatch_lookup_request(worker, MagicMock(), [b"reset"])
+        self.assertEqual(resp, b"\x00")
+
+    def test_lookup_reads_token_len_after_tag(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import (
+            dispatch_lookup_request,
+        )
+
+        def decode_lookup_frame(frames: list[bytes]) -> list[int] | list[str]:
+            if frames == [b"groups"]:
+                groups: list[int] = [0]
+                return groups
+            hashes: list[str] = ["hash"]
+            return hashes
+
+        worker = MagicMock()
+        worker.lookup_scheduler.return_value = 8
+        decoder = MagicMock()
+        decoder.decode.side_effect = decode_lookup_frame
+        frames = [
+            b"lookup",
+            (64).to_bytes(4, "big"),
+            b"groups",
+            (16).to_bytes(4, "big"),
+            b"hashes",
+        ]
+        resp = dispatch_lookup_request(worker, decoder, frames)
+        self.assertEqual(int.from_bytes(resp, "big"), 8)
+        worker.lookup_scheduler.assert_called_once_with(
+            64,
+            ["hash"],
+            [0],
+            use_layerwise=False,
+            hbm_hit_tokens=16,
+        )
+
+    def test_unknown_message_returns_err(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import (
+            dispatch_lookup_request,
+        )
+
+        resp = dispatch_lookup_request(MagicMock(), MagicMock(), [b"nope"])
+        self.assertEqual(resp, b"\x00")
+
+
 if __name__ == "__main__":
     unittest.main()

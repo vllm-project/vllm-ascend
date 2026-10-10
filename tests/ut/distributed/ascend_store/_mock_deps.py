@@ -129,6 +129,7 @@ _base_mod.KVConnectorBase_V1 = type(  # type: ignore[attr-defined]
     (),
     {
         "__init__": lambda self, **kw: None,
+        "role": property(lambda self: self._role),
         "bind_connector_metadata": lambda self, metadata: setattr(self, "_connector_metadata", metadata),
         "_get_connector_metadata": lambda self: self._connector_metadata,
     },
@@ -475,12 +476,15 @@ else:
     # tests in the same CPU-UT process.
     _kv_transfer_init = importlib.import_module("vllm_ascend.distributed.kv_transfer")
 
-_kv_utils_pkg = _make_pkg(
-    "vllm_ascend.distributed.kv_transfer.utils",
-    os.path.join(_kv_transfer_real_path, "utils"),
-)
-sys.modules["vllm_ascend.distributed.kv_transfer.utils"] = _kv_utils_pkg
-sys.modules["vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine"] = MagicMock()
+if _MOCK_VLLM_DEPS:
+    # Ascend-store tests import the Mooncake backend, which imports this module.
+    # Without vLLM there is no real engine to load, so keep the import stubbed.
+    _kv_utils_pkg = _make_pkg(
+        "vllm_ascend.distributed.kv_transfer.utils",
+        os.path.join(_kv_transfer_real_path, "utils"),
+    )
+    sys.modules["vllm_ascend.distributed.kv_transfer.utils"] = _kv_utils_pkg
+    sys.modules["vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine"] = MagicMock()
 
 _kv_pool_pkg = _make_pkg(
     "vllm_ascend.distributed.kv_transfer.kv_pool",

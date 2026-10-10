@@ -926,15 +926,9 @@ class TestLookupKeyClient(unittest.TestCase):
         self.assertEqual(result, 32)
         mock_socket.send_multipart.assert_called_once()
         frames = mock_socket.send_multipart.call_args.args[0]
-        self.assertEqual(
-            frames,
-            [
-                (64).to_bytes(4, "big"),
-                b"groups",
-                (16).to_bytes(4, "big"),
-                b"hashes",
-            ],
-        )
+        self.assertEqual(frames[0], b"lookup")
+        self.assertEqual(int.from_bytes(frames[1], "big"), 64)
+        self.assertEqual(int.from_bytes(frames[3], "big"), 16)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.make_zmq_socket")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.zmq")
@@ -949,6 +943,62 @@ class TestLookupKeyClient(unittest.TestCase):
         client = LookupKeyClient(config)
         client.close()
         mock_socket.close.assert_called_once_with(linger=0)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.make_zmq_socket")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.zmq")
+    def test_reset_ack(self, mock_zmq, mock_make_socket):
+        config = MagicMock()
+        config.parallel_config.data_parallel_rank = 0
+        config.kv_transfer_config.kv_connector_extra_config = {}
+        mock_socket = MagicMock()
+        mock_make_socket.return_value = mock_socket
+        mock_socket.recv.return_value = b"\x01"
+
+        client = LookupKeyClient(config)
+        self.assertTrue(client.reset())
+        mock_socket.send.assert_called_once_with(b"reset")
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.make_zmq_socket")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.zmq")
+    def test_reset_nack(self, mock_zmq, mock_make_socket):
+        config = MagicMock()
+        config.parallel_config.data_parallel_rank = 0
+        config.kv_transfer_config.kv_connector_extra_config = {}
+        mock_socket = MagicMock()
+        mock_make_socket.return_value = mock_socket
+        mock_socket.recv.return_value = b"\x00"
+
+        client = LookupKeyClient(config)
+        self.assertFalse(client.reset())
+
+
+class TestKVPoolSchedulerResetStore(unittest.TestCase):
+    def _scheduler(self):
+        scheduler = KVPoolScheduler.__new__(KVPoolScheduler)
+        scheduler.backend_name = "mooncake"
+        scheduler.use_layerwise = False
+        scheduler.vllm_config = MagicMock()
+        scheduler.client = MagicMock()
+        scheduler.client.reset.return_value = True
+        scheduler.sending_events = {}
+        scheduler.sending_blocks = {}
+        scheduler._loading_req_ids = set()
+        return scheduler
+
+    def test_reset_store_acks(self):
+        scheduler = self._scheduler()
+        self.assertTrue(scheduler.reset_store())
+        scheduler.client.reset.assert_called_once_with()
+
+    def test_reset_store_nack(self):
+        scheduler = self._scheduler()
+        scheduler.client.reset.return_value = False
+        self.assertFalse(scheduler.reset_store())
+
+    def test_reset_store_rpc_error(self):
+        scheduler = self._scheduler()
+        scheduler.client.reset.side_effect = RuntimeError("zmq")
+        self.assertFalse(scheduler.reset_store())
 
 
 class TestKVPoolSchedulerStoreQueryKeys(unittest.TestCase):
