@@ -356,6 +356,34 @@ def _record_v2_eplb_load(router: FusedMoERouter, result: FusedExpertsResult) -> 
     )
 
 
+def _empty_like_preserving_npu_format(tensor: torch.Tensor) -> torch.Tensor:
+    """Allocate an EPLB buffer with the source tensor's NPU storage format."""
+    if tensor.device.type != "npu":
+        return torch.empty_like(tensor)
+
+    # ACLNN-only devices force allow_internal_format=False, so torch.empty_like
+    # silently converts internal formats such as FRACTAL_NZ_C0_16 to ND. Use
+    # the explicit NPU allocator to preserve the expert's storage format.
+    assert tensor.storage_offset() == 0, (
+        "EPLB expert buffer allocation requires an offset-0 source "
+        f"tensor, but got storage_offset={tensor.storage_offset()}"
+    )
+
+    result = torch_npu.empty_with_format(
+        size=tensor.size(),
+        dtype=tensor.dtype,
+        layout=tensor.layout,
+        device=tensor.device,
+        acl_format=int(torch_npu.get_npu_format(tensor)),
+    )
+
+    assert result.stride() == tensor.stride(), (
+        "EPLB expert buffer allocation must preserve the source stride, "
+        f"but got source={tensor.stride()} and buffer={result.stride()}"
+    )
+    return result
+
+
 class EplbExpertTensorList(list[torch.Tensor]):
     """Per-expert tensors exposed through the upstream EPLB weight contract."""
 
@@ -365,9 +393,9 @@ class EplbExpertTensorList(list[torch.Tensor]):
 
     @classmethod
     def __torch_function__(cls, func, types, args=(), kwargs=None):
-        if func is torch.empty_like:
+        if func is torch.empty_like and not kwargs:
             source = args[0]
-            return cls(torch.empty_like(tensor, **(kwargs or {})) for tensor in source)
+            return cls(_empty_like_preserving_npu_format(tensor) for tensor in source)
         return NotImplemented
 
 
