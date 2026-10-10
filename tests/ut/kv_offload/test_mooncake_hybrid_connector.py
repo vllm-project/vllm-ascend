@@ -410,6 +410,30 @@ class TestMooncakeHybridConnectorWorker(unittest.TestCase):
                 worker.kv_recv_thread = MagicMock()
         return worker
 
+    def test_get_remote_rank_asymmetric_pd(self):
+        """`_get_remote_rank` must not index a decode-TP-sized list with P-side tp_rank."""
+        worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+        worker._get_remote_ranks_for_req = MagicMock(return_value=[[0, 2, 4, 6]])
+
+        worker.kv_role = "kv_producer"
+        worker.tp_rank = 5
+        self.assertEqual(worker._get_remote_rank("req-asymmetric"), [0, 2, 4, 6])
+
+        worker.kv_role = "kv_consumer"
+        worker.tp_rank = 0
+        self.assertEqual(worker._get_remote_rank("req-decode"), [0, 2, 4, 6])
+
+        worker._get_remote_ranks_for_req = MagicMock(return_value=[[0], [1], [2], [3]])
+        worker.kv_role = "kv_producer"
+        worker.tp_rank = 2
+        self.assertEqual(worker._get_remote_rank("req-symmetric"), [2])
+
+        # Multi-group OOR still uses decode-group 0 (not modulo / other groups).
+        worker._get_remote_ranks_for_req = MagicMock(return_value=[[10], [11]])
+        worker.kv_role = "kv_producer"
+        worker.tp_rank = 5
+        self.assertEqual(worker._get_remote_rank("req-multi-oor"), [10])
+
     def test_start_load_kv_replica_routing_and_completion(self):
         cases = [
             # PCP, P-TP, D-TP, P-DP rank, Mamba receive branch.
