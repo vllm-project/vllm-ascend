@@ -188,7 +188,7 @@ After the instance starts, check which knobs passed startup validation:
    finegrained_tp_config enabled: oproj_tensor_parallel_size=8, mlp_tensor_parallel_size=8, lmhead_tensor_parallel_size=8, embedding_tensor_parallel_size=8
    ```
 
-   Only the knobs that survived validation are listed; the format is `knob=size`. Note that under `tensor_parallel_size > 1`, embedding / LM head TP still appears in this line but does not actually take effect (see [Standard Tensor Parallelism Requirement](#standard-tensor-parallelism-requirement)).
+   Only the knobs that survived validation are listed; the format is `knob=size`. This summary does not gate on `tensor_parallel_size`; see [Standard Tensor Parallelism Requirement](#standard-tensor-parallelism-requirement) for the interplay with standard TP.
 
 2. If `oproj_tensor_parallel_size` / `mlp_tensor_parallel_size` are missing from that line, check for the capture-bound auto-disable warning:
 
