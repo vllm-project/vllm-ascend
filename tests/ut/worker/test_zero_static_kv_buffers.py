@@ -76,6 +76,22 @@ def test_zero_static_kv_buffers_fp8_non_contiguous_copies_scalar_not_full_buffer
     assert torch.count_nonzero(t.contiguous().view(torch.int8)).item() == 0
 
 
+def test_zero_static_kv_buffers_oom_falls_back_to_int8_view():
+    # Regression test for the a2 CI OOM: plain zero_() can materialize a
+    # same-size temporary on NPU (6-12 GiB extra on a nearly-full card).
+    # Only OutOfMemoryError may take the in-place int8-view fallback.
+    class _OomTensor(torch.Tensor):
+        def zero_(self):
+            if self.dtype != torch.int8:
+                raise torch.OutOfMemoryError("NPU out of memory")
+            return super().zero_()
+
+    t = torch.ones(4).as_subclass(_OomTensor)
+    ctx = {"layer0": _FakeAttnModule([t])}
+    _zero_static_kv_buffers(_make_runner(ctx))
+    assert torch.count_nonzero(t).item() == 0
+
+
 def test_zero_static_kv_buffers_propagates_unexpected_errors():
     # RuntimeError from zero_() on ordinary dtypes is not a recoverable
     # dtype/layout issue: it must abort startup instead of leaving a

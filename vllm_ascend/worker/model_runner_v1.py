@@ -381,25 +381,38 @@ _FP8_DTYPES = frozenset(
 )
 
 
-def _zero_tensor(t: torch.Tensor) -> None:
-    """Zero a tensor in place without allocating a same-size buffer.
+def _zero_without_temp_buffer(t: torch.Tensor) -> None:
+    """Zero a tensor in place without allocating a same-size temporary.
 
-    Dispatch on dtype/layout instead of catching RuntimeError blindly: an
-    unexpected failure must abort startup loudly rather than leave a
-    poisoned buffer behind. The fp8 fallbacks must never materialize a
-    zeros_like() copy: doubling a resident buffer OOMed a nearly-full card
-    in CI (a2 mamba SSM state, 6.13 GiB with only 4.32 GiB free).
+    Contiguous tensors are filled through an int8 reinterpretation of the
+    same bytes; non-contiguous ones take a scalar broadcast copy_. A
+    zeros_like() copy OOMed a nearly-full card in CI (a2 mamba SSM state,
+    6.13 GiB with only 4.32 GiB free), so neither branch may materialize
+    one.
     """
-    if t.dtype not in _FP8_DTYPES:
-        t.zero_()
-        return
     if t.is_contiguous():
-        # fp8 storages may not implement zero_(); reinterpret as int8.
         t.view(torch.int8).zero_()
+    else:
+        t.copy_(torch.zeros((), dtype=t.dtype, device=t.device))
+
+
+def _zero_tensor(t: torch.Tensor) -> None:
+    """Zero a tensor in place.
+
+    fp8 storages may not implement zero_() at all, and plain zero_() can
+    itself materialize a same-size temporary for some NPU dtypes/layouts
+    (a2 CI runners: 6-12 GiB extra while the pool is nearly full). Both
+    cases take the no-temporary path. Only OutOfMemoryError is treated as
+    recoverable; any other failure must abort startup loudly rather than
+    leave a poisoned buffer behind.
+    """
+    if t.dtype in _FP8_DTYPES:
+        _zero_without_temp_buffer(t)
         return
-    # Non-contiguous fp8: broadcast a scalar zero instead of allocating a
-    # zeros_like() copy.
-    t.copy_(torch.zeros((), dtype=t.dtype, device=t.device))
+    try:
+        t.zero_()
+    except torch.OutOfMemoryError:
+        _zero_without_temp_buffer(t)
 
 
 def _zero_static_kv_buffers(runner) -> None:
