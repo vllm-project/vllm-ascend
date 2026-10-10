@@ -1552,6 +1552,29 @@ class BatchJobSchedConfig:
 
 
 @config
+class PREFLOWConfig:
+    """Configuration for profiled PREFLOW scheduling on PD prefill nodes.
+
+    ``max_fcfs_inflation`` defines the completion deadline relative to the
+    request's frozen FCFS baseline. A value of ``0.5`` permits at most 50%
+    additional modeled prefill time. PREFLOW profiles its cost function during
+    engine startup and schedules one request per model-execution step so those
+    measured costs remain additive.
+    """
+
+    enabled: bool = False
+    max_fcfs_inflation: float = 0.5
+
+    @model_validator(mode="after")
+    def _validate_config(self):
+        if not math.isfinite(self.max_fcfs_inflation) or self.max_fcfs_inflation < 0:
+            raise ValueError(
+                f"preflow_config.max_fcfs_inflation must be finite and non-negative, got {self.max_fcfs_inflation}"
+            )
+        return self
+
+
+@config
 class ShortRequestFirstConfig:
     """Configuration object for ``additional_config["scheduler_config"]["short_request_first_config"]``.
 
@@ -1620,8 +1643,8 @@ class SchedulerConfig:
     resolves the precedence (nested scheduler_config > top-level legacy >
     default), preserving the original deprecation warnings, and then constructs
     this class from final configuration values. Sub-configs
-    (ShortRequestFirstConfig / ProfilingChunkConfig / BatchJobSchedConfig) are
-    typed fields that pydantic coerces from nested dicts.
+    (ShortRequestFirstConfig / ProfilingChunkConfig / BatchJobSchedConfig /
+    PREFLOWConfig) are typed fields that pydantic coerces from nested dicts.
     """
 
     enable_balance_scheduling: bool = False
@@ -1629,6 +1652,7 @@ class SchedulerConfig:
     short_request_first_config: ShortRequestFirstConfig = dataclasses.field(default_factory=ShortRequestFirstConfig)
     profiling_chunk_config: ProfilingChunkConfig = dataclasses.field(default_factory=ProfilingChunkConfig)
     batch_job_sched_config: BatchJobSchedConfig = dataclasses.field(default_factory=BatchJobSchedConfig)
+    preflow_config: PREFLOWConfig = dataclasses.field(default_factory=PREFLOWConfig)
     dyntra_lb_config: DyntraLBConfig = dataclasses.field(default_factory=DyntraLBConfig)
 
     @classmethod
@@ -1670,6 +1694,7 @@ class SchedulerConfig:
             "short_request_first_config": _resolve("short_request_first_config", {}),
             "profiling_chunk_config": _resolve("profiling_chunk_config", {}),
             "batch_job_sched_config": _resolve("batch_job_sched_config", {}),
+            "preflow_config": scheduler_config.get("preflow_config", {}),
             "dyntra_lb_config": scheduler_config.get("dyntra_lb_config", {}),
         }
         # Forward nested unknown keys to pydantic so extra="forbid" reports
