@@ -136,17 +136,6 @@ def resolve_bounded_replay(vllm_config: VllmConfig, cache_config: CacheConfig | 
         # nothing to warn about. Probed rather than read, so the lane does not
         # have to be named here.
         return False
-    if getattr(vllm_config, "use_v2_model_runner", False):
-        # Upstream's guard, for the opposite reason: upstream keeps the switch
-        # off because only its V2 runner skips the paged-KV writes of replayed
-        # tokens, while on Ascend only the V1 runner *pads* them. Under V2
-        # nothing would, and the replayed positions would be rewritten in blocks
-        # still shared with every other request that hit the same prefix.
-        logger.warning_once(
-            "SWA bounded replay needs model runner V1 on Ascend (only it pads the replayed slots); "
-            "the sliding-window cache takes part in prefix caching instead."
-        )
-        return False
     if vllm_config.parallel_config.prefill_context_parallel_size > 1:
         # Upstream's condition and wording: the PAD pass walks the batch the
         # rank was handed, which under PCP is not the batch the scheduler
