@@ -5,6 +5,7 @@ import sys
 from unittest.mock import MagicMock, patch
 
 import torch
+import torch._inductor.pattern_matcher as pm
 import torch.fx as fx
 from torch._subclasses.fake_tensor import FakeTensorMode
 from vllm.config import VllmConfig
@@ -130,6 +131,38 @@ class TestMatmulReduceScatterFusionPass(TestBase):
         self._apply(graph_module)
         self.assertEqual(_targets(graph_module).count(FUSED_OP), 1)
         self.assertNotIn(PAD_OP, _targets(graph_module))
+
+    def test_nge_registration_preserves_padding_scalar(self):
+        # Exercise the arguments sent to NGE using its underlying matcher,
+        # without importing an NPU backend in CPU-only unit tests.
+        backend_pass = pm.PatternMatcherPass()
+
+        def register_backend(**kwargs):
+            pm.register_replacement(**kwargs, trace_fn=pm.fwd_only, pass_dicts=backend_pass)
+
+        module = "vllm_ascend.compilation.passes.base_pattern"
+        with (
+            patch(f"{module}._registered_patterns", set()),
+            patch(f"{module}.nge.register_replacement", side_effect=register_backend),
+        ):
+            self._make_pass()
+
+        for pad_rows in (None, 1, 2, 7):
+            with self.subTest(pad_rows=pad_rows):
+                graph_module = _build_graph(num_tokens=7 if pad_rows in (1, 7) else 8, pad_rows=pad_rows)
+                expected = next(
+                    node.meta["val"].shape for node in graph_module.graph.nodes if node.target is REDUCE_SCATTER_OP
+                )
+                self.assertEqual(backend_pass.apply(graph_module.graph), 1)
+                fused = next(node for node in graph_module.graph.nodes if node.target is FUSED_OP)
+                self.assertEqual(fused.meta["val"].shape, expected)
+                if pad_rows is None:
+                    self.assertNotIn(PAD_OP, _targets(graph_module))
+                else:
+                    padded_input = fused.args[0]
+                    self.assertIs(padded_input.target, PAD_OP)
+                    self.assertEqual(padded_input.args[1], [0, 0, 0, pad_rows])
+                    self.assertEqual(padded_input.args[0].op, "placeholder")
 
     def test_fused_output_shape_is_preserved(self):
         graph_module = _build_graph()

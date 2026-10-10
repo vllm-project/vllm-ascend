@@ -1,6 +1,5 @@
 from abc import ABC, abstractmethod
 from collections.abc import Callable
-from typing import Any
 
 import torch
 import torch._inductor.pattern_matcher as pm
@@ -44,12 +43,8 @@ class BasePattern(ABC):
         return lambda match: True
 
     def get_scalar_workaround(self) -> dict[str, float | int] | None:
-        """Return scalar example values for Inductor pattern registration."""
+        """Return scalar example values for Inductor and NGE registration."""
         return None
-
-    def get_nge_inputs(self) -> list[Any]:
-        """Return example inputs for NGE pattern registration."""
-        return self.get_inputs()
 
     def pattern_key(self) -> str:
         return f"{self.__class__.__name__}_{self.eps}"
@@ -84,8 +79,9 @@ class BasePattern(ABC):
         nge.register_replacement(
             search_fn=pattern_fn,
             replace_fn=replacement_fn,
-            example_inputs=self.get_nge_inputs(),
+            example_inputs=example_inputs,
             extra_check=lambda match: stream_check(match) and extra_check(match),
+            scalar_workaround=self.get_scalar_workaround(),
         )
 
         # Mark this pattern as registered

@@ -113,9 +113,6 @@ class PaddedMatmulReduceScatterPattern(_MatmulReduceScatterPattern):
     def get_scalar_workaround(self) -> dict[str, float | int] | None:
         return {"pad_rows": 13}
 
-    def get_nge_inputs(self) -> list:
-        return [*self.get_inputs(), 13]
-
     def get_extra_check(self):
         base_check = super().get_extra_check()
 
