@@ -387,6 +387,34 @@ class NPUModelRunner(GPUModelRunner):
                 kv_cache_config,
                 kv_cache_allocation_context=kv_cache_allocation_context,
             )
+            # The upstream initializer resolves the effective graph mode and
+            # creates the target/speculator graph managers. Adaptive
+            # verification can promote PIECEWISE to FULL_AND_PIECEWISE, so
+            # initialize the shared update stream from that resolved mode and
+            # update managers that captured the previous None value.
+            if (
+                self.cudagraph_manager.cudagraph_mode.has_full_cudagraphs()
+                and self.update_stream is None
+            ):
+                self.update_stream = torch.npu.Stream()
+                self.cudagraph_manager.update_stream = self.update_stream
+                if self.speculator is not None:
+                    self.speculator.update_stream = self.update_stream
+                    for manager_attr in (
+                        "query_cudagraph_manager",
+                        "prefill_cudagraph_manager",
+                        "decode_cudagraph_manager",
+                    ):
+                        manager = getattr(self.speculator, manager_attr, None)
+                        # Manager names do not necessarily identify the
+                        # runtime phase: the draft-prefill manager can replay
+                        # FULL graphs for uniform decode-shaped batches.
+                        if (
+                            manager is not None
+                            and manager.cudagraph_mode.has_full_cudagraphs()
+                        ):
+                            manager.update_stream = self.update_stream
+
             if self.pcp_manager is not None:
                 assert isinstance(self.pcp_manager, AscendPCPManager)
                 self.pcp_manager.vllm_config = self.vllm_config
