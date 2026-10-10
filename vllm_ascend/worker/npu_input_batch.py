@@ -342,6 +342,14 @@ class NPUInputBatch(InputBatch):
 
     def clone_for_vpp_sampling(self) -> "NPUInputBatch":
         """Clone the sampling-visible batch state for a yielded VPP batch."""
+        # Deep-copy logitsprocs: the built-in per-batch processors (min_tokens,
+        # logit_bias, ...) keep mutable per-batch state keyed by row index
+        # (e.g. `min_toks` / `logits_slice`). Sharing them by reference lets a
+        # later packed batch overwrite the state a pending sample still needs,
+        # and the stale row indices then index a smaller logits tensor
+        # (IndexCheck assert: "index value N exceeds bounds M").
+        import copy as _copy
+
         clone = NPUInputBatch._acquire_for_clone(
             max_num_reqs=self.max_num_reqs,
             max_model_len=self.max_model_len,
@@ -351,7 +359,7 @@ class NPUInputBatch(InputBatch):
             vocab_size=self.vocab_size,
             block_sizes=self._block_sizes,
             kernel_block_sizes=self._kernel_block_sizes,
-            logitsprocs=self.logitsprocs,
+            logitsprocs=_copy.deepcopy(self.logitsprocs),
             logitsprocs_need_output_token_ids=self.logitsprocs_need_output_token_ids,
             is_spec_decode=self.is_spec_decode,
             is_pooling_model=self.is_pooling_model,
@@ -410,10 +418,17 @@ class NPUInputBatch(InputBatch):
         clone.req_output_token_ids = self.req_output_token_ids.copy()
         clone.spec_token_ids = [token_ids.copy() for token_ids in self.spec_token_ids]
 
-        clone.prev_sampled_token_ids = self.prev_sampled_token_ids
-        clone.prev_req_id_to_index = (
-            None if self.prev_req_id_to_index is None else self.prev_req_id_to_index.copy()
-        )
+        # Async-PP sampled-token handoff state is transient per live batch:
+        # prev_sampled_token_ids is sized to the live batch's request rows and
+        # prev_req_id_to_index maps into those rows. Carrying them into a
+        # snapshot (by reference) lets a recycled clone leak a tensor sized for
+        # a previous, possibly smaller batch; when a packed VPP batch with more
+        # requests later swaps this snapshot in, the scatter in
+        # `_prepare_input_ids` indexes it out of bounds (IndexCheck assert).
+        # The scheduler-IPC path (new_token_ids -> token_ids_cpu) already
+        # carries the real tokens, so the full-copy input path is correct.
+        clone.prev_sampled_token_ids = None
+        clone.prev_req_id_to_index = None
         clone.sampled_token_ids_cpu = self.sampled_token_ids_cpu
         clone.async_copy_ready_event = self.async_copy_ready_event
         clone.sampling_metadata = clone._make_sampling_metadata()
