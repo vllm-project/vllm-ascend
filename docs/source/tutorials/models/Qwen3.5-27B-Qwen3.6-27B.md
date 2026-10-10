@@ -407,6 +407,8 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
         # Load model from ModelScope to speed up download
         export MODEL_PATH=Eco-Tech/Qwen3.6-27B-w8a8c8-mxfp8
         export VLLM_USE_MODELSCOPE=True
+        # C8 quantization is not yet adapted to model runner V2; use V1
+        export VLLM_USE_V2_MODEL_RUNNER=0
         export HCCL_BUFFSIZE=512
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         # To reduce memory fragmentation and avoid out of memory
@@ -448,6 +450,7 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
     - `--no-enable-prefix-caching` indicates that prefix caching is disabled. The current implementation of hybrid kv cache for Qwen3.6-27B may result in a very large effective `block_size` when prefix caching is enabled (e.g., 2048), which means any prefix shorter than `block_size` will never be cached. If your workload has many short repeated prefixes, consider keeping prefix caching disabled. For related issues, see the [Public FAQs](../../faqs.md).
     - `--quantization ascend` indicates that quantization is used. To disable quantization, remove this option.
     - `--kv-cache-dtype mxfp8` enables the C8 (MXFP8 KV cache) and is required by the `Qwen3.6-27B-w8a8c8-mxfp8` weights. It stores the KV cache of the full-attention layers as FP8 (E4M3) with E8M0 scales, roughly halving the KV cache memory, and runs the full-attention layers on the dedicated QFA (quant flash attention) kernel. The W8A8C8 weights bring performance gains in long-sequence scenarios. With this option, `--block-size` must be a multiple of `512` (it defaults to `512` if unset).
+    - `VLLM_USE_V2_MODEL_RUNNER=0` explicitly selects model runner V1. Keep this value at `0` when serving the C8 weights: C8 quantization is not yet adapted to model runner V2, so only model runner V1 can be used while `--kv-cache-dtype mxfp8` is enabled.
     - For short-sequence scenarios (e.g., 16K input length), the W8A8 weights (e.g., `Qwen3.6-27B-w8a8-mxfp8`) are recommended instead. When serving a W8A8 weight, remove `--kv-cache-dtype mxfp8` from the startup command. Note that C8 quantization is only supported on A5 machines (950DT and 950PR Products).
     - `--speculative-config` uses `qwen3_5_mtp` for `Qwen3.6-27B` because it shares the same MTP head design as `Qwen3.5-27B`.
     - `--compilation-config` contains configurations related to the aclgraph graph mode. The most significant configurations are `"cudagraph_mode"` and `"cudagraph_capture_sizes"`, which have the following meanings:
