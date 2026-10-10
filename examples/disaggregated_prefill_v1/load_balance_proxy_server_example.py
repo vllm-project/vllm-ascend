@@ -241,7 +241,9 @@ def calculate_decode_score(request_length: int) -> float:
 
 
 def normalize_host(host: str) -> str:
-    return host.replace("localhost", "0.0.0.0").replace("127.0.0.1", "0.0.0.0")
+    if host in {"localhost", "127.0.0.1"}:
+        return "0.0.0.0"
+    return host
 
 
 def server_key(host: str, port: int) -> str:
