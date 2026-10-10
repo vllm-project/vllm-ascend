@@ -24,6 +24,8 @@ silently turn the comparison into apples-to-oranges, so the parity and the
 caching contract are pinned here.
 """
 
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -187,3 +189,60 @@ def test_reference_signature_starts_one_server_per_measurement_conditions(refere
     assert mock_generate.call_count == 2
     # One gate per startup, not per call: a cache hit must not stop the world.
     assert mock_wait.call_count == 2
+
+
+def test_direct_checkpoint_is_not_copied_or_deleted(tmp_path):
+    payload = tmp_path / "sentinel"
+    payload.write_text("original")
+    source = SimpleNamespace(checkpoint_directory=tmp_path)
+    with utils.fixed_startup_checkpoint(source) as checkpoint:
+        assert Path(checkpoint) == tmp_path
+    assert payload.read_text() == "original"
+
+
+def test_direct_checkpoint_reference_runs_independently_per_case(reference_cache, tmp_path):
+    _FakeServer.instances.clear()
+    source = SimpleNamespace(checkpoint_directory=tmp_path)
+    prompts = ["short", [1, 2, 3]]
+    with (
+        patch("tests.e2e.conftest.RemoteOpenAIServer", _FakeServer),
+        patch.object(utils, "wait_for_free_device_memory"),
+        patch.object(utils, "generation_signature", return_value=[("text", (-0.5,))]) as generate,
+        patch("tests.e2e.pull_request.rlhf.qwen38_weight_transfer_utils.worker_rpc") as probe,
+    ):
+        for _ in range(2):
+            reference_signature(
+                source,
+                CASE,
+                port=PORT,
+                gpu_memory_utilization=0.45,
+                tensor_parallel_size=1,
+                device_index=0,
+                prompts=prompts,
+            )
+    assert len(_FakeServer.instances) == 2
+    assert all(s.model == str(tmp_path) for s in _FakeServer.instances)
+    assert generate.call_count == 2
+    assert generate.call_args.kwargs["prompts"] == prompts
+    assert probe.call_count == 4
+    assert reference_cache == {}
+
+
+@pytest.mark.parametrize("wrong_round", [0, 1])
+def test_missing_or_wrong_live_update_cannot_pass(wrong_round):
+    reference = [("reference", (-0.5,))]
+    updates = [reference, reference]
+    updates[wrong_round] = [("wrong payload", (-1.0,))]
+    with pytest.raises(AssertionError):
+        utils.assert_weight_update_matches_reference([("dummy", (-2.0,))], reference, *updates, CASE)
+
+
+def test_qwen_context_flags_keep_reference_live_parity():
+    from dataclasses import replace
+
+    case = replace(CASE, max_model_len=4096, max_num_seqs=1, max_num_batched_tokens=4096)
+    reference = _flag_map(reference_serve_args(case, port=PORT, gpu_memory_utilization=0.45))
+    live = _flag_map(live_update_serve_args(case, backend="hccl", port=PORT, gpu_memory_utilization=0.45))
+    for flag in ("--max-model-len", "--max-num-seqs", "--max-num-batched-tokens"):
+        assert live[flag] == reference[flag]
+    assert _flag_map(reference_serve_args(CASE, port=PORT, gpu_memory_utilization=0.45))["--max-model-len"] == "1024"
