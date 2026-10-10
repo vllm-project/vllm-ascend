@@ -6328,7 +6328,6 @@ class NPUModelRunner(GPUModelRunner):
                     indexes_kv_by_block_stride = bool(getattr(attn_module, "indexes_kv_by_block_stride", False))
                     kv_cache_spec[layer_name] = AscendMLAAttentionSpec(
                         block_size=self.block_size,
-                        num_heads=attn_module.num_heads,
                         num_kv_heads=1,
                         head_size=head_size,
                         dtype=dtype,

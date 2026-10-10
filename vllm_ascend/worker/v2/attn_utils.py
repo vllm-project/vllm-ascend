@@ -898,13 +898,13 @@ def _uses_single_raw_mla_cache(
         return False
     if not kv_cache_spec.supports_single_raw_backing:
         return False
+    if not supports_component_major_mla_pd(vllm_config) or enable_sfa(vllm_config):
+        return False
 
     attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase, [layer_name])
     attn_module = attn_layers.get(layer_name)
     return (
         isinstance(attn_module, MLAAttention)
-        and supports_component_major_mla_pd(vllm_config)
-        and not enable_sfa(vllm_config)
         and getattr(attn_module, "indexer", None) is None
         and not getattr(attn_module.impl, "fa_quant_layer", False)
     )
