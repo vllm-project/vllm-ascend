@@ -17,6 +17,7 @@ from vllm_ascend.attention.sfa_v1 import AscendSFABackend
 from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import (
+    _SUPPORTS_RUNTIME_K,
     AscendAutoRegressiveSpeculator,
     gather,
     torch_gather_wrapper,
@@ -194,17 +195,20 @@ def test_run_model_broadcasts_replicated_hidden_states():
 def test_generate_draft_updates_attn_metadata():
     """Test updating attention metadata during draft generation."""
     speculator = AscendAutoRegressiveSpeculator.__new__(AscendAutoRegressiveSpeculator)
+    speculator.num_speculative_steps = 3
     attn_metadata = {"layer.0": MagicMock()}
     speculator._update_decode_attn_metadata = MagicMock()
     with patch.object(AutoRegressiveSpeculator, "_generate_draft") as parent_generate:
         speculator._generate_draft(2, 4, attn_metadata, None, None)
-    parent_generate.assert_called_once_with(2, 4, attn_metadata, None, None, CUDAGraphMode.NONE)
+    runtime_kwargs = {"num_speculative_steps": 3} if _SUPPORTS_RUNTIME_K else {}
+    parent_generate.assert_called_once_with(2, 4, attn_metadata, None, None, CUDAGraphMode.NONE, **runtime_kwargs)
     speculator._update_decode_attn_metadata.assert_called_once_with(attn_metadata, 1, 2)
 
 
 def test_generate_draft_skips_update_without_attn_metadata():
     """Test skipping metadata updates when attention metadata is absent."""
     speculator = AscendAutoRegressiveSpeculator.__new__(AscendAutoRegressiveSpeculator)
+    speculator.num_speculative_steps = 3
     speculator._update_decode_attn_metadata = MagicMock()
     with patch.object(AutoRegressiveSpeculator, "_generate_draft"):
         speculator._generate_draft(2, 4, None, None, None)
@@ -225,11 +229,13 @@ def test_multi_step_decode_full_graph():
 def test_multi_step_decode_non_full_graph():
     """Test multi-step decode without full graph execution."""
     speculator = AscendAutoRegressiveSpeculator.__new__(AscendAutoRegressiveSpeculator)
+    speculator.num_speculative_steps = 3
     batch_desc = SimpleNamespace(cg_mode=CUDAGraphMode.NONE)
     seq_lens_cpu_upper_bound = torch.tensor([10, 20], dtype=torch.int32)
     with patch.object(AutoRegressiveSpeculator, "_multi_step_decode") as parent_decode:
         speculator._multi_step_decode(2, False, batch_desc, None, seq_lens_cpu_upper_bound)
-    parent_decode.assert_called_once_with(2, False, batch_desc, None, seq_lens_cpu_upper_bound)
+    runtime_kwargs = {"num_speculative_steps": 3} if _SUPPORTS_RUNTIME_K else {}
+    parent_decode.assert_called_once_with(2, False, batch_desc, None, seq_lens_cpu_upper_bound, **runtime_kwargs)
 
 
 def test_prefill_filters_target_only_metadata():
@@ -581,6 +587,7 @@ def test_capture_multi_step_captures_decode():
     speculator.replicated_pcp = False
     speculator.kv_cache_config = object()
     speculator.num_speculative_steps = 3
+    speculator.speculative_config = SimpleNamespace(uses_dynamic_speculative_decoding=lambda: False)
     with (
         patch(
             "vllm_ascend.worker.v2.spec_decode.autoregressive.speculator.disable_target_pcp_for_replicated_draft",
