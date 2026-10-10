@@ -271,8 +271,7 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
         self.assertEqual(scheme.group_size, 32)
 
     @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_current_vllm_config")
-    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.use_cann_megamoe", return_value=True)
-    def test_megamoe_preserves_per_expert_payload_after_disposing_source(self, _mock_use_megamoe, mock_vllm):
+    def test_all_moe_paths_share_per_expert_payload(self, mock_vllm):
         mock_vllm.return_value = create_mock_vllm_config()
         layer = create_mxfp_moe_layer(
             num_experts=self.num_experts,
@@ -289,16 +288,21 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
             names, originals, (weights.w1, weights.w2, weights.w1_scale, weights.w2_scale)
         ):
             with self.subTest(name=name):
-                self.assertEqual(getattr(layer, name).numel(), 0)
+                self.assertFalse(hasattr(layer, name))
                 self.assertEqual(len(experts), self.num_experts)
-                for expert, expected in zip(experts, original.unbind(0)):
+                if name.endswith("scale"):
+                    groups, channels, scale_size = original.shape
+                    expected_tensor = original.reshape(groups, channels, scale_size // 2, 2).transpose(1, 2)
+                else:
+                    expected_tensor = original.transpose(1, 2)
+                for expert, expected in zip(experts, expected_tensor.unbind(0)):
                     if name.endswith("scale"):
-                        expected = expected.reshape(expected.shape[0], -1, 2)
+                        self.assertEqual(expert.shape[-1], 2)
                     self.assertEqual(expert.dtype, expected.dtype)
                     self.assertTrue(expert.is_contiguous())
                     torch.testing.assert_close(expert.float(), expected.float(), rtol=0, atol=0)
         self.scheme.process_weights_after_loading(layer)
-        self.assertIs(layer.cann_mega_moe_w13_weight_list, weights.w1)
+        self.assertIs(layer.w13_weight_list, weights.w1)
 
     def test_get_weight_various_expert_counts(self):
         for num_experts in [4, 8, 16]:
@@ -314,8 +318,7 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
         self.assertEqual(result["w2_weight_scale"].dtype, torch.uint8)
 
     @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_current_vllm_config")
-    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.use_cann_megamoe", return_value=False)
-    def test_process_weights_stores_original_shapes(self, mock_use_cann_megamoe, mock_vllm):
+    def test_process_weights_stores_original_shapes(self, mock_vllm):
         layer = create_mxfp_moe_layer(
             num_experts=self.num_experts, hidden_size=self.hidden_size, intermediate_size=self.intermediate_size
         )
@@ -323,95 +326,81 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
         self.scheme.process_weights_after_loading(layer)
         self.assertTrue(hasattr(layer, "_mxfp8_original_shapes"))
         self.assertIn("w13_weight", layer._mxfp8_original_shapes)
-        self.assertEqual(layer.w13_weight.shape, (original_shape[0], original_shape[2], original_shape[1]))
-        self.assertTrue(layer.w13_weight.data.is_contiguous())
-        self.assertTrue(layer.w2_weight.data.is_contiguous())
-        self.assertTrue(layer.w13_weight_scale.data.is_contiguous())
-        self.assertTrue(layer.w2_weight_scale.data.is_contiguous())
+        self.assertFalse(hasattr(layer, "w13_weight"))
+        self.assertEqual(len(layer.w13_weight_list), self.num_experts)
+        self.assertEqual(layer.w13_weight_list[0].shape, (original_shape[2], original_shape[1]))
+        self.assertTrue(all(weight.is_contiguous() for weight in layer.w13_weight_list))
+        self.assertTrue(all(weight.is_contiguous() for weight in layer.w2_weight_list))
+        self.assertTrue(all(scale.is_contiguous() for scale in layer.w13_weight_scale_list))
+        self.assertTrue(all(scale.is_contiguous() for scale in layer.w2_weight_scale_list))
 
     @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_current_vllm_config")
-    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.use_cann_megamoe", return_value=False)
-    @patch("vllm_ascend.utils._should_trans_nz", return_value=False)
-    def test_process_weights_nz_disabled_keeps_pre_nz_layout(
-        self, mock_should_trans_nz, mock_use_cann_megamoe, mock_vllm
-    ):
+    def test_weight_accessors_use_unified_expert_lists(self, mock_vllm):
         layer = create_mxfp_moe_layer(
             num_experts=self.num_experts, hidden_size=self.hidden_size, intermediate_size=self.intermediate_size
         )
         self.scheme.process_weights_after_loading(layer)
-        self.assertFalse(layer.w13_weight.data.is_contiguous())
-        self.assertFalse(layer.w2_weight.data.is_contiguous())
-        self.assertFalse(layer.w13_weight_scale.data.is_contiguous())
-        self.assertFalse(layer.w2_weight_scale.data.is_contiguous())
-
         weight_views = self.scheme.get_eplb_weight_views(layer)
+        fused_weights = self.scheme.get_fused_mc2_weights(layer)
         self.assertTrue(self.scheme.supports_eplb)
-        self.assertEqual(len(weight_views), 4)
-        for source, weight_view in zip(
-            [layer.w13_weight, layer.w2_weight, layer.w13_weight_scale, layer.w2_weight_scale],
-            weight_views,
-        ):
-            self.assertTrue(weight_view.is_contiguous())
-            self.assertEqual(weight_view.shape[0], self.num_experts)
-            self.assertEqual(weight_view.untyped_storage().data_ptr(), source.untyped_storage().data_ptr())
+        self.assertIs(weight_views[0], layer.w13_weight_list)
+        self.assertIs(weight_views[1], layer.w2_weight_list)
+        self.assertIs(weight_views[2], layer.w13_weight_scale_list)
+        self.assertIs(weight_views[3], layer.w2_weight_scale_list)
+        self.assertIs(fused_weights.w1, layer.w13_weight_list)
+        self.assertIs(fused_weights.w2, layer.w2_weight_list)
+        self.assertIs(fused_weights.w1_scale, layer.w13_weight_scale_list)
+        self.assertIs(fused_weights.w2_scale, layer.w2_weight_scale_list)
 
     @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_current_vllm_config")
-    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.use_cann_megamoe", return_value=False)
-    def test_moe_buffer_data_ptr_stable_across_reloads(self, mock_use_cann_megamoe, mock_vllm):
-        for nz_enabled in (False, True):
-            with (
-                self.subTest(nz_enabled=nz_enabled),
-                patch("vllm_ascend.utils._should_trans_nz", return_value=nz_enabled),
-                patch("torch_npu.npu_format_cast", side_effect=lambda weight, fmt, **kwargs: weight.clone()) as cast,
-            ):
-                layer = create_mxfp_moe_layer(
-                    num_experts=self.num_experts, hidden_size=self.hidden_size, intermediate_size=self.intermediate_size
-                )
-                names = ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale")
-                loaded = {name: getattr(layer, name).data.clone() for name in names}
-                self.scheme.process_weights_after_loading(layer)
-                # Keep the tensors captured by the graph alive, including scales.
-                captured = {name: getattr(layer, name).data for name in names}
-                pointers = {name: tensor.data_ptr() for name, tensor in captured.items()}
-                for _ in range(3):
-                    self.scheme.restore_weights_for_rl_loading(layer)
-                    for name in names:
-                        torch.testing.assert_close(getattr(layer, name).float(), loaded[name].float(), rtol=0, atol=0)
-                    loaded = {}
-                    for name in names:
-                        parameter = getattr(layer, name)
-                        loaded[name] = torch.randint(0, 16, parameter.shape, dtype=torch.uint8).to(parameter.dtype)
-                        parameter.data.copy_(loaded[name])
-                    self.scheme.process_weights_after_loading(layer)
-                    for name in names:
-                        parameter = getattr(layer, name)
-                        self.assertEqual(parameter.data_ptr(), pointers[name], name)
-                        self.assertEqual(parameter.is_contiguous(), nz_enabled, name)
-                        expected = loaded[name]
-                        if name.endswith("_scale"):
-                            groups, channels, scale_size = expected.shape
-                            expected = expected.reshape(groups, channels, scale_size // 2, 2)
-                        expected = expected.transpose(1, 2)
-                        torch.testing.assert_close(parameter.float(), expected.float(), rtol=0, atol=0)
-                        torch.testing.assert_close(captured[name].float(), expected.float(), rtol=0, atol=0)
-                self.assertEqual(cast.call_count, 2 if nz_enabled else 0)
+    def test_moe_buffer_data_ptr_stable_across_reloads(self, mock_vllm):
+        layer = create_mxfp_moe_layer(
+            num_experts=self.num_experts, hidden_size=self.hidden_size, intermediate_size=self.intermediate_size
+        )
+        names = ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale")
+        loaded = {name: getattr(layer, name).data.clone() for name in names}
+        self.scheme.process_weights_after_loading(layer)
+        captured = {
+            name: list(getattr(layer, f"{name}_list"))
+            for name in names
+        }
+        pointers = {name: [tensor.data_ptr() for tensor in tensors] for name, tensors in captured.items()}
+        for _ in range(3):
+            self.scheme.restore_weights_for_rl_loading(layer)
+            for name in names:
+                torch.testing.assert_close(getattr(layer, name).float(), loaded[name].float(), rtol=0, atol=0)
+            loaded = {}
+            for name in names:
+                parameter = getattr(layer, name)
+                loaded[name] = torch.randint(0, 16, parameter.shape, dtype=torch.uint8).to(parameter.dtype)
+                parameter.data.copy_(loaded[name])
+            self.scheme.process_weights_after_loading(layer)
+            for name in names:
+                tensors = getattr(layer, f"{name}_list")
+                self.assertEqual([tensor.data_ptr() for tensor in tensors], pointers[name])
+                expected = loaded[name]
+                if name.endswith("_scale"):
+                    groups, channels, scale_size = expected.shape
+                    expected = expected.reshape(groups, channels, scale_size // 2, 2)
+                expected = expected.transpose(1, 2)
+                for tensor, expected_expert, captured_tensor in zip(tensors, expected, captured[name]):
+                    torch.testing.assert_close(tensor.float(), expected_expert.float(), rtol=0, atol=0)
+                    torch.testing.assert_close(captured_tensor.float(), expected_expert.float(), rtol=0, atol=0)
 
     @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_current_vllm_config")
-    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.use_cann_megamoe", return_value=False)
-    def test_restore_weights_for_rl_loading(self, mock_use_cann_megamoe, mock_vllm):
+    def test_restore_weights_for_rl_loading(self, mock_vllm):
         layer = create_mxfp_moe_layer(
             num_experts=self.num_experts, hidden_size=self.hidden_size, intermediate_size=self.intermediate_size
         )
         original_w13_shape = layer.w13_weight.shape
         self.scheme.process_weights_after_loading(layer)
-        self.assertNotEqual(layer.w13_weight.shape, original_w13_shape)
+        self.assertFalse(hasattr(layer, "w13_weight"))
         self.scheme.restore_weights_for_rl_loading(layer)
         self.assertEqual(layer.w13_weight.shape, original_w13_shape)
 
     @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_current_vllm_config")
-    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.use_cann_megamoe", return_value=False)
     @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8._EXTRA_CTX")
-    def test_apply_full_params(self, mock_ctx, mock_use_cann_megamoe, mock_vllm):
+    def test_apply_full_params(self, mock_ctx, mock_vllm):
         tokens = 4
         layer = create_mxfp_moe_layer(
             num_experts=self.num_experts, hidden_size=self.hidden_size, intermediate_size=self.intermediate_size

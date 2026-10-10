@@ -167,60 +167,82 @@ class TestAscendW4A4MXFP4MoEMethod(TestBase):
             self.assertEqual(result["w13_weight_scale"].dtype, torch.uint8)
             self.assertEqual(result["w2_weight_scale"].dtype, torch.uint8)
 
-    @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.get_current_vllm_config")
-    @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.use_cann_megamoe", return_value=False)
-    def test_process_weights_transposes_weights(self, mock_use_cann_megamoe, mock_vllm):
+    @staticmethod
+    def _make_moe_layer(scale_groups: int = 4):
         layer = nn.Module()
         layer.w13_weight = nn.Parameter(torch.randint(0, 255, (8, 256, 64), dtype=torch.uint8), requires_grad=False)
         layer.w2_weight = nn.Parameter(torch.randint(0, 255, (8, 128, 128), dtype=torch.uint8), requires_grad=False)
         layer.w13_weight_scale = nn.Parameter(
-            torch.randint(0, 255, (8, 256, 4), dtype=torch.uint8), requires_grad=False
-        )
-        layer.w2_weight_scale = nn.Parameter(torch.randint(0, 255, (8, 128, 8), dtype=torch.uint8), requires_grad=False)
-        self.scheme.process_weights_after_loading(layer)
-        self.assertEqual(layer.w13_weight.shape, (8, 64, 256))
-        self.assertEqual(layer.w13_weight_scale.shape, (8, 2, 256, 2))
-
-        weight_views = self.scheme.get_eplb_weight_views(layer)
-        self.assertTrue(self.scheme.supports_eplb)
-        self.assertEqual(len(weight_views), 4)
-        for source, weight_view in zip(
-            [layer.w13_weight, layer.w2_weight, layer.w13_weight_scale, layer.w2_weight_scale],
-            weight_views,
-        ):
-            self.assertTrue(weight_view.is_contiguous())
-            self.assertEqual(weight_view.shape[0], self.num_experts)
-            self.assertEqual(weight_view.untyped_storage().data_ptr(), source.untyped_storage().data_ptr())
-
-    @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.get_current_vllm_config")
-    @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.use_cann_megamoe", return_value=False)
-    def test_process_weights_pads_odd_scale_groups(self, mock_use_cann_megamoe, mock_vllm):
-        layer = nn.Module()
-        layer.w13_weight = nn.Parameter(torch.randint(0, 255, (8, 256, 64), dtype=torch.uint8), requires_grad=False)
-        layer.w2_weight = nn.Parameter(torch.randint(0, 255, (8, 128, 128), dtype=torch.uint8), requires_grad=False)
-        layer.w13_weight_scale = nn.Parameter(
-            torch.randint(0, 255, (8, 256, 11), dtype=torch.uint8), requires_grad=False
+            torch.randint(0, 255, (8, 256, scale_groups), dtype=torch.uint8), requires_grad=False
         )
         layer.w2_weight_scale = nn.Parameter(
-            torch.randint(0, 255, (8, 128, 11), dtype=torch.uint8), requires_grad=False
+            torch.randint(0, 255, (8, 128, scale_groups), dtype=torch.uint8), requires_grad=False
         )
+        return layer
+
+    @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.torch_npu")
+    def test_process_weights_builds_unified_expert_lists(self, mock_npu):
+        mock_npu.npu_format_cast.side_effect = lambda x, *a, **kw: x
+        layer = self._make_moe_layer()
         self.scheme.process_weights_after_loading(layer)
-        self.assertEqual(layer.w13_weight_scale.shape, (8, 6, 256, 2))
-        self.assertEqual(layer.w2_weight_scale.shape, (8, 6, 128, 2))
+        self.assertFalse(hasattr(layer, "w13_weight"))
+        self.assertEqual(len(layer.w13_weight_list), 8)
+        self.assertEqual(layer.w13_weight_list[0].shape, (64, 256))
+        self.assertEqual(layer.w2_weight_list[0].shape, (128, 128))
+        self.assertEqual(layer.w13_weight_scale_list[0].shape, (2, 256, 2))
+        self.assertEqual(layer.w2_weight_scale_list[0].shape, (2, 128, 2))
+
+        fused_weights = self.scheme.get_fused_mc2_weights(layer)
+        weight_views = self.scheme.get_eplb_weight_views(layer)
+        self.assertTrue(self.scheme.supports_eplb)
+        for expected, fused, eplb in zip(
+            (
+                layer.w13_weight_list,
+                layer.w2_weight_list,
+                layer.w13_weight_scale_list,
+                layer.w2_weight_scale_list,
+            ),
+            (fused_weights.w1, fused_weights.w2, fused_weights.w1_scale, fused_weights.w2_scale),
+            weight_views,
+        ):
+            self.assertIs(fused, expected)
+            self.assertIs(eplb, expected)
+
+    @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.torch_npu")
+    def test_process_weights_pads_odd_scale_groups(self, mock_npu):
+        mock_npu.npu_format_cast.side_effect = lambda x, *a, **kw: x
+        layer = self._make_moe_layer(scale_groups=11)
+        self.scheme.process_weights_after_loading(layer)
+        self.assertEqual(layer.w13_weight_scale_list[0].shape, (6, 256, 2))
+        self.assertEqual(layer.w2_weight_scale_list[0].shape, (6, 128, 2))
+
+        self.scheme.restore_weights_for_rl_loading(layer)
+        self.assertEqual(layer.w13_weight_scale.shape, (8, 256, 11))
+        self.assertEqual(layer.w2_weight_scale.shape, (8, 128, 11))
+
+    @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.torch_npu")
+    def test_refit_cycle_preserves_expert_buffer_addresses(self, mock_npu):
+        mock_npu.npu_format_cast.side_effect = lambda x, *a, **kw: x
+        layer = self._make_moe_layer()
+        self.scheme.process_weights_after_loading(layer)
+        list_names = ("w13_weight_list", "w2_weight_list", "w13_weight_scale_list", "w2_weight_scale_list")
+        pointers = {name: [tensor.data_ptr() for tensor in getattr(layer, name)] for name in list_names}
+
+        self.scheme.restore_weights_for_rl_loading(layer)
+        self.scheme.process_weights_after_loading(layer)
+
+        for name in list_names:
+            self.assertEqual([tensor.data_ptr() for tensor in getattr(layer, name)], pointers[name])
 
     @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.torch_npu")
     @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4._EXTRA_CTX")
     def test_apply_full_params(self, mock_ctx, mock_npu):
         tokens = 4
         layer = nn.Module()
-        layer.w13_weight = nn.Parameter(torch.randint(0, 255, (8, 64, 256), dtype=torch.uint8), requires_grad=False)
-        layer.w2_weight = nn.Parameter(torch.randint(0, 255, (8, 128, 128), dtype=torch.uint8), requires_grad=False)
-        layer.w13_weight_scale = nn.Parameter(
-            torch.randint(0, 255, (8, 64, 128, 2), dtype=torch.uint8), requires_grad=False
-        )
-        layer.w2_weight_scale = nn.Parameter(
-            torch.randint(0, 255, (8, 128, 64, 2), dtype=torch.uint8), requires_grad=False
-        )
+        layer.w13_weight_list = [torch.randint(0, 255, (64, 256), dtype=torch.uint8) for _ in range(8)]
+        layer.w2_weight_list = [torch.randint(0, 255, (128, 128), dtype=torch.uint8) for _ in range(8)]
+        layer.w13_weight_scale_list = [torch.randint(0, 255, (2, 256, 2), dtype=torch.uint8) for _ in range(8)]
+        layer.w2_weight_scale_list = [torch.randint(0, 255, (2, 128, 2), dtype=torch.uint8) for _ in range(8)]
         layer.swiglu_limit = 0.0
         x = torch.randn(tokens, self.hidden_size, dtype=torch.bfloat16)
         topk_weights = torch.randn(tokens, 2)
@@ -251,10 +273,8 @@ class TestAscendW4A4MXFP4MoEMethod(TestBase):
     @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.torch_npu")
     def test_apply_gmm1_passes_mxfp4_dtypes(self, mock_npu):
         layer = nn.Module()
-        layer.w13_weight = nn.Parameter(torch.randint(0, 255, (8, 64, 256), dtype=torch.uint8), requires_grad=False)
-        layer.w13_weight_scale = nn.Parameter(
-            torch.randint(0, 255, (8, 64, 128, 2), dtype=torch.uint8), requires_grad=False
-        )
+        layer.w13_weight_list = [torch.randint(0, 255, (64, 256), dtype=torch.uint8) for _ in range(8)]
+        layer.w13_weight_scale_list = [torch.randint(0, 255, (2, 256, 2), dtype=torch.uint8) for _ in range(8)]
         mock_npu.float4_e2m1fn_x2 = torch.uint8
         mock_npu.float8_e8m0fnu = torch.uint8
         mock_npu.npu_dynamic_mx_quant.return_value = (
@@ -269,7 +289,15 @@ class TestAscendW4A4MXFP4MoEMethod(TestBase):
         mlp_compute_input.group_list = torch.tensor([4], dtype=torch.int64)
         mlp_compute_input.group_list_type = 0
 
-        self.scheme.apply_gmm1(mlp_compute_input)
+        with patch.object(
+            self.scheme,
+            "_quant_hidden_states",
+            return_value=(
+                torch.randint(0, 255, (4, self.hidden_size), dtype=torch.uint8),
+                torch.randint(0, 255, (4, 4), dtype=torch.uint8),
+            ),
+        ):
+            self.scheme.apply_gmm1(mlp_compute_input)
 
         kwargs = mock_npu.npu_grouped_matmul.call_args.kwargs
         self.assertEqual(kwargs["x_dtype"], mock_npu.float4_e2m1fn_x2)
