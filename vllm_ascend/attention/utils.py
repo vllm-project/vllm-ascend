@@ -263,6 +263,10 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     # E.g., tensor([128, 256, 64]) for 3 requests with different seq lengths.
     seq_lens_cpu: torch.Tensor = None
 
+    # True only for a host mirror of the device's post-rejection valid lengths.
+    # A scheduler/draft length upper bound must not set this flag.
+    seq_lens_cpu_is_exact: bool = False
+
     # Host mirror of this cache group's block table, including padded rows.
 
     # CPU tensor of already computed tokens count per request.
@@ -328,6 +332,7 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             query_start_loc_cpu=self.query_start_loc_cpu[: num_actual_reqs + 1],
             seq_lens=self.seq_lens[:num_actual_reqs],
             seq_lens_cpu=_slice_reqs(self.seq_lens_cpu),
+            seq_lens_cpu_is_exact=self.seq_lens_cpu_is_exact,
             num_computed_tokens_cpu=_slice_reqs(self.num_computed_tokens_cpu),
             num_reqs=num_actual_reqs,
             num_actual_tokens=num_actual_tokens,
@@ -599,19 +604,19 @@ def _select_seq_lens(
 ) -> torch.Tensor:
     """Choose the seq_lens tensor carried by the built attention metadata.
 
-    Defaults to the CPU mirror: ``_seq_lens_cpu`` is always available and
-    updated during draft iterations, while ``seq_lens_cpu`` is None in async
-    spec decode mode. Cross-attention and generic parallel drafting override
-    this with the NPU ``seq_lens``; the one exception is DSpark on the GLM5.2
-    family, whose CPU mirror carries the same post-rejection-sampling lengths
-    across draft iterations, so building from it skips the NPU->CPU sync at
-    ``seq_lens.tolist()`` in the metadata build.
+    Prefer a CPU mirror. Parallel drafting keeps the NPU source unless the
+    caller explicitly supplies exact post-rejection host lengths, or the
+    existing GLM5.2/DSpark mirror contract applies. Cross-attention retains
+    device lengths. Reusing the exact mirror avoids repeated NPU->CPU copies
+    when builders call ``seq_lens.tolist()``.
     """
-    # Prefer _seq_lens_cpu (always available, updated during draft
-    # iterations) over seq_lens_cpu (None in async spec decode mode).
+    # An explicit exact mirror takes precedence over legacy CPU fields, which
+    # can still contain the target's upper bound after rejection sampling.
     model_config = vllm_config.model_config
     num_reqs = common_attn_metadata.num_reqs
-    if common_attn_metadata._seq_lens_cpu is not None:
+    if common_attn_metadata.seq_lens_cpu_is_exact and common_attn_metadata.seq_lens_cpu is not None:
+        seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
+    elif common_attn_metadata._seq_lens_cpu is not None:
         seq_lens = common_attn_metadata._seq_lens_cpu[:num_reqs]
     elif common_attn_metadata.seq_lens_cpu is not None:
         seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
@@ -621,8 +626,11 @@ def _select_seq_lens(
     if isinstance(kv_cache_spec, CrossAttentionSpec):
         seq_lens = common_attn_metadata.seq_lens
     if speculative_config is not None and speculative_config.parallel_drafting:
-        # PARD / DFlash (and DSpark on other models) keep the NPU seq_lens;
-        # only DSpark on the GLM5.2 family keeps the CPU mirror above.
-        if not (speculative_config.use_dspark() and _is_glm_model(model_config)):
+        # Preserve the device source unless the caller supplied exact host
+        # lengths, or the existing GLM5.2/DSpark mirror contract applies.
+        use_cpu_mirror = common_attn_metadata.seq_lens_cpu_is_exact or (
+            speculative_config.use_dspark() and _is_glm_model(model_config)
+        )
+        if not use_cpu_mirror:
             seq_lens = common_attn_metadata.seq_lens
     return seq_lens

@@ -69,9 +69,16 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         max_model_len: int,
         causal: bool | Mapping[int, bool] = False,
         progress_bar_desc: str = "Capturing CUDA graphs",
+        *,
+        precompute_context_kv: Callable[[int], None] | None = None,
     ) -> None:
         """Capture ACL graphs for DFlash."""
         with communicator_switch(), model_capture_wrapper(self.speculator, False):
+            context_kwargs = {}
+            if precompute_context_kv is not None:
+                # Newer upstream captures context KV ahead of the query. Keep
+                # that compute prefix instead of dropping the callback.
+                context_kwargs["precompute_context_kv"] = precompute_context_kv
             super().capture(
                 forward_fn,
                 input_buffers,
@@ -80,13 +87,28 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
                 kv_cache_config,
                 max_model_len,
                 causal,
-                progress_bar_desc,
+                progress_bar_desc=progress_bar_desc,
+                **context_kwargs,
             )
 
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Override run_fullgraph to update full graph params in run_fullgraph."""
         num_tokens = desc.num_tokens
         attn_backend = list(self.speculator.attn_backends.values())[0]
+        if getattr(self.speculator, "_deferred_draft_attn_metadata", None) is not None:
+            graph = self.graphs[desc]
+            assert isinstance(graph, UpdatableGraph)
+            # The update stream must wait for inputs BEFORE replay is queued:
+            # waiting on the replay itself would form a cycle at the first FIA.
+            self.update_stream.wait_stream(torch.npu.current_stream())
+            ret = super().run_fullgraph(desc)
+            with torch.npu.stream(self.update_stream):
+                metadata = self.speculator.build_draft_attn_metadatas(
+                    desc.num_reqs, self.speculator.input_batch.seq_lens_cpu_upper_bound
+                )
+                resolved_tasks = graph.iter_resolved_tasks(ContextSource(metadata[0]))
+                graph.update(self.update_stream, resolved_tasks)
+            return ret
         draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(
             desc.num_reqs,
             self.speculator.input_batch.seq_lens_cpu_upper_bound,

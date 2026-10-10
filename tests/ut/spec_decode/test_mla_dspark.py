@@ -242,9 +242,10 @@ def test_capture_delegates_and_restores_contexts(monkeypatch, architecture, fail
         "capture",
     )
 
-    def capture(self, *received):
+    def capture(self, *received, progress_bar_desc):
         assert self is manager
-        assert received == args
+        assert received == args[:-1]
+        assert progress_bar_desc == args[-1]
         assert events == ["enter communicator", "enter model"]
         events.append("capture")
         if fail:

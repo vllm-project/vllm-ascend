@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any
 
@@ -40,7 +40,7 @@ from vllm.v1.attention.backends.registry import (  # type: ignore
 )
 from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec, FullAttentionSpec, SlidingWindowSpec
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
@@ -258,6 +258,14 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         self.vllm_config = vllm_config
         self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
         self.pcp_enabled = self.pcp_size > 1
+        # Only the plain dense builder has no group-local derived metadata.
+        # DCP/310P and other subclasses must opt in with their own update path.
+        self.supports_update_block_table = (
+            type(self) is AscendAttentionMetadataBuilder
+            and vllm_config.use_v2_model_runner
+            and not self.pcp_enabled
+            and type(kv_cache_spec) in (FullAttentionSpec, SlidingWindowSpec)
+        )
         self.model_config = vllm_config.model_config
         self.compilation_config = vllm_config.compilation_config
         self.device = device
@@ -358,8 +366,12 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         # Get attn_mask from singleton AttentionMaskBuilder
         attn_mask = self.attn_mask_builder.get_attention_mask(common_attn_metadata.causal, self.model_config)
 
-        # TODO: Yet another unnecessary H2D while we already have a query_start_loc on device
-        query_start_loc = query_start_loc_cpu.pin_memory().to(self.device, non_blocking=True)
+        if self.supports_update_block_table:
+            # MRV2 supplies the current device boundaries, including FIA graph
+            # padding. Share that view instead of pinning and copying it again.
+            query_start_loc = common_attn_metadata.query_start_loc[: num_reqs + 1]
+        else:
+            query_start_loc = query_start_loc_cpu.pin_memory().to(self.device, non_blocking=True)
 
         actual_seq_lengths_q = query_start_loc_cpu[1:].tolist()
         seq_lens_list = seq_lens.tolist()
@@ -388,14 +400,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             padding_len = num_reqs_fia - len(seq_lens_list)
             seq_lens_list = seq_lens_list + [1] * padding_len
             seq_lens = torch.cat([seq_lens, seq_lens.new_ones(padding_len)])
-        if block_table is not None and block_table.shape[0] < num_reqs_fia:
-            block_table = torch.cat(
-                [
-                    block_table,
-                    block_table.new_zeros((num_reqs_fia - block_table.shape[0], block_table.shape[1])),
-                ],
-                dim=0,
-            )
+        block_table = self._pad_block_table(block_table, num_reqs_fia)
 
         backend_metadata = self._build_backend_metadata(
             common_attn_metadata,
@@ -430,6 +435,33 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             assert expanded_slot_mapping is not None
             self._finalize_pcp_metadata(attn_metadata, expanded_slot_mapping)
         return attn_metadata
+
+    @staticmethod
+    def _pad_block_table(block_table: torch.Tensor | None, num_reqs: int) -> torch.Tensor | None:
+        if block_table is not None and block_table.shape[0] < num_reqs:
+            block_table = torch.cat(
+                [block_table, block_table.new_zeros((num_reqs - block_table.shape[0], block_table.shape[1]))],
+                dim=0,
+            )
+        return block_table
+
+    def update_block_table(
+        self,
+        metadata: AscendMetadata,
+        blk_table: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ) -> AscendMetadata:
+        # Keep the cached template and all physical cache addresses independent.
+        # The lists, masks and query/sequence tensors are batch-local read-only
+        # inputs; mutable per-group scratch must not be shared.
+        assert self.supports_update_block_table
+        return replace(
+            metadata,
+            block_tables=self._pad_block_table(blk_table, len(metadata.actual_seq_lengths_q)),
+            slot_mapping=slot_mapping[: metadata.num_actual_tokens],
+            reshape_cache_event=None,
+            qfa_metadata_cache={},
+        )
 
     def _finalize_pcp_metadata(
         self,

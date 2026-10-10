@@ -33,6 +33,7 @@ from vllm_ascend.worker.v2.attn_utils import (
 )
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.model_states import init_asecnd_model_state
+from vllm_ascend.worker.v2.model_states import mamba_hybrid as mamba_hybrid_module
 from vllm_ascend.worker.v2.model_states.mamba_hybrid import (
     AscendMambaHybridModelState,
 )
@@ -317,10 +318,11 @@ def test_prepare_inputs_propagates_padded_request_count():
     assert padded_count.id == "num_reqs_padded"
 
 
-@patch("vllm_ascend.worker.v2.model_states.mamba_hybrid.build_attn_metadata")
 @pytest.mark.parametrize("num_spec", [0, 3])
 @pytest.mark.parametrize("graph_mode", [CUDAGraphMode.FULL, CUDAGraphMode.NONE])
-def test_prepare_attn_keeps_actual_counts_separate_from_padding(mock_build_attn_metadata, num_spec, graph_mode):
+def test_prepare_attn_keeps_actual_counts_separate_from_padding(monkeypatch, num_spec, graph_mode):
+    mock_build_attn_metadata = MagicMock()
+    monkeypatch.setattr(mamba_hybrid_module, "build_attn_metadata", mock_build_attn_metadata)
     expected_metadata = {"gdn": object()}
     mock_build_attn_metadata.return_value = expected_metadata
     state = SimpleNamespace(
@@ -330,6 +332,7 @@ def test_prepare_attn_keeps_actual_counts_separate_from_padding(mock_build_attn_
         ),
         num_accepted_tokens_gpu=torch.tensor([2, 3], dtype=torch.int32),
         max_model_len=1024,
+        _align_mode=False,
     )
     input_batch = SimpleNamespace(
         num_reqs=2,
@@ -368,11 +371,94 @@ def test_prepare_attn_keeps_actual_counts_separate_from_padding(mock_build_attn_
     assert kwargs["num_tokens"] == graph_requests * (num_spec + 1)
     model_metadata = kwargs["model_specific_attn_metadata"]
     if num_spec:
-        assert model_metadata.num_decode_draft_tokens_cpu.tolist() == [num_spec] * graph_requests
+        assert model_metadata.num_decode_draft_tokens_cpu.tolist() == [num_spec] * 2 + [-1] * (graph_requests - 2)
         assert model_metadata.num_accepted_tokens.tolist() == [2, 3] + [1] * (graph_requests - 2)
     else:
         assert model_metadata.num_decode_draft_tokens_cpu is None
         assert model_metadata.num_accepted_tokens is None
+
+
+@pytest.mark.parametrize("drafts", [None, [0, 3, 0, 2]])
+@pytest.mark.parametrize("for_capture", [False, True])
+def test_prepare_attn_zero_drafts_and_align_groups(monkeypatch, drafts, for_capture):
+    build = MagicMock(return_value={})
+    monkeypatch.setattr(mamba_hybrid_module, "build_attn_metadata", build)
+    indices = torch.arange(24 * 6 * 4, dtype=torch.int32).view(24, 6, 4)
+    gather = MagicMock(return_value=indices)
+    monkeypatch.setattr(mamba_hybrid_module, "_compute_aligned_state_indices", gather)
+    builders = [SimpleNamespace(mamba_aligned_state_indices=None) for _ in range(24)]
+    groups = [[SimpleNamespace(get_metadata_builder=lambda _, b=b: b)] for b in builders]
+    state = SimpleNamespace(
+        vllm_config=SimpleNamespace(num_speculative_tokens=3, parallel_config=None),
+        num_accepted_tokens_gpu=torch.tensor([1, 4, 2, 3], dtype=torch.int32),
+        max_model_len=1024,
+        _align_mode=True,
+        _get_mamba_group_info=MagicMock(return_value=(list(range(24)), None)),
+        _ensure_align_ctx=MagicMock(return_value=object()),
+    )
+    state._get_aligned_state_index_views = lambda values: AscendMambaHybridModelState._get_aligned_state_index_views(
+        state, values
+    )
+    batch = SimpleNamespace(
+        num_reqs=4,
+        num_reqs_after_padding=6,
+        num_tokens=9,
+        num_tokens_after_padding=12,
+        is_prefilling_np=np.array([False, True, True, False]),
+        prefill_runs_as_decode_np=np.array([False, False, True, False]),
+        idx_mapping=torch.tensor([3, 1, 2, 0]),
+        num_draft_tokens_per_req=None if drafts is None else np.array(drafts, dtype=np.int32),
+        num_scheduled_tokens=np.array([1, 7, 1, 0], dtype=np.int32),
+        query_start_loc=torch.tensor([0, 1, 8, 9, 9, 9, 9], dtype=torch.int32),
+        query_start_loc_np=np.array([0, 1, 8, 9, 9, 9, 9], dtype=np.int32),
+        seq_lens=torch.tensor([32, 7, 16, 0, 0, 0], dtype=torch.int32),
+        dcp_local_seq_lens=None,
+        seq_lens_np=np.array([32, 7, 16, 0, 0, 0], dtype=np.int32),
+        positions=None,
+        attn_state=None,
+    )
+    tables = tuple(torch.zeros(6, 32, dtype=torch.int32) for _ in builders)
+    AscendMambaHybridModelState.prepare_attn(
+        state, batch, CUDAGraphMode.FULL, tables, torch.empty(0), groups, MagicMock(), for_capture=for_capture
+    )
+    gather.assert_called_once_with(state._ensure_align_ctx.return_value, batch.seq_lens, 6, 32)
+    for group_idx, builder in enumerate(builders):
+        torch.testing.assert_close(builder.mamba_aligned_state_indices, indices[group_idx])
+    model_metadata = build.call_args.kwargs["model_specific_attn_metadata"]
+    assert model_metadata.is_prefilling.tolist() == [False, True, False, False, False, False]
+    if for_capture:
+        assert model_metadata.num_decode_draft_tokens_cpu is None
+        assert model_metadata.num_accepted_tokens is None
+    else:
+        assert model_metadata.num_decode_draft_tokens_cpu.tolist() == [0, -1, 0, -1, -1, -1]
+        assert model_metadata.num_accepted_tokens.tolist() == [3, 4, 2, 1, 1, 1]
+
+
+@pytest.mark.parametrize("num_reqs", [0, 1, 33])
+@pytest.mark.parametrize("separate_index_tables", [False, True])
+def test_aligned_state_indices_use_npu_gather(monkeypatch, num_reqs, separate_index_tables):
+    output = torch.empty(24, 64, 4, dtype=torch.int32)
+    gather = MagicMock(return_value=output[:, :num_reqs])
+    monkeypatch.setattr(mamba_hybrid_module, "compute_aligned_state_indices", gather)
+    ctx = SimpleNamespace(
+        is_initialized=True,
+        aligned_state_indices=output,
+        block_table_ptrs=object(),
+        block_table_stride_req=32,
+        block_size=16,
+        num_groups=24,
+    )
+    if separate_index_tables:
+        ctx.aligned_index_block_table_ptrs = object()
+    seq_lens = SimpleNamespace(device=SimpleNamespace(type="npu"), shape=(64,), stride=lambda _: 2)
+    actual = mamba_hybrid_module._compute_aligned_state_indices(ctx, seq_lens, num_reqs, 32)
+    assert actual.shape == (24, num_reqs, 4)
+    if not num_reqs:
+        gather.assert_not_called()
+        return
+    gather.assert_called_once_with(
+        getattr(ctx, "aligned_index_block_table_ptrs", ctx.block_table_ptrs), seq_lens, output, num_reqs, 32, 32, 16
+    )
 
 
 def test_prepare_attn_propagates_actual_request_count_to_metadata_builder():
