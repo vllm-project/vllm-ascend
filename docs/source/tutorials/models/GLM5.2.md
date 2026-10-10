@@ -41,8 +41,6 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 ## 4 Installation
 
-### 4.1 Docker Image Installation
-
 - You can use our official docker image to run GLM-5.2 and GLM-5.3. The hardware-specific container commands below follow the GLM-5.3-Flash guide.
 
 Before launching a container, replace the image tag with a compatible, tested build for your target model and hardware. The documentation-wide image tag is not a model compatibility guarantee. Use the same image digest on all nodes.
@@ -165,29 +163,6 @@ For A5 PD deployment, the host must already have the platform-generated HCCL/HIX
     ```
 
 If you want to deploy multi-node environment, you need to set up environment on each node.
-
-### 4.2 Version Compatibility
-
-| Configuration | Version boundary |
-| --- | --- |
-| Commands on this page | Follow the current source configuration schema. Record the vLLM and vLLM Ascend versions and image digest used for validation; a documentation build is not an end-to-end deployment test. |
-| GLM-5.2 v0.26.0rc1/rc2 | Use the matching release documentation and image. Do not combine legacy additional-config fields with current commands. |
-| GLM-5.3 / A5 quantization | Requires a build supporting the selected model and checkpoint format; GLM-5.2 results do not establish GLM-5.3 compatibility. |
-
-In the current schema, Mul-Add fusion is configured as `ascend_compilation_config.fuse_muls_add`, not a top-level `fuse_muls_add` key. The examples retain this setting in the nested configuration. Do not copy the removed `enable_reduce_sample` field from older examples. KV-cache and indexer dtypes must match the checkpoint and runtime; do not copy A3 INT8 settings to A5 MXFP checkpoints.
-
-Capture runtime versions inside each container before testing:
-
-```shell
-python -m pip show vllm vllm-ascend
-vllm serve --help
-```
-
-Capture the image identity on the host (use the container name from the commands above):
-
-```shell
-docker inspect vllm-ascend
-```
 
 ## 5 Online Service Deployment {: #5-online-service-deployment }
 
