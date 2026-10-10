@@ -23,11 +23,17 @@ from tests.e2e.conftest import VllmRunner, qwen_prompt, wait_until_npu_memory_fr
 MODEL = "Qwen/Qwen3.6-27B"
 
 
+def _get_test_images():
+    """Exercise varying encoder sequence lengths within a multimodal batch."""
+    image = ImageAsset("cherry_blossom").pil_image.convert("RGB")
+    return [image.resize((size, size)) for size in (224, 448, 672, 896)]
+
+
 @patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
 @wait_until_npu_memory_free()
 def test_qwen3_6_27b_multimodel_fia_eager():
     """Verify multimodal generation with FIA op and eager mode."""
-    image = ImageAsset("cherry_blossom").pil_image.convert("RGB")
+    images = _get_test_images()
     questions = [
         "What is the content of this image?",
         "Describe the content of this image in detail.",
@@ -35,7 +41,6 @@ def test_qwen3_6_27b_multimodel_fia_eager():
         "Where is this image taken?",
     ]
 
-    images = [image] * len(questions)
     prompts = qwen_prompt(questions)
 
     with VllmRunner(
@@ -58,14 +63,18 @@ def test_qwen3_6_27b_multimodel_fia_eager():
             max_tokens=64,
         )
 
-    assert outputs[0][1]
+    assert len(outputs) == len(prompts)
+    assert all(text for _, text in outputs)
 
 
-@patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
+@patch.dict(
+    os.environ,
+    {"HCCL_BUFFSIZE": "1024", "VLLM_USE_V2_MODEL_RUNNER": "1"},
+)
 @wait_until_npu_memory_free()
-def test_qwen3_6_27b_multimodel_fia_acl_graph():
-    """Verify multimodal generation with FIA op and FULL_AND_PIECEWISE graph mode."""
-    image = ImageAsset("cherry_blossom").pil_image.convert("RGB")
+def test_qwen3_6_27b_multimodel_encoder_acl_graph_mrv2():
+    """Verify MRV2 encoder ACL graph while decoder graph capture is disabled."""
+    images = _get_test_images()
     questions = [
         "What is the content of this image?",
         "Describe the content of this image in detail.",
@@ -73,7 +82,6 @@ def test_qwen3_6_27b_multimodel_fia_acl_graph():
         "Where is this image taken?",
     ]
 
-    images = [image] * len(questions)
     prompts = qwen_prompt(questions)
 
     with VllmRunner(
@@ -90,14 +98,29 @@ def test_qwen3_6_27b_multimodel_fia_acl_graph():
         },
         compilation_config={
             "cudagraph_mm_encoder": True,
-            "cudagraph_capture_sizes": [1],
-            "encoder_cudagraph_token_budgets": [128, 256, 512, 1024, 1536, 2048, 2560, 3072, 3584, 4096],
+            "cudagraph_mode": "NONE",
+            "encoder_cudagraph_max_vision_items_per_batch": 4,
+            # The four test images require 1920 encoder tokens in total. One
+            # fitting budget is sufficient to validate capture and replay and
+            # avoids capturing nine unrelated graphs during this E2E test.
+            "encoder_cudagraph_token_budgets": [2048],
         },
     ) as vllm_model:
+        graph_stats_before = vllm_model.model.llm_engine.collective_rpc("get_encoder_cudagraph_stats")
         outputs = vllm_model.generate_greedy(
             prompts=prompts,
             images=images,
             max_tokens=64,
         )
 
-    assert outputs[0][1]
+        graph_stats_after = vllm_model.model.llm_engine.collective_rpc("get_encoder_cudagraph_stats")
+
+    assert len(outputs) == len(prompts)
+    assert all(text for _, text in outputs)
+    assert len(graph_stats_before) == len(graph_stats_after) == 2
+    assert all(stats is not None for stats in graph_stats_before + graph_stats_after)
+    assert all(stats["manager"] == "EncoderAclGraphManager" for stats in graph_stats_after)
+    assert all(stats["captured"] for stats in graph_stats_after)
+    assert all(
+        after["graph_hits"] > before["graph_hits"] for before, after in zip(graph_stats_before, graph_stats_after)
+    ), f"Encoder ACL graph did not replay on every TP rank: {graph_stats_before=} {graph_stats_after=}"
