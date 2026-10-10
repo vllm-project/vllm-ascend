@@ -682,6 +682,23 @@ class AscendModelSlimConfig(QuantizationConfig):
         runtime_prefix = prefix
         prefix = self.quant_prefix_mapper(model_type, prefix)
 
+        low_rank = getattr(vllm_config.model_config.hf_config, "moe_svd", None)
+        if isinstance(low_rank, dict) and is_fused_moe_layer(layer):
+            layers = low_rank.get("layers")
+            if (
+                not isinstance(layers, list)
+                or not layers
+                or any(type(index) is not int or index < 0 for index in layers)
+                or len(set(layers)) != len(layers)
+            ):
+                raise ValueError("moe_svd.layers must be a nonempty list of unique nonnegative layer indices")
+            layer_match = re.search(r"(?:^|\.)layers\.(\d+)(?:\.|$)", runtime_prefix)
+            if layer_match is not None and int(layer_match.group(1)) in layers:
+                from ..methods.w4a8.w4a8_svd import AscendW4A8SVDFusedMoEMethod
+
+                logger.debug("Select AscendW4A8SVDFusedMoEMethod for %s", prefix)
+                return AscendW4A8SVDFusedMoEMethod(layer.moe_config, low_rank, tid2eid)
+
         # Kimi K3's mixed-precision packed KDA projection is split by the model
         # adapter, so it must be resolved BEFORE get_quant_type_for_layer.
         if model_type in ("kimi_k3", "kimi_linear") and self.uses_kimi_k3_mixed_kda_projection(prefix):

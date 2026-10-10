@@ -71,6 +71,21 @@ class TestMoECommMethod(TestBase):
         comm_impl.mega_moe_symm_buffer = None
         return comm_impl
 
+    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.MoECommMethod.fused_experts")
+    def test_fused_mc2_low_rank_uses_dispatched_mlp(self, base_fused_experts):
+        expected = object()
+        base_fused_experts.return_value = expected
+        comm_impl = object.__new__(FusedMC2CommImpl)
+        fused_input = MagicMock()
+        fused_input.weights.low_rank = (MagicMock(), MagicMock(), MagicMock())
+        quant_method = MagicMock()
+
+        result = comm_impl.fused_experts(fused_input, quant_method=quant_method)
+
+        self.assertIs(result, expected)
+        base_fused_experts.assert_called_once_with(fused_input, quant_method=quant_method)
+        quant_method.get_fused_mc2_weights.assert_not_called()
+
     def tearDown(self):
         self._patch_get_ascend_config.stop()
         self._patch_get_ascend_config_module.stop()
