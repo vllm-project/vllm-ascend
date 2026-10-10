@@ -169,14 +169,12 @@ def test_idle_allow_manual_dump_defers_end_of_wave_to_sample(tmp_path: Path):
                 sampler_output=MagicMock(),
                 valid_sampled_token_ids=[1],
                 req_ids_output_copy=["r1"],
-                invalid_req_indices=None,
                 finished_req_ids=None,
             )
 
         proc.run_sample_phase(
             sample_fn=sample_fn,
             speculative_config=None,
-            need_accepted_tokens=False,
             use_async=False,
         )
         eow.assert_called_once_with(allow_manual_dump=True)
@@ -306,7 +304,6 @@ def test_run_sample_phase_idle_skips_hooks(tmp_path: Path):
             sampler_output=MagicMock(),
             valid_sampled_token_ids=[1],
             req_ids_output_copy=["r1"],
-            invalid_req_indices=None,
             finished_req_ids=None,
         )
 
@@ -317,7 +314,6 @@ def test_run_sample_phase_idle_skips_hooks(tmp_path: Path):
     proc.run_sample_phase(
         sample_fn=sample_fn,
         speculative_config=None,
-        need_accepted_tokens=False,
         use_async=False,
     )
     assert calls == ["sample"]

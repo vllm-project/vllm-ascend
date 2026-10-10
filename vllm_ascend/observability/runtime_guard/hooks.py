@@ -127,7 +127,6 @@ def _build_sample_phase_result(runner: Any, output: Any, input_batch: Any, finis
         sampler_output=SimpleNamespace(sampled_token_ids=sampled),
         valid_sampled_token_ids=getattr(output, "sampled_token_ids", None),
         req_ids_output_copy=req_ids,
-        invalid_req_indices=None,
         finished_req_ids=finished_req_ids,
     )
 
@@ -163,10 +162,9 @@ def runtime_guard_sample_tokens(sample_tokens_fn):
             return _build_sample_phase_result(self, output, input_batch, finished_req_ids)
 
         speculative_config = getattr(self, "speculative_config", None)
-        result, _ = guard.run_sample_phase(
+        result = guard.run_sample_phase(
             sample_fn=sample_fn,
             speculative_config=speculative_config,
-            need_accepted_tokens=False,
             use_async=bool(getattr(self, "use_async_scheduling", False)),
             accepted_token_nums_fn=(
                 (lambda _result: get_postprocess_sampled(self)[1]) if speculative_config is not None else None

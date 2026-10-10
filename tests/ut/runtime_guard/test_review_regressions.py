@@ -122,10 +122,9 @@ def test_v3d_run_sample_phase_hook_failure_does_not_block_sampling():
     p.check_after_sample = boom
     p.should_check_after_spec = lambda: False
 
-    result, routed = p.run_sample_phase(
+    result = p.run_sample_phase(
         sample_fn=sample_fn,
         speculative_config=None,
-        need_accepted_tokens=False,
         use_async=False,
     )
     assert sampled == [1]
@@ -295,7 +294,6 @@ def test_v8c_async_skips_sample_wave_stamp_on_non_tp0():
             sampler_output=SimpleNamespace(sampled_token_ids=[1]),
             valid_sampled_token_ids=[1],
             req_ids_output_copy=["r1"],
-            invalid_req_indices=None,
             finished_req_ids=None,
         )
 
@@ -306,7 +304,6 @@ def test_v8c_async_skips_sample_wave_stamp_on_non_tp0():
         p.run_sample_phase(
             sample_fn=sample_fn,
             speculative_config=None,
-            need_accepted_tokens=False,
             use_async=True,
         )
     assert wt._sample_waves == {}
@@ -319,7 +316,6 @@ def test_v8c_async_skips_sample_wave_stamp_on_non_tp0():
         p.run_sample_phase(
             sample_fn=sample_fn,
             speculative_config=None,
-            need_accepted_tokens=False,
             use_async=True,
         )
     assert wt.take_sample_wave("r1") == 1

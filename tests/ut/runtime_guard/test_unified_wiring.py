@@ -106,14 +106,12 @@ def test_run_sample_phase_invokes_spec_hooks():
             sampler_output=SimpleNamespace(sampled_token_ids=[1]),
             valid_sampled_token_ids=[1],
             req_ids_output_copy=["r1"],
-            invalid_req_indices=None,
             finished_req_ids=None,
         )
 
     p.run_sample_phase(
         sample_fn=sample_fn,
         speculative_config=object(),
-        need_accepted_tokens=False,
         use_async=False,
         accepted_token_nums_fn=lambda _r: [1],
     )
@@ -182,14 +180,12 @@ def test_d11_async_model_runner_output_defers_after_sample():
             sampler_output=SimpleNamespace(sampled_token_ids=padded),
             valid_sampled_token_ids=padded,
             req_ids_output_copy=["r1"],
-            invalid_req_indices=None,
             finished_req_ids=None,
         )
 
     p.run_sample_phase(
         sample_fn=sample_fn,
         speculative_config=None,
-        need_accepted_tokens=False,
         use_async=False,
     )
     assert "waves" in calls

@@ -239,7 +239,7 @@ def test_sample_tokens_orchestrates_guard_around_body():
 
     def _run(sample_fn, **kwargs):
         runner.run_phase_kwargs = kwargs
-        return sample_fn(), None
+        return sample_fn()
 
     guard.run_sample_phase.side_effect = _run
 
@@ -250,7 +250,6 @@ def test_sample_tokens_orchestrates_guard_around_body():
     assert runner.order == ["body", "postprocess"]
     assert runner.run_phase_kwargs == {
         "speculative_config": None,
-        "need_accepted_tokens": False,
         "use_async": False,
         "accepted_token_nums_fn": None,
     }
@@ -286,7 +285,7 @@ def test_sample_tokens_passes_accepted_token_nums_fn_for_spec():
         nums_fn = kwargs["accepted_token_nums_fn"]
         assert nums_fn is not None
         assert nums_fn(result) == [1]
-        return result, None
+        return result
 
     guard.run_sample_phase.side_effect = _run
     runner.sample_tokens(None)

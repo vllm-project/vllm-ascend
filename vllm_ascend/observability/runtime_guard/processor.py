@@ -72,7 +72,6 @@ class SamplePhaseResult:
     sampler_output: Any
     valid_sampled_token_ids: Any
     req_ids_output_copy: Any
-    invalid_req_indices: Any
     finished_req_ids: Any
 
 
@@ -450,28 +449,21 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         *,
         sample_fn: Callable[[], SamplePhaseResult],
         speculative_config: Any,
-        need_accepted_tokens: bool,
         use_async: bool,
-        async_state_update_fn: Callable[[SamplePhaseResult], None] | None = None,
-        routed_experts_fn: Callable[[SamplePhaseResult], Any] | None = None,
         accepted_token_nums_fn: Callable[[SamplePhaseResult], Any] | None = None,
-    ) -> tuple[SamplePhaseResult, Any]:
-        """Single sink for post-pre-sample runtime_guard hooks.
+    ) -> SamplePhaseResult:
+        """Single sink for post-pre-sample runtime_guard hooks (v2).
 
-        Replaces 7 inline ``self.runtime_guard.*`` calls scattered across
-        ``NPUModelRunner.sample_tokens`` with one orchestration call so
-        hook ordering is owned by ``RuntimeGuardProcessor`` rather than the runner.
+        Hook ordering is owned by ``RuntimeGuardProcessor`` rather than the runner.
 
         Hook 1 (``check_before_sample``) stays on the compute_logits wrap inside
         :func:`~vllm_ascend.observability.runtime_guard.hooks.runtime_guard_sample_tokens`
-        so it fires BEFORE grammar bitmask (v2 only).
+        so it fires BEFORE grammar bitmask.
 
         Hook sequence (``S1`` golden path):
             2. ``sample_fn()`` returns :class:`SamplePhaseResult`
             3. ``mark_finished``
-            -> ``async_state_update_fn`` (only if ``need_accepted_tokens``)
             4. ``check_after_spec`` (spec only; ``accepted_token_nums_fn`` for branch)
-            -> ``routed_experts_fn`` (async path: BEFORE wave stamp; sync: AFTER check_after_sample)
             5. ``record_sample_waves``
             6. ``check_after_sample`` (host-ready ids only; see defer note below)
             7. ``end_of_wave_sync`` (config+dump gate; after sync auto arm when possible)
@@ -491,14 +483,9 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         # Still flush: TP>1 drain collectives must stay lockstep every sample.
         if not self.needs_sample_phase_hooks():
             result = sample_fn()
-            if need_accepted_tokens and async_state_update_fn is not None:
-                async_state_update_fn(result)
-            routed_experts_result = None
-            if routed_experts_fn is not None:
-                routed_experts_result = routed_experts_fn(result)
             # End-of-wave gate uses collectives — do not soft-fail (desync/hang).
             self.end_of_wave_sync(allow_manual_dump=True)
-            return result, routed_experts_result
+            return result
 
         # Runner's sample work (sample + draft + bookkeeping + output + profiling + eplb)
         result = sample_fn()
@@ -507,9 +494,6 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
             self._last_input_batch = result.input_batch
         # Hook 3: mark_finished
         self._soft_fail("mark_finished", lambda: self.mark_finished(result.finished_req_ids))
-        # Async state update callback (between mark_finished and check_after_spec)
-        if need_accepted_tokens and async_state_update_fn is not None:
-            async_state_update_fn(result)
         # Hook 4: check_after_spec (spec only). Gate here to skip the
         # accepted_token_nums_fn callback when detection is off; soft-fail
         # lives inside check_after_spec itself.
@@ -523,10 +507,6 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
                 accepted_token_nums=accepted_token_nums,
                 req_ids=result.req_ids_output_copy,
             )
-        # Async path: routed_experts computed BEFORE wave stamp
-        routed_experts_result = None
-        if use_async and routed_experts_fn is not None:
-            routed_experts_result = routed_experts_fn(result)
         # Hook 5: record_sample_waves (sync: all ranks; async: output-rank TP0 only)
         if self._should_record_sample_waves(use_async=use_async):
             self._soft_fail(
@@ -547,12 +527,9 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
                     req_ids=result.req_ids_output_copy,
                 ),
             )
-        # Sync path: routed_experts computed AFTER check_after_sample
-        if not use_async and routed_experts_fn is not None:
-            routed_experts_result = routed_experts_fn(result)
         # Hook 7: end-of-wave config+dump gate (collectives — no soft-fail).
         self.end_of_wave_sync(allow_manual_dump=True)
-        return result, routed_experts_result
+        return result
 
     def check_before_sample(
         self,
