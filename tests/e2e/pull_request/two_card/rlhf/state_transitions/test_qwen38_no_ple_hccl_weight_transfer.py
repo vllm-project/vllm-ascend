@@ -155,4 +155,4 @@ def test_qwen38_no_ple_hccl_weight_transfer(request, packed):
                 group.close()
             if thread.is_alive():
                 finish_rpc(thread)
-    assert_weight_update_matches_reference(dummy, reference, *signatures, case)
+    assert_weight_update_matches_reference(dummy, reference, signatures[0], signatures[1], case)

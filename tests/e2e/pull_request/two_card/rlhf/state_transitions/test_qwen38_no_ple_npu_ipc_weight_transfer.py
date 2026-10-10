@@ -100,4 +100,4 @@ def test_qwen38_no_ple_npu_ipc_weight_transfer(request, monkeypatch, packed):
             post(server, "wake_up", params={"tags": ["kv_cache"]})
             signatures.append(generation_signature(server.get_client(), case.model, prompts=prompts))
             worker_rpc(server, "check_no_ple_execution")
-    assert_weight_update_matches_reference(dummy, reference, *signatures, case)
+    assert_weight_update_matches_reference(dummy, reference, signatures[0], signatures[1], case)

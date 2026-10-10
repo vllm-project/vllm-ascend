@@ -25,7 +25,6 @@ caching contract are pinned here.
 """
 
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -194,7 +193,7 @@ def test_reference_signature_starts_one_server_per_measurement_conditions(refere
 def test_direct_checkpoint_is_not_copied_or_deleted(tmp_path):
     payload = tmp_path / "sentinel"
     payload.write_text("original")
-    source = SimpleNamespace(checkpoint_directory=tmp_path)
+    source = MagicMock(checkpoint_directory=tmp_path)
     with utils.fixed_startup_checkpoint(source) as checkpoint:
         assert Path(checkpoint) == tmp_path
     assert payload.read_text() == "original"
@@ -202,8 +201,8 @@ def test_direct_checkpoint_is_not_copied_or_deleted(tmp_path):
 
 def test_direct_checkpoint_reference_runs_independently_per_case(reference_cache, tmp_path):
     _FakeServer.instances.clear()
-    source = SimpleNamespace(checkpoint_directory=tmp_path)
-    prompts = ["short", [1, 2, 3]]
+    source = MagicMock(checkpoint_directory=tmp_path)
+    prompts: list[str | list[int]] = ["short", [1, 2, 3]]
     with (
         patch("tests.e2e.conftest.RemoteOpenAIServer", _FakeServer),
         patch.object(utils, "wait_for_free_device_memory"),
@@ -234,7 +233,7 @@ def test_missing_or_wrong_live_update_cannot_pass(wrong_round):
     updates = [reference, reference]
     updates[wrong_round] = [("wrong payload", (-1.0,))]
     with pytest.raises(AssertionError):
-        utils.assert_weight_update_matches_reference([("dummy", (-2.0,))], reference, *updates, CASE)
+        utils.assert_weight_update_matches_reference([("dummy", (-2.0,))], reference, updates[0], updates[1], CASE)
 
 
 def test_qwen_context_flags_keep_reference_live_parity():

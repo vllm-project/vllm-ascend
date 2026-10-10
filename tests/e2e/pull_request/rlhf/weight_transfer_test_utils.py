@@ -450,7 +450,7 @@ class FixedRandomWeightSource(WeightSource):
         save_file(state, str(target / "model.safetensors"), metadata={"format": "pt"})
 
 
-def packed_buffer_size_for(source: FixedRandomWeightSource) -> int:
+def packed_buffer_size_for(source: WeightSource) -> int:
     """Size a packed transfer buffer so every single tensor fits.
 
     Both engines default to 1 GiB, which is smaller than the largest tensor of
@@ -565,13 +565,13 @@ def reference_serve_args(
 
 
 @contextlib.contextmanager
-def fixed_startup_checkpoint(source: FixedRandomWeightSource) -> Iterator[str]:
+def fixed_startup_checkpoint(source: WeightSource) -> Iterator[str]:
     """Expose the source's payload as a throwaway startup-load checkpoint."""
     checkpoint = getattr(source, "checkpoint_directory", None)
     if isinstance(checkpoint, (str, Path)):
         yield str(checkpoint)
         return
-    directory = tempfile.mkdtemp(prefix=f"fixed-startup-{source.case_id}-")
+    directory = tempfile.mkdtemp(prefix=f"fixed-startup-{getattr(source, 'case_id', 'weights')}-")
     try:
         source.write_checkpoint(directory)
         yield directory
@@ -621,7 +621,7 @@ _REFERENCE_SIGNATURES: dict[tuple[str, float, int], list[tuple[str, tuple[float,
 
 
 def reference_signature(
-    source: FixedRandomWeightSource,
+    source: WeightSource,
     case: WeightUpdateModelCase,
     *,
     port: int,
@@ -690,7 +690,9 @@ def generation_signature(
 ) -> list[tuple[str, tuple[float, ...]]]:
     """Capture deterministic text and logprobs for exact reload comparison."""
     signature = []
-    for prompt in PROMPTS if prompts is None else prompts:
+    if prompts is None:
+        prompts = list(PROMPTS)
+    for prompt in prompts:
         response = client.completions.create(
             model=model,
             prompt=prompt,
