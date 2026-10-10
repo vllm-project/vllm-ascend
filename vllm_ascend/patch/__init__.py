@@ -1261,6 +1261,21 @@
 #       Monkey-patch Step3p5 to enable SP.
 #    Future Plan:
 #       Remove this patch once upstream SP completes refactor.
+#   3. The FP32 router gate's import path -- `FP32ReplicatedLinear` on
+#      `vllm.model_executor.models.step3p5` versus `GateLinear` on
+#      `vllm.model_executor.layers.fused_moe`
+#    Why:
+#       v0.31.0 moved the gate out of the model module into the MoE package, and
+#       re-expressed "run the router in FP32" as an `out_dtype` rather than an
+#       input cast. Both spellings are needed: the release lane and the verified
+#       vLLM main ref export only the old one, v0.31.0 only the new one, and
+#       naming the absent one fails at import, which takes the whole worker down
+#       before any model is loaded.
+#    How:
+#       Probe for the old name and fall back to the MoE package's `GateLinear`,
+#       carrying whichever extra keywords that ref's own Step3.5 code passes.
+#    Future Plan:
+#       Drop the probe once every supported lane exports `GateLinear`.
 #
 # ** 21. File: worker/patch_triton.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
