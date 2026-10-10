@@ -2,19 +2,9 @@
 
 ## Feature Introduction
 
-Fine-Grained Tensor Parallelism (Fine-grained TP) extends standard tensor parallelism by enabling **independent tensor-parallel sizes for different model components**. Instead of applying a single global `tensor_parallel_size` to all layers, Fine-grained TP allows users to configure separate TP sizes for key modules — such as embedding, LM head, attention output projection (o_proj), and MLP blocks — via the `finegrained_tp_config` parameter.
+Fine-Grained Tensor Parallelism (Fine-grained TP) extends standard tensor parallelism with **independent tensor-parallel sizes for different model components** — embedding, LM head, attention output projection (o_proj), and MLP blocks — configured via the `finegrained_tp_config` parameter. Instead of a single global `tensor_parallel_size`, each component is sharded along the data-parallel (DP) axis with its own size, reducing per-device weight memory. The feature supports MoE models.
 
-This capability supports heterogeneous parallelism strategies within a single model, providing finer control over weight distribution, memory layout, and communication patterns across devices. The feature is compatible with MoE transformer architectures and integrates into vLLM’s serving pipeline.
-
-Fine-grained TP delivers two primary performance advantages through targeted weight sharding:
-
-- **Reduced Per-Device Memory Footprint**:  
-  Fine-grained TP shards large weight matrices (e.g., LM head, o_proj) across devices, lowering peak memory usage and enabling larger batches or deployment on memory-limited hardware, all without quantization.
-  
-- **Faster Memory Access in GEMMs**:  
-  In decode-heavy workloads, GEMM performance is often memory-bound. Weight sharding reduces per-device weight fetch volume, cutting DRAM traffic and improving bandwidth efficiency, especially for latency-sensitive layers like LM head and o_proj.
-
-In the measured DeepSeek-R1-W8A8 deployment below, the four knobs together saved **9.72 GB per card** with a net TPOT improvement (see [Experimental Results](#experimental-results)).
+In the measured DeepSeek-R1-W8A8 deployment below, the four knobs together saved **9.72 GB per card** with a net TPOT improvement (see [Experimental Results](#experimental-results)). In decode-heavy workloads, where GEMMs are memory-bound, the smaller per-device weights also reduce the weight-read volume per step for the sharded modules.
 
 ### Working Principle
 
@@ -52,7 +42,7 @@ The four knobs are freely combinable — on a PD decode node all four can be ena
 |----------|-------------|
 | Model | MoE models only — see [Models](#models) for how to check a checkpoint |
 | Deployment Scenario | embedding / LM head TP: all-DP MoE serving or PD decode nodes; o_proj / MLP TP: P/D-disaggregated decode nodes only |
-| Standard TP | Fine-grained sizes require, or are only effective under, `tensor_parallel_size == 1`; see [Standard Tensor Parallelism Requirement](#standard-tensor-parallelism-requirement) |
+| Standard TP | o_proj / MLP TP require `tensor_parallel_size == 1` (enforced at config load); embedding / LM head TP are validated only under `tensor_parallel_size == 1` — under `tp > 1` their fine-grained sharding replaces the standard TP sharding of these modules; see [Standard Tensor Parallelism Requirement](#standard-tensor-parallelism-requirement) |
 | Feature Mutual Exclusion | Pipeline parallelism (`pipeline_parallel_size > 1`) cannot be combined with any of the four knobs; `prefill_context_parallel_size > 1` cannot be combined with o_proj / MLP TP; PCP embedding / LM-head weight sharding (`enable_pcp_embedding_lmhead_weight_sharding`, on by default when PCP > 1) cannot be combined with embedding / LM head TP |
 | Hardware | No config-enforced hardware restriction; the performance data in this guide was measured on Atlas A2 (see [Experimental Results](#experimental-results)) |
 
@@ -60,7 +50,7 @@ The four knobs are freely combinable — on a PD decode node all four can be ena
 
 Fine-grained TP currently supports **MoE models only**. The constraint is enforced at configuration load: a non-MoE model fails at startup with `The finegrained tp sizes can be enabled only for MOE models.`
 
-To check whether a checkpoint qualifies, look at its `config.json`: the model counts as a MoE model when the config exposes routed experts through any of the fields `n_routed_experts` (DeepSeek-style), `num_local_experts` (Mixtral-style), `num_experts`, `moe_num_experts`, or MoE blocks under `block_configs`. Checkpoints such as DeepSeek-V3/R1, the Qwen3 MoE series, GLM MoE variants, Kimi-K2, and MiniMax-M3 qualify; dense checkpoints such as Llama or the dense Qwen series do not.
+To check whether a checkpoint qualifies, look at its `config.json`: the model counts as a MoE model when the config exposes routed experts through any of the fields `n_routed_experts` (DeepSeek-style), `num_local_experts` (Mixtral-style), `num_experts`, `moe_num_experts`, or MoE blocks under `block_configs`. Checkpoints such as DeepSeek-V3/R1, the Qwen3 MoE series, GLM MoE variants, Kimi-K2, and MiniMax-M3 qualify; dense checkpoints such as Llama or the dense Qwen series do not. Qualification here is config-based; see [Experimental Results](#experimental-results) for the measured coverage.
 
 The restriction comes from the sharding axis: fine-grained TP shards weights across the data-parallel (DP) dimension, and only MoE deployments keep a cross-rank DP group — for a dense model, every DP rank runs as an independent DP=1 engine, leaving no group to shard across.
 
@@ -105,8 +95,8 @@ Fine-grained TP shards the configured layer **across the data-parallel (DP) dime
 
 | Component | Behavior with `tensor_parallel_size > 1` |
 |-----------|------------------------------------------|
-| `o_proj` / `mlp` | **Not supported.** For `o_proj`, the DSA attention output is reshaped with `n_local_groups = n_groups // tp_size` (standard TP), while the wo_a/wo_b weights are sharded by the OTP group (DP dimension); the two axes no longer align (for MLP, the combination is simply untested). Both knobs are therefore rejected at config load unless `tensor_parallel_size == 1`. |
-| `embedding` / LM head | **Supported, but only effective under `tensor_parallel_size == 1`.** Both components are sharded along the fine-grained (DP-realm) group, whose process group is built along the DP axis at a fixed `tp_idx` — orthogonal to the standard TP axis. When `tensor_parallel_size > 1`, the standard TP sharding and the fine-grained sharding operate on different axes of the rank grid and can no longer compose: the fine-grained group's ranks all share the same standard-TP weight shard, so fine-grained TP cannot deliver additional sharding. In other words, these components are designed for all-DP (`tensor_parallel_size == 1`) deployments; under `tensor_parallel_size > 1` the standard TP dimension takes over and the fine-grained configuration does not take effect. |
+| `o_proj` / `mlp` | **Rejected at config load.** For `o_proj`, the DSA attention output is reshaped with `n_local_groups = n_groups // tp_size` (standard TP), while the wo_a/wo_b weights are sharded by the OTP group (DP dimension); the two axes no longer align (for MLP, the combination is simply untested). Both knobs require `tensor_parallel_size == 1`. |
+| `embedding` / LM head | **Validated for `tensor_parallel_size == 1` only.** With a knob enabled, these modules always resolve to the fine-grained plan: their weights are sharded by the fine-grained (DP-axis, fixed `tp_idx`) group — `vocab / fine_grained_size` per rank — which **replaces** the standard TP sharding of these modules instead of composing with it. There is no config-time gate on `tensor_parallel_size`, and the fine-grained groups remain valid under `tp > 1`, but that combination is not validated — keep `tensor_parallel_size == 1` when enabling these knobs. |
 
 ## Feature Usage
 
@@ -244,7 +234,7 @@ To evaluate the effectiveness of fine-grained TP in large-scale service scenario
 
 ## Deployment Recommendations
 
-Fine-grained TP is the **most effective** in the **decode instance** of PD separation, where models are typically deployed in all-DP mode. In this setup, sharding weight-heavy layers reduces redundant storage and memory pressure. Accordingly, `o_proj` TP and MLP TP are validated for — and limited to — P/D-disaggregated decode nodes (see [Preconditions for o_proj / MLP TP](#preconditions-for-o_proj--mlp-tp)), while embedding and LM head TP are also applicable to all-DP deployments without PD.
+Fine-grained TP is designed for the **decode instance** of PD separation, where models are typically deployed in all-DP mode. In this setup, sharding weight-heavy layers reduces redundant storage and memory pressure. Accordingly, `o_proj` TP and MLP TP are validated for — and limited to — P/D-disaggregated decode nodes (see [Preconditions for o_proj / MLP TP](#preconditions-for-o_proj--mlp-tp)), while embedding and LM head TP are also applicable to all-DP deployments without PD.
 
 ## FAQs
 
