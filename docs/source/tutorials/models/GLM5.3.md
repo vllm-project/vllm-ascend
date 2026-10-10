@@ -325,7 +325,7 @@ Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
         --kv-cache-dtype int8 \
         --attention_config.indexer_kv_dtype int8 \
-        --additional-config '{"enable_dsa_cp": true, "enable_balance_scheduling": true, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_flashcomm1": true}' \
+        --additional-config '{"ascend_compilation_config": {"fuse_muls_add": true}, "enable_dsa_cp": true, "enable_balance_scheduling": true,  "multistream_overlap_shared_expert": true, "enable_flashcomm1": true}' \
         --enable-prefix-caching \
         --async-scheduling \
         --api-server-count 1
@@ -387,7 +387,7 @@ Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
         --kv-cache-dtype int8 \
         --attention_config.indexer_kv_dtype int8 \
-        --additional-config '{"enable_dsa_cp": true, "enable_balance_scheduling": true,"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_flashcomm1": true}' \
+        --additional-config '{"ascend_compilation_config": {"fuse_muls_add": true}, "enable_dsa_cp": true, "enable_balance_scheduling": true,  "multistream_overlap_shared_expert": true, "enable_flashcomm1": true}' \
         --enable-prefix-caching \
         --async-scheduling
     ```

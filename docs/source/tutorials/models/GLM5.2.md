@@ -215,7 +215,7 @@ The parameters are explained as follows:
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --attention_config.indexer_kv_dtype int8 \
-    --additional-config '{"enable_dsa_cp": true, "enable_balance_scheduling": true,"fuse_muls_add":true,"multistream_overlap_shared_expert":true,"c8_enable_reshape_optim":false, "enable_flashcomm1": true, "enable_fused_mc2": 1}'  \
+    --additional-config '{"ascend_compilation_config": {"fuse_muls_add": true}, "enable_dsa_cp": true, "enable_balance_scheduling": true, "multistream_overlap_shared_expert":true,"c8_enable_reshape_optim":false, "enable_flashcomm1": true, "enable_fused_mc2": 1}'  \
     --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
     ```
 
@@ -262,7 +262,7 @@ The parameters are explained as follows:
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --attention_config.indexer_kv_dtype int8 \
-    --additional-config '{"enable_dsa_cp": true, "enable_balance_scheduling": true,"fuse_muls_add":true,"multistream_overlap_shared_expert":true,"c8_enable_reshape_optim":false, "enable_flashcomm1": true, "enable_fused_mc2": 1}'  \
+    --additional-config '{"ascend_compilation_config": {"fuse_muls_add": true}, "enable_dsa_cp": true, "enable_balance_scheduling": true, "multistream_overlap_shared_expert":true,"c8_enable_reshape_optim":false, "enable_flashcomm1": true, "enable_fused_mc2": 1}'  \
     --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
     ```
 
@@ -477,7 +477,7 @@ Before you start, please
             --max-model-len 202752 \
             --safetensors-load-strategy 'prefetch' \
             --attention_config.indexer_kv_dtype int8 \
-            --additional-config '{"fuse_muls_add":true, "enable_dsa_cp":true,  "enable_flashcomm1": true, "enable_fused_mc2": 1}' \
+            --additional-config '{ "ascend_compilation_config": {"fuse_muls_add": true}, "enable_dsa_cp":true,  "enable_flashcomm1": true, "enable_fused_mc2": 1}' \
             --max-num-batched-tokens 16384 \
             --trust-remote-code \
             --enable-prefix-caching \
@@ -540,7 +540,7 @@ Before you start, please
             --max-model-len 202752 \
             --safetensors-load-strategy 'prefetch' \
             --attention_config.indexer_kv_dtype int8 \
-            --additional-config '{"fuse_muls_add":true, "enable_dsa_cp":true,  "enable_flashcomm1": true, "enable_fused_mc2": 1}' \
+            --additional-config '{ "ascend_compilation_config": {"fuse_muls_add": true}, "enable_dsa_cp":true,  "enable_flashcomm1": true, "enable_fused_mc2": 1}' \
             --max-num-batched-tokens 16384 \
             --trust-remote-code \
             --enable-prefix-caching \
@@ -603,7 +603,7 @@ Before you start, please
             --kv-cache-dtype int8 \
             --attention_config.indexer_kv_dtype int8 \
             --speculative-config '{"num_speculative_tokens": 5,  "method":"deepseek_mtp","enforce_eager":true}' \
-            --additional-config '{"fuse_muls_add":true, "recompute_scheduler_enable":true, "enable_fused_mc2": 1, "enable_mlapo": true}' \
+            --additional-config '{ "ascend_compilation_config": {"fuse_muls_add": true}, "recompute_scheduler_enable":true, "enable_fused_mc2": 1, "enable_mlapo": true}' \
             --trust-remote-code \
             --max-num-seqs 32 \
             --gpu-memory-utilization 0.90 \
@@ -664,7 +664,7 @@ Before you start, please
             --kv-cache-dtype int8 \
             --attention_config.indexer_kv_dtype int8 \
             --speculative-config '{"num_speculative_tokens": 5,  "method":"deepseek_mtp","enforce_eager":true}' \
-            --additional-config '{"fuse_muls_add":true, "recompute_scheduler_enable":true, "enable_fused_mc2": 1, "enable_mlapo": true}' \
+            --additional-config '{ "ascend_compilation_config": {"fuse_muls_add": true}, "recompute_scheduler_enable":true, "enable_fused_mc2": 1, "enable_mlapo": true}' \
             --trust-remote-code \
             --max-num-seqs 32 \
             --gpu-memory-utilization 0.90 \
@@ -866,7 +866,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8c8 \
     }' \
     --kv-cache-dtype int8 \
     --attention_config.indexer_kv_dtype int8 \
-    --additional-config '{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false}, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_mc2_hierarchy_comm": false, "enable_cpu_binding": true, "recompute_scheduler_enable": false, "enable_mlapo": true}' \
+    --additional-config '{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": { "fuse_muls_add": true,"enable_npugraph_ex": true, "enable_static_kernel": false},  "multistream_overlap_shared_expert": true, "enable_mc2_hierarchy_comm": false, "enable_cpu_binding": true, "recompute_scheduler_enable": false, "enable_mlapo": true}' \
     --profiler-config \
     '{
         "profiler": "torch",
@@ -965,7 +965,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8c8 \
     }' \
     --kv-cache-dtype int8 \
     --attention_config.indexer_kv_dtype int8 \
-    --additional-config '{"enable_flashcomm1": false, "enable_dsa_cp": false, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false}, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_mc2_hierarchy_comm": false, "enable_cpu_binding": true, "recompute_scheduler_enable": true, "enable_mlapo": true}' \
+    --additional-config '{"enable_flashcomm1": false, "enable_dsa_cp": false, "ascend_compilation_config": { "fuse_muls_add": true,"enable_npugraph_ex": true, "enable_static_kernel": false},  "multistream_overlap_shared_expert": true, "enable_mc2_hierarchy_comm": false, "enable_cpu_binding": true, "recompute_scheduler_enable": true, "enable_mlapo": true}' \
     --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp", "enforce_eager":true}'
 ```
 
@@ -1064,7 +1064,7 @@ vllm serve <MODEL_PATH> \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [4, 16, 128]}' \
   --kv-cache-dtype int8 \
   --attention_config.indexer_kv_dtype int8 \
-  --additional-config '{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false}, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_mc2_hierarchy_comm": false, "enable_cpu_binding": true, "recompute_scheduler_enable": false, "weight_nz_mode": 1}' \
+  --additional-config '{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": { "fuse_muls_add": true,"enable_npugraph_ex": true, "enable_static_kernel": false},  "multistream_overlap_shared_expert": true, "enable_mc2_hierarchy_comm": false, "enable_cpu_binding": true, "recompute_scheduler_enable": false, "weight_nz_mode": 1}' \
   --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
   --quantization ascend \
   --enable-expert-parallel \
@@ -1117,7 +1117,7 @@ vllm serve <MODEL_PATH> \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
   --kv-cache-dtype int8 \
   --attention_config.indexer_kv_dtype int8 \
-  --additional-config '{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false}, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_mc2_hierarchy_comm": false, "enable_cpu_binding": true, "recompute_scheduler_enable": false, "weight_nz_mode": 1}' \
+  --additional-config '{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": { "fuse_muls_add": true,"enable_npugraph_ex": true, "enable_static_kernel": false},  "multistream_overlap_shared_expert": true, "enable_mc2_hierarchy_comm": false, "enable_cpu_binding": true, "recompute_scheduler_enable": false, "weight_nz_mode": 1}' \
   --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
   --quantization ascend \
   --enable-expert-parallel \
@@ -1272,7 +1272,7 @@ prepare the script `run_dp_template.sh` on each node.
         --safetensors-load-strategy 'prefetch' \
         --kv-cache-dtype int8 \
         --attention_config.indexer_kv_dtype int8 \
-        --additional-config '{"fuse_muls_add":true, "multistream_overlap_shared_expert": true, "enable_dsa_cp":true, "c8_enable_reshape_optim":true, "mega_moe_max_tokens": 8192, "enable_flashcomm1": true, "enable_fused_mc2": 1}' \
+        --additional-config '{ "ascend_compilation_config": {"fuse_muls_add": true}, "multistream_overlap_shared_expert": true, "enable_dsa_cp":true, "c8_enable_reshape_optim":true, "mega_moe_max_tokens": 8192, "enable_flashcomm1": true, "enable_fused_mc2": 1}' \
         --max-num-batched-tokens 8192 \
         --trust-remote-code \
         --enable-prefix-caching \
@@ -1336,7 +1336,7 @@ prepare the script `run_dp_template.sh` on each node.
         --safetensors-load-strategy 'prefetch' \
         --kv-cache-dtype int8 \
         --attention_config.indexer_kv_dtype int8 \
-        --additional-config '{"fuse_muls_add":true, "multistream_overlap_shared_expert": true, "c8_enable_reshape_optim":true, "mega_moe_max_tokens": 8192, "enable_flashcomm1": true, "enable_fused_mc2": 1}' \
+        --additional-config '{ "ascend_compilation_config": {"fuse_muls_add": true}, "multistream_overlap_shared_expert": true, "c8_enable_reshape_optim":true, "mega_moe_max_tokens": 8192, "enable_flashcomm1": true, "enable_fused_mc2": 1}' \
         --max-num-batched-tokens 8192 \
         --trust-remote-code \
         --enable-prefix-caching \
@@ -1401,7 +1401,7 @@ prepare the script `run_dp_template.sh` on each node.
         --speculative-config '{"num_speculative_tokens": 5,  "method":"deepseek_mtp","enforce_eager":true}' \
         --kv-cache-dtype int8 \
         --attention_config.indexer_kv_dtype int8 \
-        --additional-config '{"fuse_muls_add":true, "recompute_scheduler_enable":true, "multistream_overlap_shared_expert":true, "enable_fused_mc2": 1, "enable_mlapo": true}' \
+        --additional-config '{ "ascend_compilation_config": {"fuse_muls_add": true}, "recompute_scheduler_enable":true, "multistream_overlap_shared_expert":true, "enable_fused_mc2": 1, "enable_mlapo": true}' \
         --trust-remote-code \
         --max-num-seqs 32 \
         --gpu-memory-utilization 0.90 \
@@ -1464,7 +1464,7 @@ prepare the script `run_dp_template.sh` on each node.
         --attention_config.indexer_kv_dtype int8 \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --speculative-config '{"num_speculative_tokens": 5,  "method":"deepseek_mtp","enforce_eager":true}' \
-        --additional-config '{"fuse_muls_add":true, "recompute_scheduler_enable":true, "multistream_overlap_shared_expert":true, "enable_fused_mc2": 1, "enable_mlapo": true}' \
+        --additional-config '{ "ascend_compilation_config": {"fuse_muls_add": true}, "recompute_scheduler_enable":true, "multistream_overlap_shared_expert":true, "enable_fused_mc2": 1, "enable_mlapo": true}' \
         --trust-remote-code \
         --max-num-seqs 32 \
         --gpu-memory-utilization 0.90 \
