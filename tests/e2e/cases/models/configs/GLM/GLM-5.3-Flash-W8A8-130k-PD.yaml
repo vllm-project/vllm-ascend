@@ -38,7 +38,7 @@ env_common: &env_common
   HCCL_BUFFSIZE: "1024"
   VLLM_USE_V2_MODEL_RUNNER: "0"
   ASCEND_GLOBAL_RESOURCE_CONFIG: '{"comm_resource_config.protocol_desc":["hccs:device"]}'
-
+  VLLM_USE_MODELSCOPE: true
 templates:
   - node_index: 0
     envs:
