@@ -50,7 +50,7 @@ The four knobs are freely combinable — on a PD decode node all four can be ena
 
 Fine-grained TP currently supports **MoE models only**. The constraint is enforced at configuration load: a non-MoE model fails at startup with `The finegrained tp sizes can be enabled only for MOE models.`
 
-To check whether a checkpoint qualifies, look at its `config.json`: the model counts as a MoE model when the config exposes routed experts through any of the fields `n_routed_experts` (DeepSeek-style), `num_local_experts` (Mixtral-style), `num_experts`, `moe_num_experts`, or MoE blocks under `block_configs`. Checkpoints such as DeepSeek-V3/R1, the Qwen3 MoE series, GLM MoE variants, Kimi-K2, and MiniMax-M3 qualify; dense checkpoints such as Llama or the dense Qwen series do not. Qualification here is config-based; see [Experimental Results](#experimental-results) for the measured coverage.
+To check whether a checkpoint qualifies, look at its `config.json`: the model counts as a MoE model when the config exposes routed experts through any of the fields `n_routed_experts` (DeepSeek-style), `num_local_experts` (Mixtral-style), `num_experts`, `moe_num_experts`, or MoE blocks under `block_configs`. Checkpoints such as DeepSeek-V3/R1, the Qwen3 MoE series, GLM MoE variants, Kimi-K2, and MiniMax-M3 qualify; dense checkpoints such as Llama or the dense Qwen series do not.
 
 The restriction comes from the sharding axis: fine-grained TP shards weights across the data-parallel (DP) dimension, and only MoE deployments keep a cross-rank DP group — for a dense model, every DP rank runs as an independent DP=1 engine, leaving no group to shard across.
 
