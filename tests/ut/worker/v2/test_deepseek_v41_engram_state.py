@@ -5,6 +5,7 @@
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import numpy as np
 import pytest
 import torch
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
@@ -139,3 +140,60 @@ def test_eager_hook_forwards_lookup_events(state):
     assert result["engram_pending"] is events
     state.prepare_engram()
     state.model.prepare_engram_inputs.assert_called_once()
+
+
+def test_prepare_attn_pads_replay_slots_and_forwards_replay_metadata(state, monkeypatch):
+    from vllm.config.compilation import CUDAGraphMode
+
+    from vllm_ascend.core import kv_cache_interface
+    from vllm_ascend.worker.v2.model_states import default as ascend_model_state
+
+    state.device = torch.device("cpu")
+    state._replay_start_np[1] = 2
+    monkeypatch.setattr(kv_cache_interface, "is_prefix_cacheable", lambda spec: True)
+
+    slot_mappings = torch.zeros((1, 3), dtype=torch.int64)
+    positions = torch.tensor([2, 3, 4], dtype=torch.int64)
+    input_batch = SimpleNamespace(
+        num_reqs=2,
+        is_prefilling_np=np.array([True, True]),
+        idx_mapping_np=np.array([1, 2]),
+        query_start_loc=torch.tensor([0, 2, 3], dtype=torch.int32),
+        positions=positions,
+    )
+    kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(prefix_replay_tokens=4))]
+    )
+
+    launch = Mock()
+    kernel = Mock()
+    kernel.__getitem__ = Mock(return_value=launch)
+    monkeypatch.setattr(deepseek_v41, "_pad_v2_replayed_slots_kernel", kernel)
+
+    delegated = {}
+
+    def prepare_attn(_self, *args, **kwargs):
+        delegated.update(kwargs)
+        return {"prepared": True}
+
+    monkeypatch.setattr(AscendModelState, "prepare_attn", prepare_attn)
+    result = state.prepare_attn(
+        input_batch,
+        CUDAGraphMode.NONE,
+        (torch.zeros((2, 3), dtype=torch.int32),),
+        slot_mappings,
+        [],
+        kv_cache_config,
+    )
+
+    assert result == {"prepared": True}
+    args, kwargs = launch.call_args
+    assert args[0] is slot_mappings
+    assert args[4] is positions
+    assert args[5].tolist() == [2, 0]
+    assert args[6] == 4
+    assert kwargs == {"NUM_GROUPS": 1, "BLOCK": 1024}
+
+    metadata = delegated["model_specific_attn_metadata"]
+    assert isinstance(metadata, ascend_model_state.ReplayAttnMetadata)
+    assert metadata.get_extra_common_attn_kwargs(0, 2)["replay_start"].tolist() == [2, 0]
