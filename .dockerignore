@@ -1,0 +1,59 @@
+# vllm-ascend .dockerignore
+# Reduce build context size to speed up buildkitd upload.
+# NOTE: Keep csrc/, cmake/, CMakeLists.txt, pyproject.toml, setup.py,
+#       vllm_ascend/ and .github/ (.github/workflows/scripts/install_daily_deps.sh
+#       is COPY'd into all images; cannot be restored once .github is ignored).
+
+# Git history (largest, ~92M)
+.git/
+.gitattributes
+.gitignore
+# .gitmodules must be kept: csrc/build_aclnn.sh reads the catlass submodule
+# commit from it during the fallback fetch.
+!.gitmodules
+
+# Tooling / IDE
+.agents/
+.claude/
+.gemini/
+.idea/
+.vscode/
+AGENTS.md
+CLAUDE.md
+CODE_OF_CONDUCT.md
+CONTRIBUTING.md
+DCO
+codecov.yml
+
+# Other markdown at repo root (README.md must be kept, setup.py uses it for long_description)
+/docs/*.md
+/examples/*.md
+/benchmarks/*.md
+
+# Docs / examples / tests / benchmarks at REPO ROOT only (not needed at build or
+# runtime). Leading "/" anchors to repo root so nested dirs under csrc/ (e.g.
+# csrc/cmake/scripts/examples/, csrc/attention/*/examples/) are KEPT - they are
+# referenced by csrc/cmake/func_examples.cmake and custom_build.cmake.
+/docs/
+/examples/
+/benchmarks/
+/tests/
+
+# Python cache / build artifacts
+__pycache__/
+*.pyc
+*.egg-info/
+*.whl
+*.egg
+dist/
+
+# NOTE: build/ is NOT excluded - csrc/cmake/third_party/build/modules/patch/*.patch
+#       is referenced by abseil-cpp.cmake / ascend_protobuf.cmake (PATCH_COMMAND).
+
+# Local environment
+.venv/
+venv/
+.env
+*.log
+.DS_Store
+Thumbs.db
