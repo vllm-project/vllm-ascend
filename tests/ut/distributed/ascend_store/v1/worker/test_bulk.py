@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 import pytest
+import torch
 
 from tests.ut.distributed.ascend_store.v1.helpers import (
     FakeBackend,
@@ -16,12 +17,14 @@ from tests.ut.distributed.ascend_store.v1.helpers import (
     store_one,
 )
 from tests.ut.distributed.ascend_store.v1.worker.bulk_fixtures import (
+    TensorBytesBackend,
     make_align_state_topology,
     make_sparse_group_topology,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.coordinates import (
     TokenRange,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.projection import compile_bulk_projection_binder
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.lookup import (
     LookupRequest,
     TailKeyBoundary,
@@ -33,9 +36,65 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.transf
     StateCheckpointSource,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker import base as worker_module
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk import SynchronousBulkWorker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.io import BackendIO
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.io.arguments import BulkBackendArguments
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.resources import KVPoolResources
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.transfer.batch import KVTransferBatch
+
+
+@pytest.mark.parametrize(
+    "retention_interval,stored_swa_boundaries,middle_end,fallback_end",
+    ((None, (16, 32, 48, 64, 80, 96), 80, 64), (0, (80, 96), 0, 0), (64, (48, 64, 80, 96), 80, 64)),
+)
+def test_bulk_lookup_recovers_sparse_retention_objects_and_loads_tail(
+    retention_interval, stored_swa_boundaries, middle_end, fallback_end
+) -> None:
+    topology = make_sparse_group_topology(block_size=16, sliding_window=33)
+    backend = TensorBytesBackend()
+    resources = KVPoolResources(
+        backend, make_backend_spec(requires_exists_before_put=True), 8, topology.transfer_groups
+    )
+    binder = compile_bulk_projection_binder(topology, 256, retention_interval=retention_interval)
+    worker = SynchronousBulkWorker(topology, binder, resources, source_ready_event_factory=FakeEvent)
+    block_hashes = tuple(bytes([index]) for index in range(1, 9))
+    cache_values = torch.arange(8 * 2 * 16, dtype=torch.float32).reshape(8, 2, 16, 1, 1)
+    caches = {group.layer_names[0]: cache_values + group.group_id * 1000 for group in topology.transfer_groups}
+    source_blocks = ((), (1, 2, 3, 4, 5, 6), (), (1, 2, 3, 4, 5, 6))
+    try:
+        worker.bind_kv_caches(caches)
+        command = RangeStoreCommand("producer", TokenRange(0, 96), source_blocks, block_hashes[:6], 97, 17)
+        assert store_one(worker, command).evidence.succeeded
+        assert worker.take_released_store_job_ids() == {17}
+        swa_keys = tuple(key for key in backend.objects if "@group:3@" in key)
+        assert sorted(int(key.rsplit("@", 1)[1], 16) * 16 for key in swa_keys) == list(stored_swa_boundaries)
+
+        query_start = len(backend.calls)
+        # This consumer extends beyond the producer's prompt; later hashes are absent remotely.
+        for start, end, expected_end in ((0, 128, 96), (0, 80, middle_end), (64, 128, 96)):
+            result = worker.lookup(LookupRequest(TokenRange(start, end), (1, 3), block_hashes))
+            assert result.available_end_token == expected_end
+        queried = {key for call in backend.calls[query_start:] if call[0] == "exists" for key in call[1]}
+        assert all(key in queried for key in backend.objects)
+
+        expected_tail = {name: cache[6].clone() for name, cache in caches.items()}
+        for cache in caches.values():
+            cache[7].zero_()
+        destination_blocks = ((), (1, 2, 3, 4, 5, 7), (), (1, 2, 3, 4, 5, 7))
+        begin_step(worker, load=(LoadCommand("consumer", TokenRange(0, 96), destination_blocks, block_hashes[:6]),))
+        worker.start_load()
+        assert not worker.collect_load_result().failed_locations
+        worker.end_step()
+        for name, cache in caches.items():
+            torch.testing.assert_close(cache[7], expected_tail[name])
+
+        window_key = next(key for key in swa_keys if key.endswith("@05"))
+        del backend.objects[window_key]
+        after_eviction = worker.lookup(LookupRequest(TokenRange(0, 128), (1, 3), block_hashes))
+        assert after_eviction.available_end_token == fallback_end
+    finally:
+        worker.close()
+    assert backend.closed and resources.kv_caches is None
 
 
 def test_ordinary_bulk_worker_owns_lookup_load_store_rows_and_ranges() -> None:

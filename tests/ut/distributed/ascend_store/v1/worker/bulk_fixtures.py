@@ -54,27 +54,27 @@ def make_align_state_topology():
     )
 
 
-def make_sparse_group_topology():
+def make_sparse_group_topology(*, block_size: int = 4, sliding_window: int = 8):
     base = make_topology(group_ids=(1, 3), physical_layers=(0,))
     attention = KVPoolGroupTopology(
         1,
-        FullAttentionSpec(block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float32),
+        FullAttentionSpec(block_size=block_size, num_kv_heads=1, head_size=1, dtype=torch.float32),
         (KVPoolLayerTopology(0, ("layers.0.attention",)),),
         replace(base.groups[1].key_metadata, cache_family="attention"),
     )
     sliding = KVPoolGroupTopology(
         3,
         SlidingWindowSpec(
-            block_size=4,
+            block_size=block_size,
             num_kv_heads=1,
             head_size=1,
             dtype=torch.float32,
-            sliding_window=8,
+            sliding_window=sliding_window,
         ),
         (KVPoolLayerTopology(1, ("layers.1.swa",)),),
         replace(base.groups[3].key_metadata, cache_family="swa"),
     )
-    return replace(base, groups=(attention, sliding))
+    return replace(base, groups=(attention, sliding), cache_transfer_granularity=block_size, hash_block_size=block_size)
 
 
 class TensorBytesBackend(FakeBackend):
