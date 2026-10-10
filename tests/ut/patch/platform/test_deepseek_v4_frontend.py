@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from typing import Any
+
 from vllm.tokenizers import deepseek_v4
 
 from vllm_ascend.patch.platform import patch_deepseek_v4_frontend  # noqa: F401
@@ -29,11 +31,11 @@ def _tokenizer(monkeypatch):
 
 def test_request_tools_attach_to_existing_system_without_mutation(monkeypatch):
     tokenizer, captured_messages = _tokenizer(monkeypatch)
-    messages = [
+    messages: list[dict[str, Any]] = [
         {"role": "system", "content": "system prompt", "tools": ["old"]},
         {"role": "user", "content": "hi"},
     ]
-    tools = [{"type": "function", "function": {"name": "get_weather"}}]
+    tools: list[dict[str, Any]] = [{"type": "function", "function": {"name": "get_weather"}}]
     original_messages = [message.copy() for message in messages]
 
     tokenizer.apply_chat_template(messages, tools=tools, tokenize=False)
