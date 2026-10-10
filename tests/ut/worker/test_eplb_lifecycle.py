@@ -106,7 +106,10 @@ def test_partial_wake_restores_named_buffer_only_after_its_pool_is_mapped(monkey
         value.copy_(backup)
 
     buffer = SimpleNamespace(
-        device=SimpleNamespace(type="npu"), data_ptr=value.data_ptr, cpu=lambda: value, copy_=restore
+        device=SimpleNamespace(type="npu"),
+        data_ptr=value.data_ptr,
+        cpu=lambda: value,
+        data=SimpleNamespace(copy_=restore),
     )
     worker.model_runner.model = SimpleNamespace(named_buffers=lambda: [("weights_buffer", buffer)])
     allocator.pointer_to_data[value.data_ptr()] = SimpleNamespace(

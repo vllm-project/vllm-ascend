@@ -329,7 +329,7 @@ class NPUWorker(WorkerBase):
             for name, buffer in model.named_buffers():
                 saved = self._sleep_saved_buffers.get(name)
                 if saved is not None and (tags is None or saved[1] is None or saved[1] in tags):
-                    buffer.copy_(saved[0])
+                    buffer.data.copy_(saved[0])
                     del self._sleep_saved_buffers[name]
 
         rl_config = get_ascend_config().rl_config
