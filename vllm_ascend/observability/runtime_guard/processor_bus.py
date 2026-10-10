@@ -54,6 +54,9 @@ class RuntimeGuardBusMixin:
     _merged_bus_inflight: bool
     _pending_merged_bus_dump_jobs: list[dict[str, Any]]
     _pending_merged_bus_can_dump: bool
+    _pending_merged_bus_is_first: bool
+    _bus_wave_seq: int
+    _merged_bus_warn_ts: float
 
     # Defined on RuntimeGuardDumpMixin / RuntimeGuardProcessor.
     _claim_dump_jobs_to_deferred_via_tp: Any

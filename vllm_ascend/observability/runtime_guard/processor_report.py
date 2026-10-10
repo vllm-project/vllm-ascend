@@ -49,6 +49,8 @@ class RuntimeGuardReportMixin:
     action_executor: Any
     _tokenizer: Any | None
     _tokenizer_failed: bool
+    _last_input_batch: Any | None
+    _scheduler_output_for_step: Any | None
 
     # Defined on RuntimeGuardDumpMixin / RuntimeGuardProcessor.
     _run_kv_dumps: Any

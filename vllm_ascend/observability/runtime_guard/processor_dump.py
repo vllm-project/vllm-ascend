@@ -50,6 +50,8 @@ class RuntimeGuardDumpMixin:
     # Attributes provided by RuntimeGuardProcessor (mixin composition).
     runner: Any
     runtime_config: Any
+    quota: Any
+    action_executor: Any
     _deferred_kv_dump_jobs: list[dict[str, Any]]
     _kv_dump_jobs: list[dict[str, Any]]
 
@@ -99,7 +101,7 @@ class RuntimeGuardDumpMixin:
         from vllm_ascend.observability.runtime_guard.state import RequestGuardStore
 
         if jobs:
-            RequestGuardStore.get().finish_dump_jobs([j.get("req_id") for j in jobs if j.get("req_id")])
+            RequestGuardStore.get().finish_dump_jobs([str(rid) for j in jobs if (rid := j.get("req_id"))])
         if not jobs:
             return
         try:
