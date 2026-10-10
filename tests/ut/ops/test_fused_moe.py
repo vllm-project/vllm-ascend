@@ -43,6 +43,7 @@ from vllm_ascend.ops.fused_moe.shared_experts import (
     SharedExpertMLPPath,
     SharedExpertParallelMode,
 )
+from vllm_ascend.patch.platform import patch_fused_moe
 from vllm_ascend.quantization.quant_type import QuantType
 
 
@@ -919,9 +920,14 @@ def test_hash_router_chunks_unaligned_input_ids_for_sequence_parallel(monkeypatc
 
 
 @pytest.mark.parametrize("return_with_event", [False, True])
-@pytest.mark.parametrize("v2_eplb", [False, True])
+@pytest.mark.parametrize(
+    "v2_eplb,mapping_records,record_enabled",
+    [(False, False, False), (True, False, False), (True, True, False), (True, True, True)],
+)
 @pytest.mark.parametrize("is_sequence_parallel", [False, True])
-def test_routed_experts_forward_impl_runs_current_flow(monkeypatch, return_with_event, v2_eplb, is_sequence_parallel):
+def test_routed_experts_forward_impl_runs_current_flow(
+    monkeypatch, return_with_event, v2_eplb, mapping_records, record_enabled, is_sequence_parallel
+):
     """Verify routed-expert forward preserves the current dispatch flow."""
     _disable_force_eplb(monkeypatch)
     routed_experts = AscendRoutedExperts.__new__(AscendRoutedExperts)
@@ -932,7 +938,8 @@ def test_routed_experts_forward_impl_runs_current_flow(monkeypatch, return_with_
     input_ids = torch.tensor([11, 22])
     routed_out = torch.randn(2, 4)
     finalized = torch.randn(2, 4)
-    expert_load = torch.zeros(4, dtype=torch.int32)
+    expert_load = torch.tensor([7, 11, 13, 17], dtype=torch.int32)
+    initial_load = expert_load.clone()
     quant_method = AscendUnquantizedFusedMoEMethod.__new__(AscendUnquantizedFusedMoEMethod)
     quant_method.apply = MagicMock(
         return_value=SimpleNamespace(
@@ -951,12 +958,15 @@ def test_routed_experts_forward_impl_runs_current_flow(monkeypatch, return_with_
     topk_ids = torch.tensor([[0, 1], [1, 0]], dtype=torch.int64)
     routed_experts.router = SimpleNamespace(
         _select_experts=MagicMock(return_value=(topk_weights, topk_ids)),
+        _validate_eplb_state=MagicMock(),
         eplb_state=(
             SimpleNamespace(
                 expert_load_view=expert_load,
-                should_record_tensor=torch.tensor(False),
+                should_record_tensor=torch.tensor(record_enabled),
                 local_expert_count=2,
                 local_expert_start=2,
+                expert_replica_routing_table=torch.tensor([[2, 3], [3, 2]], dtype=torch.int32),
+                num_unpadded_tokens_tensors=[torch.tensor(1, dtype=torch.int32)] if mapping_records else None,
             )
             if v2_eplb
             else None
@@ -1012,6 +1022,25 @@ def test_routed_experts_forward_impl_runs_current_flow(monkeypatch, return_with_
     monkeypatch.setattr(routed_experts_module, "get_ascend_config", lambda: SimpleNamespace(enable_force_eplb=False))
     record_expert_tokens = MagicMock()
     monkeypatch.setattr(torch.ops.vllm, "ascend_eplb_record_expert_tokens", record_expert_tokens)
+    original_mapping = MagicMock(return_value=topk_ids)
+    monkeypatch.setattr(torch.ops.vllm, "ascend_eplb_map_to_physical", original_mapping)
+
+    def map_and_record(ids, table, load, enabled, valid, *, local_expert_start, local_expert_count):
+        # CPU reference for the operator boundary; the real hook/forward run below.
+        mapped = table[torch.arange(ids.shape[0])[:, None] % table.shape[0], ids].to(ids.dtype)
+        if enabled:
+            counts = torch.bincount(mapped[: int(valid)].flatten(), minlength=load.numel())
+            end = local_expert_start + local_expert_count
+            load[local_expert_start:end] += counts[local_expert_start:end].to(load.dtype)
+        return mapped
+
+    map_record = MagicMock(side_effect=map_and_record)
+    monkeypatch.setattr(patch_fused_moe, "eplb_map_and_record", map_record)
+    if mapping_records:
+        routed_experts.router._select_experts.side_effect = lambda **_: (
+            topk_weights,
+            patch_fused_moe._ascend_apply_eplb_mapping(routed_experts.router, topk_ids),
+        )
 
     result = routed_experts.forward_impl(
         hidden_states=hidden_states,
@@ -1045,20 +1074,38 @@ def test_routed_experts_forward_impl_runs_current_flow(monkeypatch, return_with_
         quant_method.apply.call_args.kwargs["topk_weights"],
         topk_weights,
     )
-    assert torch.equal(quant_method.apply.call_args.kwargs["topk_ids"], topk_ids)
+    expected_ids = torch.tensor([[2, 3], [2, 3]]) if mapping_records else topk_ids
+    assert torch.equal(quant_method.apply.call_args.kwargs["topk_ids"], expected_ids)
     routed_experts.router._select_experts.assert_called_once_with(
         hidden_states=prepared_hidden_states,
         router_logits=prepared_router_logits,
         input_ids=input_ids,
     )
-    expected_load = torch.zeros_like(expert_load)
+    expected_load = initial_load.clone()
+    if mapping_records and record_enabled:
+        expected_load[2:] += 1
     torch.testing.assert_close(expert_load, expected_load)
-    assert record_expert_tokens.call_count == int(v2_eplb)
+    assert map_record.call_count == int(mapping_records)
+    assert record_expert_tokens.call_count == int(v2_eplb and not mapping_records)
+    if v2_eplb:
+        state = routed_experts.router.eplb_state
+        assert state.mapping_valid_tokens is None
+        assert not state.record_done_in_mapping
     moe_comm_method.finalize.assert_called_once_with(
         hidden_states=routed_out,
         reduce_results=False,
         padded_hidden_states_shape=torch.Size([2, 4]),
     )
+    if mapping_records:
+        # A subsequent ineligible step must not inherit the early-record state.
+        state.num_unpadded_tokens_tensors = None
+        routed_experts.forward_impl(hidden_states=hidden_states, router_logits=router_logits, input_ids=input_ids)
+        assert map_record.call_count == 1
+        original_mapping.assert_called_once()
+        record_expert_tokens.assert_called_once()
+        assert state.mapping_valid_tokens is None
+        assert not state.record_done_in_mapping
+        torch.testing.assert_close(expert_load, expected_load)
 
 
 class _Projection(nn.Module):

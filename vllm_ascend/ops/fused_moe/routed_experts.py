@@ -28,6 +28,7 @@ from vllm.model_executor.layers.fused_moe import FusedMoERouter, RoutedExperts
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import UnquantizedFusedMoEMethod
 from vllm.model_executor.utils import replace_parameter
+from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
@@ -354,6 +355,25 @@ def _record_v2_eplb_load(router: FusedMoERouter, result: FusedExpertsResult) -> 
         result.group_list_type,
         eplb_state.local_expert_start,
     )
+
+
+def _mapping_valid_token_prefix(
+    layer: "AscendRoutedExperts",
+    mc2_mask: torch.Tensor | None,
+) -> torch.Tensor | int | None:
+    """Use the existing step count or #17574's MC2 mask as a valid prefix."""
+    router = layer.router
+    if router is None:
+        return None
+    state = router.eplb_state
+    if state is None or state.num_unpadded_tokens_tensors is None:
+        return None
+    valid_tokens = state.num_unpadded_tokens_tensors[dbo_current_ubatch_id()]
+    if mc2_mask is not None:
+        return mc2_mask.to(torch.int32).sum()
+    # Other modes inherit the valid-prefix contract. DP/PCP interleaving
+    # remains an inherited risk, not a grid-private reduction requirement.
+    return valid_tokens
 
 
 class EplbExpertTensorList(list[torch.Tensor]):
@@ -700,6 +720,21 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         pertoken_scale = prepare_output.pertoken_scale
         if self.router is None:
             raise RuntimeError("AscendRoutedExperts requires a router for expert selection.")
+        eplb_state = self.router.eplb_state
+        if eplb_state is not None:
+            eplb_state.record_done_in_mapping = False
+            eplb_state.mapping_valid_tokens = None
+            # Post-router ID rewrites prevent recording final assignments here.
+            # Communication modes share the existing valid-prefix contract.
+            if (
+                self._use_v2_model_runner
+                and self.log2phy is None
+                and not getattr(self, "mix_placement", False)
+                and not get_ascend_config().enable_force_eplb
+                and not enable_force_load_balance
+                and eplb_state.local_expert_count > 0
+            ):
+                eplb_state.mapping_valid_tokens = _mapping_valid_token_prefix(self, mc2_mask)
         topk_weights, topk_ids = self._select_experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
@@ -721,8 +756,11 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             self.ascend_pertoken_scale = None
             self.ascend_mc2_mask = None
 
-        if self._use_v2_model_runner:
+        if self._use_v2_model_runner and not getattr(eplb_state, "record_done_in_mapping", False):
             _record_v2_eplb_load(self.router, fused_experts_results)
+        if eplb_state is not None:
+            eplb_state.record_done_in_mapping = False
+            eplb_state.mapping_valid_tokens = None
 
         if self.dynamic_eplb and _EXTRA_CTX.eplb_heat_collection_status:
             expert_tokens = fused_experts_results.expert_tokens
