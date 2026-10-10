@@ -25,6 +25,7 @@ from vllm_ascend.attention.utils import (
     _select_seq_lens,
     filter_chunked_req_indices,
     get_or_register_attention_buffer,
+    transdata,
 )
 
 NUM_REQS = 2
@@ -157,3 +158,32 @@ def test_filter_chunked_req_indices_mixed_mask() -> None:
     )
 
     torch.testing.assert_close(indices, torch.tensor([0, 1, 3, 4, 5]))
+
+
+def test_transdata_pads_rows_and_columns_independently() -> None:
+    """transdata must pad rows and columns to the block size independently.
+
+    Pre-fix, the F.pad tuple applied the row deficit to the last dim and the
+    column deficit to dim -2, so a (2, 9) input with (16, 16) blocks crashed
+    inside the block reshape.
+    """
+    x = torch.arange(2 * 9, dtype=torch.float32).reshape(2, 9)
+    out = transdata(x, block_size=(16, 16))
+    assert out.shape == (1, 16, 16)
+    assert torch.equal(out[0, :2, :9], x)
+    assert torch.equal(out[0, 2:, :], torch.zeros(14, 16))
+    assert torch.equal(out[0, :2, 9:], torch.zeros(2, 7))
+
+
+def test_transdata_reorders_blocks_for_non_multiple_shapes() -> None:
+    """Non-multiple shapes must be padded to the block size before the reshape."""
+    x = torch.arange(18 * 34, dtype=torch.float32).reshape(18, 34)
+    out = transdata(x, block_size=(16, 32))
+    assert out.shape == (2, 32, 32)
+    # Block 0 holds input columns 0..31, block 1 holds columns 32..33 plus padding.
+    assert torch.equal(out[0, :18, :32], x[:, :32])
+    assert torch.equal(out[1, :18, :2], x[:, 32:34])
+    assert torch.equal(out[1, :18, 2:], torch.zeros(18, 30))
+    # Rows 18..31 are row padding in both blocks.
+    assert torch.equal(out[0, 18:, :], torch.zeros(14, 32))
+    assert torch.equal(out[1, 18:, :], torch.zeros(14, 32))
