@@ -34,6 +34,8 @@ constexpr uint64_t HP_INDEX_TILE_MAX = 4096;
 constexpr uint64_t HP_INDEX_TILE_ALIGN = 32;
 constexpr uint64_t HP_UPDATE_UB_RATIO = 2;
 constexpr uint64_t HP_DOUBLE_BUFFER = 2;
+constexpr uint64_t HP_MIN_ROWS_PER_CORE = 16;
+constexpr uint64_t HP_LARGE_ROW_BYTES = 8192;
 constexpr uint64_t HP_ROWS_PER_BATCH_MAX = 256;
 constexpr uint64_t INDEX_TYPE_INT32 = 1;
 constexpr uint64_t INDEX_TYPE_INT64 = 2;
@@ -222,6 +224,11 @@ inline void ScatterNdUpdateSkArch22Tiling::Tiling4HpCorePartition(uint64_t index
     hpCoreNum_ = std::min(coreNum_, indexRow);
     if (hpCoreNum_ == 0) {
         hpCoreNum_ = 1;
+    }
+    // 与 ops-nn 一致：小行（<8KB）时每核至少分到 16 行，避免核间调度开销盖过并行收益
+    uint64_t rowBytes = scatterLength_ * dataTypeSize_;
+    if (rowBytes < HP_LARGE_ROW_BYTES) {
+        hpCoreNum_ = std::max(uint64_t(1), std::min(hpCoreNum_, indexRow / HP_MIN_ROWS_PER_CORE));
     }
     hpTailIndexNum_ = indexRow / hpCoreNum_;
     hpFrontIndexNum_ = hpTailIndexNum_ + 1;
@@ -507,8 +514,9 @@ ge::graphStatus ScatterNdUpdateSkArch22Tiling::Init()
     }
     auto compileInfo = tilingContext_->GetCompileInfo<ScatterNdUpdateSkArch22CompileInfo>();
     OP_CHECK_NULL_WITH_CONTEXT(tilingContext_, compileInfo);
-    // Use all available vector cores for full-core scheduling.
-    coreNum_ = static_cast<uint64_t>(compileInfo->vectorCoreNum);
+    // 与 ops-nn 一致：按实际负载裁核（totalLength/indexRow 均不足时不开空核）
+    coreNum_ = std::min(static_cast<uint64_t>(compileInfo->vectorCoreNum), std::min(info.totalLength, info.indexRow));
+    coreNum_ = coreNum_ == 0 ? 1 : coreNum_;
     ubSize_ = compileInfo->ubSize;
     GetDtypeSize();
     SetTilingKeyMode();
