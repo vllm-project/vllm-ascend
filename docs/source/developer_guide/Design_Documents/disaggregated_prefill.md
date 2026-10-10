@@ -14,10 +14,11 @@ This feature addresses the need to optimize the **Time Per Output Token (TPOT)**
 
 ## Usage
 
-vLLM Ascend currently supports two types of connectors for handling KV cache management:  
+vLLM Ascend supports the following KV cache transfer modes:
 
 - **MooncakeConnector**: D nodes pull KV cache from P nodes.
 - **MooncakeLayerwiseConnector**: P nodes push KV cache to D nodes in a layered manner.  
+- **MooncakeD2RHConnectorV1**: D nodes pull KV cache into local host memory before loading it into device memory.
 
 For step-by-step deployment and configuration, refer to the following guide:  
 [PD disaggregation multi-node deployment guide](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/features/pd_disaggregation_mooncake_multi_node.html)
@@ -52,6 +53,35 @@ Our design diagram is shown below, illustrating the pull and push schemes respec
 4. The Proxy's `metaserver` endpoint receives the request, calls `select_prefiller` to choose a P node, and forwards it with `kv_transfer_params` set to `do_remote_decode=True`, `max_completion_tokens=1`, and `min_tokens=1`.
 5. During processing, the P node's scheduler pushes KV cache layer-wise; once all layers pushing is complete, it releases the request and notifies the D node to begin decoding.
 6. The D node performs decoding and returns the result.
+
+#### Mooncake D2RH Connector
+
+D2RH (device-to-remote-host) splits KV cache transfer into two stages:
+**P HBM → D DRAM → D HBM**. Once the first stage completes, P can release the
+transferred KV cache without waiting for D's host-to-device (H2D) copy or decoding.
+
+![D2RH KV cache transfer workflow](../../assets/disaggregated_prefill_d2rh.png)
+
+The pull arrows in the diagram represent requests, not the direction of KV data.
+
+1. **Route the request (1–3):** The proxy selects P, waits for prefill to finish,
+   and forwards the request and KV transfer metadata to D.
+2. **Stage KV cache (4–6):** D's scheduler asks its workers to pull the required
+   KV cache from P HBM into D DRAM. The workers notify P when the first-hop reads
+   complete, allowing P to release the corresponding cache.
+3. **Load and decode (7–10):** The workers notify D's scheduler that staging is
+   ready. D allocates the required device blocks and loads the staged KV cache
+   into HBM. Decoding starts only after the required H2D transfers complete.
+
+Valid host-cache hits avoid repeated P-to-D transfers. Valid D-local HBM prefix
+hits can also reduce H2D copies; a host-cache hit alone is not an HBM hit. Host
+blocks remain pinned until all H2D reads using them finish.
+
+To enable this mode, set `"kv_connector": "MooncakeD2RHConnectorV1"` in
+`--kv-transfer-config` on both nodes, with `"kv_role": "kv_producer"` on P and
+`"kv_role": "kv_consumer"` on D. Keep the `prefill` and `decode` parallelism
+settings consistent with the deployment and reserve enough host memory on D
+for staging.
 
 ### 3. Interface Design
 
