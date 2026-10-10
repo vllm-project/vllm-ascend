@@ -34,6 +34,7 @@ from vllm_ascend.ops.fused_moe.dataclass.shared_experts import (
     PreparedSharedExpertInput,
     RoutedMoEMilestones,
 )
+from vllm_ascend.ops.fused_moe import moe_utils
 from vllm_ascend.ops.fused_moe.moe_utils import _pad_tokens_with_cat
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, npu_stream_switch, shared_experts_calculation_stream
@@ -102,6 +103,7 @@ class AscendSharedExperts:
         self.megamoe_shared_weights_ready = False
         self._megamoe_shared_fusion_disabled = False
         self._megamoe_shared_parts: dict[str, torch.Tensor] = {}
+        self._megamoe_shared_packed_fp4 = False
 
         if self.multistream_overlap:
             # Wrap the quant_method's process_weights_after_loading to validate that
@@ -232,10 +234,14 @@ class AscendSharedExperts:
         MegaMoe expects (out, in) tensors while the processed linear buffer is
         (in, out) ND, so a transpose+contiguous materializes the correct ND
         layout; the per-group scale becomes (n, k//2, 2), matching the routed
-        per-expert scale shape. Packed MXFP4 additionally applies the same
-        format casts as the routed experts in the W4A4 MoE method: w1 stays
-        FRACTAL_NZ and w2 is rebuilt as FRACTAL_NZ_C0_32 on an fp8 carrier,
-        and the byte-stored E8M0 scales are viewed with their semantic dtype.
+        per-expert scale shape. Mixed-quantization models (e.g. W4A4C8) may
+        quantize the shared expert differently from the routed experts, so the
+        layout is decided by the shared linear's own weight dtype: MXFP8 stores
+        one fp8 per element, packed MXFP4 stores two fp4 per uint8 byte. Packed
+        MXFP4 additionally applies the same format casts as the routed experts
+        in the W4A4 MoE method: w1 stays FRACTAL_NZ and w2 is rebuilt as
+        FRACTAL_NZ_C0_32 on an fp8 carrier, and the byte-stored E8M0 scales
+        are viewed with their semantic dtype.
         """
         if self._megamoe_shared_fusion_disabled:
             return
@@ -246,7 +252,19 @@ class AscendSharedExperts:
                 "intermediate size required by the MegaMoe layout"
             )
             return
-        packed_fp4 = self.quant_type == QuantType.W4A4MXFP
+        if linear.weight.data.dtype == torch.uint8:
+            # Packed MXFP4 shared expert: two logical K values per byte.
+            packed_fp4 = True
+        elif linear.weight.data.dtype == torch.float8_e4m3fn:
+            packed_fp4 = False
+        else:
+            self._disable_megamoe_shared_fusion(
+                f"shared-expert weight dtype {linear.weight.data.dtype} is not "
+                "supported by MegaMoe fusion (expected MXFP8 fp8_e4m3fn or packed "
+                "MXFP4 uint8); keeping the separate shared-expert forward."
+            )
+            return
+        self._megamoe_shared_packed_fp4 = packed_fp4
         if packed_fp4:
             # Packed FP4 stores two logical K values per byte.
             expected_weight_shape = (
@@ -293,9 +311,10 @@ class AscendSharedExperts:
                     customize_dtype=torch.float8_e4m3fn,
                     input_dtype=torch_npu.float4_e2m1fn_x2,
                 )
-            # Checkpoint E8M0 scales are stored as bytes; CANN MegaMoe
-            # requires their semantic dtype.
-            scale = scale.view(torch.float8_e8m0fnu)
+        # Checkpoint E8M0 scales are stored as bytes; the MegaMoe A5 input
+        # check requires their semantic dtype for routed and shared experts
+        # alike (the storage is unchanged, only the dtype is reinterpreted).
+        scale = scale.view(torch.float8_e8m0fnu)
         self._megamoe_shared_parts[slot] = weight
         self._megamoe_shared_parts[slot + "_scale"] = scale
         self._maybe_finish_megamoe_shared_weights()
@@ -315,6 +334,18 @@ class AscendSharedExperts:
             [self._megamoe_shared_parts["w1_scale"]],
             [self._megamoe_shared_parts["w2_scale"]],
         )
+        # Record the shared expert's own quant settings so the operator call
+        # can declare them explicitly. The routed and shared experts may differ
+        # (W4A4C8: MXFP4 routed + MXFP8 shared); the shared GMM then runs in
+        # A8W8 mode while the routed one runs in A4W4 mode. Values are the ACL
+        # dtype ints the MegaMoe wrapper accepts, matching
+        # _get_cann_mega_moe_quant_settings.
+        shared_quant_type = QuantType.W4A4MXFP if self._megamoe_shared_packed_fp4 else QuantType.W8A8MXFP
+        _, shared_quant_out_dtype, shared_weight_type = moe_utils._get_cann_mega_moe_quant_settings(
+            shared_quant_type
+        )
+        self.moe_layer.ascend_megamoe_shared_quant_out_dtype = shared_quant_out_dtype
+        self.moe_layer.ascend_megamoe_shared_weight_type = shared_weight_type
         if not self.megamoe_shared_weights_ready:
             self.megamoe_shared_weights_ready = True
             logger.info_once("Fused the shared expert into the A5 MegaMoe operator.")

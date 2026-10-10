@@ -523,20 +523,32 @@ class FusedMC2CommImpl(MoECommMethod):
         # separate shared-expert forward when this payload is present.
         shared_kwargs: dict = {}
         if weights.shared_w1 is not None:
+            # The shared expert may be quantized differently from the routed
+            # experts (W4A4C8: MXFP4 routed + MXFP8 shared). Prefer the quant
+            # settings recorded with the fused shared weights -- ACL dtype ints
+            # accepted by the MegaMoe wrapper -- and only fall back to mirroring
+            # the routed activation quant dtype when they are unavailable.
+            shared_quant_out_dtype = getattr(layer, "ascend_megamoe_shared_quant_out_dtype", None)
+            if shared_quant_out_dtype is None:
+                shared_quant_out_dtype = (
+                    fused_experts_input.quant.mxfp.act_quant_type
+                    if fused_experts_input.quant.mxfp is not None
+                    else None
+                )
             shared_kwargs = dict(
                 shared_l1_weights=weights.shared_w1,
                 shared_l2_weights=weights.shared_w2,
                 shared_l1_weights_sf=weights.shared_w1_scale,
                 shared_l2_weights_sf=weights.shared_w2_scale,
-                # Mirror the routed activation quant dtype so the kernel tiling
-                # sizes the shared GMM1/activation output the same way as the
-                # routed one (fp8_e4m3fn for the A5 MXFP quant types).
-                shared_expert_quant_out_dtype=(
-                    fused_experts_input.quant.mxfp.act_quant_type
-                    if fused_experts_input.quant.mxfp is not None
-                    else None
-                ),
+                shared_expert_quant_out_dtype=shared_quant_out_dtype,
             )
+            # Mixed quantization: declare the shared weight dtype explicitly,
+            # otherwise the operator inherits the routed weight type for the
+            # shared descriptors and resolves the wrong shared GMM mode.
+            shared_weight_type = getattr(layer, "ascend_megamoe_shared_weight_type", None)
+            if shared_weight_type is not None and shared_weight_type != weight_type:
+                shared_kwargs["shared_weight1_type"] = shared_weight_type
+                shared_kwargs["shared_weight2_type"] = shared_weight_type
 
         out, expert_tokens = self.mega_moe(
             fused_experts_input.hidden_states,
