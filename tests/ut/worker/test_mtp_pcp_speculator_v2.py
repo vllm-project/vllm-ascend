@@ -745,46 +745,112 @@ def test_graph_prefill_refreshes_captured_cache_buffers(attn_architecture: str) 
         assert (captured_blocks.data_ptr(), captured_slots.data_ptr()) == (block_ptr, slot_ptr)
 
 
-@pytest.mark.parametrize("attn_architecture", ["GQA", "MLA"])
-@pytest.mark.parametrize("target_has_padding", [False, True])
-def test_sharded_target_graph_prefill_rebuilds_global_metadata(
-    attn_architecture: str, target_has_padding: bool
-) -> None:
+def _make_sharded_prefill_speculator(attn_architecture: str, query_start_loc: list[int], seq_lens: list[int]):
     speculator = object.__new__(AscendMTPSpeculator)
-    speculator.input_buffers = SimpleNamespace(query_start_loc=torch.tensor([0, 4, 4], dtype=torch.int32))
-    query_buffer_ptr = speculator.input_buffers.query_start_loc.data_ptr()
+    speculator.input_buffers = SimpleNamespace(
+        query_start_loc=torch.full((17,), -1, dtype=torch.int32),
+        input_ids=torch.full((16,), 7, dtype=torch.int32),
+        positions=torch.full((16,), 7, dtype=torch.int64),
+    )
+    speculator.hidden_states = torch.full((16, 2), 7.0)
+    speculator.num_speculative_steps = 3
     speculator.replicated_pcp = True
     speculator.pcp_manager = SimpleNamespace(is_decode_sharded=True)
     speculator.attn_architecture = attn_architecture
-    batch = _make_padded_input_batch()
-    batch.is_dummy = False
-    batch.num_reqs, batch.num_tokens = 1, 4
-    batch.query_start_loc_np = np.array([0, 4], dtype=np.int32)
-    batch.seq_lens_cpu_upper_bound = torch.tensor([9, 99] if target_has_padding else [9], dtype=torch.int32)
-    speculator.input_batch = batch
     speculator.block_tables = MagicMock()
     speculator.kv_cache_config = object()
+    batch = _make_padded_input_batch()
+    batch.is_dummy = False
+    batch.num_reqs = len(query_start_loc) - 1
+    batch.num_tokens = query_start_loc[-1]
+    batch.query_start_loc_np = np.array(query_start_loc, dtype=np.int32)
+    batch.seq_lens_cpu_upper_bound = torch.tensor(seq_lens, dtype=torch.int32)
+    speculator.input_batch = batch
+    return speculator, batch
+
+
+@pytest.mark.parametrize("attn_architecture", ["GQA", "MLA"])
+@pytest.mark.parametrize("target_has_padding", [False, True])
+@pytest.mark.parametrize(
+    "query_start_loc,seq_lens,num_reqs_padded,num_tokens_padded,expected_query_start_loc,expected_seq_lens",
+    [
+        ([0, 4], [9], 2, 8, [0, 4, 8], [9, 0]),
+        ([0, 4], [9], 4, 16, [0, 4, 8, 12, 16], [9, 0, 0, 0]),
+        ([0, 4, 8, 12], [9, 17, 33], 4, 16, [0, 4, 8, 12, 16], [9, 17, 33, 0]),
+    ],
+)
+def test_sharded_target_graph_prefill_rebuilds_global_metadata(
+    attn_architecture: str,
+    target_has_padding: bool,
+    query_start_loc: list[int],
+    seq_lens: list[int],
+    num_reqs_padded: int,
+    num_tokens_padded: int,
+    expected_query_start_loc: list[int],
+    expected_seq_lens: list[int],
+) -> None:
+    target_seq_lens = seq_lens + ([99] if target_has_padding else [])
+    speculator, batch = _make_sharded_prefill_speculator(attn_architecture, query_start_loc, target_seq_lens)
+    query_buffer_ptr = speculator.input_buffers.query_start_loc.data_ptr()
     global_metadata = {"draft.layer": object()}
     speculator._build_attn_metadata = MagicMock(return_value=global_metadata)
     with patch.object(speculator_module, "build_slot_mappings_by_layer", return_value={}) as build_slots:
         metadata, _ = speculator._prepare_replicated_prefill_attn(
             {"draft.layer": SimpleNamespace(actual_seq_lengths_q=[2, 4])},
             {},
-            2,
-            8,
+            num_reqs_padded,
+            num_tokens_padded,
             CUDAGraphMode.FULL,
         )
     assert metadata is global_metadata
     kwargs = speculator._build_attn_metadata.call_args.kwargs
-    np.testing.assert_array_equal(kwargs["query_start_loc_np"], [0, 4, 8])
-    assert kwargs["seq_lens_cpu_upper_bound"].tolist() == [9, 0]
-    assert kwargs["num_reqs"] == 2
-    assert speculator.input_buffers.query_start_loc.tolist() == [0, 4, 8]
+    cpu_query_start_loc = kwargs["query_start_loc_np"]
+    np.testing.assert_array_equal(cpu_query_start_loc, expected_query_start_loc)
+    # FIA TND layout: the last CPU boundary equals the graph token count T,
+    # and every dummy request spans exactly K + 1 tokens.
+    assert int(cpu_query_start_loc[-1]) == num_tokens_padded == kwargs["batch_desc"].num_tokens
+    assert set(np.diff(cpu_query_start_loc[len(seq_lens) :]).tolist()) <= {4}
+    assert kwargs["seq_lens_cpu_upper_bound"].tolist() == expected_seq_lens
+    assert kwargs["num_reqs"] == num_reqs_padded
+    assert kwargs["num_actual_reqs"] == len(seq_lens)
+    # Device boundaries match the CPU boundaries in the bound draft buffer.
+    assert speculator.input_buffers.query_start_loc[: num_reqs_padded + 1].tolist() == expected_query_start_loc
     assert speculator.input_buffers.query_start_loc.data_ptr() == query_buffer_ptr
-    assert kwargs["batch_desc"].num_tokens == 8
-    np.testing.assert_array_equal(batch.query_start_loc_np, [0, 4])
-    assert batch.seq_lens_cpu_upper_bound.tolist() == ([9, 99] if target_has_padding else [9])
+    # Padding rows get defined inputs; scheduled rows are untouched.
+    real_end = query_start_loc[-1]
+    assert speculator.input_buffers.input_ids[real_end:num_tokens_padded].eq(0).all()
+    assert speculator.input_buffers.positions[real_end:num_tokens_padded].eq(0).all()
+    assert speculator.hidden_states[real_end:num_tokens_padded].eq(0).all()
+    assert speculator.hidden_states[:real_end].eq(7).all()
+    # The restored global batch is not modified.
+    np.testing.assert_array_equal(batch.query_start_loc_np, query_start_loc)
+    assert batch.seq_lens_cpu_upper_bound.tolist() == target_seq_lens
     build_slots.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "query_start_loc,num_reqs_padded,num_tokens_padded",
+    [
+        # No request row is left for the padding.
+        ([0, 4, 8], 2, 12),
+        # Padding is not whole K + 1 = 4 token requests.
+        ([0, 4], 4, 8),
+    ],
+)
+def test_sharded_target_graph_prefill_rejects_non_uniform_padding(
+    query_start_loc: list[int], num_reqs_padded: int, num_tokens_padded: int
+) -> None:
+    speculator, batch = _make_sharded_prefill_speculator("MLA", query_start_loc, [9] * (len(query_start_loc) - 1))
+    speculator._build_attn_metadata = MagicMock()
+    with (
+        patch.object(speculator_module, "build_slot_mappings_by_layer", return_value={}),
+        pytest.raises(RuntimeError, match=r"T - real_end == \(R - n\) \* \(K \+ 1\)"),
+    ):
+        speculator._prepare_replicated_prefill_attn(
+            {"draft.layer": object()}, {}, num_reqs_padded, num_tokens_padded, CUDAGraphMode.FULL
+        )
+    speculator._build_attn_metadata.assert_not_called()
+    np.testing.assert_array_equal(batch.query_start_loc_np, query_start_loc)
 
 
 @pytest.mark.parametrize("guard", ["non_pcp", "no_batch", "no_metadata"])
