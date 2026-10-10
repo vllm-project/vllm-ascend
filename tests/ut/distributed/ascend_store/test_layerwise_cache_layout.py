@@ -639,3 +639,66 @@ def test_out_of_bounds_contiguous_descriptor_is_rejected():
     )
     with pytest.raises(ValueError, match="exceeds its backing allocation"):
         apply_layerwise_kv_cache_plan(config, _make_vllm_config(3, 1))
+
+
+@pytest.mark.parametrize("c8_first", [False, True])
+def test_mixed_indexers_share_max_capacity_without_changing_reuse_order(c8_first):
+    main = _make_full_attention_spec()
+    bf16 = AscendSFAIndexerCacheSpec(block_size=2, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)
+    c8 = AscendSFAIndexerCacheSpec(
+        block_size=2,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.int8,
+        scale_dim=1,
+        scale_dtype=torch.float16,
+        cache_sparse_li_c8=True,
+    )
+    names = [f"model.layers.{i}.self_attn.attn" for i in range(5)]
+    indexers = [f"model.layers.{i}.self_attn.indexer.k_cache" for i in (1, 3)]
+    specs = dict.fromkeys(names, main)
+    specs.update(zip(indexers, (c8, bf16) if c8_first else (bf16, c8)))
+    config = SimpleNamespace(
+        num_blocks=2,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=2 * spec.page_size_bytes,
+                layers=[name],
+                layer_stride=0,
+                block_stride=spec.page_size_bytes,
+                offset=0,
+            )
+            for name, spec in specs.items()
+        ],
+        kv_cache_groups=[
+            SimpleNamespace(
+                layer_names=list(specs),
+                kv_cache_spec=UniformTypeKVCacheSpecs(block_size=2, kv_cache_specs=specs),
+            )
+        ],
+    )
+    layout = build_layerwise_reuse_layout(specs, 5, {"layerwise_num_shared_buffers": 1})
+    assert layout.prefetch_layer_map == {2: 1, 3: 2, 4: 3}
+    apply_layerwise_kv_cache_plan(config, _make_vllm_config(5, 1))
+    assert len(config.kv_cache_tensors) == 3  # independent main, shared main, shared indexer
+    shared = next(t for t in config.kv_cache_tensors if t.layers == indexers)
+    assert shared.size == 2 * bf16.page_size_bytes
+    assert shared.layer_stride == 0
+    assert specs[indexers[0]] is (c8 if c8_first else bf16)
+
+
+@pytest.mark.parametrize("replication", [1, 2])
+@pytest.mark.parametrize("quantized", [False, True])
+def test_indexer_descriptor_content_includes_scales(replication, quantized):
+    spec = AscendSFAIndexerCacheSpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.int8 if quantized else torch.bfloat16,
+        scale_dim=1 if quantized else 0,
+        scale_dtype=torch.float16,
+        cache_sparse_li_c8=quantized,
+        sfa_dcp_replicated_indexer_size=replication,
+    )
+    assert spec.state_content_size_bytes == replication * (130 if quantized else 256)
+    assert spec.block_size * spec.num_kv_heads * spec.state_content_size_bytes == spec.page_size_bytes

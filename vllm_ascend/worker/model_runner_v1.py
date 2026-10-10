@@ -233,6 +233,7 @@ from vllm_ascend.worker.device_metadata import (
     DeviceMetadataTask,
     DeviceMetadataTaskProvider,
 )
+from vllm_ascend.worker.indexer_cache import allocate_shared_indexer_cache
 from vllm_ascend.worker.kvpp_cache import allocate_kvpp_cache
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.utils import (
@@ -5321,6 +5322,20 @@ class NPUModelRunner(GPUModelRunner):
             # Only the layerwise planner emits zero-stride alias descriptors
             # here. Ordinary vLLM group descriptors retain private layer buffers.
             reuse_slot = layerwise_reuse and kv_cache_tensor.layer_stride == 0
+            if reuse_slot and all(
+                isinstance(layer_kv_cache_spec[name], AscendSFAIndexerCacheSpec) for name in shared_layers
+            ):
+                indexer_specs = {
+                    name: spec for name in shared_layers
+                    if isinstance((spec := layer_kv_cache_spec[name]), AscendSFAIndexerCacheSpec)
+                }
+                kv_cache_raw_tensors.update(
+                    allocate_shared_indexer_cache(
+                        indexer_specs, kv_cache_config.num_blocks,
+                        lambda size: self._allocate_int8_cache_tensor(size, alignment),
+                    )
+                )
+                continue
             allocation_layers = shared_layers[:1] if reuse_slot else shared_layers
             use_mamba = False
             use_compressed_cache = False

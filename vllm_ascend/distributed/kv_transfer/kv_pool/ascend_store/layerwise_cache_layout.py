@@ -14,6 +14,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
+from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     get_layerwise_protocol,
 )
@@ -353,19 +354,26 @@ def apply_layerwise_kv_cache_plan(
     if seen_layers != set(layer_specs):
         raise ValueError("Layerwise KV cache descriptors must cover every cache spec.")
 
-    def _merge_specs(named_specs: list[NamedKVCacheSpec]) -> None:
+    def _merge_specs(named_specs: list[NamedKVCacheSpec], *, indexer: bool = False) -> None:
         shared_by = [named_spec.layer_name for named_spec in named_specs]
         reference_spec = layer_specs[shared_by[0]]
-        if any(layer_specs[layer_name] != reference_spec for layer_name in shared_by[1:]):
+        # Indexers keep their own dtype and data/scale views over a raw slot.
+        # Only their backing capacity is shared; main caches still require
+        # identical specs. The slot ordering and reuse fences stay unchanged.
+        variable_indexer = indexer and all(
+            isinstance(named_spec.spec, AscendSFAIndexerCacheSpec) for named_spec in named_specs
+        )
+        if not variable_indexer and any(layer_specs[layer_name] != reference_spec for layer_name in shared_by[1:]):
             raise ValueError(
                 "Layers sharing layerwise KV buffers must have identical cache specs for every named cache spec."
             )
+        capacity_per_block = max(named_spec.spec.page_size_bytes for named_spec in named_specs)
         new_tensors.append(
             KVCacheTensor(
                 layers=shared_by,
-                size=kv_cache_config.num_blocks * reference_spec.page_size_bytes,
+                size=kv_cache_config.num_blocks * capacity_per_block,
                 layer_stride=0,
-                block_stride=reference_spec.page_size_bytes,
+                block_stride=capacity_per_block,
                 offset=0,
             )
         )
@@ -379,7 +387,7 @@ def apply_layerwise_kv_cache_plan(
             if indexer is not None:
                 indexer_specs.append(indexer)
         if indexer_specs:
-            _merge_specs(indexer_specs)
+            _merge_specs(indexer_specs, indexer=True)
     # Draft KV survives between forwards, unlike a layerwise target scratch
     # slot. Give every resident draft layer its own persistent descriptor.
     for layer_name in layer_specs:
