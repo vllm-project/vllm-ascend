@@ -688,10 +688,10 @@ class AscendConfig:
             engram_config is not None
             and not engram_config.dp_shared_memory
             and vc.use_v2_model_runner
-            and vc.parallel_config.data_parallel_size > 1
+            and (vc.parallel_config.data_parallel_size > 1 or vc.parallel_config.prefill_context_parallel_size > 1)
         ):
-            # DP-dummy ranks have no hash work in MRV2. Share host tables so
-            # replicas do not require matching embedding collectives each step.
+            # DP-dummy ranks have no hash work in MRV2. Share host tables
+            # across DP and PCP peers to avoid per-step lookup collectives.
             engram_config.dp_shared_memory = True
         if (
             self.enable_force_eplb

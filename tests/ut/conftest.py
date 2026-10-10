@@ -110,6 +110,22 @@ if not _npu_available:
     acl_mod.rt = acl_rt  # type: ignore[attr-defined]
     sys.modules["acl"] = acl_mod
     sys.modules["acl.rt"] = acl_rt
+    # The worker patches import Ascend-only FLA kernels even for unrelated
+    # CPU tests. Mock that device boundary alongside torch_npu.
+    for _fla_module_name in ("fla_npu", "fla_npu.ops", "fla_npu.ops.ascendc"):
+        _fla_module = types.ModuleType(_fla_module_name)
+        _fla_module.__spec__ = importlib.util.spec_from_loader(_fla_module_name, loader=None)
+        _fla_module.__path__ = []
+        sys.modules[_fla_module_name] = _fla_module
+    for _fla_op in (
+        "causal_conv1d_fn",
+        "causal_conv1d_update",
+        "recurrent_gated_delta_rule",
+        "chunk_gated_delta_rule_fwd_h",
+        "chunk_kda_fwd",
+        "recurrent_kda",
+    ):
+        setattr(sys.modules["fla_npu.ops.ascendc"], _fla_op, MagicMock())
     mooncake_engine = types.ModuleType("mooncake.engine")
     mooncake_engine.__spec__ = importlib.util.spec_from_loader("mooncake.engine", loader=None)
     mooncake_engine.TransferEngine = MagicMock()  # type: ignore[attr-defined]
@@ -142,6 +158,8 @@ if not _npu_available:
     _default_npu_stream = _NpuStreamStub()
 
     torch.npu = MagicMock()
+    # Use the mock class so NPUGraph subclasses retain their Python methods.
+    torch.npu.NPUGraph = MagicMock
     torch.npu.is_available = MagicMock(return_value=False)
     torch.npu.Stream = _NpuStreamStub
     torch.npu.Event = MagicMock

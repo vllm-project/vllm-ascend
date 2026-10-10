@@ -879,7 +879,9 @@ class KVPoolWorker:
         speculative_config = getattr(vllm_config, "speculative_config", None)
         use_eagle_fn = getattr(speculative_config, "use_eagle", None)
         use_eagle = bool(use_eagle_fn()) if callable(use_eagle_fn) else False
-        retention_interval = self.kv_cache_config.prefix_cache_retention_interval
+        retention_interval = getattr(envs, "VLLM_PREFIX_CACHE_RETENTION_INTERVAL", None)
+        if not isinstance(retention_interval, int):
+            retention_interval = None
         return AscendStoreCoordinator(
             self.kv_cache_config.kv_cache_groups,
             scheduler_block_size=self.cache_transfer_granularity,
@@ -2907,25 +2909,23 @@ class KVPoolWorker:
             if save_finished_events[layer_id].is_set():
                 save_finished_events[layer_id].clear()
 
-    def wait_for_previous_save(self) -> None:
-        save_batch = self._previous_save_batch
-        if save_batch is None:
-            return
+    def handle_released_saves(self, released_req_ids: set[str] | None) -> None:
+        """Fence only the saves of requests whose blocks this step may reuse.
 
-        assert self.kv_send_thread is not None
+        Finished and preempted requests' blocks are freed immediately by the
+        scheduler; before this step's forward can reallocate those blocks,
+        every queued save chunk of exactly those requests must have drained.
+        Requests whose blocks were already released in earlier steps were
+        drained by that step's fence and never queue new puts, so they need
+        no further waiting here.
+        """
         send_thread = self.kv_send_thread
-        wait_start = time.perf_counter()
-        while True:
-            send_thread.raise_if_failed()
-            if save_batch.done.wait(timeout=SAVE_BATCH_FAILURE_POLL_INTERVAL_S):
-                break
-        elapsed = time.perf_counter() - wait_start
-        logger.debug(
-            "Previous KV save batch completed after waiting %.3f ms tp_rank=%d",
-            elapsed * 1000,
-            self.tp_rank,
-        )
-        self._previous_save_batch = None
+        if send_thread is None:
+            return
+        send_thread.raise_if_failed()
+        if isinstance(send_thread, KVCacheStoreSendingThread):
+            send_thread.wait_for_requests_saved(released_req_ids)
+        # Layerwise saves are already synchronized at each step's final layer.
 
     def wait_for_save(self, connector_metadata: AscendConnectorMetadata) -> None:
         current_event = None

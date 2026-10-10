@@ -39,6 +39,25 @@ The comment itself triggers the workflow — no label is required.
     [CODEOWNERS](https://github.com/vllm-project/vllm-ascend/blob/main/.github/CODEOWNERS)
     file.
 
+### Maintenance window
+
+Maintainers can pause PR-triggered commands during a maintenance window by setting
+the repository variable `NIGHTLY_COMMAND_BLOCK_WINDOW`. The value is an optional
+switch followed by an `HH:MM-HH:MM` range in Beijing time (UTC+8):
+
+| Value | Behavior |
+|-------|----------|
+| `true 22:00-08:00` | Gate enabled; block inside the window |
+| `22:00-08:00` | Same as above (switch omitted) |
+| `false 22:00-08:00` | Gate explicitly disabled |
+| unset / invalid | Gate disabled (fail-open) |
+
+Switch aliases are `true/1/yes/on` and `false/0/no/off` (case-insensitive); a space
+or comma may separate the switch from the range. Cross-midnight ranges are
+supported. While the gate is enabled and the current Beijing time falls inside the
+range, `/nightly` and `/weekly` comments do not dispatch tests; the bot replies with
+the active window instead.
+
 ### 2. Wait for results
 
 GitHub Actions will trigger the `Nightly-A2` or `Nightly-A3` workflow. Only tests
@@ -280,6 +299,13 @@ The workflow will:
   users' comments are ignored.
 - To re-trigger after fixing an issue, simply push a new commit — the workflow will
   reuse the existing `/nightly` comment automatically.
+
+**My `/nightly` comment was ignored during the maintenance window.**
+
+- If the repository variable `NIGHTLY_COMMAND_BLOCK_WINDOW` is set and the current
+  Beijing time is inside the configured range, `/nightly` and `/weekly` are
+  intentionally blocked to protect the third-party scheduling tests. The bot replies
+  with the active window; retry after it ends.
 
 **Only some tests ran, not the ones I expected.**
 

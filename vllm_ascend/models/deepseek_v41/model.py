@@ -1027,8 +1027,8 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         )
         self.engram_layout = EngramLayout.from_config(config) if self.has_engram else None
         if self.engram_layout is not None:
-            # Complete head buckets per rank, laid out over TP and the
-            # node-local EDP group (upstream's, not one built from EP hosts).
+            # Head buckets use TP x DP x PCP when sharded, or TP alone when host
+            # storage is shared across local DP x PCP replicas.
             # Fail on an unreadable checkpoint before the first table exists:
             # the allocation below is per-rank 24-51 GiB, and discovering a
             # missing index/key during weight iteration would mean paying for
@@ -1106,6 +1106,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         slot_mapping=None,
         block_table=None,
         *,
+        token_indices=None,
         force_dummy=False,
         output_buffers=None,
         ready_events=None,
@@ -1173,8 +1174,12 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                 dead = dead | (torch.arange(input_ids.shape[0], device=device) >= valid_token_count)
             # Publish the keep mask before hashing and table communication.
             mask = ~dead
+            if token_indices is not None:
+                mask = mask.index_select(0, token_indices)
             publish_mask()
             if lookback_token_ids is None:
+                if not hash_state.use_slot_cache:
+                    raise RuntimeError("MRV2 Engram requires device lookback_token_ids")
                 lookback_token_ids = input_ids.new_full((query_start_loc.numel() - 1, hash_state.lookback_depth), -1)
             hashes = hash_state(
                 input_ids,
@@ -1186,6 +1191,8 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                 slot_mapping,
                 block_table,
             )
+            if token_indices is not None:
+                hashes = hashes.index_select(0, token_indices)
         elif participates:
             assert hash_state is not None
             hashes, mask = hash_state.dummy_hashes(input_ids)
@@ -1394,6 +1401,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         slot_mapping=None,
         block_table=None,
         *,
+        token_indices=None,
         force_dummy=False,
         cg_mode=None,
     ):
@@ -1402,8 +1410,8 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         Dispatch keys off the forward context: the V1 runner calls this inside
         the forward, so capture (already done by
         ``prepare_engram_graph_inputs``) and the overlap check read the
-        context. The V2 runner calls it before any context exists and hands
-        ``cg_mode`` over instead: FULL steps reuse bucket-keyed ExternalEvents,
+        context. The V2 state defers lookup until the forward context exists and
+        passes ``cg_mode`` explicitly: FULL steps reuse bucket-keyed ExternalEvents,
         NONE steps get per-step plain events, unknown/other modes stay
         synchronous because compiled regions must not trace stream control
         ops. ``slot_mapping``/``block_table`` stay ``None`` under the V2
@@ -1412,20 +1420,20 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         graph_inputs = self.prepare_engram_graph_inputs(padded_tokens, prime=False)
         if not graph_inputs["engram_lookups"]:
             return graph_inputs
-        num_tokens = positions.shape[0]
+        num_tokens = positions.shape[0] if token_indices is None else token_indices.numel()
         output_tokens = num_tokens if padded_tokens is None else padded_tokens
         if not num_tokens <= output_tokens <= self._engram_max_tokens:
             raise ValueError("Engram token count exceeds the output buffer capacity")
-        if is_forward_context_available():
+        if cg_mode is None and is_forward_context_available():
             # V1: the context decided above (capture registered ExternalEvents
             # under the batch descriptor).
             overlap = self._can_overlap_engram_preparation()
         else:
-            # V2: no forward context exists yet, so the runner passes the
-            # graph mode of this step (captured by the model state); None
+            # V2 passes the step mode explicitly and retains capture bucket
+            # event keys after entering the forward context. None
             # means unknown, which stays synchronous.
             overlap = cg_mode in (CUDAGraphMode.NONE, CUDAGraphMode.FULL) and self._engram_overlap_enabled
-            if overlap and cg_mode == CUDAGraphMode.FULL and "engram_pending" not in graph_inputs:
+            if overlap and cg_mode == CUDAGraphMode.FULL:
                 mask_ready, events = self._get_engram_external_events(output_tokens, prime=False)
                 graph_inputs.update(engram_pending=events, engram_mask_ready_event=mask_ready, engram_graph_events=True)
         if overlap and "engram_pending" not in graph_inputs:
@@ -1441,6 +1449,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             query_start_loc,
             slot_mapping,
             block_table,
+            token_indices=token_indices,
             force_dummy=force_dummy,
             output_buffers=graph_inputs["engram_lookups"],
             ready_events=graph_inputs.get("engram_pending"),
@@ -1460,7 +1469,15 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         # Keep the hash, lookup and existing DP/TP collectives on one producer.
         stream.wait_stream(main)
         try:
-            for tensor in (input_ids, positions, lookback_token_ids, query_start_loc, slot_mapping, block_table):
+            for tensor in (
+                input_ids,
+                positions,
+                lookback_token_ids,
+                query_start_loc,
+                slot_mapping,
+                block_table,
+                token_indices,
+            ):
                 if isinstance(tensor, torch.Tensor) and tensor.device.type == "npu":
                     tensor.record_stream(stream)
             for tensor in (*graph_inputs["engram_lookups"].values(), graph_inputs["engram_mask"]):
@@ -1642,6 +1659,7 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
         slot_mapping=None,
         block_table=None,
         *,
+        token_indices=None,
         force_dummy=False,
         cg_mode=None,
     ):
@@ -1653,6 +1671,7 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
             query_start_loc,
             slot_mapping,
             block_table,
+            token_indices=token_indices,
             force_dummy=force_dummy,
             cg_mode=cg_mode,
         )
