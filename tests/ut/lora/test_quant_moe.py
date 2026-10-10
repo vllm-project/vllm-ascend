@@ -15,8 +15,8 @@ from vllm_ascend.lora.quant_moe import (
     register_quant_moe_lora_impl,
     validate_quant_moe_lora_activation_input,
 )
-from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights
-from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
+from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
+from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput, build_mlp_compute_input
 from vllm_ascend.ops.fused_moe.dataclass.moe_quant import MoEQuantParams
 from vllm_ascend.quantization.quant_type import QuantType
 
@@ -359,6 +359,133 @@ def test_apply_moe_activation_dispatches_known_kernels() -> None:
         out = _apply_moe_activation(clamped, "silu", 2.0, 1.0, 0.0)
     swiglu.assert_called_once()
     torch.testing.assert_close(out, torch.tensor([[2.0, 2.0, -2.0, 2.0]]))
+
+
+def _situ_reference(gate_up: torch.Tensor, beta: float | None, linear_beta: float | None) -> torch.Tensor:
+    gate, up = gate_up.double().chunk(2, dim=-1)
+    beta = 1.0 if beta is None else beta
+    gate = beta * torch.tanh(gate / beta) * torch.sigmoid(gate)
+    if linear_beta is not None:
+        up = linear_beta * torch.tanh(up / linear_beta)
+    return (gate * up).to(gate_up.dtype)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("activation", [MoEActivation.SITU, "situ"])
+@pytest.mark.parametrize("beta,linear_beta", [(None, None), (4.0, None), (4.0, 25.0), (None, 25.0)])
+def test_apply_moe_activation_situ_matches_reference(
+    dtype: torch.dtype,
+    activation: MoEActivation | str,
+    beta: float | None,
+    linear_beta: float | None,
+) -> None:
+    gate_up = torch.tensor(
+        [[-10.0, -3.0, 2.0, 8.0, 100.0, -5.0, 9.0, -100.0], [0.0, 1.0, -1.0, 4.0, -1.0, 2.0, 3.0, 5.0]],
+        dtype=dtype,
+    )
+    original = gate_up.clone()
+
+    # SwiGLU settings must not clamp or otherwise affect SiTU.
+    result = _apply_moe_activation(
+        gate_up,
+        activation,
+        7.0,
+        1.7,
+        1.0,
+        activation_situ_beta=beta,
+        activation_situ_linear_beta=linear_beta,
+    )
+
+    assert result.shape == (2, 4)
+    assert result.dtype == dtype
+    torch.testing.assert_close(result, _situ_reference(gate_up, beta, linear_beta))
+    torch.testing.assert_close(gate_up, original, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+def test_apply_moe_activation_situ_handles_empty_input(dtype: torch.dtype) -> None:
+    gate_up = torch.empty(0, 8, dtype=dtype)
+    result = _apply_moe_activation(gate_up, MoEActivation.SITU, 0.0, 1.0, 0.0)
+    assert result.shape == (0, 4)
+    assert result.dtype == dtype
+
+
+@pytest.mark.parametrize("comm_type", [MoECommType.ALLGATHER, MoECommType.ALLTOALL])
+@pytest.mark.parametrize("beta,linear_beta", [(None, None), (4.0, None), (4.0, 25.0)])
+def test_dynamic_int8_lora_situ_reaches_second_quantization(
+    comm_type: MoECommType, beta: float | None, linear_beta: float | None
+) -> None:
+    base_input = _make_input(lora_context=SimpleNamespace(use_ep=comm_type == MoECommType.ALLTOALL))
+    fused_input = build_fused_experts_input(
+        hidden_states=base_input.hidden_states,
+        topk_weights=torch.ones(2, 1),
+        topk_ids=base_input.topk_ids,
+        quant_type=QuantType.W8A8,
+        dynamic_eplb=False,
+        w1=base_input.weights.w1,
+        w2=base_input.weights.w2,
+        w1_scale=base_input.weights.w1_scale,
+        w2_scale=base_input.weights.w2_scale,
+        activation=MoEActivation.SITU,
+        lora_context=base_input.lora_context,
+    )
+    moe_config = SimpleNamespace(
+        activation_situ_beta=beta,
+        activation_situ_linear_beta=linear_beta,
+        swiglu_limit=7.0,
+    )
+    dispatch_output = SimpleNamespace(
+        hidden_states=base_input.hidden_states,
+        group_list=base_input.group_list,
+        group_list_type=base_input.group_list_type,
+        dynamic_scale=None,
+        topk_scales=None,
+        combine_metadata=SimpleNamespace(expanded_row_idx=base_input.expanded_row_idx),
+    )
+    mlp_input = build_mlp_compute_input(
+        fused_experts_input=fused_input,
+        token_dispatch_output=dispatch_output,
+        moe_config=moe_config,
+        use_fusion_ops=True,
+    )
+    gate_up_out = torch.tensor(
+        [[-10.0, 2.0, 8.0, 100.0, 9.0, -100.0], [0.0, 1.0, -1.0, -1.0, 2.0, 3.0]], dtype=torch.bfloat16
+    )
+    expected = _situ_reference(gate_up_out, beta, linear_beta)
+    routing = (torch.tensor([0, 1]), torch.tensor([0, 1]))
+    down_out = torch.zeros(2, 4, dtype=torch.bfloat16)
+    stream = Mock(record_event=Mock(return_value=object()))
+
+    def swiglu_reference(gate_up: torch.Tensor) -> torch.Tensor:
+        gate, up = gate_up.chunk(2, dim=-1)
+        return torch.nn.functional.silu(gate) * up
+
+    with (
+        patch(f"{QUANT_MOE}._EXTRA_CTX") as extra_ctx,
+        patch.object(
+            DeviceOperator,
+            "npu_dynamic_quant",
+            side_effect=[
+                (torch.ones(2, 4, dtype=torch.int8), torch.ones(2)),
+                (torch.ones(2, 3, dtype=torch.int8), torch.ones(2)),
+            ],
+        ) as dynamic_quant,
+        patch(f"{QUANT_MOE}.torch_npu.npu_grouped_matmul", return_value=[gate_up_out], create=True),
+        patch(f"{QUANT_MOE}.torch_npu.npu_swiglu", side_effect=swiglu_reference, create=True),
+        patch.object(DeviceOperator, "npu_grouped_matmul_gmm2", return_value=down_out),
+        patch(f"{QUANT_MOE}._recover_moe_lora_routing_allgather", return_value=routing),
+        patch(f"{QUANT_MOE}._recover_moe_lora_routing_all2all", return_value=routing),
+        patch(f"{QUANT_MOE}.moe_lora_apply_w13"),
+        patch(f"{QUANT_MOE}.moe_lora_apply_w2") as apply_w2,
+        patch(f"{QUANT_MOE}.torch.npu.current_stream", return_value=stream),
+    ):
+        extra_ctx.moe_comm_type = comm_type
+        output, _ = quant_apply_mlp_with_moe_lora(mlp_compute_input=mlp_input)
+
+    assert output is down_out
+    assert dynamic_quant.call_count == 2
+    torch.testing.assert_close(dynamic_quant.call_args_list[1].kwargs["hidden_states"], expected)
+    torch.testing.assert_close(apply_w2.call_args.kwargs["silu_out"], expected)
 
 
 def test_mc2_comm_type_is_unsupported() -> None:
