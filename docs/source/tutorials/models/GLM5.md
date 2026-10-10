@@ -384,7 +384,7 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
     --async-scheduling \
     --kv-cache-dtype int8 \
     --attention_config.indexer_kv_dtype int8 \
-    --additional-config '{"enable_dsa_cp": true, "enable_balance_scheduling": true, "fuse_muls_add": true, "enable_flashcomm1": true, "enable_fused_mc2": true, "enable_mlapo": true}' \
+    --additional-config '{"ascend_compilation_config": {"fuse_muls_add": true}, "enable_dsa_cp": true, "enable_balance_scheduling": true,  "enable_flashcomm1": true, "enable_fused_mc2": true, "enable_mlapo": true}' \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
     ```
@@ -431,7 +431,7 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
     --async-scheduling \
     --kv-cache-dtype int8 \
     --attention_config.indexer_kv_dtype int8 \
-    --additional-config '{"enable_dsa_cp": true, "enable_balance_scheduling": true, "fuse_muls_add": true, "enable_flashcomm1": true, "enable_fused_mc2": true, "enable_mlapo": true}' \
+    --additional-config '{"ascend_compilation_config": {"fuse_muls_add": true}, "enable_dsa_cp": true, "enable_balance_scheduling": true,  "enable_flashcomm1": true, "enable_fused_mc2": true, "enable_mlapo": true}' \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
     ```
@@ -1080,7 +1080,7 @@ if __name__ == "__main__":
             --max-model-len 202752 \
             --kv-cache-dtype int8 \
             --attention_config.indexer_kv_dtype int8 \
-            --additional-config '{"fuse_muls_add": true, "recompute_scheduler_enable": false, "multistream_overlap_shared_expert": true, "enable_dsa_cp": true, "c8_enable_reshape_optim": true, "enable_flashcomm1": true, "enable_fused_mc2": true}' \
+            --additional-config '{ "ascend_compilation_config": {"fuse_muls_add": true}, "recompute_scheduler_enable": false, "multistream_overlap_shared_expert": true, "enable_dsa_cp": true, "c8_enable_reshape_optim": true, "enable_flashcomm1": true, "enable_fused_mc2": true}' \
             --max-num-batched-tokens 16384 \
             --trust-remote-code \
             --enable-prefix-caching \
@@ -1142,7 +1142,7 @@ if __name__ == "__main__":
             --max-model-len 202752 \
             --kv-cache-dtype int8 \
             --attention_config.indexer_kv_dtype int8 \
-            --additional-config '{"fuse_muls_add": true, "recompute_scheduler_enable": false, "multistream_overlap_shared_expert": true, "enable_dsa_cp": true, "c8_enable_reshape_optim": true, "enable_flashcomm1": true, "enable_fused_mc2": true}' \
+            --additional-config '{ "ascend_compilation_config": {"fuse_muls_add": true}, "recompute_scheduler_enable": false, "multistream_overlap_shared_expert": true, "enable_dsa_cp": true, "c8_enable_reshape_optim": true, "enable_flashcomm1": true, "enable_fused_mc2": true}' \
             --max-num-batched-tokens 16384 \
             --trust-remote-code \
             --enable-prefix-caching \
@@ -1207,7 +1207,7 @@ if __name__ == "__main__":
             --kv-cache-dtype int8 \
             --attention_config.indexer_kv_dtype int8 \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-            --additional-config '{"fuse_muls_add": true, "recompute_scheduler_enable": true, "multistream_overlap_shared_expert": true, "enable_fused_mc2": true, "enable_mlapo": true}' \
+            --additional-config '{ "ascend_compilation_config": {"fuse_muls_add": true}, "recompute_scheduler_enable": true, "multistream_overlap_shared_expert": true, "enable_fused_mc2": true, "enable_mlapo": true}' \
             --trust-remote-code \
             --max-num-seqs 32 \
             --gpu-memory-utilization 0.92 \
@@ -1270,7 +1270,7 @@ if __name__ == "__main__":
             --kv-cache-dtype int8 \
             --attention_config.indexer_kv_dtype int8 \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-            --additional-config '{"fuse_muls_add": true, "recompute_scheduler_enable": true, "multistream_overlap_shared_expert": true, "enable_fused_mc2": true, "enable_mlapo": true}' \
+            --additional-config '{ "ascend_compilation_config": {"fuse_muls_add": true}, "recompute_scheduler_enable": true, "multistream_overlap_shared_expert": true, "enable_fused_mc2": true, "enable_mlapo": true}' \
             --trust-remote-code \
             --max-num-seqs 32 \
             --gpu-memory-utilization 0.92 \
