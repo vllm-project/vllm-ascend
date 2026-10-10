@@ -48,7 +48,7 @@ The following table lists additional configuration options available in vLLM Asc
 | Name                                | Type | Default | Description                                                                                               |
 |-------------------------------------|------|---------|-----------------------------------------------------------------------------------------------------------|
 | `xlite_graph_config`                | dict | `{}`    | Configuration options for Xlite graph mode                                                                |
-| `finegrained_tp_config`             | dict | `{}`    | Configuration options for module tensor parallelism                                                       |
+| `finegrained_tp_config`             | dict | `{}`    | Configuration options for fine-grained tensor parallelism. See [Fine-Grained Tensor Parallelism](../feature_guide/Fine_grained_TP.md). |
 | `ascend_compilation_config`         | dict | `{}`    | Configuration options for ascend compilation                                                              |
 | `ascend_warmup_config`              | dict | `{}`    | Configuration options for startup warmup that overlaps weight loading                                     |
 | `eplb_config`                       | dict | `{}`    | Runner-specific EPLB extensions. See [Expert Parallelism Load Balancer](../feature_guide/expert_parallelism_load_balancer.md). |
@@ -94,10 +94,10 @@ The details of each configuration option are as follows:
 
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
-| `lmhead_tensor_parallel_size`    | int  | `0` | The custom tensor parallel size of lm_head.    |
-| `oproj_tensor_parallel_size`     | int  | `0` | The custom tensor parallel size of o_proj.     |
-| `embedding_tensor_parallel_size` | int  | `0` | The custom tensor parallel size of embedding. |
-| `mlp_tensor_parallel_size`       | int  | `0` | The custom tensor parallel size of mlp.       |
+| `lmhead_tensor_parallel_size`    | int  | `0` | The custom tensor parallel size of the LM head. Must evenly divide `data_parallel_size`.    |
+| `oproj_tensor_parallel_size`     | int  | `0` | The custom tensor parallel size of o_proj. Must evenly divide `data_parallel_size`; values > 1 require the o_proj / MLP preconditions.     |
+| `embedding_tensor_parallel_size` | int  | `0` | The custom tensor parallel size of the embedding. Must evenly divide `data_parallel_size`. |
+| `mlp_tensor_parallel_size`       | int  | `0` | The custom tensor parallel size of the MLP. Must evenly divide `data_parallel_size`; values > 1 require the o_proj / MLP preconditions.       |
 
 **ascend_compilation_config**
 
@@ -314,10 +314,8 @@ An example of additional configuration is as follows:
 ```python
 {
     "finegrained_tp_config": {
-        "lmhead_tensor_parallel_size": 8,
-        "oproj_tensor_parallel_size": 8,
         "embedding_tensor_parallel_size": 8,
-        "mlp_tensor_parallel_size": 8,
+        "lmhead_tensor_parallel_size": 8,
     },
     "enable_kv_nz": False,
     "multistream_overlap_shared_expert": True,
