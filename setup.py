@@ -29,7 +29,6 @@ from setuptools.command.build_ext import build_ext
 from setuptools.command.build_py import build_py
 from setuptools.command.develop import develop
 from setuptools.command.install import install
-from setuptools_scm import get_version
 
 
 def load_module_from_path(module_name, path):
@@ -413,7 +412,8 @@ class custom_install(install):
 
 ROOT_DIR = os.path.dirname(__file__)
 try:
-    VERSION = get_version(write_to="vllm_ascend/_version.py")
+    versioning = load_module_from_path("ascend_build_versioning", os.path.join(ROOT_DIR, "versioning.py"))
+    VERSION = versioning.get_package_version(root=ROOT_DIR, write_to="vllm_ascend/_version.py")
 except LookupError:
     # The checkout action in github action CI does not checkout the tag. It
     # only checks out the commit. In this case, we set a dummy version.
