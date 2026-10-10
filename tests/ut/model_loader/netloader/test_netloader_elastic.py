@@ -795,3 +795,100 @@ def test_server_start(server_config):
 
 if __name__ == "__main__":
     pytest.main()
+
+
+# ---------------------------------------------------------------------------
+# ElasticServer registration path: one dead or malformed client must not stop
+# the accept loop, block other registrations, or leak its socket.
+# ---------------------------------------------------------------------------
+
+
+def _bare_server():
+    """ElasticServer without __init__, so no real socket is bound."""
+    from vllm_ascend.model_loader.netloader.interaction.elastic import ElasticServer
+
+    server = ElasticServer.__new__(ElasticServer)
+    # __del__ closes self.s; give it something harmless so garbage collection
+    # of these bare instances stays quiet.
+    server.s = MagicMock()
+    return server
+
+
+def test_accept_loop_survives_a_failing_registration():
+    server = _bare_server()
+    first, second = MagicMock(name="conn1"), MagicMock(name="conn2")
+    handled = []
+
+    server.s = MagicMock()
+    # Two clients, then the socket closes to end the loop.
+    server.s.accept.side_effect = [
+        (first, ("10.0.0.1", 5001)),
+        (second, ("10.0.0.2", 5002)),
+        OSError("socket closed"),
+    ]
+
+    def register_handler(conn, addr, buffer_size=1024):
+        handled.append(addr)
+        if conn is first:
+            raise RuntimeError("malformed client")
+
+    server.register_handler = register_handler
+    server.elastic_client_handler()
+
+    # The second client was still served after the first one raised.
+    assert handled == [("10.0.0.1", 5001), ("10.0.0.2", 5002)]
+    # And the failed client's socket was closed rather than leaked.
+    first.close.assert_called_once()
+
+
+def test_accept_loop_exits_when_the_socket_is_closed():
+    server = _bare_server()
+    server.s = MagicMock()
+    server.s.accept.side_effect = OSError("bad file descriptor")
+    server.register_handler = MagicMock()
+
+    # Returns instead of spinning on the same error forever.
+    server.elastic_client_handler()
+    server.register_handler.assert_not_called()
+
+
+def test_registration_recv_has_a_deadline():
+    from vllm_ascend.model_loader.netloader.interaction import elastic as elastic_module
+
+    server = _bare_server()
+    conn = MagicMock()
+    conn.recv.return_value = b""
+
+    server.register_handler(conn, ("10.0.0.1", 5001))
+
+    conn.settimeout.assert_called_once_with(elastic_module._REGISTRATION_RECV_TIMEOUT_S)
+
+
+def test_client_that_sends_nothing_does_not_leak_its_socket():
+    server = _bare_server()
+    conn = MagicMock()
+    conn.recv.return_value = b""
+
+    server.register_handler(conn, ("10.0.0.1", 5001))
+
+    conn.close.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "recv_result",
+    [
+        pytest.param({"side_effect": ConnectionResetError("peer reset")}, id="reset"),
+        pytest.param({"side_effect": TimeoutError("timed out")}, id="timeout"),
+        pytest.param({"return_value": b"\xff\xfe not utf-8"}, id="not-utf8"),
+    ],
+)
+def test_unreadable_registration_message_is_handled(recv_result):
+    server = _bare_server()
+    conn = MagicMock()
+    conn.recv.configure_mock(**recv_result)
+
+    # No exception escapes to the accept loop, and the socket is closed.
+    server.register_handler(conn, ("10.0.0.1", 5001))
+
+    conn.close.assert_called_once()
+    conn.sendall.assert_not_called()
