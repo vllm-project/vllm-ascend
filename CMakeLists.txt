@@ -51,7 +51,7 @@ endif()
 
 include(${ASCENDC_CMAKE_DIR}/ascendc.cmake)
 
-file(GLOB KERNEL_FILES
+file(GLOB KERNEL_FILES CONFIGURE_DEPENDS
 ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/*.cpp)
 
 set(VLLM_ASCEND_CUSTOM_OP
@@ -68,15 +68,11 @@ endif()
 
 message("TORCH_NPU_PATH is ${TORCH_NPU_PATH}")
 
-if(SOC_VERSION MATCHES "ascend310p.*")
-    file(GLOB VLLM_ASCEND_SRC
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/*.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/aclnn_torch_adapter/*.cpp)
-else()
-    file(GLOB VLLM_ASCEND_SRC
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/*.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/aclnn_torch_adapter/*.cpp)
-endif()
+# Both branches of this condition collected the same sources (see
+# vllm-project/vllm-ascend#17788); collapsed to a single glob.
+file(GLOB VLLM_ASCEND_SRC CONFIGURE_DEPENDS
+${CMAKE_CURRENT_SOURCE_DIR}/csrc/*.cpp
+${CMAKE_CURRENT_SOURCE_DIR}/csrc/aclnn_torch_adapter/*.cpp)
 
 # Sparse KV cache offloading is currently supported on Atlas A3 only.
 if(SOC_VERSION MATCHES "ascend910_93.*")
