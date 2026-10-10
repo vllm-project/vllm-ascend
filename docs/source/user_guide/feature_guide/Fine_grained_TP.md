@@ -25,10 +25,12 @@ The four components fall into two families with different communication contract
 
 ### Usage Scenarios
 
-| Scenario | Components typically enabled | Applicable Conditions |
-|----------|------------------------------|------------------------|
-| All-DP MoE serving (standalone, or the decode side of PD separation) | embedding / LM head | MoE model, `tensor_parallel_size == 1`, sizes evenly divide `data_parallel_size` |
-| P/D-disaggregated decode (D) node | o_proj / MLP, usually combined with embedding / LM head | The full [preconditions for o_proj / MLP TP](#preconditions-for-o_proj--mlp-tp) |
+The four knobs are freely combinable — on a PD decode node all four can be enabled together (this is the configuration measured in [Experimental Results](#experimental-results)); each knob only needs to satisfy its own family's constraints.
+
+| Scenario | Components that can be enabled | Applicable Conditions |
+|----------|-------------------------------|------------------------|
+| All-DP MoE serving (standalone, or the decode side of PD separation) | embedding / LM head — o_proj and MLP TP additionally require a PD decode node | MoE model, `tensor_parallel_size == 1`, sizes evenly divide `data_parallel_size` |
+| P/D-disaggregated decode (D) node | all four together: o_proj / MLP / embedding / LM head | The o_proj / MLP knobs require the full [preconditions for o_proj / MLP TP](#preconditions-for-o_proj--mlp-tp) |
 
 ### Constraints and Limitations
 
@@ -117,7 +119,7 @@ vllm serve deepseek-ai/DeepSeek-R1 \
     }'
 ```
 
-**Scenario 2 — o_proj + MLP TP on a P/D-disaggregated decode node:**
+**Scenario 2 — all four knobs on a P/D-disaggregated decode node:**
 
 ```bash
 vllm serve deepseek-ai/DeepSeek-R1 \
@@ -130,7 +132,9 @@ vllm serve deepseek-ai/DeepSeek-R1 \
         },
         "finegrained_tp_config": {
             "oproj_tensor_parallel_size": 8,
-            "mlp_tensor_parallel_size": 8
+            "mlp_tensor_parallel_size": 8,
+            "lmhead_tensor_parallel_size": 8,
+            "embedding_tensor_parallel_size": 8
         }
     }' \
     --kv-transfer-config '{
@@ -182,7 +186,7 @@ After the instance starts, confirm which knobs actually took effect:
    Expected output (Scenario 2):
 
    ```text
-   finegrained_tp_config enabled: oproj_tensor_parallel_size=8, mlp_tensor_parallel_size=8
+   finegrained_tp_config enabled: oproj_tensor_parallel_size=8, mlp_tensor_parallel_size=8, lmhead_tensor_parallel_size=8, embedding_tensor_parallel_size=8
    ```
 
    Only the knobs that survived validation are listed; the format is `knob=size`.
