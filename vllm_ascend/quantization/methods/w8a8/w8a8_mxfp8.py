@@ -637,15 +637,17 @@ class AscendW8A8MXFP8DSDynamicLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
             # The layer may use OTP instead of the model's ordinary TP group.
             # Derive the group count from the loaded output shard.
             n_local_groups = layer.weight.shape[1] // self.o_lora_rank
-            layer.weight.data = (
-                layer.weight.data.T.reshape(n_local_groups, self.o_lora_rank, -1).transpose(1, 2).contiguous()
+            weight = layer.weight.data.T.reshape(n_local_groups, self.o_lora_rank, -1)
+            weight_scale = layer.weight_scale.data.transpose(0, 1).reshape(n_local_groups, self.o_lora_rank, -1, 2)
+            weight, weight_scale = maybe_trans_nz_with_scale(
+                weight,
+                weight_scale,
+                transpose_dims=(1, 2),
+                customize_dtype=torch.float8_e4m3fn,
             )
-            layer.weight_scale.data = (
-                layer.weight_scale.data.transpose(0, 1)
-                .reshape(n_local_groups, self.o_lora_rank, -1, 2)
-                .transpose(1, 2)
-                .contiguous()
-            )
+            # CP/PCP also require contiguous ND tensors when NZ is disabled.
+            layer.weight.data = weight.contiguous()
+            layer.weight_scale.data = weight_scale.contiguous()
         elif layer.prefix.endswith("wo_b"):
             # DSA PCP gathers these tensors directly along the leading
             # dimension, which requires contiguous HCCL inputs.
