@@ -916,7 +916,9 @@ class AscendConfig:
         (
             self._sparse_li_c8_layer_ids,
             self._sparse_li_c8_layer_names,
-        ) = self._parse_sparse_li_layers_from_quant_config(quant_config, ("INT8_DYNAMIC", "W8A8_MXFP8"))
+        ) = self._parse_sparse_li_layers_from_quant_config(
+            quant_config, ("INT8_DYNAMIC", "QK_INT8_DYNAMIC", "W8A8_MXFP8")
+        )
         (
             self._sparse_li_c4_layer_ids,
             self._sparse_li_c4_layer_names,

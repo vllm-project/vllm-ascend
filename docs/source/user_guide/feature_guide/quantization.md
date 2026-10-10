@@ -172,6 +172,18 @@ python -m vllm.entrypoints.api_server \
     --trust-remote-code 
 ```
 
+### ModelSlim indexer dynamic INT8 metadata
+
+Sparse indexer checkpoints can label Q/K dynamic INT8 quantization as either
+`INT8_DYNAMIC` or `QK_INT8_DYNAMIC`. Both names use the same attention quantization
+implementation. Per-layer `*.indexer.quant_type` metadata determines which indexer
+layers use quantization, including checkpoints with the legacy global
+`indexer_quant_type: INT8_DYNAMIC` and per-layer `QK_INT8_DYNAMIC` labels.
+
+Set `--attention_config.indexer_kv_dtype int8` to enable the INT8 indexer cache.
+The metadata alone does not enable it. The main attention KV cache is configured
+independently; `--kv-cache-dtype int8` is not required for indexer INT8.
+
 ## References
 
 - [ModelSlim GitCode](https://gitcode.com/Ascend/msmodelslim)
