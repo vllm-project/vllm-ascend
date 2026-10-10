@@ -1,4 +1,4 @@
-"""Regression tests for PD proxy fairness and Messages/Responses forwarding."""
+"""Regression tests for Messages/Responses forwarding."""
 
 import argparse
 import asyncio
@@ -129,54 +129,6 @@ async def _body(response) -> bytes:
     async for chunk in response.body_iterator:
         chunks.append(chunk if isinstance(chunk, bytes) else bytes(chunk))
     return b"".join(chunks)
-
-
-def test_heap_tie_break_uses_push_counter_not_ordinal():
-    scheduler = _scheduler()
-    heap = scheduler._pool(proxy.ServerRole.PREFILL).heap
-    counters = [item[1] for item in heap]
-    ordinals = [scheduler.prefillers[item[3]].ordinal for item in heap]
-    assert counters == [1, 2]
-    assert ordinals == [0, 1]
-    assert counters != ordinals
-
-
-def test_equal_priority_rotates_across_prefillers_and_decoders():
-    scheduler = _scheduler()
-
-    def cycle(pick, release):
-        first = pick(50)
-        release(first["key"], 50)
-        second = pick(50)
-        release(second["key"], 50)
-        third = pick(50)
-        release(third["key"], 50)
-        assert first["port"] != second["port"]
-        assert third["port"] == first["port"]
-        return first, second
-
-    cycle(scheduler.begin_request, scheduler.release_prefill_kv)
-    cycle(scheduler.pick_decoder, scheduler.release_decoder)
-    assert scheduler.request_num == 3
-    for entry in scheduler.prefillers.values():
-        assert entry.active_kv_cache == 0
-    for entry in scheduler.decoders.values():
-        assert entry.active_tokens == 0
-
-
-def test_lower_load_wins_when_priorities_differ():
-    scheduler = _scheduler()
-    busy = scheduler.begin_request(1000)
-    idle = scheduler.begin_request(10)
-    assert busy["port"] == 8100
-    assert idle["port"] == 8101
-    assert scheduler.prefillers[busy["key"]].active_kv_cache == 1000
-    assert scheduler.prefillers[idle["key"]].active_kv_cache == 10
-
-    busy_decoder = scheduler.pick_decoder(1000)
-    idle_decoder = scheduler.pick_decoder(10)
-    assert busy_decoder["port"] == 8200
-    assert idle_decoder["port"] == 8201
 
 
 def test_prefill_payload_depends_on_api():

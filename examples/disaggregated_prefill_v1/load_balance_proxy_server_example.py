@@ -283,7 +283,6 @@ class SharedProxyScheduler:
             ServerRole.DECODE: RolePools(),
         }
         self._ordinal = 0
-        self._push_counter = 0
 
         for host, port in prefiller_instances:
             self._add_server_no_lock(ServerRole.PREFILL, host, port)
@@ -317,8 +316,7 @@ class SharedProxyScheduler:
         pool = self._pool(role)
         entry = pool.servers[key]
         entry.heap_seq += 1
-        self._push_counter += 1
-        heapq.heappush(pool.heap, (self._priority(role, entry, key), self._push_counter, entry.heap_seq, key))
+        heapq.heappush(pool.heap, (self._priority(role, entry, key), entry.ordinal, entry.heap_seq, key))
         if len(pool.heap) > 2 * len(pool.servers):
             self._reset_heap(role)
 
@@ -339,8 +337,7 @@ class SharedProxyScheduler:
         for key, entry in pool.servers.items():
             if bump_seq:
                 entry.heap_seq += 1
-            self._push_counter += 1
-            heap.append((self._priority(role, entry, key), self._push_counter, entry.heap_seq, key))
+            heap.append((self._priority(role, entry, key), entry.ordinal, entry.heap_seq, key))
         heapq.heapify(heap)
         pool.heap = heap
 
