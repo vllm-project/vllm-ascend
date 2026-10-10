@@ -477,6 +477,32 @@ jobs:
 
       # ============================================
 
+      - name: Check profiling artifacts
+        if: ${{ always() && inputs.config_file_path != '' }}
+        id: profiling-artifacts
+        run: |
+          profiling_dir=/vllm-workspace/vllm-ascend/profiling
+          profiling_file=""
+          if [[ -d "$profiling_dir" ]]; then
+            profiling_file=$(find "$profiling_dir" -type f -size +0c -print -quit)
+          fi
+          if [[ -n "$profiling_file" ]]; then
+            echo "has_files=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_files=false" >> "$GITHUB_OUTPUT"
+            echo "No profiling artifacts found; skipping upload."
+          fi
+
+      - name: Upload profiling artifacts
+        if: ${{ always() && steps.profiling-artifacts.outputs.has_files == 'true' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: profiling-${{ inputs.vllm_ascend_branch }}-${{ inputs.name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /vllm-workspace/vllm-ascend/profiling
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 1
+
       - name: Set benchmark artifact timestamp
         if: ${{ always() && inputs.config_file_path != '' }}
         id: bench_ts
