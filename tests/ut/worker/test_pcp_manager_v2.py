@@ -534,7 +534,10 @@ def test_attention_context_collects_global_pcp_data(dcp_world_size, is_prefillin
     gather_block_tables = MagicMock(return_value=block_tables)
     num_blocks = np.arange(16, dtype=np.int32).reshape(2, 8)
     manager._global_batch = input_batch
-    manager._local_batch = SimpleNamespace(num_reqs=3, idx_mapping_np=np.array([3, 3, 7], dtype=np.int32))
+    manager._local_batch = SimpleNamespace(
+        num_reqs=3, num_tokens=input_batch.num_tokens, idx_mapping_np=np.array([3, 3, 7], dtype=np.int32)
+    )
+    manager._local_gather_idx = torch.arange(input_batch.num_tokens + 3, dtype=torch.int64)
     manager._block_tables = SimpleNamespace(
         gather_block_tables=gather_block_tables,
         num_blocks=SimpleNamespace(np=num_blocks),
@@ -565,6 +568,7 @@ def test_attention_context_collects_global_pcp_data(dcp_world_size, is_prefillin
         global_slot_mappings[:, : input_batch.num_tokens_after_padding],
     )
     assert actual.hidden_restore_idx is hidden_restore_idx
+    torch.testing.assert_close(actual.local_token_indices, manager._local_gather_idx[: input_batch.num_tokens])
     gather_block_tables.assert_called_once_with(
         input_batch.idx_mapping,
         input_batch.num_reqs_after_padding,
@@ -829,16 +833,17 @@ def test_pcp_manager_skips_hidden_restore_before_last_pp_rank() -> None:
 
 
 @pytest.mark.parametrize("method", ["mtp", "eagle3", "dspark"])
+@pytest.mark.parametrize("draft_sample_method", ["greedy", "probabilistic"])
 @pytest.mark.parametrize(
     ("cudagraph_mode", "sparse_mla"),
     [(CUDAGraphMode.NONE, False), (CUDAGraphMode.NONE, True), (CUDAGraphMode.FULL_DECODE_ONLY, True)],
 )
 def test_validate_config_allows_supported_speculators(
-    method: str, cudagraph_mode: CUDAGraphMode, sparse_mla: bool
+    method: str, draft_sample_method: str, cudagraph_mode: CUDAGraphMode, sparse_mla: bool
 ) -> None:
     speculative_config = SimpleNamespace(
         method=method,
-        draft_sample_method="greedy",
+        draft_sample_method=draft_sample_method,
     )
     vllm_config = _make_pcp_config(cudagraph_mode, sparse_mla=sparse_mla)
     vllm_config.speculative_config = speculative_config
@@ -853,9 +858,6 @@ def test_validate_config_allows_supported_speculators(
     ("method", "draft_sample_method", "error"),
     [
         ("draft_model", "greedy", "supports speculative decoding only with"),
-        ("mtp", "random", "requires greedy draft sampling"),
-        ("eagle3", "random", "requires greedy draft sampling"),
-        ("dspark", "random", "requires greedy draft sampling"),
     ],
 )
 def test_validate_config_rejects_unsupported_speculator_options(

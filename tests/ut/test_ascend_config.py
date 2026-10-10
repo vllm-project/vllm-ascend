@@ -25,7 +25,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import PropertyMock, patch
 
-from vllm.config import KVTransferConfig
+from vllm.config import DeviceConfig, KVTransferConfig
 from vllm.config import VllmConfig as _VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 
@@ -2087,23 +2087,30 @@ class TestKVPPConfig(TestBase):
 
 
 class TestEngramSharedMemoryDefaults(TestBase):
-    def test_shared_tables_are_derived_for_mrv2_dp(self):
+    def test_shared_tables_are_derived_for_mrv2_dp_or_pcp(self):
+        topologies = (
+            (1, 1, False),
+            (2, 1, True),
+            (1, 2, True),
+            (2, 4, True),
+        )
         for use_v2 in (False, True):
-            for dp in (1, 2, 8):
+            for dp, pcp, auto_shared in topologies:
                 for shared in (False, True):
-                    with self.subTest(use_v2=use_v2, dp=dp, shared=shared):
-                        config = VllmConfig()
+                    with self.subTest(use_v2=use_v2, dp=dp, pcp=pcp, shared=shared):
+                        config = VllmConfig(device_config=DeviceConfig(device="cpu"))
                         config.parallel_config.data_parallel_size = dp
+                        config.parallel_config.prefill_context_parallel_size = pcp
                         config.engram_config = SimpleNamespace(dp_shared_memory=shared)
                         ascend_config = AscendConfig(sparse_kv_offload_config=SparseKVOffloadConfig())
                         with patch.object(
                             _VllmConfig, "use_v2_model_runner", new_callable=PropertyMock, return_value=use_v2
                         ):
                             ascend_config.derive_and_validate(config)
-                        self.assertEqual(config.engram_config.dp_shared_memory, shared or (use_v2 and dp > 1))
+                        self.assertEqual(config.engram_config.dp_shared_memory, shared or (use_v2 and auto_shared))
 
     def test_no_engram_config_is_preserved(self):
-        config = VllmConfig()
+        config = VllmConfig(device_config=DeviceConfig(device="cpu"))
         config.engram_config = None
         AscendConfig(sparse_kv_offload_config=SparseKVOffloadConfig()).derive_and_validate(config)
         self.assertIsNone(config.engram_config)

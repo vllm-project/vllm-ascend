@@ -248,3 +248,70 @@ def test_dspark_context_rope_reuses_all_layer_configs(monkeypatch, shared_config
         assert call.args[0] is states
         assert call.args[1] is slot
         assert call.args[2] is layer.self_attn
+
+
+@pytest.mark.parametrize("use_tq", [False, True])
+@pytest.mark.parametrize("formatted_slots", [False, True])
+def test_dspark_turboquant_context_cache_uses_rotated_basis(monkeypatch, use_tq, formatted_slots):
+    from vllm_ascend.attention.dsa_v1 import AscendDSAImpl
+    from vllm_ascend.models.deepseek_v4 import dspark
+    from vllm_ascend.models.layer.attention.layer import DSAAttention
+    from vllm_ascend.ops.dsa import AscendDeepseekSparseAttention
+
+    shared_kv = torch.zeros(2, 1, 8)
+    rotated_kv = torch.ones_like(shared_kv)
+    slots = torch.tensor([0, 9], dtype=torch.int32)
+    slot_pairs = torch.tensor([[0, 0], [1, 1]], dtype=torch.int32)
+    if formatted_slots:
+        slots = slot_pairs
+    cache = torch.empty(2, 8, 1, 8, dtype=torch.bfloat16)
+    transform = SimpleNamespace(forward=Mock(return_value=rotated_kv))
+    # Use the real wrapper hierarchy; the transform belongs to the backend
+    # implementation and is not forwarded by either nn.Module wrapper.
+    wrapper = AscendDeepseekSparseAttention.__new__(AscendDeepseekSparseAttention)
+    torch.nn.Module.__init__(wrapper)
+    wrapper.dsa_attn = DSAAttention.__new__(DSAAttention)
+    torch.nn.Module.__init__(wrapper.dsa_attn)
+    impl = AscendDSAImpl.__new__(AscendDSAImpl)
+    impl.turboquant = transform if use_tq else None
+    wrapper.dsa_attn.impl = impl
+    attn = SimpleNamespace(dsa_attn=wrapper)
+    swa_layer = SimpleNamespace(block_size=8, kv_cache=cache)
+    attn.dsa_attn.swa_cache_layer = swa_layer
+    plan = SimpleNamespace(
+        format_dsa_slot_mapping=Mock(return_value=slot_pairs),
+        dsa_kv_compress_scatter=Mock(),
+    )
+    impl.get_kv_plan = Mock(return_value=plan)
+    writer = Mock()
+    from vllm_ascend.attention import dsa_attn_kv_plan
+
+    monkeypatch.setattr(dsa_attn_kv_plan, "get_dsa_attn_kv_plan", lambda _: plan)
+    monkeypatch.setattr(dsa_attn_kv_plan, "write_dsa_cache", writer)
+
+    model = SimpleNamespace(vllm_config=SimpleNamespace())
+    dspark.DeepseekV4DSparkModel._store_standard_swa_kv(model, shared_kv, slots, attn)
+
+    if use_tq:
+        transform.forward.assert_called_once_with(shared_kv)
+        writer.assert_called_once()
+        write_args = writer.call_args.args
+        assert write_args[0] is cache
+        assert write_args[1] is rotated_kv
+        torch.testing.assert_close(write_args[2], slot_pairs)
+        if formatted_slots:
+            impl.get_kv_plan.assert_not_called()
+            plan.format_dsa_slot_mapping.assert_not_called()
+        else:
+            impl.get_kv_plan.assert_called_once_with()
+            plan.format_dsa_slot_mapping.assert_called_once_with(slots, swa_layer.block_size)
+        plan.dsa_kv_compress_scatter.assert_not_called()
+    else:
+        transform.forward.assert_not_called()
+        writer.assert_not_called()
+        impl.get_kv_plan.assert_not_called()
+        plan.dsa_kv_compress_scatter.assert_called_once()
+        write_args = plan.dsa_kv_compress_scatter.call_args.args
+        assert write_args[0] is cache
+        assert write_args[1] is shared_kv
+        torch.testing.assert_close(write_args[2], slot_pairs)

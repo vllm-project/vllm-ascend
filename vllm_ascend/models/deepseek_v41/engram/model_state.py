@@ -102,6 +102,12 @@ class EngramModelState(AscendModelState):
         if window is None:
             return model_inputs
         dummy = input_batch.is_dummy or self.kvpp_is_dummy_run or ring_state_update_skipped()
+        batch = input_batch
+        token_indices = None
+        if self.pcp_context is not None and not dummy:
+            # Hash contiguous requests; select local rows only after hashing.
+            batch = self.pcp_context.global_batch
+            token_indices = self.pcp_context.local_token_indices
         if dummy:
             # Idle ranks still participate in lookup, but have no history.
             window.fill_(-1)
@@ -112,11 +118,11 @@ class EngramModelState(AscendModelState):
 
             _gather_lookback_kernel[(window.shape[0],)](
                 window,
-                input_batch.idx_mapping,
+                batch.idx_mapping,
                 req_states.num_computed_tokens.gpu,
                 all_token_ids,
                 all_token_ids.stride(0),
-                input_batch.num_reqs,
+                batch.num_reqs,
                 DEPTH=depth,
                 BLOCK_DEPTH=triton.next_power_of_2(depth),
             )
@@ -124,10 +130,10 @@ class EngramModelState(AscendModelState):
         if self._engram_graph_inputs is not None and self._cg_mode == CUDAGraphMode.FULL:
             graph_inputs = self._engram_graph_inputs
             query = graph_inputs["engram_query_start_loc"]
-            valid_tokens = 0 if dummy else input_batch.num_tokens
+            valid_tokens = 0 if dummy else batch.num_tokens
             query.fill_(valid_tokens)
             if not dummy:
-                query[: input_batch.num_reqs + 1].copy_(input_batch.query_start_loc[: input_batch.num_reqs + 1])
+                query[: batch.num_reqs + 1].copy_(batch.query_start_loc[: batch.num_reqs + 1])
             graph_inputs["engram_valid_token_count"].fill_(valid_tokens)
             model_inputs.update(graph_inputs)
             # FULL replay runs its own producers. No Python-side hash/lookup
@@ -139,13 +145,14 @@ class EngramModelState(AscendModelState):
         # dummy graph-producer coordinates.
         # DP lookup needs the forward context, which is not established yet.
         self._engram_inputs = {
-            "input_ids": input_batch.input_ids[: input_batch.num_tokens],
-            "positions": input_batch.positions[: input_batch.num_tokens],
+            "input_ids": batch.input_ids[: batch.num_tokens],
+            "positions": batch.positions[: batch.num_tokens],
             "padded_tokens": input_batch.num_tokens_after_padding,
             "lookback_token_ids": window,
-            "query_start_loc": None if dummy else input_batch.query_start_loc[: input_batch.num_reqs + 1],
+            "query_start_loc": None if dummy else batch.query_start_loc[: batch.num_reqs + 1],
             "cg_mode": self._cg_mode,
             "force_dummy": dummy,
+            "token_indices": token_indices,
         }
         model_inputs.update(self.model.prepare_engram_graph_inputs(input_batch.num_tokens_after_padding))
         return model_inputs

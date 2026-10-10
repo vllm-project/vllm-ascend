@@ -56,6 +56,8 @@ class AscendPCPAttentionContext:
     global_block_table_num_blocks: torch.Tensor | None = None
     # Original batch row for each local request, in upstream segment order.
     local_to_global_req_indices: tuple[int, ...] | None = None
+    # Actual local tokens in the unpartitioned batch, excluding padding.
+    local_token_indices: torch.Tensor | None = None
 
 
 class AscendPCPManager(PCPManager):
@@ -242,10 +244,6 @@ class AscendPCPManager(PCPManager):
             if speculative_config.method not in ("mtp", "eagle3", "dspark"):
                 raise NotImplementedError(
                     "Ascend MRV2 PCP supports speculative decoding only with MTP, Eagle3 and DSpark."
-                )
-            if speculative_config.draft_sample_method != "greedy":
-                raise NotImplementedError(
-                    "Ascend MRV2 PCP speculative decoding currently requires greedy draft sampling."
                 )
         is_sparse_mla = hasattr(model_config.hf_text_config, "index_topk")
         cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
@@ -622,6 +620,9 @@ class AscendPCPManager(PCPManager):
         global_batch = self._global_batch
         hidden_restore_idx = self._hidden_restore_idx
         assert global_batch is not None
+        local_batch = self._local_batch if input_batch is None else input_batch
+        assert local_batch is not None
+        assert self._local_gather_idx is not None
         assert self._block_tables is not None
         assert self._global_batch_slot_mappings is not None
         assert hidden_restore_idx is not None
@@ -631,8 +632,6 @@ class AscendPCPManager(PCPManager):
             global_block_table_num_blocks = torch.from_numpy(
                 self._block_tables.num_blocks.np[:, global_batch.idx_mapping_np[: global_batch.num_reqs]]
             ).to(device=self.device, non_blocking=True)
-            local_batch = self._local_batch if input_batch is None else input_batch
-            assert local_batch is not None
             global_rows = {
                 int(state): row for row, state in enumerate(global_batch.idx_mapping_np[: global_batch.num_reqs])
             }
@@ -642,6 +641,7 @@ class AscendPCPManager(PCPManager):
         return AscendPCPAttentionContext(
             global_batch=global_batch,
             local_to_global_req_indices=local_to_global_req_indices,
+            local_token_indices=self._local_gather_idx[: local_batch.num_tokens],
             global_block_tables=self._block_tables.gather_block_tables(
                 global_batch.idx_mapping,
                 global_batch.num_reqs_after_padding,
