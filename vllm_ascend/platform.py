@@ -1697,7 +1697,20 @@ def _validate_routing_replay_config(vllm_config: VllmConfig) -> None:
     Its R3 data plane was removed here, so without this check the engine would
     start and silently return no ``routed_experts``.
     """
-    r3_requested = getattr(vllm_config.model_config, "enable_return_routed_experts", False)
+    # The switch moved between vLLM revisions: ``ModelConfig`` still carries it
+    # on the main lane, while the releases moved it to ``AuxOutputConfig``, where
+    # the engine sets it from ``--enable-return-routed-experts``. Reading only the
+    # first misses the request on a release lane, and the run then dies in the
+    # scheduler's aux-output connector -- which expects an auxiliary output per
+    # scheduled request and gets none -- instead of here.
+    r3_requested = bool(
+        getattr(vllm_config.model_config, "enable_return_routed_experts", False)
+        or getattr(
+            getattr(vllm_config, "aux_output_config", None),
+            "enable_return_routed_experts",
+            False,
+        )
+    )
     if r3_requested and not vllm_config.use_v2_model_runner:
         raise ValueError(
             "routed-experts capture (--enable-return-routed-experts) is only supported by the "
