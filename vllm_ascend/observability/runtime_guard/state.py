@@ -526,6 +526,11 @@ class RequestGuardStore:
                 return True
         return True
 
+    def list_req_ids(self) -> list[str]:
+        """All request ids currently held in the store (live + finished)."""
+        with self._lock:
+            return list(self._by_req)
+
     def list_reapable(self, *, current_wave: int) -> list[str]:
         """Finished reqs whose drain probe is clear (or past defer cap).
 

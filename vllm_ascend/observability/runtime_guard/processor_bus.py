@@ -23,7 +23,9 @@ from typing import Any
 from vllm_ascend.logger import init_logger_ascend
 from vllm_ascend.observability.runtime_config.dist import _runtime_config_sync_group_or_none
 from vllm_ascend.observability.runtime_guard.bus_worker import MergedBusRequest, MergedBusResult
+from vllm_ascend.observability.runtime_guard.io import RequestIoSnapshotManager
 from vllm_ascend.observability.runtime_guard.rank_gate import should_dump_kv_on_rank
+from vllm_ascend.observability.runtime_guard.state import RequestGuardStore
 
 logger = init_logger_ascend(__name__)
 
@@ -36,8 +38,7 @@ class RuntimeGuardBusMixin:
     Broadcast path (last-PP × TP only): submit merged due-broadcast(+due bcasts) to
     :class:`DueBitsBusWorker` at wave head; apply results in
     :meth:`_drain_merged_bus` at end-of-wave so the collective overlaps
-    forward. Non-last PP and ``tp_size<=1`` poll JSON locally. Missing worker
-    is lazily started (no sync fallback).
+    forward. Non-last PP and ``tp_size<=1`` poll JSON locally.
     """
 
     # Attributes provided by RuntimeGuardProcessor (mixin composition).
@@ -46,6 +47,8 @@ class RuntimeGuardBusMixin:
     detectors: Any
     report_writer: Any
     action_executor: Any
+    wave_tracker: Any
+    _kv_dump_jobs: list[dict[str, Any]]
     _deferred_kv_dump_jobs: list[dict[str, Any]]
     _bus_worker: Any
     _merged_bus_inflight: bool
@@ -56,6 +59,7 @@ class RuntimeGuardBusMixin:
     _claim_dump_jobs_to_deferred_via_tp: Any
     _drop_pending_dump_jobs: Any
     _refund_dropped_dump_arms: Any
+    needs_sample_phase_hooks: Any
 
     def _refresh_config_body(self) -> bool:
         # Wave-head: 1×due-broadcast([config_due, dump_due]) + per-lane bcasts.
@@ -64,8 +68,14 @@ class RuntimeGuardBusMixin:
         # same-wave detector arms stay queued until the next head (+1 wave).
         return self._wave_head_task_bus()
 
-    def _apply_config_cascade(self) -> None:
-        """Re-bind dependents after a successful wave-head config apply."""
+    def _apply_config_cascade(self, *, prev_needs_sample_hooks: bool) -> None:
+        """Re-bind dependents after a successful wave-head config apply.
+
+        When hot-reload turns all detectors off (``needs_sample_phase_hooks``
+        True→False), purge RequestGuardStore / wave stamps so finished reqs
+        are not left unreaped after sync stops calling mark_finished/reap.
+        Deferred KV dump jobs already claimed for D2H are kept.
+        """
         self.action_executor.apply_runtime_config()
         self.runtime_config.apply_ascend_log_level()
         self.detectors.apply_runtime_config()
@@ -74,6 +84,25 @@ class RuntimeGuardBusMixin:
         self.report_writer.max_output_token_ids = self.runtime_config.report_max_output_token_ids()
         self.report_writer.decode_token_ids = self.runtime_config.report_decode_token_ids()
         self.report_writer.max_per_req = self.runtime_config.report_max_per_req()
+        if prev_needs_sample_hooks and not self.needs_sample_phase_hooks():
+            self._purge_guard_state_after_detectors_off()
+
+    def _purge_guard_state_after_detectors_off(self) -> None:
+        """Drop detect-side per-req state after all detectors are disabled."""
+        store = RequestGuardStore.get()
+        ids = store.list_req_ids()
+        # Unclaimed auto arms will never fire from detectors; refund + drop.
+        # Jobs already moved to ``_deferred_kv_dump_jobs`` still D2H this wave.
+        if self._kv_dump_jobs:
+            self._drop_pending_dump_jobs()
+        if ids:
+            store.clear_many(ids, detectors=self.detectors)
+            self.wave_tracker.discard_many(ids)
+        RequestIoSnapshotManager.get().clear_wave_cache()
+        logger.info(
+            "[runtime_guard] purged %d req state(s) after all detectors disabled",
+            len(ids),
+        )
 
     def _wave_head_task_bus(self) -> bool:
         """Wave-head config+dump gate. Returns whether config content changed."""
@@ -85,6 +114,7 @@ class RuntimeGuardBusMixin:
         # Non-last-PP / tp_size<=1 / reload off: local config; auto dump via TP claim.
         changed = False
         if cfg.hot_reload_enabled:
+            prev_hooks = bool(self.needs_sample_phase_hooks())
             try:
                 changed = cfg.sync_runtime_config()
             except Exception as exc:
@@ -94,7 +124,7 @@ class RuntimeGuardBusMixin:
                 )
                 changed = False
             if changed:
-                self._apply_config_cascade()
+                self._apply_config_cascade(prev_needs_sample_hooks=prev_hooks)
         # Previous-wave auto jobs: claim via TP bus into deferred; D2H at
         # end-of-wave (same path as broadcast merged bus).
         self._claim_dump_jobs_to_deferred_via_tp()
@@ -242,6 +272,7 @@ class RuntimeGuardBusMixin:
         cfg = self.runtime_config
         changed = False
         if result.config_due and isinstance(result.config_payload, dict):
+            prev_hooks = bool(self.needs_sample_phase_hooks())
             try:
                 changed = cfg.apply_config_sync_payload(
                     result.config_payload,
@@ -249,7 +280,7 @@ class RuntimeGuardBusMixin:
                     leader_changed=result.leader_changed,
                 )
                 if changed:
-                    self._apply_config_cascade()
+                    self._apply_config_cascade(prev_needs_sample_hooks=prev_hooks)
             except Exception as exc:
                 logger.warning(
                     "[runtime_guard sync] config apply soft-failed error=%s",

@@ -135,6 +135,7 @@ def test_async_merged_bus_submit_then_drain_applies_config():
         _kv_dump_jobs=[],
         _deferred_kv_dump_jobs=[],
         _apply_config_cascade=MagicMock(),
+        needs_sample_phase_hooks=lambda: False,
         _bus_worker=worker,
         _merged_bus_inflight=False,
         _pending_merged_bus_dump_jobs=[],

@@ -1185,6 +1185,7 @@ def test_v18f_merged_bus_idle_one_bcast_zero_obj():
         _kv_dump_jobs=[],
         _deferred_kv_dump_jobs=[],
         _apply_config_cascade=MagicMock(),
+        needs_sample_phase_hooks=lambda: False,
         _refund_dropped_dump_arms=MagicMock(),
         _drop_pending_dump_jobs=MagicMock(),
     )
@@ -1241,6 +1242,7 @@ def test_v18g_merged_bus_both_lanes_two_bcasts():
         _kv_dump_jobs=list(jobs),
         _deferred_kv_dump_jobs=[],
         _apply_config_cascade=MagicMock(),
+        needs_sample_phase_hooks=lambda: False,
         _refund_dropped_dump_arms=MagicMock(),
         _drop_pending_dump_jobs=MagicMock(),
     )
@@ -2256,5 +2258,90 @@ def test_v29b_finished_index_survives_reuse_cycle():
         assert store.list_reapable(current_wave=5) == ["r1"]
         store.clear("r1")
         assert store.list_reapable(current_wave=9) == []
+    finally:
+        RequestGuardStore.reset_for_tests()
+
+
+# ------------------------------------------------- V30 (purge on all detectors off)
+
+
+def test_v30_cascade_purges_store_when_all_detectors_disabled():
+    """Hot-reload True→False on needs_sample_phase_hooks clears Store; keeps deferred dumps."""
+    from vllm_ascend.observability.runtime_guard.processor_bus import RuntimeGuardBusMixin
+    from vllm_ascend.observability.runtime_guard.state import RequestGuardStore, WaveTracker
+
+    RequestGuardStore.reset_for_tests()
+    try:
+        store = RequestGuardStore.get()
+        store.get_or_create("r1")
+        store.append_output_ids("r1", [1, 2])
+        store.mark_finished(["r2"], wave=1)
+
+        wt = WaveTracker()
+        wt.advance(allow_manual_dump=True)
+        wt.record_sample_waves(["r1", "r2"])
+
+        p = _bare_processor()
+        p.wave_tracker = wt
+        p.detectors = MagicMock()
+        p.action_executor = MagicMock()
+        p.report_writer = MagicMock()
+        p.runtime_config = MagicMock()
+        p.runtime_config.needs_sample_phase_hooks.return_value = False
+        p.runtime_config.report_save_sensitive_info.return_value = False
+        p.runtime_config.report_max_prompt_token_ids.return_value = 0
+        p.runtime_config.report_max_output_token_ids.return_value = 0
+        p.runtime_config.report_decode_token_ids.return_value = False
+        p.runtime_config.report_max_per_req.return_value = 0
+        p.quota = MagicMock()
+        p._kv_dump_jobs = [{"req_id": "r1", "consume_quota": True, "arm_id": "a1"}]
+        p._deferred_kv_dump_jobs = [{"req_id": "kept", "arm_id": "a0"}]
+        p.needs_sample_phase_hooks = p.runtime_config.needs_sample_phase_hooks  # type: ignore[method-assign]
+
+        with patch(
+            "vllm_ascend.observability.runtime_guard.processor_dump.runner_tp_rank",
+            return_value=0,
+        ):
+            RuntimeGuardBusMixin._apply_config_cascade(p, prev_needs_sample_hooks=True)
+
+        assert store.list_req_ids() == []
+        assert wt._sample_waves == {}
+        assert p._kv_dump_jobs == []
+        assert p._deferred_kv_dump_jobs == [{"req_id": "kept", "arm_id": "a0"}]
+        p.quota.refund.assert_called_once_with(consume_quota=True)
+        p.detectors.clear_finished.assert_any_call("r1")
+    finally:
+        RequestGuardStore.reset_for_tests()
+
+
+def test_v30b_cascade_skips_purge_when_hooks_stay_on():
+    from vllm_ascend.observability.runtime_guard.processor_bus import RuntimeGuardBusMixin
+    from vllm_ascend.observability.runtime_guard.state import RequestGuardStore
+
+    RequestGuardStore.reset_for_tests()
+    try:
+        store = RequestGuardStore.get()
+        store.get_or_create("r1")
+
+        p = _bare_processor()
+        p.wave_tracker = MagicMock()
+        p.detectors = MagicMock()
+        p.action_executor = MagicMock()
+        p.report_writer = MagicMock()
+        p.runtime_config = MagicMock()
+        p.runtime_config.needs_sample_phase_hooks.return_value = True
+        p.runtime_config.report_save_sensitive_info.return_value = False
+        p.runtime_config.report_max_prompt_token_ids.return_value = 0
+        p.runtime_config.report_max_output_token_ids.return_value = 0
+        p.runtime_config.report_decode_token_ids.return_value = False
+        p.runtime_config.report_max_per_req.return_value = 0
+        p._kv_dump_jobs = [{"req_id": "r1"}]
+        p.needs_sample_phase_hooks = p.runtime_config.needs_sample_phase_hooks  # type: ignore[method-assign]
+
+        RuntimeGuardBusMixin._apply_config_cascade(p, prev_needs_sample_hooks=True)
+
+        assert store.list_req_ids() == ["r1"]
+        assert p._kv_dump_jobs == [{"req_id": "r1"}]
+        p.wave_tracker.discard_many.assert_not_called()
     finally:
         RequestGuardStore.reset_for_tests()
