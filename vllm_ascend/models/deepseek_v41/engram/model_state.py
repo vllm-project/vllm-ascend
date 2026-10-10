@@ -133,9 +133,7 @@ class EngramModelState(AscendModelState):
             from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
 
             specs = [group.kv_cache_spec for group in kv_cache_config.kv_cache_groups]
-            windows = [
-                int(getattr(spec, "prefix_replay_tokens", getattr(spec, "sliding_window", 0))) for spec in specs
-            ]
+            windows = [int(getattr(spec, "prefix_replay_tokens", getattr(spec, "sliding_window", 0))) for spec in specs]
             self._replay_groups = (
                 max(windows, default=0),
                 torch.tensor(

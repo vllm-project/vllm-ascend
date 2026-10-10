@@ -26,9 +26,9 @@ import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
+from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_config import get_ascend_config
