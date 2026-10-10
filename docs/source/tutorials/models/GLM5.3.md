@@ -885,8 +885,8 @@ Run the four commands in Section 5.2.3 in separate terminals. Keep the
 master processes running while the other nodes join; start both nodes of
 each group before waiting for the group to become healthy.
 
-After the Prefill API on P0:8000 and all sixteen Decode APIs answer
-`curl http://<node_ip>:<port>/v1/models`, start the
+After the Prefill API on P0:8000 and all sixteen Decode APIs respond
+to `GET /v1/models`, start the
 [PD load-balancing proxy](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
 from the matching checkout on a separate host that can reach all P/D
 API endpoints. The proxy listens on port 8000; using a separate host
