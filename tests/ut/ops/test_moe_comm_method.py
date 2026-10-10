@@ -128,6 +128,93 @@ class TestMoECommMethod(TestBase):
         self.assertEqual(call_args.kwargs["max_recv_token_num"], 1024)
         mock_warning_once.assert_not_called()
 
+    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.logger.warning_once")
+    def test_fused_mc2_capacity_covers_the_prefill_load(self, mock_warning_once):
+        # GLM-5.2 w4a8 on A3/EP16 with max_num_batched_tokens=8192 and tp=4 hands
+        # 2048 tokens per rank to the operator, topk is 8: 2048 * 8 * 8 = 131072 is
+        # needed while the default configuration only provides 65536.
+        self.mock_ascend_config.mega_moe_max_tokens = 65536
+        self.moe_config.experts_per_token = 8
+        comm_impl = self._make_fused_mc2_comm_for_buffer_init()
+        comm_impl._prefill_tokens_per_rank = 2048
+
+        self.assertEqual(comm_impl._fused_mc2_capacity(), 131072)
+        mock_warning_once.assert_called_once()
+
+    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.logger.warning_once")
+    def test_fused_mc2_capacity_keeps_sufficient_configured_value(self, mock_warning_once):
+        self.mock_ascend_config.mega_moe_max_tokens = 65536
+        self.moe_config.experts_per_token = 8
+        comm_impl = self._make_fused_mc2_comm_for_buffer_init()
+        comm_impl._prefill_tokens_per_rank = 1024
+
+        self.assertEqual(comm_impl._fused_mc2_capacity(), 65536)
+        mock_warning_once.assert_not_called()
+
+    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.logger.warning_once")
+    def test_fused_mc2_capacity_is_rank_invariant(self, mock_warning_once):
+        # The value has to match on every EP rank, so it must not depend on the
+        # runtime expert load of the rank that computes it.
+        self.mock_ascend_config.mega_moe_max_tokens = 65536
+        self.moe_config.experts_per_token = 8
+        comm_impl = self._make_fused_mc2_comm_for_buffer_init()
+        comm_impl._prefill_tokens_per_rank = 2048
+
+        comm_impl.expert_token_nums = torch.full((8,), 31711, dtype=torch.int32)
+        hot_rank_capacity = comm_impl._fused_mc2_capacity()
+        comm_impl.expert_token_nums = torch.zeros((8,), dtype=torch.int32)
+        idle_rank_capacity = comm_impl._fused_mc2_capacity()
+
+        self.assertEqual(hot_rank_capacity, 131072)
+        self.assertEqual(idle_rank_capacity, 131072)
+
+    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.logger.warning_once")
+    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_mc2_group")
+    def test_mega_moe_symm_buffer_follows_the_fused_mc2_capacity(self, mock_get_mc2_group, mock_warning_once):
+        # mega_moe_max_tokens (512) is far below the prefill requirement
+        # (2048 tokens per rank * topk 2 * imbalance 8 = 32768), so the P-node peer
+        # buffer follows the same capacity the operator is sized with, clamped to
+        # the absolute safe upper bound (128 * 8 * min(2, 64 // 8) = 2048).
+        self.mock_ascend_config.mega_moe_max_tokens = 512
+        self.moe_config.num_experts = 64
+        self.moe_config.experts_per_token = 2
+        mock_mc2_group = MagicMock()
+        mock_mc2_group.device_group = "mc2_group"
+        mock_get_mc2_group.return_value = mock_mc2_group
+        comm_impl = self._make_fused_mc2_comm_for_buffer_init()
+        comm_impl._prefill_tokens_per_rank = 2048
+
+        comm_impl._init_mega_moe_symm_buffer(is_decode_only_node=False)
+
+        call_args = comm_impl.get_symm_buffer_for_mega_moe.call_args
+        self.assertEqual(call_args.kwargs["max_recv_token_num"], 2048)
+
+    def test_verify_fused_mc2_no_truncation_skips_sync_when_provably_safe(self):
+        comm_impl = self._make_fused_mc2_comm_for_buffer_init()
+        comm_impl.expert_token_nums = MagicMock()
+
+        # 2 tokens * topk 2 * ep_world_size 8 = 32 < 1000000, so no sync is needed.
+        comm_impl._verify_fused_mc2_no_truncation(2, 2, 1000000)
+
+        comm_impl.expert_token_nums.sum.assert_not_called()
+
+    def test_verify_fused_mc2_no_truncation_raises_on_overflow(self):
+        comm_impl = self._make_fused_mc2_comm_for_buffer_init()
+        comm_impl.expert_token_nums = torch.full((8,), 4096, dtype=torch.int32)
+
+        # 2048 tokens * topk 2 * ep_world_size 8 = 32768 is not provably safe, and
+        # the 32768 received tokens reach the capacity, so this rank truncated.
+        with self.assertRaisesRegex(RuntimeError, "truncated its work"):
+            comm_impl._verify_fused_mc2_no_truncation(2048, 2, 32768)
+
+    def test_verify_fused_mc2_no_truncation_accepts_within_capacity(self):
+        comm_impl = self._make_fused_mc2_comm_for_buffer_init()
+        comm_impl.expert_token_nums = torch.ones((8,), dtype=torch.int32)
+
+        # Not provably safe, so the device sync runs, but the 8 received tokens
+        # stay below the capacity.
+        comm_impl._verify_fused_mc2_no_truncation(64, 8, 1024)
+
     def test_apply_cann_mega_moe_passes_oai_kwargs_when_supported(self):
         captured = {}
 
