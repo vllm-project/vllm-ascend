@@ -550,10 +550,20 @@ class FusedMC2CommImpl(MoECommMethod):
                 shared_kwargs["shared_weight1_type"] = shared_weight_type
                 shared_kwargs["shared_weight2_type"] = shared_weight_type
 
+        topk_weights = fused_experts_input.topk_weights.to(torch.float32)
+        if weights.shared_w1 is not None:
+            # When the shared expert runs inside MegaMoe, the operator output
+            # contains routed + shared combined. The runner's output-side
+            # routed_scaling_factor would scale the shared contribution too,
+            # so fold the factor into the topk weights instead; the runner
+            # skips its own scaling for the fused call (see FusedMoE.forward).
+            routed_scaling_factor = getattr(layer, "routed_scaling_factor", None)
+            if routed_scaling_factor is not None and routed_scaling_factor != 1.0:
+                topk_weights = topk_weights * routed_scaling_factor
         out, expert_tokens = self.mega_moe(
             fused_experts_input.hidden_states,
             fused_experts_input.topk_ids.to(torch.int32),
-            fused_experts_input.topk_weights.to(torch.float32),
+            topk_weights,
             weight1,
             weight2,
             self.mega_moe_symm_buffer,

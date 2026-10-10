@@ -230,7 +230,14 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         # See note above re: the two all-reduce points.
         shared_output = self._maybe_reduce_shared_expert_output(shared_output, fused_output_is_reduced)
 
-        shared_output, fused_output = self._maybe_apply_routed_scale_to_output(shared_output, fused_output)
+        if self._megamoe_shared_expert_fused:
+            # MegaMoe folded routed_scaling_factor into the topk weights for
+            # the fused shared-expert call (see FusedMC2CommImpl), so its
+            # output already is the final MoE result. Scaling here would
+            # wrongly scale the shared-expert contribution too.
+            pass
+        else:
+            shared_output, fused_output = self._maybe_apply_routed_scale_to_output(shared_output, fused_output)
 
         # Apply output transform (e.g. latent -> full dim)
         fused_output = self.apply_routed_output_transform(fused_output)
