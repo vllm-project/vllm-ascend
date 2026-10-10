@@ -245,7 +245,28 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
             # whose token count exceeds the cumulative query length. Keep the
             # mapping refresh above when unifying metadata construction.
             if cudagraph_runtime_mode == CUDAGraphMode.FULL and self.attn_architecture in ("MLA", "GQA"):
-                return attn_metadata, slot_mappings
+                pcp_manager = getattr(self, "pcp_manager", None)
+                if pcp_manager is None or not pcp_manager.is_decode_sharded:
+                    return attn_metadata, slot_mappings
+                # Target metadata describes rank-local verification queries.
+                # The replicated draft graph needs the global query width,
+                # including dummy requests which own its graph padding.
+                query_width = num_tokens_padded // num_reqs_padded
+                query_start_loc_np = np.arange(num_reqs_padded + 1, dtype=np.int32) * query_width
+                seq_lens_cpu = torch.zeros_like(input_batch.seq_lens_cpu_upper_bound[:num_reqs_padded])
+                seq_lens_cpu[: input_batch.num_reqs].copy_(input_batch.seq_lens_cpu_upper_bound[: input_batch.num_reqs])
+                attn_metadata = self._build_attn_metadata(
+                    num_reqs=num_reqs_padded,
+                    batch_desc=BatchExecutionDescriptor(
+                        cg_mode=cudagraph_runtime_mode,
+                        num_tokens=num_tokens_padded,
+                        num_reqs=num_reqs_padded,
+                    ),
+                    query_start_loc_np=query_start_loc_np,
+                    seq_lens_cpu_upper_bound=seq_lens_cpu,
+                    step=0,
+                )
+                return attn_metadata, build_slot_mappings_by_layer(slot_mappings_tensor, self.kv_cache_config)
 
         slot_mappings = build_slot_mappings_by_layer(
             slot_mappings_tensor,
@@ -312,6 +333,27 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         we need to cache input_batch, so we can use it later in
         generate_draft.
         """
+        if (
+            self.replicated_pcp
+            and self.pcp_manager is not None
+            and self.pcp_manager.is_decode_sharded
+            and not dummy_run
+            and 0 < input_batch.num_tokens < input_batch.num_tokens_after_padding
+        ):
+            # PCP padding belongs to the rank-local target layout. The draft
+            # runs the restored global batch and chooses its own graph padding;
+            # retaining target padding breaks eager FIA when a draft graph is
+            # unavailable (e.g. 12 global tokens restored into 16 padded rows).
+            input_batch = copy(input_batch)
+            input_batch.num_tokens_after_padding = input_batch.num_tokens
+            input_batch.query_start_loc = input_batch.query_start_loc[: input_batch.num_reqs + 1]
+            input_batch.query_start_loc_np = input_batch.query_start_loc_np[: input_batch.num_reqs + 1]
+            input_batch.input_ids = input_batch.input_ids[: input_batch.num_tokens]
+            input_batch.positions = input_batch.positions[: input_batch.num_tokens]
+            input_batch.is_padding = input_batch.is_padding[: input_batch.num_tokens]
+            last_hidden_states = last_hidden_states[: input_batch.num_tokens]
+            if aux_hidden_states is not None:
+                aux_hidden_states = [states[: input_batch.num_tokens] for states in aux_hidden_states]
         self.input_batch = input_batch
         # Replicated drafts use global tokens, unlike the PCP-local target.
         # Every DP rank must take the draft sync, including decode and idle ranks.
