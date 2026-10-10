@@ -1,9 +1,27 @@
 import torch
 import torch.nn.functional as F
+from vllm.config import get_current_vllm_config
 from vllm.model_executor.models.qwen3_dflash import (
     DFlashQwen3ForCausalLM,
     DFlashQwen3Model,
 )
+from vllm.triton_utils import HAS_TRITON
+
+from vllm_ascend.ops.rotary_embedding import AscendRotaryEmbedding
+
+# Bound the extra live native norm outputs during small context updates.
+_MAX_STACKED_CONTEXT_NORM_BYTES = 4 * 1024 * 1024
+
+_orig_build_fused_kv_buffers = DFlashQwen3Model._build_fused_kv_buffers
+
+
+def _build_fused_kv_buffers(self):
+    _orig_build_fused_kv_buffers(self)
+    self._use_q_only_context_rope = (
+        HAS_TRITON
+        and get_current_vllm_config().use_v2_model_runner
+        and type(self.layers[0].self_attn.rotary_emb) is AscendRotaryEmbedding
+    )
 
 
 def precompute_and_store_context_kv(
@@ -12,7 +30,7 @@ def precompute_and_store_context_kv(
     context_positions: torch.Tensor,
     context_slot_mapping: torch.Tensor | None = None,
 ) -> None:
-    if not hasattr(self, "_num_attn_layers"):
+    if not hasattr(self, "_use_q_only_context_rope"):
         self._build_fused_kv_buffers()
 
     num_ctx = context_states.shape[0]
@@ -32,18 +50,27 @@ def precompute_and_store_context_kv(
     all_v = all_kv[1]  # [L, num_ctx, nkv, hd], contiguous
 
     # --- Per-layer RMSNorm K (3D: [num_ctx, nkv, hd] per layer) ---
-    all_k_normed = torch.empty_like(all_k)
-    for i in range(L):
-        k_norm_layer = self.layers[i].self_attn.k_norm
-        all_k_normed[i] = k_norm_layer(all_k[i])
+    if self._use_q_only_context_rope and all_k.numel() * all_k.element_size() <= _MAX_STACKED_CONTEXT_NORM_BYTES:
+        # Retain native norm arithmetic while replacing six small output copies
+        # with one stack. Large prefills retain bounded temporary storage.
+        all_k_normed = torch.stack([self.layers[i].self_attn.k_norm(all_k[i]) for i in range(L)])
+    else:
+        all_k_normed = torch.empty_like(all_k)
+        for i in range(L):
+            k_norm_layer = self.layers[i].self_attn.k_norm
+            all_k_normed[i] = k_norm_layer(all_k[i])
 
     # --- Fused RoPE across all layers ---
     # View as [L * num_ctx, kv] so RoPE sees one big batch (no copy).
     # In-place RoPE: pass K as the "query" arg with key=None.
     all_k_flat = all_k_normed.view(L * num_ctx, kv)
     positions_repeated = context_positions.repeat(L)
-    tmpv = all_k_flat.clone()
-    self.layers[0].self_attn.rotary_emb(positions_repeated, all_k_flat, tmpv)
+    if self._use_q_only_context_rope:
+        # Context has only K. The cloned second RoPE input was discarded.
+        all_k_flat, _ = self.layers[0].self_attn.rotary_emb(positions_repeated, all_k_flat, None)
+    else:
+        tmpv = all_k_flat.clone()
+        self.layers[0].self_attn.rotary_emb(positions_repeated, all_k_flat, tmpv)
 
     if context_slot_mapping is None:
         return
@@ -67,6 +94,7 @@ def precompute_and_store_context_kv(
 
 
 DFlashQwen3Model.precompute_and_store_context_kv = precompute_and_store_context_kv
+DFlashQwen3Model._build_fused_kv_buffers = _build_fused_kv_buffers
 
 _orig_read_mask_embedding = DFlashQwen3ForCausalLM._read_mask_embedding
 

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable, Hashable, Sequence
+from collections.abc import Callable, Hashable, Iterable, Iterator, Sequence
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, replace
 from typing import Any, Protocol
@@ -148,15 +148,20 @@ class UpdatableGraph(torch.npu.NPUGraph):
         self,
         source: ParamSource,
     ) -> tuple[GraphUpdateTask, ...]:
+        return tuple(self.iter_resolved_tasks(source))
+
+    def iter_resolved_tasks(self, source: ParamSource) -> Iterator[GraphUpdateTask]:
+        # Validate every provider before releasing any captured task, then bind
+        # each task immediately before its update instead of building a tuple.
         params_by_provider = {provider: source.get(provider) for provider in self.provider_sizes}
         for provider, size in self.provider_sizes.items():
             assert len(params_by_provider[provider]) == size
-        return tuple(task.bind(params_by_provider[task.provider][task.provider_index]) for task in self.tasks)
+        return (task.bind(params_by_provider[task.provider][task.provider_index]) for task in self.tasks)
 
     def update(
         self,
         update_stream,
-        resolved_tasks: tuple[GraphUpdateTask, ...],
+        resolved_tasks: Iterable[GraphUpdateTask],
     ) -> None:
         logger.debug_once("Updating host-side attention metadata with UpdatableGraph.")
         with torch.npu.stream(update_stream):

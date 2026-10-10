@@ -104,6 +104,7 @@ from vllm_ascend.worker.v2.attn_utils import (
 )
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
+from vllm_ascend.worker.v2.input_staging import BatchInputStaging
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.pp_transport import (
@@ -240,6 +241,7 @@ class NPUModelRunner(GPUModelRunner):
             max_num_tokens=self.max_num_tokens,
             device=self.device,
         )
+        self.batch_input_staging = BatchInputStaging(self.max_num_reqs, self.device)
 
         # Pinned D2H staging for corrected device state after spec rejection.
         # The authoritative host state is the shared NumPy/torch RequestState view.
@@ -660,11 +662,15 @@ class NPUModelRunner(GPUModelRunner):
 
         req_ids = batch_req_state.req_ids
 
-        self._update_seq_lens_cpu(scheduler_output, req_ids)
+        # Batch layout and H2D submission do not consume corrected CPU lengths.
+        # Preserve early synchronization for partitioned/adaptive paths, which
+        # may inspect request state while constructing their layout.
+        defer_cpu_lengths = self.adaptive_verification is None and not self.use_pp and self.pcp_manager is None
+        if not defer_cpu_lengths:
+            self._update_seq_lens_cpu(scheduler_output, req_ids)
 
         num_scheduled_tokens_np = batch_req_state.num_scheduled_tokens
         idx_mapping_np = batch_req_state.idx_mapping_np
-        idx_mapping = async_copy_to_gpu(idx_mapping_np, device=self.device)
         num_reqs = len(req_ids)
 
         num_valid_tokens = num_scheduled_tokens_np
@@ -676,15 +682,6 @@ class NPUModelRunner(GPUModelRunner):
                 ],
                 dtype=np.int32,
             )
-        attn_state = build_attn_state(
-            self.vllm_config,
-            self.input_buffers.seq_lens_np,
-            num_reqs,
-            num_scheduled_tokens_np,
-            num_valid_tokens,
-            kv_cache_config=self.kv_cache_config,
-        )
-
         # Get the number of draft tokens for each request.
         draft_tokens = scheduler_output.scheduled_spec_decode_tokens
         num_draft_tokens_per_req = None
@@ -694,7 +691,6 @@ class NPUModelRunner(GPUModelRunner):
             total_num_logits = num_reqs
             cu_num_logits_np = np.arange(num_reqs + 1, dtype=np.int32)
             cu_num_logits = torch.arange(num_reqs + 1, device=self.device, dtype=torch.int32)
-            expanded_idx_mapping = idx_mapping
             expanded_local_pos = torch.zeros(num_reqs, dtype=torch.int32, device=self.device)
         else:
             num_draft_tokens_per_req = np.fromiter(
@@ -709,7 +705,6 @@ class NPUModelRunner(GPUModelRunner):
             cu_num_logits_np = np.empty(num_reqs + 1, dtype=np.int32)
             cu_num_logits_np[0] = 0
             np.cumsum(num_logits, out=cu_num_logits_np[1:])
-            cu_num_logits = async_copy_to_gpu(cu_num_logits_np, device=self.device)
 
         adaptive_verification_manager = self.adaptive_verification
         adaptive_verification_active = (
@@ -745,7 +740,17 @@ class NPUModelRunner(GPUModelRunner):
             )
 
         query_start_loc = self.input_buffers.query_start_loc
-        async_copy_to_gpu(query_start_loc_np, out=query_start_loc)
+        staging = getattr(self, "batch_input_staging", None)
+        staged = None
+        if staging is not None and draft_tokens and defer_cpu_lengths and getattr(batch_desc, "num_ubatches", 1) == 1:
+            staged = staging.copy(idx_mapping_np, cu_num_logits_np, query_start_loc_np, query_start_loc)
+        if staged is None:
+            idx_mapping = async_copy_to_gpu(idx_mapping_np, device=self.device)
+            if draft_tokens:
+                cu_num_logits = async_copy_to_gpu(cu_num_logits_np, device=self.device)
+            async_copy_to_gpu(query_start_loc_np, out=query_start_loc)
+        else:
+            idx_mapping, cu_num_logits = staged
 
         if adaptive_verification_active:
             cu_num_logits, query_start_loc, total_num_draft_tokens = adaptive_verification_manager.reallocate_drafts(
@@ -774,9 +779,21 @@ class NPUModelRunner(GPUModelRunner):
             expanded_idx_mapping, expanded_local_pos = expand_idx_mapping(
                 idx_mapping, total_num_logits, cu_num_logits, self.decode_query_len
             )
+        else:
+            expanded_idx_mapping = idx_mapping
 
         query_start_loc_np = query_start_loc_np[: num_reqs_padded + 1]
         query_start_loc = query_start_loc[: num_reqs_padded + 1]
+        if defer_cpu_lengths:
+            self._update_seq_lens_cpu(scheduler_output, req_ids)
+        attn_state = build_attn_state(
+            self.vllm_config,
+            self.input_buffers.seq_lens_np,
+            num_reqs,
+            num_scheduled_tokens_np,
+            num_valid_tokens,
+            kv_cache_config=self.kv_cache_config,
+        )
         self.eplb.set_batch_phase(batch_req_state.has_prefill)
 
         # Graph dispatch may classify a PD prompt-tail step as decode, but

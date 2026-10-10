@@ -1061,6 +1061,38 @@ def test_prepare_inputs_common_path():
     np.testing.assert_array_equal(runner.input_buffers.seq_lens_cpu[:2], np.array([3, 4], dtype=np.int32))
 
 
+def test_input_staging_submits_layout_before_waiting_for_corrected_lengths():
+    runner, output, batch, desc = _prepare_inputs_runner(draft=True, speculator=True)
+    calls = []
+
+    def stage(mapping, logits, query, query_out):
+        calls.append("stage")
+        query_out.copy_(torch.from_numpy(query))
+        return torch.from_numpy(mapping.copy()), torch.from_numpy(logits.copy())
+
+    runner.batch_input_staging = SimpleNamespace(copy=MagicMock(side_effect=stage))
+    runner.num_computed_tokens_event.synchronize.side_effect = lambda: calls.append("length_wait")
+    _run_prepare_inputs(runner, output, batch, desc)
+    assert calls == ["stage", "length_wait"]
+    runner.batch_input_staging.copy.assert_called_once()
+    assert runner.input_buffers.seq_lens_cpu[:2].tolist() == [5, 4]
+
+
+@pytest.mark.parametrize("partition", ["pp", "pcp", "ubatch"])
+def test_input_staging_is_bypassed_for_partitioned_execution(partition):
+    runner, output, batch, desc = _prepare_inputs_runner(draft=True, speculator=True)
+    runner.batch_input_staging = SimpleNamespace(copy=MagicMock())
+    if partition == "pp":
+        runner.use_pp = True
+    elif partition == "pcp":
+        runner.pcp_manager = SimpleNamespace(get_global_graph_num_reqs=lambda _: None)
+    else:
+        desc.num_ubatches = 2
+    _run_prepare_inputs(runner, output, batch, desc)
+    runner.batch_input_staging.copy.assert_not_called()
+    runner.num_computed_tokens_event.synchronize.assert_called_once_with()
+
+
 @pytest.mark.parametrize("num_spec_tokens", [0, 1, 5])
 @pytest.mark.parametrize("full_cg", [False, True])
 def test_pd_tail_input_survives_decode_reclassification(num_spec_tokens, full_cg):
