@@ -298,6 +298,8 @@ class NPUWorker(WorkerBase):
         if cleanup_enabled:
             self.sleep_wakeup_manager.wakeup(tags)
 
+        self.synchronize_device()
+
     def _check_weight_transfer_engine(self) -> None:
         if self.weight_transfer_engine is None:
             raise RuntimeError(
@@ -1260,6 +1262,18 @@ class NPUWorker(WorkerBase):
 
     def reset_encoder_cache(self) -> None:
         self.model_runner.reset_encoder_cache()
+
+    def synchronize_device(self) -> None:
+        """Block until all in-flight NPU work has completed.
+
+        The engine reaches this wait through ``collective_rpc("synchronize_device")``
+        when a pause completes (vLLM #52914), and ``wake_up`` ends with it so a
+        caller may start same-device work -- an RLHF weight sync, say -- as soon as
+        wake-up returns. It is defined on the worker rather than inherited because
+        ``wake_up`` calls it unconditionally, while vLLM releases predating #52914
+        (v0.28.0, for one) define no ``WorkerBase.synchronize_device``.
+        """
+        torch.npu.synchronize()
 
     def execute_dummy_batch(self) -> None:
         self.log_memory_stats()

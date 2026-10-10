@@ -581,9 +581,10 @@ class TestNPUWorker(TestBase):
         mock_allocator_class.get_instance.return_value.sleep.assert_called_once_with(offload_tags=("weights",))
         self.assertEqual(mock_mem_get_info.call_count, 2)
 
+    @patch("vllm_ascend.worker.worker.NPUWorker.synchronize_device")
     @patch("vllm_ascend.worker.worker.CaMemAllocator")
     @patch("vllm_ascend.worker.worker.get_ascend_config")
-    def test_wake_up_mode_enabled(self, mock_get_config, mock_allocator_class):
+    def test_wake_up_mode_enabled(self, mock_get_config, mock_allocator_class, mock_synchronize_device):
         mock_config = MagicMock()
         mock_config.weight_nz_mode = 0
         mock_config.rl_config.enabled = True
@@ -621,12 +622,16 @@ class TestNPUWorker(TestBase):
             worker.sleep_wakeup_manager.wakeup.assert_called_once_with(["test_tag"])
             mock_model_runner.post_kv_cache_wake_up.assert_not_called()
 
+            mock_synchronize_device.assert_called_once_with()
+
             worker.wake_up(tags=["kv_cache"])
             mock_model_runner.post_kv_cache_wake_up.assert_not_called()
+            self.assertEqual(mock_synchronize_device.call_count, 2)
 
+    @patch("vllm_ascend.worker.worker.NPUWorker.synchronize_device")
     @patch("vllm_ascend.worker.worker.CaMemAllocator")
     @patch("vllm_ascend.worker.worker.get_ascend_config")
-    def test_wake_up_without_post_kv_cache_hook(self, mock_get_config, mock_allocator_class):
+    def test_wake_up_without_post_kv_cache_hook(self, mock_get_config, mock_allocator_class, mock_synchronize_device):
         from vllm_ascend.worker.worker import NPUWorker
 
         mock_get_config.return_value = SimpleNamespace(
@@ -647,6 +652,38 @@ class TestNPUWorker(TestBase):
         worker.wake_up(tags=["kv_cache"])
 
         mock_allocator.wake_up.assert_called_once_with(tags=["kv_cache"])
+        mock_synchronize_device.assert_called_once_with()
+
+    def test_synchronize_device_waits_for_npu_work(self):
+        """The barrier must delegate to the NPU synchronize primitive.
+
+        ``torch.npu`` is swapped out whole rather than patching its nested
+        ``synchronize``: on some torch_npu builds ``torch.npu`` resolves to a
+        lazily built proxy, so a nested patch never reaches the call site and the
+        assertion silently sees zero calls.
+        """
+        from vllm_ascend.worker.worker import NPUWorker
+
+        calls: list[str] = []
+        fake_npu = SimpleNamespace(synchronize=lambda: calls.append("sync"))
+
+        worker = NPUWorker.__new__(NPUWorker)
+        with patch.object(torch, "npu", fake_npu, create=True):
+            worker.synchronize_device()
+
+        self.assertEqual(calls, ["sync"])
+
+    def test_synchronize_device_is_defined_on_the_npu_worker(self):
+        """Ascend must carry the barrier itself on vLLM releases without it.
+
+        vLLM #52914 added ``WorkerBase.synchronize_device``, but ``wake_up`` calls
+        the barrier unconditionally while vLLM releases predating #52914 (v0.28.0
+        among them) define no ``WorkerBase.synchronize_device``, so the wake path
+        cannot be left to inheritance.
+        """
+        from vllm_ascend.worker.worker import NPUWorker
+
+        self.assertIn("synchronize_device", NPUWorker.__dict__)
 
     @staticmethod
     def _make_unquantized_moe_model():
@@ -661,9 +698,12 @@ class TestNPUWorker(TestBase):
         routed_experts.w2_weight.weight_loader = MagicMock()
         return model
 
+    @patch("vllm_ascend.worker.worker.NPUWorker.synchronize_device")
     @patch("vllm_ascend.worker.worker.CaMemAllocator")
     @patch("vllm_ascend.worker.worker.get_ascend_config")
-    def test_wake_up_does_not_transpose_moe_weights(self, mock_get_config, mock_allocator_class):
+    def test_wake_up_does_not_transpose_moe_weights(
+        self, mock_get_config, mock_allocator_class, mock_synchronize_device
+    ):
         """Level-2 reload uses reload_weights; wake_up must not transpose MoE layout."""
         from vllm_ascend.worker.worker import NPUWorker
 
@@ -705,6 +745,7 @@ class TestNPUWorker(TestBase):
             self.assertIs(routed_experts.w13_weight.weight_loader, w13_loader)
             self.assertIs(routed_experts.w2_weight.weight_loader, w2_loader)
         mock_allocator_class.get_instance.return_value.wake_up.assert_called_once_with(tags=["weights"])
+        mock_synchronize_device.assert_called_once_with()
 
     @patch("vllm_ascend.worker.worker.current_platform")
     @patch("vllm_ascend.worker.worker.MemorySnapshot")
