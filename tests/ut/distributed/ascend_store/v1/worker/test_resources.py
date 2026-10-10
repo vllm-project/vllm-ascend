@@ -1,0 +1,490 @@
+"""Registration rollback and Worker teardown preserve native memory lifetime."""
+
+from __future__ import annotations
+
+from dataclasses import replace
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
+import pytest
+import torch
+from vllm.v1.kv_cache_interface import SlidingWindowSpec
+
+from tests.ut.distributed.ascend_store.v1.helpers import (
+    FakeEvent,
+    begin_step,
+    make_backend_spec,
+    make_topology,
+    store_one,
+)
+from tests.ut.distributed.ascend_store.v1.worker.bulk_fixtures import TensorBytesBackend, make_multi_spec_caches
+from tests.ut.distributed.ascend_store.v1.worker.gva_fixtures import (
+    FakeGVABackend,
+    make_gva_spec,
+)
+from tests.ut.distributed.ascend_store.v1.worker.resource_fixtures import (
+    RecordingBackend,
+    make_caches,
+    make_resources,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1 import vllm_adapter
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend import (
+    BackendSpec,
+    LayerwiseAccessKind,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.coordinates import (
+    TokenRange,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.projection import (
+    GVALayerwiseProjectionBinder,
+    compile_bulk_projection_binder,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.lookup import LookupRequest
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.transfer import (
+    KVTransferStep,
+    LoadCommand,
+    RangeStoreCommand,
+    StoreCommandBatch,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.route import KVPoolRouteSpec
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.topology import resolve_group_layers
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk import (
+    AsynchronousBulkWorker,
+    SynchronousBulkWorker,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwise import (
+    GVALayerwiseWorker,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.resources import (
+    GVAObjectLayout,
+    KVPoolResources,
+)
+
+
+def test_resources_own_exact_shared_storage_region_and_close_in_order() -> None:
+    backend = RecordingBackend()
+    topology, resources = make_resources(backend)
+    caches = make_caches(topology, shared_storage=True)
+    storage = next(iter(caches.values())).untyped_storage()
+
+    resources.bind_kv_caches(caches)
+
+    assert backend.calls == [("register_region", storage.data_ptr(), storage.nbytes())]
+    resources.close()
+    resources.close()
+
+    assert backend.calls == [
+        ("register_region", storage.data_ptr(), storage.nbytes()),
+        ("unregister_region", storage.data_ptr(), storage.nbytes()),
+        ("backend_close",),
+    ]
+    assert resources.kv_caches is None
+    assert backend.closed
+    with pytest.raises(RuntimeError, match="closed"):
+        resources.bind_kv_caches(caches)
+
+
+def test_bulk_store_registers_target_and_mtp_entries_and_deduplicates_confirmed_keys() -> None:
+    base = make_topology(physical_layers=(0,))
+    names = ("model.layers.0.attention", "mtp.layers.0.attention", "mtp.layers.1.attention")
+    group = replace(base.groups[0], layers=resolve_group_layers(list(names), base_layer_count=2))
+    topology = replace(base, groups=(group,))
+    backend = TensorBytesBackend()
+    resources = KVPoolResources(
+        backend, make_backend_spec(requires_exists_before_put=True), 8, topology.transfer_groups
+    )
+    worker = SynchronousBulkWorker(
+        topology, compile_bulk_projection_binder(topology, 64), resources, source_ready_event_factory=FakeEvent
+    )
+    caches = {name: torch.zeros((8, 2, 4, 1, 1), dtype=torch.float32) for name in names}
+    try:
+        worker.bind_kv_caches(caches)
+        assert backend.registered_regions == [
+            (cache.data_ptr(), cache.numel() * cache.element_size()) for cache in caches.values()
+        ]
+        command = RangeStoreCommand("target-and-draft", TokenRange(0, 4), ((1,),), (b"a",), 4, 17)
+        begin_step(worker, store=(command,))
+        # Bulk publication occurs at finalization, after both target and draft cache writes.
+        for index, name in enumerate(names):
+            caches[name][1].fill_(index + 1)
+        assert not any(call[0] == "put" for call in backend.calls)
+        worker.finish_step()
+        (completion,) = worker.fence_previous_store()
+        worker.end_step()
+        assert completion.evidence.succeeded and completion.evidence.source_release_confirmed
+        (key,) = backend.objects
+        expected_payload = b"".join(caches[name][1].view(torch.uint8).numpy().tobytes() for name in names)
+        assert backend.objects[key] == expected_payload
+        put_call = next(call for call in backend.calls if call[0] == "put")
+        assert put_call[2] == (tuple(caches[name][1].data_ptr() for name in names),)
+        assert put_call[3] == ((32, 32, 32),)
+        assert worker.take_released_store_job_ids() == {17}
+
+        for name in names:
+            caches[name][2].copy_(caches[name][1])
+        duplicate = store_one(
+            worker, replace(command, request_id="duplicate", block_ids_by_group=((2,),), store_job_id=18)
+        )
+        assert duplicate.evidence.succeeded and duplicate.evidence.source_release_confirmed
+        assert len([call for call in backend.calls if call[0] == "put"]) == 1
+        assert backend.objects[key] == expected_payload
+        assert worker.take_released_store_job_ids() == {18}
+    finally:
+        worker.close()
+    assert backend.closed and resources.kv_caches is None
+
+
+@pytest.mark.parametrize("empty_first", (False, True))
+@pytest.mark.parametrize("use_gva", (False, True))
+def test_resources_skip_empty_rope_views_in_registration_and_projection(empty_first, use_gva) -> None:
+    backend = RecordingBackend()
+    topology = make_topology(physical_layers=(0,))
+    resources = KVPoolResources(
+        backend,
+        make_backend_spec(layerwise_access=LayerwiseAccessKind.GVA if use_gva else None),
+        8,
+        topology.transfer_groups,
+        gva_layout=GVAObjectLayout(0, 1, 0, 1, 1) if use_gva else None,
+    )
+    nope_cache = torch.empty((8, 4), dtype=torch.float32)
+    rope_cache = torch.empty((8, 4, 0), dtype=torch.float32)
+    caches = (rope_cache, nope_cache) if empty_first else (nope_cache, rope_cache)
+
+    registration = resources.bind_kv_caches({topology.groups[0].layer_names[0]: caches})
+
+    address = nope_cache.data_ptr()
+    region_size = nope_cache.numel() * nope_cache.element_size()
+    block_size_bytes = nope_cache[0].numel() * nope_cache.element_size()
+    assert backend.calls == [("register_region", address, region_size)]
+    assert registration["base_addresses"] == {0: [address]}
+    assert registration["block_lengths"] == {0: [block_size_bytes]}
+    assert registration["block_strides"] == {0: [block_size_bytes]}
+    assert registration["layer_entry_offsets"] == {0: [0, 1]}
+    if use_gva:
+        assert registration["object_sizes"] == {0: block_size_bytes}
+        assert registration["object_offsets"] == {0: 0}
+    resources.close()
+    assert backend.calls[-2:] == [("unregister_region", address, region_size), ("backend_close",)]
+
+
+def test_registration_failure_rolls_back_successful_prefix_before_backend_close() -> None:
+    backend = RecordingBackend(fail_registration_index=1)
+    topology, resources = make_resources(backend)
+    caches = make_caches(topology)
+
+    with pytest.raises(RuntimeError, match="registration failed at region 1"):
+        resources.bind_kv_caches(caches)
+
+    assert resources.kv_caches is caches
+    assert [call[0] for call in backend.calls] == [
+        "register_region",
+        "register_region",
+        "unregister_region",
+    ]
+    resources.close()
+    assert [call[0] for call in backend.calls][-1] == "backend_close"
+    assert resources.kv_caches is None
+
+
+def test_incomplete_registration_rollback_retains_owner_and_retries_release() -> None:
+    backend = RecordingBackend(
+        fail_registration_index=1,
+        fail_unregister_count=1,
+    )
+    topology, resources = make_resources(backend)
+    caches = make_caches(topology)
+
+    with pytest.raises(RuntimeError, match="rollback is incomplete"):
+        resources.bind_kv_caches(caches)
+
+    assert resources.kv_caches is caches
+    assert "backend_close" not in [call[0] for call in backend.calls]
+    resources.close()
+    assert [call[0] for call in backend.calls][-2:] == ["unregister_region", "backend_close"]
+    assert resources.kv_caches is None
+
+
+def test_backend_close_failure_retains_cache_owner_until_retry() -> None:
+    backend = RecordingBackend(fail_close_count=1)
+    topology, resources = make_resources(backend, physical_layers=(0,))
+    caches = make_caches(topology)
+    resources.bind_kv_caches(caches)
+
+    with pytest.raises(RuntimeError, match="backend close failed"):
+        resources.close()
+
+    assert resources.kv_caches is caches
+    assert [call[0] for call in backend.calls].count("unregister_region") == 1
+    resources.close()
+    assert [call[0] for call in backend.calls].count("unregister_region") == 1
+    assert resources.kv_caches is None
+
+
+def test_worker_bind_failure_releases_registration_before_backend_close() -> None:
+    backend = RecordingBackend()
+    topology, resources = make_resources(backend, physical_layers=(0,))
+    caches = make_caches(topology)
+    projection_binder = compile_bulk_projection_binder(topology, 64)
+
+    with patch.object(type(projection_binder), "bind", side_effect=RuntimeError("projection binding failed")):
+        worker = SynchronousBulkWorker(topology, projection_binder, resources)
+        with pytest.raises(RuntimeError, match="projection binding failed"):
+            worker.bind_kv_caches(caches)
+
+    lifecycle = [call[0] for call in backend.calls]
+    assert lifecycle == ["register_region", "unregister_region", "backend_close"]
+    assert resources.kv_caches is None
+
+
+@pytest.mark.parametrize("load_async", (False, True))
+def test_memcache_bulk_factory_binds_hybrid_buffers_without_gva_constraints(monkeypatch, load_async) -> None:
+    topology = make_topology(group_ids=(0, 1), physical_layers=(0,))
+    sliding_spec = SlidingWindowSpec(
+        block_size=4,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=8,
+    )
+    topology = replace(topology, groups=(topology.groups[0], replace(topology.groups[1], kv_cache_spec=sliding_spec)))
+    backend = RecordingBackend()
+    backend_spec = BackendSpec("memcache", lambda *_args, **_kwargs: backend, LayerwiseAccessKind.GVA, True)
+    route_spec = KVPoolRouteSpec(topology, "memcache", 64, use_layerwise=False)
+    projection_binder = compile_bulk_projection_binder(topology, 64)
+    monkeypatch.setattr(vllm_adapter, "resolve_kv_pool_route_spec", lambda *_args: route_spec)
+    monkeypatch.setattr(vllm_adapter, "_compile_kv_pool_projection_binder", lambda *_args: projection_binder)
+    monkeypatch.setattr(vllm_adapter, "resolve_backend_spec", lambda _name: backend_spec)
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(),
+        kv_transfer_config=SimpleNamespace(kv_role="kv_consumer", kv_connector_extra_config={"load_async": load_async}),
+        model_config=SimpleNamespace(
+            get_layers_start_end_indices=MagicMock(return_value=(0, 1)),
+            get_total_num_hidden_layers=MagicMock(return_value=1),
+        ),
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+    )
+    cache_config = SimpleNamespace(
+        num_blocks=8,
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=group.kv_cache_spec) for group in topology.groups],
+    )
+
+    worker = vllm_adapter.create_kv_pool_worker(config, cache_config)
+    try:
+        assert type(worker) is (AsynchronousBulkWorker if load_async else SynchronousBulkWorker)
+        config.model_config.get_layers_start_end_indices.assert_not_called()
+        config.model_config.get_total_num_hidden_layers.assert_not_called()
+        caches = {
+            name: torch.empty((8, 4), dtype=torch.float32) for group in topology.groups for name in group.layer_names
+        }
+        worker.bind_kv_caches(caches)
+        registered_regions = [entry for entry in backend.calls if entry[0] == "register_region"]
+        assert registered_regions == [
+            ("register_region", cache.data_ptr(), cache.numel() * cache.element_size()) for cache in caches.values()
+        ]
+    finally:
+        worker.close()
+    assert backend.closed
+
+
+@pytest.mark.parametrize("load_async", (False, True), ids=("sync", "async"))
+def test_memcache_multi_spec_store_lookup_load_preserves_payloads_and_private_state(load_async, monkeypatch) -> None:
+    cache_config, caches = make_multi_spec_caches()
+    backend = TensorBytesBackend()
+    backend_spec = BackendSpec("memcache", lambda *_args, **_kwargs: backend, LayerwiseAccessKind.GVA, True)
+    monkeypatch.setattr(vllm_adapter, "resolve_backend_spec", lambda _name: backend_spec)
+    monkeypatch.setattr(vllm_adapter, "_kvpp_size", lambda _config: 1)
+    monkeypatch.setattr(vllm_adapter, "get_tp_group", lambda: SimpleNamespace(rank_in_group=0))
+    monkeypatch.setattr(vllm_adapter, "get_pp_group", lambda: SimpleNamespace(rank_in_group=0))
+    monkeypatch.setattr(vllm_adapter, "resolve_dcp_kv_cache_spec", lambda spec, _size: spec)
+    monkeypatch.setattr(vllm_adapter.kv_cache_utils, "resolve_kv_cache_block_sizes", lambda *_args: (32, 32))
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            world_size=1,
+            tensor_parallel_size=1,
+            pipeline_parallel_size=1,
+            decode_context_parallel_size=1,
+            prefill_context_parallel_size=1,
+        ),
+        kv_transfer_config=SimpleNamespace(
+            kv_role="kv_both",
+            kv_connector_extra_config={"backend": "memcache", "load_async": load_async},
+        ),
+        model_config=SimpleNamespace(
+            max_model_len=64,
+            model="deepseek_v41",
+            use_mla=True,
+            hf_text_config=SimpleNamespace(num_hidden_layers=4, model_type="deepseek_v41"),
+            get_total_num_hidden_layers=lambda: 4,
+            get_total_num_kv_heads=lambda: 1,
+        ),
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+        speculative_config=None,
+    )
+    source_blocks = {0: 1, 2: 3}
+    destination_blocks = {0: 5, 2: 6}
+    expected = {}
+    for group_id, block_id in source_blocks.items():
+        for index, name in enumerate(sorted(cache_config.kv_cache_groups[group_id].layer_names)):
+            block = caches[name][block_id]
+            values = (
+                torch.arange(block.numel(), dtype=block.dtype).reshape(block.shape)
+                + (group_id + 1) * 1000
+                + index * 100
+            )
+            block.copy_(values)
+            expected[name] = values
+    private_name = "model.layers.2.compressor.state_cache"
+    private_block = 4
+    caches[private_name][private_block].fill_(99)
+    private_state = caches[private_name][private_block].clone()
+
+    worker = vllm_adapter.create_kv_pool_worker(config, cache_config)
+    try:
+        worker.bind_kv_caches(caches)
+        assert len(backend.registered_regions) == 2
+        command = RangeStoreCommand("producer", TokenRange(0, 32), ((1,), (private_block,), (3,)), (b"a",), 32, 17)
+        completion = store_one(worker, command)
+        assert completion.evidence.succeeded
+        assert [(item.source.group_id, item.source.block_id) for item in completion.evidence.transfer_evidence] == [
+            (0, 1),
+            (2, 3),
+        ]
+        assert worker.take_released_store_job_ids() == {17}
+        for group_id in source_blocks:
+            (key,) = [key for key in backend.objects if f"@group:{group_id}@" in key]
+            names = sorted(cache_config.kv_cache_groups[group_id].layer_names)
+            payload = b"".join(expected[name].contiguous().view(torch.uint8).numpy().tobytes() for name in names)
+            assert backend.objects[key] == payload
+        assert len(backend.objects) == 2
+        assert worker.lookup(LookupRequest(TokenRange(0, 32), (0, 2), (b"a",))).available_end_token == 32
+        for group_id, block_id in destination_blocks.items():
+            for name in cache_config.kv_cache_groups[group_id].layer_names:
+                caches[name][block_id].zero_()
+        begin_step(worker, load=(LoadCommand("consumer", TokenRange(0, 32), ((5,), (private_block,), (6,)), (b"a",)),))
+        worker.start_load()
+        worker.close()
+        result = worker.collect_load_result()
+        if load_async:
+            assert result.completed_request_ids == {"consumer"}
+        assert not result.failed_locations
+        for group_id, block_id in destination_blocks.items():
+            for name in cache_config.kv_cache_groups[group_id].layer_names:
+                torch.testing.assert_close(caches[name][block_id], expected[name])
+        torch.testing.assert_close(caches[private_name][private_block], private_state)
+        worker.end_step()
+    finally:
+        worker.close()
+    assert backend.closed
+
+
+def test_worker_factory_closes_backend_when_layout_resolution_fails(monkeypatch) -> None:
+    topology = make_topology(physical_layers=(0,))
+
+    class FactoryBackend(RecordingBackend):
+        instance = None
+
+        def __init__(self, *_args, **_kwargs) -> None:
+            super().__init__()
+            type(self).instance = self
+
+    backend_spec = BackendSpec(
+        "memcache",
+        FactoryBackend,
+        LayerwiseAccessKind.GVA,
+        True,
+    )
+    route_spec = SimpleNamespace(topology=topology, backend_name="memcache", use_layerwise=True)
+    monkeypatch.setattr(vllm_adapter, "resolve_kv_pool_route_spec", lambda *_args: route_spec)
+    monkeypatch.setattr(vllm_adapter, "_compile_kv_pool_projection_binder", lambda *_args: object())
+    monkeypatch.setattr(vllm_adapter, "resolve_backend_spec", lambda _name: backend_spec)
+
+    def fail_layout(_parallel_config):
+        raise RuntimeError("layout resolution failed")
+
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(),
+        kv_transfer_config=SimpleNamespace(kv_connector_extra_config={}),
+        model_config=SimpleNamespace(get_layers_start_end_indices=fail_layout),
+    )
+
+    with pytest.raises(RuntimeError, match="layout resolution failed"):
+        vllm_adapter.create_kv_pool_worker(config, SimpleNamespace())
+
+    assert FactoryBackend.instance is not None
+    assert FactoryBackend.instance.calls == [("backend_close",)]
+
+
+def test_unknown_store_source_keeps_real_registration_and_backend_open() -> None:
+    topology = make_topology(physical_layers=(0,))
+    backend = RecordingBackend()
+    backend.put_result = RuntimeError("put failed after address handoff")
+    backend_spec = make_backend_spec(layerwise_access=None)
+    resources = KVPoolResources(backend, backend_spec, 8, topology.groups)
+    projection_binder = compile_bulk_projection_binder(topology, 64)
+    worker = SynchronousBulkWorker(
+        topology,
+        projection_binder,
+        resources,
+        source_ready_event_factory=FakeEvent,
+    )
+    caches = make_caches(topology)
+    worker.bind_kv_caches(caches)
+    worker.begin_step(
+        KVTransferStep(
+            store=StoreCommandBatch(
+                (
+                    RangeStoreCommand(
+                        "request",
+                        TokenRange(0, 4),
+                        ((7,),),
+                        (b"a",),
+                        4,
+                        17,
+                    ),
+                )
+            )
+        )
+    )
+    worker.finish_step()
+
+    with pytest.raises(RuntimeError, match="Store source release is unknown"):
+        worker.close()
+
+    assert resources.kv_caches is caches
+    assert "unregister_region" not in [call[0] for call in backend.calls]
+    assert "backend_close" not in [call[0] for call in backend.calls]
+
+
+def test_gva_worker_close_unregisters_exact_region_before_backend_close() -> None:
+    backend = FakeGVABackend()
+    topology = make_topology(physical_layers=(0,))
+    backend_spec = make_gva_spec()
+    resources = KVPoolResources(
+        backend,
+        backend_spec,
+        8,
+        topology.groups,
+        gva_layout=GVAObjectLayout(0, 1, 0, 1, 1),
+    )
+    projection_binder = GVALayerwiseProjectionBinder(
+        topology,
+        64,
+        lambda group, value, head, stage: f"g{group}:p{stage}:h{head}:{value}",
+    )
+    worker = GVALayerwiseWorker(
+        topology,
+        projection_binder,
+        resources,
+        source_ready_event_factory=FakeEvent,
+    )
+    cache = torch.empty((8, 4), dtype=torch.float32)
+
+    worker.bind_kv_caches({topology.groups[0].layer_names[0]: cache})
+    worker.close()
+
+    lifecycle = [call for call in backend.calls if call[0] in ("register_buffer", "unregister_buffer", "backend_close")]
+    assert lifecycle == [
+        ("register_buffer", (cache.data_ptr(),), (cache.nbytes,)),
+        ("unregister_buffer", cache.data_ptr(), cache.nbytes),
+        ("backend_close",),
+    ]

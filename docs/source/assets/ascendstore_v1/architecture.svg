@@ -1,0 +1,90 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="1000" viewBox="0 0 1120 1000" role="img" aria-labelledby="ascendstore-v1-architecture-title ascendstore-v1-architecture-desc">
+<title id="ascendstore-v1-architecture-title">AscendStore v1 的组件职责</title>
+<desc id="ascendstore-v1-architecture-desc">Scheduler 在调度进程中形成传输计划，Worker 在执行进程中使用 Projection 计算位置、Timeline 安排执行，再通过 Worker I/O 调用 Backend。消息只携带描述，KV 字节在 Worker 和外部池之间传输。</desc>
+<defs><marker id="ascendstore-v1-architecture-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#526d7a"/></marker></defs>
+<style>text{font-family:Geist,"PingFang SC","Microsoft YaHei",sans-serif;fill:#223036}.sub{fill:#526d7a}</style>
+<rect width="1120" height="1000" fill="#ffffff"/>
+<text x="32" y="44" font-size="28" font-weight="600" text-anchor="start" style="fill:#223036">各部分负责什么</text>
+<text x="32" y="76" font-size="18" font-weight="400" text-anchor="start" style="fill:#526d7a">Scheduler 形成计划，Worker 将计划落实到本地缓存与后端。</text>
+<rect x="32" y="108" width="320" height="712" rx="8" fill="#f4f7f7" stroke="#c8d4d9"/>
+<rect x="384" y="108" width="704" height="712" rx="8" fill="#f4f7f7" stroke="#c8d4d9"/>
+<text x="48" y="144" font-size="22" font-weight="600" text-anchor="start" style="fill:#223036">Scheduler 进程</text>
+<text x="400" y="144" font-size="22" font-weight="600" text-anchor="start" style="fill:#223036">Worker 进程</text>
+<path d="M192,252 V332" fill="none" stroke="#526d7a" stroke-width="1.5" marker-end="url(#ascendstore-v1-architecture-arrow)"/>
+<path d="M736,252 V332" fill="none" stroke="#526d7a" stroke-width="1.5" marker-end="url(#ascendstore-v1-architecture-arrow)"/>
+<path d="M320,188 H416" fill="none" stroke="#526d7a" stroke-width="1.5" marker-end="url(#ascendstore-v1-architecture-arrow)"/>
+<path d="M416,236 H320" fill="none" stroke="#526d7a" stroke-width="1.5" stroke-dasharray="5,4" marker-end="url(#ascendstore-v1-architecture-arrow)"/>
+<path d="M320,372 H416" fill="none" stroke="#526d7a" stroke-width="1.5" marker-end="url(#ascendstore-v1-architecture-arrow)"/>
+<path d="M416,424 H320" fill="none" stroke="#526d7a" stroke-width="1.5" stroke-dasharray="5,4" marker-end="url(#ascendstore-v1-architecture-arrow)"/>
+<path d="M560,480 V544" fill="none" stroke="#526d7a" stroke-width="1.5" marker-end="url(#ascendstore-v1-architecture-arrow)"/>
+<path d="M912,480 V544" fill="none" stroke="#526d7a" stroke-width="1.5" marker-end="url(#ascendstore-v1-architecture-arrow)"/>
+<path d="M1056,410 H1064 Q1072,410 1072,418 V684 Q1072,692 1064,692 H744 Q736,692 736,700 V712" fill="none" stroke="#526d7a" stroke-width="1.5" marker-end="url(#ascendstore-v1-architecture-arrow)"/>
+<path d="M704,800 V860" fill="none" stroke="#526d7a" stroke-width="1.5" marker-end="url(#ascendstore-v1-architecture-arrow)"/>
+<path d="M768,860 V800" fill="none" stroke="#526d7a" stroke-width="1.5" marker-end="url(#ascendstore-v1-architecture-arrow)"/>
+<rect x="342.0" y="156" width="52" height="24" fill="white"/>
+<text x="368" y="174" font-size="18" font-weight="400" text-anchor="middle" style="fill:#526d7a">命令</text>
+<rect x="342.0" y="204" width="52" height="24" fill="white"/>
+<text x="368" y="222" font-size="18" font-weight="400" text-anchor="middle" style="fill:#526d7a">结果</text>
+<rect x="328.0" y="340" width="80" height="24" fill="white"/>
+<text x="368" y="358" font-size="18" font-weight="400" text-anchor="middle" style="fill:#526d7a">Lookup</text>
+<rect x="342.0" y="392" width="52" height="24" fill="white"/>
+<text x="368" y="410" font-size="18" font-weight="400" text-anchor="middle" style="fill:#526d7a">候选</text>
+<rect x="774.0" y="660" width="164" height="24" fill="white"/>
+<text x="856" y="678" font-size="18" font-weight="400" text-anchor="middle" style="fill:#526d7a">Worker I/O 调用</text>
+<rect x="634.0" y="816" width="60" height="24" fill="white"/>
+<text x="664" y="834" font-size="18" font-weight="400" text-anchor="middle" style="fill:#526d7a">Store</text>
+<rect x="778.0" y="816" width="60" height="24" fill="white"/>
+<text x="808" y="834" font-size="18" font-weight="400" text-anchor="middle" style="fill:#526d7a">Load</text>
+<g data-node="scheduler-connector" data-x="64" data-y="172" data-w="256" data-h="80">
+<rect x="64" y="172" width="256" height="80" rx="8" fill="white" stroke="#c8d4d9"/>
+<text x="80" y="204" font-size="22" font-weight="600" text-anchor="start" style="fill:#223036">Connector</text>
+<text x="80" y="232" font-size="18" font-weight="400" text-anchor="start" style="fill:#526d7a">接收回调，交接消息</text>
+</g>
+<g data-node="worker-connector" data-x="416" data-y="172" data-w="640" data-h="80">
+<rect x="416" y="172" width="640" height="80" rx="8" fill="white" stroke="#c8d4d9"/>
+<text x="432" y="204" font-size="22" font-weight="600" text-anchor="start" style="fill:#223036">Connector</text>
+<text x="432" y="232" font-size="18" font-weight="400" text-anchor="start" style="fill:#526d7a">接收本轮命令，返回执行结果</text>
+</g>
+<g data-node="scheduler" data-x="64" data-y="332" data-w="256" data-h="148">
+<rect x="64" y="332" width="256" height="148" rx="8" fill="white" stroke="#c8d4d9"/>
+<text x="80" y="364" font-size="22" font-weight="600" text-anchor="start" style="fill:#223036">Scheduler</text>
+<text x="80" y="392" font-size="18" font-weight="400" text-anchor="start" style="fill:#526d7a">命中采用与范围规划</text>
+<text x="80" y="420" font-size="18" font-weight="400" text-anchor="start" style="fill:#526d7a">请求进度</text>
+<text x="80" y="448" font-size="18" font-weight="400" text-anchor="start" style="fill:#526d7a">Store 来源引用</text>
+</g>
+<g data-node="worker" data-x="416" data-y="332" data-w="640" data-h="148">
+<rect x="416" y="332" width="640" height="148" rx="8" fill="#eef2fc" stroke="#2a52be"/>
+<text x="432" y="364" font-size="22" font-weight="600" text-anchor="start" style="fill:#223036">Worker</text>
+<text x="432" y="392" font-size="18" font-weight="400" text-anchor="start" style="fill:#526d7a">接入本地缓存，选择对象并整理批次</text>
+<text x="432" y="420" font-size="18" font-weight="400" text-anchor="start" style="fill:#526d7a">保留请求、组、block 与 job 的归属</text>
+<text x="432" y="448" font-size="18" font-weight="400" text-anchor="start" style="fill:#526d7a">处理传输结果及来源释放</text>
+</g>
+<g data-node="projection" data-x="416" data-y="544" data-w="288" data-h="108">
+<rect x="416" y="544" width="288" height="108" rx="8" fill="#eef8fb" stroke="#2a9cbe"/>
+<text x="432" y="576" font-size="22" font-weight="600" text-anchor="start" style="fill:#223036">Projection</text>
+<text x="432" y="604" font-size="18" font-weight="400" text-anchor="start" style="fill:#526d7a">共同恢复位置、对象 key</text>
+<text x="432" y="632" font-size="18" font-weight="400" text-anchor="start" style="fill:#526d7a">本地地址与字节范围</text>
+</g>
+<g data-node="timeline" data-x="768" data-y="544" data-w="288" data-h="108">
+<rect x="768" y="544" width="288" height="108" rx="8" fill="#f3f0fc" stroke="#4c2abe"/>
+<text x="784" y="576" font-size="22" font-weight="600" text-anchor="start" style="fill:#223036">Timeline</text>
+<text x="784" y="604" font-size="18" font-weight="400" text-anchor="start" style="fill:#526d7a">提交、等待与执行进度</text>
+<text x="784" y="632" font-size="18" font-weight="400" text-anchor="start" style="fill:#526d7a">执行 Worker 传输回调</text>
+</g>
+<g data-node="backend" data-x="416" data-y="712" data-w="640" data-h="88">
+<rect x="416" y="712" width="640" height="88" rx="8" fill="white" stroke="#c8d4d9"/>
+<text x="432" y="744" font-size="22" font-weight="600" text-anchor="start" style="fill:#223036">Backend Port 与适配器</text>
+<text x="432" y="772" font-size="18" font-weight="400" text-anchor="start" style="fill:#526d7a">本地注册、原生访问、返回值与完成约定</text>
+</g>
+<g data-node="external" data-x="416" data-y="860" data-w="640" data-h="84">
+<rect x="416" y="860" width="640" height="84" rx="8" fill="white" stroke="#c8d4d9"/>
+<text x="432" y="892" font-size="22" font-weight="600" text-anchor="start" style="fill:#223036">外部 KV 池</text>
+<text x="432" y="920" font-size="18" font-weight="400" text-anchor="start" style="fill:#526d7a">保存对象，按内容身份供后续请求复用</text>
+</g>
+<text x="64" y="560" font-size="18" font-weight="400" text-anchor="start" style="fill:#526d7a">范围、block 表与 hash</text>
+<text x="64" y="592" font-size="18" font-weight="400" text-anchor="start" style="fill:#526d7a">留在调度侧；</text>
+<text x="64" y="624" font-size="18" font-weight="400" text-anchor="start" style="fill:#526d7a">实际缓存地址和 Backend</text>
+<text x="64" y="656" font-size="18" font-weight="400" text-anchor="start" style="fill:#526d7a">留在 Worker 侧。</text>
+<line x1="32" y1="952" x2="1088" y2="952" stroke="#c8d4d9"/>
+<text x="32" y="978" font-size="18" font-weight="400" text-anchor="start" style="fill:#526d7a">实线表示调用或传递方向，虚线表示返回；两侧 Connector 通过 vLLM 交接命令与结果。</text>
+</svg>
