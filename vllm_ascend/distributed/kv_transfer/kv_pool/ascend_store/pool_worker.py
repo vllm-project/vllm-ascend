@@ -471,7 +471,9 @@ class KVPoolWorker:
         # batch_alloc is non-idempotent (returns MMC_DUPLICATED_OBJECT for an
         # existing key without registering the blob), so the worker must track
         # which keys it has already allocated and reuse those GVAs instead of
-        # re-allocating them on every save step.
+        # re-allocating them on every save step. A value of 0 is a skip-only
+        # marker for a key that is present but not GVA-readable (demoted to
+        # SSD): safe to skip re-saving, never a batch_copy write target.
         self._allocated_gvas: dict[str, int] = {}
         self._put_started_keys: set[str] = set()
         self._put_started_keys_lock = threading.Lock()
@@ -485,7 +487,6 @@ class KVPoolWorker:
         # per step via .clear() in process_layer_data().
         self._step_keyinfo_cache: dict[str, Any] = {}
         self._step_lease_result: dict[str, int] = {}
-        self._step_exist_cache: dict[str, int] = {}
 
     def _init_layerwise_config(self) -> None:
         # Build mapping: physical_layer -> [(group_id, layer_idx_in_group), ...]
@@ -1645,29 +1646,62 @@ class KVPoolWorker:
         )
 
     def _refresh_allocated_gvas(self, keys: list[str]) -> None:
-        """Drop local GVA entries whose MemCache blobs were evicted."""
+        """Reconcile cached GVAs with the store's per-medium blob state.
+
+        ``batch_is_exist`` is medium-agnostic: with DRAM/SSD pooling a key
+        demoted to SSD still reports 1 while its cached DRAM GVA is stale,
+        and a stale GVA reused as a batch_copy destination can corrupt
+        whichever blob now owns that recycled DRAM range. Validate through
+        key metadata instead:
+          - missing key                  -> drop the entry so the save path
+                                            re-allocates it
+          - resident with a live GVA     -> adopt the store's current GVA
+          - present without a GVA (SSD)  -> keep as a skip-only marker (0):
+                                            already saved, loadable via the
+                                            load path's rewarm, never a
+                                            batch_copy write target
+        """
         cached_keys = list(dict.fromkeys(key for key in keys if key in self._allocated_gvas))
         if not cached_keys:
             return
-        # PERF-TUNE(4): reuse this step's existence results for repeated keys
-        step_cache = getattr(self, "_step_exist_cache", None) or {}
-        self._step_exist_cache = step_cache
-        uncached_keys = [k for k in cached_keys if k not in step_cache]
+        # PERF-TUNE(4): reuse this step's key-info results for repeated keys.
+        # The load path runs earlier in the same step and may already hold
+        # post-rewarm infos for overlapping keys.
+        ki_cache = getattr(self, "_step_keyinfo_cache", None) or {}
+        self._step_keyinfo_cache = ki_cache
+        uncached_keys = [k for k in cached_keys if k not in ki_cache]
         if uncached_keys:
-            fetched_states = self.m_store.batch_is_exist(uncached_keys)
-            if len(fetched_states) != len(uncached_keys):
+            fetched_infos = self.m_store.batch_get_key_info(uncached_keys)
+            if fetched_infos is None or len(fetched_infos) != len(uncached_keys):
                 raise RuntimeError(
-                    "MemCache exists check returned unexpected number of states: "
-                    f"expected={len(uncached_keys)}, actual={len(fetched_states)}"
+                    "MemCache key-info check returned unexpected number of results: "
+                    f"expected={len(uncached_keys)}, "
+                    f"actual={len(fetched_infos) if fetched_infos is not None else 0}"
                 )
-            for k, st in zip(uncached_keys, fetched_states):
-                step_cache[k] = st
-        exists_states = [step_cache[k] for k in cached_keys]
-        for key, exists in zip(cached_keys, exists_states):
-            if exists == 0:
+            for k, ki in zip(uncached_keys, fetched_infos):
+                ki_cache[k] = ki
+        for key in cached_keys:
+            info = ki_cache[key]
+            if info is None:
                 self._allocated_gvas.pop(key, None)
-            elif exists != 1:
-                raise RuntimeError(f"MemCache exists check failed for {key}: state={exists}")
+                continue
+            sizes = info.size()
+            if not sizes or sizes <= 0:
+                # Metadata without a usable payload: treat as evicted.
+                self._allocated_gvas.pop(key, None)
+                continue
+            current_gva = next((address for address in (info.gva_list() or []) if address > 0), 0)
+            if current_gva > 0:
+                # Resident with a live GVA: adopt the store's current value
+                # so a blob re-allocated elsewhere is never written through
+                # a stale cached address.
+                self._allocated_gvas[key] = current_gva
+            else:
+                # Present but not GVA-readable (demoted to SSD): keep as a
+                # skip-only marker. The block is already saved and the load
+                # path rewarms it on read; the stale GVA must never be
+                # reused as a batch_copy write target.
+                self._allocated_gvas[key] = 0
 
     def _alloc_gvas_for_save(self, requests: list[ReqMeta]) -> None:
         """Allocate per-group GVA on the worker side right before batch_copy.
@@ -1735,9 +1769,11 @@ class KVPoolWorker:
                     for block_idx in candidate_blocks
                 ]
                 self._refresh_allocated_gvas(candidate_keys)
-                # Skip blocks that are still present and readable in MemCache.
-                # Only a leading run of already-allocated blocks is skipped so
-                # the readable-blob write failure semantics stay unchanged.
+                # Skip blocks whose data is already committed in the pool:
+                # resident entries (GVA > 0) and SSD-demoted markers (0) are
+                # both already saved; the load path rewarms the latter on
+                # read. Only a leading run is skipped so the readable-blob
+                # write failure semantics stay unchanged.
                 allocated_prefix = 0
                 for block_idx in candidate_blocks:
                     key = self._make_layerwise_full_key(group_id, block_hash_to_str(group_block_hashes[block_idx]))
@@ -1754,6 +1790,10 @@ class KVPoolWorker:
                     key = self._make_layerwise_full_key(group_id, block_hash_to_str(group_block_hashes[blk_idx]))
                     cached = self._allocated_gvas.get(key)
                     if cached is not None:
+                        # cached > 0: reuse the store-validated GVA.
+                        # cached == 0: SSD-demoted marker; append 0 so
+                        # batch_copy skips the block instead of writing
+                        # through a stale GVA.
                         block_gvas.append(cached)
                     else:
                         new_keys.append(key)
@@ -2626,7 +2666,6 @@ class KVPoolWorker:
         # PERF-TUNE(4): cache repeated memcache RPC results within this step.
         self._step_keyinfo_cache = {}
         self._step_lease_result = {}
-        self._step_exist_cache = {}
         # Mooncake uses the projected stage-local cache layout, including any
         # draft layers. The GVA/key planes retain their existing PP key count.
         if not self.use_block_key_layerwise and getattr(self, "pp_size", 1) > 1:
