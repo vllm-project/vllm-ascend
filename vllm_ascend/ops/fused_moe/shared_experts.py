@@ -290,8 +290,15 @@ class AscendSharedExperts:
                     self.moe_config.intermediate_size_per_partition,
                 )
             )
-        weight = linear.weight.data.transpose(0, 1).contiguous()
-        scale = linear.weight_scale.data.transpose(0, 1).contiguous()
+        try:
+            # Aclnn-only firmware cannot clone tensors that carry a FRACTAL_NZ
+            # internal format, so force the ND view before the transpose +
+            # contiguous materialization (2 == ACL_FORMAT_ND).
+            weight = torch_npu.npu_format_cast(linear.weight.data, 2)
+            weight = weight.transpose(0, 1).contiguous()
+            scale = linear.weight_scale.data.transpose(0, 1).contiguous()
+        finally:
+            torch.npu.config.allow_internal_format = True
         if tuple(weight.shape) != expected_weight_shape:
             self._disable_megamoe_shared_fusion(
                 f"shared-expert weight shape {tuple(weight.shape)} does not match the "
