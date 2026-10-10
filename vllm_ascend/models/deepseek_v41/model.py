@@ -921,7 +921,7 @@ class DeepseekV41DecoderLayer(nn.Module):
         return hidden_states, ffn_pre
 
 
-@support_torch_compile(dynamic_arg_dims={"input_ids": 0, "positions": 0, "intermediate_tensors": 0})
+@support_torch_compile(dynamic_arg_dims={"input_ids": 0, "positions": 0, "intermediate_tensors": 0, "inputs_embeds": 0})
 class DeepseekV41Model(nn.Module, EagleModelMixin):
     """V4.1 backbone with delayed HC collapse and shared attention state."""
 
