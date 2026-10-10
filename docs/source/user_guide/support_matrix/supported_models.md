@@ -41,7 +41,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
     | GLM-4.x             |   ✅    |      |      |       A2/A3        | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | 198k | [GLM-4.x](../../tutorials/models/GLM4.x.md) |
     | GLM-5/5.1           |   🔵    |      |  ✅ |       A2/A3        | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 200k | [GLM-5](../../tutorials/models/GLM5.md) |
     | GLM-5.2             |   🔵    |      |  ✅ |       A2/A3        | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 200k | [GLM-5.2](../../tutorials/models/GLM5.2.md) |
-    | GLM-5.3             |   🔵    |      |  ✅ |       A2/A3        | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | 🔵 | ✅ | ✅ | 🔵 | ✅ | ✅ | 200k | [GLM-5.3](../../tutorials/models/GLM5.3.md) |
+    | GLM-5.3             |   🔵    |      |  ✅ |    950DT/A2/A3     | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | 🔵 | ✅ | ✅ | 🔵 | ✅ | ✅ | 200k | [GLM-5.3](../../tutorials/models/GLM5.2.md#5-online-service-deployment) |
     | GLM-5.3-Flash             |   🔵    |      |  ✅ |  A2/A3/950DT Products   | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 200k | [GLM-5.3-Flash](../../tutorials/models/GLM5.3-Flash.md) |
     | Gemma4              |   🔵    |      |  ✅ |   A2/A3/950PR&950DT Products  |     | ✅ | ✅ |  |  | ✅ | ✅ |  |  | ✅ |  | ✅ | ✅ |  | [Gemma4](../../tutorials/models/Gemma4.md) |
     | Kimi-K2-Thinking    |   🔵    |      |      |       A2/A3       |      |  |  |  |  |  |  |  |  |  |  |  |  |  | [Kimi-K2-Thinking](../../tutorials/models/Kimi-K2-Thinking.md) |

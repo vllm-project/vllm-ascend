@@ -36,11 +36,13 @@ Keep both prefill context parallel size and decode context parallel size at 1.
 
 ### 3.1 Model Weight
 
-- `GLM-5.3-Flash-w8a8-mxfp8 (950DT Products mxfp8 Quantized)`: requires 1 950DT Products (96GB × 8) node.[Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8-mxfp8).
-- `GLM-5.3-Flash-w8a8`: requires 1 Atlas 800 A3 (128GB × 8) node for
-  single-node deployment, or 2 nodes for 1P1D PD disaggregated deployment.
-  [Download model weight](https://modelers.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8).
-- `GLM-5.3-Flash-w8a8`: requires 2 Atlas 800 A2 (64GB × 8) nodes.[Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8).
+Download the checkpoint from [Eco-Tech on Modelers](https://modelers.cn/user/Eco-Tech?model_name=glm) for the hardware shown below. A3 and A5 checkpoints use different quantization formats; do not interchange them. The scripts use `/root/.cache/modelscope/hub/models/vllm-ascend/<checkpoint-name>` as a local mount path, not as a download source. Preserve the exact case of the repository name when naming the local directory.
+
+| Checkpoint | Hardware | Deployment | Download |
+| --- | --- | --- | --- |
+| `GLM-5.3-Flash-w8a8-mxfp8` | **A5**: 950DT Products | 1 node (96GB × 8) for single-node deployment | [Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8-mxfp8) |
+| `GLM-5.3-Flash-w8a8` | **A3**: Atlas 800 A3 (128GB × 8) | 1 node for single-node deployment; 2 nodes for 1P1D PD | [Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8) |
+| `GLM-5.3-Flash-w8a8` | **A2**: Atlas 800 A2 | 2 nodes (64GB × 8 each) for colocated deployment; 4 nodes for PD | [Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8) |
 
 - You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to quantize the model directly.
 
@@ -181,7 +183,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 === "950DT Products"
 
-    - Quantized model `GLM-5.3-Flash-w8a8-mxfp8` can be deployed on 1 950DT Products (96GB × 8) .
+    - The A5 single-node startup record uses `GLM-5.3-Flash-w8a8-mxfp8` on 1 950DT Products (96GB × 8) with DP8/TP1. Adjust the command for your installed CANN environment; this configuration has not been validated as part of this documentation update.
 
     Run the following script to execute online inference.
 
@@ -189,30 +191,35 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
     export VLLM_USE_V2_MODEL_RUNNER=0
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_BUFFSIZE=1024
+    export OMP_NUM_THREADS=1
+    export TASK_QUEUE_ENABLE=1
 
-    vllm serve Eco-Tech/GLM-5.3-Flash-w8a8-mxfp8 \
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-Flash-w8a8-mxfp8 \
       --host 0.0.0.0 \
       --port 8000 \
-      --data-parallel-size 1 \
-      --tensor-parallel-size 8 \
+      --data-parallel-size 8 \
+      --tensor-parallel-size 1 \
       --enable-expert-parallel \
       --seed 1024 \
       --quantization ascend \
       --served-model-name glm \
-      --max-num-seqs 32 \
-      --max-model-len 132096 \
+      --async-scheduling \
+      --max-num-seqs 128 \
+      --max-model-len 131092 \
+      --enable-prefix-caching \
       --max-num-batched-tokens 8192 \
       --trust-remote-code \
-      --gpu-memory-utilization 0.9 \
+      --gpu-memory-utilization 0.95 \
       --limit-mm-per-prompt '{"image": 1, "video": 0}' \
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16,32,64,96,128]}' \
-      --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
+      --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}'
     ```
 
 === "Atlas 800 A3 series"
 
-    - Quantized model `GLM-5.3-Flash-w8a8` can be deployed on 1 A3 (64GB × 16) .
+    - Quantized model `GLM-5.3-Flash-w8a8` can be deployed on 1 A3 (128GB × 8) with DP1/TP16.
 
     Run the following script to execute online inference.
 
@@ -224,11 +231,12 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
     export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_BUFFSIZE=400
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
 
-    vllm serve Eco-Tech/GLM-5.3-Flash-w8a8   \
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-Flash-w8a8 \
       --host 0.0.0.0 \
       --port 8000 \
-      --max-model-len 133120  \
+      --max-model-len 133120 \
       --data-parallel-size 1 \
       --tensor-parallel-size 16 \
       --enable-expert-parallel \
@@ -253,12 +261,12 @@ Only the key parameters specific to this model/scenario are described below. `ma
 
 **Model-specific parameters:**
 
-- `--data-parallel-size 1`: Runs a single DP rank. `--tensor-parallel-size` is 8 on 950DT Products and 16 on Atlas 800 A3. This layout is recommended to balance memory capacity and compute efficiency for the w8a8 weights.
+- `--data-parallel-size` and `--tensor-parallel-size`: The A5 single-node example uses DP8/TP1; the Atlas 800 A3 example uses DP1/TP16.
 - `--enable-expert-parallel`: Must be enabled for the MoE architecture of GLM-5.3-Flash.
 - `--quantization ascend`: Enables Ascend quantization for the w8a8 quantized weights.
 - `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'`: Enables graph capture for the decode phase only, improving decode performance by reducing kernel launch overhead.
 - `--limit-mm-per-prompt '{"image": 1, "video": 0}'`: For text-only deployment, --limit-mm-per-prompt can be omitted. For multimodal deployment, configure this parameter according to the actual request shape. For example, use --limit-mm-per-prompt '{"image":2,"video":0}' for two-image requests, and use --limit-mm-per-prompt '{"image":0,"video":1}' for one-video requests.
-- `--speculative-config`: Enables Multi-Token Prediction (MTP) speculative decoding with the DeepSeek-style MTP draft head of GLM-5.3-Flash. The single-node examples use three speculative tokens on 950DT Products and five on Atlas 800 A3. `enforce_eager: true` keeps the MTP draft model in eager mode because GLM-5.3-Flash does not support graph-mode speculative decoding.
+- `--speculative-config`: Enables Multi-Token Prediction (MTP) speculative decoding with the DeepSeek-style MTP draft head of GLM-5.3-Flash. The single-node examples use five speculative tokens on both 950DT Products and Atlas 800 A3. `enforce_eager: true` keeps the MTP draft model in eager mode because GLM-5.3-Flash does not support graph-mode speculative decoding.
 
 ### 5.2 1P1D PD Disaggregated Deployment
 
@@ -360,7 +368,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
 
     LOCAL_IP="<PREFILL_NODE_IP>"
     NIC_NAME="<NETWORK_INTERFACE>"
-    MODEL_PATH="<YOUR_MODEL_PATH>"
+    MODEL_PATH="/root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-Flash-w8a8"
 
     export HCCL_IF_IP="$LOCAL_IP"
     export GLOO_SOCKET_IFNAME="$NIC_NAME"
@@ -425,7 +433,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
 
     LOCAL_IP="<DECODE_NODE_IP>"
     NIC_NAME="<NETWORK_INTERFACE>"
-    MODEL_PATH="<YOUR_MODEL_PATH>"
+    MODEL_PATH="/root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-Flash-w8a8"
 
     export HCCL_IF_IP="$LOCAL_IP"
     export GLOO_SOCKET_IFNAME="$NIC_NAME"
@@ -635,7 +643,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
     #!/usr/bin/env bash
     export LOCAL_IP="<PREFILL_NODE0_IP>"
     export NIC_NAME="<PREFILL_NODE0_NIC>"
-    export MODEL_PATH="<YOUR_MODEL_PATH>"
+    export MODEL_PATH="/root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-Flash-w8a8"
     export SERVER_ROLE_ARGS="--api-server-count 1"
     exec bash ./run_p.sh "$@"
     ```
@@ -646,7 +654,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
     #!/usr/bin/env bash
     export LOCAL_IP="<PREFILL_NODE1_IP>"
     export NIC_NAME="<PREFILL_NODE1_NIC>"
-    export MODEL_PATH="<YOUR_MODEL_PATH>"
+    export MODEL_PATH="/root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-Flash-w8a8"
     export SERVER_ROLE_ARGS="--headless"
     exec bash ./run_p.sh "$@"
     ```
@@ -761,7 +769,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
     #!/usr/bin/env bash
     export LOCAL_IP="<DECODE_NODE0_IP>"
     export NIC_NAME="<DECODE_NODE0_NIC>"
-    export MODEL_PATH="<YOUR_MODEL_PATH>"
+    export MODEL_PATH="/root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-Flash-w8a8"
     exec bash ./run_d.sh "$@"
     ```
 
@@ -771,7 +779,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
     #!/usr/bin/env bash
     export LOCAL_IP="<DECODE_NODE1_IP>"
     export NIC_NAME="<DECODE_NODE1_NIC>"
-    export MODEL_PATH="<YOUR_MODEL_PATH>"
+    export MODEL_PATH="/root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-Flash-w8a8"
     exec bash ./run_d.sh "$@"
     ```
 
@@ -1115,7 +1123,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
 
     Replace the final `--kv-transfer-config` argument in `run_p.sh` with the
     following fragment. Keep the remaining
-    Prefill flags from Section 5.2.2, including `--max-num-seqs 32`.
+    Prefill flags from the A3 Prefill instructions in Section 5.2, including `--max-num-seqs 32`.
 
     ```shell
       --kv-transfer-config \
@@ -1145,7 +1153,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     ```
 
     Replace the final `--kv-transfer-config` argument in `run_d.sh` with the
-    following fragment. Keep the remaining Decode flags from Section 5.2.3,
+    following fragment. Keep the remaining Decode flags from the A3 Decode instructions in Section 5.2,
     including `FULL_DECODE_ONLY` graph mode and the MTP configuration.
 
     ```shell
@@ -1201,11 +1209,11 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
          --client_ttl=120
        ```
 
-    2. Start Decode with the launcher command in Section 5.2.3. Wait until all
+    2. Start Decode with the launcher command in the A3 Decode instructions in Section 5.2. Wait until all
        sixteen Decode engines on ports `9900-9915` are ready.
-    3. Start Prefill with the launcher command in Section 5.2.2. Wait until both
+    3. Start Prefill with the launcher command in the A3 Prefill instructions in Section 5.2. Wait until both
        Prefill engines on ports `9081-9082` are ready.
-    4. Start the proxy from Section 5.2.4. Send inference requests to
+    4. Start the proxy from the A3 proxy instructions in Section 5.2. Send inference requests to
        `<PREFILL_NODE_IP>:8081` using the examples in Section 6.
 
     **Verify KV Cache Reuse**
@@ -1362,7 +1370,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     Proxy.
 
     1. In a separate terminal in the first Prefill container, start Mooncake
-       Master with the command from Section 5.4.1.4. Ensure port `50088` is
+       Master with the command from the A3 Start the Services instructions in Section 5.4. Ensure port `50088` is
        reachable from all four nodes.
     2. Start D0 and D1 with the launcher commands from Section 5.2
        (`--dp-rank-start 0` and `4`; four engines per node on ports
@@ -1376,10 +1384,206 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
 
     **Verify KV Cache Reuse**
 
-    Follow the verification steps in Section 5.4.1.5 through the proxy. The proxy
+    Follow the verification steps in the A3 Verify KV Cache Reuse instructions in Section 5.4 through the proxy. The proxy
     sends requests to the P0 API while the DP group uses both Prefill ranks. A
     repeated request can hit a local prefix cache, so confirm pool load/hit
     information on the other Prefill rank to verify shared pool reuse.
+
+### 5.5 Historical Prefill-Decode Self-Test Reference (vLLM 0.29.0)
+
+The following 1P1D configurations come from separate A3 and 950DT self-tests of vLLM 0.29.0. They are not interchangeable with the co-located commands above. Both tests used locally requantized checkpoints; if you substitute the published Modelers weights, revalidate accuracy and performance. The prefill and decode nodes must use the same checkpoint and be connected through their data-plane network. Replace the example IPs, interface names, and local model paths before starting.
+
+| Hardware | Prefill | Decode | Checkpoint used in the self-test |
+| --- | --- | --- | --- |
+| Atlas 800 A3 | DP16/TP1/EP16 | DP16/TP1/EP16 | `GLM-5.3-Flash-w8a8-requant-20260917` |
+| 950DT Products | DP1/TP8/EP8 | DP8/TP1/EP8 | `GLM-5.3-Flash-W8A8-MXFP8-0918` |
+
+The A3 self-test used vllm-ascend commit `a71b766ce6fc0a9669a412e15a5cf53f7f827093` with CANN 9.1.0; the 950DT self-test used commit `47ba29b72b5d0406f9c41e7b1fc6eb30e7a067a5` with CANN 9.2.0. These version-pinned records do not imply that the commands are verified on the current main branch.
+
+#### 5.5.1 Atlas 800 A3 (DP16/TP1 on Each Node)
+
+On each node, copy [`launch_online_dp.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/launch_online_dp.py) into a separate working directory and create `run_dp_template.sh` there. Set `local_ip` and `nic_name` to that node's data-plane address and interface. The launcher invokes the template once per DP rank and assigns one logical NPU and one HTTP port to each rank.
+
+Prefill node template:
+
+```bash
+#!/bin/bash
+local_ip="<P_DATA_IP>"
+nic_name="<P_DATA_IFACE>"
+export HCCL_IF_IP=$local_ip
+export GLOO_SOCKET_IFNAME=$nic_name
+export TP_SOCKET_IFNAME=$nic_name
+export HCCL_SOCKET_IFNAME=$nic_name
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_BUFFSIZE=1024
+export ASCEND_RT_VISIBLE_DEVICES=$1
+
+vllm serve /mnt/share/weights/GLM-5.3-Flash-w8a8-requant-20260917 \
+  --host 0.0.0.0 --port $2 \
+  --data-parallel-size $3 --data-parallel-rank $4 \
+  --data-parallel-address $5 --data-parallel-rpc-port $6 \
+  --tensor-parallel-size $7 --enable-expert-parallel \
+  --seed 1024 --served-model-name glm \
+  --safetensors-load-strategy prefetch \
+  --max-num-seqs 32 --max-model-len 133120 --max-num-batched-tokens 8192 \
+  --trust-remote-code --quantization ascend \
+  --limit-mm-per-prompt '{"image": 1, "video": 0}' \
+  --gpu-memory-utilization 0.85 \
+  --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}' \
+  --additional-config '{"enable_cpu_binding": "True", "multistream_overlap_shared_expert": true}' \
+  --kv-transfer-config '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_producer", "kv_port": "36680"}'
+```
+
+Decode node template:
+
+```bash
+#!/bin/bash
+local_ip="<D_DATA_IP>"
+nic_name="<D_DATA_IFACE>"
+export HCCL_IF_IP=$local_ip
+export GLOO_SOCKET_IFNAME=$nic_name
+export TP_SOCKET_IFNAME=$nic_name
+export HCCL_SOCKET_IFNAME=$nic_name
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_BUFFSIZE=1024
+export ASCEND_RT_VISIBLE_DEVICES=$1
+
+vllm serve /mnt/share/weights/GLM-5.3-Flash-w8a8-requant-20260917 \
+  --host 0.0.0.0 --port $2 \
+  --data-parallel-size $3 --data-parallel-rank $4 \
+  --data-parallel-address $5 --data-parallel-rpc-port $6 \
+  --tensor-parallel-size $7 --enable-expert-parallel \
+  --seed 1024 --served-model-name glm \
+  --safetensors-load-strategy prefetch \
+  --max-num-seqs 10 --max-model-len 133120 --max-num-batched-tokens 60 \
+  --trust-remote-code --quantization ascend \
+  --limit-mm-per-prompt '{"image": 1, "video": 0}' \
+  --gpu-memory-utilization 0.85 \
+  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+  --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}' \
+  --additional-config '{"multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_static_kernel": true}}' \
+  --kv-transfer-config '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer", "kv_port": "36580"}'
+```
+
+Start the two nodes from their respective working directories (each contains its own `run_dp_template.sh`):
+
+```bash
+# Prefill node
+P_DATA_IP=192.168.13.167
+python launch_online_dp.py --dp-size 16 --tp-size 1 --dp-size-local 16 \
+  --dp-rank-start 0 --dp-address "$P_DATA_IP" --dp-rpc-port 12325 \
+  --vllm-start-port 9081
+
+# Decode node
+D_DATA_IP=192.168.13.168
+python launch_online_dp.py --dp-size 16 --tp-size 1 --dp-size-local 16 \
+  --dp-rank-start 0 --dp-address "$D_DATA_IP" --dp-rpc-port 12325 \
+  --vllm-start-port 9900
+```
+
+Run the [disaggregated prefill proxy](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py) from the repository root. It uses prefill port 9081 and decode ports 9900–9915:
+
+```bash
+P_DATA_IP=192.168.13.167
+D_DATA_IP=192.168.13.168
+decoder_hosts=()
+decoder_ports=()
+for port in {9900..9915}; do
+  decoder_hosts+=("$D_DATA_IP")
+  decoder_ports+=("$port")
+done
+python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
+  --host 0.0.0.0 --port 8081 \
+  --prefiller-hosts "$P_DATA_IP" --prefiller-ports 9081 \
+  --decoder-hosts "${decoder_hosts[@]}" --decoder-ports "${decoder_ports[@]}"
+```
+
+Send requests to proxy port 8081, not directly to a P or D port.
+
+#### 5.5.2 950DT Products (Prefill TP8, Decode DP8/TP1)
+
+The prefill node starts one TP8 service:
+
+```bash
+local_ip="<P_DATA_IP>"
+nic_name="<P_DATA_IFACE>"
+export HCCL_IF_IP=$local_ip
+export GLOO_SOCKET_IFNAME=$nic_name
+export TP_SOCKET_IFNAME=$nic_name
+export HCCL_SOCKET_IFNAME=$nic_name
+export VLLM_VERSION=0.29.0
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export HCCL_BUFFSIZE=1024
+export HCCL_OP_EXPANSION_MODE="AIV"
+
+vllm serve /mnt/share/w00936111/GLM-5.3-Flash-W8A8-MXFP8-0918/GLM-5.3-Flash-W8A8-MXFP8-0918 \
+  --host 0.0.0.0 --port 9081 \
+  --data-parallel-size 1 --tensor-parallel-size 8 --enable-expert-parallel \
+  --seed 1024 --quantization ascend --served-model-name glm \
+  --max-num-seqs 32 --max-model-len 133120 --max-num-batched-tokens 8192 \
+  --trust-remote-code --gpu-memory-utilization 0.9 \
+  --limit-mm-per-prompt '{"image": 1, "video": 0}' \
+  --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}' \
+  --kv-transfer-config '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_producer", "kv_port": "28000"}'
+```
+
+On the decode node, create `run_dp_template.sh` with the following content and use the same `launch_online_dp.py` as above:
+
+```bash
+#!/bin/bash
+local_ip="<D_DATA_IP>"
+nic_name="<D_DATA_IFACE>"
+export HCCL_IF_IP=$local_ip
+export GLOO_SOCKET_IFNAME=$nic_name
+export TP_SOCKET_IFNAME=$nic_name
+export HCCL_SOCKET_IFNAME=$nic_name
+export VLLM_VERSION=0.29.0
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export HCCL_BUFFSIZE=1024
+export HCCL_OP_EXPANSION_MODE="AIV"
+export ASCEND_RT_VISIBLE_DEVICES=$1
+
+vllm serve /mnt/share/w00936111/GLM-5.3-Flash-W8A8-MXFP8-0918/GLM-5.3-Flash-W8A8-MXFP8-0918 \
+  --host 0.0.0.0 --port $2 \
+  --data-parallel-size $3 --data-parallel-rank $4 \
+  --data-parallel-address $5 --data-parallel-rpc-port $6 \
+  --tensor-parallel-size $7 --enable-expert-parallel \
+  --seed 1024 --quantization ascend --served-model-name glm \
+  --max-num-seqs 10 --max-model-len 133120 --max-num-batched-tokens 60 \
+  --trust-remote-code --gpu-memory-utilization 0.9 \
+  --limit-mm-per-prompt '{"image": 1, "video": 0}' \
+  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+  --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}' \
+  --kv-transfer-config '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer", "kv_port": "28100"}'
+```
+
+```bash
+D_DATA_IP="your-decode-node-data-ip"
+python launch_online_dp.py --dp-size 8 --tp-size 1 --dp-size-local 8 \
+  --dp-rank-start 0 --dp-address "$D_DATA_IP" --dp-rpc-port 12325 \
+  --vllm-start-port 9900
+```
+
+The 950DT proxy uses prefill port 9081 and decode ports 9900–9907:
+
+```bash
+P_DATA_IP="your-prefill-node-data-ip"
+D_DATA_IP="your-decode-node-data-ip"
+decoder_hosts=()
+decoder_ports=()
+for port in {9900..9907}; do
+  decoder_hosts+=("$D_DATA_IP")
+  decoder_ports+=("$port")
+done
+python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
+  --host 0.0.0.0 --port 8000 \
+  --prefiller-hosts "$P_DATA_IP" --prefiller-ports 9081 \
+  --decoder-hosts "${decoder_hosts[@]}" --decoder-ports "${decoder_ports[@]}"
+```
+
+Send requests to proxy port 8000, not directly to a P or D port. The original self-tests used 8192 input tokens, 1024 output tokens, eight requests at concurrency one and zero prefix-cache hit rate; each reported an average TPOT of 11.5 ms. Treat these figures as self-test observations, not performance gates.
 
 ## 6 Functional Verification
 
