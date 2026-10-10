@@ -20,7 +20,6 @@
 from typing import Any
 
 import numpy as np
-
 import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.triton_utils import tl, triton
