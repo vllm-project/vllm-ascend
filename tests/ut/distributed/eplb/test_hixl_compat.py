@@ -16,6 +16,19 @@ from tests.ut.distributed.eplb.test_hixl_communicator import _Engine, _Tensor
 from vllm_ascend.distributed.eplb import eplb_communicator, hixl_compat
 
 
+@pytest.mark.parametrize("finalizing", [False, True])
+def test_destructors_do_not_call_hixl_after_interpreter_shutdown(monkeypatch, finalizing):
+    monkeypatch.setattr(sys, "is_finalizing", lambda: finalizing)
+    communicator = eplb_communicator.AscendHixlEplbCommunicator.__new__(eplb_communicator.AscendHixlEplbCommunicator)
+    communicator.close = MagicMock()
+    engine = hixl_compat.Hixl.__new__(hixl_compat.Hixl)
+    engine._close = MagicMock()
+    communicator.__del__()
+    engine.__del__()
+    assert communicator.close.call_count == (0 if finalizing else 1)
+    assert engine._close.call_count == (0 if finalizing else 1)
+
+
 def test_compat_layout_matches_probed_cann_abi():
     assert ctypes.sizeof(hixl_compat.MemDesc) == 144
     assert ctypes.sizeof(hixl_compat.TransferOpDesc) == 24
@@ -34,7 +47,8 @@ def test_compat_layout_matches_probed_cann_abi():
     desc = hixl_compat.TransferOpDesc(local_addr=1, remote_addr=2, len=3)
     assert (desc.local_addr, desc.remote_addr, desc.len) == (1, 2, 3)
     mem_desc = hixl_compat.MemDesc(4096, 8192)
-    assert (mem_desc.addr, mem_desc.len, mem_desc.remote_accessible) == (4096, 8192, True)
+    assert (mem_desc.addr, mem_desc.len) == (4096, 8192)
+    assert bytes(mem_desc.reserved) == bytes(128)
 
 
 def test_compat_empty_options_map_self_points_at_header():
@@ -74,6 +88,11 @@ def test_resolve_raises_when_both_hixl_paths_are_unavailable(monkeypatch):
 
 def test_hixl_communicator_reads_through_hixl_compat(monkeypatch):
     engine = _Engine()
+    monkeypatch.setitem(
+        sys.modules,
+        "acl",
+        SimpleNamespace(rt=SimpleNamespace(get_context=lambda: (1, 0), set_context=lambda _context: 0)),
+    )
     monkeypatch.setitem(sys.modules, "hixl", None)
     monkeypatch.setattr(hixl_compat, "ensure_available", MagicMock())
     monkeypatch.setattr(hixl_compat, "Hixl", lambda: engine)

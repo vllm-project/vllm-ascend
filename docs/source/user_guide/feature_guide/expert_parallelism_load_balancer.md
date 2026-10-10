@@ -83,8 +83,7 @@ EPLB is not recommended in the following scenarios because the load-balancing be
 
 Select MRv2 explicitly when the model or environment does not select it by
 default. Enable expert parallelism and upstream EPLB. Ascend selects STAIR
-as the upstream policy default and automatically uses HIXL when available,
-falling back to Gloo otherwise. Movement is asynchronous only. The STAIR
+as the upstream policy default and automatically uses HIXL. Missing or inconsistent HIXL bindings cause startup to fail. Movement is asynchronous only. The STAIR
 defaults do not require tuning.
 
 ```bash
@@ -116,7 +115,7 @@ MRv2 uses the upstream `EPLBConfig` fields:
 | `policy` | `stair` on Ascend | Select `stair` for the Ascend policy or `default` for upstream-policy comparison experiments. |
 | `log_balancedness` | `false` | Log expert balancedness metrics. |
 | `log_balancedness_interval` | `1` | Interval between balancedness log entries. |
-| `communicator` | Auto (`None`) on Ascend | Leave unset to use HIXL when available and Gloo otherwise; set `hixl` or `torch_gloo` to select a backend explicitly. |
+| `communicator` | Auto (`None`) on Ascend | Leave unset to use HIXL; set `hixl` or `torch_gloo` to select a backend explicitly. |
 
 These fields may also be passed together as JSON through `--eplb-config`.
 They must not be placed in `--additional-config` for MRv2.
@@ -126,17 +125,12 @@ distributed with CANN HIXL or vllm_ascend's ctypes binding, which drives
 the local toolkit libraries directly (`libcann_hixl.so`, for CANN
 distributions that ship the library without the package). The ranks reach
 a group-wide consensus at startup; if any rank has no usable HIXL binding,
-or the binding classes differ between ranks, the whole group falls back to
-`torch_gloo` CPU staging and the decision is logged.
+or the binding classes differ between ranks, startup fails. Explicit `hixl` selection also requires this consensus.
 
 STAIR leaves both per-rank and cross-node migration limits unrestricted by
-default (`-1`) so that HIXL can use the available bandwidth. When the
-communicator falls back to Gloo automatically, Ascend clamps only the
-limits you have not set explicitly to `1` to avoid excessive CPU-staged
-transfers; explicitly configured values are kept (for example
-`cross_node_transfer_limit: 0` still forbids cross-node migrations) and a
-warning is logged. Explicitly setting `torch_gloo` or `hixl` also keeps
-your configured limits untouched.
+default (`-1`) so that HIXL can use the available bandwidth. Configured limits remain unchanged for both explicit and automatic communicator selection.
+
+Weight offload and prefetch are incompatible with upstream EPLB on Ascend. Enabling EPLB with `cpu_offload_gb > 0` or `offload_group_size > 0` raises a configuration error. Sleep/wake uses a separate lifecycle: EPLB saves placement and closes its registrations before sleep, then restores metadata and rebuilds registration after the required memory has been remapped. Level-2 sleep requires reloading weights before inference. Checkpoint reload resets placement to the checkpoint layout; kernel-format reload preserves physical-slot placement.
 
 Ascend extends the upstream `policy` field without adding a second selector.
 For example, use `--eplb-config.policy default` to run the upstream policy;

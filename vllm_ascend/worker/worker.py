@@ -21,6 +21,7 @@ import copy
 import gc
 import inspect
 import logging
+from collections.abc import Iterable
 from contextlib import AbstractContextManager, nullcontext
 from types import NoneType
 from typing import Any
@@ -84,6 +85,7 @@ from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.device_allocator.sleep_mem_optimized import SleepWakeupManager
+from vllm_ascend.distributed.eplb.eplb_state import AscendEplbState
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import uses_sfa_dspark_kv_transfer
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
     build_layerwise_cache_layout,
@@ -175,7 +177,7 @@ class NPUWorker(WorkerBase):
         self.npugraph_memory_bytes = 0
         if vllm_config.model_config and vllm_config.model_config.enable_sleep_mode:
             # Buffers saved before sleep
-            self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
+            self._sleep_saved_buffers: dict[str, tuple[torch.Tensor, str | None]] = {}
         self.sleep_wakeup_manager = SleepWakeupManager(vllm_config, self, lambda: getattr(self, "model_runner", None))
 
         # Weight transfer engine is created in `load_model` once the model
@@ -244,6 +246,25 @@ class NPUWorker(WorkerBase):
                     return
 
     def sleep(self, level: int = 1) -> None:
+        state = getattr(self.model_runner, "eplb_state", None)
+        allocator = CaMemAllocator.get_instance()
+        if isinstance(state, AscendEplbState):
+            regions = [
+                region
+                for ms in state.model_states.values()
+                for region in getattr(ms.communicator, "_registered_regions", [])
+            ]
+            regions.extend((tensor.data_ptr(), tensor.nbytes) for tensor in state.lifecycle_tensors())
+            self._eplb_pending_wake_tags = {
+                data.tag
+                for data in allocator.pointer_to_data.values()
+                if data.tag != CaMemAllocator.sleep_persistent_tag
+                and any(
+                    start < data.handle[2] + data.handle[1] and data.handle[2] < start + size for start, size in regions
+                )
+            }
+            state.close()
+            state.save_sleep_state()
         free_bytes_before_sleep = torch.npu.mem_get_info()[0]
         # Level-1 only offloads the weights pool. Persistent metadata such as
         # the DSA Hadamard matrix is allocated outside the kv_cache pool, so it
@@ -252,14 +273,28 @@ class NPUWorker(WorkerBase):
             self._sleep_saved_buffers = {}
         else:
             model = self.model_runner.model
-            self._sleep_saved_buffers = {name: buffer.cpu().clone() for name, buffer in model.named_buffers()}
+            self._sleep_saved_buffers = {
+                name: (
+                    buffer.cpu().clone(),
+                    next(
+                        (
+                            data.tag
+                            for data in allocator.pointer_to_data.values()
+                            if buffer.device.type == "npu"
+                            and data.tag != CaMemAllocator.sleep_persistent_tag
+                            and data.handle[2] <= buffer.data_ptr() < data.handle[2] + data.handle[1]
+                        ),
+                        None,
+                    ),
+                )
+                for name, buffer in model.named_buffers()
+            }
 
         rl_config = get_ascend_config().rl_config
         cleanup_enabled = rl_config.enabled and rl_config.sleep_mode_extra_cleanup
         if cleanup_enabled:
             self.sleep_wakeup_manager.sleep()
 
-        allocator = CaMemAllocator.get_instance()
         allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
         free_bytes_after_sleep, total = torch.npu.mem_get_info()
         freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
@@ -274,6 +309,9 @@ class NPUWorker(WorkerBase):
         )
 
     def wake_up(self, tags: list[str] | None = None) -> None:
+        state = getattr(self.model_runner, "eplb_state", None)
+        if isinstance(state, AscendEplbState):
+            state.raise_if_close_failed()
         nz_mode = get_ascend_config().weight_nz_mode
         if nz_mode:
             raise ValueError(
@@ -289,14 +327,27 @@ class NPUWorker(WorkerBase):
         if len(self._sleep_saved_buffers):
             model = self.model_runner.model
             for name, buffer in model.named_buffers():
-                if name in self._sleep_saved_buffers:
-                    buffer.data.copy_(self._sleep_saved_buffers[name].data)
-            self._sleep_saved_buffers = {}
+                saved = self._sleep_saved_buffers.get(name)
+                if saved is not None and (tags is None or saved[1] is None or saved[1] in tags):
+                    buffer.data.copy_(saved[0])
+                    del self._sleep_saved_buffers[name]
 
         rl_config = get_ascend_config().rl_config
         cleanup_enabled = rl_config.enabled and rl_config.sleep_mode_extra_cleanup
         if cleanup_enabled:
             self.sleep_wakeup_manager.wakeup(tags)
+
+        pending_tags = getattr(self, "_eplb_pending_wake_tags", None)
+        if pending_tags is not None:
+            if tags is None:
+                pending_tags.clear()
+            else:
+                pending_tags.difference_update(tags)
+            if not pending_tags:
+                state = getattr(self.model_runner, "eplb_state", None)
+                if isinstance(state, AscendEplbState):
+                    state.resume()
+                del self._eplb_pending_wake_tags
 
     def _check_weight_transfer_engine(self) -> None:
         if self.weight_transfer_engine is None:
@@ -363,6 +414,9 @@ class NPUWorker(WorkerBase):
         self._weight_update_active = False
 
     def shutdown(self) -> None:
+        state = getattr(getattr(self, "model_runner", None), "eplb_state", None)
+        if isinstance(state, AscendEplbState):
+            state.close()
         if ensure_kv_transfer_shutdown is not None:
             ensure_kv_transfer_shutdown()
 
@@ -1301,8 +1355,22 @@ class NPUWorker(WorkerBase):
     def update_config(self, overrides: dict[str, Any]) -> None:
         self.model_runner.update_config(overrides)
 
-    def reload_weights(self, *args, **kwargs) -> None:
-        self.model_runner.reload_weights(*args, **kwargs)
+    def reload_weights(
+        self,
+        weights_iterator: Iterable[tuple[str, torch.Tensor]] | None = None,
+        weights_path: str | None = None,
+        is_checkpoint_format: bool = True,
+    ) -> None:
+        state = getattr(self.model_runner, "eplb_state", None)
+        if isinstance(state, AscendEplbState):
+            state.close()
+        self.model_runner.reload_weights(
+            weights_iterator=weights_iterator, weights_path=weights_path, is_checkpoint_format=is_checkpoint_format
+        )
+        if isinstance(state, AscendEplbState):
+            state.finish_weight_reload(is_checkpoint_format)
+            if not getattr(self, "_eplb_pending_wake_tags", None):
+                state.resume()
 
     def check_health(self) -> None:
         import subprocess
