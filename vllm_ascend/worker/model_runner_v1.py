@@ -213,6 +213,7 @@ from vllm_ascend.utils import (
     global_stream,
     is_c8_mxfp_kv_quant,
     is_hidden_state_cache_spec,
+    is_pd_decode_recompute_scheduler_enabled,
     is_score_encoder_cache_manager,
     kv_cache_spec_uses_packed_sfa_main_cache,
     kv_cache_spec_uses_sparse_sfa_c8,
@@ -3341,11 +3342,18 @@ class NPUModelRunner(GPUModelRunner):
         has_initial_state = np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] > 0)
         if self.use_dcp or self.model_config.is_hybrid:
             # Mamba prompt chunks must retain prefill state semantics even when
-            # their width matches the speculative decode graph. DCP also
-            # requires the full prompt to be computed before uniform decode.
-            has_initial_state = has_initial_state and np.all(
-                self.input_batch.num_computed_tokens_cpu[:num_reqs] >= self.input_batch.num_prompt_tokens[:num_reqs]
-            )
+            # their width matches the speculative decode graph. PD recompute
+            # starts from transferred state at N-1 and recomputes the last token.
+            num_computed_tokens = self.input_batch.num_computed_tokens_cpu[:num_reqs]
+            num_prompt_tokens = self.input_batch.num_prompt_tokens[:num_reqs]
+            done_prefilling = num_computed_tokens >= num_prompt_tokens
+            if (
+                not self.use_dcp
+                and self.model_config.is_hybrid
+                and is_pd_decode_recompute_scheduler_enabled(self.vllm_config)
+            ):
+                done_prefilling |= num_computed_tokens == num_prompt_tokens - 1
+            has_initial_state = has_initial_state and np.all(done_prefilling)
         uniform_decode = (
             (
                 has_initial_state
