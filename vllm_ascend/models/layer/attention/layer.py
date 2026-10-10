@@ -208,6 +208,7 @@ class DSAAttention(nn.Module, AttentionLayerBase):
             # The scheduler operates in raw-token units. Ascend kernels keep
             # using the compressed page exposed by storage_block_size.
             block_size=storage_block_size * self.compress_ratio,
+            num_heads=self.n_local_heads,
             num_kv_heads=1,
             head_size=cached_head_size,
             dtype=kv_cache_dtype,

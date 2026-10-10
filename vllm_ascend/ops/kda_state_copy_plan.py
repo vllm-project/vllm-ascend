@@ -195,17 +195,13 @@ class KDAStateCopyPlan:
         if any(t.data_ptr() % 16 for t in tensors[1:]):
             raise RuntimeError("unaligned normalized KDA buffer")
         with nullcontext() if torch.npu.current_device() == state.device.index else torch.npu.device(state.device):
-            # CompiledKernel.__getitem__ bypasses the Triton JIT argument binder.
-            # The Ascend launcher stub retains the complete bound signature,
-            # including tl.constexpr arguments. Therefore the direct launch must
-            # use the same 12-argument ordering as the preparation-time launch.
+            # Triton binds constexpr values at compile time, so a direct launch
+            # passes runtime arguments only. The Ascend launcher does not accept
+            # TO_CACHE, HAS_FLAGS, or BLOCK_SIZE again.
             self._compiled[indices.dtype, to_cache][(indices.numel(), self._tiles, 1)](
                 *tensors,
                 *self._scalars,
                 0 if to_cache else 1,
-                to_cache,
-                not to_cache,
-                DEFAULT_KDA_BLOCK_SIZE,
             )
 
     def gather(self, state: torch.Tensor, indices: torch.Tensor, flags: torch.Tensor | None) -> torch.Tensor:
