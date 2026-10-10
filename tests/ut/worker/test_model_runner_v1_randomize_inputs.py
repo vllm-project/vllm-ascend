@@ -10,12 +10,13 @@ import torch
 from vllm.config import CUDAGraphMode
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
+from vllm_ascend._310p.model_runner_310p import NPUModelRunner310
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
-def _dummy_runner(use_embeds):
-    runner = NPUModelRunner.__new__(NPUModelRunner)
+def _dummy_runner(use_embeds, runner_cls):
+    runner = runner_cls.__new__(runner_cls)
     runner.kvpp = SimpleNamespace(scheduler=object(), prepare_forward=lambda _: None, complete_forward=lambda: None)
     runner.uniform_decode_query_len = 1
     runner.scheduler_config = SimpleNamespace(max_num_batched_tokens=4, max_num_seqs=4)
@@ -52,10 +53,11 @@ def _dummy_runner(use_embeds):
     return runner
 
 
+@pytest.mark.parametrize("runner_cls", [NPUModelRunner, NPUModelRunner310])
 @pytest.mark.parametrize("randomize_inputs", [False, True])
 @pytest.mark.parametrize("use_embeds", [False, True])
-def test_v1_dummy_randomization_is_applied_during_forward_and_restored(randomize_inputs, use_embeds):
-    runner = _dummy_runner(use_embeds)
+def test_v1_dummy_randomization_is_applied_during_forward_and_restored(randomize_inputs, use_embeds, runner_cls):
+    runner = _dummy_runner(use_embeds, runner_cls)
     inputs = runner.inputs_embeds.gpu if use_embeds else runner.input_ids.gpu
     expected_value = (2 if use_embeds else 7) if randomize_inputs else 0
 
@@ -107,10 +109,11 @@ def test_v1_profile_passes_randomization_to_mc2_and_upstream(randomize_inputs):
     assert runner._dummy_run.call_count == 2
 
 
-def test_upstream_v1_profile_dispatch_accepts_new_randomize_keyword():
+@pytest.mark.parametrize("runner_cls", [NPUModelRunner, NPUModelRunner310])
+def test_upstream_v1_profile_dispatch_accepts_new_randomize_keyword(runner_cls):
     import inspect
 
-    runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner = runner_cls.__new__(runner_cls)
     runner.supports_mm_inputs = False
     runner.max_num_tokens = 4
     observed = []
@@ -121,7 +124,7 @@ def test_upstream_v1_profile_dispatch_accepts_new_randomize_keyword():
     def dummy_dispatch(*args, **kwargs):
         # Bind against the actual Ascend override before stopping ahead of
         # device execution. The new upstream profile always supplies this kwarg.
-        inspect.signature(NPUModelRunner._dummy_run).bind(runner, *args, **kwargs)
+        inspect.signature(runner_cls._dummy_run).bind(runner, *args, **kwargs)
         observed.append((args, kwargs))
         raise ProfileReachedDummy
 
