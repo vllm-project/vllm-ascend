@@ -225,6 +225,9 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
             return attn_metadata, slot_mappings
 
         assert isinstance(input_batch, AscendInputBatch)
+        num_reqs = input_batch.num_reqs
+        query_start_loc_np = input_batch.query_start_loc_np
+        seq_lens_cpu = input_batch.seq_lens_cpu_upper_bound
         if input_batch.is_dummy:
             # Replicated drafts need local dummy slots instead of target PCP slots.
             self.block_tables.get_dummy_block_tables(num_reqs_padded)
@@ -241,11 +244,27 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
                 input_batch.positions,
                 num_tokens_padded=num_tokens_padded,
             )
-            # TODO: Remove this early return once FIA supports padded Query tensors
-            # whose token count exceeds the cumulative query length. Keep the
-            # mapping refresh above when unifying metadata construction.
+            # These FULL backends normally reuse target metadata. A sharded
+            # target instead needs metadata for the restored global draft.
             if cudagraph_runtime_mode == CUDAGraphMode.FULL and self.attn_architecture in ("MLA", "GQA"):
-                return attn_metadata, slot_mappings
+                pcp_manager = getattr(self, "pcp_manager", None)
+                if pcp_manager is None or not pcp_manager.is_decode_sharded:
+                    return attn_metadata, slot_mappings
+                if int(query_start_loc_np[num_reqs]) < num_tokens_padded:
+                    # Give graph-padding tokens dummy requests with no cached KV.
+                    assert num_reqs_padded > num_reqs
+                    padding_boundaries = np.linspace(
+                        query_start_loc_np[num_reqs], num_tokens_padded, num_reqs_padded - num_reqs + 1, dtype=np.int32
+                    )
+                    query_start_loc_np = np.concatenate((query_start_loc_np[:num_reqs], padding_boundaries))
+                    # Keep CPU and GPU metadata in the same global layout.
+                    self.input_buffers.query_start_loc[: num_reqs_padded + 1].copy_(
+                        torch.from_numpy(query_start_loc_np)
+                    )
+                    padded_seq_lens_cpu = torch.zeros(num_reqs_padded, dtype=seq_lens_cpu.dtype)
+                    padded_seq_lens_cpu[:num_reqs].copy_(seq_lens_cpu[:num_reqs])
+                    seq_lens_cpu = padded_seq_lens_cpu
+                    num_reqs = num_reqs_padded
 
         slot_mappings = build_slot_mappings_by_layer(
             slot_mappings_tensor,
@@ -254,14 +273,14 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         # This is draft prefill, not the later one-token-per-request decode.
         # Query lengths may differ, so do not use _build_uniform_attn_metadata.
         attn_metadata = self._build_attn_metadata(
-            num_reqs=input_batch.num_reqs,
+            num_reqs=num_reqs,
             batch_desc=BatchExecutionDescriptor(
                 cg_mode=cudagraph_runtime_mode,
                 num_tokens=num_tokens_padded,
                 num_reqs=num_reqs_padded,
             ),
-            query_start_loc_np=input_batch.query_start_loc_np,
-            seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound,
+            query_start_loc_np=query_start_loc_np,
+            seq_lens_cpu_upper_bound=seq_lens_cpu,
             step=0,
         )
         return attn_metadata, slot_mappings
