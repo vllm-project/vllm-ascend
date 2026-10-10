@@ -79,7 +79,7 @@ on:
       mem_deps:
         description: 'Memcache and Memfabric versions (JSON object: {"memcache":["date","version"],"memfabric":["date","version"]})'
         required: false
-        default: '{"memcache":["20260923.6","1.3.0"],"memfabric":["20260923.6","1.3.0"]}'
+        default: '{"memcache":["20261009.15","1.3.0"],"memfabric":["20261009.10","1.3.0"]}'
         type: string
       torch_npu:
         description: 'Torch NPU version and date (JSON array: ["date", "version"])'
@@ -164,10 +164,10 @@ jobs:
       schedule_tag_pattern: 'main'
       build_type: ${{ needs.setup-matrix.outputs.build_type }}
       cann_version: ${{ fromJSON(inputs.cann || '["swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann", "9.1.0_20260731131545"]')[1] }}
-      memcache_version: ${{ fromJSON(inputs.mem_deps || '{"memcache":["20260923.6","1.3.0"],"memfabric":["20260923.6","1.3.0"]}').memcache[1] }}
-      memcache_date: ${{ fromJSON(inputs.mem_deps || '{"memcache":["20260923.6","1.3.0"],"memfabric":["20260923.6","1.3.0"]}').memcache[0] }}
-      memfabric_version: ${{ fromJSON(inputs.mem_deps || '{"memcache":["20260923.6","1.3.0"],"memfabric":["20260923.6","1.3.0"]}').memfabric[1] }}
-      memfabric_date: ${{ fromJSON(inputs.mem_deps || '{"memcache":["20260923.6","1.3.0"],"memfabric":["20260923.6","1.3.0"]}').memfabric[0] }}
+      memcache_version: ${{ fromJSON(inputs.mem_deps || '{"memcache":["20261009.15","1.3.0"],"memfabric":["20261009.10","1.3.0"]}').memcache[1] }}
+      memcache_date: ${{ fromJSON(inputs.mem_deps || '{"memcache":["20261009.15","1.3.0"],"memfabric":["20261009.10","1.3.0"]}').memcache[0] }}
+      memfabric_version: ${{ fromJSON(inputs.mem_deps || '{"memcache":["20261009.15","1.3.0"],"memfabric":["20261009.10","1.3.0"]}').memfabric[1] }}
+      memfabric_date: ${{ fromJSON(inputs.mem_deps || '{"memcache":["20261009.15","1.3.0"],"memfabric":["20261009.10","1.3.0"]}').memfabric[0] }}
       torch_npu_version: ${{ fromJSON(inputs.torch_npu || '["20260926.5", "26.2.0"]')[1] }}
       torch_npu_date: ${{ fromJSON(inputs.torch_npu || '["20260926.5", "26.2.0"]')[0] }}
       triton_ascend_version: ${{ fromJSON(inputs.triton_ascend || '["20260923230212", "3.6.0%2Bdev20260923230212"]')[0] }}
@@ -212,10 +212,10 @@ jobs:
       branch_ref: ''
       build_type: ${{ needs.setup-matrix.outputs.build_type }}
       cann_version: ${{ fromJSON(inputs.cann || '["swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann", "9.1.0_20260731131545"]')[1] }}
-      memcache_version: ${{ fromJSON(inputs.mem_deps || '{"memcache":["20260923.6","1.3.0"],"memfabric":["20260923.6","1.3.0"]}').memcache[1] }}
-      memcache_date: ${{ fromJSON(inputs.mem_deps || '{"memcache":["20260923.6","1.3.0"],"memfabric":["20260923.6","1.3.0"]}').memcache[0] }}
-      memfabric_version: ${{ fromJSON(inputs.mem_deps || '{"memcache":["20260923.6","1.3.0"],"memfabric":["20260923.6","1.3.0"]}').memfabric[1] }}
-      memfabric_date: ${{ fromJSON(inputs.mem_deps || '{"memcache":["20260923.6","1.3.0"],"memfabric":["20260923.6","1.3.0"]}').memfabric[0] }}
+      memcache_version: ${{ fromJSON(inputs.mem_deps || '{"memcache":["20261009.15","1.3.0"],"memfabric":["20261009.10","1.3.0"]}').memcache[1] }}
+      memcache_date: ${{ fromJSON(inputs.mem_deps || '{"memcache":["20261009.15","1.3.0"],"memfabric":["20261009.10","1.3.0"]}').memcache[0] }}
+      memfabric_version: ${{ fromJSON(inputs.mem_deps || '{"memcache":["20261009.15","1.3.0"],"memfabric":["20261009.10","1.3.0"]}').memfabric[1] }}
+      memfabric_date: ${{ fromJSON(inputs.mem_deps || '{"memcache":["20261009.15","1.3.0"],"memfabric":["20261009.10","1.3.0"]}').memfabric[0] }}
       torch_npu_version: ${{ fromJSON(inputs.torch_npu || '["20260926.5", "26.2.0"]')[1] }}
       torch_npu_date: ${{ fromJSON(inputs.torch_npu || '["20260926.5", "26.2.0"]')[0] }}
       triton_ascend_version: ${{ fromJSON(inputs.triton_ascend || '["20260923230212", "3.6.0%2Bdev20260923230212"]')[0] }}
