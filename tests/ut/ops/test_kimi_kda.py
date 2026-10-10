@@ -404,7 +404,7 @@ def test_prefill_fuses_raw_gate_and_updates_v_first_state(lower_bound):
 
     with (
         patch("vllm_ascend.ops.kda.l2norm_fwd", side_effect=lambda x: x),
-        patch("vllm_ascend.ops.kda.chunk_kda_fwd", new=chunk_kda_fwd),
+        patch.object(torch.ops._C_ascend, "chunk_kda_fwd_ascendc", new=chunk_kda_fwd, create=True),
     ):
         actual = attention._run_prefill(
             q,
@@ -419,6 +419,7 @@ def test_prefill_fuses_raw_gate_and_updates_v_first_state(lower_bound):
         )
 
     assert actual is output
+    chunk_kda_fwd.assert_called_once()
     assert chunk_kda_fwd.call_args.args[3] is raw_gate
     assert chunk_kda_fwd.call_args.kwargs["use_gate_in_kernel"] is True
     assert chunk_kda_fwd.call_args.kwargs["state_v_first"] is True

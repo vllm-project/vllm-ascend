@@ -21,7 +21,10 @@ import math
 import pytest
 import torch
 import torch_npu  # noqa: F401
-from fla_npu.ops.ascendc import chunk_kda_fwd
+
+from vllm_ascend.utils import enable_custom_op
+
+enable_custom_op()
 
 CHUNK_KDA_OUTPUT_NAMES = (
     "o",
@@ -183,7 +186,7 @@ def test_kimi_k3_safe_gate_prefill_and_transposed_state_layout():
     chunk_indices = (0, 0)
 
     initial_state_kv = cache_vk.transpose(-1, -2).contiguous()
-    got = chunk_kda_fwd(
+    got = torch.ops._C_ascend.chunk_kda_fwd_ascendc(
         q,
         k,
         v,
@@ -206,7 +209,7 @@ def test_kimi_k3_safe_gate_prefill_and_transposed_state_layout():
         state_v_first=True,
     )
 
-    retained = chunk_kda_fwd(
+    retained = torch.ops._C_ascend.chunk_kda_fwd_ascendc(
         q,
         k,
         v.contiguous(),
@@ -270,7 +273,7 @@ def test_kimi_k3_a5_multichunk_all_outputs_match_reference(tokens, heads):
     cache_vk = torch.randn(1, heads, head_dim, head_dim, dtype=torch.float32, device="npu") * 0.01
     chunk_indices = tuple(value for chunk_id in range(math.ceil(tokens / 64)) for value in (0, chunk_id))
 
-    result = chunk_kda_fwd(
+    result = torch.ops._C_ascend.chunk_kda_fwd_ascendc(
         q,
         k,
         v.contiguous(),
@@ -292,7 +295,7 @@ def test_kimi_k3_a5_multichunk_all_outputs_match_reference(tokens, heads):
         return_intermediate_states=False,
         state_v_first=True,
     )
-    retained = chunk_kda_fwd(
+    retained = torch.ops._C_ascend.chunk_kda_fwd_ascendc(
         q,
         k,
         v.contiguous(),
@@ -374,7 +377,7 @@ def test_kimi_k3_a5_model_prefill_profile_shape(layout):
     cu_seqlens = (0, tokens)
     chunk_indices = tuple(value for chunk_id in range(math.ceil(tokens / 64)) for value in (0, chunk_id))
 
-    result = chunk_kda_fwd(
+    result = torch.ops._C_ascend.chunk_kda_fwd_ascendc(
         q,
         k,
         v.contiguous(),
@@ -396,7 +399,7 @@ def test_kimi_k3_a5_model_prefill_profile_shape(layout):
         return_intermediate_states=False,
         state_v_first=True,
     )
-    retained = chunk_kda_fwd(
+    retained = torch.ops._C_ascend.chunk_kda_fwd_ascendc(
         q,
         k,
         v.contiguous(),
