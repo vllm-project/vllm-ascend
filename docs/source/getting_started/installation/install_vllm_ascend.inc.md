@@ -139,7 +139,7 @@ Choose one of the following methods to install `vllm` and `vllm-ascend`. PyTorch
         build artifacts or caches from the previous CANN environment.
 
         Run the following commands from the vLLM Ascend repository root
-        after configuring the updated CANN environment:
+        after configuring the selected CANN environment:
 
         ```bash
         # Remove previous build artifacts and caches.
@@ -155,7 +155,7 @@ Choose one of the following methods to install `vllm` and `vllm-ascend`. PyTorch
         Clear the custom cache separately after verifying it is safe to
         remove, especially if it is shared by other builds.
 
-        Ensure that the updated CANN and `torch_npu` versions are compatible
+        Ensure that the selected CANN and `torch_npu` versions are compatible
         with vLLM Ascend. Rebuilding cannot resolve version incompatibilities.
 
 Finally, handle `triton` and `triton-ascend` according to the hardware:
