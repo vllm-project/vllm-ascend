@@ -30,6 +30,10 @@ The support matrix records the maximum verified capability for this model. The s
 | `Qwen3.5-397B-A17B-w8a8-mxfp8` (quantized version) | 1 950DT Products(96GB x 8) node | [ModelScope](https://modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w8a8-mxfp8) |
 | `Qwen3.5-397B-A17B-w4a4-mxfp4` (quantized version) | 1 950DT Products(96GB x 8) node | [ModelScope](https://modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w4a4-mxfp4) |
 
+:::{note}
+When deploying C8-quantized model weights on A5 (950DT Products), add `--kv-cache-dtype mxfp8` to the `vllm serve` command.
+:::
+
 It is recommended to download the model weight to a shared directory across multiple nodes, such as `/root/.cache/`, so that all serving nodes can load the same path.
 
 >**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
@@ -191,6 +195,7 @@ Single-node deployment runs both Prefill and Decode on the same node. It is suit
     export HCCL_OP_EXPANSION_MODE="AIV"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1
+    export VLLM_USE_V2_MODEL_RUNNER=0
 
     # Reduce memory fragmentation and avoid out-of-memory errors.
 
@@ -214,7 +219,7 @@ Single-node deployment runs both Prefill and Decode on the same node. It is suit
       --async-scheduling \
       --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3}' \
       --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-      --additional-config '{"enable_cpu_binding":true}'
+      --additional-config '{"enable_cpu_binding": true, "enable_fused_mc2": 2, "enable_flashcomm1": true}'
     ```
 
 === "A3 series"
@@ -230,6 +235,7 @@ Single-node deployment runs both Prefill and Decode on the same node. It is suit
     export HCCL_OP_EXPANSION_MODE="AIV"
     export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export VLLM_USE_V2_MODEL_RUNNER=0
 
     # Reduce memory fragmentation and avoid out-of-memory errors.
 
@@ -256,7 +262,7 @@ Single-node deployment runs both Prefill and Decode on the same node. It is suit
       --enable-prefix-caching \
       --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
       --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-      --additional-config '{"enable_cpu_binding":true, "enable_fused_mc2":1}'
+      --additional-config '{"enable_cpu_binding": true, "enable_fused_mc2": 2, "enable_flashcomm1": true}'
     ```
 
 === "A2 series"
@@ -277,7 +283,10 @@ Common Issues Tip: If the service fails to start, HBM is insufficient, or reques
 - `--quantization ascend` enables Ascend quantization for the W8A8 model. Remove this option when deploying the BF16 model.
 - `--speculative-config` enables Qwen3.5 MTP speculative decoding. Reduce `num_speculative_tokens` or remove this option if the workload is sensitive to first-token latency or if MTP is unstable in your environment.
 - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` enables full decode ACLGraph replay to reduce dispatch overhead.
-- `--additional-config` enables Ascend-specific optimizations. `enable_fused_mc2` enables MoE fused operators, and `enable_cpu_binding` enables Ascend-native CPU binding.
+- `VLLM_USE_V2_MODEL_RUNNER=0` selects Model Runner V1 for the single-node examples above.
+- `--additional-config` enables Ascend-specific optimizations. `enable_cpu_binding=true` enables Ascend-native CPU binding.
+- `enable_flashcomm1=true` enables MoE sequence parallelism, sharding tokens across TP ranks. It requires `--enable-expert-parallel` and a TP size greater than 1.
+- `enable_fused_mc2=2` selects the CANN MegaMoe path when the required operators are available and the model and parallel configuration support it. `1` selects dispatch-FFN-combine, and `0` disables the fused path.
 
 ### 5.2 Multi-Node Deployment with MP (Recommended)
 
@@ -446,6 +455,7 @@ export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
 export GLOO_SOCKET_IFNAME=$NETWORK_CARD_NAME
 export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
+export VLLM_USE_V2_MODEL_RUNNER=0
 
 # Ensure the model path matches the directory recorded during download
 vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
@@ -469,7 +479,7 @@ vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
   --quantization ascend \
   --no-disable-hybrid-kv-cache-manager \
   --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
-  --additional-config '{"enable_cpu_binding": true}' \
+  --additional-config '{"enable_cpu_binding": true, "enable_flashcomm1": true, "enable_fused_mc2": 2}' \
   --gpu-memory-utilization 0.9 \
   --enforce-eager \
   --kv-transfer-config \
@@ -517,6 +527,7 @@ export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
 export GLOO_SOCKET_IFNAME=$NETWORK_CARD_NAME
 export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
+export VLLM_USE_V2_MODEL_RUNNER=0
 
 # Ensure the model path matches the directory recorded during download
 vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
@@ -540,7 +551,7 @@ vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
   --quantization ascend \
   --no-disable-hybrid-kv-cache-manager \
   --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3}' \
-  --additional-config '{"recompute_scheduler_enable": true, "enable_cpu_binding": true}' \
+  --additional-config '{"recompute_scheduler_enable": true, "enable_cpu_binding": true, "enable_flashcomm1": true, "enable_fused_mc2": 2}' \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
   --gpu-memory-utilization 0.96 \
   --kv-transfer-config \
@@ -565,6 +576,9 @@ Common Issues Tip: If the decode node fails to initialize, check that `--tensor-
 
 **Key parameters for PD disaggregation:**
 
+- `VLLM_USE_V2_MODEL_RUNNER=0` selects Model Runner V1 on both prefill and decode nodes in these examples.
+- `enable_flashcomm1=true` enables MoE sequence parallelism on both nodes. It requires `--enable-expert-parallel` and a TP size greater than 1.
+- `enable_fused_mc2=2` selects the CANN MegaMoe path when the required operators are available and the model and parallel configuration support it. `1` selects dispatch-FFN-combine, and `0` disables the fused path.
 - `--distributed-executor-backend mp` uses multiprocessing on each node for the local workers.
 - Prefill uses `--data-parallel-size 1`, `--data-parallel-size-local 1`, and `--tensor-parallel-size 16`. This creates 1 DP group with TP16.
 - Decode uses `--data-parallel-size 1`, `--data-parallel-size-local 1`, and `--tensor-parallel-size 16`. This creates 1 local DP groups, each with TP16 .
@@ -615,6 +629,7 @@ export GLOO_SOCKET_IFNAME=$nic_name
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export HCCL_DFS_CONFIG="task_exception:off,inconsistent_check:off"
 export HCCL_ALGO=level0:fullmesh
+export VLLM_USE_V2_MODEL_RUNNER=0
 
 # Ensure the model path matches the directory recorded during download
 vllm serve Eco-Tech/Qwen3.5-397B-A17B-w4a4-mxfp4 \
@@ -639,7 +654,7 @@ vllm serve Eco-Tech/Qwen3.5-397B-A17B-w4a4-mxfp4 \
   --async-scheduling \
   --enforce-eager \
   --speculative-config '{"num_speculative_tokens": 1, "method": "qwen3_5_mtp", "enforce_eager": true}' \
-  --additional-config '{"enable_cpu_binding": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true}' \
+  --additional-config '{"enable_cpu_binding": true, "enable_flashcomm1": true, "enable_fused_mc2": 2, "enable_shared_expert_dp": true}' \
   --kv-transfer-config \
   '{"kv_connector": "MooncakeConnector",
     "kv_role": "kv_producer",
@@ -690,6 +705,7 @@ export GLOO_SOCKET_IFNAME=$nic_name
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export HCCL_DFS_CONFIG="task_exception:off,inconsistent_check:off"
 export HCCL_ALGO=level0:fullmesh
+export VLLM_USE_V2_MODEL_RUNNER=0
 
 # Ensure the model path matches the directory recorded during download
 vllm serve Eco-Tech/Qwen3.5-397B-A17B-w4a4-mxfp4 \
@@ -715,7 +731,7 @@ vllm serve Eco-Tech/Qwen3.5-397B-A17B-w4a4-mxfp4 \
   --async-scheduling \
   --speculative-config '{"num_speculative_tokens": 3, "method": "qwen3_5_mtp"}' \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-  --additional-config '{"enable_cpu_binding": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": false}}' \
+  --additional-config '{"recompute_scheduler_enable": true, "enable_cpu_binding": true, "enable_flashcomm1": true, "enable_fused_mc2": 2}' \
   --kv-transfer-config \
   '{"kv_connector": "MooncakeConnector",
     "kv_role": "kv_consumer",
@@ -737,6 +753,12 @@ vllm serve Eco-Tech/Qwen3.5-397B-A17B-w4a4-mxfp4 \
 ```
 
 Common Issues Tip: If decode node 0 fails to initialize, check that `--data-parallel-start-rank` is 0, `--tensor-parallel-size` is 8, and `kv_connector_extra_config.decode.dp_size` matches the global decode DP size (1).
+
+**Key parameters for PD disaggregation on 950DT Products:**
+
+- `VLLM_USE_V2_MODEL_RUNNER=0`, `enable_flashcomm1=true`, and `enable_fused_mc2=2` select Model Runner V1, MoE sequence parallelism, and the supported CANN MegaMoe path, respectively, as described in [Section 5.4](#54-prefill-decode-disaggregation-a3).
+- `enable_shared_expert_dp=true` is enabled only on the prefill node in this example. It replicates shared-expert weights across TP ranks and processes different tokens on each rank, at the cost of additional weight memory. It requires `--enable-expert-parallel` and a TP size greater than 1, and can be combined with `enable_flashcomm1`.
+- `recompute_scheduler_enable=true` is enabled only on the decode node to send requests back to prefill for KV cache recomputation when decode KV cache is insufficient.
 
 ### 5.6 Request Forwarding
 
@@ -905,7 +927,9 @@ Recommended tuning order:
 | Zero-like elimination | Enabled by default | Removes unnecessary zero-like tensor operations in attention. | No extra configuration is required. |
 | Qwen3.5 MTP speculative decoding | `--speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'` | Improves decode throughput when acceptance rate is good. | Reduce speculative tokens if latency or stability regresses. |
 | Full decode ACLGraph | `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` | Reduces operator dispatch overhead and stabilizes decode performance. | Recommended for decode-heavy serving. |
-| Fused MC2 | `--additional-config '{"enable_fused_mc2": 1}'` | Enables MoE fused operators to improve MoE prefill/decode efficiency. | If accuracy or performance regresses in multi-DP large-token scenarios, disable it and compare. |
+| Fused MC2 | `--additional-config '{"enable_fused_mc2": 2}'` | Selects the CANN MegaMoe fused MoE path when supported. | Requires the corresponding operators and a supported model and parallel configuration. `1` selects dispatch-FFN-combine; `0` disables the fused path. |
+| MoE sequence parallelism | `--additional-config '{"enable_flashcomm1": true}'` | Shards tokens across TP ranks for MoE computation. | Requires EP and TP greater than 1. |
+| Shared expert data parallelism | `--additional-config '{"enable_shared_expert_dp": true}'` | Processes different tokens on each TP rank for shared-expert computation. | Requires EP and TP greater than 1. Replicates shared-expert weights, increasing memory usage. Enabled on the 950DT prefill node in Section 5.5. |
 | Shared expert overlap | `--additional-config '{"multistream_overlap_shared_expert": true}'` | Overlaps shared expert computation in MoE workloads. | Recommended for MP throughput scenarios. |
 | Recompute scheduler | `--additional-config '{"recompute_scheduler_enable": true}'` | Recomputes KV through prefill when decode KV cache is insufficient in PD mode. | Only valid on decode nodes where `kv_role` is `kv_consumer`. |
 | CPU binding | `--additional-config '{"enable_cpu_binding": true}'` | Improves CPU affinity and reduces scheduling jitter on ARM servers. | Enabled by default in many configurations, but explicitly setting it keeps the recipe clear. |
