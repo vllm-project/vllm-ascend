@@ -47,6 +47,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.transf
     StoreCommandBatch,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.route import KVPoolRouteSpec
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.topology import resolve_group_layers
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk import (
     AsynchronousBulkWorker,
     SynchronousBulkWorker,
@@ -81,6 +82,56 @@ def test_resources_own_exact_shared_storage_region_and_close_in_order() -> None:
     assert backend.closed
     with pytest.raises(RuntimeError, match="closed"):
         resources.bind_kv_caches(caches)
+
+
+def test_bulk_store_registers_target_and_mtp_entries_and_deduplicates_confirmed_keys() -> None:
+    base = make_topology(physical_layers=(0,))
+    names = ("model.layers.0.attention", "mtp.layers.0.attention", "mtp.layers.1.attention")
+    group = replace(base.groups[0], layers=resolve_group_layers(list(names), base_layer_count=2))
+    topology = replace(base, groups=(group,))
+    backend = TensorBytesBackend()
+    resources = KVPoolResources(
+        backend, make_backend_spec(requires_exists_before_put=True), 8, topology.transfer_groups
+    )
+    worker = SynchronousBulkWorker(
+        topology, compile_bulk_projection_binder(topology, 64), resources, source_ready_event_factory=FakeEvent
+    )
+    caches = {name: torch.zeros((8, 2, 4, 1, 1), dtype=torch.float32) for name in names}
+    try:
+        worker.bind_kv_caches(caches)
+        assert backend.registered_regions == [
+            (cache.data_ptr(), cache.numel() * cache.element_size()) for cache in caches.values()
+        ]
+        command = RangeStoreCommand("target-and-draft", TokenRange(0, 4), ((1,),), (b"a",), 4, 17)
+        begin_step(worker, store=(command,))
+        # Bulk publication occurs at finalization, after both target and draft cache writes.
+        for index, name in enumerate(names):
+            caches[name][1].fill_(index + 1)
+        assert not any(call[0] == "put" for call in backend.calls)
+        worker.finish_step()
+        (completion,) = worker.fence_previous_store()
+        worker.end_step()
+        assert completion.evidence.succeeded and completion.evidence.source_release_confirmed
+        (key,) = backend.objects
+        expected_payload = b"".join(caches[name][1].view(torch.uint8).numpy().tobytes() for name in names)
+        assert backend.objects[key] == expected_payload
+        put_call = next(call for call in backend.calls if call[0] == "put")
+        assert put_call[2] == (tuple(caches[name][1].data_ptr() for name in names),)
+        assert put_call[3] == ((32, 32, 32),)
+        assert worker.take_released_store_job_ids() == {17}
+
+        for name in names:
+            caches[name][2].copy_(caches[name][1])
+        duplicate = store_one(
+            worker, replace(command, request_id="duplicate", block_ids_by_group=((2,),), store_job_id=18)
+        )
+        assert duplicate.evidence.succeeded and duplicate.evidence.source_release_confirmed
+        assert len([call for call in backend.calls if call[0] == "put"]) == 1
+        assert backend.objects[key] == expected_payload
+        assert worker.take_released_store_job_ids() == {18}
+    finally:
+        worker.close()
+    assert backend.closed and resources.kv_caches is None
 
 
 @pytest.mark.parametrize("empty_first", (False, True))

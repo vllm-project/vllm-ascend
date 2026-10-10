@@ -107,7 +107,7 @@ def create_kv_pool_scheduler(
         store_enabled=_store_enabled(vllm_config, extra_config),
         save_decode_cache=bool(extra_config.get("save_decode_cache", False)),
         discard_partial_chunks=discard_partial_chunks,
-        use_eagle_block_drop=_uses_eagle_block_drop(vllm_config),
+        use_eagle_block_drop=_uses_eagle(vllm_config),
         has_private_state=has_private_state,
         expected_worker_count=vllm_config.parallel_config.world_size,
     )
@@ -284,7 +284,7 @@ def resolve_kv_pool_route_spec(
         backend_name=backend_name,
         max_model_len=vllm_config.model_config.max_model_len,
         use_layerwise=use_layerwise,
-        use_eagle=_uses_eagle_block_drop(vllm_config),
+        use_eagle=_uses_eagle(vllm_config),
         retention_interval=kv_cache_config.prefix_cache_retention_interval,
     )
 
@@ -317,8 +317,6 @@ def _validate_kv_pool_preflight(
 
     if _kvpp_size(vllm_config) > 1:
         raise ValueError("AscendStore v1 does not support active KVPP until KVPP ownership is represented")
-
-    _validate_speculative_support(vllm_config, use_layerwise=use_layerwise)
 
     transfer_config = vllm_config.kv_transfer_config
     parallel_config = vllm_config.parallel_config
@@ -401,18 +399,6 @@ def _validate_bulk_topology_support(
     partitions = resolve_consumer_pipeline_partitions(vllm_config)
     if partitions is not None and len(partitions) > 1:
         raise ValueError("AscendStore v1 TP mismatch cannot be composed with Consumer pipeline Store")
-
-
-def _validate_speculative_support(vllm_config: VllmConfig, *, use_layerwise: bool) -> None:
-    speculative_config = getattr(vllm_config, "speculative_config", None)
-    if speculative_config is None:
-        return
-    method = getattr(speculative_config, "method", None)
-    route = "Layerwise" if use_layerwise else "Bulk"
-    raise ValueError(
-        f"AscendStore v1 {route} does not yet support speculative method {method!r}; "
-        "a named Scheduler-to-Backend lifecycle trace is required"
-    )
 
 
 def _resolve_transfer_group_ids(kv_cache_config: KVCacheConfig) -> tuple[tuple[int, ...], tuple[int, ...]]:
@@ -610,12 +596,8 @@ def _parse_pipeline_partitions(
     return partitions
 
 
-def _uses_eagle_block_drop(vllm_config: VllmConfig) -> bool:
+def _uses_eagle(vllm_config: VllmConfig) -> bool:
     speculative_config = getattr(vllm_config, "speculative_config", None)
-    if speculative_config is None:
-        return False
-    use_eagle_block_drop = getattr(speculative_config, "use_eagle_block_drop", None)
-    if callable(use_eagle_block_drop):
-        return bool(use_eagle_block_drop())
+    # Match production's external-cache policy, including when local block drop is disabled.
     use_eagle = getattr(speculative_config, "use_eagle", None)
-    return bool(use_eagle()) if callable(use_eagle) else False
+    return use_eagle() is True if callable(use_eagle) else False
