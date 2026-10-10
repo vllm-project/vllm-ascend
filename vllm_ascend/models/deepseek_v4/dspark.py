@@ -54,8 +54,9 @@ def _apply_dsv4_rope(
     x: torch.Tensor,
     *,
     inverse: bool = False,
+    rope=None,
 ) -> torch.Tensor:
-    cos, sin = get_cos_and_sin_dsa(positions)
+    cos, sin = rope if rope is not None else get_cos_and_sin_dsa(positions)
     layer_name = rotary_emb.layername
     cos_t = cos[layer_name]
     sin_t = sin[layer_name]
@@ -178,12 +179,22 @@ class DeepseekV4DSparkModel(nn.Module):
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
         attn: type[nn.Module] | None = None,
+        rope=None,
     ) -> torch.Tensor:
         assert attn is not None
         kv = attn.kv_norm(attn.wkv(hidden_states))
-        k_nope, k_pe = kv.split([attn.nope_head_dim, attn.rope_head_dim], dim=-1)
-        k_pe = _apply_dsv4_rope(attn.rotary_emb, positions, k_pe.unsqueeze(1)).squeeze(1)
-        return torch.cat([k_nope, k_pe], dim=-1).view(-1, 1, attn.head_dim).contiguous()
+        # npu_rotary_mul writes its result back to the input storage
+        # (ComplexExpRotaryEmbedding.forward ends with y.copy_(...)), so rope
+        # can run in-place on the rope-segment view of kv; the previous
+        # split -> rope -> cat -> contiguous round-trip was a redundant copy.
+        k_pe = kv[:, attn.nope_head_dim :]
+        _apply_dsv4_rope(
+            attn.rotary_emb,
+            positions,
+            k_pe.unsqueeze(1),
+            rope=rope,
+        )
+        return kv.view(-1, 1, attn.head_dim)
 
     def _store_standard_swa_kv(
         self,
@@ -202,7 +213,17 @@ class DeepseekV4DSparkModel(nn.Module):
         while isinstance(swa_kv_cache, (list, tuple)) and len(swa_kv_cache) == 1:
             swa_kv_cache = swa_kv_cache[0]
 
-        from vllm_ascend.attention.dsa_attn_kv_plan import get_dsa_attn_kv_plan
+        from vllm_ascend.attention.dsa_attn_kv_plan import get_dsa_attn_kv_plan, write_dsa_cache
+
+        dsa_impl = attn.dsa_attn.dsa_attn.impl
+        turboquant = dsa_impl.turboquant
+        if turboquant is not None:
+            # Draft queries and context KV must use the same rotated basis.
+            shared_kv = turboquant.forward(shared_kv)
+            if slot_mapping.ndim == 1:
+                slot_mapping = dsa_impl.get_kv_plan().format_dsa_slot_mapping(slot_mapping, swa_cache_layer.block_size)
+            write_dsa_cache(swa_kv_cache, shared_kv, slot_mapping)
+            return
 
         if slot_mapping.ndim == 1:
             slot_mapping = get_dsa_attn_kv_plan(self.vllm_config).format_dsa_slot_mapping(
@@ -218,12 +239,22 @@ class DeepseekV4DSparkModel(nn.Module):
     ) -> None:
         if context_states.numel() == 0 or context_slot_mapping is None:
             return
+        rope_layers = [layer.self_attn.rotary_emb.layername for layer in self.layers.values()]
+        rope = get_cos_and_sin_dsa(
+            context_positions,
+            layer_names=rope_layers,
+        )
         for layer_idx, layer in enumerate(self.layers.values()):
             layer_context_slot_mapping = None if context_slot_mapping is None else context_slot_mapping[layer_idx]
             if context_positions.numel() == 0:
                 return
             attn = layer.self_attn
-            shared_kv = self._project_shared_kv(context_states, context_positions, attn)
+            shared_kv = self._project_shared_kv(
+                context_states,
+                context_positions,
+                attn,
+                rope=rope,
+            )
             self._store_standard_swa_kv(shared_kv, layer_context_slot_mapping, attn)
 
     def forward(

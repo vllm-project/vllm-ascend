@@ -1,5 +1,20 @@
 # Release Notes
 
+## v0.23.0.post1 - 2026.09.21
+
+This is the first post release of vLLM Ascend v0.23.0. It includes the fixes, dependency updates, CI changes, and documentation updates merged into the v0.23.0 release branch after the v0.23.0 tag. Please follow the [official documentation](https://docs.vllm.ai/projects/ascend/en/v0.23.0/) to get started.
+
+### Bug Fixes
+
+- Fixed stale KV-cache writes during DP-aligned dummy runs by invalidating per-KV-group slot mappings before attention metadata construction. [#15362](https://github.com/vllm-project/vllm-ascend/pull/15362)
+- Fixed MTP overlay prefix-cache precision on Atlas 300I DUO and kept W8A8 MXFP8 transformed buffers stable across RL weight reloads in ACL Graph mode. [#14336](https://github.com/vllm-project/vllm-ascend/pull/14336) [#13905](https://github.com/vllm-project/vllm-ascend/pull/13905)
+
+### Other Changes
+
+- Pinned the KV Pool dependencies to `memfabric_hybrid==1.2.0` and `memcache_hybrid==1.2.0`. [#14352](https://github.com/vllm-project/vllm-ascend/pull/14352)
+- Consolidated installation guidance, GLM-5/5.2 and Kimi-K3 deployment instructions, PD and 310P notes, release metadata, navigation titles, English comments, and Chinese translations. [#15449](https://github.com/vllm-project/vllm-ascend/pull/15449) [#14242](https://github.com/vllm-project/vllm-ascend/pull/14242) [#14338](https://github.com/vllm-project/vllm-ascend/pull/14338) [#14634](https://github.com/vllm-project/vllm-ascend/pull/14634) [#14698](https://github.com/vllm-project/vllm-ascend/pull/14698) [#14713](https://github.com/vllm-project/vllm-ascend/pull/14713) [#14906](https://github.com/vllm-project/vllm-ascend/pull/14906) [#15998](https://github.com/vllm-project/vllm-ascend/pull/15998) [#16106](https://github.com/vllm-project/vllm-ascend/pull/16106) [#14382](https://github.com/vllm-project/vllm-ascend/pull/14382) [#14387](https://github.com/vllm-project/vllm-ascend/pull/14387) [#14436](https://github.com/vllm-project/vllm-ascend/pull/14436) [#14579](https://github.com/vllm-project/vllm-ascend/pull/14579) [#14684](https://github.com/vllm-project/vllm-ascend/pull/14684) [#15534](https://github.com/vllm-project/vllm-ascend/pull/15534) [#16202](https://github.com/vllm-project/vllm-ascend/pull/16202)
+- Added release-branch nightly and weekly model configurations and installed `concurrent-log-handler` in release images. [#14559](https://github.com/vllm-project/vllm-ascend/pull/14559) [#14645](https://github.com/vllm-project/vllm-ascend/pull/14645) [#14739](https://github.com/vllm-project/vllm-ascend/pull/14739) [#16191](https://github.com/vllm-project/vllm-ascend/pull/16191)
+
 ## v0.26.0rc1 - 2026.09.03
 
 This is the first release candidate of v0.26.0 for vLLM Ascend, aligned with upstream vLLM v0.26.0. This release is a model‑restricted version. Fully validated models include Kimi K3, GLM‑5.2, DeepSeek V4 Flash 0731, DeepSeek V4 Pro 0813. Availability is not guaranteed for other models. For the full test report, see: [v0.26.0rc1 Test Conclusion](https://github.com/vllm-project/vllm-ascend/blob/releases/v0.26.0rc/tests/vllm_ascend_v0.26.0rc1_test_conclusion.md). Please follow the [official documentation](https://docs.vllm.ai/projects/ascend/en/v0.26.0rc1/) to get started.
@@ -227,7 +242,7 @@ Unless stated otherwise, these optimizations are selected automatically for the 
 ### Deprecation and Configuration Changes
 
 - The former `enable_sparse_c8` option was split into `enable_sparse_sfa_c8` and `enable_sparse_li_c8`; update `--additional-config` according to the sparse-attention components in use. [#12351](https://github.com/vllm-project/vllm-ascend/pull/12351)
-- Migrate FlashComm1 deployments from `VLLM_ASCEND_ENABLE_FLASHCOMM1` to `additional_config.enable_flashcomm1`. [#9064](https://github.com/vllm-project/vllm-ascend/pull/9064)
+- Migrate FlashComm1 deployments to `additional_config.enable_flashcomm1`. [#9064](https://github.com/vllm-project/vllm-ascend/pull/9064)
 - `VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL` was removed during the `AscendConfig` migration. DSA-CP is now controlled by `additional_config.enable_dsa_cp`; deployments that previously relied on FlashComm1 implicitly enabling DSA-CP must explicitly enable both options. [#9668](https://github.com/vllm-project/vllm-ascend/pull/9668) [#9697](https://github.com/vllm-project/vllm-ascend/pull/9697) [#9910](https://github.com/vllm-project/vllm-ascend/pull/9910)
 - Sequence Parallelism is marked unavailable for all current model categories in the v0.23.0 support matrix; deployments that used it in v0.18.0 should move to FlashComm1 where applicable. [#12860](https://github.com/vllm-project/vllm-ascend/pull/12860)†
 - `ASCEND_BUFFER_POOL` was removed. Use `ASCEND_ENABLE_USE_FABRIC_MEM=1` or `HCCL_INTRA_ROCE_ENABLE=1` according to the hardware and deployment path. [#13834](https://github.com/vllm-project/vllm-ascend/pull/13834)†
@@ -591,7 +606,7 @@ We're excited to announce the release of v0.20.2rc1 for vLLM Ascend. This is the
 
 ### Breaking Changes and Migration Notes
 
-- Migrated a set of runtime options from environment variables to `AscendConfig`, including the FC1/FlashComm1 switch from `VLLM_ASCEND_ENABLE_FLASHCOMM1` to `additional_config.enable_flashcomm1`. Please review configuration code and deployment manifests when upgrading. [#9064](https://github.com/vllm-project/vllm-ascend/pull/9064)
+- Migrated a set of runtime options from environment variables to `AscendConfig`, including the FC1/FlashComm1 switch to `additional_config.enable_flashcomm1`. Please review configuration code and deployment manifests when upgrading. [#9064](https://github.com/vllm-project/vllm-ascend/pull/9064)
 - Disabled SwiGLU clamp by default, which may slightly change behavior for workloads that previously relied on the old default. [#9438](https://github.com/vllm-project/vllm-ascend/pull/9438)
 
 ### Documentation

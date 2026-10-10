@@ -37,11 +37,17 @@ on:
         type: choice
         options:
           - main
+          - releases/v0.30.0
+          - releases/v0.29.0rc
+          - releases/v0.28.0rc
+          - releases/v0.27.1rc
           - releases/v0.26.0rc
           - releases/v0.25.1rc
           - releases/v0.24.0rc
           - releases/v0.23.0
           - releases/v0.22.1rc
+          - releases/v0.21.0rc
+          - releases/v0.20.2rc
           - releases/v0.18.0
       build_type:
         description: 'Build type: daily or release'
@@ -69,6 +75,7 @@ jobs:
     with:
       target: a2
       vllm_ascend_branch: ${{ github.event.pull_request.head.sha || inputs.vllm_ascend_branch || 'main' }}
+      base_image_branch: ${{ github.event.pull_request.base.ref || inputs.vllm_ascend_branch || 'main' }}
       build_type: ${{ inputs.build_type || 'release' }}
       should_push: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' }}
       soc: '910b'
@@ -85,6 +92,7 @@ jobs:
     with:
       target: a3
       vllm_ascend_branch: ${{ github.event.pull_request.head.sha || inputs.vllm_ascend_branch || 'main' }}
+      base_image_branch: ${{ github.event.pull_request.base.ref || inputs.vllm_ascend_branch || 'main' }}
       build_type: ${{ inputs.build_type || 'release' }}
       should_push: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' }}
       soc: 'a3'
@@ -101,6 +109,7 @@ jobs:
     with:
       target: 310p
       vllm_ascend_branch: ${{ github.event.pull_request.head.sha || inputs.vllm_ascend_branch || 'main' }}
+      base_image_branch: ${{ github.event.pull_request.base.ref || inputs.vllm_ascend_branch || 'main' }}
       build_type: ${{ inputs.build_type || 'release' }}
       should_push: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' }}
       soc: '310p'
@@ -116,6 +125,7 @@ jobs:
     with:
       target: a5
       vllm_ascend_branch: ${{ github.event.pull_request.head.sha || inputs.vllm_ascend_branch || 'main' }}
+      base_image_branch: ${{ github.event.pull_request.base.ref || inputs.vllm_ascend_branch || 'main' }}
       build_type: ${{ inputs.build_type || 'release' }}
       should_push: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' }}
       soc: '950'

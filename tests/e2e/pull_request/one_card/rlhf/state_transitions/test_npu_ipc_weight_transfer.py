@@ -8,10 +8,9 @@ runtime weight representations are compatible. This matrix instead targets
 architectures whose correctness depends on the transaction: fused-MoE layout
 restoration, derived FP32 routing weights, and SFA source/derived-state
 restoration. Cases whose model is not ready for the transaction are skipped in
-both lanes with a per-case ``skip_reason`` — DeepSeek-V4-Flash (needs the
-attention-sink fix in #16355) and GLM-5.1 (its SFA runtime state does not survive
-the level-2 sleep the same-chip lane needs, tracked by #16725) — so the matrix
-carries Qwen3.5-35B-A3B today.
+both lanes with a per-case ``skip_reason`` — DeepSeek-V4-Flash needs the
+attention-sink fix that lives in #16355 — so the matrix carries Qwen3.5-35B-A3B
+and GLM-5.1 today.
 
 The correctness oracle is *normal startup loading of the same payload*, not the
 first live update: the generator also writes a temporary checkpoint, a reference

@@ -78,13 +78,18 @@ skip_tests:
 # 560T labels (``linux-aarch64-a3-800i-N``); the files themselves stay in
 # their normal directory-based partitions.
 accuracy_tests:
+  - tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_6_dflash.py
+  - tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_6_dspark.py
   - tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_6_mtp.py
   - tests/e2e/pull_request/two_card/test_shared_expert_dp.py
+  - tests/e2e/pull_request/two_card/test_shared_expert_dp_graph.py
   - tests/e2e/pull_request/two_card/lora/test_ilama_lora_tp2.py
   - tests/e2e/pull_request/two_card/lora/test_llama32_lora_tp2.py
   - tests/e2e/pull_request/two_card/lora/test_qwen35_densemodel_lora_tp.py
   - tests/e2e/pull_request/two_card/lora/test_qwen3moe_lora.py
   - tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py
+  - tests/e2e/pull_request/two_card/spec_decode/test_spec_decode_heavy.py
+  - tests/e2e/pull_request/two_card/test_pipeline_parallel.py
   - tests/e2e/pull_request/four_card/test_deepseek_v4.py
   - tests/e2e/pull_request/four_card/test_graph_mode.py
   - tests/e2e/pull_request/four_card/test_pipeline_parallel.py
@@ -108,11 +113,10 @@ runner_mapping:
     310p: 310p-1
   tests/e2e/pull_request/two_card:
     default: a3-2
+    310p: 310p-2
   tests/e2e/pull_request/four_card:
     default: a3-4
     310p: 310p-4
-  tests/e2e/pull_request/eight_card:
-    default: a3-8
 
 # === Partition Configuration ===
 # Maps logical test buckets to exact labels from runner_label.json and controls
@@ -121,21 +125,21 @@ partition:
   310p-1:
     runner_label: linux-aarch64-310p-1
     count: 1
+  310p-2:
+    runner_label: linux-aarch64-310p-2
+    count: 1
   310p-4:
     runner_label: linux-aarch64-310p-4
     count: 1
   a2-1:
     runner_label: linux-aarch64-a2b3-1
-    count: 5
+    count: 7
   a3-2:
     runner_label: linux-aarch64-a3-2
-    count: 4
+    count: 5
   a3-4:
     runner_label: linux-aarch64-a3-4
-    count: 4
-  a3-8:
-    runner_label: linux-aarch64-a3-8
-    count: 1
+    count: 5
   cpu-0:
     runner_label: linux-amd64-cpu-8-hk
     count: 1

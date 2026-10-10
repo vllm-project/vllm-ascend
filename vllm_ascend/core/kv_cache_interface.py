@@ -22,8 +22,6 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
-from vllm_ascend.utils import vllm_version_is
-
 
 def get_kv_cache_compression_ratio(kv_cache_spec: KVCacheSpec) -> int:
     """Return the MLA compression ratio across vLLM cache-spec APIs."""
@@ -36,14 +34,13 @@ def get_storage_block_size(kv_cache_spec: KVCacheSpec) -> int:
         storage_block_sizes = {get_storage_block_size(spec) for spec in kv_cache_spec.kv_cache_specs.values()}
         assert len(storage_block_sizes) == 1, "All specs in one KV cache group must use the same storage block size."
         return storage_block_sizes.pop()
-    if not vllm_version_is("0.29.0"):
-        # vLLM #53906 added an optional MLA storage-view override. It is not
-        # Ascend's derived number of physical rows per logical block.
-        if isinstance(kv_cache_spec, AscendMLAAttentionSpec):
-            return kv_cache_spec.block_size // kv_cache_spec.tokens_per_state
-        if isinstance(kv_cache_spec, MLAAttentionSpec):
-            storage_block_size = kv_cache_spec.storage_block_size
-            return kv_cache_spec.block_size if storage_block_size is None else storage_block_size
+    # vLLM #53906 added an optional MLA storage-view override. It is not
+    # Ascend's derived number of physical rows per logical block.
+    if isinstance(kv_cache_spec, AscendMLAAttentionSpec):
+        return kv_cache_spec.block_size // kv_cache_spec.tokens_per_state
+    if isinstance(kv_cache_spec, MLAAttentionSpec):
+        storage_block_size = kv_cache_spec.storage_block_size
+        return kv_cache_spec.block_size if storage_block_size is None else storage_block_size
     return getattr(kv_cache_spec, "storage_block_size", kv_cache_spec.block_size)
 
 
@@ -107,21 +104,17 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     # main-cache property here; indexer-specific C8 properties belong to the
     # indexer spec.
     cache_sparse_sfa_c8: bool = False
+    cache_sparse_sfa_turboquant: bool = False
     store_on_host: bool = False
     # Ascend kernels consume padded pages through an explicit physical block
     # stride. vLLM main removed this field from AttentionSpec, but it remains
     # part of the Ascend runner/backend contract.
     indexes_kv_by_block_stride: bool = False
-    if vllm_version_is("0.29.0"):
 
-        @property
-        def storage_block_size(self) -> int:
-            """Legacy physical geometry; main uses get_storage_block_size.
-
-            On main, #53906 initializes a dataclass field with this name.
-            A read-only property would reject that constructor assignment.
-            """
-            return self.block_size // self.tokens_per_state
+    @property
+    def uses_packed_sfa_main_cache(self) -> bool:
+        """Whether the SFA main cache is stored in one packed tensor."""
+        return self.cache_sparse_sfa_c8 or self.cache_sparse_sfa_turboquant
 
     @property
     def real_page_size_bytes(self) -> int:
@@ -145,6 +138,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
                 spec.scale_dim,
                 spec.scale_dtype,
                 spec.cache_sparse_sfa_c8,
+                spec.cache_sparse_sfa_turboquant,
                 spec.store_on_host,
                 spec.alignment,
                 get_kv_cache_compression_ratio(spec),
@@ -167,6 +161,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             scale_dtype=first_spec.scale_dtype,
             alignment=first_spec.alignment,
             cache_sparse_sfa_c8=first_spec.cache_sparse_sfa_c8,
+            cache_sparse_sfa_turboquant=first_spec.cache_sparse_sfa_turboquant,
             store_on_host=first_spec.store_on_host,
             indexes_kv_by_block_stride=first_spec.indexes_kv_by_block_stride,
         )
@@ -193,6 +188,7 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
     scale_dim: int = 0
     scale_dtype: torch.dtype = torch.int8
     cache_sparse_li_c8: bool = False
+    cache_sparse_li_c4: bool = False
     cache_dtype_str: str | None = None
     sfa_dcp_replicated_indexer_size: int = 1
 
@@ -219,6 +215,7 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
         scale_dim_set = set(spec.scale_dim for spec in specs)
         scale_dtype_set = set(spec.scale_dtype for spec in specs)
         cache_sparse_li_c8_set = set(spec.cache_sparse_li_c8 for spec in specs)
+        cache_sparse_li_c4_set = set(spec.cache_sparse_li_c4 for spec in specs)
         sfa_dcp_replicated_indexer_size_set = set(spec.sfa_dcp_replicated_indexer_size for spec in specs)
         assert (
             len(cache_dtype_str_set) == 1
@@ -226,11 +223,12 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
             and len(scale_dim_set) == 1
             and len(scale_dtype_set) == 1
             and len(cache_sparse_li_c8_set) == 1
+            and len(cache_sparse_li_c4_set) == 1
             and len(sfa_dcp_replicated_indexer_size_set) == 1
         ), (
             "All SFA indexer cache layers in the same KV cache group must use "
-            "the same dtype, scale layout, quantization method, sparse LI C8 "
-            "setting and DCP replication size."
+            "the same dtype, scale layout, quantization method, LI quant flags "
+            "and DCP replication size."
         )
         return cls(
             block_size=specs[0].block_size,
@@ -241,6 +239,7 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
             scale_dim=scale_dim_set.pop(),
             scale_dtype=scale_dtype_set.pop(),
             cache_sparse_li_c8=cache_sparse_li_c8_set.pop(),
+            cache_sparse_li_c4=cache_sparse_li_c4_set.pop(),
             sfa_dcp_replicated_indexer_size=sfa_dcp_replicated_indexer_size_set.pop(),
         )
 
@@ -360,8 +359,23 @@ class AscendIndexerKPoolTailSpec(SlidingWindowSpec):
         )
 
 
+@dataclass(frozen=True, kw_only=True)
+class AscendCircularBufferSpec(CircularBufferSpec):
+    """Circular state whose physical pages participate in Ascend KV zeroing."""
+
+    def is_uniform_with_collection(self, kv_cache_specs: dict[str, KVCacheSpec]) -> bool:
+        return all(isinstance(spec, AscendCircularBufferSpec) for spec in kv_cache_specs.values())
+
+
 def register_ascend_kv_cache_specs() -> None:
+    from vllm_ascend.core.single_type_kv_cache_manager import AscendCircularBufferManager
     from vllm_ascend.models.glm5next.kv_cache import KpoolTailManager
+
+    KVCacheSpecRegistry.register(
+        kvcache_spec_cls=AscendCircularBufferSpec,
+        manager_class=AscendCircularBufferManager,
+        uniform_type_base_spec=AscendCircularBufferSpec,
+    )
 
     KVCacheSpecRegistry.register(
         kvcache_spec_cls=AscendMLAAttentionSpec,

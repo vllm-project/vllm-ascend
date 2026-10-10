@@ -130,6 +130,9 @@ jobs:
     needs: select-all-tests
     if: ${{ needs.select-all-tests.outputs.has_tests == 'true' }}
     uses: ./.github/workflows/_ensure_csrc_cache.yaml
+    secrets:
+      HW_OBS_AK: ${{ secrets.HW_OBS_AK }}
+      HW_OBS_SK: ${{ secrets.HW_OBS_SK }}
     with:
       target_ids: ${{ needs.select-all-tests.outputs.csrc_cache_target_ids }}
       source_ref: ${{ needs.select-all-tests.outputs.vllm_ascend_ref }}

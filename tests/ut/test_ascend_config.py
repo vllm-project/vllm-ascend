@@ -13,27 +13,34 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import dataclasses
 import json
+import math
 import os
 import subprocess
 import sys
 from importlib.util import find_spec as real_find_spec
+from statistics import NormalDist
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import PropertyMock, patch
 
-from vllm.config import KVTransferConfig
+from vllm.config import DeviceConfig, KVTransferConfig
 from vllm.config import VllmConfig as _VllmConfig
+from vllm.config.compilation import CUDAGraphMode
 
 from tests.ut.base import TestBase
+from tests.ut.kvpp_utils import make_kvpp_config
 from vllm_ascend.ascend_config import (
     AscendCompilationConfig,
     AscendConfig,
     AscendFusionConfig,
+    AscendWarmupConfig,
     DynamicSpecConfig,
     DyntraLBConfig,
     EplbConfig,
     FinegrainedTPConfig,
+    KVPPConfig,
     ProfilingChunkConfig,
     RejectionSamplerConfig,
     RlConfig,
@@ -147,8 +154,8 @@ class TestAscendConfig(TestBase):
         (
             config._sparse_li_c8_layer_ids,
             config._sparse_li_c8_layer_names,
-        ) = AscendConfig._parse_sparse_li_c8_layers_from_quant_config(quant_config)
-        config._sparse_li_c8_layer_filter_enabled = AscendConfig._has_sparse_li_c8_layer_config(quant_config)
+        ) = AscendConfig._parse_sparse_li_layers_from_quant_config(quant_config, ("INT8_DYNAMIC", "W8A8_MXFP8"))
+        config._sparse_li_layer_filter_enabled = AscendConfig._has_sparse_li_layer_config(quant_config)
         return config
 
     def test_sparse_li_c8_layer_filter_uses_indexer_quant_type(self):
@@ -202,6 +209,135 @@ class TestAscendConfig(TestBase):
         )
         with self.assertRaisesRegex(ValueError, "load_collection_phase must be one of"):
             EplbConfig(load_collection_phase="prompt")
+
+    def test_stair_config_defaults_and_overrides(self):
+        defaults = EplbConfig().stair_config
+        config = EplbConfig(stair_config={"rank_transfer_limit": 2, "load_risk_quantile": 0.9})
+
+        self.assertEqual(
+            dataclasses.asdict(defaults),
+            {
+                "load_window_bins": 64,
+                "load_risk_quantile": 0.75,
+                "relative_balance_threshold": 0.95,
+                "absolute_balance_threshold": 0.90,
+                "rank_transfer_limit": -1,
+                "cross_node_transfer_limit": -1,
+                "replica_search_num_stages": 4,
+                "replica_search_radius": 8,
+                "replica_search_beam_size": 64,
+                "placement_search_backtrack_limit": 32,
+            },
+        )
+        self.assertEqual(config.stair_config.rank_transfer_limit, 2)
+        self.assertEqual(config.stair_config.z_score, NormalDist().inv_cdf(0.9))
+
+    def test_stair_config_default_factory_and_frozen_contract(self):
+        first = EplbConfig().stair_config
+        second = EplbConfig().stair_config
+
+        self.assertIsNot(first, second)
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            first.load_window_bins = 2
+
+    def test_stair_config_accepts_boundaries(self):
+        for value in (
+            {"load_window_bins": 2},
+            {"load_window_bins": 256},
+            {"load_risk_quantile": 0.500001},
+            {"load_risk_quantile": 0.999999},
+            {"relative_balance_threshold": 0.000001},
+            {"relative_balance_threshold": 1},
+            {"absolute_balance_threshold": 0.000001},
+            {"absolute_balance_threshold": 1},
+            {"rank_transfer_limit": 1},
+            {"rank_transfer_limit": -1},
+            {"cross_node_transfer_limit": 0},
+            {"cross_node_transfer_limit": -1},
+            {"replica_search_num_stages": 1},
+            {"replica_search_num_stages": 8},
+            {"replica_search_radius": 0},
+            {"replica_search_radius": 32},
+            {"replica_search_beam_size": 1},
+            {"replica_search_beam_size": 128},
+            {"placement_search_backtrack_limit": 0},
+            {"placement_search_backtrack_limit": 64},
+        ):
+            with self.subTest(value=value):
+                EplbConfig(stair_config=value)
+
+    def test_stair_config_rejects_invalid_values(self):
+        for value in (
+            {"load_window_bins": 1},
+            {"load_window_bins": 257},
+            {"load_risk_quantile": 0.5},
+            {"load_risk_quantile": 1},
+            {"relative_balance_threshold": 0},
+            {"relative_balance_threshold": 1.001},
+            {"absolute_balance_threshold": 0},
+            {"absolute_balance_threshold": 1.001},
+            {"rank_transfer_limit": 0},
+            {"cross_node_transfer_limit": -2},
+            {"replica_search_num_stages": 0},
+            {"replica_search_num_stages": 9},
+            {"replica_search_radius": -1},
+            {"replica_search_radius": 33},
+            {"replica_search_beam_size": 0},
+            {"replica_search_beam_size": 129},
+            {"placement_search_backtrack_limit": -1},
+            {"placement_search_backtrack_limit": 65},
+        ):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                EplbConfig(stair_config=value)
+
+    def test_stair_config_rejects_boolean_and_non_finite_numbers(self):
+        names = dataclasses.asdict(EplbConfig().stair_config)
+        for name in names:
+            with self.subTest(name=name, value=True), self.assertRaisesRegex(ValueError, "must not be booleans"):
+                EplbConfig(stair_config={name: True})
+            for value in (math.nan, math.inf, -math.inf):
+                with self.subTest(name=name, value=value), self.assertRaises(ValueError):
+                    EplbConfig(stair_config={name: value})
+
+    def test_eplb_config_rejects_algorithm_selection(self):
+        for algorithm in ("default", "stair"):
+            with self.subTest(algorithm=algorithm), self.assertRaises(ValueError):
+                EplbConfig(**{"algorithm": algorithm})
+
+    def test_stair_config_rejects_removed_options(self):
+        for name in (
+            "flash_tree_depth",
+            "flash_tree_width",
+            "hysteresis_absolute",
+            "hysteresis_relative",
+            "imbalance_threshold",
+            "lpt_max_backtracks",
+            "max_load_window_bins",
+            "max_candidates_per_layer",
+            "max_expert_transfers_per_rank_pair",
+            "min_relative_score_improvement",
+            "min_absolute_score_improvement",
+            "p95_regression_tolerance",
+            "risk_quantile",
+            "sample_size",
+            "score_tie_tolerance",
+        ):
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                EplbConfig(stair_config={name: 0})
+
+    def test_eplb_config_rejects_policy_selection(self):
+        for policy in ("default", "stair"):
+            with self.subTest(policy=policy), self.assertRaises(ValueError):
+                EplbConfig(**{"policy": policy})
+
+    def test_stair_config_rejects_unknown_option(self):
+        with self.assertRaises(ValueError):
+            EplbConfig(stair_config={"unknown_option": 0})
+
+    def test_stair_config_rejects_internal_policy_controls(self):
+        for name in ("z_score", "use_covariance", "hysteresis_enabled"):
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                EplbConfig(stair_config={name: 0})
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
@@ -600,34 +736,6 @@ class TestAscendConfig(TestBase):
         self.assertTrue(ascend_config.msmonitor_use_daemon)
 
     @_clean_up_ascend_config
-    @patch("vllm_ascend.ascend_config.logger.warning")
-    def test_flashcomm_config_warns(self, mock_warning):
-        test_vllm_config = VllmConfig()
-        test_vllm_config.additional_config = {"enable_flashcomm1": True}
-        init_ascend_config(test_vllm_config)
-
-        warning_messages = [call.args[0] for call in mock_warning.call_args_list]
-        self.assertIn(
-            "FlashComm is deprecated; remove enable_flashcomm1 and "
-            "VLLM_ASCEND_ENABLE_FLASHCOMM1 from the configuration. Use upstream configuration instead",
-            warning_messages,
-        )
-
-    @_clean_up_ascend_config
-    @patch("vllm_ascend.ascend_config.logger.warning")
-    def test_flashcomm_environment_warns(self, mock_warning):
-        test_vllm_config = VllmConfig()
-        with patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"}, clear=True):
-            init_ascend_config(test_vllm_config)
-
-        warning_messages = [call.args[0] for call in mock_warning.call_args_list]
-        self.assertIn(
-            "FlashComm is deprecated; remove enable_flashcomm1 and "
-            "VLLM_ASCEND_ENABLE_FLASHCOMM1 from the configuration. Use upstream configuration instead",
-            warning_messages,
-        )
-
-    @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_sequence_parallel_and_shared_expert_dp_are_independent(self, mock_check_and_update_config):
         for use_sequence_parallel_moe, enable_shared_expert_dp in (
@@ -809,6 +917,94 @@ class TestSparseKVOffloadConfig(TestBase):
         self.assertFalse(config.keep_device_kv_cache)
         self.assertTrue(config.use_fused_overlap)
 
+    def test_v2_decode_offload_allows_p_side_pp(self):
+        vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_topk=128)),
+            parallel_config=SimpleNamespace(
+                prefill_context_parallel_size=1,
+                decode_context_parallel_size=1,
+                pipeline_parallel_size=1,
+            ),
+            kv_transfer_config=SimpleNamespace(is_kv_consumer=True),
+            use_v2_model_runner=True,
+            speculative_config=None,
+        )
+
+        config = SparseKVOffloadConfig.from_additional_config(vllm_config, {"enabled": True})
+        self.assertTrue(config.enabled)
+        self.assertEqual(config.topk, 128)
+
+        # P-side PP does not enable offload; D-side PP remains unsupported.
+        vllm_config.parallel_config.pipeline_parallel_size = 2
+        with self.assertRaisesRegex(ValueError, "Sparse KV offload don't support pipeline parallel"):
+            SparseKVOffloadConfig.from_additional_config(vllm_config, {"enabled": True})
+
+    def test_v2_offload_accepts_v1_fused_and_mtp_combinations(self):
+        vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_topk=2048)),
+            parallel_config=SimpleNamespace(
+                prefill_context_parallel_size=1,
+                decode_context_parallel_size=1,
+                pipeline_parallel_size=1,
+            ),
+            kv_transfer_config=SimpleNamespace(is_kv_consumer=True),
+            use_v2_model_runner=True,
+            speculative_config=None,
+        )
+        fused = SparseKVOffloadConfig.from_additional_config(
+            vllm_config, {"enabled": True, "fused_op_type": "fused_copy_sfa", "topk_buffer_size": 4096}
+        )
+        self.assertTrue(fused.use_fused_copy_sfa)
+
+        vllm_config.speculative_config = SimpleNamespace(method="mtp", num_speculative_tokens=1)
+        self.assertTrue(SparseKVOffloadConfig.from_additional_config(vllm_config, {"enabled": True}).enabled)
+        fused_mtp = SparseKVOffloadConfig.from_additional_config(
+            vllm_config, {"enabled": True, "fused_op_type": "fused_copy_sfa", "topk_buffer_size": 4096}
+        )
+        self.assertTrue(fused_mtp.use_fused_copy_sfa)
+
+        vllm_config.speculative_config.num_speculative_tokens = 2
+        fused_mtp2 = SparseKVOffloadConfig.from_additional_config(
+            vllm_config, {"enabled": True, "fused_op_type": "fused_copy_sfa", "topk_buffer_size": 6144}
+        )
+        self.assertTrue(fused_mtp2.use_fused_copy_sfa)
+
+    def test_remote_dspark_requires_v2_but_does_not_restrict_mtp(self):
+        vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_topk=2048)),
+            parallel_config=SimpleNamespace(
+                prefill_context_parallel_size=1,
+                decode_context_parallel_size=1,
+                pipeline_parallel_size=1,
+            ),
+            kv_transfer_config=SimpleNamespace(is_kv_consumer=True),
+            use_v2_model_runner=False,
+            speculative_config=SimpleNamespace(method="dspark", num_speculative_tokens=3),
+        )
+        with self.assertRaisesRegex(ValueError, "V2 remote prompt-context initialization"):
+            SparseKVOffloadConfig.from_additional_config(
+                vllm_config,
+                {"enabled": True, "fused_op_type": "fused_copy_sfa", "topk_buffer_size": 8192},
+            )
+
+        with self.assertRaisesRegex(ValueError, "V2 remote prompt-context initialization"):
+            SparseKVOffloadConfig.from_additional_config(vllm_config, {"enabled": True})
+        vllm_config.use_v2_model_runner = True
+        fused = SparseKVOffloadConfig.from_additional_config(
+            vllm_config,
+            {"enabled": True, "fused_op_type": "fused_copy_sfa", "topk_buffer_size": 8192},
+        )
+        self.assertTrue(fused.use_fused_copy_sfa)
+        config = SparseKVOffloadConfig.from_additional_config(vllm_config, {"enabled": True})
+        self.assertFalse(config.use_fused_copy_sfa)
+        vllm_config.use_v2_model_runner = False
+        vllm_config.speculative_config.method = "mtp"
+        config = SparseKVOffloadConfig.from_additional_config(
+            vllm_config,
+            {"enabled": True, "fused_op_type": "fused_copy_sfa", "topk_buffer_size": 8192},
+        )
+        self.assertTrue(config.use_fused_copy_sfa)
+
     def test_unknown_key_is_rejected_even_when_disabled(self):
         with self.assertRaises(ValueError):
             SparseKVOffloadConfig.from_additional_config(SimpleNamespace(), {"unknown_option": False})
@@ -949,6 +1145,13 @@ class TestSubconfigPydanticTypeValidation(TestBase):
         with self.assertRaises(ValueError):
             AscendFusionConfig(unknown_key=1)
 
+    def test_ascend_warmup_config_bool_lax_and_forbid(self):
+        cfg = AscendWarmupConfig(enable_early_kernel_warmup="true", enable_early_nz_warmup="false")
+        self.assertTrue(cfg.enable_early_kernel_warmup)
+        self.assertFalse(cfg.enable_early_nz_warmup)
+        with self.assertRaises(ValueError):
+            AscendWarmupConfig(unknown_key=1)
+
     def test_ascend_compilation_config_bool_lax_and_forbid(self):
         cfg = AscendCompilationConfig(enable_npugraph_ex="false")
         self.assertFalse(cfg.enable_npugraph_ex)
@@ -993,6 +1196,86 @@ class TestSubconfigPydanticTypeValidation(TestBase):
         with self.assertRaisesRegex(ValueError, "lmhead_tensor_parallel_size must be non-negative"):
             FinegrainedTPConfig(lmhead_tensor_parallel_size=-1)
 
+    def _oproj_tp_vllm_config(
+        self,
+        max_num_batched_tokens=8192,
+        max_num_seqs=256,
+        num_speculative_tokens=0,
+        max_cudagraph_capture_size=512,
+        cudagraph_capture_sizes=None,
+        cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+        prefill_context_parallel_size=1,
+    ):
+        speculative_config = None
+        if num_speculative_tokens:
+            speculative_config = SimpleNamespace(num_speculative_tokens=num_speculative_tokens)
+        return SimpleNamespace(
+            parallel_config=SimpleNamespace(
+                tensor_parallel_size=1,
+                data_parallel_size=8,
+                prefill_context_parallel_size=prefill_context_parallel_size,
+            ),
+            compilation_config=SimpleNamespace(
+                cudagraph_mode=cudagraph_mode,
+                max_cudagraph_capture_size=max_cudagraph_capture_size,
+                cudagraph_capture_sizes=cudagraph_capture_sizes,
+            ),
+            scheduler_config=SimpleNamespace(max_num_batched_tokens=max_num_batched_tokens, max_num_seqs=max_num_seqs),
+            speculative_config=speculative_config,
+            kv_transfer_config=SimpleNamespace(is_kv_consumer=True),
+            model_config=SimpleNamespace(is_moe=True),
+        )
+
+    def test_oproj_tp_requires_graph_mode(self):
+        config = FinegrainedTPConfig(oproj_tensor_parallel_size=2)
+        # VllmConfig.__post_init__ normalizes enforce_eager into NONE, so this
+        # single check covers both spellings of "no graph mode".
+        with self.assertRaisesRegex(AssertionError, "only supported in graph mode"):
+            config._validate_preconditions(self._oproj_tp_vllm_config(cudagraph_mode=CUDAGraphMode.NONE))
+
+    def test_oproj_tp_rejects_pcp(self):
+        config = FinegrainedTPConfig(oproj_tensor_parallel_size=2)
+        with self.assertRaisesRegex(AssertionError, "not supported with prefill_context_parallel_size"):
+            config._validate_preconditions(self._oproj_tp_vllm_config(prefill_context_parallel_size=2))
+
+    def test_oproj_tp_size_one_skips_the_checks(self):
+        # Size 1 requests no split: no exchange groups to align, so the preconditions do not apply.
+        config = FinegrainedTPConfig(oproj_tensor_parallel_size=1)
+        config._validate_preconditions(self._oproj_tp_vllm_config(cudagraph_mode=CUDAGraphMode.NONE))
+        self.assertEqual(config.oproj_tensor_parallel_size, 1)
+
+    def test_oproj_tp_capture_bound_check(self):
+        config = FinegrainedTPConfig(oproj_tensor_parallel_size=2)
+        config._validate_preconditions(self._oproj_tp_vllm_config())
+        # max_num_batched_tokens can cap the step below the capture bound.
+        config._validate_preconditions(self._oproj_tp_vllm_config(max_num_batched_tokens=512))
+        self.assertEqual(config.oproj_tensor_parallel_size, 2)
+        # 300 reqs x decode_query_len 2 (spec window) = 600 > 512: disabled with a warning.
+        config._validate_preconditions(self._oproj_tp_vllm_config(max_num_seqs=300, num_speculative_tokens=1))
+        self.assertEqual(config.oproj_tensor_parallel_size, 0)
+        # An explicit capture size that covers the step keeps the knob on.
+        config = FinegrainedTPConfig(oproj_tensor_parallel_size=2)
+        config._validate_preconditions(
+            self._oproj_tp_vllm_config(max_num_seqs=300, num_speculative_tokens=1, max_cudagraph_capture_size=1024)
+        )
+        self.assertEqual(config.oproj_tensor_parallel_size, 2)
+        # Before _set_cudagraph_sizes backfills it, an explicit sizes list is the bound.
+        config = FinegrainedTPConfig(oproj_tensor_parallel_size=2)
+        config._validate_preconditions(
+            self._oproj_tp_vllm_config(max_cudagraph_capture_size=None, cudagraph_capture_sizes=[8, 16, 512])
+        )
+        self.assertEqual(config.oproj_tensor_parallel_size, 2)
+
+    def test_mlp_tp_capture_bound_check(self):
+        config = FinegrainedTPConfig(mlp_tensor_parallel_size=2)
+        config._validate_preconditions(self._oproj_tp_vllm_config())
+        self.assertEqual(config.mlp_tensor_parallel_size, 2)
+        # The step bound is knob-independent, so an oversized step disables both knobs together.
+        config = FinegrainedTPConfig(oproj_tensor_parallel_size=2, mlp_tensor_parallel_size=4)
+        config._validate_preconditions(self._oproj_tp_vllm_config(max_num_seqs=300, num_speculative_tokens=1))
+        self.assertEqual(config.oproj_tensor_parallel_size, 0)
+        self.assertEqual(config.mlp_tensor_parallel_size, 0)
+
     def test_eplb_config_int_field_lax(self):
         cfg = EplbConfig(eplb_policy_type="2")
         self.assertEqual(cfg.eplb_policy_type, 2)
@@ -1027,6 +1310,91 @@ class TestUpstreamConfigCompatibility(TestBase):
         self.assertFalse(AscendConfig._is_megamoe_supported_by_config(vc))
         text_config.moe_intermediate_size = 1024
         self.assertTrue(AscendConfig._is_megamoe_supported_by_config(vc))
+
+    @patch(
+        "vllm_ascend.ascend_config.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A5),
+    )
+    def test_a5_megamoe_k3_uses_routed_dimensions_and_top_k(self, _mock_profile):
+        text_config = SimpleNamespace(
+            hidden_size=7168,
+            routed_expert_hidden_size=3584,
+            moe_intermediate_size=3072,
+            num_experts_per_token=16,
+        )
+        vc = SimpleNamespace(
+            model_config=SimpleNamespace(hf_text_config=text_config, get_num_experts=lambda: 896),
+            parallel_config=SimpleNamespace(world_size_across_dp=32, pipeline_parallel_size=1),
+        )
+        for architecture in ("KimiK3ForCausalLM", "KimiLinearForCausalLM", "KimiK3ForConditionalGeneration"):
+            with self.subTest(architecture=architecture):
+                vc.model_config.architectures = [architecture]
+                self.assertTrue(AscendConfig._is_megamoe_supported_by_config(vc))
+                with patch.object(text_config, "hidden_size", 896):
+                    self.assertTrue(AscendConfig._is_megamoe_supported_by_config(vc))
+                with patch.object(text_config, "routed_expert_hidden_size", None):
+                    self.assertTrue(AscendConfig._is_megamoe_supported_by_config(vc))
+                for field, value in (
+                    ("routed_expert_hidden_size", 896),
+                    ("routed_expert_hidden_size", 1536),
+                    ("num_experts_per_token", 33),
+                ):
+                    with self.subTest(field=field), patch.object(text_config, field, value):
+                        self.assertFalse(AscendConfig._is_megamoe_supported_by_config(vc))
+                # Dense MLP dimensions must not substitute for missing K3
+                # routed-expert dimensions, even if the shape looks supported.
+                with (
+                    patch.object(text_config, "moe_intermediate_size", None),
+                    patch.object(text_config, "intermediate_size", 3072, create=True),
+                ):
+                    self.assertFalse(AscendConfig._is_megamoe_supported_by_config(vc))
+                # K3's model constructor reads this spelling, not the aliases.
+                with (
+                    patch.object(text_config, "num_experts_per_token", 33),
+                    patch.object(text_config, "num_experts_per_tok", 4, create=True),
+                ):
+                    self.assertFalse(AscendConfig._is_megamoe_supported_by_config(vc))
+
+    @patch(
+        "vllm_ascend.ascend_config.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A5),
+    )
+    def test_a5_megamoe_other_models_keep_legacy_config_rules(self, _mock_profile):
+        text_config = SimpleNamespace(
+            hidden_size=4096,
+            routed_expert_hidden_size=896,
+            moe_intermediate_size=1024,
+            intermediate_size=1024,
+            num_experts_per_tok=4,
+            num_experts_per_token=33,
+        )
+        model_config = SimpleNamespace(hf_text_config=text_config, get_num_experts=lambda: 128)
+        vc = SimpleNamespace(
+            model_config=model_config,
+            parallel_config=SimpleNamespace(world_size_across_dp=8, pipeline_parallel_size=1),
+        )
+        for architectures in (
+            ["Qwen3_5MoeForConditionalGeneration"],
+            ["DeepseekV3ForCausalLM"],
+            ["DeepseekV2ForCausalLM"],
+            ["KimiK25ForConditionalGeneration"],
+            ["KimiK3MTPModel"],
+            ["K3DSparkModel"],
+            [],
+            None,
+        ):
+            with self.subTest(architectures=architectures):
+                model_config.architectures = architectures
+                # K3-specific fields must not change the legacy decision.
+                self.assertTrue(AscendConfig._is_megamoe_supported_by_config(vc))
+                for field, value in (
+                    ("hidden_size", 3584),
+                    ("moe_intermediate_size", 3072),
+                    ("moe_intermediate_size", None),
+                    ("num_experts_per_tok", 33),
+                ):
+                    with self.subTest(field=field), patch.object(text_config, field, value):
+                        self.assertFalse(AscendConfig._is_megamoe_supported_by_config(vc))
 
     def test_megamoe_model_config_constraints(self):
         supported = SimpleNamespace(
@@ -1388,6 +1756,16 @@ class TestTopLevelSwitchTypeValidation(TestBase):
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_dsa_cp_and_pcp_are_mutually_exclusive(self, mock_fix):
+        vc = VllmConfig()
+        vc.additional_config = {"enable_dsa_cp": True}
+        vc.parallel_config.prefill_context_parallel_size = 4
+
+        with self.assertRaisesRegex(ValueError, "DSA-CP and PCP cannot be enabled at the same time.*Use PCP instead"):
+            init_ascend_config(vc)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_dsa_cp_enabled_auto_disabled_when_sp_conditions_not_met(self, mock_fix):
         """Case 4: dsa_cp on + SP conditions NOT met (tp=1) -> dsa auto-disabled."""
         with patch.dict(os.environ, {}, clear=False):
@@ -1664,6 +2042,25 @@ class TestTopLevelSwitchTypeValidation(TestBase):
 
 
 class TestKVPPConfig(TestBase):
+    def test_graph_modes(self):
+        from types import SimpleNamespace
+
+        from vllm.config import CUDAGraphMode
+
+        from tests.ut.kvpp_utils import make_kvpp_config
+        from vllm_ascend.ascend_config import KVPPConfig
+
+        for mode in CUDAGraphMode:
+            with self.subTest(mode=mode):
+                config = make_kvpp_config()
+                config.model_config.enforce_eager = False
+                config.compilation_config = SimpleNamespace(cudagraph_mode=mode)
+                if mode == CUDAGraphMode.PIECEWISE:
+                    KVPPConfig.from_vllm_config(config).validate(config)
+                else:
+                    with self.assertRaisesRegex(ValueError, "PIECEWISE"):
+                        KVPPConfig.from_vllm_config(config).validate(config)
+
     def test_enable_switch_uses_tp_size(self):
         from tests.ut.kvpp_utils import make_kvpp_config
         from vllm_ascend.ascend_config import KVPPConfig
@@ -1696,10 +2093,9 @@ class TestKVPPConfig(TestBase):
         KVPPConfig.from_vllm_config(config).validate(config)
         restrictions = (
             ("parallel_config", "decode_context_parallel_size", 2, "DCP"),
-            ("model_config", "enforce_eager", False, "eager"),
             ("model_config", "use_mla", False, "MLA"),
             ("model_config", "is_hybrid", True, "MLA"),
-            ("speculative_config", "method", "dspark", "mtp"),
+            ("speculative_config", "method", "eagle3", "mtp"),
             ("speculative_config", "num_speculative_tokens_per_batch_size", {1: 2}, "fixed"),
         )
         for section, field, value, message in restrictions:
@@ -1711,6 +2107,18 @@ class TestKVPPConfig(TestBase):
                 with self.assertRaisesRegex(ValueError, message):
                     _validate_parallel_config(config)
 
+    def test_dspark_accepts_fixed_length_and_rejects_dynamic_verification(self):
+        config = make_kvpp_config()
+        config.speculative_config.method = "dspark"
+        KVPPConfig.from_vllm_config(config).validate(config)
+        config.speculative_config.enable_adaptive_verification = True
+        with self.assertRaisesRegex(ValueError, "adaptive verification"):
+            KVPPConfig.from_vllm_config(config).validate(config)
+        config.speculative_config.enable_adaptive_verification = False
+        config.additional_config["dynamic_spec_config"] = {"method": "dspark"}
+        with self.assertRaisesRegex(ValueError, "dynamic speculative lengths"):
+            KVPPConfig.from_vllm_config(config).validate(config)
+
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_config_factory_keeps_kvpp_enabled(self, _check_config):
         clear_ascend_config()
@@ -1721,3 +2129,33 @@ class TestKVPPConfig(TestBase):
         config.additional_config = {"enable_kvpp": True}
         actual = init_ascend_config(config)
         self.assertEqual(actual.kvpp_config.size, 4)
+
+
+class TestEngramSharedMemoryDefaults(TestBase):
+    def test_shared_tables_are_derived_for_mrv2_dp_or_pcp(self):
+        topologies = (
+            (1, 1, False),
+            (2, 1, True),
+            (1, 2, True),
+            (2, 4, True),
+        )
+        for use_v2 in (False, True):
+            for dp, pcp, auto_shared in topologies:
+                for shared in (False, True):
+                    with self.subTest(use_v2=use_v2, dp=dp, pcp=pcp, shared=shared):
+                        config = VllmConfig(device_config=DeviceConfig(device="cpu"))
+                        config.parallel_config.data_parallel_size = dp
+                        config.parallel_config.prefill_context_parallel_size = pcp
+                        config.engram_config = SimpleNamespace(dp_shared_memory=shared)
+                        ascend_config = AscendConfig(sparse_kv_offload_config=SparseKVOffloadConfig())
+                        with patch.object(
+                            _VllmConfig, "use_v2_model_runner", new_callable=PropertyMock, return_value=use_v2
+                        ):
+                            ascend_config.derive_and_validate(config)
+                        self.assertEqual(config.engram_config.dp_shared_memory, shared or (use_v2 and auto_shared))
+
+    def test_no_engram_config_is_preserved(self):
+        config = VllmConfig(device_config=DeviceConfig(device="cpu"))
+        config.engram_config = None
+        AscendConfig(sparse_kv_offload_config=SparseKVOffloadConfig()).derive_and_validate(config)
+        self.assertIsNone(config.engram_config)

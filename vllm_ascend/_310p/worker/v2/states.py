@@ -33,7 +33,8 @@ class Ascend310PStagedWriteTensor:
             self._uva_buffer = UvaBuffer(size, dtype)
             self.cpu = self._uva_buffer.cpu
             self.np = self._uva_buffer.np
-            self.gpu = self._uva_buffer.uva
+            # vLLM main (#56908) turned UvaBuffer.uva into a method.
+            self.gpu = self._uva_buffer.uva()
         else:
             self.cpu = torch.zeros(size, dtype=dtype, device="cpu")
             self.np = self.cpu.numpy()
@@ -58,7 +59,7 @@ class Ascend310PStagedWriteTensor:
         if not self._dirty_indices:
             return
         if self.uva_instead_of_gpu:
-            self.gpu = self._uva_buffer.uva
+            self.gpu = self._uva_buffer.uva()
             self._dirty_indices.clear()
             return
         # Small request vectors favor one bulk H2D.

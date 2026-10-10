@@ -29,7 +29,16 @@ from vllm.logger import logger
 from vllm.utils.network_utils import get_ip
 from vllm.v1.kv_cache_interface import KVCacheConfig
 
+from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
+    DSparkContextDescriptor,
+    DSparkContextReceiver,
+)
+from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_kv import (
+    DraftKVCacheMetadata,
+    build_draft_kv_metadata,
+)
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (
+    CopySfaTailDest,
     LayerMetadata,
     SendTask,
     get_external_request_id,
@@ -57,6 +66,7 @@ from vllm_ascend.distributed.kv_transfer.utils.utils import (
     get_transfer_timeout_value,
     validate_register_region_count,
 )
+from vllm_ascend.spec_decode.dspark_utils import get_dspark_aux_layer_ids
 
 if TYPE_CHECKING:
     from vllm.v1.attention.backend import AttentionMetadata
@@ -147,6 +157,15 @@ class SFAPDRD2HConsumerWorker:
         self.request_map: dict[str, str] = {}
         # external_req_id -> (main CPU block ids, indexer HBM block ids).
         self._dest_blocks_by_req: dict[str, tuple[list[int], list[int]]] = {}
+        # Internal req_id -> early-bound fused_copy_sfa top-k row used by the runner.
+        self.copy_sfa_slots_by_req: dict[str, int] = {}
+        # external_req_id -> circular-tail destination. Shared with the read thread.
+        self._copy_sfa_tail_by_req: dict[str, CopySfaTailDest] = {}
+        self._topk_k_bases: list[int] = []
+        self._topk_v_bases: list[int] = []
+        self._topk_row_tokens = 0
+        self._topk_hot_tokens = 0
+        self._copy_sfa_block_size = 128
         # External req ids whose DONE signal arrived before request_map
         # was seeded (see get_finished). Retried every step until mapped.
         self._pending_done: set[str] = set()
@@ -154,6 +173,38 @@ class SFAPDRD2HConsumerWorker:
         # rank has finished the same request. This is scheduler readiness state,
         # not a per-layer barrier.
         self._terminal_ext_ids: set[str] = set()
+        self._dspark_context_receiver: DSparkContextReceiver | None = None
+        self._dspark_pending_recv: set[str] = set()
+        self._deferred_finished_req_ids: set[str] = set()
+        self._dspark_draft_blocks_by_req: dict[str, dict[int, tuple[int, ...]]] = {}
+        self.dspark_draft_layer_names: tuple[str, ...] = ()
+        self.dspark_draft_kv_metadata: dict[str, DraftKVCacheMetadata] = {}
+
+    def configure_dspark_draft_layers(self, layer_names: tuple[str, ...]) -> None:
+        """Keep draft pages out of target-layer registration while exposing them to DSpark."""
+        if self._mf_read_thread is not None or self.request_map:
+            raise RuntimeError("Configure DSpark cache ownership before request admission")
+        configured = tuple(layer_names)
+        available = {name for group in self.kv_cache_config.kv_cache_groups for name in group.layer_names}
+        if not configured or len(set(configured)) != len(configured) or not set(configured) <= available:
+            raise ValueError("DSpark draft cache names must uniquely match allocated KV layers")
+        self.dspark_draft_layer_names = configured
+        self.kv_cache_config.dspark_draft_layer_names = configured
+
+    def bind_dspark_context_receiver(self, receiver: DSparkContextReceiver) -> None:
+        """Bind the direct-transfer readiness gate before admitting requests."""
+        if getattr(self, "_dspark_context_receiver", None) is not None or self.request_map:
+            raise RuntimeError("Bind the DSpark context receiver once, before request admission")
+        self._dspark_context_receiver = receiver
+        if self._mf_read_thread is not None:
+            self._mf_read_thread.bind_dspark_context_receiver(receiver)
+
+    def get_dspark_draft_block_ids(self, request_id: str) -> dict[int, tuple[int, ...]]:
+        """Return scheduler-allocated resident draft blocks for one request."""
+        try:
+            return self._dspark_draft_blocks_by_req[request_id]
+        except KeyError as error:
+            raise RuntimeError(f"No resident DSpark blocks were registered for request {request_id}") from error
 
     # ------------------------------------------------------------------
     # Common
@@ -200,6 +251,36 @@ class SFAPDRD2HConsumerWorker:
                 indexer_ids = list(getattr(req, "indexer_block_ids", []) or [])
                 self._dest_blocks_by_req[ext_id] = (main_ids, indexer_ids)
                 self._cpu_blocks_by_req[req_id] = len(main_ids)
+                descriptor = getattr(req, "dspark_context_descriptor", None)
+                if descriptor is not None:
+                    receiver = self._dspark_context_receiver
+                    if receiver is None:
+                        raise RuntimeError("DSpark context arrived before its model-thread receiver was bound")
+                    group_ids = tuple(getattr(req, "dspark_draft_group_ids", ()) or ())
+                    block_ids_by_group = getattr(req, "dspark_draft_block_ids_by_group", None)
+                    if not group_ids or block_ids_by_group is None or set(group_ids) != set(block_ids_by_group):
+                        raise RuntimeError("Scheduler metadata is missing exact resident DSpark block tables")
+                    self._dspark_draft_blocks_by_req[ext_id] = {
+                        group_id: tuple(block_ids_by_group[group_id]) for group_id in group_ids
+                    }
+                    receiver.register_request(descriptor)
+                    self._dspark_pending_recv.add(req_id)
+                pool_slot = getattr(req, "pool_slot", None)
+                if pool_slot is not None:
+                    self.copy_sfa_slots_by_req[req_id] = int(pool_slot)
+                    dense = bool(getattr(req, "dense", False))
+                    tail_tokens = int(getattr(req, "tail_tokens", 0) or 0)
+                    # dense: the pull thread copies the whole prompt into the
+                    # row's hot region (short requests decode as -3); tail: the
+                    # circular slots only receive the incomplete last block.
+                    if dense or tail_tokens > 0:
+                        self._copy_sfa_tail_by_req[ext_id] = CopySfaTailDest(
+                            pool_slot=int(pool_slot),
+                            tail_tokens=tail_tokens,
+                            tail_block_index=int(getattr(req, "tail_block_index", 0) or 0),
+                            dense=dense,
+                            kv_tokens=int(getattr(req, "kv_tokens", 0) or 0),
+                        )
 
     def save_kv_layer(
         self,
@@ -218,9 +299,18 @@ class SFAPDRD2HConsumerWorker:
         for req_id in req_ids:
             ext_id = get_external_request_id(req_id)
             ext_ids.add(ext_id)
+            receiver = getattr(self, "_dspark_context_receiver", None)
+            if receiver is not None:
+                # Check transfer ownership before dropping any DMA destination.
+                receiver.discard_request_id(ext_id)
+                self._dspark_pending_recv.discard(req_id)
+                self._deferred_finished_req_ids.discard(req_id)
             self._cpu_blocks_by_req.pop(req_id, None)
             self.request_map.pop(ext_id, None)
             self._dest_blocks_by_req.pop(ext_id, None)
+            getattr(self, "_dspark_draft_blocks_by_req", {}).pop(ext_id, None)
+            getattr(self, "copy_sfa_slots_by_req", {}).pop(req_id, None)
+            getattr(self, "_copy_sfa_tail_by_req", {}).pop(ext_id, None)
             self._pending_done.discard(ext_id)
             self._terminal_ext_ids.discard(ext_id)
         # Drop any partial contributor-completion state so a dead contributor or a
@@ -252,14 +342,41 @@ class SFAPDRD2HConsumerWorker:
         if hasattr(self, "_mf_read_thread") and self._mf_read_thread is not None:
             local_done = self._mf_read_thread.get_and_clear_done()
             local_failed = self._mf_read_thread.get_and_clear_failed()
-            self._terminal_ext_ids.update(local_done | local_failed)
+        self._terminal_ext_ids.update(local_done | local_failed)
 
-        tp_status = self._gather_tp_read_status(
-            set(self._terminal_ext_ids),
-            local_failed,
-        )
+        local_terminal = set(self._terminal_ext_ids)
+        receiver = getattr(self, "_dspark_context_receiver", None)
+        if receiver is not None:
+            # Target KV reads and direct P-computed draft-KV transfers are
+            # independent. A request is released only after both have joined.
+            for ext_id in local_terminal:
+                descriptor = receiver.get_descriptor(ext_id)
+                if descriptor is not None:
+                    receiver.mark_target_kv_done(ext_id, descriptor.generation)
+            local_terminal = (local_terminal & receiver.ready_requests()) | local_failed
+        tp_status = self._gather_tp_read_status(local_terminal, local_failed)
         finished_on_all = set.intersection(*(terminal for terminal, _ in tp_status)) if tp_status else set()
         failed_on_any = set().union(*(failed for _, failed in tp_status))
+        if receiver is not None:
+            for ext_id in finished_on_all - failed_on_any:
+                descriptor = receiver.get_descriptor(ext_id)
+                if descriptor is not None:
+                    logger.debug(
+                        "DSpark remote prompt ready: req=%s tokens=%d aux_layers=%s draft_groups=%s tp_rank=%d",
+                        ext_id,
+                        descriptor.prompt_tokens,
+                        descriptor.aux_layer_ids,
+                        tuple(self._dspark_draft_blocks_by_req[ext_id]),
+                        self.tp_rank,
+                    )
+                    # All TP ranks completed context writes and target reads.
+                    # Retire ingress capacity now, without dropping live draft
+                    # block tables, request_map, or duplicate-ACK bookkeeping.
+                    # Waiting for finished_req_ids lets the next load hook run
+                    # before cleanup and overflow an otherwise bounded pool.
+                    receiver.retire_ready_request(ext_id, descriptor.generation)
+        if receiver is not None and failed_on_any:
+            raise RuntimeError(f"DSpark remote prompt transfer failed; refusing local recomputation: {failed_on_any}")
         self._terminal_ext_ids.difference_update(finished_on_all)
 
         for ext_id in failed_on_any:
@@ -293,7 +410,15 @@ class SFAPDRD2HConsumerWorker:
         # request_map[ext_id] and discard _pending_done[ext_id] before the
         # resolution loop above, leaking any finished req whose DONE arrives in
         # the same step (unmappable -> stuck in _pending_done forever).
-        if finished_req_ids:
+        if receiver is not None:
+            self._dspark_pending_recv.difference_update(done_recving)
+            self._deferred_finished_req_ids.update(finished_req_ids or ())
+            # Cancellation does not abort the remote reads. Keep their lookup
+            # tables until the original target+draft join completes on every TP.
+            ready_to_cleanup = self._deferred_finished_req_ids - self._dspark_pending_recv
+            if ready_to_cleanup:
+                self._cleanup_request_state(ready_to_cleanup)
+        elif finished_req_ids:
             self._cleanup_request_state(finished_req_ids)
 
         return set(), done_recving
@@ -324,6 +449,14 @@ class SFAPDRD2HConsumerWorker:
             indexer_scale_tensors=self._indexer_scale_tensors,
             dest_blocks_by_req=self._dest_blocks_by_req,
             get_offload_layer_id=self.offload_manager._get_offload_layer_id,
+            copy_sfa_tail_by_req=self._copy_sfa_tail_by_req,
+            topk_k_bases=self._topk_k_bases,
+            topk_v_bases=self._topk_v_bases,
+            topk_row_tokens=self._topk_row_tokens,
+            topk_hot_tokens=self._topk_hot_tokens,
+            block_size=self._copy_sfa_block_size,
+            dspark_draft_kv_metadata=self.dspark_draft_kv_metadata,
+            dspark_draft_blocks_by_req=self._dspark_draft_blocks_by_req,
         )
 
     def _register_memfabric_pull(
@@ -335,7 +468,12 @@ class SFAPDRD2HConsumerWorker:
         assert self.kv_cache_config is not None
         num_blocks = self.kv_cache_config.num_blocks
         main_names = list(self.offload_manager.offload_layer_names)
-        indexer_by_layer = {_layer_idx(name): name for name in kv_caches if "indexer" in name.lower()}
+        draft_names = set(self.dspark_draft_layer_names)
+        indexer_by_layer = {
+            _layer_idx(name): name for name in kv_caches if "indexer" in name.lower() and name not in draft_names
+        }
+        if draft_names:
+            self.dspark_draft_kv_metadata = build_draft_kv_metadata(self.kv_cache_config, kv_caches)
 
         # Store layer info for MembPullReadThread
         self._main_names = main_names
@@ -407,6 +545,7 @@ class SFAPDRD2HConsumerWorker:
 
         # Create memfabric engine (no registration)
         self._ensure_engine()
+        self._bind_copy_sfa_tail_destinations()
         read_state = self._build_consumer_read_state()
         # Start MembPullReadThread (ZMQ ROUTER + memfabric read)
         self._mf_read_thread = MembPullReadThread(
@@ -428,6 +567,33 @@ class SFAPDRD2HConsumerWorker:
             sum(t is not None for t in self._indexer_tensors),
             len(main_names),
         )
+
+    def _bind_copy_sfa_tail_destinations(self) -> None:
+        """Publish rank-local topk buffer bases for circular-tail D2D."""
+        manager = self.offload_manager
+        if manager is None or not getattr(manager, "use_fused_copy_sfa", False):
+            self._topk_k_bases = []
+            self._topk_v_bases = []
+            self._topk_row_tokens = 0
+            self._topk_hot_tokens = 0
+            return
+        # The shared manager is also imported by the attention backend.
+        from vllm_ascend.attention.sfa_kv_offload import COPY_SFA_TAIL_BLOCKS
+
+        topk_k = manager.topk_buffers_k
+        topk_v = manager.topk_buffers_v
+        if not topk_k or not topk_v:
+            raise RuntimeError("fused_copy_sfa PD tail D2D requires registered topk buffers")
+        self._topk_k_bases = [int(tensor.data_ptr()) for tensor in topk_k]
+        self._topk_v_bases = [int(tensor.data_ptr()) for tensor in topk_v]
+        self._copy_sfa_block_size = int(manager.block_size)
+        self._topk_row_tokens = int(topk_k[0].shape[1])
+        self._topk_hot_tokens = self._topk_row_tokens - COPY_SFA_TAIL_BLOCKS * self._copy_sfa_block_size
+        if self._topk_hot_tokens <= 0:
+            raise RuntimeError(
+                "fused_copy_sfa topk row is missing circular tail slots: "
+                f"row_tokens={self._topk_row_tokens}, block_size={self._copy_sfa_block_size}"
+            )
 
     def shutdown(self) -> None:
         read_thread = getattr(self, "_mf_read_thread", None)
@@ -488,8 +654,15 @@ class SFAPDRD2HProducerWorker:
         # Layers whose PD send was already dispatched at scatter time by
         # on_kv_cache_written; save_kv_layer skips these at layer end.
         self._pd_dispatched_layers: set[int] = set()
+        speculative = getattr(vllm_config, "speculative_config", None)
+        self.dspark_aux_layer_ids = (
+            get_dspark_aux_layer_ids(vllm_config) if speculative is not None and speculative.method == "dspark" else ()
+        )
+        self.dspark_draft_layer_names: tuple[str, ...] = ()
+        self.dspark_draft_kv_metadata: dict[str, DraftKVCacheMetadata] = {}
+        self._active_dspark_requests: dict[str, Any] = {}
 
-    def get_finished(self) -> tuple[set[str], set[str]]:
+    def get_finished(self, finished_req_ids: set[str] | None = None) -> tuple[set[str], set[str]]:
         return set(), set()
 
     def get_block_ids_with_load_errors(self) -> set[int]:
@@ -507,22 +680,25 @@ class SFAPDRD2HProducerWorker:
             return req_meta
         raise RuntimeError("SfaRemoteD2HConnector P side supports memfabric pull only.")
 
-    def start_load_kv(self, metadata: KVConnectorMetadata) -> None:
-        """Prepare P-side request metadata for memfabric pull mode.
+    def bind_connector_metadata(self, metadata: KVConnectorMetadata) -> None:
+        """Prepare P-side dispatch metadata before this step's layer hooks.
 
-        * reset ``self.current_layer`` — the per-step layer counter that
-          ``save_kv_layer`` increments; without the reset it drifts to
-          ``>= total_layers`` and every request after the first is skipped.
-        * adjust ``remote_port`` by ``tp_rank`` — D's ROUTER binds
-          ``side_channel_port + tp_rank`` (one per rank) but D advertises the
-          base port, so each P rank must send to ``base + tp_rank``.
+        * reset ``self.current_layer`` — the stage-local fallback position for
+          hooks without an explicit layer name.
+        * clear ``_pd_dispatched_layers`` so the new step can send each layer
+          once, through either the scatter-time or layer-end hook.
+        * adjust ``remote_port`` by the mapped D TP rank. D advertises its base
+          port, while each D rank listens on ``base + decode_tp_rank``.
 
         ``remote_host`` / ``local_block_ids`` are already correct from
         ``build_connector_meta``; main and indexer group ids remain separate."""
         if self._backend == BACKEND_MEMFABRIC:
             self.current_layer = 0
             self._pd_dispatched_layers = set()
+            self._active_dspark_requests = {}
             for req_id, req_meta in getattr(metadata, "requests", {}).items():
+                if getattr(req_meta, "dspark_context_generation", None):
+                    self._active_dspark_requests[req_id] = req_meta
                 if req_meta.remote_port is None:
                     continue
                 remote_tp_size = req_meta.remote_tp_size
@@ -543,7 +719,7 @@ class SFAPDRD2HProducerWorker:
                     description="SFAPD remote D-side TP control-plane port",
                 )
                 logger.debug(
-                    "MembPull P start_load_kv req %s: remote_host=%s, "
+                    "MembPull P bind_connector_metadata req %s: remote_host=%s, "
                     "remote_port=%s->%s, tp_rank=%s, tp_ratio=%s, local_block_ids=%s, "
                     "chunk_finish=%s, local_computed_tokens=%s, local_transed_tokens=%s",
                     req_id,
@@ -557,6 +733,9 @@ class SFAPDRD2HProducerWorker:
                     req_meta.local_computed_tokens,
                     req_meta.local_transed_tokens,
                 )
+            # An unrelated/empty scheduling step must not reset a partially
+            # sent prompt. Retire offsets with request completion, not with
+            # the set of requests scheduled in this particular step.
             return
         raise RuntimeError("SfaRemoteD2HConnector P side supports memfabric pull only.")
 
@@ -623,8 +802,10 @@ class SFAPDRD2HProducerWorker:
                 layer2group_ids[layer_name] = group_idx
 
         num_blocks = self.kv_cache_config.num_blocks
-        main_by_layer = {_layer_idx(name): name for name in kv_caches if "indexer" not in name.lower()}
-        indexer_by_layer = {_layer_idx(name): name for name in kv_caches if "indexer" in name.lower()}
+        draft_names = set(self.dspark_draft_layer_names)
+        target_caches = {name: cache for name, cache in kv_caches.items() if name not in draft_names}
+        main_by_layer = {_layer_idx(name): name for name in target_caches if "indexer" not in name.lower()}
+        indexer_by_layer = {_layer_idx(name): name for name in target_caches if "indexer" in name.lower()}
         if not main_by_layer:
             raise RuntimeError("SFAPD producer did not find main SFA KV cache layers")
 
@@ -646,7 +827,7 @@ class SFAPDRD2HProducerWorker:
 
         for physical_idx, main_name in sorted(main_by_layer.items()):
             layer_meta = LayerMetadata([], [], [], [])
-            _append_cache_tensors(layer_meta, kv_caches[main_name], layer2group_ids[main_name])
+            _append_cache_tensors(layer_meta, target_caches[main_name], layer2group_ids[main_name])
             layer_meta.main_tensor_count = len(layer_meta.kv_caches_base_addr)
             if layer_meta.main_tensor_count != 2:
                 raise RuntimeError(
@@ -657,7 +838,7 @@ class SFAPDRD2HProducerWorker:
             if indexer_name is not None:
                 _append_cache_tensors(
                     layer_meta,
-                    kv_caches[indexer_name],
+                    target_caches[indexer_name],
                     layer2group_ids[indexer_name],
                 )
                 layer_meta.has_indexer = True
@@ -666,12 +847,16 @@ class SFAPDRD2HProducerWorker:
         self.last_layer_idx = max(main_by_layer)
         self.total_layers = self.last_layer_idx + 1
         self.stage_layer_names = [name for _, name in sorted(main_by_layer.items())]
+        if draft_names:
+            self.dspark_draft_kv_metadata = build_draft_kv_metadata(self.kv_cache_config, kv_caches)
 
         # Infer physical storage slots directly from component addresses.
         # Main and indexer storage are tracked independently: a main-only layer
         # can still share its main slot with a later layer that owns an indexer.
         self.layer_storage_slots = self._infer_layer_storage_slots(self.layer_metadata)
 
+        # Register both cache families. Target layer metadata remains separate
+        # so draft layer indices cannot collide with target SFA layer indices.
         register_regions = collect_storage_merged_register_regions(kv_caches)
         validate_register_region_count(register_regions)
         global_memfabric_te.register_buffer(register_regions.ptrs, register_regions.lengths)
@@ -691,9 +876,103 @@ class SFAPDRD2HProducerWorker:
             self.kv_send_layer_thread.stop()
             raise RuntimeError("SFAPD P-side send thread failed during startup") from error
         logger.info(
-            "MembPull P registered kv caches: layers=%d, p_session=%s",
+            "MembPull P registered kv caches: target_layers=%d, dspark_draft_layers=%d, p_session=%s",
             len(self.layer_metadata),
+            len(self.dspark_draft_kv_metadata),
             global_memfabric_te.unique_id,
+        )
+
+    def configure_dspark_draft_layers(self, layer_names: tuple[str, ...]) -> None:
+        if self.kv_send_layer_thread is not None:
+            raise RuntimeError("Configure DSpark draft layers before P cache registration")
+        configured = tuple(layer_names)
+        available = {name for group in self.kv_cache_config.kv_cache_groups for name in group.layer_names}
+        if not configured or len(set(configured)) != len(configured) or not set(configured) <= available:
+            raise ValueError("DSpark draft cache names must uniquely match allocated KV layers")
+        self.dspark_draft_layer_names = configured
+        self.kv_cache_config.dspark_draft_layer_names = configured
+
+    @staticmethod
+    def _draft_kv_metadata_to_wire(
+        metadata: dict[str, DraftKVCacheMetadata],
+    ) -> dict[str, dict[str, Any]]:
+        return {
+            name: {
+                "group_id": item.group_id,
+                "block_size": item.block_size,
+                "num_blocks": item.num_blocks,
+                "base_addrs": item.base_addrs,
+                "block_strides": item.block_strides,
+                "block_lens": item.block_lens,
+                "block_scales": item.block_scales,
+                "shapes": item.shapes,
+                "dtypes": item.dtypes,
+            }
+            for name, item in metadata.items()
+        }
+
+    def send_dspark_draft_kv(
+        self,
+        request_id: str,
+        descriptor: DSparkContextDescriptor,
+        source_blocks_by_group: dict[int, tuple[int, ...]],
+    ) -> None:
+        """Let D pull P-computed draft KV into D's own resident block table."""
+        if self.pp_rank != self.pp_size - 1 or not self.dspark_draft_kv_metadata:
+            raise RuntimeError("P-side DSpark draft KV transfer requires registered draft pages on final PP")
+        if self.kv_send_layer_thread is None:
+            raise RuntimeError("SFAPD P send thread is not registered")
+        req_meta = self._active_dspark_requests.get(request_id)
+        if req_meta is None:
+            raise RuntimeError(f"No remote DSpark consumer metadata is bound for request {request_id}")
+        if not req_meta.remote_host or not req_meta.remote_port:
+            raise RuntimeError(f"Remote DSpark request {request_id} has no Decode endpoint")
+        if descriptor.request_id != get_external_request_id(request_id):
+            raise RuntimeError("DSpark KV request ID does not match SFA producer metadata")
+        if descriptor.generation != req_meta.dspark_context_generation:
+            raise RuntimeError("DSpark KV allocation generation does not match Decode rendezvous")
+        if descriptor.aux_layer_ids != self.dspark_aux_layer_ids:
+            raise RuntimeError("DSpark target-boundary schema differs between P and D")
+        expected_groups = {item.group_id for item in self.dspark_draft_kv_metadata.values()}
+        if set(source_blocks_by_group) != expected_groups:
+            raise ValueError("P DSpark source tables must cover every draft cache group")
+        request_blocks = req_meta.local_block_ids
+        for group_id in expected_groups:
+            if group_id >= len(request_blocks):
+                raise RuntimeError(f"P request is missing DSpark draft KV group {group_id}")
+            block_size = self.kv_cache_specs[group_id].block_size
+            required = (descriptor.prompt_tokens + block_size - 1) // block_size
+            if tuple(source_blocks_by_group[group_id]) != tuple(request_blocks[group_id][:required]):
+                raise RuntimeError("P DSpark source blocks differ from scheduler-owned prompt blocks")
+        self.kv_send_layer_thread.send_dspark_draft_kv(
+            host=req_meta.remote_host,
+            port=req_meta.remote_port,
+            remote_engine_id=req_meta.remote_engine_id,
+            descriptor=descriptor,
+            draft_kv_metadata=self._draft_kv_metadata_to_wire(self.dspark_draft_kv_metadata),
+            source_blocks_by_group=source_blocks_by_group,
+        )
+        logger.debug(
+            "DSpark P draft KV transferred: req=%s tokens=%d draft_layers=%d draft_groups=%s tp_rank=%d",
+            descriptor.request_id,
+            descriptor.prompt_tokens,
+            len(self.dspark_draft_kv_metadata),
+            tuple(sorted(source_blocks_by_group)),
+            self.tp_rank,
+        )
+
+    def get_dspark_context_descriptor(self, request_id: str, prompt_tokens: int) -> DSparkContextDescriptor | None:
+        req_meta = self._active_dspark_requests.get(request_id)
+        if req_meta is None or not req_meta.dspark_context_generation:
+            return None
+        if not self.dspark_aux_layer_ids:
+            raise RuntimeError("Prefill DSpark auxiliary boundaries were not configured")
+        return DSparkContextDescriptor(
+            request_id=get_external_request_id(request_id),
+            generation=req_meta.dspark_context_generation,
+            prompt_tokens=prompt_tokens,
+            aux_layer_ids=self.dspark_aux_layer_ids,
+            hidden_size=self.vllm_config.model_config.get_hidden_size(),
         )
 
     def _has_memfabric_pull_target(

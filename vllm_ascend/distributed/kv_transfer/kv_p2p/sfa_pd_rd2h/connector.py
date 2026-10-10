@@ -24,6 +24,9 @@ from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 
+from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
+    DSparkContextReceiver,
+)
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.scheduler import (
     SFAPDRD2HProducerScheduler,
     SFAPDRD2HScheduler,
@@ -36,6 +39,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.worker import (
 if TYPE_CHECKING:
     from vllm.forward_context import ForwardContext
     from vllm.v1.attention.backend import AttentionMetadata
+    from vllm.v1.outputs import KVConnectorOutput
     from vllm.v1.request import Request
 
 _LAYER_IDX_RE = re.compile(r"layers\.(\d+)")
@@ -144,18 +148,65 @@ class SfaRemoteD2HConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished_all_groups(request, block_ids)
 
+    def update_connector_output(self, connector_output: "KVConnectorOutput") -> None:
+        if self.is_consumer:
+            assert self.connector_scheduler is not None
+            self.connector_scheduler.update_connector_output(connector_output)
+
     # ------------------------------------------------------------------
     # Worker side
     # ------------------------------------------------------------------
+    def bind_connector_metadata(self, connector_metadata: KVConnectorMetadata) -> None:
+        super().bind_connector_metadata(connector_metadata)
+        if self.is_producer:
+            assert self.connector_worker is not None
+            # Producer layer hooks need the reset dispatch state and TP-mapped
+            # destination before forward. vLLM may call start_load_kv only
+            # after target forward, when resetting would also rewind MTP state.
+            self.connector_worker.bind_connector_metadata(connector_metadata)
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
+
+    def bind_dspark_context_receiver(
+        self,
+        receiver: DSparkContextReceiver,
+    ) -> None:
+        if not self.is_consumer or self.connector_worker is None:
+            raise RuntimeError("DSpark prompt-context receiver can only bind on the Decode worker")
+        self.connector_worker.bind_dspark_context_receiver(receiver)
+
+    def configure_dspark_draft_layers(self, layer_names: tuple[str, ...]) -> None:
+        if self.connector_worker is None:
+            raise RuntimeError("DSpark draft caches can only be configured on a worker connector")
+        self.connector_worker.configure_dspark_draft_layers(layer_names)
+
+    def get_dspark_draft_block_ids(self, request_id: str) -> dict[int, tuple[int, ...]]:
+        if not self.is_consumer or self.connector_worker is None:
+            raise RuntimeError("Resident DSpark block tables exist only on the Decode worker")
+        return self.connector_worker.get_dspark_draft_block_ids(request_id)
+
+    def send_dspark_draft_kv(
+        self,
+        request_id: str,
+        descriptor: Any,
+        source_blocks_by_group: dict[int, tuple[int, ...]],
+    ) -> None:
+        if not self.is_producer or self.connector_worker is None:
+            raise RuntimeError("DSpark draft KV can only be sent by the Prefill worker")
+        self.connector_worker.send_dspark_draft_kv(request_id, descriptor, source_blocks_by_group)
+
+    def get_dspark_context_descriptor(self, request_id: str, prompt_tokens: int):
+        if not self.is_producer or self.connector_worker is None:
+            raise RuntimeError("DSpark context descriptors can only be created by the Prefill worker")
+        return self.connector_worker.get_dspark_context_descriptor(request_id, prompt_tokens)
 
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         assert self.connector_worker is not None
         if self.is_consumer:
             return self.connector_worker.get_finished(finished_req_ids)
-        return self.connector_worker.get_finished()
+        return self.connector_worker.get_finished(finished_req_ids)
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         assert self.connector_worker is not None
@@ -163,7 +214,10 @@ class SfaRemoteD2HConnector(KVConnectorBase_V1, SupportsHMA):
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
-        self.connector_worker.start_load_kv(self._get_connector_metadata())
+        # Keep consumer loads at the runner's ordered load hook. Producer
+        # preparation already ran at bind time, including its port adjustment.
+        if not self.is_producer:
+            self.connector_worker.start_load_kv(self._get_connector_metadata())
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         """Per-layer gate called before each layer's attention computation.
@@ -215,6 +269,13 @@ class SfaRemoteD2HConnector(KVConnectorBase_V1, SupportsHMA):
         # completion is tracked by READ_DONE/storage_send_done_events.
         if self.is_consumer and self.connector_worker is not None:
             self.connector_worker.wait_for_save()
+
+    def get_copy_sfa_slot_bindings(self) -> dict[str, int]:
+        """Return the early-bound fused_copy_sfa top-k rows for in-flight PD requests."""
+        worker = self.connector_worker
+        if worker is None:
+            return {}
+        return dict(getattr(worker, "copy_sfa_slots_by_req", {}))
 
     # Phase 3: real per-req CPU-block count for the solution-1 threshold.
     def get_num_cpu_blocks(self, req_ids: list[str]) -> dict[str, int] | None:

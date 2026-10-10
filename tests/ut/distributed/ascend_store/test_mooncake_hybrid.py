@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+from numpy.typing import NDArray
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401
 
@@ -77,6 +78,9 @@ class MemoryRangeStore:
     def batch_is_exist(self, keys):
         return [int(key in self.complete) for key in keys]
 
+    def batch_is_readable(self, keys):
+        return [key in self.complete for key in keys]
+
     def batch_get_start(self, keys):
         self.open_reads.update(key for key in keys if key in self.complete)
         return [0 if key in self.complete else -1 for key in keys]
@@ -131,7 +135,7 @@ class TestMooncakeHybrid(unittest.TestCase):
             worker = make_worker(self, num_layers=4, num_hidden_layers=4, use_layerwise=True, kv_cache_config=config)
         store = MemoryRangeStore()
         worker.m_store = store
-        arrays = {}
+        arrays: dict[str, NDArray[np.uint8]] = {}
         for group, spec in enumerate(groups):
             for layer, name in enumerate(spec.layer_names):
                 arrays[name] = np.full((8, 8 + group * 4), 1 + group * 16 + layer, dtype=np.uint8)
@@ -186,6 +190,7 @@ class TestMooncakeHybrid(unittest.TestCase):
         )
         meta = AscendConnectorMetadata(set())
         meta.add_request(request)
+        worker.prepare_layerwise_step(meta)
         worker.start_load_kv(meta)
         self.assertEqual(len(store.objects), 7)
         self.assertEqual(sorted(len(value) for value in store.objects.values()), [16] * 4 + [32] + [36] * 2)
@@ -202,6 +207,10 @@ class TestMooncakeHybrid(unittest.TestCase):
                 assert worker.layer_save_finished_events is not None
                 self.assertTrue(worker.layer_save_finished_events[layer].wait(timeout=2))
                 self.assertEqual(len(store.complete), 4, "Group 0 completes before the last physical layer")
+        # The deferred last-layer drain (see PERF-TUNE(2) in pool_worker)
+        # normally runs at the next step's start_load_kv; synchronize here so
+        # the final group commits are observable.
+        worker._drain_deferred_last_save()
         self.assertEqual(len(store.complete), 7)
         self.assertFalse(worker._put_started_keys)
         for array in arrays.values():
@@ -218,6 +227,7 @@ class TestMooncakeHybrid(unittest.TestCase):
                 is_last_chunk=True,
             )
         )
+        worker.prepare_layerwise_step(meta)
         worker.start_load_kv(meta)
         for _ in range(4):
             worker.wait_for_layer_load()
@@ -301,13 +311,25 @@ class TestMooncakeHybrid(unittest.TestCase):
 
     def test_coordinator_queries_all_heads_using_mooncake_existence(self):
         scheduler = object.__new__(KVPoolScheduler)
+        scheduler.dspark_prefix_keys = None
+        scheduler.num_speculative_blocks_by_group = {}
         scheduler.block_key_hybrid = True
-        scheduler.block_key_hybrid_layout = "layout"
         scheduler.layerwise_protocol = mooncake_layerwise
         scheduler.model_name = "model"
         scheduler.tp_size = 2
+        scheduler.pp_size = 1
         scheduler.put_step = 1
         scheduler.grouped_block_size = [16, 32]
+        with patch.object(mooncake_layerwise, "hybrid_layout_id", return_value="layout"):
+            scheduler.layerwise_keys = mooncake_layerwise.bind_layerwise_keys(
+                vllm_config=SimpleNamespace(
+                    parallel_config=SimpleNamespace(pipeline_parallel_size=1, tensor_parallel_size=2)
+                ),
+                kv_cache_config=None,
+                model_name=scheduler.model_name,
+                use_hybrid=True,
+                grouped_block_size=scheduler.grouped_block_size,
+            )
         scheduler.layerwise_max_transfer_blocks = 1
         scheduler.store_scheduler = MagicMock()
         scheduler.cache_coordinator = MagicMock()
@@ -337,12 +359,17 @@ class TestMooncakeHybrid(unittest.TestCase):
         )
         meta = AscendConnectorMetadata(set())
         meta.add_request(request)
+        worker.prepare_layerwise_step(meta)
         worker.start_load_kv(meta)
         for _ in range(4):
             worker.wait_for_layer_load()
             with attention_transfer_window():
                 pass
             worker.save_kv_layer(meta)
+        # The deferred last-layer drain (see PERF-TUNE(2) in pool_worker)
+        # normally runs at the next step's start_load_kv; synchronize here so
+        # callers observe the fully committed saves.
+        worker._drain_deferred_last_save()
         return request
 
     def test_unequal_cache_entries_in_one_physical_layer(self):
@@ -357,6 +384,7 @@ class TestMooncakeHybrid(unittest.TestCase):
         request.can_save = False
         meta = AscendConnectorMetadata(set())
         meta.add_request(request)
+        worker.prepare_layerwise_step(meta)
         worker.start_load_kv(meta)
         for _ in range(4):
             worker.wait_for_layer_load()
@@ -384,6 +412,7 @@ class TestMooncakeHybrid(unittest.TestCase):
         worker.kv_role = "kv_consumer"
         meta = AscendConnectorMetadata(set())
         meta.add_request(request)
+        worker.prepare_layerwise_step(meta)
         worker.start_load_kv(meta)
         for _ in range(4):
             worker.wait_for_layer_load()
@@ -423,6 +452,7 @@ class TestMooncakeHybrid(unittest.TestCase):
         store.batch_copy_get = lambda keys, *args: [-1] * len(keys)
         meta = AscendConnectorMetadata(set())
         meta.add_request(request)
+        worker.prepare_layerwise_step(meta)
         worker.start_load_kv(meta)
         with self.assertRaisesRegex(RuntimeError, "refusing incomplete"):
             worker.wait_for_layer_load()

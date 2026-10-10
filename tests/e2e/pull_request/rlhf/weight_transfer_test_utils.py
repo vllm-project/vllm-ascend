@@ -199,13 +199,14 @@ MODEL_CASES = (
             # single-chip IPC budget by keeping only the first 8 experts.
             "n_routed_experts": 8,
         },
-        skip_reason=(
-            "GLM-5.1's SFA runtime state does not survive the live-update "
-            "lifecycle yet: the same-chip lane fails its first update once the "
-            "engine has been through a level-2 sleep/wake cycle (#16725), and the "
-            "SFA runtime-weight refresh is still pending as well; both lanes skip "
-            "the case until those land"
-        ),
+        # No skip_reason left. The "SFA runtime-weight refresh" this case used to
+        # wait for is not a prerequisite: the state that *is* weight-derived (the
+        # KPool indexer's FP32 _wk/_gate/_norm copies, SFA's W_UK_T/W_UV) is
+        # re-derived by the layerwise reload, which finalizes deferred attention
+        # layers through process_weights_after_loading. The level-2 half is fixed
+        # by owning SFA/MLA runtime state as non-persistent buffers: the LI C8
+        # Hadamard matrices, the DCP remap order/sentinel, the DeepSeek-V4 DSA RoPE
+        # tables and the interleaved RoPE tables the MLA/SFA rope lookups read.
     ),
 )
 

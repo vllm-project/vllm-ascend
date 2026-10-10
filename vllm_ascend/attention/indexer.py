@@ -1,13 +1,15 @@
 from dataclasses import dataclass
 from typing import Any
 
-import scipy  # type: ignore
+import numpy as np
+import scipy.linalg  # type: ignore
 import torch
 import torch_npu
 from torch import nn
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tp_group
 from vllm.triton_utils import HAS_TRITON
+from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -17,12 +19,15 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
 from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.utils import select_common_block_size
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.context_parallel.common_cp import (
     build_pcp_ordered_slot_mapping,
     get_cp_local_query_key_lens,
+    get_pcp_num_replicated_tokens,
+    is_pcp_decode_sharding_enabled,
 )
 from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
     build_sfa_dcp_replicated_block_table,
@@ -82,6 +87,11 @@ class AscendSFAIndexerMetadata:
     # The PCP cache-write gather splits the local prefill region on this
     # independently computed decode-token count.
     num_decode_tokens: int = 0
+    # Optional selection supplied by the owning attention implementation.
+    # Projection, rope and cache writes continue to use this backend.
+    # The selector receives ``(q_li, weights, indexer, metadata, q_li_scale)``;
+    # ``q_li_scale`` is set only when LI C8 has already quantized ``q_li``.
+    topk_selector: Any | None = None
 
 
 class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
@@ -115,16 +125,20 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
 
     accept_output_buffer: bool = True
 
+    # Bare annotations only: the buffers themselves are registered per instance
+    # in ``__init__`` and stay ``None`` until ``process_weights_after_loading``
+    # fills them. A class-level ``= None`` default would shadow the registered
+    # buffer on attribute lookup and make the matrices process-global again,
+    # which is exactly the sleep-mode bug these annotations document for mypy.
+    q_hadamard: torch.Tensor | None
+    k_hadamard: torch.Tensor | None
+
     @property
     def topk_output_width(self) -> int:
         return self.topk_tokens
 
     def get_topk_lengths(self, positions: torch.Tensor) -> torch.Tensor:
         return (positions + 1).clamp(min=0, max=self.topk_tokens)
-
-    # q_hadamard and k_hadamard tensor shared when dsa c8 enabled
-    q_hadamard: torch.Tensor | None = None
-    k_hadamard: torch.Tensor | None = None
 
     @staticmethod
     def get_impl_cls():
@@ -189,30 +203,64 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             elif self.c8_k_cache_dtype == torch.int8:
                 self.c8_k_scale_cache_dtype = torch.float16
 
+        self.enable_sparse_li_c4 = get_ascend_config().is_sparse_li_c4_layer(self.k_cache.prefix)
+        if self.enable_sparse_li_c4:
+            self.c4_k_cache_dtype, self.c4_k_scale_cache_dtype = torch.uint8, torch.float8_e8m0fnu
+            self.c4_k_op_dtype = torch_npu.float4_e2m1fn_x2
+
         model_type = get_current_vllm_config().model_config.hf_config.model_type
         self.is_rope_neox_style = model_type not in ["glm_moe_dsa"]
         self.use_torch_npu_lightning_indexer = model_type in ["glm_moe_dsa"]
 
-        # Cache-write gathers for parallel layouts: PCP all-gathers the
-        # prefill region across the CP group, DSA-CP all-gathers the indexer
-        # k across the TP group. Both are no-ops in the base layout.
+        # Cache-write gathers for parallel layouts: PCP all-gathers every
+        # non-replicated token across the CP group, DSA-CP all-gathers the
+        # indexer k across the TP group. Both are no-ops in the base layout.
         parallel_config = get_current_vllm_config().parallel_config
         self._pcp_active = parallel_config.prefill_context_parallel_size > 1
+        self._is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(get_current_vllm_config())
         self._dsa_cp_active = enable_dsa_cp()
 
+        # The LI C8 Hadamard matrices are created while the sleep-mode weights
+        # mem-pool is active and are read by every forward, so they must survive
+        # a level-2 sleep. Keep them as non-persistent buffers of this module so
+        # the worker's buffer backup path (``model.named_buffers()``) restores
+        # them; a plain attribute keeps its Python reference across sleep while
+        # its device storage is discarded and remapped empty.
+        self.register_buffer("q_hadamard", None, persistent=False)
+        self.register_buffer("k_hadamard", None, persistent=False)
+
+    @property
+    def enable_sparse_li_quant(self) -> bool:
+        return self.enable_sparse_li_c8 or self.enable_sparse_li_c4
+
     def process_weights_after_loading(self) -> None:
-        if self.enable_sparse_li_c8 and AscendSFAIndexerBackend.q_hadamard is None:
+        if not self.enable_sparse_li_quant:
+            return
+        if self.q_hadamard is None:
             hadamard = torch.tensor(scipy.linalg.hadamard(128), dtype=torch.bfloat16, device="npu")
-            AscendSFAIndexerBackend.q_hadamard = hadamard / (128**0.5)
-        if self.enable_sparse_li_c8 and AscendSFAIndexerBackend.k_hadamard is None:
+            self.q_hadamard = hadamard / (128**0.5)
+        if self.k_hadamard is None:
             hadamard = torch.tensor(scipy.linalg.hadamard(128), dtype=torch.bfloat16, device="npu")
-            AscendSFAIndexerBackend.k_hadamard = hadamard / (128**0.5)
+            self.k_hadamard = hadamard / (128**0.5)
 
     @property
     def num_cache_tensors(self) -> int:
         """Number of tensors this indexer's cache occupies in the composed
         ``kv_cache`` tuple (k cache only, or k cache plus scale cache)."""
-        return 2 if self.enable_sparse_li_c8 else 1
+        return 2 if self.enable_sparse_li_quant else 1
+
+    def _quantize_li_tensor(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Apply Hadamard transform and quantize for LI C8 or C4 path."""
+        assert self.q_hadamard is not None
+        x = x @ self.q_hadamard
+        shape_ori = x.shape
+        x = x.view(-1, self.head_dim)
+        if self.enable_sparse_li_c4:
+            x, scale = torch_npu.npu_dynamic_mx_quant(x, dst_type=self.c4_k_op_dtype)
+            scale = scale.view(*shape_ori[:-1], *scale.shape[-2:])
+            return x, scale.view(self.c4_k_scale_cache_dtype)
+        x, scale = torch_npu.npu_dynamic_quant(x, dst_type=self.c8_k_cache_dtype)
+        return x, scale.to(self.c8_k_scale_cache_dtype)
 
     def write_cache(
         self,
@@ -221,18 +269,24 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         slot_mapping: torch.Tensor,
         indexer_attn_metadata: Any | None = None,
     ) -> None:
-        """Persist ``k_li`` (and ``k_li_scale`` when LI C8 is enabled) into
+        """Persist ``k_li`` (and ``k_li_scale`` when LI quant is enabled) into
         this indexer's own cache tensors: slot 0 of ``self.k_cache.kv_cache``
-        is the k cache, slot 1 (present only for LI C8) is the scale cache.
+        is the k cache, slot 1 (present only for LI quant) is the scale cache.
 
         ``forward`` calls this after ``_gather_cache_inputs`` has resolved
         the parallel layout of the tensors and the slot mapping; variants
         with a different cache layout should override it.
         ``indexer_attn_metadata`` is this indexer's own layer metadata; the
-        LI C8 reshape-optim path reads its group fields.
+        LI quant reshape-optim path reads its group fields.
         """
         indexer_k_cache = self.k_cache.kv_cache[INDEXER_K_CACHE_SLOT]
         use_reshape_optim = self._use_c8_reshape_optim()
+        # float4_e2m1fn_x2 / float8_e8m0fnu are not supported by the scatter /
+        # store_kv_block kernels; view as uint8 (same 1-byte layout) for the
+        # cache write.
+        if k_li.dtype == torch_npu.float4_e2m1fn_x2:
+            indexer_k_cache = indexer_k_cache.view(torch.uint8)
+            k_li = k_li.view(torch.uint8)
         if use_reshape_optim:
             assert indexer_attn_metadata is not None
             torch.ops._C_ascend.store_kv_block(
@@ -244,14 +298,20 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
                 indexer_attn_metadata.block_size,
             )
         else:
-            torch_npu.npu_scatter_nd_update_(
+            DeviceOperator.scatter_cache(
                 indexer_k_cache.view(-1, k_li.shape[-1]),
                 slot_mapping.view(-1, 1),
                 k_li.view(-1, k_li.shape[-1]),
             )
-        if self.enable_sparse_li_c8:
+        if self.enable_sparse_li_quant:
             assert k_li_scale is not None
+            # C4 scale is multi-dimensional (b*s, d/64, 2); C8 is (b*s, 1).
+            # Keep all trailing dims beyond the token axis for the scatter.
+            scale_per_token = k_li_scale.shape[1:]
             indexer_scale_cache = self.k_cache.kv_cache[INDEXER_SCALE_CACHE_SLOT]
+            if indexer_scale_cache.dtype == torch.float8_e8m0fnu:
+                indexer_scale_cache = indexer_scale_cache.view(torch.uint8)
+                k_li_scale = k_li_scale.view(torch.uint8)
             if use_reshape_optim:
                 assert indexer_attn_metadata is not None
                 torch.ops._C_ascend.store_kv_block(
@@ -263,10 +323,10 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
                     indexer_attn_metadata.block_size,
                 )
             else:
-                torch_npu.npu_scatter_nd_update_(
-                    indexer_scale_cache.view(-1, k_li_scale.shape[-1]),
+                DeviceOperator.scatter_cache(
+                    indexer_scale_cache.view(-1, *scale_per_token),
                     slot_mapping.view(-1, 1),
-                    k_li_scale.view(-1, k_li_scale.shape[-1]),
+                    k_li_scale.view(-1, *scale_per_token),
                 )
 
     def _use_c8_reshape_optim(self) -> bool:
@@ -317,11 +377,10 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
 
             k_li = torch.cat([k_li_pe, k_li_nope], dim=-1)  # [b*s,128]
 
-        if self.enable_sparse_li_c8:
-            k_li = k_li @ AscendSFAIndexerBackend.k_hadamard
-            k_li, k_li_scale = torch_npu.npu_dynamic_quant(k_li.view(-1, self.head_dim), dst_type=self.c8_k_cache_dtype)
-            k_li_scale = k_li_scale.to(self.c8_k_scale_cache_dtype)  # [b*s,]
-            k_li_scale = k_li_scale.unsqueeze(-1)  # [b*s,1]
+        if self.enable_sparse_li_quant:
+            k_li, k_li_scale = self._quantize_li_tensor(k_li)
+            if self.enable_sparse_li_c8:
+                k_li_scale = k_li_scale.unsqueeze(-1)
         else:
             k_li_scale = None
 
@@ -342,9 +401,10 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         slot_mapping = indexer_metadata.slot_mapping
         if self._pcp_active:
             tensors = (k_li,) if k_li_scale is None else (k_li, k_li_scale)
-            gathered_tensors, slot_mapping = _gather_prefill_cache_inputs(
-                tensors, slot_mapping, indexer_metadata.num_decode_tokens
+            num_replicated_tokens = get_pcp_num_replicated_tokens(
+                indexer_metadata.num_decode_tokens, self._is_pcp_decode_sharded
             )
+            gathered_tensors, slot_mapping = _gather_prefill_cache_inputs(tensors, slot_mapping, num_replicated_tokens)
             k_li = gathered_tensors[0]
             assert slot_mapping.numel() == k_li.shape[0], (
                 "PCP indexer cache write requires one slot per gathered token: "
@@ -363,7 +423,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             # throughput becomes a concern.
             k_li, k_handle = all_gather_async(k_li, get_tp_group(), async_op=True)
             scale_handle = None
-            if self.enable_sparse_li_c8:
+            if self.enable_sparse_li_quant:
                 assert k_li_scale is not None
                 k_li_scale, scale_handle = all_gather_async(k_li_scale, get_tp_group(), async_op=True)
             if k_handle is not None:
@@ -379,6 +439,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         k_hidden_states: torch.Tensor,
         indexer_metadata: AscendSFAIndexerMetadata,
         compute_topk: bool = True,
+        attn_q_gather_handle: torch.distributed.Work | None = None,
     ) -> torch.Tensor | None:
         """Full indexer pipeline: k path -> cache write -> top-k selection.
 
@@ -393,6 +454,11 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         cos = indexer_metadata.cos
         sin = indexer_metadata.sin
         k_li, k_li_scale, indexer_weights = self.forward_k(k_hidden_states, cos, sin)
+        if attn_q_gather_handle is not None:
+            # Keep the k projection overlapped with Q communication, but order
+            # the TP cache gathers after Q to avoid concurrent cross-group AIV
+            # collectives during graph replay. wait() adds a stream dependency.
+            attn_q_gather_handle.wait()
         k_li, k_li_scale, slot_mapping = self._gather_cache_inputs(k_li, k_li_scale, indexer_metadata)
         self.write_cache(k_li, k_li_scale, slot_mapping, indexer_attn_metadata=indexer_metadata)
         if not compute_topk:
@@ -455,12 +521,13 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
 
         q_li_scale = None
         q_li_shape_ori = None
-        if self.enable_sparse_li_c8:
+        if self.enable_sparse_li_quant:
             q_li_shape_ori = q_li.shape
-            q_li = q_li @ AscendSFAIndexerBackend.q_hadamard
-            q_li, q_li_scale = torch_npu.npu_dynamic_quant(q_li.view(-1, self.head_dim), dst_type=self.c8_k_cache_dtype)
-            q_li_scale = q_li_scale.to(self.c8_k_scale_cache_dtype)  # [b*s,]
+            q_li, q_li_scale = self._quantize_li_tensor(q_li)
 
+        topk_selector = getattr(indexer_metadata, "topk_selector", None)
+        if topk_selector is not None:
+            return topk_selector(q_li, weights, self, indexer_metadata, q_li_scale)
         return DeviceOperator.indexer_select_post_process(
             q_li,
             q_li_scale,
@@ -473,6 +540,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             indexer_metadata.actual_seq_lengths_query,
             indexer_metadata.actual_seq_lengths_key,
             self.enable_sparse_li_c8,
+            self.enable_sparse_li_c4,
             self.use_torch_npu_lightning_indexer,
         )
 
@@ -521,6 +589,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         self._dcp_block_table_buffers: dict[object, torch.Tensor] = {}
         self._dcp_slot_mapping_buffers: dict[object, torch.Tensor] = {}
         self._pcp_indexer_slot_mapping_buffers: dict[object, torch.Tensor] = {}
+        self._lim_token_masks: dict[object, CpuGpuBuffer] = {}
         max_num_input_tokens = scheduler_config.max_num_batched_tokens
         self._rope_capacity = max_num_input_tokens
         pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
@@ -985,6 +1054,26 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         # graph capture and runtime rebuild update the exact same storage.
         return ("slot_mapping", common_attn_metadata.slot_mapping.data_ptr())
 
+    def _mask_lim_slot_mapping(self, common_attn_metadata, slot_mapping, buffer_key) -> None:
+        active = getattr(common_attn_metadata, "req_topk_buffer_active", None)
+        if active is None or not get_ascend_config().sparse_kv_offload_config.use_fused_copy_sfa:
+            return
+        # Only request ownership and query layout are needed; exact device
+        # positions in this group's slot mapping must remain unchanged.
+        count = common_attn_metadata.num_reqs
+        ends = common_attn_metadata.query_start_loc_cpu[1 : count + 1].numpy()
+        positions = np.arange(slot_mapping.numel())
+        rows = np.searchsorted(ends, positions, side="right").clip(max=count - 1)
+        mask = self._lim_token_masks.get(buffer_key)
+        if mask is None:
+            mask = CpuGpuBuffer(
+                self._slot_capacity, dtype=torch.bool, device=slot_mapping.device, pin_memory=is_pin_memory_available()
+            )
+            self._lim_token_masks[buffer_key] = mask
+        size = slot_mapping.numel()
+        mask.np[:size] = (~active.numpy()[rows]) | (positions >= ends[-1])
+        slot_mapping.masked_fill_(mask.copy_to_gpu(size), -1)
+
     def _build(
         self,
         common_attn_metadata: CommonAttentionMetadata,
@@ -995,15 +1084,6 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
     ) -> AscendSFAIndexerMetadata:
         num_reqs = common_attn_metadata.num_reqs
         num_input_tokens = common_attn_metadata.num_input_tokens
-        if (
-            self.speculative_config is not None
-            and getattr(self.speculative_config, "method", None) == "dspark"
-            and getattr(self.speculative_config, "enable_adaptive_verification", False)
-        ):
-            # Keep the independently built indexer metadata aligned with SFA:
-            # adaptive verification records its graph-shaped token count in
-            # positions rather than common_attn_metadata.num_input_tokens.
-            num_input_tokens = common_attn_metadata.positions.shape[0]
         if self.use_dcp:
             block_table, slot_mapping = self._build_dcp_cache_metadata(
                 common_attn_metadata,
@@ -1025,6 +1105,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
                 num_input_tokens,
                 buffer_key,
             )
+        self._mask_lim_slot_mapping(common_attn_metadata, slot_mapping, buffer_key)
         input_positions = common_attn_metadata.positions[:num_input_tokens].long()
         block_size = self.kernel_block_size
 
