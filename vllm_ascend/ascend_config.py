@@ -574,6 +574,15 @@ class AscendConfig:
         default_factory=lambda: get_current_hardware_profile().device_adaptor_family
         == DeviceAdaptorFamily.FP8_OPTIMIZED
     )
+    # Gather RoPE cos/sin rows from the contiguous interleaved base table
+    # instead of the strided per-half views, so each lookup is a plain row
+    # copy instead of a full-cache materialization. Bitwise identical to
+    # the legacy path.
+    rope_flat_gather: bool = True
+    # Prebuild per-draft-step MTP attention metadata on a side stream,
+    # window-gated by external events around the lm_head sampling section
+    # of the previous draft forward.
+    multistream_mtp_metadata_overlap: bool = False
     enable_prefill_mc2: bool = False
     multistream_overlap_shared_expert: bool = False
     enable_kv_nz: bool = False

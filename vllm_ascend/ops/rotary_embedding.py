@@ -34,6 +34,7 @@ from vllm.model_executor.layers.rotary_embedding import (
 from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 from vllm.triton_utils import HAS_TRITON
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.platform import NPUPlatform
@@ -57,6 +58,7 @@ _cos_mla: torch.Tensor = None
 _sin_mla: torch.Tensor = None
 _cos_cache: torch.Tensor = None
 _sin_cache: torch.Tensor = None
+_cos_sin_flat: torch.Tensor | None = None
 _cos_sin_cache: torch.Tensor = None
 _cos: torch.Tensor = None
 _sin: torch.Tensor = None
@@ -96,13 +98,21 @@ def get_cos_and_sin_mla(positions, use_cache=False):
     global _sin_cache
     global _cos_mla
     global _sin_mla
+    global _cos_sin_flat
     num_tokens = positions.size(0)
     # MLA-NoPE skip rope cache (e.g. GLM-5.3-Flash qk_rope_head_dim=0).
     # Do not copy indexer RoPE (last dim 32) into a 0-width MLA buffer.
     if _cos_mla is not None and _cos_mla.shape[-1] == 0:
         return _cos_mla[:num_tokens], _sin_mla[:num_tokens]
-    cos = _cos_cache[positions].unsqueeze(1).unsqueeze(2)
-    sin = _sin_cache[positions].unsqueeze(1).unsqueeze(2)
+    if _cos_sin_flat is not None and get_ascend_config().rope_flat_gather:
+        # Fast path: row-gather from the contiguous interleaved base instead of
+        # the strided per-half views (avoids the per-lookup full-cache copy).
+        even_positions = positions * 2
+        cos = _cos_sin_flat[even_positions].unsqueeze(1).unsqueeze(2)
+        sin = _cos_sin_flat[even_positions + 1].unsqueeze(1).unsqueeze(2)
+    else:
+        cos = _cos_cache[positions].unsqueeze(1).unsqueeze(2)
+        sin = _sin_cache[positions].unsqueeze(1).unsqueeze(2)
     if not use_cache:
         return cos, sin
     if _cos_mla is None or _cos_mla.shape[-1] != cos.shape[-1]:
@@ -134,8 +144,12 @@ def _record_cos_sin_cache(cos_sin_cache):
 def _record_cos_and_sin_cache(cos_cache, sin_cache):
     global _cos_cache
     global _sin_cache
+    global _cos_sin_flat
     _cos_cache = cos_cache
     _sin_cache = sin_cache
+    # This registration unconditionally overwrites the half-table globals; drop
+    # the interleaved flat view so the fast path cannot read a stale buffer.
+    _cos_sin_flat = None
 
 
 def _record_cos_and_sin_cache_interleaved(owner: "torch.nn.Module", cos_sin_cache) -> None:
@@ -161,14 +175,23 @@ def _record_cos_and_sin_cache_interleaved(owner: "torch.nn.Module", cos_sin_cach
     """
     global _cos_cache
     global _sin_cache
+    global _cos_sin_flat
     if _cos_cache is not None or _sin_cache is not None:
         return
     hidden_dim = cos_sin_cache.shape[-1] // 2
-    cos_cache, sin_cache = cos_sin_cache.view(-1, 2, hidden_dim).repeat(1, 1, 2).chunk(2, dim=1)
+    repeated = cos_sin_cache.view(-1, 2, hidden_dim).repeat(1, 1, 2)
+    cos_cache, sin_cache = repeated.chunk(2, dim=1)
     _cos_cache = cos_cache.squeeze(1)
     _sin_cache = sin_cache.squeeze(1)
     owner.register_buffer("_rope_derived_cos_cache", _cos_cache, persistent=False)
     owner.register_buffer("_rope_derived_sin_cache", _sin_cache, persistent=False)
+    # Contiguous flat view of the interleaved buffer: _cos_cache[i] == flat[2i]
+    # and _sin_cache[i] == flat[2i + 1]. Indexing the strided per-half views
+    # makes aclnnIndex materialize the whole cache per lookup; the flat base is
+    # contiguous so the same row gather is a plain copy. The view shares the
+    # storage owned by the derived pair above, so the sleep-mode wake backup
+    # that restores those buffers in place covers it as well.
+    _cos_sin_flat = repeated.view(-1, repeated.shape[-1])
 
 
 def update_cos_sin(positions):

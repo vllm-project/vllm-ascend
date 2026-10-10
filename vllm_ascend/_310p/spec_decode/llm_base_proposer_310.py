@@ -41,6 +41,8 @@ class AscendSpecDecodeBaseProposer310(AscendSpecDecodeBaseProposer):
         num_tokens,
         is_prefill=None,
         sampling_metadata: SamplingMetadata | None = None,
+        metadata_events=None,
+        window_events=None,
     ) -> torch.Tensor:
         AscendRotaryEmbedding310.set_rope_position_flag_310p(True)
         try:
@@ -55,6 +57,8 @@ class AscendSpecDecodeBaseProposer310(AscendSpecDecodeBaseProposer):
                 num_tokens,
                 is_prefill,
                 sampling_metadata,
+                metadata_events,
+                window_events,
             )
         finally:
             AscendRotaryEmbedding310.set_rope_position_flag_310p(False)
