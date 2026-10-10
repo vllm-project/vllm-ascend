@@ -20,6 +20,8 @@ pytest.importorskip(
     reason="DeepSeek V4.1 is unavailable on this vLLM release",
 )
 
+from vllm.models.deepseek_v41.nvidia import engram as upstream_engram
+
 from vllm_ascend.models.deepseek_v41.engram import embedding as embedding_mod
 from vllm_ascend.models.deepseek_v41.engram import npu
 from vllm_ascend.models.deepseek_v41.engram.common import engram_gate
@@ -38,10 +40,12 @@ def test_shared_memory_needs_a_local_dp_peer(monkeypatch):
 
 
 @pytest.mark.parametrize("quantized", [False, True])
-def test_loader_preserves_checkpoint_storage(tmp_path, quantized):
+@pytest.mark.parametrize("shared", [False, True])
+def test_loader_preserves_checkpoint_shards_across_dp_pcp_tp(tmp_path, monkeypatch, quantized, shared):
     key = "layers.1.engram.embed.weight"
     scale_key = "layers.1.engram.embed.scale"
-    source = torch.linspace(-12, 12, 19 * 64).reshape(19, 64).bfloat16()
+    head_sizes = (1, 2, 3, 4, 5, 6, 7, 8)
+    source = torch.linspace(-12, 12, 36 * 64).reshape(36, 64).bfloat16()
     codes, scales = npu.quantize_engram_rows(source)
     save_file({key: source}, tmp_path / "model.safetensors")
     (tmp_path / "model.safetensors.index.json").write_text(json.dumps({"weight_map": {key: "model.safetensors"}}))
@@ -50,18 +54,64 @@ def test_loader_preserves_checkpoint_storage(tmp_path, quantized):
         (tmp_path / "quant_model_weights.safetensors.index.json").write_text(
             json.dumps({"weight_map": {key: "quant.safetensors", scale_key: "quant.safetensors"}})
         )
-    table = object.__new__(embedding_mod.AscendParallelEngramEmbedding)
-    torch.nn.Module.__init__(table)
-    table._shared_group = None
-    table.vocab_start_idx = 0
-    table.vocab_end_idx = 19
     expected = codes if quantized else source
-    table.weight = torch.nn.Parameter(torch.empty_like(expected), requires_grad=False)
-    table.weight_scale_inv = torch.nn.Parameter(torch.empty_like(scales), requires_grad=False) if quantized else None
-    table.load_checkpoint(tmp_path, key, chunk_rows=7)
-    assert torch.equal(table.weight, expected)
-    if quantized:
-        assert torch.equal(table.weight_scale_inv, scales)
+    storage: dict[tuple[int, int], tuple[torch.Tensor, torch.Tensor | None]] = {}
+    writers, barriers = [], []
+
+    def allocate(table):
+        rows = table.part_num_embeddings
+        return storage.setdefault(
+            (table.vocab_start_idx, table.vocab_end_idx),
+            (
+                torch.zeros(rows, 64, dtype=expected.dtype),
+                torch.zeros(rows, 2, dtype=scales.dtype) if quantized else None,
+            ),
+        )
+
+    original_load = embedding_mod.AscendParallelEngramEmbedding._load_into_storage
+
+    def load(table, *args):
+        writers.append((table.vocab_start_idx, table.vocab_end_idx))
+        original_load(table, *args)
+
+    def synchronize(errors, error, *, group):
+        assert error is None
+        barriers.append(group)
+        errors[:] = [None] * len(errors)
+
+    monkeypatch.setattr(embedding_mod.AscendParallelEngramEmbedding, "_allocate_weights", allocate)
+    monkeypatch.setattr(embedding_mod.AscendParallelEngramEmbedding, "_load_into_storage", load)
+    monkeypatch.setattr(embedding_mod.dist, "all_gather_object", synchronize)
+    monkeypatch.setattr(embedding_mod, "in_the_same_node_as", lambda group: [True] * 4)
+    monkeypatch.setattr(embedding_mod, "get_tp_group", lambda: SimpleNamespace(cpu_group=object()))
+    monkeypatch.setattr(embedding_mod, "get_tensor_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(embedding_mod, "get_engram_dp_size", lambda: 4)
+    shared_ranges = [(0, 10), (10, 36)]
+    split_ranges = [(0, 1), (1, 3), (3, 6), (6, 10), (10, 15), (15, 21), (21, 28), (28, 36)]
+    loaded_ranges = []
+    for dp_rank in range(2):
+        for pcp_rank in range(2):
+            for tp_rank in range(2):
+                group = SimpleNamespace(world_size=4, rank_in_group=dp_rank * 2 + pcp_rank, cpu_group=object())
+                monkeypatch.setattr(embedding_mod, "get_engram_dp_group", lambda group=group: group)
+                monkeypatch.setattr(embedding_mod, "get_tensor_model_parallel_rank", lambda rank=tp_rank: rank)
+                monkeypatch.setattr(upstream_engram, "get_engram_dp_group", lambda group=group: group)
+                monkeypatch.setattr(upstream_engram, "get_tensor_model_parallel_rank", lambda rank=tp_rank: rank)
+                table = embedding_mod.AscendParallelEngramEmbedding(
+                    36, 64, head_sizes, 0, cpu_offload=True, dp_shared_memory=shared, storage_dtype=expected.dtype
+                )
+                start, end = shared_ranges[tp_rank] if shared else split_ranges[tp_rank * 4 + dp_rank * 2 + pcp_rank]
+                assert (table.vocab_start_idx, table.vocab_end_idx) == (start, end)
+                assert table.dp_size == (1 if shared else 4)
+                assert table._shared_group is (group if shared else None)
+                table.load_checkpoint(tmp_path, key, chunk_rows=7)
+                assert torch.equal(table.weight, expected[start:end])
+                if quantized:
+                    assert torch.equal(table.weight_scale_inv, scales[start:end])
+                loaded_ranges.append((start, end))
+    assert sorted(set(loaded_ranges)) == (shared_ranges if shared else split_ranges)
+    assert sorted(writers) == (shared_ranges if shared else split_ranges)
+    assert len(barriers) == (8 if shared else 0)
 
 
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
