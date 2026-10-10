@@ -33,6 +33,7 @@ from vllm_ascend.ops.fused_moe.moe_utils import cumsum_group_list, maybe_normali
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
 from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
 from vllm_ascend.utils import FP8_METHOD, dispose_tensor, maybe_trans_nz, maybe_trans_nz_with_scale
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
 
 from ..base import (
     AscendLinearScheme,
@@ -262,6 +263,9 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         self.group_size = quant_description.get("group_size", 32)
         ascend_config = get_ascend_config()
         self.dynamic_eplb = False if vllm_config.use_v2_model_runner else ascend_config.eplb_config.dynamic_eplb
+        self.use_expert_weight_list = self.dynamic_eplb or (
+            vllm_config.use_v2_model_runner is True and vllm_config.parallel_config.enable_eplb is True
+        )
 
     @staticmethod
     def get_weight(
@@ -340,16 +344,23 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
             )
         else:
             return MoEWeights(
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
-                w1_scale=layer.w13_weight_scale,
-                w2_scale=layer.w2_weight_scale,
+                w1=self._get_weights(layer, "w13_weight"),
+                w2=self._get_weights(layer, "w2_weight"),
+                w1_scale=self._get_weights(layer, "w13_weight_scale"),
+                w2_scale=self._get_weights(layer, "w2_weight_scale"),
                 w1_scale_bias=None,
                 w2_scale_bias=None,
             )
 
     @staticmethod
     def get_eplb_weight_views(layer: torch.nn.Module) -> list[torch.Tensor]:
+        if hasattr(layer, "w13_weight_list"):
+            return [
+                layer.w13_weight_list,
+                layer.w2_weight_list,
+                layer.w13_weight_scale_list,
+                layer.w2_weight_scale_list
+            ]
         return [
             layer.w13_weight.transpose(1, 2),
             layer.w2_weight.transpose(1, 2),
@@ -439,6 +450,40 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         # Mark as transformed
         layer._mxfp8_transformed = True
 
+        # Create per-expert NZ weight lists for EPLB compatibility.
+        # Each expert is cloned then NZ-converted in-place, giving
+        # storage_offset==0 independent tensors safe for HCCL P2P.
+        # float8_e4m3fn NZ tensors cannot be cloned directly, so
+        # convert the whole block to ND first, unbind+clone, then
+        # NZ-convert each expert in-place.
+        
+        if self.use_expert_weight_list:
+            max_experts_per_card = 128
+            assert layer.local_num_experts <= max_experts_per_card, (
+                f"W8A8 MXFP8 EPLB requires local_num_experts <= {max_experts_per_card} "
+                f"(CANN tensorList limit for per-expert NZ list in npu_grouped_matmul_swiglu_quant_v2), "
+                f"got {layer.local_num_experts}. "
+                f"Consider increasing data-parallel-size to reduce experts per card."
+            )
+            for tensor_name in ("w13_weight", "w2_weight"):
+                weight = getattr(layer, tensor_name)
+                weight_nd = torch_npu.npu_format_cast(weight.data, torch_npu.Format.ND)
+                expert_list = []
+                for expert in weight_nd.unbind(dim=0):
+                    expert = expert.clone()
+                    torch_npu.npu_format_cast_(
+                        expert, ACL_FORMAT_FRACTAL_NZ, customize_dtype=torch.float8_e4m3fn
+                    )
+                    expert_list.append(expert)
+                setattr(layer, f"{tensor_name}_list", expert_list)
+                delattr(layer, tensor_name)
+            for tensor_name in ("w13_weight_scale", "w2_weight_scale"):
+                scale = getattr(layer, tensor_name)
+                expert_list = [s.clone() for s in scale.data.unbind(dim=0)]
+                setattr(layer, f"{tensor_name}_list", expert_list)
+                delattr(layer, tensor_name)
+            torch.npu.empty_cache()
+
     def restore_weights_for_rl_loading(self, layer):
         """Restore weights to original shapes for RL weight reloading.
 
@@ -493,6 +538,11 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         # Mark as not transformed (ready for weight loading)
         layer._mxfp8_transformed = False
 
+    def _get_weights(self, layer, name):
+        """Return per-expert list if EPLB created it, else [block_tensor]."""
+        list_name = f"{name}_list"
+        return getattr(layer, list_name) if hasattr(layer, list_name) else [getattr(layer, name)]
+        
     def apply_gmm1_act_quant(self, mlp_compute_input: MoEMlpComputeInput):
         hidden_states = mlp_compute_input.hidden_states
         hidden_states, pertoken_scale = self._quant_hidden_states(hidden_states, mlp_compute_input.dynamic_scale)
@@ -501,9 +551,9 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
 
         hidden_states, out_scale = torch_npu.npu_grouped_matmul_swiglu_quant_v2(
             x=hidden_states,
-            weight=[layer.w13_weight],
+            weight=self._get_weights(layer, "w13_weight"),
             group_list=cumsum_group_list(mlp_compute_input.group_list, mlp_compute_input.group_list_type, 0),
-            weight_scale=[layer.w13_weight_scale],
+            weight_scale=self._get_weights(layer, "w13_weight_scale"),
             x_scale=pertoken_scale,
             dequant_mode=2,
             quant_mode=2,
@@ -524,8 +574,8 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         assert layer is not None
         hidden_states = torch_npu.npu_grouped_matmul(
             x=[hidden_states],
-            weight=[layer.w13_weight],
-            scale=[layer.w13_weight_scale],
+            weight=self._get_weights(layer, "w13_weight"),
+            scale=self._get_weights(layer, "w13_weight_scale"),
             per_token_scale=[pertoken_scale],
             bias=None,
             split_item=2,
@@ -557,8 +607,8 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         )
         return torch_npu.npu_grouped_matmul(
             x=[hidden_states],
-            weight=[layer.w2_weight],
-            scale=[layer.w2_weight_scale],
+            weight=self._get_weights(layer, "w2_weight"),
+            scale=self._get_weights(layer, "w2_weight_scale"),
             bias=None,
             per_token_scale=[act_out_scale],
             split_item=2,
