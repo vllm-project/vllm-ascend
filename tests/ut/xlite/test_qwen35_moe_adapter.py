@@ -92,25 +92,26 @@ def _hf_text_config(**overrides):
 
 
 def _adapter_self(hf):
-    cfg = SimpleNamespace(hidden_size=64, moe_ep_size=1, moe_tp_size=1)
-    return SimpleNamespace(
-        xlite_config=cfg,
-        xlite_model=MagicMock(),
-        hf_text_config=hf,
-        hf_vision_config=SimpleNamespace(),
-        rottary_embed=None,
-        _decoder_layer_mlp_module="mlp",
-        is_tensor_nz=lambda t: False,
-        quantization=False,
-        vllm_config=SimpleNamespace(
-            scheduler_config=SimpleNamespace(max_num_batched_tokens=512, max_num_seqs=8),
-            parallel_config=SimpleNamespace(data_parallel_size=1, enable_expert_parallel=False),
-            model_config=SimpleNamespace(max_model_len=1024, dtype=torch.bfloat16),
-            cache_config=SimpleNamespace(block_size=128),
-            speculative_config=None,
-            quant_config=None,
-        ),
+    """Real instance (bypassing __init__) so zero-arg super() works."""
+    self = object.__new__(Qwen3_5MoeXliteModel)
+    self.xlite_config = SimpleNamespace(
+        hidden_size=64, moe_ep_size=1, moe_tp_size=1, moe_intermediate_size=64, experts_weight_transpose=True
     )
+    self.xlite_model = SimpleNamespace()
+
+    self.rottary_embed = None
+    self._decoder_layer_mlp_module = "mlp"
+    self.is_tensor_nz = lambda t: False
+    self.quantization = False
+    self.vllm_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=512, max_num_seqs=8),
+        parallel_config=SimpleNamespace(data_parallel_size=1, enable_expert_parallel=False),
+        model_config=SimpleNamespace(max_model_len=1024, dtype=torch.bfloat16, hf_text_config=hf, hf_config=SimpleNamespace()),
+        cache_config=SimpleNamespace(block_size=128),
+        speculative_config=None,
+        quant_config=None,
+    )
+    return self
 
 
 def test_qwen35_moe_architectures_registered():
@@ -172,9 +173,8 @@ def test_load_moe_weights_binds_shared_expert_gate(monkeypatch):
     def fake_init_matmul_weights(layers, name, path):
         matmul_requests.append((name, path))
 
-    monkeypatch.setattr(xlite_mod_under_test, "init_matmul_weights", fake_init_matmul_weights)
-
     self = _adapter_self(_hf_text_config())
+    self.init_matmul_weights = fake_init_matmul_weights
     Qwen3_5MoeXliteModel._load_moe_weights(self, layers=[SimpleNamespace()])
 
     assert "mlp.shared_expert_gate.weight" in requested
