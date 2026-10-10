@@ -257,15 +257,37 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         )
         # This is draft prefill, not the later one-token-per-request decode.
         # Query lengths may differ, so do not use _build_uniform_attn_metadata.
+        num_reqs = input_batch.num_reqs
+        query_start_loc_np = input_batch.query_start_loc_np
+        seq_lens_cpu = input_batch.seq_lens_cpu_upper_bound
+        pcp_manager = getattr(self, "pcp_manager", None)
+        if (
+            not input_batch.is_dummy
+            and pcp_manager is not None
+            and pcp_manager.is_decode_sharded
+            and cudagraph_runtime_mode == CUDAGraphMode.FULL
+            and self.attn_architecture in ("MLA", "GQA")
+            and int(query_start_loc_np[num_reqs]) < num_tokens_padded
+        ):
+            # Give graph-padding tokens dummy requests with no cached KV.
+            assert num_reqs_padded > num_reqs
+            padding_boundaries = np.linspace(
+                query_start_loc_np[num_reqs], num_tokens_padded, num_reqs_padded - num_reqs + 1, dtype=np.int32
+            )
+            query_start_loc_np = np.concatenate((query_start_loc_np[:num_reqs], padding_boundaries))
+            padded_seq_lens_cpu = torch.zeros(num_reqs_padded, dtype=seq_lens_cpu.dtype)
+            padded_seq_lens_cpu[:num_reqs].copy_(seq_lens_cpu[:num_reqs])
+            seq_lens_cpu = padded_seq_lens_cpu
+            num_reqs = num_reqs_padded
         attn_metadata = self._build_attn_metadata(
-            num_reqs=input_batch.num_reqs,
+            num_reqs=num_reqs,
             batch_desc=BatchExecutionDescriptor(
                 cg_mode=cudagraph_runtime_mode,
                 num_tokens=num_tokens_padded,
                 num_reqs=num_reqs_padded,
             ),
-            query_start_loc_np=input_batch.query_start_loc_np,
-            seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound,
+            query_start_loc_np=query_start_loc_np,
+            seq_lens_cpu_upper_bound=seq_lens_cpu,
             step=0,
         )
         return attn_metadata, slot_mappings
