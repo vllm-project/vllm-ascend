@@ -60,7 +60,7 @@
   python3 -m unittest discover -s tests/ut/ops -p test_split_qkv_rmsnorm_mrope_dispatch.py
   ```
 
-- Host-only checks cover the shared UB helper, invalid capacity, exact-fit rejection, tensor layout, semantic constraints, the centralized override, and the real wrapper's Python selection/launch wiring using tensor/launch stubs. The production cleanup removes evidence/identity machinery and the unused M2 tail-only specialization, reuses the existing token partition, and preserves the G2 estimate and G3 threshold. Structural comparison with the pre-cleanup source checks the M1, M2 pair and odd-tail computation bodies. The three-point device numerical run below validates the cleaned-up source; the performance measurements still belong to an earlier source.
+- Host-only checks cover the shared UB helper, invalid capacity, exact-fit rejection, tensor layout, semantic constraints, the centralized override, and the real wrapper's Python selection/launch wiring using tensor/launch stubs. The production cleanup removes evidence/identity machinery and the unused M2 tail-only specialization, reuses the existing token partition, and preserves the G2 estimate and G3 threshold. Structural comparison with the pre-cleanup source checks the M1, M2 pair and odd-tail computation bodies. The device results below cover the cleaned-up routes and a same-run four-route ablation of the current PR kernel.
 
 - The pre-existing single-card accuracy suite covers bf16/fp16, gate/no-gate, interleaved/contiguous MRoPE, two token counts, and two head configurations. It was not run on the exact current PR head in this work:
 
@@ -70,32 +70,128 @@
 
 ## Bounded offline validation
 
-- The primary performance baseline for this PR is the **unmodified main/Phase 0 operator**, compared with the complete candidate including direct half RoPE and adaptive M1/M2 routing. The speedup metric is `baseline median device duration / candidate median device duration`; above 1 favors the candidate. At main commit `0015065d`, the operator source is byte-identical to the frozen Phase 0 `v0.23.0rc1` baseline (SHA-256 `ba3c7e740c3a2a9c8850733d3be77fefac79bc3ed02a45b4be076b58d6f7632d`); it still constructs `cat_x`/`cat_y` and broadcasts cos/sin to the full RoPE width.
+### Same-run main-baseline ablation
 
-  | Case | Tokens | Q/KV heads | Phase 0 median duration (us) | Complete candidate median duration (us) | Historical baseline/candidate ratio |
-  | --- | ---: | ---: | ---: | ---: | ---: |
-  | P5 | 8,192 | 4 / 1 | 362.069992 | 283.090012 | 1.2790x |
+The primary baseline is the unmodified main/Phase 0 operator, byte-identical at the
+PR's local main base `be0b61da22778b043eb2369b5f922b2a39ddc46d` (source SHA-256
+`ba3c7e740c3a2a9c8850733d3be77fefac79bc3ed02a45b4be076b58d6f7632d`).
+It constructs the rotation tensors and full-width cos/sin temporaries removed by
+direct half RoPE. The candidate measured here is PR source commit `5b09d01c`
+(wrapper SHA-256 `6089f901fb35ddcbe6a6af698384029a43a2d30451f14bd9a40f4f0e6514eea1`).
+Later documentation-only changes do not change these measured kernel bytes.
 
-  This is a **descriptive cross-run ratio**, not a same-run paired result. The baseline comes from `run_20260903T030801685837Z_all_0ae57a2d`; the candidate is the measured earlier port source `fd671ea7` in `run_20261008T073722771387Z_all_9e4872ed`, not the exact current PR head. Both use Ascend910B3/P40, the same image ID (`sha256:13315b656180f24489bb0076ff449fd5dcc15f84f447872ce38bf7e43606489a`), the same defined P5 shape/modes and seed `20260812`, six timing samples per subject, and `msprof op` device duration with one profiled launch. However, the runs use different dates and zero versus five profiler warm-ups; physical-card identity and byte-identical input packs were not matched across runs. These differences can affect the ratio, so it is not a controlled estimate or a non-regression guarantee. Comparable B3 Phase 0 durations for T1024/P4 have not been identified; A3 or simulator timings are not mixed into this table.
-- On one Ascend910B3/P40 device in the `v0.23.0rc1` image, parent commit `c1469f99` completed `HQ24_T1024_B3` through the public entry (`run_20261009T022037682885Z_numerics_20830d57`). With the override unset, the wrapper selected M2 pair-capable and produced a compiled object. Q/K passed `atol=rtol=0.02` against the frozen CPU reference; V/Gate were byte-exact. This one-item run has no timing result. The later `de2b1605` commit changes only the policy's approved `regex` import and a docstring spelling; its exact policy bytes were not rerun on device.
-- As a supplementary comparison, an earlier port source, `fd671ea7`, completed a seven-point B3 numerical matrix and the separate `run_20261008T073722771387Z_all_9e4872ed` paired long-workload run. The latter used frozen M1/on **already containing direct half RoPE** as A (source SHA-256 `ad28c9afec42629ee21ed9ddf50c6665cd46e94533b5b80a8470580b6c04fc0d`) and the ported public wrapper as B, with the same inputs, six valid pairs per point (18/18 total), three ABBA/BAAB/ABBA blocks, five warm-ups, and one profiled target-kernel launch. This comparison measures the additional benefit of the integrated paired path over the optimized M1 control; it does not measure the total improvement over main/Phase 0. The metric below is the median of individual A/B device-duration ratios; above 1 favors B.
+The Qwen3.5 caller and frozen model configuration define the following local head
+geometries. Inputs are fixed-seed **synthetic representative tensors**, not
+captured model activations; TP describes the source geometry, not a distributed
+experiment. P1/P4 retain their B4-origin input bytes with a B3 execution overlay;
+P5 originated as B3.
 
-  All three sampled inputs are bf16, `head_size=256`, `rope_dim=64`, `mrope_section=(11, 11, 10)`, with gate enabled, interleaved Q/gate layout, interleaved MRoPE, and no Q/K bias. They use 40 active vector cores. T1024 and P4 use six local Q heads and one KV head; P5 uses four local Q heads and one KV head. The frozen T1024/P4 B4 input definitions were overlaid to B3 by changing only the case ID and execution SoC; P5 originated as a B3 input.
+| Case | Model geometry / TP | Tokens | Local Q/KV heads | Fused QKV shape |
+| --- | --- | ---: | --- | --- |
+| P1 | Qwen3.5-27B / TP4 | 192 | 6 / 1 | [192, 3584] |
+| P2 | Qwen3.5-27B / TP1 | 192 | 24 / 4 | [192, 14336] |
+| P3 | Qwen3.5-27B / TP4 | 1 | 6 / 1 | [1, 3584] |
+| P4 | Qwen3.5-27B / TP4 | 4096 | 6 / 1 | [4096, 3584] |
+| P5 | Qwen3.5-122B-A10B / TP8 | 8192 | 4 / 1 | [8192, 2560] |
 
-  | Case | Tokens | Q/KV heads | Direct-half M1 / candidate median duration (us) | Valid pairs | Incremental paired A/B | Interpretation |
-  | --- | ---: | ---: | ---: | ---: | ---: | --- |
-  | T1024 | 1,024 | 6 / 1 | 59.210 / 56.670 | 6/6 | 1.0447x | `no_clear_change`; below the pre-registered 1.05x gain threshold |
-  | P4 | 4,096 | 6 / 1 | 185.130 / 156.160 | 6/6 | 1.1861x | `faster` at this sampled shape |
-  | P5 | 8,192 | 4 / 1 | 347.070 / 283.090 | 6/6 | 1.2269x | `faster` at this sampled shape |
+All cases use bf16, per-head RMSNorm (`eps=1e-6`), `head_size=256`,
+`rope_dim=64`, `mrope_section=(11, 11, 10)`, gate enabled, interleaved
+Q/gate and MRoPE, and no Q/K bias.
 
-- All six numerical items in that paired run passed; no failure or diagnostic was reported. These timings belong to the **earlier source and that B3 runtime**, not to the exact current PR head or a model-throughput claim. Their ratios must not be relabeled as main/Phase 0 speedups or multiplied by historical Phase 1 ratios to estimate a total gain. Earlier P1/P2/P3 results with no clear incremental M2 benefit likewise do not establish that the complete PR has no benefit over main: the current M1 fallback retains direct half RoPE. The full target result tree was not copied locally; the received compact handoff, target-side committed status, and mutation-free handoff form report-level evidence. The target-side original result remains the source for independent checksum review.
-- The cleaned-up production source at `e0f26aeb` passed a three-point public-entry numerical run on Ascend910B3/P40 (`run_20261009T072317173553Z_numerics_aaee9b8d`, package `pkg_3a16bd076842b8c8`). The override was unset for all items. The older `v0.23.0rc1` image was staged with the exact main UB helper and the two required environment getters, rather than a mock capacity. Source/helper identities and branch compiler configurations were recorded in the bounded handoff.
+Four routes use the same input and seed `20260812` within
+`run_20261009T120233461334Z_all_c87fd60a` (`pkg_e0b2a8d76a0073b7`):
 
-  | Case | Tokens | Q/KV heads | Actual route | Q / K maximum absolute error | V / Gate |
-  | --- | ---: | ---: | --- | --- | --- |
-  | HQ24_T1024_B3 | 1,024 | 24 / 4 | M2, `shape_resource`, multibuffer off | 0.015625 / 0.00390625 | Byte-exact |
-  | P3_B3 | 1 | 6 / 1 | M1, `g3_workload`, multibuffer on | 0 / 0 | Byte-exact |
-  | E2C_B3 | 192 | 16 / 4 | M1, `g2_resource`, multibuffer on | 0.0078125 / 0.0078125 | Byte-exact |
+- **BASE**: unmodified main kernel, single row, backend-default multibuffer.
+- **M1**: current PR direct-half kernel, explicit single row, backend default.
+- **M2/off**: current PR kernel, forced M2 only inside the experiment by bypassing
+  G2/G3, not G1; `multibuffer=False`, `num_stages=1`, `num_warps=32`.
+- **PR auto**: unmodified production wrapper with BLOCK/UB overrides unset, selecting M1 for
+  P1/P2/P3 and M2/off for P4/P5. Production gates are not bypassed.
 
-  All three items were finite and passed Q/K `atol=rtol=0.02`; V/Gate had zero mismatched bytes and elements. HQ24/T1024 partitions include odd final rows, covering M2's single-row tail; the other points protect singleton and pair-boundary fallbacks. The result was reported completed, committed and mutation-free handoff-readable. This is **report-level numerical evidence**, not independent verification of the full target result checksums, IR semantics, measured UB usage, or fresh performance. It does not qualify every shape or a newer-main runtime.
-- There is still no matching-main NPU Nightly, model/graph-replay test, or fresh paired performance run for the cleaned-up source. The trial workload threshold and conservative boundary guard remain explicit qualification limits.
+This ablation directly invokes the same wrapper; it does not add another public-op
+registration test. Separate public-entry numerical protection is recorded below.
+
+Each cell reports **median device duration (us) / speedup over BASE**:
+`BASE median / route median`, calculated before rounding. BASE is 1x.
+
+| Case | BASE | M1 | Forced M2/off | PR auto (actual route) |
+| --- | --- | --- | --- | --- |
+| P1 | 14.230 / 1.0000x | 13.860 / 1.0267x | 13.050 / 1.0904x | 13.650 / 1.0425x (M1) |
+| P2 | 20.340 / 1.0000x | 18.270 / 1.1133x | 18.560 / 1.0959x | 18.410 / 1.1048x (M1) |
+| P3 | 6.520 / 1.0000x | 5.860 / 1.1126x | 6.490 / 1.0046x | 5.740 / 1.1359x (M1) |
+| P4 | 193.330 / 1.0000x | 183.870 / 1.0514x | 155.200 / 1.2457x | 155.990 / 1.2394x (M2) |
+| P5 | 360.450 / 1.0000x | 346.060 / 1.0416x | 282.700 / 1.2750x | 283.700 / 1.2705x (M2) |
+
+The run reported 20/20 numerical passes, 20/20 terminal canaries and 120/120 valid
+timings. All Q/K outputs were finite and passed `atol=rtol=0.02`; V/Gate were
+byte-exact. The received configuration summaries confirm the expected B3
+M1/default-on or M2/off instances, stages 1 and warps 32.
+
+P4/P5 are the main measured long-partition gains. M1 retains direct half RoPE even
+when adaptive dispatch falls back. The M1 control is a route-level ablation, not
+an isolation of every Python-wrapper difference. Forced M2 is not uniformly
+better than M1: P2 is slightly slower and P3 is about 10.8% longer; P3 has only
+a single-row tail, no pair work. P1's forced-M2 result is better than the selected
+M1, so the conservative workload threshold is not claimed universally optimal.
+These five M2 successes do not invalidate the Hq16/D256 boundary overflow or
+justify relaxing G2.
+
+### Measurement and evidence limits
+
+- One Ascend910B3/P40 device (host card 3, logical card 0), the rc1 image ID
+  `sha256:13315b656180f24489bb0076ff449fd5dcc15f84f447872ce38bf7e43606489a`,
+  and the provisional OBSFS mount-managed profile were used. This SHA is a local
+  **image ID**, not a registry manifest digest. The older image was staged with
+  the exact main UB helper and environment getters, not a mock capacity.
+- Each route has six samples from `msprof op`, five warm-ups and one profiled
+  target-kernel launch. These are same-run fixed-order rounds, **not randomized
+  or ABBA-paired estimates**. Raw samples, including spikes, are retained.
+  Maximum min/max spread across all cells was 9.7561%; PR P4/P5 spreads were
+  1.2565%/0.7261%. A single seed/run is not a significance or equivalence test.
+  The auxiliary 1.05x gain / 0.98x regression labels are not statistical bounds;
+  P1's 1.0425x does not clear the gain label.
+- The environment, six-sample protocol and BASE metric were confirmed before
+  packaging, but the additional fixed-order / 10% spread-hint confirmation was
+  still pending when the user executed `run-all`. The research archive records
+  that process deviation; the executed protocol is not relabeled as fully
+  pre-confirmed.
+- Received compact fragments, supplemental per-item summaries, completed/committed
+  status and the mutation-free host handoff form **report-level evidence**.
+  The full target result tree and its checksums were not independently rehashed
+  locally. The target-reported result manifest SHA-256 is
+  `c8dd6761c0df38ecadf0d67bb51a5cf8d696b9fb65e6ad90052aa64c3a872009`.
+  Input/source identities, all samples and reconstruction boundaries are retained
+  in the research archive; no target artifacts were deleted.
+- Prior default-versus-off P4/P5 measurements had mixed directions. Keeping
+  M2/off preserves the tested configuration, not a claim that off is always
+  fastest or that the backend default is unsafe. No selector or resource-model
+  change is inferred from this ablation.
+
+### Supplementary route protection
+
+The earlier cleaned-up source `e0f26aeb` passed a three-point public-entry numerical
+run (`run_20261009T072317173553Z_numerics_aaee9b8d`,
+`pkg_3a16bd076842b8c8`) on the same B3/P40 runtime, with all overrides unset:
+
+| Case | Tokens | Q/KV heads | Actual route | Q / K maximum absolute error | V / Gate |
+| --- | ---: | --- | --- | --- | --- |
+| HQ24_T1024_B3 | 1024 | 24 / 4 | M2, shape_resource, multibuffer off | 0.015625 / 0.00390625 | Byte-exact |
+| P3_B3 | 1 | 6 / 1 | M1, g3_workload, multibuffer on | 0 / 0 | Byte-exact |
+| E2C_B3 | 192 | 16 / 4 | M1, g2_resource, multibuffer on | 0.0078125 / 0.0078125 | Byte-exact |
+
+All outputs were finite and passed the stated tolerances. HQ24/T1024 includes odd
+final rows and protects M2's single-row tail; the other points protect singleton
+and pair-boundary fallbacks. This earlier run is numerical protection, not a
+timing measurement of the exact current source.
+
+T1024 with 6/1 heads is a separate long-partition transition probe, not one of
+P1-P5. An earlier source `fd671ea7` measured 1.0447x incremental paired gain over
+an already direct-half M1 in `run_20261008T073722771387Z_all_9e4872ed`; this is
+below the 1.05x auxiliary gain label, not a main-baseline speedup. It remains
+eligible under the workload policy without a claim of clear performance benefit.
+Historical cross-run P5 ratios are superseded by the same-run table above.
+
+No matching-main NPU Nightly, model/graph-replay test, measured UB-liveness upper
+bound, or broader hardware/dtype/runtime qualification is claimed. Simulator IR
+and resource screening do not establish device numerical correctness or actual
+free UB headroom.
