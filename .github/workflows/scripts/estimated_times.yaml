@@ -133,6 +133,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/spec_decode/test_dspark_deepseekv4.py: 1140
   tests/e2e/pull_request/four_card/spec_decode/test_mtp_step3p5.py: 30
   tests/e2e/pull_request/four_card/test_data_parallel_tp2.py: 20
+  tests/e2e/pull_request/four_card/test_ec_mooncake_cross_encoder_store.py: 900
   tests/e2e/pull_request/four_card/test_sequence_parallel_linear.py: 1190
   tests/e2e/pull_request/four_card/test_deepseek_v3_2_w8a8_pruning.py: 580
   tests/e2e/pull_request/four_card/test_deepseek_v4.py: 600
@@ -153,6 +154,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_mla_precision.py: 210
   tests/e2e/pull_request/one_card/test_sfa_v1_precision.py: 90
   tests/e2e/pull_request/one_card/test_eplb_map_to_physical_npu.py: 50
+  tests/e2e/pull_request/one_card/test_ec_mooncake_fallback.py: 120
   tests/e2e/pull_request/one_card/test_gdn_layerwise_kv.py: 70
   tests/e2e/pull_request/two_card/test_activation.py: 50
   tests/e2e/pull_request/two_card/test_kimi_kda_fused_norm_gate.py: 80
