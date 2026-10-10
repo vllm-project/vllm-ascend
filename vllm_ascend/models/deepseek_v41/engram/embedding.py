@@ -33,6 +33,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.deepseek_v41.common.engram import ParallelEngramEmbedding
 
 from .npu import (
+    EngramUrmaCubeLookup,
     HostUvaBuffer,
     SharedUvaBuffer,
     gather_dequantize_engram_int8,
@@ -61,7 +62,16 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         cpu_offload: bool = False,
         dp_shared_memory: bool = False,
         storage_dtype: torch.dtype = torch.int8,
+        scale_on_device: bool = False,
+        aicpu_urma_cube: bool = False,
     ) -> None:
+        if scale_on_device and (not cpu_offload or not dp_shared_memory or storage_dtype != torch.float8_e4m3fn):
+            raise ValueError("Device scales require shared host offload with native MXFP8 codes")
+        if aicpu_urma_cube and not scale_on_device:
+            raise ValueError("AICPU lookup requires HBM scales")
+        self._aicpu_lookup = EngramUrmaCubeLookup() if aicpu_urma_cube else None
+        self.compressed_lookup = aicpu_urma_cube
+        self.scale_on_device = scale_on_device
         self.storage_dtype = storage_dtype
         if storage_dtype not in (torch.bfloat16, torch.int8, torch.float8_e4m3fn):
             raise ValueError(f"Unsupported Engram storage dtype: {storage_dtype}")
@@ -155,6 +165,8 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
             # One physical copy of the mapped range, registered by each
             # rank in the sharing group.
             self._codes_uva = SharedUvaBuffer(codes_shape, self.storage_dtype, device, self._shared_group)
+            if self.scale_on_device:
+                return self._codes_uva.tensor, torch.full(scales_shape, 127, dtype=torch.uint8, device=device)
             if quantized:
                 self._scales_uva = SharedUvaBuffer(scales_shape, self.scale_dtype, device, self._shared_group)
             return self._codes_uva.tensor, self._scales_uva.tensor if self._scales_uva is not None else None
@@ -182,6 +194,9 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
             "_codes_uva": "weight",
             "_scales_uva": "weight_scale_inv",
         }
+        lookup = getattr(self, "_aicpu_lookup", None)
+        if isinstance(lookup, EngramUrmaCubeLookup):
+            lookup.close()
         for name, alias in aliases.items():
             buffer = getattr(self, name)
             if buffer is None:
@@ -196,6 +211,12 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
                     torch.empty(0, dtype=param.dtype, device=param.device),
                     requires_grad=False,
                 ),
+            )
+
+        if getattr(self, "scale_on_device", False) and self._codes_uva is None:
+            param = self.weight_scale_inv
+            self.weight_scale_inv = nn.Parameter(
+                torch.empty(0, dtype=param.dtype, device=param.device), requires_grad=False
             )
 
     def bind_checkpoint(self, model_path, key: str) -> None:
@@ -222,11 +243,24 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
             self._load_into_storage(model_path, key, chunk_rows)
             return
         error = None
-        if self._shared_group.rank_in_group == 0:
-            try:
+        try:
+            if self._shared_group.rank_in_group == 0:
                 self._load_into_storage(model_path, key, chunk_rows)
-            except Exception as exc:  # noqa: BLE001 - propagated to every rank
-                error = f"{type(exc).__name__}: {exc}"
+            elif getattr(self, "scale_on_device", False):
+                root = Path(model_path)
+                scale_key = key.removesuffix(".weight") + ".scale"
+                index = self._checkpoint_index(root, scale_key)
+                with safe_open(root / index[scale_key], framework="pt", device="cpu") as sf:
+                    scales = sf.get_slice(scale_key)
+                    if scales.get_dtype() != "F8_E8M0":
+                        raise ValueError("Device scales require E8M0 checkpoint scales")
+                    for start in range(self.vocab_start_idx, self.vocab_end_idx, chunk_rows):
+                        stop = min(start + chunk_rows, self.vocab_end_idx)
+                        self.weight_scale_inv.data[start - self.vocab_start_idx : stop - self.vocab_start_idx].copy_(
+                            scales[start:stop].view(torch.uint8)
+                        )
+        except Exception as exc:  # noqa: BLE001 - propagated to every rank
+            error = f"{type(exc).__name__}: {exc}"
         errors: list[str | None] = [None] * self._shared_group.world_size
         dist.all_gather_object(errors, error, group=self._shared_group.cpu_group)
         failures = "; ".join(f"rank {rank}: {failure}" for rank, failure in enumerate(errors) if failure is not None)
@@ -399,6 +433,29 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
             gather_dequantize_engram_int8(self.weight, self.weight_scale_inv, indices, self.dim, **launch)
         else:
             _torch_lookup(self, indices, out)
+
+    def lookup_codes(
+        self,
+        indices: torch.Tensor,
+        output_codes: torch.Tensor,
+        output_scales: torch.Tensor,
+    ) -> None:
+        """Gather native MXFP8 rows and E8M0 scales for direct Cube WKV."""
+        if not self.compressed_lookup or not isinstance(self._aicpu_lookup, EngramUrmaCubeLookup):
+            raise RuntimeError("Compressed Engram lookup is not enabled")
+        if self._codes_uva is None or self.weight_scale_inv is None:
+            raise RuntimeError("Compressed lookup requires host codes and HBM scales")
+        self._aicpu_lookup.lookup_codes(
+            cast(HostUvaBuffer, self._codes_uva),
+            self.weight_scale_inv,
+            indices,
+            head_start=self.head_start,
+            local_heads=self.part_n_hash_cols,
+            vocab_start=self.vocab_start_idx,
+            vocab_end=self.vocab_end_idx,
+            output_codes=output_codes,
+            output_scales=output_scales,
+        )
 
 
 def _torch_lookup(embed: AscendParallelEngramEmbedding, indices, out) -> None:
