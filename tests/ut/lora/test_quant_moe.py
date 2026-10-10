@@ -373,7 +373,12 @@ def _situ_reference(gate_up: torch.Tensor, beta: float | None, linear_beta: floa
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("activation", [MoEActivation.SITU, "situ"])
 @pytest.mark.parametrize("beta,linear_beta", [(None, None), (4.0, None), (4.0, 25.0), (None, 25.0)])
-def test_apply_moe_activation_situ_matches_reference(dtype, activation, beta, linear_beta) -> None:
+def test_apply_moe_activation_situ_matches_reference(
+    dtype: torch.dtype,
+    activation: MoEActivation | str,
+    beta: float | None,
+    linear_beta: float | None,
+) -> None:
     gate_up = torch.tensor(
         [[-10.0, -3.0, 2.0, 8.0, 100.0, -5.0, 9.0, -100.0], [0.0, 1.0, -1.0, 4.0, -1.0, 2.0, 3.0, 5.0]],
         dtype=dtype,
@@ -398,7 +403,7 @@ def test_apply_moe_activation_situ_matches_reference(dtype, activation, beta, li
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
-def test_apply_moe_activation_situ_handles_empty_input(dtype) -> None:
+def test_apply_moe_activation_situ_handles_empty_input(dtype: torch.dtype) -> None:
     gate_up = torch.empty(0, 8, dtype=dtype)
     result = _apply_moe_activation(gate_up, MoEActivation.SITU, 0.0, 1.0, 0.0)
     assert result.shape == (0, 4)
@@ -407,7 +412,9 @@ def test_apply_moe_activation_situ_handles_empty_input(dtype) -> None:
 
 @pytest.mark.parametrize("comm_type", [MoECommType.ALLGATHER, MoECommType.ALLTOALL])
 @pytest.mark.parametrize("beta,linear_beta", [(None, None), (4.0, None), (4.0, 25.0)])
-def test_dynamic_int8_lora_situ_reaches_second_quantization(comm_type, beta, linear_beta) -> None:
+def test_dynamic_int8_lora_situ_reaches_second_quantization(
+    comm_type: MoECommType, beta: float | None, linear_beta: float | None
+) -> None:
     base_input = _make_input(lora_context=SimpleNamespace(use_ep=comm_type == MoECommType.ALLTOALL))
     fused_input = build_fused_experts_input(
         hidden_states=base_input.hidden_states,
@@ -449,7 +456,7 @@ def test_dynamic_int8_lora_situ_reaches_second_quantization(comm_type, beta, lin
     down_out = torch.zeros(2, 4, dtype=torch.bfloat16)
     stream = Mock(record_event=Mock(return_value=object()))
 
-    def swiglu_reference(gate_up):
+    def swiglu_reference(gate_up: torch.Tensor) -> torch.Tensor:
         gate, up = gate_up.chunk(2, dim=-1)
         return torch.nn.functional.silu(gate) * up
 
