@@ -600,6 +600,7 @@ def test_propose_replicated_pcp_disables_dp_sync():
     """Test replicated PCP disables DP synchronization during propose."""
     speculator = AscendAutoRegressiveSpeculator.__new__(AscendAutoRegressiveSpeculator)
     speculator.replicated_pcp = True
+    speculator.pcp_manager = None
     input_batch = object()
     args = [object() for _ in range(10)]
     dp_sync = object()

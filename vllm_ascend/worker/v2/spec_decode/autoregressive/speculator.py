@@ -241,10 +241,14 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
                 input_batch.positions,
                 num_tokens_padded=num_tokens_padded,
             )
-            # TODO: Remove this early return once FIA supports padded Query tensors
-            # whose token count exceeds the cumulative query length. Keep the
-            # mapping refresh above when unifying metadata construction.
-            if cudagraph_runtime_mode == CUDAGraphMode.FULL and self.attn_architecture in ("MLA", "GQA"):
+            # Only replicated targets can reuse FULL graph metadata. Sharded
+            # targets continue through the global draft metadata builder below.
+            pcp_manager = getattr(self, "pcp_manager", None)
+            if (
+                cudagraph_runtime_mode == CUDAGraphMode.FULL
+                and self.attn_architecture in ("MLA", "GQA")
+                and (pcp_manager is None or not pcp_manager.is_decode_sharded)
+            ):
                 return attn_metadata, slot_mappings
 
         slot_mappings = build_slot_mappings_by_layer(
@@ -253,16 +257,53 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         )
         # This is draft prefill, not the later one-token-per-request decode.
         # Query lengths may differ, so do not use _build_uniform_attn_metadata.
+        num_reqs = input_batch.num_reqs
+        query_start_loc_np = input_batch.query_start_loc_np
+        seq_lens_cpu = input_batch.seq_lens_cpu_upper_bound
+        pcp_manager = getattr(self, "pcp_manager", None)
+        if (
+            not input_batch.is_dummy
+            and pcp_manager is not None
+            and pcp_manager.is_decode_sharded
+            and cudagraph_runtime_mode == CUDAGraphMode.FULL
+            and self.attn_architecture in ("MLA", "GQA")
+            and int(query_start_loc_np[num_reqs]) < num_tokens_padded
+        ):
+            # FULL decode graphs pad whole (K + 1)-token requests. Describe them
+            # as dummy requests with no cached KV.
+            query_len = self.num_speculative_steps + 1
+            real_end = int(query_start_loc_np[num_reqs])
+            if num_reqs_padded <= num_reqs or num_tokens_padded - real_end != (num_reqs_padded - num_reqs) * query_len:
+                raise RuntimeError(
+                    "Sharded-PCP draft prefill expects FULL decode padding of whole requests: "
+                    "T - real_end == (R - n) * (K + 1), got "
+                    f"T={num_tokens_padded}, real_end={real_end}, R={num_reqs_padded}, n={num_reqs}, K+1={query_len}"
+                )
+            padding_boundaries = np.linspace(
+                real_end, num_tokens_padded, num_reqs_padded - num_reqs + 1, dtype=np.int32
+            )
+            query_start_loc_np = np.concatenate((query_start_loc_np[:num_reqs], padding_boundaries))
+            # The builder reads GPU boundaries from the existing draft buffer.
+            self.input_buffers.query_start_loc[: num_reqs_padded + 1].copy_(torch.from_numpy(query_start_loc_np))
+            # Upstream fills only scheduled rows; give padding rows defined inputs.
+            self.input_buffers.input_ids[real_end:num_tokens_padded].zero_()
+            self.input_buffers.positions[real_end:num_tokens_padded].zero_()
+            self.hidden_states[real_end:num_tokens_padded].zero_()
+            padded_seq_lens_cpu = torch.zeros(num_reqs_padded, dtype=seq_lens_cpu.dtype)
+            padded_seq_lens_cpu[:num_reqs].copy_(seq_lens_cpu[:num_reqs])
+            seq_lens_cpu = padded_seq_lens_cpu
+            num_reqs = num_reqs_padded
         attn_metadata = self._build_attn_metadata(
-            num_reqs=input_batch.num_reqs,
+            num_reqs=num_reqs,
             batch_desc=BatchExecutionDescriptor(
                 cg_mode=cudagraph_runtime_mode,
                 num_tokens=num_tokens_padded,
                 num_reqs=num_reqs_padded,
             ),
-            query_start_loc_np=input_batch.query_start_loc_np,
-            seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound,
+            query_start_loc_np=query_start_loc_np,
+            seq_lens_cpu_upper_bound=seq_lens_cpu,
             step=0,
+            num_actual_reqs=input_batch.num_reqs,
         )
         return attn_metadata, slot_mappings
 
@@ -535,9 +576,12 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         step: int,
         causal: bool | Mapping[int, bool] = True,
         dcp_local_seq_lens: torch.Tensor | None = None,
+        num_actual_reqs: int | None = None,
     ) -> dict[str, Any] | None:
         """Build Ascend draft metadata for uniform and explicit query layouts."""
         assert self.input_batch is not None
+        # Graph-padding dummy requests are not real requests for DCP/offload.
+        num_real_reqs = num_reqs if num_actual_reqs is None else num_actual_reqs
         seq_lens_cpu = None
         is_prefilling = torch.from_numpy(self.input_batch.is_prefilling_np)
         if self.use_dcp:
@@ -546,7 +590,7 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
             seq_lens_cpu, is_prefilling = self.dcp_manager.prepare_draft_dcp_metadata_inputs(
                 target_seq_lens_cpu=self._get_seq_lens_cpu(num_reqs_padded),
                 is_prefilling=is_prefilling,
-                num_reqs=num_reqs,
+                num_reqs=num_real_reqs,
                 num_reqs_padded=num_reqs_padded,
                 step=step,
                 max_model_len=self.max_model_len,
@@ -555,7 +599,7 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         # Upstream's uniform builder calls self._build_attn_metadata, so this
         # single hook also covers graph capture and eager draft decode.
         offload_kwargs = self._sparse_kv_offload_metadata.build_kwargs(
-            self.input_batch, self.model_state, num_reqs, batch_desc, query_start_loc_np, step
+            self.input_batch, self.model_state, num_real_reqs, batch_desc, query_start_loc_np, step
         )
         with build_attn_metadata_factory(
             self.input_buffers.positions,
