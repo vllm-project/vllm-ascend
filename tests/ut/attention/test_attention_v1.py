@@ -539,6 +539,45 @@ class TestAscendAttentionBackendImpl(TestBase):
             kv_sharing_target_layer_name="producer_layer",
         )
 
+    def test_kv_cache_dtype_honors_layer_override(self):
+        self.mock_vllm_config.cache_config.cache_dtype = "fp8"
+        self.mock_vllm_config.model_config.dtype = torch.bfloat16
+        for recipe_c8 in (False, True):
+            self.mock_vllm_config.quant_config.enable_c8_quant = recipe_c8
+            for layer_dtype, expected in (("auto", torch.bfloat16), ("bfloat16", torch.bfloat16)):
+                with self.subTest(layer_dtype=layer_dtype, recipe_c8=recipe_c8):
+                    impl = AscendAttentionBackendImpl(
+                        num_heads=16,
+                        head_size=128,
+                        scale=128**-0.5,
+                        num_kv_heads=1,
+                        alibi_slopes=None,
+                        sliding_window=None,
+                        kv_cache_dtype=layer_dtype,
+                        logits_soft_cap=None,
+                        attn_type=self.attention_type.DECODER,
+                        kv_sharing_target_layer_name=None,
+                    )
+                    self.assertEqual(impl.kv_cache_dtype, expected)
+                    self.assertFalse(impl.enable_c8_quant)
+
+    def test_quantized_layer_still_requires_quantized_weights(self):
+        self.mock_vllm_config.cache_config.cache_dtype = "bfloat16"
+        self.mock_vllm_config.quant_config.enable_c8_quant = False
+        with self.assertRaisesRegex(ValueError, "corresponding quantized weights are required"):
+            AscendAttentionBackendImpl(
+                num_heads=16,
+                head_size=128,
+                scale=128**-0.5,
+                num_kv_heads=1,
+                alibi_slopes=None,
+                sliding_window=None,
+                kv_cache_dtype="fp8",
+                logits_soft_cap=None,
+                attn_type=self.attention_type.DECODER,
+                kv_sharing_target_layer_name=None,
+            )
+
     def test_hnd_layout_is_recorded_during_initialization(self):
         with patch.object(attn_module.envs_vllm, "VLLM_KV_CACHE_LAYOUT", "HND"):
             impl = AscendAttentionBackendImpl(

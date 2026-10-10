@@ -50,14 +50,26 @@ def engram_config():
     )
 
 
-@pytest.mark.parametrize("draft,shared", [(False, None), (True, None), (False, False), (True, True)])
-def test_native_engram_resolution_on_npu(engram_config, draft, shared):
+@pytest.mark.parametrize(
+    "draft,shared,dp,pcp",
+    [
+        (False, None, 4, 1),
+        (True, None, 4, 1),
+        (False, False, 2, 2),
+        (True, True, 4, 1),
+        (False, True, 1, 2),
+        (False, True, 2, 2),
+    ],
+)
+def test_native_engram_resolution_on_npu(engram_config, draft, shared, dp, pcp):
     from vllm.config import EngramConfig, VllmConfig
     from vllm.platforms import current_platform
 
     from vllm_ascend.platform import _validate_engram_config
 
     config = engram_config
+    config.parallel_config.data_parallel_size = dp
+    config.parallel_config.prefill_context_parallel_size = pcp
     original = EngramConfig(cpu_offload=True, dp_shared_memory=shared) if shared is not None else None
     config.engram_config = original
     if draft:
@@ -79,9 +91,10 @@ def test_native_engram_resolution_on_npu(engram_config, draft, shared):
         ("model_config", "architecture", "UnsupportedModel", "non-empty n-gram"),
         ("engram_config", "embedding_across_dp", True, "embedding_across_dp"),
         ("parallel_config", "tensor_parallel_size", 16, "TP=1/2/4/8"),
-        ("parallel_config", "pipeline_parallel_size", 2, "PP=PCP=DCP"),
-        ("parallel_config", "prefill_context_parallel_size", 2, "PP=PCP=DCP"),
-        ("parallel_config", "decode_context_parallel_size", 2, "PP=PCP=DCP"),
+        ("parallel_config", "pipeline_parallel_size", 2, "PP=DCP"),
+        ("parallel_config", "decode_context_parallel_size", 2, "PP=DCP"),
+        ("parallel_config", "data_parallel_size", 1, "dp_shared_memory requires"),
+        ("parallel_config", "enable_elastic_ep", True, "elastic EP"),
         ("load_config", "load_format", "pt", "indexed safetensors"),
     ],
 )

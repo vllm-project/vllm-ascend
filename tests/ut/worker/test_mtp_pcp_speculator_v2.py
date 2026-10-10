@@ -14,6 +14,7 @@ import torch
 from vllm.config import (
     CUDAGraphMode,
     DeviceConfig,
+    EngramConfig,
     ModelConfig,
     ParallelConfig,
     SchedulerConfig,
@@ -21,6 +22,7 @@ from vllm.config import (
     VllmConfig,
     replace,
 )
+from vllm.config.parallel import EPLBConfig
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.gpu import dp_utils
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
@@ -100,13 +102,14 @@ def _make_padded_input_batch() -> MagicMock:
 
 
 @pytest.mark.parametrize(
-    ("target_pcp_size", "expected_execution_pcp_size", "dcp_size"),
-    [(2, 1, 4), (2, 1, 8), (1, 1, 4)],
+    ("target_pcp_size", "dcp_size", "dp_size", "engram"),
+    [(2, 4, 2, False), (2, 8, 2, False), (1, 4, 2, False), (2, 1, 1, True), (2, 1, 2, True)],
 )
 def test_draft_runtime_config_preserves_target_worker_topology(
     target_pcp_size: int,
-    expected_execution_pcp_size: int,
     dcp_size: int,
+    dp_size: int,
+    engram: bool,
 ) -> None:
     draft_parallel_config = SimpleNamespace(
         prefill_context_parallel_size=2,
@@ -123,11 +126,12 @@ def test_draft_runtime_config_preserves_target_worker_topology(
         decode_context_parallel_size=dcp_size,
         enable_expert_parallel=True,
         enable_eplb=True,
-        eplb_config=SimpleNamespace(num_redundant_experts=0),
+        eplb_config=EPLBConfig(num_redundant_experts=0),
         rank=7,
-        data_parallel_size=2,
-        data_parallel_rank=1,
-        pipeline_parallel_size=2,
+        data_parallel_size=dp_size,
+        data_parallel_rank=dp_size - 1,
+        pipeline_parallel_size=1 if engram else 2,
+        enable_elastic_ep=False,
     )
     target_cache_config = SimpleNamespace(
         block_size=128,
@@ -135,6 +139,7 @@ def test_draft_runtime_config_preserves_target_worker_topology(
     target_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(async_scheduling=False),
         parallel_config=target_parallel_config,
+        engram_config=EngramConfig(cpu_offload=True, dp_shared_memory=True) if engram else None,
         speculative_config=SimpleNamespace(
             draft_parallel_config=draft_parallel_config,
         ),
@@ -148,6 +153,8 @@ def test_draft_runtime_config_preserves_target_worker_topology(
     captured: dict[str, SimpleNamespace] = {}
 
     def fake_replace(config, **changes):
+        if isinstance(config, EngramConfig):
+            return dataclass_replace(config, **changes)
         if "pipeline_parallel_size" in changes:
             assert changes["decode_context_parallel_size"] == (1 if target_pcp_size > 1 else dcp_size)
         if "model_config" in changes:
@@ -163,6 +170,8 @@ def test_draft_runtime_config_preserves_target_worker_topology(
                 captured["reconstruction_dcp_size"] = reconstructed_parallel.decode_context_parallel_size
         values = vars(config).copy()
         values.update(changes)
+        if config is target_config and values["engram_config"] is not None:
+            values["engram_config"].verify_parallel_config(values["parallel_config"])
         return SimpleNamespace(**values)
 
     def fake_parent_init(speculator, execution_config, device):
@@ -201,27 +210,34 @@ def test_draft_runtime_config_preserves_target_worker_topology(
     ):
         speculator = AscendMTPSpeculator(target_config, torch.device("cpu"))
 
-    assert dcp_manager.call_args.kwargs["dcp_world_size"] == dcp_size
-    assert dcp_manager.call_args.kwargs["dcp_rank"] == 0
+    if dcp_size > 1:
+        assert dcp_manager.call_args.kwargs["dcp_world_size"] == dcp_size
+        assert dcp_manager.call_args.kwargs["dcp_rank"] == 0
+    else:
+        dcp_manager.assert_not_called()
     execution_config = captured["execution_config"]
     execution_parallel_config = execution_config.parallel_config
-    assert execution_parallel_config.prefill_context_parallel_size == expected_execution_pcp_size
+    assert execution_parallel_config.prefill_context_parallel_size == 1
     assert execution_parallel_config.cp_kv_cache_interleave_size == 128
     assert execution_parallel_config.decode_context_parallel_size == dcp_size
     assert target_parallel_config.decode_context_parallel_size == dcp_size
-    if target_pcp_size > 1:
+    if target_pcp_size > 1 and dcp_size > 1:
         assert captured["reconstruction_dcp_size"] == 1
     else:
         assert "reconstruction_dcp_size" not in captured
     assert execution_parallel_config.enable_expert_parallel
-    assert execution_parallel_config.enable_eplb
+    assert execution_parallel_config.enable_eplb == (target_pcp_size == 1 or dp_size > 1)
     assert execution_parallel_config.rank == target_parallel_config.rank
-    assert execution_parallel_config.data_parallel_size == 2
-    assert execution_parallel_config.data_parallel_rank == 1
+    assert execution_parallel_config.data_parallel_size == dp_size
+    assert execution_parallel_config.data_parallel_rank == dp_size - 1
     assert target_parallel_config.prefill_context_parallel_size == target_pcp_size
     assert target_parallel_config.cp_kv_cache_interleave_size == 128
     assert target_parallel_config.enable_expert_parallel
     assert target_parallel_config.enable_eplb
+    if engram:
+        assert target_config.engram_config.dp_shared_memory
+        assert execution_config.engram_config.dp_shared_memory == (dp_size > 1)
+        assert (execution_config.engram_config is target_config.engram_config) == (dp_size > 1)
 
     draft_config = speculator.draft_vllm_config
     assert draft_parallel_config.prefill_context_parallel_size == 2
@@ -229,11 +245,13 @@ def test_draft_runtime_config_preserves_target_worker_topology(
     assert not draft_parallel_config.enable_expert_parallel
     assert not draft_parallel_config.enable_eplb
     assert draft_config.model_config is draft_model_config
-    assert draft_config.parallel_config.prefill_context_parallel_size == expected_execution_pcp_size
+    assert draft_config.parallel_config.prefill_context_parallel_size == 1
     assert draft_config.parallel_config.cp_kv_cache_interleave_size == 128
     assert draft_config.parallel_config.pipeline_parallel_size == 1
     assert draft_config.parallel_config.decode_context_parallel_size == dcp_size
-    assert draft_config.additional_config["scheduler_config"]["profiling_chunk_config"]["enabled"] is False
+    assert draft_config.additional_config["scheduler_config"]["profiling_chunk_config"]["enabled"] == (
+        target_parallel_config.pipeline_parallel_size == 1
+    )
     assert target_config.additional_config["scheduler_config"]["profiling_chunk_config"]["enabled"] is True
 
 
