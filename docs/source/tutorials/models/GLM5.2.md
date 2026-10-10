@@ -20,9 +20,9 @@ Download the checkpoint from [Eco-Tech on Modelers](https://modelers.cn/user/Eco
 
 |  Weight Version          | Hardware Requirements                                             | Download Links |
 |--------------------------|-------------------------------------------------------------------|----------------|
-|  `GLM-5.2-w8a8c8`        | **A3**: 2 Atlas 800 A3 (64GB × 16) nodes; **A2**: 4 Atlas 800 A2 (64GB × 8) nodes | [Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.2-w8a8c8) |
+|  `GLM-5.2-w8a8c8`        | **A3**: 2 Atlas 800 A3 (128GB × 8) nodes; **A2**: 4 Atlas 800 A2 (64GB × 8) nodes | [Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.2-w8a8c8) |
 |  `GLM-5.2-W8A8C8-mxfp8` | **A5**: 950PR&950DT Products | [Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.2-W8A8C8-mxfp8) |
-|  `GLM-5.3-w8a8c8`        | **A3** / A2: Atlas 800 A3 / A2 | [Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.3-w8a8c8) |
+|  `GLM-5.3-w8a8c8`        | **A3**: Atlas 800 A3 (128GB × 8); **A2**: Atlas 800 A2 | [Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.3-w8a8c8) |
 |  `GLM-5.3-W8A8C8-mxfp8` | **A5**: 950PR&950DT Products | [Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.3-W8A8C8-mxfp8) |
 |  `GLM-5.2-w4a8c8`        | **A3**: 1 Atlas 800 A3 (128GB × 8) node; **A2**: 2 Atlas 800 A2 (64GB × 8) nodes | [Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.2-w4a8c8) |
 |  `GLM-5.2-w4a4c8-mxfp4` | **A5**: 950PR&950DT Products | [Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.2-w4a4c8-mxfp4) |
@@ -241,7 +241,7 @@ The deployment sections below cover GLM-5.2 and GLM-5.3. Select the checkpoint f
 
 === "A3 Series"
 
-    For a reduced context of 32768 tokens, the W8A8C8 checkpoint can run on 1 Atlas 800 A3 (64GB × 16) with DP1/TP16. Select the GLM-5.2 or GLM-5.3 checkpoint below. This is not the full-context deployment: use the multi-node deployment for longer contexts.
+    For a reduced context of 32768 tokens, the W8A8C8 checkpoint can run on 1 Atlas 800 A3 (128GB × 8) with DP1/TP16. Select the GLM-5.2 or GLM-5.3 checkpoint below. This is not the full-context deployment: use the multi-node deployment for longer contexts.
 
     ```shell
     # GLM-5.2:
@@ -405,7 +405,7 @@ If you want to deploy a multi-node environment, first verify the data-plane netw
 
 === "A3 series"
 
-    - `GLM-5.2-w8a8c8`: can be deployed on 2 Atlas 800 A3 (64GB × 16) with DP4/TP8 and expert parallelism. Both nodes must mount the same checkpoint path and expose all 16 logical NPUs to their containers.
+    - `GLM-5.2-w8a8c8`: can be deployed on 2 Atlas 800 A3 (128GB × 8) with DP4/TP8 and expert parallelism. Both nodes must mount the same checkpoint path and expose all 16 logical NPUs to their containers.
 
     Run the following scripts on two nodes respectively.
 
@@ -1052,7 +1052,7 @@ In the PD disaggregation scenario, Mooncake is used as the KV cache transfer con
 
 === "A3 Series"
 
-    Prefill-Decode disaggregation with the `GLM-5.2-w8a8c8` weights can be deployed on 4 Atlas 800 A3 (64GB × 16).
+    Prefill-Decode disaggregation with the `GLM-5.2-w8a8c8` weights can be deployed on 4 Atlas 800 A3 (128GB × 8).
 
     Before you start, please
 
@@ -1724,7 +1724,7 @@ In the PD disaggregation scenario, Mooncake is used as the KV cache transfer con
 
 #### 5.2.1 Single-Node 1M Deployment
 
-- Quantized model `GLM-5.2-w4a8c8` can be deployed on 1 Atlas 800 A3 (64GB × 16) for the 1M context.
+- Quantized model `GLM-5.2-w4a8c8` can be deployed on 1 Atlas 800 A3 (128GB × 8) for the 1M context.
 
 Recommended command:
 
@@ -1762,7 +1762,7 @@ vllm serve <MODEL_PATH> \
 
 #### 5.2.2 Dual-Node Co-Located 1M Deployment
 
-- `GLM-5.2-w4a8c8` can be deployed on 2 Atlas 800 A3 (64GB × 16) for the 1M context.
+- `GLM-5.2-w4a8c8` can be deployed on 2 Atlas 800 A3 (128GB × 8) for the 1M context.
 
 Recommended command for both co-located nodes:
 
@@ -1815,7 +1815,7 @@ vllm serve <MODEL_PATH> \
 
 #### 5.2.3 PD Disaggregation 1M Deployment
 
-PD disaggregation for the 1M context with the `GLM-5.2-w8a8c8` weights can be deployed on 4 Atlas 800 A3 (64GB × 16).
+PD disaggregation for the 1M context with the `GLM-5.2-w8a8c8` weights can be deployed on 4 Atlas 800 A3 (128GB × 8).
 
 Before you start, please
 
@@ -2301,8 +2301,8 @@ An HTTP error, startup failure, or empty/invalid response is not a successful ve
 
 | dataset | version | metric | mode | vllm-api-general-chat | note |
 | ----- | ----- | ----- | ----- | ----- | ----- |
-| AIME2026 | - | accuracy | gen | 93.33 | 4 Atlas 800 A3 (64GB × 16) |
-| GPQA | - | accuracy | gen | 90.4 | 8 Atlas 800 A3 (64GB × 16) |
+| AIME2026 | - | accuracy | gen | 93.33 | 4 Atlas 800 A3 (128GB × 8) |
+| GPQA | - | accuracy | gen | 90.4 | 8 Atlas 800 A3 (128GB × 8) |
 | GPQA | - | accuracy | gen | 91.92 | 8 Atlas 800 A2 (64GB × 8) |
 | AIME2026 | - | accuracy | gen | 95.00 | 950PR&950DT Products, w4a4c8 |
 | GPQA Diamond | - | accuracy | gen | 89.90 | 950PR&950DT Products, w4a4c8 |

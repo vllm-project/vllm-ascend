@@ -35,7 +35,7 @@ Download the checkpoint from [Eco-Tech on Modelers](https://modelers.cn/user/Eco
 | Checkpoint | Hardware | Deployment | Download |
 | --- | --- | --- | --- |
 | `GLM-5.3-Flash-w8a8-mxfp8` | **A5**: 950DT Products | 1 node (96GB × 8) for single-node deployment | [Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8-mxfp8) |
-| `GLM-5.3-Flash-w8a8` | **A3**: Atlas 800 A3 | 1 node for single-node deployment; 2 nodes for 1P1D PD | [Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8) |
+| `GLM-5.3-Flash-w8a8` | **A3**: Atlas 800 A3 (128GB × 8) | 1 node for single-node deployment; 2 nodes for 1P1D PD | [Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8) |
 | `GLM-5.3-Flash-w8a8` | **A2**: Atlas 800 A2 | 2 nodes (64GB × 8 each) for colocated deployment; 4 nodes for PD | [Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8) |
 
 - You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to quantize the model directly.
@@ -213,7 +213,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 === "Atlas 800 A3 series"
 
-    - Quantized model `GLM-5.3-Flash-w8a8` can be deployed on 1 A3 (64GB × 16) with DP1/TP16.
+    - Quantized model `GLM-5.3-Flash-w8a8` can be deployed on 1 A3 (128GB × 8) with DP1/TP16.
 
     Run the following script to execute online inference.
 
