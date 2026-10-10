@@ -37,6 +37,24 @@ from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
 
 
+def _pad_and_split_tokens(x: torch.Tensor, padded_len: int, tp_size: int, tp_rank: int) -> torch.Tensor:
+    """Return one TP shard of zero-padded tokens without materializing other shards.
+
+    Match tensor_split's uneven split rule. Fully valid shards are views, as
+    in the existing unpadded path; zero-only shards own fresh storage so that
+    consumers and graph captures cannot mutate a shared padding buffer.
+    """
+    shard_rows, remainder = divmod(padded_len, tp_size)
+    start = tp_rank * shard_rows + min(tp_rank, remainder)
+    shard_rows += int(tp_rank < remainder)
+    if start >= x.shape[0]:
+        return x.new_zeros((shard_rows, *x.shape[1:]))
+    local = x[start : min(start + shard_rows, x.shape[0])]
+    if local.shape[0] == shard_rows:
+        return local.contiguous()
+    return _pad_tokens_with_cat(local, shard_rows)
+
+
 class PrepareAndFinalize(ABC):
     """
     Abstract base class for MoE (Mixture-of-Experts) tensor preparation and finalization
@@ -293,17 +311,21 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
             target_pad_length = _EXTRA_CTX.padded_num_tokens
             pad_size = target_pad_length - self.num_tokens
 
-            if pad_size > 0:
-                hidden_states = _pad_tokens_with_cat(hidden_states, target_pad_length)
-                router_logits = _pad_tokens_with_cat(router_logits, target_pad_length)
-                padded_hidden_states_shape = hidden_states.shape
+            if pad_size > 0 and self.tp_size > 1:
+                padded_hidden_states_shape = torch.Size((target_pad_length, *hidden_states.shape[1:]))
+                hidden_states = _pad_and_split_tokens(hidden_states, target_pad_length, self.tp_size, self.tp_rank)
+                router_logits = _pad_and_split_tokens(router_logits, target_pad_length, self.tp_size, self.tp_rank)
+            else:
+                if pad_size > 0:
+                    hidden_states = _pad_tokens_with_cat(hidden_states, target_pad_length)
+                    router_logits = _pad_tokens_with_cat(router_logits, target_pad_length)
+                    padded_hidden_states_shape = hidden_states.shape
 
-            # Slice across TP ranks
-            if self.tp_size > 1:
-                split_hidden_states = torch.tensor_split(hidden_states, self.tp_size, dim=0)
-                split_router_logits = torch.tensor_split(router_logits, self.tp_size, dim=0)
-                hidden_states = split_hidden_states[self.tp_rank]
-                router_logits = split_router_logits[self.tp_rank]
+                if self.tp_size > 1:
+                    split_hidden_states = torch.tensor_split(hidden_states, self.tp_size, dim=0)
+                    split_router_logits = torch.tensor_split(router_logits, self.tp_size, dim=0)
+                    hidden_states = split_hidden_states[self.tp_rank]
+                    router_logits = split_router_logits[self.tp_rank]
 
         return MoEPrepareOutput(
             hidden_states=hidden_states,
