@@ -201,7 +201,7 @@ class TestMooncakeHybrid(unittest.TestCase):
         )
         worker.kv_recv_thread.add_request = lambda task: dispatch(worker.kv_recv_thread, task)
         worker.cache_coordinator = object()
-        masks = ([True] * 4, [True] * 2, [False, False, False, True])
+        masks: tuple[list[bool], ...] = ([True] * 4, [True] * 2, [False, False, False, True])
         if private_tail:
             masks += ([],)
         worker.token_database.store_mask = MagicMock(return_value=masks)
