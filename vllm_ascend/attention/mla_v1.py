@@ -2461,8 +2461,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         )
 
         num_decode_tokens = attn_metadata.num_decode_tokens
-        # Fused MLA cache由runner保存为单一tensor。旧MLA实现仍按
-        # nope/rope两个logical tensor访问算子，因此在这里做零拷贝切片。
+        # The runner stores a fused MLA cache as one tensor, while the legacy
+        # MLA implementation still expects separate NoPE/RoPE logical tensors.
+        # Split it here as zero-copy views.
         fused_mla_cache = isinstance(kv_cache, torch.Tensor)
         if isinstance(kv_cache, torch.Tensor):
             kv_cache = (

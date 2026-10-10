@@ -17,7 +17,7 @@ from vllm_ascend.compilation.acl_graph import (
 )
 from vllm_ascend.compilation.updatable_graph import UpdatableGraph
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
-from vllm_ascend.utils import super_kernel_scope, vllm_version_is, weak_ref_tensor, weak_ref_tensors
+from vllm_ascend.utils import super_kernel_scope, weak_ref_tensor, weak_ref_tensors
 from vllm_ascend.worker.v2.attn_utils import ring_state_update_skipped
 
 
@@ -79,25 +79,14 @@ class AscendV2KVBlockZeroer(KVBlockZeroer):
 
             if not component_groups:
                 continue
-            zeroer_kwargs: dict[str, Any]
-            if vllm_version_is("0.28.0"):
-                zeroer_kwargs = {
-                    "cache_dtype": cache_dtype,
-                    "static_forward_context": component_context,
-                    "runner_only_attn_layers": runner_only_attn_layers,
-                }
-            else:
-                zeroer_kwargs = {
-                    "static_forward_context": component_context,
-                    "num_blocks": num_blocks,
-                    "runner_only_attn_layers": runner_only_attn_layers,
-                }
             self._zeroers.append(
                 KVBlockZeroer(
                     device,
                     attn_groups_iter=component_groups,
                     kernel_block_sizes=kernel_block_sizes,
-                    **zeroer_kwargs,
+                    static_forward_context=component_context,
+                    num_blocks=num_blocks,
+                    runner_only_attn_layers=runner_only_attn_layers,
                 )
             )
 

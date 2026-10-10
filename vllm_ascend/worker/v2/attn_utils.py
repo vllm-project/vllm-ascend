@@ -98,7 +98,6 @@ from vllm_ascend.utils import (
     get_kv_cache_tensor_layers,
     is_hidden_state_cache_spec,
     kv_cache_spec_uses_packed_sfa_main_cache,
-    vllm_version_is,
 )
 from vllm_ascend.worker.kvpp_cache import allocate_kvpp_cache
 from vllm_ascend.worker.utils import (
@@ -891,9 +890,6 @@ def _uses_single_raw_mla_cache(
     kv_cache_spec: KVCacheSpec,
 ) -> bool:
     """Whether an MLA layer uses the Ascend single raw backing protocol."""
-    if vllm_version_is("0.28.0"):
-        return False
-
     if not isinstance(kv_cache_spec, AscendMLAAttentionSpec):
         return False
     if not kv_cache_spec.supports_single_raw_backing:

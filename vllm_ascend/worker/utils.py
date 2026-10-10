@@ -273,8 +273,9 @@ class AscendKVBlockZeroer(KVBlockZeroer):
                 if layer_name in runner_only_attn_layers:
                     continue
                 kv_cache = static_forward_context[layer_name].kv_cache
-                # Fused MLA由单一tensor表示；component-major MLA的两个view同样共享一个物理page，从nope起点清理一次即可。
-                # legacy K/V协议仍逐个component清理。
+                # Fused MLA is one tensor, and component-major MLA views share
+                # one physical page; zero once from the NoPE start. The legacy
+                # K/V protocol still zeroes each component separately.
                 if _component_views_share_slot(kv_cache, spec):
                     kv_tensors = (kv_cache[0],)
                 elif isinstance(kv_cache, torch.Tensor):

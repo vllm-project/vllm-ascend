@@ -55,7 +55,6 @@ from vllm_ascend.models.deepseek_v4 import model as deepseek_v4_model
 from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _get_kv_cache_config_deepseek_v4_main,
 )
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2 import model_runner as v2_model_runner
 from vllm_ascend.worker.v2 import utils as v2_utils
@@ -494,7 +493,6 @@ def test_mrv2_attention_views_interleave_kv_per_physical_page():
     assert torch.count_nonzero(raw_typed[2 * physical_page_elements :]) == 8
 
 
-@pytest.mark.skipif(vllm_version_is("0.28.0"), reason="V2 single raw MLA follows the main allocation contract")
 def test_v2_mla_single_raw_backing_selects_layout_by_hardware_and_local_q_heads(monkeypatch):
     layer_name = "model.layers.0.self_attn.attn"
     num_blocks = 2
@@ -607,7 +605,6 @@ def test_v2_mla_single_raw_backing_selects_layout_by_hardware_and_local_q_heads(
     assert nope.untyped_storage() is rope.untyped_storage()
 
 
-@pytest.mark.skipif(vllm_version_is("0.28.0"), reason="V2 single raw MLA follows the main allocation contract")
 def test_v2_single_raw_mla_path_excludes_unsupported_modes(monkeypatch):
     layer_name = "model.layers.0.self_attn.attn"
     attn_module = MLAAttention.__new__(MLAAttention)
@@ -649,7 +646,7 @@ def test_v2_single_raw_mla_path_excludes_unsupported_modes(monkeypatch):
     assert not attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, blocked_spec)
 
 
-def test_v2_zeroer_constructs_component_zeroers_on_both_vllm_lanes(monkeypatch):
+def test_v2_zeroer_constructs_component_zeroers(monkeypatch):
     class RecordingZeroer:
         calls: list[dict[str, Any]] = []
 
@@ -681,39 +678,33 @@ def test_v2_zeroer_constructs_component_zeroers_on_both_vllm_lanes(monkeypatch):
     }
     monkeypatch.setattr(v2_utils, "KVBlockZeroer", RecordingZeroer)
 
-    for is_v028, expected_kwargs in (
-        (False, {"num_blocks": 2}),
-        (True, {"cache_dtype": "auto"}),
-    ):
-        RecordingZeroer.calls.clear()
-        monkeypatch.setattr(v2_utils, "vllm_version_is", lambda _version, result=is_v028: result)
-        AscendV2KVBlockZeroer(
-            torch.device("cpu"),
-            attn_groups_iter=[group],
-            kernel_block_sizes=[4],
-            static_forward_context=context,
-            num_blocks=2,
-            cache_dtype="auto",
-        )
+    RecordingZeroer.calls.clear()
+    AscendV2KVBlockZeroer(
+        torch.device("cpu"),
+        attn_groups_iter=[group],
+        kernel_block_sizes=[4],
+        static_forward_context=context,
+        num_blocks=2,
+        cache_dtype="auto",
+    )
 
-        assert len(RecordingZeroer.calls) == 2
-        assert all(call["kernel_block_sizes"] == [4] for call in RecordingZeroer.calls)
-        assert all(call["attn_groups"] == [group] for call in RecordingZeroer.calls)
-        for component_id, call in enumerate(RecordingZeroer.calls):
-            assert call["static_forward_context"] == {
-                "layer": SimpleNamespace(kv_cache=context["layer"].kv_cache[component_id])
-            }
-            assert call["runner_only_attn_layers"] == set()
-            for key, value in expected_kwargs.items():
-                assert call[key] == value
-            assert set(call) == {
-                "device",
-                "attn_groups",
-                "kernel_block_sizes",
-                "static_forward_context",
-                "runner_only_attn_layers",
-                *expected_kwargs,
-            }
+    assert len(RecordingZeroer.calls) == 2
+    assert all(call["kernel_block_sizes"] == [4] for call in RecordingZeroer.calls)
+    assert all(call["attn_groups"] == [group] for call in RecordingZeroer.calls)
+    for component_id, call in enumerate(RecordingZeroer.calls):
+        assert call["static_forward_context"] == {
+            "layer": SimpleNamespace(kv_cache=context["layer"].kv_cache[component_id])
+        }
+        assert call["runner_only_attn_layers"] == set()
+        assert call["num_blocks"] == 2
+        assert set(call) == {
+            "device",
+            "attn_groups",
+            "kernel_block_sizes",
+            "static_forward_context",
+            "runner_only_attn_layers",
+            "num_blocks",
+        }
 
 
 def test_v2_model_runner_binds_tuple_aware_zeroer(monkeypatch):
@@ -799,10 +790,6 @@ def test_v2_zeroer_covers_each_mla_component_view():
     assert all(zeroer._meta[-1] == 3 for zeroer in zeroer._zeroers)
 
 
-@pytest.mark.skipif(
-    vllm_version_is("0.28.0"),
-    reason="vLLM #51718 only changed the main planner",
-)
 def test_main_dsv4_materializes_real_planner_geometry_once(monkeypatch):
     small_name = "model.layers.0.self_attn.attn"
     large_name = "model.layers.1.self_attn.attn"

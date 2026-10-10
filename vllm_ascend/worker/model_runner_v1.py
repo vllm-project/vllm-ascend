@@ -222,7 +222,6 @@ from vllm_ascend.utils import (
     model_uses_kpool_indexer,
     set_potential_max_tokens,
     should_skip_allreduce_across_dp_group,
-    vllm_version_is,
     weak_ref_tensor,
     weak_ref_tensors,
 )
@@ -4827,8 +4826,6 @@ class NPUModelRunner(GPUModelRunner):
         layer_name: str,
         kv_cache_spec: KVCacheSpec,
         attn_module: AttentionLayerBase | None = None,
-        *,
-        use_legacy_shared_by_layout: bool = False,
     ) -> bool:
         """Whether this runner can expose an MLA layer from one raw backing."""
         if not isinstance(kv_cache_spec, AscendMLAAttentionSpec):
@@ -4838,8 +4835,7 @@ class NPUModelRunner(GPUModelRunner):
         # Runtime-only exclusions do not need the static forward context. In
         # particular, sparse layerwise tests synthesize a runner without it.
         if (
-            use_legacy_shared_by_layout
-            or not supports_component_major_mla_pd(self.vllm_config)
+            not supports_component_major_mla_pd(self.vllm_config)
             or self.use_sparse
             or self.sparse_kv_offload_enabled
             or self.use_compress
@@ -4994,7 +4990,6 @@ class NPUModelRunner(GPUModelRunner):
                 for name in allocation.layers:
                     kv_cache_raw_tensors[name] = backing
             return kv_cache_raw_tensors
-        use_legacy_shared_by_layout = vllm_version_is("0.28.0")
         uses_padded_page_layout = requires_padded_page_layout(layer_kv_cache_spec.values())
         is_dsv4_main = any(
             getattr(spec, "model_version", None) == "deepseek_v4"
@@ -5267,11 +5262,11 @@ class NPUModelRunner(GPUModelRunner):
                     is_single_raw_mla = self._uses_single_raw_mla_cache(
                         layer_name,
                         current_kv_cache_spec,
-                        use_legacy_shared_by_layout=use_legacy_shared_by_layout,
                     )
-                    # 纯MLA在这里为当前layer分配single raw backing；hybrid MLA
-                    # 使用上方standardized shared backing生成的bare raw tensor。
-                    # is_single_raw_mla只基于当前layer判断，不能推广到shared_layers。
+                    # Pure MLA layers allocate a single raw backing here. Hybrid
+                    # MLA uses a bare tensor slice from the standardized shared
+                    # backing above. The single-raw predicate is per-layer and
+                    # must not be generalized to shared_layers.
                     if is_single_raw_mla:
                         fused_raw_size = (
                             kv_cache_config.num_blocks
@@ -5642,8 +5637,10 @@ class NPUModelRunner(GPUModelRunner):
                         kv_caches[layer_name] = reshaped_tensors
                         continue
 
-                    # MLA使用allocate/hybrid阶段的一整块raw backing。
-                    # A5FlashMLA消费token交错的单tensor；A3 FIA消费component-major 双view。MHA/GQA继续走raw K/V协议。
+                    # MLA uses one raw backing allocated by the allocation or
+                    # hybrid phase. A5 FlashMLA consumes one token-interleaved
+                    # tensor; A3 FIA consumes component-major views. MHA/GQA
+                    # keeps the raw K/V protocol.
                     raw_cache = kv_cache_raw_tensors[layer_name]
                     fused_raw_tensor = get_single_raw_mla_backing(raw_cache)
 
@@ -5684,8 +5681,8 @@ class NPUModelRunner(GPUModelRunner):
                             and current_kv_cache_spec.num_heads in MLA_FLASH_SUPPORTED_Q_HEADS
                             and get_flashmla_ops() is not None
                         ):
-                            # A5每个kernel slot内按token交错存储[nope|rope]：
-                            # token0[nope|rope], token1[nope|rope], ...。
+                            # A5 interleaves [NoPE | RoPE] per token in every
+                            # kernel slot: token0[NoPE|RoPE], token1[...], ...
                             fused_cache = make_page_strided_cache_view(
                                 fused_raw_tensor,
                                 (*component_shape, fused_dim),
@@ -5695,9 +5692,10 @@ class NPUModelRunner(GPUModelRunner):
                             kv_caches[layer_name] = fused_cache
                             continue
 
-                        # A3/FIA要求nope和rope各自内部连续，只允许首轴携带
-                        # page padding stride。每个kernel slot物理上按
-                        # [all nope][all rope][padding]写入。
+                        # A3/FIA requires NoPE and RoPE to be internally
+                        # contiguous; only the first axis may carry the page
+                        # stride. Each kernel slot is physically stored as
+                        # [all NoPE][all RoPE][padding].
                         nope_cache = make_page_strided_cache_view(
                             fused_raw_tensor,
                             (*component_shape, nope_dim),

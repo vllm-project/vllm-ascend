@@ -70,17 +70,17 @@ def _is_component_major_mla_binding(spec: KVCacheSpec, caches: tuple[torch.Tenso
     different from a token-interleaved parent page, where NoPE and RoPE are
     sliced along the trailing dimension of every token.
     """
-    # 检查MLA的双cache view
+    # Require the two-view MLA cache contract.
     if not isinstance(spec, MLAAttentionSpec) or len(caches) != 2:
         return False
 
     nope, rope = caches
     if nope.dtype != rope.dtype:
         return False
-    # 两个view必须共享同一个storage
+    # Both views must share one storage.
     if nope.untyped_storage().data_ptr() != rope.untyped_storage().data_ptr():
         return False
-    # 首轴布局必须一致
+    # Their first-axis layout must match.
     if nope.shape[0] != rope.shape[0] or nope.stride(0) != rope.stride(0):
         return False
 
@@ -89,7 +89,7 @@ def _is_component_major_mla_binding(spec: KVCacheSpec, caches: tuple[torch.Tenso
     # interleaved parent does not satisfy both component strides.
     if nope.ndim != 4 or rope.ndim != 4:
         return False
-    # 非首轴外其余轴连续
+    # All axes other than the first axis must be contiguous.
     if nope.stride(1) != nope.shape[2] * nope.shape[3]:
         return False
     if rope.stride(1) != rope.shape[2] * rope.shape[3]:

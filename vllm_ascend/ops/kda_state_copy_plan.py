@@ -195,8 +195,9 @@ class KDAStateCopyPlan:
         if any(t.data_ptr() % 16 for t in tensors[1:]):
             raise RuntimeError("unaligned normalized KDA buffer")
         with nullcontext() if torch.npu.current_device() == state.device.index else torch.npu.device(state.device):
-            # Triton 在编译阶段绑定 constexpr 常量，直接调用只传运行时参数。
-            # Ascend launcher 不接收 TO_CACHE、HAS_FLAGS、BLOCK_SIZE 三个编译常量。
+            # Triton binds constexpr values at compile time, so a direct launch
+            # passes runtime arguments only. The Ascend launcher does not accept
+            # TO_CACHE, HAS_FLAGS, or BLOCK_SIZE again.
             self._compiled[indices.dtype, to_cache][(indices.numel(), self._tiles, 1)](
                 *tensors,
                 *self._scalars,

@@ -34,7 +34,7 @@ def _forbid_compilation(monkeypatch):
 @pytest.mark.parametrize("index_dtype", [torch.int32, torch.int64])
 @torch.inference_mode()
 def test_direct_compiled_launch_uses_runtime_abi(to_cache, index_dtype, monkeypatch):
-    """使用真实 launcher 验证参数接口、无 JIT 调用以及缓存复制结果。"""
+    """Verify the runtime ABI, no-JIT execution, and cache-copy results."""
     state = torch.arange(48, dtype=torch.float32, device="npu").reshape(8, 1, 2, 3)
     original = state.cpu()
     indices = torch.tensor([-1, 0, 3], dtype=index_dtype, device="npu")
@@ -44,19 +44,22 @@ def test_direct_compiled_launch_uses_runtime_abi(to_cache, index_dtype, monkeypa
     plan.seal()
     _forbid_compilation(monkeypatch)
 
-    # 真实编译内核会拒绝多余的 constexpr 参数，同时验证动态输入的数据结果。
+    # A real compiled kernel rejects the redundant constexpr arguments and
+    # validates the data results for dynamic inputs.
     plan._launch(state, packed, indices, flags, to_cache=to_cache)
 
     if to_cache:
         expected = original.clone()
         expected[0] = 101
         expected[3] = 101
-        # 无效索引不写，初始状态标记不能抑制最终状态写回。
+        # Invalid indices do not write, and the initial-state flag must not
+        # suppress the final state write-back.
         torch.testing.assert_close(state.cpu(), expected, rtol=0, atol=0)
     else:
         expected = torch.zeros((3, 1, 2, 3), dtype=torch.float32)
         expected[1] = original[0]
-        # 无效索引和 false flag 均清零，gather 不修改原缓存。
+        # Invalid indices and false flags are zeroed; gather leaves the cache
+        # untouched.
         torch.testing.assert_close(packed.cpu(), expected, rtol=0, atol=0)
         torch.testing.assert_close(state.cpu(), original, rtol=0, atol=0)
 
