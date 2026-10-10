@@ -16,8 +16,12 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+from copy import copy
+
+import torch.nn as nn
 from vllm.config import VllmConfig, replace
 from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator
+from vllm.v1.worker.gpu.spec_decode.eagle.utils import load_eagle_model
 
 from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import (
     AscendAutoRegressiveSpeculator,
@@ -27,6 +31,19 @@ from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import (
 class AscendEagleSpeculator(AscendAutoRegressiveSpeculator, EagleSpeculator):
     """Ascend Eagle speculator: the NPU loop from AscendAutoRegressiveSpeculator
     layered on upstream EagleSpeculator (flat/GQA attention)."""
+
+    def load_draft_model(
+        self,
+        target_model: nn.Module,
+        target_attn_layer_names: set[str],
+    ) -> nn.Module:
+        # The upstream loader uses the target runtime config, independently of
+        # _create_draft_vllm_config. Expose the draft identity before attention
+        # construction so draft MLA layers never initialize MLAPO.
+        draft_load_config = copy(self.vllm_config)
+        draft_load_config.model_config = copy(self.vllm_config.model_config)
+        draft_load_config.model_config.runner_type = self.draft_model_config.runner_type
+        return load_eagle_model(target_model, draft_load_config)
 
     def _create_draft_vllm_config(self) -> VllmConfig:
         # EAGLE draft models are dense even when the target is an MoE model.
