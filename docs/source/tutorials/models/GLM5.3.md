@@ -10,9 +10,9 @@ This document will show the main verification steps of the model, including supp
 
     **Current status and constraints**
 
-    - GLM-5.3 has only been tested on the official Docker image `quay.io/ascend/vllm-ascend:v0.23.0-a3` and `quay.io/ascend/vllm-ascend:v0.23.0` **only on multi-node co-located scenario**.
+    - The multi-node co-located examples were tested on the official Docker images `quay.io/ascend/vllm-ascend:v0.23.0-a3` and `quay.io/ascend/vllm-ascend:v0.23.0`. The [Prefill-Decode disaggregation example](#52-prefill-decode-disaggregation) uses a separate **0.30.0RC reference configuration** with MemCache KV pooling on A3.
     - The features listed in [Supported Features](#2-supported-features) are only those enabled by the verified deployment commands in this document, and do **not** imply that all features are supported for GLM-5.3. This is an early-access version; performance optimization and reliability validation are still in progress (see [Declaration](#10-declaration)).
-    - All the scripts below is based on **v0.23.0**, so some params are not supported in main code. If you are using the main branch of vllm-Ascend, please make sure to check it.
+    - The co-located scripts are based on **v0.23.0**; Section 5.2 has its own version requirements. Check configuration compatibility before using either example with another release or the main branch.
 
 ## 2 Supported Features
 
@@ -130,7 +130,7 @@ If you don't want to use the docker image as above, you can also build all from 
 
 ## 5 Online Service Deployment
 
-The deployment scenarios validated for this release are organized by context window size (below 1M), hardware (Atlas 800 A3 / A2), and deployment mode (multi-node co-located). All startup scripts below are the verified reference commands; key parameters are explained after each scenario.
+The multi-node co-located examples are organized by context window size (below 1M) and hardware (Atlas 800 A3 / A2). Section 5.2 adds a separate A3 Prefill-Decode disaggregation reference with MemCache KV pooling. Version requirements and key parameters are described with each scenario.
 
 !!! note
 
@@ -138,7 +138,7 @@ The deployment scenarios validated for this release are organized by context win
 
 !!! warning
 
-    - The scripts below is tested on **v0.23.0**, some params may have changed in main branch.
+    - The scripts in Section 5.1 were tested on **v0.23.0**. Parameters may have changed in the main branch. For Section 5.2, follow the version requirements in that section.
 
 ### 5.1 Multi-node Deployment
 
@@ -421,7 +421,413 @@ The 1M context scenarios have not yet tested for `GLM-5.3`. If you want to deplo
 
 ### 5.2 Prefill-Decode Disaggregation
 
-Prefill-Decode disaggregation scenarios have not yet tested for `GLM-5.3`. If you want to deploy prefill-decode disaggregation, you can refer to scripts in [GLM-5.2 Prefill-Decode Disaggregation](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/GLM5.2.html#prefill-decode-disaggregation).
+#### 5.2.1 Deployment on 4 Atlas 800 A3 with MemCache KV Pooling
+
+This reference uses GLM-5.3 W8A8C8 weights, a maximum sequence length of **200,000 tokens**, and separate Prefill and Decode instances. `MultiConnector` combines `MooncakeConnectorV1` for P-to-D KV transfer with `AscendStoreConnector` for MemCache KV pooling.
+
+!!! warning "Version requirements"
+
+    These commands are adapted from a **0.30.0RC reference configuration**, not the v0.23.0 co-located environment above. Use a matching vLLM/vLLM-Ascend environment with the V1 model runner, `glm47` parsers, and both connectors available. Do not assume that the v0.23.0 images in Section 4 support this configuration. Check release-specific options when using a different version; in particular, DSA CP and scheduler configuration can change between releases.
+
+The following placement uses four A3 nodes, each exposing 16 NPU devices to its container. Prefill and Decode use separate DP groups.
+
+| Role | Nodes | Global DP | TP per DP rank | DP ranks per node | Devices per role |
+| --- | --- | --- | --- | --- | --- |
+| Prefill | P0, P1 | 4 | 8 | 2 | 32 |
+| Decode | D0, D1 | 8 | 4 | 4 | 32 |
+
+Prerequisites:
+
+1. Prepare the same GLM-5.3 W8A8C8 weights and compatible software on every node. Install `fastokens` on Prefill nodes for `VLLM_USE_FASTOKENS=1`. Set `MODEL_PATH` to the local model directory. The `--quantization ascend` option loads the Ascend quantization configuration from the weights; do not copy the co-located KV-cache overrides into this reference without checking compatibility.
+2. Verify [multi-node communication](../../getting_started/installation.md#installation-multi-node-interconnect). Set each node's `local_ip` and `nic_name` to its reachable address and matching network interface.
+3. Complete [MemCache backend setup](../../user_guide/feature_guide/kv_pool.md#scenario-2-memcache-backend), including the hardware/CANN prerequisites, `memfabric-hybrid` and `memcache-hybrid` installation, configuration files, and metadata service. All P/D instances must access the same pool. The connector configuration below does not start the MemCache service.
+4. Ensure the API, DP RPC, and KV-transfer ports are available and reachable. Keep the Prefill and Decode node groups separate and avoid conflicting local ports.
+
+Before you start, prepare the following scripts on each node, following the same launcher/template layout as the [GLM-5.2 PD deployment](GLM5.2.md#513-prefill-decode-disaggregation).
+
+1. Prepare the script `launch_online_dp.py` on each node:
+
+    ```python
+    import argparse
+    import multiprocessing
+    import os
+    import subprocess
+    import sys
+
+    def parse_args():
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--dp-size", type=int, required=True, help="Data parallel size.")
+        parser.add_argument("--tp-size", type=int, default=1, help="Tensor parallel size.")
+        parser.add_argument("--dp-size-local", type=int, default=-1, help="Local data parallel size.")
+        parser.add_argument("--dp-rank-start", type=int, default=0, help="Starting rank for data parallel.")
+        parser.add_argument("--dp-address", type=str, required=True, help="IP address for data parallel master node.")
+        parser.add_argument("--dp-rpc-port", type=str, default="12321", help="Port for data parallel master node.")
+        parser.add_argument("--vllm-start-port", type=int, default=8000, help="Starting port for the engine.")
+        return parser.parse_args()
+
+    args = parse_args()
+    dp_size = args.dp_size
+    tp_size = args.tp_size
+    dp_size_local = args.dp_size_local
+    if dp_size_local == -1:
+        dp_size_local = dp_size
+    dp_rank_start = args.dp_rank_start
+    dp_address = args.dp_address
+    dp_rpc_port = args.dp_rpc_port
+    vllm_start_port = args.vllm_start_port
+    gpus_per_dp_rank = tp_size
+
+    def run_command(visible_devices, dp_rank, vllm_engine_port):
+        command = [
+            "bash",
+            "./run_dp_template.sh",
+            visible_devices,
+            str(vllm_engine_port),
+            str(dp_size),
+            str(dp_rank),
+            dp_address,
+            dp_rpc_port,
+            str(tp_size),
+        ]
+        subprocess.run(command, check=True)
+
+    if __name__ == "__main__":
+        template_path = "./run_dp_template.sh"
+        if not os.path.exists(template_path):
+            print(f"Template file {template_path} does not exist.")
+            sys.exit(1)
+
+        processes = []
+        num_cards = dp_size_local * gpus_per_dp_rank
+
+        for i in range(dp_size_local):
+            dp_rank = dp_rank_start + i
+            vllm_engine_port = vllm_start_port + i
+            visible_devices = ",".join(str(x) for x in range(i * gpus_per_dp_rank, (i + 1) * gpus_per_dp_rank))
+            process = multiprocessing.Process(
+                target=run_command,
+                args=(visible_devices, dp_rank, vllm_engine_port)
+            )
+            processes.append(process)
+            process.start()
+
+        for process in processes:
+            process.join()
+        sys.exit(1 if any(process.exitcode != 0 for process in processes) else 0)
+    ```
+
+2. Prepare the script `run_dp_template.sh` on each node. Use the Prefill template on P0/P1 and the Decode template on D0/D1. Set `local_ip`, `nic_name`, and the installation paths separately on each node. `MEMCACHE_ROOT` is the installed `memcache_hybrid` package directory; `PYTHON_LIB_DIR` is the library directory of the Python installation used by vLLM.
+
+    1. Prefill nodes 0 and 1
+
+        ```shell
+        #!/usr/bin/env bash
+
+        # Set these values separately on each node.
+        local_ip="<current_node_ip>"
+        nic_name="<current_node_nic>"
+        MODEL_PATH=/path/to/GLM-5.3-W8A8C8
+        MEMCACHE_ROOT=/path/to/site-packages/memcache_hybrid
+        PYTHON_LIB_DIR=/path/to/python/lib
+
+        export MMC_LOCAL_CONFIG_PATH="${MEMCACHE_ROOT}/config/mmc-local.conf"
+        export LD_LIBRARY_PATH="${MEMCACHE_ROOT}/lib:${PYTHON_LIB_DIR}:${LD_LIBRARY_PATH}"
+        export ASCEND_RT_VISIBLE_DEVICES=$1
+        export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+        export HCCL_EXEC_TIMEOUT=1800
+        export HCCL_CONNECT_TIMEOUT=1800
+        export VLLM_HOST_IP=$local_ip
+        export HCCL_IF_IP=$local_ip
+        export GLOO_SOCKET_IFNAME=$nic_name
+        export TP_SOCKET_IFNAME=$nic_name
+        export HCCL_SOCKET_IFNAME=$nic_name
+        export HCCL_BUFFSIZE=1024
+        export HCCL_OP_EXPANSION_MODE="AIV"
+        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+        export TASK_QUEUE_ENABLE=1
+        export VLLM_USE_V2_MODEL_RUNNER=0
+        export PYTHONHASHSEED=0
+        export ACL_OP_INIT_MODE=1
+
+        export VLLM_USE_FASTOKENS=1
+
+        vllm serve "${MODEL_PATH}" \
+            --host 0.0.0.0 \
+            --port $2 \
+            --data-parallel-size $3 \
+            --data-parallel-rank $4 \
+            --data-parallel-address $5 \
+            --data-parallel-rpc-port $6 \
+            --tensor-parallel-size $7 \
+            --enable-expert-parallel \
+            --enable-chunked-prefill \
+            --enable-prefix-caching \
+            --seed 1024 \
+            --served-model-name glm5 \
+            --max-model-len 200000 \
+            --max-num-batched-tokens 8192 \
+            --trust-remote-code \
+            --max-num-seqs 64 \
+            --gpu-memory-utilization 0.92 \
+            --async-scheduling \
+            --quantization ascend \
+            --safetensors-load-strategy 'prefetch' \
+            --enable-auto-tool-choice \
+            --tool-call-parser glm47 \
+            --reasoning-parser glm47 \
+            --enforce-eager \
+            --api-server-count 8 \
+            --additional-config '{"enable_dsa_cp":true,"enable_fused_mc2":1,"enable_flashcomm1":true}' \
+            --speculative-config '{"num_speculative_tokens":1,"method":"deepseek_mtp","enforce_eager":true}' \
+            --kv-transfer-config '{
+                "kv_connector": "MultiConnector",
+                "kv_role": "kv_producer",
+                "kv_port": "30000",
+                "engine_id": "0",
+                "kv_connector_extra_config": {
+                    "connectors": [
+                        {
+                            "kv_connector": "MooncakeConnectorV1",
+                            "kv_role": "kv_producer",
+                            "kv_port": "30000",
+                            "kv_connector_extra_config": {
+                                "use_ascend_direct": true,
+                                "prefill": {"dp_size": 4, "tp_size": 8},
+                                "decode": {"dp_size": 8, "tp_size": 4}
+                            }
+                        },
+                        {
+                            "kv_connector": "AscendStoreConnector",
+                            "kv_role": "kv_producer",
+                            "kv_connector_extra_config": {
+                                "lookup_rpc_port": "0",
+                                "backend": "memcache",
+                                "use_layerwise": false
+                            }
+                        }
+                    ]
+                }
+            }'
+        ```
+
+    2. Decode nodes 0 and 1
+
+        ```shell
+        #!/usr/bin/env bash
+
+        # Set these values separately on each node.
+        local_ip="<current_node_ip>"
+        nic_name="<current_node_nic>"
+        MODEL_PATH=/path/to/GLM-5.3-W8A8C8
+        MEMCACHE_ROOT=/path/to/site-packages/memcache_hybrid
+        PYTHON_LIB_DIR=/path/to/python/lib
+
+        export MMC_LOCAL_CONFIG_PATH="${MEMCACHE_ROOT}/config/mmc-local.conf"
+        export LD_LIBRARY_PATH="${MEMCACHE_ROOT}/lib:${PYTHON_LIB_DIR}:${LD_LIBRARY_PATH}"
+        export ASCEND_RT_VISIBLE_DEVICES=$1
+        export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+        export HCCL_EXEC_TIMEOUT=1800
+        export HCCL_CONNECT_TIMEOUT=1800
+        export VLLM_HOST_IP=$local_ip
+        export HCCL_IF_IP=$local_ip
+        export GLOO_SOCKET_IFNAME=$nic_name
+        export TP_SOCKET_IFNAME=$nic_name
+        export HCCL_SOCKET_IFNAME=$nic_name
+        export HCCL_BUFFSIZE=1024
+        export HCCL_OP_EXPANSION_MODE="AIV"
+        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+        export TASK_QUEUE_ENABLE=1
+        export VLLM_USE_V2_MODEL_RUNNER=0
+        export PYTHONHASHSEED=0
+        export ACL_OP_INIT_MODE=1
+
+        export OMP_PROC_BIND=false
+        export OMP_NUM_THREADS=10
+
+        vllm serve "${MODEL_PATH}" \
+            --host 0.0.0.0 \
+            --port $2 \
+            --data-parallel-size $3 \
+            --data-parallel-rank $4 \
+            --data-parallel-address $5 \
+            --data-parallel-rpc-port $6 \
+            --tensor-parallel-size $7 \
+            --enable-expert-parallel \
+            --enable-chunked-prefill \
+            --enable-prefix-caching \
+            --seed 1024 \
+            --served-model-name glm5 \
+            --max-model-len 200000 \
+            --max-num-batched-tokens 256 \
+            --trust-remote-code \
+            --max-num-seqs 32 \
+            --gpu-memory-utilization 0.92 \
+            --async-scheduling \
+            --quantization ascend \
+            --safetensors-load-strategy 'prefetch' \
+            --enable-auto-tool-choice \
+            --tool-call-parser glm47 \
+            --reasoning-parser glm47 \
+            --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+            --additional-config '{"recompute_scheduler_enable":true,"enable_fused_mc2":1,"ascend_compilation_config":{"enable_static_kernel":false}}' \
+            --speculative-config '{"num_speculative_tokens":5,"method":"deepseek_mtp","enforce_eager":true}' \
+            --kv-transfer-config '{
+                "kv_connector": "MultiConnector",
+                "kv_role": "kv_consumer",
+                "kv_port": "30200",
+                "engine_id": "2",
+                "kv_connector_extra_config": {
+                    "connectors": [
+                        {
+                            "kv_connector": "MooncakeConnectorV1",
+                            "kv_role": "kv_consumer",
+                            "kv_port": "30200",
+                            "kv_connector_extra_config": {
+                                "use_ascend_direct": true,
+                                "prefill": {"dp_size": 4, "tp_size": 8},
+                                "decode": {"dp_size": 8, "tp_size": 4}
+                            }
+                        },
+                        {
+                            "kv_connector": "AscendStoreConnector",
+                            "kv_role": "kv_consumer",
+                            "kv_connector_extra_config": {
+                                "lookup_rpc_port": "0",
+                                "backend": "memcache",
+                                "use_layerwise": false
+                            }
+                        }
+                    ]
+                }
+            }'
+        ```
+
+Once the preparation is done, start the servers with the following command on each node. Keep all ranks running while the other nodes join; start the proxy only after every API endpoint is healthy.
+
+1. Prefill node 0
+
+    ```shell
+    node_p0_ip="<P0_ip>"
+    python launch_online_dp.py \
+        --dp-size 4 \
+        --tp-size 8 \
+        --dp-size-local 2 \
+        --dp-rank-start 0 \
+        --dp-address "$node_p0_ip" \
+        --dp-rpc-port 16591 \
+        --vllm-start-port 9081
+    ```
+
+2. Prefill node 1
+
+    ```shell
+    node_p0_ip="<P0_ip>"
+    python launch_online_dp.py \
+        --dp-size 4 \
+        --tp-size 8 \
+        --dp-size-local 2 \
+        --dp-rank-start 2 \
+        --dp-address "$node_p0_ip" \
+        --dp-rpc-port 16591 \
+        --vllm-start-port 9081
+    ```
+
+3. Decode node 0
+
+    ```shell
+    node_d0_ip="<D0_ip>"
+    python launch_online_dp.py \
+        --dp-size 8 \
+        --tp-size 4 \
+        --dp-size-local 4 \
+        --dp-rank-start 0 \
+        --dp-address "$node_d0_ip" \
+        --dp-rpc-port 16600 \
+        --vllm-start-port 9900
+    ```
+
+4. Decode node 1
+
+    ```shell
+    node_d0_ip="<D0_ip>"
+    python launch_online_dp.py \
+        --dp-size 8 \
+        --tp-size 4 \
+        --dp-size-local 4 \
+        --dp-rank-start 4 \
+        --dp-address "$node_d0_ip" \
+        --dp-rpc-port 16600 \
+        --vllm-start-port 9900
+    ```
+
+From the matching vLLM-Ascend checkout, start the [P/D load-balancing proxy](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py) on a host that can reach all 12 API endpoints. Set the four host variables to the corresponding node addresses, including repeated hosts for instances on the same node.
+
+```shell
+P0="<P0_ip>"
+P1="<P1_ip>"
+D0="<D0_ip>"
+D1="<D1_ip>"
+
+python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --prefiller-hosts "$P0" "$P0" "$P1" "$P1" \
+    --prefiller-ports 9081 9082 9081 9082 \
+    --decoder-hosts "$D0" "$D0" "$D0" "$D0" "$D1" "$D1" "$D1" "$D1" \
+    --decoder-ports 9900 9901 9902 9903 9900 9901 9902 9903
+```
+
+Key Parameter Descriptions:
+
+Only the key parameters specific to this model/scenario are described below. Adjust `max-model-len` and `max-num-seqs` according to the workload and available memory.
+
+**Multi-node network and data parallel configuration:**
+
+- `local_ip` / `nic_name`: The current node's reachable IP address and matching network interface. `node_p0_ip` / `node_d0_ip` identify the masters of the separate Prefill and Decode DP groups.
+- `launch_online_dp.py` starts one external-DP instance per local rank. It passes `$1` = visible devices, `$2` = API port, `$3` = global DP size, `$4` = global DP rank, `$5` = DP master address, `$6` = DP RPC port, and `$7` = TP size to `run_dp_template.sh`.
+- Prefill uses `DP4 TP8`, with ranks 0–1 on P0 and 2–3 on P1. Decode uses `DP8 TP4`, with ranks 0–3 on D0 and 4–7 on D1. Each node uses devices 0–15 without overlap between local instances.
+- Every instance exposes an API endpoint for the proxy. Do not add `--headless` to these external-DP templates.
+
+**Prefill node-specific configurations (P0/P1):**
+
+- `VLLM_USE_FASTOKENS=1` / `--api-server-count 8`: Enable the installed `fastokens` backend and start eight API server processes per Prefill instance.
+- `--enforce-eager`: Run Prefill in eager mode, with an 8,192-token batch budget and at most 64 sequences.
+- `enable_dsa_cp` / `enable_flashcomm1` / `enable_fused_mc2`: Retain the reference's DSA CP, FlashComm1, and fused MC2 settings.
+- `--speculative-config`: Use one MTP token and an eager draft model on Prefill.
+
+**Decode node-specific configurations (D0/D1):**
+
+- `FULL_DECODE_ONLY` / `enable_static_kernel=false`: Retain the reference's decode graph configuration, with a 256-token batch budget and at most 32 sequences.
+- `--speculative-config`: Use five MTP tokens and an eager draft model on Decode.
+- `recompute_scheduler_enable=true`: Enable recomputation scheduling only on Decode, so requests can return to Prefill when decode KV cache is insufficient.
+- `OMP_PROC_BIND=false` / `OMP_NUM_THREADS=10`: Reference CPU settings; size CPU resources for the local worker count before tuning them.
+
+**KV transfer and MemCache pooling configuration:**
+
+- `MultiConnector`: Combine `MooncakeConnectorV1` for P-to-D transfer with `AscendStoreConnector` for MemCache pooling. Set both child roles to `kv_producer` on Prefill and `kv_consumer` on Decode.
+- `prefill` / `decode`: Keep the same global topology (`DP4 TP8` / `DP8 TP4`) in every Mooncake connector configuration.
+- `kv_port`: Base handshake port, 30000 on Prefill and 30200 on Decode. Mooncake offsets worker ports using the DP/TP ranks; reserve the resulting ranges on each host.
+- `engine_id`: Follow the GLM-5.2 convention: `"0"` for Prefill and `"2"` for Decode.
+- `lookup_rpc_port`: Use `"0"` on both sides, as in the GLM-5.2 pooling examples. The Ascend Store IPC lookup path also includes the DP rank; Prefill and Decode run on separate node groups.
+- `backend=memcache` / `use_layerwise=false`: Use non-layerwise MemCache pooling on both sides. Complete the pool configuration and start its metadata service before starting the vLLM instances.
+
+**Request forwarding and verification:**
+
+- Register all four Prefill and eight Decode API endpoints with the proxy, including repeated host addresses for local instances.
+- Send requests to the proxy using the served model name `glm5`:
+
+```shell
+curl "http://<proxy_ip>:8000/v1/chat/completions" \
+    -H "Content-Type: application/json" \
+    -d '{
+        "model": "glm5",
+        "messages": [{"role": "user", "content": "Explain prefill and decode in an LLM."}],
+        "max_tokens": 128,
+        "temperature": 0
+    }'
+```
+
+Check P/D logs for successful KV transfer and MemCache initialization. To verify pool reuse, send requests with a shared prefix and inspect the Ascend Store/MemCache hit and load metrics; one successful response alone does not demonstrate a pool hit. Keep thinking enabled as described above. This reference does not establish support for A2, 1M context, or other parallel layouts.
 
 ## 6 Functional Verification
 
