@@ -8,6 +8,7 @@ from vllm.distributed import get_dcp_group, get_pcp_group, get_tp_group
 
 import vllm_ascend.ops.triton.dcp.dcp_a2a  # noqa: F401
 from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
+from vllm_ascend.utils import model_uses_kpool_indexer
 
 
 def is_pcp_decode_sharding_enabled(vllm_config) -> bool:
@@ -16,13 +17,16 @@ def is_pcp_decode_sharding_enabled(vllm_config) -> bool:
     Graph execution follows the sharded path as well. Speculative decoding
     stays on the replicated path in this change. The decision is derived from
     declared vLLM fields so cloning a draft ``ParallelConfig`` with
-    ``replace()`` does not see an undeclared attribute.
+    ``replace()`` does not see an undeclared attribute. KPool models keep
+    replicated decodes so every PCP rank advances its TP-sharded Mamba state
+    in the same request order.
     """
     parallel_config = vllm_config.parallel_config
     return (
         parallel_config.prefill_context_parallel_size > 1
         and parallel_config.decode_context_parallel_size == 1
         and vllm_config.speculative_config is None
+        and not model_uses_kpool_indexer(getattr(vllm_config, "model_config", None))
     )
 
 

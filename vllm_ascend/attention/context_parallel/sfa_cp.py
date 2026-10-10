@@ -51,6 +51,7 @@ from vllm_ascend.utils import (
     _round_up,
     enable_dsa_cp,
     enable_dsa_cp_full_o_proj,
+    enable_kpool_dcp_replicated_indexer,
     enable_pcp_o_proj_weight_sharding,
     enable_sfa_dcp_force_tmajor_restore,
     enable_sfa_dcp_replicated_indexer,
@@ -64,6 +65,28 @@ from vllm_ascend.weight_switch import (
 from vllm_ascend.weight_switch.o_proj import OProjWeightSwitchMixin
 
 M = TypeVar("M", bound=AscendSFAMetadata)
+
+
+def _get_sfa_indexer_output_width(vllm_config: VllmConfig, topk_indices_buffer: torch.Tensor | None = None) -> int:
+    """Return the largest sparse-index width consumed by SFA.
+
+    LightningIndexer returns exactly ``index_topk`` entries. KPool appends the
+    uncompressed causal tail, whose maximum width is ``index_kpool - 1``.
+    MTP can reuse a buffer padded beyond that logical width.
+    """
+    for config in (
+        getattr(vllm_config.model_config, "hf_text_config", None),
+        getattr(vllm_config.model_config, "hf_config", None),
+    ):
+        index_topk = getattr(config, "index_topk", None)
+        if isinstance(index_topk, int) and index_topk > 0:
+            index_kpool = getattr(config, "index_kpool", 1)
+            output_padding = index_kpool - 1 if isinstance(index_kpool, int) and index_kpool > 1 else 0
+            output_width = index_topk + output_padding
+            if topk_indices_buffer is not None:
+                output_width = max(output_width, topk_indices_buffer.shape[-1])
+            return output_width
+    raise RuntimeError("index_topk must be set in the model config for DCP SFA.")
 
 
 class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
@@ -315,9 +338,27 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         num_replicated_tokens = get_pcp_num_replicated_tokens(
             attn_metadata.num_decode_tokens or 0, self.is_pcp_decode_sharded
         )
-        (kv_no_split, cos, sin), slots = _gather_prefill_cache_inputs(
-            (kv_no_split, cos, sin), slots, num_replicated_tokens
-        )
+        restore_indices = getattr(attn_metadata, "pcp_hidden_restore_indices", None)
+        if self.qk_rope_head_dim == 0 and restore_indices is not None:
+            # NoPE projects only the actual local tokens, while PCP slots keep
+            # the padded rank stride. Gather equal-width KV and restore the
+            # same global token order for both KV and its cache addresses.
+            pad_tokens = attn_metadata.num_input_tokens - kv_no_split.shape[0]
+            if pad_tokens < 0:
+                raise ValueError("SFA PCP KV exceeds the rank-local padded token count.")
+            if pad_tokens:
+                kv_no_split = nn.functional.pad(kv_no_split, (0, 0, 0, pad_tokens))
+            gathered_kv = get_pcp_group().all_gather(kv_no_split.contiguous(), dim=0)
+            kv_no_split = torch.index_select(gathered_kv, 0, restore_indices)
+            slots = torch.index_select(slots, 0, restore_indices)
+            if self.uses_packed_sfa_main_cache:
+                attn_metadata.pcp_cache_write_slots = slots
+        elif self.qk_rope_head_dim == 0:
+            (kv_no_split,), slots = _gather_prefill_cache_inputs((kv_no_split,), slots, num_replicated_tokens)
+        else:
+            (kv_no_split, cos, sin), slots = _gather_prefill_cache_inputs(
+                (kv_no_split, cos, sin), slots, num_replicated_tokens
+            )
         assert slots.numel() == kv_no_split.shape[0], (
             "SFA PCP cache write requires one slot per gathered token: "
             f"tokens={kv_no_split.shape[0]}, slots={slots.numel()}."
@@ -1302,17 +1343,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         self._dcp_interleave_size = self.vllm_config.parallel_config.cp_kv_cache_interleave_size
         if self._dcp_interleave_size <= 0:
             raise RuntimeError(f"Invalid cp_kv_cache_interleave_size: {self._dcp_interleave_size}")
-        self._dcp_index_topk = 0
-        for config in (
-            getattr(self.vllm_config.model_config, "hf_text_config", None),
-            getattr(self.vllm_config.model_config, "hf_config", None),
-        ):
-            index_topk = getattr(config, "index_topk", None)
-            if isinstance(index_topk, int) and index_topk > 0:
-                self._dcp_index_topk = index_topk
-                break
-        if self._dcp_index_topk <= 0:
-            raise RuntimeError("index_topk must be set in the model config for DCP SFA.")
+        self._dcp_index_topk = _get_sfa_indexer_output_width(self.vllm_config, self.topk_indices_buffer)
         device = self.q_proj.weight.device
         self._remap_order = torch.arange(self._dcp_index_topk, dtype=torch.float32, device=device)
         self._remap_invalid_index = torch.tensor(-1.0, dtype=torch.float32, device=device)
@@ -1372,10 +1403,9 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         assert valid_block_ids is not None and block_table is not None
         kv = torch.index_select(kv_cache[0], 0, valid_block_ids)
         split_sizes: tuple[int, ...]
-        if self.uses_packed_sfa_main_cache:
-            # Packed SFA formats store nope, rope, and quantization data in one
-            # SFA KV cache. The remaining cache entries belong to the indexer
-            # and must not participate in the DCP SFA KV all-gather.
+        if self.uses_packed_sfa_main_cache or self.qk_rope_head_dim == 0:
+            # Packed SFA and NoPE MLA each store the main KV in one cache.
+            # The remaining cache entries, if any, belong to the indexer.
             gather_input = kv.contiguous()
             split_sizes = (kv.shape[-1],)
         else:
@@ -1445,7 +1475,8 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         topk_count = topk_indices.shape[-1]
         if topk_count > self._dcp_index_topk:
             raise RuntimeError(
-                f"topk_indices last dimension ({topk_count}) exceeds configured index_topk ({self._dcp_index_topk})."
+                "topk_indices last dimension "
+                f"({topk_count}) exceeds the configured indexer output width ({self._dcp_index_topk})."
             )
         if topk_indices.numel() == 0:
             return topk_indices
@@ -1906,7 +1937,9 @@ def resolve_sfa_metadata_builder(
 ) -> type[AscendSFAMetadataBuilder]:
     """Resolve one SFA metadata builder from the independent CP switches."""
     dsa_cp_enabled = enable_dsa_cp()
-    dcp_enabled = enable_sfa_dcp_replicated_indexer()
+    dcp_enabled = enable_sfa_dcp_replicated_indexer(vllm_config) or (
+        vllm_config is not None and enable_kpool_dcp_replicated_indexer(vllm_config)
+    )
     pcp_enabled = vllm_config is not None and vllm_config.parallel_config.prefill_context_parallel_size > 1
     if dsa_cp_enabled and dcp_enabled:
         return AscendSFADSADCPMetadataBuilder
@@ -1922,7 +1955,9 @@ def resolve_sfa_metadata_builder(
 def resolve_sfa_impl(vllm_config: VllmConfig | None = None) -> type[AscendSFAImpl]:
     """Resolve one SFA implementation from the independent CP switches."""
     dsa_cp_enabled = enable_dsa_cp()
-    dcp_enabled = enable_sfa_dcp_replicated_indexer()
+    dcp_enabled = enable_sfa_dcp_replicated_indexer(vllm_config) or (
+        vllm_config is not None and enable_kpool_dcp_replicated_indexer(vllm_config)
+    )
     pcp_enabled = vllm_config is not None and vllm_config.parallel_config.prefill_context_parallel_size > 1
     if dsa_cp_enabled and dcp_enabled:
         return AscendSFADSADCPImpl

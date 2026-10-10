@@ -37,6 +37,7 @@ from vllm.v1.worker.gpu.states import RequestState
 
 from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
+from vllm_ascend.utils import model_uses_kpool_indexer
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 
@@ -235,7 +236,11 @@ class AscendPCPManager(PCPManager):
 
         if model_config.is_encoder_decoder:
             raise NotImplementedError("MRV2 PCP does not support encoder-decoder models yet.")
-        if supports_mm_inputs:
+        # GLM-Next is registered through a multimodal wrapper even when PCP is
+        # serving its language path. Its KPool indexer restores the partitioned
+        # language tokens explicitly; keep the generic MM rejection for every
+        # other model family.
+        if supports_mm_inputs and not model_uses_kpool_indexer(model_config):
             raise NotImplementedError("MRV2 PCP does not support MM inputs yet.")
         if vllm_config.lora_config is not None:
             raise NotImplementedError("MRV2 PCP does not support LoRA yet.")

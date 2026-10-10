@@ -381,7 +381,9 @@ def test_prepare_attn_propagates_actual_request_count_to_metadata_builder():
     )
     module = ast.parse(model_state_path.read_text(encoding="utf-8"))
     prepare_attn = next(
-        node for node in ast.walk(module) if isinstance(node, ast.FunctionDef) and node.name == "prepare_attn"
+        node
+        for node in ast.walk(module)
+        if isinstance(node, ast.FunctionDef) and node.name == "_build_attn_metadata_for_batch"
     )
     build_call = next(
         node
@@ -392,6 +394,88 @@ def test_prepare_attn_propagates_actual_request_count_to_metadata_builder():
 
     assert ast.unparse(keywords["num_reqs"]) == "num_reqs"
     assert ast.unparse(keywords["num_actual_reqs"]) == "input_batch.num_reqs"
+
+
+def test_glm_kpool_pcp_builds_mamba_metadata_from_global_requests():
+    local_batch = SimpleNamespace(is_dummy=False)
+    global_batch = SimpleNamespace(num_reqs=1)
+    pcp_context = SimpleNamespace(
+        global_batch=global_batch,
+        global_block_tables=("global_table",),
+        global_slot_mappings="global_slots",
+    )
+    pcp_manager = SimpleNamespace(build_attention_context=MagicMock(return_value=pcp_context))
+    state = SimpleNamespace(
+        pcp_manager=pcp_manager,
+        vllm_config=SimpleNamespace(model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_kpool=4))),
+    )
+    mamba_spec = _mamba_spec()
+    attn_groups = [[SimpleNamespace(kv_cache_spec=object())], [_group(mamba_spec)]]
+    local_metadata = {"sfa": object()}
+    mamba_metadata = SimpleNamespace()
+    with patch.object(
+        AscendMambaHybridModelState,
+        "_build_attn_metadata_for_batch",
+        side_effect=[local_metadata, {"linear_attn": mamba_metadata}],
+    ) as build_batch:
+        metadata = AscendMambaHybridModelState.prepare_attn(
+            state,
+            input_batch=local_batch,
+            cudagraph_mode=CUDAGraphMode.NONE,
+            block_tables=("local_table",),
+            slot_mappings="local_slots",
+            attn_groups=attn_groups,
+            kv_cache_config=MagicMock(),
+        )
+
+    assert metadata == {"sfa": local_metadata["sfa"], "linear_attn": mamba_metadata}
+    assert mamba_metadata.pcp_context is pcp_context
+    assert build_batch.call_args_list[0].args[1] is local_batch
+    assert build_batch.call_args_list[0].args[5][0][0] is attn_groups[0][0]
+    assert build_batch.call_args_list[0].args[5][1] == []
+    assert build_batch.call_args_list[1].args[1] is global_batch
+    assert build_batch.call_args_list[1].args[2] == CUDAGraphMode.NONE
+    assert build_batch.call_args_list[1].args[3] == ("global_table",)
+    assert build_batch.call_args_list[1].args[4] == "global_slots"
+    assert build_batch.call_args_list[1].args[5][0] == []
+    assert build_batch.call_args_list[1].args[5][1][0] is attn_groups[1][0]
+
+
+@patch("vllm_ascend.worker.v2.model_states.mamba_hybrid.preprocess_mamba_align_fused_kernel")
+def test_glm_kpool_pcp_advances_mamba_align_state_once_per_global_request(mock_kernel):
+    global_batch = SimpleNamespace(
+        num_reqs=1,
+        idx_mapping=torch.tensor([3], dtype=torch.int32),
+        query_start_loc=torch.tensor([0, 8], dtype=torch.int32),
+    )
+    global_tables = (torch.zeros(1, 2, dtype=torch.int32),)
+    pcp_context = SimpleNamespace(global_batch=global_batch, global_block_tables=global_tables)
+    pcp_manager = SimpleNamespace(build_attention_context=MagicMock(return_value=pcp_context))
+    spec = _mamba_spec()
+    state = SimpleNamespace(
+        _align_mode=True,
+        pcp_manager=pcp_manager,
+        vllm_config=SimpleNamespace(model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_kpool=4))),
+        _finish_previous_layerwise_mamba_copy=MagicMock(),
+        _get_mamba_group_info=MagicMock(return_value=([0], spec)),
+        _ensure_align_ctx=MagicMock(return_value=MagicMock()),
+        _prepare_layerwise_mamba_copy=MagicMock(return_value=True),
+        _mamba_state_idx_gpu=torch.zeros(4, dtype=torch.int32),
+        num_accepted_tokens_gpu=torch.ones(4, dtype=torch.int32),
+        _mamba_src_col_gpu=torch.zeros(4, dtype=torch.int32),
+        _mamba_src_off_gpu=torch.zeros(4, dtype=torch.int32),
+    )
+    local_batch = SimpleNamespace(num_reqs=2)
+    num_computed_tokens = torch.zeros(4, dtype=torch.int32)
+
+    AscendMambaHybridModelState.preprocess_state(
+        state, local_batch, (torch.ones(2, 2, dtype=torch.int32),), MagicMock(), num_computed_tokens
+    )
+
+    assert state._ensure_align_ctx.call_args.args[2] is global_tables
+    assert mock_kernel.__getitem__.return_value.call_args.args[0] is global_batch.idx_mapping
+    assert mock_kernel.__getitem__.return_value.call_args.args[3] is global_batch.query_start_loc
+    assert mock_kernel.__getitem__.return_value.call_args.kwargs["MAMBA_BLOCK_SIZE"] == spec.block_size
 
 
 @patch(

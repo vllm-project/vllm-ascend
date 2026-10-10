@@ -17,7 +17,7 @@ from vllm.v1.request import Request
 
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
-    AscendMLAAttentionSpec,
+    AscendKPoolIndexerCacheSpec,
 )
 
 
@@ -96,6 +96,11 @@ class Glm5NextIndexerCache(nn.Module, AttentionLayerBase):
         self.compress_ratio = compress_ratio
         self.prefix = prefix
         current_config = get_current_vllm_config()
+        self.dcp_replication_size = getattr(
+            current_config.parallel_config,
+            "decode_context_parallel_size",
+            1,
+        )
         self.kv_cache = [torch.tensor([]) for _ in range(current_config.parallel_config.pipeline_parallel_size)]
         static_context = current_config.compilation_config.static_forward_context
         if prefix in static_context:
@@ -103,9 +108,15 @@ class Glm5NextIndexerCache(nn.Module, AttentionLayerBase):
         static_context[prefix] = self
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        del vllm_config
+        dcp_replication_size = self.dcp_replication_size
+        if vllm_config is not None:
+            dcp_replication_size = getattr(
+                vllm_config.parallel_config,
+                "decode_context_parallel_size",
+                dcp_replication_size,
+            )
         ratio_kwargs: dict[str, Any] = {"tokens_per_state": self.compress_ratio}
-        return AscendMLAAttentionSpec(
+        return AscendKPoolIndexerCacheSpec(
             block_size=self.cache_config.block_size,
             num_kv_heads=1,
             head_size=self.head_dim,
@@ -113,6 +124,7 @@ class Glm5NextIndexerCache(nn.Module, AttentionLayerBase):
             cache_dtype_str=None,
             model_version="glm5_next",
             indexes_kv_by_block_stride=True,
+            dcp_replication_size=dcp_replication_size,
             **ratio_kwargs,
         )
 

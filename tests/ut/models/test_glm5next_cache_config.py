@@ -16,7 +16,10 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
 )
 
-from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec
+from vllm_ascend.core.kv_cache_interface import (
+    AscendIndexerKPoolTailSpec,
+    AscendKPoolIndexerCacheSpec,
+)
 from vllm_ascend.models.glm5next.cache_config import (
     _get_glm5_next_cache_layout,
     get_glm5_next_kv_cache_config,
@@ -146,6 +149,51 @@ def test_groups_share_block_ids_and_pack_two_page_classes(pool):
     )
     assert get_glm5_next_pool_bytes_per_block(groups) == bytes_per_block
     assert get_glm5_next_max_memory_usage(config, groups) == required_blocks * bytes_per_block
+
+
+def test_small_page_accounts_for_dcp_indexer_replication():
+    config = make_config()
+    config.parallel_config.decode_context_parallel_size = 16
+    specs = {
+        "model.layers.0.attn": MLAAttentionSpec(
+            block_size=128,
+            num_kv_heads=1,
+            head_size=512,
+            dtype=torch.bfloat16,
+            model_version="glm5_next",
+        ),
+        "model.layers.0.indexer.k_cache": AscendKPoolIndexerCacheSpec(
+            block_size=128,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.bfloat16,
+            model_version="glm5_next",
+            dcp_replication_size=16,
+            **_ratio_kwargs(4),
+        ),
+        "model.layers.0.indexer.tail_cache": AscendIndexerKPoolTailSpec(
+            block_size=4,
+            sliding_window=4,
+            compress_ratio=4,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.float32,
+            model_version="glm5_next",
+            indexes_kv_by_block_stride=True,
+        ),
+    }
+
+    groups = get_glm5_next_kv_cache_groups(config, specs)
+    layout = _get_glm5_next_cache_layout(groups)
+
+    assert layout is not None
+    indexer = specs["model.layers.0.indexer.k_cache"]
+    tail = specs["model.layers.0.indexer.tail_cache"]
+    assert layout.small_page_size == max(
+        indexer.unpadded_page_size_bytes,
+        tail.unpadded_page_size_bytes,
+    )
+    assert layout.small_page_size == layout.main_page_size
 
 
 def test_standalone_mtp_layout_has_no_mamba_groups():
