@@ -240,8 +240,6 @@ class AscendK3DSparkModel(UpstreamK3DSparkModel):
 
 
 class AscendK3DSparkForCausalLM(UpstreamK3DSparkForCausalLM):
-    draft_id_to_target_id = None
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         nn.Module.__init__(self)
         assert vllm_config.speculative_config is not None
