@@ -1304,7 +1304,8 @@ def get_potential_max_tokens() -> int:
 def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_model: bool = False) -> bool:
     """Decide whether to skip the all-reduce across the DP group.
 
-    Skipping is applicable for all dense models and for moe models only on ranks
+    LMHead TP always requires synchronization for uniform LMHead input shapes.
+    Otherwise, skipping is applicable for all dense models and for moe models only on ranks
     that act as KV consumers. We skip the DP all-reduce when either:
     - Both the prefill and decode communication methods are MC2 (or FUSED_MC2), or
     - Decode requires MC2 and ascend_config.scheduler_config.recompute_scheduler_enable is True.
@@ -1320,6 +1321,9 @@ def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_mode
     computed once in init, and select_moe_comm_method is just config lookups, so
     this is cheap and avoids id-reuse / stale-cache / init-ordering hazards.
     """
+    if lmhead_tp_enable():
+        return False
+
     ascend_config = get_ascend_config()
     # 1. When mc2_comm_alg == "hierarchy", dispatch/combine op don't support dynamic bs;
     # 2. When use mega_moe, op don't support dynamic global_bs;

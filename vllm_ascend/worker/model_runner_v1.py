@@ -883,6 +883,16 @@ class NPUModelRunner(GPUModelRunner):
 
         return max_tokens_across_dp, num_tokens_after_padding, synced_cudagraph_mode
 
+    def _get_lmhead_pad_size(self, num_tokens_across_dp: torch.Tensor | None) -> int:
+        pad_size = self.max_num_reqs * self.uniform_decode_query_len
+        if (
+            self.dcp_size == 1
+            and num_tokens_across_dp is not None
+            and not should_skip_allreduce_across_dp_group(self.vllm_config, is_draft_model=False)
+        ):
+            pad_size = min(pad_size, int(num_tokens_across_dp.max().item()))
+        return pad_size
+
     def get_model(self) -> nn.Module:
         # get raw model out of the aclgraph wrapper.
         if isinstance(self.model, (ACLGraphWrapper, BreakableACLGraphWrapper)):
@@ -2607,6 +2617,9 @@ class NPUModelRunner(GPUModelRunner):
         self.kvpp.complete_forward()
 
         with record_function_or_nullcontext("post process"):
+            if lmhead_tp_enable():
+                lmhead_pad_size = self._get_lmhead_pad_size(num_tokens_across_dp)
+                logits_indices = logits_indices[:lmhead_pad_size]
             aux_hidden_states = None
             if self.use_aux_hidden_state_outputs:
                 hidden_states, aux_hidden_states = hidden_states
@@ -4239,7 +4252,9 @@ class NPUModelRunner(GPUModelRunner):
             def dummy_compute_logits(hidden_states):
                 if not need_dummy_logits:
                     return None
-                return self.model.compute_logits(hidden_states[dummy_indices])
+                lmhead_pad_size = self._get_lmhead_pad_size(num_tokens_across_dp)
+                indices = dummy_indices[:lmhead_pad_size]
+                return self.model.compute_logits(hidden_states[indices])
 
             def dummy_drafter_compute_logits(hidden_states):
                 if not need_dummy_logits or self.drafter is None:
