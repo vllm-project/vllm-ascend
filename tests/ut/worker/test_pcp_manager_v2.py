@@ -783,6 +783,29 @@ def test_request_state_cpu_and_numpy_tokens_share_storage() -> None:
     assert state.num_computed_tokens_np[1] == 23
 
 
+def test_sampling_restore_exposes_unpadded_global_view() -> None:
+    manager = AscendPCPManager.__new__(AscendPCPManager)
+    batch = _make_global_pcp_batch()
+    batch.is_dummy = False
+    batch.num_tokens = 12
+    batch.num_tokens_after_padding = 16
+    batch.query_start_loc_np = np.array([0, 12, 16], dtype=np.int32)
+    batch.query_start_loc = torch.tensor([0, 12, 16], dtype=torch.int32)
+    manager._global_batch = batch
+    manager._sampling_hidden_restored = True
+    hidden_states = torch.arange(32).reshape(16, 2)
+    with patch.object(AscendPCPManager, "_restore_unpadded_global_batch", return_value=True):
+        restored_hidden, restored_batch = manager.restore_for_sampling(hidden_states)
+    assert restored_batch is not batch
+    assert restored_batch.num_tokens_after_padding == 12
+    assert restored_batch.query_start_loc.tolist() == [0, 12]
+    assert restored_batch.query_start_loc_np.tolist() == [0, 12]
+    assert restored_hidden.shape == (12, 2)
+    assert restored_hidden.data_ptr() == hidden_states.data_ptr()
+    assert batch.num_tokens_after_padding == 16
+    assert batch.query_start_loc.tolist() == [0, 12, 16]
+
+
 def test_pcp_manager_restores_model_owned_hidden_buffer() -> None:
     hidden_states = torch.tensor([[1.0, 2.0], [3.0, 4.0], [-1.0, -1.0], [-1.0, -1.0]])
     restored = torch.tensor([[1.0, 2.0], [5.0, 6.0], [3.0, 4.0], [9.0, 9.0]])

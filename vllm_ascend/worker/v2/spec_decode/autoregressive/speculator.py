@@ -340,27 +340,6 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         we need to cache input_batch, so we can use it later in
         generate_draft.
         """
-        if (
-            self.replicated_pcp
-            and self.pcp_manager is not None
-            and self.pcp_manager.is_decode_sharded
-            and not dummy_run
-            and 0 < input_batch.num_tokens < input_batch.num_tokens_after_padding
-        ):
-            # PCP padding belongs to the rank-local target layout. The draft
-            # runs the restored global batch and chooses its own graph padding;
-            # retaining target padding breaks eager FIA when a draft graph is
-            # unavailable (e.g. 12 global tokens restored into 16 padded rows).
-            input_batch = copy(input_batch)
-            input_batch.num_tokens_after_padding = input_batch.num_tokens
-            input_batch.query_start_loc = input_batch.query_start_loc[: input_batch.num_reqs + 1]
-            input_batch.query_start_loc_np = input_batch.query_start_loc_np[: input_batch.num_reqs + 1]
-            input_batch.input_ids = input_batch.input_ids[: input_batch.num_tokens]
-            input_batch.positions = input_batch.positions[: input_batch.num_tokens]
-            input_batch.is_padding = input_batch.is_padding[: input_batch.num_tokens]
-            last_hidden_states = last_hidden_states[: input_batch.num_tokens]
-            if aux_hidden_states is not None:
-                aux_hidden_states = [states[: input_batch.num_tokens] for states in aux_hidden_states]
         self.input_batch = input_batch
         # Replicated drafts use global tokens, unlike the PCP-local target.
         # Every DP rank must take the draft sync, including decode and idle ranks.
