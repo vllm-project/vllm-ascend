@@ -271,6 +271,82 @@ def test_partial_hash_alignment_reaches_real_managers_and_cached_blocks():
     assert len(swa_hit[0][0]) == 1
 
 
+@pytest.mark.parametrize(
+    ("allow_partial_hash_hits", "expected"),
+    [(True, True), (False, False)],
+)
+def test_dcp_partial_hash_hits_respect_explicit_gate(
+    allow_partial_hash_hits: bool,
+    expected: bool,
+) -> None:
+    cfg = _make_hybrid_kv_cache_config(
+        full_block_size=32,
+        mamba_block_size=64,
+    )
+
+    coordinator = AscendHybridKVCacheCoordinator(
+        cfg,
+        max_model_len=4096,
+        use_eagle=False,
+        enable_caching=True,
+        enable_kv_cache_events=False,
+        dcp_world_size=2,
+        pcp_world_size=1,
+        hash_block_size=16,
+        scheduler_block_size=64,
+        allow_partial_hash_hits=allow_partial_hash_hits,
+    )
+
+    assert coordinator.enable_partial_hash_hits is expected
+    assert coordinator._cache_hit_alignment_tokens == (16 if expected else 64)
+
+
+def test_partial_hash_hits_downgrade_for_unsupported_manager() -> None:
+    specs = [
+        FullAttentionSpec(
+            block_size=32,
+            num_kv_heads=1,
+            head_size=8,
+            dtype=torch.float16,
+        ),
+        MambaSpec(
+            block_size=64,
+            shapes=((1,),),
+            dtypes=(torch.float32,),
+            mamba_cache_mode="align",
+        ),
+        SlidingWindowMLASpec(
+            block_size=32,
+            num_kv_heads=1,
+            head_size=8,
+            dtype=torch.float16,
+            sliding_window=32,
+        ),
+    ]
+    cfg = KVCacheConfig(
+        num_blocks=64,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(layer_names=[str(index)], kv_cache_spec=spec) for index, spec in enumerate(specs)
+        ],
+    )
+
+    coordinator = AscendHybridKVCacheCoordinator(
+        cfg,
+        max_model_len=4096,
+        use_eagle=False,
+        enable_caching=True,
+        enable_kv_cache_events=False,
+        dcp_world_size=1,
+        pcp_world_size=1,
+        hash_block_size=16,
+        scheduler_block_size=64,
+    )
+
+    assert not coordinator.enable_partial_hash_hits
+    assert coordinator._cache_hit_alignment_tokens == 64
+
+
 def _ratio_kwargs(ratio: int) -> dict[str, int]:
     """vLLM #51718 renamed compress_ratio to tokens_per_state on main."""
     return {"tokens_per_state": ratio}
@@ -279,6 +355,7 @@ def _ratio_kwargs(ratio: int) -> dict[str, int]:
 def _make_hybrid_kv_cache_config(
     full_block_size: int = 16,
     mamba_block_size: int = 16,
+    mamba_cache_mode: str = "align",
 ) -> KVCacheConfig:
     full_spec = FullAttentionSpec(
         block_size=full_block_size,
@@ -290,7 +367,7 @@ def _make_hybrid_kv_cache_config(
         block_size=mamba_block_size,
         shapes=((1,),),
         dtypes=(torch.float32,),
-        mamba_cache_mode="none",
+        mamba_cache_mode=mamba_cache_mode,
     )
     return KVCacheConfig(
         num_blocks=10,
@@ -404,6 +481,7 @@ def _make_vllm_config(
     dcp: int,
     block_size: int = 16,
     prefix_match_unit: int | None = None,
+    kv_transfer_config: object | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         cache_config=SimpleNamespace(
@@ -415,7 +493,7 @@ def _make_vllm_config(
         parallel_config=SimpleNamespace(
             decode_context_parallel_size=dcp,
         ),
-        kv_transfer_config=None,
+        kv_transfer_config=kv_transfer_config,
     )
 
 
@@ -475,15 +553,15 @@ def test_ascend_mla_merge_preserves_upstream_layout_fields() -> None:
 @pytest.mark.parametrize(
     ("enable_prefix_caching", "expected_hash_block_size"),
     [
-        pytest.param(False, math.lcm(16, 32) * 2, id="dcp-without-prefix-caching"),
-        pytest.param(True, math.gcd(16, 32), id="dcp-with-prefix-caching"),
+        pytest.param(False, math.lcm(16 * 2, 48), id="dcp-without-prefix-caching"),
+        pytest.param(True, math.gcd(16 * 2, 48), id="dcp-with-prefix-caching"),
     ],
 )
 def test_resolve_kv_cache_block_sizes_with_cp_hybrid_groups(
     enable_prefix_caching: bool,
     expected_hash_block_size: int,
 ) -> None:
-    kv_cache_config = _make_hybrid_kv_cache_config(full_block_size=16, mamba_block_size=32)
+    kv_cache_config = _make_hybrid_kv_cache_config(full_block_size=16, mamba_block_size=48)
     vllm_config = _make_vllm_config(
         enable_prefix_caching=enable_prefix_caching,
         dcp=2,
@@ -494,9 +572,123 @@ def test_resolve_kv_cache_block_sizes_with_cp_hybrid_groups(
         vllm_config,
     )
 
-    expected_scheduler_block_size = math.lcm(16, 32) * 2
+    expected_scheduler_block_size = math.lcm(16 * 2, 48)
     assert scheduler_block_size == expected_scheduler_block_size
     assert hash_block_size == expected_hash_block_size
+
+
+def test_resolve_dcp_hybrid_groups_honors_prefix_match_unit() -> None:
+    """DCP>1 multi-group path must honor ``prefix_match_unit`` like upstream.
+
+    Regression: the DCP branch hardcoded ``hash_block_size = gcd(...)``, so a
+    user-configured ``--prefix-match-unit`` was silently ignored and hybrid
+    prefix hashing stayed at the coarse group-GCD granularity.
+    """
+    kv_cache_config = _make_hybrid_kv_cache_config(full_block_size=16, mamba_block_size=48)
+    vllm_config = _make_vllm_config(
+        enable_prefix_caching=True,
+        dcp=2,
+        prefix_match_unit=8,
+    )
+
+    _, hash_block_size = _ascend_resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
+
+    assert hash_block_size == 8
+
+
+def test_resolve_dcp_hybrid_groups_hash_with_connector_only() -> None:
+    """Block hashes feed KV connectors too: with a connector active and prefix
+    caching off, hashing must stay fine (GCD), not collapse to the scheduler
+    block size. Upstream gates on ``enable_prefix_caching or connector_enabled``.
+    """
+    kv_cache_config = _make_hybrid_kv_cache_config(full_block_size=16, mamba_block_size=48)
+    vllm_config = _make_vllm_config(
+        enable_prefix_caching=False,
+        dcp=2,
+        kv_transfer_config=SimpleNamespace(),
+    )
+
+    _, hash_block_size = _ascend_resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
+
+    assert hash_block_size == math.gcd(16 * 2, 48)
+
+
+def test_resolve_dcp_hybrid_groups_rejects_indivisible_prefix_match_unit() -> None:
+    kv_cache_config = _make_hybrid_kv_cache_config(full_block_size=16, mamba_block_size=48)
+    vllm_config = _make_vllm_config(
+        enable_prefix_caching=True,
+        dcp=2,
+        prefix_match_unit=5,
+    )
+
+    with pytest.raises(ValueError, match="prefix_match_unit"):
+        _ascend_resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
+
+
+def test_resolve_dcp_hybrid_groups_scales_attention_but_not_mamba() -> None:
+    kv_cache_config = _make_hybrid_kv_cache_config(full_block_size=16, mamba_block_size=32)
+    vllm_config = _make_vllm_config(
+        enable_prefix_caching=True,
+        dcp=2,
+    )
+
+    assert _ascend_resolve_kv_cache_block_sizes(kv_cache_config, vllm_config) == (32, 32)
+
+
+def test_resolve_dcp_non_align_mamba_disables_fine_hashing() -> None:
+    kv_cache_config = _make_hybrid_kv_cache_config(
+        full_block_size=16,
+        mamba_block_size=48,
+        mamba_cache_mode="none",
+    )
+    vllm_config = _make_vllm_config(
+        enable_prefix_caching=True,
+        dcp=2,
+        prefix_match_unit=8,
+    )
+
+    scheduler_block_size, hash_block_size = _ascend_resolve_kv_cache_block_sizes(
+        kv_cache_config,
+        vllm_config,
+    )
+
+    assert scheduler_block_size == math.lcm(16 * 2, 48)
+    assert hash_block_size == scheduler_block_size
+
+
+def test_resolve_dcp_checks_state_alignment_at_actual_hit_granularity() -> None:
+    specs = [
+        MLAAttentionSpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=8,
+            dtype=torch.float16,
+            **_ratio_kwargs(16),
+        ),
+        MLAAttentionSpec(
+            block_size=32,
+            num_kv_heads=1,
+            head_size=8,
+            dtype=torch.float16,
+            **_ratio_kwargs(16),
+        ),
+    ]
+    kv_cache_config = KVCacheConfig(
+        num_blocks=10,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(layer_names=[str(index)], kv_cache_spec=spec) for index, spec in enumerate(specs)
+        ],
+    )
+    vllm_config = _make_vllm_config(
+        enable_prefix_caching=True,
+        dcp=2,
+        prefix_match_unit=8,
+    )
+
+    # There is no partial Mamba group, so hits remain scheduler-aligned at 64
+    # tokens. The 8-token hash unit itself need not align to tokens_per_state.
+    assert _ascend_resolve_kv_cache_block_sizes(kv_cache_config, vllm_config) == (64, 8)
 
 
 @pytest.mark.parametrize(
