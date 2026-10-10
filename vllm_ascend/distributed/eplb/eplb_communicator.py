@@ -488,7 +488,7 @@ class AscendHixlEplbCommunicator(EplbCommunicator):
     def _confirm_all_ranks(self, local_error: Exception | None, operation: str) -> None:
         if self._group_error is not None:
             raise RuntimeError("HIXL EPLB CPU group failed; worker must terminate") from self._group_error
-        completed = torch.tensor(int(local_error is None), dtype=torch.int32)
+        completed = torch.tensor(int(local_error is None), dtype=torch.int32, device="cpu")
         try:
             work = torch.distributed.all_reduce(
                 completed,
