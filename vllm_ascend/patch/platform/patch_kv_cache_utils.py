@@ -407,9 +407,7 @@ def _ascend_get_packed_kv_cache_groups(
     # precondition inside the function, main leaves the check to its caller.
     fallback_kwargs: dict[str, Any] = {}
     for fallback_name in ("use_deepseek_v4_fallback", "use_trailing_layer_fallback"):
-        fallback_kwargs = declared_kwarg(
-            vllm.v1.core.kv_cache_utils._annotate_eagle_groups, fallback_name, True
-        )
+        fallback_kwargs = declared_kwarg(vllm.v1.core.kv_cache_utils._annotate_eagle_groups, fallback_name, True)
         if fallback_kwargs:
             break
     vllm.v1.core.kv_cache_utils._annotate_eagle_groups(

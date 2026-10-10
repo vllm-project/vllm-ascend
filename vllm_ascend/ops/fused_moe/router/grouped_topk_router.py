@@ -47,9 +47,7 @@ class AscendGroupedTopKRouter(BaseRouter):
         # while the factor is ``None`` or ``1.0``. A baseline whose helper cannot
         # take the keyword would answer MiniMax2 regardless -- so rule that case
         # out here rather than pass a keyword it does not declare.
-        factor_kwargs = declared_kwarg(
-            get_routing_method_type, "routed_scaling_factor", self.routed_scaling_factor
-        )
+        factor_kwargs = declared_kwarg(get_routing_method_type, "routed_scaling_factor", self.routed_scaling_factor)
         num_expert_group = self.num_expert_group if self.use_grouped_topk else None
         has_e_score_bias = self.e_score_correction_bias is not None
         if (
