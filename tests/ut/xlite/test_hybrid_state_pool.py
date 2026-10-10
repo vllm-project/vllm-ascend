@@ -65,20 +65,26 @@ except Exception:  # pragma: no cover - CI CPU environments have no xlite wheel
 
 from vllm_ascend.xlite.xlite import XliteWrapper  # noqa: E402
 
-CONV_SHAPE = (8, 6, 4)
-SSM_SHAPE = (8, 2, 4, 4)
+CONV_TAIL = (6, 4)
+SSM_TAIL = (2, 4, 4)
 
 
 def _wrapper(n_layers=2, max_batch=8):
+    """Real pool geometry: persistent holds max_batch+1 rows (slot 0 is NULL)."""
     w = object.__new__(XliteWrapper)
     w.device = "cpu"
     w._xlite_hybrid_block_to_slot = {}
     w._xlite_hybrid_free_slots = list(range(1, max_batch + 1))
     w._xlite_hybrid_persistent = [
-        (torch.full(CONV_SHAPE, float(layer_idx + 1)), torch.full(SSM_SHAPE, float(layer_idx + 1)))
+        (
+            torch.full((max_batch + 1, *CONV_TAIL), float(layer_idx + 1)),
+            torch.full((max_batch + 1, *SSM_TAIL), float(layer_idx + 1)),
+        )
         for layer_idx in range(n_layers)
     ]
-    w._xlite_hybrid_batch = [(torch.zeros(CONV_SHAPE), torch.zeros(SSM_SHAPE)) for _ in range(n_layers)]
+    w._xlite_hybrid_batch = [
+        (torch.zeros((max_batch, *CONV_TAIL)), torch.zeros((max_batch, *SSM_TAIL))) for _ in range(n_layers)
+    ]
     w._xlite_hybrid_last_ids = None
     w._xlite_hybrid_last_dense = None
     w._xlite_hybrid_last_idx = None
@@ -90,10 +96,11 @@ def _wrapper(n_layers=2, max_batch=8):
 def test_hybrid_slots_assigns_dense_slots_and_skips_null():
     w = _wrapper()
     slots = XliteWrapper._hybrid_slots(w, (101, 0, 102))
-    assert slots == (1, 0, 2)
-    assert w._xlite_hybrid_block_to_slot == {101: 1, 102: 2}
+    # free_slots.pop() hands out the highest free slot first (NULL -> 0).
+    assert slots == (8, 0, 7)
+    assert w._xlite_hybrid_block_to_slot == {101: 8, 102: 7}
     # Recomputing the same IDs reuses the slots.
-    assert XliteWrapper._hybrid_slots(w, (101, 0, 102)) == (1, 0, 2)
+    assert XliteWrapper._hybrid_slots(w, (101, 0, 102)) == (8, 0, 7)
 
 
 def test_hybrid_slots_new_request_gets_next_slot():
@@ -102,7 +109,7 @@ def test_hybrid_slots_new_request_gets_next_slot():
     # 101 retires from the batch; 103 is new and gets the next free slot.
     slots = XliteWrapper._hybrid_slots(w, (102, 103))
     assert slots[0] == w._xlite_hybrid_block_to_slot[102]
-    assert slots[1] == slots[0] + 1
+    assert slots[1] == slots[0] - 1
     assert 103 in w._xlite_hybrid_block_to_slot
 
 
@@ -131,21 +138,25 @@ def test_hybrid_copy_roundtrip_between_persistent_and_batch():
         conv_p[3] = 30.0
     XliteWrapper._hybrid_copy(w, idx, to_batch=True)
     for conv_b, _ssm_b in w._xlite_hybrid_batch:
-        assert torch.equal(conv_b[0], torch.full(CONV_SHAPE[1:], 10.0))
-        assert torch.equal(conv_b[1], torch.full(CONV_SHAPE[1:], 30.0))
+        assert torch.equal(conv_b[0], torch.full(CONV_TAIL, 10.0))
+        assert torch.equal(conv_b[1], torch.full(CONV_TAIL, 30.0))
     # Push back and verify persistent rows were overwritten.
     for conv_b, _ssm_b in w._xlite_hybrid_batch:
         conv_b[0] = 99.0
     XliteWrapper._hybrid_copy(w, idx, to_batch=False)
     for conv_p, _ssm_p in w._xlite_hybrid_persistent:
-        assert torch.equal(conv_p[1], torch.full(CONV_SHAPE[1:], 99.0))
-        assert torch.equal(conv_p[3], torch.full(CONV_SHAPE[1:], 30.0))
+        assert torch.equal(conv_p[1], torch.full(CONV_TAIL, 99.0))
+        assert torch.equal(conv_p[3], torch.full(CONV_TAIL, 30.0))
 
 
 def test_hybrid_zero_rows_clears_batch_and_persistent_rows():
     w = _wrapper()
     XliteWrapper._hybrid_slots(w, (5,))
     dense = XliteWrapper._hybrid_slots(w, (5, 6))
+    # Simulate an earlier scatter: the persistent slots carry state.
+    for conv_p, _ssm_p in w._xlite_hybrid_persistent:
+        conv_p[dense[0]] = 20.0
+        conv_p[dense[1]] = 40.0
     XliteWrapper._hybrid_copy(w, torch.tensor(dense, dtype=torch.long), to_batch=True)
     for conv_b, _ssm_b in w._xlite_hybrid_batch:
         assert torch.count_nonzero(conv_b).item() > 0
@@ -154,6 +165,7 @@ def test_hybrid_zero_rows_clears_batch_and_persistent_rows():
         assert torch.count_nonzero(conv_b).item() == 0
         assert torch.count_nonzero(ssm_b).item() == 0
     for conv_p, ssm_p in w._xlite_hybrid_persistent:
+        assert torch.count_nonzero(conv_p[dense[0]]).item() == 0
         assert torch.count_nonzero(conv_p[dense[1]]).item() == 0
         assert torch.count_nonzero(ssm_p[dense[1]]).item() == 0
 
@@ -161,21 +173,23 @@ def test_hybrid_zero_rows_clears_batch_and_persistent_rows():
 def test_hybrid_gather_copies_state_to_batch_rows():
     w = _wrapper()
     idx = torch.tensor([2, 4], dtype=torch.long)
+    slot_a, slot_b = XliteWrapper._hybrid_slots(w, (2, 4))
     for conv_p, _ssm_p in w._xlite_hybrid_persistent:
-        conv_p[2] = 20.0
-        conv_p[4] = 40.0
+        conv_p[slot_a] = 20.0
+        conv_p[slot_b] = 40.0
 
     XliteWrapper._hybrid_gather(w, idx, cached_lens=[3, 3], num_reqs=2)
 
     assert w._xlite_hybrid_skip is False
     for conv_b, _ssm_b in w._xlite_hybrid_batch:
-        assert torch.equal(conv_b[0], torch.full(CONV_SHAPE[1:], 20.0))
-        assert torch.equal(conv_b[1], torch.full(CONV_SHAPE[1:], 40.0))
+        assert torch.equal(conv_b[0], torch.full(CONV_TAIL, 20.0))
+        assert torch.equal(conv_b[1], torch.full(CONV_TAIL, 40.0))
 
 
 def test_hybrid_gather_skips_when_request_order_unchanged():
     w = _wrapper()
     idx = torch.tensor([2, 4], dtype=torch.long)
+    XliteWrapper._hybrid_slots(w, (2, 4))
     XliteWrapper._hybrid_gather(w, idx, cached_lens=[3, 3], num_reqs=2)
 
     # Same ids again with no fresh rows -> no copy, skip recorded.
@@ -190,7 +204,14 @@ def test_hybrid_gather_skips_when_request_order_unchanged():
 def test_hybrid_gather_zeroes_fresh_requests_on_unchanged_order():
     w = _wrapper()
     idx = torch.tensor([2, 4], dtype=torch.long)
+    slot_a, slot_b = XliteWrapper._hybrid_slots(w, (2, 4))
+    # Scatter real state first, then a full gather fills both batch rows.
+    for conv_p, _ssm_p in w._xlite_hybrid_persistent:
+        conv_p[slot_a] = 20.0
+        conv_p[slot_b] = 40.0
     XliteWrapper._hybrid_gather(w, idx, cached_lens=[3, 3], num_reqs=2)
+    for conv_b, _ssm_b in w._xlite_hybrid_batch:
+        assert torch.count_nonzero(conv_b).item() > 0
     # cached_len == 0 -> fresh request: its batch row must be cleared.
     XliteWrapper._hybrid_gather(w, idx, cached_lens=[3, 0], num_reqs=2)
     for conv_b, _ssm_b in w._xlite_hybrid_batch:
@@ -212,7 +233,7 @@ def test_hybrid_scatter_marks_dirty_after_skip():
     XliteWrapper._hybrid_scatter(w)
     assert w._xlite_hybrid_dirty is False
     for conv_p, _ssm_p in w._xlite_hybrid_persistent:
-        assert torch.equal(conv_p[1], torch.full(CONV_SHAPE[1:], 7.0))
+        assert torch.equal(conv_p[1], torch.full(CONV_TAIL, 7.0))
 
 
 def test_gdn_state_ids_prefers_non_spec_indices(monkeypatch):
