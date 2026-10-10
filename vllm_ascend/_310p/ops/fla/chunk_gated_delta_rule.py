@@ -315,6 +315,75 @@ def _prepare_chunk_indices_list(cu_seqlens: torch.Tensor, chunk_size: int) -> li
     return chunk_indices
 
 
+def _invert_strict_lower_rows(strict_lower: torch.Tensor) -> torch.Tensor:
+    """Forward substitution. Stable for any width, but each row syncs the host."""
+    attn = strict_lower.clone()
+    width = attn.shape[-1]
+    for row_idx in range(1, width):
+        row = attn[..., row_idx, :row_idx].clone()
+        sub = attn[..., :row_idx, :row_idx].clone()
+        attn[..., row_idx, :row_idx] = row + (row.unsqueeze(-1) * sub).sum(-2)
+    return attn + torch.eye(width, dtype=attn.dtype, device=attn.device)
+
+
+def _product_inv_leaf(lower: torch.Tensor) -> torch.Tensor:
+    """``(I - L)^{-1}`` for a strictly lower ``L`` of width 2, 4, or 8.
+
+    ``L^width = 0``, so the product stops at ``L^{width/2}``. Width 8 is the
+    largest tile whose intermediate powers stay finite for the correlated keys
+    GDN actually produces. A single product over width 64 does not.
+    """
+    width = lower.shape[-1]
+    eye = torch.eye(width, dtype=lower.dtype, device=lower.device)
+    inverse = eye + lower
+    power = lower @ lower
+    for _ in range(max(width.bit_length() - 2, 0)):
+        inverse = inverse @ (eye + power)
+        power = power @ power
+    return inverse
+
+
+def _invert_blocked(lower: torch.Tensor) -> torch.Tensor:
+    """Block inverse of ``I - L`` for ``lower`` shaped ``[batch, width, width]``."""
+    width = lower.shape[-1]
+    if width <= 8:
+        return _product_inv_leaf(lower)
+    half = width // 2
+    top_left = lower[:, :half, :half].contiguous()
+    bot_right_src = lower[:, half:, half:].contiguous()
+    cross = lower[:, half:, :half].contiguous()
+    inverse_diag = _invert_blocked(torch.cat((top_left, bot_right_src), dim=0))
+    batch = lower.shape[0]
+    top_inv = inverse_diag[:batch]
+    bot_inv = inverse_diag[batch:]
+    # (I - L) = [[I-L11, 0], [-L21, I-L22]], so the lower-left block of the
+    # inverse is (I-L22)^{-1} L21 (I-L11)^{-1}.
+    bot_left = bot_inv.matmul(cross).matmul(top_inv)
+    top = torch.cat((top_inv, torch.zeros_like(top_inv)), dim=-1)
+    bot = torch.cat((bot_left, bot_inv), dim=-1)
+    return torch.cat((top, bot), dim=-2)
+
+
+def _invert_strict_lower(strict_lower: torch.Tensor) -> torch.Tensor:
+    """Inverse of ``I - L`` for a strictly lower-triangular ``L``.
+
+    Tiles of width 8 use the finite product ``(I+L)(I+L^2)(I+L^4)``. Larger
+    power-of-two widths are assembled with the block formula, which is a
+    handful of batched matmuls on device. The plain width-64 product overflows
+    when keys in a chunk are correlated and then MTP rejects every draft.
+    Per-row substitution matches this result but copies each row back to the
+    host; that stall is what made MTP prefill with prefix caching regress.
+    """
+    width = strict_lower.shape[-1]
+    if width <= 1:
+        return torch.eye(width, dtype=strict_lower.dtype, device=strict_lower.device)
+    if width & (width - 1):
+        return _invert_strict_lower_rows(strict_lower)
+    lead = strict_lower.shape[:-2]
+    flat = strict_lower.reshape(-1, width, width)
+    return _invert_blocked(flat).reshape(*lead, width, width)
+
+
 def _compute_kernel_inputs_from_torch_wy(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -350,11 +419,7 @@ def _compute_kernel_inputs_from_torch_wy(
         diagonal=0,
     )
     attn = attn.masked_fill(mask_diag, 0)
-    for row_idx in range(1, chunk_size):
-        row = attn[..., row_idx, :row_idx].clone()
-        sub = attn[..., :row_idx, :row_idx].clone()
-        attn[..., row_idx, :row_idx] = row + (row.unsqueeze(-1) * sub).sum(-2)
-    attn = attn + torch.eye(chunk_size, dtype=attn.dtype, device=attn.device)
+    attn = _invert_strict_lower(attn)
 
     value = attn @ (value * beta.unsqueeze(-1))
     k_cumdecay = attn @ (k_beta * g.exp().unsqueeze(-1))
@@ -479,6 +544,7 @@ def chunk_gated_delta_rule_310(
     cu_seqlens: torch.Tensor | None = None,
     head_first: bool = False,
     use_qk_l2norm_in_kernel: bool = False,
+    cu_seqlens_cpu: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """310P chunk GDN path backed by AscendC fwd_h/fwd_o kernels.
 
@@ -511,8 +577,17 @@ def chunk_gated_delta_rule_310(
         chunk_indices_list = None
         num_states = q.shape[0]
     else:
+        # Host cu_seqlens is built once per step. Copying the device tensor
+        # here syncs every linear-attention layer during prefill.
+        if cu_seqlens_cpu is None:
+            if cu_seqlens.device.type == "cpu":
+                cu_seqlens_cpu = cu_seqlens
+            else:
+                cu_seqlens_cpu = cu_seqlens.to(device="cpu")
+        if cu_seqlens_cpu.dtype != torch.int64:
+            cu_seqlens_cpu = cu_seqlens_cpu.to(torch.int64)
         q_pad, k_pad, v_pad, g_pad, beta_pad, seq_ranges, cu_kernel = _pad_varlen_to_chunk(
-            q, k, v, g, beta, cu_seqlens.to(torch.int64).cpu(), CHUNK_SIZE
+            q, k, v, g, beta, cu_seqlens_cpu, CHUNK_SIZE
         )
         assert cu_kernel is not None
         cu_list = cu_kernel.tolist()

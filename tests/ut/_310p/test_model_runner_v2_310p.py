@@ -523,24 +523,25 @@ def test_config_accepts_lora() -> None:
     NPUModelRunner310V2._validate_config(_make_vllm_config(lora_config=object()))
 
 
-def test_copy_kv_cache_blocks_flattens_mamba_lists() -> None:
-    """Prefix-cache CoW must flatten list[Tensor] mamba layers for upstream copy."""
+def test_copy_kv_cache_blocks_uses_device_memcpy() -> None:
+    """Prefix-cache CoW copies each attention and mamba page with one D2D memcpy."""
     runner = object.__new__(NPUModelRunner310V2)
-    runner._attn_kv_copy_params = []
-    t0 = torch.zeros(4, 2)
-    t1 = torch.zeros(4, 2)
-    runner.kv_caches = [[t0, t1], torch.zeros(2)]  # hybrid: mamba list + other
-    runner.kv_cache_config = SimpleNamespace(num_blocks=4)
+    k_cache = torch.zeros(8, 4)
+    v_cache = torch.zeros(8, 4)
+    runner._attn_kv_copy_params = [(k_cache, v_cache, 2)]
+    mamba_conv = torch.zeros(4, 2)
+    mamba_ssm = torch.zeros(4, 2)
+    runner.kv_caches = [[mamba_conv, mamba_ssm], torch.zeros(2)]
     copies = [SimpleNamespace(src_block_id=0, dst_block_id=1)]
 
-    with patch.object(model_runner_module, "copy_kv_cache_blocks_inplace") as mock_copy:
+    with patch.object(model_runner_module, "_copy_block_bytes") as mock_copy:
         NPUModelRunner310V2._copy_kv_cache_blocks_310p(runner, copies)
 
-    mock_copy.assert_called_once()
-    tensors_arg, num_blocks, copies_arg = mock_copy.call_args[0]
-    assert tensors_arg == [t0, t1]
-    assert num_blocks == 4
-    assert copies_arg is copies
+    assert mock_copy.call_count == 4
+    copied_dsts = {call.args[0] for call in mock_copy.call_args_list}
+    assert k_cache.data_ptr() + 2 * k_cache.stride(0) * k_cache.element_size() in copied_dsts
+    assert mamba_conv.data_ptr() + mamba_conv.stride(0) * mamba_conv.element_size() in copied_dsts
+    assert mamba_ssm.data_ptr() + mamba_ssm.stride(0) * mamba_ssm.element_size() in copied_dsts
 
 
 def test_sampler_accepts_temperature_and_rejects_penalties() -> None:

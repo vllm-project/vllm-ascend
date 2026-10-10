@@ -4,7 +4,10 @@ import pytest
 import torch
 import torch_npu
 
-from vllm_ascend._310p.ops.fla.chunk_gated_delta_rule import chunk_gated_delta_rule_pytorch
+from vllm_ascend._310p.ops.fla.chunk_gated_delta_rule import (
+    _invert_strict_lower,
+    chunk_gated_delta_rule_pytorch,
+)
 
 
 def _cpu_rms_norm(x, weight, eps):
@@ -145,3 +148,47 @@ def test_chunk_gated_delta_rule_310_varlen_tnd_path():
     assert final_state_tnd is not None
     assert final_state_bthd is not None
     torch.testing.assert_close(final_state_tnd, final_state_bthd, rtol=1e-4, atol=1e-4)
+
+
+def _row_strict_lower_inverse(strict_lower: torch.Tensor) -> torch.Tensor:
+    attn = strict_lower.clone()
+    width = attn.shape[-1]
+    for row_idx in range(1, width):
+        row = attn[..., row_idx, :row_idx].clone()
+        sub = attn[..., :row_idx, :row_idx].clone()
+        attn[..., row_idx, :row_idx] = row + (row.unsqueeze(-1) * sub).sum(-2)
+    return attn + torch.eye(width, dtype=attn.dtype)
+
+
+def test_invert_strict_lower_matches_row_update():
+    torch.manual_seed(0)
+    width = 64
+    key = torch.randn(1, 2, 2, width, 16)
+    key = key / key.norm(dim=-1, keepdim=True)
+    beta = torch.rand(1, 2, 2, width)
+    gate = -torch.rand(1, 2, 2, width).cumsum(-1)
+    decay = (gate.unsqueeze(-1) - gate.unsqueeze(-2)).tril().exp().tril()
+    strict_lower = -(key * beta.unsqueeze(-1)) @ key.transpose(-1, -2) * decay
+    strict_lower = strict_lower.tril(diagonal=-1)
+
+    solved = _invert_strict_lower(strict_lower)
+    reference = _row_strict_lower_inverse(strict_lower)
+    torch.testing.assert_close(solved, reference, rtol=1e-4, atol=1e-5)
+
+
+def test_invert_strict_lower_solves_correlated_keys():
+    """Product-form inversion overflows when keys in a chunk are aligned."""
+    torch.manual_seed(1)
+    width = 64
+    base = torch.randn(1, 1, 1, 128)
+    key = base + 0.01 * torch.randn(1, 1, width, 128)
+    key = key / key.norm(dim=-1, keepdim=True)
+    beta = torch.full((1, 1, width), 0.95)
+    gram = (key * beta.unsqueeze(-1)) @ key.transpose(-1, -2)
+    strict_lower = (-gram).tril(diagonal=-1)
+
+    solved = _invert_strict_lower(strict_lower)
+    eye = torch.eye(width, dtype=solved.dtype)
+    residual = (eye - strict_lower) @ solved - eye
+    assert torch.isfinite(solved).all()
+    torch.testing.assert_close(residual, torch.zeros_like(residual), atol=1e-4, rtol=1e-4)

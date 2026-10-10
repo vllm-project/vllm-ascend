@@ -284,6 +284,119 @@ def test_producer_restores_drop_knobs_on_exception(monkeypatch):
     assert scheduler.use_eagle_block_drop is True
 
 
+def test_310p_fitting_prefill_skips_last_cache_split(monkeypatch):
+    monkeypatch.setattr(mod, "is_310p", lambda: True)
+    monkeypatch.setattr(
+        mod,
+        "_original_mamba_block_aligned_split",
+        lambda self, request, num_new_tokens, nlc=0, nec=0: 768,
+    )
+    scheduler = _scheduler(is_kv_consumer=None)
+    request = _request(num_computed_tokens=0, num_prompt_tokens=1024, num_tokens=1024)
+    result = _mamba_block_aligned_split(scheduler, request, num_new_tokens=1024)
+    assert result == 1024
+
+
+def test_310p_keeps_shared_prefix_junction_split(monkeypatch):
+    monkeypatch.setattr(mod, "is_310p", lambda: True)
+    monkeypatch.setattr(
+        mod,
+        "_original_mamba_block_aligned_split",
+        lambda self, request, num_new_tokens, nlc=0, nec=0: 384,
+    )
+    scheduler = _scheduler(is_kv_consumer=None)
+    request = _request(num_computed_tokens=0, num_prompt_tokens=1024, num_tokens=1024)
+    request.shared_prefix_boundary = 384
+    result = _mamba_block_aligned_split(scheduler, request, num_new_tokens=1024)
+    assert result == 384
+
+
+def test_310p_coalesces_suffix_after_prefix_hit(monkeypatch):
+    monkeypatch.setattr(mod, "is_310p", lambda: True)
+    monkeypatch.setattr(
+        mod,
+        "_original_mamba_block_aligned_split",
+        lambda self, request, num_new_tokens, nlc=0, nec=0: 384,
+    )
+    scheduler = _scheduler(is_kv_consumer=None)
+    request = _request(num_computed_tokens=384, num_prompt_tokens=1024, num_tokens=1024)
+    result = _mamba_block_aligned_split(scheduler, request, num_new_tokens=640)
+    assert result == 640
+
+
+def test_310p_cold_junction_floors_to_block(monkeypatch):
+    """A 512 junction on a 384 block must end the chunk at 384 so mamba is stored."""
+    monkeypatch.setattr(mod, "is_310p", lambda: True)
+    monkeypatch.setattr(
+        mod,
+        "_original_mamba_block_aligned_split",
+        lambda self, request, num_new_tokens, nlc=0, nec=0: 512,
+    )
+    scheduler = _scheduler(is_kv_consumer=None)
+    scheduler.block_size = 384
+    request = _request(num_computed_tokens=0, num_prompt_tokens=1024, num_tokens=1024)
+    request.shared_prefix_boundary = 512
+    result = _mamba_block_aligned_split(scheduler, request, num_new_tokens=1024)
+    assert result == 384
+
+
+def test_310p_short_prefix_skips_uncacheable_junction(monkeypatch):
+    """Prefix 512 on a 640-token page cannot store mamba state."""
+    monkeypatch.setattr(mod, "is_310p", lambda: True)
+    monkeypatch.setattr(
+        mod,
+        "_original_mamba_block_aligned_split",
+        lambda self, request, num_new_tokens, nlc=0, nec=0: 512,
+    )
+    scheduler = _scheduler(is_kv_consumer=None)
+    scheduler.block_size = 640
+    request = _request(num_computed_tokens=0, num_prompt_tokens=1024, num_tokens=1024)
+    request.shared_prefix_boundary = 512
+    result = _mamba_block_aligned_split(scheduler, request, num_new_tokens=1024)
+    assert result == 1024
+
+
+def test_310p_hit_ignores_junction_inside_suffix(monkeypatch):
+    """A later request already holds the prefix; do not stop at its junction."""
+    monkeypatch.setattr(mod, "is_310p", lambda: True)
+    monkeypatch.setattr(
+        mod,
+        "_original_mamba_block_aligned_split",
+        lambda self, request, num_new_tokens, nlc=0, nec=0: 128,
+    )
+    scheduler = _scheduler(is_kv_consumer=None)
+    request = _request(num_computed_tokens=384, num_prompt_tokens=1024, num_tokens=1024)
+    request.shared_prefix_boundary = 512
+    result = _mamba_block_aligned_split(scheduler, request, num_new_tokens=640)
+    assert result == 640
+
+
+def test_310p_hit_coalesces_unaligned_suffix(monkeypatch):
+    monkeypatch.setattr(mod, "is_310p", lambda: True)
+    monkeypatch.setattr(
+        mod,
+        "_original_mamba_block_aligned_split",
+        lambda self, request, num_new_tokens, nlc=0, nec=0: 256,
+    )
+    scheduler = _scheduler(is_kv_consumer=None)
+    request = _request(num_computed_tokens=512, num_prompt_tokens=1024, num_tokens=1024)
+    result = _mamba_block_aligned_split(scheduler, request, num_new_tokens=512)
+    assert result == 512
+
+
+def test_non_310p_keeps_upstream_split(monkeypatch):
+    monkeypatch.setattr(mod, "is_310p", lambda: False)
+    monkeypatch.setattr(
+        mod,
+        "_original_mamba_block_aligned_split",
+        lambda self, request, num_new_tokens, nlc=0, nec=0: 768,
+    )
+    scheduler = _scheduler(is_kv_consumer=None)
+    request = _request(num_computed_tokens=0, num_prompt_tokens=1024, num_tokens=1024)
+    result = _mamba_block_aligned_split(scheduler, request, num_new_tokens=1024)
+    assert result == 768
+
+
 def test_producer_handles_missing_drop_attributes(monkeypatch):
     monkeypatch.setattr(
         mod,
