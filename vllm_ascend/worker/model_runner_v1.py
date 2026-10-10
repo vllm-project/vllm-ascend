@@ -3339,10 +3339,8 @@ class NPUModelRunner(GPUModelRunner):
     ) -> tuple[CUDAGraphMode, BatchDescriptor, bool, torch.Tensor | None, CUDAGraphStat | None]:
         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
         has_initial_state = np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] > 0)
-        if self.use_dcp or self.model_config.is_hybrid:
-            # Mamba prompt chunks must retain prefill state semantics even when
-            # their width matches the speculative decode graph. DCP also
-            # requires the full prompt to be computed before uniform decode.
+        if self.use_dcp:
+            # DCP decode graphs require the full prompt to be computed.
             has_initial_state = has_initial_state and np.all(
                 self.input_batch.num_computed_tokens_cpu[:num_reqs] >= self.input_batch.num_prompt_tokens[:num_reqs]
             )
@@ -3753,15 +3751,17 @@ class NPUModelRunner(GPUModelRunner):
                 cascade_attn_prefix_lens[kv_cache_gid][attn_gid] if cascade_attn_prefix_lens else 0
             )
 
-            extra_attn_metadata_args: dict[str, Any] = {}
-            if isinstance(builder, GDNAttentionMetadataBuilder) and not is_gdn_noop:
+            extra_attn_metadata_args = {}
+            if (
+                use_spec_decode
+                and isinstance(builder, GDNAttentionMetadataBuilder)
+                and not is_gdn_noop
+            ):
                 assert ubid is None, "UBatching not supported with GDN yet"
-                extra_attn_metadata_args["num_actual_reqs"] = num_reqs
-                if use_spec_decode:
-                    extra_attn_metadata_args.update(
-                        num_accepted_tokens=self.num_accepted_tokens.gpu[:num_reqs_padded],
-                        num_decode_draft_tokens_cpu=self.num_decode_draft_tokens.cpu[:num_reqs_padded],
-                    )
+                extra_attn_metadata_args = dict(
+                    num_accepted_tokens=self.num_accepted_tokens.gpu[:num_reqs_padded],
+                    num_decode_draft_tokens_cpu=self.num_decode_draft_tokens.cpu[:num_reqs_padded],
+                )
 
             if isinstance(builder, (AscendDSAMetadataBuilder, AscendDSACPMetadataBuilder)):
                 if for_cudagraph_capture:
@@ -3793,6 +3793,12 @@ class NPUModelRunner(GPUModelRunner):
                     common_attn_metadata=common_attn_metadata,
                     **extra_attn_metadata_args,
                 )
+                # NOTE(zxr): Due to the Triton operator does not deal with -1 padding in FullGraph mode,
+                # the padding needs to be changed from -1 to 0 to avoid writing invalid mamba block.
+                if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs() \
+                    and isinstance(builder, GDNAttentionMetadataBuilder) and attn_metadata_i.num_prefills == 0:
+                    if attn_metadata_i.num_decodes == 0 and attn_metadata_i.num_spec_decodes > 0:
+                        attn_metadata_i.spec_state_indices_tensor[attn_metadata_i.num_spec_decodes:].fill_(0)
             if device_metadata_provider is not None:
                 assert device_metadata_tasks is not None
                 device_metadata_tasks.extend(device_metadata_provider.take_device_metadata_tasks())
