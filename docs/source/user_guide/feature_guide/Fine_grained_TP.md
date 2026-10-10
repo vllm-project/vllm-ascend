@@ -2,9 +2,9 @@
 
 ## Feature Introduction
 
-Fine-Grained Tensor Parallelism (Fine-grained TP) extends standard tensor parallelism with **independent tensor-parallel sizes for different model components** — embedding, LM head, attention output projection (o_proj), and MLP blocks — configured via the `finegrained_tp_config` parameter. Instead of a single global `tensor_parallel_size`, each component is sharded along the data-parallel (DP) axis with its own size, reducing per-device weight memory. The feature supports MoE models.
+Fine-Grained Tensor Parallelism (Fine-grained TP) extends standard tensor parallelism with **independent tensor-parallel sizes for different model components** — embedding, LM head, attention output projection (o_proj), and MLP blocks — configured via the `finegrained_tp_config` parameter. Instead of a single global `tensor_parallel_size`, each component is sharded along the data-parallel (DP) axis with its own size, reducing per-device weight memory. The feature supports MoE models only.
 
-In the measured DeepSeek-R1-W8A8 deployment below, the four knobs together saved **9.72 GB per card** with a net TPOT improvement (see [Experimental Results](#experimental-results)). In decode-heavy workloads, where GEMMs are memory-bound, the smaller per-device weights also reduce the weight-read volume per step for the sharded modules.
+In the measured DeepSeek-R1-W8A8 deployment below, the four knobs together saved **9.72 GB per card** with a net TPOT improvement (see [Experimental Results](#experimental-results)). In decode-heavy workloads, where GEMMs are memory-bound, the smaller per-device weights also reduce the weight-read volume per step for the sharded GEMM modules (LM head, o_proj, and MLP).
 
 ### Working Principle
 
@@ -19,7 +19,7 @@ The four knobs are freely combinable — on a PD decode node all four can be ena
 
 | Scenario | Components that can be enabled | Applicable Conditions |
 |----------|-------------------------------|------------------------|
-| All-DP MoE serving — standalone, or a PD decode node using embedding / LM head TP only | embedding / LM head | MoE model, `tensor_parallel_size == 1`, sizes evenly divide `data_parallel_size` |
+| All-DP MoE serving — standalone, or a PD decode node using embedding / LM head TP only | embedding / LM head | MoE model, `tensor_parallel_size == 1` (see [Standard Tensor Parallelism Requirement](#standard-tensor-parallelism-requirement)), sizes evenly divide `data_parallel_size` |
 | P/D-disaggregated decode (D) node with all four knobs | o_proj / MLP / embedding / LM head | The o_proj / MLP knobs require the full [preconditions for o_proj / MLP TP](#preconditions-for-o_proj--mlp-tp) |
 
 #### Component & Execution Mode Support
@@ -54,7 +54,7 @@ To check whether a checkpoint qualifies, look at its `config.json`: the model co
 
 The restriction comes from the sharding axis: fine-grained TP shards weights across the data-parallel (DP) dimension, and only MoE deployments keep a cross-rank DP group — for a dense model, every DP rank runs as an independent DP=1 engine, leaving no group to shard across.
 
-Within a qualifying MoE model, `mlp_tensor_parallel_size` shards the dense FFN layers — for example, the first three dense layers of DeepSeek-R1; the routed experts of the MoE layers are sharded by expert parallel instead, and shared experts stay replicated.
+Within a qualifying MoE model, `mlp_tensor_parallel_size` shards the dense MLP layers — for example, the first three dense layers of DeepSeek-R1; the routed experts of the MoE layers are sharded by expert parallel instead, and shared experts stay replicated.
 
 #### Preconditions for o_proj / MLP TP
 
@@ -63,7 +63,7 @@ Within a qualifying MoE model, `mlp_tensor_parallel_size` shards the dense FFN l
 - a MoE model with `tensor_parallel_size == 1` (and a `data_parallel_size` that the TP size evenly divides);
 - a P/D-disaggregated deployment, on the decode (D) node only (`kv_role = kv_consumer`);
 - the recompute scheduler: `scheduler_config.recompute_scheduler_enable = true` in `--additional-config` (it keeps decode-node steps decode-shaped);
-- `PreemptOffloadConnector` in the KV connector chain — combine the P/D transfer connector (e.g. `MooncakeConnectorV1`) and `PreemptOffloadConnector` via `MultiConnector` (a preempted request must not return to the prefill node, whose recomputed KV loses precision); see the [Preempt Offload Guide](preempt_offload_connector.md);
+- `PreemptOffloadConnector` in the KV connector chain — combine the P/D transfer connector (e.g. `MooncakeConnectorV1`) and `PreemptOffloadConnector` via `MultiConnector` (a preempted request must not return to the prefill node: the recomputed KV loses precision); see the [Preempt Offload Guide](preempt_offload_connector.md);
 - a graph mode: do not start the instance with `--enforce-eager`;
 - `prefill_context_parallel_size == 1`.
 
@@ -187,7 +187,7 @@ After the instance starts, check which knobs passed startup validation:
    finegrained_tp_config enabled: oproj_tensor_parallel_size=8, mlp_tensor_parallel_size=8, lmhead_tensor_parallel_size=8, embedding_tensor_parallel_size=8
    ```
 
-   Only the knobs that survived validation are listed; the format is `knob=size`. This summary does not gate on `tensor_parallel_size`; see [Standard Tensor Parallelism Requirement](#standard-tensor-parallelism-requirement) for the interplay with standard TP.
+   Only the knobs that passed the startup checks are listed; the format is `knob=size` (for the interplay with `tensor_parallel_size`, see [Standard Tensor Parallelism Requirement](#standard-tensor-parallelism-requirement)).
 
 2. If `oproj_tensor_parallel_size` / `mlp_tensor_parallel_size` are missing from that line, check for the capture-bound auto-disable warning:
 
@@ -213,14 +213,14 @@ All knobs live under `finegrained_tp_config` inside `--additional-config`. The d
 
 | Parameter | Type | Default | Required | Value Range | Description |
 |-----------|------|---------|----------|-------------|-------------|
-| `oproj_tensor_parallel_size` | int | 0 | No | 0, or a divisor of `data_parallel_size` | TP size of the attention output projection (`wo_a`/`wo_b`). Values > 1 require the [o_proj / MLP preconditions](#preconditions-for-o_proj--mlp-tp). |
+| `oproj_tensor_parallel_size` | int | 0 | No | 0, or a divisor of `data_parallel_size` | TP size of the attention output projection (`o_proj`, or the two-stage `wo_a`/`wo_b` in DSA-style models). Values > 1 require the [o_proj / MLP preconditions](#preconditions-for-o_proj--mlp-tp). |
 | `lmhead_tensor_parallel_size` | int | 0 | No | 0, or a divisor of `data_parallel_size` | TP size of the LM head (shards the vocabulary dimension). |
 | `embedding_tensor_parallel_size` | int | 0 | No | 0, or a divisor of `data_parallel_size` | TP size of the token embedding table. |
 | `mlp_tensor_parallel_size` | int | 0 | No | 0, or a divisor of `data_parallel_size` | TP size of the MLP (feed-forward) blocks. Values > 1 require the [o_proj / MLP preconditions](#preconditions-for-o_proj--mlp-tp). |
 
 ## Experimental Results
 
-To evaluate the effectiveness of fine-grained TP in large-scale service scenarios, we use the model **DeepSeek-R1-W8A8**, deploy PD separated decode instances in an environment of 32 cards of Ascend Atlas A2 inference products (64 GB per card), with parallel configuration as DP32+EP32, and fine-grained TP size of 8; the performance data is as follows.
+To evaluate the effectiveness of fine-grained TP in large-scale serving, we deploy P/D-disaggregated decode instances of **DeepSeek-R1-W8A8** on 32 Ascend Atlas A2 inference cards (64 GB per card), with DP32+EP32 and a fine-grained TP size of 8. The performance data is as follows.
 
 | Module           | Memory Savings | TPOT Impact (batch=24)    |
 | ---------------- | -------------- | ------------------------- |
