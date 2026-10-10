@@ -76,6 +76,31 @@ def test_zero_static_kv_buffers_fp8_non_contiguous_copies_scalar_not_full_buffer
     assert torch.count_nonzero(t.contiguous().view(torch.int8)).item() == 0
 
 
+def test_zero_static_kv_buffers_chunks_large_non_contiguous(monkeypatch):
+    # Mirrors the a2 CI OOM: a non-contiguous buffer whose zero_() wants a
+    # same-size temporary must be re-zeroed in dim-0 chunks so each chunk's
+    # kernel-side temporary stays bounded (full-size copy_ wanted 6.13 GiB
+    # with only 4.33 GiB free).
+    monkeypatch.setattr("vllm_ascend.worker.model_runner_v1._ZERO_CHUNK_BYTES", 64)
+    copy_src_shapes = []
+
+    class _OomRecorder(torch.Tensor):
+        def zero_(self):
+            raise torch.OutOfMemoryError("NPU out of memory")
+
+        def copy_(self, src):
+            copy_src_shapes.append(tuple(src.shape))
+            return super().copy_(src)
+
+    t = torch.ones(8, 8).as_subclass(_OomRecorder).t()
+    assert not t.is_contiguous()
+    ctx = {"layer0": _FakeAttnModule([t])}
+    _zero_static_kv_buffers(_make_runner(ctx))
+    # 64 bytes / 32-byte row = 2 rows per chunk -> 4 chunks, scalar each
+    assert copy_src_shapes == [(), (), (), ()]
+    assert torch.count_nonzero(t).item() == 0
+
+
 def test_zero_static_kv_buffers_oom_falls_back_to_int8_view():
     # Regression test for the a2 CI OOM: plain zero_() can materialize a
     # same-size temporary on NPU (6-12 GiB extra on a nearly-full card).

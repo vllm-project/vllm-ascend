@@ -381,19 +381,31 @@ _FP8_DTYPES = frozenset(
 )
 
 
+# Upper bound for one chunked fill of a non-contiguous buffer, so the
+# kernel-side temporary stays small even on a nearly-full card.
+_ZERO_CHUNK_BYTES = 64 * 1024 * 1024
+
+
 def _zero_without_temp_buffer(t: torch.Tensor) -> None:
     """Zero a tensor in place without allocating a same-size temporary.
 
     Contiguous tensors are filled through an int8 reinterpretation of the
-    same bytes; non-contiguous ones take a scalar broadcast copy_. A
-    zeros_like() copy OOMed a nearly-full card in CI (a2 mamba SSM state,
-    6.13 GiB with only 4.32 GiB free), so neither branch may materialize
-    one.
+    same bytes, which needs no workspace. Non-contiguous ones make even
+    zero_()/copy_() materialize a temporary proportional to the operand
+    size on NPU (a2 CI OOMed with 6-12 GiB extra on a nearly-full card),
+    so they are filled with a scalar broadcast in dim-0 chunks bounded by
+    _ZERO_CHUNK_BYTES.
     """
     if t.is_contiguous():
         t.view(torch.int8).zero_()
-    else:
+        return
+    if t.dim() == 0 or t.numel() * t.element_size() <= _ZERO_CHUNK_BYTES:
         t.copy_(torch.zeros((), dtype=t.dtype, device=t.device))
+        return
+    rows_per_chunk = max(1, _ZERO_CHUNK_BYTES // (t[0].numel() * t.element_size()))
+    zero = torch.zeros((), dtype=t.dtype, device=t.device)
+    for start in range(0, t.shape[0], rows_per_chunk):
+        t[start:start + rows_per_chunk].copy_(zero)
 
 
 def _zero_tensor(t: torch.Tensor) -> None:
