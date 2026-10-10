@@ -3,6 +3,7 @@
 import math
 from collections import defaultdict
 from dataclasses import replace
+from typing import Any
 
 import vllm.v1.core.kv_cache_utils
 from vllm.config import VllmConfig
@@ -23,7 +24,7 @@ from vllm.v1.kv_cache_interface import (
     get_kv_cache_spec_kind,
 )
 
-from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
+from vllm_ascend.core.kv_cache_interface import declared_kwarg, is_prefix_cacheable
 from vllm_ascend.models.deepseek_v41.cache_config import (
     get_deepseek_v41_kv_cache_config,
     get_deepseek_v41_pool_bytes_per_block,
@@ -398,11 +399,24 @@ def _ascend_get_packed_kv_cache_groups(
             assert _orig_get_packed_kv_cache_groups is not None
             return _orig_get_packed_kv_cache_groups(vllm_config, kv_cache_spec)
         groups = _get_kv_cache_groups_uniform_groups(grouped_specs)
+    # vLLM renamed this switch between the release lane and main --
+    # ``use_trailing_layer_fallback`` there, ``use_deepseek_v4_fallback`` here --
+    # and both names enable the same rule 2, so name whichever the pinned lane
+    # declares. Ascend asks for it because this is the packed grouping path, the
+    # one where the rule's precondition holds; the release lane re-checks that
+    # precondition inside the function, main leaves the check to its caller.
+    fallback_kwargs: dict[str, Any] = {}
+    for fallback_name in ("use_deepseek_v4_fallback", "use_trailing_layer_fallback"):
+        fallback_kwargs = declared_kwarg(
+            vllm.v1.core.kv_cache_utils._annotate_eagle_groups, fallback_name, True
+        )
+        if fallback_kwargs:
+            break
     vllm.v1.core.kv_cache_utils._annotate_eagle_groups(
         vllm_config,
         kv_cache_spec,
         groups,
-        use_deepseek_v4_fallback=True,
+        **fallback_kwargs,
     )
     vllm.v1.core.kv_cache_utils._warn_if_unannotated_eagle_mamba(
         vllm_config,
