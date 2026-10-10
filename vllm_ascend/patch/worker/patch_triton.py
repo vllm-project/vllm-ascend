@@ -12,21 +12,18 @@ from vllm_ascend.ops.causal_conv1d import (
 from vllm_ascend.ops.causal_conv1d import causal_conv1d_update as _npu_causal_conv1d_update_impl
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.layernorm_guard import LayerNormFn
-from vllm_ascend.utils import vllm_version_is
 
-if vllm_version_is("0.30.0"):
-    triton.next_power_of_2 = next_power_of_2
-else:
 
-    def _next_power_of_2(n):
-        # vLLM #58651's packed_qk_rope kernel evaluates
-        # triton.next_power_of_2(rotary_dim) with a tl.constexpr argument.
-        # The host helper only understands plain ints, so unwrap first.
-        if isinstance(n, tl.constexpr):
-            n = n.value
-        return next_power_of_2(n)
+def _next_power_of_2(n):
+    # vLLM #58651's packed_qk_rope kernel evaluates
+    # triton.next_power_of_2(rotary_dim) with a tl.constexpr argument.
+    # The host helper only understands plain ints, so unwrap first.
+    if isinstance(n, tl.constexpr):
+        n = n.value
+    return next_power_of_2(n)
 
-    triton.next_power_of_2 = _next_power_of_2
+
+triton.next_power_of_2 = _next_power_of_2
 
 
 def _npu_causal_conv1d_update(*args, **kwargs):

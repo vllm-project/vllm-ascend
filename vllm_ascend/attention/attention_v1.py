@@ -65,7 +65,7 @@ from vllm_ascend.compilation.updatable_graph import (
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import attention_transfer_window
-from vllm_ascend.utils import MINIMAX_M3_FP8_KV_CACHE_BLOCK_SIZE, is_minimax_m3_fp8_kv_cache, vllm_version_is
+from vllm_ascend.utils import MINIMAX_M3_FP8_KV_CACHE_BLOCK_SIZE, is_minimax_m3_fp8_kv_cache
 
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
@@ -377,10 +377,8 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         # (and trims the query to its last entry), so padding there only changes
         # the captured graph. The V2 runner reports speculative decode as
         # ChunkedPrefill, so decide from the per-request is_prefilling flags
-        # (falling back to the state when they are unavailable). v0.30.0 already
-        # pads this at the request level and stays unchanged behind
-        # vllm_version_is().
-        if not vllm_version_is("0.30.0") and self.vllm_config.use_v2_model_runner:
+        # (falling back to the state when they are unavailable).
+        if self.vllm_config.use_v2_model_runner:
             is_prefilling = common_attn_metadata.is_prefilling
             if is_prefilling is None:
                 decode_like = common_attn_metadata.attn_state in (

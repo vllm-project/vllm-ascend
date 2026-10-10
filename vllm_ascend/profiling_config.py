@@ -495,7 +495,7 @@ SERVICE_PROFILING_SYMBOLS_YAML = f"""
     expr: this | attr finished_recving_kv_req_ids | str
   - name: scheduler_failed_recving
     expr: this | attr failed_recving_kv_req_ids | str
-- symbol: vllm.v1.core.sched.scheduler:Scheduler._try_promote_blocked_waiting_request
+- symbol: vllm.v1.core.sched.scheduler:Scheduler._handle_blocked_waiting_request
   min_version: "0.9.1"
   domain: Schedule
   name: Scheduler.tryPromoteBlockedWaiting

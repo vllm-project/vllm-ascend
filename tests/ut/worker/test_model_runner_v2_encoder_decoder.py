@@ -13,7 +13,6 @@ from vllm.v1.worker.gpu.model_states.encoder_decoder import (
 
 import vllm_ascend.worker.v2.model_states as model_states
 import vllm_ascend.worker.v2.model_states.encoder_decoder as encoder_decoder
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.model_states.encoder_decoder import (
     AscendEncoderDecoderModelState,
 )
@@ -103,10 +102,7 @@ def test_ascend_encoder_decoder_state_builds_ascend_attention_metadata(
     state = AscendEncoderDecoderModelState.__new__(AscendEncoderDecoderModelState)
     # vLLM main (#58149) made max_model_len a read-only property backed by
     # model_config; v0.30.0 keeps the plain instance attribute.
-    if vllm_version_is("0.30.0"):
-        state.max_model_len = 32
-    else:
-        state.model_config = SimpleNamespace(max_model_len=32)
+    state.model_config = SimpleNamespace(max_model_len=32)
     parallel_config = SimpleNamespace(
         decode_context_parallel_size=2,
         cp_kv_cache_interleave_size=1,

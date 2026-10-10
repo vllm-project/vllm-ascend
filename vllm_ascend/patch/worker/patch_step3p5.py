@@ -46,7 +46,7 @@ from vllm.distributed import (
     tensor_model_parallel_reduce_scatter,
 )
 from vllm.logger import logger
-from vllm.model_executor.layers.fused_moe import FusedMoEFactory
+from vllm.model_executor.layers.fused_moe import FusedMoEFactory, GateLinear
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.models.step3p5 import (
     FusedMoEBlock,
@@ -61,12 +61,6 @@ from vllm.model_executor.models.utils import (
 )
 
 from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.utils import vllm_version_is
-
-if vllm_version_is("0.30.0"):
-    from vllm.model_executor.models.step3p5 import FP32ReplicatedLinear
-else:
-    from vllm.model_executor.layers.fused_moe import GateLinear
 
 
 def _patched_attention_forward(
@@ -147,23 +141,13 @@ def _patched_fused_moe_block_init(
             f"Tensor parallel size {self.tp_size} is greater than the number of experts {config.moe_num_experts}."
         )
 
-    if vllm_version_is("0.30.0"):
-        self.gate = FP32ReplicatedLinear(
-            config.hidden_size,
-            config.moe_num_experts,
-            bias=False,
-            quant_config=None,
-            params_dtype=torch.float32,  # Use FP32 for higher precision.
-            prefix=f"{prefix}.gate",
-        )
-    else:
-        self.gate = GateLinear(
-            config.hidden_size,
-            config.moe_num_experts,
-            out_dtype=torch.float32,
-            params_dtype=torch.float32,
-            prefix=f"{prefix}.gate",
-        )
+    self.gate = GateLinear(
+        config.hidden_size,
+        config.moe_num_experts,
+        out_dtype=torch.float32,
+        params_dtype=torch.float32,
+        prefix=f"{prefix}.gate",
+    )
     self.use_moe_router_bias = config.use_moe_router_bias
     assert self.use_moe_router_bias, "Only support use_moe_router_bias is true."
     self.routed_scaling_factor = config.moe_router_scaling_factor

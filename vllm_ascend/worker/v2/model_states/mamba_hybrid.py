@@ -267,8 +267,13 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             num_reqs = input_batch.num_reqs
             num_tokens = input_batch.num_tokens
 
+        is_prefilling_np = input_batch.is_prefilling_np
+        if input_batch.prefill_runs_as_decode_np is not None:
+            # vLLM #58400 runs one-token prompt tails as decodes. Their
+            # placeholder drafts need rollback-capable decode metadata.
+            is_prefilling_np = is_prefilling_np & ~input_batch.prefill_runs_as_decode_np
         is_prefilling = torch.zeros(num_reqs, dtype=torch.bool, device="cpu")
-        is_prefilling[: input_batch.num_reqs] = torch.from_numpy(input_batch.is_prefilling_np)
+        is_prefilling[: input_batch.num_reqs] = torch.from_numpy(is_prefilling_np)
 
         num_accepted_tokens = None
         num_decode_draft_tokens_cpu = None

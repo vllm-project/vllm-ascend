@@ -19,7 +19,6 @@ from vllm_ascend.models.kimi_k3_dspark import (
     AscendK3DSparkForCausalLM,
 )
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
-from vllm_ascend.utils import vllm_version_is
 
 
 def test_kimi_disabling_mlapo_refreshes_projection_nz_management():
@@ -264,21 +263,13 @@ def test_kimi_attention_residual_stays_sequence_sharded(monkeypatch):
 
     hidden_states = torch.arange(4, dtype=torch.float32).view(2, 2)
     block_residual = torch.zeros(2, 1, 2)
-    if vllm_version_is("0.30.0"):
-        output, returned_residual = layer.forward_attn_residual(
-            positions=torch.arange(3),
-            hidden_states=hidden_states,
-            block_residual=block_residual,
-        )
-        assert output.shape == torch.Size([2, 2])
-    else:
-        _, returned_residual, output = layer.forward_attn_residual(
-            positions=torch.arange(3),
-            hidden_states=hidden_states,
-            block_residual=block_residual,
-            prefix_delta=None,
-        )
-        assert output.shape == torch.Size([2, 2])
+    _, returned_residual, output = layer.forward_attn_residual(
+        positions=torch.arange(3),
+        hidden_states=hidden_states,
+        block_residual=block_residual,
+        prefix_delta=None,
+    )
+    assert output.shape == torch.Size([2, 2])
 
     assert collective_shapes == [
         ("gather", torch.Size([2, 2])),
@@ -352,43 +343,20 @@ def test_kimi_model_allocates_attention_residual_after_sp_shard(monkeypatch):
 
 
 def test_kimi_model_selects_materialized_or_raw_dspark_aux_stream(monkeypatch):
-    if vllm_version_is("0.30.0"):
+    class RecordingLayer(nn.Module):  # type: ignore[no-redef]
+        def __init__(self, layer_idx: int) -> None:
+            super().__init__()
+            self.layer_idx = layer_idx
+            self.prev_valid_blocks = layer_idx
+            self.self_attention_res_proj = SimpleNamespace(weight=torch.ones(1, 1))
+            self.self_attention_res_norm = SimpleNamespace(weight=torch.ones(1), variance_epsilon=1e-5)
 
-        class RecordingLayer(nn.Module):
-            def __init__(self, layer_idx: int) -> None:
-                super().__init__()
-                self.layer_idx = layer_idx
-                self.prev_valid_blocks = layer_idx
-                self.self_attention_res_proj = nn.Identity()
-                self.self_attention_res_norm = nn.Identity()
+        def forward(self, *, positions, hidden_states, residual, prefix_delta=None, **kwargs):
+            del positions
+            return hidden_states + 10, residual, torch.full_like(hidden_states, 5)
 
-            def prepare_attn_residual(self, prefix, bank, addend=None, **kwargs):
-                raw = prefix if addend is None else prefix + addend
-                return raw + 100 * self.prev_valid_blocks, raw, raw + 100 * self.prev_valid_blocks
-
-            def forward(self, *, positions, hidden_states, residual, prepared_attn_input, **kwargs):
-                del positions, hidden_states
-                return prepared_attn_input[1] + 10, residual, None
-
-        expected_materialized = torch.tensor([[111.0]])
-        expected_raw = torch.tensor([[11.0]])
-
-    else:
-
-        class RecordingLayer(nn.Module):  # type: ignore[no-redef]
-            def __init__(self, layer_idx: int) -> None:
-                super().__init__()
-                self.layer_idx = layer_idx
-                self.prev_valid_blocks = layer_idx
-                self.self_attention_res_proj = SimpleNamespace(weight=torch.ones(1, 1))
-                self.self_attention_res_norm = SimpleNamespace(weight=torch.ones(1), variance_epsilon=1e-5)
-
-            def forward(self, *, positions, hidden_states, residual, prefix_delta=None, **kwargs):
-                del positions
-                return hidden_states + 10, residual, torch.full_like(hidden_states, 5)
-
-        expected_materialized = torch.tensor([[1016.0]])
-        expected_raw = torch.tensor([[16.0]])
+    expected_materialized = torch.tensor([[1016.0]])
+    expected_raw = torch.tensor([[16.0]])
 
     monkeypatch.setattr(kimi_k3, "_use_attn_res_prefill_cache", lambda: False)
 

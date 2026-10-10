@@ -157,7 +157,8 @@ def test_balance_scheduler_installs_short_request_first_queue(monkeypatch, balan
         self.vllm_config = args[0]
         self.policy = SchedulingPolicy.FCFS
         self.waiting = create_request_queue(self.policy)
-        self.skipped_waiting = create_request_queue(self.policy)
+        self.kv_holding_waiting = create_request_queue(self.policy)
+        self.deferred_waiting = set()
 
     ascend_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(
@@ -611,9 +612,9 @@ _SCHEDULER_METHOD_SEAMS = [
     "_preempt_request",
     "_try_schedule_encoder_inputs",
     "_mamba_block_aligned_split",
-    "_select_waiting_queue_for_scheduling",
+    "_holds_kv_blocks",
     "_is_blocked_waiting_status",
-    "_try_promote_blocked_waiting_request",
+    "_handle_blocked_waiting_request",
     "_make_cached_request_data",
     "_update_after_schedule",
     "_build_kv_connector_meta",
@@ -691,7 +692,6 @@ def _make_balance_scheduler(*, dp_size=2, max_num_seqs=16):
     from vllm.v1.structured_output import StructuredOutputManager
 
     from vllm_ascend.patch.platform import patch_balance_schedule as pbs
-    from vllm_ascend.utils import vllm_version_is
 
     ascend_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(
@@ -711,8 +711,7 @@ def _make_balance_scheduler(*, dp_size=2, max_num_seqs=16):
         stack.enter_context(
             patch.object(ModelConfig, "is_encoder_decoder", new_callable=PropertyMock, return_value=False)
         )
-        if not vllm_version_is("0.27.1"):
-            stack.enter_context(patch.object(ModelConfig, "uses_mrope", new_callable=PropertyMock, return_value=False))
+        stack.enter_context(patch.object(ModelConfig, "uses_mrope", new_callable=PropertyMock, return_value=False))
         stack.enter_context(patch.object(pbs, "init_ascend_config", return_value=ascend_config))
         stack.enter_context(patch("vllm_ascend.ascend_config.get_ascend_config", return_value=ascend_config))
 
@@ -895,7 +894,7 @@ def test_balance_schedule_encoder_lora_preempt_and_blocked():
     scheduler.add_request(blocked)
     blocked.status = RequestStatus.WAITING_FOR_REMOTE_KVS
     scheduler._is_blocked_waiting_status = lambda status: status == RequestStatus.WAITING_FOR_REMOTE_KVS
-    scheduler._try_promote_blocked_waiting_request = MagicMock(return_value=False)
+    scheduler._handle_blocked_waiting_request = MagicMock(return_value=False)
     scheduler.schedule()
 
     preempt = _make_balance_scheduler()

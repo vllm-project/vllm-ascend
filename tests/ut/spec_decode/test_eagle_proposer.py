@@ -35,7 +35,7 @@ from vllm_ascend.ops.mla import AscendMultiHeadLatentAttention
 from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 from vllm_ascend.spec_decode.utils import SlidingWindowAdapter
-from vllm_ascend.utils import enable_custom_op, vllm_version_is
+from vllm_ascend.utils import enable_custom_op
 from vllm_ascend.worker.dcp_utils import DCPSpecDecodeFirstPassInputs
 
 enable_custom_op()
@@ -70,11 +70,6 @@ def _supports_multimodal_inputs_patch(vllm_config=None):
     removed that method and reads ``ModelConfig.supports_multimodal_inputs``
     instead. ``vllm_config`` is only required on the main lane.
     """
-    if vllm_version_is("0.30.0"):
-        return patch(
-            "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs",
-            return_value=False,
-        )
     if vllm_config is not None:
         model_config = getattr(vllm_config, "model_config", None)
         if model_config is not None:
@@ -2418,11 +2413,6 @@ class TestRunMergedDraft(TestBase):
         import vllm.multimodal.registry
 
         assert hasattr(vllm.multimodal.registry, "MultiModalRegistry")
-        # vLLM main removed this method; only check the contract on v0.30.0.
-        if vllm_version_is("0.30.0"):
-            sig = inspect.signature(vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs)
-            sig_name = self.get_param_names(sig)
-            assert sig_name == ["self", "model_config"]
 
         import vllm.v1.spec_decode.eagle
 

@@ -9,8 +9,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from vllm_ascend.utils import vllm_version_is
-
 
 def test_engram_patch_is_noop_without_upstream_config(monkeypatch):
     original_import = builtins.__import__
@@ -86,10 +84,7 @@ def test_native_engram_resolution_on_npu(engram_config, draft, shared, dp, pcp):
         assert config.engram_config is original
     # vLLM main resolves the default to True when the caller leaves it unset;
     # v0.30.0 keeps the unset value as False.
-    if vllm_version_is("0.30.0"):
-        expected_dp_shared_memory = bool(shared)
-    else:
-        expected_dp_shared_memory = True if shared is None else bool(shared)
+    expected_dp_shared_memory = True if shared is None else bool(shared)
     assert config.engram_config.dp_shared_memory == expected_dp_shared_memory
 
 
