@@ -706,6 +706,12 @@ class AscendConfig:
                 "Use PCP instead: remove enable_dsa_cp from additional_config "
                 "when --prefill-context-parallel-size is greater than 1."
             )
+        if self.enable_dsa_cp and vc.use_v2_model_runner:
+            raise ValueError(
+                "DSA-CP is not supported by Model Runner V2. "
+                "Remove enable_dsa_cp from additional_config and use "
+                "prefill context parallelism (PCP) instead."
+            )
         self._check_mooncake_c8_kv_cache_quant(vc)
 
         # profiling_chunk vs min_chunk clamp
