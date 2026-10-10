@@ -32,14 +32,20 @@ def _situ_reference(gate_up: torch.Tensor, beta: float | None, linear_beta: floa
     [(torch.float16, 2e-3, 2e-3), (torch.bfloat16, 2e-2, 2e-2), (torch.float32, 2e-4, 2e-5)],
 )
 @pytest.mark.parametrize("beta,linear_beta", [(None, None), (4.0, None), (4.0, 25.0)])
-def test_moe_lora_situ_npu_and_graph_replay(dtype, rtol, atol, beta, linear_beta) -> None:
+def test_moe_lora_situ_npu_and_graph_replay(
+    dtype: torch.dtype,
+    rtol: float,
+    atol: float,
+    beta: float | None,
+    linear_beta: float | None,
+) -> None:
     gate_up_cpu = torch.tensor(
         [[-10.0, -3.0, 2.0, 8.0, 100.0, -5.0, 9.0, -100.0], [0.0, 1.0, -1.0, 4.0, -1.0, 2.0, 3.0, 5.0]],
         dtype=dtype,
     )
     gate_up = gate_up_cpu.npu()
 
-    def activate():
+    def activate() -> torch.Tensor:
         return _apply_moe_activation(
             gate_up,
             MoEActivation.SITU,
