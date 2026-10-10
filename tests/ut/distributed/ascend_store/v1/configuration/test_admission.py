@@ -14,7 +14,9 @@ from tests.ut.distributed.ascend_store.v1.helpers import (
     make_worker,
     store_one,
 )
+from tests.ut.distributed.ascend_store.v1.scheduler.fixtures import FakeRemoteLookup, make_request
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1 import vllm_adapter
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend import BackendSpec, LayerwiseAccessKind
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.coordinates import (
     TokenRange,
 )
@@ -55,26 +57,56 @@ def _make_factory_config(
             get_total_num_hidden_layers=lambda: 2,
         ),
         speculative_config=speculative_config,
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
         additional_config={} if additional_config is None else additional_config,
     )
 
 
-def test_factories_reject_every_unverified_speculative_method(monkeypatch) -> None:
-    monkeypatch.setattr(vllm_adapter, "resolve_backend_spec", lambda _name: object())
-    monkeypatch.setattr(vllm_adapter, "get_layerwise_protocol", lambda _name: None)
-    monkeypatch.setattr(vllm_adapter, "validate_layerwise_topology", lambda *_args: None)
-    for use_layerwise in (False, True):
-        for method in ("mtp", "dspark", "eagle", "eagle3", "dflash"):
-            config = _make_factory_config(
-                speculative_config=SimpleNamespace(method=method),
-                use_layerwise=use_layerwise,
+@pytest.mark.parametrize("use_layerwise", (False, True), ids=("bulk", "layerwise"))
+@pytest.mark.parametrize(
+    "method,use_eagle",
+    (("mtp", True), ("dspark", True), ("eagle", True), ("eagle3", True), ("dflash", True), ("draft_model", False)),
+)
+def test_speculative_factories_follow_upstream_eagle_policy(monkeypatch, use_layerwise, method, use_eagle) -> None:
+    backend = FakeBackend()
+    backend_spec = BackendSpec("mooncake", lambda *_args, **_kwargs: backend, LayerwiseAccessKind.KEY_RANGE, True)
+    monkeypatch.setattr(vllm_adapter, "resolve_backend_spec", lambda _name: backend_spec)
+    monkeypatch.setattr(vllm_adapter.kv_cache_utils, "resolve_kv_cache_block_sizes", lambda *_args: (4, 4))
+    monkeypatch.setattr(vllm_adapter, "get_tp_group", lambda: SimpleNamespace(rank_in_group=0))
+    monkeypatch.setattr(vllm_adapter, "get_pp_group", lambda: SimpleNamespace(rank_in_group=0))
+    monkeypatch.setattr(vllm_adapter, "RemoteLookup", lambda _address: FakeRemoteLookup(8))
+    cache_config = SimpleNamespace(
+        num_blocks=8,
+        transfer_group_ids=(0,),
+        kv_cache_groups=[
+            SimpleNamespace(
+                layer_names=["model.layers.0.attention", "mtp.layers.0.attention"],
+                kv_cache_spec=FullAttentionSpec(block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float32),
+                is_eagle_group=False,
             )
-            for factory in ("scheduler", "worker"):
-                with pytest.raises(ValueError, match=rf"speculative method '{method}'"):
-                    if factory == "scheduler":
-                        vllm_adapter.create_kv_pool_scheduler(config, SimpleNamespace(), "unused")
-                    else:
-                        vllm_adapter.resolve_kv_pool_route_spec(config, SimpleNamespace())
+        ],
+        prefix_cache_retention_interval=None,
+    )
+    config = _make_factory_config(
+        speculative_config=SimpleNamespace(
+            method=method,
+            use_eagle=lambda: use_eagle,
+            # Production's external-cache policy does not follow this local-cache switch.
+            use_eagle_block_drop=lambda: False,
+        ),
+        use_layerwise=use_layerwise,
+    )
+
+    scheduler = vllm_adapter.create_kv_pool_scheduler(config, cache_config, "unused")
+    worker = vllm_adapter.create_kv_pool_worker(config, cache_config)
+    try:
+        assert scheduler.get_num_new_matched_tokens(make_request(prompt_tokens=8), 0) == (4 if use_eagle else 7, False)
+        binder = vllm_adapter.compile_kv_pool_projection_binder(config, cache_config)
+        assert binder.use_eagle is use_eagle
+    finally:
+        scheduler.close()
+        worker.close()
+    assert backend.closed
 
 
 def test_layerwise_factories_reject_align_state_before_route_construction(monkeypatch) -> None:
@@ -104,7 +136,10 @@ def test_layerwise_factories_reject_align_state_before_route_construction(monkey
         ],
         prefix_cache_retention_interval=None,
     )
-    config = _make_factory_config(use_layerwise=True)
+    config = _make_factory_config(
+        use_layerwise=True,
+        speculative_config=SimpleNamespace(method="mtp", use_eagle=lambda: True),
+    )
 
     for factory in ("scheduler", "worker"):
         with pytest.raises(ValueError, match="does not support Mamba align-state groups"):
