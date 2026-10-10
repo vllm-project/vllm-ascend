@@ -68,10 +68,8 @@ defaults:
     shell: bash -el {0}
 
 env:
-  UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-  UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu"
+  UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi"
   UV_INDEX_STRATEGY: unsafe-best-match
-  UV_INSECURE_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
   UV_HTTP_TIMEOUT: 120
   UV_NO_CACHE: 1
   UV_SYSTEM_PYTHON: 1
@@ -107,22 +105,16 @@ jobs:
           fetch-depth: 0
           submodules: recursive
 
-      - name: Config mirrors (ubuntu)
+      - name: Install packages (ubuntu)
         if: fromJSON(inputs.target).os == 'ubuntu'
         run: |
-          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
-          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           apt-get update -y
           apt-get install -y git zstd
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
-      - name: Config mirrors (openeuler)
+      - name: Install packages (openeuler)
         if: fromJSON(inputs.target).os == 'openeuler'
         run: |
-          sed -Ei 's@https?://[^/]+/(openeuler|centos|fedora)@http://cache-service.nginx-pypi-cache.svc.cluster.local:8081/\1@g' /etc/yum.repos.d/*.repo
-          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           yum install -y git zstd
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
