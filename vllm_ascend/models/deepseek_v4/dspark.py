@@ -329,6 +329,8 @@ class DeepseekV4DSparkModel(nn.Module):
 
 @support_torch_compile
 class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts, SupportsEagle3):
+    draft_id_to_target_id = None
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         assert vllm_config.speculative_config is not None
