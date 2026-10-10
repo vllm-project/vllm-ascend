@@ -4,6 +4,7 @@
 """Ascend communicators for asynchronous EPLB."""
 
 import contextlib
+import sys
 import time
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
@@ -617,6 +618,10 @@ class AscendHixlEplbCommunicator(EplbCommunicator):
         self.close()
 
     def __del__(self) -> None:
+        # ACL may already be shut down. Explicit close owns normal teardown;
+        # failed teardown resources are released by process exit.
+        if sys.is_finalizing():
+            return
         try:  # noqa: SIM105
             # Destruction is not collective. Normal shutdown must use close().
             self.close(coordinated=False)
