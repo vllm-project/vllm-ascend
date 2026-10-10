@@ -2294,7 +2294,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         worker = self._make_gva_worker()
         key = worker._make_layerwise_full_key(0, "h0")
         worker._allocated_gvas[key] = 101
-        worker.m_store.batch_is_exist.return_value = [0]
+        worker.m_store.batch_get_key_info.return_value = [None]
         worker.m_store.batch_alloc.return_value = [202]
         request = self._make_gva_request(can_save=True)
 
@@ -2303,6 +2303,83 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         worker.m_store.batch_alloc.assert_called_once_with([key], [64], LAYERWISE_READ_LEASE_TTL_MS)
         self.assertEqual(worker._allocated_gvas[key], 202)
         self.assertEqual(request.block_gvas_by_group_np[0].tolist(), [202])
+
+    def test_ssd_demoted_gva_is_marked_not_written_and_not_reallocated(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import (
+            LAYERWISE_READ_LEASE_TTL_MS,
+        )
+
+        worker = self._make_gva_worker()
+        # Block 1 was saved in an earlier step; its blob has since been
+        # demoted to SSD, so the cached GVA is stale. Block 0 is new.
+        demoted_key = worker._make_layerwise_full_key(0, "h1")
+        fresh_key = worker._make_layerwise_full_key(0, "h0")
+        worker._allocated_gvas[demoted_key] = 101
+        demoted_info = MagicMock()
+        demoted_info.size.return_value = 64
+        demoted_info.gva_list.return_value = []
+        worker.m_store.batch_get_key_info.return_value = [demoted_info]
+        worker.m_store.batch_alloc.return_value = [202]
+        request = ReqMeta(
+            req_id="r1",
+            token_len_chunk=32,
+            save_start_token=0,
+            save_end_token=32,
+            target_token_len=32,
+            num_prompt_tokens=32,
+            block_ids=[7, 8],
+            block_ids_by_group=[[7, 8]],
+            block_hashes=["h0", "h1"],
+            can_save=True,
+            block_ids_np=np.asarray([7, 8], dtype=np.int64),
+            block_ids_by_group_np=[np.asarray([7, 8], dtype=np.int64)],
+        )
+
+        worker._alloc_gvas_for_save([request])
+
+        # The demoted key is neither re-allocated (batch_alloc would fail
+        # with MMC_DUPLICATED_OBJECT) nor written through its stale GVA.
+        worker.m_store.batch_alloc.assert_called_once_with([fresh_key], [64], LAYERWISE_READ_LEASE_TTL_MS)
+        self.assertEqual(worker._allocated_gvas[demoted_key], 0)
+        self.assertEqual(request.block_gvas_by_group_np[0].tolist(), [202, 0])
+
+    def test_resident_gva_is_refreshed_to_store_value(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import (
+            LAYERWISE_READ_LEASE_TTL_MS,
+        )
+
+        worker = self._make_gva_worker()
+        # Block 1's blob was re-allocated elsewhere: the key is still
+        # resident, but the cached GVA no longer matches the store.
+        resident_key = worker._make_layerwise_full_key(0, "h1")
+        fresh_key = worker._make_layerwise_full_key(0, "h0")
+        worker._allocated_gvas[resident_key] = 101
+        resident_info = MagicMock()
+        resident_info.size.return_value = 64
+        resident_info.gva_list.return_value = [303]
+        worker.m_store.batch_get_key_info.return_value = [resident_info]
+        worker.m_store.batch_alloc.return_value = [202]
+        request = ReqMeta(
+            req_id="r1",
+            token_len_chunk=32,
+            save_start_token=0,
+            save_end_token=32,
+            target_token_len=32,
+            num_prompt_tokens=32,
+            block_ids=[7, 8],
+            block_ids_by_group=[[7, 8]],
+            block_hashes=["h0", "h1"],
+            can_save=True,
+            block_ids_np=np.asarray([7, 8], dtype=np.int64),
+            block_ids_by_group_np=[np.asarray([7, 8], dtype=np.int64)],
+        )
+
+        worker._alloc_gvas_for_save([request])
+
+        # The store's current GVA is adopted for the cached hole block.
+        self.assertEqual(worker._allocated_gvas[resident_key], 303)
+        self.assertEqual(request.block_gvas_by_group_np[0].tolist(), [202, 303])
+        worker.m_store.batch_alloc.assert_called_once_with([fresh_key], [64], LAYERWISE_READ_LEASE_TTL_MS)
 
     def test_partial_decode_is_saved_and_loaded_for_reused_layer(self):
         worker = self._make_worker()
