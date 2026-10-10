@@ -9,7 +9,7 @@
   2. A scalar selector chooses a BASE row tile or, for a qualified single group, a HOIST32 M-axis launch. BASE uses the existing two-dimensional `(row tiles, groups)` grid with `BLOCK_M=16` or `64`. All multi-group inputs retain BASE64.
   3. HOIST32 caps its one-dimensional grid at the vector-core count, walks M-axis tiles with a grid-stride loop, and loads the single group's weight and optional bias before that loop.
   4. Each tile computes normalization in fp32, applies the affine transform and optional gate, and stores masked outputs. Statistics are stored group-major as `[group, row]`.
-- **Supported modes**: Inference-time LayerNorm and RMSNorm, with optional bias and pre/post gate. The selector is not device-name or dtype allowlisted. Evidence consists of bounded single-operator runs, including final public-route BF16/FP16 numerical checks on Ascend910B4/P40 and historical Ascend910B3 measurements. These are separate environments; they do not establish all-device, all-dtype performance or model-level graph-capture qualification.
+- **Supported modes**: Inference-time LayerNorm and RMSNorm, with optional bias and pre/post gate. The public signature, calling convention, output aliasing, and normalization/gating semantics are unchanged.
 
 ## Parameters
 
@@ -28,36 +28,49 @@
 
 ## Constraints
 
-- `N` must be divisible by `group_size`; `weight` and optional `bias` have shape `[N]`; optional `z` and `out` have shape `[M, N]`. The wrapper checks these conditions and the last-dimension strides. Resource tiling and the routes below use the **per-group** width `N_group=group_size`, not total `N` (for example, total `N=384` with `group_size=128` has three groups of width 128).
-- All multi-group inputs (`G>1`) retain the original BASE64 launch, including its compiler resource limitations. Single-group NPU inputs with `N_group<128` use BASE16. At `N_group=128`, a single group uses HOIST32 when `4 * ceil(M / 32) >= P`, where `P` is the initialized vector-core count. The BM32 tiles need to cover at least one quarter of the initialized runtime vector cores: the boundary is M=289 for P=40 and M=353 for P=48. This is an integer tile-count rule, not a measured optimal crossover. Multi-group persistent execution is not enabled.
-- For `128 < N_group <= 512`, single-group NPU calls use BASE16 when the initialized vector-core count is available and `get_ub_size_bytes()` returns at least 196608 bytes. `BLOCK_N` is 256 for `N_group` 129–256 and 512 for 257–512. The existing getter may return its compatibility default or debugging override; its value is a routing input, not an independent compiler-resource measurement. Missing or lower UB in the scalar selector, `N_group>512`, and non-NPU calls retain BASE64. An uninitialized vector-core count continues to raise for single-group NPU calls rather than falling back; grouped baseline calls do not query it. The width is the per-group `N_group`, not total `N`.
-- BASE retains its existing `65536 / element_size` feature-width guard. That guard does not qualify other full-tile resource buckets; PR1 does not add N-axis chunking, and `N_group>512` remains on the original BASE64 route.
-- Route selection depends on shape, group count, and the initialized vector-core count, not on tensor values. No claim is made here that every route is faster on every supported device or dtype.
-- Final unforced public HOIST32 at B4/P40, N128, BF16 RMSNorm with gate before normalization (`norm_before_gate=False`), had median BASE16/candidate paired ratios of 1.033535 at M289 and 1.078332 at M639. Against the former PERSIST32 path the ratios were 0.998504 and 0.996091, with mixed directions. These controls describe simplification and the sampled selector boundary; BASE16 and PERSIST32 are not the frozen upstream BASE64 comparator, and the threshold is not an optimal crossover claim.
+- `x` is two-dimensional `[M,N]`, with positive `M` and `N_group`. `N` must be divisible by `group_size`; optional `z` and `out` match `x`, and `weight` and optional `bias` have shape `[N]`. These tensors require contiguous last dimensions. The wrapper checks shapes and strides before dispatch.
+- `group_size=None` means `N_group=N` and `G=1`. Tiling uses the per-group width, not total `N`: `[M,384]` with `group_size=128` has `G=3`.
+- LayerNorm returns fp32 `mean` and `rstd` in group-major order, with flattened index `group*M+row`; RMSNorm returns `mean=None`. The caller-provided `out` is reused when supplied.
+- BASE retains the existing `65536 / element_size` feature-width guard. This input-width guard is separate from the compiler's UB requirements.
 
 ## Model input shapes
 
-vLLM's [Qwen3.5 linear-attention layers](https://github.com/vllm-project/vllm/blob/ced6857afa0ea7b2e3f0846a62e1394e90f15607/vllm/model_executor/models/qwen3_5.py#L144-L151) use Qwen GDN. Its [output norm](https://github.com/vllm-project/vllm/blob/ced6857afa0ea7b2e3f0846a62e1394e90f15607/vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py#L487-L494) uses `group_size=None`, `norm_before_gate=True`, and RMSNorm with a gate and no bias. On Ascend, the [output-projection path](https://github.com/c5566b/vllm-ascend/blob/1097a8d766ec8abb4e3bfb9fba72b10bbe0beeb2/vllm_ascend/ops/gdn.py#L333-L341) reshapes `[T, H_local, D_v]` to `[M, N]`, where:
+vLLM's [Qwen3.5 linear-attention layers](https://github.com/vllm-project/vllm/blob/ced6857afa0ea7b2e3f0846a62e1394e90f15607/vllm/model_executor/models/qwen3_5.py#L144-L151) use Qwen GDN. Its [output norm](https://github.com/vllm-project/vllm/blob/ced6857afa0ea7b2e3f0846a62e1394e90f15607/vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py#L487-L494) uses `group_size=None`, `norm_before_gate=True`, and RMSNorm with a gate and no bias. On Ascend, the [output-projection path](https://github.com/c5566b/vllm-ascend/blob/1097a8d766ec8abb4e3bfb9fba72b10bbe0beeb2/vllm_ascend/ops/gdn.py#L333-L341) reshapes both the attention output and its gate from `[T, H_local, D_v]` to `[M, N]`. The [Ascend gated-norm wrapper](https://github.com/c5566b/vllm-ascend/blob/1097a8d766ec8abb4e3bfb9fba72b10bbe0beeb2/vllm_ascend/ops/layernorm.py#L125-L147) then calls `layer_norm_fwd_npu`. Here:
 
-- `T` is the number of token rows entering this projection on the current rank.
+- `T` is the number of token-activation rows passed to this projection on the current rank, including any rows present in its input tensor. It is not a fixed request batch size or the model's maximum sequence length.
 - `H_local` is its local value-head count (`num_v_heads / TP` in this path).
 - `M = T * H_local`, and `N = D_v`, the value-head width.
 - `group_size=None` gives `N_group=N` and `G=1`: model heads have been folded into the row dimension, rather than becoming normalization groups.
 
-| Model | Value-head width `D_v` | Value heads at TP1 `H_local` | Flattened row count at TP1 |
-| --- | ---: | ---: | --- |
-| [Qwen3.5-27B](https://huggingface.co/Qwen/Qwen3.5-27B/blob/af65380a20d418eeb0a2bcb784dd43e9b76c4a2e/config.json) | 128 | 48 | `M=48*T` |
-| [Qwen3.5-35B-A3B](https://huggingface.co/Qwen/Qwen3.5-35B-A3B/blob/41adbc1e50345066ac5153217957e9910204e632/config.json) | 128 | 32 | `M=32*T` |
+| Model | Value-head width `D_v` | Value heads at TP1 `H_local` | Flattened row count at TP1 | GDN norm epsilon |
+| --- | ---: | ---: | --- | --- |
+| [Qwen3.5-27B](https://huggingface.co/Qwen/Qwen3.5-27B/blob/af65380a20d418eeb0a2bcb784dd43e9b76c4a2e/config.json) | 128 | 48 | `M=48*T` | `1e-6` |
+| [Qwen3.5-35B-A3B](https://huggingface.co/Qwen/Qwen3.5-35B-A3B/blob/41adbc1e50345066ac5153217957e9910204e632/config.json) | 128 | 32 | `M=32*T` | `1e-6` |
 
-For example, four token rows at TP1 give `M=192` for Qwen3.5-27B and `M=128` for Qwen3.5-35B-A3B. Both configurations use `rms_norm_eps=1e-6`. Operator performance cases are stated in flattened `[M,N]` coordinates; boundary and tail controls need not map to an integer token count for a particular model. They are single-operator measurements, not model-throughput measurements.
+Each flattened row is one `(token, local value head)` pair: `row=t*H_local+h`. The normalization weight (and optional bias) has width `D_v` and is reused across these rows. `G=N/N_group` counts groups within a row; it is not the number of model value heads.
+
+For example, four token rows at TP1 give `M=192` for Qwen3.5-27B and `M=128` for Qwen3.5-35B-A3B. At TP1, the Qwen3.5-35B-A3B head count also maps 2048 token rows to `M=65536`. These are shape mappings, not captured model benchmarks. Both Qwen configurations use `rms_norm_eps=1e-6`. Operator performance cases are stated in flattened `[M,N]` coordinates; boundary and tail controls need not map to an integer token count for a particular model. They are single-operator measurements, not model-throughput measurements.
+
+[OLMo-Hybrid-7B](https://huggingface.co/allenai/Olmo-Hybrid-7B/blob/712e06263b8656a2ea6ec2c395106f19bba2f50f/config.json) has 30 value heads of width 192. Its [GDN output norm](https://github.com/vllm-project/vllm/blob/ced6857afa0ea7b2e3f0846a62e1394e90f15607/vllm/model_executor/layers/mamba/gdn/olmo_gdn_linear_attn.py#L149-L157) also uses single-group RMSNorm with `norm_before_gate=True`, and its [output-projection reshape](https://github.com/vllm-project/vllm/blob/ced6857afa0ea7b2e3f0846a62e1394e90f15607/vllm/model_executor/layers/mamba/gdn/olmo_gdn_linear_attn.py#L279-L288) gives `M=30*T` at TP1 and `N=N_group=192`. Two token rows therefore map to `[60,192]`, motivating the resource control below. The pinned GDN implementation sets its output-norm epsilon to `1e-5`; the resource controls use `1e-6` and test both gate orders. They exercise this width and the operator's supported semantics, rather than reproducing all OLMo call parameters.
+
+## Execution paths and dispatch
+
+The existing BASE kernel is launched with BM16 (BASE16) or BM64 (BASE64). HOIST32 uses BM32, caps its grid at the initialized vector-core count, and processes row blocks in a grid-stride loop. Loading weight and optional bias outside that loop reuses them when a program processes multiple blocks.
+
+| Input condition | Route | Row block | Grid |
+| --- | --- | ---: | --- |
+| `G>1`, or non-NPU input | BASE64 | 64 | `(ceil(M/64), G)` |
+| NPU, `G=1`, `N_group<128` | BASE16 | 16 | `(ceil(M/16), 1)` |
+| NPU, `G=1`, `N_group=128`, `4*ceil(M/32)<P` | BASE16 | 16 | `(ceil(M/16), 1)` |
+| NPU, `G=1`, `N_group=128`, `4*ceil(M/32)>=P` | HOIST32 | 32 | `(min(P, ceil(M/32)),)` |
+| NPU, `G=1`, `129<=N_group<=512`, UB getter reports at least 192 KiB | BASE16 | 16 | `(ceil(M/16), 1)` |
+| Remaining inputs | BASE64 | 64 | `(ceil(M/64), G)` |
+
+`P` is supplied by the initialized device properties; it is not a hardcoded core count. The N128 boundary is M=289 at P=40 and M=353 at P=48. This tile-count rule is supported by the sampled cases, rather than a precisely measured universal crossover. Route selection uses shape and resource properties, not tensor values, and does not impose a device-name or dtype allowlist.
 
 ## Origin and Differences
 
-- **Origin**: The existing `layernorm_gated.py` implementation is adapted from Flash Linear Attention's gated LayerNorm and the Triton LayerNorm tutorial. PR1 reuses the original BASE kernel's normalization and gating math.
-- **Differences**:
-    - NPU execution can use a smaller BASE row tile or a capped persistent M-axis grid instead of always launching one BASE64 program per row tile.
-    - HOIST32 moves single-group weight and optional bias loads outside each program's M-tile loop. This describes source-level work placement, not an isolated measured speedup claim.
-    - The selector retains BASE64 for multiple groups, `N_group>512`, or insufficient BASE16 qualification; N-chunk/C2 dispatch is not part of PR1. This fallback does not guarantee freedom from compiler resource failures.
+The BASE implementation is adapted from Flash Linear Attention's gated LayerNorm and the Triton LayerNorm tutorial. This change reuses its mathematical body, selects smaller row tiles for eligible single-group inputs, and adds persistent execution with parameter reuse for N128. All grouped inputs retain the original BASE64 execution.
 
 ## Test Cases
 
@@ -75,37 +88,47 @@ For example, four token rows at TP1 give `M=192` for Qwen3.5-27B and `M=128` for
 
 - Additional cases derive M from the initialized vector-core count to exercise BASE16 immediately below the threshold, HOIST32 at and above the threshold, and HOIST32 at M=65536. They record the actual JIT launch through the public wrapper and compare `out`, `mean`, and `rstd` with the same CPU reference for limited BF16/FP16 RMSNorm/LayerNorm and gate combinations. These cases still require execution on a matching-main NPU environment before claiming in-tree NPU coverage of the new routes.
 
-## Bounded offline validation
+## On-device validation
 
-- Code checkpoint `bdbdc07a9f268751bed01dff3a0b300b0005cb0f`: notebook-native unforced public regression on Ascend910B4/P40, CANN 8.5, run `pr1_20261003T053128Z_b223ff93`, passed 24 cases with two seeds each. M288 uses BASE16; M289/290/639/640 use HOIST32. BF16/FP16 outputs and applicable statistics passed the frozen CPU-reference tolerances. No NaN was observed; an earlier M288 first-launch NaN has an unresolved cause and is not claimed fixed.
-- The same checkpoint's M289 and M639 public performance runs (`pr1_20261003T080327Z_3df6fcb2` and `pr1_20261003T090228Z_acd3c642`) use three ABBA blocks and six pairs per comparison. The reported metric is the median of individual baseline/candidate duration ratios. This is single-operator evidence, not model throughput.
-- Earlier checkpoint `b03e4adb51d047ede4ade6b55a11ae863f1d0e5e` passed 32 public numerical items, including N192/256/384/512 BASE16 representatives. The single-group wide routes and kernel bodies are unchanged; reuse retains each recorded dtype and gate order. Historical smaller-tile grouped results do not qualify the current grouped BASE64 fallback. That earlier N192 public evidence used BF16 RMS+Z with `norm_before_gate=False`; the separate final-source True/False controls below now validate both recorded gate orders. Its M65536 BF16 RMS+Z `norm_before_gate=False` BASE64/HOIST32 paired median is 1.360094, reused as unchanged-route evidence rather than a rerun of the final commit or evidence for `True`. The final-source upstream comparison and N192 controls are now completed for the bounded matrix below.
-- Native offline runs do not execute the matching-main in-tree Nightly suite or full vLLM integration. Matching-main CI/Nightly, model and graph-replay qualification remain unverified.
+### Qwen-aligned N128 route comparison
 
-### Final-source upstream value controls (2026-10-05)
+Six batches on Ascend910B4/P40, 192 KiB UB, and CANN 8.5 compare frozen BASE64 with the selected public route and the alternative route. All use N128/G1/BF16 RMSNorm, `z` present, no bias, `eps=1e-6`, and `norm_before_gate=True`, matching the Qwen GDN normalization parameters described above. M128 tests small M; M288/289 bracket dispatch; M639/M20449 check tails; M20449/M65536 cover larger workloads.
 
-Seven native batches compare frozen upstream `5f8a1286a2d04d35b94ebc8a961057c48a7b82d2` with final PR1 `bdbdc07a9f268751bed01dff3a0b300b0005cb0f`, using complete unforced public wrappers on one Ascend910B4 logical device0 with initialized P40 and UB196608. Five timing cases use N128/G1/BF16 RMS+Z/no bias, `norm_before_gate=False`, eps1e-6. Both subjects pass two numeric seeds (32744904/32744905) before timing at seed32744904.
+All 36 numerical checks passed (two seeds per route and shape), with outputs and applicable statistics compared against the CPU reference. The offline tolerances are `atol=rtol=0.03` for output and `0.005` for statistics. These are the recorded offline tolerances; the in-tree Nightly test defines its own dtype-specific tolerances.
 
-| M | Final route/grid | Median BASE64 / final ratio | Six-pair observed range | Run UTC / hex suffix |
-| ---: | --- | ---: | --- | --- |
-| 128 | BASE16 [8,1] | 1.470820x | 1.410170–1.532143x | 2026-10-05T03:54:15Z / 0xafed90c9 |
-| 288 | BASE16 [18,1] | 1.153072x | 1.118541–1.215190x | 2026-10-05T05:53:46Z / 0x30972383 |
-| 289 | HOIST32 [10] | 1.161114x | 1.147147–1.212308x | 2026-10-05T06:25:59Z / 0x0dc60abd |
-| 639 | HOIST32 [20] | 1.059783x | 1.038461–1.080111x | 2026-10-05T06:40:22Z / 0xec136b8d |
-| 20449 | HOIST32 [40] | 1.271823x | 1.256373–1.318982x | 2026-10-05T07:18:37Z / 0x677bd8f4 |
+| M | N_group | G | Dtype | Norm | z / bias | norm_before_gate | BASE64 (frozen baseline) | BASE16 (route 1) | HOIST32 (route 2) | Selected route |
+| ---: | ---: | ---: | --- | --- | --- | --- | ---: | ---: | ---: | --- |
+| 128 | 128 | 1 | BF16 | RMSNorm | Yes / No | True (post-gate) | 8.310 / 1.000x | **5.590 / 1.487x** | 6.030 / 1.378x | **BASE16** |
+| 288 | 128 | 1 | BF16 | RMSNorm | Yes / No | True (post-gate) | 7.670 / 1.000x | **6.430 / 1.193x** | 6.550 / 1.171x | **BASE16** |
+| 289 | 128 | 1 | BF16 | RMSNorm | Yes / No | True (post-gate) | 7.440 / 1.000x | 6.600 / 1.127x | **6.620 / 1.124x** | **HOIST32** |
+| 639 | 128 | 1 | BF16 | RMSNorm | Yes / No | True (post-gate) | 7.750 / 1.000x | 8.190 / 0.946x | **7.530 / 1.029x** | **HOIST32** |
+| 20449 | 128 | 1 | BF16 | RMSNorm | Yes / No | True (post-gate) | 53.121 / 1.000x | 142.033 / 0.374x | **41.071 / 1.293x** | **HOIST32** |
+| 65536 | 128 | 1 | BF16 | RMSNorm | Yes / No | True (post-gate) | 160.553 / 1.000x | 444.989 / 0.361x | **117.612 / 1.365x** | **HOIST32** |
 
-Each row retains three serial ABBA blocks,12 target timings and six individual duration ratios, with a whole-batch shared profiler lock. Timing is raw msprof OpBasicInfo device-task duration,5 warmups/1 launch and a synchronized driver, excluding host comparisons and process wall time. All30 observed pairs favor final PR1 for these points; the result describes the complete tiling/dispatch change, not an isolated hoist contribution or universal non-regression. M288 and M289 test both threshold sides against BASE64 but differ in shape, so they do not establish an optimal same-shape route crossover. M65536 remains separate unchanged-route evidence, not one of the new30 pairs.
+Route cells show median device duration (us) and speedup relative to BASE64, with BASE64 normalized to `1.000x`. Bold cells mark the selected route. Timing uses `msprof op` target-kernel device-task duration, five warm-ups, one profiled launch, and three serial A-B-B-A blocks per comparison. The six batches contain 144 timing samples. Kernel route, row tile, grid, and mathematical flags were verified. Each shape has a BASE64/public-route comparison and an alternative/public-route comparison. The table uses the public-route median from the former and the alternative-route median from the latter; each speedup is the BASE64 duration median divided by that route's median. No acceleration ratios are multiplied or pooled across gate orders.
 
-M60/N192/G1/BF16 RMS+Z/no bias/eps1e-6 was independently tested with both gate orders: True run `pr1_20261005T015155Z_f174c9c4`, False run `pr1_20261005T023048Z_007e45a3`. Each order uses two fixed seeds. All four upstream BASE64 BM64/BN256/grid[1,1] attempts were explicit compiler UB negatives (2629632 required versus1572864 available bits), numeric NOT_RUN. Same-input final public FT_BASE BM16/BN256/grid[4,1] passed all four numerical checks; separate fresh-process health probes passed after each negative. N192 timing/speedup is N/A. This supports runability for these exact modes, not every device/dtype/width.
+The selected routes improve over BASE64 at all six points. Near the boundary, the two candidate routes have similar timings; the threshold is not a universal fastest-route claim. At M20449 and M65536, HOIST32 improves over BASE64 by 1.293x and 1.365x and also substantially outperforms the BASE16 controls. These comparisons evaluate persistent execution and parameter reuse together, rather than isolating parameter hoisting.
 
-Across these seven batches,24 numeric items PASS and four upstream items are compiler resource negatives, not28 numeric PASS. All60 target timings/30 pairs and full saved scientific data were independently reviewed. Output atol/rtol .03/.03 and statistics .005/.005 are elementwise allclose tolerances. M20449's640 BM32 tiles include one valid row in the last tile; all saved valid rows and that tail were checked. Native results are NOT_A_TOOLKIT_RUN, descriptive_only, automated_go=false. Current finite M288 evidence does not resolve the historical first-launch NaN cause. Matching-main CI/Nightly, full model/graph and broader device/dtype qualification remain pending; these historical results do not qualify subsequent whole-source revisions.
+### N192 resource control
 
-### Wide HOIST resource probe (2026-10-06)
+M60/N192/G1/BF16 RMSNorm with `z`, no bias, and `eps=1e-6` was tested with the same baseline/candidate inputs for both gate orders in the same B4/P40 environment. Each uses two seeds.
 
-A separately forced experimental HOIST32 route (BM32/BN256/grid40) was tested at N256/G1, M20449 and M2560, BF16 RMS+Z/no bias, norm_before_gate=True, on the same B4/P40/192 KiB UB environment. Each first-seed public BASE16 control passed; each HOIST32 attempt was rejected during compilation: 1713152 bits (209.125 KiB) required versus 1572864 bits (192 KiB) available. Independent tiny NPU health probes passed. Candidate numerics were NOT_RUN, remaining seeds and all timing positions were stopped, and no performance ratios exist.
+| M | N_group | G | norm_before_gate | Upstream BASE64 (BM64/BN256) | Public PR1 BASE16 (BM16/BN256) |
+| ---: | ---: | ---: | --- | --- | --- |
+| 60 | 192 | 1 | True (post-gate) | Compile failed: 321 KiB required > 192 KiB available | Compiled; numerical checks passed |
+| 60 | 192 | 1 | False (pre-gate) | Compile failed: 321 KiB required > 192 KiB available | Compiled; numerical checks passed |
 
-The experimental override is not part of this PR's public dispatch. The M2560 probe was run without the planned positive-first-point continuation prerequisite and is retained as an additional resource negative. These two failures do not qualify wide-N HOIST or prove all N>128 implementations impossible. PR1 retains BASE16 for its qualified single-group intermediate widths; further HOIST tiling work is deferred.
+BASE64 requires 321 KiB on the 192 KiB target; it fails compilation and has no numerical or performance result. BASE16 compiles and passes numerical checks for both orders. Independent fresh-process NPU health probes passed after every baseline compile failure. These measurements establish the resource repair for the tested inputs, not an N192 speedup.
 
-### Grouped baseline fallback (2026-10-10)
+### Evidence reuse
 
-Multi-group inputs now use the original BASE kernel with BM64 for every group width. The grouped BM32 tuning configuration is removed, and grouped calls no longer need initialized vector-core or UB getters. Kernel bodies, group offsets, output/statistics layout, and single-group launch selection are unchanged. The six Qwen-aligned N128/G1 True performance cases and N192/G1 True/False resource controls retain their measured execution configurations; this reuse is not a new device run of the revised wrapper. No grouped performance improvement or wide-group UB repair is claimed.
+The native packages use PR1 runtime checkpoint `bdbdc07a9f268751bed01dff3a0b300b0005cb0f` and frozen upstream `5f8a1286a2d04d35b94ebc8a961057c48a7b82d2`. Subsequent grouped BASE64 fallback and BASE16 naming cleanup preserve these single-group kernel bodies and measured launch configurations. The revised wrapper as a whole has not been rerun on device. Earlier gate-before-normalization measurements remain separate historical evidence and are not pooled into the Qwen-aligned table. The earlier 24-case BF16/FP16 public-route regression and N192/256/384/512 single-group numerical controls also remain bounded evidence for their unchanged paths.
+
+## Known limitations and remaining validation
+
+- **Grouped inputs**: All `G>1` cases retain BASE64. No grouped performance improvement or grouped UB repair is claimed; the baseline's resource limitations remain.
+- **Wide inputs**: HOIST32 is selected only at single-group N128. At N256/G1, experimental forced HOIST32 probes for M20449 and M2560 required 209.125 KiB UB on a 192 KiB target and failed compilation; the BASE16 numerical controls passed. There is no wide-HOIST timing or numerical result. These negatives do not show that every possible wide-N implementation is infeasible.
+- **UB envelope**: Qualified single-group widths 129–512 use BASE16; `BLOCK_N` is 256 for widths 129–256 and 512 for widths 257–512. Missing or lower UB in the scalar selector, or widths above 512, retain BASE64. A BASE fallback does not guarantee compilation for arbitrary widths, dtypes, or mathematical modes.
+- **Runtime properties**: Single-group NPU calls require the existing device-property initialization contract. An uninitialized vector-core getter raises; it does not silently select BASE64. Grouped calls do not query these properties. The UB getter may return its compatibility default or the existing debugging override, so its routing value is not an independent measurement of the compiler's resource use.
+- **Performance scope**: The displayed gains are BF16 single-operator measurements on B4/P40 with the stated semantics. Host route tests and BF16/FP16 numerical checks do not establish speedup for every dtype, shape, device, or gate order. Simulator traces explain execution mechanisms but do not prove numerical correctness or device speedup.
+- **Remaining validation**: Matching-main in-tree NPU CI/Nightly, full model execution, and graph replay remain unverified by these offline runs. The earlier M288 first-launch NaN did not recur in the final tests; its cause remains unresolved.
