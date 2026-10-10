@@ -137,11 +137,9 @@ def resolve_bounded_replay(vllm_config: VllmConfig, cache_config: CacheConfig | 
         # have to be named here.
         return False
     if vllm_config.parallel_config.prefill_context_parallel_size > 1:
-        # Upstream's condition and wording: the PAD pass walks the batch the
-        # rank was handed, which under PCP is not the batch the scheduler
-        # rewound. The runner guard above already covers it today -- Ascend
-        # rejects PCP on the V1 runner at startup -- but for a different reason,
-        # so this has to be stated separately for the day that is lifted.
+        # The PAD pass walks the batch the rank was handed, which under PCP is
+        # not the batch the scheduler rewound. Keep replay disabled until the
+        # per-rank replay boundaries can be mapped correctly.
         logger.warning_once(
             "SWA bounded replay is off under prefill context parallelism (the replayed tokens' slot "
             "padding knows the rank-local batch only); the sliding-window cache takes part in prefix "
