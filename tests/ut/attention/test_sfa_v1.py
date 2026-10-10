@@ -1558,6 +1558,49 @@ class TestAscendSFAImpl(TestBase):
         path = self.impl._resolve_preprocess_type(torch.bfloat16)
         self.assertEqual(path, PreprocessType.PROLOG_V3)
 
+    def test_quantized_prolog_with_unquantized_indexer_uses_native(self):
+        self._set_quant(AscendW8A8DynamicLinearMethod)
+        self.impl.has_indexer = True
+        self.impl.skip_indexer_pre_process = False
+        self.impl.indexer = SimpleNamespace(wq_b=SimpleNamespace())
+        self.impl.enable_sparse_sfa_turboquant = False
+        self.impl.enable_sparse_sfa_c8 = True
+        self.assertEqual(self.impl._resolve_preprocess_type(torch.bfloat16), PreprocessType.NATIVE)
+
+    def test_quantized_prolog_with_missing_indexer_projection_uses_native(self):
+        self._set_quant(AscendW8A8DynamicLinearMethod)
+        self.impl.has_indexer = True
+        self.impl.indexer = SimpleNamespace()
+        self.impl.enable_sparse_sfa_turboquant = False
+        self.impl.enable_sparse_sfa_c8 = True
+        self.assertEqual(self.impl._resolve_preprocess_type(torch.bfloat16), PreprocessType.NATIVE)
+
+    def test_quantized_prolog_with_quantized_indexer_stays_fused(self):
+        self._set_quant(AscendW8A8DynamicLinearMethod)
+        self.impl.has_indexer = True
+        self.impl.skip_indexer_pre_process = False
+        self.impl.indexer = SimpleNamespace(wq_b=SimpleNamespace(weight_scale=torch.ones(1)))
+        self.impl.enable_sparse_sfa_turboquant = False
+        self.impl.enable_sparse_sfa_c8 = True
+        self.assertEqual(self.impl._resolve_preprocess_type(torch.bfloat16), PreprocessType.PROLOG_V3)
+
+    def test_unquantized_prolog_with_unquantized_indexer_uses_native(self):
+        self._set_quant(None)
+        self.impl.is_kv_consumer = True
+        self.impl.has_indexer = True
+        self.impl.indexer = SimpleNamespace(wq_b=SimpleNamespace())
+        self.impl.enable_sparse_sfa_turboquant = False
+        self.impl.enable_sparse_sfa_c8 = False
+        self.assertEqual(self.impl._resolve_preprocess_type(torch.bfloat16), PreprocessType.NATIVE)
+
+    def test_skipped_unquantized_indexer_preserves_native_query_path(self):
+        self._set_quant(AscendW8A8DynamicLinearMethod)
+        self.impl.has_indexer = True
+        self.impl.skip_indexer_pre_process = True
+        self.impl.indexer = SimpleNamespace(wq_b=SimpleNamespace())
+        self.impl.enable_sparse_sfa_turboquant = False
+        self.assertEqual(self.impl._resolve_preprocess_type(torch.bfloat16), PreprocessType.NATIVE)
+
     def test_resolve_path_w8a8_mlapo_enabled_goes_mlapo(self):
         """W8A8 + enable_mlapo → MLAPO."""
         self._set_quant(AscendW8A8LinearMethod)
