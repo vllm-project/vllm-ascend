@@ -221,7 +221,7 @@ def layer_norm_fwd_npu(
 
     runtime_p = None
     ub_bytes = None
-    if getattr(getattr(x, "device", None), "type", None) == "npu":
+    if ngroups == 1 and getattr(getattr(x, "device", None), "type", None) == "npu":
         runtime_p = get_vectorcore_num()
         if 128 < group_size <= FT16_MAX_N_GROUP:
             ub_bytes = get_ub_size_bytes()
@@ -234,8 +234,8 @@ def layer_norm_fwd_npu(
     )
 
     # BASE selections reuse the upstream kernel and feature-dimension guard.
-    # Non-NPU and unqualified wide-N inputs retain BLOCK_M=64; qualified NPU
-    # inputs may use a smaller row tile.
+    # Grouped, non-NPU, and unqualified wide-N inputs retain BLOCK_M=64;
+    # qualified single-group NPU inputs may use a smaller row tile.
     if spec.impl == "FT_BASE":
         max_fused_size = 65536 // x.element_size()
         block_n = min(max_fused_size, triton.next_power_of_2(group_size))

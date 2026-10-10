@@ -198,6 +198,60 @@ def _unload_layernorm_fakes(saved):
 
 
 class WrapperRouteTests(unittest.TestCase):
+    def test_grouped_baseline_launch_needs_no_initialized_resource_getters(self):
+        layer, state, launches, saved = _load_layernorm_with_fakes()
+        state["vector_cores"] = None
+        state["ub_size"] = None
+        try:
+            for rows, groups in ((65, 2), (65536, 4)):
+                for width in (63, 128, 192, 512, 513):
+                    for rms, gate_before in ((False, False), (True, True)):
+                        with self.subTest(rows=rows, groups=groups, width=width, rms=rms):
+                            columns = width * groups
+                            x = _FakeTensor((rows, columns), "bfloat16")
+                            weight = _FakeTensor((columns,), "bfloat16")
+                            bias = None if rms else _FakeTensor((columns,), "bfloat16")
+                            z = _FakeTensor((rows, columns), "bfloat16")
+                            out = _FakeTensor((rows, columns), "bfloat16")
+                            result = layer.layer_norm_fwd_npu(
+                                x,
+                                weight,
+                                bias,
+                                1e-6,
+                                z=z,
+                                out=out,
+                                group_size=width,
+                                norm_before_gate=not gate_before,
+                                is_rms_norm=rms,
+                            )
+                            name, grid, args, kwargs = launches[-1]
+                            self.assertEqual(name, "_layer_norm_fwd_1pass_kernel_npu")
+                            self.assertEqual(grid, ((rows + 63) // 64, groups))
+                            self.assertEqual(len(args), 13)
+                            self.assertEqual(args[7:13], (columns, columns, columns, rows, width, 1e-6))
+                            self.assertEqual(
+                                (kwargs["BLOCK_M"], kwargs["BLOCK_N"]), (64, 1 << (width - 1).bit_length())
+                            )
+                            self.assertEqual(kwargs["NORM_BEFORE_GATE"], not gate_before)
+                            self.assertEqual(kwargs["IS_RMS_NORM"], rms)
+                            self.assertIs(result[0], out)
+                            self.assertIs(args[0], x)
+                            self.assertIs(args[1], out)
+                            self.assertIs(args[2], weight)
+                            self.assertIs(args[3], bias)
+                            self.assertIs(args[4], z)
+                            self.assertIs(args[5], result[1])
+                            self.assertIs(args[6], result[2])
+                            if rms:
+                                self.assertIsNone(result[1])
+                            else:
+                                self.assertEqual(result[1].shape, (groups * rows,))
+                            self.assertEqual(result[2].shape, (groups * rows,))
+            self.assertEqual(state["getter_calls"], 0)
+            self.assertEqual(state["ub_getter_calls"], 0)
+        finally:
+            _unload_layernorm_fakes(saved)
+
     def test_public_wrapper_launch_contract_and_fallbacks(self):
         layer, state, launches, saved = _load_layernorm_with_fakes()
         try:
@@ -302,8 +356,8 @@ class WrapperRouteTests(unittest.TestCase):
             call(2048, columns=256, group_size=128)
             name, grid, args, kwargs = launches[-1]
             self.assertEqual(name, "_layer_norm_fwd_1pass_kernel_npu")
-            self.assertEqual(grid, (64, 2))
-            self.assertEqual(kwargs["BLOCK_M"], 32)
+            self.assertEqual(grid, (32, 2))
+            self.assertEqual(kwargs["BLOCK_M"], 64)
 
             call(287, bias=False, z=True)
             name, grid, args, kwargs = launches[-1]
@@ -352,18 +406,18 @@ class WrapperRouteTests(unittest.TestCase):
             # Routing uses per-group width, not the total tensor width.
             before_ub_calls = state["ub_getter_calls"]
             call(65, columns=384, group_size=128)
-            self.assertEqual(launches[-1][1], (3, 3))
+            self.assertEqual(launches[-1][1], (2, 3))
             self.assertEqual(launches[-1][2][11], 128)
-            self.assertEqual(launches[-1][3]["BLOCK_M"], 32)
+            self.assertEqual(launches[-1][3]["BLOCK_M"], 64)
             self.assertEqual(launches[-1][3]["BLOCK_N"], 128)
             self.assertEqual(state["ub_getter_calls"], before_ub_calls)
 
             call(65, columns=384, group_size=192)
-            self.assertEqual(launches[-1][1], (5, 2))
+            self.assertEqual(launches[-1][1], (2, 2))
             self.assertEqual(launches[-1][2][11], 192)
-            self.assertEqual(launches[-1][3]["BLOCK_M"], 16)
+            self.assertEqual(launches[-1][3]["BLOCK_M"], 64)
             self.assertEqual(launches[-1][3]["BLOCK_N"], 256)
-            self.assertEqual(state["ub_getter_calls"], before_ub_calls + 1)
+            self.assertEqual(state["ub_getter_calls"], before_ub_calls)
 
             for ub_size in (196607, None):
                 state["ub_size"] = ub_size
