@@ -751,6 +751,8 @@ def test_sharded_target_graph_prefill_rebuilds_global_metadata(
     attn_architecture: str, target_has_padding: bool
 ) -> None:
     speculator = object.__new__(AscendMTPSpeculator)
+    speculator.input_buffers = SimpleNamespace(query_start_loc=torch.tensor([0, 4, 4], dtype=torch.int32))
+    query_buffer_ptr = speculator.input_buffers.query_start_loc.data_ptr()
     speculator.replicated_pcp = True
     speculator.pcp_manager = SimpleNamespace(is_decode_sharded=True)
     speculator.attn_architecture = attn_architecture
@@ -777,6 +779,8 @@ def test_sharded_target_graph_prefill_rebuilds_global_metadata(
     np.testing.assert_array_equal(kwargs["query_start_loc_np"], [0, 4, 8])
     assert kwargs["seq_lens_cpu_upper_bound"].tolist() == [9, 0]
     assert kwargs["num_reqs"] == 2
+    assert speculator.input_buffers.query_start_loc.tolist() == [0, 4, 8]
+    assert speculator.input_buffers.query_start_loc.data_ptr() == query_buffer_ptr
     assert kwargs["batch_desc"].num_tokens == 8
     np.testing.assert_array_equal(batch.query_start_loc_np, [0, 4])
     assert batch.seq_lens_cpu_upper_bound.tolist() == ([9, 99] if target_has_padding else [9])

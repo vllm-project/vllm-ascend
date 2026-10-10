@@ -275,6 +275,8 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
                 query_start_loc_np[num_reqs], num_tokens_padded, num_reqs_padded - num_reqs + 1, dtype=np.int32
             )
             query_start_loc_np = np.concatenate((query_start_loc_np[:num_reqs], padding_boundaries))
+            # The builder reads GPU boundaries from the existing draft buffer.
+            self.input_buffers.query_start_loc[: num_reqs_padded + 1].copy_(torch.from_numpy(query_start_loc_np))
             padded_seq_lens_cpu = torch.zeros(num_reqs_padded, dtype=seq_lens_cpu.dtype)
             padded_seq_lens_cpu[:num_reqs].copy_(seq_lens_cpu[:num_reqs])
             seq_lens_cpu = padded_seq_lens_cpu
