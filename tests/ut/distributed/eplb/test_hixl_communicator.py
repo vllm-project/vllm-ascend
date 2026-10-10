@@ -378,6 +378,23 @@ def test_failed_cpu_group_is_not_reused_for_cleanup(monkeypatch):
     assert communicator._engine is not None
 
 
+def test_rank_confirmation_uses_cpu_under_a_device_context(monkeypatch):
+    communicator = _bare_communicator(monkeypatch)
+    communicator._group_error = None
+    communicator._world_size = 2
+    communicator._cpu_group = object()
+    del communicator._confirm_all_ranks
+
+    def all_reduce(tensor, **_kwargs):
+        assert tensor.device.type == "cpu"
+        tensor.fill_(2)
+        return MagicMock()
+
+    monkeypatch.setattr(torch.distributed, "all_reduce", all_reduce)
+    with torch.device("meta"):
+        communicator._confirm_all_ranks(None, "initialization")
+
+
 @pytest.mark.parametrize("rollback_fails", [False, True])
 def test_initialization_rollback_failure_bypasses_rpc_and_retains_storage(monkeypatch, rollback_fails):
     communicator = _bare_communicator(monkeypatch)
