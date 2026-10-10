@@ -456,8 +456,8 @@ class NPUModelRunner(GPUModelRunner):
         self.use_sparse = enable_sfa(vllm_config)
         # Backends that derive per-token visible history from self.positions
         # rather than from seq_lens: the LightningIndexer SFA family and the
-        # GLM-Next kpool indexer. Both reach SparseMLAMetadataState.prepare(),
-        # which calls indexer.get_topk_lengths(positions).
+        # GLM-Next kpool indexer. Both need real positions to select causally
+        # valid sparse indices.
         self.uses_positions_for_attention = self.use_sparse or model_uses_kpool_indexer(
             getattr(vllm_config, "model_config", None)
         )

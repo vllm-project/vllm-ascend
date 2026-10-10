@@ -7,7 +7,7 @@ import torch_npu
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import get_pcp_group, get_tensor_model_parallel_world_size
-from vllm.forward_context import get_forward_context, is_forward_context_available
+from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadataBuilder
 from vllm.model_executor.utils import replace_parameter
@@ -138,10 +138,8 @@ def generate_smla_plan(metadata, num_heads, head_dim, topk, cu_seqlens_q, topk_l
     )
 
 
-def build_smla_metadata(metadata, buffer, num_heads, head_dim, topk):
-    generated = generate_smla_plan(
-        metadata, num_heads, head_dim, topk, metadata.query_start_loc, metadata.smla_topk_length
-    )
+def build_smla_metadata(metadata, buffer, num_heads, head_dim, topk, cu_seqlens_q, topk_length):
+    generated = generate_smla_plan(metadata, num_heads, head_dim, topk, cu_seqlens_q, topk_length)
     if generated.numel() != buffer.numel():
         # The persistent buffer is sized by the operator's fixed [1024] contract.
         # A generated plan of any other size means this build does not match the
@@ -178,44 +176,28 @@ def sparse_mla(query, cache, indices, metadata, scale):
         sorted_indices = torch.where(sorted_indices == sentinel, -1, sorted_indices)
         if metadata.smla_sinks is None:
             raise RuntimeError("Sparse MLA requires persistent sinks owned by SparseMLAMetadataState.")
-        # Default to the very tensors the plan in metadata.smla_metadata was
-        # generated from, so plan and call always describe the same work.
-        topk_length = metadata.smla_topk_length
+        # MTP and shared indexers can reuse selections while positions advance.
+        # Count the actual left-aligned prefix on every call, including target
+        # FULL graphs whose query shape still matches the metadata capacity.
+        topk_length = metadata.smla_topk_length[: query.shape[0]]
+        metadata.smla_topk_length.zero_()
+        # The builder refreshes this persistent mask outside graph capture.
+        # A Python token count used here would freeze at the captured batch size.
+        valid = metadata.smla_valid_mask[: query.shape[0]]
+        topk_length.copy_((sorted_indices >= 0).sum(dim=-1, dtype=torch.int32).masked_fill(~valid, 0))
         cu_seqlens_q = metadata.query_start_loc
-        plan = metadata.smla_metadata
-        # The plan has to be generated from the very tensors the operator call
-        # receives: a plan built over different ones makes the kernel index past
-        # what it was handed. The shape check below catches the eager case, where
-        # the query is trimmed to the unpadded row count, but a replayed FULL
-        # draft graph passes the padded count the plan was built for. The MTP
-        # draft replays one captured graph per step, so its pre-built plan can
-        # describe a different step's rows; rebuild from the indices actually
-        # passed whenever the draft model is running.
-        draft_model = is_forward_context_available() and getattr(get_forward_context(), "is_draft_model", False)
-        if query.shape[0] != topk_length.shape[0] or draft_model:
-            # Eager and piecewise steps trim the query to the unpadded token
-            # count, while the plan built during metadata construction still
-            # describes the padded one (graph capacity, and under data
-            # parallelism the group-wide token count, which can be hundreds of
-            # rows larger). cu_seqlens_q is padded for the same reason. Rebuild
-            # for the rows actually being passed.
-            #
-            # Since this branch regenerates the plan anyway, take the top-k
-            # lengths from the indices being passed rather than from the
-            # prediction made before the indexer ran. The sort above left every
-            # -1 at the tail of its row, so counting the non-negative entries
-            # gives exactly the left-aligned prefix the operator contract asks
-            # for, and unlike a prediction it cannot overshoot into the -1 tail.
-            topk_length = (sorted_indices >= 0).sum(dim=-1, dtype=torch.int32).reshape(query.shape[0], -1)
+        if query.shape[0] != metadata.smla_topk_length.shape[0]:
+            # Eager and piecewise execution trim graph-padding query rows.
             cu_seqlens_q = cu_seqlens_q.clamp(max=query.shape[0])
-            plan = generate_smla_plan(
-                metadata,
-                query.shape[1],
-                query.shape[2],
-                sorted_indices.shape[-1],
-                cu_seqlens_q,
-                topk_length,
-            )
+        build_smla_metadata(
+            metadata,
+            metadata.smla_metadata,
+            query.shape[1],
+            query.shape[2],
+            sorted_indices.shape[-1],
+            cu_seqlens_q,
+            topk_length,
+        )
         result = sparse_flash_mla(
             query.contiguous(),
             ori_kv=cache,
@@ -225,7 +207,7 @@ def sparse_mla(query, cache, indices, metadata, scale):
             seqused_ori_kv=metadata.seq_lens,
             ori_topk_length=topk_length,
             sinks=metadata.smla_sinks,
-            metadata=plan,
+            metadata=metadata.smla_metadata,
             softmax_scale=scale,
             cmp_ratio=1,
             # Must match the mode the plan above was generated with.
@@ -263,11 +245,11 @@ def sparse_mla(query, cache, indices, metadata, scale):
 class SparseMLAMetadataState:
     """Persistent operator buffers for NoPE within the shared SFA builder.
 
-    Indexers supply their visible index counts. Pool construction and scoring
-    remain entirely outside attention metadata and operator dispatch.
+    Sparse MLA fills lengths and the plan after receiving selected indices.
+    Pool construction and scoring remain outside operator dispatch.
     """
 
-    def __init__(self, kv_cache_spec, vllm_config, device, indexer, kernel_block_size=128, num_heads=None):
+    def __init__(self, kv_cache_spec, vllm_config, device, kernel_block_size=128, num_heads=None):
         block_size = kv_cache_spec.block_size
         if block_size <= 0 or block_size % kernel_block_size:
             raise ValueError("Sparse MLA block size must be a positive multiple of the SFA kernel block size.")
@@ -285,17 +267,13 @@ class SparseMLAMetadataState:
             dtype=torch.int32,
             device=device,
         )
-        self.indexer = indexer
         if self.use_smla:
-            if indexer is None:
-                raise ValueError("A5 NoPE sparse MLA requires an indexer to supply visible top-k lengths.")
             config = vllm_config.model_config.hf_text_config
             self.num_heads = (
                 config.num_attention_heads // vllm_config.parallel_config.tensor_parallel_size
                 if num_heads is None
                 else num_heads
             )
-            self.head_dim = config.kv_lora_rank
             self.metadata_buffer = torch.empty(SMLA_METADATA_SIZE, dtype=torch.int32, device=device)
             self.length_buffer = torch.empty(
                 vllm_config.scheduler_config.max_num_batched_tokens,
@@ -303,6 +281,7 @@ class SparseMLAMetadataState:
                 dtype=torch.int32,
                 device=device,
             )
+            self.valid_mask_buffer = torch.empty_like(self.length_buffer, dtype=torch.bool)
             # ACL Graph replay reads the addresses captured on the first run,
             # so every tensor the operator consumes has to outlive the capture.
             # Allocate the sinks once here, next to the other persistent
@@ -329,21 +308,13 @@ class SparseMLAMetadataState:
             positions = metadata.positions
             if positions.numel() > self.length_buffer.shape[0]:
                 raise ValueError("Sparse MLA token count exceeds its persistent top-k buffer.")
-            lengths = self.length_buffer[: positions.numel()]
-            counts = self.indexer.get_topk_lengths(positions)
-            # ``query_start_loc``'s last entry is the PADDED token count: the
-            # runner extends it so the TND layout constraint holds. It cannot
-            # separate real rows from padding, and padding rows still carry
-            # positions left behind by an earlier, larger batch while their
-            # sequence lengths are zero. Bound the mask by the unpadded token
-            # count, so padding never claims a top-k length with no KV behind it.
             valid = torch.arange(positions.numel(), device=positions.device) < metadata.num_actual_tokens
-            lengths[:, 0].copy_(counts.masked_fill(~valid, 0))
-            metadata.smla_topk_length = lengths
+            mask = self.valid_mask_buffer[: positions.numel()]
+            mask[:, 0].copy_(valid)
+            metadata.smla_valid_mask = mask
+            metadata.smla_topk_length = self.length_buffer[: positions.numel()]
+            metadata.smla_metadata = self.metadata_buffer
             metadata.smla_sinks = self.sinks
-            build_smla_metadata(
-                metadata, self.metadata_buffer, self.num_heads, self.head_dim, self.indexer.topk_output_width
-            )
         return metadata
 
 
@@ -471,6 +442,7 @@ class AscendSFAMetadata:
     max_seq_len: int = 0
     smla_metadata: torch.Tensor | None = None
     smla_topk_length: torch.Tensor | None = None
+    smla_valid_mask: torch.Tensor | None = None
     smla_sinks: torch.Tensor | None = None
 
 
@@ -546,9 +518,6 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         layer = vllm_config.compilation_config.static_forward_context[layer_names[0]]
         self.nope = layer.qk_rope_head_dim == 0
         self.nope_states: dict[int | None, SparseMLAMetadataState] = {}
-        self.nope_indexer = None
-        if self.nope:
-            self.nope_indexer = layer.impl.indexer
 
         self.use_pcp = vllm_config.parallel_config.prefill_context_parallel_size > 1
         self.is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(vllm_config)
@@ -757,7 +726,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
     def _prepare_nope_metadata(self, metadata: AscendSFAMetadata, draft_index: int | None) -> None:
         if draft_index not in self.nope_states:
             self.nope_states[draft_index] = SparseMLAMetadataState(
-                self.kv_cache_spec, self.vllm_config, self.device, self.nope_indexer, self.kernel_block_size
+                self.kv_cache_spec, self.vllm_config, self.device, self.kernel_block_size
             )
         self.nope_states[draft_index].prepare(metadata)
 
