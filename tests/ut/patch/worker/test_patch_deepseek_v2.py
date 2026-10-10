@@ -82,6 +82,48 @@ def test_mtp_layer_keeps_indexer():
     )
 
 
+@pytest.mark.parametrize("last_rank", [False, True])
+@pytest.mark.parametrize("native", [False, True])
+def test_forward_compilation_does_not_trigger_buffer_mutation_guard(monkeypatch, last_rank, native):
+    group = SimpleNamespace(is_first_rank=True, is_last_rank=last_rank)
+    monkeypatch.setattr(patch_deepseek_v2, "get_pp_group", lambda: group)
+    model = SimpleNamespace(
+        config=SimpleNamespace(llama_4_scaling=None),
+        layers=[lambda positions, hidden, residual, scaling: (hidden + 1, hidden)],
+        start_layer=0,
+        end_layer=1,
+        aux_hidden_state_layers=(0,),
+        _use_upstream_aux_relay=native,
+        send_pp_topk_indices=False,
+        embed_input_ids=lambda ids: ids.float().unsqueeze(-1),
+        norm=lambda hidden, residual: (hidden + residual, None),
+        pack_local_aux_hidden_states=lambda states: {"aux_hidden_states_0": states[0]},
+    )
+    ids = torch.arange(4)
+    compiled_codes = []
+
+    def capture_bytecode(old_code, new_code):
+        if old_code is _patched_forward.__code__:
+            compiled_codes.append(new_code)
+
+    torch._dynamo.reset()
+    handle = torch._dynamo.convert_frame.register_bytecode_hook(capture_bytecode)
+    try:
+        with torch.inference_mode():
+            expected = _patched_forward(model, ids, ids, None)
+            actual = torch.compile(_patched_forward, backend="eager", fullgraph=True)(model, ids, ids, None)
+        assert compiled_codes
+        # vLLM checks co_names, including names retained from traced-out branches.
+        assert all("update" not in code.co_names for code in compiled_codes)
+        if last_rank:
+            torch.testing.assert_close(actual, expected)
+        else:
+            torch.testing.assert_close(actual.tensors, expected.tensors)
+    finally:
+        handle.remove()
+        torch._dynamo.reset()
+
+
 @pytest.mark.parametrize("native", [False, True])
 @pytest.mark.parametrize("boundaries", [(0, 78), (0, 38, 78), (0, 42, 78), (0, 20, 40, 59, 78)])
 @pytest.mark.parametrize("aux_layers", [(0, 2, 20, 39, 58, 75, 78), (2, 22, 38, 58, 74)])
