@@ -39,6 +39,7 @@
 #include "mc2/dispatch_ffn_combine/dispatch_ffn_combine_torch_adpt.h"
 #include "gmm/grouped_matmul_swiglu_quant_weight_nz_tensor_list/grouped_matmul_swiglu_quant_torch_adpt.h"
 #include "gmm/grouped_matmul_swiglu_quant_v2/grouped_matmul_swiglu_quant_v2_torch_adpt.h"
+#include "attention/qsa_expand_e3/qsa_expand_e3_torch_adpt.h"
 #include "moe/moe_gating_top_k/moe_gating_top_k_torch_adpt.h"
 #include "attention/sparse_flash_attention/sparse_flash_attention_torch_adpt.h"
 #include "attention/sparse_flash_mla/sparse_flash_mla_torch_adpt.h"
@@ -3108,6 +3109,16 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     );
     ops.impl("npu_fused_quant_lightning_indexer_manage", torch::kPrivateUse1,
              &vllm_ascend::npu_fused_quant_lightning_indexer_manage);
+
+    ops.def(
+        "qsa_expand_e3_out("
+            "Tensor groups, Tensor complete_groups, Tensor tail_start, "
+            "Tensor tail_count, Tensor sequence_lengths, Tensor token_to_req, "
+            "Tensor(a!) out"
+        ") -> Tensor(a!)"
+    );
+    ops.impl("qsa_expand_e3_out", torch::kPrivateUse1,
+             &vllm_ascend::qsa_expand_e3_out);
 
     // k2q_csr: q2k -> k2q CSR (Meta/Hist/RowPrefix/TilePrefix/Scatter)
     ops.def(
