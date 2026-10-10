@@ -32,12 +32,45 @@ from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import cudagraph_utils
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.cp_utils import maybe_prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor, ModelCudaGraphManager
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.ubatch_utils import UBatchRunner
 from vllm.v1.worker.utils import AttentionGroup
+
+try:
+    from vllm.v1.worker.gpu.cp_utils import maybe_prepare_dcp_local_seq_lens
+except ImportError:
+    # The same function is `prepare_dcp_local_seq_lens` on the releases that
+    # predate the rename. Renaming it also moved the DCP-off case out of an
+    # ``assert dcp_size > 1`` and into the early ``None`` return the name
+    # advertises, and the bodies are otherwise identical, so the older name is
+    # called with the newer contract restored rather than left to assert when
+    # the caller runs without DCP.
+    from vllm.v1.worker.gpu import cp_utils as _cp_utils
+
+    def maybe_prepare_dcp_local_seq_lens(  # type: ignore[no-redef]
+        dcp_local_seq_lens: torch.Tensor,
+        seq_lens: torch.Tensor,
+        num_reqs: int,
+        dcp_size: int,
+        dcp_rank: int,
+        cp_interleave: int,
+        *,
+        num_reqs_padded: int | None = None,
+    ) -> torch.Tensor | None:
+        if dcp_size == 1:
+            return None
+        return _cp_utils.prepare_dcp_local_seq_lens(
+            dcp_local_seq_lens,
+            seq_lens,
+            num_reqs,
+            dcp_size,
+            dcp_rank,
+            cp_interleave,
+            num_reqs_padded=num_reqs_padded,
+        )
+
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.compilation.acl_graph import (

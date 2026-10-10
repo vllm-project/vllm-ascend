@@ -58,6 +58,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.dsa_v41 import (
     DeepseekV41CacheLayer,
 )
+from vllm_ascend.core.kv_cache_interface import resolve_bounded_replay
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.models.common.ops.sequence_parallel import (
@@ -565,7 +566,7 @@ def build_layer_plan(config: Any) -> DeepseekV41Topology:
 class AscendDeepseekV41SWACache(DeepseekV41CacheLayer):
     """Ascend SWA cache registered with the V4.1 allocator."""
 
-    def __init__(self, head_dim, window_size, dtype, prefix, cache_config):
+    def __init__(self, head_dim, window_size, dtype, prefix, cache_config, bounded_replay=False):
         from vllm_ascend.models.layer.attention.layer import DSV4_BLOCK_SIZES
 
         block_size = DSV4_BLOCK_SIZES[cache_config.block_size][0][1]
@@ -575,6 +576,11 @@ class AscendDeepseekV41SWACache(DeepseekV41CacheLayer):
             head_size=head_dim,
             dtype=dtype,
             cache_dtype=cache_config.cache_dtype,
+            # SWA bounded replay (vLLM #56227). The field and its cache argument
+            # arrive together upstream, and a pin without either rejects the
+            # keyword, so it is spelled out only for the constructor that
+            # declares it.
+            bounded_replay=bounded_replay,
         )
         super().__init__(get_current_vllm_config(), prefix, spec)
         self.head_dim = head_dim
@@ -631,6 +637,11 @@ class DeepseekV41SWAAttention(nn.Module):
             dtype=kv_cache_dtype,
             prefix=f"{prefix}.swa_cache",
             cache_config=cache_config,
+            # The target's sliding window is the one bounded replay rebuilds.
+            # The draft reaches this same call through its SWA cache subclass,
+            # which rebuilds the spec without the flag, so the feature is a
+            # strict addition to the target's group.
+            bounded_replay=resolve_bounded_replay(vllm_config, cache_config),
         )
 
         dsa_modules = DSAModules(

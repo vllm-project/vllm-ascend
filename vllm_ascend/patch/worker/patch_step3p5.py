@@ -34,6 +34,8 @@
 # shape constraints).
 #
 
+from typing import Any
+
 import torch
 from torch import nn
 from vllm.config import VllmConfig
@@ -49,7 +51,6 @@ from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.models.step3p5 import (
-    FP32ReplicatedLinear,
     FusedMoEBlock,
     Step3p5Attention,
     Step3p5DecoderLayer,
@@ -60,6 +61,24 @@ from vllm.model_executor.models.utils import (
     extract_layer_index,
     sequence_parallel_chunk,
 )
+
+# The FP32 router gate moved between vLLM refs. ``releases/v0.30.0`` and the
+# verified vLLM main ref define ``FP32ReplicatedLinear`` beside the model, and
+# express "run the router in FP32" by casting the input; v0.31.0 dropped that
+# class and uses the MoE package's ``GateLinear``, which takes an output dtype
+# instead. Same layer underneath -- ``GateLinear`` is a ``ReplicatedLinear``
+# subclass -- so only the keyword set differs, and the extra keywords below are
+# what each ref's own Step3.5 code passes. Probed rather than version-compared,
+# the way the rest of this repository handles a lane that may not carry a name:
+# a missing name is the one thing observable at import time.
+try:
+    from vllm.model_executor.models.step3p5 import FP32ReplicatedLinear
+
+    _FP32_GATE_KWARGS: dict[str, Any] = {"bias": False, "quant_config": None}
+except ImportError:
+    from vllm.model_executor.layers.fused_moe import GateLinear as FP32ReplicatedLinear  # type: ignore[no-redef]
+
+    _FP32_GATE_KWARGS = {"out_dtype": torch.float32}
 
 from vllm_ascend.device.device_op import DeviceOperator
 
@@ -145,10 +164,9 @@ def _patched_fused_moe_block_init(
     self.gate = FP32ReplicatedLinear(
         config.hidden_size,
         config.moe_num_experts,
-        bias=False,
-        quant_config=None,
         params_dtype=torch.float32,  # Use FP32 for higher precision.
         prefix=f"{prefix}.gate",
+        **_FP32_GATE_KWARGS,
     )
     self.use_moe_router_bias = config.use_moe_router_bias
     assert self.use_moe_router_bias, "Only support use_moe_router_bias is true."

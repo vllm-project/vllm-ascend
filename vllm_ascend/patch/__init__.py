@@ -776,6 +776,36 @@
 #       Remove this patch once upstream vLLM adds the terminal short-circuit
 #       to the outlines backend.
 #
+# ** 20a. File: platform/patch_swa_bounded_replay.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.core.sched.output.CachedRequestData` (new field `replay_start`)
+#   2. `vllm.v1.core.sched.scheduler.Scheduler._make_cached_request_data`
+#    Why:
+#       Sliding-window bounded replay (vLLM #56227) rebuilds the sliding-window KV
+#       of a prefix hit by recomputing the hit's last window, and tells the
+#       worker where that run begins through `NewRequestData.replay_start`.
+#       Upstream's V2 model runner folds resumed requests into that same
+#       new-request list, so one field covers them. The V1 runner resumes a
+#       preempted request through `CachedRequestData` instead, and a resumed
+#       request is exactly the one that can be rewound a second time --
+#       preemption clears the computed count, so readmission runs the prefix
+#       lookup again and re-sets the replay start. Without the field on that
+#       payload, the worker would not know to stop writing the replayed
+#       positions and would overwrite blocks still shared with every other
+#       request that hit the same prefix.
+#    How:
+#       Declare `replay_start` on the payload -- msgpack encodes only declared
+#       fields, so an attribute set after construction never crosses the process
+#       boundary -- and fill it from the resumed requests inside the single
+#       method upstream builds that payload in. The field list is redeclared at
+#       import time because msgspec caches it per type. Inert on a pin that
+#       predates the feature, which is probed rather than version-compared.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/56227
+#    Future Plan:
+#       Remove this patch once upstream carries the replay start on the V1
+#       resume path as well, i.e. once `CachedRequestData` declares the field.
+#
 # ** 21. File: platform/patch_torch_accelerator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `torch.accelerator.memory_stats`, `torch.accelerator.memory_reserved`,
@@ -1231,6 +1261,21 @@
 #       Monkey-patch Step3p5 to enable SP.
 #    Future Plan:
 #       Remove this patch once upstream SP completes refactor.
+#   3. The FP32 router gate's import path -- `FP32ReplicatedLinear` on
+#      `vllm.model_executor.models.step3p5` versus `GateLinear` on
+#      `vllm.model_executor.layers.fused_moe`
+#    Why:
+#       v0.31.0 moved the gate out of the model module into the MoE package, and
+#       re-expressed "run the router in FP32" as an `out_dtype` rather than an
+#       input cast. Both spellings are needed: the release lane and the verified
+#       vLLM main ref export only the old one, v0.31.0 only the new one, and
+#       naming the absent one fails at import, which takes the whole worker down
+#       before any model is loaded.
+#    How:
+#       Probe for the old name and fall back to the MoE package's `GateLinear`,
+#       carrying whichever extra keywords that ref's own Step3.5 code passes.
+#    Future Plan:
+#       Drop the probe once every supported lane exports `GateLinear`.
 #
 # ** 21. File: worker/patch_triton.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
