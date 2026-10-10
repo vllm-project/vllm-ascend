@@ -944,8 +944,8 @@ class AscendConfig:
         self._validate_mc2_comm_alg(vc)
 
         # mega_moe_max_tokens range
-        if self.mega_moe_max_tokens <= 0:
-            raise ValueError(f"mega_moe_max_tokens must be a positive integer, got {self.mega_moe_max_tokens}")
+        if self.mega_moe_max_tokens < 0:
+            raise ValueError(f"mega_moe_max_tokens must be a non-negative integer, got {self.mega_moe_max_tokens}")
 
         # batch-sharded sampling (Model Runner V2) shards the sampler inputs
         # per TP rank, while lmhead TP overrides NPUModelRunner.sample with a
