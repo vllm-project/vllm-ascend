@@ -2389,6 +2389,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner.ascend_config = MagicMock()
         runner.ascend_config.kvpp_config.size = 1
         runner.model_config.hf_text_config = SimpleNamespace(
+            model_type="qwen3",
             kv_lora_rank=512,
             qk_rope_head_dim=64,
         )
@@ -2490,6 +2491,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner.ascend_config = MagicMock()
         runner.ascend_config.kvpp_config.size = 1
         runner.model_config.hf_text_config = SimpleNamespace(
+            model_type="qwen3",
             kv_lora_rank=512,
             qk_rope_head_dim=64,
         )
@@ -2551,6 +2553,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner.ascend_config.is_sparse_li_c8_layer.return_value = False
         runner.ascend_config.is_sparse_li_c4_layer.return_value = False
         runner.model_config.hf_text_config = SimpleNamespace(
+            model_type="qwen3",
             kv_lora_rank=512,
             qk_rope_head_dim=64,
             index_head_dim=128,
