@@ -238,11 +238,9 @@ class MooncakeBackend(Backend):
         self.set_device()
         store = MooncakeDistributedStore()
         local_hostname = get_ip()
-        ssd_kwargs = _ssd_setup_kwargs(self.config)
         # Scheduler-only clients must not register SSD storage with Mooncake,
         # which would inflate the active client count and reported SSD usage.
-        if not self._contribute_memory:
-            ssd_kwargs = {}
+        ssd_kwargs = _ssd_setup_kwargs(self.config) if self._contribute_memory else {}
         # Each rank that contributes memory to the pool uses its own SSD
         # directory to avoid bucket file collisions. Key by the globally unique
         # rank so that DP/TP/PP/CP replicas never share a directory (dense and
