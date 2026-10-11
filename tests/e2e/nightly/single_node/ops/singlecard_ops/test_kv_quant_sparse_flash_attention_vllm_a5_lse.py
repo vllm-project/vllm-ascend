@@ -19,7 +19,7 @@ pytestmark = pytest.mark.skipif(
 @pytest.mark.parametrize("heads", [16, 32, 64])
 def test_a5_c8_lse(length, count, heads):
     # A5 selectively uses this extension; keep registration lazy.
-    import vllm_ascend.vllm_ascend_C  # noqa: F401
+    import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401
 
     torch.manual_seed(16656)
     page_size, nope_dim, rope_dim, tile_size = 128, 512, 64, 128
