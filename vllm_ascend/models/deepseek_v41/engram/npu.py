@@ -361,3 +361,198 @@ class SharedUvaBuffer:
         if self.shm is not None:
             self.shm.close()
             self.shm = None
+
+
+class EngramUrmaCubeLookup:
+    """Experimental 950DT AICPU UDMA gather for direct MXFP8 Cube WKV.
+
+    Each lookup owns its host registration and device queue. Calls must be
+    serialized on the Engram stream, including captured graph replays. Close
+    after discarding graphs and before closing the source host mapping.
+    """
+
+    PAGE_BYTES = 4096
+    LAUNCHER_CLASS = "EngramUrmaAicpu"
+
+    def __init__(self):
+        from pathlib import Path
+
+        import vllm_ascend.vllm_ascend_C  # noqa: F401
+
+        self.device_index = torch.npu.current_device()
+        directory = Path(__file__).resolve().parents[3] / "engram_aicpu"
+        launcher_class = getattr(torch.classes._C_ascend, self.LAUNCHER_CLASS)
+        self.gather_launcher = launcher_class(str(directory / "libengram_aicpu.json"))
+        self.gather_function = self.gather_launcher.function_handle()
+        self.host_library = ctypes.CDLL(str(directory / "libengram_urma_host.so"))
+        self.host_library.EngramReadRegister.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_size_t,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_uint32),
+            ctypes.c_uint,
+        ]
+        self.host_library.EngramReadRegister.restype = ctypes.c_void_p
+        self.host_library.EngramReadRelease.argtypes = [ctypes.c_void_p]
+        self.host_library.EngramReadRelease.restype = None
+        self.host_state = None
+        self.source = None
+        self.metadata = None
+        self.state_slot = torch.zeros(1, dtype=torch.int64, device=f"npu:{self.device_index}")
+        self.last_call = None
+        self.staging_buffers = {}
+        # Spread host registrations across the two physical host chips.
+        # AICPU namespaces name their local chip c0. The kernel selects between
+        # its d0e3/d1e3 endpoints on the first successful transfer.
+        self.host_chip = self.device_index // 4
+        self.chip = self.die = 0
+
+    def _bind_source(self, codes):
+        if self.source is not None:
+            if self.source is not codes:
+                raise ValueError("A URMA lookup instance must retain the same source")
+            return
+        if torch.npu.is_current_stream_capturing():
+            raise RuntimeError("Warm up URMA registration before graph capture")
+        metadata = ctypes.create_string_buffer(128)
+        status = (ctypes.c_uint32 * 16)()
+        state = self.host_library.EngramReadRegister(
+            codes.tensor.data_ptr(),
+            codes.tensor.numel() * codes.tensor.element_size(),
+            ctypes.addressof(metadata),
+            status,
+            self.host_chip,
+        )
+        if not state:
+            raise RuntimeError(f"Engram URMA host registration failed: {list(status)}")
+        try:
+            self.metadata = torch.frombuffer(metadata, dtype=torch.uint8).clone().to(f"npu:{self.device_index}")
+        except Exception:
+            self.host_library.EngramReadRelease(state)
+            raise
+        self.host_state = state
+        self.source = codes
+
+    def _stage_codes(self, codes, ids, rows, width, head_start, local_heads, vocab_start, vocab_end):
+        self._bind_source(codes)
+        key = (rows, width)
+        staged = self.staging_buffers.get(key)
+        if staged is None:
+            storage = torch.empty(rows * width + 2 * self.PAGE_BYTES, dtype=torch.uint8, device=ids.device)
+            offset = (-storage.data_ptr()) % self.PAGE_BYTES
+            staged = storage[offset : offset + rows * width].view(rows, width)
+            self.staging_buffers[key] = staged
+        torch.ops._C_ascend.engram_urma_gather(
+            self.gather_function,
+            self.metadata,
+            self.state_slot,
+            ids,
+            staged,
+            head_start,
+            local_heads,
+            vocab_start,
+            vocab_end,
+            self.chip,
+            self.die,
+        )
+        self.last_call = (ids, staged, head_start, local_heads, vocab_start, vocab_end)
+        return staged
+
+    def close(self):
+        if self.host_state is None:
+            return
+        with torch.npu.device(self.device_index):
+            torch.npu.synchronize()
+            if self.last_call is not None:
+                self._close_device()
+                torch.npu.synchronize()
+                if self.state_slot.cpu().item() != 0:
+                    raise RuntimeError("Engram URMA device resources did not close")
+            self.host_library.EngramReadRelease(self.host_state)
+            self.host_state = None
+            self.source = self.metadata = self.last_call = None
+            self.staging_buffers.clear()
+
+    def _close_device(self):
+        ids, staged, head_start, local_heads, vocab_start, vocab_end = self.last_call
+        torch.ops._C_ascend.engram_urma_gather(
+            self.gather_function,
+            self.metadata,
+            self.state_slot,
+            ids,
+            staged,
+            head_start,
+            local_heads,
+            vocab_start,
+            vocab_end,
+            self.chip,
+            self.die,
+            True,
+        )
+
+    def lookup_codes(
+        self,
+        codes,
+        scales,
+        ids,
+        *,
+        head_start=0,
+        local_heads=1,
+        vocab_start=0,
+        vocab_end=None,
+        output_codes,
+        output_scales,
+    ):
+        if codes.tensor.dtype != torch.float8_e4m3fn:
+            raise ValueError("Direct Cube Engram lookup requires E4M3 codes")
+        if scales.device.type != "npu" or scales.dtype != torch.uint8:
+            raise ValueError("Direct Cube Engram lookup requires HBM uint8 E8M0 scales")
+        if output_codes.dtype != torch.uint8 or output_scales.dtype != torch.uint8:
+            raise ValueError("Direct Cube output buffers must retain raw FP8/E8M0 bytes")
+        if ids.ndim != 2 or ids.dtype not in (torch.int32, torch.int64) or ids.stride(1) != 1:
+            raise ValueError("Cube IDs require int32/int64 with contiguous columns")
+        if head_start < 0 or local_heads <= 0 or head_start + local_heads > ids.shape[1]:
+            raise ValueError("Invalid Engram head range")
+        if ids.device.index != self.device_index or scales.device != ids.device:
+            raise ValueError("Cube launcher and tensors must use the same NPU")
+        width = codes.tensor.shape[-1]
+        vocab_end = codes.tensor.shape[0] if vocab_end is None else vocab_end
+        if vocab_start > vocab_end or vocab_end - vocab_start > codes.tensor.shape[0]:
+            raise ValueError("Invalid Cube vocabulary range")
+        if scales.shape != (codes.tensor.shape[0], width // SCALE_GROUP) or not scales.is_contiguous():
+            raise ValueError("Invalid Cube scale shape")
+        if (
+            output_codes.shape != (ids.shape[0] * local_heads, width)
+            or output_scales.shape != (ids.shape[0], local_heads * (width // SCALE_GROUP))
+            or not output_codes.is_contiguous()
+            or not output_scales.is_contiguous()
+            or output_codes.device != ids.device
+            or output_scales.device != ids.device
+        ):
+            raise ValueError("Invalid Cube output shape or device")
+        tokens = ids.shape[0]
+        rows = tokens * local_heads
+        if not rows:
+            return output_codes, output_scales
+        staged = self._stage_codes(
+            codes, ids, rows, codes.tensor.shape[-1], head_start, local_heads, vocab_start, vocab_end
+        )
+        output_codes[:rows].copy_(staged)
+        selected = ids[:, head_start : head_start + local_heads].reshape(-1).to(torch.int64)
+        owned = (selected >= vocab_start) & (selected < vocab_end)
+        local = torch.where(owned, selected - vocab_start, torch.zeros_like(selected))
+        gathered = scales.index_select(0, local)
+        gathered.view(torch.int8).masked_fill_(~owned[:, None], 0)
+        output_scales[:tokens].copy_(gathered.view(tokens, -1))
+        return output_codes, output_scales
+
+
+def compressed_engram_views(buffer, heads, width):
+    """Fixed-address contiguous codes/scales stored in two packed planes."""
+    capacity = buffer.shape[0]
+    code_width = heads * width
+    flat = buffer.view(-1)
+    return (
+        flat[: capacity * code_width].view(capacity, code_width),
+        flat[capacity * code_width :].view(capacity, code_width // SCALE_GROUP),
+    )

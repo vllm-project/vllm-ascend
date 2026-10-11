@@ -37,8 +37,9 @@ class AscendEngram(nn.Module):
         rows: torch.Tensor,
         token_mask: torch.Tensor,
         rotation: torch.Tensor | None,
+        compressed_rows: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
-        kv = self.wkv(rows)
+        kv = self.wkv(compressed_rows if compressed_rows is not None else rows)
         if (
             rotation is None
             and hidden_states.device.type == "npu"

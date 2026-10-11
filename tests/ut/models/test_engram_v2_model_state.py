@@ -278,6 +278,56 @@ def test_forward_only_waits_external_events_on_full_runs(runtime, monkeypatch, m
     assert bool(wait_names) is waits
 
 
+@pytest.mark.parametrize("tokens", [1, 4, 8])
+def test_compressed_forward_preserves_capacity_scale_offset(runtime, tokens):
+    from vllm_ascend.models.deepseek_v41.engram.npu import compressed_engram_views
+
+    model = make_model()
+    model.use_sequence_parallel, model.engram_rotated = False, False
+    model.hc_mult, model.aux_hidden_state_layers = 1, ()
+    model.shared_attention_state = SimpleNamespace(reset=lambda: None)
+    model.norm = lambda values: values
+    packed = torch.zeros((8, 4 * (64 + 2)), dtype=torch.uint8)
+    codes, scales = compressed_engram_views(packed, 4, 64)
+    codes.fill_(52)
+    scales.fill_(127)
+    observed = []
+
+    class Gate:
+        embed_tokens = SimpleNamespace(compressed_lookup=True, n_hash_cols=4, dim=64)
+
+        def __call__(self, hidden, rows, mask, rotation, *, compressed_rows):
+            actual_codes, actual_scales = compressed_rows
+            observed.append(actual_codes.shape[0])
+            assert actual_codes.shape == (tokens, 256)
+            assert actual_scales.shape == (tokens, 4, 2)
+            assert torch.equal(actual_codes.view(torch.uint8), codes[:tokens])
+            assert torch.equal(actual_scales.view(torch.uint8).flatten(1), scales[:tokens])
+            assert actual_scales.data_ptr() == scales.data_ptr()
+            return hidden
+
+    class Layer:
+        layer_idx = 1
+        engram = Gate()
+
+        def __call__(self, positions, hidden, pre_mix, *args, **kwargs):
+            return hidden, pre_mix
+
+        def hc_collapse(self, hidden, pre_mix):
+            return hidden[:, 0]
+
+    model.layers = [Layer()]
+    model.forward(
+        torch.arange(tokens),
+        torch.arange(tokens),
+        None,
+        inputs_embeds=torch.ones(tokens, 8),
+        engram_lookups={1: packed},
+        engram_mask=torch.ones(8, dtype=torch.bool),
+    )
+    assert observed == [tokens]
+
+
 def make_state(model, monkeypatch):
     monkeypatch.setattr("vllm_ascend.ops.triton.engram_lookback._gather_lookback_kernel", MagicMock())
     monkeypatch.setattr(
