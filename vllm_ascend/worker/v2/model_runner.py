@@ -88,7 +88,6 @@ from vllm_ascend.models.deepseek_v41.cache_config import uses_a5_packed_cache
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import (
     is_deepseek_v41,
-    is_pd_decode_recompute_scheduler_enabled,
     lmhead_tp_enable,
     lmhead_tp_max_num_logits,
     lmhead_tp_pad_rows,
@@ -604,9 +603,39 @@ class NPUModelRunner(GPUModelRunner):
             super().profile_run()
 
     def gather_batch_req_state(self, scheduler_output: SchedulerOutput, dummy_run: bool):
-        batch_state, uniform_token_count = super().gather_batch_req_state(scheduler_output, dummy_run)
-        if batch_state is not None and is_pd_decode_recompute_scheduler_enabled(self.vllm_config):
-            pd_decode_recompute = (
+        batch_state, uniform_token_count = super().gather_batch_req_state(scheduler_output, dummy_run)  # [关键代码]
+        # ─── 示例 PR：PD decode 节点首 verify 步静默 eager 的根因与修复 ───
+        #
+        # 生产实测（MiniMax-M3 PD 分离 + EAGLE3 + v2 FULL_DECODE_ONLY）：decode
+        # 迭代 131ms → 471ms（3.6×），而启动时 49 桶全捕、dispatch 覆盖索引完好，
+        # 说明问题不在桶，而在 dispatch 的输入判定。根因链（对照下面带
+        # [关键代码] 行尾标注的未修改行）：
+        #
+        #   1. P 侧完成 prefill 并经 Mooncake 传 KV 后，D 节点新请求的第一个
+        #      verify 步就是它"最后一段 prefill"：本步恰好调度 decode_query_len
+        #      个 token（EAGLE3 = 1+3 = 4），且本步执行完 num_computed_prefill
+        #      == prefill_len；
+        #   2. 上游仍按"prefill 未跑完"给该步打 is_prefilling / has_prefill
+        #      （方法第一行 super()，vllm/v1/worker/gpu/model_runner.py）；
+        #   3. get_uniform_decode_token_count()（vllm/v1/worker/utils.py:740）
+        #      见 has_prefill 直接返回 None——尽管批形状是完全均匀的 4×N
+        #      （profiling 实证：44=4×11 的形状在跑 eager，而 44 桶早已捕获）；
+        #   4. v2 图 dispatch 是纯静态查表：uniform=None 静默 miss、走 eager，
+        #      无任何日志；
+        #   5. dp_utils.py 对 cg_mode 做 DP 间 MIN 级联：持有新请求的 1 个
+        #      rank 把全部 4 个 rank 一起拖成 eager；持续到达负载下几乎每步
+        #      都有 rank 在 join，整组长期 eager。
+        #
+        # 修复：下面这段重分类逻辑 vllm-ascend 本就自带（为 recompute_scheduler
+        # 而写，注释原文 "to preserve full cudagraph for this step"），只是被
+        # recompute_scheduler_enable（默认 false）门控。本 PR 仅把生效条件放宽为
+        # "PD decode 节点（kv_consumer）"——纯 dispatch 分类修正，零调度行为变化。
+        kv_cfg = self.vllm_config.kv_transfer_config
+        is_pd_decode_node = (
+            kv_cfg is not None and kv_cfg.is_kv_consumer and not kv_cfg.is_kv_producer
+        )
+        if batch_state is not None and is_pd_decode_node:  # [修改点] 原为 is_pd_decode_recompute_scheduler_enabled
+            pd_decode_recompute = (  # [关键代码] 本步==decode_query_len 且恰好跑完 prefill
                 batch_state.is_prefilling_np
                 & (batch_state.num_computed_prefill_tokens_np > 0)
                 & (batch_state.num_scheduled_tokens == self.decode_query_len)
@@ -615,10 +644,10 @@ class NPUModelRunner(GPUModelRunner):
                     >= batch_state.prefill_len_np
                 )
             )
-            if np.any(pd_decode_recompute):
-                batch_state.is_prefilling_np[pd_decode_recompute] = False
-                batch_state = batch_state._replace(has_prefill=bool(batch_state.is_prefilling_np.any()))
-                uniform_token_count = vllm_model_runner.get_uniform_decode_token_count(
+            if np.any(pd_decode_recompute):  # [关键代码] 命中 = 首 verify 步请求
+                batch_state.is_prefilling_np[pd_decode_recompute] = False  # [关键代码] 摘掉过期 prefill 标志
+                batch_state = batch_state._replace(has_prefill=bool(batch_state.is_prefilling_np.any()))  # [关键代码]
+                uniform_token_count = vllm_model_runner.get_uniform_decode_token_count(  # [关键代码] None→4 命中已捕桶
                     len(batch_state.req_ids),
                     batch_state.num_tokens,
                     int(batch_state.num_scheduled_tokens.max()),
