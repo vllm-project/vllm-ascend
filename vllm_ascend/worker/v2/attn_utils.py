@@ -1742,16 +1742,29 @@ def _reshape_kv_cache_v2(
                 if k_dtype != v_dtype:
                     raise ValueError("Combined hybrid K/V cache requires matching K/V dtypes.")
                 if isinstance(kv_cache_spec, (AscendMLAAttentionSpec, MLAAttentionSpec)):
-                    # MLA backends return a 4D latent cache shape. Keep its K
-                    # and V components in contiguous regions, as in MRv1.
-                    typed_cache = raw_cache.view(k_dtype)
-                    k_elements = math.prod(k_shape)
-                    v_elements = math.prod(v_shape)
-                    if k_elements + v_elements > typed_cache.numel():
-                        raise ValueError(f"Combined MLA cache for {layer_name} is too small.")
-                    padding_elements = typed_cache.numel() - k_elements - v_elements
-                    k_cache = typed_cache[padding_elements : padding_elements + k_elements].view(k_shape)
-                    v_cache = typed_cache[padding_elements + k_elements :].view(v_shape)
+                    # 混合缓存的 block ID 在组间共享；NoPE/RoPE 必须留在
+                    # 各自 manager 页内，不能把整层重新排成两个连续 plane。
+                    dtype_size = get_dtype_size(k_dtype)
+                    if num_blocks_per_kv_block < 1:
+                        raise ValueError("Combined MLA cache requires a positive kernel-block ratio.")
+                    if page_stride_bytes % (num_blocks_per_kv_block * dtype_size):
+                        raise ValueError("Combined MLA pages must split into dtype-aligned kernel slots.")
+                    slot_stride_bytes = page_stride_bytes // num_blocks_per_kv_block
+                    k_block_bytes = math.prod(k_shape[1:]) * dtype_size
+                    v_block_bytes = math.prod(v_shape[1:]) * dtype_size
+                    if k_block_bytes + v_block_bytes > slot_stride_bytes:
+                        raise ValueError("Combined MLA kernel slot is smaller than its K/V components.")
+                    if (
+                        k_shape[0] != v_shape[0]
+                        or k_shape[0] * slot_stride_bytes > raw_cache.numel() * raw_cache.element_size()
+                    ):
+                        raise ValueError("Combined MLA kernel slots exceed the layer's raw cache slice.")
+                    k_cache = make_page_strided_cache_view(
+                        raw_cache, k_shape, k_dtype, slot_stride_bytes
+                    )
+                    v_cache = make_page_strided_cache_view(
+                        raw_cache, v_shape, v_dtype, slot_stride_bytes, offset_bytes=k_block_bytes
+                    )
                 else:
                     k_cache, v_cache = _reshape_combined_attention_kv_cache(
                         raw_cache,
