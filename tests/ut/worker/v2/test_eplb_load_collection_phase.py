@@ -155,6 +155,8 @@ class TestAscendEplbFreshLoadGate(unittest.TestCase):
     @staticmethod
     def _make_state(*, rearrangement_step=1):
         state = object.__new__(AscendEplbState)
+        state._hixl_session = None
+        state._close_error = None
         state._suspended = False
         state.parallel_config = SimpleNamespace(
             enable_elastic_ep=False,
