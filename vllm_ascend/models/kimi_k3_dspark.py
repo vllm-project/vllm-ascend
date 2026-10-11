@@ -9,6 +9,7 @@ import torch
 from torch import nn
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
+from vllm.logger import logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -32,6 +33,8 @@ from vllm.models.kimi_k3.nvidia.dspark_mla import (
     K3DSparkModel as UpstreamK3DSparkModel,
 )
 
+from vllm_ascend import envs
+from vllm_ascend.attention.utils import get_flashmla_ops
 from vllm_ascend.models.kimi_k3 import (
     AscendKimiMLAAttention,
 )
@@ -44,6 +47,99 @@ def _uses_causal_draft_attention(config) -> bool:
     if isinstance(dflash_config, dict) and "causal" in dflash_config:
         return bool(dflash_config["causal"])
     return bool(getattr(config, "full_attention_causal", False))
+
+
+def _uses_prolog_v3_context_writer(kv_cache: object) -> bool:
+    """Whether a component-major cache needs the stride-aware PROLOG_V3 path."""
+    if not isinstance(kv_cache, tuple) or len(kv_cache) != 2:
+        return False
+    if not all(isinstance(cache, torch.Tensor) for cache in kv_cache):
+        return False
+
+    def first_axis_strided(cache: torch.Tensor) -> bool:
+        if cache.dim() != 4 or cache.is_contiguous():
+            return False
+        # PROLOG_V3 supports a non-contiguous first axis only. Fused
+        # token-interleaved views remain on their existing DSpark path.
+        return (
+            cache.stride(3) == 1
+            and cache.stride(2) == cache.shape[3]
+            and cache.stride(1) == cache.shape[2] * cache.stride(2)
+            and cache.stride(0) != cache.shape[1] * cache.stride(1)
+        )
+
+    return all(first_axis_strided(cache) for cache in kv_cache)
+
+
+def _log_dspark_mla_cache_diagnostic(
+    layer_idx: int,
+    original_cache: object,
+    normalized_cache: object,
+    slots: torch.Tensor,
+) -> None:
+    """Log the cache contract consumed by the DSpark context writer.
+
+    Keep it disabled during normal serving to avoid synchronization and noisy logs.
+    """
+    if not envs.VLLM_ASCEND_DEBUG_DSPARK_MLA_CACHE:
+        return
+
+    flashmla_ops = get_flashmla_ops()
+    logger.warning(
+        "DSpark MLA cache diagnostic: layer_idx=%d original_type=%s normalized_type=%s "
+        "flashmla_ops=%s slots_dtype=%s slots_numel=%s",
+        layer_idx,
+        type(original_cache).__name__,
+        type(normalized_cache).__name__,
+        "available" if flashmla_ops is not None else "absent",
+        slots.dtype,
+        slots.numel(),
+    )
+
+    if isinstance(normalized_cache, tuple) and len(normalized_cache) == 2:
+        views = dict(zip(("nope", "rope"), normalized_cache))
+    else:
+        views = {}
+
+    slots_min = int(slots.min().item())
+    slots_max = int(slots.max().item())
+    for component, tensor in views.items():
+        if not isinstance(tensor, torch.Tensor):
+            logger.warning(
+                "DSpark MLA cache view diagnostic: layer_idx=%d component=%s type=%s",
+                layer_idx,
+                component,
+                type(tensor).__name__,
+            )
+            continue
+
+        storage_numel = tensor.untyped_storage().nbytes() // tensor.element_size()
+        view_offset = tensor.storage_offset()
+        actual_storage_numel = storage_numel - view_offset
+        required_storage_size = sum((size - 1) * stride for size, stride in zip(tensor.shape, tensor.stride()))
+        python_bound_ok = view_offset + required_storage_size < storage_numel
+        exceeds_u32 = storage_numel >= 2**32 or actual_storage_numel >= 2**32 or required_storage_size >= 2**32
+        slots_bound_ok = slots_min >= -1 and slots_max < tensor.shape[0] * tensor.shape[1]
+
+        logger.warning(
+            "DSpark MLA cache view diagnostic: layer_idx=%d component=%s shape=%s stride=%s "
+            "storage_offset=%s storage_numel=%s actual_storage_numel=%s required_storage_size=%s "
+            "python_bound_ok=%s exceeds_u32=%s contiguous=%s slots_min=%s slots_max=%s slots_bound_ok=%s",
+            layer_idx,
+            component,
+            tuple(tensor.shape),
+            tuple(tensor.stride()),
+            view_offset,
+            storage_numel,
+            actual_storage_numel,
+            required_storage_size,
+            python_bound_ok,
+            exceeds_u32,
+            tensor.is_contiguous(),
+            slots_min,
+            slots_max,
+            slots_bound_ok,
+        )
 
 
 class AscendK3DSparkDecoderLayer(UpstreamK3DSparkDecoderLayer):
@@ -204,18 +300,34 @@ class AscendK3DSparkModel(UpstreamK3DSparkModel):
         cos, sin = get_cos_and_sin_mla(context_positions)
         for layer_idx, layer in enumerate(self.layers):
             attn = layer.self_attn
+            slots = context_slot_mapping[layer_idx] if per_layer_slot_mapping else context_slot_mapping
+            if slots is None:
+                continue
+            kv_cache = attn.kv_cache
+            if _uses_prolog_v3_context_writer(kv_cache):
+                _log_dspark_mla_cache_diagnostic(layer_idx, kv_cache, kv_cache, slots)
+                attn.impl.exec_context_kv_prolog_v3(
+                    context_states,
+                    cos,
+                    sin,
+                    kv_cache,
+                    slots,
+                )
+                continue
+
             assert attn.fused_qkv_a_proj is not None
             assert attn.q_lora_rank is not None
             qkv_lora = attn.fused_qkv_a_proj(context_states)[0]
             kv_no_split = qkv_lora[..., attn.q_lora_rank :].contiguous()
-            slots = context_slot_mapping[layer_idx] if per_layer_slot_mapping else context_slot_mapping
-            if slots is None:
-                continue
+            if isinstance(kv_cache, torch.Tensor):
+                # Context writes bypass MLA forward's fused-cache view split.
+                kv_cache = (kv_cache[..., : attn.impl.kv_lora_rank], kv_cache[..., attn.impl.kv_lora_rank :])
+            _log_dspark_mla_cache_diagnostic(layer_idx, attn.kv_cache, kv_cache, slots)
             attn.impl.exec_kv_prefill(
                 kv_no_split,
                 cos,
                 sin,
-                attn.kv_cache,
+                kv_cache,
                 slots,
             )
 

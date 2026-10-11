@@ -17,6 +17,7 @@ from vllm_ascend.core.kv_cache_interface import (
     get_kv_cache_compression_ratio,
     get_storage_block_size,
     register_ascend_kv_cache_specs,
+    supports_component_major_mla_pd,
 )
 
 
@@ -85,3 +86,33 @@ def test_circular_registry_preserves_spec_and_reports_recycled_pages(ascend, zer
     assert not spec.prefix_cacheable and not spec.uses_slot_mapping
     manager.free("request")
     assert pool.get_num_free_blocks() == len(old_ids)
+
+
+def test_component_major_mla_pd_gate():
+    assert supports_component_major_mla_pd(SimpleNamespace(kv_transfer_config=None))
+
+    for connector in ("MooncakeConnectorV2", "MooncakePullConnector"):
+        config = SimpleNamespace(
+            kv_transfer_config=SimpleNamespace(
+                kv_connector=connector,
+                kv_connector_module_path=None,
+            )
+        )
+        assert supports_component_major_mla_pd(config)
+
+    for connector in ("MooncakeConnectorV1", "AscendStoreConnector", "MultiConnector"):
+        config = SimpleNamespace(
+            kv_transfer_config=SimpleNamespace(
+                kv_connector=connector,
+                kv_connector_module_path=None,
+            )
+        )
+        assert not supports_component_major_mla_pd(config)
+
+    config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(
+            kv_connector="MooncakeConnectorV2",
+            kv_connector_module_path="custom.connector",
+        )
+    )
+    assert not supports_component_major_mla_pd(config)
