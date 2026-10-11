@@ -294,7 +294,7 @@ nav:
         - user_guide/feature_guide/netloader.md
         - user_guide/feature_guide/rfork.md
         - user_guide/feature_guide/epd_disaggregation.md
-        - user_guide/feature_guide/kv_pool.md
+        - user_guide/feature_guide/kv_cache_pool_ascend_store.md
         - user_guide/feature_guide/mooncake_layerwise_adaptation_and_optimization.md
         - user_guide/feature_guide/mooncake_hybrid_attention.md
         - user_guide/feature_guide/layerwise_and_sparse_kv_cache_offloading.md

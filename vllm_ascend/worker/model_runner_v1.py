@@ -22,7 +22,7 @@ import math
 import sys
 import time
 from collections import defaultdict, deque
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import copy, deepcopy
 from dataclasses import dataclass, replace
@@ -360,6 +360,98 @@ class ExecuteModelState(NamedTuple):
     batch_desc: BatchDescriptor
 
 
+def _iter_kv_tensors(kv_cache: Any) -> Iterator[torch.Tensor]:
+    """Yield every tensor nested inside a kv_cache container."""
+    if isinstance(kv_cache, torch.Tensor):
+        yield kv_cache
+    elif isinstance(kv_cache, (list, tuple)):
+        for item in kv_cache:
+            yield from _iter_kv_tensors(item)
+    elif isinstance(kv_cache, dict):
+        for item in kv_cache.values():
+            yield from _iter_kv_tensors(item)
+
+
+# fp8 storages may not implement zero_(); they are zeroed through an int8
+# reinterpretation (or a scalar broadcast when not contiguous) instead.
+_FP8_DTYPES = frozenset(
+    getattr(torch, name)
+    for name in ("float8_e4m3fn", "float8_e5m2", "float8_e4m3fnuz", "float8_e5m2fnuz")
+    if hasattr(torch, name)
+)
+
+
+# Upper bound for one chunked fill of a non-contiguous buffer, so the
+# kernel-side temporary stays small even on a nearly-full card.
+_ZERO_CHUNK_BYTES = 64 * 1024 * 1024
+
+
+def _zero_without_temp_buffer(t: torch.Tensor) -> None:
+    """Zero a tensor in place without allocating a same-size temporary.
+
+    Contiguous tensors are filled through an int8 reinterpretation of the
+    same bytes, which needs no workspace. Non-contiguous ones make even
+    zero_()/copy_() materialize a temporary proportional to the operand
+    size on NPU (a2 CI OOMed with 6-12 GiB extra on a nearly-full card),
+    so they are filled with a scalar broadcast in dim-0 chunks bounded by
+    _ZERO_CHUNK_BYTES.
+    """
+    if t.is_contiguous():
+        t.view(torch.int8).zero_()
+        return
+    if t.dim() == 0 or t.numel() * t.element_size() <= _ZERO_CHUNK_BYTES:
+        t.copy_(torch.zeros((), dtype=t.dtype, device=t.device))
+        return
+    rows_per_chunk = max(1, _ZERO_CHUNK_BYTES // (t[0].numel() * t.element_size()))
+    zero = torch.zeros((), dtype=t.dtype, device=t.device)
+    for start in range(0, t.shape[0], rows_per_chunk):
+        t[start:start + rows_per_chunk].copy_(zero)
+
+
+def _zero_tensor(t: torch.Tensor) -> None:
+    """Zero a tensor in place.
+
+    fp8 storages may not implement zero_() at all, and plain zero_() can
+    itself materialize a same-size temporary for some NPU dtypes/layouts
+    (a2 CI runners: 6-12 GiB extra while the pool is nearly full). Both
+    cases take the no-temporary path. Only OutOfMemoryError is treated as
+    recoverable; any other failure must abort startup loudly rather than
+    leave a poisoned buffer behind.
+    """
+    if t.dtype in _FP8_DTYPES:
+        _zero_without_temp_buffer(t)
+        return
+    try:
+        t.zero_()
+    except torch.OutOfMemoryError:
+        _zero_without_temp_buffer(t)
+
+
+def _zero_static_kv_buffers(runner) -> None:
+    """Zero every KV-cache / recurrent-state tensor in static_forward_context.
+
+    Fix for the GLM-5.3-Flash C8 accuracy collapse: FULL_DECODE_ONLY capture
+    runs dummy decodes that really execute the KDA/SFA write paths over the
+    persistent buffers. On this model the KDA conv/recurrent state caches
+    share backing storage with the SFA fp8 KV pool (per 4-layer group the
+    KDA state tensors and the next SFA pool have the same data_ptr), so the
+    bf16 garbage written by causal_conv1d/recurrent_kda lands in pool blocks
+    0-8; reinterpreted as fp8 e4m3 those bytes include NaN encodings
+    (0x7F/0xFF), which the SFA forward then reads into the residual stream.
+    Nothing resets the buffers after capture, so the first real request
+    reads poisoned state and collapses into emitting '!' forever. Zeroing
+    right after capture_model() restores the logically-empty state the
+    engine assumes at startup. It runs exactly once per startup, outside
+    any captured graph, so graph replay and steady-state inference are
+    unaffected.
+    """
+    compilation_config = getattr(runner, "compilation_config", None)
+    ctx = getattr(compilation_config, "static_forward_context", None) or {}
+    for mod in ctx.values():
+        for tensor in _iter_kv_tensors(getattr(mod, "kv_cache", None)):
+            _zero_tensor(tensor)
+
+
 class NPUModelRunner(GPUModelRunner):
     # vLLM #51718 describes compatible KV cache groups as views over one
     # standardized backing allocation. The default runner preserves that
@@ -390,15 +482,6 @@ class NPUModelRunner(GPUModelRunner):
         self.query_start_loc = self._make_buffer(
             self.max_num_reqs + 2,  # type: ignore[has-type]
             dtype=torch.int32,
-        )
-        self.group_len = self._make_buffer(
-            vllm_config.scheduler_config.max_num_batched_tokens , dtype=torch.int32
-        )        
-        self.group_key_idx = self._make_buffer(
-           vllm_config.scheduler_config.max_num_batched_tokens , dtype=torch.int32
-        )        
-        self.group_key_cache_idx = self._make_buffer(
-            vllm_config.scheduler_config.max_num_batched_tokens, dtype=torch.int32
         )
 
         # Now, query_start_loc is padded.
@@ -456,8 +539,8 @@ class NPUModelRunner(GPUModelRunner):
         self.use_sparse = enable_sfa(vllm_config)
         # Backends that derive per-token visible history from self.positions
         # rather than from seq_lens: the LightningIndexer SFA family and the
-        # GLM-Next kpool indexer. Both reach SparseMLAMetadataState.prepare(),
-        # which calls indexer.get_topk_lengths(positions).
+        # GLM-Next kpool indexer. Both need real positions to select causally
+        # valid sparse indices.
         self.uses_positions_for_attention = self.use_sparse or model_uses_kpool_indexer(
             getattr(vllm_config, "model_config", None)
         )
@@ -766,6 +849,22 @@ class NPUModelRunner(GPUModelRunner):
                 )
         self.discard_request_indices = self._make_buffer(self.max_num_reqs, dtype=torch.int64)
         self.num_discarded_requests = 0
+        # The one replay window every bounded-replay KV cache group agrees on, 0
+        # when nothing replays -- and then the whole replay path is skipped, so
+        # a run without the feature pays nothing. ``initialize_kv_cache`` fills
+        # it in once the groups are final.
+        self.prefix_replay_tokens = 0
+        self._replay_starts: dict[str, int] = {}
+        # Per-request replay start: 0 for every request that is not replaying,
+        # else where that request's replayed run begins. Rebuilt on the CPU as
+        # part of the step and copied with the same pinned, non-blocking rhythm
+        # as ``num_computed_tokens``, so it adds no sync point.
+        self.replay_start = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
+        # Whether the step being prepared replays. ``_dummy_run`` builds
+        # attention metadata without going through ``_prepare_inputs``, so this
+        # is also cleared there: otherwise a capture batch would hand the
+        # builder a buffer still holding the last real step's values.
+        self._replay_active = False
 
     def _get_drafter(self):
         return get_spec_decode_method(self.speculative_config.method, self.vllm_config, self.device, self)
@@ -958,6 +1057,7 @@ class NPUModelRunner(GPUModelRunner):
         ).unsqueeze(1)
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> Callable | None:
+        self._update_replay_requests(scheduler_output)
         # Temporary rewind guard for KV-load-failure recompute.
         # This can be removed after the upstream fix is merged.
         req_data = scheduler_output.scheduled_cached_reqs
@@ -1276,6 +1376,70 @@ class NPUModelRunner(GPUModelRunner):
             self.tmp_encoder_cache[mm_hash] = output
 
         self.maybe_save_ec_to_connector({mm_hash: output}, mm_hash)
+
+    def _update_replay_requests(self, scheduler_output: "SchedulerOutput") -> None:
+        """Keep replay boundaries across chunks, replacing them on readmission."""
+        if not self.prefix_replay_tokens:
+            return
+        for req_id in scheduler_output.finished_req_ids:
+            self._replay_starts.pop(req_id, None)
+        for req in scheduler_output.scheduled_new_reqs:
+            self._replay_starts.pop(req.req_id, None)
+            if req.replay_start:
+                self._replay_starts[req.req_id] = req.replay_start
+        cached = scheduler_output.scheduled_cached_reqs
+        for req_id in cached.resumed_req_ids:
+            # The resume payload omits zero boundaries. A resume without a
+            # fresh hit must discard the boundary from the previous admission.
+            self._replay_starts.pop(req_id, None)
+            start = cached.replay_start.get(req_id, 0)
+            if start:
+                self._replay_starts[req_id] = start
+
+    def _fill_replay_start(self, num_reqs: int) -> torch.Tensor | None:
+        """Gather saved boundaries for chunks still inside the replay window.
+
+        The window can span multiple scheduled chunks. Once a chunk starts at
+        or beyond its end, no cached slots need padding and the natural SWA
+        lower bound is already at or beyond the replay start. Checking token
+        positions also covers replay of generated tokens after preemption.
+        """
+        if not self.prefix_replay_tokens:
+            self._replay_active = False
+            return None
+
+        self.replay_start.np.fill(0)
+        replaying = False
+        for req_id, index in self.input_batch.req_id_to_index.items():
+            if index >= num_reqs:
+                continue
+            start = self._replay_starts.get(req_id, 0)
+            if not start:
+                continue
+            computed = self.input_batch.num_computed_tokens_cpu[index]
+            if start <= computed < start + self.prefix_replay_tokens:
+                self.replay_start.np[index] = start
+                replaying = True
+            else:
+                # Finished replay, or a recompute rewound below its boundary.
+                self._replay_starts.pop(req_id, None)
+        # Clear padded rows too so batch reordering cannot retain an old bound.
+        self.replay_start.copy_to_gpu()
+        self._replay_active = replaying
+        return self.replay_start.gpu[:num_reqs] if replaying else None
+
+    def _attn_replay_start(self, num_reqs_padded: int) -> torch.Tensor | None:
+        """What the step's attention metadata carries as its per-request replay
+        start, or None when the step does not replay.
+
+        None rather than an all-zero buffer because a dummy, profiling or
+        capture batch never goes through ``_prepare_inputs``: the buffer would
+        still hold the previous real step's values, and the attention builder
+        would clamp a window it was never asked to.
+        """
+        if not self._replay_active:
+            return None
+        return self.replay_start.gpu[:num_reqs_padded]
 
     def _prepare_inputs(
         self,
@@ -1618,11 +1782,24 @@ class NPUModelRunner(GPUModelRunner):
         if self._needs_seq_lens_cpu_sync and async_spec_decode_active:
             self._correct_optimistic_seq_lens_cpu(num_reqs)
 
+        replay_start = self._fill_replay_start(num_reqs)
+
         self.input_batch.block_table.compute_slot_mapping(
             num_reqs,
             self.query_start_loc.gpu[: num_reqs + 1],
             self.positions[:total_num_scheduled_tokens],
         )
+
+        if replay_start is not None:
+            # After every group's slot mapping is final, so this sees the same
+            # slots the attention kernels are about to be handed.
+            self.input_batch.block_table.pad_replayed_slots(
+                num_reqs,
+                self.query_start_loc.gpu[: num_reqs + 1],
+                self.positions[:total_num_scheduled_tokens],
+                replay_start,
+                self.prefix_replay_tokens,
+            )
 
         if self.use_async_spec_decode and self.uses_mrope:
             drift = self.num_computed_tokens[req_indices_gpu].to(
@@ -3674,9 +3851,10 @@ class NPUModelRunner(GPUModelRunner):
             attn_state=self.attn_state,
             decode_token_per_req=self.decode_token_per_req,
             context_parallel_metadata=self.long_seq_metadata,
-            group_len = self.group_len.gpu[:num_reqs_padded],
-            group_key_idx = self.group_key_idx.gpu[:num_reqs_padded],
-            group_key_cache_idx = self.group_key_cache_idx.gpu[:num_reqs_padded],
+            # 0 for every request that is not replaying, and for every padded
+            # row; a backend clamps the sliding-window lower bound of a
+            # replaying request to it.
+            replay_start=self._attn_replay_start(num_reqs_padded),
             req_ids_tensor=(
                 self._offload_req_ids_tensor.gpu[:num_reqs_padded]
                 if self._offload_req_ids_tensor is not None
@@ -4029,6 +4207,10 @@ class NPUModelRunner(GPUModelRunner):
         # vllm-ascend does not support ubatch now
         ubatch_slices, ubatch_slices_padded = None, None
         attn_metadata: PerLayerAttnMetadata | None = None
+        # A dummy/profiling/capture batch never replays: it does not go through
+        # ``_prepare_inputs``, so clear the flag rather than let the metadata
+        # report the last real step's replay and clamp a window mid-capture.
+        self._replay_active = False
         # _dummy_run shares pinned CPU buffers (seq_lens, query_start_loc,
         # gdn_query_start_loc, etc.) with execute_model. It must participate in
         # the same event protocol so that back-to-back dummy/real steps don't
@@ -4612,6 +4794,15 @@ class NPUModelRunner(GPUModelRunner):
         )
         self.kernel_block_sizes = kernel_block_sizes
         self.may_reinitialize_input_batch(kv_cache_config, kernel_block_sizes)
+        # The one replay window the KV cache groups agree on, 0 when nothing
+        # replays (the scheduler asserts the same agreement). Read after the
+        # calls above because those can still add or rewrap KV cache groups. The
+        # defensive read keeps a pin that predates the replay API at "nothing
+        # replays".
+        self.prefix_replay_tokens = max(
+            (getattr(group.kv_cache_spec, "prefix_replay_tokens", 0) for group in kv_cache_config.kv_cache_groups),
+            default=0,
+        )
         if self.sparse_kv_offload_enabled:
             self.sparse_kv_offload_manager = init_sparse_kv_offload_manager(
                 self.vllm_config,
@@ -6423,6 +6614,13 @@ class NPUModelRunner(GPUModelRunner):
                 cuda_graph_size = GPUModelRunner.capture_model(self)
         finally:
             self._engram_capture_active = False
+
+        # Capture runs dummy forwards that can leave garbage in the static
+        # KV/state buffers (e.g. GLM-5.3-Flash: KDA dummy state lands in the
+        # aliased SFA fp8 pool and reads back as NaN). Zero them once here so
+        # real requests start from the logically-empty state the engine
+        # assumes. See _zero_static_kv_buffers for the full story.
+        _zero_static_kv_buffers(self)
 
         mgr = self.encoder_cudagraph_manager
         if mgr is not None and self.update_stream is not None:

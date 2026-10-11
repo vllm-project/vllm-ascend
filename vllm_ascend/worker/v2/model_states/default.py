@@ -28,6 +28,7 @@ from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
+from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -39,6 +40,18 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
 )
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata, ring_state_update_skipped
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
+
+
+class ReplayAttnMetadata(ModelSpecificAttnMetadata):
+    """Pass V4.1 replay boundaries to the SWA metadata builder."""
+
+    def __init__(self, replay_start: torch.Tensor):
+        self.replay_start = replay_start
+
+    def get_extra_common_attn_kwargs(self, cache_group_idx: int, num_reqs: int) -> dict[str, Any]:
+        del cache_group_idx
+        return {"replay_start": self.replay_start[:num_reqs]}
+
 
 if TYPE_CHECKING:
     from vllm_ascend.worker.device_metadata import TargetDeviceMetadata
@@ -175,6 +188,7 @@ class AscendModelState(DefaultModelState):
         kv_cache_config: KVCacheConfig,
         for_capture: bool = False,
         ubatch_idx: int = 0,
+        model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     ) -> dict[str, Any]:
         """Override prepare_attn method because `build_attn_metadata` is different from vllm."""
         # vLLM #50945 adds this contract; Ascend still disables DBO.
@@ -300,6 +314,7 @@ class AscendModelState(DefaultModelState):
             for_cudagraph_capture=for_capture,
             # Same wiring as model_runner_v1
             full_graph_mode=cudagraph_mode == CUDAGraphMode.FULL,
+            model_specific_attn_metadata=model_specific_attn_metadata,
             req_ids_tensor=offload_req_ids.gpu[:num_reqs] if offload_req_ids is not None else None,
             token_to_req=offload_token_to_req.gpu[:num_input_tokens] if offload_token_to_req is not None else None,
             offload_dummy=getattr(input_batch, "is_dummy", False),
