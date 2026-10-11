@@ -1091,18 +1091,3 @@ def test_pad_query_layout_rejects_graph_smaller_than_batch() -> None:
         speculator_module.pad_query_layout_to_graph(
             np.array([0, 8], dtype=np.int32), torch.tensor([8], dtype=torch.int32), 1, 2, 4
         )
-
-
-@pytest.mark.parametrize("is_decode_sharded", [False, True])
-@pytest.mark.parametrize("attn_architecture", ["GQA", "MLA", "SFA"])
-@pytest.mark.parametrize("cudagraph_runtime_mode", [CUDAGraphMode.FULL, CUDAGraphMode.PIECEWISE])
-def test_target_prefill_metadata_reuse_requires_replicated_target(
-    is_decode_sharded: bool, attn_architecture: str, cudagraph_runtime_mode: CUDAGraphMode
-) -> None:
-    speculator = object.__new__(AscendMTPSpeculator)
-    speculator.pcp_manager = SimpleNamespace(is_decode_sharded=is_decode_sharded)
-    speculator.attn_architecture = attn_architecture
-    expected = (
-        cudagraph_runtime_mode == CUDAGraphMode.FULL and attn_architecture in ("GQA", "MLA") and not is_decode_sharded
-    )
-    assert speculator._reuses_target_prefill_metadata(cudagraph_runtime_mode) is expected

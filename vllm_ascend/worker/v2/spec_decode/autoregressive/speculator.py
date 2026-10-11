@@ -59,7 +59,6 @@ from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSampl
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
     disable_profiling_chunk_for_draft,
     disable_target_pcp_for_replicated_draft,
-    draft_dp_sync,
     prepare_replicated_pcp_config,
 )
 
@@ -247,18 +246,6 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
             return self.attn_groups
         return self.target_attn_groups
 
-    def _reuses_target_prefill_metadata(self, cudagraph_runtime_mode: CUDAGraphMode) -> bool:
-        """Whether the target's FULL metadata already describes the draft prefill.
-
-        A replicated target builds MLA/GQA FULL metadata for the same global
-        layout the draft replays. A sharded target's metadata is PCP-local, so
-        the draft builds its own from the restored global batch.
-        """
-        if cudagraph_runtime_mode != CUDAGraphMode.FULL or self.attn_architecture not in ("MLA", "GQA"):
-            return False
-        assert self.pcp_manager is not None
-        return not self.pcp_manager.is_decode_sharded
-
     def _prepare_replicated_prefill_attn(
         self,
         attn_metadata: dict[str, Any] | None,
@@ -292,7 +279,15 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
                 input_batch.positions,
                 num_tokens_padded=num_tokens_padded,
             )
-            if self._reuses_target_prefill_metadata(cudagraph_runtime_mode):
+            # A replicated target's MLA/GQA FULL metadata already describes the
+            # global layout the draft replays; a sharded target's is PCP-local.
+            # TODO: Remove this early return once FIA supports padded Query tensors
+            # whose token count exceeds the cumulative query length.
+            if (
+                cudagraph_runtime_mode == CUDAGraphMode.FULL
+                and self.attn_architecture in ("MLA", "GQA")
+                and not self.pcp_manager.is_decode_sharded
+            ):
                 return attn_metadata, slot_mappings
 
         num_reqs = input_batch.num_reqs
@@ -379,7 +374,9 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         generate_draft.
         """
         self.input_batch = input_batch
-        sync_state = draft_dp_sync(self, dp_sync)
+        # Replicated drafts use global tokens, unlike the PCP-local target.
+        # Every DP rank must take the draft sync, including decode and idle ranks.
+        sync_state = None if self.replicated_pcp else dp_sync
         # wrap build_attn_metadata to use Ascend attention metadata building.
         # so we can call super().propose() directly.
         with (

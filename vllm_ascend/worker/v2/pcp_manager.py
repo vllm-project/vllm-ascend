@@ -70,8 +70,6 @@ class AscendPCPManager(PCPManager):
     _gathered_kv_slot_mappings: torch.Tensor | None
     _pad_slot_id: torch.Tensor
     _sampling_hidden_restored: bool = False
-    # Global batch handed back after target execution; see restored_global_batch.
-    _restored_global_batch: AscendInputBatch | None = None
     # The runner's global input buffers, which back global graph metadata.
     global_input_buffers: AscendInputBuffers | None = None
 
@@ -211,49 +209,31 @@ class AscendPCPManager(PCPManager):
         return last_hidden_states, hidden_states
 
     @property
-    def hands_off_to_replicated_draft(self) -> bool:
-        """Whether a sharded target hands its restored batch to a PCP=1 draft.
-
-        The draft selects its own graph and padding, so it must receive the
-        scheduled global tokens without the target's execution padding.
-        """
-        return self.is_decode_sharded and self.vllm_config.speculative_config is not None
-
-    @property
     def restored_global_batch(self) -> AscendInputBatch:
-        """The global batch consumed after target execution.
+        """The global batch handed to sampling and the draft after target execution.
 
-        Sampling and the replicated draft both use this batch, together with
-        hidden states from ``restore_hidden_states``, whose row count always
-        equals its ``num_tokens_after_padding``.
+        A sharded target pads only for its own PCP-local execution, so that
+        padding is dropped here and the draft picks its own graph and padding
+        exactly as without PCP. A replicated target already executes the
+        global layout, which the draft may reuse as is.
         """
-        if self._restored_global_batch is None:
-            raise RuntimeError("PCP restored global batch is unavailable before partition_batch().")
-        return self._restored_global_batch
-
-    @staticmethod
-    def _without_execution_padding(batch: AscendInputBatch) -> AscendInputBatch:
-        """Return a view of ``batch`` covering only its scheduled requests and tokens.
-
-        Every padded-extent field is cut back together, so the descriptor stays
-        self-consistent. Request-sized fields (idx_mapping, req_ids, ...) are
-        already unpadded.
-        """
-        num_reqs = batch.num_reqs
-        num_tokens = batch.num_tokens
-        dcp_local_seq_lens = batch.dcp_local_seq_lens
+        global_batch = self.global_batch
+        if not self.is_decode_sharded:
+            return global_batch
+        num_reqs = global_batch.num_reqs
+        num_tokens = global_batch.num_tokens
+        # Sharding requires DCP=1, so dcp_local_seq_lens needs no trimming.
         return replace(  # type: ignore[call-arg]
-            batch,
+            global_batch,
             num_reqs_after_padding=num_reqs,
             num_tokens_after_padding=num_tokens,
-            query_start_loc=batch.query_start_loc[: num_reqs + 1],
-            query_start_loc_np=batch.query_start_loc_np[: num_reqs + 1],
-            seq_lens=batch.seq_lens[:num_reqs],
-            seq_lens_cpu_upper_bound=batch.seq_lens_cpu_upper_bound[:num_reqs],
-            dcp_local_seq_lens=None if dcp_local_seq_lens is None else dcp_local_seq_lens[:num_reqs],
-            input_ids=batch.input_ids[:num_tokens],
-            positions=batch.positions[:num_tokens],
-            is_padding=batch.is_padding[:num_tokens],
+            query_start_loc=global_batch.query_start_loc[: num_reqs + 1],
+            query_start_loc_np=global_batch.query_start_loc_np[: num_reqs + 1],
+            seq_lens=global_batch.seq_lens[:num_reqs],
+            seq_lens_cpu_upper_bound=global_batch.seq_lens_cpu_upper_bound[:num_reqs],
+            input_ids=global_batch.input_ids[:num_tokens],
+            positions=global_batch.positions[:num_tokens],
+            is_padding=global_batch.is_padding[:num_tokens],
         )
 
     @property
@@ -357,11 +337,6 @@ class AscendPCPManager(PCPManager):
             padded_num_reqs=padded_num_reqs if self.is_decode_sharded else None,
         )
         assert isinstance(local_batch, AscendInputBatch)
-        # The target keeps executing on the padded global layout; only the
-        # batch handed back after execution drops that padding.
-        self._restored_global_batch = (
-            self._without_execution_padding(global_batch) if self.hands_off_to_replicated_draft else global_batch
-        )
         self._pad_hidden_restore_idx(global_batch)
         if not self.is_decode_sharded:
             local_batch = self._pad_replicated_decode_graph(global_batch, local_batch)
@@ -521,10 +496,10 @@ class AscendPCPManager(PCPManager):
             return hidden_states
 
         restored_hidden_states = super().restore_hidden_states(hidden_states)
-        restored_batch = self._restored_global_batch
-        if restored_batch is not None:
-            restored_hidden_states[restored_batch.num_tokens :].zero_()
+        if self._global_batch is not None:
+            restored_batch = self.restored_global_batch
             restored_hidden_states = restored_hidden_states[: restored_batch.num_tokens_after_padding]
+            restored_hidden_states[restored_batch.num_tokens :].zero_()
         return restored_hidden_states
 
     def restore_for_sampling(

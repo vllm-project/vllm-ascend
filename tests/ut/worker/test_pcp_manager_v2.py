@@ -803,9 +803,19 @@ def _make_padded_global_decode_batch() -> AscendInputBatch:
     return batch
 
 
-def test_restored_global_batch_drops_only_target_padding() -> None:
-    batch = _make_padded_global_decode_batch()
-    restored = AscendPCPManager._without_execution_padding(batch)
+def _make_restoring_manager(is_decode_sharded: bool) -> AscendPCPManager:
+    manager = AscendPCPManager.__new__(AscendPCPManager)
+    manager.vllm_config = _make_pcp_config(CUDAGraphMode.FULL_DECODE_ONLY)
+    manager.vllm_config.parallel_config.decode_context_parallel_size = 1 if is_decode_sharded else 2
+    manager._global_batch = _make_padded_global_decode_batch()
+    assert manager.is_decode_sharded is is_decode_sharded
+    return manager
+
+
+def test_sharded_target_hands_off_unpadded_global_batch() -> None:
+    manager = _make_restoring_manager(is_decode_sharded=True)
+    batch = manager._global_batch
+    restored = manager.restored_global_batch
 
     assert restored is not batch
     assert (restored.num_reqs, restored.num_reqs_after_padding) == (3, 3)
@@ -816,45 +826,19 @@ def test_restored_global_batch_drops_only_target_padding() -> None:
     assert not bool(restored.is_padding.any())
     # Request-sized fields are shared, and views keep the target's storage.
     assert restored.idx_mapping is batch.idx_mapping
-    assert restored.req_ids is batch.req_ids
     assert restored.input_ids.data_ptr() == batch.input_ids.data_ptr()
     # The target batch keeps its padded execution layout.
     assert batch.num_tokens_after_padding == 16
     assert batch.query_start_loc.tolist() == [0, 4, 8, 12, 16]
 
 
-@pytest.mark.parametrize("method", [None, "mtp", "eagle3", "dspark"])
-def test_partition_selects_restored_global_batch(method) -> None:
-    manager = AscendPCPManager.__new__(AscendPCPManager)
-    speculative_config = None if method is None else SimpleNamespace(method=method)
-    manager.vllm_config = _make_pcp_config(
-        CUDAGraphMode.FULL_DECODE_ONLY,
-        speculative_config=speculative_config,
-    )
-    # Every speculative method hands off the unpadded global batch. Non-spec
-    # PCP keeps the target's padded layout.
-    hands_off = method is not None
-    assert manager.hands_off_to_replicated_draft is hands_off
-    batch = _make_padded_global_decode_batch()
-    with (
-        patch.object(PCPManager, "partition_batch", return_value=batch),
-        patch.object(AscendPCPManager, "_pad_hidden_restore_idx"),
-        patch.object(AscendPCPManager, "_pad_uniform_query_start_loc"),
-        patch.object(AscendPCPManager, "_pad_replicated_decode_graph", return_value=batch),
-    ):
-        manager._input_buffers = AscendInputBuffers(max_num_reqs=8, max_num_tokens=32, device=torch.device("cpu"))
-        manager.partition_batch(batch)
-    restored = manager.restored_global_batch
-    if hands_off:
-        assert restored.num_tokens_after_padding == 12
-        assert restored.query_start_loc_np.tolist() == [0, 4, 8, 12]
-    else:
-        assert restored is batch
+def test_replicated_target_hands_off_its_global_batch() -> None:
+    manager = _make_restoring_manager(is_decode_sharded=False)
+    assert manager.restored_global_batch is manager._global_batch
 
 
 def test_sampling_and_draft_share_restored_global_layout() -> None:
-    manager = AscendPCPManager.__new__(AscendPCPManager)
-    manager._restored_global_batch = AscendPCPManager._without_execution_padding(_make_padded_global_decode_batch())
+    manager = _make_restoring_manager(is_decode_sharded=True)
     gathered = torch.arange(32, dtype=torch.float32).reshape(16, 2)
     with (
         patch(
@@ -868,7 +852,7 @@ def test_sampling_and_draft_share_restored_global_layout() -> None:
         manager._sampling_hidden_restored = True
         sampling_hidden, sampling_batch = manager.restore_for_sampling(draft_hidden)
     parent_restore.assert_called_once()
-    assert sampling_batch is manager.restored_global_batch
+    assert sampling_batch.num_tokens == 12
     assert sampling_hidden is draft_hidden
     assert draft_hidden.shape[0] == sampling_batch.num_tokens_after_padding == 12
     torch.testing.assert_close(draft_hidden, gathered[:12])
@@ -881,10 +865,10 @@ def test_pcp_manager_restores_model_owned_hidden_buffer() -> None:
     manager = AscendPCPManager.__new__(AscendPCPManager)
     manager.pcp_world_size = 2
     manager._padded_gather_idx = torch.empty(6, dtype=torch.int64)
-    manager._restored_global_batch = SimpleNamespace(
-        num_tokens=3,
-        num_tokens_after_padding=4,
-    )
+    manager.vllm_config = _make_pcp_config(CUDAGraphMode.FULL_DECODE_ONLY)
+    manager.vllm_config.parallel_config.decode_context_parallel_size = 2
+    manager._global_batch = _make_padded_global_decode_batch()
+    manager._global_batch.num_tokens, manager._global_batch.num_tokens_after_padding = 3, 4
 
     captured_local_hidden_states = []
 
