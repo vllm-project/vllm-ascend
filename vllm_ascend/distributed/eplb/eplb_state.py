@@ -162,9 +162,6 @@ class AscendEplbState(_eplb_state.EplbState):
         self._stop_async = threading.Event()
         self._suspended = False
         self._close_error: Exception | None = None
-        self._rebuild_group: Any = None
-        self._sleep_saved_mappings: dict[str, torch.Tensor] | None = None
-        self._pending_checkpoint_reload: bool | None = None
         # vLLM main renamed ``EplbState.cuda_device_index`` to ``device_index``
         # (and passes it to EplbModelState on add_model), so keep both lanes
         # pointing at the attribute upstream actually reads.
@@ -225,139 +222,12 @@ class AscendEplbState(_eplb_state.EplbState):
 
     def raise_if_close_failed(self) -> None:
         if self._close_error is not None:
-            logger.error("EPLB lifecycle failed; terminating the worker: %s", self._close_error)
+            logger.error("EPLB cleanup failed; terminating the worker: %s", self._close_error)
             # Ordinary RPC exceptions are caught by the upstream worker loop.
             # SystemExit reaches its process-death monitor and engine shutdown.
             raise SystemExit(
-                "EPLB lifecycle failed; worker must terminate before rebuilding or unmapping memory"
+                "EPLB cleanup failed; worker must terminate before releasing registered memory"
             ) from self._close_error
-
-    def resume(self) -> None:
-        """Create fresh registrations after all required memory is restored."""
-        self.raise_if_close_failed()
-        if not self._suspended:
-            return
-        try:
-            if self._sleep_saved_mappings is not None or self._pending_checkpoint_reload is not None:
-                self._restore_model_state()
-                # HIXL and the background stream must see completed restoration.
-                torch.npu.synchronize()
-            for model_state in self.model_states.values():
-                if isinstance(model_state.communicator, AscendHixlEplbCommunicator):
-                    model_state.communicator = _eplb_state.create_eplb_communicator(
-                        get_eplb_group(), "hixl", model_state.model.expert_weights, model_state.expert_buffer
-                    )
-        except Exception as error:
-            self._close_error = error
-            self.raise_if_close_failed()
-        self._suspended = False
-        self._stop_async.clear()
-        self.start_async_loop()
-
-    def lifecycle_tensors(self) -> Iterator[torch.Tensor]:
-        """Include metadata in partial-wake gating, even outside weights pools."""
-        if self.should_record_tensor is not None:
-            yield self.should_record_tensor
-        for model_state in self.model_states.values():
-            yield model_state.physical_to_logical_map_buffer
-            yield model_state.logical_to_physical_map
-            yield model_state.logical_replica_count
-            yield model_state.expert_load_pass_buffer
-            yield model_state.expert_load_window
-            yield from model_state.num_unpadded_tokens_tensors
-            for layer in model_state.model.moe_layers:
-                layer_state = layer.eplb_state
-                if isinstance(layer_state, AscendEplbLayerState):
-                    if layer_state.expert_replica_routing_table is not None:
-                        yield layer_state.expert_replica_routing_table
-
-    def save_sleep_state(self) -> None:
-        """Save placement after draining, before allocator mappings disappear."""
-        self._sleep_saved_mappings = {
-            key: model_state.physical_to_logical_map_buffer.cpu().clone()
-            for key, model_state in self.model_states.items()
-        }
-
-    def finish_weight_reload(self, is_checkpoint_format: bool) -> None:
-        # Partial wake can leave metadata unmapped. Apply this on resume only.
-        # A subsequent kernel reload preserves the checkpoint's new slots.
-        self._pending_checkpoint_reload = is_checkpoint_format or self._pending_checkpoint_reload is True
-
-    def _restore_model_state(self) -> None:
-        for key, model_state in self.model_states.items():
-            mapping = None if self._sleep_saved_mappings is None else self._sleep_saved_mappings[key]
-            if self._pending_checkpoint_reload:
-                model = model_state.model
-                token = EXPERT_MAPPING_EP_SIZE.set(get_ep_group().world_size)
-                try:
-                    initial = self.build_initial_global_physical_to_logical_map(
-                        model.num_routed_experts, model.num_redundant_experts
-                    )
-                finally:
-                    EXPERT_MAPPING_EP_SIZE.reset(token)
-                mapping = torch.full(
-                    model_state.physical_to_logical_map_buffer.shape, -1, dtype=torch.long, device="cpu"
-                )
-                mapping[:, : len(initial)] = torch.tensor(initial, device="cpu")
-            if mapping is not None:
-                model_state.physical_to_logical_map_buffer.copy_(mapping)
-                _eplb_state._commit_eplb_maps(model_state, mapping[:, : model_state.model.num_physical_experts])
-            model_state.expert_load_pass_buffer.zero_()
-            model_state.expert_load_window.zero_()
-            for tensor in model_state.num_unpadded_tokens_tensors:
-                tensor.zero_()
-            model_state.model.set_eplb_state(
-                model_state.expert_load_pass_buffer,
-                model_state.logical_to_physical_map,
-                model_state.logical_replica_count,
-            )
-            if self.uses_custom_load_stats:
-                self._initialize_load_stats_state(model_state)
-        if self.should_record_tensor is not None:
-            self.should_record_tensor.zero_()
-        self.expert_load_window_step = 0
-        self.expert_rearrangement_step = 0
-        self._has_fresh_recorded_load = False
-        self._is_load_sampling_step = False
-        self._should_collect_local_load = False
-        if self.uses_custom_load_stats:
-            self._local_load_collection_mask.zero_()
-            self._physical_load_sample_slots.fill_(-1)
-            self._num_recorded_load_steps = 0
-            self._load_stats_window_start_index = 0
-            self._load_stats_window_write_index = 0
-        self._sleep_saved_mappings = None
-        self._pending_checkpoint_reload = None
-
-    def create_communicator(self, model_config, group_coordinator):
-        """Defer elastic EP registration until the final weight views exist.
-
-        Upstream stages a communicator before switching groups/quant methods.
-        Reuse the old object as the staging token and register the final views
-        in update_communicator, after the old generation has been closed.
-        """
-        communicator = self.model_states[model_config.compute_hash()].communicator
-        if not isinstance(communicator, AscendHixlEplbCommunicator):
-            return super().create_communicator(model_config, group_coordinator)
-        self._rebuild_group = group_coordinator
-        return communicator
-
-    def update_communicator(self, model_config, communicator) -> None:
-        self.raise_if_close_failed()
-        if self._rebuild_group is not None:
-            self.close()
-            model_state = self.model_states[model_config.compute_hash()]
-            try:
-                communicator = _eplb_state.create_eplb_communicator(
-                    self._rebuild_group, "hixl", model_state.model.expert_weights, model_state.expert_buffer
-                )
-            except Exception as error:
-                self._close_error = error
-                self.raise_if_close_failed()
-            self._rebuild_group = None
-        super().update_communicator(model_config, communicator)
-        self._suspended = False
-        self._stop_async.clear()
 
     def start_async_loop(self, *args, **kwargs) -> None:
         if not self._suspended:
@@ -584,7 +454,6 @@ class AscendEplbState(_eplb_state.EplbState):
         self,
         is_profile: bool = False,
         rank_mapping: dict[int, int] | None = None,
-        use_last_expert_load: bool = False,
     ) -> torch.Tensor | None:
         if self._suspended:
             return None
@@ -606,10 +475,10 @@ class AscendEplbState(_eplb_state.EplbState):
                 self.publish_async_load_stats(global_load_stats)
             result = None
         else:
-            kwargs: dict[str, Any] = dict(is_profile=is_profile, rank_mapping=rank_mapping)
-            if use_last_expert_load:
-                kwargs["use_last_expert_load"] = True
-            result = super().rearrange(**kwargs)
+            result = super().rearrange(
+                is_profile=is_profile,
+                rank_mapping=rank_mapping,
+            )
         if not is_profile and not self.is_async:
             for model_state in self.model_states.values():
                 refresh_model_routing_tables(model_state)

@@ -15,7 +15,6 @@ import torch
 from pydantic.dataclasses import rebuild_dataclass
 from vllm.config import parallel as _parallel_config
 from vllm.distributed import get_eplb_group
-from vllm.distributed.elastic_ep.elastic_execute import ElasticEPScalingExecutor
 from vllm.distributed.eplb import async_worker as _async_worker
 from vllm.distributed.eplb import eplb_communicator as _eplb_communicator
 from vllm.distributed.eplb import eplb_state as _eplb_state
@@ -799,26 +798,6 @@ def _patch_async_move_to_workspace() -> None:
         _eplb_state._move_to_workspace = _wrap_move_to_workspace(original_move)
 
 
-def _wrap_elastic_group_switch(original_switch):
-    @wraps(original_switch)
-    def switch(self, *args, **kwargs):
-        state = self.worker.model_runner.eplb_state
-        if isinstance(state, AscendEplbState):
-            # Drain on the old groups, before upstream replaces or retires them.
-            state.close()
-        return original_switch(self, *args, **kwargs)
-
-    setattr(switch, _PATCH_MARKER, True)
-    return switch
-
-
-def _patch_elastic_group_switch() -> None:
-    for name in ("switch_and_prepare", "switch_and_remove"):
-        original = getattr(ElasticEPScalingExecutor, name)
-        if not getattr(original, _PATCH_MARKER, False):
-            setattr(ElasticEPScalingExecutor, name, _wrap_elastic_group_switch(original))
-
-
 _patch_eplb_policy_config()
 _patch_eplb_communicator_config()
 _patch_parallel_config()
@@ -827,4 +806,3 @@ _patch_communicator_factory()
 _patch_explicit_transfer_execution()
 _patch_changed_layer_transfer()
 _patch_async_move_to_workspace()
-_patch_elastic_group_switch()
