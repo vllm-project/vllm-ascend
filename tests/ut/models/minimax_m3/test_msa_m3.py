@@ -395,10 +395,7 @@ def test_indexer_metadata_builder(batch_spec: BatchSpec) -> None:
         assert metadata.num_decodes == batch_spec.batch_size
         assert metadata.prefill is None
         assert metadata.decode is not None
-        assert torch.equal(metadata.decode.start_loc, torch.zeros(batch_spec.batch_size, dtype=torch.int32))
-        assert metadata.decode.start_loc.data_ptr() == builder.decode_start_loc_buffer.data_ptr()
-        rebuilt = builder.build(0, common)
-        assert rebuilt.decode.start_loc.data_ptr() == metadata.decode.start_loc.data_ptr()
+        assert metadata.decode.start_loc is None
     else:
         assert metadata.num_prefills == batch_spec.batch_size
         assert metadata.decode is None
@@ -674,7 +671,7 @@ def test_a3_indexer_forward_receives_fused_select_counts() -> None:
         seq_lens=torch.tensor([129], dtype=torch.int32),
         context_lens=torch.tensor([128], dtype=torch.int32),
         block_table=torch.tensor([[0, 1]], dtype=torch.int32),
-        start_loc=torch.zeros(1, dtype=torch.int32),
+        start_loc=torch.tensor([1], dtype=torch.int32),
         max_seq_len=129,
         decode_query_len=1,
     )
@@ -706,19 +703,13 @@ def test_a3_indexer_forward_receives_fused_select_counts() -> None:
             msa_m3_module,
             "minimax_m3_index_decode_ascendc",
             return_value=(expected, expected_select_num_idx),
-        ) as mock_decode,
+        ),
     ):
         actual, prefill, select_num_idx = impl.forward(torch.zeros(1, 4))
 
     assert actual is expected
     assert prefill is None
     assert select_num_idx is expected_select_num_idx
-    mock_decode.assert_called_once()
-    decode_start_loc = mock_decode.call_args.args[6]
-    assert decode_start_loc is decode.start_loc
-    assert decode_start_loc.dtype == torch.int32
-    assert decode_start_loc.device == decode.context_lens.device
-    assert torch.equal(decode_start_loc, torch.zeros_like(decode.context_lens))
 
 
 def test_a5_indexer_forward_keeps_original_prefill_path() -> None:
@@ -1752,9 +1743,7 @@ def test_ascendc_index_decode_uses_full_cache_without_tp_collectives(
     assert decode_op.call_args.args[0].shape == (2 * query_len, 1, 4)
     assert decode_op.call_args.args[1] is impl.index_cache.kv_cache
     assert decode_op.call_args.args[2] is metadata.decode.block_table
-    assert torch.equal(metadata.decode.start_loc, torch.zeros(2, dtype=torch.int32))
-    assert metadata.decode.start_loc.data_ptr() == builder.decode_start_loc_buffer.data_ptr()
-    assert all(call.args[6] is metadata.decode.start_loc for call in decode_op.call_args_list)
+    assert torch.equal(decode_op.call_args.args[6], torch.tensor([128, 128], dtype=torch.int32))
     assert decode_op.call_args.kwargs["decode_query_len"] == query_len
     assert prefill_op.call_count == 2 * num_prefills
     forbidden.assert_not_called()
