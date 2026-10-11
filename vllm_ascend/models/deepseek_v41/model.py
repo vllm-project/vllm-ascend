@@ -8,6 +8,7 @@ import typing
 from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass
+from functools import partial
 from itertools import islice
 from typing import Any
 
@@ -71,6 +72,7 @@ from vllm_ascend.ops.dsa import AscendDeepseekSparseAttention, DSAModules
 from vllm_ascend.ops.rope_dsv4 import ComplexExpRotaryEmbedding
 from vllm_ascend.ops.triton.mul_add import muls_add_triton
 from vllm_ascend.utils import (
+    enable_custom_op,
     enable_dsa_cp,
     get_rotation_path,
     normalize_deepseek_v41_config,
