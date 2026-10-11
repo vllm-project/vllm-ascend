@@ -120,11 +120,22 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
             input_size = self.o_proj_weight_load_state.input_size_per_partition_before
             output_size = self.o_proj.output_size_per_partition
             dtype = self.vllm_config.model_config.dtype
-            device = self.vllm_config.device_config.device
-            self._pcp_o_proj_ag_in_buf = torch.empty((capacity, input_size), dtype=dtype, device=device)
-            self._pcp_o_proj_ag_out_buf = torch.empty((pcp_size * capacity, input_size), dtype=dtype, device=device)
-            self._pcp_o_proj_rs_in_buf = torch.empty((pcp_size * capacity, output_size), dtype=dtype, device=device)
-            self._pcp_o_proj_rs_out_buf = torch.empty((capacity, output_size), dtype=dtype, device=device)
+            device = self.o_proj.weight.device
+            # Layers execute O-proj collectives sequentially, so compatible
+            # layers can reuse these graph-stable buffers from the weight pool.
+            buffer_shapes = {
+                "_pcp_o_proj_ag_in_buf": (capacity, input_size),
+                "_pcp_o_proj_ag_out_buf": (pcp_size * capacity, input_size),
+                "_pcp_o_proj_rs_in_buf": (pcp_size * capacity, output_size),
+                "_pcp_o_proj_rs_out_buf": (capacity, output_size),
+            }
+            for name, shape in buffer_shapes.items():
+                pool_key = (self.o_proj_weight_switch_pool_key, "decode", name, device, dtype, shape)
+                buffer = self.o_proj_full_pools.get(pool_key)
+                if buffer is None:
+                    buffer = torch.empty(shape, dtype=dtype, device=device)
+                    self.o_proj_full_pools[pool_key] = buffer
+                setattr(self, name, buffer)
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         result = super().process_weights_after_loading(act_dtype)
