@@ -84,6 +84,8 @@ class HardwareCapability(Enum):
     DSV41_PACKED_CACHE = auto()
     # Enable dynamic-MX norm fusion and the associated ``wo_a`` weight-layout contract.
     DYNAMIC_MX_QUANT_FUSION = auto()
+    # Preserve native FP8/E8M0 Engram checkpoint storage on A5.
+    ENGRAM_MXFP8 = auto()
     # Select DynamicMxQuantV3 ``scale_alg=1`` for model paths that require it.
     DYNAMIC_MX_QUANT_SCALE_ALG_ONE = auto()
     # Allow GDN prefill to use the external FLA NPU fused operator.
@@ -358,6 +360,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.DSV4_COMPRESSED_CACHE,
                     HardwareCapability.DSV41_PACKED_CACHE,
                     HardwareCapability.DYNAMIC_MX_QUANT_FUSION,
+                    HardwareCapability.ENGRAM_MXFP8,
                     HardwareCapability.DYNAMIC_MX_QUANT_SCALE_ALG_ONE,
                     HardwareCapability.FLA_GDN_PREFILL,
                     HardwareCapability.FP8_ATTENTION,

@@ -1132,6 +1132,21 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             ori_sparse_indices, ori_topk_length = cached_window
         if ori_topk_length is None and ori_sparse_indices is not None and noncausal:
             ori_topk_length = (ori_sparse_indices >= 0).sum(dim=-1, dtype=torch.int32)
+
+        # SWA bounded replay (vLLM #56227): a prefill admission that hit the
+        # prefix cache recomputes the hit's last window, and only the
+        # sliding-window group is rebuilt by it. That group's window is the one
+        # that can reach below ``replay_start`` into the region it does not hold,
+        # so the floor rides ``ori_topk_length``, the operator's per-token
+        # channel for "how many ori KV entries this query may see". The window's
+        # width stays a scalar (``ori_win_left``) and still bounds it from above,
+        # so this only ever narrows the mask, and only for the requests that are
+        # replaying.
+        #
+        # Only the sliding-window group carries it, because
+        # ``_forward_attention`` reads the mask and this length from
+        # ``metadata.swa`` whichever group's loop ranges it was handed, and those
+        # ranges come from the same band -- so they stay a superset of the window.
         replay_start = getattr(common, "replay_start", None)
         if replay_start is not None and cache_kind == "swa" and not noncausal:
             replay_visible_lens = build_replay_swa_visible_lens(

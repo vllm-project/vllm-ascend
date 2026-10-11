@@ -16,6 +16,7 @@ from vllm_ascend.attention.context_parallel.dsa_cp import (
     AscendDSAPCPMetadataBuilder,
     restore_tp_heads,
 )
+from vllm_ascend.attention.dsa_v1 import dsv4_dsa_overlap_stream
 from vllm_ascend.attention.dsa_v41 import (
     AscendDSAV41Impl,
     AscendDSAV41Metadata,
@@ -25,7 +26,7 @@ from vllm_ascend.attention.dsa_v41 import (
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, enable_pcp
 from vllm_ascend.core.kv_cache_interface import get_kv_cache_compression_ratio, get_storage_block_size
 from vllm_ascend.ops.rope_dsv4 import get_full_cos_and_sin_dsa_for_layer
-from vllm_ascend.utils import enable_dsa_cp
+from vllm_ascend.utils import enable_dsa_cp, npu_stream_switch
 
 if TYPE_CHECKING:
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
@@ -167,7 +168,7 @@ class AscendDSAV41CPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
         return replace(local, global_metadata=global_metadata, cp_token_range=(start, end, per_rank, padded))
 
 
-class AscendDSAV41CPImpl(AscendDSAV41Impl):
+class _ReplicatedCacheImpl(AscendDSAV41Impl):
     def multistream_preprocess(self, attn, hidden_states, cos, sin, swa_metadata):
         """Slice local Q from full inputs and overlap replicated KV preprocessing."""
         global_metadata = self._global_layer_metadata(get_forward_context().attn_metadata)
