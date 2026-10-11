@@ -259,6 +259,72 @@ def test_sfa_pcp_decode_buffers_cover_verification_tokens_and_graph_padding(
     assert impl._pcp_o_proj_rs_out_buf.shape == (expected_capacity, 3)
 
 
+def test_sfa_pcp_decode_buffers_are_shared_across_compatible_layers():
+    with (
+        patch.object(AscendSFAPCPImpl, "o_proj_full_pools", {}),
+        patch("vllm_ascend.attention.context_parallel.sfa_cp.torch.empty", wraps=torch.empty) as allocate,
+    ):
+        first = _make_pcp_o_proj_impl(sharded_decode=True)
+        second = _make_pcp_o_proj_impl(sharded_decode=True)
+
+        assert allocate.call_count == 4
+        buffers = [
+            value for name, value in vars(first).items() if name.startswith("_pcp_o_proj_") and name.endswith("_buf")
+        ]
+        assert len({buffer.data_ptr() for buffer in buffers}) == 4
+        for name, buffer in vars(first).items():
+            if name.startswith("_pcp_o_proj_") and name.endswith("_buf"):
+                assert getattr(second, name) is buffer
+
+        first._enable_o_proj_full_weight_switch()
+        second._enable_o_proj_full_weight_switch()
+        assert first.o_proj_weight_state.gather_parts["weight"].full_tensor.data_ptr() == (
+            second.o_proj_weight_state.gather_parts["weight"].full_tensor.data_ptr()
+        )
+        assert first.o_proj_weight_state.gather_parts["weight"].full_tensor.data_ptr() not in {
+            buffer.data_ptr() for buffer in buffers
+        }
+
+
+@pytest.mark.parametrize("changed_config", [{"activation_dtype": torch.bfloat16}, {"max_capture_size": 8}])
+def test_sfa_pcp_decode_buffer_pool_separates_dtype_and_shape(changed_config):
+    with patch.object(AscendSFAPCPImpl, "o_proj_full_pools", {}):
+        first = _make_pcp_o_proj_impl(sharded_decode=True)
+        second = _make_pcp_o_proj_impl(sharded_decode=True, **changed_config)
+
+        for name, buffer in vars(first).items():
+            if name.startswith("_pcp_o_proj_") and name.endswith("_buf"):
+                assert getattr(second, name).data_ptr() != buffer.data_ptr()
+
+
+def test_sfa_pcp_decode_buffer_pool_uses_weight_device():
+    allocate_cpu = torch.empty
+
+    def allocate(shape, *, dtype, device):
+        return allocate_cpu(shape, dtype=dtype, device="cpu")
+
+    with (
+        patch.object(AscendSFAPCPImpl, "o_proj_full_pools", {}),
+        patch("vllm_ascend.attention.context_parallel.sfa_cp.torch.empty", side_effect=allocate) as allocate_mock,
+        patch("torch.nn.Parameter") as parameter,
+    ):
+        parameter.return_value = SimpleNamespace(device=torch.device("npu:0"))
+        first = _make_pcp_o_proj_impl(sharded_decode=True)
+        parameter.return_value = SimpleNamespace(device=torch.device("npu:1"))
+        second = _make_pcp_o_proj_impl(sharded_decode=True)
+        parameter.return_value = SimpleNamespace(device=torch.device("npu:0"))
+        same_device = _make_pcp_o_proj_impl(sharded_decode=True)
+
+        assert allocate_mock.call_count == 8
+        assert [call.kwargs["device"] for call in allocate_mock.call_args_list] == (
+            [torch.device("npu:0")] * 4 + [torch.device("npu:1")] * 4
+        )
+        for name, buffer in vars(first).items():
+            if name.startswith("_pcp_o_proj_") and name.endswith("_buf"):
+                assert getattr(second, name) is not buffer
+                assert getattr(same_device, name) is buffer
+
+
 def test_sfa_pcp_weight_switch_does_not_install_loader_when_disabled() -> None:
     pcp_group = SimpleNamespace(world_size=2, rank_in_group=0)
     with (
