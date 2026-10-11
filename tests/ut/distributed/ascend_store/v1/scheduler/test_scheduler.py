@@ -23,6 +23,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.coordinates imp
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.projection.reachability import (
     HybridReachability,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.lookup import TailKeyBoundary
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.transfer import (
     CheckpointStoreCommand,
     StateCheckpointSource,
@@ -424,6 +425,39 @@ def test_speculative_lookup_recomputes_only_the_prompt_tail(
             make_output(new=(new_request_data("request", ([1, 2, 3],), safe_end),), scheduled_tokens={"request": 0})
         )
         assert [command.load_range for command in step.load.commands] == ([TokenRange(0, load_end)] if load_end else [])
+    finally:
+        scheduler.close()
+
+
+@pytest.mark.parametrize(
+    "prompt_tokens,readable_end,attention_tail,eagle,private,safe_end,load_end",
+    (
+        (64, 32, 40, False, False, 32, 32),
+        (128, 128, 128, False, False, 127, 128),
+        (128, 128, 128, True, False, 64, 64),
+        (128, 128, 128, False, True, 64, 64),
+    ),
+)
+def test_load_keeps_lookup_tail_identity_only_when_physical_frontier_is_unchanged(
+    prompt_tokens, readable_end, attention_tail, eagle, private, safe_end, load_end
+) -> None:
+    tail_keys = (TailKeyBoundary(0, attention_tail), TailKeyBoundary(1, readable_end))
+    scheduler = SynchronousBulkScheduler(
+        replace(make_config(granularity=64, groups=(0, 1), eagle=eagle, private=private), hash_block_size=8),
+        FakeRemoteLookup(readable_end, tail_key_boundaries=tail_keys),
+    )
+    request = make_request(prompt_tokens=prompt_tokens, hashes=prompt_tokens // 8)
+    try:
+        assert scheduler.get_num_new_matched_tokens(request, 0) == (safe_end, False)
+        scheduler.confirm_allocation(request, FakeBlocks([5, 6], [7, 8, 9, 10]), safe_end)
+        step = scheduler.build_step(
+            make_output(
+                new=(new_request_data("request", ([5, 6], [7, 8, 9, 10]), safe_end),), scheduled_tokens={"request": 0}
+            )
+        )
+        (command,) = step.load.commands
+        assert command.load_range == TokenRange(0, load_end)
+        assert command.tail_key_boundaries == (tail_keys if load_end == readable_end else ())
     finally:
         scheduler.close()
 
