@@ -76,6 +76,9 @@ class AscendNgramHashState(NgramHashState):
     Keep that compiler workaround in this subclass, without changing vLLM.
     """
 
+    TOKEN_BLOCK = 32
+    LAYER_MAJOR_TOKEN_BLOCK = 16
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -86,6 +89,8 @@ class AscendNgramHashState(NgramHashState):
         lookback_dead_mask: torch.Tensor,
         slot_mapping: torch.Tensor | None,
         block_table: torch.Tensor | None,
+        *,
+        layer_major: bool = False,
     ) -> torch.Tensor:
         """Compute [tokens, layers, hash columns] int32 n-gram hashes.
 
@@ -96,7 +101,14 @@ class AscendNgramHashState(NgramHashState):
         num_tokens = input_ids.shape[0]
         num_layers, max_ngram = self.multipliers.shape
         num_heads = self.primes.shape[-1]
-        output = input_ids.new_empty((num_tokens, num_layers, (max_ngram - 1) * num_heads), dtype=torch.int32)
+        if layer_major:
+            if self.use_slot_cache:
+                raise ValueError("Layer-major Engram hashes require slotless V2 hashing")
+            output = input_ids.new_empty(
+                (num_layers, num_tokens, (max_ngram - 1) * num_heads), dtype=torch.int32
+            ).transpose(0, 1)
+        else:
+            output = input_ids.new_empty((num_tokens, num_layers, (max_ngram - 1) * num_heads), dtype=torch.int32)
         if num_tokens == 0:
             return output
         # Ascend needs the request search out of the hash body (E3); one launch
@@ -131,7 +143,8 @@ class AscendNgramHashState(NgramHashState):
             )
         from vllm_ascend.ops.triton.engram_hash import _hash_ids_kernel
 
-        _hash_ids_kernel[(triton.cdiv(num_tokens, 32), num_layers)](
+        token_block = self.LAYER_MAJOR_TOKEN_BLOCK if layer_major else self.TOKEN_BLOCK
+        _hash_ids_kernel[(triton.cdiv(num_tokens, token_block), num_layers)](
             input_ids,
             self.token_map,
             dead_mask,
@@ -160,7 +173,7 @@ class AscendNgramHashState(NgramHashState):
             cache_block_size=self.block_size,
             MAX_NGRAM=max_ngram,
             num_heads=num_heads,
-            BLOCK_T=32,
+            BLOCK_T=token_block,
             BLOCK_H=triton.next_power_of_2(num_heads),
             dead_id=DEAD_ID,
             lookback_depth=lookback_token_ids.shape[1],
@@ -168,6 +181,7 @@ class AscendNgramHashState(NgramHashState):
             lookback_col_stride=lookback_token_ids.stride(1),
             lookback_mask_row_stride=lookback_dead_mask.stride(0),
             lookback_mask_col_stride=lookback_dead_mask.stride(1),
+            LAYER_MAJOR=layer_major,
             num_warps=4,
         )
         return output

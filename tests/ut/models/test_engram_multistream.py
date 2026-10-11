@@ -62,6 +62,7 @@ def make_model():
     model._engram_overlap_enabled = True
     model._engram_input_buffers, model._engram_prepare_stream = None, None
     model._engram_graph_events = {}
+    model._engram_late_lookup_enabled, model._engram_late_lookup_stream = False, None
     model._engram_max_tokens = 8
     model.engram_rotation = torch.eye(32)
     model.config = SimpleNamespace(engram_layer_ids=(1, 2), image_token_id=999)
@@ -206,7 +207,7 @@ def test_dp_alltoall_and_tp_gather_finish_before_each_table_is_published(runtime
         def ensure_cache(self):
             return True
 
-        def __call__(self, tokens, *args):
+        def __call__(self, tokens, *args, **kwargs):
             assert torch.npu.current_stream().name == "aux"
             calls.append(("hash",))
             return tokens.new_zeros((tokens.shape[0], 2, 4))

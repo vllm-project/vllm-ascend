@@ -11,6 +11,7 @@ from vllm.config import CUDAGraphMode
 
 from vllm_ascend.models.deepseek_v41 import model as model_mod
 from vllm_ascend.models.deepseek_v41.engram import model_state as state_mod
+from vllm_ascend.models.deepseek_v41.engram.layer import AscendEngram
 from vllm_ascend.ops.triton import engram_lookback
 
 
@@ -66,7 +67,11 @@ def make_model():
     model._engram_overlap_enabled = True
     model._engram_input_buffers, model._engram_prepare_stream = None, None
     model._engram_capture_stream, model._engram_capture_events = None, None
+    model._engram_side_wkv_enabled = False
+    model._engram_side_wkv_events = {}
+    model._engram_side_wkv_phase_tokens = (288,)
     model._engram_graph_events = {}
+    model._engram_late_lookup_enabled, model._engram_late_lookup_stream = False, None
     model._engram_max_tokens = 8
     model._mtp_hidden_buffer = None
     model.engram_rotation = torch.eye(32)
@@ -581,3 +586,27 @@ def test_mask_wait_is_delayed_past_early_layer_compute(runtime):
     )
     assert calls.index(("layer", 0)) < calls.index(("wait_event", mask_event)) < calls.index(("layer", 1))
     assert calls.count(("wait_event", mask_event)) == 1
+
+
+def test_precomputed_projection_preserves_gate_and_skips_duplicate_wkv(runtime):
+    module = object.__new__(AscendEngram)
+    torch.nn.Module.__init__(module)
+    module.dim, module.hc_mult, module.eps = 3, 2, 1e-6
+    module.q_weight = torch.nn.Parameter(torch.ones(2, 3))
+    module.k_weight = torch.nn.Parameter(torch.ones(2, 3))
+    kv, hidden, rows = torch.randn(4, 9), torch.randn(4, 2, 3), torch.randn(4, 8)
+    mask = torch.tensor([True, False, True, True])
+    module.wkv = Mock(return_value=kv)
+    expected = module(hidden, rows, mask, None)
+    actual = module(hidden, rows, mask, None, precomputed_kv=kv)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    module.wkv.assert_called_once_with(rows)
+    model = make_model()
+    model.layers[1].engram.wkv = module.wkv
+    down, projected = torch.nn.Identity(), {}
+    hook = model._defer_engram_side_projection(down, rows, projected, 1, torch.npu.Event(), runtime[2])
+    assert not projected
+    down(rows)
+    assert projected[1] is kv
+    hook.remove()
+    assert not down._forward_hooks

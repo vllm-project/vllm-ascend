@@ -17,6 +17,7 @@ from unittest.mock import patch
 import torch
 import torch.distributed as dist
 from vllm.logger import logger
+from vllm.triton_utils import tl, triton
 
 from vllm_ascend.device.device_op import DeviceOperator
 
@@ -372,9 +373,11 @@ class EngramUrmaCubeLookup:
     """
 
     PAGE_BYTES = 4096
+    SCALE_PROGRAMS = 32
+    SCALE_BLOCK_ROWS = 128
     LAUNCHER_CLASS = "EngramUrmaAicpu"
 
-    def __init__(self):
+    def __init__(self, *, parallel_scales=False):
         from pathlib import Path
 
         import vllm_ascend.vllm_ascend_C  # noqa: F401
@@ -401,6 +404,10 @@ class EngramUrmaCubeLookup:
         self.state_slot = torch.zeros(1, dtype=torch.int64, device=f"npu:{self.device_index}")
         self.last_call = None
         self.staging_buffers = {}
+        self.parallel_scales = parallel_scales
+        self.scale_stream = torch.npu.Stream() if parallel_scales else None
+        self.scale_inputs_ready = torch.npu.Event() if parallel_scales else None
+        self.scales_ready = torch.npu.Event() if parallel_scales else None
         # Spread host registrations across the two physical host chips.
         # AICPU namespaces name their local chip c0. The kernel selects between
         # its d0e3/d1e3 endpoints on the first successful transfer.
@@ -433,10 +440,10 @@ class EngramUrmaCubeLookup:
         self.host_state = state
         self.source = codes
 
-    def _stage_codes(self, codes, ids, rows, width, head_start, local_heads, vocab_start, vocab_end):
+    def _stage_codes(self, codes, ids, rows, width, head_start, local_heads, vocab_start, vocab_end, destination=None):
         self._bind_source(codes)
         key = (rows, width)
-        staged = self.staging_buffers.get(key)
+        staged = destination if destination is not None else self.staging_buffers.get(key)
         if staged is None:
             storage = torch.empty(rows * width + 2 * self.PAGE_BYTES, dtype=torch.uint8, device=ids.device)
             offset = (-storage.data_ptr()) % self.PAGE_BYTES
@@ -454,6 +461,7 @@ class EngramUrmaCubeLookup:
             vocab_end,
             self.chip,
             self.die,
+            False,
         )
         self.last_call = (ids, staged, head_start, local_heads, vocab_start, vocab_end)
         return staged
@@ -534,17 +542,121 @@ class EngramUrmaCubeLookup:
         rows = tokens * local_heads
         if not rows:
             return output_codes, output_scales
-        staged = self._stage_codes(
-            codes, ids, rows, codes.tensor.shape[-1], head_start, local_heads, vocab_start, vocab_end
-        )
-        output_codes[:rows].copy_(staged)
-        selected = ids[:, head_start : head_start + local_heads].reshape(-1).to(torch.int64)
-        owned = (selected >= vocab_start) & (selected < vocab_end)
-        local = torch.where(owned, selected - vocab_start, torch.zeros_like(selected))
-        gathered = scales.index_select(0, local)
-        gathered.view(torch.int8).masked_fill_(~owned[:, None], 0)
-        output_scales[:tokens].copy_(gathered.view(tokens, -1))
+        caller = torch.npu.current_stream(self.device_index)
+        if self.parallel_scales:
+            # Register before starting an independent operation: a rejected
+            # source or capture without warmup must leave no pending gather.
+            self._bind_source(codes)
+            self.scale_inputs_ready.record(caller)
+            with torch.npu.stream(self.scale_stream):
+                self.scale_stream.wait_event(self.scale_inputs_ready)
+                self._gather_scales(scales, ids, output_scales, head_start, local_heads, vocab_start, vocab_end)
+                self.scales_ready.record(self.scale_stream)
+        try:
+            staged = self._stage_codes(
+                codes,
+                ids,
+                rows,
+                codes.tensor.shape[-1],
+                head_start,
+                local_heads,
+                vocab_start,
+                vocab_end,
+                destination=output_codes if can_urma_write_output(output_codes) else None,
+            )
+            if staged.data_ptr() != output_codes.data_ptr():
+                output_codes[:rows].copy_(staged)
+        finally:
+            if self.parallel_scales:
+                caller.wait_event(self.scales_ready)
+        if not self.parallel_scales:
+            self._gather_scales(scales, ids, output_scales, head_start, local_heads, vocab_start, vocab_end)
         return output_codes, output_scales
+
+    def _gather_scales(self, scales, ids, output, head_start, local_heads, vocab_start, vocab_end):
+        gather_engram_scales_bounded(
+            scales,
+            ids,
+            output,
+            head_start=head_start,
+            local_heads=local_heads,
+            vocab_start=vocab_start,
+            vocab_end=vocab_end,
+        )
+
+
+def can_urma_write_output(output):
+    """The registered, page-rounded interval must be owned by this storage."""
+    page = EngramUrmaCubeLookup.PAGE_BYTES
+    address = output.data_ptr()
+    if output.dtype != torch.uint8 or not output.is_contiguous() or address % page:
+        return False
+    storage = output.untyped_storage()
+    end = (address + output.numel() + page - 1) // page * page
+    return storage.data_ptr() <= address and end <= storage.data_ptr() + storage.nbytes()
+
+
+def allocate_compressed_engram_buffer(capacity, heads, width, device):
+    """Keep both packed planes and native page registration inside one owner."""
+    page = EngramUrmaCubeLookup.PAGE_BYTES
+    packed_width = heads * (width + width // SCALE_GROUP)
+    owner = torch.zeros(capacity * packed_width + 2 * page, dtype=torch.uint8, device=device)
+    offset = (-owner.data_ptr()) % page
+    return owner[offset : offset + capacity * packed_width].view(capacity, packed_width)
+
+
+@triton.jit
+def _engram_scale_gather_bounded(
+    source,
+    ids,
+    output,
+    rows,
+    vocab_start,
+    vocab_end,
+    stride,
+    HEAD_START: tl.constexpr,
+    HEADS: tl.constexpr,
+    WIDTH: tl.constexpr,
+    PAD_WIDTH: tl.constexpr,
+    PROGRAMS: tl.constexpr,
+    BLOCK_ROWS: tl.constexpr,
+):
+    col = tl.arange(0, PAD_WIDTH)
+    for base in range(tl.program_id(0) * BLOCK_ROWS, rows, PROGRAMS * BLOCK_ROWS):
+        row = base + tl.arange(0, BLOCK_ROWS)
+        selected = tl.load(ids + row // HEADS * stride + HEAD_START + row % HEADS, row < rows, other=-1).to(tl.int64)
+        valid = (row < rows) & (selected >= vocab_start) & (selected < vocab_end)
+        local = tl.where(valid, selected - vocab_start, 0)
+        value = tl.load(
+            source + local[:, None] * WIDTH + col[None, :], valid[:, None] & (col[None, :] < WIDTH), other=0
+        )
+        tl.store(output + row[:, None] * WIDTH + col[None, :], value, (row[:, None] < rows) & (col[None, :] < WIDTH))
+
+
+def gather_engram_scales_bounded(scales, ids, output, *, head_start, local_heads, vocab_start, vocab_end):
+    from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
+
+    rows = ids.shape[0] * local_heads
+    if rows:
+        init_device_properties_triton()
+        block_rows = EngramUrmaCubeLookup.SCALE_BLOCK_ROWS
+        grid = min(EngramUrmaCubeLookup.SCALE_PROGRAMS, triton.cdiv(rows, block_rows))
+        _engram_scale_gather_bounded[(grid,)](
+            scales,
+            ids,
+            output,
+            rows,
+            vocab_start,
+            vocab_end,
+            ids.stride(0),
+            HEAD_START=head_start,
+            HEADS=local_heads,
+            WIDTH=scales.shape[1],
+            PAD_WIDTH=triton.next_power_of_2(scales.shape[1]),
+            PROGRAMS=grid,
+            BLOCK_ROWS=block_rows,
+            num_warps=4,
+        )
 
 
 def compressed_engram_views(buffer, heads, width):

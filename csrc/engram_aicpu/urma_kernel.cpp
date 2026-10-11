@@ -14,6 +14,7 @@
 namespace {
 constexpr uint64_t PAGE_SIZE = 4096;
 constexpr unsigned WINDOW = 2048;
+constexpr unsigned READ_WINDOW = 1024;
 constexpr uint64_t COMPLETION_TIMEOUT_NS = 500000000;
 constexpr size_t SYSFS_DEVICE_BACKPOINTER = 400;
 constexpr size_t READER_CODE_BYTES = 3680;
@@ -118,11 +119,33 @@ bool gather(Engine* e,const EngramUrmaParams& p) {
         if (!e->local) return false;
         e->base=base;e->length=length;
     }
+    static_assert(WINDOW == 2*READ_WINDOW,"Lookahead requires two existing banks");
     e->last_completion=0;
     urma_seg_t segment{};memcpy(&segment,reinterpret_cast<void*>(p.metadata),sizeof(segment));
     const int64_t rows=p.tokens*p.local_heads;
-    for (int64_t begin=0;begin<rows;begin+=WINDOW) {
-        int64_t end=begin+WINDOW<rows?begin+WINDOW:rows;
+    bool pending=false;
+    uint64_t pending_end=0, deadline=0;
+    unsigned bank=0;
+    auto complete_pending = [&]() -> bool {
+        if (!pending) return true;
+        urma_cr_t cr{};
+        while (true) {
+            int count=urma_poll_jfc(e->jfc,1,&cr);
+            if (count<0) return false;
+            if (count>0) {
+                e->last_completion=cr.status;
+                if (cr.status!=0 || cr.user_ctx!=pending_end) return false;
+                pending=false;
+                return true;
+            }
+            if (now_ns()>=deadline) return false;
+        }
+    };
+    for (int64_t begin=0;begin<rows;begin+=READ_WINDOW) {
+        int64_t end=begin+READ_WINDOW<rows?begin+READ_WINDOW:rows;
+        auto requests=e->requests+bank*READ_WINDOW;
+        auto source_sges=e->source_sges+bank*READ_WINDOW;
+        auto destination_sges=e->destination_sges+bank*READ_WINDOW;
         unsigned n=0;
         for (int64_t row=begin;row<end;++row) {
             int64_t index=read_id(p,row);
@@ -130,30 +153,26 @@ bool gather(Engine* e,const EngramUrmaParams& p) {
             if (index<p.vocab_start || index>=p.vocab_end) {
                 memset(reinterpret_cast<void*>(dest),0,p.width);continue;
             }
-            e->source_sges[n].addr=segment.ubva.va+uint64_t(index-p.vocab_start)*p.width;
-            e->source_sges[n].len=p.width;e->source_sges[n].tseg=e->remote;
-            e->destination_sges[n].addr=dest;e->destination_sges[n].len=p.width;e->destination_sges[n].tseg=e->local;
-            auto& wr=e->requests[n];wr.opcode=URMA_OPC_READ;wr.flag.value=0;wr.tjetty=e->target;wr.user_ctx=end;
-            wr.rw.src.sge=e->source_sges+n;wr.rw.src.num_sge=1;
-            wr.rw.dst.sge=e->destination_sges+n;wr.rw.dst.num_sge=1;
-            wr.next=e->requests+n+1;++n;
+            source_sges[n].addr=segment.ubva.va+uint64_t(index-p.vocab_start)*p.width;
+            source_sges[n].len=p.width;source_sges[n].tseg=e->remote;
+            destination_sges[n].addr=dest;destination_sges[n].len=p.width;destination_sges[n].tseg=e->local;
+            auto& wr=requests[n];wr.opcode=URMA_OPC_READ;wr.flag.value=0;wr.tjetty=e->target;wr.user_ctx=end;
+            wr.rw.src.sge=source_sges+n;wr.rw.src.num_sge=1;
+            wr.rw.dst.sge=destination_sges+n;wr.rw.dst.num_sge=1;
+            wr.next=requests+n+1;++n;
         }
+        // Even an all-invalid batch drains the previous transfer. It never
+        // emits a WR or completion, and writes only its own output row range.
+        if (!complete_pending()) return false;
         if (!n) continue;
-        auto& last=e->requests[n-1];last.next=nullptr;
+        auto& last=requests[n-1];last.next=nullptr;
         last.flag.bs.complete_enable=1;last.flag.bs.comp_order=1;last.flag.bs.fence=1;
         urma_jfs_wr_t* bad=nullptr;
-        if (urma_post_jfs_wr(e->jfs,e->requests,&bad)) return false;
-        urma_cr_t cr{};bool completed=false;
-        uint64_t deadline=now_ns()+COMPLETION_TIMEOUT_NS;
-        while (now_ns()<deadline) {
-            int count=urma_poll_jfc(e->jfc,1,&cr);
-            if (count<0) return false;
-            if (count>0) {completed=true;break;}
-        }
-        if (completed) e->last_completion=cr.status;
-        if (!completed || cr.status!=0 || cr.user_ctx!=uint64_t(end)) return false;
+        if (urma_post_jfs_wr(e->jfs,requests,&bad)) return false;
+        pending=true;pending_end=end;deadline=now_ns()+COMPLETION_TIMEOUT_NS;
+        bank=1-bank;
     }
-    return true;
+    return complete_pending();
 }
 static_assert(sizeof(urma_jfs_wr_t)==80 && sizeof(urma_sge_t)==32 && sizeof(urma_seg_t)==48 && sizeof(urma_rjfr_t)==40,"Unsupported URMA ABI");
 }
