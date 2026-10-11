@@ -450,7 +450,6 @@ class _ExtraForwardContextProxy:
         "max_tokens_across_pcp",
         "num_accept_tokens",
         "in_profile_run",
-        "pcp_profile",
         "padded_num_tokens",
         "sinks",
         "eplb_heat_collection_status",

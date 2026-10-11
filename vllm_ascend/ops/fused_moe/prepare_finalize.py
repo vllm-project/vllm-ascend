@@ -249,30 +249,6 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
 
-    def _split_pcp_profile_tensor(self, tensor: torch.Tensor, pad_value=0) -> torch.Tensor:
-        local_num_tokens = self._pcp_profile_local_num_tokens
-        group = get_pcp_group()
-        padded_num_tokens = local_num_tokens * group.world_size
-        padding = (0, 0) * (tensor.ndim - 1) + (0, padded_num_tokens - tensor.shape[0])
-        tensor = nn.functional.pad(tensor, padding, value=pad_value)
-        start = group.rank_in_group * local_num_tokens
-        return tensor[start : start + local_num_tokens].contiguous()
-
-    def _prepare_pcp_profile(self, hidden_states, router_logits, mc2_mask):
-        # Real PCP batches are already rank-local. Only the initial MRV2
-        # dummy profile bypasses partition_batch and carries global rows.
-        self._pcp_profile_num_tokens = None
-        if not _EXTRA_CTX.pcp_profile:
-            return hidden_states, router_logits, mc2_mask
-        self._pcp_profile_num_tokens = hidden_states.shape[0]
-        pcp_size = get_pcp_group().world_size
-        self._pcp_profile_local_num_tokens = (hidden_states.shape[0] + pcp_size - 1) // pcp_size
-        return (
-            self._split_pcp_profile_tensor(hidden_states),
-            self._split_pcp_profile_tensor(router_logits),
-            self._split_pcp_profile_tensor(mc2_mask, pad_value=False),
-        )
-
     def prepare(
         self,
         hidden_states: torch.Tensor,
@@ -329,7 +305,6 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
                 hidden_states = split_hidden_states[self.tp_rank]
                 router_logits = split_router_logits[self.tp_rank]
 
-        hidden_states, router_logits, mc2_mask = self._prepare_pcp_profile(hidden_states, router_logits, mc2_mask)
         return MoEPrepareOutput(
             hidden_states=hidden_states,
             router_logits=router_logits,
@@ -344,11 +319,6 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
         reduce_results: bool,
         padded_hidden_states_shape: torch.Size | None = None,
     ) -> torch.Tensor:
-        if self._pcp_profile_num_tokens is not None:
-            # Preserve global hidden-state/residual/shared-expert allocations
-            # during memory profiling instead of shrinking the entire dummy
-            # forward and underestimating PCP's gather buffers.
-            hidden_states = get_pcp_group().all_gather(hidden_states, dim=0)[: self._pcp_profile_num_tokens]
         if self.replace_allreduce:
             # Return the original SP shard to the residual/shared-expert path.
             return hidden_states[: self.num_tokens]
@@ -375,8 +345,6 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
             if self.tp_size > 1:
                 input_ids = torch.tensor_split(input_ids, self.tp_size, dim=0)
                 input_ids = input_ids[self.tp_rank]
-        if self._pcp_profile_num_tokens is not None:
-            input_ids = self._split_pcp_profile_tensor(input_ids)
         return input_ids
 
 

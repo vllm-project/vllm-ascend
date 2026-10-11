@@ -45,7 +45,6 @@ class TestPrepareAndFinalize(unittest.TestCase):
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     def test_mc2_prepare_finalize(self, mock_get_forward_context, mock_tp_rank, mock_tp_size):
         mock_context = MagicMock()
-        mock_context.pcp_profile = False
         mock_context.mc2_mask = torch.tensor([1, 0, 1])
         mock_context.padded_num_tokens = 4
         mock_get_forward_context.return_value = mock_context
@@ -81,7 +80,6 @@ class TestPrepareAndFinalize(unittest.TestCase):
             shard_size = (num_tokens + 3) // 4
             hidden = torch.arange(shard_size * 4 * 8, dtype=torch.float32).reshape(-1, 8)
             context = MagicMock()
-            context.pcp_profile = False
             context.mc2_mask = torch.arange(padded_num_tokens) < num_tokens
             context.padded_num_tokens = padded_num_tokens
             mock_context.return_value = context
@@ -126,7 +124,6 @@ class TestPrepareAndFinalize(unittest.TestCase):
     @patch("torch.distributed.all_gather")
     def test_mc2_tp_split_allgather(self, mock_all_gather, mock_get_forward_context, mock_tp_rank, mock_tp_size):
         mock_context = MagicMock()
-        mock_context.pcp_profile = False
         mock_context.mc2_mask = torch.tensor([1, 0, 1, 0])
         mock_context.padded_num_tokens = 4
         mock_get_forward_context.return_value = mock_context
