@@ -169,7 +169,6 @@ TILING_DATA_FIELD_DEF(uint32_t, sparseBlockCount)
 TILING_DATA_FIELD_DEF(uint32_t, isActualLenDimsNull)
 TILING_DATA_FIELD_DEF(uint32_t, isActualLenDimsKVNull)
 TILING_DATA_FIELD_DEF(uint32_t, ropeHeadDim)
-TILING_DATA_FIELD_DEF(uint32_t, keyStride0)
 END_TILING_DATA_DEF
 REGISTER_TILING_DATA_CLASS(SparseFlashAttentionBaseParamsMlaOp, SparseFlashAttentionBaseParamsMla)
 
