@@ -250,8 +250,7 @@ class AscendMiniMaxM3IndexerMetadataBuilder(AttentionMetadataBuilder[AscendMiniM
         )
         self.block_size = kv_cache_spec.block_size
         self.decode_start_loc_buffer = (
-            torch.empty_like(self.context_len_buffer)
-            if _USE_ASCENDC_INDEX_SCORE_DECODE else None
+            torch.empty_like(self.context_len_buffer) if _USE_ASCENDC_INDEX_SCORE_DECODE else None
         )
         self.attn_mask_builder = AttentionMaskBuilder(device) if _USE_ASCENDC_INDEX_SCORE_PREFILL else None
 
