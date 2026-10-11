@@ -36,6 +36,13 @@ if TYPE_CHECKING:
 
 _MEGA_MOE_SUPPORTED = None
 
+# Draft caches stay outside the KVPP owner partition. Each of these methods
+# reports its cache layer names from the loaded proposer, so ownership does
+# not depend on layer indices or a fixed speculative length.
+KVPP_SPECULATIVE_METHODS = frozenset({"mtp", "dspark", "dflash", "eagle3"})
+# DSpark, DFlash, and EAGLE3 drafts may publish sliding-window specs. MTP does not.
+KVPP_WINDOWED_DRAFT_METHODS = frozenset({"dspark", "dflash", "eagle3"})
+
 
 def is_mega_moe_supported() -> bool:
     """Whether the megamoe op is available at runtime.
@@ -98,17 +105,12 @@ class KVPPConfig:
         if not model_config.use_mla or model_config.is_hybrid:
             raise ValueError("KVPP currently supports only non-hybrid MLA models.")
         speculative_config = vllm_config.speculative_config
-        if speculative_config is not None:
-            if speculative_config.method not in ("mtp", "dspark"):
-                raise ValueError("KVPP supports speculative decoding only with method='mtp' or method='dspark'.")
-            if speculative_config.num_speculative_tokens_per_batch_size:
-                raise ValueError("KVPP currently supports only a fixed number of speculative tokens.")
-            if speculative_config.method == "dspark":
-                if getattr(speculative_config, "enable_adaptive_verification", False):
-                    raise ValueError("KVPP does not support DSpark adaptive verification.")
-                dynamic_spec = (vllm_config.additional_config or {}).get("dynamic_spec_config") or {}
-                if dynamic_spec.get("method") is not None:
-                    raise ValueError("KVPP does not support dynamic speculative lengths.")
+        if speculative_config is not None and speculative_config.method not in KVPP_SPECULATIVE_METHODS:
+            supported = ", ".join(sorted(KVPP_SPECULATIVE_METHODS))
+            raise ValueError(
+                "KVPP supports speculative decoding only with "
+                f"{supported}, got method={speculative_config.method!r}."
+            )
 
 
 @config

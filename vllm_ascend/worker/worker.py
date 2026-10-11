@@ -70,7 +70,12 @@ from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.ascend_config import KVPPConfig, get_ascend_config, init_ascend_config
+from vllm_ascend.ascend_config import (
+    KVPP_WINDOWED_DRAFT_METHODS,
+    KVPPConfig,
+    get_ascend_config,
+    init_ascend_config,
+)
 from vllm_ascend.batch_invariant import init_batch_invariance
 from vllm_ascend.core.kv_cache_placement import (
     KVPPPhysicalCachePlan,
@@ -1130,7 +1135,7 @@ class NPUWorker(WorkerBase):
             speculative_config = self.vllm_config.speculative_config
             if (
                 speculative_config is not None
-                and speculative_config.method == "dspark"
+                and speculative_config.method in KVPP_WINDOWED_DRAFT_METHODS
                 and any(isinstance(spec, SlidingWindowSpec) for spec in kv_cache_spec.values())
             ):
                 # Use the same full-allocation specs for KVPP budgeting and

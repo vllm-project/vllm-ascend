@@ -125,9 +125,11 @@ def test_stage_without_target_has_no_scratch_cost(with_mtp, expected):
     assert plan.get_num_blocks(288) == expected
 
 
+@pytest.mark.parametrize("method", ["dspark", "dflash", "eagle3"])
 @pytest.mark.parametrize("rank,target_cost", [(0, 308), (1, 296), (2, 232)])
-def test_dspark_keeps_draft_caches_in_every_rank_budget(rank, target_cost):
+def test_draft_caches_stay_in_every_rank_budget(rank, target_cost, method):
     config, specs, drafts = make_dspark_kvpp_case()
+    config.speculative_config.method = method
     target_specs = {name: spec for name, spec in specs.items() if name not in drafts}
     target_plan = placement.create_kvpp_cache_allocation_plan(config, target_specs, rank)
     plan = placement.create_kvpp_cache_allocation_plan(config, specs, rank)
@@ -143,8 +145,10 @@ def test_dspark_keeps_draft_caches_in_every_rank_budget(rank, target_cost):
     assert list(plan.layer_bundles.items()) == list(reverse.layer_bundles.items())
 
 
-def test_dspark_draft_only_stage_has_no_scratch_cost():
+@pytest.mark.parametrize("method", ["dspark", "dflash", "eagle3"])
+def test_draft_only_stage_has_no_scratch_cost(method):
     config, specs, drafts = make_dspark_kvpp_case()
+    config.speculative_config.method = method
     plan = placement.create_kvpp_cache_allocation_plan(config, {name: specs[name] for name in drafts}, 1)
     assert plan.layer_owner_ranks == {}
     assert plan.get_num_blocks(3 * 384) == 3
@@ -160,14 +164,16 @@ def test_mtp_still_rejects_sliding_window_cache_specs():
         placement.create_kvpp_cache_allocation_plan(config, specs, 0)
 
 
-def test_dspark_draft_names_are_filtered_to_local_cache_specs():
+@pytest.mark.parametrize("method", ["mtp", "dspark", "dflash", "eagle3"])
+def test_draft_names_are_filtered_to_local_cache_specs(method):
     config, specs, drafts = make_dspark_kvpp_case()
+    config.speculative_config.method = method
     del config.model_config.hf_config.num_nextn_predict_layers
     assert placement.find_draft_layers(config, specs) == set(drafts)
     assert placement.find_draft_layers(config, [layer_name(16), drafts[-1]]) == {drafts[-1]}
 
 
-@pytest.mark.parametrize("method", ["mtp", "dspark"])
+@pytest.mark.parametrize("method", ["mtp", "dspark", "dflash", "eagle3"])
 @pytest.mark.parametrize("v2", [False, True])
 def test_loader_names_override_numeric_ranges(method, v2):
     config, specs, drafts = make_dspark_kvpp_case(
@@ -193,9 +199,11 @@ def test_loader_names_override_numeric_ranges(method, v2):
     assert all(plan.layer_bundles[name] == (name,) for name in drafts)
 
 
+@pytest.mark.parametrize("method", ["mtp", "dspark", "dflash", "eagle3"])
 @pytest.mark.parametrize("v2", [False, True])
-def test_missing_proposer_is_only_valid_on_non_draft_pp_stage(v2):
+def test_missing_proposer_is_only_valid_on_non_draft_pp_stage(v2, method):
     config, specs, _ = make_dspark_kvpp_case()
+    config.speculative_config.method = method
     config.use_v2_model_runner = v2
     with pytest.raises(ValueError, match="loaded proposer"):
         placement.register_kvpp_draft_layers(config, SimpleNamespace(), specs, is_last_pp_rank=True)

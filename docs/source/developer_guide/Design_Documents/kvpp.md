@@ -56,9 +56,9 @@ Prefetching uses a separate transfer stream. A ready event establishes data depe
 | Area | Scope |
 | --- | --- |
 | Models and execution | Non-hybrid MLA/SFA models in eager mode; Model Runner V1 and V2 |
-| Supported combinations | TP, EP, PP, chunked prefill, prefix caching, asynchronous scheduling, fixed-step MTP |
+| Supported combinations | TP, EP, PP, chunked prefill, prefix caching, asynchronous scheduling, MTP, DSpark, DFlash, EAGLE3 |
 | Cache layouts | Allocated from actual specifications, including LI-C8 and SFA-C8 |
-| Not supported | Graph execution, PCP, DCP, disaggregated prefill/decode, variable-step MTP |
+| Not supported | Graph execution, PCP, DCP, disaggregated prefill/decode, speculative methods other than MTP, DSpark, DFlash, and EAGLE3 |
 
 KVPP trades communication for persistent cache capacity. Each rank still needs two scratch buffers sized for the largest target layer, plus its independent MTP caches. Memory savings therefore depend on layer count, TP size, and per-layer cache sizes. Broadcast traffic grows with the allocated block count; payloads are not filtered by request or active block.
 
