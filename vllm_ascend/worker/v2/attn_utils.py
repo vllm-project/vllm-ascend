@@ -684,6 +684,46 @@ def _adjust_dsv4_kv_layout(
     return caches
 
 
+def _reshape_combined_mla_kv_cache(
+    raw_cache: torch.Tensor,
+    k_shape: tuple[int, ...],
+    v_shape: tuple[int, ...],
+    dtype: torch.dtype,
+    page_stride_bytes: int,
+    num_blocks_per_kv_block: int = 1,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """把两个MLA组件放在同一物理页的kernel槽内，保持共享池的页地址一致。"""
+    if len(k_shape) != 4 or len(v_shape) != 4 or k_shape[:3] != v_shape[:3]:
+        raise ValueError("Combined MLA cache components must have matching block/token/head dimensions.")
+    dtype_size = get_dtype_size(dtype)
+    if num_blocks_per_kv_block < 1:
+        raise ValueError("Combined MLA cache requires a positive kernel-block ratio.")
+    if page_stride_bytes <= 0 or page_stride_bytes % (num_blocks_per_kv_block * dtype_size):
+        raise ValueError("Combined MLA pages must split into dtype-aligned kernel slots.")
+    slot_stride_bytes = page_stride_bytes // num_blocks_per_kv_block
+    k_block_bytes = math.prod(k_shape[1:]) * dtype_size
+    v_block_bytes = math.prod(v_shape[1:]) * dtype_size
+    if k_block_bytes + v_block_bytes > slot_stride_bytes:
+        raise ValueError("Combined MLA kernel slot is smaller than its K/V components.")
+    if k_shape[0] * slot_stride_bytes > raw_cache.numel() * raw_cache.element_size():
+        raise ValueError("Combined MLA kernel slots exceed the layer's raw cache slice.")
+    storage_offset_bytes = raw_cache.storage_offset() * raw_cache.element_size()
+    if storage_offset_bytes % dtype_size:
+        raise ValueError("Combined MLA raw cache offset must be dtype-aligned.")
+    typed_cache = raw_cache.view(dtype)
+
+    def component_view(shape, offset_bytes):
+        dense_strides = [math.prod(shape[dim + 1 :]) for dim in range(len(shape))]
+        return torch.as_strided(
+            typed_cache,
+            size=shape,
+            stride=(slot_stride_bytes // dtype_size, *dense_strides[1:]),
+            storage_offset=(storage_offset_bytes + offset_bytes) // dtype_size,
+        )
+
+    return component_view(k_shape, 0), component_view(v_shape, k_block_bytes)
+
+
 def _reshape_combined_attention_kv_cache(
     raw_cache: torch.Tensor,
     kv_cache_shape: tuple[int, ...],
@@ -1646,16 +1686,9 @@ def _reshape_kv_cache_v2(
                 if k_dtype != v_dtype:
                     raise ValueError("Combined hybrid K/V cache requires matching K/V dtypes.")
                 if isinstance(kv_cache_spec, (AscendMLAAttentionSpec, MLAAttentionSpec)):
-                    # MLA backends return a 4D latent cache shape. Keep its K
-                    # and V components in contiguous regions, as in MRv1.
-                    typed_cache = raw_cache.view(k_dtype)
-                    k_elements = math.prod(k_shape)
-                    v_elements = math.prod(v_shape)
-                    if k_elements + v_elements > typed_cache.numel():
-                        raise ValueError(f"Combined MLA cache for {layer_name} is too small.")
-                    padding_elements = typed_cache.numel() - k_elements - v_elements
-                    k_cache = typed_cache[padding_elements : padding_elements + k_elements].view(k_shape)
-                    v_cache = typed_cache[padding_elements + k_elements :].view(v_shape)
+                    k_cache, v_cache = _reshape_combined_mla_kv_cache(
+                        raw_cache, k_shape, v_shape, k_dtype, page_stride_bytes, num_blocks_per_kv_block
+                    )
                 else:
                     k_cache, v_cache = _reshape_combined_attention_kv_cache(
                         raw_cache,

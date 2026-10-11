@@ -39,6 +39,7 @@ from vllm_ascend.attention.dsa_v1 import (
     AscendDSAMetadataBuilder,
     AscendDSASWABackend,
 )
+from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, AscendSFAMetadataBuilder
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
@@ -2098,3 +2099,244 @@ def test_tq_groups_without_a_dsa_builder_skip_the_formatted_mapping(for_capture,
         assert "formatted_slot_mapping" not in build_call.call_args.kwargs
         # A group without a DSA builder keeps its lazy geometry untouched.
         assert builder.tq_group_block_sizes is None
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize(
+    ("manager_block_size", "rope_dim", "page_padding_bytes", "raw_offset_bytes"),
+    [(384, 64, 0, 0), (384, 64, 768, 512), (768, 64, 0, 512), (384, 0, 0, 512)],
+)
+def test_hybrid_mla_manager_pages_do_not_alias_other_mamba_blocks(
+    monkeypatch, dtype, manager_block_size, rope_dim, page_padding_bytes, raw_offset_bytes
+):
+    """MLA 的 manager 页 4 与 Mamba 的 SSM 页 3 必须保持相互隔离。"""
+    mla_name = "model.layers.0.self_attn.attn"
+    mamba_name = "model.layers.1.linear_attn"
+    num_blocks = 5
+    kernel_block_size = 128
+    nope_dim = 512
+    guard_bytes = 1024
+    mla_spec = AscendMLAAttentionSpec(
+        block_size=manager_block_size,
+        num_kv_heads=1,
+        head_size=nope_dim + rope_dim,
+        dtype=dtype,
+        indexes_kv_by_block_stride=True,
+    )
+    mamba_spec = MambaSpec(
+        block_size=manager_block_size,
+        shapes=((54, 128), (6, 128, 128)),
+        dtypes=(dtype, torch.float32),
+    )
+    page_bytes = max(mla_spec.page_size_bytes, mamba_spec.page_size_bytes) + page_padding_bytes
+    mla_spec = replace(mla_spec, page_size_padded=page_bytes)
+    mamba_spec = replace(mamba_spec, page_size_padded=page_bytes)
+    layer_bytes = num_blocks * page_bytes
+    backing_bytes = raw_offset_bytes + layer_bytes + guard_bytes
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            replace(
+                _make_kv_cache_tensor(backing_bytes, [name], page_bytes),
+                layer_stride=layer_bytes,
+                offset=raw_offset_bytes,
+            )
+            for name in (mla_name, mamba_name)
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(layer_names=[name], kv_cache_spec=spec)
+            for name, spec in ((mla_name, mla_spec), (mamba_name, mamba_spec))
+        ],
+    )
+    layer = _make_mla_layer()
+    layer.kv_lora_rank = nope_dim
+    layer.qk_rope_head_dim = rope_dim
+    layer.impl.dtype = dtype
+    vllm_config = SimpleNamespace(
+        additional_config={},
+        kv_transfer_config=None,
+        model_config=SimpleNamespace(hf_config=SimpleNamespace()),
+        cache_config=SimpleNamespace(cache_dtype="auto"),
+        quant_config=None,
+    )
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args, **_kwargs: {mla_name: layer})
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(attn_utils, "enable_fa_quant", lambda *_args, **_kwargs: False)
+
+    # 使用真实 allocator 的共享 backing，并保留原始 slice 前后的哨兵区域。
+    raw_caches = attn_utils._allocate_kv_cache(kv_cache_config, shared_layers={}, device=torch.device("cpu"))
+    mla_raw, mamba_raw = raw_caches[mla_name], raw_caches[mamba_name]
+    assert isinstance(mla_raw, torch.Tensor) and isinstance(mamba_raw, torch.Tensor)
+    assert mla_raw.data_ptr() == mamba_raw.data_ptr()
+    assert mla_raw.storage_offset() == raw_offset_bytes
+    backing = torch.as_strided(mla_raw, size=(backing_bytes,), stride=(1,), storage_offset=0)
+    backing.fill_(42)
+    nope, rope = attn_utils._reshape_kv_cache_v2(
+        attn_groups=[
+            AttentionGroup(
+                backend=AscendMLABackend,
+                layer_names=[mla_name],
+                kv_cache_spec=mla_spec,
+                kv_cache_group_id=0,
+            )
+        ],
+        kv_cache_raw_tensors=raw_caches,
+        cache_dtype="auto",
+        kernel_block_sizes=[kernel_block_size],
+        shared_kv_cache_layers={},
+        kv_cache_config=kv_cache_config,
+    )[mla_name]
+    conv_state, ssm_state = attn_utils._reshape_mamba_kv_cache(mamba_raw, mamba_spec)
+
+    kernel_blocks_per_manager = manager_block_size // kernel_block_size
+    first_kernel_block = 4 * kernel_blocks_per_manager
+    last_kernel_block = first_kernel_block + kernel_blocks_per_manager
+    ssm_state[3].fill_(0.125)
+    protected_ssm = ssm_state[3].clone()
+    before_mla_write = backing.clone()
+    nope[first_kernel_block:last_kernel_block].fill_(1.25)
+    rope[first_kernel_block:last_kernel_block].fill_(-0.25)
+    torch.testing.assert_close(ssm_state[3], protected_ssm, rtol=0, atol=0)
+    mla_page_start = raw_offset_bytes + 4 * page_bytes
+    mla_page_end = mla_page_start + page_bytes
+    torch.testing.assert_close(backing[:mla_page_start], before_mla_write[:mla_page_start], rtol=0, atol=0)
+    torch.testing.assert_close(backing[mla_page_end:], before_mla_write[mla_page_end:], rtol=0, atol=0)
+
+    dtype_bytes = nope.element_size()
+    slot_bytes = page_bytes // kernel_blocks_per_manager
+    nope_block_bytes = kernel_block_size * nope_dim * dtype_bytes
+    rope_block_bytes = kernel_block_size * rope_dim * dtype_bytes
+    for block_id in range(first_kernel_block, last_kernel_block):
+        # 通过物理页地址独立核对两个组件和 padding，不用 cache 的 stride 推导预期。
+        block_start = block_id * slot_bytes
+        rope_start = block_start + nope_block_bytes
+        padding_start = rope_start + rope_block_bytes
+        block_end = block_start + slot_bytes
+        assert torch.all(mla_raw[block_start:rope_start].view(dtype) == 1.25)
+        assert torch.all(mla_raw[rope_start:padding_start].view(dtype) == -0.25)
+        assert torch.all(mla_raw[padding_start:block_end] == 42)
+
+    protected_nope = nope[first_kernel_block:last_kernel_block].clone()
+    protected_rope = rope[first_kernel_block:last_kernel_block].clone()
+    before_ssm_write = backing.clone()
+    ssm_state[3].fill_(0.75)
+    torch.testing.assert_close(nope[first_kernel_block:last_kernel_block], protected_nope, rtol=0, atol=0)
+    torch.testing.assert_close(rope[first_kernel_block:last_kernel_block], protected_rope, rtol=0, atol=0)
+    ssm_start = raw_offset_bytes + 3 * page_bytes + conv_state[0].numel() * conv_state.element_size()
+    ssm_end = ssm_start + ssm_state[3].numel() * ssm_state.element_size()
+    torch.testing.assert_close(backing[:ssm_start], before_ssm_write[:ssm_start], rtol=0, atol=0)
+    torch.testing.assert_close(backing[ssm_end:], before_ssm_write[ssm_end:], rtol=0, atol=0)
+
+    assert nope.shape == (num_blocks * kernel_blocks_per_manager, kernel_block_size, 1, nope_dim)
+    assert rope.shape == (num_blocks * kernel_blocks_per_manager, kernel_block_size, 1, rope_dim)
+    assert nope.stride(0) * dtype_bytes == rope.stride(0) * dtype_bytes == slot_bytes
+    assert nope.storage_offset() * dtype_bytes == raw_offset_bytes
+    assert rope.storage_offset() * dtype_bytes == raw_offset_bytes + nope_block_bytes
+    assert (
+        nope.untyped_storage().data_ptr() == rope.untyped_storage().data_ptr() == backing.untyped_storage().data_ptr()
+    )
+
+
+@pytest.mark.parametrize("num_blocks_per_kv_block", [0, -1])
+def test_combined_mla_cache_requires_positive_kernel_block_ratio(num_blocks_per_kv_block):
+    with pytest.raises(ValueError, match="positive kernel-block ratio"):
+        attn_utils._reshape_combined_mla_kv_cache(
+            torch.empty(64, dtype=torch.int8),
+            (4, 2, 1, 2),
+            (4, 2, 1, 1),
+            torch.float16,
+            32,
+            num_blocks_per_kv_block,
+        )
+
+
+@pytest.mark.parametrize("page_stride_bytes", [0, -32, 31, 30])
+def test_combined_mla_cache_requires_aligned_kernel_slots(page_stride_bytes):
+    # 30 字节虽满足 dtype 对齐，但不能均分成两个 dtype 对齐的 kernel 槽。
+    with pytest.raises(ValueError, match="dtype-aligned kernel slots"):
+        attn_utils._reshape_combined_mla_kv_cache(
+            torch.empty(64, dtype=torch.int8), (4, 2, 1, 2), (4, 2, 1, 1), torch.float16, page_stride_bytes, 2
+        )
+
+
+def test_combined_mla_cache_requires_room_for_both_components():
+    with pytest.raises(ValueError, match="smaller than its K/V components"):
+        attn_utils._reshape_combined_mla_kv_cache(
+            torch.empty(64, dtype=torch.int8), (4, 2, 1, 2), (4, 2, 1, 1), torch.float16, 16, 2
+        )
+
+
+def test_combined_mla_cache_bounds_views_to_raw_slice():
+    backing = torch.full((128,), 42, dtype=torch.int8)
+    raw_cache = backing[16:78]
+    # 底层 storage 仍有余量，但 view 不能借用当前层 raw slice 外的字节。
+    with pytest.raises(ValueError, match="exceed the layer's raw cache slice"):
+        attn_utils._reshape_combined_mla_kv_cache(raw_cache, (4, 2, 1, 2), (4, 2, 1, 1), torch.float16, 32, 2)
+    assert torch.all(backing == 42)
+
+
+@pytest.mark.parametrize(
+    ("k_shape", "v_shape"),
+    [
+        ((4, 2, 1, 2), (3, 2, 1, 1)),
+        ((4, 2, 1, 2), (4, 3, 1, 1)),
+        ((4, 2, 1, 2), (4, 2, 2, 1)),
+        ((4, 2, 1), (4, 2, 1, 1)),
+        ((4, 2, 1, 2), (4, 2, 1)),
+        ((4, 2, 1, 2), (4, 2, 1, 1, 1)),
+    ],
+)
+def test_combined_mla_cache_requires_matching_component_shapes(k_shape, v_shape):
+    with pytest.raises(ValueError, match="matching block/token/head dimensions"):
+        attn_utils._reshape_combined_mla_kv_cache(
+            torch.empty(64, dtype=torch.int8), k_shape, v_shape, torch.float16, 32, 2
+        )
+
+
+def test_combined_mla_cache_requires_aligned_raw_offset():
+    backing = torch.full((128,), 42, dtype=torch.int8)
+    with pytest.raises(ValueError, match="raw cache offset must be dtype-aligned"):
+        attn_utils._reshape_combined_mla_kv_cache(backing[1:65], (4, 2, 1, 2), (4, 2, 1, 1), torch.float16, 32, 2)
+    assert torch.all(backing == 42)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_combined_mla_cache_nonzero_offset_preserves_guards_and_slot_padding(dtype):
+    num_kernel_blocks = 6
+    kernel_blocks_per_manager = 3
+    page_stride_bytes = 60
+    raw_offset_bytes = 8
+    layer_bytes = 2 * page_stride_bytes
+    guard_bytes = 12
+    backing = torch.full((raw_offset_bytes + layer_bytes + guard_bytes,), 42, dtype=torch.int8)
+    raw_cache = backing[raw_offset_bytes : raw_offset_bytes + layer_bytes]
+    k_cache, v_cache = attn_utils._reshape_combined_mla_kv_cache(
+        raw_cache,
+        (num_kernel_blocks, 2, 1, 3),
+        (num_kernel_blocks, 2, 1, 1),
+        dtype,
+        page_stride_bytes,
+        kernel_blocks_per_manager,
+    )
+    k_cache.fill_(1.25)
+    v_cache.fill_(-0.25)
+
+    # 每槽 20 字节：K 占 12 字节、V 占 4 字节，剩余 4 字节必须保留哨兵。
+    slot_bytes = page_stride_bytes // kernel_blocks_per_manager
+    k_block_bytes = 12
+    v_block_bytes = 4
+    for block_id in range(num_kernel_blocks):
+        block_start = raw_offset_bytes + block_id * slot_bytes
+        v_start = block_start + k_block_bytes
+        padding_start = v_start + v_block_bytes
+        assert torch.all(backing[block_start:v_start].view(dtype) == 1.25)
+        assert torch.all(backing[v_start:padding_start].view(dtype) == -0.25)
+        assert torch.all(backing[padding_start : block_start + slot_bytes] == 42)
+    assert torch.all(backing[:raw_offset_bytes] == 42)
+    assert torch.all(backing[raw_offset_bytes + layer_bytes :] == 42)
+    assert k_cache.stride(0) * k_cache.element_size() == slot_bytes
+    assert v_cache.stride(0) * v_cache.element_size() == slot_bytes
+    assert k_cache.storage_offset() * k_cache.element_size() == raw_offset_bytes
+    assert v_cache.storage_offset() * v_cache.element_size() == raw_offset_bytes + k_block_bytes
+    assert k_cache.untyped_storage().data_ptr() == v_cache.untyped_storage().data_ptr() == backing.data_ptr()
