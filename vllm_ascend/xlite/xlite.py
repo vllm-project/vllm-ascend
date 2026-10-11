@@ -1742,8 +1742,6 @@ class XliteWrapper:
                     "runnable(hybrid lens mismatch)",
                 )
             cached_lens_list = [max(seq_lens_list[i] - query_lens_list[i], 0) for i in range(num_reqs)]
-            if input_ids is None:
-                return self.npu_runnable(input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs)
             bt = getattr(attn_metadata, "block_tables", None)
             if bt is None:
                 return _ensure_output(
