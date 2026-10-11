@@ -8,6 +8,8 @@ import torch_npu
 
 from vllm_ascend.ops.triton.pcp_kv_cache import copy_pcp_kv_cache
 
+PCP_COPY_MAX_TILE_ROWS = 8
+
 
 def try_load_strided_mla_cache(cache_k, cache_v, block_table, seq_lens, seq_offset, key, value) -> bool:
     """只处理已验证的4D、单物理头、FP16/BF16非连续ND缓存。"""
@@ -63,7 +65,7 @@ def try_load_strided_mla_cache(cache_k, cache_v, block_table, seq_lens, seq_offs
 
     # 既有A3多行copy在不完整末tile上会报MTE；最大row tile为8。
     # 重复已有合法slot使全部地址有效，最多额外读取7个token，不读取新页。
-    padded_tokens = (num_tokens + 7) // 8 * 8
+    padded_tokens = (num_tokens + PCP_COPY_MAX_TILE_ROWS - 1) // PCP_COPY_MAX_TILE_ROWS * PCP_COPY_MAX_TILE_ROWS
     if padded_tokens != num_tokens:
         slots = torch.cat((slots, slots[:1].expand(padded_tokens - num_tokens)))
     packed = copy_pcp_kv_cache((cache_k, cache_v), slots)[:num_tokens]

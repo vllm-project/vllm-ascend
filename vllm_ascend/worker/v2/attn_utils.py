@@ -1759,9 +1759,7 @@ def _reshape_kv_cache_v2(
                         or k_shape[0] * slot_stride_bytes > raw_cache.numel() * raw_cache.element_size()
                     ):
                         raise ValueError("Combined MLA kernel slots exceed the layer's raw cache slice.")
-                    k_cache = make_page_strided_cache_view(
-                        raw_cache, k_shape, k_dtype, slot_stride_bytes
-                    )
+                    k_cache = make_page_strided_cache_view(raw_cache, k_shape, k_dtype, slot_stride_bytes)
                     v_cache = make_page_strided_cache_view(
                         raw_cache, v_shape, v_dtype, slot_stride_bytes, offset_bytes=k_block_bytes
                     )
