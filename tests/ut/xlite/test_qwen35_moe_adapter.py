@@ -106,7 +106,9 @@ def _adapter_self(hf):
     self.vllm_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(max_num_batched_tokens=512, max_num_seqs=8),
         parallel_config=SimpleNamespace(data_parallel_size=1, enable_expert_parallel=False),
-        model_config=SimpleNamespace(max_model_len=1024, dtype=torch.bfloat16, hf_text_config=hf, hf_config=SimpleNamespace()),
+        model_config=SimpleNamespace(
+            max_model_len=1024, dtype=torch.bfloat16, hf_text_config=hf, hf_config=SimpleNamespace()
+        ),
         cache_config=SimpleNamespace(block_size=128),
         speculative_config=None,
         quant_config=None,
