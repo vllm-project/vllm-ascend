@@ -4,15 +4,13 @@
 
 from __future__ import annotations
 
-import torch
-
+from vllm_ascend.ops import packaged_attention as ops
 from vllm_ascend.ops.triton.prepare_indexer_indices import (
     prepare_indexer_indices,
 )
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage, wait_for_device_metadata
 
-from .package_loader import import_packaged_a5_module
-from .quantization import mxfp4_quantize_e8m0
+from .quantization import mxfp4_quantize_e8m0 as quantize_mxfp4_indexer
 
 
 def _prepare_indices(
@@ -32,16 +30,17 @@ def _prepare_indices(
     )
 
 
-def _common(query, weights, source_cache, source_metadata, compress_ratio):
+def _common(query, weights, source_cache, source_metadata, compress_ratio, quantized_query, query_scale):
     op_metadata = source_metadata.qli_metadata
     if op_metadata is None:
         raise RuntimeError("A5 QLI metadata was not built")
     wait_for_device_metadata(DeviceMetadataStage.INDEXER, id(op_metadata))
-    q_data, q_scale = mxfp4_quantize_e8m0(query)
+    if quantized_query is None:
+        quantized_query, query_scale = quantize_mxfp4_indexer(query)
     query_start_loc = source_metadata.query_start_loc
     return (
-        q_data,
-        q_scale.unflatten(-1, (2, 2)).contiguous(),
+        quantized_query,
+        query_scale.unflatten(-1, (2, 2)).contiguous(),
         weights.float().contiguous(),
         source_cache[0],
         source_cache[1].unflatten(-1, (2, 2)),
@@ -83,17 +82,20 @@ def _qli(
     candidate_lengths,
     topk_lengths,
     indices_output,
+    quantized_query,
+    query_scale,
 ):
-    import_packaged_a5_module("cann_ops_transformer.ops.attention.quant_lightning_indexer_dsl")
     q, qs, w, k, ks, common = _common(
         query,
         weights,
         source_cache,
         source_metadata,
         compress_ratio,
+        quantized_query,
+        query_scale,
     )
-    common[_layout_keyword(torch.ops.cann_ops_transformer.ds41.quant_lightning_indexer)] = "PA_BBND"
-    indices, _, candidate_out, candidate_length = torch.ops.cann_ops_transformer.ds41.quant_lightning_indexer(
+    common["layout_k"] = "PA_BBND"
+    indices, _, candidate_out, candidate_length = ops.quant_lightning_indexer(
         q,
         k,
         w,
@@ -107,11 +109,11 @@ def _qli(
     )
     if is_candidate_source:
         candidate_lengths.copy_(candidate_length)
-    selected = _prepare_indices(
+    selected = prepare_indexer_indices(
         indices.squeeze(1),
         positions,
         compress_ratio,
-        topk_lengths=topk_lengths,
+        lengths_output=topk_lengths,
         indices_output=indices_output,
     )
     return selected, candidate_out if is_candidate_source else candidates
@@ -131,8 +133,9 @@ def _qsli(
     candidate_lengths,
     topk_lengths,
     indices_output,
+    quantized_query,
+    query_scale,
 ):
-    import_packaged_a5_module("cann_ops_transformer.ops.attention.quant_sparse_lightning_indexer_dsl")
     if len(source_cache) != 3:
         raise RuntimeError("A5 QSLI requires its source's folded K/scale twin")
     q, qs, w, _, _, common = _common(
@@ -141,9 +144,10 @@ def _qsli(
         source_cache,
         source_metadata,
         compress_ratio,
+        quantized_query,
+        query_scale,
     )
     common.pop("metadata")
-    ops = torch.ops.cann_ops_transformer.ds41
     metadata = ops.quant_sparse_lightning_indexer_metadata(
         candidate_lengths,
         cu_seqlens_q=common["cu_seqlens_q"],
@@ -152,9 +156,9 @@ def _qsli(
         batch_size=source_metadata.num_reqs,
         max_seqlen_q=-1,
         max_seqlen_k=-1,
-        num_heads_q=query.shape[1],
+        num_heads_q=q.shape[1],
         num_heads_k=1,
-        head_dim=query.shape[2],
+        head_dim=q.shape[2] * 2,
         topk=topk,
         quant_mode=1,
         candidate_block_size=candidate_block_size,
@@ -164,7 +168,7 @@ def _qsli(
         layout_k="PA_BBND",
     )
     common["metadata"] = metadata
-    common[_layout_keyword(ops.quant_sparse_lightning_indexer)] = "PA_BBND"
+    common["layout_k"] = "PA_BBND"
     indices, _ = ops.quant_sparse_lightning_indexer(
         q,
         source_cache[2].squeeze(2),
@@ -177,11 +181,11 @@ def _qsli(
         candidate_block_size,
         **common,
     )
-    selected = _prepare_indices(
+    selected = prepare_indexer_indices(
         indices.squeeze(1),
         positions,
         compress_ratio,
-        topk_lengths=topk_lengths,
+        lengths_output=topk_lengths,
         indices_output=indices_output,
     )
     return selected, candidates
@@ -204,6 +208,8 @@ def run_a5_indexer(
     candidate_lengths,
     topk_lengths,
     indices_output,
+    quantized_query=None,
+    query_scale=None,
 ):
     if uses_candidate_filter:
         return _qsli(
@@ -219,6 +225,8 @@ def run_a5_indexer(
             candidate_lengths=candidate_lengths,
             topk_lengths=topk_lengths,
             indices_output=indices_output,
+            quantized_query=quantized_query,
+            query_scale=query_scale,
         )
     return _qli(
         query,
@@ -235,4 +243,6 @@ def run_a5_indexer(
         candidate_lengths=candidate_lengths,
         topk_lengths=topk_lengths,
         indices_output=indices_output,
+        quantized_query=quantized_query,
+        query_scale=query_scale,
     )

@@ -37,7 +37,8 @@ from vllm_ascend.core.kv_cache_interface import (
     get_storage_block_size,
 )
 from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.ops.dsv41_a5.package_loader import import_packaged_a5_module
+from vllm_ascend.ops import packaged_attention
+from vllm_ascend.ops.dsv41_a5.package_loader import _load_payload_package
 from vllm_ascend.ops.rope_dsv4 import (
     get_cos_and_sin_dsa,
     get_full_cos_and_sin_dsa_for_layer,
@@ -424,50 +425,9 @@ class AscendDSAV41Impl:
         # Packaged A5 prefill/mixed cache writes must be captured on the
         # current stream even when the independent Q/KV preparation overlaps.
         # A missing prefill classification also cannot qualify as pure decode.
-        return getattr(attn, "packed_cache_ops", None) is not None and (
+        return getattr(attn, "dsv41_backend", None) is not None and (
             metadata.num_prefills > 0 or metadata.num_decodes != metadata.num_reqs
         )
-
-    def _indexer_hidden_states(self, hidden_states, metadata):
-        return hidden_states[: metadata.swa.num_actual_tokens]
-
-    def _prepare_indexer_inputs(self, attn, hidden_states, qr, cos, sin, metadata):
-        if not self.role.has_long_context or not self.role.is_index_source:
-            return None
-        indexer = attn.indexer
-        main_stream = torch.npu.current_stream()
-        aux_stream = dsv4_dsa_overlap_stream()
-
-        query = indexer.project_query(qr)
-        weights_start = main_stream.record_event()
-        with npu_stream_switch(aux_stream, enabled=True):
-            aux_stream.wait_event(weights_start)
-            weights = indexer.project_weights(hidden_states)
-            weights_done = aux_stream.record_event()
-        indexer.apply_query_rope(query, cos, sin)
-        main_stream.wait_event(weights_done)
-        return DeepseekV41PreparedIndexer(query=query, weights=weights)
-
-    @staticmethod
-    def _should_quantize_indexer(prepared, metadata):
-        return (
-            prepared is not None
-            and prepared.quantized_query is None
-            and prepared.query is not None
-            and prepared.query.shape[0] > 0
-            and metadata.indexer.cache.max_cache_seq_len > 0
-        )
-
-    def _quantize_indexer_query(self, attn, prepared, metadata):
-        if not self._should_quantize_indexer(prepared, metadata):
-            return
-        main_stream = torch.npu.current_stream()
-        aux_stream = dsv4_dsa_overlap_stream()
-        quantize_start = main_stream.record_event()
-        with npu_stream_switch(aux_stream, enabled=True):
-            aux_stream.wait_event(quantize_start)
-            prepared.quantized_query, prepared.query_scale = attn.indexer.quantize_query(prepared.query)
-            prepared.quantize_done = aux_stream.record_event()
 
     def _preprocess(self, attn, query_hidden, cache_hidden, query_metadata, cache_metadata):
         query_hidden = query_hidden[: query_metadata.swa.num_actual_tokens]
@@ -509,6 +469,47 @@ class AscendDSAV41Impl:
         else:
             self._quantize_indexer_query(attn, prepared_indexer, query_metadata)
         return q.to(query_hidden.dtype), qr, prepared_indexer
+
+    def _indexer_hidden_states(self, hidden_states, metadata):
+        return hidden_states[: metadata.swa.num_actual_tokens]
+
+    def _prepare_indexer_inputs(self, attn, hidden_states, qr, cos, sin, metadata):
+        if not self.role.has_long_context or not self.role.is_index_source:
+            return None
+        indexer = attn.indexer
+        main_stream = torch.npu.current_stream()
+        aux_stream = dsv4_dsa_overlap_stream()
+
+        query = indexer.project_query(qr)
+        weights_start = main_stream.record_event()
+        with npu_stream_switch(aux_stream, enabled=True):
+            aux_stream.wait_event(weights_start)
+            weights = indexer.project_weights(hidden_states)
+            weights_done = aux_stream.record_event()
+        indexer.apply_query_rope(query, cos, sin)
+        main_stream.wait_event(weights_done)
+        return DeepseekV41PreparedIndexer(query=query, weights=weights)
+
+    @staticmethod
+    def _should_quantize_indexer(prepared, metadata):
+        return (
+            prepared is not None
+            and prepared.quantized_query is None
+            and prepared.query is not None
+            and prepared.query.shape[0] > 0
+            and metadata.indexer.cache.max_cache_seq_len > 0
+        )
+
+    def _quantize_indexer_query(self, attn, prepared, metadata):
+        if not self._should_quantize_indexer(prepared, metadata):
+            return
+        main_stream = torch.npu.current_stream()
+        aux_stream = dsv4_dsa_overlap_stream()
+        quantize_start = main_stream.record_event()
+        with npu_stream_switch(aux_stream, enabled=True):
+            aux_stream.wait_event(quantize_start)
+            prepared.quantized_query, prepared.query_scale = attn.indexer.quantize_query(prepared.query)
+            prepared.quantize_done = aux_stream.record_event()
 
     def _prepare_queries(self, attn, hidden_states, positions, cos, sin, metadata):
         hidden_states = hidden_states[: metadata.swa.num_actual_tokens]
@@ -1066,7 +1067,6 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         # Only tiling metadata is captured. C2 state preparation stays outside
         # the graph, with its actual counts and state-update policy.
         metadata_in_graph = self._device_metadata_in_graph
-        metadata_tokens = num_input_tokens if metadata_in_graph else num_actual_tokens
         shared = kwargs.get("common_v41_metadata")
         if shared is None:
             shared = {}
@@ -1252,9 +1252,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                 num_actual_tokens,
             )
             if self._uses_a5_packed_cache and ori_sparse_indices is not None:
-                clamp_replay_swa_indices(
-                    positions, ori_sparse_indices, ori_topk_length, replay_visible_lens
-                )
+                clamp_replay_swa_indices(positions, ori_sparse_indices, ori_topk_length, replay_visible_lens)
             else:
                 ori_topk_length = replay_visible_lens
         ori_mask_mode = 0 if noncausal else 4
@@ -1276,8 +1274,8 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                     self._a5_smla_metadata.zero_()
                     return
                 length_rows = self._a5_smla_length_rows[:num_actual_tokens]
-                import_packaged_a5_module("cann_ops_transformer.ops.attention.mixed_quant_sparse_flash_mla_dsl")
-                value = torch.ops.cann_ops_transformer.ds41.mixed_quant_sparse_flash_mla_metadata(
+                _load_payload_package()
+                value = packaged_attention.mixed_quant_sparse_flash_mla_metadata(
                     length_rows,
                     length_rows,
                     cu_seqlens_q=common.query_start_loc[: num_reqs + 1].int().contiguous(),
@@ -1350,11 +1348,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                 build_smla_metadata,
             )
 
-        if (
-            self._build_query_metadata
-            and self._supports_device_ops
-            and cache_kind == "index_k"
-        ):
+        if self._build_query_metadata and self._supports_device_ops and cache_kind == "index_k":
             residual = cmp_residual_buffer
 
             if self._uses_a5_packed_cache:
@@ -1374,8 +1368,8 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                     if num_actual_tokens == 0:
                         self._qli_metadata.zero_()
                         return
-                    import_packaged_a5_module("cann_ops_transformer.ops.attention.quant_lightning_indexer_dsl")
-                    value = torch.ops.cann_ops_transformer.ds41.quant_lightning_indexer_metadata(
+                    _load_payload_package()
+                    value = packaged_attention.quant_lightning_indexer_metadata(
                         cu_seqlens_q=common.query_start_loc[: num_reqs + 1].int(),
                         seqused_k=coordinates["cache_seq_lens"],
                         cmp_residual_k=residual,
@@ -1448,11 +1442,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             skip_ring_update = bool(kwargs.get("skip_ring_state_update", False))
 
             def build_c2_metadata() -> None:
-                if (
-                    self._uses_a5_packed_cache
-                    and full_source_cos is not None
-                    and full_source_sin is not None
-                ):
+                if self._uses_a5_packed_cache and full_source_cos is not None and full_source_sin is not None:
                     build_c2_ring_metadata(
                         common.query_start_loc,
                         seq_lens,
@@ -1466,12 +1456,8 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                         num_actual_tokens,
                         skip_update=skip_ring_update,
                         ring_metadata_output=ring_meta,
-                        complete_mask_output=self._c2_complete_mask[
-                            :num_input_tokens
-                        ],
-                        source_positions_output=self._c2_source_positions[
-                            :num_input_tokens
-                        ],
+                        complete_mask_output=self._c2_complete_mask[:num_input_tokens],
+                        source_positions_output=self._c2_source_positions[:num_input_tokens],
                         cos_output=self._c2_source_cos[:num_input_tokens],
                         sin_output=self._c2_source_sin[:num_input_tokens],
                     )

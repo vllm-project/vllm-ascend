@@ -375,7 +375,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.MLAPO_NATIVE_WEIGHTS,
                     HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
                     HardwareCapability.MOE_DISPATCH_SHARED_EXPERT_ARGS,
-                    HardwareCapability.MOE_GATING_TOP_K_PACKAGED_A5,
+                    HardwareCapability.MOE_GATING_TOP_K_HASH_VISION,
                     HardwareCapability.NPUGRAPH_EX,
                     HardwareCapability.STANDARD_MAMBA_PATCH,
                     HardwareCapability.STANDARD_WORKER_PATCHES,

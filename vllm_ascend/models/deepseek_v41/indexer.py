@@ -205,7 +205,7 @@ class DeepseekV41Indexer(nn.Module):
         return self._output(self.weights_proj, hidden_states).float() * self.weights_scale
 
     def quantize_query(self, query):
-        if self.packed_cache_ops is not None:
+        if self.dsv41_backend is not None:
             return quantize_mxfp4_indexer(query)
         return quantize_indexer_query(query)
 
