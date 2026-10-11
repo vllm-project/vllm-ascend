@@ -23,6 +23,7 @@ from vllm_ascend.attention.context_parallel.sfa_cp import (
     AscendSFAPCPDCPMetadataBuilder,
     AscendSFAPCPImpl,
     DCPGatherContext,
+    _index_select_kv_blocks,
     resolve_sfa_impl,
     resolve_sfa_metadata_builder,
 )
@@ -1670,3 +1671,12 @@ def test_dsa_dcp_indexer_attn_q_gather_handle(has_prefill, has_handle):
 def test_other_sfa_layouts_have_no_indexer_attn_q_gather_handle(impl_cls):
     impl = impl_cls.__new__(impl_cls)
     assert impl._get_indexer_attn_q_gather_handle(Mock()) is None
+
+
+@pytest.mark.parametrize("dtype", [torch.float8_e4m3fn, torch.float8_e5m2])
+def test_index_select_fp8_kv_preserves_all_bit_patterns(dtype):
+    original = torch.arange(256, dtype=torch.int32).to(torch.uint8).reshape(4, 64)
+    selected = torch.tensor([3, 1, 0, 2], dtype=torch.int64)
+    result = _index_select_kv_blocks(original.view(dtype), selected)
+    assert result.dtype == dtype
+    torch.testing.assert_close(result.view(torch.uint8), original[selected], atol=0, rtol=0)

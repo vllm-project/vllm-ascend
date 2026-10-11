@@ -81,6 +81,7 @@ _EXPECTED_CAPABILITIES = {
             HardwareCapability.AUTO_ENABLE_CUSTOM_OPS,
             HardwareCapability.SCATTER_ND_CACHE_STORE,
             HardwareCapability.SCATTER_ND_FP8_CACHE_STORE,
+            HardwareCapability.SFA_C8_DCP_REPLICATED_INDEXER,
             HardwareCapability.BGMV_SGMV_META_REGISTRATION,
             HardwareCapability.CANN_MEGAMOE,
             HardwareCapability.CANN_MEGAMOE_MXFP,
