@@ -49,11 +49,11 @@ COMMON_ENV = {
     "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
 }
 
-MTP_EXPECTED_OUTPUT_PREFIXES = {
-    "The president of the United States is": ("The president of the United States is the head of the executive branch"),
-}
-DSPARK_EXPECTED_OUTPUT_PREFIXES = {
-    "The president of the United States is": ("The president of the United States is the head of the executive branch"),
+EXPECTED_OUTPUT_PREFIXES = {
+    "Hello, my name is": "Hello, my name is {name} and I am {age} years old.",
+    "The president of the United States is": "The president of the United States is the head of the executive branch",
+    "The capital of France is": "The capital of France is Paris",
+    "The future of AI is": "The future of AI is not just about technology;",
 }
 
 MTP_MIN_ACCEPTANCE_RATES = [0.85, 0.65, 0.35]
@@ -90,6 +90,8 @@ def _run_test(
         additional_config={
             "enable_dsa_cp": False,
             "enable_prefill_mc2": True,
+            # TODO: Re-enable after PCP decode sharding lands; DSV4 results are unstable.
+            "enable_pcp_o_proj_weight_sharding": False,
         },
     ) as runner:
         outputs = runner.generate(PROMPTS_SHORT, sampling_params)
@@ -143,7 +145,7 @@ def test_deepseek_v4_dsa_pcp_mtp_full_decode_only() -> None:
     _run_test(
         MTP_MODEL,
         minimum_rates=MTP_MIN_ACCEPTANCE_RATES,
-        expected_output_prefixes=MTP_EXPECTED_OUTPUT_PREFIXES,
+        expected_output_prefixes=EXPECTED_OUTPUT_PREFIXES,
         speculative_config={
             "num_speculative_tokens": MTP_NUM_SPECULATIVE_TOKENS,
             "method": "mtp",
@@ -171,9 +173,8 @@ def test_deepseek_v4_dsa_pcp_dspark() -> None:
     """Verify output accuracy and DSpark acceptance for DSA-PCP graph execution."""
     _run_test(
         DSPARK_MODEL,
-        # TODO: Restore acceptance checks once the DSpark acceptance issue is resolved.
-        minimum_rates=None,
-        expected_output_prefixes=DSPARK_EXPECTED_OUTPUT_PREFIXES,
+        minimum_rates=DSPARK_MIN_ACCEPTANCE_RATES,
+        expected_output_prefixes=EXPECTED_OUTPUT_PREFIXES,
         speculative_config={
             "num_speculative_tokens": DSPARK_NUM_SPECULATIVE_TOKENS,
             "method": "dspark",

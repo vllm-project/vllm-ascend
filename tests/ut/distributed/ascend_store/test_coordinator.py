@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import inspect
 import unittest
 from dataclasses import dataclass, replace
 from unittest.mock import patch
@@ -22,7 +23,7 @@ from unittest.mock import patch
 # isort: off
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 import torch
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, SlidingWindowSpec
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec, SlidingWindowSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import get_block_hashes
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import (
     AscendStoreCoordinator,
@@ -257,6 +258,64 @@ class TestAscendStoreCoordinator(unittest.TestCase):
         )
 
         self.assertEqual(result, [256, 1024])
+
+    def test_mamba_replay_boundary_and_partial_prefix_lookup(self):
+        from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+
+        if "reachable_boundaries" not in inspect.signature(MambaManager.reachable_block_mask).parameters:
+            self.skipTest("requires the reachable_boundaries vLLM API")
+        spec = MambaSpec(block_size=256, shapes=((1,),), dtypes=(torch.float32,), mamba_cache_mode="align")
+        for interval, expected in [
+            (0, [False, False, True, False]),
+            (512, [False, True, True, True]),
+            (None, [True, True, True, True]),
+        ]:
+            with self.subTest(retention_interval=interval):
+                coord = AscendStoreCoordinator(
+                    [KVCacheGroupSpec(["attention"], _full_spec(256)), KVCacheGroupSpec(["state"], spec)],
+                    scheduler_block_size=256,
+                    hash_block_size=256,
+                    group_block_sizes=[256, 256],
+                    group_cache_families=["default", "default"],
+                    retention_interval=interval,
+                )
+                self.assertEqual(coord.store_mask(1024, num_prompt_tokens=769)[1], expected)
+                hashes = _hashes(4)
+
+                def query(group_id, group_hashes, mask):
+                    # A shorter request published only its 768-token checkpoint.
+                    return [
+                        h for i, h in enumerate(group_hashes) if (mask is None or mask[i]) and (group_id == 0 or i == 2)
+                    ]
+
+                self.assertEqual(coord.find_reachable_hit_tokens(hashes, 1024, query), 768)
+
+    def test_legacy_reachable_mask_ignores_new_boundary_argument(self):
+        class LegacyManager:
+            @staticmethod
+            def reachable_block_mask(
+                start_block,
+                end_block,
+                alignment_tokens,
+                kv_cache_spec,
+                use_eagle,
+                retention_interval=None,
+                num_prompt_tokens=None,
+            ):
+                return [retention_interval, num_prompt_tokens]
+
+        result = _reachable_block_mask(
+            LegacyManager,
+            start_block=0,
+            end_block=1,
+            alignment_tokens=128,
+            kv_cache_spec=None,
+            use_eagle=False,
+            retention_interval=0,
+            num_prompt_tokens=129,
+            reachable_boundaries=(128,),
+        )
+        self.assertEqual(result, [0, 129])
 
     def test_store_mask_propagates_eagle_to_same_spec_siblings(self):
         calls = []

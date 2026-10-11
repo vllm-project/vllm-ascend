@@ -213,7 +213,17 @@ class DeepseekV4DSparkModel(nn.Module):
         while isinstance(swa_kv_cache, (list, tuple)) and len(swa_kv_cache) == 1:
             swa_kv_cache = swa_kv_cache[0]
 
-        from vllm_ascend.attention.dsa_attn_kv_plan import get_dsa_attn_kv_plan
+        from vllm_ascend.attention.dsa_attn_kv_plan import get_dsa_attn_kv_plan, write_dsa_cache
+
+        dsa_impl = attn.dsa_attn.dsa_attn.impl
+        turboquant = getattr(dsa_impl, "turboquant", None)
+        if turboquant is not None:
+            # Draft queries and context KV must use the same rotated basis.
+            shared_kv = turboquant.forward(shared_kv)
+            if slot_mapping.ndim == 1:
+                slot_mapping = dsa_impl.get_kv_plan().format_dsa_slot_mapping(slot_mapping, swa_cache_layer.block_size)
+            write_dsa_cache(swa_kv_cache, shared_kv, slot_mapping)
+            return
 
         if slot_mapping.ndim == 1:
             slot_mapping = get_dsa_attn_kv_plan(self.vllm_config).format_dsa_slot_mapping(
@@ -319,6 +329,8 @@ class DeepseekV4DSparkModel(nn.Module):
 
 @support_torch_compile
 class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts, SupportsEagle3):
+    draft_id_to_target_id = None
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         assert vllm_config.speculative_config is not None
@@ -508,12 +520,19 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts, Support
                 break
             else:
                 if "attn_sink" in name:
+                    param = params_dict[name]
+                    # Route the write through the parameter's loader, like the
+                    # target model does. A live weight update runs inside vLLM's
+                    # layerwise reload, which parks the layer on the meta device
+                    # and only replays loads made through ``weight_loader``; a
+                    # direct ``copy_`` lands on the meta tensor and is lost, so
+                    # the draft model's sinks would keep their dummy values.
+                    weight_loader = getattr(param, "weight_loader", default_weight_loader)
                     if enable_dsa_cp():
-                        narrow = loaded_weight
+                        weight_loader(param, loaded_weight)
                     else:
-                        narrow = loaded_weight[head_start:head_end]
-                    with torch.no_grad():
-                        params_dict[name].copy_(narrow)
+                        # Handle attention sinks (distributed across ranks)
+                        weight_loader(param, loaded_weight[head_start:head_end])
                     loaded_params.add(name)
                     continue
                 param = params_dict[name]

@@ -348,6 +348,52 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
         )
         self.assertEqual(output.shape, (2, self.embedding_dim))
 
+    def test_pcp_embedding_exchanges_local_span_with_static_buffers(self):
+        layer = self._create_layer()
+        layer.token_exchange_group = MagicMock(world_size=2, device_group="pcp")
+        layer.output_reduce_group = None
+        layer.parallel_mode = VocabParallelMode.PCP_X_TP
+        layer.embedding_tp_capacity = 8
+        layer.params_dtype = torch.float32
+        shapes: list[tuple[str, int] | tuple[str, int, int]] = []
+        addresses = []
+
+        def all_gather(output, input_, *, group):
+            shapes.append(("all_gather", input_.shape[0], output.shape[0]))
+            addresses.append((input_.data_ptr(), output.data_ptr()))
+            output.copy_(input_.repeat(2))
+
+        def embedding(_, input_):
+            shapes.append(("embedding", input_.shape[0]))
+            return input_.unsqueeze(-1).expand(-1, layer.embedding_dim).float()
+
+        def reduce_scatter(output, input_, *, group):
+            shapes.append(("reduce_scatter", input_.shape[0], output.shape[0]))
+            output.copy_(input_[: output.shape[0]])
+
+        layer.quant_method.embedding = MagicMock(side_effect=embedding)
+        with (
+            patch("vllm_ascend.ops.vocab_parallel_embedding.dist.all_gather_into_tensor", side_effect=all_gather),
+            patch("vllm_ascend.ops.vocab_parallel_embedding.dist.reduce_scatter_tensor", side_effect=reduce_scatter),
+        ):
+            first = layer(torch.tensor([15, 16]))
+            second = layer(torch.tensor([15]))
+
+        self.assertEqual(first.shape, (2, self.embedding_dim))
+        self.assertEqual(second.shape, (1, self.embedding_dim))
+        self.assertEqual(
+            shapes,
+            [
+                ("all_gather", 2, 4),
+                ("embedding", 4),
+                ("reduce_scatter", 4, 2),
+                ("all_gather", 1, 2),
+                ("embedding", 2),
+                ("reduce_scatter", 2, 1),
+            ],
+        )
+        self.assertEqual(addresses[0], addresses[1])
+
 
 class TestVocabParallelPlan(unittest.TestCase):
     def test_resolve_vocab_parallel_plan(self):
@@ -511,16 +557,12 @@ class TestAscendLogitsProcessor(unittest.TestCase):
         self.mock_group.rank_in_group = 0
         self.mock_pcp_group = MagicMock(world_size=1, rank_in_group=0)
         self.mock_ascend_config = MagicMock()
-        # enable_reduce_sample must be explicitly False so _get_logits_lmheadtp
-        # reaches the lmhead_all_to_all branch (a MagicMock attribute is truthy
-        # and would silently skip it).
-        self.mock_ascend_config.enable_reduce_sample = False
+
         self.mock_quant_method = MagicMock()
         # 2 rows so lmhead_all_to_all's equal split (world_size=2) holds.
         self.mock_quant_method.apply = MagicMock(return_value=torch.randn(2, self.vocab_size))
         self.mock_all_to_all_single = MagicMock(side_effect=lambda out, inp, **kwargs: out.copy_(inp))
         self.patches = [
-            patch("vllm_ascend.ops.vocab_parallel_embedding.get_ascend_config", return_value=self.mock_ascend_config),
             patch("vllm_ascend.ops.vocab_parallel_embedding.get_lmhead_tp_group", return_value=self.mock_group),
             patch("vllm_ascend.ops.vocab_parallel_embedding.lmhead_tp_enable", return_value=True),
             patch(

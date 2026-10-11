@@ -8,6 +8,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
 from vllm.v1.worker import mamba_utils
 
+from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import uses_sfa_dspark_kv_transfer
+
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.distributed.kv_events import KVConnectorKVEvents
@@ -23,6 +25,14 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
             role=role,
             kv_cache_config=kv_cache_config,
         )
+
+        transfer = vllm_config.kv_transfer_config
+        self._requires_full_dspark_prompt = (
+            uses_sfa_dspark_kv_transfer(vllm_config) and transfer.is_kv_producer and not transfer.is_kv_consumer
+        )
+        self._dspark_prefix_provider_index: int | None = None
+        if self._requires_full_dspark_prompt:
+            self.configure_dspark_prefix_cache(vllm_config)
 
         self._all_support_hma = all(supports_hma(c) for c in self._connectors)
         assert vllm_config.scheduler_config.disable_hybrid_kv_cache_manager or self._all_support_hma, (
@@ -41,6 +51,20 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
             )
             for connector in self._connectors
         )
+
+    def configure_dspark_prefix_cache(self, vllm_config: "VllmConfig") -> bool:
+        """Select a store that restores both target and persistent draft KV."""
+        providers = []
+        for index, connector in enumerate(self._connectors):
+            configure = getattr(connector, "configure_dspark_prefix_cache", None)
+            if callable(configure) and configure(vllm_config):
+                providers.append(index)
+        if len(providers) > 1:
+            raise ValueError("DSpark prefix reuse requires exactly one paired target/draft store")
+        self._dspark_prefix_provider_index = providers[0] if providers else None
+        if providers:
+            self._requires_full_dspark_prompt = False
+        return bool(providers)
 
     def _configure_layerwise_reuse_completion(self) -> None:
         # Producers that report when a shared physical KV slot is safe to reuse.
@@ -161,6 +185,18 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
         request: "Request",
         num_computed_tokens: int,
     ) -> tuple[int | None, bool]:
+        # A target-only child cannot initialize the skipped draft context.
+        if getattr(self, "_requires_full_dspark_prompt", False):
+            return 0, False
+        provider_index = getattr(self, "_dspark_prefix_provider_index", None)
+        if provider_index is not None:
+            tokens, load_async = self._connectors[provider_index].get_num_new_matched_tokens(
+                request, num_computed_tokens
+            )
+            if tokens is not None and tokens > 0:
+                self._requests_to_connector[request.request_id] = provider_index
+            return tokens, load_async
+
         # Recompute offload may contain an unhashed partial block that other
         # prefix-cache connectors cannot restore. Give its request state
         # priority regardless of connector ordering.

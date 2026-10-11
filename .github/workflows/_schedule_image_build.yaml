@@ -83,7 +83,7 @@ on:
         description: 'Memcache date'
         required: false
         type: string
-        default: '20260921.3'
+        default: '20260923.6'
       memfabric_version:
         description: 'Memfabric version'
         required: false
@@ -93,17 +93,17 @@ on:
         description: 'Memfabric date'
         required: false
         type: string
-        default: '20260921.3'
+        default: '20260923.6'
       torch_npu_version:
         description: 'Torch NPU version'
         required: false
         type: string
-        default: '26.1.0'
+        default: '26.2.0'
       torch_npu_date:
         description: 'Torch NPU date'
         required: false
         type: string
-        default: '20260725.3'
+        default: '20260926.5'
       cann_swr_url:
         description: 'CANN base image URL (SWR registry)'
         required: false
@@ -144,11 +144,6 @@ on:
         required: false
         type: string
         default: ''
-      aptmirror:
-        description: 'APT mirror URL for Ubuntu (replaces archive.ubuntu.com / ports.ubuntu.com)'
-        required: false
-        type: string
-        default: 'http://cache-service.nginx-pypi-cache.svc.cluster.local:8081'
     secrets:
       SWR_USERNAME:
         description: 'SWR username for pushing images'
@@ -166,7 +161,6 @@ defaults:
 
 env:
   SWR_REPO: ${{ inputs.swr_repo }}
-  APTMIRROR: ${{ inputs.aptmirror }}
 
 jobs:
   build-push-digest:
@@ -191,9 +185,6 @@ jobs:
 
     - name: Install zstd
       run: |
-        if [ -n "$APTMIRROR" ]; then
-          sed -Ei "s@(ports|archive).ubuntu.com@${APTMIRROR#http://}@g" /etc/apt/sources.list
-        fi
         apt-get update -y
         apt-get install -y zstd
 
@@ -364,27 +355,14 @@ jobs:
         build-args: |
           CANN_QUAY_URL=${{ inputs.cann_swr_url }}
           CANN_VERSION=${{ inputs.cann_image_version }}
-          APTMIRROR=http://cache-service.nginx-pypi-cache.svc.cluster.local:8081
-          YUM_MIRROR=http://cache-service.nginx-pypi-cache.svc.cluster.local:8083
-          RUSTUP_DIST_SERVER=http://cache-service.nginx-pypi-cache.svc.cluster.local:8082/rustup
-          RUSTUP_UPDATE_ROOT=http://cache-service.nginx-pypi-cache.svc.cluster.local:8082/rustup/rustup
-          # crates.io sparse index mirror (port 8085 must be added to the
-          # nginx-pypi-cache Deployment, see cratescache.conf). Without it,
-          # cargo falls back to public crates.io and times out.
-          CRATES_IO_INDEX=http://cache-service.nginx-pypi-cache.svc.cluster.local:8085/index/
-          PIP_INDEX_URL=http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-          PIP_TRUSTED_HOST=cache-service.nginx-pypi-cache.svc.cluster.local
-          PYTORCH_INDEX_URL=http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu
-          ASCEND_INDEX_URL=http://cache-service.nginx-pypi-cache.svc.cluster.local/ascend/repos/pypi
-          GIT_PROXY=https://gh-proxy.test.osinfra.cn/
           COMPILE_CUSTOM_KERNELS=${{ steps.cache-csrc.outputs.cache-hit == 'true' && '0' || '1' }}
           ${{ inputs.vllm_commit != '' && !startsWith(inputs.vllm_commit, 'v') && format('VLLM_COMMIT={0}', inputs.vllm_commit) || '' }}
           ${{ startsWith(inputs.vllm_commit, 'v') && format('VLLM_TAG={0}', inputs.vllm_commit) || '' }}
           BUILD_TYPE=${{ inputs.build_type || 'release' }}
           MEMCACHE_VERSION=${{ inputs.memcache_version || '1.3.0' }}
-          MEMCACHE_DATE=${{ inputs.memcache_date || '20260921.3' }}
+          MEMCACHE_DATE=${{ inputs.memcache_date || '20260923.6' }}
           MEMFABRIC_VERSION=${{ inputs.memfabric_version || '1.3.0' }}
-          MEMFABRIC_DATE=${{ inputs.memfabric_date || '20260921.3' }}
+          MEMFABRIC_DATE=${{ inputs.memfabric_date || '20260923.6' }}
           TORCH_NPU_VERSION=${{ inputs.torch_npu_version || '26.1.0' }}
           TORCH_NPU_DATE=${{ inputs.torch_npu_date || '20260725.3' }}
           TRITON_ASCEND_VERSION=${{ inputs.triton_ascend_version || '' }}
