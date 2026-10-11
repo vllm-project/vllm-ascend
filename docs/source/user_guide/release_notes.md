@@ -2,7 +2,7 @@
 
 ## v0.30.0rc1 - 2026.10.11
 
-This is the first release candidate of vLLM Ascend v0.30.0, a model-focused release built on the v0.29 release line and aligned with upstream vLLM v0.30.0 via the main2main pipeline. This release focuses on four flagship models: **DeepSeek V4.1**, **GLM-5.3**, **GLM-5.3-Flash**, and **Qwen3.8-27B**, and hardens the shared execution stacks they rely on (Model Runner V2, PCP/DCP parallelism, KV Cache Pool, and speculative decoding). Model or hardware combinations outside the scope declared below are not part of the release claims. Please follow the [official documentation](https://docs.vllm.ai/projects/ascend/en/v0.30.0/) to get started.
+This is vLLM Ascend v0.30.0rc1, a model-focused release built on the v0.29 release line and aligned with upstream vLLM v0.30.0 via the main2main pipeline. This release focuses on four flagship models: **DeepSeek V4.1**, **GLM-5.3**, **GLM-5.3-Flash**, and **Qwen3.8-27B**, and hardens the shared execution stacks they rely on (Model Runner V2, PCP/DCP parallelism, KV Cache Pool, and speculative decoding). Model or hardware combinations outside the scope declared below are not part of the release claims. Please follow the [official documentation](https://docs.vllm.ai/projects/ascend/en/v0.30.0rc1/) to get started.
 
 ### Highlights
 
@@ -91,7 +91,7 @@ This is the first release candidate of vLLM Ascend v0.30.0, a model-focused rele
 ### Dependencies
 
 - vLLM: v0.30.0
-- CANN: 9.1.0
+- CANN: 9.2.0
 - Ascend HDK: 26.0.RC1
 - PyTorch / torch_npu: 2.10.0 / 2.10.0.post4
 - Triton Ascend: 3.2.2
