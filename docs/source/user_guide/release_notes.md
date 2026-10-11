@@ -45,6 +45,12 @@ This is the official release of vLLM Ascend v0.30.0, building on the v0.29 relea
 - Used FullAttn TP parallelism when DCP > 1 and num_kv_heads > 1 in P/D deployment. [#17524](https://github.com/vllm-project/vllm-ascend/pull/17524)
 - Added mapped pinned CPU views for MRV2 UVA buffers and aligned spec-decode draft LM head with lmhead TP. [#17680](https://github.com/vllm-project/vllm-ascend/pull/17680) [#15079](https://github.com/vllm-project/vllm-ascend/pull/15079)
 - Used physical KV block size for DFlash DCP slots. [#17717](https://github.com/vllm-project/vllm-ascend/pull/17717)
+- Added DeepSeek V4.1 PCP support. [#17992](https://github.com/vllm-project/vllm-ascend/pull/17992)
+- Added EPLB support for Kimi K3 and its MTP draft model. [#17835](https://github.com/vllm-project/vllm-ascend/pull/17835)
+- Added Mooncake V2 KV receive failure handling in P/D disaggregation. [#18146](https://github.com/vllm-project/vllm-ascend/pull/18146)
+- Allowed probabilistic draft sampling with MRV2 PCP. [#18086](https://github.com/vllm-project/vllm-ascend/pull/18086)
+- Unified the MLA prolog and connected DCP current KV. [#17615](https://github.com/vllm-project/vllm-ascend/pull/17615)
+- Added grouped matmul SiTU quant fusion and integrated A3 GMM dequant SiTU quant fusion in MoE. [#17364](https://github.com/vllm-project/vllm-ascend/pull/17364) [#16655](https://github.com/vllm-project/vllm-ascend/pull/16655)
 
 ### Performance
 
@@ -71,6 +77,11 @@ This is the official release of vLLM Ascend v0.30.0, building on the v0.29 relea
 - Used FP16 gate projection for MoE routing on 310P. [#17669](https://github.com/vllm-project/vllm-ascend/pull/17669)
 - Skipped unused device metadata copies for GDN fused prefill and read strided Kimi gated norm inputs directly. [#16887](https://github.com/vllm-project/vllm-ascend/pull/16887) [#17677](https://github.com/vllm-project/vllm-ascend/pull/17677)
 - Optimized DeepSeek-V4 VL embed_input_ids to remove per-step copies. [#16671](https://github.com/vllm-project/vllm-ascend/pull/16671)
+- Optimized the DeepSeek V4 TurboQuant framework path by sharing transform tensors, caching KV plans, and fusing scale correction and cache packing. [#18037](https://github.com/vllm-project/vllm-ascend/pull/18037)
+- Released dead W8A8 fp32 MoE scales under MegaMoe. [#17105](https://github.com/vllm-project/vllm-ascend/pull/17105)
+- Prepared Triton prefill state-copy plans for KDA and widened Mamba temporal postprocess state copies. [#17614](https://github.com/vllm-project/vllm-ascend/pull/17614) [#17260](https://github.com/vllm-project/vllm-ascend/pull/17260)
+- Used zero-block cat padding for shared-expert token pads in MoE. [#17577](https://github.com/vllm-project/vllm-ascend/pull/17577)
+- Accepted optional group_index in the dequant_situ_quant BF16 path. [#17570](https://github.com/vllm-project/vllm-ascend/pull/17570)
 
 ### Bug Fixes
 
@@ -109,6 +120,25 @@ This is the official release of vLLM Ascend v0.30.0, building on the v0.29 relea
 - Capped Ascend V2 parallel-draft dummy requests, fixed speculative PP CPU token counts for FIA, and preserved replicated draft dummy metadata during graph capture. [#17746](https://github.com/vllm-project/vllm-ascend/pull/17746) [#17675](https://github.com/vllm-project/vllm-ascend/pull/17675) [#17747](https://github.com/vllm-project/vllm-ascend/pull/17747)
 - Disabled EPLB for PCP-only replicated drafts and corrected the `NZ` flag with `is_tensor_nz` check for MoE gate weights in xlite. [#17959](https://github.com/vllm-project/vllm-ascend/pull/17959) [#17627](https://github.com/vllm-project/vllm-ascend/pull/17627)
 - Synchronized MemCache init in KV Pool. [#17289](https://github.com/vllm-project/vllm-ascend/pull/17289)
+- Zeroed static KV buffers after cudagraph capture. [#17659](https://github.com/vllm-project/vllm-ascend/pull/17659)
+- Rejected legacy DSA-CP with Model Runner V2. [#18206](https://github.com/vllm-project/vllm-ascend/pull/18206)
+- Fixed E8M0 scale dtype and missing activation kwargs for CANN MegaMoE. [#18157](https://github.com/vllm-project/vllm-ascend/pull/18157) [#18137](https://github.com/vllm-project/vllm-ascend/pull/18137)
+- Handled hybrid cache views in preempt offload. [#18140](https://github.com/vllm-project/vllm-ascend/pull/18140)
+- Defined draft token mapping for full-vocabulary DSpark models and handled DSpark backends without TurboQuant. [#18182](https://github.com/vllm-project/vllm-ascend/pull/18182) [#18183](https://github.com/vllm-project/vllm-ascend/pull/18183)
+- Applied DeepSeek-V4 attention sinks through the weight loader. [#16958](https://github.com/vllm-project/vllm-ascend/pull/16958)
+- Used a 64-token kernel minimum for MiniMax-M3 FP8 KV. [#18125](https://github.com/vllm-project/vllm-ascend/pull/18125)
+- Sized DFlash query buffers for ACL graph padding. [#17379](https://github.com/vllm-project/vllm-ascend/pull/17379)
+- Removed a leftover debug log in QSFA tiling. [#18110](https://github.com/vllm-project/vllm-ascend/pull/18110)
+- Pointed users at the recipe fix when o_proj capacity is exceeded. [#18126](https://github.com/vllm-project/vllm-ascend/pull/18126)
+- Made the DSA block size a Triton constexpr object. [#18079](https://github.com/vllm-project/vllm-ascend/pull/18079)
+- Preserved PIECEWISE dummy query widths with DP and MTP. [#18038](https://github.com/vllm-project/vllm-ascend/pull/18038)
+- Supported encoder-decoder model state on MRV2. [#17979](https://github.com/vllm-project/vllm-ascend/pull/17979)
+- Avoided a current-config lookup in MiniMax-M3 MRV2 forward. [#17994](https://github.com/vllm-project/vllm-ascend/pull/17994)
+- Normalized GQA tuples and registered strided cache spans in KV cache. [#17934](https://github.com/vllm-project/vllm-ascend/pull/17934)
+- Aligned MLA DCP DSpark draft metadata. [#17580](https://github.com/vllm-project/vllm-ascend/pull/17580)
+- Dropped MRv1 routed-experts capture and kept MRV2 startable. [#17315](https://github.com/vllm-project/vllm-ascend/pull/17315)
+- Marked tilingData as const in CompressorMetadataKernel. [#17463](https://github.com/vllm-project/vllm-ascend/pull/17463)
+- Avoided CPP validation when building PP=1 draft configs. [#17381](https://github.com/vllm-project/vllm-ascend/pull/17381)
 
 ### Documentation
 
@@ -118,17 +148,23 @@ This is the official release of vLLM Ascend v0.30.0, building on the v0.29 relea
 - Added GLM-5.3-Flash PD / KV cache pool deployment guide and GLM-5.3-Flash A2 PD deployment guide. [#17773](https://github.com/vllm-project/vllm-ascend/pull/17773) [#17946](https://github.com/vllm-project/vllm-ascend/pull/17946)
 - Updated MiniMax-M3 A3 PD serving configurations. [#17982](https://github.com/vllm-project/vllm-ascend/pull/17982)
 - Updated the PCP feature compatibility table and documented serving and runtime LoRA updates. [#18050](https://github.com/vllm-project/vllm-ascend/pull/18050) [#17802](https://github.com/vllm-project/vllm-ascend/pull/17802)
+- Updated the KV pool format documentation. [#17473](https://github.com/vllm-project/vllm-ascend/pull/17473)
+- Added clean rebuild guidance after CANN version changes. [#18215](https://github.com/vllm-project/vllm-ascend/pull/18215)
+- Removed the flashcomm environment variable from docs. [#17981](https://github.com/vllm-project/vllm-ascend/pull/17981)
+- Adjusted the order of the deployment guide and updated the AIDD. [#17736](https://github.com/vllm-project/vllm-ascend/pull/17736) [#17733](https://github.com/vllm-project/vllm-ascend/pull/17733)
 
 ### Deprecation & Breaking Changes
 
 - Bundled KDA operators (causal conv, GDN state, gate cumsum) are replaced by the external flash-linear-attention-npu (fla_npu) package. [#17664](https://github.com/vllm-project/vllm-ascend/pull/17664) [#17727](https://github.com/vllm-project/vllm-ascend/pull/17727)
 - Custom operators conflicting with official CANN operator names are renamed with a `_vllm` suffix (KDA gate cumsum, GDN FwdH, sparse attention, quant lightning indexer) to avoid runtime name collisions; environments should install the corresponding operator packages. [#17998](https://github.com/vllm-project/vllm-ascend/pull/17998) [#17997](https://github.com/vllm-project/vllm-ascend/pull/17997) [#17937](https://github.com/vllm-project/vllm-ascend/pull/17937) [#17209](https://github.com/vllm-project/vllm-ascend/pull/17209)
 - MLA preprocess migrates to the ACLNN two-stage interface for NPU Graph. [#15182](https://github.com/vllm-project/vllm-ascend/pull/15182)
+- Removed the `store_kv_block` optimization and the `c8_enable_reshape_optim` switch. [#18128](https://github.com/vllm-project/vllm-ascend/pull/18128)
 
 ### Known Issues
 
 - Default Model Runner V2 for all configurations was reverted; MRV2 remains opt-in per configuration. [#17661](https://github.com/vllm-project/vllm-ascend/pull/17661)
 - MRV1 dirty block-table optimization was reverted on the release line. [#17470](https://github.com/vllm-project/vllm-ascend/pull/17470)
+- The resolved prefix retention config propagation was reverted. [#18029](https://github.com/vllm-project/vllm-ascend/pull/18029)
 - See the issue tracker for open accuracy investigations on DSV4.1 + DSA-CP ([#17729](https://github.com/vllm-project/vllm-ascend/issues/17729)) and GLM-5.3 P/D ([#17541](https://github.com/vllm-project/vllm-ascend/issues/17541)).
 
 ## v0.23.0.post1 - 2026.09.21
