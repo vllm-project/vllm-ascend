@@ -21,8 +21,8 @@ def test_profile_bound_covers_mixed_batches(pcp_size, decode_query_len):
     manager.dcp_world_size = 1
     manager._reorder_segments = lambda segments, *_: segments
     uses_computed_tokens = "num_computed_tokens" in inspect.signature(manager._get_rank_segments).parameters
-    for lengths in product(range(1, 8), repeat=3):
-        lengths = np.array(lengths)
+    for batch_lengths in product(range(1, 8), repeat=3):
+        lengths = np.array(batch_lengths)
         starts = np.concatenate(([0], np.cumsum(lengths)))
         bound = get_pcp_profile_num_tokens(int(lengths.sum()), pcp_size, 3, decode_query_len)
         for prefilling in product([False, True], repeat=3):
