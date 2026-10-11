@@ -1,9 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 
+from unittest.mock import Mock
+
 import pytest
 import torch
+from vllm.triton_utils import triton
 
+from vllm_ascend.ops.triton.msa import minimax_qknorm_rope_cache as fused_module
 from vllm_ascend.ops.triton.msa.minimax_qknorm_rope_cache import minimax_qknorm_rope_cache
 
 
@@ -259,3 +263,99 @@ def test_cache_graph_replay_updates_slots_and_preserves_strides(fp8, tokens):
     assert torch.equal(iq.cpu().float(), saved_iq.cpu().float())
     assert torch.equal(key.cpu().float(), saved_key.cpu().float())
     assert torch.equal(index.cpu().float(), saved_index.cpu().float())
+
+
+@pytest.fixture
+def isolated_fused_kernel(monkeypatch):
+    """Keep the real JIT cache isolated from tests that ran earlier in this process."""
+    original = fused_module._minimax_qknorm_rope_cache_kernel
+    kernel = triton.jit(original.fn, do_not_specialize=original.do_not_specialize)
+    compile_spy = Mock(wraps=kernel._do_compile)
+    monkeypatch.setattr(kernel, "_do_compile", compile_spy)
+    monkeypatch.setattr(fused_module, "_minimax_qknorm_rope_cache_kernel", kernel)
+    return kernel, compile_spy
+
+
+def jit_variant_count(kernel):
+    # Ascend's Triton 3.2 runtime uses cache[device]; newer Triton uses
+    # device_caches[device][0]. Count actual dispatch variants, not disk files.
+    if hasattr(kernel, "device_caches"):
+        return sum(len(entry[0]) for entry in kernel.device_caches.values())
+    return sum(len(cache) for cache in kernel.cache.values())
+
+
+def make_compile_case(tokens=192, actual=192, blocks=64, layout="dense", q_heads=8):
+    """Allocate aligned inputs while varying one explicit layout attribute."""
+    hd, block_size = 128, 128
+    main_width = (q_heads + 2) * hd
+    separate = layout != "packed"
+    width = main_width if separate else main_width + 2 * hd
+    main = torch.randn((tokens, width + (32 if layout == "input" else 0)), device="npu", dtype=torch.bfloat16)
+    main = main[:, :width]
+    index = torch.randn((tokens, 2 * hd + (32 if layout == "index_input" else 0)), device="npu", dtype=main.dtype)
+    index = index[:, : 2 * hd] if separate else None
+    cs = torch.randn((1024, 64 + (16 if layout == "rope" else 0)), device="npu", dtype=main.dtype)[:, :64]
+    step = 2 if layout == "positions" else 1
+    positions = torch.arange(tokens * step, device="npu", dtype=torch.int64)[::step]
+    weights = [torch.zeros(hd, device="npu", dtype=main.dtype) for _ in range(4)]
+    key = torch.zeros((blocks, block_size + (1 if layout == "key" else 0), 1, hd), device="npu", dtype=main.dtype)
+    value = torch.zeros((blocks, block_size + (1 if layout == "value" else 0), 1, hd), device="npu", dtype=main.dtype)
+    cache = torch.zeros(
+        (blocks, block_size + (1 if layout == "index_cache" else 0), hd), device="npu", dtype=main.dtype
+    )
+    key, value, cache = key[:, :block_size], value[:, :block_size], cache[:, :block_size]
+    # Deliberately give padding tokens valid slots. NUM_SLOTS, rather than -1
+    # padding, must suppress their writes when the runtime scalar changes.
+    slots = torch.arange(blocks * block_size - tokens, blocks * block_size, device="npu", dtype=torch.int64)
+    args = [main, cs, positions, *weights, key, value, cache, slots, slots, actual, q_heads, 1, 1, 1e-6]
+    return args, {"index_packed": index}
+
+
+@torch.inference_mode()
+def test_request_sizes_reuse_one_compiled_variant(isolated_fused_kernel):
+    kernel, compile_spy = isolated_fused_kernel
+    args, kwargs = make_compile_case()
+    minimax_qknorm_rope_cache(*args, **kwargs)
+    torch.npu.synchronize()
+    assert jit_variant_count(kernel) == compile_spy.call_count == 1
+    # These are three independent sweeps, not a parametrized test with a fresh
+    # runtime cache per case. Include 0/1 and aligned/unaligned scalar values.
+    cases = [(n, n, 64) for n in (1, 4, 8, 16, 32, 64, 128, 192, 256, 512)]
+    cases += [(192, n, 64) for n in (0, 1, 4, 15, 16, 17, 31, 32, 127, 191, 192)]
+    cases += [(192, 192, n) for n in (3, 64, 5392, 8192)]
+    for tokens, actual, blocks in cases:
+        args, kwargs = make_compile_case(tokens, actual, blocks)
+        minimax_qknorm_rope_cache(*args, **kwargs)
+        torch.npu.synchronize()
+        assert jit_variant_count(kernel) == 1, (tokens, actual, blocks)
+        assert compile_spy.call_count == 1, (tokens, actual, blocks)
+        # V has no norm/RoPE rounding: exact equality also verifies that each
+        # invocation used the new runtime NUM_SLOTS instead of the warmup value.
+        written = args[8].reshape(-1, 128)[args[10]]
+        expected = torch.zeros_like(written)
+        expected[:actual] = args[0][:actual, -128:]
+        assert torch.equal(written, expected), (tokens, actual, blocks)
+        for cache in (args[7], args[9]):
+            assert torch.count_nonzero(cache.reshape(-1, 128)[args[10][actual:]]).item() == 0
+    print(f"dynamic sweeps: {len(cases)} cases, variants=1, compile_entries=1")
+
+
+@torch.inference_mode()
+def test_layout_variants_compile_once_then_reuse(isolated_fused_kernel):
+    kernel, compile_spy = isolated_fused_kernel
+    layouts = ("dense", "input", "index_input", "positions", "rope", "key", "value", "index_cache", "packed")
+    for count, layout in enumerate(layouts, 1):
+        args, kwargs = make_compile_case(layout=layout)
+        minimax_qknorm_rope_cache(*args, **kwargs)
+        torch.npu.synchronize()
+        assert jit_variant_count(kernel) == count, layout
+        assert compile_spy.call_count == count, layout
+    # Once every layout is warm, changing request lengths and revisiting layouts
+    # must not compile again. Layout changes intentionally remain specialized.
+    for layout in reversed(layouts):
+        args, kwargs = make_compile_case(tokens=32, actual=17, blocks=3, layout=layout)
+        minimax_qknorm_rope_cache(*args, **kwargs)
+        torch.npu.synchronize()
+        assert jit_variant_count(kernel) == len(layouts), layout
+        assert compile_spy.call_count == len(layouts), layout
+    print(f"layout sweep: variants={len(layouts)}, revisit_compile_entries=0")
