@@ -19,6 +19,7 @@
 
 from collections.abc import Iterator
 from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -39,6 +40,9 @@ from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_shard
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 
 
 @dataclass(frozen=True)
@@ -261,16 +265,31 @@ class AscendPCPManager(PCPManager):
             raise NotImplementedError("MRV2 PCP supports FULL_DECODE_ONLY CUDA graphs only.")
 
     def get_global_graph_num_reqs(self, batch_desc: BatchExecutionDescriptor) -> int | None:
-        """Global request capacity of a sharded FULL decode graph, if any.
-
-        Dispatch sizes the graph for the largest rank-local batch, while the
-        global batch keeps every request for cache updates and sampling.
-        """
+        """Global request capacity of a sharded FULL decode graph, if any."""
         if not self.is_decode_sharded or batch_desc.cg_mode != CUDAGraphMode.FULL:
             return None
-        # validate_config only allows FULL_DECODE_ONLY, whose batches are uniform.
         assert batch_desc.num_reqs is not None and batch_desc.uniform_token_count is not None
         return self._get_global_graph_num_reqs(batch_desc.num_reqs, batch_desc.uniform_token_count)
+
+    def _partition_speculative_batch_compat(
+        self,
+        global_batch: AscendInputBatch,
+        batch_desc: BatchExecutionDescriptor,
+    ) -> AscendInputBatch:
+        """Adapt speculative batches until upstream PCP supports them natively."""
+        global_draft_counts = global_batch.num_draft_tokens_per_req
+        if global_draft_counts is None:
+            raise RuntimeError("PCP speculative decoding requires per-request draft token counts.")
+        if np.any(global_draft_counts[global_batch.is_prefilling_np] != 0):
+            raise NotImplementedError("PCP speculative decoding does not support draft tokens on prefill requests.")
+        non_spec_batch = replace(global_batch, num_draft_tokens=0, num_draft_tokens_per_req=None)
+        try:
+            local_batch = super().partition_batch(non_spec_batch, batch_desc)
+        finally:
+            self._global_batch = global_batch
+        assert isinstance(local_batch, AscendInputBatch)
+        return local_batch
+
 
     def _get_global_graph_num_reqs(self, num_local_reqs: int, query_len: int) -> int:
         assert self.global_input_buffers is not None
@@ -296,18 +315,15 @@ class AscendPCPManager(PCPManager):
     def partition_batch(
         self,
         input_batch: AscendInputBatch,
-        padded_num_tokens: int | None = None,
-        padded_num_reqs: int | None = None,
+        batch_desc: "BatchExecutionDescriptor",
     ) -> AscendInputBatch:
         """Partition the batch and update Ascend-specific local metadata."""
         global_batch = input_batch
-        # A sharded decode graph is sized per rank, so upstream can pad the
-        # local requests. Replicated decode graphs are padded below instead.
-        local_batch = super().partition_batch(
-            global_batch,
-            padded_num_tokens=padded_num_tokens,
-            padded_num_reqs=padded_num_reqs if self.is_decode_sharded else None,
-        )
+        padded_num_reqs = self.get_global_graph_num_reqs(batch_desc)
+        if global_batch.num_draft_tokens > 0:
+            local_batch = self._partition_speculative_batch_compat(global_batch, batch_desc)
+        else:
+            local_batch = super().partition_batch(global_batch, batch_desc)
         assert isinstance(local_batch, AscendInputBatch)
         self._pad_hidden_restore_idx(global_batch)
         if not self.is_decode_sharded:
@@ -386,7 +402,7 @@ class AscendPCPManager(PCPManager):
         graph_num_reqs = (
             global_batch.num_tokens_after_padding if is_full_decode_graph else global_batch.num_reqs_after_padding
         )
-        # The base PCP manager may already honor ``padded_num_tokens`` while
+        # The base PCP manager may already honor the descriptor's token count while
         # leaving request-shaped metadata at the actual request count. Pad when
         # either extent is still short so the runtime metadata matches the fixed
         # graph capture layout.

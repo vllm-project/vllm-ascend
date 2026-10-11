@@ -89,16 +89,20 @@ def test_target_exports_residual_entering_selected_layers(monkeypatch):
         def hc_collapse(hidden, pre_mix):
             return hidden.mean(dim=1)
 
-    model = SimpleNamespace(
-        hc_mult=4,
-        needs_moe_input_ids=False,
-        _mtp_hidden_buffer=None,
-        prepare_engram=lambda input_ids, positions: ({}, torch.empty(0, dtype=torch.bool)),
-        aux_hidden_state_layers=(1, 3),
-        shared_attention_state=SimpleNamespace(reset=lambda: None),
-        layers=[Layer(i) for i in range(3)],
-        norm=lambda hidden: hidden,
-    )
+    model = DeepseekV41Model.__new__(DeepseekV41Model)
+    torch.nn.Module.__init__(model)
+    model.hc_mult = 4
+    model._mtp_hidden_buffer = None
+    model.start_layer = 0
+    model.end_layer = 3
+    model.decoder_replay_start = 3
+    model.decoder_replay_layers = None
+    model.use_sequence_parallel = False
+    model.needs_moe_input_ids = False
+    model.aux_hidden_state_layers = (1, 3)
+    model.shared_attention_state = SimpleNamespace(reset=lambda: None)
+    model.layers = [Layer(i) for i in range(3)]
+    model.norm = lambda hidden: hidden
     hidden = torch.arange(12, dtype=torch.float32).reshape(3, 4)
     output, aux = DeepseekV41Model.forward(
         model,

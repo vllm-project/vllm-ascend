@@ -40,7 +40,7 @@ from vllm.v1.attention.backends.registry import (  # type: ignore
 )
 from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec, KVCacheSpec
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
@@ -144,7 +144,7 @@ class AscendAttentionBackend(AttentionBackend):
                 cache[dst_indices] = cache[src_indices]
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int]:
+    def get_supported_kernel_block_sizes(kv_cache_spec: KVCacheSpec | None = None) -> list[int]:
         if is_minimax_m3_fp8_kv_cache(get_current_vllm_config_or_none()):
             # Keep 128 as a common kernel block with M3 sparse/indexer caches.
             return [MINIMAX_M3_FP8_KV_CACHE_BLOCK_SIZE, 128]
