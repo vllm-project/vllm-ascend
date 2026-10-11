@@ -776,6 +776,36 @@
 #       Remove this patch once upstream vLLM adds the terminal short-circuit
 #       to the outlines backend.
 #
+# ** 20a. File: platform/patch_swa_bounded_replay.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.core.sched.output.CachedRequestData` (new field `replay_start`)
+#   2. `vllm.v1.core.sched.scheduler.Scheduler._make_cached_request_data`
+#    Why:
+#       Sliding-window bounded replay (vLLM #56227) rebuilds the sliding-window KV
+#       of a prefix hit by recomputing the hit's last window, and tells the
+#       worker where that run begins through `NewRequestData.replay_start`.
+#       Upstream's V2 model runner folds resumed requests into that same
+#       new-request list, so one field covers them. The V1 runner resumes a
+#       preempted request through `CachedRequestData` instead, and a resumed
+#       request is exactly the one that can be rewound a second time --
+#       preemption clears the computed count, so readmission runs the prefix
+#       lookup again and re-sets the replay start. Without the field on that
+#       payload, the worker would not know to stop writing the replayed
+#       positions and would overwrite blocks still shared with every other
+#       request that hit the same prefix.
+#    How:
+#       Declare `replay_start` on the payload -- msgpack encodes only declared
+#       fields, so an attribute set after construction never crosses the process
+#       boundary -- and fill it from the resumed requests inside the single
+#       method upstream builds that payload in. The field list is redeclared at
+#       import time because msgspec caches it per type. Inert on a pin that
+#       predates the feature, which is probed rather than version-compared.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/56227
+#    Future Plan:
+#       Remove this patch once upstream carries the replay start on the V1
+#       resume path as well, i.e. once `CachedRequestData` declares the field.
+#
 # ** 21. File: platform/patch_torch_accelerator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `torch.accelerator.memory_stats`, `torch.accelerator.memory_reserved`,
@@ -1579,6 +1609,19 @@
 #       Ascend layouts, including segmented Conv/SSM storage, shared views and
 #       multiple kernel blocks per scheduler block. If #17451 is integrated,
 #       consolidate the duplicate runner rebind into one patch module.
+#
+#   3. `vllm.v1.worker.gpu.model_runner.dispatch_cg_and_sync_dp`
+#    Why:
+#       With sharded PCP decode, the dispatch token count is rank-local, but
+#       the runner still passes the global request count, so no uniform decode
+#       graph matches.
+#    How:
+#       When `is_pcp_decode_sharding_enabled()` holds, derive the request
+#       count from the local tokens and the uniform query length.
+#    Related PR (if no, explain why):
+#       No upstream PR yet; vLLM #52162 still passes the global request count.
+#    Future Plan:
+#       Remove once upstream dispatches sharded PCP decode with local counts.
 #
 # ** 34. File: platform/patch_vision.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

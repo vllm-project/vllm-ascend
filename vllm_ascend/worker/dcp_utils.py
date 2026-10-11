@@ -14,7 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import copy
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -120,19 +119,9 @@ class DCPManager:
             pin_memory=pin_memory,
         )
         self.mtp_slot_mapping: torch.Tensor | None = None
-        # MLA handles causality with history/current split attention.
+        # GQA and MLA use history/current split attention, so no
+        # per-request mask spanning the DCP-local cache is needed.
         self.dcp_mtp_attn_mask = None
-        if dcp_world_size > 1 and self.speculative_config and not vllm_config.model_config.use_mla:
-            self.dcp_mtp_attn_mask = CpuGpuBuffer(
-                (
-                    max_num_reqs,
-                    self.decode_threshold,
-                    vllm_config.model_config.max_model_len,
-                ),
-                dtype=torch.bool,
-                device=device,
-                pin_memory=pin_memory,
-            )
         self.async_rebuild_req_indices: np.ndarray | None = None
         self.async_rebuild_cu_num_tokens: np.ndarray | None = None
         self.async_rebuild_num_tokens = 0
@@ -624,43 +613,15 @@ class DCPManager:
         self,
         common_attn_metadata: Any,
         kv_cache_spec: Any,
-        seq_lens: torch.Tensor,
-        draft_index: int,
-        seq_lens_cpu: torch.Tensor | None = None,
     ) -> None:
-        """Prepare decode classification and backend-specific draft DCP metadata.
-
-        The proposer has already advanced the common sequence lengths for this
-        step. Publish their local CPU lengths for MLA; other backends still
-        use the per-step legacy DCP metadata below.
-        """
+        """Let builders consume the already-advanced per-step lengths."""
         if common_attn_metadata.is_prefilling is not None:
             common_attn_metadata.is_prefilling = torch.zeros_like(common_attn_metadata.is_prefilling)
 
-        if self._is_mla_kv_cache_spec(kv_cache_spec):
-            self.prepare_common_attn_metadata(common_attn_metadata)
-            # Do not let the first pass's query lengths override this decode
-            # step's query_start_loc_cpu and max_query_len in the shared split.
-            common_attn_metadata.context_parallel_metadata = None
-            return
-
-        dcp_metadata = common_attn_metadata.context_parallel_metadata
-        assert dcp_metadata is not None, "DCP metadata must be populated for speculative drafting."
-        dcp_metadata = copy.copy(dcp_metadata)
-        # Subsequent draft steps have one query per request; the per-step KV
-        # lengths already exclude future keys. The verify mask describes the
-        # previous multi-token batch and must not be reused here.
-        dcp_metadata.dcp_mtp_attn_mask = None
-        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
-        query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
-        dcp_metadata.query_lens_cpu = query_lens_cpu
-        dcp_metadata.max_query_len = int(query_lens_cpu.max().item()) if query_lens_cpu.numel() else 0
-
-        seq_lens_for_dcp = seq_lens_cpu if seq_lens_cpu is not None else seq_lens
-        local_seq_lens = self._get_dcp_local_seq_lens(seq_lens_for_dcp + draft_index + 1)
-        dcp_metadata.num_computed_tokens_of_dcp = local_seq_lens
-        dcp_metadata.draft_cp_seq_len = local_seq_lens[:, self.dcp_world_rank]
-        common_attn_metadata.context_parallel_metadata = dcp_metadata
+        self.prepare_common_attn_metadata(common_attn_metadata)
+        # Query layout and history belong to this step's builder, rather than
+        # the first pass's legacy DCP metadata.
+        common_attn_metadata.context_parallel_metadata = None
 
     def update_spec_decode_drafting_cp_metadata(
         self,
@@ -668,40 +629,37 @@ class DCPManager:
         kv_cache_spec: Any,
         seq_lens: torch.Tensor,
         draft_index: int,
-        seq_lens_cpu: torch.Tensor | None = None,
         attn_metadata_builder: Any | None = None,
     ) -> None:
         is_sfa_dcp = self._is_sfa_dcp_metadata_builder(attn_metadata_builder)
-        is_mla = self._is_mla_kv_cache_spec(kv_cache_spec)
-        if is_mla and not is_sfa_dcp:
-            assert attn_metadata.decode is not None, (
-                "MLA DCP speculative draft metadata must be classified as decode "
-                "before backend-specific metadata is finalized."
-            )
-            assert attn_metadata.decode.cp_seq_len is not None
+        if not is_sfa_dcp:
+            if self._is_mla_kv_cache_spec(kv_cache_spec):
+                assert attn_metadata.decode is not None, (
+                    "MLA DCP speculative draft metadata must be classified as decode "
+                    "before backend-specific metadata is finalized."
+                )
+                assert attn_metadata.decode.cp_seq_len is not None
+            else:
+                assert attn_metadata.decode is not None, (
+                    "GQA DCP speculative draft metadata must be classified as decode "
+                    "before backend-specific metadata is finalized."
+                )
+                assert attn_metadata.decode.cp_history_seq_len is not None
             return
 
-        seq_lens_for_dcp = seq_lens
-        # SFA DCP writes rank_seq_lens into a device buffer below, so compute it
-        # from the device seq_lens to avoid a CPU->NPU copy on the drafting path.
-        if not is_sfa_dcp and seq_lens_cpu is not None:
-            seq_lens_for_dcp = seq_lens_cpu
-        local_seq_lens = self._get_dcp_local_seq_lens(seq_lens_for_dcp + draft_index + 1)
+        # SFA updates its graph-stable device buffer without a CPU->NPU copy.
+        local_seq_lens = self._get_dcp_local_seq_lens(seq_lens + draft_index + 1)
         rank_seq_lens = local_seq_lens[:, self.dcp_world_rank]
-
-        if is_sfa_dcp:
-            dcp_context = attn_metadata.dcp_context
-            assert dcp_context is not None
-            target = dcp_context.seq_lens
-            rank_seq_lens = rank_seq_lens.to(
-                device=target.device,
-                dtype=target.dtype,
-                non_blocking=True,
-            )
-            target[: rank_seq_lens.shape[0]].copy_(rank_seq_lens, non_blocking=True)
-            target[rank_seq_lens.shape[0] :].fill_(0)
-        elif attn_metadata.decode_meta is not None:
-            attn_metadata.decode_meta.num_computed_tokens_of_dcp = local_seq_lens.numpy()
+        dcp_context = attn_metadata.dcp_context
+        assert dcp_context is not None
+        target = dcp_context.seq_lens
+        rank_seq_lens = rank_seq_lens.to(
+            device=target.device,
+            dtype=target.dtype,
+            non_blocking=True,
+        )
+        target[: rank_seq_lens.shape[0]].copy_(rank_seq_lens, non_blocking=True)
+        target[rank_seq_lens.shape[0] :].fill_(0)
 
     def generate_dcp_metadata(
         self,
@@ -735,69 +693,5 @@ class DCPManager:
             max_query_len=(int(query_lens_cpu[:num_reqs].max().item()) if num_reqs else 0),
         )
 
-        if self.speculative_config and not self.vllm_config.model_config.use_mla:
-            assert self.dcp_mtp_attn_mask is not None
-            if self.num_decode_reqs > 0:
-                decode_scheduled = num_scheduled_tokens[: self.num_decode_reqs]
-                if fixed_decode_seq_lens_cpu is not None:
-                    decode_computed = (fixed_decode_seq_lens_cpu[: self.num_decode_reqs] - decode_scheduled).tolist()
-                else:
-                    decode_computed = input_batch.num_computed_tokens_cpu[: self.num_decode_reqs].tolist()
-                mask = self.generate_mtp_attention_mask_for_decode(decode_computed, decode_scheduled)
-                self.dcp_mtp_attn_mask.np[: self.num_decode_reqs] = mask
-                self.dcp_mtp_attn_mask.copy_to_gpu(self.num_decode_reqs)
-            mask_count = self.num_decode_reqs if self.num_decode_reqs > 0 else num_reqs
-            metadata.dcp_mtp_attn_mask = self.dcp_mtp_attn_mask.gpu[:mask_count]
-
         self.long_seq_metadata = metadata
         return metadata, block_table_tensor
-
-    def generate_mtp_attention_mask_for_decode(
-        self,
-        decode_num_computed_tokens: list[int],
-        decode_num_scheduled_tokens: np.ndarray,
-        num_decode_reqs: int | None = None,
-    ) -> torch.Tensor:
-        """Build interleave-aware causal masks for DCP speculative decode."""
-        if num_decode_reqs is None:
-            num_decode_reqs = self.num_decode_reqs
-        interleave_size = self.vllm_config.parallel_config.cp_kv_cache_interleave_size
-        q_lens = torch.tensor(
-            decode_num_scheduled_tokens[:num_decode_reqs],
-            dtype=torch.int32,
-        )
-        histories = torch.tensor(decode_num_computed_tokens, dtype=torch.int32)
-        total_lens = histories + q_lens
-        k_lens = get_dcp_local_seq_lens(
-            total_lens,
-            dcp_size=self.dcp_world_size,
-            dcp_rank=self.dcp_world_rank,
-            cp_kv_cache_interleave_size=interleave_size,
-        )
-        valid = k_lens > 0
-        assert self.dcp_mtp_attn_mask is not None
-        output = self.dcp_mtp_attn_mask.cpu[:num_decode_reqs]
-        output.zero_()
-        if not valid.any():
-            return output
-
-        max_q = int(q_lens[valid].max().item())
-        max_k = int(k_lens[valid].max().item())
-        q_indices = torch.arange(max_q, dtype=torch.int32)
-        k_indices = torch.arange(max_k, dtype=torch.int32)
-        valid_q = valid[:, None] & (q_indices[None, :] < q_lens[:, None])
-        valid_k = valid[:, None] & (k_indices[None, :] < k_lens[:, None])
-        positions = histories[:, None] + q_indices[None, :]
-        inclusive_positions = positions + 1
-        local_q = get_dcp_local_seq_lens(
-            inclusive_positions,
-            dcp_size=self.dcp_world_size,
-            dcp_rank=self.dcp_world_rank,
-            cp_kv_cache_interleave_size=interleave_size,
-        )
-        upper = local_q - 1
-        # Before this rank's first key, upper is -1 and every local key is
-        # in the query's future, even if later queries have local context.
-        full_mask = (k_indices[None, None, :] > upper[:, :, None]) & valid_q[:, :, None] & valid_k[:, None, :]
-        output[:num_decode_reqs, :max_q, :max_k] = full_mask
-        return output

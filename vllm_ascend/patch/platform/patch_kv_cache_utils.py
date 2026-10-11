@@ -630,6 +630,30 @@ def _ascend_get_kv_cache_config_from_groups(
             prefix_cache_retention_interval=vllm_config.cache_config.prefix_cache_retention_interval,
         )
     kv_cache_config.kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+    speculative_config = getattr(vllm_config, "speculative_config", None)
+    if speculative_config is not None and speculative_config.method == "dspark":
+        from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import resident_mla_context_group_ids
+
+        # Upstream scheduler conversion keeps only the first spec in a uniform
+        # group, losing draft residency when target and draft share block IDs.
+        # Preserve the worker-derived ownership through that deepcopy. Remove
+        # this bridge once upstream KVCacheConfig carries per-layer ownership.
+        kv_cache_config.dspark_context_group_ids = resident_mla_context_group_ids(kv_cache_config.kv_cache_groups)
+        draft_only_group_ids = []
+        for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
+            group_spec = group.kv_cache_spec
+            specs = (
+                tuple(group_spec.kv_cache_specs.values())
+                if isinstance(group_spec, UniformTypeKVCacheSpecs)
+                else (group_spec,)
+            )
+            # Keep mixed target/draft groups in the ordinary target lookup.
+            # Empty PP-local layer names still carry the global group spec.
+            if specs and all(
+                isinstance(spec, MLAAttentionSpec) and spec.non_causal_multi_token_decode for spec in specs
+            ):
+                draft_only_group_ids.append(group_id)
+        kv_cache_config.dspark_draft_only_group_ids = tuple(draft_only_group_ids)
     return kv_cache_config
 
 

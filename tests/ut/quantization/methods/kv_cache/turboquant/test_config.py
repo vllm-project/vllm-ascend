@@ -5,12 +5,13 @@ import pytest
 import torch
 
 from vllm_ascend.quantization.methods.kv_cache.turboquant import config
-from vllm_ascend.utils import AscendDeviceType
 
 
 @pytest.fixture
 def runtime(monkeypatch):
-    monkeypatch.setattr(config, "get_ascend_device_type", lambda: AscendDeviceType.A3)
+    monkeypatch.setattr(
+        config, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda _capability: True)
+    )
     monkeypatch.setattr(config.ctypes, "CDLL", lambda _: SimpleNamespace(NnopbaseSupportTensorV2=lambda: True))
     return SimpleNamespace(
         cache_config=SimpleNamespace(cache_dtype="turboquant_4bit_nc"),
@@ -24,6 +25,9 @@ def runtime(monkeypatch):
                 qk_rope_head_dim=64,
                 index_topk=512,
                 num_attention_heads=64,
+                # DeepSeek V4 carries compress_ratios; it is what routes the
+                # config to the compressed-cache checks rather than the SFA ones.
+                compress_ratios=[4],
             ),
         ),
         parallel_config=SimpleNamespace(
@@ -81,7 +85,9 @@ def test_invalid_configuration_fails_early(runtime, path, value, message):
 
 
 def test_a5_is_rejected(runtime, monkeypatch):
-    monkeypatch.setattr(config, "get_ascend_device_type", lambda: AscendDeviceType.A5)
+    monkeypatch.setattr(
+        config, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda _capability: False)
+    )
     with pytest.raises(ValueError, match="A2/A3"):
         config.validate_turboquant(runtime)
 
@@ -100,7 +106,46 @@ def test_non_turboquant_configuration_is_unchanged(cache_dtype, monkeypatch):
     def unexpected_probe(*args):
         pytest.fail("Non-TurboQuant configuration probed TurboQuant capabilities")
 
-    monkeypatch.setattr(config, "get_ascend_device_type", unexpected_probe)
+    monkeypatch.setattr(config, "get_current_hardware_profile", unexpected_probe)
     monkeypatch.setattr(config.ctypes, "CDLL", unexpected_probe)
     config.validate_turboquant(runtime)
     assert vars(runtime) == {"cache_config": SimpleNamespace(cache_dtype=cache_dtype)}
+
+
+def _as_sfa_model(runtime):
+    """Reshape the DeepSeek V4 fixture into a GLM-style SFA model."""
+    hf = runtime.model_config.hf_text_config
+    del hf.compress_ratios
+    hf.model_type = "glm5_next_text"
+    hf.kv_lora_rank = 512
+    return runtime
+
+
+def test_sfa_model_is_not_rejected_by_the_deepseek_checks(runtime):
+    # Regression: the DeepSeek-only checks used to run for every TurboQuant
+    # config, so a GLM-style SFA model was refused before its own checks ran.
+    config.validate_turboquant(_as_sfa_model(runtime))
+
+
+def test_sfa_model_is_validated_against_the_sfa_dims(runtime):
+    # The SFA branch has to actually run, not just be reached.
+    _as_sfa_model(runtime).model_config.hf_text_config.kv_lora_rank = 256
+
+    with pytest.raises(ValueError, match="kv_lora_rank=512"):
+        config.validate_turboquant(runtime)
+
+
+def test_sfa_model_allows_context_parallelism(runtime):
+    # Only the compressed-cache path forbids DCP/PCP; the packed SFA cache works
+    # with context parallelism.
+    _as_sfa_model(runtime).parallel_config.decode_context_parallel_size = 2
+
+    config.validate_turboquant(runtime)
+
+
+def test_sfa_cache_accepts_the_v1_model_runner(runtime):
+    # The V1 runner builds the same packed SFA main cache spec; the compressed
+    # cache of the DeepSeek V4 path stays V2-only, as the case above asserts.
+    _as_sfa_model(runtime).use_v2_model_runner = False
+
+    config.validate_turboquant(runtime)

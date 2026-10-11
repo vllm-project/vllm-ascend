@@ -312,6 +312,8 @@ jobs:
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
+      needs.setup-vars.result == 'success' &&
+      needs.setup-vars.outputs.single_node != '[]' &&
       (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
     strategy:
       fail-fast: false
@@ -356,6 +358,8 @@ jobs:
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
+      needs.setup-vars.result == 'success' &&
+      needs.setup-vars.outputs.multi_card != '[]' &&
       (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
     strategy:
       fail-fast: false

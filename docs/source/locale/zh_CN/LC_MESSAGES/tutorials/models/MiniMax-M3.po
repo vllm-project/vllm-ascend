@@ -172,13 +172,6 @@ msgstr ""
 "`additional_config.enable_flashcomm1` 启用，而仅语言模型模式通过 `--language-model-only` "
 "启用。"
 
-msgid ""
-"`VLLM_ASCEND_ENABLE_FLASHCOMM1=1` is kept for compatibility, but "
-"`additional_config.enable_flashcomm1` is preferred."
-msgstr ""
-"`VLLM_ASCEND_ENABLE_FLASHCOMM1=1` 保留用于兼容性，但更推荐使用 "
-"`additional_config.enable_flashcomm1`。"
-
 msgid "## 6 Thinking and Parser Configuration"
 msgstr "## 6 思考与解析器配置"
 

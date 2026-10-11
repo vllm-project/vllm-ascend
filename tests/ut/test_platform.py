@@ -17,8 +17,10 @@ from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.platform import (
     NPUPlatform,
     _setup_compile_backend,
+    _validate_draft_decode_context_parallel_config,
     _validate_eplb_config,
     _validate_parallel_config,
+    _validate_pcp_dcp_config,
     _validate_routing_replay_config,
     _validate_sfa_dcp_kv_sp,
 )
@@ -121,6 +123,129 @@ def test_ascend_sequence_parallel_moe_supports_dp1(dp_size, tp_size, enable_ep, 
     )
 
     assert config.use_sequence_parallel_moe is expected
+
+
+@pytest.mark.parametrize(
+    "use_mla,pcp_size,dcp_size",
+    [
+        pytest.param(True, 2, 2, id="mla-equal"),
+        pytest.param(True, 2, 16, id="mla-full-tp-pcp"),
+        pytest.param(False, 2, 2, id="gqa-equal-2"),
+        pytest.param(False, 4, 4, id="gqa-equal-4"),
+        pytest.param(False, 1, 2, id="dcp-only"),
+        pytest.param(False, 2, 1, id="pcp-only"),
+        pytest.param(False, 1, 1, id="tp-only"),
+    ],
+)
+def test_validate_pcp_dcp_config_accepts_supported_sizes(use_mla, pcp_size, dcp_size):
+    # This guard owns PCP/DCP equality; Q/KV head geometry is validated elsewhere.
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(use_mla=use_mla),
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=pcp_size,
+            decode_context_parallel_size=dcp_size,
+        ),
+    )
+    _validate_pcp_dcp_config(config)
+
+
+@pytest.mark.parametrize(
+    "pcp_size,dcp_size",
+    [
+        pytest.param(2, 4, id="dcp-larger"),
+        pytest.param(4, 2, id="pcp-larger"),
+        pytest.param(2, 16, id="full-tp-pcp-rejected-for-gqa"),
+    ],
+)
+def test_validate_pcp_dcp_config_rejects_unsupported_sizes(pcp_size, dcp_size):
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(use_mla=False),
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=pcp_size,
+            decode_context_parallel_size=dcp_size,
+        ),
+    )
+    with pytest.raises(ValueError, match=rf"PCP\+DCP.*PCP={pcp_size}, DCP={dcp_size}"):
+        _validate_pcp_dcp_config(config)
+
+
+@pytest.mark.parametrize("dcp_size", [2, 16])
+def test_parallel_config_preserves_upstream_pcp_dcp_sizes(dcp_size):
+    from vllm.config.parallel import ParallelConfig
+
+    import vllm_ascend.patch.platform.patch_parallel_config  # noqa: F401
+
+    config = ParallelConfig(
+        tensor_parallel_size=8,
+        prefill_context_parallel_size=2,
+        decode_context_parallel_size=dcp_size,
+    )
+    assert config.decode_context_parallel_size == dcp_size
+
+
+@pytest.mark.parametrize("dcp_size", [4, 8])
+def test_parallel_config_rejects_partial_tp_pcp_groups(dcp_size):
+    from vllm.config.parallel import ParallelConfig
+
+    with pytest.raises(ValueError, match="valid DCP sizes"):
+        ParallelConfig(
+            tensor_parallel_size=8,
+            prefill_context_parallel_size=2,
+            decode_context_parallel_size=dcp_size,
+        )
+
+
+def test_pcp_dcp_rejects_unequal_sizes_for_gqa_draft():
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=8,
+            prefill_context_parallel_size=2,
+            decode_context_parallel_size=16,
+        ),
+        model_config=SimpleNamespace(
+            use_mla=True,
+            model_arch_config=SimpleNamespace(total_num_attention_heads=32),
+            get_total_num_kv_heads=lambda: 4,
+        ),
+        speculative_config=SimpleNamespace(
+            num_speculative_tokens_per_batch_size=None,
+            draft_model_config=SimpleNamespace(
+                use_mla=False,
+                model_arch_config=SimpleNamespace(total_num_attention_heads=32),
+                get_total_num_kv_heads=lambda: 8,
+            ),
+            draft_parallel_config=None,
+            draft_tensor_parallel_size=None,
+        ),
+    )
+    # MLA target validation is unchanged; its GQA draft must obey equal sizes.
+    _validate_pcp_dcp_config(config)
+    with pytest.raises(ValueError, match="to equal decode_context_parallel_size"):
+        _validate_draft_decode_context_parallel_config(config)
+
+
+def test_eagle3_gqa_pcp_dcp_skips_tp_only_head_limit():
+    draft_model_config = SimpleNamespace(
+        use_mla=False,
+        model_arch_config=SimpleNamespace(total_num_attention_heads=32),
+        get_total_num_kv_heads=lambda: 4,
+    )
+    speculative_config = SimpleNamespace(
+        num_speculative_tokens_per_batch_size=None,
+        draft_model_config=draft_model_config,
+        draft_parallel_config=None,
+        draft_tensor_parallel_size=None,
+    )
+    vllm_config = SimpleNamespace(
+        speculative_config=speculative_config,
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=4,
+            prefill_context_parallel_size=2,
+            decode_context_parallel_size=2,
+        ),
+    )
+
+    _validate_draft_decode_context_parallel_config(vllm_config)
 
 
 @pytest.mark.parametrize("model_role", ["target", "draft", "alias", "non_speculative"])
@@ -338,6 +463,7 @@ class TestNPUPlatform(TestBase):
         vllm_config.parallel_config.eplb_config = MagicMock(
             use_async=False,
             communicator="torch_gloo",
+            policy="stair",
         )
 
         with patch.dict("os.environ", {}, clear=True), patch("vllm_ascend.platform.logger.warning") as warning:
@@ -345,6 +471,23 @@ class TestNPUPlatform(TestBase):
 
         self.assertTrue(vllm_config.parallel_config.eplb_config.use_async)
         self.assertEqual(vllm_config.parallel_config.eplb_config.communicator, "torch_gloo")
+        self.assertNotIn("stair_config", vllm_config.additional_config.get("eplb_config", {}))
+        warning.assert_called_once()
+
+    def test_validate_eplb_config_keeps_explicit_hixl_when_forcing_async(self):
+        vllm_config = self.mock_vllm_config()
+        vllm_config.use_v2_model_runner = True
+        vllm_config.parallel_config.enable_eplb = True
+        vllm_config.parallel_config.eplb_config = MagicMock(
+            use_async=False,
+            communicator="hixl",
+        )
+
+        with patch.dict("os.environ", {}, clear=True), patch("vllm_ascend.platform.logger.warning") as warning:
+            _validate_eplb_config(vllm_config)
+
+        self.assertTrue(vllm_config.parallel_config.eplb_config.use_async)
+        self.assertEqual(vllm_config.parallel_config.eplb_config.communicator, "hixl")
         warning.assert_called_once()
 
     def test_validate_eplb_config_rejects_nccl_before_sync_normalization(self):
@@ -425,6 +568,19 @@ class TestNPUPlatform(TestBase):
             patch.dict("os.environ", {}, clear=True),
             self.assertRaisesRegex(ValueError, "got 'nixl'"),
         ):
+            _validate_eplb_config(vllm_config)
+
+    def test_validate_eplb_config_async_allows_hixl_communicator(self):
+        vllm_config = self.mock_vllm_config()
+        vllm_config.use_v2_model_runner = True
+        vllm_config.parallel_config.enable_eplb = True
+        vllm_config.parallel_config.enable_elastic_ep = False
+        vllm_config.parallel_config.eplb_config = MagicMock(
+            use_async=True,
+            communicator="hixl",
+        )
+
+        with patch.dict("os.environ", {}, clear=True):
             _validate_eplb_config(vllm_config)
 
     def test_validate_eplb_config_allows_load_collection_phase_with_dbo_and_spec_decode(
@@ -629,84 +785,6 @@ class TestNPUPlatform(TestBase):
 
         self.assertIsNone(vllm_config.compilation_config.max_cudagraph_capture_size)
         self.assertEqual(vllm_config.compilation_config.cudagraph_capture_sizes, [1, 2, 4])
-
-    def test_validate_indexer_pp_config_rejects_indexshare_partition(self):
-        indexer_types = ["full", "full", "full", "shared", "shared", "shared"]
-        indexer_types.extend(["full", "shared", "shared", "shared"] * 18)
-        vllm_config = TestNPUPlatform.mock_vllm_config()
-        vllm_config.parallel_config.pipeline_parallel_size = 2
-        vllm_config.model_config.hf_text_config = SimpleNamespace(
-            num_hidden_layers=78,
-            indexer_types=indexer_types,
-        )
-
-        with (
-            patch("vllm.envs.VLLM_PP_LAYER_PARTITION", None),
-            pytest.raises(ValueError, match="layer 39 uses a shared Indexer"),
-        ):
-            self.platform._validate_indexer_pp_config(vllm_config)
-
-    def test_validate_indexer_pp_config_accepts_aligned_partition(self):
-        vllm_config = TestNPUPlatform.mock_vllm_config()
-        vllm_config.parallel_config.pipeline_parallel_size = 2
-        vllm_config.model_config.hf_text_config = SimpleNamespace(
-            num_hidden_layers=8,
-            indexer_types=["full", "shared", "shared", "shared"] * 2,
-        )
-
-        with patch("vllm.envs.VLLM_PP_LAYER_PARTITION", None):
-            self.platform._validate_indexer_pp_config(vllm_config)
-
-    def test_validate_indexer_pp_config_rejects_index_cache_partition(self):
-        test_cases = (
-            (
-                2,
-                SimpleNamespace(
-                    num_hidden_layers=6,
-                    use_index_cache=True,
-                    index_topk_freq=4,
-                    index_skip_topk_offset=3,
-                ),
-                "layer 3 skips Top-K computation",
-            ),
-            (
-                3,
-                SimpleNamespace(
-                    num_hidden_layers=6,
-                    use_index_cache=True,
-                    index_topk_pattern="FFSFFS",
-                ),
-                "layer 2 skips Top-K computation",
-            ),
-        )
-
-        for pp_size, hf_text_config, error_match in test_cases:
-            with self.subTest(pp_size=pp_size, error_match=error_match):
-                vllm_config = TestNPUPlatform.mock_vllm_config()
-                vllm_config.parallel_config.pipeline_parallel_size = pp_size
-                vllm_config.model_config.hf_text_config = hf_text_config
-
-                with (
-                    patch("vllm.envs.VLLM_PP_LAYER_PARTITION", None),
-                    pytest.raises(ValueError, match=error_match),
-                ):
-                    self.platform._validate_indexer_pp_config(vllm_config)
-
-    @patch.object(
-        NPUPlatform,
-        "_validate_indexer_pp_config",
-        side_effect=ValueError("invalid Indexer PP partition"),
-    )
-    def test_check_and_update_config_validates_indexer_before_worker_start(
-        self,
-        mock_validate_indexer,
-    ):
-        vllm_config = TestNPUPlatform.mock_vllm_config()
-
-        with pytest.raises(ValueError, match="invalid Indexer PP partition"):
-            self.platform.check_and_update_config(vllm_config)
-
-        mock_validate_indexer.assert_called_once_with(vllm_config)
 
     def test_check_ascend_config_oproj_tp_requires_offload_connector(self):
         from vllm_ascend.platform import _check_ascend_config

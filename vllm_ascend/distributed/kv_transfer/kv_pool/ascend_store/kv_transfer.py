@@ -881,6 +881,11 @@ class KVCacheStoreBatch:
         self.done = threading.Event()
 
 
+# Poll interval for waiting on a specific request's queued save chunks
+# (released-block fence; keep it small so scheduling stays responsive).
+SAVE_REQUEST_POLL_INTERVAL_S = 0.001
+
+
 class KVCacheStoreSendingThread(KVTransferThread):
     def __init__(
         self,
@@ -931,6 +936,34 @@ class KVCacheStoreSendingThread(KVTransferThread):
             self.request_queue.put(request)
         self.request_queue.put(save_batch)
         return save_batch
+
+    def wait_for_requests_saved(self, req_ids: set[str] | None) -> None:
+        """Block until every queued save chunk of these requests completed.
+
+        Block-reuse fence: the scheduler frees a finished or preempted
+        request's blocks immediately, so before this step's forward may
+        reallocate them, all of that request's queued puts must drain. A
+        request never queues new puts after it finishes or is preempted, so
+        draining it once makes its blocks safe to reuse from then on.
+        """
+        if not req_ids:
+            return
+        pending = set(req_ids)
+        wait_start = time.perf_counter()
+        while True:
+            self.raise_if_failed()
+            with self.done_task_lock:
+                pending &= self.stored_requests.keys()
+                if not pending:
+                    break
+            time.sleep(SAVE_REQUEST_POLL_INTERVAL_S)
+        elapsed = time.perf_counter() - wait_start
+        logger.debug(
+            "Released-block KV save fence (%s) completed after waiting %.3f ms tp_rank=%d",
+            ",".join(sorted(req_ids))[:200],
+            elapsed * 1000,
+            self.tp_rank,
+        )
 
     def is_stored_request(self, req_id: str) -> bool:
         with self.done_task_lock:

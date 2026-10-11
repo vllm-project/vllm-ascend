@@ -245,7 +245,19 @@ Requirements:
 
 - use disaggregated Prefill/Decode deployment;
 - enable the feature only on Decode; and
-- use Model Runner V1.
+- use Model Runner V1 or V2 on Decode. Keep Decode at pipeline parallel size 1;
+  Prefill can use pipeline parallelism with the producer connector.
+
+MemFabric configuration-store ownership stays on Prefill, using the official
+transfer-engine initialization. No additional store-role or preconnection
+configuration is needed. Deploy the same connector protocol version on both
+sides, and validate actual remote KV reads rather than relying on `/health`.
+
+For the validated GLM-5.2 Prefill PP2 deployment on 16 NPUs, use DP1 × PP2 ×
+TP8, not DP2 × PP2 × TP8. Set `VLLM_PP_LAYER_PARTITION=38,40`: each stage
+must contain the full Indexer owner for its shared Indexer layers. A balanced
+39/39 partition is rejected by the existing stage-boundary guard; cross-stage
+TopK sharing is not supported. Decode remains DP2 × TP8 with PP size 1.
 
 Add the following options to the Decode launch command:
 
@@ -309,9 +321,10 @@ The fused path has these additional requirements:
 
 - The model must use `index_topk=2048` and a cache block size of `128`.
 - Let `Q_max = 1 + num_speculative_tokens`, or `1` without speculative decoding.
-  `Q_max` must be between `1` and `7`.
+  `Q_max` must be between `1` and `14`.
 - `topk_buffer_size` must be a multiple of `256`, at least `Q_max * 2048`,
-  and at most `16128`. The runtime allocates two additional tail blocks;
+  and at most `32512` (the largest aligned value within LIM's `32640` limit).
+  The runtime allocates two additional tail blocks;
   do not add them to this setting.
 - Keep `use_fused_overlap=false`; it cannot be combined with `fused_copy_sfa`.
 - Use BF16 for the main KV cache. Sparse SFA C8 is not supported.
@@ -323,8 +336,10 @@ The fused path has these additional requirements:
 | :--- | :--- | :--- |
 | No speculative decoding | 1 | 2048 |
 | MTP1 | 2 | 4096 |
+| MTP2 | 3 | 6144 |
 | MTP3 | 4 | 8192 |
 | MTP5 | 6 | 12288 |
+| DSpark8 | 9 | 18432 |
 
 For example, the following A3 Decode command uses GLM-5.2 W4A8 with DP2 TP8,
 MTP3, and `FULL_DECODE_ONLY` target graphs. Replace the model path and size
@@ -373,6 +388,54 @@ graph mode configured by `--compilation-config`; do not add a top-level
 disabled, and `keep_device_kv_cache=false` keeps the full main KV in the host
 pool. With DP2, the example reserves `2 * 128 = 256` GiB of host KV memory.
 
+Model Runner V2 uses the same sparse-offload configuration, including MTP and
+`fused_copy_sfa`: set `VLLM_USE_V2_MODEL_RUNNER=1`. For an eager V2 launch,
+replace the graph compilation option with a top-level `--enforce-eager`.
+
+### DSpark with Sparse Decode Offload
+
+GLM MLA DSpark requires Model Runner V2 on both Prefill and Decode. Configure
+the same draft checkpoint and speculative-token count on both nodes, for example:
+
+```bash
+VLLM_USE_V2_MODEL_RUNNER=1 vllm serve /path/to/target \
+    --speculative-config '{"method":"dspark","model":"/path/to/GLM-MLA-draft","num_speculative_tokens":8}' \
+    ...
+```
+
+Keep Prefill eager and disable local vLLM prefix caching on both nodes. Auxiliary capture
+layers are resolved from the draft checkpoint; no separate layer-ID setting is
+needed. Prefill projects the target's prompt features locally and writes its
+own draft KV. The SFA producer connector transfers those pages alongside target
+KV, and Decode waits for both transfers before decoding. Hidden features are
+not sent to Decode for prompt-KV reconstruction.
+
+The Prefill Memcache layerwise store can reuse external prefixes independently
+of the local prefix-caching switch. It saves draft KV under checkpoint-specific
+companion keys, without placing the live draft pages in target scratch buffers.
+A prefix is usable only when every target stage and every final-stage draft TP
+rank has saved it. Prefill restores draft pages into the new request's NPU block
+table, projects only the remaining prompt features, then transfers the completed
+target and draft KV to Decode. The final Eagle recomputation block is retained
+even on a complete store hit. Missing draft companions make the prefix a miss;
+load failures after lookup fail closed rather than using uninitialized draft KV.
+
+Enable sparse offload only on Decode, with the consumer connector and
+`fused_copy_sfa` configuration above. For draft8, set `topk_buffer_size` to at
+least `18432`; `20480` is an example with extra hot-cache capacity. These are
+kernel/layout bounds, not a draft-checkpoint whitelist or a guarantee that every
+width has been validated end to end. Both nodes must use the same cache block
+size. Remote DSpark draft-KV transfer does not support PCP or DCP.
+
+Only the target's main KV is offloaded to the host. The loaded draft supplies
+its cache-layer ownership, and its full context KV stays in device memory.
+Layerwise Prefill Offload excludes draft pages from its shared scratch pool.
+The paired prefix-store path also keeps draft save/load separate from target
+layer hooks, including when target buffers are not reused. Other store paths
+retain their original registration and addressing.
+Account for this context-dependent HBM cost when sizing long-context serving;
+target offload alone does not establish 1M-context DSpark support.
+
 ## 4. Start the P/D Proxy
 
 Start Prefill and Decode with the configurations above. After both nodes are
@@ -395,7 +458,8 @@ For multi-node deployment, advertise reachable addresses instead of
 
 - Shared-buffer Layerwise Prefill Offload requires Memcache and eager mode.
 - Context parallelism has not been validated with Layerwise Prefill Offload.
-- Sparse Decode Offload supports DP and TP; CP and PP are not supported.
+- Sparse Decode Offload supports DP and TP on Decode; CP and Decode-side PP
+  are not supported. Prefill-side PP is supported with the producer connector.
 - MemFabric is the only supported `SfaRemoteD2HConnector` transfer backend.
 - The MemFabric data-path protocol is selected by launch configuration instead
   of hardware detection: use `sdma` (default) or `device_rdma` on A3 series and

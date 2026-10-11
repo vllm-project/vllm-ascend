@@ -567,6 +567,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
 
     ```bash
     unset http_proxy https_proxy ftp_proxy
+    export VLLM_USE_V2_MODEL_RUNNER=1
 
     nic_name="xxxx"                 # NIC corresponding to local_ip
     local_ip="xxxx"                 # Prefill node IP
@@ -632,6 +633,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
 
     ```bash
     unset http_proxy https_proxy ftp_proxy
+    export VLLM_USE_V2_MODEL_RUNNER=1
 
     nic_name="xxxx"                 # NIC corresponding to local_ip
     local_ip="xxxx"                 # Decode node IP
@@ -669,7 +671,8 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
         --max-num-batched-tokens 32768 \
         --trust-remote-code \
         --quantization ascend \
-        --max-num-seqs 64 \
+        --max-num-seqs 128 \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --gpu-memory-utilization 0.92 \
         --limit-mm-per-prompt '{"image":1,"video":0}' \
         --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true}' \
@@ -929,14 +932,16 @@ Key Parameter Descriptions:
 
 **Prefill node-specific configurations:**
 
+- `--language-model-only` (optional): For text-only tests, add this flag as needed based on the available KV cache capacity to avoid reserving memory for multimodal processing. Follow the FLASHCOMM1 compatibility guidance in [Section 5.5](#55-multimodal-and-vit-dp-optional) when enabling this flag.
 - `--pipeline-parallel-size` (A3 Prefill: `2`): Splits the 60 MiniMax-M3 layers across two pipeline stages. A3 sets `VLLM_PP_LAYER_PARTITION=30,30` and also writes `pp_layer_partition` into the Mooncake extra config. The 950DT products launch uses `--pp-size 1` on both Prefill and Decode (no pipeline parallel), so no layer partition is needed.
 - `--enforce-eager`: Prefill nodes do not capture CUDA/ACL graphs.
 - `--speculative-config '{"method":"eagle3", ...}'`: Enables the `MiniMax-M3-EAGLE3-GQA` draft model. Do not replace this with GLM MTP options.
 
 **Decode node-specific configurations:**
 
+- `--language-model-only` (optional): For text-only tests, add this flag as needed based on the available KV cache capacity to avoid reserving memory for multimodal processing.
 - `"max_cudagraph_capture_size"` (optional, omitted by default): Limits the maximum decode batch size covered by ACL graph capture and the graph memory reserved for it; the program default is `512`. With EAGLE3 speculative decoding, each request is expanded to `1 + num_speculative_tokens` tokens in one decode step (`4` tokens when `num_speculative_tokens=3`). Since DP distributes requests per rank, the per-rank batch size matters: for example, with `DP2` and `--max-num-seqs 256`, each DP rank handles 128 requests, producing `4 × 128 = 512` tokens per step — exactly at the default limit. If concurrency rises to 257, one DP rank handles 129 requests, giving `4 × 129 = 516 > 512`; batches above 512 skip graph capture and fall back to eager execution, lowering decode throughput. In that case set `"max_cudagraph_capture_size":1024` in `--compilation-config` (e.g., `--compilation-config '{"max_cudagraph_capture_size":1024}'`). Because a larger capture size reserves additional NPU memory, the configurations in this tutorial keep the default; add this option only when your target concurrency requires it.
-- `--max-num-seqs 256`: Decode concurrency used by the verified 950DT products 1P1D launch. A3 uses `64`.
+- `--max-num-seqs 256`: Decode concurrency used by the verified 950DT products 1P1D launch. A3 uses `128`.
 
 **Mooncake KV transfer configuration (`--kv-transfer-config`):**
 
@@ -963,7 +968,7 @@ This section builds on [Section 5.3](#53-prefill-decode-disaggregation). Reuse t
 - `AscendStoreConnector` stores KV in the Mooncake KV Cache Pool so later Prefills with the same prefix can hit the pool instead of recomputing.
 - By default the Prefill node performs pool lookup, load, and write.
 
-For backend selection, `mooncake.json`, Mooncake Master, eviction, and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_guide/feature_guide/kv_pool.md). For the hardware/communication environment variables required by pooling, refer to [Environment Variables Description](../../user_guide/feature_guide/kv_pool.md#51-environment-variables-description). For MiniMax-specific issues, refer to [Chapter 10 FAQ](#10-faq).
+For backend selection, `mooncake.json`, Mooncake Master, eviction, and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md). For the hardware/communication environment variables required by pooling, refer to [Environment Variables Description](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md). For MiniMax-specific issues, refer to [Chapter 10 FAQ](#10-faq).
 
 **Compared with normal PD in Section 5.3, pay attention to these pooling-only requirements:**
 
@@ -973,7 +978,7 @@ For backend selection, `mooncake.json`, Mooncake Master, eviction, and tenant op
 | Mooncake Master | Not required | Must start `mooncake_master` before Decode / Prefill |
 | `mooncake.json` | Not required | Required on every rank; Prefill donates memory, Decode sets `global_segment_size=0` |
 | `engine_id` / `lookup_rpc_port` | Fixed example IDs are OK | **Must be unique per DP rank** (`37000/37100 + DP_RANK`) to avoid port / engine collisions |
-| Extra env | Section 5.3 `HCCL_*` only | Keep 5.3 env, then add pool fabric/UB exports from [kv_pool.md §5.1](../../user_guide/feature_guide/kv_pool.md#51-environment-variables-description) |
+| Extra env | Section 5.3 `HCCL_*` only | Keep 5.3 env, then add pool fabric/UB exports from [KV Cache Pool Deployment Guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md) |
 | Container mounts | 950DT needs `/etc/hixlep/` | Also mount `/etc/hccn.conf`; keep `/etc/hixlep/` on 950DT |
 | Startup order | Decode → Prefill → Proxy | **Mooncake Master → Decode → Prefill → Proxy** |
 | Verification | P→D KV transfer only | Also check Prefill pool lookup/get/put hits after a repeated-prefix warmup |
@@ -1040,7 +1045,7 @@ Decode `mooncake.json` on both platforms (same Master and `tenant_id`, no donate
 
 #### 5.4.2 Environment Variables
 
-Start from the Section 5.3 environment block (`HCCL_IF_IP`, `HCCL`/`GLOO`/`TP` socket IFNAME, `HCCL_BUFFSIZE`, `HCCL_OP_EXPANSION_MODE`, `PYTORCH_NPU_ALLOC_CONF`, `ASCEND_RT_VISIBLE_DEVICES`, and A3 Prefill `VLLM_PP_LAYER_PARTITION="30,30"`). Then add the pooling-required variables below. Choose the hardware/communication exports from [Environment Variables Description](../../user_guide/feature_guide/kv_pool.md#51-environment-variables-description) according to your machine and link type.
+Start from the Section 5.3 environment block (`HCCL_IF_IP`, `HCCL`/`GLOO`/`TP` socket IFNAME, `HCCL_BUFFSIZE`, `HCCL_OP_EXPANSION_MODE`, `PYTORCH_NPU_ALLOC_CONF`, `ASCEND_RT_VISIBLE_DEVICES`, and A3 Prefill `VLLM_PP_LAYER_PARTITION="30,30"`). Then add the pooling-required variables below. Choose the hardware/communication exports from [Environment Variables Description](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md) according to your machine and link type.
 
 Common pooling exports on every Prefill and Decode rank:
 
@@ -1071,6 +1076,7 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
 
     ```bash
     unset http_proxy https_proxy ftp_proxy
+    export VLLM_USE_V2_MODEL_RUNNER=1
 
     nic_name="xxxx"                 # NIC corresponding to local_ip
     local_ip="xxxx"                 # Prefill node IP
@@ -1156,6 +1162,7 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
 
     ```bash
     unset http_proxy https_proxy ftp_proxy
+    export VLLM_USE_V2_MODEL_RUNNER=1
 
     nic_name="xxxx"                 # NIC corresponding to local_ip
     local_ip="xxxx"                 # Decode node IP
@@ -1197,7 +1204,8 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
         --max-num-batched-tokens 32768 \
         --trust-remote-code \
         --quantization ascend \
-        --max-num-seqs 64 \
+        --max-num-seqs 128 \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --gpu-memory-utilization 0.92 \
         --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true}' \
         --speculative-config '{"method":"eagle3","model":"${EAGLE3_WEIGHT_PATH}","num_speculative_tokens":3}' \
@@ -1492,8 +1500,6 @@ FLASHCOMM1 and language-model-only mode should not be enabled at the same time f
 # Enable language-model-only mode.
 --language-model-only
 ```
-
-`VLLM_ASCEND_ENABLE_FLASHCOMM1=1` is kept for compatibility, but `additional_config.enable_flashcomm1` is preferred.
 
 ## 6 Thinking and Parser Configuration
 

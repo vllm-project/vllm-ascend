@@ -22,6 +22,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_attn_kv_plan import (
+    DsaAttnKvPlan,
     get_dsa_attn_kv_plan,
     is_a5_bf16_kv_enabled,
     write_dsa_cache,
@@ -67,7 +68,11 @@ if TYPE_CHECKING:
 
 if HAS_TRITON:
     from vllm_ascend.ops.triton.rms_norm import triton_q_rms  # noqa: F811
+    from vllm_ascend.ops.triton.spec_decode.dspark_swa_indices import (
+        build_dspark_swa_indices_triton,
+    )
 else:
+    build_dspark_swa_indices_triton = None  # type: ignore
     triton_q_rms = None  # type: ignore
 
 
@@ -457,6 +462,22 @@ def build_dspark_swa_indices(
         )
     if query_start_loc is None or seq_lens is None:
         raise ValueError("DSpark SWA query_start_loc and seq_lens must both be provided")
+
+    if (
+        use_logical_indices
+        and build_dspark_swa_indices_triton is not None
+        and query_start_loc.device.type == "npu"
+        and num_decode_tokens is not None
+        and indices_output is None
+        and buffer is None
+    ):
+        return build_dspark_swa_indices_triton(
+            query_start_loc,
+            seq_lens,
+            num_decode_tokens,
+            index_width,
+            window_size,
+        )
 
     query_lens = query_start_loc[1:] - query_start_loc[:-1]
     prefix_lens = seq_lens - query_lens
@@ -1121,7 +1142,11 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         dspark_swa_indices = None
         vision_swa_indices = None
         ori_win_left, ori_win_right = self.model_config.hf_config.sliding_window - 1, 0
-        if not has_prefill and not common_attn_metadata.causal:
+        if (
+            not has_prefill
+            and not common_attn_metadata.causal
+            and (self.compressor_ratio <= 1 or not is_turboquant(self.vllm_config))
+        ):
             # DSpark non-causal parallel drafting: every draft query attends to
             # the trailing context window plus the whole current draft block.
             # Not gated on the SAS metadata cache: the indices depend on the
@@ -1553,7 +1578,18 @@ class AscendDSAImpl(AttentionImplBase[Any]):
 
     enable_pcp_o_proj_weight_sharding = False
 
+    _oproj_send_buf: torch.Tensor
     turboquant: TurboQuantLatent | None = None
+    _tq_kv_plan: DsaAttnKvPlan | None = None
+
+    def get_kv_plan(self) -> DsaAttnKvPlan:
+        # Only TQ modules cache their fixed execution plan. Other cache modes
+        # retain the baseline planner and operator selection on every call.
+        if self.turboquant is None:
+            return get_dsa_attn_kv_plan(self.vllm_config, self.compress_ratio)
+        if self._tq_kv_plan is None:
+            self._tq_kv_plan = get_dsa_attn_kv_plan(self.vllm_config, self.compress_ratio)
+        return self._tq_kv_plan
 
     def __init__(
         self,
@@ -1584,7 +1620,9 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         self.window_size = window_size
         self.q_lora_rank = q_lora_rank
         self.compress_ratio = compress_ratio
-        self.turboquant = TurboQuantLatent() if is_turboquant(self.vllm_config) and compress_ratio == 4 else None
+        self.turboquant = (
+            TurboQuantLatent(legacy_hadamard=True) if is_turboquant(self.vllm_config) and compress_ratio == 4 else None
+        )
         self.softmax_scale = self.head_dim**-0.5
         self.support_fp8_attention = get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
 
@@ -1691,32 +1729,38 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         # before ACL graph capture (profiling run triggers it).
         pass
 
-    def _forward_o_proj(self, o_proj_input: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
-        num_tokens = o_proj_input.shape[0]
-        group_hidden_dim = o_proj_input.shape[1] * o_proj_input.shape[2] // self.n_local_groups
-        o_proj_input = o_proj_input.view(num_tokens, self.n_local_groups, group_hidden_dim)
-        # A5 (Ascend950) uses an FP8-quantized o_proj path (dynamic MX quant
-        # + quantized batch matmul). Preserve it as-is: it predates and is
-        # orthogonal to the OTP path below, so it must win first.
-        use_a5_quant_o_proj = self.support_fp8_attention and _has_weight_scale(self.wo_a)
-        if use_a5_quant_o_proj:
-            o = o_proj_input
-            o, swiglu_out_scale = torch_npu.npu_dynamic_mx_quant(o, dst_type=torch.float8_e4m3fn)
-            o = torch_npu.npu_transpose_quant_batchmatmul(
-                o,
+    def _wo_a_bmm(self, o_proj_input: torch.Tensor) -> torch.Tensor:
+        """Project grouped activations with FP8 or BF16, preserving the 3D layout."""
+        if self.support_fp8_attention and _has_weight_scale(self.wo_a):
+            o_proj_input, act_scale = torch_npu.npu_dynamic_mx_quant(o_proj_input, dst_type=torch.float8_e4m3fn)
+            return torch_npu.npu_transpose_quant_batchmatmul(
+                o_proj_input,
                 self.wo_a.weight,
                 dtype=torch.bfloat16,
                 bias=None,
                 group_sizes=(0, 0, 32),
-                x1_scale=swiglu_out_scale.view(torch.float8_e8m0fnu),
+                x1_scale=act_scale.view(torch.float8_e8m0fnu),
                 x2_scale=self.wo_a.weight_scale.view(torch.float8_e8m0fnu),
                 perm_x1=(1, 0, 2),
                 perm_x2=(0, 1, 2),
                 perm_y=(1, 0, 2),
             )
-            o = o.reshape(num_tokens, -1)
-            output[...] = self.wo_b(o)
-        elif oproj_tp_enable():
+        return torch_npu.npu_transpose_batchmatmul(
+            o_proj_input,
+            self.wo_a.weight,
+            bias=None,
+            scale=None,
+            perm_x1=(1, 0, 2),
+            perm_x2=(0, 1, 2),
+            perm_y=(1, 0, 2),
+            batch_split_factor=1,
+        )
+
+    def _forward_o_proj(self, o_proj_input: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
+        num_tokens = o_proj_input.shape[0]
+        group_hidden_dim = o_proj_input.shape[1] * o_proj_input.shape[2] // self.n_local_groups
+        o_proj_input = o_proj_input.view(num_tokens, self.n_local_groups, group_hidden_dim)
+        if oproj_tp_enable():
             oproj_group = get_otp_group()
             oproj_tp_size = oproj_group.world_size
             if self.n_local_groups % oproj_tp_size != 0:
@@ -1732,13 +1776,25 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             # Pad to a static exchange size so the all_to_all / reduce_scatter
             # shapes are identical across all ACL graph buckets — variable
             # shapes desync the HCCL communicator during graph replay.
-            # potential_max_tokens is computed once in the model runner __init__,
-            # so reading it here is a cheap global lookup.
-            exchange_num_tokens = get_potential_max_tokens()
+            # Profiling can use the scheduler's full token budget even when
+            # the decode capacity is smaller. Freeze the larger capacity when
+            # allocating the buffers, then reuse it for capture and replay.
+            if hasattr(self, "_oproj_send_buf"):
+                exchange_num_tokens = self._oproj_send_buf.shape[1]
+            else:
+                exchange_num_tokens = max(
+                    get_potential_max_tokens(),
+                    self.vllm_config.scheduler_config.max_num_batched_tokens,
+                )
             if exchange_num_tokens < num_tokens:
+                scheduler_config = self.vllm_config.scheduler_config
                 raise ValueError(
-                    "oproj static exchange capacity must cover local tokens, "
-                    f"got {exchange_num_tokens} and {num_tokens}."
+                    f"oproj static exchange capacity ({exchange_num_tokens}) must cover "
+                    f"local tokens ({num_tokens}). Fine-grained oproj TP requires "
+                    "capacity >= max_num_batched_tokens. Please set --max-num-batched-"
+                    "tokens to max_num_seqs * decode_query_len "
+                    f"(currently max_num_seqs={scheduler_config.max_num_seqs}), or "
+                    "raise the largest cudagraph_capture_sizes entry."
                 )
             # Lazily allocate static send/recv buffers on first call. The
             # profiling run hits this path before ACL graph capture, so the
@@ -1758,16 +1814,8 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             send[:, :num_tokens].copy_(o_proj_input.transpose(1, 0))
             dist.all_to_all_single(recv.view(-1), send.view(-1), group=oproj_group.device_group)
             o_proj_input = recv.view(oproj_tp_size * exchange_num_tokens, groups_per_rank, group_hidden_dim)
-            o_proj_input = torch_npu.npu_transpose_batchmatmul(
-                o_proj_input,
-                self.wo_a.weight,
-                bias=None,
-                scale=None,
-                perm_x1=(1, 0, 2),
-                perm_x2=(0, 1, 2),
-                perm_y=(1, 0, 2),
-                batch_split_factor=1,
-            )
+            # Quantization stays after all-to-all; communication buffers keep their input dtype.
+            o_proj_input = self._wo_a_bmm(o_proj_input)
             o_proj_input = o_proj_input.reshape(oproj_tp_size * exchange_num_tokens, -1)
             o_proj_output = self.wo_b(o_proj_input)
             # reduce_scatter via a raw dist collective into an address-stable
@@ -1784,18 +1832,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             dist.reduce_scatter_tensor(self._oproj_rs_out_buf, o_proj_output, group=oproj_group.device_group)
             output[...] = self._oproj_rs_out_buf[:num_tokens]
         else:
-            # A5 BF16 wo_a is reshaped to [groups, hidden, rank] at load time,
-            # matching the A3 layout expected by npu_transpose_batchmatmul.
-            o_proj_input = torch_npu.npu_transpose_batchmatmul(
-                o_proj_input,
-                self.wo_a.weight,
-                bias=None,
-                scale=None,
-                perm_x1=(1, 0, 2),
-                perm_x2=(0, 1, 2),
-                perm_y=(1, 0, 2),
-                batch_split_factor=1,
-            )
+            o_proj_input = self._wo_a_bmm(o_proj_input)
             o_proj_input = o_proj_input.reshape(num_tokens, -1)
             output[...] = self.wo_b(o_proj_input)
         return output
@@ -2294,7 +2331,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
 
         notify_kv_cache_written(layer_name)
         wait_for_device_metadata(DeviceMetadataStage.ATTENTION, id(common_metadata.sas_metadata))
-        kv_plan = get_dsa_attn_kv_plan(self.vllm_config, self.compress_ratio)
+        kv_plan = self.get_kv_plan()
         attn_op = kv_plan.get_dsa_sparse_attn_op()
         attn_kwargs = kv_plan.get_dsa_sparse_attn_base_kwargs()
         if has_prefill:

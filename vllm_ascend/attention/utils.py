@@ -101,6 +101,20 @@ def get_sfa_qsfa_packed_head_dim(
     return kv_lora_rank + qk_rope_head_dim * get_dtype_size(torch.bfloat16) + scale_metadata_bytes
 
 
+def get_tq_packed_bytes(kv_lora_rank: int) -> int:
+    """Bytes of the int4-packed nope half of one TurboQuant 4-bit latent slot."""
+    return kv_lora_rank // 2
+
+
+def get_tq_fused_slot_bytes(kv_lora_rank: int, qk_rope_head_dim: int) -> int:
+    """Bytes of one fused TQ4 slot: int4 nope + bf16 rope + fp16 scale."""
+    return (
+        get_tq_packed_bytes(kv_lora_rank)
+        + qk_rope_head_dim * get_dtype_size(torch.bfloat16)
+        + get_dtype_size(torch.float16)
+    )
+
+
 @dataclass
 class PagedAttentionGraphParam:
     """Mark PA params when PA and FIA share one graph replay list."""
@@ -279,9 +293,6 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
 
     # Metadata for Decode Context Parallelism (DCP) operations.
     context_parallel_metadata: AscendDCPMetadata | None = None
-    group_len: torch.Tensor = None
-    group_key_idx: torch.Tensor = None
-    group_key_cache_idx: torch.Tensor = None
     # Per-request / per-token request identity used by the Sparse KV offload
     # resident LRU (adler32-hashed request ids and token->request mapping).
     req_ids_tensor: torch.Tensor | None = None
@@ -301,6 +312,14 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     _seq_lens_cpu: torch.Tensor | None = None
     _num_computed_tokens_cpu: torch.Tensor | None = None
     dcp_local_seq_lens_cpu: torch.Tensor | None = None
+
+    # Per-request replay start: 0 for every request that is not replaying, else
+    # where that request's replayed run begins. A backend clamps a replaying
+    # request's sliding-window lower bound to it: below that point the window's
+    # KV is not being rebuilt -- the replayed positions are padded on the
+    # cacheable groups -- and only the shared prefix is there. ``None`` means
+    # the same as all zeros; dummy/profiling/capture batches do not fill it.
+    replay_start: torch.Tensor | None = None
 
     # TODO: Remove it when vLLM no longer uses this function.
     def unpadded(self, num_actual_tokens: int, num_actual_reqs: int) -> "AscendCommonAttentionMetadata":
@@ -353,13 +372,11 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             encoder_seq_lens_cpu=_slice_reqs(self.encoder_seq_lens_cpu),
             logits_indices_padded=self.logits_indices_padded,
             num_logits_indices=self.num_logits_indices,
-            group_len=self.group_len,
-            group_key_idx=self.group_key_idx,
-            group_key_cache_idx=self.group_key_cache_idx,
             req_topk_buffer_slots=_slice_reqs(self.req_topk_buffer_slots),
             req_topk_buffer_active=_slice_reqs(self.req_topk_buffer_active),
             copy_sfa_draft_index=self.copy_sfa_draft_index,
             offload_dummy=self.offload_dummy,
+            replay_start=_slice_reqs(self.replay_start),
             req_ids_tensor=_slice_reqs(self.req_ids_tensor),
             token_to_req=(self.token_to_req[:num_actual_tokens] if self.token_to_req is not None else None),
         )

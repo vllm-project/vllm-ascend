@@ -314,8 +314,10 @@ def fill_mxfp_v_scale_cache(value_scale: torch.Tensor, value_scale_cache: torch.
     its channel axis up with the cache's fragment split and lets the block,
     token-group and even/odd axes broadcast. Head count and V head dim are
     read from the cache so a model whose V head dim differs from Q/K's stays
-    correct. A one-time fill (run once the caches exist, before any request,
-    capture or replay) rather than a per-step scatter.
+    correct. Fill the whole cache at allocation, then refill only newly
+    assigned physical pages before attention. Hybrid Mamba groups can
+    overwrite these bytes while they own a page; static checkpoint scales
+    do not imply a permanent value in shared backing storage.
     """
     num_kv_heads = value_scale_cache.shape[1]
     v_dim_frags = value_scale_cache.shape[2]
@@ -839,8 +841,8 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
             slot_mapping,
         )
 
-        # Only K's scale is per-token; V's static scale is filled once at KV
-        # cache setup by NPUModelRunner._fill_c8_mxfp_v_scale_caches.
+        # Only K's scale is per-token; the runner fills static V scales at
+        # setup and restores them when a physical page is reassigned to C8.
         scatter_mxfp_k_scale_cache(
             # Byte view: index_put_ on float8 falls back to AICPU.
             key_scale.view(torch.uint8) if key_scale.dtype != torch.uint8 else key_scale,

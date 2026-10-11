@@ -44,7 +44,7 @@ from vllm_ascend.attention.utils import (
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
-from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionBackend
+from vllm_ascend.ops.gdn_attn_builder import AscendGDNFusedAttentionBackend
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
@@ -202,6 +202,14 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             cls._fused_chunk_available = False
         return cls._fused_chunk_available
 
+    @classmethod
+    def _supports_host_metadata_prefill(cls) -> bool:
+        """Whether an available fused prefill path only needs host metadata."""
+        use_fla_gdn_prefill = get_current_hardware_profile().supports(HardwareCapability.FLA_GDN_PREFILL)
+        if use_fla_gdn_prefill and _get_fla_gdn_prefill_op() is not None:
+            return True
+        return cls._probe_fused_chunk()
+
     @staticmethod
     def _chunk_gated_delta_rule_fused(
         q: torch.Tensor,
@@ -284,7 +292,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         return
 
     def get_attn_backend(self) -> type[AttentionBackend]:
-        return AscendGDNAttentionBackend
+        return AscendGDNFusedAttentionBackend
 
     def forward(
         self,
@@ -613,6 +621,15 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 HardwareCapability.FLA_GDN_PREFILL
             )
             fla_gdn_prefill_op = _get_fla_gdn_prefill_op() if use_fla_gdn_prefill else None
+            # The built-in fused operator is NPU-only. Keep CPU/unit-test
+            # dispatch on the Triton-compatible path even when its availability
+            # probe was cached globally.
+            use_fused_chunk = (
+                fla_gdn_prefill_op is None
+                and query_non_spec.device.type != "cpu"
+                and AscendGatedDeltaNetAttention._probe_fused_chunk()
+                and get_pcp_group().world_size == 1
+            )
             if fla_gdn_prefill_op is not None:
                 initial_state = gather_ssm_states(
                     ssm_state,
@@ -635,10 +652,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     prefill_state_indices,
                     last_recurrent_state.to(ssm_state.dtype).contiguous(),
                 )
-            # Use the fused CANN operator when available (probed once, cached on
-            # the class) and applicable. It only supports the non-PCP case; fall
-            # back to the Triton pipeline under PCP or if the op is unavailable.
-            elif AscendGatedDeltaNetAttention._probe_fused_chunk() and get_pcp_group().world_size == 1:
+            elif use_fused_chunk:
                 # Gather only the selected rows. Generic advanced indexing first
                 # materializes the complete cache when ssm_state has a padded
                 # batch stride under the hybrid KV-cache manager.

@@ -4,8 +4,8 @@ Model Runner V2 on Ascend uses the upstream vLLM Expert Parallelism Load
 Balancer (EPLB) control plane and adds a small Ascend-specific integration
 plane. Upstream code owns load windows, policy execution, placement state, and
 the rearrangement transaction. vLLM Ascend owns device routing, executed-load
-recording, quantized expert-weight views, and the asynchronous Gloo-staged
-movement adapter.
+recording, quantized expert-weight views, and the asynchronous movement
+adapter (HIXL by default, Gloo CPU staging as fallback).
 
 This page describes the current asynchronous architecture. For the decisions
 behind this ownership model, see
@@ -23,8 +23,8 @@ EPLB has a control plane and a data plane:
   expert installed on the local rank, runs fused MoE, and records the experts
   that actually executed.
 - The **movement plane** exposes the real quantized expert storage and moves it
-  through the upstream rearrangement transaction using a Gloo-staged worker;
-  the model-runner thread commits completed layers between forwards.
+  through the upstream rearrangement transaction with a background movement
+  worker; the model-runner thread commits completed layers between forwards.
 
 The Ascend integration adapts the boundaries between these planes; it does not
 implement a second controller or placement lifecycle.
@@ -38,7 +38,7 @@ flowchart LR
     E -->|"executed expert counts"| F["Load recorder"]
     F --> A
     A -->|"default-policy placement"| G["Quantization-owned weight views"]
-    G <-->|"Gloo-staged transfer"| H["Peer EP ranks"]
+    G <-->|"HIXL direct transfer (Gloo fallback)"| H["Peer EP ranks"]
     G -->|"main-thread commit"| B
 ```
 
@@ -52,8 +52,9 @@ flowchart LR
 | Router adapter | Per-instance logical-to-physical ID mapping without replacing the upstream router class |
 | Fused MoE EPLB helpers | Device lookup and post-compute physical load recording |
 | Quantization method | View of the expert tensors and metadata actually consumed by its kernel |
-| `AscendGlooEplbCommunicator` | Upstream asynchronous communicator contract implemented with CPU staging over Gloo |
-| Platform patch | Capability adaptation and the narrow construction/commit hooks not exposed by upstream |
+| `AscendHixlEplbCommunicator` | Default upstream asynchronous communicator: receiver-initiated one-sided reads between NPU memory regions registered with the HIXL engine |
+| `AscendGlooEplbCommunicator` | Fallback communicator: upstream asynchronous contract implemented with CPU staging over Gloo |
+| Platform patch | Capability adaptation, communicator selection consensus, and the narrow construction/commit hooks not exposed by upstream |
 
 The platform patch is an entry adapter. Runtime routing, state management, and
 communication live in explicit components so that patching does not become an
@@ -96,11 +97,11 @@ in the layer hot path.
 ## Rearrangement and weight views
 
 When an upstream load window closes, vLLM's default policy calculates a new
-placement and the upstream asynchronous worker stages expert tensors through
-Gloo one layer at a time. The model-runner thread installs each published
-layer, commits its placement, and refreshes the device lookup before
-acknowledging the staging buffer. Routing never observes a lookup for an
-uncommitted placement.
+placement and the upstream asynchronous worker moves the changed layers'
+expert weights through the selected transport. The model-runner thread
+installs each published layer, commits its placement, and refreshes the
+device lookup before acknowledging the receive workspace. Routing never
+observes a lookup for an uncommitted placement.
 
 Expert storage is quantization-specific. Some kernels consume independent
 per-expert tensors, while others consume packed tensors or associated scale and
@@ -123,14 +124,32 @@ not in this architecture page.
 
 ## Communication and synchronization
 
-`AscendGlooEplbCommunicator` implements the upstream asynchronous communicator
-interface. Expert tensors are staged through CPU memory because the background
-worker does not issue HCCL collectives. Foreground MoE communication remains on
-its normal device path.
+The movement plane has two communicators implementing the upstream
+asynchronous communicator interface:
+
+- `AscendHixlEplbCommunicator` (default): receiver-initiated one-sided reads
+  between NPU memory regions registered with the HIXL engine. Participating
+  expert weights and receive buffers are registered once per engine at
+  startup, whole allocator segments at a time.
+- `AscendGlooEplbCommunicator` (fallback): CPU-staged P2P over Gloo with
+  pinned staging buffers.
+
+Communicator selection is a two-stage consensus. The config stage probes each
+rank locally and records a provisional choice; the EPLB controller then
+reduces the per-rank bindings (official `hixl` package, vllm_ascend ctypes
+binding, or none) across the EPLB group before the policy or state is built.
+The group uses HIXL only when every rank resolves the same binding class; a
+missing or differing binding degrades the whole group to Gloo and clamps the
+STAIR migration limits the user left unset (explicitly configured limits are
+preserved with a warning). An explicit `communicator` setting skips the
+consensus. HIXL initialization or runtime failures fail fast instead of
+falling back mid-flight: ranks may disagree on transfer progress and live
+slots may already be in transition (see
+[RFC #17572](https://github.com/vllm-project/vllm-ascend/issues/17572)).
 
 Only asynchronous EPLB is supported. The upstream worker publishes one layer
 at a time and waits for the model-runner thread to acknowledge consumption
-before reusing the staging workspace. The Ascend commit adapter delays that
+before reusing the receive workspace. The Ascend commit adapter delays that
 acknowledgement until the layer's device lookup has been refreshed.
 
 ## Invariants
@@ -144,8 +163,8 @@ Changes to this integration must preserve these invariants:
    operation and excludes padding.
 5. Weight movement updates the exact storage used by the active quantized
    kernel.
-6. The worker does not reuse staging storage before the main thread commits
-   the layer and refreshes routing.
+6. The worker does not reuse transfer workspace before the main thread
+   commits the layer and refreshes routing.
 7. Unsupported modes fail during initialization instead of silently degrading.
 8. EPLB-disabled execution and the Model Runner V1 EPLB path remain isolated.
 9. The routing hot path avoids host loops, device-to-host synchronization, and

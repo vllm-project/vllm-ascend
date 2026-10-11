@@ -5,12 +5,15 @@ from __future__ import annotations
 import argparse
 import hashlib
 import importlib.util
+import os
 import subprocess
+import sys
+import venv
 from pathlib import Path
 
 import pytest
 
-from .build_cache_test_utils import REPO_ROOT
+from .build_cache_test_utils import ENGINE, REPO_ROOT, build_cache_command
 
 HELPER = REPO_ROOT / ".github" / "workflows" / "scripts" / "prepare_csrc_l1_restore.py"
 
@@ -78,6 +81,113 @@ def test_prepare_uses_engine_output_and_exports_environment(tmp_path: Path, monk
     exported = environment.read_text(encoding="utf-8")
     assert f"VLLM_ASCEND_BUILD_CACHE_DIR={tmp_path / 'cache'}" in exported
     assert f"VLLM_ASCEND_BUILD_CACHE_EVENT_LOG={runner_temp / 'csrc-l1-selected_a2.jsonl'}" in exported
+
+
+@pytest.mark.parametrize("entrypoint", ["engine", "restore-helper"])
+def test_snapshot_key_before_build_dependencies(tmp_path: Path, entrypoint: str):
+    # Restore runs before project dependencies are installed. Exercise the real
+    # subprocess boundary with a Python environment that cannot import regex.
+    python_root = tmp_path / "python"
+    venv.EnvBuilder(with_pip=False).create(python_root)
+    python_bin = python_root / "bin"
+    python = python_bin / "python3"
+    environment = os.environ.copy()
+    environment.pop("PYTHONPATH", None)
+    environment.pop("PYTHONHOME", None)
+    environment["PATH"] = f"{python_bin}{os.pathsep}{os.defpath}"
+    output = tmp_path / "github-output"
+    environment["GITHUB_OUTPUT"] = str(output)
+    environment["GITHUB_ENV"] = str(tmp_path / "github-env")
+    environment["RUNNER_TEMP"] = str(tmp_path)
+
+    subprocess.run(
+        [str(python), "-c", "import importlib.util; assert importlib.util.find_spec('regex') is None"],
+        env=environment,
+        check=True,
+    )
+    command = [
+        str(python),
+        str(ENGINE if entrypoint == "engine" else HELPER),
+    ]
+    if entrypoint == "engine":
+        command += ["snapshot-key", "--unique-suffix", "bootstrap"]
+    else:
+        command += ["--cache-dir", str(tmp_path / "cache"), "--source-root", str(REPO_ROOT)]
+    command += [
+        "--architecture",
+        "ARM64",
+        "--soc-version",
+        "a3",
+        "--toolchain-image",
+        "image@sha256:bootstrap",
+        "--csrc-hash",
+        "bootstrap-source",
+    ]
+    result = subprocess.run(command, env=environment, capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    if entrypoint == "engine":
+        assert len(result.stdout.splitlines()) == 3
+        assert all(line.startswith("vllm-ascend-inc-v1-schema4-") for line in result.stdout.splitlines())
+    else:
+        values = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
+        assert values["supported"] == "true", result.stdout
+        assert values["primary_key"].startswith(values["same_csrc_prefix"])
+        assert values["same_csrc_prefix"].startswith(values["compat_prefix"])
+
+
+def test_cache_cold_cross_root_warm_and_mutation_without_build_dependencies(tmp_path: Path):
+    subprocess.run(
+        [sys.executable, "-I", "-S", "-c", "import importlib.util; assert importlib.util.find_spec('regex') is None"],
+        check=True,
+    )
+    builder = tmp_path / "builder.py"
+    counter = tmp_path / "counter"
+    builder.write_text(
+        "from pathlib import Path\n"
+        "import sys\n"
+        "prepared, output, counter = map(Path, sys.argv[1:])\n"
+        "output.mkdir(parents=True, exist_ok=True)\n"
+        "(output / 'kernel.o').write_text(prepared.read_text().split('VALUE=')[1])\n"
+        "count = int(counter.read_text()) if counter.exists() else 0\n"
+        "counter.write_text(str(count + 1))\n",
+        encoding="utf-8",
+    )
+
+    for root_name, value, status, build_count in [
+        ("root-a", 1, "MISS", 1),
+        ("root-b", 1, "HIT", 1),
+        ("root-b", 2, "MISS", 2),
+    ]:
+        root = tmp_path / root_name
+        root.mkdir(exist_ok=True)
+        prepared = root / "input.txt"
+        prepared.write_text(f'ROOT="{root}"\nVALUE={value}\n', encoding="utf-8")
+        output = root / "output"
+        command = build_cache_command(
+            cache_root=tmp_path / "cache",
+            domain="third_party",
+            unit="standalone",
+            output_dir=output,
+            environment_profile="host-cxx",
+            prepared_inputs=[prepared],
+            recipe_values=[],
+            environment_values=["toolchain=standalone-test"],
+            environment_tools=[],
+            build_command=[sys.executable, "-I", "-S", str(builder), str(prepared), str(output), str(counter)],
+            normalize_paths=[root],
+            artifact_includes=["kernel.o"],
+        )
+        command[1:1] = ["-I", "-S"]
+        result = subprocess.run(command, capture_output=True, text=True)
+
+        assert result.returncode == 0, result.stderr
+        assert f"[build-cache] {status} " in result.stdout
+        assert "BYPASS" not in result.stdout
+        if status == "MISS":
+            assert "[build-cache] SAVED " in result.stdout
+        assert counter.read_text() == str(build_count)
+        assert (output / "kernel.o").read_text() == f"{value}\n"
 
 
 def test_prepare_missing_engine_is_unsupported_but_exports_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

@@ -354,6 +354,7 @@ def test_rope0_python_quant_cache_attention_pipeline(dtype):
 
     impl = SimpleNamespace(
         enable_sparse_sfa_c8=True,
+        enable_sparse_sfa_turboquant=False,
         qk_rope_head_dim=0,
         sfa_qsfa_packed_kv_head_dim=packed_dim,
         sfa_qsfa_tile_size=QUANT_TILE_SIZE,

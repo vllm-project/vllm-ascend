@@ -22,7 +22,7 @@ from typing import Any
 import torch
 import torch_npu
 import vllm.envs as envs_vllm
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import VllmConfig, get_current_vllm_config, get_current_vllm_config_or_none
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
@@ -44,6 +44,10 @@ from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
+from vllm_ascend.attention.context_parallel.common_cp import (
+    get_pcp_num_replicated_tokens,
+    is_pcp_decode_sharding_enabled,
+)
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     _select_seq_lens,
@@ -60,6 +64,7 @@ from vllm_ascend.compilation.updatable_graph import (
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import attention_transfer_window
+from vllm_ascend.utils import MINIMAX_M3_FP8_KV_CACHE_BLOCK_SIZE, is_minimax_m3_fp8_kv_cache
 
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
@@ -95,9 +100,10 @@ class AscendAttentionBackend(AttentionBackend):
     @classmethod
     def supports_pcp(cls) -> bool:
         # vLLM checks this capability before any instance-level PCP dispatch.
-        # Only the main GQA implementation owns the PCP path; exact identity
-        # prevents backends such as 310P from inheriting unsupported capability.
-        return cls.get_impl_cls() is AscendAttentionBackendImpl
+        # The main backend owns both the ordinary GQA implementation and its
+        # DCP specialization. Keep derived backends such as 310P and C8 opted
+        # out unless they declare support themselves.
+        return cls is AscendAttentionBackend
 
     @staticmethod
     def get_kv_cache_shape(
@@ -139,6 +145,9 @@ class AscendAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int]:
+        if is_minimax_m3_fp8_kv_cache(get_current_vllm_config_or_none()):
+            # Keep 128 as a common kernel block with M3 sparse/indexer caches.
+            return [MINIMAX_M3_FP8_KV_CACHE_BLOCK_SIZE, 128]
         return [128]
 
 
@@ -536,6 +545,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             type(self) is AscendAttentionBackendImpl
             and self.vllm_config.parallel_config.prefill_context_parallel_size > 1
         )
+        self.is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(self.vllm_config)
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -557,9 +567,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.is_kv_producer = (
             self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_producer
         )
-        self.kv_cache_dtype = kv_cache_dtype_str_to_dtype(
-            self.vllm_config.cache_config.cache_dtype, self.vllm_config.model_config
-        )
+        self.kv_cache_dtype = kv_cache_dtype_str_to_dtype(kv_cache_dtype, self.vllm_config.model_config)
         self.enable_c8_quant = self.vllm_config.quant_config is not None and getattr(
             self.vllm_config.quant_config, "enable_c8_quant", False
         )
@@ -1224,7 +1232,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 value[:local_num_input_tokens],
             ),
             expanded_slot_mapping,
-            attn_metadata.num_decode_tokens,
+            get_pcp_num_replicated_tokens(attn_metadata.num_decode_tokens, self.is_pcp_decode_sharded),
         )
         local_num_actual_tokens = attn_metadata.num_actual_tokens
         try:
@@ -1235,7 +1243,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             attn_metadata.slot_mapping = expanded_slot_mapping
             attn_metadata.num_actual_tokens = local_num_actual_tokens
 
-        return query, key, value, output
+        return query, cache_key, cache_value, output
 
     def forward_impl(
         self,
