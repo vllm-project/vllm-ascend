@@ -500,7 +500,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
     ) -> None:
         # Lazy-load Triton only for the supported NPU path. Cache access stays
         # inside the opaque attention op, like _run_sparse_attention.
-        from vllm_ascend.ops.triton.linearnorm.minimax_qknorm_rope_cache import minimax_qknorm_rope_cache
+        from vllm_ascend.ops.triton.msa.minimax_qknorm_rope_cache import minimax_qknorm_rope_cache
 
         metadata = get_forward_context().attn_metadata
         main_meta = metadata[self.layer_name]

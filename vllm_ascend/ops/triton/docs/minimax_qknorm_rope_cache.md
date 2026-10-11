@@ -1,5 +1,10 @@
 # MiniMax-M3 QK norm、RoPE 与 KV cache 写入融合
 
+## Description
+
+- **Location**: `vllm_ascend/ops/triton/msa/minimax_qknorm_rope_cache.py` — `_minimax_qknorm_rope_cache_kernel`，入口 `minimax_qknorm_rope_cache`。
+- **Origin**: 与 MiniMax-M3 其他 Triton 算子一样放在 `ops/triton/msa`，不再放在 `ops/triton/linearnorm`。
+
 ## 实现
 
 参考 Ascend PR [#15772](https://github.com/vllm-project/vllm-ascend/pull/15772)
