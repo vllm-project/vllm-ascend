@@ -79,7 +79,10 @@ from vllm_ascend.core.kv_cache_interface import (
     get_storage_block_size,
 )
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import get_layerwise_reuse_config
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
+    allocate_shared_indexer_cache,
+    get_layerwise_reuse_config,
+)
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     allocate_kv_cache_tensors_for_sparse_kv_offload,
     reshape_kv_cache_tensors_for_sparse_kv_offload,
@@ -96,7 +99,6 @@ from vllm_ascend.utils import (
     is_hidden_state_cache_spec,
     kv_cache_spec_uses_packed_sfa_main_cache,
 )
-from vllm_ascend.worker.indexer_cache import allocate_shared_indexer_cache
 from vllm_ascend.worker.kvpp_cache import allocate_kvpp_cache
 
 if TYPE_CHECKING:
