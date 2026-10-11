@@ -68,7 +68,7 @@ from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_ND,
     ACL_FORMAT_FRACTAL_NZ,
     is_pd_decode_recompute_scheduler_enabled,
-    maybe_trans_nz,
+    maybe_transpose_bmm_weight_nz,
     weak_ref_tensors,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
@@ -1127,7 +1127,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         replace_parameter(
             self,
             "W_UV",
-            W_UV.transpose(0, 1).contiguous(),  # (L, N, V) -> (N, L, V)
+            # Cast before injection so RL reloads refresh the NZ storage in
+            # place via prefer_copy (stable address for captured graphs).
+            maybe_transpose_bmm_weight_nz(W_UV.transpose(0, 1).contiguous()),  # (L, N, V) -> (N, L, V)
             prefer_copy=True,
         )
         replace_parameter(
@@ -1170,7 +1172,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             self._process_weights_for_fused(act_dtype)
         else:
             # if mlapo, W_UK_T can't trans nz
-            self.W_UK_T = maybe_trans_nz(self.W_UK_T)
+            self.W_UK_T = maybe_transpose_bmm_weight_nz(self.W_UK_T)
 
     def _load_fa_quant_scales(self):
         layer = self.vllm_config.compilation_config.static_forward_context[self.layer_name]

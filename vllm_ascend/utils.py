@@ -406,6 +406,49 @@ def maybe_trans_nz(
     return torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ, **kwargs)
 
 
+def maybe_transpose_bmm_weight_nz(weight: torch.Tensor) -> torch.Tensor:
+    """Cast an npu_transpose_batchmatmul weight to FRACTAL_NZ when eligible.
+
+    ``npu_transpose_batchmatmul`` (and the ``torch.bmm`` fallbacks next to it)
+    dispatch the ``*WeightNz`` aclnn variants when the weight is NZ, which
+    removes the on-the-fly ND->NZ cast inside the matmul. Unlike
+    ``maybe_trans_nz`` this converts BF16/FP16 weights at any nonzero
+    ``weight_nz_mode`` (mode=0 keeps ND for batch-invariant / RL-deterministic
+    runs), because these weights are consumed exclusively by the
+    transpose-batchmatmul family.
+
+    npu_format_cast to FRACTAL_NZ silently downgrades the target format to
+    ND while torch.npu.config.allow_internal_format is disabled — the
+    default on Atlas A2/A3 for processes that do not opt in (standalone
+    scripts, UTs; vllm-ascend's model runner enables it in serving). The
+    resulting format is therefore validated and, when the cast did not take
+    effect, the NZ tensor is built explicitly via empty_with_format + copy_
+    (the copy_ performs the ND->NZ layout conversion; verified bit-identical
+    against the ND dispatch on GLM-5.3-Flash shapes), which makes this
+    helper flag-independent.
+    """
+    if not get_ascend_config().weight_nz_mode:
+        return weight
+    if weight.dtype not in (torch.bfloat16, torch.float16):
+        return weight
+    # FRACTAL_NZ is a 16x16 block layout: both trailing (K, N) dims must be
+    # 16-aligned for the cast; below 2D there are no such dims.
+    if weight.ndim < 2 or weight.shape[-1] % 16 != 0 or weight.shape[-2] % 16 != 0:
+        return weight
+    out = torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ)
+    if int(torch_npu.get_npu_format(out)) != ACL_FORMAT_FRACTAL_NZ:
+        out = torch_npu.empty_with_format(
+            size=weight.shape,
+            dtype=weight.dtype,
+            device=weight.device,
+            acl_format=ACL_FORMAT_FRACTAL_NZ,
+        )
+        out.copy_(weight)
+        if int(torch_npu.get_npu_format(out)) != ACL_FORMAT_FRACTAL_NZ:
+            return weight
+    return out
+
+
 def maybe_trans_nz_with_scale(
     weight: torch.Tensor,
     weight_scale: torch.Tensor,

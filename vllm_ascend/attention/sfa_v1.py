@@ -69,7 +69,7 @@ from vllm_ascend.utils import (
     enable_sp,
     is_mtp_layer,
     is_rl_weight_update_enabled,
-    maybe_trans_nz,
+    maybe_transpose_bmm_weight_nz,
 )
 
 if TYPE_CHECKING:
@@ -998,7 +998,9 @@ class AscendSFAImpl(MLAAttentionImpl):
         replace_parameter(
             self,
             "W_UV",
-            W_UV.transpose(0, 1).contiguous(),  # (L, N, V) -> (N, L, V)
+            # Cast before injection so RL reloads refresh the NZ storage in
+            # place via prefer_copy (stable address for captured graphs).
+            maybe_transpose_bmm_weight_nz(W_UV.transpose(0, 1).contiguous()),  # (L, N, V) -> (N, L, V)
             prefer_copy=True,
         )
         replace_parameter(
@@ -1017,7 +1019,10 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.preprocess_type = self._resolve_preprocess_type(act_dtype)
 
         if self.preprocess_type == PreprocessType.NATIVE:
-            self.W_UK_T = maybe_trans_nz(self.W_UK_T)
+            # W_UK_T feeds npu_transpose_batchmatmul in the q path (and the
+            # bmm fallback); the fused PROLOG_V3/mla_preprocess paths above
+            # consume it as ND, hence the NATIVE gate.
+            self.W_UK_T = maybe_transpose_bmm_weight_nz(self.W_UK_T)
 
         if self.preprocess_type == PreprocessType.PROLOG_V3 and self.enable_sparse_sfa_c8:
             if self.sfa_qsfa_kr_cache_dummy is None:
