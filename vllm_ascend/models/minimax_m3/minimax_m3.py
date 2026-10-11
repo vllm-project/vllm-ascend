@@ -489,6 +489,8 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             == self.k_norm.variance_epsilon
             == self.index_q_norm.variance_epsilon
             == self.index_k_norm.variance_epsilon
+            and getattr(self, "kv_cache_torch_dtype", torch.bfloat16)
+            in (torch.bfloat16, torch.float8_e4m3fn)
         )
 
     def _run_fused_sparse_attention(

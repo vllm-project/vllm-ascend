@@ -47,7 +47,7 @@ def _norm_rope(
     return x
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["NUM_SLOTS"])
 def _minimax_qknorm_rope_cache_kernel(
     packed,
     index_packed,
@@ -64,7 +64,7 @@ def _minimax_qknorm_rope_cache_kernel(
     index_cache,
     slots,
     index_slots,
-    NUM_SLOTS: tl.constexpr,
+    NUM_SLOTS,
     Q_HEADS: tl.constexpr,
     KV_HEADS: tl.constexpr,
     IQ_HEADS: tl.constexpr,
