@@ -59,6 +59,7 @@ from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSampl
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
     disable_profiling_chunk_for_draft,
     disable_target_pcp_for_replicated_draft,
+    draft_dp_sync,
     prepare_replicated_pcp_config,
 )
 
@@ -66,6 +67,44 @@ if TYPE_CHECKING:
     from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
 logger = logging.getLogger(__name__)
+
+
+def pad_query_layout_to_graph(
+    query_start_loc_np: np.ndarray,
+    seq_lens_cpu_upper_bound: torch.Tensor,
+    num_reqs: int,
+    num_reqs_padded: int,
+    num_tokens_padded: int,
+) -> tuple[np.ndarray, torch.Tensor, int]:
+    """Extend a draft query layout to a FULL graph's request and token counts.
+
+    Returns ``(query_start_loc_np, seq_lens_cpu_upper_bound, num_reqs)`` for
+    metadata construction. A layout that already ends at the graph's token
+    count (for example, a replicated target's FIA-padded batch) is returned
+    unchanged. Otherwise the graph's spare requests split the padding tokens as
+    evenly as possible (exactly the query width of a uniform decode graph,
+    which always reserves those requests) and have no cached KV.
+    """
+    if query_start_loc_np.shape[0] > num_reqs_padded and query_start_loc_np[num_reqs_padded] == num_tokens_padded:
+        return query_start_loc_np, seq_lens_cpu_upper_bound, num_reqs
+    num_padding_reqs = num_reqs_padded - num_reqs
+    num_padding_tokens = num_tokens_padded - int(query_start_loc_np[num_reqs])
+    if num_padding_tokens < 0:
+        raise ValueError(
+            f"Draft FULL graph ({num_tokens_padded} tokens) is smaller than the batch "
+            f"({int(query_start_loc_np[num_reqs])} tokens)."
+        )
+    if num_padding_reqs <= 0:
+        return query_start_loc_np, seq_lens_cpu_upper_bound, num_reqs
+    padding_query_lens = np.full(num_padding_reqs, num_padding_tokens // num_padding_reqs, dtype=np.int32)
+    padding_query_lens[num_padding_reqs - num_padding_tokens % num_padding_reqs :] += 1
+    padded_query_start_loc_np = np.empty(num_reqs_padded + 1, dtype=np.int32)
+    padded_query_start_loc_np[: num_reqs + 1] = query_start_loc_np[: num_reqs + 1]
+    np.cumsum(padding_query_lens, out=padded_query_start_loc_np[num_reqs + 1 :])
+    padded_query_start_loc_np[num_reqs + 1 :] += query_start_loc_np[num_reqs]
+    padded_seq_lens = torch.zeros(num_reqs_padded, dtype=seq_lens_cpu_upper_bound.dtype)
+    padded_seq_lens[:num_reqs].copy_(seq_lens_cpu_upper_bound[:num_reqs])
+    return padded_query_start_loc_np, padded_seq_lens, num_reqs_padded
 
 
 class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveSpeculator):
@@ -208,6 +247,18 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
             return self.attn_groups
         return self.target_attn_groups
 
+    def _reuses_target_prefill_metadata(self, cudagraph_runtime_mode: CUDAGraphMode) -> bool:
+        """Whether the target's FULL metadata already describes the draft prefill.
+
+        A replicated target builds MLA/GQA FULL metadata for the same global
+        layout the draft replays. A sharded target's metadata is PCP-local, so
+        the draft builds its own from the restored global batch.
+        """
+        if cudagraph_runtime_mode != CUDAGraphMode.FULL or self.attn_architecture not in ("MLA", "GQA"):
+            return False
+        assert self.pcp_manager is not None
+        return not self.pcp_manager.is_decode_sharded
+
     def _prepare_replicated_prefill_attn(
         self,
         attn_metadata: dict[str, Any] | None,
@@ -241,11 +292,45 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
                 input_batch.positions,
                 num_tokens_padded=num_tokens_padded,
             )
-            # TODO: Remove this early return once FIA supports padded Query tensors
-            # whose token count exceeds the cumulative query length. Keep the
-            # mapping refresh above when unifying metadata construction.
-            if cudagraph_runtime_mode == CUDAGraphMode.FULL and self.attn_architecture in ("MLA", "GQA"):
+            if self._reuses_target_prefill_metadata(cudagraph_runtime_mode):
                 return attn_metadata, slot_mappings
+
+        num_reqs = input_batch.num_reqs
+        query_start_loc_np = input_batch.query_start_loc_np
+        seq_lens_cpu_upper_bound = input_batch.seq_lens_cpu_upper_bound
+        if cudagraph_runtime_mode == CUDAGraphMode.FULL:
+            # The draft picked its own FULL graph, which may be larger than its
+            # batch (capture sizes, DP padding). FIA needs the query layout to
+            # end at the graph's token count.
+            query_start_loc_np, seq_lens_cpu_upper_bound, num_reqs = pad_query_layout_to_graph(
+                query_start_loc_np,
+                seq_lens_cpu_upper_bound,
+                num_reqs,
+                num_reqs_padded,
+                num_tokens_padded,
+            )
+            if query_start_loc_np is not input_batch.query_start_loc_np:
+                # The draft FULL graph reads the GPU offsets from this bound buffer.
+                self.input_buffers.query_start_loc[: num_reqs + 1].copy_(torch.from_numpy(query_start_loc_np))
+
+        slot_mappings = build_slot_mappings_by_layer(
+            slot_mappings_tensor,
+            self.kv_cache_config,
+        )
+        # This is draft prefill, not the later one-token-per-request decode.
+        # Query lengths may differ, so do not use _build_uniform_attn_metadata.
+        attn_metadata = self._build_attn_metadata(
+            num_reqs=num_reqs,
+            batch_desc=BatchExecutionDescriptor(
+                cg_mode=cudagraph_runtime_mode,
+                num_tokens=num_tokens_padded,
+                num_reqs=num_reqs_padded,
+            ),
+            query_start_loc_np=query_start_loc_np,
+            seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+            step=0,
+        )
+        return attn_metadata, slot_mappings
 
         slot_mappings = build_slot_mappings_by_layer(
             slot_mappings_tensor,
@@ -313,9 +398,7 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         generate_draft.
         """
         self.input_batch = input_batch
-        # Replicated drafts use global tokens, unlike the PCP-local target.
-        # Every DP rank must take the draft sync, including decode and idle ranks.
-        sync_state = None if self.replicated_pcp else dp_sync
+        sync_state = draft_dp_sync(self, dp_sync)
         # wrap build_attn_metadata to use Ascend attention metadata building.
         # so we can call super().propose() directly.
         with (

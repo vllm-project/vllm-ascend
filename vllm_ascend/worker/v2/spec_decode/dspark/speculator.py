@@ -51,6 +51,7 @@ from vllm_ascend.worker.v2.spec_decode.dflash.speculator import prepare_dflash_i
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
     disable_profiling_chunk_for_draft,
+    draft_dp_sync,
     prepare_replicated_pcp_config,
 )
 
@@ -423,7 +424,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
     ) -> torch.Tensor:
         self.input_batch = input_batch
         assert self.input_batch is not None
-        sync_state = dp_sync
+        sync_state = draft_dp_sync(self, dp_sync)
         if dummy_run and skip_attn_for_dummy_run:
             # Profiling runs the draft with its own query token count, which
             # can differ from the target batch. Let forward_context coordinate

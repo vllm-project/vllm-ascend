@@ -120,6 +120,17 @@ def disable_target_pcp_for_replicated_draft(
         model_state.pcp_manager = target_pcp_manager
 
 
+def draft_dp_sync(speculator: ReplicatedPCPDraftSpeculator, target_dp_sync: Any) -> Any:
+    """DP agreement a speculator may reuse for its draft prefill.
+
+    A replicated draft runs the global batch, while the target's agreement may
+    describe a PCP-local batch, so the draft must agree its own shape. The
+    choice depends only on configuration, so every DP rank, including ranks
+    running a dummy batch, takes the same collective path.
+    """
+    return None if speculator.replicated_pcp else target_dp_sync
+
+
 def prepare_replicated_pcp_config(
     vllm_config: VllmConfig,
 ) -> tuple[VllmConfig, bool]:
