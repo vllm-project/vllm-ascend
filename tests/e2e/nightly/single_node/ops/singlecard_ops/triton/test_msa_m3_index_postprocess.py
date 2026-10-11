@@ -89,7 +89,7 @@ def test_block_boundaries(context_dtype: torch.dtype, query_len: int, topk: int,
 @pytest.mark.parametrize("init_blocks,local_blocks", [(0, 0), (1, 2)])
 def test_decode_topk_varying_runtime_parameters(strided: bool, init_blocks: int, local_blocks: int) -> None:
     # Keep model configuration fixed while varying batch shape, widths and MTP.
-    heads, topk, block_size = 2, 8, 128
+    heads, topk, block_size = 4, 16, 128
     for requests, query_len, logical_blocks, width in [(1, 1, 3, 4), (3, 4, 17, 32), (2, 1, 8, 16)]:
         tokens = requests * query_len
         reference = torch.arange(heads * tokens * width, dtype=torch.float32).view(heads, tokens, width)
