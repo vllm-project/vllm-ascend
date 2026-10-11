@@ -384,43 +384,26 @@ def minimax_m3_index_decode(
     init_blocks: int,
     local_blocks: int,
     decode_query_len: int,
-    return_select_num_idx: bool = False,
-) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-    """Compute AscendC decode scores and optionally fuse TopK helpers."""
-    if return_select_num_idx:
-        score = _minimax_m3_index_score(
-            idx_q,
-            index_kv_cache,
-            block_table,
-            cu_seqlens_q,
-            seq_lens,
-            start_loc,
-            causal_mask,
-        )
-        return index_decode_topk_fused(
-            score,
-            context_lens,
-            decode_query_len,
-            topk,
-            block_table.shape[-1],
-            init_blocks=init_blocks,
-            local_blocks=local_blocks,
-        )
-    topk_indices, _ = _minimax_m3_index_decode(
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute AscendC decode scores and fuse their TopK helpers."""
+    score = _minimax_m3_index_score(
         idx_q,
         index_kv_cache,
         block_table,
         cu_seqlens_q,
         seq_lens,
-        context_lens,
         start_loc,
         causal_mask,
-        topk=topk,
+    )
+    return index_decode_topk_fused(
+        score,
+        context_lens,
+        decode_query_len,
+        topk,
+        block_table.shape[-1],
         init_blocks=init_blocks,
         local_blocks=local_blocks,
-        decode_query_len=decode_query_len,
     )
-    return topk_indices
 
 
 @torch.no_grad()

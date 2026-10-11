@@ -816,7 +816,7 @@ def test_a5_indexer_forward_keeps_original_decode_path() -> None:
     assert mock_decode.call_args.kwargs == {"sm_scale": impl.scale}
 
 
-def test_a3_indexer_forward_requests_fused_select_counts() -> None:
+def test_a3_indexer_forward_receives_fused_select_counts() -> None:
     impl = object.__new__(AscendMiniMaxM3IndexerImpl)
     torch.nn.Module.__init__(impl)
     impl.use_v2_model_runner = False
@@ -873,14 +873,13 @@ def test_a3_indexer_forward_requests_fused_select_counts() -> None:
             msa_m3_module,
             "minimax_m3_index_decode_ascendc",
             return_value=(expected, expected_select_num_idx),
-        ) as mock_decode,
+        ),
     ):
         actual, prefill, select_num_idx = impl.forward(torch.zeros(1, 4))
 
     assert actual is expected
     assert prefill is None
     assert select_num_idx is expected_select_num_idx
-    assert mock_decode.call_args.kwargs["return_select_num_idx"] is True
 
 
 def test_a5_indexer_forward_keeps_original_prefill_path() -> None:
@@ -1341,54 +1340,6 @@ def test_ascendc_index_prefill_limits_score_width_for_topk(
     assert topk_args[3:] == (1, 2, 1, 1)
 
 
-def test_ascendc_index_decode_wraps_score_candidates() -> None:
-    idx_q = torch.zeros(1, 2, 128)
-    index_key_cache = torch.zeros(4, 128, 128)
-    block_table = torch.tensor([[0, 1, 2, 3]], dtype=torch.int32)
-    cu_seqlens_q = torch.tensor([0, 1], dtype=torch.int32)
-    seq_lens = torch.tensor([129], dtype=torch.int32)
-    context_lens = torch.tensor([128], dtype=torch.int32)
-    start_loc = torch.tensor([1], dtype=torch.int32)
-    causal_mask = torch.zeros(2048, 2048, dtype=torch.int8)
-    expected = torch.zeros(2, 1, 2, dtype=torch.int32)
-    scores = torch.zeros(2, 1, 2)
-
-    with patch(
-        "vllm_ascend.models.minimax_m3.ops.msa_m3_npu._minimax_m3_index_decode",
-        return_value=(expected, scores),
-    ) as mock_decode:
-        actual = minimax_m3_index_decode(
-            idx_q,
-            index_key_cache,
-            block_table,
-            cu_seqlens_q,
-            seq_lens,
-            context_lens,
-            start_loc,
-            causal_mask,
-            topk=2,
-            init_blocks=1,
-            local_blocks=1,
-            decode_query_len=1,
-        )
-
-    assert actual is expected
-    mock_decode.assert_called_once_with(
-        idx_q,
-        index_key_cache,
-        block_table,
-        cu_seqlens_q,
-        seq_lens,
-        context_lens,
-        start_loc,
-        causal_mask,
-        topk=2,
-        init_blocks=1,
-        local_blocks=1,
-        decode_query_len=1,
-    )
-
-
 def test_ascendc_index_decode_returns_fused_select_counts() -> None:
     idx_q = torch.zeros(1, 2, 128)
     index_key_cache = torch.zeros(4, 128, 128)
@@ -1425,7 +1376,6 @@ def test_ascendc_index_decode_returns_fused_select_counts() -> None:
             init_blocks=1,
             local_blocks=1,
             decode_query_len=1,
-            return_select_num_idx=True,
         )
 
     assert actual is expected
@@ -2457,7 +2407,8 @@ def test_a3_index_decode_uses_full_cache_without_tp_collectives(
     monkeypatch.setattr(msa_m3_module, "minimax_m3_index_decode", forbidden, raising=False)
     monkeypatch.setattr(impl, "_decode_topk_tp_sharded", forbidden)
     expected = torch.zeros(1, 2 * query_len, 2, dtype=torch.int32)
-    decode_op = MagicMock(return_value=expected)
+    expected_select_num_idx = torch.full((1, 2 * query_len), 2, dtype=torch.int32)
+    decode_op = MagicMock(return_value=(expected, expected_select_num_idx))
     prefill_op = MagicMock(return_value=torch.zeros(1, 128, 2, dtype=torch.int32))
     monkeypatch.setattr(msa_m3_module, "minimax_m3_index_decode_ascendc", decode_op)
     monkeypatch.setattr(msa_m3_module, "minimax_m3_index_prefill_ascendc", prefill_op)
@@ -2465,7 +2416,7 @@ def test_a3_index_decode_uses_full_cache_without_tp_collectives(
         actual, prefill, select_num_idx = impl.forward(torch.zeros(common.num_actual_tokens, 4))
         assert actual is expected
         assert prefill is (prefill_op.return_value if num_prefills else None)
-        assert select_num_idx is None
+        assert select_num_idx is expected_select_num_idx
     assert decode_op.call_count == 2
     assert decode_op.call_args.args[0].shape == (2 * query_len, 1, 4)
     assert decode_op.call_args.args[1] is impl.index_cache.kv_cache
