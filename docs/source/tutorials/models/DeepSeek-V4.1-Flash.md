@@ -849,3 +849,57 @@ For common environment, installation, and parameter issues, refer to the
   DSpark draft model.
 - Production performance qualification and task-level accuracy evaluation are
   not complete.
+
+## 12 vLLM 0.30.0 的 bounded replay 兼容支持
+
+在未包含上游 replay 协议的 vLLM 0.30.0 镜像中，Ascend 插件回移配置、请求载荷和本地前缀命中调度逻辑。
+镜像中的 vLLM 文件和已编译算子保持不变。此兼容路径默认关闭，通过以下参数显式开启：
+
+```shell
+--enable-prefix-caching --swa-bounded-replay
+```
+
+显式关闭使用 `--no-swa-bounded-replay`。已具备原生 replay 协议的 vLLM 使用上游实现。
+该回移仅支持本地前缀缓存；开启 replay 时配置 KV connector 会明确报错。
+PCP 和使用独立调度器副本的 Ascend 模式仍受已有 replay 限制约束。
+
+SWA 缓存不参与前缀复用。命中其他缓存组后，调度器重算命中前缀的末尾 SWA 窗口，
+worker 屏蔽共享缓存组在重算区间的写入，并裁剪 SWA 的可见范围。
+不超过窗口长度的命中会完整重算。抢占后重新入队时，调度器重新计算并传递 replay 边界。
+
+### 12.1 真权重验证命令
+
+以下为 A5 的 TP1/DP4/EP4 回归配置，运行前使用已有 CANN 环境和已编译 Ascend 算子：
+
+```shell
+cd /workspace
+VLLM_USE_V2_MODEL_RUNNER=1 vllm serve /home/weights/deepseek-ai--DeepSeek-V4.1-Flash \
+  --tokenizer-mode deepseek_v41 --served-model-name deepseek-v41-accuracy \
+  --host 127.0.0.1 --port 8011 \
+  --tensor-parallel-size 1 --data-parallel-size 4 --data-parallel-size-local 4 \
+  --enable-expert-parallel --quantization deepseek_v4_fp8 \
+  --max-model-len 16384 --max-num-batched-tokens 2048 --max-num-seqs 1 \
+  --block-size 128 --enforce-eager --enable-prefix-caching --swa-bounded-replay \
+  --limit-mm-per-prompt '{"image":0}' \
+  --engram-config '{"cpu_offload":true,"dp_shared_memory":false}' \
+  --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":16}' \
+  --safetensors-load-strategy lazy --additional-config '{"enable_cpu_binding":false}'
+```
+
+先用关闭 replay 的服务保存对照，再对开启后的服务执行相同请求：
+
+```shell
+cd /path/to/vllm-ascend
+python tests/e2e/models/swa_bounded_replay_probe.py \
+  --base-url http://127.0.0.1:8011 --model deepseek-v41-accuracy \
+  --output /tmp/replay-disabled.json
+
+# 重启服务，显式传入 --swa-bounded-replay 后执行。
+python tests/e2e/models/swa_bounded_replay_probe.py \
+  --base-url http://127.0.0.1:8011 --model deepseek-v41-accuracy \
+  --baseline /tmp/replay-disabled.json --output /tmp/replay-enabled.json
+```
+
+验收需要同时确认 HTTP 请求成功、输出与对照一致，以及服务日志中实际出现
+`SWA bounded replay is active`。仅启动成功或配置字段为真不足以证明已执行 replay。
+跨 chunk 回归还应使用小于 SWA 窗口的调度预算。
