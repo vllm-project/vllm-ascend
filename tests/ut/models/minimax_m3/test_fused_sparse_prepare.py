@@ -29,7 +29,8 @@ def make_layer():
 
 
 @pytest.mark.parametrize(
-    "unsupported", [None, "dtype", "cpu", "positions", "heads", "rope", "eps", "triton", "large_batch"]
+    "unsupported",
+    [None, "dtype", "cpu", "positions", "heads", "rope", "eps", "triton", "large_batch", "cache_dtype"],
 )
 def test_fusion_guard(unsupported):
     layer = make_layer()
@@ -49,6 +50,8 @@ def test_fusion_guard(unsupported):
         layer.k_norm = SimpleNamespace(variance_epsilon=1e-5)
     elif unsupported == "large_batch":
         hidden.shape = (513, 128)
+    elif unsupported == "cache_dtype":
+        layer.kv_cache_torch_dtype = torch.float8_e5m2
     with patch("vllm_ascend.models.minimax_m3.minimax_m3.HAS_TRITON", unsupported != "triton"):
         assert MiniMaxM3SparseAttention._can_fuse_sparse_prepare(layer, positions, hidden) == (unsupported is None)
 
