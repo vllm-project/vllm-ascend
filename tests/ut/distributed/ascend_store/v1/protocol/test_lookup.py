@@ -7,7 +7,8 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 
 import pytest
-import zmq
+from zmq.constants import RCVTIMEO, SNDTIMEO, SocketType
+from zmq.sugar.context import Context
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.coordinates import TokenRange
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol import rpc
@@ -53,10 +54,10 @@ def test_lookup_rpc_replies_to_request_failures_and_keeps_serving(lookup_address
     server = LookupServer(lookup, lookup_address)
     client = LookupClient(lookup_address)
     try:
-        with zmq.Context() as context:
-            socket = context.socket(zmq.REQ)
+        with Context() as context:
+            socket = context.socket(SocketType.REQ)
             try:
-                socket.setsockopt(zmq.RCVTIMEO, 2000)
+                socket.setsockopt(RCVTIMEO, 2000)
                 socket.connect(lookup_address)
                 for frames in ([b"malformed"], codec.encode_request(request), codec.encode_request(request)):
                     socket.send_multipart(frames)
@@ -95,10 +96,10 @@ def test_lookup_rpc_recreates_connection_without_reusing_a_late_reply(lookup_add
 
     def serve_peer():
         try:
-            with zmq.Context() as context:
-                socket = context.socket(zmq.REP)
+            with Context() as context:
+                socket = context.socket(SocketType.REP)
                 try:
-                    socket.setsockopt(zmq.RCVTIMEO, 3000)
+                    socket.setsockopt(RCVTIMEO, 3000)
                     socket.bind(lookup_address)
                     ready.set()
                     socket.recv_multipart()
@@ -153,7 +154,7 @@ def test_lookup_rpc_uses_one_timeout_budget_for_send_and_receive(
     client = LookupClient("unused", timeout_ms=timeout_ms)
     try:
         assert client.lookup(LookupRequest(TokenRange(0, 4), (0,), (b"a",))) == LookupResult(4)
-        assert options == [(zmq.SNDTIMEO, send_timeout), (zmq.RCVTIMEO, receive_timeout)]
+        assert options == [(SNDTIMEO, send_timeout), (RCVTIMEO, receive_timeout)]
     finally:
         client.close()
 
@@ -191,10 +192,10 @@ def test_lookup_rpc_close_keeps_active_query_owned_until_it_can_stop(lookup_addr
 
     server = LookupServer(lookup, lookup_address)
     try:
-        with zmq.Context() as context:
-            socket = context.socket(zmq.REQ)
+        with Context() as context:
+            socket = context.socket(SocketType.REQ)
             try:
-                socket.setsockopt(zmq.RCVTIMEO, 2000)
+                socket.setsockopt(RCVTIMEO, 2000)
                 socket.connect(lookup_address)
                 socket.send_multipart(LookupCodec().encode_request(LookupRequest(TokenRange(0, 4), (0,), (b"a",))))
                 assert query_started.wait(timeout=2)

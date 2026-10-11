@@ -3,6 +3,7 @@
 """Compare production AscendStore and v1 on their smallest common route."""
 
 import shutil
+from importlib import import_module
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +20,6 @@ from tests.e2e.common.kv_pool.ascendstore_v1_probe import (
 )
 from tests.e2e.common.kv_pool.config import MooncakeKVPoolConfig
 from tests.e2e.conftest import VllmRunner
-from tests.e2e.nightly.single_node.models.scripts.kv_pool_runtime import SingleNodeMooncakeManager
 
 MODEL = "Qwen/Qwen3-0.6B"
 PROMPT_TOKEN_COUNT = 513
@@ -100,7 +100,9 @@ def _exercise_connector(
     cold_prompts = [TokensPrompt(prompt_token_ids=[0] * PROMPT_TOKEN_COUNT)]
     sampling_params = SamplingParams(temperature=0, max_tokens=OUTPUT_TOKEN_COUNT, ignore_eos=True)
 
-    with SingleNodeMooncakeManager(pool_config, f"{tmp_path.name}-{implementation}") as pool:
+    # Keep this optional integration dependency local to the v1 E2E execution.
+    pool_runtime = import_module("tests.e2e.nightly.single_node.models.scripts.kv_pool_runtime")
+    with pool_runtime.SingleNodeMooncakeManager(pool_config, f"{tmp_path.name}-{implementation}") as pool:
         for name, value in pool.server_envs.items():
             monkeypatch.setenv(name, value)
         with VllmRunner(

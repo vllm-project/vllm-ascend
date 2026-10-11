@@ -70,7 +70,7 @@ def test_layerwise_lookup_recovers_sparse_objects_after_publication(
             return codes
 
     topology = make_sparse_group_topology(block_size=16, sliding_window=33)
-    backend = FakeGVABackend() if use_gva else PublishedKeyRangeBackend()
+    backend: FakeGVABackend | PublishedKeyRangeBackend = FakeGVABackend() if use_gva else PublishedKeyRangeBackend()
     backend_spec = make_gva_spec() if use_gva else make_backend_spec(requires_exists_before_put=True)
     resources = KVPoolResources(
         backend,
