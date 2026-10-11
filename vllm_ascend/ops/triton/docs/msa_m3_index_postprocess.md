@@ -120,8 +120,13 @@ each shape and dynamic replay; unsupported cache introspection reports null.
 This does not count `torch.topk`/CANN internal variants. Validate both full and
 split-stage outputs for every shape and full outputs for every replay case.
 
+The benchmark script is retained on the test host at
+`/home/cxy-pr18294-20261011/msa_index_decode_topk.py`, mounted as
+`/test-run/msa_index_decode_topk.py` in the test container. It is not part of this
+repository. Run the following inside that container:
+
 ```bash
-ASCEND_RT_VISIBLE_DEVICES=8 python benchmarks/msa_index_decode_topk.py \
+ASCEND_RT_VISIBLE_DEVICES=8 python /test-run/msa_index_decode_topk.py \
   --output-dir /test-run/artifacts/msa-benchmark --warmup 20 --repeats 100
 ```
 
