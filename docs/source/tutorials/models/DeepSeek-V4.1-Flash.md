@@ -863,7 +863,6 @@ and use the `main` branch with the matching vLLM revision recorded in
         --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
         --additional-config '{
             "enable_cpu_binding":true,
-            "enable_fused_mc2":1,
             "enable_dsa_cp":true,
             "enable_flashcomm1":true,
             "enable_shared_expert_dp":true
