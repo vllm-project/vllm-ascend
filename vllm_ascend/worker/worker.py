@@ -701,9 +701,10 @@ class NPUWorker(WorkerBase):
         has_mamba = any(isinstance(spec, MambaSpec) for spec in per_layer_specs)
         model_runner = getattr(self, "model_runner", None)
         layout = self.vllm_config.cache_config.get_resolved_kv_cache_layout()
+        is_step_model = self.model_config.hf_text_config.model_type in ("step3p5", "step3p7")
         if (
             has_attention
-            and has_mamba
+            and (has_mamba or is_step_model)
             and layout.is_layer_compact
             and layout.is_block_compact
             and getattr(model_runner, "supports_standardized_shared_kv_backing", False)
