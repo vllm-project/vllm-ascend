@@ -52,13 +52,13 @@ def _registration_worker(rank: int, port: int, binding: str) -> None:
         weights = [allocation[: 84 * _MIB // 4].view(2, -1), allocation.view(2, -1)]
         buffers = [torch.empty_like(tensor) for tensor in weights]
         communicator = eplb_communicator.AscendHixlEplbCommunicator(dist.group.WORLD, [weights], buffers)
-        registered = tuple(communicator._registered_regions)
+        registered = tuple(communicator._registered_handles)
         # Grow the allocator, then let it reclaim unused mapped pages while
         # the original expert registrations and connections remain alive.
         extra = torch.empty(128 * _MIB, dtype=torch.uint8, device=f"npu:{rank}")
         del extra
         torch.npu.empty_cache()
-        assert tuple(communicator._registered_regions) == registered
+        assert tuple(communicator._registered_handles) == registered
 
         with ThreadPoolExecutor(max_workers=1) as executor:
             for _ in range(4):
@@ -84,7 +84,7 @@ def _registration_worker(rank: int, port: int, binding: str) -> None:
     ]
     buffers = [torch.empty_like(weights[0][0])]
     communicator = eplb_communicator.AscendHixlEplbCommunicator(dist.group.WORLD, weights, buffers)
-    assert len(communicator._registered_regions) > 256
+    assert len(communicator._registered_handles) > 256
     communicator.close()
     del communicator, buffers, weights, allocation
     torch.npu.empty_cache()

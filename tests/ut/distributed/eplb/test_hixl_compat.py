@@ -162,5 +162,5 @@ def test_hixl_communicator_reads_through_hixl_compat(monkeypatch):
     assert operation == hixl_compat.TransferOp.READ
     assert all(isinstance(desc, hixl_compat.TransferOpDesc) for desc in descriptors)
 
-    communicator._close()
+    communicator.close()
     assert engine.finalized
