@@ -165,7 +165,6 @@ class AscendHixlEplbCommunicator(EplbCommunicator):
         self._engine: Any | None = None
         self._acl_context: Any = None
         self._registered_handles: list[int] = []
-        self._registered_regions: list[tuple[int, int]] = []
         self._storage_refs: list[Any] = []
         self._requests: list[int] = []
         self._usable = False
@@ -335,7 +334,6 @@ class AscendHixlEplbCommunicator(EplbCommunicator):
         )
         self._check_status(status, f"register memory at {address:#x}, size={size}")
         self._registered_handles.append(handle)
-        self._registered_regions.append((address, size))
 
     def _exchange_remote_state(
         self,
@@ -457,6 +455,7 @@ class AscendHixlEplbCommunicator(EplbCommunicator):
         except Exception as error:
             local_error = error
         launch_finished_at = time.perf_counter()
+        request_count = len(self._requests)
         try:
             self._wait_for_transfers(self._requests)
         except Exception as error:
@@ -477,7 +476,7 @@ class AscendHixlEplbCommunicator(EplbCommunicator):
                     launch_ms=(launch_finished_at - phase_started_at) * 1000,
                     transfer_ms=(transfer_finished_at - launch_finished_at) * 1000,
                     confirmation_ms=(confirmed_at - transfer_finished_at) * 1000,
-                    request_count=getattr(self, "_last_request_count", 0),
+                    request_count=request_count,
                     transfer_bytes=self._pending_bytes,
                 )
             )
@@ -507,7 +506,6 @@ class AscendHixlEplbCommunicator(EplbCommunicator):
 
     def _start_transfers(self) -> None:
         assert self._engine is not None
-        self._last_request_count = 0
         for src_rank, descriptors in self._pending_reads.items():
             operations = [
                 self._hixl.TransferOpDesc(
@@ -524,7 +522,6 @@ class AscendHixlEplbCommunicator(EplbCommunicator):
             )
             self._check_status(status, f"read from rank {src_rank}")
             self._requests.append(request)
-            self._last_request_count += 1
 
     def _wait_for_transfers(self, requests: list[int]) -> None:
         assert self._engine is not None
@@ -590,7 +587,6 @@ class AscendHixlEplbCommunicator(EplbCommunicator):
                 handle = self._registered_handles[-1]
                 self._check_status(engine.deregister_mem(handle), f"deregister memory handle={handle}")
                 self._registered_handles.pop()
-                self._registered_regions.pop()
         except Exception as error:
             local_error = error
         if coordinated:
@@ -613,9 +609,6 @@ class AscendHixlEplbCommunicator(EplbCommunicator):
         self._storage_refs.clear()
         self._remote_engines.clear()
         self._remote_send_meta.clear()
-
-    def _close(self) -> None:
-        self.close()
 
     def __del__(self) -> None:
         # ACL may already be shut down. Explicit close owns normal teardown;

@@ -195,7 +195,7 @@ def test_hixl_reads_registered_remote_expert(monkeypatch):
     timing = communicator._eplb_hixl_phase_timings[0]
     assert (timing.request_count, timing.transfer_bytes) == (1, 32)
 
-    communicator._close()
+    communicator.close()
     assert engine.deregistered == [1]
     assert engine.finalized
 
@@ -237,7 +237,6 @@ def test_hixl_close_retains_resources_on_disconnect_failure(monkeypatch):
     communicator._remote_engines = {1: "peer"}
     communicator._engine.disconnect = MagicMock(return_value=103900)
     communicator._registered_handles = [1]
-    communicator._registered_regions = [(0, 2_097_152)]
     storage = object()
     communicator._storage_refs = [storage]
 
@@ -261,7 +260,6 @@ def _bare_communicator(monkeypatch):
     communicator._remote_engines = {}
     communicator._remote_send_meta = {}
     communicator._registered_handles = []
-    communicator._registered_regions = []
     communicator._storage_refs = []
     communicator._requests = []
     communicator._pending_reads = {}
@@ -319,6 +317,7 @@ def test_partial_submission_is_drained_before_reporting_failure(monkeypatch):
     with pytest.raises(RuntimeError, match="read from rank 2"):
         communicator.execute()
     communicator._engine.get_transfer_status.assert_called_once_with(11)
+    assert communicator._eplb_hixl_phase_timings[0].request_count == 1
     assert communicator._requests == []
     assert not communicator._usable
 
@@ -326,13 +325,11 @@ def test_partial_submission_is_drained_before_reporting_failure(monkeypatch):
 def test_close_preserves_failed_deregistration_handle(monkeypatch):
     communicator = _bare_communicator(monkeypatch)
     communicator._registered_handles = [1, 2]
-    communicator._registered_regions = [(0, 2), (4, 2)]
     communicator._storage_refs = [object()]
     communicator._engine.deregister_mem = MagicMock(side_effect=[0, 103900])
     with pytest.raises(RuntimeError, match="deregister"):
         communicator.close()
     assert communicator._registered_handles == [1]
-    assert communicator._registered_regions == [(0, 2)]
     assert communicator._storage_refs
     assert not communicator._engine.finalized
 
@@ -414,7 +411,6 @@ def test_initialization_rollback_failure_bypasses_rpc_and_retains_storage(monkey
         storage_ref = weakref.ref(storage)
         communicator._storage_refs = [storage]
         communicator._registered_handles = [1]
-        communicator._registered_regions = [(0, 2)]
         raise RuntimeError("registration failed")
 
     communicator._register_tensor_segments = fail_registration
