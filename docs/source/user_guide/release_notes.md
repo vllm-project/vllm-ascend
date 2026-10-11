@@ -1,6 +1,6 @@
 # Release Notes
 
-## v0.30.0 - 2026.10.09
+## v0.30.0 - 2026.10.11
 
 This is the official release of vLLM Ascend v0.30.0, building on the v0.29 release line and aligning the plugin with upstream vLLM v0.30.0. Please follow the [official documentation](https://docs.vllm.ai/projects/ascend/en/v0.30.0/) to get started.
 
