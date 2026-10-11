@@ -423,7 +423,9 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
     ) -> torch.Tensor:
         self.input_batch = input_batch
         assert self.input_batch is not None
-        sync_state = dp_sync
+        # Replicated drafts consume global requests, unlike sharded targets.
+        # Every DP rank must synchronize the draft batch independently.
+        sync_state = None if self.replicated_pcp else dp_sync
         if dummy_run and skip_attn_for_dummy_run:
             # Profiling runs the draft with its own query token count, which
             # can differ from the target batch. Let forward_context coordinate
