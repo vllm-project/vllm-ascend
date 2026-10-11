@@ -112,13 +112,14 @@ class BaseDeviceAdaptor:
             )
             return
 
-        torch_npu.npu_scatter_pa_kv_cache(
+        torch.ops._C_ascend.npu_scatter_pa_kv_cache(
             key=key.contiguous(),
             value=value.contiguous(),
             key_cache=key_cache,
             value_cache=value_cache,
             slot_mapping=slot_mapping.contiguous(),
             cache_mode="Norm",
+            scatter_mode="None",
         )
 
     @classmethod
