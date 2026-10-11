@@ -196,6 +196,8 @@ class DSAAttention(nn.Module, AttentionLayerBase):
             kv_cache_dtype = torch.uint8 if self.compress_ratio == 4 else torch.bfloat16
         use_bf16_kv = is_a5_bf16_kv_enabled(vllm_config)
         has_compressed_cache = get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE)
+        if has_compressed_cache and self.kv_cache_dtype == "auto":
+            kv_cache_dtype = torch.float8_e4m3fn
 
         cached_head_size = self.head_size + 128 if has_compressed_cache and not use_bf16_kv else self.head_size
         if is_turboquant(vllm_config) and self.compress_ratio == 4:
