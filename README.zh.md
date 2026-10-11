@@ -26,7 +26,7 @@ vLLM Ascend Plugin
 ---
 *最新消息* 🔥
 
-- [2026/09] 我们发布了新的正式版本 [v0.30.0](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.30.0)! 请按照[官方指南](https://docs.vllm.ai/projects/ascend/en/v0.30.0/)开始在 Ascend 上部署 vLLM Ascend Plugin。
+- [2026/10] 我们发布了新的候选版本 [v0.30.0rc1](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.30.0rc1)! 请按照[官方指南](https://docs.vllm.ai/projects/ascend/en/v0.30.0rc1/)开始在 Ascend 上部署 vLLM Ascend Plugin。
 - [2026/09] 我们发布了新的候选版本 [v0.26.0rc1](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.26.0rc1)! 请按照[官方指南](https://docs.vllm.ai/projects/ascend/en/v0.26.0rc1/)开始在 Ascend 上部署 vLLM Ascend Plugin。
 - [2026/08] 我们发布了新的正式版本 [v0.23.0](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.23.0)! 请按照[官方指南](https://docs.vllm.ai/projects/ascend/en/v0.23.0/)开始在 Ascend 上部署 vLLM Ascend Plugin。
 - [2026/05] 我们发布了新的正式版本 [v0.18.0](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.18.0)! 请按照[官方指南](https://docs.vllm.ai/projects/ascend/en/v0.18.0/)开始在Ascend上部署vLLM Ascend Plugin。
