@@ -407,6 +407,28 @@ def test_hixl_initialization_failure_never_starts_the_async_worker(monkeypatch):
 
 
 @pytest.mark.parametrize("entry", ["step", "ready", "close"])
+def test_hixl_worker_setup_failure_exits_before_releasing_storage(entry):
+    state = _shutdown_state()
+    session = MagicMock(spec=_HixlSession)
+    session._error = None
+    session._usable = True
+    state._hixl_session = session
+    state.async_worker = SimpleNamespace(is_alive=lambda: False)
+    state.model_states = {"main": SimpleNamespace(rebalanced=False, pending_result=None)}
+    with pytest.raises(SystemExit, match="worker must terminate") as fatal:
+        if entry == "step":
+            state.step()
+        elif entry == "ready":
+            state._all_ranks_result_ready(object())
+        else:
+            state.close()
+    assert "background worker terminated" in str(fatal.value.__cause__)
+    assert session._error is fatal.value.__cause__
+    assert not session._usable
+    session.close.assert_not_called()
+
+
+@pytest.mark.parametrize("entry", ["step", "ready", "close"])
 def test_failed_shared_session_exits_from_foreground_before_reusing_resources(entry):
     state = _shutdown_state()
     error = RuntimeError("HIXL transfer failed")

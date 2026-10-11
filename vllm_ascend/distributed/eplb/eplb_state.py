@@ -136,7 +136,14 @@ def refresh_model_routing_tables(
 def _raise_if_async_worker_stopped(state: Any) -> None:
     worker = getattr(state, "async_worker", None)
     if worker is not None and not worker.is_alive():
-        raise RuntimeError("EPLB background worker terminated unexpectedly")
+        error = RuntimeError("EPLB background worker terminated unexpectedly")
+        session = getattr(state, "_hixl_session", None)
+        if session is not None:
+            # Device/stream setup can fail before the migration loop is entered.
+            session._error = session._error or error
+            session._usable = False
+            state.raise_if_close_failed()
+        raise error
 
 
 class AscendEplbState(_eplb_state.EplbState):
@@ -208,6 +215,7 @@ class AscendEplbState(_eplb_state.EplbState):
             self._suspended = True
             worker = self.async_worker
             if worker is not None:
+                _raise_if_async_worker_stopped(self)
                 # Acknowledge real completed results before stopping the idle loop.
                 # This also handles the worker waiting for consumed_event.
                 self.drain_async()
@@ -345,6 +353,8 @@ class AscendEplbState(_eplb_state.EplbState):
     ) -> None:
         """Advance the custom time axis alongside the upstream load window."""
         self.raise_if_close_failed()
+        if self._hixl_session is not None:
+            _raise_if_async_worker_stopped(self)
         is_sampling = getattr(self, "_is_load_sampling_step", False) and not is_dummy and not is_profile
         should_collect = getattr(self, "_should_collect_local_load", False)
         self._is_load_sampling_step = False

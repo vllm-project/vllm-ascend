@@ -129,7 +129,10 @@ asynchronous communicator interface:
 
 - `AscendHixlEplbCommunicator` (default): receiver-initiated one-sided reads
   between NPU memory regions registered with the HIXL engine. Participating
-  expert weights and receive buffers are registered as aligned, merged live tensor ranges. The communicator holds their underlying storage until deregistration succeeds. Unrelated allocator growth does not change these registrations.
+  expert weights and receive buffers from all models are registered as aligned,
+  merged live tensor ranges. One state-owned HIXL session holds their underlying
+  storage until deregistration succeeds. Unrelated allocator growth does not
+  change these registrations.
 - `AscendGlooEplbCommunicator` (fallback): CPU-staged P2P over Gloo with
   pinned staging buffers.
 

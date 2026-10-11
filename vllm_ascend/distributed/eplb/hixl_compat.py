@@ -462,10 +462,10 @@ class Hixl:
             self._engine = None
 
     def __del__(self) -> None:
-        if sys.is_finalizing():
-            return
-        # contextlib may already be cleared during interpreter shutdown.
+        # Module globals may already be cleared during interpreter shutdown.
         try:  # noqa: SIM105
+            if sys.is_finalizing():
+                return
             self._close()
         except Exception:
             pass
