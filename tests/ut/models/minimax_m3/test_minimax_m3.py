@@ -147,7 +147,8 @@ class TestMiniMaxM3Modeling(unittest.TestCase):
         )
 
         reduce_scatter.assert_called_once()
-        shard.assert_called_once_with(residual)
+        shard.assert_called_once()
+        torch.testing.assert_close(shard.call_args.args[0], residual)
         self.assertEqual(layer.self_attn.input_shapes, [torch.Size([3, 2])])
         self.assertEqual(output.shape, torch.Size([2, 2]))
         self.assertEqual(output_residual.shape, torch.Size([2, 2]))
