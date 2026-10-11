@@ -33,17 +33,25 @@ PCP support is experimental and available only with ModelRunner V2. The followin
 
 DCP supports eager and graph execution, prefix caching, chunked prefill, speculative decoding, P/D disaggregation, and MLAPO on the model and hardware combinations documented by vLLM Ascend. The following table shows whether each feature can be combined with DCP across devices and attention backends:
 
-| Device | Attention Backend | Chunked Prefill + DCP | Prefix Caching + DCP | Graph Mode + DCP | P/D Disaggregation + DCP | MLAPO + DCP | Speculative Decoding + DCP |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| Ascend A2/A3 | MLA/GQA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility (MLA)<br>— Not applicable (GQA) | ✅ P/D disaggregation<br>❌ PD-mixed deployment |
-| Ascend A2/A3 | SFA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility |
-| 950PR&950DT Products | MLA/GQA | 🟠 Partial compatibility | 🟠 Partial compatibility | 🟠 Partial compatibility | 🟠 Partial compatibility | 🟠 Partial compatibility (MLA)<br>— Not applicable (GQA) | 🟠 P/D disaggregation<br>❌ PD-mixed deployment |
-| 950PR&950DT Products | SFA | ❌ No compatibility | ❌ No compatibility | ❌ No compatibility | ❌ No compatibility | ❌ No compatibility | ❌ No compatibility |
+| Device | Attention Backend | Basic DCP | Chunked Prefill + DCP | Prefix Caching + DCP | Graph Mode + DCP | P/D Disaggregation + DCP | MLAPO + DCP | Speculative Decoding + DCP |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Ascend A2/A3 | MLA/GQA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility (MLA)<br>— Not applicable (GQA) | ✅ P/D disaggregation<br>❌ PD-mixed deployment |
+| Ascend A2/A3 | SFA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility |
+| 950PR&950DT Products | MLA/GQA | 🟠 Partial compatibility | 🟠 Partial compatibility | 🟠 Partial compatibility | 🟠 Partial compatibility | 🟠 Partial compatibility | 🟠 Partial compatibility (MLA)<br>— Not applicable (GQA) | 🟠 P/D disaggregation<br>❌ PD-mixed deployment |
+| 950PR Products | SFA | ❌ No compatibility | ❌ No compatibility | ❌ No compatibility | ❌ No compatibility | ❌ No compatibility | ❌ No compatibility | ❌ No compatibility |
+| 950DT Products | SFA | 🟠 Partial compatibility (GLM-5.2, BF16 KV) | — Not validated | — Not validated | — Not validated | — Not validated | — Not validated | — Not validated |
 
-- ✅ **Full compatibility**: Combining the feature with DCP is supported.
-- 🟠 **Partial compatibility**: Combining the feature with DCP is experimentally supported; interfaces and functionality may change.
-- ❌ **No compatibility**: Combining the feature with DCP is not supported.
+- ✅ **Full compatibility**: The basic DCP path or feature combination is supported.
+- 🟠 **Partial compatibility**: The basic DCP path or feature combination is experimentally supported; interfaces and functionality may change.
+- ❌ **No compatibility**: The basic DCP path or feature combination is not supported.
+- **Not validated**: The feature combination is outside the current validation scope.
 - **Not applicable**: The feature does not apply to this attention backend.
+
+SFA DCP is experimentally supported on Ascend950DT with the repository's custom
+`sparse_flash_attention` operator installed. Validation covers GLM-5.2 W4A8
+with BF16 KV, TP8 and DCP8 on CANN 9.2.0. It does not establish support for
+Ascend950PR or the feature combinations marked **Not validated** above.
+Existing A5 packages or images that omit the custom operator require rebuilding.
 
 DSA-CP supports prefix caching, chunked prefill, speculative decoding, P/D disaggregation on the model and hardware combinations documented by vLLM Ascend.
 
