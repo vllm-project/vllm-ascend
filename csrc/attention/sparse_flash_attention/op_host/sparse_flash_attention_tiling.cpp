@@ -371,6 +371,10 @@ void SFAMlaTiling::FillTilingBaseParamsMla()
     tilingData_.baseParams.set_isActualLenDimsNull(sfaInfo_->actualQSeqLenFlag ? 0U : 1U);
     tilingData_.baseParams.set_isActualLenDimsKVNull(sfaInfo_->actualSeqLenFlag ? 0U : 1U);
     tilingData_.baseParams.set_ropeHeadDim(sfaInfo_->ropeHeadDim);
+    // The operator definition makes key inputs contiguous before kernel execution.
+    // CANN's Ascend950 kernel expresses the page stride in KV rows, not elements.
+    tilingData_.baseParams.set_keyStride0(
+        sfaInfo_->pageAttentionFlag ? static_cast<uint32_t>(sfaInfo_->blockSize) : 0U);
 }
 
 // for flash decode

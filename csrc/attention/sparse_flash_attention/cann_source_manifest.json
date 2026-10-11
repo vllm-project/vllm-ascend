@@ -1,0 +1,167 @@
+{
+  "repository": "https://gitcode.com/cann/ops-transformer",
+  "tag": "v9.2.0.pre",
+  "commit": "1bba359a9ae31401c63f8d63e2ce8a72cf7c986b",
+  "files": [
+    {
+      "source": "attention/sparse_flash_attention/op_kernel/arch35/sparse_flash_attention_common_arch35.h",
+      "destination": "csrc/attention/sparse_flash_attention/op_kernel/arch35/sparse_flash_attention_common_arch35.h",
+      "sha256": "47387e905b8776d549e418f51cc34ac67991a649a6a1492fdd81595fbffe1359"
+    },
+    {
+      "source": "attention/sparse_flash_attention/op_kernel/arch35/sparse_flash_attention_kernel_mla_arch35.h",
+      "destination": "csrc/attention/sparse_flash_attention/op_kernel/arch35/sparse_flash_attention_kernel_mla.h",
+      "sha256": "2a01719788a72b55e435bc604f6bd7476d3a2fb6dd4327e7fc06be11948ff661"
+    },
+    {
+      "source": "attention/sparse_flash_attention/op_kernel/arch35/sparse_flash_attention_kvcache.h",
+      "destination": "csrc/attention/sparse_flash_attention/op_kernel/arch35/sparse_flash_attention_kvcache.h",
+      "sha256": "fe4732e7e0791ed8a296bfee4792fac06c29006c879728dddf08aa910bb67859"
+    },
+    {
+      "source": "attention/sparse_flash_attention/op_kernel/arch35/sparse_flash_attention_service_cube_mla_arch35.h",
+      "destination": "csrc/attention/sparse_flash_attention/op_kernel/arch35/sparse_flash_attention_service_cube_mla.h",
+      "sha256": "1312a28c2456787d9d64a81f9e9ccfc53b2713f965b09fb654a1b397b8928152"
+    },
+    {
+      "source": "attention/sparse_flash_attention/op_kernel/arch35/sparse_flash_attention_service_vector_mla_arch35.h",
+      "destination": "csrc/attention/sparse_flash_attention/op_kernel/arch35/sparse_flash_attention_service_vector_mla.h",
+      "sha256": "8b7bf6cc80de543d5939acf83c835d25ff3c652c1252f3dda5f980375326c8bf"
+    },
+    {
+      "source": "attention/sparse_flash_attention/op_kernel/arch35/common/util_regbase.h",
+      "destination": "csrc/attention/sparse_flash_attention/op_kernel/arch35/common/util_regbase.h",
+      "sha256": "938a6ff272eb2a033561ff4bc27208f7160d03d5d3fbd7dfc2febf01ed307b29"
+    },
+    {
+      "source": "common/include/op_kernel/util.h",
+      "destination": "csrc/attention/sparse_flash_attention/op_kernel/arch35/cann_common/base/util.h",
+      "sha256": "9f7cc20fdc7bf40ebff75ac66ff4a6fc49c7c0d2ce624a53f6c56106ae36b2a2"
+    },
+    {
+      "source": "attention/common/op_kernel/arch35/vf/vf_mul_sel_softmaxflashv2_cast_nz_sfa.h",
+      "destination": "csrc/attention/sparse_flash_attention/op_kernel/arch35/cann_common/arch35/vf/vf_mul_sel_softmaxflashv2_cast_nz_sfa.h",
+      "sha256": "7d7f5a1756fe3728afa4d58bfe322f0e4085fb1c4bfd06ef33ef965f366bd201"
+    },
+    {
+      "source": "attention/common/op_kernel/arch35/vf/vf_flashupdate_new.h",
+      "destination": "csrc/attention/sparse_flash_attention/op_kernel/arch35/cann_common/arch35/vf/vf_flashupdate_new.h",
+      "sha256": "8439b159902eb08b87d3732e111acf8d097aaf00c1d441379ed729cb5862493e"
+    },
+    {
+      "source": "attention/common/op_kernel/buffers_policy.h",
+      "destination": "csrc/attention/sparse_flash_attention/op_kernel/arch35/cann_common/buffers_policy.h",
+      "sha256": "7ed41f4f61922e39bef395304afd1b329b1ed3288425fa4c2abe533b8111581d"
+    },
+    {
+      "source": "attention/common/op_kernel/attn_buffer_manager.h",
+      "destination": "csrc/attention/sparse_flash_attention/op_kernel/arch35/cann_common/attn_buffer_manager.h",
+      "sha256": "b00c5b61e997b89861c6ae9a607c18e6a8c483a5bf36535bf3ed4cd5250af832"
+    },
+    {
+      "source": "attention/common/op_kernel/attn_buffer.h",
+      "destination": "csrc/attention/sparse_flash_attention/op_kernel/arch35/cann_common/attn_buffer.h",
+      "sha256": "d428a0415cb5a9012a99146d3163920fccf9a26e346b5002ab8b2d2529438a65"
+    },
+    {
+      "source": "attention/common/op_kernel/buffer_mix_core.h",
+      "destination": "csrc/attention/sparse_flash_attention/op_kernel/arch35/cann_common/buffer_mix_core.h",
+      "sha256": "fcab2165aae59ae6bf64b438671959328e5a41a5260f5ea05034a4f70e57ef63"
+    },
+    {
+      "source": "attention/common/op_kernel/arch35/vf/vf_basic_block_aligned128_no_update_sfa.h",
+      "destination": "csrc/attention/sparse_flash_attention/op_kernel/arch35/cann_common/arch35/vf/vf_basic_block_aligned128_no_update_sfa.h",
+      "sha256": "f626678d92ed72fb6a433dc6efb56478aebf7e79738abc07ecf1674c0f4ddd6c"
+    },
+    {
+      "source": "attention/common/op_kernel/arch35/vf/vf_basic_block_aligned128_update_sfa.h",
+      "destination": "csrc/attention/sparse_flash_attention/op_kernel/arch35/cann_common/arch35/vf/vf_basic_block_aligned128_update_sfa.h",
+      "sha256": "92157e409c53cc2326d0ce2ae4e8e34fcaa5587a0ec5ec5b8186290411bbff6d"
+    },
+    {
+      "source": "attention/common/op_kernel/arch35/vf/vf_basic_block_unaligned64_update_sfa.h",
+      "destination": "csrc/attention/sparse_flash_attention/op_kernel/arch35/cann_common/arch35/vf/vf_basic_block_unaligned64_update_sfa.h",
+      "sha256": "92812498c49eb72051c3812ab8f2282ad78672f53aceef9b4fb9b7699013c193"
+    },
+    {
+      "source": "attention/common/op_kernel/arch35/vf/vf_basic_block_unaligned64_no_update_sfa.h",
+      "destination": "csrc/attention/sparse_flash_attention/op_kernel/arch35/cann_common/arch35/vf/vf_basic_block_unaligned64_no_update_sfa.h",
+      "sha256": "ae455a06a43c6f91b1a446b0a955385e5381f4882f038a2f671c7cef67e5747b"
+    },
+    {
+      "source": "attention/common/op_kernel/arch35/vf/vf_basic_block_unaligned128_no_update_sfa.h",
+      "destination": "csrc/attention/sparse_flash_attention/op_kernel/arch35/cann_common/arch35/vf/vf_basic_block_unaligned128_no_update_sfa.h",
+      "sha256": "92c083cc3e548952fb8bff43253f7c3eac85e929e109a45d46cec40f7244f481"
+    },
+    {
+      "source": "attention/common/op_kernel/arch35/vf/vf_basic_block_unaligned128_update_sfa.h",
+      "destination": "csrc/attention/sparse_flash_attention/op_kernel/arch35/cann_common/arch35/vf/vf_basic_block_unaligned128_update_sfa.h",
+      "sha256": "00aa17bb819a8fe16711689d538c6223815c6597255a5e365f399b8c218450d0"
+    },
+    {
+      "source": "attention/common/op_kernel/arch35/vf/vf_basic_block_utils.h",
+      "destination": "csrc/attention/sparse_flash_attention/op_kernel/arch35/cann_common/arch35/vf/vf_basic_block_utils.h",
+      "sha256": "d660a56ddcd8b9da813ab531642ae088ce3321910ba7c10f74541a56c4ec2c26"
+    },
+    {
+      "source": "attention/common/op_kernel/arch35/vf/vf_basic_block_128_common_sfa.h",
+      "destination": "csrc/attention/sparse_flash_attention/op_kernel/arch35/cann_common/arch35/vf/vf_basic_block_128_common_sfa.h",
+      "sha256": "290de41027cf284e46e0904db199e0db27d4d9be87d9a6d4700d76cb630ef1c5"
+    },
+    {
+      "source": "attention/common/op_kernel/arch35/vf/vf_basic_block_unaligned64_common_sfa.h",
+      "destination": "csrc/attention/sparse_flash_attention/op_kernel/arch35/cann_common/arch35/vf/vf_basic_block_unaligned64_common_sfa.h",
+      "sha256": "0bde79b0d717f8ada6a35bb0fce49fc3b3a9e325e1aaa5ed919cfe23f4340778"
+    },
+    {
+      "source": "attention/common/op_kernel/offset_calculator.h",
+      "destination": "csrc/attention/sparse_flash_attention/op_kernel/arch35/cann_common/offset_calculator.h",
+      "sha256": "0ab85b78da7e3c4be75142bd2bc7c8d7b41fe564e34bc2dbe1dd4be84b142892"
+    },
+    {
+      "source": "attention/common/op_kernel/matmul.h",
+      "destination": "csrc/attention/sparse_flash_attention/op_kernel/arch35/cann_common/matmul.h",
+      "sha256": "44a7bb2297bfe22c115d1ba76b353d8391d710ff9d3797a449da80d6b280db36"
+    },
+    {
+      "source": "attention/common/op_kernel/FixpipeOut.h",
+      "destination": "csrc/attention/sparse_flash_attention/op_kernel/arch35/cann_common/FixpipeOut.h",
+      "sha256": "2be00d49a66653b1c1e44529bdf7f377edbba129af1a4ce2b30ffd205c509757"
+    },
+    {
+      "source": "attention/common/op_kernel/CopyInL1.h",
+      "destination": "csrc/attention/sparse_flash_attention/op_kernel/arch35/cann_common/CopyInL1.h",
+      "sha256": "4868e262eec86e205418786e7dae13bf267681559af6dbc1c11ce56d989b9130"
+    },
+    {
+      "source": "attention/common/op_kernel/memcopy/gm_layout.h",
+      "destination": "csrc/attention/sparse_flash_attention/op_kernel/arch35/cann_common/memcopy/gm_layout.h",
+      "sha256": "c9b60ed4990bf026c8585b7f1713b2f0e609ea28964b94b9da03640555c9924c"
+    },
+    {
+      "source": "attention/common/op_kernel/memcopy/parser.h",
+      "destination": "csrc/attention/sparse_flash_attention/op_kernel/arch35/cann_common/memcopy/parser.h",
+      "sha256": "795c722d5f2aab9767764afc33f5bbd8db401de49d4814ff60d8c573e784a6d4"
+    },
+    {
+      "source": "attention/common/op_kernel/memcopy/offset_calculator_v2.h",
+      "destination": "csrc/attention/sparse_flash_attention/op_kernel/arch35/cann_common/memcopy/offset_calculator_v2.h",
+      "sha256": "2f07ff5a8368b2b22797f2a1eb56a64202ac07c1fbfd68c034076dc014417ee4"
+    },
+    {
+      "source": "attention/common/op_kernel/memcopy/fa_gm_tensor.h",
+      "destination": "csrc/attention/sparse_flash_attention/op_kernel/arch35/cann_common/memcopy/fa_gm_tensor.h",
+      "sha256": "5bdeb9f8565cb931d2791bec62963b725e4007855b3ea5e9dc156b9673e41020"
+    },
+    {
+      "source": "attention/common/op_kernel/memcopy/fa_l1_tensor.h",
+      "destination": "csrc/attention/sparse_flash_attention/op_kernel/arch35/cann_common/memcopy/fa_l1_tensor.h",
+      "sha256": "8eb170da3a99874ca9bb020ea91f6326e30486495c6ec4e4bfbf9082ff69673f"
+    },
+    {
+      "source": "attention/common/op_kernel/memcopy/gm_coord.h",
+      "destination": "csrc/attention/sparse_flash_attention/op_kernel/arch35/cann_common/memcopy/gm_coord.h",
+      "sha256": "9888e757f2c50e8efb109babd09f6fe1a3a8c2ba98051d72744f8f17931af4a1"
+    }
+  ]
+}

@@ -34,7 +34,7 @@ using namespace AscendC;
         templateClass<CubeBlockType, VecBlockType> op;                                            \
         GET_TILING_DATA_WITH_STRUCT(tilingdataClass, tiling_data_in, tiling);                       \
         op.Init(query, key, value, sparseIndices, actualSeqLengthsQuery, actualSeqLengthsKV,      \
-	    blocktable, queryRope, keyRope, attentionOut, softmaxMax, softmaxSum, user, nullptr, tiling, &tPipe);         \
+	    blocktable, queryRope, keyRope, attentionOut, softmaxMax, softmaxSum, nullptr, user, nullptr, tiling, &tPipe);         \
         op.Process();                                                                             \
     } while (0)
 #else
@@ -48,7 +48,7 @@ using namespace AscendC;
         GET_TILING_DATA_WITH_STRUCT(tilingdataClass, tiling_data_in, tiling);                       \
         const tilingdataClass *__restrict tilingData = &tiling_data_in;                                     \
         op.Init(query, key, value, sparseIndices, actualSeqLengthsQuery, actualSeqLengthsKV,      \
-	    blocktable, queryRope, keyRope, attentionOut, softmaxMax, softmaxSum, user, tilingData, tiling, &tPipe);         \
+	    blocktable, queryRope, keyRope, attentionOut, softmaxMax, softmaxSum, nullptr, user, tilingData, tiling, &tPipe);         \
         op.Process();                                                                             \
     } while (0)
 #endif
