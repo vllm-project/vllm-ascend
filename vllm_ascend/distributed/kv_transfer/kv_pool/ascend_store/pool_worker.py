@@ -2939,7 +2939,6 @@ class KVPoolWorker:
             raise TypeError(
                 f"Non-layerwise KV save requires KVCacheStoreSendingThread, but got {type(send_thread).__name__}"
             )
-        send_thread.raise_if_failed()
         requests: list[ReqMeta] = []
 
         for request in connector_metadata.requests:
@@ -3218,14 +3217,15 @@ class KVPoolWorker:
             len(keys_c),
         )
 
-    def _store_kv_tp_mismatch(self, req_meta: ReqMeta) -> None:
+    def _store_kv_tp_mismatch(self, req_meta: ReqMeta) -> bool:
         send_thread = self.kv_send_thread
         if send_thread is None:
-            return
+            logger.error("Cannot save TP-mismatch KV without a sending thread")
+            return False
         assert isinstance(send_thread, KVCacheStoreSendingThread)
         req_id = req_meta.req_id
         if not send_thread.is_live_store_job(req_meta):
-            return
+            return False
         token_len = req_meta.token_len_chunk
         block_ids = req_meta.block_ids_by_group[0]
         save_start_token = send_thread.get_saved_offset(req_id)
@@ -3239,7 +3239,7 @@ class KVPoolWorker:
             save_start_token=save_start_token,
         )
         if not keys:
-            return
+            return True
         logical_key_count = len(keys)
         partitions = getattr(self.token_database, "partitions", None)
         if self.kv_role == "kv_consumer" and partitions is not None and len(partitions) > 1:
@@ -3252,16 +3252,23 @@ class KVPoolWorker:
                 addrs,
                 sizes,
             )
-        if len(keys) % logical_key_count != 0:
-            raise RuntimeError(
-                f"Prefill-PP adaptor expanded {logical_key_count} TP keys to an invalid count {len(keys)}"
-            )
+        if not keys or len(keys) % logical_key_count != 0:
+            logger.error("Prefill-PP adaptor expanded %s TP keys to an invalid count %s", logical_key_count, len(keys))
+            return False
         physical_keys_per_logical_key = len(keys) // logical_key_count
         physical_keys_per_block = self.num_sub_keys * physical_keys_per_logical_key
         exists_states = send_thread.lookup(keys)
+        if len(exists_states) != len(keys):
+            logger.error(
+                "Invalid TP-mismatch lookup result count for request %s: expected=%d actual=%d",
+                req_id,
+                len(keys),
+                len(exists_states),
+            )
+            return False
         missing_indices = [i for i, exists in enumerate(exists_states) if not exists]
         if not missing_indices:
-            return
+            return True
         missing_keys = [keys[i] for i in missing_indices]
         missing_addrs = [addrs[i] for i in missing_indices]
         missing_sizes = [sizes[i] for i in missing_indices]
@@ -3276,9 +3283,10 @@ class KVPoolWorker:
         put_result = self.m_store.put(missing_keys, missing_addrs, missing_sizes)
         if isinstance(put_result, list):
             if len(put_result) != len(missing_keys):
-                raise RuntimeError(
-                    f"KV store backend returned {len(put_result)} results for {len(missing_keys)} TP-mismatch keys"
+                logger.error(
+                    "KV store backend returned %s results for %s TP-mismatch keys", len(put_result), len(missing_keys)
                 )
+                return False
             put_failed = not all(put_result)
         else:
             put_failed = put_result is False
@@ -3347,7 +3355,9 @@ class KVPoolWorker:
                 send_thread.update_kv_event(stored_events)
         if put_failed:
             qualifier = "partially " if isinstance(put_result, list) else ""
-            raise RuntimeError(f"KV store backend {qualifier}failed to put TP-mismatch request {req_id}")
+            logger.error("KV store backend %sfailed to put TP-mismatch request %s", qualifier, req_id)
+            return False
+        return True
 
     def get_finished(self, finished_req_ids: set[str], meta: AscendConnectorMetadata) -> tuple[set[str], set[str]]:
         if self.use_block_key_layerwise:

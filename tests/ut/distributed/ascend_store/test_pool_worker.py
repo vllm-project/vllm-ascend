@@ -1337,7 +1337,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker"
         with patch(f"{module}.torch.npu", create=True):
             worker.wait_for_save(meta)
-        worker.kv_send_thread.raise_if_failed.assert_called_once_with()
+        worker.kv_send_thread.raise_if_failed.assert_not_called()
         worker.kv_send_thread.add_save_batch.assert_called_once_with([req])
         worker.kv_send_thread.request_queue.join.assert_not_called()
         self.assertIs(worker._previous_save_batch, save_batch)
@@ -1357,7 +1357,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         meta = AscendConnectorMetadata(set(), set())
         meta.add_request(req)
         worker.wait_for_save(meta)
-        worker.kv_send_thread.raise_if_failed.assert_called_once_with()
+        worker.kv_send_thread.raise_if_failed.assert_not_called()
         worker.kv_send_thread.add_save_batch.assert_not_called()
         worker.kv_send_thread.request_queue.join.assert_not_called()
 
@@ -2768,8 +2768,8 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
             store_job_id=1,
         )
 
-        with self.assertRaisesRegex(RuntimeError, "partially failed"):
-            worker._store_kv_tp_mismatch(req)
+        with self.assertLogs("vllm", level="ERROR"):
+            self.assertFalse(worker._store_kv_tp_mismatch(req))
 
         events = send_thread.update_kv_event.call_args.args[0]
         self.assertEqual(len(events), 1)

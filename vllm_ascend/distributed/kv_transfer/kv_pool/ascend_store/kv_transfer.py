@@ -546,7 +546,9 @@ class KVTransferThread(threading.Thread):
 
     def add_request(self, request: Any) -> None:
         with self._request_submit_lock:
-            self.raise_if_failed()
+            if self._fatal_error is not None:
+                logger.error("Reject KV transfer submission to failed thread %s: %s", self.name, self._fatal_error)
+                return
             self.request_queue.put(request)
 
     def get_and_clear_finished_requests(
@@ -923,13 +925,14 @@ class KVCacheStoreSendingThread(KVTransferThread):
         # the normal Decode path.
         self._retry_token_ids: dict[str, tuple[int, list[int]]] = {}
 
-    def lookup_store_keys(self, keys: list[str], kv_cache_group_id: int = 0) -> list[bool]:
+    def lookup_store_keys(self, keys: list[str], kv_cache_group_id: int = 0) -> list[bool] | None:
         """Return existence in the logical Decode-key domain.
 
         A Decode consumer may expand one logical block into one key per
         Prefill PP rank. The block is reusable only when every expanded key is
         present; checking only ``@pp_rank:0`` would turn a partial PUT into a
         false hit and permanently skip the missing partitions on retry.
+        Return None after logging malformed results; callers must fail the job.
         """
         partitions = getattr(self.token_database, "partitions", None)
         if self.kv_role != "kv_consumer" or not keys or partitions is None or len(partitions) <= 1:
@@ -943,17 +946,20 @@ class KVCacheStoreSendingThread(KVTransferThread):
             kv_cache_group_id=kv_cache_group_id,
         )
         if len(expanded_keys) % len(keys) != 0:
-            raise RuntimeError(
-                f"Prefill-PP key adaptor expanded {len(keys)} logical keys to an invalid count {len(expanded_keys)}"
+            logger.error(
+                "Prefill-PP key adaptor expanded %s logical keys to an invalid count %s", len(keys), len(expanded_keys)
             )
+            return None
         partitions_per_key = len(expanded_keys) // len(keys)
         if partitions_per_key == 0:
-            raise RuntimeError("Prefill-PP key adaptor returned no store keys")
+            logger.error("Prefill-PP key adaptor returned no store keys")
+            return None
         expanded_exists = self.lookup(expanded_keys)
         if len(expanded_exists) != len(expanded_keys):
-            raise RuntimeError(
-                f"KV store returned {len(expanded_exists)} lookup results for {len(expanded_keys)} Prefill-PP keys"
+            logger.error(
+                "KV store returned %s lookup results for %s Prefill-PP keys", len(expanded_exists), len(expanded_keys)
             )
+            return None
         return [
             all(expanded_exists[start : start + partitions_per_key])
             for start in range(0, len(expanded_exists), partitions_per_key)
@@ -974,7 +980,16 @@ class KVCacheStoreSendingThread(KVTransferThread):
         # to a fatal state mutually exclusive. A failed consumer therefore
         # either drains this complete batch or rejects it before registration.
         with self._request_submit_lock:
-            self.raise_if_failed()
+            if self._fatal_error is not None:
+                logger.error("Reject KV save batch to failed thread %s: %s", self.name, self._fatal_error)
+                # 未入队的 batch 不会读取源 KV，但 Scheduler 的 pin 仍须报告完成。
+                # 不登记 jobs、不推进成功 offset，也不发布 BlockStored。
+                with self.completed_events_lock:
+                    for request in requests:
+                        if request.event_id is not None:
+                            self.completed_events[request.event_id] = self.completed_events.get(request.event_id, 0) + 1
+                save_batch.done.set()
+                return save_batch
             for request in requests:
                 self.add_stored_request(request)
             for request in requests:
@@ -1119,23 +1134,24 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 # Complete the batch fence even after a fatal dispatch error.
                 # Request fences observe _fatal_error before allowing block reuse.
                 failed_request.done.set()
-            # Dispatch can fail after a subclass has already acknowledged the
-            # current queue item. Emergency cleanup must remain idempotent so
-            # it does not hide the original failure with a second task_done().
-            # This thread is the queue's only consumer; producers may increase
-            # unfinished_tasks, but cannot make this positive check stale in
-            # the unsafe direction.
-            if self.request_queue.unfinished_tasks > 0:
-                self.request_queue.task_done()
 
+        # run() 持有 _request_submit_lock，且本线程是唯一消费者，队列长度在清理期间不会增加。
+        # unfinished_tasks 包含 queued items 和尚未确认的当前 item；若两者数量相等，
+        # 当前 item 已经 task_done，不能借用后续任务的计数再次确认它。
+        queued_request_count = self.request_queue.qsize()
+        current_needs_ack = self.request_queue.unfinished_tasks > queued_request_count
         if request_data is not None:
             finish_failed_request(request_data)
-        while True:
+            if current_needs_ack:
+                self.request_queue.task_done()
+        # 每个 get_nowait 成功取出的 item 分别确认一次，包含最后的 batch fence。
+        for _ in range(queued_request_count):
             try:
                 queued_request = self.request_queue.get_nowait()
             except queue.Empty:
                 break
             finish_failed_request(queued_request)
+            self.request_queue.task_done()
 
     def _handle_request(self, req_meta: ReqMeta | KVCacheStoreBatch):
         if isinstance(req_meta, KVCacheStoreBatch):
@@ -1147,10 +1163,13 @@ class KVCacheStoreSendingThread(KVTransferThread):
             req_id = req_meta.req_id
             tracked_request = self.is_live_store_job(req_meta)
             try:
-                self.worker._store_kv_tp_mismatch(req_meta)
+                succeeded = self.worker._store_kv_tp_mismatch(req_meta)
                 if tracked_request:
-                    self.record_saved_offset(req_meta, req_meta.token_len_chunk)
-                    self._clear_retry_token_ids(req_meta)
+                    if succeeded is True:
+                        self.record_saved_offset(req_meta, req_meta.token_len_chunk)
+                        self._clear_retry_token_ids(req_meta)
+                    else:
+                        self._remember_retry_token_ids(req_meta)
             except Exception:
                 self._remember_retry_token_ids(req_meta)
                 logger.exception("Failed to store KV cache for TP-mismatch request %s", req_id)
@@ -1170,9 +1189,13 @@ class KVCacheStoreSendingThread(KVTransferThread):
             tracked_request = self.is_live_store_job(req_meta)
             if not tracked_request:
                 return
-            self._handle_stored_request(req_meta)
-            self.record_saved_offset(req_meta, req_meta.token_len_chunk)
-            self._clear_retry_token_ids(req_meta)
+            # 写入失败通过返回值报告；不能把日志后的正常返回当成成功。
+            succeeded = self._handle_stored_request(req_meta)
+            if succeeded is True:
+                self.record_saved_offset(req_meta, req_meta.token_len_chunk)
+                self._clear_retry_token_ids(req_meta)
+            else:
+                self._remember_retry_token_ids(req_meta)
         except Exception:
             self._remember_retry_token_ids(req_meta)
             logger.exception("Failed to store KV cache for request %s", req_id)
@@ -1185,8 +1208,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     self.completed_events[req_meta.event_id] = 1
             self.request_queue.task_done()
 
-    def _handle_stored_request(self, req_meta: ReqMeta):
-        """Store missing KV chunks for one request."""
+    def _handle_stored_request(self, req_meta: ReqMeta) -> bool:
+        """Store missing KV chunks; log validation/PUT failures and return False."""
         token_len = req_meta.token_len_chunk
         req_id = req_meta.req_id
         current_event = req_meta.current_event
@@ -1295,6 +1318,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 # ranks. A partial prior PUT must be retried, so require every
                 # partition key to exist before skipping the logical block.
                 exists_states = self.lookup_store_keys(keys, kv_cache_group_id=group_id)
+                if exists_states is None:
+                    return False
                 missing_indices = [index for index, exists in enumerate(exists_states) if not exists]
             else:
                 missing_indices = self._get_missing_indices(keys, require_exists_check=self.enable_kv_event)
@@ -1376,17 +1401,29 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     sizes,
                     kv_cache_group_id=group_id,
                 )
+            if not keys or len(keys) % logical_key_count != 0:
+                logger.error(
+                    "Invalid PP key expansion for request %s: logical=%d physical=%d",
+                    req_id,
+                    logical_key_count,
+                    len(keys),
+                )
+                return False
             if current_event is not None:
                 current_event.synchronize()
             put_result = self.m_store.put(keys, addrs, sizes)
             if isinstance(put_result, list):
                 if len(put_result) != len(keys):
-                    raise RuntimeError(f"KV store backend returned {len(put_result)} results for {len(keys)} keys")
+                    logger.error("KV store backend returned %s results for %s keys", len(put_result), len(keys))
+                    return False
                 if not all(put_result):
                     if len(put_result) % logical_key_count != 0:
-                        raise RuntimeError(
-                            f"KV store returned {len(put_result)} physical results for {logical_key_count} logical keys"
+                        logger.error(
+                            "KV store returned %s physical results for %s logical keys",
+                            len(put_result),
+                            logical_key_count,
                         )
+                        return False
                     physical_keys_per_logical = len(put_result) // logical_key_count
                     logical_success = [
                         all(put_result[start : start + physical_keys_per_logical])
@@ -1400,11 +1437,14 @@ class KVCacheStoreSendingThread(KVTransferThread):
                                 if succeeded
                             ]
                         )
-                    raise RuntimeError(f"KV store backend partially failed to put request {req_id}")
+                    logger.error("KV store backend partially failed to put request %s", req_id)
+                    return False
             elif put_result is False:
-                raise RuntimeError(f"KV store backend failed to put request {req_id}")
+                logger.error("KV store backend failed to put request %s", req_id)
+                return False
             if self.enable_kv_event and stored_events:
                 self.update_kv_event(stored_events)
+        return True
 
 
 class KVCacheStoreRecvingThread(KVTransferThread):

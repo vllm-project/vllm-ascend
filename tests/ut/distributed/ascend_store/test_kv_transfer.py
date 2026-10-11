@@ -840,17 +840,106 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         self.assertFalse(t.is_stored_request("r1"))
         self.assertEqual(t.get_completed_events(), {7: 1})
 
+    def test_dispatch_cleanup_keeps_queued_acknowledgements_after_current_was_done(self):
+        t, _ = self._make_thread([0])
+        current = ReqMeta("r1", event_id=7, store_job_id=7)
+        queued = ReqMeta("r2", event_id=8, store_job_id=8)
+        batch = t.add_save_batch([current, queued])
+        self.assertIs(t.request_queue.get_nowait(), current)
+        self.assertEqual(t.finish_store_job(current), 0)
+        t.completed_events[7] = 1
+        t.request_queue.task_done()
+        acknowledge = t.request_queue.task_done
+
+        def checked_acknowledge():
+            self.assertGreater(t.request_queue.unfinished_tasks, t.request_queue.qsize())
+            acknowledge()
+
+        with (
+            t._request_submit_lock,
+            patch.object(t.request_queue, "task_done", side_effect=checked_acknowledge) as task_done,
+        ):
+            t._handle_request_exception(current)
+        self.assertEqual(task_done.call_count, 2)
+        self.assertEqual(t.request_queue.unfinished_tasks, 0)
+        self.assertTrue(t.request_queue.empty())
+        self.assertTrue(batch.done.is_set())
+        self.assertFalse(t.is_stored_request("r2"))
+        self.assertEqual(t.get_completed_events(), {7: 1, 8: 1})
+
     def test_add_save_batch_rejects_job_after_fatal_error(self):
         t, _ = self._make_thread([0])
         req = ReqMeta("r1", event_id=7, store_job_id=7)
         t._fatal_error = RuntimeError("dispatch failed")
 
-        with self.assertRaisesRegex(RuntimeError, "failed during asynchronous transfer"):
-            t.add_save_batch([req])
+        with self.assertLogs("vllm", level="ERROR"):
+            batch = t.add_save_batch([req])
+        self.assertTrue(batch.done.is_set())
+        self.assertEqual(t.get_completed_events(), {7: 1})
+        self.assertEqual(t.get_saved_offset("r1"), 0)
 
         self.assertFalse(t.is_stored_request("r1"))
         self.assertTrue(t.request_queue.empty())
         self.assertEqual(t.request_queue.unfinished_tasks, 0)
+
+    def test_add_request_logs_and_rejects_after_fatal_error(self):
+        t, _ = self._make_thread()
+        t._fatal_error = RuntimeError("dispatch failed")
+        with self.assertLogs("vllm", level="ERROR"):
+            t.add_request(ReqMeta("r1"))
+        self.assertTrue(t.request_queue.empty())
+        self.assertEqual(t.request_queue.unfinished_tasks, 0)
+
+    def test_malformed_put_result_does_not_advance_or_publish(self):
+        for result in ([], [True], [True, True, True]):
+            with self.subTest(result=result):
+                t, store = self._make_thread([0, 0], enable_kv_event=True)
+                store.put = MagicMock(return_value=result)
+                req = ReqMeta(
+                    "r1",
+                    token_len_chunk=32,
+                    block_ids=[0, 1],
+                    block_hashes=[b"h0", b"h1"],
+                    token_ids=list(range(32)),
+                    original_block_size=16,
+                    event_id=7,
+                )
+                t.add_stored_request(req)
+                t.request_queue.put(req)
+                with self.assertLogs("vllm", level="ERROR"):
+                    t._handle_request(req)
+                self.assertEqual(t.get_saved_offset("r1"), 0)
+                self.assertEqual(t._retry_token_ids["r1"], (0, list(range(32))))
+                self.assertFalse(t.is_stored_request("r1"))
+                self.assertEqual(t.request_queue.unfinished_tasks, 0)
+                self.assertEqual(t.get_completed_events(), {7: 1})
+                self.assertEqual(t.kv_events, [])
+                self.assertIsNone(t._fatal_error)
+
+    def test_tp_mismatch_false_result_retains_retry_progress(self):
+        t, _ = self._make_thread(enable_kv_event=True)
+        t.worker = MagicMock(tp_mismatch=True)
+        t.worker._store_kv_tp_mismatch.return_value = False
+        req = ReqMeta("r1", token_len_chunk=16, token_ids=list(range(16)), event_id=7)
+        t.add_stored_request(req)
+        t.request_queue.put(req)
+        t._handle_request(req)
+        self.assertEqual(t.get_saved_offset("r1"), 0)
+        self.assertEqual(t._retry_token_ids["r1"], (0, list(range(16))))
+        self.assertEqual(t.get_completed_events(), {7: 1})
+        self.assertFalse(t.is_stored_request("r1"))
+        self.assertEqual(t.request_queue.unfinished_tasks, 0)
+
+    def test_invalid_pp_lookup_logs_without_claiming_a_hit(self):
+        t, _ = self._make_thread()
+        t.kv_role = "kv_consumer"
+        t.token_database.partitions = [1, 1]
+        for expanded, exists in (([], []), (["a", "b", "c"], []), (["a", "b", "c", "d"], [True])):
+            with self.subTest(expanded=expanded, exists=exists):
+                t._decode_adaptor_prefill_pp = MagicMock(return_value=(expanded, [], []))
+                t.lookup = MagicMock(return_value=exists)
+                with self.assertLogs("vllm", level="ERROR"):
+                    self.assertIsNone(t.lookup_store_keys(["x", "y"]))
 
     def test_handle_request_sync_and_dcp(self):
         t, store = self._make_thread([0])
@@ -1191,6 +1280,7 @@ class TestKVTransferTpMismatchDispatch(unittest.TestCase):
 
                             def save(req, store=store):
                                 store.put([], [], [])
+                                return True
 
                             worker._store_kv_tp_mismatch.side_effect = save
                         requests = [
