@@ -595,7 +595,6 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
                         init_blocks=self.init_blocks,
                         local_blocks=self.local_blocks,
                         decode_query_len=d.decode_query_len,
-                        return_select_num_idx=True,
                     )
             else:
                 tp_size = tp_group.world_size
