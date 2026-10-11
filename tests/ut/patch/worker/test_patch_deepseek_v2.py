@@ -85,6 +85,9 @@ def test_mtp_layer_keeps_indexer():
 @pytest.mark.parametrize("last_rank", [False, True])
 @pytest.mark.parametrize("native", [False, True])
 def test_forward_compilation_does_not_trigger_buffer_mutation_guard(monkeypatch, last_rank, native):
+    # CPU UTs mock the NPU backend, but Dynamo's stream tracking calls the
+    # real accelerator API. This test only compiles CPU tensor operations.
+    monkeypatch.setattr(torch.accelerator, "is_available", lambda: False)
     group = SimpleNamespace(is_first_rank=True, is_last_rank=last_rank)
     monkeypatch.setattr(patch_deepseek_v2, "get_pp_group", lambda: group)
     model = SimpleNamespace(
