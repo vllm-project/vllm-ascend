@@ -221,6 +221,7 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
             # MegaMoe consumes the non-transposed per-expert weight/scale lists
             # built in process_weights_after_loading (the non-mega path uses the
             # transposed single tensors below).
+            shared = getattr(layer, "ascend_megamoe_shared_weights", None)
             return MoEWeights(
                 w1=layer.cann_mega_moe_w13_weight_list,
                 w2=layer.cann_mega_moe_w2_weight_list,
@@ -228,6 +229,10 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
                 w2_scale=layer.cann_mega_moe_w2_weight_scale_list,
                 w1_scale_bias=None,
                 w2_scale_bias=None,
+                shared_w1=shared[0] if shared else None,
+                shared_w2=shared[1] if shared else None,
+                shared_w1_scale=shared[2] if shared else None,
+                shared_w2_scale=shared[3] if shared else None,
             )
         else:
             return MoEWeights(

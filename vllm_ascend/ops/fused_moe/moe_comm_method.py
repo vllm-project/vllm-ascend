@@ -516,13 +516,64 @@ class FusedMC2CommImpl(MoECommMethod):
         # Quant methods supply the routed layer, whose activation was bound at
         # initialization. The shared communicator may belong to a later layer.
         layer = cast(torch.nn.Module, fused_experts_input.layer)
+
+        # Shared experts fused into the MegaMoe operator (A5 only): their
+        # GMM1 + activation + GMM2 runs inside the kernel on the local tokens,
+        # so no Dispatch/Combine traffic is involved. The caller skips the
+        # separate shared-expert forward when this payload is present.
+        shared_kwargs: dict = {}
+        if weights.shared_w1 is not None:
+            # The shared expert may be quantized differently from the routed
+            # experts (W4A4C8: MXFP4 routed + MXFP8 shared). Prefer the quant
+            # settings recorded with the fused shared weights -- ACL dtype ints
+            # accepted by the MegaMoe wrapper -- and only fall back to mirroring
+            # the routed activation quant dtype when they are unavailable.
+            shared_quant_out_dtype = getattr(layer, "ascend_megamoe_shared_quant_out_dtype", None)
+            if shared_quant_out_dtype is None:
+                shared_quant_out_dtype = (
+                    fused_experts_input.quant.mxfp.act_quant_type
+                    if fused_experts_input.quant.mxfp is not None
+                    else None
+                )
+            shared_kwargs = dict(
+                shared_l1_weights=weights.shared_w1,
+                shared_l2_weights=weights.shared_w2,
+                shared_l1_weights_sf=weights.shared_w1_scale,
+                shared_l2_weights_sf=weights.shared_w2_scale,
+                shared_expert_quant_out_dtype=shared_quant_out_dtype,
+            )
+            # Mixed quantization: declare the shared weight dtype explicitly,
+            # otherwise the operator inherits the routed weight type for the
+            # shared descriptors and resolves the wrong shared GMM mode.
+            shared_weight_type = getattr(layer, "ascend_megamoe_shared_weight_type", None)
+            if shared_weight_type is not None and shared_weight_type != weight_type:
+                shared_kwargs["shared_weight1_type"] = shared_weight_type
+                shared_kwargs["shared_weight2_type"] = shared_weight_type
+
+        topk_weights = fused_experts_input.topk_weights.to(torch.float32)
+        if weights.shared_w1 is not None:
+            # When the shared expert runs inside MegaMoe, the operator output
+            # contains routed + shared combined. The runner's output-side
+            # routed_scaling_factor would scale the shared contribution too,
+            # so fold the factor into the topk weights instead; the runner
+            # skips its own scaling for the fused call (see FusedMoE.forward).
+            # The factor must come from the runner: with
+            # apply_routed_scale_to_output=True (e.g. GLM MoE models on NPU)
+            # the router and the routed-experts layer both hold 1.0 and only
+            # the runner keeps the real value, so the runner plumbs it down
+            # as ``ascend_megamoe_fold_scale`` before dispatching.
+            routed_scaling_factor = getattr(layer, "ascend_megamoe_fold_scale", None)
+            if routed_scaling_factor is None:
+                routed_scaling_factor = getattr(layer, "routed_scaling_factor", None)
+            if routed_scaling_factor is not None and routed_scaling_factor != 1.0:
+                topk_weights = topk_weights * routed_scaling_factor
         activation_kwargs = getattr(layer, "mega_moe_activation_kwargs", None)
         if activation_kwargs is None:
             activation_kwargs = getattr(self, "mega_moe_activation_kwargs", {}) or {}
         out, expert_tokens = self.mega_moe(
             fused_experts_input.hidden_states,
             fused_experts_input.topk_ids.to(torch.int32),
-            fused_experts_input.topk_weights.to(torch.float32),
+            topk_weights,
             weight1,
             weight2,
             self.mega_moe_symm_buffer,
@@ -533,6 +584,7 @@ class FusedMC2CommImpl(MoECommMethod):
             x_active_mask=x_active_mask,
             weight1_type=weight_type,
             weight2_type=weight_type,
+            **shared_kwargs,
             **activation_kwargs,
         )
         # NOTE: self.expert_token_nums is only used by the
