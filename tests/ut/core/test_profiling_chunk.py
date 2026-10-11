@@ -222,6 +222,16 @@ class TestChunkSizePredictor(TestBase):
         self.assertIsNotNone(result)
         self.assertEqual(result % 128, 0)
 
+    def test_fit_chunk_constrains_negative_coefficients(self):
+        predictor = ChunkSizePredictor()
+        # The unconstrained solution is a=0, b=-1, c=11.
+        data = [[c * c, c, 1, 11 - c] for c in range(1, 6)]
+
+        self.assertTrue(predictor.fit_chunk(data))
+        self.assertGreaterEqual(predictor.quadratic_chunk_a, 0.0)
+        self.assertGreaterEqual(predictor.linear_chunk_b, 0.0)
+        self.assertGreaterEqual(predictor.constant_chunk_c, 0.0)
+
 
 # ===================================================================
 # ProfilingChunkManager
