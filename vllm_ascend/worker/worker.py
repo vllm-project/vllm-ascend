@@ -701,27 +701,17 @@ class NPUWorker(WorkerBase):
         has_mamba = any(isinstance(spec, MambaSpec) for spec in per_layer_specs)
         model_runner = getattr(self, "model_runner", None)
         layout = self.vllm_config.cache_config.get_resolved_kv_cache_layout()
-        # Multi-group pure-attention models (e.g. Step-3.7 full+sliding window)
+        # Step-3.5/3.7 (model_type step3p5/step3p7) multi-group attention models
         # share one overlay backing exactly like hybrid models: every group's
-        # page sum is identical, so the runner's shared-backing path materializes
-        # one physical block per block id. Exempt the budget when the groups are
-        # uniform; the runner falls back to per-layer buffers otherwise, which
-        # still matches this scale decision (no exemption -> scaled budget).
-        group_page_sums = []
-        for group in kv_cache_groups:
-            group_pages = 0
-            for layer_name in group.layer_names:
-                group_spec = group.kv_cache_spec
-                if isinstance(group_spec, UniformTypeKVCacheSpecs):
-                    layer_spec = group_spec.kv_cache_specs[layer_name]
-                else:
-                    layer_spec = group_spec
-                group_pages += layer_spec.page_size_bytes
-            group_page_sums.append(group_pages)
-        uniform_group_pages = len(set(group_page_sums)) <= 1
+        # page sum is identical, so the runner's shared-backing path
+        # materializes one physical block per block id. Exempt the budget for
+        # those models; other multi-group models fall back to per-layer
+        # buffers, which still matches this scale decision (no exemption ->
+        # scaled budget).
+        is_step_model = self.model_config.hf_text_config.model_type in ("step3p5", "step3p7")
         if (
             has_attention
-            and (has_mamba or uniform_group_pages)
+            and (has_mamba or is_step_model)
             and layout.is_layer_compact
             and layout.is_block_compact
             and getattr(model_runner, "supports_standardized_shared_kv_backing", False)

@@ -335,6 +335,7 @@ class TestNPUWorker(TestBase):
             kv_transfer_config=SimpleNamespace(kv_connector="FutureConnector"),
         )
         worker.get_kv_cache_spec = MagicMock(return_value={"attn": attn_spec, "linear_attn": mamba_spec})
+        worker.model_config = SimpleNamespace(hf_text_config=SimpleNamespace(model_type="qwen3"))
 
         for supports_standardized_backing, expected_budget in (
             (True, 12345),
@@ -351,7 +352,7 @@ class TestNPUWorker(TestBase):
                 with patch("vllm_ascend.worker.worker.get_kv_cache_groups", return_value=groups):
                     self.assertEqual(worker._scale_kv_cache_memory_for_multi_group(12345), expected_budget)
 
-    def test_pure_attention_multi_group_budget_follows_runner_backing_layout(self):
+    def test_pure_attention_multi_group_budget_scales_for_private_layout(self):
         from vllm_ascend.worker.worker import NPUWorker
 
         spec = FullAttentionSpec(
@@ -371,11 +372,14 @@ class TestNPUWorker(TestBase):
                 kv_cache_spec=spec,
             ),
         ]
-        layout = SimpleNamespace(is_layer_compact=True, is_block_compact=True)
-        cache_config = SimpleNamespace(get_resolved_kv_cache_layout=lambda: layout)
         worker = NPUWorker.__new__(NPUWorker)
         worker.vllm_config = SimpleNamespace(
-            cache_config=cache_config,
+            cache_config=SimpleNamespace(
+                get_resolved_kv_cache_layout=lambda: SimpleNamespace(
+                    is_layer_compact=True,
+                    is_block_compact=True,
+                )
+            ),
             kv_transfer_config=None,
         )
         worker.get_kv_cache_spec = MagicMock(
@@ -384,21 +388,21 @@ class TestNPUWorker(TestBase):
                 "decoder_attn": spec,
             }
         )
+        worker.model_config = SimpleNamespace(hf_text_config=SimpleNamespace(model_type="qwen3"))
+        worker.model_runner = SimpleNamespace(
+            supports_standardized_shared_kv_backing=True,
+            use_sparse=False,
+            use_compress=False,
+        )
 
-        for supports_standardized_backing, expected_budget in (
-            (True, 12345),
-            (False, 6172),
+        with patch(
+            "vllm_ascend.worker.worker.get_kv_cache_groups",
+            return_value=groups,
         ):
-            with self.subTest(
-                supports_standardized_backing=supports_standardized_backing,
-            ):
-                worker.model_runner = SimpleNamespace(
-                    use_sparse=False,
-                    use_compress=False,
-                    supports_standardized_shared_kv_backing=supports_standardized_backing,
-                )
-                with patch("vllm_ascend.worker.worker.get_kv_cache_groups", return_value=groups):
-                    self.assertEqual(worker._scale_kv_cache_memory_for_multi_group(12345), expected_budget)
+            self.assertEqual(
+                worker._scale_kv_cache_memory_for_multi_group(12345),
+                6172,
+            )
 
     @patch("vllm_ascend.utils.adapt_patch")
     @patch("vllm_ascend.ops")

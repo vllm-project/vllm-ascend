@@ -4979,6 +4979,10 @@ class NPUModelRunner(GPUModelRunner):
         self.hybrid_with_attn_and_mamba = any(
             isinstance(spec, MambaSpec) for spec in layer_kv_cache_spec.values()
         ) and any(isinstance(spec, AttentionSpec) for spec in layer_kv_cache_spec.values())
+        # Step-3.5/3.7 (model_type step3p5/step3p7) multi-group attention models
+        # overlay their groups on one backing exactly like hybrid models, even
+        # though they carry no Mamba layers.
+        self.is_step_model = self.model_config.hf_text_config.model_type in ("step3p5", "step3p7")
         strided_attention_cache_layers: set[str] = set()
         if (
             not self.use_dcp
@@ -5092,12 +5096,14 @@ class NPUModelRunner(GPUModelRunner):
         # contiguous per-layer tensors, which the default layer/block-compact
         # layout provides. Materialize slices of one backing tensor so cache
         # groups retain #51718's overlay semantics without reducing capacity.
+        # Step-3.5/3.7 (model_type step3p5/step3p7) multi-group attention
+        # models share this backing exactly like hybrid models; other
+        # multi-group models keep the generic per-descriptor allocation below.
         if (
             not is_dsv4_main
             and not uses_padded_page_layout
             and kv_cache_config.kv_cache_tensors
-            and (self.hybrid_with_attn_and_mamba
-                 or len(kv_cache_config.kv_cache_tensors) > 1)
+            and (self.hybrid_with_attn_and_mamba or self.is_step_model)
             and not self.use_sparse
             and not self.use_compress
         ):
