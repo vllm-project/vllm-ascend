@@ -153,7 +153,7 @@ def test_fused_cache_insert_precedes_indexer_and_attention():
     kernel = Mock(side_effect=lambda *args, **kwargs: order.append("insert") or (q, iq))
     module = SimpleNamespace(minimax_qknorm_rope_cache=kernel)
     with (
-        patch.dict("sys.modules", {"vllm_ascend.ops.triton.linearnorm.minimax_qknorm_rope_cache": module}),
+        patch.dict("sys.modules", {"vllm_ascend.ops.triton.msa.minimax_qknorm_rope_cache": module}),
         patch("vllm_ascend.models.minimax_m3.minimax_m3.get_forward_context", return_value=context),
     ):
         MiniMaxM3SparseAttention._run_fused_sparse_attention(layer, torch.empty(4, 1536), torch.arange(4), q)

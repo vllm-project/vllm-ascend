@@ -4,7 +4,7 @@
 import pytest
 import torch
 
-from vllm_ascend.ops.triton.linearnorm.minimax_qknorm_rope_cache import minimax_qknorm_rope_cache
+from vllm_ascend.ops.triton.msa.minimax_qknorm_rope_cache import minimax_qknorm_rope_cache
 
 
 def reference(packed, cos_sin, positions, weights, q_heads, kv_heads, index_heads, eps):
