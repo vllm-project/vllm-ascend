@@ -262,14 +262,11 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
         # Real PCP batches are already rank-local. Only the initial MRV2
         # dummy profile bypasses partition_batch and carries global rows.
         self._pcp_profile_num_tokens = None
-        profile_num_tokens = _EXTRA_CTX.pcp_profile_num_tokens
-        if profile_num_tokens is None:
-            return hidden_states, router_logits, mc2_mask
-        local_num_tokens = (profile_num_tokens + self.tp_size - 1) // self.tp_size
-        if hidden_states.shape[0] <= local_num_tokens:
+        if not _EXTRA_CTX.pcp_profile:
             return hidden_states, router_logits, mc2_mask
         self._pcp_profile_num_tokens = hidden_states.shape[0]
-        self._pcp_profile_local_num_tokens = local_num_tokens
+        pcp_size = get_pcp_group().world_size
+        self._pcp_profile_local_num_tokens = (hidden_states.shape[0] + pcp_size - 1) // pcp_size
         return (
             self._split_pcp_profile_tensor(hidden_states),
             self._split_pcp_profile_tensor(router_logits),
