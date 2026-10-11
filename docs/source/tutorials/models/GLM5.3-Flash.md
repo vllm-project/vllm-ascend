@@ -1,4 +1,4 @@
-# GLM-5.3-Flash (Experimental)
+# GLM-5.3-Flash
 
 ## 1 Introduction
 
@@ -6,7 +6,7 @@
 
 This document shows the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node deployment, 1P1D Prefill-Decode (PD) disaggregated deployment, multi-node deployment, and accuracy and performance evaluation.
 
-This document is written based on the vLLM-Ascend v0.30.0RC. This model is supported in this release.
+This document is based on vLLM-Ascend v0.30.0RC1, which supports GLM-5.3-Flash on Atlas 800I A2 and Atlas 800I A3. Support for 950DT Products is currently experimental; official support will be available in a future release.
 
 ## 2 Supported Features
 
@@ -14,33 +14,18 @@ Refer to [Supported Features List](../../user_guide/support_matrix/supported_mod
 
 Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
-The A3 PD configuration in this guide uses DP2/TP8 on the Prefill node and
-DP16/TP1 on the Decode node. Prefill runs in eager mode with FlashComm1, while
-Decode uses `FULL_DECODE_ONLY` graph mode and keeps FlashComm1 disabled.
-
-The A2 PD configuration in this guide uses DP2/TP8 across two Prefill
-nodes and DP8/TP2 across two Decode nodes. Prefill runs in eager mode,
-while Decode uses `FULL_DECODE_ONLY` graph mode and keeps FlashComm1
-disabled.
-
 GLM-5.3-Flash model currently supports only model runner V1 on Ascend, so
-all A3 scripts set `VLLM_USE_V2_MODEL_RUNNER=0` explicitly.
-
-Experimental SFA context parallelism can be enabled with
-`--additional-config '{"enable_dsa_cp": true}'`. It shards SFA query tokens
-within the tensor parallel group and keeps the main KV, indexer pool, and tail
-caches replicated. KDA continues to use its existing tensor parallel path.
-Keep both prefill context parallel size and decode context parallel size at 1.
+all Atlas 800I A3 scripts set `VLLM_USE_V2_MODEL_RUNNER=0` explicitly.
 
 ## 3 Prerequisites
 
 ### 3.1 Model Weight
 
 - `GLM-5.3-Flash-w8a8-mxfp8 (950DT Products mxfp8 Quantized)`: requires 1 950DT Products (96GB × 8) node.[Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8-mxfp8).
-- `GLM-5.3-Flash-w8a8`: requires 1 Atlas 800 A3 (128GB × 8) node for
+- `GLM-5.3-Flash-w8a8`: requires 1 Atlas 800I A3 (128GB × 8) node for
   single-node deployment, or 2 nodes for 1P1D PD disaggregated deployment.
   [Download model weight](https://modelers.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8).
-- `GLM-5.3-Flash-w8a8`: requires 2 Atlas 800 A2 (64GB × 8) nodes.[Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8).
+- `GLM-5.3-Flash-w8a8`: requires 2 Atlas 800I A2 (64GB × 8) nodes.[Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8).
 
 - You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to quantize the model directly.
 
@@ -61,7 +46,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     Start the docker image on each node.
 
     ```shell
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5
+    export IMAGE=quay.io/ascend/vllm-ascend:glm-5.3-flash-a5-openeuler
     export NAME=vllm-ascend
 
     docker run --rm \
@@ -93,13 +78,13 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     -itd $IMAGE bash
     ```
 
-=== "A3 series"
+=== "Atlas 800I A3 series"
 
     Start the docker image on each node.
 
     ```shell
 
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
+    export IMAGE=quay.io/ascend/vllm-ascend:v0.30.0rc1-a3
     export NAME=vllm-ascend
 
     # Run the container using the defined variables
@@ -107,7 +92,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     docker run --rm \
     --name $NAME \
     --net=host \
-    --shm-size=1g \
+    --shm-size=100g \
     --device /dev/davinci0 \
     --device /dev/davinci1 \
     --device /dev/davinci2 \
@@ -133,17 +118,18 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
     -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
     -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /etc/hccn.conf:/etc/hccn.conf:ro \
     -v /root/.cache:/root/.cache \
     -it $IMAGE bash
     ```
 
-=== "A2 series"
+=== "Atlas 800I A2 series"
 
     Start the docker image on each node.
 
     ```shell
 
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+    export IMAGE=quay.io/ascend/vllm-ascend:v0.30.0rc1
     export NAME=vllm-ascend
 
     docker run --rm \
@@ -205,14 +191,14 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
       --max-num-batched-tokens 8192 \
       --trust-remote-code \
       --gpu-memory-utilization 0.9 \
-      --limit-mm-per-prompt '{"image": 1, "video": 0}' \
+      --limit-mm-per-prompt '{"image":1,"video":0}' \
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16,32,64,96,128]}' \
       --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
     ```
 
-=== "Atlas 800 A3 series"
+=== "Atlas 800I A3 series"
 
-    - Quantized model `GLM-5.3-Flash-w8a8` can be deployed on 1 A3 (64GB × 16) .
+    - Quantized model `GLM-5.3-Flash-w8a8` can be deployed on 1 Atlas 800I A3 (64GB × 16) .
 
     Run the following script to execute online inference.
 
@@ -223,12 +209,12 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export HCCL_BUFFSIZE=400
+    export HCCL_BUFFSIZE=1024
 
     vllm serve Eco-Tech/GLM-5.3-Flash-w8a8   \
       --host 0.0.0.0 \
       --port 8000 \
-      --max-model-len 133120  \
+      --max-model-len 1048576 \
       --data-parallel-size 1 \
       --tensor-parallel-size 16 \
       --enable-expert-parallel \
@@ -239,11 +225,12 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
       --max-num-batched-tokens 8192 \
       --trust-remote-code \
       --quantization ascend \
-      --limit-mm-per-prompt '{"image": 1, "video": 0}' \
+      --kv-cache-dtype int8 \
+      --limit-mm-per-prompt '{"image":1,"video":0}' \
       --gpu-memory-utilization 0.92 \
-      --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}' \
+      --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": false}' \
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-      --additional_config '{"multistream_overlap_shared_expert": true}' \
+      --additional-config '{"multistream_overlap_shared_expert": true}' \
       --api-server-count 1
     ```
 
@@ -253,20 +240,139 @@ Only the key parameters specific to this model/scenario are described below. `ma
 
 **Model-specific parameters:**
 
-- `--data-parallel-size 1`: Runs a single DP rank. `--tensor-parallel-size` is 8 on 950DT Products and 16 on Atlas 800 A3. This layout is recommended to balance memory capacity and compute efficiency for the w8a8 weights.
+- `--data-parallel-size 1`: Runs a single DP rank. `--tensor-parallel-size` is 8 on 950DT Products and 16 on Atlas 800I A3. This layout is recommended to balance memory capacity and compute efficiency for the w8a8 weights.
 - `--enable-expert-parallel`: Must be enabled for the MoE architecture of GLM-5.3-Flash.
 - `--quantization ascend`: Enables Ascend quantization for the w8a8 quantized weights.
 - `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'`: Enables graph capture for the decode phase only, improving decode performance by reducing kernel launch overhead.
-- `--limit-mm-per-prompt '{"image": 1, "video": 0}'`: For text-only deployment, --limit-mm-per-prompt can be omitted. For multimodal deployment, configure this parameter according to the actual request shape. For example, use --limit-mm-per-prompt '{"image":2,"video":0}' for two-image requests, and use --limit-mm-per-prompt '{"image":0,"video":1}' for one-video requests.
-- `--speculative-config`: Enables Multi-Token Prediction (MTP) speculative decoding with the DeepSeek-style MTP draft head of GLM-5.3-Flash. The single-node examples use three speculative tokens on 950DT Products and five on Atlas 800 A3. `enforce_eager: true` keeps the MTP draft model in eager mode because GLM-5.3-Flash does not support graph-mode speculative decoding.
+- `--limit-mm-per-prompt '{"image":1,"video":0}'`: Allows at most one image per prompt and disables video input in all deployment examples.
+- `--speculative-config`: Enables Multi-Token Prediction (MTP) speculative decoding with the DeepSeek-style MTP draft head of GLM-5.3-Flash. The single-node examples use three speculative tokens on 950DT Products and five on Atlas 800I A3. `enforce_eager: true` keeps the MTP draft model in eager mode on 950DT Products, while `enforce_eager: false` enables graph mode for the draft model on Atlas 800I A3. GLM-5.3-Flash supports MTP draft graph execution in v0.30.0RC1; the forced-eager restriction for other GLM models does not apply to this model.
 
-### 5.2 1P1D PD Disaggregated Deployment
+### 5.2 Multi-Node Colocated Deployment
 
-Both A3 and A2 deployments use the same `launch_online_dp.py` script to
+=== "Atlas 800I A2 series"
+
+    - Quantized model `GLM-5.3-Flash-w8a8` can be deployed on 2 Atlas 800I A2 (64GB × 8) nodes with DP2 across the two nodes (one DP rank per node) and TP8 inside each node.
+
+    Run the following scripts on two nodes respectively.
+
+    **node 0**
+
+    ```shell
+    # this obtained through ifconfig
+    # nic_name is the network interface name corresponding to local_ip of the current node
+    nic_name="xxxx"
+    local_ip="xx.xx.xx.1"
+
+    # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
+    node0_ip="xx.xx.xx.1"
+
+    export VLLM_USE_V2_MODEL_RUNNER=0
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export HCCL_OP_EXPANSION_MODE=AIV
+    export HCCL_BUFFSIZE=1024
+    export VLLM_RPC_TIMEOUT=3600000
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+    export HCCL_EXEC_TIMEOUT=3600
+    export HCCL_CONNECT_TIMEOUT=1200
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export HCCL_IF_IP=$local_ip
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+
+    vllm serve /path/to/GLM-5.3-Flash-w8a8 \
+        --host 0.0.0.0 \
+        --port 8000 \
+        --max-model-len 133120 \
+        --data-parallel-size 2 \
+        --data-parallel-size-local 1 \
+        --data-parallel-start-rank 0 \
+        --data-parallel-address $node0_ip \
+        --data-parallel-rpc-port 12321 \
+        --tensor-parallel-size 8 \
+        --enable-expert-parallel \
+        --seed 1024 \
+        --served-model-name glm \
+        --safetensors-load-strategy prefetch \
+        --max-num-seqs 32 \
+        --max-num-batched-tokens 8192 \
+        --trust-remote-code \
+        --quantization ascend \
+        --limit-mm-per-prompt '{"image":1,"video":0}' \
+        --gpu-memory-utilization 0.85 \
+        --speculative-config '{"num_speculative_tokens":3,"method":"deepseek_mtp","enforce_eager":true}' \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[4,8,16,32,64,96,128]}' \
+        --api-server-count 1
+    ```
+
+    **node 1**
+
+    ```shell
+    # this obtained through ifconfig
+    # nic_name is the network interface name corresponding to local_ip of the current node
+    nic_name="xxxx"
+    local_ip="xx.xx.xx.2"
+
+    # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
+    node0_ip="xx.xx.xx.1"
+
+    export VLLM_USE_V2_MODEL_RUNNER=0
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export HCCL_OP_EXPANSION_MODE=AIV
+    export HCCL_BUFFSIZE=1024
+    export VLLM_RPC_TIMEOUT=3600000
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+    export HCCL_EXEC_TIMEOUT=3600
+    export HCCL_CONNECT_TIMEOUT=1200
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export HCCL_IF_IP=$local_ip
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+
+    vllm serve /path/to/GLM-5.3-Flash-w8a8 \
+        --host 0.0.0.0 \
+        --port 8000 \
+        --headless \
+        --max-model-len 133120 \
+        --data-parallel-size 2 \
+        --data-parallel-size-local 1 \
+        --data-parallel-start-rank 1 \
+        --data-parallel-address $node0_ip \
+        --data-parallel-rpc-port 12321 \
+        --tensor-parallel-size 8 \
+        --enable-expert-parallel \
+        --seed 1024 \
+        --served-model-name glm \
+        --safetensors-load-strategy prefetch \
+        --max-num-seqs 32 \
+        --max-num-batched-tokens 8192 \
+        --trust-remote-code \
+        --quantization ascend \
+        --limit-mm-per-prompt '{"image":1,"video":0}' \
+        --gpu-memory-utilization 0.85 \
+        --speculative-config '{"num_speculative_tokens":3,"method":"deepseek_mtp","enforce_eager":true}' \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[4,8,16,32,64,96,128]}'
+    ```
+
+#### Key Parameter Descriptions
+
+**Multi-node network and data parallel configuration:**
+
+- `HCCL_IF_IP`, `GLOO_SOCKET_IFNAME`, `TP_SOCKET_IFNAME`, `HCCL_SOCKET_IFNAME`: Network interface configuration for multi-node communication. Set `nic_name` to the network interface name (obtained via `ifconfig`) and `local_ip` to the current node's IP address. These must be correctly configured on each node for successful multi-node communication.
+- `--data-parallel-size 2 --data-parallel-size-local 1`: Runs two DP ranks across the two nodes, one rank per node; each rank uses TP8 within its node.
+- `--data-parallel-start-rank`: Starting DP rank offset of the current node. Node 0 uses `0`, node 1 uses `1`.
+- `--data-parallel-address`: IP address of the data parallel master node (node 0). Must match the `local_ip` of the master node.
+- `--data-parallel-rpc-port 12321`: RPC port for data parallel master communication. Must be the same across all nodes.
+- `--headless`: Indicates a non-master node (used on node 1). Do not use on node 0.
+
+### 5.3 1P1D PD Disaggregated Deployment
+
+Both Atlas 800I A3 and Atlas 800I A2 deployments use the same `launch_online_dp.py` script to
 start one vLLM process per local DP rank. Save it on every Prefill and Decode
 node before following the platform-specific instructions below.
 
-#### 5.2.1 Prepare the DP Launcher
+#### 5.3.1 Prepare the DP Launcher
 
 ```python
 import argparse
@@ -333,19 +439,22 @@ if __name__ == "__main__":
 The launcher passes visible devices, engine port, global DP size, DP rank, DP
 address, DP RPC port, and TP size to each role script as `$1` through `$7`.
 
-=== "Atlas 800 A3 series"
+=== "Atlas 800I A3 series"
 
-    This example uses two Atlas 800 A3 servers. The Prefill node runs two
-    DP ranks with TP8 (DP2/TP8), and the Decode node runs sixteen DP ranks
-    with TP1 (DP16/TP1). Both layouts consume all 16 logical devices on their
+    This example uses two Atlas 800I A3 servers. The Prefill node runs two
+    DP ranks with TP8 (DP2/TP8), and the Decode node runs eight DP ranks
+    with TP2 (DP8/TP2). Both layouts consume all 16 logical devices on their
     respective servers. `MooncakeConnectorV2` transfers KV cache from the
     Prefill engines to the Decode engines.
 
     Before starting the services, replace `LOCAL_IP`, `NIC_NAME`, and
     `MODEL_PATH` in the following scripts with values for the deployment
-    environment.
+    environment. These scripts target an Atlas 800I A3 supernode using HCCS with its
+    device RoCE ports down. They explicitly select `hccs:device` for device
+    communication; the socket interface variables still select the host
+    network. Adjust the resource configuration for other network topologies.
 
-    **A3 Serving Scripts and Startup Commands**
+    **Atlas 800I A3 Serving Scripts and Startup Commands**
 
     **Start the Prefill node**
 
@@ -357,6 +466,10 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
     #!/usr/bin/env bash
     # Usage: bash run_p.sh <visible_devices> <http_port> <dp_size> \
     #   <dp_rank> <dp_address> <rpc_port> <tp_size>
+
+    # This Atlas 800I A3 supernode uses HCCS; its device RoCE ports are down.
+    export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["hccs:device"]}'
+    export ASCEND_LOCAL_COMM_RES='{"version":"1.2"}'
 
     LOCAL_IP="<PREFILL_NODE_IP>"
     NIC_NAME="<NETWORK_INTERFACE>"
@@ -384,19 +497,27 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
       --seed 1024 \
       --served-model-name glm \
       --safetensors-load-strategy prefetch \
-      --max-num-seqs 32 \
-      --max-model-len 133120 \
-      --max-num-batched-tokens 8192 \
+      --max-num-seqs 64 \
+      --max-model-len 1048576 \
+      --max-num-batched-tokens 4096 \
       --trust-remote-code \
-      --enforce-eager \
       --quantization ascend \
-      --limit-mm-per-prompt '{"image": 1, "video": 0}' \
+      --limit-mm-per-prompt '{"image":1,"video":0}' \
       --gpu-memory-utilization 0.92 \
       --tool-call-parser glm47 \
       --reasoning-parser glm45 \
       --enable-auto-tool-choice \
+      --kv-cache-dtype int8 \
+      --prefix-cache-retention-interval None \
       --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}' \
-      --additional_config '{"multistream_overlap_shared_expert":true,"enable_flashcomm1":true}' \
+      --additional-config '{
+        "enable_flashcomm1": true,
+        "enable_dsa_cp": true,
+        "enable_prefill_mc2": true,
+        "enable_fused_mc2": 1,
+        "enable_shared_expert_dp": true,
+        "multistream_overlap_shared_expert": false
+      }' \
       --kv-transfer-config \
       '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_producer", "kv_port": "36680"}'
     ```
@@ -416,12 +537,16 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
     **Start the Decode Node**
 
     On the Decode node, save the following script as `run_d.sh`. Decode uses
-    `FULL_DECODE_ONLY` graph mode for the target model. FlashComm1 remains
-    disabled by default.
+    `FULL_DECODE_ONLY` graph mode for the target model, enables graph mode
+    for the MTP draft model, and enables FlashComm1.
 
     ```shell
     #!/usr/bin/env bash
     # Usage is the same as run_p.sh.
+
+    # This Atlas 800I A3 supernode uses HCCS; its device RoCE ports are down.
+    export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["hccs:device"]}'
+    export ASCEND_LOCAL_COMM_RES='{"version":"1.2"}'
 
     LOCAL_IP="<DECODE_NODE_IP>"
     NIC_NAME="<NETWORK_INTERFACE>"
@@ -449,31 +574,36 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
       --seed 1024 \
       --served-model-name glm \
       --safetensors-load-strategy prefetch \
-      --max-num-seqs 10 \
-      --max-model-len 133120 \
-      --max-num-batched-tokens 60 \
+      --max-num-seqs 32 \
+      --max-model-len 1048576 \
+      --max-num-batched-tokens 192 \
       --trust-remote-code \
       --quantization ascend \
-      --limit-mm-per-prompt '{"image": 1, "video": 0}' \
+      --limit-mm-per-prompt '{"image":1,"video":0}' \
       --gpu-memory-utilization 0.92 \
       --tool-call-parser glm47 \
       --reasoning-parser glm45 \
       --enable-auto-tool-choice \
+      --kv-cache-dtype int8 \
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-      --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}' \
-      --additional_config '{"multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_static_kernel": true}}' \
+      --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": false}' \
+      --additional-config '{
+        "multistream_overlap_shared_expert": true,
+        "recompute_scheduler_enable": true,
+        "enable_flashcomm1": true
+      }' \
       --kv-transfer-config \
       '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer", "kv_port": "36580"}'
     ```
 
-    Start sixteen DP16/TP1 Decode engines. `--dp-address` uses the Decode node
-    IP. The launcher assigns API ports `9900-9915`.
+    Start eight DP8/TP2 Decode engines. `--dp-address` uses the Decode node
+    IP. The launcher assigns API ports `9900-9907`.
 
     ```shell
     python launch_online_dp.py \
       --template ./run_d.sh \
-      --dp-size 16 \
-      --tp-size 1 \
+      --dp-size 8 \
+      --tp-size 2 \
       --dp-address "<DECODE_NODE_IP>" \
       --vllm-start-port 9900
     ```
@@ -485,7 +615,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
     [load-balancing proxy](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py).
     The proxy listens on port `8081`, distributes requests across Prefill
     endpoints `9081-9082`, and then forwards Decode work to endpoints
-    `9900-9915`.
+    `9900-9907`.
 
     ```shell
     #!/usr/bin/env bash
@@ -494,7 +624,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
     P_N=${P_N:-2}
     P_PORT0=${P_PORT0:-9081}
     D_IP="${D_IP:-<DECODE_NODE_IP>}"
-    D_N=${D_N:-16}
+    D_N=${D_N:-8}
     D_PORT0=${D_PORT0:-9900}
 
     unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY all_proxy
@@ -510,49 +640,58 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
     **Key Parameter Descriptions**
 
     - `--data-parallel-size` and `--tensor-parallel-size` define DP2/TP8 on
-      Prefill and DP16/TP1 on Decode. Their product must be 16 on each A3 node.
+      Prefill and DP8/TP2 on Decode. Both layouts use all 16 logical devices
+      on their respective Atlas 800I A3 nodes.
     - `--data-parallel-address` and `--data-parallel-rpc-port` coordinate DP
       ranks within one role. Prefill and Decode use their respective node IPs.
       The default RPC port `12325` can be reused because the roles run on
       different hosts.
     - `--vllm-start-port 9081` assigns API ports `9081-9082` on Prefill, while
-      `--vllm-start-port 9900` assigns `9900-9915` on Decode. All endpoints
+      `--vllm-start-port 9900` assigns `9900-9907` on Decode. All endpoints
       must be reachable from the proxy.
-    - Both roles use a maximum model length of `133120` and MTP speculative
-      decoding with five speculative tokens. `enforce_eager` in the
-      speculative configuration keeps the MTP draft model in eager mode.
+    - Both roles use `--max-model-len 1048576`, `--kv-cache-dtype int8`, and
+      MTP speculative decoding with five speculative tokens. The MTP draft
+      model uses `enforce_eager: true` on Prefill and `enforce_eager: false`
+      on Decode.
     - `VLLM_USE_V2_MODEL_RUNNER=0` explicitly selects model runner V1 on both
-      roles for this validated configuration.
-    - Prefill uses `--max-num-seqs 32` and
-      `--max-num-batched-tokens 8192`. Decode uses `--max-num-seqs 10` and
-      `--max-num-batched-tokens 60`. Tune these role-specific scheduler limits
+      roles for this configuration.
+    - Prefill uses `--max-num-seqs 64` and
+      `--max-num-batched-tokens 4096`. Decode uses `--max-num-seqs 32` and
+      `--max-num-batched-tokens 192`. Tune these role-specific scheduler limits
       independently for the target workload.
+    - Prefill sets `--prefix-cache-retention-interval None`. For KV Cache
+      Pool deployment, apply the prefix-caching changes in Section 5.4.
+    - Decode uses `FULL_DECODE_ONLY` graph mode. Both roles explicitly
+      enable FlashComm1.
+    - Prefill sets `enable_dsa_cp: true`, `enable_prefill_mc2: true`,
+      `enable_fused_mc2: 1`, and `enable_shared_expert_dp: true`, with
+      `multistream_overlap_shared_expert: false`. Decode sets
+      `multistream_overlap_shared_expert: true` and
+      `recompute_scheduler_enable: true`.
+    - Both Prefill and Decode use `--limit-mm-per-prompt '{"image":1,"video":0}'`, allowing
+      at most one image per prompt and disabling video input.
     - `MooncakeConnectorV2` transfers KV cache between the two roles.
       `kv_role` must be `kv_producer` on Prefill and `kv_consumer` on Decode.
       The role-specific KV ports must be available on their respective hosts.
-    - Prefill uses `--enforce-eager` for the target model and explicitly
-      enables FlashComm1 with `enable_flashcomm1: true`. Decode leaves
-      FlashComm1 disabled and uses `FULL_DECODE_ONLY` for the target model.
-    - `multistream_overlap_shared_expert: true` overlaps shared-expert and
-      routed-expert work. CPU binding remains enabled by default on both roles;
-      Decode additionally enables the static kernel in
-      `ascend_compilation_config`.
-    - `HCCL_IF_IP` and all socket interface variables must select the service
-      network used by the configured node IPs. The DP RPC, engine, Mooncake,
-      and proxy ports must be allowed by the host firewall.
+    - `ASCEND_GLOBAL_RESOURCE_CONFIG` selects `hccs:device`, and
+      `ASCEND_LOCAL_COMM_RES` sets resource configuration version `1.2` for
+      this HCCS supernode. `HCCL_IF_IP` and all socket interface variables must
+      select the host network used by the configured node IPs. The DP RPC,
+      engine, Mooncake, and proxy ports must be allowed by the host firewall.
 
-=== "Atlas 800 A2 series"
+=== "Atlas 800I A2 series"
 
-    This example uses four Atlas 800 A2 (64GB × 8) servers: two Prefill
+    This example uses four Atlas 800I A2 (64GB × 8) servers: two Prefill
     nodes running one DP rank with TP8 each (DP2/TP8 in total), and two
     Decode nodes running four DP ranks with TP2 each (DP8/TP2 in total).
-    Each rank consumes all eight devices on its server.
+    Each Prefill rank uses eight devices, and each Decode rank uses two.
+    Together, the local ranks use all eight devices on each server.
     `MooncakeConnectorV2` transfers KV cache from the Prefill engines to the
     Decode engines. The topology names the two Prefill nodes P0/P1 and the
     two Decode nodes D0/D1. P0 serves the Prefill API endpoint; P1 is
     headless. The proxy addresses the API endpoints on both Decode nodes.
 
-    The shared `launch_online_dp.py` launcher from Section 5.2.1 starts the
+    The shared `launch_online_dp.py` launcher from Section 5.3.1 starts the
     engines on all four nodes. Save the common serving templates below and the
     node-specific wrapper scripts on their respective nodes. Replace all IP,
     NIC, and model-path placeholders.
@@ -808,16 +947,17 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
 
     1. Complete the container and multi-node communication checks on all
        four nodes.
-    2. Start P0 with the launcher command below (`--dp-rank-start 0`). P0
+    2. Start P0 with the launcher command above (`--dp-rank-start 0`). P0
        hosts the Prefill API endpoint and the Prefill DP master.
     3. Start D0 with its launcher command (`--dp-rank-start 0`). D0 hosts
        the Decode DP master and four API endpoints.
-    4. After P0 and D0 are ready, start P1 and D1 with their commands
-       (`--dp-rank-start 1` and `--dp-rank-start 4`).
-    5. After all ten engines are ready, start the proxy. Verify each
-       engine first with
-       `curl http://127.0.0.1:<port>/v1/models`, then send requests to
-       `<PREFILL_NODE0_IP>:8081`.
+    4. Immediately after launching P0 and D0, start P1 and D1 with their
+       commands (`--dp-rank-start 1` and `--dp-rank-start 4`). Each DP group
+       completes initialization after all its ranks have started.
+    5. After all ten engines are ready, verify the API endpoints on P0, D0,
+       and D1 with `curl http://127.0.0.1:<port>/v1/models` and check the
+       headless P1 initialization logs. Start the proxy, then send requests
+       to `<PREFILL_NODE0_IP>:8081`.
 
     **Deploy the PD proxy**
 
@@ -843,11 +983,11 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
       --decoder-ports 9900 9901 9902 9903 9900 9901 9902 9903
     ```
 
-    **Key parameter differences from the A3 layout**
+    **Key parameter differences from the Atlas 800I A3 layout**
 
-    - DP2/TP8 on Prefill and DP8/TP2 on Decode are the validated A2
-      layouts. Their products must be 8 on each A2 node instead of 16 on
-      each A3 node.
+    - Atlas 800I A2 uses the same global DP2/TP8 Prefill and DP8/TP2 Decode sizes as
+      Atlas 800I A3, but spreads each role across two nodes with eight devices per
+      node. Each Atlas 800I A3 role runs on one node with 16 logical devices.
     - P0 and P1 use the shared launcher with one local DP rank each. P0
       exposes the Prefill API with `--api-server-count 1`; P1 is headless.
       D0 and D1 each run four API-serving DP8/TP2 engines through their
@@ -864,9 +1004,8 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
       `VLLM_USE_V2_MODEL_RUNNER=0`, consistent with the other tabs in
       this guide. `VLLM_HOST_IP` advertises the IP that peers use to
       reach each engine for KV transfer.
-    - MTP speculative decoding uses three speculative tokens on A2.
-      `enforce_eager: true` keeps the MTP draft model in eager mode, as in
-      the other tabs of this guide.
+    - MTP speculative decoding uses three speculative tokens on Atlas 800I A2.
+      `enforce_eager: true` keeps the MTP draft model in eager mode.
     - `HCCL_HOST_SOCKET_PORT_RANGE` and `HCCL_NPU_SOCKET_PORT_RANGE` on
       Decode reserve a disjoint 100-port window per DP rank (starting at
       `60000 + rank * 100`). When several engines share one node, these
@@ -875,7 +1014,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
     - The remaining timeout and runtime variables
       (`VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS`, `HCCL_EXEC_TIMEOUT`,
       `HCCL_CONNECT_TIMEOUT`, `VLLM_RPC_TIMEOUT`, `OMP_PROC_BIND`,
-      `OMP_NUM_THREADS`) are the validated A2 startup defaults for this
+      `OMP_NUM_THREADS`) are the validated Atlas 800I A2 startup defaults for this
       model size; keep them unless your environment requires different
       values.
     - `HCCL_IF_IP` and all socket interface variables must select the
@@ -883,239 +1022,122 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
       engine, Mooncake, and proxy ports must be allowed by the host
       firewall.
 
-### 5.3 Multi-Node Colocated Deployment
-
-=== "A2 series"
-
-    - Quantized model `GLM-5.3-Flash-w8a8` can be deployed on 2 Atlas 800 A2 (64GB × 8) nodes with DP2 across the two nodes (one DP rank per node) and TP8 inside each node.
-
-    Run the following scripts on two nodes respectively.
-
-    **node 0**
-
-    ```shell
-    # this obtained through ifconfig
-    # nic_name is the network interface name corresponding to local_ip of the current node
-    nic_name="xxxx"
-    local_ip="xx.xx.xx.1"
-
-    # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
-    node0_ip="xx.xx.xx.1"
-
-    export VLLM_USE_V2_MODEL_RUNNER=0
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export HCCL_OP_EXPANSION_MODE=AIV
-    export HCCL_BUFFSIZE=1024
-    export VLLM_RPC_TIMEOUT=3600000
-    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
-    export HCCL_EXEC_TIMEOUT=3600
-    export HCCL_CONNECT_TIMEOUT=1200
-    export GLOO_SOCKET_IFNAME=$nic_name
-    export TP_SOCKET_IFNAME=$nic_name
-    export HCCL_SOCKET_IFNAME=$nic_name
-    export HCCL_IF_IP=$local_ip
-    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-
-    vllm serve /path/to/GLM-5.3-Flash-w8a8 \
-        --host 0.0.0.0 \
-        --port 8000 \
-        --max-model-len 133120 \
-        --data-parallel-size 2 \
-        --data-parallel-size-local 1 \
-        --data-parallel-start-rank 0 \
-        --data-parallel-address $node0_ip \
-        --data-parallel-rpc-port 12321 \
-        --tensor-parallel-size 8 \
-        --enable-expert-parallel \
-        --seed 1024 \
-        --served-model-name glm \
-        --safetensors-load-strategy prefetch \
-        --max-num-seqs 32 \
-        --max-num-batched-tokens 8192 \
-        --trust-remote-code \
-        --quantization ascend \
-        --limit-mm-per-prompt '{"image":1,"video":0}' \
-        --gpu-memory-utilization 0.85 \
-        --speculative-config '{"num_speculative_tokens":3,"method":"deepseek_mtp","enforce_eager":true}' \
-        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[4,8,16,32,64,96,128]}' \
-        --api-server-count 1
-    ```
-
-    **node 1**
-
-    ```shell
-    # this obtained through ifconfig
-    # nic_name is the network interface name corresponding to local_ip of the current node
-    nic_name="xxxx"
-    local_ip="xx.xx.xx.2"
-
-    # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
-    node0_ip="xx.xx.xx.1"
-
-    export VLLM_USE_V2_MODEL_RUNNER=0
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export HCCL_OP_EXPANSION_MODE=AIV
-    export HCCL_BUFFSIZE=1024
-    export VLLM_RPC_TIMEOUT=3600000
-    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
-    export HCCL_EXEC_TIMEOUT=3600
-    export HCCL_CONNECT_TIMEOUT=1200
-    export GLOO_SOCKET_IFNAME=$nic_name
-    export TP_SOCKET_IFNAME=$nic_name
-    export HCCL_SOCKET_IFNAME=$nic_name
-    export HCCL_IF_IP=$local_ip
-    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-
-    vllm serve /path/to/GLM-5.3-Flash-w8a8 \
-        --host 0.0.0.0 \
-        --port 8000 \
-        --headless \
-        --max-model-len 133120 \
-        --data-parallel-size 2 \
-        --data-parallel-size-local 1 \
-        --data-parallel-start-rank 1 \
-        --data-parallel-address $node0_ip \
-        --data-parallel-rpc-port 12321 \
-        --tensor-parallel-size 8 \
-        --enable-expert-parallel \
-        --seed 1024 \
-        --served-model-name glm \
-        --safetensors-load-strategy prefetch \
-        --max-num-seqs 32 \
-        --max-num-batched-tokens 8192 \
-        --trust-remote-code \
-        --quantization ascend \
-        --limit-mm-per-prompt '{"image":1,"video":0}' \
-        --gpu-memory-utilization 0.85 \
-        --speculative-config '{"num_speculative_tokens":3,"method":"deepseek_mtp","enforce_eager":true}' \
-        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[4,8,16,32,64,96,128]}'
-    ```
-
-#### Key Parameter Descriptions
-
-**Multi-node network and data parallel configuration:**
-
-- `HCCL_IF_IP`, `GLOO_SOCKET_IFNAME`, `TP_SOCKET_IFNAME`, `HCCL_SOCKET_IFNAME`: Network interface configuration for multi-node communication. Set `nic_name` to the network interface name (obtained via `ifconfig`) and `local_ip` to the current node's IP address. These must be correctly configured on each node for successful multi-node communication.
-- `--data-parallel-size 2 --data-parallel-size-local 1`: Runs two DP ranks across the two nodes, one rank per node; each rank uses TP8 within its node.
-- `--data-parallel-start-rank`: Starting DP rank offset of the current node. Node 0 uses `0`, node 1 uses `1`.
-- `--data-parallel-address`: IP address of the data parallel master node (node 0). Must match the `local_ip` of the master node.
-- `--data-parallel-rpc-port 12321`: RPC port for data parallel master communication. Must be the same across all nodes.
-- `--headless`: Indicates a non-master node (used on node 1). Do not use on node 0.
-
 ### 5.4 Prefill-Decode Disaggregation with KV Cache Pool
 
-This section documents Mooncake KV Cache Pool deployment for both Atlas 800
-A3 and Atlas 800 A2. Select the platform subsection that matches the PD
-topology in [Section 5.2](#52-1p1d-pd-disaggregated-deployment). Both
+This section uses the Memcache backend for Atlas 800I A3 and the Mooncake
+backend for Atlas 800I A2. Select the platform subsection that matches the PD
+topology in [Section 5.3](#53-1p1d-pd-disaggregated-deployment). Both
 platforms use `MultiConnector` to combine two connectors:
 
 - `MooncakeConnectorV2` continues to transfer KV cache from Prefill to Decode.
 - `AscendStoreConnector` lets Prefill look up, load, and save cached prefixes
-  in the Mooncake KV Cache Pool, reducing repeated Prefill computation.
-
-Decode receives KV through the P→D connector. Its pool connector keeps
-`consumer_is_to_load` and `consumer_is_to_put` disabled, and contributes no
-pool memory. This configuration reuses pooled prefixes among Prefill engines
-with the same TP8 layout; it does not load TP8 pool entries directly into TP1
-Decode engines.
+  in the KV Cache Pool, reducing repeated Prefill computation.
 
 For backend installation, hardware dependencies, memory sizing, eviction,
 and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md).
 
-=== "Atlas 800 A3 series"
+=== "Atlas 800I A3 series"
 
-    Reuse the A3 DP2/TP8 Prefill and DP16/TP1 Decode topology, launcher, and
-    proxy endpoint mapping from Section 5.2.
+    Reuse the Atlas 800I A3 DP2/TP8 Prefill and DP8/TP2 Decode topology, launcher, and
+    proxy endpoint mapping from Section 5.3.
 
-    **Prepare the Containers and Mooncake Configuration**
+    **Prepare the Memcache Backend**
 
-    Install the Mooncake backend according to the KV Cache Pool Deployment Guide.
-    For A3 HCCS pooling, check the HDK, CANN, and LingQu Computing Network
-    requirements in its [HDK and CANN Version Compatibility Reference](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#hdk_and_cann_version_compatibility_reference).
-    Add the following mount to the A3 Docker command in Section 4.1 on both nodes:
+    Follow [Scenario 2: Memcache Backend](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend)
+    for prerequisite checks and memory sizing. The Atlas 800I A3 HCCS
+    configuration uses `device_sdma`, which requires LingQu Computing Network
+    1.5 or later. Also check the HDK and CANN requirements in the guide's
+    [HDK and CANN Version Compatibility Reference](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#hdk-and-cann-version-compatibility-reference).
+    **When starting the Atlas 800I A3 containers on both Prefill and Decode nodes, you must include the following read-only mount in the Docker command from Section 4.1:**
 
     ```shell
     -v /etc/hccn.conf:/etc/hccn.conf:ro \
     ```
 
-    Create a separate `mooncake.json` on each node. Replace `<PREFILL_NODE_IP>`
-    with the Prefill node IP used in Section 5.2; Mooncake Master runs on that
-    node at port `50088`. Use the same `tenant_id` on both nodes.
+    The Docker images in Section 4.1 already include `memfabric-hybrid` and
+    `memcache-hybrid`. Locate the installed Memcache package in each container:
 
-    Prefill `mooncake.json`:
-
-    ```json
-    {
-      "metadata_server": "P2PHANDSHAKE",
-      "protocol": "ascend",
-      "device_name": "",
-      "master_server_address": "<PREFILL_NODE_IP>:50088",
-      "global_segment_size": "64GB",
-      "preferred_segment": true,
-      "prefer_alloc_in_same_node": true,
-      "enable_ssd_offload": false,
-      "tenant_id": "default"
-    }
+    ```shell
+    pip show memcache_hybrid
     ```
 
-    `global_segment_size` is registered per worker, not per node. With DP2/TP8,
-    the Prefill node starts 16 workers, so `64GB` per worker reserves `1TB` in
-    total. Adjust this example to the available fabric memory, keeping each
-    non-zero segment size aligned to `1GB`.
+    The `Location` field from `pip show` is `<PYTHON_SITE_PACKAGES>` in the
+    commands below. Replace `<CONFIG_DIRECTORY>` with the absolute directory
+    containing the configuration files on each node.
 
-    Decode `mooncake.json`:
+    This example stores pooled KV cache in DDR memory on both the Prefill
+    and Decode nodes. The Memcache LocalService initializes within each vLLM
+    worker, and each worker contributes `20GB` of DDR memory to the pool.
+    Decode receives KV cache through `MooncakeConnectorV2`.
 
-    ```json
-    {
-      "metadata_server": "P2PHANDSHAKE",
-      "protocol": "ascend",
-      "device_name": "",
-      "master_server_address": "<PREFILL_NODE_IP>:50088",
-      "global_segment_size": 0,
-      "preferred_segment": true,
-      "prefer_alloc_in_same_node": true,
-      "enable_ssd_offload": false,
-      "tenant_id": "default"
-    }
+    On the Prefill node, create `mmc-meta.conf`:
+
+    ```ini
+    ock.mmc.meta_service_url = tcp://<PREFILL_NODE_IP>:5000
+    ock.mmc.meta_service.config_store_url = tcp://<PREFILL_NODE_IP>:6000
+    ock.mmc.meta_service.metrics_url = http://<PREFILL_NODE_IP>:8000
+    ock.mmc.log_level = info
     ```
+
+    On both the Prefill and Decode nodes, create the following `mmc-local.conf`:
+
+    ```ini
+    ock.mmc.meta_service_url = tcp://<PREFILL_NODE_IP>:5000
+    ock.mmc.local_service.config_store_url = tcp://<PREFILL_NODE_IP>:6000
+    ock.mmc.log_level = info
+    ock.mmc.local_service.world_size = 256
+    ock.mmc.local_service.protocol = device_sdma
+    ock.mmc.local_service.dram.size = 20GB
+    ock.mmc.local_service.max.dram.size = 1024GB
+    ock.mmc.local_service.storage.enabled = false
+    ```
+
+    `dram.size` specifies the DDR capacity allocated per worker. Prefill
+    (DP2/TP8) and Decode (DP8/TP2) each start 16 workers. At `20GB` per worker,
+    each node contributes `320GB`, for a total DDR pool capacity of `640GB`.
+    Reserve sufficient DDR memory for the operating system and vLLM. For
+    `device_sdma`, keep each non-zero size aligned to `1GB`.
+
+    `world_size` is the maximum number of LocalServices supported by Memcache;
+    keep it consistent across all workers and large enough for the 32 workers
+    in this deployment.
 
     **Add the Pool Environment Variables**
 
-    In both `run_p.sh` and `run_d.sh`, keep the Section 5.2 environment variables
-    and add the following exports before `exec vllm serve`. Replace
-    `<CONFIG_DIRECTORY>` with the absolute directory containing that node's
-    `mooncake.json`.
+    In both `run_p.sh` and `run_d.sh`, keep the Section 5.3 environment variables
+    and add the following exports before `exec vllm serve`:
 
     ```shell
-    export PYTHONHASHSEED=0
-    export MOONCAKE_CONFIG_PATH="<CONFIG_DIRECTORY>/mooncake.json"
+    MEMCACHE_PACKAGE_DIR="<PYTHON_SITE_PACKAGES>/memcache_hybrid"
+    PYTHON_LIB_DIR="$(python -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR"))')"
 
-    # A3 HCCS fabric-memory pooling.
+    export PYTHONHASHSEED=0
+    export MMC_LOCAL_CONFIG_PATH="<CONFIG_DIRECTORY>/mmc-local.conf"
+    export LD_LIBRARY_PATH="${MEMCACHE_PACKAGE_DIR}/lib:${PYTHON_LIB_DIR}:${LD_LIBRARY_PATH:-}"
+
+    # Atlas 800I A3 HCCS fabric-memory pooling.
     export ACL_OP_INIT_MODE=1
     export ASCEND_ENABLE_USE_FABRIC_MEM=1
-
-    # Optional: set MOONCAKE_LIB_DIRS if Mooncake uses a custom library path.
-    if [ -n "${MOONCAKE_LIB_DIRS:-}" ]; then
-        export LD_LIBRARY_PATH="${MOONCAKE_LIB_DIRS}:${LD_LIBRARY_PATH:-}"
-    fi
     ```
 
-    The two nodes must use the same `PYTHONHASHSEED`. For A3 RoCE pooling, use the
-    communication and huge-page settings in the KV Cache Pool Deployment Guide
-    instead of the HCCS fabric-memory exports above.
+    Use the same `PYTHONHASHSEED` and Memcache service endpoints on both nodes.
+    Keep the HCCS communication settings from Section 5.3, including
+    `ASCEND_GLOBAL_RESOURCE_CONFIG` and `ASCEND_LOCAL_COMM_RES`.
 
     **Update the Prefill and Decode Connectors**
 
-    Prefix caching and chunked prefill are enabled by default for this model,
-    so the serving scripts omit their explicit flags. Keep both features
-    enabled. GLM-5.3-Flash has linear-attention state, and `AscendStoreConnector`
+    For Atlas 800I A3 KV Cache Pool deployment, add `--enable-prefix-caching` to both
+    `run_p.sh` and `run_d.sh` in Section 5.3, and keep
+    chunked prefill enabled (the model default). GLM-5.3-Flash has
+    linear-attention state, and `AscendStoreConnector`
     requires `mamba_cache_mode=align`; the model configuration selects this mode
     when prefix caching is enabled. Keep the hybrid KV cache manager enabled
     and `use_layerwise` disabled for this configuration.
 
     Replace the final `--kv-transfer-config` argument in `run_p.sh` with the
-    following fragment. Keep the remaining
-    Prefill flags from Section 5.2.2, including `--max-num-seqs 32`.
+    following fragment. Apart from the prefix-caching change above, keep
+    the remaining Atlas 800I A3 Prefill flags from Section 5.3, including
+    `--max-num-seqs 64`.
 
     ```shell
       --kv-transfer-config \
@@ -1134,7 +1156,8 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
               "kv_connector": "AscendStoreConnector",
               "kv_role": "kv_producer",
               "kv_connector_extra_config": {
-                "backend": "mooncake",
+                "backend": "memcache",
+                "memcache_dp_init_barrier": true,
                 "use_layerwise": false,
                 "lookup_rpc_port": '"$((37000 + $4))"'
               }
@@ -1145,8 +1168,9 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     ```
 
     Replace the final `--kv-transfer-config` argument in `run_d.sh` with the
-    following fragment. Keep the remaining Decode flags from Section 5.2.3,
-    including `FULL_DECODE_ONLY` graph mode and the MTP configuration.
+    following fragment. Apart from the prefix-caching change above, keep
+    the remaining Atlas 800I A3 Decode flags from Section 5.3, including
+    `FULL_DECODE_ONLY` graph mode and the MTP configuration.
 
     ```shell
       --kv-transfer-config \
@@ -1165,7 +1189,8 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
               "kv_connector": "AscendStoreConnector",
               "kv_role": "kv_consumer",
               "kv_connector_extra_config": {
-                "backend": "mooncake",
+                "backend": "memcache",
+                "memcache_dp_init_barrier": true,
                 "use_layerwise": false,
                 "consumer_is_to_load": false,
                 "consumer_is_to_put": false,
@@ -1180,32 +1205,40 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     `$4` is the DP rank passed by `launch_online_dp.py`. Each engine must have a
     unique `engine_id` and `lookup_rpc_port`; the child connectors inherit the
     outer `engine_id`. The Prefill lookup values are `37000-37001`, and the
-    Decode lookup values are `37100-37115`. Keep the role-specific Mooncake KV
-    base ports from Section 5.2; its workers and schedulers derive their own
+    Decode lookup values are `37100-37107`. Keep the role-specific Mooncake KV
+    base ports from Section 5.3; its workers and schedulers derive their own
     ports from the topology.
+
+    Keep `memcache_dp_init_barrier` set to `true` on every rank in each DP
+    group. It synchronizes workers after Memcache initialization and before
+    NPU graph capture. Set it in the `AscendStoreConnector` child, as shown
+    above.
 
     **Start the Services**
 
-    Start the services in this order: Mooncake Master → Decode → Prefill → Proxy.
+    Start the services in this order: Memcache MetaService, Decode, Prefill,
+    then the proxy. Each vLLM worker initializes its Memcache LocalService
+    during startup.
 
-    1. In a separate terminal in the Prefill container, start Mooncake Master.
-       Ensure port `50088` is reachable from both nodes.
+    1. In a separate terminal in the Prefill container, start MetaService.
+       Ensure ports `5000` and `6000` are reachable from both nodes and port
+       `8000` is available for metrics.
 
        ```shell
-       mooncake_master \
-         --port 50088 \
-         --eviction_high_watermark_ratio 0.9 \
-         --eviction_ratio 0.1 \
-         --default_kv_lease_ttl 11000 \
-         --enable_offload=false \
-         --client_ttl=120
+       MEMCACHE_PACKAGE_DIR="<PYTHON_SITE_PACKAGES>/memcache_hybrid"
+       PYTHON_LIB_DIR="$(python -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR"))')"
+       export LD_LIBRARY_PATH="${MEMCACHE_PACKAGE_DIR}/lib:${PYTHON_LIB_DIR}:${LD_LIBRARY_PATH:-}"
+       export MMC_META_CONFIG_PATH="<CONFIG_DIRECTORY>/mmc-meta.conf"
+       python -c "from memcache_hybrid import MetaService; MetaService.main()"
        ```
 
-    2. Start Decode with the launcher command in Section 5.2.3. Wait until all
-       sixteen Decode engines on ports `9900-9915` are ready.
-    3. Start Prefill with the launcher command in Section 5.2.2. Wait until both
-       Prefill engines on ports `9081-9082` are ready.
-    4. Start the proxy from Section 5.2.4. Send inference requests to
+    2. Start Decode with the Atlas 800I A3 launcher command in Section 5.3. Wait until
+       all eight Decode engines on ports `9900-9907` are ready and their
+       Memcache LocalServices have reserved the configured DDR pool memory.
+    3. Start Prefill with the Atlas 800I A3 launcher command in Section 5.3. Wait until
+       both Prefill engines on ports `9081-9082` are ready and their Memcache
+       LocalServices have reserved the configured DDR pool memory.
+    4. Start the Atlas 800I A3 proxy from Section 5.3. Send inference requests to
        `<PREFILL_NODE_IP>:8081` using the examples in Section 6.
 
     **Verify KV Cache Reuse**
@@ -1221,25 +1254,42 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     complete, cacheable blocks are reused, so a partial trailing block can
     still require computation.
 
-=== "Atlas 800 A2 series"
+=== "Atlas 800I A2 series"
 
     Reuse the `launch_online_dp.py` launcher, the P0/P1 and D0/D1 scripts, the
     DP2/TP8 Prefill and DP8/TP2 Decode topology, and the proxy configuration from
-    Section 5.2. A2 nodes do not have the A3 HCCS fabric: the
-    pool runs over the A2 RoCE network with the `P2PHANDSHAKE` metadata server
-    and the `ascend` protocol, and the A3 fabric-memory exports do not apply.
+    Section 5.3. Atlas 800I A2 nodes do not have the Atlas 800I A3 HCCS fabric: the
+    pool runs over the Atlas 800I A2 RoCE network with the `P2PHANDSHAKE` metadata server
+    and the `ascend` protocol, and the Atlas 800I A3 fabric-memory exports do not apply.
 
     For backend installation, memory sizing, eviction, and tenant options, refer
     to the [KV Cache Pool Deployment Guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md).
 
     **Prepare the Mooncake Configuration**
 
-    The A2 Docker command in Section 4.1 already mounts `/etc/hccn.conf`.
+    The Atlas 800I A2 Docker command in Section 4.1 already mounts `/etc/hccn.conf`.
     Install the Mooncake backend according to the KV Cache Pool Deployment
-    Guide, then create the Prefill and Decode `mooncake.json` files using the
-    JSON shape shown in the A3 subsection. Set `master_server_address` to
-    `<PREFILL_NODE0_IP>:50088`; Mooncake Master runs in the first Prefill
-    container. `global_segment_size` is registered per worker: with DP2/TP8
+    Guide, then create the following `mooncake.json` on both Prefill nodes.
+    Mooncake Master runs in the first Prefill container at
+    `<PREFILL_NODE0_IP>:50088`.
+
+    ```json
+    {
+      "metadata_server": "P2PHANDSHAKE",
+      "protocol": "ascend",
+      "device_name": "",
+      "master_server_address": "<PREFILL_NODE0_IP>:50088",
+      "global_segment_size": "8GB",
+      "preferred_segment": true,
+      "prefer_alloc_in_same_node": true,
+      "enable_ssd_offload": false,
+      "tenant_id": "default"
+    }
+    ```
+
+    On both Decode nodes, use the same JSON configuration with
+    `global_segment_size` set to `0`. Use the same `tenant_id` on all four
+    nodes. `global_segment_size` is registered per worker: with DP2/TP8
     spread across two Prefill nodes, each node starts 8 workers. The validated
     example uses `8GB` per worker, a `128GB` pool in total; adjust the
     per-worker size to the available host memory, keeping each non-zero segment
@@ -1248,7 +1298,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
 
     **Add the Pool Environment Variables**
 
-    In both `run_p.sh` and `run_d.sh`, keep the Section 5.2 environment
+    In both `run_p.sh` and `run_d.sh`, keep the Section 5.3 environment
     variables and add the following exports before `exec vllm serve`. Replace
     `<CONFIG_DIRECTORY>` with the absolute directory containing that node's
     `mooncake.json`.
@@ -1258,9 +1308,9 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     export MOONCAKE_CONFIG_PATH="<CONFIG_DIRECTORY>/mooncake.json"
     ```
 
-    All nodes must use the same `PYTHONHASHSEED`. Do not add the A3
-    `ASCEND_ENABLE_USE_FABRIC_MEM` export; it applies to the A3 HCCS fabric
-    only. The general A2 branch of the KV Cache Pool Deployment Guide also
+    All nodes must use the same `PYTHONHASHSEED`. Do not add the Atlas 800I A3
+    `ASCEND_ENABLE_USE_FABRIC_MEM` export; it applies to the Atlas 800I A3 HCCS fabric
+    only. The general Atlas 800I A2 branch of the KV Cache Pool Deployment Guide also
     suggests huge pages and `HCCL_INTRA_ROCE_ENABLE`; with the `P2PHANDSHAKE`
     metadata server and the `ascend` protocol these are not required, and the
     validated configuration does not set them.
@@ -1276,7 +1326,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     `align` automatically.
 
     Replace the final `--kv-transfer-config` argument in `run_p.sh` with the
-    following fragment. Keep the remaining Prefill flags from Section 5.2,
+    following fragment. Keep the remaining Prefill flags from Section 5.3,
     including `--max-num-seqs 64`.
 
     ```shell
@@ -1312,7 +1362,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     ```
 
     Replace the final `--kv-transfer-config` argument in `run_d.sh` with the
-    following fragment. Keep the remaining Decode flags from Section 5.2,
+    following fragment. Keep the remaining Decode flags from Section 5.3,
     including `FULL_DECODE_ONLY` graph mode and the MTP configuration.
 
     ```shell
@@ -1362,21 +1412,32 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     Proxy.
 
     1. In a separate terminal in the first Prefill container, start Mooncake
-       Master with the command from Section 5.4.1.4. Ensure port `50088` is
-       reachable from all four nodes.
-    2. Start D0 and D1 with the launcher commands from Section 5.2
+       Master. Ensure port `50088` is reachable from all four nodes.
+
+       ```shell
+       mooncake_master \
+         --port 50088 \
+         --eviction_high_watermark_ratio 0.9 \
+         --eviction_ratio 0.1 \
+         --default_kv_lease_ttl 11000 \
+         --enable_offload=false \
+         --client_ttl=120
+       ```
+
+    2. Start D0 and D1 with the launcher commands from Section 5.3
        (`--dp-rank-start 0` and `4`; four engines per node on ports
        `9900-9903`). Wait until all eight Decode engines answer
        `curl /v1/models`.
-    3. Start P0 and P1 with the launcher commands from Section 5.2
+    3. Start P0 and P1 with the launcher commands from Section 5.3
        (`--dp-rank-start 0` and `1`; P0 serves the API endpoint on port
-       `9081`, while P1 is headless). Wait until both engines answer.
-    4. Start the A2 proxy from Section 5.2. Send inference requests to
+       `9081`, while P1 is headless). Wait until the P0 API endpoint is
+       ready and P1 logs confirm successful initialization.
+    4. Start the Atlas 800I A2 proxy from Section 5.3. Send inference requests to
        `<PREFILL_NODE0_IP>:8081` using the examples in Section 6.
 
     **Verify KV Cache Reuse**
 
-    Follow the verification steps in Section 5.4.1.5 through the proxy. The proxy
+    Follow the KV Cache reuse verification steps in the Atlas 800I A3 subsection. The proxy
     sends requests to the P0 API while the DP group uses both Prefill ranks. A
     repeated request can hit a local prefix cache, so confirm pool load/hit
     information on the other Prefill rank to verify shared pool reuse.
@@ -1385,7 +1446,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
 
 Once the selected deployment is ready, query its service endpoint. For the
 1P1D PD deployment, use the Prefill node IP and proxy port `8081`. For a
-single-node or A2 colocated deployment, use the API endpoint exposed by its
+single-node or Atlas 800I A2 colocated deployment, use the API endpoint exposed by its
 vLLM service.
 
 ```shell
@@ -1428,6 +1489,19 @@ The expected result of this request is a JSON payload containing the model’s g
 
 For detailed instructions, refer to [Using AISBench for accuracy evaluation](../../developer_guide/evaluation/using_ais_bench.md).
 
+### 7.2 Accuracy Results with PD Disaggregation
+
+The following accuracy results were obtained using the Atlas 800I A3 PD
+configuration in [Section 5.3](#53-1p1d-pd-disaggregated-deployment), with
+DP2/TP8 on the Prefill node and DP8/TP2 on the Decode node. Evaluation requests
+were sent through the PD proxy. The table below lists the generation parameters
+used for each dataset.
+
+| Dataset | Hardware | Score | generation_kwargs |
+| --- | --- | --- | --- |
+| GPQA | Atlas 800I A3 | 89.9 | `temperature=1.0, top_p=0.95, max_tokens=131072` |
+| MMMU-PRO | Atlas 800I A3 | 78.4 | `temperature=1.0, top_p=0.95, max_tokens=98304` |
+
 ## 8 Performance Evaluation
 
 ### 8.1 Using AISBench
@@ -1438,7 +1512,41 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
-## 9 FAQ
+## 9 Performance Tuning
+
+### 9.1 Atlas 800I A3 PD Optimizations
+
+The following optimizations are already enabled in the reference configuration
+in [Section 5.3](#53-1p1d-pd-disaggregated-deployment). Use the same W8A8 weights
+and role-specific settings when reproducing the deployment.
+
+| Optimization | Role | Configuration | Purpose and constraints |
+| --- | --- | --- | --- |
+| FlashComm1 | Prefill and Decode | `enable_flashcomm1: true` | Optimizes tensor-parallel communication. |
+| DSA context parallelism | Prefill | `enable_dsa_cp: true` | Distributes sparse-attention work for long prompts; use model runner V1. |
+| Prefill MoE communication | Prefill | `enable_prefill_mc2: true`, `enable_fused_mc2: 1`, `enable_shared_expert_dp: true` | Uses fused MoE communication with the reference W8A8 weights and EP16 layout; keep `multistream_overlap_shared_expert: false` on this role. |
+| Shared-expert overlap | Decode | `multistream_overlap_shared_expert: true` | Overlaps shared-expert execution with other work; the Decode configuration does not enable fused MC2. |
+| Decode execution | Decode | `FULL_DECODE_ONLY` | Reduces decode launch overhead. |
+| MTP | Prefill and Decode | `num_speculative_tokens: 5` | Keeps the Prefill draft in eager mode and enables draft graph execution on Decode. |
+| KV capacity | Prefill and Decode | `--kv-cache-dtype int8` | Reduces KV cache memory consumption for long contexts. |
+
+### 9.2 Workload-Specific Settings
+
+- Tune `--max-num-seqs` and `--max-num-batched-tokens` independently on each
+  role. The reference uses 64 sequences and 4096 batched tokens on Prefill,
+  and 32 sequences and 192 batched tokens on Decode. Measure time to first
+  token, time per output token, and throughput before changing these limits.
+- Set `--max-model-len` to the required context length and adjust
+  `--gpu-memory-utilization` to the available NPU memory. The reference uses
+  1048576 tokens and a utilization of 0.92 on both roles.
+- Decode enables `recompute_scheduler_enable: true` to allow recomputation
+  on Prefill when Decode KV cache is insufficient. Keep it disabled on Prefill.
+- For repeated prefixes, use the DDR KV Cache Pool configuration in
+  [Section 5.4](#54-prefill-decode-disaggregation-with-kv-cache-pool). Both
+  Prefill and Decode contribute `20GB` per worker. Confirm pool hits when
+  evaluating reuse benefits.
+
+## 10 FAQ
 
 - **Q: How to enable function calling for GLM-5.3-Flash?**
 
