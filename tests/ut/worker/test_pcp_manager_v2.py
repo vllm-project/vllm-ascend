@@ -783,16 +783,6 @@ def test_request_state_cpu_and_numpy_tokens_share_storage() -> None:
     assert state.num_computed_tokens_np[1] == 23
 
 
-@pytest.mark.parametrize(
-    ("method", "expected_sharding"),
-    [("mtp", True), ("eagle3", False), ("dspark", False)],
-)
-def test_decode_sharding_limited_to_validated_speculators(method, expected_sharding):
-    config = _make_pcp_config(CUDAGraphMode.FULL_DECODE_ONLY)
-    config.speculative_config = SimpleNamespace(method=method)
-    assert is_pcp_decode_sharding_enabled(config) is expected_sharding
-
-
 def _make_padded_global_decode_batch() -> AscendInputBatch:
     """Three 4-token decode requests padded by the target to a 16-token, 4-request graph."""
     batch = _make_global_pcp_batch()
@@ -833,13 +823,17 @@ def test_restored_global_batch_drops_only_target_padding() -> None:
     assert batch.query_start_loc.tolist() == [0, 4, 8, 12, 16]
 
 
-@pytest.mark.parametrize("hands_off", [False, True])
-def test_partition_selects_restored_global_batch(hands_off) -> None:
+@pytest.mark.parametrize("method", [None, "mtp", "eagle3", "dspark"])
+def test_partition_selects_restored_global_batch(method) -> None:
     manager = AscendPCPManager.__new__(AscendPCPManager)
+    speculative_config = None if method is None else SimpleNamespace(method=method)
     manager.vllm_config = _make_pcp_config(
         CUDAGraphMode.FULL_DECODE_ONLY,
-        speculative_config=SimpleNamespace(method="mtp" if hands_off else "eagle3"),
+        speculative_config=speculative_config,
     )
+    # Every speculative method hands off the unpadded global batch. Non-spec
+    # PCP keeps the target's padded layout.
+    hands_off = method is not None
     assert manager.hands_off_to_replicated_draft is hands_off
     batch = _make_padded_global_decode_batch()
     with (
