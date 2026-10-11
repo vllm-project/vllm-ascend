@@ -40,6 +40,8 @@ DCP supports eager and graph execution, prefix caching, chunked prefill, specula
 | 950PR&950DT Products | MLA/GQA | 🟠 Partial compatibility | 🟠 Partial compatibility | 🟠 Partial compatibility | 🟠 Partial compatibility | 🟠 Partial compatibility (MLA)<br>— Not applicable (GQA) | 🟠 P/D disaggregation<br>❌ PD-mixed deployment |
 | 950PR&950DT Products | SFA | 🟠 Partial compatibility | 🟠 Partial compatibility | 🟠 Partial compatibility | 🟠 Partial compatibility | 🟠 Partial compatibility | 🟠 Partial compatibility |
 
+On Ascend950 (A5), DCP cannot be combined with SFA C8 (`enable_sparse_sfa_c8=true`).
+
 - ✅ **Full compatibility**: Combining the feature with DCP is supported.
 - 🟠 **Partial compatibility**: Combining the feature with DCP is experimentally supported; interfaces and functionality may change.
 - ❌ **No compatibility**: Combining the feature with DCP is not supported.
