@@ -1066,24 +1066,10 @@ class KVCacheStoreSendingThread(KVTransferThread):
             group_block_size = self._get_block_size(group_id)
 
             group_store_mask = (
-                list(store_masks[group_id]) if store_masks is not None and group_id < len(store_masks) else None
+                store_masks[group_id] if store_masks is not None and group_id < len(store_masks) else None
             )
-            if group_store_mask is not None:
-                skipped_chunks = 0
-                for chunk_id, allowed in enumerate(group_store_mask):
-                    start = chunk_id * group_block_size
-                    if allowed and should_skip(start, start + group_block_size):
-                        group_store_mask[chunk_id] = False
-                        skipped_chunks += 1
-                if skipped_chunks:
-                    logger.debug(
-                        "KV pool put skipped %d pooled chunks for request %s group %d",
-                        skipped_chunks,
-                        req_id,
-                        group_id,
-                    )
-                if not group_store_mask or not any(group_store_mask):
-                    continue
+            if group_store_mask is not None and not group_store_mask:
+                continue
 
             starts: list[int] = []
             ends: list[int] = []
@@ -1097,14 +1083,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
             def chunk_filter(
                 start: int,
                 group_block_size=group_block_size,
-                group_store_mask=group_store_mask,
             ) -> bool:
-                block_idx = start // group_block_size
-                mask_allows = group_store_mask is None or (
-                    block_idx < len(group_store_mask) and group_store_mask[block_idx]
-                )
-                chunk_start = block_idx * group_block_size
-                return mask_allows and not should_skip(chunk_start, chunk_start + group_block_size)
+                return not should_skip(start, start + group_block_size)
 
             tp_replicas = self.put_step if self.dcp_size <= 1 and not align_state_group else 1
             # PCP=2, TP=4, KV heads=2, tp_replicas=2:
@@ -1122,6 +1102,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 chunk_filter=chunk_filter,
                 shard_rank=self.pcp_rank * tp_replicas + self.tp_rank % tp_replicas,
                 shard_size=self.pcp_size * tp_replicas,
+                chunk_mask=group_store_mask,
             )
             for start, end, key, block_hash, block_id in iterator:
                 starts.append(start)
