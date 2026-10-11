@@ -84,6 +84,21 @@ def get_mrv2_in_profile_run() -> bool:
     return _MRV2_IN_PROFILE_RUN.get()
 
 
+def get_pcp_profile_num_tokens(num_tokens: int, pcp_size: int, max_num_reqs: int, decode_query_len: int) -> int:
+    """Bound rank-local rows for any mixed PCP batch within the token budget.
+
+    Decode rows are replicated. Each prefill contributes at most two chunks
+    of ceil(query_len / (2 * pcp_size)), so reserve two rounding rows per
+    request as well as the full decode budget. Keep the global dummy batch
+    intact; this bound only shards its MoE computation.
+    """
+    if pcp_size == 1:
+        return num_tokens
+    decode_tokens = min(num_tokens, max_num_reqs * decode_query_len)
+    prefill_tokens = num_tokens - decode_tokens
+    return min(num_tokens, decode_tokens + (prefill_tokens + pcp_size - 1) // pcp_size + 2 * max_num_reqs)
+
+
 def use_cann_megamoe(vllm_config: VllmConfig) -> bool:
     # TODO: drop the EP-size guard when MegaMoe supports larger EP sizes.
     return (
@@ -450,6 +465,7 @@ class _ExtraForwardContextProxy:
         "max_tokens_across_pcp",
         "num_accept_tokens",
         "in_profile_run",
+        "pcp_profile_num_tokens",
         "padded_num_tokens",
         "sinks",
         "eplb_heat_collection_status",

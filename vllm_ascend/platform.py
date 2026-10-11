@@ -577,6 +577,7 @@ class NPUPlatform(Platform):
             _is_decode_only_node,
             get_mc2_mask,
             get_mrv2_in_profile_run,
+            get_pcp_profile_num_tokens,
             select_moe_comm_method,
             use_cann_megamoe,
         )
@@ -624,6 +625,23 @@ class NPUPlatform(Platform):
             num_tokens = list(attn_metadata.values())[0].num_actual_tokens
         pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
         max_tokens_across_pcp = num_tokens if pcp_size > 1 else 0
+        pcp_profile_num_tokens = None
+        # DCP can replicate short prefills as well as decode requests. Keep
+        # its existing profile until that additional replication is bounded.
+        if (
+            in_profile_run
+            and attn_metadata is None
+            and pcp_size > 1
+            and vllm_config.parallel_config.decode_context_parallel_size == 1
+        ):
+            speculative_config = vllm_config.speculative_config
+            decode_query_len = 1 if speculative_config is None else speculative_config.num_speculative_tokens + 1
+            pcp_profile_num_tokens = get_pcp_profile_num_tokens(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                pcp_size,
+                vllm_config.scheduler_config.max_num_seqs,
+                decode_query_len,
+            )
         dp_world_size = get_dp_group().world_size
         if dp_world_size > 1 and dp_metadata is not None:
             max_tokens_across_dp = dp_metadata.num_tokens_across_dp_cpu.max().item()
@@ -665,6 +683,7 @@ class NPUPlatform(Platform):
             "is_draft_model": is_draft_model,
             "is_draft_model_prefill": is_draft_model_prefill,
             "in_profile_run": in_profile_run,
+            "pcp_profile_num_tokens": pcp_profile_num_tokens,
             "padded_num_tokens": padded_num_tokens,
             "sinks": sinks,
             "dynamic_mx_quant_scale_alg": dynamic_mx_quant_scale_alg,
