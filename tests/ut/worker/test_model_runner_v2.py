@@ -357,7 +357,7 @@ def test_adaptive_verification_pads_fia_query_boundaries(
     np.testing.assert_array_equal(actual[: len(expected)], expected)
 
 
-def test_sample_tokens_restores_replicated_draft_hidden_states():
+def test_sample_tokens_skips_mtp_buffer_when_aux_hidden_states_exist():
     runner = _make_runner(need_timing=False)
     runner.is_last_pp_rank = True
     runner.speculator = SimpleNamespace(replicated_pcp=True)
@@ -380,9 +380,8 @@ def test_sample_tokens_restores_replicated_draft_hidden_states():
             return_value=restored_hidden_states,
         ),
     )
-    runner.model = SimpleNamespace(
-        get_mtp_target_hidden_states=lambda: target_hidden_states,
-    )
+    get_mtp_target_hidden_states = Mock(return_value=target_hidden_states)
+    runner.model = SimpleNamespace(get_mtp_target_hidden_states=get_mtp_target_hidden_states)
     grammar_output = object()
     expected_output = object()
 
@@ -395,10 +394,32 @@ def test_sample_tokens_restores_replicated_draft_hidden_states():
 
     assert actual is expected_output
     parent_sample_tokens.assert_called_once_with(grammar_output)
-    runner.pcp_manager.restore_hidden_state_buffer.assert_called_once_with(target_hidden_states)
+    get_mtp_target_hidden_states.assert_not_called()
+    runner.pcp_manager.restore_hidden_state_buffer.assert_not_called()
     runner.pcp_manager.restore_hidden_states.assert_called_once_with(hidden_states)
     state._replace.assert_called_once_with(hidden_states=restored_hidden_states)
     assert runner.execute_model_state is restored_state
+
+
+def test_restore_replicated_draft_uses_mtp_buffer_without_aux_hidden_states():
+    runner = _make_runner(need_timing=False)
+    runner.is_last_pp_rank = True
+    runner.speculator = SimpleNamespace(replicated_pcp=True)
+    runner.execute_model_state = SimpleNamespace(aux_hidden_states=[], hidden_states=None)
+
+    target_hidden_states = object()
+    get_mtp_target_hidden_states = Mock(return_value=target_hidden_states)
+    runner.model = SimpleNamespace(get_mtp_target_hidden_states=get_mtp_target_hidden_states)
+    runner.pcp_manager = SimpleNamespace(
+        restore_hidden_state_buffer=Mock(),
+        restore_hidden_states=Mock(),
+    )
+
+    runner._restore_replicated_draft_target_states()
+
+    get_mtp_target_hidden_states.assert_called_once_with()
+    runner.pcp_manager.restore_hidden_state_buffer.assert_called_once_with(target_hidden_states)
+    runner.pcp_manager.restore_hidden_states.assert_not_called()
 
 
 def test_prepare_inputs_preserves_pcp_tokens_and_forwards_graph_padding():
