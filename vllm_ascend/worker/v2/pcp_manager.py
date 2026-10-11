@@ -209,6 +209,34 @@ class AscendPCPManager(PCPManager):
         return last_hidden_states, hidden_states
 
     @property
+    def restored_global_batch(self) -> AscendInputBatch:
+        """The global batch handed to sampling and the draft after target execution.
+
+        A sharded target pads only for its own PCP-local execution, so that
+        padding is dropped here and the draft picks its own graph and padding
+        exactly as without PCP. A replicated target already executes the
+        global layout, which the draft may reuse as is.
+        """
+        global_batch = self.global_batch
+        if not self.is_decode_sharded:
+            return global_batch
+        num_reqs = global_batch.num_reqs
+        num_tokens = global_batch.num_tokens
+        # Sharding requires DCP=1, so dcp_local_seq_lens needs no trimming.
+        return replace(  # type: ignore[call-arg]
+            global_batch,
+            num_reqs_after_padding=num_reqs,
+            num_tokens_after_padding=num_tokens,
+            query_start_loc=global_batch.query_start_loc[: num_reqs + 1],
+            query_start_loc_np=global_batch.query_start_loc_np[: num_reqs + 1],
+            seq_lens=global_batch.seq_lens[:num_reqs],
+            seq_lens_cpu_upper_bound=global_batch.seq_lens_cpu_upper_bound[:num_reqs],
+            input_ids=global_batch.input_ids[:num_tokens],
+            positions=global_batch.positions[:num_tokens],
+            is_padding=global_batch.is_padding[:num_tokens],
+        )
+
+    @property
     def global_batch(self) -> AscendInputBatch:
         """Return the scheduled batch retained before PCP partitioning."""
         global_batch = self._global_batch
@@ -459,13 +487,19 @@ class AscendPCPManager(PCPManager):
         return
 
     def restore_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        """Restore active tokens and zero any fixed-graph padding rows."""
+        """Restore rows in the layout of ``restored_global_batch``.
+
+        Scheduled tokens come first; any padding rows that batch still exposes
+        are zeroed.
+        """
         if not self.is_last_pp_rank:
             return hidden_states
 
         restored_hidden_states = super().restore_hidden_states(hidden_states)
         if self._global_batch is not None:
-            restored_hidden_states[self._global_batch.num_tokens :].zero_()
+            restored_batch = self.restored_global_batch
+            restored_hidden_states = restored_hidden_states[: restored_batch.num_tokens_after_padding]
+            restored_hidden_states[restored_batch.num_tokens :].zero_()
         return restored_hidden_states
 
     def restore_for_sampling(
@@ -482,14 +516,17 @@ class AscendPCPManager(PCPManager):
         graphs each rank pads its local batch to the same global padded length,
         so a length match does not distinguish local from restored layouts.
         """
-        assert self._global_batch is not None
-        if self._sampling_hidden_restored:
-            self._sampling_hidden_restored = False
-            return hidden_states, self._global_batch
-        return super().restore_for_sampling(hidden_states)
+        if not self._sampling_hidden_restored:
+            hidden_states = self.restore_hidden_states(hidden_states)
+        self._sampling_hidden_restored = False
+        return hidden_states, self.restored_global_batch
 
     def restore_hidden_state_buffer(self, hidden_states: torch.Tensor) -> None:
-        """Restore a model-owned rank-local buffer to the global PCP layout."""
+        """Restore a model-owned rank-local buffer to the global PCP layout.
+
+        Only the leading ``restored_global_batch.num_tokens_after_padding`` rows
+        are meaningful afterwards, matching ``restore_hidden_states``.
+        """
         if not self.is_last_pp_rank:
             return
 
