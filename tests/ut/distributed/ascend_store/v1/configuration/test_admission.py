@@ -74,7 +74,7 @@ def test_speculative_factories_follow_upstream_eagle_policy(monkeypatch, use_lay
     monkeypatch.setattr(vllm_adapter.kv_cache_utils, "resolve_kv_cache_block_sizes", lambda *_args: (4, 4))
     monkeypatch.setattr(vllm_adapter, "get_tp_group", lambda: SimpleNamespace(rank_in_group=0))
     monkeypatch.setattr(vllm_adapter, "get_pp_group", lambda: SimpleNamespace(rank_in_group=0))
-    monkeypatch.setattr(vllm_adapter, "RemoteLookup", lambda _address: FakeRemoteLookup(8))
+    monkeypatch.setattr(vllm_adapter, "RemoteLookup", lambda _address, **_kwargs: FakeRemoteLookup(8))
     cache_config = SimpleNamespace(
         num_blocks=8,
         transfer_group_ids=(0,),
@@ -190,7 +190,7 @@ def test_private_groups_are_projected_out_of_scheduler_worker_and_backend(monkey
     monkeypatch.setattr(
         vllm_adapter,
         "RemoteLookup",
-        lambda _address: SimpleNamespace(close=lambda: None),
+        lambda _address, **_kwargs: SimpleNamespace(close=lambda: None),
     )
 
     attention = FullAttentionSpec(block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float32)
@@ -279,7 +279,7 @@ def test_kvpp_authoritative_size_selects_noop_or_rejection(kvpp_size, monkeypatc
     monkeypatch.setattr(
         vllm_adapter,
         "RemoteLookup",
-        lambda _address: SimpleNamespace(close=lambda: None),
+        lambda _address, **_kwargs: SimpleNamespace(close=lambda: None),
     )
     attention = FullAttentionSpec(block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float32)
     cache_config = SimpleNamespace(

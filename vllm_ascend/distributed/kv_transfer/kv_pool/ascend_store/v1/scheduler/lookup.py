@@ -14,9 +14,9 @@ from .state import LoadCandidate, SchedulerConfig
 class RemoteLookup:
     """Own the lazy Scheduler-side Lookup RPC client."""
 
-    def __init__(self, address: str) -> None:
+    def __init__(self, address: str, *, timeout_ms: int = -1) -> None:
         self.address = address
-        self._client: LookupClient | None = None
+        self._client = LookupClient(address, timeout_ms=timeout_ms)
 
     def query(
         self,
@@ -24,14 +24,10 @@ class RemoteLookup:
         transfer_group_ids: tuple[int, ...],
         block_hashes: tuple[BlockHash, ...],
     ) -> LookupResult:
-        if self._client is None:
-            self._client = LookupClient(self.address)
         return self._client.lookup(LookupRequest(query_range, transfer_group_ids, block_hashes))
 
     def close(self) -> None:
-        if self._client is not None:
-            self._client.close()
-            self._client = None
+        self._client.close()
 
 
 def resolve_load_candidate(
