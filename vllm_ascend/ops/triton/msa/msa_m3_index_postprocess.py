@@ -12,20 +12,7 @@ _SCORE_ALIGNMENT = 16
 _PREPARE_TILE = 256
 
 
-# Score/context views and batch-dependent widths/strides can vary between calls.
-@triton.jit(
-    do_not_specialize=[
-        "stride_sh",
-        "stride_sq",
-        "stride_sk",
-        "stride_ph",
-        "stride_pq",
-        "stride_context",
-        "logical_blocks",
-        "prepared_width",
-        "decode_query_len",
-    ]
-)
+@triton.jit
 def _ascendc_decode_score_prepare_kernel(
     score_ptr,
     prepared_ptr,
@@ -35,7 +22,7 @@ def _ascendc_decode_score_prepare_kernel(
     stride_sk,
     stride_ph,
     stride_pq,
-    stride_pk: tl.constexpr,
+    stride_pk,
     stride_context,
     logical_blocks,
     prepared_width,
@@ -73,31 +60,20 @@ def _ascendc_decode_score_prepare_kernel(
     )
 
 
-# Output row/element strides depend only on the fixed TopK configuration;
-# head strides and request metadata depend on the current batch.
-@triton.jit(
-    do_not_specialize=[
-        "stride_rh",
-        "stride_ih",
-        "stride_ch",
-        "stride_context",
-        "logical_blocks",
-        "decode_query_len",
-    ]
-)
+@triton.jit
 def _ascendc_decode_topk_postprocess_kernel(
     raw_ptr,
     indices_ptr,
     counts_ptr,
     context_ptr,
     stride_rh,
-    stride_rq: tl.constexpr,
-    stride_rk: tl.constexpr,
+    stride_rq,
+    stride_rk,
     stride_ih,
-    stride_iq: tl.constexpr,
-    stride_ik: tl.constexpr,
+    stride_iq,
+    stride_ik,
     stride_ch,
-    stride_cq: tl.constexpr,
+    stride_cq,
     stride_context,
     logical_blocks,
     decode_query_len,
