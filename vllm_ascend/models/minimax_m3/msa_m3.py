@@ -580,7 +580,7 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
                         self.block_size,
                         rounding_mode="floor",
                     ).to(dtype=torch.int32)
-                    decode_topk = minimax_m3_index_decode_ascendc(
+                    decode_topk, decode_select_num_idx = minimax_m3_index_decode_ascendc(
                         decode_iq,
                         kv,
                         d.block_table,
@@ -593,6 +593,7 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
                         init_blocks=self.init_blocks,
                         local_blocks=self.local_blocks,
                         decode_query_len=d.decode_query_len,
+                        return_select_num_idx=True,
                     )
             else:
                 tp_size = tp_group.world_size

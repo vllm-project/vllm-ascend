@@ -299,6 +299,16 @@ def test_a5_decode_topk_keeps_fused_postprocess_fast_path() -> None:
     assert "return topk_idx, select_num_idx" in decode_source
 
 
+def test_a3_decode_topk_uses_fused_prepare_and_postprocess() -> None:
+    source_path = Path(msa_m3_module.__file__).with_name("ops") / "msa_m3_index_postprocess.py"
+    source = source_path.read_text(encoding="utf-8")
+
+    assert "def _ascendc_decode_score_prepare_kernel(" in source
+    assert "_, raw_indices = torch.topk(prepared, k=topk" in source
+    assert "def _ascendc_decode_topk_postprocess_kernel(" in source
+    assert "return indices, counts" in source
+
+
 @patch("vllm_ascend.models.minimax_m3.msa_m3.get_forward_context")
 def test_minimax_m3_sparse_forward_dispatches_to_layer(
     mock_get_forward_context: MagicMock,
@@ -804,6 +814,73 @@ def test_a5_indexer_forward_keeps_original_decode_path() -> None:
     assert mock_decode.call_args.kwargs == {"sm_scale": impl.scale}
 
 
+def test_a3_indexer_forward_requests_fused_select_counts() -> None:
+    impl = object.__new__(AscendMiniMaxM3IndexerImpl)
+    torch.nn.Module.__init__(impl)
+    impl.use_v2_model_runner = False
+    impl.num_index_heads = 1
+    impl.num_kv_heads = 1
+    impl.index_head_dim = 4
+    impl.topk_blocks = 2
+    impl.init_blocks = 1
+    impl.local_blocks = 1
+    impl.scale = 0.5
+    impl.index_cache = SimpleNamespace(
+        prefix="layer.attn.index_cache",
+        kv_cache=torch.zeros(4, 128, 4),
+    )
+    decode = AscendMiniMaxM3IndexerDecodeMetadata(
+        cu_seqlens_q=torch.tensor([0, 1], dtype=torch.int32),
+        seq_lens=torch.tensor([129], dtype=torch.int32),
+        context_lens=torch.tensor([128], dtype=torch.int32),
+        block_table=torch.tensor([[0, 1]], dtype=torch.int32),
+        start_loc=torch.tensor([1], dtype=torch.int32),
+        max_seq_len=129,
+        decode_query_len=1,
+    )
+    metadata = AscendMiniMaxM3IndexerMetadata(
+        seq_lens=decode.seq_lens,
+        max_seq_len=decode.max_seq_len,
+        slot_mapping=torch.zeros(1, dtype=torch.int64),
+        causal_mask=torch.zeros(1, 1, dtype=torch.bool),
+        num_actual_tokens=1,
+        num_decodes=1,
+        num_decode_tokens=1,
+        num_prefills=0,
+        num_prefill_tokens=0,
+        decode=decode,
+    )
+    expected = torch.zeros(1, 1, 2, dtype=torch.int32)
+    expected_select_num_idx = torch.ones(1, 1, dtype=torch.int32)
+
+    with (
+        patch.object(msa_m3_module, "_USE_ASCENDC_INDEX_SCORE_DECODE", True),
+        patch.object(
+            msa_m3_module,
+            "get_forward_context",
+            return_value=SimpleNamespace(
+                attn_metadata={impl.index_cache.prefix: metadata},
+            ),
+        ),
+        patch.object(
+            msa_m3_module,
+            "get_tp_group",
+            return_value=SimpleNamespace(world_size=1, rank_in_group=0),
+        ),
+        patch.object(
+            msa_m3_module,
+            "minimax_m3_index_decode_ascendc",
+            return_value=(expected, expected_select_num_idx),
+        ) as mock_decode,
+    ):
+        actual, prefill, select_num_idx = impl.forward(torch.zeros(1, 4))
+
+    assert actual is expected
+    assert prefill is None
+    assert select_num_idx is expected_select_num_idx
+    assert mock_decode.call_args.kwargs["return_select_num_idx"] is True
+
+
 def test_a5_indexer_forward_keeps_original_prefill_path() -> None:
     impl = object.__new__(AscendMiniMaxM3IndexerImpl)
     torch.nn.Module.__init__(impl)
@@ -1307,6 +1384,67 @@ def test_ascendc_index_decode_wraps_score_candidates() -> None:
         init_blocks=1,
         local_blocks=1,
         decode_query_len=1,
+    )
+
+
+def test_ascendc_index_decode_returns_fused_select_counts() -> None:
+    idx_q = torch.zeros(1, 2, 128)
+    index_key_cache = torch.zeros(4, 128, 128)
+    block_table = torch.tensor([[0, 1, 2, 3]], dtype=torch.int32)
+    cu_seqlens_q = torch.tensor([0, 1], dtype=torch.int32)
+    seq_lens = torch.tensor([129], dtype=torch.int32)
+    context_lens = torch.tensor([128], dtype=torch.int32)
+    start_loc = torch.tensor([1], dtype=torch.int32)
+    causal_mask = torch.zeros(2048, 2048, dtype=torch.int8)
+    score = torch.zeros(2, 1, 4)
+    expected = torch.zeros(2, 1, 2, dtype=torch.int32)
+    expected_counts = torch.ones(2, 1, dtype=torch.int32)
+
+    with (
+        patch(
+            "vllm_ascend.models.minimax_m3.ops.msa_m3_npu._minimax_m3_index_score",
+            return_value=score,
+        ) as mock_score,
+        patch(
+            "vllm_ascend.models.minimax_m3.ops.msa_m3_npu.index_decode_topk_fused",
+            return_value=(expected, expected_counts),
+        ) as mock_fused_topk,
+    ):
+        actual, counts = minimax_m3_index_decode(
+            idx_q,
+            index_key_cache,
+            block_table,
+            cu_seqlens_q,
+            seq_lens,
+            context_lens,
+            start_loc,
+            causal_mask,
+            topk=2,
+            init_blocks=1,
+            local_blocks=1,
+            decode_query_len=1,
+            return_select_num_idx=True,
+        )
+
+    assert actual is expected
+    assert counts is expected_counts
+    mock_score.assert_called_once_with(
+        idx_q,
+        index_key_cache,
+        block_table,
+        cu_seqlens_q,
+        seq_lens,
+        start_loc,
+        causal_mask,
+    )
+    mock_fused_topk.assert_called_once_with(
+        score,
+        context_lens,
+        1,
+        2,
+        block_table.shape[-1],
+        init_blocks=1,
+        local_blocks=1,
     )
 
 
