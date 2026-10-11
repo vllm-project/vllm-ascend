@@ -31,6 +31,7 @@ import torch
 import torch_npu
 from torch import nn
 from transformers import PretrainedConfig
+from vllm import envs
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
     CacheConfig,
@@ -44,7 +45,7 @@ from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
 )
-from vllm.forward_context import get_forward_context
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -96,6 +97,12 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.models.common.ops.sequence_parallel import (
+    sp_all_gather,
+    sp_padding_mask,
+    sp_reduce_scatter,
+    sp_shard,
+)
 from vllm_ascend.models.minimax_m3.msa_m3 import (
     AscendMiniMaxM3Indexer,
     AscendMiniMaxM3IndexerLinear,
@@ -597,8 +604,10 @@ class MiniMaxM3MLP(nn.Module):
         reduce_results: bool = True,
         intermediate_size: int | None = None,
         prefix: str = "",
+        is_sequence_parallel: bool = False,
     ) -> None:
         super().__init__()
+        self.is_sequence_parallel = is_sequence_parallel
         hidden_size = config.hidden_size
         hidden_act = config.hidden_act
         if intermediate_size is None:
@@ -616,7 +625,7 @@ class MiniMaxM3MLP(nn.Module):
             hidden_size,
             bias=False,
             quant_config=quant_config,
-            reduce_results=reduce_results,
+            reduce_results=False if is_sequence_parallel else reduce_results,
             prefix=f"{prefix}.down_proj",
         )
         if hidden_act == "swigluoai":
@@ -638,9 +647,16 @@ class MiniMaxM3MLP(nn.Module):
         self,
         x,
     ):
+        if self.is_sequence_parallel:
+            # TP-sharded dense weights must see the same token rows on every
+            # rank. Restore the padded full sequence for the MLP, then reduce
+            # its TP partial output back to the rank-local SP shard.
+            x = sp_all_gather(x)
         gate_up, _ = self.gate_up_proj(x)
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
+        if self.is_sequence_parallel:
+            x = sp_reduce_scatter(x)
         return x
 
 
@@ -651,6 +667,7 @@ class MiniMaxM3MoE(nn.Module):
         parallel_config: ParallelConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        is_sequence_parallel: bool = False,
     ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -706,6 +723,7 @@ class MiniMaxM3MoE(nn.Module):
 
         self.experts = FusedMoEFactory(
             shared_experts=self.shared_experts,
+            is_sequence_parallel=is_sequence_parallel,
             num_experts=config.num_local_experts,
             gate=self.gate,
             top_k=config.num_experts_per_tok,
@@ -773,6 +791,7 @@ class MiniMaxM3Attention(nn.Module):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        reduce_results: bool = True,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -812,6 +831,7 @@ class MiniMaxM3Attention(nn.Module):
             hidden_size,
             bias=False,
             quant_config=quant_config,
+            reduce_results=reduce_results,
             prefix=f"{prefix}.o_proj",
         )
 
@@ -882,6 +902,19 @@ class MiniMaxM3DecoderLayer(nn.Module):
 
         self.layer_idx = layer_idx
 
+        moe_layer_freq = getattr(config, "moe_layer_freq", None)
+        # ``is_layer_sparse`` here means "this layer's MLP is a sparse MoE",
+        # not anything about attention sparsity. The name is kept (instead of
+        # the clearer ``is_layer_moe``) to match the convention used by the
+        # rest of sglang -- ``OperationsStrategy``, ``LayerScatterModes``,
+        # ``LayerCommunicator``, ``gpt_oss``, ``falcon_h1`` etc all access
+        # ``layer.is_layer_sparse``.
+        self.is_layer_sparse = moe_layer_freq[layer_idx] != 0 if moe_layer_freq is not None else True
+        # Keep both dense and MoE layers sequence-sharded. Dense MLPs gather
+        # around their TP-sharded weights; MoE layers use the SP-aware runner.
+        # Pipeline stages close the SP region before handing tensors onward.
+        self.use_sequence_parallel = parallel_config.use_sequence_parallel_moe
+
         sparse_attention_config = getattr(config, "sparse_attention_config", None)
 
         if sparse_attention_config is not None:
@@ -904,6 +937,7 @@ class MiniMaxM3DecoderLayer(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
+            reduce_results=not self.use_sequence_parallel,
         )
         if is_sparse_attention_layer:
             self.self_attn = MiniMaxM3SparseAttention(
@@ -914,21 +948,13 @@ class MiniMaxM3DecoderLayer(nn.Module):
         else:
             self.self_attn = MiniMaxM3Attention(**attn_kwargs)
 
-        moe_layer_freq = getattr(config, "moe_layer_freq", None)
-        # ``is_layer_sparse`` here means "this layer's MLP is a sparse MoE",
-        # not anything about attention sparsity. The name is kept (instead of
-        # the clearer ``is_layer_moe``) to match the convention used by the
-        # rest of sglang -- ``OperationsStrategy``, ``LayerScatterModes``,
-        # ``LayerCommunicator``, ``gpt_oss``, ``falcon_h1`` etc all access
-        # ``layer.is_layer_sparse``.
-        self.is_layer_sparse = moe_layer_freq[layer_idx] != 0 if moe_layer_freq is not None else True
-
         if self.is_layer_sparse:
             self.block_sparse_moe = MiniMaxM3MoE(
                 config=config,
                 quant_config=quant_config,
                 parallel_config=parallel_config,
                 prefix=f"{prefix}.block_sparse_moe",
+                is_sequence_parallel=self.use_sequence_parallel,
             )
         else:
             self.mlp = MiniMaxM3MLP(
@@ -936,6 +962,15 @@ class MiniMaxM3DecoderLayer(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
                 intermediate_size=config.dense_intermediate_size,
+                is_sequence_parallel=self.use_sequence_parallel,
+            )
+        if self.is_layer_sparse and self.use_sequence_parallel:
+            actual_sp = self.block_sparse_moe.experts.moe_config.is_sequence_parallel
+            assert actual_sp, "MiniMax-M3 FlashComm requires an SP-enabled MoE runner"
+            logger.info_once(
+                "MiniMax-M3 FlashComm model wiring active: attention ReduceScatter, "
+                "MoE sp_size=%s, residual remains sharded across dense and MoE layers",
+                self.block_sparse_moe.experts.moe_config.sp_size,
             )
         self.input_layernorm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -945,19 +980,34 @@ class MiniMaxM3DecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
-    ) -> torch.Tensor:
+        input_is_sequence_parallel: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # Track layout explicitly: for a one-token batch the padded SP shard
+        # and full input can have the same shape.
+        full_num_tokens = positions.shape[0]
+        if input_is_sequence_parallel and not self.use_sequence_parallel:
+            hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
+            assert residual is not None
+            residual = sp_all_gather(residual)[:full_num_tokens]
+            input_is_sequence_parallel = False
         # Self Attention
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
+        if input_is_sequence_parallel:
+            hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
         )
 
         # Fully Connected
+        if self.use_sequence_parallel:
+            hidden_states = sp_reduce_scatter(hidden_states)
+            if not input_is_sequence_parallel:
+                residual = sp_shard(residual)
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
 
         if self.is_layer_sparse:
@@ -1051,14 +1101,50 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
                 PPTransportDataType.AUX_HIDDEN_STATES,
             )
 
+        hidden_states_are_sp = False
+        sp_forward_context = None
+        original_is_padding = None
+        if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
+            sp_forward_context = get_forward_context()
+            original_is_padding = sp_forward_context.is_padding
         for idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
         ):
-            hidden_states, residual = layer(positions, hidden_states, residual)
-            self._maybe_add_hidden_state(aux_hidden_states, idx + 1, hidden_states, residual)
+            if sp_forward_context is not None:
+                if layer.use_sequence_parallel and not hidden_states_are_sp:
+                    sp_forward_context.is_padding = sp_padding_mask(original_is_padding, positions)
+                elif hidden_states_are_sp and not layer.use_sequence_parallel:
+                    sp_forward_context.is_padding = original_is_padding
+            hidden_states, residual = layer(
+                positions,
+                hidden_states,
+                residual,
+                input_is_sequence_parallel=hidden_states_are_sp,
+            )
+            hidden_states_are_sp = layer.use_sequence_parallel
+            if hidden_states_are_sp:
+                if idx + 1 in self.aux_hidden_state_layers:
+                    # EAGLE3 consumes the residual-added full token layout.
+                    # Gather only requested snapshots, not both outputs per layer.
+                    auxiliary = hidden_states + residual
+                    auxiliary = sp_all_gather(auxiliary)[: positions.shape[0]]
+                    self._maybe_add_hidden_state(aux_hidden_states, idx + 1, auxiliary, None)
+            else:
+                self._maybe_add_hidden_state(aux_hidden_states, idx + 1, hidden_states, residual)
+
+        if sp_forward_context is not None:
+            # The forward context is reused by speculative steps and must not
+            # retain the rank-local padding mask after the target forward.
+            sp_forward_context.is_padding = original_is_padding
 
         if not pp_group.is_last_rank:
+            if hidden_states_are_sp:
+                # PP transport carries full-token tensors. The next stage can
+                # start a fresh SP region after receiving them.
+                assert residual is not None
+                hidden_states = sp_all_gather(hidden_states)[: positions.shape[0]]
+                residual = sp_all_gather(residual)[: positions.shape[0]]
             intermediate_tensors = IntermediateTensors({"hidden_states": hidden_states, "residual": residual})
             return add_pp_transport_tensors(
                 intermediate_tensors,
@@ -1066,6 +1152,8 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
                 aux_hidden_states,
             )
         hidden_states, _ = self.norm(hidden_states, residual)
+        if hidden_states_are_sp:
+            hidden_states = sp_all_gather(hidden_states)[: positions.shape[0]]
 
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
