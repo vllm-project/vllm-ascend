@@ -492,8 +492,6 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
 
     def process_weights_after_loading(self) -> None:
         self._wk_weight = self.wk_weights_proj.weight.detach()[: self.head_dim].contiguous()
-        # Like the upstream indexer, keep only the ranking-sensitive head
-        # projection in FP32. K and the compression gate use model precision.
         self._head_weight_f32 = self.wk_weights_proj.weight.detach()[self.head_dim :].float().contiguous()
         self._gate_weight = self.index_kpool_compress_gate.detach()
         self._norm_weight_f32 = self.k_norm.weight.detach().float() if self.k_norm.weight is not None else None
