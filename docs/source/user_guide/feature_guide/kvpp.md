@@ -125,7 +125,7 @@ Each worker uses a handshake port derived from `kv_port` and its parallel rank. 
 
 KVPP supports `kv_producer` and `kv_both` for Memcache pooling. `kv_consumer` has not been tested and is outside the validated support scope.
 
-Configure the memcache SDK and MetaService as described in [KV Pool](kv_pool.md), then add:
+Configure the memcache SDK and MetaService as described in [KV Cache Pool (Ascend Store)](kv_cache_pool_ascend_store.md), then add:
 
 ```bash
 --kv-transfer-config '{"kv_connector":"AscendStoreConnector","kv_role":"kv_producer","kv_connector_extra_config":{"lookup_rpc_port":"0","backend":"memcache","use_layerwise":false,"load_async":true}}'

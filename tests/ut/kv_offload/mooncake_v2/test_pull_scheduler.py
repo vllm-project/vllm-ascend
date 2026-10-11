@@ -451,14 +451,20 @@ def test_request_finished_delays_blocks_and_builds_remote_params() -> None:
     scheduler._sending_thread.add_delayed_request.assert_called_once()
 
 
-def test_update_connector_output_routes_worker_completion_and_scheduler_ack() -> None:
+@pytest.mark.parametrize("failed", [False, True])
+def test_update_connector_output_routes_worker_completion_and_scheduler_ack(failed: bool) -> None:
     scheduler = make_pull_scheduler()
+    scheduler.kv_transfer_config = SimpleNamespace(kv_load_failure_policy="fail")
     scheduler._recving_thread = MagicMock()
     scheduler._sending_thread = MagicMock()
     scheduler._sending_thread.get_and_clear_finished_requests.return_value = {"request-p"}
     scheduler._reqs_recv_info["request-d"] = ("10.0.0.1", 6000, "request-p")
     scheduler._reqs_need_send["request-p"] = time.time()
-    output = SimpleNamespace(finished_recving={"request-d"}, finished_sending=None)
+    output = SimpleNamespace(
+        finished_recving={"request-d"},
+        finished_sending=None,
+        failed_recving={"request-d"} if failed else set(),
+    )
 
     scheduler.update_connector_output(output)  # type: ignore[arg-type]
 

@@ -1624,27 +1624,6 @@ at::Tensor kda_layout_swap12_meta(
     return at::empty_symint(y_sizes, x.options());
 }
 
-void store_kv_block_metadata(
-    const at::Tensor &slot_mapping_npu,
-    const at::Tensor &group_len,
-    const at::Tensor &group_key_idx,
-    const at::Tensor &group_key_cache_idx,
-    int64_t block_size)
- {
-    return;
- }
-
-void store_kv_block(
-    const at::Tensor &key_in,
-    const at::Tensor &key_cache_in,
-    const at::Tensor &group_len,
-    const at::Tensor &group_key_idx,
-    const at::Tensor &group_key_cache_idx,
-    int64_t block_size)
-{
-    return;
-
-}
 std::tuple<at::Tensor, at::Tensor> dequant_situ_quant_meta(
     const at::Tensor& x,
     const c10::optional<at::Tensor>& weight_scale,
@@ -1958,9 +1937,6 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("kda_gate_cumsum_vllm", &vllm_ascend::meta::kda_gate_cumsum_vllm_meta);
     // kda_layout_swap12
     ops.impl("kda_layout_swap12", &vllm_ascend::meta::kda_layout_swap12_meta);
-     // store_kv_block
-    ops.impl("store_kv_block_pre", &vllm_ascend::meta::store_kv_block_metadata);
-    ops.impl("store_kv_block", &vllm_ascend::meta::store_kv_block);
 }
 }
 #endif

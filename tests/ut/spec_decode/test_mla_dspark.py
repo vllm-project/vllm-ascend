@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 import torch
 from vllm.config import AttentionConfig
+from vllm.v1.worker.gpu.dp_utils import DPSyncState
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
@@ -27,6 +28,7 @@ from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpec
 
 def make_speculator():
     spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
+    spec.replicated_pcp = False
     spec.attn_architecture = "MLA"
     spec.use_dcp = False
     spec.requires_non_causal = True
@@ -43,6 +45,34 @@ def make_speculator():
         positions=torch.arange(20), seq_lens=torch.tensor([5, 0, 0, 0], dtype=torch.int32)
     )
     return spec
+
+
+@pytest.mark.parametrize("replicated_pcp", [False, True])
+def test_dspark_sync_matches_global_draft_requests(monkeypatch, replicated_pcp):
+    spec = make_speculator()
+    spec.replicated_pcp = replicated_pcp
+    spec.max_num_reqs = 4
+    spec.max_num_tokens = 20
+    batch = SimpleNamespace(num_reqs=4, is_prefilling_np=np.zeros(4, dtype=np.bool_))
+    target_sync = SimpleNamespace(num_reqs=2 if replicated_pcp else 4)
+    monkeypatch.setattr(shared, "build_attn_metadata_wrapper", nullcontext)
+    monkeypatch.setattr(shared, "build_attn_metadata_factory", lambda *a, **kw: nullcontext())
+
+    def parent_propose(self, *args, **kwargs):
+        sync = args[11]
+        if sync is not None:
+            # Execute the actual upstream capacity check, not a duplicate of it.
+            self._build_uniform_batch_dp_sync(sync, batch.num_reqs, self.num_query_per_req)
+        assert (sync is None) == replicated_pcp
+        return "draft"
+
+    if not replicated_pcp:
+        # The helper replaces the real DP state after checking capacity.
+        target_sync = DPSyncState(
+            num_tokens_across_dp=torch.tensor([4, 4]), uniform_token_count=1, eager=False, num_reqs=4
+        )
+    monkeypatch.setattr(DSparkSpeculator, "propose", parent_propose)
+    assert spec.propose(batch, *[None for _ in range(10)], dp_sync=target_sync) == "draft"
 
 
 def make_target():

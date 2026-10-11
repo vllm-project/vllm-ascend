@@ -968,7 +968,7 @@ This section builds on [Section 5.3](#53-prefill-decode-disaggregation). Reuse t
 - `AscendStoreConnector` stores KV in the Mooncake KV Cache Pool so later Prefills with the same prefix can hit the pool instead of recomputing.
 - By default the Prefill node performs pool lookup, load, and write.
 
-For backend selection, `mooncake.json`, Mooncake Master, eviction, and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_guide/feature_guide/kv_pool.md). For the hardware/communication environment variables required by pooling, refer to [Environment Variables Description](../../user_guide/feature_guide/kv_pool.md#51-environment-variables-description). For MiniMax-specific issues, refer to [Chapter 10 FAQ](#10-faq).
+For backend selection, `mooncake.json`, Mooncake Master, eviction, and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md). For the hardware/communication environment variables required by pooling, refer to [Environment Variables Description](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md). For MiniMax-specific issues, refer to [Chapter 10 FAQ](#10-faq).
 
 **Compared with normal PD in Section 5.3, pay attention to these pooling-only requirements:**
 
@@ -978,7 +978,7 @@ For backend selection, `mooncake.json`, Mooncake Master, eviction, and tenant op
 | Mooncake Master | Not required | Must start `mooncake_master` before Decode / Prefill |
 | `mooncake.json` | Not required | Required on every rank; Prefill donates memory, Decode sets `global_segment_size=0` |
 | `engine_id` / `lookup_rpc_port` | Fixed example IDs are OK | **Must be unique per DP rank** (`37000/37100 + DP_RANK`) to avoid port / engine collisions |
-| Extra env | Section 5.3 `HCCL_*` only | Keep 5.3 env, then add pool fabric/UB exports from [kv_pool.md §5.1](../../user_guide/feature_guide/kv_pool.md#51-environment-variables-description) |
+| Extra env | Section 5.3 `HCCL_*` only | Keep 5.3 env, then add pool fabric/UB exports from [KV Cache Pool Deployment Guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md) |
 | Container mounts | 950DT needs `/etc/hixlep/` | Also mount `/etc/hccn.conf`; keep `/etc/hixlep/` on 950DT |
 | Startup order | Decode → Prefill → Proxy | **Mooncake Master → Decode → Prefill → Proxy** |
 | Verification | P→D KV transfer only | Also check Prefill pool lookup/get/put hits after a repeated-prefix warmup |
@@ -1045,7 +1045,7 @@ Decode `mooncake.json` on both platforms (same Master and `tenant_id`, no donate
 
 #### 5.4.2 Environment Variables
 
-Start from the Section 5.3 environment block (`HCCL_IF_IP`, `HCCL`/`GLOO`/`TP` socket IFNAME, `HCCL_BUFFSIZE`, `HCCL_OP_EXPANSION_MODE`, `PYTORCH_NPU_ALLOC_CONF`, `ASCEND_RT_VISIBLE_DEVICES`, and A3 Prefill `VLLM_PP_LAYER_PARTITION="30,30"`). Then add the pooling-required variables below. Choose the hardware/communication exports from [Environment Variables Description](../../user_guide/feature_guide/kv_pool.md#51-environment-variables-description) according to your machine and link type.
+Start from the Section 5.3 environment block (`HCCL_IF_IP`, `HCCL`/`GLOO`/`TP` socket IFNAME, `HCCL_BUFFSIZE`, `HCCL_OP_EXPANSION_MODE`, `PYTORCH_NPU_ALLOC_CONF`, `ASCEND_RT_VISIBLE_DEVICES`, and A3 Prefill `VLLM_PP_LAYER_PARTITION="30,30"`). Then add the pooling-required variables below. Choose the hardware/communication exports from [Environment Variables Description](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md) according to your machine and link type.
 
 Common pooling exports on every Prefill and Decode rank:
 
