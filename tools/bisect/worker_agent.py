@@ -31,10 +31,10 @@ import time
 from pathlib import Path
 
 from tools.bisect import git_ops, runner
-from tools.bisect.build_manager import BuildError, BuildManager
+from tools.bisect.build_manager import DEPLOY_ERRORS, BuildManager
 from tools.bisect.config import BisectInput, BisectOptions
 from tools.bisect.coordinator import Coordinator
-from tools.bisect.version_compat import VersionAdaptationError, VersionAdapter
+from tools.bisect.version_compat import VersionAdapter
 
 logger = logging.getLogger("bisect.worker")
 
@@ -49,12 +49,7 @@ def _launch_pytest(inp: BisectInput, opt: BisectOptions, log_path: Path) -> int:
     env.setdefault("BENCHMARK_HOME", str(opt.repo_dir / "benchmark"))
     env["LWS_WORKER_INDEX"] = str(opt.node_index)
 
-    base = inp.config_base_path or ""
-    test_path = (
-        runner._EXTERNAL_DP_TEST
-        if "external_dp/config" in base or "external_dp/config" in inp.config_yaml
-        else runner._INTERNAL_DP_TEST
-    )
+    test_path = runner._multi_node_test_path(opt.repo_dir, inp)
     sources = " ; ".join(f"source {f} 2>/dev/null || true" for f in runner._ENV_SOURCE_FILES)
     bash_cmd = f"set -e ; {sources} ; exec python -m pytest -sv --show-capture=no {test_path}"
     with open(log_path, "a", encoding="utf-8") as out:
@@ -75,6 +70,21 @@ def _launch_pytest(inp: BisectInput, opt: BisectOptions, log_path: Path) -> int:
             return 124
 
 
+def _await_start(coord: Coordinator, rnd: int, opt: BisectOptions) -> bool:
+    """Wait for the master's start/abort decision for round ``rnd``.
+
+    A timeout is survivable (the master may still be rebuilding, or the round
+    was abandoned after a desync): return False so the caller moves on to the
+    next round instead of dying -- a dead agent leaves the master waiting out
+    the barrier timeout on every remaining round.
+    """
+    try:
+        return coord.wait_start(rnd, opt.barrier_timeout_s)
+    except TimeoutError:
+        logger.error("[worker] round %d: no start/abort decision within %ss; continuing", rnd, opt.barrier_timeout_s)
+        return False
+
+
 def run_worker(inp: BisectInput, opt: BisectOptions) -> int:
     coord = Coordinator(opt.coord_dir, opt.num_nodes, opt.node_index)
     builder = BuildManager(opt)
@@ -83,9 +93,14 @@ def run_worker(inp: BisectInput, opt: BisectOptions) -> int:
     log_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info("[worker] node %d started; waiting for master commands", opt.node_index)
-    # Only DONE/release files created AFTER this moment count as stop signals, so
-    # a stale sentinel from a previous run on the persistent PVC is ignored.
-    start_ts = time.time()
+    # Record the legacy cutoff before fetching: completion may arrive while
+    # history is downloading. A run-scoped directory needs no mtime filter.
+    start_ts = None if opt.run_scoped_coord else time.time()
+    # Recover the full history up front: the nightly clone is depth-1 and only
+    # the tip exists locally, while every commanded commit is an ancestor.
+    # Doing this before the first round keeps the slow, network-bound unshallow
+    # out of the barrier window (prepare() re-resolves as a no-op backstop).
+    git_ops.ensure_full_history(opt.repo_dir)
     rnd = 0
     while True:
         rnd += 1
@@ -110,19 +125,21 @@ def run_worker(inp: BisectInput, opt: BisectOptions) -> int:
                 tuple(cmd.get("version_checks", ())),
                 log_path,
             )
-        except (BuildError, VersionAdaptationError) as exc:
+        except DEPLOY_ERRORS as exc:
             # Publish a deliberately inconsistent ready marker so the master
             # aborts the round if it managed to deploy successfully. The worker
             # waits for the master's start/abort decision and never launches a
-            # partial distributed test.
-            logger.error("[worker] build failed for %s: %s", commit[:12], exc)
+            # partial distributed test. GitError is included: the worker's repo
+            # is often a shallow clone and an unrecoverable commit must not
+            # kill the agent (a dead agent leaves the master waiting out the
+            # barrier timeout on every remaining round).
+            logger.error("[worker] deploy failed for %s: %s", commit[:12], exc)
             coord.signal_ready(rnd, "worker-deploy-failed")
-            if not coord.wait_start(rnd, opt.barrier_timeout_s):
-                continue
+            _await_start(coord, rnd, opt)
             continue
 
         coord.signal_ready(rnd, git_ops.current_commit(opt.repo_dir))
-        if not coord.wait_start(rnd, opt.barrier_timeout_s):
+        if not _await_start(coord, rnd, opt):
             logger.info("[worker] round %d aborted before test execution", rnd)
             continue
         # Launch the worker test; it returns when the master's trial completes.

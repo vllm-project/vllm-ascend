@@ -2,7 +2,7 @@ import vllm.envs as envs
 from vllm.config.vllm import VllmConfig
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
-from vllm_ascend.worker.v2.pp_utils import resolve_spec_pp_support
+from vllm_ascend.worker.v2.pp_transport import resolve_spec_pp_support
 
 _original_validate_v2_model_runner = VllmConfig._validate_v2_model_runner
 _original_get_unsupported_features = VllmConfig._get_v2_model_runner_unsupported_features

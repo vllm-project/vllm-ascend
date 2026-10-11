@@ -2,7 +2,7 @@
 """CPU metadata contracts for MLA DCP producers and graph updates."""
 
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
@@ -54,13 +54,19 @@ def test_common_lengths_cover_all_ranks_and_preserve_global(size, interleave, us
 
 @pytest.mark.parametrize("for_capture", [False, True])
 @pytest.mark.parametrize("use_dcp", [False, True])
-def test_v2_common_lengths_are_shared_by_groups(monkeypatch, for_capture, use_dcp):
+@pytest.mark.parametrize("config_source", ["argument", "builder", "context"])
+def test_v2_common_lengths_are_shared_by_groups(monkeypatch, for_capture, use_dcp, config_source):
     config = SimpleNamespace(
         parallel_config=SimpleNamespace(decode_context_parallel_size=8 if use_dcp else 1, cp_kv_cache_interleave_size=4)
     )
     monkeypatch.setattr(attn_utils, "get_dcp_group", lambda: SimpleNamespace(rank_in_group=1))
+    get_context = Mock(return_value=config if config_source == "context" else None)
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config_or_none", get_context)
 
     class Builder:
+        def __init__(self):
+            self.vllm_config = config if config_source == "builder" else None
+
         def build(self, common_prefix_len, common_attn_metadata):
             return common_attn_metadata
 
@@ -88,10 +94,11 @@ def test_v2_common_lengths_are_shared_by_groups(monkeypatch, for_capture, use_dc
             slot_mappings=torch.zeros((2, 4), dtype=torch.int64),
             kv_cache_config=SimpleNamespace(kv_cache_groups=[None, None]),
             dcp_local_seq_lens=device_local,
-            parallel_config=config.parallel_config,
+            parallel_config=config.parallel_config if config_source == "argument" else None,
             for_cudagraph_capture=for_capture,
         )
     assert partition.call_count == int(use_dcp)
+    assert get_context.call_count == int(use_dcp and config_source == "context")
     common0, common1 = result["layer0"], result["layer1"]
     assert common0.dcp_local_seq_lens is device_local
     assert common0.dcp_local_seq_lens_cpu is common1.dcp_local_seq_lens_cpu
@@ -141,7 +148,7 @@ def test_draft_factory_forwards_cpu_lengths_and_explicit_config(monkeypatch):
     monkeypatch.setattr(attn_utils, "_BUILD_ATTN_METADATA_MODULE", module)
     lengths = torch.tensor([32, 128, 0, 0], dtype=torch.int32)
     config = SimpleNamespace(decode_context_parallel_size=8, cp_kv_cache_interleave_size=4)
-    with attn_utils.build_draft_attn_metadata_factory(
+    with attn_utils.build_attn_metadata_factory(
         torch.arange(8),
         4,
         torch.zeros(4, dtype=torch.bool),
@@ -153,3 +160,26 @@ def test_draft_factory_forwards_cpu_lengths_and_explicit_config(monkeypatch):
     assert forwarded["parallel_config"] is config
     assert forwarded["seq_lens_np"].tolist() == [32, 128, 0, 0]
     assert forwarded["positions"].tolist() == [0, 1, 2, 3]
+
+
+@pytest.mark.parametrize("context_config", [None, SimpleNamespace(parallel_config=None)])
+def test_v2_dcp_metadata_requires_explicit_or_context_parallel_config(monkeypatch, context_config):
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config_or_none", lambda: context_config)
+    lengths = torch.tensor([1], dtype=torch.int32)
+    offsets = torch.tensor([0, 1], dtype=torch.int32)
+    with pytest.raises(AssertionError, match="DCP metadata requires"):
+        attn_utils.build_attn_metadata(
+            attn_groups=[],
+            num_reqs=1,
+            num_tokens=1,
+            query_start_loc_gpu=offsets,
+            query_start_loc_cpu=offsets,
+            max_query_len=1,
+            seq_lens=lengths,
+            seq_lens_np=lengths.numpy(),
+            max_seq_len=16,
+            block_tables=[],
+            slot_mappings=torch.zeros((0, 1), dtype=torch.int64),
+            kv_cache_config=SimpleNamespace(kv_cache_groups=[]),
+            dcp_local_seq_lens=lengths,
+        )

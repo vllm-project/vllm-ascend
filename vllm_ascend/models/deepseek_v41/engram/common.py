@@ -8,7 +8,24 @@ the Ascend token history lives in ``hash_state`` next to the SWA slot cache,
 which is where upstream keeps it too.
 """
 
+from pathlib import Path
+
 import torch
+from safetensors import safe_open
+
+
+def load_engram_rotation_block(model_root: str, hidden_size: int, rotation_path: Path | None = None) -> torch.Tensor:
+    """Use the A3 Quarot basis, or the native A5 identity basis."""
+    rotation_path = rotation_path or Path(model_root) / "optional/quarot.safetensors"
+    if not rotation_path.is_file():
+        return torch.eye(32)
+    with safe_open(rotation_path, framework="pt") as checkpoint:
+        rotation = checkpoint.get_tensor("global_rotation")
+    block = rotation[:32, :32].contiguous()
+    expected = torch.block_diag(*[block] * (hidden_size // 32))
+    if not torch.equal(rotation, expected):
+        raise ValueError("Engram gate requires repeated block32 global rotation")
+    return block
 
 
 def engram_enabled(text_config) -> bool:
@@ -31,18 +48,20 @@ def engram_gate(
     key: torch.Tensor,
     value: torch.Tensor,
     channel_weight: torch.Tensor,
-    rotation_block: torch.Tensor,
+    rotation_block: torch.Tensor | None,
     token_mask: torch.Tensor,
     eps: float,
 ) -> torch.Tensor:
-    """Apply original-basis gating to a rotated residual and rotated value.
+    """Apply original-basis gating, undoing checkpoint rotation when present.
 
     ``hidden`` and ``key`` have shape [tokens, hc_mult, hidden_size].
     The saved rotation consists of identical diagonal blocks. Restore hidden
     in FP32; the value projection already includes the forward rotation.
     """
     dim = hidden.shape[-1]
-    original = (hidden.float().unflatten(-1, (-1, rotation_block.shape[0])) @ rotation_block.float().T).flatten(-2)
+    original = hidden.float()
+    if rotation_block is not None:
+        original = (original.unflatten(-1, (-1, rotation_block.shape[0])) @ rotation_block.float().T).flatten(-2)
     key = key.float()
     rstd = torch.rsqrt(original.square().mean(-1) + eps)
     rstd *= torch.rsqrt(key.square().mean(-1) + eps)

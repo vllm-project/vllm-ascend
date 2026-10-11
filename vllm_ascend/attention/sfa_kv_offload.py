@@ -27,7 +27,7 @@ from typing import Any, NamedTuple, TypeVar, cast
 import numpy as np
 import torch
 import torch_npu
-from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
 from vllm.forward_context import (
     get_forward_context,
     is_forward_context_available,
@@ -37,8 +37,13 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.utils import CpuGpuBuffer
 
-from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_config import SparseKVOffloadConfig, get_ascend_config
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.indexer import (
+    INDEXER_K_CACHE_SLOT,
+    INDEXER_SCALE_CACHE_SLOT,
+)
 from vllm_ascend.attention.sfa_v1 import (
     AscendSFAImpl,
     AscendSFAMetadata,
@@ -57,6 +62,37 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     get_sparse_kv_offload_manager,
 )
 from vllm_ascend.utils import enable_dsa_cp
+
+# LIM bounds mirror both BF16 and quantized kernel constants headers;
+# source-checkout tests enforce parity, independently of the draft checkpoint.
+LIM_TOPK = 2048
+LIM_MAX_QUERY_ROWS = 14
+LIM_MAX_HOT_TOKENS = 32640
+LIM_CACHE_BLOCK_SIZE = 128
+
+# Copy-SFA's two-block circular tail requires stronger alignment than LIM.
+COPY_SFA_TAIL_BLOCKS = 2
+COPY_SFA_TAIL_TOKENS = COPY_SFA_TAIL_BLOCKS * LIM_CACHE_BLOCK_SIZE
+
+
+def _validate_fused_copy_sfa_config(vllm_config: VllmConfig, cfg: SparseKVOffloadConfig) -> None:
+    """Check kernel and circular-tail bounds before allocating fused buffers."""
+    if not cfg.use_fused_copy_sfa:
+        return
+    speculative = vllm_config.speculative_config
+    width = 1 + (speculative.num_speculative_tokens if speculative else 0)
+    if cfg.topk != LIM_TOPK or not 1 <= width <= LIM_MAX_QUERY_ROWS:
+        raise ValueError(f"fused_copy_sfa requires TopK={LIM_TOPK} and 1–{LIM_MAX_QUERY_ROWS} query rows per request")
+    if (
+        not width * cfg.topk <= cfg.topk_buffer_size <= LIM_MAX_HOT_TOKENS
+        or cfg.topk_buffer_size % COPY_SFA_TAIL_TOKENS
+    ):
+        raise ValueError(
+            f"fused_copy_sfa hot budget must be {COPY_SFA_TAIL_TOKENS}-aligned "
+            f"in [Q_max*{LIM_TOPK}, {LIM_MAX_HOT_TOKENS}]: "
+            "the dense short-sequence layout only lines up with the circular "
+            f"tail slots when topk_buffer_size is a multiple of {COPY_SFA_TAIL_TOKENS}"
+        )
 
 
 @dataclass
@@ -160,6 +196,8 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
         metadata_cls: type[AscendSFAOffloadMetadata] | None = None,
         supports_dcp_with_varlen: bool = False,
     ):
+        cfg = get_ascend_config().sparse_kv_offload_config
+        _validate_fused_copy_sfa_config(vllm_config, cfg)
         super().__init__(
             kv_cache_spec,
             layer_names,
@@ -168,7 +206,6 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
             metadata_cls if metadata_cls is not None else AscendSFAOffloadMetadata,
             supports_dcp_with_varlen,
         )
-        cfg = get_ascend_config().sparse_kv_offload_config
         self.use_fused_copy_sfa = cfg.use_fused_copy_sfa
         if self.use_fused_copy_sfa:
             self._init_copy_sfa_metadata_buffers(vllm_config, device)
@@ -192,11 +229,12 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
         self.lim_reuse_topk = getattr(draft_hf, "index_share_for_mtp_iteration", False)
         steps = self.copy_sfa_metadata_steps
         self.copy_sfa_hot_tokens = cfg.topk_buffer_size
-        self.copy_sfa_stride_blocks = cfg.topk_buffer_size // 128 + 2
+        self.copy_sfa_stride_blocks = cfg.topk_buffer_size // LIM_CACHE_BLOCK_SIZE + COPY_SFA_TAIL_BLOCKS
         self.copy_sfa_blocks = torch.arange(self.copy_sfa_stride_blocks, dtype=torch.int32, device=device)
-        self.copy_sfa_parts = torch.arange(2, dtype=torch.int64, device=device)
+        self.copy_sfa_parts = torch.arange(COPY_SFA_TAIL_BLOCKS, dtype=torch.int64, device=device)
         # CPU-owned layout uses persistent pinned storage. Each target/draft
         # step has distinct storage: later metadata builds precede execution.
+        # CpuGpuBuffer keeps fixed device addresses for ACL graph replay.
         host_fields = {
             "query_ends": (requests, torch.int32),
             "widths": (requests, torch.int32),
@@ -204,7 +242,6 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
             "pool_indices": (requests, torch.int64),
             "block_bases": (requests, torch.int32),
             "active": (requests, torch.bool),
-            "generation_match": (requests, torch.bool),
             "token_rows": (tokens, torch.int64),
             "token_offsets": (tokens, torch.int64),
             "token_active": (tokens, torch.bool),
@@ -231,26 +268,28 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
                 "request_state",
             )
         }
-        # Target and physical MTP-layer histories are independent. Request
-        # generations are host-owned; prefix/cache history follows device S.
+        # Target and physical MTP-layer histories are independent.
+        # Slot ownership is invalidated explicitly; lengths stay on device.
         banks = 1 + self.lim_mtp_layers
-        self.lim_last_generation = np.full((banks, 2 * requests), -1, dtype=np.int64)
         self.lim_last_prefix = torch.zeros((banks, 2 * requests), dtype=torch.int32, device=device)
-        self.lim_last_cache = torch.zeros_like(self.lim_last_prefix)
+        self.lim_last_cache = torch.full_like(self.lim_last_prefix, -1)
         self.copy_sfa_hbm_block_table = torch.empty(
             (steps, requests, self.copy_sfa_stride_blocks), dtype=torch.int32, device=device
         )
         self.copy_sfa_device_slots = torch.empty((steps, tokens), dtype=torch.int64, device=device)
-        self.copy_sfa_tail_src = torch.empty((steps, requests, 2), dtype=torch.int64, device=device)
+        self.copy_sfa_tail_src = torch.empty((steps, requests, COPY_SFA_TAIL_BLOCKS), dtype=torch.int64, device=device)
         self.copy_sfa_tail_dst = torch.empty_like(self.copy_sfa_tail_src)
-        self.copy_sfa_tail_lengths = torch.empty((steps, requests, 2), dtype=torch.int32, device=device)
+        self.copy_sfa_tail_lengths = torch.empty(
+            (steps, requests, COPY_SFA_TAIL_BLOCKS), dtype=torch.int32, device=device
+        )
         hf_config = vllm_config.model_config.hf_text_config
         self.copy_sfa_token_bytes = torch.tensor(
             [hf_config.kv_lora_rank * 2, hf_config.qk_rope_head_dim * 2], dtype=torch.int64, device=device
         ).view(2, 1, 1)
-        self.copy_sfa_copy_src_offsets = torch.empty((steps, requests * 4), dtype=torch.int64, device=device)
+        copy_descriptors = requests * COPY_SFA_TAIL_BLOCKS * self.copy_sfa_token_bytes.numel()
+        self.copy_sfa_copy_src_offsets = torch.empty((steps, copy_descriptors), dtype=torch.int64, device=device)
         self.copy_sfa_copy_dst_offsets = torch.empty_like(self.copy_sfa_copy_src_offsets)
-        self.copy_sfa_copy_lengths = torch.empty((steps, requests * 4), dtype=torch.int32, device=device)
+        self.copy_sfa_copy_lengths = torch.empty((steps, copy_descriptors), dtype=torch.int32, device=device)
 
     def _populate_offload_metadata(
         self,
@@ -271,7 +310,7 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
         metadata.fused_copy_sfa_enabled = (
             self.use_fused_copy_sfa
             and (num_prefills == 0 or common_attn_metadata.offload_dummy)
-            and 1 <= common_attn_metadata.max_query_len <= 7
+            and 1 <= common_attn_metadata.max_query_len <= max(7, self.copy_sfa_metadata_steps)
         )
         metadata.copy_sfa_reuse_logical_lens = None
         metadata.copy_sfa_copy_src_offsets = None
@@ -283,14 +322,14 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
         bank = 0 if draft_index is None else 1 + draft_index % self.lim_mtp_layers
         count = common_attn_metadata.num_reqs
         pools_cpu = common_attn_metadata.req_topk_buffer_slots
-        generations_cpu = common_attn_metadata.req_topk_buffer_generations
-        if pools_cpu is None or generations_cpu is None:
-            raise RuntimeError("fused_copy_sfa offload requires host request slots and generations")
+        active_cpu = common_attn_metadata.req_topk_buffer_active
+        if pools_cpu is None or active_cpu is None:
+            raise RuntimeError("fused_copy_sfa offload requires host request slots and activity")
         # Reject missing host mirrors rather than introducing a hidden D2H.
-        if pools_cpu.device.type != "cpu" or generations_cpu.device.type != "cpu":
-            raise RuntimeError("fused_copy_sfa request slots and generations must be CPU tensors")
+        if pools_cpu.device.type != "cpu" or active_cpu.device.type != "cpu":
+            raise RuntimeError("fused_copy_sfa request slots and activity must be CPU tensors")
         pools_np = pools_cpu[:count].numpy()
-        generations_np = generations_cpu[:count].numpy()
+        active_rows_np = active_cpu[:count].numpy()
 
         def upload(name, values):
             buffer = self.copy_sfa_host[name][step]
@@ -300,12 +339,12 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
 
         if not metadata.fused_copy_sfa_enabled:
             metadata.copy_sfa_prefill_pool_slots = upload("pool_entries", pools_np)
-            self.lim_last_generation[bank].fill(-1)
+            self.lim_last_cache[bank].fill_(-1)
             return metadata
         query_loc = common_attn_metadata.query_start_loc_cpu[: count + 1].numpy()
         ends_np, starts_np = query_loc[1:], query_loc[:-1]
         widths_np = ends_np - starts_np
-        active_np = (generations_np >= 0) & (widths_np > 0)
+        active_np = active_rows_np & (widths_np > 0)
         pools_np = np.where(active_np, pools_np, np.arange(count) + self.copy_sfa_pool_capacity)
         ends = upload("query_ends", ends_np)
         widths = upload("widths", widths_np)
@@ -317,9 +356,12 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
         # Compute row geometry once; LIM state and attention consume the same
         # values. CPU seq_lens may still be optimistic after MTP rejection.
         seq_lens = torch.where(active, common_attn_metadata.seq_lens[:count], widths)
-        prefix = torch.div((seq_lens - widths).clamp_min(0), 128, rounding_mode="floor") * 128
+        prefix = (
+            torch.div((seq_lens - widths).clamp_min(0), LIM_CACHE_BLOCK_SIZE, rounding_mode="floor")
+            * LIM_CACHE_BLOCK_SIZE
+        )
         is_short = prefix < self.copy_sfa_hot_tokens
-        cache = torch.where(active, torch.where(is_short, 0, prefix.clamp_max(self.copy_sfa_hot_tokens)), 2048)
+        cache = torch.where(active, torch.where(is_short, 0, prefix.clamp_max(self.copy_sfa_hot_tokens)), LIM_TOPK)
         logical = torch.where(active, torch.where(is_short, seq_lens, cache + seq_lens - prefix), 0)
         for name, value in (
             ("seq_lens", seq_lens),
@@ -335,15 +377,11 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
             # Reusing draft steps never run LIM or advance its history.
             state.fill_(-3)
         else:
-            same_generation = upload("generation_match", self.lim_last_generation[bank, pools_np] == generations_np)
             pool_indices = upload("pool_indices", pools_np)
-            ready = (
-                same_generation
-                & (self.lim_last_cache[bank, pool_indices] == cache)
-                & (self.lim_last_prefix[bank, pool_indices] <= prefix)
+            ready = (self.lim_last_cache[bank, pool_indices] == cache) & (
+                self.lim_last_prefix[bank, pool_indices] <= prefix
             )
             state.copy_(torch.where(active, torch.where(is_short, -3, torch.where(ready, -1, -2)), -3))
-            self.lim_last_generation[bank, pools_np] = generations_np
             self.lim_last_prefix[bank].scatter_(0, pool_indices, prefix)
             self.lim_last_cache[bank].scatter_(0, pool_indices, cache)
         metadata.lim_request_state = state
@@ -352,10 +390,14 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
             buffer.copy_(torch.where(active, torch.where(is_short, seq_lens, cache), 0))
             metadata.copy_sfa_reuse_logical_lens = buffer
 
-        cache_blocks = cache[:, None] // 128
+        cache_blocks = cache[:, None] // LIM_CACHE_BLOCK_SIZE
         blocks = self.copy_sfa_blocks[None, :]
         physical = upload("block_bases", pools_np * self.copy_sfa_stride_blocks)[:, None]
-        ring_blocks = self.copy_sfa_stride_blocks - 2 + (prefix[:, None] // 128 + blocks - cache_blocks) % 2
+        ring_blocks = (
+            self.copy_sfa_stride_blocks
+            - COPY_SFA_TAIL_BLOCKS
+            + (prefix[:, None] // LIM_CACHE_BLOCK_SIZE + blocks - cache_blocks) % COPY_SFA_TAIL_BLOCKS
+        )
         self.copy_sfa_hbm_block_table[step, :count].copy_(
             physical + torch.where(is_short[:, None] | (blocks < cache_blocks), blocks, ring_blocks)
         )
@@ -367,22 +409,24 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
         if getattr(common_attn_metadata, "copy_sfa_restore_tails", False):
             # Ordinary decode keeps its tail resident. Build H2D descriptors
             # only for the runner's explicit rollback restoration.
-            tail_blocks = prefix[:, None].to(torch.int64) // 128 + self.copy_sfa_parts
+            tail_blocks = prefix[:, None].to(torch.int64) // LIM_CACHE_BLOCK_SIZE + self.copy_sfa_parts
             source_ids = source.gather(1, tail_blocks.clamp(0, source.shape[1] - 1)).to(torch.int64)
-            lengths = (seq_lens[:, None] - widths[:, None] - prefix[:, None] - self.copy_sfa_parts * 128).clamp(0, 128)
+            lengths = (
+                seq_lens[:, None] - widths[:, None] - prefix[:, None] - self.copy_sfa_parts * LIM_CACHE_BLOCK_SIZE
+            ).clamp(0, LIM_CACHE_BLOCK_SIZE)
             lengths = torch.where(
                 active[:, None] & ~is_short[:, None] & (tail_blocks < source.shape[1]) & (source_ids >= 0), lengths, 0
             )
-            self.copy_sfa_tail_src[step, :count].copy_(source_ids.clamp_min(0) * 128)
+            self.copy_sfa_tail_src[step, :count].copy_(source_ids.clamp_min(0) * LIM_CACHE_BLOCK_SIZE)
             self.copy_sfa_tail_dst[step, :count].copy_(
-                pools[:, None].to(torch.int64) * self.copy_sfa_stride_blocks * 128
+                pools[:, None].to(torch.int64) * self.copy_sfa_stride_blocks * LIM_CACHE_BLOCK_SIZE
                 + self.copy_sfa_hot_tokens
-                + tail_blocks % 2 * 128
+                + tail_blocks % COPY_SFA_TAIL_BLOCKS * LIM_CACHE_BLOCK_SIZE
             )
             self.copy_sfa_tail_lengths[step, :count].copy_(lengths)
             for name in ("tail_src", "tail_dst", "tail_lengths"):
                 setattr(metadata, "copy_sfa_" + name, getattr(self, "copy_sfa_" + name)[step, :count])
-            descriptor_count = count * 4
+            descriptor_count = count * COPY_SFA_TAIL_BLOCKS * self.copy_sfa_token_bytes.numel()
             for name, values in (
                 ("copy_src_offsets", metadata.copy_sfa_tail_src),
                 ("copy_dst_offsets", metadata.copy_sfa_tail_dst),
@@ -405,13 +449,13 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
         metadata.slot_mapping.masked_fill_(token_invalid[: metadata.slot_mapping.numel()], -1)
         logical_positions = seq_lens[token_rows] - widths[token_rows] + token_offsets
         token_pools_np = np.where(token_active_np, pools_np[rows_np], self.copy_sfa_pool_capacity + rows_np)
-        row_base = upload("token_bases", token_pools_np * self.copy_sfa_stride_blocks * 128)
+        row_base = upload("token_bases", token_pools_np * self.copy_sfa_stride_blocks * LIM_CACHE_BLOCK_SIZE)
         self.copy_sfa_device_slots[step, :tokens].copy_(
             row_base
             + torch.where(
                 is_short[token_rows] & token_active,
                 logical_positions,
-                self.copy_sfa_hot_tokens + logical_positions % 256,
+                self.copy_sfa_hot_tokens + logical_positions % COPY_SFA_TAIL_TOKENS,
             )
         )
         metadata.copy_sfa_device_slots = self.copy_sfa_device_slots[step, :tokens]
@@ -468,6 +512,9 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         kv_sharing_target_layer_name: str | None,
         **kwargs,
     ):
+        offload_cfg = get_ascend_config().sparse_kv_offload_config
+        if offload_cfg.use_fused_copy_sfa:
+            _validate_fused_copy_sfa_config(get_current_vllm_config(), offload_cfg)
         super().__init__(
             num_heads,
             head_size,
@@ -483,28 +530,27 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         )
         if enable_dsa_cp():
             raise NotImplementedError("Sparse KV offload currently requires TP without context parallelism")
-        if self.enable_sparse_sfa_c8:
+        if self.uses_packed_sfa_main_cache:
             raise NotImplementedError(
-                "Sparse KV offload does not support the sparse SFA C8 main "
-                "cache; sparse LI C8 is supported for the device-resident "
-                "indexer cache."
+                "Sparse KV offload does not support packed SFA main caches "
+                "(C8 or TQ4); sparse LI C8 is supported for the "
+                "device-resident indexer cache."
             )
         self._current_layer_name: str | None = None
         self.block_size = self.vllm_config.cache_config.block_size
-        offload_cfg = get_ascend_config().sparse_kv_offload_config
         self.use_fused_overlap = offload_cfg.use_fused_overlap
         self.use_fused_copy_sfa = offload_cfg.use_fused_copy_sfa
         self.lim_indexer_owner = self
         self._copy_sfa_metadata: AscendSFAOffloadMetadata | None = None
         if self.use_fused_copy_sfa:
-            if self.enable_sparse_li_c8:
-                raise NotImplementedError("Fused Copy-SFA offload does not support sparse LI C8 serving yet")
             self.copy_sfa_hot_tokens = offload_cfg.topk_buffer_size
             requests = self.vllm_config.scheduler_config.max_num_seqs + 2
             tokens = self.vllm_config.scheduler_config.max_num_batched_tokens
             device = torch.device("npu")
             if not self.skip_topk:
-                source_capacity = cdiv(self.vllm_config.model_config.max_model_len, 128) * 128
+                source_capacity = (
+                    cdiv(self.vllm_config.model_config.max_model_len, LIM_CACHE_BLOCK_SIZE) * LIM_CACHE_BLOCK_SIZE
+                )
                 self.lim_slot_map = torch.full(
                     (requests * 2, source_capacity), -(1 << 31), dtype=torch.int32, device=device
                 )
@@ -514,7 +560,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
                     else 0
                 )
                 output_tokens = min(tokens, requests * width + self.vllm_config.parallel_config.tensor_parallel_size)
-                self.lim_topk_src = torch.zeros((output_tokens, 1, 2048), dtype=torch.int32, device=device)
+                self.lim_topk_src = torch.zeros((output_tokens, 1, LIM_TOPK), dtype=torch.int32, device=device)
                 self.lim_topk_dst = torch.zeros_like(self.lim_topk_src)
                 self.lim_topk_misses = torch.zeros(output_tokens, dtype=torch.int32, device=device)
                 self.lim_miss_src = torch.empty((requests, 32768), dtype=torch.int32, device=device)
@@ -634,7 +680,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             "cudagraph_runtime_mode",
             CUDAGraphMode.NONE,
         )
-        return forward_context.capturing or runtime_mode not in (
+        return bool(_EXTRA_CTX.capturing) or runtime_mode not in (
             None,
             CUDAGraphMode.NONE,
         )
@@ -665,7 +711,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             self._lim_select if attn_metadata.fused_copy_sfa_enabled and not self.skip_topk else None
         )
 
-    def _lim_select(self, query, weights, indexer, indexer_metadata):
+    def _lim_select(self, query, weights, indexer, indexer_metadata, query_scale=None):
         metadata = self._copy_sfa_metadata
         assert metadata is not None and metadata.copy_sfa_pool_entries is not None
         count = metadata.copy_sfa_pool_entries.numel()
@@ -673,35 +719,64 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         request_state = metadata.lim_request_state
         prefix = metadata.copy_sfa_prefix_lens
         cache = metadata.copy_sfa_cache_tokens
-        index_cache = indexer.k_cache.kv_cache[0].view(-1, 128, 1, 128)
+        index_cache = indexer.k_cache.kv_cache[INDEXER_K_CACHE_SLOT].view(-1, 128, 1, 128)
         table = indexer_metadata.block_table[:count].contiguous()
-        if self.lim_key_scale is None:
-            self.lim_key_scale = torch.empty(index_cache.shape[:3], dtype=torch.float32, device=query.device)
-            self.lim_query_scale = torch.empty(
-                (self.lim_topk_src.shape[0], query.shape[1]), dtype=torch.float32, device=query.device
+        if indexer.enable_sparse_li_c8:
+            n_head = indexer.n_head
+            assert query_scale is not None, "C8 LIM requires query_dequant_scale from the indexer"
+            key_scale = indexer.k_cache.kv_cache[INDEXER_SCALE_CACHE_SLOT]
+            if key_scale.dim() == 4:
+                key_scale = key_scale.squeeze(2)
+            key_scale = key_scale.reshape(index_cache.shape[0], 128, 1)
+            torch.ops._C_ascend.npu_fused_quant_lightning_indexer_manage(
+                weights[:tokens].contiguous(),
+                query_scale.view(-1, n_head)[:tokens].contiguous(),
+                query.view(-1, n_head, 128)[:tokens].contiguous(),
+                key_scale.contiguous(),
+                index_cache,
+                table,
+                metadata.copy_sfa_query_ends,
+                metadata.copy_sfa_seq_lens,
+                prefix,
+                cache,
+                request_state,
+                metadata.copy_sfa_pool_entries,
+                self.lim_slot_map,
+                self.lim_topk_src[:tokens],
+                self.lim_topk_dst[:tokens],
+                self.lim_topk_misses[:tokens],
+                self.lim_miss_src[:count],
+                self.lim_miss_dst[:count],
+                self.lim_misses[:count],
             )
-        assert self.lim_query_scale is not None
-        torch.ops._C_ascend.npu_fused_lightning_indexer_manage(
-            weights[:tokens].contiguous(),
-            self.lim_query_scale[:tokens],
-            query[:tokens].contiguous(),
-            self.lim_key_scale,
-            index_cache,
-            table,
-            metadata.copy_sfa_query_ends,
-            metadata.copy_sfa_seq_lens,
-            prefix,
-            cache,
-            request_state,
-            metadata.copy_sfa_pool_entries,
-            self.lim_slot_map,
-            self.lim_topk_src[:tokens],
-            self.lim_topk_dst[:tokens],
-            self.lim_topk_misses[:tokens],
-            self.lim_miss_src[:count],
-            self.lim_miss_dst[:count],
-            self.lim_misses[:count],
-        )
+        else:
+            if self.lim_key_scale is None:
+                self.lim_key_scale = torch.empty(index_cache.shape[:3], dtype=torch.float32, device=query.device)
+                self.lim_query_scale = torch.empty(
+                    (self.lim_topk_src.shape[0], query.shape[1]), dtype=torch.float32, device=query.device
+                )
+            assert self.lim_query_scale is not None
+            torch.ops._C_ascend.npu_fused_lightning_indexer_manage(
+                weights[:tokens].contiguous(),
+                self.lim_query_scale[:tokens],
+                query[:tokens].contiguous(),
+                self.lim_key_scale,
+                index_cache,
+                table,
+                metadata.copy_sfa_query_ends,
+                metadata.copy_sfa_seq_lens,
+                prefix,
+                cache,
+                request_state,
+                metadata.copy_sfa_pool_entries,
+                self.lim_slot_map,
+                self.lim_topk_src[:tokens],
+                self.lim_topk_dst[:tokens],
+                self.lim_topk_misses[:tokens],
+                self.lim_miss_src[:count],
+                self.lim_miss_dst[:count],
+                self.lim_misses[:count],
+            )
         if metadata.copy_sfa_reuse_logical_lens is not None:
             # Only draft step 0 saves the selection for later MTP forwards.
             # Target layers consume their current metadata directly.
@@ -908,13 +983,16 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             start = kv_len - q_len  # this batch's new tokens [start, kv_len)
             is_short = kv_len <= hot
             if not is_short:
-                start = max(start, (kv_len // 128) * 128)  # long: tail block only
+                start = max(start, (kv_len // LIM_CACHE_BLOCK_SIZE) * LIM_CACHE_BLOCK_SIZE)  # long: tail block only
             if start >= kv_len:
                 continue
             positions = torch.arange(start, kv_len, dtype=torch.int64, device=device)
-            src = block_table[row].to(torch.int64)[positions // 128] * 128 + positions % 128
+            src = (
+                block_table[row].to(torch.int64)[positions // LIM_CACHE_BLOCK_SIZE] * LIM_CACHE_BLOCK_SIZE
+                + positions % LIM_CACHE_BLOCK_SIZE
+            )
             row_base = int(pool_slots[row]) * stride_tokens
-            dst = row_base + (positions if is_short else hot + positions % 256)
+            dst = row_base + (positions if is_short else hot + positions % COPY_SFA_TAIL_TOKENS)
             for paged, buffers in (
                 (kv_cache[0], manager.topk_buffers_k),
                 (kv_cache[1], manager.topk_buffers_v),
@@ -1062,7 +1140,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             or self.fused_overlap_last_req_ids.device != device
         )
         if needs_realloc:
-            if get_forward_context().capturing:
+            if _EXTRA_CTX.capturing:
                 raise RuntimeError(
                     "fused_overlap selection state must be preallocated before "
                     "NPUGraph capture: "
@@ -1128,7 +1206,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             raise RuntimeError("fused_overlap offload requires req_ids_tensor metadata for selection invalidation")
         device = last_req_ids.device
         token_to_req = attn_metadata.token_to_req[:num_tokens].to(device=device, dtype=torch.long)
-        if not get_forward_context().capturing:
+        if not _EXTRA_CTX.capturing:
             invalid_req_mapping = (token_to_req < 0) | (token_to_req >= num_reqs)
             if bool(invalid_req_mapping.any().item()):
                 raise RuntimeError(
@@ -1197,7 +1275,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
                 "fused_overlap full_kv_actual_seq must have one entry per decode "
                 f"request: got {full_kv_actual_seq.numel()} for num_reqs={num_reqs}"
             )
-        if get_forward_context().capturing:
+        if _EXTRA_CTX.capturing:
             return
         token_to_req = attn_metadata.token_to_req[:num_tokens]
         if token_to_req.numel() != num_tokens:
@@ -1243,7 +1321,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             .to(dtype=torch.int32)
             .contiguous()
         )
-        if not get_forward_context().capturing and bool((token_kv_lens <= 0).any().item()):
+        if not _EXTRA_CTX.capturing and bool((token_kv_lens <= 0).any().item()):
             raise RuntimeError(
                 "fused_overlap MTP flatten produced non-positive per-token kv lenses: "
                 f"token_kv_lens={token_kv_lens.detach().cpu().tolist()}"
@@ -1478,7 +1556,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             stable_prefix_lens_npu=common_inputs.stable_prefix_lens,
             visible_seq_lens_npu=full_kv_actual_seq,
             selection_membership_map=selection_membership_map,
-            capturing=get_forward_context().capturing,
+            capturing=bool(_EXTRA_CTX.capturing),
             skip_topk=self.skip_topk,
         )
         if not external_plan_prepared:
@@ -1520,11 +1598,11 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             num_tokens=num_tokens,
             selection_kv_cache=selection_kv_cache,
             selection_k_rope=selection_k_rope,
-            capturing=get_forward_context().capturing,
+            capturing=bool(_EXTRA_CTX.capturing),
         )
         attn_output = fused_op(**fused_inputs)
         attn_output = attn_output[..., : ql_nope_decode.shape[-1]].contiguous()
-        manager.wait_for_current_kv_writeback(get_forward_context().capturing)
+        manager.wait_for_current_kv_writeback(bool(_EXTRA_CTX.capturing))
         return attn_output
 
     def _execute_sparse_flash_attention_process(

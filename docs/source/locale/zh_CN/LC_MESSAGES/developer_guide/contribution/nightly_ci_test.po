@@ -451,19 +451,12 @@ msgstr ""
 "| `pr-accuracy-group-2` | Qwen2.5-Math-RM-72B、Hunyuan-A13B-Instruct | "
 "pr_only |"
 
-msgid ""
-"| `multi-node-deepseek-v3.2-W8A8-EP` | DeepSeek-V3.2-W8A8 with EP, 4-node |"
-msgstr "| `multi-node-deepseek-v3.2-W8A8-EP` | DeepSeek-V3.2-W8A8，EP，4节点 |"
-
 msgid "| `multi-node-qwen3-dp` | Qwen3-235B-A22B, 2-node DP |"
 msgstr "| `multi-node-qwen3-dp` | Qwen3-235B-A22B，2节点 DP |"
 
 msgid ""
 "| `multi-node-qwenw8a8-2node-eplb` | Qwen3-235B-W8A8 with EPLB, 2-node |"
 msgstr "| `multi-node-qwenw8a8-2node-eplb` | Qwen3-235B-W8A8，EPLB，2节点 |"
-
-msgid "| `multi-node-dpsk3.2-2node` | DeepSeek-V3.2-W8A8, 2-node |"
-msgstr "| `multi-node-dpsk3.2-2node` | DeepSeek-V3.2-W8A8，2节点 |"
 
 msgid "| `multi-node-qwen-disagg-pd` | Qwen3-235B disaggregated PD, 2-node |"
 msgstr "| `multi-node-qwen-disagg-pd` | Qwen3-235B 分离式 PD，2节点 |"
@@ -496,12 +489,6 @@ msgid ""
 "| `deepseek-r1-0528-w8a8-prefix-cache` | DeepSeek-R1-0528-W8A8 prefix cache "
 "|"
 msgstr "| `deepseek-r1-0528-w8a8-prefix-cache` | DeepSeek-R1-0528-W8A8 前缀缓存 |"
-
-msgid "| `deepseek-v3-2-w8a8` | DeepSeek-V3.2-W8A8 |"
-msgstr "| `deepseek-v3-2-w8a8` | DeepSeek-V3.2-W8A8 |"
-
-msgid "| `glm-4.7-w8a8` | GLM-4.7 W8A8 |"
-msgstr "| `glm-4.7-w8a8` | GLM-4.7 W8A8 |"
 
 msgid "| `kimi-k2.5` | Kimi-K2.5 |"
 msgstr "| `kimi-k2.5` | Kimi-K2.5 |"

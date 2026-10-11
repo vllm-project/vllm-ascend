@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from vllm_ascend.distributed.eplb.state import EXPERT_MAPPING_EP_SIZE
+from vllm_ascend.distributed.eplb.eplb_state import EXPERT_MAPPING_EP_SIZE
 from vllm_ascend.patch.platform.patch_eplb import (
     _build_distributed_initial_expert_map,
     _with_expert_mapping_ep_size,

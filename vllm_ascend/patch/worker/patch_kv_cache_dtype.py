@@ -62,7 +62,7 @@ def _apply_fp8_kv_cache_dtype_flip() -> None:
 
 
 def _widen_cache_dtype_literal_for_worker() -> None:
-    """Widen ``CacheConfig.cache_dtype`` to accept ``"int8"`` in the worker.
+    """Widen ``CacheConfig.cache_dtype`` to accept ``"int8"``/``"mxfp8"`` in the worker.
 
     Mirrors ``patch/platform/patch_kv_cache_dtype.py``: update the module-level
     Literal, the ``CacheConfig`` annotation and dataclass field type, then
@@ -85,10 +85,11 @@ def _widen_cache_dtype_literal_for_worker() -> None:
     from vllm.config.cache import CacheConfig
 
     existing_args = getattr(_cache_mod.CacheDType, "__args__", ())
-    if "int8" not in existing_args:
-        # Derive from the current upstream Literal and append "int8" so no
-        # upstream member is dropped.
-        widened = typing.Literal[*existing_args + ("int8",)]  # type: ignore[valid-type]
+    missing = tuple(d for d in ("int8", "mxfp8") if d not in existing_args)
+    if missing:
+        # Derive from the current upstream Literal and append the Ascend-only
+        # dtypes so no upstream member is dropped.
+        widened = typing.Literal[*existing_args + missing]  # type: ignore[valid-type]
 
         _cache_mod.CacheDType = widened
         CacheConfig.__annotations__["cache_dtype"] = widened
@@ -104,6 +105,12 @@ def _widen_cache_dtype_literal_for_worker() -> None:
         # Already widened by the platform patch in the main process and
         # inherited via fork; nothing to patch here.
         widened = _cache_mod.CacheDType
+
+    # The C8-MXFP path stores FP8 KV payloads; the generic impl constructor
+    # resolves the dtype string before the C8 backend swaps the class, so the
+    # mapping must exist even though the C8 caches are allocated as raw int8
+    # bytes.
+    _torch_utils.STR_DTYPE_TO_TORCH_DTYPE.setdefault("mxfp8", torch.float8_e4m3fn)
 
     # Unconditional rebind: the selector's module-global CacheDType must point
     # at the widened Literal regardless of import order / fork inheritance.
