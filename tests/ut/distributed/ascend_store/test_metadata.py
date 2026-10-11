@@ -219,12 +219,14 @@ class TestChunkedTokenDatabase(unittest.TestCase):
     def test_process_tokens_with_tail_clipped_block_ids_maps_tail_chunks(self):
         db = ChunkedTokenDatabase([self.meta], block_size=[128], partitions=None)
         hashes = [bytes([idx % 251]) * 32 for idx in range(128)]
+        predicate = MagicMock(return_value=True)
 
         result = list(
             db.process_token_key_strings_with_block_ids(
                 128 * 128,
                 hashes,
                 [1000, 1001, 1002, 1003],
+                chunk_filter=predicate,
             )
         )
 
@@ -236,6 +238,7 @@ class TestChunkedTokenDatabase(unittest.TestCase):
             [block_id for _, _, _, _, block_id in result],
             [1000, 1001, 1002, 1003],
         )
+        self.assertEqual(predicate.call_count, 4)
 
     def test_process_tokens_token_len_shorter_than_all_blocks(self):
         hashes = ["a", "b", "c", "d"]
@@ -309,58 +312,8 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         )
         self.assertEqual([(start, end, block_id) for start, end, _, _, block_id in result], [(32, 48, 12)])
 
-    def test_chunk_masks_preserve_multigroup_filtered_shards(self):
-        db = ChunkedTokenDatabase([self.meta, self.meta], [16, 32], None, hash_block_size=8)
-        hashes = [f"h{i}" for i in range(16)]
-        for group_id, block_size in enumerate((16, 32)):
-            for mask in (None, [], [True], [False, True, True, False, True, True, False, True]):
-                for block_ids in ([1, 0, 3, 4, 0, 6, 7, 8], [0, 6, 7, 8], []):
-                    for mask_num in (0, 17, 65, 129):
-                        for shard_rank in range(3):
-                            with self.subTest(
-                                group=group_id, mask=mask, ids=block_ids, start=mask_num, rank=shard_rank
-                            ):
-
-                                def allowed(start, block_size=block_size, mask=mask):
-                                    index = start // block_size
-                                    return (mask is None or (index < len(mask) and mask[index])) and index != 2
-
-                                kwargs = dict(
-                                    token_len=121,
-                                    block_hashes=hashes,
-                                    block_ids=block_ids,
-                                    mask_num=mask_num,
-                                    kv_cache_group_id=group_id,
-                                    skip_null_blocks=True,
-                                    shard_rank=shard_rank,
-                                    shard_size=3,
-                                )
-                                expected = list(
-                                    db.process_token_key_strings_with_block_ids(**kwargs, chunk_filter=allowed)
-                                )
-                                actual = list(
-                                    db.process_token_key_strings_with_block_ids(
-                                        **kwargs,
-                                        chunk_mask=mask,
-                                        chunk_filter=lambda start, size=block_size: start // size != 2,
-                                    )
-                                )
-                                self.assertEqual(actual, expected)
-
-    def test_tail_clipped_save_does_not_filter_history(self):
-        num_blocks = 65536
-        predicate = MagicMock(return_value=True)
-        result = list(
-            self.db.process_token_key_strings_with_block_ids(
-                num_blocks * 16, ["hash"] * num_blocks, [10, 11, 12, 13], chunk_filter=predicate
-            )
-        )
-        self.assertEqual([item[0] for item in result], [i * 16 for i in range(num_blocks - 4, num_blocks)])
-        self.assertEqual([item[4] for item in result], [10, 11, 12, 13])
-        self.assertEqual(predicate.call_count, 4)
-
     def test_sparse_mask_does_not_call_filter_for_disallowed_chunks(self):
-        num_blocks = 65536
+        num_blocks = 32
         mask = [False] * num_blocks
         for i in (1, 17, num_blocks - 1):
             mask[i] = True

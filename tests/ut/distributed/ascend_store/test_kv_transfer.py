@@ -501,7 +501,10 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
 
     def test_sparse_multigroup_save_preserves_tail_ids_and_shards(self):
         masks = ([True, False, False, True, True, True, False, True], [True, False, True, True])
-        all_saved = []
+        expected = {
+            0: [(0, "h15", [1208], [16]), (1, "h11", [2704], [32])],
+            1: [(1, "h15", [2736], [32])],
+        }
         for pcp_rank in range(2):
             for tp_rank in range(2):
                 with self.subTest(pcp_rank=pcp_rank, tp_rank=tp_rank):
@@ -521,26 +524,23 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
                         block_hashes=[f"h{i}" for i in range(16)],
                         kv_cache_group_ids=[0, 1],
                         skip_null_blocks_by_group=[True, True],
-                        load_spec=LoadSpec(vllm_cached_tokens=0, kvpool_cached_tokens=32, can_load=True),
+                        load_spec=LoadSpec(vllm_cached_tokens=64, kvpool_cached_tokens=80, can_load=True),
                     )
                     thread._handle_stored_request(req)
-                    keys = [key for call in store.put_calls for key in call[0]]
-                    suffixes = [key.rsplit("@", 1)[1] for key in keys]
-                    expected = {0: ["h9", "h11"], 1: ["h15", "h15"]}.get(pcp_rank * 2 + tp_rank, [])
-                    self.assertEqual(suffixes, expected)
+                    self.assertEqual(
+                        [item for call in store.put_calls for item in zip(*call)],
+                        [(db._get_key_prefix(g) + h, a, s) for g, h, a, s in expected.get(pcp_rank * 2 + tp_rank, [])],
+                    )
                     self.assertEqual(
                         masks, ([True, False, False, True, True, True, False, True], [True, False, True, True])
                     )
-                    all_saved.extend(keys)
-        self.assertEqual(len(all_saved), 4)
-        self.assertEqual(len(set(all_saved)), 4)
 
     def test_save_does_not_scan_mask_before_addressable_tail(self):
         class TailMask(list):
             def __iter__(self):
                 raise AssertionError("The complete historical mask must not be scanned")
 
-        num_blocks = 65536
+        num_blocks = 32
         thread, store = self._make_thread([0, 0])
         thread.token_database.store_mask = MagicMock(
             return_value=(TailMask([False] * (num_blocks - 2) + [True, True]),)

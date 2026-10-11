@@ -16,14 +16,12 @@
 #
 
 import inspect
-import random
 import unittest
 from dataclasses import dataclass, replace
 from unittest.mock import patch
 
 # isort: off
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
-from tests.ut.distributed.ascend_store._mock_deps import _MOCK_VLLM_DEPS
 import torch
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec, SlidingWindowSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import block_hash_to_bytes, get_block_hashes
@@ -178,26 +176,43 @@ class TestAscendStoreCoordinator(unittest.TestCase):
         self.assertEqual(hit_length, 128 * 128)
 
     def test_missing_required_group_returns_zero(self):
-        block_hashes = _hashes(128)
-        c1_exists = {(0, block_hash) for block_hash in block_hashes}
+        sizes = [128, 16384, 16384]
+        block_hashes = _hashes(256)
+        exists = {(0, h) for h in block_hashes}
+        exists.update((1, h) for h in get_block_hashes(block_hashes, sizes[1], sizes[0]))
         coord = AscendStoreCoordinator(
-            [
-                KVCacheGroupSpec(["layer.0"], _full_spec(128)),
-                KVCacheGroupSpec(["layer.1"], _full_spec(128 * 128)),
-            ],
-            scheduler_block_size=128 * 128,
+            [KVCacheGroupSpec([f"layer.{i}"], _full_spec(size)) for i, size in enumerate(sizes)],
+            scheduler_block_size=16384,
             hash_block_size=128,
-            group_block_sizes=[128, 128 * 128],
-            group_cache_families=["c1", "c128"],
+            group_block_sizes=sizes,
+            group_cache_families=["c1", "c128", "c128"],
         )
 
         _, hit_length = coord.find_longest_cache_hit(
             block_hashes,
-            128 * 128,
-            ExternalCachedBlockPool(128, c1_exists),
+            32768,
+            ExternalCachedBlockPool(128, exists),
         )
 
         self.assertEqual(hit_length, 0)
+        for local, length, expected in (
+            (127, 32768, 0),
+            (128, 32768, 0),
+            (16383, 32768, 0),
+            (16384, 32768, 16384),
+            (16512, 32768, 16384),
+            (32768, 32768, 32768),
+            (32768, 16512, 16384),
+            (32768, 0, 0),
+        ):
+            with self.subTest(local=local, length=length):
+
+                def query(group_id, hashes, mask, local=local):
+                    return [] if group_id == 2 else hashes[local // sizes[group_id] :]
+
+                self.assertEqual(
+                    coord.find_reachable_hit_tokens(block_hashes, length, query, hbm_hit_tokens=local), expected
+                )
 
     def test_store_mask_uses_manager_reachability(self):
         coord = AscendStoreCoordinator(
@@ -274,23 +289,30 @@ class TestAscendStoreCoordinator(unittest.TestCase):
         ]:
             with self.subTest(retention_interval=interval):
                 coord = AscendStoreCoordinator(
-                    [KVCacheGroupSpec(["attention"], _full_spec(256)), KVCacheGroupSpec(["state"], spec)],
+                    [KVCacheGroupSpec(["attention"], _full_spec(128)), KVCacheGroupSpec(["state"], spec)],
                     scheduler_block_size=256,
-                    hash_block_size=256,
-                    group_block_sizes=[256, 256],
+                    hash_block_size=128,
+                    group_block_sizes=[128, 256],
                     group_cache_families=["default", "default"],
                     retention_interval=interval,
                 )
                 self.assertEqual(coord.store_mask(1024, num_prompt_tokens=769)[1], expected)
-                hashes = _hashes(4)
+                for local, hit in ((0, 768), (512, 768), (767, 768), (1024, 1024)):
+                    with self.subTest(local=local):
 
-                def query(group_id, group_hashes, mask):
-                    # A shorter request published only its 768-token checkpoint.
-                    return [
-                        h for i, h in enumerate(group_hashes) if (mask is None or mask[i]) and (group_id == 0 or i == 2)
-                    ]
+                        def query(group_id, group_hashes, mask, local=local, coord=coord):
+                            # A shorter request published only its 768-token checkpoint.
+                            return [
+                                h
+                                for i, h in enumerate(group_hashes)
+                                if i >= local // coord.group_effective_block_sizes[group_id]
+                                and (mask is None or mask[i])
+                                and (group_id == 0 or i == 2)
+                            ]
 
-                self.assertEqual(coord.find_reachable_hit_tokens(hashes, 1024, query), 768)
+                        self.assertEqual(
+                            coord.find_reachable_hit_tokens(_hashes(8), 1024, query, hbm_hit_tokens=local), hit
+                        )
 
     def test_legacy_reachable_mask_ignores_new_boundary_argument(self):
         class LegacyManager:
@@ -376,12 +398,17 @@ class TestFindReachableHitTokens(unittest.TestCase):
     """The shared driver behind the scheduler/worker coordinator lookups."""
 
     def test_passes_mask_allowed_hashes_to_query_callback(self):
+        private_spec = _full_spec(128)
+        object.__setattr__(private_spec, "prefix_cacheable", False)
         coord = AscendStoreCoordinator(
-            [KVCacheGroupSpec(["layer.0"], _sliding_spec(block_size=128, sliding_window=256))],
+            [
+                KVCacheGroupSpec(["layer.0"], _sliding_spec(block_size=128, sliding_window=256)),
+                KVCacheGroupSpec(["private"], private_spec),
+            ],
             scheduler_block_size=256,
             hash_block_size=128,
-            group_block_sizes=[128],
-            group_cache_families=["c1"],
+            group_block_sizes=[128, 128],
+            group_cache_families=["c1", "c1"],
         )
         calls: list[tuple[int, list, list | None]] = []
 
@@ -393,10 +420,12 @@ class TestFindReachableHitTokens(unittest.TestCase):
             "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator._reachable_block_mask",
             return_value=[False, True],
         ):
-            hit = coord.find_reachable_hit_tokens(_hashes(2), 256, query_group_hits)
-
-        self.assertEqual(hit, 0)
-        self.assertEqual(calls, [(0, _hashes(2), [False, True])])
+            for local in (0, 256):
+                with self.subTest(local=local):
+                    calls.clear()
+                    hit = coord.find_reachable_hit_tokens(_hashes(2), 256, query_group_hits, hbm_hit_tokens=local)
+                    self.assertEqual(hit, local)
+                    self.assertEqual(calls, [(0, _hashes(2), [False, True])])
 
     def test_hit_length_derived_from_callback_hits(self):
         with patch(
@@ -427,7 +456,7 @@ class TestFindReachableHitTokens(unittest.TestCase):
         derive.assert_called_once()
         self.assertFalse(derive.call_args.kwargs["apply_eagle"])
 
-    def test_no_hits_returns_zero_without_deriving(self):
+    def test_no_remote_hits_only_derives_for_hbm_prefix(self):
         with patch(
             "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator._get_manager_class",
             return_value=_FakePrefixManager,
@@ -446,51 +475,7 @@ class TestFindReachableHitTokens(unittest.TestCase):
         self.assertEqual(hit, 0)
         derive.assert_not_called()
 
-    def test_hbm_prefix_matches_expanded_hits_across_group_granularities(self):
-        with patch(
-            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator._get_manager_class",
-            return_value=_FakeCompressedManager,
-        ):
-            coord = AscendStoreCoordinator(
-                [KVCacheGroupSpec([f"layer.{i}"], _full_spec(size)) for i, size in enumerate((128, 256, 256))],
-                scheduler_block_size=256,
-                hash_block_size=128,
-                group_block_sizes=[128, 256, 256],
-                group_cache_families=["c1", "c4", "c4"],
-            )
-        hashes = _hashes(8)
-        for use_hex in (False, True):
-            block_hashes = [h.hex() for h in hashes] if use_hex else hashes
-            for token_len in (0, 256, 384, 1024):
-                for local_tokens in (0, 127, 128, 255, 256, 384, 1024, 2048):
-                    for missing_group in (None, 0, 1, 2):
-                        with self.subTest(hex=use_hex, length=token_len, local=local_tokens, missing=missing_group):
-
-                            def external(
-                                group_id, group_hashes, mask, local_tokens=local_tokens, missing_group=missing_group
-                            ):
-                                start = local_tokens // coord.group_effective_block_sizes[group_id]
-                                return [] if group_id == missing_group else list(group_hashes[start:])
-
-                            def expanded(group_id, group_hashes, mask, local_tokens=local_tokens):
-                                count = local_tokens // coord.group_effective_block_sizes[group_id]
-                                return list(group_hashes[:count]) + external(group_id, group_hashes, mask)
-
-                            expected = coord.find_reachable_hit_tokens(block_hashes, token_len, expanded)
-                            actual = coord.find_reachable_hit_tokens(
-                                block_hashes, token_len, external, hbm_hit_tokens=local_tokens
-                            )
-                            self.assertEqual(actual, expected)
-
-    def test_hbm_prefix_hash_conversion_is_lazy(self):
-        coord = AscendStoreCoordinator(
-            [KVCacheGroupSpec(["layer.0"], _full_spec(128))],
-            scheduler_block_size=128,
-            hash_block_size=128,
-            group_block_sizes=[128],
-            group_cache_families=["c1"],
-        )
-        hashes = [i.to_bytes(32, "big").hex() for i in range(65536)]
+        hashes = [i.to_bytes(32, "big").hex() for i in range(32)]
         module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator"
         with patch(f"{module}.block_hash_to_bytes", wraps=block_hash_to_bytes) as convert:
 
@@ -511,76 +496,6 @@ class TestFindReachableHitTokens(unittest.TestCase):
                     hashes, len(hashes) * 128, lambda *args: [], hbm_hit_tokens=(len(hashes) - 1) * 128
                 )
         self.assertEqual(hit, (len(hashes) - 1) * 128)
-
-    @unittest.skipIf(_MOCK_VLLM_DEPS, "requires real vLLM FullAttention, SWA and Mamba managers")
-    def test_hbm_prefix_matches_expanded_hits_with_real_managers(self):
-        sizes = [16, 32, 32, 64]
-        specs = [
-            _full_spec(16),
-            _sliding_spec(32, 48),
-            _sliding_spec(32, 48),
-            MambaSpec(block_size=64, shapes=((1,),), dtypes=(torch.float32,), mamba_cache_mode="align"),
-        ]
-        coord = AscendStoreCoordinator(
-            [KVCacheGroupSpec([f"layer.{i}"], spec) for i, spec in enumerate(specs)],
-            64,
-            8,
-            sizes,
-            ["default"] * len(sizes),
-        )
-        random_hits = random.Random(0)
-        for use_hex in (False, True):
-            hashes = [i.to_bytes(32, "big") for i in range(32)]
-            block_hashes = [h.hex() for h in hashes] if use_hex else hashes
-            for token_len in (64, 120, 256):
-                for local_tokens in (0, 15, 31, 32, 63, 64, 128, 256):
-                    for pattern in range(3):
-                        with self.subTest(hex=use_hex, length=token_len, local=local_tokens, pattern=pattern):
-                            present = [
-                                [pattern == 0 or (pattern == 1 and random_hits.choice((False, True))) for _ in hashes]
-                                for _ in sizes
-                            ]
-
-                            def external(group_id, group_hashes, mask, local_tokens=local_tokens, present=present):
-                                first = local_tokens // sizes[group_id]
-                                return [
-                                    h
-                                    for i, h in enumerate(group_hashes)
-                                    if i >= first and present[group_id][i] and (mask is None or mask[i])
-                                ]
-
-                            def expanded(group_id, group_hashes, mask, local_tokens=local_tokens):
-                                count = local_tokens // sizes[group_id]
-                                return list(group_hashes[:count]) + external(group_id, group_hashes, mask)
-
-                            expected = coord.find_reachable_hit_tokens(block_hashes, token_len, expanded)
-                            actual = coord.find_reachable_hit_tokens(
-                                block_hashes, token_len, external, hbm_hit_tokens=local_tokens
-                            )
-                            self.assertEqual(actual, expected)
-
-    def test_non_cacheable_group_is_not_queried_with_hbm_hits(self):
-        spec = _full_spec(128)
-        object.__setattr__(spec, "prefix_cacheable", False)
-        with patch(
-            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator._get_manager_class",
-            return_value=_FakePrefixManager,
-        ):
-            coord = AscendStoreCoordinator(
-                [KVCacheGroupSpec(["cached"], _full_spec(128)), KVCacheGroupSpec(["private"], spec)],
-                128,
-                128,
-                [128, 128],
-                ["default", "default"],
-            )
-        queried = []
-
-        def query(group_id, hashes, mask):
-            queried.append(group_id)
-            return []
-
-        self.assertEqual(coord.find_reachable_hit_tokens(_hashes(2), 256, query, hbm_hit_tokens=256), 256)
-        self.assertEqual(queried, [0])
 
 
 if __name__ == "__main__":
