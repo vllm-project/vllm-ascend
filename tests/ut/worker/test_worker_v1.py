@@ -334,6 +334,7 @@ class TestNPUWorker(TestBase):
             # allocation or its corresponding budget calculation.
             kv_transfer_config=SimpleNamespace(kv_connector="FutureConnector"),
         )
+        worker.model_config = SimpleNamespace(hf_text_config=SimpleNamespace(model_type="qwen3"))
         worker.get_kv_cache_spec = MagicMock(return_value={"attn": attn_spec, "linear_attn": mamba_spec})
 
         for supports_standardized_backing, expected_budget in (
@@ -381,6 +382,7 @@ class TestNPUWorker(TestBase):
             ),
             kv_transfer_config=None,
         )
+        worker.model_config = SimpleNamespace(hf_text_config=SimpleNamespace(model_type="qwen3"))
         worker.get_kv_cache_spec = MagicMock(
             return_value={
                 "encoder_attn": spec,

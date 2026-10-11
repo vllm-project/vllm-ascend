@@ -5170,6 +5170,7 @@ class NPUModelRunner(GPUModelRunner):
         self.hybrid_with_attn_and_mamba = any(
             isinstance(spec, MambaSpec) for spec in layer_kv_cache_spec.values()
         ) and any(isinstance(spec, AttentionSpec) for spec in layer_kv_cache_spec.values())
+        is_step_model = self.model_config.hf_text_config.model_type in ("step3p5", "step3p7")
         strided_attention_cache_layers: set[str] = set()
         if (
             not self.use_dcp
@@ -5286,7 +5287,8 @@ class NPUModelRunner(GPUModelRunner):
         if (
             not is_dsv4_main
             and not uses_padded_page_layout
-            and self.hybrid_with_attn_and_mamba
+            and (self.hybrid_with_attn_and_mamba
+                 or is_step_model)
             and not self.use_sparse
             and not self.use_compress
             and kv_cache_config.kv_cache_tensors
