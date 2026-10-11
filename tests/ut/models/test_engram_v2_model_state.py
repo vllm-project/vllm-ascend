@@ -67,6 +67,7 @@ def make_model():
     model._engram_input_buffers, model._engram_prepare_stream = None, None
     model._engram_capture_stream, model._engram_capture_events = None, None
     model._engram_graph_events = {}
+    model._engram_late_lookup_enabled, model._engram_late_lookup_stream = False, None
     model._engram_max_tokens = 8
     model._mtp_hidden_buffer = None
     model.engram_rotation = torch.eye(32)

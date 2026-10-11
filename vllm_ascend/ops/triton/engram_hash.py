@@ -81,6 +81,7 @@ def _hash_ids_kernel(
     lookback_col_stride,
     lookback_mask_row_stride,
     lookback_mask_col_stride,
+    LAYER_MAJOR: tl.constexpr,
 ):
     token = tl.program_id(0) * BLOCK_T + tl.arange(0, BLOCK_T)
     layer = tl.program_id(1)
@@ -148,7 +149,9 @@ def _hash_ids_kernel(
             prime = tl.load(primes + param_offset, head < num_heads, other=1)
             offset = tl.load(offsets + param_offset, head < num_heads, other=0)
             hashed = rolling[:, None] % prime[None, :] + offset[None, :]
-            out_offset = (token.to(tl.int64) * num_layers + layer)[:, None] * ((MAX_NGRAM - 1) * num_heads) + col[
-                None, :
-            ]
+            if LAYER_MAJOR:
+                row = layer * num_tokens + token.to(tl.int64)
+            else:
+                row = token.to(tl.int64) * num_layers + layer
+            out_offset = row[:, None] * ((MAX_NGRAM - 1) * num_heads) + col[None, :]
             tl.store(output + out_offset, hashed, valid[:, None] & (head < num_heads))

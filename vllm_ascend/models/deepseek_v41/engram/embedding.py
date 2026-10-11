@@ -64,12 +64,15 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         storage_dtype: torch.dtype = torch.int8,
         scale_on_device: bool = False,
         aicpu_urma_cube: bool = False,
+        aicpu_parallel_scales: bool = False,
     ) -> None:
         if scale_on_device and (not cpu_offload or not dp_shared_memory or storage_dtype != torch.float8_e4m3fn):
             raise ValueError("Device scales require shared host offload with native MXFP8 codes")
         if aicpu_urma_cube and not scale_on_device:
             raise ValueError("AICPU lookup requires HBM scales")
-        self._aicpu_lookup = EngramUrmaCubeLookup() if aicpu_urma_cube else None
+        if aicpu_parallel_scales and not aicpu_urma_cube:
+            raise ValueError("Parallel scales require AICPU Cube lookup")
+        self._aicpu_lookup = EngramUrmaCubeLookup(parallel_scales=aicpu_parallel_scales) if aicpu_urma_cube else None
         self.compressed_lookup = aicpu_urma_cube
         self.scale_on_device = scale_on_device
         self.storage_dtype = storage_dtype
