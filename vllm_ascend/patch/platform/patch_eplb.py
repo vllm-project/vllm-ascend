@@ -5,7 +5,7 @@
 
 from collections.abc import Sequence
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import wraps
 from inspect import signature
 from typing import Any, Literal, get_args
@@ -13,6 +13,7 @@ from typing import Any, Literal, get_args
 import numpy as np
 import torch
 from pydantic.dataclasses import rebuild_dataclass
+from vllm.config import get_current_vllm_config
 from vllm.config import parallel as _parallel_config
 from vllm.distributed import get_eplb_group
 from vllm.distributed.eplb import async_worker as _async_worker
@@ -117,6 +118,7 @@ def _probe_local_hixl_binding() -> tuple[str, str | None]:
 
 
 _BINDING_CONSENSUS_RANK = {"none": 0, "ctypes": 1, "official": 2}
+_STAIR_TRANSFER_LIMIT_KEYS = ("rank_transfer_limit", "cross_node_transfer_limit")
 
 
 def _group_hixl_binding_consensus() -> str:
@@ -126,7 +128,7 @@ def _group_hixl_binding_consensus() -> str:
     ``ctypes`` when every rank at least resolved the ctypes fallback,
     ``mixed`` when the ranks resolved different binding classes, and
     ``none`` when at least one rank has no usable HIXL binding. Mixed
-    bindings and ``none`` both reject automatic HIXL initialization:
+    bindings and ``none`` both degrade the whole group to torch_gloo:
     HIXL engines only interoperate over one CANN line protocol, and the
     sender/receiver roles must agree on the transfer path.
     """
@@ -147,6 +149,41 @@ def _group_hixl_binding_consensus() -> str:
     return "official" if lowest == 2 else "ctypes"
 
 
+def _clamp_stair_limits_for_gloo_fallback(ascend_eplb_config) -> Any:
+    """Clamp only the STAIR transfer limits the user left unset.
+
+    An automatic Gloo fallback must not override explicitly configured
+    limits (for example ``cross_node_transfer_limit: 0`` disables
+    cross-node transfers on purpose); unset limits default to unlimited
+    and are clamped to one because CPU-staged transfers cannot sustain a
+    migration storm.
+    """
+    vllm_config = get_current_vllm_config()
+    additional_config = vllm_config.additional_config if isinstance(vllm_config.additional_config, dict) else {}
+    eplb_config = additional_config.get("eplb_config", {})
+    stair_config = eplb_config.get("stair_config", {}) if isinstance(eplb_config, dict) else {}
+    stair_config = stair_config if isinstance(stair_config, dict) else {}
+    unset_keys = [key for key in _STAIR_TRANSFER_LIMIT_KEYS if key not in stair_config]
+    if unset_keys:
+        stair_config = {**stair_config, **dict.fromkeys(unset_keys, 1)}
+        eplb_config = {**eplb_config, "stair_config": stair_config}
+        vllm_config.additional_config = {**additional_config, "eplb_config": eplb_config}
+        logger.info(
+            "Ascend EPLB fell back to torch_gloo; STAIR %s clamped to 1.",
+            " and ".join(unset_keys),
+        )
+    preserved_keys = [key for key in _STAIR_TRANSFER_LIMIT_KEYS if key not in unset_keys]
+    if preserved_keys:
+        logger.warning(
+            "Ascend EPLB fell back to torch_gloo; keeping the explicitly configured STAIR %s.",
+            " and ".join(preserved_keys),
+        )
+    clamped_fields = {key: 1 for key in unset_keys}
+    if clamped_fields:
+        return replace(ascend_eplb_config.stair_config, **clamped_fields)
+    return ascend_eplb_config.stair_config
+
+
 # Provisional auto-selection marker set on an EPLBConfig instance by the
 # ParallelConfig post-init hook (config stage, per-process probe). The
 # worker-stage consensus in resolve_ascend_eplb_communicator() consumes it:
@@ -165,10 +202,22 @@ def _clear_auto_selected(eplb_config) -> None:
 
 
 def resolve_ascend_eplb_communicator(parallel_config, ascend_eplb_config) -> Any:
-    """Require a usable, consistent HIXL binding for automatic selection."""
+    """Confirm or correct the provisional communicator by group consensus.
+
+    Called once per rank before the EPLB policy and state are built, when
+    the EPLB group exists but neither the policy nor the communicator has
+    been constructed. The config stage already set a provisional decision
+    (marked auto-selected) from the local probe; this consensus re-validates
+    it group-wide because HIXL engines only interoperate over one CANN line
+    protocol and the transfer path must agree on every rank. An explicit
+    ``communicator`` setting (no marker) skips the consensus entirely.
+    Falls back to torch_gloo — clamping the STAIR transfer limits the user
+    left unset — when any rank lacks a usable HIXL binding or when the
+    binding classes differ between ranks.
+    """
     eplb_config = parallel_config.eplb_config
     auto_selected = bool(getattr(eplb_config, _AUTO_SELECTED_ATTRIBUTE, False))
-    if eplb_config.communicator not in (None, "hixl") and not auto_selected:
+    if eplb_config.communicator is not None and not auto_selected:
         return ascend_eplb_config.stair_config
     _clear_auto_selected(eplb_config)
     binding = _group_hixl_binding_consensus()
@@ -182,10 +231,12 @@ def resolve_ascend_eplb_communicator(parallel_config, ascend_eplb_config) -> Any
         eplb_config.communicator = "hixl"
         logger.info("Ascend EPLB selected hixl: every EPLB rank resolved the %s binding.", binding)
         return ascend_eplb_config.stair_config
-    raise RuntimeError(
-        f"HIXL EPLB requires a usable, consistent binding on every rank (consensus={binding}). "
-        "Install matching CANN HIXL bindings on all workers."
-    )
+    eplb_config.communicator = "torch_gloo"
+    if binding == "mixed":
+        logger.info("Ascend EPLB selected torch_gloo: HIXL binding classes differ between EPLB ranks.")
+    else:
+        logger.info("Ascend EPLB selected torch_gloo: HIXL is unavailable on at least one EPLB rank.")
+    return _clamp_stair_limits_for_gloo_fallback(ascend_eplb_config)
 
 
 def _patch_parallel_config() -> None:
@@ -206,7 +257,21 @@ def _patch_parallel_config() -> None:
         ):
             # Provisional per-process decision; must precede the upstream
             # auto-selection below so it is not preempted by nixl/gloo.
-            config.eplb_config.communicator = "hixl"
+            binding, reason = _probe_local_hixl_binding()
+            if binding != "none":
+                config.eplb_config.communicator = "hixl"
+                logger.info(
+                    "Ascend EPLB provisionally selected hixl (%s binding); "
+                    "pending group-wide consensus at worker init.",
+                    binding,
+                )
+            else:
+                config.eplb_config.communicator = "torch_gloo"
+                logger.info(
+                    "Ascend EPLB provisionally selected torch_gloo: HIXL is unavailable (%s); "
+                    "pending group-wide consensus at worker init.",
+                    reason,
+                )
             _mark_auto_selected(config.eplb_config)
         original_post_init(config)
 
