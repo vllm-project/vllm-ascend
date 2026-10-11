@@ -395,7 +395,8 @@ def test_indexer_metadata_builder(batch_spec: BatchSpec) -> None:
         assert metadata.num_decodes == batch_spec.batch_size
         assert metadata.prefill is None
         assert metadata.decode is not None
-        assert metadata.decode.start_loc is None
+        assert metadata.decode.start_loc.dtype == torch.int32
+        assert torch.equal(metadata.decode.start_loc, metadata.decode.context_lens // 128)
     else:
         assert metadata.num_prefills == batch_spec.batch_size
         assert metadata.decode is None
@@ -1744,6 +1745,7 @@ def test_ascendc_index_decode_uses_full_cache_without_tp_collectives(
     assert decode_op.call_args.args[1] is impl.index_cache.kv_cache
     assert decode_op.call_args.args[2] is metadata.decode.block_table
     assert torch.equal(decode_op.call_args.args[6], torch.tensor([128, 128], dtype=torch.int32))
+    assert all(call.args[6] is metadata.decode.start_loc for call in decode_op.call_args_list)
     assert decode_op.call_args.kwargs["decode_query_len"] == query_len
     assert prefill_op.call_count == 2 * num_prefills
     forbidden.assert_not_called()
