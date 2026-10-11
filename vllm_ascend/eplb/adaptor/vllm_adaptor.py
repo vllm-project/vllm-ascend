@@ -21,6 +21,7 @@ from typing import Any
 
 import torch
 import torch.distributed as dist
+import torch_npu
 from vllm.logger import logger
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -59,11 +60,40 @@ EPLB_EXPERT_WEIGHT_NAMES = {
         "w13_scale_bias_list",
         "w2_scale_bias_list",
     ),
+    (QuantType.W4A8MXFP, False): (
+        "w13_weight_list",
+        "w2_weight_list",
+        "w13_weight_scale_list",
+        "w2_weight_scale_list",
+    ),
+    (QuantType.W4A8MXFP, True): (
+        "w13_weight_list",
+        "w2_weight_list",
+        "w13_weight_scale_list",
+        "w2_weight_scale_list",
+    ),
     (QuantType.W4A4MXFP, False): ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"),
     (QuantType.W4A4MXFP, True): ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"),
     (QuantType.W8A8MXFP, False): ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"),
     (QuantType.W8A8MXFP, True): ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"),
 }
+
+_W4A8MXFP_NZ_WEIGHT_NAMES = {"w13_weight_list", "w2_weight_list"}
+
+
+def _new_w4a8_mxfp_nz_buffer(expert_tensor: torch.Tensor) -> torch.Tensor:
+    """Create an offset-0 NZ receive buffer matching an MXFP expert."""
+    buffer_tensor = torch.empty(expert_tensor.shape, dtype=expert_tensor.dtype, device=expert_tensor.device)
+    input_dtype = (
+        torch.float4_e2m1fn_x2 if expert_tensor.dtype == torch.float4_e2m1fn_x2 else torch_npu.float4_e2m1fn_x2
+    )
+    torch_npu.npu_format_cast_(
+        buffer_tensor,
+        29,
+        customize_dtype=torch.float8_e4m3fn,
+        input_dtype=input_dtype,
+    )
+    return buffer_tensor
 
 
 class VllmEplbAdaptor:
@@ -128,8 +158,11 @@ class VllmEplbAdaptor:
             buffer_tensor_shapes[expert_weight_key] = expert_tensor_shapes
             self.buffer_tensor_list[expert_weight_key] = [[] for _ in range(num_buffer_tensor)]
             for buffer_id in range(num_buffer_tensor):
-                for expert_tensor in expert_tensors:
-                    buffer_tensor = torch.empty_like(expert_tensor)
+                for name, expert_tensor in zip(expert_weight_names, expert_tensors):
+                    if expert_weight_key[0] == QuantType.W4A8MXFP and name in _W4A8MXFP_NZ_WEIGHT_NAMES:
+                        buffer_tensor = _new_w4a8_mxfp_nz_buffer(expert_tensor)
+                    else:
+                        buffer_tensor = torch.empty_like(expert_tensor)
                     self.buffer_tensor_list[expert_weight_key][buffer_id].append(buffer_tensor)
 
     def init_expert_param_per_layer(self):
@@ -138,8 +171,6 @@ class VllmEplbAdaptor:
         for local_idx, layer in enumerate(self.moe_layers):
             quant_type = QuantType.NONE if self.model.quant_config is None else layer.quant_type
             expert_weight_key = (quant_type, get_ascend_config().enable_fused_mc2 == 1)
-            if expert_weight_key[0] == QuantType.W4A8MXFP:
-                raise RuntimeError(f"EPLB not support {quant_type}")
             if expert_weight_key not in EPLB_EXPERT_WEIGHT_NAMES:
                 raise ValueError(f"EPLB not support {quant_type} with fused MC2 {expert_weight_key[1]}")
             expert_weight_names = EPLB_EXPERT_WEIGHT_NAMES[expert_weight_key]
@@ -201,11 +232,15 @@ class VllmEplbAdaptor:
 
     def do_update_expert_weight(self, layer_id, local_expert_to_replace, buffer_tensor_id):
         expert_weight_key = self.expert_weight_key_per_layer[layer_id]
-        for expert_tensor, buffer_tensor in zip(
+        for name, expert_tensor, buffer_tensor in zip(
+            EPLB_EXPERT_WEIGHT_NAMES[expert_weight_key],
             self.expert_param_per_layer[layer_id][local_expert_to_replace],
             self.buffer_tensor_list[expert_weight_key][buffer_tensor_id],
         ):
-            expert_tensor.copy_(buffer_tensor)
+            if expert_weight_key[0] == QuantType.W4A8MXFP and name in _W4A8MXFP_NZ_WEIGHT_NAMES:
+                torch_npu.copy_memory_(expert_tensor, buffer_tensor)
+            else:
+                expert_tensor.copy_(buffer_tensor)
             logger.debug("Expert tensor shape is :%s", expert_tensor.shape)
 
     def do_update_log2phy_map(self, layer_id, updated_log2phy_map):
