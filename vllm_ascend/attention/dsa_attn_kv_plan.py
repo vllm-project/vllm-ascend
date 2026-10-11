@@ -26,20 +26,6 @@ def _supports_dsv4_compressed_cache() -> bool:
     return get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE)
 
 
-def resolve_dsv4_cache_dtype(cache_dtype, model_dtype: str) -> str:
-    """Return the KV cache dtype the platform should pin for DeepSeek-V4.
-
-    On A5 the launch request has to stay readable afterwards, because it is the
-    only thing that separates an explicit bfloat16 KV request from ``auto``.
-    ``auto`` and the model dtype resolve identically everywhere downstream, so
-    collapsing every non-bfloat16 request to ``auto`` preserves the upstream
-    values while keeping the mode recoverable.
-    """
-    if not _supports_dsv4_compressed_cache():
-        return model_dtype
-    return "bfloat16" if str(cache_dtype).lower() in _BF16_KV_CACHE_DTYPES else "auto"
-
-
 def is_a5_bf16_kv_enabled(vllm_config) -> bool:
     """Return whether BF16 SparseFlashMla KV is enabled on A5.
 

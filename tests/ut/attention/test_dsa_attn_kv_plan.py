@@ -13,7 +13,6 @@ from vllm_ascend.attention.dsa_attn_kv_plan import (
     DSA_COMPRESSOR_SLOT_MAPPING_FLAT,
     get_dsa_attn_kv_plan,
     is_a5_bf16_kv_enabled,
-    resolve_dsv4_cache_dtype,
 )
 from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla
 from vllm_ascend.device.hardware_profile import get_hardware_profile
@@ -212,37 +211,9 @@ def test_only_explicit_bfloat16_selects_bf16_kv_on_a5():
         assert is_a5_bf16_kv_enabled(_cache_config("bfloat16"))
         assert not is_a5_bf16_kv_enabled(_cache_config())
         assert not is_a5_bf16_kv_enabled(_cache_config("fp8"))
-        # The A5 spec path rewrites cache_dtype once FP8 KV is chosen.
         assert not is_a5_bf16_kv_enabled(_cache_config("float8_e4m3fn"))
 
 
 def test_a5_bf16_kv_is_disabled_on_non_a5():
     with _on(AscendDeviceType.A3):
         assert not is_a5_bf16_kv_enabled(_cache_config("bfloat16"))
-
-
-def test_non_a5_pins_cache_dtype_to_the_model_dtype():
-    with _on(AscendDeviceType.A3):
-        for launch in ("auto", "bfloat16", "fp8"):
-            assert resolve_dsv4_cache_dtype(launch, "bfloat16") == "bfloat16"
-
-
-def test_a5_collapses_non_bfloat16_requests_to_auto():
-    # "auto" resolves to the model dtype everywhere downstream, so it carries
-    # the FP8 mode without changing any value upstream would have computed.
-    with _on(AscendDeviceType.A5):
-        assert resolve_dsv4_cache_dtype("bfloat16", "bfloat16") == "bfloat16"
-        assert resolve_dsv4_cache_dtype("auto", "bfloat16") == "auto"
-        assert resolve_dsv4_cache_dtype("fp8", "bfloat16") == "auto"
-
-
-def test_a5_mode_survives_the_spec_path_rewrite():
-    with _on(AscendDeviceType.A5):
-        for launch in ("auto", "fp8"):
-            pinned = resolve_dsv4_cache_dtype(launch, "bfloat16")
-            assert not is_a5_bf16_kv_enabled(_cache_config(pinned))
-            # layer.get_kv_cache_spec pins FP8 once it has picked the mode.
-            assert not is_a5_bf16_kv_enabled(_cache_config("float8_e4m3fn"))
-
-        pinned = resolve_dsv4_cache_dtype("bfloat16", "bfloat16")
-        assert is_a5_bf16_kv_enabled(_cache_config(pinned))
