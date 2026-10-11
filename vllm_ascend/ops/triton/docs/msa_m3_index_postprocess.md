@@ -53,10 +53,10 @@ All parameters are required except `init_blocks` and `local_blocks`, which defau
 - A contiguous score buffer can be reused and modified in place. Clone it if
   the caller needs original scores after this call. Non-contiguous scores use
   a separate contiguous preparation buffer.
-- Dynamic widths, query length and batch-dependent/input-view strides use
-  `do_not_specialize`. Model constants and fixed output strides use
-  `tl.constexpr`. Changing model constants or input dtype can still require a
-  different compiled specialization.
+- Widths, query length and strides use Triton's default specialization.
+  Model constants (`TOPK`, `INIT_BLOCKS`, `LOCAL_BLOCKS`, `BLOCK_SIZE` and
+  `TILE`, where applicable) use `tl.constexpr`. Changes to input properties or
+  model constants can require a different compiled specialization.
 - The caller supplies correctly updated metadata for ACL graph replay. This
   validation measures eager execution; it does not certify all graph shapes.
 
