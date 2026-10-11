@@ -9,7 +9,7 @@ from typing import Any
 import torch
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
-from vllm_ascend.models.minimax_m3.ops.msa_m3_index_postprocess import index_decode_topk_fused
+from vllm_ascend.ops.triton.msa.msa_m3_index_postprocess import index_decode_topk_fused
 from vllm_ascend.utils import enable_custom_op
 
 # Existing mode for legacy prefill, decode, and A5 FP8 prefill.

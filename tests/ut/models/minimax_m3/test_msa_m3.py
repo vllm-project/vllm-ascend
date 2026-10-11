@@ -57,6 +57,7 @@ from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
 from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
     minimax_m3_sparse_attn_decode as minimax_m3_sparse_attn_decode_npu,
 )
+from vllm_ascend.ops.triton.msa import msa_m3_index_postprocess
 from vllm_ascend.utils import AscendDeviceType
 
 
@@ -294,7 +295,7 @@ def test_a5_decode_topk_keeps_fused_postprocess_fast_path() -> None:
 
 
 def test_a3_decode_topk_uses_fused_prepare_and_postprocess() -> None:
-    source_path = Path(msa_m3_module.__file__).with_name("ops") / "msa_m3_index_postprocess.py"
+    source_path = Path(msa_m3_index_postprocess.__file__)
     source = source_path.read_text(encoding="utf-8")
 
     assert "def _ascendc_decode_score_prepare_kernel(" in source
