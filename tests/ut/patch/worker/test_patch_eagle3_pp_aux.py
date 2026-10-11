@@ -270,6 +270,17 @@ def test_make_empty_intermediate_tensors_allocates_only_incoming_aux_layers():
     assert result["aux_layer_0"].dtype == torch.float32
 
 
+def test_patch_preserves_native_eagle3_pp_aux_forward():
+    model = _FakeEagleMixinModel(start_layer=2, end_layer=4, aux_hidden_state_layers=(0, 2, 3))
+    model.supports_aux_hidden_states_over_pp = True
+    original_forward = model.forward.__func__
+
+    assert eagle3_pp_aux.patch_eagle3_pp_aux_propagation(model) is False
+    assert model.forward.__func__ is original_forward
+    assert not hasattr(model, "_eagle3_pp_aux_forward_patched")
+    assert not hasattr(model, "_eagle3_pp_aux_make_empty_patched")
+
+
 def test_patch_accepts_eagle_mixin_model():
     model = _FakeEagleMixinModel(start_layer=2, end_layer=4, aux_hidden_state_layers=(0, 2, 3))
 
