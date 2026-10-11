@@ -249,6 +249,10 @@ class AscendMiniMaxM3IndexerMetadataBuilder(AttentionMetadataBuilder[AscendMiniM
             device=device,
         )
         self.block_size = kv_cache_spec.block_size
+        self.prefill_cu_seqlens_q_buffer = torch.empty_like(self.context_len_buffer)
+        self.prefill_start_loc_buffer = (
+            torch.empty_like(self.context_len_buffer) if _USE_ASCENDC_INDEX_SCORE_PREFILL else None
+        )
         self.decode_start_loc_buffer = (
             torch.empty_like(self.context_len_buffer) if _USE_ASCENDC_INDEX_SCORE_DECODE else None
         )
@@ -287,7 +291,22 @@ class AscendMiniMaxM3IndexerMetadataBuilder(AttentionMetadataBuilder[AscendMiniM
                 ),
                 non_blocking=True,
             )
-            cu_seqlens_q = (query_start_loc[num_decodes : prefill_end + 1] - num_decode_tokens).to(torch.int32)
+            prefill_start_loc = None
+            if _USE_ASCENDC_INDEX_SCORE_PREFILL:
+                assert self.prefill_start_loc_buffer is not None
+                prefill_start_loc = self.prefill_start_loc_buffer[:active_prefills]
+                torch.div(
+                    prefill_context_lens,
+                    self.block_size,
+                    rounding_mode="floor",
+                    out=prefill_start_loc,
+                )
+            cu_seqlens_q = self.prefill_cu_seqlens_q_buffer[: active_prefills + 1]
+            torch.sub(
+                query_start_loc[num_decodes : prefill_end + 1],
+                num_decode_tokens,
+                out=cu_seqlens_q,
+            )
             prefill_metadata = AscendMiniMaxM3IndexerPrefillMetadata(
                 cu_seqlens_q=cu_seqlens_q,
                 seq_lens=seq_lens[num_decodes:prefill_end],
@@ -295,15 +314,7 @@ class AscendMiniMaxM3IndexerMetadataBuilder(AttentionMetadataBuilder[AscendMiniM
                 block_table=block_table[num_decodes:prefill_end],
                 max_query_len=common_attn_metadata.max_query_len,
                 max_seq_len=common_attn_metadata.max_seq_len,
-                start_loc=(
-                    torch.div(
-                        prefill_context_lens,
-                        self.block_size,
-                        rounding_mode="floor",
-                    ).to(dtype=torch.int32)
-                    if _USE_ASCENDC_INDEX_SCORE_PREFILL
-                    else None
-                ),
+                start_loc=prefill_start_loc,
             )
 
         decode_metadata: AscendMiniMaxM3IndexerDecodeMetadata | None = None
@@ -665,6 +676,7 @@ class AscendMiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[AscendMiniMa
             dtype=torch.int32,
             device=device,
         )
+        self.prefill_cu_seqlens_q_buffer = torch.empty_like(self.context_len_buffer)
 
     def build(
         self,
@@ -711,7 +723,12 @@ class AscendMiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[AscendMiniMa
                 ),
                 non_blocking=True,
             )
-            cu_seqlens_q = (query_start_loc[num_decodes : prefill_end + 1] - num_decode_tokens).to(torch.int32)
+            cu_seqlens_q = self.prefill_cu_seqlens_q_buffer[: active_prefills + 1]
+            torch.sub(
+                query_start_loc[num_decodes : prefill_end + 1],
+                num_decode_tokens,
+                out=cu_seqlens_q,
+            )
             prefill_metadata = AscendMiniMaxM3SparsePrefillMetadata(
                 cu_seqlens_q=cu_seqlens_q,
                 cu_seqlens_k=prefill_cu_seqlens_k,

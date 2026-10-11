@@ -373,6 +373,9 @@ def test_sparse_metadata_builder(batch_spec: BatchSpec) -> None:
         assert metadata.prefill.cu_seqlens_k.shape[0] == batch_spec.batch_size + 1
         assert metadata.prefill.total_kv_blocks == 5
         assert metadata.prefill.max_kv_blocks == 3
+        assert metadata.prefill.cu_seqlens_q.data_ptr() == builder.prefill_cu_seqlens_q_buffer.data_ptr()
+        rebuilt = builder.build(0, common)
+        assert rebuilt.prefill.cu_seqlens_q.data_ptr() == metadata.prefill.cu_seqlens_q.data_ptr()
 
 
 @pytest.mark.parametrize(
@@ -410,6 +413,12 @@ def test_indexer_metadata_builder(batch_spec: BatchSpec) -> None:
             metadata.prefill.start_loc,
             metadata.prefill.context_lens // 128,
         )
+        assert builder.prefill_start_loc_buffer is not None
+        assert metadata.prefill.start_loc.data_ptr() == builder.prefill_start_loc_buffer.data_ptr()
+        assert metadata.prefill.cu_seqlens_q.data_ptr() == builder.prefill_cu_seqlens_q_buffer.data_ptr()
+        rebuilt = builder.build(0, common)
+        assert rebuilt.prefill.start_loc.data_ptr() == metadata.prefill.start_loc.data_ptr()
+        assert rebuilt.prefill.cu_seqlens_q.data_ptr() == metadata.prefill.cu_seqlens_q.data_ptr()
 
 
 def test_sparse_metadata_builder_fia_padded_dummy_request() -> None:
