@@ -13,6 +13,7 @@ from tests.ut.distributed.ascend_store.v1.scheduler.fixtures import (
     make_output,
     make_request,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1 import connector as connector_module
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.connector import (
     AscendStoreV1Connector,
 )
@@ -160,3 +161,38 @@ def test_worker_connector_rolls_back_metadata_when_worker_rejects_step(monkeypat
         connector.bind_connector_metadata(step)
 
     assert calls == [("bind", step), ("begin", step), ("clear",)]
+
+
+def test_connector_retains_worker_on_lookup_close_failure_and_can_retry_shutdown() -> None:
+    calls = []
+    query_running = True
+
+    def close_lookup():
+        calls.append("lookup")
+        if query_running:
+            raise RuntimeError("Lookup is still running")
+
+    connector = AscendStoreV1Connector.__new__(AscendStoreV1Connector)
+    connector.scheduler = None
+    connector.lookup_server = SimpleNamespace(close=close_lookup)
+    connector.worker = SimpleNamespace(close=lambda: calls.append("worker"))
+    with pytest.raises(RuntimeError, match="Lookup is still running"):
+        connector.shutdown()
+    assert calls == ["lookup"]
+    query_running = False
+    connector.shutdown()
+    assert calls == ["lookup", "lookup", "worker"]
+
+
+def test_connector_closes_created_worker_if_lookup_server_cannot_start(monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(KVConnectorBase_V1, "__init__", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        connector_module,
+        "create_kv_pool_worker",
+        lambda *_args: SimpleNamespace(lookup=lambda *_args: None, close=lambda: calls.append("worker")),
+    )
+    monkeypatch.setattr(AscendStoreV1Connector, "_resolve_lookup_address", lambda *_args: "unsupported://lookup")
+    with pytest.raises(RuntimeError, match="Failed to start Lookup server"):
+        AscendStoreV1Connector(SimpleNamespace(parallel_config=SimpleNamespace(rank=0)), None, None)
+    assert calls == ["worker"]

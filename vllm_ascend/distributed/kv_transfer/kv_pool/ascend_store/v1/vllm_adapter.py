@@ -118,7 +118,9 @@ def create_kv_pool_scheduler(
         scheduler_type = AsynchronousBulkScheduler
     else:
         scheduler_type = SynchronousBulkScheduler
-    return scheduler_type(config, RemoteLookup(lookup_address))
+    return scheduler_type(
+        config, RemoteLookup(lookup_address, timeout_ms=extra_config.get("lookup_rpc_timeout_ms", -1))
+    )
 
 
 def create_kv_pool_worker(vllm_config: VllmConfig, kv_cache_config: KVCacheConfig) -> KVPoolWorker:

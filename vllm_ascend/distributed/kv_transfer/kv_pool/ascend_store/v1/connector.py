@@ -49,8 +49,12 @@ class AscendStoreV1Connector(KVConnectorBase_V1, SupportsHMA):
         else:
             self.worker = create_kv_pool_worker(vllm_config, kv_cache_config)
             if vllm_config.parallel_config.rank == 0:
-                lookup_address = self._resolve_lookup_address(vllm_config)
-                self.lookup_server = LookupServer(self.worker.lookup, lookup_address)
+                try:
+                    lookup_address = self._resolve_lookup_address(vllm_config)
+                    self.lookup_server = LookupServer(self.worker.lookup, lookup_address)
+                except BaseException:
+                    self.worker.close()
+                    raise
 
     @staticmethod
     def _resolve_lookup_address(vllm_config: VllmConfig) -> str:
@@ -188,6 +192,7 @@ class AscendStoreV1Connector(KVConnectorBase_V1, SupportsHMA):
         if self.scheduler is not None:
             self.scheduler.close()
         if self.lookup_server is not None:
+            # close() must confirm that Lookup no longer uses the Worker's Backend.
             self.lookup_server.close()
         if self.worker is not None:
             self.worker.close()

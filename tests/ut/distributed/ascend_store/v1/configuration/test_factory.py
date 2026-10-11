@@ -126,7 +126,7 @@ def test_factory_binds_role_capabilities(monkeypatch) -> None:
     )
     for role, extra, load_enabled, store_enabled in cases:
         lookup = FakeRemoteLookup(4)
-        monkeypatch.setattr(vllm_adapter, "RemoteLookup", lambda _address, lookup=lookup: lookup)
+        monkeypatch.setattr(vllm_adapter, "RemoteLookup", lambda _address, lookup=lookup, **_kwargs: lookup)
         config = SimpleNamespace(
             kv_transfer_config=SimpleNamespace(kv_role=role, kv_connector_extra_config=extra),
             parallel_config=SimpleNamespace(world_size=1),
@@ -160,7 +160,7 @@ def test_scheduler_factory_honors_configured_load_publication_timing(monkeypatch
         (True, False, False),
         (True, True, False),
     )
-    monkeypatch.setattr(vllm_adapter, "RemoteLookup", lambda _address: FakeRemoteLookup(4))
+    monkeypatch.setattr(vllm_adapter, "RemoteLookup", lambda _address, **_kwargs: FakeRemoteLookup(4))
     monkeypatch.setattr(vllm_adapter.kv_cache_utils, "resolve_kv_cache_block_sizes", lambda *_: (4, 4))
     spec = FullAttentionSpec(block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float32)
     cache_config = SimpleNamespace(
@@ -209,6 +209,57 @@ def test_backend_selection_fixes_access_kind_once(monkeypatch) -> None:
         "memcache": LayerwiseAccessKind.GVA,
     }
     assert {name: backend_module.resolve_backend_spec(name).layerwise_access for name in expected} == expected
+
+
+@pytest.mark.parametrize(
+    "timeout_ms,is_valid",
+    (
+        (None, True),
+        (-1, True),
+        (0, True),
+        (250, True),
+        (2**31 - 1, True),
+        (-2, False),
+        (True, False),
+        (1.5, False),
+        ("250", False),
+        (2**31, False),
+    ),
+)
+def test_scheduler_factory_configures_lookup_timeout_and_rejects_invalid_values(
+    monkeypatch, timeout_ms, is_valid
+) -> None:
+    monkeypatch.setattr(vllm_adapter.kv_cache_utils, "resolve_kv_cache_block_sizes", lambda *_args: (4, 4))
+    cache_config = SimpleNamespace(
+        transfer_group_ids=(0,),
+        kv_cache_groups=[
+            SimpleNamespace(
+                kv_cache_spec=FullAttentionSpec(block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float32)
+            )
+        ],
+    )
+    extra_config = {} if timeout_ms is None else {"lookup_rpc_timeout_ms": timeout_ms}
+    config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(kv_role="kv_both", kv_connector_extra_config=extra_config),
+        parallel_config=SimpleNamespace(world_size=1),
+        speculative_config=None,
+    )
+    if not is_valid:
+        with pytest.raises(ValueError, match="lookup_rpc_timeout_ms"):
+            vllm_adapter.create_kv_pool_scheduler(config, cache_config, "unused")
+        return
+
+    observed_timeouts = []
+    remote_lookup = vllm_adapter.RemoteLookup
+
+    def create_lookup(address, *, timeout_ms):
+        observed_timeouts.append(timeout_ms)
+        return remote_lookup(address, timeout_ms=timeout_ms)
+
+    monkeypatch.setattr(vllm_adapter, "RemoteLookup", create_lookup)
+    scheduler = vllm_adapter.create_kv_pool_scheduler(config, cache_config, "unused")
+    scheduler.close()
+    assert observed_timeouts == [-1 if timeout_ms is None else timeout_ms]
 
 
 @pytest.mark.parametrize("layout", ("NHD", "HND", "LBHNC"))
