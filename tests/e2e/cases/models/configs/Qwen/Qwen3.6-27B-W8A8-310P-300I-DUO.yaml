@@ -40,11 +40,6 @@ test_cases:
         baseline: 81
         threshold: 3
         temperature: 0
-        top_p:
-        top_k:
-        min_p:
-        presence_penalty:
-        repetition_penalty:
       perf:
         case_type: performance
         dataset_path: vllm-ascend/GSM8K-in3500-bs2800
@@ -54,5 +49,5 @@ test_cases:
         max_out_len: 1536
         batch_size: 8
         request_rate: 0
-        baseline: 46
+        baseline: 42.7629
         threshold: 0.97

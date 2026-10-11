@@ -2115,6 +2115,7 @@ def test_pcp_metadata_builds_global_view_when_batch_has_prefill():
     global_slot_mapping = global_slot_mappings[1, : global_batch.num_tokens]
     local_common = SimpleNamespace(
         attn_state="local",
+        query_start_loc_cpu=torch.tensor([0, 2], dtype=torch.int32),
         num_actual_tokens=2,
         num_input_tokens=3,
         num_reqs=2,
@@ -2658,7 +2659,9 @@ def test_o_proj_capacity_covers_profile_and_decode(tp_size, decode_capacity, sch
     impl.support_fp8_attention = False
     impl.wo_a = SimpleNamespace(weight=torch.ones(1, 2, 2))
     impl.wo_b = lambda x: x
-    impl.vllm_config = SimpleNamespace(scheduler_config=SimpleNamespace(max_num_batched_tokens=scheduler_capacity))
+    impl.vllm_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=scheduler_capacity, max_num_seqs=4)
+    )
     group = SimpleNamespace(world_size=tp_size, device_group=object())
     capacity = max(decode_capacity, scheduler_capacity)
 
@@ -2697,7 +2700,7 @@ def test_o_proj_capacity_covers_profile_and_decode(tp_size, decode_capacity, sch
             else:
                 assert all(current is original for current, original in zip(current_buffers, buffers))
 
-        with pytest.raises(ValueError, match="static exchange capacity must cover local tokens"):
+        with pytest.raises(ValueError, match=r"capacity \(\d+\) must cover local tokens \(\d+\)"):
             impl._forward_o_proj(torch.zeros(capacity + 1, tp_size, 2), torch.empty(capacity + 1, 2))
 
     assert a2a.call_count == rs.call_count == 3
