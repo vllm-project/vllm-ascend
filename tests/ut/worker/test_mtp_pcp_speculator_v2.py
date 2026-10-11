@@ -747,8 +747,9 @@ def test_graph_prefill_refreshes_captured_cache_buffers(attn_architecture: str) 
 
 @pytest.mark.parametrize("attn_architecture", ["GQA", "MLA"])
 @pytest.mark.parametrize("target_has_padding", [False, True])
+@pytest.mark.parametrize("is_dummy", [False, True])
 def test_sharded_target_graph_prefill_rebuilds_global_metadata(
-    attn_architecture: str, target_has_padding: bool
+    attn_architecture: str, target_has_padding: bool, is_dummy: bool
 ) -> None:
     speculator = object.__new__(AscendMTPSpeculator)
     speculator.input_buffers = SimpleNamespace(query_start_loc=torch.tensor([0, 4, 4], dtype=torch.int32))
@@ -757,7 +758,7 @@ def test_sharded_target_graph_prefill_rebuilds_global_metadata(
     speculator.pcp_manager = SimpleNamespace(is_decode_sharded=True)
     speculator.attn_architecture = attn_architecture
     batch = _make_padded_input_batch()
-    batch.is_dummy = False
+    batch.is_dummy = is_dummy
     batch.num_reqs, batch.num_tokens = 1, 4
     batch.query_start_loc_np = np.array([0, 4], dtype=np.int32)
     batch.seq_lens_cpu_upper_bound = torch.tensor([9, 99] if target_has_padding else [9], dtype=torch.int32)
@@ -810,13 +811,14 @@ def test_prepare_replicated_prefill_preserves_bypass(guard: str) -> None:
     speculator._build_attn_metadata.assert_not_called()
 
 
-@pytest.mark.parametrize("attn_architecture", ["GQA", "SFA"])
+@pytest.mark.parametrize("attn_architecture", ["GQA", "MLA", "SFA"])
 def test_graph_prefill_uses_local_dummy_metadata(attn_architecture: str) -> None:
     speculator = object.__new__(AscendMTPSpeculator)
     speculator.replicated_pcp = True
     speculator.attn_architecture = attn_architecture
     speculator.input_batch = _make_padded_input_batch()
     speculator.input_batch.is_dummy = True
+    speculator.input_buffers = SimpleNamespace(query_start_loc=torch.zeros(5, dtype=torch.int32))
     speculator.block_tables = MagicMock()
     speculator.kv_cache_config = object()
     target_metadata, draft_metadata = object(), object()
@@ -836,10 +838,16 @@ def test_graph_prefill_uses_local_dummy_metadata(attn_architecture: str) -> None
         speculator.block_tables.get_dummy_slot_mappings.return_value, speculator.kv_cache_config
     )
     kwargs = speculator._build_attn_metadata.call_args.kwargs
-    assert kwargs["num_reqs"] == 2
     assert kwargs["step"] == 0
-    assert kwargs["query_start_loc_np"] is speculator.input_batch.query_start_loc_np
-    assert kwargs["seq_lens_cpu_upper_bound"] is speculator.input_batch.seq_lens_cpu_upper_bound
+    if attn_architecture in ("MLA", "GQA"):
+        assert kwargs["num_reqs"] == 4
+        np.testing.assert_array_equal(kwargs["query_start_loc_np"], [0, 3, 6, 7, 8])
+        assert speculator.input_buffers.query_start_loc.tolist() == [0, 3, 6, 7, 8]
+        assert kwargs["seq_lens_cpu_upper_bound"].tolist() == [0, 1, 0, 0]
+    else:
+        assert kwargs["num_reqs"] == 2
+        assert kwargs["query_start_loc_np"] is speculator.input_batch.query_start_loc_np
+        assert kwargs["seq_lens_cpu_upper_bound"] is speculator.input_batch.seq_lens_cpu_upper_bound
 
 
 @pytest.mark.parametrize("replicated", [False, True])
