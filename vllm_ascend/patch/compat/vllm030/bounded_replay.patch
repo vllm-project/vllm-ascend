@@ -1,8 +1,8 @@
 diff --git a/vllm/config/cache.py b/vllm/config/cache.py
-index 37ad5b2b34..c12433a367 100644
+index 9bd898731..d5f6bc8a1 100644
 --- a/vllm/config/cache.py
 +++ b/vllm/config/cache.py
-@@ -227,6 +227,11 @@ class CacheConfig:
+@@ -225,6 +225,11 @@ class CacheConfig:
      necessary for implementing this optimization in some models (e.g. Gemma3n)
      """
  
@@ -14,8 +14,8 @@ index 37ad5b2b34..c12433a367 100644
      kv_cache_memory_bytes: int | None = None
      """Size of KV Cache per GPU in bytes. By default, this is set to None
      and vllm can automatically infer the kv cache size based on
-@@ -281,8 +286,9 @@ class CacheConfig:
-             "effective_attention_block_size",
+@@ -279,8 +284,9 @@ class CacheConfig:
+             "num_cpu_blocks",
              "kv_cache_size_tokens",
              "kv_cache_max_concurrency",
 -            # WIP feature toggle not impacting compiled graph shape
@@ -26,10 +26,10 @@ index 37ad5b2b34..c12433a367 100644
  
          from vllm.config.utils import get_hash_factors, hash_factors
 diff --git a/vllm/engine/arg_utils.py b/vllm/engine/arg_utils.py
-index ccb30a2597..59c24b5b24 100644
+index b420e84f5..7bb2cc379 100644
 --- a/vllm/engine/arg_utils.py
 +++ b/vllm/engine/arg_utils.py
-@@ -765,6 +765,7 @@ class EngineArgs:
+@@ -766,6 +766,7 @@ class EngineArgs:
      stream_interval: int = SchedulerConfig.stream_interval
  
      kv_sharing_fast_prefill: bool = CacheConfig.kv_sharing_fast_prefill
@@ -37,7 +37,7 @@ index ccb30a2597..59c24b5b24 100644
      optimization_level: OptimizationLevel = VllmConfig.optimization_level
      performance_mode: PerformanceMode = VllmConfig.performance_mode
  
-@@ -1294,6 +1295,9 @@ class EngineArgs:
+@@ -1296,6 +1297,9 @@ class EngineArgs:
          cache_group.add_argument(
              "--kv-sharing-fast-prefill", **cache_kwargs["kv_sharing_fast_prefill"]
          )
@@ -47,7 +47,7 @@ index ccb30a2597..59c24b5b24 100644
          cache_group.add_argument(
              "--mamba-cache-dtype", **cache_kwargs["mamba_cache_dtype"]
          )
-@@ -2098,6 +2102,7 @@ class EngineArgs:
+@@ -2108,6 +2112,7 @@ class EngineArgs:
              prefix_cache_retention_interval=self.prefix_cache_retention_interval,
              kv_cache_dtype_skip_layers=self.kv_cache_dtype_skip_layers,
              kv_sharing_fast_prefill=self.kv_sharing_fast_prefill,
@@ -56,12 +56,12 @@ index ccb30a2597..59c24b5b24 100644
              mamba_ssm_cache_dtype=self.mamba_ssm_cache_dtype,
              mamba_block_size=self.mamba_block_size,
 diff --git a/vllm/v1/core/kv_cache_manager.py b/vllm/v1/core/kv_cache_manager.py
-index 49f62a2670..1adf386cab 100644
+index 226da3a1e..59e7e6bff 100644
 --- a/vllm/v1/core/kv_cache_manager.py
 +++ b/vllm/v1/core/kv_cache_manager.py
-@@ -465,12 +465,17 @@ class KVCacheManager:
+@@ -463,12 +463,17 @@ class KVCacheManager:
+         Returns:
              A list of new allocated blocks.
- 
          """
 -        # When loading KV data asynchronously, we may have zero new tokens to
 -        # compute while still allocating slots for externally computed tokens.
@@ -82,7 +82,7 @@ index 49f62a2670..1adf386cab 100644
  
          if new_computed_blocks is not None:
 diff --git a/vllm/v1/core/sched/output.py b/vllm/v1/core/sched/output.py
-index 3a46fa40a7..7501c51b2c 100644
+index 3a46fa40a..7501c51b2 100644
 --- a/vllm/v1/core/sched/output.py
 +++ b/vllm/v1/core/sched/output.py
 @@ -48,6 +48,8 @@ class NewRequestData:
@@ -103,13 +103,13 @@ index 3a46fa40a7..7501c51b2c 100644
  
      @property
 diff --git a/vllm/v1/core/sched/scheduler.py b/vllm/v1/core/sched/scheduler.py
-index 19ea411aa1..e78440b184 100644
+index daf2b316d..f3917a5b2 100644
 --- a/vllm/v1/core/sched/scheduler.py
 +++ b/vllm/v1/core/sched/scheduler.py
-@@ -263,6 +263,18 @@ class Scheduler(SchedulerInterface):
-         self.use_eagle_block_drop = False
-         self.num_spec_tokens = vllm_config.num_speculative_tokens
-         self.num_lookahead_tokens = vllm_config.num_lookahead_tokens
+@@ -269,6 +269,18 @@ class Scheduler(SchedulerInterface):
+         # manager's re-prefillable window (this minus 1), and how many tokens to
+         # reserve between a chunk boundary and the prefill end.
+         self.num_prefill_lookahead = 0
 +        # DSV41 SWA bounded replay: groups that declare a replay window are rebuilt
 +        # after a prefix hit by recomputing its trailing tokens. One window
 +        # for all such groups, so the rewind matches every group's allocation.
@@ -122,10 +122,28 @@ index 19ea411aa1..e78440b184 100644
 +            f"Prefix replay windows should agree: {sorted(replay_windows)}"
 +        )
 +        self.prefix_replay_tokens = replay_windows.pop() if replay_windows else 0
-         self.num_prefill_lookahead = vllm_config.num_prefill_lookahead_tokens
          self.dynamic_sd_lookup: list[int] | None = None
          if speculative_config is not None:
-@@ -978,6 +990,17 @@ class Scheduler(SchedulerInterface):
+             if speculative_config.num_speculative_tokens_per_batch_size:
+@@ -947,6 +959,17 @@ class Scheduler(SchedulerInterface):
+                             step_skipped_waiting.prepend_request(request)
+                             continue
+ 
++                        if self.prefix_replay_tokens:
++                            # SWA bounded replay recomputes the hit's last
++                            # window, from the block holding its first
++                            # token; the sliding-window groups retire
++                            # whole blocks below the window of the hit's
++                            # next token. Hits end on a block boundary, or
++                            # a hit ending one token short of one would
++                            # retire the block the replay starts in.
++                            ext_tokens -= ext_tokens % self.block_size
++                            load_kv_async = load_kv_async and ext_tokens > 0
++
+                         if partial_tail and ext_tokens > partial_tail:
+                             # Remote strictly exceeds the full local hit: drop the
+                             # sub-block tail so no CoW is needed, and let the load
+@@ -989,6 +1012,17 @@ class Scheduler(SchedulerInterface):
                          num_new_local_computed_tokens + num_external_computed_tokens
                      )
                      assert num_computed_tokens <= request.num_tokens
@@ -143,7 +161,7 @@ index 19ea411aa1..e78440b184 100644
  
                      # Skip request with pending mm encoding prefetches
                      if self._ec_transfer_pending(request, num_computed_tokens):
-@@ -1012,6 +1035,11 @@ class Scheduler(SchedulerInterface):
+@@ -1023,6 +1057,11 @@ class Scheduler(SchedulerInterface):
                  new_encoder_compute_budget = encoder_compute_budget
                  pad_spec_decode = False
  
@@ -155,7 +173,7 @@ index 19ea411aa1..e78440b184 100644
                  if load_kv_async:
                      # KVTransfer: loading remote KV, do not allocate for new work.
                      assert num_external_computed_tokens > 0
-@@ -1022,6 +1050,12 @@ class Scheduler(SchedulerInterface):
+@@ -1033,6 +1072,12 @@ class Scheduler(SchedulerInterface):
                      break
                  else:
                      request_token_budget = min(token_budget, input_budget - draft_slots)
@@ -168,9 +186,9 @@ index 19ea411aa1..e78440b184 100644
                      # Number of tokens to be scheduled.
                      # We use `request.num_tokens` instead of
                      # `request.num_prompt_tokens` to consider the resumed
-@@ -1149,9 +1183,12 @@ class Scheduler(SchedulerInterface):
-                         + self._spec_decode_step_blocks()
-                     )
+@@ -1156,9 +1201,12 @@ class Scheduler(SchedulerInterface):
+                     # avoid deadlock and predictable preemptions.
+                     reserved_blocks = self._inflight_prefill_reserved_blocks()
  
 +                # Replayed tokens are already counted in the adopted hit; a
 +                # chunk that ends inside the replayed range needs no new slots.
@@ -182,7 +200,7 @@ index 19ea411aa1..e78440b184 100644
                      num_new_computed_tokens=num_new_local_computed_tokens,
                      new_computed_blocks=new_computed_blocks,
                      num_lookahead_tokens=effective_lookahead_tokens,
-@@ -2930,6 +2967,20 @@ class Scheduler(SchedulerInterface):
+@@ -2916,6 +2964,20 @@ class Scheduler(SchedulerInterface):
              self._request_remaining_blocks(req) for req in self._inflight_prefills
          )
  
@@ -201,9 +219,9 @@ index 19ea411aa1..e78440b184 100644
 +        return num_replay_tokens
 +
      def _update_waiting_for_remote_kv(self, request: Request) -> None:
-         """KV Connector: update request state after async recv is finished.
- 
-@@ -2965,11 +3016,16 @@ class Scheduler(SchedulerInterface):
+         """
+         KV Connector: update request state after async recv is finished.
+@@ -2952,11 +3014,16 @@ class Scheduler(SchedulerInterface):
              # This will cache the blocks iff caching is enabled.
              self.kv_cache_manager.cache_blocks(request, request.num_computed_tokens)
  
@@ -226,12 +244,12 @@ index 19ea411aa1..e78440b184 100644
  
      def _try_promote_blocked_waiting_request(self, request: Request) -> bool:
 diff --git a/vllm/v1/core/single_type_kv_cache_manager.py b/vllm/v1/core/single_type_kv_cache_manager.py
-index 9ad0a38ed5..df52acc9ca 100644
+index 40027e71f..00e52c33f 100644
 --- a/vllm/v1/core/single_type_kv_cache_manager.py
 +++ b/vllm/v1/core/single_type_kv_cache_manager.py
-@@ -492,6 +492,8 @@ class SingleTypeKVCacheManager(ABC):
+@@ -489,6 +489,8 @@ class SingleTypeKVCacheManager(ABC):
+             replay_boundaries: Positions a later request replaying this prompt
                  can resume at, from ``get_replay_boundaries``.
- 
          """
 +        if not self.kv_cache_spec.prefix_cacheable:
 +            return
@@ -239,10 +257,10 @@ index 9ad0a38ed5..df52acc9ca 100644
          num_full_blocks = num_tokens // self.block_size
  
 diff --git a/vllm/v1/kv_cache_interface.py b/vllm/v1/kv_cache_interface.py
-index 17771d9ae6..35c33972d8 100644
+index 8cd867eb9..5a56355d1 100644
 --- a/vllm/v1/kv_cache_interface.py
 +++ b/vllm/v1/kv_cache_interface.py
-@@ -164,6 +164,11 @@ class KVCacheSpec:
+@@ -166,6 +166,11 @@ class KVCacheSpec:
          """Whether this spec's group participates in prefix caching."""
          return True
  
@@ -254,7 +272,7 @@ index 17771d9ae6..35c33972d8 100644
      @property
      def num_heads(self) -> int:
          raise NotImplementedError
-@@ -908,6 +913,7 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
+@@ -909,6 +914,7 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
      # DeepseekV4-only: see MLAAttentionSpec.model_version.
      alignment: int | None = None  # Default to None for no padding.
      model_version: str | None = None
@@ -262,7 +280,7 @@ index 17771d9ae6..35c33972d8 100644
  
      # MLA stores a single latent vector per state; there is no separate V.
      head_size_v: int = 0
-@@ -919,6 +925,14 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
+@@ -920,6 +926,14 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
          super().__post_init__()
          _apply_alignment_padding(self)
  
@@ -277,7 +295,7 @@ index 17771d9ae6..35c33972d8 100644
      @classmethod
      def merge(cls, specs: list[Self]) -> Self:
          assert all(isinstance(spec, SlidingWindowMLASpec) for spec in specs), (
-@@ -930,16 +944,18 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
+@@ -931,16 +945,18 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
          model_version_set = set(spec.model_version for spec in specs)
          sliding_window_set = set(spec.sliding_window for spec in specs)
          extra_retained_set = set(spec.extra_retained_tokens for spec in specs)
@@ -297,7 +315,7 @@ index 17771d9ae6..35c33972d8 100644
          )
          return cls(
              block_size=specs[0].block_size,
-@@ -954,6 +970,7 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
+@@ -955,6 +971,7 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
              cache_dtype_str=cache_dtype_str_set.pop(),
              tokens_per_state=tokens_per_state_set.pop(),
              model_version=model_version_set.pop(),
@@ -305,7 +323,7 @@ index 17771d9ae6..35c33972d8 100644
          )
  
      def is_uniform_with_collection(
-@@ -962,6 +979,7 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
+@@ -963,6 +980,7 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
          return all(
              isinstance(spec, SlidingWindowMLASpec)
              and spec.sliding_window == self.sliding_window
@@ -313,7 +331,7 @@ index 17771d9ae6..35c33972d8 100644
              for spec in kv_cache_specs.values()
          )
  
-@@ -1191,6 +1209,10 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
+@@ -1196,6 +1214,10 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
      def prefix_cacheable(self) -> bool:
          return all(spec.prefix_cacheable for spec in self.kv_cache_specs.values())
  
@@ -325,7 +343,7 @@ index 17771d9ae6..35c33972d8 100644
      def first_spec(self) -> KVCacheSpec:
          """Return the first spec in the group."""
 diff --git a/vllm/v1/request.py b/vllm/v1/request.py
-index ad875264af..dcf679093b 100644
+index 8b453a090..76ecd6259 100644
 --- a/vllm/v1/request.py
 +++ b/vllm/v1/request.py
 @@ -201,6 +201,9 @@ class Request:
@@ -339,13 +357,33 @@ index ad875264af..dcf679093b 100644
          # The number of NaNs in logits. A value greater than 0
          # indicates that the output is corrupted
 diff --git a/vllm/v1/worker/gpu/model_states/default.py b/vllm/v1/worker/gpu/model_states/default.py
-index 27a9591e4b..9690ea4d14 100644
+index 27a9591e4..35ca9ccba 100644
 --- a/vllm/v1/worker/gpu/model_states/default.py
 +++ b/vllm/v1/worker/gpu/model_states/default.py
-@@ -229,5 +229,6 @@ class DefaultModelState(ModelState):
+@@ -16,7 +16,10 @@ from vllm.v1.worker.gpu.attn_utils import (
+ from vllm.v1.worker.gpu.input_batch import InputBatch
+ from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
+ from vllm.v1.worker.gpu.mm.rope import get_rope_state
+-from vllm.v1.worker.gpu.model_states.interface import ModelState
++from vllm.v1.worker.gpu.model_states.interface import (
++    ModelSpecificAttnMetadata,
++    ModelState,
++)
+ from vllm.v1.worker.gpu.model_states.mm_pruning import maybe_create_mm_pruner
+ from vllm.v1.worker.gpu.model_states.prompt_embeds import PromptEmbedsState
+ from vllm.v1.worker.gpu.states import RequestState
+@@ -173,6 +176,7 @@ class DefaultModelState(ModelState):
+         kv_cache_config: KVCacheConfig,
+         for_capture: bool = False,
+         ubatch_idx: int = 0,
++        model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
+     ) -> dict[str, Any]:
+         if cudagraph_mode == CUDAGraphMode.FULL:
+             # Use padded sizes - padding is handled by model_runner.prepare_attn.
+@@ -229,5 +233,6 @@ class DefaultModelState(ModelState):
              req_idx=input_batch.idx_mapping_np,
              ubatch_idx=ubatch_idx,
              fast_prefill=input_batch.fast_prefill,
-+            replay_start=input_batch.replay_start,
++            model_specific_attn_metadata=model_specific_attn_metadata,
          )
          return attn_metadata

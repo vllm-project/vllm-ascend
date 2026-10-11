@@ -497,6 +497,7 @@ setup(
     packages=find_packages(exclude=("docs", "examples", "tests*", "csrc")),
     package_data={
         "vllm_ascend.observability": ["config/*.yaml"],
+        "vllm_ascend.patch.compat.vllm030": ["*.patch", "*.txt", "README.md"],
     },
     python_requires=">=3.10",
     install_requires=get_requirements(),

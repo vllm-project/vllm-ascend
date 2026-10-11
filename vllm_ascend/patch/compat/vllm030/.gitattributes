@@ -1,0 +1,2 @@
+# Unified diffs require a space prefix on empty context lines.
+bounded_replay.patch text eol=lf whitespace=-blank-at-eol
