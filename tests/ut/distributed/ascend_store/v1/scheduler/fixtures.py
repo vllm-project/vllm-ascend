@@ -5,21 +5,22 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.coordinates import TokenRange
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.lookup import LookupResult
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.lookup import LookupResult, TailKeyBoundary
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.scheduler import (
     SchedulerConfig,
 )
 
 
 class FakeRemoteLookup:
-    def __init__(self, available_end_token: int = 0) -> None:
+    def __init__(self, available_end_token: int = 0, *, tail_key_boundaries: tuple[TailKeyBoundary, ...] = ()) -> None:
         self.available_end_token = available_end_token
+        self.tail_key_boundaries = tail_key_boundaries
         self.queries: list[tuple[TokenRange, tuple[int, ...], tuple[bytes, ...]]] = []
         self.closed = False
 
     def query(self, query_range, transfer_group_ids, block_hashes) -> LookupResult:
         self.queries.append((query_range, transfer_group_ids, block_hashes))
-        return LookupResult(self.available_end_token)
+        return LookupResult(self.available_end_token, self.tail_key_boundaries)
 
     def close(self) -> None:
         self.closed = True

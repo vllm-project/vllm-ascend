@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 from dataclasses import replace
+from math import lcm
 from types import SimpleNamespace
 
 import torch
@@ -27,18 +28,20 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.topology import
 )
 
 
-def make_align_state_topology():
-    base = make_topology(group_ids=(0, 1), physical_layers=(0,), tp_size=2)
+def make_align_state_topology(
+    *, attention_block_size: int = 8, state_block_size: int = 8, hash_block_size: int = 4, tp_size: int = 2
+):
+    base = make_topology(group_ids=(0, 1), physical_layers=(0,), tp_size=tp_size)
     attention = KVPoolGroupTopology(
         0,
-        FullAttentionSpec(block_size=8, num_kv_heads=1, head_size=1, dtype=torch.float32),
+        FullAttentionSpec(block_size=attention_block_size, num_kv_heads=1, head_size=1, dtype=torch.float32),
         (KVPoolLayerTopology(0, ("layers.0.attention",)),),
         replace(base.groups[0].key_metadata, cache_family="attention"),
     )
     state = KVPoolGroupTopology(
         1,
         MambaSpec(
-            block_size=8,
+            block_size=state_block_size,
             shapes=((1,),),
             dtypes=(torch.float32,),
             mamba_cache_mode="align",
@@ -48,8 +51,8 @@ def make_align_state_topology():
     )
     return replace(
         base,
-        cache_transfer_granularity=8,
-        hash_block_size=4,
+        cache_transfer_granularity=lcm(attention_block_size, state_block_size),
+        hash_block_size=hash_block_size,
         groups=(attention, state),
     )
 

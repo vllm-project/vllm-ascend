@@ -153,6 +153,8 @@ def hybrid_bulk_ranges(
     store: bool,
 ) -> BulkRangeBatch:
     entry_slices = tuple(axis.entry_slice for axis in group.store_axes) if store else ((0, len(group.base_addresses)),)
+    # Checkpoint companions store whole pages even at a partial token boundary.
+    # Whole-object Load must receive those pages without extending logical reuse.
     return contiguous_ranges(
         block_ids,
         token_counts,
@@ -162,7 +164,7 @@ def hybrid_bulk_ranges(
         strides=group.block_strides,
         block_size=group.block_size,
         entry_slices=entry_slices,
-        full_extent=group.uses_align_state,
+        full_extent=group.uses_align_state or not store,
     )
 
 

@@ -67,9 +67,13 @@ def resolve_load_candidate(
     load_start = 0 if query_range.start_token == 0 else local_cached_tokens
     if physical_load_end < load_start:
         physical_load_end = load_start
-    tail_boundaries = tuple(
-        boundary for boundary in lookup_result.tail_key_boundaries if boundary.boundary_token <= physical_load_end
-    )
+    # Lookup may select a longer Attention object in the same physical tail page.
+    # Its identity remains valid unless the physical Load frontier changes.
+    tail_boundaries = lookup_result.tail_key_boundaries
+    if physical_load_end != readable_end:
+        tail_boundaries = tuple(
+            boundary for boundary in tail_boundaries if boundary.boundary_token <= physical_load_end
+        )
     return LoadCandidate(
         local_cached_tokens,
         readable_end,

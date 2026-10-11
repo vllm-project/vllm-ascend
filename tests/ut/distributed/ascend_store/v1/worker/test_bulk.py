@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -15,6 +17,13 @@ from tests.ut.distributed.ascend_store.v1.helpers import (
     make_topology,
     make_worker,
     store_one,
+)
+from tests.ut.distributed.ascend_store.v1.scheduler.fixtures import (
+    FakeBlocks,
+    make_config,
+    make_output,
+    make_request,
+    new_request_data,
 )
 from tests.ut.distributed.ascend_store.v1.worker.bulk_fixtures import (
     TensorBytesBackend,
@@ -35,8 +44,15 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.transf
     RangeStoreCommand,
     StateCheckpointSource,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.scheduler import (
+    AsynchronousBulkScheduler,
+    SynchronousBulkScheduler,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker import base as worker_module
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk import SynchronousBulkWorker
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk import (
+    AsynchronousBulkWorker,
+    SynchronousBulkWorker,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.io import BackendIO
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.io.arguments import BulkBackendArguments
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.resources import KVPoolResources
@@ -93,6 +109,113 @@ def test_bulk_lookup_recovers_sparse_retention_objects_and_loads_tail(
         after_eviction = worker.lookup(LookupRequest(TokenRange(0, 128), (1, 3), block_hashes))
         assert after_eviction.available_end_token == fallback_end
     finally:
+        worker.close()
+    assert backend.closed and resources.kv_caches is None
+
+
+@pytest.mark.parametrize("attention_block_size,hit_end,tail_end", ((16, 24, 24), (64, 32, 40)))
+@pytest.mark.parametrize(
+    "worker_type,scheduler_type",
+    ((SynchronousBulkWorker, SynchronousBulkScheduler), (AsynchronousBulkWorker, AsynchronousBulkScheduler)),
+    ids=("sync", "async"),
+)
+def test_hybrid_checkpoint_round_trip_receives_full_objects_with_lookup_tail_keys(
+    attention_block_size, hit_end, tail_end, worker_type, scheduler_type
+) -> None:
+    topology = make_align_state_topology(
+        attention_block_size=attention_block_size, state_block_size=32, hash_block_size=8, tp_size=1
+    )
+    attention, state = topology.groups
+    attention = replace(attention, kv_cache_spec=replace(attention.kv_cache_spec, head_size=2, head_size_v=3))
+    topology = replace(topology, groups=(attention, state))
+    backend = TensorBytesBackend()
+    resources = KVPoolResources(
+        backend, make_backend_spec(layerwise_access=None, requires_exists_before_put=True), 8, topology.groups
+    )
+    worker = worker_type(
+        topology, compile_bulk_projection_binder(topology, 256), resources, source_ready_event_factory=FakeEvent
+    )
+    # Unequal K/V entries have padding between pages, not inside their payloads.
+    backing_pages = [torch.full((8, attention_block_size * width + 4), -999.0) for width in (2, 3)]
+    attention_caches = tuple(
+        backing[:, :-4].view(8, attention_block_size, 1, width)
+        for backing, width in zip(backing_pages, (2, 3), strict=True)
+    )
+    for index, cache in enumerate(attention_caches):
+        cache.copy_(torch.arange(cache.numel()).reshape(cache.shape) + index * 1000)
+    state_cache = torch.arange(8, dtype=torch.float32).reshape(8, 1)
+    hashes = tuple(bytes([index]) for index in range(1, topology.cache_transfer_granularity // 8 + 1))
+    source_blocks = (1, 2) if attention_block_size == 16 else (1,)
+    destination_blocks = (5, 6) if attention_block_size == 16 else (5,)
+    config = replace(
+        make_config(granularity=topology.cache_transfer_granularity, groups=(0, 1), align_groups=frozenset((1,))),
+        hash_block_size=8,
+    )
+    lookup = SimpleNamespace(
+        query=lambda query_range, group_ids, block_hashes: worker.lookup(
+            LookupRequest(query_range, group_ids, block_hashes)
+        ),
+        close=lambda: None,
+    )
+    scheduler = scheduler_type(config, lookup)
+    try:
+        worker.bind_kv_caches({attention.layer_names[0]: attention_caches, state.layer_names[0]: state_cache})
+        boundaries = (hit_end,) if tail_end == hit_end else (hit_end, tail_end)
+        for index, boundary in enumerate(boundaries):
+            command = CheckpointStoreCommand(
+                "producer", (source_blocks, ()), hashes, 0, (StateCheckpointSource(1, 3 + index, boundary),), 17 + index
+            )
+            assert store_one(worker, command).evidence.succeeded
+        if tail_end > hit_end:
+            # A full Attention companion can outlive the state at the same boundary.
+            state_tail_key = next(
+                key for key in backend.objects if "@group:1@" in key and key.endswith(f"@{tail_end // 8:02x}")
+            )
+            del backend.objects[state_tail_key]
+
+        request = make_request(
+            "consumer",
+            prompt_tokens=topology.cache_transfer_granularity,
+            tokens=topology.cache_transfer_granularity + 1,
+        )
+        request.block_hashes = list(hashes)
+        raw = worker.lookup(LookupRequest(TokenRange(0, request.num_prompt_tokens), (0, 1), hashes))
+        assert raw.available_end_token == hit_end
+        assert raw.tail_key_boundaries == (TailKeyBoundary(0, tail_end), TailKeyBoundary(1, hit_end))
+        assert scheduler.get_num_new_matched_tokens(request, 0) == (hit_end, scheduler.load_is_deferred)
+        scheduler.confirm_allocation(request, FakeBlocks(list(destination_blocks), [7]), hit_end)
+        output = make_output(
+            new=(new_request_data("consumer", (destination_blocks, (7,)), hit_end),), scheduled_tokens={"consumer": 0}
+        )
+        step = scheduler.build_step(output)
+        (load,) = step.load.commands
+        assert load.load_range == TokenRange(0, hit_end)
+        assert load.tail_key_boundaries == raw.tail_key_boundaries
+
+        expected_pages = [backing.clone() for backing in backing_pages]
+        for expected, cache in zip(expected_pages, attention_caches, strict=True):
+            for source, destination in zip(source_blocks, destination_blocks, strict=True):
+                expected[destination, :-4] = cache[source].reshape(-1)
+        expected_state = state_cache.clone()
+        expected_state[7] = state_cache[3]
+        worker.begin_step(step)
+        worker.start_load()
+        # Public close drains the async copy before resource release and result collection.
+        worker.close()
+        result = worker.collect_load_result()
+        assert not result.failed_request_ids and not result.failed_locations
+        if scheduler.load_is_deferred:
+            assert result.completed_request_ids == {"consumer"}
+        worker.end_step()
+        get_call = next(call for call in reversed(backend.calls) if call[0] == "get")
+        full_entry_sizes = tuple(cache[0].numel() * cache.element_size() for cache in attention_caches)
+        assert get_call[3] == (full_entry_sizes,) * len(destination_blocks) + ((state_cache[0].nbytes,),)
+        assert all(key in backend.objects for key in get_call[1])
+        for backing, expected in zip(backing_pages, expected_pages, strict=True):
+            torch.testing.assert_close(backing, expected)
+        torch.testing.assert_close(state_cache, expected_state)
+    finally:
+        scheduler.close()
         worker.close()
     assert backend.closed and resources.kv_caches is None
 
@@ -227,7 +350,7 @@ def test_hybrid_bulk_worker_owns_fine_lookup_load_range_and_checkpoint_store(mon
     assert ["@group:0@" in key for key in get_call[1]] == [True, False]
     assert ["@group:1@" in key for key in get_call[1]] == [False, True]
     assert get_call[2] == ((1192,), (12448,))
-    assert get_call[3] == ((16,), (32,))
+    assert get_call[3] == ((32,), (32,))
 
     backend.calls.clear()
     range_completion = store_one(
