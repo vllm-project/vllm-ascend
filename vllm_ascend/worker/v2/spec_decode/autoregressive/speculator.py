@@ -332,25 +332,6 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         )
         return attn_metadata, slot_mappings
 
-        slot_mappings = build_slot_mappings_by_layer(
-            slot_mappings_tensor,
-            self.kv_cache_config,
-        )
-        # This is draft prefill, not the later one-token-per-request decode.
-        # Query lengths may differ, so do not use _build_uniform_attn_metadata.
-        attn_metadata = self._build_attn_metadata(
-            num_reqs=input_batch.num_reqs,
-            batch_desc=BatchExecutionDescriptor(
-                cg_mode=cudagraph_runtime_mode,
-                num_tokens=num_tokens_padded,
-                num_reqs=num_reqs_padded,
-            ),
-            query_start_loc_np=input_batch.query_start_loc_np,
-            seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound,
-            step=0,
-        )
-        return attn_metadata, slot_mappings
-
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         if self.speculative_config.enforce_eager:
             cudagraph_mode = CUDAGraphMode.NONE
