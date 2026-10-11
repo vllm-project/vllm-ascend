@@ -991,9 +991,7 @@ class MiniMaxM3DecoderLayer(nn.Module):
             # the first SP shard to the positions dimension so hidden states,
             # residuals, and subsequent reduce-scatter outputs all use the same
             # token layout.
-            assert hidden_states.shape[0] >= full_num_tokens, (
-                "MiniMax-M3 SP input has fewer rows than positions"
-            )
+            assert hidden_states.shape[0] >= full_num_tokens, "MiniMax-M3 SP input has fewer rows than positions"
             hidden_states = hidden_states[:full_num_tokens]
             if residual is not None:
                 residual = residual[:full_num_tokens]
