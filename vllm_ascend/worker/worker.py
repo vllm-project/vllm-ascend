@@ -701,6 +701,9 @@ class NPUWorker(WorkerBase):
         has_mamba = any(isinstance(spec, MambaSpec) for spec in per_layer_specs)
         model_runner = getattr(self, "model_runner", None)
         layout = self.vllm_config.cache_config.get_resolved_kv_cache_layout()
+        # TODO: The Step-3.5/3.7 models will be sunset in the future. Once they
+        # are, remove this is_step_model exemption: this line and the
+        # `or is_step_model` budget gate below.
         is_step_model = self.model_config.hf_text_config.model_type in ("step3p5", "step3p7")
         if (
             has_attention
