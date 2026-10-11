@@ -68,6 +68,7 @@ _CURRENT_STREAM = None
 _GLOBAL_STREAM = None
 _SHARED_EXPERTS_CALCULATION_STREAM = None
 _CP_CHUNKEDPREFILL_COMM_STREAM = None
+_CP_DECODE_COMM_STREAM = None
 _ASCEND_CUSTOMOP_IS_REIGISTERED = False
 _DEFAULT_BUFFER_SIZE = 200
 _MIN_DP_BUFFER_SIZE = 50
@@ -84,6 +85,15 @@ _CUSTOM_OP_BASE_DIR = (
     os.path.dirname(__file__) if os.path.isabs(__file__) else os.path.abspath(os.path.dirname(__file__))
 )
 _IS_ROT_WEIGHT_USED = None
+
+
+def is_gqa_pcp_dcp_config(model_config: Any, parallel_config: Any) -> bool:
+    """Whether a GQA/MQA model enables both PCP and DCP."""
+    return (
+        parallel_config.decode_context_parallel_size > 1
+        and parallel_config.prefill_context_parallel_size > 1
+        and not model_config.use_mla
+    )
 
 
 def extract_dsv4_layer_index(config: Any, layer_name: str) -> int:
@@ -654,6 +664,13 @@ def cp_chunkedprefill_comm_stream() -> torch.npu.Stream:
     if _CP_CHUNKEDPREFILL_COMM_STREAM is None:
         _CP_CHUNKEDPREFILL_COMM_STREAM = torch_npu.npu.Stream()
     return _CP_CHUNKEDPREFILL_COMM_STREAM
+
+
+def cp_decode_comm_stream() -> torch.npu.Stream:
+    global _CP_DECODE_COMM_STREAM
+    if _CP_DECODE_COMM_STREAM is None:
+        _CP_DECODE_COMM_STREAM = torch_npu.npu.Stream()
+    return _CP_DECODE_COMM_STREAM
 
 
 def attention_calculation_stream() -> torch.npu.Stream:
@@ -1354,6 +1371,9 @@ def has_layer_idx(model_instance: torch.nn.Module) -> bool:
 # the QFA path (the QFA D=256 requirement doc allows block sizes 512/1024).
 A5_C8_MXFP_KV_CACHE_BLOCK_SIZE = 512
 
+# Dense-kernel minimum for upstream alignment, not the final M3 cache block.
+MINIMAX_M3_FP8_KV_CACHE_BLOCK_SIZE = 64
+
 # Enabled with ``--kv-cache-dtype mxfp8``, like the other Ascend C8 KV cache
 # flavors. The ModelSlim checkpoint recipe (fa_v.scale weights) is loaded when
 # present; it is not the switch.
@@ -1362,6 +1382,24 @@ C8_MXFP_KV_CACHE_DTYPE = "mxfp8"
 
 def is_c8_mxfp_kv_quant(vllm_config: VllmConfig) -> bool:
     return vllm_config.cache_config.cache_dtype == C8_MXFP_KV_CACHE_DTYPE
+
+
+def is_minimax_m3_fp8_kv_cache(vllm_config: VllmConfig | None) -> bool:
+    if vllm_config is None:
+        return False
+    model_config = vllm_config.model_config
+    cache_config = vllm_config.cache_config
+    architectures = getattr(getattr(model_config, "hf_config", None), "architectures", None) or ()
+    return (
+        any(
+            architecture in ("MiniMaxM3SparseForCausalLM", "MiniMaxM3SparseForConditionalGeneration")
+            for architecture in architectures
+        )
+        and cache_config is not None
+        and cache_config.cache_dtype in ("fp8", "fp8_e4m3")
+        and bool(cache_config.kv_cache_dtype_skip_layers)
+        and get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
+    )
 
 
 def refresh_block_size(vllm_config):

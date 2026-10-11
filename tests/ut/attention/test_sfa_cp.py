@@ -790,7 +790,8 @@ def test_dsa_cp_indexer_cache_follows_runtime_ownership(
     notify.assert_called_once_with(impl.layer_name)
 
 
-def test_sfa_dsa_cp_builder_shards_tokens_and_sequence_lengths() -> None:
+@pytest.mark.parametrize("nope", [False, True])
+def test_sfa_dsa_cp_builder_shards_tokens_and_sequence_lengths(nope) -> None:
     builder = AscendSFADSACPMetadataBuilder.__new__(AscendSFADSACPMetadataBuilder)
     builder.actual_seq_lengths_query = torch.tensor([3, 5, 0], dtype=torch.int32)
     builder.actual_seq_lengths_key = torch.tensor([3, 5, 0], dtype=torch.int32)
@@ -808,20 +809,24 @@ def test_sfa_dsa_cp_builder_shards_tokens_and_sequence_lengths() -> None:
     with patch("vllm_ascend.attention.context_parallel.sfa_cp.get_tp_group", return_value=tp_group):
         cos, sin, slot_mapping, extra = builder._prepare_parallel_metadata(
             common,
-            torch.arange(10, dtype=torch.float32).view(5, 1, 1, 2),
-            torch.arange(10, dtype=torch.float32).view(5, 1, 1, 2),
+            None if nope else torch.arange(10, dtype=torch.float32).view(5, 1, 1, 2),
+            None if nope else torch.arange(10, dtype=torch.float32).view(5, 1, 1, 2),
             torch.arange(5, dtype=torch.int32),
             torch.tensor([3, 5], dtype=torch.int32),
             torch.tensor([3, 5], dtype=torch.int32),
             draft_index=None,
         )
 
-    assert cos.shape[0] == sin.shape[0] == 3
+    if nope:
+        assert cos is None and sin is None
+    else:
+        assert cos.shape[0] == sin.shape[0] == 3
     torch.testing.assert_close(slot_mapping, torch.tensor([0, 1, 2, 3, 4, -1], dtype=torch.int32))
     context = extra["dsa_cp_context"]
     torch.testing.assert_close(context.slot_mapping_cp, torch.tensor([3, 4, -1], dtype=torch.int32))
     torch.testing.assert_close(context.actual_seq_lengths_query, torch.tensor([0, 2], dtype=torch.int32))
     torch.testing.assert_close(context.actual_seq_lengths_key, torch.tensor([0, 5], dtype=torch.int32))
+    torch.testing.assert_close(context.query_start_loc, torch.tensor([0, 0, 2], dtype=torch.int32))
     torch.testing.assert_close(builder.actual_seq_lengths_query, torch.tensor([3, 5, 0], dtype=torch.int32))
     torch.testing.assert_close(builder.actual_seq_lengths_key, torch.tensor([3, 5, 0], dtype=torch.int32))
 

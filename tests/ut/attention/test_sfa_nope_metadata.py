@@ -12,10 +12,11 @@ from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
 
 import vllm_ascend.attention.sfa_v1 as sfa
 import vllm_ascend.attention.sfa_v1 as sparse_mla
+from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADSACPMetadataBuilder
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily
 
 
-def _builder(block_size, a5, monkeypatch, rope_dim=0):
+def _builder(block_size, a5, monkeypatch, rope_dim=0, builder_cls=sfa.AscendSFAMetadataBuilder, tp_size=1):
     indexer = SimpleNamespace(
         topk_output_width=17,
         get_topk_lengths=lambda positions: torch.where(positions == 0, 1, 7),
@@ -27,7 +28,7 @@ def _builder(block_size, a5, monkeypatch, rope_dim=0):
             get_head_size=lambda: 512,
             hf_text_config=SimpleNamespace(num_attention_heads=4, kv_lora_rank=512),
         ),
-        parallel_config=SimpleNamespace(tensor_parallel_size=1, prefill_context_parallel_size=1),
+        parallel_config=SimpleNamespace(tensor_parallel_size=tp_size, prefill_context_parallel_size=1),
         scheduler_config=SimpleNamespace(max_num_seqs=2, max_num_batched_tokens=4),
         speculative_config=None,
         compilation_config=SimpleNamespace(
@@ -41,7 +42,6 @@ def _builder(block_size, a5, monkeypatch, rope_dim=0):
         "get_current_hardware_profile",
         lambda: SimpleNamespace(device_adaptor_family=DeviceAdaptorFamily.FP8_OPTIMIZED if a5 else None),
     )
-    monkeypatch.setattr(sfa, "get_ascend_config", lambda: SimpleNamespace(c8_reshape_optim_enabled=False))
     monkeypatch.setattr(sfa, "select_common_block_size", lambda *args: 128)
     monkeypatch.setattr(
         sfa, "AttentionMaskBuilder", lambda device: SimpleNamespace(get_attention_mask=lambda *args: None)
@@ -55,9 +55,7 @@ def _builder(block_size, a5, monkeypatch, rope_dim=0):
         self.model_config, self.metadata_cls = cfg.model_config, metadata_cls
 
     with patch.object(MLACommonMetadataBuilder, "__init__", base_init):
-        return sfa.AscendSFAMetadataBuilder(
-            SimpleNamespace(block_size=block_size), ["layer"], config, torch.device("cpu")
-        )
+        return builder_cls(SimpleNamespace(block_size=block_size), ["layer"], config, torch.device("cpu"))
 
 
 def _common(block_size):
@@ -80,12 +78,48 @@ def _common(block_size):
         block_table_tensor=expanded,
         max_query_len=2,
         max_seq_len=block_size + 2,
-        group_len=None,
-        group_key_idx=None,
-        group_key_cache_idx=None,
         attn_state=sfa.AscendAttentionState.ChunkedPrefill,
         causal=True,
     )
+
+
+@pytest.mark.parametrize("dummy_request", [False, True])
+def test_dsacp_nope_plan_uses_local_queries_and_full_heads(monkeypatch, dummy_request):
+    group = SimpleNamespace(world_size=2, rank_in_group=1)
+    monkeypatch.setattr("vllm_ascend.attention.context_parallel.sfa_cp.get_tp_group", lambda: group)
+    plans = []
+
+    def plan(**kwargs):
+        plans.append(kwargs)
+        return torch.zeros(1024, dtype=torch.int32)
+
+    monkeypatch.setattr(sfa, "sparse_flash_mla_metadata", plan)
+    builder = _builder(128, True, monkeypatch, builder_cls=AscendSFADSACPMetadataBuilder, tp_size=2)
+    common = _common(128)
+    if dummy_request:
+        common.num_reqs = 3
+        common.query_start_loc = torch.tensor([0, 2, 3, 4], dtype=torch.int32)
+        common.query_start_loc_cpu = common.query_start_loc.clone()
+        common.seq_lens = torch.cat((common.seq_lens, torch.tensor([0], dtype=torch.int32)))
+        common.block_table_tensor = torch.cat(
+            (common.block_table_tensor, torch.zeros_like(common.block_table_tensor[:1]))
+        )
+    metadata = builder.build(0, common)
+    local = metadata.nope_metadata
+    assert local is not None
+    assert metadata.num_actual_tokens == 3 and local.num_actual_tokens == 1
+    assert metadata.query_start_loc.data_ptr() == common.query_start_loc.data_ptr()
+    torch.testing.assert_close(
+        local.query_start_loc, torch.tensor([0, 0, 1, 2] if dummy_request else [0, 0, 1], dtype=torch.int32)
+    )
+    torch.testing.assert_close(local.seq_lens, torch.tensor([0, 1, 0] if dummy_request else [0, 1], dtype=torch.int32))
+    torch.testing.assert_close(local.smla_topk_length, torch.tensor([[1], [0]], dtype=torch.int32))
+    assert plans[0]["num_heads_q"] == 4
+    assert plans[0]["cu_seqlens_q"] is local.query_start_loc
+    second = builder.build(0, common).nope_metadata
+    assert second.query_start_loc.data_ptr() == local.query_start_loc.data_ptr()
+    assert second.smla_metadata.data_ptr() == local.smla_metadata.data_ptr()
+    assert second.smla_topk_length.data_ptr() == local.smla_topk_length.data_ptr()
 
 
 @pytest.mark.parametrize("block_size", [128, 384, 640, 2304, 4352])

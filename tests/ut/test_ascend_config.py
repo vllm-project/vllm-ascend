@@ -25,7 +25,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import PropertyMock, patch
 
-from vllm.config import KVTransferConfig
+from vllm.config import DeviceConfig, KVTransferConfig
 from vllm.config import VllmConfig as _VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 
@@ -917,7 +917,59 @@ class TestSparseKVOffloadConfig(TestBase):
         self.assertFalse(config.keep_device_kv_cache)
         self.assertTrue(config.use_fused_overlap)
 
-    def test_fused_copy_sfa_rejects_dspark(self):
+    def test_v2_decode_offload_allows_p_side_pp(self):
+        vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_topk=128)),
+            parallel_config=SimpleNamespace(
+                prefill_context_parallel_size=1,
+                decode_context_parallel_size=1,
+                pipeline_parallel_size=1,
+            ),
+            kv_transfer_config=SimpleNamespace(is_kv_consumer=True),
+            use_v2_model_runner=True,
+            speculative_config=None,
+        )
+
+        config = SparseKVOffloadConfig.from_additional_config(vllm_config, {"enabled": True})
+        self.assertTrue(config.enabled)
+        self.assertEqual(config.topk, 128)
+
+        # P-side PP does not enable offload; D-side PP remains unsupported.
+        vllm_config.parallel_config.pipeline_parallel_size = 2
+        with self.assertRaisesRegex(ValueError, "Sparse KV offload don't support pipeline parallel"):
+            SparseKVOffloadConfig.from_additional_config(vllm_config, {"enabled": True})
+
+    def test_v2_offload_accepts_v1_fused_and_mtp_combinations(self):
+        vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_topk=2048)),
+            parallel_config=SimpleNamespace(
+                prefill_context_parallel_size=1,
+                decode_context_parallel_size=1,
+                pipeline_parallel_size=1,
+            ),
+            kv_transfer_config=SimpleNamespace(is_kv_consumer=True),
+            use_v2_model_runner=True,
+            speculative_config=None,
+        )
+        fused = SparseKVOffloadConfig.from_additional_config(
+            vllm_config, {"enabled": True, "fused_op_type": "fused_copy_sfa", "topk_buffer_size": 4096}
+        )
+        self.assertTrue(fused.use_fused_copy_sfa)
+
+        vllm_config.speculative_config = SimpleNamespace(method="mtp", num_speculative_tokens=1)
+        self.assertTrue(SparseKVOffloadConfig.from_additional_config(vllm_config, {"enabled": True}).enabled)
+        fused_mtp = SparseKVOffloadConfig.from_additional_config(
+            vllm_config, {"enabled": True, "fused_op_type": "fused_copy_sfa", "topk_buffer_size": 4096}
+        )
+        self.assertTrue(fused_mtp.use_fused_copy_sfa)
+
+        vllm_config.speculative_config.num_speculative_tokens = 2
+        fused_mtp2 = SparseKVOffloadConfig.from_additional_config(
+            vllm_config, {"enabled": True, "fused_op_type": "fused_copy_sfa", "topk_buffer_size": 6144}
+        )
+        self.assertTrue(fused_mtp2.use_fused_copy_sfa)
+
+    def test_remote_dspark_requires_v2_but_does_not_restrict_mtp(self):
         vllm_config = SimpleNamespace(
             model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_topk=2048)),
             parallel_config=SimpleNamespace(
@@ -929,15 +981,23 @@ class TestSparseKVOffloadConfig(TestBase):
             use_v2_model_runner=False,
             speculative_config=SimpleNamespace(method="dspark", num_speculative_tokens=3),
         )
-        with self.assertRaisesRegex(ValueError, "fused_copy_sfa does not support DSpark"):
+        with self.assertRaisesRegex(ValueError, "V2 remote prompt-context initialization"):
             SparseKVOffloadConfig.from_additional_config(
                 vllm_config,
                 {"enabled": True, "fused_op_type": "fused_copy_sfa", "topk_buffer_size": 8192},
             )
 
-        # The restriction is specific to fused Copy-SFA; baseline offload is unchanged.
+        with self.assertRaisesRegex(ValueError, "V2 remote prompt-context initialization"):
+            SparseKVOffloadConfig.from_additional_config(vllm_config, {"enabled": True})
+        vllm_config.use_v2_model_runner = True
+        fused = SparseKVOffloadConfig.from_additional_config(
+            vllm_config,
+            {"enabled": True, "fused_op_type": "fused_copy_sfa", "topk_buffer_size": 8192},
+        )
+        self.assertTrue(fused.use_fused_copy_sfa)
         config = SparseKVOffloadConfig.from_additional_config(vllm_config, {"enabled": True})
         self.assertFalse(config.use_fused_copy_sfa)
+        vllm_config.use_v2_model_runner = False
         vllm_config.speculative_config.method = "mtp"
         config = SparseKVOffloadConfig.from_additional_config(
             vllm_config,
@@ -1786,51 +1846,6 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         self.assertTrue(config.enable_sparse_sfa_c8)
 
     @_clean_up
-    @patch("vllm_ascend.utils.model_uses_sfa_sparse")
-    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_c8_reshape_optim_is_initialized_from_sfa_li_c8_and_pd_role(
-        self,
-        mock_fix,
-        mock_uses_sfa,
-    ):
-        cases = (
-            (None, True, True, "kv_producer", True),
-            (False, True, True, "kv_producer", False),
-            (True, False, True, "kv_producer", False),
-            (True, True, False, "kv_producer", False),
-            (True, True, True, "kv_consumer", False),
-            (True, True, True, "kv_both", False),
-            (True, True, True, None, False),
-        )
-        for reshape_optim, uses_sfa, enable_li_c8, kv_role, expected in cases:
-            with self.subTest(
-                reshape_optim=reshape_optim,
-                uses_sfa=uses_sfa,
-                enable_li_c8=enable_li_c8,
-                kv_role=kv_role,
-            ):
-                mock_uses_sfa.return_value = uses_sfa
-                vc = VllmConfig()
-                vc.additional_config = {
-                    "refresh": True,
-                    "enable_sparse_li_c8": enable_li_c8,
-                }
-                if reshape_optim is not None:
-                    vc.additional_config["c8_enable_reshape_optim"] = reshape_optim
-                # enable_sparse_li_c8 is derived from indexer_kv_dtype (see
-                # init_ascend_config); the per-case flag is expressed there.
-                vc.attention_config.indexer_kv_dtype = "int8" if enable_li_c8 else "auto"
-                if kv_role is not None:
-                    vc.kv_transfer_config = KVTransferConfig(
-                        kv_connector="MooncakeConnectorV1",
-                        kv_role=kv_role,
-                    )
-
-                config = init_ascend_config(vc)
-
-                self.assertEqual(config.c8_reshape_optim_enabled, expected)
-
-    @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_rejection_sampler_config_survives_factory(self, mock_fix):
         vc = VllmConfig()
@@ -2072,23 +2087,30 @@ class TestKVPPConfig(TestBase):
 
 
 class TestEngramSharedMemoryDefaults(TestBase):
-    def test_shared_tables_are_derived_for_mrv2_dp(self):
+    def test_shared_tables_are_derived_for_mrv2_dp_or_pcp(self):
+        topologies = (
+            (1, 1, False),
+            (2, 1, True),
+            (1, 2, True),
+            (2, 4, True),
+        )
         for use_v2 in (False, True):
-            for dp in (1, 2, 8):
+            for dp, pcp, auto_shared in topologies:
                 for shared in (False, True):
-                    with self.subTest(use_v2=use_v2, dp=dp, shared=shared):
-                        config = VllmConfig()
+                    with self.subTest(use_v2=use_v2, dp=dp, pcp=pcp, shared=shared):
+                        config = VllmConfig(device_config=DeviceConfig(device="cpu"))
                         config.parallel_config.data_parallel_size = dp
+                        config.parallel_config.prefill_context_parallel_size = pcp
                         config.engram_config = SimpleNamespace(dp_shared_memory=shared)
                         ascend_config = AscendConfig(sparse_kv_offload_config=SparseKVOffloadConfig())
                         with patch.object(
                             _VllmConfig, "use_v2_model_runner", new_callable=PropertyMock, return_value=use_v2
                         ):
                             ascend_config.derive_and_validate(config)
-                        self.assertEqual(config.engram_config.dp_shared_memory, shared or (use_v2 and dp > 1))
+                        self.assertEqual(config.engram_config.dp_shared_memory, shared or (use_v2 and auto_shared))
 
     def test_no_engram_config_is_preserved(self):
-        config = VllmConfig()
+        config = VllmConfig(device_config=DeviceConfig(device="cpu"))
         config.engram_config = None
         AscendConfig(sparse_kv_offload_config=SparseKVOffloadConfig()).derive_and_validate(config)
         self.assertIsNone(config.engram_config)

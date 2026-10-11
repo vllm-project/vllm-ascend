@@ -345,7 +345,7 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
                 )
                 for weight in layer.w2_weight.data
             ]
-            # Checkpoint E8M0 scales are stored as bytes; CANN MegaMoe requires their semantic dtype.
+            # Checkpoint E8M0 scales are stored as bytes; CANN requires their semantic dtype.
             layer.cann_mega_moe_w13_weight_scale_list = [
                 w13_weight_scale.clone().view(torch.float8_e8m0fnu)
                 for w13_weight_scale in layer.w13_weight_scale.data.unbind(dim=0)

@@ -51,6 +51,7 @@ jobs:
       bisect_args_json: ${{ steps.resolve.outputs.bisect_args_json }}
       command: ${{ steps.resolve.outputs.command }}
       pr_number: ${{ steps.resolve.outputs.pr_number }}
+      blocked: ${{ steps.block_window.outputs.blocked }}
     steps:
       - name: Install system dependencies
         run: |
@@ -105,13 +106,102 @@ jobs:
         if: steps.auth.outputs.is_authorized == 'false'
         run: exit 1
 
-      - name: Install Python dependencies
+      # Maintenance window gate. Controlled by the repository variable
+      # NIGHTLY_COMMAND_BLOCK_WINDOW. The value is an optional switch followed by
+      # an HH:MM-HH:MM window in Beijing time (UTC+8, cross-midnight supported),
+      # for example "true 22:00-08:00", "false 22:00-08:00" or just
+      # "22:00-08:00". Switch aliases: true/1/yes/on and false/0/no/off
+      # (case-insensitive); space or comma separators are accepted. When enabled
+      # and the current Beijing time falls inside the window, the /nightly and
+      # /weekly comment triggers are blocked. Unset, explicitly disabled or
+      # malformed values disable the gate (fail-open).
+      - name: Check command block window
+        id: block_window
         if: steps.auth.outputs.is_authorized == 'true'
+        env:
+          BLOCK_WINDOW: ${{ vars.NIGHTLY_COMMAND_BLOCK_WINDOW }}
+          COMMAND: ${{ github.event.action }}
+        run: |
+          echo "command=${COMMAND%-command}" >> "$GITHUB_OUTPUT"
+          BLOCKED="false"
+          RAW="$(echo "$BLOCK_WINDOW" | tr ',' ' ' | xargs)"
+          ENABLED="auto"
+          WINDOW=""
+          if [ -n "$RAW" ]; then
+            read -r FIRST SECOND _REST <<< "$RAW"
+            case "$(echo "$FIRST" | tr '[:upper:]' '[:lower:]')" in
+              true|1|yes|on)
+                ENABLED="true"
+                WINDOW="$SECOND"
+                ;;
+              false|0|no|off)
+                ENABLED="false"
+                WINDOW="$SECOND"
+                ;;
+              *)
+                ENABLED="auto"
+                WINDOW="$FIRST"
+                ;;
+            esac
+          fi
+          if [ "$ENABLED" = "false" ]; then
+            echo "NIGHTLY_COMMAND_BLOCK_WINDOW explicitly disabled."
+          elif [ -z "$WINDOW" ]; then
+            if [ "$ENABLED" = "true" ]; then
+              echo "::warning::Gate enabled in NIGHTLY_COMMAND_BLOCK_WINDOW but no window is set (expected HH:MM-HH:MM); block window disabled."
+            else
+              echo "NIGHTLY_COMMAND_BLOCK_WINDOW is not set; block window disabled."
+            fi
+          elif [[ ! "$WINDOW" =~ ^([0-9]{2}):([0-9]{2})-([0-9]{2}):([0-9]{2})$ ]]; then
+            echo "::warning::Invalid NIGHTLY_COMMAND_BLOCK_WINDOW='$WINDOW' (expected HH:MM-HH:MM); block window disabled."
+          else
+            SH=${BASH_REMATCH[1]}
+            SM=${BASH_REMATCH[2]}
+            EH=${BASH_REMATCH[3]}
+            EM=${BASH_REMATCH[4]}
+            if (( 10#$SH > 23 || 10#$SM > 59 || 10#$EH > 23 || 10#$EM > 59 )); then
+              echo "::warning::Out-of-range time in NIGHTLY_COMMAND_BLOCK_WINDOW='$WINDOW'; block window disabled."
+            else
+              START_MIN=$((10#$SH * 60 + 10#$SM))
+              END_MIN=$((10#$EH * 60 + 10#$EM))
+              NOW_MIN=$((10#$(date -u -d '+8 hours' +%H) * 60 + 10#$(date -u -d '+8 hours' +%M)))
+              if (( START_MIN <= END_MIN )); then
+                if (( NOW_MIN >= START_MIN && NOW_MIN < END_MIN )); then
+                  BLOCKED="true"
+                fi
+              else
+                if (( NOW_MIN >= START_MIN || NOW_MIN < END_MIN )); then
+                  BLOCKED="true"
+                fi
+              fi
+            fi
+          fi
+          {
+            echo "blocked=$BLOCKED"
+            echo "window=$WINDOW"
+          } >> "$GITHUB_OUTPUT"
+          if [ "$BLOCKED" = "true" ]; then
+            echo "Command /${COMMAND%-command} is blocked until the maintenance window ends."
+          fi
+
+      - name: Post blocked comment
+        if: steps.auth.outputs.is_authorized == 'true' && steps.block_window.outputs.blocked == 'true'
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
+          body: |
+            [Bot]: `/${{ steps.block_window.outputs.command }}` is temporarily disabled during the maintenance window (Beijing time `${{ steps.block_window.outputs.window }}`). Please retry after the window ends.
+          reactions: confused
+
+      - name: Install Python dependencies
+        if: steps.auth.outputs.is_authorized == 'true' && steps.block_window.outputs.blocked != 'true'
         run: pip3 install pyyaml -q
 
       - name: Resolve test cases and branch
         id: resolve
-        if: steps.auth.outputs.is_authorized == 'true'
+        if: steps.auth.outputs.is_authorized == 'true' && steps.block_window.outputs.blocked != 'true'
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
           ALL_ARGS: ${{ github.event.client_payload.slash_command.args.all }}
@@ -341,7 +431,7 @@ jobs:
   dispatch-a2:
     name: Trigger Nightly-A2
     needs: [authorize]
-    if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.command == 'nightly' && needs.authorize.outputs.dispatch_a2 == 'true'
+    if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.blocked != 'true' && needs.authorize.outputs.command == 'nightly' && needs.authorize.outputs.dispatch_a2 == 'true'
     runs-on: linux-amd64-cpu-4-hk
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
@@ -383,7 +473,7 @@ jobs:
   dispatch-a3:
     name: Trigger Nightly-A3
     needs: [authorize]
-    if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.command == 'nightly' && needs.authorize.outputs.dispatch_a3 == 'true'
+    if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.blocked != 'true' && needs.authorize.outputs.command == 'nightly' && needs.authorize.outputs.dispatch_a3 == 'true'
     runs-on: linux-amd64-cpu-4-hk
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
@@ -425,7 +515,7 @@ jobs:
   dispatch-a3-560t:
     name: Trigger Nightly-A3-560T
     needs: [authorize]
-    if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.command == 'nightly' && needs.authorize.outputs.dispatch_a3_560t == 'true'
+    if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.blocked != 'true' && needs.authorize.outputs.command == 'nightly' && needs.authorize.outputs.dispatch_a3_560t == 'true'
     runs-on: linux-amd64-cpu-4-hk
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
@@ -467,7 +557,7 @@ jobs:
   dispatch-a5:
     name: Trigger Nightly-A5
     needs: [authorize]
-    if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.command == 'nightly' && needs.authorize.outputs.dispatch_a5 == 'true'
+    if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.blocked != 'true' && needs.authorize.outputs.command == 'nightly' && needs.authorize.outputs.dispatch_a5 == 'true'
     runs-on: linux-amd64-cpu-4-hk
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
@@ -507,7 +597,7 @@ jobs:
   dispatch-310p:
     name: Trigger Nightly-310P
     needs: [authorize]
-    if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.command == 'nightly' && needs.authorize.outputs.dispatch_310p == 'true'
+    if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.blocked != 'true' && needs.authorize.outputs.command == 'nightly' && needs.authorize.outputs.dispatch_310p == 'true'
     runs-on: linux-amd64-cpu-4-hk
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
@@ -547,7 +637,7 @@ jobs:
   dispatch-weekly-a2:
     name: Trigger Weekly-A2
     needs: [authorize]
-    if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.command == 'weekly' && needs.authorize.outputs.dispatch_a2 == 'true'
+    if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.blocked != 'true' && needs.authorize.outputs.command == 'weekly' && needs.authorize.outputs.dispatch_a2 == 'true'
     runs-on: linux-amd64-cpu-4-hk
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
@@ -587,7 +677,7 @@ jobs:
   dispatch-weekly-a3:
     name: Trigger Weekly-A3
     needs: [authorize]
-    if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.command == 'weekly' && needs.authorize.outputs.dispatch_a3 == 'true'
+    if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.blocked != 'true' && needs.authorize.outputs.command == 'weekly' && needs.authorize.outputs.dispatch_a3 == 'true'
     runs-on: linux-amd64-cpu-4-hk
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
@@ -629,7 +719,7 @@ jobs:
   dispatch-weekly-a3-560t:
     name: Trigger Weekly-A3-560T
     needs: [authorize]
-    if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.command == 'weekly' && needs.authorize.outputs.dispatch_a3_560t == 'true'
+    if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.blocked != 'true' && needs.authorize.outputs.command == 'weekly' && needs.authorize.outputs.dispatch_a3_560t == 'true'
     runs-on: linux-amd64-cpu-4-hk
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
@@ -671,7 +761,7 @@ jobs:
   dispatch-weekly-310p:
     name: Trigger Weekly-310P
     needs: [authorize]
-    if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.command == 'weekly' && needs.authorize.outputs.dispatch_310p == 'true'
+    if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.blocked != 'true' && needs.authorize.outputs.command == 'weekly' && needs.authorize.outputs.dispatch_310p == 'true'
     runs-on: linux-amd64-cpu-4-hk
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
@@ -713,7 +803,7 @@ jobs:
   post-links:
     name: Post workflow links
     needs: [authorize, dispatch-a2, dispatch-a3, dispatch-a3-560t, dispatch-a5, dispatch-310p, dispatch-weekly-a2, dispatch-weekly-a3, dispatch-weekly-a3-560t, dispatch-weekly-310p]
-    if: always() && needs.authorize.outputs.is_authorized == 'true'
+    if: always() && needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.blocked != 'true'
     runs-on: linux-amd64-cpu-2-hk
     steps:
       - name: Build comment body

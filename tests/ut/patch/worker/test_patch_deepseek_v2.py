@@ -30,6 +30,33 @@ def _config(**overrides) -> SimpleNamespace:
     return SimpleNamespace(**values)
 
 
+@pytest.mark.parametrize("non_causal", [None, False, True])
+def test_mla_constructor_preserves_decode_mask_flag(monkeypatch, non_causal):
+    for name in ("DeepSeekV2FusedQkvAProjLinear", "ColumnParallelLinear", "RowParallelLinear", "RMSNorm"):
+        monkeypatch.setattr(patch_deepseek_v2, name, lambda *args, **kwargs: torch.nn.Identity())
+    monkeypatch.setattr(patch_deepseek_v2, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(patch_deepseek_v2, "get_rope", lambda *args, **kwargs: torch.nn.Identity())
+    wrapper = Mock(return_value=torch.nn.Identity())
+    monkeypatch.setattr(patch_deepseek_v2, "MultiHeadLatentAttentionWrapper", wrapper)
+    options = {} if non_causal is None else {"non_causal_multi_token_decode": non_causal}
+    attention = torch.nn.Module()
+    patch_deepseek_v2._deepseek_v2_mla_attention_init(
+        attention,
+        vllm_config=SimpleNamespace(),
+        config=_config(rms_norm_eps=1e-5, rope_parameters={"rope_type": "default"}),
+        hidden_size=32,
+        num_heads=4,
+        qk_nope_head_dim=4,
+        qk_rope_head_dim=4,
+        v_head_dim=8,
+        q_lora_rank=16,
+        kv_lora_rank=8,
+        prefix="model.layers.0.self_attn",
+        **options,
+    )
+    assert wrapper.call_args.kwargs["non_causal_multi_token_decode"] is (non_causal is True)
+
+
 def test_glm51_skip_topk_keeps_per_layer_indexer():
     assert not _should_skip_indexer_init(
         _config(),
@@ -56,11 +83,11 @@ def test_mtp_layer_keeps_indexer():
 
 
 @pytest.mark.parametrize("native", [False, True])
-@pytest.mark.parametrize("boundaries", [(0, 78), (0, 42, 78), (0, 20, 40, 59, 78)])
-def test_aux_relay_matches_unpartitioned_forward(monkeypatch, native, boundaries):
+@pytest.mark.parametrize("boundaries", [(0, 78), (0, 38, 78), (0, 42, 78), (0, 20, 40, 59, 78)])
+@pytest.mark.parametrize("aux_layers", [(0, 2, 20, 39, 58, 75, 78), (2, 22, 38, 58, 74)])
+def test_aux_relay_matches_unpartitioned_forward(monkeypatch, native, boundaries, aux_layers):
     if native and not hasattr(DeepseekV2Model, "pack_local_aux_hidden_states"):
         pytest.skip("The installed vLLM release has no native aux relay")
-    aux_layers = (0, 2, 20, 39, 58, 75, 78)
     ids = torch.zeros(4, dtype=torch.long)
 
     def layer(positions, hidden, residual, scaling):
@@ -91,6 +118,11 @@ def test_aux_relay_matches_unpartitioned_forward(monkeypatch, native, boundaries
                 monkeypatch.setattr(parallel_state, "model_parallel_is_initialized", lambda: True)
                 monkeypatch.setattr(parallel_state, "get_pp_group", lambda group=group: group)
                 model._set_aux_hidden_state_layers(aux_layers)
+                # IDs are boundaries after a target layer. The state at a
+                # PP cut belongs to the upstream stage, including boundary38.
+                expected_incoming = 0 if first else sum(idx <= start for idx in aux_layers)
+                assert model._aux_slot_base_cached == expected_incoming
+                assert model._aux_upstream_total_cached == (expected_incoming if last else 0)
             output = patch_deepseek_v2._patched_forward(model, ids if first else None, ids, incoming)
             if not last:
                 if native:

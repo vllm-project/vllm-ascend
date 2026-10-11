@@ -313,6 +313,14 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
             layer.cann_mega_moe_fused_w2_scale_list = list(
                 layer.fused_w2_scale.view(layer.w2_weight.shape[0], -1).data.unbind(dim=0)
             )
+            # MegaMoe reads the fused int64 scale lists above exclusively for
+            # activations whose fused MC2 path supports the scale layout.
+            # swigluoai_uninterleave still uses the standard GMM path, which
+            # reads the fp32 scale copy during forward.
+            activation = getattr(layer, "activation", "silu")
+            activation = getattr(activation, "value", activation)
+            if activation != "swigluoai_uninterleave":
+                del layer.w13_weight_scale_fp32
 
     def _get_mlp_weights(self, layer: torch.nn.Module) -> tuple:
         """Return (w1, w1_scale, w2, w2_scale) in the standard MLP layout."""

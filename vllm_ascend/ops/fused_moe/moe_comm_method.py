@@ -567,6 +567,9 @@ class FusedMC2CommImpl(MoECommMethod):
                 routed_scaling_factor = getattr(layer, "routed_scaling_factor", None)
             if routed_scaling_factor is not None and routed_scaling_factor != 1.0:
                 topk_weights = topk_weights * routed_scaling_factor
+        activation_kwargs = getattr(layer, "mega_moe_activation_kwargs", None)
+        if activation_kwargs is None:
+            activation_kwargs = getattr(self, "mega_moe_activation_kwargs", {}) or {}
         out, expert_tokens = self.mega_moe(
             fused_experts_input.hidden_states,
             fused_experts_input.topk_ids.to(torch.int32),
@@ -582,7 +585,7 @@ class FusedMC2CommImpl(MoECommMethod):
             weight1_type=weight_type,
             weight2_type=weight_type,
             **shared_kwargs,
-            **layer.mega_moe_activation_kwargs,
+            **activation_kwargs,
         )
         # NOTE: self.expert_token_nums is only used by the
         # mega_moe path (enable_fused_mc2 == 1) as a

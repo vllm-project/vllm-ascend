@@ -449,7 +449,6 @@ class AscendConfig:
             "enable_sparse_sfa_c8": false,
             "enable_sparse_li_c8": false,
             "enable_sparse_li_c4": false,
-            "c8_enable_reshape_optim": true,
             "ascend_compilation_config": {
                 "enable_npugraph_ex": true,
                 "enable_static_kernel": false,
@@ -646,8 +645,6 @@ class AscendConfig:
     enable_sparse_sfa_c8: bool = False
     enable_sparse_li_c8: bool = False
     enable_sparse_li_c4: bool = False
-    # See https://github.com/vllm-project/vllm-ascend/issues/15896
-    c8_enable_reshape_optim: bool = True
     pd_tp_ratio: int = 1
     pd_head_ratio: int = 1
     num_head_replica: int = 1
@@ -658,7 +655,6 @@ class AscendConfig:
     _sparse_li_c4_layer_ids: set[int] = dataclasses.field(default_factory=set, init=False, repr=False)
     _sparse_li_c4_layer_names: set[str] = dataclasses.field(default_factory=set, init=False, repr=False)
     _sparse_li_layer_filter_enabled: bool = dataclasses.field(default=False, init=False, repr=False)
-    _c8_reshape_optim_enabled: bool = dataclasses.field(default=False, init=False, repr=False)
 
     @model_validator(mode="after")
     def _validate_user_input_ranges(self):
@@ -705,10 +701,10 @@ class AscendConfig:
             engram_config is not None
             and not engram_config.dp_shared_memory
             and vc.use_v2_model_runner
-            and vc.parallel_config.data_parallel_size > 1
+            and (vc.parallel_config.data_parallel_size > 1 or vc.parallel_config.prefill_context_parallel_size > 1)
         ):
-            # DP-dummy ranks have no hash work in MRV2. Share host tables so
-            # replicas do not require matching embedding collectives each step.
+            # DP-dummy ranks have no hash work in MRV2. Share host tables
+            # across DP and PCP peers to avoid per-step lookup collectives.
             engram_config.dp_shared_memory = True
         if (
             self.enable_force_eplb
@@ -722,6 +718,12 @@ class AscendConfig:
                 "DSA-CP and PCP cannot be enabled at the same time. "
                 "Use PCP instead: remove enable_dsa_cp from additional_config "
                 "when --prefill-context-parallel-size is greater than 1."
+            )
+        if self.enable_dsa_cp and vc.use_v2_model_runner:
+            raise ValueError(
+                "DSA-CP is not supported by Model Runner V2. "
+                "Remove enable_dsa_cp from additional_config and use "
+                "prefill context parallelism (PCP) instead."
             )
         self._check_mooncake_c8_kv_cache_quant(vc)
 
@@ -933,15 +935,6 @@ class AscendConfig:
         self.enable_sparse_li_c4 = vllm_config.attention_config.indexer_kv_dtype == "mxfp4" and use_sparse
         if self.enable_sparse_li_c8 and self.enable_sparse_li_c4:
             raise ValueError("enable_sparse_li_c8 and enable_sparse_li_c4 are mutually exclusive.")
-        kv_transfer_config = vc.kv_transfer_config
-        is_prefill_node = kv_transfer_config is not None and (
-            getattr(kv_transfer_config, "kv_role", None) == "kv_producer"
-            or (
-                bool(getattr(kv_transfer_config, "is_kv_producer", False))
-                and not bool(getattr(kv_transfer_config, "is_kv_consumer", False))
-            )
-        )
-        self._c8_reshape_optim_enabled = self.c8_enable_reshape_optim and self.enable_sparse_li_c8 and is_prefill_node
         quant_config = getattr(vc, "quant_config", None)
         (
             self._sparse_li_c8_layer_ids,
@@ -1276,11 +1269,6 @@ class AscendConfig:
             self._sparse_li_c4_layer_names,
             self._sparse_li_c4_layer_ids,
         )
-
-    @property
-    def c8_reshape_optim_enabled(self) -> bool:
-        """Whether SFA should use StoreKVBlock for LI C8 cache writes."""
-        return self._c8_reshape_optim_enabled
 
     @staticmethod
     def _get_compile_ranges(compilation_config):
@@ -1764,22 +1752,15 @@ class SparseKVOffloadConfig:
                     "and can only be used in D node. For debugging in PD colocate scenario, "
                     "you can enable keep_device_kv_cache."
                 )
-        if vllm_config.use_v2_model_runner:
-            raise ValueError("Sparse KV offload doesn't support model_runner_v2 now.")
-
         self.topk = vllm_config.model_config.hf_text_config.index_topk
-        if self.use_fused_copy_sfa:
-            if vllm_config.speculative_config and vllm_config.speculative_config.method == "dspark":
-                raise ValueError("fused_copy_sfa does not support DSpark speculative decoding")
-            width = 1 + (vllm_config.speculative_config.num_speculative_tokens if vllm_config.speculative_config else 0)
-            if self.topk != 2048 or not 1 <= width <= 7:
-                raise ValueError("fused_copy_sfa serving requires TopK=2048 and 1–7 query rows per request")
-            if not width * self.topk <= self.topk_buffer_size <= 16256 or self.topk_buffer_size % 256:
-                raise ValueError(
-                    "fused_copy_sfa hot budget must be 256-aligned in [Q_max*2048, 16128]: "
-                    "the dense short-sequence layout only lines up with the circular "
-                    "tail slots when topk_buffer_size is a multiple of 256"
-                )
+        speculative = getattr(vllm_config, "speculative_config", None)
+        if (
+            speculative is not None
+            and speculative.method == "dspark"
+            and not getattr(vllm_config, "use_v2_model_runner", False)
+        ):
+            # Only V2 initializes the resident draft KV from remote prompt context.
+            raise ValueError("Sparse KV offload with DSpark requires V2 remote prompt-context initialization")
         if self.topk_buffer_size < self.topk:
             raise ValueError(
                 "sparse_kv_offload_config.topk_buffer_size must be >= topk, "

@@ -4,6 +4,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 import torch
+from vllm.config import CUDAGraphMode
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
@@ -58,6 +59,8 @@ def test_aclgraph_model_forwards_confidence_computation():
 )
 def test_adaptive_tail_dummy_run_balances_moe_routing(adaptive_verification, context_len, expected):
     runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.input_buffers = SimpleNamespace(dummy_num_tokens=None)
+    runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE)
     runner.max_num_reqs = 32
     runner.max_num_tokens = 256
     runner.speculator = None

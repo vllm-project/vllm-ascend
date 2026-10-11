@@ -22,6 +22,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_attn_kv_plan import (
+    DsaAttnKvPlan,
     get_dsa_attn_kv_plan,
     is_a5_bf16_kv_enabled,
     write_dsa_cache,
@@ -1141,7 +1142,11 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         dspark_swa_indices = None
         vision_swa_indices = None
         ori_win_left, ori_win_right = self.model_config.hf_config.sliding_window - 1, 0
-        if not has_prefill and not common_attn_metadata.causal:
+        if (
+            not has_prefill
+            and not common_attn_metadata.causal
+            and (self.compressor_ratio <= 1 or not is_turboquant(self.vllm_config))
+        ):
             # DSpark non-causal parallel drafting: every draft query attends to
             # the trailing context window plus the whole current draft block.
             # Not gated on the SAS metadata cache: the indices depend on the
@@ -1575,6 +1580,16 @@ class AscendDSAImpl(AttentionImplBase[Any]):
 
     _oproj_send_buf: torch.Tensor
     turboquant: TurboQuantLatent | None = None
+    _tq_kv_plan: DsaAttnKvPlan | None = None
+
+    def get_kv_plan(self) -> DsaAttnKvPlan:
+        # Only TQ modules cache their fixed execution plan. Other cache modes
+        # retain the baseline planner and operator selection on every call.
+        if self.turboquant is None:
+            return get_dsa_attn_kv_plan(self.vllm_config, self.compress_ratio)
+        if self._tq_kv_plan is None:
+            self._tq_kv_plan = get_dsa_attn_kv_plan(self.vllm_config, self.compress_ratio)
+        return self._tq_kv_plan
 
     def __init__(
         self,
@@ -1605,7 +1620,9 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         self.window_size = window_size
         self.q_lora_rank = q_lora_rank
         self.compress_ratio = compress_ratio
-        self.turboquant = TurboQuantLatent() if is_turboquant(self.vllm_config) and compress_ratio == 4 else None
+        self.turboquant = (
+            TurboQuantLatent(legacy_hadamard=True) if is_turboquant(self.vllm_config) and compress_ratio == 4 else None
+        )
         self.softmax_scale = self.head_dim**-0.5
         self.support_fp8_attention = get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
 
@@ -1770,9 +1787,14 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                     self.vllm_config.scheduler_config.max_num_batched_tokens,
                 )
             if exchange_num_tokens < num_tokens:
+                scheduler_config = self.vllm_config.scheduler_config
                 raise ValueError(
-                    "oproj static exchange capacity must cover local tokens, "
-                    f"got {exchange_num_tokens} and {num_tokens}."
+                    f"oproj static exchange capacity ({exchange_num_tokens}) must cover "
+                    f"local tokens ({num_tokens}). Fine-grained oproj TP requires "
+                    "capacity >= max_num_batched_tokens. Please set --max-num-batched-"
+                    "tokens to max_num_seqs * decode_query_len "
+                    f"(currently max_num_seqs={scheduler_config.max_num_seqs}), or "
+                    "raise the largest cudagraph_capture_sizes entry."
                 )
             # Lazily allocate static send/recv buffers on first call. The
             # profiling run hits this path before ACL graph capture, so the
@@ -2309,7 +2331,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
 
         notify_kv_cache_written(layer_name)
         wait_for_device_metadata(DeviceMetadataStage.ATTENTION, id(common_metadata.sas_metadata))
-        kv_plan = get_dsa_attn_kv_plan(self.vllm_config, self.compress_ratio)
+        kv_plan = self.get_kv_plan()
         attn_op = kv_plan.get_dsa_sparse_attn_op()
         attn_kwargs = kv_plan.get_dsa_sparse_attn_base_kwargs()
         if has_prefill:
