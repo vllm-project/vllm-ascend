@@ -398,6 +398,13 @@ def test_indexer_metadata_builder(batch_spec: BatchSpec) -> None:
         assert metadata.decode is not None
         assert metadata.decode.start_loc.dtype == torch.int32
         assert torch.equal(metadata.decode.start_loc, metadata.decode.context_lens // 128)
+        assert builder.decode_start_loc_buffer is not None
+        assert (
+            metadata.decode.start_loc.data_ptr()
+            == builder.decode_start_loc_buffer.data_ptr()
+        )
+        rebuilt = builder.build(0, common)
+        assert rebuilt.decode.start_loc.data_ptr() == metadata.decode.start_loc.data_ptr()
     else:
         assert metadata.num_prefills == batch_spec.batch_size
         assert metadata.decode is None

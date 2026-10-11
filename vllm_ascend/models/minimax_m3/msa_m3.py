@@ -249,6 +249,10 @@ class AscendMiniMaxM3IndexerMetadataBuilder(AttentionMetadataBuilder[AscendMiniM
             device=device,
         )
         self.block_size = kv_cache_spec.block_size
+        self.decode_start_loc_buffer = (
+            torch.empty_like(self.context_len_buffer)
+            if _USE_ASCENDC_INDEX_SCORE_DECODE else None
+        )
         self.attn_mask_builder = AttentionMaskBuilder(device) if _USE_ASCENDC_INDEX_SCORE_PREFILL else None
 
     def build(
@@ -320,11 +324,14 @@ class AscendMiniMaxM3IndexerMetadataBuilder(AttentionMetadataBuilder[AscendMiniM
                     non_blocking=True,
                 )
                 decode_cu_seqlens_q = query_start_loc[: active_decodes + 1].to(torch.int32)
-                decode_start_loc = torch.div(
+                assert self.decode_start_loc_buffer is not None
+                decode_start_loc = self.decode_start_loc_buffer[:active_decodes]
+                torch.div(
                     decode_context_lens,
                     self.block_size,
                     rounding_mode="floor",
-                ).to(dtype=torch.int32)
+                    out=decode_start_loc,
+                )
             decode_metadata = AscendMiniMaxM3IndexerDecodeMetadata(
                 seq_lens=seq_lens[:active_decodes],
                 block_table=block_table[:active_decodes],
