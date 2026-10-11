@@ -42,6 +42,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from vllm.distributed.utils import get_pp_indices
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory, fused_moe_make_expert_params_mapping
@@ -89,18 +90,20 @@ from vllm_ascend.models.deepseek_v4.indexer import DeepseekV4Indexer
 from vllm_ascend.ops.dsa import AscendDeepseekSparseAttention, DSAModules
 from vllm_ascend.ops.rope_dsv4 import ComplexExpRotaryEmbedding
 from vllm_ascend.ops.triton.mul_add import muls_add_triton
+from vllm_ascend.quantization.methods.kv_cache.turboquant import is_turboquant
 from vllm_ascend.utils import (
+    dsv4_skips_indexer_topk,
     enable_custom_op,
     enable_dsa_cp,
     extract_dsv4_layer_index,
     get_dsv4_compress_ratio,
 )
-from vllm_ascend.worker.v2.pp_utils import (
+from vllm_ascend.worker.v2.pp_transport import (
     PPTransportDataType,
     add_pp_transport_tensors,
     get_pp_transport_tensors,
 )
-from vllm_ascend.worker.v2.pp_utils import (
+from vllm_ascend.worker.v2.pp_transport import (
     make_empty_intermediate_tensors as make_pp_empty_intermediate_tensors,
 )
 
@@ -577,16 +580,9 @@ class DeepseekV4Attention(nn.Module):
         # only, leaving impl-level references stale.
         skip_topk = False
         if self.compress_ratio == 4 and use_index_cache and ".mtp." not in prefix:
-            compress_ratios = getattr(config, "compress_ratios", None) or []
-            indexer_seq_idx = sum(1 for r in compress_ratios[:config_layer_idx] if r == 4)
-            pattern = getattr(config, "index_topk_pattern", None)
-            freq = getattr(config, "index_topk_freq", 1)
-            if pattern is None:
-                skip_topk = max(indexer_seq_idx - 1, 0) % freq != 0
-            else:
-                assert pattern[0] == "F", "index_topk_pattern must start with 'F'"
-                if 0 <= indexer_seq_idx < len(pattern):
-                    skip_topk = pattern[indexer_seq_idx] == "S"
+            pp_group = get_pp_group()
+            pp_start_layer, _ = get_pp_indices(config.num_hidden_layers, pp_group.rank_in_group, pp_group.world_size)
+            skip_topk = dsv4_skips_indexer_topk(config, config_layer_idx, pp_start_layer)
 
         if self.compress_ratio > 1:
             self.compressor = Compressor(
@@ -613,6 +609,8 @@ class DeepseekV4Attention(nn.Module):
                 )
 
         kv_cache_dtype = kv_cache_dtype_str_to_dtype(vllm_config.cache_config.cache_dtype, vllm_config.model_config)
+        if is_turboquant(vllm_config):
+            kv_cache_dtype = torch.bfloat16
         swa_cache_layer = AscendDeepseekV4SWACache(
             head_dim=self.head_dim,
             window_size=self.window_size,
@@ -880,17 +878,20 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # permanently cost max_num_batched_tokens * hc_dim per rank.
         # Aligned with upstream DeepSeekV4 (see vllm PR #50312).
         spec_config = vllm_config.speculative_config
-        self._needs_mtp_hidden_states = bool(
+        self._mtp_hidden_buffer: torch.Tensor | None = None
+        if (
             get_pp_group().is_last_rank
             and spec_config is not None
             and (spec_config.use_eagle() or spec_config.uses_draft_model())
-        )
-        self._mtp_buffer_shape = (
-            vllm_config.scheduler_config.max_num_batched_tokens,
-            hc_dim,
-        )
-        self._mtp_buffer_dtype = vllm_config.model_config.dtype
-        self._mtp_hidden_buffer: torch.Tensor | None = None
+        ):
+            # Bind the buffer before compilation: lazy allocation in forward
+            # can leave FULL graph replay writing a different tensor from the
+            # model-owned residual restored for the replicated PCP draft.
+            self._mtp_hidden_buffer = torch.empty(
+                (vllm_config.scheduler_config.max_num_batched_tokens, hc_dim),
+                dtype=vllm_config.model_config.dtype,
+                device=self.device,
+            )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -985,13 +986,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             hidden_states = sp_all_gather(hidden_states)[: positions.shape[0]]
 
         # Stash pre-hc_head residual for the MTP draft (captured copy_).
-        if self._needs_mtp_hidden_states:
-            if self._mtp_hidden_buffer is None:
-                self._mtp_hidden_buffer = torch.empty(
-                    self._mtp_buffer_shape,
-                    dtype=self._mtp_buffer_dtype,
-                    device=self.device,
-                )
+        if self._mtp_hidden_buffer is not None:
             num_tokens = hidden_states.shape[0]
             self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
 
@@ -1113,6 +1108,12 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
+    def compute_logits_local(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor | None:
+        return self.logits_processor(self.lm_head, hidden_states, skip_gather=True)
+
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
@@ -1218,12 +1219,20 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
                 if is_pp_missing_parameter(name, self):
                     continue
                 param = params_dict[name]
+                # Route the write through the parameter's loader. A live weight
+                # update runs inside vLLM's layerwise reload, which parks the
+                # layer on the meta device and buffers every load made through
+                # ``weight_loader`` so it can replay it onto the materialized
+                # layer. A direct ``param.data.copy_`` bypasses that buffer: it
+                # lands on the meta tensor (a no-op), so attention sinks would
+                # silently keep their dummy values after an update.
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 if enable_dsa_cp():
-                    param.data.copy_(loaded_weight)
+                    weight_loader(param, loaded_weight)
                 else:
                     # Handle attention sinks (distributed across ranks)
                     narrow_weight = loaded_weight.narrow(0, head_start, heads_per_rank)
-                    param.data.copy_(narrow_weight)
+                    weight_loader(param, narrow_weight)
                 loaded_params.add(name)
                 continue
 

@@ -187,7 +187,7 @@ Run the following script to start the vLLM server:
 ```{model-code}
 :block_name: kimi_k2_thinking_single_node
 :converter_tag: single_node
-:test_case_path: tests/e2e/nightly/single_node/models/configs/Kimi-K2-Thinking.yaml
+:test_case_path: tests/e2e/cases/models/configs/Kimi/Kimi-K2-Thinking.yaml
 ```
 
 **Parameter and Environment Variable Descriptions:**

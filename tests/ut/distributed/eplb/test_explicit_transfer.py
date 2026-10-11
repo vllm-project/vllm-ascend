@@ -11,6 +11,8 @@ from vllm_ascend.distributed.eplb.explicit_transfer import stage_explicit_layer_
 
 
 class FakeCommunicator:
+    receiver_initiated = False
+
     def __init__(self):
         self.sends = []
         self.recvs = []
@@ -60,6 +62,27 @@ class TestExplicitTransfer(unittest.TestCase):
         np.testing.assert_array_equal(metadata.recv_expert_ids, [2, -1])
         np.testing.assert_array_equal(metadata.recv_dst_rows, [1, -1])
         self.assertTrue(communicator.executed)
+
+    def test_receiver_initiated_transfer_only_stages_local_destinations(self):
+        communicator = FakeCommunicator()
+        communicator.receiver_initiated = True
+        weights = [torch.tensor([[10.0], [11.0]])]
+        buffers = [torch.zeros_like(weights[0])]
+
+        metadata = stage_explicit_layer_transfer(
+            torch.tensor([0, 1, 2, 3]),
+            torch.tensor([0, 2, 1, 3]),
+            np.array([[0, 1], [0, 1]]),
+            np.array([[0, 0], [1, 1]]),
+            weights,
+            buffers,
+            SimpleNamespace(size=lambda: 2, rank=lambda: 0),
+            communicator,
+        )
+
+        self.assertFalse(communicator.sends)
+        self.assertEqual([(rank, expert) for _, rank, expert in communicator.recvs], [(1, 2)])
+        self.assertEqual(metadata.recv_count, 1)
 
     def test_transfer_rejects_false_source_before_communication(self):
         communicator = FakeCommunicator()

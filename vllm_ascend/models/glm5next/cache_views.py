@@ -33,20 +33,19 @@ def _view_kpool_tail_cache(
     if not isinstance(raw_cache, torch.Tensor):
         raise ValueError(f"KPool tail cache for {layer_name} must use one raw tensor.")
     typed_slot = raw_cache.view(kv_cache_spec.dtype)
-    tail_block_el = kv_cache_spec.unpadded_page_size_bytes // get_dtype_size(kv_cache_spec.dtype)
-    num_tail_blocks = num_blocks
-    if num_tail_blocks * tail_block_el * 2 > typed_slot.numel():
+    dtype_size = get_dtype_size(kv_cache_spec.dtype)
+    page_el = typed_slot.numel() // num_blocks if num_blocks else 0
+    tail_block_el = kv_cache_spec.unpadded_page_size_bytes // dtype_size
+    if num_blocks and tail_block_el > page_el:
         raise ValueError(
-            f"KPool tail cache for {layer_name} exceeds half the small slot: "
-            f"packed={num_tail_blocks * tail_block_el} elements, "
-            f"slot={typed_slot.numel()}."
+            f"KPool tail cache for {layer_name} does not fit one small page: "
+            f"tail={tail_block_el} elements, page={page_el} elements."
         )
     return [
-        typed_slot[typed_slot.numel() - num_tail_blocks * tail_block_el :].view(
-            num_tail_blocks,
-            2,
-            kv_cache_spec.block_size,
-            kv_cache_spec.head_size,
+        torch.as_strided(
+            typed_slot,
+            size=(num_blocks, 2, kv_cache_spec.block_size, kv_cache_spec.head_size),
+            stride=(page_el, kv_cache_spec.block_size * kv_cache_spec.head_size, kv_cache_spec.head_size, 1),
         )
     ]
 
@@ -78,9 +77,9 @@ def _view_compressed_indexer_cache(
     )
     strides = _row_major_strides(shape)
     typed_slot = raw_single.view(kv_cache_spec.dtype)
-    if strides[0] * shape[0] * 2 > typed_slot.numel():
+    if strides[0] * shape[0] != typed_slot.numel():
         raise ValueError(
-            f"Compressed indexer cache for {layer_name} exceeds half the small slot: "
+            f"Compressed indexer cache for {layer_name} does not exactly fill the small slot: "
             f"packed={strides[0] * shape[0]} elements, slot={typed_slot.numel()}."
         )
     return (torch.as_strided(typed_slot, size=shape, stride=tuple(strides)),)

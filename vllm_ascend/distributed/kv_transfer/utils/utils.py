@@ -408,19 +408,14 @@ def collect_storage_merged_register_regions(
         if tensor is None or tensor.numel() == 0:
             continue
 
-        if not tensor.is_contiguous():
-            logger.warning(
-                "Mooncake register_buffer got a non-contiguous KV cache "
-                "tensor: shape=%s, dtype=%s, data_ptr=%s. "
-                "Registration will use logical numel * element_size.",
-                tuple(tensor.shape),
-                tensor.dtype,
-                hex(tensor.data_ptr()),
-            )
-
         nbytes = tensor.nbytes
         start = tensor.data_ptr()
-        end = start + nbytes
+        # Strided K/V views can touch bytes beyond their logical payload.
+        # Start at the view pointer so storage offsets remain accounted for.
+        span_bytes = tensor.element_size() + sum(
+            (size - 1) * stride * tensor.element_size() for size, stride in zip(tensor.shape, tensor.stride())
+        )
+        end = start + span_bytes
         storage_key = tensor_storage_key(tensor)
 
         logical_tensor_count += 1

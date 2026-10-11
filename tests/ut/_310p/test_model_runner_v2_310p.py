@@ -424,9 +424,11 @@ def test_postprocess_sampled_keeps_last_token_on_device() -> None:
         num_computed_tokens_cpu=torch.zeros(2, dtype=torch.int32),
         last_sampled_tokens=torch.zeros((2, 1), dtype=torch.int64),
         last_sampled_tokens_cpu=torch.tensor([[20], [11]], dtype=torch.int64),
+        next_prefill_tokens=torch.zeros(2, dtype=torch.int64),
     )
     runner.model_state = MagicMock()
-    runner.speculator = object()
+    # Must allow attribute assignment for host-mirror publish in postprocess_sampled.
+    runner.speculator = SimpleNamespace()
     runner.rejection_sampler = MagicMock()
     runner._decode_req_indices = model_runner_module.CpuGpuBuffer(
         2, dtype=torch.int64, device=runner.device, pin_memory=False
@@ -876,6 +878,8 @@ def test_main_attention_descriptor_allocates_private_kv_per_layer() -> None:
 def test_model_state_uses_greedy_sampler() -> None:
     model_state = object.__new__(Ascend310PModelState)
     model_state.rope_state = None
+    # AscendModelState.prepare_inputs probes the engram hook via self.model.
+    model_state.model = SimpleNamespace()
 
     model_inputs = model_state.prepare_inputs(SimpleNamespace(), req_states=None)
     sampler, speculator = model_state.custom_sampler(object())
@@ -947,3 +951,52 @@ def test_worker_selects_v2_runner_on_310p() -> None:
     with patch("vllm_ascend._310p.worker.v2.model_runner.NPUModelRunner310V2") as runner_cls:
         worker.model_runner = worker._create_model_runner()
     runner_cls.assert_called_once_with(worker.vllm_config, worker.device)
+
+
+@pytest.mark.parametrize(
+    ("block_sizes", "head_sizes", "expected_kernel_size"),
+    [([64], [128], 64), ([128], [128], 128), ([128], [256], 64), ([256], [128], 128), ([128, 64], [128, 128], 64)],
+)
+def test_adjust_kernel_block_sizes_respects_physical_blocks(block_sizes, head_sizes, expected_kernel_size):
+    class FakeAttentionSpec:
+        def __init__(self, block_size, head_size):
+            self.block_size = block_size
+            self.head_size = head_size
+
+    class FakeUniformTypeKVCacheSpecs:
+        def __init__(self, specs):
+            self.kv_cache_specs = dict(enumerate(specs))
+
+    specs = [FakeAttentionSpec(b, h) for b, h in zip(block_sizes, head_sizes)]
+    group_spec = specs[0] if len(specs) == 1 else FakeUniformTypeKVCacheSpecs(specs)
+    runner = object.__new__(NPUModelRunner310V2)
+    runner.kernel_block_sizes = [128]
+    runner.attn_groups = [
+        [SimpleNamespace(backend=SimpleNamespace(get_supported_kernel_block_sizes=lambda: [128, 64]))]
+    ]
+    config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=group_spec)])
+    with (
+        patch.object(model_runner_module, "AttentionSpec", FakeAttentionSpec),
+        patch.object(model_runner_module, "UniformTypeKVCacheSpecs", FakeUniformTypeKVCacheSpecs),
+    ):
+        runner._adjust_kernel_block_sizes(config)
+    assert runner.kernel_block_sizes == [expected_kernel_size]
+    assert all(b % expected_kernel_size == 0 for b in block_sizes)
+
+
+def test_adjust_kernel_block_sizes_rejects_incompatible_physical_blocks():
+    class FakeAttentionSpec:
+        block_size = 96
+        head_size = 128
+
+    runner = object.__new__(NPUModelRunner310V2)
+    runner.kernel_block_sizes = [128]
+    runner.attn_groups = [
+        [SimpleNamespace(backend=SimpleNamespace(get_supported_kernel_block_sizes=lambda: [128, 64]))]
+    ]
+    config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=FakeAttentionSpec())])
+    with (
+        patch.object(model_runner_module, "AttentionSpec", FakeAttentionSpec),
+        pytest.raises(NotImplementedError, match="divides every attention cache block size"),
+    ):
+        runner._adjust_kernel_block_sizes(config)

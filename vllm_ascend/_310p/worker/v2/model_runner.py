@@ -49,6 +49,7 @@ from vllm_ascend._310p.worker.v2.kv_block_zeroer import AscendKVBlockZeroer310V2
 from vllm_ascend._310p.worker.v2.spec_utils import (
     combine_sampled_and_draft_tokens_cpu,
     expand_idx_mapping_cpu,
+    set_prefill_host_meta,
 )
 from vllm_ascend._310p.worker.v2.states import Ascend310PRequestState
 from vllm_ascend.core.kv_cache_interface import get_storage_block_size
@@ -826,10 +827,12 @@ class NPUModelRunner310V2(NPUModelRunner):
                 block_size
                 for block_size in backend.get_supported_kernel_block_sizes()
                 if block_size * max_head_size <= _ATTENTION_BLOCK_SIZE_LIMIT
+                and all(spec.block_size % block_size == 0 for spec in attention_specs)
             ]
             if not supported_sizes:
                 raise NotImplementedError(
-                    f"310P paged attention requires block_size * head_size <= {_ATTENTION_BLOCK_SIZE_LIMIT}."
+                    f"310P paged attention requires block_size * head_size <= {_ATTENTION_BLOCK_SIZE_LIMIT} "
+                    "and a kernel block size that divides every attention cache block size in the group."
                 )
             self.kernel_block_sizes[group_id] = supported_sizes[0]
 
@@ -1113,6 +1116,11 @@ class NPUModelRunner310V2(NPUModelRunner):
                 self.input_buffers.input_ids[:num_decode_reqs].copy_(
                     decode_tokens.to(self.input_buffers.input_ids.dtype)
                 )
+                # FULL decode graphs embed padded rows as well. Clear them
+                # after the partial copy: reused buffers may contain stale
+                # out-of-vocabulary IDs, and 310P slice writes can affect the
+                # adjacent tail element.
+                self.input_buffers.input_ids[num_decode_reqs:num_tokens_after_padding].zero_()
                 return
             self._decode_req_indices.np[:num_decode_reqs] = decode_req_indices
             self._decode_input_indices.np[:num_decode_reqs] = decode_input_indices
@@ -1277,6 +1285,10 @@ class NPUModelRunner310V2(NPUModelRunner):
         if self._sampled_tokens_cpu is not None:
             assert self.rejection_sampler is not None
             self.rejection_sampler.synchronize_cpu()
+        # Host rejection counts are ready after synchronize_cpu; reuse them in
+        # propose() instead of another device→host copy.
+        if self.speculator is not None and self._num_rejected_cpu is not None:
+            self.speculator._last_num_rejected_cpu = self._num_rejected_cpu
         sampled_tokens_cpu = self._sampled_tokens_cpu
         num_sampled_cpu = _post_update_cpu(
             self._postprocess_idx_mapping_np,
@@ -1325,6 +1337,31 @@ class NPUModelRunner310V2(NPUModelRunner):
             num_sampled_cpu,
             self.req_states.num_computed_tokens_cpu,
         )
+        # Publish host mirrors for draft-prefill prepare (avoid 4× D2H there).
+        if self.speculator is not None and self._num_rejected_cpu is not None:
+            num_reqs = int(self._num_rejected_cpu.shape[0])
+            next_cpu = getattr(self, "next_prefill_tokens_cpu", None)
+            if next_cpu is not None:
+                next_prefill_np = np.asarray(next_cpu)
+            else:
+                next_prefill_np = np.zeros(
+                    int(self.req_states.next_prefill_tokens.shape[0]),
+                    dtype=np.int64,
+                )
+            max_reqs = int(self.req_states.last_sampled_tokens.shape[0])
+            last_sampled_np = np.zeros((max_reqs, 1), dtype=np.int64)
+            if valid_batch_np.size and sampled_tokens_cpu is not None:
+                for batch_idx in valid_batch_np:
+                    req_idx = int(self._postprocess_idx_mapping_np[batch_idx])
+                    n = int(self._num_sampled_cpu[batch_idx])
+                    last_sampled_np[req_idx, 0] = int(sampled_tokens_cpu[batch_idx, n - 1])
+            set_prefill_host_meta(
+                num_reqs=num_reqs,
+                num_sampled_np=self._num_sampled_cpu.numpy(),
+                num_rejected_np=self._num_rejected_cpu.numpy(),
+                last_sampled_np=last_sampled_np,
+                next_prefill_np=next_prefill_np,
+            )
 
     def _update_seq_lens_cpu(
         self,

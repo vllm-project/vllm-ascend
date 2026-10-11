@@ -22,6 +22,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import MambaSpec, SlidingWindowSpec, UniformTypeKVCacheSpecs
 from vllm.v1.outputs import KVConnectorOutput
 
+from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.metadata import (
     MambaConvLoadMeta,
     PreemptOffloadMetadata,
@@ -319,7 +320,11 @@ class PreemptOffloadScheduler:
                         effective_hashes.append(None)
             else:
                 group_block_size = kv_cache_groups[g].kv_cache_spec.block_size
-                logical_num_blocks = cdiv(num_computed_tokens, group_block_size)
+                is_circular = is_circular_kv_cache_spec(kv_cache_groups[g].kv_cache_spec)
+                # A ring owns one private block, independent of token position.
+                if is_circular and (len(group_gpu_ids) != 1 or group_gpu_ids[0] <= 0):
+                    raise RuntimeError(f"Invalid circular cache blocks for {req_id}: {group_gpu_ids}")
+                logical_num_blocks = 1 if is_circular else cdiv(num_computed_tokens, group_block_size)
                 aligned_group_gpu_ids = self._align_group_block_ids(g, group_gpu_ids, logical_num_blocks)
 
                 for block_idx, block_id in enumerate(aligned_group_gpu_ids):
@@ -331,7 +336,9 @@ class PreemptOffloadScheduler:
                     gpu_block = self._gpu_block_pool.blocks[block_id]
                     block_is_computed = (block_idx + 1) * group_block_size <= num_computed_tokens
                     block_hash = (
-                        gpu_block.block_hash if block_is_computed and self.enable_offload_prefix_caching else None
+                        gpu_block.block_hash
+                        if block_is_computed and self.enable_offload_prefix_caching and not is_circular
+                        else None
                     )
                     gpu_blocks.append(gpu_block)
                     effective_hashes.append(block_hash)
@@ -508,6 +515,16 @@ class PreemptOffloadScheduler:
                         source_offset=conv_source_offset,
                     )
                 )
+            elif is_circular_kv_cache_spec(self.cpu_kv_cache_config.kv_cache_groups[g].kv_cache_spec):
+                # Reuse the ordinary block transfer, but always restore slot 0.
+                group_gpu_ids = block_ids_by_group[g]
+                if len(group_cpu_ids) != 1 or len(group_gpu_ids) != 1 or group_cpu_ids[0] <= 0 or group_gpu_ids[0] <= 0:
+                    raise RuntimeError(
+                        f"Invalid circular cache restore for {request.request_id}: "
+                        f"cpu={group_cpu_ids}, gpu={group_gpu_ids}"
+                    )
+                cpu_block_ids.append(group_cpu_ids[0])
+                gpu_block_ids.append(group_gpu_ids[0])
             else:
                 group_block_size = self.cpu_kv_cache_config.kv_cache_groups[g].kv_cache_spec.block_size
                 start_block = load_start_tokens // group_block_size

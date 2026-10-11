@@ -13,6 +13,7 @@ P (``kv_producer``): build metadata for layer-wise READ_READY notifications.
 from __future__ import annotations
 
 import threading
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from typing import TYPE_CHECKING, Any
@@ -25,6 +26,10 @@ from vllm.utils.math_utils import round_down
 from vllm.utils.network_utils import get_ip
 from vllm.v1.kv_cache_interface import KVCacheConfig
 
+from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
+    DSparkContextDescriptor,
+    resident_mla_context_group_ids,
+)
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (
     BATCH_KV_TRANSFER_PARAMS,
     SfaPDConsumerMetadata,
@@ -37,10 +42,12 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots i
     copy_sfa_pool_capacity,
     copy_sfa_prefill_dest_geometry,
 )
+from vllm_ascend.spec_decode.dspark_utils import get_dspark_aux_layer_ids
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.outputs import KVConnectorOutput
     from vllm.v1.request import Request
 
 METASERVER_MAX_RETRIES = 3
@@ -240,6 +247,8 @@ class SFAPDRD2HScheduler:
             raise ValueError("SFAPDRD2HScheduler requires KVCacheConfig")
         self.block_size = [group_spec.kv_cache_spec.block_size for group_spec in kv_cache_config.kv_cache_groups]
         self.main_group_idx, self.indexer_group_idx = infer_sfa_component_group_ids(kv_cache_config)
+        self._dspark_context_groups = self._find_dspark_context_groups()
+        self._dspark_context_requests: dict[str, tuple[DSparkContextDescriptor, dict[int, tuple[int, ...]]]] = {}
 
         self.side_channel_host = get_ip()
         # Control-plane port = kv_port + data_parallel_rank * tp_size. This MUST
@@ -285,6 +294,8 @@ class SFAPDRD2HScheduler:
         # req_ids awaiting their first build_connector_meta seed (so the worker
         # can build request_map for get_finished even while async-waiting KV).
         self._reqs_need_recv: set[str] = set()
+        self._dspark_pending_recv: set[str] = set()
+        self._deferred_finished_req_ids: set[str] = set()
         self.executor = ThreadPoolExecutor(32)
         self._metaserver_futures = {}
         self._metaserver_retry_timers = {}
@@ -292,14 +303,48 @@ class SFAPDRD2HScheduler:
         self._metaserver_lock = threading.Lock()
         self._shutdown_event = threading.Event()
 
+    def _find_dspark_context_groups(self) -> tuple[int, ...]:
+        """Find resident draft MLA groups without changing attention semantics."""
+        speculative_config = getattr(self.vllm_config, "speculative_config", None)
+        if speculative_config is None or speculative_config.method != "dspark":
+            return ()
+        group_ids = getattr(self.kv_cache_config, "dspark_context_group_ids", None)
+        if group_ids is None:
+            group_ids = resident_mla_context_group_ids(self.kv_cache_config.kv_cache_groups)
+        if not group_ids:
+            raise RuntimeError("DSpark sparse offload requires loader-created resident MLA cache groups")
+        if len(set(group_ids)) != len(group_ids) or any(
+            type(group_id) is not int or not 0 <= group_id < len(self.kv_cache_config.kv_cache_groups)
+            for group_id in group_ids
+        ):
+            raise RuntimeError("DSpark resident MLA group ownership is invalid")
+        return tuple(group_ids)
+
     # ------------------------------------------------------------------
     # D side (kv_consumer)
     # ------------------------------------------------------------------
-    def get_num_new_matched_tokens(self, request: Request, num_computed_tokens: int) -> tuple[int, bool]:
+    def get_num_new_matched_tokens(self, request: Request, num_computed_tokens: int) -> tuple[int | None, bool]:
         # Pull the entire prompt KV from the remote P node into D's CPU pool
         # (main MLA) / HBM (indexer). Async relative to engine execution.
         params = request.kv_transfer_params
         if params is not None and params.get("do_remote_prefill"):
+            if getattr(self, "_dspark_context_groups", ()):
+                contexts = self._dspark_context_requests
+                # Remote-prefill waiters do not count against RUNNING. Bound
+                # resident draft-context admission to the worker receiver,
+                # rather than the larger copy-SFA scratch-slot arena.
+                if (
+                    request.request_id not in contexts
+                    and len(contexts) >= self.vllm_config.scheduler_config.max_num_seqs
+                ):
+                    return None, False
+            allocator = getattr(self, "_copy_sfa_slot_allocator", None)
+            if allocator is not None and not allocator.can_bind(request.request_id):
+                # Async KV receivers are waiting, not RUNNING, so max_num_seqs
+                # does not bound the number of stable top-k rows they own.
+                # None defers this request without local recomputation or an
+                # allocation/rendezvous until an existing owner finishes.
+                return None, False
             assert num_computed_tokens % min(self.block_size) == 0
             count = max(len(request.prompt_token_ids) - num_computed_tokens, 0)
             return count, count > 0
@@ -325,6 +370,29 @@ class SFAPDRD2HScheduler:
         main_block_ids = list(block_ids_by_group[self.main_group_idx])
         indexer_block_ids = list(block_ids_by_group[self.indexer_group_idx])
         self._request_trackers[request.request_id] = (main_block_ids, indexer_block_ids)
+        dspark_context_descriptor = None
+        dspark_draft_block_ids_by_group = None
+        if getattr(self, "_dspark_context_groups", ()):
+            aux_layer_ids = get_dspark_aux_layer_ids(self.vllm_config)
+            prompt_tokens = len(getattr(request, "prompt_token_ids", None) or ())
+            hidden_size = self.vllm_config.model_config.get_hidden_size()
+            if not aux_layer_ids or prompt_tokens <= 0:
+                raise RuntimeError("DSpark remote prefill requires prompt tokens and configured auxiliary boundaries")
+            dspark_context_descriptor = DSparkContextDescriptor(
+                request_id=get_external_request_id(request.request_id),
+                generation=uuid.uuid4().hex,
+                prompt_tokens=prompt_tokens,
+                aux_layer_ids=aux_layer_ids,
+                hidden_size=hidden_size,
+            )
+            dspark_draft_block_ids_by_group = {
+                group_id: tuple(block_ids_by_group[group_id]) for group_id in self._dspark_context_groups
+            }
+            self._dspark_context_requests[request.request_id] = (
+                dspark_context_descriptor,
+                dspark_draft_block_ids_by_group,
+            )
+            self._dspark_pending_recv.add(request.request_id)
         self._reqs_need_recv.add(request.request_id)
         allocator = getattr(self, "_copy_sfa_slot_allocator", None)
         if allocator is not None:
@@ -363,6 +431,8 @@ class SFAPDRD2HScheduler:
             remote_dcp_size=self.vllm_config.parallel_config.decode_context_parallel_size,
             remote_cached_tokens=request.num_computed_tokens,
         )
+        if dspark_context_descriptor is not None:
+            kv_transfer_params["dspark_context_generation"] = dspark_context_descriptor.generation
         # Allocation is complete once the rendezvous request is submitted.
         # Keep the vLLM remote-prefill state independent of the legacy proxy's
         # HTTP result; old proxies return 500 for extra prompt-list children
@@ -390,6 +460,7 @@ class SFAPDRD2HScheduler:
 
     def build_connector_meta(self, scheduler_output: SchedulerOutput) -> KVConnectorMetadata:
         meta = SfaPDConsumerMetadata()
+        context_requests = getattr(self, "_dspark_context_requests", {})
         for req_id in list(self._reqs_need_recv):
             tracker = self._request_trackers.get(req_id)
             if tracker is None:
@@ -397,7 +468,15 @@ class SFAPDRD2HScheduler:
             main_block_ids, indexer_block_ids = tracker
             binding = getattr(self, "_copy_sfa_bindings", {}).get(req_id)
             if binding is None:
-                meta.add_request(req_id, main_block_ids, indexer_block_ids)
+                descriptor, draft_ids = context_requests.get(req_id, (None, {}))
+                meta.add_request(
+                    req_id,
+                    main_block_ids,
+                    indexer_block_ids,
+                    dspark_context_descriptor=descriptor,
+                    dspark_draft_group_ids=self._dspark_context_groups if descriptor is not None else (),
+                    dspark_draft_block_ids_by_group=draft_ids if descriptor is not None else None,
+                )
             else:
                 pool_slot, tail_tokens, tail_block_index, kv_tokens, dense = binding
                 meta.add_request(
@@ -409,6 +488,9 @@ class SFAPDRD2HScheduler:
                     tail_block_index=tail_block_index,
                     kv_tokens=kv_tokens,
                     dense=dense,
+                    dspark_context_descriptor=context_requests.get(req_id, (None, {}))[0],
+                    dspark_draft_group_ids=(self._dspark_context_groups if req_id in context_requests else ()),
+                    dspark_draft_block_ids_by_group=context_requests.get(req_id, (None, None))[1],
                 )
         self._reqs_need_recv.clear()
         return meta
@@ -421,24 +503,41 @@ class SFAPDRD2HScheduler:
         request: Request,
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
+        if request.request_id in self._dspark_pending_recv:
+            # Let the existing rendezvous and reads drain naturally. vLLM
+            # retains the KV blocks; retain the connector's destinations too.
+            self._deferred_finished_req_ids.add(request.request_id)
+            return True, None
+        self._cleanup_finished_request(request.request_id)
+        return False, None
+
+    def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
+        completed = set(connector_output.finished_recving or ())
+        self._dspark_pending_recv.difference_update(completed)
+        for request_id in completed & self._deferred_finished_req_ids:
+            self._cleanup_finished_request(request_id)
+
+    def _cleanup_finished_request(self, request_id: str) -> None:
         # vLLM owns the block lifecycle; the connector only drops its lookup.
-        self._request_trackers.pop(request.request_id, None)
-        self._reqs_need_recv.discard(request.request_id)
+        self._request_trackers.pop(request_id, None)
+        getattr(self, "_dspark_context_requests", {}).pop(request_id, None)
+        self._reqs_need_recv.discard(request_id)
+        self._dspark_pending_recv.discard(request_id)
+        self._deferred_finished_req_ids.discard(request_id)
         copy_sfa_bindings = getattr(self, "_copy_sfa_bindings", None)
         if copy_sfa_bindings is not None:
-            copy_sfa_bindings.pop(request.request_id, None)
+            copy_sfa_bindings.pop(request_id, None)
         allocator = getattr(self, "_copy_sfa_slot_allocator", None)
         if allocator is not None:
-            allocator.release(request.request_id)
+            allocator.release(request_id)
         with self._metaserver_lock:
-            self._cancelled_metaserver_requests.add(request.request_id)
-            future = self._metaserver_futures.pop(request.request_id, None)
-            timer = self._metaserver_retry_timers.pop(request.request_id, None)
+            self._cancelled_metaserver_requests.add(request_id)
+            future = self._metaserver_futures.pop(request_id, None)
+            timer = self._metaserver_retry_timers.pop(request_id, None)
         if future is not None:
             future.cancel()
         if timer is not None:
             timer.cancel()
-        return False, None
 
     # ------------------------------------------------------------------
     # helpers

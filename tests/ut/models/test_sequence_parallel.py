@@ -33,7 +33,9 @@ def test_reduce_scatter_padding(monkeypatch, custom_collective, num_tokens, tp_s
     monkeypatch.setattr(sp, "get_tp_group", lambda: SimpleNamespace(device_communicator=communicator))
     monkeypatch.setattr(sp, "tensor_model_parallel_reduce_scatter", fallback)
 
-    result = sp.sp_reduce_scatter(x)
+    # This CPU-only test exercises the custom-op implementation directly;
+    # the public wrapper intentionally registers only the PrivateUse1 kernel.
+    result = sp._ascend_sp_reduce_scatter_impl(x)
 
     assert len(inputs) == 1
     torch.testing.assert_close(result, expected[: expected.shape[0] // tp_size])

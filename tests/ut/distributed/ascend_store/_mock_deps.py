@@ -124,7 +124,15 @@ if _MOCK_VLLM_DEPS:
 _base_mod: Any = (
     sys.modules["vllm.distributed.kv_transfer.kv_connector.v1.base"] if _MOCK_VLLM_DEPS else types.SimpleNamespace()
 )
-_base_mod.KVConnectorBase_V1 = type("KVConnectorBase_V1", (), {"__init__": lambda self, **kw: None})  # type: ignore[attr-defined]
+_base_mod.KVConnectorBase_V1 = type(  # type: ignore[attr-defined]
+    "KVConnectorBase_V1",
+    (),
+    {
+        "__init__": lambda self, **kw: None,
+        "bind_connector_metadata": lambda self, metadata: setattr(self, "_connector_metadata", metadata),
+        "_get_connector_metadata": lambda self: self._connector_metadata,
+    },
+)
 _base_mod.KVConnectorMetadata = type("KVConnectorMetadata", (), {})  # type: ignore[attr-defined]
 _base_mod.KVConnectorWorkerMetadata = type("KVConnectorWorkerMetadata", (), {})  # type: ignore[attr-defined]
 _base_mod.KVConnectorRole = MagicMock()  # type: ignore[attr-defined]

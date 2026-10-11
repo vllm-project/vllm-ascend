@@ -108,6 +108,7 @@ def test_FusedRMSNormGated_dispatches_to_ascend_kernel(default_vllm_config):
         eps=1e-6,
         prenorm=True,
         residual_in_fp32=True,
+        out=None,
     )
 
 
