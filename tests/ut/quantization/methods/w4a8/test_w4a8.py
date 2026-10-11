@@ -327,9 +327,7 @@ class TestGmmDequantSituQuantFusionGate(TestBase):
         w1 = [torch.zeros(self.k, self.n // 8, dtype=torch.int32) for _ in range(num_experts)]
         w1_scale = torch.zeros(num_experts, self.n, dtype=torch.int64)
         group_list = torch.zeros(num_experts, dtype=torch.int64)
-        with patch(
-            "vllm_ascend.quantization.methods.w4a8.w4a8.get_current_hardware_profile"
-        ) as mock_profile:
+        with patch("vllm_ascend.quantization.methods.w4a8.w4a8.get_current_hardware_profile") as mock_profile:
             mock_profile.return_value.supports.return_value = True
             return _gmm_dequant_situ_quant_fusion_supported(
                 hidden_states=hidden_states,

@@ -42,7 +42,7 @@ from ..base import AscendMoEScheme, QuantType
 from ..registry import register_scheme
 
 # Metadata limits of the fused gmm_dequant_situ_quant kernel. Must stay in
-# sync with the TORCH_CHECKs in
+# sync with the hard limits enforced in
 # csrc/gmm/gmm_dequant_situ_quant/gmm_dequant_situ_quant_torch_adpt.h
 # (GMSQ_BM, GMSQ_MAX_M_BLOCKS, GMSQ_MAX_EXPERTS). The Python-side fusion gate
 # mirrors them so oversized batches take the npu_grouped_matmul fallback
