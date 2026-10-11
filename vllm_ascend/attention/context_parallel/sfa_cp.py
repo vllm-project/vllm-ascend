@@ -522,7 +522,6 @@ class AscendSFADSACPMetadataBuilder(AscendSFAMetadataBuilder):
                 self.kv_cache_spec,
                 self.vllm_config,
                 self.device,
-                self.nope_indexer,
                 self.kernel_block_size,
                 num_heads=self.model_config.hf_text_config.num_attention_heads,
             )
