@@ -11,8 +11,7 @@ from torch import nn
 from torch.nn.parameter import Parameter
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
-from vllm.config.compilation import CUDAGraphMode
-from vllm.distributed import divide, get_tensor_model_parallel_world_size, get_tp_group
+from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.linear import (
@@ -41,16 +40,14 @@ from vllm.v1.kv_cache_interface import (
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
-    MiniMaxM3TPDecodeScoreMetadata,
-    minimax_m3_index_tp_block_parallel_decode,
-    minimax_m3_sparse_attn,
-    minimax_m3_sparse_attn_decode,
-)
-from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
     minimax_m3_index_decode as minimax_m3_index_decode_ascendc,
 )
 from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
     minimax_m3_index_prefill as minimax_m3_index_prefill_ascendc,
+)
+from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
+    minimax_m3_sparse_attn,
+    minimax_m3_sparse_attn_decode,
 )
 from vllm_ascend.ops.linear import AscendColumnParallelLinear
 from vllm_ascend.ops.linear_op import get_parallel_op
@@ -61,52 +58,11 @@ from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 _USE_ASCENDC_INDEX_SCORE_PREFILL = True
 _USE_ASCENDC_INDEX_SCORE_DECODE = get_ascend_device_type() != AscendDeviceType.A5
 
-_MRV2_PADDING_DUMMY_KEY = "minimax_m3_mrv2_padding_dummy"
-_MRV2_DUMMY_INDEXER_TP_WARMED_KEY = "minimax_m3_mrv2_dummy_indexer_tp_warmed"
-_MRV2_SKIP_DUMMY_SPARSE_ATTN_KEY = "minimax_m3_mrv2_skip_dummy_sparse_attn"
-
 if get_ascend_device_type() == AscendDeviceType.A5:
     from vllm_ascend.models.minimax_m3.ops.msa_m3_triton_a5 import (
         minimax_m3_index_decode,
         minimax_m3_index_score,
         minimax_m3_index_topk,
-    )
-
-
-def _is_mrv2_idle_dp_dummy(forward_context: ForwardContext, *, use_v2_model_runner: bool) -> bool:
-    """Return whether this is an eager MRV2 idle-DP padding-only forward."""
-    is_padding = getattr(forward_context, "is_padding", None)
-    dp_metadata = getattr(forward_context, "dp_metadata", None)
-    additional_kwargs = getattr(forward_context, "additional_kwargs", None)
-    if is_padding is None or dp_metadata is None or additional_kwargs is None:
-        return False
-
-    cached = additional_kwargs.get(_MRV2_PADDING_DUMMY_KEY)
-    if cached is not None:
-        return bool(cached)
-
-    is_dummy = False
-    if (
-        use_v2_model_runner
-        and forward_context.cudagraph_runtime_mode == CUDAGraphMode.NONE
-        and is_padding.numel() == 1
-        and dp_metadata.num_tokens_across_dp_cpu.numel() > 1
-        and int(dp_metadata.num_tokens_across_dp_cpu.max().item()) > 1
-    ):
-        # is_padding is an NPU tensor. Cache this device-to-host read once per
-        # model forward instead of synchronizing in every sparse layer.
-        is_dummy = bool(is_padding[0].item())
-
-    additional_kwargs[_MRV2_PADDING_DUMMY_KEY] = is_dummy
-    return is_dummy
-
-
-def _should_use_tp_sharded_index_decode(tp_size: int, num_prefills: int) -> bool:
-    # A3 AscendC and A5 Triton decode score the replicated index-K cache with
-    # local query heads. Avoid gathering queries and merging TP-local TopK
-    # candidates on these devices; keep block sharding on other families.
-    return (
-        get_ascend_device_type() not in (AscendDeviceType.A3, AscendDeviceType.A5) and tp_size > 1 and num_prefills == 0
     )
 
 
@@ -257,7 +213,6 @@ class AscendMiniMaxM3IndexerDecodeMetadata:
     cu_seqlens_q: torch.Tensor | None = None
     context_lens: torch.Tensor | None = None
     start_loc: torch.Tensor | None = None
-    tp_score: MiniMaxM3TPDecodeScoreMetadata | None = None
 
 
 @dataclass
@@ -294,34 +249,7 @@ class AscendMiniMaxM3IndexerMetadataBuilder(AttentionMetadataBuilder[AscendMiniM
             device=device,
         )
         self.block_size = kv_cache_spec.block_size
-        self.tp_size = vllm_config.parallel_config.tensor_parallel_size
         self.attn_mask_builder = AttentionMaskBuilder(device) if _USE_ASCENDC_INDEX_SCORE_PREFILL else None
-
-    def _build_tp_score_metadata(
-        self,
-        block_table: torch.Tensor,
-        cu_seqlens_q: torch.Tensor,
-        context_lens: torch.Tensor,
-        *,
-        max_seq_len: int,
-        decode_query_len: int,
-    ) -> MiniMaxM3TPDecodeScoreMetadata:
-        """Package graph-stable inputs; derive TP tensors in model forward."""
-        tp_rank = get_tp_group().rank_in_group
-        max_block_count = (max_seq_len + self.block_size - 1) // self.block_size
-        blocks_per_tp = (max_block_count + self.tp_size - 1) // self.tp_size
-        block_offset = tp_rank * blocks_per_tp
-        block_count = max(0, min(blocks_per_tp, max_block_count - block_offset))
-        return MiniMaxM3TPDecodeScoreMetadata(
-            block_table=block_table,
-            cu_seqlens_q=cu_seqlens_q,
-            context_lens=context_lens,
-            max_block_count=max_block_count,
-            block_size=self.block_size,
-            block_offset=block_offset,
-            block_count=block_count,
-            decode_query_len=decode_query_len,
-        )
 
     def build(
         self,
@@ -399,14 +327,6 @@ class AscendMiniMaxM3IndexerMetadataBuilder(AttentionMetadataBuilder[AscendMiniM
                 cu_seqlens_q=decode_cu_seqlens_q,
                 context_lens=decode_context_lens,
             )
-            if _USE_ASCENDC_INDEX_SCORE_DECODE and _should_use_tp_sharded_index_decode(self.tp_size, active_prefills):
-                decode_metadata.tp_score = self._build_tp_score_metadata(
-                    decode_metadata.block_table,
-                    decode_cu_seqlens_q,
-                    decode_context_lens,
-                    max_seq_len=decode_metadata.max_seq_len,
-                    decode_query_len=decode_query_len,
-                )
 
         return AscendMiniMaxM3IndexerMetadata(
             seq_lens=seq_lens,
@@ -443,8 +363,6 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
         kv_cache_torch_dtype: torch.dtype = torch.bfloat16,
     ) -> None:
         super().__init__()
-        # The current config is scoped to initialization, not graph capture.
-        self.use_v2_model_runner = get_current_vllm_config().use_v2_model_runner
         self.num_kv_heads = num_kv_heads
         self.scale = scale
         self.topk_blocks = topk_blocks
@@ -461,62 +379,6 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
             kv_cache_torch_dtype=kv_cache_torch_dtype,
         )
 
-    def _decode_topk_tp_sharded(
-        self,
-        idx_q: torch.Tensor,
-        index_kv_cache: torch.Tensor,
-        block_table: torch.Tensor,
-        seq_lens: torch.Tensor,
-        max_seq_len: int,
-        decode_query_len: int,
-        tp_group: Any,
-        tp_size: int,
-        tp_rank: int,
-    ) -> torch.Tensor:
-        full_idx_q = tp_group.all_gather(idx_q.contiguous(), dim=1)
-
-        max_block_count = (max_seq_len + self.block_size - 1) // self.block_size
-        blocks_per_tp = (max_block_count + tp_size - 1) // tp_size
-        block_offset = tp_rank * blocks_per_tp
-        block_count = max(0, min(blocks_per_tp, max_block_count - block_offset))
-        local_block_table = block_table[:, block_offset : block_offset + block_count].contiguous()
-        local_seq_lens = torch.clamp(
-            seq_lens - block_offset * self.block_size,
-            min=0,
-            max=block_count * self.block_size,
-        )
-
-        local_topk, local_scores = minimax_m3_index_decode(
-            full_idx_q,
-            index_kv_cache,
-            local_block_table,
-            local_seq_lens,
-            max_seq_len,
-            self.topk_blocks,
-            self.init_blocks,
-            self.local_blocks,
-            full_idx_q.shape[1],
-            decode_query_len,
-            sm_scale=self.scale,
-            block_offset=block_offset,
-            block_count=block_count,
-            global_seq_lens=seq_lens,
-            return_scores=True,
-        )
-        gathered_scores = tp_group.all_gather(local_scores.contiguous(), dim=-1)
-        gathered_topk = tp_group.all_gather(local_topk.contiguous(), dim=-1)
-
-        local_head_count = idx_q.shape[1]
-        local_head_start = tp_rank * local_head_count
-        local_gathered_scores = gathered_scores.narrow(0, local_head_start, local_head_count)
-        _, merged_pos = torch.topk(
-            local_gathered_scores,
-            k=self.topk_blocks,
-            dim=-1,
-        )
-        local_gathered_topk = gathered_topk.narrow(0, local_head_start, local_head_count)
-        return torch.gather(local_gathered_topk, dim=-1, index=merged_pos)
-
     def forward(
         self,
         index_query: torch.Tensor,
@@ -532,25 +394,6 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
         index_md = attn_metadata[self.index_cache.prefix]
         assert isinstance(index_md, AscendMiniMaxM3IndexerMetadata)
 
-        # MRV2 represents an idle DP rank as a one-token decode-like padding
-        # forward. Run the first sparse layer normally to preserve TP/HCCL
-        # communicator initialization order, then skip the repeated indexer
-        # collectives in the remaining layers. MRV1 is explicitly excluded.
-        if (
-            _USE_ASCENDC_INDEX_SCORE_DECODE
-            and index_md.num_decodes > 0
-            and index_md.num_prefills == 0
-            and _should_use_tp_sharded_index_decode(get_tp_group().world_size, index_md.num_prefills)
-            and _is_mrv2_idle_dp_dummy(forward_context, use_v2_model_runner=self.use_v2_model_runner)
-        ):
-            if forward_context.additional_kwargs.get(
-                _MRV2_DUMMY_INDEXER_TP_WARMED_KEY,
-                False,
-            ):
-                forward_context.additional_kwargs[_MRV2_SKIP_DUMMY_SPARSE_ATTN_KEY] = True
-                return None, None, None
-            forward_context.additional_kwargs[_MRV2_DUMMY_INDEXER_TP_WARMED_KEY] = True
-
         num_tokens = index_md.num_actual_tokens
         num_decode_tokens = index_md.num_decode_tokens
         iq = index_query[:num_tokens].view(-1, self.num_index_heads, self.index_head_dim)
@@ -562,69 +405,41 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
         if index_md.num_decodes > 0:
             d = index_md.decode
             assert d is not None
-            tp_group = get_tp_group()
             decode_iq = iq[:num_decode_tokens]
             if _USE_ASCENDC_INDEX_SCORE_DECODE:
-                if _should_use_tp_sharded_index_decode(tp_group.world_size, index_md.num_prefills):
-                    decode_topk = minimax_m3_index_tp_block_parallel_decode(
-                        decode_iq,
-                        kv,
-                        d.tp_score,
-                        index_md.causal_mask,
-                        topk=self.topk_blocks,
-                        init_blocks=self.init_blocks,
-                        local_blocks=self.local_blocks,
-                        tp_group=tp_group,
-                    )
-                else:
-                    decode_start_loc = torch.div(
-                        d.context_lens,
-                        self.block_size,
-                        rounding_mode="floor",
-                    ).to(dtype=torch.int32)
-                    decode_topk, decode_select_num_idx = minimax_m3_index_decode_ascendc(
-                        decode_iq,
-                        kv,
-                        d.block_table,
-                        d.cu_seqlens_q,
-                        d.seq_lens,
-                        d.context_lens,
-                        decode_start_loc,
-                        index_md.causal_mask,
-                        topk=self.topk_blocks,
-                        init_blocks=self.init_blocks,
-                        local_blocks=self.local_blocks,
-                        decode_query_len=d.decode_query_len,
-                    )
+                decode_start_loc = torch.div(
+                    d.context_lens,
+                    self.block_size,
+                    rounding_mode="floor",
+                ).to(dtype=torch.int32)
+                decode_topk, decode_select_num_idx = minimax_m3_index_decode_ascendc(
+                    decode_iq,
+                    kv,
+                    d.block_table,
+                    d.cu_seqlens_q,
+                    d.seq_lens,
+                    d.context_lens,
+                    decode_start_loc,
+                    index_md.causal_mask,
+                    topk=self.topk_blocks,
+                    init_blocks=self.init_blocks,
+                    local_blocks=self.local_blocks,
+                    decode_query_len=d.decode_query_len,
+                )
             else:
-                tp_size = tp_group.world_size
-                tp_rank = tp_group.rank_in_group
-                if _should_use_tp_sharded_index_decode(tp_size, index_md.num_prefills):
-                    decode_topk = self._decode_topk_tp_sharded(
-                        decode_iq,
-                        kv,
-                        d.block_table,
-                        d.seq_lens,
-                        d.max_seq_len,
-                        d.decode_query_len,
-                        tp_group,
-                        tp_size,
-                        tp_rank,
-                    )
-                else:
-                    decode_topk, decode_select_num_idx = minimax_m3_index_decode(
-                        decode_iq,
-                        kv,
-                        d.block_table,
-                        d.seq_lens,
-                        d.max_seq_len,
-                        self.topk_blocks,
-                        self.init_blocks,
-                        self.local_blocks,
-                        self.num_kv_heads,
-                        d.decode_query_len,
-                        sm_scale=self.scale,
-                    )
+                decode_topk, decode_select_num_idx = minimax_m3_index_decode(
+                    decode_iq,
+                    kv,
+                    d.block_table,
+                    d.seq_lens,
+                    d.max_seq_len,
+                    self.topk_blocks,
+                    self.init_blocks,
+                    self.local_blocks,
+                    self.num_kv_heads,
+                    d.decode_query_len,
+                    sm_scale=self.scale,
+                )
         if index_md.num_prefills > 0:
             p = index_md.prefill
             assert p is not None
@@ -966,11 +781,6 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
         attn_metadata = forward_context.attn_metadata
         if not isinstance(attn_metadata, dict):
             return output
-        if getattr(forward_context, "additional_kwargs", {}).get(
-            _MRV2_SKIP_DUMMY_SPARSE_ATTN_KEY,
-            False,
-        ):
-            return output.zero_()
         main_md = attn_metadata[layer.layer_name]
         assert isinstance(main_md, AscendMiniMaxM3SparseMetadata)
         decode_topk, prefill_topk, decode_select_num_idx = topk_idx

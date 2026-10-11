@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Fused TopK helpers around the A3 AscendC MsaIndexScore operator."""
+"""Fused TopK helpers around the A2/A3 AscendC MsaIndexScore operator."""
 
 from __future__ import annotations
 
@@ -111,7 +111,7 @@ def index_decode_topk_fused(
     init_blocks: int = 0,
     local_blocks: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return int32 block IDs and valid counts for non-sharded A3 decode."""
+    """Return int32 block IDs and valid counts for A2/A3 decode."""
     if score.ndim != 3 or score.dtype != torch.float32:
         raise ValueError("Expected a [heads, query_tokens, score_width] float32 tensor")
     if context_lens.ndim != 1 or context_lens.dtype not in (torch.int32, torch.int64):
