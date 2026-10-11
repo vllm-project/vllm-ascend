@@ -606,7 +606,7 @@ class NPUModelRunner(GPUModelRunner):
                 # Use a call-scoped bypass because skip_compiled would require runner-specific ForwardContext plumbing.
                 with disable_compilation(self.get_model()):
                     self._dummy_run(mc2_tokens_capacity, skip_attn=True, skip_eplb=True, is_profile=True)
-            self.max_num_tokens = profile_max_num_tokens
+            self.max_num_tokens: int = profile_max_num_tokens
             try:
                 super().profile_run()
             finally:
