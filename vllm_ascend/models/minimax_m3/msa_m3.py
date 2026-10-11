@@ -312,6 +312,7 @@ class AscendMiniMaxM3IndexerMetadataBuilder(AttentionMetadataBuilder[AscendMiniM
             active_decodes = _active_decode_num_reqs(num_decodes, num_decode_tokens, decode_query_len)
             decode_context_lens = None
             decode_cu_seqlens_q = None
+            decode_start_loc = None
             if _USE_ASCENDC_INDEX_SCORE_DECODE:
                 decode_context_lens = self.context_len_buffer[:active_decodes]
                 decode_context_lens.copy_(
@@ -319,6 +320,11 @@ class AscendMiniMaxM3IndexerMetadataBuilder(AttentionMetadataBuilder[AscendMiniM
                     non_blocking=True,
                 )
                 decode_cu_seqlens_q = query_start_loc[: active_decodes + 1].to(torch.int32)
+                decode_start_loc = torch.div(
+                    decode_context_lens,
+                    self.block_size,
+                    rounding_mode="floor",
+                ).to(dtype=torch.int32)
             decode_metadata = AscendMiniMaxM3IndexerDecodeMetadata(
                 seq_lens=seq_lens[:active_decodes],
                 block_table=block_table[:active_decodes],
@@ -326,6 +332,7 @@ class AscendMiniMaxM3IndexerMetadataBuilder(AttentionMetadataBuilder[AscendMiniM
                 decode_query_len=decode_query_len,
                 cu_seqlens_q=decode_cu_seqlens_q,
                 context_lens=decode_context_lens,
+                start_loc=decode_start_loc,
             )
 
         return AscendMiniMaxM3IndexerMetadata(
@@ -407,11 +414,6 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
             assert d is not None
             decode_iq = iq[:num_decode_tokens]
             if _USE_ASCENDC_INDEX_SCORE_DECODE:
-                decode_start_loc = torch.div(
-                    d.context_lens,
-                    self.block_size,
-                    rounding_mode="floor",
-                ).to(dtype=torch.int32)
                 decode_topk, decode_select_num_idx = minimax_m3_index_decode_ascendc(
                     decode_iq,
                     kv,
@@ -419,7 +421,7 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
                     d.cu_seqlens_q,
                     d.seq_lens,
                     d.context_lens,
-                    decode_start_loc,
+                    d.start_loc,
                     index_md.causal_mask,
                     topk=self.topk_blocks,
                     init_blocks=self.init_blocks,
