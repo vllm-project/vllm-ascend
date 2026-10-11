@@ -52,13 +52,15 @@ def _registration_worker(rank: int, port: int, binding: str) -> None:
         weights = [allocation[: 84 * _MIB // 4].view(2, -1), allocation.view(2, -1)]
         buffers = [torch.empty_like(tensor) for tensor in weights]
         communicator = eplb_communicator.AscendHixlEplbCommunicator(dist.group.WORLD, [weights], buffers)
-        registered = tuple(communicator._registered_handles)
+        session = eplb_communicator._HixlSession(dist.group.WORLD)
+        session.initialize({"model": communicator})
+        registered = tuple(session._registered_handles)
         # Grow the allocator, then let it reclaim unused mapped pages while
         # the original expert registrations and connections remain alive.
         extra = torch.empty(128 * _MIB, dtype=torch.uint8, device=f"npu:{rank}")
         del extra
         torch.npu.empty_cache()
-        assert tuple(communicator._registered_handles) == registered
+        assert tuple(session._registered_handles) == registered
 
         with ThreadPoolExecutor(max_workers=1) as executor:
             for _ in range(4):
@@ -66,10 +68,10 @@ def _registration_worker(rank: int, port: int, binding: str) -> None:
                 for tensor in buffers:
                     assert torch.all(tensor[0] == 2 - rank).item()
         timings.extend(communicator._eplb_hixl_phase_timings)
-        communicator.close()
-        communicator.close()
-        assert not communicator._storage_refs
-        del communicator, buffers, weights, allocation
+        session.close()
+        session.close()
+        assert not session._storage_refs
+        del session, communicator, buffers, weights, allocation
         torch.npu.empty_cache()
     # Validate the increased region count against the real backend rather
     # than imposing the old, unverified 256-region limit.
@@ -84,9 +86,11 @@ def _registration_worker(rank: int, port: int, binding: str) -> None:
     ]
     buffers = [torch.empty_like(weights[0][0])]
     communicator = eplb_communicator.AscendHixlEplbCommunicator(dist.group.WORLD, weights, buffers)
-    assert len(communicator._registered_handles) > 256
-    communicator.close()
-    del communicator, buffers, weights, allocation
+    session = eplb_communicator._HixlSession(dist.group.WORLD)
+    session.initialize({"model": communicator})
+    assert len(session._registered_handles) > 256
+    session.close()
+    del session, communicator, buffers, weights, allocation
     torch.npu.empty_cache()
     if rank == 0:
         print(
@@ -134,10 +138,13 @@ def _failed_close_worker(rank: int, port: int) -> None:
     weights = torch.full((2, 1024), rank + 1, dtype=torch.float32, device=f"npu:{rank}")
     buffers = [torch.empty_like(weights)]
     communicator = eplb_communicator.AscendHixlEplbCommunicator(dist.group.WORLD, [[weights]], buffers)
+    session = eplb_communicator._HixlSession(dist.group.WORLD)
+    session.initialize({"model": communicator})
     _migrate(communicator, buffers, rank)
-    communicator._engine = _FailedDeregistration(communicator._engine, rank)
+    session._engine = _FailedDeregistration(session._engine, rank)
     state: Any = AscendEplbState.__new__(AscendEplbState)
     state._close_error = None
+    state._hixl_session = session
     state.async_worker = None
     state.model_states = {"model": SimpleNamespace(communicator=communicator)}
     try:
@@ -145,8 +152,8 @@ def _failed_close_worker(rank: int, port: int) -> None:
     except SystemExit:
         # The owner remains intact until the actual subprocess exits. This
         # failure must bypass the upstream RPC loop's `except Exception`.
-        assert communicator._engine is not None
-        assert communicator._storage_refs
+        assert session._engine is not None
+        assert session._storage_refs
         assert state._close_error is not None
         raise
     raise AssertionError("failed deregistration must terminate the worker")
@@ -167,7 +174,7 @@ def _failed_initialization_worker(rank: int, port: int) -> None:
     dist.init_process_group("gloo", init_method=f"tcp://127.0.0.1:{port}", rank=rank, world_size=2)
     weights = torch.full((2, 1024), rank + 1, dtype=torch.float32, device=f"npu:{rank}")
     buffers = [torch.empty_like(weights)]
-    register = eplb_communicator.AscendHixlEplbCommunicator._register_tensor_segments
+    register = eplb_communicator._HixlSession._register_tensor_segments
 
     def fail_after_registration(communicator, tensors):
         register(communicator, tensors)
@@ -175,10 +182,12 @@ def _failed_initialization_worker(rank: int, port: int) -> None:
             communicator._engine = _FailedDeregistration(communicator._engine, rank)
             raise RuntimeError("injected initialization failure after real registration")
 
-    eplb_communicator.AscendHixlEplbCommunicator._register_tensor_segments = fail_after_registration
+    eplb_communicator._HixlSession._register_tensor_segments = fail_after_registration
 
     def rebuild():
-        eplb_communicator.AscendHixlEplbCommunicator(dist.group.WORLD, [[weights]], buffers)
+        communicator = eplb_communicator.AscendHixlEplbCommunicator(dist.group.WORLD, [[weights]], buffers)
+        session = eplb_communicator._HixlSession(dist.group.WORLD)
+        session.initialize({"model": communicator})
 
     def unexpected_response(_output):
         raise AssertionError("failed rollback must bypass ordinary RPC error handling")
@@ -188,8 +197,8 @@ def _failed_initialization_worker(rank: int, port: int) -> None:
         WorkerProc._execute_worker_rpc(rpc, ("rebuild", (), {}, None))
     except SystemExit as error:
         cause = error.__cause__
-        assert cause is not None and hasattr(cause, "hixl_communicator")
-        owner = cause.hixl_communicator
+        assert cause is not None and hasattr(cause, "hixl_session")
+        owner = cause.hixl_session
         assert owner._engine is not None
         assert owner._storage_refs
         if rank == 0:
@@ -205,3 +214,131 @@ def test_failed_initialization_rollback_terminates_workers_through_rpc(monkeypat
     with pytest.raises(ProcessExitedException) as error:
         mp.spawn(_failed_initialization_worker, args=(get_open_port(),), nprocs=2, join=True)
     assert error.value.exit_code == 1
+
+
+class _TrackingEngine:
+    def __init__(self, engine):
+        self.engine = engine
+        self.regions = []
+        self.connections = 0
+        self.finalizations = 0
+
+    def __getattr__(self, name):
+        return getattr(self.engine, name)
+
+    def register_mem(self, descriptor, mem_type):
+        address, size = descriptor.addr, descriptor.len
+        assert all(address + size <= start or start + length <= address for start, length in self.regions)
+        status, handle = self.engine.register_mem(descriptor, mem_type)
+        if status == 0:
+            self.regions.append((address, size))
+        return status, handle
+
+    def connect(self, *args):
+        self.connections += 1
+        return self.engine.connect(*args)
+
+    def finalize(self):
+        self.finalizations += 1
+        return self.engine.finalize()
+
+
+class _TrackingBinding:
+    def __init__(self, binding):
+        self.binding = binding
+        self.engines = []
+
+    def __getattr__(self, name):
+        return getattr(self.binding, name)
+
+    def Hixl(self):
+        engine = _TrackingEngine(self.binding.Hixl())
+        self.engines.append(engine)
+        return engine
+
+
+def _shared_registration_worker(rank: int, port: int, binding: str) -> None:
+    torch.npu.set_device(rank)
+    tracked = _TrackingBinding(hixl_compat if binding == "ctypes" else eplb_communicator._resolve_hixl_module())
+    eplb_communicator._resolve_hixl_module = lambda: tracked
+    dist.init_process_group(
+        "gloo", init_method=f"tcp://127.0.0.1:{port}", rank=rank, world_size=2, timeout=timedelta(seconds=300)
+    )
+    # Use distinct ordinary allocator storages and select two whose outward
+    # registration ranges overlap. Neither tensor must start on a 2 MiB boundary.
+    candidates = [torch.full((2, 16 * 1024), rank + 1, device=f"npu:{rank}") for _ in range(32)]
+    alignment = 2 * _MIB
+    pairs = [
+        (left, right)
+        for index, left in enumerate(candidates)
+        for right in candidates[index + 1 :]
+        if left.data_ptr() // alignment == right.data_ptr() // alignment
+        and left.data_ptr() % alignment
+        and right.data_ptr() % alignment
+    ]
+    assert pairs, "allocator did not produce the overlapping aligned ranges required by this regression"
+    main_weight, draft_weight = pairs[0]
+    assert main_weight.untyped_storage().data_ptr() != draft_weight.untyped_storage().data_ptr()
+    draft_weight.fill_(rank + 11)
+    buffers = {
+        model: [torch.full_like(weight, -7)] for model, weight in (("draft", draft_weight), ("main", main_weight))
+    }
+    communicators = {
+        model: eplb_communicator.AscendHixlEplbCommunicator(dist.group.WORLD, [[weight]], buffers[model])
+        for model, weight in (("draft", draft_weight), ("main", main_weight))
+    }
+    session = eplb_communicator._HixlSession(dist.group.WORLD)
+    state: Any = AscendEplbState.__new__(AscendEplbState)
+    state._hixl_session = session
+    state._close_error = None
+    state.async_worker = None
+    state.model_states = {key: SimpleNamespace(communicator=value) for key, value in communicators.items()}
+    session.initialize(communicators)
+    assert len(tracked.engines) == 1
+    engine = tracked.engines[0]
+    assert engine.connections == 1
+    shared_page = main_weight.data_ptr() // alignment * alignment
+    assert sum(start <= shared_page < start + length for start, length in engine.regions) == 1
+    handles = tuple(session._registered_handles)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        for _ in range(8):
+            extra = torch.empty(128 * _MIB, dtype=torch.uint8, device=f"npu:{rank}")
+            del extra
+            torch.npu.empty_cache()
+            for model in ("draft", "main"):
+                executor.submit(_migrate, communicators[model], buffers[model], rank).result(timeout=300)
+                expected = (12 if model == "draft" else 2) - rank
+                assert torch.all(buffers[model][0][0] == expected).item()
+                assert torch.all(buffers[model][0][1] == -7).item()
+            assert tuple(session._registered_handles) == handles
+            assert torch.all(main_weight == rank + 1).item()
+            assert torch.all(draft_weight == rank + 11).item()
+    for tensor in candidates:
+        if tensor is not draft_weight:
+            assert torch.all(tensor == rank + 1).item()
+    timings = [timing for c in communicators.values() for timing in c._eplb_hixl_phase_timings]
+    state.close()
+    state.close()
+    assert engine.finalizations == 1
+    assert not session._storage_refs
+    if rank == 0:
+        print(
+            {
+                "binding": binding,
+                "models": 2,
+                "registered_regions": len(engine.regions),
+                "registered_bytes": sum(size for _, size in engine.regions),
+                "mean_transfer_ms": statistics.mean(t.transfer_ms for t in timings),
+            }
+        )
+    dist.destroy_process_group()
+
+
+@pytest.mark.parametrize("binding", ["ctypes", "official"])
+def test_main_and_draft_share_aligned_registration_after_empty_cache(monkeypatch, binding):
+    if torch.npu.device_count() < 2:
+        pytest.skip("requires two NPU devices")
+    if binding == "official" and importlib.util.find_spec("hixl") is None:
+        pytest.skip("CANN does not provide the official Python binding")
+    monkeypatch.setenv("PYTORCH_NPU_ALLOC_CONF", "expandable_segments:True")
+    mp.spawn(_shared_registration_worker, args=(get_open_port(), binding), nprocs=2, join=True)

@@ -22,7 +22,7 @@ from vllm.distributed.eplb.policy import AbstractEplbPolicy
 from vllm.distributed.parallel_state import in_the_same_node_as
 from vllm.logger import logger
 
-from vllm_ascend.distributed.eplb.eplb_communicator import AscendHixlEplbCommunicator
+from vllm_ascend.distributed.eplb.eplb_communicator import AscendHixlEplbCommunicator, _HixlSession
 from vllm_ascend.distributed.eplb.policy import PreparedLoadStats
 from vllm_ascend.ops.fused_moe import eplb as _eplb_ops
 from vllm_ascend.utils import vllm_version_is
@@ -162,6 +162,7 @@ class AscendEplbState(_eplb_state.EplbState):
         self._stop_async = threading.Event()
         self._suspended = False
         self._close_error: Exception | None = None
+        self._hixl_session: _HixlSession | None = None
         # vLLM main renamed ``EplbState.cuda_device_index`` to ``device_index``
         # (and passes it to EplbModelState on add_model), so keep both lanes
         # pointing at the attribute upstream actually reads.
@@ -178,6 +179,8 @@ class AscendEplbState(_eplb_state.EplbState):
 
     def add_model(self, model, model_config) -> None:
         """Build the EP-aware layout and initialize custom load statistics."""
+        if self._hixl_session is not None:
+            raise RuntimeError("Cannot add EPLB models after HIXL initialization")
         token = EXPERT_MAPPING_EP_SIZE.set(get_ep_group().world_size)
         try:
             with _configured_upstream_policy(
@@ -213,14 +216,15 @@ class AscendEplbState(_eplb_state.EplbState):
                 if worker.is_alive():
                     raise TimeoutError("EPLB background worker could not be stopped; worker must terminate")
                 self.async_worker = None
-            for model_state in self.model_states.values():
-                if isinstance(model_state.communicator, AscendHixlEplbCommunicator):
-                    model_state.communicator.close()
+            if self._hixl_session is not None:
+                self._hixl_session.close()
         except Exception as error:
             self._close_error = error
             self.raise_if_close_failed()
 
     def raise_if_close_failed(self) -> None:
+        if self._hixl_session is not None and self._hixl_session._error is not None:
+            self._close_error = self._hixl_session._error
         if self._close_error is not None:
             logger.error("EPLB cleanup failed; terminating the worker: %s", self._close_error)
             # Ordinary RPC exceptions are caught by the upstream worker loop.
@@ -231,6 +235,16 @@ class AscendEplbState(_eplb_state.EplbState):
 
     def start_async_loop(self, *args, **kwargs) -> None:
         if not self._suspended:
+            communicators = {
+                key: model_state.communicator
+                for key, model_state in self.model_states.items()
+                if isinstance(model_state.communicator, AscendHixlEplbCommunicator)
+            }
+            if communicators and self._hixl_session is None:
+                self._hixl_session = _HixlSession(next(iter(communicators.values()))._cpu_group)
+                self._hixl_session.initialize(communicators)
+            if self._hixl_session is not None:
+                self._hixl_session.check_usable()
             super().start_async_loop(*args, **kwargs)
 
     def _initialize_load_stats_state(self, model_state: Any) -> None:
@@ -330,6 +344,7 @@ class AscendEplbState(_eplb_state.EplbState):
         log_stats: bool = False,
     ) -> None:
         """Advance the custom time axis alongside the upstream load window."""
+        self.raise_if_close_failed()
         is_sampling = getattr(self, "_is_load_sampling_step", False) and not is_dummy and not is_profile
         should_collect = getattr(self, "_should_collect_local_load", False)
         self._is_load_sampling_step = False
@@ -516,6 +531,7 @@ class AscendEplbState(_eplb_state.EplbState):
 
     def _all_ranks_result_ready(self, model_state: Any) -> bool:
         """Pipeline readiness reduction behind one foreground iteration."""
+        self.raise_if_close_failed()
         _raise_if_async_worker_stopped(self)
         model_state._eplb_migration_span_steps = getattr(model_state, "_eplb_migration_span_steps", 0) + 1
         group = get_ep_group().cpu_group

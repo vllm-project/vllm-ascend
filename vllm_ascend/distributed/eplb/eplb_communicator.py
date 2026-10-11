@@ -4,7 +4,6 @@
 """Ascend communicators for asynchronous EPLB."""
 
 import contextlib
-import sys
 import time
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
@@ -27,6 +26,8 @@ from vllm.utils.network_utils import get_ip, get_open_port, join_host_port
 _HIXL_MEMORY_ALIGNMENT = 2 * 1024 * 1024
 _TRANSFER_TIMEOUT_SECONDS = 300
 _STATUS_POLL_SECONDS = 0.0005
+
+_ExpertMetadata = dict[tuple[int, int], tuple[tuple[int, ...], int]]
 
 
 @dataclass(frozen=True)
@@ -147,97 +148,38 @@ class AscendGlooEplbCommunicator(TorchDistGlooStagedEplbCommunicator):
         return False
 
 
-class AscendHixlEplbCommunicator(EplbCommunicator):
-    """Read expert weights directly between registered NPU allocations."""
+class _HixlSession:
+    """Own registrations and connections for every model in one EPLB state."""
 
-    receiver_initiated = True
-
-    def __init__(
-        self,
-        cpu_group: ProcessGroup,
-        all_expert_weights: Sequence[Sequence[Any]],
-        expert_buffer: Sequence[Any],
-    ) -> None:
+    def __init__(self, cpu_group: ProcessGroup) -> None:
         self._cpu_group = cpu_group
         self._rank = cpu_group.rank()
         self._world_size = cpu_group.size()
         self._group_error: Exception | None = None
+        self._error: Exception | None = None
         self._engine: Any | None = None
         self._acl_context: Any = None
         self._registered_handles: list[int] = []
         self._storage_refs: list[Any] = []
         self._requests: list[int] = []
-        self._usable = False
         self._remote_engines: dict[int, str] = {}
-        self._remote_send_meta: dict[int, dict[tuple[int, int], tuple[tuple[int, ...], int]]] = {}
-        self._expert_to_src_row: list[dict[int, int]] | None = None
-        self._layer_idx: int | None = None
-        self._pending_reads: dict[int, list[tuple[int, int, int]]] = {}
-        self._pending_bytes = 0
+        self._usable = False
+        self._initializing = False
+
+    def initialize(self, communicators: dict[str, "AscendHixlEplbCommunicator"]) -> None:
+        local_engine = ""
+        local_meta: dict[str, _ExpertMetadata] = {}
 
         def preflight() -> None:
             self._hixl = _resolve_hixl_module()
-            if not all_expert_weights or not all_expert_weights[0] or not expert_buffer:
-                raise ValueError("HIXL EPLB requires expert weights and receive buffers")
-            first_view = all_expert_weights[0][0]
-            first_tensors = self._storage_tensors(first_view)
-            if not first_tensors:
-                raise ValueError("HIXL EPLB requires non-empty NPU expert tensors")
-            first_tensor = first_tensors[0]
-            if first_tensor.device.type != "npu" or first_tensor.ndim == 0 or first_tensor.shape[0] == 0:
-                raise ValueError("HIXL EPLB requires non-empty NPU expert tensors")
-            self._device = first_tensor.device
-            self._num_local_experts = first_tensor.shape[0] if hasattr(first_view, "data_ptr") else len(first_tensors)
-
-        self._initialize_phase(preflight, "preflight")
-        self._initialize(all_expert_weights, expert_buffer)
-        self._log_initialized()
-
-    def _validate_tensors(
-        self,
-        all_expert_weights: Sequence[Sequence[Any]],
-        expert_buffer: Sequence[Any],
-    ) -> None:
-        for layer_views in all_expert_weights:
-            for view in layer_views:
-                self._validate_view(view)
-        for view in expert_buffer:
-            self._validate_view(view)
-
-    @staticmethod
-    def _storage_tensors(view: Any) -> tuple[torch.Tensor, ...]:
-        return (view,) if hasattr(view, "data_ptr") else tuple(view)
-
-    def _validate_view(self, view: Any) -> None:
-        tensors = self._storage_tensors(view)
-        if not tensors:
-            raise ValueError("HIXL EPLB does not support empty expert weight views")
-        if len(tensors) not in (1, self._num_local_experts):
-            raise ValueError("HIXL EPLB weight views must contain one storage or one tensor per local expert")
-        for tensor in tensors:
-            self._validate_storage(tensor)
-        if hasattr(view, "data_ptr"):
-            if tensors[0].shape[0] != self._num_local_experts:
-                raise ValueError("HIXL EPLB weight views must align their first dimension with local experts")
-            if not tensors[0].is_contiguous():
-                raise ValueError("HIXL EPLB stacked tensors must have contiguous expert rows")
-        elif any(tensor.nbytes != tensors[0].nbytes for tensor in tensors[1:]):
-            raise ValueError("HIXL EPLB per-expert tensors in one weight view must have equal sizes")
-
-    def _validate_storage(self, tensor: torch.Tensor) -> None:
-        if tensor.device != self._device or tensor.ndim == 0 or not is_weak_contiguous(tensor):
-            raise ValueError("HIXL EPLB tensors must share one contiguous slot-aligned NPU layout")
-
-    def _iter_storage_tensors(self, views: Sequence[Any]) -> Iterator[torch.Tensor]:
-        for view in views:
-            yield from self._storage_tensors(view)
-
-    def _initialize(
-        self,
-        all_expert_weights: Sequence[Sequence[Any]],
-        expert_buffer: Sequence[Any],
-    ) -> None:
-        local_engine = ""
+            for key, communicator in communicators.items():
+                if communicator._cpu_group is not self._cpu_group:
+                    raise ValueError("HIXL EPLB models must share one CPU group")
+                communicator._prepare()
+                local_meta[key] = communicator._local_send_meta()
+            self._device = next(iter(communicators.values()))._device
+            if any(c._device != self._device for c in communicators.values()):
+                raise ValueError("HIXL EPLB models must share one NPU device")
 
         def initialize_engine() -> None:
             import acl  # type: ignore[import-not-found, import-untyped]  # NPU worker runtime.
@@ -251,33 +193,42 @@ class AscendHixlEplbCommunicator(EplbCommunicator):
             self._check_status(self._engine.initialize(local_engine, {}), "initialize")
 
         self._initializing = True
+        for communicator in communicators.values():
+            communicator._session = self
         try:
+            self._initialize_phase(preflight, "preflight")
             self._initialize_phase(initialize_engine, "initialization")
-            tensors = [
-                tensor for layer_views in all_expert_weights for tensor in self._iter_storage_tensors(layer_views)
-            ]
-            tensors.extend(self._iter_storage_tensors(expert_buffer))
-
-            def register_tensors() -> None:
-                self._validate_tensors(all_expert_weights, expert_buffer)
-                self._register_tensor_segments(tensors)
-
-            self._initialize_phase(register_tensors, "registration")
             self._initialize_phase(
-                lambda: self._exchange_remote_state(local_engine, all_expert_weights), "metadata exchange"
+                lambda: self._exchange_remote_state(local_engine, communicators, local_meta), "metadata exchange"
             )
+            tensors = [
+                tensor
+                for communicator in communicators.values()
+                for views in (*communicator._all_expert_weights, communicator._expert_buffer)
+                for tensor in communicator._iter_storage_tensors(views)
+            ]
+            self._initialize_phase(lambda: self._register_tensor_segments(tensors), "registration")
             self._connect_peers()
             self._usable = True
             self._initializing = False
+            for communicator in communicators.values():
+                # The session now pins storage; model states own the tensors.
+                communicator._all_expert_weights = ()
+                communicator._expert_buffer = ()
+                communicator._log_initialized()
         except Exception:
             try:
                 self.close()
             except Exception as cleanup_error:
                 # Keep the owner on the fatal exception chain until process exit.
                 # An ordinary RPC exception is serialized and then discarded.
-                cleanup_error.hixl_communicator = self  # type: ignore[attr-defined]
+                cleanup_error.hixl_session = self  # type: ignore[attr-defined]
                 raise SystemExit("HIXL initialization rollback failed; worker must terminate") from cleanup_error
             raise
+
+    def check_usable(self) -> None:
+        if not self._usable:
+            raise RuntimeError("HIXL EPLB session is closed or failed") from self._error
 
     def _initialize_phase(self, operation: Callable[[], None], name: str) -> None:
         local_error: Exception | None = None
@@ -338,41 +289,31 @@ class AscendHixlEplbCommunicator(EplbCommunicator):
     def _exchange_remote_state(
         self,
         local_engine: str,
-        all_expert_weights: Sequence[Sequence[Any]],
+        communicators: dict[str, "AscendHixlEplbCommunicator"],
+        local_meta: dict[str, _ExpertMetadata],
     ) -> None:
-        local_meta: dict[tuple[int, int], tuple[tuple[int, ...], int]] = {}
-        for layer_idx, layer_views in enumerate(all_expert_weights):
-            for tensor_idx, view in enumerate(layer_views):
-                tensors = self._storage_tensors(view)
-                if hasattr(view, "data_ptr"):
-                    tensor = tensors[0]
-                    stride = tensor.nbytes // self._num_local_experts
-                    addresses = tuple(tensor.data_ptr() + slot * stride for slot in range(self._num_local_experts))
-                else:
-                    stride = tensors[0].nbytes
-                    addresses = tuple(tensor.data_ptr() for tensor in tensors)
-                local_meta[(layer_idx, tensor_idx)] = addresses, stride
-
-        gathered: list[tuple[str, dict[tuple[int, int], tuple[tuple[int, ...], int]]] | None] = [
-            None
-        ] * self._world_size
-        torch.distributed.all_gather_object(
-            gathered,
-            (local_engine, local_meta),
-            group=self._cpu_group,
-        )
+        gathered: list[tuple[str, dict[str, _ExpertMetadata]] | None] = [None] * self._world_size
+        torch.distributed.all_gather_object(gathered, (local_engine, local_meta), group=self._cpu_group)
         for peer_rank, peer_state in enumerate(gathered):
             if peer_rank == self._rank:
                 continue
-            if peer_state is None or peer_state[1].keys() != local_meta.keys():
-                raise RuntimeError(f"HIXL EPLB metadata mismatch with rank {peer_rank}")
-            for key, (peer_addresses, peer_stride) in peer_state[1].items():
-                if len(peer_addresses) != self._num_local_experts:
-                    raise RuntimeError(f"HIXL EPLB expert count mismatch with rank {peer_rank} for {key}")
-                if peer_stride != local_meta[key][1]:
-                    raise RuntimeError(f"HIXL EPLB tensor size mismatch with rank {peer_rank} for {key}")
+            if peer_state is None or list(peer_state[1]) != list(local_meta):
+                raise RuntimeError(f"HIXL EPLB model order mismatch with rank {peer_rank}")
+            for model_key, communicator in communicators.items():
+                peer_meta = peer_state[1][model_key]
+                if peer_meta.keys() != local_meta[model_key].keys():
+                    raise RuntimeError(f"HIXL EPLB metadata mismatch with rank {peer_rank} for {model_key}")
+                for key, (addresses, stride) in peer_meta.items():
+                    if len(addresses) != communicator._num_local_experts:
+                        raise RuntimeError(
+                            f"HIXL EPLB expert count mismatch with rank {peer_rank} for {model_key}, {key}"
+                        )
+                    if stride != local_meta[model_key][key][1]:
+                        raise RuntimeError(
+                            f"HIXL EPLB tensor size mismatch with rank {peer_rank} for {model_key}, {key}"
+                        )
+                communicator._remote_send_meta[peer_rank] = peer_meta
             self._remote_engines[peer_rank] = peer_state[0]
-            self._remote_send_meta[peer_rank] = peer_state[1]
 
     def _connect_peers(self) -> None:
         assert self._engine is not None
@@ -391,11 +332,6 @@ class AscendHixlEplbCommunicator(EplbCommunicator):
         if status != self._hixl.SUCCESS:
             raise RuntimeError(f"HIXL EPLB {operation} failed with status {status}")
 
-    def set_stream(self, stream: torch.Stream | None) -> None:
-        # HIXL owns its streams, but APIs on another thread must use the
-        # exact ACL context in which this engine was initialized.
-        self._set_hixl_context()
-
     def _set_hixl_context(self) -> None:
         torch.npu.set_device(self._device)
         if self._acl_context is not None:
@@ -403,9 +339,220 @@ class AscendHixlEplbCommunicator(EplbCommunicator):
 
             self._check_status(acl.rt.set_context(self._acl_context), "restore ACL context")
 
+    def _confirm_all_ranks(self, local_error: Exception | None, operation: str) -> None:
+        if self._group_error is not None:
+            raise RuntimeError("HIXL EPLB CPU group failed; worker must terminate") from self._group_error
+        completed = torch.tensor(int(local_error is None), dtype=torch.int32, device="cpu")
+        try:
+            work = torch.distributed.all_reduce(
+                completed,
+                group=self._cpu_group,
+                async_op=True,
+            )
+            work.wait(timeout=timedelta(seconds=_TRANSFER_TIMEOUT_SECONDS))
+        except Exception as error:
+            self._group_error = error
+            raise
+        if local_error is not None:
+            raise local_error
+        if completed.item() != self._world_size:
+            raise RuntimeError(f"HIXL EPLB {operation} failed on another rank")
+
+    def _start_transfers(self, reads: dict[int, list[tuple[int, int, int]]]) -> None:
+        assert self._engine is not None
+        for src_rank, descriptors in reads.items():
+            operations = [
+                self._hixl.TransferOpDesc(
+                    local_addr=local_addr,
+                    remote_addr=remote_addr,
+                    len=length,
+                )
+                for local_addr, remote_addr, length in descriptors
+            ]
+            status, request = self._engine.transfer_async(
+                self._remote_engines[src_rank],
+                self._hixl.TransferOp.READ,
+                operations,
+            )
+            self._check_status(status, f"read from rank {src_rank}")
+            self._requests.append(request)
+
+    def _wait_for_transfers(self, requests: list[int]) -> None:
+        assert self._engine is not None
+        pending = set(requests)
+        deadline = time.monotonic() + _TRANSFER_TIMEOUT_SECONDS
+        while pending:
+            for request in tuple(pending):
+                status, transfer_status = self._engine.get_transfer_status(request)
+                # CANN consumes terminal requests, including query failures.
+                # Never query an invalidated handle again during shutdown.
+                if status != self._hixl.SUCCESS or transfer_status != self._hixl.TransferStatus.WAITING:
+                    pending.remove(request)
+                    self._requests.remove(request)
+                self._check_status(status, "query transfer")
+                if transfer_status not in (self._hixl.TransferStatus.WAITING, self._hixl.TransferStatus.COMPLETED):
+                    raise RuntimeError(f"HIXL EPLB transfer failed with state {transfer_status}")
+            if pending:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("HIXL EPLB transfer timed out")
+                time.sleep(_STATUS_POLL_SECONDS)
+
+    def close(self) -> None:
+        """Release the shared registrations only after every rank has drained."""
+        if self._error is not None:
+            raise RuntimeError("HIXL EPLB session failed; worker must terminate") from self._error
+        if self._engine is None and not self._initializing:
+            return
+        self._usable = False
+        try:
+            local_error: Exception | None = None
+            try:
+                if self._engine is not None:
+                    self._set_hixl_context()
+                    self._wait_for_transfers(self._requests)
+            except Exception as error:
+                local_error = error
+            self._confirm_all_ranks(local_error, "drain")
+            for remote_engine in self._remote_engines.values():
+                try:
+                    assert self._engine is not None
+                    status = self._engine.disconnect(remote_engine)
+                    if status != getattr(self._hixl, "NOT_CONNECTED", None):
+                        self._check_status(status, "disconnect")
+                except Exception as error:
+                    local_error = local_error or error
+            # Outgoing completion alone does not prove incoming READs are done.
+            self._confirm_all_ranks(local_error, "disconnect")
+            try:
+                while self._registered_handles:
+                    assert self._engine is not None
+                    handle = self._registered_handles[-1]
+                    self._check_status(self._engine.deregister_mem(handle), f"deregister memory handle={handle}")
+                    self._registered_handles.pop()
+            except Exception as error:
+                local_error = error
+            self._confirm_all_ranks(local_error, "deregistration")
+            try:
+                if self._engine is not None:
+                    status = self._engine.finalize()
+                    if status is not None:
+                        self._check_status(status, "finalize")
+            except Exception as error:
+                local_error = error
+            self._confirm_all_ranks(local_error, "finalization")
+        except Exception as error:
+            self._error = error
+            raise
+        self._engine = None
+        self._initializing = False
+        self._storage_refs.clear()
+        self._remote_engines.clear()
+
+
+class AscendHixlEplbCommunicator(EplbCommunicator):
+    """Keep model-specific READ metadata while the state owns HIXL resources."""
+
+    receiver_initiated = True
+
+    def __init__(
+        self,
+        cpu_group: ProcessGroup,
+        all_expert_weights: Sequence[Sequence[Any]],
+        expert_buffer: Sequence[Any],
+    ) -> None:
+        self._cpu_group = cpu_group
+        self._rank = cpu_group.rank()
+        self._world_size = cpu_group.size()
+        self._all_expert_weights = all_expert_weights
+        self._expert_buffer = expert_buffer
+        self._session: _HixlSession | None = None
+        self._remote_send_meta: dict[int, _ExpertMetadata] = {}
+        self._expert_to_src_row: list[dict[int, int]] | None = None
+        self._layer_idx: int | None = None
+        self._pending_reads: dict[int, list[tuple[int, int, int]]] = {}
+        self._pending_bytes = 0
+
+    def _prepare(self) -> None:
+        if not self._all_expert_weights or not self._all_expert_weights[0] or not self._expert_buffer:
+            raise ValueError("HIXL EPLB requires expert weights and receive buffers")
+        first_view = self._all_expert_weights[0][0]
+        first_tensors = self._storage_tensors(first_view)
+        if not first_tensors:
+            raise ValueError("HIXL EPLB requires non-empty NPU expert tensors")
+        first_tensor = first_tensors[0]
+        if first_tensor.device.type != "npu" or first_tensor.ndim == 0 or first_tensor.shape[0] == 0:
+            raise ValueError("HIXL EPLB requires non-empty NPU expert tensors")
+        self._device = first_tensor.device
+        self._num_local_experts = first_tensor.shape[0] if hasattr(first_view, "data_ptr") else len(first_tensors)
+        self._validate_tensors(self._all_expert_weights, self._expert_buffer)
+
+    def _require_session(self) -> _HixlSession:
+        if self._session is None:
+            raise RuntimeError("HIXL EPLB session must be initialized before migration")
+        self._session.check_usable()
+        return self._session
+
+    def _validate_tensors(
+        self,
+        all_expert_weights: Sequence[Sequence[Any]],
+        expert_buffer: Sequence[Any],
+    ) -> None:
+        for layer_views in all_expert_weights:
+            for view in layer_views:
+                self._validate_view(view)
+        for view in expert_buffer:
+            self._validate_view(view)
+
+    @staticmethod
+    def _storage_tensors(view: Any) -> tuple[torch.Tensor, ...]:
+        return (view,) if hasattr(view, "data_ptr") else tuple(view)
+
+    def _validate_view(self, view: Any) -> None:
+        tensors = self._storage_tensors(view)
+        if not tensors:
+            raise ValueError("HIXL EPLB does not support empty expert weight views")
+        if len(tensors) not in (1, self._num_local_experts):
+            raise ValueError("HIXL EPLB weight views must contain one storage or one tensor per local expert")
+        for tensor in tensors:
+            self._validate_storage(tensor)
+        if hasattr(view, "data_ptr"):
+            if tensors[0].shape[0] != self._num_local_experts:
+                raise ValueError("HIXL EPLB weight views must align their first dimension with local experts")
+            if not tensors[0].is_contiguous():
+                raise ValueError("HIXL EPLB stacked tensors must have contiguous expert rows")
+        elif any(tensor.nbytes != tensors[0].nbytes for tensor in tensors[1:]):
+            raise ValueError("HIXL EPLB per-expert tensors in one weight view must have equal sizes")
+
+    def _validate_storage(self, tensor: torch.Tensor) -> None:
+        if tensor.device != self._device or tensor.ndim == 0 or not is_weak_contiguous(tensor):
+            raise ValueError("HIXL EPLB tensors must share one contiguous slot-aligned NPU layout")
+
+    def _iter_storage_tensors(self, views: Sequence[Any]) -> Iterator[torch.Tensor]:
+        for view in views:
+            yield from self._storage_tensors(view)
+
+    def _local_send_meta(self) -> _ExpertMetadata:
+        local_meta: _ExpertMetadata = {}
+        for layer_idx, layer_views in enumerate(self._all_expert_weights):
+            for tensor_idx, view in enumerate(layer_views):
+                tensors = self._storage_tensors(view)
+                if hasattr(view, "data_ptr"):
+                    tensor = tensors[0]
+                    stride = tensor.nbytes // self._num_local_experts
+                    addresses = tuple(tensor.data_ptr() + slot * stride for slot in range(self._num_local_experts))
+                else:
+                    stride = tensors[0].nbytes
+                    addresses = tuple(tensor.data_ptr() for tensor in tensors)
+                local_meta[(layer_idx, tensor_idx)] = addresses, stride
+
+        return local_meta
+
+    def set_stream(self, stream: torch.Stream | None) -> None:
+        # HIXL owns its streams; restore the engine's initialization context.
+        self._require_session()._set_hixl_context()
+
     def set_transfer_context(self, old_indices: np.ndarray, layer_idx: int) -> None:
-        if not self._usable:
-            raise RuntimeError("HIXL EPLB communicator is closed or failed")
+        self._require_session()
         if self._pending_reads:
             raise RuntimeError("HIXL EPLB started a layer with pending transfers")
         placement = np.asarray(old_indices).reshape(
@@ -446,18 +593,19 @@ class AscendHixlEplbCommunicator(EplbCommunicator):
             self._pending_bytes += remote_stride
 
     def execute(self) -> None:
+        session = self._require_session()
         if self._layer_idx is None:
             raise RuntimeError("set_transfer_context() must precede HIXL execution")
         phase_started_at = time.perf_counter()
         local_error: Exception | None = None
         try:
-            self._start_transfers()
+            session._start_transfers(self._pending_reads)
         except Exception as error:
             local_error = error
         launch_finished_at = time.perf_counter()
-        request_count = len(self._requests)
+        request_count = len(session._requests)
         try:
-            self._wait_for_transfers(self._requests)
+            session._wait_for_transfers(session._requests)
         except Exception as error:
             local_error = local_error or error
         transfer_finished_at = time.perf_counter()
@@ -465,9 +613,10 @@ class AscendHixlEplbCommunicator(EplbCommunicator):
             # Publish the layer only after every one-sided READ is complete.
             # The foreground can then defer an unavailable result instead of
             # waiting for transfer safety during workspace commit.
-            self._confirm_all_ranks(local_error, "transfer")
-        except Exception:
-            self._usable = False
+            session._confirm_all_ranks(local_error, "transfer")
+        except Exception as error:
+            session._error = error
+            session._usable = False
             raise
         finally:
             confirmed_at = time.perf_counter()
@@ -485,138 +634,6 @@ class AscendHixlEplbCommunicator(EplbCommunicator):
             self._expert_to_src_row = None
             self._layer_idx = None
 
-    def _confirm_all_ranks(self, local_error: Exception | None, operation: str) -> None:
-        if self._group_error is not None:
-            raise RuntimeError("HIXL EPLB CPU group failed; worker must terminate") from self._group_error
-        completed = torch.tensor(int(local_error is None), dtype=torch.int32, device="cpu")
-        try:
-            work = torch.distributed.all_reduce(
-                completed,
-                group=self._cpu_group,
-                async_op=True,
-            )
-            work.wait(timeout=timedelta(seconds=_TRANSFER_TIMEOUT_SECONDS))
-        except Exception as error:
-            self._group_error = error
-            raise
-        if local_error is not None:
-            raise local_error
-        if completed.item() != self._world_size:
-            raise RuntimeError(f"HIXL EPLB {operation} failed on another rank")
-
-    def _start_transfers(self) -> None:
-        assert self._engine is not None
-        for src_rank, descriptors in self._pending_reads.items():
-            operations = [
-                self._hixl.TransferOpDesc(
-                    local_addr=local_addr,
-                    remote_addr=remote_addr,
-                    len=length,
-                )
-                for local_addr, remote_addr, length in descriptors
-            ]
-            status, request = self._engine.transfer_async(
-                self._remote_engines[src_rank],
-                self._hixl.TransferOp.READ,
-                operations,
-            )
-            self._check_status(status, f"read from rank {src_rank}")
-            self._requests.append(request)
-
-    def _wait_for_transfers(self, requests: list[int]) -> None:
-        assert self._engine is not None
-        pending = set(requests)
-        deadline = time.monotonic() + _TRANSFER_TIMEOUT_SECONDS
-        while pending:
-            for request in tuple(pending):
-                status, transfer_status = self._engine.get_transfer_status(request)
-                self._check_status(status, "query transfer")
-                if transfer_status == self._hixl.TransferStatus.COMPLETED:
-                    pending.remove(request)
-                    self._requests.remove(request)
-                elif transfer_status != self._hixl.TransferStatus.WAITING:
-                    raise RuntimeError(f"HIXL EPLB transfer failed with state {transfer_status}")
-            if pending:
-                if time.monotonic() >= deadline:
-                    raise TimeoutError("HIXL EPLB transfer timed out")
-                time.sleep(_STATUS_POLL_SECONDS)
-
     @property
     def needs_profile_buffer_reservation(self) -> bool:
         return False
-
-    def close(self, *, coordinated: bool = True) -> None:
-        """Drain, unbind and deregister before allowing storage to be released.
-
-        A failed close retains the engine, outstanding handles and storage.
-        The caller must propagate the error and terminate the worker rather
-        than rebuild the model or unmap its memory.
-        """
-        engine = getattr(self, "_engine", None)
-        if engine is None and not getattr(self, "_initializing", False):
-            return
-        self._usable = False
-        local_error: Exception | None = None
-        try:
-            if engine is not None:
-                self._set_hixl_context()
-                self._wait_for_transfers(self._requests)
-        except Exception as error:
-            local_error = error
-        if coordinated:
-            self._confirm_all_ranks(local_error, "drain")
-        elif local_error is not None:
-            raise local_error
-        for remote_engine in self._remote_engines.values():
-            try:
-                assert engine is not None
-                status = engine.disconnect(remote_engine)
-                if status != getattr(self._hixl, "NOT_CONNECTED", None):
-                    self._check_status(status, "disconnect")
-            except Exception as error:
-                local_error = local_error or error
-        if coordinated:
-            # Peers can still have incoming READ connections bound to our
-            # memory after our own outgoing connections have been closed.
-            self._confirm_all_ranks(local_error, "disconnect")
-        elif local_error is not None:
-            raise local_error
-        try:
-            while self._registered_handles:
-                assert engine is not None
-                handle = self._registered_handles[-1]
-                self._check_status(engine.deregister_mem(handle), f"deregister memory handle={handle}")
-                self._registered_handles.pop()
-        except Exception as error:
-            local_error = error
-        if coordinated:
-            self._confirm_all_ranks(local_error, "deregistration")
-        elif local_error is not None:
-            raise local_error
-        try:
-            if engine is not None:
-                status = engine.finalize()
-                if status is not None:
-                    self._check_status(status, "finalize")
-        except Exception as error:
-            local_error = error
-        if coordinated:
-            self._confirm_all_ranks(local_error, "finalization")
-        elif local_error is not None:
-            raise local_error
-        self._engine = None
-        self._initializing = False
-        self._storage_refs.clear()
-        self._remote_engines.clear()
-        self._remote_send_meta.clear()
-
-    def __del__(self) -> None:
-        # ACL may already be shut down. Explicit close owns normal teardown;
-        # failed teardown resources are released by process exit.
-        if sys.is_finalizing():
-            return
-        try:  # noqa: SIM105
-            # Destruction is not collective. Normal shutdown must use close().
-            self.close(coordinated=False)
-        except Exception:
-            pass

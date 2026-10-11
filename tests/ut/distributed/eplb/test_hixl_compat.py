@@ -19,13 +19,9 @@ from vllm_ascend.distributed.eplb import eplb_communicator, hixl_compat
 @pytest.mark.parametrize("finalizing", [False, True])
 def test_destructors_do_not_call_hixl_after_interpreter_shutdown(monkeypatch, finalizing):
     monkeypatch.setattr(sys, "is_finalizing", lambda: finalizing)
-    communicator = eplb_communicator.AscendHixlEplbCommunicator.__new__(eplb_communicator.AscendHixlEplbCommunicator)
-    communicator.close = MagicMock()
     engine = hixl_compat.Hixl.__new__(hixl_compat.Hixl)
     engine._close = MagicMock()
-    communicator.__del__()
     engine.__del__()
-    assert communicator.close.call_count == (0 if finalizing else 1)
     assert engine._close.call_count == (0 if finalizing else 1)
 
 
@@ -118,8 +114,11 @@ def test_hixl_communicator_reads_through_hixl_compat(monkeypatch):
         gathered[1] = (
             "192.0.2.2:12346",
             {
-                key: (tuple(address + 10_000 for address in addresses), stride)
-                for key, (addresses, stride) in local_state[1].items()
+                model: {
+                    key: (tuple(address + 10_000 for address in addresses), stride)
+                    for key, (addresses, stride) in meta.items()
+                }
+                for model, meta in local_state[1].items()
             },
         )
 
@@ -144,7 +143,9 @@ def test_hixl_communicator_reads_through_hixl_compat(monkeypatch):
     ]
     communicator = eplb_communicator.AscendHixlEplbCommunicator(group, weights, buffers)
 
-    assert communicator._hixl is hixl_compat
+    session = eplb_communicator._HixlSession(group)
+    session.initialize({"main": communicator})
+    assert session._hixl is hixl_compat
     assert engine.options == {}
     assert len(engine.registered) == 1
     assert isinstance(engine.registered[0], hixl_compat.MemDesc)
@@ -162,5 +163,5 @@ def test_hixl_communicator_reads_through_hixl_compat(monkeypatch):
     assert operation == hixl_compat.TransferOp.READ
     assert all(isinstance(desc, hixl_compat.TransferOpDesc) for desc in descriptors)
 
-    communicator.close()
+    session.close()
     assert engine.finalized
