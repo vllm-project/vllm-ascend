@@ -249,6 +249,10 @@ class AscendMiniMaxM3IndexerMetadataBuilder(AttentionMetadataBuilder[AscendMiniM
             device=device,
         )
         self.block_size = kv_cache_spec.block_size
+        # Required by the score operator; local masking runs in fused TopK.
+        self.decode_start_loc_buffer = (
+            torch.zeros_like(self.context_len_buffer) if _USE_ASCENDC_INDEX_SCORE_DECODE else None
+        )
         self.attn_mask_builder = AttentionMaskBuilder(device) if _USE_ASCENDC_INDEX_SCORE_PREFILL else None
 
     def build(
@@ -326,6 +330,9 @@ class AscendMiniMaxM3IndexerMetadataBuilder(AttentionMetadataBuilder[AscendMiniM
                 decode_query_len=decode_query_len,
                 cu_seqlens_q=decode_cu_seqlens_q,
                 context_lens=decode_context_lens,
+                start_loc=(
+                    self.decode_start_loc_buffer[:active_decodes] if self.decode_start_loc_buffer is not None else None
+                ),
             )
 
         return AscendMiniMaxM3IndexerMetadata(
@@ -407,11 +414,6 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
             assert d is not None
             decode_iq = iq[:num_decode_tokens]
             if _USE_ASCENDC_INDEX_SCORE_DECODE:
-                decode_start_loc = torch.div(
-                    d.context_lens,
-                    self.block_size,
-                    rounding_mode="floor",
-                ).to(dtype=torch.int32)
                 decode_topk, decode_select_num_idx = minimax_m3_index_decode_ascendc(
                     decode_iq,
                     kv,
@@ -419,7 +421,7 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
                     d.cu_seqlens_q,
                     d.seq_lens,
                     d.context_lens,
-                    decode_start_loc,
+                    d.start_loc,
                     index_md.causal_mask,
                     topk=self.topk_blocks,
                     init_blocks=self.init_blocks,
