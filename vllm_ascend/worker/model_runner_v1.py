@@ -154,6 +154,7 @@ from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h import get_prebound_copy_sfa_slots
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
+    allocate_shared_indexer_cache,
     apply_layerwise_kv_cache_plan,
     get_layerwise_reuse_config,
 )
@@ -233,7 +234,6 @@ from vllm_ascend.worker.device_metadata import (
     DeviceMetadataTask,
     DeviceMetadataTaskProvider,
 )
-from vllm_ascend.worker.indexer_cache import allocate_shared_indexer_cache
 from vllm_ascend.worker.kvpp_cache import allocate_kvpp_cache
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.utils import (

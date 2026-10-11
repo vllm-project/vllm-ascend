@@ -5,7 +5,9 @@ import pytest
 import torch
 
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
-from vllm_ascend.worker.indexer_cache import allocate_shared_indexer_cache
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
+    allocate_shared_indexer_cache,
+)
 
 
 @pytest.mark.parametrize("c8_first", [False, True])
