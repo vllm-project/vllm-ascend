@@ -8,9 +8,9 @@ from unittest.mock import Mock
 import pytest
 
 from tests.ut.core.test_dyntra_lb_scheduler import create_dyntra_lb_scheduler, make_dyntra_test_config
+from vllm_ascend.core.balance_scheduler import BalanceScheduler
 from vllm_ascend.core.dyntra_lb_scheduler import AsyncDyntraLBScheduler, DyntraLBScheduler
 from vllm_ascend.core.scheduler_profiling_chunk import ProfilingChunkScheduler
-from vllm_ascend.patch.platform.patch_balance_schedule import BalanceScheduler
 
 
 @pytest.mark.parametrize(
@@ -21,10 +21,6 @@ from vllm_ascend.patch.platform.patch_balance_schedule import BalanceScheduler
 def test_boundary_state_is_drained_consumed_and_not_dispatched(monkeypatch, scheduler_cls, with_connector):
     """Hand off main snapshots locally; preserve release connector metadata."""
     scheduler = create_dyntra_lb_scheduler(make_dyntra_test_config(), scheduler_cls=scheduler_cls)
-    if isinstance(scheduler, BalanceScheduler):
-        # Exercise the local schedule implementation, not its super fallback.
-        scheduler._balance_enabled = True
-
     scheduler.connector = object() if with_connector else None
     scheduler.ec_connector = None
     scheduler.requests = {"cached": object(), "boundary": object()}

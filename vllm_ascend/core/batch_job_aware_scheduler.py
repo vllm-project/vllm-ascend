@@ -649,6 +649,7 @@ class BatchJobAwareScheduler(Scheduler):
         incremental O(1) deltas when a single request is added, avoiding
         redundant full scans.
         """
+        # delta for batch-job-aware scheduling: refresh reservations each step.
         self._block_reserver.invalidate_cache()
         return super().schedule(*args, **kwargs)
 

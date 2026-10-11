@@ -275,7 +275,6 @@ class TestProfilingChunkManager(TestBase):
 
 
 class TestProfilingChunkScheduler(TestBase):
-    @patch("vllm_ascend.patch.platform.patch_balance_schedule.init_ascend_config")
     # ProfilingChunkScheduler imports these names inside __init__, so patch the
     # source module from which that inline import resolves them.
     @patch("vllm_ascend.ascend_config.init_ascend_config")
@@ -287,7 +286,6 @@ class TestProfilingChunkScheduler(TestBase):
         self,
         mock_get_ascend_config,
         _mock_profiling_init_ascend_config,
-        mock_balance_init_ascend_config,
         srf_enabled=False,
     ):
         profiling_cfg = MagicMock()
@@ -300,7 +298,6 @@ class TestProfilingChunkScheduler(TestBase):
         short_request_first_cfg.threshold = 256
         short_request_first_cfg.long_max_wait_ms = 2000.0
         mock_get_ascend_config.return_value.scheduler_config.short_request_first_config = short_request_first_cfg
-        mock_balance_init_ascend_config.return_value.scheduler_config.short_request_first_config.enabled = False
 
         mock_hf_config = MagicMock()
         mock_hf_config.model_type = "qwen3"
@@ -363,7 +360,7 @@ class TestProfilingChunkScheduler(TestBase):
             stack.enter_context(
                 patch.object(ModelConfig, "is_encoder_decoder", new_callable=PropertyMock, return_value=False)
             )
-            # vLLM main (post-v0.28.0) reads model_config.uses_mrope in
+            # vLLM 0.30.0 reads model_config.uses_mrope in
             # Scheduler.__init__, which infinitely recurses on a bare
             # MagicMock hf_config. Override it to keep the UT runnable.
             stack.enter_context(patch.object(ModelConfig, "uses_mrope", new_callable=PropertyMock, return_value=False))
@@ -385,7 +382,6 @@ class TestProfilingChunkScheduler(TestBase):
         scheduler = self.create_scheduler()
         self.assertIsNotNone(scheduler.profiling_chunk_manager)
         self.assertFalse(scheduler._profiling_initialized)
-        self.assertFalse(scheduler._short_request_first_enabled)
         self.assertNotIsInstance(
             scheduler.waiting,
             ShortRequestFirstRequestQueue,
@@ -713,7 +709,6 @@ class TestProfilingChunkScheduler(TestBase):
 
 
 class TestProfilingChunkAsyncScheduler(TestBase):
-    @patch("vllm_ascend.patch.platform.patch_balance_schedule.init_ascend_config")
     # ProfilingChunkScheduler imports these names inside __init__, so patch the
     # source module from which that inline import resolves them.
     @patch("vllm_ascend.ascend_config.init_ascend_config")
@@ -725,7 +720,6 @@ class TestProfilingChunkAsyncScheduler(TestBase):
         self,
         mock_get_ascend_config,
         _mock_profiling_init_ascend_config,
-        mock_balance_init_ascend_config,
         srf_enabled=False,
         async_scheduling=True,
         pipeline_parallel_size=1,
@@ -740,8 +734,6 @@ class TestProfilingChunkAsyncScheduler(TestBase):
         short_request_first_cfg.threshold = 256
         short_request_first_cfg.long_max_wait_ms = 2000.0
         mock_get_ascend_config.return_value.scheduler_config.short_request_first_config = short_request_first_cfg
-        mock_balance_init_ascend_config.return_value.scheduler_config.short_request_first_config.enabled = False
-
         mock_hf_config = MagicMock()
         mock_hf_config.model_type = "qwen3"
         mock_hf_config.is_encoder_decoder = False
@@ -812,7 +804,7 @@ class TestProfilingChunkAsyncScheduler(TestBase):
             stack.enter_context(
                 patch.object(ModelConfig, "is_encoder_decoder", new_callable=PropertyMock, return_value=False)
             )
-            # vLLM main (post-v0.28.0) reads model_config.uses_mrope in
+            # vLLM 0.30.0 reads model_config.uses_mrope in
             # Scheduler.__init__, which infinitely recurses on a bare
             # MagicMock hf_config. Override it to keep the UT runnable.
             stack.enter_context(patch.object(ModelConfig, "uses_mrope", new_callable=PropertyMock, return_value=False))

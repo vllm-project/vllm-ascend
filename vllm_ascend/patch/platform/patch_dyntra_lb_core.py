@@ -26,7 +26,7 @@ from vllm.logger import logger
 from vllm.v1.engine.core import DPEngineCoreProc
 from vllm.v1.request import Request
 
-from vllm_ascend.ascend_config import DyntraLBConfig, get_ascend_config, init_ascend_config
+from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.core.dyntra_lb_scheduler import (
     diagnostics_enabled,
     get_dyntra_lb_request_block_num,
@@ -52,25 +52,6 @@ class _Modification(TypedDict):
     out_blk: list[int]
     in_blk: list[int]
     freeze: bool
-
-
-def _get_dyntra_lb_config(vllm_config) -> DyntraLBConfig:
-    try:
-        return get_ascend_config().scheduler_config.dyntra_lb_config
-    except Exception:
-        pass
-    additional_config = getattr(vllm_config, "additional_config", None) or {}
-    scheduler_config = additional_config.get("scheduler_config") or {}
-    if not isinstance(scheduler_config, dict):
-        return DyntraLBConfig()
-    dyntra_lb_config = scheduler_config.get("dyntra_lb_config") or {}
-    if not isinstance(dyntra_lb_config, dict):
-        return DyntraLBConfig()
-    return DyntraLBConfig(**dyntra_lb_config)
-
-
-def _dyntra_lb_enabled(vllm_config) -> bool:
-    return _get_dyntra_lb_config(vllm_config).enabled
 
 
 def _print_rank_0(message: str, dp_rank: int, enable_diagnostics: bool) -> None:

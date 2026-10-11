@@ -108,13 +108,12 @@ def test_rejects_installation_after_request_admission():
         )
 
 
-@pytest.mark.parametrize("enabled", [False, True])
-def test_async_scheduler_only_installs_queue_when_enabled(enabled):
+def test_async_scheduler_installs_queue():
     vllm_config = SimpleNamespace()
     ascend_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(
             short_request_first_config=SimpleNamespace(
-                enabled=enabled,
+                enabled=True,
                 threshold=256,
                 long_max_wait_ms=0.0,
             )
@@ -132,7 +131,7 @@ def test_async_scheduler_only_installs_queue_when_enabled(enabled):
     ):
         scheduler = ShortRequestFirstAsyncScheduler(vllm_config=vllm_config)
 
-    assert isinstance(scheduler.waiting, ShortRequestFirstRequestQueue) is enabled
+    assert isinstance(scheduler.waiting, ShortRequestFirstRequestQueue)
 
 
 @pytest.mark.parametrize(
