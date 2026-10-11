@@ -985,6 +985,18 @@ class MiniMaxM3DecoderLayer(nn.Module):
         # Track layout explicitly: for a one-token batch the padded SP shard
         # and full input can have the same shape.
         full_num_tokens = positions.shape[0]
+        if self.use_sequence_parallel and not input_is_sequence_parallel:
+            # ACL Graph may expose the bucket-sized hidden input and the
+            # actual-token positions as independent symbolic dimensions. Bind
+            # the first SP shard to the positions dimension so hidden states,
+            # residuals, and subsequent reduce-scatter outputs all use the same
+            # token layout.
+            assert hidden_states.shape[0] >= full_num_tokens, (
+                "MiniMax-M3 SP input has fewer rows than positions"
+            )
+            hidden_states = hidden_states[:full_num_tokens]
+            if residual is not None:
+                residual = residual[:full_num_tokens]
         if input_is_sequence_parallel and not self.use_sequence_parallel:
             hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
             assert residual is not None
