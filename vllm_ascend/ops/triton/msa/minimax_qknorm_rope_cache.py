@@ -47,6 +47,8 @@ def _norm_rope(
     return x
 
 
+# Request-dependent bounds must not specialize on their value or alignment.
+# Head dimensions and layout strides below are fixed for a warmed deployment.
 @triton.jit(do_not_specialize=["NUM_SLOTS"])
 def _minimax_qknorm_rope_cache_kernel(
     packed,
