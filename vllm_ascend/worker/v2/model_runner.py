@@ -594,7 +594,7 @@ class NPUModelRunner(GPUModelRunner):
         # The initial dummy profile bypasses PCP batch partitioning. Profile
         # rank-local tokens; the existing MoE preparation still handles TP.
         pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
-        global_max_num_tokens = self.max_num_tokens
+        global_max_num_tokens: int = self.max_num_tokens
         profile_max_num_tokens = (global_max_num_tokens + pcp_size - 1) // pcp_size
         with override_mrv2_in_profile_run(True):
             if (
