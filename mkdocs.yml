@@ -267,6 +267,7 @@ nav:
     - faqs.md
   - User Guide:
     - user_guide/index.md
+    - Sparse HCCL Weight Updates: user_guide/sparse_hccl.md
     - Deployment Guide:
         - user_guide/deployment_guide/index.md
         - user_guide/deployment_guide/using_mindie_motor.md
