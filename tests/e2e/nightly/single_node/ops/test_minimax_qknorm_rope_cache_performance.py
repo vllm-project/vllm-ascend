@@ -30,9 +30,10 @@ def constexpr_reference(tmp_path_factory):
     # avoiding a second hand-maintained copy of the production implementation.
     tree = ast.parse(inspect.getsource(fused_module._minimax_qknorm_rope_cache_kernel.fn))
     fn = tree.body[0]
-    fn.decorator_list = [ast.parse("triton.jit").body[0].value]
+    assert isinstance(fn, ast.FunctionDef)
+    fn.decorator_list = [ast.parse("triton.jit", mode="eval").body]
     argument = next(arg for arg in fn.args.args if arg.arg == "NUM_SLOTS")
-    argument.annotation = ast.parse("tl.constexpr").body[0].value
+    argument.annotation = ast.parse("tl.constexpr", mode="eval").body
     path = tmp_path_factory.mktemp("minimax_constexpr") / "reference.py"
     path.write_text(
         "from vllm.triton_utils import tl, triton\n"
@@ -42,6 +43,7 @@ def constexpr_reference(tmp_path_factory):
         encoding="utf-8",
     )
     spec = importlib.util.spec_from_file_location("minimax_constexpr_reference", path)
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module._minimax_qknorm_rope_cache_kernel
@@ -91,7 +93,7 @@ def test_num_slots_specialization_performance(tokens, q_heads, constexpr_referen
             graphs[name] = captured_call(fn)
     for actual, expected in zip(outputs["runtime"], outputs["constexpr"]):
         torch.testing.assert_close(actual, expected, atol=0, rtol=0)
-    samples = {name: [] for name in graphs}
+    samples: dict[str, list[float]] = {name: [] for name in graphs}
     # Alternate order to reduce systematic clock/thermal drift between variants.
     for sample in range(TIMING_SAMPLES):
         order = ("constexpr", "runtime") if sample % 2 == 0 else ("runtime", "constexpr")

@@ -140,7 +140,12 @@ def test_fused_cache_insert_precedes_indexer_and_attention():
     layer.kv_cache = torch.empty(2, 4, 16, 1, 128)
     index_cache = torch.empty(4, 16, 128)
     order = []
-    layer.indexer = Mock(side_effect=lambda query: order.append("index") or "topk")
+
+    def run_indexer(query):
+        order.append("index")
+        return "topk"
+
+    layer.indexer = Mock(side_effect=run_indexer)
     layer.indexer.index_cache = SimpleNamespace(prefix="index", kv_cache=[index_cache])
     layer.impl = SimpleNamespace(forward=Mock(side_effect=lambda *args: order.append("attention")))
     layer._insert_kv = Mock(side_effect=AssertionError("duplicate cache insertion"))
@@ -153,7 +158,12 @@ def test_fused_cache_insert_precedes_indexer_and_attention():
         }
     )
     q, iq = torch.empty(4, 1024), torch.empty(4, 128)
-    kernel = Mock(side_effect=lambda *args, **kwargs: order.append("insert") or (q, iq))
+
+    def run_kernel(*args, **kwargs):
+        order.append("insert")
+        return q, iq
+
+    kernel = Mock(side_effect=run_kernel)
     module = SimpleNamespace(minimax_qknorm_rope_cache=kernel)
     with (
         patch.dict("sys.modules", {"vllm_ascend.ops.triton.msa.minimax_qknorm_rope_cache": module}),

@@ -76,7 +76,7 @@ def test_minimax_qknorm_rope_cache(tokens, heads, rotary_dim):
         eps,
         index_packed=packed_npu[:, main_width:] if separate_index else None,
     )
-    expected = reference(packed, cos_sin, positions, weights, *heads, eps)
+    expected = reference(packed, cos_sin, positions, weights, q_heads, kv_heads, index_heads, eps)
     torch.testing.assert_close(q.cpu().float(), expected[0].to(q.dtype).float(), atol=0.032, rtol=0.01)
     torch.testing.assert_close(iq.cpu().float(), expected[3].to(iq.dtype).float(), atol=0.032, rtol=0.01)
     for cache, part, mapping, sentinel in (
