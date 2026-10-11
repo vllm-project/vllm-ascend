@@ -46,11 +46,11 @@ def _shared_dequant_swiglu_quant(
 
 
 _REPRO_CASES = [
-    ([4608, 2048], 0.0, "large_2048_aligned"),
-    ([2, 192], 0.0, "small_192_misaligned"),
-    ([4, 192], 0.0, "small_192_misaligned_4rows"),
-    ([8, 384], 0.0, "small_384_aligned"),
-    ([1, 256], 0.0, "single_row_256_aligned"),
+    ([4608, 2048], 10.0, "large_2048_aligned"),
+    ([2, 192], 10.0, "small_192_misaligned"),
+    ([4, 192], 10.0, "small_192_misaligned_4rows"),
+    ([8, 384], 10.0, "small_384_aligned"),
+    ([1, 256], 10.0, "single_row_256_aligned"),
 ]
 
 
@@ -78,7 +78,7 @@ def test_npu_dequant_swiglu_quant_with_limit(x_shape, clamp_limit, desc):
     # 2. Fused op (NPUGraph, same as production code)
     graph = torch.npu.NPUGraph()
     with torch.npu.graph(graph, capture_error_mode="thread_local", auto_dispatch_capture=True):
-        output, output_scale = torch.ops._C_ascend.npu_dequant_swiglu_quant(
+        output, output_scale = torch_npu.npu_dequant_swiglu_quant(
             x=x,
             weight_scale=weight_scale,
             activation_scale=activate_scale,
