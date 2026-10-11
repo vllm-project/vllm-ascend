@@ -69,7 +69,7 @@ def test_parallel_and_vllm_config_keep_upstream_validation():
     assert vllm_config.parallel_config.enable_eplb
     # Provisional auto-selection happens at config stage (no HIXL here);
     # the worker-stage consensus may still correct it group-wide.
-    assert vllm_config.parallel_config.eplb_config.communicator == "hixl"
+    assert vllm_config.parallel_config.eplb_config.communicator == "torch_gloo"
     assert getattr(
         vllm_config.parallel_config.eplb_config,
         patch_eplb._AUTO_SELECTED_ATTRIBUTE,
@@ -130,6 +130,7 @@ def test_resolve_ascend_communicator_selects_hixl_when_group_agrees():
             )
             with (
                 patch.object(patch_eplb, "_group_hixl_binding_consensus", return_value=binding),
+                patch("vllm_ascend.patch.platform.patch_eplb.get_current_vllm_config", return_value=vllm_config),
             ):
                 stair_config = patch_eplb.resolve_ascend_eplb_communicator(parallel_config, ascend_eplb_config)
 
@@ -138,20 +139,54 @@ def test_resolve_ascend_communicator_selects_hixl_when_group_agrees():
             assert vllm_config.additional_config == {}
 
 
-@pytest.mark.parametrize("binding", ["none", "mixed"])
-def test_resolve_ascend_communicator_rejects_unusable_hixl_without_gloo(binding):
-    parallel_config, ascend_eplb_config, vllm_config = _resolver_fixtures(communicator="hixl", auto_selected=True)
+def test_resolve_ascend_communicator_falls_back_to_gloo_and_clamps_unset_limits():
+    parallel_config, ascend_eplb_config, vllm_config = _resolver_fixtures(
+        communicator="hixl",
+        auto_selected=True,
+        additional_config={"eplb_config": {"stair_config": {"load_window_bins": 32}}},
+    )
     with (
-        patch.object(patch_eplb, "_group_hixl_binding_consensus", return_value=binding),
-        pytest.raises(RuntimeError, match="consistent binding"),
+        patch.object(patch_eplb, "_group_hixl_binding_consensus", return_value="none"),
+        patch("vllm_ascend.patch.platform.patch_eplb.get_current_vllm_config", return_value=vllm_config),
     ):
-        patch_eplb.resolve_ascend_eplb_communicator(parallel_config, ascend_eplb_config)
-    assert parallel_config.eplb_config.communicator == "hixl"
-    assert vllm_config.additional_config == {}
+        stair_config = patch_eplb.resolve_ascend_eplb_communicator(parallel_config, ascend_eplb_config)
+
+    assert parallel_config.eplb_config.communicator == "torch_gloo"
+    assert vllm_config.additional_config["eplb_config"]["stair_config"] == {
+        "load_window_bins": 32,
+        "rank_transfer_limit": 1,
+        "cross_node_transfer_limit": 1,
+    }
+    assert (stair_config.rank_transfer_limit, stair_config.cross_node_transfer_limit) == (1, 1)
+    assert stair_config.load_window_bins == 32
+
+
+def test_resolve_ascend_communicator_keeps_explicit_limits_on_gloo_fallback():
+    parallel_config, ascend_eplb_config, vllm_config = _resolver_fixtures(
+        communicator="hixl",
+        auto_selected=True,
+        additional_config={
+            "eplb_config": {"stair_config": {"rank_transfer_limit": -1, "cross_node_transfer_limit": 0}}
+        },
+    )
+    with (
+        patch.object(patch_eplb, "_group_hixl_binding_consensus", return_value="mixed"),
+        patch("vllm_ascend.patch.platform.patch_eplb.get_current_vllm_config", return_value=vllm_config),
+        patch.object(patch_eplb.logger, "warning") as warning,
+    ):
+        stair_config = patch_eplb.resolve_ascend_eplb_communicator(parallel_config, ascend_eplb_config)
+
+    assert parallel_config.eplb_config.communicator == "torch_gloo"
+    assert vllm_config.additional_config["eplb_config"]["stair_config"] == {
+        "rank_transfer_limit": -1,
+        "cross_node_transfer_limit": 0,
+    }
+    assert (stair_config.rank_transfer_limit, stair_config.cross_node_transfer_limit) == (-1, 0)
+    assert any("keeping the explicitly configured" in call.args[0] for call in warning.call_args_list)
 
 
 def test_resolve_ascend_communicator_skips_consensus_for_explicit_communicator():
-    parallel_config, ascend_eplb_config, _ = _resolver_fixtures(communicator="torch_gloo")
+    parallel_config, ascend_eplb_config, _ = _resolver_fixtures(communicator="hixl")
     with patch.object(
         patch_eplb,
         "_group_hixl_binding_consensus",
@@ -159,18 +194,8 @@ def test_resolve_ascend_communicator_skips_consensus_for_explicit_communicator()
     ):
         stair_config = patch_eplb.resolve_ascend_eplb_communicator(parallel_config, ascend_eplb_config)
 
-    assert parallel_config.eplb_config.communicator == "torch_gloo"
+    assert parallel_config.eplb_config.communicator == "hixl"
     assert stair_config is ascend_eplb_config.stair_config
-
-
-@pytest.mark.parametrize("binding", ["none", "mixed"])
-def test_explicit_hixl_requires_binding_consensus(binding):
-    parallel_config, ascend_eplb_config, _ = _resolver_fixtures(communicator="hixl")
-    with (
-        patch.object(patch_eplb, "_group_hixl_binding_consensus", return_value=binding),
-        pytest.raises(RuntimeError, match="consistent binding"),
-    ):
-        patch_eplb.resolve_ascend_eplb_communicator(parallel_config, ascend_eplb_config)
 
 
 def test_group_hixl_binding_consensus_combines_rank_bindings(monkeypatch):
