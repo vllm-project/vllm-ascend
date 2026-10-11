@@ -36,15 +36,19 @@ except Exception:  # pragma: no cover - CI CPU environments have no xlite wheel
 
     xlite_mod = types.ModuleType("xlite")
     xlite_c = types.ModuleType("xlite._C")
-    xlite_c.AttnMHA = _AttnKind.MHA
-    xlite_c.AttnMLA = _AttnKind.MLA
-    xlite_c.AttnHybrid = _AttnKind.HYBRID
-    xlite_c.AttnDSA = _AttnKind.DSA
-    xlite_c.AttnMeta = type("AttnMeta", (), {})
-    xlite_c.AttnMetaV2 = type("AttnMetaV2", (), {})
-    xlite_c.Runtime = MagicMock
-    xlite_c.ScoringFuncSoftmax = 0
-    xlite_c.ScoringFuncSigmoid = 1
+    # setattr keeps the dynamic ModuleType attributes invisible to mypy.
+    for _name, _value in {
+        "AttnMHA": _AttnKind.MHA,
+        "AttnMLA": _AttnKind.MLA,
+        "AttnHybrid": _AttnKind.HYBRID,
+        "AttnDSA": _AttnKind.DSA,
+        "AttnMeta": type("AttnMeta", (), {}),
+        "AttnMetaV2": type("AttnMetaV2", (), {}),
+        "Runtime": MagicMock,
+        "ScoringFuncSoftmax": 0,
+        "ScoringFuncSigmoid": 1,
+    }.items():
+        setattr(xlite_c, _name, _value)
     for _name in (
         "graph_capture_begin",
         "graph_capture_end",
@@ -170,7 +174,7 @@ def test_load_moe_weights_binds_shared_expert_gate(monkeypatch):
         return [torch.zeros(2, 4)]
 
     monkeypatch.setattr(xlite_mod_under_test, "get_layer_weights", fake_get_layer_weights)
-    matmul_requests: list[str] = []
+    matmul_requests: list[tuple[str, str]] = []
 
     def fake_init_matmul_weights(layers, name, path):
         matmul_requests.append((name, path))
