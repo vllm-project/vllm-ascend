@@ -25,6 +25,14 @@ def test_destructors_do_not_call_hixl_after_interpreter_shutdown(monkeypatch, fi
     assert engine._close.call_count == (0 if finalizing else 1)
 
 
+def test_destructor_ignores_cleared_module_globals(monkeypatch):
+    engine = hixl_compat.Hixl.__new__(hixl_compat.Hixl)
+    engine._close = MagicMock()
+    monkeypatch.setattr(hixl_compat, "sys", None)
+    engine.__del__()
+    engine._close.assert_not_called()
+
+
 def test_compat_layout_matches_probed_cann_abi():
     assert ctypes.sizeof(hixl_compat.MemDesc) == 144
     assert ctypes.sizeof(hixl_compat.TransferOpDesc) == 24
