@@ -32,7 +32,7 @@ The four knobs are freely combinable — on a PD decode node all four can be ena
 | **LM head**   | ✅     | ✅     | ✅       | ✅      |
 
 ```{note}
-- o_proj / MLP TP cannot be combined with standard TP and require `tensor_parallel_size == 1` (enforced at config load); embedding / LM head TP can be combined with standard TP. See [Standard Tensor Parallelism Requirement](#standard-tensor-parallelism-requirement).
+- o_proj / MLP TP cannot be combined with standard TP and require `tensor_parallel_size == 1`; embedding / LM head TP can — see [Standard Tensor Parallelism Requirement](#standard-tensor-parallelism-requirement).
 - LM head TP can be combined with speculative decoding (EAGLE, DFlash, and DSpark draft models); see [LM Head TP and Speculative Decoding](#lm-head-tp-and-speculative-decoding).
 ```
 
@@ -238,7 +238,7 @@ To evaluate the effectiveness of fine-grained TP in large-scale serving, we depl
 
 ## Deployment Recommendations
 
-Fine-grained TP is designed for the **decode instance** of PD separation, where models are typically deployed in all-DP mode. In this setup, sharding weight-heavy layers reduces redundant storage and memory pressure. Accordingly, `o_proj` TP and MLP TP are validated for — and limited to — P/D-disaggregated decode nodes (see [Preconditions for o_proj / MLP TP](#preconditions-for-o_proj--mlp-tp)), while embedding and LM head TP are also usable outside PD deployments, including stacked with standard TP (Scenario 1).
+Fine-grained TP is designed for the **decode instance** of PD separation, where models are typically deployed in all-DP mode. In this setup, sharding weight-heavy layers reduces redundant storage and memory pressure. For where each knob can run, see [Usage Scenarios](#usage-scenarios) and [Preconditions for o_proj / MLP TP](#preconditions-for-o_proj--mlp-tp).
 
 ## FAQs
 
