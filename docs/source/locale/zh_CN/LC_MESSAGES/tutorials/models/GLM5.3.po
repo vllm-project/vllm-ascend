@@ -118,8 +118,8 @@ msgid ""
 "in main branch."
 msgstr "- 以下脚本已在 **v0.23.0** 上测试，某些参数在 main 分支中可能已更改。"
 
-msgid "### 5.1 Multi-node Deployment"
-msgstr "### 5.1 多节点部署"
+msgid "#### 5.1.1 Multi-node Deployment"
+msgstr "#### 5.1.1 多节点部署"
 
 msgid ""
 "If you want to deploy multi-node environment, you need to verify multi-node "
@@ -135,8 +135,8 @@ msgid ""
 "FAQs](../../faqs.md)."
 msgstr "常见问题提示：如果遇到问题，请参阅[公共 FAQ](../../faqs.md)。"
 
-msgid "#### 5.1.1 Context Below 1M"
-msgstr "#### 5.1.1 上下文低于 1M"
+msgid "### 5.1 Context Below 1M"
+msgstr "### 5.1 上下文低于 1M"
 
 msgid ""
 "=== \"A3 series\"\n"
@@ -213,19 +213,6 @@ msgid ""
 msgstr ""
 "**注意：**\n"
 "此场景启用了`additional_config.enable_fused_mc2=1`（融合的`dispatch_ffn_combine`/`mega_moe`算子）。融合MC2与`multistream_overlap_shared_expert`存在冲突——这两种优化不能同时启用（当融合MC2开启时，运行时将强制禁用`multistream_overlap_shared_expert`）。"
-
-msgid "#### 5.1.2 1M Context Deployment"
-msgstr "#### 5.1.2 1M上下文部署"
-
-msgid ""
-"The 1M context scenarios have not yet tested for `GLM-5.3`. If you want to "
-"deploy, please refer to scripts in [GLM-5.2 1M Context "
-"Deployment](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/GLM5.2.html#m-context-"
-"deployment)."
-msgstr ""
-"`GLM-5.3`尚未测试1M上下文场景。如需部署，请参考[GLM-5.2 "
-"1M上下文部署](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/GLM5.2.html#m-context-"
-"deployment)中的脚本。"
 
 msgid "### 5.2 Prefill-Decode Disaggregation"
 msgstr "### 5.2 Prefill-Decode分离"
@@ -363,3 +350,6 @@ msgstr "- **问：GLM-5.3 是否支持 `enable_thinking: false`？**"
 
 msgid "A: No, GLM-5.3 does not support `enable_thinking`."
 msgstr "答：不支持，GLM-5.3 不支持 `enable_thinking`。"
+
+msgid "### 5.2 1M Context Configuration"
+msgstr "### 5.2 1M 上下文配置"

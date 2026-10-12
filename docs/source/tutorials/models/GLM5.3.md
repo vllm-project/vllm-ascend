@@ -122,13 +122,13 @@ If you don't want to use the docker image as above, you can also build all from 
 
 ## 5 Online Service Deployment
 
-### 5.1 Multi-node Deployment
+### 5.1 Context Below 1M
 
-If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../getting_started/installation.md#installation-multi-node-interconnect). The scripts in Section 5.1 were tested on **v0.23.0**.
+#### 5.1.1 Multi-node Deployment
+
+If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../getting_started/installation.md#installation-multi-node-interconnect). The scripts in Section 5.1.1 were tested on **v0.23.0**.
 
 Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md).
-
-#### 5.1.1 Context Below 1M
 
 === "A3 series"
     -  `GLM-5.3-w8a8c8`: can be deployed on 2 Atlas 800 A3 (64GB × 16).
@@ -399,18 +399,14 @@ Only the key parameters specific to this model/scenario are described below. max
 **Notice:**
 This scenario enables `additional_config.enable_fused_mc2=1` (fused `dispatch_ffn_combine`/`mega_moe` operators). Fused MC2 conflicts with `multistream_overlap_shared_expert` — the two optimizations must not be enabled at the same time (the runtime forcibly disables `multistream_overlap_shared_expert` when fused MC2 is on).
 
-#### 5.1.2 1M Context Deployment
-
-For the 1M context configuration, see [1M Prefill-Decode Disaggregation (DCP)](#54-1m-prefill-decode-disaggregation-dcp).
-
-### 5.2 Prefill-Decode Disaggregation
+#### 5.1.2 Prefill-Decode Disaggregation
 
 This A3 reference serves GLM-5.3 W8A8C8 with a **200,000-token** maximum
 sequence length for the 198K workload. It uses one Prefill engine spanning
 P0/P1 with TP16 and PP2, and sixteen TP2 Decode engines on D0/D1.
-Section 5.3 adds MemCache KV pooling to the same deployment.
+Section 5.1.3 adds MemCache KV pooling to the same deployment.
 
-#### 5.2.1 Topology and Prerequisites
+##### 5.1.2.1 Topology and Prerequisites
 
 | Role | Nodes | Global DP | TP | PP | Placement | Devices per role |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -438,7 +434,7 @@ Use the A3 `v0.30.0rc1-a3` image from Section 4.1 on all four nodes.
    environment and both roles' connector topology. Both roles explicitly
    use int8 KV cache and int8 indexer KV cache for these W8A8C8 weights.
 
-#### 5.2.2 Prepare the Scripts
+##### 5.1.2.2 Prepare the Scripts
 
 Before you start, please
 
@@ -834,7 +830,7 @@ Before you start, please
             }'
         ```
 
-#### 5.2.3 Start the Engines
+##### 5.1.2.3 Start the Engines
 
 Once the preparation is done, you can start the server with the following command on each node:
 
@@ -864,10 +860,10 @@ Once the preparation is done, you can start the server with the following comman
     python launch_online_dp.py --dp-size 16 --tp-size 2 --dp-size-local 8 --dp-rank-start 8 --dp-address "$D0_IP" --dp-rpc-port 16600 --vllm-start-port 8000
     ```
 
-#### 5.2.4 Start the Proxy
+##### 5.1.2.4 Start the Proxy
 
 Replace each node's IP and installation-path placeholders before starting.
-Run the four commands in Section 5.2.3 in separate terminals. Keep the
+Run the four commands in Section 5.1.2.3 in separate terminals. Keep the
 master processes running while the other nodes join; start both nodes of
 each group before waiting for the group to become healthy.
 
@@ -914,14 +910,14 @@ Key parameters:
 - The examples give Prefill and each Decode engine distinct `engine_id`
   values so P-to-D peer registration cannot conflict.
 
-### 5.3 MemCache KV Cache Pool Deployment
+#### 5.1.3 MemCache KV Cache Pool Deployment
 
 This extends the same four-node PP/PD topology with `MultiConnector`:
 `MooncakeConnectorV2` transfers KV cache from Prefill to Decode, and
 `AscendStoreConnector` provides non-layerwise MemCache pooling. Retain
-the launcher, PP placement, and proxy routing from Section 5.2.
+the launcher, PP placement, and proxy routing from Section 5.1.2.
 
-#### 5.3.1 Prepare MemCache
+##### 5.1.3.1 Prepare MemCache
 
 Complete [MemCache backend setup](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend),
 including the hardware/CANN prerequisites, `memfabric-hybrid` and
@@ -931,12 +927,12 @@ start the MemCache service. Set `MEMCACHE_ROOT` to the installed
 `memcache_hybrid` directory and `PYTHON_LIB_DIR` to the library directory
 of the Python installation actually used by vLLM on each node.
 
-#### 5.3.2 Prepare the Scripts
+##### 5.1.3.2 Prepare the Scripts
 
 Before you start, please
 
 1. prepare the script `launch_online_dp.py` on each Decode node, using the
-   launcher in Section 5.2.2.
+   launcher in Section 5.1.2.2.
 
 2. prepare the pooled script `run_dp_template.sh` on each node.
 
@@ -1388,7 +1384,7 @@ also includes the DP rank, and P/D run on separate hosts. It is not a TCP
 listener on port zero. `backend="memcache"` and `use_layerwise=false`
 are set on both sides.
 
-#### 5.3.3 Start the Engines
+##### 5.1.3.3 Start the Engines
 
 Start the MemCache metadata service and complete its configuration on all
 four nodes before starting vLLM.
@@ -1421,14 +1417,14 @@ Once the preparation is done, you can start the server with the following comman
     python launch_online_dp.py --dp-size 16 --tp-size 2 --dp-size-local 8 --dp-rank-start 8 --dp-address "$D0_IP" --dp-rpc-port 16600 --vllm-start-port 8000
     ```
 
-#### 5.3.4 Start the Proxy and Verify Pooling
+##### 5.1.3.4 Start the Proxy and Verify Pooling
 
 1. Start the MemCache metadata service and complete its configuration on
    all four nodes before starting vLLM.
 2. Start P0, P1, D0, and D1 with the commands in
-   Section 5.3.3. Both Prefill scripts already specify port 8000.
+   Section 5.1.3.3. Both Prefill scripts already specify port 8000.
 3. Wait for P0:8000 and all sixteen Decode APIs to become healthy. Start
-   the proxy from Section 5.2.4 on a separate host, using the same
+   the proxy from Section 5.1.2.4 on a separate host, using the same
    Prefill endpoint and Decode ports 8000-8007. Its public port is 8000.
 4. Send requests to the proxy using the served model name `glm5`:
 
@@ -1453,14 +1449,16 @@ cache.  These references do not
 establish A2, 1M-context, or other parallel-layout support, and do not add
 accuracy or performance claims for the 198K workload.
 
-### 5.4 1M Prefill-Decode Disaggregation (DCP)
+### 5.2 1M Context Configuration
+
+#### 5.2.1 1M Prefill-Decode Disaggregation (DCP)
 
 This configuration uses GLM-5.3 W8A8C8 weights on four Atlas 800 A3
 nodes, with 16 logical NPU devices per node. Use the A3 image from
 [Docker Image Installation](#41-docker-image-installation) on all nodes.
 The maximum context length is 1,048,576 tokens, including input and output.
 
-#### 5.4.1 Topology and Prerequisites
+##### 5.2.1.1 Topology and Prerequisites
 
 | Role | Nodes | Global DP | TP | PP | DCP | Local DP ranks | Devices per role |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -1469,7 +1467,7 @@ The maximum context length is 1,048,576 tokens, including input and output.
 
 P0 and P1 run DP ranks 0 and 1. D0 runs ranks 0-1 and D1 runs ranks 2-3.
 Prefill context parallel size is 1 on both roles. This DCP layout is
-separate from the PP2 layout in Sections 5.2 and 5.3.
+separate from the PP2 layout in Sections 5.1.2 and 5.1.3.
 
 1. Prepare identical weights on all four nodes and verify
    [multi-node communication](../../getting_started/installation.md#installation-multi-node-interconnect).
@@ -1481,7 +1479,7 @@ separate from the PP2 layout in Sections 5.2 and 5.3.
    ports derived from the configured base ports 30000 and 30200.
    Run the public proxy on a separate host at port 8000.
 
-#### 5.4.2 Prepare the Scripts
+##### 5.2.1.2 Prepare the Scripts
 
 Before you start, please
 
@@ -1546,6 +1544,7 @@ Before you start, please
         LOCAL_IP="<PREFILL_NODE_IP>"
         NIC_NAME="<NETWORK_INTERFACE>"
         MODEL_PATH="<YOUR_MODEL_PATH>"
+
         export HCCL_OP_EXPANSION_MODE="AIV"
         export VLLM_ENGINE_READY_TIMEOUT_S=100000
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
@@ -1590,10 +1589,10 @@ Before you start, please
             --max-model-len 1048576 \
             --safetensors-load-strategy 'prefetch' \
             --additional-config '{
-        "enable_dsa_cp":true,
-        "enable_fused_mc2": 1,
-        "enable_flashcomm1": true
-        }' \
+                "enable_dsa_cp": true,
+                "enable_fused_mc2": 1,
+                "enable_flashcomm1": true
+            }' \
             --max-num-batched-tokens 8192 \
             --trust-remote-code \
             --enable-prefix-caching \
@@ -1607,16 +1606,22 @@ Before you start, please
             --kv-cache-dtype int8 \
             --attention_config.indexer_kv_dtype int8 \
             --kv-transfer-config '{
-        "kv_connector": "MooncakeConnectorV1",
-        "kv_role": "kv_producer",
-        "kv_port": "30000",
-        "engine_id": "0",
-        "kv_connector_extra_config": {
-        "use_ascend_direct": true,
-        "prefill": {"dp_size": 2, "tp_size": 16},
-        "decode": { "dp_size": 4, "tp_size": 8}
-        }
-        }'
+                "kv_connector": "MooncakeConnectorV1",
+                "kv_role": "kv_producer",
+                "kv_port": "30000",
+                "engine_id": "0",
+                "kv_connector_extra_config": {
+                    "use_ascend_direct": true,
+                    "prefill": {
+                        "dp_size": 2,
+                        "tp_size": 16
+                    },
+                    "decode": {
+                        "dp_size": 4,
+                        "tp_size": 8
+                    }
+                }
+            }'
         ```
 
     2. Prefill node 1
@@ -1627,6 +1632,7 @@ Before you start, please
         LOCAL_IP="<PREFILL_NODE_IP>"
         NIC_NAME="<NETWORK_INTERFACE>"
         MODEL_PATH="<YOUR_MODEL_PATH>"
+
         export HCCL_OP_EXPANSION_MODE="AIV"
         export VLLM_ENGINE_READY_TIMEOUT_S=100000
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
@@ -1671,10 +1677,10 @@ Before you start, please
             --max-model-len 1048576 \
             --safetensors-load-strategy 'prefetch' \
             --additional-config '{
-        "enable_dsa_cp":true,
-        "enable_fused_mc2": 1,
-        "enable_flashcomm1": true
-        }' \
+                "enable_dsa_cp": true,
+                "enable_fused_mc2": 1,
+                "enable_flashcomm1": true
+            }' \
             --max-num-batched-tokens 8192 \
             --trust-remote-code \
             --enable-prefix-caching \
@@ -1688,16 +1694,22 @@ Before you start, please
             --kv-cache-dtype int8 \
             --attention_config.indexer_kv_dtype int8 \
             --kv-transfer-config '{
-        "kv_connector": "MooncakeConnectorV1",
-        "kv_role": "kv_producer",
-        "kv_port": "30000",
-        "engine_id": "0",
-        "kv_connector_extra_config": {
-        "use_ascend_direct": true,
-        "prefill": {"dp_size": 2, "tp_size": 16},
-        "decode": { "dp_size": 4, "tp_size": 8}
-        }
-        }'
+                "kv_connector": "MooncakeConnectorV1",
+                "kv_role": "kv_producer",
+                "kv_port": "30000",
+                "engine_id": "0",
+                "kv_connector_extra_config": {
+                    "use_ascend_direct": true,
+                    "prefill": {
+                        "dp_size": 2,
+                        "tp_size": 16
+                    },
+                    "decode": {
+                        "dp_size": 4,
+                        "tp_size": 8
+                    }
+                }
+            }'
         ```
 
     3. Decode node 0
@@ -1755,10 +1767,10 @@ Before you start, please
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
             --speculative-config '{"num_speculative_tokens": 5,  "method":"deepseek_mtp","enforce_eager":true}' \
             --additional-config '{
-        "recompute_scheduler_enable":true,
-        "enable_mlapo":true,
-        "enable_fused_mc2": 1
-        }' \
+                "recompute_scheduler_enable": true,
+                "enable_mlapo": true,
+                "enable_fused_mc2": 1
+            }' \
             --trust-remote-code \
             --max-num-seqs 32 \
             --gpu-memory-utilization 0.90 \
@@ -1770,16 +1782,22 @@ Before you start, please
             --kv-cache-dtype int8 \
             --attention_config.indexer_kv_dtype int8 \
             --kv-transfer-config '{
-        "kv_connector": "MooncakeConnectorV1",
-        "kv_role": "kv_consumer",
-        "kv_port": "30200",
-        "engine_id": "2",
-        "kv_connector_extra_config": {
-        "use_ascend_direct": true,
-        "prefill": {"dp_size": 2, "tp_size": 16},
-        "decode": { "dp_size": 4, "tp_size":8}
-        }
-        }'
+                "kv_connector": "MooncakeConnectorV1",
+                "kv_role": "kv_consumer",
+                "kv_port": "30200",
+                "engine_id": "2",
+                "kv_connector_extra_config": {
+                    "use_ascend_direct": true,
+                    "prefill": {
+                        "dp_size": 2,
+                        "tp_size": 16
+                    },
+                    "decode": {
+                        "dp_size": 4,
+                        "tp_size": 8
+                    }
+                }
+            }'
         ```
 
     4. Decode node 1
@@ -1837,10 +1855,10 @@ Before you start, please
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
             --speculative-config '{"num_speculative_tokens": 5,  "method":"deepseek_mtp","enforce_eager":true}' \
             --additional-config '{
-        "recompute_scheduler_enable":true,
-        "enable_mlapo":true,
-        "enable_fused_mc2": 1
-        }' \
+                "recompute_scheduler_enable": true,
+                "enable_mlapo": true,
+                "enable_fused_mc2": 1
+            }' \
             --trust-remote-code \
             --max-num-seqs 32 \
             --gpu-memory-utilization 0.90 \
@@ -1852,19 +1870,25 @@ Before you start, please
             --kv-cache-dtype int8 \
             --attention_config.indexer_kv_dtype int8 \
             --kv-transfer-config '{
-        "kv_connector": "MooncakeConnectorV1",
-        "kv_role": "kv_consumer",
-        "kv_port": "30200",
-        "engine_id": "2",
-        "kv_connector_extra_config": {
-        "use_ascend_direct": true,
-        "prefill": {"dp_size": 2, "tp_size": 16},
-        "decode": { "dp_size": 4, "tp_size":8}
-        }
-        }'
+                "kv_connector": "MooncakeConnectorV1",
+                "kv_role": "kv_consumer",
+                "kv_port": "30200",
+                "engine_id": "2",
+                "kv_connector_extra_config": {
+                    "use_ascend_direct": true,
+                    "prefill": {
+                        "dp_size": 2,
+                        "tp_size": 16
+                    },
+                    "decode": {
+                        "dp_size": 4,
+                        "tp_size": 8
+                    }
+                }
+            }'
         ```
 
-#### 5.4.3 Start the Service
+##### 5.2.1.3 Start the Engines
 
 Run these commands from the directory containing both scripts on each node.
 The two Prefill commands use the same P0 master address, and the two Decode
@@ -1873,46 +1897,45 @@ commands use the same D0 master address.
 1. Prefill node 0
 
     ```shell
-    python launch_online_dp.py --dp-size 2 --tp-size 16 --dp-size-local 1 \
-        --dp-rank-start 0 --dp-address "<PREFILL_NODE_0_IP>" \
-        --dp-rpc-port 16591 --vllm-start-port 8000
+    P0_IP="<PREFILL_NODE0_IP>"
+    python launch_online_dp.py --dp-size 2 --tp-size 16 --dp-size-local 1 --dp-rank-start 0 --dp-address "$P0_IP" --dp-rpc-port 16591 --vllm-start-port 8000
     ```
 
 2. Prefill node 1
 
     ```shell
-    python launch_online_dp.py --dp-size 2 --tp-size 16 --dp-size-local 1 \
-        --dp-rank-start 1 --dp-address "<PREFILL_NODE_0_IP>" \
-        --dp-rpc-port 16591 --vllm-start-port 8000
+    P0_IP="<PREFILL_NODE0_IP>"
+    python launch_online_dp.py --dp-size 2 --tp-size 16 --dp-size-local 1 --dp-rank-start 1 --dp-address "$P0_IP" --dp-rpc-port 16591 --vllm-start-port 8000
     ```
 
 3. Decode node 0
 
     ```shell
-    python launch_online_dp.py --dp-size 4 --tp-size 8 --dp-size-local 2 \
-        --dp-rank-start 0 --dp-address "<DECODE_NODE_0_IP>" \
-        --dp-rpc-port 16600 --vllm-start-port 8000
+    D0_IP="<DECODE_NODE0_IP>"
+    python launch_online_dp.py --dp-size 4 --tp-size 8 --dp-size-local 2 --dp-rank-start 0 --dp-address "$D0_IP" --dp-rpc-port 16600 --vllm-start-port 8000
     ```
 
 4. Decode node 1
 
     ```shell
-    python launch_online_dp.py --dp-size 4 --tp-size 8 --dp-size-local 2 \
-        --dp-rank-start 2 --dp-address "<DECODE_NODE_0_IP>" \
-        --dp-rpc-port 16600 --vllm-start-port 8000
+    D0_IP="<DECODE_NODE0_IP>"
+    python launch_online_dp.py --dp-size 4 --tp-size 8 --dp-size-local 2 --dp-rank-start 2 --dp-address "$D0_IP" --dp-rpc-port 16600 --vllm-start-port 8000
     ```
 
-#### 5.4.4 Start the Proxy
+##### 5.2.1.4 Start the Proxy
 
 After all six APIs become healthy, start the proxy on its separate host:
 
 ```shell
+P0_IP="<P0_IP>"
+P1_IP="<P1_IP>"
+D0_IP="<D0_IP>"
+D1_IP="<D1_IP>"
+
 python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
-    --port 8000 --host 0.0.0.0 \
-    --prefiller-hosts "<PREFILL_NODE_0_IP>" "<PREFILL_NODE_1_IP>" \
-    --prefiller-ports 8000 8000 \
-    --decoder-hosts "<DECODE_NODE_0_IP>" "<DECODE_NODE_0_IP>" \
-        "<DECODE_NODE_1_IP>" "<DECODE_NODE_1_IP>" \
+    --host 0.0.0.0 --port 8000 \
+    --prefiller-hosts "$P0_IP" "$P1_IP" --prefiller-ports 8000 8000 \
+    --decoder-hosts "$D0_IP" "$D0_IP" "$D1_IP" "$D1_IP" \
     --decoder-ports 8000 8001 8000 8001
 ```
 
@@ -1998,13 +2021,13 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 ### 9.1 Recommended Configurations
 
 The following A3 W8A8C8 settings summarize the deployment scripts in
-Sections 5.2-5.4. Global DP includes all nodes of one role; local DP is the
+Sections 5.1.2, 5.1.3 and 5.2.1. Global DP includes all nodes of one role; local DP is the
 number of ranks on one node. Each role uses 32 logical NPU devices.
 
 #### 9.1.1 Detailed Node Configuration
 
 | Scenario | Role | TP | Global DP | Local DP | PP | DCP | Max Num Seqs | Max Num Batched Tokens | Max Model Len | MTP Spec Num |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 198K PD, with or without pooling | Prefill | 16 | 1 | 1 | 2 | 1 | 64 | 16384 | 200000 | 1 |
 | 198K PD, with or without pooling | Decode | 2 | 16 | 8 | 1 | 1 | 64 | 256 | 200000 | 5 |
 | 1M PD | Prefill | 16 | 2 | 1 | 1 | 16 | 64 | 8192 | 1048576 | 1 |
@@ -2018,12 +2041,12 @@ request; reserve output tokens within the 1,048,576-token context limit.
 
 | Scenario | Input / Output | Prefix cache hit rate | Deployment reference |
 | --- | --- | --- | --- |
-| Prefill-only | 16K / 1, 128K / 1 | 0% | Section 5.2 |
-| Decode-only | 16K / 1K, 128K / 1K | 100% | Section 5.2 |
-| Complete PD | 16K / 1K | 0% | Section 5.2 |
-| Complete PD, 1M context | Approximately 1M / 1K | 0% | Section 5.4 |
-| Pooling | 128K / 1K | 90%, 32 distinct prefixes | Section 5.3 |
-| Pooling | 40K-80K / 2.5K | Repeated prefixes | Section 5.3 |
+| Prefill-only | 16K / 1, 128K / 1 | 0% | Section 5.1.2 |
+| Decode-only | 16K / 1K, 128K / 1K | 100% | Section 5.1.2 |
+| Complete PD | 16K / 1K | 0% | Section 5.1.2 |
+| Complete PD, 1M context | Approximately 1M / 1K | 0% | Section 5.2.1 |
+| Pooling | 128K / 1K | 90%, 32 distinct prefixes | Section 5.1.3 |
+| Pooling | 40K-80K / 2.5K | Repeated prefixes | Section 5.1.3 |
 
 #### 9.1.3 Optimizations Requiring Explicit Enablement
 
@@ -2041,7 +2064,7 @@ the deployment scripts.
 | MLAPO | 1M Decode | `"enable_mlapo": true` | Fuses MLA preprocessing; account for its memory requirements. |
 | Recompute scheduler | A3 Decode | `"recompute_scheduler_enable": true` | Enables Prefill-side recomputation when Decode KV cache capacity is insufficient. |
 | Decode graph | A3 Decode | `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` | Captures Decode execution; the reference Prefill uses eager mode. |
-| KV pooling | Repeated-prefix PD | Ascend Store/MemCache configuration in Section 5.3 | Reuses KV across requests and engines; confirm pool hits in backend metrics. |
+| KV pooling | Repeated-prefix PD | Ascend Store/MemCache configuration in Section 5.1.3 | Reuses KV across requests and engines; confirm pool hits in backend metrics. |
 
 ### 9.2 Tuning Guidelines
 
