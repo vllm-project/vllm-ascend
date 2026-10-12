@@ -95,6 +95,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     plan_sparse_kv_offload_memory,
 )
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
+from vllm_ascend.observability.runtime_guard.hooks import runtime_guard_idle_step
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
 from vllm_ascend.utils import (
@@ -701,9 +702,13 @@ class NPUWorker(WorkerBase):
         has_mamba = any(isinstance(spec, MambaSpec) for spec in per_layer_specs)
         model_runner = getattr(self, "model_runner", None)
         layout = self.vllm_config.cache_config.get_resolved_kv_cache_layout()
+        # TODO: The Step-3.5/3.7 models will be sunset in the future. Once they
+        # are, remove this is_step_model exemption: this line and the
+        # `or is_step_model` budget gate below.
+        is_step_model = self.model_config.hf_text_config.model_type in ("step3p5", "step3p7")
         if (
             has_attention
-            and has_mamba
+            and (has_mamba or is_step_model)
             and layout.is_layer_compact
             and layout.is_block_compact
             and getattr(model_runner, "supports_standardized_shared_kv_backing", False)
@@ -1130,7 +1135,7 @@ class NPUWorker(WorkerBase):
             speculative_config = self.vllm_config.speculative_config
             if (
                 speculative_config is not None
-                and speculative_config.method == "dspark"
+                and speculative_config.use_eagle()
                 and any(isinstance(spec, SlidingWindowSpec) for spec in kv_cache_spec.values())
             ):
                 # Use the same full-allocation specs for KVPP budgeting and
@@ -1261,6 +1266,9 @@ class NPUWorker(WorkerBase):
     def reset_encoder_cache(self) -> None:
         self.model_runner.reset_encoder_cache()
 
+    # Lockstep wave sync for idle DP ranks (never burns manual_dump);
+    # lives in the runtime_guard hook, see runtime_guard_idle_step.
+    @runtime_guard_idle_step
     def execute_dummy_batch(self) -> None:
         self.log_memory_stats()
         num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
@@ -1272,13 +1280,21 @@ class NPUWorker(WorkerBase):
         init_distributed_environment(
             self.parallel_config.world_size, self.rank, self.distributed_init_method, self.local_rank, "hccl"
         )
-        ensure_model_parallel_initialized(
-            self.parallel_config.tensor_parallel_size,
-            self.parallel_config.pipeline_parallel_size,
-            self.parallel_config.prefill_context_parallel_size,
-            self.parallel_config.decode_context_parallel_size,
-        )
-        init_ascend_model_parallel(self.parallel_config)
+        group_config = self.vllm_config
+        if group_config.engram_config is not None and self.parallel_config.prefill_context_parallel_size > 1:
+            # Skip upstream's DP-only Engram group so Ascend can create
+            # _ENGRAM_DP once with DP x PCP ranks. Copy the config to preserve
+            # the original Engram settings for Ascend and model initialization.
+            group_config = copy.copy(group_config)
+            group_config.engram_config = None
+        with set_current_vllm_config(group_config):
+            ensure_model_parallel_initialized(
+                self.parallel_config.tensor_parallel_size,
+                self.parallel_config.pipeline_parallel_size,
+                self.parallel_config.prefill_context_parallel_size,
+                self.parallel_config.decode_context_parallel_size,
+            )
+        init_ascend_model_parallel(self.parallel_config, self.vllm_config.engram_config)
         ensure_ec_transfer_initialized(self.vllm_config)
 
     def get_supported_pooling_tasks(self):

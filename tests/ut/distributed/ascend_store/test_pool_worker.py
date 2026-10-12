@@ -22,7 +22,6 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
-import pytest
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 
@@ -124,7 +123,6 @@ def make_worker(
     if kv_cache_config is not None:
         config.scheduler_config.disable_hybrid_kv_cache_manager = False
     config.cache_config.block_size = cache_block_size
-    config.cache_config.prefix_cache_retention_interval = 0
     config.cache_config.prefix_match_unit = prefix_match_unit
     config.kv_events_config = None
     if enable_kv_events:
@@ -133,29 +131,6 @@ def make_worker(
     from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
     return KVPoolWorker(config, use_layerwise=use_layerwise, kv_cache_config=kv_cache_config)
-
-
-@pytest.mark.parametrize("retention_interval", [None, 0, 4096])
-def test_cache_coordinator_uses_kv_cache_config_retention_interval(retention_interval):
-    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import pool_worker
-
-    worker = pool_worker.KVPoolWorker.__new__(pool_worker.KVPoolWorker)
-    worker.kv_cache_config = SimpleNamespace(
-        kv_cache_groups=[object()],
-        prefix_cache_retention_interval=retention_interval,
-    )
-    worker.use_hybrid = True
-    worker.cache_transfer_granularity = 16
-    worker.hash_block_size = 16
-    worker.grouped_block_size = [16]
-    worker.kv_cache_group_families = ["mamba"]
-
-    vllm_config = SimpleNamespace(speculative_config=None)
-    with patch.object(pool_worker, "AscendStoreCoordinator") as coordinator_cls:
-        coordinator = worker._build_cache_coordinator(vllm_config)
-
-    assert coordinator is coordinator_cls.return_value
-    assert coordinator_cls.call_args.kwargs["retention_interval"] == retention_interval
 
 
 class TestPCPPoolWorker(unittest.TestCase):
@@ -286,8 +261,7 @@ class TestLayerwiseAttentionSave(unittest.TestCase):
                     FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float32),
                 )
                 for layer in range(2)
-            ],
-            prefix_cache_retention_interval=None,
+            ]
         )
         worker = make_worker(self, use_layerwise=True, kv_cache_config=plan)
         worker.kv_send_thread = MagicMock(request_queue=queue.Queue())
@@ -306,8 +280,7 @@ class TestLayerwiseAttentionSave(unittest.TestCase):
                         mamba_cache_mode="align",
                     ),
                 )
-            ],
-            prefix_cache_retention_interval=None,
+            ]
         )
         worker = make_worker(self, num_layers=1, use_layerwise=True, kv_cache_config=plan)
         worker.kv_recv_thread = MagicMock()
@@ -343,10 +316,7 @@ class TestLayerwiseAttentionSave(unittest.TestCase):
                     self,
                     num_layers=2,
                     use_layerwise=True,
-                    kv_cache_config=SimpleNamespace(
-                        kv_cache_groups=groups,
-                        prefix_cache_retention_interval=None,
-                    ),
+                    kv_cache_config=SimpleNamespace(kv_cache_groups=groups),
                     pp_rank=1,
                     pp_partition=(2, 2),
                 )
@@ -1385,6 +1355,31 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         worker.kv_send_thread.add_stored_request.assert_not_called()
         worker.kv_send_thread.request_queue.join.assert_not_called()
 
+    def test_handle_released_saves_noop_without_send_thread(self):
+        worker = self._make_worker()
+        worker.kv_send_thread = None
+        worker.handle_released_saves({"r1"})
+
+    def test_handle_released_saves_drains_only_released_requests(self):
+        worker = self._make_worker()
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import KVCacheStoreSendingThread
+
+        worker.kv_send_thread = MagicMock(spec=KVCacheStoreSendingThread)
+        released = {"r1", "r2"}
+        worker.handle_released_saves(released)
+        worker.kv_send_thread.raise_if_failed.assert_called_once_with()
+        worker.kv_send_thread.wait_for_requests_saved.assert_called_once_with(released)
+
+    def test_handle_released_saves_skips_layerwise_thread(self):
+        worker = self._make_worker()
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import KVCacheStoreLayerSendingThread
+
+        # A spec'd layerwise-thread mock has no wait_for_requests_saved member,
+        # so a wrong dispatch would raise AttributeError here.
+        worker.kv_send_thread = MagicMock(spec=KVCacheStoreLayerSendingThread)
+        worker.handle_released_saves({"r1"})
+        worker.kv_send_thread.raise_if_failed.assert_called_once_with()
+
     def test_get_finished_producer_clears_synchronous_completions(self):
         worker = self._make_worker(kv_role="kv_producer")
 
@@ -1958,6 +1953,31 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         )
         worker._process_save_for_layer_batch([req], 0)
         self.assertEqual(len(worker.layer_save_tasks[0]), 0)
+
+    def test_masked_block_runs_cached_across_layers(self):
+        worker = self._make_worker()
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=48,
+            block_ids=[0, 1, 2],
+            block_hashes=["h0", "h1", "h2"],
+            can_save=True,
+            save_start_token=0,
+            save_end_token=48,
+        )
+        req.store_masks = ([True, False, True],)
+
+        worker._process_save_for_layer_batch([req], 0)
+        worker._process_save_for_layer_batch([req], 1)
+
+        expected_runs = [(0, 1), (2, 3)]
+        for layer in (0, 1):
+            runs = [(r.start_block, r.end_block) for r in worker.layer_save_tasks[layer][0].block_ranges]
+            self.assertEqual(runs, expected_runs)
+        self.assertEqual(len(worker._masked_runs_cache), 1)
+
+        worker.process_layer_data([])
+        self.assertEqual(worker._masked_runs_cache, {})
 
     def test_process_load_for_layer_batch_skips(self):
         for load_spec in (None, LoadSpec(0, 0, can_load=False, token_len=0)):

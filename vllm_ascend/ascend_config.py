@@ -97,18 +97,6 @@ class KVPPConfig:
                 raise ValueError("KVPP supports eager execution or PIECEWISE only.")
         if not model_config.use_mla or model_config.is_hybrid:
             raise ValueError("KVPP currently supports only non-hybrid MLA models.")
-        speculative_config = vllm_config.speculative_config
-        if speculative_config is not None:
-            if speculative_config.method not in ("mtp", "dspark"):
-                raise ValueError("KVPP supports speculative decoding only with method='mtp' or method='dspark'.")
-            if speculative_config.num_speculative_tokens_per_batch_size:
-                raise ValueError("KVPP currently supports only a fixed number of speculative tokens.")
-            if speculative_config.method == "dspark":
-                if getattr(speculative_config, "enable_adaptive_verification", False):
-                    raise ValueError("KVPP does not support DSpark adaptive verification.")
-                dynamic_spec = (vllm_config.additional_config or {}).get("dynamic_spec_config") or {}
-                if dynamic_spec.get("method") is not None:
-                    raise ValueError("KVPP does not support dynamic speculative lengths.")
 
 
 @config
@@ -449,7 +437,6 @@ class AscendConfig:
             "enable_sparse_sfa_c8": false,
             "enable_sparse_li_c8": false,
             "enable_sparse_li_c4": false,
-            "c8_enable_reshape_optim": true,
             "ascend_compilation_config": {
                 "enable_npugraph_ex": true,
                 "enable_static_kernel": false,
@@ -602,6 +589,10 @@ class AscendConfig:
         default_factory=lambda: os.path.join(os.path.expanduser("~"), "ascend", "log", "vllm_ascend")
     )
     dump_config_path: str | None = None
+    runtime_config_path: str | None = None
+    runtime_config_hot_reload: bool = False
+    # Runtime object constructed in init_ascend_config (not from additional_config dict).
+    runtime_config: Any = None
     mc2_comm_alg: Literal["", "fullmesh", "hierarchy", "fullmesh_v2"] = ""
 
     # ---- A-family (envs fallback): default = envs module value, before-validator injects ----
@@ -642,8 +633,6 @@ class AscendConfig:
     enable_sparse_sfa_c8: bool = False
     enable_sparse_li_c8: bool = False
     enable_sparse_li_c4: bool = False
-    # See https://github.com/vllm-project/vllm-ascend/issues/15896
-    c8_enable_reshape_optim: bool = True
     pd_tp_ratio: int = 1
     pd_head_ratio: int = 1
     num_head_replica: int = 1
@@ -654,7 +643,6 @@ class AscendConfig:
     _sparse_li_c4_layer_ids: set[int] = dataclasses.field(default_factory=set, init=False, repr=False)
     _sparse_li_c4_layer_names: set[str] = dataclasses.field(default_factory=set, init=False, repr=False)
     _sparse_li_layer_filter_enabled: bool = dataclasses.field(default=False, init=False, repr=False)
-    _c8_reshape_optim_enabled: bool = dataclasses.field(default=False, init=False, repr=False)
 
     @model_validator(mode="after")
     def _validate_user_input_ranges(self):
@@ -688,10 +676,10 @@ class AscendConfig:
             engram_config is not None
             and not engram_config.dp_shared_memory
             and vc.use_v2_model_runner
-            and vc.parallel_config.data_parallel_size > 1
+            and (vc.parallel_config.data_parallel_size > 1 or vc.parallel_config.prefill_context_parallel_size > 1)
         ):
-            # DP-dummy ranks have no hash work in MRV2. Share host tables so
-            # replicas do not require matching embedding collectives each step.
+            # DP-dummy ranks have no hash work in MRV2. Share host tables
+            # across DP and PCP peers to avoid per-step lookup collectives.
             engram_config.dp_shared_memory = True
         if (
             self.enable_force_eplb
@@ -705,6 +693,12 @@ class AscendConfig:
                 "DSA-CP and PCP cannot be enabled at the same time. "
                 "Use PCP instead: remove enable_dsa_cp from additional_config "
                 "when --prefill-context-parallel-size is greater than 1."
+            )
+        if self.enable_dsa_cp and vc.use_v2_model_runner:
+            raise ValueError(
+                "DSA-CP is not supported by Model Runner V2. "
+                "Remove enable_dsa_cp from additional_config and use "
+                "prefill context parallelism (PCP) instead."
             )
         self._check_mooncake_c8_kv_cache_quant(vc)
 
@@ -916,15 +910,6 @@ class AscendConfig:
         self.enable_sparse_li_c4 = vllm_config.attention_config.indexer_kv_dtype == "mxfp4" and use_sparse
         if self.enable_sparse_li_c8 and self.enable_sparse_li_c4:
             raise ValueError("enable_sparse_li_c8 and enable_sparse_li_c4 are mutually exclusive.")
-        kv_transfer_config = vc.kv_transfer_config
-        is_prefill_node = kv_transfer_config is not None and (
-            getattr(kv_transfer_config, "kv_role", None) == "kv_producer"
-            or (
-                bool(getattr(kv_transfer_config, "is_kv_producer", False))
-                and not bool(getattr(kv_transfer_config, "is_kv_consumer", False))
-            )
-        )
-        self._c8_reshape_optim_enabled = self.c8_enable_reshape_optim and self.enable_sparse_li_c8 and is_prefill_node
         quant_config = getattr(vc, "quant_config", None)
         (
             self._sparse_li_c8_layer_ids,
@@ -1259,11 +1244,6 @@ class AscendConfig:
             self._sparse_li_c4_layer_names,
             self._sparse_li_c4_layer_ids,
         )
-
-    @property
-    def c8_reshape_optim_enabled(self) -> bool:
-        """Whether SFA should use StoreKVBlock for LI C8 cache writes."""
-        return self._c8_reshape_optim_enabled
 
     @staticmethod
     def _get_compile_ranges(compilation_config):
@@ -1835,6 +1815,15 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
     # pre-step; the resolved path is passed as the dump_config_path field.
     dump_config_path = AscendConfig._resolve_dump_config_path(additional_config)
 
+    from vllm_ascend.observability.runtime_config import (
+        ADDITIONAL_CONFIG_STRIP_KEYS as _RUNTIME_CONFIG_STRIP_KEYS,
+    )
+    from vllm_ascend.observability.runtime_config import (
+        build_runtime_config_from_additional,
+    )
+
+    runtime_boot = build_runtime_config_from_additional(additional_config)
+
     # Keys that must NOT flow from additional_config into AscendConfig.
     # These are stripped so that only user-configurable keys reach pydantic,
     # where extra="forbid" can reject unknown options.
@@ -1861,6 +1850,7 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
         # replaced with the validated dump_config_path field below.
         "dump_config",
         "dump_config_path",
+        *_RUNTIME_CONFIG_STRIP_KEYS,
         # pure-derived fields (derive_and_validate computes them; user input would residualize)
         # enable_sparse_li_c4 is selected by attention_config.indexer_kv_dtype
         # and the model's sparse-attention support,not additional config.
@@ -1902,6 +1892,9 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
         sparse_kv_offload_config=sparse_kv,
         kvpp_config=kvpp_config,
         dump_config_path=dump_config_path,
+        runtime_config_path=runtime_boot.path,
+        runtime_config_hot_reload=runtime_boot.hot_reload,
+        runtime_config=runtime_boot.runtime_config,
         **kwargs,
     )
     # Business validation (Plan B): pydantic did type/range/enum checks during

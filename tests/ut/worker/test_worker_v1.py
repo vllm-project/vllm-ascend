@@ -108,6 +108,54 @@ class TestNPUWorker(TestBase):
         self.assertEqual((num_layers, num_slots), (6, 3))
         self.assertEqual(factor, expected_logical_bytes / expected_physical_bytes)
 
+    def test_engram_group_initialization_preserves_target_config(self):
+        from vllm.config import get_current_vllm_config, set_current_vllm_config
+
+        from vllm_ascend.worker.worker import NPUWorker
+
+        for pcp_size, has_engram, fails in ((1, True, False), (2, False, False), (2, True, False), (2, True, True)):
+            with self.subTest(pcp_size=pcp_size, has_engram=has_engram, fails=fails):
+                engram_config = SimpleNamespace(dp_shared_memory=False) if has_engram else None
+                config = SimpleNamespace(engram_config=engram_config)
+                worker = NPUWorker.__new__(NPUWorker)
+                worker.vllm_config = config
+                worker.parallel_config = SimpleNamespace(
+                    world_size=8,
+                    tensor_parallel_size=1,
+                    pipeline_parallel_size=1,
+                    prefill_context_parallel_size=pcp_size,
+                    decode_context_parallel_size=1,
+                )
+                worker.rank = worker.local_rank = 0
+                worker.distributed_init_method = "tcp://localhost:12345"
+
+                def initialize_groups(
+                    *args, pcp_size=pcp_size, engram_config=engram_config, config=config, fails=fails
+                ):
+                    active = get_current_vllm_config()
+                    expected = None if pcp_size > 1 else engram_config
+                    self.assertIs(active.engram_config, expected)
+                    self.assertIs(config.engram_config, engram_config)
+                    if fails:
+                        raise RuntimeError("group initialization failed")
+
+                with (
+                    set_current_vllm_config(config),
+                    patch("vllm_ascend.worker.worker.init_batch_invariance"),
+                    patch("vllm_ascend.worker.worker.init_distributed_environment"),
+                    patch("vllm_ascend.worker.worker.ensure_model_parallel_initialized", side_effect=initialize_groups),
+                    patch("vllm_ascend.worker.worker.init_ascend_model_parallel") as ascend_init,
+                    patch("vllm_ascend.worker.worker.ensure_ec_transfer_initialized"),
+                ):
+                    if fails:
+                        with self.assertRaisesRegex(RuntimeError, "group initialization failed"):
+                            worker._init_worker_distributed_environment()
+                        ascend_init.assert_not_called()
+                    else:
+                        worker._init_worker_distributed_environment()
+                        ascend_init.assert_called_once_with(worker.parallel_config, engram_config)
+                    self.assertIs(get_current_vllm_config(), config)
+
     def test_layer_reuse_memory_factor_counts_components_per_buffer(self):
         from vllm_ascend.core.kv_cache_interface import (
             AscendMLAAttentionSpec,
@@ -286,6 +334,7 @@ class TestNPUWorker(TestBase):
             # allocation or its corresponding budget calculation.
             kv_transfer_config=SimpleNamespace(kv_connector="FutureConnector"),
         )
+        worker.model_config = SimpleNamespace(hf_text_config=SimpleNamespace(model_type="qwen3"))
         worker.get_kv_cache_spec = MagicMock(return_value={"attn": attn_spec, "linear_attn": mamba_spec})
 
         for supports_standardized_backing, expected_budget in (
@@ -333,6 +382,7 @@ class TestNPUWorker(TestBase):
             ),
             kv_transfer_config=None,
         )
+        worker.model_config = SimpleNamespace(hf_text_config=SimpleNamespace(model_type="qwen3"))
         worker.get_kv_cache_spec = MagicMock(
             return_value={
                 "encoder_attn": spec,

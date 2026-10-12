@@ -26,6 +26,7 @@ from vllm_ascend.attention.mla_v1 import (
     AscendMLAPrefillMetadata,
     DecodeMLAPreprocessResult,
 )
+from vllm_ascend.utils import vllm_version_is
 
 
 def test_mla_dcp_extends_v1_backend() -> None:
@@ -43,9 +44,19 @@ def test_mla_dcp_extends_v1_backend() -> None:
 
 @pytest.mark.parametrize("dcp_size", [1, 8])
 def test_mla_dcp_passes_runner_v2_cp_compatibility(dcp_size) -> None:
-    group = SimpleNamespace(world_size=dcp_size, rank_in_group=0)
-    with patch("vllm.distributed.parallel_state.get_dcp_group", return_value=group):
-        impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
+    if vllm_version_is("0.30.0"):
+        group = SimpleNamespace(world_size=dcp_size, rank_in_group=0)
+        with patch("vllm.distributed.parallel_state.get_dcp_group", return_value=group):
+            impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
+    else:
+        # vLLM main resolves the DCP group through
+        # ``get_dcp_world_size_and_rank`` and computes the LSE capability from
+        # its result inside ``__new__``.
+        with patch(
+            "vllm.distributed.parallel_state.get_dcp_world_size_and_rank",
+            return_value=(dcp_size, 0),
+        ):
+            impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
     assert impl.need_to_return_lse_for_decode == (dcp_size > 1)
     config = SimpleNamespace(
         parallel_config=SimpleNamespace(
@@ -346,17 +357,20 @@ def test_mla_dcp_uses_native_global_query_heads_for_fia(mock_fia) -> None:
 
 
 @pytest.mark.parametrize(
-    "use_spec_decode,is_draft,is_prefill,expected",
+    "use_spec_decode,is_draft,is_prefill,query_ends,expected",
     [
-        pytest.param(True, False, False, True, id="speculative-target"),
-        pytest.param(True, True, False, False, id="draft-decode"),
-        pytest.param(False, True, True, True, id="draft-prefill"),
+        pytest.param(True, False, False, [1, 2], True, id="speculative-target"),
+        pytest.param(True, True, False, [1, 2], False, id="draft-decode"),
+        pytest.param(True, True, False, [2, 3], True, id="multi-token-draft"),
+        pytest.param(False, True, True, [1, 2], True, id="draft-prefill"),
+        pytest.param(False, False, False, [1, 2], False, id="decode"),
+        pytest.param(False, False, False, [1, 4], True, id="multi-token-decode"),
     ],
 )
-def test_mla_split_selection_matches_shared_policy(use_spec_decode, is_draft, is_prefill, expected):
+def test_mla_split_selection_matches_shared_policy(use_spec_decode, is_draft, is_prefill, query_ends, expected):
     impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
     impl.speculative_config = object() if use_spec_decode else None
-    metadata = SimpleNamespace(causal=True, decode=SimpleNamespace(actual_seq_lengths_q=[1, 2]))
+    metadata = SimpleNamespace(causal=True, decode=SimpleNamespace(actual_seq_lengths_q=query_ends))
     with patch(
         "vllm_ascend.attention.context_parallel.mla_cp._EXTRA_CTX",
         SimpleNamespace(is_draft_model=is_draft, is_draft_model_prefill=is_prefill, capturing=True),

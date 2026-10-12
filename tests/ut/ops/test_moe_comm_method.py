@@ -156,7 +156,10 @@ class TestMoECommMethod(TestBase):
         fused_input.quant.quant_type = QuantType.NONE
         fused_input.routing.mc2_mask = torch.ones(2, dtype=torch.bool)
         fused_input.activation = "swigluoai_uninterleave"
-        fused_input.layer.mega_moe_activation_kwargs = comm_impl.mega_moe_activation_kwargs
+        # A routed layer can have no activation kwargs when the shared
+        # communicator is initialized before its MegaMoE activation metadata.
+        # Fall back to the communicator's resolved kwargs in that case.
+        fused_input.layer.mega_moe_activation_kwargs = None
         weights = MoEWeights(w1=[torch.zeros(8, 16)], w2=[torch.zeros(16, 8)])
 
         for device_type in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5):
@@ -180,6 +183,25 @@ class TestMoECommMethod(TestBase):
                 self.assertIsNone(captured["x_active_mask"])
             else:
                 torch.testing.assert_close(captured["x_active_mask"], torch.ones(2, dtype=torch.int8))
+
+        # An explicit empty mapping belongs to the routed layer and must not
+        # inherit the communicator's activation kwargs.
+        fused_input.layer.mega_moe_activation_kwargs = {}
+        with (
+            patch(
+                "vllm_ascend.ops.fused_moe.moe_comm_method.moe_utils._get_cann_mega_moe_quant_settings",
+                return_value=(0, None, None),
+            ),
+            patch(
+                "vllm_ascend.ops.fused_moe.moe_comm_method.get_current_hardware_profile",
+                return_value=get_hardware_profile(AscendDeviceType.A5),
+            ),
+        ):
+            comm_impl._apply_cann_mega_moe(fused_input, weights, is_decode_only_node=True)
+
+        self.assertEqual(captured["glu_alpha"], 1.0)
+        self.assertEqual(captured["glu_bias"], 0.0)
+        self.assertIsNone(captured["activation_clamp"])
 
     def test_situ_activation_is_bound_at_initialization(self):
         self.mock_ascend_config.enable_fused_mc2 = 1

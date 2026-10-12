@@ -26,6 +26,12 @@ disabled.
 GLM-5.3-Flash model currently supports only model runner V1 on Ascend, so
 all A3 scripts set `VLLM_USE_V2_MODEL_RUNNER=0` explicitly.
 
+Experimental SFA context parallelism can be enabled with
+`--additional-config '{"enable_dsa_cp": true}'`. It shards SFA query tokens
+within the tensor parallel group and keeps the main KV, indexer pool, and tail
+caches replicated. KDA continues to use its existing tensor parallel path.
+Keep both prefill context parallel size and decode context parallel size at 1.
+
 ## 3 Prerequisites
 
 ### 3.1 Model Weight
@@ -1014,7 +1020,7 @@ with the same TP8 layout; it does not load TP8 pool entries directly into TP1
 Decode engines.
 
 For backend installation, hardware dependencies, memory sizing, eviction,
-and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_guide/feature_guide/kv_pool.md).
+and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md).
 
 === "Atlas 800 A3 series"
 
@@ -1025,7 +1031,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
 
     Install the Mooncake backend according to the KV Cache Pool Deployment Guide.
     For A3 HCCS pooling, check the HDK, CANN, and LingQu Computing Network
-    requirements in its [Hardware Dependency Quick Reference](../../user_guide/feature_guide/kv_pool.md#ascend_global_resource_config).
+    requirements in its [HDK and CANN Version Compatibility Reference](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#hdk_and_cann_version_compatibility_reference).
     Add the following mount to the A3 Docker command in Section 4.1 on both nodes:
 
     ```shell
@@ -1224,7 +1230,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     and the `ascend` protocol, and the A3 fabric-memory exports do not apply.
 
     For backend installation, memory sizing, eviction, and tenant options, refer
-    to the [KV Cache Pool Deployment Guide](../../user_guide/feature_guide/kv_pool.md).
+    to the [KV Cache Pool Deployment Guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md).
 
     **Prepare the Mooncake Configuration**
 

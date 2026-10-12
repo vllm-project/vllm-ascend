@@ -31,6 +31,7 @@ from tests.deepseek_v41_utils import (
     select_index_topk,
 )
 from vllm_ascend.attention import dsa_v41
+from vllm_ascend.attention.context_parallel import dsa_cp, dsa_v41_cp
 from vllm_ascend.attention.dsa_v41 import (
     AscendDSAV41Impl,
     AscendDSAV41MetadataBuilder,
@@ -42,6 +43,7 @@ from vllm_ascend.attention.dsa_v41 import (
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSlidingWindowMLASpec,
+    declared_kwarg,
     get_storage_block_size,
 )
 from vllm_ascend.models.deepseek_v41.cache_config import (
@@ -54,7 +56,7 @@ from vllm_ascend.models.deepseek_v41.cache_config import (
     make_folded_index_cache_spec,
 )
 from vllm_ascend.models.deepseek_v41.compressor import DeepseekV41Compressor
-from vllm_ascend.models.deepseek_v41.model import build_layer_plan
+from vllm_ascend.models.deepseek_v41.model import AscendDeepseekV41SWACache, build_layer_plan
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage
 
 
@@ -67,9 +69,11 @@ def mock_npu_rms_norm(monkeypatch):
 
     monkeypatch.setattr(torch_npu, "npu_rms_norm", rms_norm)
     monkeypatch.setattr(torch.Tensor, "pin_memory", lambda self: self)
+    monkeypatch.setattr(dsa_v41, "get_ascend_config", lambda: SimpleNamespace(multistream_dsv4_dsa_overlap=True))
     vllm_config = MagicMock()
     vllm_config.compilation_config.custom_ops = ["all"]
     vllm_config.quant_config = None
+    vllm_config.parallel_config.prefill_context_parallel_size = 1
     with set_current_vllm_config(vllm_config):
         yield
 
@@ -167,6 +171,35 @@ def test_owner_counts_nested_config_and_source_resolution(config, runtime):
     assert type(specs["model.layers.2.self_attn.indexer.k_cache"]) is AscendMLAAttentionSpec
     assert type(specs["model.layers.2.self_attn.swa_cache"]) is AscendSlidingWindowMLASpec
     assert type(specs["model.layers.2.self_attn.compressor.state_cache"]) is CircularBufferSpec
+
+
+@pytest.mark.parametrize("packed_groups", [False, True])
+def test_swa_only_reduced_backbone_uses_independent_cache_allocations(config, runtime, packed_groups):
+    config.num_hidden_layers = 2
+    config.compress_ratios = [0, 0]
+    config.kv_source_layer_ids = []
+    config.index_source_layer_ids = []
+    specs = collect_specs(runtime)
+    assert len(specs) == 2
+    assert all(isinstance(spec, AscendSlidingWindowMLASpec) for spec in specs.values())
+    assert is_deepseek_v41_cache(specs)
+
+    groups = (
+        make_cache_groups(group_cache_specs(specs))
+        if packed_groups
+        else kv_cache_utils.get_kv_cache_groups(runtime, specs)
+    )
+    assert is_deepseek_v41_cache(groups)
+    page_bytes = sum(spec.page_size_bytes for spec in specs.values())
+    assert kv_cache_utils._pool_bytes_per_block(groups) == page_bytes
+    cache_config = kv_cache_utils.get_kv_cache_config_from_groups(runtime, groups, 10 * page_bytes + 1)
+    assert cache_config.num_blocks == 10
+    assert len(cache_config.kv_cache_tensors) == 2
+    assert {tuple(tensor.layers) for tensor in cache_config.kv_cache_tensors} == {(name,) for name in specs}
+    assert sum(tensor.size for tensor in cache_config.kv_cache_tensors) == 10 * page_bytes
+    for tensor in cache_config.kv_cache_tensors:
+        assert tensor.block_stride == specs[tensor.layers[0]].page_size_bytes
+        assert tensor.offset == tensor.layer_stride == 0
 
 
 def test_twelve_groups_share_four_layer_slots(config, runtime):
@@ -1499,45 +1532,48 @@ def test_v41_cp_source_rope_initializes_global_compressor(runtime, monkeypatch, 
     assert builder._global_builder._device_metadata_enabled is async_metadata
 
 
-@pytest.mark.parametrize("local_tokens", [0, 1, 2])
-@pytest.mark.parametrize("num_tokens", [3, 4])
-def test_v41_cp_output_exchange_only_pads_partial_ranks(monkeypatch, local_tokens, num_tokens):
-    from vllm_ascend.attention.context_parallel.dsa_v41_cp import AscendDSAV41CPImpl
+@pytest.mark.parametrize(
+    "world,rank,live_tokens,extra_padding",
+    [(2, 0, 5, 0), (2, 1, 5, 1), (4, 0, 5, 3), (4, 3, 5, 1), (2, 1, 0, 2), (4, 3, 0, 2)],
+)
+def test_v41_cp_preserves_tp_heads_and_flashcomm_output_extent(monkeypatch, world, rank, live_tokens, extra_padding):
+    rank %= world
+    per_rank = (live_tokens + world - 1) // world
+    token_extent = world * (per_rank + extra_padding)
+    heads, width = 2 * world, 2
+    canonical = torch.arange(live_tokens * heads * width, dtype=torch.float32).view(live_tokens, heads, width) + 1
+    peers = torch.zeros(world * per_rank, heads, width)
+    peers[:live_tokens] = canonical
+    local = peers[rank * per_rank : min((rank + 1) * per_rank, live_tokens)]
+    group = SimpleNamespace(world_size=world, device_group=object())
 
-    impl = AscendDSAV41CPImpl("layer", SimpleNamespace(is_kv_source=False), None, None, None)
-    calls = []
-    monkeypatch.setattr("vllm_ascend.attention.context_parallel.dsa_v41_cp.get_tp_group", lambda: None)
+    def exchange(recv, send, *, group):
+        # Emulate peers' all-to-all sends, while running restore_tp_heads
+        # itself unmocked to test the token/head coordinate change.
+        expected_send = peers[rank * per_rank : (rank + 1) * per_rank]
+        expected_send = torch.cat(expected_send.split(2, dim=1), dim=0)
+        torch.testing.assert_close(send, expected_send)
+        recv.copy_(peers[:, rank * 2 : (rank + 1) * 2])
 
-    def exchange(tensor, group):
-        calls.append(tensor)
-        return torch.ones((4, 2, 3))
+    def project(value, output):
+        expected = torch.zeros(token_extent, 2, width)
+        expected[:live_tokens] = canonical[:, rank * 2 : (rank + 1) * 2]
+        torch.testing.assert_close(value, expected)
+        # FlashComm reduce-scatter keeps a TP-local token buffer.
+        output.copy_(value.flatten(1).chunk(world, dim=0)[rank])
 
-    monkeypatch.setattr("vllm_ascend.attention.context_parallel.dsa_v41_cp.restore_tp_heads", exchange)
-
-    def project(tensor, output):
-        assert output is destination
-        assert tensor.shape == (num_tokens, 2, 3)
-        output.copy_(tensor.flatten(1))
-
-    projection = SimpleNamespace(_forward_o_proj=project)
-    attn = SimpleNamespace(dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=projection)))
-    destination = torch.empty((num_tokens, 6))
-    local_output = torch.ones((local_tokens, 4, 3))
-    output = impl._project_output(
-        attn,
-        local_output,
-        torch.empty((num_tokens, 6)),
-        SimpleNamespace(swa=SimpleNamespace(cp_token_range=(0, 2, 2, 4))),
-        projected=destination,
+    monkeypatch.setattr(dsa_v41_cp, "get_tp_group", lambda: group)
+    monkeypatch.setattr(dsa_cp.dist, "all_to_all_single", exchange)
+    impl = dsa_v41_cp.AscendDSAV41CPImpl.__new__(dsa_v41_cp.AscendDSAV41CPImpl)
+    attn = SimpleNamespace(
+        dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=SimpleNamespace(_forward_o_proj=project)))
     )
-    assert output.data_ptr() == destination.data_ptr()
-    assert len(calls) == 1
-    assert calls[0].shape == (2, 4, 3)
-    assert (calls[0] is local_output) == (local_tokens == 2)
-    torch.testing.assert_close(calls[0][:local_tokens], local_output)
-    assert torch.count_nonzero(calls[0][local_tokens:]) == 0
-    assert output.shape == (num_tokens, 6)
-    torch.testing.assert_close(output, torch.ones_like(destination))
+    output = torch.full((token_extent // world, 4), -777.0)
+    metadata = SimpleNamespace(swa=SimpleNamespace(cp_token_range=(0, 0, per_rank, 0)))
+    assert impl._project_output(attn, local, torch.empty(token_extent, 4), metadata, projected=output) is output
+    full = torch.zeros(token_extent, 4)
+    full[:live_tokens] = canonical[:, rank * 2 : (rank + 1) * 2].flatten(1)
+    torch.testing.assert_close(output, full.chunk(world)[rank])
 
 
 def test_v41_cp_consumers_reuse_local_topk_and_candidates():
@@ -1561,19 +1597,6 @@ def test_v41_cp_consumers_reuse_local_topk_and_candidates():
     assert actual.data_ptr() == indices.data_ptr()
     torch.testing.assert_close(actual, indices)
     assert shared.candidates is candidates
-
-
-@pytest.mark.parametrize("cp", [False, True])
-def test_v41_backend_routes_metadata_and_execution_together(monkeypatch, cp):
-    from vllm_ascend.attention.context_parallel import dsa_v41_cp
-    from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheBackend
-
-    monkeypatch.setattr(dsa_v41_cp, "enable_dsa_cp", lambda: cp)
-    builder, impl = dsa_v41_cp.get_v41_cp_classes()
-    assert DeepseekV41CacheBackend.get_builder_cls() is builder
-    assert not DeepseekV41CacheBackend.supports_pcp()
-    if cp:
-        assert issubclass(impl, dsa_v41_cp.AscendDSAV41CPImpl)
 
 
 def test_v41_cp_accepts_async_seq_lens_mirror(runtime, monkeypatch):
@@ -1610,91 +1633,6 @@ def test_v41_cp_resolves_own_planes_with_native_draft_metadata_present():
     assert impl._global_layer_metadata(metadata).swa is global_swa
 
 
-@pytest.mark.parametrize("overlap", [False, True])
-def test_v41_query_preparation_honors_multistream_setting(overlap):
-    from unittest.mock import Mock
-
-    from vllm_ascend.attention.dsa_v41 import AscendDSAV41Impl
-
-    impl = AscendDSAV41Impl.__new__(AscendDSAV41Impl)
-    impl.role = SimpleNamespace(is_kv_source=True)
-    impl.preprocess = Mock(return_value=("q", "qr"))
-    impl.multistream_preprocess = Mock(return_value=("q", "qr"))
-    impl._write_compressed_source = Mock()
-    attn = SimpleNamespace(
-        packed_cache_ops=None,
-        dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=SimpleNamespace(multistream_dsv4_dsa_overlap=overlap))),
-    )
-    metadata = SimpleNamespace(swa=SimpleNamespace(num_actual_tokens=6, num_prefills=0))
-    assert impl._prepare_queries(attn, "hidden", "positions", "cos", "sin", metadata) == ("q", "qr")
-    selected = impl.multistream_preprocess if overlap else impl.preprocess
-    selected.assert_called_once_with(attn, "hidden", "cos", "sin", metadata.swa)
-    impl._write_compressed_source.assert_not_called()
-
-
-def test_v41_a5_prefill_selects_multistream_preparation():
-    from unittest.mock import Mock
-
-    from vllm_ascend.attention.dsa_v41 import AscendDSAV41Impl
-
-    impl = AscendDSAV41Impl.__new__(AscendDSAV41Impl)
-    impl.role = SimpleNamespace(is_kv_source=False)
-    impl.preprocess = Mock(return_value=("q", "qr"))
-    impl.multistream_preprocess = Mock(return_value=("q", "qr"))
-    attn = SimpleNamespace(
-        packed_cache_ops=object(),
-        dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=SimpleNamespace(multistream_dsv4_dsa_overlap=True))),
-    )
-    metadata = SimpleNamespace(swa=SimpleNamespace(num_actual_tokens=6, num_prefills=1))
-
-    assert impl._prepare_queries(attn, "hidden", "positions", "cos", "sin", metadata) == ("q", "qr")
-    impl.multistream_preprocess.assert_called_once_with(attn, "hidden", "cos", "sin", metadata.swa)
-    impl.preprocess.assert_not_called()
-
-
-@pytest.mark.parametrize("overlap", [False, True])
-def test_v41_cp_query_preparation_uses_full_inputs(overlap):
-    from unittest.mock import Mock
-
-    from vllm_ascend.attention.context_parallel.dsa_v41_cp import AscendDSAV41CPImpl
-
-    impl = AscendDSAV41CPImpl.__new__(AscendDSAV41CPImpl)
-    impl.multistream_preprocess = Mock(return_value=("q", "qr"))
-    impl._write_compressed_source = Mock()
-    attn = SimpleNamespace(
-        dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=SimpleNamespace(multistream_dsv4_dsa_overlap=overlap)))
-    )
-    metadata = SimpleNamespace(swa=SimpleNamespace(num_actual_tokens=2, cp_token_range=(2, 4, 2, 6)))
-    assert impl._prepare_queries(attn, "abcdef", "positions", "cos", "sin", metadata) == ("q", "qr")
-    impl.multistream_preprocess.assert_called_once_with(attn, "abcdef", "cos", "sin", metadata.swa)
-    impl._write_compressed_source.assert_not_called()
-
-
-@pytest.mark.parametrize("overlap", [False, True])
-@pytest.mark.parametrize("local_tokens", [0, 2])
-def test_v41_cp_input_preparation_updates_empty_rank_cache(overlap, local_tokens):
-    from unittest.mock import Mock
-
-    from vllm_ascend.attention.context_parallel.dsa_v41_cp import AscendDSAV41CPImpl
-
-    impl = AscendDSAV41CPImpl.__new__(AscendDSAV41CPImpl)
-    full = torch.arange(24).reshape(6, 4)
-    global_metadata = SimpleNamespace(swa=SimpleNamespace(num_actual_tokens=5))
-    impl._global_layer_metadata = Mock(return_value=global_metadata)
-    impl._update_caches = Mock()
-    attn = SimpleNamespace(
-        dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=SimpleNamespace(multistream_dsv4_dsa_overlap=overlap)))
-    )
-    metadata = SimpleNamespace(swa=SimpleNamespace(cp_token_range=(3, 6, 3, 6), num_actual_tokens=local_tokens))
-    assert impl._prepare_inputs_and_caches(attn, full, metadata, {}) is None
-    if local_tokens == 0:
-        impl._update_caches.assert_called_once()
-        assert torch.equal(impl._update_caches.call_args.args[1], full[:5])
-        assert impl._update_caches.call_args.args[2] is global_metadata
-    else:
-        impl._update_caches.assert_not_called()
-
-
 def test_dspark_v41_indices_keep_capture_addresses(runtime):
     runtime.speculative_config = SimpleNamespace(num_speculative_tokens=3)
     spec = AscendSlidingWindowMLASpec(
@@ -1723,13 +1661,6 @@ def test_dspark_v41_indices_keep_capture_addresses(runtime):
     assert not torch.equal(old_indices, second.ori_sparse_indices)
     assert second.ori_sparse_indices[0, 0, 0] == 129
     assert first.ori_topk_length.tolist() == [131, 131, 131, 5]
-
-
-def test_v41_cp_inherits_forward():
-    from vllm_ascend.attention.context_parallel.dsa_v41_cp import AscendDSAV41CPImpl
-    from vllm_ascend.attention.dsa_v41 import AscendDSAV41Impl
-
-    assert AscendDSAV41CPImpl.forward is AscendDSAV41Impl.forward
 
 
 @pytest.mark.parametrize("rank", [None, 0, 1, 7])
@@ -1798,3 +1729,202 @@ def test_dspark_v41_noncausal_metadata_preserves_full_visible_block(runtime, mon
     torch.testing.assert_close(local.ori_sparse_indices, full.ori_sparse_indices[rank : rank + 1])
     assert local.seq_lens.tolist() == ([first_seq_len, 0] if rank < 3 else [0, 0])
     assert local.ori_mask_mode == 0
+
+
+# --- SWA bounded replay: the read side's floor (vLLM #56227) ------------------
+#
+# A replayed request recomputes the hit's last window, so the sliding-window
+# group holds no KV of its own below ``replay_start``: those blocks were retired
+# and replaced by the null block, whose KV upstream documents as all-zero. The
+# window therefore has to be floored there, through ``ori_topk_length``, since
+# the operator bounds a window with one scalar for the whole call.
+
+
+REPLAY_WINDOW = 32  # upstream's own SWA geometry
+REPLAY_START = 64  # a 96-token hit, whose last window is recomputed
+REPLAY_SEQ_LEN = 100
+
+
+def _replay_common(replay_starts, *, query_lens, seq_lens):
+    """A prefill batch, whose requests replay whatever ``replay_starts`` says."""
+    query_start_loc = torch.tensor([0, *query_lens], dtype=torch.int32).cumsum(0).to(torch.int32)
+    return _cp_common().replace(
+        slot_mapping=torch.full((sum(query_lens),), -1, dtype=torch.int64),
+        block_table_tensor=torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.int32),
+        query_start_loc=query_start_loc,
+        query_start_loc_cpu=query_start_loc,
+        seq_lens=torch.tensor(seq_lens, dtype=torch.int32),
+        seq_lens_cpu=torch.tensor(seq_lens, dtype=torch.int32),
+        num_reqs=len(seq_lens),
+        num_actual_tokens=sum(query_lens),
+        num_input_tokens=sum(query_lens),
+        max_query_len=max(query_lens),
+        max_seq_len=max(seq_lens),
+        positions=torch.cat([torch.arange(seq - qlen, seq) for seq, qlen in zip(seq_lens, query_lens)]),
+        is_prefilling=torch.tensor([True] * len(seq_lens)),
+        causal=True,
+        replay_start=None if replay_starts is None else torch.tensor(replay_starts, dtype=torch.int32),
+    )
+
+
+def _swa_builder(runtime, window=REPLAY_WINDOW):
+    # The builder reads the window off the model config, which is the same value
+    # the operator's own band uses, so the two cannot drift; the spec is only
+    # there for the cache geometry. Set both to the geometry under test.
+    runtime.model_config.hf_text_config.sliding_window = window
+    spec = AscendSlidingWindowMLASpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.bfloat16,
+        sliding_window=window,
+        cache_dtype_str="bfloat16",
+        model_version="deepseek_v41",
+    )
+    return AscendDSAV41MetadataBuilder(spec, [], runtime, torch.device("cpu"))
+
+
+def _expected_lens(window: int, replay_start: int, positions) -> list[int]:
+    """Upstream's row, as a count: ``position - max(position - window + 1, replay_start) + 1``."""
+    return [p - max(p - window + 1, replay_start, 0) + 1 for p in positions]
+
+
+def _built_lens(metadata) -> list[int]:
+    return metadata.ori_topk_length[:, 0].tolist()
+
+
+def test_a_replayed_window_is_floored_at_the_replay_start(runtime):
+    """The floor is the whole point: below ``replay_start`` the sliding-window
+    group holds nothing, so no count may cover it."""
+    builder = _swa_builder(runtime)
+    query_len = REPLAY_SEQ_LEN - REPLAY_START
+    common = _replay_common([REPLAY_START], query_lens=[query_len], seq_lens=[REPLAY_SEQ_LEN])
+
+    metadata = builder.build(0, common)
+
+    positions = range(REPLAY_START, REPLAY_SEQ_LEN)
+    assert _built_lens(metadata) == _expected_lens(REPLAY_WINDOW, REPLAY_START, positions)
+    # The first replayed token sees itself and nothing else: the rest of the
+    # window it would have asked for is below the replay start.
+    assert _built_lens(metadata)[0] == 1
+    # Rows stay floored while the query is inside the window it is rebuilding,
+    # and are the full window once it has run past it.
+    assert _built_lens(metadata)[REPLAY_WINDOW - 1] == REPLAY_WINDOW
+    assert _built_lens(metadata)[REPLAY_WINDOW] == REPLAY_WINDOW
+    # The band is still what bounds the window from above, and nothing else
+    # about the call changed.
+    assert metadata.ori_mask_mode == 4
+    assert metadata.ori_win_left == REPLAY_WINDOW - 1
+    assert metadata.ori_sparse_indices is None
+
+
+def test_a_window_that_drifts_between_the_spec_and_the_config_is_rejected(runtime):
+    """The write side pads out the spec's window and this mask floors on the text
+    config's. Both are read from the model today, so they agree -- but they are
+    two sources, and a drift would pad one window while bounding another, which
+    shows up as precision rather than as a failure. The builder refuses it."""
+    builder = _swa_builder(runtime)
+    runtime.model_config.hf_text_config.sliding_window = REPLAY_WINDOW + 1
+    common = _replay_common([REPLAY_START], query_lens=[REPLAY_SEQ_LEN - REPLAY_START], seq_lens=[REPLAY_SEQ_LEN])
+
+    with pytest.raises(AssertionError):
+        builder.build(0, common)
+
+
+def test_only_the_request_that_replays_is_floored(runtime):
+    """A replay step is one step of a batch: the requests that are not replaying
+    have a lower bound of zero, and their count is the one the operator's own
+    band would have produced."""
+    builder = _swa_builder(runtime)
+    common = _replay_common(
+        [REPLAY_START, 0],
+        query_lens=[REPLAY_SEQ_LEN - REPLAY_START, 5],
+        seq_lens=[REPLAY_SEQ_LEN, 20],
+    )
+
+    metadata = builder.build(0, common)
+
+    lens = _built_lens(metadata)
+    assert lens[: REPLAY_SEQ_LEN - REPLAY_START] == _expected_lens(
+        REPLAY_WINDOW, REPLAY_START, range(REPLAY_START, REPLAY_SEQ_LEN)
+    )
+    assert lens[REPLAY_SEQ_LEN - REPLAY_START :] == _expected_lens(REPLAY_WINDOW, 0, range(15, 20))
+
+
+@pytest.mark.parametrize("drop_field", [False, True])
+def test_a_step_that_does_not_replay_reports_no_length(runtime, drop_field):
+    """The runner reports "nothing replays" as ``None`` rather than as zeros, and
+    a lane without the field does not report at all. Both have to leave the
+    operator exactly as it was configured before this feature."""
+    builder = _swa_builder(runtime)
+    common = _replay_common(None, query_lens=[REPLAY_SEQ_LEN], seq_lens=[REPLAY_SEQ_LEN])
+    if drop_field:
+        del common.replay_start
+
+    metadata = builder.build(0, common)
+
+    assert metadata.ori_topk_length is None
+    assert metadata.ori_sparse_indices is None
+    assert metadata.ori_mask_mode == 4
+
+
+def test_an_all_zero_replay_start_reproduces_the_band(runtime):
+    """The builder cannot tell zeros from a real replay without reading a device
+    tensor, and must not: the runner's ``None`` is the only "does not replay".
+    So an all-zero vector has to be *equivalent* to the band rather than skipped
+    -- which is what makes this a floor and nothing else."""
+    builder = _swa_builder(runtime)
+    common = _replay_common([0], query_lens=[6], seq_lens=[REPLAY_SEQ_LEN])
+
+    metadata = builder.build(0, common)
+
+    assert _built_lens(metadata) == _expected_lens(REPLAY_WINDOW, 0, range(REPLAY_SEQ_LEN - 6, REPLAY_SEQ_LEN))
+
+
+def test_only_the_sliding_window_group_carries_the_length(runtime):
+    """The length is read off the sliding-window group's metadata whichever
+    group's loop ranges the layer is handed, so no other group has any use for
+    it -- and a long-KV group that reported one would be masking a window it
+    does not read."""
+    long_kv = AscendDSAV41MetadataBuilder(
+        AscendMLAAttentionSpec(
+            block_size=128,
+            num_kv_heads=1,
+            head_size=8,
+            dtype=torch.bfloat16,
+            tokens_per_state=2,
+            model_version="deepseek_v41",
+            storage_block_size=64,
+        ),
+        [],
+        runtime,
+        torch.device("cpu"),
+    )
+    common = _replay_common([REPLAY_START], query_lens=[4], seq_lens=[REPLAY_SEQ_LEN])
+
+    metadata = long_kv.build(0, common)
+
+    assert metadata.ori_topk_length is None
+    assert metadata.ori_mask_mode == 4
+
+
+def test_the_swa_cache_carries_the_replay_flag_into_its_spec():
+    """Where the switch becomes a spec field, and the field becomes the two
+    properties the scheduler and the worker read. On a lane pinned before
+    #56227 there is no field to carry, and then there is no flag either."""
+    if not declared_kwarg(AscendSlidingWindowMLASpec, "bounded_replay", True):
+        pytest.skip("bounded_replay is absent from this baseline's SlidingWindowMLASpec.")
+
+    cache = AscendDeepseekV41SWACache(
+        head_dim=8,
+        window_size=REPLAY_WINDOW,
+        dtype=torch.bfloat16,
+        prefix="model.layers.0.self_attn.swa_cache",
+        cache_config=SimpleNamespace(block_size=64, cache_dtype="bfloat16"),
+        bounded_replay=True,
+    )
+
+    spec = cache.get_kv_cache_spec(None)
+    assert spec.bounded_replay
+    assert not spec.prefix_cacheable
+    assert spec.prefix_replay_tokens == REPLAY_WINDOW

@@ -80,3 +80,39 @@ def test_overflow_fails_before_collective_and_bypasses_do_not_need_metadata(runt
     assert parallel.gather_engram_hashes(hashes, dp_shared_memory=True) is hashes
     monkeypatch.setattr(parallel, "get_engram_dp_group", lambda: None)
     assert parallel.gather_engram_hashes(hashes) is hashes
+
+
+@pytest.mark.parametrize("counts", [(3, 0, 1, 0), (6, 6, 6, 6)])
+def test_dp_pcp_split_table_round_trip_preserves_query_and_head_order(runtime, monkeypatch, counts):
+    config, _, _ = runtime
+    config.scheduler_config.max_num_batched_tokens = 8
+    monkeypatch.setattr(parallel, "get_potential_max_tokens", lambda: 8)
+    hashes = [torch.arange(count, dtype=torch.int32).view(-1, 1, 1) + rank * 10 for rank, count in enumerate(counts)]
+    padded = torch.cat([torch.cat((ids, ids.new_full((8 - len(ids), 1, 1), parallel.DEAD_ID))) for ids in hashes])
+
+    def lookup(owner):
+        ids = padded[:, 0, 0].view(-1, 1, 1)
+        heads = torch.arange(owner * 2, owner * 2 + 2).view(1, 2, 1)
+        return torch.where(ids == parallel.DEAD_ID, 0, ids * 100 + heads)
+
+    for rank, ids in enumerate(hashes):
+
+        def all_gather(local, dim, rank=rank):
+            assert dim == 0
+            torch.testing.assert_close(local, padded[rank * 8 : (rank + 1) * 8])
+            return padded
+
+        group = SimpleNamespace(world_size=4, rank_in_group=rank, device_group=object(), all_gather=all_gather)
+        monkeypatch.setattr(parallel, "get_engram_dp_group", lambda group=group: group)
+        gathered = parallel.gather_engram_hashes(ids)
+        torch.testing.assert_close(gathered, padded)
+
+        def all_to_all(recv, staged, *, group, rank=rank):
+            torch.testing.assert_close(staged, lookup(rank))
+            recv.copy_(torch.cat([lookup(owner)[rank * 8 : (rank + 1) * 8] for owner in range(4)]))
+
+        monkeypatch.setattr(parallel.dist, "all_to_all_single", all_to_all)
+        output = parallel.exchange_engram_rows(lookup(rank), len(ids))
+        expected = ids[:, 0, 0].view(-1, 1, 1) * 100 + torch.arange(8).view(1, 8, 1)
+        torch.testing.assert_close(output, expected)
+        assert parallel.gather_engram_hashes(ids, dp_shared_memory=True) is ids

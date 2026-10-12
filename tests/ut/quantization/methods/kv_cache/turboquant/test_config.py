@@ -141,3 +141,11 @@ def test_sfa_model_allows_context_parallelism(runtime):
     _as_sfa_model(runtime).parallel_config.decode_context_parallel_size = 2
 
     config.validate_turboquant(runtime)
+
+
+def test_sfa_cache_accepts_the_v1_model_runner(runtime):
+    # The V1 runner builds the same packed SFA main cache spec; the compressed
+    # cache of the DeepSeek V4 path stays V2-only, as the case above asserts.
+    _as_sfa_model(runtime).use_v2_model_runner = False
+
+    config.validate_turboquant(runtime)

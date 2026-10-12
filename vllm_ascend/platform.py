@@ -56,6 +56,7 @@ from vllm_ascend.utils import (
     refresh_block_size,
     update_cudagraph_capture_sizes,
     enable_sp,
+    vllm_version_is,
 )
 
 if TYPE_CHECKING:
@@ -498,9 +499,11 @@ class NPUPlatform(Platform):
         cls._validate_indexer_pp_config(vllm_config)
 
         _validate_routing_replay_config(vllm_config)
+        _validate_pcp_dcp_config(vllm_config)
         _validate_draft_decode_context_parallel_config(vllm_config)
         _validate_parallel_config(vllm_config)
         _validate_engram_config(vllm_config)
+        _validate_aux_output_config(vllm_config)
 
         # 3.Auto detect quantization method and verify cache dtype
         maybe_auto_detect_quantization(vllm_config)
@@ -1396,6 +1399,73 @@ def _setup_worker_and_scheduler(
                 "vllm_ascend.core.batch_job_aware_scheduler.BatchJobAwareScheduler"
             )
 
+    _downgrade_swa_bounded_replay(vllm_config, ascend_config)
+
+
+def _swa_bounded_replay_unsupported_mode(ascend_config) -> str | None:
+    """Name the Ascend mode that cannot honor SWA bounded replay.
+
+    Upstream implements the rewind inside ``Scheduler.schedule()``. Four Ascend
+    modes replace that method with a verbatim copy of an older upstream body, so
+    they neither rewind a prefix hit nor realize that the chunk they scheduled
+    is a replay; activating any of them therefore has to turn the switch off.
+
+    The other two modes reach upstream's ``schedule()`` and inherit the rewind:
+    ``batch_job_aware_scheduler`` calls ``super()``, and
+    ``short_request_first_scheduler`` does not override ``schedule()`` at all --
+    it only installs a request queue. Note that ``enable_balance_scheduling`` is
+    a fork despite being a monkeypatch rather than a ``scheduler_cls``, and that
+    its ``super().schedule()`` fallback only applies while balancing is off.
+
+    ``enable_dsa_cp`` is deliberately not here: DSA-CP is not a scheduler fork,
+    and its V4.1 metadata builder keeps the per-request channel the window clamp
+    needs, so that check belongs with the clamp rather than at startup.
+    """
+    scheduler_config = ascend_config.scheduler_config
+    if scheduler_config.recompute_scheduler_enable:
+        return "recompute_scheduler_enable"
+    if scheduler_config.dyntra_lb_config.enabled:
+        return "dyntra_lb_config"
+    if scheduler_config.profiling_chunk_config.enabled:
+        return "profiling_chunk_config"
+    if scheduler_config.enable_balance_scheduling:
+        return "enable_balance_scheduling"
+    return None
+
+
+def _downgrade_swa_bounded_replay(vllm_config: VllmConfig, ascend_config) -> None:
+    """Turn the SWA bounded replay switch off where this backend cannot honor it.
+
+    The switch defaults to on and is only read by a model the feature was
+    written for, so turning it off is invisible everywhere else: such a model's
+    sliding-window group then stays prefix-cacheable, which is the behavior from
+    before the feature. A downgrade rather than an error, because the switch
+    defaults to on while each of the modes below is an explicit user opt-in.
+    """
+    cache_config = vllm_config.cache_config
+    if cache_config is None or not getattr(cache_config, "swa_bounded_replay", False):
+        return
+
+    mode = _swa_bounded_replay_unsupported_mode(ascend_config)
+    if mode is None:
+        return
+
+    cache_config.swa_bounded_replay = False
+
+    from vllm_ascend.core.kv_cache_interface import supports_bounded_replay
+
+    if not supports_bounded_replay(vllm_config.model_config):
+        # Nothing would have replayed: the feature belongs to the DeepSeek-V4.1
+        # tree, and a V4 model never reads the switch. Warning here would tell
+        # the user a feature they never had is off.
+        return
+
+    logger.warning_once(
+        "SWA bounded replay is disabled: %s schedules with a pinned copy of the "
+        "scheduler, which cannot rewind a prefix hit.",
+        mode,
+    )
+
 
 def _validate_sfa_dcp_kv_sp(vllm_config: VllmConfig) -> None:
     parallel_config = vllm_config.parallel_config
@@ -1615,10 +1685,9 @@ def _validate_engram_config(vllm_config: VllmConfig) -> None:
         parallel_config.enable_elastic_ep
         or parallel_config.tensor_parallel_size not in (1, 2, 4, 8)
         or parallel_config.pipeline_parallel_size != 1
-        or parallel_config.prefill_context_parallel_size != 1
         or parallel_config.decode_context_parallel_size != 1
     ):
-        raise ValueError("Ascend Engram requires TP=1/2/4/8 with PP=PCP=DCP=1.")
+        raise ValueError("Ascend Engram requires TP=1/2/4/8 with PP=DCP=1.")
     load_format = vllm_config.load_config.load_format
     if load_format not in ("auto", "safetensors", "dummy"):
         raise ValueError("Ascend Engram requires indexed safetensors (auto/safetensors), or dummy weights.")
@@ -1685,6 +1754,53 @@ def _validate_parallel_config(vllm_config: VllmConfig) -> None:
             )
 
 
+def _validate_model_pcp_dcp_config(
+    model_config: ModelConfig,
+    pcp_size: int,
+    dcp_size: int,
+) -> None:
+    """Require equal PCP/DCP sizes for GQA/MQA stacking."""
+    if model_config.use_mla or pcp_size <= 1 or dcp_size <= 1:
+        return
+    if pcp_size != dcp_size:
+        raise ValueError(
+            "GQA/MQA PCP+DCP requires prefill_context_parallel_size "
+            "to equal decode_context_parallel_size; "
+            f"got PCP={pcp_size}, DCP={dcp_size}."
+        )
+
+
+def _validate_pcp_dcp_config(vllm_config: VllmConfig) -> None:
+    """Validate GQA/MQA PCP+DCP sizes for the target model."""
+    parallel_config = vllm_config.parallel_config
+    _validate_model_pcp_dcp_config(
+        vllm_config.model_config,
+        parallel_config.prefill_context_parallel_size,
+        parallel_config.decode_context_parallel_size,
+    )
+
+
+def _validate_aux_output_config(vllm_config: VllmConfig) -> None:
+    """Reject AuxOutput configurations the Ascend runner cannot service.
+
+    vLLM main moved routed-experts output to the AuxOutput connector and
+    requires Model Runner V2 for it. Ascend is an out-of-tree platform, so the
+    upstream check is skipped and only the V2 NPUModelRunner wires the worker
+    connector up. Without this guard a V1 run enables the scheduler-side
+    connector and crashes with "auxiliary output worker output is missing".
+    """
+    if vllm_version_is("0.30.0"):
+        return
+    if getattr(vllm_config, "aux_output_config", None) is None:
+        return
+    if vllm_config.aux_output_config.enabled and not vllm_config.use_v2_model_runner:
+        raise ValueError(
+            "enable_return_routed_experts (AuxOutput Connector) is only "
+            "supported by Model Runner V2 on Ascend. Set "
+            "VLLM_USE_V2_MODEL_RUNNER=1."
+        )
+
+
 def _validate_draft_decode_context_parallel_config(vllm_config: VllmConfig) -> None:
     speculative_config = vllm_config.speculative_config
     if speculative_config is None:
@@ -1708,8 +1824,13 @@ def _validate_draft_decode_context_parallel_config(vllm_config: VllmConfig) -> N
     if draft_model_config is None:
         return
 
-    # MLA draft models do not use the GQA/MQA DCP head-sharding rule.
+    # MLA draft models do not use the GQA/MQA head-sharding rules below.
     if draft_model_config.use_mla:
+        return
+
+    pcp_size = parallel_config.prefill_context_parallel_size
+    if pcp_size > 1:
+        _validate_model_pcp_dcp_config(draft_model_config, pcp_size, decode_context_parallel_size)
         return
 
     draft_parallel_config = speculative_config.draft_parallel_config

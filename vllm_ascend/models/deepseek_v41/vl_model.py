@@ -208,6 +208,11 @@ class AscendDeepseekV41ForCausalLM(
             is_multimodal=is_multimodal,
         )
 
+    def set_embedding_num_tokens_padded(self, num_tokens_padded: int) -> None:
+        # MRV2 model state sees this multimodal wrapper. Forward its batch
+        # length to the vocabulary embedding that performs PCP token exchange.
+        self.language_model.model.embed_tokens.set_embedding_num_tokens_padded(num_tokens_padded)
+
     def prepare_engram_graph_inputs(self, padded_tokens=None):
         return self.language_model.prepare_engram_graph_inputs(padded_tokens)
 
@@ -232,6 +237,7 @@ class AscendDeepseekV41ForCausalLM(
         slot_mapping=None,
         block_table=None,
         *,
+        token_indices=None,
         force_dummy=False,
         cg_mode=None,
     ):
@@ -243,6 +249,7 @@ class AscendDeepseekV41ForCausalLM(
             query_start_loc,
             slot_mapping,
             block_table,
+            token_indices=token_indices,
             force_dummy=force_dummy,
             cg_mode=cg_mode,
         )

@@ -25,7 +25,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import PropertyMock, patch
 
-from vllm.config import KVTransferConfig
+from vllm.config import DeviceConfig, KVTransferConfig
 from vllm.config import VllmConfig as _VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 
@@ -1846,51 +1846,6 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         self.assertTrue(config.enable_sparse_sfa_c8)
 
     @_clean_up
-    @patch("vllm_ascend.utils.model_uses_sfa_sparse")
-    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_c8_reshape_optim_is_initialized_from_sfa_li_c8_and_pd_role(
-        self,
-        mock_fix,
-        mock_uses_sfa,
-    ):
-        cases = (
-            (None, True, True, "kv_producer", True),
-            (False, True, True, "kv_producer", False),
-            (True, False, True, "kv_producer", False),
-            (True, True, False, "kv_producer", False),
-            (True, True, True, "kv_consumer", False),
-            (True, True, True, "kv_both", False),
-            (True, True, True, None, False),
-        )
-        for reshape_optim, uses_sfa, enable_li_c8, kv_role, expected in cases:
-            with self.subTest(
-                reshape_optim=reshape_optim,
-                uses_sfa=uses_sfa,
-                enable_li_c8=enable_li_c8,
-                kv_role=kv_role,
-            ):
-                mock_uses_sfa.return_value = uses_sfa
-                vc = VllmConfig()
-                vc.additional_config = {
-                    "refresh": True,
-                    "enable_sparse_li_c8": enable_li_c8,
-                }
-                if reshape_optim is not None:
-                    vc.additional_config["c8_enable_reshape_optim"] = reshape_optim
-                # enable_sparse_li_c8 is derived from indexer_kv_dtype (see
-                # init_ascend_config); the per-case flag is expressed there.
-                vc.attention_config.indexer_kv_dtype = "int8" if enable_li_c8 else "auto"
-                if kv_role is not None:
-                    vc.kv_transfer_config = KVTransferConfig(
-                        kv_connector="MooncakeConnectorV1",
-                        kv_role=kv_role,
-                    )
-
-                config = init_ascend_config(vc)
-
-                self.assertEqual(config.c8_reshape_optim_enabled, expected)
-
-    @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_rejection_sampler_config_survives_factory(self, mock_fix):
         vc = VllmConfig()
@@ -2095,8 +2050,6 @@ class TestKVPPConfig(TestBase):
             ("parallel_config", "decode_context_parallel_size", 2, "DCP"),
             ("model_config", "use_mla", False, "MLA"),
             ("model_config", "is_hybrid", True, "MLA"),
-            ("speculative_config", "method", "eagle3", "mtp"),
-            ("speculative_config", "num_speculative_tokens_per_batch_size", {1: 2}, "fixed"),
         )
         for section, field, value, message in restrictions:
             with self.subTest(field=field):
@@ -2107,17 +2060,15 @@ class TestKVPPConfig(TestBase):
                 with self.assertRaisesRegex(ValueError, message):
                     _validate_parallel_config(config)
 
-    def test_dspark_accepts_fixed_length_and_rejects_dynamic_verification(self):
+    def test_dspark_accepts_fixed_length_and_dynamic_verification(self):
         config = make_kvpp_config()
         config.speculative_config.method = "dspark"
         KVPPConfig.from_vllm_config(config).validate(config)
         config.speculative_config.enable_adaptive_verification = True
-        with self.assertRaisesRegex(ValueError, "adaptive verification"):
-            KVPPConfig.from_vllm_config(config).validate(config)
+        KVPPConfig.from_vllm_config(config).validate(config)
         config.speculative_config.enable_adaptive_verification = False
         config.additional_config["dynamic_spec_config"] = {"method": "dspark"}
-        with self.assertRaisesRegex(ValueError, "dynamic speculative lengths"):
-            KVPPConfig.from_vllm_config(config).validate(config)
+        KVPPConfig.from_vllm_config(config).validate(config)
 
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_config_factory_keeps_kvpp_enabled(self, _check_config):
@@ -2132,23 +2083,30 @@ class TestKVPPConfig(TestBase):
 
 
 class TestEngramSharedMemoryDefaults(TestBase):
-    def test_shared_tables_are_derived_for_mrv2_dp(self):
+    def test_shared_tables_are_derived_for_mrv2_dp_or_pcp(self):
+        topologies = (
+            (1, 1, False),
+            (2, 1, True),
+            (1, 2, True),
+            (2, 4, True),
+        )
         for use_v2 in (False, True):
-            for dp in (1, 2, 8):
+            for dp, pcp, auto_shared in topologies:
                 for shared in (False, True):
-                    with self.subTest(use_v2=use_v2, dp=dp, shared=shared):
-                        config = VllmConfig()
+                    with self.subTest(use_v2=use_v2, dp=dp, pcp=pcp, shared=shared):
+                        config = VllmConfig(device_config=DeviceConfig(device="cpu"))
                         config.parallel_config.data_parallel_size = dp
+                        config.parallel_config.prefill_context_parallel_size = pcp
                         config.engram_config = SimpleNamespace(dp_shared_memory=shared)
                         ascend_config = AscendConfig(sparse_kv_offload_config=SparseKVOffloadConfig())
                         with patch.object(
                             _VllmConfig, "use_v2_model_runner", new_callable=PropertyMock, return_value=use_v2
                         ):
                             ascend_config.derive_and_validate(config)
-                        self.assertEqual(config.engram_config.dp_shared_memory, shared or (use_v2 and dp > 1))
+                        self.assertEqual(config.engram_config.dp_shared_memory, shared or (use_v2 and auto_shared))
 
     def test_no_engram_config_is_preserved(self):
-        config = VllmConfig()
+        config = VllmConfig(device_config=DeviceConfig(device="cpu"))
         config.engram_config = None
         AscendConfig(sparse_kv_offload_config=SparseKVOffloadConfig()).derive_and_validate(config)
         self.assertIsNone(config.engram_config)

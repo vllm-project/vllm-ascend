@@ -54,7 +54,7 @@ from vllm_ascend._310p.worker.v2.spec_utils import (
 from vllm_ascend._310p.worker.v2.states import Ascend310PRequestState
 from vllm_ascend.core.kv_cache_interface import get_storage_block_size
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, get_kv_cache_tensor_layers
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, get_kv_cache_tensor_layers, vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 
@@ -602,14 +602,30 @@ class NPUModelRunner310V2(NPUModelRunner):
             self._force_eager_pc_batch = False
             self._force_eager_spec_batch = False
 
-    def prepare_inputs(  # type: ignore[misc, override]
-        self,
-        scheduler_output: SchedulerOutput,
-        batch_req_state: BatchReqState,
-        batch_desc: BatchExecutionDescriptor,
-    ) -> Ascend310PInputBatch:
-        del batch_req_state
-        return self._prepare_inputs_310p(scheduler_output, batch_desc)
+    if vllm_version_is("0.30.0"):
+
+        def prepare_inputs(  # type: ignore[misc, override]
+            self,
+            scheduler_output: SchedulerOutput,
+            batch_req_state: BatchReqState,
+            batch_desc: BatchExecutionDescriptor,
+        ) -> Ascend310PInputBatch:
+            del batch_req_state
+            return self._prepare_inputs_310p(scheduler_output, batch_desc)
+
+    else:
+
+        def prepare_inputs(  # type: ignore[misc, override]
+            self,
+            scheduler_output: SchedulerOutput,
+            batch_req_state: BatchReqState,
+            batch_desc: BatchExecutionDescriptor,
+            num_active_loras: int,  # noqa: ARG002
+        ) -> Ascend310PInputBatch:
+            # vLLM #56456 added the trailing num_active_loras positional
+            # argument; the 310P path does not use it.
+            del batch_req_state
+            return self._prepare_inputs_310p(scheduler_output, batch_desc)
 
     def finish_requests(self, scheduler_output: SchedulerOutput) -> None:
         super().finish_requests(scheduler_output)
@@ -827,10 +843,12 @@ class NPUModelRunner310V2(NPUModelRunner):
                 block_size
                 for block_size in backend.get_supported_kernel_block_sizes()
                 if block_size * max_head_size <= _ATTENTION_BLOCK_SIZE_LIMIT
+                and all(spec.block_size % block_size == 0 for spec in attention_specs)
             ]
             if not supported_sizes:
                 raise NotImplementedError(
-                    f"310P paged attention requires block_size * head_size <= {_ATTENTION_BLOCK_SIZE_LIMIT}."
+                    f"310P paged attention requires block_size * head_size <= {_ATTENTION_BLOCK_SIZE_LIMIT} "
+                    "and a kernel block size that divides every attention cache block size in the group."
                 )
             self.kernel_block_sizes[group_id] = supported_sizes[0]
 
@@ -1114,6 +1132,11 @@ class NPUModelRunner310V2(NPUModelRunner):
                 self.input_buffers.input_ids[:num_decode_reqs].copy_(
                     decode_tokens.to(self.input_buffers.input_ids.dtype)
                 )
+                # FULL decode graphs embed padded rows as well. Clear them
+                # after the partial copy: reused buffers may contain stale
+                # out-of-vocabulary IDs, and 310P slice writes can affect the
+                # adjacent tail element.
+                self.input_buffers.input_ids[num_decode_reqs:num_tokens_after_padding].zero_()
                 return
             self._decode_req_indices.np[:num_decode_reqs] = decode_req_indices
             self._decode_input_indices.np[:num_decode_reqs] = decode_input_indices
