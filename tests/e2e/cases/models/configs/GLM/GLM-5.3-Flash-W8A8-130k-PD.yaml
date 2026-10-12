@@ -165,9 +165,15 @@ benchmarks:
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
     num_prompts: 512
     max_out_len: 1024
+<<<<<<< HEAD
     batch_size: 128
     request_rate: 0
     baseline: 2313.132
+=======
+    batch_size: 64
+    request_rate: 1.52
+    baseline: 1
+>>>>>>> 6c164024c (update)
     threshold: 0.97
   acc_aime2025:
     case_type: accuracy
