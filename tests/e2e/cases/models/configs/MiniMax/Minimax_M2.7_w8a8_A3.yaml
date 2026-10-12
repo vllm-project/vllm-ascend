@@ -6,7 +6,6 @@ _envs: &envs
   SERVER_PORT: "DEFAULT_PORT"
   HCCL_BUFFSIZE: "1024"
   HCCL_OP_EXPANSION_MODE: "AIV"
-  LD_PRELOAD: "/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
   OMP_NUM_THREADS: "1"
 

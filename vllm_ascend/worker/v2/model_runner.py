@@ -19,6 +19,7 @@
 
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import deepcopy
+from dataclasses import replace
 from typing import Any
 
 import numpy as np
@@ -85,10 +86,14 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     init_sparse_kv_offload_manager,
 )
 from vllm_ascend.models.deepseek_v41.cache_config import uses_a5_packed_cache
+from vllm_ascend.observability.runtime_guard.hooks import (
+    runtime_guard_sample_tokens,
+    runtime_guard_step,
+)
+from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import (
     is_deepseek_v41,
-    is_pd_decode_recompute_scheduler_enabled,
     lmhead_tp_enable,
     lmhead_tp_max_num_logits,
     lmhead_tp_pad_rows,
@@ -107,12 +112,7 @@ from vllm_ascend.worker.v2.eplb import AscendEPLBController
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
-from vllm_ascend.worker.v2.pp_transport import (
-    bypass_upstream_spec_pp_guard,
-    resolve_spec_pp_support,
-    restore_pp_after_upstream_init,
-    use_legacy_spec_pp,
-)
+from vllm_ascend.worker.v2.pp_transport import resolve_spec_pp_support
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 from vllm_ascend.worker.v2.states import AscendRequestState
@@ -147,16 +147,9 @@ class NPUModelRunner(GPUModelRunner):
         set_potential_max_tokens(vllm_config)
         parallel_config = vllm_config.parallel_config
 
-        # Only release versions need PP hidden during upstream initialization.
         spec_pp_support = resolve_spec_pp_support(vllm_config)
         with torch_cuda_wrapper():
-            with bypass_upstream_spec_pp_guard(vllm_config, spec_pp_support) as pp_disabled:
-                super().__init__(vllm_config, device)
-            if pp_disabled:
-                restore_pp_after_upstream_init(self, vllm_config)
-        # Native PP owns token broadcast/writeback; only releases use our packing.
-        # Legacy Spec+PP transport (0.28/0.29 only); deleted when 0.30+ is the floor.
-        self.use_spec_pp = spec_pp_support is not None and use_legacy_spec_pp()
+            super().__init__(vllm_config, device)
         # These FIA models need post-rejection host counts on every PP stage.
         # TODO: Remove this extra PP sync when FIA and its metadata builders
         # use device lengths instead of exact CPU lengths.
@@ -227,13 +220,6 @@ class NPUModelRunner(GPUModelRunner):
             vocab_size=self.vocab_size,
             device=self.device,
         )
-        if self.use_spec_pp:
-            from vllm_ascend.patch.worker.patch_v2.patch_spec_pp import (
-                install_upstream_spec_pp_protocol,
-            )
-
-            assert self.pp_handler is not None
-            install_upstream_spec_pp_protocol(self.pp_handler, self.req_states, self.num_speculative_steps)
         # AscendInputBuffers has extra `seq_lens_cpu` attribute.
         # so reinitialize input_buffers here.
         self.input_buffers: AscendInputBuffers = AscendInputBuffers(
@@ -262,6 +248,8 @@ class NPUModelRunner(GPUModelRunner):
         set_mc2_tokens_capacity(vllm_config, self.max_num_reqs, self.decode_query_len)
         set_mc2_mask(vllm_config, self.device)
         set_potential_max_tokens(vllm_config)
+
+        self.runtime_guard = RuntimeGuardProcessor.bind(self)
 
     @property
     def pcp_manager_cls(self) -> type[AscendPCPManager]:
@@ -316,6 +304,7 @@ class NPUModelRunner(GPUModelRunner):
             pcp_manager._sampling_hidden_restored = True
         self.execute_model_state = state
 
+    @runtime_guard_sample_tokens
     def sample_tokens(self, grammar_output):
         if (
             lmhead_tp_enable()
@@ -342,11 +331,7 @@ class NPUModelRunner(GPUModelRunner):
         if pcp_manager is not None and isinstance(pcp_manager, AscendPCPManager):
             pcp_manager._sampling_hidden_restored = False
         self._restore_replicated_draft_target_states()
-        output = super().sample_tokens(grammar_output)
-        if self.use_spec_pp and self.is_last_pp_rank:
-            assert self.pp_handler is not None
-            self.pp_handler.broadcast_drafts()
-        return output
+        return super().sample_tokens(grammar_output)
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return apply_dspark_resident_kv_specs(
@@ -491,7 +476,10 @@ class NPUModelRunner(GPUModelRunner):
             layer = self.compilation_config.static_forward_context[layer_name]
             layer.impl.bind_copy_sfa_kv_cache(manager, layer_name)
 
+    # runtime_guard_step must stay INNER (below @torch.inference_mode()) so the
+    # wave sync keeps running inside the inference-mode context.
     @torch.inference_mode()
+    @runtime_guard_step
     def execute_model(
         self,
         scheduler_output: SchedulerOutput,
@@ -559,6 +547,20 @@ class NPUModelRunner(GPUModelRunner):
             profiling_config,
             execution_start_time,
         )
+
+        # In adaptive verification, idle DP ranks dummy-run at target graph capacity.
+        # Restore their request counts before draft DP sync to avoid inflating all ranks.
+        if (
+            dummy_run
+            and not is_profile
+            and context_len == 0
+            and self.adaptive_verification is not None
+            and self.execute_model_state is not None
+        ):
+            state = self.execute_model_state
+            self.execute_model_state = state._replace(
+                input_batch=replace(state.input_batch, num_reqs=len(scheduler_output.num_scheduled_tokens))
+            )
         return output
 
     def _maybe_send_draft_kv(self, scheduler_output: SchedulerOutput) -> None:
@@ -623,7 +625,14 @@ class NPUModelRunner(GPUModelRunner):
 
     def gather_batch_req_state(self, scheduler_output: SchedulerOutput, dummy_run: bool):
         batch_state, uniform_token_count = super().gather_batch_req_state(scheduler_output, dummy_run)
-        if batch_state is not None and is_pd_decode_recompute_scheduler_enabled(self.vllm_config):
+        kv_cfg = self.vllm_config.kv_transfer_config
+        is_pd_decode_node = kv_cfg is not None and kv_cfg.is_kv_consumer and not kv_cfg.is_kv_producer
+        # TODO: has_prefill describes prompt progress, not decode-graph eligibility.
+        # Decode-like prompt tails can therefore incorrectly disable FULL graphs
+        # for the entire batch; see https://github.com/vllm-project/vllm/pull/58400.
+        # This PD-only reclassification is a temporary workaround. Replace it with
+        # a dedicated graph-eligibility check once the upstream semantics are aligned.
+        if batch_state is not None and is_pd_decode_node:
             pd_decode_recompute = (
                 batch_state.is_prefilling_np
                 & (batch_state.num_computed_prefill_tokens_np > 0)
