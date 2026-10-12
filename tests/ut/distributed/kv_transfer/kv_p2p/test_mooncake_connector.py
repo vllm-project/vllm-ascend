@@ -1130,7 +1130,9 @@ class TestCoreFunctionality(unittest.TestCase):
         self.thread.remote_block_stride_per_addr["remote_engine"][6666] = [[1024]]
 
     def _configure_mock_mamba_transfer(self):
-        self.thread.kv_group2layeridx = {0: ({"kv_cache_spec_type": "MambaSpec"}, [0])}
+        self.thread.kv_group2layeridx = {
+            0: ({"kv_cache_spec_type": "MambaSpec", "shapes": [[5, 10], [5, 10, 1]], "dtype_sizes": [2, 4]}, [0])
+        }
         self.thread.kv_caches_base_addr["local_engine"][5555] = [[0x1000, 0x2000]]
         self.thread.kv_caches_base_addr["remote_engine"] = {6666: [[0x3000, 0x4000]]}
         self.thread.block_len_per_addr = [[100, 200]]
@@ -1299,6 +1301,216 @@ class TestCoreFunctionality(unittest.TestCase):
         self.assertEqual(call_args[2], [0x3000 + 3 * 160, 0x4000 + 3 * 512])
         self.assertEqual(call_args[3], [100, 200])
         mock_get_meta.assert_not_called()
+
+    @patch.object(KVCacheRecvingThread, "_get_remote_metadata")
+    def test_transfer_mamba_uses_producer_layout_with_different_consumer_mode(self, mock_get_meta):
+        for producer_mode, consumer_mode in (("align", "none"), ("none", "align"), ("none", "none")):
+            with self.subTest(producer_mode=producer_mode, consumer_mode=consumer_mode):
+                self._configure_mock_mamba_transfer()
+                self.thread.mamba_cache_mode = consumer_mode
+                self.thread.num_speculative_tokens = 5
+                self.thread.remote_kv_group2layeridx["remote_engine"][6666] = {
+                    0: (
+                        {
+                            **self.thread.kv_group2layeridx[0][0],
+                            "mamba_cache_mode": producer_mode,
+                            "num_speculative_blocks": 1,
+                        },
+                        [0],
+                    )
+                }
+                req = dict(self.test_req)
+                req["local_block_ids"] = [[2, 20, 21, 22, 23, 24]]
+                req["remote_block_ids"] = [[3]] if producer_mode == "align" else [[3, 30]]
+                self.engine.batch_transfer_sync_read.reset_mock()
+                self.thread._transfer_kv_cache_all_groups(req)
+                call_args, _ = self.engine.batch_transfer_sync_read.call_args
+                self.assertEqual(call_args[1], [0x1000 + 2 * 128, 0x2000 + 2 * 256])
+                self.assertEqual(call_args[2], [0x3000 + 3 * 160, 0x4000 + 3 * 512])
+                self.assertEqual(call_args[3], [100, 200])
+        mock_get_meta.assert_not_called()
+
+    @patch.object(KVCacheRecvingThread, "_get_remote_metadata")
+    def test_transfer_mamba_rejects_invalid_explicit_producer_state(self, mock_get_meta):
+        for producer_mode, blocks in (("align", [3, 4]), ("align", []), ("none", [3])):
+            with self.subTest(producer_mode=producer_mode, blocks=blocks):
+                self._configure_mock_mamba_transfer()
+                self.thread.mamba_cache_mode = "none"
+                self.thread.num_speculative_tokens = 0
+                self.thread.remote_kv_group2layeridx["remote_engine"][6666] = {
+                    0: (
+                        {
+                            **self.thread.kv_group2layeridx[0][0],
+                            "mamba_cache_mode": producer_mode,
+                            "num_speculative_blocks": 1,
+                        },
+                        [0],
+                    )
+                }
+                req = dict(self.test_req)
+                req["local_block_ids"] = [[2]]
+                req["remote_block_ids"] = [blocks]
+                self.engine.batch_transfer_sync_read.reset_mock()
+                with self.assertRaises(RuntimeError):
+                    self.thread._transfer_kv_cache_all_groups(req)
+                self.engine.batch_transfer_sync_read.assert_not_called()
+        mock_get_meta.assert_not_called()
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.is_conv_state_dim_first", return_value=False)
+    def test_mamba_layout_guard_accepts_tp4_to_tp1_and_rejects_mtp_mismatch(self, _layout):
+        local = {
+            "shapes": [[8, 24576], [64, 128, 128]],
+            "dtype_sizes": [2, 4],
+            "state_dtypes": ["torch.bfloat16", "torch.float32"],
+        }
+        remote = {
+            "shapes": [[8, 6144], [16, 128, 128]],
+            "dtype_sizes": [2, 4],
+            "state_dtypes": ["torch.bfloat16", "torch.float32"],
+        }
+        self.thread._validate_mamba_transfer_layout(local, remote, 4)
+        for change in (
+            {"shapes": [[4, 6144], [16, 128, 128]]},
+            {"shapes": [[8, 6144], [16, 128, 64]]},
+            {"dtype_sizes": [4, 4]},
+            {"state_dtypes": ["torch.float16", "torch.float32"]},
+        ):
+            with self.subTest(change=change), self.assertRaisesRegex(RuntimeError, "Incompatible P/D Mamba"):
+                self.thread._validate_mamba_transfer_layout(local, {**remote, **change}, 4)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.is_conv_state_dim_first", return_value=False)
+    def test_mamba_incompatible_shape_rejected_before_remote_read(self, _layout):
+        self._configure_mock_mamba_transfer()
+        self.thread.mamba_cache_mode = "none"
+        self.thread.num_speculative_tokens = 5
+        spec = {
+            **self.thread.kv_group2layeridx[0][0],
+            "mamba_cache_mode": "align",
+            "num_speculative_blocks": 5,
+            "shapes": [[4, 10], [5, 10, 1]],
+        }
+        self.thread.remote_kv_group2layeridx["remote_engine"][6666] = {0: (spec, [0])}
+        req = {**self.test_req, "local_block_ids": [[2, 20, 21, 22, 23, 24]], "remote_block_ids": [[3]]}
+        with self.assertRaisesRegex(RuntimeError, "Incompatible P/D Mamba state shapes"):
+            self.thread._transfer_kv_cache_all_groups(req)
+        self.engine.batch_transfer_sync_read.assert_not_called()
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.is_conv_state_dim_first", return_value=True)
+    def test_mamba_layout_guard_dim_first(self, _layout):
+        local = {"shapes": [[48, 8], [8, 2, 2]], "dtype_sizes": [2, 4]}
+        remote = {"shapes": [[12, 8], [2, 2, 2]], "dtype_sizes": [2, 4]}
+        self.thread._validate_mamba_transfer_layout(local, remote, 4)
+        with self.assertRaisesRegex(RuntimeError, "Incompatible P/D Mamba state shapes"):
+            self.thread._validate_mamba_transfer_layout(local, {**remote, "shapes": [[12, 4], [2, 2, 2]]}, 4)
+
+    def test_mamba_layout_guard_preserves_equal_tp_state_ranks(self):
+        spec = {"shapes": [[8, 16], [16, 32]], "dtype_sizes": [2, 4]}
+        self.thread._validate_mamba_transfer_layout(spec, spec, 1)
+        with self.assertRaisesRegex(RuntimeError, "Incompatible P/D Mamba state shapes"):
+            self.thread._validate_mamba_transfer_layout(spec, {**spec, "shapes": [[4, 16], [16, 32]]}, 1)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.is_conv_state_dim_first", return_value=False)
+    def test_mamba_layout_guard_rejects_invalid_metadata(self, _layout):
+        spec = {"shapes": [[8, 48], [8, 2, 2]], "dtype_sizes": [2, 4]}
+        for local, remote, ratio, error in (
+            ({}, spec, 1, "Invalid Mamba state shape metadata"),
+            (spec, {}, 1, "Invalid Mamba state shape metadata"),
+            (spec, spec, 0, "Invalid Mamba state shape metadata"),
+            (spec, spec, 5, "not divisible"),
+            ({**spec, "shapes": [[8, 48], [8, 4]]}, spec, 4, "Unsupported local"),
+            (spec, {"shapes": spec["shapes"]}, 1, "dtype sizes"),
+        ):
+            with self.subTest(local=local, remote=remote, ratio=ratio), self.assertRaisesRegex(RuntimeError, error):
+                self.thread._validate_mamba_transfer_layout(local, remote, ratio)
+
+    def test_mamba_transfer_rejects_malformed_producer_metadata(self):
+        for change in (
+            {"mamba_cache_mode": "all"},
+            {"num_speculative_blocks": -1},
+            {"num_speculative_blocks": "5"},
+            {"shapes": None},
+        ):
+            with self.subTest(change=change):
+                self._configure_mock_mamba_transfer()
+                self.thread.mamba_cache_mode = "none"
+                self.thread.num_speculative_tokens = 5
+                spec = {
+                    **self.thread.kv_group2layeridx[0][0],
+                    "mamba_cache_mode": "align",
+                    "num_speculative_blocks": 5,
+                    **change,
+                }
+                if spec.get("shapes") is None:
+                    spec.pop("shapes")
+                self.thread.remote_kv_group2layeridx["remote_engine"][6666] = {0: (spec, [0])}
+                self.engine.batch_transfer_sync_read.reset_mock()
+                req = {**self.test_req, "local_block_ids": [[2]], "remote_block_ids": [[3]]}
+                with self.assertRaises(RuntimeError):
+                    self.thread._transfer_kv_cache_all_groups(req)
+                self.engine.batch_transfer_sync_read.assert_not_called()
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.is_conv_state_dim_first", return_value=False)
+    def test_mamba_mtp5_tp4_transfer_reconstructs_conv_and_ssm_bytes(self, _layout):
+        # Eight conv history positions (kernel=4, MTP=5), three Q/K/V segments.
+        self.thread.tp_size = 1
+        self.thread.vllm_config.model_config.hf_text_config = types.SimpleNamespace(
+            linear_attn_config={"num_heads": 8, "head_dim": 2}
+        )
+        conv = torch.arange(8 * 48, dtype=torch.float16).reshape(8, 48)
+        ssm = torch.arange(8 * 2 * 2, dtype=torch.float32).reshape(8, 2, 2)
+        local_conv = torch.full((3, conv.numel() + 16), -1, dtype=torch.float16)
+        local_ssm = torch.full((3, ssm.numel() + 16), -1, dtype=torch.float32)
+        local_spec = {"shapes": [list(conv.shape), list(ssm.shape)], "dtype_sizes": [2, 4]}
+        for rank in range(4):
+            remote_conv = torch.cat(
+                [conv[:, segment * 16 + rank * 4 : segment * 16 + (rank + 1) * 4] for segment in range(3)], dim=1
+            ).contiguous()
+            remote_ssm = ssm[rank * 2 : (rank + 1) * 2].contiguous()
+            remote_spec = {"shapes": [list(remote_conv.shape), list(remote_ssm.shape)], "dtype_sizes": [2, 4]}
+            self.thread._validate_mamba_transfer_layout(local_spec, remote_spec, 4)
+            padded_conv = torch.full((4, remote_conv.numel() + 16), -2, dtype=torch.float16)
+            padded_ssm = torch.full((4, remote_ssm.numel() + 16), -2, dtype=torch.float32)
+            padded_conv[2, : remote_conv.numel()] = remote_conv.reshape(-1)
+            padded_ssm[2, : remote_ssm.numel()] = remote_ssm.reshape(-1)
+            local_addrs, remote_addrs, lengths = [], [], []
+            self.thread._append_mamba_transfer_meta(
+                local_addrs,
+                remote_addrs,
+                lengths,
+                group_spec=local_spec,
+                src_layer_base_addr=[local_conv.data_ptr(), local_ssm.data_ptr()],
+                dst_layer_base_addr=[padded_conv.data_ptr(), padded_ssm.data_ptr()],
+                block_len=[conv.numel() * 2, ssm.numel() * 4],
+                block_stride=[local_conv.stride(0) * 2, local_ssm.stride(0) * 4],
+                remote_block_stride=[padded_conv.stride(0) * 2, padded_ssm.stride(0) * 4],
+                remote_block_id=2,
+                local_block_id=1,
+                tp_num_need_pulls=4,
+                remote_tp_offset=rank,
+            )
+            for destination, source, size in zip(local_addrs, remote_addrs, lengths):
+                ctypes.memmove(destination, source, size)
+        torch.testing.assert_close(local_conv[1, : conv.numel()].reshape_as(conv), conv, rtol=0, atol=0)
+        torch.testing.assert_close(local_ssm[1, : ssm.numel()].reshape_as(ssm), ssm, rtol=0, atol=0)
+        self.assertTrue(torch.all(local_conv[1, conv.numel() :] == -1))
+        self.assertTrue(torch.all(local_ssm[1, ssm.numel() :] == -1))
+
+    def test_serialize_mamba_state_layout_survives_dtype_repr_fallback(self):
+        spec = MambaSpec(
+            block_size=16,
+            shapes=((1, 2), (2, 3)),
+            dtypes=(torch.float16, torch.float32),
+            mamba_cache_mode="align",
+            num_speculative_blocks=1,
+        )
+        group = KVCacheGroupSpec(layer_names=["layer_0"], kv_cache_spec=spec)
+        serialized = MooncakeConnectorWorker._serialize_kv_group_spec(group)
+        restored = msgspec.msgpack.decode(msgspec.msgpack.encode(serialized))
+        self.assertEqual(restored["mamba_cache_mode"], "align")
+        self.assertEqual(restored["num_speculative_blocks"], 1)
+        self.assertEqual(restored["shapes"], [[1, 2], [2, 3]])
+        self.assertEqual(restored["dtype_sizes"], [2, 4])
+        self.assertEqual(restored["state_dtypes"], ["torch.float16", "torch.float32"])
 
     @patch.object(KVCacheRecvingThread, "_get_remote_metadata")
     def test_transfer_groups_contiguous_kernel_blocks(self, mock_get_meta):

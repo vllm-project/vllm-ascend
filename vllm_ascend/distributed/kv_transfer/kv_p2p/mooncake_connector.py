@@ -822,6 +822,12 @@ class KVCacheRecvingThread(threading.Thread):
                 self.kv_group2layeridx,
             )
         remote_layer_name_to_idx = build_layer_name_to_metadata_idx(remote_kv_group2layeridx)
+        remote_mamba_specs = {
+            layer_idx: remote_group_spec
+            for remote_group_spec, remote_layer_indices in remote_kv_group2layeridx.values()
+            if remote_group_spec["kv_cache_spec_type"] == "MambaSpec"
+            for layer_idx in remote_layer_indices
+        }
         session_id = f"{remote_host}:{remote_transfer_port}"
 
         req_start_time = time.perf_counter()
@@ -916,9 +922,23 @@ class KVCacheRecvingThread(threading.Thread):
                         )
                     )
             else:
-                # Ascend Hybrid Mamba supports "align" (prefix caching) and
-                # "none" (no prefix caching), but not "all".
-                if self.mamba_cache_mode == "align":
+                # The producer's layout determines the remote state block.
+                # P and D may use different prefix-cache modes; state shapes must match.
+                remote_layer_idx = get_remote_layer_idx(layer_indices[0], group_spec, raw_layer_indices)
+                remote_mamba_spec = remote_mamba_specs.get(remote_layer_idx, {})
+                if "shapes" in remote_mamba_spec:
+                    self._validate_mamba_transfer_layout(group_spec, remote_mamba_spec, tp_num_need_pulls)
+                elif "mamba_cache_mode" in remote_mamba_spec:
+                    raise RuntimeError("Missing remote Mamba state shapes")
+                # Preserve same-layout compatibility with peers predating the
+                # explicit Mamba metadata fields.
+                remote_mamba_mode = remote_mamba_spec.get("mamba_cache_mode", self.mamba_cache_mode)
+                remote_speculative_blocks = remote_mamba_spec.get("num_speculative_blocks", self.num_speculative_tokens)
+                if remote_mamba_mode not in (None, "align", "none"):
+                    raise RuntimeError(f"Unsupported remote Mamba cache mode: {remote_mamba_mode}")
+                if not isinstance(remote_speculative_blocks, int) or remote_speculative_blocks < 0:
+                    raise RuntimeError(f"Invalid remote Mamba speculative block count: {remote_speculative_blocks}")
+                if remote_mamba_mode == "align":
                     if len(remote_group_block_ids) != 1:
                         raise RuntimeError(
                             "Mooncake Mamba transfer requires exactly one normalized remote state block; "
@@ -928,13 +948,13 @@ class KVCacheRecvingThread(threading.Thread):
                         )
                     remote_state_block_id = remote_group_block_ids[0]
                 else:
-                    transfer_block_idx = len(remote_group_block_ids) - self.num_speculative_tokens - 1
+                    transfer_block_idx = len(remote_group_block_ids) - remote_speculative_blocks - 1
                     if transfer_block_idx < 0:
                         raise RuntimeError(
                             "Invalid non-aligned Mamba state block metadata: "
                             f"request_id={remote_request_id}, group_idx={group_idx}, "
                             f"remote_block_count={len(remote_group_block_ids)}, "
-                            f"num_speculative_tokens={self.num_speculative_tokens}."
+                            f"remote_num_speculative_blocks={remote_speculative_blocks}."
                         )
                     remote_state_block_id = remote_group_block_ids[transfer_block_idx]
                 grouped_remote_block_ids = [[remote_state_block_id]]
@@ -1191,6 +1211,38 @@ class KVCacheRecvingThread(threading.Thread):
         for _, (k_cache_layer, v_cache_layer) in group_kv_caches.items():
             _transpose_cache_by_block(k_cache_layer)
             _transpose_cache_by_block(v_cache_layer)
+
+    @staticmethod
+    def _validate_mamba_transfer_layout(local_spec: dict[str, Any], remote_spec: dict[str, Any], tp_ratio: int) -> None:
+        """Reject incompatible state storage before issuing any remote read."""
+        local_shapes = local_spec.get("shapes", [])
+        remote_shapes = remote_spec.get("shapes", [])
+        if len(local_shapes) != 2 or len(remote_shapes) != 2 or tp_ratio < 1:
+            raise RuntimeError("Invalid Mamba state shape metadata")
+        expected = [list(shape) for shape in local_shapes]
+        if tp_ratio > 1:
+            # Match the sharding used by _append_mamba_transfer_meta. Equal-TP
+            # transfers copy complete states and need no rank-specific layout.
+            if [len(shape) for shape in local_shapes] != [2, 3]:
+                raise RuntimeError(f"Unsupported local Mamba state shapes: {local_shapes}")
+            conv_width_axis = 0 if is_conv_state_dim_first() else 1
+            for shape, axis in ((expected[0], conv_width_axis), (expected[1], 0)):
+                if shape[axis] % tp_ratio:
+                    raise RuntimeError("Mamba state width is not divisible by the P/D TP ratio")
+                shape[axis] //= tp_ratio
+        if [list(shape) for shape in remote_shapes] != expected:
+            raise RuntimeError(
+                "Incompatible P/D Mamba state shapes: "
+                f"producer={remote_shapes}, expected={expected}, consumer={local_shapes}. "
+                "P and D must use equal num_speculative_tokens and compatible model layouts."
+            )
+        local_sizes = local_spec.get("dtype_sizes")
+        remote_sizes = remote_spec.get("dtype_sizes")
+        if local_sizes is None or local_sizes != remote_sizes:
+            raise RuntimeError("Incompatible P/D Mamba state dtype sizes")
+        if "state_dtypes" in local_spec and "state_dtypes" in remote_spec:
+            if local_spec["state_dtypes"] != remote_spec["state_dtypes"]:
+                raise RuntimeError("Incompatible P/D Mamba state dtypes")
 
     def _append_mamba_transfer_meta(
         self,
@@ -2289,6 +2341,11 @@ class MooncakeConnectorWorker:
         if kv_cache_group_id is not None:
             serialized["kv_cache_group_id"] = kv_cache_group_id
         if isinstance(kv_cache_spec, MambaSpec):
+            # torch.dtype may force kv_cache_spec to a repr-only fallback.
+            # Keep the state layout explicit for mixed P/D cache modes.
+            serialized["mamba_cache_mode"] = kv_cache_spec.mamba_cache_mode
+            serialized["num_speculative_blocks"] = kv_cache_spec.num_speculative_blocks
+            serialized["state_dtypes"] = [str(dtype) for dtype in kv_cache_spec.dtypes]
             serialized["shapes"] = [list(shape) for shape in kv_cache_spec.shapes]
             serialized["dtype_sizes"] = [
                 torch.tensor([], dtype=dtype).element_size()
