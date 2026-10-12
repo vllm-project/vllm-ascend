@@ -68,7 +68,78 @@ class TestW8A8FusedMoEMethod(unittest.TestCase):
     def _make_method(self, use_expert_weight_list=False):
         method = AscendW8A8DynamicFusedMoEMethod.__new__(AscendW8A8DynamicFusedMoEMethod)
         method.use_expert_weight_list = use_expert_weight_list
+        method.enable_eplb = use_expert_weight_list
         return method
+
+    def _gmm1_scale(self, method, layer):
+        with (
+            patch("torch_npu.npu_grouped_matmul", return_value=["out"], create=True) as gmm,
+            patch("torch_npu.npu_dynamic_quant", return_value=("qx", "pscale"), create=True),
+        ):
+            method.apply_gmm1(_mlp_compute_input(layer=layer))
+        return gmm.call_args.kwargs["scale"]
+
+    def test_gmm1_reuses_original_bf16_scale(self):
+        method = self._make_method()
+        layer = _w8a8_layer()
+        layer.w13_weight_scale = torch.randn(1, 8).bfloat16()
+        layer.w13_weight_scale_fp32 = layer.w13_weight_scale.float()
+        layer.w2_weight_scale = layer.w2_weight_scale.bfloat16()
+        for _ in range(2):
+            scale = self._gmm1_scale(method, layer)[0]
+            self.assertIs(scale, layer.w13_weight_scale)
+            torch.testing.assert_close(scale, layer.w13_weight_scale_fp32.bfloat16(), rtol=0, atol=0)
+
+        # A reload replaces the layer's scale; do not retain a cached tensor.
+        layer.w13_weight_scale = torch.full((1, 8), 0.5, dtype=torch.bfloat16)
+        layer.w13_weight_scale_fp32 = layer.w13_weight_scale.float()
+        self.assertIs(self._gmm1_scale(method, layer)[0], layer.w13_weight_scale)
+
+    def test_gmm1_eplb_uses_updated_fp32_scale(self):
+        method = self._make_method()
+        method.enable_eplb = True
+        layer = _w8a8_layer()
+        layer.w13_weight_scale = torch.zeros(1, 8, dtype=torch.bfloat16)
+        layer.w13_weight_scale_fp32 = torch.ones(1, 8)
+        layer.w2_weight_scale = layer.w2_weight_scale.bfloat16()
+        scale = self._gmm1_scale(method, layer)[0]
+        self.assertIsNot(scale, layer.w13_weight_scale)
+        torch.testing.assert_close(scale, torch.ones(1, 8, dtype=torch.bfloat16))
+
+    def test_gmm1_preserves_conversion_for_other_scale_contracts(self):
+        for original in (
+            None,
+            torch.ones(1, 8),
+            torch.ones(8, dtype=torch.bfloat16),
+            torch.ones(1, 8, dtype=torch.bfloat16, device="meta"),
+        ):
+            with self.subTest(original=original):
+                method = self._make_method()
+                layer = _w8a8_layer()
+                layer.w13_weight_scale = original
+                layer.w2_weight_scale = layer.w2_weight_scale.bfloat16()
+                scale = self._gmm1_scale(method, layer)[0]
+                torch.testing.assert_close(scale, layer.w13_weight_scale_fp32.bfloat16(), rtol=0, atol=0)
+
+        for dtype in (torch.float16, torch.float32):
+            with self.subTest(dtype=dtype):
+                layer = _w8a8_layer()
+                layer.w13_weight_scale = torch.zeros(1, 8, dtype=dtype)
+                layer.w2_weight_scale = layer.w2_weight_scale.to(dtype)
+                scale = self._gmm1_scale(self._make_method(), layer)[0]
+                torch.testing.assert_close(scale, layer.w13_weight_scale_fp32.to(dtype), rtol=0, atol=0)
+
+    def test_gmm1_converts_each_expert_scale(self):
+        layer = SimpleNamespace(
+            w13_weight_list=[torch.randn(8, 16), torch.randn(8, 16)],
+            w13_weight_scale_fp32_list=[torch.full((8,), 0.25), torch.full((8,), 0.75)],
+            w2_weight_list=[torch.randn(16, 8), torch.randn(16, 8)],
+            w2_weight_scale_list=[torch.ones(16, dtype=torch.bfloat16) for _ in range(2)],
+        )
+        scales = self._gmm1_scale(self._make_method(use_expert_weight_list=True), layer)
+        self.assertEqual(len(scales), 2)
+        for actual, expected in zip(scales, layer.w13_weight_scale_fp32_list):
+            torch.testing.assert_close(actual, expected.bfloat16(), rtol=0, atol=0)
 
     def test_apply_gmm1_act_quant_custom_op_path(self):
         method = self._make_method()
