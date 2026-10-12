@@ -1366,6 +1366,7 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(impl.num_heads_padded, 32)  # next power of 2
         self.assertEqual(impl.head_padding, 12)  # 32 - 20
 
+    @patch("vllm_ascend.attention.mla_v1.torch_npu", SimpleNamespace())
     def test_q_proj_and_k_up_proj(self):
         batch_size = 4
         x = torch.randn(batch_size, self.impl.num_heads, self.impl.qk_head_dim)
@@ -1373,14 +1374,74 @@ class TestAscendMLAImpl(TestBase):
         self.impl.q_proj.return_value = (q_proj_output,)
         if not hasattr(self.impl, "W_UK_T") or self.impl.W_UK_T is None:
             self.impl.W_UK_T = torch.randn(self.impl.num_heads, self.impl.qk_nope_head_dim, self.impl.kv_lora_rank)
-        result = self.impl._q_proj_and_k_up_proj(x)
-        ql_nope, q_pe = result
+        expected_q_nope, expected_q_pe = q_proj_output.split(
+            [self.impl.qk_nope_head_dim, self.impl.qk_rope_head_dim], dim=-1
+        )
+        expected_ql_nope = torch.bmm(expected_q_nope.transpose(0, 1), self.impl.W_UK_T).transpose(0, 1)
+
+        ql_nope, q_pe = self.impl._q_proj_and_k_up_proj(x)
+
         self.assertEqual(ql_nope.shape[0], batch_size)
         self.assertEqual(ql_nope.shape[1], self.impl.num_heads)
         self.assertEqual(ql_nope.shape[2], self.impl.kv_lora_rank)
         self.assertEqual(q_pe.shape[0], batch_size)
         self.assertEqual(q_pe.shape[1], self.impl.num_heads)
         self.assertEqual(q_pe.shape[2], self.impl.qk_rope_head_dim)
+        torch.testing.assert_close(ql_nope, expected_ql_nope)
+        torch.testing.assert_close(q_pe, expected_q_pe)
+
+    @patch("vllm_ascend.attention.mla_v1.torch_npu")
+    def test_q_proj_and_k_up_proj_fuses_transposes(self, mock_torch_npu):
+        batch_size = 8
+        self.impl.num_heads = 6
+        self.impl.qk_nope_head_dim = 128
+        self.impl.qk_rope_head_dim = 64
+        self.impl.qk_head_dim = 192
+        self.impl.kv_lora_rank = 512
+
+        x = torch.randn(batch_size, self.impl.num_heads, self.impl.qk_head_dim)
+        q_proj_output = torch.randn(batch_size, self.impl.num_heads, self.impl.qk_head_dim)
+        self.impl.q_proj.return_value = (q_proj_output,)
+        self.impl.W_UK_T = torch.randn(
+            self.impl.num_heads,
+            self.impl.qk_nope_head_dim,
+            self.impl.kv_lora_rank,
+        )
+        expected_q_nope, expected_q_pe = q_proj_output.split(
+            [self.impl.qk_nope_head_dim, self.impl.qk_rope_head_dim], dim=-1
+        )
+        self.assertFalse(expected_q_nope.is_contiguous())
+        expected_ql_nope = torch.bmm(expected_q_nope.transpose(0, 1), self.impl.W_UK_T).transpose(0, 1).contiguous()
+
+        def fake_transpose_batchmatmul(input_tensor, weight, *, perm_x1, perm_y):
+            return torch.bmm(input_tensor.permute(perm_x1), weight).permute(perm_y).contiguous()
+
+        mock_torch_npu.npu_transpose_batchmatmul.side_effect = fake_transpose_batchmatmul
+
+        ql_nope, q_pe = self.impl._q_proj_and_k_up_proj(x)
+
+        mock_torch_npu.npu_transpose_batchmatmul.assert_called_once()
+        call_args, call_kwargs = mock_torch_npu.npu_transpose_batchmatmul.call_args
+        torch.testing.assert_close(call_args[0], expected_q_nope)
+        self.assertIs(call_args[1], self.impl.W_UK_T)
+        self.assertEqual(call_kwargs, {"perm_x1": (1, 0, 2), "perm_y": (1, 0, 2)})
+        torch.testing.assert_close(ql_nope, expected_ql_nope)
+        torch.testing.assert_close(q_pe, expected_q_pe)
+        self.assertTrue(ql_nope.is_contiguous())
+        self.assertEqual(
+            ql_nope.stride(),
+            (self.impl.num_heads * self.impl.kv_lora_rank, self.impl.kv_lora_rank, 1),
+        )
+
+    def test_q_proj_transpose_batchmatmul_operator_availability(self):
+        with patch(
+            "vllm_ascend.attention.mla_v1.torch_npu",
+            SimpleNamespace(npu_transpose_batchmatmul=object()),
+        ):
+            self.assertTrue(self.impl._can_use_q_proj_transpose_batchmatmul())
+
+        with patch("vllm_ascend.attention.mla_v1.torch_npu", SimpleNamespace()):
+            self.assertFalse(self.impl._can_use_q_proj_transpose_batchmatmul())
 
     @patch("torch_npu.npu_interleave_rope")
     def test_rope_single(self, mock_npu_interleave_rope):
@@ -1950,6 +2011,35 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(self.impl.W_UV.shape[0], self.impl.num_heads)
         self.assertEqual(self.impl.W_UV.shape[1], self.impl.kv_lora_rank)
         self.assertEqual(self.impl.W_UV.shape[2], self.impl.v_head_dim)
+
+    @patch("vllm_ascend.attention.mla_v1.maybe_trans_nz")
+    @patch("vllm_ascend.attention.mla_v1.torch_npu")
+    def test_process_weights_keeps_w_uk_t_nd_for_fused_q_proj(self, mock_torch_npu, mock_maybe_trans_nz):
+        self.impl.num_heads = 6
+        self.impl.qk_nope_head_dim = 128
+        self.impl.qk_rope_head_dim = 64
+        self.impl.qk_head_dim = 192
+        self.impl.kv_lora_rank = 512
+        self.impl.enable_mlapo = False
+        self.impl.fa_quant_layer = False
+
+        layer = MagicMock(spec=LinearBase)
+        layer.quant_method = MagicMock(spec=UnquantizedLinearMethod)
+        layer.weight = torch.randn(
+            self.impl.num_heads * (self.impl.qk_nope_head_dim + self.impl.v_head_dim),
+            self.impl.kv_lora_rank,
+        )
+        self.impl.kv_b_proj = layer
+        mock_torch_npu.npu_format_cast.return_value = layer.weight
+
+        self.impl.process_weights_after_loading(torch.bfloat16)
+
+        mock_maybe_trans_nz.assert_not_called()
+        self.assertTrue(self.impl.W_UK_T.is_contiguous())
+        self.assertEqual(
+            self.impl.W_UK_T.shape,
+            (self.impl.num_heads, self.impl.qk_nope_head_dim, self.impl.kv_lora_rank),
+        )
 
     @patch("torch_npu.npu_format_cast")
     def test_process_weights_after_loading_with_mlapo(self, mock_format_cast):
