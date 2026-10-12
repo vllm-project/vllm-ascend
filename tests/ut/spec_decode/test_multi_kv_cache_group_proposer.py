@@ -115,6 +115,9 @@ def test_initialize_attn_backend_splits_glm_physical_cache_groups():
     proposer._draft_attn_layer_names = {"draft.attn", "draft.indexer.k_cache"}
     proposer.vllm_config = MagicMock()
     proposer.device = torch.device("cpu")
+    proposer.num_speculative_tokens = 2
+    proposer.slot_mapping_group = [torch.zeros(4, dtype=torch.int32) for _ in range(2)]
+    proposer.runner = SimpleNamespace(pin_memory=False)
 
     main_backend = MagicMock()
     main_backend.full_cls_name.return_value = "main.backend"
@@ -155,6 +158,8 @@ def test_secondary_group_recomputes_slot_mapping_from_its_block_table():
     proposer._uses_multi_group_kv_cache = True
     proposer.kv_cache_gid = 0
     proposer._draft_block_table_width = MagicMock(return_value=2)
+    # Pre-created in initialize_attn_backend; the hook no longer allocates.
+    proposer._multi_group_slot_mapping_buffers = {(1, 0): torch.zeros(4, dtype=torch.int32)}
 
     secondary_block_table = MagicMock()
     secondary_block_table.get_device_tensor.return_value = torch.arange(8, dtype=torch.int32).reshape(2, 4)
@@ -245,6 +250,7 @@ def test_cache_only_next_step_uses_group_metadata_without_advancing_state():
         common_attn_metadata,
         cache_only_group,
         2,
+        1,
     )
     builder.build_for_drafting.assert_called_once_with(group_common_attn_metadata, 1)
     assert per_layer_metadata == {
@@ -253,11 +259,59 @@ def test_cache_only_next_step_uses_group_metadata_without_advancing_state():
     }
 
 
+@pytest.mark.parametrize("draft_index", [0, 1, 2])
+def test_multi_group_graph_capture_uses_per_group_views(draft_index):
+    proposer = AscendMultiKVCacheGroupMTPProposer.__new__(AscendMultiKVCacheGroupMTPProposer)
+    proposer.use_compress = False
+    common = SimpleNamespace(num_input_tokens=8)
+    group_views = [object(), object()]
+    builders = [MagicMock(), MagicMock()]
+    groups = [
+        SimpleNamespace(
+            layer_names=[f"draft.layer.{index}"],
+            get_metadata_builder=MagicMock(return_value=builder),
+        )
+        for index, builder in enumerate(builders)
+    ]
+    proposer.draft_attn_groups = groups
+    proposer._common_attn_metadata_for_draft_group = MagicMock(side_effect=group_views)
+    expected = [object(), object()]
+    for builder, metadata in zip(builders, expected):
+        builder.build_for_graph_capture.return_value = metadata
+
+    result = proposer._build_multi_group_graph_capture_metadata(common, draft_index)
+
+    assert result == {
+        "draft.layer.0": expected[0],
+        "draft.layer.1": expected[1],
+    }
+    assert [invocation.args for invocation in proposer._common_attn_metadata_for_draft_group.call_args_list] == [
+        (common, groups[0], 8, draft_index),
+        (common, groups[1], 8, draft_index),
+    ]
+    for builder, group_view in zip(builders, group_views):
+        builder.build_for_graph_capture.assert_called_once_with(
+            group_view,
+            multi_group_proposer.AscendAttentionState.DecodeOnly,
+        )
+
+
+def test_multi_group_graph_capture_rejects_compressed_attention():
+    proposer = AscendMultiKVCacheGroupMTPProposer.__new__(AscendMultiKVCacheGroupMTPProposer)
+    proposer.use_compress = True
+    with pytest.raises(AssertionError):
+        proposer._build_multi_group_graph_capture_metadata(SimpleNamespace(num_input_tokens=8), 0)
+
+
 def test_secondary_tail_slots_cover_prefill_and_keep_each_step():
     proposer = AscendMultiKVCacheGroupMTPProposer.__new__(AscendMultiKVCacheGroupMTPProposer)
     proposer._uses_multi_group_kv_cache = True
     proposer.kv_cache_gid = 0
     proposer._draft_block_table_width = MagicMock(return_value=1)
+    proposer._multi_group_slot_mapping_buffers = {
+        (1, 0): torch.zeros(8, dtype=torch.int32),
+        (1, 1): torch.zeros(8, dtype=torch.int32),
+    }
     slots = torch.full((8,), -1, dtype=torch.int32)
     table = torch.tensor([[2], [7]], dtype=torch.int32)
     block_table = MagicMock()
@@ -281,14 +335,20 @@ def test_secondary_tail_slots_cover_prefill_and_keep_each_step():
         _seq_lens_cpu=None,
         seq_lens_cpu=None,
     )
-    first = proposer._common_attn_metadata_for_draft_group(common, group, 8)
+    first = proposer._common_attn_metadata_for_draft_group(common, group, 8, 0)
     assert first.slot_mapping.tolist() == [23, 24, 25, 64, 65, -1, -1, -1]
     common.positions = torch.tensor([8, 12, 0, 0, 0, 0, 0, 0])
     common.query_start_loc = torch.tensor([0, 1, 2])
     common.num_actual_tokens = 2
-    second = proposer._common_attn_metadata_for_draft_group(common, group, 8)
+    second = proposer._common_attn_metadata_for_draft_group(common, group, 8, 1)
     assert second.slot_mapping.tolist() == [26, 66, -1, -1, -1, -1, -1, -1]
     assert first.slot_mapping.tolist() == [23, 24, 25, 64, 65, -1, -1, -1]
+    assert first.slot_mapping.data_ptr() != second.slot_mapping.data_ptr()
+
+    common.positions = torch.tensor([9, 13, 0, 0, 0, 0, 0, 0])
+    refreshed = proposer._common_attn_metadata_for_draft_group(common, group, 8, 1)
+    assert refreshed.slot_mapping.data_ptr() == second.slot_mapping.data_ptr()
+    assert refreshed.slot_mapping.tolist() == [18, 67, -1, -1, -1, -1, -1, -1]
 
 
 def test_later_draft_sequence_lengths_exclude_rejected_tokens():
@@ -330,3 +390,52 @@ def test_later_draft_sequence_lengths_exclude_rejected_tokens():
         assert common.positions[:2].tolist() == [10 + step, 20 + step]
         assert common.slot_mapping[:2].tolist() == [256 + 10 + step, 896 + 20 + step]
         assert common._seq_lens_cpu is None
+
+
+def test_full_graph_later_draft_accepts_missing_cpu_sequence_lengths():
+    proposer = AscendMultiKVCacheGroupMTPProposer.__new__(AscendMultiKVCacheGroupMTPProposer)
+    proposer._uses_multi_group_kv_cache = True
+    proposer.kv_cache_gid = 0
+    proposer.uses_mrope = False
+    proposer.method = "mtp"
+    proposer.max_model_len = 4096
+    proposer.block_size = 128
+    proposer.has_gdn = False
+    proposer.use_compress = False
+    proposer.sliding_window = None
+    proposer.arange = torch.arange(17, dtype=torch.int32)
+    proposer.token_arange_np = np.arange(17, dtype=np.int32)
+    proposer.slot_mapping_group = [torch.zeros(16, dtype=torch.int32) for _ in range(3)]
+    proposer.seq_lens_group = [torch.zeros(16, dtype=torch.int32) for _ in range(3)]
+    proposer.query_start_loc_group = [torch.zeros(17, dtype=torch.int32) for _ in range(3)]
+    proposer.runner = SimpleNamespace(dcp_manager=None)
+    proposer._draft_block_table_width = MagicMock(return_value=1)
+    builder = MagicMock()
+    group = SimpleNamespace(
+        kv_cache_group_id=0,
+        get_metadata_builder=lambda: builder,
+    )
+    common = SimpleNamespace(
+        num_reqs=2,
+        num_actual_tokens=12,
+        seq_lens=torch.tensor([15, 24], dtype=torch.int32),
+        _seq_lens_cpu=torch.tensor([15, 24], dtype=torch.int32),
+        seq_lens_cpu=None,
+        num_computed_tokens_cpu=None,
+        positions=torch.arange(12, dtype=torch.int32),
+        block_table_tensor=torch.tensor([[2], [7]], dtype=torch.int32),
+    )
+
+    updated, _ = proposer.attn_update_stack_num_spec_norm(
+        1,
+        common,
+        batch_size=2,
+        input_batch_size=12,
+        used_update_positions=torch.tensor([10, 20], dtype=torch.int32),
+        aclgraph_runtime_mode=CUDAGraphMode.FULL,
+        attn_group=group,
+    )
+
+    assert updated.seq_lens[:2].tolist() == [12, 22]
+    assert updated.seq_lens_cpu is None
+    assert updated._seq_lens_cpu is None

@@ -89,6 +89,9 @@ constexpr uint32_t ATTR_SOFTMAX_SCALE_INDEX = 0;
 constexpr uint32_t ATTR_CMP_RATIO_INDEX = 1;
 constexpr uint32_t ATTR_ORI_MASK_MODE_INDEX = 2;
 constexpr uint32_t ATTR_CMP_MASK_MODE_INDEX = 3;
+// The band mask mode. Its left edge is what the SWA bounded replay bound rides
+// (vLLM #56227), through ori_topk_length in band mode.
+constexpr uint32_t SMLA_ORI_MASK_MODE_BAND = 4U;
 constexpr uint32_t ATTR_ORI_WIN_LEFT_INDEX = 4;
 constexpr uint32_t ATTR_ORI_WIN_RIGHT_INDEX = 5;
 constexpr uint32_t ATTR_LAYOUT_Q_INDEX = 6;

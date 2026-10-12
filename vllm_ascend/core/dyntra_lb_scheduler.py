@@ -30,7 +30,6 @@ from vllm.v1.request import Request, RequestStatus
 from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm_ascend.ascend_config import DyntraLBConfig
-from vllm_ascend.utils import vllm_version_is
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.scheduler import Scheduler as _SchedulerBase
@@ -1106,7 +1105,7 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
 
         # Drain every step, including without a connector, to avoid stale
         # Mamba boundary offers. Snapshot exact current block tables for the
-        # connector before building its metadata. (vLLM v0.29.0 and main)
+        # connector before building its metadata.
         kv_connector_block_state = None
         boundary_state_offloads = self.kv_cache_manager.take_boundary_state_offloads()
         if self.connector is not None:
@@ -1114,24 +1113,11 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
             # new blocks. Resolve its current table only when the connector reads it.
             block_state_req_ids = set(num_scheduled_tokens)
             block_state_req_ids.update(req_id for req_id in boundary_state_offloads if req_id in self.requests)
-            if vllm_version_is("0.29.0"):
-                snapshot_req_ids = {req.req_id for req in new_reqs_data}
-                snapshot_req_ids.update(
-                    req_id
-                    for req_id, block_ids in zip(cached_reqs_data.req_ids, cached_reqs_data.new_block_ids, strict=True)
-                    if block_ids
-                )
-                snapshot_req_ids.update(req_id for req_id in boundary_state_offloads if req_id in self.requests)
-                kv_connector_block_state = KVConnectorBlockState(
-                    block_ids={req_id: self.kv_cache_manager.get_block_ids(req_id) for req_id in snapshot_req_ids},
-                    boundary_state_offloads=boundary_state_offloads,
-                )
-            else:
-                kv_connector_block_state = KVConnectorBlockState(
-                    req_ids=block_state_req_ids,
-                    resolve_block_ids=self.kv_cache_manager.get_block_ids,
-                    boundary_state_offloads=boundary_state_offloads,
-                )
+            kv_connector_block_state = KVConnectorBlockState(
+                req_ids=block_state_req_ids,
+                resolve_block_ids=self.kv_cache_manager.get_block_ids,
+                boundary_state_offloads=boundary_state_offloads,
+            )
 
         pending_kv_cache_block_copies = None
         take_kv_cache_block_copies = getattr(self.kv_cache_manager, "take_kv_cache_block_copies", None)

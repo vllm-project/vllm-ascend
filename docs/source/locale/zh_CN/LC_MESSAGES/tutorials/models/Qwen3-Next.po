@@ -128,9 +128,6 @@ msgstr ""
 msgid "## 8 Performance Evaluation"
 msgstr "## 8 性能评估"
 
-msgid "### Using AISBench"
-msgstr "### 使用 AISBench"
-
 msgid ""
 "Refer to [Using AISBench for performance "
 "evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-"
@@ -139,9 +136,6 @@ msgstr ""
 "详情请参考[使用 AISBench "
 "进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-"
 "performance-evaluation)。"
-
-msgid "### Using vLLM Benchmark"
-msgstr "### 使用 vLLM Benchmark"
 
 msgid "Run performance evaluation of `Qwen3-Next` as an example."
 msgstr "以 `Qwen3-Next` 为例运行性能评估。"
@@ -249,15 +243,6 @@ msgstr ""
 "本文档将介绍模型的核心验证步骤，包括支持的特性、环境准备，以及精度和性能评估。Qwen3-Next 目前使用 Triton "
 "Ascend，该技术处于实验阶段。在后续版本中，其与稳定性和精度相关的性能可能会发生变化，并且性能将持续优化。"
 
-msgid ""
-"`Qwen3-Next-80B-A3B-Instruct`: requires **8 cards in 1 Atlas 800 A3 (64GB × "
-"16) node** or **8 cards in 1 Atlas 800 A2 (64GB × 8) node**. [Model "
-"Weight](https://www.modelscope.cn/models/Qwen/Qwen3-Next-80B-A3B-Instruct)"
-msgstr ""
-"`Qwen3-Next-80B-A3B-Instruct`：需要 **1 个 Atlas 800 A3（64GB × 16）节点中的 8 张卡**或 "
-"**1 个 Atlas 800 A2（64GB × 8）节点中的 8 "
-"张卡**。[模型权重](https://www.modelscope.cn/models/Qwen/Qwen3-Next-80B-A3B-Instruct)"
-
 msgid "Start the docker image on each node."
 msgstr "在每个节点上启动 Docker 镜像。"
 
@@ -339,3 +324,32 @@ msgid ""
 "For more details, please refer to the [Installation "
 "Guide](../../getting_started/installation.md)."
 msgstr "更多详细信息，请参阅[安装指南](../../getting_started/installation.md)。"
+
+msgid "|  Weight Version | Hardware Requirements | Download Links |"
+msgstr "|  权重版本 | 硬件要求 | 下载链接 |"
+
+msgid ""
+"| `Qwen3-Next-80B-A3B-Instruct` | **8 cards in 1 Atlas 800 A3 (64GB × 16) "
+"node** or **8 cards in 1 Atlas 800 A2 (64GB × 8) node** | "
+"[ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-Next-80B-A3B-Instruct)"
+" |"
+msgstr ""
+"| `Qwen3-Next-80B-A3B-Instruct` | **1 台 Atlas 800 A3（64GB × 16）节点中的 8 张卡** 或"
+" **1 台 Atlas 800 A2（64GB × 8）节点中的 8 张卡** | "
+"[ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-Next-80B-A3B-Instruct)"
+" |"
+
+msgid ""
+">**Path description**: Download the model weights to a directory of your "
+"choice and record it. Ensure the model path in the subsequent deployment "
+"command matches this directory."
+msgstr ">**路径说明**：将模型权重下载到您选择的目录并记录该路径。确保后续部署命令中的模型路径与此目录一致。"
+
+msgid "### 7.1 Using AISBench"
+msgstr "### 7.1 使用 AISBench"
+
+msgid "### 8.1 Using AISBench"
+msgstr "### 8.1 使用 AISBench"
+
+msgid "### 8.2 Using vLLM Benchmark"
+msgstr "### 8.2 使用 vLLM Benchmark"

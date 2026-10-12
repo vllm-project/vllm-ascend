@@ -24,6 +24,7 @@ from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
+from vllm_ascend.utils import vllm_version_is
 
 
 class AscendInputBuffers(InputBuffers):
@@ -61,6 +62,10 @@ class AscendInputBuffers(InputBuffers):
         # define seq_lens_np for easier calculation with numpy.
         self.seq_lens_np: np.ndarray = self.seq_lens_cpu.numpy()
 
+        # Logical query token count, scoped to _dummy_run before graph padding.
+        # None keeps the default layout for other dummy/capture paths.
+        self.dummy_num_tokens: int | None = None
+
 
 @dataclass
 class AscendInputBatch(InputBatch):
@@ -82,14 +87,40 @@ class AscendInputBatch(InputBatch):
         num_tokens: int,
         input_buffers: AscendInputBuffers,
         max_query_len: int | None = None,
+        is_padding: bool = True,
     ) -> "AscendInputBatch":
         """Override the make_dummy method to calculate seq_lens_np."""
-        input_batch = InputBatch.make_dummy(
-            num_reqs,
-            num_tokens,
-            input_buffers,
-            max_query_len=max_query_len,
-        )
+        # The incoming count includes graph padding. Save it for the model input
+        # views below, while building query metadata from the original scheduled
+        # count used for DP synchronization. Only _dummy_run supplies that override.
+        num_tokens_after_padding = num_tokens
+        if input_buffers.dummy_num_tokens is not None:
+            # PIECEWISE pads model inputs without adding scheduled queries.
+            num_tokens = input_buffers.dummy_num_tokens
+            assert num_tokens <= num_tokens_after_padding
+        if vllm_version_is("0.30.0"):
+            input_batch = InputBatch.make_dummy(
+                num_reqs,
+                num_tokens,
+                input_buffers,
+                max_query_len=max_query_len,
+            )
+        else:
+            input_batch = InputBatch.make_dummy(
+                num_reqs,
+                num_tokens,
+                input_buffers,
+                max_query_len=max_query_len,
+                is_padding=is_padding,
+            )
+        if num_tokens_after_padding != num_tokens:
+            input_batch.num_tokens_after_padding = num_tokens_after_padding
+            input_buffers.input_ids[num_tokens:num_tokens_after_padding].zero_()
+            input_buffers.positions[num_tokens:num_tokens_after_padding].zero_()
+            input_buffers.is_padding[num_tokens:num_tokens_after_padding].fill_(True)
+            input_batch.input_ids = input_buffers.input_ids[:num_tokens_after_padding]
+            input_batch.positions = input_buffers.positions[:num_tokens_after_padding]
+            input_batch.is_padding = input_buffers.is_padding[:num_tokens_after_padding]
         base_tokens = num_tokens // num_reqs
         num_extra = num_tokens % num_reqs
         input_buffers.seq_lens_np[: num_reqs - num_extra] = base_tokens

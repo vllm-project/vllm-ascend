@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import cast
 
 import torch
 from vllm.logger import logger
@@ -46,21 +47,32 @@ from vllm_ascend.ops.fused_moe.token_dispatcher import (
 )
 from vllm_ascend.quantization.quant_type import QuantType
 
-_MoECommMethods: dict[MoECommType | None, MoECommMethod] = {}
+_MoECommMethods: dict[tuple[MoECommType | None, tuple[int, ...]], MoECommMethod] = {}
 
 
-def get_moe_comm_method(moe_comm_type: MoECommType | None) -> MoECommMethod | None:
-    return _MoECommMethods.get(moe_comm_type)
+def _moe_config_key(
+    moe_comm_type: MoECommType | None, moe_config: FusedMoEConfig | None
+) -> tuple[MoECommType | None, tuple[int, ...]]:
+    """Return the execution shape that owns mutable MoE comm state."""
+    _CONFIG_KEY_FIELDS = ("num_experts", "num_local_experts")
+    return (moe_comm_type, tuple(int(getattr(moe_config, field, 0) or 0) for field in _CONFIG_KEY_FIELDS))
+
+
+def get_moe_comm_method(
+    moe_comm_type: MoECommType | None,
+    moe_config: FusedMoEConfig | None = None,
+) -> MoECommMethod | None:
+    return _MoECommMethods.get(_moe_config_key(moe_comm_type, moe_config))
 
 
 def setup_moe_comm_method(moe_config):
     if moe_config.ep_size > 1:
-        _MoECommMethods[MoECommType.ALLTOALL] = AlltoAllCommImpl(moe_config)
-        _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
-        _MoECommMethods[MoECommType.MC2] = MC2CommImpl(moe_config)
-        _MoECommMethods[MoECommType.FUSED_MC2] = FusedMC2CommImpl(moe_config)
+        _MoECommMethods[_moe_config_key(MoECommType.ALLTOALL, moe_config)] = AlltoAllCommImpl(moe_config)
+        _MoECommMethods[_moe_config_key(MoECommType.ALLGATHER, moe_config)] = AllGatherCommImpl(moe_config)
+        _MoECommMethods[_moe_config_key(MoECommType.MC2, moe_config)] = MC2CommImpl(moe_config)
+        _MoECommMethods[_moe_config_key(MoECommType.FUSED_MC2, moe_config)] = FusedMC2CommImpl(moe_config)
     else:
-        _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
+        _MoECommMethods[_moe_config_key(MoECommType.ALLGATHER, moe_config)] = AllGatherCommImpl(moe_config)
 
 
 @dataclass
@@ -72,6 +84,7 @@ class FusedExpertsResult:
     before_dispatch_evt: torch.npu.Event | None = None
     before_gmm2_evt: torch.npu.Event | None = None
     before_combine_evt: torch.npu.Event | None = None
+    shared_activation_overlap_start_evt: torch.npu.Event | None = None
     # For dynamic_eplb
     group_list_type: int = 1
     expert_tokens: torch.Tensor | None = None
@@ -79,6 +92,11 @@ class FusedExpertsResult:
 
 class MoECommMethod(ABC):
     """Base class for MoE communication methods."""
+
+    # Staged communication backends normally place shared activation work at
+    # routed GMM2. Dispatch-based MC2 and All2All opt into the larger routed
+    # GMM1 + GMM2 Cube window.
+    shared_activation_overlaps_routed_gmm1 = False
 
     def __init__(self, moe_config: FusedMoEConfig):
         self.moe_config = moe_config
@@ -140,6 +158,10 @@ class MoECommMethod(ABC):
         )
         token_dispatch_output = self.token_dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
 
+        shared_activation_overlap_start_evt = None
+        if self.shared_activation_overlaps_routed_gmm1:
+            shared_activation_overlap_start_evt = torch.npu.current_stream().record_event()
+
         mlp_compute_input = build_mlp_compute_input(
             fused_experts_input=fused_experts_input,
             token_dispatch_output=token_dispatch_output,
@@ -152,6 +174,9 @@ class MoECommMethod(ABC):
         else:
             mlp_output, before_gmm2_evt = apply_moe_mlp(mlp_compute_input, quant_method)
 
+        if shared_activation_overlap_start_evt is None:
+            shared_activation_overlap_start_evt = before_gmm2_evt
+
         before_combine_evt = torch.npu.current_stream().record_event()
         routed_out = self.token_dispatcher.token_combine(
             hidden_states=mlp_output,
@@ -163,6 +188,7 @@ class MoECommMethod(ABC):
             before_dispatch_evt=before_dispatch_evt,
             before_gmm2_evt=before_gmm2_evt,
             before_combine_evt=before_combine_evt,
+            shared_activation_overlap_start_evt=shared_activation_overlap_start_evt,
             group_list_type=token_dispatch_output.group_list_type,
             expert_tokens=token_dispatch_output.group_list,
         )
@@ -222,6 +248,8 @@ class MC2CommImpl(MoECommMethod):
     Communication and Computation parallelism on Ascend devices.
     """
 
+    shared_activation_overlaps_routed_gmm1 = True
+
     def pad_and_split_input_ids(self, input_ids):
         return self.prepare_finalize.pad_and_split_input_ids(input_ids)  # type: ignore[attr-defined]
 
@@ -241,6 +269,8 @@ class AlltoAllCommImpl(MoECommMethod):
     between data parallel ranks before and after the MLP computation. It should
     have better performance than AllGatherCommImpl when DP size > 1.
     """
+
+    shared_activation_overlaps_routed_gmm1 = True
 
     def pad_and_split_input_ids(self, input_ids):
         return self.prepare_finalize.pad_and_split_input_ids(input_ids)  # type: ignore[attr-defined]
@@ -268,10 +298,22 @@ class FusedMC2CommImpl(MoECommMethod):
 
     def __init__(self, moe_config):
         super().__init__(moe_config)
+        self._mega_moe_hccl_state_stale = False
         self.enable_fused_mc2 = get_ascend_config().enable_fused_mc2
         if self.enable_fused_mc2 == 1 and is_mega_moe_supported():
             self.mega_moe_symm_buffer = None
             self.get_symm_buffer_for_mega_moe, self.mega_moe = moe_utils.load_cann_mega_moe_ops()
+            # Resolve the Python ABI once, before the first collective/capture.
+            # The activation and its scalar parameters belong to FusedMoEConfig.
+            self.mega_moe_activation_kwargs = moe_utils.select_mega_moe_activation_kwargs(
+                self.mega_moe,
+                activation=moe_config.activation,
+                activation_clamp=moe_config.swiglu_limit if (moe_config.swiglu_limit or 0.0) > 0 else None,
+                swiglu_alpha=1.0 if moe_config.swiglu_alpha is None else moe_config.swiglu_alpha,
+                swiglu_beta=0.0 if moe_config.swiglu_beta is None else moe_config.swiglu_beta,
+                situ_beta=moe_config.activation_situ_beta,
+                situ_linear_beta=moe_config.activation_situ_linear_beta,
+            )
         if self.enable_fused_mc2 == 1:
             self.expert_token_nums = torch.zeros([self.moe_config.num_local_experts], dtype=torch.int32, device="npu")
         else:
@@ -289,6 +331,57 @@ class FusedMC2CommImpl(MoECommMethod):
 
     def _get_prepare_finalize(self):
         return PrepareAndFinalizeWithMC2(self.moe_config)
+
+    def prepare_hccl_teardown(self) -> bool:
+        """Invalidate the MegaMoe context before its MC2 group is destroyed."""
+        symm_buffer = getattr(self, "mega_moe_symm_buffer", None)
+        if symm_buffer is None:
+            return True
+
+        context_manager = getattr(symm_buffer, "_ctx_manager", None)
+        update_group = getattr(context_manager, "update_group", None)
+        if not callable(update_group):
+            raise RuntimeError(
+                "The installed cann_ops_transformer MegaMoe context manager "
+                "does not expose update_group(); refusing to tear down its HCCL group."
+            )
+
+        self._mega_moe_hccl_state_stale = True
+        logger.info("Marked MegaMoe HCCL runtime context stale before MC2 group teardown.")
+        return True
+
+    def refresh_hccl_runtime_state(self) -> bool:
+        """Rebind a stale MegaMoe context to the restored MC2 communicator."""
+        symm_buffer = getattr(self, "mega_moe_symm_buffer", None)
+        if symm_buffer is None or not self._mega_moe_hccl_state_stale:
+            return True
+
+        device_group = get_mc2_group().device_group
+        local_rank = torch.distributed.get_rank(group=device_group)
+        backend = device_group._get_backend(torch.device("npu"))
+        group_name = backend.get_hccl_comm_name(local_rank)
+        context_manager = symm_buffer._ctx_manager
+
+        # The context tensor was created under inference mode during model
+        # initialization. CANN updates it in place, so preserve that mode here.
+        with torch.inference_mode():
+            context_manager.update_group(group_name, symm_buffer.context)
+        symm_buffer.group = device_group
+        symm_buffer.rank_id = local_rank
+        symm_buffer.group_name = group_name
+        symm_buffer.ep_world_size = torch.distributed.get_world_size(group=device_group)
+        symm_buffer.ccl_buffer_size = context_manager.ccl_buffer_size
+        torch.distributed.barrier(
+            group=device_group,
+            device_ids=[torch.npu.current_device()],
+        )
+        self._mega_moe_hccl_state_stale = False
+        logger.info(
+            "Refreshed MegaMoe HCCL runtime context after MC2 group restore: rank=%d, world_size=%d.",
+            local_rank,
+            symm_buffer.ep_world_size,
+        )
+        return True
 
     def _init_mega_moe_symm_buffer(
         self,
@@ -418,7 +511,6 @@ class FusedMC2CommImpl(MoECommMethod):
             self.mega_moe_symm_buffer.dispatch_quant_mode = dispatch_quant_mode
             self.mega_moe_symm_buffer.dispatch_quant_out_dtype = dispatch_quant_out_dtype
 
-        activation_clamp = self.swiglu_limit if self.swiglu_limit > 0 else None
         x_active_mask = None
         # Ascend 950 (A5) MegaMoe only support a null x_active_mask, and it
         # must be passed as None. But on A2/A3 it must be valid.
@@ -439,14 +531,12 @@ class FusedMC2CommImpl(MoECommMethod):
         # A8W4-INT precision-compensation biases B1/B2 (l1_bias/l2_bias).
         l1_bias = weights.w1_scale_bias
         l2_bias = weights.w2_scale_bias
-        activation_kwargs = moe_utils.select_mega_moe_activation_kwargs(
-            self.mega_moe,
-            activation=fused_experts_input.activation,
-            activation_clamp=activation_clamp,
-            swiglu_alpha=self.swiglu_alpha,
-            swiglu_beta=self.swiglu_beta,
-        )
-
+        # Quant methods supply the routed layer, whose activation was bound at
+        # initialization. The shared communicator may belong to a later layer.
+        layer = cast(torch.nn.Module, fused_experts_input.layer)
+        activation_kwargs = getattr(layer, "mega_moe_activation_kwargs", None)
+        if activation_kwargs is None:
+            activation_kwargs = getattr(self, "mega_moe_activation_kwargs", {}) or {}
         out, expert_tokens = self.mega_moe(
             fused_experts_input.hidden_states,
             fused_experts_input.topk_ids.to(torch.int32),
@@ -511,6 +601,7 @@ class FusedMC2CommImpl(MoECommMethod):
                     group=self.token_dispatcher.moe_all_to_all_group_name,
                     max_output_size=get_ascend_config().mega_moe_max_tokens,
                     swiglu_limit=self.swiglu_limit,
+                    world_size=self.token_dispatcher.ep_world_size,
                     x_active_mask=fused_experts_input.routing.mc2_mask,
                     out=out,
                     expert_token_nums=self.expert_token_nums,

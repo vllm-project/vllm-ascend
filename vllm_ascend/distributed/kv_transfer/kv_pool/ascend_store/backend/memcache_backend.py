@@ -7,6 +7,7 @@ from typing import Any
 
 import torch
 from vllm.config import ParallelConfig
+from vllm.distributed.parallel_state import get_dp_group
 from vllm.logger import logger
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import (
@@ -17,6 +18,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
     get_scheduler_device_id,
     parse_qos_from_extra_config,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.layerwise_keys import LayerwiseKeyBuilder
 
 
 def _is_device_sdma() -> bool:
@@ -35,6 +37,7 @@ def _is_device_sdma() -> bool:
 
 
 MEMCACHE_THREAD_START_WAIT_S = 0.1
+MEMCACHE_SSD_MEDIA_TYPE = 2
 
 
 def _validate_device_ub_qos() -> None:
@@ -78,6 +81,24 @@ class MmcDirect(Enum):
 # with snapshot assertions.
 
 LAYERWISE_DATA_PLANE = "gva"
+
+
+def bind_layerwise_keys(
+    *,
+    vllm_config: Any,
+    kv_cache_config: Any,
+    model_name: str,
+    use_hybrid: bool,
+    grouped_block_size: list[int],
+) -> LayerwiseKeyBuilder:
+    """Bind GVA key identity behind the same interface as block-key stores."""
+    num_groups = len(grouped_block_size)
+    pp_size = vllm_config.parallel_config.pipeline_parallel_size
+
+    def make_key(group: int, block_hash: str, head: int, stage: int) -> str:
+        return make_full_key(model_name, group, block_hash, head, num_groups, stage, pp_size)
+
+    return LayerwiseKeyBuilder(make_key, pp_size)
 
 
 def extract_layout_config(extra_config: dict[str, Any]) -> dict[str, Any] | None:
@@ -176,12 +197,17 @@ class MemcacheBackend(Backend):
         init_bm: bool = True,
         lazy_init: bool = False,
         extra_config: dict[str, Any] | None = None,
+        dp_init_barrier: bool = True,
     ):
+        if not isinstance(dp_init_barrier, bool):
+            raise ValueError("memcache_dp_init_barrier in kv_connector_extra_config must be a boolean.")
         _inject_device_ub_qos(extra_config)
         _validate_device_ub_qos()
         self.device_id = torch.npu.current_device() if device_id is None else device_id
         self._init_bm = init_bm
         self._lazy_init = lazy_init and _is_device_sdma()
+        # Lazy initialization can be triggered independently by each DP rank.
+        self._dp_init_barrier = dp_init_barrier and parallel_config.data_parallel_size > 1 and not self._lazy_init
 
         self.store: Any | None = None
         self._store_initialized = False
@@ -231,6 +257,12 @@ class MemcacheBackend(Backend):
             raise
 
         assert res == 0
+        if self._init_bm and self._dp_init_barrier:
+            # Keep early ranks from entering NPU work while peers are still
+            # establishing MemCache channels. Metadata-only clients must not join.
+            logger.info("Waiting for all DP MemCache initializations")
+            torch.distributed.barrier(group=get_dp_group().cpu_group)
+            logger.info("All DP MemCache initializations completed")
         time.sleep(MEMCACHE_THREAD_START_WAIT_S)
         return store
 
@@ -257,6 +289,15 @@ class MemcacheBackend(Backend):
         self._pending_buffers = (list(ptrs), list(sizes))
         self._register_buffers_if_needed()
 
+    def unregister_buffer(self, ptrs: list[int], sizes: list[int]):
+        if len(ptrs) != len(sizes):
+            raise ValueError(f"ptrs and sizes must have the same length: {len(ptrs)} != {len(sizes)}")
+        if not self._store_initialized:
+            return
+        assert self.store is not None
+        for ptr, size in zip(ptrs, sizes):
+            self.store.unregister_buffer(ptr, size)
+
     def _register_buffers_if_needed(self):
         if self._pending_buffers is None or not self._store_initialized:
             return
@@ -276,7 +317,7 @@ class MemcacheBackend(Backend):
         assert self.store is not None
         return self.store.batch_is_exist(keys)
 
-    def batch_get_key_info(self, keys: list[str]) -> list[Any]:
+    def batch_get_key_info(self, keys: list[str], *, for_load: bool = False) -> list[Any]:
         if self._lazy_init and not self._store_initialized:
             logger.debug(
                 "MemcacheBackend.batch_get_key_info called before store initialization; "
@@ -285,7 +326,85 @@ class MemcacheBackend(Backend):
             )
             return []
         assert self.store is not None
-        return self.store.batch_get_key_info(keys)
+        infos = self.store.batch_get_key_info(keys)
+        if not for_load:
+            return infos
+        if infos is None or len(infos) != len(keys):
+            raise RuntimeError("Memcache key-info response length mismatch")
+        rewarmed = False
+        for key, info in zip(keys, infos, strict=True):
+            # A missing key yields a None entry: there is no SSD object to
+            # rewarm, and the caller treats it as not loadable.
+            if info is None:
+                continue
+            # MEDIA_SSD=2 has no directly readable GVA. Query and AddLease
+            # do not rewarm in the deployed SDK; only the regular Get path
+            # waits for SSD -> DRAM completion. Its API requires a full-size
+            # destination. UBoE does not enable host swap buffers by default,
+            # so use one registered temporary NPU blob at a time.
+            if (
+                info.size() <= 0
+                or MEMCACHE_SSD_MEDIA_TYPE not in info.type_list()
+                or any(gva > 0 for gva in info.gva_list())
+            ):
+                continue
+            size = info.size()
+            scratch = torch.empty(size, dtype=torch.uint8, device="npu")
+            address = scratch.data_ptr()
+            registered = self.store.register_buffer(address, size)
+            if registered != 0:
+                raise RuntimeError(f"Memcache SSD rewarm buffer registration failed: result={registered}")
+            try:
+                results = self.store.batch_get_into([key], [address], [size], MmcDirect.COPY_G2L.value)
+            finally:
+                self.store.unregister_buffer(address, size)
+            if results != [0]:
+                raise RuntimeError(f"Memcache SSD rewarm failed: key={key}, results={results}")
+            rewarmed = True
+            logger.debug("Memcache layerwise SSD rewarm completed key=%s bytes=%d", key, size)
+        return self.store.batch_get_key_info(keys) if rewarmed else infos
+
+    def batch_get_into_buffers(
+        self,
+        keys: list[str],
+        addrs: list[int],
+        sizes: list[int],
+        direction: int = MmcDirect.COPY_G2L.value,
+    ) -> list[int] | None:
+        if self._lazy_init and not self._store_initialized:
+            logger.error(
+                "Failed to get %d keys out of %d. Store is not initialized; "
+                "call put() first to trigger initialization.",
+                len(keys),
+                len(keys),
+            )
+            logger.debug("Failed to get key details. keys=%s", keys)
+            return None
+        assert self.store is not None
+        try:
+            res = self.store.batch_get_into(keys, addrs, sizes, direction)
+            failed_codes = [int(value) for value in res if value != 0]
+            failed_count = len(failed_codes)
+            if failed_count:
+                error_codes = sorted(set(failed_codes))
+                logger.error(
+                    "Failed to get %d keys out of %d. error_codes=%s. Check key existence and memory state.",
+                    failed_count,
+                    len(keys),
+                    error_codes,
+                )
+                logger.debug("Failed to get key details. keys=%s, result=%s", keys, res)
+            return res
+        except Exception as e:
+            logger.error(
+                "Failed to get %d keys out of %d. type=%s, error=%s. Check store state and network.",
+                len(keys),
+                len(keys),
+                type(e).__name__,
+                e,
+            )
+            logger.debug("Failed to get key details. keys=%s", keys)
+            return None
 
     def batch_is_readable(self, keys: list[str]) -> list[bool]:
         """Map valid MemCache GVA metadata to the common readability contract."""
@@ -296,6 +415,9 @@ class MemcacheBackend(Backend):
             raise BatchResultShapeError(f"batch_get_key_info returned {len(key_infos)} results for {len(keys)} keys")
         readable = []
         for key_info in key_infos:
+            if key_info is None:
+                readable.append(False)
+                continue
             try:
                 size = int(key_info.size())
                 gvas = key_info.gva_list()
@@ -325,7 +447,12 @@ class MemcacheBackend(Backend):
             return [0] * len(keys)
         return finish(keys, results)
 
-    def get(self, key: list[str], addr: list[list[int]], size: list[list[int]]):
+    def get(
+        self,
+        key: list[str],
+        addr: list[list[int]],
+        size: list[list[int]],
+    ):
         if self._lazy_init and not self._store_initialized:
             logger.error(
                 "Failed to get %d keys out of %d. Store is not initialized; "
@@ -361,7 +488,12 @@ class MemcacheBackend(Backend):
             logger.debug("Failed to get key details. keys=%s", key)
             return None
 
-    def put(self, key: list[str], addr: list[list[int]], size: list[list[int]]):
+    def put(
+        self,
+        key: list[str],
+        addr: list[list[int]],
+        size: list[list[int]],
+    ):
         self.ensure_initialized()
         assert self.store is not None
         try:
@@ -390,3 +522,30 @@ class MemcacheBackend(Backend):
             logger.debug("Failed to put key details. keys=%s", key)
             if self._lazy_init:
                 logger.warning("First DSV4(compress) request failure is expected. This is normal behavior.")
+
+    def put_from(
+        self,
+        key: str,
+        addr: int,
+        size: int,
+        direction: int = MmcDirect.COPY_L2G.value,
+    ) -> int | None:
+        self.ensure_initialized()
+        assert self.store is not None
+        try:
+            res = self.store.put_from(key, addr, size, direction)
+            if res != 0:
+                logger.error(
+                    "Failed to put key %s. error_code=%s. Check memory and store capacity.",
+                    key,
+                    res,
+                )
+            return res
+        except Exception as e:
+            logger.error(
+                "Failed to put key %s. type=%s, error=%s. Check store state and memory.",
+                key,
+                type(e).__name__,
+                e,
+            )
+            return None

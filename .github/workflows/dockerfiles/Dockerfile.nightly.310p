@@ -22,35 +22,21 @@ ARG TAG_SUFFIX=""
 FROM ${BASE_IMAGE}:nightly-${VLLM_ASCEND_BRANCH}-310p${OS_MARK}${TAG_SUFFIX}
 
 # Build-time configuration. Defaults are the public community mirrors so this
-# Dockerfile can be built standalone; CI passes internal mirrors via --build-arg.
-ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
+# Dockerfile can be built standalone.
 ARG PIP_EXTRA_INDEX_URL="https://repo.huaweicloud.com/ascend/repos/pypi"
-ARG PIP_TRUSTED_HOST=""
 ARG AIS_BENCH_TAG="v3.1-20260609-master"
 ARG AIS_BENCH_URL="https://github.com/AISBench/benchmark.git"
-ARG GIT_PROXY=""
 
 # Define environments
 ENV DEBIAN_FRONTEND=noninteractive
 
 WORKDIR /workspace
 
-RUN pip config set global.index-url "${PIP_INDEX_URL}" && \
-    if [ -n "${PIP_TRUSTED_HOST}" ]; then \
-        pip config set global.trusted-host "${PIP_TRUSTED_HOST}"; \
-    fi
-
 # Install requirements-dev.txt for tests
 RUN export PIP_EXTRA_INDEX_URL="${PIP_EXTRA_INDEX_URL}" && \
     cd /vllm-workspace/vllm-ascend && \
     python3 -m pip install -r requirements-dev.txt && \
     python3 -m pip cache purge
-
-# Configure git proxy for GitHub access (rewrite github.com URLs through the
-# internal proxy, since the cluster-internal buildkitd has no direct egress).
-RUN if [ -n "$GIT_PROXY" ]; then \
-      git config --system url."${GIT_PROXY}https://github.com/".insteadOf https://github.com/; \
-    fi
 
 # Install benchmark tools
 RUN git clone -b ${AIS_BENCH_TAG} --depth 1 "${AIS_BENCH_URL}" /vllm-workspace/vllm-ascend/benchmark && \

@@ -3,6 +3,7 @@
 
 import sys
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -22,9 +23,21 @@ from vllm_ascend._310p.worker.v2.sampler import Ascend310PSampler
 from vllm_ascend._310p.worker.v2.states import Ascend310PStagedWriteTensor
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
+
+
+def _add_request(sampler, req_idx, prompt_len, sampling_params):
+    """Call ``Ascend310PSampler.add_request`` across vLLM versions.
+
+    vLLM main (#56497) dropped the ``prompt_len`` argument.
+    """
+    if vllm_version_is("0.30.0"):
+        sampler.add_request(req_idx, prompt_len, sampling_params)
+    else:
+        sampler.add_request(req_idx, sampling_params)
 
 
 def _make_vllm_config(**overrides):
@@ -93,20 +106,7 @@ def test_kv_zeroing_uses_narrow_310p_gate(
         kv_cache_groups=[SimpleNamespace(is_eagle_group=uses_eagle_block_drop)],
     )
 
-    with patch.object(model_runner_module, "vllm_version_is", return_value=False):
-        assert runner._needs_kv_cache_zeroing_310p(kv_cache_config) is expected
-
-
-def test_kv_zeroing_matches_v029_gate() -> None:
-    runner = object.__new__(NPUModelRunner310V2)
-    runner.speculative_config = SimpleNamespace(num_speculative_tokens=2)
-    kv_cache_config = SimpleNamespace(
-        has_mamba_layers=True,
-        kv_cache_groups=[SimpleNamespace(is_eagle_group=True)],
-    )
-
-    with patch.object(model_runner_module, "vllm_version_is", return_value=True):
-        assert runner._needs_kv_cache_zeroing_310p(kv_cache_config)
+    assert runner._needs_kv_cache_zeroing_310p(kv_cache_config) is expected
 
 
 def test_update_requests_filters_unneeded_upstream_zeroing() -> None:
@@ -377,8 +377,13 @@ def test_prepare_inputs_dispatches_to_310p_implementation() -> None:
     batch_desc = MagicMock()
     expected = object()
 
+    args: tuple[Any, ...] = (scheduler_output, MagicMock(), batch_desc)
+    if not vllm_version_is("0.30.0"):
+        # vLLM main (#56456) added the trailing num_active_loras positional.
+        args = (*args, 0)
+
     with patch.object(runner, "_prepare_inputs_310p", return_value=expected) as prepare_inputs_310p:
-        result = runner.prepare_inputs(scheduler_output, MagicMock(), batch_desc)
+        result = runner.prepare_inputs(*args)
 
     assert result is expected
     prepare_inputs_310p.assert_called_once_with(scheduler_output, batch_desc)
@@ -437,9 +442,11 @@ def test_postprocess_sampled_keeps_last_token_on_device() -> None:
         num_computed_tokens_cpu=torch.zeros(2, dtype=torch.int32),
         last_sampled_tokens=torch.zeros((2, 1), dtype=torch.int64),
         last_sampled_tokens_cpu=torch.tensor([[20], [11]], dtype=torch.int64),
+        next_prefill_tokens=torch.zeros(2, dtype=torch.int64),
     )
     runner.model_state = MagicMock()
-    runner.speculator = object()
+    # Must allow attribute assignment for host-mirror publish in postprocess_sampled.
+    runner.speculator = SimpleNamespace()
     runner.rejection_sampler = MagicMock()
     runner._decode_req_indices = model_runner_module.CpuGpuBuffer(
         2, dtype=torch.int64, device=runner.device, pin_memory=False
@@ -522,12 +529,16 @@ def test_config_accepts_mtp_and_rejects_non_mtp() -> None:
     [
         ("speculative_config", object(), "only supported via MTP"),
         ("kv_transfer_config", object(), "KV cache transfer"),
-        ("lora_config", object(), "LoRA"),
     ],
 )
 def test_config_rejects_out_of_scope_features(field, value, message) -> None:
     with pytest.raises(NotImplementedError, match=message):
         NPUModelRunner310V2._validate_config(_make_vllm_config(**{field: value}))
+
+
+def test_config_accepts_lora() -> None:
+    """310P MRv2 supports LoRA; gate must not reject lora_config."""
+    NPUModelRunner310V2._validate_config(_make_vllm_config(lora_config=object()))
 
 
 def test_copy_kv_cache_blocks_flattens_mamba_lists() -> None:
@@ -552,14 +563,14 @@ def test_copy_kv_cache_blocks_flattens_mamba_lists() -> None:
 
 def test_sampler_accepts_temperature_and_rejects_penalties() -> None:
     sampler = Ascend310PSampler(max_num_reqs=4, device="cpu", vocab_size=16)
-    sampler.add_request(0, 4, SamplingParams(temperature=0))
-    sampler.add_request(1, 4, SamplingParams(temperature=0.8, top_p=0.9, top_k=8, seed=7))
+    _add_request(sampler, 0, 4, SamplingParams(temperature=0))
+    _add_request(sampler, 1, 4, SamplingParams(temperature=0.8, top_p=0.9, top_k=8, seed=7))
     sampler.apply_staged_writes()
     assert sampler.sampling_states.temperature.gpu[1].item() == pytest.approx(0.8)
     assert sampler.sampling_states.top_p.gpu[1].item() == pytest.approx(0.9)
     assert int(sampler.sampling_states.top_k.gpu[1].item()) == 8
     with pytest.raises(NotImplementedError, match="Unsupported sampling parameters"):
-        sampler.add_request(2, 4, SamplingParams(temperature=0, frequency_penalty=0.5))
+        _add_request(sampler, 2, 4, SamplingParams(temperature=0, frequency_penalty=0.5))
 
 
 def test_sampler_temperature_scales_logits_before_argmax() -> None:
@@ -576,7 +587,7 @@ def test_sampler_temperature_scales_logits_before_argmax() -> None:
 
 def test_sampler_greedy_call_returns_argmax() -> None:
     sampler = Ascend310PSampler(max_num_reqs=2, device="cpu", vocab_size=4)
-    sampler.add_request(0, 2, SamplingParams(temperature=0))
+    _add_request(sampler, 0, 2, SamplingParams(temperature=0))
     logits = torch.tensor([[0.1, 3.0, 0.2, 0.0]], dtype=torch.float32)
     input_batch = SimpleNamespace(
         expanded_idx_mapping=torch.tensor([0], dtype=torch.int32),
@@ -639,7 +650,7 @@ def test_sampler_top_k_restricts_softmax_mass() -> None:
     import vllm_ascend._310p.worker.v2.sampler as sampler_mod
 
     sampler = Ascend310PSampler(max_num_reqs=1, device="cpu", vocab_size=5)
-    sampler.add_request(0, 2, SamplingParams(temperature=0.8, top_k=2, top_p=1.0, seed=7))
+    _add_request(sampler, 0, 2, SamplingParams(temperature=0.8, top_k=2, top_p=1.0, seed=7))
     sampler.apply_staged_writes()
     # max at idx1, second at idx2; top_k=2 must keep only {1,2}
     logits = torch.tensor([[1.0, 5.0, 4.0, 0.0, -2.0]], dtype=torch.float32)
@@ -665,7 +676,7 @@ def test_sampler_top_k_one_matches_argmax_with_temperature() -> None:
     import vllm_ascend._310p.worker.v2.sampler as sampler_mod
 
     sampler = Ascend310PSampler(max_num_reqs=1, device="cpu", vocab_size=5)
-    sampler.add_request(0, 2, SamplingParams(temperature=0.9, top_k=1, top_p=1.0, seed=3))
+    _add_request(sampler, 0, 2, SamplingParams(temperature=0.9, top_k=1, top_p=1.0, seed=3))
     sampler.apply_staged_writes()
     logits = torch.tensor([[0.2, 0.1, 3.0, 1.5, -1.0]], dtype=torch.float32)
 
@@ -683,7 +694,7 @@ def test_sampler_top_p_restricts_softmax_mass() -> None:
     import vllm_ascend._310p.worker.v2.sampler as sampler_mod
 
     sampler = Ascend310PSampler(max_num_reqs=1, device="cpu", vocab_size=5)
-    sampler.add_request(0, 2, SamplingParams(temperature=0.8, top_k=-1, top_p=0.5, seed=11))
+    _add_request(sampler, 0, 2, SamplingParams(temperature=0.8, top_k=-1, top_p=0.5, seed=11))
     sampler.apply_staged_writes()
     logits = torch.tensor([[5.0, 4.0, 1.0, 0.0, -1.0]], dtype=torch.float32)
     captured: dict[str, torch.Tensor] = {}
@@ -885,6 +896,8 @@ def test_main_attention_descriptor_allocates_private_kv_per_layer() -> None:
 def test_model_state_uses_greedy_sampler() -> None:
     model_state = object.__new__(Ascend310PModelState)
     model_state.rope_state = None
+    # AscendModelState.prepare_inputs probes the engram hook via self.model.
+    model_state.model = SimpleNamespace()
 
     model_inputs = model_state.prepare_inputs(SimpleNamespace(), req_states=None)
     sampler, speculator = model_state.custom_sampler(object())
@@ -956,3 +969,52 @@ def test_worker_selects_v2_runner_on_310p() -> None:
     with patch("vllm_ascend._310p.worker.v2.model_runner.NPUModelRunner310V2") as runner_cls:
         worker.model_runner = worker._create_model_runner()
     runner_cls.assert_called_once_with(worker.vllm_config, worker.device)
+
+
+@pytest.mark.parametrize(
+    ("block_sizes", "head_sizes", "expected_kernel_size"),
+    [([64], [128], 64), ([128], [128], 128), ([128], [256], 64), ([256], [128], 128), ([128, 64], [128, 128], 64)],
+)
+def test_adjust_kernel_block_sizes_respects_physical_blocks(block_sizes, head_sizes, expected_kernel_size):
+    class FakeAttentionSpec:
+        def __init__(self, block_size, head_size):
+            self.block_size = block_size
+            self.head_size = head_size
+
+    class FakeUniformTypeKVCacheSpecs:
+        def __init__(self, specs):
+            self.kv_cache_specs = dict(enumerate(specs))
+
+    specs = [FakeAttentionSpec(b, h) for b, h in zip(block_sizes, head_sizes)]
+    group_spec = specs[0] if len(specs) == 1 else FakeUniformTypeKVCacheSpecs(specs)
+    runner = object.__new__(NPUModelRunner310V2)
+    runner.kernel_block_sizes = [128]
+    runner.attn_groups = [
+        [SimpleNamespace(backend=SimpleNamespace(get_supported_kernel_block_sizes=lambda: [128, 64]))]
+    ]
+    config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=group_spec)])
+    with (
+        patch.object(model_runner_module, "AttentionSpec", FakeAttentionSpec),
+        patch.object(model_runner_module, "UniformTypeKVCacheSpecs", FakeUniformTypeKVCacheSpecs),
+    ):
+        runner._adjust_kernel_block_sizes(config)
+    assert runner.kernel_block_sizes == [expected_kernel_size]
+    assert all(b % expected_kernel_size == 0 for b in block_sizes)
+
+
+def test_adjust_kernel_block_sizes_rejects_incompatible_physical_blocks():
+    class FakeAttentionSpec:
+        block_size = 96
+        head_size = 128
+
+    runner = object.__new__(NPUModelRunner310V2)
+    runner.kernel_block_sizes = [128]
+    runner.attn_groups = [
+        [SimpleNamespace(backend=SimpleNamespace(get_supported_kernel_block_sizes=lambda: [128, 64]))]
+    ]
+    config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=FakeAttentionSpec())])
+    with (
+        patch.object(model_runner_module, "AttentionSpec", FakeAttentionSpec),
+        pytest.raises(NotImplementedError, match="divides every attention cache block size"),
+    ):
+        runner._adjust_kernel_block_sizes(config)

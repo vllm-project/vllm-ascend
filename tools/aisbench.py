@@ -71,6 +71,27 @@ class AisbenchRunner:
 
     def __init__(self, model: str, port: int, aisbench_config: dict, host_ip: str = "localhost", verify=True):
         self.model = model
+        self.port = port
+        self.host_ip = host_ip
+        self.proc = None
+        self.task_type = aisbench_config["case_type"]
+        self.exp_folder = None
+        self.result_line = None
+        if self.task_type == "curl_cmd":
+            cmds = aisbench_config.get("cmds", [])
+            print(f"[INFO] Running custom curl commands for task: {self.task_type}")
+            for cmd in cmds:
+                formatted_cmd = cmd.replace("${SERVER_PORT}", str(self.port)).replace("$SERVER_PORT", str(self.port))
+                print(f"Executing: {formatted_cmd}")
+                try:
+                    res = subprocess.run(formatted_cmd, shell=True, check=True, capture_output=True, text=True)
+                    if res.stdout:
+                        print(f"Response: {res.stdout.strip()}")
+                except subprocess.CalledProcessError as e:
+                    print(f"Failed to execute cmd: {formatted_cmd}\nError: {e.stderr}")
+                    raise e
+            self.result = "SUCCESS"
+            return
         self.dataset_path = aisbench_config.get("dataset_path_local")
         if not self.dataset_path:
             self.dataset_path = maybe_download_from_modelscope(aisbench_config["dataset_path"], repo_type="dataset")
@@ -99,6 +120,7 @@ class AisbenchRunner:
         self.repetition_penalty = aisbench_config.get("repetition_penalty")
         self.no_pred = aisbench_config.get("no_pred")
         self.thinking = aisbench_config.get("thinking")
+        self.reasoning_effort = aisbench_config.get("reasoning_effort")
         self.input_throughput_threshold = aisbench_config.get("input_throughput_threshold")
         self.tpot_threshold = aisbench_config.get("tpot_threshold")
         self.spec_decode_baseline = aisbench_config.get("baseline", [])
@@ -116,11 +138,13 @@ class AisbenchRunner:
         self._wait_for_task()
         if verify:
             self.baseline = aisbench_config.get("baseline", 1)
+            self.input_throughput_baseline = aisbench_config.get("input_throughput_baseline", 1)
             if self.task_type == "accuracy":
                 self.threshold = aisbench_config.get("threshold", 1)
                 self._accuracy_verify()
             if self.task_type == "performance":
-                self.threshold = aisbench_config.get("threshold", 0.97)
+                self.threshold = aisbench_config.get("threshold")
+                self.input_throughput_threshold = aisbench_config.get("input_throughput_threshold")
                 self._performance_verify()
             if self.task_type == "spec_decode":
                 self.threshold = aisbench_config.get("threshold", 0.05)
@@ -175,6 +199,12 @@ class AisbenchRunner:
         if self.thinking:
             field_thinking = 'chat_template_kwargs={"thinking": True}'
             content = re.sub(r"ignore_eos.*", f"ignore_eos=False,\n            {field_thinking},", content)
+        if self.reasoning_effort is not None:
+            content = re.sub(
+                r"ignore_eos.*",
+                f'ignore_eos=False,\n            reasoning_effort="{self.reasoning_effort}",',
+                content,
+            )
         if self.task_type == "performance":
             content = re.sub(r"path=.*", f'path="{self.model_path}",', content)
             content = re.sub(r"request_rate.*", f"request_rate={self.request_rate},", content)
@@ -195,12 +225,12 @@ class AisbenchRunner:
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
-        self.proc.terminate()
-        try:
-            self.proc.wait(8)
-        except subprocess.TimeoutExpired:
-            # force kill if needed
-            self.proc.kill()
+        if self.proc is not None:
+            self.proc.terminate()
+            try:
+                self.proc.wait(8)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
 
     def _wait_for_exp_folder(self):
         while True:
@@ -257,17 +287,22 @@ class AisbenchRunner:
 
     def _performance_verify(self):
         self._get_result_performance()
-        output_throughput = self.result_json["Output Token Throughput"]["total"].replace("token/s", "")
-        assert float(output_throughput) >= self.threshold * self.baseline, (
-            "Performance verification failed. "
-            f"The current Output Token Throughput is {output_throughput} token/s, "
-            f"which is not greater than or equal to {self.threshold} * baseline {self.baseline}."
-        )
+        if self.threshold is not None:
+            output_throughput = self.result_json["Output Token Throughput"]["total"].replace("token/s", "")
+            assert float(output_throughput) >= self.threshold * self.baseline, (
+                "Performance verification failed. "
+                f"The current Output Token Throughput is {output_throughput} token/s, "
+                f"which is not greater than or equal to {self.threshold} * baseline {self.baseline}."
+            )
         if self.input_throughput_threshold is not None:
-            input_throughput = str(self.result_json["Input Token Throughput"]["total"]).replace("token/s", "")
-            assert float(input_throughput) >= float(self.input_throughput_threshold), (
-                f"Input Token Throughput verification failed. The current value is {input_throughput} token/s, "
-                f"which is not greater than {self.input_throughput_threshold} token/s."
+            input_throughput = self.result_json["Input Token Throughput"]["total"].replace("token/s", "")
+            assert float(input_throughput) >= float(self.input_throughput_threshold) * float(
+                self.input_throughput_baseline
+            ), (
+                "Input Token verification failed. "
+                f"The current Input Token Throughput is {input_throughput} token/s, "
+                f"which is not greater than or equal to "
+                f"{self.input_throughput_threshold} * baseline {self.input_throughput_baseline}."
             )
         if self.tpot_threshold is not None:
             tpot = float(str(self.result_csv.loc["TPOT", "Average"]).replace("ms", ""))

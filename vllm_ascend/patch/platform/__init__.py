@@ -18,6 +18,7 @@ import os
 
 import vllm_ascend.patch.platform.patch_deepseek_v4_vision  # noqa
 import vllm_ascend.patch.platform.patch_distributed  # noqa
+import vllm_ascend.patch.platform.patch_glm53_reasoning  # noqa
 import vllm_ascend.patch.platform.patch_kv_cache_utils  # noqa
 import vllm_ascend.patch.platform.patch_mamba_block_aligned_split  # noqa
 import vllm_ascend.patch.platform.patch_mla_prefill_backend  # noqa
@@ -48,11 +49,36 @@ import vllm_ascend.patch.platform.patch_speculative_config  # noqa
 import vllm_ascend.patch.platform.patch_eplb  # noqa
 import vllm_ascend.patch.platform.patch_fused_moe  # noqa
 import vllm_ascend.patch.platform.patch_dp_device_ids  # noqa
+
+# The Ascend Engram adapter requires `vllm.config.engram` (vLLM main/v0.30.0+).
 import vllm_ascend.patch.platform.patch_engram_config  # noqa
+
 import vllm_ascend.patch.platform.patch_glm5next_config  # noqa
 import vllm_ascend.patch.platform.patch_indexer_kv_dtype  # noqa
 import vllm_ascend.patch.platform.patch_kv_cache_dtype  # noqa
+import vllm_ascend.patch.platform.patch_example_connector  # noqa
+import vllm_ascend.patch.platform.patch_swa_bounded_replay  # noqa
 
+# ** File: platform/patch_example_connector.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.distributed.ec_transfer.ec_connector.example_connector.ECExampleConnector.start_load_caches`
+#    Why:
+#       The upstream method only qualifies the safetensors load device with an
+#       index when `current_platform.is_cuda_alike()` returns True. Ascend NPU
+#       returns False, so in TP>1 every rank loads the EC cache to the default
+#       device (npu:0), causing rank 1 to access cross-device tensors and
+#       trigger NPU AI Core errcode=95 (MTE DDR address out of range).
+#    How:
+#       Monkey-patch `start_load_caches` to extend the device-index
+#       qualification to `device == "npu"`. The patch only takes effect on EC
+#       consumer nodes; producers and non-EC deployments fall through to the
+#       original upstream behavior.
+#    Related PR (if no, explain why):
+#       No upstream PR currently covers this Ascend-specific behavior.
+#    Future Plan:
+#       Remove this patch when upstream's `is_cuda_alike()` covers Ascend NPU
+#       or when the device-index qualification is applied unconditionally.
+#
 # ** File: platform/patch_kv_cache_utils.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.kv_cache_utils`

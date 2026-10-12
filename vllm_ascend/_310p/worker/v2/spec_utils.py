@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 import torch
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
@@ -326,11 +328,19 @@ def prepare_prefill_inputs_cpu(
     if seq_lens_np is None:
         seq_lens_np = input_batch.seq_lens.detach().cpu().numpy()
 
-    # Small metadata only (one sync each); avoid D2H of full token buffers.
-    num_sampled_np = num_sampled[:num_reqs].detach().cpu().numpy()
-    num_rejected_np = num_rejected[:num_reqs].detach().cpu().numpy()
-    last_sampled_np = last_sampled.detach().cpu().numpy()
-    next_prefill_np = next_prefill_tokens.detach().cpu().numpy()
+    # Prefer host mirrors published after rejection synchronize_cpu (no D2H).
+    host_meta = _PREFILL_HOST_META
+    if host_meta is not None and int(host_meta.get("num_reqs", -1)) == num_reqs:
+        num_sampled_np = np.asarray(host_meta["num_sampled_np"])
+        num_rejected_np = np.asarray(host_meta["num_rejected_np"])
+        last_sampled_np = np.asarray(host_meta["last_sampled_np"])
+        next_prefill_np = np.asarray(host_meta["next_prefill_np"])
+    else:
+        # Small metadata only (one sync each); avoid D2H of full token buffers.
+        num_sampled_np = num_sampled[:num_reqs].detach().cpu().numpy()
+        num_rejected_np = num_rejected[:num_reqs].detach().cpu().numpy()
+        last_sampled_np = last_sampled.detach().cpu().numpy()
+        next_prefill_np = next_prefill_tokens.detach().cpu().numpy()
 
     target_input_ids = input_batch.input_ids
     target_positions = input_batch.positions
@@ -469,10 +479,32 @@ def prepare_decode_inputs_cpu(
 # is illegal under NPU GLOBAL ACLGraph capture; callers set this before fill_.
 _DRAFT_STEP_HOST: int = 0
 
+# Host mirrors for draft-prefill prepare (filled after rejection synchronize_cpu).
+_PREFILL_HOST_META: dict[str, Any] | None = None
+
 
 def set_draft_step_host(step: int) -> None:
     global _DRAFT_STEP_HOST
     _DRAFT_STEP_HOST = int(step)
+
+
+def set_prefill_host_meta(
+    *,
+    num_reqs: int,
+    num_sampled_np: np.ndarray,
+    num_rejected_np: np.ndarray,
+    last_sampled_np: np.ndarray,
+    next_prefill_np: np.ndarray,
+) -> None:
+    """Publish CPU mirrors so prepare_prefill_inputs_cpu skips D2H syncs."""
+    global _PREFILL_HOST_META
+    _PREFILL_HOST_META = {
+        "num_reqs": int(num_reqs),
+        "num_sampled_np": num_sampled_np,
+        "num_rejected_np": num_rejected_np,
+        "last_sampled_np": last_sampled_np,
+        "next_prefill_np": next_prefill_np,
+    }
 
 
 def update_draft_inputs_cpu(
@@ -493,12 +525,10 @@ def update_draft_inputs_cpu(
     Signature matches upstream ``update_draft_inputs`` (incl.
     ``sample_src_positions``).
     """
-    # ``.item()`` is a sync D2H and is illegal under NPU GLOBAL ACLGraph capture.
-    if torch.npu.is_current_stream_capturing():
-        step = _DRAFT_STEP_HOST
-    else:
-        step = int(current_draft_step.item())
-        set_draft_step_host(step)
+    # Prefer host mirror — ``.item()`` is a sync D2H (illegal under GLOBAL
+    # capture and a steady-state MTP tax). Callers use set_draft_step_host.
+    del current_draft_step
+    step = _DRAFT_STEP_HOST
     tokens = draft_tokens[:num_reqs]
     output_draft_tokens[:num_reqs, step].copy_(tokens)
     if step >= num_speculative_steps - 1:

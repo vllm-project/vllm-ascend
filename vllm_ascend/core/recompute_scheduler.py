@@ -46,7 +46,7 @@ from vllm_ascend.core.dyntra_lb_scheduler import (
     DyntraLBPolicyMixin,
     print_scheduler_summary,
 )
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.utils import get_ascend_config
 
 
 @dataclass
@@ -87,8 +87,8 @@ class RecomputeScheduler(Scheduler):
 
     This keeps a local copy of vLLM's schedule() only to pad the first decode
     request for stable Ascend speculative-decode graph shapes. Preempted KV is
-    offloaded when possible; otherwise the request is sent back to P to redo
-    prefill.
+    offloaded when possible; otherwise the request returns to P to redo
+    prefill, or is aborted under o_proj TP.
     """
 
     prefill_capacity_bound: bool
@@ -132,6 +132,18 @@ class RecomputeScheduler(Scheduler):
                 )
 
         if not offloaded:
+            # Mirror the config gate: only a real split (size > 1) forbids the return to P.
+            ftpc = get_ascend_config().finegrained_tp_config
+            if ftpc.oproj_tensor_parallel_size > 1 or ftpc.mlp_tensor_parallel_size > 1:
+                logger.error(
+                    "KV offload failed with fine-grained TP enabled; aborting the request instead "
+                    "of returning it to P for recomputation: request_id=%s, "
+                    "num_computed_tokens=%d",
+                    request.request_id,
+                    request.num_computed_tokens,
+                )
+                self.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+                return False
             if not offload_raised:
                 logger.warning(
                     "KV offload was unavailable or failed before decode-side "
@@ -252,6 +264,17 @@ class RecomputeScheduler(Scheduler):
                 req_index += 1
                 continue
 
+            # Encoder inputs may still be in transit for a running chunk.
+            if (
+                self.ec_connector is not None
+                and request.mm_features
+                and not self.ec_connector.ensure_cache_available(
+                    request, request.num_computed_tokens - request.num_output_placeholders
+                )
+            ):
+                req_index += 1
+                continue
+
             num_new_tokens = (
                 request.num_tokens_with_spec + request.num_output_placeholders - request.num_computed_tokens
             )
@@ -325,6 +348,9 @@ class RecomputeScheduler(Scheduler):
                         # The request can be scheduled.
                         break
 
+                    if self.connector is not None and self.connector.has_pending_block_frees():
+                        break
+
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
                     if self.policy == SchedulingPolicy.PRIORITY:
@@ -332,6 +358,15 @@ class RecomputeScheduler(Scheduler):
                             self.running,
                             key=lambda r: (r.priority, r.arrival_time),
                         )
+                    else:
+                        preempted_req = self.running[-1]
+
+                    # A deferred free will not help with immediate allocation.
+                    # Check before removing the victim or invoking offload/recompute.
+                    if not self._request_blocks_can_be_freed(preempted_req):
+                        break
+
+                    if self.policy == SchedulingPolicy.PRIORITY:
                         # Record the index of the preemption victim to
                         # maintain accurate loop state.
                         victim_index = self.running.index(preempted_req)
@@ -558,11 +593,7 @@ class RecomputeScheduler(Scheduler):
                     assert num_computed_tokens <= request.num_tokens
 
                     # Skip request with pending mm encoding prefetches
-                    if (
-                        self.ec_connector is not None
-                        and request.mm_features
-                        and not self.ec_connector.ensure_cache_available(request, num_computed_tokens)
-                    ):
+                    if self._ec_transfer_pending(request, num_computed_tokens):
                         request_queue.pop_request()
                         step_skipped_waiting.prepend_request(request)
                         continue
@@ -581,6 +612,10 @@ class RecomputeScheduler(Scheduler):
                     new_computed_blocks = self.kv_cache_manager.empty_kv_cache_blocks
                     num_new_local_computed_tokens = 0
                     num_computed_tokens = request.num_computed_tokens
+                    if self._ec_transfer_pending(request, num_computed_tokens):
+                        request_queue.pop_request()
+                        step_skipped_waiting.prepend_request(request)
+                        continue
 
                 encoder_inputs_to_schedule = None
                 external_load_encoder_input = []
@@ -854,7 +889,6 @@ class RecomputeScheduler(Scheduler):
         # Construct the scheduler output.
         new_request_kwargs = {
             "uses_mrope": self.model_uses_mrope,
-            **({"uses_xdrope": self.model_uses_xdrope} if vllm_version_is("0.29.0") else {}),
         }
         if self.use_v2_model_runner:
             scheduled_new_reqs.extend(scheduled_resumed_reqs)
@@ -900,24 +934,11 @@ class RecomputeScheduler(Scheduler):
             # new blocks. Resolve its current table only when the connector reads it.
             block_state_req_ids = set(num_scheduled_tokens)
             block_state_req_ids.update(req_id for req_id in boundary_state_offloads if req_id in self.requests)
-            if vllm_version_is("0.29.0"):
-                snapshot_req_ids = {req.req_id for req in new_reqs_data}
-                snapshot_req_ids.update(
-                    req_id
-                    for req_id, block_ids in zip(cached_reqs_data.req_ids, cached_reqs_data.new_block_ids, strict=True)
-                    if block_ids
-                )
-                snapshot_req_ids.update(req_id for req_id in boundary_state_offloads if req_id in self.requests)
-                kv_connector_block_state = KVConnectorBlockState(
-                    block_ids={req_id: self.kv_cache_manager.get_block_ids(req_id) for req_id in snapshot_req_ids},
-                    boundary_state_offloads=boundary_state_offloads,
-                )
-            else:
-                kv_connector_block_state = KVConnectorBlockState(
-                    req_ids=block_state_req_ids,
-                    resolve_block_ids=self.kv_cache_manager.get_block_ids,
-                    boundary_state_offloads=boundary_state_offloads,
-                )
+            kv_connector_block_state = KVConnectorBlockState(
+                req_ids=block_state_req_ids,
+                resolve_block_ids=self.kv_cache_manager.get_block_ids,
+                boundary_state_offloads=boundary_state_offloads,
+            )
 
         kv_cache_block_copies, cow_retained_blocks = self.kv_cache_manager.take_kv_cache_block_copies()
         if kv_cache_block_copies:

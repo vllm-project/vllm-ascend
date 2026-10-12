@@ -11,9 +11,11 @@ Take the DeepSeek-r1-w8a8 model as an example, use 4 Atlas 800T A3 servers to de
 ### Physical Layer Requirements
 
 - The physical machines must be located on the same LAN, with network connectivity.
-- All NPUs must be interconnected. Intra-node connectivity is via HCCS, and inter-node connectivity is via RDMA.
+- All NPUs must be interconnected. On A2/A3, intra-node connectivity is via HCCS, and inter-node connectivity is via RDMA. For Atlas 850/850E/950 SuperPod (950PR/950DT), see [Atlas 850/850E/950 SuperPod Communication Configuration](#atlas-850850e950-superpod-communication-configuration).
 
 ### Verification Process
+
+The following checks apply to A2/A3 deployments.
 
 Execute the following commands on each node in sequence. The results must all be `success` and the status must be `UP`:
 
@@ -118,6 +120,72 @@ Execute the following commands on each node in sequence. The results must all be
         for i in {0..7}; do hccn_tool -i $i -tls -g ; done | grep switch
         ```
 
+### Atlas 850/850E/950 SuperPod Communication Configuration
+
+For Atlas 850/850E/950 SuperPod (950PR/950DT), PD disaggregation uses the super plane (based on UB port and UBC protocol) by default. No additional network configuration is required for this default path. Set the following environment variable in both the prefiller and decoder serving environments to generate the communication configuration automatically:
+
+```bash
+export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
+```
+
+The parameter plane supports UBG, UBoE, and RoCE network protocols. Each protocol requires compatible hardware and network configuration completed in advance. Consult your environment provider or administrator for the required environment and configuration.
+
+For UBG or UBoE network protocols, keep the automatic configuration setting above and select the corresponding protocol before starting the serving processes:
+
+=== "UBG"
+
+    ```bash
+    export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["ub_rtp:device"]}'
+    ```
+
+=== "UBoE"
+
+    ```bash
+    export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["uboe:device"]}'
+    ```
+
+=== "RoCE"
+
+    For RoCE network protocol, current configuration is to prepare endpoint configuration files under `/etc/hixlep` and set `ascend_local_comm_res_path` in `kv_connector_extra_config` on both sides. For example, with `DP=4` and `TP=1` on each side:
+
+    ```json
+    {
+        "kv_connector_extra_config": {
+            "prefill": {
+                "dp_size": 4,
+                "tp_size": 1
+            },
+            "decode": {
+                "dp_size": 4,
+                "tp_size": 1
+            },
+            "ascend_local_comm_res_path": "/etc/hixlep"
+        }
+    }
+    ```
+
+    Merge these fields into your existing `--kv-transfer-config` and adjust the parallelism settings to your deployment.
+
+    When combining PD disaggregation with KV pooling through `MultiConnector`, place `ascend_local_comm_res_path` in the **outer** `MultiConnector`'s `kv_connector_extra_config`, alongside the `connectors` list. Do not place it in a child connector's `kv_connector_extra_config`: the worker loads the endpoint files from the outer KV transfer configuration. Keep the `prefill` and `decode` parallelism settings in the Mooncake P/D child connector's configuration.
+
+    Create an endpoint file for each physical NPU used on the host, named `/etc/hixlep/ub_endpoint_npu_<physical_npu_id>.json`. The suffix is the host physical NPU ID, not the DP rank or the ordinal within the visible devices. An example file contains:
+
+    ```json
+    {
+        "version": "1.3",
+        "net_instance_id": "superpod_0",
+        "endpoint_list": [
+            {
+                "protocol": "roce",
+                "comm_id": "<host_roce_ip>",
+                "placement": "host"
+            }
+        ]
+    }
+    ```
+
+    Replace `<host_roce_ip>` with the actual host RoCE IP address. Ensure the endpoint files are available at the configured path inside each container.
+
 ## Run with Docker
 
 Start a Docker container on each node.
@@ -161,6 +229,41 @@ docker run --rm \
 -v /etc/hccn.conf:/etc/hccn.conf \
 -v /mnt/sfs_turbo/.cache:/root/.cache \
 -it $IMAGE bash
+```
+
+### Atlas 850/850E/950 SuperPod (950PR/950DT) Container Requirements
+
+For Atlas 850/850E/950 SuperPod (950PR/950DT), adapt the device mappings and mounts to the host and selected transport. For automatically generated UB communication configuration, include the following options in your `docker run` command, before the image name:
+
+```bash
+--device=/dev/ummu \
+--device=/dev/uburma \
+-v /usr/bin/urma_admin:/usr/bin/urma_admin \
+```
+
+Mounting `/lib/route.conf` is optional. If you choose to mount it manually, generate the file on the host before starting the container. See the [LocalCommRes Configuration Guide](https://gitcode.com/cann/hixl/wiki/A5%20LocalCommRes%E9%85%8D%E7%BD%AE%E6%8C%87%E5%8D%97.md) for generation and configuration instructions, then add:
+
+```bash
+-v /lib/route.conf:/lib/route.conf \
+```
+
+RoCE requires the following device and driver configuration mounts:
+
+```bash
+--device=/dev/infiniband \
+-v /etc/libibverbs.d/hrn5.driver:/etc/libibverbs.d/hrn5.driver:ro \
+```
+
+Make the RoCE endpoint directory available inside the container, for example:
+
+```bash
+-v /etc/hixlep:/etc/hixlep:ro \
+```
+
+Optionally, mount the host's `hiroce5` executable to inspect RoCE network cards from inside the container. Use its actual path on the host; for example:
+
+```bash
+-v /usr/local/bin/hiroce5:/usr/local/bin/hiroce5 \
 ```
 
 ## Install Mooncake

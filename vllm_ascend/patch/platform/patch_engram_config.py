@@ -14,25 +14,32 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Allow Engram on Ascend and host table sharing across PCP replicas."""
+
 import importlib.util
 
-# If vLLM has no EngramConfig, there is no --engram-config flag to enable
-# host offload and no model-config restriction to relax.
+# Older vLLM builds have no Engram config to patch.
 if importlib.util.find_spec("vllm.config.engram") is not None:
-    from vllm.config.engram import EngramConfig
+    from vllm.config.engram import EngramConfig, model_has_engram_layers
 
-    def _verify_model_config(self, model_config) -> None:
-        """Require Engram layers, without upstream's CUDA-only restriction.
+    def verify_model_config(self, model_config) -> None:
+        # Keep upstream's model/layer checks; only its CUDA requirement is lifted.
+        if not model_has_engram_layers(model_config):
+            raise ValueError("EngramConfig requires a supported model with non-empty n-gram layer ids.")
 
-        Upstream rejects every non-CUDA platform because Engram only existed
-        there. The Ascend tables hash the same checkpoint with the same layout
-        and only differ in where the rows are stored, so the checkpoint is the
-        whole contract here.
-        """
-        text_config = None if model_config is None else model_config.hf_text_config
-        if not getattr(text_config, "engram_layer_ids", None):
-            raise ValueError("EngramConfig requires non-empty engram_layer_ids.")
-        if getattr(self, "dp_shared_memory", False) or getattr(self, "embedding_across_dp", False):
-            raise ValueError("Ascend Engram does not support DP-sharded embeddings.")
+    # TODO: Remove this override once all supported vLLM versions natively
+    # support Engram PCP, including DP x PCP groups and parallel validation.
+    def verify_parallel_config(self, parallel_config) -> None:
+        """Reject unsupported embedding parallel topologies."""
+        if self.dp_shared_memory:
+            if parallel_config.data_parallel_size <= 1 and parallel_config.prefill_context_parallel_size <= 1:
+                raise ValueError(
+                    "dp_shared_memory requires data_parallel_size > 1 or prefill_context_parallel_size > 1."
+                )
+            if parallel_config.enable_elastic_ep:
+                raise ValueError("dp_shared_memory is not supported with elastic EP.")
+        if self.embedding_across_dp and parallel_config.data_parallel_size > 1 and parallel_config.enable_elastic_ep:
+            raise ValueError("Engram embedding_across_dp is not supported with elastic EP yet.")
 
-    EngramConfig.verify_model_config = _verify_model_config  # type: ignore[method-assign]
+    EngramConfig.verify_model_config = verify_model_config
+    EngramConfig.verify_parallel_config = verify_parallel_config
