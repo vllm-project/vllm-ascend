@@ -615,6 +615,11 @@ class NPUModelRunner(GPUModelRunner):
         batch_state, uniform_token_count = super().gather_batch_req_state(scheduler_output, dummy_run)
         kv_cfg = self.vllm_config.kv_transfer_config
         is_pd_decode_node = kv_cfg is not None and kv_cfg.is_kv_consumer and not kv_cfg.is_kv_producer
+        # TODO: has_prefill describes prompt progress, not decode-graph eligibility.
+        # Decode-like prompt tails can therefore incorrectly disable FULL graphs
+        # for the entire batch; see https://github.com/vllm-project/vllm/pull/58400.
+        # This PD-only reclassification is a temporary workaround. Replace it with
+        # a dedicated graph-eligibility check once the upstream semantics are aligned.
         if batch_state is not None and is_pd_decode_node:
             pd_decode_recompute = (
                 batch_state.is_prefilling_np
