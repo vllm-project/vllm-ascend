@@ -25,13 +25,14 @@ finally:
 
 TP_SIZE = 2
 TP_GROUP_NAME = "tp:0"
+HCOM_NAME = "test_hcom"
 REDUCE_DIM = 512
 OUTPUT_DIM = 256
 
 GEMM_OP = torch.ops.vllm.unquantized_gemm.default
 REDUCE_SCATTER_OP = torch.ops.vllm.reduce_scatter.default
 PAD_OP = torch.ops.aten.constant_pad_nd.default
-FUSED_OP = torch.ops.vllm.npu_matmul_reduce_scatter.default
+FUSED_OP = torch.ops.npu.npu_mm_reduce_scatter_base.default
 
 
 def _build_graph(
@@ -95,6 +96,7 @@ class TestMatmulReduceScatterFusionPass(TestBase):
     def _make_pass(self) -> MatmulReduceScatterFusionPass:
         tp_group = MagicMock()
         tp_group.unique_name = TP_GROUP_NAME
+        tp_group.device_group._get_backend.return_value.get_hccl_comm_name.return_value = HCOM_NAME
         module = "vllm_ascend.compilation.passes.mm_reduce_scatter_fusion_pass"
         with (
             patch(f"{module}.get_tp_group", return_value=tp_group),
@@ -107,6 +109,7 @@ class TestMatmulReduceScatterFusionPass(TestBase):
     def _apply(self, graph_module: fx.GraphModule) -> None:
         tp_group = MagicMock()
         tp_group.unique_name = TP_GROUP_NAME
+        tp_group.device_group._get_backend.return_value.get_hccl_comm_name.return_value = HCOM_NAME
         module = "vllm_ascend.compilation.passes.mm_reduce_scatter_fusion_pass"
         with (
             patch(f"{module}.get_tp_group", return_value=tp_group),
@@ -123,6 +126,9 @@ class TestMatmulReduceScatterFusionPass(TestBase):
         fused = next(node for node in graph_module.graph.nodes if node.target is FUSED_OP)
         padded_input = fused.args[0]
         self.assertIs(padded_input.target, PAD_OP)
+        self.assertIs(fused.args[1].target, torch.ops.aten.permute.default)
+        self.assertEqual(fused.args[1].args[1], [1, 0])
+        self.assertEqual(fused.args[2:4], (HCOM_NAME, TP_SIZE))
         self.assertEqual(padded_input.args[0].op, "placeholder")
         self.assertEqual(padded_input.meta["val"].shape, (10, REDUCE_DIM))
 

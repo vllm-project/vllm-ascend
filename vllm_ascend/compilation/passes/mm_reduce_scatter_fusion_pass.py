@@ -7,8 +7,8 @@ from __future__ import annotations
 from typing import Any
 
 import torch
-import torch.fx as fx
 import torch._inductor.pattern_matcher as pm
+import torch.fx as fx
 from torch._inductor.pattern_matcher import Match, PatternMatcherPass
 from vllm.compilation.passes.inductor_pass import enable_fake_mode
 from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
@@ -19,6 +19,7 @@ from vllm.logger import logger
 
 from vllm_ascend.compilation.passes import base_pattern
 from vllm_ascend.compilation.passes.base_pattern import BasePattern
+from vllm_ascend.device.device_op import DeviceOperator
 
 _MIN_REDUCE_DIM = 256
 _MAX_REDUCE_DIM_EXCLUSIVE = 65535
@@ -39,10 +40,11 @@ def _arg(node: fx.Node, index: int, name: str, default=None):
 
 
 class _MatmulReduceScatterPattern(BasePattern):
-    def __init__(self, vllm_config: VllmConfig, tp_size: int, group_name: str):
+    def __init__(self, vllm_config: VllmConfig, tp_size: int, group_name: str, hcom_name: str):
         super().__init__(vllm_config)
         self.tp_size = tp_size
         self.group_name = group_name
+        self.hcom_name = hcom_name
 
     def _empty(self, *shape: int) -> torch.Tensor:
         dtype = self.dtype if self.dtype in _SUPPORTED_DTYPES else torch.bfloat16
@@ -135,7 +137,9 @@ class MatmulReduceScatterPattern(_MatmulReduceScatterPattern):
 
     def get_replacement(self):
         def replacement(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
-            return torch.ops.vllm.npu_matmul_reduce_scatter.default(x, weight, self.tp_size, self.group_name)
+            return DeviceOperator.npu_mm_reduce_scatter_base(
+                x, weight.t(), self.hcom_name, self.tp_size, reduce_op="sum"
+            )
 
         return replacement
 
@@ -183,7 +187,9 @@ class PaddedMatmulReduceScatterPattern(_MatmulReduceScatterPattern):
     def get_replacement(self):
         def replacement(x: torch.Tensor, weight: torch.Tensor, pad_rows: int) -> torch.Tensor:
             padded = torch.ops.aten.constant_pad_nd.default(x, [0, 0, 0, pad_rows], 0.0)
-            return torch.ops.vllm.npu_matmul_reduce_scatter.default(padded, weight, self.tp_size, self.group_name)
+            return DeviceOperator.npu_mm_reduce_scatter_base(
+                padded, weight.t(), self.hcom_name, self.tp_size, reduce_op="sum"
+            )
 
         return replacement
 
@@ -199,9 +205,16 @@ class MatmulReduceScatterFusionPass(VllmInductorPass):
         if self.tp_size not in _SUPPORTED_WORLD_SIZES:
             return
 
-        self.group_name = get_tp_group().unique_name
-        MatmulReduceScatterPattern(config, self.tp_size, self.group_name).register(self.pattern_match_passes)
-        PaddedMatmulReduceScatterPattern(config, self.tp_size, self.group_name).register(self.pattern_match_passes)
+        tp_group = get_tp_group()
+        self.group_name = tp_group.unique_name
+        backend = tp_group.device_group._get_backend(torch.device("npu"))
+        self.hcom_name = backend.get_hccl_comm_name(tp_group.rank_in_group)
+        MatmulReduceScatterPattern(config, self.tp_size, self.group_name, self.hcom_name).register(
+            self.pattern_match_passes
+        )
+        PaddedMatmulReduceScatterPattern(config, self.tp_size, self.group_name, self.hcom_name).register(
+            self.pattern_match_passes
+        )
 
     def __call__(self, graph: torch.fx.Graph) -> None:
         self.begin()
