@@ -60,6 +60,25 @@ Targeted validation was conducted on the following 4 models, which are the only 
 | Qwen3.8 27B | A2 co-located | GPQA | 91.08 |
 | Qwen3.8 27B | A2 co-located | MMMU-pro | 75.34 |
 
+### Weight Numeric Types
+
+The following table records the model weight numeric types used for the
+accuracy validation. It describes weight precision only; KV cache dtypes such
+as INT8/C8 and TurboQuant are not included in this table.
+
+| Model | A3 Weight Numeric Type | A2 Weight Numeric Type |
+|-------|------------------------|------------------------|
+| DeepSeek V4.1 Flash | W8A8 | W8A8 |
+| GLM 5.3 | W8A8C8 | W8A8C8 |
+| GLM 5.3 Flash | W8A8 | W8A8 |
+| Qwen3.8 27B | W8A8 | W8A8 |
+
+The values above follow the corresponding v0.30.0rc1 model guides: [DeepSeek
+V4.1 Flash](https://docs.vllm.ai/projects/ascend/en/v0.30.0rc1/tutorials/models/DeepSeek-V4.1-Flash.html),
+[GLM 5.3](https://docs.vllm.ai/projects/ascend/en/v0.30.0rc1/tutorials/models/GLM5.3.html),
+[GLM 5.3 Flash](https://docs.vllm.ai/projects/ascend/en/v0.30.0rc1/tutorials/models/GLM5.3-Flash.html),
+and [Qwen3.8 27B](https://docs.vllm.ai/projects/ascend/en/v0.30.0rc1/tutorials/models/Qwen3.8-27B.html).
+
 ### Test Configuration Links
 
 - DeepSeek-V4.1-Flash configuration archive: [DeepSeek-V4.1-Flash#5.2 1P1D PD Disaggregated Deployment](https://docs.vllm.ai/projects/ascend/en/v0.30.0rc1/tutorials/models/DeepSeek-V4.1-Flash.html#52-1p1d-pd-disaggregated-deployment)
