@@ -57,8 +57,8 @@ This is vLLM Ascend v0.30.0rc1, a model-focused release built on the v0.29 relea
 |-------|------------------------------------|---------------|
 | DeepSeek V4.1 | Atlas 800 A3, Atlas 800 A2 | W8A8 serving; Model Runner V2 execution, TurboQuant INT4 KV cache, torch.compile, P/D deployment |
 | GLM-5.3 | Atlas 800 A3 (128GB x 8), Atlas 800 A2 | W8A8C8 multi-node serving; sparse SFA C8 packed KV cache, speculative decoding (DSpark) |
-| GLM-5.3-Flash | 950DT Products (96GB x 8), Atlas 800 A3 (128GB x 8), Atlas 800 A2 | MXFP8 quantization on 950DT, W8A8 on A3/A2; P/D disaggregation and KV Cache Pool deployment |
-| Qwen3.8-27B | 950DT/950PR Products, Atlas 800 A3, Atlas 800 A2, Atlas 300I DUO (W8A8-310P) | BF16 and W8A8 (incl. MXFP8 on 950DT); hybrid linear-attention serving with non-contiguous KV cache |
+| GLM-5.3-Flash | Atlas 800 A3 (128GB x 8), Atlas 800 A2 | W8A8 on A3/A2; P/D disaggregation and KV Cache Pool deployment |
+| Qwen3.8-27B | Atlas 800 A3, Atlas 800 A2, Atlas 300I DUO (W8A8-310P) | BF16 and W8A8; hybrid linear-attention serving with non-contiguous KV cache |
 
 ### Performance
 
@@ -122,7 +122,7 @@ This is vLLM Ascend v0.30.0rc1, a model-focused release built on the v0.29 relea
 
 ### Documentation
 
-- Added DeepSeek V4.1 Flash A3 PD deployment guide and documented W4A4C8 quantization scheme with Ascend 950 accuracy for DSV4-Flash/Pro and GLM-5.2. [#17099](https://github.com/vllm-project/vllm-ascend/pull/17099) [#17226](https://github.com/vllm-project/vllm-ascend/pull/17226)
+- Added DeepSeek V4.1 Flash A3 PD deployment guide and documented the W4A4C8 quantization scheme for DSV4-Flash/Pro and GLM-5.2. [#17099](https://github.com/vllm-project/vllm-ascend/pull/17099) [#17226](https://github.com/vllm-project/vllm-ascend/pull/17226)
 - Documented MRV2 feature stacks supported with pipeline parallelism and rewrote the KV pool guide on a unified feature doc template. [#17449](https://github.com/vllm-project/vllm-ascend/pull/17449) [#16856](https://github.com/vllm-project/vllm-ascend/pull/16856)
 - Added guidance for Qwen pooling models and dflash2 docs. [#17474](https://github.com/vllm-project/vllm-ascend/pull/17474) [#17383](https://github.com/vllm-project/vllm-ascend/pull/17383)
 - Added GLM-5.3-Flash PD / KV cache pool deployment guide and GLM-5.3-Flash A2 PD deployment guide. [#17773](https://github.com/vllm-project/vllm-ascend/pull/17773) [#17946](https://github.com/vllm-project/vllm-ascend/pull/17946)
