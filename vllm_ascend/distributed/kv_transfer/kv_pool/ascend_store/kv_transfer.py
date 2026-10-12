@@ -982,8 +982,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
         with self._request_submit_lock:
             if self._fatal_error is not None:
                 logger.error("Reject KV save batch to failed thread %s: %s", self.name, self._fatal_error)
-                # 未入队的 batch 不会读取源 KV，但 Scheduler 的 pin 仍须报告完成。
-                # 不登记 jobs、不推进成功 offset，也不发布 BlockStored。
+                # No source KV is read, but completion must release Scheduler pins.
+                # Reject without registering jobs, advancing offsets, or emitting BlockStored.
                 with self.completed_events_lock:
                     for request in requests:
                         if request.event_id is not None:
@@ -1135,16 +1135,16 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 # Request fences observe _fatal_error before allowing block reuse.
                 failed_request.done.set()
 
-        # run() 持有 _request_submit_lock，且本线程是唯一消费者，队列长度在清理期间不会增加。
-        # unfinished_tasks 包含 queued items 和尚未确认的当前 item；若两者数量相等，
-        # 当前 item 已经 task_done，不能借用后续任务的计数再次确认它。
+        # run() holds _request_submit_lock, and this thread is the only consumer.
+        # unfinished_tasks counts queued items plus the current item if unacknowledged.
+        # Equal counts mean the current item was already acknowledged; do not repeat it.
         queued_request_count = self.request_queue.qsize()
         current_needs_ack = self.request_queue.unfinished_tasks > queued_request_count
         if request_data is not None:
             finish_failed_request(request_data)
             if current_needs_ack:
                 self.request_queue.task_done()
-        # 每个 get_nowait 成功取出的 item 分别确认一次，包含最后的 batch fence。
+        # Acknowledge each dequeued item exactly once, including batch fences.
         for _ in range(queued_request_count):
             try:
                 queued_request = self.request_queue.get_nowait()
@@ -1189,7 +1189,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
             tracked_request = self.is_live_store_job(req_meta)
             if not tracked_request:
                 return
-            # 写入失败通过返回值报告；不能把日志后的正常返回当成成功。
+            # Only explicit success may advance the saved offset; failures return False.
             succeeded = self._handle_stored_request(req_meta)
             if succeeded is True:
                 self.record_saved_offset(req_meta, req_meta.token_len_chunk)
