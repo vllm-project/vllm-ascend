@@ -14,6 +14,7 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import get_tp_group
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -30,6 +31,8 @@ from vllm_ascend.core.kv_cache_interface import (
 )
 from vllm_ascend.device.hardware_profile import AttentionBackendFamily, get_current_hardware_profile
 from vllm_ascend.utils import _round_up, enable_dsa_cp, vllm_version_is
+
+logger = init_logger(__name__)
 
 GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE = 128
 
@@ -67,6 +70,7 @@ class AscendIndexerKPoolMetadata:
     keypool_state_table: torch.Tensor | None = None
     keypool_start_offsets: torch.Tensor | None = None
     pooled_slot_mapping: torch.Tensor | None = None
+    max_pool_seq_len: int | None = None
 
 
 @dataclass
@@ -259,11 +263,15 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
             local_start=self.dsa_cp_rank * (num_cache_tokens // self.dsa_cp_size),
         )
         block_table = common_attn_metadata.block_table_tensor[:num_reqs]
+        max_seq_len = getattr(common_attn_metadata, "max_seq_len", None)
         return AscendIndexerKPoolMetadata(
             block_table=block_table,
             slot_mapping=slot_mapping,
             seq_lens=seq_lens,
             positions=positions,
+            max_pool_seq_len=(max_seq_len + self.compress_ratio - 1) // self.compress_ratio
+            if max_seq_len is not None
+            else None,
             block_size=self.kernel_row_block_size,
             compress_ratio=self.compress_ratio,
             cum_query_lens=cum_query_lens,
@@ -528,6 +536,12 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         self.tail_cache: Any = vllm_indexer.tail_cache
         self.topk_indices_buffer: torch.Tensor | None = vllm_indexer.topk_indices_buffer
         self._init_cann_ops()
+        if getattr(self.k_cache, "quant_dtype", None) is not None:
+            logger.info(
+                "KPool indexer LI C8 enabled for %s: k_cache dtype=%s, scale dtype=fp32",
+                self.k_cache.prefix,
+                self.k_cache.quant_dtype,
+            )
         for name in (
             "_key_weight",
             "_gate_weight",
@@ -689,8 +703,11 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             or tail_metadata.cann_inputs is None
         ):
             raise ValueError("GLM KPool metadata requires CANN request boundaries and pooled-key row indices.")
-        if indexer_cache.dtype != torch.bfloat16:
-            raise TypeError("GLM KPool compressed cache must be bfloat16.")
+        if indexer_cache.dtype not in (torch.bfloat16, torch.int8):
+            raise TypeError("GLM KPool compressed cache must be bfloat16 or int8.")
+        row_width = self.head_dim + (4 if indexer_cache.dtype == torch.int8 else 0)
+        if indexer_cache.shape[-1] != row_width:
+            raise ValueError("GLM KPool cache rows must contain the key and any packed FP32 scale.")
         if tail_cache.dtype != torch.float32:
             raise TypeError("GLM KPool compressor tail must be float32.")
         if tail_cache.ndim != 3 or tail_cache.shape[1] < self.index_kpool or tail_cache.shape[2] != 2 * self.head_dim:
@@ -756,6 +773,32 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
                 return output[:, :output_width].unsqueeze(1)
             return torch.full((num_tokens, 1, output_width), -1, dtype=torch.int32, device=hidden_states.device)
         assert q_values is not None and weights is not None
+        if indexer_cache.dtype == torch.int8:
+            from vllm_ascend.ops.triton.glm5_next_lightning_indexer import (  # type: ignore[import-untyped]
+                glm5_next_lightning_indexer_triton,
+            )
+
+            max_pools = indexer_metadata.max_pool_seq_len
+            # Captured graphs must cover future sequence growth, not only
+            # the sequence lengths used while warming up the graph.
+            if max_pools is None or get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.FULL:
+                max_pools = indexer_metadata.block_table.shape[1] * indexer_cache.shape[1]
+            indices = glm5_next_lightning_indexer_triton(
+                q_values,
+                indexer_cache,
+                weights.to(q_values.dtype),
+                query_metadata.cum_query_lens,
+                query_metadata.seq_lens,
+                indexer_metadata.block_table,
+                query_metadata.positions,
+                index_topk=self.topk_tokens,
+                index_kpool=self.index_kpool,
+                max_pool_seq_len=max_pools,
+                output_buffer=self.topk_indices_buffer,
+                pack_tail=True,
+                allow_cache_packing=get_forward_context().cudagraph_runtime_mode != CUDAGraphMode.FULL,
+            )
+            return indices
         query = q_values.to(indexer_cache.dtype)
         indices, _ = self._pool_key_indexer(
             query,

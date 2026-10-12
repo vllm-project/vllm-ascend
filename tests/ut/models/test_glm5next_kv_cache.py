@@ -457,6 +457,7 @@ def _common():
         num_reqs=2,
         num_input_tokens=10,
         num_actual_tokens=8,
+        max_seq_len=9,
         query_start_loc=torch.tensor([0, 6, 8], dtype=torch.int32),
         seq_lens=torch.tensor([8, 9], dtype=torch.int32),
         block_table_tensor=torch.tensor([[0, -1], [1, -1]], dtype=torch.int32),
@@ -483,6 +484,7 @@ def test_metadata_delegates_to_kernel_and_keeps_capture_storage(
     cache_tokens = backend_module._round_up(input_tokens, 2 if dsa_cp else 1)
     assert args[2:] == (cache_tokens, 8 if unpadded else input_tokens, 128, 4)
     assert first.num_actual_tokens == common.num_actual_tokens
+    assert first.max_pool_seq_len == 3
     kwargs = keypool_kernels.build_keypool_metadata.call_args.kwargs
     assert kwargs["query_metadata"] is first.query_metadata
     assert kwargs["local_start"] == (5 if dsa_cp else 0)

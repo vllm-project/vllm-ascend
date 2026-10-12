@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import importlib.util
+import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -378,8 +379,9 @@ def test_cann_backend_reports_missing_operator_dependencies(monkeypatch, missing
     ],
 )
 @pytest.mark.parametrize("reuse_output", [False, True])
+@pytest.mark.parametrize("quant", [False, True])
 def test_cann_indexer_writes_caches_before_optional_selection(
-    monkeypatch, compute_topk, dsa_cp, actual_query_tokens, runtime_mode, reuse_output
+    monkeypatch, compute_topk, dsa_cp, actual_query_tokens, runtime_mode, reuse_output, quant
 ):
     monkeypatch.setattr(
         backend_module, "get_forward_context", lambda: SimpleNamespace(cudagraph_runtime_mode=runtime_mode)
@@ -410,6 +412,7 @@ def test_cann_indexer_writes_caches_before_optional_selection(
         setattr(op, "_" + name, mock)
         calls.attach_mock(mock, name)
     metadata = _indexer_metadata()
+    metadata.max_pool_seq_len = 1
     metadata.query_start_loc = torch.tensor([0, 4, 8], dtype=torch.int32)
     metadata.start_pos = torch.zeros(2, dtype=torch.int32)
     metadata.pool_tail = torch.zeros(2, dtype=torch.int64)
@@ -427,7 +430,14 @@ def test_cann_indexer_writes_caches_before_optional_selection(
     query_metadata = metadata.query_metadata or metadata
     tail_metadata = _tail_metadata()
     tail_metadata.cann_inputs = SimpleNamespace(retained_indices=None)
-    cache = torch.empty(2, 2, 1, 2, dtype=torch.bfloat16)
+    cache = torch.empty(2, 2, 1, 6 if quant else 2, dtype=torch.int8 if quant else torch.bfloat16)
+    select_int8 = MagicMock(return_value=packed)
+    calls.attach_mock(select_int8, "select_int8")
+    monkeypatch.setitem(
+        sys.modules,
+        "vllm_ascend.ops.triton.glm5_next_lightning_indexer",
+        SimpleNamespace(glm5_next_lightning_indexer_triton=select_int8),
+    )
     tail = torch.empty(2, 4, 4)
     with patch.object(torch.Tensor, "item", side_effect=AssertionError("unexpected device synchronization")):
         result = op._forward_cann(
@@ -460,6 +470,19 @@ def test_cann_indexer_writes_caches_before_optional_selection(
             assert torch.all(op.topk_indices_buffer[query_rows:] == 77)
             assert torch.all(storage[1::2] == 77)
             assert torch.all(storage[:, 11:] == 77)
+    elif compute_topk and quant:
+        assert result is packed
+        assert names[3:] == ["select_int8"]
+        assert select_int8.call_args.args[1] is cache
+        assert select_int8.call_args.args[3] is query_metadata.cum_query_lens
+        assert select_int8.call_args.args[4] is query_metadata.seq_lens
+        assert select_int8.call_args.args[5] is metadata.block_table
+        assert select_int8.call_args.args[6] is query_metadata.positions
+        assert select_int8.call_args.kwargs["max_pool_seq_len"] == (2 if runtime_mode == CUDAGraphMode.FULL else 1)
+        assert select_int8.call_args.kwargs["pack_tail"]
+        assert select_int8.call_args.kwargs["allow_cache_packing"] == (runtime_mode != CUDAGraphMode.FULL)
+        op._pool_key_indexer.assert_not_called()
+        op._pack_keypool_indices.assert_not_called()
     elif compute_topk:
         assert result is packed
         assert names[3:] == ["pool_key_indexer", "pack_keypool_indices"]

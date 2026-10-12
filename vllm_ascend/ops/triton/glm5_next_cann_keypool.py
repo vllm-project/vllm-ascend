@@ -4,6 +4,7 @@
 
 from types import SimpleNamespace
 
+import torch
 from vllm.triton_utils import tl, triton
 
 
@@ -31,6 +32,9 @@ def _write_keypool_caches_kernel(
     INPUT_WIDTH,
     SPECULATIVE: tl.constexpr,
     BLOCK: tl.constexpr,
+    CACHE_ROW: tl.constexpr,
+    QUANT: tl.constexpr,
+    TAIL_STRIDE: tl.constexpr,
 ):
     row = tl.program_id(0)
     cols = tl.arange(0, BLOCK)
@@ -47,17 +51,33 @@ def _write_keypool_caches_kernel(
         else:
             source = tl.load(state_rows + input_row, valid, other=0).to(tl.int64)
             tail_value = tl.load(state + source * 2 * HEAD_DIM + cols, valid & (cols < 2 * HEAD_DIM), other=0)
-        tl.store(tail + dest * 2 * HEAD_DIM + cols, tail_value, valid & (cols < 2 * HEAD_DIM))
+        tail_address = tail + dest // PAGE_ROWS * TAIL_STRIDE + dest % PAGE_ROWS * 2 * HEAD_DIM + cols
+        tl.store(tail_address, tail_value, valid & (cols < 2 * HEAD_DIM))
     else:
         pool_row = row - tail_rows
         slot = tl.load(slots + pool_row).to(tl.int64)
         valid = (slot >= 0) & (slot < cache_blocks * BLOCK_SIZE)
         pool_value = tl.load(pooled + pool_row * POOLED_STRIDE + cols, valid & (cols < HEAD_DIM), other=0)
-        address = cache + slot // BLOCK_SIZE * CACHE_STRIDE + slot % BLOCK_SIZE * HEAD_DIM + cols
-        tl.store(address, pool_value, valid & (cols < HEAD_DIM))
+        row_base = cache + slot // BLOCK_SIZE * CACHE_STRIDE + slot % BLOCK_SIZE * CACHE_ROW
+        if QUANT:
+            values = pool_value.to(tl.float32)
+            abs_max = tl.max(tl.abs(values))
+            scale = tl.where(abs_max > 0, tl.div_rn(abs_max, 127.0), 1.0)
+            quantized = tl.extra.cann.libdevice.nearbyint(tl.div_rn(values, scale))
+            quantized = tl.minimum(tl.maximum(quantized, -127.0), 127.0).to(tl.int8)
+            tl.store(row_base + cols, quantized, valid & (cols < HEAD_DIM))
+            scale_bits = tl.where(abs_max > 0, scale, 0.0).to(tl.int32, bitcast=True)
+            for byte in tl.static_range(4):
+                tl.store(row_base + HEAD_DIM + byte, ((scale_bits >> (8 * byte)) & 0xFF).to(tl.int8), valid)
+        else:
+            tl.store(row_base + cols, pool_value, valid & (cols < HEAD_DIM))
 
 
 def write_keypool_caches(tail, cache, key, gate, pooled, metadata, tail_metadata, state):
+    head_dim = tail.shape[-1] // 2
+    quant = cache.dtype == torch.int8
+    if cache.shape[-1] != head_dim + (4 if quant else 0):
+        raise ValueError("KPool cache row width must match the key and packed scale.")
     inputs = tail_metadata.cann_inputs
     writes = inputs.write_indices
     tail_rows = writes.numel()
@@ -74,7 +94,7 @@ def write_keypool_caches(tail, cache, key, gate, pooled, metadata, tail_metadata
         state,
         metadata.pooled_slot_mapping,
         tail_rows,
-        cache.shape[-1],
+        head_dim,
         inputs.page_rows,
         tail.shape[0],
         tail.shape[1],
@@ -85,7 +105,10 @@ def write_keypool_caches(tail, cache, key, gate, pooled, metadata, tail_metadata
         writes.stride(0),
         writes.shape[1],
         key is not None,
-        triton.next_power_of_2(2 * cache.shape[-1]),
+        triton.next_power_of_2(2 * head_dim),
+        cache.shape[-1],
+        quant,
+        tail.stride(0),
     )
 
 

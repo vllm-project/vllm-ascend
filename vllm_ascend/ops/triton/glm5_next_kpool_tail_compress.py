@@ -26,6 +26,8 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
 
 TRITON_MAX_BLOCK_D = 128
+# LI C8 pooled rows end with one little-endian FP32 scale.
+LI_C8_SCALE_BYTES = 4
 # Masked request ends must sort after every valid token offset.
 QUERY_END_SENTINEL = torch.iinfo(torch.int32).max
 
@@ -36,6 +38,7 @@ QUERY_END_SENTINEL = torch.iinfo(torch.int32).max
 def _glm5_next_kpool_tail_compress_kernel(
     tail_cache_ptr,
     indexer_cache_ptr,
+    c8_cache_ptr,
     k_ptr,
     gate_score_ptr,
     ape_ptr,
@@ -67,6 +70,8 @@ def _glm5_next_kpool_tail_compress_kernel(
     POOL_SIZE: tl.constexpr,
     BLOCK_P: tl.constexpr,
     BLOCK_D: tl.constexpr,
+    QUANT_MODE: tl.constexpr,
+    QUANT_MAX: tl.constexpr,
 ):
     token_idx = tl.program_id(0)
     dim_offsets = tl.program_id(1) * BLOCK_D + tl.arange(0, BLOCK_D)
@@ -159,14 +164,45 @@ def _glm5_next_kpool_tail_compress_kernel(
         safe_indexer_slot = tl.where(indexer_valid, indexer_slot, 0)
         indexer_block = safe_indexer_slot // indexer_block_size
         indexer_offset = safe_indexer_slot % indexer_block_size
-        tl.store(
+        row_base = (
             indexer_cache_ptr
             + indexer_block * indexer_cache_stride_block
             + indexer_offset * indexer_cache_stride_offset
-            + dim_offsets * indexer_cache_stride_d,
-            compressed,
-            mask=dim_mask & indexer_valid,
         )
+        if QUANT_MODE == 0:
+            tl.store(
+                row_base + dim_offsets * indexer_cache_stride_d,
+                compressed,
+                mask=dim_mask & indexer_valid,
+            )
+        else:
+            # LI C8: one program owns the whole row (the wrapper enforces
+            # HEAD_DIM <= BLOCK_D), so the per-row absmax is exact. The FP32
+            # scale is packed right after the HEAD_DIM quantized bytes. Ascend
+            # Triton cannot bitcast fp8-typed pointers, so the scale goes
+            # through the int8 byte view as four little-endian stores.
+            abs_max = tl.max(tl.abs(compressed))
+            scale = tl.where(abs_max > 0, tl.div_rn(abs_max, QUANT_MAX), 1.0)
+            quantized = tl.div_rn(compressed, scale)
+            if QUANT_MODE == 1:
+                quantized = tl.extra.cann.libdevice.nearbyint(quantized)
+                quantized = tl.minimum(tl.maximum(quantized, -QUANT_MAX), QUANT_MAX).to(tl.int8)
+            else:
+                quantized = tl.minimum(tl.maximum(quantized, -QUANT_MAX), QUANT_MAX).to(tl.float8e4nv)
+            tl.store(
+                row_base + dim_offsets * indexer_cache_stride_d,
+                quantized,
+                mask=dim_mask & indexer_valid,
+            )
+            scale_bits = tl.where(abs_max > 0, scale, 0.0).to(tl.int32, bitcast=True)
+            byte_base = (
+                c8_cache_ptr
+                + indexer_block * indexer_cache_stride_block
+                + indexer_offset * indexer_cache_stride_offset
+                + HEAD_DIM * indexer_cache_stride_d
+            )
+            for i in tl.static_range(4):
+                tl.store(byte_base + i, ((scale_bits >> (8 * i)) & 0xFF).to(tl.int8), mask=indexer_valid)
 
 
 @triton.jit(do_not_specialize=["num_tokens"])
@@ -264,10 +300,28 @@ def glm5_next_kpool_tail_compress_and_write_cache_triton(
 
     block_p = next_power_of_2(index_kpool)
     block_d = min(next_power_of_2(head_dim), TRITON_MAX_BLOCK_D)
+    # LI C8 packs a per-row FP32 scale after HEAD_DIM quantized bytes. The
+    # absmax reduction spans the row, so one program must own it entirely.
+    quant_mode = 0
+    quant_max = 1.0
+    if indexer_cache.dtype == torch.int8:
+        quant_mode, quant_max = 1, 127.0
+    elif indexer_cache.dtype == torch.float8_e4m3fn:
+        quant_mode, quant_max = 2, 448.0
+    if quant_mode != 0 and triton.cdiv(head_dim, block_d) != 1:
+        raise NotImplementedError(
+            f"KPool LI C8 requires one dim program per row: head_dim={head_dim}, block_d={block_d}."
+        )
+    if indexer_cache.ndim != 4 or indexer_cache.shape[3] != head_dim + (LI_C8_SCALE_BYTES if quant_mode else 0):
+        raise ValueError(
+            f"KPool indexer cache rows of {indexer_cache.dtype} do not match head_dim={head_dim}: "
+            f"shape={tuple(indexer_cache.shape)}."
+        )
     num_reqs = cum_query_lens.shape[0]
     _glm5_next_kpool_tail_compress_kernel[(num_tokens, triton.cdiv(head_dim, block_d))](
         tail_cache,
         indexer_cache,
+        indexer_cache.view(torch.int8) if quant_mode != 0 else indexer_cache,
         k,
         gate_score,
         ape,
@@ -299,6 +353,8 @@ def glm5_next_kpool_tail_compress_and_write_cache_triton(
         index_kpool,
         block_p,
         block_d,
+        quant_mode,
+        quant_max,
     )
     _store_kpool_tail_kernel[(num_reqs * tail_cache.shape[2], triton.cdiv(head_dim, block_d))](
         tail_cache,

@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
+from vllm_ascend.ops import cann_keypool as state_adapters
 from vllm_ascend.ops.triton import glm5_next_cann_keypool as adapters
 
 
@@ -151,3 +152,18 @@ def test_cache_writer_passes_padded_page_and_block_layout_without_running_kernel
     assert scalars[:7] == [3, dim, 80, 3, 7, 3, 32]
     assert 48 * dim in scalars
     assert dim + 64 in scalars
+
+
+@pytest.mark.parametrize("page_bytes", [32768, 38016])
+def test_cann_history_gather_preserves_packed_indexer_page_stride(page_bytes):
+    # 38016 bytes is the real int8 page: 288 * (128 key bytes + 4 scale bytes).
+    dim, blocks, capacity, pool = 128, 3, 7, 4
+    page_elements = page_bytes // 4
+    backing = torch.arange(blocks * page_elements, dtype=torch.float32)
+    tail = backing.as_strided((blocks, capacity, 2 * dim), (page_elements, 2 * dim, 1))
+    page_rows = page_elements // (2 * dim)
+    rows = torch.tensor([[1, 2, 3, 0], [2 * page_rows + 2, 2 * page_rows + 3, 2 * page_rows, 2 * page_rows + 1]])
+    metadata = SimpleNamespace(cann_inputs=SimpleNamespace(page_rows=page_rows, history_indices=rows))
+    result = state_adapters.prepare_keypool_state(tail, torch.zeros(2, dtype=torch.int32), metadata, pool)
+    expected = torch.stack((tail[0, [1, 2, 3, 0]], tail[2, [2, 3, 0, 1]]))
+    torch.testing.assert_close(result[1:3], expected, rtol=0, atol=0)

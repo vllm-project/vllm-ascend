@@ -18,12 +18,21 @@ def _cache_rows(cache):
 def prepare_keypool_state(tail, starts, tail_metadata, pool):
     n, width = starts.numel(), tail.shape[-1]
     inputs = tail_metadata.cann_inputs
-    if inputs.page_rows * width != tail.stride(0):
+    if inputs.page_rows != tail.stride(0) // width:
         raise ValueError("KeyPool tail metadata must preserve the physical cache page stride.")
     state = tail.new_empty((1 + 2 * n, pool, width))
-    torch.index_select(
-        _cache_rows(tail), 0, inputs.history_indices.flatten(), out=state[1 : n + 1].view(n * pool, width)
-    )
+    if tail.stride(0) % width:
+        # Packed int8 indexer pages share storage with the FP32 tail. Their
+        # byte size need not be a multiple of a tail row, so preserve the
+        # physical page stride instead of flattening across page boundaries.
+        history = inputs.history_indices
+        blocks = torch.div(history, inputs.page_rows, rounding_mode="floor")
+        offsets = history % inputs.page_rows
+        state[1 : n + 1].copy_(tail[blocks, offsets])
+    else:
+        torch.index_select(
+            _cache_rows(tail), 0, inputs.history_indices.flatten(), out=state[1 : n + 1].view(n * pool, width)
+        )
     return state
 
 
