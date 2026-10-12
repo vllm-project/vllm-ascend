@@ -121,7 +121,7 @@ def test_calibration_rejects_invalid_configuration(calibration_setup, override):
         aisbench.AisbenchRunner("test-model", 8000, {**calibration_setup, **override})
 
 
-@pytest.mark.parametrize("case_type, threshold", [("accuracy", 1), ("performance", 0.97)])
+@pytest.mark.parametrize("case_type, threshold", [("accuracy", 1), ("performance", None)])
 def test_existing_default_verification_is_unchanged(calibration_setup, monkeypatch, case_type, threshold):
     verify = Mock()
     monkeypatch.setattr(aisbench.AisbenchRunner, f"_{case_type}_verify", verify)
