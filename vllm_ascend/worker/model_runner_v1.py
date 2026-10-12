@@ -4670,6 +4670,40 @@ class NPUModelRunner(GPUModelRunner):
 
         self.debugger.step(**kwargs)
 
+    def may_add_encoder_only_layers_to_kv_cache_config(self) -> None:
+        """Ascend: allow multiple encoder-only spec groups.
+
+        EmbeddingGemma2 mixes sliding (head 256) and full (head 512)
+        encoder-only layers, producing two distinct EncoderOnlyAttentionSpec
+        groups. Encoder-only specs allocate no KV cache, so extra groups are
+        free; upstream only supports a single group.
+        """
+        from vllm.v1.attention.backend import AttentionType
+
+        block_size = self.vllm_config.cache_config.block_size
+        encoder_only_attn_specs: dict[AttentionSpec, list[str]] = defaultdict(list)
+        attn_layers = get_layers_from_vllm_config(self.vllm_config, Attention)
+        for layer_name, attn_module in attn_layers.items():
+            if attn_module.attn_type == AttentionType.ENCODER_ONLY:
+                attn_spec: AttentionSpec = EncoderOnlyAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=attn_module.num_kv_heads,
+                    head_size=attn_module.head_size,
+                    dtype=self.kv_cache_dtype,
+                )
+                encoder_only_attn_specs[attn_spec].append(layer_name)
+                self.runner_only_attn_layers.add(layer_name)
+        if encoder_only_attn_specs:
+            # Collapse all encoder-only layers into a single KV cache group.
+            # Encoder-only specs allocate no KV cache and the 310P encoder
+            # path uses a shared non-causal mask, so one group is sufficient
+            # (and matches the single-group assumptions downstream).
+            spec, _ = next(iter(encoder_only_attn_specs.items()))
+            layer_names = [n for names in encoder_only_attn_specs.values() for n in names]
+            self.kv_cache_config.kv_cache_groups.append(
+                KVCacheGroupSpec(layer_names=layer_names, kv_cache_spec=spec)
+            )
+
     def initialize_kv_cache(
         self,
         kv_cache_config: KVCacheConfig,
