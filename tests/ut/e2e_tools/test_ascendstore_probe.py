@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import sys
+import threading
 from collections.abc import Callable
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, create_autospec
 
 import pytest
 import torch
@@ -17,7 +18,11 @@ from tests.e2e.common.kv_pool.ascendstore_v1_probe import (
     clear_worker_local_kv,
     collect_worker_io_probe,
     install_worker_io_probe,
+    remove_worker_io_probe,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import KVCacheStoreSendingThread
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk.worker import SynchronousBulkWorker
 
 _PRODUCTION_MODULE = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector"
 
@@ -67,23 +72,27 @@ def worker_factory(monkeypatch: pytest.MonkeyPatch) -> Callable[[str], SimpleNam
         if implementation == "production":
             connector_type = type("AscendStoreConnector", (), {"__module__": _PRODUCTION_MODULE})
             connector = connector_type()
-            connector.connector_worker = SimpleNamespace(
-                m_store=backend,
-                kv_caches={"layer": cache},
-                cache_transfer_granularity=4,
-                wait_for_previous_save=Mock(),
-            )
-            wait_for_store = connector.connector_worker.wait_for_previous_save
+            # Exercise the real production fence; autospec prevents inventing removed sender methods.
+            send_thread = create_autospec(KVCacheStoreSendingThread, instance=True)
+            send_thread.done_task_lock = threading.Lock()
+            send_thread.stored_requests = {"internal-request-id": 1}
+            connector.connector_worker = KVPoolWorker.__new__(KVPoolWorker)
+            connector.connector_worker.m_store = backend
+            connector.connector_worker.kv_caches = {"layer": cache}
+            connector.connector_worker.cache_transfer_granularity = 4
+            connector.connector_worker.kv_send_thread = send_thread
+            wait_for_store = send_thread.wait_for_requests_saved
             store_method = "put"
             load_method = "get"
         elif implementation == "v1":
             connector_type = type("AscendStoreV1Connector", (), {"__module__": _V1_MODULE})
             connector = connector_type()
-            connector.worker = SimpleNamespace(
-                _resources=SimpleNamespace(kv_caches={"layer": cache}, backend=backend),
-                _topology=SimpleNamespace(cache_transfer_granularity=4),
-                fence_previous_store=Mock(),
-            )
+            connector.worker = SynchronousBulkWorker.__new__(SynchronousBulkWorker)
+            connector.worker._resources = SimpleNamespace(kv_caches={"layer": cache}, backend=backend)
+            connector.worker._topology = SimpleNamespace(cache_transfer_granularity=4)
+            connector.worker._store_fatal_error = None
+            connector.worker._pending_store_batch = None
+            connector.worker.fence_previous_store = Mock(wraps=connector.worker.fence_previous_store)
             wait_for_store = connector.worker.fence_previous_store
             store_method = "store"
             load_method = "load"
@@ -122,7 +131,10 @@ def test_probe_accepts_verified_store_lookup_load_evidence(
         expected = worker.cache.clone()
         getattr(worker.backend, worker.store_method)(worker.keys, worker.addresses, worker.sizes)
         cold_evidence = clear_worker_local_kv(worker)
-        worker.wait_for_store.assert_called_once()
+        if implementation == "production":
+            worker.wait_for_store.assert_called_once_with({"internal-request-id"})
+        else:
+            worker.wait_for_store.assert_called_once()
         assert torch.count_nonzero(worker.cache) == 0
         assert cold_evidence["get_calls"] == cold_evidence["lookup_calls"] == 0
         assert cold_evidence["local_kv_cleared"]
@@ -150,6 +162,11 @@ def test_probe_accepts_verified_store_lookup_load_evidence(
         assert decoded is not None and decoded.result is not None
         assert decoded.result.result == [warm_evidence]
         summaries.append(warm_evidence)
+        remove_worker_io_probe(worker)
+        # Once uninstalled, the test-only byte assertions must no longer wrap the Backend.
+        worker.cache.zero_()
+        worker.backend.mode = "noop"
+        assert getattr(worker.backend, worker.load_method)(worker.keys, worker.addresses, worker.sizes) == [0, 0]
 
     assert summaries[0] == summaries[1]
 
@@ -161,6 +178,9 @@ def test_probe_rejects_failed_malformed_or_silently_skipped_loads(
     install_worker_io_probe(worker)
     worker.backend.store(worker.keys, worker.addresses, worker.sizes)
     clear_worker_local_kv(worker)
+    # Lookup observations must not turn a normal miss into an exception in the RPC server thread.
+    assert worker.backend.exists(["not-stored"]) == [0]
+    assert "not-stored" in collect_worker_io_probe(worker)["lookup_keys"]
     assert all(worker.backend.exists(worker.keys))
     for mode in ("noop", "partial", "fail", "short", "missing"):
         worker.cache.zero_()
@@ -175,6 +195,28 @@ def test_probe_rejects_an_unsupported_connector(worker_factory: Callable[[str], 
     unsupported.connector.__class__.__module__ = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store"
     with pytest.raises(AssertionError, match="Unsupported connector"):
         install_worker_io_probe(unsupported)
+
+
+def test_probe_preserves_source_bytes_when_store_fence_fails(
+    worker_factory: Callable[[str], SimpleNamespace],
+) -> None:
+    for implementation in ("production", "v1"):
+        worker = worker_factory(implementation)
+        install_worker_io_probe(worker)
+        getattr(worker.backend, worker.store_method)(worker.keys, worker.addresses, worker.sizes)
+        expected = worker.cache.clone()
+        if implementation == "production":
+            worker.connector.connector_worker.kv_send_thread.raise_if_failed.side_effect = RuntimeError("Store failed")
+        else:
+            worker.connector.worker._store_fatal_error = RuntimeError("Store failed")
+        with pytest.raises(RuntimeError):
+            clear_worker_local_kv(worker)
+        assert torch.equal(worker.cache, expected)
+        with pytest.raises(RuntimeError):
+            remove_worker_io_probe(worker)
+        worker.backend.mode = "noop"
+        worker.cache.zero_()
+        assert getattr(worker.backend, worker.load_method)(worker.keys, worker.addresses, worker.sizes) == [0, 0]
 
 
 def test_snapshot_uses_storage_offsets_and_rejects_out_of_bounds() -> None:

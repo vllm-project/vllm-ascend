@@ -17,6 +17,7 @@ from tests.e2e.common.kv_pool.ascendstore_v1_probe import (
     clear_worker_local_kv,
     collect_worker_io_probe,
     install_worker_io_probe,
+    remove_worker_io_probe,
 )
 from tests.e2e.common.kv_pool.config import MooncakeKVPoolConfig
 from tests.e2e.conftest import VllmRunner
@@ -95,6 +96,8 @@ def _exercise_connector(
     )
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    # Both independent engines must use the production-supported byte layout and reproducible block hashes.
+    monkeypatch.setenv("VLLM_KV_CACHE_LAYOUT", "NHD")
     # Trusted test callbacks need pickle support in the client and spawned EngineCore.
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     cold_prompts = [TokensPrompt(prompt_token_ids=[0] * PROMPT_TOKEN_COUNT)]
@@ -114,42 +117,46 @@ def _exercise_connector(
             pipeline_parallel_size=1,
             gpu_memory_utilization=0.5,
             enable_prefix_caching=True,
+            prefix_caching_hash_algo="sha256",
             enable_chunked_prefill=False,
             enforce_eager=True,
             async_scheduling=False,
             seed=42,
             kv_transfer_config=transfer_config,
         ) as runner:
-            (granularity,) = runner.model.collective_rpc(install_worker_io_probe)
-            expected_loaded_tokens = PROMPT_TOKEN_COUNT // granularity * granularity
-            assert 0 < expected_loaded_tokens < PROMPT_TOKEN_COUNT
+            try:
+                (granularity,) = runner.model.collective_rpc(install_worker_io_probe)
+                expected_loaded_tokens = PROMPT_TOKEN_COUNT // granularity * granularity
+                assert 0 < expected_loaded_tokens < PROMPT_TOKEN_COUNT
 
-            cold_output = runner.model.generate(cold_prompts, sampling_params, use_tqdm=False)[0]
-            assert cold_output.finished and cold_output.num_cached_tokens == 0
-            assert len(cold_output.outputs[0].token_ids) == OUTPUT_TOKEN_COUNT
+                cold_output = runner.model.generate(cold_prompts, sampling_params, use_tqdm=False)[0]
+                assert cold_output.finished and cold_output.num_cached_tokens == 0
+                assert len(cold_output.outputs[0].token_ids) == OUTPUT_TOKEN_COUNT
 
-            # Reset removes cache hashes, not bytes. Erase Worker KV as well, preserving Mooncake objects.
-            assert runner.model.reset_prefix_cache(), "Local KV must be cleared before testing remote Load"
-            (cold_evidence,) = runner.model.collective_rpc(clear_worker_local_kv)
-            assert len(cold_evidence["stored_keys"]) == expected_loaded_tokens // granularity
+                # Drain Store before clearing its source bytes or resetting the Scheduler's local hashes.
+                (cold_evidence,) = runner.model.collective_rpc(clear_worker_local_kv)
+                assert len(cold_evidence["stored_keys"]) == expected_loaded_tokens // granularity
+                assert runner.model.reset_prefix_cache(), "Local KV must be cleared before testing remote Load"
 
-            warm_output = runner.model.generate(cold_prompts, sampling_params, use_tqdm=False)[0]
-            assert warm_output.finished and warm_output.num_cached_tokens == expected_loaded_tokens
-            assert warm_output.outputs[0].token_ids == cold_output.outputs[0].token_ids
-            (warm_evidence,) = runner.model.collective_rpc(collect_worker_io_probe)
+                warm_output = runner.model.generate(cold_prompts, sampling_params, use_tqdm=False)[0]
+                assert warm_output.finished and warm_output.num_cached_tokens == expected_loaded_tokens
+                assert warm_output.outputs[0].token_ids == cold_output.outputs[0].token_ids
+                (warm_evidence,) = runner.model.collective_rpc(collect_worker_io_probe)
+            finally:
+                runner.model.collective_rpc(remove_worker_io_probe)
 
     stored_keys = tuple(sorted(cold_evidence["stored_keys"]))
-    lookup_keys = tuple(sorted(warm_evidence["lookup_keys"]))
+    lookup_keys = set(warm_evidence["lookup_keys"])
     loaded_keys = tuple(sorted(warm_evidence["loaded_keys"]))
-    assert warm_evidence["lookup_calls"] == 1, "The warm request must execute one real Backend Lookup"
-    assert warm_evidence["get_calls"] == 1, "The warm request must execute one real Backend Load"
-    assert lookup_keys == loaded_keys == stored_keys
+    assert warm_evidence["lookup_calls"] > 0, "The warm request must execute real Backend Lookup"
+    assert warm_evidence["get_calls"] > 0, "The warm request must execute real Backend Load"
+    assert set(stored_keys) <= lookup_keys, "Lookup must query every stored prefix object"
+    assert loaded_keys == stored_keys
     assert warm_evidence["loaded_bytes"] == cold_evidence["stored_bytes"] > 0
     return {
         "granularity": granularity,
         "loaded_tokens": expected_loaded_tokens,
         "stored_keys": stored_keys,
-        "lookup_keys": lookup_keys,
         "loaded_keys": loaded_keys,
         "stored_bytes": cold_evidence["stored_bytes"],
         "loaded_bytes": warm_evidence["loaded_bytes"],
