@@ -140,11 +140,13 @@ def _mamba_block_aligned_split(
             num_new_local_computed_tokens,
             num_external_computed_tokens,
         )
-    # vLLM 0.28.x and newer revisions use different names.  Some
-    # transitional scheduler implementations expose both and different
-    # wrapper layers consult different attributes, so clear every
-    # attribute that exists and restore all of them after the call.
-    drop_attrs = tuple(name for name in ("use_eagle", "use_eagle_block_drop") if hasattr(self, name))
+    # Prefer the dedicated drop bit: enabling MTP is not the same as dropping
+    # a verifier block. Only older schedulers use use_eagle for both purposes.
+    drop_attrs = (
+        ("use_eagle_block_drop",)
+        if hasattr(self, "use_eagle_block_drop")
+        else tuple(name for name in ("use_eagle",) if hasattr(self, name))
+    )
     original_drop_values = {name: getattr(self, name) for name in drop_attrs}
     for name in drop_attrs:
         setattr(self, name, False)

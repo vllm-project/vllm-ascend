@@ -17,8 +17,16 @@ import pytest
 import torch
 import zmq
 from vllm.config import KVTransferConfig
+from vllm.sampling_params import SamplingParams
+from vllm.utils.hashing import sha256
 from vllm.utils.network_utils import make_zmq_path
-from vllm.v1.core.kv_cache_utils import get_kv_cache_config_from_groups, is_kv_cache_spec_uniform
+from vllm.v1.core.kv_cache_manager import KVCacheManager
+from vllm.v1.core.kv_cache_utils import (
+    get_kv_cache_config_from_groups,
+    get_request_block_hasher,
+    is_kv_cache_spec_uniform,
+)
+from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
@@ -26,7 +34,7 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
-from vllm.v1.request import RequestStatus
+from vllm.v1.request import Request, RequestStatus
 from zmq.constants import ROUTER
 from zmq.sugar.socket import Socket
 
@@ -1153,7 +1161,7 @@ class TestCoreFunctionality(unittest.TestCase):
 
                 mock_transfer.assert_called_once_with(self.test_req)
                 mock_send.assert_called_once_with("req1", "localhost", 6666, {6666: 1})
-                self.thread.task_tracker.update_done_task_count.assert_called_once_with("req1")
+                self.thread.task_tracker.update_done_task_count.assert_called_once_with("req1", report_finished=True)
                 self.mock_queue.task_done.assert_called_once()
                 expected_errors = {1, 2} if transfer_error else set()
                 self.assertEqual(self.thread.get_and_clear_invalid_block_ids(), expected_errors)
@@ -1170,7 +1178,7 @@ class TestCoreFunctionality(unittest.TestCase):
         self.engine.batch_transfer_sync_read.assert_not_called()
         mock_free_remote_port.assert_called_once_with("req1", "localhost", {6666: 1})
         mock_send_done.assert_called_once_with("req1", "localhost", 6666, {6666: 1})
-        cast(Any, self.thread.task_tracker).update_done_task_count.assert_called_once_with("req1")
+        cast(Any, self.thread.task_tracker).update_done_task_count.assert_called_once_with("req1", report_finished=True)
         self.mock_queue.task_done.assert_called_once()
 
     @patch.object(KVCacheRecvingThread, "_get_remote_metadata")
@@ -2041,6 +2049,71 @@ def test_metadata_to_wire_descriptors_and_completion(
     assert worker.get_finished() == (set(), set())
 
 
+def test_zero_external_notification_does_not_report_receive_finished(wire_transfer_contract):
+    worker, receiver, engine, socket, _ = wire_transfer_contract
+    metadata = MooncakeConnectorMetadata()
+    metadata.reqs_in_batch.add("local-hit")
+    metadata.add_new_req(
+        "local-hit",
+        ([],),
+        0,
+        {
+            "remote_request_id": "prefill-request",
+            "remote_engine_id": "prefill-engine",
+            "remote_host": "127.0.0.1",
+            "remote_port": 6000,
+            "remote_block_ids": ([3, 4, 5],),
+            "remote_block_size": 16,
+            "num_computed_tokens": 48,
+        },
+    )
+    worker.start_load_kv(metadata)
+    task = receiver.request_queue.get_nowait()
+    assert task["report_finished"] is False
+    receiver._handle_request(task)
+    engine.batch_transfer_sync_read.assert_not_called()
+    messages = [msgspec.msgpack.decode(call.args[0]) for call in socket.send.call_args_list]
+    assert messages == [[DONE_RECVING_MSG, "prefill-request", {}]]
+    assert worker.get_finished() == (set(), set())
+    assert not receiver.task_tracker.reqs_to_process
+    assert not receiver.task_tracker.delayed_free_requests
+    assert not receiver.request_task_counts
+    assert not receiver.finished_request_markers
+
+
+@pytest.mark.parametrize("report_finished", [False, True])
+@pytest.mark.parametrize("finish_order", [(0, 1, 2), (2, 0, 1)])
+@pytest.mark.parametrize("fail_transfer", [False, True])
+def test_notification_completion_all_shards(report_finished, finish_order, fail_transfer):
+    case = TestCoreFunctionality()
+    case.setUp()
+    receiver = case.thread
+    receiver.task_tracker = KVCacheTaskTracker()
+    receiver.task_tracker.add_req_to_process("req1")
+    receiver.task_tracker.add_delayed_request("req1", time.time())
+    tasks = [dict(case.test_req, all_task_done=i == 2, report_finished=report_finished) for i in range(3)]
+    for task in tasks:
+        receiver._mark_request_task_submitted(task)
+    with (
+        patch.object(
+            receiver, "_transfer_kv_cache_all_groups", side_effect=RuntimeError("transfer") if fail_transfer else None
+        ),
+        patch.object(receiver, "_send_done_recv_signal") as notify,
+        patch.object(receiver, "_send_done_signal_to_free_remote_port") as free_port,
+    ):
+        for index, task_index in enumerate(finish_order):
+            receiver._handle_request(tasks[task_index])
+            expected = {"req1"} if report_finished and index == 2 else set()
+            assert receiver.get_and_clear_finished_requests() == expected
+        assert notify.call_count == free_port.call_count == 3
+    assert not receiver.task_tracker.reqs_to_process
+    assert not receiver.task_tracker.delayed_free_requests
+    assert not receiver.request_task_counts
+    assert not receiver.finished_request_markers
+    receiver.task_tracker.update_done_task_count("req1", report_finished=report_finished)
+    assert receiver.get_and_clear_finished_requests() == set()
+
+
 @pytest.mark.parametrize("done_ack", [b"ACK", b"NOT-ACK"], ids=["cleanup-succeeds", "cleanup-also-fails"])
 def test_wire_transfer_failure_does_not_poison_next_request(wire_transfer_contract, monkeypatch, done_ack):
     """UT-IT: retain first-failure evidence even if DONE cleanup also fails.
@@ -2733,6 +2806,127 @@ class TestMooncakeConnector(unittest.TestCase):
         request = MockRequest("req1")
         connector.request_finished(request, [1, 2, 3])
         mock_method.assert_called_once_with(request, ([1, 2, 3],))
+
+
+@pytest.fixture
+def boundary_handoff():
+    from vllm.v1.core.block_pool import BlockPool
+
+    case = TestMooncakeConnectorScheduler()
+    case.setUp()
+    scheduler = case.scheduler
+    scheduler.need_truncate = True
+    scheduler.group_transfer_info = [
+        types.SimpleNamespace(tokens_per_block=16, blocks_per_window=0, is_state_group=state)
+        for state in (False, True, True)
+    ]
+    pool = BlockPool(12, True, 16)
+    scheduler._boundary_block_pool = pool
+    blocks = pool.get_new_blocks(4)
+    request = case._make_remote_decode_request(32)
+    scheduler._boundary_requests[request.request_id] = request
+    connector = MooncakeConnector.__new__(MooncakeConnector)
+    connector.connector_scheduler = scheduler
+    return scheduler, connector, request, pool, blocks
+
+
+def test_boundary_handoff_structured_output_and_exact_ids(boundary_handoff):
+    scheduler, connector, request, pool, blocks = boundary_handoff
+    ids = [block.block_id for block in blocks]
+    output = MockSchedulerOutput()
+    output.kv_connector_block_state = types.SimpleNamespace(
+        boundary_state_offloads={request.request_id: [(1, ids[0], 16), (1, ids[1], 32), (2, ids[2], 32)]}
+    )
+    scheduler.build_connector_meta(output)
+    assert [block.ref_cnt for block in blocks] == [1, 2, 2, 1]
+    # DCP FA geometry is unchanged; state groups use exact offered IDs, not
+    # positional slots from the request's block table.
+    delay, params = scheduler.request_finished(request, ([8, 9], [10, 11], [10, 11]))
+    assert delay
+    assert params["remote_block_ids"] == ([8, 9], [ids[1]], [ids[2]])
+    assert params["remote_state_boundary_tokens"] == 32
+    pool.free_blocks(blocks)
+    pressure = pool.get_new_blocks(pool.get_num_free_blocks())
+    assert ids[1] not in [block.block_id for block in pressure]
+    assert ids[2] not in [block.block_id for block in pressure]
+    completion = types.SimpleNamespace(finished_sending={request.request_id})
+    connector.update_connector_output(completion)
+    connector.update_connector_output(completion)
+    assert pool.blocks[ids[1]].ref_cnt == pool.blocks[ids[2]].ref_cnt == 0
+    assert not scheduler._boundary_states
+    pool.free_blocks(pressure)
+    assert pool.get_num_free_blocks() == 11
+
+
+def test_boundary_handoff_finish_hook_replaces_and_releases(boundary_handoff):
+    scheduler, connector, request, pool, blocks = boundary_handoff
+    a, b, c, _ = [block.block_id for block in blocks]
+    assert connector.register_finished_partial_tail(request, ([], [], []), [(1, a, 32), (2, b, 32)])
+    assert connector.register_finished_partial_tail(request, ([], [], []), [(1, c, 32), (2, b, 32)])
+    assert [block.ref_cnt for block in blocks] == [1, 2, 2, 1]
+    request.status = RequestStatus.FINISHED_ABORTED
+    assert scheduler.request_finished(request, ([], [], [])) == (False, None)
+    assert [block.ref_cnt for block in blocks] == [1, 1, 1, 1]
+    assert not scheduler._boundary_requests
+    pool.free_blocks(blocks)
+
+
+@pytest.mark.parametrize("bad_id", [0, -1, 12])
+def test_boundary_handoff_invalid_source(boundary_handoff, bad_id):
+    scheduler, _, request, _, blocks = boundary_handoff
+    with pytest.raises(ValueError, match="Invalid"):
+        scheduler._retain_boundary_states(request, [(1, bad_id, 32)])
+    assert [block.ref_cnt for block in blocks] == [1, 1, 1, 1]
+
+
+def test_boundary_handoff_conflict_and_incomplete_groups(boundary_handoff):
+    scheduler, _, request, _, blocks = boundary_handoff
+    a, b, *_ = [block.block_id for block in blocks]
+    with pytest.raises(ValueError, match="Conflicting"):
+        scheduler._retain_boundary_states(request, [(1, a, 32), (1, b, 32)])
+    scheduler._retain_boundary_states(request, [(1, a, 32)])
+    with pytest.raises(ValueError, match="Incomplete"):
+        scheduler.request_finished(request, ([8, 9], [10, 11], [10, 11]))
+    assert blocks[0].ref_cnt == 1
+    assert not scheduler._boundary_states
+
+
+@pytest.mark.parametrize("boundary", [0, -1, True, "31", 16, 33])
+def test_boundary_handoff_recomputes_inconsistent_remote_prefix(boundary_handoff, boundary):
+    scheduler, _, request, _, _ = boundary_handoff
+    request.prompt_token_ids.append(42)
+    request.kv_transfer_params = {"do_remote_prefill": True, "remote_state_boundary_tokens": boundary}
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
+    assert request.kv_transfer_params["do_remote_prefill"]
+
+
+def test_boundary_handoff_invalid_remote_prefix_preserves_cleanup(boundary_handoff):
+    scheduler, _, request, _, _ = boundary_handoff
+    request.prompt_token_ids.append(42)
+    request.kv_transfer_params = {
+        "do_remote_prefill": True,
+        "remote_state_boundary_tokens": 16,
+        "remote_block_ids": ([8, 9], [10], [11]),
+        "remote_engine_id": "remote",
+        "remote_request_id": "remote-request",
+        "remote_host": "localhost",
+        "remote_port": 5000,
+    }
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
+    blocks = MagicMock()
+    scheduler.update_state_after_alloc(request, blocks, 0)
+    empty_groups = tuple([] for _ in scheduler.kv_cache_groups)
+    assert scheduler._reqs_need_recv[request.request_id][1:] == (empty_groups, (), 0)
+    blocks.get_unhashed_block_ids_all_groups.assert_not_called()
+    blocks.get_block_ids.assert_not_called()
+
+
+def test_boundary_handoff_remote_prefix_local_overlap(boundary_handoff):
+    scheduler, _, request, _, _ = boundary_handoff
+    request.prompt_token_ids.append(42)
+    request.kv_transfer_params = {"do_remote_prefill": True, "remote_state_boundary_tokens": 32}
+    assert scheduler.get_num_new_matched_tokens(request, 16) == (16, True)
+    assert scheduler.get_num_new_matched_tokens(request, 32) == (0, False)
 
 
 class TestMooncakeConnectorScheduler(unittest.TestCase):
@@ -5024,6 +5218,136 @@ def test_state_prefill_token_count_boundary(truncate, tokens):
     scheduler = MooncakeConnectorScheduler.__new__(MooncakeConnectorScheduler)
     scheduler.need_truncate = truncate
     assert scheduler._state_prefill_token_count(tokens) == (tokens - 1 if truncate and tokens > 1 else tokens)
+
+
+@pytest.mark.parametrize("hash_unit", [16, 128, 512])
+@pytest.mark.parametrize("offset", [-1, 0, 1])
+@pytest.mark.parametrize("payload", ["tokens", "embeds"])
+@pytest.mark.parametrize("units", [1, 2])
+@pytest.mark.parametrize("hashing", [False, True])
+def test_admission_truncation_keeps_real_request_hashes_consistent(
+    monkeypatch, hash_unit, offset, payload, units, hashing
+):
+    """Admission must invalidate the removed tail before lookup and later append."""
+    from vllm.v1.core import kv_cache_utils
+
+    monkeypatch.setattr(kv_cache_utils, "NONE_HASH", sha256("st04-none"), raising=False)
+    count = units * hash_unit + offset
+    tokens = list(range(count))
+    embeds = torch.arange(count * 2, dtype=torch.float32).reshape(count, 2)
+    hasher = get_request_block_hasher(hash_unit, sha256) if hashing else None
+
+    def make_request(request_id, size):
+        return Request(
+            request_id=request_id,
+            prompt_token_ids=tokens[:size] if payload == "tokens" else None,
+            prompt_embeds=embeds[:size].clone() if payload == "embeds" else None,
+            sampling_params=SamplingParams(max_tokens=8, extra_args={"kv_transfer_params": {"do_remote_decode": True}}),
+            pooling_params=None,
+            block_hasher=hasher,
+        )
+
+    request = make_request("admitted", count)
+    original_hashes = request.block_hashes.copy()
+    connector_scheduler = MooncakeConnectorScheduler.__new__(MooncakeConnectorScheduler)
+    connector_scheduler._boundary_requests = {}
+    connector_scheduler.need_truncate = True
+    connector = MooncakeConnector.__new__(MooncakeConnector)
+    connector.connector_scheduler = connector_scheduler
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler.requests = {}
+    scheduler.connector = connector
+    scheduler.spec_decode_metrics_level = "none"
+    scheduler.log_stats = False
+    queued = []
+    scheduler._enqueue_waiting_request = queued.append
+
+    scheduler.add_request(request)
+    expected = make_request("expected", count - 1)
+    assert queued == [request]
+    assert scheduler.requests[request.request_id] is request
+    assert request.num_tokens == request.num_prompt_tokens == count - 1
+    assert list(request.all_token_ids) == list(expected.all_token_ids)
+    assert request.block_hashes == expected.block_hashes
+    assert request.block_hashes == original_hashes[: (count - 1) // hash_unit]
+    assert request.max_tokens == 1
+    lookup = []
+
+    def find_hit(hashes, max_length):
+        lookup.append((hashes.copy(), max_length))
+        return (), 0, 0
+
+    manager = KVCacheManager.__new__(KVCacheManager)
+    manager.prefix_cache_lookup_enabled = lambda req: True
+    manager.coordinator = types.SimpleNamespace(find_longest_cache_hit=find_hit)
+    manager.create_kv_cache_blocks = lambda blocks: blocks
+    manager.enable_kv_cache_events = False
+    assert manager.get_computed_blocks(request) == ((), 0, 0)
+    assert lookup == [(expected.block_hashes, count - 2)]
+    assert connector.get_num_new_matched_tokens(request, 0) == (0, False)
+    connector.on_new_request(request)  # Same-request reentry must be a no-op.
+    assert request.block_hashes == expected.block_hashes
+    assert request.num_tokens == count - 1
+
+    # Exercise upstream preemption without claiming real block reclamation.
+    released = []
+    scheduler._free_request_blocks = released.append
+    scheduler.encoder_cache_manager = types.SimpleNamespace(free=lambda req: None)
+    scheduler._inflight_prefills = set()
+    resumed = []
+    scheduler.waiting = types.SimpleNamespace(prepend_request=resumed.append)
+    scheduler.reset_preempted_req_ids = set()
+    request.status = RequestStatus.RUNNING
+    request.num_computed_tokens = 1
+    scheduler._preempt_request(request, 0.0)
+    assert released == resumed == [request]
+    assert request.num_preemptions == 1
+    assert request.num_computed_tokens == 0
+    assert request.status == RequestStatus.PREEMPTED
+    connector.on_new_request(request)
+    assert request.num_tokens == count - 1
+    assert request.block_hashes == expected.block_hashes
+
+    # A generated replacement token must not inherit the removed prompt hash.
+    request.append_output_token_ids(999)
+    expected.append_output_token_ids(999)
+    assert request.block_hashes == expected.block_hashes
+
+
+@pytest.mark.parametrize("hashing", [False, True])
+@pytest.mark.parametrize(
+    "params,need_truncate,count",
+    [
+        (None, True, 16),
+        ({}, True, 16),
+        ({"do_remote_prefill": True}, True, 16),
+        ({"do_remote_decode": False}, True, 16),
+        ({"do_remote_decode": True}, False, 16),
+        ({"do_remote_decode": True}, True, 0),
+        ({"do_remote_decode": True}, True, 1),
+    ],
+)
+def test_real_request_admission_guards_preserve_hashes(monkeypatch, params, need_truncate, count, hashing):
+    from vllm.v1.core import kv_cache_utils
+
+    monkeypatch.setattr(kv_cache_utils, "NONE_HASH", sha256("st04-none"), raising=False)
+    request = Request(
+        request_id="guarded",
+        prompt_token_ids=list(range(count)),
+        sampling_params=SamplingParams(max_tokens=8, extra_args={"kv_transfer_params": params}),
+        pooling_params=None,
+        block_hasher=get_request_block_hasher(16, sha256) if hashing else None,
+    )
+    hashes = request.block_hashes.copy()
+    scheduler = MooncakeConnectorScheduler.__new__(MooncakeConnectorScheduler)
+    scheduler._boundary_requests = {}
+    scheduler.need_truncate = need_truncate
+    scheduler.on_new_request(request)
+    assert request.num_tokens == request.num_prompt_tokens == count
+    assert request.prompt_token_ids == list(range(count))
+    assert request.block_hashes == hashes
+    assert request.max_tokens == 8
+    assert not (request.kv_transfer_params or {}).get("_p_side_truncated")
 
 
 @pytest.mark.parametrize("mode", ["empty", "legacy", "pp-key", "invalid-pp-key"])

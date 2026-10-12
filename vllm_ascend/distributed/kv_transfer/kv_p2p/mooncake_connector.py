@@ -84,6 +84,8 @@ if TYPE_CHECKING:
     from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.core.block_pool import BlockPool
+    from vllm.v1.outputs import KVConnectorOutput
     from vllm.v1.request import Request
 # isort: on
 
@@ -195,10 +197,11 @@ class KVCacheTaskTracker:
             self.finished_requests.add(request_id)
             self.reqs_to_process.discard(request_id)
 
-    def update_done_task_count(self, request_id: str):
+    def update_done_task_count(self, request_id: str, report_finished: bool = True):
         with self.done_task_lock:
             if request_id in self.reqs_to_process:
-                self.finished_requests.add(request_id)
+                if report_finished:
+                    self.finished_requests.add(request_id)
                 self.reqs_to_process.discard(request_id)
                 self.delayed_free_requests.pop(request_id, None)
             else:
@@ -582,6 +585,7 @@ class KVCacheRecvingThread(threading.Thread):
         shard_idx: int = 0,
         local_block_ids_replicate_k: BlockIds | None = None,
         remote_block_ids_replicate_k: BlockIds | None = None,
+        report_finished: bool = True,
     ):
         """Add a new request to the queue for processing."""
         if remote_port_send_num is None:
@@ -602,6 +606,7 @@ class KVCacheRecvingThread(threading.Thread):
             "all_task_done": all_task_done,
             "shard_idx": shard_idx,
             "remote_block_size": remote_block_size,
+            "report_finished": report_finished,
         }
         logger.debug("Adding request %s to the queue.Trans info:%s", request_id, trans_info)
         self.request_queue.put(trans_info)
@@ -758,7 +763,10 @@ class KVCacheRecvingThread(threading.Thread):
                             remote_request_id,
                             e,
                         )
-                self.task_tracker.update_done_task_count(request_id)
+                self.task_tracker.update_done_task_count(
+                    request_id,
+                    report_finished=req_meta.get("report_finished", True),
+                )
                 with self.proc_not_transfer_request_lock:
                     self.proc_not_transfer_request.pop(remote_request_id, None)
                 self._clear_failed_recv_request(request_id)
@@ -1650,6 +1658,26 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.build_connector_meta(scheduler_output)
 
+    def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
+        assert self.connector_scheduler is not None
+        self.connector_scheduler._boundary_block_pool = gpu_block_pool
+
+    def register_finished_partial_tail(
+        self, request: "Request", block_ids: BlockIds, partial_tail_offloads: list[tuple[int, int, int]]
+    ) -> bool:
+        assert self.connector_scheduler is not None
+        if not (request.kv_transfer_params or {}).get("do_remote_decode"):
+            return False
+        if request.status != RequestStatus.FINISHED_LENGTH_CAPPED:
+            return False
+        self.connector_scheduler._retain_boundary_states(request, partial_tail_offloads)
+        return bool(self.connector_scheduler._boundary_states.get(request.request_id))
+
+    def update_connector_output(self, connector_output: "KVConnectorOutput") -> None:
+        assert self.connector_scheduler is not None
+        for req_id in connector_output.finished_sending or ():
+            self.connector_scheduler._release_boundary_states(req_id)
+
     def request_finished(
         self,
         request: "Request",
@@ -1772,6 +1800,9 @@ class MooncakeConnectorScheduler:
         self._reqs_need_recv: dict[str, tuple[Request, BlockIds, BlockIds, int]] = {}
         self._reqs_need_send: dict[str, float] = {}
         self._reqs_in_batch: set[str] = set()
+        self._boundary_block_pool = None
+        self._boundary_requests: dict[str, Request] = {}
+        self._boundary_states: dict[str, dict[int, int]] = {}
 
         # master-slave meta information for cross-nodes
         self.multi_nodes_meta_mapping: dict[str, dict[str, Any]] = {}
@@ -1901,6 +1932,12 @@ class MooncakeConnectorScheduler:
 
             request._all_token_ids.pop()
             request.num_prompt_tokens -= 1
+            # Request hashes were built before admission. Reuse its hasher so
+            # the removed tail cannot survive lookup or a later token append.
+            if getattr(request, "_block_hasher", None) is not None:
+                request.block_hashes.clear()
+                request._prompt_embeds_per_block_hashes.clear()
+                request.update_block_hashes()
             request.max_tokens = 1
             params["_p_side_truncated"] = True
 
@@ -1910,6 +1947,38 @@ class MooncakeConnectorScheduler:
         params = request.kv_transfer_params
         if params is not None and params.get("do_remote_decode") and self.need_truncate:
             self._truncate_request_for_prefill(request)
+            self._boundary_requests[request.request_id] = request
+
+    def _retain_boundary_states(self, request: "Request", offloads: list[tuple[int, int, int]]) -> None:
+        """Pin only exact final-prefill offers; intermediate boundaries are unused."""
+        state_groups = {idx for idx, info in enumerate(self.group_transfer_info) if info.is_state_group}
+        selected = {}
+        for group_id, block_id, boundary in offloads:
+            if group_id not in state_groups or boundary != request.num_prompt_tokens:
+                continue
+            if group_id in selected and selected[group_id] != block_id:
+                raise ValueError("Conflicting Mooncake boundary-state offers")
+            selected[group_id] = block_id
+        if not selected:
+            return
+        pool = self._boundary_block_pool
+        if pool is None:
+            raise RuntimeError("Mooncake boundary handoff requires the scheduler block pool")
+        if any(bid <= 0 or bid >= len(pool.blocks) or pool.blocks[bid].is_null for bid in selected.values()):
+            raise ValueError("Invalid Mooncake boundary-state source")
+        previous = self._boundary_states.get(request.request_id, {})
+        updated = previous | selected
+        old_ids, new_ids = set(previous.values()), set(updated.values())
+        pool.touch([pool.blocks[bid] for bid in new_ids - old_ids])
+        pool.free_blocks(pool.blocks[bid] for bid in old_ids - new_ids)
+        self._boundary_states[request.request_id] = updated
+
+    def _release_boundary_states(self, request_id: str) -> None:
+        states = self._boundary_states.pop(request_id, {})
+        self._boundary_requests.pop(request_id, None)
+        if states:
+            assert self._boundary_block_pool is not None
+            self._boundary_block_pool.free_blocks(self._boundary_block_pool.blocks[bid] for bid in set(states.values()))
 
     def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
         """
@@ -1938,6 +2007,24 @@ class MooncakeConnectorScheduler:
             # Remote prefill: get all prompt blocks from remote.
             token_ids = request.prompt_token_ids or []
             actual = self._state_prefill_token_count(len(token_ids))
+            remote_boundary = params.get("remote_state_boundary_tokens")
+            if remote_boundary is not None:
+                if (
+                    not isinstance(remote_boundary, int)
+                    or isinstance(remote_boundary, bool)
+                    or not 0 < remote_boundary <= actual
+                    or remote_boundary != actual
+                ):
+                    # Never combine a different state with the existing FA
+                    # suffix. Recompute locally, retaining transfer metadata so
+                    # the zero-external path still notifies P to release its KV.
+                    logger.warning(
+                        "Ignoring remote Mamba state boundary %r for request %s (expected %d); recomputing locally",
+                        remote_boundary,
+                        request.request_id,
+                        actual,
+                    )
+                    return 0, False
             params["num_computed_tokens"] = num_computed_tokens
             count = max(actual - num_computed_tokens, 0)
             if count > 0:
@@ -1959,7 +2046,11 @@ class MooncakeConnectorScheduler:
         if params is not None and params.get("do_remote_prefill"):
             if params.get("remote_block_ids"):
                 if all(p in params for p in ("remote_engine_id", "remote_host", "remote_port", "remote_request_id")):
-                    local_block_ids = blocks.get_unhashed_block_ids_all_groups() if num_external_tokens > 0 else []
+                    local_block_ids = (
+                        blocks.get_unhashed_block_ids_all_groups()
+                        if num_external_tokens > 0
+                        else tuple([] for _ in self.kv_cache_groups)
+                    )
                     local_full_block_ids = blocks.get_block_ids() if num_external_tokens > 0 else tuple()
                     # Get unhashed blocks to pull from remote.
                     self._reqs_need_recv[request.request_id] = (
@@ -1980,6 +2071,13 @@ class MooncakeConnectorScheduler:
         scheduler_output: SchedulerOutput,
     ) -> KVConnectorMetadata:
         meta = MooncakeConnectorMetadata()
+
+        block_state = getattr(scheduler_output, "kv_connector_block_state", None)
+        if block_state is not None:
+            for req_id, offloads in block_state.boundary_state_offloads.items():
+                request = self._boundary_requests.get(req_id)
+                if request is not None:
+                    self._retain_boundary_states(request, offloads)
 
         # Loop through scheduled reqs and convert to ReqMeta.
         for req_id, (req, block_ids, full_block_ids, num_external_tokens) in self._reqs_need_recv.items():
@@ -2020,6 +2118,7 @@ class MooncakeConnectorScheduler:
         )
 
         if params is None:
+            self._release_boundary_states(request.request_id)
             return False, None
 
         # A remote-prefill request can be rejected before scheduler admission
@@ -2029,6 +2128,7 @@ class MooncakeConnectorScheduler:
         # the data transfer for empty block IDs but still sends the completion
         # signal to the P node, allowing it to release the stranded KV blocks.
         if params.get("do_remote_prefill"):
+            self._release_boundary_states(request.request_id)
             empty_block_ids: BlockIds = tuple([] for _ in self.kv_cache_groups)
             self._reqs_need_recv[request.request_id] = (
                 request,
@@ -2040,18 +2140,29 @@ class MooncakeConnectorScheduler:
             return False, None
 
         if not params.get("do_remote_decode") or request.status != RequestStatus.FINISHED_LENGTH_CAPPED:
+            self._release_boundary_states(request.request_id)
             return False, None
 
         num_prompt_blocks = math.ceil(len(request.prompt_token_ids) / self.block_size)
         computed_block_ids = self._get_transfer_block_ids(block_ids, len(request.prompt_token_ids))
         computed_block_ids = self._get_swa_transfer_block_ids(computed_block_ids)
+        exact_states = self._boundary_states.get(request.request_id, {})
+        if exact_states:
+            state_groups = {idx for idx, info in enumerate(self.group_transfer_info) if info.is_state_group}
+            if exact_states.keys() != state_groups:
+                self._release_boundary_states(request.request_id)
+                raise ValueError("Incomplete Mooncake final boundary-state handoff")
+            computed_block_ids = tuple(
+                [exact_states[idx]] if idx in exact_states else group for idx, group in enumerate(computed_block_ids)
+            )
+        self._boundary_requests.pop(request.request_id, None)
         computed_block_lens = [len(block_id_list) for block_id_list in computed_block_ids]
         delay_free_blocks = sum(computed_block_lens) > 0
         if delay_free_blocks:
             logger.info("Delaying free of %d blocks for request %s", sum(computed_block_lens), request.request_id)
             self._reqs_need_send[request.request_id] = time.time()
 
-        return delay_free_blocks, dict(
+        transfer_params = dict(
             do_remote_prefill=True,
             do_remote_decode=False,
             remote_block_ids=computed_block_ids,
@@ -2067,6 +2178,9 @@ class MooncakeConnectorScheduler:
             num_prompt_blocks=num_prompt_blocks,
             remote_block_size=self.block_size,
         )
+        if exact_states:
+            transfer_params["remote_state_boundary_tokens"] = request.num_prompt_tokens
+        return delay_free_blocks, transfer_params
 
     def _port_offset_from_handshake_metadata(
         self,
@@ -3922,6 +4036,7 @@ class MooncakeConnectorWorker:
                         remote_block_size=meta.remote_block_size,
                         local_block_ids_replicate_k=local_block_ids_replicate_k_for_port,
                         remote_block_ids_replicate_k=remote_block_ids_replicate_k_for_port,
+                        report_finished=(getattr(meta, "num_external_tokens", 1) > 0),
                     )
 
         if self.kv_send_thread is not None and self.dcp_size == 1:

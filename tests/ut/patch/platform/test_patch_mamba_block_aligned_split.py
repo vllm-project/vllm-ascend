@@ -234,7 +234,7 @@ def test_producer_clears_drop_knobs_around_upstream_call(monkeypatch):
     result = _mamba_block_aligned_split(scheduler, _request(), num_new_tokens=8)
     assert result == 42
     # The original sees the EAGLE drop disabled...
-    assert observed == {"use_eagle": False, "use_eagle_block_drop": False}
+    assert observed == {"use_eagle": True, "use_eagle_block_drop": False}
     # ...and the scheduler's own knobs are restored afterwards.
     assert scheduler.use_eagle is True
     assert scheduler.use_eagle_block_drop is True
@@ -246,7 +246,7 @@ def test_standalone_clears_drop_knobs_around_upstream_call(monkeypatch):
     scheduler = _scheduler(is_kv_consumer=None)
     result = _mamba_block_aligned_split(scheduler, _request(), num_new_tokens=8)
     assert result == 42
-    assert observed == {"use_eagle": False, "use_eagle_block_drop": False}
+    assert observed == {"use_eagle": True, "use_eagle_block_drop": False}
     assert scheduler.use_eagle is True
     assert scheduler.use_eagle_block_drop is True
 
@@ -297,3 +297,45 @@ def test_producer_handles_missing_drop_attributes(monkeypatch):
     assert result == 42
     assert not hasattr(scheduler, "use_eagle")
     assert not hasattr(scheduler, "use_eagle_block_drop")
+
+
+@pytest.mark.parametrize("role", ["producer", "standalone", "consumer", "both"])
+@pytest.mark.parametrize("internal_checkpoint", [False, True])
+def test_delegated_split_preserves_upstream_internal_checkpoint(role, internal_checkpoint):
+    scheduler = _scheduler(
+        is_kv_consumer=None if role == "standalone" else role in {"consumer", "both"},
+        is_kv_producer=role in {"producer", "both"},
+    )
+    scheduler.hash_block_size = 16
+    scheduler.mamba_partial_cache_hit = True
+    scheduler.mamba_has_prefill_checkpoint_blocks = internal_checkpoint
+    scheduler.mamba_prefill_checkpoint_alignment = 16
+    request = _request(num_computed_tokens=0, num_prompt_tokens=1000, num_tokens=1000)
+    result = _mamba_block_aligned_split(scheduler, request, 1000)
+    # A valid internal checkpoint avoids extra page/tail forwards entirely.
+    if internal_checkpoint:
+        assert result == 1000
+    else:
+        assert result == (768 if role in {"producer", "standalone"} else 384)
+    assert scheduler.use_eagle is scheduler.use_eagle_block_drop is True
+
+
+@pytest.mark.parametrize("fine_grained", [False, True])
+def test_shared_junction_remains_an_upstream_capability(fine_grained):
+    scheduler = _scheduler(is_kv_consumer=False, is_kv_producer=True)
+    scheduler.mamba_fine_grained_prefix_cache = fine_grained
+    request = _request(num_computed_tokens=0, num_prompt_tokens=2000, num_tokens=2000)
+    request.shared_prefix_boundary = 600
+    result = _mamba_block_aligned_split(scheduler, request, 1000)
+    assert result == (600 if fine_grained else 384)
+    assert request.shared_prefix_boundary == 600
+
+
+def test_legacy_drop_fallback_restores_mtp_flag(monkeypatch):
+    scheduler = _scheduler(is_kv_consumer=False, is_kv_producer=True)
+    del scheduler.use_eagle_block_drop
+    observed = {}
+    monkeypatch.setattr(mod, "_original_mamba_block_aligned_split", _fake_original_recording(observed))
+    assert _mamba_block_aligned_split(scheduler, _request(), 8) == 42
+    assert observed == {"use_eagle": False, "use_eagle_block_drop": None}
+    assert scheduler.use_eagle is True
