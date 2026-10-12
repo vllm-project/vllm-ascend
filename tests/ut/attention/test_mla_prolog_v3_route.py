@@ -29,6 +29,7 @@ def _make_impl() -> AscendMLAImpl:
     impl.layer_name = "model.layers.0.self_attn.attn"
     impl.use_mla_rope = True
     impl.qk_rope_head_dim = ROPE_DIM
+    impl.dtype = torch.bfloat16
     impl.enable_kv_nz = False
     impl.fa_quant_layer = False
     impl.support_fp8_attention = False
@@ -326,6 +327,16 @@ def test_prolog_v3_writer_requires_rope_and_operator(monkeypatch):
     assert not impl._cache_requires_prolog_v3_writer((nope, rope))
 
 
+def test_prolog_v3_writer_excludes_native_fp16():
+    impl = _make_impl()
+    nope, rope = _component_major_cache()
+    impl.dtype = torch.float16
+
+    assert not impl.supports_prolog_v3_dtype()
+    assert not impl.supports_prolog_v3_writer()
+    assert not impl._cache_requires_prolog_v3_writer((nope, rope))
+
+
 def test_dcp_current_kv_capacity_uses_decode_query_len():
     impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
     impl.vllm_config = SimpleNamespace(
@@ -532,6 +543,122 @@ def test_forward_falls_back_when_dcp_current_buffer_is_too_small():
 
     impl.mla_preprocess_prolog_v3.assert_not_called()
     impl._mla_preprocess.assert_called_once()
+
+
+def test_forward_falls_back_when_dcp_prefill_current_buffer_is_too_small():
+    impl = _make_impl()
+    impl.use_output_gate = False
+    impl.enable_mlapo = False
+    impl.dcp_enabled = True
+    impl.pcp_enabled = False
+    impl.is_pcp_decode_sharded = False
+    impl._dcp_current_kv_buffers = (
+        torch.empty(1, 1, 1, NOPE_DIM),
+        torch.empty(1, 1, 1, ROPE_DIM),
+        torch.arange(1),
+    )
+    impl._decode_requires_current_kv = MagicMock(return_value=True)
+    impl._cache_requires_prolog_v3_writer = MagicMock(return_value=True)
+    impl.mla_preprocess_prolog_v3 = MagicMock(return_value=(None, None))
+    impl._mla_preprocess = MagicMock(return_value=(None, None))
+    impl.o_proj = MagicMock(side_effect=lambda tensor, **_kwargs: (tensor,))
+
+    hidden = torch.zeros(2, 128)
+    output = torch.empty(2, impl.num_heads * impl.v_head_dim)
+    metadata = SimpleNamespace(
+        num_actual_tokens=2,
+        num_decodes=0,
+        num_prefills=1,
+        num_decode_tokens=0,
+    )
+
+    with (
+        patch.object(mla_v1, "_EXTRA_CTX", SimpleNamespace(num_tokens=2)),
+        patch.object(mla_v1, "maybe_save_kv_layer_to_connector"),
+    ):
+        assert impl.forward("layer", hidden, _component_major_cache(), metadata, output) is output
+
+    impl.mla_preprocess_prolog_v3.assert_not_called()
+    impl._mla_preprocess.assert_called_once()
+
+
+def test_mla_preprocess_prolog_v3_preserves_dcp_prefill_current_kv():
+    impl = _make_impl()
+    num_prefill_tokens = 4
+    current_nope_cache = torch.zeros(1, BLOCK_SIZE, 1, NOPE_DIM)
+    current_pe_cache = torch.zeros(1, BLOCK_SIZE, 1, ROPE_DIM)
+    current_indices = torch.arange(BLOCK_SIZE)
+    impl._dcp_current_kv_buffers = (current_nope_cache, current_pe_cache, current_indices)
+    impl._decode_requires_current_kv = MagicMock(return_value=True)
+    impl._prepare_prolog_v3_weights = lambda: impl._prolog_v3_weights
+
+    qkv_lora = torch.zeros(num_prefill_tokens, impl.q_lora_rank + FUSED_DIM)
+    impl.fused_qkv_a_proj = MagicMock(return_value=(qkv_lora,))
+    impl.q_a_layernorm = MagicMock(side_effect=lambda tensor: tensor)
+    impl.q_proj = MagicMock(
+        side_effect=lambda tensor: (torch.zeros(tensor.shape[0], impl.num_heads * (impl.qk_nope_head_dim + ROPE_DIM)),)
+    )
+    impl.rope_single = MagicMock(side_effect=lambda tensor, _cos, _sin: tensor)
+    impl.kv_b_proj = MagicMock(
+        side_effect=lambda tensor: (
+            torch.zeros(tensor.shape[0], impl.num_heads * (impl.qk_nope_head_dim + impl.v_head_dim)),
+        )
+    )
+
+    nope, rope = _component_major_cache()
+    hidden = torch.randn(num_prefill_tokens, 128)
+    # Slots -1 are real current rows owned by another DCP rank, not padding.
+    prefill_slots = torch.tensor([-1, BLOCK_SIZE, -1, BLOCK_SIZE + 1])
+    metadata = SimpleNamespace(
+        num_decode_tokens=0,
+        num_actual_tokens=num_prefill_tokens,
+        slot_mapping=prefill_slots,
+        prefill=SimpleNamespace(
+            cos=torch.randn(num_prefill_tokens, ROPE_DIM),
+            sin=torch.randn(num_prefill_tokens, ROPE_DIM),
+        ),
+    )
+
+    expected_nope = torch.arange(num_prefill_tokens, dtype=torch.float32) + 3.0
+    expected_pe = torch.arange(num_prefill_tokens, dtype=torch.float32) + 4.0
+
+    def fake_prolog(**kwargs):
+        kwargs["kv_cache"][0, :num_prefill_tokens, 0, 0] = expected_nope
+        kwargs["kr_cache"][0, :num_prefill_tokens, 0, 0] = expected_pe
+        return (
+            torch.zeros(num_prefill_tokens, impl.num_heads * NOPE_DIM),
+            torch.zeros(num_prefill_tokens, impl.num_heads * ROPE_DIM),
+            None,
+            None,
+            None,
+        )
+
+    with (
+        patch("torch_npu.npu_mla_prolog_v3", side_effect=fake_prolog) as mock_prolog,
+        patch("torch_npu.npu_kv_rmsnorm_rope_cache") as mock_legacy,
+        patch.object(mla_v1.DeviceOperator, "reshape_and_cache") as mock_scatter,
+    ):
+        decode, prefill = impl.mla_preprocess_prolog_v3(hidden, (nope, rope), metadata)
+
+    assert decode is None
+    assert prefill is not None
+    mock_legacy.assert_not_called()
+
+    prolog_kwargs = mock_prolog.call_args.kwargs
+    assert prolog_kwargs["kv_cache"].untyped_storage() is current_nope_cache.untyped_storage()
+    assert prolog_kwargs["kr_cache"].untyped_storage() is current_pe_cache.untyped_storage()
+    assert torch.equal(prolog_kwargs["cache_index"], current_indices[:num_prefill_tokens])
+
+    scatter_kwargs = mock_scatter.call_args.kwargs
+    assert scatter_kwargs["key_cache"] is nope
+    assert scatter_kwargs["value_cache"] is rope
+    assert torch.equal(scatter_kwargs["slot_mapping"], prefill_slots)
+    assert scatter_kwargs["key"].untyped_storage() is current_nope_cache.untyped_storage()
+    assert scatter_kwargs["value"].untyped_storage() is current_pe_cache.untyped_storage()
+
+    nope_passed_to_kv_b = impl.kv_b_proj.call_args.args[0]
+    assert torch.equal(nope_passed_to_kv_b[:, 0], expected_nope)
+    assert torch.equal(prefill.k_pe[:, 0, 0], expected_pe)
 
 
 def test_mla_preprocess_prolog_v3_supports_dcp_current_kv_split(monkeypatch):
