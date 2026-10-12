@@ -36,7 +36,6 @@ This is vLLM Ascend v0.30.0rc1, a model-focused release built on the v0.29 relea
 - Added GLM-5.2 V2 sparse KV offload with PP and DSpark, plus a fused quant lightning indexer manage operator for sparse KV cache offloading. [#17900](https://github.com/vllm-project/vllm-ascend/pull/17900) [#17444](https://github.com/vllm-project/vllm-ascend/pull/17444)
 - Added GLM-5.3-Flash layerwise memcache DRAM/SSD pooling in KV Pool. [#17698](https://github.com/vllm-project/vllm-ascend/pull/17698)
 - Supported C8-MXFP (FP8 KV cache with E8M0 scales) and INT8 C8 RoPE0 on A2/A3. [#17180](https://github.com/vllm-project/vllm-ascend/pull/17180) [#16706](https://github.com/vllm-project/vllm-ascend/pull/16706)
-- Added the `store_kv_block` custom operator on Ascend 950. [#16392](https://github.com/vllm-project/vllm-ascend/pull/16392)
 - Added HIXL expert-weight transfers for EPLB. [#17578](https://github.com/vllm-project/vllm-ascend/pull/17578)
 - Supported batch-sharded sampling with removed reduce sample. [#15011](https://github.com/vllm-project/vllm-ascend/pull/15011)
 - Used FullAttn TP parallelism when DCP > 1 and num_kv_heads > 1 in P/D deployment. [#17524](https://github.com/vllm-project/vllm-ascend/pull/17524)
