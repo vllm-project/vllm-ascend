@@ -220,7 +220,6 @@ and use the `main` branch with the matching vLLM revision recorded in
         --tool-call-parser deepseek_v41 \
         --enable-auto-tool-choice \
         --safetensors-load-strategy lazy \
-        --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}' \
         --quantization ascend \
         --block-size 128 \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
@@ -408,7 +407,6 @@ and use the `main` branch with the matching vLLM revision recorded in
         --reasoning-parser deepseek_v41 \
         --tool-call-parser deepseek_v41 \
         --enable-auto-tool-choice \
-        --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}' \
         --safetensors-load-strategy lazy \
         --gpu-memory-utilization 0.9 \
         --quantization ascend \
@@ -499,7 +497,6 @@ and use the `main` branch with the matching vLLM revision recorded in
         --reasoning-parser deepseek_v41 \
         --tool-call-parser deepseek_v41 \
         --enable-auto-tool-choice \
-        --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}' \
         --safetensors-load-strategy lazy \
         --gpu-memory-utilization 0.95 \
         --quantization ascend \
@@ -638,7 +635,7 @@ and use the `main` branch with the matching vLLM revision recorded in
       INFO:     Application startup complete.
       ```
 
-### 5.3 A3 1P1D Deployment with Memcache KV Cache Pool
+### 5.3 1P1D Deployment with Memcache KV Cache Pool
 
 This configuration extends the A3 1P1D deployment in Section 5.2 with a
 Memcache KV Cache Pool. `MooncakeHybridConnector` continues to transfer KV
@@ -806,7 +803,6 @@ vllm serve "$MODEL_PATH" \
     --reasoning-parser deepseek_v41 \
     --tool-call-parser deepseek_v41 \
     --enable-auto-tool-choice \
-    --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}' \
     --safetensors-load-strategy lazy \
     --gpu-memory-utilization 0.9 \
     --quantization ascend \
@@ -910,7 +906,6 @@ vllm serve "$MODEL_PATH" \
     --reasoning-parser deepseek_v41 \
     --tool-call-parser deepseek_v41 \
     --enable-auto-tool-choice \
-    --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}' \
     --safetensors-load-strategy lazy \
     --gpu-memory-utilization 0.95 \
     --quantization ascend \
@@ -1050,7 +1045,6 @@ For Memcache configuration, capacity tuning, and troubleshooting, refer to the
       --tool-call-parser deepseek_v41 \
       --enable-auto-tool-choice \
       --trust-remote-code \
-      --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}' \
       --safetensors-load-strategy lazy \
       --quantization ascend \
       --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_npugraph_ex":false,"enable_static_kernel":false}}' \
@@ -1150,8 +1144,8 @@ true
 ## 7 Accuracy Evaluation
 
 Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md)
-to evaluate the deployed service. No vLLM Ascend task-level accuracy result is
-published for this configuration yet. When reporting results, record the
+to evaluate the deployed service. Accuracy results will be documented in the
+[release notes](../../user_guide/release_notes.md). When reporting results, record the
 checkpoint, prompt encoder, reasoning effort, sampling parameters, dataset
 version, and whether DSpark is enabled.
 
