@@ -1,9 +1,24 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+# This file is a part of the vllm-ascend project.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Release-lane configuration and bounded replay allocation regression tests."""
 
 import argparse
 import dataclasses
+import subprocess
+import sys
 import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock, PropertyMock, patch
@@ -11,13 +26,13 @@ from unittest.mock import MagicMock, PropertyMock, patch
 import msgspec
 import pytest
 import torch
-import vllm
 from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.single_type_kv_cache_manager import (
@@ -31,15 +46,82 @@ from vllm.v1.request import Request
 from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec, register_ascend_kv_cache_specs
 from vllm_ascend.patch.platform.patch_swa_bounded_replay_legacy import (
     _mark_prefix_replay,
+    _patch_scheduler,
     _rewrite_method,
+    apply_legacy_replay_patch,
     register_legacy_replay_argument,
 )
 
-pytestmark = pytest.mark.skipif(vllm.__version__.split("+")[0] != "0.30.0", reason="vLLM 0.30 backport")
+pytestmark = pytest.mark.skipif(
+    hasattr(Scheduler, "_mark_prefix_replay")
+    and Scheduler._mark_prefix_replay.__module__ != apply_legacy_replay_patch.__module__,
+    reason="vLLM supplies native bounded replay",
+)
 
 BLOCK_SIZE = 16
 WINDOW = 32
 HIT_TOKENS = 96
+
+
+@pytest.fixture(autouse=True)
+def enable_legacy_replay():
+    apply_legacy_replay_patch(SimpleNamespace(cache_config=SimpleNamespace(swa_bounded_replay=True)))
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_replay_installation_is_opt_in_and_idempotent_in_fresh_process(enabled):
+    # A fresh interpreter catches import-time mutations that an already-patched
+    # pytest process cannot observe. Exercise the worker wire schema as well.
+    script = """
+from types import SimpleNamespace
+import msgspec
+from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.core.kv_cache_manager import KVCacheManager
+from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
+from vllm.v1.core.sched.output import NewRequestData, CachedRequestData
+originals = (Scheduler.schedule, KVCacheManager.allocate_slots, SingleTypeKVCacheManager.cache_blocks)
+from vllm_ascend.patch.platform.patch_swa_bounded_replay_legacy import apply_legacy_replay_patch
+assert not hasattr(Scheduler, '_mark_prefix_replay')
+assert originals == (Scheduler.schedule, KVCacheManager.allocate_slots, SingleTypeKVCacheManager.cache_blocks)
+assert 'replay_start' in NewRequestData.__dataclass_fields__
+assert 'replay_start' in CachedRequestData.__dataclass_fields__
+config = SimpleNamespace(cache_config=SimpleNamespace(swa_bounded_replay=ENABLED))
+apply_legacy_replay_patch(config)
+installed = (Scheduler.schedule, KVCacheManager.allocate_slots, SingleTypeKVCacheManager.cache_blocks)
+assert (originals != installed) == ENABLED
+apply_legacy_replay_patch(config)
+assert installed == (Scheduler.schedule, KVCacheManager.allocate_slots, SingleTypeKVCacheManager.cache_blocks)
+""".replace("ENABLED", repr(enabled))
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_native_replay_is_preserved():
+    config = SimpleNamespace(cache_config=SimpleNamespace(swa_bounded_replay=True))
+    with (
+        patch(
+            "vllm_ascend.patch.platform.patch_swa_bounded_replay_legacy.Scheduler",
+            SimpleNamespace(_mark_prefix_replay=lambda *args: None),
+        ),
+        patch("vllm_ascend.patch.platform.patch_swa_bounded_replay_legacy._patch_scheduler") as install,
+    ):
+        apply_legacy_replay_patch(config)
+        install.assert_not_called()
+
+
+def test_changed_scheduler_body_does_not_partially_patch_scheduler():
+    class UnsupportedScheduler:
+        def __init__(self):
+            pass
+
+        def schedule(self):
+            return "unchanged"
+
+    with patch("vllm_ascend.patch.platform.patch_swa_bounded_replay_legacy.Scheduler", UnsupportedScheduler):
+        original_init = UnsupportedScheduler.__init__
+        with pytest.raises(RuntimeError, match="unexpected UnsupportedScheduler.schedule body"):
+            _patch_scheduler()
+        assert UnsupportedScheduler.__init__ is original_init
 
 
 @pytest.mark.parametrize("enabled", [False, True])
@@ -158,11 +240,13 @@ def test_changed_scheduler_body_fails_before_installing_method():
     assert UnsupportedScheduler.schedule is original
 
 
-@pytest.fixture
-def replay_scheduler():
+@pytest.fixture(params=[(False, False), (True, False), (True, True)], ids=["v1", "v2", "v2-async"])
+def replay_scheduler(request):
+    use_v2_model_runner, async_scheduling = request.param
     with (
         patch.object(ModelConfig, "__post_init__", lambda self, *args, **kwargs: None),
         patch.object(VllmConfig, "__post_init__", lambda self, *args, **kwargs: None),
+        patch.object(VllmConfig, "use_v2_model_runner", new_callable=PropertyMock, return_value=use_v2_model_runner),
         patch.object(ModelConfig, "is_encoder_decoder", new_callable=PropertyMock, return_value=False),
         patch.object(ModelConfig, "uses_mrope", new_callable=PropertyMock, return_value=False),
         patch.object(ModelConfig, "is_diffusion", new_callable=PropertyMock, return_value=False),
@@ -185,7 +269,7 @@ def replay_scheduler():
                 max_num_batched_tokens=16,
                 enable_chunked_prefill=True,
                 is_encoder_decoder=False,
-                async_scheduling=False,
+                async_scheduling=async_scheduling,
                 watermark=0.0,
             ),
         )
@@ -208,7 +292,8 @@ def replay_scheduler():
                 KVCacheGroupSpec(["swa"], swa),
             ],
         )
-        yield Scheduler(config, kv, MagicMock(), BLOCK_SIZE)
+        scheduler_cls = AsyncScheduler if async_scheduling else Scheduler
+        yield scheduler_cls(config, kv, MagicMock(), BLOCK_SIZE)
 
 
 @pytest.mark.parametrize("hit", [16, 32, 96])
@@ -247,4 +332,27 @@ def test_actual_scheduler_replays_across_chunks_and_preserves_shared_blocks(repl
         scheduler._preempt_request(req, time.monotonic())
         resumed = scheduler.schedule()
         assert req.replay_start == hit - WINDOW
-        assert resumed.scheduled_cached_reqs.replay_start == {req.request_id: hit - WINDOW}
+        if scheduler.use_v2_model_runner:
+            assert resumed.scheduled_new_reqs[0].replay_start == hit - WINDOW
+        else:
+            assert resumed.scheduled_cached_reqs.replay_start == {req.request_id: hit - WINDOW}
+
+
+@pytest.mark.parametrize("enabled,connector", [(True, False), (True, True), (False, False)])
+def test_scheduler_created_before_patch_initializes_replay_on_first_schedule(replay_scheduler, enabled, connector):
+    scheduler = replay_scheduler
+    scheduler.cache_config.swa_bounded_replay = enabled
+    scheduler.connector = MagicMock() if connector else None
+    # Simulate a scheduler whose original constructor ran before config
+    # revalidation installed the replay constructor wrapper.
+    del scheduler.prefix_replay_tokens
+    if connector:
+        with pytest.raises(ValueError, match="local prefix caching only"):
+            scheduler.schedule()
+        assert not hasattr(scheduler, "prefix_replay_tokens")
+    else:
+        scheduler.schedule()
+        if enabled:
+            assert scheduler.prefix_replay_tokens == WINDOW
+        else:
+            assert not hasattr(scheduler, "prefix_replay_tokens")

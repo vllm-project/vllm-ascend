@@ -790,7 +790,9 @@
 #       methods, verifying each source anchor before compiling the replacement.
 #       SWA blocks remain private; cached groups adopt the full hit and replayed
 #       tokens consume compute budget without allocating duplicate slots.
-#       Load before BalanceScheduler captures the upstream base class.
+#       Register config and payload interfaces before parsing/serialization.
+#       Install scheduler/cache behavior only after config enables replay.
+#       Validate source anchors rather than matching a version string.
 #    Related upstream work: vLLM #56227.
 #    Future Plan:
 #       Remove after the release lane supplies the upstream replay protocol.

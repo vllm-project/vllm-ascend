@@ -1,5 +1,18 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+# This file is a part of the vllm-ascend project.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Backport the local SWA replay admission protocol to vLLM 0.30.
 
 The installed vLLM files and extensions are left intact. This patch supplies
@@ -15,12 +28,11 @@ import inspect
 import textwrap
 
 import pydantic.dataclasses
-import vllm
 from vllm.config import CacheConfig
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.logger import logger
 from vllm.v1.core.kv_cache_manager import KVCacheManager
-from vllm.v1.core.sched.output import NewRequestData
+from vllm.v1.core.sched.output import CachedRequestData, NewRequestData
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
 from vllm.v1.kv_cache_interface import KVCacheSpec, UniformTypeKVCacheSpecs
@@ -79,7 +91,7 @@ def register_legacy_replay_argument(parser) -> None:
         )
 
 
-def _rewrite_method(cls, name: str, replacements: tuple[tuple[str, str], ...]) -> None:
+def _rewrite_method(cls, name: str, replacements: tuple[tuple[str, str], ...], *, install: bool = True):
     """Retain the pinned scheduler body, inserting only the replay protocol.
 
     Every insertion must match once. A changed upstream body fails explicitly
@@ -96,7 +108,9 @@ def _rewrite_method(cls, name: str, replacements: tuple[tuple[str, str], ...]) -
     exec(compile(source, inspect.getfile(original), "exec"), original.__globals__, namespace)
     patched = namespace[name]
     functools.update_wrapper(patched, original)
-    setattr(cls, name, patched)
+    if install:
+        setattr(cls, name, patched)
+    return patched
 
 
 def _mark_prefix_replay(self, request, num_hit_tokens: int) -> int:
@@ -120,26 +134,35 @@ def _replay_window(spec) -> int:
     return getattr(spec, "prefix_replay_tokens", 0)
 
 
+def _initialize_replay_window(self) -> None:
+    enabled = getattr(self.cache_config, "swa_bounded_replay", False)
+    windows = (
+        {_replay_window(g.kv_cache_spec) for g in self.kv_cache_manager.kv_cache_config.kv_cache_groups}
+        if enabled
+        else set()
+    )
+    windows.discard(0)
+    if len(windows) > 1:
+        raise ValueError("SWA bounded replay requires matching window sizes")
+    prefix_replay_tokens = next(iter(windows), 0)
+    if prefix_replay_tokens and self.connector is not None:
+        raise ValueError("The vLLM 0.30 SWA replay backport supports local prefix caching only")
+    self.prefix_replay_tokens = prefix_replay_tokens
+    if prefix_replay_tokens:
+        logger.info("SWA bounded replay enabled on vLLM 0.30: window=%d", prefix_replay_tokens)
+
+
 def _patch_scheduler() -> None:
+    """Validate the pinned bodies, then install the opt-in replay behavior."""
     original_init = Scheduler.__init__
 
     @functools.wraps(original_init)
     def init(self, *args, **kwargs):
         original_init(self, *args, **kwargs)
-        windows = {_replay_window(g.kv_cache_spec) for g in self.kv_cache_manager.kv_cache_config.kv_cache_groups}
-        windows.discard(0)
-        if len(windows) > 1:
-            raise ValueError("SWA bounded replay requires matching window sizes")
-        self.prefix_replay_tokens = next(iter(windows), 0)
-        if self.prefix_replay_tokens and self.connector is not None:
-            raise ValueError("The vLLM 0.30 SWA replay backport supports local prefix caching only")
-        if self.prefix_replay_tokens:
-            logger.info("SWA bounded replay enabled on vLLM 0.30: window=%d", self.prefix_replay_tokens)
+        _initialize_replay_window(self)
 
-    Scheduler.__init__ = init
-    Scheduler._mark_prefix_replay = _mark_prefix_replay
-    Request.replay_start = 0
-    _rewrite_method(
+    original_schedule = Scheduler.schedule
+    replay_schedule = _rewrite_method(
         Scheduler,
         "schedule",
         (
@@ -172,8 +195,9 @@ def _patch_scheduler() -> None:
                 "                request,\n                max(num_new_tokens - num_replay_tokens, 0),",
             ),
         ),
+        install=False,
     )
-    _rewrite_method(
+    replay_allocate_slots = _rewrite_method(
         KVCacheManager,
         "allocate_slots",
         (
@@ -182,10 +206,27 @@ def _patch_scheduler() -> None:
                 "if num_new_tokens == 0 and num_external_computed_tokens == 0 and num_new_computed_tokens == 0:",
             ),
         ),
+        install=False,
     )
 
+    @functools.wraps(original_schedule)
+    def schedule(self, *args, **kwargs):
+        if not getattr(self.cache_config, "swa_bounded_replay", False):
+            return original_schedule(self, *args, **kwargs)
+        # Config revalidation can install this patch after a scheduler has
+        # already entered its original constructor (including AsyncScheduler).
+        if not hasattr(self, "prefix_replay_tokens"):
+            _initialize_replay_window(self)
+        return replay_schedule(self, *args, **kwargs)
 
-def _patch_payload_and_cache() -> None:
+    # Validate both source bodies before installing any scheduler behavior.
+    Scheduler.__init__ = init
+    Scheduler._mark_prefix_replay = _mark_prefix_replay
+    Scheduler.schedule = schedule
+    KVCacheManager.allocate_slots = replay_allocate_slots
+
+
+def _patch_payload() -> None:
     # Declare the field before msgspec first inspects NewRequestData.
     prototype = dataclasses.make_dataclass("ReplayPayloadField", [("replay_start", int, 0)])
     NewRequestData.__annotations__["replay_start"] = int
@@ -203,6 +244,16 @@ def _patch_payload_and_cache() -> None:
         return result
 
     NewRequestData.from_request = from_request
+    # Do not import the resume patch here: it must capture the scheduler after
+    # BalanceScheduler and PP/MTP have installed their wrappers.
+    if "replay_start" not in CachedRequestData.__dataclass_fields__:
+        CachedRequestData.__annotations__["replay_start"] = dict[str, int]
+        CachedRequestData.replay_start = dataclasses.field(default_factory=dict)
+        del CachedRequestData.__init__
+        dataclasses.dataclass(CachedRequestData)
+
+
+def _patch_cache() -> None:
     original_cache_blocks = SingleTypeKVCacheManager.cache_blocks
 
     @functools.wraps(original_cache_blocks)
@@ -214,17 +265,35 @@ def _patch_payload_and_cache() -> None:
     SingleTypeKVCacheManager.cache_blocks = cache_blocks
 
 
-def apply_legacy_replay_patch() -> None:
+def apply_legacy_replay_patch(vllm_config) -> None:
+    """Install the admission backport only after replay is explicitly enabled."""
+    if not getattr(vllm_config.cache_config, "swa_bounded_replay", False):
+        return
     if hasattr(Scheduler, "_mark_prefix_replay"):
         return
-    if vllm.__version__.split("+")[0] != "0.30.0":
+    _patch_scheduler()
+    _patch_cache()
+    # The resume module was imported before the scheduler backport existed.
+    from vllm_ascend.patch.platform.patch_swa_bounded_replay import _patch_make_cached_request_data
+
+    _patch_make_cached_request_data()
+
+
+def _register_legacy_replay_interfaces() -> None:
+    """Register CLI and wire fields before parsing or msgspec caches the schema.
+
+    This does not replace scheduler or cache methods. Both sides of the worker
+    boundary need the same payload schema even before the engine config exists.
+    Native replay implementations retain their own interfaces and behavior.
+    """
+    if hasattr(Scheduler, "_mark_prefix_replay"):
         return
     # Workers also read the window from group specs, including uniform groups.
     KVCacheSpec.prefix_replay_tokens = property(lambda self: 0)
     UniformTypeKVCacheSpecs.prefix_replay_tokens = property(_replay_window)
     _patch_config()
-    _patch_scheduler()
-    _patch_payload_and_cache()
+    Request.replay_start = 0
+    _patch_payload()
 
 
-apply_legacy_replay_patch()
+_register_legacy_replay_interfaces()

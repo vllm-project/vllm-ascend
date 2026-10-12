@@ -537,6 +537,12 @@ class NPUPlatform(Platform):
         # 8.Setup worker class, custom ops and scheduler (ascend_config -> vllm_config).
         _setup_worker_and_scheduler(vllm_config, ascend_config)
 
+        # Replay may have been disabled by the scheduler-mode checks above.
+        from vllm_ascend.patch.platform.patch_swa_bounded_replay_legacy import apply_legacy_replay_patch
+
+        if getattr(vllm_config.cache_config, "swa_bounded_replay", False):
+            apply_legacy_replay_patch(vllm_config)
+
         # 9.Validate SFA / DCP / KV and SP consistency (vllm_config)
         _validate_sfa_dcp_kv_sp(vllm_config)
 
