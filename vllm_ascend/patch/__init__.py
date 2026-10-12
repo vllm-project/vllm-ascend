@@ -858,9 +858,10 @@
 #    How:
 #       Call apply_v2_model_runner_config_patch() to install the Ascend
 #       default-v2 use_v2_model_runner property (with the V2 feature
-#       blacklist) and neutralize upstream V2 validation. Keep
-#       additional patches for spec-PP unsupported features and
-#       Ascend-supported V1 features (dspark / dflash2).
+#       blacklist) and neutralize upstream V2 validation. Spec+PP is
+#       native upstream, so this patch no longer rewrites that unsupported
+#       list. Keep the Ascend-supported V1 feature allowlist
+#       (dspark / dflash2).
 #       worker/patch_v2/patch_use_v2_model_runner.py reuses this platform
 #       patch so EngineCore and worker processes share the same behavior.
 #    Related PR (if no, explain why):
