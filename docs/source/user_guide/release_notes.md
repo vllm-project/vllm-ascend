@@ -25,7 +25,6 @@ This is vLLM Ascend v0.30.0rc1, a model-focused release built on the v0.29 relea
 - Added AscendStore preparation for V4.1 and speculative cache reuse. [#16973](https://github.com/vllm-project/vllm-ascend/pull/16973)
 - Added fused lightning indexer manage and fused scatter copy sparse flash attention operators for sparse KV cache offloading, plus fused operators for layerwise sparse offload. [#16640](https://github.com/vllm-project/vllm-ascend/pull/16640) [#17392](https://github.com/vllm-project/vllm-ascend/pull/17392)
 - Added MemCache-backed L1 encoder cache for EC Transfer. [#16953](https://github.com/vllm-project/vllm-ascend/pull/16953)
-- Added `scatter_nd_update_sk` custom op support on Ascend 950. [#17409](https://github.com/vllm-project/vllm-ascend/pull/17409)
 - Extended `split_qkv_rmsnorm_rope` with value normalization for Gemma4. [#15332](https://github.com/vllm-project/vllm-ascend/pull/15332)
 - Added flash-linear-attention-npu to Docker images (FLA NPU backend for GDN prefill). [#17534](https://github.com/vllm-project/vllm-ascend/pull/17534) [#16420](https://github.com/vllm-project/vllm-ascend/pull/16420)
 - Supported non-uniform KV cache page sizes in the worker. [#16966](https://github.com/vllm-project/vllm-ascend/pull/16966)
