@@ -20,11 +20,18 @@ from unittest.mock import MagicMock
 
 import torch
 
+# The real xlite._C probes the NPU runtime at import time and *aborts the
+# process* (not an ImportError) on CPU-only runners, so it must only be
+# imported when a real NPU is present. Otherwise install the stub below.
+_HAVE_XLITE = False
 try:
+    import subprocess as _sp
+
+    _sp.run(["npu-smi", "info"], capture_output=True, check=True)
     import xlite._C  # noqa: F401
 
     _HAVE_XLITE = True
-except Exception:  # pragma: no cover - CI CPU environments have no xlite wheel
+except Exception:  # pragma: no cover - CPU-only runners take the stub path
     _HAVE_XLITE = False
     import enum
 
