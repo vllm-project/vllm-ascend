@@ -230,7 +230,9 @@ def test_blacklist_logs_fallback(monkeypatch):
     monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
     monkeypatch.setattr(mrv2_utils.logger, "warning_once", lambda *args, **kwargs: warning_calls.append(args))
 
-    assert use_v2_model_runner(SimpleNamespace(model_config=SimpleNamespace(architectures=["HYV3ForCausalLM"]))) is False
+    assert (
+        use_v2_model_runner(SimpleNamespace(model_config=SimpleNamespace(architectures=["HYV3ForCausalLM"]))) is False
+    )
     assert len(warning_calls) == 1
     assert "Hy3-preview" in warning_calls[0][1]
 
