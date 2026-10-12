@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 import torch
 from vllm.config import AttentionConfig
+from vllm.v1.worker.gpu.dp_utils import DPSyncState
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
@@ -18,6 +19,7 @@ from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend, AscendSFAMetadata
 from vllm_ascend.models import kimi_k3_dspark
 from vllm_ascend.models.kimi_k3 import AscendKimiLinearModel
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.dflash import aclgraph as graph
@@ -27,6 +29,8 @@ from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpec
 
 def make_speculator():
     spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
+    spec.replicated_pcp = False
+    spec.enable_adaptive_verification = False
     spec.attn_architecture = "MLA"
     spec.use_dcp = False
     spec.requires_non_causal = True
@@ -43,6 +47,34 @@ def make_speculator():
         positions=torch.arange(20), seq_lens=torch.tensor([5, 0, 0, 0], dtype=torch.int32)
     )
     return spec
+
+
+@pytest.mark.parametrize("replicated_pcp", [False, True])
+def test_dspark_sync_matches_global_draft_requests(monkeypatch, replicated_pcp):
+    spec = make_speculator()
+    spec.replicated_pcp = replicated_pcp
+    spec.max_num_reqs = 4
+    spec.max_num_tokens = 20
+    batch = SimpleNamespace(num_reqs=4, is_prefilling_np=np.zeros(4, dtype=np.bool_))
+    target_sync = SimpleNamespace(num_reqs=2 if replicated_pcp else 4)
+    monkeypatch.setattr(shared, "build_attn_metadata_wrapper", nullcontext)
+    monkeypatch.setattr(shared, "build_attn_metadata_factory", lambda *a, **kw: nullcontext())
+
+    def parent_propose(self, *args, **kwargs):
+        sync = args[11]
+        if sync is not None:
+            # Execute the actual upstream capacity check, not a duplicate of it.
+            self._build_uniform_batch_dp_sync(sync, batch.num_reqs, self.num_query_per_req)
+        assert (sync is None) == replicated_pcp
+        return "draft"
+
+    if not replicated_pcp:
+        # The helper replaces the real DP state after checking capacity.
+        target_sync = DPSyncState(
+            num_tokens_across_dp=torch.tensor([4, 4]), uniform_token_count=1, eager=False, num_reqs=4
+        )
+    monkeypatch.setattr(DSparkSpeculator, "propose", parent_propose)
+    assert spec.propose(batch, *[None for _ in range(10)], dp_sync=target_sync) == "draft"
 
 
 def make_target():
@@ -231,20 +263,35 @@ def test_capture_delegates_and_restores_contexts(monkeypatch, architecture, fail
         return context("model")
 
     monkeypatch.setattr(graph, "model_capture_wrapper", model_context)
-    args: tuple[Any, ...] = (
+    forward_args: tuple[Any, ...] = (
         MagicMock(),
         SimpleNamespace(positions=torch.arange(20)),
         object(),
         [],
         object(),
         128,
-        False,
-        "capture",
     )
+    if vllm_version_is("0.30.0"):
+        # v0.30.0 capture() has no precompute_context_kv hook; the trailing
+        # positional is progress_bar_desc.
+        args: tuple[Any, ...] = (*forward_args, False, "Capturing CUDA graphs")
+        expected_kwargs = {
+            "causal": False,
+            "progress_bar_desc": "Capturing CUDA graphs",
+        }
+    else:
+        args = (*forward_args, False, "capture")
+        expected_kwargs = {
+            "causal": False,
+            "precompute_context_kv": "capture",
+            "progress_bar_desc": "Capturing CUDA graphs",
+        }
 
-    def capture(self, *received):
+    def capture(self, *received, **kwargs):
         assert self is manager
-        assert received == args
+        assert received == forward_args
+        # The Ascend wrapper forwards the trailing options as keywords.
+        assert kwargs == expected_kwargs
         assert events == ["enter communicator", "enter model"]
         events.append("capture")
         if fail:

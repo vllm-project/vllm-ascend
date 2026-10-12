@@ -180,7 +180,6 @@ The `pr-accuracy-group-*` entries only run on `/nightly` (PR-triggered) runs;
 | `kimi-k2-thinking` | Kimi-K2-Thinking |
 | `qwen3-vl-235b-a22b-instruct-w8a8` | Qwen3-VL-235B-A22B-Instruct-W8A8 |
 | `deepseek-r1-0528-w8a8-prefix-cache` | DeepSeek-R1-0528-W8A8 prefix cache |
-| `glm-4.7-w8a8` | GLM-4.7 W8A8 |
 | `kimi-k2.5` | Kimi-K2.5 |
 | `Qwen3.5-397B-A17B-w8a8-mtp` | Qwen3.5-397B-A17B W8A8 + MTP |
 | `Qwen3.5-27B-w8a8-A3` | Qwen3.5-27B W8A8 |

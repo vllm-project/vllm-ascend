@@ -142,6 +142,7 @@ def builders(monkeypatch):
         monkeypatch.setattr(module, "get_full_cos_and_sin_dsa_for_layer", lambda name: (full_cos, full_sin))
 
     def make(world=2, rank=0, *, max_seqs=2, graph_sizes=(12, 24), dcp=1, legacy=False, decode_sharded=False):
+        monkeypatch.setattr(dsa_v41_cp, "is_pcp_decode_sharding_enabled", lambda config: decode_sharded)
         config = SimpleNamespace(
             parallel_config=SimpleNamespace(
                 tensor_parallel_size=world if legacy else 1,
