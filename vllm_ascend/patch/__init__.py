@@ -49,6 +49,31 @@
 #    Future Plan:
 #       Remove this patch when vLLM merge the PR.
 #
+# ** 1a. File: platform/patch_deepseek_v4_text_terminals.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.parser.engine.streaming_parser_engine.StreamingParserEngine._process_lex_tokens`
+#    Why:
+#       DeepSeek V4 emits its DSML tool-call markers as plain text on the MTP path.
+#       Once a stream has carried any token id, the engine demotes a lex-matched
+#       terminal to content whenever the same marker also has a token-id entry, so
+#       the whole tool block reaches the client as content instead of a tool call.
+#       The same markers also arrive as dedicated token ids on other paths, so the
+#       outcome must not depend on which encoding arrives first.
+#    How:
+#       For the DeepSeek V4 parser config, clear `_token_id_terminal_names` for the
+#       duration of one `_process_lex_tokens` call and restore it afterwards, which
+#       keeps text-form terminals authoritative without changing the upstream loop.
+#       Other parser configs keep the upstream token-id rule. If the supported vLLM
+#       no longer declares TOOL_START/TOOL_END as token-id terminals, the patch logs
+#       a warning and skips itself.
+#    Related PR (if no, explain why):
+#       No upstream PR fixes this yet. The demotion is deliberate and pinned by
+#       `tests/parser/engine/test_engine.py::TestTokenIdFiltering`, and the related
+#       open PRs (#59145, #56184, #57051, #52645) address other degradation shapes.
+#    Future Plan:
+#       Remove this patch once the supported vLLM keeps text-form terminals
+#       authoritative for the DeepSeek V4 parser config.
+#
 # ** 2. File: platform/patch_deepseek_v4_vision.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.transformers_utils.model_arch_config_convertor.MODEL_ARCH_CONFIG_CONVERTORS`
