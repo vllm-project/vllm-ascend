@@ -18,7 +18,7 @@
 
 The front-end emits flat raw uint8 plus the original (H, W) and the target
 grid; resize, patchify and rescale+normalize all run on the device.
-Normalize reuses vLLM's FusedInputNorm. smart_resize stays on the CPU so
+Normalize reuses vLLM's FusedMMInputNorm. smart_resize stays on the CPU so
 placeholder accounting is unchanged. Payload drops ~8x (uint8, no temporal
 replication).
 
@@ -37,6 +37,7 @@ from transformers.models.qwen2_vl.image_processing_qwen2_vl import (
     Qwen2VLImageProcessor,
     smart_resize,
 )
+from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.models.qwen3_5 import (
     Qwen3_5ForConditionalGeneration,
     Qwen3_5MoeForConditionalGeneration,
@@ -47,10 +48,7 @@ from vllm.model_executor.models.qwen3_vl import (
     Qwen3VLDummyInputsBuilder,
     Qwen3VLMultiModalProcessor,
 )
-from vllm.model_executor.models.vision import (
-    FusedInputNorm,
-    run_dp_sharded_mrope_vision_model,
-)
+from vllm.model_executor.models.vision import run_dp_sharded_mrope_vision_model
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig
 
@@ -137,7 +135,7 @@ class _AscendVLPreprocessMixin:
 
     def __init__(self, *, vllm_config, prefix="model"):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
-        self.input_norm = FusedInputNorm.from_model_config(self.model_config)
+        self.input_norm = build_mm_input_norm(self.model_config)
         vc = self.config.vision_config
         self._c = vc.in_channels
         self._ps = vc.patch_size
