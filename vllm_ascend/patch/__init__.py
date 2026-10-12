@@ -1729,3 +1729,24 @@
 #       Remove this patch when upstream provides a backend capability hook for
 #       enabling MoE sequence parallelism with DP=1.
 #
+
+# ** 37. File: worker/patch_v2/patch_rejection_sampler.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm_ascend.worker.v2.model_runner.NPUModelRunner.load_model`
+#    Why:
+#       Ordinary prefill can contain embedding-safe placeholder drafts. PD
+#       recompute can additionally clear prefill flags before sampling.
+#    How:
+#       Register through worker patches, after the other V2 patches. Delegate
+#       model loading, then install an instance-local verification mask on the
+#       standard sampler. Retain physical-prefill restoration only for pure
+#       KV consumers with recompute_scheduler_enable. Inherited runner paths
+#       keep the same behavior; upstream GPU/V1 classes remain untouched.
+#       Helpers in prefill_rejection_sampler.py and
+#       recompute_rejection_sampler.py preserve the two independent conditions.
+#       No upstream sampling pipeline or kernel is copied.
+#    Related PR:
+#       https://github.com/vllm-project/vllm-ascend/pull/17941
+#    Future Plan:
+#       Remove each adapter when equivalent upstream behavior is available.
+#       Recheck the private _verify_in_chunks boundary when updating vLLM.

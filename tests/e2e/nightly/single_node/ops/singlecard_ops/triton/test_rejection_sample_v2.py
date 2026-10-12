@@ -3,11 +3,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import gc
+from collections.abc import Callable
+from dataclasses import dataclass
+from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 from vllm.v1.spec_decode.utils import unconditional_to_conditional_rates
 
+from vllm_ascend.patch.worker.patch_v2.prefill_rejection_sampler import install_prefill_placeholder_mask
+from vllm_ascend.patch.worker.patch_v2.recompute_rejection_sampler import RecomputeAwareRejectionSampler
 from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import rejection_sample
 
 VOCAB_SIZE = 4096
@@ -68,6 +74,85 @@ def _build_rejection_sample_inputs(
         temperature=temp_tensor,
         seed=seed,
     )
+
+
+@dataclass
+class _PrefillBatch:
+    num_draft_tokens: int
+    has_prefill: bool
+    is_prefilling_np: np.ndarray
+    num_computed_prefill_tokens_np: np.ndarray
+    prefill_len_np: np.ndarray
+    idx_mapping_np: np.ndarray
+    expanded_idx_mapping: torch.Tensor
+    expanded_local_pos: torch.Tensor
+
+
+@pytest.mark.parametrize("num_speculative_steps", [3, 5, 7])
+@pytest.mark.parametrize("phase", ["prefill", "recompute", "decode"])
+@pytest.mark.parametrize("recompute_enabled", [False, True])
+@pytest.mark.parametrize("temperature", [0.0, 1.0])
+@pytest.mark.parametrize("has_draft_logits", [False, True])
+@torch.inference_mode()
+def test_prefill_adapter_matches_explicit_mask_on_npu(
+    num_speculative_steps, phase, recompute_enabled, temperature, has_draft_logits
+):
+    """Compare the installed adapters with explicitly masked kernel inputs."""
+    torch.manual_seed(42)
+    inputs = _build_rejection_sample_inputs(
+        torch.randn(VOCAB_SIZE, device="npu"),
+        torch.randn(VOCAB_SIZE, device="npu"),
+        num_speculative_steps,
+        temperature,
+        num_trials=2,
+    )
+    if not has_draft_logits:
+        inputs["draft_logits"] = None
+    # The first request has placeholders; the second has real token-zero
+    # proposals. Both start with embedding-safe IDs.
+    inputs["draft_sampled"].zero_()
+    batch = _PrefillBatch(
+        num_draft_tokens=2 * num_speculative_steps,
+        has_prefill=phase == "prefill",
+        is_prefilling_np=np.array([phase == "prefill", False]),
+        num_computed_prefill_tokens_np=np.array([100 if phase == "decode" else 99, 100]),
+        prefill_len_np=np.array([100, 100]),
+        idx_mapping_np=np.array([0, 1]),
+        expanded_idx_mapping=inputs["expanded_idx_mapping"],
+        expanded_local_pos=inputs["expanded_local_pos"],
+    )
+    expected_drafts = inputs["draft_sampled"].clone()
+    if phase == "prefill" or (phase == "recompute" and recompute_enabled):
+        expected_drafts[1 : num_speculative_steps + 1] = -1
+    expected, expected_counts = rejection_sample(
+        **{**inputs, "draft_sampled": expected_drafts}, num_speculative_steps=num_speculative_steps
+    )
+
+    def verify(logits, sampler_batch, draft_logits, draft_sampled, pos, max_chunk_logits, max_num_logprobs):
+        return rejection_sample(
+            **{**inputs, "draft_sampled": draft_sampled}, num_speculative_steps=num_speculative_steps
+        )
+
+    boundary = SimpleNamespace(_verify_in_chunks=verify)
+    install_prefill_placeholder_mask(boundary)
+
+    def sample(logits, sampler_batch, draft_logits):
+        return boundary._verify_in_chunks(
+            logits, sampler_batch, draft_logits, inputs["draft_sampled"], inputs["pos"], 0, 0
+        )
+
+    sampler: Callable[..., tuple[torch.Tensor, torch.Tensor]]
+    if recompute_enabled:
+        sampler = RecomputeAwareRejectionSampler(sample)
+    else:
+        sampler = sample
+    actual, actual_counts = sampler(inputs["target_logits"], batch, inputs["draft_logits"])
+    torch.testing.assert_close(actual_counts, expected_counts)
+    valid = torch.arange(actual.shape[1], device="npu")[None, :] < actual_counts[:, None]
+    torch.testing.assert_close(actual[valid], expected[valid])
+    assert torch.count_nonzero(inputs["draft_sampled"]).item() == 0
+    np.testing.assert_array_equal(batch.is_prefilling_np, [phase == "prefill", False])
+    assert batch.has_prefill == (phase == "prefill")
 
 
 @pytest.mark.parametrize(

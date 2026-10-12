@@ -82,3 +82,6 @@ if not get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKE
 
 # only patch routed experts capture in main2main.
 import vllm_ascend.patch.worker.patch_routed_experts_capture  # noqa
+
+# Install after the other worker patches so runner imports see their bindings.
+import vllm_ascend.patch.worker.patch_v2.patch_rejection_sampler  # noqa
