@@ -18,8 +18,8 @@ msgstr ""
 "Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: detect_po_changes.py\n"
 
-msgid "# GLM-5.3 (Experimental)"
-msgstr "# GLM-5.3（实验性）"
+msgid "# GLM-5.3"
+msgstr "# GLM-5.3"
 
 msgid "## 1 Introduction"
 msgstr "## 1 简介"
@@ -40,15 +40,6 @@ msgstr "本文档将展示该模型的主要验证步骤，包括支持的特性
 
 msgid "**Current status and constraints**"
 msgstr "**当前状态与限制**"
-
-msgid ""
-"- GLM-5.3 has only been tested on the official Docker image `quay.io/ascend/vllm-ascend:v0.23.0-a3` and `quay.io/ascend/vllm-ascend:v0.23.0` **only on multi-node co-located scenario**.\n"
-"    - The features listed in [Supported Features](#2-supported-features) are only those enabled by the verified deployment commands in this document, and do **not** imply that all features are supported for GLM-5.3. This is an early-access version; performance optimization and reliability validation are still in progress (see [Declaration](#10-declaration)).\n"
-"    - All the scripts below is based on **v0.23.0**, so some params are not supported in main code. If you are using the main branch of vllm-Ascend, please make sure to check it."
-msgstr ""
-"- GLM-5.3 仅在官方 Docker 镜像 `quay.io/ascend/vllm-ascend:v0.23.0-a3` 和 `quay.io/ascend/vllm-ascend:v0.23.0` 上进行了测试，**且仅在多节点共置场景下**。\n"
-"    - [支持的特性](#2-supported-features) 中列出的特性仅为本文档中已验证部署命令所启用的特性，**不**意味着 GLM-5.3 支持所有特性。这是一个早期访问版本；性能优化和可靠性验证仍在进行中（参见[声明](#10-declaration)）。\n"
-"    - 以下所有脚本均基于 **v0.23.0**，因此某些参数在主代码中不受支持。如果您使用的是 vllm-Ascend 的 main 分支，请务必检查。"
 
 msgid "## 2 Supported Features"
 msgstr "## 2 支持的特性"
@@ -320,24 +311,14 @@ msgid ""
 msgstr ""
 "有关更多详细信息，请参阅[vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/)。"
 
-msgid "## 9 FAQ"
-msgstr "## 9 常见问题"
+msgid "## 10 FAQ"
+msgstr "## 10 常见问题"
 
 msgid "- **Q: How to enable function calling for GLM-5.3?**"
 msgstr "- **问：如何为GLM-5.3启用函数调用？**"
 
 msgid "A: Please add following configurations in vLLM startup command"
 msgstr "答：请在vLLM启动命令中添加以下配置"
-
-msgid "## 10 Declaration"
-msgstr "## 10 声明"
-
-msgid ""
-"- The current version is only for early experience, and performance optimization is still in progress.\n"
-"- The service reliability has not been fully validated, and it is not recommended for direct use in production environments."
-msgstr ""
-"- 当前版本仅供早期体验使用，性能优化仍在进行中。\n"
-"- 服务可靠性尚未得到充分验证，不建议直接用于生产环境。"
 
 msgid ""
 "|  Weight Version          | Hardware Requirements"
