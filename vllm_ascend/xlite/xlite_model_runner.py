@@ -90,7 +90,10 @@ class XliteModelRunner(NPUModelRunner):
             return super()._dummy_run(*args, is_profile=is_profile, is_graph_capturing=is_graph_capturing, **kwargs)  # type: ignore[return-value]
 
     def initialize_kv_cache(
-        self, kv_cache_config: KVCacheConfig, kv_cache_allocation_context: AbstractContextManager | None = None
+        self,
+        kv_cache_config: KVCacheConfig,
+        kv_cache_allocation_context: AbstractContextManager | None = None,
+        is_profiling: bool = False,
     ) -> None:
         super().initialize_kv_cache(kv_cache_config, kv_cache_allocation_context=kv_cache_allocation_context)
         self.runner_model.register_kv_caches(self.kv_caches)  # type: ignore[arg-type]
