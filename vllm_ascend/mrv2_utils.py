@@ -124,6 +124,10 @@ def _v2_blacklist(vllm_config: VllmConfig) -> list[str]:
             reasons.append("suffix speculative decoding")
         if method in _NGRAM_SPEC_METHODS:
             reasons.append("ngram speculative decoding")
+        # V2 init_speculator has no draft_model branch. Parallel drafting with
+        # a separate draft model still runs on the V1 proposer.
+        if method == "draft_model":
+            reasons.append("draft_model speculative decoding")
 
     return reasons
 
@@ -146,6 +150,7 @@ def use_v2_model_runner(vllm_config: VllmConfig) -> bool:
     * enable_dsa_cp
     * suffix speculative decoding
     * ngram speculative decoding (``ngram`` / ``ngram_gpu``)
+    * draft_model speculative decoding
 
     Set ``VLLM_USE_V2_MODEL_RUNNER=0`` to force V1.
     """
