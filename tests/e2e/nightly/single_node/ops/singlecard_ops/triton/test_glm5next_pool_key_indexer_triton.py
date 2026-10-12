@@ -125,3 +125,138 @@ def test_empty_query():
     )
     assert result.shape == (0, 1, OUTPUT_WIDTH)
     assert result.dtype == torch.int32
+
+
+def _monotonic_paged_cache(capacity, generator):
+    """Encode logical pool IDs exactly with three BF16 base-128 digits."""
+    pages = (capacity + CACHE_BLOCK_SIZE - 1) // CACHE_BLOCK_SIZE
+    physical_pages = torch.randperm(pages, generator=generator)
+    logical = torch.arange(pages * CACHE_BLOCK_SIZE)
+    keys = torch.zeros(pages * CACHE_BLOCK_SIZE, HEAD_DIM, dtype=torch.bfloat16)
+    keys[:, 0] = logical // (128 * 128)
+    keys[:, 1] = logical // 128 % 128
+    keys[:, 2] = logical % 128
+    cache = torch.empty(pages, CACHE_BLOCK_SIZE, 1, HEAD_DIM, dtype=torch.bfloat16)
+    cache[physical_pages, :, 0] = keys.view(pages, CACHE_BLOCK_SIZE, HEAD_DIM)
+    table = physical_pages.to(torch.int32).repeat(3, 1)
+    return cache.npu(), table.npu()
+
+
+@pytest.mark.parametrize("capacity", [8193, 262208])
+@pytest.mark.parametrize("use_graph", [False, True])
+@torch.inference_mode()
+def test_streaming_topk_length_growth_and_shrink_reuses_output(capacity, use_graph, monkeypatch):
+    generator = torch.Generator().manual_seed(41)
+    num_tokens = 6
+    cache, table = _monotonic_paged_cache(capacity, generator)
+    query = torch.zeros(num_tokens, NUM_HEADS, HEAD_DIM, dtype=torch.bfloat16, device="npu")
+    query[:, 0, :3] = torch.tensor([128 * 128, 128, 1], dtype=torch.bfloat16, device="npu")
+    weights = torch.zeros(num_tokens, NUM_HEADS, dtype=torch.bfloat16, device="npu")
+    weights[:, 0] = torch.tensor([1, -1, 1, -1, 1, 1], dtype=torch.bfloat16, device="npu")
+    ends = torch.tensor([1, 3, 4], dtype=torch.int32)
+    lengths = torch.tensor([0, 1024, 1024], dtype=torch.int32)
+    positions = torch.full((num_tokens,), 4098, dtype=torch.int64)
+    device_ends, device_lengths, device_positions = ends.npu(), lengths.npu(), positions.npu()
+    args = (query, cache, weights, device_ends, device_lengths, table, device_positions)
+    backing = torch.full((2 * (num_tokens + 1), 2080), 77, dtype=torch.int32, device="npu")
+    buffer = backing[::2]
+    kwargs = dict(
+        index_topk=INDEX_TOPK,
+        index_kpool=POOL_SIZE,
+        max_pool_seq_len=capacity,
+        output_buffer=buffer,
+        pack_tail=True,
+        allow_cache_packing=False,
+    )
+    # Exercise global request lookup across multiple token chunks.
+    monkeypatch.setattr(indexer, "TRITON_SCORES_CHUNK_BYTES", 2 * 4 * 512 * 8)
+    topk_shapes = []
+    original_topk = torch.topk
+
+    def record_topk(scores, *args, **kwargs):
+        topk_shapes.append(scores.shape)
+        return original_topk(scores, *args, **kwargs)
+
+    monkeypatch.setattr(torch, "topk", record_topk)
+    if use_graph:
+        indexer.glm5_next_lightning_indexer_triton(*args, **kwargs)
+        torch.npu.synchronize()
+        graph = torch.npu.NPUGraph()
+        with torch.npu.graph(graph):
+            result = indexer.glm5_next_lightning_indexer_triton(*args, **kwargs)
+
+    for step, length in enumerate([1024, 4099, capacity, 511, 0, 2051]):
+        ends[:] = torch.tensor([0, 2, 5] if step % 2 else [1, 3, 4])
+        lengths[:] = torch.tensor([min(length, 4), length, length])
+        positions[:] = max(2, length * POOL_SIZE + 2)
+        positions[1] = min(int(positions[1]), 1537 * POOL_SIZE + 1)
+        device_ends.copy_(ends)
+        device_lengths.copy_(lengths)
+        device_positions.copy_(positions)
+        if use_graph:
+            graph.replay()
+        else:
+            result = indexer.glm5_next_lightning_indexer_triton(*args, **kwargs)
+        actual = result.cpu()[:, 0]
+        expected = torch.full_like(actual, -1)
+        start = 0
+        for request, end in enumerate(ends.tolist()):
+            for row in range(start, end):
+                position = int(positions[row])
+                visible = min(int(lengths[request]), (position + 1) // POOL_SIZE)
+                count = min(visible, INDEX_TOPK // POOL_SIZE)
+                pools = torch.arange(visible - count, visible) if row % 2 == 0 else torch.arange(count)
+                history = (pools[:, None] * POOL_SIZE + torch.arange(POOL_SIZE)).flatten()
+                expected[row, : history.numel()] = history.to(torch.int32)
+                tail_start = (position + 1) // POOL_SIZE * POOL_SIZE
+                tail = torch.arange(tail_start, position + 1, dtype=torch.int32)
+                tail_column = min(tail_start, INDEX_TOPK)
+                expected[row, tail_column : tail_column + tail.numel()] = tail
+                torch.testing.assert_close(actual[row, tail_column : tail_column + tail.numel()], tail, rtol=0, atol=0)
+            start = end
+        torch.testing.assert_close(actual.sort(dim=1).values, expected.sort(dim=1).values, rtol=0, atol=0)
+        assert result.data_ptr() == buffer.data_ptr()
+        assert (buffer[:num_tokens, OUTPUT_WIDTH:] == -1).all()
+        assert (buffer[num_tokens:] == 77).all()
+        assert (backing[1::2] == 77).all()
+    assert topk_shapes and all(shape[0] <= 2 and shape[1] == 2048 for shape in topk_shapes)
+
+
+@pytest.mark.parametrize("special_scores", [False, True])
+@torch.inference_mode()
+def test_streaming_topk_handles_ties_and_nonfinite_scores(special_scores):
+    capacity = 4099
+    generator = torch.Generator().manual_seed(43)
+    cache, table = _monotonic_paged_cache(capacity, generator)
+    query = torch.zeros(1, NUM_HEADS, HEAD_DIM, dtype=torch.bfloat16, device="npu")
+    weights = torch.zeros(1, NUM_HEADS, dtype=torch.bfloat16, device="npu")
+    weights[:, 0] = 1
+    if special_scores:
+        query[:, 0, :3] = torch.tensor([128 * 128, 128, 1], dtype=torch.bfloat16, device="npu")
+        for logical, value in [(3, float("nan")), (5, float("inf")), (7, -float("inf"))]:
+            physical = int(table[0, logical // CACHE_BLOCK_SIZE].cpu())
+            cache[physical, logical % CACHE_BLOCK_SIZE, 0, 0] = value
+    args = (
+        query,
+        cache,
+        weights,
+        torch.tensor([1], dtype=torch.int32, device="npu"),
+        torch.tensor([capacity], dtype=torch.int32, device="npu"),
+        table[:1],
+        torch.tensor([capacity * POOL_SIZE - 1], dtype=torch.int64, device="npu"),
+    )
+    result = indexer.glm5_next_lightning_indexer_triton(
+        *args,
+        index_topk=INDEX_TOPK,
+        index_kpool=POOL_SIZE,
+        max_pool_seq_len=capacity,
+        allow_cache_packing=False,
+    ).cpu()[0, 0]
+    pools = result[:INDEX_TOPK].view(-1, POOL_SIZE)
+    assert ((pools[:, 0] >= 0) & (pools[:, 0] < capacity * POOL_SIZE)).all()
+    assert torch.unique(pools[:, 0]).numel() == INDEX_TOPK // POOL_SIZE
+    torch.testing.assert_close(pools, pools[:, :1] + torch.arange(POOL_SIZE, dtype=pools.dtype), rtol=0, atol=0)
+    assert (result[INDEX_TOPK:] == -1).all()
+    if special_scores:
+        expected = torch.cat((torch.tensor([5]), torch.arange(capacity - 511, capacity))) * POOL_SIZE
+        torch.testing.assert_close(pools[:, 0].sort().values, expected.sort().values.to(torch.int32), rtol=0, atol=0)
