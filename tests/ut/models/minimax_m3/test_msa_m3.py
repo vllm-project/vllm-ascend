@@ -449,6 +449,7 @@ def test_sparse_metadata_builder_fia_padded_dummy_request() -> None:
     assert indexer_metadata.prefill.context_lens.shape[0] == batch_size
 
 
+@pytest.mark.usefixtures("a2_index_decode")
 def test_indexer_metadata_builder_trims_graph_padded_spec_decode() -> None:
     device = torch.device("cpu")
     common = _create_common_attn_metadata(
@@ -568,10 +569,10 @@ def test_a5_index_score_uses_ascendc_prefill_and_triton_decode() -> None:
         assert not _should_use_tp_sharded_index_decode(tp_size=4, num_prefills=0)
 
 
-def test_non_a5_decode_keeps_tp_block_sharding() -> None:
+def test_a2_decode_keeps_tp_block_sharding() -> None:
     with patch(
         "vllm_ascend.models.minimax_m3.msa_m3.get_ascend_device_type",
-        return_value=AscendDeviceType.A3,
+        return_value=AscendDeviceType.A2,
     ):
         assert _should_use_tp_sharded_index_decode(tp_size=4, num_prefills=0)
         assert not _should_use_tp_sharded_index_decode(tp_size=1, num_prefills=0)
@@ -664,6 +665,7 @@ def test_mrv2_non_dummy_forwards_are_not_skipped(
 @patch("vllm_ascend.models.minimax_m3.msa_m3.get_current_vllm_config")
 @patch("vllm_ascend.models.minimax_m3.msa_m3.get_tp_group")
 @patch("vllm_ascend.models.minimax_m3.msa_m3.get_forward_context")
+@pytest.mark.usefixtures("a2_index_decode")
 def test_mrv2_idle_dp_runs_first_indexer_layer_then_skips_repeats(
     mock_get_forward_context: MagicMock,
     mock_get_tp_group: MagicMock,
@@ -1428,6 +1430,7 @@ def test_tp_single_token_decode_uses_dense_mode(
         (1, [[1], [3], [5]], [1, 0, 75]),
     ],
 )
+@pytest.mark.usefixtures("a2_index_decode")
 def test_tp_speculative_decode_uses_packed_causal_halo(
     tp_rank: int,
     expected_block_table: list[list[int]],
@@ -1639,6 +1642,7 @@ def test_speculative_topk_masks_future_blocks_before_selection() -> None:
 
 @patch("vllm_ascend.models.minimax_m3.msa_m3.get_tp_group")
 @patch("vllm_ascend.models.minimax_m3.msa_m3.get_forward_context")
+@pytest.mark.usefixtures("a2_index_decode")
 def test_indexer_speculative_decode_uses_tp_block_parallel_path(
     mock_get_forward_context: MagicMock,
     mock_get_tp_group: MagicMock,
@@ -2241,3 +2245,97 @@ def test_sparse_attn_prefill_dispatches_by_operator_availability(
         }
 
     mock_is_available.assert_called_once_with()
+
+
+@pytest.fixture
+def a2_index_decode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep TP-block-parallel regression coverage independent of the host."""
+    monkeypatch.setattr(msa_m3_module, "get_ascend_device_type", lambda: AscendDeviceType.A2)
+    monkeypatch.setattr(msa_m3_module, "_USE_ASCENDC_INDEX_SCORE_DECODE", True)
+
+
+@pytest.mark.parametrize("tp_size", [1, 4, 8])
+@pytest.mark.parametrize("num_prefills", [0, 1])
+def test_a3_index_decode_does_not_shard_blocks(tp_size: int, num_prefills: int) -> None:
+    with patch.object(msa_m3_module, "get_ascend_device_type", return_value=AscendDeviceType.A3):
+        assert not _should_use_tp_sharded_index_decode(tp_size, num_prefills)
+
+
+@pytest.mark.parametrize("tp_size", [1, 4, 8])
+@pytest.mark.parametrize("query_len", [1, 4])
+@pytest.mark.parametrize("num_prefills", [0, 1])
+@pytest.mark.parametrize("idle_dp", [False, True])
+def test_a3_index_decode_uses_full_cache_without_tp_collectives(
+    monkeypatch: pytest.MonkeyPatch,
+    tp_size: int,
+    query_len: int,
+    num_prefills: int,
+    idle_dp: bool,
+) -> None:
+    # Exercise metadata and forward together: an unguarded metadata, dummy,
+    # or forward TP branch must fail even when the other branches are correct.
+    monkeypatch.setattr(msa_m3_module, "get_ascend_device_type", lambda: AscendDeviceType.A3)
+    monkeypatch.setattr(msa_m3_module, "_USE_ASCENDC_INDEX_SCORE_DECODE", True)
+    monkeypatch.setattr(msa_m3_module, "_USE_ASCENDC_INDEX_SCORE_PREFILL", True)
+    group = SimpleNamespace(world_size=tp_size, rank_in_group=0, all_gather=MagicMock())
+    monkeypatch.setattr(msa_m3_module, "get_tp_group", lambda: group)
+    device = torch.device("cpu")
+    common = _create_common_attn_metadata(
+        BatchSpec(
+            seq_lens=[16384 + query_len] * 2 + [128] * num_prefills,
+            query_lens=[query_len] * 2 + [128] * num_prefills,
+        ),
+        block_size=128,
+        device=device,
+    )
+    monkeypatch.setattr(
+        msa_m3_module,
+        "split_decodes_and_prefills",
+        lambda *a, **kw: (2, num_prefills, 2 * query_len, 128 * num_prefills),
+    )
+    builder = _make_indexer_builder(device, tp_size=tp_size)
+    forbidden = MagicMock(side_effect=AssertionError("A3 must not use TP-sharded index decode"))
+    monkeypatch.setattr(builder, "_build_tp_score_metadata", forbidden)
+    metadata = builder.build(0, common)
+    assert metadata.decode is not None
+    assert metadata.decode.tp_score is None
+    assert metadata.decode.block_table.shape == (2, 129)
+
+    impl = object.__new__(AscendMiniMaxM3IndexerImpl)
+    torch.nn.Module.__init__(impl)
+    impl.use_v2_model_runner = True
+    impl.num_index_heads = 1
+    impl.index_head_dim = 4
+    impl.block_size = 128
+    impl.topk_blocks = 2
+    impl.init_blocks = 1
+    impl.local_blocks = 1
+    impl.index_cache = SimpleNamespace(prefix="index", kv_cache=torch.zeros(258, 128, 4))
+    context = _make_mrv2_padding_context() if idle_dp else SimpleNamespace(additional_kwargs={})
+    context.attn_metadata = {"index": metadata}
+    monkeypatch.setattr(msa_m3_module, "get_forward_context", lambda: context)
+    monkeypatch.setattr(msa_m3_module, "_is_mrv2_idle_dp_dummy", forbidden)
+    monkeypatch.setattr(msa_m3_module, "minimax_m3_index_tp_block_parallel_decode", forbidden)
+    monkeypatch.setattr(msa_m3_module, "minimax_m3_index_decode", forbidden, raising=False)
+    monkeypatch.setattr(impl, "_decode_topk_tp_sharded", forbidden)
+    expected = torch.zeros(1, 2 * query_len, 2, dtype=torch.int32)
+    decode_op = MagicMock(return_value=expected)
+    prefill_op = MagicMock(return_value=torch.zeros(1, 128, 2, dtype=torch.int32))
+    monkeypatch.setattr(msa_m3_module, "minimax_m3_index_decode_ascendc", decode_op)
+    monkeypatch.setattr(msa_m3_module, "minimax_m3_index_prefill_ascendc", prefill_op)
+    for _ in range(2):
+        actual, prefill, select_num_idx = impl.forward(torch.zeros(common.num_actual_tokens, 4))
+        assert actual is expected
+        assert prefill is (prefill_op.return_value if num_prefills else None)
+        assert select_num_idx is None
+    assert decode_op.call_count == 2
+    assert decode_op.call_args.args[0].shape == (2 * query_len, 1, 4)
+    assert decode_op.call_args.args[1] is impl.index_cache.kv_cache
+    assert decode_op.call_args.args[2] is metadata.decode.block_table
+    assert torch.equal(decode_op.call_args.args[6], torch.tensor([128, 128], dtype=torch.int32))
+    assert decode_op.call_args.kwargs["decode_query_len"] == query_len
+    assert prefill_op.call_count == 2 * num_prefills
+    assert msa_m3_module._MRV2_DUMMY_INDEXER_TP_WARMED_KEY not in context.additional_kwargs
+    assert msa_m3_module._MRV2_SKIP_DUMMY_SPARSE_ATTN_KEY not in context.additional_kwargs
+    forbidden.assert_not_called()
+    group.all_gather.assert_not_called()
