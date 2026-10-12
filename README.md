@@ -1,3 +1,13 @@
+<!--
+Fork note: this banner is added only on green-hand-shandong's fork.
+-->
+> **ℹ️ About this fork** (green-hand-shandong) — used for upstream contributions and **Atlas 300I Duo (310P)** bring-up work:
+>
+> - ✅ **[WeMM-Embedding](https://github.com/Tencent/WeMM-Embedding) (2B / 4B / 9B) verified on Atlas 300I Duo (310P3, FP16)** — text / image / video embeddings, Matryoshka truncation, model-card reference reproduction, ~473 tok/s (2B, batch). Upstream docs: PR [#17723](https://github.com/vllm-project/vllm-ascend/pull/17723)
+> - 🛠 **`v0.26.0rc2-310p` release image is missing the `vllm_ascend_C` extension** (all Qwen3.5-based models crash on 310P): reported in [#17713](https://github.com/vllm-project/vllm-ascend/issues/17713) with an in-container rebuild workaround; fail-fast fix in PR [#17714](https://github.com/vllm-project/vllm-ascend/pull/17714)
+>
+> Everything below is the upstream README.
+
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/vllm-project/vllm-ascend/main/docs/source/logos/vllm-ascend-logo-text-dark.png">
