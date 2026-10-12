@@ -18,6 +18,16 @@
 name: Schedule Test Coverage
 
 on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - labeled
+    branches:
+      - 'main'
+      - '*-dev'
+      - 'releases/v*'
   workflow_dispatch:
     inputs:
       vllm_ascend_ref:
@@ -39,7 +49,7 @@ concurrency:
 
 jobs:
   select-full-tests:
-    if: ${{ github.event_name == 'workflow_dispatch' }}
+    if: ${{ github.event_name == 'pull_request' }}
     runs-on: linux-amd64-cpu-8-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
@@ -56,7 +66,9 @@ jobs:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.vllm_ascend_ref || 'main' }}
+          # Use the PR/current-branch commit, not main. Empty workflow_dispatch
+          # inputs previously fell through to main and skipped this branch.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
 
       - name: Resolve refs
