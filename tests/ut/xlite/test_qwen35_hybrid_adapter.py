@@ -191,13 +191,14 @@ def _hybrid_self():
         head_dim=8,
         n_kv_heads=2,
     )
-    adapter = SimpleNamespace(xlite_config=cfg)
+    # The wrapper reads the role mask from the adapter (built in
+    # `_build_model_config`), not from its own attributes.
+    adapter = SimpleNamespace(xlite_config=cfg, _full_attention_mask=[False, True])  # layer 0 GDN, layer 1 MHA
     return SimpleNamespace(
         adapter_xlite_model=adapter,
         hidden_states=torch.zeros(1, 16, dtype=torch.float32),
         device="cpu",
         _xlite_hybrid_state_refs=[],
-        _full_attention_mask=[False, True],  # layer 0 GDN, layer 1 MHA
         # referenced by the slot-major adaptation log
         _xlite_native_gdn_groups=[],
     )
@@ -241,7 +242,7 @@ def test_adapt_hybrid_kv_caches_follows_role_mask_for_noncanonical_layout():
     cfg = self.adapter_xlite_model.xlite_config
     cfg.n_layers = 4
     # Non-canonical arrangement: full at 0 and 3, GDN elsewhere.
-    self._full_attention_mask = [True, False, False, True]
+    self.adapter_xlite_model._full_attention_mask = [True, False, False, True]
     full_kv = [
         torch.zeros(3, cfg.block_size, cfg.n_kv_heads, cfg.head_dim),
         torch.zeros(3, cfg.block_size, cfg.n_kv_heads, cfg.head_dim),
