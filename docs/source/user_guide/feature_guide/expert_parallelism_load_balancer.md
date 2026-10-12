@@ -8,8 +8,8 @@ vLLM Ascend provides two EPLB integration paths:
 
 - **Model Runner V2 (MRv2)** uses the upstream vLLM EPLB controller,
   configuration, default policy, load window, asynchronous worker, and
-  rearrangement lifecycle. Ascend adds Gloo CPU staging and the
-  `load_collection_phase` extension.
+  rearrangement lifecycle. Ascend adds the HIXL and Gloo movement adapters
+  and the `load_collection_phase` extension.
 - **Model Runner V1 (MRv1)** retains the legacy vLLM Ascend dynamic, recording,
   and static EPLB modes.
 
@@ -82,9 +82,10 @@ EPLB is not recommended in the following scenarios because the load-balancing be
 ### Model Runner V2: Asynchronous EPLB
 
 Select MRv2 explicitly when the model or environment does not select it by
-default. Enable expert parallelism and upstream EPLB. Ascend uses the upstream
-default policy, selects the Gloo communicator automatically, and supports
-asynchronous movement only.
+default. Enable expert parallelism and upstream EPLB. Ascend selects STAIR
+as the upstream policy default and automatically uses HIXL when available,
+falling back to Gloo otherwise. Movement is asynchronous only. The STAIR
+defaults do not require tuning.
 
 ```bash
 export VLLM_USE_V2_MODEL_RUNNER=1
@@ -112,13 +113,34 @@ MRv2 uses the upstream `EPLBConfig` fields:
 | `step_interval` | `3000` | Interval between expert rearrangements. |
 | `num_redundant_experts` | `0` | Number of redundant physical experts. |
 | `use_async` | `true` | Ascend MRv2 always runs asynchronously. `false` is normalized to `true` with a warning. |
-| `policy` | `default` | Upstream EPLB placement policy. |
+| `policy` | `stair` on Ascend | Select `stair` for the Ascend policy or `default` for upstream-policy comparison experiments. |
 | `log_balancedness` | `false` | Log expert balancedness metrics. |
 | `log_balancedness_interval` | `1` | Interval between balancedness log entries. |
-| `communicator` | `None` | Leave unset for automatic Gloo selection, or set `torch_gloo`. |
+| `communicator` | Auto (`None`) on Ascend | Leave unset to use HIXL when available and Gloo otherwise; set `hixl` or `torch_gloo` to select a backend explicitly. |
 
 These fields may also be passed together as JSON through `--eplb-config`.
 They must not be placed in `--additional-config` for MRv2.
+Automatic selection requires the same HIXL binding class on every EPLB
+rank: each rank resolves either the official `hixl` Python package
+distributed with CANN HIXL or vllm_ascend's ctypes binding, which drives
+the local toolkit libraries directly (`libcann_hixl.so`, for CANN
+distributions that ship the library without the package). The ranks reach
+a group-wide consensus at startup; if any rank has no usable HIXL binding,
+or the binding classes differ between ranks, the whole group falls back to
+`torch_gloo` CPU staging and the decision is logged.
+
+STAIR leaves both per-rank and cross-node migration limits unrestricted by
+default (`-1`) so that HIXL can use the available bandwidth. When the
+communicator falls back to Gloo automatically, Ascend clamps only the
+limits you have not set explicitly to `1` to avoid excessive CPU-staged
+transfers; explicitly configured values are kept (for example
+`cross_node_transfer_limit: 0` still forbids cross-node migrations) and a
+warning is logged. Explicitly setting `torch_gloo` or `hixl` also keeps
+your configured limits untouched.
+
+Ascend extends the upstream `policy` field without adding a second selector.
+For example, use `--eplb-config.policy default` to run the upstream policy;
+omit it or set it to `stair` to run STAIR.
 
 #### MRv2 Load Collection Phase
 
@@ -152,8 +174,13 @@ vllm serve Qwen/Qwen3-30B-A3B \
 
 !!! IMPORTANT
 
-    MRv2 supports asynchronous EPLB only and normalizes `use_async=false` to asynchronous Gloo movement. It rejects legacy `dynamic_eplb`, recording/static-map fields, `DYNAMIC_EPLB`, and `EXPERT_MAP_RECORD`, as
-    well as communicators other than Gloo. Validate the target model, topology, graph mode, and traffic independently before production use.
+    MRv2 supports asynchronous EPLB only and normalizes `use_async=false` to
+    asynchronous movement. It rejects elastic EP, legacy `dynamic_eplb`,
+    recording/static-map fields, `DYNAMIC_EPLB`, and `EXPERT_MAP_RECORD`, as
+    well as communicators other than Gloo and HIXL. HIXL requires the CANN HIXL
+    runtime and working device connectivity on every EPLB rank. Validate the
+    target model, topology, graph mode, and traffic independently before
+    production use.
 
 ### Model Runner V1: Legacy EPLB
 

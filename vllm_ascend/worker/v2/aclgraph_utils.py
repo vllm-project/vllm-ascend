@@ -32,7 +32,6 @@ from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import cudagraph_utils
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.cp_utils import maybe_prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor, ModelCudaGraphManager
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
@@ -49,9 +48,18 @@ from vllm_ascend.compilation.updatable_graph import (
     ContextSource,
     UpdatableGraph,
 )
-from vllm_ascend.utils import use_updatable_graph
+from vllm_ascend.utils import use_updatable_graph, vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.utils import communicator_switch
+
+if vllm_version_is("0.30.0"):
+    from vllm.v1.worker.gpu.cp_utils import (
+        maybe_prepare_dcp_local_seq_lens as _prepare_dcp_local_seq_lens,
+    )
+else:
+    from vllm.v1.worker.gpu.cp_utils import (
+        prepare_dcp_local_seq_lens as _prepare_dcp_local_seq_lens,
+    )
 
 
 def _prepare_pcp_inputs_to_capture(
@@ -83,15 +91,16 @@ def _prepare_pcp_inputs_to_capture(
     slot_mappings = pcp_manager.get_dummy_slot_mappings(num_tokens)
     slot_mappings_by_layer = cudagraph_utils.build_slot_mappings_by_layer(slot_mappings, kv_cache_config)
 
-    input_batch.dcp_local_seq_lens = maybe_prepare_dcp_local_seq_lens(
-        input_buffers.dcp_local_seq_lens,
-        input_batch.seq_lens,
-        input_batch.num_reqs,
-        _block_tables.cp_size,
-        _block_tables.cp_rank,
-        _block_tables.cp_interleave,
-        num_reqs_padded=input_batch.num_reqs_after_padding,
-    )
+    if _block_tables.cp_size > 1:
+        input_batch.dcp_local_seq_lens = _prepare_dcp_local_seq_lens(
+            input_buffers.dcp_local_seq_lens,
+            input_batch.seq_lens,
+            input_batch.num_reqs,
+            _block_tables.cp_size,
+            _block_tables.cp_rank,
+            _block_tables.cp_interleave,
+            num_reqs_padded=input_batch.num_reqs_after_padding,
+        )
 
     attn_metadata = model_state.prepare_attn(
         input_batch,
@@ -179,11 +188,32 @@ class ModelAclGraphManager(ModelCudaGraphManager):
             attn_backend = _get_graph_update_backend(self.model_runner.attn_groups)
         attn_metadata = self.model_runner.model_state.attn_metadata
 
-        if use_updatable_graph(attn_backend):
-            return self._updatable_graph_replay(desc, attn_metadata)
-        else:
-            # This will be removed once the refactoring is fully complete.
-            return self._graph_relay(attn_backend, desc, num_tokens, attn_metadata)
+        metadata = getattr(self.model_runner.model_state, "device_metadata", None)
+        try:
+            prepare_engram = getattr(self.model_runner.model_state, "prepare_engram", None)
+            if prepare_engram is not None:
+                # Match FULL replay's DP padding before lookup consumes it.
+                with (
+                    set_current_vllm_config(self.vllm_config),
+                    set_forward_context(
+                        attn_metadata,
+                        self.vllm_config,
+                        num_tokens=num_tokens,
+                        cudagraph_runtime_mode=desc.cg_mode,
+                        num_tokens_across_dp=torch.full([self.model_runner.dp_size], num_tokens),
+                        batch_descriptor=None,
+                        slot_mapping=None,
+                    ),
+                ):
+                    prepare_engram()
+            if use_updatable_graph(attn_backend):
+                return self._updatable_graph_replay(desc, attn_metadata)
+            else:
+                # This will be removed once the refactoring is fully complete.
+                return self._graph_relay(attn_backend, desc, num_tokens, attn_metadata)
+        finally:
+            if metadata is not None:
+                metadata.finish_replay()
 
     def _graph_relay(self, attn_backend, desc, num_tokens, attn_metadata):
         self.update_stream.wait_stream(torch.npu.current_stream())
@@ -249,28 +279,34 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         pcp_manager: Any = None,
     ) -> None:
         """Capture CUDA graphs for model forward pass."""
-        model = ModelWithContext(model)
+        metadata = getattr(model_state, "device_metadata", None)
+        model = ModelWithContext(model, device_metadata=metadata)
         pcp_manager = getattr(self.model_runner, "pcp_manager", None)
         if pcp_manager is not None:
             cudagraph_utils.prepare_inputs_to_capture = partial(
                 _prepare_pcp_inputs_to_capture,
                 pcp_manager=pcp_manager,
             )
-        with communicator_switch():
-            return super().capture(
-                model,
-                model_state,
-                input_buffers,
-                intermediate_tensors,
-                block_tables,
-                attn_groups,
-                kv_cache_config,
-                pcp_manager=pcp_manager,
-                has_lora=has_lora,
-                use_aux_hidden_state_outputs=use_aux_hidden_state_outputs,
-                lora_capture_hook=lora_capture_hook,
-                progress_bar_desc=progress_bar_desc,
-            )
+        try:
+            with communicator_switch():
+                return super().capture(
+                    model,
+                    model_state,
+                    input_buffers,
+                    intermediate_tensors,
+                    block_tables,
+                    attn_groups,
+                    kv_cache_config,
+                    pcp_manager=pcp_manager,
+                    has_lora=has_lora,
+                    use_aux_hidden_state_outputs=use_aux_hidden_state_outputs,
+                    lora_capture_hook=lora_capture_hook,
+                    progress_bar_desc=progress_bar_desc,
+                )
+        finally:
+            # Input preparation can fail before ModelWithContext.forward runs.
+            if metadata is not None:
+                metadata.finish()
 
 
 class ModelWithContext(nn.Module):
@@ -278,11 +314,12 @@ class ModelWithContext(nn.Module):
     so we can inherit vllm's CudaGraphManager._capture_full_graph.
     """
 
-    def __init__(self, original_model, is_draft_model=False, is_draft_model_prefill=False):
+    def __init__(self, original_model, is_draft_model=False, is_draft_model_prefill=False, device_metadata=None):
         super().__init__()
         self.original_model = original_model
         self.is_draft_model = is_draft_model
         self.is_draft_model_prefill = is_draft_model_prefill
+        self.device_metadata = device_metadata
 
     def forward(self, *args, **kwargs):
         forward_context = get_forward_context()
@@ -297,7 +334,16 @@ class ModelWithContext(nn.Module):
         if self.is_draft_model_prefill:
             _EXTRA_CTX.is_draft_model_prefill = True
 
-        return self.original_model(*args, **kwargs)
+        try:
+            if self.device_metadata is not None:
+                self.device_metadata.begin_forward()
+            return self.original_model(*args, **kwargs)
+        finally:
+            # Warmup and actual capture receive separate prepare_attn calls.
+            # Retire each submission, including unused producers, after its
+            # consumers; do not wait for metadata at graph entry.
+            if self.device_metadata is not None:
+                self.device_metadata.finish()
 
     def get_original_model(self):
         return self.original_model
@@ -323,6 +369,19 @@ class ModelWithContext(nn.Module):
 
     def compute_confidence(self, head_hidden: torch.Tensor, markov_embed: torch.Tensor):
         return self.original_model.compute_confidence(head_hidden, markov_embed)
+
+    if not vllm_version_is("0.30.0"):
+
+        def __getattr__(self, name: str):
+            # vLLM #57632 moved the draft context-K/V precompute into the
+            # capture path, which reaches model methods through this wrapper.
+            try:
+                return super().__getattr__(name)
+            except AttributeError:
+                original_model = self._modules.get("original_model")
+                if original_model is None:
+                    raise
+                return getattr(original_model, name)
 
 
 @contextmanager
