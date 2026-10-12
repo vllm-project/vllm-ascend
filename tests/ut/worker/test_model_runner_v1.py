@@ -1334,6 +1334,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             pcp_enabled=False,
             is_pcp_decode_sharded=False,
             supports_prolog_v3_quantization=lambda: False,
+            supports_prolog_v3_projection=lambda: False,
             q_proj=SimpleNamespace(_chunk_size=0),
         )
         runner.compilation_config = SimpleNamespace(static_forward_context={layer_name: attn_module})
@@ -1345,6 +1346,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             self.assertFalse(runner._uses_single_raw_mla_cache(layer_name, spec, attn_module))
 
         attn_module.impl.enable_kv_nz = False
+        attn_module.impl.supports_prolog_v3_projection = lambda: True
         with patch(
             "vllm_ascend.worker.model_runner_v1.supports_component_major_mla_pd",
             return_value=True,

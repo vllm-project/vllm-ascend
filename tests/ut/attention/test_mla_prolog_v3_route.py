@@ -296,6 +296,17 @@ def test_unsupported_or_mixed_prolog_quantization_keeps_legacy_path(fused_method
     assert not impl._cache_requires_prolog_v3_writer((nope, rope))
 
 
+def test_mla_without_q_lora_keeps_legacy_writer():
+    impl = _make_impl()
+    impl.q_lora_rank = None
+    impl.fused_qkv_a_proj = None
+    impl.q_a_layernorm = None
+    nope, rope = _component_major_cache()
+
+    assert not impl.supports_prolog_v3_projection()
+    assert not impl._cache_requires_prolog_v3_writer((nope, rope))
+
+
 def test_mla_preprocess_prolog_v3_replaces_rmsnorm_rope_cache_writer():
     impl = _make_impl()
     total_tokens = 5
