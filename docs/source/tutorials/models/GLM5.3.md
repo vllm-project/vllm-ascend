@@ -1053,8 +1053,8 @@ the MemCache pool, and the proxy in front of them.
 
 Save the following complete script as `start_d_engine_pool.sh` on all
 four Decode nodes. `launch_online_dp.py` (Section 5.4.1) supplies
-`$1`-`$7`; the node's IP and NIC come from the environment exactly as in
-Section 5.4.3.
+`$1`-`$7`; `LOCAL_IP` is supplied by the start command, while the NIC,
+model, and MemCache paths are configured in this script.
 
 ```shell
 #!/usr/bin/env bash
@@ -1067,12 +1067,12 @@ DP_RANK=$4
 DP_ADDRESS=$5
 DP_RPC_PORT=$6
 TP_SIZE=$7
-MODEL_PATH=${MODEL_PATH:-/path/to/GLM-5.3-w8a8c8}
+MODEL_PATH="<YOUR_MODEL_PATH>"
 
-LOCAL_IP=${LOCAL_IP:?export LOCAL_IP to this node's IP before starting}
-NIC_NAME=${NIC_NAME:?export NIC_NAME to the interface carrying LOCAL_IP}
-MEMCACHE_ROOT=${MEMCACHE_ROOT:?export MEMCACHE_ROOT to the memcache_hybrid install dir}
-PYTHON_LIB_DIR=${PYTHON_LIB_DIR:?export PYTHON_LIB_DIR to the vLLM Python lib dir}
+LOCAL_IP=${LOCAL_IP:?export LOCAL_IP to this node IP before starting}
+NIC_NAME="<NETWORK_INTERFACE>"
+MEMCACHE_ROOT="<MEMCACHE_ROOT>"
+PYTHON_LIB_DIR="<PYTHON_LIB_DIR>"
 
 unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
 source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh
@@ -1189,52 +1189,34 @@ Proxy.
     ```
 
 3. After both Prefill instances are ready, start Decode on all four Decode
-   nodes. Run each command on its target node and set that node's IP/NIC:
+   nodes. Run each command on its target node; only `LOCAL_IP` is supplied
+   by the command, and the remaining node settings are configured in
+   `start_d_engine_pool.sh`:
 
     ```shell
     # Decode node 0, DP ranks 0-3
-    export LOCAL_IP="<DECODE_NODE0_IP>"
-    export NIC_NAME="<NETWORK_INTERFACE>"
-    export MODEL_PATH="<YOUR_MODEL_PATH>"
-    export MEMCACHE_ROOT="<MEMCACHE_ROOT>"
-    export PYTHON_LIB_DIR="<PYTHON_LIB_DIR>"
-    python3 launch_online_dp.py \
+    LOCAL_IP="<DECODE_NODE0_IP>" python3 launch_online_dp.py \
       --script-path ./start_d_engine_pool.sh \
       --dp-size 16 --tp-size 2 --dp-size-local 4 \
       --dp-rank-start 0 --dp-address "<DECODE_NODE0_IP>" \
       --dp-rpc-port 12990 --vllm-start-port 10010
 
     # Decode node 1, DP ranks 4-7
-    export LOCAL_IP="<DECODE_NODE1_IP>"
-    export NIC_NAME="<NETWORK_INTERFACE>"
-    export MODEL_PATH="<YOUR_MODEL_PATH>"
-    export MEMCACHE_ROOT="<MEMCACHE_ROOT>"
-    export PYTHON_LIB_DIR="<PYTHON_LIB_DIR>"
-    python3 launch_online_dp.py \
+    LOCAL_IP="<DECODE_NODE1_IP>" python3 launch_online_dp.py \
       --script-path ./start_d_engine_pool.sh \
       --dp-size 16 --tp-size 2 --dp-size-local 4 \
       --dp-rank-start 4 --dp-address "<DECODE_NODE0_IP>" \
       --dp-rpc-port 12990 --vllm-start-port 10010
 
     # Decode node 2, DP ranks 8-11
-    export LOCAL_IP="<DECODE_NODE2_IP>"
-    export NIC_NAME="<NETWORK_INTERFACE>"
-    export MODEL_PATH="<YOUR_MODEL_PATH>"
-    export MEMCACHE_ROOT="<MEMCACHE_ROOT>"
-    export PYTHON_LIB_DIR="<PYTHON_LIB_DIR>"
-    python3 launch_online_dp.py \
+    LOCAL_IP="<DECODE_NODE2_IP>" python3 launch_online_dp.py \
       --script-path ./start_d_engine_pool.sh \
       --dp-size 16 --tp-size 2 --dp-size-local 4 \
       --dp-rank-start 8 --dp-address "<DECODE_NODE0_IP>" \
       --dp-rpc-port 12990 --vllm-start-port 10010
 
     # Decode node 3, DP ranks 12-15
-    export LOCAL_IP="<DECODE_NODE3_IP>"
-    export NIC_NAME="<NETWORK_INTERFACE>"
-    export MODEL_PATH="<YOUR_MODEL_PATH>"
-    export MEMCACHE_ROOT="<MEMCACHE_ROOT>"
-    export PYTHON_LIB_DIR="<PYTHON_LIB_DIR>"
-    python3 launch_online_dp.py \
+    LOCAL_IP="<DECODE_NODE3_IP>" python3 launch_online_dp.py \
       --script-path ./start_d_engine_pool.sh \
       --dp-size 16 --tp-size 2 --dp-size-local 4 \
       --dp-rank-start 12 --dp-address "<DECODE_NODE0_IP>" \
