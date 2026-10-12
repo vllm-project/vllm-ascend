@@ -343,9 +343,19 @@ class TestGLM53Store(unittest.TestCase):
         hit_request.request_id = "missing"
         self.assertEqual(scheduler.get_num_new_matched_tokens(hit_request, 0), (0, False))
 
-    def test_mooncake_layerwise_still_rejects_hybrid(self):
-        with self.assertRaisesRegex(ValueError, "AscendStore private KV state requires non-layerwise transfer"):
-            make_worker(self, kv_cache_config=make_glm53_plan(), use_layerwise=True, use_mla=True)
+    def test_mooncake_layerwise_excludes_private_tail(self):
+        plan = make_glm53_plan()
+        worker = make_worker(self, kv_cache_config=plan, use_layerwise=True, use_mla=True, num_layers=4)
+        start_patch(self, "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.importlib")
+        scheduler = KVPoolScheduler(worker.vllm_config, True, plan)
+        self.assertTrue(worker.use_block_key_layerwise)
+        self.assertTrue(scheduler.use_block_key_layerwise)
+        self.assertEqual(worker.cacheable_group_ids, [0, 2, 3, 4])
+        self.assertEqual(scheduler.cacheable_group_ids, worker.cacheable_group_ids)
+        worker.register_kv_caches(make_glm53_caches(plan))
+        for layer in range(worker.num_layers):
+            for group_id, _ in worker._groups_for_layerwise_transfer(layer):
+                self.assertIn(group_id, worker.cacheable_group_ids)
 
     def test_empty_final_layer_waits_for_pending_save_before_reusing_events(self):
         pending: queue.Queue[str] = queue.Queue()
