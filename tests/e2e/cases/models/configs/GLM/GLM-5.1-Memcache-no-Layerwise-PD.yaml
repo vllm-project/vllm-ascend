@@ -78,7 +78,7 @@ kv_pool:
       ock.mmc.log_level: error
       ock.mmc.local_service.world_size: 256
       ock.mmc.local_service.protocol: device_sdma
-      ock.mmc.local_service.dram.size: 10GB
+      ock.mmc.local_service.dram.size: 35GB
 
 env_common: &env_common
   VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
