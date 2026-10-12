@@ -46,6 +46,7 @@ CHECK_IMPORTS = {
             # Round-trip a locally constructed scheduler output using the
             # serialization employed by the upstream worker message queue.
             "tests/ut/core/test_compressor_checkpoint_integration.py",
+            "tests/ut/core/test_compressor_checkpoint_async.py",
         },
     ),
     "re": ForbiddenImport(

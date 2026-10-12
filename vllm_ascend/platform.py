@@ -33,7 +33,7 @@ os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-from vllm_ascend.ascend_config import init_ascend_config
+from vllm_ascend.ascend_config import DSV4_ASYNC_CHECKPOINT_SCHEDULER, DSV4_CHECKPOINT_SCHEDULER, init_ascend_config
 
 # isort: off
 from vllm_ascend.utils import (
@@ -706,7 +706,9 @@ class NPUPlatform(Platform):
 
         if ascend_config.enable_dsv4_shared_compressor_workspace and cache_config.enable_prefix_caching:
             vllm_config.scheduler_config.scheduler_cls = (
-                "vllm_ascend.core.compressor_checkpoint_scheduler.CompressorCheckpointScheduler"
+                DSV4_ASYNC_CHECKPOINT_SCHEDULER
+                if vllm_config.scheduler_config.async_scheduling
+                else DSV4_CHECKPOINT_SCHEDULER
             )
 
         cp_size = parallel_config.prefill_context_parallel_size * parallel_config.decode_context_parallel_size

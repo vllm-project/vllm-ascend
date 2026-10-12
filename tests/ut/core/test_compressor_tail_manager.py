@@ -358,11 +358,11 @@ def test_prefix_gate_distinguishes_user_blocks_from_internal_tail_pages(block_si
     ("config", "is_a3", "multistream", "expected_reason"),
     [
         pytest.param(
-            _stage1_config(cache_config__enable_prefix_caching=True, scheduler_config__async_scheduling=True),
+            _stage1_config(cache_config__enable_prefix_caching=True, scheduler_config__async_scheduling=None),
             True,
             False,
-            "compressor checkpoints require explicit synchronous scheduling",
-            id="prefix-cache-async",
+            "compressor checkpoints require an explicit scheduling mode",
+            id="prefix-cache-unspecified-mode",
         ),
         pytest.param(
             _stage1_config(cache_config__enable_prefix_caching=True, cache_config__block_size=128),

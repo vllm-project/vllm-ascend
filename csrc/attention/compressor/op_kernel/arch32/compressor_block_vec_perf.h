@@ -106,6 +106,8 @@ public:
                                                 GlobalTensor<T> kvCacheTcGm, GlobalTensor<T> scoreCacheTcGm,
                                                 GlobalTensor<T> vec1ResGm, GlobalTensor<T> vec2InputGm);
     __aicore__ inline void ComputeVec2(const Vec2RunInfo &info);
+    __aicore__ inline void InitHistoryWorkspace(__gm__ uint8_t *workspace);
+    __aicore__ inline void SnapshotHistory();
 
 protected:
     GlobalTensor<T> vec1ResGm_;
@@ -240,6 +242,7 @@ private:
     GlobalTensor<int32_t> sequsedGm_;
     GlobalTensor<int32_t> stateBlockTableGm_;
     GlobalTensor<T> stateCacheGm_;
+    GlobalTensor<T> historyStateGm_;
     GlobalTensor<T> apeGm_;
     GlobalTensor<X_T> normWeightGm_;
     GlobalTensor<ROPE_T> ropeSinGm_;
@@ -337,6 +340,45 @@ __aicore__ inline void CompressorBlockVectorPerf<COMP>::InitBuffers(TPipe *pipe)
     }
     gatherOffsetCastUb = gatherOffsetUb.ReinterpretCast<uint32_t>();
     PipeBarrier<PIPE_V>();
+}
+
+template <typename COMP>
+__aicore__ inline void CompressorBlockVectorPerf<COMP>::InitHistoryWorkspace(__gm__ uint8_t *workspace)
+{
+    historyStateGm_.SetGlobalBuffer((__gm__ T *)workspace);
+}
+
+template <typename COMP>
+__aicore__ inline void CompressorBlockVectorPerf<COMP>::SnapshotHistory()
+{
+    if constexpr (COMP::cacheMode == CACHE_MODE::CYCLE) {
+        const uint32_t ringTokens = coff_ * constInfo_.cmpRatio;
+        const uint32_t rowElements = 2 * coff_ * constInfo_.headDim;
+        const uint32_t vectorCoreNum = 2 * GetBlockNum();
+        // Each AIV owns disjoint complete rows, independent of TC assignment.
+        // Keep the old ring separate from the state pages updated by SaveState.
+        for (uint32_t row = GetBlockIdx(); row < constInfo_.batchSize * ringTokens; row += vectorCoreNum) {
+            const uint32_t batchIdx = row / ringTokens;
+            if (GetSeqLength(batchIdx) == 0 || GetStartPos(batchIdx) == 0) {
+                continue;
+            }
+            const uint32_t slot = row % ringTokens;
+            const uint64_t tableOffset = static_cast<uint64_t>(batchIdx) * constInfo_.maxBlockNumPerBatch;
+            const uint64_t page = stateBlockTableGm_.GetValue(tableOffset + slot / constInfo_.blockSize);
+            const uint64_t stateOffset = page * constInfo_.stateCacheStrideDim0 +
+                                         (slot % constInfo_.blockSize) * rowElements;
+            LocalTensor<T> inputUb = inputQue1.AllocTensor<T>();
+            DataCopy(inputUb, stateCacheGm_[stateOffset], rowElements);
+            inputQue1.EnQue(inputUb);
+            inputQue1.DeQue<T>();
+            DataCopyWithOutputQue(historyStateGm_[static_cast<uint64_t>(row) * rowElements], inputUb,
+                                  1, rowElements, rowElements, rowElements);
+            inputQue1.FreeTensor(inputUb);
+        }
+        // Complete all DMA writes before any AIV can overwrite an old state slot.
+        PipeBarrier<PIPE_ALL>();
+        SyncAll();
+    }
 }
 
 template <typename COMP>
@@ -828,8 +870,16 @@ __aicore__ inline void CompressorBlockVectorPerf<COMP>::ReadFromCacheState(
                                 remainRowCnt * 2 * coff_ * constInfo_.headDim +
                                 stateIdx * coff_ * constInfo_.headDim + dStartIdx;
 
-        DataCopyAlignGmToUb(output[copyFinishRowCnt * coff_ * dDealSize], state[stateOffset], copyRowCount,
-                                dDealSize, coff_ * constInfo_.headDim * 2, coff_ * dDealSize);
+        if constexpr (COMP::cacheMode == CACHE_MODE::CYCLE) {
+            const uint64_t historyOffset =
+                (static_cast<uint64_t>(batchIdx) * ringTokenCount + cacheSeqIdx) * 2 * coff_ * constInfo_.headDim +
+                stateIdx * coff_ * constInfo_.headDim + dStartIdx;
+            DataCopyAlignGmToUb(output[copyFinishRowCnt * coff_ * dDealSize], historyStateGm_[historyOffset],
+                               copyRowCount, dDealSize, coff_ * constInfo_.headDim * 2, coff_ * dDealSize);
+        } else {
+            DataCopyAlignGmToUb(output[copyFinishRowCnt * coff_ * dDealSize], state[stateOffset], copyRowCount,
+                               dDealSize, coff_ * constInfo_.headDim * 2, coff_ * dDealSize);
+        }
         copyFinishRowCnt += copyRowCount;
         curSeqIdx += copyRowCount;
     }

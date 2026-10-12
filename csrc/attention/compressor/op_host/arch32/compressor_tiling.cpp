@@ -240,6 +240,12 @@ ge::graphStatus CompressorTiling::CalcWorkSpace()
     workspaceSize_ += workspaceParams_->mm1ScoreResSize * maxGroupNum * MM1_RES_ELEM_SIZE * workspaceParams_->dbWorkspaceRatio;
     workspaceSize_ += workspaceParams_->vec1TailCacheSize * MM1_RES_ELEM_SIZE * workspaceParams_->dbWorkspaceRatio * 2;   // 2 kv和score
     workspaceSize_ += workspaceParams_->vec1ResSize * maxGroupNum * V1_RES_ELEM_SIZE * workspaceParams_->dbWorkspaceRatio;
+    if (static_cast<uint8_t>(*context_->cacheMode) == static_cast<uint8_t>(CACHE_MODE::CYCLE)) {
+        // Immutable per-request input history; SaveState continues to update the
+        // original pages while every ReadState reads this invocation's snapshot.
+        workspaceSize_ += static_cast<uint64_t>(baseParams_->batchSize) * coff * baseParams_->cmpRatio *
+                          2 * coff * baseParams_->headDim * MM1_RES_ELEM_SIZE;
+    }
 
     if (context_->workSpaces) {
         context_->workSpaces[0] = workspaceSize_;

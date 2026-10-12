@@ -272,7 +272,10 @@ def scheduler(tmp_path, coordinator, monkeypatch, request):
     from vllm.config import CacheConfig, DeviceConfig, ModelConfig, ParallelConfig, SchedulerConfig, VllmConfig
     from vllm.v1.structured_output import StructuredOutputManager
 
-    from vllm_ascend.core.compressor_checkpoint_scheduler import CompressorCheckpointScheduler
+    from vllm_ascend.core.compressor_checkpoint_scheduler import (
+        CompressorCheckpointAsyncScheduler,
+        CompressorCheckpointScheduler,
+    )
 
     monkeypatch.setenv("VLLM_CACHE_ROOT", str(tmp_path / "cache"))
 
@@ -310,7 +313,7 @@ def scheduler(tmp_path, coordinator, monkeypatch, request):
             max_num_batched_tokens=options.get("token_budget", 6000),
             max_model_len=max_model_len,
             enable_chunked_prefill=True,
-            async_scheduling=False,
+            async_scheduling=options.get("async_scheduling", False),
             watermark=0,
             is_encoder_decoder=False,
         ),
@@ -318,7 +321,10 @@ def scheduler(tmp_path, coordinator, monkeypatch, request):
     )
     kv = cache_config(options.get("num_blocks", 4096))
     config.cache_config.num_gpu_blocks = kv.num_blocks
-    return CompressorCheckpointScheduler(
+    scheduler_cls = (
+        CompressorCheckpointAsyncScheduler if options.get("async_scheduling", False) else CompressorCheckpointScheduler
+    )
+    return scheduler_cls(
         vllm_config=config,
         kv_cache_config=kv,
         block_size=32,
