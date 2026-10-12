@@ -3,7 +3,7 @@
 ## Description
 
 - **Function**: `index_decode_topk_fused` selects sparse logical block IDs from
-  AscendC MsaIndexScore output, masks invisible blocks, forces initial/local
+  AscendC MsaIndexScoreVllm output, masks invisible blocks, forces initial/local
   blocks, and returns int32 indices and valid counts.
 - **Formula**: For query token `q`, request `b = q // decode_query_len` and
   offset `o = q % decode_query_len`, the visible block count is
