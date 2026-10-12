@@ -52,7 +52,6 @@ test_cases:
       - '{"enable_cpu_binding":true, "enable_fused_mc2":1, "enable_flashcomm1":true}'
       - "--kv-transfer-config"
       - '{"kv_connector": "AscendStoreConnector", "kv_role": "kv_both", "kv_connector_extra_config": {"backend": "memcache", "lookup_rpc_port": "0"}}'
-      
     benchmarks:
       perf_1:
         case_type: performance
