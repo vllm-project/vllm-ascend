@@ -1449,7 +1449,7 @@ cache.  These references do not
 establish A2, 1M-context, or other parallel-layout support, and do not add
 accuracy or performance claims for the 198K workload.
 
-### 5.2 1M Context Configuration
+### 5.2 1M Context Configuration (A3)
 
 #### 5.2.1 1M Prefill-Decode Disaggregation (DCP)
 
@@ -2018,25 +2018,23 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 
 ## 9 Performance Tuning
 
-### 9.1 Recommended Configurations
-
 The following A3 W8A8C8 settings summarize the deployment scripts in
 Sections 5.1.2, 5.1.3 and 5.2.1. Global DP includes all nodes of one role; local DP is the
 number of ranks on one node. Each role uses 32 logical NPU devices.
 
-#### 9.1.1 Detailed Node Configuration
+### 9.1 Detailed Node Configuration
 
 | Scenario | Role | TP | Global DP | Local DP | PP | DCP | Max Num Seqs | Max Num Batched Tokens | Max Model Len | MTP Spec Num |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 198K PD, with or without pooling | Prefill | 16 | 1 | 1 | 2 | 1 | 64 | 16384 | 200000 | 1 |
 | 198K PD, with or without pooling | Decode | 2 | 16 | 8 | 1 | 1 | 64 | 256 | 200000 | 5 |
-| 1M PD | Prefill | 16 | 2 | 1 | 1 | 16 | 64 | 8192 | 1048576 | 1 |
-| 1M PD | Decode | 8 | 4 | 2 | 1 | 8 | 32 | 192 | 1048576 | 5 |
+| 1M PD (A3) | Prefill | 16 | 2 | 1 | 1 | 16 | 64 | 8192 | 1048576 | 1 |
+| 1M PD (A3) | Decode | 8 | 4 | 2 | 1 | 8 | 32 | 192 | 1048576 | 5 |
 
-#### 9.1.2 Performance Workloads
+### 9.2 Performance Workloads
 
 The 0.30 RC performance reference covers the following workloads.
-Lengths use `input/output` notation. The 1M case uses one concurrent
+Lengths use `input/output` notation. The 1M A3 case uses one concurrent
 request; reserve output tokens within the 1,048,576-token context limit.
 
 | Scenario | Input / Output | Prefix cache hit rate | Deployment reference |
@@ -2044,11 +2042,11 @@ request; reserve output tokens within the 1,048,576-token context limit.
 | Prefill-only | 16K / 1, 128K / 1 | 0% | Section 5.1.2 |
 | Decode-only | 16K / 1K, 128K / 1K | 100% | Section 5.1.2 |
 | Complete PD | 16K / 1K | 0% | Section 5.1.2 |
-| Complete PD, 1M context | Approximately 1M / 1K | 0% | Section 5.2.1 |
+| Complete PD, 1M context (A3) | Approximately 1M / 1K | 0% | Section 5.2.1 |
 | Pooling | 128K / 1K | 90%, 32 distinct prefixes | Section 5.1.3 |
 | Pooling | 40K-80K / 2.5K | Repeated prefixes | Section 5.1.3 |
 
-#### 9.1.3 Optimizations Requiring Explicit Enablement
+### 9.3 Optimizations Requiring Explicit Enablement
 
 Combine enabled options in one `--additional-config` JSON object, as in
 the deployment scripts.
@@ -2058,33 +2056,13 @@ the deployment scripts.
 | FlashComm1 | A3 Prefill | `"enable_flashcomm1": true` | Reduces TP communication overhead; the Decode reference keeps it disabled. |
 | Fused MC2 | A3 PD | `"enable_fused_mc2": 1` | Fuses MoE dispatch, computation and combine. Do not combine with shared-expert multistream overlap. |
 | DSA CP | A3 Prefill | `"enable_dsa_cp": true` | Distributes long-context attention work; use the layout specified in each scenario. |
-| DCP | 1M PD | `--decode-context-parallel-size 16` on Prefill, `8` on Decode | Shards KV cache across the TP group. Keep PCP at 1 and KV interleave at 128 on both roles. |
+| DCP | 1M PD (A3) | `--decode-context-parallel-size 16` on Prefill, `8` on Decode | Shards KV cache across the TP group. Keep PCP at 1 and KV interleave at 128 on both roles. |
 | Int8 attention KV cache | A3 W8A8C8 | `--kv-cache-dtype int8` | Reduces attention KV cache memory. |
 | Int8 indexer KV cache | A3 W8A8C8 | `--attention_config.indexer_kv_dtype int8` | Quantizes the indexer cache separately from the attention cache. |
-| MLAPO | 1M Decode | `"enable_mlapo": true` | Fuses MLA preprocessing; account for its memory requirements. |
+| MLAPO | A3 1M Decode | `"enable_mlapo": true` | Fuses MLA preprocessing; account for its memory requirements. |
 | Recompute scheduler | A3 Decode | `"recompute_scheduler_enable": true` | Enables Prefill-side recomputation when Decode KV cache capacity is insufficient. |
 | Decode graph | A3 Decode | `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` | Captures Decode execution; the reference Prefill uses eager mode. |
 | KV pooling | Repeated-prefix PD | Ascend Store/MemCache configuration in Section 5.1.3 | Reuses KV across requests and engines; confirm pool hits in backend metrics. |
-
-### 9.2 Tuning Guidelines
-
-Choose a workload by input/output length, request concurrency and prefix
-cache hit rate. Measure TTFT, TPOT and output throughput separately for
-Prefill-only, Decode-only and complete PD tests. Warm up before collecting
-results and change one parameter at a time.
-
-| Parameter | Tuning guidance |
-| --- | --- |
-| `--max-model-len` | Include both input and output tokens. Use the workload's required length when sizing KV cache. |
-| `--max-num-seqs` | Increase gradually for throughput; reduce when KV cache pressure or tail latency rises. The limit applies per DP rank. |
-| `--max-num-batched-tokens` | Tune Prefill and Decode separately. Larger Prefill batches can improve throughput; Decode must also accommodate speculative tokens. |
-| `--gpu-memory-utilization` | Leave memory for graph capture, communication and temporary buffers; reduce if startup or execution runs out of memory. |
-| `num_speculative_tokens` | Compare acceptance rate, TPOT and memory use. More draft tokens do not guarantee higher throughput. |
-| Prefix caching | Enable for repeated prefixes and warm the cache before measuring hits. For a zero-hit Prefill benchmark, use `--no-enable-prefix-caching`. Verify shared-pool loads separately from local prefix hits. |
-
-For general methods, refer to [Performance Tuning](../../developer_guide/performance_and_debug/optimization_and_tuning.md).
-For feature options, refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md).
-For environment variables, refer to [envs.py](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/envs.py).
 
 ## 10 FAQ
 

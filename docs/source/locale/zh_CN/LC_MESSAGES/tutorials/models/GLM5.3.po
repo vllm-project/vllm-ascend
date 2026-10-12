@@ -351,5 +351,5 @@ msgstr "- **问：GLM-5.3 是否支持 `enable_thinking: false`？**"
 msgid "A: No, GLM-5.3 does not support `enable_thinking`."
 msgstr "答：不支持，GLM-5.3 不支持 `enable_thinking`。"
 
-msgid "### 5.2 1M Context Configuration"
-msgstr "### 5.2 1M 上下文配置"
+msgid "### 5.2 1M Context Configuration (A3)"
+msgstr "### 5.2 1M 上下文配置（A3）"
