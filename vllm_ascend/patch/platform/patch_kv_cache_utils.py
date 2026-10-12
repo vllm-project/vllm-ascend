@@ -393,7 +393,8 @@ def _get_trailing_mtp_layer(vllm_config: VllmConfig, kv_cache_spec: dict[str, KV
     # decoders use full attention, so their last registered attention layer
     # remains last among the full-attention specs, but not in the whole dict.
     draft_config = vllm_config.speculative_config.draft_model_config
-    architectures = getattr(draft_config.hf_config, "architectures", None) if draft_config is not None else None
+    hf_config = getattr(draft_config, "hf_config", None)
+    architectures = getattr(hf_config, "architectures", None)
     if not architectures or not all(arch in ("Qwen3NextMTP", "Qwen3_5MTP", "Qwen3_5MoeMTP") for arch in architectures):
         return None
     # Cache-only/MLA subclasses may also derive from FullAttentionSpec. The
@@ -429,11 +430,11 @@ def _ascend_annotate_eagle_groups(
         use_trailing_layer_fallback = spec_config.method == "mtp" or use_deepseek_v4_fallback
     if not use_trailing_layer_fallback or not spec_config.use_eagle():
         return
-    model_config = vllm_config.model_config
-    if spec_config.method != "mtp" and (
-        model_config is None or model_config.hf_config.model_type not in ("deepseek_v4", "deepseek_v41")
-    ):
-        return
+    if spec_config.method != "mtp":
+        hf_config = getattr(vllm_config.model_config, "hf_config", None)
+        model_type = getattr(hf_config, "model_type", None)
+        if model_type not in ("deepseek_v4", "deepseek_v41"):
+            return
 
     # Groups must partition the supplied mapping before positional inference.
     # The packed caller may already have excluded hidden-state cache layers.

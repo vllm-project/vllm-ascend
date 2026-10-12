@@ -177,6 +177,62 @@ def test_same_draft_model_type_does_not_enable_unknown_architectures(architectur
     assert not any(group.is_eagle_group for group in groups)
 
 
+@pytest.mark.parametrize(
+    "draft_config",
+    [None, SimpleNamespace(), SimpleNamespace(hf_config=None), SimpleNamespace(hf_config=SimpleNamespace())],
+    ids=["no-config", "missing-hf-config", "null-hf-config", "missing-architectures"],
+)
+def test_hybrid_missing_draft_metadata_disables_positional_fallback(draft_config):
+    config = _config()
+    config.speculative_config.draft_model_config = draft_config
+    specs = _hybrid_specs()
+    groups = _hybrid_groups(specs)
+
+    _ascend_annotate_eagle_groups(config, specs, groups)
+
+    assert not any(group.is_eagle_group for group in groups)
+
+
+@pytest.mark.parametrize(
+    "model_config",
+    [None, SimpleNamespace(), SimpleNamespace(hf_config=None), SimpleNamespace(hf_config=SimpleNamespace())],
+    ids=["no-config", "missing-hf-config", "null-hf-config", "missing-model-type"],
+)
+@pytest.mark.parametrize("method", ["mtp", "dspark"])
+def test_missing_target_metadata_only_disables_non_mtp_fallback(model_config, method):
+    config = _config(method=method)
+    config.model_config = model_config
+    specs = _hybrid_specs()
+    groups = _hybrid_groups(specs)
+
+    _ascend_annotate_eagle_groups(config, specs, groups, use_trailing_layer_fallback=True)
+
+    assert [group.is_eagle_group for group in groups] == [method == "mtp", False]
+
+
+@pytest.mark.parametrize("missing_config", ["draft", "target"])
+def test_missing_metadata_preserves_explicit_spec_marker(missing_config):
+    config = _config(method="mtp" if missing_config == "draft" else "dspark")
+    if missing_config == "draft":
+        config.speculative_config.draft_model_config = SimpleNamespace()
+    else:
+        config.model_config = SimpleNamespace()
+    specs = _hybrid_specs()
+    marker_spec = MLAAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.bfloat16,
+        non_causal_multi_token_decode=True,
+    )
+    specs["draft.marker"] = marker_spec
+    groups = [*_hybrid_groups(specs), KVCacheGroupSpec(["draft.marker"], marker_spec)]
+
+    _ascend_annotate_eagle_groups(config, specs, groups, use_trailing_layer_fallback=True)
+
+    assert [group.is_eagle_group for group in groups] == [False, False, True]
+
+
 @pytest.mark.parametrize("extra_spec_type", [HiddenStateCacheSpec, AscendSFAIndexerCacheSpec, MLAAttentionSpec])
 def test_hybrid_with_additional_cache_types_does_not_guess(extra_spec_type):
     specs = _hybrid_specs()
