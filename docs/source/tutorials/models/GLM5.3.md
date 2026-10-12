@@ -932,7 +932,7 @@ MetaService.
     ock.mmc.log_level = error
     ock.mmc.local_service.world_size = 256
     ock.mmc.local_service.protocol = device_rdma
-     ock.mmc.local_service.dram.size = 40GB
+    ock.mmc.local_service.dram.size = 40GB
     ```
 
 4. Set `MEMCACHE_ROOT` to the installed `memcache_hybrid` directory and
@@ -1243,14 +1243,6 @@ Proxy.
 
 4. After the Prefill and Decode APIs are ready, start the proxy on a host
    that can reach every endpoint:
-
-After both Prefill APIs (`http://<PREFILL_NODE0_IP>:8000/v1/models`,
-`http://<PREFILL_NODE2_IP>:8000/v1/models`) and all sixteen Decode APIs
-answer, start the
-[PD load-balancing proxy](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
-on a host that reaches every endpoint. Both Prefill instance leaders and
-all sixteen Decode endpoints are registered explicitly (the lists are
-zipped 1:1):
 
 ```shell
 python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
