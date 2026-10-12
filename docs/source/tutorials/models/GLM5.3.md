@@ -518,15 +518,25 @@ LOCAL_IP=${3:?need local_ip}
 
 # ---- Per-node role (the only difference between the four nodes) ----
 case "$NODE_RANK" in
-  0) HEADLESS_ARGS="";;                  # node 0: hosts the API server
-  1|2|3) HEADLESS_ARGS="--headless";;    # nodes 1-3: headless workers
-  *) echo "node_rank must be 0-3" >&2; exit 1;;
+  0)
+    HEADLESS_ARGS=""                  # node 0: hosts the API server
+    ;;
+  1|2|3)
+    HEADLESS_ARGS="--headless"        # nodes 1-3: headless workers
+    ;;
+  *)
+    echo "node_rank must be 0-3" >&2
+    exit 1
+    ;;
 esac
-API_SERVER_COUNT=""; [ "$NODE_RANK" = "0" ] && API_SERVER_COUNT="--api-server-count 1"
+API_SERVER_COUNT=""
+if [ "$NODE_RANK" = "0" ]; then
+  API_SERVER_COUNT="--api-server-count 1"
+fi
 
 MODEL_PATH=${MODEL_PATH:-/path/to/GLM-5.3-w8a8c8}
-NIC="<NETWORK_INTERFACE>"   # set to your business-network interface
-P_MASTER_IP="<PREFILL_NODE0_IP>"   # TCP store + DP RPC master (node 0)
+NIC="<NETWORK_INTERFACE>"       # set to your business-network interface
+P_MASTER_IP="<PREFILL_NODE0_IP>"  # TCP store + DP RPC master (node 0)
 
 unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
 source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh
@@ -539,34 +549,72 @@ source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh
 # hang the startup in SYN_SENT.
 export HCCL_SOCKET_IFNAME=$NIC
 export VLLM_HOST_IP=$LOCAL_IP
-export GLOO_SOCKET_IFNAME=$NIC TP_SOCKET_IFNAME=$NIC
-export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000 HCCL_EXEC_TIMEOUT=7200 HCCL_CONNECT_TIMEOUT=7200
+export GLOO_SOCKET_IFNAME=$NIC
+export TP_SOCKET_IFNAME=$NIC
+export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+export HCCL_EXEC_TIMEOUT=7200
+export HCCL_CONNECT_TIMEOUT=7200
 export VLLM_RPC_TIMEOUT=360000 VLLM_ENGINE_READY_TIMEOUT_S=1200
 export VLLM_ASCEND_ENABLE_MLAPO=1
-export OMP_PROC_BIND=false OMP_NUM_THREADS=10 HCCL_BUFFSIZE=1024 HCCL_OP_EXPANSION_MODE=AIV
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True TASK_QUEUE_ENABLE=1 VLLM_USE_V1=1
-export CPU_AFFINITY_CONF=1 ACL_OP_INIT_MODE=1
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=10
+export HCCL_BUFFSIZE=1024
+export HCCL_OP_EXPANSION_MODE=AIV
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export TASK_QUEUE_ENABLE=1
+export VLLM_USE_V1=1
+export CPU_AFFINITY_CONF=1
+export ACL_OP_INIT_MODE=1
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export PROMETHEUS_MULTIPROC_DIR=/dev/shm/vllm_metrics_p
 mkdir -p "$PROMETHEUS_MULTIPROC_DIR"
 
 exec vllm serve "$MODEL_PATH" \
-  --host 0.0.0.0 --port "$PORT" \
-  --data-parallel-size 2 --tensor-parallel-size 16 \
-  --nnodes 4 --node-rank "$NODE_RANK" \
-  --master-addr "$P_MASTER_IP" --master-port 29501 \
-  --data-parallel-address "$P_MASTER_IP" --data-parallel-rpc-port 12980 \
-  --enable-expert-parallel --quantization ascend \
-  --enable-chunked-prefill --enable-prefix-caching \
-  --seed 1024 --served-model-name glm5 --max-model-len 135000 \
-  --max-num-batched-tokens 8192 --max-num-seqs 64 --gpu-memory-utilization 0.92 \
-  --trust-remote-code --async-scheduling --enforce-eager \
+  --host 0.0.0.0 \
+  --port "$PORT" \
+  --data-parallel-size 2 \
+  --tensor-parallel-size 16 \
+  --nnodes 4 \
+  --node-rank "$NODE_RANK" \
+  --master-addr "$P_MASTER_IP" \
+  --master-port 29501 \
+  --data-parallel-address "$P_MASTER_IP" \
+  --data-parallel-rpc-port 12980 \
+  --enable-expert-parallel \
+  --quantization ascend \
+  --enable-chunked-prefill \
+  --enable-prefix-caching \
+  --seed 1024 \
+  --served-model-name glm5 \
+  --max-model-len 135000 \
+  --max-num-batched-tokens 8192 \
+  --max-num-seqs 64 \
+  --gpu-memory-utilization 0.92 \
+  --trust-remote-code \
+  --async-scheduling \
+  --enforce-eager \
   --safetensors-load-strategy prefetch \
-  --kv-cache-dtype int8 --attention_config.indexer_kv_dtype int8 \
-  --enable-auto-tool-choice --tool-call-parser glm47 --reasoning-parser glm47 \
-  --speculative-config '{"num_speculative_tokens":3,"method":"deepseek_mtp","enforce_eager":true}' \
-  --additional-config '{"enable_dsa_cp":true,"enable_fused_mc2":1,"enable_flashcomm1":true,"ascend_compilation_config":{"fuse_muls_add":true}}' \
-  --kv-transfer-config '{"kv_connector":"MooncakeConnectorV1","kv_role":"kv_producer","kv_port":"30000","engine_id":"0","kv_connector_extra_config":{"use_ascend_direct":true,"prefill":{"dp_size":2,"tp_size":16},"decode":{"dp_size":16,"tp_size":2}}}' \
+  --kv-cache-dtype int8 \
+  --attention_config.indexer_kv_dtype int8 \
+  --enable-auto-tool-choice \
+  --tool-call-parser glm47 \
+  --reasoning-parser glm47 \
+  --speculative-config \
+  '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
+  --additional-config \
+  '{"enable_dsa_cp": true, "enable_fused_mc2": 1, "enable_flashcomm1": true, "ascend_compilation_config": {"fuse_muls_add": true}}' \
+  --kv-transfer-config \
+  '{
+    "kv_connector": "MooncakeConnectorV1",
+    "kv_role": "kv_producer",
+    "kv_port": "30000",
+    "engine_id": "0",
+    "kv_connector_extra_config": {
+      "use_ascend_direct": true,
+      "prefill": {"dp_size": 2, "tp_size": 16},
+      "decode": {"dp_size": 16, "tp_size": 2}
+    }
+  }' \
   $API_SERVER_COUNT $HEADLESS_ARGS
 ```
 
@@ -603,7 +651,7 @@ DP_RPC_PORT=$6
 TP_SIZE=$7
 MODEL_PATH=${MODEL_PATH:-/path/to/GLM-5.3-w8a8c8}
 
-LOCAL_IP=${LOCAL_IP:?export LOCAL_IP to this node's IP before starting}
+LOCAL_IP=${LOCAL_IP:?export LOCAL_IP to this node IP before starting}
 NIC_NAME=${NIC_NAME:?export NIC_NAME to the interface carrying LOCAL_IP}
 
 unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
@@ -611,33 +659,73 @@ source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh
 
 # Intra-node TP2: HCCL_IF_IP to the local business IP is fine here.
 export VLLM_HOST_IP=$LOCAL_IP HCCL_IF_IP=$LOCAL_IP
-export GLOO_SOCKET_IFNAME=$NIC_NAME TP_SOCKET_IFNAME=$NIC_NAME HCCL_SOCKET_IFNAME=$NIC_NAME
-export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000 HCCL_EXEC_TIMEOUT=7200 HCCL_CONNECT_TIMEOUT=7200
-export VLLM_RPC_TIMEOUT=360000 VLLM_ENGINE_READY_TIMEOUT_S=1200
+export GLOO_SOCKET_IFNAME=$NIC_NAME
+export TP_SOCKET_IFNAME=$NIC_NAME
+export HCCL_SOCKET_IFNAME=$NIC_NAME
+export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+export HCCL_EXEC_TIMEOUT=7200
+export HCCL_CONNECT_TIMEOUT=7200
+export VLLM_RPC_TIMEOUT=360000
+export VLLM_ENGINE_READY_TIMEOUT_S=1200
 export VLLM_ASCEND_ENABLE_MLAPO=1
-export OMP_PROC_BIND=false OMP_NUM_THREADS=10 HCCL_BUFFSIZE=1024 HCCL_OP_EXPANSION_MODE=AIV
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True TASK_QUEUE_ENABLE=1 VLLM_USE_V1=1
-export CPU_AFFINITY_CONF=1 ACL_OP_INIT_MODE=1 ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=10
+export HCCL_BUFFSIZE=1024
+export HCCL_OP_EXPANSION_MODE=AIV
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export TASK_QUEUE_ENABLE=1
+export VLLM_USE_V1=1
+export CPU_AFFINITY_CONF=1
+export ACL_OP_INIT_MODE=1
+export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
 export PROMETHEUS_MULTIPROC_DIR=/dev/shm/vllm_metrics_d_${DP_RANK}
 mkdir -p "$PROMETHEUS_MULTIPROC_DIR"
 export VLLM_MOONCAKE_ZMQ_RETRIES=20 VLLM_MOONCAKE_ZMQ_RETRY_SLEEP=0.5
 
 exec vllm serve "$MODEL_PATH" \
-  --host 0.0.0.0 --port "$PORT" \
-  --data-parallel-size "$DP_SIZE" --data-parallel-rank "$DP_RANK" \
-  --data-parallel-address "$DP_ADDRESS" --data-parallel-rpc-port "$DP_RPC_PORT" \
+  --host 0.0.0.0 \
+  --port "$PORT" \
+  --data-parallel-size "$DP_SIZE" \
+  --data-parallel-rank "$DP_RANK" \
+  --data-parallel-address "$DP_ADDRESS" \
+  --data-parallel-rpc-port "$DP_RPC_PORT" \
   --tensor-parallel-size "$TP_SIZE" \
-  --enable-expert-parallel --enable-chunked-prefill --enable-prefix-caching \
-  --seed 1024 --served-model-name glm5 --max-model-len 135000 \
-  --max-num-batched-tokens 256 --max-num-seqs 32 --gpu-memory-utilization 0.92 \
-  --trust-remote-code --async-scheduling --quantization ascend \
+  --enable-expert-parallel \
+  --enable-chunked-prefill \
+  --enable-prefix-caching \
+  --seed 1024 \
+  --served-model-name glm5 \
+  --max-model-len 135000 \
+  --max-num-batched-tokens 256 \
+  --max-num-seqs 32 \
+  --gpu-memory-utilization 0.92 \
+  --trust-remote-code \
+  --async-scheduling \
+  --quantization ascend \
   --safetensors-load-strategy prefetch \
-  --kv-cache-dtype int8 --attention_config.indexer_kv_dtype int8 \
-  --enable-auto-tool-choice --tool-call-parser glm47 --reasoning-parser glm47 \
-  --additional-config '{"recompute_scheduler_enable":true,"enable_sparse_sfa_c8":true,"enable_sparse_li_c8":true,"enable_fused_mc2":1}' \
-  --speculative-config '{"num_speculative_tokens":3,"method":"deepseek_mtp","enforce_eager":true}' \
-  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-  --kv-transfer-config '{"kv_connector":"MooncakeConnectorV1","kv_role":"kv_consumer","kv_port":"30100","engine_id":"1","kv_connector_extra_config":{"use_ascend_direct":true,"prefill":{"dp_size":2,"tp_size":16},"decode":{"dp_size":16,"tp_size":2}}}'
+  --kv-cache-dtype int8 \
+  --attention_config.indexer_kv_dtype int8 \
+  --enable-auto-tool-choice \
+  --tool-call-parser glm47 \
+  --reasoning-parser glm47 \
+  --additional-config \
+  '{"recompute_scheduler_enable": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_fused_mc2": 1}' \
+  --speculative-config \
+  '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
+  --compilation-config \
+  '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+  --kv-transfer-config \
+  '{
+    "kv_connector": "MooncakeConnectorV1",
+    "kv_role": "kv_consumer",
+    "kv_port": "30100",
+    "engine_id": "1",
+    "kv_connector_extra_config": {
+      "use_ascend_direct": true,
+      "prefill": {"dp_size": 2, "tp_size": 16},
+      "decode": {"dp_size": 16, "tp_size": 2}
+    }
+  }'
 ```
 
 #### 5.4.4 Start the Engines
