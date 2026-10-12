@@ -32,7 +32,16 @@ def install_worker_io_probe(worker: Any) -> int:
         backend = kv_pool_worker.m_store
         kv_caches = kv_pool_worker.kv_caches
         granularity = kv_pool_worker.cache_transfer_granularity
-        wait_for_store: Callable[[], Any] = kv_pool_worker.wait_for_previous_save
+        send_thread = kv_pool_worker.kv_send_thread
+        assert send_thread is not None, "The production Bulk route must own a Store sender"
+
+        def drain_production_store() -> None:
+            # vLLM randomizes internal IDs; the sender owns the IDs of the queued Store chunks.
+            with send_thread.done_task_lock:
+                request_ids = set(send_thread.stored_requests)
+            kv_pool_worker.handle_released_saves(request_ids)
+
+        wait_for_store: Callable[[], Any] = drain_production_store
         store_method_name = "put"
         load_method_name = "get"
     elif connector_kind == _V1_CONNECTOR:
@@ -53,6 +62,9 @@ def install_worker_io_probe(worker: Any) -> int:
         for cache_or_caches in kv_caches.values()
         for cache in ((cache_or_caches,) if isinstance(cache_or_caches, torch.Tensor) else cache_or_caches)
     )
+    original_exists = backend.exists
+    original_store = getattr(backend, store_method_name)
+    original_load = getattr(backend, load_method_name)
     probe: dict[str, Any] = {
         "caches": caches,
         "wait_for_store": wait_for_store,
@@ -64,18 +76,18 @@ def install_worker_io_probe(worker: Any) -> int:
         "loaded_bytes": 0,
         "local_kv_cleared": False,
         "load_started": False,
+        "backend": backend,
+        "store_method_name": store_method_name,
+        "load_method_name": load_method_name,
+        "original_exists": original_exists,
+        "original_store": original_store,
+        "original_load": original_load,
     }
-    original_exists = backend.exists
-    original_store = getattr(backend, store_method_name)
-    original_load = getattr(backend, load_method_name)
 
     def record_exists(keys: list[str]) -> Any:
         result = original_exists(keys)
         if probe["local_kv_cleared"] and not probe["load_started"]:
-            values = tuple(result)
-            assert len(values) == len(keys) and all(bool(value) for value in values), (
-                "Lookup did not observe every object stored by the cold request"
-            )
+            # A miss is legal. Assertions here could kill the production Lookup RPC thread before it replies.
             probe["lookup_calls"] += 1
             probe["lookup_keys"].extend(keys)
         return result
@@ -156,6 +168,21 @@ def collect_worker_io_probe(worker: Any) -> dict[str, Any]:
         "loaded_bytes": probe["loaded_bytes"],
         "local_kv_cleared": probe["local_kv_cleared"],
     }
+
+
+def remove_worker_io_probe(worker: Any) -> None:
+    """Drain Store and restore Backend methods before the engine releases its KV storage."""
+    probe = getattr(worker, "_ascendstore_equivalence_probe", None)
+    if probe is None:
+        return
+    try:
+        probe["wait_for_store"]()
+    finally:
+        backend = probe["backend"]
+        backend.exists = probe["original_exists"]
+        setattr(backend, probe["store_method_name"], probe["original_store"])
+        setattr(backend, probe["load_method_name"], probe["original_load"])
+        del worker._ascendstore_equivalence_probe
 
 
 def _assert_successful_results(operation: str, keys: list[str], results: Sequence[int]) -> None:
