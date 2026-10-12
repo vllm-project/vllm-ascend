@@ -389,6 +389,11 @@ includes that path in its remote cache version: using `/tmp` on one runner
 and `runner.temp` on another separates otherwise compatible keys into
 different OBS namespaces. The relative archive layout also restores under
 each consumer's own workspace, not the producer's absolute directory.
+The producer initially sets `VLLM_ASCEND_BUILD_CACHE_DIR=csrc/build_cache`.
+Restore exports its absolute equivalent through `GITHUB_ENV` for compilation
+and preserves the original spelling in its `cache-dir` output. Save consumes
+that output, not the updated environment variable: using the absolute build
+directory as the save input would split the OBS namespace again.
 Restore/save transport failures remain nonfatal; ordinary source compilation
 is still the fallback. Existing snapshots under the old path namespaces are
 not migrated, so the first build with the shared path may be cold.

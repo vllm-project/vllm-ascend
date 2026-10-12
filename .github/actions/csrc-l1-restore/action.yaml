@@ -23,6 +23,9 @@ inputs:
     default: ''
 
 outputs:
+  cache-dir:
+    description: Original relative transport path; use for save instead of the exported absolute build directory.
+    value: ${{ inputs.cache-dir }}
   supported:
     value: ${{ steps.key.outputs.supported }}
   primary-key:
