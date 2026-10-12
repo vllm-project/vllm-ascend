@@ -235,8 +235,6 @@ class AscendPCPManager(PCPManager):
 
         if model_config.is_encoder_decoder:
             raise NotImplementedError("MRV2 PCP does not support encoder-decoder models yet.")
-        if supports_mm_inputs:
-            raise NotImplementedError("MRV2 PCP does not support MM inputs yet.")
         if vllm_config.lora_config is not None:
             raise NotImplementedError("MRV2 PCP does not support LoRA yet.")
         speculative_config = vllm_config.speculative_config
@@ -244,10 +242,6 @@ class AscendPCPManager(PCPManager):
             if speculative_config.method not in ("mtp", "eagle3", "dspark"):
                 raise NotImplementedError(
                     "Ascend MRV2 PCP supports speculative decoding only with MTP, Eagle3 and DSpark."
-                )
-            if speculative_config.draft_sample_method != "greedy":
-                raise NotImplementedError(
-                    "Ascend MRV2 PCP speculative decoding currently requires greedy draft sampling."
                 )
         is_sparse_mla = hasattr(model_config.hf_text_config, "index_topk")
         cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
@@ -470,7 +464,22 @@ class AscendPCPManager(PCPManager):
         restored_hidden_states = super().restore_hidden_states(hidden_states)
         if self._global_batch is not None:
             restored_hidden_states[self._global_batch.num_tokens :].zero_()
+            if self._restore_unpadded_global_batch():
+                restored_hidden_states = restored_hidden_states[: self._global_batch.num_tokens]
         return restored_hidden_states
+
+    def _restore_unpadded_global_batch(self) -> bool:
+        """Sampling and replicated drafting consume scheduled global tokens.
+
+        Target graph padding stays private to target attention/capture views.
+        The draft chooses its own execution padding after restoration.
+        """
+        return (
+            getattr(getattr(self, "vllm_config", None), "speculative_config", None) is not None
+            and self.is_decode_sharded
+            and self._global_batch is not None
+            and not self._global_batch.is_dummy
+        )
 
     def restore_for_sampling(
         self,
@@ -489,8 +498,20 @@ class AscendPCPManager(PCPManager):
         assert self._global_batch is not None
         if self._sampling_hidden_restored:
             self._sampling_hidden_restored = False
-            return hidden_states, self._global_batch
-        return super().restore_for_sampling(hidden_states)
+            global_batch = self._global_batch
+        else:
+            hidden_states, global_batch = super().restore_for_sampling(hidden_states)
+        if self._restore_unpadded_global_batch():
+            # Preserve the target's batch; expose real request boundaries and
+            # token extent at the global restoration boundary.
+            global_batch = replace(
+                global_batch,
+                num_tokens_after_padding=global_batch.num_tokens,
+                query_start_loc=global_batch.query_start_loc[: global_batch.num_reqs + 1],
+                query_start_loc_np=global_batch.query_start_loc_np[: global_batch.num_reqs + 1],
+            )
+            hidden_states = hidden_states[: global_batch.num_tokens]
+        return hidden_states, global_batch
 
     def restore_hidden_state_buffer(self, hidden_states: torch.Tensor) -> None:
         """Restore a model-owned rank-local buffer to the global PCP layout."""

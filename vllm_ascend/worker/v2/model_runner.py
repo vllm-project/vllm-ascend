@@ -591,17 +591,26 @@ class NPUModelRunner(GPUModelRunner):
         if sparse_cfg.enabled:
             allocate_kv_offload_topk_profile_buffers(self.get_kv_cache_spec(), self.vllm_config, sparse_cfg)
         mc2_tokens_capacity = get_mc2_tokens_capacity()
+        # The initial dummy profile bypasses PCP batch partitioning. Profile
+        # rank-local tokens; the existing MoE preparation still handles TP.
+        pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
+        global_max_num_tokens: int = self.max_num_tokens
+        profile_max_num_tokens = (global_max_num_tokens + pcp_size - 1) // pcp_size
         with override_mrv2_in_profile_run(True):
             if (
                 mc2_tokens_capacity is not None
-                and self.max_num_tokens > mc2_tokens_capacity
+                and profile_max_num_tokens > mc2_tokens_capacity
                 and select_moe_comm_method(mc2_tokens_capacity, self.vllm_config)
                 in {MoECommType.MC2, MoECommType.FUSED_MC2}
             ):
                 # Use a call-scoped bypass because skip_compiled would require runner-specific ForwardContext plumbing.
                 with disable_compilation(self.get_model()):
                     self._dummy_run(mc2_tokens_capacity, skip_attn=True, skip_eplb=True, is_profile=True)
-            super().profile_run()
+            self.max_num_tokens: int = profile_max_num_tokens
+            try:
+                super().profile_run()
+            finally:
+                self.max_num_tokens = global_max_num_tokens
 
     def gather_batch_req_state(self, scheduler_output: SchedulerOutput, dummy_run: bool):
         batch_state, uniform_token_count = super().gather_batch_req_state(scheduler_output, dummy_run)

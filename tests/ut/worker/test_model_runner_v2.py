@@ -24,7 +24,8 @@ def _make_runner(need_timing: bool = True):
         scheduler_config=SimpleNamespace(profiling_chunk_config=SimpleNamespace(need_timing=need_timing)),
         sparse_kv_offload_config=SimpleNamespace(enabled=False),
     )
-    runner.vllm_config = SimpleNamespace()
+    runner.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(prefill_context_parallel_size=1))
+    runner.max_num_tokens = 16
     runner.model_config = SimpleNamespace(hf_config=SimpleNamespace(model_type="other_model"))
     runner.kv_cache_config = KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
     runner.kvpp = SimpleNamespace(complete_forward=lambda: None)
@@ -844,7 +845,7 @@ def test_initialize_kv_cache_forwards_allocation_context():
 def test_profile_run_dummy_reserves_mc2(moe_type):
     runner = _make_runner()
     runner.max_num_tokens = 16
-    runner.vllm_config = SimpleNamespace()
+    runner.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(prefill_context_parallel_size=1))
     runner.get_model = MagicMock(return_value="m")
     runner._dummy_run = MagicMock()
     with (
@@ -870,6 +871,44 @@ def test_profile_run_skips_mc2_dummy_without_capacity():
     ):
         runner.profile_run()
     runner._dummy_run.assert_not_called()
+
+
+@pytest.mark.parametrize(("pcp_size", "tokens", "expected"), [(1, 16384, 16384), (16, 16384, 1024), (4, 17, 5)])
+@pytest.mark.parametrize("fail", [False, True])
+def test_profile_run_uses_pcp_local_tokens_and_restores_budget(pcp_size, tokens, expected, fail):
+    runner = _make_runner()
+    runner.vllm_config.parallel_config.prefill_context_parallel_size = pcp_size
+    runner.max_num_tokens = tokens
+
+    def parent_profile(self):
+        assert self.max_num_tokens == expected
+        if fail:
+            raise RuntimeError("profile failed")
+
+    with (
+        patch("vllm_ascend.worker.v2.model_runner.get_mc2_tokens_capacity", return_value=None),
+        patch.object(GPUModelRunner, "profile_run", parent_profile),
+    ):
+        if fail:
+            with pytest.raises(RuntimeError, match="profile failed"):
+                runner.profile_run()
+        else:
+            runner.profile_run()
+    assert runner.max_num_tokens == tokens
+
+
+def test_profile_run_compares_mc2_capacity_with_pcp_local_budget():
+    runner = _make_runner()
+    runner.max_num_tokens = 16384
+    runner.vllm_config.parallel_config.prefill_context_parallel_size = 16
+    runner._dummy_run = Mock()
+    with (
+        patch("vllm_ascend.worker.v2.model_runner.get_mc2_tokens_capacity", return_value=2048),
+        patch.object(GPUModelRunner, "profile_run"),
+    ):
+        runner.profile_run()
+    runner._dummy_run.assert_not_called()
+    assert runner.max_num_tokens == 16384
 
 
 def test_profile_run_reserves_sparse_offload_topk_buffers():
