@@ -1,3 +1,5 @@
+from typing import Any
+
 import numpy as np
 import torch
 from vllm.distributed import get_dcp_group
@@ -6,12 +8,16 @@ from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec, MambaSpec, UniformTypeKVCacheSpecs
 from vllm.v1.utils import CpuGpuBuffer
 
+from vllm_ascend import envs
 from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
+from vllm_ascend.ops.triton.block_table_scatter import scatter_block_table
 from vllm_ascend.ops.triton.compute_slot_mapping import (
     _compute_slot_mapping_kernel,
     _next_power_of_2,
     compute_slot_mapping_fused_groups,
 )
+
+_NO_DIRTY = np.iinfo(np.int32).max
 
 
 class BlockTable:
@@ -328,6 +334,191 @@ class BlockTable:
         return CpuGpuBuffer(*size, dtype=dtype, device=self.device, pin_memory=self.pin_memory)
 
 
+class OptimizedBlockTable(BlockTable):
+    """Keep the device table persistent and upload only modified valid ranges.
+
+    Consumers must read only valid block prefixes. Runtime commits execute on
+    the consumer stream; two event-protected staging slots keep both pinned
+    host data and device scatter inputs alive until the scatter completes.
+    Dummy/graph preparation continues to use the inherited full-table commit.
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.dirty_begin = np.full(self.max_num_reqs, _NO_DIRTY, dtype=np.int32)
+        self.dirty_end = np.zeros(self.max_num_reqs, dtype=np.int32)
+        self._dirty_commit_buffer_index = 0
+        self._dirty_pack_capacity = 0
+        self._dirty_segment_capacity = 0
+        self._dirty_pack_buffers: list[CpuGpuBuffer] = []
+        self._dirty_metadata_buffers: list[CpuGpuBuffer] = []
+        self._dirty_buffer_events: list[Any | None] = [None, None]
+
+    def _mark_dirty(self, row_idx: int, begin: int, end: int) -> None:
+        if end <= begin:
+            return
+        self.dirty_begin[row_idx] = min(self.dirty_begin[row_idx], begin)
+        self.dirty_end[row_idx] = max(self.dirty_end[row_idx], end)
+
+    def _clear_dirty(self, row_idx: int) -> None:
+        self.dirty_begin[row_idx] = _NO_DIRTY
+        self.dirty_end[row_idx] = 0
+
+    def _clear_dirty_rows(self, num_reqs: int) -> None:
+        num_reqs = min(num_reqs, self.max_num_reqs)
+        self.dirty_begin[:num_reqs] = _NO_DIRTY
+        self.dirty_end[:num_reqs] = 0
+
+    def _synchronize_dirty_buffers(self) -> None:
+        for event in self._dirty_buffer_events:
+            if event is not None:
+                event.synchronize()
+
+    def _ensure_dirty_buffers(
+        self,
+        total_blocks: int,
+        segment_count: int,
+    ) -> None:
+        required_blocks = max(total_blocks, 1)
+        required_segments = max(segment_count, 1)
+        if required_blocks <= self._dirty_pack_capacity and required_segments <= self._dirty_segment_capacity:
+            return
+
+        self._synchronize_dirty_buffers()
+        self._dirty_pack_capacity = max(
+            self._dirty_pack_capacity,
+            _next_power_of_2(required_blocks),
+        )
+        self._dirty_segment_capacity = max(
+            self._dirty_segment_capacity,
+            _next_power_of_2(required_segments),
+        )
+        self._dirty_pack_buffers = [
+            self._make_buffer(
+                self._dirty_pack_capacity,
+                dtype=torch.int32,
+            )
+            for _ in range(2)
+        ]
+        self._dirty_metadata_buffers = [
+            self._make_buffer(
+                self._dirty_segment_capacity,
+                4,
+                dtype=torch.int32,
+            )
+            for _ in range(2)
+        ]
+        self._dirty_buffer_events = [None, None]
+
+    def append_row(
+        self,
+        block_ids,
+        row_idx: int,
+    ) -> None:
+        start = int(self.num_blocks_per_row[row_idx])
+        super().append_row(block_ids, row_idx)
+        end = int(self.num_blocks_per_row[row_idx])
+        self._mark_dirty(row_idx, start, end)
+
+    def add_row(self, block_ids: list[int], row_idx: int) -> None:
+        self.num_blocks_per_row[row_idx] = 0
+        self._clear_dirty(row_idx)
+        self.append_row(block_ids, row_idx)
+
+    def clear_row(self, row_idx: int) -> None:
+        super().clear_row(row_idx)
+        self._clear_dirty(row_idx)
+
+    def move_row(self, src: int, tgt: int) -> None:
+        super().move_row(src, tgt)
+        num_blocks = int(self.num_blocks_per_row[tgt])
+        self._clear_dirty(tgt)
+        self._mark_dirty(tgt, 0, num_blocks)
+
+    def swap_row(self, src: int, tgt: int) -> None:
+        if src == tgt:
+            return
+        num_blocks_src = int(self.num_blocks_per_row[src])
+        num_blocks_tgt = int(self.num_blocks_per_row[tgt])
+        max_blocks = max(num_blocks_src, num_blocks_tgt)
+        if max_blocks > 0:
+            temporary = self.block_table.np[src, :max_blocks].copy()
+            self.block_table.np[src, :max_blocks] = self.block_table.np[tgt, :max_blocks]
+            self.block_table.np[tgt, :max_blocks] = temporary
+
+        self.num_blocks_per_row[src] = num_blocks_tgt
+        self.num_blocks_per_row[tgt] = num_blocks_src
+        self._clear_dirty(src)
+        self._clear_dirty(tgt)
+        self._mark_dirty(src, 0, num_blocks_tgt)
+        self._mark_dirty(tgt, 0, num_blocks_src)
+
+    def commit_dirty_ranges(self, num_reqs: int) -> None:
+        num_reqs = min(num_reqs, self.max_num_reqs)
+        segments: list[tuple[int, int, int]] = []
+        total_blocks = 0
+        for row_idx in range(num_reqs):
+            begin = int(self.dirty_begin[row_idx])
+            end = int(self.dirty_end[row_idx])
+            if begin == _NO_DIRTY or end <= begin:
+                continue
+
+            end = min(end, int(self.num_blocks_per_row[row_idx]))
+            if end <= begin:
+                self._clear_dirty(row_idx)
+                continue
+            segments.append((row_idx, begin, end))
+            total_blocks += end - begin
+
+        if not segments:
+            return
+
+        max_dirty_blocks = self.max_num_reqs * self.block_table.gpu.shape[1]
+        if total_blocks > max_dirty_blocks:
+            raise RuntimeError(f"dirty block count {total_blocks} exceeds table capacity {max_dirty_blocks}")
+
+        self._ensure_dirty_buffers(total_blocks, len(segments))
+        buffer_idx = self._dirty_commit_buffer_index
+        self._dirty_commit_buffer_index = 1 - buffer_idx
+        reusable = self._dirty_buffer_events[buffer_idx]
+        if reusable is not None:
+            reusable.synchronize()
+
+        packed = self._dirty_pack_buffers[buffer_idx]
+        metadata = self._dirty_metadata_buffers[buffer_idx]
+        packed_offset = 0
+        for segment_idx, (row_idx, begin, end) in enumerate(segments):
+            length = end - begin
+            packed.np[packed_offset : packed_offset + length] = self.block_table.np[row_idx, begin:end]
+            metadata.np[segment_idx] = (
+                row_idx,
+                begin,
+                length,
+                packed_offset,
+            )
+            packed_offset += length
+
+        packed.copy_to_gpu(total_blocks)
+        metadata.copy_to_gpu(len(segments))
+        scatter_block_table(
+            packed.gpu,
+            metadata.gpu,
+            self.block_table.gpu,
+            len(segments),
+        )
+        event = torch.npu.Event()
+        event.record(torch.npu.current_stream())
+        self._dirty_buffer_events[buffer_idx] = event
+
+        for row_idx, _, _ in segments:
+            self._clear_dirty(row_idx)
+
+    def clear(self) -> None:
+        self._synchronize_dirty_buffers()
+        super().clear()
+        self._clear_dirty_rows(self.max_num_reqs)
+
+
 class MultiGroupBlockTable:
     """The BlockTables for each KV cache group."""
 
@@ -368,10 +559,13 @@ class MultiGroupBlockTable:
                 f"max_num_blocks length ({len(max_num_blocks)}) must match block_sizes length ({len(block_sizes)})"
             )
 
+        self._commit_optimization_disabled = envs.VLLM_ASCEND_BLOCK_TABLE_NO_COMMIT_OPTIMIZE
+        block_table_cls = BlockTable if self._commit_optimization_disabled else OptimizedBlockTable
+
         # Use zip to pair block_sizes with kernel_sizes one-to-one
         if kv_cache_groups is not None:
             self.block_tables = [
-                BlockTable(
+                block_table_cls(
                     block_size,
                     max_num_reqs,
                     max_num_blocks_per_req,
@@ -389,7 +583,7 @@ class MultiGroupBlockTable:
             ]
         else:
             self.block_tables = [
-                BlockTable(
+                block_table_cls(
                     block_size,
                     max_num_reqs,
                     max_num_blocks_per_req,
@@ -506,6 +700,14 @@ class MultiGroupBlockTable:
     def commit_block_table(self, num_reqs: int) -> None:
         for block_table in self.block_tables:
             block_table.commit_block_table(num_reqs)
+
+    def commit_runtime(self, num_reqs: int) -> None:
+        """Commit scheduler mutations; dummy/graph paths use full commits."""
+        for block_table in self.block_tables:
+            if self._commit_optimization_disabled:
+                block_table.commit_block_table(num_reqs)
+            else:
+                block_table.commit_dirty_ranges(num_reqs)
 
     def clear(self) -> None:
         for block_table in self.block_tables:
