@@ -39,6 +39,12 @@ import vllm_ascend.patch.platform.patch_mamba_manager  # noqa
 if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv("EXPERT_MAP_RECORD", "false") == "true":
     import vllm_ascend.patch.platform.patch_multiproc_executor  # noqa
 
+# Defer-free patch must run BEFORE patch_balance_schedule: balance swaps the
+# module-level Scheduler name to BalanceScheduler, so a later import would
+# patch (and clobber) BalanceScheduler.schedule instead of the base class.
+# Patching the base first lets BalanceScheduler inherit the fix via
+# super().schedule() on its disabled path.
+import vllm_ascend.patch.platform.patch_defer_block_free_schedule  # noqa
 import vllm_ascend.patch.platform.patch_balance_schedule  # noqa
 import vllm_ascend.patch.platform.patch_dyntra_lb_core  # noqa
 
