@@ -222,6 +222,9 @@ def _build_non_spec_chunked_prefill_metadata(
 
 class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
     _cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
+    # KDA schedules the final row slice on a vector-only auxiliary stream.
+    # Generic GDN consumers keep the historical eager slice in the builder.
+    defer_conv_cache_slice = False
 
     def __init__(
         self,
@@ -395,7 +398,11 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         attn_metadata.non_spec_prefill_metadata = GDNPrefillMetadata(
             causal_conv1d=GDNCausalConv1dMetadata(
                 query_start_loc=attn_metadata.non_spec_query_start_loc,
-                cache_indices=non_spec_cache_indices[:prefill_num_rows],
+                cache_indices=(
+                    non_spec_cache_indices
+                    if self.defer_conv_cache_slice
+                    else non_spec_cache_indices[:prefill_num_rows]
+                ),
                 initial_state_mode=initial_state_mode,
             ),
             chunk=chunk_metadata,
@@ -427,7 +434,11 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         attn_metadata.spec_decode_metadata = GDNSpecDecodeMetadata(
             spec_causal_conv1d=GDNSpecCausalConv1dMetadata(
                 query_start_loc=attn_metadata.spec_query_start_loc,
-                cache_indices=attn_metadata.spec_state_indices_tensor[:spec_num_rows],
+                cache_indices=(
+                    attn_metadata.spec_state_indices_tensor
+                    if self.defer_conv_cache_slice
+                    else attn_metadata.spec_state_indices_tensor[:spec_num_rows]
+                ),
                 num_accepted_tokens=attn_metadata.num_accepted_tokens[:spec_num_rows],
             ),
             actual_seq_lengths=_build_actual_seq_lengths(
@@ -462,7 +473,11 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         attn_metadata.non_spec_decode_metadata = GDNDecodeMetadata(
             causal_conv1d=GDNCausalConv1dMetadata(
                 query_start_loc=attn_metadata.non_spec_query_start_loc,
-                cache_indices=non_spec_cache_indices[:non_spec_num_rows],
+                cache_indices=(
+                    non_spec_cache_indices
+                    if self.defer_conv_cache_slice
+                    else non_spec_cache_indices[:non_spec_num_rows]
+                ),
                 initial_state_mode=None,
             ),
             actual_seq_lengths=_build_actual_seq_lengths(

@@ -255,7 +255,7 @@ def test_mixed_forward_marks_auxiliary_beta_as_preprocessed():
     raw_gate = torch.randn(1, 4, 2, 3)
     output_gate = torch.randn(4, 2, 3)
     projected = torch.randn(4, 6)
-    attention._run_overlapped_qkv_bfg = MagicMock(return_value=(mixed_qkv, beta, raw_gate, output_gate))
+    attention._run_overlapped_qkv_bfg = MagicMock(return_value=(mixed_qkv, beta, raw_gate, output_gate, None))
     attention._forward = MagicMock()
     attention.o_proj = _RecordingLinear(projected)
 

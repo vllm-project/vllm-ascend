@@ -7,6 +7,7 @@ upstream vLLM.  Only the CUDA-specific convolution and KDA execution is
 replaced here with the Ascend metadata builder and AscendC operators.
 """
 
+from dataclasses import dataclass
 from functools import wraps
 
 import torch
@@ -27,7 +28,10 @@ from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
-from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionBackend
+from vllm_ascend.ops.gdn_attn_builder import (
+    AscendGDNAttentionBackend,
+    AscendGDNAttentionMetadataBuilder,
+)
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import (
     AscendW4A8MXFPDynamicLinearMethod,
@@ -41,6 +45,27 @@ _KDA_CHUNK_SIZE = 64
 _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
 _F_PROJ_SHARD_ID = 1
 _KDA_BFG_STREAM: torch.npu.Stream | None = None
+_KDA_CONV_META_STREAM: torch.npu.Stream | None = None
+
+
+@dataclass
+class _KDAConvCacheIndices:
+    spec: torch.Tensor | None
+    prefill: torch.Tensor | None
+    decode: torch.Tensor | None
+    ready_event: torch.npu.Event
+
+
+class _KDAAttentionMetadataBuilder(AscendGDNAttentionMetadataBuilder):
+    # Leave the source cache-index tensors unsliced so KDA can enqueue the
+    # short row slice on its vector-only stream after BFG has been launched.
+    defer_conv_cache_slice = True
+
+
+class _KDAAttentionBackend(AscendGDNAttentionBackend):
+    @staticmethod
+    def get_builder_cls() -> type[_KDAAttentionMetadataBuilder]:
+        return _KDAAttentionMetadataBuilder
 
 
 def _kda_bfg_stream() -> torch.npu.Stream:
@@ -48,6 +73,13 @@ def _kda_bfg_stream() -> torch.npu.Stream:
     if _KDA_BFG_STREAM is None:
         _KDA_BFG_STREAM = torch_npu.npu.Stream()
     return _KDA_BFG_STREAM
+
+
+def _kda_conv_meta_stream() -> torch.npu.Stream:
+    global _KDA_CONV_META_STREAM
+    if _KDA_CONV_META_STREAM is None:
+        _KDA_CONV_META_STREAM = torch_npu.npu.Stream()
+    return _KDA_CONV_META_STREAM
 
 
 class _KDAFusedBFGLinear(MergedColumnParallelLinear):
@@ -255,7 +287,49 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         self.conv1d.quant_method.process_weights_after_loading = process_weights_and_pack
 
     def get_attn_backend(self) -> type[AttentionBackend]:
-        return AscendGDNAttentionBackend
+        return _KDAAttentionBackend
+
+    def _schedule_conv_cache_indices(self) -> _KDAConvCacheIndices | None:
+        """Run Conv1d metadata row slices on a vector-only auxiliary stream."""
+        forward_context = get_forward_context()
+        attn_metadata_raw = forward_context.attn_metadata
+        if not isinstance(attn_metadata_raw, dict):
+            return None
+        attn_metadata = attn_metadata_raw.get(self.prefix)
+        if not isinstance(attn_metadata, GDNAttentionMetadata):
+            return None
+
+        main_stream = torch.npu.current_stream()
+        meta_stream = _kda_conv_meta_stream()
+        metadata_ready = main_stream.record_event()
+
+        with npu_stream_switch(meta_stream):
+            meta_stream.wait_event(metadata_ready)
+
+            spec = None
+            if attn_metadata.spec_decode_metadata is not None:
+                spec_meta = attn_metadata.spec_decode_metadata.spec_causal_conv1d
+                spec = spec_meta.cache_indices[: spec_meta.query_start_loc.size(0) - 1]
+
+            prefill = None
+            if attn_metadata.non_spec_prefill_metadata is not None:
+                prefill_meta = attn_metadata.non_spec_prefill_metadata.causal_conv1d
+                prefill = prefill_meta.cache_indices[: prefill_meta.query_start_loc.size(0) - 1]
+
+            decode = None
+            if attn_metadata.non_spec_decode_metadata is not None:
+                decode_meta = attn_metadata.non_spec_decode_metadata.causal_conv1d
+                decode = decode_meta.cache_indices[: decode_meta.query_start_loc.size(0) - 1]
+
+            for tensor in (spec, prefill, decode):
+                if tensor is not None:
+                    tensor.record_stream(meta_stream)
+            ready_event = meta_stream.record_event()
+
+        for tensor in (spec, prefill, decode):
+            if tensor is not None:
+                tensor.record_stream(main_stream)
+        return _KDAConvCacheIndices(spec, prefill, decode, ready_event)
 
     def forward(
         self,
@@ -264,7 +338,10 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
     ) -> torch.Tensor:
         if self.uses_mixed_projection:
             num_tokens = hidden_states.size(0)
-            mixed_qkv, beta, g1, g2 = self._run_overlapped_qkv_bfg(hidden_states)
+            mixed_qkv, beta, g1, g2, conv_cache_indices = self._run_overlapped_qkv_bfg(
+                hidden_states,
+                return_conv_cache=True,
+            )
             core_attn_out = torch.empty(
                 (1, num_tokens, self.local_num_heads, self.head_dim),
                 dtype=hidden_states.dtype,
@@ -277,6 +354,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
                 beta=beta,
                 core_attn_out=core_attn_out,
                 beta_is_preprocessed=True,
+                conv_cache_indices=conv_cache_indices,
             )
             core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
             return self.o_proj(core_attn_out)[0]
@@ -285,7 +363,15 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
     def _run_overlapped_qkv_bfg(
         self,
         hidden_states: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        *,
+        return_conv_cache: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        _KDAConvCacheIndices | None,
+    ]:
         """Fork BFG work to an auxiliary stream and join it back to main."""
         main_stream = torch.npu.current_stream()
         bfg_stream = _kda_bfg_stream()
@@ -297,6 +383,10 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             fused_bfg = self._project_bfg(hidden_states)
             bfg_projection_ready = bfg_stream.record_event()
 
+        # BFG is queued first.  The independent Conv1d metadata slices are
+        # then submitted to a vector-only stream while DynamicQuant and the
+        # QKV Cube matmul use the main stream.
+        conv_cache_indices = self._schedule_conv_cache_indices() if return_conv_cache else None
         quantized_qkv = self._quantize_fused_qkv(hidden_states)
         quant_ready = main_stream.record_event()
 
@@ -319,6 +409,8 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         # bfg_ready is the auxiliary stream tail. Joining that exact event is
         # required for multi-stream ACL graph capture as well as eager reuse.
         main_stream.wait_event(bfg_ready)
+        if return_conv_cache:
+            return mixed_qkv, beta, g1, g2, conv_cache_indices
         return mixed_qkv, beta, g1, g2
 
     def _project_bfg(
@@ -529,6 +621,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         core_attn_out: torch.Tensor,
         *,
         beta_is_preprocessed: bool = False,
+        conv_cache_indices: _KDAConvCacheIndices | None = None,
     ) -> None:
         """Dispatch speculative, prefill, and decode tokens through KDA kernels."""
         forward_context = get_forward_context()
@@ -553,6 +646,8 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
 
         conv_state, recurrent_state = self.kv_cache
         conv_weights_t = self.get_parameter(_PACKED_CONV_WEIGHT_NAME)
+        if conv_cache_indices is not None:
+            torch.npu.current_stream().wait_event(conv_cache_indices.ready_event)
         spec_masks = attn_metadata.spec_sequence_masks
         spec_token_indices = attn_metadata.spec_token_indx
         non_spec_token_indices = attn_metadata.non_spec_token_indx
@@ -583,12 +678,18 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             spec_meta = attn_metadata.spec_decode_metadata
             assert spec_meta is not None
             spec_conv_meta = spec_meta.spec_causal_conv1d
+            spec_cache_indices = (
+                conv_cache_indices.spec
+                if conv_cache_indices is not None
+                else spec_conv_meta.cache_indices[: spec_conv_meta.query_start_loc.size(0) - 1]
+            )
+            assert spec_cache_indices is not None
             mixed_spec = self._run_causal_conv1d(
                 mixed_spec,
                 conv_weights_t,
                 conv_state,
                 spec_conv_meta.query_start_loc,
-                spec_conv_meta.cache_indices,
+                spec_cache_indices,
                 None,
                 run_mode=1,
                 num_accepted_tokens=spec_conv_meta.num_accepted_tokens,
@@ -620,24 +721,40 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             if attn_metadata.num_prefills > 0:
                 prefill_meta = attn_metadata.non_spec_prefill_metadata
                 assert prefill_meta is not None
+                prefill_cache_indices = (
+                    conv_cache_indices.prefill
+                    if conv_cache_indices is not None
+                    else prefill_meta.causal_conv1d.cache_indices[
+                        : prefill_meta.causal_conv1d.query_start_loc.size(0) - 1
+                    ]
+                )
+                assert prefill_cache_indices is not None
                 mixed_non_spec = self._run_causal_conv1d(
                     mixed_non_spec,
                     conv_weights_t,
                     conv_state,
                     prefill_meta.causal_conv1d.query_start_loc,
-                    prefill_meta.causal_conv1d.cache_indices,
+                    prefill_cache_indices,
                     prefill_meta.causal_conv1d.initial_state_mode,
                     run_mode=0,
                 )
             elif attn_metadata.num_decodes > 0:
                 decode_meta = attn_metadata.non_spec_decode_metadata
                 assert decode_meta is not None
+                decode_cache_indices = (
+                    conv_cache_indices.decode
+                    if conv_cache_indices is not None
+                    else decode_meta.causal_conv1d.cache_indices[
+                        : decode_meta.causal_conv1d.query_start_loc.size(0) - 1
+                    ]
+                )
+                assert decode_cache_indices is not None
                 mixed_non_spec = self._run_causal_conv1d(
                     mixed_non_spec,
                     conv_weights_t,
                     conv_state,
                     decode_meta.causal_conv1d.query_start_loc,
-                    decode_meta.causal_conv1d.cache_indices,
+                    decode_cache_indices,
                     None,
                     run_mode=1,
                 )
