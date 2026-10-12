@@ -99,10 +99,10 @@ The details of each configuration option are as follows:
 
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
-| `lmhead_tensor_parallel_size`    | int  | `0` | The custom tensor parallel size of the LM head. Must evenly divide `data_parallel_size`.    |
-| `oproj_tensor_parallel_size`     | int  | `0` | The custom tensor parallel size of o_proj. Must evenly divide `data_parallel_size`; values > 1 require the o_proj / MLP preconditions.     |
-| `embedding_tensor_parallel_size` | int  | `0` | The custom tensor parallel size of the embedding. Must evenly divide `data_parallel_size`. |
-| `mlp_tensor_parallel_size`       | int  | `0` | The custom tensor parallel size of the MLP. Must evenly divide `data_parallel_size`; values > 1 require the o_proj / MLP preconditions.       |
+| `lmhead_tensor_parallel_size`    | int  | `0` | The custom tensor parallel size of `lm_head`.    |
+| `oproj_tensor_parallel_size`     | int  | `0` | The custom tensor parallel size of `o_proj`.     |
+| `embedding_tensor_parallel_size` | int  | `0` | The custom tensor parallel size of `embedding`. |
+| `mlp_tensor_parallel_size`       | int  | `0` | The custom tensor parallel size of `mlp`.       |
 
 **ascend_compilation_config**
 
