@@ -29,7 +29,11 @@ def warmup_v2_model_dtype_rejection_sampler(model_runner: NPUModelRunner) -> Non
     if target_dtype == torch.float32:
         return
 
-    draft_logits = model_runner.speculator.draft_logits
+    speculator = model_runner.speculator
+    if speculator is None:
+        return
+
+    draft_logits = speculator.draft_logits
     num_spec_steps = model_runner.num_speculative_steps
     vocab_size = model_runner.model_config.get_vocab_size()
     device = model_runner.device

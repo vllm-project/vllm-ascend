@@ -81,8 +81,14 @@ def test_warms_configured_synthetic_acceptance(draft_dtype):
             num_speculative_steps=2,
             model_config=SimpleNamespace(dtype=torch.float32),
         ),
+        SimpleNamespace(
+            is_last_pp_rank=True,
+            num_speculative_steps=2,
+            model_config=SimpleNamespace(dtype=torch.bfloat16),
+            speculator=None,
+        ),
     ],
-    ids=["non_sampling_rank", "no_speculation", "fp32"],
+    ids=["non_sampling_rank", "no_speculation", "fp32", "no_speculator"],
 )
 def test_skips_unused_variants(runner):
     with patch("vllm_ascend.model_executor.warmup.v2_rejection_sampler_warmup.rejection_sample") as sample:
