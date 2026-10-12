@@ -104,6 +104,24 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Non-sensitive FSA scheduling: 1 (default) enables the dynamic planner stream; 0 disables it.
+    "VLLM_ASCEND_FSA_ASYNC_PLAN": lambda: bool(int(os.getenv("VLLM_ASCEND_FSA_ASYNC_PLAN", "1"))),
+    # Non-sensitive FSA layout reuse within a graph capture: 1 (default); 0 disables it.
+    "VLLM_ASCEND_FSA_REUSE_WRITEBACK_LAYOUT": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_FSA_REUSE_WRITEBACK_LAYOUT", "1"))
+    ),
+    # Non-sensitive runtime descriptor fusion: 1 (default); 0 disables it. Preserves MemFabric copy.
+    "VLLM_ASCEND_FSA_FUSED_WRITEBACK_DESCRIPTORS": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_FSA_FUSED_WRITEBACK_DESCRIPTORS", "1"))
+    ),
+    # Non-sensitive paired K/Rope scatter: 1 (default); 0 disables it. Native fallback remains.
+    "VLLM_ASCEND_FSA_PAIRED_CURRENT_SCATTER": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_FSA_PAIRED_CURRENT_SCATTER", "1"))
+    ),
+    # Non-sensitive device-value checks: 0 (default) skips optional checks; 1 enables validation.
+    "VLLM_ASCEND_FSA_VALIDATE_DEVICE_METADATA": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_FSA_VALIDATE_DEVICE_METADATA", "0"))
+    ),
 }
 
 # end-env-vars-definition
