@@ -172,6 +172,7 @@ private:
     __aicore__ inline void InitBuffers();
     __aicore__ inline void InitActualSeqLen(__gm__ uint8_t *actualSeqLengthsQ, __gm__ uint8_t *actualSeqLengths);
     __aicore__ inline void InitOutputSingleCore();
+    __aicore__ inline void InitPaddingOutput();
     // ================================Process functions================================
     __aicore__ inline void ProcessBalance();
     __aicore__ inline void PreloadPipeline(uint32_t loop, uint64_t s2Start, uint64_t s2LoopIdx,
@@ -321,6 +322,30 @@ __aicore__ inline void SparseFlashAttentionMla<SFAT>::InitOutputSingleCore()
 }
 
 template <typename SFAT>
+__aicore__ inline void SparseFlashAttentionMla<SFAT>::InitPaddingOutput()
+{
+    if constexpr (LAYOUT_T == SFA_LAYOUT::TND) {
+        if (constInfo.actualLenDimsQ == 0) {
+            return;
+        }
+        int64_t actualTokens = actualSeqLengthsQGm.GetValue(constInfo.batchSize - 1);
+        if (actualTokens < 0 || actualTokens >= constInfo.qSeqSize) {
+            return;
+        }
+        // Partition only the unwritten tail at head boundaries; live writes are disjoint.
+        uint64_t paddingHeads = (constInfo.qSeqSize - actualTokens) * constInfo.qHeadNum;
+        uint64_t vectorCoreNum = 2 * GetBlockNum();
+        uint64_t headsPerCore = (paddingHeads + vectorCoreNum - 1) / vectorCoreNum;
+        uint64_t headOffset = tmpBlockIdx * headsPerCore;
+        if (headOffset < paddingHeads) {
+            uint64_t headCount = Min(headsPerCore, paddingHeads - headOffset);
+            uint64_t outputOffset = (actualTokens * constInfo.qHeadNum + headOffset) * headDim;
+            matmul::InitOutput<OUT_T>(attentionOutGm[outputOffset], headCount * headDim, 0);
+        }
+    }
+}
+
+template <typename SFAT>
 __aicore__ inline void SparseFlashAttentionMla<SFAT>::GetActualSeqLen(uint32_t bIdx, uint32_t s1Idx)
 {
     tempLoopInfo.curActualSeqLenOri = GetActualSeqLenKV(bIdx);
@@ -452,6 +477,7 @@ __aicore__ inline void SparseFlashAttentionMla<SFAT>::Init(__gm__ uint8_t *query
     softmaxMaxGm.SetGlobalBuffer((__gm__ T *)softmaxMax);
     softmaxSumGm.SetGlobalBuffer((__gm__ T *)softmaxSum);
     if ASCEND_IS_AIV {
+        InitPaddingOutput();
         if (constInfo.needInit && LAYOUT_T != SFA_LAYOUT::TND) {
             InitOutputSingleCore();
         }

@@ -284,3 +284,57 @@ def test_plain_decode_writes_padded_destination_directly(monkeypatch, empty):
     assert calls == [True]
     torch.testing.assert_close(target[0, :3, 0], qkv[:3, :128] * 2)
     assert torch.count_nonzero(target[:, 3:]) == 0
+
+
+@pytest.mark.parametrize("mode", ["decode", "spec", "mixed"])
+def test_forward_norm_uses_live_device_lengths_and_clears_nan_padding(monkeypatch, mode):
+    capacity, heads, dim = 4, 2, 8
+    starts = torch.tensor([0, 4], dtype=torch.int32)
+    spec_starts = torch.tensor([0, 0], dtype=torch.int32)
+    metadata = SimpleNamespace(
+        num_actual_tokens=capacity,
+        non_spec_query_start_loc=None if mode == "spec" else starts,
+        spec_query_start_loc=None if mode == "decode" else spec_starts,
+    )
+    monkeypatch.setattr(model_kda, "get_forward_context", lambda: SimpleNamespace(attn_metadata={"layer": metadata}))
+    gate = torch.ones(capacity, heads, dim)
+    raw = torch.ones(1, capacity, heads, dim)
+    raw[0, 0, 0, 0] = torch.nan
+    normalized = []
+
+    def attention(**kwargs):
+        kwargs["core_attn_out"].copy_(raw)
+
+    def norm(x, g, *, out, num_valid_tokens):
+        assert out is x
+        expected = x * torch.sigmoid(g)
+        expected[:, num_valid_tokens:] = 0
+        out.copy_(expected)
+        normalized.append(out)
+        return out
+
+    projection = 3 * heads * dim + heads + 2 * dim
+    layer = SimpleNamespace(
+        prefix="layer",
+        local_num_heads=heads,
+        head_dim=dim,
+        local_projection_size=heads * dim,
+        in_proj_qkvbfg_a=lambda x: (torch.zeros(capacity, projection),),
+        f_b_proj=lambda x: (torch.zeros(capacity, heads * dim),),
+        g_b_proj=lambda x: (gate.reshape(capacity, -1),),
+        _forward=attention,
+        o_norm=norm,
+        o_proj=lambda x: (x,),
+    )
+    # The captured CPU capacity stays fixed while the device lengths shrink.
+    for live in (3, 1, 0):
+        starts[-1] = live if mode == "decode" else (1 if live and mode == "mixed" else 0)
+        spec_starts[-1] = live - starts[-1] if mode == "mixed" else live
+        gate.fill_(1)
+        gate[live:] = torch.nan
+        actual = model_kda.Glm5NextLinearAttention.forward(layer, torch.ones(capacity, dim), None)
+        assert actual.data_ptr() == normalized[-1].data_ptr()
+        torch.testing.assert_close(
+            actual[:live], (raw[:, :live] * torch.sigmoid(gate[:live])).reshape(live, heads * dim), equal_nan=True
+        )
+        assert torch.count_nonzero(actual[live:]) == 0

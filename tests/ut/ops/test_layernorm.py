@@ -86,15 +86,17 @@ def test_RMSNorm_creates_bias_from_quant_description(default_vllm_config):
     assert not layer.bias.requires_grad
 
 
-def test_FusedRMSNormGated_dispatches_to_ascend_kernel(default_vllm_config):
+@pytest.mark.parametrize("with_padding", [False, True])
+def test_FusedRMSNormGated_dispatches_to_ascend_kernel(default_vllm_config, with_padding):
     layer = FusedRMSNormGated(hidden_size=8, eps=1e-6, activation="sigmoid")
     x = torch.randn(1, 4, 2, 8)
     gate = torch.randn(4, 2, 8)
     residual = torch.randn_like(x)
     expected = (torch.empty_like(x), torch.empty_like(x))
+    live_tokens = torch.tensor(3, dtype=torch.int32) if with_padding else None
 
     with patch("vllm_ascend.ops.layernorm.rms_norm_gated", return_value=expected) as fused_norm_gate:
-        actual = layer(x, gate, residual=residual, prenorm=True, residual_in_fp32=True)
+        actual = layer(x, gate, residual=residual, prenorm=True, residual_in_fp32=True, num_valid_tokens=live_tokens)
 
     assert isinstance(layer, AscendFusedRMSNormGated)
     assert actual is expected
@@ -109,6 +111,7 @@ def test_FusedRMSNormGated_dispatches_to_ascend_kernel(default_vllm_config):
         prenorm=True,
         residual_in_fp32=True,
         out=None,
+        num_valid_tokens=live_tokens,
     )
 
 
