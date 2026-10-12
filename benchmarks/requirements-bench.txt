@@ -1,4 +1,5 @@
 pandas
 datasets
 modelscope
+pyarrow<26
 tabulate
