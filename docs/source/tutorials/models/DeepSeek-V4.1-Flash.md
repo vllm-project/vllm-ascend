@@ -812,7 +812,6 @@ vllm serve "$MODEL_PATH" \
     --quantization ascend \
     --enforce-eager \
     --enable-prefix-caching \
-    --no-disable-hybrid-kv-cache-manager \
     --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
     --additional-config '{
         "enable_cpu_binding":true,
@@ -905,7 +904,6 @@ vllm serve "$MODEL_PATH" \
     --async-scheduling \
     --block-size 128 \
     --no-enable-prefix-caching \
-    --no-disable-hybrid-kv-cache-manager \
     --trust-remote-code \
     --tokenizer-mode deepseek_v41 \
     --reasoning-parser deepseek_v41 \
@@ -984,8 +982,6 @@ Key pooling parameters:
 - `use_layerwise: false` is required for DeepSeek-V4.1-Flash. Do not enable
   layerwise pooling for this model because its CED hybrid-attention structure
   is not supported by the layerwise path.
-- `--no-disable-hybrid-kv-cache-manager` keeps the hybrid KV cache manager
-  enabled and is required for DeepSeek-V4 family KV Pool deployments.
 
 For Memcache configuration, capacity tuning, and troubleshooting, refer to the
 [KV Cache Pool guide](../../user_guide/feature_guide/kv_pool.md#scenario-2-memcache-backend).
