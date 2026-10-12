@@ -679,21 +679,18 @@ jobs:
     needs: [pre-commit, select-tests]
     # !cancelled() overrides transitive skip-propagation from recommend-tests
     # (skipped under ready-all) through select-tests, without running after workflow cancel.
-    # ready-all and main2main run the full suite. The one_card cases moved into
-    # curated_tests.a5 are dropped from that A2 scan, so those labels must
-    # start this job. ready-a5 still runs the same suite on its own when
-    # select-tests has already produced the A5 groups.
+    # ready-all and main2main already include the relocated one_card cases in
+    # the main matrix under a5-4. This job is the ready-a5 curated run, and
+    # stays off those full-suite labels so the same files are not scheduled twice.
     if: >-
       ${{
         !cancelled() &&
         needs.pre-commit.result == 'success' &&
         needs.select-tests.result == 'success' &&
         needs.select-tests.outputs.has_tests_a5 == 'true' &&
-        (
-          contains(github.event.pull_request.labels.*.name, 'ready-a5') ||
-          contains(github.event.pull_request.labels.*.name, 'ready-all') ||
-          contains(github.event.pull_request.labels.*.name, 'main2main')
-        )
+        contains(github.event.pull_request.labels.*.name, 'ready-a5') &&
+        !contains(github.event.pull_request.labels.*.name, 'ready-all') &&
+        !contains(github.event.pull_request.labels.*.name, 'main2main')
       }}
     name: run-selected-tests-a5 (vllm@${{ matrix.vllm_version_short }})
     strategy:
@@ -820,8 +817,8 @@ jobs:
           if [ "${HAS_TESTS_A5}" = "true" ]; then
             TESTS_A5_RESULT="${{ needs.run-selected-tests-a5.result }}"
             echo "run-selected-tests-a5: ${TESTS_A5_RESULT}"
-            if [ "${TESTS_A5_RESULT}" = "skipped" ] && [ "${HAS_READY_A5_LABEL}" != "true" ] && [ "${HAS_READY_ALL_LABEL}" != "true" ] && [ "${HAS_MAIN2MAIN_LABEL}" != "true" ]; then
-              echo "::notice::run-selected-tests-a5 was skipped because this is not a full-suite run and ready-a5 is not set"
+            if [ "${TESTS_A5_RESULT}" = "skipped" ] && { [ "${HAS_READY_A5_LABEL}" != "true" ] || [ "${HAS_READY_ALL_LABEL}" = "true" ] || [ "${HAS_MAIN2MAIN_LABEL}" = "true" ]; }; then
+              echo "::notice::run-selected-tests-a5 was skipped; full-suite A5 cases run in the main matrix under a5-4"
             elif [ "${TESTS_A5_RESULT}" != "success" ]; then
               echo "::error::run-selected-tests-a5 did not succeed (result: ${TESTS_A5_RESULT})."
               echo "::error::The A5 test suite failed. Open the failed run-selected-tests-a5 job above for details."

@@ -43,9 +43,9 @@ curated_tests:
   kvpp:
     - tests/e2e/pull_request/two_card/test_kvpp.py
   # A5 (Ascend 950) curated test suite.
-  # one_card files here are removed from the A2 partition by select_tests.py
-  # unless this suite itself is selected. A2-only kernels (TurboQuant, SFA,
-  # QKV-norm RoPE fusion, xlite, 310P, VL/MiniCPM) stay on the A2 scan.
+  # one_card files here are moved from the A2 partition to a5-4 by
+  # select_tests.py. A2-only kernels (TurboQuant, SFA, QKV-norm RoPE fusion,
+  # xlite, 310P, VL/MiniCPM) stay on the A2 scan.
   a5:
     - tests/e2e/pull_request/four_card/test_data_parallel_tp2.py
     - tests/e2e/pull_request/one_card/test_msa_index_score.py
@@ -184,6 +184,9 @@ partition:
   a2-1:
     runner_label: linux-aarch64-a2b3-1
     count: 7
+  a5-4:
+    runner_label: linux-aarch64-a5-4
+    count: 6
   a3-2:
     runner_label: linux-aarch64-a3-2
     count: 5

@@ -452,8 +452,8 @@ def _a2_tests_relocated_to_a5(curated_tests: dict[str, list[str]]) -> set[str]:
     """Return one_card files owned by the A5 curated suite.
 
     Those files still live under ``tests/e2e/pull_request/one_card``, which
-    directory scans route to the A2 partition. Non-A5 selections drop them so
-    they run only through ``--curated a5``.
+    directory scans route to the A2 partition. Non-A5 selections move them to
+    the ``a5-4`` partition so the full suite runs them on Ascend 950.
     """
     relocated: set[str] = set()
     for test_file in _expand_test_files(curated_tests.get("a5", [])):
@@ -462,15 +462,25 @@ def _a2_tests_relocated_to_a5(curated_tests: dict[str, list[str]]) -> set[str]:
     return relocated
 
 
-def _drop_tests(groups: dict[PartitionKey, list[str]], dropped: set[str]) -> None:
-    if not dropped:
+def _move_tests(
+    groups: dict[PartitionKey, list[str]],
+    moved: set[str],
+    destination: PartitionKey,
+) -> None:
+    if not moved:
         return
+    relocated_targets: list[str] = []
     for key in list(groups.keys()):
-        groups[key] = [
-            target
-            for target in groups[key]
-            if _as_posix_path(_pytest_node_file_path(target).rstrip("/")) not in dropped
-        ]
+        stay: list[str] = []
+        for target in groups[key]:
+            file_path = _as_posix_path(_pytest_node_file_path(target).rstrip("/"))
+            if file_path in moved:
+                relocated_targets.append(target)
+            else:
+                stay.append(target)
+        groups[key] = stay
+    if relocated_targets:
+        groups[destination].extend(relocated_targets)
 
 
 def _load_curated_tests(meta: dict) -> dict[str, list[str]]:
@@ -906,10 +916,10 @@ def main():
             all_groups[key] = filtered
         _dedup_groups(all_groups)
 
-    # one_card files listed in curated_tests.a5 have moved off A2. Keep them
-    # only for the A5 curated run; every other selection drops them.
+    # one_card files listed in curated_tests.a5 leave the A2 partition and
+    # show up under a5-4. The curated A5 run already overrides the runner.
     if args.curated != "a5":
-        _drop_tests(all_groups, _a2_tests_relocated_to_a5(curated_tests))
+        _move_tests(all_groups, _a2_tests_relocated_to_a5(curated_tests), "a5-4")
         _dedup_groups(all_groups)
 
     # Normalize every input mode. A bare file contains all of its nodeids,
