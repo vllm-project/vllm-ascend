@@ -29,8 +29,8 @@ Test selection is driven by the coverage/AST based precision testing pipeline
   e2e test paths (files or directories) supplied via the ``/e2e`` PR
   comment. Each path is routed directly to the appropriate runner.
 
-- ``--all-tests``: Full-suite mode. Scans ``tests/ut`` (routed to the CPU
-  runner) and ``tests/e2e/pull_request`` (routed by directory convention).
+- ``--all-tests``: Full-suite mode. Scans ``tests/ut`` (CPU),
+  ``tests/e2e/pull_request``, and the nightly ``singlecard_ops`` tree (NPU).
   Used for ready-all runs and scheduled full scans.
 
 - ``--curated``: Curated-suite mode. Reads the named test list from
@@ -40,7 +40,7 @@ Pipeline (all modes):
   1. Collect    -- gather test paths (always resolved to individual files).
   2. Skip       -- remove configured ``skip_tests`` entries.
   3. Route      -- map tests to logical partitions via runner_mapping.
-  4. Pin        -- move configured files to dedicated logical partitions.
+  4. Replicate  -- add configured hardware-specific coverage for mixed files.
   5. Partition  -- select exact runner labels and split groups by estimated time.
   6. Output     -- write test_groups / has_tests / matched_modules.
 
@@ -91,6 +91,7 @@ class RunnerInfo:
 class PartitionInfo:
     runner_label: str
     count: int
+    single_npu: bool = False
 
 
 PartitionKey = str
@@ -103,7 +104,11 @@ CPU_UT_BATCH_ALIAS = "cpu-ut"
 CPU_UT_BATCH_PATH = "tests/ut"
 
 # Full-suite mode roots scanned by --all-tests.
-_ALL_TESTS_ROOTS = ("tests/ut", "tests/e2e/pull_request")
+_ALL_TESTS_ROOTS = (
+    "tests/ut",
+    "tests/e2e/pull_request",
+    "tests/e2e/nightly/single_node/ops/singlecard_ops",
+)
 
 # When set via --skip-cpu-ut, tests/ut targets are dropped from every selection
 # mode. CPU UTs are executed by the cpu-ut job on every PR; the PR test
@@ -410,6 +415,7 @@ def _load_partition_config(meta: dict) -> dict[PartitionKey, PartitionInfo]:
         result[str(key)] = PartitionInfo(
             runner_label=runner_label,
             count=count,
+            single_npu=bool(value.get("single_npu", False)),
         )
     return result
 
@@ -452,6 +458,32 @@ def _load_skip_tests(meta: dict) -> set[str]:
     if not isinstance(raw, list) or not all(isinstance(t, str) and t for t in raw):
         raise ValueError("skip_tests must be a list of test file paths")
     return {t.rstrip("/") for t in raw}
+
+
+def _add_hardware_coverage(
+    groups: dict[PartitionKey, list[str]],
+    meta: dict,
+    partitions: dict[PartitionKey, PartitionInfo],
+) -> None:
+    """Repeat selected files on devices needed by their hardware-specific cases.
+
+    Run after normal deduplication and skip filtering: copies across hardware
+    partitions are intentional. A selected nodeid keeps its original scope.
+    """
+    selected = [target for targets in groups.values() for target in targets]
+    for path, destinations in (meta.get("additional_hardware", {}) or {}).items():
+        if not isinstance(destinations, list) or not destinations:
+            raise ValueError(f"additional_hardware must list destination partitions: {path}")
+        for destination in destinations:
+            if destination not in partitions or not partitions[destination].single_npu:
+                raise ValueError(f"additional_hardware requires a single-NPU partition: {destination}")
+            for target in selected:
+                test_file = _as_posix_path(_pytest_node_file_path(target))
+                matches = test_file.startswith(path) if path.endswith("/") else test_file == path
+                if matches:
+                    bucket = groups.setdefault(destination, [])
+                    if target not in bucket:
+                        bucket.append(target)
 
 
 def _validate_runner_config(
@@ -497,7 +529,7 @@ def _prefer_560t_partitions(
     for key, info in updated.items():
         target_label = _A3_560T_LABEL_MAP.get(info.runner_label)
         if target_label is not None:
-            updated[key] = PartitionInfo(runner_label=target_label, count=info.count)
+            updated[key] = PartitionInfo(runner_label=target_label, count=info.count, single_npu=info.single_npu)
     return updated
 
 
@@ -520,19 +552,18 @@ def _apply_runner_label_override(
 
     override_key = f"{override_runner.npu_type.value}-{override_runner.num_npus}"
     overridden: dict[PartitionKey, list[str]] = {}
+    updated_partition_config = dict(partition_config)
     for partition_key, tests in all_groups.items():
         partition_info = partition_config.get(partition_key)
         runner = runners.get(partition_info.runner_label) if partition_info else None
         if runner is not None and runner.npu_type == NpuType.CPU:
             overridden[partition_key] = tests
         else:
-            overridden.setdefault(override_key, []).extend(tests)
+            single_npu = partition_info.single_npu if partition_info else False
+            key = f"ops-{override_runner.npu_type.value}-1" if single_npu else override_key
+            overridden.setdefault(key, []).extend(tests)
+            updated_partition_config[key] = PartitionInfo(runner_label=runner_label, count=1, single_npu=single_npu)
 
-    updated_partition_config = dict(partition_config)
-    updated_partition_config[override_key] = PartitionInfo(
-        runner_label=runner_label,
-        count=1,
-    )
     return overridden, updated_partition_config
 
 
@@ -595,9 +626,10 @@ def _build_test_group(
     tests: list[str],
     partition_name: str,
     partition: str,
+    single_npu: bool = False,
 ) -> dict:
     group: dict = {
-        "num_npus": runner.num_npus,
+        "num_npus": 1 if single_npu else runner.num_npus,
         "npu_type": runner.npu_type.value,
         "runner": runner.label,
         "tests": " ".join(sorted(tests)),
@@ -644,10 +676,11 @@ def _resolve_to_runners(
                         bucket,
                         partition_key,
                         f"{i + 1}-{psize}",
+                        partition_info.single_npu,
                     )
                 )
         else:
-            result.append(_build_test_group(runner, tests, partition_key, "1-1"))
+            result.append(_build_test_group(runner, tests, partition_key, "1-1", partition_info.single_npu))
 
     return result
 
@@ -729,8 +762,8 @@ def main():
     input_group.add_argument(
         "--all-tests",
         action="store_true",
-        help="Run the full test suite: scan tests/ut (CPU) and "
-        "tests/e2e/pull_request, routing e2e tests by directory convention",
+        help="Run the full test suite: scan tests/ut (CPU), tests/e2e/pull_request, "
+        "and nightly singlecard_ops, routing e2e tests by configuration",
     )
     input_group.add_argument(
         "--curated",
@@ -865,6 +898,8 @@ def main():
     if args.all_tests or _has_accuracy_tests(all_groups, accuracy_tests):
         partition_config = _prefer_560t_partitions(partition_config)
 
+    _add_hardware_coverage(all_groups, meta, partition_config)
+
     # A command-line override is an explicit, transient choice and therefore
     # has higher priority than static routing.
     if args.runner_label_override:
@@ -875,6 +910,8 @@ def main():
                 runners,
                 partition_config,
             )
+            # An explicit override can merge the hardware copies again.
+            _dedup_groups(all_groups)
         except ValueError as exc:
             parser.error(str(exc))
 

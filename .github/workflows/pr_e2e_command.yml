@@ -161,9 +161,10 @@ jobs:
             exit 1
           fi
           for TEST in $TESTS; do
-            if [[ ! "$TEST" =~ ^tests/e2e/pull_request/[^/]+/ ]]; then
+            if [[ ! "$TEST" =~ ^tests/e2e/pull_request/[^/]+/ ]] &&
+               [[ ! "$TEST" =~ ^tests/e2e/nightly/single_node/ops/singlecard_ops(/|$) ]]; then
               echo "::error::Unsupported test path: $TEST"
-              echo "Only tests under tests/e2e/pull_request/<subdir>/ are supported."
+              echo "Use tests/e2e/pull_request/<subdir>/ or tests/e2e/nightly/single_node/ops/singlecard_ops/."
               exit 1
             fi
           done

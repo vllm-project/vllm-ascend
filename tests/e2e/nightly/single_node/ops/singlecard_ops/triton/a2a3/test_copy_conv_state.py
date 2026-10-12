@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+"""Regression coverage for local convolution-state copying and write-back."""
+
 import pytest
 import torch
 import torch_npu  # noqa: F401
@@ -38,7 +40,7 @@ def test_conv_state_copy_masks_invalid_slots_and_preserves_shared_pages(dim_firs
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("layout", ["contiguous", "page_strided", "dim_first"])
 @pytest.mark.parametrize("run_mode,tokens,initial", [(0, 127, False), (0, 128, True), (1, 1, True)])
-def test_causal_conv_first_packed_row_matches_reference(dtype, layout, run_mode, tokens, initial):
+def test_copy_conv_state_writeback_preserves_storage(dtype, layout, run_mode, tokens, initial):
     slots, state_len, dim = 4, 3, 384
     generator = torch.Generator().manual_seed(42)
     storage = (torch.randn(slots * state_len * dim * 2, generator=generator) * 0.2).to(dtype)
