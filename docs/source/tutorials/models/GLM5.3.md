@@ -305,7 +305,7 @@ Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-w8a8c8 \
         --host 0.0.0.0 \
         --port 8077 \
-        --max-model-len 135000 \
+        --max-model-len 200000 \
         --data-parallel-size 4 \
         --data-parallel-size-local 1 \
         --data-parallel-start-rank 0 \
@@ -367,7 +367,7 @@ Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md
         --host 0.0.0.0 \
         --port 8077 \
         --headless \
-        --max-model-len 135000 \
+        --max-model-len 200000 \
         --data-parallel-size 4 \
         --data-parallel-size-local 1 \
         --data-parallel-start-rank ${dp_start_rank} \
@@ -478,9 +478,9 @@ Prerequisites:
 1. Prepare the same weights and software on all eight nodes. Set
    `MODEL_PATH` to the installed GLM-5.3-w8a8c8 weight directory.
 2. Verify [multi-node communication](../../getting_started/installation.md#installation-multi-node-interconnect).
-   The Prefill command takes the node's own IP as `$3`; the Decode
-  command passes each node's IP as `LOCAL_IP` inline when invoking
-  `launch_online_dp.py`.
+   The Prefill command takes the node's own IP as `$3`; each Decode node
+   sets its own `LOCAL_IP` in its local engine script before invoking
+   `launch_online_dp.py`.
 3. Reserve the Prefill master port 29501 (TCP store for `--nnodes 4`),
    Prefill DP RPC port 12980, Decode DP RPC port 12990, Decode API ports
    10010-10013 per node, Prefill API port 8077, proxy port 8000, and the
@@ -572,7 +572,7 @@ export CPU_AFFINITY_CONF=1
 export ACL_OP_INIT_MODE=1
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 
-exec vllm serve "$MODEL_PATH" \
+vllm serve "$MODEL_PATH" \
   --host 0.0.0.0 \
   --port "$PORT" \
   --data-parallel-size 2 \
@@ -589,7 +589,7 @@ exec vllm serve "$MODEL_PATH" \
   --enable-prefix-caching \
   --seed 1024 \
   --served-model-name glm5 \
-  --max-model-len 135000 \
+  --max-model-len 200000 \
   --max-num-batched-tokens 8192 \
   --max-num-seqs 64 \
   --gpu-memory-utilization 0.92 \
@@ -603,7 +603,7 @@ exec vllm serve "$MODEL_PATH" \
   --tool-call-parser glm47 \
   --reasoning-parser glm47 \
   --speculative-config \
-  '{"num_speculative_tokens": 1, "method": "deepseek_mtp", "enforce_eager": true}' \
+  '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}' \
   --additional-config \
   '{"enable_dsa_cp": true, "enable_fused_mc2": 1, "enable_flashcomm1": true, "ascend_compilation_config": {"fuse_muls_add": true}}' \
   --kv-transfer-config \
@@ -623,8 +623,9 @@ exec vllm serve "$MODEL_PATH" \
 
 #### 5.4.3 Decode Engine Script
 
-Save the following complete script as `start_d_engine.sh`. One copy
-serves all four Decode nodes; `launch_online_dp.py` supplies `$1`-`$7`.
+Save the following complete script as `start_d_engine.sh` on all four
+Decode nodes. Set `LOCAL_IP` to the current node's IP in each copy;
+`launch_online_dp.py` supplies `$1`-`$7`.
 
 ```shell
 #!/usr/bin/env bash
@@ -639,7 +640,7 @@ DP_RPC_PORT=$6
 TP_SIZE=$7
 MODEL_PATH="<YOUR_MODEL_PATH>"
 
-LOCAL_IP=${LOCAL_IP:?export LOCAL_IP to this node IP before starting}
+LOCAL_IP="<CURRENT_DECODE_NODE_IP>"
 NIC_NAME="<NETWORK_INTERFACE>"
 
 unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
@@ -666,11 +667,11 @@ export TASK_QUEUE_ENABLE=1
 export VLLM_USE_V1=1
 export CPU_AFFINITY_CONF=1
 export ACL_OP_INIT_MODE=1
-export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export VLLM_MOONCAKE_ZMQ_RETRIES=20
 export VLLM_MOONCAKE_ZMQ_RETRY_SLEEP=0.5
 
-exec vllm serve "$MODEL_PATH" \
+vllm serve "$MODEL_PATH" \
   --host 0.0.0.0 \
   --port "$PORT" \
   --data-parallel-size "$DP_SIZE" \
@@ -683,7 +684,7 @@ exec vllm serve "$MODEL_PATH" \
   --enable-prefix-caching \
   --seed 1024 \
   --served-model-name glm5 \
-  --max-model-len 135000 \
+  --max-model-len 200000 \
   --max-num-batched-tokens 256 \
   --max-num-seqs 32 \
   --gpu-memory-utilization 0.92 \
@@ -725,7 +726,7 @@ started nearly simultaneously.
 1. Decode node 0 (DP ranks 0-3, hosts the DP master):
 
     ```shell
-    LOCAL_IP="<DECODE_NODE0_IP>" python3 launch_online_dp.py --script-path ./start_d_engine.sh --dp-size 16 --tp-size 2 --dp-size-local 4 --dp-rank-start 0 --dp-address "<DECODE_NODE0_IP>" --dp-rpc-port 12990 --vllm-start-port 10010
+    python3 launch_online_dp.py --script-path ./start_d_engine.sh --dp-size 16 --tp-size 2 --dp-size-local 4 --dp-rank-start 0 --dp-address "<DECODE_NODE0_IP>" --dp-rpc-port 12990 --vllm-start-port 10010
     ```
 
 2. Decode node 1 (DP ranks 4-7), node 2 (8-11), and node 3 (12-15):
@@ -735,13 +736,13 @@ started nearly simultaneously.
 
     ```shell
     # Decode node 1
-    LOCAL_IP="<DECODE_NODE1_IP>" python3 launch_online_dp.py --script-path ./start_d_engine.sh --dp-size 16 --tp-size 2 --dp-size-local 4 --dp-rank-start 4 --dp-address "<DECODE_NODE0_IP>" --dp-rpc-port 12990 --vllm-start-port 10010
+    python3 launch_online_dp.py --script-path ./start_d_engine.sh --dp-size 16 --tp-size 2 --dp-size-local 4 --dp-rank-start 4 --dp-address "<DECODE_NODE0_IP>" --dp-rpc-port 12990 --vllm-start-port 10010
 
     # Decode node 2
-    LOCAL_IP="<DECODE_NODE2_IP>" python3 launch_online_dp.py --script-path ./start_d_engine.sh --dp-size 16 --tp-size 2 --dp-size-local 4 --dp-rank-start 8 --dp-address "<DECODE_NODE0_IP>" --dp-rpc-port 12990 --vllm-start-port 10010
+    python3 launch_online_dp.py --script-path ./start_d_engine.sh --dp-size 16 --tp-size 2 --dp-size-local 4 --dp-rank-start 8 --dp-address "<DECODE_NODE0_IP>" --dp-rpc-port 12990 --vllm-start-port 10010
 
     # Decode node 3
-    LOCAL_IP="<DECODE_NODE3_IP>" python3 launch_online_dp.py --script-path ./start_d_engine.sh --dp-size 16 --tp-size 2 --dp-size-local 4 --dp-rank-start 12 --dp-address "<DECODE_NODE0_IP>" --dp-rpc-port 12990 --vllm-start-port 10010
+    python3 launch_online_dp.py --script-path ./start_d_engine.sh --dp-size 16 --tp-size 2 --dp-size-local 4 --dp-rank-start 12 --dp-address "<DECODE_NODE0_IP>" --dp-rpc-port 12990 --vllm-start-port 10010
     ```
 
 3. Prefill node 0 (API server) first, then nodes 2, 1, and 3 (leader before
@@ -788,7 +789,7 @@ Key parameters:
   TCP store on node 0:29501, DP RPC 12980). Node 0 is the only API
   server (`--api-server-count 1`); the other three nodes are
   `--headless`. It runs eager with a 8192-token batch budget, 64
-  sequences, 1 MTP token, and enables DSA CP, fused MC2, FlashComm1.
+  sequences, 5 MTP tokens, and enables DSA CP, fused MC2, FlashComm1.
 - Decode runs DP16×TP2 with a 256-token batch budget, 32 sequences,
   5 MTP tokens with an eager draft, `FULL_DECODE_ONLY` graph mode, and
   `recompute_scheduler_enable=true`.
@@ -945,7 +946,7 @@ export LD_LIBRARY_PATH="${MEMCACHE_ROOT}/lib:${PYTHON_LIB_DIR}:${LD_LIBRARY_PATH
 export ASCEND_LOCAL_COMM_RES='{"version":"1.2"}'
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 
-exec vllm serve "$MODEL_PATH" \
+vllm serve "$MODEL_PATH" \
   --host 0.0.0.0 --port "$PORT" \
   --tensor-parallel-size 8 \
   --enable-expert-parallel \
@@ -957,7 +958,7 @@ exec vllm serve "$MODEL_PATH" \
   --enable-chunked-prefill --no-async-scheduling \
   --enable-prefix-caching \
   --seed 1024 --served-model-name glm5 \
-  --max-model-len 128000 \
+  --max-model-len 200000 \
   --max-num-batched-tokens 16384 \
   --max-num-seqs 64 --gpu-memory-utilization 0.92 \
   --trust-remote-code --quantization ascend \
@@ -966,7 +967,7 @@ exec vllm serve "$MODEL_PATH" \
   --enforce-eager \
   --kv-cache-dtype int8 --attention_config.indexer_kv_dtype int8 \
   --additional-config '{"enable_dsa_cp":true,"enable_flashcomm1":true,"scheduler_config":{"profiling_chunk_config":{"enabled":true}}}' \
-  --speculative-config '{"num_speculative_tokens":1,"method":"deepseek_mtp","enforce_eager":true}' \
+  --speculative-config '{"num_speculative_tokens":5,"method":"deepseek_mtp","enforce_eager":true}' \
   --kv-transfer-config '{
       "kv_connector": "MultiConnector",
       "kv_role": "kv_producer",
@@ -1007,9 +1008,9 @@ the MemCache pool, and the proxy in front of them.
 #### 5.5.3 Decode Engine Script (Pooled)
 
 Save the following complete script as `start_d_engine_pool.sh` on all
-four Decode nodes. `launch_online_dp.py` (Section 5.4.1) supplies
-`$1`-`$7`; `LOCAL_IP` is supplied by the start command, while the NIC,
-model, and MemCache paths are configured in this script.
+four Decode nodes. Set `LOCAL_IP` to the current node's IP in each copy.
+`launch_online_dp.py` (Section 5.4.1) supplies `$1`-`$7`; the NIC, model,
+and MemCache paths are configured in this script.
 
 ```shell
 #!/usr/bin/env bash
@@ -1024,7 +1025,7 @@ DP_RPC_PORT=$6
 TP_SIZE=$7
 MODEL_PATH="<YOUR_MODEL_PATH>"
 
-LOCAL_IP=${LOCAL_IP:?export LOCAL_IP to this node IP before starting}
+LOCAL_IP="<CURRENT_DECODE_NODE_IP>"
 NIC_NAME="<NETWORK_INTERFACE>"
 MEMCACHE_ROOT="<MEMCACHE_ROOT>"
 PYTHON_LIB_DIR="<PYTHON_LIB_DIR>"
@@ -1049,14 +1050,14 @@ export HCCL_OP_EXPANSION_MODE=AIV
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export TASK_QUEUE_ENABLE=1
 export VLLM_USE_V2_MODEL_RUNNER=0
-export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export PYTHONHASHSEED=0
 export ACL_OP_INIT_MODE=1
 export MMC_LOCAL_CONFIG_PATH="${MEMCACHE_ROOT}/config/mmc-local.conf"
 export LD_LIBRARY_PATH="${MEMCACHE_ROOT}/lib:${PYTHON_LIB_DIR}:${LD_LIBRARY_PATH}"
 export ASCEND_LOCAL_COMM_RES='{"version":"1.2"}'
 
-exec vllm serve "$MODEL_PATH" \
+vllm serve "$MODEL_PATH" \
   --host 0.0.0.0 --port "$PORT" \
   --data-parallel-size "$DP_SIZE" --data-parallel-rank "$DP_RANK" \
   --data-parallel-address "$DP_ADDRESS" --data-parallel-rpc-port "$DP_RPC_PORT" \
@@ -1150,22 +1151,21 @@ Proxy.
     ```
 
 3. After both Prefill instances are ready, start Decode on all four Decode
-   nodes. Run each command on its target node; only `LOCAL_IP` is supplied
-   by the command, and the remaining node settings are configured in
-   `start_d_engine_pool.sh`:
+    nodes. Run each command on its target node; `LOCAL_IP` is configured in
+    that node's copy of `start_d_engine_pool.sh`:
 
     ```shell
     # Decode node 0, DP ranks 0-3
-    LOCAL_IP="<DECODE_NODE0_IP>" python3 launch_online_dp.py --script-path ./start_d_engine_pool.sh --dp-size 16 --tp-size 2 --dp-size-local 4 --dp-rank-start 0 --dp-address "<DECODE_NODE0_IP>" --dp-rpc-port 12990 --vllm-start-port 10010
+    python3 launch_online_dp.py --script-path ./start_d_engine_pool.sh --dp-size 16 --tp-size 2 --dp-size-local 4 --dp-rank-start 0 --dp-address "<DECODE_NODE0_IP>" --dp-rpc-port 12990 --vllm-start-port 10010
 
     # Decode node 1, DP ranks 4-7
-    LOCAL_IP="<DECODE_NODE1_IP>" python3 launch_online_dp.py --script-path ./start_d_engine_pool.sh --dp-size 16 --tp-size 2 --dp-size-local 4 --dp-rank-start 4 --dp-address "<DECODE_NODE0_IP>" --dp-rpc-port 12990 --vllm-start-port 10010
+    python3 launch_online_dp.py --script-path ./start_d_engine_pool.sh --dp-size 16 --tp-size 2 --dp-size-local 4 --dp-rank-start 4 --dp-address "<DECODE_NODE0_IP>" --dp-rpc-port 12990 --vllm-start-port 10010
 
     # Decode node 2, DP ranks 8-11
-    LOCAL_IP="<DECODE_NODE2_IP>" python3 launch_online_dp.py --script-path ./start_d_engine_pool.sh --dp-size 16 --tp-size 2 --dp-size-local 4 --dp-rank-start 8 --dp-address "<DECODE_NODE0_IP>" --dp-rpc-port 12990 --vllm-start-port 10010
+    python3 launch_online_dp.py --script-path ./start_d_engine_pool.sh --dp-size 16 --tp-size 2 --dp-size-local 4 --dp-rank-start 8 --dp-address "<DECODE_NODE0_IP>" --dp-rpc-port 12990 --vllm-start-port 10010
 
     # Decode node 3, DP ranks 12-15
-    LOCAL_IP="<DECODE_NODE3_IP>" python3 launch_online_dp.py --script-path ./start_d_engine_pool.sh --dp-size 16 --tp-size 2 --dp-size-local 4 --dp-rank-start 12 --dp-address "<DECODE_NODE0_IP>" --dp-rpc-port 12990 --vllm-start-port 10010
+    python3 launch_online_dp.py --script-path ./start_d_engine_pool.sh --dp-size 16 --tp-size 2 --dp-size-local 4 --dp-rank-start 12 --dp-address "<DECODE_NODE0_IP>" --dp-rpc-port 12990 --vllm-start-port 10010
     ```
 
 4. After the Prefill and Decode APIs are ready, start the proxy on a host
@@ -1217,8 +1217,8 @@ Key parameters:
   `mmc-local.conf`; `MEMCACHE_ROOT/lib` must be on `LD_LIBRARY_PATH`
   for the MemCache runtime libraries.
 - **Prefill budget**: eager mode, `--no-async-scheduling`, 16,384-token
-  batch budget, 64 sequences, one MTP token, DSA CP + FlashComm1,
-  `max-model-len 128000`, and the chunked-prefill profiling config
+  batch budget, 64 sequences, five MTP tokens, DSA CP + FlashComm1,
+  `max-model-len 200000`, and the chunked-prefill profiling config
   (`scheduler_config.profiling_chunk_config`).
 - **Decode budget**: 256-token batch budget, 64 sequences, five MTP
   tokens with an eager draft, `FULL_DECODE_ONLY` graph mode, and
