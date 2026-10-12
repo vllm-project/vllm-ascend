@@ -5,6 +5,7 @@ import time
 from enum import Enum
 from typing import Any
 
+import numpy as np
 import torch
 from vllm.config import ParallelConfig
 from vllm.distributed.parallel_state import get_dp_group
@@ -190,6 +191,8 @@ def _inject_device_ub_qos(extra_config: dict[str, Any] | None) -> None:
 
 
 class MemcacheBackend(Backend):
+    supports_array_put = True
+
     def __init__(
         self,
         parallel_config: ParallelConfig,
@@ -491,8 +494,8 @@ class MemcacheBackend(Backend):
     def put(
         self,
         key: list[str],
-        addr: list[list[int]],
-        size: list[list[int]],
+        addr: list[list[int]] | np.ndarray | list[np.ndarray],
+        size: list[list[int]] | np.ndarray | list[np.ndarray],
     ):
         self.ensure_initialized()
         assert self.store is not None
