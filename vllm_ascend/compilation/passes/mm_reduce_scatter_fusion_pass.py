@@ -8,6 +8,7 @@ from typing import Any
 
 import torch
 import torch.fx as fx
+import torch._inductor.pattern_matcher as pm
 from torch._inductor.pattern_matcher import Match, PatternMatcherPass
 from vllm.compilation.passes.inductor_pass import enable_fake_mode
 from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
@@ -16,6 +17,7 @@ from vllm.config.utils import Range
 from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group
 from vllm.logger import logger
 
+from vllm_ascend.compilation.passes import base_pattern
 from vllm_ascend.compilation.passes.base_pattern import BasePattern
 
 _MIN_REDUCE_DIM = 256
@@ -52,9 +54,37 @@ class _MatmulReduceScatterPattern(BasePattern):
 
     @enable_fake_mode
     def register(self, pm_pass: PatternMatcherPass) -> None:
-        super().register(pm_pass)
+        pattern_id = self.pattern_key()
+        pattern_fn = self.get_pattern()
+        replacement_fn = self.get_replacement()
+        example_inputs = self.get_inputs()
+        extra_check = self._get_extra_check()
+        scalar_workaround = self._get_scalar_workaround()
 
-    def get_extra_check(self):
+        pm.register_replacement(
+            pattern_fn,
+            replacement_fn,
+            example_inputs,
+            pm.fwd_only,
+            pm_pass,
+            extra_check=extra_check,
+            scalar_workaround=scalar_workaround,
+        )
+
+        if pattern_id in base_pattern._registered_patterns:
+            return
+
+        stream_check = self.get_extra_stream_scope_check()
+        base_pattern.nge.register_replacement(
+            search_fn=pattern_fn,
+            replace_fn=replacement_fn,
+            example_inputs=example_inputs,
+            extra_check=lambda match: stream_check(match) and extra_check(match),
+            scalar_workaround=scalar_workaround,
+        )
+        base_pattern._registered_patterns.add(pattern_id)
+
+    def _get_extra_check(self):
         def supported(match: Match) -> bool:
             gemm = next((node for node in match.nodes if node.target is _GEMM_OP), None)
             reduce_scatter = next((node for node in match.nodes if node.target is _REDUCE_SCATTER_OP), None)
@@ -80,6 +110,9 @@ class _MatmulReduceScatterPattern(BasePattern):
             return reduce_dim is not None and _MIN_REDUCE_DIM <= reduce_dim < _MAX_REDUCE_DIM_EXCLUSIVE
 
         return supported
+
+    def _get_scalar_workaround(self) -> dict[str, float | int] | None:
+        return None
 
     def pattern_key(self) -> str:
         return f"{self.__class__.__name__}_{self.tp_size}_{self.group_name}"
@@ -110,11 +143,11 @@ class MatmulReduceScatterPattern(_MatmulReduceScatterPattern):
 class PaddedMatmulReduceScatterPattern(_MatmulReduceScatterPattern):
     """Match ``gemm -> padding -> reduce_scatter`` and move padding to input."""
 
-    def get_scalar_workaround(self) -> dict[str, float | int] | None:
+    def _get_scalar_workaround(self) -> dict[str, float | int] | None:
         return {"pad_rows": 13}
 
-    def get_extra_check(self):
-        base_check = super().get_extra_check()
+    def _get_extra_check(self):
+        base_check = super()._get_extra_check()
 
         def supported(match: Match) -> bool:
             if not base_check(match):
