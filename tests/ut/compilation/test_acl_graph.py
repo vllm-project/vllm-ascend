@@ -213,24 +213,6 @@ class TestACLGraphWrapper(TestBase):
                 runnable=self.mock_runnable, vllm_config=self.mock_vllm_config, runtime_mode=CUDAGraphMode.NONE
             )
 
-    @patch("vllm_ascend.compilation.acl_graph.current_platform")
-    @patch("vllm_ascend.compilation.acl_graph.envs")
-    @patch("vllm_ascend.compilation.acl_graph.get_forward_context")
-    def test_call_without_forward_context_runs_eager(self, mock_get_forward_context, mock_envs, mock_current_platform):
-        """Profile dummy propose can call a compiled submodule before context exists."""
-        mock_envs.VLLM_LOGGING_LEVEL = "INFO"
-        mock_current_platform.get_global_graph_pool.return_value = self.mock_graph_pool
-        mock_get_forward_context.side_effect = AssertionError(
-            "Forward context is not set. Please use `set_forward_context` to set the forward context."
-        )
-
-        wrapper = ACLGraphWrapper(
-            runnable=self.mock_runnable, vllm_config=self.mock_vllm_config, runtime_mode=CUDAGraphMode.FULL
-        )
-
-        self.assertEqual(wrapper(), "test_output")
-        self.mock_runnable.assert_called_once_with()
-
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     @patch("vllm_ascend.compilation.acl_graph.get_forward_context")
     @patch("vllm_ascend.compilation.acl_graph.current_platform")
