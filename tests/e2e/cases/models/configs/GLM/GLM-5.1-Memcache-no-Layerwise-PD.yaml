@@ -125,8 +125,6 @@ templates:
       - '{"num_speculative_tokens": 3, "method":"deepseek_mtp","enforce_eager":true}'
       - --seed
       - "1024"
-      - --served-model-name
-      - "glm-5"
       - --max-model-len
       - "202752"
       - --additional-config
@@ -183,8 +181,6 @@ templates:
       - '{"num_speculative_tokens": 3, "method":"deepseek_mtp","enforce_eager":true}'
       - --seed
       - "1024"
-      - --served-model-name
-      - "glm-5"
       - --max-model-len
       - "202752"
       - --additional-config
@@ -234,8 +230,6 @@ templates:
       - '{"use_index_cache": true, "index_topk_freq": 4}'
       - --seed
       - "1024"
-      - --served-model-name
-      - "glm-5"
       - --max-model-len
       - "202752"
       - --max-num-batched-tokens
@@ -288,8 +282,6 @@ templates:
       - '{"use_index_cache": true, "index_topk_freq": 4}'
       - --seed
       - "1024"
-      - --served-model-name
-      - "glm-5"
       - --max-model-len
       - "202752"
       - --max-num-batched-tokens
