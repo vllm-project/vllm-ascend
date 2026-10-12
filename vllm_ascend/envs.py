@@ -71,6 +71,11 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Number of Kimi K3 decoder layers to instantiate and load for debugging.
+    # 0 (the default) loads the complete model.
+    "VLLM_ASCEND_KIMI_K3_MAX_LOADED_LAYERS": lambda: os.getenv(
+        "VLLM_ASCEND_KIMI_K3_MAX_LOADED_LAYERS", "0"
+    ),
 }
 
 # end-env-vars-definition
