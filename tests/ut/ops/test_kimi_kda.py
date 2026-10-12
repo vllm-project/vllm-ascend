@@ -9,6 +9,7 @@ import torch
 from torch import nn
 
 from vllm_ascend.ops.kimi_kda import (
+    _KDA_BFG_STREAM_PRIORITY,
     _PACKED_CONV_WEIGHT_NAME,
     AscendKimiK3DeltaAttention,
     _KDAFusedBFGLinear,
@@ -22,6 +23,16 @@ from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import (
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import (
     AscendW8A8MXFP8DynamicLinearMethod,
 )
+
+
+def test_kda_bfg_stream_uses_high_priority(monkeypatch: pytest.MonkeyPatch):
+    import vllm_ascend.ops.kimi_kda as kimi_kda
+
+    fake_stream = object()
+    monkeypatch.setattr(kimi_kda, "_KDA_BFG_STREAM", None)
+    with patch.object(kimi_kda.torch_npu.npu, "Stream", return_value=fake_stream) as stream_factory:
+        assert kimi_kda._kda_bfg_stream() is fake_stream
+    stream_factory.assert_called_once_with(priority=_KDA_BFG_STREAM_PRIORITY)
 
 
 class _RecordingLinear(nn.Module):

@@ -40,13 +40,17 @@ from vllm_ascend.utils import npu_stream_switch
 _KDA_CHUNK_SIZE = 64
 _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
 _F_PROJ_SHARD_ID = 1
+_KDA_BFG_STREAM_PRIORITY = -1
 _KDA_BFG_STREAM: torch.npu.Stream | None = None
 
 
 def _kda_bfg_stream() -> torch.npu.Stream:
     global _KDA_BFG_STREAM
     if _KDA_BFG_STREAM is None:
-        _KDA_BFG_STREAM = torch_npu.npu.Stream()
+        # Lower values have higher priority in torch_npu.  BFG is the long
+        # Cube operation; launch it ahead of the short DynamicQuant work on
+        # the main stream so the two streams overlap as early as possible.
+        _KDA_BFG_STREAM = torch_npu.npu.Stream(priority=_KDA_BFG_STREAM_PRIORITY)
     return _KDA_BFG_STREAM
 
 
