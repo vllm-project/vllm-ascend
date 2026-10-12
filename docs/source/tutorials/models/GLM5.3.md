@@ -940,17 +940,9 @@ MetaService.
    actually used by vLLM on each node (both are used by the scripts
    below).
 
-5. Start the MetaService on `<MEMCACHE_META_IP>` before any vLLM
-   process:
-
-    ```shell
-    export MMC_META_CONFIG_PATH=${MEMCACHE_ROOT}/config/mmc-meta.conf
-    python3 -c "from memcache_hybrid import MetaService; MetaService.main()"
-    ```
-
 #### 5.5.2 Prefill Engine Script (Pooled)
 
-Save the following script on all four Prefill nodes. Each instance spans
+Save the following script as `start_p_pool.sh` on all four Prefill nodes. Each instance spans
 two nodes (`--nnodes 2`, `mp` backend): the instance leader runs
 `node_rank 0` and hosts the API server; its partner runs `node_rank 1`.
 Run it once per node with the node's role.
@@ -1052,24 +1044,10 @@ exec vllm serve "$MODEL_PATH" \
   $HEADLESS_ARGS
 ```
 
-Start each Prefill node with its role:
-
-```shell
-# Instance 0: node 0 leads, node 1 partners (run on each node with its own IP)
-export NIC_NAME=<NETWORK_INTERFACE>
-export INSTANCE_LEADER_IP=<PREFILL_NODE0_IP>
-bash start_p_pool.sh 0 8000 <PREFILL_NODE0_IP>   # node 0
-bash start_p_pool.sh 1 8000 <PREFILL_NODE1_IP>   # node 1 (partner, headless)
-
-# Instance 1: node 2 leads, node 3 partners
-export INSTANCE_LEADER_IP=<PREFILL_NODE2_IP>
-bash start_p_pool.sh 0 8000 <PREFILL_NODE2_IP>   # node 2
-bash start_p_pool.sh 1 8000 <PREFILL_NODE3_IP>   # node 3 (partner, headless)
-```
-
-The two Prefill instances are fully independent vLLM deployments (each
-with its own TCP store on its leader's port 7060); they share only the
-weight directory, the MemCache pool, and the proxy in front of them.
+The four Prefill start commands are grouped in Section 5.5.4. The two
+Prefill instances are fully independent vLLM deployments (each with its own
+TCP store on its leader's port 7060); they share only the weight directory,
+the MemCache pool, and the proxy in front of them.
 
 #### 5.5.3 Decode Engine Script (Pooled)
 
@@ -1168,15 +1146,103 @@ exec vllm serve "$MODEL_PATH" \
   }'
 ```
 
-Start the four Decode nodes with the direct launcher commands in Section
-5.4.4 (`--dp-size 16 --tp-size 2 --dp-size-local 4`, `--dp-rank-start`
-0/4/8/12, DP RPC 12990, API ports 10010-10013). Use
-`--script-path ./start_d_engine_pool.sh` instead of
-`./start_d_engine.sh`, and export `MEMCACHE_ROOT` and `PYTHON_LIB_DIR`
-alongside `LOCAL_IP`, `NIC_NAME`, and `MODEL_PATH` on each node. Start the
-Decode group before the Prefill instances, as in Section 5.4.4.
+The four Decode start commands are grouped in Section 5.5.4. They use
+`--script-path ./start_d_engine_pool.sh` and the same launcher arguments as
+Section 5.4.4.
 
-#### 5.5.4 Start the Proxy
+#### 5.5.4 Start Services
+
+Start services in this order: MemCache MetaService, Prefill, Decode, then
+Proxy.
+
+1. Start the MemCache MetaService on `<MEMCACHE_META_IP>` before any vLLM
+   process:
+
+    ```shell
+    export MMC_META_CONFIG_PATH="${MEMCACHE_ROOT}/config/mmc-meta.conf"
+    python3 -c "from memcache_hybrid import MetaService; MetaService.main()"
+    ```
+
+2. Start the two Prefill instances. Run each command on its target node and
+   export the shared paths and the instance leader IP on that node:
+
+    ```shell
+    # Prefill node 0: instance 0 leader and API server
+    export MODEL_PATH="<YOUR_MODEL_PATH>"
+    export NIC_NAME="<NETWORK_INTERFACE>"
+    export MEMCACHE_ROOT="<MEMCACHE_ROOT>"
+    export PYTHON_LIB_DIR="<PYTHON_LIB_DIR>"
+    export INSTANCE_LEADER_IP="<PREFILL_NODE0_IP>"
+    bash start_p_pool.sh 0 8000 <PREFILL_NODE0_IP>
+
+    # Prefill node 1: instance 0 partner
+    export INSTANCE_LEADER_IP="<PREFILL_NODE0_IP>"
+    bash start_p_pool.sh 1 8000 <PREFILL_NODE1_IP>
+
+    # Prefill node 2: instance 1 leader and API server
+    export INSTANCE_LEADER_IP="<PREFILL_NODE2_IP>"
+    bash start_p_pool.sh 0 8000 <PREFILL_NODE2_IP>
+
+    # Prefill node 3: instance 1 partner
+    export INSTANCE_LEADER_IP="<PREFILL_NODE2_IP>"
+    bash start_p_pool.sh 1 8000 <PREFILL_NODE3_IP>
+    ```
+
+3. After both Prefill instances are ready, start Decode on all four Decode
+   nodes. Run each command on its target node and set that node's IP/NIC:
+
+    ```shell
+    # Decode node 0, DP ranks 0-3
+    export LOCAL_IP="<DECODE_NODE0_IP>"
+    export NIC_NAME="<NETWORK_INTERFACE>"
+    export MODEL_PATH="<YOUR_MODEL_PATH>"
+    export MEMCACHE_ROOT="<MEMCACHE_ROOT>"
+    export PYTHON_LIB_DIR="<PYTHON_LIB_DIR>"
+    python3 launch_online_dp.py \
+      --script-path ./start_d_engine_pool.sh \
+      --dp-size 16 --tp-size 2 --dp-size-local 4 \
+      --dp-rank-start 0 --dp-address "<DECODE_NODE0_IP>" \
+      --dp-rpc-port 12990 --vllm-start-port 10010
+
+    # Decode node 1, DP ranks 4-7
+    export LOCAL_IP="<DECODE_NODE1_IP>"
+    export NIC_NAME="<NETWORK_INTERFACE>"
+    export MODEL_PATH="<YOUR_MODEL_PATH>"
+    export MEMCACHE_ROOT="<MEMCACHE_ROOT>"
+    export PYTHON_LIB_DIR="<PYTHON_LIB_DIR>"
+    python3 launch_online_dp.py \
+      --script-path ./start_d_engine_pool.sh \
+      --dp-size 16 --tp-size 2 --dp-size-local 4 \
+      --dp-rank-start 4 --dp-address "<DECODE_NODE0_IP>" \
+      --dp-rpc-port 12990 --vllm-start-port 10010
+
+    # Decode node 2, DP ranks 8-11
+    export LOCAL_IP="<DECODE_NODE2_IP>"
+    export NIC_NAME="<NETWORK_INTERFACE>"
+    export MODEL_PATH="<YOUR_MODEL_PATH>"
+    export MEMCACHE_ROOT="<MEMCACHE_ROOT>"
+    export PYTHON_LIB_DIR="<PYTHON_LIB_DIR>"
+    python3 launch_online_dp.py \
+      --script-path ./start_d_engine_pool.sh \
+      --dp-size 16 --tp-size 2 --dp-size-local 4 \
+      --dp-rank-start 8 --dp-address "<DECODE_NODE0_IP>" \
+      --dp-rpc-port 12990 --vllm-start-port 10010
+
+    # Decode node 3, DP ranks 12-15
+    export LOCAL_IP="<DECODE_NODE3_IP>"
+    export NIC_NAME="<NETWORK_INTERFACE>"
+    export MODEL_PATH="<YOUR_MODEL_PATH>"
+    export MEMCACHE_ROOT="<MEMCACHE_ROOT>"
+    export PYTHON_LIB_DIR="<PYTHON_LIB_DIR>"
+    python3 launch_online_dp.py \
+      --script-path ./start_d_engine_pool.sh \
+      --dp-size 16 --tp-size 2 --dp-size-local 4 \
+      --dp-rank-start 12 --dp-address "<DECODE_NODE0_IP>" \
+      --dp-rpc-port 12990 --vllm-start-port 10010
+    ```
+
+4. After the Prefill and Decode APIs are ready, start the proxy on a host
+   that can reach every endpoint:
 
 After both Prefill APIs (`http://<PREFILL_NODE0_IP>:8000/v1/models`,
 `http://<PREFILL_NODE2_IP>:8000/v1/models`) and all sixteen Decode APIs
