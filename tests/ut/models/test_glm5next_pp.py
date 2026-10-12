@@ -31,7 +31,7 @@ def _stub_model(*, mhc: bool) -> Glm5NextModel:
     model.config = SimpleNamespace(
         hidden_size=HIDDEN_SIZE,
         mhc=mhc,
-        mhc_num_residual_streams=N_STREAMS,
+        hc_mult=N_STREAMS,
     )
     model.is_sequence_parallel = False
     return model

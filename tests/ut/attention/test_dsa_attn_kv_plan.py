@@ -24,7 +24,6 @@ _DSA_C_ASCEND_OPS = (
     "npu_sparse_attn_sharedkv_metadata",
     "npu_kv_quant_sparse_attn_sharedkv",
     "npu_kv_quant_sparse_attn_sharedkv_metadata",
-    "kv_compress_epilog",
     "npu_scatter_nd_update_sk",
 )
 
@@ -39,7 +38,10 @@ def _stub_dsa_c_ascend_ops():
 
 
 def _config(use_bf16: bool):
-    return SimpleNamespace(cache_config=SimpleNamespace(cache_dtype="bfloat16" if use_bf16 else "auto"))
+    # "auto" is the bfloat16 layout: it means the model dtype. The fp8 plan needs an
+    # explicit request, which is the whole point of resolving it in
+    # ``is_a5_bf16_kv_enabled`` rather than reading the literal alone.
+    return SimpleNamespace(cache_config=SimpleNamespace(cache_dtype="bfloat16" if use_bf16 else "fp8"))
 
 
 def _cache_config(cache_dtype: str = "auto"):
@@ -58,12 +60,21 @@ def test_get_dsa_attn_kv_plan_requires_vllm_config():
         get_dsa_attn_kv_plan()
 
 
+@pytest.mark.parametrize("device_type", [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5])
+@pytest.mark.parametrize("cache_dtype", ["auto", "bfloat16", "fp8"])
+@pytest.mark.parametrize("compress_ratio", [1, 4, 128])
+def test_non_turboquant_plan_is_independent_of_compress_ratio(device_type, cache_dtype, compress_ratio):
+    with _on(device_type):
+        config = _cache_config(cache_dtype)
+        assert get_dsa_attn_kv_plan(config, compress_ratio) == get_dsa_attn_kv_plan(config)
+
+
 def test_a5_fp8_plan_uses_flat_shared_kv():
     with _on(AscendDeviceType.A5):
         plan = get_dsa_attn_kv_plan(_config(False))
         assert plan.get_dsa_compressor_slot_mapping_format() == DSA_COMPRESSOR_SLOT_MAPPING_FLAT
         assert not plan.requires_block_offset_slots
-        assert plan.get_dsa_sparse_attn_metadata_kwargs("npu:0") == {"kv_quant_mode": 1}
+        assert plan.get_dsa_sparse_attn_metadata_kwargs("npu:0") == {}
 
 
 def test_a5_bf16_plan_uses_sparse_flash_mla():
@@ -88,13 +99,40 @@ def test_non_a5_plan_preserves_shared_kv_runtime_kwargs():
         assert "cu_seqlens_ori_kv" in kwargs
 
 
+@pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
+def test_batched_slot_conversion_matches_independent_groups(dtype):
+    with _on(AscendDeviceType.A3):
+        plan = get_dsa_attn_kv_plan(_cache_config("turboquant_4bit_nc"))
+    slots = torch.tensor(
+        [[0, 7, 8, -1, -5, 65537], [31, 32, 63, 64, -1, 98765], [127, 128, 129, -1, 0, 1000001]],
+        dtype=dtype,
+    )
+    slots = slots[:, :5]  # The runner slices active tokens from a wider buffer.
+    block_sizes = torch.tensor([8, 32, 128], dtype=dtype).unsqueeze(1)
+    expected = torch.stack([plan.format_dsa_slot_mapping(row, size) for row, size in zip(slots, [8, 32, 128])])
+    actual = plan.format_dsa_slot_mapping(slots, block_sizes)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert actual.dtype == torch.int32
+    assert (actual[slots < 0] == -1).all()
+
+
 def test_scatter_skips_none_updates():
     with _on(AscendDeviceType.A5):
         plan = get_dsa_attn_kv_plan(_config(False))
         cache = torch.zeros(2, 1, 4)
-        with mock.patch.object(torch.ops._C_ascend, "kv_compress_epilog") as epilog:
+        with mock.patch.object(torch.ops, "cann_ops_transformer.kv_compress_epilog") as epilog:
             plan.dsa_kv_compress_scatter(cache, None, torch.tensor([0], dtype=torch.int32))
             epilog.assert_not_called()
+
+
+def test_a3_baseline_scatter_is_unchanged():
+    with _on(AscendDeviceType.A3):
+        plan = get_dsa_attn_kv_plan(_cache_config("bfloat16"))
+    cache = torch.zeros(2, 32, 1, 512)
+    updates = torch.ones(3, 1, 512)
+    slots = torch.tensor([[0, 1], [-1, -1], [1, 2]], dtype=torch.int32)
+    plan.dsa_kv_compress_scatter(cache, updates, slots)
+    torch.ops._C_ascend.npu_scatter_nd_update_sk.assert_called_once_with(cache, slots, updates)
 
 
 def _cpu_scatter_nd_update_(cache, indices, updates):
@@ -171,18 +209,21 @@ def test_is_a5_bf16_kv_enabled_requires_vllm_config():
         is_a5_bf16_kv_enabled()
 
 
-def test_only_explicit_bfloat16_selects_bf16_kv_on_a5():
+def test_a5_bf16_kv_covers_an_unset_request():
+    # "auto" means the model dtype, bfloat16, so it has to select the bfloat16 layout:
+    # reading the literal alone is what put the fp8 plan on a bfloat16 page.
     with _on(AscendDeviceType.A5):
-        assert is_a5_bf16_kv_enabled(_cache_config("bfloat16"))
-        assert not is_a5_bf16_kv_enabled(_cache_config())
-        assert not is_a5_bf16_kv_enabled(_cache_config("fp8"))
+        for dtype in ("auto", "bfloat16", "bf16"):
+            assert is_a5_bf16_kv_enabled(_cache_config(dtype))
         # The A5 spec path rewrites cache_dtype once FP8 KV is chosen.
-        assert not is_a5_bf16_kv_enabled(_cache_config("float8_e4m3fn"))
+        for dtype in ("fp8", "float8_e4m3fn", "int8"):
+            assert not is_a5_bf16_kv_enabled(_cache_config(dtype))
 
 
 def test_a5_bf16_kv_is_disabled_on_non_a5():
     with _on(AscendDeviceType.A3):
-        assert not is_a5_bf16_kv_enabled(_cache_config("bfloat16"))
+        for dtype in ("auto", "bfloat16", "fp8"):
+            assert not is_a5_bf16_kv_enabled(_cache_config(dtype))
 
 
 def test_non_a5_pins_cache_dtype_to_the_model_dtype():
@@ -191,22 +232,10 @@ def test_non_a5_pins_cache_dtype_to_the_model_dtype():
             assert resolve_dsv4_cache_dtype(launch, "bfloat16") == "bfloat16"
 
 
-def test_a5_collapses_non_bfloat16_requests_to_auto():
-    # "auto" resolves to the model dtype everywhere downstream, so it carries
-    # the FP8 mode without changing any value upstream would have computed.
+def test_a5_pins_the_bfloat16_layout_and_keeps_other_requests_apart():
+    # "auto" means the model dtype, bfloat16: the two select the same layout, and a
+    # request for the fp8 one has to stay distinguishable from it.
     with _on(AscendDeviceType.A5):
-        assert resolve_dsv4_cache_dtype("bfloat16", "bfloat16") == "bfloat16"
-        assert resolve_dsv4_cache_dtype("auto", "bfloat16") == "auto"
+        for launch in ("auto", "bfloat16", "bf16"):
+            assert resolve_dsv4_cache_dtype(launch, "bfloat16") == "bfloat16"
         assert resolve_dsv4_cache_dtype("fp8", "bfloat16") == "auto"
-
-
-def test_a5_mode_survives_the_spec_path_rewrite():
-    with _on(AscendDeviceType.A5):
-        for launch in ("auto", "fp8"):
-            pinned = resolve_dsv4_cache_dtype(launch, "bfloat16")
-            assert not is_a5_bf16_kv_enabled(_cache_config(pinned))
-            # layer.get_kv_cache_spec pins FP8 once it has picked the mode.
-            assert not is_a5_bf16_kv_enabled(_cache_config("float8_e4m3fn"))
-
-        pinned = resolve_dsv4_cache_dtype("bfloat16", "bfloat16")
-        assert is_a5_bf16_kv_enabled(_cache_config(pinned))

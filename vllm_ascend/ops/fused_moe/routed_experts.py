@@ -356,6 +356,34 @@ def _record_v2_eplb_load(router: FusedMoERouter, result: FusedExpertsResult) -> 
     )
 
 
+def _empty_like_preserving_npu_format(tensor: torch.Tensor) -> torch.Tensor:
+    """Allocate an EPLB buffer with the source tensor's NPU storage format."""
+    if tensor.device.type != "npu":
+        return torch.empty_like(tensor)
+
+    # ACLNN-only devices force allow_internal_format=False, so torch.empty_like
+    # silently converts internal formats such as FRACTAL_NZ_C0_16 to ND. Use
+    # the explicit NPU allocator to preserve the expert's storage format.
+    assert tensor.storage_offset() == 0, (
+        "EPLB expert buffer allocation requires an offset-0 source "
+        f"tensor, but got storage_offset={tensor.storage_offset()}"
+    )
+
+    result = torch_npu.empty_with_format(
+        size=tensor.size(),
+        dtype=tensor.dtype,
+        layout=tensor.layout,
+        device=tensor.device,
+        acl_format=int(torch_npu.get_npu_format(tensor)),
+    )
+
+    assert result.stride() == tensor.stride(), (
+        "EPLB expert buffer allocation must preserve the source stride, "
+        f"but got source={tensor.stride()} and buffer={result.stride()}"
+    )
+    return result
+
+
 class EplbExpertTensorList(list[torch.Tensor]):
     """Per-expert tensors exposed through the upstream EPLB weight contract."""
 
@@ -363,11 +391,22 @@ class EplbExpertTensorList(list[torch.Tensor]):
     def shape(self) -> torch.Size:
         return torch.Size((len(self), *self[0].shape))
 
+    def element_size(self) -> int:
+        # Upstream registers expert weights via
+        # `w.view(torch.uint8) if w.element_size() == 1 else w`, so the
+        # container must expose the underlying per-expert item size.
+        return self[0].element_size()
+
+    def view(self, dtype: torch.dtype) -> "EplbExpertTensorList":
+        # Mirror Tensor.view for a 1-byte dtype reinterpretation while keeping
+        # the per-expert container (and its aliasing semantics) intact.
+        return type(self)(tensor.view(dtype) for tensor in self)
+
     @classmethod
     def __torch_function__(cls, func, types, args=(), kwargs=None):
-        if func is torch.empty_like:
+        if func is torch.empty_like and not kwargs:
             source = args[0]
-            return cls(torch.empty_like(tensor, **(kwargs or {})) for tensor in source)
+            return cls(_empty_like_preserving_npu_format(tensor) for tensor in source)
         return NotImplemented
 
 
@@ -427,7 +466,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
                 draft_model_config = vllm_config.speculative_config.draft_model_config
                 draft_model_config.draft_moe_quant_type = self.quant_type
 
-    def get_expert_weights(self) -> Iterable[torch.Tensor]:
+    def get_expert_weights(self) -> Iterable[torch.Tensor | EplbExpertTensorList]:
         try:
             get_weight_views = self.quant_method.get_eplb_weight_views
         except AttributeError as exc:
@@ -760,7 +799,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         if self.return_with_event:
             return routed_out, RoutedMoEMilestones(
                 routed_dispatch_start=fused_experts_results.before_dispatch_evt,
-                routed_gmm2_start=fused_experts_results.before_gmm2_evt,
+                shared_activation_overlap_start=fused_experts_results.shared_activation_overlap_start_evt,
                 routed_combine_start=fused_experts_results.before_combine_evt,
             )
 

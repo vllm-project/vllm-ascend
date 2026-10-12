@@ -48,28 +48,30 @@ Steps to follow to enable SP currently:
 > [!NOTE]
 > **Difference from upstream.** Upstream vLLM enables MoE sequence parallelism only when `data_parallel_size > 1`, together with a supported all2all backend, expert parallelism, and `tensor_parallel_size > 1`. On vLLM Ascend, `data_parallel_size > 1` is not part of the enablement condition. Ascend FlashComm also supports the TP/EP topology with `data_parallel_size = 1`, so SP MoE can be enabled when DP is 1 as long as the conditions above are met. `data_parallel_size > 1` remains supported.
 
+### Matmul reduce-scatter fusion
+
+On supported Ascend devices, enable `fuse_gemm_comms` to fuse a
+sequence-parallel, bias-free row-parallel projection with its token-dimension
+reduce-scatter. The fused implementation supports BF16/FP16 with TP size 2,
+4, or 8; unmatched graphs continue to use the unfused path.
+
+```bash
+--compilation-config '{"pass_config":{"fuse_gemm_comms":true}}'
+```
+
 ### FlashComm switch (Ascend only)
 
 vLLM Ascend enables SP MoE through the FlashComm switch. The switch is still
 required; SP MoE is not enabled from the parallel configuration alone.
 
-To enable SP MoE, set one of the following (the `additional_config` form is
-preferred):
+To enable SP MoE, set `additional_config.enable_flashcomm1`:
 
 ```bash
-# Preferred. On vLLM Ascend, data-parallel-size may be 1.
+# On vLLM Ascend, data-parallel-size may be 1.
 # Upstream requires data-parallel-size > 1 for the same SP path.
 vllm serve <moe-model> \
   --data-parallel-size 1 \
   --tensor-parallel-size 2 \
   --enable-expert-parallel \
   --additional-config '{"enable_flashcomm1": true}'
-```
-
-```bash
-# Kept for compatibility. data-parallel-size may be 1 on vLLM Ascend.
-VLLM_ASCEND_ENABLE_FLASHCOMM1=1 vllm serve <moe-model> \
-  --data-parallel-size 1 \
-  --tensor-parallel-size 2 \
-  --enable-expert-parallel
 ```

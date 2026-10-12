@@ -8,8 +8,8 @@ from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.common.kv_pool.config import MemcacheKVPoolConfig
 from tests.e2e.common.kvpp import PROMPTS, complete, output_texts, server_args
+from tests.e2e.common.single_node.kv_pool_runtime import SingleNodeMemcacheManager
 from tests.e2e.conftest import RemoteOpenAIServer, wait_until_npu_memory_free
-from tests.e2e.nightly.single_node.models.scripts.kv_pool_runtime import SingleNodeMemcacheManager
 
 MODEL = "Eco-Tech/GLM-5.2-w4a8"
 TP_SIZE = 8
@@ -69,12 +69,14 @@ def test_kvpp_memcache_reload(tmp_path, pcp_size):
                 }
             ),
         ]
+        # KV pool is off the V2 blacklist, so this case defaults to V2 without
+        # an explicit runner env pin.
         with RemoteOpenAIServer(
             maybe_model_redirect(MODEL),
             args,
             server_port=port,
             auto_port=False,
-            env_dict={**pool.server_envs, "VLLM_USE_V2_MODEL_RUNNER": "1", "VLLM_SERVER_DEV_MODE": "1"},
+            env_dict={**pool.server_envs, "VLLM_SERVER_DEV_MODE": "1"},
         ) as server:
             # Use a prompt spanning cache blocks so the replay exercises pool loading.
             prompt = PROMPTS[1]

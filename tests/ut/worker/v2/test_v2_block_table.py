@@ -21,14 +21,17 @@ def _parent_init(
     max_num_batched_tokens,
     max_num_blocks_per_group,
     device,
-    kernel_block_sizes,
-    cp_size,
-    cp_rank,
-    cp_interleave,
+    kernel_block_sizes=None,
+    cp_size=1,
+    cp_rank=0,
+    cp_interleave=1,
     slot_mapping_enabled=None,
 ):
     self.block_sizes = block_sizes
-    self.kernel_block_sizes = kernel_block_sizes
+    # vLLM main dropped `kernel_block_sizes` from BlockTables; only the release
+    # lane forwards it.
+    if kernel_block_sizes is not None:
+        self.kernel_block_sizes = kernel_block_sizes
     self.num_kv_cache_groups = len(block_sizes)
     self.max_num_batched_tokens = max_num_batched_tokens
     self.device = device
@@ -78,6 +81,10 @@ def test_init_keeps_explicit_kernel_block_sizes():
         kernel_block_sizes=[4],
     )
     assert tables.kernel_block_sizes == [4]
+    # vLLM #57169 dropped the expansion from BlockTables on main; a manager
+    # block still covers `blocks_per_kv_block` kernel entries (block 7 ->
+    # [14, 15]) because Ascend kernels address kernel blocks.
+    assert tables.blocks_per_kv_block == [2]
 
 
 def test_init_forwards_slot_mapping_enabled_on_newer_vllm():
@@ -196,9 +203,13 @@ def test_init_block_table_layout_tensors_builds_distinct_sizes():
     tables.block_tables = [SimpleNamespace(gpu=torch.zeros(2, 8)) for _ in range(2)]
     tables.input_block_tables = [torch.zeros(2, 8) for _ in range(2)]
     tables._slot_mapping_enabled = [True, False]
+    # vLLM main's ``init_block_table_layout_tensors`` reads this; ``__init__``
+    # normally sets it, but this stub bypasses ``__init__``.
+    tables._sliding_window_reach = [0, 0]
     tables.init_block_table_layout_tensors()
-
-    assert torch.equal(tables.kernel_block_sizes_tensor, torch.tensor([8, 8], dtype=torch.int32))
+    # vLLM main dropped `kernel_block_sizes`; AscendBlockTables builds the
+    # kernel-block tensor in __init__ instead.
+    assert not hasattr(tables, "kernel_block_sizes_tensor")
     assert torch.equal(tables.block_sizes_tensor, torch.tensor([16, 32], dtype=torch.int32))
     assert tables.block_sizes_tensor.device.type == "cpu"
 

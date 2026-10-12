@@ -24,6 +24,9 @@ from vllm.v1.worker.mamba_utils import (
 )
 
 import vllm_ascend.patch.worker.patch_mamba_utils  # noqa: F401
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.patch.worker.patch_mamba_utils import _reset_layerwise_copy_meta
 
 _COPY_FUNCS: MambaStateCopyFuncsByType = {
     MambaAttentionBackendEnum.MAMBA2: (get_conv_copy_spec, get_temporal_copy_spec)
@@ -47,6 +50,7 @@ def postprocess_mamba(
     mamba_group_ids = copy_bufs.mamba_group_ids
     mamba_spec = copy_bufs.mamba_spec
     copy_bufs.offset = 0
+    _reset_layerwise_copy_meta(copy_bufs)
     for i, req_id in enumerate(input_batch.req_ids):
         req_state = requests[req_id]
         num_computed_tokens = req_state.num_computed_tokens
@@ -73,6 +77,10 @@ def postprocess_mamba(
             )
             if src_block_idx == dest_block_idx:
                 num_accepted_tokens_cpu[i] = 1
+    # Match the explicit metadata staging required by the Ascend copy path.
+    copy_bufs.src_ptrs.copy_to_gpu(copy_bufs.offset)
+    copy_bufs.dst_ptrs.copy_to_gpu(copy_bufs.offset)
+    copy_bufs.sizes.copy_to_gpu(copy_bufs.offset)
     do_mamba_copy_block(copy_bufs)
 
 
@@ -235,6 +243,10 @@ def _run_gpu_postprocess(
     torch.accelerator.synchronize()
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @pytest.mark.skipif(not torch.npu.is_available(), reason="NPU required")
 def test_matches_python_postprocess_mamba():
     cfg = _TestConfig()

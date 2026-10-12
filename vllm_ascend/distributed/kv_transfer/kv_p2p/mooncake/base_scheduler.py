@@ -78,13 +78,22 @@ class MooncakeBaseConnectorScheduler:
         # [kv_port, kv_port + dp_size * pp_size * pcp_size * tp_size).
         # Keep one scheduler control port per DP rank immediately after that
         # range so it cannot collide with a worker handshake socket.
+        # Dense engines reset their compute DP rank to zero; the serving
+        # index still identifies each independent replica.
         self.side_channel_port = (
-            self.kv_transfer_config.kv_port + self.max_device_id + vllm_config.parallel_config.data_parallel_rank
+            self.kv_transfer_config.kv_port + self.max_device_id + vllm_config.parallel_config.data_parallel_index
         )
 
         self.kv_cache_groups = kv_cache_config.kv_cache_groups
         self.group_block_size = [group.kv_cache_spec.block_size for group in self.kv_cache_groups]
         self.group_unique_specs = [self._get_group_unique_specs(group) for group in self.kv_cache_groups]
+        # Remove this restriction once the backend supports joint PCP/TP sharding.
+        if (
+            self.pcp_size > 1
+            and self.tp_size > 1
+            and any(isinstance(spec, MambaSpec) for specs in self.group_unique_specs for spec in specs)
+        ):
+            raise ValueError("Mooncake Mamba requires PCP=1 or TP=1 on both producer and consumer")
         self.need_truncate = self._needs_prefill_token_truncation()
 
         logger.info("Initializing Mooncake Scheduler %s", engine_id)
@@ -183,6 +192,10 @@ class MooncakeBaseConnectorScheduler:
         params = request.kv_transfer_params
         if params is not None and params.get("do_remote_decode") and self.need_truncate:
             self._truncate_request_for_prefill(request)
+
+    def shutdown(self) -> None:
+        """Release scheduler-side resources when the engine shuts down."""
+        raise NotImplementedError
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
         raise NotImplementedError

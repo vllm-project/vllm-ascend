@@ -60,7 +60,7 @@ class TestKVTransferMissingKeyPut(unittest.TestCase):
             block_hashes=[b"h0", b"h1", b"h2", b"h3"],  # type: ignore[arg-type]
             current_event=None,
         )
-        thread.add_stored_request("req-1")
+        thread.add_stored_request(req_meta)
         thread.request_queue.put(req_meta)
         thread._handle_request(req_meta)
 
@@ -69,6 +69,9 @@ class TestKVTransferMissingKeyPut(unittest.TestCase):
         self.assertEqual(len(put_keys), 2)
         self.assertEqual(put_addrs, [[1001], [1003]])
         self.assertEqual(put_sizes, [[16], [16]])
+        self.assertEqual(thread.get_saved_offset("req-1"), 64)
+        self.assertFalse(thread.is_stored_request("req-1"))
+        self.assertEqual(thread.request_queue.unfinished_tasks, 0)
 
 
 if __name__ == "__main__":

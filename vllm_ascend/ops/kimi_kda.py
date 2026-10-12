@@ -34,7 +34,7 @@ from vllm_ascend.attention.utils import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
     record_attention_compute_start,
 )
-from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionBackend
+from vllm_ascend.ops.gdn_attn_builder import AscendGDNHostMetadataBackend
 from vllm_ascend.ops.kda import run_chunk_kda, run_recurrent_kda
 from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import (
     AscendW4A8MXFPDynamicLinearMethod,
@@ -42,7 +42,7 @@ from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import (
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import (
     AscendW8A8MXFP8DynamicLinearMethod,
 )
-from vllm_ascend.utils import npu_stream_switch
+from vllm_ascend.utils import npu_stream_switch, vllm_version_is
 
 _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
 _F_PROJ_SHARD_ID = 1
@@ -252,7 +252,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         self.conv1d.quant_method.process_weights_after_loading = process_weights_and_pack
 
     def get_attn_backend(self) -> type[AttentionBackend]:
-        return AscendGDNAttentionBackend
+        return AscendGDNHostMetadataBackend
 
     def forward(
         self,
@@ -435,12 +435,21 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             .to(device=packed_param.device, dtype=packed_param.dtype)
             .contiguous()
         )
-        replace_parameter(
-            self,
-            _PACKED_CONV_WEIGHT_NAME,
-            packed_weight,
-            prefer_copy=True,
-        )
+        # vLLM main (#62326) keeps the parameter object by default and drops
+        # `prefer_copy`; v0.32.0 still requires `prefer_copy=True`.
+        if vllm_version_is("0.32.0"):
+            replace_parameter(
+                self,
+                _PACKED_CONV_WEIGHT_NAME,
+                packed_weight,
+                prefer_copy=True,
+            )
+        else:
+            replace_parameter(
+                self,
+                _PACKED_CONV_WEIGHT_NAME,
+                packed_weight,
+            )
 
     def _run_recurrent(
         self,
@@ -733,9 +742,9 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         elif core_non_spec is not None:
             core_attn_out[:, :num_actual_tokens] = core_non_spec
 
-        # The registered Ascend FusedRMSNormGated uses the fused norm-gate
-        # kernel while preserving the upstream parameter/loading contract.
-        normalized = self.o_norm(core_attn_out[:, :num_actual_tokens], g2)
-        core_attn_out[:, :num_actual_tokens].copy_(normalized)
+        # Keep the registered norm's parameters while writing into the
+        # caller-owned attention output directly.
+        norm_out = core_attn_out[:, :num_actual_tokens]
+        self.o_norm.forward_oot(norm_out, g2, out=norm_out)
         core_attn_out[:, num_actual_tokens:].zero_()
         maybe_save_kv_layer_to_connector("", [])

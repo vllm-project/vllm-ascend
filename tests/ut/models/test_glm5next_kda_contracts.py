@@ -14,16 +14,17 @@ import vllm_ascend.ops.kda as kda_ops
     "accepted,qkv_padding,direct_output",
     [(None, 0, False), (None, 64, False), ([1, 2, 1], 0, False), ([1, 2, 1], 64, False), (None, 64, True)],
 )
-def test_recurrent_raw_gates_rollback_slots_and_padding(monkeypatch, accepted, qkv_padding, direct_output):
+@pytest.mark.parametrize("state_dtype", [torch.float32, torch.bfloat16])
+def test_recurrent_raw_gates_rollback_slots_and_padding(monkeypatch, accepted, qkv_padding, direct_output, state_dtype):
     q, k, v = (torch.ones(1, 4, 1, 128 + qkv_padding * i, dtype=torch.bfloat16)[..., :128] for i in (1, 2, 3))
     gate = q * 2
     beta = torch.zeros(1, 4, 1, dtype=torch.bfloat16)
-    state = torch.zeros(8, 1, 128, 128)
+    state = torch.zeros(8, 1, 128, 128, dtype=state_dtype)
     starts = torch.tensor([0, 1, 3], dtype=torch.int32)
     slots = torch.tensor([[2, 3], [5, 6], [0, 0]], dtype=torch.int32)
     accepted_tensor = None if accepted is None else torch.tensor(accepted, dtype=torch.int32)
 
-    def recurrent(q_arg, k_arg, v_arg, gate_arg, beta_arg, state_arg, cu, ids, a_log, bias, **kwargs):
+    def recurrent(q_arg, k_arg, v_arg, gate_arg, beta_arg, state_arg, *, cu_seqlens, ssm_state_indices, **kwargs):
         # Preserve each view's strides and storage without materializing Q/K/V.
         assert q_arg is q and k_arg is k and v_arg is v
         assert kwargs["use_gate_in_kernel"] and kwargs["use_beta_sigmoid_in_kernel"]
@@ -31,14 +32,17 @@ def test_recurrent_raw_gates_rollback_slots_and_padding(monkeypatch, accepted, q
         assert state_arg is state
         torch.testing.assert_close(gate_arg, gate)
         torch.testing.assert_close(beta_arg, beta)
-        torch.testing.assert_close(ids, slots[:2])
+        assert cu_seqlens is starts
+        torch.testing.assert_close(ssm_state_indices, slots[:2])
+        assert kwargs["state_v_first"] and kwargs["inplace_final_state"]
+        assert not kwargs["output_final_state"]
         if accepted_tensor is not None:
             torch.testing.assert_close(kwargs["num_accepted_tokens"], accepted_tensor[:2])
         result = q_arg.clone()
         result[:, 3:] = float("nan")
-        return result
+        return result, None
 
-    monkeypatch.setattr(torch.ops._C_ascend, "recurrent_kda", recurrent, raising=False)
+    monkeypatch.setattr(kda_ops, "recurrent_kda", recurrent)
     destination = torch.full((1, 8, 1, 128), float("nan"), dtype=q.dtype) if direct_output else None
 
     def writeback(source, target, ends):
@@ -66,7 +70,14 @@ def test_recurrent_raw_gates_rollback_slots_and_padding(monkeypatch, accepted, q
     if direct_output:
         assert out is destination
     torch.testing.assert_close(out[:, :3], q[:, :3])
-    assert torch.count_nonzero(out[:, 3:]) == 0
+    if direct_output:
+        # write_recurrent_output zeroes the captured buffer before copying.
+        assert torch.count_nonzero(out[:, 3:]) == 0
+    else:
+        # The recurrent kernel writes valid rows only; padding rows are owned
+        # by the caller (index_copy_ / write_recurrent_output), so the sentinel
+        # NaNs written by the kernel must survive unchanged.
+        assert torch.isnan(out[:, 3:]).all()
 
 
 @pytest.mark.parametrize("state_dtype", [torch.float32, torch.bfloat16])
@@ -80,9 +91,9 @@ def test_chunk_uses_host_descriptors_and_preserves_vk_cache(monkeypatch, state_d
     keep = torch.tensor([0]) if compact else None
     metadata = SimpleNamespace(
         keep_meta=keep,
-        cu_seqlens_host=torch.tensor([0, 3] if compact else [0, 1, 3]),
+        cu_seqlens_host=(0, 3) if compact else (0, 1, 3),
         cu_seqlens_kern=None,
-        chunk_indices_chunk64_host=torch.tensor([[0, 0]] if compact else [[0, 0], [1, 0]]),
+        chunk_indices_chunk64_host=(0, 0) if compact else (0, 0, 1, 0),
     )
 
     def chunk(q_arg, k_arg, v, g, beta, scale, chunk_size, **kwargs):
@@ -96,8 +107,8 @@ def test_chunk_uses_host_descriptors_and_preserves_vk_cache(monkeypatch, state_d
         torch.testing.assert_close(beta, torch.full_like(beta, 0.5))
         return v, torch.full_like(kwargs["initial_state"], 17)
 
-    monkeypatch.setattr(torch.ops._C_ascend, "chunk_kda_fwd", chunk, raising=False)
-    monkeypatch.setattr(kda_ops, "l2norm_fwd", lambda x: x)
+    monkeypatch.setattr(kda_ops, "chunk_kda_fwd", chunk)
+    monkeypatch.setattr("vllm.third_party.flash_linear_attention.ops.l2norm.l2norm_fwd", lambda x: x)
     out = kda.chunk_kda(
         q, q, q, q, torch.zeros(1, 3, 1), state, indices, has_initial, metadata, torch.zeros(1), torch.zeros(128), -4
     )

@@ -276,7 +276,7 @@ int main()
     uint64_t workspaceSize = 0;
     aclOpExecutor *executor = nullptr;
     void *workspaceAddr = nullptr;
-    ret = aclnnQuantLightningIndexerV2MetadataGetWorkspaceSize(
+    ret = aclnnVllmAscendQuantLightningIndexerV2MetadataGetWorkspaceSize(
         context.cuSeqlensQOptional.data, context.cuSeqlensKOptional.data, context.sequsedQOptional.data,
         context.sequsedKOptional.data, context.cmpResidualKOptional.data, context.numHeadsQ, context.numHeadsK,
         context.headDim, context.topk, context.quantMode, context.batchSize, context.maxSeqlenQ, context.maxSeqlenK,
@@ -297,7 +297,7 @@ int main()
     });
 
     // 调用aclnnLightningIndexerV2Metadata第二段接口
-    ret = aclnnQuantLightningIndexerV2Metadata(workspaceAddr, workspaceSize, executor, stream);
+    ret = aclnnVllmAscendQuantLightningIndexerV2Metadata(workspaceAddr, workspaceSize, executor, stream);
     CHECK_LOG_RET(ret == ACL_SUCCESS, ret, "aclnnQuantLightningIndexerV2Metadata failed. ERROR: %d\n", ret);
 
     // 4. （固定写法）同步等待任务执行结束

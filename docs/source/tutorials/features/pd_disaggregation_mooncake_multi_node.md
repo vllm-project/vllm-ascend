@@ -2,7 +2,7 @@
 
 ## Getting Started
 
-vLLM-Ascend now supports prefill-decode (PD) disaggregation with EP (Expert Parallel) options. This guide takes one-by-one steps to verify these features with constrained resources.
+vLLM-Ascend now supports prefill-decode (PD) disaggregation with EP (Expert Parallelism) options. This guide takes one-by-one steps to verify these features with constrained resources.
 
 Take the DeepSeek-r1-w8a8 model as an example, use 4 Atlas 800T A3 servers to deploy the "2P1D" architecture. Assume the IP of the prefiller server is 192.0.0.1 (prefill 1) and 192.0.0.2 (prefill 2), and the decoder servers are 192.0.0.3 (decoder 1) and 192.0.0.4 (decoder 2). On each server, use 8 NPUs and 16 chips to deploy one service instance.
 
@@ -11,9 +11,11 @@ Take the DeepSeek-r1-w8a8 model as an example, use 4 Atlas 800T A3 servers to de
 ### Physical Layer Requirements
 
 - The physical machines must be located on the same LAN, with network connectivity.
-- All NPUs must be interconnected. Intra-node connectivity is via HCCS, and inter-node connectivity is via RDMA.
+- All NPUs must be interconnected. On A2/A3, intra-node connectivity is via HCCS, and inter-node connectivity is via RDMA. For Atlas 850/850E/950 SuperPod (950PR/950DT), see [Atlas 850/850E/950 SuperPod Communication Configuration](#atlas-850850e950-superpod-communication-configuration).
 
 ### Verification Process
+
+The following checks apply to A2/A3 deployments.
 
 Execute the following commands on each node in sequence. The results must all be `success` and the status must be `UP`:
 
@@ -118,6 +120,72 @@ Execute the following commands on each node in sequence. The results must all be
         for i in {0..7}; do hccn_tool -i $i -tls -g ; done | grep switch
         ```
 
+### Atlas 850/850E/950 SuperPod Communication Configuration
+
+For Atlas 850/850E/950 SuperPod (950PR/950DT), PD disaggregation uses the super plane (based on UB port and UBC protocol) by default. No additional network configuration is required for this default path. Set the following environment variable in both the prefiller and decoder serving environments to generate the communication configuration automatically:
+
+```bash
+export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
+```
+
+The parameter plane supports UBG, UBoE, and RoCE network protocols. Each protocol requires compatible hardware and network configuration completed in advance. Consult your environment provider or administrator for the required environment and configuration.
+
+For UBG or UBoE network protocols, keep the automatic configuration setting above and select the corresponding protocol before starting the serving processes:
+
+=== "UBG"
+
+    ```bash
+    export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["ub_rtp:device"]}'
+    ```
+
+=== "UBoE"
+
+    ```bash
+    export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["uboe:device"]}'
+    ```
+
+=== "RoCE"
+
+    For RoCE network protocol, current configuration is to prepare endpoint configuration files under `/etc/hixlep` and set `ascend_local_comm_res_path` in `kv_connector_extra_config` on both sides. For example, with `DP=4` and `TP=1` on each side:
+
+    ```json
+    {
+        "kv_connector_extra_config": {
+            "prefill": {
+                "dp_size": 4,
+                "tp_size": 1
+            },
+            "decode": {
+                "dp_size": 4,
+                "tp_size": 1
+            },
+            "ascend_local_comm_res_path": "/etc/hixlep"
+        }
+    }
+    ```
+
+    Merge these fields into your existing `--kv-transfer-config` and adjust the parallelism settings to your deployment.
+
+    When combining PD disaggregation with KV pooling through `MultiConnector`, place `ascend_local_comm_res_path` in the **outer** `MultiConnector`'s `kv_connector_extra_config`, alongside the `connectors` list. Do not place it in a child connector's `kv_connector_extra_config`: the worker loads the endpoint files from the outer KV transfer configuration. Keep the `prefill` and `decode` parallelism settings in the Mooncake P/D child connector's configuration.
+
+    Create an endpoint file for each physical NPU used on the host, named `/etc/hixlep/ub_endpoint_npu_<physical_npu_id>.json`. The suffix is the host physical NPU ID, not the DP rank or the ordinal within the visible devices. An example file contains:
+
+    ```json
+    {
+        "version": "1.3",
+        "net_instance_id": "superpod_0",
+        "endpoint_list": [
+            {
+                "protocol": "roce",
+                "comm_id": "<host_roce_ip>",
+                "placement": "host"
+            }
+        ]
+    }
+    ```
+
+    Replace `<host_roce_ip>` with the actual host RoCE IP address. Ensure the endpoint files are available at the configured path inside each container.
+
 ## Run with Docker
 
 Start a Docker container on each node.
@@ -161,6 +229,41 @@ docker run --rm \
 -v /etc/hccn.conf:/etc/hccn.conf \
 -v /mnt/sfs_turbo/.cache:/root/.cache \
 -it $IMAGE bash
+```
+
+### Atlas 850/850E/950 SuperPod (950PR/950DT) Container Requirements
+
+For Atlas 850/850E/950 SuperPod (950PR/950DT), adapt the device mappings and mounts to the host and selected transport. For automatically generated UB communication configuration, include the following options in your `docker run` command, before the image name:
+
+```bash
+--device=/dev/ummu \
+--device=/dev/uburma \
+-v /usr/bin/urma_admin:/usr/bin/urma_admin \
+```
+
+Mounting `/lib/route.conf` is optional. If you choose to mount it manually, generate the file on the host before starting the container. See the [LocalCommRes Configuration Guide](https://gitcode.com/cann/hixl/wiki/A5%20LocalCommRes%E9%85%8D%E7%BD%AE%E6%8C%87%E5%8D%97.md) for generation and configuration instructions, then add:
+
+```bash
+-v /lib/route.conf:/lib/route.conf \
+```
+
+RoCE requires the following device and driver configuration mounts:
+
+```bash
+--device=/dev/infiniband \
+-v /etc/libibverbs.d/hrn5.driver:/etc/libibverbs.d/hrn5.driver:ro \
+```
+
+Make the RoCE endpoint directory available inside the container, for example:
+
+```bash
+-v /etc/hixlep:/etc/hixlep:ro \
+```
+
+Optionally, mount the host's `hiroce5` executable to inspect RoCE network cards from inside the container. Use its actual path on the host; for example:
+
+```bash
+-v /usr/local/bin/hiroce5:/usr/local/bin/hiroce5 \
 ```
 
 ## Install Mooncake
@@ -214,7 +317,19 @@ export LD_LIBRARY_PATH=/usr/local/lib64/python3.12/site-packages/mooncake:$LD_LI
 
 ## Prefiller/Decoder Deployment
 
-We can run the following scripts to launch a server on the prefiller/decoder node, respectively. Please note that each P/D node will occupy ports ranging from kv_port to kv_port + num_chips to initialize socket listeners. To avoid any issues, port conflicts should be prevented. Additionally, ensure that each node's engine_id is uniquely assigned to avoid conflicts.
+!!! note "Timeout for long sequences or high concurrency"
+
+    For long sequences or high concurrency, the default KV-cache release timeout of 480 seconds may be insufficient. Increase it as needed in the prefiller startup script. For versions that use `VLLM_MOONCAKE_CONNECTOR_TIMEOUT` for this timeout, add:
+
+    ```shell
+    export VLLM_MOONCAKE_CONNECTOR_TIMEOUT=1800
+    ```
+
+    The value is in seconds: `1800` allows 30 minutes before timeout. In current versions, this setting is named `VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT`; use `export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=1800` instead. Check the variable name supported by your installed version.
+
+    Increasing this timeout generally does not affect inference accuracy or performance during normal operation. If a decoder (D) node fails while requests still have KV caches on the prefiller (P) node that the decoder has not received, a longer timeout delays releasing those caches. They continue to occupy HBM, reducing the memory available for other requests on the P node until they are released.
+
+We can run the following scripts to launch a server on the prefiller/decoder node, respectively. Please note that each P/D node will occupy ports ranging from kv_port to kv_port + num_chips to initialize socket listeners. To avoid any issues, port conflicts should be prevented.
 
 ### QoS Configuration
 
@@ -327,9 +442,6 @@ Modify `run_dp_template.sh` on each node.
     export HCCL_IF_IP=$local_ip
     export GLOO_SOCKET_IFNAME=$nic_name
     export TP_SOCKET_IFNAME=$nic_name
-    export HCCL_SOCKET_IFNAME=$nic_name
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=10
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_BUFFSIZE=256
     export TASK_QUEUE_ENABLE=1
@@ -382,9 +494,6 @@ Modify `run_dp_template.sh` on each node.
     export HCCL_IF_IP=$local_ip
     export GLOO_SOCKET_IFNAME=$nic_name
     export TP_SOCKET_IFNAME=$nic_name
-    export HCCL_SOCKET_IFNAME=$nic_name
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=10
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_BUFFSIZE=256
     export TASK_QUEUE_ENABLE=1
@@ -437,9 +546,6 @@ Modify `run_dp_template.sh` on each node.
     export HCCL_IF_IP=$local_ip
     export GLOO_SOCKET_IFNAME=$nic_name
     export TP_SOCKET_IFNAME=$nic_name
-    export HCCL_SOCKET_IFNAME=$nic_name
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=10
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_BUFFSIZE=600
     export TASK_QUEUE_ENABLE=1
@@ -492,9 +598,6 @@ Modify `run_dp_template.sh` on each node.
     export HCCL_IF_IP=$local_ip
     export GLOO_SOCKET_IFNAME=$nic_name
     export TP_SOCKET_IFNAME=$nic_name
-    export HCCL_SOCKET_IFNAME=$nic_name
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=10
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_BUFFSIZE=600
     export TASK_QUEUE_ENABLE=1
@@ -550,9 +653,6 @@ Modify `run_dp_template.sh` on each node.
     export HCCL_IF_IP=$local_ip
     export GLOO_SOCKET_IFNAME=$nic_name
     export TP_SOCKET_IFNAME=$nic_name
-    export HCCL_SOCKET_IFNAME=$nic_name
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=10
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_BUFFSIZE=256
     export TASK_QUEUE_ENABLE=1
@@ -605,9 +705,6 @@ Modify `run_dp_template.sh` on each node.
     export HCCL_IF_IP=$local_ip
     export GLOO_SOCKET_IFNAME=$nic_name
     export TP_SOCKET_IFNAME=$nic_name
-    export HCCL_SOCKET_IFNAME=$nic_name
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=10
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_BUFFSIZE=256
     export TASK_QUEUE_ENABLE=1
@@ -660,9 +757,6 @@ Modify `run_dp_template.sh` on each node.
     export HCCL_IF_IP=$local_ip
     export GLOO_SOCKET_IFNAME=$nic_name
     export TP_SOCKET_IFNAME=$nic_name
-    export HCCL_SOCKET_IFNAME=$nic_name
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=10
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_BUFFSIZE=600
     export TASK_QUEUE_ENABLE=1
@@ -715,9 +809,6 @@ Modify `run_dp_template.sh` on each node.
     export HCCL_IF_IP=$local_ip
     export GLOO_SOCKET_IFNAME=$nic_name
     export TP_SOCKET_IFNAME=$nic_name
-    export HCCL_SOCKET_IFNAME=$nic_name
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=10
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_BUFFSIZE=600
     export TASK_QUEUE_ENABLE=1
@@ -774,6 +865,261 @@ python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 16 --dp-rank
 # on 192.0.0.4
 python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 16 --dp-rank-start 16 --dp-address 192.0.0.3 --dp-rpc-port 12321 --vllm-start-port 7100
 ```
+
+## D2RH Deployment on Atlas 850E (UBoE)
+
+**Validation scope:** D2RH has only been validated with the Atlas 850E
+UBoE configuration shown below, using DeepSeek-V4-Flash. Other hardware,
+network types, and deployment configurations have not been validated.
+
+D2RH stages KV cache in the Decode node's host memory before loading it into
+HBM. See the [D2RH workflow](../../developer_guide/Design_Documents/disaggregated_prefill.md#mooncake-d2rh-connector)
+for the transfer sequence and cache-hit behavior.
+
+**Memory limitation:** D2RH currently registers a pinned host KV cache on each
+Decode worker with the same capacity as its device KV cache, plus alignment
+overhead. This mirrors the KV cache, not the device's total HBM capacity.
+Ensure that available host RAM and container memory limits cover the combined
+allocation of all local Decode ranks, with headroom for model loading and other
+process memory.
+
+**1. Start P and D in separate terminals on their respective nodes.**
+
+Replace the example IPs, interface names, and model paths with your deployment
+values. Run each script on its corresponding node.
+
+On P:
+
+```shell
+unset ftp_proxy
+unset https_proxy
+unset http_proxy
+unset FTP_PROXY HTTPS_PROXY HTTP_PROXY
+unset HCCL_INTRA_ROCE_ENABLE
+
+nic_name="eth0" # change to your own NIC name
+local_ip=192.0.2.10 # change to your own IP
+
+export HCCL_IF_IP="$local_ip"
+export GLOO_SOCKET_IFNAME="$nic_name"
+export TP_SOCKET_IFNAME="$nic_name"
+export HCCL_ALGO=level0:fullmesh
+export HCCL_OP_EXPANSION_MODE=CCU_SCHED
+export VLLM_RPC_TIMEOUT=3600000
+export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+export HCCL_EXEC_TIMEOUT=204
+export HCCL_CONNECT_TIMEOUT=120
+export HCCL_BUFFSIZE=512
+export LD_LIBRARY_PATH="/usr/local/lib:${LD_LIBRARY_PATH:-}"
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export TASK_QUEUE_ENABLE=1
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
+export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
+export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["uboe:device"]}'
+
+# Ensure the model path matches the directory recorded during download
+vllm serve /path/to/DeepSeek-V4-Flash-0731-w4a4c8 \
+    --host "$local_ip" \
+    --port 8100 \
+    --served-model-name dsv4 \
+    --data-parallel-size 4 \
+    --data-parallel-address "$local_ip" \
+    --data-parallel-rpc-port 12321 \
+    --tensor-parallel-size 1 \
+    --pipeline-parallel-size 1 \
+    --enable-expert-parallel \
+    --gpu-memory-utilization 0.9 \
+    --max-model-len 133120 \
+    --max-num-batched-tokens 8192 \
+    --max-num-seqs 32 \
+    --block-size 32 \
+    --enable-prefix-caching \
+    --no-disable-hybrid-kv-cache-manager \
+    --api-server-count 1 \
+    --async-scheduling \
+    --tokenizer-mode deepseek_v4 \
+    --tool-call-parser deepseek_v4 \
+    --enable-auto-tool-choice \
+    --reasoning-parser deepseek_v4 \
+    --trust-remote-code \
+    --quantization ascend \
+    --attention_config.indexer_kv_dtype fp8 \
+    --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}' \
+    --speculative-config '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}' \
+    --enforce-eager \
+    --kv-transfer-config \
+    '{
+        "kv_connector": "MooncakeD2RHConnectorV1",
+        "kv_role": "kv_producer",
+        "kv_port": "36010",
+        "kv_connector_extra_config": {
+            "prefill": {
+                "dp_size": 4,
+                "tp_size": 1
+            },
+            "decode": {
+                "dp_size": 4,
+                "tp_size": 1
+            }
+        }
+    }' \
+    --additional-config '{
+        "enable_cpu_binding": true,
+        "enable_shared_expert_dp": true,
+        "multistream_overlap_shared_expert": true,
+        "enable_flashcomm1": false
+    }'
+```
+
+On D:
+
+```shell
+unset ftp_proxy
+unset https_proxy
+unset http_proxy
+unset FTP_PROXY HTTPS_PROXY HTTP_PROXY
+unset HCCL_INTRA_ROCE_ENABLE
+
+nic_name="eth0" # change to your own NIC name
+local_ip=192.0.2.20 # change to your own IP
+
+export HCCL_IF_IP="$local_ip"
+export GLOO_SOCKET_IFNAME="$nic_name"
+export TP_SOCKET_IFNAME="$nic_name"
+export HCCL_ALGO=level0:fullmesh
+export HCCL_OP_EXPANSION_MODE=CCU_SCHED
+export VLLM_RPC_TIMEOUT=3600000
+export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+export HCCL_EXEC_TIMEOUT=204
+export HCCL_CONNECT_TIMEOUT=120
+export HCCL_BUFFSIZE=512
+export LD_LIBRARY_PATH="/usr/local/lib:${LD_LIBRARY_PATH:-}"
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export TASK_QUEUE_ENABLE=1
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
+export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
+export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["uboe:device"]}'
+
+# Ensure the model path matches the directory recorded during download
+vllm serve /path/to/DeepSeek-V4-Flash-0731-w4a4c8 \
+    --host "$local_ip" \
+    --port 8200 \
+    --served-model-name dsv4 \
+    --data-parallel-size 4 \
+    --data-parallel-address "$local_ip" \
+    --data-parallel-rpc-port 12322 \
+    --tensor-parallel-size 1 \
+    --pipeline-parallel-size 1 \
+    --enable-expert-parallel \
+    --gpu-memory-utilization 0.9 \
+    --max-model-len 133120 \
+    --max-num-batched-tokens 1024 \
+    --max-num-seqs 32 \
+    --block-size 32 \
+    --enable-prefix-caching \
+    --no-disable-hybrid-kv-cache-manager \
+    --api-server-count 1 \
+    --async-scheduling \
+    --tokenizer-mode deepseek_v4 \
+    --tool-call-parser deepseek_v4 \
+    --enable-auto-tool-choice \
+    --reasoning-parser deepseek_v4 \
+    --trust-remote-code \
+    --quantization ascend \
+    --attention_config.indexer_kv_dtype fp8 \
+    --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}' \
+    --speculative-config '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}' \
+    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+    --kv-transfer-config \
+    '{
+        "kv_connector": "MooncakeD2RHConnectorV1",
+        "kv_role": "kv_consumer",
+        "kv_port": "36020",
+        "kv_connector_extra_config": {
+            "d2rh_zmq_port": 38100,
+            "d2rh_scheduler_ready_port": 38200,
+            "prefill": {
+                "dp_size": 4,
+                "tp_size": 1
+            },
+            "decode": {
+                "dp_size": 4,
+                "tp_size": 1
+            }
+        }
+    }' \
+    --additional-config '{
+        "enable_cpu_binding": true,
+        "enable_shared_expert_dp": true,
+        "multistream_overlap_shared_expert": true,
+        "enable_flashcomm1": false
+    }'
+```
+
+The scripts enable prefix caching on both sides, keep the hybrid KV cache
+manager enabled, and set
+`ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["uboe:device"]}'`.
+They use FP8 indexer cache on Atlas 850E, not the INT8 indexer setting from the
+A2/A3 examples; see the [W4A4C8 FAQ](../models/DeepSeek-V4-Flash.md#q-how-do-the-w4a4c8-ultra-low-bit-quantized-weights-preserve-accuracy).
+P uses eager execution and D uses `FULL_DECODE_ONLY` graphs.
+
+The context limit is 133120 tokens, enough for 128k input plus 1k output, including
+any prompt-template tokens within that limit.
+Adjust `--gpu-memory-utilization` directly if needed.
+Reducing it reduces available KV capacity and can reduce D's staging allocation;
+recheck both host memory and maximum request capacity after changing it.
+
+HTTP ports are 8100 (P) and 8200 (D); DP RPC ports are 12321 and 12322, and
+`kv_port` bases are 36010 and 36020. The Decode script explicitly sets two
+additional TCP/ZMQ control-port bases in `kv_connector_extra_config`:
+
+- `d2rh_zmq_port` (default: `38100`): Each D worker listens for `START_PULL`
+  requests from its local scheduler. These requests trigger staging of the
+  required KV cache into D host memory, reusing valid host-cache entries when
+  available. This port carries control messages, not the KV data itself.
+- `d2rh_scheduler_ready_port` (default: `38200`): Each D scheduler listens for
+  worker notifications that host staging is ready. Once the required workers
+  report readiness, the request can proceed to device-block allocation and
+  H2D loading. This notification does not mean that H2D or decoding has finished.
+
+These are base ports, not single ports shared by all ranks. For this
+DP4/TP1/PP1 deployment, D uses `38100-38103` for pull requests and
+`38200-38203` for scheduler-ready notifications, with one port per DP rank in
+each range. Other parallelism layouts introduce additional rank offsets;
+reserve the full ranges for the deployment. Both settings are D-side controls
+and do not need to be duplicated in the P script.
+
+These ports are independent of `kv_port`, which is still used for Mooncake
+handshake metadata and transfer-completion signaling. Changing `kv_port` does
+not change either D2RH control-port base. Mooncake TransferEngine RPC and
+UBoE/HCCL communication also have separate network requirements.
+
+For multiple D instances sharing a host network, assign non-overlapping ranges
+to both settings and avoid conflicts with HTTP, DP RPC, `kv_port`, and other
+services. For example, a second DP4/TP1/PP1 instance can use bases `39100` and
+`39200` if `39100-39103` and `39200-39203` are free. Configure the bases once in
+that instance's D launch command; rank offsets are added automatically. Ensure
+that D schedulers and workers can reach the bound D-node IP and these TCP ports.
+
+**2. Check both services, then start the proxy.**
+
+On a host that can reach both nodes, from the repository root:
+
+```shell
+unset http_proxy https_proxy ftp_proxy HTTP_PROXY HTTPS_PROXY FTP_PROXY
+export P_IP=192.0.2.10
+export D_IP=192.0.2.20
+curl --fail "http://${P_IP}:8100/health"
+curl --fail "http://${D_IP}:8200/health"
+python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
+    --host 0.0.0.0 --port 8000 \
+    --prefiller-hosts "$P_IP" --prefiller-ports 8100 \
+    --decoder-hosts "$D_IP" --decoder-ports 8200
+```
+
+The proxy points at each node's single API endpoint; the server distributes
+requests across its local DP ranks. Do not also run `launch_online_dp.py` for
+this example. Keep these unauthenticated example endpoints on a trusted network.
 
 ## Example Proxy for Deployment
 

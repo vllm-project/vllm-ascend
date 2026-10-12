@@ -645,6 +645,23 @@ __aicore__ inline void SWAVectorBlock<SMLAT>::ElewiseCompute(const RunInfo &info
                 if (dealTempSize == 0) {
                     continue;
                 }
+                // SWA bounded replay: in band mode a supplied ori_topk_length is
+                // how many ori KV entries this query token may see -- per token,
+                // which the window's own scalar width cannot express. Keep that
+                // many ending at the same right edge. max() keeps ori_win_left as
+                // the upper bound, so this only ever narrows.
+                if (constInfo.hasOriTopkLength && constInfo.oriMaskMode == 4U) {
+                    uint64_t qTokenOffset = 0;
+                    if constexpr (LAYOUT_T == SMLA_LAYOUT::TND) {
+                        qTokenOffset = static_cast<uint64_t>(actualSeqLengthsQGm.GetValue(info.bIdx)) + i;
+                    } else {
+                        qTokenOffset = static_cast<uint64_t>(info.bIdx) * constInfo.qSeqSize + i;
+                    }
+                    int32_t rowLen = oriTopkLengthGm.GetValue(qTokenOffset * constInfo.kvHeadNum + info.n2IdxReal);
+                    if (rowLen > 0) {
+                        left = Max(left, right - rowLen + 1);
+                    }
+                }
                 SetInfInBlk(mmResUb[ubOffset], dealTempSize, columnCount, 0, left - 1);
                 SetInfInBlk(mmResUb[ubOffset], dealTempSize, columnCount, right + 1, columnCount - 1);
                 right = Min(right + 1, columnCount - 1);

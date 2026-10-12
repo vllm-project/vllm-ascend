@@ -1,15 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any
-
 import pytest
 import torch
 from vllm.triton_utils import triton
-from vllm.v1.worker.gpu.block_table import (
-    _compute_slot_mappings_kernel as ref_compute_slot_mappings_kernel,
-)
 
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.v2.block_table.compute_slot_mappings import (
     _compute_slot_mappings_kernel as ascend_compute_slot_mappings_kernel,
 )
@@ -18,6 +15,10 @@ from vllm_ascend.worker.v2.block_table import (
 )
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @pytest.mark.parametrize(
     ("cp_size", "cp_rank", "cp_interleave"),
     [
@@ -28,7 +29,7 @@ from vllm_ascend.worker.v2.block_table import (
     ],
 )
 def test_compute_slot_mapping_npu_kernel_cp(cp_size: int, cp_rank: int, cp_interleave: int) -> None:
-    """Check the Ascend V2 kernel against the upstream kernel."""
+    """Check the Ascend V2 kernel against the logical CP/block mapping."""
     device = "npu"
     max_num_tokens = 8192
     # Empty requests use -1 as their mapping sentinel. The Ascend kernel must
@@ -70,7 +71,6 @@ def test_compute_slot_mapping_npu_kernel_cp(cp_size: int, cp_rank: int, cp_inter
     min_kernel_block_size = min(kernel_block_sizes.tolist())
     block_table_window_size = triton.next_power_of_2((1024 + min_kernel_block_size - 1) // min_kernel_block_size + 1)
     slot_mappings = torch.zeros((num_groups, max_num_tokens), dtype=torch.int32, device=device)
-    ref_slot_mappings = torch.zeros_like(slot_mappings)
 
     kernel_args = (
         max_num_tokens,
@@ -97,18 +97,35 @@ def test_compute_slot_mapping_npu_kernel_cp(cp_size: int, cp_rank: int, cp_inter
         **kernel_kwargs,
         BLOCK_TABLE_WINDOW_SIZE=block_table_window_size,
     )
-    ref_args: tuple[Any, ...] = kernel_args + (torch.ones(num_groups, dtype=torch.bool, device=device),)
-    ref_compute_slot_mappings_kernel[grid](
-        *ref_args,
-        ref_slot_mappings,
-        ref_slot_mappings.stride(0),
-        cp_rank,
-        **kernel_kwargs,
-    )
+    ref_slot_mappings = torch.full((num_groups, max_num_tokens), -1, dtype=torch.int32, device="cpu")
+    host_mapping = idx_mapping.cpu().tolist()
+    host_starts = query_start_loc.cpu().tolist()
+    host_positions = positions.cpu().tolist()
+    for group, (table, kv_block_size, kernel_block_size) in enumerate(
+        zip(block_tables, kv_block_sizes.cpu().tolist(), kernel_block_sizes.cpu().tolist())
+    ):
+        table = table.cpu()
+        for request, state_idx in enumerate(host_mapping):
+            if state_idx < 0:
+                continue
+            for token in range(host_starts[request], host_starts[request + 1]):
+                position = host_positions[token]
+                if cp_size > 1:
+                    virtual_block, offset = divmod(position, kv_block_size * cp_size)
+                    if offset // cp_interleave % cp_size != cp_rank:
+                        continue
+                    rounds, remainder = divmod(offset, cp_interleave * cp_size)
+                    position = virtual_block * kv_block_size + rounds * cp_interleave + remainder % cp_interleave
+                block, offset = divmod(position, kernel_block_size)
+                ref_slot_mappings[group, token] = int(table[state_idx, block]) * kernel_block_size + offset
 
-    torch.testing.assert_close(slot_mappings, ref_slot_mappings)
+    torch.testing.assert_close(slot_mappings.cpu(), ref_slot_mappings)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 def test_ascend_block_tables_compute_slot_mappings_out() -> None:
     """Exercise the V2 override, including its current ``out`` argument."""
     device = torch.device("npu")
