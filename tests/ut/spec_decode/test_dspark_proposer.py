@@ -526,36 +526,13 @@ class TestPadDraftBuffersBeforeBuild(_DSparkProposerTestBase):
 class TestDSparkInitialization(_DSparkProposerTestBase):
     """Tests for DSpark initialization configuration."""
 
-    @pytest.mark.parametrize(
-        ("additional_config", "draft_sample_method", "message"),
-        [
-            pytest.param(
-                {"enable_reduce_sample": True},
-                "greedy",
-                "does not support enable_reduce_sample",
-                id="reduce-sample-bypasses-markov-head",
-            ),
-            pytest.param(
-                {},
-                "probabilistic",
-                "probabilistic draft sampling is not supported",
-                id="probabilistic-draft-sampling",
-            ),
-        ],
-    )
-    def test_rejects_invalid_config_before_parent_initialization(
-        self,
-        additional_config: dict,
-        draft_sample_method: str,
-        message: str,
-    ) -> None:
+    def test_rejects_reduce_sample_before_parent_initialization(self) -> None:
         vllm_config = self._make_vllm_config(SimpleNamespace())
-        vllm_config.additional_config = additional_config
-        vllm_config.speculative_config.draft_sample_method = draft_sample_method
+        vllm_config.additional_config = {"enable_reduce_sample": True}
         parent_init = MagicMock()
 
         with (
-            pytest.raises(ValueError, match=message),
+            pytest.raises(ValueError, match="does not support enable_reduce_sample"),
             patch.object(
                 AscendDSparkProposer.__base__,
                 "__init__",
@@ -631,10 +608,10 @@ class TestSetPerGroupAttnMetadata(_DSparkProposerTestBase):
 
 
 class TestDSparkInitValidation:
-    """``AscendDSparkProposer.__init__`` rejects probabilistic draft sampling
-    (unsupported on the v1 model runner) and, for the greedy path, allocates
-    the DSpark-specific draft/seed buffers and overrides the DFlash
-    query-token / cudagraph defaults."""
+    """``AscendDSparkProposer.__init__`` accepts probabilistic draft sampling
+    (supported via the per-step probability collection in
+    ``llm_base_proposer``), allocates the DSpark-specific draft/seed buffers
+    and overrides the DFlash query-token / cudagraph defaults."""
 
     @staticmethod
     def _make_vllm_config(
@@ -682,7 +659,7 @@ class TestDSparkInitValidation:
 
         monkeypatch.setattr(AscendDflashProposer, "__init__", _stub)
 
-    def test_probabilistic_rejected(self, monkeypatch):
+    def test_probabilistic_accepted(self, monkeypatch):
         device = torch.device("cpu")
         self._stub_dflash_init(
             monkeypatch,
@@ -698,8 +675,11 @@ class TestDSparkInitValidation:
             max_num_tokens=256,
             draft_sample_method="probabilistic",
         )
-        with pytest.raises(ValueError, match="probabilistic"):
-            AscendDSparkProposer(vllm_config, device)
+        # Probabilistic draft sampling is supported (per-step probabilities
+        # are collected in llm_base_proposer); init must not raise.
+        proposer = AscendDSparkProposer(vllm_config, device)
+        assert proposer._dspark_draft_buffer.shape == (16, 6)
+        assert proposer._dspark_seed_buffer.shape == (16,)
 
     def test_greedy_allocates_dspark_buffers(self, monkeypatch):
         device = torch.device("cpu")

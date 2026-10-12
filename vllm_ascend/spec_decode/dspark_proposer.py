@@ -45,11 +45,6 @@ class AscendDSparkProposer(AscendDflashProposer):
                 "DSpark Markov-head correction. Set "
                 "additional_config.enable_reduce_sample=false."
             )
-        if vllm_config.speculative_config.draft_sample_method == "probabilistic":
-            raise ValueError(
-                "DSpark probabilistic draft sampling is not supported on the v1 "
-                "model runner; use greedy (the default) instead."
-            )
         super().__init__(vllm_config, device, runner=runner)
         self.sample_from_anchor = getattr(self.draft_model_config.hf_config, "sample_from_anchor", True)
         if self.sample_from_anchor:
