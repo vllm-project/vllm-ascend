@@ -276,9 +276,9 @@ settings. Restart the serving processes after changing P/D QoS.
 
 ### kv_port Configuration Guide
 
-On Ascend NPU, Mooncake uses AscendDirectTransport for RDMA data transfer. Its [port allocation helper](https://github.com/kvcache-ai/Mooncake/blob/b4ccdc3082d2def865ecf1b5e68bc511025da40e/mooncake-transfer-engine/src/transport/ascend_transport/ascend_direct_transport/utils.cpp) uses a stride of **100** per physical NPU device ID: device `d` can select any port from `base_port + d × 100` through `base_port + (d + 1) × 100`, **including both endpoints**. The default `base_port` is `20000`; Mooncake's `ASCEND_BASE_PORT` environment variable overrides it.
+For Mooncake's AscendDirectTransport RDMA path, the host listener [port allocation helper](https://github.com/kvcache-ai/Mooncake/blob/b4ccdc3082d2def865ecf1b5e68bc511025da40e/mooncake-transfer-engine/src/transport/ascend_transport/ascend_direct_transport/utils.cpp) uses a stride of **100** per physical NPU device ID: device `d` can select any port from `base_port + d × 100` through `base_port + (d + 1) × 100`, **including both endpoints**. The default `base_port` is `20000`; Mooncake's `ASCEND_BASE_PORT` environment variable overrides it.
 
-Keep `kv_port` and all of its worker listener ports outside the transport's allocation intervals. The table below assumes the default base port and contiguous physical device IDs starting at `0`:
+When using this host listener allocator, keep `kv_port` and all of its worker listener ports outside its allocation intervals. The table below assumes the default base port and contiguous physical device IDs starting at `0`:
 
 | Physical NPU Device IDs | Reserved Port Range (Inclusive) | Recommended kv_port |
 |-------------------------|---------------------------------|---------------------|
@@ -287,9 +287,11 @@ Keep `kv_port` and all of its worker listener ports outside the transport's allo
 
 Use physical device IDs rather than board counts or process-local logical IDs. If the IDs are non-contiguous, or `ASCEND_BASE_PORT` is changed, calculate the intervals with the formula above instead of using the table.
 
+These ranges describe AscendDirectTransport host listener sockets, not UB ports or UBC endpoints. Atlas 850/850E/950 SuperPod (950PR/950DT) uses the [UB/UBC super plane by default](https://github.com/vllm-project/vllm-ascend/blob/bdd5d57ab0a4842712617b5d169050832ad3b6be/docs/source/tutorials/features/pd_disaggregation_mooncake_multi_node.md#atlas-850850e950-superpod-communication-configuration); configure those communication resources separately. If that deployment also uses AscendDirectTransport's host listener allocator, its `kv_port` and worker ports must still avoid the intervals above.
+
 !!! warning
 
-    If you occasionally see `zmq.error.ZMQError: Address already in use` during startup, it may be caused by kv_port conflicting with randomly allocated AscendDirectTransport ports. Increase your kv_port value to avoid the reserved range.
+    When using this host listener allocator, `zmq.error.ZMQError: Address already in use` during startup may be caused by kv_port conflicting with randomly allocated AscendDirectTransport ports. Increase your kv_port value to avoid the reserved range.
 
 ### launch_online_dp.py
 
