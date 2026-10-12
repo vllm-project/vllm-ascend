@@ -2879,16 +2879,41 @@ def test_boundary_handoff_invalid_source(boundary_handoff, bad_id):
     assert [block.ref_cnt for block in blocks] == [1, 1, 1, 1]
 
 
-def test_boundary_handoff_conflict_and_incomplete_groups(boundary_handoff):
+def test_boundary_handoff_conflicting_groups(boundary_handoff):
     scheduler, _, request, _, blocks = boundary_handoff
     a, b, *_ = [block.block_id for block in blocks]
     with pytest.raises(ValueError, match="Conflicting"):
         scheduler._retain_boundary_states(request, [(1, a, 32), (1, b, 32)])
-    scheduler._retain_boundary_states(request, [(1, a, 32)])
-    with pytest.raises(ValueError, match="Incomplete"):
-        scheduler.request_finished(request, ([8, 9], [10, 11], [10, 11]))
+
+
+@pytest.mark.parametrize("group_id", [1, 2])
+def test_boundary_handoff_incomplete_groups_recompute_and_release(boundary_handoff, group_id):
+    scheduler, connector, request, pool, blocks = boundary_handoff
+    a = blocks[0].block_id
+    # An incomplete offer must not leave upstream partial-tail delay enabled.
+    assert not connector.register_finished_partial_tail(request, ([], [], []), [(group_id, a, 32)])
+    assert blocks[0].ref_cnt == 2
+    assert scheduler.request_finished(request, ([8, 9], [10, 11], [10, 11])) == (False, None)
     assert blocks[0].ref_cnt == 1
     assert not scheduler._boundary_states
+    assert not scheduler._boundary_requests
+    assert request.request_id not in scheduler._reqs_need_send
+    # Repeated cleanup must not drop the request's original ownership.
+    scheduler._release_boundary_states(request.request_id)
+    assert blocks[0].ref_cnt == 1
+    pool.free_blocks(blocks)
+
+
+def test_boundary_handoff_finish_hook_waits_for_complete_groups(boundary_handoff):
+    scheduler, connector, request, pool, blocks = boundary_handoff
+    a, b, *_ = [block.block_id for block in blocks]
+    assert not connector.register_finished_partial_tail(request, ([], [], []), [(1, a, 32)])
+    assert connector.register_finished_partial_tail(request, ([], [], []), [(2, b, 32)])
+    assert [block.ref_cnt for block in blocks] == [2, 2, 1, 1]
+    request.status = RequestStatus.FINISHED_ABORTED
+    assert scheduler.request_finished(request, ([], [], [])) == (False, None)
+    assert [block.ref_cnt for block in blocks] == [1, 1, 1, 1]
+    pool.free_blocks(blocks)
 
 
 @pytest.mark.parametrize("boundary", [0, -1, True, "31", 16, 33])

@@ -1671,7 +1671,11 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         if request.status != RequestStatus.FINISHED_LENGTH_CAPPED:
             return False
         self.connector_scheduler._retain_boundary_states(request, partial_tail_offloads)
-        return bool(self.connector_scheduler._boundary_states.get(request.request_id))
+        states = self.connector_scheduler._boundary_states.get(request.request_id, {})
+        state_groups = {
+            idx for idx, info in enumerate(self.connector_scheduler.group_transfer_info) if info.is_state_group
+        }
+        return bool(states) and states.keys() == state_groups
 
     def update_connector_output(self, connector_output: "KVConnectorOutput") -> None:
         assert self.connector_scheduler is not None
@@ -2151,7 +2155,13 @@ class MooncakeConnectorScheduler:
             state_groups = {idx for idx, info in enumerate(self.group_transfer_info) if info.is_state_group}
             if exact_states.keys() != state_groups:
                 self._release_boundary_states(request.request_id)
-                raise ValueError("Incomplete Mooncake final boundary-state handoff")
+                # Never pair an exact state from one group with a positional
+                # state from another. Omit transfer metadata so D recomputes.
+                logger.warning(
+                    "Incomplete Mooncake boundary-state handoff for %s; falling back to local prefill",
+                    request.request_id,
+                )
+                return False, None
             computed_block_ids = tuple(
                 [exact_states[idx]] if idx in exact_states else group for idx, group in enumerate(computed_block_ids)
             )
