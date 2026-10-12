@@ -479,8 +479,8 @@ Prerequisites:
    `MODEL_PATH` to the installed GLM-5.3-w8a8c8 weight directory.
 2. Verify [multi-node communication](../../getting_started/installation.md#installation-multi-node-interconnect).
    The Prefill command takes the node's own IP as `$3`; the Decode
-   command exports each node's IP as `LOCAL_IP` before invoking
-   `launch_online_dp.py`.
+  command passes each node's IP as `LOCAL_IP` inline when invoking
+  `launch_online_dp.py`.
 3. Reserve the Prefill master port 29501 (TCP store for `--nnodes 4`),
    Prefill DP RPC port 12980, Decode DP RPC port 12990, Decode API ports
    10010-10013 per node, Prefill API port 8077, proxy port 8000, and the
@@ -492,8 +492,7 @@ Prerequisites:
 #### 5.4.1 Prepare the Decode DP Launcher
 
 Save `launch_online_dp.py` on all four Decode nodes — the same launcher
-as the A3 PD guide (Section 5.2.2 of the A3 reference, PR #18168) and
-the GLM-5.2 8-node A2 guide. It starts one process per local DP rank and
+pattern as the GLM-5.2 8-node A2 guide. It starts one process per local DP rank and
 propagates child failures. Prefill does not use this launcher (its
 `--nnodes 4` is handled by `vllm serve` directly).
 
@@ -540,9 +539,9 @@ if [ "$NODE_RANK" = "0" ]; then
   API_SERVER_COUNT="--api-server-count 1"
 fi
 
-NIC_NAME=${NIC_NAME:?export NIC_NAME to the business-network interface}
-P_MASTER_IP=${P_MASTER_IP:?export P_MASTER_IP to the Prefill master IP}
-MODEL_PATH=${MODEL_PATH:?export MODEL_PATH to the model directory}
+NIC_NAME="<NETWORK_INTERFACE>"
+P_MASTER_IP="<PREFILL_NODE0_IP>"
+MODEL_PATH="<YOUR_MODEL_PATH>"
 
 unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
 source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh
@@ -560,7 +559,8 @@ export TP_SOCKET_IFNAME=$NIC_NAME
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
 export HCCL_EXEC_TIMEOUT=7200
 export HCCL_CONNECT_TIMEOUT=7200
-export VLLM_RPC_TIMEOUT=360000 VLLM_ENGINE_READY_TIMEOUT_S=1200
+export VLLM_RPC_TIMEOUT=360000
+export VLLM_ENGINE_READY_TIMEOUT_S=1200
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
 export HCCL_BUFFSIZE=1024
@@ -603,7 +603,7 @@ exec vllm serve "$MODEL_PATH" \
   --tool-call-parser glm47 \
   --reasoning-parser glm47 \
   --speculative-config \
-  '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
+  '{"num_speculative_tokens": 1, "method": "deepseek_mtp", "enforce_eager": true}' \
   --additional-config \
   '{"enable_dsa_cp": true, "enable_fused_mc2": 1, "enable_flashcomm1": true, "ascend_compilation_config": {"fuse_muls_add": true}}' \
   --kv-transfer-config \
@@ -637,16 +637,17 @@ DP_RANK=$4
 DP_ADDRESS=$5
 DP_RPC_PORT=$6
 TP_SIZE=$7
-MODEL_PATH=${MODEL_PATH:?export MODEL_PATH to the model directory}
+MODEL_PATH="<YOUR_MODEL_PATH>"
 
 LOCAL_IP=${LOCAL_IP:?export LOCAL_IP to this node IP before starting}
-NIC_NAME=${NIC_NAME:?export NIC_NAME to the interface carrying LOCAL_IP}
+NIC_NAME="<NETWORK_INTERFACE>"
 
 unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
 source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh
 
 # Intra-node TP2: HCCL_IF_IP to the local business IP is fine here.
-export VLLM_HOST_IP=$LOCAL_IP HCCL_IF_IP=$LOCAL_IP
+export VLLM_HOST_IP=$LOCAL_IP
+export HCCL_IF_IP=$LOCAL_IP
 export GLOO_SOCKET_IFNAME=$NIC_NAME
 export TP_SOCKET_IFNAME=$NIC_NAME
 export HCCL_SOCKET_IFNAME=$NIC_NAME
@@ -666,7 +667,8 @@ export VLLM_USE_V1=1
 export CPU_AFFINITY_CONF=1
 export ACL_OP_INIT_MODE=1
 export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
-export VLLM_MOONCAKE_ZMQ_RETRIES=20 VLLM_MOONCAKE_ZMQ_RETRY_SLEEP=0.5
+export VLLM_MOONCAKE_ZMQ_RETRIES=20
+export VLLM_MOONCAKE_ZMQ_RETRY_SLEEP=0.5
 
 exec vllm serve "$MODEL_PATH" \
   --host 0.0.0.0 \
@@ -697,7 +699,7 @@ exec vllm serve "$MODEL_PATH" \
   --additional-config \
   '{"recompute_scheduler_enable": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_fused_mc2": 1}' \
   --speculative-config \
-  '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
+  '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}' \
   --compilation-config \
   '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
   --kv-transfer-config \
@@ -723,15 +725,7 @@ started nearly simultaneously.
 1. Decode node 0 (DP ranks 0-3, hosts the DP master):
 
     ```shell
-    export LOCAL_IP="<DECODE_NODE0_IP>"
-    export NIC_NAME="<NETWORK_INTERFACE>"
-    export MODEL_PATH="<YOUR_MODEL_PATH>"
-    python3 launch_online_dp.py \
-      --script-path ./start_d_engine.sh \
-      --dp-size 16 --tp-size 2 --dp-size-local 4 \
-      --dp-rank-start 0 \
-      --dp-address "<DECODE_NODE0_IP>" --dp-rpc-port 12990 \
-      --vllm-start-port 10010
+    LOCAL_IP="<DECODE_NODE0_IP>" python3 launch_online_dp.py --script-path ./start_d_engine.sh --dp-size 16 --tp-size 2 --dp-size-local 4 --dp-rank-start 0 --dp-address "<DECODE_NODE0_IP>" --dp-rpc-port 12990 --vllm-start-port 10010
     ```
 
 2. Decode node 1 (DP ranks 4-7), node 2 (8-11), and node 3 (12-15):
@@ -741,37 +735,13 @@ started nearly simultaneously.
 
     ```shell
     # Decode node 1
-    export LOCAL_IP="<DECODE_NODE1_IP>"
-    export NIC_NAME="<NETWORK_INTERFACE>"
-    export MODEL_PATH="<YOUR_MODEL_PATH>"
-    python3 launch_online_dp.py \
-      --script-path ./start_d_engine.sh \
-      --dp-size 16 --tp-size 2 --dp-size-local 4 \
-      --dp-rank-start 4 \
-      --dp-address "<DECODE_NODE0_IP>" --dp-rpc-port 12990 \
-      --vllm-start-port 10010
+    LOCAL_IP="<DECODE_NODE1_IP>" python3 launch_online_dp.py --script-path ./start_d_engine.sh --dp-size 16 --tp-size 2 --dp-size-local 4 --dp-rank-start 4 --dp-address "<DECODE_NODE0_IP>" --dp-rpc-port 12990 --vllm-start-port 10010
 
     # Decode node 2
-    export LOCAL_IP="<DECODE_NODE2_IP>"
-    export NIC_NAME="<NETWORK_INTERFACE>"
-    export MODEL_PATH="<YOUR_MODEL_PATH>"
-    python3 launch_online_dp.py \
-      --script-path ./start_d_engine.sh \
-      --dp-size 16 --tp-size 2 --dp-size-local 4 \
-      --dp-rank-start 8 \
-      --dp-address "<DECODE_NODE0_IP>" --dp-rpc-port 12990 \
-      --vllm-start-port 10010
+    LOCAL_IP="<DECODE_NODE2_IP>" python3 launch_online_dp.py --script-path ./start_d_engine.sh --dp-size 16 --tp-size 2 --dp-size-local 4 --dp-rank-start 8 --dp-address "<DECODE_NODE0_IP>" --dp-rpc-port 12990 --vllm-start-port 10010
 
     # Decode node 3
-    export LOCAL_IP="<DECODE_NODE3_IP>"
-    export NIC_NAME="<NETWORK_INTERFACE>"
-    export MODEL_PATH="<YOUR_MODEL_PATH>"
-    python3 launch_online_dp.py \
-      --script-path ./start_d_engine.sh \
-      --dp-size 16 --tp-size 2 --dp-size-local 4 \
-      --dp-rank-start 12 \
-      --dp-address "<DECODE_NODE0_IP>" --dp-rpc-port 12990 \
-      --vllm-start-port 10010
+    LOCAL_IP="<DECODE_NODE3_IP>" python3 launch_online_dp.py --script-path ./start_d_engine.sh --dp-size 16 --tp-size 2 --dp-size-local 4 --dp-rank-start 12 --dp-address "<DECODE_NODE0_IP>" --dp-rpc-port 12990 --vllm-start-port 10010
     ```
 
 3. Prefill node 0 (API server) first, then nodes 2, 1, and 3 (leader before
@@ -779,27 +749,15 @@ started nearly simultaneously.
 
     ```shell
     # Prefill node 0
-    export NIC_NAME="<NETWORK_INTERFACE>"
-    export P_MASTER_IP="<PREFILL_NODE0_IP>"
-    export MODEL_PATH="<YOUR_MODEL_PATH>"
     bash start_p_engine.sh 0 8077 <PREFILL_NODE0_IP>
 
     # Prefill node 2
-    export NIC_NAME="<NETWORK_INTERFACE>"
-    export P_MASTER_IP="<PREFILL_NODE0_IP>"
-    export MODEL_PATH="<YOUR_MODEL_PATH>"
     bash start_p_engine.sh 2 8077 <PREFILL_NODE2_IP>
 
     # Prefill node 1
-    export NIC_NAME="<NETWORK_INTERFACE>"
-    export P_MASTER_IP="<PREFILL_NODE0_IP>"
-    export MODEL_PATH="<YOUR_MODEL_PATH>"
     bash start_p_engine.sh 1 8077 <PREFILL_NODE1_IP>
 
     # Prefill node 3
-    export NIC_NAME="<NETWORK_INTERFACE>"
-    export P_MASTER_IP="<PREFILL_NODE0_IP>"
-    export MODEL_PATH="<YOUR_MODEL_PATH>"
     bash start_p_engine.sh 3 8077 <PREFILL_NODE3_IP>
     ```
 
@@ -817,17 +775,7 @@ zipped 1:1 with a length check — all sixteen Decode endpoints must be
 listed explicitly:
 
 ```shell
-python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
-    --host 0.0.0.0 --port 8000 --workers 8 \
-    --prefiller-hosts <PREFILL_NODE0_IP> --prefiller-ports 8077 \
-    --decoder-hosts <DECODE_NODE0_IP> <DECODE_NODE0_IP> <DECODE_NODE0_IP> <DECODE_NODE0_IP> \
-        <DECODE_NODE1_IP> <DECODE_NODE1_IP> <DECODE_NODE1_IP> <DECODE_NODE1_IP> \
-        <DECODE_NODE2_IP> <DECODE_NODE2_IP> <DECODE_NODE2_IP> <DECODE_NODE2_IP> \
-        <DECODE_NODE3_IP> <DECODE_NODE3_IP> <DECODE_NODE3_IP> <DECODE_NODE3_IP> \
-    --decoder-ports 10010 10011 10012 10013 \
-        10010 10011 10012 10013 \
-        10010 10011 10012 10013 \
-        10010 10011 10012 10013
+python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py --host 0.0.0.0 --port 8000 --workers 8 --prefiller-hosts <PREFILL_NODE0_IP> --prefiller-ports 8077 --decoder-hosts <DECODE_NODE0_IP> <DECODE_NODE0_IP> <DECODE_NODE0_IP> <DECODE_NODE0_IP> <DECODE_NODE1_IP> <DECODE_NODE1_IP> <DECODE_NODE1_IP> <DECODE_NODE1_IP> <DECODE_NODE2_IP> <DECODE_NODE2_IP> <DECODE_NODE2_IP> <DECODE_NODE2_IP> <DECODE_NODE3_IP> <DECODE_NODE3_IP> <DECODE_NODE3_IP> <DECODE_NODE3_IP> --decoder-ports 10010 10011 10012 10013 10010 10011 10012 10013 10010 10011 10012 10013 10010 10011 10012 10013
 ```
 
 Key parameters:
@@ -840,9 +788,9 @@ Key parameters:
   TCP store on node 0:29501, DP RPC 12980). Node 0 is the only API
   server (`--api-server-count 1`); the other three nodes are
   `--headless`. It runs eager with a 8192-token batch budget, 64
-  sequences, 3 MTP tokens, and enables DSA CP, fused MC2, FlashComm1.
+  sequences, 1 MTP token, and enables DSA CP, fused MC2, FlashComm1.
 - Decode runs DP16×TP2 with a 256-token batch budget, 32 sequences,
-  3 MTP tokens with an eager draft, `FULL_DECODE_ONLY` graph mode, and
+  5 MTP tokens with an eager draft, `FULL_DECODE_ONLY` graph mode, and
   `recompute_scheduler_enable=true`.
 - On the Prefill side, do **not** set `HCCL_IF_IP` (see the comment in
   5.4.2): device-side HCCL auto-selects the NPU RoCE interface, and
@@ -974,13 +922,19 @@ source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh
 
 export VLLM_SERVER_DEV_MODE=1
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-export HCCL_EXEC_TIMEOUT=1800 HCCL_CONNECT_TIMEOUT=1800
+export HCCL_EXEC_TIMEOUT=1800
+export HCCL_CONNECT_TIMEOUT=1800
 # TP8 stays inside one node per PP stage, so HCCL_IF_IP to the business IP is fine here.
-export VLLM_HOST_IP=$LOCAL_IP HCCL_IF_IP=$LOCAL_IP
-export GLOO_SOCKET_IFNAME=$NIC_NAME TP_SOCKET_IFNAME=$NIC_NAME HCCL_SOCKET_IFNAME=$NIC_NAME
+export VLLM_HOST_IP=$LOCAL_IP
+export HCCL_IF_IP=$LOCAL_IP
+export GLOO_SOCKET_IFNAME=$NIC_NAME
+export TP_SOCKET_IFNAME=$NIC_NAME
+export HCCL_SOCKET_IFNAME=$NIC_NAME
 export LD_LIBRARY_PATH="${PYTHON_LIB_DIR}:/usr/local/lib:${LD_LIBRARY_PATH}"
-export HCCL_BUFFSIZE=1024 HCCL_OP_EXPANSION_MODE=AIV
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True TASK_QUEUE_ENABLE=1
+export HCCL_BUFFSIZE=1024
+export HCCL_OP_EXPANSION_MODE=AIV
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export TASK_QUEUE_ENABLE=1
 export VLLM_USE_V2_MODEL_RUNNER=0
 export VLLM_USE_FASTOKENS=1
 export VLLM_PP_LAYER_PARTITION="42,36"
@@ -997,7 +951,8 @@ exec vllm serve "$MODEL_PATH" \
   --enable-expert-parallel \
   --pipeline-parallel-size 2 \
   --distributed-executor-backend mp \
-  --master-addr "$INSTANCE_LEADER_IP" --master-port 7060 \
+  --master-addr "$INSTANCE_LEADER_IP" \
+  --master-port 7060 \
   --nnodes 2 --node-rank "$NODE_RANK" \
   --enable-chunked-prefill --no-async-scheduling \
   --enable-prefix-caching \
@@ -1079,14 +1034,20 @@ source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh
 
 export VLLM_SERVER_DEV_MODE=1
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-export HCCL_EXEC_TIMEOUT=1800 HCCL_CONNECT_TIMEOUT=1800
+export HCCL_EXEC_TIMEOUT=1800
+export HCCL_CONNECT_TIMEOUT=1800
 export ASCEND_TRANSFER_TIMEOUT=10000
 # Intra-node TP2: HCCL_IF_IP to the local business IP is fine here.
-export VLLM_HOST_IP=$LOCAL_IP HCCL_IF_IP=$LOCAL_IP
-export GLOO_SOCKET_IFNAME=$NIC_NAME TP_SOCKET_IFNAME=$NIC_NAME HCCL_SOCKET_IFNAME=$NIC_NAME
+export VLLM_HOST_IP=$LOCAL_IP
+export HCCL_IF_IP=$LOCAL_IP
+export GLOO_SOCKET_IFNAME=$NIC_NAME
+export TP_SOCKET_IFNAME=$NIC_NAME
+export HCCL_SOCKET_IFNAME=$NIC_NAME
 export LD_LIBRARY_PATH="${PYTHON_LIB_DIR}:/usr/local/lib:${LD_LIBRARY_PATH}"
-export HCCL_BUFFSIZE=1024 HCCL_OP_EXPANSION_MODE=AIV
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True TASK_QUEUE_ENABLE=1
+export HCCL_BUFFSIZE=1024
+export HCCL_OP_EXPANSION_MODE=AIV
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export TASK_QUEUE_ENABLE=1
 export VLLM_USE_V2_MODEL_RUNNER=0
 export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
 export PYTHONHASHSEED=0
@@ -1195,50 +1156,23 @@ Proxy.
 
     ```shell
     # Decode node 0, DP ranks 0-3
-    LOCAL_IP="<DECODE_NODE0_IP>" python3 launch_online_dp.py \
-      --script-path ./start_d_engine_pool.sh \
-      --dp-size 16 --tp-size 2 --dp-size-local 4 \
-      --dp-rank-start 0 --dp-address "<DECODE_NODE0_IP>" \
-      --dp-rpc-port 12990 --vllm-start-port 10010
+    LOCAL_IP="<DECODE_NODE0_IP>" python3 launch_online_dp.py --script-path ./start_d_engine_pool.sh --dp-size 16 --tp-size 2 --dp-size-local 4 --dp-rank-start 0 --dp-address "<DECODE_NODE0_IP>" --dp-rpc-port 12990 --vllm-start-port 10010
 
     # Decode node 1, DP ranks 4-7
-    LOCAL_IP="<DECODE_NODE1_IP>" python3 launch_online_dp.py \
-      --script-path ./start_d_engine_pool.sh \
-      --dp-size 16 --tp-size 2 --dp-size-local 4 \
-      --dp-rank-start 4 --dp-address "<DECODE_NODE0_IP>" \
-      --dp-rpc-port 12990 --vllm-start-port 10010
+    LOCAL_IP="<DECODE_NODE1_IP>" python3 launch_online_dp.py --script-path ./start_d_engine_pool.sh --dp-size 16 --tp-size 2 --dp-size-local 4 --dp-rank-start 4 --dp-address "<DECODE_NODE0_IP>" --dp-rpc-port 12990 --vllm-start-port 10010
 
     # Decode node 2, DP ranks 8-11
-    LOCAL_IP="<DECODE_NODE2_IP>" python3 launch_online_dp.py \
-      --script-path ./start_d_engine_pool.sh \
-      --dp-size 16 --tp-size 2 --dp-size-local 4 \
-      --dp-rank-start 8 --dp-address "<DECODE_NODE0_IP>" \
-      --dp-rpc-port 12990 --vllm-start-port 10010
+    LOCAL_IP="<DECODE_NODE2_IP>" python3 launch_online_dp.py --script-path ./start_d_engine_pool.sh --dp-size 16 --tp-size 2 --dp-size-local 4 --dp-rank-start 8 --dp-address "<DECODE_NODE0_IP>" --dp-rpc-port 12990 --vllm-start-port 10010
 
     # Decode node 3, DP ranks 12-15
-    LOCAL_IP="<DECODE_NODE3_IP>" python3 launch_online_dp.py \
-      --script-path ./start_d_engine_pool.sh \
-      --dp-size 16 --tp-size 2 --dp-size-local 4 \
-      --dp-rank-start 12 --dp-address "<DECODE_NODE0_IP>" \
-      --dp-rpc-port 12990 --vllm-start-port 10010
+    LOCAL_IP="<DECODE_NODE3_IP>" python3 launch_online_dp.py --script-path ./start_d_engine_pool.sh --dp-size 16 --tp-size 2 --dp-size-local 4 --dp-rank-start 12 --dp-address "<DECODE_NODE0_IP>" --dp-rpc-port 12990 --vllm-start-port 10010
     ```
 
 4. After the Prefill and Decode APIs are ready, start the proxy on a host
    that can reach every endpoint:
 
 ```shell
-python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
-    --host 0.0.0.0 --port 1999 --workers 8 \
-    --prefiller-hosts <PREFILL_NODE0_IP> <PREFILL_NODE2_IP> \
-    --prefiller-ports 8000 8000 \
-    --decoder-hosts <DECODE_NODE0_IP> <DECODE_NODE0_IP> <DECODE_NODE0_IP> <DECODE_NODE0_IP> \
-        <DECODE_NODE1_IP> <DECODE_NODE1_IP> <DECODE_NODE1_IP> <DECODE_NODE1_IP> \
-        <DECODE_NODE2_IP> <DECODE_NODE2_IP> <DECODE_NODE2_IP> <DECODE_NODE2_IP> \
-        <DECODE_NODE3_IP> <DECODE_NODE3_IP> <DECODE_NODE3_IP> <DECODE_NODE3_IP> \
-    --decoder-ports 10010 10011 10012 10013 \
-        10010 10011 10012 10013 \
-        10010 10011 10012 10013 \
-        10010 10011 10012 10013
+python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py --host 0.0.0.0 --port 1999 --workers 8 --prefiller-hosts <PREFILL_NODE0_IP> <PREFILL_NODE2_IP> --prefiller-ports 8000 8000 --decoder-hosts <DECODE_NODE0_IP> <DECODE_NODE0_IP> <DECODE_NODE0_IP> <DECODE_NODE0_IP> <DECODE_NODE1_IP> <DECODE_NODE1_IP> <DECODE_NODE1_IP> <DECODE_NODE1_IP> <DECODE_NODE2_IP> <DECODE_NODE2_IP> <DECODE_NODE2_IP> <DECODE_NODE2_IP> <DECODE_NODE3_IP> <DECODE_NODE3_IP> <DECODE_NODE3_IP> <DECODE_NODE3_IP> --decoder-ports 10010 10011 10012 10013 10010 10011 10012 10013 10010 10011 10012 10013 10010 10011 10012 10013
 ```
 
 #### 5.5.5 Verify Pooling
