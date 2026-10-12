@@ -52,6 +52,8 @@ from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     _select_seq_lens,
     enable_dcp,
+    fia_physical_block_table,
+    fia_physical_kv_views,
     needs_layer_aware_fia_graph_replay,
     notify_kv_cache_written,
     split_decodes_and_prefills,
@@ -209,6 +211,8 @@ class AscendMetadata:
     # Block addresses per sequence (Seq id -> list of physical block).
     # (batch_size, max_blocks_per_seq)
     block_tables: torch.Tensor = None
+    # Read-only physical page addresses, shared only within this metadata step.
+    fia_block_tables: dict[int, torch.Tensor] = field(default_factory=dict)
 
     # The indices of the token slots that input tokens will be stored into.
     # E.g., if `slot_mapping` is [35, 2, 17] and the block size is 16, the
@@ -483,15 +487,16 @@ class FIAParamProvider:
     sliding_window: int | None
     is_draft_model: bool = False
     is_non_pa: bool = False
+    block_stride: int = 1
 
     def resolve(self, attn_metadata) -> dict[str, Any]:
         metadata = attn_metadata[self.layer_name]
 
-        if self.is_draft_model or not self.sliding_window:
+        if self.is_draft_model or not self.sliding_window or self.block_stride != 1:
             return {
                 "actual_seq_lengths": metadata.actual_seq_lengths_q,
                 "actual_seq_lengths_kv": metadata.seq_lens_list,
-                "block_table": None if self.is_non_pa else metadata.block_tables,
+                "block_table": None if self.is_non_pa else fia_physical_block_table(metadata, self.block_stride),
             }
         else:
             return {
@@ -624,6 +629,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         layer=None,
     ) -> torch.Tensor:
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(key, value, attn_metadata)
+        key, value, block_table, block_stride = self._prepare_fia_kv_pages(key, value, block_table, attn_metadata)
 
         num_tokens = attn_metadata.actual_seq_lengths_q[-1]
         actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q
@@ -711,6 +717,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 self.sliding_window,
                 _EXTRA_CTX.is_draft_model,
                 is_non_pa=block_table is None,
+                block_stride=block_stride,
             ),
         )
         return output, num_tokens
@@ -872,6 +879,20 @@ class AscendAttentionBackendImpl(AttentionImpl):
             actual_seq_lengths_kv = attn_metadata.seq_lens_list
         return key, value, block_size, block_table, actual_seq_lengths_kv
 
+    def _prepare_fia_kv_pages(self, key, value, block_table, attn_metadata):
+        """Adapt ordinary FIA inputs without changing the shared cache layout."""
+        block_stride = 1
+        if (
+            block_table is not None
+            and type(self) is AscendAttentionBackendImpl
+            and self.sinks is None
+            and not self.use_bnsd_kv_cache
+        ):
+            key, value, block_stride = fia_physical_kv_views(key, value)
+            if block_stride != 1:
+                block_table = fia_physical_block_table(attn_metadata, block_stride)[: block_table.shape[0]]
+        return key, value, block_table, block_stride
+
     def forward_fused_infer_attention(
         self,
         query: torch.Tensor,
@@ -897,6 +918,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(
             key, value, attn_metadata, kv_cache
         )
+        key, value, block_table, _ = self._prepare_fia_kv_pages(key, value, block_table, attn_metadata)
         num_tokens = attn_metadata.actual_seq_lengths_q[-1]
         query = query[:num_tokens]
         if (

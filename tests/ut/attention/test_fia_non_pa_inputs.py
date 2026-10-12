@@ -185,14 +185,23 @@ def test_graph_workspace_and_task_preserve_fia_layout_contract(v2, use_pa):
     task_kwargs = register.call_args.args[1]
     expected_key = impl.key_cache.view(2, 3, 4) if use_pa else key
     expected_value = impl.value_cache.view(2, 3, 4) if use_pa else value
+    uses_physical_pages = use_pa and not v2
     for kwargs in (workspace_kwargs, task_kwargs):
-        assert kwargs["block_table"] is (metadata.block_tables if use_pa else None)
+        if uses_physical_pages:
+            torch.testing.assert_close(kwargs["block_table"], metadata.block_tables * 2)
+        else:
+            assert kwargs["block_table"] is (metadata.block_tables if use_pa else None)
         for name, original in (("key", expected_key), ("value", expected_value)):
-            assert kwargs[name].is_contiguous() == (not use_pa)
-            torch.testing.assert_close(kwargs[name], original)
+            assert kwargs[name].is_contiguous() == (not use_pa or uses_physical_pages)
+            if uses_physical_pages:
+                torch.testing.assert_close(kwargs[name][::2], original)
+                assert kwargs[name].untyped_storage().data_ptr() == original.untyped_storage().data_ptr()
+            else:
+                torch.testing.assert_close(kwargs[name], original)
             if use_pa:
                 assert kwargs[name].data_ptr() == original.data_ptr()
-                assert kwargs[name].stride() == original.stride()
+                if not uses_physical_pages:
+                    assert kwargs[name].stride() == original.stride()
     assert task_kwargs["key"] is workspace_kwargs["key"]
     assert task_kwargs["value"] is workspace_kwargs["value"]
     if not v2:
@@ -201,7 +210,10 @@ def test_graph_workspace_and_task_preserve_fia_layout_contract(v2, use_pa):
         )
         provider = register.call_args.args[2]
         runtime_kwargs = {**task_kwargs, **provider.resolve({"layer": runtime_metadata})}
-        assert runtime_kwargs["block_table"] is (runtime_metadata.block_tables if use_pa else None)
+        if uses_physical_pages:
+            torch.testing.assert_close(runtime_kwargs["block_table"], runtime_metadata.block_tables * 2)
+        else:
+            assert runtime_kwargs["block_table"] is (runtime_metadata.block_tables if use_pa else None)
         assert runtime_kwargs["key"] is task_kwargs["key"]
         assert runtime_kwargs["value"] is task_kwargs["value"]
     assert result is output
