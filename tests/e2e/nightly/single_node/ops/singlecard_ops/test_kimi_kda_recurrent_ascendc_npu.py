@@ -714,9 +714,16 @@ def test_kimi_k3_tp16_recurrent_kda_full_decode_graph_padding():
     torch.npu.synchronize()
 
     assert isinstance(ascendc_out, torch.Tensor)
-    assert torch.isfinite(ascendc_out[:, :active_tokens]).all()
+    assert torch.isfinite(ascendc_out).all()
     # A graph-padded call must update the active cache line while skipping
-    # zero-length rows. Padding-tail output is intentionally not compared.
+    # zero-length rows. The kernel clears the unused static output tail.
+    padding_out = ascendc_out[:, active_tokens:].cpu()
+    torch.testing.assert_close(
+        padding_out,
+        torch.zeros_like(padding_out),
+        rtol=0,
+        atol=0,
+    )
     torch.testing.assert_close(ascendc_state.cpu(), triton_state.cpu(), rtol=0.02, atol=0.02)
     torch.testing.assert_close(ascendc_state.cpu(), reference_state, rtol=0.02, atol=0.02)
     torch.testing.assert_close(
@@ -810,7 +817,7 @@ def test_kimi_k3_recurrent_kda_decode_wrapper_aclgraph_replay():
 
     torch.manual_seed(20260724)
     device = torch.device("npu")
-    tokens, heads, dim = 3, 6, 128
+    tokens, heads, dim = 4, 6, 128
     q = torch.randn(1, tokens, heads, dim, dtype=torch.bfloat16, device=device)
     k = torch.randn_like(q)
     v = torch.randn_like(q)
@@ -859,7 +866,7 @@ def test_kimi_k3_recurrent_kda_decode_wrapper_aclgraph_replay():
     v.copy_(torch.randn_like(v))
     raw_gate.copy_(torch.randn_like(raw_gate) * 0.25)
     beta.copy_(torch.rand_like(beta))
-    cu_seqlens.copy_(torch.tensor([0, 2, 3], dtype=torch.int32, device=device))
+    cu_seqlens.copy_(torch.tensor([0, 1, 2], dtype=torch.int32, device=device))
     state_indices.copy_(
         torch.tensor(
             [[7, 8, 8, 8, 8, 8, 8, 8], [3, 6, 6, 6, 6, 6, 6, 6]],
@@ -867,7 +874,7 @@ def test_kimi_k3_recurrent_kda_decode_wrapper_aclgraph_replay():
             device=device,
         )
     )
-    accepted.copy_(torch.tensor([2, 1], dtype=torch.int64, device=device))
+    accepted.copy_(torch.tensor([1, 1], dtype=torch.int64, device=device))
     state_graph.copy_(state_initial)
     graph.replay()
     torch.npu.synchronize()
@@ -875,5 +882,24 @@ def test_kimi_k3_recurrent_kda_decode_wrapper_aclgraph_replay():
     state_eager = state_initial.clone()
     eager_out = invoke(state_eager)
     torch.npu.synchronize()
-    torch.testing.assert_close(graph_out.cpu(), eager_out.cpu(), rtol=0.02, atol=0.02)
+    graph_out_cpu = graph_out.cpu()
+    torch.testing.assert_close(graph_out_cpu, eager_out.cpu(), rtol=0.02, atol=0.02)
     torch.testing.assert_close(state_graph.cpu(), state_eager.cpu(), rtol=0.02, atol=0.02)
+    padding_out = graph_out_cpu[:, 2:]
+    torch.testing.assert_close(
+        padding_out,
+        torch.zeros_like(padding_out),
+        rtol=0,
+        atol=0,
+    )
+
+    # Replaying the same graph with no active tokens must clear the complete
+    # static output without touching the state pool.
+    cu_seqlens.zero_()
+    accepted.zero_()
+    state_graph.copy_(state_initial)
+    graph.replay()
+    torch.npu.synchronize()
+    graph_out_cpu = graph_out.cpu()
+    torch.testing.assert_close(graph_out_cpu, torch.zeros_like(graph_out_cpu), rtol=0, atol=0)
+    torch.testing.assert_close(state_graph.cpu(), state_initial.cpu(), rtol=0, atol=0)
