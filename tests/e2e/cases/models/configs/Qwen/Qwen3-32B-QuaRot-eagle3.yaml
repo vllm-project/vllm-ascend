@@ -22,7 +22,7 @@ test_cases:
       - "0.9"
       - "--speculative-config"
       - '{"method": "eagle3", "model": "RedHatAI/Qwen3-32B-speculator.eagle3", "num_speculative_tokens": 3}'
-      - --compilation-config
+      - "--compilation-config"
       - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
       - "--additional-config"
       - '{"enable_flashcomm1": true, "ascend_compilation_config":{"enable_npugraph_ex": true, "enable_static_kernel": false}}'
