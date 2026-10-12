@@ -957,7 +957,7 @@ vllm serve "$MODEL_PATH" \
   --enable-chunked-prefill --no-async-scheduling \
   --enable-prefix-caching \
   --seed 1024 --served-model-name glm5 \
-  --max-model-len 200000 \
+  --max-model-len 12800 \
   --max-num-batched-tokens 16384 \
   --max-num-seqs 64 --gpu-memory-utilization 0.92 \
   --trust-remote-code --quantization ascend \
@@ -1065,7 +1065,7 @@ vllm serve "$MODEL_PATH" \
   --enable-chunked-prefill \
   --enable-prefix-caching \
   --seed 1024 --served-model-name glm5 \
-  --max-model-len 200000 \
+  --max-model-len 12800 \
   --max-num-batched-tokens 256 \
   --max-num-seqs 64 --gpu-memory-utilization 0.92 \
   --async-scheduling \
@@ -1080,7 +1080,7 @@ vllm serve "$MODEL_PATH" \
       "kv_connector": "MultiConnector",
       "kv_role": "kv_consumer",
       "kv_port": "30200",
-      "engine_id": "glm53-decode-pool-dp'"$4"'",
+      "engine_id": 1,
       "kv_connector_extra_config": {
           "connectors": [
           {
