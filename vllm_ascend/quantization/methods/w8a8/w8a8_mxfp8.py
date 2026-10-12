@@ -521,9 +521,9 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
 
         hidden_states, out_scale = torch_npu.npu_grouped_matmul_swiglu_quant_v2(
             x=hidden_states,
-            weight=[layer.w13_weight],
+            weight=self._get_weights(layer, "w13_weight"),
             group_list=cumsum_group_list(mlp_compute_input.group_list, mlp_compute_input.group_list_type, 0),
-            weight_scale=[layer.w13_weight_scale],
+            weight_scale=self._get_weights(layer, "w13_weight_scale"),
             x_scale=pertoken_scale,
             dequant_mode=2,
             quant_mode=2,
@@ -544,8 +544,8 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         assert layer is not None
         hidden_states = torch_npu.npu_grouped_matmul(
             x=[hidden_states],
-            weight=[layer.w13_weight],
-            scale=[layer.w13_weight_scale],
+            weight=self._get_weights(layer, "w13_weight"),
+            scale=self._get_weights(layer, "w13_weight_scale"),
             per_token_scale=[pertoken_scale],
             bias=None,
             split_item=2,
@@ -577,8 +577,8 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         )
         return torch_npu.npu_grouped_matmul(
             x=[hidden_states],
-            weight=[layer.w2_weight],
-            scale=[layer.w2_weight_scale],
+            weight=self._get_weights(layer, "w2_weight"),
+            scale=self._get_weights(layer, "w2_weight_scale"),
             bias=None,
             per_token_scale=[act_out_scale],
             split_item=2,
