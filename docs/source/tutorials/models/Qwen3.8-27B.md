@@ -489,19 +489,11 @@ Expected Result: The service returns HTTP 200 OK. The JSON response contains the
 
 ## 7 Accuracy Evaluation
 
-Here is an accuracy evaluation method.
-
-### 7.1 Using AISBench
-
-1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
-
-2. After execution, you can get the result. Here are the results of `Qwen3.8-27B`, `Qwen3.8-27B-w8a8` and `Qwen3.8-27B-w8a8-mxfp8` in `vllm-ascend:v0.23.0rc1` for reference only.
-
-| dataset | model | metric | mode | vllm-api-general-chat |
-|----- | ----- | ----- | ----- | -----|
-| GPQA Diamond | Qwen3.8-27B | accuracy | gen | 90.40 |
-| GPQA Diamond | Qwen3.8-27B-w8a8 | accuracy | gen | 89.90 |
-| GPQA Diamond | Qwen3.8-27B-w8a8-mxfp8 | accuracy | gen | 89.39 |
+Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md)
+to evaluate the deployed service. Accuracy results will be documented in the
+[release notes](../../user_guide/release_notes.md). When reporting results, record the
+checkpoint, prompt encoder, reasoning effort, sampling parameters and dataset
+version.
 
 ## 8 Performance Evaluation
 
