@@ -14,9 +14,11 @@ and only overrides what differs on NPU:
   ``torch.zeros(pin_memory=True)`` since ``cudaHostRegister`` is
   CUDA-only, and transfer streams drop the lowest-priority hint that
   ``torch.npu.Stream`` does not yet expose.
+* ``wait_for_save`` records the compute barrier on the NPU stream.
+  ``bind_connector_metadata`` resets the per-step submission guard.
 
-All other handler entry points — ``bind_connector_metadata``,
-``clear_connector_metadata``, ``start_load_kv``, ``wait_for_save``,
+All other handler entry points — ``clear_connector_metadata``,
+``start_load_kv``, ``get_finished``,
 ``build_connector_worker_meta``, ``handle_preemptions``,
 ``_flush_and_sync_all``, ``_poll_stream_events`` — are inherited
 verbatim.
@@ -36,6 +38,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.simple.copy_backend 
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
+    from vllm.v1.simple_kv_offload.metadata import SimpleCPUOffloadMetadata
 
 
 def _flatten_kv_value(
@@ -77,6 +80,7 @@ class SimpleCPUOffloadNPUWorker(SimpleCPUOffloadWorker):
         # CUDA resource was allocated, so the transient instance is
         # just GC'd.
         self._backend = NPUDmaCopyBackend()
+        self._store_submitted = False
 
     def register_kv_caches(
         self,
@@ -84,7 +88,7 @@ class SimpleCPUOffloadNPUWorker(SimpleCPUOffloadWorker):
     ) -> None:
         """Register NPU KV caches and allocate pinned CPU mirrors.
 
-        For every unique storage backing ``kv_caches`` we expose a
+        For every unique view in ``kv_caches`` we expose a
         contiguous ``[num_blocks, block_bytes]`` int8 view. The batch
         memcpy backend then strides blocks uniformly across all such
         sub-tensors in a single ``aclrtMemcpyBatchAsync`` call.
@@ -99,26 +103,60 @@ class SimpleCPUOffloadNPUWorker(SimpleCPUOffloadWorker):
         assert self.kv_cache_config is not None
         num_blocks = self.kv_cache_config.num_blocks
 
-        # Deduplicate by untyped_storage().data_ptr(): a single NPU
-        # allocation may back multiple layers (e.g. shared KV across
-        # tied weights or via aliasing). On Ascend, K and V live in
-        # *separate* allocations, so we must iterate every sub-tensor
-        # — taking only ``value[0]`` would silently drop the V cache.
+        # Preserve distinct views into shared allocations, while deduplicating
+        # identical aliases across layers. Iterate every K/V sub-tensor.
         unique_caches: dict[str, torch.Tensor] = {}
-        seen_ptrs: set[int] = set()
-        for layer_name, value in kv_caches.items():
-            for sub_idx, tensor in enumerate(_flatten_kv_value(value)):
-                storage = tensor.untyped_storage()
-                ptr = storage.data_ptr()
-                if ptr in seen_ptrs:
-                    continue
-                seen_ptrs.add(ptr)
+        descriptor_caches = self._descriptor_block_views(kv_caches)
+        if descriptor_caches is None:
+            seen_views: set[tuple] = set()
+            for layer_name, value in kv_caches.items():
+                for sub_idx, tensor in enumerate(_flatten_kv_value(value)):
+                    storage = tensor.untyped_storage()
+                    # Distinct caches can share one NPU allocation: Model Runner V2
+                    # slices K and V out of the same backing store. Keying the
+                    # dedup on the storage pointer alone would drop every V cache,
+                    # so include the view geometry as well.
+                    view_key = (
+                        storage.data_ptr(),
+                        tensor.storage_offset(),
+                        tuple(tensor.shape),
+                        tuple(tensor.stride()),
+                        tensor.dtype,
+                    )
+                    if view_key in seen_views:
+                        continue
+                    seen_views.add(view_key)
 
-                key = layer_name if sub_idx == 0 else f"{layer_name}.{sub_idx}"
-                unique_caches.update(self._build_block_views(key, tensor, num_blocks))
+                    # A registered physical page can already contain this
+                    # component (for example V following K in every page).
+                    if tensor.ndim >= 1 and tensor.shape[0] >= num_blocks:
+                        span = (
+                            1 + sum((n - 1) * s for n, s in zip(tensor.shape[1:], tensor.stride()[1:]))
+                        ) * tensor.element_size()
+                        if any(
+                            page.untyped_storage().data_ptr() == storage.data_ptr()
+                            and page.stride(0) == tensor.stride(0) * tensor.element_size()
+                            and tensor.data_ptr() - page.data_ptr() >= 0
+                            and tensor.data_ptr() - page.data_ptr() + span <= page.shape[1]
+                            for page in unique_caches.values()
+                        ):
+                            continue
 
+                    key = layer_name if sub_idx == 0 else f"{layer_name}.{sub_idx}"
+                    unique_caches.update(self._build_block_views(key, tensor, num_blocks))
+
+        else:
+            # Packed components and group overlays share physical pages.
+            unique_caches = descriptor_caches
         per_tensor_bpb = [t.stride(0) * t.element_size() for t in unique_caches.values()]
         total_bytes_per_block = sum(per_tensor_bpb)
+        if getattr(self.kv_cache_config, "kv_cache_tensors", ()):
+            # Include unused tuple padding in capacity accounting, as the
+            # scheduler does when deriving the CPU configuration.
+            pool_bytes_per_block = self.kv_cache_config.kv_cache_tensors[0].size // num_blocks
+            if total_bytes_per_block > pool_bytes_per_block:
+                raise ValueError("Offload pages exceed the scheduler block budget")
+            total_bytes_per_block = pool_bytes_per_block
         self.num_cpu_blocks = max(1, self.cpu_capacity_bytes // total_bytes_per_block)
         logger.info(
             "SimpleCPUOffloadNPUWorker: %d unique NPU KV tensors, allocating %d CPU blocks (%.2f GB)",
@@ -163,61 +201,96 @@ class SimpleCPUOffloadNPUWorker(SimpleCPUOffloadWorker):
             self.store_stream,
         )
 
-    def get_finished(
-        self,
-        finished_req_ids: set[str],
-    ) -> tuple[set[str] | None, set[str] | None]:
-        """Submit NPU transfers and report completed events.
+    def bind_connector_metadata(self, metadata: "SimpleCPUOffloadMetadata") -> None:
+        super().bind_connector_metadata(metadata)
+        self._store_submitted = False
 
-        This mirrors vLLM's worker state machine. The only platform-specific
-        difference is recording the store barrier with ``torch.npu`` instead
-        of the CUDA stream used by the upstream implementation.
-        """
+    def wait_for_save(self) -> None:
+        """Order stores after NPU compute, including no-forward cleanup hooks."""
         metadata = self._connector_metadata
-        if metadata is not None:
-            if metadata.load_cpu_blocks:
-                self._backend.launch_copy(
-                    metadata.load_cpu_blocks,
-                    metadata.load_gpu_blocks,
-                    is_store=False,
-                    event_idx=metadata.load_event,
-                    events_list=self._load_events,
-                )
-            if metadata.store_gpu_blocks:
-                store_compute_done = self._store_compute_done
-                if store_compute_done is None:
-                    store_compute_done = torch.npu.Event()
-                    self._store_compute_done = store_compute_done
-                store_compute_done.record(torch.npu.current_stream())
-                self._backend.launch_copy(
-                    metadata.store_gpu_blocks,
-                    metadata.store_cpu_blocks,
-                    is_store=True,
-                    event_idx=metadata.store_event,
-                    events_list=self._store_events,
-                    wait_event=store_compute_done,
-                )
+        if metadata is None or not metadata.store_gpu_blocks or self._store_submitted:
+            return
+        store_compute_done = self._store_compute_done
+        if store_compute_done is None:
+            store_compute_done = torch.npu.Event()
+            self._store_compute_done = store_compute_done
+        store_compute_done.record(torch.npu.current_stream())
+        self._backend.launch_copy(
+            metadata.store_gpu_blocks,
+            metadata.store_cpu_blocks,
+            is_store=True,
+            event_idx=metadata.store_event,
+            events_list=self._store_events,
+            wait_event=store_compute_done,
+        )
+        self._store_submitted = True
 
-        finished_recving: set[str] = set()
-        if self._pending_load_event_indices:
-            load_watermark = self._poll_stream_events(is_store=False)
-            for event_idx in [
-                event_idx for event_idx in self._pending_load_event_indices if event_idx <= load_watermark
-            ]:
-                self._pending_load_event_indices.discard(event_idx)
-                req_ids = metadata.load_event_to_reqs.get(event_idx) if metadata is not None else None
-                if req_ids:
-                    finished_recving.update(req_ids)
+    def _descriptor_block_views(self, kv_caches: dict) -> dict[str, torch.Tensor] | None:
+        """Recognize packed pages in one shared allocation from their geometry.
 
-        if self._pending_store_event_indices:
-            store_watermark = self._poll_stream_events(is_store=True)
-            for event_idx in [
-                event_idx for event_idx in self._pending_store_event_indices if event_idx <= store_watermark
-            ]:
-                self._pending_store_event_indices.discard(event_idx)
-                self._completed_store_events[event_idx] = 1
-
-        return None, finished_recving or None
+        Separate K/V allocations and stacked layouts use the ordinary tensor
+        path. Validate every component before constructing any byte views.
+        """
+        config = self.kv_cache_config
+        assert config is not None
+        descriptors = getattr(config, "kv_cache_tensors", ())
+        if not descriptors or not kv_caches.keys() <= {name for d in descriptors for name in d.layers}:
+            return None
+        allocation = None
+        regions: dict[tuple[int, int], tuple[str, torch.Tensor]] = {}
+        for descriptor in descriptors:
+            if descriptor.size != descriptors[0].size or descriptor.size % config.num_blocks:
+                return None
+            for layer_index, name in enumerate(descriptor.layers):
+                if name not in kv_caches:
+                    continue
+                components = _flatten_kv_value(kv_caches[name])
+                if not components:
+                    return None
+                first = components[0]
+                offset = first.storage_offset() * first.element_size()
+                storage = first.untyped_storage()
+                page_bytes = descriptor.block_stride
+                if page_bytes is None or page_bytes <= 0:
+                    return None
+                origin = offset - descriptor.offset - layer_index * descriptor.layer_stride
+                identity = (first.device, storage.data_ptr(), origin)
+                if origin < 0 or origin + descriptor.size > storage.nbytes():
+                    return None
+                if allocation is not None and allocation != identity:
+                    return None
+                allocation = identity
+                # Blocks-outermost descriptors interleave layers within a page.
+                page_offset = offset
+                if 0 < descriptor.layer_stride < page_bytes:
+                    page_offset -= layer_index * descriptor.layer_stride
+                for tensor in components:
+                    if (
+                        tensor.ndim < 1
+                        or tensor.shape[0] < config.num_blocks
+                        or tensor.stride(0) * tensor.element_size() != page_bytes
+                        or tensor.untyped_storage().data_ptr() != storage.data_ptr()
+                    ):
+                        return None
+                    component_offset = tensor.storage_offset() * tensor.element_size() - page_offset
+                    span = 1 + sum((n - 1) * s for n, s in zip(tensor.shape[1:], tensor.stride()[1:]))
+                    if component_offset < 0 or component_offset + span * tensor.element_size() > page_bytes:
+                        return None
+                regions.setdefault((page_offset, page_bytes), (name, first))
+        if allocation is None:
+            return None
+        previous_end = 0
+        for offset, page_bytes in sorted(regions):
+            end = offset + config.num_blocks * page_bytes
+            if offset < previous_end or end > allocation[2] + descriptors[0].size:
+                return None
+            previous_end = end
+        views = {}
+        for (offset, page_bytes), (name, tensor) in regions.items():
+            views[name] = torch.empty(0, dtype=torch.int8, device=tensor.device).set_(
+                tensor.untyped_storage(), offset, (config.num_blocks, page_bytes)
+            )
+        return views
 
     @staticmethod
     def _build_block_views(
@@ -248,10 +321,30 @@ class SimpleCPUOffloadNPUWorker(SimpleCPUOffloadWorker):
         storage = tensor.untyped_storage()
         storage_offset_bytes = tensor.storage_offset() * el
 
+        # MRV1 may expose (K/V, blocks, ...) while interleaving K and V
+        # within each physical page. Copy that page once, not one full
+        # block stride starting at each component's offset.
+        if tensor.ndim >= 2 and tensor.shape[1] >= num_blocks and tensor.stride(0) < tensor.stride(1):
+            page_size_bytes = tensor.stride(1) * el
+            page_span = 1 + sum(
+                (size - 1) * stride for dim, (size, stride) in enumerate(zip(tensor.shape, tensor.stride())) if dim != 1
+            )
+            if page_span * el <= page_size_bytes:
+                data_bytes = num_blocks * page_size_bytes
+                if storage_offset_bytes + data_bytes > storage.nbytes():
+                    raise ValueError(f"Offload block view {key} exceeds its backing storage")
+                return {
+                    key: torch.empty(0, dtype=torch.int8, device=tensor.device).set_(
+                        storage, storage_offset_bytes, (num_blocks, page_size_bytes)
+                    )
+                }
+
         if tensor.ndim >= 1 and tensor.shape[0] >= num_blocks:
             # Single-segment, blocks-outermost.
             page_size_bytes = tensor.stride(0) * el
             data_bytes = num_blocks * page_size_bytes
+            if storage_offset_bytes + data_bytes > storage.nbytes():
+                raise ValueError(f"Offload block view {key} exceeds its backing storage")
             raw = torch.empty(0, dtype=torch.int8, device=tensor.device).set_(
                 storage, storage_offset_bytes, (data_bytes,)
             )
@@ -276,6 +369,9 @@ class SimpleCPUOffloadNPUWorker(SimpleCPUOffloadWorker):
         seg_stride_bytes = tensor.stride(0) * el
         n_segments = tensor.shape[0]
         total_bytes = (n_segments - 1) * seg_stride_bytes + seg_data_bytes
+
+        if storage_offset_bytes + total_bytes > storage.nbytes():
+            raise ValueError(f"Offload block view {key} exceeds its backing storage")
 
         raw = torch.empty(0, dtype=torch.int8, device=tensor.device).set_(storage, storage_offset_bytes, (total_bytes,))
         segs: dict[str, torch.Tensor] = {}
