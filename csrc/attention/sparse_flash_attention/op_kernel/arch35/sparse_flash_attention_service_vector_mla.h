@@ -803,7 +803,9 @@ TEMPLATES_DEF_NO_DEFAULT __aicore__ inline void SFAVectorService<TEMPLATE_ARGS>:
     sharedParams.isActualSeqLengthsNull = sparseAttnSharedkvBaseParams.isActualLenDimsNull;
     sharedParams.isActualSeqLengthsKVNull = sparseAttnSharedkvBaseParams.isActualLenDimsKVNull;
     sharedParams.returnSoftmaxLse = sparseAttnSharedkvBaseParams.returnSoftmaxLse;
-    sharedParams.needInit = 0;
+    // A query can have no selected local keys even when its KV cache is nonempty.
+    // Leave zero output and max/sum = 0 (LSE = -inf) for skipped queries.
+    sharedParams.needInit = sharedParams.returnSoftmaxLse && sharedParams.oriMaskMode == 0;
     for (uint32_t bIdx = 0; bIdx < sharedParams.bSize; bIdx++) {
         int64_t s2Size;
         if constexpr (KV_LAYOUT_T == SFA_LAYOUT::TND) {

@@ -199,7 +199,7 @@ def _recover_moe_lora_routing_allgather(lora_context, expanded_row_idx, topk_ids
     ``.item()``/data-dependent host sync.
     """
     top_k = lora_context.top_k
-    expanded = torch.abs(expanded_row_idx)
+    expanded = torch.abs(expanded_row_idx).to(torch.float32)
     inv_perm = torch.argsort(expanded)
     expert_per_row = topk_ids.reshape(-1)[inv_perm].to(torch.long)
 

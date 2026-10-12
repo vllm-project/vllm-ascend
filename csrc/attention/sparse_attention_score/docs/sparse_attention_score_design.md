@@ -237,11 +237,11 @@ KV transfer volume is reduced by **4x**, equal to `groupSize`. This is the main 
 
 ## 7. `inner_precise` Precision Modes
 
-### Modes Supported on A5 (Ascend 950)
+### Modes Supported on 950PR&950DT Products
 
-SparseAttentionScore on A5 (Ascend 950PR/950DT) supports **only `inner_precise=4`**, the default value. It selects the `LOW_HIGH_MIXED` mixed-precision mode.
+SparseAttentionScore on 950PR&950DT Products supports **only `inner_precise=4`**, the default value. It selects the `LOW_HIGH_MIXED` mixed-precision mode.
 
-| `inner_precise` | Meaning | A5 Support | A2/A3 Support |
+| `inner_precise` | Meaning | 950PR&950DT Products Support | A2/A3  Support |
 |:---:|---|:---:|:---:|
 | 0 | `ALL_HIGH`: online softmax and `rescaleO` both use FP32 | No | Yes |
 | 1 | `ALL_LOW`: online softmax and `rescaleO` both use FP16 (FP16 input only) | No | Yes |
@@ -249,7 +249,7 @@ SparseAttentionScore on A5 (Ascend 950PR/950DT) supports **only `inner_precise=4
 
 ### Differences Between Modes
 
-**`inner_precise=4` (`LOW_HIGH_MIXED`)** is the only A5 mode and balances performance with accuracy.
+**`inner_precise=4` (`LOW_HIGH_MIXED`)** is the only 950PR&950DT Products mode and balances performance with accuracy.
 
 Its computation and storage precision are assigned as follows:
 
@@ -279,9 +279,9 @@ Its computation and storage precision are assigned as follows:
 - In mode 1, `rescaleO` also runs in FP16. Precision degrades substantially after repeated correction multiplications over long sequences.
 - Mode 4 accumulates `rescaleO` in FP32, preserving final-output accuracy even when online softmax has many iterations because `top_k` is large.
 
-### Why A5 Uses Mode 4
+### Why 950PR&950DT Products Uses Mode 4
 
-1. **Hardware adaptation**: The A5 Cube core has a bandwidth advantage when FixPipe writes FP32 intermediates to UB, enabling efficient BF16-to-FP32 PV accumulation.
+1. **Hardware adaptation**: The 950PR&950DT Products Cube core has a bandwidth advantage when FixPipe writes FP32 intermediates to UB, enabling efficient BF16-to-FP32 PV accumulation.
 2. **L1 efficiency**: Storing P in BF16 with the zN layout uses half as much L1 space as FP32 and permits more double-buffering stages.
 3. **Accuracy balance**: The BF16 exp approximation introduces about 1-2 ULP of error, while FP32 accumulation in `rescaleO` prevents the final O from suffering catastrophic precision degradation over multiple iterations.
 

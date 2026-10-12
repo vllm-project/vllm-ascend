@@ -21,9 +21,6 @@ msgstr ""
 msgid "# Qwen2.5-Math-RM-72B"
 msgstr "# Qwen2.5-Math-RM-72B"
 
-msgid "## Introduction"
-msgstr "## 简介"
-
 msgid ""
 "This document provides a detailed workflow for the complete deployment and "
 "verification of the model, including supported features, environment "
@@ -35,22 +32,10 @@ msgid ""
 "The `Qwen2.5-Math-RM-72B` model is supported since `vllm-ascend:v0.9.0`."
 msgstr "`Qwen2.5-Math-RM-72B` 模型自 `vllm-ascend:v0.9.0` 版本起得到支持。"
 
-msgid "## Supported Features"
-msgstr "## 支持的特性"
-
-msgid "## Environment Preparation"
-msgstr "## 环境准备"
-
-msgid "### Model Weight"
-msgstr "### 模型权重"
-
 msgid ""
 "It is recommended to download the model weights to a local directory (e.g., "
 "`./Qwen2.5-Math-RM-72B/`) for quick access during deployment."
 msgstr "建议将模型权重下载到本地目录（例如 `./Qwen2.5-Math-RM-72B/`），以便在部署期间快速访问。"
-
-msgid "### Installation"
-msgstr "### 安装"
 
 msgid ""
 "You can use our official docker image to run `Qwen2.5-Math-RM-72B` directly."
@@ -60,20 +45,6 @@ msgid ""
 "These versions support multi-NPU deployment, allowing the model to utilize "
 "all available NPU devices (e.g., 4 NPUs) for improved performance."
 msgstr "这些版本支持多NPU部署，允许模型利用所有可用的NPU设备（例如4个NPU）以获得更好的性能。"
-
-msgid ""
-"Select an image based on your machine type and start the docker image on "
-"your node, refer to [using docker](../../installation.md#set-up-using-"
-"docker)."
-msgstr ""
-"根据您的机器类型选择镜像，并在节点上启动Docker镜像，请参考[安装指南](../../installation.md#set-up-using-"
-"docker)。"
-
-msgid "## Deployment"
-msgstr "## 部署"
-
-msgid "### Single-node Deployment"
-msgstr "### 单节点部署"
 
 msgid ""
 "Qwen2.5-Math-RM-72B supports single-node single-card deployment on the 910B4"
@@ -92,9 +63,6 @@ msgid ""
 "mode for scoring mathematical solutions."
 msgstr "需要使用 `--task reward` 参数以奖励模型模式运行模型，用于对数学解决方案进行评分。"
 
-msgid "## Functional Verification"
-msgstr "## 功能验证"
-
 msgid ""
 "After starting the service, verify functionality using a `curl` request:"
 msgstr "启动服务后，使用 `curl` 请求验证功能："
@@ -104,14 +72,8 @@ msgid ""
 "deployment."
 msgstr "有效的响应（例如 `{\"reward_score\": 1.69}`）表示部署成功。"
 
-msgid "### Batch Reward Scoring"
-msgstr "### 批量奖励评分"
-
 msgid "You can also score multiple responses for comparison:"
 msgstr "您还可以对多个响应进行评分以进行比较："
-
-msgid "## References"
-msgstr "## 参考资料"
 
 msgid ""
 "- [Qwen2.5-Math Technical Report](https://arxiv.org/abs/2409.12122)\n"
@@ -135,17 +97,6 @@ msgstr ""
 "token的上下文窗口，并在数学计算、逐步推理评估和解答质量评估方面提供了增强的能力。"
 
 msgid ""
-"- `Qwen2.5-Math-RM-72B` (BF16 version):\n"
-"    - With CPU offloading: requires at least 1 Atlas 910B4 (32GB × 1) card or higher\n"
-"    - Without CPU offloading: requires at least 4 Atlas 910B4 (32GB × 4) cards or higher\n"
-"  [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen2.5-Math-RM-72B)"
-msgstr ""
-"- `Qwen2.5-Math-RM-72B`（BF16版本）：\n"
-"    - 使用CPU卸载：至少需要1张Atlas 910B4（32GB × 1）或更高配置的卡\n"
-"    - 不使用CPU卸载：至少需要4张Atlas 910B4（32GB × 4）或更高配置的卡\n"
-"  [下载模型权重](https://www.modelscope.cn/models/Qwen/Qwen2.5-Math-RM-72B)"
-
-msgid ""
 "Refer to [Supported Features "
 "List](../../user_guide/support_matrix/supported_models.md) to get the "
 "model's supported feature matrix."
@@ -156,3 +107,62 @@ msgid ""
 "Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the"
 " feature's configuration."
 msgstr "请参阅[特性指南](../../user_guide/feature_guide/index.md)以获取该特性的配置。"
+
+msgid ""
+"Select an image based on your machine type and start the docker image on "
+"your node, refer to [using "
+"docker](../../getting_started/installation.md#installation-prebuilt-image)."
+msgstr ""
+"根据您的机器类型选择镜像，并在您的节点上启动该 Docker 镜像，请参阅 [使用 "
+"Docker](../../getting_started/installation.md#installation-prebuilt-image)。"
+
+msgid "## 1 Introduction"
+msgstr "## 1 简介"
+
+msgid "## 2 Supported Features"
+msgstr "## 2 支持的特性"
+
+msgid "## 3 Environment Preparation"
+msgstr "## 3 环境准备"
+
+msgid "### 3.1 Model Weight"
+msgstr "### 3.1 模型权重"
+
+msgid ""
+"|  Weight Version                       | Hardware Requirements           | "
+"Download Links |"
+msgstr "|  权重版本                       | 硬件要求           | 下载链接 |"
+
+msgid ""
+"| `Qwen2.5-Math-RM-72B` (BF16 version)  | With CPU offloading: requires at "
+"least 1 Atlas 910B4 (32GB × 1) card or higher<br>Without CPU offloading: "
+"requires at least 4 Atlas 910B4 (32GB × 4) cards or higher | "
+"[ModelScope](https://www.modelscope.cn/models/Qwen/Qwen2.5-Math-RM-72B) |"
+msgstr ""
+"| `Qwen2.5-Math-RM-72B` (BF16 版本)  | 使用 CPU 卸载：至少需要 1 张 Atlas 910B4 (32GB × "
+"1) 或更高规格的卡<br>不使用 CPU 卸载：至少需要 4 张 Atlas 910B4 (32GB × 4) 或更高规格的卡 | "
+"[ModelScope](https://www.modelscope.cn/models/Qwen/Qwen2.5-Math-RM-72B) |"
+
+msgid ""
+">**Path description**: Download the model weights to a directory of your "
+"choice and record it. Ensure the model path in the subsequent deployment "
+"command matches this directory."
+msgstr ">**路径说明**：将模型权重下载到您选择的目录并记录该路径。确保后续部署命令中的模型路径与该目录一致。"
+
+msgid "### 4 Installation"
+msgstr "### 4 安装"
+
+msgid "## 5 Deployment"
+msgstr "## 5 部署"
+
+msgid "### 5.1 Single-node Deployment"
+msgstr "### 5.1 单节点部署"
+
+msgid "## 6 Functional Verification"
+msgstr "## 6 功能验证"
+
+msgid "### 6.1 Batch Reward Scoring"
+msgstr "### 6.1 批量奖励打分"
+
+msgid "## 7 References"
+msgstr "## 7 参考资料"

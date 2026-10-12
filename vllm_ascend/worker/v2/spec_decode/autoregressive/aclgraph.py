@@ -26,6 +26,11 @@ from vllm_ascend.compilation.acl_graph import (
     set_draft_graph_prefill_params,
     update_full_graph_params,
 )
+from vllm_ascend.compilation.updatable_graph import (
+    SharedSource,
+    UpdatableGraph,
+)
+from vllm_ascend.utils import use_updatable_graph, vllm_version_is
 from vllm_ascend.worker.v2.aclgraph_utils import (
     collect_sorted_captured_token_sizes,
     model_capture_wrapper,
@@ -112,6 +117,15 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
                     attn_groups,
                     kv_cache_config,
                     full_cudagraph=(desc.cg_mode == CUDAGraphMode.FULL),
+                    # vLLM #58275 makes mixed FULL graphs capture prefill kernels
+                    # by bounding the dummy query length to the capture
+                    # descriptor. v0.30.0 has no such default and keeps its own
+                    # (unbounded) behaviour.
+                    **(
+                        {"max_query_len": desc.max_query_len or desc.uniform_token_count}
+                        if not vllm_version_is("0.30.0")
+                        else {}
+                    ),
                 )
                 seq_lens_cpu_upper_bound = input_buffers.seq_lens_cpu[:num_reqs]
                 return lambda cg_mode: forward_fn(
@@ -127,30 +141,41 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Replay the draft ACL graph and update its attention parameters."""
         num_tokens = desc.num_tokens
-        if self.is_draft_model_prefill:
-            logger.info_once(
-                "AutoRegressiveAclGraphManager: draft prefill run_fullgraph with num_tokens=%s", num_tokens
-            )
-        else:
-            logger.info_once("AutoRegressiveAclGraphManager: draft run_fullgraph with num_tokens=%s", num_tokens)
+        logger.info_once(
+            "ACL graph replay is active for the V2 draft model (%s, logged once per phase).",
+            "prefill" if self.is_draft_model_prefill else "decode",
+        )
+        assert self.update_stream is not None
 
-        draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(desc.num_reqs, self.is_draft_model_prefill)
+        attn_backend = self.speculator.attn_backend
+        draft_vllm_config = self.speculator.draft_vllm_config
+        draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(
+            desc.num_reqs,
+            desc.num_tokens,
+            self.is_draft_model_prefill,
+        )
+        if use_updatable_graph(attn_backend):
+            return self._updatable_graph_replay(desc, draft_attn_metadatas)
+        else:
+            # This will be removed once the refactoring is fully complete.
+            return self._graph_replay(desc, attn_backend, num_tokens, draft_vllm_config, draft_attn_metadatas)
+
+    def _graph_replay(self, desc, attn_backend, num_tokens, draft_vllm_config, draft_attn_metadatas):
         self.update_stream.wait_stream(torch.npu.current_stream())
         ret = super().run_fullgraph(desc)
-
         # Mirror vLLM's DP graph-replay token-count metadata.
         num_tokens_across_dp = torch.full([self.speculator.dp_size], num_tokens)
+        attn_metadata = self.speculator.model_state.attn_metadata
         # sfa_v1.py:AscendSFABackend.get_impl_cls reaches
         # sfa_cp.py:resolve_sfa_impl, whose SFA CP selector reads the current
         # ModelConfig. Publish the draft config because set_forward_context()
         # does not update it.
         # TODO: Remove this explicit current-config scope once ACL graph replay
         # passes VllmConfig directly through the graph-update interfaces.
-        draft_vllm_config = self.speculator.draft_vllm_config
         with (
             set_current_vllm_config(draft_vllm_config),
             set_forward_context(
-                self.speculator.model_state.attn_metadata,
+                attn_metadata,
                 draft_vllm_config,
                 num_tokens=num_tokens,
                 cudagraph_runtime_mode=desc.cg_mode,
@@ -164,7 +189,6 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
             _EXTRA_CTX.is_draft_model_prefill = self.is_draft_model_prefill
 
             forward_context = get_forward_context()
-            attn_backend = self.speculator.attn_backend
             assert attn_backend is not None, "Speculator attention backend is not initialized"
             update_full_graph_params(
                 # FIXME(Ronald1995): support hybrid attn backend
@@ -176,4 +200,18 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
                 self.speculator.speculative_config,
                 draft_attn_metadatas=draft_attn_metadatas,
             )
+        return ret
+
+    def _updatable_graph_replay(self, desc, draft_attn_metadatas):
+        graph = self.graphs[desc]
+        assert isinstance(graph, UpdatableGraph)
+        fia_params = self.speculator.build_fia_params(
+            desc.num_reqs,
+            draft_attn_metadatas[0],
+            self.is_draft_model_prefill,
+        )
+        resolved_tasks = graph.resolve_tasks(SharedSource(fia_params))
+        self.update_stream.wait_stream(torch.npu.current_stream())
+        ret = super().run_fullgraph(desc)
+        graph.update(self.update_stream, resolved_tasks)
         return ret

@@ -41,11 +41,11 @@ COMMENT_RE = __import__("re").compile(r"^<!--.*-->$")
 
 # MkDocs Material extensions that should be recognized but whose
 # translatable content is extracted as separate paragraphs.
-# - !!! type ["title"]   → admonition (note, warning, tip, etc.)
-# - ??? ["title"]        → collapsible/details
-# - === "tab label"      → content tabs
+# - !!! type ["title"]     → admonition (note, warning, tip, etc.)
+# - ???[+] type ["title"]  → collapsible/details; ``+`` means expanded
+# - === "tab label"        → content tabs
 ADMONITION_RE = __import__("re").compile(r'^!!!\s+\w+(\s+"[^"]*")?\s*$')
-DETAILS_RE = __import__("re").compile(r'^\?\?\?(\s+"[^"]*")?\s*$')
+DETAILS_RE = __import__("re").compile(r'^\?\?\?\+?\s+\w+(\s+"[^"]*")?\s*$')
 TAB_RE = __import__("re").compile(r'^===\s+"[^"]*"\s*$')
 
 # Table rows that are purely structural or data-only (no natural language
@@ -66,8 +66,8 @@ def _is_translatable_paragraph(paragraph: str) -> bool:
         return False
 
     # Skip MkDocs Material structural directives that have no
-    # translatable text content (e.g. bare "!!! note").
-    if ADMONITION_RE.match(text) and '"' not in text:
+    # translatable text content (e.g. bare "!!! note" or "???+ note").
+    if (ADMONITION_RE.match(text) or DETAILS_RE.match(text)) and '"' not in text:
         return False
 
     # Skip pure table data rows (contributor tables, feature matrices,

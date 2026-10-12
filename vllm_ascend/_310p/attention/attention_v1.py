@@ -95,8 +95,16 @@ class AscendAttentionBackend310(AscendAttentionBackend):
         return AscendAttentionMetadataBuilder310
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
         return [128, 64]
+
+    @classmethod
+    def get_preferred_block_size(cls, default_block_size: int) -> int:
+        # Keep the 310P default at 128 rather than selecting the smallest
+        # supported size (64), which regresses paged decode performance.
+        if cls.supports_block_size(default_block_size):
+            return default_block_size
+        return 128
 
 
 class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
@@ -184,6 +192,12 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
             Any: The result of the attention operation.
         """
         if attn_metadata.seq_lens.device != query.device:
+            # Pageable H2D is illegal under NPU GLOBAL ACLGraph capture.
+            if torch.npu.is_current_stream_capturing():
+                raise RuntimeError(
+                    "310P paged attention: seq_lens must already be on-device before "
+                    "ACLGraph capture; move it outside torch.npu.graph()."
+                )
             attn_metadata.seq_lens = attn_metadata.seq_lens.to(
                 device=query.device,
                 non_blocking=True,
@@ -265,6 +279,8 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
         block_table = attn_metadata.block_tables
 
         if attn_metadata.seq_lens.device != query.device:
+            if torch.npu.is_current_stream_capturing():
+                raise RuntimeError("310P splitfuse: seq_lens must already be on-device before ACLGraph capture.")
             attn_metadata.seq_lens = attn_metadata.seq_lens.to(
                 device=query.device,
                 non_blocking=True,

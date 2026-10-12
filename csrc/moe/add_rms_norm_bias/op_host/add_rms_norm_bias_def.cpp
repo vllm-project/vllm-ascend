@@ -65,6 +65,14 @@ public:
 
         this->AICore().AddConfig("ascend910b");
         this->AICore().AddConfig("ascend910_93");
+
+        // Reuse the four-input schema above, including optional beta and FP32 rstd.
+        OpAICoreConfig regbaseCfg;
+        regbaseCfg.DynamicCompileStaticFlag(true)
+            .DynamicRankSupportFlag(true)
+            .DynamicShapeSupportFlag(true)
+            .ExtendCfgInfo("opFile.value", "add_rms_norm_bias_apt");
+        this->AICore().AddConfig("ascend950", regbaseCfg);
     }
 };
 OP_ADD(AddRmsNormBias);

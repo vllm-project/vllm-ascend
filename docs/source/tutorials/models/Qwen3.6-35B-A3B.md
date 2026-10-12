@@ -18,10 +18,14 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get feature
 
 ### 3.1 Model Weight
 
-- `Qwen3.6-35B-A3B` (BF16 version): requires 1 Atlas A3 inference products (64G x 16) node, 1 Atlas A2 inference products (64G x 8) node, or Atlas 300I DUO. [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3.6-35B-A3B).
-- `Qwen3.6-35B-A3B-w8a8` (quantized version): requires 1 Atlas A3 inference products (64G x 16) node, 1 Atlas A2 inference products (64G x 8) node, or Atlas 300I DUO. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-35B-A3B-w8a8).
+|  Weight Version  | Hardware Requirements | Download Links |
+|------------------|-----------------------|----------------|
+| `Qwen3.6-35B-A3B` (BF16 version) | 1 Atlas A3 inference products (64GB x 16) node, 1 Atlas A2 inference products (64GB x 8) node, or Atlas 300I DUO | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3.6-35B-A3B) |
+| `Qwen3.6-35B-A3B-w8a8` (quantized version) | 1 Atlas A3 inference products (64GB x 16) node, 1 Atlas A2 inference products (64GB x 8) node, or Atlas 300I DUO | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-35B-A3B-w8a8) |
 
 It is recommended to download the model weight to `/root/.cache/`.
+
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ## 4 Installation
 
@@ -29,7 +33,7 @@ It is recommended to download the model weight to `/root/.cache/`.
 
 Select an image based on your machine type. For example, use `quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}` for Atlas A2 inference products, `quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3` for Atlas A3 inference products, and `quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p` for Atlas 300I DUO.
 
-Refer to [using docker](../../installation.md#set-up-using-docker) for the complete installation guide.
+Refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image) for the complete installation guide.
 
 === "Atlas A3 inference products"
 
@@ -146,7 +150,7 @@ python -c "import vllm, vllm_ascend; print('vllm and vllm_ascend are ready')"
 
 ### 4.2 Source Code Installation
 
-You can also build and install `vllm-ascend` from source. Refer to [set up using python](../../installation.md#set-up-using-python).
+You can also build and install `vllm-ascend` from source. Refer to [set up using python](../../getting_started/installation.md#installation-existing-cann-install).
 
 !!! note
 
@@ -171,20 +175,18 @@ Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-3
 
     # Load model from ModelScope to speed up download.
     export VLLM_USE_MODELSCOPE=True
-
-    # Reduce memory fragmentation and avoid out-of-memory errors.
+    export HCCL_BUFFSIZE=1024
+    export HCCL_OP_EXPANSION_MODE="AIV"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-    export HCCL_OP_EXPANSION_MODE="AIV"
-    export HCCL_BUFFSIZE=1024
-    export OMP_NUM_THREADS=1
-    export TASK_QUEUE_ENABLE=1
+    # Reduce memory fragmentation and avoid out-of-memory errors.
+
     echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
     sysctl -w vm.swappiness=0
     sysctl -w kernel.numa_balancing=0
     sysctl kernel.sched_migration_cost_ns=50000
-    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 
+    # Ensure the model path matches the directory recorded during download
     vllm serve Eco-Tech/Qwen3.6-35B-A3B-w8a8 \
       --host 0.0.0.0 \
       --port 8000 \
@@ -221,7 +223,8 @@ Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-3
     ```shell
     export VLLM_USE_MODELSCOPE=True
     export ASCEND_RT_VISIBLE_DEVICES=0,1
-
+    
+    # Ensure the model path matches the directory recorded during download
     vllm serve Eco-Tech/Qwen3.6-35B-A3B-w8a8 \
       --host 127.0.0.1 \
       --port 8080 \
@@ -249,7 +252,7 @@ Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-3
     - `--quantization ascend` enables Ascend quantization for the W8A8 model. Remove this option when deploying the BF16 model.
     - To enable MTP speculative decoding, use --speculative_config '{"method": "mtp", "num_speculative_tokens": 1}'. We recommend setting num_speculative_tokens to 1. If your usage scenario involves fewer than two concurrent requests, it is recommended to enable MTP. Otherwise, it is recommended not to enable MTP.
 
-Common Issues Tip: If the service fails to start, HBM is insufficient, or requests are not scheduled as expected, refer to [FAQs](../../faqs.md) first, and then check the model-specific FAQ in Section 10.
+Common Issues Tip: If the service fails to start, HBM is insufficient, or requests are not scheduled as expected, refer to [Public FAQs](../../faqs.md) first, and then check the model-specific FAQ in Section 10.
 
 ## 6 Functional Verification
 
@@ -370,7 +373,7 @@ Recommended tuning order:
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, refer to [FAQs](../../faqs.md). This section only covers model-specific issues for Qwen3.6-35B-A3B.
+For common environment, installation, and general parameter issues, refer to [Public FAQs](../../faqs.md). This section only covers model-specific issues for Qwen3.6-35B-A3B.
 
 ### Q1: Why does the service report OOM during startup or soon after accepting requests?
 

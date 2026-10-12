@@ -18,9 +18,6 @@
 name: Release Code and Wheel
 
 on:
-  schedule:
-    # UTC+8: 10am, 16pm
-    - cron: '0 2,8 * * *'
   push:
     tags:
       - 'v*'
@@ -33,6 +30,7 @@ on:
         type: choice
         options:
           - main
+          - v0.26.0rc1
           - v0.23.0
           - v0.23.0rc1
           - v0.22.1rc1
@@ -373,6 +371,7 @@ jobs:
           ls
           docker build -f ./.github/workflows/dockerfiles/Dockerfile.buildwheel.a5 \
           --build-arg PY_VERSION=${{ matrix.python-version }} \
+          --build-arg MAX_JOBS=2 \
           -t wheel-a5:v1 .
           docker run --rm \
           -u "$(id -u):$(id -g)" \

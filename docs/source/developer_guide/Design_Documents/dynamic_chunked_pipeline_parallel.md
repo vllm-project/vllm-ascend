@@ -10,9 +10,9 @@ In Pipeline Parallelism (PP) + Chunked Prefill scenarios, long sequences are spl
 
 ```text
 Chunk 1 (history=0):     ██████         → Time T1
-Chunk 2 (history=4K):    ████████       → Time T2 > T1
-Chunk 3 (history=8K):    ██████████     → Time T3 > T2
-Chunk 4 (history=12K):   ████████████   → Time T4 > T3
+Chunk 2 (history=4k):    ████████       → Time T2 > T1
+Chunk 3 (history=8k):    ██████████     → Time T3 > T2
+Chunk 4 (history=12k):   ████████████   → Time T4 > T3
 ```
 
 This time variance propagates across pipeline stages, causing increased idle waiting (Pipeline Bubble) and significantly reducing GPU utilization.
@@ -147,7 +147,8 @@ After each batch, feature vectors `[Σ(C+H)·C, Σ(C+H), N]` and actual executio
 
 - **Pipeline Parallelism Required**: Must set `--pipeline-parallel-size > 1`
 - **Chunked Prefill Required**: Must enable `--enable-chunked-prefill`
-- **Incompatible with Balance Scheduling**: Cannot enable `VLLM_ASCEND_BALANCE_SCHEDULING`
+- **Incompatible with Balance Scheduling**: Cannot enable
+  `additional_config.scheduler_config.enable_balance_scheduling`
 - **Startup Overhead**: Profiling phase adds tens of seconds to initialization
 - **Memory**: No additional runtime memory overhead; profiling reuses existing dummy_run mechanism
 
