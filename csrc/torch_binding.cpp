@@ -2986,6 +2986,8 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     );
     ops.impl("npu_fused_quant_lightning_indexer_manage", torch::kPrivateUse1,
              &vllm_ascend::npu_fused_quant_lightning_indexer_manage);
+    ops.impl("npu_fused_quant_lightning_indexer_manage", torch::kMeta,
+             &vllm_ascend::npu_fused_quant_lightning_indexer_manage_meta);
 
     // k2q_csr: q2k -> k2q CSR (Meta/Hist/RowPrefix/TilePrefix/Scatter)
     ops.def(

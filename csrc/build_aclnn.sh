@@ -211,6 +211,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         "compressor_metadata"
         "quant_lightning_indexer_v2"
         "quant_lightning_indexer_v2_metadata"
+        "fused_quant_lightning_indexer_manage"
         "kv_quant_sparse_attn_sharedkv"
         "kv_quant_sparse_flash_attention_vllm"
         "kv_quant_sparse_attn_sharedkv_metadata"
