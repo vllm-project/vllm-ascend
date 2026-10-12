@@ -542,6 +542,10 @@ def build_attn_metadata(
                 attn_metadata_extra_kwargs.update(
                     num_actual_reqs=num_actual_reqs,
                     common_ratio_to_sas_metadata=common_ratio_to_sas_metadata,
+                    # FULL graphs replay the padded batch; DSA PCP restore
+                    # indices must span the padded extent. Mirror the V4.1
+                    # branch so the flag also reaches builders during capture.
+                    full_graph_mode=full_graph_mode or for_cudagraph_capture,
                 )
                 if formatted_slot_mappings is not None:
                     attn_metadata_extra_kwargs["formatted_slot_mapping"] = formatted_slot_mappings[i]
