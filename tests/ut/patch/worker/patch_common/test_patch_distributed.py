@@ -185,6 +185,7 @@ def _load_patch_distributed_module():
 
     npu_communicator_module.NPUCommunicator = FakeNPUCommunicator
     utils_module.create_hccl_pg_options = MagicMock(return_value=shared_hccl_options)
+    utils_module.get_hccl_qos_config = MagicMock(return_value={})
 
     vllm_ascend_module.patch = vllm_ascend_patch
     vllm_ascend_patch.worker = vllm_ascend_patch_worker
