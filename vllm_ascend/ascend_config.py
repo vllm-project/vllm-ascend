@@ -47,6 +47,38 @@ def is_mega_moe_supported() -> bool:
     return _MEGA_MOE_SUPPORTED
 
 
+def is_megamoe_supported_by_config(vllm_config) -> bool:
+    hf_text_config = vllm_config.model_config.hf_text_config
+    # Latent-MoE models such as Kimi K3 project tokens before dispatch, so
+    # MegaMoe sees routed_expert_hidden_size rather than the model width.
+    hidden_size = getattr(hf_text_config, "routed_expert_hidden_size", None)
+    if hidden_size is None:
+        hidden_size = getattr(hf_text_config, "hidden_size", None)
+    if hidden_size is None and hasattr(vllm_config.model_config, "get_hidden_size"):
+        hidden_size = vllm_config.model_config.get_hidden_size()
+    if hidden_size is None:
+        return False
+    hidden_size = int(hidden_size)
+    # Hidden-size bounds come from the CANN MegaMoe kernel constraints:
+    # the dispatch / FFN / combine cube tiles require hidden in the closed
+    # range [1024, 8192] and a multiple of 512 (the cube K-step). Models
+    # outside this range (e.g. small Qwen variants with hidden=896, or any
+    # hidden=9216 LLaMA-style head) are silently routed back to MC2.
+    if hidden_size < 1024 or hidden_size > 8192 or hidden_size % 512 != 0:
+        return False
+
+    # Intermediate-size bounds come from the CANN MegaMoe kernel constraints:
+    # For CANN 9.1.0 MegaMoe tiling requires intermediate_size in the closed
+    # range [1024, 3072] and a multiple of 512. This constraint may be removed
+    # in CANN 9.2.0
+    moe_intermediate_size = getattr(hf_text_config, "routed_expert_intermediate_size", None)
+    if moe_intermediate_size is None:
+        moe_intermediate_size = getattr(hf_text_config, "moe_intermediate_size", None)
+    if moe_intermediate_size is None:
+        return False
+    return moe_intermediate_size >= 1024 and moe_intermediate_size <= 3072 and moe_intermediate_size % 512 == 0
+
+
 def validate_additional_config_bool(value: Any, path: str) -> bool:
     """Apply the same pydantic bool rules to values read before config init."""
     try:
@@ -260,7 +292,7 @@ class AscendConfig:
             "draft_window_size": null,
             "mix_placement": false,
             "pa_shape_list": [],
-            "mega_moe_max_tokens": 65536,
+            "mega_moe_max_tokens": 6144,
             "ascend_log_path": "~/ascend/log/vllm_ascend",
             "c8_enable_reshape_optim": false,
             "enable_fused_mc2": 0,
@@ -400,8 +432,9 @@ class AscendConfig:
     # This is a reference value: if the actual per-rank received token
     # count exceeds it, tokens may be truncated, causing precision
     # degradation. Do not set it too large because workspace memory scales
-    # linearly with this value. Default 65536.
-    mega_moe_max_tokens: int = 65536
+    # linearly with this value. Default 6144, an empirically validated
+    # capacity for Kimi K3 that avoids the much larger worst-case buffer.
+    mega_moe_max_tokens: int = 6144
     ascend_log_path: str = dataclasses.field(
         default_factory=lambda: os.path.join(os.path.expanduser("~"), "ascend", "log", "vllm_ascend")
     )
