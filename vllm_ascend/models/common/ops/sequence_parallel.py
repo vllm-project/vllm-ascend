@@ -68,9 +68,7 @@ def _ascend_sp_reduce_scatter_impl(x: torch.Tensor) -> torch.Tensor:
     """Pad rows to the TP multiple, then reduce-scatter across TP ranks."""
     tp_size = get_tensor_model_parallel_world_size()
     sp_pad = (-x.shape[0]) % tp_size
-    # Keep required padding as FX nodes so the matmul-reduce-scatter fusion
-    # can move it before the row-parallel matmul. ``F.pad`` is prohibitively
-    # expensive for the large GEMM output on the unfused fallback path.
+    # Avoid copying the full input when its token count is already aligned.
     if sp_pad > 0:
         pad_shape = [sp_pad, x.shape[1]]
         x = torch.cat([x, x.new_zeros(pad_shape)], dim=0)
