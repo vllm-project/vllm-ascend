@@ -18,7 +18,6 @@ import os
 
 from vllm_ascend import envs
 
-import vllm_ascend.patch.platform.patch_deepseek_v4_tool_call_parser  # noqa
 import vllm_ascend.patch.platform.patch_deepseek_v4_vision  # noqa
 import vllm_ascend.patch.platform.patch_distributed  # noqa
 import vllm_ascend.patch.platform.patch_glm53_reasoning  # noqa

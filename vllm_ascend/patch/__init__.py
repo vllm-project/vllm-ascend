@@ -812,27 +812,6 @@
 #    Future Plan:
 #       Remove this patch once the supported vLLM version contains PR #44105.
 #
-# ** File: platform/patch_deepseek_v4_tool_call_parser.py **
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.tool_parsers.deepseekv4_tool_parser.DeepSeekV4ToolParser`
-#   2. `vllm.entrypoints.openai.chat_completion.serving.OpenAIServingChat`
-#    Why:
-#       DeepSeek V4 DSML tool-call streams can carry multiple invokes in one
-#       tool_calls block, emit terminal argument bytes together with
-#       `finish_reason="tool_calls"` in the same SSE chunk, and interleave
-#       parameter tags across chunk boundaries. The upstream parser drops or
-#       duplicates tool calls for those stream shapes.
-#    How:
-#       Wrap the upstream parser with a stream-state machine that splits
-#       multi-invoke blocks, defers argument extraction until block closure,
-#       and rewrites the serving layer to flush the remaining-argument delta
-#       with the terminal chunk.
-#    Related PR (if no, explain why):
-#       No; this is a stream-shape compatibility fix.
-#    Future Plan:
-#       Remove this patch once the upstream DeepSeek V4 tool parser handles
-#       multi-invoke DSML streams and terminal argument flushing natively.
-#
 # ** File: platform/patch_lopt_tokenization.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.renderers.hf_renderer.HFRenderer`
