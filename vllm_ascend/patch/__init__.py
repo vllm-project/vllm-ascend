@@ -846,10 +846,9 @@
 #   1. `vllm.config.vllm.VllmConfig.use_v2_model_runner`
 #    Why:
 #       Ascend uses the NPU v2 runner by default. Features that are not
-#       V2-ready (pooling KV, LoRA, VL encoder disaggregation,
+#       V2-ready (pooling KV, VL encoder disaggregation,
 #       draft_window_size, enable_reduce_sample, enable_dsa_cp, suffix
-#       speculative decoding, ngram speculative decoding, parallel_drafting,
-#       and dflash2 graph)
+#       speculative decoding, and ngram speculative decoding)
 #       default to v1.
 #       Upstream GPU-specific architecture, feature, and Triton gates must not
 #       silently switch an
