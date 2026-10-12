@@ -7,7 +7,7 @@ import pytest
 import torch
 from torch import nn
 from torch.nn import functional as F
-from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SituAndMul
 
 from vllm_ascend.ascend_forward_context import MoECommType
@@ -20,6 +20,7 @@ from vllm_ascend.ops.fused_moe.routed_experts import (
     AscendRoutedExperts,
     AscendUnquantizedFusedMoEMethod,
     make_eplb_placement_config,
+    should_force_moe_load_balance,
     use_multistage_eplb_load,
 )
 from vllm_ascend.ops.fused_moe.router import fused_topk_router as fused_topk_router_module
@@ -80,6 +81,58 @@ def _build_unquantized_method(*, dynamic_eplb: bool = False):
 )
 def test_use_multistage_eplb_load(dynamic_eplb, policy_type, collection_interval, expected):
     assert use_multistage_eplb_load(dynamic_eplb, policy_type, collection_interval) is expected
+
+
+def test_force_load_balance_probe_is_explicit_and_supports_megamoe(monkeypatch):
+    monkeypatch.setattr(routed_experts_module, "ENABLE_W4A8_MXFP_FORCE_LOAD_BALANCE", True)
+
+    assert should_force_moe_load_balance(
+        quant_type=QuantType.W4A8MXFP,
+        in_profile_run=False,
+        use_mega_moe=False,
+        capturing=False,
+        cudagraph_runtime_mode=CUDAGraphMode.NONE,
+    )
+    assert should_force_moe_load_balance(
+        quant_type=QuantType.W4A8MXFP,
+        in_profile_run=False,
+        use_mega_moe=True,
+        capturing=False,
+        cudagraph_runtime_mode=CUDAGraphMode.NONE,
+    )
+    assert not should_force_moe_load_balance(
+        quant_type=QuantType.W8A8MXFP,
+        in_profile_run=False,
+        use_mega_moe=False,
+        capturing=False,
+        cudagraph_runtime_mode=CUDAGraphMode.NONE,
+    )
+    assert should_force_moe_load_balance(
+        quant_type=QuantType.W4A8MXFP,
+        in_profile_run=True,
+        use_mega_moe=True,
+        capturing=False,
+        cudagraph_runtime_mode=CUDAGraphMode.NONE,
+    )
+
+
+@pytest.mark.parametrize(
+    "cudagraph_runtime_mode",
+    [CUDAGraphMode.FULL, CUDAGraphMode.PIECEWISE],
+)
+def test_force_load_balance_probe_skips_graph_mode(monkeypatch, cudagraph_runtime_mode):
+    monkeypatch.setattr(routed_experts_module, "ENABLE_W4A8_MXFP_FORCE_LOAD_BALANCE", True)
+    warning_once = MagicMock()
+    monkeypatch.setattr(routed_experts_module.logger, "warning_once", warning_once)
+
+    assert not should_force_moe_load_balance(
+        quant_type=QuantType.W4A8MXFP,
+        in_profile_run=False,
+        use_mega_moe=False,
+        capturing=False,
+        cudagraph_runtime_mode=cudagraph_runtime_mode,
+    )
+    warning_once.assert_called_once()
 
 
 def test_make_eplb_placement_config_does_not_copy_source():

@@ -20,7 +20,7 @@ from types import SimpleNamespace
 
 import torch
 import torch_npu
-from vllm.config import get_current_vllm_config
+from vllm.config import CUDAGraphMode, get_current_vllm_config
 from vllm.distributed.utils import is_weak_contiguous
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
@@ -29,6 +29,7 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import UnquantizedFusedMoEMethod
 from vllm.model_executor.utils import replace_parameter
 
+from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType, use_cann_megamoe
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
@@ -40,6 +41,33 @@ from vllm_ascend.ops.fused_moe.moe_utils import get_moe_num_logical_experts
 from vllm_ascend.ops.fused_moe.shared_experts import FusedMoEEvents
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
+
+ENABLE_W4A8_MXFP_FORCE_LOAD_BALANCE = envs.VLLM_ASCEND_ENABLE_W4A8_MXFP_FORCE_LOAD_BALANCE
+
+
+def should_force_moe_load_balance(
+    *,
+    quant_type: QuantType,
+    in_profile_run: bool,
+    use_mega_moe: bool,
+    capturing: bool,
+    cudagraph_runtime_mode: CUDAGraphMode | None,
+) -> bool:
+    """Enable the explicit eager-only load probe for supported MoE backends."""
+    if in_profile_run:
+        return True
+    if (
+        not ENABLE_W4A8_MXFP_FORCE_LOAD_BALANCE
+        or quant_type != QuantType.W4A8MXFP
+    ):
+        return False
+    if capturing or cudagraph_runtime_mode not in (None, CUDAGraphMode.NONE):
+        logger.warning_once(
+            "VLLM_ASCEND_ENABLE_W4A8_MXFP_FORCE_LOAD_BALANCE is ignored for graph-mode requests; "
+            "the debug routing override applies only to eager execution."
+        )
+        return False
+    return True
 
 
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
@@ -506,8 +534,17 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             moe_layer_index = forward_context.moe_layer_index % (len(forward_context.all_moe_layers))
             forward_context.moe_layer_index = moe_layer_index
 
-        # Load balancing for token distribution among experts in dummy_run.
-        enable_force_load_balance = _EXTRA_CTX.in_profile_run
+        # Profile runs preserve the existing routing behavior. The explicit
+        # probe switch enables the same routing override for eager W4A8 MXFP
+        # requests, while leaving MegaMoe and graph-mode execution unchanged.
+        probe_force_load_balance = should_force_moe_load_balance(
+            quant_type=self.quant_type,
+            in_profile_run=False,
+            use_mega_moe=getattr(_EXTRA_CTX, "use_mega_moe", False),
+            capturing=getattr(forward_context, "capturing", False),
+            cudagraph_runtime_mode=getattr(forward_context, "cudagraph_runtime_mode", None),
+        )
+        enable_force_load_balance = _EXTRA_CTX.in_profile_run or probe_force_load_balance
 
         lora_context = getattr(self, "_ascend_moe_lora_context", None)
         if lora_context is not None:
@@ -533,6 +570,10 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             enable_force_load_balance=enable_force_load_balance,
             input_ids=input_ids,
         )
+        if probe_force_load_balance and mc2_mask is not None:
+            # Include DP padding rows in the probe workload. Finalization
+            # still removes padded outputs.
+            mc2_mask = torch.ones_like(mc2_mask)
         self.ascend_pertoken_scale = pertoken_scale
         self.ascend_mc2_mask = mc2_mask
         try:
