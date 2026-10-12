@@ -140,7 +140,9 @@ ASCENDC_EXTERN_C graphStatus TilingGMMSwigluQuant(gert::TilingContext *context)
     auto attrs = context->GetAttrs();
     float limited = 0.0f;
     if (attrs != nullptr) {
-        if (const double *limitedPtr = attrs->GetAttrPointer<double>(ATTR_INDEX_LIMITED)) {
+        if (const float *limitedPtr = attrs->GetAttrPointer<float>(ATTR_INDEX_LIMITED)) {
+            limited = *limitedPtr;
+        } else if (const double *limitedPtr = attrs->GetAttrPointer<double>(ATTR_INDEX_LIMITED)) {
             limited = static_cast<float>(*limitedPtr);
         }
     }

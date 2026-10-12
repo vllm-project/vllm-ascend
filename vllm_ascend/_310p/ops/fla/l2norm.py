@@ -21,7 +21,7 @@ import math
 
 import torch
 import torch_npu
-from vllm.model_executor.layers.fla.ops.utils import tensor_cache
+from vllm.third_party.flash_linear_attention.ops.utils import tensor_cache
 
 
 @tensor_cache

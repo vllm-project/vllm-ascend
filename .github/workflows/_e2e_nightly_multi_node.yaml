@@ -6,16 +6,16 @@ on:
       soc_version:
         required: true
         type: string
-        description: use a2 or a3
+        description: use a2 or a3 or a5
       runner:
         required: false
         type: string
-        default: linux-aarch64-a3-0
+        default: linux-aarch64-a3-800t-0
       image:
         required: false
         type: string
         description: base image for pods
-        default: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.1-910b-ubuntu22.04-py3.12"
+        default: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-910b-ubuntu22.04-py3.12"
       config_file_path:
         required: true
         type: string
@@ -24,7 +24,12 @@ on:
         required: false
         type: string
         default: ''
-        description: override CONFIG_BASE_PATH used by the yaml loader inside the pod (defaults to nightly path)
+        description: CONFIG_BASE_PATH used by the YAML loader inside the pod
+      test_frequency:
+        required: false
+        type: string
+        default: nightly
+        description: good-table namespace and baseline cadence (nightly or weekly)
       replicas:
         required: false
         default: "1"
@@ -78,12 +83,59 @@ on:
         type: boolean
         default: false
         description: enable Pod AOP pipeline on failure
+      bisect_good_commit:
+        required: false
+        type: string
+        default: ''
+        description: explicit good commit for bisect (overrides good_table lookup)
+      bisect_bad_commit:
+        required: false
+        type: string
+        default: 'HEAD'
+        description: bad commit to bisect from (default HEAD)
+      bisect_fail_confirm_retries:
+        required: false
+        type: string
+        default: ''
+        description: flaky guard retry count for bisect (default 1)
+      bisect_trial_timeout:
+        required: false
+        type: string
+        default: ''
+        description: per-trial pytest timeout in seconds for bisect (default 7200)
+      bisect_barrier_timeout:
+        required: false
+        type: string
+        default: ''
+        description: multi-node barrier timeout in seconds for bisect (default 3600)
+      bisect_no_verify_good:
+        required: false
+        type: boolean
+        default: false
+        description: skip good endpoint verification in bisect
+      bisect_no_verify_bad:
+        required: false
+        type: boolean
+        default: false
+        description: skip bad endpoint verification in bisect
+      bisect_force_initial_build:
+        required: false
+        type: boolean
+        default: false
+        description: clean-rebuild on the first bisect trial
+      bisect_config_base_path:
+        required: false
+        type: string
+        default: ''
+        description: override CONFIG_BASE_PATH for bisect
     secrets:
       KUBECONFIG_B64:
         required: true
       OBS_ACCESS_KEY_ID:
         required: false
       OBS_SECRET_ACCESS_KEY:
+        required: false
+      OPENLIBING_SECRET:
         required: false
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
@@ -102,7 +154,7 @@ concurrency:
 jobs:
   e2e:
     name: ${{ inputs.config_file_path }}
-    timeout-minutes: ${{ inputs.request_id != '' && 240 || fromJSON(inputs.testcase_timeout) }}
+    timeout-minutes: ${{ inputs.request_id != '' && (inputs.aop_multi_enabled && 1440 || 240) || fromJSON(inputs.testcase_timeout) }}
     # This is the runner with no NPU for k8s controller
     runs-on: ${{ inputs.runner }}
     if: ${{ inputs.should_run }}
@@ -111,6 +163,7 @@ jobs:
       env:
         KUBECONFIG: /tmp/kubeconfig
         NAMESPACE: vllm-project
+        OPENLIBING_SECRET: ${{ secrets.OPENLIBING_SECRET }}
     steps:
       - name: Decode kubeconfig
         run: echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > "$KUBECONFIG"
@@ -156,7 +209,8 @@ jobs:
 
       - name: Prepare scripts
         run: |
-          install -D tests/e2e/nightly/multi_node/scripts/run.sh /root/.cache/tests/run.sh
+          install -D tests/e2e/common/multi_node/run.sh /root/.cache/tests/run.sh
+          install -D tests/e2e/nightly/scripts/bisect_args.sh /root/.cache/tests/bisect_args.sh
 
       - name: Clear resources
         run: |
@@ -189,6 +243,17 @@ jobs:
           done
 
       - name: Launch cluster
+        env:
+          BISECT_GOOD_COMMIT: ${{ inputs.bisect_good_commit }}
+          BISECT_BAD_COMMIT: ${{ inputs.bisect_bad_commit }}
+          BISECT_FAIL_CONFIRM_RETRIES: ${{ inputs.bisect_fail_confirm_retries }}
+          BISECT_TRIAL_TIMEOUT: ${{ inputs.bisect_trial_timeout }}
+          BISECT_BARRIER_TIMEOUT: ${{ inputs.bisect_barrier_timeout }}
+          BISECT_NO_VERIFY_GOOD: ${{ inputs.bisect_no_verify_good }}
+          BISECT_NO_VERIFY_BAD: ${{ inputs.bisect_no_verify_bad }}
+          BISECT_FORCE_INITIAL_BUILD: ${{ inputs.bisect_force_initial_build }}
+          BISECT_CONFIG_BASE_PATH: ${{ inputs.bisect_config_base_path }}
+          OPENLIBING_SECRET: ${{ secrets.OPENLIBING_SECRET }}
         run: |
           set -euo pipefail
 
@@ -204,9 +269,13 @@ jobs:
           runner="${{ inputs.soc_version }}"
           echo "FAIL_TAG=${fail_tag}" >> $GITHUB_ENV
 
-          if [ "${{ inputs.soc_version }}" = "a3" ]; then
-            npu_per_node=16
-            pvc_name=gy005-az5-vllm-ascend
+          if [ "${{ inputs.soc_version }}" = "a5" ]; then
+              npu_per_node=8
+              npu_resource_name=huawei.com/npu
+              shared_volume_path=/mnt/share
+          elif [ "${{ inputs.soc_version }}" = "a3" ]; then
+              npu_per_node=16
+              pvc_name=gy005-az5-vllm-ascend
           else
             npu_per_node=8
             pvc_name=vllm-project-hk001
@@ -214,7 +283,7 @@ jobs:
 
           benchmark_job_name="${{ steps.vars.outputs.benchmark_job_name }}"
 
-          jinja2 tests/e2e/nightly/multi_node/scripts/lws.yaml.jinja2 \
+          jinja2 tests/e2e/common/multi_node/lws.yaml.jinja2 \
             -D lws_name="$LWS_NAME" \
             -D log_prefix="$LOG_PREFIX" \
             -D size="$size" \
@@ -227,11 +296,27 @@ jobs:
             -D is_pr_test="$is_pr_test" \
             -D vllm_ascend_ref="$vllm_ascend_ref" \
             -D vllm_ascend_remote_url="$vllm_ascend_remote_url" \
-            -D pvc_name="$pvc_name" \
+            -D pvc_name="${pvc_name:-}" \
             -D benchmark_job_name="$benchmark_job_name" \
             -D runner="$runner" \
             -D aop_multi_enabled="${{ inputs.aop_multi_enabled }}" \
-            -D good_table="/root/.cache/vllm-ascend/${{ inputs.vllm_ascend_branch }}/nightly/good_table.csv" \
+            -D good_table="/root/.cache/vllm-ascend/${{ inputs.vllm_ascend_branch || 'main' }}/${{ inputs.test_frequency }}/good_table.csv" \
+            -D openlibing_secret="${OPENLIBING_SECRET:-}" \
+            -D vllm_ascend_branch="${{ inputs.vllm_ascend_branch }}" \
+            -D test_frequency="${{ inputs.test_frequency }}" \
+            -D soc_version="${{ inputs.soc_version }}" \
+            -D npu_resource_name="${npu_resource_name:-}" \
+            -D shared_volume_path="${shared_volume_path:-}" \
+            -D max_good_age_days="${{ inputs.test_frequency == 'weekly' && 8 || 3 }}" \
+            -D bisect_good_commit="$BISECT_GOOD_COMMIT" \
+            -D bisect_bad_commit="$BISECT_BAD_COMMIT" \
+            -D bisect_fail_confirm_retries="$BISECT_FAIL_CONFIRM_RETRIES" \
+            -D bisect_trial_timeout="$BISECT_TRIAL_TIMEOUT" \
+            -D bisect_barrier_timeout="$BISECT_BARRIER_TIMEOUT" \
+            -D bisect_no_verify_good="$BISECT_NO_VERIFY_GOOD" \
+            -D bisect_no_verify_bad="$BISECT_NO_VERIFY_BAD" \
+            -D bisect_force_initial_build="$BISECT_FORCE_INITIAL_BUILD" \
+            -D bisect_config_base_path="$BISECT_CONFIG_BASE_PATH" \
             --outfile lws.yaml
 
           kubectl apply -f ./lws.yaml
@@ -309,12 +394,148 @@ jobs:
           done
 
           LEADER_TMP=$(mktemp)
-          kubectl logs -f "$LEADER_POD" -n "$NAMESPACE" | tee "$LEADER_TMP" | while IFS= read -r line; do
-            echo "$line"
-            if echo "$line" | grep -q "$FAIL_TAG"; then
+          if [ "${{ inputs.aop_multi_enabled }}" = "true" ]; then
+            leader_identity() {
+              local attempt state
+              for ((attempt=0; attempt<3; attempt++)); do
+                if state=$(kubectl --request-timeout=30s get pod "$LEADER_POD" -n "$NAMESPACE" \
+                    -o jsonpath='{.metadata.uid}{"|"}{.status.containerStatuses[?(@.name=="vllm-leader")].containerID}{"|"}{.status.containerStatuses[?(@.name=="vllm-leader")].restartCount}'); then
+                  printf '%s\n' "$state"
+                  return 0
+                fi
+                sleep 1
+              done
+              echo "::error::Unable to query AOP leader state." >&2
+              return 1
+            }
+            initial_identity=$(leader_identity)
+            IFS='|' read -r pod_uid container_id restart_count <<< "$initial_identity"
+            if [ -z "$pod_uid" ] || [ -z "$container_id" ] || [ -z "$restart_count" ]; then
+              echo "::error::Cannot identify the AOP leader container."
               exit 1
             fi
-          done
+            finished="AOP_RUN_FINISHED:${LOG_PREFIX}:"
+            MAX_RECONNECTS=12
+            reconnects=0
+            verified_logs=$(mktemp)
+            stream_pid=""
+            display_pid=""
+            stop_aop_stream() {
+              if [ -n "$stream_pid" ]; then
+                kill "$stream_pid" 2>/dev/null || true
+                wait "$stream_pid" 2>/dev/null || true
+                stream_pid=""
+              fi
+              if [ -n "$display_pid" ]; then
+                kill "$display_pid" 2>/dev/null || true
+                wait "$display_pid" 2>/dev/null || true
+                display_pid=""
+              fi
+            }
+            trap 'stop_aop_stream; rm -f "$verified_logs"; cleanup' EXIT
+            read_result() {
+              local line
+              result=""
+              # read ignores an incomplete trailing line, unlike a prefix grep.
+              while IFS= read -r line; do
+                if [[ "$line" == *"$FAIL_TAG"* ]]; then
+                  result=1
+                  return
+                fi
+                if [[ "$line" == "$finished"* ]]; then
+                  result=${line#"$finished"}
+                  if [[ ! "$result" =~ ^[0-9]+$ ]]; then result=1; fi
+                  return
+                fi
+              done < "$1"
+            }
+            recover_result() {
+              local before after uid restarts attempt
+              local previous=()
+              for ((attempt=0; attempt<3; attempt++)); do
+                before=$(leader_identity)
+                IFS='|' read -r uid _ restarts <<< "$before"
+                if [ "$uid" != "$pod_uid" ]; then
+                  echo "::error::AOP leader pod was replaced; original logs are unavailable."
+                  exit 1
+                fi
+                previous=()
+                if [ "$before" != "$initial_identity" ]; then
+                  if [[ "$restarts" =~ ^[0-9]+$ ]] && [ "$restarts" -eq "$((restart_count + 1))" ]; then
+                    previous=(--previous)
+                  else
+                    echo "::error::Original AOP leader logs are no longer available."
+                    exit 1
+                  fi
+                fi
+                if ! kubectl --request-timeout=30s logs "$LEADER_POD" -c vllm-leader -n "$NAMESPACE" \
+                    "${previous[@]}" > "$verified_logs"; then
+                  sleep 1
+                  continue
+                fi
+                after=$(leader_identity)
+                if [ "$before" != "$after" ]; then
+                  sleep 1
+                  continue
+                fi
+                read_result "$verified_logs"
+                if [ -n "$result" ]; then
+                  cp "$verified_logs" "$LEADER_TMP"
+                  return
+                fi
+                if [ "${#previous[@]}" -gt 0 ]; then
+                  echo "::error::Original AOP leader ended without a completion result."
+                  exit 1
+                fi
+                return
+              done
+              echo "::error::Unable to retrieve stable AOP leader logs."
+              exit 1
+            }
+            while true; do
+              # Check retained logs before reconnecting; never follow a new
+              # container just because the original stream disconnected.
+              recover_result
+              if [ "$result" = "0" ]; then break; fi
+              if [ -n "$result" ]; then exit 1; fi
+              : > "$LEADER_TMP"
+              kubectl logs -f "$LEADER_POD" -c vllm-leader -n "$NAMESPACE" \
+                > "$LEADER_TMP" &
+              stream_pid=$!
+              tail -n +1 -f "$LEADER_TMP" &
+              display_pid=$!
+              # Completion must stop even a still-open log connection.
+              while kill -0 "$stream_pid" 2>/dev/null; do
+                read_result "$LEADER_TMP"
+                if [ -n "$result" ]; then break; fi
+                sleep 1
+              done
+              stop_aop_stream
+              # Only a finite snapshot with stable identity is authoritative.
+              recover_result
+              if [ "$result" = "0" ]; then
+                break
+              elif [ -n "$result" ]; then
+                echo "::error::AOP leader reported failure: $result"
+                exit 1
+              fi
+              # A disconnect is retryable only when no completion was reported.
+              if [ "$reconnects" -ge "$MAX_RECONNECTS" ]; then
+                echo "::error::AOP log reconnection limit reached without a completion result."
+                exit 1
+              fi
+              reconnects=$((reconnects + 1))
+              echo "[stream] reconnecting to AOP leader ($reconnects/$MAX_RECONNECTS)..."
+              sleep 5
+            done
+          else
+            kubectl logs -f "$LEADER_POD" -n "$NAMESPACE" | tee "$LEADER_TMP" | while IFS= read -r line; do
+              echo "$line"
+              if echo "$line" | grep -q "$FAIL_TAG"; then
+                exit 1
+              fi
+            done
+          fi
 
           eval "$(awk '
             /^vLLM Git information$/        { sec="vllm"; next }
@@ -329,8 +550,7 @@ jobs:
           rm -f "$LEADER_TMP"
 
       - name: Update good_table.csv on success
-        # if: ${{ steps.stream_logs.outcome == 'success' && inputs.request_id == '' }}
-        if: ${{ steps.stream_logs.outcome == 'success'}}
+        if: ${{ steps.stream_logs.outcome == 'success' && inputs.request_id == '' }}
         env:
           TEST_NAME: ${{ inputs.name || inputs.config_file_path }}
           TEST_PATH: ${{ inputs.config_file_path }}
@@ -338,11 +558,12 @@ jobs:
           RUN_LINK: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           python3 tests/e2e/nightly/scripts/update_good_table.py \
-            --cache-csv "/root/.cache/vllm-ascend/${{ inputs.vllm_ascend_branch || 'main' }}/nightly/good_table.csv" \
+            --cache-csv "/root/.cache/vllm-ascend/${{ inputs.vllm_ascend_branch || 'main' }}/${{ inputs.test_frequency }}/good_table.csv" \
             --test-name "$TEST_NAME" \
             --test-path "$TEST_PATH" \
             --config-base-path "$CONFIG_BASE_PATH" \
             --scene "multi_node" \
+            --soc "${{ inputs.soc_version }}" \
             --run-link  "$RUN_LINK" \
             --vllm-ascend-dir "." \
             --vllm-ascend-version "${{ steps.stream_logs.outputs.vllm_ascend_hash }}" \

@@ -15,7 +15,10 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import importlib.util
 import os
+import sys
+from types import ModuleType
 
 from . import envs
 
@@ -24,6 +27,36 @@ from . import envs
 if envs.VLLM_ASCEND_LOPT_ENABLE:
     os.environ.setdefault("RAYON_NUM_THREADS", "1")
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
+_triton_available = importlib.util.find_spec("triton") is not None
+
+try:
+    import triton.experimental.gluon  # type: ignore[import-untyped]  # noqa: F401
+except (ImportError, ModuleNotFoundError):
+    # fallback: create stubs for old triton-ascend
+    if "triton.experimental" not in sys.modules:
+        _experimental = ModuleType("triton.experimental")
+        _experimental.__path__ = []
+        sys.modules["triton.experimental"] = _experimental
+    for _gluon_stub in (
+        "triton.experimental.gluon",
+        "triton.experimental.gluon.language",
+    ):
+        if _gluon_stub not in sys.modules:
+            sys.modules[_gluon_stub] = ModuleType(_gluon_stub)
+
+# main2main compat: `_aggregate` was added to triton.language.core in
+# vllm main post-0.26.0. Stub it here so vllm.triton_utils can import it
+# without breaking on triton-ascend 3.2.1. Skip if triton is not
+# installed at all (e.g. 310P or CPU-UT environments).
+if _triton_available:
+    try:
+        import triton.language.core as _tl_core  # type: ignore[import-untyped]
+    except Exception:
+        pass
+    else:
+        if not hasattr(_tl_core, "_aggregate"):
+            _tl_core._aggregate = lambda *a, **kw: None
 
 _GLOBAL_PATCH_APPLIED = False
 

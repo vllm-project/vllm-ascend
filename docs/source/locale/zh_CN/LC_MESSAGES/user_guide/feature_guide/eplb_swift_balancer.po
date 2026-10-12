@@ -19,15 +19,12 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 "Generated-By: Babel 2.18.0\n"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:1
 msgid "Expert Load Balance (EPLB)"
 msgstr "专家负载均衡 (EPLB)"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:3
 msgid "Overview"
 msgstr "概述"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:5
 msgid ""
 "Expert balancing for MoE (Mixture of Experts) models in LLM (Large "
 "Language) serving is essential for optimal performance. Dynamically "
@@ -40,145 +37,112 @@ msgstr ""
 "world)”操作的存在，在推理过程中动态更改专家可能会对 TTFT（首词元延迟）和 "
 "TPOT（每输出词元延迟）产生负面影响。SwiftBalancer 实现了异步专家负载均衡，具备零开销的专家迁移能力，确保了服务的无缝连续性。"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:7
 msgid "EPLB Effects"
 msgstr "EPLB 效果"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:9
 msgid ""
 "Reduced Latency: Dynamically balances expert loads to minimize TTFT and "
 "TPOT by distributing workloads evenly across experts."
 msgstr "降低延迟：通过在专家之间均匀分配工作负载，动态平衡专家负载，从而最小化 TTFT 和 TPOT。"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:10
 msgid ""
 "Enhanced Throughput: Optimizes NPU utilization, increasing token "
 "generation speed under high-concurrency scenarios."
 msgstr "提升吞吐量：优化 NPU 利用率，提高高并发场景下的词元生成速度。"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:11
 msgid ""
 "Zero-Overhead Movement: Expert redistribution occurs asynchronously "
 "without interrupting ongoing inference requests."
 msgstr "零开销迁移：专家重分布过程异步进行，不会中断正在进行的推理请求。"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:12
 msgid ""
 "Adaptive Scaling: Automatically adjusts to workload fluctuations while "
 "maintaining stable performance."
 msgstr "自适应缩放：自动调整以应对工作负载波动，同时保持性能稳定。"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:13
 msgid ""
 "Fault Tolerance: Redundant expert placement ensures system resilience "
 "during hardware failures."
 msgstr "容错性：冗余的专家放置策略确保了系统在硬件故障时的恢复能力。"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:15
 msgid "Support Scenarios"
 msgstr "支持场景"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:17
 msgid "Models"
 msgstr "模型"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:19
 msgid "DeepSeekV3/V3.1/R1, Qwen3-MoE"
 msgstr "DeepSeekV3/V3.1/R1, Qwen3-MoE"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:21
 msgid "MOE QuantType"
 msgstr "MoE 量化类型"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md
 msgid "QuantType"
 msgstr "量化类型"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md
 msgid "Supported Hardware"
 msgstr "支持的硬件"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md
 msgid "W8A8 / W8A8-Dynamic"
 msgstr "W8A8 / W8A8-Dynamic"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md
 msgid "A2, A3, Ascend 950 Products"
 msgstr "A2, A3, Ascend 950 系列产品"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md
 msgid "W4A8 (with fused MC2 enabled)"
 msgstr "W4A8 (启用融合 MC2)"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md
 msgid "MXFP4"
 msgstr "MXFP4"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md
 msgid "Ascend 950 Products"
 msgstr "Ascend 950 系列产品"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md
 msgid "MXFP8"
 msgstr "MXFP8"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:30
 msgid "How to Use EPLB"
 msgstr "如何使用 EPLB"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:32
 msgid "EPLB has three usage modes:"
 msgstr "EPLB 有三种使用模式："
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md
 msgid "Mode"
 msgstr "模式"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md
 msgid "Config in `eplb_config`"
 msgstr "`eplb_config` 配置"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md
 msgid "Env Variable"
 msgstr "环境变量"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md
 msgid "**Dynamic EPLB**"
 msgstr "**动态 EPLB**"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md
 msgid "`dynamic_eplb: true`"
 msgstr "`dynamic_eplb: true`"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md
 msgid "`DYNAMIC_EPLB=true`"
 msgstr "`DYNAMIC_EPLB=true`"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md
 msgid "**Recording** (generate expert map)"
 msgstr "**记录模式** (生成专家映射表)"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md
 msgid "`expert_map_record_path`"
 msgstr "`expert_map_record_path`"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md
 msgid "`DYNAMIC_EPLB=true` or `EXPERT_MAP_RECORD=true`"
 msgstr "`DYNAMIC_EPLB=true` 或 `EXPERT_MAP_RECORD=true`"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md
 msgid "**Static EPLB** (load pre-recorded map)"
 msgstr "**静态 EPLB** (加载预记录映射表)"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md
 msgid "`expert_map_path`"
 msgstr "`expert_map_path`"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md
 msgid "none required"
 msgstr "无需设置"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:40
 msgid ""
 "[!IMPORTANT] For Dynamic EPLB and Recording modes, the env variable acts "
 "as a safety guard: setting `dynamic_eplb: true` in config alone is not "
@@ -190,11 +154,9 @@ msgstr ""
 "`DYNAMIC_EPLB=true` 或 `EXPERT_MAP_RECORD=true`。静态 EPLB（通过 "
 "`expert_map_path` 加载预记录映射表）**不**需要设置环境变量。"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:43
 msgid "Dynamic EPLB"
 msgstr "动态 EPLB"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:45
 msgid ""
 "We need to add environment variable `export DYNAMIC_EPLB=\"true\"` to "
 "enable vLLM EPLB. Enable dynamic balancing with auto-tuned parameters. "
@@ -206,78 +168,61 @@ msgstr ""
 "功能。通过自动调优的参数启用动态平衡。根据工作负载模式调整 `expert_heat_collection_interval` 和 "
 "`algorithm_execution_interval`。在当前版本中，建议使用以下策略：swift balancer(2)。"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:60
 msgid "EPLB Policy Types"
 msgstr "EPLB 策略类型"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:62
 msgid ""
 "The `eplb_policy_type` parameter selects the balancing algorithm used "
 "during dynamic expert redistribution:"
 msgstr "`eplb_policy_type` 参数选择动态专家重分布期间使用的平衡算法："
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md
 msgid "Value"
 msgstr "值"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md
 msgid "Policy"
 msgstr "策略"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md
 msgid "Description"
 msgstr "描述"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md
 msgid "`0`"
 msgstr "`0`"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md
 msgid "Random"
 msgstr "随机"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md
 msgid "Randomly swaps experts between ranks. Suitable for basic testing only."
 msgstr "在 ranks 之间随机交换专家。仅适用于基础测试。"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md
 msgid "`1`"
 msgstr "`1`"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md
 msgid "DefaultEplb"
 msgstr "DefaultEplb"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md
 msgid ""
 "Open-source EPLB algorithm. Adds redundant experts to the hottest, packs "
 "via balanced assignment with local constraint exchange."
 msgstr "开源 EPLB 算法。为最热的专家添加冗余，通过平衡分配和局部约束交换进行打包。"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md
 msgid "`2`"
 msgstr "`2`"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md
 msgid "SwiftBalanceEplb"
 msgstr "SwiftBalanceEplb"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md
 msgid ""
 "Optimized for low-bandwidth environments. Supports intra-node and inter-"
 "node expert redundancy, joint optimization of expert placement. "
 "**(Recommended)**"
 msgstr "针对低带宽环境优化。支持节点内和节点间专家冗余，联合优化专家放置。**（推荐）**"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md
 msgid "`3`"
 msgstr "`3`"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md
 msgid "FlashLB"
 msgstr "FlashLB"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md
 msgid ""
 "Statistical method using sliding-window mean/variance/covariance of "
 "expert loads. Uses FlashTree layered search for optimal replica "
@@ -285,15 +230,12 @@ msgid ""
 "high-frequency load fluctuations."
 msgstr "统计方法，使用专家负载的滑动窗口均值/方差/协方差。使用 FlashTree 分层搜索进行最优副本分配，并使用 `minimize_redeploy` 进行增量调整。最适合高频负载波动场景。"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:71
 msgid "Static EPLB"
 msgstr "静态 EPLB"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:73
 msgid "Initial Setup (Record Expert Map)"
 msgstr "初始设置（记录专家映射表）"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:75
 msgid ""
 "We need to add environment variable `export EXPERT_MAP_RECORD=\"true\"` "
 "to record expert map. Generate the initial expert distribution map using "
@@ -303,25 +245,20 @@ msgstr ""
 "需要添加环境变量 `export EXPERT_MAP_RECORD=\"true\"` 来记录专家映射表。使用 "
 "`expert_map_record_path` 生成初始专家分布图。这为未来的部署创建了基准配置。"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:89
 msgid "Subsequent Deployments (Use Recorded Map)"
 msgstr "后续部署（使用已记录的映射表）"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:91
 msgid ""
 "Load the pre-recorded expert map for consistent performance. This avoids "
 "recalculating distributions at runtime."
 msgstr "加载预先记录的专家映射表以获得一致的性能。这避免了在运行时重新计算分布。"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:102
 msgid "Critical Considerations"
 msgstr "关键注意事项"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:104
 msgid "Parameter Tuning:"
 msgstr "参数调优："
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:105
 msgid ""
 "expert_heat_collection_interval: Higher values (e.g., 400+) for stable "
 "workloads; lower values (e.g., 100-200) for fluctuating traffic."
@@ -329,98 +266,79 @@ msgstr ""
 "expert_heat_collection_interval：对于稳定的工作负载，建议使用较高值（如 "
 "400+）；对于波动的流量，建议使用较低值（如 100-200）。"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:106
 msgid ""
 "algorithm_execution_interval: Should be ≥ 30 to avoid premature balancing"
 " during startup."
 msgstr "algorithm_execution_interval：应 ≥ 30，以避免在启动阶段过早进行平衡。"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:107
 msgid ""
 "num_redundant_experts: Must match tensor-parallel size (e.g., 16 for 16 "
 "NPUs) to ensure sufficient redundancy."
 msgstr "num_redundant_experts：必须匹配张量并行 (TP) 大小（例如 16 张 NPU 则设为 16），以确保足够的冗余度。"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:109
 msgid "Hardware Requirements:"
 msgstr "硬件要求："
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:110
 msgid ""
 "Ensure that all NPUs have identical memory capacity and compute "
 "capabilities."
 msgstr "确保所有 NPU 具有相同的显存容量和计算能力。"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:111
 msgid ""
 "Network bandwidth must support expert redistribution traffic (≥ 10 Gbps "
 "recommended)."
 msgstr "网络带宽必须支持专家重分布的流量（建议 ≥ 10 Gbps）。"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:113
 msgid "Model Compatibility:"
 msgstr "模型兼容性："
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:114
 msgid ""
 "Only MoE models with explicit expert parallelism support (e.g., Qwen3 MoE"
 " models) are compatible."
 msgstr "仅支持具有显式专家并行支持的 MoE 模型（如 Qwen3 MoE 模型）。"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:115
 msgid ""
 "Verify model architecture supports dynamic expert routing through "
 "`--enable-expert-parallel`."
 msgstr "通过 `--enable-expert-parallel` 验证模型架构是否支持动态专家路由。"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:117
 msgid "Monitoring & Validation:"
 msgstr "监控与验证："
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:118
 msgid ""
 "Track metrics: expert_load_balance_ratio, ttft_p99, tpot_avg, and "
 "npu_utilization."
 msgstr "跟踪以下指标：expert_load_balance_ratio、ttft_p99、tpot_avg 以及 npu_utilization。"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:119
 msgid "Use vLLM monitor to detect imbalances during runtime."
 msgstr "使用 vLLM monitor 检测运行时的不平衡情况。"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:120
 msgid ""
 "Always verify expert map JSON structure before loading (validate with jq "
 "or similar tools)."
 msgstr "加载前务必验证专家映射表的 JSON 结构（使用 jq 或类似工具验证）。"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:122
 msgid "Startup Behavior:"
 msgstr "启动行为："
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:123
 msgid ""
 "Initial requests may experience higher latency during the first balancing"
 " cycle (typically 1-2 minutes)."
 msgstr "在第一个平衡周期内（通常为 1-2 分钟），初始请求可能会经历较高的延迟。"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:124
 msgid "Avoid sudden traffic spikes during the warm-up phase."
 msgstr "避免在预热阶段出现突发流量高峰。"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:126
 msgid "Common Pitfalls:"
 msgstr "常见陷阱："
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:127
 msgid ""
 "Incorrect tensor-parallel-size vs. actual NPU count → causes resource "
 "underutilization."
 msgstr "张量并行大小 (TP size) 与实际 NPU 数量不符 → 导致资源利用不足。"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:128
 msgid "Using expert_map_path without generating the map first → runtime errors."
 msgstr "在未生成映射表的情况下使用 expert_map_path → 导致运行时错误。"
 
-#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:129
 msgid "Setting num_redundant_experts > available NPUs → system failure."
 msgstr "设置 num_redundant_experts 大于可用 NPU 数量 → 导致系统故障。"

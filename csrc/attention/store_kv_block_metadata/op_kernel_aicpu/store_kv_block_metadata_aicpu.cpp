@@ -18,7 +18,6 @@
 
 #include "log.h"
 #include "status.h"
-#include <algorithm>
 #include <cstring>
 #include "store_kv_block_metadata_aicpu.h"
 
@@ -76,16 +75,13 @@ bool StoreKvBlockMetadataCpuKernel::GenMetaData()
     // total elements in slot_mapping (1-D tensor)
     int64_t slotMappingLen = slotMapping_->GetTensorShape()->GetDimSize(0);
 
-    // Use the smallest output capacity so no output tensor can be overrun.
-    int64_t groupLenCapacity = groupLen_->GetTensorShape()->GetDimSize(0);
-    int64_t groupKeyIdxCapacity = groupKeyIdx_->GetTensorShape()->GetDimSize(0);
-    int64_t groupKeyCacheIdxCapacity = groupKeyCacheIdx_->GetTensorShape()->GetDimSize(0);
-    int64_t outCapacity = std::min(groupLenCapacity, std::min(groupKeyIdxCapacity, groupKeyCacheIdxCapacity));
+    // total capacity of output tensors (1-D, same shape as input)
+    int64_t outCapacity = groupLen_->GetTensorShape()->GetDimSize(0);
 
     int32_t idxSlotmap = 0;
     int32_t idxGroups = 0;
 
-    while (idxSlotmap < slotMappingLen && idxGroups < outCapacity) {
+    while (idxSlotmap < slotMappingLen) {
         // Skip dirty values (negative slots)
         int32_t cacheSlot = slotMappingData[idxSlotmap];
         if (cacheSlot < 0) {
@@ -114,26 +110,16 @@ bool StoreKvBlockMetadataCpuKernel::GenMetaData()
         idxGroups++;
     }
 
-    if (idxSlotmap < slotMappingLen) {
-        KERNEL_LOG_ERROR("output capacity %lld is insufficient for slot_mapping length %lld",
-                         static_cast<long long>(outCapacity), static_cast<long long>(slotMappingLen));
-        return false;
-    }
-
     // 0 fill the remaining output entries. store_kv_block kernel reads groupLen as uint32_t,
     // so negative fillers would be interpreted as huge positive values and bypass the
     // `groupLen <= 0` guard, causing out-of-range MTE writes. Use 0 so that guard works.
-    if (idxGroups < groupLenCapacity) {
+    if (idxGroups < outCapacity) {
         std::memset(groupLenData + idxGroups, 0,
-                    static_cast<size_t>(groupLenCapacity - idxGroups) * sizeof(int32_t));
-    }
-    if (idxGroups < groupKeyIdxCapacity) {
+                    static_cast<size_t>(outCapacity - idxGroups) * sizeof(int32_t));
         std::memset(groupKeyIdxData + idxGroups, 0,
-                    static_cast<size_t>(groupKeyIdxCapacity - idxGroups) * sizeof(int32_t));
-    }
-    if (idxGroups < groupKeyCacheIdxCapacity) {
+                    static_cast<size_t>(outCapacity - idxGroups) * sizeof(int32_t));
         std::memset(groupKeyCacheIdxData + idxGroups, 0,
-                    static_cast<size_t>(groupKeyCacheIdxCapacity - idxGroups) * sizeof(int32_t));
+                    static_cast<size_t>(outCapacity - idxGroups) * sizeof(int32_t));
     }
 
     return true;

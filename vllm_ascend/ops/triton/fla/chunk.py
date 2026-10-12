@@ -14,9 +14,7 @@ import torch
 from einops import rearrange
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
-from vllm.model_executor.layers.fla.ops.utils import SUPPRESS_LEVEL
-
-from vllm_ascend.ops.gdn_attn_builder import _compact_empty_segments
+from vllm.third_party.flash_linear_attention.ops.utils import SUPPRESS_LEVEL
 
 from .chunk_delta_h import chunk_gated_delta_rule_fwd_h  # noqa: F401
 from .chunk_delta_hupdate import chunk_gated_delta_rule_fwd_hupdate
@@ -79,12 +77,13 @@ def chunk_gated_delta_rule_fwd(
         chunk_indices_bt=chunk_indices_chunk64,
         output_dtype=k.dtype,
     )
+    g_transpose = g.transpose(1, 2).contiguous()
     w, u = recompute_w_u_fwd(
         k=k,
         v=v,
         beta=beta,
         A=A,
-        g_cumsum=g,
+        g_cumsum=g_transpose,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices_chunk64,
     )
@@ -92,7 +91,6 @@ def chunk_gated_delta_rule_fwd(
     k_ascendc = k.to(torch.bfloat16).transpose(1, 2).contiguous()
     w_ascendc = w.to(torch.bfloat16).transpose(1, 2).contiguous()
     u_ascendc = u.to(torch.bfloat16).transpose(1, 2).contiguous()
-    g_ascendc = g.transpose(1, 2).contiguous()
     q_ascendc = q.to(torch.bfloat16).transpose(1, 2).contiguous()
 
     cu_seqlens = None if cu_seqlens is None else cu_seqlens.to(torch.int64)
@@ -112,16 +110,13 @@ def chunk_gated_delta_rule_fwd(
             initial_state[keep_meta] if initial_state is not None and keep_meta is not None else initial_state
         )
     else:
-        cu_seqlens_kern, initial_state_kern, keep_meta = _compact_empty_segments(
-            cu_seqlens_host,
-            initial_state,
-            device=initial_state.device if initial_state is not None else None,
-        )
-    h, v_new, final_state = torch.ops._C_ascend.chunk_gated_delta_rule_fwd_h(
+        cu_seqlens_kern, initial_state_kern = cu_seqlens_host, initial_state
+        keep_meta = None
+    h, v_new, final_state = torch.ops._C_ascend.chunk_gated_delta_rule_fwd_h_vllm(
         k_ascendc,
         w_ascendc,
         u_ascendc,
-        g=g_ascendc,
+        g=g_transpose,
         gk=None,
         initial_state=initial_state_kern,
         output_final_state=True,
@@ -150,7 +145,7 @@ def chunk_gated_delta_rule_fwd(
             k=k,
             w=w,
             u=u,
-            g=g,
+            g=g_transpose,
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices_chunk64,
             chunk_offsets=chunk_offsets_chunk64,
@@ -167,7 +162,7 @@ def chunk_gated_delta_rule_fwd(
         updated_state = final_state.new_empty(get_pcp_group().world_size, *final_state.shape)
         updated_state[0, ...] = all_final_state[0]
         for i in range(1, get_pcp_group().world_size):
-            # correct_i = all_final_state[i] + Phi_i * (correct_{i-1} - s0)
+            # correct_i = all_final_state[i] + Φ_i · (correct_{i-1} - s0) = Φ_i · correct_{i-1} + p_i
             updated_final_state = all_final_state[i] + torch.matmul(
                 all_final_h_update[i, ...], updated_state[i - 1, ...] - initial_state
             )
@@ -189,7 +184,7 @@ def chunk_gated_delta_rule_fwd(
                 k=k,
                 w=w,
                 u=u,
-                g=g,
+                g=g_transpose,
                 initial_state=rerun_initial_state,
                 output_final_state=True,
                 cu_seqlens=cu_seqlens,
@@ -199,13 +194,13 @@ def chunk_gated_delta_rule_fwd(
             h = h.transpose(1, 2).contiguous()
             v_new = v_new.transpose(1, 2).contiguous()
 
-    o_ascendc = torch.ops._C_ascend.chunk_fwd_o(
+    o_ascendc = torch.ops._C_ascend.chunk_fwd_o_vllm(
         q_ascendc,
         k_ascendc,
         v_new,
         h,
         scale,
-        g=g_ascendc,
+        g=g_transpose,
         g_gamma=None,
         cu_seqlens=cu_seqlens_host,
         chunk_indices=chunk_indices_chunk64_host,

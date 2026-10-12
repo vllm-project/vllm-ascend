@@ -14,18 +14,14 @@ from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec, UniformTypeKVCacheSpecs
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.spec_decode.llm_base_proposer import compute_probs_and_sample_next_token
 from vllm.v1.spec_decode.utils import PADDING_SLOT_ID
 from vllm.v1.worker.utils import AttentionGroup
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
-from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 from vllm_ascend.utils import lmhead_tp_enable
-from vllm_ascend.worker.utils import copy_snapshot_to_gpu
 
 
 class AscendStep3p5MTPProposer(AscendEagleProposer):
@@ -149,10 +145,7 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
         extra_attn_metadata_args: dict[str, Any] = {}
         if self.use_compress:
             extra_attn_metadata_args = dict(
-                prefill_ratio_to_sas_metadata=dict(),
-                decode_ratio_to_sas_metadata=dict(),
                 common_ratio_to_sas_metadata=dict(),
-                block_size=self.draft_attn_groups[0].kv_cache_spec.block_size,
             )
 
         for attn_group in self.draft_attn_groups:
@@ -186,27 +179,13 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
         spec_step_idx: int,
         num_indices: int,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """GPU Step3.5 sampling semantics with Ascend TP/reduce-sample paths."""
+        """GPU Step3.5 sampling semantics with Ascend TP paths."""
         logits: torch.Tensor | None = None
-        if get_ascend_config().enable_reduce_sample and self.method == "mtp":
-            if not hasattr(self.model.model, "compute_logits"):
-                draft_token_ids = self.compute_draft_token_ids(hidden_states)
-                if lmhead_tp_enable() and num_indices < draft_token_ids.shape[0]:
-                    draft_token_ids = draft_token_ids[:num_indices]
-                return draft_token_ids, None
-            logits = self.model.compute_logits(hidden_states, spec_step_idx=spec_step_idx)
-            if lmhead_tp_enable():
-                logits = get_lmhead_tp_group().all_to_all(logits)
-            else:
-                logits = self.model.model.logits_processor._gather_logits(logits)
-        else:
-            logits = self.model.compute_logits(hidden_states, spec_step_idx=spec_step_idx)
+        logits = self.model.compute_logits(hidden_states, spec_step_idx=spec_step_idx)
 
         if lmhead_tp_enable() and num_indices < logits.shape[0]:
             logits = logits[:num_indices]
-        if not self._enable_probabilistic_draft_probs or sampling_metadata.all_greedy:
-            return logits.argmax(dim=-1), None
-        return compute_probs_and_sample_next_token(logits, sampling_metadata)
+        return self._sample_draft_from_logits(logits, sampling_metadata)
 
     @torch.inference_mode()
     def dummy_run(
@@ -231,15 +210,10 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
         if not self.use_cuda_graph:
             aclgraph_runtime_mode = CUDAGraphMode.NONE
 
-        if (
-            self.pcp_size * self.dcp_size > 1
-            and self.use_cuda_graph
-            and not is_profile
-            and self.block_table_tensor_clone is None
-        ):
+        if self.dcp_size > 1 and self.use_cuda_graph and not is_profile and self.block_table_tensor_clone is None:
             self.block_table_tensor_clone = torch.zeros(
                 (
-                    self.runner.max_num_tokens + 2 * self.pcp_size * self.runner.max_num_reqs,
+                    self.runner.max_num_tokens + 2 * self.runner.max_num_reqs,
                     self.runner.input_batch.block_table[0].get_device_tensor().shape[1],
                 ),
                 dtype=torch.int32,
@@ -254,8 +228,9 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
         if aclgraph_runtime_mode == CUDAGraphMode.FULL and len(self.runner.attn_groups) > 0:
             num_computed_tokens_cpu = self.runner.input_batch.num_computed_tokens_cpu_tensor[:num_reqs]
 
-            self.query_start_loc.cpu[: num_reqs + 1].copy_(self.runner.query_start_loc.cpu[: num_reqs + 1])
-            copy_snapshot_to_gpu(self.query_start_loc)
+            with self.runner.synchronize_input_prep():
+                self.query_start_loc.cpu[: num_reqs + 1].copy_(self.runner.query_start_loc.cpu[: num_reqs + 1])
+                self.query_start_loc.copy_to_gpu()
 
             common_attn_metadata = AscendCommonAttentionMetadata(
                 query_start_loc=self.query_start_loc.gpu[: num_reqs + 1],
@@ -276,8 +251,8 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
                 decode_token_per_req=self.runner.decode_token_per_req,
                 max_seq_len=0,
             )
-            if self.pcp_size * self.dcp_size > 1:
-                common_attn_metadata.prefill_context_parallel_metadata = self.runner.pcp_manager.long_seq_metadata
+            if self.dcp_size > 1:
+                common_attn_metadata.context_parallel_metadata = self.runner.dcp_manager.long_seq_metadata
 
             common_attn_metadata = self.shallow_copy_metadata(common_attn_metadata)
             common_attn_metadata.slot_mapping = self.slot_mapping_group[0]
@@ -296,6 +271,12 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
             inputs_embeds = None
 
         self.token_indices_to_sample.fill_(0)
+
+        if aclgraph_runtime_mode == CUDAGraphMode.FULL:
+            self._maybe_update_metadata(
+                self.draft_attn_groups[0].backend,
+                multi_steps_attn_metadata,
+            )
 
         with set_ascend_forward_context(
             multi_steps_attn_metadata[0] if multi_steps_attn_metadata else None,
@@ -328,6 +309,7 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
 
     def _propose(
         self,
+        num_speculative_tokens: int,
         target_token_ids: torch.Tensor,
         target_positions: torch.Tensor,
         target_hidden_states: torch.Tensor,
@@ -345,8 +327,19 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
         num_scheduled_tokens: int = 0,
         num_rejected_tokens_gpu: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        # Dynamic SD: honor the scheduled per-step K, unified with
+        # ``AscendSpecDecodeBaseProposer._propose`` (this override does not call
+        # ``super()``, so it sets the value itself).
+        self.num_speculative_tokens = num_speculative_tokens
         self._last_draft_probs = None
         batch_size = common_attn_metadata.batch_size()
+
+        # Dynamic SD may schedule K == 0: return an empty [batch_size, 0] draft
+        # (mirrors AscendSpecDecodeBaseProposer._propose) so the downstream
+        # copy/unpack paths -- which key off ``draft_token_ids.shape[1]`` -- stay
+        # consistent. This override does not inherit the base's early return.
+        if self.num_speculative_tokens == 0:
+            return torch.empty(batch_size, 0, device=target_token_ids.device, dtype=torch.int64)
 
         if token_indices_to_sample is None:
             token_indices_to_sample = common_attn_metadata.query_start_loc[1:] - 1
@@ -364,7 +357,7 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
             num_prefill_reqs=num_prefill_reqs,
             num_decode_reqs=num_decode_reqs,
         )
-        if self.pcp_size * self.dcp_size > 1:
+        if self.dcp_size > 1:
             assert long_seq_args is not None
         assert self.runner is not None
 
@@ -400,6 +393,7 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
 
         if aclgraph_runtime_mode == CUDAGraphMode.FULL:
             num_reqs_padded = self.runner._pad_query_start_loc_for_fia(
+                self.runner.query_start_loc,
                 num_input_tokens,
                 batch_descriptor.num_reqs if batch_descriptor.num_reqs is not None else common_attn_metadata.num_reqs,
                 common_attn_metadata.num_reqs,
@@ -409,9 +403,7 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
             common_attn_metadata.num_reqs = num_reqs_padded
             common_attn_metadata.query_start_loc = self.runner.query_start_loc.gpu[: num_reqs_padded + 1]
             common_attn_metadata.query_start_loc_cpu = self.runner.query_start_loc.cpu[: num_reqs_padded + 1]
-            slicing_length = (
-                num_reqs_padded * self.decode_threshold if self.pcp_size * self.dcp_size > 1 else num_reqs_padded
-            )
+            slicing_length = num_reqs_padded * self.decode_threshold if self.dcp_size > 1 else num_reqs_padded
             common_attn_metadata.block_table_tensor = self._adjust_tensor(
                 common_attn_metadata.block_table_tensor, slicing_length
             )
@@ -426,23 +418,9 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
                     common_attn_metadata.num_computed_tokens_cpu, num_reqs_padded
                 )
 
-            if self.pcp_size > 1:
-                pcp_allgather_restore_idx = (
-                    common_attn_metadata.prefill_context_parallel_metadata.pcp_allgather_restore_idx
-                )
-                index = torch.arange(
-                    pcp_allgather_restore_idx.shape[0],
-                    device=pcp_allgather_restore_idx.device,
-                )
-                mask = (index % (self.pcp_size * self.decode_threshold)) >= self.decode_threshold
-                pcp_allgather_restore_idx[mask] = 0
-                self.runner.pcp_manager.pcp_allgather_restore_idx.gpu[: pcp_allgather_restore_idx.shape[0]] = (
-                    pcp_allgather_restore_idx
-                )
-                self.runner.pcp_manager.pcp_allgather_restore_idx.gpu[pcp_allgather_restore_idx.shape[0] :] = 0
         else:
             num_reqs_padded = common_attn_metadata.num_reqs
-            if not self.vllm_config.model_config.use_mla and self.pcp_size * self.dcp_size == 1:
+            if not self.vllm_config.model_config.use_mla and self.dcp_size == 1:
                 common_attn_metadata.block_table_tensor = self._adjust_tensor(
                     common_attn_metadata.block_table_tensor, num_reqs_padded
                 )
@@ -480,6 +458,12 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
         self.token_indices_to_sample[:token_indices_to_sample_len].copy_(token_indices_to_sample)
         self.token_indices_to_sample[token_indices_to_sample_len:].fill_(0)
 
+        if aclgraph_runtime_mode == CUDAGraphMode.FULL:
+            self._maybe_update_metadata(
+                self.draft_attn_groups[0].backend,
+                multi_steps_attn_metadata,
+            )
+
         with set_ascend_forward_context(
             multi_steps_attn_metadata[0],
             self.vllm_config,
@@ -504,6 +488,7 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
                 "multi_steps_attn_metadata": multi_steps_attn_metadata,
                 "num_tokens": num_tokens,
                 "is_prefill": attn_metadata_i.num_prefills,
+                "sampling_metadata": sampling_metadata,
             }
             run_draft = partial(self._runnable, **model_inputs)
             if self.enable_enpu:
@@ -524,10 +509,11 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
         multi_steps_attn_metadata,
         num_tokens,
         is_prefill=None,
+        sampling_metadata: SamplingMetadata | None = None,
     ) -> torch.Tensor:
         """Base MTP execution flow with Step3.5 step-aware layer/head selection."""
         self._last_draft_probs = None
-        sampling_metadata = self.runner.input_batch.sampling_metadata
+        # sampling_metadata fallback is handled by the parent class.
         model_input_ids = self.input_ids[:num_input_tokens]
         model_positions = self._get_positions(num_input_tokens)
         model_kwargs = {
@@ -538,7 +524,6 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
         }
         if self.pass_hidden_states_to_model:
             model_hidden_states = self.hidden_states[:num_input_tokens]
-            model_hidden_states, model_positions = self.maybe_pad_and_reduce(model_hidden_states, model_positions)
             model_kwargs["hidden_states"] = model_hidden_states
             model_kwargs["positions"] = model_positions
 
@@ -548,10 +533,6 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
             hidden_states = last_hidden_states
         else:
             last_hidden_states, hidden_states = ret_hidden_states
-
-        last_hidden_states, model_positions, hidden_states = self.maybe_all_gather_and_unpad(
-            last_hidden_states, model_positions, hidden_states
-        )
 
         num_indices = token_indices_to_sample.shape[0]
         if lmhead_tp_enable():
@@ -575,10 +556,6 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
                     -1, self.num_speculative_tokens, draft_probs.shape[-1]
                 ).contiguous()
             return draft_token_ids.view(-1, self.num_speculative_tokens)
-
-        if self.pcp_size * self.dcp_size > 1 and is_prefill:
-            draft_token_ids_list = [draft_token_ids for _ in range(self.num_speculative_tokens)]
-            return torch.stack(draft_token_ids_list, dim=1)
 
         return self._run_window_draft_steps(
             first_draft_token_ids=draft_token_ids,
@@ -667,10 +644,6 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
             model_input_ids = self.input_ids[:input_batch_size]
             model_positions = self._get_positions(input_batch_size)
             model_hidden_states = self.hidden_states[:input_batch_size]
-            model_hidden_states, model_positions = self.maybe_pad_and_reduce(
-                model_hidden_states,
-                model_positions,
-            )
             if forward_context is not None and multi_steps_attn_metadata:
                 if spec_step_idx >= len(multi_steps_attn_metadata):
                     raise AssertionError("Step3.5 MTP metadata must contain one entry per draft step")
@@ -691,12 +664,6 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
                 hidden_states = ret_hidden_states
             else:
                 last_hidden_states, hidden_states = ret_hidden_states
-
-            last_hidden_states, model_positions, hidden_states = self.maybe_all_gather_and_unpad(
-                last_hidden_states,
-                model_positions,
-                hidden_states,
-            )
 
             num_indices = token_indices_to_sample.shape[0]
             sample_hidden_states = last_hidden_states[token_indices_to_sample]

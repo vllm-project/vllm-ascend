@@ -1,3 +1,5 @@
+import enum
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any
@@ -5,21 +7,84 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config.speculative import SpeculativeConfig
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group, is_v1_kv_transfer_group
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils.torch_utils import get_dtype_size
+from vllm.v1.attention.backend import MLAAttentionImpl
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec, FullAttentionSpec
 
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
 from vllm_ascend.utils import (
-    AscendDeviceType,
+    _is_glm_model,
     get_ascend_config,
-    get_ascend_device_type,
     is_pd_decode_recompute_scheduler_enabled,
 )
-from vllm_ascend.worker.kvcomp_utils import KVCompMetaData
 
 SFA_QSFA_TILE_SIZE = 128
+MLAPO_MAX_SUPPORTED_TOKENS = 1024
+
+
+class PreprocessType(enum.Enum):
+    NATIVE = "native"
+    PROLOG_V3 = "prolog_v3"
+    MLAPO = "mlapo"
+
+
+def mark_fused_preprocess_weights(impl: MLAAttentionImpl) -> None:
+    """Refresh NZ management after changing preprocessing policy, before loading weights."""
+    resolve_type = getattr(impl, "_fused_preprocess_type", None)
+    if resolve_type is None:
+        return
+    managed = resolve_type() is not None
+    for layer in (impl.fused_qkv_a_proj, impl.q_proj):
+        if layer is not None:
+            layer._fused_preprocess_managed = managed
+
+
+def get_or_register_attention_buffer(
+    vllm_config: VllmConfig,
+    layer_names: list[str],
+    name: str,
+    factory: Callable[[], torch.Tensor],
+) -> torch.Tensor:
+    """Return a shared non-persistent buffer owned by attention modules."""
+    # TODO: Revisit this after torch_npu supports traversing mem-pool
+    # allocations during sleep/wake. The buffer could then be allocated from
+    # the appropriate mem-pool for CaMem to manage its device-memory lifetime.
+    static_forward_context = vllm_config.compilation_config.static_forward_context
+    modules = []
+    for layer_name in layer_names:
+        module = static_forward_context.get(layer_name)
+        if not isinstance(module, torch.nn.Module):
+            raise ValueError(f"Attention layer {layer_name!r} is not a registered torch.nn.Module")
+        modules.append(module)
+
+    if not modules:
+        raise ValueError("At least one attention layer is required to own the buffer")
+
+    buffer = next((getattr(module, name) for module in modules if hasattr(module, name)), None)
+    if buffer is None:
+        buffer = factory()
+
+    for module in modules:
+        existing = getattr(module, name, None)
+        if existing is None:
+            module.register_buffer(name, buffer, persistent=False)
+        elif existing is not buffer:
+            raise ValueError(f"Attention buffer {name!r} is already registered with a different tensor")
+
+    return buffer
+
+
+def build_valid_topk_mask(
+    topk_indices: torch.Tensor,
+    seq_len_thresholds: torch.Tensor,
+) -> torch.Tensor:
+    """Mask padding and unwritten tail-block positions in SFA top-k rows."""
+    return (topk_indices >= 0) & (topk_indices < seq_len_thresholds)
 
 
 def get_sfa_qsfa_packed_head_dim(
@@ -34,6 +99,31 @@ def get_sfa_qsfa_packed_head_dim(
         )
     scale_metadata_bytes = (kv_lora_rank // tile_size) * get_dtype_size(torch.float32)
     return kv_lora_rank + qk_rope_head_dim * get_dtype_size(torch.bfloat16) + scale_metadata_bytes
+
+
+def get_tq_packed_bytes(kv_lora_rank: int) -> int:
+    """Bytes of the int4-packed nope half of one TurboQuant 4-bit latent slot."""
+    return kv_lora_rank // 2
+
+
+def get_tq_fused_slot_bytes(kv_lora_rank: int, qk_rope_head_dim: int) -> int:
+    """Bytes of one fused TQ4 slot: int4 nope + bf16 rope + fp16 scale."""
+    return (
+        get_tq_packed_bytes(kv_lora_rank)
+        + qk_rope_head_dim * get_dtype_size(torch.bfloat16)
+        + get_dtype_size(torch.float16)
+    )
+
+
+@dataclass
+class PagedAttentionGraphParam:
+    """Mark PA params when PA and FIA share one graph replay list."""
+
+    params: tuple
+    layer_name: str | None
+
+    def __iter__(self):
+        return iter(self.params)
 
 
 def cache_graph_workspace(
@@ -101,10 +191,11 @@ def ascend_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
     return chunked_prefill_workspace_size
 
 
-def using_paged_attention(runtime_shape: int, vllm_config: VllmConfig, head_size: int | None = None) -> bool:
+def using_paged_attention(runtime_shape: int | None, vllm_config: VllmConfig, head_size: int | None = None) -> bool:
+    """Check any configured PA shape for KV allocation when runtime_shape is None."""
     if vllm_config.speculative_config is not None:
         return False
-    if get_ascend_device_type() == AscendDeviceType.A5:
+    if not get_current_hardware_profile().supports(HardwareCapability.PAGED_ATTENTION):
         return False
     # TODO: Remove this fallback when A2/A3 FIA TND supports Gemma4's
     # 512-dim global attention heads. Decode can use PA directly; prefill is
@@ -117,99 +208,46 @@ def using_paged_attention(runtime_shape: int, vllm_config: VllmConfig, head_size
     if cudagraph_mode != CUDAGraphMode.FULL_DECODE_ONLY:
         return False
 
-    return runtime_shape in get_ascend_config().pa_shape_list
+    pa_shape_list = get_ascend_config().pa_shape_list
+    return bool(pa_shape_list) if runtime_shape is None else runtime_shape in pa_shape_list
+
+
+def requires_contiguous_pa_kv_cache(layer, vllm_config: VllmConfig, spec: FullAttentionSpec) -> bool:
+    """Require contiguous K/V only for unpadded ordinary Attention layers eligible for PA."""
+    # Import lazily to avoid a circular dependency with attention_v1.
+    from vllm_ascend.attention.attention_v1 import AscendAttentionBackendImpl
+
+    impl = getattr(layer, "impl", None)
+    return (
+        type(impl) is AscendAttentionBackendImpl
+        and impl.sliding_window is None
+        and getattr(vllm_config.model_config, "runner_type", None) != "pooling"
+        and spec.page_size_bytes == spec.real_page_size_bytes
+        and using_paged_attention(None, vllm_config, spec.head_size)
+    )
 
 
 @lru_cache(maxsize=1)
-def enable_cp():
-    prefill_config = get_current_vllm_config().parallel_config
-    return prefill_config.prefill_context_parallel_size > 1 or prefill_config.decode_context_parallel_size > 1
+def enable_dcp():
+    parallel_config = get_current_vllm_config().parallel_config
+    return parallel_config.decode_context_parallel_size > 1
+
+
+def enable_pcp():
+    parallel_config = get_current_vllm_config().parallel_config
+    return parallel_config.prefill_context_parallel_size > 1
 
 
 @dataclass
-class AscendPrefillContextParallelMetadata:
-    """
-    Metadata for Prefill Context Parallelism (PCP) in CommonAttentionMetadata.
+class AscendDCPMetadata:
+    """Per-batch metadata required by decode context parallelism."""
 
-    Contains index tensors and sequence lengths for PCP operations.
-    """
-
-    pcp_allgather_restore_idx: torch.Tensor = None
-
-    num_actual_tokens_pcp_padded: int = 0
-
-    num_computed_tokens_of_pcp_dcp: list[list[list[int]]] | None = None
-
-    q_head_idx_tensor: torch.Tensor = None
-
-    q_tail_idx_tensor: torch.Tensor = None
-
-    kv_with_q_head_nomask_idx_tensor: torch.Tensor = None
-
-    kv_with_q_head_mask_idx_tensor: torch.Tensor = None
-
-    kv_with_q_tail_nomask_idx_tensor: torch.Tensor = None
-
-    kv_with_q_tail_mask_idx_tensor: torch.Tensor = None
-
-    kv_tail_proj_idx_tensor: torch.Tensor = None
-
-    kv_with_q_head_attn_idx_in_tail_tensor: torch.Tensor = None
-
-    kv_with_q_tail_attn_idx_in_tail_tensor: torch.Tensor = None
-
-    attn_mask_seqlens: torch.Tensor = None
-
-    head_attn_nomask_seqlens: torch.Tensor = None
-
-    tail_attn_nomask_seqlens: torch.Tensor = None
-
-    head_actual_seq_lengths_kv: list[int] | None = None
-
-    tail_actual_seq_lengths_kv: list[int] | None = None
-
-    q_full_idx: torch.Tensor = None
-
-    # original query_lens before pcp split
-    query_lens_pcp_full_cpu: torch.Tensor = None
-
-    # original max_query_len before pcp split
-    max_query_len_pcp_full: int = 0
-
-    # the following attributes are specifically used in hybrid-attn models.
-    pcp_use_hybrid_attn: bool = False
-
-    pcp_unpad_mask: torch.Tensor = None
-
-    # to get the right order of query in prefill per rank
-    pcp_fa_query_idx: torch.Tensor = None
-
-    # restore the full sequence across all pcp ranks
-    # when entering from linear-attention to attention
-    pcp_enter_fa_restore_idx: torch.Tensor = None
-
-    # restore the original FA padded layout without boolean-mask scatter
-    pcp_fa_padding_restore_idx: torch.Tensor = None
-
-    # scatter the full sequence across all pcp ranks
-    # when exiting from attention to linear-attention
-    pcp_exit_fa_scatter_idx: torch.Tensor = None
-
-    # the number of tokens padded in linear-attn per rank
-    pcp_padded_tokens_fla: int = 0
-
-    # the max number of unpadded tokens in all ranks
-    max_num_tokens_across_pcp: int = 0
-
-    # the number of scheduled tokens on the current rank before padding
-    total_num_scheduled_tokens: int = 0
-
-    # Because the sequence shard in linear attention layers does not include padding,
-    # the full attention layers cannot obtain the correct query_lens with pcp pad for
-    # chunked prefill calculation. Therefore, this value needs to be passed to the backend.
-    # TODO:To be refactored.
-    attn_chunk_seqlens: torch.Tensor = None
+    num_computed_tokens_of_dcp: list[list[int]] | torch.Tensor | None = None
+    query_lens_cpu: torch.Tensor = None
+    max_query_len: int = 0
     dcp_mtp_attn_mask: torch.Tensor = None
+    draft_cp_seq_len: torch.Tensor | None = None
+    draft_base_seq_lens: torch.Tensor | None = None
 
 
 @dataclass
@@ -224,6 +262,8 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     # CPU tensor of sequence lengths for host-side operations.
     # E.g., tensor([128, 256, 64]) for 3 requests with different seq lengths.
     seq_lens_cpu: torch.Tensor = None
+
+    # Host mirror of this cache group's block table, including padded rows.
 
     # CPU tensor of already computed tokens count per request.
     # E.g., tensor([100, 200, 50]) means req0 has 100 tokens already computed.
@@ -251,9 +291,30 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     # Total number of tokens including padding, used for padding operations.
     num_input_tokens: int = 0
 
-    # Metadata for Prefill Context Parallelism (PCP) operations.
-    prefill_context_parallel_metadata: AscendPrefillContextParallelMetadata | None = None
-    kvcomp_metadata: KVCompMetaData | None = None
+    # Metadata for Decode Context Parallelism (DCP) operations.
+    context_parallel_metadata: AscendDCPMetadata | None = None
+    group_len: torch.Tensor = None
+    group_key_idx: torch.Tensor = None
+    group_key_cache_idx: torch.Tensor = None
+    # Per-request / per-token request identity used by the Sparse KV offload
+    # resident LRU (adler32-hashed request ids and token->request mapping).
+    req_ids_tensor: torch.Tensor | None = None
+    token_to_req: torch.Tensor | None = None
+    # CPU views of runner-owned CpuGpuBuffers; never exact sequence lengths.
+    req_topk_buffer_slots: torch.Tensor | None = None
+    req_topk_buffer_active: torch.Tensor | None = None
+    copy_sfa_draft_index: int | None = None
+    copy_sfa_restore_tails: bool = False
+    offload_dummy: bool = False
+
+    # vLLM main (#55353) removed the deprecated
+    # CommonAttentionMetadata._seq_lens_cpu / _num_computed_tokens_cpu
+    # fields and (#56157) renamed dcp_local_seq_lens_cpu to
+    # dcp_local_seq_lens_cpu_upper_bound. Ascend keeps its own copies so
+    # NPU attention backends get CPU seq_lens without a GPU->CPU sync.
+    _seq_lens_cpu: torch.Tensor | None = None
+    _num_computed_tokens_cpu: torch.Tensor | None = None
+    dcp_local_seq_lens_cpu: torch.Tensor | None = None
 
     # TODO: Remove it when vLLM no longer uses this function.
     def unpadded(self, num_actual_tokens: int, num_actual_reqs: int) -> "AscendCommonAttentionMetadata":
@@ -284,7 +345,7 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             attn_state=self.attn_state,
             graph_pad_size=-1,  # It should be -1 when not run in fullgraph mode.
             num_input_tokens=self.num_input_tokens,
-            prefill_context_parallel_metadata=self.prefill_context_parallel_metadata,
+            context_parallel_metadata=self.context_parallel_metadata,
             seq_lens_cpu_upper_bound=self.seq_lens_cpu_upper_bound[:num_actual_reqs]
             if self.seq_lens_cpu_upper_bound is not None
             else None,
@@ -306,6 +367,15 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             encoder_seq_lens_cpu=_slice_reqs(self.encoder_seq_lens_cpu),
             logits_indices_padded=self.logits_indices_padded,
             num_logits_indices=self.num_logits_indices,
+            group_len=self.group_len,
+            group_key_idx=self.group_key_idx,
+            group_key_cache_idx=self.group_key_cache_idx,
+            req_topk_buffer_slots=_slice_reqs(self.req_topk_buffer_slots),
+            req_topk_buffer_active=_slice_reqs(self.req_topk_buffer_active),
+            copy_sfa_draft_index=self.copy_sfa_draft_index,
+            offload_dummy=self.offload_dummy,
+            req_ids_tensor=_slice_reqs(self.req_ids_tensor),
+            token_to_req=(self.token_to_req[:num_actual_tokens] if self.token_to_req is not None else None),
         )
 
 
@@ -324,14 +394,14 @@ def filter_chunked_req_indices(
     """
     assert mask_for_non_zero_chunk is not None and len(seq_len) == len(mask_for_non_zero_chunk)
     offsets = torch.cumsum(torch.cat([torch.tensor([0]), seq_len[:-1]]), dim=0)
-    filtered_indices = torch.cat(
-        [
-            torch.arange(offsets[i], offsets[i] + seq_len[i])
-            for i in range(len(mask_for_non_zero_chunk))
-            if mask_for_non_zero_chunk[i]
-        ]
-    )
-    return filtered_indices
+    filtered_ranges = [
+        torch.arange(offsets[i], offsets[i] + seq_len[i])
+        for i in range(len(mask_for_non_zero_chunk))
+        if mask_for_non_zero_chunk[i]
+    ]
+    if not filtered_ranges:
+        return torch.empty(0, dtype=torch.long, device=seq_len.device)
+    return torch.cat(filtered_ranges)
 
 
 def split_decodes_and_prefills(
@@ -343,8 +413,8 @@ def split_decodes_and_prefills(
     """
     Assuming a reordered batch, finds the boundary between prefill and decode
     requests.
-    While pcp > 1, query_lens is split across pcp ranks, so we pass in the
-    original query_lens and max_query_len to distinguish prefills and decodes.
+    DCP metadata may carry a stable CPU copy of query lengths for asynchronous
+    speculative-decoding updates.
 
     The batch is expected to be ordered as:
     decode -> short_extend -> long_extend -> prefill
@@ -367,10 +437,10 @@ def split_decodes_and_prefills(
         num_decode_tokens: The number of tokens in the decode requests.
         num_prefill_tokens: The number of tokens in the prefill requests.
     """
-    long_seq_metadata = common_attn_metadata.prefill_context_parallel_metadata
-    query_lens_pcp_full = long_seq_metadata.query_lens_pcp_full_cpu if long_seq_metadata else None
-    max_query_len_pcp_full = long_seq_metadata.max_query_len_pcp_full if long_seq_metadata else 0
-    max_query_len = common_attn_metadata.max_query_len if max_query_len_pcp_full == 0 else max_query_len_pcp_full
+    dcp_metadata = common_attn_metadata.context_parallel_metadata
+    query_lens_dcp = dcp_metadata.query_lens_cpu if dcp_metadata else None
+    max_query_len_dcp = dcp_metadata.max_query_len if dcp_metadata else 0
+    max_query_len = common_attn_metadata.max_query_len if max_query_len_dcp == 0 else max_query_len_dcp
     num_reqs = common_attn_metadata.num_reqs
     if num_reqs == 0:
         return 0, 0, 0, 0
@@ -391,7 +461,7 @@ def split_decodes_and_prefills(
         return num_reqs, 0, num_tokens, 0
 
     query_lens_sharded = query_start_loc[1:] - query_start_loc[:-1]
-    query_lens = query_lens_sharded if query_lens_pcp_full is None else query_lens_pcp_full
+    query_lens = query_lens_sharded if query_lens_dcp is None else query_lens_dcp
     if query_lens[0].item() > decode_threshold:
         return 0, num_reqs, 0, num_tokens
 
@@ -433,7 +503,7 @@ def wait_for_kv_layer_from_connector(layer_name: str):
 
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
-    if attn_metadata is None:
+    if attn_metadata is None or not connector.has_connector_metadata():
         return
     # TODO: assert ascendMetadata
     connector.wait_for_layer_load(layer_name)
@@ -450,7 +520,7 @@ def maybe_save_kv_layer_to_connector(
 
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
-    if attn_metadata is None:
+    if attn_metadata is None or not connector.has_connector_metadata():
         return
     # TODO: assert ascendMetadata
     connector.save_kv_layer(layer_name, kv_cache_layer, attn_metadata)
@@ -463,9 +533,9 @@ def notify_kv_cache_written(layer_name: str = ""):
     The attention layer calls this unconditionally; each connector decides whether
     it needs to record a synchronization primitive (e.g. a compute-stream event
     later waited on by the resharding stream to overlap the outgoing KV copy).
-    Connectors that don't need it -- such as the AscendStore pool connector, which
-    records its own sync event at save time -- simply do not implement
-    ``on_kv_cache_written`` and this becomes a no-op.
+    The AscendStore pool and SFA-PD connectors implement
+    ``on_kv_cache_written`` to dispatch a layerwise save or PD-pull
+    notification at scatter time. Other connectors can omit the hook.
     """
     if not has_kv_transfer_group() or not is_v1_kv_transfer_group():
         return
@@ -510,7 +580,7 @@ def transdata(nd_mat, block_size: tuple = (16, 16)):
 
 def enabling_mlapo(vllm_config: VllmConfig) -> bool:
     config_val = get_ascend_config().enable_mlapo
-    if get_ascend_device_type() == AscendDeviceType.A5:
+    if get_current_hardware_profile().supports(HardwareCapability.UNRESTRICTED_MLAPO):
         return bool(config_val)
 
     is_decode_instance = (
@@ -519,3 +589,40 @@ def enabling_mlapo(vllm_config: VllmConfig) -> bool:
         and not vllm_config.kv_transfer_config.is_kv_producer
     )
     return bool(config_val and is_decode_instance)
+
+
+def _select_seq_lens(
+    common_attn_metadata: AscendCommonAttentionMetadata,
+    kv_cache_spec: AttentionSpec | None,
+    speculative_config: SpeculativeConfig | None,
+    vllm_config: VllmConfig,
+) -> torch.Tensor:
+    """Choose the seq_lens tensor carried by the built attention metadata.
+
+    Defaults to the CPU mirror: ``_seq_lens_cpu`` is always available and
+    updated during draft iterations, while ``seq_lens_cpu`` is None in async
+    spec decode mode. Cross-attention and generic parallel drafting override
+    this with the NPU ``seq_lens``; the one exception is DSpark on the GLM5.2
+    family, whose CPU mirror carries the same post-rejection-sampling lengths
+    across draft iterations, so building from it skips the NPU->CPU sync at
+    ``seq_lens.tolist()`` in the metadata build.
+    """
+    # Prefer _seq_lens_cpu (always available, updated during draft
+    # iterations) over seq_lens_cpu (None in async spec decode mode).
+    model_config = vllm_config.model_config
+    num_reqs = common_attn_metadata.num_reqs
+    if common_attn_metadata._seq_lens_cpu is not None:
+        seq_lens = common_attn_metadata._seq_lens_cpu[:num_reqs]
+    elif common_attn_metadata.seq_lens_cpu is not None:
+        seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
+    else:
+        seq_lens = common_attn_metadata.seq_lens[:num_reqs].to("cpu")
+
+    if isinstance(kv_cache_spec, CrossAttentionSpec):
+        seq_lens = common_attn_metadata.seq_lens
+    if speculative_config is not None and speculative_config.parallel_drafting:
+        # PARD / DFlash (and DSpark on other models) keep the NPU seq_lens;
+        # only DSpark on the GLM5.2 family keeps the CPU mirror above.
+        if not (speculative_config.use_dspark() and _is_glm_model(model_config)):
+            seq_lens = common_attn_metadata.seq_lens
+    return seq_lens

@@ -1,17 +1,18 @@
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
-import scipy  # type: ignore
 import torch
 import torch_npu
-import vllm.envs as envs_vllm
-from torch import nn
 from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group
+from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed import get_pcp_group, get_tensor_model_parallel_world_size
+from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadataBuilder
-from vllm.model_executor.layers.linear import UnquantizedLinearMethod
-from vllm.triton_utils import HAS_TRITON
+from vllm.model_executor.utils import replace_parameter
+from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import (
     AttentionBackend,  # type: ignore
     AttentionCGSupport,
@@ -21,83 +22,304 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.utils import select_common_block_size
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.context_parallel.common_cp import AscendPCPMetadata
-from vllm_ascend.attention.mla_v1 import MAX_O_PROJ_PREFETCH_SIZE, MLAPO_MAX_SUPPORTED_TOKENS
+from vllm_ascend.attention.context_parallel.common_cp import (
+    get_pcp_num_replicated_tokens,
+    is_pcp_decode_sharding_enabled,
+)
+from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
 from vllm_ascend.attention.utils import (
+    MLAPO_MAX_SUPPORTED_TOKENS,
     SFA_QSFA_TILE_SIZE,
     AscendCommonAttentionMetadata,
+    PreprocessType,
     ascend_chunked_prefill_workspace_size,
-    enable_cp,
     get_sfa_qsfa_packed_head_dim,
+    get_tq_fused_slot_bytes,
+    get_tq_packed_bytes,
     maybe_save_kv_layer_to_connector,
     notify_kv_cache_written,
+    split_decodes_and_prefills,
     trans_rope_weight,
     transdata,
     wait_for_kv_layer_from_connector,
 )
 from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.device.mxfp_compat import FLOAT8_E8M0FNU_DTYPE
-from vllm_ascend.distributed.utils import all_gather_async
-from vllm_ascend.memcache_comm_fence import (
-    record_attention_compute_start,
+from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, get_current_hardware_profile
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
+    attention_transfer_window,
 )
-from vllm_ascend.ops.layer_shard_linear import (
-    is_hidden_layer,
-    post_process_after_loading_for_shard_weight_series,
-    reach_layer_for_shard_weight_series,
-    register_all_layers_to_shard_weight_series,
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
+    OFFLOAD_K_CACHE_NPU_INDEX,
+    OFFLOAD_KV_CACHE_TUPLE_LEN,
+    OFFLOAD_V_CACHE_NPU_INDEX,
 )
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
-from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
 from vllm_ascend.quantization.methods import (
     AscendW8A8DynamicLinearMethod,
     AscendW8A8LinearMethod,
     AscendW8A8MXFP8DynamicLinearMethod,
 )
+from vllm_ascend.quantization.methods.kv_cache.turboquant.latent import TurboQuantLatent
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_ND,
     ACL_FORMAT_FRACTAL_NZ,
-    AscendDeviceType,
-    _round_up,
     dispose_layer,
-    enable_dsa_cp,
-    enable_dsa_cp_with_layer_shard,
-    enable_dsa_cp_with_o_proj_tp,
-    enable_sfa_dcp_replicated_indexer,
     enable_sp,
-    get_ascend_device_type,
-    get_weight_prefetch_method,
+    is_mtp_layer,
+    is_rl_weight_update_enabled,
     maybe_trans_nz,
 )
-from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
 
-# token count limits within bmm_transpose operator
-BMM_TRANS_MAX_SUPPORTED_TOKENS = 1024
-
-O_PROJ_ACLNN_INPUT_PARAMS = (
-    "aclnn_input_scale",
-    "aclnn_input_scale_reciprocal",
-    "aclnn_input_offset",
-)
+    from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 
-class DCPGatherContext(NamedTuple):
-    """State needed to finish an async fused DCP all-gather."""
+# NoPE sparse MLA operator helpers.
+SMLA_METADATA_SIZE = 1024
+# GLM5Next's SFA path carries no learnable attention sink, but SparseFlashMla
+# still requires a per-head float32 sinks tensor. This is the placeholder value
+# the path has always used; whether -inf is the correct "no sink" value is a
+# separate question, tracked outside this change.
+SMLA_DEFAULT_SINK_VALUE = 1.0
+# TQ4 is a quantization type of the KV-quant sparse flash attention operator
+# (key_quant_mode=value_quant_mode=3, 386-byte KV slot), not a separate operator.
+TQ_QUANT_MODE = 3
+TQ_TILE_SIZE = 128
 
-    # The gathered fused tensor.
-    gathered: torch.Tensor
-    # Async all-gather work handle. None means the gather completed synchronously.
-    handle: torch.distributed.Work | None
-    # Permutation that restores the original dimension order after dim>0 gather.
-    restore_perm: tuple[int, ...] | None
-    # Last-dimension sizes used to split the fused tensor after gather.
-    split_sizes: tuple[int, ...]
+
+def generate_smla_plan(metadata, num_heads, head_dim, topk, cu_seqlens_q, topk_length):
+    """Derive the operator's core-split plan for one specific set of inputs.
+
+    ``cu_seqlens_q`` and ``topk_length`` have to be the very tensors the
+    operator call will receive: the plan tells the kernel how many query rows to
+    walk and how far into each row's indices to go, so a plan built over
+    different ones makes it index past what it was handed. The metadata
+    interface enforces the second half of that itself - with ori_mask_mode 0 and
+    a non-zero ori_topk it rejects an absent ori_topk_length.
+    """
+    return sparse_flash_mla_metadata(
+        num_heads_q=num_heads,
+        num_heads_kv=1,
+        head_dim=head_dim,
+        cu_seqlens_q=cu_seqlens_q,
+        seqused_ori_kv=metadata.seq_lens,
+        ori_topk_length=topk_length,
+        batch_size=metadata.seq_lens.numel(),
+        # These are scheduler CPU scalars. Passing device max() results here
+        # would force a host synchronization for each metadata build.
+        max_seqlen_q=metadata.max_query_len,
+        max_seqlen_ori_kv=metadata.max_seq_len,
+        max_seqlen_cmp_kv=0,
+        ori_topk=topk,
+        cmp_topk=0,
+        cmp_ratio=1,
+        # No Mask, which is what the sparse ori_kv scenario asks for: the
+        # selected indices are themselves the mask, since the indexer only ever
+        # offers causally valid tokens. Anything other than 0 also makes the
+        # kernel skip its softmax initialisation whenever no sequence has a
+        # query longer than its KV - which is every ordinary decode step - and
+        # a sparse gather does not write every accumulator slot, so the skipped
+        # rows keep whatever the previous step left in them.
+        ori_mask_mode=0,
+        # Required to be 0 while cmp_kv is absent.
+        cmp_mask_mode=0,
+        # Only ori_mask_mode 4 may carry a bounded window on this product line.
+        ori_win_left=-1,
+        ori_win_right=-1,
+        layout_q="TND",
+        layout_kv="PA_BBND",
+        has_ori_kv=True,
+        has_cmp_kv=False,
+        device=str(metadata.seq_lens.device),
+    )
+
+
+def build_smla_metadata(metadata, buffer, num_heads, head_dim, topk, cu_seqlens_q, topk_length):
+    generated = generate_smla_plan(metadata, num_heads, head_dim, topk, cu_seqlens_q, topk_length)
+    if generated.numel() != buffer.numel():
+        # The persistent buffer is sized by the operator's fixed [1024] contract.
+        # A generated plan of any other size means this build does not match the
+        # operator this buffer was allocated for; say so here rather than letting
+        # copy_ decide.
+        raise ValueError(f"Sparse MLA plan must contain {buffer.numel()} int32 values, got {generated.numel()}.")
+    buffer.copy_(generated)
+    metadata.smla_metadata = buffer
+
+
+def _view_cache_as_operator_pages(cache: torch.Tensor, block_size: int) -> torch.Tensor:
+    """Expose oversized contiguous storage pages at operator block granularity."""
+    storage_block_size = cache.shape[1]
+    if storage_block_size == block_size:
+        return cache
+    if storage_block_size % block_size:
+        raise ValueError(
+            f"Sparse MLA storage block size {storage_block_size} is not divisible by operator block size {block_size}."
+        )
+    try:
+        return cache.view(-1, block_size, *cache.shape[2:])
+    except RuntimeError as err:
+        raise ValueError("Sparse MLA oversized storage pages must support a zero-copy operator-page view.") from err
+
+
+def sparse_mla(query, cache, indices, metadata, scale):
+    """Attend to original latent KV, using the platform's NoPE operator."""
+    cache = _view_cache_as_operator_pages(cache, metadata.block_size)
+    if metadata.smla_metadata is not None:
+        # The A5 DMA merges adjacent columns. Preserve the selected set while
+        # sorting token positions and moving invalid padding to the end.
+        sentinel = torch.iinfo(torch.int32).max
+        sorted_indices = torch.where(indices >= 0, indices, sentinel).sort(dim=-1).values
+        sorted_indices = torch.where(sorted_indices == sentinel, -1, sorted_indices)
+        if metadata.smla_sinks is None:
+            raise RuntimeError("Sparse MLA requires persistent sinks owned by SparseMLAMetadataState.")
+        # MTP and shared indexers can reuse selections while positions advance.
+        # Count the actual left-aligned prefix on every call, including target
+        # FULL graphs whose query shape still matches the metadata capacity.
+        topk_length = metadata.smla_topk_length[: query.shape[0]]
+        metadata.smla_topk_length.zero_()
+        # The builder refreshes this persistent mask outside graph capture.
+        # A Python token count used here would freeze at the captured batch size.
+        valid = metadata.smla_valid_mask[: query.shape[0]]
+        topk_length.copy_((sorted_indices >= 0).sum(dim=-1, dtype=torch.int32).masked_fill(~valid, 0))
+        cu_seqlens_q = metadata.query_start_loc
+        if query.shape[0] != metadata.smla_topk_length.shape[0]:
+            # Eager and piecewise execution trim graph-padding query rows.
+            cu_seqlens_q = cu_seqlens_q.clamp(max=query.shape[0])
+        build_smla_metadata(
+            metadata,
+            metadata.smla_metadata,
+            query.shape[1],
+            query.shape[2],
+            sorted_indices.shape[-1],
+            cu_seqlens_q,
+            topk_length,
+        )
+        result = sparse_flash_mla(
+            query.contiguous(),
+            ori_kv=cache,
+            ori_sparse_indices=sorted_indices,
+            ori_block_table=metadata.block_table,
+            cu_seqlens_q=cu_seqlens_q,
+            seqused_ori_kv=metadata.seq_lens,
+            ori_topk_length=topk_length,
+            sinks=metadata.smla_sinks,
+            metadata=metadata.smla_metadata,
+            softmax_scale=scale,
+            cmp_ratio=1,
+            # Must match the mode the plan above was generated with.
+            ori_mask_mode=0,
+            cmp_mask_mode=0,
+            ori_win_left=-1,
+            ori_win_right=-1,
+            layout_q="TND",
+            layout_kv="PA_BBND",
+            topk_value_mode=1,
+            return_softmax_lse=False,
+        )
+    else:
+        result = torch.ops._C_ascend.npu_sparse_flash_attention(
+            query=query.contiguous(),
+            key=cache,
+            value=cache,
+            sparse_indices=indices,
+            scale_value=scale,
+            sparse_block_size=1,
+            block_table=metadata.block_table,
+            actual_seq_lengths_query=metadata.query_start_loc[1:].to(torch.int32),
+            actual_seq_lengths_kv=metadata.seq_lens.to(torch.int32),
+            query_rope=None,
+            key_rope=None,
+            layout_query="TND",
+            layout_kv="PA_BSND",
+            sparse_mode=3,
+            attention_mode=2,
+            return_softmax_lse=False,
+        )
+    return result[0]
+
+
+class SparseMLAMetadataState:
+    """Persistent operator buffers for NoPE within the shared SFA builder.
+
+    Sparse MLA fills lengths and the plan after receiving selected indices.
+    Pool construction and scoring remain outside operator dispatch.
+    """
+
+    def __init__(self, kv_cache_spec, vllm_config, device, kernel_block_size=128, num_heads=None):
+        block_size = kv_cache_spec.block_size
+        if block_size <= 0 or block_size % kernel_block_size:
+            raise ValueError("Sparse MLA block size must be a positive multiple of the SFA kernel block size.")
+        self.split = block_size // kernel_block_size
+        self.use_smla = get_current_hardware_profile().device_adaptor_family == DeviceAdaptorFamily.FP8_OPTIMIZED
+        self.block_size = kernel_block_size
+        self.table_stride = 1
+        cache_block_size = vllm_config.cache_config.block_size
+        expand_factor = max(cache_block_size // kernel_block_size, 1)
+        table_width = cdiv(vllm_config.model_config.max_model_len, cache_block_size) * expand_factor
+        self.block_table_buffer = torch.empty(
+            # Mixed FULL graphs can append one padding request.
+            vllm_config.scheduler_config.max_num_seqs + 1,
+            table_width,
+            dtype=torch.int32,
+            device=device,
+        )
+        if self.use_smla:
+            config = vllm_config.model_config.hf_text_config
+            self.num_heads = (
+                config.num_attention_heads // vllm_config.parallel_config.tensor_parallel_size
+                if num_heads is None
+                else num_heads
+            )
+            self.metadata_buffer = torch.empty(SMLA_METADATA_SIZE, dtype=torch.int32, device=device)
+            self.length_buffer = torch.empty(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                1,
+                dtype=torch.int32,
+                device=device,
+            )
+            self.valid_mask_buffer = torch.empty_like(self.length_buffer, dtype=torch.bool)
+            # ACL Graph replay reads the addresses captured on the first run,
+            # so every tensor the operator consumes has to outlive the capture.
+            # Allocate the sinks once here, next to the other persistent
+            # operator buffers, and keep it for this state's lifetime.
+            self.sinks = torch.full(
+                (self.num_heads,),
+                SMLA_DEFAULT_SINK_VALUE,
+                dtype=torch.float32,
+                device=device,
+            )
+
+    def prepare(self, metadata):
+        expanded = metadata.block_table
+        if expanded.shape[1] % self.split:
+            raise ValueError("Sparse MLA received a partially expanded SFA block table.")
+        width = expanded.shape[1] // self.table_stride
+        if width > self.block_table_buffer.shape[1]:
+            raise ValueError("Sparse MLA block table exceeds its persistent buffer.")
+        table = self.block_table_buffer[: expanded.shape[0], :width]
+        torch.div(expanded[:, :: self.table_stride], self.table_stride, rounding_mode="floor", out=table)
+        metadata.block_table = table
+        metadata.block_size = self.block_size
+        if self.use_smla:
+            positions = metadata.positions
+            if positions.numel() > self.length_buffer.shape[0]:
+                raise ValueError("Sparse MLA token count exceeds its persistent top-k buffer.")
+            valid = torch.arange(positions.numel(), device=positions.device) < metadata.num_actual_tokens
+            mask = self.valid_mask_buffer[: positions.numel()]
+            mask[:, 0].copy_(valid)
+            metadata.smla_valid_mask = mask
+            metadata.smla_topk_length = self.length_buffer[: positions.numel()]
+            metadata.smla_metadata = self.metadata_buffer
+            metadata.smla_sinks = self.sinks
+        return metadata
+
+
+# npu_transpose_batchmatmul rejects operand dimensions >= 65536
+TRANSPOSE_BMM_MAX_SUPPORTED_DIM = 65536
 
 
 def _get_indexer_types(configs: tuple[Any, ...]) -> Any | None:
@@ -129,22 +351,17 @@ class AscendSFABackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        # HACK(Ronald1995): vllm `initialize_kv_cache` method in model runner v2 make
-        # attention name assertion, we just set name to FLASH_ATTN to avoid assertion error.
-        # rectify this when vllm disable the assertion.
-        return "ASCEND_SFA" if not envs_vllm.VLLM_USE_V2_MODEL_RUNNER else "FLASH_ATTN"
+        return "ASCEND_SFA"
 
     @staticmethod
     def get_builder_cls():
-        if enable_sfa_dcp_replicated_indexer():
-            from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBuilder
+        if get_ascend_config().sparse_kv_offload_config.enabled:
+            from vllm_ascend.attention.sfa_kv_offload import AscendSFAKVOffloadMetadataBuilder
 
-            return AscendSFADCPMetadataBuilder
-        if enable_cp():
-            from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFACPMetadataBuilder
+            return AscendSFAKVOffloadMetadataBuilder
+        from vllm_ascend.attention.context_parallel.sfa_cp import resolve_sfa_metadata_builder
 
-            return AscendSFACPMetadataBuilder
-        return AscendSFAMetadataBuilder
+        return resolve_sfa_metadata_builder(get_current_vllm_config())
 
     @staticmethod
     def get_kv_cache_shape(
@@ -152,47 +369,23 @@ class AscendSFABackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
-        cache_type: str = "",
+        cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
         return (num_blocks, block_size, num_kv_heads, head_size)
 
     @staticmethod
     def get_impl_cls() -> type["AscendSFAImpl"]:
-        if enable_sfa_dcp_replicated_indexer():
-            from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPImpl
+        if get_ascend_config().sparse_kv_offload_config.enabled:
+            from vllm_ascend.attention.sfa_kv_offload import AscendSFAKVOffloadImpl
 
-            return AscendSFADCPImpl
-        if enable_cp():
-            from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFACPImpl
+            return AscendSFAKVOffloadImpl
+        from vllm_ascend.attention.context_parallel.sfa_cp import resolve_sfa_impl
 
-            return AscendSFACPImpl
-        return AscendSFAImpl
+        return resolve_sfa_impl(get_current_vllm_config())
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int]:
         return [128]
-
-
-@dataclass
-class DCPContext:
-    slot_mapping: torch.Tensor
-    block_table: torch.Tensor
-    seq_lens: torch.Tensor
-    kv_gather_block_ids: torch.Tensor | None = None
-    kv_gather_block_table: torch.Tensor | None = None
-    gather_context: DCPGatherContext | None = None
-
-
-@dataclass
-class DSACPContext:
-    num_tokens: int
-    num_tokens_pad: int
-    local_start: int
-    local_end: int
-    local_end_with_pad: int
-    slot_mapping_cp: torch.Tensor
-    actual_seq_lengths_query: torch.Tensor
-    actual_seq_lengths_key: torch.Tensor
 
 
 @dataclass
@@ -213,23 +406,25 @@ class AscendSFAMetadata:
     num_actual_tokens: int  # Number of tokens excluding padding.
     slot_mapping: torch.Tensor
     seq_lens: torch.Tensor
-    seq_lens_cpu: torch.Tensor
+    seq_lens_cpu: torch.Tensor | None
     cum_query_lens: torch.Tensor
     block_table: torch.Tensor
-    sin: torch.Tensor
-    cos: torch.Tensor
+    sin: torch.Tensor | None
+    cos: torch.Tensor | None
 
     # For logging.
     num_input_tokens: int = 0  # Number of tokens including padding.
+    pcp_slot_mapping: torch.Tensor | None = None
+    pcp_prolog_local_slots: torch.Tensor | None = None
+    pcp_prolog_global_slots: torch.Tensor | None = None
+    # All PCP ranks must join prefill KV gathers even when a rank has only padding.
+    pcp_has_global_prefill: bool = False
     # The dimension of the attention heads
     head_dim: int | None = None
     attn_mask: torch.Tensor = None
     # chunked prefill by default if no attn_states passed
     attn_state: AscendAttentionState = AscendAttentionState.ChunkedPrefill
-    dcp_context: DCPContext | None = None
-    dsa_cp_context: DSACPContext | None = None
     reshape_cache_event: torch.npu.Event = None
-    sfa_cp_metadata: AscendPCPMetadata | None = None
     num_decodes: int = 0
     num_decode_tokens: int = 0
     num_prefills: int = 0
@@ -237,9 +432,60 @@ class AscendSFAMetadata:
     group_len: torch.Tensor | None = None
     group_key_idx: torch.Tensor | None = None
     group_key_cache_idx: torch.Tensor | None = None
+    # Request identity for the Sparse KV offload resident LRU; only populated
+    # by AscendSFAKVOffloadMetadataBuilder.
+    req_ids_tensor: torch.Tensor | None = None
+    token_to_req: torch.Tensor | None = None
+    positions: torch.Tensor | None = None
+    query_start_loc: torch.Tensor | None = None
+    max_query_len: int = 0
+    max_seq_len: int = 0
+    smla_metadata: torch.Tensor | None = None
+    smla_topk_length: torch.Tensor | None = None
+    smla_valid_mask: torch.Tensor | None = None
+    smla_sinks: torch.Tensor | None = None
 
 
 M = TypeVar("M", bound=AscendSFAMetadata)
+
+
+def needs_pcp_kv_gather(attn_metadata: AscendSFAMetadata, is_decode_sharded: bool) -> bool:
+    """Whether PCP ranks must exchange this step's KV.
+
+    Only replicated decode-only steps already hold identical KV on every
+    rank, including graph padding. Ranks without local prefill still join the
+    gather when another rank has one.
+    """
+    return is_decode_sharded or attn_metadata.num_prefills > 0 or attn_metadata.pcp_has_global_prefill
+
+
+def _int64_kv_slots(slots: torch.Tensor, attn_metadata: M) -> torch.Tensor:
+    """Convert the KV slot mapping to int64 once per scheduling step.
+
+    ``npu_kv_rmsnorm_rope_cache`` requires int64 cache indices while the SFA
+    metadata carries int32 slots. Every layer of a step shares the same slot
+    tensor, so cache the converted copy on the metadata object instead of
+    re-casting it inside each layer's ``exec_kv`` (one Cast kernel per step
+    instead of one per layer).
+    """
+    if slots.dtype == torch.int64:
+        return slots
+    cached = getattr(attn_metadata, "kv_slots_i64", None)
+    if cached is None or cached[0] is not slots:
+        cached = (slots, slots.to(torch.int64))
+        attn_metadata.kv_slots_i64 = cached  # type: ignore[attr-defined]
+    return cached[1]
+
+
+@dataclass
+class SFAForwardContext:
+    """Parallel-layout inputs consumed by the shared SFA forward template."""
+
+    actual_seq_lengths_query: torch.Tensor
+    actual_seq_lengths_key: torch.Tensor
+    kv_slot_mapping: torch.Tensor
+    topk_num_tokens: int
+    gather_full_o_proj: bool = False
 
 
 class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
@@ -266,27 +512,17 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             supports_dcp_with_varlen,
         )
 
-        self.block_size = vllm_config.cache_config.block_size
         # Match the logical block size selected for BlockTable.
         self.kernel_block_size = select_common_block_size(kv_cache_spec.block_size, [AscendSFABackend])
-        self.max_blocks = (vllm_config.model_config.max_model_len + self.block_size - 1) // self.block_size
 
+        layer = vllm_config.compilation_config.static_forward_context[layer_names[0]]
+        self.nope = layer.qk_rope_head_dim == 0
+        self.nope_states: dict[int | None, SparseMLAMetadataState] = {}
+
+        self.use_pcp = vllm_config.parallel_config.prefill_context_parallel_size > 1
+        self.is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(vllm_config)
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1
-        max_num_reqs = vllm_config.scheduler_config.max_num_seqs
-        self.actual_seq_lengths_query = torch.zeros(max_num_reqs + 1, dtype=torch.int32, device=device)
-        self.actual_seq_lengths_key = torch.empty_like(self.actual_seq_lengths_query)
-        self.spec_actual_seq_lengths_query: list[torch.Tensor] | None = None
-        self.spec_actual_seq_lengths_key: list[torch.Tensor] | None = None
-        # Persistent int32 buffers for store_kv_block_metadata inputs, sized to
-        # max_num_batched_tokens (matches model_runner_v1._make_buffer sizing).
-        max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
-        self.group_len = torch.zeros(max_num_batched_tokens, dtype=torch.int32, device=device)
-        self.group_key_idx = torch.zeros(max_num_batched_tokens, dtype=torch.int32, device=device)
-        self.group_key_cache_idx = torch.zeros(max_num_batched_tokens, dtype=torch.int32, device=device)
-        self.spec_group_len: list[torch.Tensor] | None = None
-        self.spec_group_key_idx: list[torch.Tensor] | None = None
-        self.spec_group_key_cache_idx: list[torch.Tensor] | None = None
         if self.speculative_config:
             spec_token_num = self.speculative_config.num_speculative_tokens
             self.decode_threshold += spec_token_num
@@ -295,28 +531,30 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
                 npu_fused_infer_attention_score TND layout's limit of 16, \
                 got {self.decode_threshold}"
             )
-            self.spec_actual_seq_lengths_query = [
-                torch.zeros(max_num_reqs * (spec_token_num + 1) + 1, dtype=torch.int32, device=device)
-                for _ in range(spec_token_num)
-            ]
-            self.spec_actual_seq_lengths_key = [
-                torch.zeros(max_num_reqs * (spec_token_num + 1) + 1, dtype=torch.int32, device=device)
-                for _ in range(spec_token_num)
-            ]
-            self.spec_group_len = [
-                torch.zeros(max_num_batched_tokens, dtype=torch.int32, device=device) for _ in range(spec_token_num)
-            ]
-            self.spec_group_key_idx = [
-                torch.zeros(max_num_batched_tokens, dtype=torch.int32, device=device) for _ in range(spec_token_num)
-            ]
-            self.spec_group_key_cache_idx = [
-                torch.zeros(max_num_batched_tokens, dtype=torch.int32, device=device) for _ in range(spec_token_num)
-            ]
-
         self.reorder_batch_threshold = self.decode_threshold
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
-        self.rope_dim = self.model_config.hf_text_config.qk_rope_head_dim
-        self.enable_dsa_cp = enable_dsa_cp()
+
+    def _prepare_parallel_metadata(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        cum_query_lens: torch.Tensor,
+        seq_lens: torch.Tensor,
+        draft_index: int | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, Any]]:
+        """Customize metadata tensors for a parallel SFA layout."""
+        return cos, sin, slot_mapping, {}
+
+    def _update_parallel_slot_mapping(
+        self,
+        metadata: AscendSFAMetadata,
+        slot_mapping: torch.Tensor,
+        num_input_tokens: int,
+    ) -> None:
+        """Update optional parallel metadata after an outer layout wrapper."""
+        return
 
     @staticmethod
     def determine_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
@@ -330,6 +568,13 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
     ) -> AttentionCGSupport:
         # Explicit override in case the underlying builder specialized this getter.
         # @override omitted only because of mypy limitation due to type variable.
+        speculative_config = vllm_config.speculative_config
+        if (
+            speculative_config is not None
+            and speculative_config.method == "dspark"
+            and getattr(speculative_config, "enable_adaptive_verification", False)
+        ):
+            return AttentionCGSupport.ALWAYS
         return AttentionCGSupport.UNIFORM_BATCH
 
     def reorder_batch(self, input_batch: "NPUInputBatch", scheduler_output: "SchedulerOutput") -> bool:
@@ -344,7 +589,30 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         **kwargs,
     ) -> AscendSFAMetadata:
         # common_prefix_len / fast_build are unused; kept for API compatibility.
-        return self._build(common_attn_metadata, draft_index=None)
+        metadata = self._build_with_metadata_view(
+            common_attn_metadata,
+            lambda: self._build(common_attn_metadata, draft_index=None, pcp_context=kwargs.get("pcp_context")),
+        )
+        if (
+            self.use_pcp
+            and kwargs.get("pcp_context") is not None
+            and needs_pcp_kv_gather(metadata, self.is_pcp_decode_sharded)
+        ):
+            assert metadata.pcp_slot_mapping is not None
+            group = get_pcp_group()
+            num_tokens = metadata.num_input_tokens
+            rank_slots = metadata.pcp_slot_mapping[: group.world_size * num_tokens].view(group.world_size, num_tokens)
+            num_replicated_tokens = get_pcp_num_replicated_tokens(
+                metadata.num_decode_tokens, self.is_pcp_decode_sharded
+            )
+            local_slots = rank_slots[group.rank_in_group].contiguous()
+            if num_replicated_tokens and group.rank_in_group != 0:
+                # Replicated decode slots are masked outside rank 0, but each
+                # rank still writes its locally computed decode KV.
+                local_slots = torch.cat((rank_slots[0, :num_replicated_tokens], local_slots[num_replicated_tokens:]))
+            metadata.pcp_prolog_local_slots = local_slots
+            metadata.pcp_prolog_global_slots = rank_slots[:, num_replicated_tokens:].reshape(-1)
+        return metadata
 
     def build_for_drafting(
         self,
@@ -352,19 +620,38 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         draft_index: int,
         **kwargs,
     ) -> AscendSFAMetadata:
-        return self._build(common_attn_metadata, draft_index=draft_index)
+        return self._build_with_metadata_view(
+            common_attn_metadata,
+            lambda: self._build(
+                common_attn_metadata,
+                draft_index=draft_index,
+            ),
+        )
+
+    def _build_with_metadata_view(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        build_metadata: Callable[[], AscendSFAMetadata],
+    ) -> AscendSFAMetadata:
+        """Build against the default KV-cache view.
+
+        Distributed layouts can override this hook to expose a temporary view
+        while reusing the complete SFA metadata construction flow.
+        """
+        return build_metadata()
 
     def _build(
         self,
         common_attn_metadata: AscendCommonAttentionMetadata,
         draft_index: int | None = None,
+        pcp_context: Any | None = None,
     ) -> AscendSFAMetadata:
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         num_input_tokens = common_attn_metadata.num_input_tokens
-
         block_table = common_attn_metadata.block_table_tensor[:num_reqs]
-        slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
+        pcp_slot_mapping = common_attn_metadata.slot_mapping
+        slot_mapping = pcp_slot_mapping[:num_input_tokens]
         input_positions = common_attn_metadata.positions[:num_input_tokens].long()
 
         block_size = self.kernel_block_size
@@ -378,144 +665,80 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             seq_lens_cpu = common_attn_metadata._seq_lens_cpu[:num_reqs]
         elif common_attn_metadata.seq_lens_cpu is not None:
             seq_lens_cpu = common_attn_metadata.seq_lens_cpu[:num_reqs]
+        elif self.nope:
+            # MTP accepted counts are device-resident. NoPE operators use
+            # device lengths and scheduler upper bounds, so need no CPU copy.
+            seq_lens_cpu = None
         else:
             seq_lens_cpu = common_attn_metadata.seq_lens[:num_reqs].to("cpu")
 
-        cos, sin = get_cos_and_sin_mla(input_positions, use_cache=(draft_index is None))
-
-        dsa_cp_context = None
-        if self.enable_dsa_cp:
-            global_tp_size = get_tp_group().world_size
-            num_tokens = num_input_tokens
-            num_tokens_pad = _round_up(num_tokens, global_tp_size)
-            num_tokens_per_device = num_tokens_pad // global_tp_size
-            local_start = get_tp_group().rank_in_group * num_tokens_per_device
-            local_end_with_pad = local_start + num_tokens_per_device
-            local_end = min(local_end_with_pad, num_actual_tokens)
-
-            pad_size = num_tokens_pad - cos.shape[0]
-            assert cos.shape == sin.shape, f"cos.shape must be equal to sin.shape, got {cos.shape} and {sin.shape}"
-
-            if pad_size > 0:
-                cos = nn.functional.pad(cos, (0, 0, 0, 0, 0, 0, 0, pad_size))
-                sin = nn.functional.pad(sin, (0, 0, 0, 0, 0, 0, 0, pad_size))
-
-            pad_size_slot = num_tokens_pad - slot_mapping.shape[0]
-            if pad_size_slot > 0:
-                slot_mapping = nn.functional.pad(slot_mapping, (0, pad_size_slot), value=-1)
-            else:
-                slot_mapping = slot_mapping[:num_tokens_pad]
-            slot_mapping_cp = slot_mapping[local_start:local_end_with_pad]
-
-            cos = cos[local_start:local_end_with_pad]
-            sin = sin[local_start:local_end_with_pad]
-
-            assert cos.shape[0] == num_tokens_per_device, (
-                f"cos.shape[0] must be equal to num_tokens_per_device, \
-                    got {cos.shape[0]} and {num_tokens_per_device}"
-            )
-            assert slot_mapping_cp.shape[0] == num_tokens_per_device, (
-                f"slot_mapping_cp.shape[0] must be equal to num_tokens_per_device, \
-                    got {slot_mapping_cp.shape[0]} and {num_tokens_per_device}"
-            )
-            assert slot_mapping.shape[0] == num_tokens_pad, (
-                f"slot_mapping.shape[0] must be equal to num_tokens_pad, \
-                    got {slot_mapping.shape[0]} and {num_tokens_pad}"
-            )
-
-            if draft_index is not None:
-                assert self.spec_actual_seq_lengths_query is not None
-                assert self.spec_actual_seq_lengths_key is not None
-                # Per-draft-step buffers: independent, graph-stable storage so
-                # later draft steps don't clobber earlier ones' metadata.
-                actual_seq_lengths_query = self.spec_actual_seq_lengths_query[draft_index - 1]
-                actual_seq_lengths_key = self.spec_actual_seq_lengths_key[draft_index - 1]
-            else:
-                actual_seq_lengths_query = self.actual_seq_lengths_query
-                actual_seq_lengths_key = self.actual_seq_lengths_key
-
-            num_segs = cum_query_lens.shape[0]
-
-            # Vectorized per-request local query/key lengths for this rank's
-            # [local_start, local_end_with_pad) slice. Replaces a Python loop
-            # that did 2 .item() NPU->CPU syncs per request (2 * num_reqs
-            # syncs/step); now fully on-device with zero syncs.
-            # global_start[i] = 0 for i==0, else cum_query_lens[i-1]
-            global_start = common_attn_metadata.query_start_loc[:num_segs]
-            global_end = cum_query_lens
-
-            # Clip each request's [global_start, global_end) to the local range.
-            # num_local_tokens may be < 0 when the request falls entirely
-            # outside [local_start, local_end_with_pad); clamp before cumsum.
-            req_local_start = global_start.clamp(min=local_start)
-            req_local_end = global_end.clamp(max=local_end_with_pad)
-            num_local_tokens = req_local_end - req_local_start
-
-            local_query_lens = torch.cumsum(num_local_tokens.clamp(min=0), dim=0)
-            offset = global_end - req_local_end  # request tokens on later ranks
-            local_key_lens = torch.where(num_local_tokens > 0, seq_lens - offset, 0)
-
-            actual_seq_lengths_query[:num_segs] = local_query_lens
-            actual_seq_lengths_key[:num_segs] = local_key_lens
-            actual_seq_lengths_query = actual_seq_lengths_query[:num_reqs]
-            actual_seq_lengths_key = actual_seq_lengths_key[:num_reqs]
-
-            dsa_cp_context = DSACPContext(
-                num_tokens=num_tokens,
-                num_tokens_pad=num_tokens_pad,
-                local_start=local_start,
-                local_end=local_end,
-                local_end_with_pad=local_end_with_pad,
-                slot_mapping_cp=slot_mapping_cp,
-                actual_seq_lengths_query=actual_seq_lengths_query,
-                actual_seq_lengths_key=actual_seq_lengths_key,
-            )
-
-        if get_ascend_config().c8_enable_reshape_optim:
-            if draft_index is not None:
-                assert self.spec_group_len is not None
-                assert self.spec_group_key_idx is not None
-                assert self.spec_group_key_cache_idx is not None
-                group_len = self.spec_group_len[draft_index - 1]
-                group_key_idx = self.spec_group_key_idx[draft_index - 1]
-                group_key_cache_idx = self.spec_group_key_cache_idx[draft_index - 1]
-            else:
-                group_len = self.group_len
-                group_key_idx = self.group_key_idx
-                group_key_cache_idx = self.group_key_cache_idx
-            actual_group_len = group_len[:num_input_tokens]
-            actual_group_key_idx = group_key_idx[:num_input_tokens]
-            actual_group_key_cache_idx = group_key_cache_idx[:num_input_tokens]
-            torch.ops._C_ascend.store_kv_block_metadata(
-                slot_mapping,
-                actual_group_len,
-                actual_group_key_idx,
-                actual_group_key_cache_idx,
-                block_size,
-            )
+        if self.nope:
+            cos, sin = None, None
         else:
-            actual_group_len = None
-            actual_group_key_idx = None
-            actual_group_key_cache_idx = None
+            cos, sin = get_cos_and_sin_mla(input_positions, use_cache=(draft_index is None))
 
-        return self.metadata_cls(  # type: ignore
-            num_input_tokens=common_attn_metadata.num_input_tokens,
+        cos, sin, slot_mapping, parallel_metadata = self._prepare_parallel_metadata(
+            common_attn_metadata,
+            cos,
+            sin,
+            slot_mapping,
+            cum_query_lens,
+            seq_lens,
+            draft_index,
+        )
+
+        metadata = self.metadata_cls(  # type: ignore
+            num_input_tokens=num_input_tokens,
             num_actual_tokens=num_actual_tokens,
             cum_query_lens=cum_query_lens,
             seq_lens=seq_lens,
             seq_lens_cpu=seq_lens_cpu,
             slot_mapping=slot_mapping,
+            pcp_slot_mapping=pcp_slot_mapping,
+            pcp_has_global_prefill=bool(pcp_context is not None and pcp_context.global_batch.is_prefilling_np.any()),
             head_dim=self.model_config.get_head_size(),
             attn_mask=self.attn_mask_builder.get_attention_mask(common_attn_metadata.causal, self.model_config),
             attn_state=common_attn_metadata.attn_state,
             block_table=block_table,
-            sin=sin[:num_input_tokens],
-            cos=cos[:num_input_tokens],
-            dsa_cp_context=dsa_cp_context,
+            sin=None if sin is None else sin[:num_input_tokens],
+            cos=None if cos is None else cos[:num_input_tokens],
+            positions=input_positions,
+            query_start_loc=common_attn_metadata.query_start_loc[: num_reqs + 1],
+            max_query_len=common_attn_metadata.max_query_len,
+            max_seq_len=common_attn_metadata.max_seq_len,
             block_size=block_size,
-            group_len=actual_group_len,
-            group_key_idx=actual_group_key_idx,
-            group_key_cache_idx=actual_group_key_cache_idx,
+            **parallel_metadata,
+        )
+        (
+            metadata.num_decodes,
+            metadata.num_prefills,
+            metadata.num_decode_tokens,
+            _,
+        ) = split_decodes_and_prefills(
+            common_attn_metadata,
+            decode_threshold=self.decode_threshold,
+            treat_short_extends_as_decodes=not self.use_pcp,
+        )
+        if self.nope:
+            self._prepare_nope_metadata(metadata, draft_index)
+        return metadata
+
+    def _prepare_nope_metadata(self, metadata: AscendSFAMetadata, draft_index: int | None) -> None:
+        if draft_index not in self.nope_states:
+            self.nope_states[draft_index] = SparseMLAMetadataState(
+                self.kv_cache_spec, self.vllm_config, self.device, self.kernel_block_size
+            )
+        self.nope_states[draft_index].prepare(metadata)
+
+    def build_for_cudagraph_capture(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        **kwargs: Any,
+    ) -> AscendSFAMetadata:
+        return self.build(
+            common_prefix_len=0,
+            common_attn_metadata=common_attn_metadata,
+            **kwargs,
         )
 
     def build_for_graph_capture(
@@ -541,12 +764,17 @@ class AscendSFAImpl(MLAAttentionImpl):
     understand this class
     """
 
-    # Supports forward using the all-gather o_proj weight for decode requests when Sharded CP is enabled.
-    o_proj_full_pools: dict[tuple[str, int | None, torch.dtype, int, tuple[int, ...]], torch.Tensor] = {}
+    # ``W_UV``/``W_UK_T`` are injected during ``process_weights_after_loading``
+    # through ``replace_parameter``, which is ``setattr``-based and therefore
+    # invisible to static analysis. These declarations are what let mypy resolve
+    # the attributes at every use site; without them ``pre-commit`` fails with
+    # `Cannot determine type of "W_UK_T"  [has-type]`.
+    W_UV: torch.Tensor
+    W_UK_T: torch.Tensor
 
-    # q_hadamard and k_hadamard tensor shared when dsa c8 enabled
-    q_hadamard: torch.Tensor | None = None
-    k_hadamard: torch.Tensor | None = None
+    # A replicated MTP draft may inherit a PCP target's non-trivial interleave
+    # value. With DCP disabled it does not change the draft KV-cache layout.
+    supports_mtp_with_cp_non_trivial_interleave_size: bool = True
 
     def __init__(
         self,
@@ -563,10 +791,9 @@ class AscendSFAImpl(MLAAttentionImpl):
         **kwargs,
     ) -> None:
         self.num_heads = num_heads
-        self.head_size = head_size
         self.scale = float(scale)
         self.num_kv_heads = num_kv_heads
-        self.kv_cache_dtype = kv_cache_dtype
+        self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
 
         # MLA Args
         self.q_lora_rank = kwargs["q_lora_rank"]
@@ -575,25 +802,35 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.qk_rope_head_dim = kwargs["qk_rope_head_dim"]
         self.qk_head_dim = kwargs["qk_head_dim"]
         self.v_head_dim = kwargs["v_head_dim"]
-        self.rotary_emb = kwargs["rotary_emb"]
         self.q_proj = kwargs["q_proj"] if self.q_lora_rank is None else kwargs["q_b_proj"]
         self.fused_qkv_a_proj = kwargs.get("fused_qkv_a_proj")
         self.kv_b_proj = kwargs["kv_b_proj"]
         self.o_proj = kwargs["o_proj"]
         self.indexer = kwargs["indexer"]
+        self.g_proj = kwargs.get("g_proj")
+        # NoPE sparse layers use the same SFA template and native prefill;
+        # they do not need an upstream dense-MHA prefill backend.
+        if self.qk_rope_head_dim == 0:
+            self.supports_dense_mha_prefill = False
         self.kv_a_proj_with_mqa = kwargs.get("kv_a_proj_with_mqa")
         self.kv_a_layernorm = kwargs.get("kv_a_layernorm")
         self.q_a_layernorm = kwargs.get("q_a_layernorm")
-        self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         self.tp_size = get_tensor_model_parallel_world_size()
-        self.tp_rank = get_tp_group().rank_in_group
-        self.q_b_proj = kwargs["q_b_proj"]
-        self.skip_topk = kwargs.get("skip_topk", False)
+        self._skip_topk = bool(kwargs.get("skip_topk", False))
         self.topk_indices_buffer = kwargs.get("topk_indices_buffer")
+        # Optional platform service injected by the model runner. Attention
+        # stays independent of KVPP scheduling and the concrete transport.
+        self.layerwise_kv_cache_hook: Any = None
 
         ascend_config = get_ascend_config()
-        self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
         self.vllm_config = get_current_vllm_config()
+        self.is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(self.vllm_config)
+        # SFA absorbs kv_b_proj (and, for KV consumers on PROLOG_V3, the fused
+        # qkv/q projections) and disposes the source parameters. A disposed
+        # parameter is no longer a valid destination for the in-place weight
+        # updates that RL pushes through vLLM's layerwise reload, so those
+        # sources must survive whenever such updates are possible.
+        self.rl_weight_update_enabled = is_rl_weight_update_enabled(self.vllm_config)
         kv_transfer_config = self.vllm_config.kv_transfer_config
         self.is_kv_producer = kv_transfer_config is not None and kv_transfer_config.is_kv_producer
         self.is_kv_consumer = kv_transfer_config is not None and kv_transfer_config.is_kv_consumer
@@ -608,11 +845,13 @@ class AscendSFAImpl(MLAAttentionImpl):
         hf_config = self.vllm_config.model_config.hf_config
         hf_text_config = getattr(self.vllm_config.model_config, "hf_text_config", None)
         config_candidates = (hf_config, hf_text_config)
-        self.index_cache_enabled = _get_config_bool(
+        index_cache_enabled = _get_config_bool(
             config_candidates,
             "use_index_cache",
         ) or _has_shared_indexer_layers(config_candidates)
-        self.use_index_cache = self.skip_topk or self.index_cache_enabled
+        self.use_index_cache = self.skip_topk or index_cache_enabled
+        self._is_mtp_layer = is_mtp_layer(hf_config, self.layer_name)
+        self.skip_indexer_pre_process = self.skip_topk and not self._is_mtp_layer
         self.has_indexer = self.indexer is not None
         if not self.has_indexer and not self.skip_topk:
             raise ValueError(
@@ -625,89 +864,58 @@ class AscendSFAImpl(MLAAttentionImpl):
                 "topk_indices_buffer is required when indexer is None and "
                 f"skip_topk is enabled. layer_name={self.layer_name}."
             )
-        # indexer param
+        # The indexer module owns its compute rules; SFA only keeps the
+        # indexer head_dim for cache-layout composition on CP paths.
         if self.has_indexer:
-            self.n_head: int = self.indexer.n_head  # 64
             self.head_dim: int = self.indexer.head_dim  # 128
-            self.wq_b = self.indexer.wq_b
-            self.wk_weights_proj = self.indexer.wk_weights_proj
-            self.k_norm = self.indexer.k_norm
         else:
-            self.n_head = getattr(hf_config, "index_n_heads", 0)
             self.head_dim = getattr(hf_config, "index_head_dim", 0)
-            self.wq_b = None
-            self.wk_weights_proj = None
-            self.k_norm = None
-        self.cp_size = 1
-        self.is_rope_neox_style = True
-        self.use_torch_npu_lightning_indexer = False
-        if self.vllm_config.model_config.hf_config.model_type in ["glm_moe_dsa"]:
-            self.is_rope_neox_style = False
-            self.use_torch_npu_lightning_indexer = True
 
         # Sparse C8 has two independent meanings in SFA:
-        # - SFA packed KV cache for npu_kv_quant_sparse_flash_attention.
+        # - SFA packed KV cache for npu_kv_quant_sparse_flash_attention_vllm.
         # - C8 indexer cache for lightning indexer.
-        # The user-facing switches control these layouts independently, and
-        # layers without an indexer only apply the SFA setting.
+        # The user-facing switches control these layouts independently. LI C8
+        # applies only to layers that own an indexer cache.
+        self.enable_sparse_sfa_turboquant = ascend_config.enable_sparse_sfa_turboquant
         self.enable_sparse_sfa_c8 = ascend_config.enable_sparse_sfa_c8
-        self.enable_sparse_li_c8 = self.has_indexer and ascend_config.is_sparse_li_c8_layer(self.layer_name)
-        if self.enable_sparse_sfa_c8 or self.enable_sparse_li_c8:
-            if get_ascend_device_type() == AscendDeviceType.A5:
-                self.c8_k_cache_dtype = torch.float8_e4m3fn
-                self.c8_k_scale_cache_dtype = torch.float32
-            else:
-                self.c8_k_cache_dtype = torch.int8
-                self.c8_k_scale_cache_dtype = torch.float16
-
         if self.enable_sparse_sfa_c8:
+            self.c8_cache_dtype = kv_cache_dtype_str_to_dtype(
+                self.vllm_config.cache_config.cache_dtype, self.vllm_config.model_config
+            )
+
+        if self.enable_sparse_sfa_turboquant:
+            self.sfa_qsfa_packed_kv_head_dim = get_tq_fused_slot_bytes(self.kv_lora_rank, self.qk_rope_head_dim)
+        elif self.enable_sparse_sfa_c8:
             self.sfa_qsfa_packed_kv_head_dim = get_sfa_qsfa_packed_head_dim(
                 self.kv_lora_rank,
                 self.qk_rope_head_dim,
                 self.sfa_qsfa_tile_size,
             )
-        # PD decode consumers with sparse C8 can use mla_prolog_v3 to write the packed KV cache.
-        # TODO: Re-enable after the community CANN baseline upgrades from 9.0 to 9.1.
-        # npu_mla_prolog_v3 depends on CANN 9.1 and is not available in the current community CANN 9.0.
-        sfa_prolog_v3_supported = False
-        self.enable_sfa_prolog_v3 = (
-            sfa_prolog_v3_supported
-            and self.is_kv_consumer
-            and self.enable_sparse_sfa_c8
-            and get_ascend_device_type() != AscendDeviceType.A5
-        )
-        self.enable_mlapo = ascend_config.enable_mlapo and not (
-            self.enable_sfa_prolog_v3 or (self.enable_sparse_sfa_c8 and get_ascend_device_type() != AscendDeviceType.A5)
-        )
+        # Shared signed-Hadamard transform plus the ops-nn quantizer.
+        self.turboquant = TurboQuantLatent() if self.enable_sparse_sfa_turboquant else None
+        self.preprocess_type = PreprocessType.NATIVE
 
-        # Effective in SFA when FlashComm is enabled.
-        self.enable_dsa_cp = enable_dsa_cp()
+        self.enable_mlapo = bool(get_ascend_config().enable_mlapo)
+
         self.enable_sp = enable_sp()
 
-        # Enable layer sharding via DSA-CP on the P node in the PD-disaggregated setup.
-        self.enable_dsa_cp_with_layer_shard = enable_dsa_cp_with_layer_shard()
+    @property
+    def uses_packed_sfa_main_cache(self) -> bool:
+        return bool(self.enable_sparse_sfa_c8 or self.enable_sparse_sfa_turboquant)
 
-        # SFA DSA-CP mixed deployments keep o_proj in the existing TP layout.
-        # Decode can use the TP-sharded o_proj directly after an activation
-        # all-to-all, while prefill/mixed batches temporarily gather the TP
-        # shards into a full-weight buffer because their SFA output is not
-        # TP-sharded. This is part of the DSA-CP mixed-mode data path rather
-        # than an independent user-facing feature switch.
-        self.enable_dsa_cp_with_o_proj_tp = enable_dsa_cp_with_o_proj_tp()
+    @property
+    def skip_topk(self) -> bool:
+        return self._skip_topk
 
-        if self.enable_dsa_cp:
-            self.local_num_heads = self.num_heads * self.tp_size
-            if self.enable_dsa_cp_with_layer_shard:
-                self.layer_sharding_kwargs = []
-                for layer_name in get_ascend_config().layer_sharding or []:
-                    if layer_name in kwargs:
-                        self.layer_sharding_kwargs.append(kwargs[layer_name])
-                    else:
-                        logger.warning_once(
-                            f"Layer '{layer_name}' not found in kwargs, skipping sharding. "
-                            f"Check layer_sharding config and model layer names."
-                        )
-                register_all_layers_to_shard_weight_series(self.layer_sharding_kwargs)
+    @skip_topk.setter
+    def skip_topk(self, value: bool) -> None:
+        self._skip_topk = bool(value)
+        if hasattr(self, "_is_mtp_layer"):
+            self.skip_indexer_pre_process = self._skip_topk and not self._is_mtp_layer
+
+    @property
+    def runtime_has_indexer(self) -> bool:
+        return self.has_indexer and not getattr(self, "skip_indexer_pre_process", False)
 
     @staticmethod
     def update_graph_params(
@@ -716,15 +924,19 @@ class AscendSFAImpl(MLAAttentionImpl):
         num_tokens,
         vllm_config=None,
         speculative_config=None,
-        num_dcp_pcp_tokens=None,
         draft_attn_metadatas=None,
     ):
         # sfa does not need to update graph params
         pass
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
-        # NOTE: We currently do not support quant kv_b_proj.
-        assert isinstance(self.kv_b_proj.quant_method, UnquantizedLinearMethod)
+        # kv_b_proj is absorbed into W_UK/W_UV below and then disposed, so it never runs a
+        # matmul. What matters is that whichever quant method owns it left a dense weight
+        # behind; a quantized one would have replaced it with a layout we cannot split.
+        assert self.kv_b_proj.weight.dtype == act_dtype, (
+            f"SFA absorbs kv_b_proj and needs it dense in {act_dtype}, "
+            f"got {self.kv_b_proj.weight.dtype} from {type(self.kv_b_proj.quant_method).__name__}"
+        )
         # NOTE: Weight will be reshaped next, we need to revert and transpose it.
         kv_b_proj_weight = torch_npu.npu_format_cast(self.kv_b_proj.weight.data, ACL_FORMAT_FRACTAL_ND).T
         assert kv_b_proj_weight.shape == (
@@ -745,152 +957,185 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         W_UK, W_UV = kv_b_proj_weight.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
 
-        # NOTE: When we make a incontiguous weight contiguous, a new address will be allocated for the weight,
-        # in graph + RL scenario, we only capture the graph once, and the weight address is expected to be the same
-        # across iterations, so we need to copy the weight to the original address after making it contiguous.
-        if not hasattr(self, "W_UV"):
-            # Convert from (L, N, V) to (N, L, V)
-            self.W_UV = W_UV.transpose(0, 1).contiguous()
-            # Convert from (L, N, P) to (N, P, L)
-            self.W_UK_T = W_UK.permute(1, 2, 0).contiguous()
-        else:
-            self.W_UV.copy_(W_UV.transpose(0, 1).contiguous())
-            self.W_UK_T.copy_(W_UK.permute(1, 2, 0).contiguous())
+        # NOTE: `W_UK`/`W_UV` must live at a stable address: in graph + RL
+        # scenario the graph is captured once, so every later weight update
+        # reload has to refresh the stored tensors in place instead of
+        # rebinding the attributes to freshly allocated tensors.
+        # `replace_parameter(..., prefer_copy=True)` does exactly that: it
+        # copies into the existing storage while the new value stays
+        # compatible, and rebinds only when shape/dtype/device actually
+        # changes. This mirrors how upstream vLLM refreshes
+        # `MLAAttention.W_UV`/`W_UK_T`, and unlike a plain `copy_` it cannot
+        # raise on a shape mismatch.
+        replace_parameter(
+            self,
+            "W_UV",
+            W_UV.transpose(0, 1).contiguous(),  # (L, N, V) -> (N, L, V)
+            prefer_copy=True,
+        )
+        replace_parameter(
+            self,
+            "W_UK_T",
+            W_UK.permute(1, 2, 0).contiguous(),  # (L, N, P) -> (N, P, L)
+            prefer_copy=True,
+        )
 
-        # TODO(zzzzwwjj): Currently, torch.ops._C_ascend.batch_matmul_transpose cannot support weight nz
-        # self.W_UV = maybe_trans_nz(self.W_UV)
+        # Dispose kv_b_proj since it is replaced by W_UV and W_UK_T to save memory.
+        # RL keeps it: it is the only source of W_UV/W_UK_T, so every weight
+        # update re-derives them from this parameter and the parameter must stay
+        # loadable (#15463).
+        if not self.rl_weight_update_enabled:
+            dispose_layer(self.kv_b_proj)
+        self.preprocess_type = self._resolve_preprocess_type(act_dtype)
 
-        # Dispose kv_b_proj since it is replaced by W_UV and W_UK_T to save memory
-        dispose_layer(self.kv_b_proj)
-        if self.enable_dsa_cp:
-            if self.enable_dsa_cp_with_layer_shard:
-                for layer in self.layer_sharding_kwargs or []:
-                    if is_hidden_layer(layer):
-                        post_process_after_loading_for_shard_weight_series(layer)
-            elif self.enable_dsa_cp_with_o_proj_tp:
-                self._init_o_proj_tp_full_params()
-
-        if self.enable_sfa_prolog_v3:
-            reasons = self._get_sfa_prolog_v3_unsupported_reasons()
-            if reasons:
-                self.enable_sfa_prolog_v3 = False
-                self.enable_mlapo = False
-                for msg in reasons:
-                    logger.warning_once(
-                        f"{msg} Disable SFA mla_prolog_v3 for layer {self.layer_name}; "
-                        "fallback to native preprocessing."
-                    )
-            else:
-                self._process_weights_for_fused_prolog_v3()
-
-        if not self.enable_sfa_prolog_v3 and self.enable_mlapo:
-            quant_method = getattr(
-                getattr(self.fused_qkv_a_proj, "quant_method", None),
-                "quant_method",
-                None,
-            )
-            reasons = []
-            is_quantized = isinstance(quant_method, (AscendW8A8LinearMethod, AscendW8A8MXFP8DynamicLinearMethod))
-            if self.fused_qkv_a_proj is None:
-                reasons.append("fused_qkv_a_proj is None, mlapo is disabled.")
-            if not is_quantized and get_ascend_device_type() != AscendDeviceType.A5:
-                reasons.append(
-                    "Currently mlapo only supports W8A8 quantization in SFA scenario on non-A5 devices."
-                    "Some layers in your model are not quantized with W8A8,"
-                    "thus mlapo is disabled for these layers."
-                )
-            if self.enable_dsa_cp:
-                reasons.append("Currently mlapo does not support SFA with CP,thus mlapo is disabled for these layers.")
-            if reasons:
-                self.enable_mlapo = False
-                for msg in reasons:
-                    logger.warning_once(msg)
-            else:
-                self.mlapo_is_quantized = is_quantized
-                if get_ascend_device_type() == AscendDeviceType.A5:
-                    if is_quantized:
-                        self._process_weights_for_fused_mlapo_a5(act_dtype)
-                    else:
-                        self._process_weights_for_fused_mlapo_a5_float(act_dtype)
-                else:
-                    self._process_weights_for_fused_mlapo(act_dtype)
-
-        if self.enable_sparse_li_c8 and get_ascend_device_type() == AscendDeviceType.A5:
-            if hasattr(self, "mlapo_is_quantized") and not self.mlapo_is_quantized:
-                self.c8_k_cache_dtype = act_dtype
-                self.c8_k_scale_cache_dtype = act_dtype
-
-        if not self.enable_mlapo and not self.enable_sfa_prolog_v3:
-            # if mlapo, W_UK_T can't trans nz
+        if self.preprocess_type == PreprocessType.NATIVE:
             self.W_UK_T = maybe_trans_nz(self.W_UK_T)
 
-        if self.has_indexer and self.enable_sparse_li_c8 and AscendSFAImpl.q_hadamard is None:
-            AscendSFAImpl.q_hadamard = torch.tensor(scipy.linalg.hadamard(128), dtype=torch.bfloat16, device="npu") / (
-                128**0.5
-            )
-        if self.has_indexer and self.enable_sparse_li_c8 and AscendSFAImpl.k_hadamard is None:
-            AscendSFAImpl.k_hadamard = torch.tensor(scipy.linalg.hadamard(128), dtype=torch.bfloat16, device="npu") / (
-                128**0.5
-            )
+        if self.preprocess_type == PreprocessType.PROLOG_V3 and self.enable_sparse_sfa_c8:
+            if self.sfa_qsfa_kr_cache_dummy is None:
+                self.sfa_qsfa_kr_cache_dummy = torch.empty(
+                    0,
+                    dtype=torch.bfloat16,
+                    device=self.weight_dq.device,
+                )
+
+        if self.has_indexer:
+            self.indexer.process_weights_after_loading()
 
     @staticmethod
-    def _is_w8a8_dynamic_linear(layer: torch.nn.Module | None) -> bool:
-        quant_method = getattr(getattr(layer, "quant_method", None), "quant_method", None)
-        return isinstance(quant_method, AscendW8A8DynamicLinearMethod)
+    def _get_layer_quant_method(layer: torch.nn.Module | None):
+        return getattr(getattr(layer, "quant_method", None), "quant_method", None)
 
-    def _get_sfa_prolog_v3_unsupported_reasons(self) -> list[str]:
+    def _resolve_preprocess_type(self, act_dtype: torch.dtype) -> PreprocessType:
+        quant_method = self._get_layer_quant_method(self.fused_qkv_a_proj)
+        self._quant_type = type(quant_method) if quant_method is not None else None
+
+        pp_type = self._fused_preprocess_type()
+        if pp_type is not None and self._try_enable_type(pp_type, act_dtype):
+            return pp_type
+        return PreprocessType.NATIVE
+
+    def _fused_preprocess_type(self) -> PreprocessType | None:
+        """Return the enabled fused preprocess type, or None if it cannot run."""
+        quant_method = self._get_layer_quant_method(self.fused_qkv_a_proj)
+        qt = type(quant_method) if quant_method is not None else None
+
+        # PROLOG_V3 takes precedence over MLAPO and is the default fused
+        # preprocessing for quantized SFA layers in every deployment (plain
+        # serving, PD KV producers and KV consumers). ``enable_dsa_cp`` is the
+        # prefill/P-node route selector: it routes to AscendSFADSACPImpl,
+        # which unconditionally disables fused preprocessing, so the two are
+        # mutually exclusive by construction. The C8 switches only select the
+        # KV cache layout and are orthogonal to this choice. Unquantized
+        # layers keep the NATIVE chain outside KV consumers because the
+        # unquantized weight preparation transposes fused_qkv_a_proj.weight
+        # in place, which the NATIVE fallback still consumes.
+        if getattr(self, "dcp_group", None) is None:
+            prolog_v3_eligible = qt is not None or self.is_kv_consumer
+            if prolog_v3_eligible and (
+                qt is AscendW8A8DynamicLinearMethod or qt is AscendW8A8MXFP8DynamicLinearMethod or qt is None
+            ):
+                if not self._get_fused_type_unsupported_reasons(PreprocessType.PROLOG_V3):
+                    return PreprocessType.PROLOG_V3
+
+        eligible = qt is AscendW8A8LinearMethod and self.enable_mlapo
+        if eligible and not self._get_fused_type_unsupported_reasons(PreprocessType.MLAPO):
+            return PreprocessType.MLAPO
+
+        return None
+
+    def _try_enable_type(self, pp_type: PreprocessType, act_dtype: torch.dtype) -> bool:
+        reasons = self._get_fused_type_unsupported_reasons(pp_type)
+        if reasons:
+            for msg in reasons:
+                logger.warning_once(msg)
+            return False
+        if pp_type is PreprocessType.PROLOG_V3:
+            self._process_weights_for_fused_prolog_v3()
+        else:
+            self._process_weights_for_fused_mlapo(act_dtype)
+        return True
+
+    def _get_fused_type_unsupported_reasons(self, pp_type: PreprocessType) -> list[str]:
         reasons = []
-        for name, layer in (
-            ("fused_qkv_a_proj", self.fused_qkv_a_proj),
-            ("q_proj", self.q_proj),
-        ):
-            if not self._is_w8a8_dynamic_linear(layer):
-                reasons.append(f"Currently SFA mla_prolog_v3 only supports W8A8 dynamic quantization for {name}.")
+        if self.qk_rope_head_dim == 0:
+            reasons.append("NoPE SFA currently uses native preprocessing; fused NoPE contracts are not enabled.")
         if self.kv_a_layernorm is None or self.q_a_layernorm is None:
-            reasons.append("SFA mla_prolog_v3 requires q_a_layernorm and kv_a_layernorm.")
-        if getattr(self.q_proj, "_chunk_size", 0):
-            reasons.append("SFA mla_prolog_v3 does not support chunked q_proj weights yet.")
-        if self.enable_dsa_cp:
-            reasons.append("SFA mla_prolog_v3 does not support DSA-CP; DSA-CP takes precedence.")
-        if self.is_kv_producer:
-            reasons.append("SFA mla_prolog_v3 is disabled on KV producer workers.")
+            reasons.append("Fused preprocessing requires q_a_layernorm and kv_a_layernorm.")
+        if self.fused_qkv_a_proj is None:
+            reasons.append("fused_qkv_a_proj is None, mlapo is disabled.")
+
+        quant_method = self._get_layer_quant_method(self.fused_qkv_a_proj)
+        qt = type(quant_method) if quant_method is not None else None
+        if pp_type is PreprocessType.PROLOG_V3:
+            # Prolog's indexer query can carry quantization scales independently
+            # of the MLA weight type. Preserve the native query for an
+            # unquantized indexer, including layers that later toggle skip_topk.
+            if self.has_indexer:
+                wq_b = getattr(self.indexer, "wq_b", None)
+                if not hasattr(wq_b, "weight_scale"):
+                    reasons.append("PROLOG_V3 requires a quantized indexer query projection.")
+            if self.enable_sparse_sfa_turboquant:
+                reasons.append("PROLOG_V3 does not support the TurboQuant 4-bit latent cache.")
+            if qt is None and self.enable_sparse_sfa_c8:
+                reasons.append("PROLOG_V3: C8 sparse requires quantized MLAPO.")
+            if getattr(self.q_proj, "_chunk_size", 0):
+                reasons.append("PROLOG_V3 does not support chunked q_proj weights yet.")
+        elif pp_type is PreprocessType.MLAPO:
+            if self.enable_sparse_sfa_turboquant:
+                reasons.append("MLAPO does not support the TurboQuant 4-bit latent cache.")
+            elif self.enable_sparse_sfa_c8:
+                reasons.append("MLAPO does not support sparse C8; use PROLOG_V3 instead.")
+
         return reasons
 
     def _process_weights_for_fused_prolog_v3(self) -> None:
         assert self.fused_qkv_a_proj is not None
         assert self.q_proj is not None
 
+        qt = self._quant_type
+
+        if qt is None:
+            self.fused_qkv_a_proj.weight.data = self.fused_qkv_a_proj.weight.data.T
+
         fused_weight = self.fused_qkv_a_proj.weight.data
         weight_dq = fused_weight[..., : self.q_lora_rank].contiguous()
         weight_dkv_kr = fused_weight[..., self.q_lora_rank :].contiguous()
-        weight_uq_qr = self.q_proj.weight.data.contiguous()
+        if qt is not None:
+            weight_uq_qr = self.q_proj.weight.data.contiguous()
+        else:
+            weight_uq_qr = self.q_proj.weight.data.T.contiguous()
+
         self.weight_dq = torch_npu.npu_format_cast(weight_dq, ACL_FORMAT_FRACTAL_NZ)
         self.weight_dkv_kr = torch_npu.npu_format_cast(weight_dkv_kr, ACL_FORMAT_FRACTAL_NZ)
         self.weight_uq_qr = torch_npu.npu_format_cast(weight_uq_qr, ACL_FORMAT_FRACTAL_NZ)
 
-        q_a_proj_deq_scl = self.fused_qkv_a_proj.weight_scale[: self.q_lora_rank].contiguous()
-        kv_a_proj_deq_scl = self.fused_qkv_a_proj.weight_scale[self.q_lora_rank :].contiguous()
-        self.dequant_scale_w_dq = q_a_proj_deq_scl.view(1, -1).to(torch.float)
-        self.dequant_scale_w_dkv_kr = kv_a_proj_deq_scl.view(1, -1).to(torch.float)
-        self.dequant_scale_w_uq_qr = self.q_proj.weight_scale.data.view(1, -1).to(torch.float)
-        if self.enable_sparse_sfa_c8:
-            self.sfa_qsfa_k_nope_clip_alpha = torch.ones(
-                1,
-                dtype=torch.float32,
-                device=self.weight_dq.device,
-            )
-            if self.sfa_qsfa_kr_cache_dummy is None:
-                # ckvkr_repo_mode=1 stores rope in the packed KV cache, but the
-                # operator still requires kr_cache. Keep a stable, non-aliased
-                # dummy so first-run tiling/graph capture cannot alias kv_cache.
-                self.sfa_qsfa_kr_cache_dummy = torch.empty(
-                    0,
-                    dtype=torch.bfloat16,
+        if qt is AscendW8A8DynamicLinearMethod:
+            q_scl = self.fused_qkv_a_proj.weight_scale[: self.q_lora_rank].contiguous()
+            kv_scl = self.fused_qkv_a_proj.weight_scale[self.q_lora_rank :].contiguous()
+            self.dequant_scale_w_dq = q_scl.view(1, -1).to(torch.float)
+            self.dequant_scale_w_dkv_kr = kv_scl.view(1, -1).to(torch.float)
+            self.dequant_scale_w_uq_qr = self.q_proj.weight_scale.data.view(1, -1).to(torch.float)
+            if self.enable_sparse_sfa_c8:
+                self.sfa_qsfa_k_nope_clip_alpha = torch.ones(
+                    1,
+                    dtype=torch.float32,
                     device=self.weight_dq.device,
                 )
-        if self.is_kv_consumer:
-            # Decode-only workers only execute Prolog. Drop the native Linear
-            # weights after their Prolog layouts and scales have been copied.
+        elif qt is AscendW8A8MXFP8DynamicLinearMethod:
+            w_scale = self.fused_qkv_a_proj.weight_scale
+            w_scale = w_scale.transpose(0, 1)
+            w_scale = w_scale.reshape(-1, w_scale.shape[1] * w_scale.shape[2])
+            self.weight_dq_scale = w_scale[: self.q_lora_rank, ...]
+            self.weight_dkv_kr_scale = w_scale[self.q_lora_rank :, ...]
+
+            uq_scale = self.q_proj.weight_scale.data.transpose(0, 1)
+            self.weight_uq_qr_scale = uq_scale.reshape(-1, uq_scale.shape[1] * uq_scale.shape[2])
+
+        # Same reasoning as kv_b_proj: once the fused projections are consumed by
+        # PROLOG_V3 they are pure load sources, but discarding their storage
+        # breaks the next layerwise reload, so RL keeps them.
+        if self.is_kv_consumer and not self.rl_weight_update_enabled:
             dispose_layer(self.fused_qkv_a_proj)
             dispose_layer(self.q_proj)
             torch.npu.empty_cache()
@@ -911,7 +1156,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         wd_qkv = torch.cat((kv_a_proj_wt, q_a_proj_wt), dim=-1)
         wd_qkv = wd_qkv.t().contiguous()
         wd_qkv = transdata(wd_qkv, block_size=(16, 32)).unsqueeze(0).contiguous()
-        self.wd_qkv = torch_npu.npu_format_cast(wd_qkv, 29)
+        self.wd_qkv = torch_npu.npu_format_cast(wd_qkv, ACL_FORMAT_FRACTAL_NZ)
 
         kv_a_proj_deq_scl = self.fused_qkv_a_proj.deq_scale[self.q_lora_rank :].contiguous()
         q_a_proj_deq_scl = self.fused_qkv_a_proj.deq_scale[: self.q_lora_rank].contiguous()
@@ -933,7 +1178,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         wu_q = trans_rope_weight(wu_q, self.qk_rope_head_dim)
         wu_q = wu_q.reshape(self.num_heads * (self.qk_nope_head_dim + self.qk_rope_head_dim), -1)
         wu_q = transdata(wu_q, block_size=(16, 32)).unsqueeze(0).contiguous()
-        self.wu_q = torch_npu.npu_format_cast(wu_q, 29)
+        self.wu_q = torch_npu.npu_format_cast(wu_q, ACL_FORMAT_FRACTAL_NZ)
 
         qb_deq_scl = self.q_proj.deq_scale.data
         qb_deq_scl = qb_deq_scl.reshape(self.num_heads, self.qk_nope_head_dim + self.qk_rope_head_dim, -1)
@@ -972,45 +1217,6 @@ class AscendSFAImpl(MLAAttentionImpl):
             self.q_proj.quant_bias = None
             torch.npu.empty_cache()
 
-    def _process_weights_for_fused_mlapo_a5(self, act_dtype: torch.dtype):
-        assert self.fused_qkv_a_proj is not None
-        assert self.q_proj is not None
-        weight_dq = self.fused_qkv_a_proj.weight.data[..., : self.q_lora_rank].contiguous()
-        self.weight_dq = torch_npu.npu_format_cast(weight_dq, 29)
-
-        weight_uq_qr = self.q_proj.weight.data.contiguous()
-        self.weight_uq_qr_scale = self.q_proj.weight_scale.data.transpose(0, 1)
-        self.weight_uq_qr_scale = self.weight_uq_qr_scale.reshape(
-            -1, self.weight_uq_qr_scale.shape[1] * self.weight_uq_qr_scale.shape[2]
-        )
-        self.weight_uq_qr = torch_npu.npu_format_cast(weight_uq_qr, 29)
-
-        weight_dkv_kr = self.fused_qkv_a_proj.weight.data[..., self.q_lora_rank :].contiguous()
-        self.weight_dkv_kr = torch_npu.npu_format_cast(weight_dkv_kr, 29)
-
-        weight_scale = self.fused_qkv_a_proj.weight_scale
-        weight_scale = weight_scale.transpose(0, 1)
-        weight_scale = weight_scale.reshape(-1, weight_scale.shape[1] * weight_scale.shape[2])
-        self.weight_dq_scale = weight_scale[: self.q_lora_rank, ...]
-        self.weight_dkv_kr_scale = weight_scale[self.q_lora_rank :, ...]
-
-    def _process_weights_for_fused_mlapo_a5_float(self, act_dtype: torch.dtype):
-        assert self.fused_qkv_a_proj is not None
-        assert self.q_proj is not None
-        self.fused_qkv_a_proj.weight.data = self.fused_qkv_a_proj.weight.data.T
-        weight_dq = self.fused_qkv_a_proj.weight.data[..., : self.q_lora_rank].contiguous()
-        self.weight_dq_cpu = weight_dq.cpu()
-        self.weight_dq = torch_npu.npu_format_cast(weight_dq, 29)
-
-        weight_uq_qr = self.q_proj.weight.data.T
-        weight_uq_qr = weight_uq_qr.contiguous()
-        self.weight_uq_qr_cpu = weight_uq_qr.cpu()
-        self.weight_uq_qr = torch_npu.npu_format_cast(weight_uq_qr, 29)
-
-        weight_dkv_kr = self.fused_qkv_a_proj.weight.data[..., self.q_lora_rank :].contiguous()
-        self.weight_dkv_kr_cpu = weight_dkv_kr.cpu()
-        self.weight_dkv_kr = torch_npu.npu_format_cast(weight_dkv_kr, 29)
-
     def forward_mha(
         self,
         q: torch.Tensor,
@@ -1044,149 +1250,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         x = torch_npu.npu_interleave_rope(x, cos, sin)
         return x.view(B, N, D)
 
-    def _init_o_proj_tp_full_params(self):
-        """
-        Initialize TP-mode aliases and Full-mode buffers for DSA-CP o_proj.
-
-        In SFA DSA-CP mixed execution, the same model instance can run both
-        decode-only and prefill/mixed batches:
-        - Decode-only batches all-to-all the SFA output in the TP group, then
-          run the original TP-sharded o_proj.
-        - Prefill/mixed batches produce SFA output that is not directly
-          compatible with TP-sharded o_proj, so each rank all-gathers the TP
-          o_proj shards and input-sharded quant params before running o_proj.
-
-        The original TP parameter storage remains the persistent source of
-        truth. The o_proj_tp_* tensors below alias that storage, while the
-        o_proj_full_* tensors are temporary gather destinations reused across
-        forwards. They are not a second persistent copy of the TP weight.
-        """
-        sample = self.o_proj.weight
-        self.o_proj_full_weight_gather_dim = 1 if self._is_o_proj_unquantized() else 0
-        if self.o_proj_full_weight_gather_dim == 0:
-            full_shape = (sample.shape[0] * self.tp_size, sample.shape[1])
-            gather_shape = full_shape
-        else:
-            full_shape = (sample.shape[0], sample.shape[1] * self.tp_size)
-            gather_shape = (sample.shape[1] * self.tp_size, sample.shape[0])
-        # Main and MTP layers can use different quantized o_proj weight layouts,
-        # so key the shared full-gather pool by gather dimension, dtype, and shape.
-        pool_key = (
-            sample.device.type,
-            sample.device.index,
-            sample.dtype,
-            self.o_proj_full_weight_gather_dim,
-            full_shape,
-        )
-        if pool_key not in AscendSFAImpl.o_proj_full_pools:
-            AscendSFAImpl.o_proj_full_pools[pool_key] = torch.empty(
-                gather_shape, dtype=sample.dtype, device=sample.device
-            )
-        self.o_proj_full_gather_pool = AscendSFAImpl.o_proj_full_pools[pool_key]
-        if self.o_proj_full_weight_gather_dim == 0:
-            self.o_proj_full_pool = self.o_proj_full_gather_pool
-        else:
-            self.o_proj_full_pool = self.o_proj_full_gather_pool.transpose(0, 1)
-
-        # TP tensors alias the original parameter storage. The TP shard remains
-        # the single source of truth; full-weight tensors below are temporary
-        # gather destinations only.
-        self.o_proj_tp_weight = self.o_proj.weight.detach()
-        if self.o_proj_full_weight_gather_dim == 0:
-            self.o_proj_tp_weight_gather_input = self.o_proj_tp_weight
-        else:
-            # Communication scratch only: all_gather_into_tensor concatenates on
-            # dim0, while unquantized row-parallel o_proj is sharded on dim1.
-            self.o_proj_tp_weight_gather_input = self.o_proj_tp_weight.transpose(0, 1).contiguous()
-        self.o_proj_tp_aclnn_input_params = {}
-        self.o_proj_full_aclnn_input_params = {}
-        for param_name in O_PROJ_ACLNN_INPUT_PARAMS:
-            param = getattr(self.o_proj, param_name, None)
-            if param is None:
-                continue
-            self.o_proj_tp_aclnn_input_params[param_name] = param.detach()
-            self.o_proj_full_aclnn_input_params[param_name] = param.repeat(self.tp_size)
-
-        self.o_proj_tp_input_sharded_quant_params = {}
-        self.o_proj_full_input_sharded_quant_params = {}
-        for param_name, param in self._iter_o_proj_input_sharded_quant_params():
-            self.o_proj_tp_input_sharded_quant_params[param_name] = param.detach()
-            self.o_proj_full_input_sharded_quant_params[param_name] = torch.empty(
-                (param.shape[0] * self.tp_size, *param.shape[1:]), dtype=param.dtype, device=param.device
-            )
-
-    def _iter_o_proj_input_sharded_quant_params(self):
-        if not isinstance(self.o_proj, nn.Module):
-            return
-        for param_name, param in self.o_proj.named_parameters(recurse=False):
-            if param_name == "weight" or param_name in O_PROJ_ACLNN_INPUT_PARAMS:
-                continue
-            if getattr(param, "input_dim", None) == 1:
-                yield param_name, param
-
-    def _switch_o_proj_params(self, params: dict[str, torch.Tensor]):
-        for param_name, param in params.items():
-            getattr(self.o_proj, param_name).set_(param)
-
-    def _get_o_proj_linear_method(self):
-        quant_method = self.o_proj.quant_method
-        return getattr(quant_method, "quant_method", quant_method)
-
-    def _is_o_proj_unquantized(self) -> bool:
-        return isinstance(self._get_o_proj_linear_method(), UnquantizedLinearMethod)
-
-    def _apply_o_proj_full_weight(self, attn_output: torch.Tensor) -> torch.Tensor:
-        return self._get_o_proj_linear_method().apply(self.o_proj, attn_output)
-
-    def _handle_o_proj_weight_switch_and_forward(
-        self,
-        attn_output: torch.Tensor,
-        output: torch.Tensor,
-        o_proj_full_handle: torch.distributed.Work | None,
-        o_proj_full_param_handles: list[torch.distributed.Work | None] | None,
-        should_shard_weight: bool,
-    ) -> tuple[torch.Tensor, bool]:
-        """
-        Handle o_proj weight switching between TP-mode and Full-mode, and execute forward computation.
-        """
-        # Gather o_proj weight from all TP ranks for Full-mode computation
-        if should_shard_weight:
-            # Wait for the completion of o_proj weight all-gather operation
-            if o_proj_full_handle is not None:
-                o_proj_full_handle.wait()
-            for handle in o_proj_full_param_handles or []:
-                if handle is not None:
-                    handle.wait()
-
-            # Temporarily switch o_proj to the gathered full-weight view for
-            # prefill/mixed DSA-CP, whose attention output is not TP-sharded.
-            self.o_proj.weight.set_(self.o_proj_full_pool)
-            self._switch_o_proj_params(self.o_proj_full_aclnn_input_params)
-            self._switch_o_proj_params(self.o_proj_full_input_sharded_quant_params)
-            output[...] = self._apply_o_proj_full_weight(attn_output)
-            # Restore TP aliases so later decode batches keep using TP storage.
-            self.o_proj.weight.set_(self.o_proj_tp_weight)
-            self._switch_o_proj_params(self.o_proj_tp_aclnn_input_params)
-            self._switch_o_proj_params(self.o_proj_tp_input_sharded_quant_params)
-
-            return output, False
-        else:
-            # For decode scenario: perform all-to-all communication on o_proj input activations
-            # Reshape for all-to-all: [batch * seq, tp_size, head_dim] -> [tp_size, batch * seq, head_dim]
-            send = (
-                attn_output.view(-1, self.tp_size, self.num_heads * self.v_head_dim)
-                .permute(1, 0, 2)
-                .reshape(-1, self.num_heads * self.v_head_dim)
-            )
-
-            attn_output = torch.empty_like(send)
-            torch.distributed.all_to_all_single(attn_output, send, group=get_tp_group().device_group)
-
-            return attn_output, True
-
-    def _get_full_kv(self, k, attn_metadata):
-        return k
-
     def exec_kv(
         self,
         kv_no_split: torch.Tensor,
@@ -1196,17 +1259,41 @@ class AscendSFAImpl(MLAAttentionImpl):
         slots: torch.Tensor,
         attn_metadata: M,
     ):
+        if self.qk_rope_head_dim == 0 and not self.enable_sparse_sfa_c8:
+            assert self.kv_a_layernorm is not None
+            values = self.kv_a_layernorm(kv_no_split.reshape(-1, self.kv_lora_rank))
+            cache = kv_cache[0]
+            # The hybrid cache configuration keeps NoPE main KV pages packed.
+            torch_npu.npu_scatter_nd_update_(
+                cache.view(-1, self.kv_lora_rank),
+                slots[: values.shape[0]].view(-1, 1),
+                values.to(cache.dtype),
+            )
+            return None, None
         B = kv_no_split.shape[0]
         N = self.num_kv_heads
         S = 1
         # npu_kv_rmsnorm_rope_cache needs [B, N, S, D]
         kv_no_split = kv_no_split.view(B, N, S, self.kv_lora_rank + self.qk_rope_head_dim)
         cache_mode = "PA"
+        # TQ4 must be checked before C8 because both return packed byte components.
+        if self.enable_sparse_sfa_turboquant:
+            assert self.kv_a_layernorm is not None
+            assert self.turboquant is not None
+            return turboquant_kv_rmsnorm_rope(
+                kv_no_split,
+                self.kv_a_layernorm.weight,
+                cos,
+                sin,
+                self.kv_lora_rank,
+                self.qk_rope_head_dim,
+                turboquant=self.turboquant,
+                epsilon=self.kv_a_layernorm.variance_epsilon,
+            )
 
-        use_custom_kv = self.enable_sparse_sfa_c8 and (
-            get_ascend_device_type() != AscendDeviceType.A5 or self.enable_dsa_cp or not self.has_indexer
-        )
-        if use_custom_kv:
+        # npu_kv_rmsnorm_rope_cache doesn't support C8 fp8 block quant;
+        # all sparse-C8-SFA layers use custom_kv_rmsnorm_rope instead.
+        if self.enable_sparse_sfa_c8:
             assert self.kv_a_layernorm is not None
             return custom_kv_rmsnorm_rope(
                 kv_no_split,
@@ -1216,37 +1303,22 @@ class AscendSFAImpl(MLAAttentionImpl):
                 self.kv_lora_rank,
                 self.qk_rope_head_dim,
                 epsilon=self.kv_a_layernorm.variance_epsilon,
-                dst_type=(torch.float8_e4m3fn if get_ascend_device_type() == AscendDeviceType.A5 else 1),
+                dst_type=self.c8_cache_dtype,
                 tile_size=self.sfa_qsfa_tile_size,
             )
 
-        if self.enable_dsa_cp:
-            _, _, k_pe, k_nope = torch_npu.npu_kv_rmsnorm_rope_cache(
-                kv_no_split,
-                self.kv_a_layernorm.weight,  # type: ignore[union-attr]
-                cos,
-                sin,
-                slots.to(torch.int64),
-                kv_cache[1],
-                kv_cache[0],
-                epsilon=self.kv_a_layernorm.variance_epsilon,  # type: ignore[union-attr]
-                cache_mode=cache_mode,
-                is_output_kv=True,
-            )
-            return k_pe, k_nope, None
-        else:
-            torch_npu.npu_kv_rmsnorm_rope_cache(
-                kv_no_split,
-                self.kv_a_layernorm.weight,  # type: ignore[union-attr]
-                cos,
-                sin,
-                slots.to(torch.int64),
-                kv_cache[1],
-                kv_cache[0],
-                epsilon=self.kv_a_layernorm.variance_epsilon,  # type: ignore[union-attr]
-                cache_mode=cache_mode,
-            )
-            return None, None
+        torch_npu.npu_kv_rmsnorm_rope_cache(
+            kv_no_split,
+            self.kv_a_layernorm.weight,  # type: ignore[union-attr]
+            cos,
+            sin,
+            _int64_kv_slots(slots, attn_metadata),
+            kv_cache[1],
+            kv_cache[0],
+            epsilon=self.kv_a_layernorm.variance_epsilon,  # type: ignore[union-attr]
+            cache_mode=cache_mode,
+        )
+        return None, None
 
     # Return `ql_nope`, `q_pe`
     def _q_proj_and_k_up_proj(self, x):
@@ -1256,232 +1328,252 @@ class AscendSFAImpl(MLAAttentionImpl):
             .split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
         )
 
-        # Convert from (B, N, P) to (N, B, P)
-        q_nope = q_nope.transpose(0, 1)
-        # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
-        ql_nope = torch.bmm(q_nope, self.W_UK_T)
-        # Convert from (N, B, L) to (B, N, L)
-        return ql_nope.transpose(0, 1), q_pe
+        if (
+            q_nope.dtype in [torch.float16, torch.bfloat16]
+            and hasattr(torch_npu, "npu_transpose_batchmatmul")
+            and q_nope.shape[0] < TRANSPOSE_BMM_MAX_SUPPORTED_DIM
+        ):
+            # Convert from (B, N, P) to (N, B, P) and multiply
+            # (N, B, P) x (N, P, L) -> (B, N, L)
+            ql_nope = torch_npu.npu_transpose_batchmatmul(
+                q_nope,
+                self.W_UK_T,
+                perm_x1=(1, 0, 2),
+                perm_x2=(0, 1, 2),
+                perm_y=(1, 0, 2),
+            )
+        else:
+            # Fallback for torch_npu builds without the fused op, unsupported
+            # dtypes, or a token dim beyond the operand limit.
+            # Convert from (B, N, P) to (N, B, P)
+            q_nope = q_nope.transpose(0, 1)
+            # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
+            ql_nope = torch.bmm(q_nope, self.W_UK_T)
+            # Convert from (N, B, L) to (B, N, L)
+            ql_nope = ql_nope.transpose(0, 1)
+        return ql_nope, q_pe
 
     def _v_up_proj(self, x):
-        num_input_tokens, _, _ = x.shape
-        if (
-            x.dtype in [torch.float16, torch.bfloat16]
-            and hasattr(torch.ops._C_ascend, "batch_matmul_transpose")
-            and num_input_tokens <= BMM_TRANS_MAX_SUPPORTED_TOKENS
-        ):
-            x = x.view(-1, self.local_num_heads, self.kv_lora_rank)
-            res = torch.empty((num_input_tokens, self.local_num_heads, self.v_head_dim), dtype=x.dtype, device=x.device)
-            torch.ops._C_ascend.batch_matmul_transpose(x, self.W_UV, res)
-            x = res.reshape(-1, self.local_num_heads * self.v_head_dim)
-        elif hasattr(torch_npu, "npu_transpose_batchmatmul"):
-            # Convert from (N, B, L)/(N, B, 1, L) to (N, B, L)
-            x = x.view(-1, self.local_num_heads, self.kv_lora_rank)
-            # Multiply (N, B, L) x (N, L, V) -> (B, N, V)
-            x = torch_npu.npu_transpose_batchmatmul(x, self.W_UV, perm_x1=(1, 0, 2), perm_y=(1, 0, 2))
-            # Convert from (N, B, V) to (B, N * V)
+        if hasattr(torch_npu, "npu_transpose_batchmatmul"):
+            # aclnn TransposeBatchMatMul with perm_x1=(1,0,2) (internal
+            # transpose) requires N*L < 65536 on older CANN binaries.
+            #   - If satisfied: keep x as (B, N, L) and let the operator
+            #     transpose internally, saving a contiguous copy.
+            #   - Otherwise: explicit transpose to (N, B, L) and use
+            #     perm_x1=(0,1,2), which downgrades the check to L < 65536.
+            # TODO: CANN 9.2 removes the N*L<65536 check; once it is the
+            # deployment baseline, collapse this branch to perm_x1=(1,0,2).
+            if self.local_num_heads * self.kv_lora_rank < 65536:
+                # (B, N, L) -> operator transposes internally -> (B, N, V)
+                x = x.view(-1, self.local_num_heads, self.kv_lora_rank)
+                x = torch_npu.npu_transpose_batchmatmul(x, self.W_UV, perm_x1=(1, 0, 2), perm_y=(1, 0, 2))
+            else:
+                # (B, N, L) -> (N, B, L) -> (B, N, V); perm_x1=(0,1,2) skips inner transpose
+                x = x.view(-1, self.local_num_heads, self.kv_lora_rank).transpose(0, 1).contiguous()
+                x = torch_npu.npu_transpose_batchmatmul(x, self.W_UV, perm_x1=(0, 1, 2), perm_y=(1, 0, 2))
+            # (B, N, V) -> (B, N * V)
             x = x.reshape(-1, self.local_num_heads * self.v_head_dim)
         else:
-            # Convert from (B, N, L) to (N, B, L)
+            # (B, N, L) -> (N, B, L)
             x = x.view(-1, self.local_num_heads, self.kv_lora_rank).transpose(0, 1)
-            # # Multiply (N, B, L) x (N, L, V) -> (N, B, V)
+            # (N, B, L) x (N, L, V) -> (N, B, V)
             x = torch.bmm(x, self.W_UV)
-            # # Convert from (N, B, V) to (B, N * V)
+            # (N, B, V) -> (B, N * V)
             x = x.transpose(0, 1).reshape(-1, self.local_num_heads * self.v_head_dim)
         return x
 
-    def _sfa_preprocess_with_mlapo(
+    def _sfa_preprocess_prolog_v3(
         self,
         hidden_states: torch.Tensor,
         kv_cache: tuple[torch.Tensor, ...],
         cos: torch.Tensor,
         sin: torch.Tensor,
         slot_mapping: torch.Tensor,
-        num_input_tokens: int,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        return DeviceOperator.sfa_preprocess_with_mlapo(
-            self,
-            hidden_states,
-            kv_cache,
-            cos,
-            sin,
-            slot_mapping,
-            num_input_tokens,
-        )
-
-    def _sfa_preprocess_with_prolog_v3(
-        self,
-        hidden_states: torch.Tensor,
-        kv_cache: tuple[torch.Tensor, ...],
-        cos: torch.Tensor,
-        sin: torch.Tensor,
-        slot_mapping: torch.Tensor,
-        cache_mode: str,
+        *,
+        attn_metadata: M | None = None,
     ) -> tuple[
         torch.Tensor,
         torch.Tensor,
         torch.Tensor,
         torch.Tensor | tuple[torch.Tensor, torch.Tensor] | None,
-        torch.Tensor | None,
-        torch.Tensor | None,
     ]:
-        ql_nope, q_pe, _, q_c, q_c_scale = DeviceOperator.execute_sfa_mla_prolog_v3(
-            self,
-            hidden_states=hidden_states,
-            rope_sin=sin,
-            rope_cos=cos,
-            kv_cache=kv_cache,
-            slot_mapping=slot_mapping,
-            cache_mode=cache_mode,
+        assert slot_mapping.numel() == hidden_states.shape[0], (
+            "SFA Prolog V3 requires one cache index per input token, "
+            f"got token_x={hidden_states.shape[0]} and cache_index={slot_mapping.numel()}."
         )
-        ql_nope = ql_nope.view(-1, self.local_num_heads, self.kv_lora_rank)
-        q_pe = q_pe.view(-1, self.local_num_heads, self.qk_rope_head_dim)
+        assert self.q_a_layernorm is not None, "q_a_layernorm must be initialized for PROLOG_V3"
+        assert self.kv_a_layernorm is not None, "kv_a_layernorm must be initialized for PROLOG_V3"
+
+        qt = self._quant_type
+        use_c8 = self.enable_sparse_sfa_c8
+
+        common: dict[str, Any] = dict(
+            weight_dq=self.weight_dq,
+            weight_uq_qr=self.weight_uq_qr,
+            weight_uk=self.W_UK_T,
+            weight_dkv_kr=self.weight_dkv_kr,
+            rmsnorm_gamma_cq=self.q_a_layernorm.weight.data,
+            rmsnorm_gamma_ckv=self.kv_a_layernorm.weight.data,
+            rmsnorm_epsilon_cq=self.q_a_layernorm.variance_epsilon,
+            rmsnorm_epsilon_ckv=self.kv_a_layernorm.variance_epsilon,
+            query_norm_flag=self.has_indexer,
+            qc_qr_scale=1.0,
+            kc_scale=1.0,
+            cache_mode="PA_BSND",
+            query_quant_mode=0,
+        )
+        kv_cache_nope = kv_cache[0]
+        extra_kwargs: dict[str, Any] = {}
+        if use_c8:
+            extra_kwargs.update(
+                ckvkr_repo_mode=1,
+                quant_scale_repo_mode=1,
+                tile_size=self.sfa_qsfa_tile_size,
+                k_nope_clip_alpha=self.sfa_qsfa_k_nope_clip_alpha,
+            )
+            kr_cache = self.sfa_qsfa_kr_cache_dummy
+        else:
+            kr_cache = kv_cache[1]
+        rope_cos_ = cos.view(cos.shape[0], cos.shape[-1])
+        rope_sin_ = sin.view(sin.shape[0], sin.shape[-1])
+        # The caller forwards the per-step cached int64 slots, so the .to()
+        # below is a no-op in production; kept for direct-call safety.
+        cache_index = slot_mapping.view(-1).to(torch.int64)
+
+        if qt is not None:
+            if qt is AscendW8A8MXFP8DynamicLinearMethod:
+                token_x, ds = torch_npu.npu_dynamic_mx_quant(hidden_states, dst_type=torch.float8_e4m3fn)
+                branch = dict(
+                    dequant_scale_x=ds.reshape(token_x.shape[0], -1).view(torch.float8_e8m0fnu),
+                    dequant_scale_w_dq=self.weight_dq_scale.view(torch.float8_e8m0fnu),
+                    dequant_scale_w_uq_qr=self.weight_uq_qr_scale.view(torch.float8_e8m0fnu),
+                    dequant_scale_w_dkv_kr=self.weight_dkv_kr_scale.view(torch.float8_e8m0fnu),
+                    weight_quant_mode=3,
+                )
+            else:
+                assert qt is AscendW8A8DynamicLinearMethod, (
+                    f"PROLOG_V3 only supports W8A8Dynamic or W8A8MXFP8 quant, "
+                    f"got {qt}. Did _resolve_preprocess_type allow a new quant type?"
+                )
+                token_x, dequant_x = torch_npu.npu_dynamic_quant(hidden_states.contiguous())
+                branch = dict(
+                    dequant_scale_x=dequant_x.view(-1, 1),
+                    dequant_scale_w_dq=self.dequant_scale_w_dq,
+                    dequant_scale_w_uq_qr=self.dequant_scale_w_uq_qr,
+                    dequant_scale_w_dkv_kr=self.dequant_scale_w_dkv_kr,
+                    weight_quant_mode=2,
+                )
+        else:
+            token_x = hidden_states
+            branch = dict(
+                dequant_scale_x=None,
+                dequant_scale_w_dq=None,
+                dequant_scale_w_uq_qr=None,
+                dequant_scale_w_dkv_kr=None,
+                weight_quant_mode=0,
+            )
+
+        ql_nope, q_pe, _, q_c, q_c_scale = torch_npu.npu_mla_prolog_v3(
+            token_x=token_x,
+            rope_sin=rope_sin_,
+            rope_cos=rope_cos_,
+            kv_cache=kv_cache_nope,
+            kr_cache=kr_cache,
+            cache_index=cache_index,
+            kv_cache_quant_mode=3 if use_c8 else 0,
+            **common,
+            **branch,
+            **extra_kwargs,
+        )
+        num_h = self.local_num_heads
+        ql_nope = ql_nope.view(-1, num_h, self.kv_lora_rank)
+        q_pe = q_pe.view(-1, num_h, self.qk_rope_head_dim)
+
         if self.has_indexer:
             if q_c is None:
                 raise RuntimeError("npu_mla_prolog_v3 did not return query_norm for SFA indexer.")
             q_c = q_c.view(-1, self.q_lora_rank)
-            if q_c_scale is not None and self.wq_b is not None and self._is_w8a8_dynamic_linear(self.wq_b):
-                q_c = (q_c, q_c_scale.view(-1))
-        else:
+            if q_c_scale is not None:
+                if qt is AscendW8A8MXFP8DynamicLinearMethod:
+                    q_c_scale = q_c_scale.view(-1, q_c_scale.shape[-1])
+                    q_c = (q_c, q_c_scale)
+                else:
+                    q_c = (q_c, q_c_scale.view(-1))
+        elif self._quant_type is None:
             q_c = None
 
-        k_nope = kv_cache[0] if cache_mode == "TND" else None
-        k_pe = kv_cache[1] if cache_mode == "TND" and not self.enable_sparse_sfa_c8 else None
-        return hidden_states, ql_nope, q_pe, q_c, k_nope, k_pe
+        return hidden_states, ql_nope, q_pe, q_c
 
-    def indexer_select_pre_process(
+    def _sfa_preprocess_mlapo(
         self,
-        x: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
-    ):
-        if not self.has_indexer:
-            raise RuntimeError(
-                f"indexer_select_pre_process should not be called when indexer is None. layer_name={self.layer_name}."
-            )
-
-        assert self.wk_weights_proj is not None
-        assert self.k_norm is not None
-
-        kw, _ = self.wk_weights_proj(x)
-        k_li = kw[:, : self.head_dim]
-        k_li = self.k_norm(k_li).unsqueeze(1)
-        k_li = k_li.view(-1, 1, self.head_dim)
-
-        if HAS_TRITON:
-            cos = cos.view(-1, self.qk_rope_head_dim)
-            sin = sin.view(-1, self.qk_rope_head_dim)
-            k_li = rope_forward_triton_siso(
-                k_li, cos, sin, rope_dim=self.qk_rope_head_dim, is_neox_style=self.is_rope_neox_style
-            )
-        else:
-            k_li_pe, k_li_nope = torch.split(
-                k_li, [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim], dim=-1
-            )
-
-            cos = cos.view(-1, 1, 1, self.qk_rope_head_dim)
-            sin = sin.view(-1, 1, 1, self.qk_rope_head_dim)
-
-            k_li_pe = k_li_pe.unsqueeze(2)
-            k_li_pe = torch_npu.npu_rotary_mul(k_li_pe, cos, sin)
-            k_li_pe = k_li_pe.squeeze(2)
-
-            k_li = torch.cat([k_li_pe, k_li_nope], dim=-1)  # [b*s,128]
-
-        if self.enable_sparse_li_c8:
-            k_li = k_li @ AscendSFAImpl.k_hadamard
-            k_li, k_li_scale = torch_npu.npu_dynamic_quant(k_li.view(-1, self.head_dim), dst_type=self.c8_k_cache_dtype)
-            k_li_scale = k_li_scale.to(self.c8_k_scale_cache_dtype)  # [b*s,]
-            k_li_scale = k_li_scale.unsqueeze(-1)  # [b*s,1]
-        else:
-            k_li_scale = None
-
-        return k_li, k_li_scale
-
-    def indexer_select_post_process(
-        self,
-        x: torch.Tensor,
-        q_c: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        hidden_states: torch.Tensor,
         kv_cache: tuple[torch.Tensor, ...],
-        attn_metadata: M,
         cos: torch.Tensor,
         sin: torch.Tensor,
-        actual_seq_lengths_query: torch.Tensor,
-        actual_seq_lengths_key: torch.Tensor,
-    ):
-        if not self.has_indexer:
-            raise RuntimeError(
-                f"indexer_select_post_process should not be called when indexer is None. layer_name={self.layer_name}."
-            )
-
-        assert self.wk_weights_proj is not None
-        assert self.wq_b is not None
-
-        kw, _ = self.wk_weights_proj(x)
-        weights = kw[:, self.head_dim :]
-        if isinstance(q_c, tuple):
-            q_c_tensor, q_c_scale = q_c
-            q_c_tensor = q_c_tensor.view(-1, q_c_tensor.shape[-1])
-            quant_matmul_kwargs = dict(
-                bias=None,
-                output_dtype=x.dtype,
-            )
-            if q_c_tensor.dtype == torch.float8_e4m3fn:
-                if q_c_scale.dim() == 2:
-                    q_c_scale = q_c_scale.view(q_c_scale.shape[0], -1, 2)
-                quant_matmul_kwargs.update(
-                    scale_dtype=FLOAT8_E8M0FNU_DTYPE,
-                    pertoken_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
-                    group_sizes=[1, 1, getattr(self.wq_b.quant_method.quant_method, "group_size", 32)],
-                )
-            elif q_c_scale.dim() > 1 and q_c_scale.shape[-1] == 1:
-                q_c_scale = q_c_scale.squeeze(dim=-1)
-            q_li = torch_npu.npu_quant_matmul(
-                q_c_tensor,
-                self.wq_b.weight,
-                self.wq_b.weight_scale,
-                pertoken_scale=q_c_scale,
-                **quant_matmul_kwargs,
-            )
-        else:
-            q_li, _ = self.wq_b(q_c)
-        q_li = q_li.view(-1, self.n_head, self.head_dim)
-        if HAS_TRITON:
-            q_li = rope_forward_triton_siso(
-                q_li, cos, sin, rope_dim=self.qk_rope_head_dim, is_neox_style=self.is_rope_neox_style
-            )
-        else:
-            q_li_pe, q_li_nope = torch.split(
-                q_li, [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim], dim=-1
-            )
-
-            q_li_pe = q_li_pe.unsqueeze(2)
-            q_li_pe = torch_npu.npu_rotary_mul(q_li_pe, cos, sin)
-            q_li_pe = q_li_pe.squeeze(2)
-            q_li = torch.cat([q_li_pe, q_li_nope], dim=-1)
-
-        q_li_scale = None
-        q_li_shape_ori = None
-        if self.enable_sparse_li_c8:
-            q_li_shape_ori = q_li.shape
-            q_li = q_li @ AscendSFAImpl.q_hadamard
-            q_li, q_li_scale = torch_npu.npu_dynamic_quant(q_li.view(-1, self.head_dim), dst_type=self.c8_k_cache_dtype)
-            q_li_scale = q_li_scale.to(self.c8_k_scale_cache_dtype)  # [b*s,]
-
-        record_attention_compute_start()
-        return DeviceOperator.indexer_select_post_process(
-            self,
-            q_li,
-            q_li_scale,
-            q_li_shape_ori,
-            weights,
-            kv_cache,
-            attn_metadata,
-            actual_seq_lengths_query,
-            actual_seq_lengths_key,
-            self.enable_sparse_li_c8,
-            self.use_torch_npu_lightning_indexer,
+        slot_mapping: torch.Tensor,
+        *,
+        num_input_tokens: int = 0,
+        attn_metadata: M | None = None,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor | tuple[torch.Tensor, torch.Tensor] | None,
+    ]:
+        """A3 MLAPO via ``torch.ops._C_ascend.mla_preprocess`` (W8A8, ≤ 1024 tokens)."""
+        k_nope, k_pe = kv_cache[0], kv_cache[1]
+        ql_nope = torch.empty(
+            (num_input_tokens, self.W_UK_T.shape[0], k_nope.shape[-1]),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
         )
+        q_pe = torch.empty(
+            (num_input_tokens, self.W_UK_T.shape[0], k_pe.shape[-1]),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
+        q_c = torch.empty(
+            (num_input_tokens, self.q_lora_rank),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
+        torch.ops._C_ascend.mla_preprocess(
+            hidden_states,
+            self.wd_qkv,
+            self.deq_scale_qkv,
+            self.gamma1,
+            self.beta1,
+            self.wu_q,
+            self.qb_deq_scl,
+            self.gamma2,
+            cos,
+            sin,
+            self.W_UK_T,
+            k_nope,
+            k_pe,
+            slot_mapping,
+            quant_scale0=self.quant_scale0,
+            quant_offset0=self.quant_offset0,
+            bias0=self.quant_bias_qkv,
+            quant_scale1=self.quant_scale1,
+            quant_offset1=self.quant_offset1,
+            bias1=self.qb_qt_bias,
+            ctkv_scale=self.ctkv_scale,
+            q_nope_scale=self.q_nope_scale,
+            cache_mode="krope_ctkv",
+            quant_mode="per_tensor_quant_asymm",
+            enable_inner_out=True,
+            q_out0=ql_nope,
+            kv_cache_out0=k_nope,
+            q_out1=q_pe,
+            kv_cache_out1=k_pe,
+            inner_out=q_c,
+        )
+        return hidden_states, ql_nope, q_pe, q_c
+
+    def _prepare_indexer_metadata(self, indexer_metadata, attn_metadata) -> None:
+        """Allow an attention backend to supply indexer selection metadata."""
+        return
 
     def _get_indexcache_topk_indices(self, num_tokens: int) -> torch.Tensor:
         if self.topk_indices_buffer is None:
@@ -1503,10 +1595,78 @@ class AscendSFAImpl(MLAAttentionImpl):
             topk_indices_to_cache = topk_indices_to_cache.squeeze(1)
         topk_indices_buffer.copy_(topk_indices_to_cache)
 
+    def _tq_rotate_query(self, ql_nope: torch.Tensor, q_pe: torch.Tensor) -> torch.Tensor:
+        assert self.turboquant is not None
+        rotated = self.turboquant.forward(ql_nope)
+        return torch.cat([rotated, q_pe], dim=-1).contiguous()
+
+    def _turboquant_sfa(
+        self,
+        query: torch.Tensor,
+        kv: torch.Tensor,
+        topk_indices: torch.Tensor,
+        block_table: torch.Tensor,
+        actual_seq_lengths_query: torch.Tensor,
+        actual_seq_lengths_kv: torch.Tensor,
+        sparse_mode: int,
+        return_softmax_lse: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+        # TQ4 is a quantization type of this operator rather than a separate one.
+        # Call it through torch_npu, i.e. the operator that ships with CANN,
+        # instead of this repo's csrc binding of the same name.
+        kwargs = {
+            "key_dequant_scale": None,
+            "value_dequant_scale": None,
+            "block_table": block_table,
+            "actual_seq_lengths_query": actual_seq_lengths_query,
+            "actual_seq_lengths_kv": actual_seq_lengths_kv,
+            "scale_value": self.scale,
+            "key_quant_mode": TQ_QUANT_MODE,
+            "value_quant_mode": TQ_QUANT_MODE,
+            "sparse_block_size": 1,
+            "layout_query": "TND",
+            "layout_kv": "PA_BSND",
+            "sparse_mode": sparse_mode,
+            "attention_mode": 2,
+            "quant_scale_repo_mode": 1,
+            "tile_size": TQ_TILE_SIZE,
+            "rope_head_dim": self.qk_rope_head_dim,
+        }
+        if return_softmax_lse:
+            kwargs["return_softmax_lse"] = True
+        result = torch_npu.npu_kv_quant_sparse_flash_attention(query, kv, kv, topk_indices, **kwargs)
+        return result if isinstance(result, tuple) else (result, None, None)
+
     def _execute_sparse_flash_attention_process(
-        self, ql_nope, q_pe, kv_cache, topk_indices, attn_metadata, actual_seq_lengths_query, actual_seq_lengths_key
+        self,
+        ql_nope,
+        q_pe,
+        kv_cache,
+        topk_indices,
+        attn_metadata,
+        actual_seq_lengths_query,
+        actual_seq_lengths_key,
+        block_table=None,
     ):
-        return DeviceOperator.execute_sparse_flash_attention_process(
+        if self.enable_sparse_sfa_turboquant:
+            attn_out, _, _ = self._turboquant_sfa(
+                self._tq_rotate_query(ql_nope, q_pe),
+                kv_cache[0],
+                topk_indices,
+                attn_metadata.block_table if block_table is None else block_table,
+                actual_seq_lengths_query,
+                actual_seq_lengths_key,
+                sparse_mode=3,
+            )
+            assert self.turboquant is not None
+            return self.turboquant.inverse(attn_out)
+        if self.qk_rope_head_dim == 0 and not self.enable_sparse_sfa_c8:
+            return sparse_mla(ql_nope, kv_cache[0], topk_indices, attn_metadata, self.scale)
+        if self.qk_rope_head_dim == 0:
+            # Present packed NoPE cache with the logical page size used by its metadata.
+            cache = kv_cache[0]
+            kv_cache = (cache.view(-1, attn_metadata.block_size, *cache.shape[2:]), *kv_cache[1:])
+        output = DeviceOperator.execute_sparse_flash_attention_process(
             self,
             ql_nope,
             q_pe,
@@ -1515,9 +1675,16 @@ class AscendSFAImpl(MLAAttentionImpl):
             attn_metadata,
             actual_seq_lengths_query,
             actual_seq_lengths_key,
+            block_table=block_table,
         )
+        if self.qk_rope_head_dim == 0:
+            # As in floating NoPE, graph-capacity rows may be unwritten by the kernel.
+            assert isinstance(output, torch.Tensor)
+            valid = torch.arange(ql_nope.shape[0], device=ql_nope.device) < actual_seq_lengths_query[-1]
+            output = output.masked_fill(~valid[:, None, None], 0)
+        return output
 
-    def _record_dcp_query_gather_context(
+    def _record_query_gather_context(
         self,
         ql_nope: torch.Tensor,
         q_pe: torch.Tensor,
@@ -1525,17 +1692,200 @@ class AscendSFAImpl(MLAAttentionImpl):
     ) -> None:
         return
 
-    def _record_dcp_kv_gather_context(
-        self,
-        kv_cache: tuple[torch.Tensor, ...],
-        attn_metadata: M,
-    ) -> None:
-        """Start a DCP KV gather after this layer has populated its cache.
+    def _get_indexer_attn_q_gather_handle(self, attn_metadata: M) -> torch.distributed.Work | None:
+        return None
 
-        The base implementation deliberately does nothing. The replicated-indexer
-        DCP implementation overrides it for batches containing prefill requests.
+    def _parallel_query_gather_dim(self) -> int:
+        """Dimension restored by an outer DCP query gather."""
+        return 1
+
+    def _prepare_kv_for_parallel(
+        self,
+        k_pe: torch.Tensor | None,
+        k_nope: torch.Tensor | None,
+        knope_scale: torch.Tensor | None,
+        full_gather_o_proj_enabled: bool,
+    ) -> tuple[
+        torch.Tensor | None,
+        list[torch.distributed.Work],
+    ]:
+        """Prepare native KV tensors for an optional parallel layout."""
+        return None, []
+
+    def _store_parallel_kv(
+        self,
+        k_pe: torch.Tensor | None,
+        k_nope: torch.Tensor | None,
+        knope_scale: torch.Tensor | None,
+        fused_kv_no_split: torch.Tensor | None,
+        kv_ag_handles: list[torch.distributed.Work],
+        kv_cache: tuple[torch.Tensor, ...] | None,
+        slot_mapping_sfa: torch.Tensor,
+        attn_metadata: M,
+        full_gather_o_proj_enabled: bool,
+    ) -> tuple[
+        torch.Tensor | None,
+        torch.Tensor | None,
+    ]:
+        """Store KV produced by native preprocessing."""
+        if self.uses_packed_sfa_main_cache:
+            assert k_pe is not None
+            assert k_nope is not None
+            assert knope_scale is not None
+            packed_kv = torch.cat(
+                [
+                    k_nope.view(-1, k_nope.shape[-1]),
+                    # Flatten leading dimensions even when the RoPE feature dimension is zero.
+                    k_pe.flatten(0, -2),
+                    knope_scale.view(-1, knope_scale.shape[-1]),
+                ],
+                dim=-1,
+            )
+            packed_head_dim = self.sfa_qsfa_packed_kv_head_dim
+            assert packed_kv.shape[-1] == packed_head_dim
+            assert kv_cache is not None
+            packed_kv = packed_kv.view(-1, packed_head_dim)
+            DeviceOperator.scatter_cache(
+                kv_cache[0].view(-1, packed_head_dim),
+                slot_mapping_sfa[: packed_kv.shape[0]].view(-1, 1),
+                packed_kv,
+            )
+
+        return k_pe, k_nope
+
+    def _get_parallel_forward_context(
+        self,
+        attn_metadata: M,
+        num_input_tokens: int,
+        hidden_states: torch.Tensor,
+    ) -> SFAForwardContext:
+        return SFAForwardContext(
+            actual_seq_lengths_query=attn_metadata.cum_query_lens,
+            actual_seq_lengths_key=attn_metadata.seq_lens,
+            kv_slot_mapping=self._get_sfa_kv_slot_mapping(attn_metadata),
+            topk_num_tokens=num_input_tokens or hidden_states.shape[0],
+        )
+
+    def _prepare_native_hidden_states(
+        self,
+        hidden_states: torch.Tensor,
+        attn_metadata: M,
+    ) -> torch.Tensor:
+        return hidden_states
+
+    def _finalize_o_proj(
+        self,
+        attn_output: torch.Tensor,
+        output: torch.Tensor,
+        gather_full_o_proj: bool,
+    ) -> torch.Tensor:
+        output[...] = self.o_proj(attn_output)[0]
+        return output
+
+    def _get_sfa_kv_slot_mapping(
+        self,
+        attn_metadata: M,
+    ) -> torch.Tensor:
+        return attn_metadata.slot_mapping
+
+    def _compose_sfa_kv_cache(self, kv_cache) -> tuple[torch.Tensor, ...] | None:
+        """Compose split cache handles into the tuple expected by SFA kernels.
+
+        ``kv_cache`` contains only the main MLA cache owned by the attention
+        layer, while ``self.indexer.k_cache.kv_cache`` contains the cache owned
+        by the indexer layer. Their possible layouts are:
+
+        - neither cache uses C8:
+          main ``(k_cache, v_cache)`` + indexer ``(indexer_k_cache,)``
+          -> ``(k_cache, v_cache, indexer_k_cache)``
+        - packed main cache only (C8 or TQ4):
+          main ``(packed_kv_cache,)`` + indexer ``(indexer_k_cache,)``
+          -> ``(packed_kv_cache, indexer_k_cache)``
+        - LI C8 only:
+          main ``(k_cache, v_cache)`` +
+          indexer ``(indexer_k_cache, indexer_scale_cache)``
+          -> ``(k_cache, v_cache, indexer_k_cache, indexer_scale_cache)``
+        - packed main cache and LI C8:
+          main ``(packed_kv_cache,)`` +
+          indexer ``(indexer_k_cache, indexer_scale_cache)``
+          -> ``(packed_kv_cache, indexer_k_cache, indexer_scale_cache)``
+
+        Static shared-index layers have no runtime indexer cache;
+        for those layers, the main cache tuple is returned unchanged.
         """
-        return
+        # TODO: Remove this recomposition once SFA kernels accept split
+        # main/indexer cache handles directly. The allocator now owns them as
+        # separate cache specs, while the current kernel path still expects the
+        # legacy combined tuple layout.
+        main_cache = kv_cache
+        if main_cache is None:
+            return None
+        if self.qk_rope_head_dim == 0:
+            # The page-strided allocator may retain an empty RoPE view for
+            # the common MLA layout. It owns no storage and is not an input
+            # to the NoPE operator.
+            if len(main_cache) == 2 and main_cache[1].numel() == 0:
+                return (main_cache[0],)
+            if len(main_cache) != 1:
+                raise RuntimeError("NoPE SFA requires one latent KV cache tensor.")
+            # The indexer owns and consumes its own cache. No LightningIndexer
+            # cache layout is imposed on this attention operator.
+            return main_cache
+        if not self.runtime_has_indexer:
+            return main_cache
+
+        # Sparse KV offload registers the main MLA cache as a 6-tuple
+        # (k_npu, v_npu, k_cpu, v_cpu, topk_buffer_k, topk_buffer_v); the
+        # attention kernels only consume the leading NPU pair.
+        if len(main_cache) == OFFLOAD_KV_CACHE_TUPLE_LEN:
+            main_cache = (main_cache[OFFLOAD_K_CACHE_NPU_INDEX], main_cache[OFFLOAD_V_CACHE_NPU_INDEX])
+
+        indexer_cache = self.indexer.k_cache.kv_cache
+        if indexer_cache is None:
+            raise RuntimeError(f"SFA indexer cache is not initialized or bound. layer_name={self.layer_name}.")
+
+        expected_main_tensors = 1 if self.uses_packed_sfa_main_cache else 2
+        if len(main_cache) != expected_main_tensors:
+            raise RuntimeError(
+                f"SFA main cache expects {expected_main_tensors} tensor(s), "
+                f"got {len(main_cache)} for layer_name={self.layer_name}."
+            )
+
+        expected_indexer_tensors = self.indexer.num_cache_tensors
+        if len(indexer_cache) != expected_indexer_tensors:
+            raise RuntimeError(
+                f"SFA indexer cache expects {expected_indexer_tensors} tensor(s), "
+                f"got {len(indexer_cache)} for layer_name={self.layer_name}."
+            )
+        return (*main_cache, *indexer_cache)
+
+    def _get_indexer_attn_metadata(self) -> Any | None:
+        """Fetch the indexer cache layer's own metadata, built by the indexer
+        backend's builder; ``None`` when this layer has no runtime indexer."""
+        if not self.runtime_has_indexer:
+            return None
+        own_prefix = self.indexer.k_cache.prefix
+        prefixes = [own_prefix]
+        kv_sharing_target = getattr(self, "kv_sharing_target_layer_name", None)
+        if kv_sharing_target is not None:
+            # Prefer the sharing target's cache view, but keep the draft
+            # indexer's own independently built metadata as a valid fallback.
+            # Some proposers register the draft indexer as its own metadata
+            # dependency even when the physical cache is shared.
+            target_base = kv_sharing_target.removesuffix(".attn")
+            prefixes = [f"{target_base}.indexer.k_cache", own_prefix]
+        forward_metadata = get_forward_context().attn_metadata
+        indexer_metadata = None
+        if isinstance(forward_metadata, dict):
+            for prefix in prefixes:
+                indexer_metadata = forward_metadata.get(prefix)
+                if indexer_metadata is not None:
+                    break
+        if indexer_metadata is None:
+            raise RuntimeError(
+                f"No metadata was built for the indexer cache layer prefixes={prefixes}. layer_name={self.layer_name}."
+            )
+        return indexer_metadata
 
     def forward(
         self,
@@ -1543,115 +1893,105 @@ class AscendSFAImpl(MLAAttentionImpl):
         hidden_states: torch.Tensor,  # query in unified attn
         kv_cache: tuple[torch.Tensor, ...],
         attn_metadata: M,
-        need_gather_q_kv: bool = False,
         output: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
+        if self.enable_sparse_sfa_turboquant:
+            assert self.turboquant is not None
+            # Build the transform tensors outside graph capture.
+            self.turboquant._initialize(hidden_states.device)
         if attn_metadata is None:
             # Profiling run.
-            if self.enable_dsa_cp_with_layer_shard and not _EXTRA_CTX.in_profile_run:
-                for layer in self.layer_sharding_kwargs or []:
-                    if is_hidden_layer(layer):
-                        reach_layer_for_shard_weight_series(layer)
             return output.fill_(0)
+
+        if self.qk_rope_head_dim == 0:
+            num_tokens = min(hidden_states.shape[0], attn_metadata.slot_mapping.shape[0])
+            if get_forward_context().cudagraph_runtime_mode != CUDAGraphMode.FULL:
+                num_tokens = min(num_tokens, attn_metadata.num_actual_tokens)
+            if num_tokens == 0:
+                return output.zero_()
+            hidden_states = hidden_states[:num_tokens]
+        gate_hidden_states = hidden_states if self.g_proj is not None else None
+
+        composed_kv_cache = self._compose_sfa_kv_cache(kv_cache)
+        assert composed_kv_cache is not None
+        kv_cache = composed_kv_cache
 
         cos = attn_metadata.cos
         sin = attn_metadata.sin
-        slot_mapping = attn_metadata.slot_mapping
-        slot_mapping_cp = None
-        if self.enable_dsa_cp:
-            assert attn_metadata.dsa_cp_context is not None
-            slot_mapping_cp = attn_metadata.dsa_cp_context.slot_mapping_cp
-            actual_seq_lengths_query = attn_metadata.dsa_cp_context.actual_seq_lengths_query
-            actual_seq_lengths_key = attn_metadata.dsa_cp_context.actual_seq_lengths_key
-        else:
-            actual_seq_lengths_query = attn_metadata.cum_query_lens
-            actual_seq_lengths_key = attn_metadata.seq_lens
-        # DCP replicated indexer stores LI cache with the full/no-CP metadata, while
-        # SFA KV remains stored with the DCP-sharded slot mapping.
-        slot_mapping_sfa = (
-            attn_metadata.dcp_context.slot_mapping
-            if attn_metadata.dcp_context is not None
-            else attn_metadata.slot_mapping
-        )
+        slot_mapping_sfa = self._get_sfa_kv_slot_mapping(attn_metadata)
+        indexer_attn_metadata = self._get_indexer_attn_metadata()
 
         # Inputs and outputs may be padded for CUDA graphs
-        num_input_tokens = attn_metadata.num_input_tokens
-        output_padded = output
+        num_input_tokens = hidden_states.shape[0] if self.qk_rope_head_dim == 0 else attn_metadata.num_input_tokens
+        parallel_context = self._get_parallel_forward_context(
+            attn_metadata,
+            num_input_tokens,
+            hidden_states,
+        )
+        actual_seq_lengths_query = parallel_context.actual_seq_lengths_query
+        actual_seq_lengths_key = parallel_context.actual_seq_lengths_key
 
-        # all-gather o_proj weight for prefill stage of PD mix node
-        o_proj_full_handle = None
-        o_proj_full_param_handles = None
-        # Prefill/mixed DSA-CP computes o_proj with a temporary full weight.
-        # Decode keeps the original TP path and only exchanges activations.
-        full_gather_o_proj_enabled = self.enable_dsa_cp_with_o_proj_tp and attn_metadata.attn_state not in {
-            AscendAttentionState.DecodeOnly,
-            AscendAttentionState.SpecDecoding,
-        }
+        fused_type: PreprocessType = self.preprocess_type
+        # PROLOG_V3 serves every attention state (decode, spec decoding and
+        # prefill); only MLAPO carries a per-call token-count limit.
+        if self.preprocess_type == PreprocessType.MLAPO and num_input_tokens > MLAPO_MAX_SUPPORTED_TOKENS:
+            fused_type = PreprocessType.NATIVE
 
-        if self.enable_sfa_prolog_v3 and attn_metadata.attn_state in (
-            AscendAttentionState.DecodeOnly,
-            AscendAttentionState.SpecDecoding,
-        ):
-            if self.enable_sp:
-                hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
-                    hidden_states.contiguous(), need_gather_q_kv
-                )
-            assert slot_mapping.numel() == hidden_states.shape[0], (
-                "SFA Prolog V3 requires one cache index per input token, "
-                f"got token_x={hidden_states.shape[0]} and cache_index={slot_mapping.numel()}."
-            )
-            if self.has_indexer:
-                k_li, k_li_scale = self.indexer_select_pre_process(x=hidden_states, cos=cos, sin=sin)
-            else:
-                k_li, k_li_scale = None, None
+        # IMPORTANT!
+        # NOTE: With PIECEWISE ACL graphs, this method is executed in
+        # eager-mode PyTorch. Even view and slice operations can add CPU
+        # overhead without launching NPU kernels. Minimize PyTorch operations
+        # in this method and benchmark changes to avoid regressions.
+        # Inputs and outputs may contain DP or graph padding. Keep the
+        # preallocated output for the caller while running attention only on
+        # the token rows described by metadata, matching upstream backends.
+        hidden_states = hidden_states[:num_input_tokens]
+        if gate_hidden_states is not None:
+            gate_hidden_states = gate_hidden_states[:num_input_tokens]
 
-            # Prolog updates the paged KV cache in place. Wait for the prompt
-            # blocks before writing the first Decode token into their tail block.
+        if fused_type == PreprocessType.NATIVE:
+            # Trim in the input layout before CP adds padding and shards it.
+            hidden_states = self._prepare_native_hidden_states(hidden_states, attn_metadata)
+            if gate_hidden_states is not None:
+                gate_hidden_states = hidden_states
+
+        if fused_type != PreprocessType.NATIVE:
+            # Keep the raw hidden states for the indexer's k path: the fused
+            # preprocess below returns new tensors and does not modify this
+            # one in place.
+            k_hidden_states = hidden_states if self.runtime_has_indexer else None
             wait_for_kv_layer_from_connector(layer_name)
-            hidden_states, ql_nope, q_pe, q_c, _, _ = self._sfa_preprocess_with_prolog_v3(
-                hidden_states=hidden_states,
-                kv_cache=kv_cache,
-                cos=cos,
-                sin=sin,
-                slot_mapping=slot_mapping,
-                cache_mode="PA_BSND",
-            )
-        # run mlapo ops when dsa-cp is disabled, and ensure that num_tokens satisfies the count limitation
-        elif self.enable_mlapo and (
-            get_ascend_device_type() == AscendDeviceType.A5 or num_input_tokens <= MLAPO_MAX_SUPPORTED_TOKENS
-        ):
-            hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
-                hidden_states.contiguous(), need_gather_q_kv
-            )
-            hidden_states, ql_nope, q_pe, q_c = self._sfa_preprocess_with_mlapo(
-                hidden_states=hidden_states,
-                kv_cache=kv_cache,
-                cos=cos,
-                sin=sin,
-                slot_mapping=slot_mapping,
-                num_input_tokens=num_input_tokens,
-            )
-            if self.has_indexer:
-                k_li, k_li_scale = self.indexer_select_pre_process(
-                    x=hidden_states,
+            if self.layerwise_kv_cache_hook is not None:
+                # The fused preprocess is the first operation that may read or
+                # update the paged SFA and LI caches.
+                self.layerwise_kv_cache_hook.wait_for_layer(layer_name)
+
+            if fused_type == PreprocessType.PROLOG_V3:
+                hidden_states, ql_nope, q_pe, q_c = self._sfa_preprocess_prolog_v3(
+                    hidden_states=hidden_states,
+                    kv_cache=kv_cache,
                     cos=cos,
                     sin=sin,
+                    # npu_mla_prolog_v3 requires int64 cache indices; reuse
+                    # the per-step conversion so all layers of a step share
+                    # one Cast kernel (the .to() inside is a no-op on int64).
+                    slot_mapping=_int64_kv_slots(slot_mapping_sfa, attn_metadata),
+                    attn_metadata=attn_metadata,
                 )
             else:
-                k_li, k_li_scale = None, None
-            wait_for_kv_layer_from_connector(layer_name)
+                hidden_states, ql_nope, q_pe, q_c = self._sfa_preprocess_mlapo(
+                    hidden_states=hidden_states,
+                    kv_cache=kv_cache,
+                    cos=cos,
+                    sin=sin,
+                    slot_mapping=slot_mapping_sfa,
+                    num_input_tokens=num_input_tokens,
+                    attn_metadata=attn_metadata,
+                )
         # native
         else:
             assert self.fused_qkv_a_proj is not None, "q lora is required for DSA."
-            weight_prefetch_method = get_weight_prefetch_method()
-            weight_prefetch_method.maybe_prefetch_mla_or_sla_weight_in_current_stream(
-                inputs=self.fused_qkv_a_proj.weight, dependency=hidden_states
-            )
-            if self.enable_sp and not self.enable_dsa_cp:
-                hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
-                    hidden_states.contiguous(), need_gather_q_kv
-                )
             qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
             q_c, kv_no_split = qkv_lora.split(
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
@@ -1660,287 +2000,176 @@ class AscendSFAImpl(MLAAttentionImpl):
             assert self.q_a_layernorm is not None, "q_a_layernorm must be initialized"
             q_c = self.q_a_layernorm(q_c)
 
-            if self.has_indexer:
-                k_li, k_li_scale = self.indexer_select_pre_process(
-                    x=hidden_states,
-                    cos=cos,
-                    sin=sin,
-                )
-            else:
-                k_li, k_li_scale = None, None
+            # The prepared hidden states feed the indexer's k path (same stage
+            # as the weights path input).
+            k_hidden_states = hidden_states if self.runtime_has_indexer else None
 
             wait_for_kv_layer_from_connector(layer_name)
+            if self.layerwise_kv_cache_hook is not None:
+                # Q/KV projections above overlap the full-layer broadcast.
+                # Wait before the first main or indexer cache access.
+                self.layerwise_kv_cache_hook.wait_for_layer(layer_name)
 
-            if self.enable_dsa_cp:
-                assert slot_mapping_cp is not None
-                kv_slots = slot_mapping_cp
-            else:
-                kv_slots = slot_mapping_sfa
-            kv_outputs = self.exec_kv(kv_no_split, cos, sin, kv_cache, kv_slots, attn_metadata)
+            kv_outputs = self.exec_kv(
+                kv_no_split,
+                cos,
+                sin,
+                kv_cache,
+                parallel_context.kv_slot_mapping,
+                attn_metadata,
+            )
             k_pe, k_nope = kv_outputs[:2]
             knope_scale = kv_outputs[2] if len(kv_outputs) == 3 else None
-
-            if (
-                self.enable_sparse_sfa_c8
-                and not self.enable_dsa_cp
-                and (get_ascend_device_type() != AscendDeviceType.A5 or not self.has_indexer)
-            ):
-                assert k_pe is not None
-                assert k_nope is not None
-                assert knope_scale is not None
-                packed_kv = torch.cat([k_nope, k_pe, knope_scale], dim=-1)
-                packed_head_dim = self.sfa_qsfa_packed_kv_head_dim
-                assert packed_kv.shape[-1] == packed_head_dim
-                torch_npu.npu_scatter_nd_update_(
-                    kv_cache[0].view(-1, packed_head_dim),
-                    slot_mapping_sfa.view(-1, 1),
-                    packed_kv.view(-1, packed_head_dim),
-                )
-
-            if self.enable_dsa_cp:
-                assert k_pe is not None
-                assert k_nope is not None
-                async_op = self.enable_dsa_cp_with_layer_shard or full_gather_o_proj_enabled
-                kv_ag_handles = []
-                # support all_gather kv async for communication calculation overlap
-                if self.enable_sparse_sfa_c8:
-                    assert knope_scale is not None
-                    fused_kv_parts = [
-                        k_nope.view(-1, k_nope.shape[-1]),
-                        k_pe.view(-1, k_pe.shape[-1]),
-                        knope_scale.view(-1, knope_scale.shape[-1]),
-                    ]
-                else:
-                    fused_kv_parts = [
-                        k_pe.view(-1, k_pe.shape[-1]),
-                        k_nope.view(-1, k_nope.shape[-1]),
-                    ]
-                    if self.has_indexer and not self.enable_sparse_li_c8:
-                        assert k_li is not None
-                        fused_kv_parts.append(k_li.view(-1, k_li.shape[-1]))
-
-                fused_kv_input = torch.cat(fused_kv_parts, dim=1)
-                fused_kv_no_split, kv_ag_handle = all_gather_async(
-                    fused_kv_input,
-                    get_tp_group(),
-                    async_op=async_op,
-                )
-                if kv_ag_handle is not None:
-                    kv_ag_handles.append(kv_ag_handle)
-
-                if self.has_indexer and (self.enable_sparse_sfa_c8 or self.enable_sparse_li_c8):
-                    assert k_li is not None
-                    k_li, kv_ag_handle = all_gather_async(
-                        k_li,
-                        get_tp_group(),
-                        async_op=async_op,
-                    )
-                    if kv_ag_handle is not None:
-                        kv_ag_handles.append(kv_ag_handle)
-                if self.has_indexer and self.enable_sparse_li_c8:
-                    assert k_li_scale is not None
-                    k_li_scale, kv_ag_handle = all_gather_async(
-                        k_li_scale,
-                        get_tp_group(),
-                        async_op=async_op,
-                    )
-                    if kv_ag_handle is not None:
-                        kv_ag_handles.append(kv_ag_handle)
+            # k_li no longer exists at this point: it is computed by
+            # indexer.forward_k below and gathered at cache-write time, so
+            # the fused gather below only carries the main KV.
+            fused_kv_no_split, kv_ag_handles = self._prepare_kv_for_parallel(
+                k_pe,
+                k_nope,
+                knope_scale,
+                parallel_context.gather_full_o_proj,
+            )
 
             ql_nope, q_pe = self._q_proj_and_k_up_proj(q_c)
-            q_pe = self.rope_single(q_pe, cos, sin)
-            self._record_dcp_query_gather_context(ql_nope, q_pe, attn_metadata)
-
-            if self.enable_dsa_cp:
-                for kv_ag_handle in kv_ag_handles:
-                    kv_ag_handle.wait()
-
-                if self.enable_dsa_cp_with_layer_shard:
-                    for layer in self.layer_sharding_kwargs or []:
-                        if is_hidden_layer(layer):
-                            reach_layer_for_shard_weight_series(layer)
-                elif full_gather_o_proj_enabled:
-                    _, o_proj_full_handle = all_gather_async(
-                        self.o_proj_tp_weight_gather_input,
-                        get_tp_group(),
-                        output=self.o_proj_full_gather_pool,
-                    )
-                    o_proj_full_param_handles = []
-                    for param_name, param in self.o_proj_tp_input_sharded_quant_params.items():
-                        _, param_handle = all_gather_async(
-                            param,
-                            get_tp_group(),
-                            output=self.o_proj_full_input_sharded_quant_params[param_name],
-                        )
-                        o_proj_full_param_handles.append(param_handle)
-
-                if kv_cache is not None:
-                    assert fused_kv_no_split is not None
-                    if self.enable_sparse_sfa_c8:
-                        torch_npu.npu_scatter_nd_update_(
-                            kv_cache[0].view(-1, fused_kv_no_split.shape[-1]),
-                            slot_mapping_sfa[: attn_metadata.num_actual_tokens].view(-1, 1),
-                            fused_kv_no_split[: attn_metadata.num_actual_tokens],
-                        )
-                        k_pe = None
-                        k_nope = None
-                    elif not self.has_indexer:
-                        k_pe, k_nope = fused_kv_no_split.split(
-                            [self.qk_rope_head_dim, self.kv_lora_rank],
-                            dim=-1,
-                        )
-                    elif not self.enable_sparse_li_c8:
-                        k_pe, k_nope, k_li = fused_kv_no_split.split(
-                            [self.qk_rope_head_dim, self.kv_lora_rank, self.head_dim],
-                            dim=-1,
-                        )
-                    else:
-                        k_pe, k_nope = fused_kv_no_split.split(
-                            [self.qk_rope_head_dim, self.kv_lora_rank],
-                            dim=-1,
-                        )
-                    if not self.enable_sparse_sfa_c8:
-                        assert k_pe is not None
-                        assert k_nope is not None
-                        k_nope = k_nope.view(k_nope.shape[0], 1, -1)
-                        k_pe = k_pe.view(k_pe.shape[0], 1, -1)
-                        DeviceOperator.reshape_and_cache(
-                            key=k_nope[: attn_metadata.num_actual_tokens],
-                            value=k_pe[: attn_metadata.num_actual_tokens],
-                            key_cache=kv_cache[0],
-                            value_cache=kv_cache[1],
-                            slot_mapping=slot_mapping_sfa[: attn_metadata.num_actual_tokens],
-                        )
-
-            # DCP's prefill path may all-gather only the blocks referenced by
-            # this batch. It must start after the current layer's SFA KV write,
-            # but before the indexer/top-k work so communication can overlap it.
-            if kv_cache is not None:
-                self._record_dcp_kv_gather_context(kv_cache, attn_metadata)
-
-            if self.has_indexer:
-                assert k_li is not None
-                k_li = self._get_full_kv(k_li, attn_metadata)
-
-        if kv_cache is not None and self.is_kv_producer:
-            attn_metadata.reshape_cache_event = torch.npu.Event()
-
-        if kv_cache is not None and self.has_indexer:
-            assert k_li is not None
-            if self.enable_sparse_sfa_c8:
-                dsa_k_cache_idx = 1
-                dsa_k_scale_cache_idx = 2
-            else:
-                dsa_k_cache_idx = 2
-                dsa_k_scale_cache_idx = 3
-
-            if get_ascend_config().c8_enable_reshape_optim:
-                torch.ops._C_ascend.store_kv_block(
-                    k_li,
-                    kv_cache[dsa_k_cache_idx],
-                    attn_metadata.group_len,
-                    attn_metadata.group_key_idx,
-                    attn_metadata.group_key_cache_idx,
-                    attn_metadata.block_size,
-                )
-            else:
-                torch_npu.npu_scatter_nd_update_(
-                    kv_cache[dsa_k_cache_idx].view(-1, k_li.shape[-1]),
-                    slot_mapping.view(-1, 1),
-                    k_li.view(-1, k_li.shape[-1]),
-                )  # b, s, n, d
-            if self.enable_sparse_li_c8:
-                assert len(kv_cache) == (3 if self.enable_sparse_sfa_c8 else 4)
-                if k_li_scale is not None:
-                    if get_ascend_config().c8_enable_reshape_optim:
-                        torch.ops._C_ascend.store_kv_block(
-                            k_li_scale,
-                            kv_cache[dsa_k_scale_cache_idx],
-                            attn_metadata.group_len,
-                            attn_metadata.group_key_idx,
-                            attn_metadata.group_key_cache_idx,
-                            attn_metadata.block_size,
-                        )
-                    else:
-                        torch_npu.npu_scatter_nd_update_(
-                            kv_cache[dsa_k_scale_cache_idx].view(-1, k_li_scale.shape[-1]),
-                            slot_mapping.view(-1, 1),
-                            k_li_scale.view(-1, k_li_scale.shape[-1]),
-                        )
-
-        if kv_cache is not None and self.is_kv_producer:
-            attn_metadata.reshape_cache_event.record()
-            notify_kv_cache_written(self.layer_name or "")
-
-        if self.enable_dsa_cp and attn_metadata.dsa_cp_context is not None:
-            topk_num_tokens = attn_metadata.dsa_cp_context.local_end_with_pad - attn_metadata.dsa_cp_context.local_start
-        else:
-            topk_num_tokens = num_input_tokens or hidden_states.shape[0]
-        if self.skip_topk:
-            topk_indices = self._get_indexcache_topk_indices(topk_num_tokens)
-        else:
-            if not self.has_indexer:
-                raise RuntimeError(f"skip_topk is False but indexer is None. layer_name={self.layer_name}.")
-            assert q_c is not None
-            topk_indices = self.indexer_select_post_process(
-                x=hidden_states,
-                q_c=q_c,
-                kv_cache=kv_cache,
-                attn_metadata=attn_metadata,
-                cos=cos,
-                sin=sin,
-                actual_seq_lengths_query=actual_seq_lengths_query,
-                actual_seq_lengths_key=actual_seq_lengths_key,
+            if self.qk_rope_head_dim:
+                q_pe = self.rope_single(q_pe, cos, sin)
+            self._record_query_gather_context(
+                ql_nope,
+                q_pe,
+                attn_metadata,
             )
-            if self.use_index_cache:
+
+            (
+                k_pe,
+                k_nope,
+            ) = self._store_parallel_kv(
+                k_pe,
+                k_nope,
+                knope_scale,
+                fused_kv_no_split,
+                kv_ag_handles,
+                kv_cache,
+                self._get_sfa_kv_slot_mapping(attn_metadata),
+                attn_metadata,
+                parallel_context.gather_full_o_proj,
+            )
+
+        # A sharded-decode PCP rank can own no request but must still write
+        # and gather KV with the other ranks.
+        has_local_query = attn_metadata.num_actual_tokens > 0
+        if self.runtime_has_indexer:
+            # One unified indexer call: k path -> cache write -> top-k
+            # selection (the selection kernel reads the freshly written
+            # cache). MTP skip_topk layers still run the k path and the write
+            # (compute_topk=False) so their cache stays up to date, then
+            # reuse the shared top-k indices. Cache layout, RoPE, parallel
+            # sequence lengths, and decode count all come from the indexer's
+            # independently built metadata.
+            assert k_hidden_states is not None
+            assert indexer_attn_metadata is not None
+            self._prepare_indexer_metadata(indexer_attn_metadata, attn_metadata)
+            topk_indices = self.indexer(
+                hidden_states,
+                q_c,
+                k_hidden_states,
+                indexer_attn_metadata,
+                compute_topk=not self.skip_topk and has_local_query,
+                attn_q_gather_handle=self._get_indexer_attn_q_gather_handle(attn_metadata),
+            )
+            if self.skip_topk:
+                topk_indices = self._get_indexcache_topk_indices(parallel_context.topk_num_tokens)
+            elif self.use_index_cache and has_local_query:
                 self._update_indexcache_topk_indices(topk_indices)
+        elif self.skip_topk:
+            # Static shared-index layers keep no runtime indexer cache and
+            # only reuse the shared top-k indices.
+            topk_indices = self._get_indexcache_topk_indices(parallel_context.topk_num_tokens)
+        else:
+            raise RuntimeError(f"skip_topk is False but indexer is None. layer_name={self.layer_name}.")
 
-        attn_output = self._execute_sparse_flash_attention_process(
-            ql_nope,
-            q_pe,
-            kv_cache,
-            topk_indices,
-            attn_metadata,
-            actual_seq_lengths_query,
-            actual_seq_lengths_key,
+        # Notify for every layer that wrote the cache, not just indexer layers:
+        # by this point all of the layer's KV (main + indexer) has been
+        # scattered - indexer layers persisted it inside indexer.forward
+        # above - so the connector can dispatch the PD pull.
+        notify_kv_cache_written(self.layer_name or "")
+
+        # Open the prefetch gate for every SFA layer. Some GLM-5.2 layers
+        # reuse cached top-k indices and have no indexer, so recording this
+        # inside the indexer's forward would leave their gate closed.
+        with attention_transfer_window():
+            if has_local_query:
+                attn_output = self._execute_sparse_flash_attention_process(
+                    ql_nope,
+                    q_pe,
+                    kv_cache,
+                    topk_indices,
+                    attn_metadata,
+                    actual_seq_lengths_query,
+                    actual_seq_lengths_key,
+                )
+
+        if has_local_query:
+            attn_output = self._v_up_proj(attn_output)
+        else:
+            # The O-proj below still joins its PCP/TP collectives.
+            attn_output = hidden_states.new_zeros((ql_nope.shape[0], self.local_num_heads * self.v_head_dim))
+        if gate_hidden_states is not None:
+            assert self.g_proj is not None
+            attn_output.mul_(torch.sigmoid(self.g_proj(gate_hidden_states.contiguous())[0]))
+        self._finalize_o_proj(
+            attn_output,
+            output[:num_input_tokens],
+            parallel_context.gather_full_o_proj,
         )
-
-        attn_output = self._v_up_proj(attn_output)
-        weight_prefetch_method = get_weight_prefetch_method()
-        weight_prefetch_method.maybe_prefetch_mla_or_sla_weight_in_current_stream(
-            inputs=self.o_proj.weight,
-            dependency=attn_output,
-            max_size=MAX_O_PROJ_PREFETCH_SIZE,
-            linear_layer=self.o_proj,
-        )
-
-        if self.enable_dsa_cp_with_o_proj_tp:
-            # SFA DSA-CP mixed mode keeps o_proj weight sharded in the TP domain:
-            # 1. prefill/mixed: gather TP shards into a temporary full weight.
-            # 2. decode-only: all-to-all hidden states, then run TP o_proj.
-            result, require_o_proj_forward = self._handle_o_proj_weight_switch_and_forward(
-                attn_output=attn_output,
-                output=output,
-                o_proj_full_handle=o_proj_full_handle,
-                o_proj_full_param_handles=o_proj_full_param_handles,
-                should_shard_weight=full_gather_o_proj_enabled,
-            )
-            if not require_o_proj_forward:
-                return result
-            attn_output = result
-
-        output[...] = self.o_proj(attn_output)[0]
 
         maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
 
-        return output_padded
+        return output
+
+
+def turboquant_kv_rmsnorm_rope(
+    kv: torch.Tensor,
+    gamma: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    kv_lora_rank: int,
+    qk_rope_head_dim: int,
+    *,
+    turboquant: TurboQuantLatent,
+    epsilon: float = 1e-5,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """TurboQuant counterpart of custom_kv_rmsnorm_rope.
+
+    Returns the same (k_rope, k_nope, scale) byte views, so the caller packs and
+    stores a TQ4 slot exactly the way it packs and stores a C8 one.
+    """
+    rms_in, rope_in = kv.split([kv_lora_rank, qk_rope_head_dim], dim=-1)
+    k_nope, _ = torch_npu.npu_rms_norm(rms_in.reshape(-1, kv_lora_rank), gamma, epsilon=epsilon)
+    k_rope = torch_npu.npu_interleave_rope(rope_in, cos, sin).reshape(-1, qk_rope_head_dim)
+
+    # compress() returns one row per token: the packed nibbles followed by the two
+    # fp16 bytes of s_t = ||latent|| / ||dequantized unit vector||, the factor
+    # attention applies to rescale the whole slot.
+    packed_bytes = get_tq_packed_bytes(kv_lora_rank)
+    row = turboquant.compress(k_nope).reshape(k_nope.shape[0], -1)
+    nibbles = row[:, :packed_bytes].view(torch.int8)
+    scale = row[:, packed_bytes:].contiguous().view(torch.float16).reshape(-1, 1)
+
+    # Pre-divide the rope half by s_t so attention rescales the whole slot with one
+    # per-column multiply instead of a separate rope pass.
+    k_rope = (k_rope.float() / (scale.float() + 1e-20)).to(torch.bfloat16).contiguous()
+    return (
+        k_rope.view(torch.int8),
+        nibbles,
+        scale.contiguous().view(torch.int8),
+    )
 
 
 def custom_kv_rmsnorm_rope(
     kv: torch.Tensor,
     gamma: torch.Tensor,
-    cos: torch.Tensor,
-    sin: torch.Tensor,
+    cos: torch.Tensor | None,
+    sin: torch.Tensor | None,
     kv_lora_rank: int,
     qk_rope_head_dim: int,
     *,
@@ -1950,19 +2179,21 @@ def custom_kv_rmsnorm_rope(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     rms_in, rope_in = kv.split([kv_lora_rank, qk_rope_head_dim], dim=-1)
     k_nope, _ = torch_npu.npu_rms_norm(rms_in, gamma, epsilon=epsilon)
-    k_rope = torch_npu.npu_interleave_rope(rope_in, cos, sin)
+    k_rope = torch_npu.npu_interleave_rope(rope_in, cos, sin) if qk_rope_head_dim else rope_in
 
     prefix_shape = k_nope.shape[:-1]
+    # npu_rms_norm returns a contiguous tensor, so the explicit
+    # .contiguous() copy before the view is redundant.
     k_nope, knope_scale = torch_npu.npu_dynamic_block_quant(
-        k_nope.contiguous().view(-1, 1, kv_lora_rank),
+        k_nope.view(-1, 1, kv_lora_rank),
         dst_type=dst_type,
         row_block_size=1,
         col_block_size=tile_size,
     )
-    if dst_type == 1 or dst_type == torch.int8:
+    if dst_type == torch.int8:
         # Return byte views so the caller can concatenate all three components.
         return (
-            k_rope.contiguous().view(torch.int8),
+            k_rope.contiguous().view(torch.int8) if qk_rope_head_dim else k_nope.new_empty((*prefix_shape, 0)),
             k_nope.view(*prefix_shape, kv_lora_rank),
             knope_scale.to(torch.float32).view(*prefix_shape, -1).contiguous().view(torch.int8),
         )

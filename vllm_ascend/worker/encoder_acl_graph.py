@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Hashable
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
@@ -27,7 +28,7 @@ from vllm.logger import logger
 from vllm.platforms import current_platform
 from vllm.v1.worker.encoder_cudagraph import BudgetGraphMetadata, EncoderCudaGraphManager
 
-from vllm_ascend.utils import vllm_version_is, weak_ref_tensors
+from vllm_ascend.utils import weak_ref_tensors
 
 # ---------------------------------------------------------------------------
 # Per–encoder-budget ACL graph bookkeeping (ViT FIA tasks)
@@ -271,7 +272,10 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
 
         weak_ref_workspaces()
 
-    def _capture_budget_graph(self, token_budget: int, path: str = "default"):
+    def _capture_budget_graph(self, token_budget: int, path: str = "default", axis_keys: tuple[Hashable, ...] = ()):
+        if axis_keys:
+            raise NotImplementedError("Encoder ACL graphs with capture axes are not supported.")
+
         logger.debug(
             "Capturing encoder aclgraph for budget=%d, max_batch_size=%d, max_frames_per_batch=%d",
             token_budget,
@@ -279,31 +283,16 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
             self.max_frames_per_batch,
         )
 
-        if vllm_version_is("0.23.0"):
-            capture_inputs = self.model.prepare_encoder_cudagraph_capture_inputs(
-                token_budget,
-                self.max_batch_size,
-                self.max_frames_per_batch,
-                self.device,
-                self.dtype,
-            )
-        else:
-            capture_inputs = self.model.prepare_encoder_cudagraph_capture_inputs(
-                token_budget,
-                self.max_batch_size,
-                self.max_frames_per_batch,
-                self.device,
-                self.dtype,
-                path,
-            )
+        capture_inputs = self.model.prepare_encoder_cudagraph_capture_inputs(
+            token_budget,
+            self.max_batch_size,
+            self.max_frames_per_batch,
+            self.device,
+            self.dtype,
+            path,
+        )
 
         values = capture_inputs.values
-        with torch.inference_mode():
-            if vllm_version_is("0.23.0"):
-                output = self.model.encoder_cudagraph_forward(dict(values))
-            else:
-                output = self.model.encoder_cudagraph_forward(dict(values), path=path)
-            output_buffer = torch.empty_like(output)
 
         graph = torch.npu.NPUGraph()
         with (
@@ -311,11 +300,7 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
             torch.inference_mode(),
             torch.npu.graph(graph, self.graph_pool),
         ):
-            if vllm_version_is("0.23.0"):
-                output = self.model.encoder_cudagraph_forward(dict(values))
-            else:
-                output = self.model.encoder_cudagraph_forward(dict(values), path=path)
-            output_buffer.copy_(output)
+            output = weak_ref_tensors(self.model.encoder_cudagraph_forward(dict(values), path=path))
 
         graph_meta = BudgetGraphMetadata(
             token_budget=token_budget,
@@ -323,48 +308,35 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
             max_frames_per_batch=self.max_frames_per_batch,
             graph=graph,
             input_buffers=values,
-            output_buffer=weak_ref_tensors(output_buffer),
+            output_buffer=weak_ref_tensors(output),
         )
-        if vllm_version_is("0.23.0"):
-            self.budget_graphs[token_budget] = graph_meta
-        else:
-            graph_set = self._get_graph_set(path)
-            graph_set[token_budget] = graph_meta
+        graph_set = self._get_graph_set(path)
+        graph_set[token_budget] = graph_meta
 
     def _run_budget_graph(
         self,
         mm_kwargs: dict[str, Any],
         token_budget: int,
         path: str = "default",
+        axis_keys: tuple[Hashable, ...] = (),
     ) -> torch.Tensor | None:
-        num_items = len(self._get_item_specs(mm_kwargs))
-        if vllm_version_is("0.23.0"):
-            if token_budget not in self.budget_graphs:
-                self.graph_misses += num_items
-                return None
-            graph_meta = self.budget_graphs[token_budget]
-        else:
-            graph_set = self._get_graph_set(path)
-            if token_budget not in graph_set:
-                self.graph_misses += num_items
-                return None
-            graph_meta = graph_set[token_budget]
+        if axis_keys:
+            raise NotImplementedError("Encoder ACL graphs with capture axes are not supported.")
 
-        if vllm_version_is("0.23.0"):
-            replay = self.model.prepare_encoder_cudagraph_replay_buffers(
-                mm_kwargs,
-                self.max_batch_size,
-                self.max_frames_per_batch,
-            )
-            buffer_items = ((key, graph_meta.input_buffers[key]) for key in self.config.buffer_keys)
-        else:
-            replay = self.model.prepare_encoder_cudagraph_replay_buffers(
-                mm_kwargs,
-                self.max_batch_size,
-                self.max_frames_per_batch,
-                path,
-            )
-            buffer_items = graph_meta.input_buffers.items()
+        num_items = len(self._get_item_specs(mm_kwargs))
+        graph_set = self._get_graph_set(path)
+        if token_budget not in graph_set:
+            self.graph_misses += num_items
+            return None
+        graph_meta = graph_set[token_budget]
+
+        replay = self.model.prepare_encoder_cudagraph_replay_buffers(
+            mm_kwargs,
+            self.max_batch_size,
+            self.max_frames_per_batch,
+            path,
+        )
+        buffer_items = graph_meta.input_buffers.items()
 
         for key, buf in buffer_items:
             src = replay.values.get(key)

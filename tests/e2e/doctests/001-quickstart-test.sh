@@ -16,49 +16,83 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-function install_system_packages() {
-    if command -v apt-get >/dev/null; then
-        sed -i 's|ports.ubuntu.com|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list
-        apt-get update -y && apt install -y curl
-    elif command -v yum >/dev/null; then
-        yum update -y && yum install -y curl
-    else
-        echo "Unknown package manager. Please install gcc, g++, numactl-devel, git, curl, and jq manually."
-    fi
+# shellcheck disable=SC1090,SC1091
+
+set -Eeuo pipefail
+
+DOCTEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DOCTEST_HELPER_PATH="${DOCTEST_DIR}/scripts/doctest_helper.py"
+source "${DOCTEST_DIR}/scripts/common.sh"
+
+VLLM_PID=""
+RUNTIME_DIR=""
+
+# Extract and source a documented shell block so environment changes remain available.
+function run_shell_block() {
+  local marker="$1"
+  local block
+  block="$(python3 "${DOCTEST_HELPER_PATH}" extract "${marker}")" || return $?
+  source /dev/stdin <<<"${block}"
 }
 
-function simple_test() {
-  # Do real import test
-  python3 -c "import vllm; print(vllm.__version__)"
+# Extract and run the offline example for the selected marker prefix.
+function run_offline() {
+  local marker_prefix="$1"
+  python3 "${DOCTEST_HELPER_PATH}" extract "${marker_prefix}-offline" >"${RUNTIME_DIR}/example.py"
+  (
+    cd "${RUNTIME_DIR}"
+    run_shell_block "${marker_prefix}-offline-run"
+  )
 }
 
-function quickstart_offline_test() {
-  # Do real script test
-  python3 "${SCRIPT_DIR}/../../examples/offline_inference_npu.py"
+# Start the documented service, run API checks, then stop it and wait for exit.
+function run_online() {
+  local marker_prefix="$1"
+  pushd "${RUNTIME_DIR}" >/dev/null
+  run_shell_block "${marker_prefix}-online-serve"
+  VLLM_PID="$!"
+  popd >/dev/null
+  wait_for_url_ready "vllm serve" "localhost:8000/v1/models"
+  run_shell_block "${marker_prefix}-online-model-list"
+  run_shell_block "${marker_prefix}-online-completion"
+  run_shell_block "${marker_prefix}-online-stop"
+  wait_for_process_exit "${VLLM_PID}"
+  VLLM_PID=""
 }
 
-function quickstart_online_test() {
-  install_system_packages
-  vllm serve Qwen/Qwen2.5-0.5B-Instruct &
-  wait_url_ready "vllm serve" "localhost:8000/v1/models"
-  # Do real curl test
-  curl http://localhost:8000/v1/completions \
-    -H "Content-Type: application/json" \
-    -d '{
-        "model": "Qwen/Qwen2.5-0.5B-Instruct",
-        "prompt": "Beijing is a",
-        "max_tokens": 5,
-        "temperature": 0
-    }' | python3 -m json.tool
-  VLLM_PID=$(pgrep -f "vllm serve")
-  _info "===> Try kill -2 ${VLLM_PID} to exit."
-  kill -2 "$VLLM_PID"
-  wait_for_exit "$VLLM_PID"
+# Stop a remaining service and remove temporary files, preserving the exit status.
+function cleanup_quickstart() {
+  local exit_code=$?
+  if [[ -n "${VLLM_PID}" ]] && kill -0 "${VLLM_PID}" 2>/dev/null; then
+    kill -2 "${VLLM_PID}" 2>/dev/null || true
+    wait_for_process_exit "${VLLM_PID}" || true
+  fi
+  if [[ -n "${RUNTIME_DIR}" && -d "${RUNTIME_DIR}" ]]; then
+    rm -rf "${RUNTIME_DIR}"
+  fi
+  return "${exit_code}"
 }
 
-_info "====> Start simple_test"
-time simple_test
-_info "====> Start quickstart_offline_test"
-time quickstart_offline_test
-_info "====> Start quickstart_online_test"
-time quickstart_online_test
+# Run the shared checks and then offline and online examples for one device.
+function run_quickstart() {
+  local device="$1"
+  local marker_prefix
+  export MODELSCOPE_HUB_FILE_LOCK=false
+  export HF_HUB_OFFLINE=1
+  trap cleanup_quickstart EXIT
+  RUNTIME_DIR="$(mktemp -d)"
+
+  case "${device}" in
+    a2) marker_prefix=quickstart-standard ;;
+    310p) marker_prefix=quickstart-300i-duo ;;
+  esac
+
+  run_shell_block quickstart-modelscope
+  run_shell_block quickstart-container-verify
+  run_offline "${marker_prefix}"
+  run_online "${marker_prefix}"
+}
+
+[[ $# -eq 1 && "${1:-}" =~ ^(a2|310p)$ ]] || die "Usage: $0 {a2|310p}"
+
+run_quickstart "$1"

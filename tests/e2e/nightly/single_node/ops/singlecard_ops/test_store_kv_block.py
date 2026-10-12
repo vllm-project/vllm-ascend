@@ -13,25 +13,6 @@ torch.set_printoptions(threshold=np.inf)
 enable_custom_op()
 
 
-@pytest.mark.parametrize("undersized_output", ["group_len", "group_key_idx", "group_key_cache_idx"])
-def test_store_kv_block_metadata_rejects_insufficient_output_capacity(undersized_output):
-    num_tokens = 2
-    slot_mapping = torch.tensor([0, 2], dtype=torch.int32).npu()
-    outputs = {
-        name: torch.empty(1 if name == undersized_output else num_tokens, dtype=torch.int32).npu()
-        for name in ("group_len", "group_key_idx", "group_key_cache_idx")
-    }
-
-    with pytest.raises(RuntimeError, match=f"{undersized_output} capacity"):
-        torch.ops._C_ascend.store_kv_block_metadata(
-            slot_mapping,
-            outputs["group_len"],
-            outputs["group_key_idx"],
-            outputs["group_key_cache_idx"],
-            1,
-        )
-
-
 def cal_slot(key, key_cache, slot_mapping, block_size):
     key_expect = key_cache.clone()
     for i, slot in enumerate(slot_mapping):

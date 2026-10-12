@@ -1,8 +1,15 @@
+from collections.abc import Iterable
+from itertools import islice
+
 import torch
 from torch import nn
 from transformers import DeepseekV2Config, DeepseekV3Config
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed import (
+    get_pp_group,
+    get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_gather,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -16,12 +23,24 @@ from vllm.model_executor.layers.mla import (
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.models.deepseek_v2 import (
+    DeepseekV2ForCausalLM,
     DeepSeekV2FusedQkvAProjLinear,
     DeepseekV2MLAAttention,
+    DeepseekV2Model,
     Indexer,
+    _get_llama_4_scaling,
     yarn_get_mscale,
 )
 from vllm.model_executor.models.utils import extract_layer_index
+from vllm.sequence import IntermediateTensors
+from vllm.v1.attention.backends.mla.index_group import SparseMLAIndexGroupBuilder
+
+from vllm_ascend.utils import is_mtp_layer, should_reuse_topk
+from vllm_ascend.worker.v2 import pp_transport
+from vllm_ascend.worker.v2.pp_transport import (
+    PPTransportDataType,
+    configure_pp_topk_transport,
+)
 
 
 def _should_skip_indexer_init(
@@ -33,8 +52,7 @@ def _should_skip_indexer_init(
         return False
 
     layer_id = extract_layer_index(prefix)
-    num_hidden_layers = getattr(config, "num_hidden_layers", None)
-    if num_hidden_layers is not None and layer_id >= num_hidden_layers:
+    if is_mtp_layer(config, prefix):
         return False
 
     # GLM-5.2 describes checkpoint-level shared indexers explicitly. Runtime
@@ -62,9 +80,14 @@ def _deepseek_v2_mla_attention_init(
     prefix: str = "",
     topk_indices_buffer: torch.Tensor | None = None,
     input_size: int | None = None,
+    reduce_results: bool = True,
+    index_group_builder: SparseMLAIndexGroupBuilder | None = None,
+    non_causal_multi_token_decode: bool = False,
 ) -> None:
-    # 这里不能使用 super().__init__()，因为当前函数定义在原类之外，
-    # 最后通过赋值的方式替换 DeepseekV2MLAAttention.__init__。
+    # Zero-argument super() is unavailable because this function is defined
+    # outside the class and assigned to DeepseekV2MLAAttention.__init__.
+    # index_group_builder is a GPU HiSparse feature; the Ascend MLA stack
+    # does not consume it, so it is accepted for signature compatibility.
     nn.Module.__init__(self)
 
     self.hidden_size = hidden_size
@@ -145,6 +168,7 @@ def _deepseek_v2_mla_attention_init(
         self.num_heads * self.v_head_dim,
         self.hidden_size,
         bias=False,
+        reduce_results=reduce_results,
         quant_config=quant_config,
         prefix=f"{prefix}.o_proj",
     )
@@ -184,36 +208,15 @@ def _deepseek_v2_mla_attention_init(
     #
     # skip_topk controls top-k reuse. Indexer initialization is skipped only
     # when the checkpoint marks this layer as sharing another layer's Indexer.
-    _skip_topk = False
-    _index_topk_freq = getattr(
-        config,
-        "index_topk_freq",
-        1,
-    )
-    _index_topk_pattern = getattr(
-        config,
-        "index_topk_pattern",
-        None,
-    )
-    _index_skip_topk_offset = getattr(
-        config,
-        "index_skip_topk_offset",
-        2,
-    )
-
     layer_id = extract_layer_index(prefix)
+    _skip_topk = should_reuse_topk(config, layer_id)
 
-    if _index_topk_pattern is None:
-        _skip_topk = (
-            max(
-                layer_id - _index_skip_topk_offset + 1,
-                0,
-            )
-            % _index_topk_freq
-            != 0
-        )
-    elif 0 <= layer_id < len(_index_topk_pattern):
-        _skip_topk = _index_topk_pattern[layer_id] == "S"
+    # The skip pattern only governs backbone layers. MTP/nextn layers
+    # (layer_id >= num_hidden_layers) must never start with skip_topk=True:
+    # they compute their own indices at draft step 0 and toggle at runtime
+    # via set_skip_topk (index_share_for_mtp_iteration). Matches upstream
+    # deepseek_v2.py behavior.
+    mtp_layer = is_mtp_layer(config, prefix)
 
     skip_indexer_init = _should_skip_indexer_init(config, prefix, _skip_topk)
     if self.is_v32 and not skip_indexer_init:
@@ -242,6 +245,11 @@ def _deepseek_v2_mla_attention_init(
     else:
         self.indexer_rope_emb = None
         self.indexer = None
+
+    # Keep the shared model-level buffer reachable from every local layer so
+    # the model can transport it when a PP boundary splits an IndexShare or
+    # IndexCache group.
+    self.topk_indices_buffer = topk_indices_buffer
 
     mla_modules = MLAModules(
         kv_a_layernorm=self.kv_a_layernorm,
@@ -272,8 +280,166 @@ def _deepseek_v2_mla_attention_init(
         cache_config,
         quant_config,
         prefix,
-        skip_topk=_skip_topk,
+        skip_topk=_skip_topk and not mtp_layer,
+        non_causal_multi_token_decode=non_causal_multi_token_decode,
     )
 
 
 DeepseekV2MLAAttention.__init__ = _deepseek_v2_mla_attention_init
+
+
+# TODO: Retire the legacy aux transport when vLLM 0.28/0.29 are no longer supported.
+_original_deepseek_v2_model_init = DeepseekV2Model.__init__
+
+
+def _find_topk_indices_buffer(layers: Iterable[object]) -> torch.Tensor | None:
+    for layer in layers:
+        self_attn = getattr(layer, "self_attn", None)
+        topk_indices_buffer = getattr(self_attn, "topk_indices_buffer", None)
+        if topk_indices_buffer is not None:
+            return topk_indices_buffer
+    return None
+
+
+def _patched_deepseek_v2_model_init(self, *args, **kwargs):
+    _original_deepseek_v2_model_init(self, *args, **kwargs)
+    # Legacy Spec+PP (0.28/0.29 only): 0.30+ uses the upstream aux relay.
+    self._use_upstream_aux_relay = kwargs["vllm_config"].use_v2_model_runner and not pp_transport.use_legacy_spec_pp()
+    self.topk_indices_buffer = _find_topk_indices_buffer(self.layers)
+    transport_data_type_list = [PPTransportDataType.TOPK_INDICES]
+    if not self._use_upstream_aux_relay:
+        transport_data_type_list.insert(0, PPTransportDataType.AUX_HIDDEN_STATES)
+    transport_data_types = tuple(transport_data_type_list)
+    configure_pp_topk_transport(self, transport_data_types)
+    self.make_empty_intermediate_tensors = pp_transport.make_empty_intermediate_tensors(
+        self,
+        self.make_empty_intermediate_tensors,
+        transport_data_types,
+    )
+
+
+DeepseekV2Model.__init__ = _patched_deepseek_v2_model_init
+
+
+# Legacy Spec+PP (0.28/0.29 only); the upstream branch below is for 0.30+.
+if not pp_transport.use_legacy_spec_pp():
+    # Release versions do not expose this interface. Reuse only upstream's
+    # slot bookkeeping; the Ascend forward still owns capture and TP gathering.
+    from vllm.model_executor.models.interfaces import EagleModelMixin
+
+    for _member in (
+        "AUX_HIDDEN_STATE_KEY",
+        "_aux_slot_base_cached",
+        "_aux_upstream_total_cached",
+        "_set_aux_hidden_state_layers",
+        "_cache_aux_pp_layout",
+        "pack_local_aux_hidden_states",
+        "collect_remote_aux_hidden_states",
+    ):
+        setattr(DeepseekV2Model, _member, getattr(EagleModelMixin, _member))
+    DeepseekV2Model.supports_aux_hidden_states_over_pp = True
+
+    def _set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        if self.model._use_upstream_aux_relay:
+            self.model._set_aux_hidden_state_layers(layers)
+        else:
+            self.model.aux_hidden_state_layers = layers
+
+    DeepseekV2ForCausalLM.set_aux_hidden_state_layers = _set_aux_hidden_state_layers
+
+
+def _capture_aux_hidden_state(self, aux_hidden_states, layer_id, hidden_states, residual, positions):
+    if layer_id not in self.aux_hidden_state_layers:
+        return
+    aux_hidden_state = hidden_states if residual is None else hidden_states + residual
+    if aux_hidden_state.shape[0] != positions.shape[0]:
+        aux_hidden_state = tensor_model_parallel_all_gather(aux_hidden_state, 0)
+        aux_hidden_state = aux_hidden_state[: positions.shape[0]]
+    aux_hidden_states.append(aux_hidden_state)
+
+
+def _patched_forward(
+    self,
+    input_ids: torch.Tensor | None,
+    positions: torch.Tensor,
+    intermediate_tensors: IntermediateTensors | None,
+    inputs_embeds: torch.Tensor | None = None,
+) -> torch.Tensor | IntermediateTensors:
+    pp_group = get_pp_group()
+    if pp_group.is_first_rank:
+        if inputs_embeds is not None:
+            hidden_states = inputs_embeds
+        else:
+            if input_ids is None:
+                raise ValueError("Either input_ids or inputs_embeds must be provided to DeepseekV2Model.forward")
+            hidden_states = self.embed_input_ids(input_ids)
+        residual = None
+        aux_hidden_states: list[torch.Tensor] = []
+    else:
+        assert intermediate_tensors is not None
+        hidden_states = intermediate_tensors["hidden_states"]
+        residual = intermediate_tensors["residual"]
+        if self._use_upstream_aux_relay:
+            aux_hidden_states = self.collect_remote_aux_hidden_states(intermediate_tensors)
+        else:
+            aux_hidden_states = pp_transport.get_pp_transport_tensors(
+                intermediate_tensors,
+                pp_transport.PPTransportDataType.AUX_HIDDEN_STATES,
+            )
+
+    llama_4_scaling_config = getattr(self.config, "llama_4_scaling", None)
+    llama_4_scaling: torch.Tensor | None
+    if llama_4_scaling_config is not None:
+        llama_4_scaling = _get_llama_4_scaling(
+            original_max_position_embeddings=llama_4_scaling_config["original_max_position_embeddings"],
+            scaling_beta=llama_4_scaling_config["beta"],
+            positions=positions,
+        )
+    else:
+        llama_4_scaling = None
+
+    if pp_group.is_first_rank:
+        _capture_aux_hidden_state(self, aux_hidden_states, 0, hidden_states, residual, positions)
+    for idx, layer in enumerate(
+        islice(self.layers, self.start_layer, self.end_layer),
+        start=self.start_layer,
+    ):
+        hidden_states, residual = layer(positions, hidden_states, residual, llama_4_scaling)
+        # A boundary state belongs to the stage producing it, including end_layer.
+        _capture_aux_hidden_state(self, aux_hidden_states, idx + 1, hidden_states, residual, positions)
+
+    if not pp_group.is_last_rank:
+        pp_output = IntermediateTensors({"hidden_states": hidden_states, "residual": residual})
+        if self._use_upstream_aux_relay:
+            pp_output.tensors.update(self.pack_local_aux_hidden_states(aux_hidden_states))
+        else:
+            pp_transport.add_pp_transport_tensors(
+                pp_output,
+                pp_transport.PPTransportDataType.AUX_HIDDEN_STATES,
+                aux_hidden_states,
+            )
+        if self.send_pp_topk_indices:
+            assert self.topk_indices_buffer is not None
+            num_tokens = positions.shape[0]
+            pp_transport.add_pp_transport_tensors(
+                pp_output,
+                PPTransportDataType.TOPK_INDICES,
+                [self.topk_indices_buffer[:num_tokens]],
+            )
+        return pp_output
+
+    if hidden_states.shape[0] != positions.shape[0]:
+        combined_states = torch.cat([hidden_states, residual], dim=-1)
+        combined_states = tensor_model_parallel_all_gather(combined_states, 0)
+        combined_states = combined_states[: positions.shape[0]]
+        hidden_size = self.hidden_size
+        hidden_states, residual = combined_states.split([hidden_size, hidden_size], dim=-1)
+        residual = residual.contiguous()
+
+    hidden_states, _ = self.norm(hidden_states, residual)
+    if len(aux_hidden_states) > 0:
+        return hidden_states, aux_hidden_states
+    return hidden_states
+
+
+DeepseekV2Model.forward = _patched_forward

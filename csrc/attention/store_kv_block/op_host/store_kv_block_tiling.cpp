@@ -108,7 +108,11 @@ static ge::graphStatus StoreKVBlockTilingFunc(gert::TilingContext* context) {
     auto platformInfo = context->GetPlatformInfo();
     OP_CHECK_NULL_WITH_CONTEXT(context, platformInfo);
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfo);
-    params.coreNum = ascendcPlatform.GetCoreNum();
+    // Arch35 (Ascend950) runs the kernel on vector cores; fall back to GetCoreNum for 910b/910_93.
+    params.coreNum = ascendcPlatform.GetCoreNumAiv();
+    if (params.coreNum == 0) {
+        params.coreNum = ascendcPlatform.GetCoreNum();
+    }
     if (params.coreNum == 0) {
         OP_LOGE(context->GetNodeName(), "Failed to get core num.");
         return ge::GRAPH_FAILED;
