@@ -445,9 +445,6 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
                         destination_format,
                         customize_dtype=destination.dtype,
                     )
-                if destination_format != int(torch_npu.Format.ND):
-                    torch_npu.copy_memory_(destination, source)
-                    continue
             destination.copy_(source)
 
     def restore_weights_for_rl_loading(self, layer):
