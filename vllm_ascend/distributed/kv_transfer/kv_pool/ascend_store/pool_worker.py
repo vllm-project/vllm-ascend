@@ -1291,31 +1291,31 @@ class KVPoolWorker:
                         break
 
                 block_gvas: list[int] = []
-                new_keys: list[str] = []
-                new_positions: list[int] = []
+                keys_to_allocate: list[str] = []
+                revalidated_keys = 0
                 for blk_idx in range(save_start_block, min(save_end_block, len(group_block_hashes))):
                     key = self._make_layerwise_gva_key(group_id, block_hash_to_str(group_block_hashes[blk_idx]))
-                    cached = self._allocated_gvas.get(key)
-                    if cached is not None:
-                        block_gvas.append(cached)
-                    else:
-                        new_keys.append(key)
-                        new_positions.append(len(block_gvas))
-                        block_gvas.append(0)
+                    revalidated_keys += int(key in self._allocated_gvas)
+                    keys_to_allocate.append(key)
+                    block_gvas.append(0)
 
-                if new_keys:
-                    new_gvas = self.m_store.batch_alloc(new_keys, [alloc_size] * len(new_keys))
+                if keys_to_allocate:
+                    new_gvas = self.m_store.batch_alloc(
+                        keys_to_allocate,
+                        [alloc_size] * len(keys_to_allocate),
+                        LAYERWISE_READ_LEASE_TTL_MS,
+                    )
                     if any(gva <= 0 for gva in new_gvas):
                         logger.error(
                             "alloc_gvas FAIL: req=%s group=%d alloc_size=%d new_keys=%d gvas_sample=%s zero_count=%d",
                             request.req_id,
                             group_id,
                             alloc_size,
-                            len(new_keys),
+                            len(keys_to_allocate),
                             new_gvas[:5],
                             sum(1 for g in new_gvas if g <= 0),
                         )
-                    for pos, key, gva in zip(new_positions, new_keys, new_gvas):
+                    for pos, (key, gva) in enumerate(zip(keys_to_allocate, new_gvas, strict=True)):
                         if gva > 0:
                             block_gvas[pos] = gva
                             self._allocated_gvas[key] = gva
@@ -1339,6 +1339,7 @@ class KVPoolWorker:
                         allocated = self.m_store.batch_alloc(
                             [partial_key],
                             [alloc_size],
+                            LAYERWISE_READ_LEASE_TTL_MS,
                         )
                         partial_gva = allocated[0] if allocated else 0
                         if partial_gva > 0:
@@ -1358,14 +1359,14 @@ class KVPoolWorker:
 
                 logger.debug(
                     "alloc_gvas: req=%s group=%d eff_bs=%d save_blocks=[%d,%d) "
-                    "new_keys=%d cached_keys=%d alloc_size=%d",
+                    "allocated_keys=%d revalidated_keys=%d alloc_size=%d",
                     request.req_id,
                     group_id,
                     effective_block_size,
                     save_start_block,
                     save_end_block,
-                    len(new_keys),
-                    len(block_gvas) - len(new_keys),
+                    len(keys_to_allocate),
+                    revalidated_keys,
                     alloc_size,
                 )
 
