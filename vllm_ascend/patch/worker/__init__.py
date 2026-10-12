@@ -17,10 +17,9 @@
 
 from vllm.triton_utils import HAS_TRITON
 
-from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
-
 # Worker processes can also send MessageQueue responses and broadcasts.
 import vllm_ascend.patch.platform.patch_shm_broadcast  # noqa
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 
 if HAS_TRITON:
     import vllm_ascend.patch.worker.patch_triton
