@@ -27,8 +27,10 @@ help:
 	@echo "  gen-zh     - Generate Chinese docs from .po files"
 	@echo "  clean      - Clean build artifacts"
 
+# Click 8.3.x can incorrectly resolve MkDocs 1.6.x's default to
+# livereload=False, so enable it explicitly for compatibility.
 serve:
-	mkdocs serve
+	mkdocs serve --livereload
 
 serve-zh:
 	DOCS_LANG=zh DOCS_SERVE=true bash tools/rtd_build.sh

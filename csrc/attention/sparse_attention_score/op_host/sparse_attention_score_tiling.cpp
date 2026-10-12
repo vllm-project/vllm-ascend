@@ -416,7 +416,13 @@ ge::graphStatus SASATiling::CalculateWorkSpace(gert::TilingContext *context)
             uint32_t dtypeSize = (dataType_ == ge::DT_FLOAT8_E4M3FN) ? 1 : 2;
             uint64_t perTaskWorkspace = static_cast<uint64_t>(topK_) * blockSize_ * embeddingSize_ * dtypeSize * 2;
             uint64_t identityIdxSize = static_cast<uint64_t>(topK_) * sizeof(int32_t);
-            workSpaceSize_ = libapiSize_ + identityIdxSize + static_cast<uint64_t>(blockDim_) * perTaskWorkspace;
+            const uint64_t sparseWorkspaceSize =
+                identityIdxSize + static_cast<uint64_t>(blockDim_) * perTaskWorkspace;
+            if (sparseWorkspaceSize > std::numeric_limits<size_t>::max() - libapiSize_) {
+                OP_LOGE(context->GetNodeName(), "Sparse workspace size overflow.");
+                return ge::GRAPH_FAILED;
+            }
+            workSpaceSize_ = libapiSize_ + sparseWorkspaceSize;
         }
     }
 

@@ -134,6 +134,11 @@ ge::graphStatus HcPreTiling::GetShapeAttrsInfoInner()
                              "hc_base size should be equal with mixhc, but is %ld", baseFirstDim),
                     return ge::GRAPH_FAILED);
 
+    // 可选输入 pre_mix: [bs, hc_mult] fp32
+    tilingData_.set_hasPreMix(context_->GetInputShape(4) != nullptr ? 1 : 0);
+    // 可选输出 pre: 内部计算的 pre 结果拷出
+    tilingData_.set_hasPreOut(context_->GetOutputShape(3) != nullptr ? 1 : 0);
+
     OPS_ERR_IF(GetAttr() != ge::GRAPH_SUCCESS,
                   OPS_LOG_E(context_->GetNodeName(), "get attr failed."),
                   return ge::GRAPH_FAILED);

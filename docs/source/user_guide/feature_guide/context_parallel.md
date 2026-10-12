@@ -9,7 +9,7 @@ Context Parallel (CP) serves long-context requests by splitting work or KV-cache
 
 For a general introduction to these two strategies, see the upstream [vLLM Context Parallel Deployment](https://docs.vllm.ai/en/latest/serving/context_parallel_deployment/) guide.
 
-DSA-CP is a separate sparse-attention optimization controlled by `additional_config.enable_dsa_cp`. It will be removed once PCP support is stable. See [Additional Configuration](../configuration/additional_config.md) for its configuration and model requirements.
+DSA-CP is a separate sparse-attention optimization controlled by `additional_config.enable_dsa_cp`. Enabling it automatically enables FlashComm as the all2all backend; there is no need to set `enable_flashcomm1` separately. It will be removed once PCP support is stable. See [Additional Configuration](../configuration/additional_config.md) for its configuration and model requirements.
 
 ## Supported Scenarios
 
@@ -17,16 +17,16 @@ DSA-CP is a separate sparse-attention optimization controlled by `additional_con
 
 PCP support is experimental and available only with ModelRunner V2. The following table shows the basic backend support and whether each feature can be combined with PCP:
 
-| Attention Backend | Basic PCP | Prefix Caching + PCP | Chunked Prefill + PCP | MLAPO + PCP | Speculative Decoding + PCP | P/D Disaggregation + PCP | Sequence Parallelism (SP) + PCP |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| MLA | ❌ No compatibility | ❌ No compatibility | ❌ No compatibility | ❌ No compatibility | ❌ No compatibility | ❌ No compatibility | ❌ No compatibility |
-| GQA | 🟠 Partial compatibility (eager) | ✅ Full compatibility | ✅ Full compatibility | — Not applicable | ❌ No compatibility | ❌ No compatibility | ❌ No compatibility |
-| SFA | ❌ No compatibility | ❌ No compatibility | ❌ No compatibility | ❌ No compatibility | ❌ No compatibility | ❌ No compatibility | ❌ No compatibility |
-| DSA | 🟠 Partial compatibility (eager) | ✅ Full compatibility | ✅ Full compatibility | — Not applicable | ❌ No compatibility | ❌ No compatibility | ❌ No compatibility |
+| Attention Backend | Basic PCP | Prefix Caching + PCP | Chunked Prefill + PCP | MLAPO + PCP | Speculative Decoding + PCP | P/D Disaggregation + PCP | KV Cache Pool + PCP | Sequence Parallelism (SP) + PCP |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| MLA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | 🟠 Partial compatibility (MTP, eager, `PIECEWISE`, `FULL_AND_PIECEWISE` and `FULL_DECODE_ONLY`) | ✅ Full compatibility (`MooncakeConnectorV1`, `MooncakeConnectorV2`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ✅ Full compatibility |
+| GQA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | — Not applicable | 🟠 Partial compatibility (Eagle3, eager, `PIECEWISE`, `FULL_AND_PIECEWISE` and `FULL_DECODE_ONLY`) | ✅ Full compatibility (`MooncakeConnectorV1`, `MooncakeConnectorV2`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ✅ Full compatibility |
+| SFA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | 🟠 Partial compatibility (MTP, eager, `PIECEWISE`, `FULL_AND_PIECEWISE` and `FULL_DECODE_ONLY`) | ✅ Full compatibility (`MooncakeConnectorV1`, `MooncakeConnectorV2`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ✅ Full compatibility |
+| DSA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | — Not applicable | 🟠 Partial compatibility (MTP and DSpark, eager, `PIECEWISE`, `FULL_AND_PIECEWISE` and `FULL_DECODE_ONLY`) | ✅ Full compatibility (`MooncakeHybridConnector`, `MooncakeConnectorV2`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ✅ Full compatibility |
+| DSA V4.1 | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | — Not applicable | 🟠 Partial compatibility (DSpark, eager, `PIECEWISE`, `FULL_AND_PIECEWISE` and `FULL_DECODE_ONLY`) | ✅ Full compatibility (`MooncakeHybridConnector`, `MooncakeConnectorV2`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ✅ Full compatibility |
 
 - ✅ **Full compatibility**: The basic path or feature combination is supported.
 - 🟠 **Partial compatibility**: The basic path or feature combination is supported with the stated limitations.
-- ❌ **No compatibility**: The backend or feature combination is not supported by the initial MRV2 PCP implementation.
 - **Not applicable**: The feature does not apply to the attention backend.
 
 ### Decode Context Parallel
@@ -37,8 +37,8 @@ DCP supports eager and graph execution, prefix caching, chunked prefill, specula
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Ascend A2/A3 | MLA/GQA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility (MLA)<br>— Not applicable (GQA) | ✅ P/D disaggregation<br>❌ PD-mixed deployment |
 | Ascend A2/A3 | SFA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility |
-| Ascend 950 | MLA/GQA | 🟠 Partial compatibility | 🟠 Partial compatibility | 🟠 Partial compatibility | 🟠 Partial compatibility | 🟠 Partial compatibility (MLA)<br>— Not applicable (GQA) | 🟠 P/D disaggregation<br>❌ PD-mixed deployment |
-| Ascend 950 | SFA | ❌ No compatibility | ❌ No compatibility | ❌ No compatibility | ❌ No compatibility | ❌ No compatibility | ❌ No compatibility |
+| 950PR&950DT Products | MLA/GQA | 🟠 Partial compatibility | 🟠 Partial compatibility | 🟠 Partial compatibility | 🟠 Partial compatibility | 🟠 Partial compatibility (MLA)<br>— Not applicable (GQA) | 🟠 P/D disaggregation<br>❌ PD-mixed deployment |
+| 950PR&950DT Products | SFA | ❌ No compatibility | ❌ No compatibility | ❌ No compatibility | ❌ No compatibility | ❌ No compatibility | ❌ No compatibility |
 
 - ✅ **Full compatibility**: Combining the feature with DCP is supported.
 - 🟠 **Partial compatibility**: Combining the feature with DCP is experimentally supported; interfaces and functionality may change.
@@ -64,10 +64,69 @@ vllm serve <supported-model> \
 
 Unlike DCP, PCP adds extra ranks: `world_size_with_pcp = prefill_context_parallel_size * original_world_size`.
 
+When PCP size is greater than 1, PCP stores embedding and LM Head weights as TP×PCP resident shards by default for every supported attention backend. Set `enable_pcp_embedding_lmhead_weight_sharding` to `false` to disable this behavior.
+
+With PCP enabled, O-projection weight sharding is on by default for SFA-PCP O-projection and DSA-PCP two-stage O-projection (`wo_a`/`wo_b`). If the weight method or PCP partition does not support sharding, the option is disabled with a warning. Set `enable_pcp_o_proj_weight_sharding` to `false` to disable it. Other attention backends do not use this option. O-projection sharding is incompatible with fine-grained TP for the same modules.
+
+#### Speculative Decoding
+
+MRV2 PCP supports MTP with MLA and DeepSeek-V4 DSA models, Eagle3 with GQA
+models, and DSpark with DeepSeek-V4 and DeepSeek-V4.1 DSA models. The target
+model runs with the configured PCP topology, while the draft model is replicated on every PCP rank
+and runs with a logical PCP size of `1`. Configure PCP only for the target
+model.
+
+For general speculative decoding configuration and model requirements, see [Speculative Decoding](speculative_decoding.md).
+
+##### MTP with MLA
+
+```bash
+export VLLM_USE_V2_MODEL_RUNNER=1
+
+vllm serve <mtp-capable-mla-model> \
+    --tensor-parallel-size 2 \
+    --prefill-context-parallel-size 2 \
+    --enable-chunked-prefill \
+    --enforce-eager \
+    --speculative-config '{"method": "mtp", "num_speculative_tokens": 3}'
+```
+
+##### Eagle3 with GQA
+
+```bash
+export VLLM_USE_V2_MODEL_RUNNER=1
+
+vllm serve <gqa-target-model> \
+    --tensor-parallel-size 2 \
+    --prefill-context-parallel-size 2 \
+    --enable-chunked-prefill \
+    --enforce-eager \
+    --speculative-config '{"method": "eagle3", "model": "<eagle3-draft-model>", "num_speculative_tokens": 3}'
+```
+
+For either method, remove `--enforce-eager` and add the following option to use a supported graph mode such as `PIECEWISE` or `FULL_DECODE_ONLY`:
+
+```bash
+--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+```
+
 #### Constraints
 
 - PCP is supported only with ModelRunner V2.
-- PCP and [DSA-CP](#dsa-cp) cannot be enabled simultaneously with the DSA backend.
+- In P/D disaggregation, enable PCP only on the prefill (`kv_producer`) engine; the decode (`kv_consumer`) engine must use `prefill_context_parallel_size=1`.
+- KV cache pooling with PCP supports only `AscendStoreConnector` with `use_layerwise=false`.
+- PCP speculative decoding supports MTP with MLA and DeepSeek-V4 DSA models,
+  Eagle3 with GQA models, and DSpark with DeepSeek-V4 and DeepSeek-V4.1 DSA models.
+- PCP does not support `FULL` CUDA graphs; use eager mode, `PIECEWISE`, `FULL_AND_PIECEWISE`, or `FULL_DECODE_ONLY`.
+- Pipeline parallelism, encoder-decoder models, multimodal inputs, and LoRA are not supported with MRV2 PCP.
+- SFA draft attention is not supported with PCP speculative decoding.
+- PCP and DCP can be stacked for MLA, SFA, and GQA. MLA and SFA support DCP
+  equal to PCP or TP x PCP. GQA stacking supports only equal
+  prefill_context_parallel_size and decode_context_parallel_size.
+- Adaptive verification is not supported with PCP speculative decoding.
+- Dynamic draft lengths are outside the currently validated scope.
+- PCP and [DSA-CP](#dsa-cp) cannot be enabled simultaneously with the DSA or
+  DSA V4.1 backend.
 
 ### Decode Context Parallel
 
@@ -102,11 +161,28 @@ DCP reuses the TP devices and does not increase the world size.
 
 ### DSA-CP
 
+DSA-CP is supported only with ModelRunner V1. Set
+`VLLM_USE_V2_MODEL_RUNNER=0` when enabling `enable_dsa_cp`. Enabling DSA-CP
+with ModelRunner V2 raises a configuration error; use PCP instead.
+
+DSA-CP will be fully deprecated once PCP is ready. PCP is currently experimental,
+with support for some feature combinations still in progress.
+
+For DSA-CP with ModelRunner V1:
+
 ```bash
+export VLLM_USE_V2_MODEL_RUNNER=0
+
 vllm serve <glm-5.2-model> \
   --tensor-parallel-size <N> \
   --block-size <B> \
   --additional-config '{"enable_dsa_cp": true}'
 ```
+
+To migrate to PCP with ModelRunner V2 and the same world size, set
+`VLLM_USE_V2_MODEL_RUNNER=1`, replace TP size `N > 1` with
+`--tensor-parallel-size 1 --prefill-context-parallel-size N` and remove
+`enable_dsa_cp` from `additional_config`. With TP size 1, PCP requires additional
+ranks. Check the compatibility and limitations above before migrating.
 
 For implementation details, see the [Context Parallel design document](../../developer_guide/Design_Documents/context_parallel.md).

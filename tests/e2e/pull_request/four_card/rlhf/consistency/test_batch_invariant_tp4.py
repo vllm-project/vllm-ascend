@@ -106,7 +106,7 @@ def _extract_step_logprobs(request_output):
     deploy="pd_mix",
     hardware="A2",
     quantization="BF16",
-    graph_mode="piecewise",
+    graph_mode="full_and_piecewise",
 )
 @pytest.mark.model(
     model_name=DEFAULT_MODEL,
@@ -118,15 +118,17 @@ def _extract_step_logprobs(request_output):
     enable_prefix_caching=False,
     distributed_executor_backend="mp",
     compilation_config={
-        "cudagraph_mode": "PIECEWISE",
         "cudagraph_capture_sizes": [1, 32, 64],
     },
     extra_kwargs={
         "load_format": "dummy",
         "hf_overrides": SMALL_QWEN3_OVERRIDES,
+        "enable_chunked_prefill": False,
+        "block_size": 128,
     },
 )
 def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(vllm_runner, monkeypatch: pytest.MonkeyPatch):
+    """Verify bitwise token/logprob invariance across batch sizes with the default graph configuration."""
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
     random.seed(seed)
     tp_size = int(os.getenv("VLLM_TEST_TP_SIZE", "4"))

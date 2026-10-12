@@ -3,23 +3,33 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any
 
 import torch
 
-from vllm_ascend.utils import (
-    AscendDeviceType,
-    enable_custom_op,
-    get_ascend_device_type,
-)
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.ops.triton.msa.msa_m3_index_postprocess import index_decode_topk_fused
+from vllm_ascend.utils import enable_custom_op
 
+# Existing mode for legacy prefill, decode, and A5 FP8 prefill.
 _SPARSE_ATTN_INNER_PRECISE = 4
+
+# Existing mode for A5 KV-gather-Q prefill with BF16 inputs.
+_PREFILL_KV_GATHER_Q_INNER_PRECISE = 1
+
+# A3 KV-gather-Q prefill with BF16 inputs: use FP32 scores and partial
+# outputs to preserve accuracy.
+_A3_PREFILL_KV_GATHER_Q_INNER_PRECISE = 0
 _MSA_INDEX_BLOCK_SIZE = 128
 _MSA_SCORE_BLOCK_ALIGNMENT = 16
-_ASCEND_DEVICE_TYPE = get_ascend_device_type()
+_FP8_E4M3_MAX = 448.0
 
-if _ASCEND_DEVICE_TYPE != AscendDeviceType.A5:
+if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
+    from vllm_ascend.models.minimax_m3.ops.msa_m3_triton_a5 import (
+        minimax_m3_index_topk as _minimax_m3_index_prefill_topk,
+    )
+elif get_current_hardware_profile().supports(HardwareCapability.RUNTIME_CUSTOM_OPS):
     from vllm_ascend.models.minimax_m3.ops.msa_m3_triton import (
         minimax_m3_index_topk as _minimax_m3_index_prefill_topk,
     )
@@ -71,20 +81,6 @@ def _npu_k2q_csr(
     )
 
 
-@dataclass
-class MiniMaxM3TPDecodeScoreMetadata:
-    """Graph-stable inputs for packed TP decode scoring."""
-
-    block_table: torch.Tensor
-    cu_seqlens_q: torch.Tensor
-    context_lens: torch.Tensor
-    max_block_count: int
-    block_size: int
-    block_offset: int
-    block_count: int
-    decode_query_len: int
-
-
 def _as_ascendc_index_kv_cache(
     index_kv_cache: torch.Tensor | tuple[torch.Tensor],
 ) -> torch.Tensor:
@@ -125,6 +121,10 @@ def _select_num_idx_from_topk(topk_idx: torch.Tensor) -> torch.Tensor:
     return (topk_idx >= 0).sum(dim=-1).to(dtype=torch.int32)
 
 
+def _to_fp8_e4m3(tensor: torch.Tensor) -> torch.Tensor:
+    return tensor.clamp(min=-_FP8_E4M3_MAX, max=_FP8_E4M3_MAX).to(torch.float8_e4m3fn)
+
+
 def _build_cu_block_lens(
     seq_lens: torch.Tensor,
     block_size: int,
@@ -160,16 +160,14 @@ def _minimax_m3_index_score(
 ) -> torch.Tensor:
     """Compute MSA index scores with the bundled AscendC operator.
 
-    ``start_loc`` is the current query block in the *passed block table*.  For
-    a TP-sharded table this is a per-request local block index, not the scalar
-    global ``block_offset`` used by the Triton decode kernel.
-
-    A causal mask selects sparse mode 3. Passing no mask selects dense mode 0
-    for a TP chunk that is entirely before the current query positions.
+    ``start_loc`` is the current query block in the complete block table.
+    A causal mask selects sparse mode 3; passing no mask selects dense mode 0.
     ``init_blocks`` and ``local_blocks`` are kept for parity with the index
     scoring interface; candidate forcing is applied by the TopK stage.
     """
     index_kv_cache = _as_ascendc_index_kv_cache(index_kv_cache)
+    if index_kv_cache.dtype == torch.float8_e4m3fn and idx_q.dtype != index_kv_cache.dtype:
+        idx_q = _to_fp8_e4m3(idx_q)
     return torch.ops._C_ascend.npu_msa_index_score(
         idx_q,
         index_kv_cache,
@@ -230,128 +228,6 @@ def minimax_m3_index_prefill(
     )
 
 
-def _index_score_topk_candidates(
-    score: torch.Tensor,
-    context_lens: torch.Tensor,
-    decode_query_len: int,
-    topk: int,
-    block_offset: int = 0,
-    init_blocks: int = 0,
-    local_blocks: int = 0,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return global block IDs and scores after exactly one local TopK."""
-    block_count = score.shape[-1]
-    query_offsets = torch.arange(
-        decode_query_len,
-        dtype=context_lens.dtype,
-        device=context_lens.device,
-    ).repeat(context_lens.shape[0])
-    visible_tokens = context_lens.repeat_interleave(decode_query_len) + query_offsets + 1
-    global_valid_block_count = torch.div(
-        visible_tokens + block_offset * _MSA_INDEX_BLOCK_SIZE + _MSA_INDEX_BLOCK_SIZE - 1,
-        _MSA_INDEX_BLOCK_SIZE,
-        rounding_mode="floor",
-    ).clamp(min=0)
-    valid_block_count = (global_valid_block_count - block_offset).clamp(min=0, max=block_count)
-    local_block_ids = torch.arange(block_count, device=score.device)
-    global_block_ids = local_block_ids + block_offset
-    valid_blocks = global_block_ids[None, :] < global_valid_block_count[:, None]
-    # A dense raw-score TP chunk can contain whole future speculative blocks
-    # for a shorter request. Remove them before TopK so they cannot displace a
-    # valid candidate and only then be discarded by output validation.
-    score = torch.where(valid_blocks[None, :, :], score, float("-inf"))
-
-    # Apply forced-block scores per token before the one and only TopK.
-    if init_blocks > 0:
-        init_mask = valid_blocks & (global_block_ids[None, :] < init_blocks)
-        score = torch.where(init_mask[None, :, :], 1.0e30, score)
-    if local_blocks > 0:
-        local_start = (global_valid_block_count - local_blocks).clamp(min=0)
-        local_mask = valid_blocks & (global_block_ids[None, :] >= local_start[:, None])
-        score = torch.where(local_mask[None, :, :], 1.0e29, score)
-
-    actual_topk_count = min(topk, block_count)
-    raw_scores, raw_topk = torch.topk(
-        score,
-        k=actual_topk_count,
-        dim=-1,
-    )
-    if actual_topk_count == topk:
-        topk_indices = raw_topk.to(dtype=torch.int32)
-        topk_scores = raw_scores
-    else:
-        topk_indices = torch.full(
-            (*raw_topk.shape[:-1], topk),
-            -1,
-            dtype=torch.int32,
-            device=raw_topk.device,
-        )
-        topk_scores = torch.full(
-            (*raw_scores.shape[:-1], topk),
-            float("-inf"),
-            dtype=raw_scores.dtype,
-            device=raw_scores.device,
-        )
-        topk_indices[..., :actual_topk_count].copy_(raw_topk)
-        topk_scores[..., :actual_topk_count].copy_(raw_scores)
-
-    valid_candidate = (topk_indices >= 0) & (topk_indices < valid_block_count[None, :, None])
-    topk_indices = torch.where(
-        valid_candidate,
-        topk_indices + block_offset,
-        -1,
-    )
-    topk_scores = torch.where(
-        valid_candidate,
-        topk_scores,
-        float("-inf"),
-    )
-    return topk_indices, topk_scores
-
-
-@torch.no_grad()
-def _minimax_m3_index_decode(
-    idx_q: torch.Tensor,
-    index_kv_cache: torch.Tensor | tuple[torch.Tensor],
-    block_table: torch.Tensor,
-    cu_seqlens_q: torch.Tensor,
-    seq_lens: torch.Tensor,
-    context_lens: torch.Tensor,
-    start_loc: torch.Tensor,
-    causal_mask: torch.Tensor | None,
-    *,
-    topk: int,
-    init_blocks: int,
-    local_blocks: int,
-    decode_query_len: int,
-    block_offset: int = 0,
-    block_count: int | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Run AscendC decode score followed by one non-fused local TopK."""
-    score = _minimax_m3_index_score(
-        idx_q,
-        index_kv_cache,
-        block_table,
-        cu_seqlens_q,
-        seq_lens,
-        start_loc,
-        causal_mask,
-        init_blocks=init_blocks,
-        local_blocks=local_blocks,
-    )
-    if block_count is None:
-        block_count = block_table.shape[-1]
-    return _index_score_topk_candidates(
-        score[..., :block_count],
-        context_lens,
-        decode_query_len,
-        topk,
-        block_offset,
-        init_blocks=init_blocks,
-        local_blocks=local_blocks,
-    )
-
-
 @torch.no_grad()
 def minimax_m3_index_decode(
     idx_q: torch.Tensor,
@@ -367,126 +243,26 @@ def minimax_m3_index_decode(
     init_blocks: int,
     local_blocks: int,
     decode_query_len: int,
-) -> torch.Tensor:
-    """Compute AscendC decode scores and return their block TopK."""
-    topk_indices, _ = _minimax_m3_index_decode(
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute AscendC decode scores and fuse their TopK helpers."""
+    score = _minimax_m3_index_score(
         idx_q,
         index_kv_cache,
         block_table,
         cu_seqlens_q,
         seq_lens,
-        context_lens,
         start_loc,
         causal_mask,
-        topk=topk,
+    )
+    return index_decode_topk_fused(
+        score,
+        context_lens,
+        decode_query_len,
+        topk,
+        block_table.shape[-1],
         init_blocks=init_blocks,
         local_blocks=local_blocks,
-        decode_query_len=decode_query_len,
     )
-    return topk_indices
-
-
-@torch.no_grad()
-def minimax_m3_index_tp_block_parallel_decode(
-    idx_q: torch.Tensor,
-    index_kv_cache: torch.Tensor | tuple[torch.Tensor],
-    metadata: MiniMaxM3TPDecodeScoreMetadata,
-    causal_mask: torch.Tensor,
-    *,
-    topk: int,
-    init_blocks: int,
-    local_blocks: int,
-    tp_group: Any,
-) -> torch.Tensor:
-    """Run packed-query scoring and TopK over TP-sharded KV blocks."""
-    full_idx_q = tp_group.all_gather(idx_q.contiguous(), dim=1).contiguous()
-    tp_rank = tp_group.rank_in_group
-    block_offset = metadata.block_offset
-    block_count = metadata.block_count
-    if block_count == 0:
-        # MsaIndexScore requires a non-empty block-table width. Ranks without
-        # logical blocks contribute neutral candidates to the collectives.
-        candidate_shape = (
-            full_idx_q.shape[1],
-            full_idx_q.shape[0],
-            topk,
-        )
-        local_topk = torch.full(
-            candidate_shape,
-            -1,
-            dtype=torch.int32,
-            device=full_idx_q.device,
-        )
-        local_scores = torch.full(
-            candidate_shape,
-            float("-inf"),
-            dtype=torch.float32,
-            device=full_idx_q.device,
-        )
-    else:
-        # Keep all derived tensors in the model forward. FULL_DECODE_ONLY
-        # captures and replays this work, whereas tensors allocated by the
-        # metadata builder would leave the graph holding stale device pointers.
-        halo_blocks = (metadata.decode_query_len - 1 + metadata.block_size - 1) // metadata.block_size
-        score_block_end = min(
-            block_offset + block_count + halo_blocks,
-            metadata.max_block_count,
-        )
-        score_block_table = metadata.block_table[:, block_offset:score_block_end].contiguous()
-        local_context_lens = metadata.context_lens - block_offset * metadata.block_size
-        chunk_capacity = block_count * metadata.block_size
-        score_capacity = score_block_table.shape[-1] * metadata.block_size
-        max_score_k_len = min(
-            chunk_capacity + metadata.decode_query_len - 1,
-            score_capacity,
-        )
-        score_k_lens = torch.clamp(
-            metadata.context_lens + metadata.decode_query_len - block_offset * metadata.block_size,
-            min=0,
-            max=max_score_k_len,
-        )
-        score_start_loc = (
-            torch.div(
-                metadata.context_lens,
-                metadata.block_size,
-                rounding_mode="floor",
-            )
-            .sub(block_offset)
-            .clamp(
-                min=0,
-                max=score_block_table.shape[-1] - 1,
-            )
-        )
-        local_topk, local_scores = _minimax_m3_index_decode(
-            full_idx_q,
-            index_kv_cache,
-            score_block_table,
-            metadata.cu_seqlens_q,
-            score_k_lens,
-            local_context_lens,
-            score_start_loc,
-            None if metadata.decode_query_len == 1 else causal_mask,
-            topk=topk,
-            init_blocks=init_blocks,
-            local_blocks=local_blocks,
-            decode_query_len=metadata.decode_query_len,
-            block_offset=block_offset,
-            block_count=block_count,
-        )
-
-    gathered_scores = tp_group.all_gather(local_scores.contiguous(), dim=-1)
-    gathered_topk = tp_group.all_gather(local_topk.contiguous(), dim=-1)
-
-    local_head_count = idx_q.shape[1]
-    local_head_start = tp_rank * local_head_count
-    local_gathered_scores = gathered_scores.narrow(0, local_head_start, local_head_count)
-    _, merged_pos = torch.topk(
-        local_gathered_scores,
-        k=topk,
-        dim=-1,
-    )
-    local_gathered_topk = gathered_topk.narrow(0, local_head_start, local_head_count)
-    return torch.gather(local_gathered_topk, dim=-1, index=merged_pos)
 
 
 @torch.no_grad()
@@ -501,8 +277,26 @@ def _minimax_m3_sparse_attn_a3(
     sm_scale: float,
     output: torch.Tensor,
     block_size: int,
+    *,
+    supports_fp8: bool = False,
 ) -> None:
     key, value = _split_main_kv_cache(kv_cache)
+    # Q-gather-KV is also the A5 fallback when experimental Split-KV is
+    # unavailable. Match decode's unscaled E4M3 inputs and BF16 output.
+    op_kwargs: dict[str, Any] = {}
+    if key.dtype == torch.float8_e4m3fn:
+        if not supports_fp8:
+            raise TypeError("MiniMax-M3 FP8 sparse attention is not supported on this device")
+        if value.dtype != torch.float8_e4m3fn:
+            raise TypeError("MiniMax-M3 FP8 sparse attention requires both K and V caches in E4M3")
+        q = _to_fp8_e4m3(q)
+        dequant_scale = torch.ones((1, 1, 1, 1), dtype=torch.float32, device=q.device)
+        op_kwargs = {
+            "q_dequant_scale": dequant_scale,
+            "k_dequant_scale": dequant_scale,
+            "v_dequant_scale": dequant_scale,
+            "attention_out_dtype": torch.bfloat16,
+        }
     q_lens_t = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
     out = torch.ops._C_ascend.npu_sparse_attention_score(
         q,
@@ -518,11 +312,12 @@ def _minimax_m3_sparse_attn_a3(
         block_size=block_size,
         top_k=topk_idx.shape[-1],
         inner_precise=_SPARSE_ATTN_INNER_PRECISE,
+        **op_kwargs,
     )
     output.copy_(out)
 
 
-def _minimax_m3_sparse_attn_a5(
+def _minimax_m3_sparse_attn_kv_gather_q(
     q: torch.Tensor,
     kv_cache: torch.Tensor | tuple[torch.Tensor, ...] | list[torch.Tensor],
     topk_idx: torch.Tensor,
@@ -533,14 +328,34 @@ def _minimax_m3_sparse_attn_a5(
     sm_scale: float,
     output: torch.Tensor,
     block_size: int,
+    total_kv_blocks: int,
+    max_kv_blocks: int,
+    *,
+    supports_fp8: bool,
 ) -> None:
     key, value = _split_main_kv_cache(kv_cache)
+
+    # A3 uses FP32 scores and partial outputs. Keep A5's existing BF16
+    # precision mode; its FP8 cache path overrides this below as before.
+    inner_precise = _PREFILL_KV_GATHER_Q_INNER_PRECISE if supports_fp8 else _A3_PREFILL_KV_GATHER_Q_INNER_PRECISE
+    if key.dtype == torch.float8_e4m3fn:
+        if not supports_fp8:
+            raise TypeError("MiniMax-M3 FP8 sparse attention is not supported on this device")
+        if value.dtype != torch.float8_e4m3fn:
+            raise TypeError("MiniMax-M3 FP8 sparse attention requires both K and V caches in E4M3")
+        q = _to_fp8_e4m3(q)
+        inner_precise = _SPARSE_ATTN_INNER_PRECISE
+
     cu_block_lens = _build_cu_block_lens(seq_lens, block_size)
+    # Keep the -1 sentinel: K2Q drops invalid entries, while replacing them
+    # with zero would add duplicate attention edges for logical KV block 0.
     k2q_row_ptr, k2q_q_indices, k2q_slot_indices = _npu_k2q_csr(
         topk_idx,
         cu_seqlens_q,
         cu_block_lens,
         order_method=1,
+        total_rows=total_kv_blocks,
+        max_kv=max_kv_blocks,
         use_simt=0,
         q_global_offset=True,
     )
@@ -562,11 +377,24 @@ def _minimax_m3_sparse_attn_a5(
         sm_scale,
         block_size,
         topk_idx.shape[-1],
-        1,
+        inner_precise,
         actual_seq_lengths=q_lens_t,
         actual_seq_lengths_kv=kv_lens_t,
     )
     output.copy_(out)
+
+
+@lru_cache
+def _is_minimax_sparse_attention_split_kv_available() -> bool:
+    """Check compatible vendor entry points once per worker process.
+
+    Restart workers after installing the experimental package and sourcing its
+    environment; the ACLNN loader also caches its library search paths.
+    """
+    import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401, PLC0415
+
+    enable_custom_op()
+    return torch.ops._C_ascend.is_minimax_sparse_attention_split_kv_available()
 
 
 @torch.no_grad()
@@ -583,12 +411,11 @@ def minimax_m3_sparse_attn(
     sm_scale: float,
     output: torch.Tensor,
     block_size: int = 128,
+    total_kv_blocks: int = -1,
+    max_kv_blocks: int = -1,
 ) -> None:
     del prefix_lens, max_query_len
-    sparse_attn_impl = (
-        _minimax_m3_sparse_attn_a5 if _ASCEND_DEVICE_TYPE == AscendDeviceType.A5 else _minimax_m3_sparse_attn_a3
-    )
-    sparse_attn_impl(
+    common_args = (
         q,
         kv_cache,
         topk_idx,
@@ -599,6 +426,20 @@ def minimax_m3_sparse_attn(
         sm_scale,
         output,
         block_size,
+    )
+    hardware_profile = get_current_hardware_profile()
+    supports_fp8 = hardware_profile.supports(HardwareCapability.FP8_ATTENTION)
+    # Select the optional optimization by ACLNN availability. The installed
+    # experimental package must provide kernels for the current device.
+    if not _is_minimax_sparse_attention_split_kv_available():
+        _minimax_m3_sparse_attn_a3(*common_args, supports_fp8=supports_fp8)
+        return
+
+    _minimax_m3_sparse_attn_kv_gather_q(
+        *common_args,
+        total_kv_blocks,
+        max_kv_blocks,
+        supports_fp8=supports_fp8,
     )
 
 
@@ -614,6 +455,9 @@ def minimax_m3_sparse_attn_decode(
     output: torch.Tensor,
     decode_query_len: int,
     block_size: int = 128,
+    *,
+    select_num_idx: torch.Tensor | None = None,
+    dequant_scale: torch.Tensor | None = None,
 ) -> None:
     """Run sparse decode through the AscendC sparse-attention operator."""
     if q.shape[0] != seq_lens.shape[0] * decode_query_len:
@@ -621,13 +465,29 @@ def minimax_m3_sparse_attn_decode(
 
     key, value = _split_main_kv_cache(kv_cache)
     query_lens = torch.full_like(seq_lens, decode_query_len, dtype=torch.int32)
+    if select_num_idx is None:
+        select_num_idx = _select_num_idx_from_topk(topk_idx)
+
+    op_kwargs: dict[str, Any] = {}
+    if key.dtype == torch.float8_e4m3fn:
+        if value.dtype != torch.float8_e4m3fn:
+            raise TypeError("MiniMax-M3 FP8 sparse attention requires both K and V caches in E4M3")
+        q = _to_fp8_e4m3(q)
+        if dequant_scale is None:
+            dequant_scale = torch.ones((1, 1, 1, 1), dtype=torch.float32, device=q.device)
+        op_kwargs = {
+            "q_dequant_scale": dequant_scale,
+            "k_dequant_scale": dequant_scale,
+            "v_dequant_scale": dequant_scale,
+            "attention_out_dtype": torch.bfloat16,
+        }
     out = torch.ops._C_ascend.npu_sparse_attention_score(
         q,
         key,
         value,
         topk_idx,
         block_table,
-        select_num_idx=_select_num_idx_from_topk(topk_idx),
+        select_num_idx=select_num_idx,
         actual_seq_lengths=query_lens,
         actual_seq_lengths_kv=seq_lens,
         num_key_value_heads=num_kv_heads,
@@ -635,5 +495,6 @@ def minimax_m3_sparse_attn_decode(
         block_size=block_size,
         top_k=topk_idx.shape[-1],
         inner_precise=_SPARSE_ATTN_INNER_PRECISE,
+        **op_kwargs,
     )
     output.copy_(out)

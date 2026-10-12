@@ -6,3 +6,4 @@ mkdocs-macros-plugin
 polib
 regex
 openai
+zhconv

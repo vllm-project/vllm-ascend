@@ -11,7 +11,7 @@ from torch import nn
 from torch.nn.parameter import Parameter
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
-from vllm.distributed import divide, get_tensor_model_parallel_world_size, get_tp_group
+from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.linear import (
@@ -40,36 +40,30 @@ from vllm.v1.kv_cache_interface import (
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
-    MiniMaxM3TPDecodeScoreMetadata,
-    minimax_m3_index_tp_block_parallel_decode,
-    minimax_m3_sparse_attn,
-    minimax_m3_sparse_attn_decode,
-)
-from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
     minimax_m3_index_decode as minimax_m3_index_decode_ascendc,
 )
 from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
     minimax_m3_index_prefill as minimax_m3_index_prefill_ascendc,
 )
+from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
+    minimax_m3_sparse_attn,
+    minimax_m3_sparse_attn_decode,
+)
 from vllm_ascend.ops.linear import AscendColumnParallelLinear
 from vllm_ascend.ops.linear_op import get_parallel_op
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
-_USE_ASCENDC_INDEX_SCORE = get_ascend_device_type() != AscendDeviceType.A5
+# The bundled MsaIndexScore includes the Ascend 950 arch35 FP8 kernel. Keep it
+# enabled for A5 prefill, while A5 decode uses its lower-latency Triton path.
+_USE_ASCENDC_INDEX_SCORE_PREFILL = True
+_USE_ASCENDC_INDEX_SCORE_DECODE = get_ascend_device_type() != AscendDeviceType.A5
 
-if not _USE_ASCENDC_INDEX_SCORE:
+if get_ascend_device_type() == AscendDeviceType.A5:
     from vllm_ascend.models.minimax_m3.ops.msa_m3_triton_a5 import (
         minimax_m3_index_decode,
         minimax_m3_index_score,
         minimax_m3_index_topk,
     )
-
-
-def _should_use_tp_sharded_index_decode(tp_size: int, num_prefills: int) -> bool:
-    # The A5 Triton decode kernel operates on the complete, replicated index-K
-    # cache on every TP rank. Keep the mainline block-sharded optimization for
-    # the other device families only.
-    return get_ascend_device_type() != AscendDeviceType.A5 and tp_size > 1 and num_prefills == 0
 
 
 def _active_decode_num_reqs(
@@ -136,7 +130,7 @@ class AscendMiniMaxM3IndexerBackend(AttentionBackend):
         return [128]
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [128]
 
     @classmethod
@@ -169,11 +163,14 @@ class AscendMiniMaxM3IndexerCache(nn.Module, AttentionLayerBase):
         head_dim: int,
         prefix: str,
         cache_config: CacheConfig | None = None,
+        kv_cache_dtype: str = "auto",
+        kv_cache_torch_dtype: torch.dtype = torch.bfloat16,
     ) -> None:
         super().__init__()
         self.kv_cache = torch.tensor([])
         self.head_dim = head_dim
-        self.dtype = torch.bfloat16
+        self.dtype = kv_cache_torch_dtype
+        self.kv_cache_dtype = kv_cache_dtype
         self.prefix = prefix
         self.cache_config = cache_config
         compilation_config = get_current_vllm_config().compilation_config
@@ -187,6 +184,7 @@ class AscendMiniMaxM3IndexerCache(nn.Module, AttentionLayerBase):
             num_kv_heads=1,
             head_size=self.head_dim,
             dtype=self.dtype,
+            cache_dtype_str=self.kv_cache_dtype,
         )
 
     def forward(self) -> None: ...
@@ -215,7 +213,6 @@ class AscendMiniMaxM3IndexerDecodeMetadata:
     cu_seqlens_q: torch.Tensor | None = None
     context_lens: torch.Tensor | None = None
     start_loc: torch.Tensor | None = None
-    tp_score: MiniMaxM3TPDecodeScoreMetadata | None = None
 
 
 @dataclass
@@ -252,34 +249,14 @@ class AscendMiniMaxM3IndexerMetadataBuilder(AttentionMetadataBuilder[AscendMiniM
             device=device,
         )
         self.block_size = kv_cache_spec.block_size
-        self.tp_size = vllm_config.parallel_config.tensor_parallel_size
-        self.attn_mask_builder = AttentionMaskBuilder(device) if _USE_ASCENDC_INDEX_SCORE else None
-
-    def _build_tp_score_metadata(
-        self,
-        block_table: torch.Tensor,
-        cu_seqlens_q: torch.Tensor,
-        context_lens: torch.Tensor,
-        *,
-        max_seq_len: int,
-        decode_query_len: int,
-    ) -> MiniMaxM3TPDecodeScoreMetadata:
-        """Package graph-stable inputs; derive TP tensors in model forward."""
-        tp_rank = get_tp_group().rank_in_group
-        max_block_count = (max_seq_len + self.block_size - 1) // self.block_size
-        blocks_per_tp = (max_block_count + self.tp_size - 1) // self.tp_size
-        block_offset = tp_rank * blocks_per_tp
-        block_count = max(0, min(blocks_per_tp, max_block_count - block_offset))
-        return MiniMaxM3TPDecodeScoreMetadata(
-            block_table=block_table,
-            cu_seqlens_q=cu_seqlens_q,
-            context_lens=context_lens,
-            max_block_count=max_block_count,
-            block_size=self.block_size,
-            block_offset=block_offset,
-            block_count=block_count,
-            decode_query_len=decode_query_len,
+        self.prefill_cu_seqlens_q_buffer = torch.empty_like(self.context_len_buffer)
+        self.prefill_start_loc_buffer = (
+            torch.empty_like(self.context_len_buffer) if _USE_ASCENDC_INDEX_SCORE_PREFILL else None
         )
+        self.decode_start_loc_buffer = (
+            torch.empty_like(self.context_len_buffer) if _USE_ASCENDC_INDEX_SCORE_DECODE else None
+        )
+        self.attn_mask_builder = AttentionMaskBuilder(device) if _USE_ASCENDC_INDEX_SCORE_PREFILL else None
 
     def build(
         self,
@@ -314,7 +291,22 @@ class AscendMiniMaxM3IndexerMetadataBuilder(AttentionMetadataBuilder[AscendMiniM
                 ),
                 non_blocking=True,
             )
-            cu_seqlens_q = (query_start_loc[num_decodes : prefill_end + 1] - num_decode_tokens).to(torch.int32)
+            prefill_start_loc = None
+            if _USE_ASCENDC_INDEX_SCORE_PREFILL:
+                assert self.prefill_start_loc_buffer is not None
+                prefill_start_loc = self.prefill_start_loc_buffer[:active_prefills]
+                torch.div(
+                    prefill_context_lens,
+                    self.block_size,
+                    rounding_mode="floor",
+                    out=prefill_start_loc,
+                )
+            cu_seqlens_q = self.prefill_cu_seqlens_q_buffer[: active_prefills + 1]
+            torch.sub(
+                query_start_loc[num_decodes : prefill_end + 1],
+                num_decode_tokens,
+                out=cu_seqlens_q,
+            )
             prefill_metadata = AscendMiniMaxM3IndexerPrefillMetadata(
                 cu_seqlens_q=cu_seqlens_q,
                 seq_lens=seq_lens[num_decodes:prefill_end],
@@ -322,15 +314,7 @@ class AscendMiniMaxM3IndexerMetadataBuilder(AttentionMetadataBuilder[AscendMiniM
                 block_table=block_table[num_decodes:prefill_end],
                 max_query_len=common_attn_metadata.max_query_len,
                 max_seq_len=common_attn_metadata.max_seq_len,
-                start_loc=(
-                    torch.div(
-                        prefill_context_lens,
-                        self.block_size,
-                        rounding_mode="floor",
-                    ).to(dtype=torch.int32)
-                    if _USE_ASCENDC_INDEX_SCORE
-                    else None
-                ),
+                start_loc=prefill_start_loc,
             )
 
         decode_metadata: AscendMiniMaxM3IndexerDecodeMetadata | None = None
@@ -342,13 +326,22 @@ class AscendMiniMaxM3IndexerMetadataBuilder(AttentionMetadataBuilder[AscendMiniM
             active_decodes = _active_decode_num_reqs(num_decodes, num_decode_tokens, decode_query_len)
             decode_context_lens = None
             decode_cu_seqlens_q = None
-            if _USE_ASCENDC_INDEX_SCORE:
+            decode_start_loc = None
+            if _USE_ASCENDC_INDEX_SCORE_DECODE:
                 decode_context_lens = self.context_len_buffer[:active_decodes]
                 decode_context_lens.copy_(
                     seq_lens[:active_decodes] - decode_query_len,
                     non_blocking=True,
                 )
                 decode_cu_seqlens_q = query_start_loc[: active_decodes + 1].to(torch.int32)
+                assert self.decode_start_loc_buffer is not None
+                decode_start_loc = self.decode_start_loc_buffer[:active_decodes]
+                torch.div(
+                    decode_context_lens,
+                    self.block_size,
+                    rounding_mode="floor",
+                    out=decode_start_loc,
+                )
             decode_metadata = AscendMiniMaxM3IndexerDecodeMetadata(
                 seq_lens=seq_lens[:active_decodes],
                 block_table=block_table[:active_decodes],
@@ -356,15 +349,8 @@ class AscendMiniMaxM3IndexerMetadataBuilder(AttentionMetadataBuilder[AscendMiniM
                 decode_query_len=decode_query_len,
                 cu_seqlens_q=decode_cu_seqlens_q,
                 context_lens=decode_context_lens,
+                start_loc=decode_start_loc,
             )
-            if _USE_ASCENDC_INDEX_SCORE and self.tp_size > 1 and active_prefills == 0:
-                decode_metadata.tp_score = self._build_tp_score_metadata(
-                    decode_metadata.block_table,
-                    decode_cu_seqlens_q,
-                    decode_context_lens,
-                    max_seq_len=decode_metadata.max_seq_len,
-                    decode_query_len=decode_query_len,
-                )
 
         return AscendMiniMaxM3IndexerMetadata(
             seq_lens=seq_lens,
@@ -397,6 +383,8 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
         init_blocks: int = 0,
         local_blocks: int = 0,
         cache_config: CacheConfig | None = None,
+        kv_cache_dtype: str = "auto",
+        kv_cache_torch_dtype: torch.dtype = torch.bfloat16,
     ) -> None:
         super().__init__()
         self.num_kv_heads = num_kv_heads
@@ -411,73 +399,25 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
             head_dim=index_head_dim,
             prefix=f"{prefix}.index_cache",
             cache_config=cache_config,
+            kv_cache_dtype=kv_cache_dtype,
+            kv_cache_torch_dtype=kv_cache_torch_dtype,
         )
-
-    def _decode_topk_tp_sharded(
-        self,
-        idx_q: torch.Tensor,
-        index_kv_cache: torch.Tensor,
-        block_table: torch.Tensor,
-        seq_lens: torch.Tensor,
-        max_seq_len: int,
-        decode_query_len: int,
-        tp_group: Any,
-        tp_size: int,
-        tp_rank: int,
-    ) -> torch.Tensor:
-        full_idx_q = tp_group.all_gather(idx_q.contiguous(), dim=1)
-
-        max_block_count = (max_seq_len + self.block_size - 1) // self.block_size
-        blocks_per_tp = (max_block_count + tp_size - 1) // tp_size
-        block_offset = tp_rank * blocks_per_tp
-        block_count = max(0, min(blocks_per_tp, max_block_count - block_offset))
-        local_block_table = block_table[:, block_offset : block_offset + block_count].contiguous()
-        local_seq_lens = torch.clamp(
-            seq_lens - block_offset * self.block_size,
-            min=0,
-            max=block_count * self.block_size,
-        )
-
-        local_topk, local_scores = minimax_m3_index_decode(
-            full_idx_q,
-            index_kv_cache,
-            local_block_table,
-            local_seq_lens,
-            max_seq_len,
-            self.topk_blocks,
-            self.init_blocks,
-            self.local_blocks,
-            full_idx_q.shape[1],
-            decode_query_len,
-            sm_scale=self.scale,
-            block_offset=block_offset,
-            block_count=block_count,
-            global_seq_lens=seq_lens,
-            return_scores=True,
-        )
-        gathered_scores = tp_group.all_gather(local_scores.contiguous(), dim=-1)
-        gathered_topk = tp_group.all_gather(local_topk.contiguous(), dim=-1)
-
-        local_head_count = idx_q.shape[1]
-        local_head_start = tp_rank * local_head_count
-        local_gathered_scores = gathered_scores.narrow(0, local_head_start, local_head_count)
-        _, merged_pos = torch.topk(
-            local_gathered_scores,
-            k=self.topk_blocks,
-            dim=-1,
-        )
-        local_gathered_topk = gathered_topk.narrow(0, local_head_start, local_head_count)
-        return torch.gather(local_gathered_topk, dim=-1, index=merged_pos)
 
     def forward(
         self,
         index_query: torch.Tensor,
-    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-        attn_metadata = get_forward_context().attn_metadata
+    ) -> tuple[
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+    ]:
+        forward_context = get_forward_context()
+        attn_metadata = forward_context.attn_metadata
         if not isinstance(attn_metadata, dict):
-            return None, None
+            return None, None, None
         index_md = attn_metadata[self.index_cache.prefix]
         assert isinstance(index_md, AscendMiniMaxM3IndexerMetadata)
+
         num_tokens = index_md.num_actual_tokens
         num_decode_tokens = index_md.num_decode_tokens
         iq = index_query[:num_tokens].view(-1, self.num_index_heads, self.index_head_dim)
@@ -485,76 +425,44 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
 
         decode_topk: torch.Tensor | None = None
         prefill_topk: torch.Tensor | None = None
+        decode_select_num_idx: torch.Tensor | None = None
         if index_md.num_decodes > 0:
             d = index_md.decode
             assert d is not None
-            tp_group = get_tp_group()
             decode_iq = iq[:num_decode_tokens]
-            if _USE_ASCENDC_INDEX_SCORE:
-                if tp_group.world_size > 1 and index_md.num_prefills == 0:
-                    decode_topk = minimax_m3_index_tp_block_parallel_decode(
-                        decode_iq,
-                        kv,
-                        d.tp_score,
-                        index_md.causal_mask,
-                        topk=self.topk_blocks,
-                        init_blocks=self.init_blocks,
-                        local_blocks=self.local_blocks,
-                        tp_group=tp_group,
-                    )
-                else:
-                    decode_start_loc = torch.div(
-                        d.context_lens,
-                        self.block_size,
-                        rounding_mode="floor",
-                    ).to(dtype=torch.int32)
-                    decode_topk = minimax_m3_index_decode_ascendc(
-                        decode_iq,
-                        kv,
-                        d.block_table,
-                        d.cu_seqlens_q,
-                        d.seq_lens,
-                        d.context_lens,
-                        decode_start_loc,
-                        index_md.causal_mask,
-                        topk=self.topk_blocks,
-                        init_blocks=self.init_blocks,
-                        local_blocks=self.local_blocks,
-                        decode_query_len=d.decode_query_len,
-                    )
+            if _USE_ASCENDC_INDEX_SCORE_DECODE:
+                decode_topk, decode_select_num_idx = minimax_m3_index_decode_ascendc(
+                    decode_iq,
+                    kv,
+                    d.block_table,
+                    d.cu_seqlens_q,
+                    d.seq_lens,
+                    d.context_lens,
+                    d.start_loc,
+                    index_md.causal_mask,
+                    topk=self.topk_blocks,
+                    init_blocks=self.init_blocks,
+                    local_blocks=self.local_blocks,
+                    decode_query_len=d.decode_query_len,
+                )
             else:
-                tp_size = tp_group.world_size
-                tp_rank = tp_group.rank_in_group
-                if _should_use_tp_sharded_index_decode(tp_size, index_md.num_prefills):
-                    decode_topk = self._decode_topk_tp_sharded(
-                        decode_iq,
-                        kv,
-                        d.block_table,
-                        d.seq_lens,
-                        d.max_seq_len,
-                        d.decode_query_len,
-                        tp_group,
-                        tp_size,
-                        tp_rank,
-                    )
-                else:
-                    decode_topk = minimax_m3_index_decode(
-                        decode_iq,
-                        kv,
-                        d.block_table,
-                        d.seq_lens,
-                        d.max_seq_len,
-                        self.topk_blocks,
-                        self.init_blocks,
-                        self.local_blocks,
-                        self.num_kv_heads,
-                        d.decode_query_len,
-                        sm_scale=self.scale,
-                    )
+                decode_topk, decode_select_num_idx = minimax_m3_index_decode(
+                    decode_iq,
+                    kv,
+                    d.block_table,
+                    d.seq_lens,
+                    d.max_seq_len,
+                    self.topk_blocks,
+                    self.init_blocks,
+                    self.local_blocks,
+                    self.num_kv_heads,
+                    d.decode_query_len,
+                    sm_scale=self.scale,
+                )
         if index_md.num_prefills > 0:
             p = index_md.prefill
             assert p is not None
-            if _USE_ASCENDC_INDEX_SCORE:
+            if _USE_ASCENDC_INDEX_SCORE_PREFILL:
                 prefill_topk = minimax_m3_index_prefill_ascendc(
                     iq[num_decode_tokens:],
                     kv,
@@ -592,7 +500,25 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
                     self.init_blocks,
                     self.local_blocks,
                 )
-        return decode_topk, prefill_topk
+        return decode_topk, prefill_topk, decode_select_num_idx
+
+    @staticmethod
+    def update_graph_params(
+        update_stream,
+        forward_context,
+        num_tokens,
+        vllm_config,
+        speculative_config=None,
+        draft_attn_metadatas=None,
+    ):
+        """No-op: indexer replay parameters are owned by its metadata builder,
+        not by the full-graph parameter-update channel.
+
+        Selection note: _get_graph_update_backend picks the first executable
+        backend, so correct updates for mixed-attention models rely on the
+        full-attention (GQA) group being scanned first — M3's full-attention
+        layers are the first layers registered, which holds today.
+        """
 
 
 class AscendMiniMaxM3Indexer(nn.Module):
@@ -609,6 +535,8 @@ class AscendMiniMaxM3Indexer(nn.Module):
         init_blocks: int = 0,
         local_blocks: int = 0,
         cache_config: CacheConfig | None = None,
+        kv_cache_dtype: str = "auto",
+        kv_cache_torch_dtype: torch.dtype = torch.bfloat16,
     ) -> None:
         super().__init__()
         self.impl = AscendMiniMaxM3IndexerImpl(
@@ -622,6 +550,8 @@ class AscendMiniMaxM3Indexer(nn.Module):
             init_blocks=init_blocks,
             local_blocks=local_blocks,
             cache_config=cache_config,
+            kv_cache_dtype=kv_cache_dtype,
+            kv_cache_torch_dtype=kv_cache_torch_dtype,
         )
 
     @property
@@ -631,7 +561,11 @@ class AscendMiniMaxM3Indexer(nn.Module):
     def forward(
         self,
         index_query: torch.Tensor,
-    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+    ) -> tuple[
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+    ]:
         return self.impl(index_query)
 
 
@@ -662,7 +596,7 @@ class AscendMiniMaxM3SparseBackend(AttentionBackend):
         return [128]
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [128]
 
     @classmethod
@@ -697,6 +631,8 @@ class AscendMiniMaxM3SparsePrefillMetadata:
     block_table: torch.Tensor
     max_query_len: int
     max_seq_len: int
+    total_kv_blocks: int
+    max_kv_blocks: int
 
 
 @dataclass
@@ -733,12 +669,14 @@ class AscendMiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[AscendMiniMa
         device: torch.device,
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        self.block_size = kv_cache_spec.block_size
         self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
         self.context_len_buffer = torch.empty(
             vllm_config.scheduler_config.max_num_batched_tokens,
             dtype=torch.int32,
             device=device,
         )
+        self.prefill_cu_seqlens_q_buffer = torch.empty_like(self.context_len_buffer)
 
     def build(
         self,
@@ -764,20 +702,33 @@ class AscendMiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[AscendMiniMa
             active_prefills = _active_prefill_num_reqs(num_prefills, num_prefill_tokens, qsl_cpu, num_decodes)
             prefill_end = num_decodes + active_prefills
             prefill_kv_lens = seq_lens[num_decodes:prefill_end]
+            prefill_kv_lens_cpu = prefill_kv_lens.detach().cpu()
+            prefill_block_lens_cpu = torch.div(
+                prefill_kv_lens_cpu + self.block_size - 1,
+                self.block_size,
+                rounding_mode="floor",
+            )
+            total_kv_blocks = int(prefill_block_lens_cpu.sum().item())
+            max_kv_blocks = int(prefill_block_lens_cpu.max().item()) if prefill_block_lens_cpu.numel() else 0
             prefill_cu_seqlens_k = torch.empty(active_prefills + 1, dtype=torch.int32, device=seq_lens.device)
             prefill_cu_seqlens_k[0] = 0
             torch.cumsum(prefill_kv_lens, dim=0, out=prefill_cu_seqlens_k[1:])
             prefill_query_lens_cpu = qsl_cpu[num_decodes + 1 : prefill_end + 1] - qsl_cpu[num_decodes:prefill_end]
             prefill_context_lens = self.context_len_buffer[num_decodes:prefill_end]
             prefill_context_lens.copy_(
-                (prefill_kv_lens.detach().cpu() - prefill_query_lens_cpu).to(
+                (prefill_kv_lens_cpu - prefill_query_lens_cpu).to(
                     device=self.context_len_buffer.device,
                     dtype=torch.int32,
                     non_blocking=True,
                 ),
                 non_blocking=True,
             )
-            cu_seqlens_q = (query_start_loc[num_decodes : prefill_end + 1] - num_decode_tokens).to(torch.int32)
+            cu_seqlens_q = self.prefill_cu_seqlens_q_buffer[: active_prefills + 1]
+            torch.sub(
+                query_start_loc[num_decodes : prefill_end + 1],
+                num_decode_tokens,
+                out=cu_seqlens_q,
+            )
             prefill_metadata = AscendMiniMaxM3SparsePrefillMetadata(
                 cu_seqlens_q=cu_seqlens_q,
                 cu_seqlens_k=prefill_cu_seqlens_k,
@@ -786,6 +737,8 @@ class AscendMiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[AscendMiniMa
                 block_table=block_table[num_decodes:prefill_end],
                 max_query_len=common_attn_metadata.max_query_len,
                 max_seq_len=common_attn_metadata.max_seq_len,
+                total_kv_blocks=total_kv_blocks,
+                max_kv_blocks=max_kv_blocks,
             )
 
         decode_metadata: AscendMiniMaxM3SparseDecodeMetadata | None = None
@@ -835,21 +788,27 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
         self.kv_cache_dtype = kv_cache_dtype
         self.topk_blocks = topk_blocks
         self.block_size = sparse_block_size
+        self._dequant_scale: torch.Tensor | None = None
 
     def forward(
         self,
         layer: AttentionLayer,
         query: torch.Tensor,
         kv_cache: torch.Tensor,
-        topk_idx: tuple[torch.Tensor | None, torch.Tensor | None],
+        topk_idx: tuple[
+            torch.Tensor | None,
+            torch.Tensor | None,
+            torch.Tensor | None,
+        ],
         output: torch.Tensor,
     ) -> torch.Tensor:
-        attn_metadata = get_forward_context().attn_metadata
+        forward_context = get_forward_context()
+        attn_metadata = forward_context.attn_metadata
         if not isinstance(attn_metadata, dict):
             return output
         main_md = attn_metadata[layer.layer_name]
         assert isinstance(main_md, AscendMiniMaxM3SparseMetadata)
-        decode_topk, prefill_topk = topk_idx
+        decode_topk, prefill_topk, decode_select_num_idx = topk_idx
 
         num_decode_tokens = main_md.num_decode_tokens
         num_tokens = main_md.num_actual_tokens
@@ -860,6 +819,12 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
         if main_md.num_decodes > 0:
             d = main_md.decode
             assert d is not None and decode_topk is not None
+            if self.kv_cache_dtype.startswith("fp8") and self._dequant_scale is None:
+                self._dequant_scale = torch.ones(
+                    (1, 1, 1, 1),
+                    dtype=torch.float32,
+                    device=query.device,
+                )
             minimax_m3_sparse_attn_decode(
                 q[:num_decode_tokens],
                 kv_cache,
@@ -871,6 +836,8 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
                 out[:num_decode_tokens],
                 d.decode_query_len,
                 block_size=self.block_size,
+                select_num_idx=decode_select_num_idx,
+                dequant_scale=self._dequant_scale,
             )
 
         if main_md.num_prefills > 0:
@@ -889,8 +856,28 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
                 self.scale,
                 out[num_decode_tokens:],
                 block_size=self.block_size,
+                total_kv_blocks=p.total_kv_blocks,
+                max_kv_blocks=p.max_kv_blocks,
             )
         return output
+
+    @staticmethod
+    def update_graph_params(
+        update_stream,
+        forward_context,
+        num_tokens,
+        vllm_config,
+        speculative_config=None,
+        draft_attn_metadatas=None,
+    ):
+        """No-op: sparse-attention replay parameters are owned by its metadata
+        builder, not by the full-graph parameter-update channel.
+
+        Selection note: _get_graph_update_backend picks the first executable
+        backend, so correct updates for mixed-attention models rely on the
+        full-attention (GQA) group being scanned first — M3's full-attention
+        layers are the first layers registered, which holds today.
+        """
 
 
 class AscendMiniMaxM3QKVParallelLinearWithIndexer(QKVParallelLinear):
@@ -1269,6 +1256,40 @@ def minimax_m3_sparse_forward_fake(
     layer_name: str,
 ) -> None:
     return
+
+
+def minimax_m3_fused_sparse_forward(
+    qkv: torch.Tensor,
+    positions: torch.Tensor,
+    attn_output: torch.Tensor,
+    layer_name: str,
+    index_qk: torch.Tensor | None = None,
+) -> None:
+    forward_context = get_forward_context()
+    if not isinstance(forward_context.attn_metadata, dict):
+        attn_output.zero_()
+        return
+    layer = forward_context.no_compile_layers[layer_name]
+    layer._run_fused_sparse_attention(qkv, positions, attn_output, index_qk)
+
+
+def minimax_m3_fused_sparse_forward_fake(
+    qkv: torch.Tensor,
+    positions: torch.Tensor,
+    attn_output: torch.Tensor,
+    layer_name: str,
+    index_qk: torch.Tensor | None = None,
+) -> None:
+    return
+
+
+direct_register_custom_op(
+    op_name="minimax_m3_fused_sparse_forward",
+    op_func=minimax_m3_fused_sparse_forward,
+    mutates_args=["attn_output"],
+    fake_impl=minimax_m3_fused_sparse_forward_fake,
+    dispatch_key="PrivateUse1",
+)
 
 
 direct_register_custom_op(

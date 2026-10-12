@@ -6,9 +6,13 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     supports_hma,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
+from vllm.v1.worker import mamba_utils
+
+from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import uses_sfa_dspark_kv_transfer
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.distributed.kv_events import KVConnectorKVEvents
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
@@ -22,11 +26,45 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
             kv_cache_config=kv_cache_config,
         )
 
+        transfer = vllm_config.kv_transfer_config
+        self._requires_full_dspark_prompt = (
+            uses_sfa_dspark_kv_transfer(vllm_config) and transfer.is_kv_producer and not transfer.is_kv_consumer
+        )
+        self._dspark_prefix_provider_index: int | None = None
+        if self._requires_full_dspark_prompt:
+            self.configure_dspark_prefix_cache(vllm_config)
+
         self._all_support_hma = all(supports_hma(c) for c in self._connectors)
         assert vllm_config.scheduler_config.disable_hybrid_kv_cache_manager or self._all_support_hma, (
             "HMA should not be enabled unless all sub-connectors support it"
         )
         self._configure_layerwise_reuse_completion()
+        self._mamba_copy_bufs = None
+        # Handle to the (V2) mamba hybrid model state while its per-layer
+        # align pre-copy is deferred behind a layerwise child connector.
+        self._mamba_state: Any = None
+        self.requires_mamba_state_copy_after_layer_load = any(
+            getattr(
+                connector,
+                "requires_mamba_state_copy_after_layer_load",
+                False,
+            )
+            for connector in self._connectors
+        )
+
+    def configure_dspark_prefix_cache(self, vllm_config: "VllmConfig") -> bool:
+        """Select a store that restores both target and persistent draft KV."""
+        providers = []
+        for index, connector in enumerate(self._connectors):
+            configure = getattr(connector, "configure_dspark_prefix_cache", None)
+            if callable(configure) and configure(vllm_config):
+                providers.append(index)
+        if len(providers) > 1:
+            raise ValueError("DSpark prefix reuse requires exactly one paired target/draft store")
+        self._dspark_prefix_provider_index = providers[0] if providers else None
+        if providers:
+            self._requires_full_dspark_prompt = False
+        return bool(providers)
 
     def _configure_layerwise_reuse_completion(self) -> None:
         # Producers that can wait until a shared physical KV slot is safe to
@@ -101,6 +139,18 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
         request: "Request",
         num_computed_tokens: int,
     ) -> tuple[int | None, bool]:
+        # A target-only child cannot initialize the skipped draft context.
+        if getattr(self, "_requires_full_dspark_prompt", False):
+            return 0, False
+        provider_index = getattr(self, "_dspark_prefix_provider_index", None)
+        if provider_index is not None:
+            tokens, load_async = self._connectors[provider_index].get_num_new_matched_tokens(
+                request, num_computed_tokens
+            )
+            if tokens is not None and tokens > 0:
+                self._requests_to_connector[request.request_id] = provider_index
+            return tokens, load_async
+
         # Recompute offload may contain an unhashed partial block that other
         # prefix-cache connectors cannot restore. Give its request state
         # priority regardless of connector ordering.
@@ -156,3 +206,17 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
         self._requests_to_connector.pop(request.request_id, None)
 
         return async_saves > 0, kv_txfer_params
+
+    def get_kv_connector_kv_cache_events(self) -> "KVConnectorKVEvents | None":
+        """Collect worker-side KV cache events from all child connectors."""
+        combined = None
+        for connector in self._connectors:
+            events = connector.get_kv_connector_kv_cache_events()
+            if events is None:
+                continue
+            if combined is None:
+                combined = events
+            else:
+                combined.add_events(events.get_all_events())
+                combined.increment_workers(events.get_number_of_workers())
+        return combined

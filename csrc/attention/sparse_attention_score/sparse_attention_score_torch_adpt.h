@@ -138,7 +138,8 @@ at::Tensor npu_sparse_attention_score(
     const c10::optional<at::Tensor> &actualSeqLengthsKv,
     c10::string_view qInputLayout, c10::string_view kvInputLayout,
     int64_t numKeyValueHeads, double scaleValue, int64_t blockSize, int64_t topK,
-    int64_t innerPrecise)
+    int64_t innerPrecise,
+    const c10::optional<at::ScalarType> &attentionOutDtype)
 {
     TORCH_CHECK(std::string(qInputLayout) == "TND",
                 "npu_sparse_attention_score only supports query TND layout");
@@ -146,9 +147,12 @@ at::Tensor npu_sparse_attention_score(
                 qDequantScale, kDequantScale, vDequantScale,
                 actualSeqLengths, actualSeqLengthsKv, numKeyValueHeads, blockSize, topK, innerPrecise);
 
-    at::ScalarType outDtype = (query.scalar_type() == at::kFloat8_e4m3fn)
-                                  ? at::kHalf
-                                  : query.scalar_type();
+    at::ScalarType outDtype = query.scalar_type();
+    if (query.scalar_type() == at::kFloat8_e4m3fn) {
+        outDtype = attentionOutDtype.value_or(at::kBFloat16);
+        TORCH_CHECK(outDtype == at::kHalf || outDtype == at::kBFloat16,
+                    "attention_out_dtype must be float16 or bfloat16 for float8_e4m3fn input.");
+    }
     at::Tensor attentionOut = at::empty(query.sizes(), query.options().dtype(outDtype));
     at::Tensor softmaxLse;
 

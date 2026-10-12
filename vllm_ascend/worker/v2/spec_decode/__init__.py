@@ -29,6 +29,14 @@ def init_speculator(
     """
     speculative_config = vllm_config.speculative_config
     assert speculative_config is not None
+    if speculative_config.method == "extract_hidden_states":
+        # No Ascend-specific behavior beyond update_stream assignment in
+        # NPUModelRunner; reuse upstream ExtractHiddenStatesSpeculator as-is.
+        from vllm.v1.worker.gpu.spec_decode.extract_hidden_states import (
+            ExtractHiddenStatesSpeculator,
+        )
+
+        return ExtractHiddenStatesSpeculator(vllm_config, device)
     if speculative_config.use_dspark():
         from vllm_ascend.worker.v2.spec_decode.dspark.speculator import (
             AscendDSparkSpeculator,
@@ -36,6 +44,12 @@ def init_speculator(
 
         return AscendDSparkSpeculator(vllm_config, device)
     if speculative_config.use_dflash():
+        if "DFlash2DraftModel" in speculative_config.draft_model_config.architectures:
+            from vllm_ascend.worker.v2.spec_decode.dflash2.speculator import (
+                AscendDFlash2Speculator,
+            )
+
+            return AscendDFlash2Speculator(vllm_config, device)
         from vllm_ascend.worker.v2.spec_decode.dflash.speculator import (
             AscendDFlashSpeculator,
         )

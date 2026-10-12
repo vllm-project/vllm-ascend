@@ -7,7 +7,6 @@ from vllm_ascend._310p.ops.fla.idex import (
     prepare_chunk_offsets_310,
 )
 from vllm_ascend._310p.spec_decode.llm_base_proposer_310 import AscendSpecDecodeBaseProposer310
-from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
 from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
 from vllm_ascend.utils import is_rc_device
 
@@ -28,14 +27,16 @@ AscendSpecDecodeBaseProposer._run_merged_draft = (  # type: ignore[method-assign
 # not exist in the triton version used on 310P CI, and NPU does not use these
 # CUDA warmup kernel anyway.
 QwenGatedDeltaNetAttention._warmup_prefill_kernels = lambda self, qkv_or_qkvz, v_dim: None  # type: ignore[method-assign]
-QwenGatedDeltaNetAttention._split_ba_for_tp = AscendGatedDeltaNetAttention._split_ba_for_tp
-QwenGatedDeltaNetAttention.get_state_shape = AscendGatedDeltaNetAttention.get_state_shape
 QwenGatedDeltaNetAttention._forward_core = AscendGatedDeltaNetAttention310._forward_core
 QwenGatedDeltaNetAttention.get_state_dtype = AscendGatedDeltaNetAttention310.get_state_dtype
 
 # 310P: make Qwen GDN use the 310P attention backend, including the
 # MTP ACL graph padding replay fixes provided by gdn_attn_builder_310.py.
 QwenGatedDeltaNetAttention.get_attn_backend = AscendGatedDeltaNetAttention310.get_attn_backend
+
+# Vision pos-embed: 310P images do not install Triton, so upstream
+# ``HAS_TRITON=False`` already selects ``pos_embed_interpolate_native``.
+# No ``fast_pos_embed_interpolate`` rewrite is required.
 
 if is_rc_device():
     from vllm.model_executor.models.qwen3_vl import Qwen3_VisionTransformer

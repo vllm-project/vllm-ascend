@@ -1,23 +1,93 @@
-from collections.abc import Iterable
-from itertools import product as iprod
+from collections.abc import Iterable, Iterator, Sequence
+from contextlib import contextmanager
 from typing import Any
 
 import torch
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import largest_power_of_2_divisor
+from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 from vllm.v1.worker.utils import AttentionGroup, KVBlockZeroer
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
 
+def copy_kv_cache_blocks_inplace(
+    kv_caches: Iterable[torch.Tensor | Sequence[torch.Tensor | None] | None],
+    num_blocks: int,
+    kv_cache_block_copies: Sequence[KVCacheBlockCopy],
+) -> None:
+    """Copy logical cache blocks for Ascend's segmented cache layout.
+
+    Unlike the upstream block-major allocation, an Ascend cache allocation can
+    contain multiple block-indexed tensor segments. For example, Mamba stores
+    all convolution states before all SSM states in the same storage. Treating
+    that complete storage as ``[num_blocks, page_size]`` therefore copies the
+    wrong byte ranges. Copy every tensor segment as ``num_blocks`` complete
+    physical pages instead. A page may span multiple kernel-level cache blocks.
+    """
+    if not kv_cache_block_copies:
+        return
+
+    cache_tensors: list[torch.Tensor] = []
+    seen_tensors: set[int] = set()
+    for entry in kv_caches:
+        if entry is None:
+            continue
+        if isinstance(entry, torch.Tensor):
+            tensors = entry.unbind(0) if entry.ndim == 5 and entry.shape[0] == 2 else (entry,)
+        else:
+            tensors = entry
+        for tensor in tensors:
+            if tensor is None:
+                continue
+            data_ptr = tensor.data_ptr()
+            if data_ptr in seen_tensors:
+                continue
+            seen_tensors.add(data_ptr)
+            cache_tensors.append(tensor)
+
+    if not cache_tensors:
+        return
+
+    device = cache_tensors[0].device
+    for tensor in cache_tensors:
+        assert tensor.device == device
+        assert tensor.shape[0] % num_blocks == 0
+        # FP8 is storage here. NPU stack/index operators need byte views;
+        # same-size bitcasts preserve the non-contiguous page geometry.
+        if tensor.dtype == torch.float8_e4m3fn:
+            tensor = tensor.view(torch.int8)
+        blocks = tensor.unflatten(0, (num_blocks, tensor.shape[0] // num_blocks))
+        source_blocks = torch.stack([blocks[copy.src_block_id] for copy in kv_cache_block_copies])
+        for index, copy in enumerate(kv_cache_block_copies):
+            blocks[copy.dst_block_id].copy_(source_blocks[index])
+
+
+@contextmanager
+def disable_compilation(model: torch.nn.Module) -> Iterator[None]:
+    compilation_model = getattr(model, "model", model)
+    if not hasattr(compilation_model, "do_not_compile"):
+        yield
+        return
+
+    previous = compilation_model.do_not_compile
+    compilation_model.do_not_compile = True
+    try:
+        yield
+    finally:
+        compilation_model.do_not_compile = previous
+
+
 @triton.jit
 def _zero_kv_blocks_kernel(
     seg_addrs_ptr,
+    seg_page_sizes_ptr,
     block_ids_ptr,
     n_blocks,
+    seg_page_strides_ptr,
     N_SEGS: tl.constexpr,
-    PAGE_SIZE_EL: tl.constexpr,
+    MAX_CHUNKS: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     GRID_SIZE: tl.constexpr,
 ):
@@ -28,26 +98,32 @@ def _zero_kv_blocks_kernel(
     buffer.  For backends where K/V is outermost (block_dim=1) there are
     two segments per buffer (one for K, one for V).
 
+    Segment payload sizes and physical page strides are independent.
+    Payload sizes bound writes; page strides advance scheduler block IDs
+    past neighboring caches and padding.
+
     seg_addrs_ptr holds absolute byte addresses (int64) for each segment,
     allowing segments to live in different CUDA allocations.
 
     Programs are mapped as (block_index, seg_index, chunk_index).
     """
     pid = tl.program_id(0)
-    chunks = PAGE_SIZE_EL // BLOCK_SIZE
-    work_per_block = N_SEGS * chunks
+    work_per_block = N_SEGS * MAX_CHUNKS
     total_work = n_blocks * work_per_block
     for work_idx in range(pid, total_work, GRID_SIZE):
         block_index = work_idx // work_per_block
         remainder = work_idx % work_per_block
-        seg_index = remainder // chunks
-        chunk_index = remainder % chunks
-        block_id = tl.load(block_ids_ptr + block_index)
-        seg_addr = tl.load(seg_addrs_ptr + seg_index)
-        ptr = tl.cast(seg_addr, tl.pointer_type(tl.int32))
-        offset = block_id.to(tl.int64) * PAGE_SIZE_EL + chunk_index.to(tl.int64) * BLOCK_SIZE
-        cols = tl.arange(0, BLOCK_SIZE).to(tl.int64)
-        tl.store(ptr + offset + cols, tl.zeros([BLOCK_SIZE], dtype=tl.int32))
+        seg_index = remainder // MAX_CHUNKS
+        chunk_index = remainder % MAX_CHUNKS
+        page_size_el = tl.load(seg_page_sizes_ptr + seg_index)
+        if chunk_index < page_size_el // BLOCK_SIZE:
+            block_id = tl.load(block_ids_ptr + block_index)
+            seg_addr = tl.load(seg_addrs_ptr + seg_index)
+            ptr = tl.cast(seg_addr, tl.pointer_type(tl.int32))
+            page_stride_el = tl.load(seg_page_strides_ptr + seg_index)
+            offset = block_id.to(tl.int64) * page_stride_el.to(tl.int64) + chunk_index.to(tl.int64) * BLOCK_SIZE
+            cols = tl.arange(0, BLOCK_SIZE).to(tl.int64)
+            tl.store(ptr + offset + cols, tl.zeros([BLOCK_SIZE], dtype=tl.int32))
 
 
 class AscendKVBlockZeroer(KVBlockZeroer):
@@ -61,7 +137,8 @@ class AscendKVBlockZeroer(KVBlockZeroer):
     def __init__(self, device: torch.device, pin_memory: bool) -> None:
         self.device = device
         self.pin_memory = pin_memory
-        self._meta: tuple[torch.Tensor, int, int, int] | None = None
+        self._meta: tuple[torch.Tensor, torch.Tensor, int, int, int] | None = None
+        self._seg_page_strides: torch.Tensor | None = None
         self._id_cap: int = 0
         self._ids_pinned: torch.Tensor | None = None
         self._ids_gpu: torch.Tensor | None = None
@@ -69,7 +146,7 @@ class AscendKVBlockZeroer(KVBlockZeroer):
     def init_meta(
         self,
         attn_groups_iter: Iterable["AttentionGroup"],
-        kernel_block_sizes: list[list[int]],
+        kernel_block_sizes: list[int],
         cache_dtype: str,
         runner_only_attn_layers: set[str],
         static_forward_context: dict[str, Any],
@@ -82,14 +159,15 @@ class AscendKVBlockZeroer(KVBlockZeroer):
 
         Block IDs from the scheduler reference logical blocks whose size
         may differ from the kernel block size (virtual block splitting).
-        PAGE_SIZE_EL accounts for this ratio so that
-        ``block_id * PAGE_SIZE_EL`` lands at the correct offset.
+        Each segment's page size accounts for this ratio so that
+        ``block_id * page_size_el`` lands at the correct offset.
 
         Only AttentionSpec layers are processed; Mamba layers are skipped.
         """
         seen_ptrs: set[int] = set()
         seg_addrs: list[int] = []
-        page_size_el: int | None = None
+        seg_page_sizes: list[int] = []
+        seg_page_strides: list[int] = []
 
         for group in attn_groups_iter:
             spec = group.kv_cache_spec
@@ -97,45 +175,51 @@ class AscendKVBlockZeroer(KVBlockZeroer):
                 continue
             if group.kv_cache_group_id >= len(kernel_block_sizes):
                 continue
-            kernel_bs = kernel_block_sizes[group.kv_cache_group_id][0]
+            kernel_bs = kernel_block_sizes[group.kv_cache_group_id]
+            assert kernel_bs > 0 and spec.block_size % kernel_bs == 0
             ratio = spec.block_size // kernel_bs
-            block_dim = 0
 
             for layer_name in group.layer_names:
                 if layer_name in runner_only_attn_layers:
                     continue
                 kv_tuple = static_forward_context[layer_name].kv_cache
-                assert len(kv_tuple) == 2, "K and V are not stored separately"
+                if cache_dtype == "mxfp8" and len(kv_tuple) == 4:
+                    # V scales are checkpoint constants, initialized before
+                    # capture. Clearing a recycled block must preserve them.
+                    kv_tuple = kv_tuple[:3]
+                else:
+                    assert len(kv_tuple) == 2, "K and V are not stored separately"
                 for kv in kv_tuple:
-                    block_dim = 0
                     dp = kv.data_ptr()
                     if dp in seen_ptrs:
                         continue
                     seen_ptrs.add(dp)
 
                     el = kv.element_size()
-                    cur_bytes = kv.stride(block_dim) * el
-                    assert cur_bytes % 4 == 0
-                    kernel_block_el = cur_bytes // 4
-                    cur_page_el = kernel_block_el * ratio
-                    if page_size_el is None:
-                        page_size_el = cur_page_el
-                    else:
-                        assert page_size_el == cur_page_el, f"Non-uniform page sizes: {page_size_el} vs {cur_page_el}"
+                    payload_bytes = kv[0].numel() * el
+                    stride_bytes = kv.stride(0) * el
+                    assert kv[0].is_contiguous(), "KV block payload must be contiguous"
+                    assert payload_bytes % 4 == 0 and stride_bytes % 4 == 0
+                    # A physical stride may include other caches and padding.
+                    # Only clear the payload. Contiguous subblocks can be
+                    # coalesced; strided subblocks need one segment each.
+                    contiguous = payload_bytes == stride_bytes
+                    for subblock in range(1 if contiguous else ratio):
+                        seg_addrs.append(dp + subblock * stride_bytes)
+                        seg_page_sizes.append(payload_bytes * (ratio if contiguous else 1) // 4)
+                        seg_page_strides.append(stride_bytes * ratio // 4)
 
-                    block_stride_bytes = cur_bytes
-                    outer_dims = [d for d in range(block_dim) if kv.stride(d) * el > block_stride_bytes]
-                    outer_strides = [kv.stride(d) * el for d in outer_dims]
-                    for outer in iprod(*(range(kv.shape[d]) for d in outer_dims)):
-                        off_bytes = sum(i * s for i, s in zip(outer, outer_strides))
-                        seg_addrs.append(dp + off_bytes)
-
-        if not seg_addrs or page_size_el is None:
+        if not seg_addrs:
             self._meta = None
+            self._seg_page_strides = None
             return
 
         # _zero_kv_blocks_kernel will use int64 zeros, to meet the UB size, we use blk_size=64B/8B=8192
-        blk_size = min(largest_power_of_2_divisor(page_size_el), 8192)
+        max_page_size_el = max(seg_page_sizes)
+        blk_size = min(
+            min(largest_power_of_2_divisor(page_size_el) for page_size_el in seg_page_sizes),
+            8192,
+        )
         self._id_cap = 8192
         self._ids_pinned = torch.empty(
             self._id_cap,
@@ -143,9 +227,11 @@ class AscendKVBlockZeroer(KVBlockZeroer):
             pin_memory=self.pin_memory,
         )
         self._ids_gpu = torch.empty(self._id_cap, dtype=torch.int64, device=self.device)
+        self._seg_page_strides = torch.tensor(seg_page_strides, dtype=torch.int64, device=self.device)
         self._meta = (
             torch.tensor(seg_addrs, dtype=torch.uint64, device=self.device),
-            page_size_el,
+            torch.tensor(seg_page_sizes, dtype=torch.int64, device=self.device),
+            max_page_size_el // blk_size,
             blk_size,
             len(seg_addrs),
         )
@@ -154,7 +240,7 @@ class AscendKVBlockZeroer(KVBlockZeroer):
         """Zero the KV cache memory for the given block IDs."""
         if not block_ids or self._meta is None:
             return
-        seg_addrs, page_size_el, blk_size, n_segs = self._meta
+        seg_addrs, seg_page_sizes, max_chunks, blk_size, n_segs = self._meta
         n_blocks = len(block_ids)
         if n_blocks > self._id_cap:
             self._id_cap = n_blocks * 2
@@ -168,17 +254,18 @@ class AscendKVBlockZeroer(KVBlockZeroer):
         self._ids_pinned[:n_blocks].numpy()[:] = block_ids
         idx = self._ids_gpu[:n_blocks]
         idx.copy_(self._ids_pinned[:n_blocks], non_blocking=True)
-        chunks = page_size_el // blk_size
-        total_work = n_blocks * n_segs * chunks
+        total_work = n_blocks * n_segs * max_chunks
         grid = min(total_work, get_vectorcore_num()) if total_work > 0 else 0
         if grid == 0:
             return
         _zero_kv_blocks_kernel[(grid,)](
             seg_addrs,
+            seg_page_sizes,
             idx,
             n_blocks,
+            self._seg_page_strides if self._seg_page_strides is not None else seg_page_sizes,
             N_SEGS=n_segs,
-            PAGE_SIZE_EL=page_size_el,
+            MAX_CHUNKS=max_chunks,
             BLOCK_SIZE=blk_size,
             GRID_SIZE=grid,
         )

@@ -17,12 +17,9 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.utils import PADDING_SLOT_ID
 from vllm.v1.worker.utils import AttentionGroup
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
-from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
-from vllm_ascend.ops.vocab_parallel_embedding import lmhead_all_to_all
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 from vllm_ascend.utils import lmhead_tp_enable
 
@@ -182,24 +179,9 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
         spec_step_idx: int,
         num_indices: int,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """GPU Step3.5 sampling semantics with Ascend TP/reduce-sample paths."""
+        """GPU Step3.5 sampling semantics with Ascend TP paths."""
         logits: torch.Tensor | None = None
-        if get_ascend_config().enable_reduce_sample and self.method == "mtp":
-            if not hasattr(self.model.model, "compute_logits"):
-                draft_token_ids, draft_probs = self.compute_draft_token_ids(hidden_states, sampling_metadata)
-                if lmhead_tp_enable() and num_indices < draft_token_ids.shape[0]:
-                    draft_token_ids = draft_token_ids[:num_indices]
-                    if draft_probs is not None:
-                        draft_probs = draft_probs[:num_indices]
-                return draft_token_ids, draft_probs
-            logits = self.model.compute_logits(hidden_states, spec_step_idx=spec_step_idx)
-            if lmhead_tp_enable():
-                # Defensive: mutually exclusive with enable_reduce_sample at startup (ascend_config.py).
-                logits = lmhead_all_to_all(logits, get_lmhead_tp_group())
-            else:
-                logits = self.model.model.logits_processor._gather_logits(logits)
-        else:
-            logits = self.model.compute_logits(hidden_states, spec_step_idx=spec_step_idx)
+        logits = self.model.compute_logits(hidden_states, spec_step_idx=spec_step_idx)
 
         if lmhead_tp_enable() and num_indices < logits.shape[0]:
             logits = logits[:num_indices]
@@ -289,6 +271,12 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
             inputs_embeds = None
 
         self.token_indices_to_sample.fill_(0)
+
+        if aclgraph_runtime_mode == CUDAGraphMode.FULL:
+            self._maybe_update_metadata(
+                self.draft_attn_groups[0].backend,
+                multi_steps_attn_metadata,
+            )
 
         with set_ascend_forward_context(
             multi_steps_attn_metadata[0] if multi_steps_attn_metadata else None,
@@ -470,6 +458,12 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
         self.token_indices_to_sample[:token_indices_to_sample_len].copy_(token_indices_to_sample)
         self.token_indices_to_sample[token_indices_to_sample_len:].fill_(0)
 
+        if aclgraph_runtime_mode == CUDAGraphMode.FULL:
+            self._maybe_update_metadata(
+                self.draft_attn_groups[0].backend,
+                multi_steps_attn_metadata,
+            )
+
         with set_ascend_forward_context(
             multi_steps_attn_metadata[0],
             self.vllm_config,
@@ -530,7 +524,6 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
         }
         if self.pass_hidden_states_to_model:
             model_hidden_states = self.hidden_states[:num_input_tokens]
-            model_hidden_states, model_positions = self.maybe_pad_and_reduce(model_hidden_states, model_positions)
             model_kwargs["hidden_states"] = model_hidden_states
             model_kwargs["positions"] = model_positions
 
@@ -540,10 +533,6 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
             hidden_states = last_hidden_states
         else:
             last_hidden_states, hidden_states = ret_hidden_states
-
-        last_hidden_states, model_positions, hidden_states = self.maybe_all_gather_and_unpad(
-            last_hidden_states, model_positions, hidden_states
-        )
 
         num_indices = token_indices_to_sample.shape[0]
         if lmhead_tp_enable():
@@ -655,10 +644,6 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
             model_input_ids = self.input_ids[:input_batch_size]
             model_positions = self._get_positions(input_batch_size)
             model_hidden_states = self.hidden_states[:input_batch_size]
-            model_hidden_states, model_positions = self.maybe_pad_and_reduce(
-                model_hidden_states,
-                model_positions,
-            )
             if forward_context is not None and multi_steps_attn_metadata:
                 if spec_step_idx >= len(multi_steps_attn_metadata):
                     raise AssertionError("Step3.5 MTP metadata must contain one entry per draft step")
@@ -679,12 +664,6 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
                 hidden_states = ret_hidden_states
             else:
                 last_hidden_states, hidden_states = ret_hidden_states
-
-            last_hidden_states, model_positions, hidden_states = self.maybe_all_gather_and_unpad(
-                last_hidden_states,
-                model_positions,
-                hidden_states,
-            )
 
             num_indices = token_indices_to_sample.shape[0]
             sample_hidden_states = last_hidden_states[token_indices_to_sample]

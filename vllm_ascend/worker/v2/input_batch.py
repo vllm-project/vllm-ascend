@@ -62,6 +62,10 @@ class AscendInputBuffers(InputBuffers):
         # define seq_lens_np for easier calculation with numpy.
         self.seq_lens_np: np.ndarray = self.seq_lens_cpu.numpy()
 
+        # Logical query token count, scoped to _dummy_run before graph padding.
+        # None keeps the default layout for other dummy/capture paths.
+        self.dummy_num_tokens: int | None = None
+
 
 @dataclass
 class AscendInputBatch(InputBatch):
@@ -69,74 +73,65 @@ class AscendInputBatch(InputBatch):
 
     # Create seq_lens_np.
     # npu's attention backend still needs seq_lens on CPU side.
-    if vllm_version_is("0.27.1"):
-        seq_lens_np: np.ndarray
-    else:
-        # main (post-0.27.1): InputBatch gained max_query_len default field,
-        # requiring the child's first field to also have a default.
-        seq_lens_np: np.ndarray = None  # type: ignore[assignment, no-redef]
+    # InputBatch gained max_query_len default field,
+    # requiring the child's first field to also have a default.
+    seq_lens_np: np.ndarray = None  # type: ignore[assignment, no-redef]
     # attn_state is used to build attention metadata.
     attn_state: AscendAttentionState | None = None
     is_dummy: bool = False
 
-    if vllm_version_is("0.27.1"):
-
-        @classmethod
-        def make_dummy(
-            cls,
-            num_reqs: int,
-            num_tokens: int,
-            input_buffers: AscendInputBuffers,
-        ) -> "AscendInputBatch":
-            """Override the make_dummy method to calculate seq_lens_np."""
-            input_batch = InputBatch.make_dummy(
-                num_reqs,
-                num_tokens,
-                input_buffers,
-            )
-            base_tokens = num_tokens // num_reqs
-            num_extra = num_tokens % num_reqs
-            input_buffers.seq_lens_np[: num_reqs - num_extra] = base_tokens
-            input_buffers.seq_lens_np[num_reqs - num_extra : num_reqs] = base_tokens + 1
-            input_buffers.seq_lens_np[num_reqs:] = 0
-            seq_lens_np = input_buffers.seq_lens_np[:num_reqs]
-            update_cos_sin(input_batch.positions)
-            base_fields = {field.name: getattr(input_batch, field.name) for field in fields(InputBatch)}
-            return cls(
-                **base_fields,
-                seq_lens_np=seq_lens_np,
-                attn_state=AscendAttentionState.DecodeOnly,
-                is_dummy=True,
-            )
-
-    else:
-
-        @classmethod
-        def make_dummy(
-            cls,
-            num_reqs: int,
-            num_tokens: int,
-            input_buffers: AscendInputBuffers,
-            max_query_len: int | None = None,
-        ) -> "AscendInputBatch":
-            """Override the make_dummy method to calculate seq_lens_np."""
+    @classmethod
+    def make_dummy(
+        cls,
+        num_reqs: int,
+        num_tokens: int,
+        input_buffers: AscendInputBuffers,
+        max_query_len: int | None = None,
+        is_padding: bool = True,
+    ) -> "AscendInputBatch":
+        """Override the make_dummy method to calculate seq_lens_np."""
+        # The incoming count includes graph padding. Save it for the model input
+        # views below, while building query metadata from the original scheduled
+        # count used for DP synchronization. Only _dummy_run supplies that override.
+        num_tokens_after_padding = num_tokens
+        if input_buffers.dummy_num_tokens is not None:
+            # PIECEWISE pads model inputs without adding scheduled queries.
+            num_tokens = input_buffers.dummy_num_tokens
+            assert num_tokens <= num_tokens_after_padding
+        if vllm_version_is("0.30.0"):
             input_batch = InputBatch.make_dummy(
                 num_reqs,
                 num_tokens,
                 input_buffers,
                 max_query_len=max_query_len,
             )
-            base_tokens = num_tokens // num_reqs
-            num_extra = num_tokens % num_reqs
-            input_buffers.seq_lens_np[: num_reqs - num_extra] = base_tokens
-            input_buffers.seq_lens_np[num_reqs - num_extra : num_reqs] = base_tokens + 1
-            input_buffers.seq_lens_np[num_reqs:] = 0
-            seq_lens_np = input_buffers.seq_lens_np[:num_reqs]
-            update_cos_sin(input_batch.positions)
-            base_fields = {field.name: getattr(input_batch, field.name) for field in fields(InputBatch)}
-            return cls(
-                **base_fields,
-                seq_lens_np=seq_lens_np,
-                attn_state=AscendAttentionState.DecodeOnly,
-                is_dummy=True,
+        else:
+            input_batch = InputBatch.make_dummy(
+                num_reqs,
+                num_tokens,
+                input_buffers,
+                max_query_len=max_query_len,
+                is_padding=is_padding,
             )
+        if num_tokens_after_padding != num_tokens:
+            input_batch.num_tokens_after_padding = num_tokens_after_padding
+            input_buffers.input_ids[num_tokens:num_tokens_after_padding].zero_()
+            input_buffers.positions[num_tokens:num_tokens_after_padding].zero_()
+            input_buffers.is_padding[num_tokens:num_tokens_after_padding].fill_(True)
+            input_batch.input_ids = input_buffers.input_ids[:num_tokens_after_padding]
+            input_batch.positions = input_buffers.positions[:num_tokens_after_padding]
+            input_batch.is_padding = input_buffers.is_padding[:num_tokens_after_padding]
+        base_tokens = num_tokens // num_reqs
+        num_extra = num_tokens % num_reqs
+        input_buffers.seq_lens_np[: num_reqs - num_extra] = base_tokens
+        input_buffers.seq_lens_np[num_reqs - num_extra : num_reqs] = base_tokens + 1
+        input_buffers.seq_lens_np[num_reqs:] = 0
+        seq_lens_np = input_buffers.seq_lens_np[:num_reqs]
+        update_cos_sin(input_batch.positions)
+        base_fields = {field.name: getattr(input_batch, field.name) for field in fields(InputBatch)}
+        return cls(
+            **base_fields,
+            seq_lens_np=seq_lens_np,
+            attn_state=AscendAttentionState.DecodeOnly,
+            is_dummy=True,
+        )
