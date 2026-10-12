@@ -135,10 +135,26 @@ class AscendCompilationConfig:
             if data.kwargs is None:
                 return data
             kw = dict(data.kwargs)
+            # Legacy alias: older launch scripts spelled the field without
+            # the inner underscore. Normalize it so extra="forbid" does not
+            # reject the whole additional-config.
+            if "enable_superkernel" in kw and "enable_super_kernel" not in kw:
+                logger.warning_once(
+                    "ascend_compilation_config: 'enable_superkernel' is a legacy "
+                    "alias; use 'enable_super_kernel' instead."
+                )
+                kw["enable_super_kernel"] = kw.pop("enable_superkernel")
             if "enable_super_kernel" not in kw and "enable_static_kernel" in kw:
                 kw["enable_super_kernel"] = kw["enable_static_kernel"]
             return ArgsKwargs(data.args, kw)
         if isinstance(data, dict):
+            if "enable_superkernel" in data and "enable_super_kernel" not in data:
+                logger.warning_once(
+                    "ascend_compilation_config: 'enable_superkernel' is a legacy "
+                    "alias; use 'enable_super_kernel' instead."
+                )
+                data = dict(data)
+                data["enable_super_kernel"] = data.pop("enable_superkernel")
             if "enable_super_kernel" not in data and "enable_static_kernel" in data:
                 data = dict(data)
                 data["enable_super_kernel"] = data["enable_static_kernel"]
