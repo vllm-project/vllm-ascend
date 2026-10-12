@@ -67,18 +67,18 @@ config:
     tp_size: 4
     dp_address: "${NODE_2_IP}"
 
-kv_pool:
-  type: memcache
-  meta_service_port: 5000
-  config_store_port: 6000
-  config:
-    meta:
-      ock.mmc.log_level: error
-    local:
-      ock.mmc.log_level: error
-      ock.mmc.local_service.world_size: 256
-      ock.mmc.local_service.protocol: device_sdma
-      ock.mmc.local_service.dram.size: 35GB
+#kv_pool:
+#  type: memcache
+#  meta_service_port: 5000
+#  config_store_port: 6000
+#  config:
+#    meta:
+#      ock.mmc.log_level: error
+#    local:
+#      ock.mmc.log_level: error
+#      ock.mmc.local_service.world_size: 256
+#      ock.mmc.local_service.protocol: device_sdma
+#      ock.mmc.local_service.dram.size: 35GB
 
 env_common: &env_common
   VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
