@@ -902,6 +902,7 @@ set -euo pipefail
 NODE_RANK=${1:?need node_rank (0=instance leader, 1=partner)}
 PORT=${2:-8000}
 LOCAL_IP=${3:?need local_ip}
+INSTANCE_LEADER_IP=${4:?need instance_leader_ip}
 
 case "$NODE_RANK" in
   0) HEADLESS_ARGS="";;                  # instance leader: API server
@@ -915,7 +916,6 @@ MEMCACHE_ROOT=${MEMCACHE_ROOT:?export MEMCACHE_ROOT to the memcache_hybrid insta
 PYTHON_LIB_DIR=${PYTHON_LIB_DIR:?export PYTHON_LIB_DIR to the vLLM Python lib dir}
 # Instance leader address: nodes 0+1 form instance 0 (leader = <PREFILL_NODE0_IP>),
 # nodes 2+3 form instance 1 (leader = <PREFILL_NODE2_IP>).
-INSTANCE_LEADER_IP=${INSTANCE_LEADER_IP:?export INSTANCE_LEADER_IP to this instance's leader IP}
 
 unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
 source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh
@@ -1150,20 +1150,16 @@ Proxy.
     export NIC_NAME="<NETWORK_INTERFACE>"
     export MEMCACHE_ROOT="<MEMCACHE_ROOT>"
     export PYTHON_LIB_DIR="<PYTHON_LIB_DIR>"
-    export INSTANCE_LEADER_IP="<PREFILL_NODE0_IP>"
-    bash start_p_pool.sh 0 8000 <PREFILL_NODE0_IP>
+    bash start_p_pool.sh 0 8000 <PREFILL_NODE0_IP> <PREFILL_NODE0_IP>
 
     # Prefill node 1: instance 0 partner
-    export INSTANCE_LEADER_IP="<PREFILL_NODE0_IP>"
-    bash start_p_pool.sh 1 8000 <PREFILL_NODE1_IP>
+    bash start_p_pool.sh 1 8000 <PREFILL_NODE1_IP> <PREFILL_NODE0_IP>
 
     # Prefill node 2: instance 1 leader and API server
-    export INSTANCE_LEADER_IP="<PREFILL_NODE2_IP>"
-    bash start_p_pool.sh 0 8000 <PREFILL_NODE2_IP>
+    bash start_p_pool.sh 0 8000 <PREFILL_NODE2_IP> <PREFILL_NODE2_IP>
 
     # Prefill node 3: instance 1 partner
-    export INSTANCE_LEADER_IP="<PREFILL_NODE2_IP>"
-    bash start_p_pool.sh 1 8000 <PREFILL_NODE3_IP>
+    bash start_p_pool.sh 1 8000 <PREFILL_NODE3_IP> <PREFILL_NODE2_IP>
     ```
 
 3. After both Prefill instances are ready, start Decode on all four Decode
