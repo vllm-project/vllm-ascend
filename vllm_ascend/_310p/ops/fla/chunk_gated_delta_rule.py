@@ -17,6 +17,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import torch
 import torch.nn.functional as F
 
@@ -365,6 +367,62 @@ def _compute_kernel_inputs_from_torch_wy(
     return q_kernel, k_kernel, w_kernel, u_kernel, g_kernel
 
 
+def _can_use_chunk_gated_delta_rule_compute_wy_op(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    chunk_size: int,
+) -> bool:
+    if q.device.type != "npu" or any(tensor.device != q.device for tensor in (k, v, g, beta)):
+        return False
+    if chunk_size != CHUNK_SIZE:
+        return False
+    if q.dtype != torch.float16 or k.dtype != torch.float16 or v.dtype != torch.float16:
+        return False
+    if beta.dtype != torch.float16 or g.dtype != torch.float32:
+        return False
+    if q.ndim != 4 or k.shape != q.shape or v.ndim != 4:
+        return False
+    if g.ndim != 3 or beta.shape != g.shape:
+        return False
+
+    batch_size, sequence_length, num_key_heads, key_dim = q.shape
+    num_value_heads = v.shape[2]
+    value_dim = v.shape[3]
+    if v.shape[:2] != q.shape[:2] or g.shape != (batch_size, sequence_length, num_value_heads):
+        return False
+    if sequence_length % chunk_size != 0 or num_key_heads == 0 or num_value_heads % num_key_heads != 0:
+        return False
+    if key_dim % 16 != 0 or value_dim % 16 != 0 or key_dim > 128 or value_dim > 128:
+        return False
+    return batch_size <= 32 and num_value_heads <= 64
+
+
+def _compute_kernel_inputs(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    chunk_size: int,
+    *,
+    compute_wy_op: Callable | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    if compute_wy_op is None or not _can_use_chunk_gated_delta_rule_compute_wy_op(q, k, v, g, beta, chunk_size):
+        return _compute_kernel_inputs_from_torch_wy(q, k, v, g, beta, chunk_size)
+
+    return compute_wy_op(
+        q.contiguous(),
+        k.contiguous(),
+        v.contiguous(),
+        g.contiguous(),
+        beta.contiguous(),
+        chunk_size,
+    )
+
+
 def _unpad_chunk_output(
     out: torch.Tensor,
     seq_ranges: list[tuple[int, int, int]],
@@ -479,12 +537,14 @@ def chunk_gated_delta_rule_310(
     cu_seqlens: torch.Tensor | None = None,
     head_first: bool = False,
     use_qk_l2norm_in_kernel: bool = False,
+    *,
+    compute_wy_op: Callable | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """310P chunk GDN path backed by AscendC fwd_h/fwd_o kernels.
 
-    Triton is unavailable on 310P, so the local WY preparation is done with
-    torch ops and the inter-chunk state/output matmuls are delegated to the
-    custom AscendC kernels.
+    WY preparation uses the operator bound during attention initialization
+    when eligible, otherwise torch ops. The inter-chunk state/output matmuls
+    are delegated to the custom AscendC kernels.
     """
     if head_first:
         raise DeprecationWarning("head_first=True is not supported in 310P chunk path.")
@@ -532,8 +592,8 @@ def chunk_gated_delta_rule_310(
         return empty_out, final_state
 
     scale = k.shape[-1] ** -0.5 if scale is None else scale
-    q_kernel, k_kernel, w_kernel, u_kernel, g_kernel = _compute_kernel_inputs_from_torch_wy(
-        q_pad, k_pad, v_pad, g_pad, beta_pad, CHUNK_SIZE
+    q_kernel, k_kernel, w_kernel, u_kernel, g_kernel = _compute_kernel_inputs(
+        q_pad, k_pad, v_pad, g_pad, beta_pad, CHUNK_SIZE, compute_wy_op=compute_wy_op
     )
 
     if initial_state is None:

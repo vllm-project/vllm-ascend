@@ -20,12 +20,14 @@
 import torch
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
+from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import QwenGatedDeltaNetAttention
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
+from vllm_ascend._310p.ops.fla.cann_ops import bind_cann_gdn_ops_on_init
 from vllm_ascend._310p.ops.fla.chunk_gated_delta_rule import chunk_gated_delta_rule_310
-from vllm_ascend._310p.ops.fla.fused_gdn_gating import fused_gdn_gating_pytorch
+from vllm_ascend._310p.ops.fla.fused_gdn_gating import fused_gdn_gating
 from vllm_ascend._310p.ops.fla.l2norm import l2norm_310p
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.utils import maybe_save_kv_layer_to_connector
@@ -183,6 +185,10 @@ def _merge_spec_and_non_spec_outputs_310(
 class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
     get_state_dtype = _310p_get_state_dtype
 
+    @bind_cann_gdn_ops_on_init
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
     def get_attn_backend(self):
         from vllm_ascend._310p.ops.gdn_attn_builder_310 import (
             AscendGDNAttentionBackend310,
@@ -316,7 +322,7 @@ class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
         query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(mixed_qkv_spec)
         query_non_spec, key_non_spec, value_non_spec = self.rearrange_mixed_qkv(mixed_qkv_non_spec)
 
-        g, beta = fused_gdn_gating_pytorch(self.A_log, a, b, self.dt_bias)
+        g, beta = fused_gdn_gating(self.A_log, a, b, self.dt_bias, gating_op=self.fused_gdn_gating_op)
         if attn_metadata.num_prefills > 0 or spec_sequence_masks is not None:
             if spec_sequence_masks is not None:
                 if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
@@ -373,6 +379,7 @@ class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
                     cu_seqlens=non_spec_query_start_loc,
                     head_first=False,
                     use_qk_l2norm_in_kernel=True,
+                    compute_wy_op=self.chunk_gated_delta_rule_compute_wy_op,
                 )
 
                 # Init cache
@@ -435,3 +442,15 @@ class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
                 )
             )
         maybe_save_kv_layer_to_connector("", [])
+
+
+class AscendQwenGatedDeltaNetAttention310(QwenGatedDeltaNetAttention):
+    """Qwen GDN layer with initialization-time CANN operator binding."""
+
+    @bind_cann_gdn_ops_on_init
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    _forward_core = AscendGatedDeltaNetAttention310._forward_core
+    get_state_dtype = AscendGatedDeltaNetAttention310.get_state_dtype
+    get_attn_backend = AscendGatedDeltaNetAttention310.get_attn_backend
