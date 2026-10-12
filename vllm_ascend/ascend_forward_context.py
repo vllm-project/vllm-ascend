@@ -33,6 +33,10 @@ class MoECommType(Enum):
 
 _MRV2_IN_PROFILE_RUN: ContextVar[bool] = ContextVar("_MRV2_IN_PROFILE_RUN", default=False)
 
+# Dynamo-safe profile-run mirror: torch.compile tracing cannot read a ContextVar.
+# NOTE: vllm's wrapper skips guard evaluation, so the bool bakes at trace time.
+_IN_PROFILE_RUN: bool = False
+
 
 _MEGA_MOE_TOKENS_PER_RANK_LIMIT = 16384
 _DISPATCH_FFN_COMBINE_TOKENS_PER_RANK_LIMIT = 512
@@ -68,20 +72,31 @@ def _is_decode_only_node(vllm_config: VllmConfig) -> bool:
 def override_mrv2_in_profile_run(enabled: bool):
     """Override MRv2's extra profile-run marker for one forward path.
 
-    MRv2 builds the base forward context inside upstream vLLM, so Ascend's
+    MRV2 builds the base forward context inside upstream vLLM, so Ascend's
     platform hook cannot tell whether the current forward is the extra MC2
-    profile dummy run. A ContextVar keeps this MRv2-only state scoped to the
-    current forward path without adding default fallback behavior.
+    profile dummy run. A ContextVar keeps this MRV2-only state scoped to the
+    current forward path without adding default fallback behavior. The flag is
+    also mirrored into the module-level ``_IN_PROFILE_RUN`` so torch.compile
+    traced code can read it (traced as a constant; guards are not re-evaluated).
     """
+    global _IN_PROFILE_RUN
     token = _MRV2_IN_PROFILE_RUN.set(enabled)
+    previous = _IN_PROFILE_RUN
+    _IN_PROFILE_RUN = previous or enabled
     try:
         yield
     finally:
         _MRV2_IN_PROFILE_RUN.reset(token)
+        _IN_PROFILE_RUN = previous
 
 
 def get_mrv2_in_profile_run() -> bool:
     return _MRV2_IN_PROFILE_RUN.get()
+
+
+def in_profile_run() -> bool:
+    """Dynamo-guardable read of the profile-run mirror (see ``_IN_PROFILE_RUN``)."""
+    return _IN_PROFILE_RUN
 
 
 def use_cann_megamoe(vllm_config: VllmConfig) -> bool:
@@ -230,10 +245,7 @@ def set_ascend_forward_context(
                 mc2_mask[:num_actual_tokens] = True
                 mc2_mask[num_actual_tokens:] = False
                 forward_context.mc2_mask = mc2_mask
-        try:
-            yield
-        finally:
-            pass
+        yield
 
 
 _mc2_tokens_capacity: int | None = None

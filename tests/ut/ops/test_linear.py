@@ -1,17 +1,28 @@
 import unittest
+from types import SimpleNamespace
+from typing import Any
 from unittest import mock
 from unittest.mock import MagicMock, patch
 
 import torch
+import torch.nn.functional as F
 
 from tests.ut.base import TestBase
-from vllm_ascend import ascend_config
+from vllm_ascend import ascend_config, ascend_forward_context
+from vllm_ascend.ascend_forward_context import override_mrv2_in_profile_run
 from vllm_ascend.distributed import parallel_state
+from vllm_ascend.ops import linear_op
 from vllm_ascend.ops.linear import (
     AscendMergedColumnParallelLinear,
     AscendReplicatedLinear,
     AscendRowParallelLinear,
     AscendUnquantizedLinearMethod,
+)
+from vllm_ascend.ops.linear_op import (
+    MLPColumnParallelOp,
+    MLPRowParallelOp,
+    OProjRowParallelOp,
+    _mlp_tp_local_tokens,
 )
 
 
@@ -28,7 +39,9 @@ class BaseLinearTest(unittest.TestCase):
         self.mock_ascend_config.finegrained_tp_config.oproj_tensor_parallel_size = 2
         self.mock_ascend_config.finegrained_tp_config.mlp_tensor_parallel_size = 2
 
-        self.patches = [
+        # The list mixes _patch instantiations of different generics, so give
+        # it a uniform type for the start()/stop() loops below.
+        self.patches: list[Any] = [
             patch("vllm_ascend.ascend_config.get_ascend_config", return_value=self.mock_ascend_config),
             patch("vllm_ascend.distributed.parallel_state.get_otp_group", return_value=self.mock_group),
             patch("vllm_ascend.distributed.parallel_state.get_mlp_tp_group", return_value=self.mock_group),
@@ -40,6 +53,12 @@ class BaseLinearTest(unittest.TestCase):
             patch("vllm_ascend.utils.mlp_tp_enable", return_value=True),
             patch("vllm_ascend.utils.oproj_tp_enable", return_value=True),
             patch("vllm_ascend.ops.linear_op.enable_dsa_cp", return_value=False),
+            # The fine-grained TP ops self-pad into static-capacity buffers and
+            # call raw torch.distributed collectives; stub them shape-agnostically.
+            patch("vllm_ascend.ops.linear_op.get_potential_max_tokens", return_value=32),
+            patch("torch.distributed.all_to_all_single", lambda recv, send, group=None: recv.copy_(send)),
+            patch("torch.distributed.all_gather_into_tensor", lambda out, inp, group=None: out.zero_()),
+            patch("torch.distributed.reduce_scatter_tensor", lambda out, inp, group=None: out.zero_()),
         ]
 
         for p in self.patches:
@@ -190,11 +209,14 @@ class TestAscendRowParallelLinear(BaseLinearTest):
         linear = AscendRowParallelLinear(
             input_size=16,
             output_size=8,
-            prefix="down_proj",
+            prefix="mlp.down_proj",
         )
         self.assertEqual(linear.custom_op.comm_group, parallel_state._MLP_TP)
 
+        # The down op trims with the token count the gate_up op recorded.
         input_tensor = torch.randn(16, 8)
+        _mlp_tp_local_tokens["mlp"] = 16
+        self.addCleanup(_mlp_tp_local_tokens.clear)
         linear(input_tensor)
 
     @patch("vllm_ascend.ops.linear.get_current_vllm_config", return_value=MagicMock())
@@ -215,7 +237,9 @@ class TestAscendRowParallelLinear(BaseLinearTest):
         )
         self.assertEqual(linear.custom_op.comm_group, parallel_state._OTP)
 
-        input_tensor = torch.randn(16, 8)
+        # Feature dim must equal input_size (tp_size x input_size_per_partition):
+        # the op reshapes [num_tokens, tp, chunk] for the exchange.
+        input_tensor = torch.randn(16, 16)
         linear(input_tensor)
 
 
@@ -394,6 +418,134 @@ class TestGetParallelOpShareExpert(unittest.TestCase):
         self.assertIsNone(custom_op)
         self.assertEqual(tp_rank, 0)
         self.assertEqual(tp_size, 1)
+
+
+# --- Self-padded static-capacity exchange (OProjRowParallelOp / MLP TP ops) ---
+# Collectives are faked with a deterministic peer rank; real HCCL behavior is
+# hardware-tested (the oversize fail-fast surfaces as a dynamo ``Unsupported``
+# under torch.compile, so it is asserted on the eager path only).
+CAPACITY, TP_SIZE, CHUNK = 8, 2, 3
+# The peer rank's all_to_all send buffer, all_gather input and reduce_scatter contribution.
+_PEER = SimpleNamespace(all_to_all_send=torch.zeros(0), ag_in=torch.zeros(0), rs_chunk=torch.zeros(0))
+
+
+def _layer(prefix, weight, output_size, input_size_per_partition=None):
+    """Minimal layer surface consumed by the ops' update_attrs/apply_impl."""
+    return SimpleNamespace(
+        prefix=prefix,
+        weight=weight,
+        output_size=output_size,
+        bias=None,
+        quant_method=SimpleNamespace(apply=lambda layer, x, bias=None: F.linear(x, layer.weight, bias)),
+        skip_bias_add=False,
+        return_bias=False,
+        gather_output=False,
+        input_is_parallel=True,
+        reduce_results=True,
+        input_size_per_partition=weight.shape[1] if input_size_per_partition is None else input_size_per_partition,
+    )
+
+
+def _pad_rows(x, capacity=CAPACITY):
+    out = x.new_zeros((capacity, x.shape[1]))
+    out[: x.shape[0]] = x
+    return out
+
+
+class TestSelfPaddedExchanges(unittest.TestCase):
+    """Padding choreography and oversize behavior of the o_proj / MLP TP ops."""
+
+    def setUp(self):
+        group = SimpleNamespace(world_size=TP_SIZE, rank_in_group=0, device_group=object())
+        # The list mixes _patch instantiations of different generics.
+        patches: list[Any] = [
+            patch("vllm_ascend.ops.linear_op.get_otp_group", return_value=group),
+            patch("vllm_ascend.ops.linear_op.get_mlp_tp_group", return_value=group),
+            patch("vllm_ascend.ops.linear_op.get_potential_max_tokens", return_value=CAPACITY),
+            patch(
+                "torch.distributed.all_to_all_single",
+                lambda recv, send, group=None: recv.view(TP_SIZE, CAPACITY, CHUNK).copy_(
+                    torch.stack([send.view(TP_SIZE, CAPACITY, CHUNK)[0], _PEER.all_to_all_send[0]])
+                ),
+            ),
+            patch(
+                "torch.distributed.all_gather_into_tensor",
+                lambda out, inp, group=None: out.copy_(torch.cat([inp, _PEER.ag_in])),
+            ),
+            patch(
+                "torch.distributed.reduce_scatter_tensor",
+                lambda out, inp, group=None: out.copy_(inp[:CAPACITY] + _PEER.rs_chunk),
+            ),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        linear_op._mlp_tp_local_tokens.clear()
+        self.addCleanup(linear_op._mlp_tp_local_tokens.clear)
+        # Oversize tests toggle the real mirror via override_mrv2_in_profile_run;
+        # a patched getter here would shadow it. Reset the mirror instead.
+        ascend_forward_context._IN_PROFILE_RUN = False
+        self.addCleanup(setattr, ascend_forward_context, "_IN_PROFILE_RUN", False)
+
+    def test_oproj_exchange_pads_and_trims(self):
+        w = torch.randn(4, 2 * CHUNK)  # full [out, attn_dim]; rank 0 owns chunk 0
+        op = OProjRowParallelOp(_layer("model.layers.0.self_attn.o_proj", w[:, :CHUNK], 4, CHUNK))
+        op.update_attrs()
+        x, x_peer = torch.randn(5, 2 * CHUNK), torch.randn(6, 2 * CHUNK)  # per-rank counts differ
+        _PEER.all_to_all_send = torch.zeros(TP_SIZE, CAPACITY, CHUNK)
+        _PEER.all_to_all_send[0, :6], _PEER.all_to_all_send[1, :6] = x_peer[:, :CHUNK], x_peer[:, CHUNK:]
+        _PEER.rs_chunk = _pad_rows(x)[:, CHUNK:] @ w[:, CHUNK:].T
+        out = op.apply(x)
+        torch.testing.assert_close(out, x @ w.T)
+        self.assertTrue(torch.all(op._send_buf[:, 5:] == 0))  # padding tail stays zero
+
+    def test_oversize_raises_outside_profile_zero_fills_inside(self):
+        op = OProjRowParallelOp(_layer("model.layers.0.self_attn.o_proj", torch.randn(4, CHUNK), 4, CHUNK))
+        op.update_attrs()
+        _PEER.all_to_all_send = torch.zeros(TP_SIZE, CAPACITY, CHUNK)
+        _PEER.rs_chunk = torch.zeros(CAPACITY, 4)
+        with self.assertRaisesRegex(ValueError, "static exchange capacity"):
+            op.apply(torch.randn(CAPACITY + 1, 2 * CHUNK))
+        # Real runner API (not a patch): also covers the profile-run mirror.
+        with override_mrv2_in_profile_run(True):
+            out = op.apply(torch.randn(CAPACITY + 1, 2 * CHUNK))
+        self.assertEqual(out.shape, (CAPACITY + 1, 4))
+        self.assertTrue(torch.all(out == 0))
+
+    def test_mlp_gate_up_down_chain(self):
+        hidden, inter = 4, 6
+        w_gate_up, w_down = torch.randn(2 * inter, hidden), torch.randn(hidden, inter)
+        gate_up = MLPColumnParallelOp(_layer("model.layers.0.mlp.gate_up_proj", w_gate_up, 2 * inter))
+        gate_up.update_attrs()
+        down = MLPRowParallelOp(_layer("model.layers.0.mlp.down_proj", w_down, hidden))
+        down.update_attrs()
+
+        # Regular chain: gate_up gathers each rank's padded tokens and records
+        # the local count; down trims its reduce_scatter with that count.
+        x, x_peer = torch.randn(5, hidden), torch.randn(6, hidden)
+        _PEER.ag_in = _pad_rows(x_peer)
+        gu_out = gate_up.apply(x)
+        self.assertEqual(gu_out.shape, (TP_SIZE * CAPACITY, 2 * inter))
+        self.assertEqual(linear_op._mlp_tp_local_tokens["model.layers.0.mlp"], 5)
+        torch.testing.assert_close(gu_out, torch.cat([_pad_rows(x), _pad_rows(x_peer)]) @ w_gate_up.T)
+        act = gu_out[:, :inter]  # stand-in for the activation between the two ops
+        _PEER.rs_chunk = _pad_rows(x_peer) @ w_gate_up.T[:, :inter] @ w_down.T  # peer's partial sum
+        out = down.apply(act)
+        torch.testing.assert_close(out, (_pad_rows(x) @ w_gate_up.T[:, :inter] @ w_down.T)[:5] + _PEER.rs_chunk[:5])
+
+        # Oversized profile batch: gate_up zero-fills, down skips the exchange.
+        with override_mrv2_in_profile_run(True):
+            gu_out = gate_up.apply(torch.randn(CAPACITY + 1, hidden))
+            self.assertEqual(gu_out.shape, (CAPACITY + 1, 2 * inter))
+            self.assertTrue(torch.all(gu_out == 0))
+            out = down.apply(torch.randn(CAPACITY + 1, inter))
+        self.assertEqual(out.shape, (CAPACITY + 1, hidden))
+        self.assertTrue(torch.all(out == 0))
+
+        # A down op whose gate_up never registered (non-fused up/down naming) fails loudly.
+        linear_op._mlp_tp_local_tokens.clear()
+        with self.assertRaisesRegex(ValueError, "gate_up-recorded"):
+            down.apply(torch.randn(TP_SIZE * CAPACITY, inter))
 
 
 if __name__ == "__main__":
