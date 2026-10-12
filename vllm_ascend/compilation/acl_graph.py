@@ -25,6 +25,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 
 from ..utils import super_kernel_scope, use_updatable_graph, weak_ref_tensors
 from .updatable_graph import (
+    ContextSequenceSource,
     ContextSource,
     SharedSource,
     UpdatableGraph,
@@ -294,7 +295,9 @@ class ACLGraphWrapper:
         need_sync = self.runtime_mode == CUDAGraphMode.FULL and not is_draft_eagle
         if not self.enable_enpu and need_sync:
             torch.npu.current_stream().synchronize()
-        if self.runtime_mode == CUDAGraphMode.FULL and use_updatable_graph(self.attn_backend):
+        if self.runtime_mode == CUDAGraphMode.FULL and (
+            use_updatable_graph(self.attn_backend) or len(entry.aclgraph.tasks) > 0
+        ):
             self._updatable_graph_replay(forward_context, entry.aclgraph)
         else:
             entry.aclgraph.replay()
@@ -308,7 +311,12 @@ class ACLGraphWrapper:
     ):
         assert self.update_stream is not None
         if _EXTRA_CTX.is_draft_model:
-            resolved_tasks = graph.resolve_tasks(SharedSource(self.draft_model_metadata))
+            source = (
+                SharedSource(self.draft_model_metadata)
+                if use_updatable_graph(self.attn_backend)
+                else ContextSequenceSource(forward_context.draft_attn_metadatas)
+            )
+            resolved_tasks = graph.resolve_tasks(source)
         else:
             resolved_tasks = graph.resolve_tasks(ContextSource(forward_context.attn_metadata))
         if self.enable_enpu:

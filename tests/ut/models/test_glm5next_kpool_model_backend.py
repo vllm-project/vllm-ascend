@@ -16,6 +16,7 @@ from vllm_ascend.attention.indexer_kpool import (
     AscendIndexerKPoolQueryMetadata,
     AscendIndexerKPoolTailMetadata,
     Glm5NextKPoolIndexerBackend,
+    KPoolIndexerGraphParams,
 )
 
 # The operator PR owns these kernels. Each orchestration test below replaces
@@ -48,6 +49,28 @@ def test_cache_metadata_import_does_not_require_indexer_operators() -> None:
 
     assert module.AscendIndexerKPoolBackend.get_builder_cls() is module.AscendIndexerKPoolMetadataBuilder
     assert module.AscendIndexerKPoolTailBackend.get_builder_cls() is module.AscendIndexerKPoolTailMetadataBuilder
+
+
+@pytest.mark.parametrize("lengths,bound", [(None, -1), ([], 0), ([1024, 1536], 1536), ([262144], 262144)])
+def test_graph_params_use_live_host_lengths(lengths, bound):
+    metadata = SimpleNamespace(seq_lens_cpu=None if lengths is None else torch.tensor(lengths))
+    provider = KPoolIndexerGraphParams("cache")
+    assert provider.resolve({"cache": metadata}) == {"max_pool_seq_len": bound}
+
+
+def test_merged_draft_graph_resolves_each_step_separately():
+    from vllm_ascend.compilation.updatable_graph import ContextSequenceSource
+
+    contexts = [
+        {"cache": SimpleNamespace(seq_lens_cpu=torch.tensor([length]))} for length in [1024, 1024, 1024, 1025, 1025]
+    ]
+    provider = KPoolIndexerGraphParams("cache")
+    assert ContextSequenceSource(contexts).get(provider) == tuple(
+        {"max_pool_seq_len": length} for length in [1024, 1024, 1024, 1025, 1025]
+    )
+    assert provider != KPoolIndexerGraphParams("cache", token_offset=256)
+    indexed_provider = KPoolIndexerGraphParams("cache", token_offset=256, context_index=3)
+    assert ContextSequenceSource(contexts).get(indexed_provider) == ({"max_pool_seq_len": 1025},)
 
 
 @pytest.mark.parametrize("pool_size", [1, 4])
