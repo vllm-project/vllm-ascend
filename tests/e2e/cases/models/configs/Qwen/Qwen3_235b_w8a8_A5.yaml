@@ -9,6 +9,7 @@ _envs: &envs
 
 
 _server_cmd: &server_cmd
+  - "--no-async-scheduling"
   - "--enable-expert-parallel"
   - "--port"
   - "$SERVER_PORT"
