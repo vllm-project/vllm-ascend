@@ -1722,6 +1722,7 @@ class MooncakeConnectorWorker:
                 if not kv_cache_tensor.shared_by:
                     continue
                 share_tensor_addr = []
+                share_tensor_ends = []
                 share_tensor_stride = []
                 cur_tensor_group_idx = []
                 for layer_name in kv_cache_tensor.shared_by:
@@ -1734,14 +1735,17 @@ class MooncakeConnectorWorker:
                         if tensor_addr in share_tensor_addr or tensor_addr in self.kv_caches_base_addr:
                             continue
                         share_tensor_addr.append(tensor_addr)
+                        share_tensor_ends.append(tensor_addr + _get_tensor_transfer_span_bytes(single_tensor))
                         share_tensor_stride.append(single_tensor.stride(0) * single_tensor.element_size())
                 cur_tensor_group_idx = sorted(list(set(cur_tensor_group_idx)))
-                self.kv_caches_base_addr.append(min(share_tensor_addr))
+                registration_base = min(share_tensor_addr)
+                self.kv_caches_base_addr.append(registration_base)
                 self.addr_group_idx.append(cur_tensor_group_idx)  # type: ignore[arg-type]
                 self.block_stride_per_addr.append(share_tensor_stride[0])
                 self.block_len_per_addr.append(share_tensor_stride[0])
-                ptrs.append(min(share_tensor_addr))
-                lengths.append(kv_cache_tensor.size)
+                ptrs.append(registration_base)
+                runtime_span = max(share_tensor_ends) - registration_base
+                lengths.append(max(kv_cache_tensor.size, runtime_span))
         else:
             raise TypeError("Mooncake connector does not support this type kv_cache now.")
 
@@ -2130,3 +2134,15 @@ def get_prefill_pp_indices(
         start_layer = sum(partitions[:pp_rank])
         end_layer = start_layer + partitions[pp_rank]
         return (start_layer, end_layer)
+
+
+def _get_tensor_transfer_span_bytes(tensor: torch.Tensor) -> int:
+    """Return the byte span used by block-stride KV transfers."""
+    if tensor.numel() == 0:
+        return 0
+    if tensor.dim() == 0:
+        return tensor.element_size()
+    block_stride = tensor.stride(0)
+    if block_stride <= 0:
+        raise ValueError(f"KV cache block stride must be positive, got {block_stride}.")
+    return tensor.shape[0] * block_stride * tensor.element_size()
