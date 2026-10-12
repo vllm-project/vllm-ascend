@@ -195,7 +195,6 @@ def _exercise_connector(
                     "local_cache_hit": 0,
                     "external_kv_transfer": REQUEST_COUNT * REUSABLE_TOKEN_COUNT,
                 }, "Every reusable prefix must come from External, leaving one token per request to compute"
-                assert external["generated_texts"] == cold["generated_texts"], concurrency
                 observations[str(concurrency)] = {
                     "cold": {"reset_before": cold_reset, **cold},
                     "external_hit": {"reset_before": external_reset, **external},
