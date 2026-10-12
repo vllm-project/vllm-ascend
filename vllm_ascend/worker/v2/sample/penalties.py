@@ -18,8 +18,41 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import functools
+
 import torch
 from vllm.triton_utils import tl, triton
+
+from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
+
+# Triton-Ascend caps the total number of launched blocks (coreDim) at UINT16_MAX.
+_MAX_CORE_DIM = 65535
+
+VOCAB_BLOCK_SIZE = 4096
+
+# Per-program fixed cost, in units of one vocab block's work. Measured on A2.
+# Any value in 2..4 picks the same grid everywhere; 0 does not work, because the
+# rest of the objective is independent of g. See #14157.
+_FIXED_COST_BLOCKS = 4
+
+
+@functools.lru_cache(maxsize=1024)
+def _vocab_grid_size(num_tokens: int, num_vocab_blocks: int, num_cores: int) -> int:
+    """Grid size for the vocab axis, minimising modelled kernel time.
+
+    The per-program fixed cost is scalar and the per-block cost is vector, so
+    total cost tracks how many programs are launched rather than how many bytes
+    move, which is also why this choice moves the bottleneck. A program costs
+    _FIXED_COST_BLOCKS + cdiv(num_vocab_blocks, g) block-equivalents, over
+    cdiv(num_tokens * g, num_cores) waves. Minimising that product amortises the
+    fixed cost while still filling the cores.
+    """
+    cap = max(1, _MAX_CORE_DIM // max(1, num_tokens))
+    best = min(
+        range(1, num_vocab_blocks + 1),
+        key=lambda g: triton.cdiv(num_tokens * g, num_cores) * (_FIXED_COST_BLOCKS + triton.cdiv(num_vocab_blocks, g)),
+    )
+    return min(cap, best)
 
 
 @triton.jit
@@ -126,9 +159,13 @@ def apply_penalties(
     output_bin_counts: torch.Tensor,
 ) -> None:
     num_tokens, vocab_size = logits.shape
-    BLOCK_SIZE = 4096
-    num_vocab_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
-    vocab_grid_size = min(num_vocab_blocks, 65535 // num_tokens)
+    # g >= 1, so num_tokens alone must fit; this previously gave g = 0 silently.
+    assert num_tokens <= _MAX_CORE_DIM, (
+        f"num_tokens={num_tokens} exceeds the Triton-Ascend coreDim limit "
+        f"({_MAX_CORE_DIM}); apply_penalties would have to chunk the token axis"
+    )
+    num_vocab_blocks = triton.cdiv(vocab_size, VOCAB_BLOCK_SIZE)
+    vocab_grid_size = _vocab_grid_size(num_tokens, num_vocab_blocks, get_vectorcore_num())
     _penalties_kernel[(num_tokens, vocab_grid_size)](
         logits,
         logits.stride(0),
@@ -145,7 +182,7 @@ def apply_penalties(
         vocab_size,
         NUM_VOCAB_BLOCKS=num_vocab_blocks,
         VOCAB_GRID_SIZE=vocab_grid_size,
-        BLOCK_SIZE=BLOCK_SIZE,
+        BLOCK_SIZE=VOCAB_BLOCK_SIZE,
     )
 
 
