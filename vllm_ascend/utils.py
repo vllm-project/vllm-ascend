@@ -74,7 +74,6 @@ _MIN_DP_BUFFER_SIZE = 50
 SLEEP_LIFECYCLE_ANCHOR_GROUP_NAME = "sleep_lifecycle_anchor"
 SLEEP_LIFECYCLE_ANCHOR_BUFFER_SIZE = 1
 _DYNAMIC_EPLB_BUFFER_SIZE = 100
-_IS_MOE_MODEL = None
 _IS_DRAFTER_MOE_MODEL = None
 _IS_VL_MODEL = None
 _HAS_ROPE = None
@@ -1003,13 +1002,15 @@ def is_score_encoder_cache_manager(vllm_config: VllmConfig) -> bool:
     return vllm_config.ec_manager_config.get_encoder_cache_manager_obj() is ScoreEncoderCacheManager
 
 
-def is_moe_model(vllm_config: VllmConfig):
-    """Checks if the model is a MoE model by config"""
-    global _IS_MOE_MODEL
-    if _IS_MOE_MODEL is None:
-        model_configs = vllm_config.model_config.hf_text_config.to_dict()
-        _IS_MOE_MODEL = _is_contain_expert(model_configs)
-    return _IS_MOE_MODEL
+def is_moe_model(vllm_config: VllmConfig) -> bool:
+    """Classify the model in this config, including independent draft LMs.
+
+    A process can run a MoE target and a dense draft (or load another model).
+    A process-global result would leak the target's communication and TP
+    settings into the draft forward context. Use vLLM's resolved expert count
+    instead of scanning HF keys, which can include unused expert settings.
+    """
+    return vllm_config.model_config.is_moe
 
 
 def is_drafter_moe_model(vllm_config: VllmConfig):

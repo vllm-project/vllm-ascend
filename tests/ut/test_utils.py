@@ -66,6 +66,15 @@ def test_register_customop_selects_gdn_before_import(device_type):
         assert register.call_count == len(utils.REGISTERED_ASCEND_OPS)
 
 
+@pytest.mark.parametrize("target_is_moe,draft_is_moe", [(True, False), (False, True), (False, False)])
+def test_is_moe_model_uses_active_model_config(target_is_moe, draft_is_moe):
+    """Independent LMs must not share communication/TP classification."""
+    target = SimpleNamespace(model_config=SimpleNamespace(is_moe=target_is_moe))
+    draft = SimpleNamespace(model_config=SimpleNamespace(is_moe=draft_is_moe))
+    for config, expected in ((target, target_is_moe), (draft, draft_is_moe), (target, target_is_moe)):
+        assert utils.is_moe_model(config) is expected
+
+
 class TestUtils(TestBase):
     def setUp(self):
         import importlib
