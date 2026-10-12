@@ -12,6 +12,26 @@ from vllm.config import VllmConfig
 
 from tests.ut.base import TestBase
 
+
+@torch.library.custom_op("mmrs_test::npu_mm_reduce_scatter_base", mutates_args=())
+def _fake_mm_reduce_scatter(
+    x1: torch.Tensor,
+    x2: torch.Tensor,
+    hcom: str,
+    world_size: int,
+    *,
+    reduce_op: str = "sum",
+) -> torch.Tensor:
+    return x1.new_empty((x1.shape[0] // world_size, x2.shape[1]))
+
+
+@_fake_mm_reduce_scatter.register_fake
+def _fake_mm_reduce_scatter_fake(
+    x1: torch.Tensor, x2: torch.Tensor, hcom: str, world_size: int, *, reduce_op: str = "sum"
+) -> torch.Tensor:
+    return x1.new_empty((x1.shape[0] // world_size, x2.shape[1]))
+
+
 _stubbed_nge = importlib.util.find_spec("npugraph_ex") is None and importlib.util.find_spec("torchair") is None
 if _stubbed_nge:
     sys.modules["npugraph_ex"] = MagicMock()
@@ -34,7 +54,7 @@ REDUCE_SCATTER_OP = torch.ops.vllm.reduce_scatter.default
 PAD_OP = torch.ops.aten.constant_pad_nd.default
 CAT_OP = torch.ops.aten.cat.default
 FULL_OP = torch.ops.aten.full.default
-FUSED_OP = torch.ops.npu.npu_mm_reduce_scatter_base.default
+FUSED_OP = torch.ops.mmrs_test.npu_mm_reduce_scatter_base.default
 
 
 def _build_graph(
@@ -111,6 +131,10 @@ def _targets(graph_module: fx.GraphModule) -> list:
     return [node.target for node in graph_module.graph.nodes if node.op == "call_function"]
 
 
+@patch(
+    "vllm_ascend.compilation.passes.mm_reduce_scatter_fusion_pass.DeviceOperator.npu_mm_reduce_scatter_base",
+    new=_fake_mm_reduce_scatter,
+)
 class TestMatmulReduceScatterFusionPass(TestBase):
     def _make_pass(self) -> MatmulReduceScatterFusionPass:
         tp_group = MagicMock()
