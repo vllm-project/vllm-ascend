@@ -229,7 +229,10 @@ class TestNPUWorker(TestBase):
         worker.vllm_config = SimpleNamespace()
         worker.get_kv_cache_spec = MagicMock(return_value={"attn": spec})
 
-        with patch("vllm_ascend.worker.worker.get_kv_cache_groups", return_value=groups):
+        with patch(
+            "vllm_ascend.worker.worker.get_kv_cache_config_builder",
+            return_value=SimpleNamespace(get_kv_cache_groups=lambda *_args: groups),
+        ):
             self.assertEqual(worker._scale_kv_cache_memory_for_multi_group(12345), 12345)
 
     def test_hybrid_budget_scaling_follows_runner_backing_layout(self):
@@ -274,7 +277,10 @@ class TestNPUWorker(TestBase):
                     use_compress=False,
                     supports_standardized_shared_kv_backing=supports_standardized_backing,
                 )
-                with patch("vllm_ascend.worker.worker.get_kv_cache_groups", return_value=groups):
+                with patch(
+                    "vllm_ascend.worker.worker.get_kv_cache_config_builder",
+                    return_value=SimpleNamespace(get_kv_cache_groups=lambda *_args: groups),
+                ):
                     self.assertEqual(worker._scale_kv_cache_memory_for_multi_group(12345), expected_budget)
 
     def test_pure_attention_multi_group_budget_scales_for_private_layout(self):
@@ -320,8 +326,8 @@ class TestNPUWorker(TestBase):
         )
 
         with patch(
-            "vllm_ascend.worker.worker.get_kv_cache_groups",
-            return_value=groups,
+            "vllm_ascend.worker.worker.get_kv_cache_config_builder",
+            return_value=SimpleNamespace(get_kv_cache_groups=lambda *_args: groups),
         ):
             self.assertEqual(
                 worker._scale_kv_cache_memory_for_multi_group(12345),

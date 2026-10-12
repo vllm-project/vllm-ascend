@@ -49,7 +49,8 @@ from vllm.tasks import SupportedTask
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
-from vllm.v1.core.kv_cache_utils import get_kv_cache_groups, unify_hybrid_kv_cache_specs
+from vllm.v1.core.kv_cache_config_builder import get_kv_cache_config_builder
+from vllm.v1.core.kv_cache_planning import _unify_hybrid_kv_cache_specs
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -669,13 +670,15 @@ class NPUWorker(WorkerBase):
         kv_cache_spec = self.get_kv_cache_spec()
         if not isinstance(kv_cache_spec, dict):
             return available_memory
-        kv_cache_groups = get_kv_cache_groups(self.vllm_config, kv_cache_spec)
+        kv_cache_groups = get_kv_cache_config_builder(self.vllm_config).get_kv_cache_groups(
+            self.vllm_config, kv_cache_spec
+        )
         if not kv_cache_groups:
             return available_memory
         # vLLM #51718 removed the DSV4-specific packed planner. Ascend restores
-        # that shared-tuple layout in patch_kv_cache_utils, so DSV4 already fits
-        # all groups in one physical budget and must not take the generic
-        # per-layer multi-group scale below.
+        # that shared-tuple layout in the Ascend KV cache config builder, so
+        # DSV4 already fits all groups in one physical budget and must not take
+        # the generic per-layer multi-group scale below.
         for group in kv_cache_groups:
             group_spec = group.kv_cache_spec
             specs = (
@@ -1121,7 +1124,7 @@ class NPUWorker(WorkerBase):
                 # Use the same full-allocation specs for KVPP budgeting and
                 # the engine's cache groups. Attention compute stays windowed.
                 kv_cache_spec = dict(kv_cache_spec)
-                unify_hybrid_kv_cache_specs(kv_cache_spec)
+                _unify_hybrid_kv_cache_specs(kv_cache_spec)
             kvpp_rank = (
                 get_pcp_group().rank_in_group * self.vllm_config.parallel_config.tensor_parallel_size
                 + get_tp_group().rank_in_group

@@ -38,6 +38,9 @@ from vllm_ascend.attention.attention_c8_mxfp import (
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
+from vllm_ascend.core.kv_cache_config_builder import (
+    _get_kv_cache_config_deepseek_v4_main,
+)
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,
@@ -49,9 +52,6 @@ from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.models.glm5next.kv_cache import (
     Glm5NextIndexerCache,
     Glm5NextTailCache,
-)
-from vllm_ascend.patch.platform.patch_kv_cache_utils import (
-    _get_kv_cache_config_deepseek_v4_main,
 )
 from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
 from vllm_ascend.utils import AscendDeviceType
@@ -2043,13 +2043,8 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                     base_offset + layer_size,
                 )
 
-    @patch(
-        "vllm_ascend.patch.platform.patch_kv_cache_utils.may_override_num_blocks",
-        side_effect=lambda _config, num_blocks: num_blocks,
-    )
     def test_dsv4_main_materializes_real_planner_geometry_once(
         self,
-        _mock_override,
     ):
         small_name = "model.layers.0.self_attn.attn"
         large_name = "model.layers.1.self_attn.attn"
@@ -2096,17 +2091,13 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         num_blocks = 3
         tuple_stride = (small_spec.page_size_bytes + large_spec.page_size_bytes) * num_blocks
         available_memory = tuple_stride * 2
-        planned_num_blocks, descriptors = _get_kv_cache_config_deepseek_v4_main(
-            SimpleNamespace(),
+        kv_cache_config = _get_kv_cache_config_deepseek_v4_main(
+            SimpleNamespace(cache_config=SimpleNamespace(prefix_cache_retention_interval=None)),
             groups,
-            available_memory,
+            num_blocks,
         )
-        self.assertEqual(planned_num_blocks, num_blocks)
-        kv_cache_config = KVCacheConfig(
-            num_blocks=planned_num_blocks,
-            kv_cache_tensors=descriptors,
-            kv_cache_groups=groups,
-        )
+        self.assertEqual(kv_cache_config.num_blocks, num_blocks)
+        descriptors = kv_cache_config.kv_cache_tensors
 
         runner = self._build_runner()
         runner.use_compress = True

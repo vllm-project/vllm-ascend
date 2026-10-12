@@ -107,6 +107,14 @@ class NPUPlatform(Platform):
         "mxfp8",
     ]
 
+    @classmethod
+    def get_kv_cache_config_builder_cls(cls, vllm_config: VllmConfig) -> str:
+        """Select the Ascend builder unless the model declares its own builder."""
+        model_cls_path = getattr(vllm_config.model_config, "kv_cache_config_builder_cls", None)
+        if model_cls_path:
+            return model_cls_path
+        return "vllm_ascend.core.kv_cache_config_builder.AscendKVCacheConfigBuilder"
+
     @property
     def pass_key(self) -> str:
         """

@@ -325,7 +325,7 @@
 #       vLLM #44243 has landed in the supported upstream version, so this
 #       override is kept only for the drop exemption of entry 2; remove it
 #       together with entry 2 once upstream exposes the PD role.
-#   2. `vllm.v1.core.kv_cache_utils.get_kv_cache_config_from_groups`,
+#   2. `vllm_ascend.core.kv_cache_config_builder.AscendKVCacheConfigBuilder`,
 #      `HybridKVCacheCoordinator.find_longest_cache_hit` and
 #      `...find_longest_cache_hit_per_group`
 #    Why:

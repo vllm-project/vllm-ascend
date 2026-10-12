@@ -5,7 +5,6 @@
 from dataclasses import replace
 
 from vllm.config import VllmConfig
-from vllm.v1.core.kv_cache_utils import may_override_num_blocks
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     KVCacheConfig,
@@ -137,12 +136,20 @@ def get_deepseek_v41_pool_bytes_per_block(groups):
 def get_deepseek_v41_kv_cache_config(
     vllm_config: VllmConfig,
     groups: list[KVCacheGroupSpec],
-    available_memory: int,
+    available_memory: int | None = None,
+    *,
+    num_blocks: int | None = None,
 ) -> KVCacheConfig:
-    """Allocate four independent layer slots backed by one global block-ID pool."""
+    """Allocate four independent layer slots backed by one global block-ID pool.
+
+    ``num_blocks`` is authoritative when given: Core already converted the
+    available memory (and any ``num_gpu_blocks_override``) into a global block
+    count and re-plans every rank against the same value.
+    """
     page_sizes, layer_tuples = get_layer_tuples(_specs_from_groups(groups))
-    capacity = max(available_memory // sum(page_sizes), 0)
-    num_blocks = may_override_num_blocks(vllm_config, capacity)
+    if num_blocks is None:
+        assert available_memory is not None
+        num_blocks = max(available_memory // sum(page_sizes), 0)
     tensors: list[KVCacheTensor] = []
     for page_size, layer_names in zip(page_sizes, layer_tuples):
         size = num_blocks * page_size

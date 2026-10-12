@@ -40,6 +40,9 @@ from vllm_ascend.attention.dsa_v1 import (
     AscendDSASWABackend,
 )
 from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
+from vllm_ascend.core.kv_cache_config_builder import (
+    _get_kv_cache_config_deepseek_v4_main,
+)
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
@@ -50,9 +53,6 @@ from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.models.deepseek_v4 import compressor as deepseek_v4_compressor
 from vllm_ascend.models.deepseek_v4 import indexer as deepseek_v4_indexer
 from vllm_ascend.models.deepseek_v4 import model as deepseek_v4_model
-from vllm_ascend.patch.platform.patch_kv_cache_utils import (
-    _get_kv_cache_config_deepseek_v4_main,
-)
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
@@ -472,21 +472,13 @@ def test_main_dsv4_materializes_real_planner_geometry_once(monkeypatch):
     num_blocks = 3
     tuple_stride = (small_spec.page_size_bytes + large_spec.page_size_bytes) * num_blocks
     backing_size = tuple_stride * 2
-    monkeypatch.setattr(
-        "vllm_ascend.patch.platform.patch_kv_cache_utils.may_override_num_blocks",
-        lambda _config, value: value,
-    )
-    planned_num_blocks, descriptors = _get_kv_cache_config_deepseek_v4_main(
-        SimpleNamespace(),
+    kv_cache_config = _get_kv_cache_config_deepseek_v4_main(
+        SimpleNamespace(cache_config=SimpleNamespace(prefix_cache_retention_interval=None)),
         groups,
-        backing_size,
+        num_blocks,
     )
-    assert planned_num_blocks == num_blocks
-    kv_cache_config = KVCacheConfig(
-        num_blocks=planned_num_blocks,
-        kv_cache_tensors=descriptors,
-        kv_cache_groups=groups,
-    )
+    assert kv_cache_config.num_blocks == num_blocks
+    descriptors = kv_cache_config.kv_cache_tensors
     vllm_config = SimpleNamespace(
         additional_config={},
         kv_transfer_config=None,

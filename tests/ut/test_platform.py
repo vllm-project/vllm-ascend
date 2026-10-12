@@ -283,6 +283,17 @@ class TestNPUPlatform(TestBase):
         self.assertEqual(NPUPlatform.ray_device_key, "NPU")
         self.assertEqual(NPUPlatform.device_control_env_var, "ASCEND_RT_VISIBLE_DEVICES")
 
+    def test_get_kv_cache_config_builder_cls(self):
+        vllm_config = self.mock_vllm_config()
+        vllm_config.model_config.kv_cache_config_builder_cls = None
+        assert NPUPlatform.get_kv_cache_config_builder_cls(vllm_config) == (
+            "vllm_ascend.core.kv_cache_config_builder.AscendKVCacheConfigBuilder"
+        )
+
+        model_builder = "example.model.CustomKVCacheConfigBuilder"
+        vllm_config.model_config.kv_cache_config_builder_cls = model_builder
+        assert NPUPlatform.get_kv_cache_config_builder_cls(vllm_config) == model_builder
+
     @patch("vllm_ascend.platform.enable_sp", return_value=False)
     @patch("vllm_ascend.platform.enable_sfa_dcp_replicated_indexer", return_value=True)
     @patch("vllm_ascend.platform.model_uses_sfa_sparse", return_value=True)

@@ -23,7 +23,7 @@ from vllm.logger import logger
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, memory_profiling
 from vllm.utils.torch_utils import set_random_seed  # noqa: E402
-from vllm.v1.core.kv_cache_utils import get_kv_cache_groups
+from vllm.v1.core.kv_cache_config_builder import get_kv_cache_config_builder
 
 from vllm_ascend._310p.kv_cache_sharing import get_310p_shared_cache_slots
 from vllm_ascend._310p.model_runner_310p import NPUModelRunner310
@@ -36,7 +36,7 @@ class NPUWorker310(NPUWorker):
         kv_cache_spec = self.get_kv_cache_spec()
         layout_resolver = getattr(self.vllm_config.cache_config, "get_resolved_kv_cache_layout", None)
         if isinstance(kv_cache_spec, dict) and callable(layout_resolver):
-            groups = get_kv_cache_groups(self.vllm_config, kv_cache_spec)
+            groups = get_kv_cache_config_builder(self.vllm_config).get_kv_cache_groups(self.vllm_config, kv_cache_spec)
             share_slots = get_310p_shared_cache_slots(groups, layout_resolver()) if groups else {}
         else:
             share_slots = {}

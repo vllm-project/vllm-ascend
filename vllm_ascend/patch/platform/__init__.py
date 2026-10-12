@@ -59,20 +59,28 @@ import vllm_ascend.patch.platform.patch_kv_cache_dtype  # noqa
 
 # ** File: platform/patch_kv_cache_utils.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.core.kv_cache_utils`
+#   1. `vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes`
+#      `vllm.v1.engine.core.resolve_kv_cache_block_sizes`
 #    Why:
-#       vLLM's generic KV-cache planner cannot represent GLM-Next's cache
-#       topology, where MLA and compressed indexer caches share block IDs while
-#       indexer-state and Mamba caches use independent groups.
+#       vLLM PR #40860 added a restriction that hybrid KV cache groups with
+#       multiple block sizes do not support decode context parallelism.
+#       This restriction is correct for CUDA but not for Ascend, which
+#       implements context parallelism for MLA and SWA-MLA layers separately,
+#       and whose GLM-Next layout keeps a non-cacheable fixed tail group.
 #    How:
-#       Use GLM-Next-specific grouping, tensor layout, and memory accounting.
-#       Other models continue to use the original vLLM implementation.
+#       Resolve the scheduler block size as lcm(group block sizes) * dcp for
+#       the multiple-group + DCP case, and drop a non-cacheable tail group
+#       before deriving the hash block size.
 #    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/53906
-#       https://github.com/vllm-project/vllm/pull/55219
+#       vLLM PR #40860 ([Feat] DeepSeek V4 Rebased).
 #    Future Plan:
-#       Remove this patch when upstream's generic KV-cache layout supports the
-#       Ascend GLM-Next cache topology.
+#       Remove this patch once upstream vLLM supports hybrid KV cache + CP for
+#       non-CUDA backends, or exposes a platform hook for this behavior.
+#
+#       Every other Ascend planning rule (grouping, materialization, memory
+#       accounting for DSV4/DSV4.1, GLM-Next, Kimi-K3 DSpark, and TurboQuant)
+#       lives in `vllm_ascend.core.kv_cache_config_builder`, which the platform
+#       selects through `NPUPlatform.get_kv_cache_config_builder_cls`.
 #
 # ** File: platform/patch_mamba_config.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

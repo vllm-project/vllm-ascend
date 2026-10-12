@@ -8,12 +8,12 @@ import torch
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256
 from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.kv_cache_planning import _is_kv_cache_spec_uniform
 from vllm.v1.core.kv_cache_utils import (
     BlockHashListWithBlockSize,
     get_block_hash,
     get_request_block_hasher,
     init_none_hash,
-    is_kv_cache_spec_uniform,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     FullAttentionManager,
@@ -91,7 +91,7 @@ def test_ascend_mla_spec_is_not_uniform_with_mamba() -> None:
         dtypes=(torch.float32,),
     )
 
-    assert not is_kv_cache_spec_uniform(
+    assert not _is_kv_cache_spec_uniform(
         {
             "mla": mla_spec,
             "mamba": mamba_spec,

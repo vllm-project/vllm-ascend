@@ -12,10 +12,7 @@ from dataclasses import dataclass
 
 from vllm.config import VllmConfig
 from vllm.model_executor.models.utils import extract_layer_index
-from vllm.v1.core.kv_cache_utils import (
-    create_kv_cache_group_specs,
-    may_override_num_blocks,
-)
+from vllm.v1.core.kv_cache_planning import _create_kv_cache_group_specs
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -336,7 +333,7 @@ def _create_mamba_groups(
     grouped_layer_names: list[list[str]],
 ) -> list[KVCacheGroupSpec]:
     sorted_groups = [list(_sorted_layer_names(layer_names)) for layer_names in grouped_layer_names]
-    return create_kv_cache_group_specs(mamba_specs, sorted_groups)
+    return _create_kv_cache_group_specs(mamba_specs, sorted_groups)
 
 
 def get_glm5_next_kv_cache_groups(
@@ -378,16 +375,25 @@ def get_glm5_next_pool_bytes_per_block(groups: list[KVCacheGroupSpec]) -> int:
 def get_glm5_next_kv_cache_config(
     vllm_config: VllmConfig,
     groups: list[KVCacheGroupSpec],
-    available_memory: int,
+    available_memory: int | None = None,
+    *,
+    num_blocks: int | None = None,
 ) -> KVCacheConfig:
-    """Describe one standard unpacked tensor per physical cache slot."""
+    """Describe one standard unpacked tensor per physical cache slot.
+
+    ``num_blocks`` is authoritative when given: Core already converted the
+    available memory (and any ``num_gpu_blocks_override``) into a global block
+    count and re-plans every rank against the same value.
+    """
 
     layout = _get_glm5_next_cache_layout(groups)
     if layout is None:
         raise ValueError("Expected GLM-Next cache groups.")
 
     bytes_per_block = get_glm5_next_pool_bytes_per_block(groups)
-    num_blocks = may_override_num_blocks(vllm_config, max(available_memory // bytes_per_block, 0))
+    if num_blocks is None:
+        assert available_memory is not None
+        num_blocks = max(available_memory // bytes_per_block, 0)
     tensors: list[KVCacheTensor] = []
 
     def make_tensor(size: int, layer_names: list[str], page_size: int) -> KVCacheTensor:
