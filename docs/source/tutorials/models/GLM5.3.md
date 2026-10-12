@@ -946,21 +946,27 @@ export ASCEND_LOCAL_COMM_RES='{"version":"1.2"}'
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 
 vllm serve "$MODEL_PATH" \
-  --host 0.0.0.0 --port "$PORT" \
+  --host 0.0.0.0 \
+  --port "$PORT" \
   --tensor-parallel-size 8 \
   --enable-expert-parallel \
   --pipeline-parallel-size 2 \
   --distributed-executor-backend mp \
   --master-addr "$INSTANCE_LEADER_IP" \
   --master-port 7060 \
-  --nnodes 2 --node-rank "$NODE_RANK" \
-  --enable-chunked-prefill --no-async-scheduling \
+  --nnodes 2 \
+  --node-rank "$NODE_RANK" \
+  --enable-chunked-prefill \
+  --no-async-scheduling \
   --enable-prefix-caching \
-  --seed 1024 --served-model-name glm5 \
+  --seed 1024 \
+  --served-model-name glm5 \
   --max-model-len 12800 \
   --max-num-batched-tokens 16384 \
-  --max-num-seqs 64 --gpu-memory-utilization 0.92 \
-  --trust-remote-code --quantization ascend \
+  --max-num-seqs 64 \
+  --gpu-memory-utilization 0.92 \
+  --trust-remote-code \
+  --quantization ascend \
   --safetensors-load-strategy prefetch \
   --enable-auto-tool-choice \
   --tool-call-parser glm47 \
@@ -1060,22 +1066,30 @@ export LD_LIBRARY_PATH="${MEMCACHE_ROOT}/lib:${PYTHON_LIB_DIR}:${LD_LIBRARY_PATH
 export ASCEND_LOCAL_COMM_RES='{"version":"1.2"}'
 
 vllm serve "$MODEL_PATH" \
-  --host 0.0.0.0 --port "$PORT" \
-  --data-parallel-size "$DP_SIZE" --data-parallel-rank "$DP_RANK" \
-  --data-parallel-address "$DP_ADDRESS" --data-parallel-rpc-port "$DP_RPC_PORT" \
+  --host 0.0.0.0 \
+  --port "$PORT" \
+  --data-parallel-size "$DP_SIZE" \
+  --data-parallel-rank "$DP_RANK" \
+  --data-parallel-address "$DP_ADDRESS" \
+  --data-parallel-rpc-port "$DP_RPC_PORT" \
   --tensor-parallel-size "$TP_SIZE" \
   --enable-expert-parallel \
   --enable-chunked-prefill \
   --enable-prefix-caching \
-  --seed 1024 --served-model-name glm5 \
+  --seed 1024 \
+  --served-model-name glm5 \
   --max-model-len 12800 \
   --max-num-batched-tokens 256 \
-  --max-num-seqs 64 --gpu-memory-utilization 0.92 \
+  --max-num-seqs 64 \
+  --gpu-memory-utilization 0.92 \
   --async-scheduling \
   --quantization ascend \
   --safetensors-load-strategy prefetch \
-  --enable-auto-tool-choice --tool-call-parser glm47 --reasoning-parser glm47 \
-  --kv-cache-dtype int8 --attention_config.indexer_kv_dtype int8 \
+  --enable-auto-tool-choice \
+  --tool-call-parser glm47 \
+  --reasoning-parser glm47 \
+  --kv-cache-dtype int8 \
+  --attention_config.indexer_kv_dtype int8 \
   --additional-config '{"recompute_scheduler_enable":true}' \
   --speculative-config '{"num_speculative_tokens":5,"method":"deepseek_mtp","enforce_eager":true}' \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
