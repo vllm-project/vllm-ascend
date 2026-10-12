@@ -14,9 +14,10 @@ from pickle import PickleBuffer
 from typing import TYPE_CHECKING, Any
 
 import torch
-import zmq
 from vllm.distributed.device_communicators import shm_broadcast
 from vllm.logger import logger
+from zmq.error import Again
+from zmq.sugar.socket import Socket
 
 if TYPE_CHECKING:
     from _typeshed import SizedBuffer
@@ -105,7 +106,7 @@ def enqueue(self: shm_broadcast.MessageQueue, obj, timeout: float | None = None)
         if self.n_remote_reader > 0:
             stage = "remote_zmq_send"
             self.remote_socket.send_multipart(all_buffers, copy=False)
-    except (TimeoutError, zmq.Again):
+    except (TimeoutError, Again):
         # Queue backpressure and retryable sends are not corruption reports.
         raise
     except Exception as error:
@@ -113,7 +114,7 @@ def enqueue(self: shm_broadcast.MessageQueue, obj, timeout: float | None = None)
         raise
 
 
-def recv(socket: zmq.Socket, timeout: float | None) -> Any:
+def recv(socket: Socket, timeout: float | None) -> Any:
     """Keep polling quiet and add frame metadata only if decoding fails."""
     timeout_ms = None if timeout is None else max(0, int(timeout * 1000))
     if not socket.poll(timeout=timeout_ms):

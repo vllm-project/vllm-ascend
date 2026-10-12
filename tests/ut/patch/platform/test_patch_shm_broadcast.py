@@ -10,15 +10,16 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 import torch
-import zmq
 from vllm.distributed.device_communicators import shm_broadcast
+from zmq.error import Again
+from zmq.sugar.frame import Frame
 
 import vllm_ascend.patch.platform.patch_shm_broadcast as patch_module
 
 _MIB = 1024 * 1024
 
 
-def _make_queue(n_local_reader, n_remote_reader, max_chunk_bytes):
+def _make_queue(n_local_reader, n_remote_reader, *, max_chunk_bytes):
     shm_buffer = bytearray(max_chunk_bytes)
     queue = SimpleNamespace(
         _is_writer=True,
@@ -192,7 +193,7 @@ def test_serialization_failure_is_logged_without_masking_error(diagnostic_logger
 
 
 @pytest.mark.parametrize("route", ["direct", "remote", "local-overflow"])
-@pytest.mark.parametrize("frame_type", [bytes, zmq.Frame])
+@pytest.mark.parametrize("frame_type", [bytes, Frame])
 def test_corrupt_recv_logs_once_through_dequeue(diagnostic_logger, route, frame_type):
     queue, shm_buffer = _make_queue(1, 1, max_chunk_bytes=128)
     socket = queue.local_socket if route == "local-overflow" else queue.remote_socket
@@ -263,7 +264,7 @@ def test_recv_poll_timeouts_are_quiet(diagnostic_logger, timeout, timeout_ms):
     diagnostic_logger.error.assert_not_called()
 
 
-@pytest.mark.parametrize("error", [TimeoutError(), zmq.Again()])
+@pytest.mark.parametrize("error", [TimeoutError(), Again()])
 def test_retryable_send_failures_are_quiet(diagnostic_logger, error):
     queue, _ = _make_queue(0, 1, max_chunk_bytes=128)
     queue.remote_socket.send_multipart.side_effect = error
