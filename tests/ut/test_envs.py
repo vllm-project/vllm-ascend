@@ -35,7 +35,10 @@ class TestEnvVariables(TestBase):
                     self.assertEqual(getattr(envs_ascend, var_name), var_handler())
 
                     handler_source = inspect.getsource(var_handler)
-                    if var_name == "VLLM_ASCEND_KVPOOL_RANGE_DEBUG":
+                    if var_name in (
+                        "VLLM_ASCEND_KVPOOL_RANGE_DEBUG",
+                        "VLLM_ASCEND_DEBUG_DSPARK_MLA_CACHE",
+                    ):
                         test_vals = ["0", "1"]
                     elif "int(" in handler_source:
                         test_vals = ["123", "456"]
@@ -60,22 +63,25 @@ class TestEnvVariables(TestBase):
             with self.subTest(var=var_name):
                 getattr(envs_ascend, var_name)
 
-    def test_kvpool_range_debug_is_strict_and_disabled_by_default(self):
-        name = "VLLM_ASCEND_KVPOOL_RANGE_DEBUG"
-        original_val = os.environ.pop(name, None)
-        try:
-            self.assertFalse(getattr(envs_ascend, name))
-            for value, expected in (("0", False), ("1", True)):
-                with self.subTest(value=value):
-                    os.environ[name] = value
-                    self.assertIs(getattr(envs_ascend, name), expected)
-            for value in ("", "2", "true", "-1"):
-                with self.subTest(invalid=value):
-                    os.environ[name] = value
-                    with self.assertRaises(ValueError):
-                        getattr(envs_ascend, name)
-        finally:
-            if original_val is None:
-                os.environ.pop(name, None)
-            else:
-                os.environ[name] = original_val
+    def test_debug_env_vars_are_strict_and_disabled_by_default(self):
+        for name in (
+            "VLLM_ASCEND_KVPOOL_RANGE_DEBUG",
+            "VLLM_ASCEND_DEBUG_DSPARK_MLA_CACHE",
+        ):
+            original_val = os.environ.pop(name, None)
+            try:
+                self.assertFalse(getattr(envs_ascend, name))
+                for value, expected in (("0", False), ("1", True)):
+                    with self.subTest(name=name, value=value):
+                        os.environ[name] = value
+                        self.assertIs(getattr(envs_ascend, name), expected)
+                for value in ("", "2", "true", "-1"):
+                    with self.subTest(name=name, invalid=value):
+                        os.environ[name] = value
+                        with self.assertRaises(ValueError):
+                            getattr(envs_ascend, name)
+            finally:
+                if original_val is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = original_val

@@ -31,6 +31,7 @@ from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCap
 from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd_kernel
 from vllm_ascend.ops.triton.fla.solve_tril import solve_tril_16x16_kernel
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
+from vllm_ascend.ops.triton.paged_mla_cache_read import try_load_strided_mla_cache
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.quantization.utils import QUANT_DTYPES, get_dynamic_mx_quant_scale_alg
 
@@ -446,6 +447,8 @@ class BaseDeviceAdaptor:
 
     @staticmethod
     def kv_cache_load(cache_kv_c, cache_k_pe, block_table, context_seq_len_npu, seq_starts, key, value):
+        if try_load_strided_mla_cache(cache_kv_c, cache_k_pe, block_table, context_seq_len_npu, seq_starts, key, value):
+            return
         torch_npu.npu_gather_pa_kv_cache(
             cache_kv_c,
             cache_k_pe,
@@ -1476,6 +1479,8 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
 
     @staticmethod
     def kv_cache_load(cache_kv_c, cache_k_pe, block_table, context_seq_len_npu, seq_offset, key, value):
+        if try_load_strided_mla_cache(cache_kv_c, cache_k_pe, block_table, context_seq_len_npu, seq_offset, key, value):
+            return
         torch_npu.npu_gather_pa_kv_cache(
             cache_kv_c,
             cache_k_pe,
