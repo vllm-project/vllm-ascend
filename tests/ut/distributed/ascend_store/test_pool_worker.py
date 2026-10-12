@@ -410,6 +410,112 @@ class TestLayerwiseAttentionSave(unittest.TestCase):
 
 
 class TestKVPPPoolWorker(unittest.TestCase):
+    def test_pp_owner_indices_are_stage_local(self):
+        from tests.ut.kvpp_utils import layer_name, make_kvpp_config
+
+        worker = make_worker(
+            self,
+            tp_size=2,
+            pp_size=2,
+            pp_rank=1,
+            pp_partition=(9, 8),
+            num_layers=9,
+            use_mla=True,
+            use_kvpp=True,
+            use_layerwise=True,
+        )
+        worker.vllm_config = make_kvpp_config(2)
+        worker._global_to_local_layer = {9: 0, 10: 1, 17: 8}
+        worker._transfer_threads_started = True
+        worker.register_kv_caches({layer_name(i): torch.zeros((4, 16, 8)) for i in (9, 10, 17)})
+        self.assertEqual(worker.physical_layer_to_group_layers, {0: [(0, 0)], 8: [(0, 1)]})
+        self.assertEqual(worker._groups_for_layerwise_transfer(0), [(0, 0)])
+        self.assertEqual(worker._groups_for_layerwise_transfer(1), [])
+        self.assertEqual(worker._groups_for_layerwise_transfer(8), [(0, 1)])
+
+    def test_layerwise_owner_indices_include_all_cache_components(self):
+        from tests.ut.kvpp_utils import indexer_name, layer_name, make_kvpp_config
+
+        for backend in ("mooncake", "memcache"):
+            with self.subTest(backend=backend):
+                worker = make_worker(
+                    self,
+                    tp_size=2,
+                    num_layers=18,
+                    use_mla=True,
+                    use_kvpp=True,
+                    use_layerwise=True,
+                    extra_config={"backend": backend},
+                )
+                worker.vllm_config = make_kvpp_config(2)
+                worker.vllm_config.compilation_config.static_forward_context[indexer_name(9)] = SimpleNamespace(
+                    _kvpp_is_draft=False
+                )
+                worker._transfer_threads_started = True
+                caches = {
+                    layer_name(9): (torch.zeros((4, 16, 8)), torch.zeros((4, 16, 4))),
+                    indexer_name(9): (torch.zeros((4, 16, 4)), torch.zeros((4, 16, 1))),
+                    layer_name(10): torch.zeros((4, 16, 8)),
+                    layer_name(17): torch.zeros((4, 16, 8)),
+                }
+                worker.register_kv_caches(caches)
+                self.assertEqual(worker.physical_layer_to_group_layers, {9: [(0, 0)], 17: [(0, 1)]})
+                self.assertEqual(worker.group_layer_cache_entry_offsets[0], [0, 4, 5])
+                self.assertEqual(worker._groups_for_layerwise_transfer(10), [])
+                for method in (
+                    "_compute_reachable_store_masks",
+                    "_process_save_for_layer_batch",
+                    "_process_load_for_layer_batch",
+                    "_prepare_load_gvas",
+                    "_alloc_gvas_for_save",
+                    "_build_shared_save_data",
+                    "_build_shared_load_data",
+                ):
+                    setattr(worker, method, MagicMock())
+                worker.layerwise_protocol = MagicMock()
+                worker.layerwise_protocol.prepare_layerwise_sessions.return_value = {}
+                worker.process_layer_data([MagicMock()])
+                for process in (worker._process_save_for_layer_batch, worker._process_load_for_layer_batch):
+                    self.assertEqual([call.args[1:] for call in process.call_args_list], [(9, 0, 0), (17, 0, 1)])
+                self.doCleanups()
+
+    def test_load_completion_is_shared_and_reset_at_step_binding(self):
+        worker = make_worker(self, tp_size=2, use_mla=True, use_kvpp=True, use_layerwise=True)
+        worker._global_to_local_layer = {9: 0, 10: 1}
+        worker.layer_load_tasks[0] = [MagicMock()]
+        worker.layer_load_finished_events = [threading.Event(), threading.Event()]
+        worker.layer_load_finished_events[0].set()
+        worker.current_layer = 0
+        worker.kv_recv_thread = MagicMock()
+        worker.external_slot_release_waiter = None
+        worker._submit_ready_layer_loads = MagicMock()
+        worker._finish_current_layerwise_load_sessions = MagicMock()
+        worker.wait_for_layer_load()
+        # Both observers can see the same completion, in either order.
+        worker.wait_for_layer_load_ready("model.layers.9.self_attn.attn")
+        worker.wait_for_layer_load_ready("model.layers.9.self_attn.attn")
+        self.assertTrue(worker.layer_load_finished_events[0].is_set())
+        self.assertEqual(worker.current_layer, 0)
+        # Non-owners have no tasks or signal to wait on.
+        worker.wait_for_layer_load_ready("model.layers.10.self_attn.attn")
+        worker.current_layer = 1
+        worker._current_layerwise_last_chunk_req_ids = {"loaded-request"}
+        worker.wait_for_layer_load()
+        worker.kv_recv_thread.set_finished_request.assert_called_once_with("loaded-request")
+        worker.process_layer_data = MagicMock()
+        worker.prepare_layerwise_step(AscendConnectorMetadata(preempted_req_ids=set()))
+        self.assertFalse(worker.layer_load_finished_events[0].is_set())
+        self.assertEqual(worker.next_layer_to_submit, 0)
+
+    def test_load_observer_surfaces_receive_failure(self):
+        worker = make_worker(self, tp_size=2, use_mla=True, use_kvpp=True, use_layerwise=True)
+        worker.layer_load_tasks[0] = [MagicMock()]
+        worker.layer_load_finished_events = [threading.Event(), threading.Event()]
+        worker.kv_recv_thread = MagicMock()
+        worker.kv_recv_thread.raise_if_failed.side_effect = RuntimeError("receive failed")
+        with self.assertRaisesRegex(RuntimeError, "receive failed"):
+            worker.wait_for_layer_load_ready("model.layers.0.self_attn.attn")
+
     def test_pcp_registers_persistent_owner_layers_and_mtp(self):
         import torch
 
@@ -645,6 +751,7 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
     def test_wait_for_layer_load_fallback_waits_for_reuse(self):
         cls = self._make_worker_class()
         worker = cls.__new__(cls)
+        worker.use_kvpp = False
         worker.current_layer = 0
         worker.num_layers = 1
         worker.layer_load_tasks = [[]]
