@@ -490,8 +490,8 @@ and use the `main` branch with the matching vLLM revision recorded in
         --seed 1024 \
         --served-model-name dsv41 \
         --max-model-len 1048576 \
-        --max-num-batched-tokens 400 \
-        --max-num-seqs 32 \
+        --max-num-batched-tokens 512 \
+        --max-num-seqs 72 \
         --async-scheduling \
         --block-size 128 \
         --no-enable-prefix-caching \
@@ -567,7 +567,7 @@ and use the `main` branch with the matching vLLM revision recorded in
       `7100-7107` on Decode. These endpoints must be reachable by the PD proxy.
     - Both roles use `--max-model-len 1048576`. Prefill uses
       `--max-num-batched-tokens 8192` and `--max-num-seqs 16` to favor prompt
-      throughput, while Decode uses `400` and `32` respectively to favor decode
+      throughput, while Decode uses `512` and `72` respectively to favor decode
       concurrency. Tune these role-specific scheduler limits independently.
     - `MooncakeHybridConnector` transfers KV cache between the two roles.
       `kv_role` must be `kv_producer` on Prefill and `kv_consumer` on Decode;
@@ -900,8 +900,8 @@ vllm serve "$MODEL_PATH" \
     --seed 1024 \
     --served-model-name dsv41 \
     --max-model-len 1048576 \
-    --max-num-batched-tokens 400 \
-    --max-num-seqs 32 \
+    --max-num-batched-tokens 512 \
+    --max-num-seqs 72 \
     --async-scheduling \
     --block-size 128 \
     --no-enable-prefix-caching \
