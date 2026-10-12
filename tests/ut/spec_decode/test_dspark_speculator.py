@@ -4,6 +4,7 @@
 
 from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -327,7 +328,7 @@ def test_mla_dcp_metadata_uses_prepared_kv_lengths(monkeypatch, mode, prepared, 
     spec.target_input_buffers = SimpleNamespace(seq_lens_cpu=torch.tensor([*target, 333, 444], dtype=torch.int32))
     prepare = MagicMock()
     monkeypatch.setattr(spec, "_prepare_draft_dcp_metadata_inputs", prepare)
-    captured = {}
+    captured: dict[str, Any] = {}
 
     @contextmanager
     def factory(positions, num_tokens, **kwargs):
@@ -364,7 +365,7 @@ def test_other_dense_draft_metadata_keeps_length_preparation(monkeypatch, archit
     flags = torch.zeros(4, dtype=torch.bool)
     prepare = MagicMock(return_value=(lengths, flags))
     monkeypatch.setattr(spec, "_prepare_draft_dcp_metadata_inputs", prepare)
-    captured = {}
+    captured: dict[str, Any] = {}
 
     @contextmanager
     def factory(positions, num_tokens, **kwargs):
