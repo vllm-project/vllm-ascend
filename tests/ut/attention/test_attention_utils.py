@@ -109,6 +109,39 @@ def test_select_seq_lens_cross_attention_uses_npu_seq_lens() -> None:
     assert seq_lens is NPU_SEQ_LENS
 
 
+@pytest.mark.parametrize("exact", [False, True])
+def test_dflash_uses_cpu_mirror_only_when_marked_exact(exact):
+    common = _common_attn_metadata()
+    common.seq_lens_cpu_is_exact = exact
+    selected = _select_seq_lens(common, None, _spec_config("dflash", True), _vllm_config("qwen3_5"))
+    torch.testing.assert_close(selected, CPU_SEQ_LENS[:NUM_REQS] if exact else NPU_SEQ_LENS)
+
+
+def test_exact_cpu_mirror_survives_unpadding():
+    common = _common_attn_metadata()
+    common.seq_lens_cpu_is_exact = True
+    unpadded = common.unpadded(num_actual_tokens=2, num_actual_reqs=1)
+    assert unpadded.seq_lens_cpu_is_exact
+    selected = _select_seq_lens(unpadded, None, _spec_config("dflash", True), _vllm_config("qwen3_5"))
+    torch.testing.assert_close(selected, CPU_SEQ_LENS[:1])
+
+
+def test_exact_cpu_lengths_take_precedence_over_legacy_upper_bound():
+    common = _common_attn_metadata()
+    common.seq_lens_cpu = torch.tensor([7, 13, 0], dtype=torch.int32)
+    common.seq_lens_cpu_is_exact = True
+    selected = _select_seq_lens(common, None, _spec_config("dflash", True), _vllm_config("qwen3_5"))
+    torch.testing.assert_close(selected, common.seq_lens_cpu[:NUM_REQS])
+
+
+def test_cross_attention_keeps_device_lengths_with_exact_cpu_mirror():
+    common = _common_attn_metadata()
+    common.seq_lens_cpu_is_exact = True
+    cache_spec = CrossAttentionSpec(block_size=16, num_kv_heads=8, head_size=128, dtype=torch.float16)
+    selected = _select_seq_lens(common, cache_spec, _spec_config("dflash", True), _vllm_config("qwen3_5"))
+    assert selected is NPU_SEQ_LENS
+
+
 def test_get_or_register_attention_buffer() -> None:
     module_a = torch.nn.Module()
     module_b = torch.nn.Module()

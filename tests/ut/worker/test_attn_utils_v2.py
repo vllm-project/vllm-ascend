@@ -19,6 +19,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu import attn_utils as upstream_attn_utils
+from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridAttnMetadata
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention import dsa_attn_kv_plan, dsa_v1
@@ -50,6 +51,7 @@ from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.models.deepseek_v4 import compressor as deepseek_v4_compressor
 from vllm_ascend.models.deepseek_v4 import indexer as deepseek_v4_indexer
 from vllm_ascend.models.deepseek_v4 import model as deepseek_v4_model
+from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionMetadataBuilder
 from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _get_kv_cache_config_deepseek_v4_main,
 )
@@ -62,6 +64,272 @@ class SparseAttentionBackend(AscendAttentionBackend):
     @classmethod
     def is_sparse(cls) -> bool:
         return True
+
+
+class _RecordingGDNReuseBuilder(AscendGDNAttentionMetadataBuilder):
+    def __init__(self):
+        self.supports_update_block_table = True
+        self.num_spec = 3
+        self.use_spec_decode = True
+        self.use_full_cuda_graph = False
+        self.decode_cudagraph_max_bs = 64
+        self.vllm_config = SimpleNamespace(
+            cache_config=SimpleNamespace(mamba_cache_mode="none"),
+            parallel_config=SimpleNamespace(prefill_context_parallel_size=1),
+        )
+        self.build_calls = []
+        self.update_calls = []
+
+    def build(self, common_prefix_len, common_attn_metadata, **kwargs):
+        self.build_calls.append((common_attn_metadata, kwargs))
+        return SimpleNamespace(
+            batch=common_attn_metadata.query_start_loc,
+            block_table=common_attn_metadata.block_table_tensor,
+        )
+
+    def build_for_cudagraph_capture(self, common_attn_metadata, **kwargs):
+        return self.build(0, common_attn_metadata, **kwargs)
+
+    def update_block_table(self, metadata, blk_table, slot_mapping=None, graph_state_updates=None):
+        self.update_calls.append(metadata)
+        if graph_state_updates is not None:
+            graph_state_updates.append(blk_table)
+        return SimpleNamespace(batch=metadata.batch, block_table=blk_table)
+
+
+def _make_gdn_reuse_inputs(num_groups):
+    spec = MambaSpec(block_size=16, shapes=((1,), (1,)), dtypes=(torch.float32,), num_speculative_blocks=3)
+    builders = [_RecordingGDNReuseBuilder() for _ in range(num_groups)]
+    for builder in builders:
+        builder.kv_cache_spec = spec
+    groups = [
+        SimpleNamespace(
+            kv_cache_spec=spec,
+            layer_names=[f"layer{i}"],
+            get_metadata_builder=lambda _index, builder=builder: builder,
+        )
+        for i, builder in enumerate(builders)
+    ]
+    query_start_loc = torch.tensor([0, 4, 8], dtype=torch.int32)
+    accepted = torch.tensor([2, 3], dtype=torch.int32)
+    drafts = torch.tensor([3, 3], dtype=torch.int32)
+    is_prefilling = torch.zeros(2, dtype=torch.bool)
+    model_specific = SimpleNamespace(
+        get_extra_common_attn_kwargs=lambda _group, n: {"is_prefilling": is_prefilling[:n]},
+        get_extra_attn_kwargs=lambda _builder, n: {
+            "num_accepted_tokens": accepted[:n],
+            "num_decode_draft_tokens_cpu": drafts[:n],
+        },
+    )
+    kwargs = dict(
+        attn_groups=[[group] for group in groups],
+        num_reqs=2,
+        num_tokens=8,
+        query_start_loc_gpu=query_start_loc,
+        query_start_loc_cpu=query_start_loc,
+        max_query_len=4,
+        seq_lens=torch.tensor([24, 48], dtype=torch.int32),
+        max_seq_len=48,
+        block_tables=tuple(torch.arange(8, dtype=torch.int32).view(2, 4) + i * 100 for i in range(num_groups)),
+        slot_mappings=torch.arange(num_groups * 8, dtype=torch.int64).view(num_groups, 8),
+        kv_cache_config=SimpleNamespace(kv_cache_groups=groups),
+        seq_lens_cpu_upper_bound=torch.tensor([24, 48], dtype=torch.int32),
+        model_specific_attn_metadata=model_specific,
+    )
+    return builders, kwargs
+
+
+@pytest.mark.parametrize("num_groups", [2, 38])
+@pytest.mark.parametrize("for_capture", [False, True])
+def test_standard_mamba_common_fields_follow_each_current_batch(num_groups, for_capture, monkeypatch):
+    builders, kwargs = _make_gdn_reuse_inputs(num_groups)
+    provider = MambaHybridAttnMetadata(
+        is_prefilling=torch.tensor([False, True]),
+        num_accepted_tokens=torch.tensor([2, 3], dtype=torch.int32),
+        num_decode_draft_tokens_cpu=torch.tensor([3, 3], dtype=torch.int32),
+    )
+    kwargs["model_specific_attn_metadata"] = provider
+    kwargs["for_cudagraph_capture"] = for_capture
+    original = MambaHybridAttnMetadata.get_extra_common_attn_kwargs
+    calls = []
+
+    def record_common_fields(self, group, num_reqs):
+        calls.append((group, num_reqs))
+        return original(self, group, num_reqs)
+
+    monkeypatch.setattr(MambaHybridAttnMetadata, "get_extra_common_attn_kwargs", record_common_fields)
+    # Disable builder reuse to inspect the common fields for every cache group.
+    for builder in builders:
+        builder.supports_update_block_table = False
+    for step, num_reqs in enumerate((2, 1, 2)):
+        provider.is_prefilling = torch.tensor([bool(step % 2), bool((step + 1) % 2)])
+        kwargs["num_reqs"] = num_reqs
+        attn_utils.build_attn_metadata(**kwargs)
+        common = [builder.build_calls[-1][0] for builder in builders]
+        assert all(metadata.is_prefilling is common[0].is_prefilling for metadata in common)
+        assert torch.equal(common[0].is_prefilling, provider.is_prefilling[:num_reqs])
+        assert common[0].is_prefilling.data_ptr() == provider.is_prefilling.data_ptr()
+    assert calls == [(0, 2), (0, 1), (0, 2)]
+
+
+def test_mamba_instance_common_override_keeps_group_specific_fields():
+    builders, kwargs = _make_gdn_reuse_inputs(2)
+    provider = MambaHybridAttnMetadata(is_prefilling=torch.zeros(2, dtype=torch.bool))
+    masks = [torch.zeros(2, dtype=torch.bool), torch.ones(2, dtype=torch.bool)]
+    fields = [{"is_prefilling": masks[i], "num_computed_tokens_cpu": torch.full((2,), i)} for i in range(2)]
+    override = MagicMock(side_effect=lambda group, n: fields[group].copy())
+    provider.get_extra_common_attn_kwargs = override
+    kwargs["model_specific_attn_metadata"] = provider
+    attn_utils.build_attn_metadata(**kwargs)
+    assert [entry.args for entry in override.call_args_list] == [(0, 2), (1, 2)]
+    for i, builder in enumerate(builders):
+        common = builder.build_calls[0][0]
+        assert common.is_prefilling is masks[i]
+        assert torch.equal(common.num_computed_tokens_cpu, torch.full((2,), i))
+        assert set(fields[i]) == {"is_prefilling", "num_computed_tokens_cpu"}
+
+
+def test_exact_cpu_lengths_require_a_separate_mirror():
+    builders, kwargs = _make_gdn_reuse_inputs(1)
+    kwargs["seq_lens_cpu_is_exact"] = True
+    with pytest.raises(ValueError, match="Exact CPU sequence lengths"):
+        attn_utils.build_attn_metadata(**kwargs)
+    assert not builders[0].build_calls
+
+
+@pytest.mark.parametrize("for_capture", [False, True])
+def test_custom_gdn_provider_keeps_group_builds_separate(for_capture):
+    builders, kwargs = _make_gdn_reuse_inputs(24)
+    kwargs["for_cudagraph_capture"] = for_capture
+    for _ in range(2):
+        result = attn_utils.build_attn_metadata(**kwargs)
+        assert len({id(metadata) for metadata in result.values()}) == 24
+        for i, metadata in enumerate(result.values()):
+            assert metadata.block_table is kwargs["block_tables"][i]
+            assert metadata.batch is result["layer0"].batch
+    assert len(builders[0].build_calls) == 2
+    assert all(len(builder.build_calls) == 2 for builder in builders)
+    assert all(not builder.update_calls for builder in builders)
+
+
+@pytest.mark.parametrize("for_capture", [False, True])
+def test_batch_global_mamba_gdn_groups_reuse_during_capture_and_replay(for_capture, monkeypatch):
+    builders, kwargs = _make_gdn_reuse_inputs(24)
+    kwargs["model_specific_attn_metadata"] = MambaHybridAttnMetadata(
+        is_prefilling=torch.zeros(2, dtype=torch.bool),
+        num_accepted_tokens=torch.tensor([2, 3], dtype=torch.int32),
+        num_decode_draft_tokens_cpu=torch.tensor([3, 3], dtype=torch.int32),
+    )
+    provider = kwargs["model_specific_attn_metadata"]
+    extra_inputs = MagicMock(wraps=provider.get_extra_attn_kwargs)
+    monkeypatch.setattr(provider, "get_extra_attn_kwargs", extra_inputs)
+    common_builds = MagicMock(wraps=attn_utils.AscendCommonAttentionMetadata)
+    monkeypatch.setattr(attn_utils, "AscendCommonAttentionMetadata", common_builds)
+    kwargs["for_cudagraph_capture"] = for_capture
+    result = attn_utils.build_attn_metadata(**kwargs)
+    assert len(builders[0].build_calls) == 1
+    assert all(not builder.build_calls and len(builder.update_calls) == 1 for builder in builders[1:])
+    for i, metadata in enumerate(result.values()):
+        assert metadata.block_table is kwargs["block_tables"][i]
+    assert extra_inputs.call_count == (0 if for_capture else 1)
+    assert common_builds.call_count == 1
+
+
+@pytest.mark.parametrize("for_capture", [False, True])
+def test_v2_flushes_group_graph_writes_once_before_return(for_capture):
+    builders, kwargs = _make_gdn_reuse_inputs(24)
+    kwargs["model_specific_attn_metadata"] = MambaHybridAttnMetadata(
+        is_prefilling=torch.zeros(2, dtype=torch.bool),
+        num_accepted_tokens=torch.tensor([2, 3], dtype=torch.int32),
+        num_decode_draft_tokens_cpu=torch.tensor([3, 3], dtype=torch.int32),
+    )
+    for builder in builders:
+        builder.graph_state_updater = MagicMock()
+    result = attn_utils.build_attn_metadata(**kwargs, for_cudagraph_capture=for_capture)
+    builders[0].graph_state_updater.apply.assert_called_once()
+    updates = builders[0].graph_state_updater.apply.call_args.args[0]
+    assert len(updates) == 23
+    for i, update in enumerate(updates, 1):
+        assert update is kwargs["block_tables"][i]
+        assert result[f"layer{i}"].block_table is update
+    assert all(not builder.graph_state_updater.apply.called for builder in builders[1:])
+
+
+@pytest.mark.parametrize("shared_capture", [False, True])
+def test_gdn_provider_changes_preserve_capture_contract(shared_capture):
+    builders, kwargs = _make_gdn_reuse_inputs(2)
+    custom_provider = kwargs["model_specific_attn_metadata"]
+    standard_provider = MambaHybridAttnMetadata(
+        is_prefilling=torch.zeros(2, dtype=torch.bool),
+        num_accepted_tokens=torch.ones(2, dtype=torch.int32),
+        num_decode_draft_tokens_cpu=torch.full((2,), 3, dtype=torch.int32),
+    )
+    kwargs["model_specific_attn_metadata"] = standard_provider if shared_capture else custom_provider
+    attn_utils.build_attn_metadata(**kwargs, for_cudagraph_capture=True)
+    kwargs["model_specific_attn_metadata"] = custom_provider if shared_capture else standard_provider
+    if shared_capture:
+        with pytest.raises(ValueError, match="batch-global Mamba provider"):
+            attn_utils.build_attn_metadata(**kwargs)
+        assert len(builders[0].build_calls) == 1
+    else:
+        attn_utils.build_attn_metadata(**kwargs)
+        assert all(len(builder.build_calls) == 2 for builder in builders)
+        assert all(not builder.update_calls for builder in builders)
+
+
+@pytest.mark.parametrize(
+    "difference",
+    [
+        "disabled",
+        "spec_width",
+        "prefill",
+        "extra_common",
+        "accepted",
+        "draft",
+        "cache_mode",
+        "extra_builder",
+        "pcp",
+    ],
+)
+def test_gdn_reuse_keeps_different_group_semantics_separate(difference):
+    builders, kwargs = _make_gdn_reuse_inputs(2)
+    if difference in ("disabled", "spec_width", "cache_mode", "pcp"):
+        kwargs["model_specific_attn_metadata"] = MambaHybridAttnMetadata(
+            is_prefilling=torch.zeros(2, dtype=torch.bool),
+            num_accepted_tokens=torch.ones(2, dtype=torch.int32),
+            num_decode_draft_tokens_cpu=torch.full((2,), 3, dtype=torch.int32),
+        )
+    if difference == "disabled":
+        builders[1].supports_update_block_table = False
+    elif difference == "spec_width":
+        spec = replace(builders[1].kv_cache_spec, num_speculative_blocks=7)
+        builders[1].kv_cache_spec = kwargs["attn_groups"][1][0].kv_cache_spec = spec
+    elif difference == "prefill":
+        masks = [torch.zeros(2, dtype=torch.bool), torch.ones(2, dtype=torch.bool)]
+        kwargs["model_specific_attn_metadata"].get_extra_common_attn_kwargs = lambda group, n: {
+            "is_prefilling": masks[group][:n]
+        }
+    elif difference == "extra_common":
+        kwargs["model_specific_attn_metadata"].get_extra_common_attn_kwargs = lambda group, n: {
+            "num_computed_tokens_cpu": torch.full((n,), group, dtype=torch.int32)
+        }
+    elif difference in ("accepted", "draft"):
+        accepted = [torch.tensor([1, 2]), torch.tensor([2, 3])]
+        drafts = [torch.tensor([3, 3]), torch.tensor([1, 3])]
+        kwargs["model_specific_attn_metadata"].get_extra_attn_kwargs = lambda builder, n: {
+            "num_accepted_tokens": accepted[builders.index(builder) if difference == "accepted" else 0][:n],
+            "num_decode_draft_tokens_cpu": drafts[builders.index(builder) if difference == "draft" else 0][:n],
+        }
+    elif difference == "cache_mode":
+        spec = replace(builders[1].kv_cache_spec, mamba_cache_mode="align")
+        builders[1].kv_cache_spec = kwargs["attn_groups"][1][0].kv_cache_spec = spec
+    elif difference == "extra_builder":
+        kwargs["model_specific_attn_metadata"].get_extra_attn_kwargs = lambda builder, n: {"group_specific": 1}
+    else:
+        kwargs["pcp_context"] = object()
+    attn_utils.build_attn_metadata(**kwargs)
+    assert all(len(builder.build_calls) == 1 for builder in builders)
+    assert all(not builder.update_calls for builder in builders)
 
 
 def _make_kv_cache_tensor(size: int, layer_names: list[str], page_size: int = 0) -> KVCacheTensor:
@@ -629,6 +897,23 @@ def test_build_attn_metadata_factory_applies_state(monkeypatch, state_kwargs, fa
     assert captured_kwargs["is_prefilling"] is is_prefilling
     assert captured_kwargs["attn_state"] == factory_state
     assert captured_kwargs["copy_sfa_draft_index"] == 2
+
+
+def test_build_attn_metadata_factory_passes_exact_host_lengths(monkeypatch):
+    raw = MagicMock(return_value="metadata")
+    monkeypatch.setattr(attn_utils._BUILD_ATTN_METADATA_MODULE, "build_attn_metadata", raw)
+    seq_lens_cpu = torch.tensor([73, 22666, 0, 0], dtype=torch.int32)
+    with attn_utils.build_attn_metadata_factory(
+        torch.arange(32),
+        32,
+        torch.zeros(4, dtype=torch.bool),
+        seq_lens_cpu=seq_lens_cpu,
+        seq_lens_cpu_is_exact=True,
+    ):
+        assert attn_utils._BUILD_ATTN_METADATA_MODULE.build_attn_metadata() == "metadata"
+    assert raw.call_args.kwargs["seq_lens_cpu_is_exact"]
+    np.testing.assert_array_equal(raw.call_args.kwargs["seq_lens_np"], seq_lens_cpu.numpy())
+    assert attn_utils._BUILD_ATTN_METADATA_MODULE.build_attn_metadata is raw
 
 
 @pytest.mark.parametrize("dcp_size", [2])
