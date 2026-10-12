@@ -142,13 +142,13 @@ class AscendGlooEplbCommunicator(TorchDistGlooStagedEplbCommunicator):
             request.wait()
 
         with stream if stream is not None else contextlib.nullcontext():
-            for dst_tensor, cpu_tensor in recv_staging:
+            for dst_tensor, src_tensor in recv_staging:
                 if dst_tensor.device.type == "npu" and torch_npu.get_npu_format(dst_tensor) == ACL_FORMAT_FRACTAL_NZ:
                     # Ascend950 cannot copy CPU tensors directly into NZ storage.
-                    cpu_tensor = torch_npu.npu_format_cast(
-                        cpu_tensor.to(dst_tensor.device, non_blocking=True), ACL_FORMAT_FRACTAL_NZ
+                    src_tensor = torch_npu.npu_format_cast(
+                        src_tensor.to(dst_tensor.device, non_blocking=True), ACL_FORMAT_FRACTAL_NZ
                     )
-                dst_tensor.copy_(cpu_tensor, non_blocking=True)
+                dst_tensor.copy_(src_tensor, non_blocking=True)
 
     @property
     def needs_profile_buffer_reservation(self) -> bool:
