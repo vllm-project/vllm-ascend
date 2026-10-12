@@ -25,6 +25,9 @@ def _patched_use_v2_model_runner(self) -> bool:
     model-compatibility decisions are deferred to the NPU runner itself.
     """
     use_v2 = envs.VLLM_USE_V2_MODEL_RUNNER
+    spec = getattr(self, "speculative_config", None)
+    if spec is not None and spec.method == "pard2" and not use_v2:
+        raise ValueError("PARD-2 on Ascend requires VLLM_USE_V2_MODEL_RUNNER=1.")
     if use_v2 is not None:
         return use_v2
     return False
