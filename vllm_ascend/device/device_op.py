@@ -1098,7 +1098,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         return_lse: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if return_lse or getattr(sfa_impl, "qk_rope_head_dim", q_pe.shape[-1]) == 0:
-            import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401
+            import_module("vllm_ascend.vllm_ascend_C")
 
             # RoPE0 packed C8 is implemented by the vllm-ascend custom operator
             # (csrc/attention/kv_quant_sparse_flash_attention_vllm). The torch_npu

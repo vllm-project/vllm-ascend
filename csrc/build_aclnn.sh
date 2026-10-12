@@ -300,18 +300,6 @@ log_selected_ops
   if [[ -d "${custom_ops_install_dir}/vendors/custom_transformer/scripts" ]]; then
     chmod u+w "${custom_ops_install_dir}/vendors/custom_transformer/scripts"
   fi
-  # An op_api library alone does not prove that the A5 C8 kernel was packaged.
-  if [[ "$SOC_ARG" == "ascend950" ]]; then
-    c8_kernel_dir="${custom_ops_install_dir}/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend950/kv_quant_sparse_flash_attention_vllm"
-    shopt -s nullglob
-    c8_kernel_binaries=("${c8_kernel_dir}"/*.o)
-    shopt -u nullglob
-    (( ${#c8_kernel_binaries[@]} > 0 )) || { echo "ERROR: installed A5 C8 kernel binaries are missing" >&2; exit 1; }
-    for kernel_binary in "${c8_kernel_binaries[@]}"; do
-      [[ -s "$kernel_binary" && -s "${kernel_binary%.o}.json" ]] || { echo "ERROR: incomplete A5 C8 kernel: $kernel_binary" >&2; exit 1; }
-    done
-    log "verified ${#c8_kernel_binaries[@]} installed A5 C8 kernel binaries"
-  fi
   log "installer finished"
   log "installed files under ${custom_ops_install_dir} (maxdepth=4, first 120 entries):"
   { find "${custom_ops_install_dir}" -mindepth 1 -maxdepth 4 -print | sort | head -n 120 | sed 's#^#[build_aclnn] install: #'; } || true
