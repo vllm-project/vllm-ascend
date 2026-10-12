@@ -10,8 +10,10 @@ attention is the independent reference; this is not NPU or ACL graph evidence.
 import ast
 import runpy
 import sys
+from contextlib import contextmanager
+from enum import Enum
 from pathlib import Path
-from types import ModuleType, SimpleNamespace
+from types import MethodType, ModuleType, SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -86,6 +88,36 @@ def combine_outputs(recv, head_dim, *, scatter_dim, local_output=None, local_lse
 
 @pytest.fixture
 def runtime(monkeypatch):
+    events, recorded_streams = [], []
+    active_stream = ["main"]
+
+    class Stream:
+        def __init__(self, name):
+            self.name = name
+
+        def record_event(self):
+            events.append(("record", self.name))
+            return self.name
+
+        def wait_event(self, event):
+            events.append(("wait", self.name, event))
+
+    main_stream, attn_stream = Stream("main"), Stream("attn")
+
+    @contextmanager
+    def on_stream(stream):
+        previous = active_stream[0]
+        active_stream[0] = stream.name
+        try:
+            yield
+        finally:
+            active_stream[0] = previous
+
+    monkeypatch.setattr(
+        torch, "npu", SimpleNamespace(current_stream=lambda: main_stream, stream=on_stream), raising=False
+    )
+    monkeypatch.setattr(torch.Tensor, "record_stream", lambda tensor, stream: recorded_streams.append((tensor, stream)))
+
     def install(name, **attrs):
         module = ModuleType(name)
         module.__dict__.update(attrs)
@@ -116,7 +148,13 @@ def runtime(monkeypatch):
         return torch.cat((lengths, cu_seqlens_q, seqused_q))
 
     metadata_op = Mock(side_effect=schedule)
-    attention_op = Mock(side_effect=paged_attention)
+
+    def attention(query, cache, **kwargs):
+        kind = "current" if kwargs["mask_mode"] == 3 else "history"
+        events.append((kind, active_stream[0]))
+        return paged_attention(query, cache, **kwargs)
+
+    attention_op = Mock(side_effect=attention)
     monkeypatch.setattr(
         api.FlashMLAAdapter,
         "load",
@@ -144,17 +182,51 @@ def runtime(monkeypatch):
             impl, torch.device("cpu"), 8, torch.triu(torch.ones(2048, 2048, dtype=torch.int8), diagonal=1)
         )
 
+    class AttentionKind(Enum):
+        HISTORY = "history"
+        CURRENT = "current"
+
+    context = SimpleNamespace(capturing=False, is_draft_model=False, is_draft_model_prefill=False)
     scope = {
         "torch": torch,
         "torch_npu": SimpleNamespace(npu_scatter_pa_kv_cache=scatter_current),
         "record_attention_compute_start": Mock(),
         "fused_dcp_lse_combine": combine_outputs,
+        "AscendMLAMetadata": object,
+        "AscendMLADCPDecodeMetadata": SimpleNamespace,
+        "MLASplitAttentionKind": AttentionKind,
+        "_EXTRA_CTX": context,
+        "_dcp_mtp_comm_stream": lambda: attn_stream,
+        "get_graph_params": Mock(side_effect=AssertionError("FlashMLA must not prepare FIA graph tasks")),
     }
-    forward = load_method(
-        "vllm_ascend/attention/context_parallel/mla_cp.py", "AscendMlaDCPImpl", "_forward_external_flashmla", scope
+    scope["torch_npu"]._npu_fused_infer_attention_score_get_max_workspace = Mock(
+        side_effect=AssertionError("FlashMLA must not query FIA workspace")
     )
+    methods = {
+        name: load_method("vllm_ascend/attention/context_parallel/mla_cp.py", "AscendMlaDCPImpl", name, scope)
+        for name in ("_forward_external_flashmla", "_run_dcp_flashmla_attention", "_forward_decode_split_attention")
+    }
+
+    def bind(impl):
+        for name, method in methods.items():
+            setattr(impl, name, MethodType(method, impl))
+        impl._forward_decode_split_attention = Mock(wraps=impl._forward_decode_split_attention)
+        impl._run_dcp_mtp_split_attention_op = Mock(side_effect=AssertionError("FlashMLA must not call FIA"))
+        return impl
+
     return SimpleNamespace(
-        builder=builder, api=api, metadata_op=metadata_op, attention_op=attention_op, forward=forward, tasks=tasks
+        builder=builder,
+        api=api,
+        metadata_op=metadata_op,
+        attention_op=attention_op,
+        forward=methods["_forward_external_flashmla"],
+        bind=bind,
+        scope=scope,
+        context=context,
+        events=events,
+        active_stream=active_stream,
+        recorded_streams=recorded_streams,
+        tasks=tasks,
     )
 
 
@@ -266,7 +338,11 @@ def test_dcp_one_keeps_original_single_attention_contract(runtime, causal):
 @pytest.mark.parametrize("causal", [True, False])
 @pytest.mark.parametrize("interleave", [1, 4, 128])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_forward_matches_dense_with_strided_history_and_empty_ranks(runtime, monkeypatch, causal, interleave, dtype):
+@pytest.mark.parametrize("capturing", [False, True])
+def test_forward_matches_dense_with_strided_history_and_empty_ranks(
+    runtime, monkeypatch, causal, interleave, dtype, capturing
+):
+    runtime.context.capturing = capturing
     torch.manual_seed(41)
     size, local_heads, tokens = 8, 8, 5
     queries = [3, 1]
@@ -324,6 +400,7 @@ def test_forward_matches_dense_with_strided_history_and_empty_ranks(runtime, mon
             output, lse, world_size, scatter_dim, group, *, defer_combine, owned=owned, rank=rank, flash=flash
         ):
             assert (world_size, scatter_dim, group, defer_combine) == (size, 1, "cpu-dcp", True)
+            runtime.events.append(("exchange", runtime.active_stream[0]))
             assert output.shape == (tokens, 64, 512) and lse.shape == (tokens, 64, 1)
             expected_output, expected_lse = partials[rank]
             expected_output = expected_output.masked_fill(~flash.token_live[None, :, None], 0)
@@ -336,14 +413,34 @@ def test_forward_matches_dense_with_strided_history_and_empty_ranks(runtime, mon
             )
 
         monkeypatch.setattr(torch.ops.vllm, "dcp_a2a_fused", exchange, raising=False)
-        impl = SimpleNamespace(
-            kv_lora_rank=512,
-            qk_rope_head_dim=64,
-            num_heads=local_heads,
-            dcp_size=size,
-            dcp_rank=rank,
-            dcp_group=SimpleNamespace(unique_name="cpu-dcp"),
-            _v_up_proj_batch_major=lambda latent: latent,
+
+        def combine(recv, head_dim, *, scatter_dim, local_output=None, local_lse=None):
+            assert runtime.events[-1] == (("wait", "main", "attn") if causal else ("exchange", "main"))
+            assert (local_output is not None) == causal
+            assert (local_lse is not None) == causal
+            runtime.events.append(("merge", runtime.active_stream[0]))
+            return combine_outputs(
+                recv, head_dim, scatter_dim=scatter_dim, local_output=local_output, local_lse=local_lse
+            )
+
+        combined = Mock(side_effect=combine)
+        runtime.scope["fused_dcp_lse_combine"] = combined
+
+        def project(latent):
+            runtime.events.append(("project", runtime.active_stream[0]))
+            return latent
+
+        impl = runtime.bind(
+            SimpleNamespace(
+                kv_lora_rank=512,
+                qk_rope_head_dim=64,
+                num_kv_heads=1,
+                num_heads=local_heads,
+                dcp_size=size,
+                dcp_rank=rank,
+                dcp_group=SimpleNamespace(unique_name="cpu-dcp"),
+                _v_up_proj_batch_major=Mock(side_effect=project),
+            )
         )
         preprocessed = SimpleNamespace(
             ql_nope=query[..., :512],
@@ -352,13 +449,166 @@ def test_forward_matches_dense_with_strided_history_and_empty_ranks(runtime, mon
             current_k_pe=current_kv[..., 512:] if causal else None,
         )
         cache, backing, snapshot = caches[rank]
-        result = runtime.forward(impl, preprocessed, cache, SimpleNamespace(external_flashmla=flash))
+        runtime.events.clear()
+        runtime.recorded_streams.clear()
+        # Production external metadata has no FIA CPU length mirrors.
+        decode = SimpleNamespace(cp_history_seq_len=None, actual_seq_lengths_q=None)
+        result = runtime.forward(impl, preprocessed, cache, SimpleNamespace(external_flashmla=flash, decode=decode))
+        impl._forward_decode_split_attention.assert_called_once()
+        impl._run_dcp_mtp_split_attention_op.assert_not_called()
+        combined.assert_called_once()
+        impl._v_up_proj_batch_major.assert_called_once()
+        if causal:
+            assert runtime.events == [
+                ("history", "main"),
+                ("record", "main"),
+                ("wait", "attn", "main"),
+                ("current", "attn"),
+                ("record", "attn"),
+                ("exchange", "main"),
+                ("wait", "main", "attn"),
+                ("merge", "main"),
+                ("project", "main"),
+            ]
+            for tensor in (
+                flash.current.query,
+                flash.current.cache,
+                flash.current.schedule,
+                flash.current.block_table,
+                flash.current.slots,
+                flash.current.attn_mask,
+                flash.cu,
+                flash.used_q,
+                flash.token_live,
+            ):
+                assert any(held is tensor and stream.name == "attn" for held, stream in runtime.recorded_streams)
+            outputs_on_main = [tensor for tensor, stream in runtime.recorded_streams if stream.name == "main"]
+            assert [tuple(tensor.shape) for tensor in outputs_on_main] == [
+                (tokens, local_heads, 512),
+                (tokens, local_heads, 1),
+            ]
+        else:
+            assert runtime.events == [("history", "main"), ("exchange", "main"), ("merge", "main"), ("project", "main")]
+            assert not runtime.recorded_streams
         tolerance = 8e-4 if dtype == torch.bfloat16 else 1e-4
         torch.testing.assert_close(result.double(), expected[:, owned], atol=tolerance, rtol=0.02)
         assert torch.equal(result[-1], torch.zeros_like(result[-1]))
         assert torch.equal(backing, snapshot)  # Forward never repacks or writes persistent history.
         cache_call = runtime.attention_op.call_args_list[-2 if causal else -1]
         assert cache_call.args[1] is cache
+    runtime.scope["get_graph_params"].assert_not_called()
+    runtime.scope["torch_npu"]._npu_fused_infer_attention_score_get_max_workspace.assert_not_called()
+
+
+@pytest.mark.parametrize("workspace_sizes,cached_size", [(None, None), ((64, 128), None), ((64, 128), 256)])
+def test_shared_dcp_keeps_fia_stream_order_and_workspace(runtime, monkeypatch, workspace_sizes, cached_size):
+    """Exercise the unchanged FIA contract through the shared production method."""
+    runtime.context.capturing = workspace_sizes is not None
+    graph = SimpleNamespace(workspaces={2: torch.empty(cached_size, dtype=torch.uint8) if cached_size else None})
+    workspace_query = Mock(side_effect=[torch.empty(n, dtype=torch.uint8) for n in workspace_sizes or ()])
+    runtime.scope["get_graph_params"] = Mock(return_value=graph)
+    runtime.scope["torch_npu"]._npu_fused_infer_attention_score_get_max_workspace = workspace_query
+
+    q_nope = torch.arange(2 * 4 * 4).float().view(2, 4, 4)
+    q_pe = torch.zeros(2, 4, 2)
+    current_k_nope, current_k_pe = torch.ones(2, 1, 4), torch.ones(2, 1, 2)
+    decode = SimpleNamespace(
+        cp_history_seq_len=[2],
+        actual_seq_lengths_q=[2],
+        block_table=torch.zeros(1, 1, dtype=torch.int32),
+        attn_mask=torch.zeros(2, 2, dtype=torch.bool),
+    )
+    history_output, history_lse = torch.ones(2, 4, 4), torch.zeros(2, 4, 1)
+    current_output, current_lse = torch.full((2, 2, 4), 3.0), torch.zeros(2, 2, 1)
+    kinds = runtime.scope["MLASplitAttentionKind"]
+
+    def attention(q, q_rope, k, k_rope, **kwargs):
+        is_history = kwargs["attention_kind"] is kinds.HISTORY
+        runtime.events.append(("history" if is_history else "current", runtime.active_stream[0]))
+        assert kwargs["actual_seq_lengths"] == [2]
+        assert kwargs["actual_seq_lengths_kv"] == [2]
+        if is_history:
+            torch.testing.assert_close(q, q_nope)
+            assert kwargs["block_table"] is decode.block_table
+            assert kwargs["sparse_mode"] == 0 and kwargs["attn_mask"] is None
+            return history_output, history_lse
+        torch.testing.assert_close(q, q_nope[:, 2:])
+        torch.testing.assert_close(q_rope, q_pe[:, 2:])
+        torch.testing.assert_close(k, current_k_nope)
+        torch.testing.assert_close(k_rope, current_k_pe)
+        assert kwargs["block_table"] is None
+        assert kwargs["sparse_mode"] == 3 and kwargs["attn_mask"] is decode.attn_mask
+        return current_output, current_lse
+
+    def exchange(output, lse, size, scatter_dim, group, *, defer_combine):
+        assert output is history_output and lse is history_lse
+        assert (size, scatter_dim, group, defer_combine) == (2, 1, "cpu-dcp", True)
+        runtime.events.append(("exchange", runtime.active_stream[0]))
+        return object()
+
+    received = Mock(side_effect=exchange)
+    monkeypatch.setattr(torch.ops.vllm, "dcp_a2a_fused", received, raising=False)
+
+    def combine(recv, head_dim, *, scatter_dim, local_output, local_lse):
+        assert head_dim == 4 and scatter_dim == 1
+        assert local_output is current_output and local_lse is current_lse
+        runtime.events.append(("merge", runtime.active_stream[0]))
+        # Two unit-weight history shards plus one unit-weight current term.
+        return (history_output[:, :2] + history_output[:, 2:] + current_output) / 3
+
+    combined = Mock(side_effect=combine)
+    runtime.scope["fused_dcp_lse_combine"] = combined
+
+    def project(latent):
+        runtime.events.append(("project", runtime.active_stream[0]))
+        return latent
+
+    impl = runtime.bind(
+        SimpleNamespace(
+            num_heads=2,
+            num_kv_heads=1,
+            kv_lora_rank=4,
+            qk_rope_head_dim=2,
+            dcp_size=2,
+            dcp_rank=1,
+            dcp_group=SimpleNamespace(unique_name="cpu-dcp"),
+            scale=0.5,
+            _v_up_proj_batch_major=Mock(side_effect=project),
+        )
+    )
+    impl._run_dcp_mtp_split_attention_op = Mock(side_effect=attention)
+    impl._run_dcp_flashmla_attention = Mock(side_effect=AssertionError("FIA must not call FlashMLA"))
+    result = impl._forward_decode_split_attention(
+        q_nope,
+        q_pe,
+        torch.zeros(1, 1, 2, 4),
+        torch.zeros(1, 1, 2, 2),
+        current_k_nope,
+        current_k_pe,
+        2,
+        SimpleNamespace(decode=decode, external_flashmla=None),
+    )
+    torch.testing.assert_close(result, torch.full((2, 2, 4), 5 / 3))
+    assert workspace_query.call_count == (2 if workspace_sizes is not None and cached_size is None else 0)
+    if workspace_sizes is not None:
+        assert graph.workspaces[2].numel() == (cached_size or max(workspace_sizes))
+    impl._run_dcp_flashmla_attention.assert_not_called()
+    assert impl._run_dcp_mtp_split_attention_op.call_count == 2
+    received.assert_called_once()
+    combined.assert_called_once()
+    impl._v_up_proj_batch_major.assert_called_once()
+    assert len(runtime.recorded_streams) == 7
+    assert runtime.events == [
+        ("history", "main"),
+        ("record", "main"),
+        ("wait", "attn", "main"),
+        ("current", "attn"),
+        ("record", "attn"),
+        ("exchange", "main"),
+        ("wait", "main", "attn"),
+        ("merge", "main"),
+        ("project", "main"),
+    ]
 
 
 @pytest.mark.parametrize("draft", [False, True])
