@@ -299,6 +299,46 @@ def test_registration_merges_live_ranges_without_bridging_holes(monkeypatch, ran
     assert communicator._storage_refs == []
 
 
+@pytest.mark.parametrize("region_count", [4000, 4001])
+def test_registration_region_limit_is_checked_before_any_backend_call(monkeypatch, region_count):
+    session = _bare_session(monkeypatch)
+    register = MagicMock(side_effect=[(0, handle) for handle in range(1, 4001)])
+    session._engine.register_mem = register
+    alignment = eplb_communicator._HIXL_MEMORY_ALIGNMENT
+    tensors = [_Tensor((2 * index + 1) * alignment, session._device) for index in range(region_count)]
+    if region_count == 4001:
+        with pytest.raises(ValueError, match="4001.*maximum is 4000"):
+            session._register_tensor_segments(tensors)
+        register.assert_not_called()
+        assert session._registered_handles == []
+    else:
+        session._register_tensor_segments(tensors)
+        assert register.call_count == 4000
+        assert len(session._registered_handles) == 4000
+    session.close()
+    assert session._storage_refs == []
+
+
+def test_registration_limit_counts_merged_regions_instead_of_input_tensors(monkeypatch):
+    session = _bare_session(monkeypatch)
+    session._register_tensor_segments([_Tensor(1000, session._device) for _ in range(4001)])
+    assert len(session._registered_handles) == 1
+    session.close()
+
+
+def test_registration_limit_failure_rolls_back_before_registering_either_model(monkeypatch):
+    session, models, engine = _shared_models(monkeypatch)
+    models["main"]._all_expert_weights[1][0]._address = 3 * eplb_communicator._HIXL_MEMORY_ALIGNMENT
+    monkeypatch.setattr(eplb_communicator, "_HIXL_MAX_REGISTERED_REGIONS", 1)
+    with pytest.raises(ValueError, match="2.*maximum is 1"):
+        session.initialize(models)
+    assert engine.registered == []
+    assert engine.connected == []
+    assert engine.finalized
+    assert session._engine is None
+    assert session._storage_refs == []
+
+
 def test_registration_keeps_old_storage_alive_after_tensor_rebinding(monkeypatch):
     communicator = _bare_session(monkeypatch)
     tensor = torch.empty(8)
