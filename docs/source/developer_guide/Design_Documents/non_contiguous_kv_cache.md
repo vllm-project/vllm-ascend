@@ -11,8 +11,11 @@ incorrect stride.
 
 This feature keeps the logical block table and block IDs unchanged while
 constructing strided tensor views over the existing physical allocation. It is
-implemented in Model Runner V1 and applies to hybrid Attention + Mamba models
-and supported pure GQA Attention models.
+implemented in Model Runner V1 and applies to hybrid Attention + Mamba models.
+Ordinary pure GQA models use separate contiguous K/V allocations for each
+eligible unpadded FullAttention layer in Model Runner V1 and V2. Auxiliary cache
+types are handled independently. Specialized packed or padded cache layouts
+retain their existing paths.
 
 ## 2. Goals and Non-Goals
 
