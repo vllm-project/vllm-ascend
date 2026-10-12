@@ -16,10 +16,14 @@ from vllm_ascend.ops.triton.qwen4_exp.qsa import (
     expand_qsa_block_indices_npu,
 )
 
-_PA_PAGE_SIZE = 192
 _HEAD_DIM = 128
 _COMPRESS_RATIO = 4
 _TOKEN_TOPK = 2048
+
+
+def is_qsa_lightning_cache_compatible(cache: torch.Tensor) -> bool:
+    """Return whether a dynamically sized QSA page satisfies the LI ABI."""
+    return bool(cache.ndim == 4 and cache.shape[0] > 0 and cache.shape[1] > 0 and cache.shape[2:] == (1, _HEAD_DIM))
 
 
 def _validate_request_boundaries(
@@ -68,12 +72,13 @@ def qsa_select_paged_tokens_lightning(
         raise ValueError("QSA LightningIndexer query must be three-dimensional BF16")
     if query.shape[1] > 64 or query.shape[2] != _HEAD_DIM:
         raise ValueError("QSA LightningIndexer requires at most 64 heads of width 128")
-    if compressed_key_cache.ndim != 4 or compressed_key_cache.shape[1:] != (
-        _PA_PAGE_SIZE,
-        1,
-        _HEAD_DIM,
-    ):
-        raise ValueError("QSA LightningIndexer requires a [pages,192,1,128] cache")
+    if not is_qsa_lightning_cache_compatible(compressed_key_cache):
+        raise ValueError(
+            "QSA LightningIndexer requires a [pages,page_size,1,128] cache "
+            "with positive pages and page_size, "
+            f"got shape={tuple(compressed_key_cache.shape)} "
+            f"stride={compressed_key_cache.stride()}"
+        )
     if compress_ratio != _COMPRESS_RATIO or token_topk != _TOKEN_TOPK:
         raise ValueError("QSA LightningIndexer requires ratio=4 and token_topk=2048")
     if block_table.ndim != 2 or sequence_lengths.shape != (block_table.shape[0],):

@@ -14,6 +14,7 @@
 
 """Ascend QSA owner for Qwen3.8-Flash-Next."""
 
+from dataclasses import replace
 from typing import Protocol, TypeAlias, cast
 
 import torch
@@ -27,7 +28,12 @@ from vllm.models.qwen4_exp.common import qsa_cache
 from vllm.models.qwen4_exp.common.qsa_cache import (
     QSAForwardMetadata,
 )
-from vllm.utils.torch_utils import canonicalize_singleton_dim_strides
+from vllm.utils.torch_utils import (
+    canonicalize_singleton_dim_strides,
+    get_dtype_size,
+)
+from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_layout import KVCacheLayout
 
 from vllm_ascend import envs
 from vllm_ascend.device.hardware_profile import (
@@ -35,18 +41,25 @@ from vllm_ascend.device.hardware_profile import (
     get_current_hardware_profile,
 )
 from vllm_ascend.ops.triton.qwen4_exp.qsa import (
+    qsa_compress_groups_with_ratio as qsa_compress_groups_with_ratio_triton,
+)
+from vllm_ascend.ops.triton.qwen4_exp.qsa import (
     qsa_select_paged_tokens as qsa_select_paged_tokens_triton,
 )
 from vllm_ascend.ops.triton.qwen4_exp.qsa import (
     qsa_sparse_paged_attention,
-    qsa_store_cache_rows,
+)
+from vllm_ascend.ops.triton.qwen4_exp.qsa import (
+    qsa_store_cache_rows as qsa_store_cache_rows_triton,
 )
 from vllm_ascend.utils import is_950
 
-from .lightning_indexer import qsa_select_paged_tokens_lightning
+from .lightning_indexer import (
+    is_qsa_lightning_cache_compatible,
+    qsa_select_paged_tokens_lightning,
+)
 from .ops import (
-    qsa_compress_groups_with_ratio,
-    reshape_and_cache_qsa,
+    qsa_compress_groups_with_ratio as qsa_compress_groups_with_ratio_reference,
 )
 from .ops import (
     qsa_select_paged_tokens as qsa_select_paged_tokens_reference,
@@ -54,8 +67,80 @@ from .ops import (
 from .ops import (
     qsa_sparse_paged_attention as qsa_sparse_paged_attention_reference,
 )
+from .ops import (
+    qsa_store_cache_rows as qsa_store_cache_rows_reference,
+)
+from .ops import (
+    reshape_and_cache_qsa,
+)
 
 QSAKVCache: TypeAlias = torch.Tensor | tuple[torch.Tensor, torch.Tensor]
+
+
+def _is_unit_stride_1d(tensor: torch.Tensor) -> bool:
+    """Return whether metadata matches the Triton pointer contract."""
+    return tensor.ndim == 1 and tensor.stride(0) == 1
+
+
+def _store_qsa_cache_rows(
+    cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    rows: torch.Tensor,
+) -> None:
+    """Store rows through Triton without compacting a strided cache view."""
+    flat_slots = slot_mapping.reshape(-1)
+    use_triton = (
+        not envs.VLLM_ASCEND_FORCE_QSA_REFERENCE
+        and cache.device.type == "npu"
+        and cache.ndim == 4
+        and cache.shape[2] == 1
+        and _is_unit_stride_1d(flat_slots)
+    )
+    if use_triton:
+        qsa_store_cache_rows_triton(cache, flat_slots, rows)
+    else:
+        qsa_store_cache_rows_reference(cache, flat_slots, rows)
+
+
+def _compress_qsa_groups(
+    raw_keys: torch.Tensor,
+    raw_positions: torch.Tensor,
+    compressor_state_cache: torch.Tensor,
+    compressor_state_block_table: torch.Tensor,
+    token_to_req: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    logical_positions: torch.Tensor,
+    compressed_slots: torch.Tensor,
+    compress_ratio: int,
+    rope_cache: torch.Tensor | None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Use fused Triton compression when its metadata inputs are dense."""
+    use_triton = (
+        not envs.VLLM_ASCEND_FORCE_QSA_REFERENCE
+        and raw_keys.device.type == "npu"
+        and all(
+            _is_unit_stride_1d(tensor)
+            for tensor in (
+                token_to_req,
+                query_start_loc,
+                logical_positions,
+                compressed_slots,
+            )
+        )
+    )
+    op = qsa_compress_groups_with_ratio_triton if use_triton else qsa_compress_groups_with_ratio_reference
+    return op(
+        raw_keys,
+        raw_positions,
+        compressor_state_cache,
+        compressor_state_block_table,
+        token_to_req,
+        query_start_loc,
+        logical_positions,
+        compressed_slots,
+        compress_ratio,
+        rope_cache,
+    )
 
 
 class QSAForwardMetadataProtocol(Protocol):
@@ -265,7 +350,7 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
             position_rows = qsa_cache.canonical_qsa_rope_positions(positions)[:num_tokens].to(
                 device=raw_key_cache.device
             )
-        pooled, first_positions = qsa_compress_groups_with_ratio(
+        pooled, first_positions = _compress_qsa_groups(
             token_k[:num_tokens],
             position_rows,
             raw_key_cache,
@@ -278,14 +363,14 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
             rope_position_cache,
         )
         normalized = self.normalize_compressed_keys(pooled, first_positions)
-        qsa_store_cache_rows(
+        _store_qsa_cache_rows(
             self.compressed_key_cache.kv_cache,
             compressed_metadata.slot_mapping,
             normalized,
         )
-        qsa_store_cache_rows(raw_key_cache, raw_metadata.slot_mapping, token_k[:num_tokens])
+        _store_qsa_cache_rows(raw_key_cache, raw_metadata.slot_mapping, token_k[:num_tokens])
         if rope_position_cache is not None:
-            qsa_store_cache_rows(
+            _store_qsa_cache_rows(
                 rope_position_cache,
                 raw_metadata.slot_mapping,
                 position_rows,
@@ -302,8 +387,7 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
             and query.ndim == 3
             and query.shape[1] <= 64
             and query.shape[2] == 128
-            and cache.ndim == 4
-            and cache.shape[1:] == (192, 1, 128)
+            and is_qsa_lightning_cache_compatible(cache)
             and self.compress_ratio == 4
             and self.token_topk == 2048
             and metadata.query_start_loc.ndim == 1
@@ -415,8 +499,8 @@ class AscendQSAImpl:
         del layer
         if isinstance(kv_cache, tuple):
             key_cache, value_cache = _split_qsa_kv_cache(kv_cache, self.head_size)
-            qsa_store_cache_rows(key_cache, slot_mapping, key)
-            qsa_store_cache_rows(value_cache, slot_mapping, value)
+            _store_qsa_cache_rows(key_cache, slot_mapping, key)
+            _store_qsa_cache_rows(value_cache, slot_mapping, value)
         else:
             reshape_and_cache_qsa(key, value, kv_cache, slot_mapping, self.head_size)
 
@@ -466,6 +550,12 @@ class AscendQSAImpl:
 
 
 class AscendQSABackend(upstream_qsa.Qwen4ExpQSAFlashAttentionBackend):
+    # QSA pages are represented by descriptor-backed views. Consecutive
+    # logical blocks may be separated by other cache owners in the common
+    # vLLM pool, while each individual page remains dense.
+    uses_descriptor_cache_view = True
+    uses_qsa_page_major_kv_view = True
+
     @staticmethod
     def get_name() -> str:
         return "QWEN4_EXP_QSA_ASCEND"
@@ -473,6 +563,24 @@ class AscendQSABackend(upstream_qsa.Qwen4ExpQSAFlashAttentionBackend):
     @staticmethod
     def get_impl_cls() -> type[AscendQSAImpl]:
         return AscendQSAImpl
+
+    @classmethod
+    def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
+        """Store main K/V in two page-major slots of one descriptor page."""
+        if spec.head_size != spec.head_size_v:
+            raise ValueError("QSA page-major K/V slots require symmetric head sizes")
+        slot_bytes = spec.num_kv_heads * spec.head_size * get_dtype_size(spec.dtype)
+        if spec.num_head_slots == 2 and spec.state_content_bytes == slot_bytes:
+            return spec
+        return replace(
+            spec,
+            num_head_slots=2,
+            state_content_bytes=slot_bytes,
+        )
+
+    @classmethod
+    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
+        return (KVCacheLayout.BLNHC, KVCacheLayout.BLHNC)
 
 
 # The upstream owner resolves these names from its module globals during
@@ -482,6 +590,21 @@ upstream_indexer.apply_qsa_rope = apply_qsa_rope
 upstream_qsa.QSAIndexer = AscendQSAIndexer
 upstream_qsa.Qwen4ExpQSAFlashAttentionImpl = AscendQSAImpl
 upstream_qsa.Qwen4ExpQSAFlashAttentionBackend = AscendQSABackend
+
+
+def _ascend_qsa_state_cache_layouts(
+    cls,
+) -> tuple[KVCacheLayout, ...]:
+    del cls
+    return (KVCacheLayout.BLNHC, KVCacheLayout.BLHNC)
+
+
+# Side-cache descriptors use the same block-outermost layout as main QSA KV.
+# Their physical block stride is honored by the runner, so no compact copy is
+# required before LightningIndexer or the Triton QSA selector consumes them.
+qsa_cache.QSAStateBackend.supported_kv_cache_layouts = classmethod(_ascend_qsa_state_cache_layouts)
+qsa_cache.QSAStateBackend.uses_descriptor_cache_view = True
+
 
 # qsa_cache selects its Triton metadata builder at import time. The upstream
 # kernel uses CUDA PDL intrinsics, so Ascend must use the equivalent Torch path.

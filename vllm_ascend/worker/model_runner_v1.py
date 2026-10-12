@@ -153,16 +153,6 @@ from vllm_ascend.compilation.acl_graph import (
 )
 from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
-from vllm_ascend.core.six_region_kv_cache_layout import (
-    GDN,
-    HIDDEN,
-    PLE,
-    QSA_COMPRESSED,
-    QSA_MAIN,
-    QSA_RAW,
-    build_six_region_kv_cache_layout,
-    make_contiguous_slab_view,
-)
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h import get_prebound_copy_sfa_slots
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
@@ -5482,9 +5472,6 @@ class NPUModelRunner(GPUModelRunner):
                 for name in allocation.layers:
                     kv_cache_raw_tensors[name] = backing
             return kv_cache_raw_tensors
-        # v0.28 uses descriptor-level shared_by allocations; the current main
-        # planner instead describes offsets into a standardized backing.
-        use_legacy_shared_by_layout = vllm_version_is("0.28.0")
         uses_padded_page_layout = requires_padded_page_layout(layer_kv_cache_spec.values())
         is_dsv4_main = any(
             getattr(spec, "model_version", None) == "deepseek_v4"
@@ -5527,28 +5514,8 @@ class NPUModelRunner(GPUModelRunner):
         # Match the worker's block-outermost cache budget policy: shared
         # backing is supported only when KV transfer is disabled.
         supports_shared_backing_with_kv_transfer = self.vllm_config.kv_transfer_config is None
-
-        six_region_layout = (
-            None
-            if use_legacy_shared_by_layout
-            else build_six_region_kv_cache_layout(
-                kv_cache_config.kv_cache_groups,
-                kv_cache_config.num_blocks,
-            )
-        )
-        uses_six_region_layout = (
-            six_region_layout is not None
-            and not is_dsv4_main
-            and not uses_padded_page_layout
-            and supports_shared_backing_with_kv_transfer
-        )
-        self._six_region_kv_cache_layout = (
-            six_region_layout if uses_six_region_layout else None
-        )
-
         uses_page_strided_shared_backing = (
-            not uses_six_region_layout
-            and not is_dsv4_main
+            not is_dsv4_main
             and not uses_padded_page_layout
             and supports_shared_backing_with_kv_transfer
             and self._uses_page_strided_shared_backing(
@@ -5557,17 +5524,6 @@ class NPUModelRunner(GPUModelRunner):
             )
         )
         self._page_strided_shared_backing = uses_page_strided_shared_backing
-
-        if uses_six_region_layout:
-            assert six_region_layout is not None
-            backing = self._allocate_int8_cache_tensor(
-                six_region_layout.slot_count
-                * six_region_layout.slot_backing_size,
-                alignment,
-            )
-            for owner in six_region_layout.owners:
-                if owner.role != HIDDEN:
-                    kv_cache_raw_tensors[owner.layer_name] = backing
 
         if uses_page_strided_shared_backing:
             backing_sizes = {
@@ -5675,7 +5631,7 @@ class NPUModelRunner(GPUModelRunner):
         if (
             not is_dsv4_main
             and not uses_padded_page_layout
-            and not uses_six_region_layout
+            and not uses_page_strided_shared_backing
             and (self.hybrid_with_attn_and_mamba
                  or is_step_model)
             and not self.use_sparse
@@ -5990,23 +5946,17 @@ class NPUModelRunner(GPUModelRunner):
             }
         is_glm5_next = any(is_glm5_next_cache_spec(spec) for spec in layer_kv_cache_spec.values())
 
-        six_region_layout = getattr(
-            self,
-            "_six_region_kv_cache_layout",
-            None,
-        )
         uses_page_strided_shared_backing = getattr(
             self,
             "_page_strided_shared_backing",
             False,
         )
         packed_descriptors = {}
-        if uses_page_strided_shared_backing:
-            for descriptor in kv_cache_config.kv_cache_tensors:
-                for layer_idx, layer_name in enumerate(
-                    get_kv_cache_tensor_layers(descriptor)
-                ):
-                    packed_descriptors[layer_name] = (descriptor, layer_idx)
+        for descriptor in kv_cache_config.kv_cache_tensors:
+            for layer_idx, layer_name in enumerate(
+                get_kv_cache_tensor_layers(descriptor)
+            ):
+                packed_descriptors[layer_name] = (descriptor, layer_idx)
         for group in self._kv_cache_spec_attn_group_iterator():
             group_kernel_block_size = None
             if kernel_block_sizes is not None:
@@ -6084,135 +6034,18 @@ class NPUModelRunner(GPUModelRunner):
                     if views is not None:
                         kv_caches[layer_name] = views
                         continue
-                if six_region_layout is not None:
-                    owner = six_region_layout.owner(layer_name)
-                    raw_slab = kv_cache_raw_tensors[layer_name]
-                    assert isinstance(raw_slab, torch.Tensor)
-                    slot_offset = (
-                        owner.slot * six_region_layout.slot_backing_size
-                    )
-                    if owner.role == QSA_MAIN:
-                        assert isinstance(
-                            current_kv_cache_spec,
-                            FullAttentionSpec,
-                        )
-                        k_cache = make_contiguous_slab_view(
-                            raw_slab,
-                            dtype=current_kv_cache_spec.dtype,
-                            num_blocks=kv_cache_config.num_blocks,
-                            item_shape=(
-                                current_kv_cache_spec.block_size,
-                                current_kv_cache_spec.num_kv_heads,
-                                current_kv_cache_spec.head_size,
-                            ),
-                            storage_offset=(
-                                slot_offset
-                                + six_region_layout.region("r2").offset
-                            ),
-                        )
-                        v_cache = make_contiguous_slab_view(
-                            raw_slab,
-                            dtype=current_kv_cache_spec.dtype,
-                            num_blocks=kv_cache_config.num_blocks,
-                            item_shape=(
-                                current_kv_cache_spec.block_size,
-                                current_kv_cache_spec.num_kv_heads,
-                                current_kv_cache_spec.head_size_v,
-                            ),
-                            storage_offset=(
-                                slot_offset
-                                + six_region_layout.region("r3").offset
-                            ),
-                        )
-                        kv_caches[layer_name] = (k_cache, v_cache)
-                        continue
-                    if owner.role in (QSA_RAW, QSA_COMPRESSED):
-                        assert isinstance(
-                            current_kv_cache_spec,
-                            AttentionSpec,
-                        )
-                        # ``tokens_per_state`` is the compressed cache's
-                        # physical row ratio on current vLLM.  The optional
-                        # ``storage_block_size`` field is a view override and
-                        # is normally unset for QSA, so the generic helper
-                        # would incorrectly return the logical 768-token
-                        # scheduler block instead of its 192 stored states.
-                        storage_block_size = (
-                            current_kv_cache_spec.block_size
-                            if owner.role == QSA_RAW
-                            else current_kv_cache_spec.num_states
-                        )
-                        region = six_region_layout.region(
-                            "r4" if owner.role == QSA_RAW else "r5"
-                        )
-                        expected_page_bytes = (
-                            storage_block_size
-                            * current_kv_cache_spec.num_kv_heads
-                            * current_kv_cache_spec.head_size
-                            * get_dtype_size(current_kv_cache_spec.dtype)
-                        )
-                        if expected_page_bytes != region.page_size_bytes:
-                            raise ValueError(
-                                f"{layer_name} six-region page mismatch: "
-                                f"view={expected_page_bytes}, "
-                                f"region={region.page_size_bytes}."
-                            )
-                        kv_caches[layer_name] = make_contiguous_slab_view(
-                            raw_slab,
-                            dtype=current_kv_cache_spec.dtype,
-                            num_blocks=kv_cache_config.num_blocks,
-                            item_shape=(
-                                current_kv_cache_spec.num_kv_heads,
-                                storage_block_size,
-                                current_kv_cache_spec.head_size,
-                            ),
-                            storage_offset=slot_offset + region.offset,
-                        )
-                        continue
-                    if owner.role in (GDN, PLE):
-                        assert isinstance(current_kv_cache_spec, MambaSpec)
-                        region_names = {
-                            GDN: ("r1", "r2"),
-                            PLE: ("r6",),
-                        }[owner.role]
-                        if len(region_names) != len(
-                            current_kv_cache_spec.shapes
-                        ):
-                            raise RuntimeError(
-                                "Invalid six-region Mamba role/shape for "
-                                f"{layer_name}: role={owner.role}, "
-                                f"shapes={current_kv_cache_spec.shapes}."
-                            )
-                        kv_caches[layer_name] = [
-                            make_contiguous_slab_view(
-                                raw_slab,
-                                dtype=dtype,
-                                num_blocks=kv_cache_config.num_blocks,
-                                item_shape=tuple(shape),
-                                storage_offset=(
-                                    slot_offset
-                                    + six_region_layout.region(
-                                        region_name
-                                    ).offset
-                                ),
-                            )
-                            for shape, dtype, region_name in zip(
-                                current_kv_cache_spec.shapes,
-                                current_kv_cache_spec.dtypes,
-                                region_names,
-                                strict=True,
-                            )
-                        ]
-                        continue
-                    if owner.role != HIDDEN:
-                        raise RuntimeError(
-                            f"Unsupported six-region owner {owner}."
-                        )
-
                 packed_descriptor = packed_descriptors.get(layer_name)
                 if (
                     packed_descriptor is not None
                     and isinstance(current_kv_cache_spec, AttentionSpec)
+                    and (
+                        uses_page_strided_shared_backing
+                        or getattr(
+                            attn_backend,
+                            "uses_descriptor_cache_view",
+                            False,
+                        )
+                    )
                 ):
                     descriptor, layer_idx = packed_descriptor
                     raw_tensor = kv_cache_raw_tensors[layer_name]
@@ -6221,6 +6054,47 @@ class NPUModelRunner(GPUModelRunner):
                         descriptor.offset
                         + layer_idx * descriptor.layer_stride
                     )
+                    if getattr(
+                        attn_backend,
+                        "uses_qsa_page_major_kv_view",
+                        False,
+                    ):
+                        if (
+                            current_kv_cache_spec.head_size_v
+                            != current_kv_cache_spec.head_size
+                        ):
+                            raise ValueError(
+                                "QSA page-major K/V cache requires symmetric "
+                                "K/V head sizes."
+                            )
+                        dtype_size = get_dtype_size(
+                            current_kv_cache_spec.dtype
+                        )
+                        cache_shape = (
+                            kv_cache_config.num_blocks,
+                            current_kv_cache_spec.num_states,
+                            current_kv_cache_spec.num_kv_heads,
+                            current_kv_cache_spec.head_size,
+                        )
+                        k_cache = self._page_strided_tensor_view(
+                            raw_tensor,
+                            dtype=current_kv_cache_spec.dtype,
+                            shape=cache_shape,
+                            block_stride_bytes=descriptor.block_stride,
+                            storage_offset_bytes=base_offset,
+                        )
+                        v_cache = self._page_strided_tensor_view(
+                            raw_tensor,
+                            dtype=current_kv_cache_spec.dtype,
+                            shape=cache_shape,
+                            block_stride_bytes=descriptor.block_stride,
+                            storage_offset_bytes=(
+                                base_offset
+                                + math.prod(cache_shape[1:]) * dtype_size
+                            ),
+                        )
+                        kv_caches[layer_name] = (k_cache, v_cache)
+                        continue
                     if self._uses_unified_attention_cache_view(attn_backend):
                         state_content_size = (
                             current_kv_cache_spec.state_content_size_bytes
@@ -7273,8 +7147,13 @@ class NPUModelRunner(GPUModelRunner):
                 if spec := mamba_module.get_kv_cache_spec(self.vllm_config):
                     kv_cache_spec[layer_name] = spec
                     mamba_page_size_padded = spec.page_size_bytes
-            # align attn_page_size to mamba_page_size_padded
+            # Descriptor-native cache owners retain their own page geometry.
+            # Padding QSA pages to the recurrent-state size would erase the
+            # main/compressed page distinction before vLLM groups them.
             for layer_name in attn_layer_names:
+                attn_backend = attn_layers[layer_name].get_attn_backend()
+                if getattr(attn_backend, "uses_descriptor_cache_view", False):
+                    continue
                 if kv_cache_spec[layer_name].page_size_bytes < mamba_page_size_padded:  # type: ignore[attr-defined]
                     object.__setattr__(kv_cache_spec[layer_name], "page_size_padded", mamba_page_size_padded)
 
