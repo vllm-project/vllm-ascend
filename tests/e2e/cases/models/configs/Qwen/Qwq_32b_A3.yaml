@@ -68,7 +68,6 @@ test_cases:
     model: "Qwen/QwQ-32B"
     envs:
       <<: *envs
-      LD_PRELOAD: "/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD"
       VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE: "1"
       VLLM_ASCEND_ENABLE_PREFETCH_MLP: "1"
     server_cmd: *server_cmd
