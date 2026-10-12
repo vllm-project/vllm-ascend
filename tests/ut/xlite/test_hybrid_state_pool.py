@@ -274,3 +274,142 @@ def test_gdn_state_ids_prefers_non_spec_indices(monkeypatch):
     # Too few indices -> None; zero requests -> None.
     assert XliteWrapper._gdn_state_ids([gdn_meta], num_reqs=5) is None
     assert XliteWrapper._gdn_state_ids([gdn_meta], num_reqs=0) is None
+
+
+class _Runnable:
+    """Records forward calls and returns a sentinel output."""
+
+    def __init__(self, out="native-out"):
+        self.out = out
+        self.calls = []
+
+    def __call__(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+        return self.out
+
+
+class _Wrapped:
+    """ACLGraph-wrapper stand-in exposing unwrap()."""
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    def unwrap(self):
+        return self._inner
+
+
+def _fallback_wrapper():
+    w = object.__new__(XliteWrapper)
+    w._pending_native_ids = []
+    w._xlite_native_dirty = set()
+    w._last_decode_keys = None
+    w._hybrid_export_to_native = MagicMock()
+    return w
+
+
+def test_native_step_fallback_records_ids_exports_and_unwraps():
+    w = _fallback_wrapper()
+    idx = torch.tensor([3, 4], dtype=torch.int32)
+    gdn_meta = SimpleNamespace(non_spec_state_indices_tensor=idx)
+    w._last_decode_keys = torch.tensor([5, 7], dtype=torch.int32)
+    inner = _Runnable()
+    w.npu_runnable = _Wrapped(inner)
+
+    out = XliteWrapper._hybrid_native_step_fallback(
+        w,
+        {"gdn0": gdn_meta},
+        input_ids=torch.tensor([1, 2]),
+        positions=torch.tensor([0, 1]),
+        intermediate_tensors=None,
+        inputs_embeds=None,
+        model_kwargs={},
+    )
+
+    assert out == "native-out"
+    # The state-index tensor is recorded by identity (no sync/copy).
+    assert len(w._pending_native_ids) == 1
+    assert w._pending_native_ids[0] is idx
+    # The last decode batch's keys are materialized exactly once and cleared.
+    w._hybrid_export_to_native.assert_called_once_with([5, 7])
+    assert w._last_decode_keys is None
+    # The UNWRAPPED runnable handled the call, not the ACLGraph wrapper.
+    assert len(inner.calls) == 1
+
+
+def test_native_step_fallback_skips_export_without_decode_keys():
+    w = _fallback_wrapper()
+    w.npu_runnable = _Runnable()
+
+    out = XliteWrapper._hybrid_native_step_fallback(
+        w,
+        {},
+        input_ids=None,
+        positions=torch.tensor([0]),
+        intermediate_tensors=None,
+        inputs_embeds=None,
+        model_kwargs={},
+    )
+
+    assert out == "native-out"
+    w._hybrid_export_to_native.assert_called_once_with(None)
+    assert w._pending_native_ids == []
+
+
+def test_native_step_fallback_safety_valve_flushes_pending_ids():
+    w = _fallback_wrapper()
+    w._pending_native_ids = [torch.tensor([i], dtype=torch.int32) for i in range(31)]
+    w.npu_runnable = _Runnable()
+    idx = torch.tensor([99], dtype=torch.int32)
+    gdn_meta = SimpleNamespace(non_spec_state_indices_tensor=idx)
+
+    XliteWrapper._hybrid_native_step_fallback(
+        w,
+        gdn_meta,
+        input_ids=None,
+        positions=torch.tensor([0]),
+        intermediate_tensors=None,
+        inputs_embeds=None,
+        model_kwargs={},
+    )
+
+    # 31 pending + 1 new hits the limit: all ids materialize into the dirty
+    # set (including the new one) and the list is cleared.
+    assert w._pending_native_ids == []
+    assert w._xlite_native_dirty == set(range(31)) | {99}
+
+
+def test_native_step_fallback_ignores_empty_index_tensors():
+    w = _fallback_wrapper()
+    w.npu_runnable = _Runnable()
+    empty = SimpleNamespace(non_spec_state_indices_tensor=torch.empty(0, dtype=torch.int32))
+    valid = SimpleNamespace(non_spec_state_indices_tensor=torch.tensor([2]))
+
+    XliteWrapper._hybrid_native_step_fallback(
+        w,
+        [empty, SimpleNamespace(), valid],
+        input_ids=None,
+        positions=torch.tensor([0]),
+        intermediate_tensors=None,
+        inputs_embeds=None,
+        model_kwargs={},
+    )
+
+    assert len(w._pending_native_ids) == 1
+    assert int(w._pending_native_ids[0][0]) == 2
+
+
+def test_decode_only_routing_routes_prefill_to_native():
+    """Regression: the hybrid decode-only routing (native prefill, xlite
+    decode) must survive — the merge once reduced it to `always graph`,
+    which broke state bridging and double-counted prefill states."""
+    import inspect
+
+    src = inspect.getsource(XliteWrapper.__call__)
+    assert "if self._hybrid_decode_only:" in src
+    assert "use_xlite_graph = not with_prefill" in src
+    # The prefill fallback must go through the bridging helper (records
+    # pending ids + exports states + unwraps the ACLGraph wrapper).
+    assert "_hybrid_native_step_fallback(" in src
+    fallback = inspect.getsource(XliteWrapper._hybrid_native_step_fallback)
+    assert "_pending_native_ids.append(" in fallback
+    assert "_hybrid_export_to_native(" in fallback

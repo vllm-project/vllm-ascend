@@ -53,6 +53,12 @@ if TYPE_CHECKING:
 
 XliteForwardResult: TypeAlias = torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]
 
+_PENDING_NATIVE_IDS_LIMIT = 32
+"""Safety bound for the decode-only deferred dirty-marking list: native steps append their
+state-index tensor without syncing, and the ids are materialized at the next import. For
+decode-free workloads (out=1) the import never runs, so the list is force-flushed at this
+length to stay bounded."""
+
 _architecture_strategy_map: dict[str, type["XliteModelBase"]] = {}
 """Mapping from model architecture names in `config.json` to their corresponding xlite adapter classes."""
 
@@ -1488,6 +1494,60 @@ class XliteWrapper:
                 else:
                     nssm[page] = ssm_p[slot].to(nssm.dtype)
 
+    def _hybrid_native_step_fallback(
+        self,
+        attn_metadata_raw: Any,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None,
+        inputs_embeds: torch.Tensor | None,
+        model_kwargs: dict[str, Any],
+    ) -> XliteForwardResult:
+        """A1 decode-only: run a native (prefill/mixed) step and bridge GDN states.
+
+        Native steps update GDN states in the vllm mamba pools, so:
+        - record the per-step state-index tensor (DEVICE) for deferred
+          dirty-marking at the next import — a ``.cpu()`` here would sync the
+          stream on every native step;
+        - flush the xlite states of the LAST xlite decode batch back into the
+          native pools first, so the native GDN reads current states (bounded
+          to one batch; new prefills have native-fresh states);
+        - call the UNWRAPPED native model: going through the ACLGraph wrapper
+          triggers a runtime lazy capture for mixed-batch shapes ("CUDA graph
+          capturing detected at an inappropriate time") — eager native prefill
+          is correct-first; piecewise graph acceleration can be revisited.
+        """
+        metas = (
+            attn_metadata_raw.values()
+            if isinstance(attn_metadata_raw, dict)
+            else attn_metadata_raw
+            if isinstance(attn_metadata_raw, list)
+            else (attn_metadata_raw,)
+        )
+        idx = None
+        for meta in metas:
+            candidate = getattr(meta, "non_spec_state_indices_tensor", None)
+            if candidate is not None and candidate.numel():
+                idx = candidate
+                break
+        if idx is not None:
+            self._pending_native_ids.append(idx)
+            if len(self._pending_native_ids) >= _PENDING_NATIVE_IDS_LIMIT:
+                # safety valve for decode-free workloads (out=1): the import
+                # never runs there, so bound the pending list.
+                for pending in self._pending_native_ids:
+                    self._xlite_native_dirty.update(int(x) for x in pending.detach().cpu().tolist())
+                self._pending_native_ids.clear()
+        exp_keys = None
+        if self._last_decode_keys is not None:
+            exp_keys = [int(x) for x in self._last_decode_keys.detach().cpu().tolist()]
+            self._last_decode_keys = None
+        self._hybrid_export_to_native(exp_keys)
+        run = self.npu_runnable
+        if hasattr(run, "unwrap"):
+            run = run.unwrap()
+        return run(input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs)
+
     @staticmethod
     def _pick_native_conv_ssm(
         group: list[torch.Tensor],
@@ -1701,9 +1761,14 @@ class XliteWrapper:
 
         # Full: graph for prefill and decode
         # Decode-Only: runnable for prefill, graph for decode
-        # Hybrid: always graph (Ascend-GDN state is not sync-compatible with xlite).
+        # Hybrid: graph, except that decode-only mode routes prefill to the
+        # native runnable and bridges the GDN states at the handoff.
         if is_hybrid:
-            use_xlite_graph = True
+            if self._hybrid_decode_only:
+                # A1: hybrid decode-only — native prefill, xlite decode.
+                use_xlite_graph = not with_prefill
+            else:
+                use_xlite_graph = True
         elif not self.full_mode and self.data_parallel_size > 1:
             num_tokens = forward_context.batch_descriptor.num_tokens
             num_reqs = forward_context.batch_descriptor.num_reqs
@@ -1714,6 +1779,13 @@ class XliteWrapper:
         if not use_xlite_graph:
             # fall back to runnable for prefill in decode-only mode
             # or when the number of tokens exceeds the graph capacity in non-full mode
+            if self._hybrid_decode_only and is_hybrid:
+                return _ensure_output(
+                    self._hybrid_native_step_fallback(
+                        attn_metadata_raw, input_ids, positions, intermediate_tensors, inputs_embeds, model_kwargs
+                    ),
+                    "runnable(not use_xlite_graph)",
+                )
             return _ensure_output(
                 self.npu_runnable(input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs),
                 "runnable(not use_xlite_graph)",
