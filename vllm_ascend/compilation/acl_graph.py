@@ -27,6 +27,7 @@ from ..utils import super_kernel_scope, use_updatable_graph, weak_ref_tensors
 from .updatable_graph import (
     ContextSequenceSource,
     ContextSource,
+    ParamSource,
     SharedSource,
     UpdatableGraph,
 )
@@ -311,7 +312,7 @@ class ACLGraphWrapper:
     ):
         assert self.update_stream is not None
         if _EXTRA_CTX.is_draft_model:
-            source = (
+            source: ParamSource = (
                 SharedSource(self.draft_model_metadata)
                 if use_updatable_graph(self.attn_backend)
                 else ContextSequenceSource(forward_context.draft_attn_metadatas)
