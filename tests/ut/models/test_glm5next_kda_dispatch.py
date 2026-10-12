@@ -9,6 +9,53 @@ import torch
 import vllm_ascend.models.glm5next.kda as model_kda
 
 
+def test_compiled_forward_reads_runtime_metadata_after_profiling(monkeypatch):
+    layer = model_kda.Glm5NextLinearAttention.__new__(model_kda.Glm5NextLinearAttention)
+    torch.nn.Module.__init__(layer)
+    layer.prefix = "layer"
+    layer.local_num_heads = layer.head_dim = layer.local_projection_size = 1
+    layer.in_proj_qkvbfg_a = lambda x: (x.repeat(1, 6), None)
+    layer.f_b_proj = layer.g_b_proj = layer.o_proj = lambda x: (x, None)
+    layer.o_norm = lambda x, gate: x
+    context = SimpleNamespace(attn_metadata=None, no_compile_layers={"layer": layer})
+    monkeypatch.setattr(model_kda, "get_forward_context", lambda: context)
+
+    def attention(qkv_proj_states, g1, beta, core_attn_out):
+        if context.attn_metadata is None:
+            core_attn_out.zero_()
+        else:
+            core_attn_out.copy_(qkv_proj_states[:, :1].reshape_as(core_attn_out) * context.attn_metadata["layer"])
+
+    layer._forward = attention
+    graphs = []
+    runtime_inputs: list[torch.Tensor] = []
+
+    def backend(graph, example_inputs):
+        graphs.append(graph)
+
+        def run(*args):
+            runtime_inputs[:] = args
+            return graph(*args)
+
+        return run
+
+    # Register only the CPU dispatch used by this test; production uses NPU.
+    cpu_impl = torch.library.Library("vllm", "IMPL", "CPU")
+    cpu_impl.impl("glm5next_kda_attention", model_kda.glm5next_kda_attention)
+    try:
+        hidden_states = torch.tensor([[1.0], [2.0]])
+        compiled = torch.compile(layer.forward, backend=backend, fullgraph=True)
+        torch.testing.assert_close(compiled(hidden_states, torch.arange(2)), torch.zeros_like(hidden_states))
+        assert len(graphs) == 1
+        # Replay the captured graph directly, as vLLM does without Dynamo guards.
+        # The profiling branch must not replace the attention's runtime dispatch.
+        for scale in (2, 3):
+            context.attn_metadata = {"layer": scale}
+            torch.testing.assert_close(graphs[0](*runtime_inputs)[0], hidden_states * scale)
+    finally:
+        del cpu_impl
+
+
 @pytest.mark.parametrize(("speculative", "spec_only"), [(False, False), (True, False), (True, True)])
 @pytest.mark.parametrize("dim_first", [False, True])
 def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch, speculative, spec_only, dim_first):
@@ -111,12 +158,12 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch
         torch.testing.assert_close(weight, expected_weight)
         assert weight is layer._merged_conv_weight
         if kwargs["run_mode"] == 0:
-            assert kwargs["cache_indices_opt"] is prefill_conv.cache_indices
+            torch.testing.assert_close(kwargs["cache_indices_opt"], prefill_conv.cache_indices[:, 0])
             assert kwargs["initial_state_mode_opt"] is prefill_conv.initial_state_mode
             assert kwargs["num_accepted_tokens_opt"] is None
         else:
             spec_conv = metadata.spec_decode_metadata.spec_causal_conv1d
-            assert kwargs["cache_indices_opt"] is spec_conv.cache_indices
+            torch.testing.assert_close(kwargs["cache_indices_opt"], spec_conv.cache_indices[:, 0])
             assert kwargs["num_accepted_tokens_opt"] is spec_conv.num_accepted_tokens
             assert kwargs["initial_state_mode_opt"] is None
         return x.clone()

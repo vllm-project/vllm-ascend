@@ -40,6 +40,9 @@ def causal_conv1d(
         # Packed rows start at zero, so zero is now a valid cache slot. Invalid
         # requests were mapped to PAD_SLOT_ID by the gather kernel.
         null_block_id = PAD_SLOT_ID
+    # GDN metadata includes recurrent-state slots; convolution uses the first.
+    if kernel_indices.dim() == 2:
+        kernel_indices = kernel_indices[:, 0]
     kernel_indices = kernel_indices.contiguous()
     if run_mode == 0:
         result = causal_conv1d_fn(
