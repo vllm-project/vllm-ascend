@@ -73,6 +73,38 @@
 #    Future Plan:
 #       Remove this patch once both behaviors are in the supported vLLM.
 #
+# ** 2a. File: platform/patch_deepseek_v4_text_terminals.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.parser.engine.streaming_parser_engine.StreamingParserEngine._process_lex_tokens`
+#    Why:
+#       The supported vLLM demotes a terminal to content once the stream has carried
+#       any token id, including terminals that were lexed from plain text. DeepSeek V4
+#       emits its DSML markers as text on the MTP path, so the whole tool block is
+#       emitted as content and `<｜DSML｜tool_calls>` reaches the client instead of a
+#       tool call. The same request also carries those markers as dedicated token ids
+#       on other paths, so the outcome must not depend on the encoding that arrives
+#       first.
+#    How:
+#       Empty `StreamingParserEngine._token_id_terminal_names` for the duration of
+#       `_process_lex_tokens` and call the original method, so the engine computes an
+#       empty strict set and keeps text-form terminals authoritative. Restore the set
+#       in a `finally` block, and only for the DeepSeek V4 parser config; every other
+#       parser config keeps the upstream behavior.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm-ascend/issues/18386
+#       No upstream PR fixes this demotion yet; the rule is still on vllm main
+#       (`vllm/parser/engine/streaming_parser_engine.py`, the `strict` branch).
+#       Related upstream work: vllm-project/vllm#59145 constrains tool-call markers by
+#       token id in the structural tag, and vllm-project/vllm#56184 / #57051 absorb
+#       stray DSML fragments instead of demoting a complete text-form block.
+#       vllm-project/vllm#52645 recovers a bare DSML invoke seen in content, which
+#       would also restore the tool call; it is still in review and does not merge
+#       into main, so it cannot be relied on for this release line.
+#    Future Plan:
+#       Remove this patch once the supported vLLM stops demoting text-form terminals,
+#       together with the `_TOKEN_ID_MARKERS` check that fails the import when the
+#       markers are no longer declared as token-id terminals.
+#
 # ** 3. File: platform/patch_deepseek_v4_tool_streaming.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.parser.deepseek_v4.DeepSeekV4Parser._compute_arg_delta`
