@@ -312,11 +312,11 @@ class ACLGraphWrapper:
     ):
         assert self.update_stream is not None
         if _EXTRA_CTX.is_draft_model:
-            source: ParamSource = (
-                SharedSource(self.draft_model_metadata)
-                if use_updatable_graph(self.attn_backend)
-                else ContextSequenceSource(forward_context.draft_attn_metadatas)
-            )
+            source: ParamSource
+            if use_updatable_graph(self.attn_backend):
+                source = SharedSource(self.draft_model_metadata)
+            else:
+                source = ContextSequenceSource(forward_context.draft_attn_metadatas)
             resolved_tasks = graph.resolve_tasks(source)
         else:
             resolved_tasks = graph.resolve_tasks(ContextSource(forward_context.attn_metadata))
