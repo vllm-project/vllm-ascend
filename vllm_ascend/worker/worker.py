@@ -299,7 +299,7 @@ class NPUWorker(WorkerBase):
         cleanup_enabled = rl_config.enabled and rl_config.sleep_mode_extra_cleanup
         if cleanup_enabled:
             self.sleep_wakeup_manager.wakeup(tags)
-        torch.npu.synchronize()
+        self.synchronize_device()
 
     def _check_weight_transfer_engine(self) -> None:
         if self.weight_transfer_engine is None:
