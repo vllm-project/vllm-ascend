@@ -194,6 +194,7 @@ and use the `main` branch with the matching vLLM revision recorded in
 
     export VLLM_USE_V2_MODEL_RUNNER=0
     export VLLM_ENGINE_READY_TIMEOUT_S=36000
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     export HCCL_BUFFSIZE=1024
     export HCCL_OP_EXPANSION_MODE="AIV"
@@ -381,6 +382,7 @@ and use the `main` branch with the matching vLLM revision recorded in
     export HCCL_SOCKET_IFNAME="$NIC_NAME"
     export VLLM_USE_V2_MODEL_RUNNER=0
     export VLLM_ENGINE_READY_TIMEOUT_S=36000
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_BUFFSIZE=1024
     export HCCL_OP_EXPANSION_MODE="AIV"
     export ASCEND_RT_VISIBLE_DEVICES=$1
@@ -467,6 +469,7 @@ and use the `main` branch with the matching vLLM revision recorded in
 
     export VLLM_USE_V2_MODEL_RUNNER=0
     export VLLM_ENGINE_READY_TIMEOUT_S=36000
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_IF_IP="$LOCAL_IP"
     export GLOO_SOCKET_IFNAME="$NIC_NAME"
     export TP_SOCKET_IFNAME="$NIC_NAME"
@@ -773,6 +776,7 @@ export TP_SOCKET_IFNAME="$NIC_NAME"
 export HCCL_SOCKET_IFNAME="$NIC_NAME"
 export VLLM_USE_V2_MODEL_RUNNER=0
 export VLLM_ENGINE_READY_TIMEOUT_S=36000
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export HCCL_BUFFSIZE=1024
 export HCCL_OP_EXPANSION_MODE="AIV"
 export ASCEND_RT_VISIBLE_DEVICES=$1
@@ -871,6 +875,7 @@ MEMCACHE_CONFIG_DIR="<MEMCACHE_CONFIG_DIR>"
 
 export VLLM_USE_V2_MODEL_RUNNER=0
 export VLLM_ENGINE_READY_TIMEOUT_S=36000
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export HCCL_IF_IP="$LOCAL_IP"
 export GLOO_SOCKET_IFNAME="$NIC_NAME"
 export TP_SOCKET_IFNAME="$NIC_NAME"
@@ -1009,6 +1014,7 @@ For Memcache configuration, capacity tuning, and troubleshooting, refer to the
 
     # Allow time for weight loading and graph capture on large models.
     export VLLM_ENGINE_READY_TIMEOUT_S="${VLLM_ENGINE_READY_TIMEOUT_S:-3600}"
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_IF_IP="$LOCAL_IP"
     export GLOO_SOCKET_IFNAME="$NIC_NAME"
     export TP_SOCKET_IFNAME="$NIC_NAME"
