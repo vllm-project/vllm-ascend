@@ -19,13 +19,14 @@ from vllm.models.qwen4_exp.amd import (
     hyperconnection as upstream_hc,
 )
 
-from .ops import (
+from vllm_ascend.ops.triton.qwen4_exp.hc import (
     grouped_gemma_rmsnorm,
     hc_combine,
     hc_combine_norm,
     hc_gate_mix,
     hc_silu,
 )
+
 from .ple import patch_upstream_ple_short_conv
 
 # Keep the upstream model and weight loader authoritative. HyperConnection's
