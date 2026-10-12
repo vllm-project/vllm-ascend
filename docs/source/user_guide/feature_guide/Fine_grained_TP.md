@@ -105,8 +105,9 @@ Fine-grained TP shards the configured layer **across the data-parallel (DP) dime
 #### Scenario 1 — embedding + LM head TP (all-DP MoE serving)
 
 ```bash
-vllm serve deepseek-ai/DeepSeek-R1 \
-    --data-parallel-size 16 \
+vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
+    --quantization ascend \
+    --data-parallel-size 32 \
     --tensor-parallel-size 1 \
     --enable-expert-parallel \
     --additional-config '{
@@ -120,8 +121,9 @@ vllm serve deepseek-ai/DeepSeek-R1 \
 #### Scenario 2 — all four knobs on a P/D-disaggregated decode node
 
 ```bash
-vllm serve deepseek-ai/DeepSeek-R1 \
-    --data-parallel-size 8 \
+vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
+    --quantization ascend \
+    --data-parallel-size 32 \
     --tensor-parallel-size 1 \
     --enable-expert-parallel \
     --additional-config '{
@@ -146,7 +148,7 @@ vllm serve deepseek-ai/DeepSeek-R1 \
                     "kv_port": "28000",
                     "kv_connector_extra_config": {
                         "prefill": {"dp_size": 1, "tp_size": 1},
-                        "decode": {"dp_size": 8, "tp_size": 1}
+                        "decode": {"dp_size": 32, "tp_size": 1}
                     }
                 },
                 {
@@ -202,7 +204,7 @@ After the instance starts, check which knobs passed startup validation:
    ```bash
    curl http://<ip>:<port>/v1/completions \
        -H "Content-Type: application/json" \
-       -d '{"model": "deepseek-ai/DeepSeek-R1", "prompt": "The future of AI is", "max_tokens": 32, "temperature": 0}'
+       -d '{"model": "vllm-ascend/DeepSeek-R1-W8A8", "prompt": "The future of AI is", "max_tokens": 32, "temperature": 0}'
    ```
 
    Expected result: HTTP 200 with a `choices` field in the response.
