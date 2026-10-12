@@ -11,7 +11,6 @@ test_cases:
       ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3"
       HCCL_BUFFSIZE: "512"
       HCCL_OP_EXPANSION_MODE: "AIV"
-      LD_PRELOAD: "/usr/lib/aarch64-linux-gnu/libjemalloc.so.2"
       NPU_MEMORY_FRACTION: "0.95"
       OMP_NUM_THREADS: "1"
       OMP_PROC_BIND: "false"

@@ -157,7 +157,6 @@ Single-node deployment completes both Prefill and Decode within the same node. T
 
     ```bash
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve ${WEIGHT_PATH} \
@@ -190,7 +189,6 @@ Single-node deployment completes both Prefill and Decode within the same node. T
 
     ```bash
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve ${WEIGHT_PATH} \
@@ -282,7 +280,6 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
     export IFNAME="${NETWORK_INTERFACE}"
     export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME="$IFNAME"
-    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     export GLOO_SOCKET_IFNAME="$IFNAME"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
@@ -319,7 +316,6 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
     export IFNAME="${NETWORK_INTERFACE}"
     export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME="$IFNAME"
-    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     export GLOO_SOCKET_IFNAME="$IFNAME"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
@@ -359,7 +355,6 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
     export IFNAME="${NETWORK_INTERFACE}"
     export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME="$IFNAME"
-    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     export GLOO_SOCKET_IFNAME="$IFNAME"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
@@ -397,7 +392,6 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
     export IFNAME="${NETWORK_INTERFACE}"
     export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME="$IFNAME"
-    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     export GLOO_SOCKET_IFNAME="$IFNAME"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 

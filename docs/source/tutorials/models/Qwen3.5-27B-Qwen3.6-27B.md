@@ -522,11 +522,6 @@ To run the vllm-ascend Prefill-Decode Disaggregation service, you need to:
     export GLOO_SOCKET_IFNAME=$nic_name
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-    # [Optional] jemalloc
-    # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
-    # export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-
-
     # Ensure the model path matches the directory recorded during download
     vllm serve Eco-Tech/Qwen3.5-27B-w8a8-mtp \
       --host 0.0.0.0 \
@@ -581,11 +576,6 @@ To run the vllm-ascend Prefill-Decode Disaggregation service, you need to:
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
     export GLOO_SOCKET_IFNAME=$nic_name
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-
-    # [Optional] jemalloc
-    # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
-    # export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-
 
     # Ensure the model path matches the directory recorded during download
     vllm serve Eco-Tech/Qwen3.5-27B-w8a8-mtp \

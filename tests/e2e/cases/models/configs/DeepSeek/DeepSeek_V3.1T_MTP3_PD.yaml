@@ -56,7 +56,6 @@ env_common: &env_common
   VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "30000"
   HCCL_EXEC_TIMEOUT: "204"
   HCCL_CONNECT_TIMEOUT: "400"
-  LD_PRELOAD: "/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD"
   OMP_PROC_BIND: "false"
   OMP_NUM_THREADS: "10"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
