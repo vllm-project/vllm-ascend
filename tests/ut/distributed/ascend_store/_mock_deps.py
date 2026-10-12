@@ -44,6 +44,8 @@ if "torch" not in sys.modules and importlib.util.find_spec("torch") is None:
     _torch.bool = "bool"  # type: ignore[attr-defined]
     _torch.float16 = "float16"  # type: ignore[attr-defined]
     _torch.float32 = "float32"  # type: ignore[attr-defined]
+    _torch.int8 = "int8"  # type: ignore[attr-defined]
+    _torch.dtype = type("dtype", (), {})  # type: ignore[attr-defined]
     _torch.zeros = MagicMock(return_value=MagicMock())  # type: ignore[attr-defined]
     _torch.sum = MagicMock(return_value=0)  # type: ignore[attr-defined]
     _torch.device = MagicMock()  # type: ignore[attr-defined]
@@ -85,14 +87,20 @@ _vllm_mock_modules = [
     "vllm.logger",
     "vllm.model_executor",
     "vllm.model_executor.layers",
+    "vllm.model_executor.layers.attention",
+    "vllm.model_executor.layers.attention_layer_base",
     "vllm.model_executor.layers.linear",
     "vllm.model_executor.layers.quantization",
+    "vllm.model_executor.models",
+    "vllm.model_executor.models.extract_hidden_states",
+    "vllm.model_executor.models.utils",
     "vllm.platforms",
     "vllm.platforms.interface",
     "vllm.utils",
     "vllm.utils.hashing",
     "vllm.utils.math_utils",
     "vllm.utils.network_utils",
+    "vllm.utils.torch_utils",
     "vllm.v1",
     "vllm.v1.attention",
     "vllm.v1.attention.backend",
@@ -120,6 +128,12 @@ if _MOCK_VLLM_DEPS:
 if _MOCK_VLLM_DEPS:
     sys.modules["vllm.utils.math_utils"].cdiv = lambda a, b: -(-a // b)  # type: ignore[attr-defined]
     sys.modules["vllm.logger"].logger = logging.getLogger("vllm")  # type: ignore[attr-defined]
+    sys.modules["vllm.utils.torch_utils"].get_dtype_size = lambda dtype: getattr(  # type: ignore[attr-defined]
+        dtype, "itemsize", {"int8": 1, "float16": 2, "float32": 4}.get(dtype, 1)
+    )
+    sys.modules["vllm.model_executor.models.utils"].extract_layer_index = lambda name: next(  # type: ignore[attr-defined]
+        int(part) for part in name.split(".") if part.isdecimal()
+    )
 
 _base_mod: Any = (
     sys.modules["vllm.distributed.kv_transfer.kv_connector.v1.base"] if _MOCK_VLLM_DEPS else types.SimpleNamespace()
@@ -237,9 +251,31 @@ class _FakeFullAttentionSpec(_FakeAttentionSpec):
     pass
 
 
+@dataclass(frozen=True, kw_only=True)
+class _FakeMLAAttentionSpec(_FakeFullAttentionSpec):
+    block_size: int = 16
+    num_kv_heads: int = 1
+    head_size: int = 1
+    dtype: Any = None
+    page_size_padded: int | None = None
+    tokens_per_state: int = 1
+
+    @property
+    def page_size_bytes(self):
+        return self.page_size_padded or self.real_page_size_bytes
+
+
+class _FakeCircularBufferSpec(_FakeKVCacheSpec):
+    pass
+
+
 class _FakeSlidingWindowSpec(_FakeKVCacheSpec):
     def __init__(self, block_size=16, sliding_window=32, **kwargs):
         super().__init__(block_size=block_size, sliding_window=sliding_window, **kwargs)
+
+
+class _FakeSlidingWindowMLASpec(_FakeSlidingWindowSpec):
+    pass
 
 
 class _FakeMambaSpec(_FakeKVCacheSpec):
@@ -381,6 +417,9 @@ _kv_interface_mod: Any = sys.modules["vllm.v1.kv_cache_interface"] if _MOCK_VLLM
 _kv_interface_mod.KVCacheSpec = _FakeKVCacheSpec  # type: ignore[attr-defined]
 _kv_interface_mod.AttentionSpec = _FakeAttentionSpec  # type: ignore[attr-defined]
 _kv_interface_mod.FullAttentionSpec = _FakeFullAttentionSpec  # type: ignore[attr-defined]
+_kv_interface_mod.MLAAttentionSpec = _FakeMLAAttentionSpec  # type: ignore[attr-defined]
+_kv_interface_mod.CircularBufferSpec = _FakeCircularBufferSpec  # type: ignore[attr-defined]
+_kv_interface_mod.SlidingWindowMLASpec = _FakeSlidingWindowMLASpec  # type: ignore[attr-defined]
 _kv_interface_mod.SlidingWindowSpec = _FakeSlidingWindowSpec  # type: ignore[attr-defined]
 _kv_interface_mod.MambaSpec = _FakeMambaSpec  # type: ignore[attr-defined]
 _kv_interface_mod.UniformTypeKVCacheSpecs = _FakeUniformTypeKVCacheSpecs  # type: ignore[attr-defined]
@@ -443,6 +482,11 @@ _vllm_ascend_package_paths = {
 for _pkg, _path in _vllm_ascend_package_paths.items():
     if _pkg not in sys.modules:
         sys.modules[_pkg] = _make_pkg(_pkg, _path)
+
+if _MOCK_VLLM_DEPS and importlib.util.find_spec("vllm_ascend._build_info") is None:
+    _build_info = types.ModuleType("vllm_ascend._build_info")
+    _build_info.__soc_version__ = "ASCEND910B1"  # type: ignore[attr-defined]
+    sys.modules["vllm_ascend._build_info"] = _build_info
 
 _distributed_utils = types.ModuleType("vllm_ascend.distributed.utils")
 _distributed_utils.all_gather_async = MagicMock()  # type: ignore[attr-defined]

@@ -2065,6 +2065,10 @@ class KVPoolWorker:
                 # failures, as the scheduler cannot handle inconsistent KV
                 # cache state across groups (see PR #9701 for rationale).
                 if invalid_block_ids:
+                    # The scheduler will recompute this request. Do not
+                    # publish a suffix computed from an incomplete prefix.
+                    if not self.layerwise_offload:
+                        request.can_save = False
                     if self.num_kv_cache_groups == 1:
                         with self._invalid_block_ids_lock:
                             self._invalid_block_ids.update(invalid_block_ids)
@@ -2638,13 +2642,13 @@ class KVPoolWorker:
         group_requests = {}
         if self.use_block_key_layerwise:
             group_requests = self.layerwise_protocol.prepare_layerwise_sessions(self, requests)
+        # Validate the prefix before constructing any suffix SAVE tasks.
+        self._prepare_load_gvas(requests)
         for local_layer in range(num_local):
             for group_id, layer_idx_in_group in self._groups_for_layerwise_transfer(local_layer):
                 self._process_save_for_layer_batch(
                     group_requests.get(group_id, requests), local_layer, group_id, layer_idx_in_group
                 )
-        # Protect the previous partial before allocating the next snapshot.
-        self._prepare_load_gvas(requests)
         self._alloc_gvas_for_save(requests)
         self._build_shared_save_data()
         for local_layer in range(num_local):

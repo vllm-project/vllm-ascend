@@ -1092,6 +1092,7 @@ class ReqMeta:
         kv_cache_group_families: list[str] | None = None,
         save_partial_block: bool = False,
         hash_block_size: int | None = None,
+        allow_save_with_load: bool = False,
     ) -> ReqMeta | None:
         """Create the request metadata from a request tracker."""
         if block_hashes is None:
@@ -1143,12 +1144,20 @@ class ReqMeta:
         skip_save = skip_save or (
             num_tokens_to_save < chunk_boundary and partial_block_index is None and not should_save_partial_block
         )
-        # A ReqMeta must never carry both a save AND a load.
-        # The save would also be wasted work — the bytes are being looked up
-        # in the store right now. Later cached_reqs steps save new tokens
-        # normally.
+        # A synchronous prefill can load an existing prefix and save a new
+        # suffix. Exclude the stored extent, including a full-hit tail that
+        # is recomputed only to obtain logits.
         if load_spec is not None and load_spec.can_load and not save_partial_block:
-            skip_save = True
+            pool_hit_tokens = (
+                load_spec.kvpool_store_skip_tokens
+                if load_spec.kvpool_store_skip_tokens is not None
+                else load_spec.kvpool_cached_tokens
+            )
+            previous_saved_tokens = max(
+                previous_saved_tokens,
+                pool_hit_tokens // cache_transfer_granularity * cache_transfer_granularity,
+            )
+            skip_save = skip_save or not allow_save_with_load or num_tokens_to_save <= previous_saved_tokens
         if skip_save and load_spec is None:
             return None
 
