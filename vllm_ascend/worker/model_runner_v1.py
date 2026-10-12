@@ -342,6 +342,134 @@ def _count_nans_per_row(logits: torch.Tensor) -> torch.Tensor:
     return logits.isnan().sum(dim=-1).to(dtype=torch.int32)
 
 
+def _iter_kv_tensors(kv_cache):
+    """Yield every tensor in a nested kv_cache structure (list/tuple/dict)."""
+    if isinstance(kv_cache, torch.Tensor):
+        yield kv_cache
+    elif isinstance(kv_cache, (list, tuple)):
+        for item in kv_cache:
+            yield from _iter_kv_tensors(item)
+    elif isinstance(kv_cache, dict):
+        for item in kv_cache.values():
+            yield from _iter_kv_tensors(item)
+
+
+# fp8 storages may not implement zero_(); they are zeroed through an int8
+# reinterpretation of the same bytes (or a flat storage fill when not
+# contiguous) instead.
+_FP8_DTYPES = frozenset(
+    getattr(torch, name)
+    for name in ("float8_e4m3fn", "float8_e5m2", "float8_e4m3fnuz", "float8_e5m2fnuz")
+    if hasattr(torch, name)
+)
+
+# Upper bound for one chunked fill of a non-contiguous buffer, so the
+# kernel-side temporary stays small even on a nearly-full card.
+_ZERO_CHUNK_BYTES = 64 * 1024 * 1024
+
+
+def _zero_storage_span(t: torch.Tensor) -> None:
+    """Zero the exact storage byte span a (possibly strided) view covers.
+
+    One flat contiguous uint8 fill over the [first, last] byte touched by
+    the view: no temporary proportional to the operand size is
+    materialized, any dtype and stride pattern works, and stride holes
+    (page padding) are wiped along the way.
+    """
+    element_size = t.element_size()
+    lo = hi = t.storage_offset()
+    for size, stride in zip(t.shape, t.stride()):
+        extent = (size - 1) * stride
+        if extent >= 0:
+            hi += extent
+        else:
+            lo += extent
+    byte_lo = lo * element_size
+    num_bytes = (hi - lo + 1) * element_size
+    flat = torch.empty(0, dtype=torch.uint8, device=t.device)
+    flat.set_(t.untyped_storage(), byte_lo, (num_bytes,))
+    flat.zero_()
+
+
+def _zero_without_temp_buffer(t: torch.Tensor) -> None:
+    """Zero a tensor in place without allocating a same-size temporary.
+
+    Contiguous tensors are filled through an int8 reinterpretation of the
+    same bytes, which needs no workspace. Non-contiguous ones make even
+    zero_()/copy_() materialize a temporary proportional to the operand
+    size on NPU (a2 CI OOMed with 6-12 GiB extra on a nearly-full card),
+    and the strided zero kernel can fail tiling outright on large padded
+    views (DeepSeek-V4-Flash nightly: aclnnInplaceZero AsStridedAiCore
+    "Failed to execute tiling", error 561103), so the byte span backing the
+    view is filled directly. If the storage cannot be re-viewed, fall back
+    to a scalar broadcast in dim-0 chunks bounded by _ZERO_CHUNK_BYTES.
+    """
+    if t.numel() == 0:
+        return
+    if t.is_contiguous():
+        t.view(torch.int8).zero_()
+        return
+    try:
+        _zero_storage_span(t)
+        return
+    except RuntimeError:
+        pass
+    if t.dim() == 0 or t.numel() * t.element_size() <= _ZERO_CHUNK_BYTES:
+        t.copy_(torch.zeros((), dtype=t.dtype, device=t.device))
+        return
+    rows_per_chunk = max(1, _ZERO_CHUNK_BYTES // (t[0].numel() * t.element_size()))
+    zero = torch.zeros((), dtype=t.dtype, device=t.device)
+    for start in range(0, t.shape[0], rows_per_chunk):
+        t[start:start + rows_per_chunk].copy_(zero)
+
+
+def _zero_tensor(t: torch.Tensor) -> None:
+    """Zero a tensor in place.
+
+    fp8 storages may not implement zero_() at all, plain zero_() can itself
+    materialize a same-size temporary for some NPU dtypes/layouts (a2 CI
+    runners: 6-12 GiB extra while the pool is nearly full), and on
+    non-contiguous views the strided zero kernel fails tiling entirely
+    (DeepSeek-V4-Flash nightly, error 561103 -- the regression that got
+    #17659 reverted in #18307). fp8 and non-contiguous tensors therefore
+    take the no-temporary path directly. Only OutOfMemoryError on the
+    contiguous fast path is treated as recoverable; any other failure must
+    abort startup loudly rather than leave a poisoned buffer behind.
+    """
+    if t.dtype in _FP8_DTYPES or not t.is_contiguous():
+        _zero_without_temp_buffer(t)
+        return
+    try:
+        t.zero_()
+    except torch.OutOfMemoryError:
+        _zero_without_temp_buffer(t)
+
+
+def _zero_static_kv_buffers(runner) -> None:
+    """Zero every KV-cache / recurrent-state tensor in static_forward_context.
+
+    Fix for the GLM-5.3-Flash C8 accuracy collapse: FULL_DECODE_ONLY capture
+    runs dummy decodes that really execute the KDA/SFA write paths over the
+    persistent buffers. On this model the KDA conv/recurrent state caches
+    share backing storage with the SFA fp8 KV pool (per 4-layer group the
+    KDA state tensors and the next SFA pool have the same data_ptr), so the
+    bf16 garbage written by causal_conv1d/recurrent_kda lands in pool blocks
+    0-8; reinterpreted as fp8 e4m3 those bytes include NaN encodings
+    (0x7F/0xFF), which the SFA forward then reads into the residual stream.
+    Nothing resets the buffers after capture, so the first real request
+    reads poisoned state and collapses into emitting '!' forever. Zeroing
+    right after capture_model() restores the logically-empty state the
+    engine assumes at startup. It runs exactly once per startup, outside
+    any captured graph, so graph replay and steady-state inference are
+    unaffected.
+    """
+    compilation_config = getattr(runner, "compilation_config", None)
+    ctx = getattr(compilation_config, "static_forward_context", None) or {}
+    for mod in ctx.values():
+        for tensor in _iter_kv_tensors(getattr(mod, "kv_cache", None)):
+            _zero_tensor(tensor)
+
+
 class ExecuteModelState(NamedTuple):
     """Ephemeral cached state transferred between execute_model() and
     sample_tokens(), after execute_model() returns None."""
@@ -6522,6 +6650,11 @@ class NPUModelRunner(GPUModelRunner):
                 cuda_graph_size = GPUModelRunner.capture_model(self)
         finally:
             self._engram_capture_active = False
+
+        # Capture-time dummy forwards leave garbage in the persistent
+        # KV-cache / recurrent-state buffers; zero them before real
+        # inference. See _zero_static_kv_buffers for the full story.
+        _zero_static_kv_buffers(self)
 
         mgr = self.encoder_cudagraph_manager
         if mgr is not None and self.update_stream is not None:
