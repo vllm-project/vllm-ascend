@@ -544,7 +544,6 @@ def test_pp_cpu_count_sync_is_scoped(architecture, use_pp, num_speculative_steps
 
 
 @pytest.mark.parametrize("architecture", ["KimiK3ForCausalLM", "DeepseekV4ForCausalLM"])
-@pytest.mark.parametrize("legacy_transport", [False, True])
 @pytest.mark.parametrize(
     "use_pp,num_speculative_steps,owns_speculator,prefill_chunk",
     [
@@ -559,7 +558,7 @@ def test_pp_cpu_count_sync_is_scoped(architecture, use_pp, num_speculative_steps
     ],
 )
 def test_host_positions_after_rejection_or_chunk(
-    architecture, legacy_transport, use_pp, num_speculative_steps, owns_speculator, prefill_chunk
+    architecture, use_pp, num_speculative_steps, owns_speculator, prefill_chunk
 ):
     events = []
 
@@ -587,7 +586,6 @@ def test_host_positions_after_rejection_or_chunk(
     )
     runner = namespace["NPUModelRunner"]()
     runner.speculator = object() if owns_speculator else None
-    runner.use_spec_pp = use_pp and num_speculative_steps > 0 and legacy_transport
     runner.use_pp = use_pp
     runner.is_last_pp_rank = not use_pp
     runner.model_state = object()

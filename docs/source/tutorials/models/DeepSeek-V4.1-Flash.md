@@ -849,3 +849,70 @@ For common environment, installation, and parameter issues, refer to the
   DSpark draft model.
 - Production performance qualification and task-level accuracy evaluation are
   not complete.
+
+## 12 Bounded Replay Compatibility for vLLM 0.30.0
+
+For vLLM 0.30.0 images without the upstream replay protocol, the Ascend plugin
+backports configuration, request payloads, and local prefix-hit admission logic.
+Installed vLLM files and compiled operators remain unchanged. The compatibility
+path is disabled by default. Enable it explicitly with:
+
+```shell
+--enable-prefix-caching --swa-bounded-replay
+```
+
+Use `--no-swa-bounded-replay` to disable replay explicitly. vLLM builds with
+native replay use the upstream implementation. Compatibility is detected from
+the replay interfaces rather than a version string. Configuration and wire
+fields are registered before use; scheduler and cache behavior is patched only
+when replay is enabled. Unsupported scheduler source bodies fail explicitly.
+The backport supports local prefix caching only; enabling replay with a KV
+connector raises an error. Existing replay restrictions still apply to PCP and
+Ascend modes that use independent scheduler copies.
+
+SWA caches do not participate in prefix reuse. After a hit in another cache
+group, the scheduler recomputes the final SWA window of the cached prefix.
+The worker masks writes to shared cache groups during replay and clamps the
+visible SWA range. Hits no longer than the window are recomputed in full.
+After preemption, readmission recalculates and forwards the replay boundary.
+
+### 12.1 Real-Weight Validation
+
+The following A5 regression configuration uses TP1/DP4/EP4. Use the existing
+CANN environment and compiled Ascend operators before running it:
+
+```shell
+cd /workspace
+VLLM_USE_V2_MODEL_RUNNER=1 vllm serve /home/weights/deepseek-ai--DeepSeek-V4.1-Flash \
+  --tokenizer-mode deepseek_v41 --served-model-name deepseek-v41-accuracy \
+  --host 127.0.0.1 --port 8011 \
+  --tensor-parallel-size 1 --data-parallel-size 4 --data-parallel-size-local 4 \
+  --enable-expert-parallel --quantization deepseek_v4_fp8 \
+  --max-model-len 16384 --max-num-batched-tokens 2048 --max-num-seqs 1 \
+  --block-size 128 --enforce-eager --enable-prefix-caching --swa-bounded-replay \
+  --limit-mm-per-prompt '{"image":0}' \
+  --engram-config '{"cpu_offload":true,"dp_shared_memory":false}' \
+  --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":16}' \
+  --safetensors-load-strategy lazy --additional-config '{"enable_cpu_binding":false}'
+```
+
+First save a baseline from a replay-disabled service, then send the same
+requests to a replay-enabled service:
+
+```shell
+cd /path/to/vllm-ascend
+python tests/e2e/models/swa_bounded_replay_probe.py \
+  --base-url http://127.0.0.1:8011 --model deepseek-v41-accuracy \
+  --output /tmp/replay-disabled.json
+
+# Restart the service with --swa-bounded-replay before running this command.
+python tests/e2e/models/swa_bounded_replay_probe.py \
+  --base-url http://127.0.0.1:8011 --model deepseek-v41-accuracy \
+  --baseline /tmp/replay-disabled.json --output /tmp/replay-enabled.json
+```
+
+Validation requires successful HTTP requests, outputs matching the baseline,
+and an actual `SWA bounded replay is active` message in the service log.
+Startup success or a true configuration field alone does not prove replay was
+exercised. Cross-chunk regression should also use a token budget smaller than
+the SWA window.

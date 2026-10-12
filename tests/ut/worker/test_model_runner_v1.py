@@ -3097,6 +3097,89 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         self.assertEqual(indexer_cache[1].shape, (2, 16, 1, 2, 2))
         self.assertEqual(indexer_cache[1].dtype, torch.float8_e8m0fnu)
 
+    def test_layerwise_mixed_indexer_allocation_and_reshape(self):
+        for c8_first in (False, True):
+            with self.subTest(c8_first=c8_first):
+                runner = self._build_runner()
+                runner.use_sparse = True
+                runner.block_size = 128
+                runner.vllm_config.kv_transfer_config = SimpleNamespace(
+                    kv_connector="AscendStoreConnector",
+                    kv_connector_extra_config={
+                        "backend": "memcache",
+                        "use_layerwise": True,
+                        "layerwise_num_shared_buffers": 1,
+                    },
+                )
+                bf16 = AscendSFAIndexerCacheSpec(
+                    block_size=128,
+                    num_kv_heads=1,
+                    head_size=128,
+                    dtype=torch.bfloat16,
+                )
+                c8 = AscendSFAIndexerCacheSpec(
+                    block_size=128,
+                    num_kv_heads=1,
+                    head_size=128,
+                    dtype=torch.int8,
+                    scale_dim=1,
+                    scale_dtype=torch.float16,
+                    cache_sparse_li_c8=True,
+                )
+                names = [f"model.layers.{i}.self_attn.indexer.k_cache" for i in (1, 3)]
+                specs = dict(zip(names, (c8, bf16) if c8_first else (bf16, c8)))
+                config = KVCacheConfig(
+                    num_blocks=2,
+                    kv_cache_tensors=[
+                        KVCacheTensor(
+                            size=2 * bf16.page_size_bytes,
+                            layers=names,
+                            layer_stride=0,
+                            block_stride=bf16.page_size_bytes,
+                            offset=0,
+                        )
+                    ],
+                    kv_cache_groups=[
+                        KVCacheGroupSpec(
+                            layer_names=names,
+                            kv_cache_spec=UniformTypeKVCacheSpecs(block_size=128, kv_cache_specs=specs),
+                        )
+                    ],
+                )
+                backend = MagicMock()
+                backend.get_kv_cache_shape.side_effect = lambda n, b, h, d: (n, b, h, d)
+                runner._kv_cache_spec_attn_group_iterator = lambda specs=specs, backend=backend: iter(
+                    [
+                        SimpleNamespace(kv_cache_group_id=0, kv_cache_spec=spec, backend=backend, layer_names=[name])
+                        for name, spec in specs.items()
+                    ]
+                )
+                raw = runner._allocate_kv_cache_tensors(config)
+                caches = runner._reshape_kv_cache_tensors(config, raw, [128])
+                bf_name, c8_name = (names[1], names[0]) if c8_first else names
+                bf_view = caches[bf_name][0]
+                data, scales = caches[c8_name]
+                self.assertEqual(bf_view.shape, (2, 128, 1, 128))
+                self.assertEqual(data.shape, bf_view.shape)
+                self.assertEqual(scales.shape, (2, 128, 1, 1))
+                self.assertEqual(bf_view.dtype, torch.bfloat16)
+                self.assertEqual(data.dtype, torch.int8)
+                self.assertEqual(scales.dtype, torch.float16)
+                self.assertEqual(bf_view.data_ptr(), data.data_ptr())
+                self.assertEqual(scales.data_ptr() - data.data_ptr(), data.numel())
+                self.assertEqual(bf_view.untyped_storage().data_ptr(), scales.untyped_storage().data_ptr())
+                # Alternate owners; each writes its valid views before reading.
+                data.fill_(7)
+                scales.fill_(0.5)
+                self.assertTrue(torch.all(data == 7))
+                self.assertTrue(torch.all(scales == 0.5))
+                bf_view.fill_(1.25)
+                self.assertTrue(torch.all(bf_view == 1.25))
+                data.fill_(-3)
+                scales.fill_(2)
+                self.assertTrue(torch.all(data == -3))
+                self.assertTrue(torch.all(scales == 2))
+
     def test_deepseek_v4_indexer_keeps_compressed_mla_layout(self):
         runner = self._build_runner()
         runner.use_compress = True
