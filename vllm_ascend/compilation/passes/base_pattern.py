@@ -38,6 +38,14 @@ class BasePattern(ABC):
     def get_extra_stream_scope_check(self):
         return extra_stream_scope_check
 
+    def get_extra_check(self):
+        """Return an additional predicate to validate pattern matches."""
+        return lambda match: True
+
+    def get_scalar_workaround(self) -> dict[str, float | int] | None:
+        """Return scalar example values for Inductor and NGE registration."""
+        return None
+
     def pattern_key(self) -> str:
         return f"{self.__class__.__name__}_{self.eps}"
 
@@ -58,16 +66,22 @@ class BasePattern(ABC):
             example_inputs,
             pm.fwd_only,
             pm_pass,
+            extra_check=self.get_extra_check(),
+            scalar_workaround=self.get_scalar_workaround(),
         )
 
         if pattern_id in _registered_patterns:
             return
 
+        extra_check = self.get_extra_check()
+        stream_check = self.get_extra_stream_scope_check()
+
         nge.register_replacement(
             search_fn=pattern_fn,
             replace_fn=replacement_fn,
             example_inputs=example_inputs,
-            extra_check=self.get_extra_stream_scope_check(),
+            extra_check=lambda match: stream_check(match) and extra_check(match),
+            scalar_workaround=self.get_scalar_workaround(),
         )
 
         # Mark this pattern as registered
