@@ -121,7 +121,7 @@ It is **recommended to use the latest release candidate (rc) version or the late
     Start the docker image on each node.
 
     ```bash
-    export IMAGE=quay.io/ascend/vllm-ascend:v0.30.0rc1-310p
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p
     docker run --rm \
         --name vllm-ascend \
         --shm-size=1g \
@@ -151,7 +151,7 @@ It is **recommended to use the latest release candidate (rc) version or the late
     Start the docker image on each node.
 
     ```shell
-    export IMAGE=quay.io/ascend/vllm-ascend:v0.30.0rc1-a5
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5
     export NAME=vllm-ascend
 
     docker run --rm \
