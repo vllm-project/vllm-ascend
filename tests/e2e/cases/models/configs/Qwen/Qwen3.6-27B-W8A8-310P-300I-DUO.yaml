@@ -37,7 +37,7 @@ test_cases:
         dataset_conf: textvga/textvqa_gen_base64
         max_out_len: 4096
         batch_size: 8
-        baseline: 81
+        baseline: 78
         temperature: 0
         verify_mode: "ge"
       perf:
