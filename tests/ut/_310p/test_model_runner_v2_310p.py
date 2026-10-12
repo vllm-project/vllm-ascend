@@ -371,6 +371,70 @@ def test_prepare_inputs_dispatches_to_310p_implementation() -> None:
     prepare_inputs_310p.assert_called_once_with(scheduler_output, batch_desc)
 
 
+def test_promote_mtp_spec_decoding_attn_state_for_uniform_verify() -> None:
+    """#17461 ChunkedPrefill must promote to SpecDecoding for 310P MTP FULL."""
+    from vllm_ascend.attention.attention_v1 import AscendAttentionState
+
+    runner = object.__new__(NPUModelRunner310V2)
+    runner.speculative_config = SimpleNamespace(method="mtp", num_speculative_tokens=1)
+    runner.decode_query_len = 2
+    num_scheduled = np.array([2, 2], dtype=np.int32)
+    num_valid = np.array([1, 1], dtype=np.int32)
+
+    promoted = runner._promote_mtp_spec_decoding_attn_state(
+        AscendAttentionState.ChunkedPrefill,
+        num_reqs=2,
+        num_scheduled_tokens=num_scheduled,
+        num_valid_tokens=num_valid,
+    )
+    assert promoted == AscendAttentionState.SpecDecoding
+
+    # Mixed / non-uniform verify must stay ChunkedPrefill (eager).
+    stayed = runner._promote_mtp_spec_decoding_attn_state(
+        AscendAttentionState.ChunkedPrefill,
+        num_reqs=2,
+        num_scheduled_tokens=np.array([2, 3], dtype=np.int32),
+        num_valid_tokens=num_valid,
+    )
+    assert stayed == AscendAttentionState.ChunkedPrefill
+
+
+def test_scheduler_output_needs_spec_eager_allows_uniform_mtp() -> None:
+    """Uniform MTP decode must not force eager after #17461 ChunkedPrefill map."""
+    from vllm_ascend.attention.attention_v1 import AscendAttentionState
+
+    runner = object.__new__(NPUModelRunner310V2)
+    runner.speculative_config = SimpleNamespace(method="mtp", num_speculative_tokens=1)
+    runner.decode_query_len = 2
+    runner.compilation_config = SimpleNamespace(
+        cudagraph_mode=SimpleNamespace(has_full_cudagraphs=lambda: True),
+    )
+    runner.kv_cache_config = None
+    runner.vllm_config = _make_vllm_config(
+        speculative_config=runner.speculative_config,
+        scheduler_config=SimpleNamespace(enable_chunked_prefill=True),
+    )
+    runner.req_states = SimpleNamespace(
+        req_id_to_index={"r0": 0},
+        num_computed_tokens_np=np.array([128], dtype=np.int32),
+    )
+
+    scheduler_output = SimpleNamespace(
+        num_scheduled_tokens={"r0": 2},
+        scheduled_spec_decode_tokens={"r0": [7]},
+        total_num_scheduled_tokens=2,
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=None,
+    )
+
+    with patch.object(
+        model_runner_module,
+        "build_attn_state",
+        return_value=AscendAttentionState.ChunkedPrefill,
+    ):
+        assert runner._scheduler_output_needs_spec_eager(scheduler_output) is False
+
+
 def test_post_update_cpu_matches_upstream_bookkeeping() -> None:
     idx_mapping_np = np.array([1, 0], dtype=np.int32)
     query_start_loc_np = np.array([0, 2, 4], dtype=np.int32)
