@@ -119,6 +119,24 @@ torch_non_c_binding_in_graph_functions_npu["torch.npu.stream"] = TorchInGraphFun
 torch._dynamo.trace_rules.torch_name_rule_map.append(torch_non_c_binding_in_graph_functions_npu)  # noqa: E402
 
 
+def validate_profile_memory_shrink(init_free_memory: int, after_profile_free_memory: int) -> None:
+    """Assert that memory profiling did not increase the free memory.
+
+    An *equal* snapshot is legitimate under memory-virtualization layers
+    (e.g. HAMi vNPU quotas), so only a *larger* post-profile free memory —
+    external memory released while vLLM was profiling — is an error.
+    """
+    assert init_free_memory >= after_profile_free_memory, (
+        "Error in memory profiling. "
+        f"Initial free memory {round(init_free_memory / GiB_bytes, 2)} GiB, "
+        f"current free memory {round(after_profile_free_memory / GiB_bytes, 2)} GiB. "
+        "This happens when other processes sharing the same container "
+        "release GPU memory while vLLM is profiling during initialization. "
+        "To fix this, ensure consistent GPU memory allocation or "
+        "isolate vLLM in its own container."
+    )
+
+
 class NPUWorker(WorkerBase):
     def __init__(
         self,
@@ -612,15 +630,7 @@ class NPUWorker(WorkerBase):
         self.non_torch_memory = profile_result.non_torch_increase
 
         free_gpu_memory = profile_result.after_profile.free_memory
-        assert self.init_snapshot.free_memory > free_gpu_memory, (
-            "Error in memory profiling. "
-            f"Initial free memory {GiB(self.init_snapshot.free_memory)} GiB, "
-            f"current free memory {GiB(free_gpu_memory)} GiB. "
-            "This happens when other processes sharing the same container "
-            "release GPU memory while vLLM is profiling during initialization. "
-            "To fix this, ensure consistent GPU memory allocation or "
-            "isolate vLLM in its own container."
-        )
+        validate_profile_memory_shrink(self.init_snapshot.free_memory, free_gpu_memory)
         self.available_kv_cache_memory_bytes = self.requested_memory - profile_result.non_kv_cache_memory
         self.available_kv_cache_memory_bytes = self._scale_kv_cache_memory_for_multi_group(
             self.available_kv_cache_memory_bytes,
