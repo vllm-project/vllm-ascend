@@ -232,15 +232,11 @@ class VllmEplbAdaptor:
 
     def do_update_expert_weight(self, layer_id, local_expert_to_replace, buffer_tensor_id):
         expert_weight_key = self.expert_weight_key_per_layer[layer_id]
-        for name, expert_tensor, buffer_tensor in zip(
-            EPLB_EXPERT_WEIGHT_NAMES[expert_weight_key],
+        for expert_tensor, buffer_tensor in zip(
             self.expert_param_per_layer[layer_id][local_expert_to_replace],
             self.buffer_tensor_list[expert_weight_key][buffer_tensor_id],
         ):
-            if expert_weight_key[0] == QuantType.W4A8MXFP and name in _W4A8MXFP_NZ_WEIGHT_NAMES:
-                torch_npu.copy_memory_(expert_tensor, buffer_tensor)
-            else:
-                expert_tensor.copy_(buffer_tensor)
+            expert_tensor.copy_(buffer_tensor)
             logger.debug("Expert tensor shape is :%s", expert_tensor.shape)
 
     def do_update_log2phy_map(self, layer_id, updated_log2phy_map):
