@@ -312,8 +312,8 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         quantized_qkv = self._quantize_fused_qkv(hidden_states)
         quant_ready = main_stream.record_event()
 
-        # Stage 1 join: DynamicQuant on main overlaps the BFG GEMM on the
-        # auxiliary stream, but the two Cube matmuls remain serialized.
+        # BFG uses the high-priority auxiliary stream; DynamicQuant and the
+        # QKV Cube matmul remain on the caller's default-priority main stream.
         main_stream.wait_event(bfg_projection_ready)
         mixed_qkv = self._matmul_fused_qkv(quantized_qkv)
 
@@ -323,9 +323,8 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             # QKV Cube matmul with beta's FP32 conversion and sigmoid vector
             # work. Split and reshape the F/output gates here as well so all
             # BFG output handling occurs after the QKV matmul is enqueued.
-            # Keep this on a separate default-priority stream: the QKV
-            # MatMul is submitted on main_stream first, while these three
-            # short vector operations remain eligible to overlap afterward.
+            # Keep this on a separate default-priority stream so the QKV
+            # MatMul is submitted on main before these short vector ops.
             postprocess_stream.wait_event(bfg_projection_ready)
             postprocess_stream.wait_event(quant_ready)
             beta, g1, g2 = self._postprocess_bfg(fused_bfg)
