@@ -1,4 +1,4 @@
-# GLM-5.3-Flash (Experimental)
+# GLM-5.3-Flash
 
 ## 1 Introduction
 
@@ -6,7 +6,7 @@
 
 This document shows the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node deployment, 1P1D Prefill-Decode (PD) disaggregated deployment, multi-node deployment, and accuracy and performance evaluation.
 
-This document is written based on the vLLM-Ascend v0.30.0RC. This model is supported in this release.
+This document is written based on the vLLM-Ascend v0.30.0rc1. This model is supported in this release.
 
 ## 2 Supported Features
 
@@ -26,7 +26,7 @@ disabled.
 GLM-5.3-Flash model currently supports only model runner V1 on Ascend, so
 all A3 scripts set `VLLM_USE_V2_MODEL_RUNNER=0` explicitly.
 
-Experimental SFA context parallelism can be enabled with
+SFA context parallelism can be enabled with
 `--additional-config '{"enable_dsa_cp": true}'`. It shards SFA query tokens
 within the tensor parallel group and keeps the main KV, indexer pool, and tail
 caches replicated. KDA continues to use its existing tensor parallel path.
@@ -99,7 +99,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
     ```shell
 
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
+    export IMAGE=quay.io/ascend/vllm-ascend:v0.30.0rc1-a3
     export NAME=vllm-ascend
 
     # Run the container using the defined variables
@@ -143,7 +143,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
     ```shell
 
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+    export IMAGE=quay.io/ascend/vllm-ascend:v0.30.0rc1-a2
     export NAME=vllm-ascend
 
     docker run --rm \
@@ -1031,7 +1031,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
 
     Install the Mooncake backend according to the KV Cache Pool Deployment Guide.
     For A3 HCCS pooling, check the HDK, CANN, and LingQu Computing Network
-    requirements in its [HDK and CANN Version Compatibility Reference](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#hdk_and_cann_version_compatibility_reference).
+    requirements in its [HDK and CANN Version Compatibility Reference](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#hdk-and-cann-version-compatibility-reference).
     Add the following mount to the A3 Docker command in Section 4.1 on both nodes:
 
     ```shell
@@ -1438,7 +1438,79 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
-## 9 FAQ
+## 9 Performance Tuning
+
+### 9.1 Recommended Configurations
+
+The configurations below summarize the W8A8 deployment scripts in
+Sections 5.1-5.3. Global DP includes all nodes of one role; local DP is
+the number of ranks on one node.
+
+#### 9.1.1 Detailed Node Configuration
+
+| Scenario | Role | TP | Global DP | Local DP | Max Num Seqs | Max Num Batched Tokens | Max Model Len | MTP Spec Num |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| A3 single node | Co-located | 16 | 1 | 1 | 32 | 8192 | 133120 | 5 |
+| A3 PD | Prefill | 8 | 2 | 2 | 32 | 8192 | 133120 | 5 |
+| A3 PD | Decode | 1 | 16 | 16 | 10 | 60 | 133120 | 5 |
+| A2 PD | Prefill | 8 | 2 | 1 | 64 | 8192 | 200000 | 3 |
+| A2 PD | Decode | 2 | 8 | 4 | 32 | 1024 | 200000 | 3 |
+| A2 co-located | Co-located | 8 | 2 | 1 | 32 | 8192 | 133120 | 3 |
+
+#### 9.1.2 Performance Workloads
+
+The 0.30 RC A3 performance reference uses Prefill DP2/TP8 and Decode
+DP8/TP2, with five MTP speculative tokens. This is a different Decode
+layout from Section 5.2.1; adjust both the launcher and connector topology
+together when comparing parallel layouts.
+
+| Scenario | Input / Output | Prefix cache hit rate |
+| --- | --- | --- |
+| Prefill-only | 16K / 1, 128K / 1 | 0% |
+| Decode-only | 16K / 1K, 128K / 1K | 100% |
+| Complete PD | 16K / 1K | 0% |
+| Pooling | 128K / 1K | 90%, 32 distinct prefixes |
+| Pooling | 40K-80K / 2.5K | Repeated prefixes |
+
+#### 9.1.3 Optimizations Requiring Explicit Enablement
+
+Combine enabled options in one `--additional-config` JSON object, as in
+the deployment scripts.
+
+| Optimization | Scenario | Enablement | Purpose and constraints |
+| --- | --- | --- | --- |
+| FlashComm1 | A3 Prefill | `"enable_flashcomm1": true` | Reduces TP communication overhead. Keep it disabled on Decode as in Section 5.2.1. |
+| SFA context parallelism | Long-context A3 Prefill | `"enable_dsa_cp": true` | Shards SFA query tokens within TP; main KV, indexer pool and tail caches remain replicated. KDA uses its existing TP path. Keep both PCP and DCP at 1. |
+| Shared-expert multistream overlap | A3 | `"multistream_overlap_shared_expert": true` | Overlaps shared-expert computation with routed experts; used by the A3 scripts. |
+| MTP | Single-node and PD | `--speculative-config` with `"method":"deepseek_mtp"` | Use an eager draft and compare acceptance rate, TPOT and memory use; counts are listed above. |
+| Decode graph | Decode and co-located | `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` | Captures Decode execution; PD Prefill uses eager mode. |
+| KV pooling | Repeated-prefix PD | Ascend Store/MemCache configuration in Section 5.4 | Reuses KV across requests; measure backend pool hits separately from local cache hits. |
+
+GLM-5.3-Flash uses hybrid SFA/KDA attention. Use its own cache and context
+parallel settings above when tuning; the GLM-5.3 1M DCP scripts target
+GLM-5.3 weights.
+
+### 9.2 Tuning Guidelines
+
+Choose a workload by input/output length, request concurrency and prefix
+cache hit rate. Measure TTFT, TPOT and output throughput separately for
+Prefill-only, Decode-only and complete PD tests. Warm up before collecting
+results and change one parameter at a time.
+
+| Parameter | Tuning guidance |
+| --- | --- |
+| `--max-model-len` | Include both input and output tokens. Use the workload's required length when sizing KV cache. |
+| `--max-num-seqs` | Increase gradually for throughput; reduce when KV cache pressure or tail latency rises. The limit applies per DP rank. |
+| `--max-num-batched-tokens` | Tune Prefill and Decode separately. Larger Prefill batches can improve throughput; Decode must also accommodate speculative tokens. |
+| `--gpu-memory-utilization` | Leave memory for graph capture, communication and temporary buffers; reduce if startup or execution runs out of memory. |
+| `num_speculative_tokens` | Compare acceptance rate, TPOT and memory use. More draft tokens do not guarantee higher throughput. |
+| Prefix caching | Enable for repeated prefixes and warm the cache before measuring hits. For a zero-hit Prefill benchmark, use `--no-enable-prefix-caching`. Verify shared-pool loads separately from local prefix hits. |
+
+For general methods, refer to [Performance Tuning](../../developer_guide/performance_and_debug/optimization_and_tuning.md).
+For feature options, refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md).
+For environment variables, refer to [envs.py](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/envs.py).
+
+## 10 FAQ
 
 - **Q: How to enable function calling for GLM-5.3-Flash?**
 

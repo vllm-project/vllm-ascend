@@ -18,8 +18,8 @@ msgstr ""
 "Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: detect_po_changes.py\n"
 
-msgid "# GLM-5.3-Flash (Experimental)"
-msgstr "# GLM-5.3-Flash（实验性）"
+msgid "# GLM-5.3-Flash"
+msgstr "# GLM-5.3-Flash"
 
 msgid "## 1 Introduction"
 msgstr "## 1 简介"
@@ -224,8 +224,8 @@ msgid ""
 msgstr ""
 "有关更多详细信息，请参阅 [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/)。"
 
-msgid "## 9 FAQ"
-msgstr "## 9 常见问题"
+msgid "## 10 FAQ"
+msgstr "## 10 常见问题"
 
 msgid "- **Q: How to enable function calling for GLM-5.3-Flash?**"
 msgstr "- **问：如何为 GLM-5.3-Flash 启用函数调用？**"
