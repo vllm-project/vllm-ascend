@@ -32,6 +32,8 @@ OUTPUT_DIM = 256
 GEMM_OP = torch.ops.vllm.unquantized_gemm.default
 REDUCE_SCATTER_OP = torch.ops.vllm.reduce_scatter.default
 PAD_OP = torch.ops.aten.constant_pad_nd.default
+CAT_OP = torch.ops.aten.cat.default
+FULL_OP = torch.ops.aten.full.default
 FUSED_OP = torch.ops.npu.npu_mm_reduce_scatter_base.default
 
 
@@ -46,6 +48,10 @@ def _build_graph(
     dtype: torch.dtype = torch.bfloat16,
     world_size: int = TP_SIZE,
     group_name: str = TP_GROUP_NAME,
+    cat_dim: int = 0,
+    reverse_cat_inputs: bool = False,
+    valid_zeros_shape: bool = True,
+    use_constant_pad: bool = False,
     pad_value: float = 0.0,
     valid_padding: bool = True,
 ) -> fx.GraphModule:
@@ -73,8 +79,21 @@ def _build_graph(
     reduced_rows = num_tokens
     if pad_rows is not None:
         reduced_rows += pad_rows
-        widths = [0, 0, 0, pad_rows] if valid_padding else [0, 1, 0, pad_rows]
-        scattered = call(PAD_OP, (gemm, widths, pad_value), reduced_rows, OUTPUT_DIM)
+        if use_constant_pad:
+            widths = [0, 0, 0, pad_rows] if valid_padding else [0, 1, 0, pad_rows]
+            scattered = call(PAD_OP, (gemm, widths, pad_value), reduced_rows, OUTPUT_DIM)
+        else:
+            zeros_columns = OUTPUT_DIM if valid_zeros_shape else OUTPUT_DIM + 1
+            zeros = graph.call_function(
+                FULL_OP,
+                args=([pad_rows, zeros_columns], 0),
+                kwargs={"dtype": dtype, "layout": torch.strided, "device": torch.device("cpu"), "pin_memory": False},
+            )
+            with fake_mode:
+                zeros.meta["val"] = torch.empty((pad_rows, zeros_columns), dtype=dtype)
+            cat_inputs = [zeros, gemm] if reverse_cat_inputs else [gemm, zeros]
+            cat_args = (cat_inputs,) if cat_dim == 0 else (cat_inputs, cat_dim)
+            scattered = call(CAT_OP, cat_args, reduced_rows, OUTPUT_DIM)
     reduce_scatter = call(
         REDUCE_SCATTER_OP,
         (scattered, dim, world_size, group_name),
@@ -123,6 +142,8 @@ class TestMatmulReduceScatterFusionPass(TestBase):
 
         self.assertEqual(_targets(graph_module).count(FUSED_OP), 1)
         self.assertNotIn(GEMM_OP, _targets(graph_module))
+        self.assertNotIn(CAT_OP, _targets(graph_module))
+        self.assertNotIn(FULL_OP, _targets(graph_module))
         fused = next(node for node in graph_module.graph.nodes if node.target is FUSED_OP)
         padded_input = fused.args[0]
         self.assertIs(padded_input.target, PAD_OP)
@@ -137,6 +158,16 @@ class TestMatmulReduceScatterFusionPass(TestBase):
         self._apply(graph_module)
         self.assertEqual(_targets(graph_module).count(FUSED_OP), 1)
         self.assertNotIn(PAD_OP, _targets(graph_module))
+
+    def test_legacy_constant_pad_pattern_is_fused(self):
+        graph_module = _build_graph(use_constant_pad=True)
+        self._apply(graph_module)
+
+        self.assertEqual(_targets(graph_module).count(FUSED_OP), 1)
+        fused = next(node for node in graph_module.graph.nodes if node.target is FUSED_OP)
+        self.assertIs(fused.args[0].target, PAD_OP)
+        self.assertEqual(fused.args[0].args[1], [0, 0, 0, 2])
+        self.assertEqual(fused.args[0].args[0].op, "placeholder")
 
     def test_nge_registration_preserves_padding_scalar(self):
         # Exercise the arguments sent to NGE using its underlying matcher,
@@ -186,8 +217,11 @@ class TestMatmulReduceScatterFusionPass(TestBase):
             {"group_name": "tp:1"},
             {"reduce_dim": 128},
             {"dtype": torch.float32},
-            {"pad_value": 1.0},
-            {"valid_padding": False},
+            {"cat_dim": 1},
+            {"reverse_cat_inputs": True},
+            {"valid_zeros_shape": False},
+            {"use_constant_pad": True, "pad_value": 1.0},
+            {"use_constant_pad": True, "valid_padding": False},
         ):
             with self.subTest(**kwargs):
                 graph_module = _build_graph(**kwargs)

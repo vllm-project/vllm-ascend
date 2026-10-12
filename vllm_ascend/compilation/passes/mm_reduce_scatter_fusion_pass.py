@@ -29,6 +29,8 @@ _SUPPORTED_DTYPES = (torch.bfloat16, torch.float16)
 _GEMM_OP = torch.ops.vllm.unquantized_gemm.default
 _REDUCE_SCATTER_OP = torch.ops.vllm.reduce_scatter.default
 _PAD_OP = torch.ops.aten.constant_pad_nd.default
+_CAT_OP = torch.ops.aten.cat.default
+_FULL_OP = torch.ops.aten.full.default
 
 
 def _static_int(value: Any) -> int | None:
@@ -144,8 +146,77 @@ class MatmulReduceScatterPattern(_MatmulReduceScatterPattern):
         return replacement
 
 
-class PaddedMatmulReduceScatterPattern(_MatmulReduceScatterPattern):
-    """Match ``gemm -> padding -> reduce_scatter`` and move padding to input."""
+class CatPaddedMatmulReduceScatterPattern(_MatmulReduceScatterPattern):
+    """Match ``gemm -> cat(gemm, zeros) -> reduce_scatter``.
+
+    Padding the bias-free GEMM input is equivalent to appending zero rows to
+    its output, and avoids materializing padding for the much larger output.
+    """
+
+    def _get_scalar_workaround(self) -> dict[str, float | int] | None:
+        return {"pad_rows": 13}
+
+    def _get_extra_check(self):
+        base_check = super()._get_extra_check()
+
+        def supported(match: Match) -> bool:
+            if not base_check(match):
+                return False
+            gemm = next((node for node in match.nodes if node.target is _GEMM_OP), None)
+            cat = next((node for node in match.nodes if node.target is _CAT_OP), None)
+            zeros = next((node for node in match.nodes if node.target is _FULL_OP), None)
+            if gemm is None or cat is None or zeros is None:
+                return False
+
+            tensors = _arg(cat, 0, "tensors")
+            cat_dim = _arg(cat, 1, "dim", 0)
+            zeros_shape = _arg(zeros, 0, "size")
+            fill_value = _arg(zeros, 1, "fill_value")
+            gemm_val = gemm.meta.get("val")
+            zeros_val = zeros.meta.get("val")
+            return (
+                isinstance(tensors, (list, tuple))
+                and list(tensors) == [gemm, zeros]
+                and cat_dim == 0
+                and fill_value in (0, 0.0)
+                and isinstance(zeros_shape, (list, tuple))
+                and len(zeros_shape) == 2
+                and gemm_val is not None
+                and zeros_val is not None
+                and zeros_val.dim() == 2
+                and zeros_val.dtype == gemm_val.dtype
+                and zeros_val.device == gemm_val.device
+                and zeros_val.shape[1] == gemm_val.shape[1]
+            )
+
+        return supported
+
+    def get_pattern(self):
+        def pattern(x: torch.Tensor, weight: torch.Tensor, pad_rows: int) -> torch.Tensor:
+            gemm = torch.ops.vllm.unquantized_gemm.default(x, weight, None)
+            zeros = torch.ops.aten.new_zeros.default(gemm, [pad_rows, gemm.shape[1]])
+            padded = torch.ops.aten.cat.default([gemm, zeros], 0)
+            return torch.ops.vllm.reduce_scatter.default(
+                padded,
+                dim=0,
+                world_size=self.tp_size,
+                group_name=self.group_name,
+            )
+
+        return pattern
+
+    def get_replacement(self):
+        def replacement(x: torch.Tensor, weight: torch.Tensor, pad_rows: int) -> torch.Tensor:
+            padded = torch.ops.aten.constant_pad_nd.default(x, [0, 0, 0, pad_rows], 0.0)
+            return DeviceOperator.npu_mm_reduce_scatter_base(
+                padded, weight.t(), self.hcom_name, self.tp_size, reduce_op="sum"
+            )
+
+        return replacement
+
+
+class ConstantPaddedMatmulReduceScatterPattern(_MatmulReduceScatterPattern):
+    """Match legacy ``gemm -> constant_pad_nd -> reduce_scatter`` graphs."""
 
     def _get_scalar_workaround(self) -> dict[str, float | int] | None:
         return {"pad_rows": 13}
@@ -212,7 +283,10 @@ class MatmulReduceScatterFusionPass(VllmInductorPass):
         MatmulReduceScatterPattern(config, self.tp_size, self.group_name, self.hcom_name).register(
             self.pattern_match_passes
         )
-        PaddedMatmulReduceScatterPattern(config, self.tp_size, self.group_name, self.hcom_name).register(
+        CatPaddedMatmulReduceScatterPattern(config, self.tp_size, self.group_name, self.hcom_name).register(
+            self.pattern_match_passes
+        )
+        ConstantPaddedMatmulReduceScatterPattern(config, self.tp_size, self.group_name, self.hcom_name).register(
             self.pattern_match_passes
         )
 
