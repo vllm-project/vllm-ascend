@@ -25,7 +25,7 @@ Please refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for
 | `Qwen3.6-27B` (BF16 version) | 1 950DT Products(96GB × 8) node or 1 Atlas 800 A3 (64GB × 16) node or 1 Atlas 800 A2 (64GB × 8) node or Atlas 300I DUO | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3.6-27B) \| [Hugging Face](https://huggingface.co/Qwen/Qwen3.6-27B) |
 | `Qwen3.6-27B-w8a8` (Quantized version) | 1 Atlas 800 A3 (64GB × 16) node or 1 Atlas 800 A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-27B-w8a8) |
 | `Qwen3.6-27B-w8a8-mxfp8` (Quantized version) | 1 950DT Products (96GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-27B-w8a8-mxfp8) |
-| `Qwen3.6-27B-w8a8c8-mxfp8` (Quantized version) | 1 950DT Products (96GB × 8) or 1 950PR Products (128GB × 8) node |  |
+| `Qwen3.6-27B-w8a8c8-mxfp8` (Quantized version) | 1 950DT Products (96GB × 8) node | [ModelScope]() |
 | `Qwen3.6-27B-w8a8-310p`(Quantized version) | 1 Atlas 300I DUO | [ModelScope](https://modelscope.cn/models/Eco-Tech/Qwen3.6-27B-W8A8-310P) |
 
 - `Qwen3.6-27B-w8a8c8-mxfp8` (W8A8 MXFP8 quantization with C8 MXFP8 KV cache): serve it with `--kv-cache-dtype mxfp8`; recommended for long-sequence scenarios.
