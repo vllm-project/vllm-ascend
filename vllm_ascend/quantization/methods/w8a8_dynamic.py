@@ -30,7 +30,13 @@ from vllm_ascend.ops.fused_moe.experts_selector import select_experts, zero_expe
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, enable_dsa_cp, maybe_trans_nz
 
-from .base import AscendLinearScheme, AscendMoEScheme, QuantType, get_moe_num_logical_experts
+from .base import (
+    AscendLinearScheme,
+    AscendMoEScheme,
+    QuantType,
+    TPWeightGatherSpec,
+    get_moe_num_logical_experts,
+)
 from .registry import register_scheme
 
 
@@ -53,6 +59,13 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
     """
 
     act_quant_type: torch.dtype = torch.int8
+    tp_weight_gather_specs = (TPWeightGatherSpec("weight"),)
+    tp_weight_output_gather_specs = (
+        TPWeightGatherSpec("weight", gather_dim=1),
+        TPWeightGatherSpec("weight_scale"),
+        TPWeightGatherSpec("weight_offset"),
+    )
+    supports_tp_weight_switch = True
 
     def __init__(self):
         pass
