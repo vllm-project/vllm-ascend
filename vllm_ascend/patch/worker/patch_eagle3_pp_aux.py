@@ -211,6 +211,13 @@ def patch_eagle3_pp_aux_propagation(inner_model: nn.Module) -> bool:
     from vllm.model_executor.models.deepseek_v2 import DeepseekV2Model
     from vllm.model_executor.models.interfaces import EagleModelMixin
 
+    if getattr(inner_model, "supports_aux_hidden_states_over_pp", False):
+        logger.info(
+            "%s provides native Eagle3 PP aux propagation; preserving its forward.",
+            type(inner_model).__name__,
+        )
+        return False
+
     if isinstance(inner_model, DeepseekV2Model):
         make_forward = _make_deepseek_v2_forward
     elif isinstance(inner_model, EagleModelMixin):
