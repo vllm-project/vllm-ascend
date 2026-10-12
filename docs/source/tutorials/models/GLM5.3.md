@@ -502,6 +502,12 @@ commands in Section 5.4.4): `--dp-size 16 --tp-size 2 --dp-size-local 4`,
 `--dp-rank-start` 0/4/8/12 per node, DP RPC port 12990 on
 `<DECODE_NODE0_IP>`, and API ports 10010-10013.
 
+The Decode script follows the GLM-5.2 `run_dp_template.sh` convention: the
+launcher supplies `$1`-`$7`, while `LOCAL_IP`, `NIC_NAME`, and `MODEL_PATH`
+are node-level settings. Prefill is intentionally different because TP16 with
+PP2 spans four nodes; `vllm serve` must receive `--nnodes 4` and `--node-rank`
+directly instead of being started as independent DP processes.
+
 #### 5.4.2 Prefill Engine Script
 
 Save the following complete script as `start_p_engine.sh`. One copy
@@ -534,9 +540,9 @@ if [ "$NODE_RANK" = "0" ]; then
   API_SERVER_COUNT="--api-server-count 1"
 fi
 
-MODEL_PATH=${MODEL_PATH:-/path/to/GLM-5.3-w8a8c8}
-NIC="<NETWORK_INTERFACE>"       # set to your business-network interface
-P_MASTER_IP="<PREFILL_NODE0_IP>"  # TCP store + DP RPC master (node 0)
+NIC_NAME=${NIC_NAME:?export NIC_NAME to the business-network interface}
+P_MASTER_IP=${P_MASTER_IP:?export P_MASTER_IP to the Prefill master IP}
+MODEL_PATH=${MODEL_PATH:?export MODEL_PATH to the model directory}
 
 unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
 source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh
@@ -547,15 +553,14 @@ source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh
 # RoCE IP fails with EI0001. Only the host-side topology socket is
 # pinned, because a host-agent vNIC can otherwise be incorrectly selected and
 # hang the startup in SYN_SENT.
-export HCCL_SOCKET_IFNAME=$NIC
+export HCCL_SOCKET_IFNAME=$NIC_NAME
 export VLLM_HOST_IP=$LOCAL_IP
-export GLOO_SOCKET_IFNAME=$NIC
-export TP_SOCKET_IFNAME=$NIC
+export GLOO_SOCKET_IFNAME=$NIC_NAME
+export TP_SOCKET_IFNAME=$NIC_NAME
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
 export HCCL_EXEC_TIMEOUT=7200
 export HCCL_CONNECT_TIMEOUT=7200
 export VLLM_RPC_TIMEOUT=360000 VLLM_ENGINE_READY_TIMEOUT_S=1200
-export VLLM_ASCEND_ENABLE_MLAPO=1
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
 export HCCL_BUFFSIZE=1024
@@ -566,8 +571,6 @@ export VLLM_USE_V1=1
 export CPU_AFFINITY_CONF=1
 export ACL_OP_INIT_MODE=1
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-export PROMETHEUS_MULTIPROC_DIR=/dev/shm/vllm_metrics_p
-mkdir -p "$PROMETHEUS_MULTIPROC_DIR"
 
 exec vllm serve "$MODEL_PATH" \
   --host 0.0.0.0 \
@@ -626,6 +629,9 @@ set -euo pipefail
 
 LOCAL_IP=${1:?need local_ip}
 NODE_RANK=${2:?need node_rank}
+export NIC_NAME="<NETWORK_INTERFACE>"
+export P_MASTER_IP="<PREFILL_NODE0_IP>"
+export MODEL_PATH="<YOUR_MODEL_PATH>"
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 mkdir -p "$SCRIPT_DIR/logs"
 
@@ -649,7 +655,7 @@ DP_RANK=$4
 DP_ADDRESS=$5
 DP_RPC_PORT=$6
 TP_SIZE=$7
-MODEL_PATH=${MODEL_PATH:-/path/to/GLM-5.3-w8a8c8}
+MODEL_PATH=${MODEL_PATH:?export MODEL_PATH to the model directory}
 
 LOCAL_IP=${LOCAL_IP:?export LOCAL_IP to this node IP before starting}
 NIC_NAME=${NIC_NAME:?export NIC_NAME to the interface carrying LOCAL_IP}
@@ -678,8 +684,6 @@ export VLLM_USE_V1=1
 export CPU_AFFINITY_CONF=1
 export ACL_OP_INIT_MODE=1
 export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE_DEVICES
-export PROMETHEUS_MULTIPROC_DIR=/dev/shm/vllm_metrics_d_${DP_RANK}
-mkdir -p "$PROMETHEUS_MULTIPROC_DIR"
 export VLLM_MOONCAKE_ZMQ_RETRIES=20 VLLM_MOONCAKE_ZMQ_RETRY_SLEEP=0.5
 
 exec vllm serve "$MODEL_PATH" \
@@ -759,6 +763,7 @@ started nearly simultaneously.
     SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
     mkdir -p "$SCRIPT_DIR/logs"
     export LOCAL_IP
+    export MODEL_PATH="<YOUR_MODEL_PATH>"
     export NIC_NAME=$(ip -o -4 addr show | grep "$LOCAL_IP/" | awk '{print $2}' | head -1)
 
     exec python3 "$SCRIPT_DIR/launch_online_dp.py" \
