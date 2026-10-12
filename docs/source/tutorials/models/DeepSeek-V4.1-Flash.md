@@ -642,6 +642,16 @@ and use the `main` branch with the matching vLLM revision recorded in
 
 === "A2 series"
 
+    > [!WARNING]
+    > The A2 configuration below is retained unchanged and **has not been
+    > revalidated** with INT8 Engram storage. Field reports on four A2 nodes
+    > could only start with `--max-model-len 524288`; the 1M setting below
+    > is not validated on A2 and has been reported to OOM
+    > (#18158, #18092). Context lengths on this page are also inconsistent
+    > by section (A3 colocated uses 150000 while the PD and A2 sections use
+    > 1048576); treat the A2 value as unverified until a revised A2
+    > configuration is documented.
+
     The existing A2 configuration is retained unchanged in this update. It uses
     four Atlas 800 A2 servers with one local DP rank per server and a global
     DP4/TP8/EP32 topology.
@@ -701,6 +711,7 @@ and use the `main` branch with the matching vLLM revision recorded in
       --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}' \
       --safetensors-load-strategy lazy \
       --quantization ascend \
+      --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
       --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_npugraph_ex":false,"enable_static_kernel":false}}' \
       --speculative-config '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}' \
       --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
@@ -840,7 +851,12 @@ For common environment, installation, and parameter issues, refer to the
 - The documented A3 deployments use either one server in colocated mode or two
   servers in 1P1D mode, with an Ascend W8A8 checkpoint and INT8 Engram storage.
 - The A2 configuration is retained unchanged and is not revalidated by this
-  update. Its revised configuration will be documented separately.
+  update. Its revised configuration will be documented separately. The 1M
+  `--max-model-len` in the A2 section is **not validated on A2**: field
+  reports could only start with 512K on four A2 nodes (#18092) and reported
+  OOM with the documented 1M parameters (#18158). The A3 sections use
+  inconsistent context lengths themselves (150000 colocated vs 1048576
+  1P1D); both are A3-validated values and are not applicable to A2.
 - DeepSeek-V4.1-Flash currently supports only model runner V1 on Ascend. Keep
   `VLLM_USE_V2_MODEL_RUNNER=0` in every A3 serving script. Pipeline parallelism
   is not covered by this guide.
