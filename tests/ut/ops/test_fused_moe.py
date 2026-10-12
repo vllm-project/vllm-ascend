@@ -179,6 +179,32 @@ def test_ascend_runner_promotes_runtime_state_to_buffer():
     assert dict(runner.named_buffers())["runtime_state"] is state
 
 
+def test_process_weights_after_loading_keeps_per_expert_nd_for_mega_moe(monkeypatch):
+    method = _build_unquantized_method()
+    layer = _build_weight_layer()
+    ascend_config = SimpleNamespace(enable_fused_mc2=1)
+    format_cast = MagicMock()
+
+    monkeypatch.setattr(fused_moe_module, "_MEGA_MOE_SUPPORTED", True)
+    monkeypatch.setattr(fused_moe_module, "get_ascend_config", lambda: ascend_config)
+    monkeypatch.setattr(fused_moe_module.torch_npu, "npu_format_cast", format_cast)
+    upstream_method_base = AscendUnquantizedFusedMoEMethod.__mro__[2]
+    monkeypatch.setattr(
+        upstream_method_base,
+        "process_weights_after_loading",
+        lambda self, layer: None,
+        raising=False,
+    )
+
+    method.process_weights_after_loading(layer)
+
+    assert len(layer.w13_weight_list) == layer.w13_weight.shape[0]
+    assert len(layer.w2_weight_list) == layer.w2_weight.shape[0]
+    assert all(weight.is_contiguous() for weight in layer.w13_weight_list)
+    assert all(weight.is_contiguous() for weight in layer.w2_weight_list)
+    format_cast.assert_not_called()
+
+
 @pytest.mark.parametrize("moe_comm_type", [MoECommType.ALLGATHER, MoECommType.FUSED_MC2])
 def test_unquantized_apply_builds_current_fused_experts_input(monkeypatch, moe_comm_type):
     method = _build_unquantized_method()
@@ -190,6 +216,7 @@ def test_unquantized_apply_builds_current_fused_experts_input(monkeypatch, moe_c
     moe_comm_method = MagicMock()
     moe_comm_method.fused_experts.return_value = routed_out
 
+    monkeypatch.setattr(fused_moe_module, "_MEGA_MOE_SUPPORTED", True)
     monkeypatch.setattr(
         fused_moe_module,
         "_EXTRA_CTX",
@@ -229,6 +256,10 @@ def test_unquantized_apply_builds_current_fused_experts_input(monkeypatch, moe_c
     if moe_comm_type == MoECommType.FUSED_MC2:
         assert fused_input.weights.w1[0] is layer.w13_weight
         assert fused_input.weights.w2[0] is layer.w2_weight
+        assert fused_input.weights.w1_scale is None
+        assert fused_input.weights.w2_scale is None
+        assert fused_input.weights.w1_scale_bias is None
+        assert fused_input.weights.w2_scale_bias is None
     else:
         assert fused_input.weights.w1 is layer.w13_weight
         assert fused_input.weights.w2 is layer.w2_weight
