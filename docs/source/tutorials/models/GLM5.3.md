@@ -86,7 +86,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
     ```shell
 
-    export IMAGE=quay.io/ascend/vllm-ascend:v0.30.0rc1-a2
+    export IMAGE=quay.io/ascend/vllm-ascend:v0.30.0rc1
     docker run --rm \
         --name vllm-ascend \
         --shm-size=1g \
