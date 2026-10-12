@@ -59,7 +59,7 @@ Unless stated otherwise, these optimizations are selected automatically for the 
 
 - vLLM: v0.30.0
 - CANN: 9.2.0
-- Ascend HDK: 26.0.RC1
+- Ascend HDK: 26.1.1
 - PyTorch / torch_npu: 2.10.0 / 2.10.0.post4
 - Triton Ascend: 3.2.2
 - mooncake-transfer-engine-npu: 0.3.11.post1
