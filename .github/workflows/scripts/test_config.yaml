@@ -42,10 +42,60 @@
 curated_tests:
   kvpp:
     - tests/e2e/pull_request/two_card/test_kvpp.py
-  # A5 (Ascend 950) curated test suite
+  # A5 (Ascend 950) curated test suite.
+  # one_card files here are removed from the A2 partition by select_tests.py
+  # unless this suite itself is selected. A2-only kernels (TurboQuant, SFA,
+  # QKV-norm RoPE fusion, xlite, 310P, VL/MiniCPM) stay on the A2 scan.
   a5:
     - tests/e2e/pull_request/four_card/test_data_parallel_tp2.py
     - tests/e2e/pull_request/one_card/test_msa_index_score.py
+    # Graph and compile
+    - tests/e2e/pull_request/one_card/test_qwen3_0_6b.py
+    - tests/e2e/pull_request/one_card/aclgraph/test_device_metadata.py
+    - tests/e2e/pull_request/one_card/compile/test_norm_quant_fusion.py
+    - tests/e2e/pull_request/one_card/compile/test_graphex_norm_quant_fusion.py
+    # Serving features
+    - tests/e2e/pull_request/one_card/test_guided_decoding.py
+    - tests/e2e/pull_request/one_card/test_batch_job_aware_scheduler_e2e.py
+    - tests/e2e/pull_request/one_card/test_completion_with_prompt_embeds.py
+    - tests/e2e/pull_request/one_card/test_multi_instance.py
+    - tests/e2e/pull_request/one_card/test_thinking_budget.py
+    - tests/e2e/pull_request/one_card/test_gumbel_sampling.py
+    - tests/e2e/pull_request/one_card/test_sampler.py
+    # Model runner v2
+    - tests/e2e/pull_request/one_card/model_runner_v2/test_qwen3_0_6B_basic.py
+    - tests/e2e/pull_request/one_card/model_runner_v2/test_qwen3_8B.py
+    - tests/e2e/pull_request/one_card/model_runner_v2/test_deepseek_v2_lite_w8a8_basic.py
+    - tests/e2e/pull_request/one_card/model_runner_v2/test_deepseek_mtp.py
+    - tests/e2e/pull_request/one_card/model_runner_v2/test_qwen3_8b_dflash.py
+    - tests/e2e/pull_request/one_card/model_runner_v2/test_qwen3_8b_dspark.py
+    - tests/e2e/pull_request/one_card/spec_decode
+    # LoRA on models A5 supports
+    - tests/e2e/pull_request/one_card/lora/test_qwen3_multi_loras.py
+    - tests/e2e/pull_request/one_card/lora/test_qwen35_densemodel_lora.py
+    - tests/e2e/pull_request/one_card/lora/test_qwen3_reranker_lora.py
+    - tests/e2e/pull_request/one_card/lora/test_lora_with_spec_decode.py
+    # Pooling, hybrid, quant, attention
+    - tests/e2e/pull_request/one_card/pooling/test_embedding.py
+    - tests/e2e/pull_request/one_card/test_qwen3_embedding_0_6b.py
+    - tests/e2e/pull_request/one_card/pooling/test_qwen3_embedding_mrv2.py
+    - tests/e2e/pull_request/one_card/pooling/test_scoring.py
+    - tests/e2e/pull_request/one_card/test_qwen3_5_0_8b.py
+    - tests/e2e/pull_request/one_card/test_qwen3_8b_w8a8.py
+    - tests/e2e/pull_request/one_card/test_linear_quantization.py
+    - tests/e2e/pull_request/one_card/test_attention_v1_precision.py
+    - tests/e2e/pull_request/one_card/test_mla_precision.py
+    - tests/e2e/pull_request/one_card/test_minimax_m3_sparse_attn.py
+    - tests/e2e/pull_request/one_card/test_minimax_qknorm_rope_cache.py
+    - tests/e2e/pull_request/one_card/test_gdn_layerwise_kv.py
+    - tests/e2e/pull_request/one_card/test_multistream_overlap_shared_expert.py
+    # Offload and RLHF state transitions
+    - tests/e2e/pull_request/one_card/test_simple_cpu_offload.py
+    - tests/e2e/pull_request/one_card/test_cpu_offloading.py
+    - tests/e2e/pull_request/one_card/test_cpu_weight_offload.py
+    - tests/e2e/pull_request/one_card/rlhf/state_transitions/test_sleep_wake.py
+    - tests/e2e/pull_request/one_card/rlhf/state_transitions/test_pause_resume.py
+    - tests/e2e/pull_request/one_card/rlhf/state_transitions/test_npu_ipc_weight_transfer.py
 
 # === Skipped Tests ===
 # Removed from any selection after directory scanning, so they are never

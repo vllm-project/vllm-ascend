@@ -432,6 +432,47 @@ def _load_accuracy_tests(meta: dict) -> set[str]:
     return tests
 
 
+def _expand_test_files(targets: list[str]) -> set[str]:
+    """Expand file or directory targets to posix ``test_*.py`` paths."""
+    files: set[str] = set()
+    for target in targets:
+        file_path = _as_posix_path(_pytest_node_file_path(target).rstrip("/"))
+        path = Path(file_path)
+        if path.is_dir():
+            for test_file in path.rglob("test_*.py"):
+                if "__pycache__" in test_file.parts:
+                    continue
+                files.add(_as_posix_path(str(test_file)))
+        else:
+            files.add(file_path)
+    return files
+
+
+def _a2_tests_relocated_to_a5(curated_tests: dict[str, list[str]]) -> set[str]:
+    """Return one_card files owned by the A5 curated suite.
+
+    Those files still live under ``tests/e2e/pull_request/one_card``, which
+    directory scans route to the A2 partition. Non-A5 selections drop them so
+    they run only through ``--curated a5``.
+    """
+    relocated: set[str] = set()
+    for test_file in _expand_test_files(curated_tests.get("a5", [])):
+        if _route_e2e_file(test_file) == "a2-1":
+            relocated.add(test_file)
+    return relocated
+
+
+def _drop_tests(groups: dict[PartitionKey, list[str]], dropped: set[str]) -> None:
+    if not dropped:
+        return
+    for key in list(groups.keys()):
+        groups[key] = [
+            target
+            for target in groups[key]
+            if _as_posix_path(_pytest_node_file_path(target).rstrip("/")) not in dropped
+        ]
+
+
 def _load_curated_tests(meta: dict) -> dict[str, list[str]]:
     """Load curated test suites from the config meta dict.
 
@@ -506,12 +547,16 @@ def _apply_runner_label_override(
     runner_label: str,
     runners: dict[str, RunnerInfo],
     partition_config: dict[PartitionKey, PartitionInfo],
+    count: int = 1,
 ) -> tuple[dict[PartitionKey, list[str]], dict[PartitionKey, PartitionInfo]]:
     """Route every non-CPU group to an exact runner label.
 
     The override is intentionally transient: it does not need a static entry
     in ``test_config.yaml``. CPU groups retain their configured partitions.
+    ``count`` is the number of load-balanced shards for the override partition.
     """
+    if count < 1:
+        raise ValueError("--runner-override-count must be >= 1")
     override_runner = runners.get(runner_label)
     if override_runner is None:
         raise ValueError(f"Unknown runner label for --runner-label-override: {runner_label}")
@@ -531,7 +576,7 @@ def _apply_runner_label_override(
     updated_partition_config = dict(partition_config)
     updated_partition_config[override_key] = PartitionInfo(
         runner_label=runner_label,
-        count=1,
+        count=count,
     )
     return overridden, updated_partition_config
 
@@ -757,6 +802,12 @@ def main():
         help="Force route all non-CPU tests to an exact label from runner_label.json",
     )
     parser.add_argument(
+        "--runner-override-count",
+        type=int,
+        default=1,
+        help="Load-balanced shard count for --runner-label-override. Default 1.",
+    )
+    parser.add_argument(
         "--skip-cpu-ut",
         action="store_true",
         help="Drop tests/ut targets from every selection mode. Used by the PR "
@@ -855,6 +906,12 @@ def main():
             all_groups[key] = filtered
         _dedup_groups(all_groups)
 
+    # one_card files listed in curated_tests.a5 have moved off A2. Keep them
+    # only for the A5 curated run; every other selection drops them.
+    if args.curated != "a5":
+        _drop_tests(all_groups, _a2_tests_relocated_to_a5(curated_tests))
+        _dedup_groups(all_groups)
+
     # Normalize every input mode. A bare file contains all of its nodeids,
     # even when the targets came from different selection modes.
     _dedup_groups(all_groups)
@@ -874,6 +931,7 @@ def main():
                 args.runner_label_override,
                 runners,
                 partition_config,
+                count=args.runner_override_count,
             )
         except ValueError as exc:
             parser.error(str(exc))

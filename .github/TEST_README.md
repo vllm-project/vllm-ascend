@@ -67,7 +67,8 @@ numeric `partition` value remains available for artifacts and load balancing.
 Workflows that temporarily reroute selected tests can use
 `--runner-label-override` with an exact label from `runner_label.json`. This
 override is applied after pinned routes, has the highest priority, and creates
-a transient single-shard partition for that invocation.
+a transient partition for that invocation. ``--runner-override-count`` sets how
+many load-balanced shards that partition uses; the default is one shard.
 
 ## `select_tests.py` Modes
 
