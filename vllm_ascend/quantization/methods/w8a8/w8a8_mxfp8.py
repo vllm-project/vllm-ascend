@@ -32,8 +32,7 @@ from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.moe_utils import cumsum_group_list, maybe_normalize_mxfp_scale_layout
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
 from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
-from vllm_ascend.utils import FP8_METHOD, dispose_tensor, maybe_trans_nz
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, FP8_METHOD, dispose_tensor, maybe_trans_nz
 
 from ..base import (
     AscendLinearScheme,
@@ -464,9 +463,7 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
                     weight_list.append(expert)
                 list_prefix = ""
             if use_mega_moe:
-                scale_list = [
-                    expert.clone().view(torch.float8_e8m0fnu) for expert in scale_nd.unbind(dim=0)
-                ]
+                scale_list = [expert.clone().view(torch.float8_e8m0fnu) for expert in scale_nd.unbind(dim=0)]
             else:
                 scale_list = [expert.clone() for expert in scale_nd.unbind(dim=0)]
 
