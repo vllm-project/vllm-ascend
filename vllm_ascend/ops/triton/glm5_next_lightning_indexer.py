@@ -17,6 +17,9 @@ TRITON_PREFILL_INDEX_MIN_TOKENS = 512
 TRITON_PREFILL_MIN_TOKENS = 32
 TRITON_PREFILL_POOL_TILE = 2048
 TRITON_PACKED_CACHE_BYTES = 256 * 1024 * 1024
+TRITON_TOPK_PARTITIONS = 4
+TRITON_TOPK_MAX_TILE = 512
+TRITON_TOPK_MAX_HEAD_DIM = 128
 NEG_INF_SENTINEL = torch.finfo(torch.float32).min
 # Masked request ends must sort after every valid token offset.
 QUERY_END_SENTINEL = torch.iinfo(torch.int32).max
@@ -55,6 +58,57 @@ def _gather_pool_cache(
             keys,
             (pools < pools_count)[:, None],
         )
+
+
+@triton.jit
+def _score_pool_tile(
+    weighted_query,
+    cache,
+    block_table,
+    request,
+    pool_start,
+    visible,
+    max_pool_seq_len,
+    num_cache_blocks,
+    CACHE_SB: tl.constexpr,
+    CACHE_ST: tl.constexpr,
+    CACHE_SD: tl.constexpr,
+    TABLE_SR: tl.constexpr,
+    TABLE_SP: tl.constexpr,
+    CACHE_BLOCK: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    BLOCK_POOL: tl.constexpr,
+    LOWEST: tl.constexpr,
+    INDEX32: tl.constexpr,
+    PACKED_CACHE: tl.constexpr,
+):
+    pools = pool_start + tl.arange(0, BLOCK_POOL)
+    dims = tl.arange(0, HEAD_DIM)
+    valid = (pools < max_pool_seq_len) & (pools < visible)
+    if PACKED_CACHE:
+        k = tl.load(
+            cache + (request * max_pool_seq_len + pools[:, None]) * HEAD_DIM + dims[None, :],
+            valid[:, None],
+            other=0,
+        )
+    elif INDEX32:
+        blocks = tl.load(
+            block_table + request * TABLE_SR + (pools // CACHE_BLOCK) * TABLE_SP,
+            valid,
+            other=0,
+        )
+        blocks = tl.minimum(tl.maximum(blocks, 0), num_cache_blocks - 1)
+        offsets = blocks[:, None] * CACHE_SB + (pools % CACHE_BLOCK)[:, None] * CACHE_ST
+        k = tl.load(cache + offsets + dims[None, :] * CACHE_SD, valid[:, None], other=0)
+    else:
+        # Large caches use a scalar int64 page base and page-local int32 offsets.
+        block = tl.load(block_table + request * TABLE_SR + (pool_start // CACHE_BLOCK) * TABLE_SP)
+        block = tl.minimum(tl.maximum(block, 0), num_cache_blocks - 1).to(tl.int64)
+        page_base = cache + block * CACHE_SB
+        offsets = tl.arange(0, BLOCK_POOL)
+        k = tl.load(page_base + offsets[:, None] * CACHE_ST + dims[None, :] * CACHE_SD, valid[:, None], other=0)
+    scores = tl.sum(k.to(tl.float32) * weighted_query[None, :], axis=1)
+    return tl.where(valid & (scores == scores), tl.minimum(tl.maximum(scores, LOWEST), -LOWEST), LOWEST)
 
 
 @triton.jit(do_not_specialize=["token_offset", "rows", "max_pool_seq_len", "num_reqs", "num_cache_blocks"])
@@ -105,40 +159,141 @@ def _glm5_next_lightning_indexer_score_kernel(
             pools = pool_start + tl.arange(0, BLOCK_POOL)
             scores = tl.full((BLOCK_POOL,), LOWEST, tl.float32)
             if live & (pool_start < visible):
-                valid = (pools < max_pool_seq_len) & (pools < visible)
-                if PACKED_CACHE:
-                    k = tl.load(
-                        cache + (request * max_pool_seq_len + pools[:, None]) * HEAD_DIM + dims[None, :],
-                        valid[:, None],
-                        other=0,
-                    )
-                elif INDEX32:
-                    pages = pools // CACHE_BLOCK
-                    blocks = tl.load(
-                        block_table + request * table_stride_r + pages * table_stride_p,
-                        pools < max_pool_seq_len,
-                        other=0,
-                    )
-                    blocks = tl.minimum(tl.maximum(blocks, 0), num_cache_blocks - 1)
-                    offsets = blocks[:, None] * cache_stride_b + (pools % CACHE_BLOCK)[:, None] * cache_stride_t
-                    k = tl.load(cache + offsets + dims[None, :] * cache_stride_d, valid[:, None], other=0)
-                else:
-                    # Large caches need a scalar int64 page base; vector offsets
-                    # remain within one page to avoid overflowing signed int32.
-                    block = tl.load(
-                        block_table + request * table_stride_r + (pool_start // CACHE_BLOCK) * table_stride_p
-                    )
-                    block = tl.minimum(tl.maximum(block, 0), num_cache_blocks - 1).to(tl.int64)
-                    page_base = cache + block * cache_stride_b
-                    offsets = tl.arange(0, BLOCK_POOL)
-                    k = tl.load(
-                        page_base + offsets[:, None] * cache_stride_t + dims[None, :] * cache_stride_d,
-                        valid[:, None],
-                        other=0,
-                    )
-                scores = tl.sum(k.to(tl.float32) * weighted_query[None, :], axis=1)
-                scores = tl.where(valid & (scores == scores), tl.minimum(tl.maximum(scores, LOWEST), -LOWEST), LOWEST)
+                scores = _score_pool_tile(
+                    weighted_query,
+                    cache,
+                    block_table,
+                    request,
+                    pool_start,
+                    visible,
+                    max_pool_seq_len,
+                    num_cache_blocks,
+                    cache_stride_b,
+                    cache_stride_t,
+                    cache_stride_d,
+                    table_stride_r,
+                    table_stride_p,
+                    CACHE_BLOCK,
+                    HEAD_DIM,
+                    BLOCK_POOL,
+                    LOWEST,
+                    INDEX32,
+                    PACKED_CACHE,
+                )
             tl.store(output + row * max_pool_seq_len + pools, scores, pools < max_pool_seq_len)
+
+
+@triton.jit
+def _sort_score_id_pairs(scores, ids, LOG_WIDTH: tl.constexpr):
+    """Descending bitonic sort, with pool IDs breaking score ties."""
+    lanes = tl.arange(0, 1 << LOG_WIDTH)
+    for stage in tl.static_range(1, LOG_WIDTH + 1):
+        for bit in tl.static_range(stage - 1, -1, -1):
+            partners = lanes ^ (1 << bit)
+            other_scores = tl.gather(scores, partners, axis=0)
+            # Ascend gather supports fp32; bitcasts preserve every ID bit.
+            other_ids = tl.gather(ids.to(tl.float32, bitcast=True), partners, axis=0).to(tl.int32, bitcast=True)
+            greater = (scores > other_scores) | ((scores == other_scores) & (ids < other_ids))
+            less = (scores < other_scores) | ((scores == other_scores) & (ids > other_ids))
+            keep_greater = ((lanes & (1 << stage)) == 0) == ((lanes & (1 << bit)) == 0)
+            swap = tl.where(keep_greater, less, greater)
+            scores = tl.where(swap, other_scores, scores)
+            ids = tl.where(swap, other_ids, ids)
+    return scores, ids
+
+
+@triton.jit(do_not_specialize=["token_offset", "rows", "max_pool_seq_len", "num_reqs", "num_cache_blocks"])
+def _streaming_pool_topk(
+    qbar,
+    cache,
+    query_ends,
+    pool_lens,
+    block_table,
+    positions,
+    candidate_scores,
+    candidate_ids,
+    token_offset,
+    rows,
+    max_pool_seq_len,
+    num_reqs,
+    num_cache_blocks,
+    CACHE_SB: tl.constexpr,
+    CACHE_ST: tl.constexpr,
+    CACHE_SD: tl.constexpr,
+    TABLE_SR: tl.constexpr,
+    TABLE_SP: tl.constexpr,
+    CACHE_BLOCK: tl.constexpr,
+    REQ_POW2: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    POOL: tl.constexpr,
+    BLOCK_POOL: tl.constexpr,
+    LOWEST: tl.constexpr,
+    INDEX32: tl.constexpr,
+    TOPK_TILE: tl.constexpr,
+    PARTITIONS: tl.constexpr,
+    SORT_LOG_WIDTH: tl.constexpr,
+    QUERY_END_SENTINEL: tl.constexpr,
+):
+    lanes = tl.arange(0, TOPK_TILE)
+    dims = tl.arange(0, HEAD_DIM)
+    requests = tl.arange(0, REQ_POW2)
+    for work in range(tl.program_id(0), rows * PARTITIONS, tl.num_programs(0)):
+        row, partition = work // PARTITIONS, work % PARTITIONS
+        token = row + token_offset
+        ends = tl.load(query_ends + requests, requests < num_reqs, other=QUERY_END_SENTINEL)
+        request = tl.minimum(tl.sum((token >= ends).to(tl.int32)), num_reqs - 1)
+        live = token < tl.load(query_ends + num_reqs - 1)
+        position = tl.load(positions + token).to(tl.int32)
+        visible = tl.minimum((position + 1) // POOL, tl.load(pool_lens + request))
+        visible = tl.where(live, tl.minimum(visible, max_pool_seq_len), 0)
+        weighted_query = tl.load(qbar + row * HEAD_DIM + dims)
+        best_scores = tl.full((TOPK_TILE,), LOWEST, tl.float32)
+        best_ids = tl.full((TOPK_TILE,), -1, tl.int32)
+        # The bound is refreshed from device metadata on every graph replay.
+        for pool_start in range(partition * TOPK_TILE, visible, PARTITIONS * TOPK_TILE):
+            scores = tl.full((TOPK_TILE,), LOWEST, tl.float32)
+            for sub in tl.static_range(TOPK_TILE // BLOCK_POOL):
+                sub_start = pool_start + sub * BLOCK_POOL
+                if sub_start < visible:
+                    sub_scores = _score_pool_tile(
+                        weighted_query,
+                        cache,
+                        block_table,
+                        request,
+                        sub_start,
+                        visible,
+                        max_pool_seq_len,
+                        num_cache_blocks,
+                        CACHE_SB,
+                        CACHE_ST,
+                        CACHE_SD,
+                        TABLE_SR,
+                        TABLE_SP,
+                        CACHE_BLOCK,
+                        HEAD_DIM,
+                        BLOCK_POOL,
+                        LOWEST,
+                        INDEX32,
+                        False,
+                    )
+                    scores = tl.where(
+                        lanes // BLOCK_POOL == sub, tl.gather(sub_scores, lanes % BLOCK_POOL, axis=0), scores
+                    )
+            ids = tl.where(scores > LOWEST, pool_start + lanes, -1)
+            if pool_start == partition * TOPK_TILE:
+                # One tile already fits in the candidate buffer, without sorting.
+                best_scores, best_ids = scores, ids
+            else:
+                merged_scores, merged_ids = _sort_score_id_pairs(
+                    tl.cat(best_scores, scores),
+                    tl.cat(best_ids, ids),
+                    SORT_LOG_WIDTH,
+                )
+                best_scores = tl.gather(merged_scores, lanes, axis=0)
+                best_ids = tl.gather(merged_ids.to(tl.float32, bitcast=True), lanes, axis=0).to(tl.int32, bitcast=True)
+        output_offsets = (row * PARTITIONS + partition) * TOPK_TILE + lanes
+        tl.store(candidate_scores + output_offsets, best_scores)
+        tl.store(candidate_ids + output_offsets, best_ids)
 
 
 @triton.jit(do_not_specialize=["rows", "token_offset", "selected", "last_query"])
@@ -214,6 +369,7 @@ def glm5_next_lightning_indexer_triton(
     output_buffer: torch.Tensor | None = None,
     pack_tail: bool = False,
     allow_cache_packing: bool = True,
+    use_streaming_topk: bool = True,
 ) -> torch.Tensor:
     """Select pools, expand tokens and optionally write the final SFA buffer."""
     num_tokens, _, head_dim = query.shape
@@ -253,6 +409,17 @@ def glm5_next_lightning_indexer_triton(
         and cum_query_lens.numel() * max_pool_seq_len * head_dim * indexer_cache.element_size()
         <= TRITON_PACKED_CACHE_BYTES
     )
+    block_pool = TRITON_POOL_CHUNK_SIZE if index32 else indexer_cache.shape[1]
+    topk_tile = next_power_of_2(selected) if selected else 1
+    candidate_width = TRITON_TOPK_PARTITIONS * topk_tile
+    streaming_topk = (
+        use_streaming_topk
+        and not packed_cache
+        and selected > 0
+        and block_pool <= topk_tile <= TRITON_TOPK_MAX_TILE
+        and head_dim <= TRITON_TOPK_MAX_HEAD_DIM
+        and max_pool_seq_len > candidate_width
+    )
     if packed_cache:
         cache = torch.empty(
             (cum_query_lens.numel(), max_pool_seq_len, 1, head_dim),
@@ -279,7 +446,8 @@ def glm5_next_lightning_indexer_triton(
         )
     else:
         cache = indexer_cache
-    token_chunk = max(1, TRITON_SCORES_CHUNK_BYTES // max(4, max_pool_seq_len * 4))
+    scratch_row_bytes = candidate_width * 8 if streaming_topk else max_pool_seq_len * 4
+    token_chunk = max(1, TRITON_SCORES_CHUNK_BYTES // max(4, scratch_row_bytes))
     for start in range(0, num_tokens, token_chunk):
         rows = min(token_chunk, num_tokens - start)
         if selected:
@@ -290,42 +458,78 @@ def glm5_next_lightning_indexer_triton(
                 .sum(dim=1)
                 .contiguous()
             )
-            scores = torch.empty((rows, max_pool_seq_len), dtype=torch.float32, device=query.device)
-            block_pool = TRITON_POOL_CHUNK_SIZE if index32 else indexer_cache.shape[1]
-            outer_pool = max(TRITON_PREFILL_POOL_TILE, block_pool) if rows >= TRITON_PREFILL_MIN_TOKENS else block_pool
-            chunks = triton.cdiv(max_pool_seq_len, outer_pool)
-            _glm5_next_lightning_indexer_score_kernel[(min(rows * chunks, TRITON_MAX_PROGRAMS),)](
-                qbar,
-                cache,
-                cum_query_lens,
-                indexer_seq_lens,
-                indexer_block_table,
-                positions,
-                scores,
-                start,
-                rows,
-                max_pool_seq_len,
-                cum_query_lens.numel(),
-                indexer_cache.shape[0],
-                0 if packed_cache else cache.stride(0),
-                cache.stride(1),
-                cache.stride(3),
-                *indexer_block_table.stride(),
-                indexer_cache.shape[1],
-                QUERY_END_SENTINEL,
-                next_power_of_2(cum_query_lens.numel()),
-                head_dim,
-                index_kpool,
-                block_pool,
-                NEG_INF_SENTINEL,
-                index32,
-                outer_pool,
-                packed_cache,
-            )
-            topk_scores, pool_ids = torch.topk(scores, selected, dim=1)
-            # Ascend scalarizes Triton's int64-to-int32 vector conversion.
-            # Convert once before expanding each selected pool into tokens.
-            pool_ids = pool_ids.to(torch.int32)
+            if streaming_topk:
+                scores = torch.empty((rows, candidate_width), dtype=torch.float32, device=query.device)
+                candidate_ids = torch.empty_like(scores, dtype=torch.int32)
+                _streaming_pool_topk[(min(rows * TRITON_TOPK_PARTITIONS, TRITON_MAX_PROGRAMS),)](
+                    qbar,
+                    indexer_cache,
+                    cum_query_lens,
+                    indexer_seq_lens,
+                    indexer_block_table,
+                    positions,
+                    scores,
+                    candidate_ids,
+                    start,
+                    rows,
+                    max_pool_seq_len,
+                    cum_query_lens.numel(),
+                    indexer_cache.shape[0],
+                    indexer_cache.stride(0),
+                    indexer_cache.stride(1),
+                    indexer_cache.stride(3),
+                    *indexer_block_table.stride(),
+                    indexer_cache.shape[1],
+                    next_power_of_2(cum_query_lens.numel()),
+                    head_dim,
+                    index_kpool,
+                    block_pool,
+                    NEG_INF_SENTINEL,
+                    index32,
+                    topk_tile,
+                    TRITON_TOPK_PARTITIONS,
+                    (2 * topk_tile).bit_length() - 1,
+                    QUERY_END_SENTINEL,
+                )
+                topk_scores, candidate_offsets = torch.topk(scores, selected, dim=1)
+                pool_ids = torch.gather(candidate_ids, 1, candidate_offsets)
+            else:
+                scores = torch.empty((rows, max_pool_seq_len), dtype=torch.float32, device=query.device)
+                outer_pool = (
+                    max(TRITON_PREFILL_POOL_TILE, block_pool) if rows >= TRITON_PREFILL_MIN_TOKENS else block_pool
+                )
+                chunks = triton.cdiv(max_pool_seq_len, outer_pool)
+                _glm5_next_lightning_indexer_score_kernel[(min(rows * chunks, TRITON_MAX_PROGRAMS),)](
+                    qbar,
+                    cache,
+                    cum_query_lens,
+                    indexer_seq_lens,
+                    indexer_block_table,
+                    positions,
+                    scores,
+                    start,
+                    rows,
+                    max_pool_seq_len,
+                    cum_query_lens.numel(),
+                    indexer_cache.shape[0],
+                    0 if packed_cache else cache.stride(0),
+                    cache.stride(1),
+                    cache.stride(3),
+                    *indexer_block_table.stride(),
+                    indexer_cache.shape[1],
+                    QUERY_END_SENTINEL,
+                    next_power_of_2(cum_query_lens.numel()),
+                    head_dim,
+                    index_kpool,
+                    block_pool,
+                    NEG_INF_SENTINEL,
+                    index32,
+                    outer_pool,
+                    packed_cache,
+                )
+                topk_scores, pool_ids = torch.topk(scores, selected, dim=1)
+                # Ascend scalarizes Triton's int64-to-int32 vector conversion.
+                pool_ids = pool_ids.to(torch.int32)
         else:
             topk_scores = pool_ids = None
         # Wide expansion amortizes row scheduling only for large token batches.
