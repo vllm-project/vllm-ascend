@@ -1,6 +1,10 @@
 # KVPP (Experimental)
 
-**Image version:** The `v0.23.0` image does not include KVPP. The base KVPP implementation is available in the `v0.30.0rc1` release line; for Ascend 950/A5, use the matching `v0.30.0rc1-a5` image. This page follows `main`, so some newer combinations described below may require a newer main/nightly image. Check the matching release's support matrix before enabling them.
+**Image version:** The `v0.23.0` image does not include KVPP. The base KVPP implementation is
+available in the `v0.30.0rc1` release line; for Ascend 950/A5, use the matching
+`v0.30.0rc1-a5` image. This page follows `main`, so some newer combinations described below may
+require a newer main/nightly image. Check the matching release's support matrix before enabling
+them.
 
 ## Overview
 
