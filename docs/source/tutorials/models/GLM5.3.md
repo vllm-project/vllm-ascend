@@ -962,9 +962,12 @@ vllm serve "$MODEL_PATH" \
   --max-num-seqs 64 --gpu-memory-utilization 0.92 \
   --trust-remote-code --quantization ascend \
   --safetensors-load-strategy prefetch \
-  --enable-auto-tool-choice --tool-call-parser glm47 --reasoning-parser glm47 \
+  --enable-auto-tool-choice \
+  --tool-call-parser glm47 \
+  --reasoning-parser glm47 \
   --enforce-eager \
-  --kv-cache-dtype int8 --attention_config.indexer_kv_dtype int8 \
+  --kv-cache-dtype int8 \
+  --attention_config.indexer_kv_dtype int8 \
   --additional-config '{"enable_dsa_cp":true,"enable_flashcomm1":true,"scheduler_config":{"profiling_chunk_config":{"enabled":true}}}' \
   --speculative-config '{"num_speculative_tokens":5,"method":"deepseek_mtp","enforce_eager":true}' \
   --kv-transfer-config '{
