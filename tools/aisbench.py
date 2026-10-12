@@ -296,6 +296,15 @@ class AisbenchRunner:
             f"which is not within {self.threshold} relative to baseline {self.baseline}."
         )
 
+    def _accuracy_verify_ge(self):
+        self._get_result_accuracy()
+        acc_value = self.result
+        assert acc_value >= self.baseline, (
+            "Accuracy verification failed. "
+            f"The accuracy of {self.dataset_path} is {acc_value}, "
+            f"which is not greater than or equal to baseline {self.baseline}."
+        )
+
     def _spec_decode_verify(self):
         from tools.spec_decode_metrics import (
             measure_acceptance_rate,
