@@ -134,9 +134,7 @@ from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBu
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import (
-    MLA_FLASH_SUPPORTED_Q_HEADS,
     AscendCommonAttentionMetadata,
-    get_flashmla_ops,
     get_sfa_qsfa_packed_head_dim,
     get_tq_fused_slot_bytes,
     requires_contiguous_pa_kv_cache,
@@ -282,7 +280,6 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendSlidingWindowMLASpec,
     get_kv_cache_compression_ratio,
     get_storage_block_size,
-    pd_uses_component_major_mla_wire_layout,
     requires_padded_page_layout,
     supports_component_major_mla_pd,
 )
@@ -4967,6 +4964,10 @@ class NPUModelRunner(GPUModelRunner):
             # PCP gathers and sharded-decode writes still use the legacy
             # preprocessing contract. Keep their allocation compatible with it.
             return False
+        if getattr(impl, "use_flashmla", False):
+            # The external reader retains its fused-cache contract, including
+            # DCP. Native FIA continues to follow the dependency's exclusions.
+            return True
         if getattr(impl, "dcp_enabled", False):
             # DCP split attention and prefill need nonlocal current KV and
             # gathered query heads. Keep them on the legacy allocation and
@@ -5797,8 +5798,8 @@ class NPUModelRunner(GPUModelRunner):
                         continue
 
                     # MLA uses one raw backing allocated by the allocation or
-                    # hybrid phase. A5 FlashMLA consumes one token-interleaved
-                    # tensor; A3 FIA consumes component-major views. MHA/GQA
+                    # hybrid phase. FlashMLA consumes one token-interleaved
+                    # tensor; FIA consumes component-major views. MHA/GQA
                     # keeps the raw K/V protocol.
                     raw_cache = kv_cache_raw_tensors[layer_name]
                     fused_raw_tensor = get_single_raw_mla_backing(raw_cache)
@@ -5835,12 +5836,7 @@ class NPUModelRunner(GPUModelRunner):
                             kernel_block_size,
                             current_kv_cache_spec.num_kv_heads,
                         )
-                        if (
-                            get_current_hardware_profile().supports(HardwareCapability.MLA_FLASH)
-                            and current_kv_cache_spec.num_heads in MLA_FLASH_SUPPORTED_Q_HEADS
-                            and get_flashmla_ops() is not None
-                            and not pd_uses_component_major_mla_wire_layout(self.vllm_config)
-                        ):
+                        if attn_module.impl.use_flashmla:
                             # A5 interleaves [NoPE | RoPE] per token in every
                             # kernel slot: token0[NoPE|RoPE], token1[...], ...
                             fused_cache = make_page_strided_cache_view(
@@ -5852,7 +5848,7 @@ class NPUModelRunner(GPUModelRunner):
                             kv_caches[layer_name] = fused_cache
                             continue
 
-                        # A3/FIA requires NoPE and RoPE to be internally
+                        # FIA requires NoPE and RoPE to be internally
                         # contiguous; only the first axis may carry the page
                         # stride. Each kernel slot is physically stored as
                         # [all NoPE][all RoPE][padding].
@@ -6486,6 +6482,7 @@ class NPUModelRunner(GPUModelRunner):
                     indexes_kv_by_block_stride = bool(getattr(attn_module, "indexes_kv_by_block_stride", False))
                     kv_cache_spec[layer_name] = AscendMLAAttentionSpec(
                         block_size=self.block_size,
+                        num_query_heads=attn_module.num_heads,
                         num_kv_heads=1,
                         head_size=head_size,
                         dtype=dtype,
@@ -6519,13 +6516,7 @@ class NPUModelRunner(GPUModelRunner):
                     )
                     kv_cache_spec[layer_name] = AscendMLAAttentionSpec(
                         block_size=spec.block_size,
-                        # Keep the physical MLA latent head count for Kimi K3;
-                        # query heads must not inflate the generic KV page shape.
-                        num_heads=(
-                            spec.num_heads
-                            if getattr(self.model_config.hf_text_config, "model_type", None) == "kimi_linear"
-                            else attn_module.num_heads
-                        ),
+                                num_query_heads=attn_module.num_heads,
                         num_kv_heads=spec.num_kv_heads,
                         head_size=head_size,
                         dtype=dtype,

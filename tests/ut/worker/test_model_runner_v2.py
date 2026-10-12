@@ -37,6 +37,7 @@ def _make_runner(need_timing: bool = True):
     runner.use_pp = False
     runner.is_last_pp_rank = False
     runner.attn_groups = []
+    runner.flashmla_executor = None
     runner.adaptive_verification = None
     runner.input_buffers = SimpleNamespace(dummy_num_tokens=None)
     runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE)
