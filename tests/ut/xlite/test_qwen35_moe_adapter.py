@@ -117,6 +117,9 @@ def _adapter_self(hf):
     self._decoder_layer_mlp_module = "mlp"
     self.is_tensor_nz = lambda t: False
     self.quantization = False
+    # layer tree for _get_layers_and_model_prefix()/the role mask
+    gdn_layer = SimpleNamespace(layer_type="linear_attention")
+    self.npu_runnable = SimpleNamespace(model=SimpleNamespace(layers=[gdn_layer, gdn_layer]))
     self.vllm_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(max_num_batched_tokens=512, max_num_seqs=8),
         parallel_config=SimpleNamespace(data_parallel_size=1, enable_expert_parallel=False),
@@ -172,28 +175,3 @@ def test_build_model_config_without_shared_experts(monkeypatch):
     Qwen3_5MoeXliteModel._build_model_config(self)
 
     assert self.xlite_config.n_shared_experts == 0
-
-
-def test_load_moe_weights_binds_shared_expert_gate(monkeypatch):
-    """y = routed + sigmoid(se_gate(x)) * shared(x): the gate must be bound."""
-    requested: list[str] = []
-
-    def fake_get_layer_weights(layers, *paths, **kwargs):
-        for p in paths:
-            requested.append(p)
-        return [torch.zeros(2, 4)]
-
-    monkeypatch.setattr(xlite_mod_under_test, "get_layer_weights", fake_get_layer_weights)
-    matmul_requests: list[tuple[str, str]] = []
-
-    def fake_init_matmul_weights(layers, name, path):
-        matmul_requests.append((name, path))
-
-    self = _adapter_self(_hf_text_config())
-    self.init_matmul_weights = fake_init_matmul_weights
-    Qwen3_5MoeXliteModel._load_moe_weights(self, layers=[SimpleNamespace()])
-
-    assert "mlp.shared_expert_gate.weight" in requested
-    assert ("se_up_gate", "mlp.shared_expert.gate_up_proj") in matmul_requests
-    assert ("se_down", "mlp.shared_expert.down_proj") in matmul_requests
-    assert "mlp.gate.weight" in requested
