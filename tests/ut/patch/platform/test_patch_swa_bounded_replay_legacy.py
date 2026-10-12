@@ -73,14 +73,32 @@ def test_replay_installation_is_opt_in_and_idempotent_in_fresh_process(enabled):
     # A fresh interpreter catches import-time mutations that an already-patched
     # pytest process cannot observe. Exercise the worker wire schema as well.
     script = """
-from types import SimpleNamespace
+from pathlib import Path
+import sys
+from types import ModuleType, SimpleNamespace
 import msgspec
+import vllm_ascend
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
 from vllm.v1.core.sched.output import NewRequestData, CachedRequestData
 originals = (Scheduler.schedule, KVCacheManager.allocate_slots, SingleTypeKVCacheManager.cache_blocks)
+
+# Import this patch in isolation. Importing vllm_ascend.patch.platform normally
+# executes every platform patch and may probe Triton's NPU backend, which is not
+# available in the no-device CPU-UT job.
+package_root = Path(vllm_ascend.__file__).parent
+patch_package = ModuleType('vllm_ascend.patch')
+patch_package.__path__ = [str(package_root / 'patch')]
+platform_package = ModuleType('vllm_ascend.patch.platform')
+platform_package.__path__ = [str(package_root / 'patch' / 'platform')]
+sys.modules['vllm_ascend.patch'] = patch_package
+sys.modules['vllm_ascend.patch.platform'] = platform_package
+vllm_ascend.patch = patch_package
+patch_package.platform = platform_package
+
 from vllm_ascend.patch.platform.patch_swa_bounded_replay_legacy import apply_legacy_replay_patch
+assert 'vllm_ascend.ops' not in sys.modules
 assert not hasattr(Scheduler, '_mark_prefix_replay')
 assert originals == (Scheduler.schedule, KVCacheManager.allocate_slots, SingleTypeKVCacheManager.cache_blocks)
 assert 'replay_start' in NewRequestData.__dataclass_fields__
