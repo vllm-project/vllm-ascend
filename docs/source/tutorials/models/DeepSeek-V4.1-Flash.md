@@ -198,11 +198,6 @@ and use the `main` branch with the matching vLLM revision recorded in
     export HCCL_BUFFSIZE=1024
     export HCCL_OP_EXPANSION_MODE="AIV"
 
-    # Optional: use jemalloc when it is installed in the container
-    if [[ -f /usr/lib/aarch64-linux-gnu/libjemalloc.so.2 ]]; then
-        export LD_PRELOAD="/usr/lib/aarch64-linux-gnu/libjemalloc.so.2${LD_PRELOAD:+:$LD_PRELOAD}"
-    fi
-
     # Ensure the model path matches the directory recorded during download
     vllm serve "$MODEL_PATH" \
         --host 0.0.0.0 \
@@ -667,10 +662,6 @@ and use the `main` branch with the matching vLLM revision recorded in
     export TP_SOCKET_IFNAME="$NIC_NAME"
     export HCCL_SOCKET_IFNAME="$NIC_NAME"
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-
-    if [[ -f /usr/lib/aarch64-linux-gnu/libjemalloc.so.2 ]]; then
-      export LD_PRELOAD="/usr/lib/aarch64-linux-gnu/libjemalloc.so.2${LD_PRELOAD:+:$LD_PRELOAD}"
-    fi
 
     HEADLESS_ARGS=()
     if [[ "$NODE_RANK" != "0" ]]; then
