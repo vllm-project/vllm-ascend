@@ -28,11 +28,11 @@ def pard2_attn_metadata_context(
     restore the previous metadata builder even if construction raises.
     """
     from vllm_ascend.attention.attention_v1 import AscendAttentionState
-    from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper, build_draft_attn_metadata_factory
+    from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_factory, build_attn_metadata_wrapper
 
     with (
         build_attn_metadata_wrapper(),
-        build_draft_attn_metadata_factory(
+        build_attn_metadata_factory(
             positions,
             num_tokens,
             is_prefilling,
