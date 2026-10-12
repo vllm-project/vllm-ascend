@@ -55,6 +55,7 @@ ACL_FORMAT_FRACTAL_ND = 2
 ACL_FORMAT_FRACTAL_NZ = 29
 
 _CUSTOM_OP_ENABLED = None
+_ATTN_RES_FWD_OP_ENABLED = None
 _DEVICE_PRINT_OP_REGISTERED = False
 _CURRENT_STREAM = None
 _GLOBAL_STREAM = None
@@ -458,6 +459,53 @@ def enable_custom_op():
                 e,
             )
     return _CUSTOM_OP_ENABLED
+
+
+def enable_attn_res_fwd_op() -> bool:
+    """Lazily register AttnResFwd on the A3 and A5 Kimi-K3 execution paths."""
+    global _ATTN_RES_FWD_OP_ENABLED
+
+    if _ATTN_RES_FWD_OP_ENABLED is not None:
+        return _ATTN_RES_FWD_OP_ENABLED
+
+    if get_ascend_device_type() not in (AscendDeviceType.A3, AscendDeviceType.A5):
+        _ATTN_RES_FWD_OP_ENABLED = False
+        return _ATTN_RES_FWD_OP_ENABLED
+
+    try:
+        if not torch.compiler.is_compiling():
+            bootstrap_custom_op_env()
+        # isort: off
+        # The general custom-op switch is disabled on A5, but AttnResFwd has
+        # dedicated A3/A5 kernels and is loaded only after model runtime setup.
+        import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401
+        # isort: on
+        _ATTN_RES_FWD_OP_ENABLED = hasattr(torch.ops._C_ascend, "attn_res_fwd")
+    except ImportError as e:
+        # Match the general lazy-loader fallback for installations that require
+        # vendor op_api libraries to be added after the first import attempt.
+        if (not torch.compiler.is_compiling()) and "libcust_opapi.so" in str(e):
+            try:
+                bootstrap_custom_op_env(include_vendor_lib=True)
+                import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401
+
+                _ATTN_RES_FWD_OP_ENABLED = hasattr(torch.ops._C_ascend, "attn_res_fwd")
+            except ImportError as retry_error:
+                _ATTN_RES_FWD_OP_ENABLED = False
+                logger.warning(
+                    "Failed to register AttnResFwd. Ensure the vllm-ascend custom-op package "
+                    "and its CANN environment are installed. error=%s",
+                    retry_error,
+                )
+        else:
+            _ATTN_RES_FWD_OP_ENABLED = False
+            logger.warning(
+                "Failed to register AttnResFwd. Ensure the vllm-ascend custom-op package "
+                "and its CANN environment are installed. error=%s",
+                e,
+            )
+
+    return _ATTN_RES_FWD_OP_ENABLED
 
 
 def find_hccl_library() -> str:
