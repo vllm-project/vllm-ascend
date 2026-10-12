@@ -47,8 +47,8 @@ _benchmarks_gpqa: &benchmarks_gpqa
     temperature: 0.6
     top_k: 20
     top_p: 0.95
-    # baseline: 100
-    # threshold: 0
+    baseline: 50
+    threshold: 50
 
 _benchmarks_perf: &benchmarks_perf
   perf:
