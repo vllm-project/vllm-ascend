@@ -1846,6 +1846,102 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         self.assertTrue(config.enable_sparse_sfa_c8)
 
     @_clean_up
+    @patch("vllm_ascend.utils.model_uses_kpool_indexer", return_value=True)
+    @patch("vllm_ascend.utils.model_uses_sfa_sparse", return_value=False)
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_kpool_li_c8_derived_on_factory_path(self, mock_fix, mock_sparse, mock_kpool):
+        vc = VllmConfig()
+        # enable_sparse_li_c8 / enable_sparse_sfa_c8 key off use_sparse_sfa,
+        # which includes kpool-indexer models (e.g. GLM-5.3-Flash) even when
+        # the model is not an SFA-sparse model.
+        vc.attention_config.indexer_kv_dtype = "int8"
+        vc.cache_config.cache_dtype = "int8"
+
+        config = init_ascend_config(vc)
+
+        self.assertTrue(config.enable_sparse_li_c8)
+        self.assertTrue(config.enable_sparse_sfa_c8)
+        self.assertFalse(config.enable_sparse_li_c4)
+        self.assertTrue(config.is_kpool_li_c8_enabled())
+
+    @_clean_up
+    @patch("vllm_ascend.utils.model_uses_kpool_indexer", return_value=True)
+    @patch("vllm_ascend.utils.model_uses_sfa_sparse", return_value=False)
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_kpool_li_c8_ignores_float_indexer_quant_description(self, mock_fix, mock_sparse, mock_kpool):
+        vc = VllmConfig()
+        # GLM-5.3-Flash W8A8 checkpoints list the indexer weights as FLOAT.
+        # That enables the LightningIndexer layer filter while matching no
+        # layer; KPool LI C8 is dynamic and must stay on regardless.
+        vc.quant_config = SimpleNamespace(
+            quant_description={
+                "model.language_model.layers.3.self_attn.indexer.wq_b.weight": "FLOAT",
+                "model.language_model.layers.7.self_attn.indexer.wq_b.weight": "FLOAT",
+            }
+        )
+        vc.attention_config.indexer_kv_dtype = "int8"
+
+        config = init_ascend_config(vc)
+
+        self.assertFalse(config.is_sparse_li_c8_layer("model.language_model.layers.3.self_attn.indexer.k_cache"))
+        self.assertTrue(config.is_kpool_li_c8_enabled())
+
+    @_clean_up
+    @patch("vllm_ascend.utils.model_uses_kpool_indexer", return_value=False)
+    @patch("vllm_ascend.utils.model_uses_sfa_sparse", return_value=True)
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_kpool_li_c8_not_enabled_for_lightning_indexer_model(self, mock_fix, mock_sparse, mock_kpool):
+        vc = VllmConfig()
+        vc.attention_config.indexer_kv_dtype = "int8"
+
+        config = init_ascend_config(vc)
+
+        self.assertTrue(config.enable_sparse_li_c8)
+        self.assertFalse(config.is_kpool_li_c8_enabled())
+
+    @_clean_up
+    @patch("vllm_ascend.utils.model_uses_kpool_indexer", return_value=True)
+    @patch("vllm_ascend.utils.model_uses_sfa_sparse", return_value=False)
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_kpool_li_c8_fp8_falls_back_to_bf16(self, mock_fix, mock_sparse, mock_kpool):
+        vc = VllmConfig()
+        # The KPool score kernel unpacks INT16 word pairs, which only supports
+        # int8 payloads; fp8 requests fall back to the bf16 pooled cache.
+        vc.attention_config.indexer_kv_dtype = "fp8"
+
+        config = init_ascend_config(vc)
+
+        self.assertTrue(config.enable_sparse_li_c8)
+        self.assertFalse(config.is_kpool_li_c8_enabled())
+
+    @_clean_up
+    @patch("vllm_ascend.utils.model_uses_kpool_indexer", return_value=True)
+    @patch("vllm_ascend.utils.model_uses_sfa_sparse", return_value=False)
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_kpool_li_c4_rejected_on_factory_path(self, mock_fix, mock_sparse, mock_kpool):
+        vc = VllmConfig()
+        # LI C4 (mxfp4) is LightningIndexer-only; the GLM-Next KPool indexer
+        # layout has no packed 4-bit path and must fail fast.
+        vc.attention_config.indexer_kv_dtype = "mxfp4"
+
+        with self.assertRaisesRegex(ValueError, "KPool indexer does not support LI C4"):
+            init_ascend_config(vc)
+
+    @_clean_up
+    @patch("vllm_ascend.utils.model_uses_kpool_indexer", return_value=False)
+    @patch("vllm_ascend.utils.model_uses_sfa_sparse", return_value=False)
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_li_c8_not_derived_for_non_sparse_model(self, mock_fix, mock_sparse, mock_kpool):
+        vc = VllmConfig()
+        vc.attention_config.indexer_kv_dtype = "int8"
+        vc.cache_config.cache_dtype = "fp8"
+
+        config = init_ascend_config(vc)
+
+        self.assertFalse(config.enable_sparse_li_c8)
+        self.assertFalse(config.enable_sparse_sfa_c8)
+
+    @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_rejection_sampler_config_survives_factory(self, mock_fix):
         vc = VllmConfig()

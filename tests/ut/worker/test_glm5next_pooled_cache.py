@@ -23,6 +23,7 @@ from vllm_ascend.models.glm5next.cache_config import (
     get_glm5_next_kv_cache_groups,
     get_glm5_next_pool_bytes_per_block,
 )
+from vllm_ascend.models.glm5next.cache_views import _view_compressed_indexer_cache
 from vllm_ascend.utils import get_kv_cache_tensor_layers
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
@@ -360,3 +361,69 @@ def test_padded_page_layout_rejected_for_packed_hybrid_pool():
         ),
     ]
     assert not requires_padded_page_layout(specs)
+
+
+def _c8_indexer_spec(**overrides):
+    kwargs = dict(
+        block_size=8,
+        num_kv_heads=1,
+        head_size=4,
+        dtype=torch.int8,
+        scale_dim=1,
+        scale_dtype=torch.float32,
+        model_version="glm5_next",
+        indexes_kv_by_block_stride=True,
+        **_ratio_kwargs(2),
+    )
+    kwargs.update(overrides)
+    return AscendMLAAttentionSpec(**kwargs)
+
+
+def test_compressed_indexer_c8_view_flattens_exact_fill_pages():
+    # The GLM-5.3-Flash serve geometry: the hybrid pool widens the scheduler
+    # block to 1152 tokens so indexer pages stay page-aligned. One scheduler
+    # block then holds 9 kernel blocks of 32 pooled rows, and 288 rows of 132
+    # bytes fill the 38016-byte page exactly.
+    spec = _c8_indexer_spec(block_size=1152, head_size=128, tokens_per_state=4)
+    assert spec.page_size_bytes == 38016
+    num_blocks = 3
+    raw = torch.zeros(num_blocks * spec.page_size_bytes, dtype=torch.uint8)
+
+    (view,) = _view_compressed_indexer_cache(INDEXER, spec, raw, _AttentionBackend, 128)
+
+    assert view.dtype == torch.int8
+    assert view.shape == (num_blocks * 9, 32, 1, 132)
+    assert view.is_contiguous()
+    assert view.data_ptr() == raw.data_ptr()
+    # Scheduler block 1, kernel block 2, pooled row 5, byte 7 of the row.
+    raw[1 * 38016 + (2 * 32 + 5) * 132 + 7] = 83
+    assert view[1 * 9 + 2, 5, 0, 7] == 83
+    view[26, 31, 0, 131] = -5
+    assert raw.view(torch.int8)[2 * 38016 + (8 * 32 + 31) * 132 + 131] == -5
+
+
+def test_compressed_indexer_c8_view_rejects_padded_multi_kernel_block_pages():
+    # A padded page puts a non-affine gap between the kernel blocks of one
+    # scheduler block, and the kernels index by kernel block.
+    spec = _c8_indexer_spec(page_size_padded=48)
+    raw = torch.zeros(2 * spec.page_size_bytes, dtype=torch.uint8)
+    with pytest.raises(NotImplementedError, match="unpadded pages"):
+        _view_compressed_indexer_cache(INDEXER, spec, raw, _AttentionBackend, 4)
+
+
+def test_compressed_indexer_c8_view_keeps_padded_stride_for_single_kernel_block():
+    # One kernel block per scheduler block stays affine through the padded
+    # page stride.
+    spec = _c8_indexer_spec(page_size_padded=48)
+    raw = torch.zeros(2 * spec.page_size_bytes, dtype=torch.uint8)
+
+    (view,) = _view_compressed_indexer_cache(INDEXER, spec, raw, _AttentionBackend, 8)
+
+    assert view.shape == (2, 4, 1, 8)
+    assert view.stride() == (48, 8, 8, 1)
+    raw[48] = 9
+    assert view[1, 0, 0, 0] == 9
+    # The tail padding bytes of a page are outside the view.
+    assert torch.count_nonzero(raw[32:48]) == 0
+    view[1, 3, 0, 7] = -1
+    assert raw.view(torch.int8)[48 + 31] == -1
