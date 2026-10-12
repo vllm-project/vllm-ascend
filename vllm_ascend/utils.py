@@ -71,6 +71,7 @@ _SHARED_EXPERTS_CALCULATION_STREAM = None
 _CP_CHUNKEDPREFILL_COMM_STREAM = None
 _ASCEND_CUSTOMOP_IS_REIGISTERED = False
 _DEFAULT_BUFFER_SIZE = 200
+_HCCL_OP_EXPANSION_MODE_AIV = 3
 _MIN_DP_BUFFER_SIZE = 50
 _DYNAMIC_EPLB_BUFFER_SIZE = 100
 _IS_MOE_MODEL = None
@@ -970,6 +971,8 @@ def npu_stream_switch(target_stream: torch.npu.Stream, *, enabled: bool = True):
 def create_hccl_pg_options(group_name: str):
     options = torch_npu._C._distributed_c10d.ProcessGroupHCCL.Options()
     hccl_config = get_hccl_config_for_pg_options(group_name) or {}
+    if group_name == "ep":
+        hccl_config["hccl_op_expansion_mode"] = _HCCL_OP_EXPANSION_MODE_AIV
     hccl_config["group_name"] = group_name
     options.hccl_config = hccl_config
     return options
