@@ -474,7 +474,7 @@ def validate_steady_union_against_oracle(case, budget):
     target_row = int(entries[0])
     route_count = routes[0]
     prefix = int(case[8][0])
-    selected_counts = {}
+    selected_counts: dict[int, int] = {}
     for route in range(route_count):
         for token in outputs[0][route, 0].cpu().tolist():
             if 0 <= int(token) < prefix:
@@ -628,7 +628,7 @@ def validate_first_fill(case, budget):
     if bool((request_miss != budget).any()):
         raise AssertionError(f"-2 request miss counts must equal C={budget}: {request_miss.cpu().tolist()}")
     start = 0
-    selected_prefix_union = [set() for _ in query_counts]
+    selected_prefix_union: list[set[int]] = [set() for _ in query_counts]
     for request, routes in enumerate(query_counts):
         end = start + routes
         row_pool = pool[entry_rows[request]].cpu()
@@ -833,8 +833,8 @@ def validate_steady_miss_and_atomicity(case, budget, misses_per_request=8):
     # duplicate slots. A row with no residents is rejected by victim
     # planning before any update and must not affect the other request.
     bad_pool = pool.cpu().clone()
-    row = bad_pool[entry_rows[0]]
-    row.fill_(INVALID_POOL_SLOT)
+    bad_pool_row = bad_pool[entry_rows[0]]
+    bad_pool_row.fill_(INVALID_POOL_SLOT)
     pool.copy_(bad_pool.to(pool.device))
     before = pool.clone()
     for output in outputs:
@@ -881,7 +881,7 @@ def validate_identity_to_steady(case, budget, *, final_length=None):
     start = 0
     for request, routes in enumerate(query_counts):
         end = start + routes
-        expected_union = set()
+        expected_union: set[int] = set()
         golden_rows = []
         for row in range(start, end):
             golden = _route_golden(case, request, row, end)
@@ -1306,13 +1306,13 @@ def validate_controlled_tail_and_future(device, heads, seed):
     # causally invisible to early MTP routes.
     prefix, tail = 12288, 256
     final = prefix + tail
-    selected = [list(range(route * TOPK, (route + 1) * TOPK)) for route in range(4)]
+    selected_by_route = [list(range(route * TOPK, (route + 1) * TOPK)) for route in range(4)]
     future = [[final - (3 - route) + i for i in range(3 - route)] for route in range(4)]
-    case = _controlled_case(device, heads, seed + 300, prefix, tail, selected, future)
+    case = _controlled_case(device, heads, seed + 300, prefix, tail, selected_by_route, future)
     case[10].fill_(-3)
     launch(case)
     torch.npu.synchronize()
-    _check_controlled_routes(case, selected, prefix, 8192, -3)
+    _check_controlled_routes(case, selected_by_route, prefix, 8192, -3)
 
     for route, forbidden in enumerate(future):
         if set(forbidden) & set(case[13][0][route, 0].cpu().tolist()):
@@ -1700,17 +1700,17 @@ def validate_extended_all_route_counts(device, heads, seed, *, query_counts=None
     for request, routes in enumerate(counts):
         end = start + routes
         selected = set().union(*goldens[start:end])
-        row = modified[entries[request]]
-        displaced = sorted(token for token in selected if token < prefix and int(row[token]) >= 0)[:8]
+        pool_row = modified[entries[request]]
+        displaced = sorted(token for token in selected if token < prefix and int(pool_row[token]) >= 0)[:8]
         replacements = [
-            token for token in range(prefix) if token not in selected and int(row[token]) == INVALID_POOL_SLOT
+            token for token in range(prefix) if token not in selected and int(pool_row[token]) == INVALID_POOL_SLOT
         ][:8]
         if len(displaced) != 8 or len(replacements) != 8:
             raise AssertionError(f"extended Q{routes} miss fixture is too small")
         for source, replacement in zip(displaced, replacements):
-            slot = int(row[source])
-            row[source] = INVALID_POOL_SLOT
-            row[replacement] = slot
+            slot = int(pool_row[source])
+            pool_row[source] = INVALID_POOL_SLOT
+            pool_row[replacement] = slot
         start = end
     case[12].copy_(modified.to(device))
     for output in case[13]:
@@ -1854,7 +1854,7 @@ def validate_graph_replay(device, heads, seed):
     for states, actual_length, route_counts in scenarios:
         case[10].copy_(torch.tensor(states, dtype=torch.int32, device=device))
         case[7].fill_(actual_length)
-        ends = []
+        ends: list[int] = []
         for count in route_counts:
             ends.append((ends[-1] if ends else 0) + count)
         case[6].copy_(torch.tensor(ends, dtype=torch.int32, device=device))
