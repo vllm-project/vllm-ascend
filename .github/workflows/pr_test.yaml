@@ -55,6 +55,12 @@ jobs:
       vllm_versions: ${{ steps.vllm.outputs.vllm_versions }}
       src: ${{ steps.filter.outputs.src }}
       ci_pipeline: ${{ steps.filter.outputs.ci_pipeline }}
+      # This fork's demo branch validates its own E2E, not the full upstream suite.
+      ascendstore_v1_only: >-
+        ${{
+          github.event.pull_request.head.repo.full_name == 'ChenZhuo888/vllm-ascend' &&
+          github.event.pull_request.head.ref == 'ascendstore-v1' && 'true' || 'false'
+        }}
     steps:
       - name: Validate PR title prefix
         run: |
@@ -278,7 +284,8 @@ jobs:
     name: Recommend tests
     needs: [pre-commit, cpu-ut]
     # The recommendation only runs under the ready-precise label: that is the
-    # only mode whose result depends on it. ready-all and main2main run
+    # only mode whose result depends on it. The fork's demo scope is explicit
+    # and does not need coverage recommendations. ready-all and main2main run
     # --all-tests and unlabeled runs select nothing, so all of them skip this
     # job. The pre-commit + cpu-ut checks are explicit so the job can never be
     # made to run after a failed upstream by adding !cancelled().
@@ -286,6 +293,7 @@ jobs:
       ${{
         needs.pre-commit.result == 'success' &&
         needs.cpu-ut.result == 'success' &&
+        needs.pre-commit.outputs.ascendstore_v1_only != 'true' &&
         contains(github.event.pull_request.labels.*.name, 'ready-precise')
       }}
     runs-on: linux-amd64-cpu-8-hk
@@ -400,6 +408,7 @@ jobs:
     # would override the transitive skip).
     # The src/ci_pipeline path categories are computed by the paths-filter step
     # in pre-commit. Modes:
+    #   ascendstore-v1 - the fork's demo branch explicitly selects its own E2E
     #   recommended - recommend job succeeded with coverage paths (ready-precise)
     #   all         - ready-all or main2main forced, or the PR touches the CI
     #                 pipeline itself
@@ -419,12 +428,18 @@ jobs:
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
     outputs:
-      has_tests: ${{ steps.scope-rec.outputs.has_tests || steps.scope-all.outputs.has_tests || steps.noop.outputs.has_tests }}
-      test_groups: ${{ steps.scope-rec.outputs.test_groups || steps.scope-all.outputs.test_groups || steps.noop.outputs.test_groups }}
-      matched_modules: ${{ steps.scope-rec.outputs.matched_modules || steps.scope-all.outputs.matched_modules || steps.noop.outputs.matched_modules }}
+      has_tests: >-
+        ${{ steps.scope-v1.outputs.has_tests || steps.scope-rec.outputs.has_tests ||
+            steps.scope-all.outputs.has_tests || steps.noop.outputs.has_tests }}
+      test_groups: >-
+        ${{ steps.scope-v1.outputs.test_groups || steps.scope-rec.outputs.test_groups ||
+            steps.scope-all.outputs.test_groups || steps.noop.outputs.test_groups }}
+      matched_modules: >-
+        ${{ steps.scope-v1.outputs.matched_modules || steps.scope-rec.outputs.matched_modules ||
+            steps.scope-all.outputs.matched_modules || steps.noop.outputs.matched_modules }}
       csrc_cache_target_ids: ${{ steps.cache-targets.outputs.target_ids }}
       base_sha: ${{ steps.source-snapshot.outputs.base_sha }}
-      # source reports which path produced the tests: "recommended", "all", or "none".
+      # source reports which path produced the tests: "ascendstore-v1", "recommended", "all", or "none".
       source: ${{ steps.decide.outputs.mode }}
       has_tests_a5: ${{ steps.scope-a5.outputs.has_tests || steps.noop-a5.outputs.has_tests }}
       test_groups_a5: ${{ steps.scope-a5.outputs.test_groups || steps.noop-a5.outputs.test_groups }}
@@ -478,6 +493,7 @@ jobs:
           HAS_MAIN2MAIN: ${{ contains(github.event.pull_request.labels.*.name, 'main2main') }}
           HAS_READY_PRECISE: ${{ contains(github.event.pull_request.labels.*.name, 'ready-precise') }}
           HAS_READY_ALL: ${{ contains(github.event.pull_request.labels.*.name, 'ready-all') }}
+          ASCENDSTORE_V1_ONLY: ${{ needs.pre-commit.outputs.ascendstore_v1_only }}
           # Reported by the paths-filter step in the pre-commit job; this job
           # does not run its own filter. Both are diagnostic only here (they
           # decide which modes are *allowed* in ci-gate), the labels above
@@ -495,6 +511,9 @@ jobs:
             MODE="all"
           elif [ "${HAS_READY_ALL}" = "true" ]; then
             MODE="all"
+          elif [ "${ASCENDSTORE_V1_ONLY}" = "true" ] && [ "${HAS_READY_PRECISE}" = "true" ]; then
+            # The demo scope is explicit even when this PR updates its CI wiring.
+            MODE="ascendstore-v1"
           elif [ "${CI_PIPELINE}" = "true" ]; then
             # The PR changes the test selection/execution pipeline itself,
             # so the precise recommendation can no longer be trusted even
@@ -516,6 +535,17 @@ jobs:
           fi
           echo "mode=${MODE}" >> "$GITHUB_OUTPUT"
           echo "Selection mode: ${MODE} (src=${SRC:-unknown} ci_pipeline=${CI_PIPELINE:-unknown})"
+
+      - name: Select AscendStore v1 E2E
+        id: scope-v1
+        if: steps.decide.outputs.mode == 'ascendstore-v1'
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          test -f tests/e2e/pull_request/one_card/test_ascendstore_v1.py
+          pip install regex pyyaml -q
+          python3 .github/workflows/scripts/select_tests.py \
+            --explicit-e2e-tests tests/e2e/pull_request/one_card/test_ascendstore_v1.py \
+            --skip-cpu-ut
 
       - name: Select tests from coverage recommendations
         id: scope-rec
@@ -556,7 +586,7 @@ jobs:
 
       - name: Select A5 tests
         id: scope-a5
-        if: needs.pre-commit.outputs.src == 'true'
+        if: needs.pre-commit.outputs.src == 'true' && needs.pre-commit.outputs.ascendstore_v1_only != 'true'
         run: |
           git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
           pip install regex
@@ -564,9 +594,9 @@ jobs:
             --curated a5 \
             --runner-label-override linux-aarch64-a5-4
 
-      - name: Set no-tests output for A5 when source paths unchanged
+      - name: Set no-tests output for A5 when disabled
         id: noop-a5
-        if: needs.pre-commit.outputs.src != 'true'
+        if: needs.pre-commit.outputs.src != 'true' || needs.pre-commit.outputs.ascendstore_v1_only == 'true'
         run: |
           {
             echo "has_tests=false"
@@ -576,7 +606,9 @@ jobs:
       - name: Add upstream test cache target
         id: cache-targets
         env:
-          SELECTED_TARGET_IDS: ${{ steps.scope-rec.outputs.csrc_cache_target_ids || steps.scope-all.outputs.csrc_cache_target_ids || steps.noop.outputs.csrc_cache_target_ids }}
+          SELECTED_TARGET_IDS: >-
+            ${{ steps.scope-v1.outputs.csrc_cache_target_ids || steps.scope-rec.outputs.csrc_cache_target_ids ||
+                steps.scope-all.outputs.csrc_cache_target_ids || steps.noop.outputs.csrc_cache_target_ids }}
         run: |
           python3 - <<'PY'
           import json
@@ -661,6 +693,7 @@ jobs:
         !cancelled() &&
         needs.pre-commit.result == 'success' &&
         needs.prepare-csrc-cache.result == 'success' &&
+        needs.pre-commit.outputs.ascendstore_v1_only != 'true' &&
         contains(github.event.pull_request.labels.*.name, 'ready-precise') &&
         needs.select-tests.outputs.has_tests == 'true'
       }}
@@ -738,6 +771,9 @@ jobs:
           echo "has_tests: ${HAS_TESTS}"
           echo "has_tests_a5: ${HAS_TESTS_A5}"
           echo "labels: main2main=${HAS_MAIN2MAIN_LABEL} ready-precise=${HAS_READY_LABEL} ready-all=${HAS_READY_ALL_LABEL} ready-a5=${HAS_READY_A5_LABEL}"
+          if [ "${SELECTION_SOURCE}" = "ascendstore-v1" ]; then
+            echo "::notice::AscendStore v1 demo scope: this is not a full upstream E2E validation."
+          fi
           if [ "${SELECT_TESTS_RESULT}" = "success" ] && [ -n "${MATCHED_MODULES// /}" ]; then
             echo "matched_modules: ${MATCHED_MODULES}"
           fi
