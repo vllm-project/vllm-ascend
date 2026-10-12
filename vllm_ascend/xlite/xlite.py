@@ -686,9 +686,6 @@ def _pack_mha_qkv_weight(qkv_weight: torch.Tensor, head_dim: int, num_heads: int
     kv_size = num_kv_heads * head_dim
     expected = q_size * 2 + kv_size * 2
     if qkv_weight.shape[0] != expected:
-        logger.warning("XLITE-DBG pack rows=%s shape=%s ndim=%s dtype=%s hd=%s nh=%s nkv=%s",
-                       qkv_weight.shape[0], tuple(qkv_weight.shape), qkv_weight.ndim,
-                       qkv_weight.dtype, head_dim, num_heads, num_kv_heads)
         raise ValueError(f"Unexpected fused QKV rows {qkv_weight.shape[0]}, expected {expected}")
     qkv_weight = qkv_weight.contiguous()
     q_gate = qkv_weight[: q_size * 2].view(num_heads, 2, head_dim, -1)
@@ -793,7 +790,6 @@ class Qwen3_5XliteModel(StandardXliteModel):
         self._full_attention_mask = [
             getattr(layer, "layer_type", None) == "full_attention" or hasattr(layer, "self_attn") for layer in layers
         ]
-        logger.warning("XLITE-DBG mask=%s n_layers=%s", self._full_attention_mask, len(layers))
 
     def _build_model(self) -> None:
         xlite_model, xlite_config = self.xlite_model, self.xlite_config
