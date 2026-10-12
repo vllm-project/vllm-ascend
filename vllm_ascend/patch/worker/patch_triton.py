@@ -3,7 +3,7 @@ import vllm.third_party.flash_linear_attention.ops as fla_ops
 import vllm.third_party.flash_linear_attention.ops.fused_recurrent as fla_fused_recurrent
 import vllm.third_party.flash_linear_attention.ops.layernorm_guard as fla_layernorm_guard
 from vllm.logger import logger
-from vllm.triton_utils import HAS_TRITON, triton
+from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.utils.math_utils import next_power_of_2
 
 from vllm_ascend.ops.causal_conv1d import (
@@ -12,8 +12,21 @@ from vllm_ascend.ops.causal_conv1d import (
 from vllm_ascend.ops.causal_conv1d import causal_conv1d_update as _npu_causal_conv1d_update_impl
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.layernorm_guard import LayerNormFn
+from vllm_ascend.utils import vllm_version_is
 
-triton.next_power_of_2 = next_power_of_2
+if vllm_version_is("0.30.0"):
+    triton.next_power_of_2 = next_power_of_2
+else:
+
+    def _next_power_of_2(n):
+        # vLLM #58651's packed_qk_rope kernel evaluates
+        # triton.next_power_of_2(rotary_dim) with a tl.constexpr argument.
+        # The host helper only understands plain ints, so unwrap first.
+        if isinstance(n, tl.constexpr):
+            n = n.value
+        return next_power_of_2(n)
+
+    triton.next_power_of_2 = _next_power_of_2
 
 
 def _npu_causal_conv1d_update(*args, **kwargs):

@@ -281,7 +281,7 @@ def test_prepare_inputs_propagates_padded_request_count():
     model_runner_path = Path(__file__).resolve().parents[3] / "vllm_ascend" / "worker" / "v2" / "model_runner.py"
     module = ast.parse(model_runner_path.read_text(encoding="utf-8"))
     prepare_inputs = next(
-        node for node in ast.walk(module) if isinstance(node, ast.FunctionDef) and node.name == "prepare_inputs"
+        node for node in ast.walk(module) if isinstance(node, ast.FunctionDef) and node.name == "_prepare_inputs_impl"
     )
 
     assignments = {
