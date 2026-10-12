@@ -18,7 +18,6 @@ import hashlib
 import json
 import logging
 import os
-import shlex
 import subprocess
 import tempfile
 import time
@@ -65,11 +64,8 @@ class AisbenchRunner:
             ]
         if self.num_prompts:
             aisbench_cmd.extend(["--num-prompts", str(self.num_prompts)])
-        if self.work_dir:
-            Path(self.work_dir).mkdir(parents=True, exist_ok=True)
-            aisbench_cmd.extend(["--work-dir", self.work_dir])
-        self.stdout_file = str(Path(self.work_dir or ".") / f"output_{self.task_type}.txt")
-        aisbench_cmd = shlex.join(aisbench_cmd) + f" --debug > {shlex.quote(self.stdout_file)} 2>&1 &"
+        self.stdout_file = f"output_{self.task_type}.txt"
+        aisbench_cmd = " ".join(aisbench_cmd) + f" --debug > {self.stdout_file} 2>&1 &"
         print(f"running aisbench cmd: {aisbench_cmd}")
         self.proc: subprocess.Popen = subprocess.Popen(aisbench_cmd, shell=True)
 
@@ -79,19 +75,6 @@ class AisbenchRunner:
         self.host_ip = host_ip
         self.proc = None
         self.task_type = aisbench_config["case_type"]
-        self.calibration_only = aisbench_config.get("calibration_only", False)
-        if not isinstance(self.calibration_only, bool):
-            raise ValueError("calibration_only must be a boolean")
-        work_dir = aisbench_config.get("work_dir")
-        self.work_dir = os.path.expandvars(work_dir) if work_dir else None
-        if self.calibration_only:
-            if self.task_type not in ("accuracy", "performance") or not self.work_dir:
-                raise ValueError("calibration_only requires an accuracy/performance case and a persistent work_dir")
-            if any(
-                aisbench_config.get(key) is not None
-                for key in ("baseline", "threshold", "tpot_threshold", "input_throughput_threshold")
-            ):
-                raise ValueError("calibration_only must not specify regression gates")
         self.exp_folder = None
         self.result_line = None
         if self.task_type == "curl_cmd":
@@ -153,23 +136,7 @@ class AisbenchRunner:
             self.metrics_baseline = capture_baseline(self.metrics_server, len(self.spec_decode_baseline))
         self._run_aisbench_task()
         self._wait_for_task()
-        if self.calibration_only:
-            if self.task_type == "accuracy":
-                self._get_result_accuracy()
-                measurement = self.result
-            else:
-                self._get_result_performance()
-                measurement = self.result_json
-            output = {
-                "case_name": aisbench_config.get("case_name", "unknown"),
-                "model": self.model,
-                "case_type": self.task_type,
-                "validation_status": "uncalibrated",
-                "measurement": measurement,
-            }
-            Path(self.work_dir, "measurement.json").write_text(json.dumps(output, indent=2), encoding="utf-8")
-            logging.warning("Calibration-only results saved to %s; no regression verdict", self.work_dir)
-        elif verify:
+        if verify:
             self.baseline = aisbench_config.get("baseline", 1)
             self.input_throughput_baseline = aisbench_config.get("input_throughput_baseline", 1)
             if self.task_type == "accuracy":
@@ -287,7 +254,7 @@ class AisbenchRunner:
 
     def _check_runtime_stdout(self):
         time.sleep(5)
-        cmd = f"tail -100 {shlex.quote(self.stdout_file)}"
+        cmd = f"tail -100 {self.stdout_file}"
         return subprocess.check_output(cmd, shell=True).decode()
 
     @staticmethod
@@ -408,10 +375,6 @@ def run_aisbench_cases(model, port, aisbench_cases, server_args="", host_ip="loc
             error_msg += f"\nserver_args are {server_args}"
         logging.error(error_msg)
     assert not aisbench_errors, "some aisbench cases failed, info were shown above."
-    assert not any(case and case.get("calibration_only", False) for case in aisbench_cases), (
-        "Calibration-only measurements collected; configure measured baselines and remove calibration_only "
-        "before claiming a passing regression verdict. See each work_dir for raw results and measurement.json."
-    )
     return aisbench_results
 
 
