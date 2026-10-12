@@ -478,9 +478,9 @@ Prerequisites:
 1. Prepare the same weights and software on all eight nodes. Set
    `MODEL_PATH` to the installed GLM-5.3-w8a8c8 weight directory.
 2. Verify [multi-node communication](../../getting_started/installation.md#installation-multi-node-interconnect).
-   The Prefill scripts read the node's own IP from `$1`; the Decode
-   wrapper takes the node's IP as `$1` and exports it as `LOCAL_IP` for
-   the engine script (with `NIC_NAME` auto-detected via `ip`).
+   The Prefill command takes the node's own IP as `$3`; the Decode
+   command exports each node's IP as `LOCAL_IP` before invoking
+   `launch_online_dp.py`.
 3. Reserve the Prefill master port 29501 (TCP store for `--nnodes 4`),
    Prefill DP RPC port 12980, Decode DP RPC port 12990, Decode API ports
    10010-10013 per node, Prefill API port 8077, proxy port 8000, and the
@@ -621,24 +621,6 @@ exec vllm serve "$MODEL_PATH" \
   $API_SERVER_COUNT $HEADLESS_ARGS
 ```
 
-Save the per-node wrapper as `start_p_node.sh`:
-
-```shell
-#!/usr/bin/env bash
-set -euo pipefail
-
-LOCAL_IP=${1:?need local_ip}
-NODE_RANK=${2:?need node_rank}
-export NIC_NAME="<NETWORK_INTERFACE>"
-export P_MASTER_IP="<PREFILL_NODE0_IP>"
-export MODEL_PATH="<YOUR_MODEL_PATH>"
-SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-mkdir -p "$SCRIPT_DIR/logs"
-
-exec bash "$SCRIPT_DIR/start_p_engine.sh" "$NODE_RANK" 8077 "$LOCAL_IP" \
-  2>&1 | tee "$SCRIPT_DIR/logs/p_node_${NODE_RANK}.log"
-```
-
 #### 5.4.3 Decode Engine Script
 
 Save the following complete script as `start_d_engine.sh`. One copy
@@ -741,48 +723,84 @@ started nearly simultaneously.
 1. Decode node 0 (DP ranks 0-3, hosts the DP master):
 
     ```shell
-    bash start_d_node.sh <DECODE_NODE0_IP> 0
-    ```
-
-2. Decode node 1 (DP ranks 4-7), node 2 (8-11), node 3 (12-15) — start
-   these at the same time as node 0:
-
-    ```shell
-    bash start_d_node.sh <DECODE_NODE1_IP> 4
-    bash start_d_node.sh <DECODE_NODE2_IP> 8
-    bash start_d_node.sh <DECODE_NODE3_IP> 12
-    ```
-
-   where `start_d_node.sh` is a thin wrapper:
-
-    ```shell
-    #!/usr/bin/env bash
-    set -euo pipefail
-    LOCAL_IP=${1:?need local_ip}
-    DP_RANK_START=${2:?need dp_rank_start}
-    SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-    mkdir -p "$SCRIPT_DIR/logs"
-    export LOCAL_IP
+    export LOCAL_IP="<DECODE_NODE0_IP>"
+    export NIC_NAME="<NETWORK_INTERFACE>"
     export MODEL_PATH="<YOUR_MODEL_PATH>"
-    export NIC_NAME=$(ip -o -4 addr show | grep "$LOCAL_IP/" | awk '{print $2}' | head -1)
-
-    exec python3 "$SCRIPT_DIR/launch_online_dp.py" \
-      --script-path "$SCRIPT_DIR/start_d_engine.sh" \
+    python3 launch_online_dp.py \
+      --script-path ./start_d_engine.sh \
       --dp-size 16 --tp-size 2 --dp-size-local 4 \
-      --dp-rank-start "$DP_RANK_START" \
+      --dp-rank-start 0 \
       --dp-address "<DECODE_NODE0_IP>" --dp-rpc-port 12990 \
-      --vllm-start-port 10010 \
-      2>&1 | tee "$SCRIPT_DIR/logs/d_node_${DP_RANK_START}.log"
+      --vllm-start-port 10010
     ```
 
-3. Prefill node 0 (API server) first, then nodes 2, 1, 3 (leader before
-   workers):
+2. Decode node 1 (DP ranks 4-7), node 2 (8-11), and node 3 (12-15):
+
+    Run the corresponding command directly on each node. Replace the
+    `LOCAL_IP` and `DP_RANK_START` values for that node.
 
     ```shell
-    bash start_p_node.sh <PREFILL_NODE0_IP> 0
-    bash start_p_node.sh <PREFILL_NODE2_IP> 2
-    bash start_p_node.sh <PREFILL_NODE1_IP> 1
-    bash start_p_node.sh <PREFILL_NODE3_IP> 3
+    # Decode node 1
+    export LOCAL_IP="<DECODE_NODE1_IP>"
+    export NIC_NAME="<NETWORK_INTERFACE>"
+    export MODEL_PATH="<YOUR_MODEL_PATH>"
+    python3 launch_online_dp.py \
+      --script-path ./start_d_engine.sh \
+      --dp-size 16 --tp-size 2 --dp-size-local 4 \
+      --dp-rank-start 4 \
+      --dp-address "<DECODE_NODE0_IP>" --dp-rpc-port 12990 \
+      --vllm-start-port 10010
+
+    # Decode node 2
+    export LOCAL_IP="<DECODE_NODE2_IP>"
+    export NIC_NAME="<NETWORK_INTERFACE>"
+    export MODEL_PATH="<YOUR_MODEL_PATH>"
+    python3 launch_online_dp.py \
+      --script-path ./start_d_engine.sh \
+      --dp-size 16 --tp-size 2 --dp-size-local 4 \
+      --dp-rank-start 8 \
+      --dp-address "<DECODE_NODE0_IP>" --dp-rpc-port 12990 \
+      --vllm-start-port 10010
+
+    # Decode node 3
+    export LOCAL_IP="<DECODE_NODE3_IP>"
+    export NIC_NAME="<NETWORK_INTERFACE>"
+    export MODEL_PATH="<YOUR_MODEL_PATH>"
+    python3 launch_online_dp.py \
+      --script-path ./start_d_engine.sh \
+      --dp-size 16 --tp-size 2 --dp-size-local 4 \
+      --dp-rank-start 12 \
+      --dp-address "<DECODE_NODE0_IP>" --dp-rpc-port 12990 \
+      --vllm-start-port 10010
+    ```
+
+3. Prefill node 0 (API server) first, then nodes 2, 1, and 3 (leader before
+   workers). Run each command directly on its target node:
+
+    ```shell
+    # Prefill node 0
+    export NIC_NAME="<NETWORK_INTERFACE>"
+    export P_MASTER_IP="<PREFILL_NODE0_IP>"
+    export MODEL_PATH="<YOUR_MODEL_PATH>"
+    bash start_p_engine.sh 0 8077 <PREFILL_NODE0_IP>
+
+    # Prefill node 2
+    export NIC_NAME="<NETWORK_INTERFACE>"
+    export P_MASTER_IP="<PREFILL_NODE0_IP>"
+    export MODEL_PATH="<YOUR_MODEL_PATH>"
+    bash start_p_engine.sh 2 8077 <PREFILL_NODE2_IP>
+
+    # Prefill node 1
+    export NIC_NAME="<NETWORK_INTERFACE>"
+    export P_MASTER_IP="<PREFILL_NODE0_IP>"
+    export MODEL_PATH="<YOUR_MODEL_PATH>"
+    bash start_p_engine.sh 1 8077 <PREFILL_NODE1_IP>
+
+    # Prefill node 3
+    export NIC_NAME="<NETWORK_INTERFACE>"
+    export P_MASTER_IP="<PREFILL_NODE0_IP>"
+    export MODEL_PATH="<YOUR_MODEL_PATH>"
+    bash start_p_engine.sh 3 8077 <PREFILL_NODE3_IP>
     ```
 
 For background launches inside containers, prefer `docker exec -d`
@@ -1150,13 +1168,13 @@ exec vllm serve "$MODEL_PATH" \
   }'
 ```
 
-Start the four Decode nodes as in Section 5.4.4, with the same wrapper
-and launcher invocation (`--dp-size 16 --tp-size 2 --dp-size-local 4`,
-`--dp-rank-start` 0/4/8/12, DP RPC 12990, API ports 10010-10013), except
-that `start_d_engine_pool.sh` replaces `start_d_engine.sh` in the
-wrapper's `--script-path` and `MEMCACHE_ROOT`/`PYTHON_LIB_DIR` are
-exported alongside `LOCAL_IP`/`NIC_NAME`. Start the Decode group before
-the Prefill instances, as in Section 5.4.4.
+Start the four Decode nodes with the direct launcher commands in Section
+5.4.4 (`--dp-size 16 --tp-size 2 --dp-size-local 4`, `--dp-rank-start`
+0/4/8/12, DP RPC 12990, API ports 10010-10013). Use
+`--script-path ./start_d_engine_pool.sh` instead of
+`./start_d_engine.sh`, and export `MEMCACHE_ROOT` and `PYTHON_LIB_DIR`
+alongside `LOCAL_IP`, `NIC_NAME`, and `MODEL_PATH` on each node. Start the
+Decode group before the Prefill instances, as in Section 5.4.4.
 
 #### 5.5.4 Start the Proxy
 
