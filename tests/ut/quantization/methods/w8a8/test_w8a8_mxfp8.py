@@ -299,9 +299,7 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
                 self.assertEqual(len(experts), self.num_experts)
                 if name.endswith("scale"):
                     groups, channels, scale_size = original.shape
-                    expected_tensor = original.reshape(groups, channels, scale_size // 2, 2).view(
-                        torch.float8_e8m0fnu
-                    )
+                    expected_tensor = original.reshape(groups, channels, scale_size // 2, 2).view(torch.float8_e8m0fnu)
                 else:
                     expected_tensor = original
                 for expert, expected in zip(experts, expected_tensor.unbind(0)):
