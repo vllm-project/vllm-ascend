@@ -42,6 +42,7 @@ _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
 _F_PROJ_SHARD_ID = 1
 _KDA_BFG_STREAM_PRIORITY = -1
 _KDA_BFG_STREAM: torch.npu.Stream | None = None
+_KDA_QKV_STREAM: torch.npu.Stream | None = None
 _KDA_BFG_POSTPROCESS_STREAM: torch.npu.Stream | None = None
 
 
@@ -60,6 +61,13 @@ def _kda_bfg_postprocess_stream() -> torch.npu.Stream:
     if _KDA_BFG_POSTPROCESS_STREAM is None:
         _KDA_BFG_POSTPROCESS_STREAM = torch_npu.npu.Stream()
     return _KDA_BFG_POSTPROCESS_STREAM
+
+
+def _kda_qkv_stream() -> torch.npu.Stream:
+    global _KDA_QKV_STREAM
+    if _KDA_QKV_STREAM is None:
+        _KDA_QKV_STREAM = torch_npu.npu.Stream(priority=_KDA_BFG_STREAM_PRIORITY)
+    return _KDA_QKV_STREAM
 
 
 class _KDAFusedBFGLinear(MergedColumnParallelLinear):
@@ -301,6 +309,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         """Fork BFG work to an auxiliary stream and join it back to main."""
         main_stream = torch.npu.current_stream()
         bfg_stream = _kda_bfg_stream()
+        qkv_stream = _kda_qkv_stream()
 
         hidden_states_ready = main_stream.record_event()
         hidden_states.record_stream(bfg_stream)
@@ -313,9 +322,19 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         quant_ready = main_stream.record_event()
 
         # BFG uses the high-priority auxiliary stream; DynamicQuant and the
-        # QKV Cube matmul remain on the caller's default-priority main stream.
-        main_stream.wait_event(bfg_projection_ready)
-        mixed_qkv = self._matmul_fused_qkv(quantized_qkv)
+        # metadata preparation remain on the caller's default-priority main
+        # stream. The QKV Cube matmul uses a second high-priority stream.
+        qkv_stream.wait_event(quant_ready)
+        qkv_stream.wait_event(bfg_projection_ready)
+        with npu_stream_switch(qkv_stream):
+            mixed_qkv = self._matmul_fused_qkv(quantized_qkv)
+            qkv_ready = qkv_stream.record_event()
+        if isinstance(quantized_qkv, tuple):
+            quantized_tensors = quantized_qkv
+        else:
+            quantized_tensors = (quantized_qkv,)
+        for tensor in quantized_tensors:
+            tensor.record_stream(qkv_stream)
 
         postprocess_stream = _kda_bfg_postprocess_stream()
         with npu_stream_switch(postprocess_stream):
@@ -323,17 +342,19 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             # QKV Cube matmul with beta's FP32 conversion and sigmoid vector
             # work. Split and reshape the F/output gates here as well so all
             # BFG output handling occurs after the QKV matmul is enqueued.
-            # Keep this on a separate default-priority stream so the QKV
-            # MatMul is submitted on main before these short vector ops.
+            # Keep this on a separate default-priority stream. The QKV
+            # MatMul was submitted on its high-priority stream first.
             postprocess_stream.wait_event(bfg_projection_ready)
             postprocess_stream.wait_event(quant_ready)
             beta, g1, g2 = self._postprocess_bfg(fused_bfg)
             bfg_ready = postprocess_stream.record_event()
 
+        mixed_qkv.record_stream(main_stream)
         for tensor in (beta, g1, g2):
             tensor.record_stream(main_stream)
         # bfg_ready is the auxiliary stream tail. Joining that exact event is
         # required for multi-stream ACL graph capture as well as eager reuse.
+        main_stream.wait_event(qkv_ready)
         main_stream.wait_event(bfg_ready)
         return mixed_qkv, beta, g1, g2
 

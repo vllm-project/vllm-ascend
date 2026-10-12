@@ -35,6 +35,16 @@ def test_kda_bfg_stream_uses_high_priority(monkeypatch: pytest.MonkeyPatch):
     stream_factory.assert_called_once_with(priority=_KDA_BFG_STREAM_PRIORITY)
 
 
+def test_kda_qkv_stream_uses_high_priority(monkeypatch: pytest.MonkeyPatch):
+    import vllm_ascend.ops.kimi_kda as kimi_kda
+
+    fake_stream = object()
+    monkeypatch.setattr(kimi_kda, "_KDA_QKV_STREAM", None)
+    with patch.object(kimi_kda.torch_npu.npu, "Stream", return_value=fake_stream) as stream_factory:
+        assert kimi_kda._kda_qkv_stream() is fake_stream
+    stream_factory.assert_called_once_with(priority=_KDA_BFG_STREAM_PRIORITY)
+
+
 class _RecordingLinear(nn.Module):
     def __init__(self, output: torch.Tensor) -> None:
         super().__init__()
@@ -283,12 +293,13 @@ def test_overlapped_qkv_bfg_keeps_two_stage_vector_cube_overlap():
     trace: list[str] = []
     main_stream = _RecordingStream("main", ["hidden_ready", "quant_ready"], trace)
     bfg_stream = _RecordingStream("bfg", ["bfg_projection_ready"], trace)
+    qkv_stream = _RecordingStream("qkv", ["qkv_ready"], trace)
     postprocess_stream = _RecordingStream("postprocess", ["bfg_ready"], trace)
     hidden_states = _RecordingTensor("hidden", trace)
     fused_bfg = _RecordingTensor("fused_bfg", trace)
     processed_bfg = tuple(_RecordingTensor(name, trace) for name in ("beta", "raw_gate", "output_gate"))
-    quantized_qkv = object()
-    qkv = object()
+    quantized_qkv = _RecordingTensor("quantized_qkv", trace)
+    qkv = _RecordingTensor("qkv", trace)
 
     def record_project_bfg(_hidden_states: object) -> _RecordingTensor:
         trace.append("project_bfg")
@@ -314,6 +325,7 @@ def test_overlapped_qkv_bfg_keeps_two_stage_vector_cube_overlap():
     with (
         patch("vllm_ascend.ops.kimi_kda.torch.npu.current_stream", return_value=main_stream),
         patch("vllm_ascend.ops.kimi_kda._kda_bfg_stream", return_value=bfg_stream),
+        patch("vllm_ascend.ops.kimi_kda._kda_qkv_stream", return_value=qkv_stream),
         patch("vllm_ascend.ops.kimi_kda._kda_bfg_postprocess_stream", return_value=postprocess_stream),
         patch(
             "vllm_ascend.ops.kimi_kda.npu_stream_switch",
@@ -333,17 +345,24 @@ def test_overlapped_qkv_bfg_keeps_two_stage_vector_cube_overlap():
         "exit:bfg",
         "dynamic_quant",
         "main.record:quant_ready",
-        "main.wait:bfg_projection_ready",
+        "qkv.wait:quant_ready",
+        "qkv.wait:bfg_projection_ready",
+        "enter:qkv",
         "qkv_matmul",
+        "qkv.record:qkv_ready",
+        "exit:qkv",
+        "quantized_qkv.record_stream:qkv",
         "enter:postprocess",
         "postprocess.wait:bfg_projection_ready",
         "postprocess.wait:quant_ready",
         "postprocess_bfg",
         "postprocess.record:bfg_ready",
         "exit:postprocess",
+        "qkv.record_stream:main",
         "beta.record_stream:main",
         "raw_gate.record_stream:main",
         "output_gate.record_stream:main",
+        "main.wait:qkv_ready",
         "main.wait:bfg_ready",
     ]
 
