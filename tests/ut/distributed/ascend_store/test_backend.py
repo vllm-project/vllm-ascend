@@ -24,6 +24,8 @@ from contextlib import ExitStack
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
+import numpy as np
+
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     backend_map,
@@ -1575,8 +1577,12 @@ class TestMemcacheBackendMethods(unittest.TestCase):
     def test_put(self):
         b = self._make_backend()
         b.store.batch_put_from_layers.return_value = [0]
-        b.put(["k1"], [[100]], [[10]])
+        addrs, sizes = np.asarray([[100]]), np.asarray([[10]])
+        b.put(["k1"], addrs, sizes)
         b.store.batch_put_from_layers.assert_called_once()
+        self.assertTrue(b.supports_array_put)
+        self.assertIs(b.store.batch_put_from_layers.call_args.args[1], addrs)
+        self.assertIs(b.store.batch_put_from_layers.call_args.args[2], sizes)
 
     def test_put_error(self):
         b = self._make_backend()

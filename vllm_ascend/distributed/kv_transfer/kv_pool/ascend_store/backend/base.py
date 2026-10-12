@@ -5,6 +5,7 @@ from collections.abc import Iterable
 from numbers import Integral
 from typing import Any
 
+import numpy as np
 import torch
 from vllm.config import ParallelConfig
 from vllm.platforms import current_platform
@@ -74,6 +75,8 @@ class Backend(ABC):
     store: Any | None = None
     # Whether the connector must filter existing keys before calling put().
     requires_exists_before_put: bool = True
+    # Whether put accepts NumPy address/size rows without list conversion.
+    supports_array_put: bool = False
 
     @abstractmethod
     def __init__(self, parallel_config: ParallelConfig, lazy_init: bool = False):
@@ -158,7 +161,12 @@ class Backend(ABC):
         raise NotImplementedError(f"{type(self).__name__} does not support batch_get_end")
 
     @abstractmethod
-    def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
+    def put(
+        self,
+        keys: list[str],
+        addrs: list[list[int]] | np.ndarray | list[np.ndarray],
+        sizes: list[list[int]] | np.ndarray | list[np.ndarray],
+    ):
         pass
 
     @abstractmethod
