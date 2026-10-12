@@ -20,7 +20,7 @@
 #include "gmsq_vcv_controller.h"
 
 // Namespace-free alias so the REGISTER_TILING_DEFAULT metadata section name
-// stays simple, matching the mla_prolog_v3 / situ_mx_quant pattern.
+// stays simple, matching the mla_prolog_v3 / situ_mx_quant_vllm pattern.
 using GmmSituTilingData = gmm_situ::SituTilingHeader;
 
 // NOTE: the kernel entry and its metadata macros (KERNEL_TASK_TYPE_DEFAULT /

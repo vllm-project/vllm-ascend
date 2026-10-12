@@ -41,7 +41,7 @@ from ..base import (
 )
 from ..registry import register_scheme
 
-# CANN uses 36 to select FP8 E4M3FN output for situ_mx_quant.
+# CANN uses 36 to select FP8 E4M3FN output for situ_mx_quant_vllm.
 SITU_MX_DST_TYPE_E4M3FN = 36
 
 
@@ -412,7 +412,7 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
             # SituAndMul: run the dequantized gmm1 first, then fuse the situ
             # activation with MXFP output quantization (Kimi K3 SITU activation).
 
-            hidden_states, swiglu_out_scale = torch.ops._C_ascend.situ_mx_quant(
+            hidden_states, swiglu_out_scale = torch.ops._C_ascend.situ_mx_quant_vllm(
                 x=hidden_states,
                 beta=1.0 if mlp_compute_input.activation_situ_beta is None else mlp_compute_input.activation_situ_beta,
                 linear_beta=mlp_compute_input.activation_situ_linear_beta or 0.0,

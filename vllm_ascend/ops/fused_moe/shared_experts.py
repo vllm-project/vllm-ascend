@@ -40,7 +40,7 @@ from vllm_ascend.quantization.prepared_linear_input import PreparedLinearInput
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import npu_stream_switch, shared_experts_calculation_stream
 
-# CANN uses 36 to select FP8 E4M3FN output for situ_mx_quant.
+# CANN uses 36 to select FP8 E4M3FN output for situ_mx_quant_vllm.
 SITU_MX_DST_TYPE_E4M3FN = 36
 
 
@@ -520,7 +520,7 @@ class AscendSharedExperts:
             "shared_activation_overlap_start",
         )
         if self.situ_activation is not None:
-            quantized_x, swiglu_out_scale = torch.ops._C_ascend.dequant_situ_quant(
+            quantized_x, swiglu_out_scale = torch.ops._C_ascend.dequant_situ_quant_vllm(
                 x=submitted_gate_up.gate_up,
                 weight_scale=self.layer.gate_up_proj.weight_scale_fp32,
                 activation_scale=pertoken_scale,
@@ -584,7 +584,7 @@ class AscendSharedExperts:
             "shared_activation_overlap_start",
         )
         if self.situ_activation is not None:
-            quantized_x, swiglu_out_scale = torch.ops._C_ascend.situ_mx_quant(
+            quantized_x, swiglu_out_scale = torch.ops._C_ascend.situ_mx_quant_vllm(
                 x=submitted_gate_up.gate_up,
                 beta=self.situ_activation.beta,
                 linear_beta=self.situ_activation.linear_beta or 0.0,

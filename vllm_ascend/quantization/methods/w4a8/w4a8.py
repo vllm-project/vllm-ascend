@@ -577,7 +577,7 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
                 group_list_type=group_list_type,
                 output_dtype=torch.bfloat16 if bias1 is not None else w2_scale[0].dtype,
             )[0]
-            hidden_states, swiglu_out_scale = torch.ops._C_ascend.dequant_situ_quant(
+            hidden_states, swiglu_out_scale = torch.ops._C_ascend.dequant_situ_quant_vllm(
                 x=hidden_states,
                 weight_scale=None,
                 activation_scale=None,

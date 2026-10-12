@@ -122,7 +122,7 @@ def resolve_bounded_replay(vllm_config: VllmConfig, cache_config: CacheConfig | 
     operator's job now: band mode reads ``ori_topk_length`` as the per-token
     visible length and floors the window's left edge with it. See
     ``build_replay_swa_visible_lens`` in ``attention/dsa_v41.py`` for the read
-    side and ``npu_sparse_flash_mla``'s band path for the clamp.
+    side and ``npu_sparse_flash_mla_vllm``'s band path for the clamp.
     """
     if not supports_bounded_replay(getattr(vllm_config, "model_config", None)):
         # Upstream wires the feature into the DeepSeek-V4.1 tree only -- the V4

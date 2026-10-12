@@ -41,7 +41,7 @@
 #include "gmm/grouped_matmul_swiglu_quant_v2/grouped_matmul_swiglu_quant_v2_torch_adpt.h"
 #include "moe/moe_gating_top_k/moe_gating_top_k_torch_adpt.h"
 #include "attention/sparse_flash_attention/sparse_flash_attention_torch_adpt.h"
-#include "attention/sparse_flash_mla/sparse_flash_mla_torch_adpt.h"
+#include "attention/sparse_flash_mla_vllm/sparse_flash_mla_vllm_torch_adpt.h"
 #include "attention/kv_compress_epilog_v2/kv_compress_epilog_v2_torch_adpt.h"
 #include "attention/quant_lightning_indexer_v2/quant_lightning_indexer_v2_torch_adpt.h"
 #include "attention/kv_quant_sparse_flash_attention_vllm/kv_quant_sparse_flash_attention_vllm_torch_adpt.h"
@@ -55,10 +55,10 @@
 #include "attention/kda_layout_swap12/kda_layout_swap12_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
 #include "attention/k2q_csr/k2q_csr_torch_adpt.h"
-#include "attention/msa_index_score/msa_index_score_torch_adpt.h"
+#include "attention/msa_index_score_vllm/msa_index_score_vllm_torch_adpt.h"
 #include "attention/sparse_attention_score/sparse_attention_score_torch_adpt.h"
-#include "moe/dequant_situ_quant/dequant_situ_quant_torch_adpt.h"
-#include "moe/situ_mx_quant/situ_mx_quant_torch_adpt.h"
+#include "moe/dequant_situ_quant_vllm/dequant_situ_quant_vllm_torch_adpt.h"
+#include "moe/situ_mx_quant_vllm/situ_mx_quant_vllm_torch_adpt.h"
 #include "gmm/gmm_dequant_situ_quant/gmm_dequant_situ_quant_torch_adpt.h"
 #include "moe/grouped_matmul_situ_quant/grouped_matmul_situ_quant_torch_adpt.h"
 #include <c10/core/Device.h>
@@ -2881,7 +2881,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("attn_res_fwd", torch::kPrivateUse1, &vllm_ascend::attn_res_fwd);
 
     ops.def(
-        "dequant_situ_quant(Tensor x, "
+        "dequant_situ_quant_vllm(Tensor x, "
         "                   *, Tensor? weight_scale=None, "
         "                   Tensor? activation_scale=None, "
         "                   Tensor? bias=None, "
@@ -2892,15 +2892,15 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                   float linear_beta=25.0, "
         "                   bool activate_left=True, "
         "                   str quant_mode=\"dynamic\") -> (Tensor y, Tensor scale)");
-    ops.impl("dequant_situ_quant", torch::kPrivateUse1, &vllm_ascend::dequant_situ_quant);
+    ops.impl("dequant_situ_quant_vllm", torch::kPrivateUse1, &vllm_ascend::dequant_situ_quant_vllm);
 
     ops.def(
-        "situ_mx_quant(Tensor x, "
+        "situ_mx_quant_vllm(Tensor x, "
         "              float beta=1.0, "
         "              float linear_beta=0.0, "
         "              bool activate_left=False, "
         "              int dst_type=36) -> (Tensor y, Tensor mxscale)");
-    ops.impl("situ_mx_quant", torch::kPrivateUse1, &vllm_ascend::situ_mx_quant);
+    ops.impl("situ_mx_quant_vllm", torch::kPrivateUse1, &vllm_ascend::situ_mx_quant_vllm);
 
     ops.def(
         "gmm_dequant_situ_quant(Tensor x, Tensor[] weight, Tensor[] weight_scale, "
@@ -3150,7 +3150,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
              &vllm_ascend::qli_v2::QuantLightningIndexerCandidate);
 
     ops.def(
-        "npu_sparse_flash_mla_metadata(int num_heads_q, int num_heads_kv, int head_dim, *, "
+        "npu_sparse_flash_mla_metadata_vllm(int num_heads_q, int num_heads_kv, int head_dim, *, "
         "Tensor? cu_seqlens_q=None, Tensor? cu_seqlens_ori_kv=None, Tensor? cu_seqlens_cmp_kv=None, "
         "Tensor? seqused_q=None, Tensor? seqused_ori_kv=None, Tensor? seqused_cmp_kv=None, "
         "Tensor? cmp_residual_kv=None, Tensor? ori_topk_length=None, Tensor? cmp_topk_length=None, "
@@ -3159,11 +3159,11 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "int ori_win_left=-1, int ori_win_right=-1, str layout_q='BSND', str layout_kv='BSND', "
         "bool has_ori_kv=True, bool has_cmp_kv=True) -> Tensor"
     );
-    ops.impl("npu_sparse_flash_mla_metadata", torch::kPrivateUse1,
-             &vllm_ascend::npu_sparse_flash_mla_metadata);
+    ops.impl("npu_sparse_flash_mla_metadata_vllm", torch::kPrivateUse1,
+             &vllm_ascend::npu_sparse_flash_mla_metadata_vllm);
 
     ops.def(
-        "npu_sparse_flash_mla(Tensor q, *, Tensor? ori_kv=None, Tensor? cmp_kv=None, "
+        "npu_sparse_flash_mla_vllm(Tensor q, *, Tensor? ori_kv=None, Tensor? cmp_kv=None, "
         "Tensor? ori_sparse_indices=None, Tensor? cmp_sparse_indices=None, "
         "Tensor? ori_block_table=None, Tensor? cmp_block_table=None, "
         "Tensor? cu_seqlens_q=None, Tensor? cu_seqlens_ori_kv=None, Tensor? cu_seqlens_cmp_kv=None, "
@@ -3174,8 +3174,8 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "str layout_q='BSND', str layout_kv='BSND', int topk_value_mode=1, "
         "bool return_softmax_lse=False) -> (Tensor, Tensor)"
     );
-    ops.impl("npu_sparse_flash_mla", torch::kPrivateUse1,
-             &vllm_ascend::npu_sparse_flash_mla);
+    ops.impl("npu_sparse_flash_mla_vllm", torch::kPrivateUse1,
+             &vllm_ascend::npu_sparse_flash_mla_vllm);
 
     ops.def(
         "npu_kv_quant_sparse_flash_attention_vllm(Tensor query, Tensor key, Tensor value,"
@@ -3618,15 +3618,15 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
              &vllm_ascend::npu_sparse_attention_score);
 
     ops.def(
-        "npu_msa_index_score("
+        "npu_msa_index_score_vllm("
         "Tensor query, Tensor key, Tensor block_table, Tensor start_loc, *, "
         "Tensor? scale=None, Tensor? atten_mask=None, "
         "Tensor? actual_seq_qlen=None, Tensor? actual_seq_klen=None, "
         "str layout_key=\"BBND\", int sparse_mode=3, "
         "int init_blocks=0, int local_blocks=0) -> Tensor"
     );
-    ops.impl("npu_msa_index_score", torch::kPrivateUse1,
-             &vllm_ascend::npu_msa_index_score);
+    ops.impl("npu_msa_index_score_vllm", torch::kPrivateUse1,
+             &vllm_ascend::npu_msa_index_score_vllm);
 
     ops.def(
         "npu_fused_lightning_indexer_manage("

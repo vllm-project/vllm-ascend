@@ -940,7 +940,7 @@ def test_batch_metadata_reuses_work_and_keeps_group_slots_separate(runtime, monk
 
     smla = Mock(side_effect=native_metadata)
     qli = Mock(side_effect=native_metadata)
-    monkeypatch.setattr(torch.ops._C_ascend, "npu_sparse_flash_mla_metadata", smla, raising=False)
+    monkeypatch.setattr(torch.ops._C_ascend, "npu_sparse_flash_mla_metadata_vllm", smla, raising=False)
     monkeypatch.setattr(torch.ops._C_ascend, "npu_quant_lightning_indexer_v2_metadata", qli, raising=False)
     for group_builders in builders:
         for builder in group_builders:
@@ -1689,7 +1689,7 @@ def test_dspark_v41_noncausal_metadata_preserves_full_visible_block(runtime, mon
         positions=torch.tensor([first_seq_len - 3, first_seq_len - 2, first_seq_len - 1, 4]),
     )
     native = Mock(return_value=torch.zeros(dsa_v41.V41_METADATA_BUFFER_SIZE, dtype=torch.int32))
-    monkeypatch.setattr(torch.ops._C_ascend, "npu_sparse_flash_mla_metadata", native, raising=False)
+    monkeypatch.setattr(torch.ops._C_ascend, "npu_sparse_flash_mla_metadata_vllm", native, raising=False)
     builder = AscendDSAV41MetadataBuilder(spec, [], runtime, torch.device("cpu"))
     builder._supports_device_ops = True
     full = builder.build_for_drafting(common, 1)

@@ -16,7 +16,7 @@
 
 """Single-operator Kimi K3 SiTU fusion fixtures.
 
-The A3 fixtures intentionally call DequantSituQuant directly.  Shared experts
+The A3 fixtures intentionally call DequantSituQuantVllm directly.  Shared experts
 exercise its INT32 dequant mode; routed experts exercise the same operator's
 pre-dequantized BF16 mode with every dequant input absent.
 """
@@ -88,8 +88,8 @@ def _run_a3(
     weight_scale: torch.Tensor | None,
     activation_scale: torch.Tensor | None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    assert hasattr(torch.ops._C_ascend, "dequant_situ_quant")
-    return torch.ops._C_ascend.dequant_situ_quant(
+    assert hasattr(torch.ops._C_ascend, "dequant_situ_quant_vllm")
+    return torch.ops._C_ascend.dequant_situ_quant_vllm(
         x=x.npu(),
         weight_scale=None if weight_scale is None else weight_scale.npu(),
         activation_scale=None if activation_scale is None else activation_scale.npu(),
@@ -112,15 +112,15 @@ def _run_a3(
 )
 @pytest.mark.parametrize(("phase", "rows"), (("decode", 1), ("prefill", 65)), ids=("decode", "prefill"))
 @torch.inference_mode()
-def test_a3_shared_dequant_situ_quant_single_op(
+def test_a3_shared_dequant_situ_quant_vllm_single_op(
     tp_size: int,
     input_width: int,
     phase: str,
     rows: int,
 ):
     """Shared experts: INT32 accumulator plus FP32 dequant scales."""
-    if not hasattr(torch.ops._C_ascend, "dequant_situ_quant"):
-        pytest.skip("requires the DequantSituQuant custom operator")
+    if not hasattr(torch.ops._C_ascend, "dequant_situ_quant_vllm"):
+        pytest.skip("requires the DequantSituQuantVllm custom operator")
 
     assert phase in {"decode", "prefill"}
     assert input_width == 12288 // tp_size
@@ -149,10 +149,10 @@ def test_a3_shared_dequant_situ_quant_single_op(
     ids=("decode_empty_m0", "decode_max_m14", "prefill_max_m910"),
 )
 @torch.inference_mode()
-def test_a3_routed_bf16_dequant_situ_quant_single_op(phase: str, rows: int):
+def test_a3_routed_bf16_dequant_situ_quant_vllm_single_op(phase: str, rows: int):
     """Routed experts: the same A3 op, BF16 input, no dequant stage."""
-    if not hasattr(torch.ops._C_ascend, "dequant_situ_quant"):
-        pytest.skip("requires the DequantSituQuant custom operator")
+    if not hasattr(torch.ops._C_ascend, "dequant_situ_quant_vllm"):
+        pytest.skip("requires the DequantSituQuantVllm custom operator")
 
     assert phase in {"decode_empty", "decode_max_local", "prefill_max_local"}
     x = _routed_input(rows)
@@ -183,20 +183,20 @@ def _is_ascend_950() -> bool:
 )
 @pytest.mark.parametrize(("phase", "rows"), (("decode", 1), ("prefill", 65)), ids=("decode", "prefill"))
 @torch.inference_mode()
-def test_a5_shared_situ_mx_quant_shapes_single_op(
+def test_a5_shared_situ_mx_quant_vllm_shapes_single_op(
     tp_size: int,
     input_width: int,
     phase: str,
     rows: int,
 ):
     """A5 shared-expert MXFP output and scale layout."""
-    if not _is_ascend_950() or not hasattr(torch.ops._C_ascend, "situ_mx_quant"):
-        pytest.skip("requires an Ascend 950 device and SituMxQuant")
+    if not _is_ascend_950() or not hasattr(torch.ops._C_ascend, "situ_mx_quant_vllm"):
+        pytest.skip("requires an Ascend 950 device and SituMxQuantVllm")
 
     assert phase in {"decode", "prefill"}
     assert input_width == 12288 // tp_size
     x = _bf16_input(rows, input_width)
-    y, mxscale = torch.ops._C_ascend.situ_mx_quant(
+    y, mxscale = torch.ops._C_ascend.situ_mx_quant_vllm(
         x.npu(),
         beta=K3_BETA,
         linear_beta=K3_LINEAR_BETA,
@@ -214,14 +214,14 @@ def test_a5_shared_situ_mx_quant_shapes_single_op(
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize(("phase", "rows"), (("decode_max_local", 14), ("prefill_max_local", 910)))
 @torch.inference_mode()
-def test_a5_routed_situ_mx_quant_shapes_single_op(phase: str, rows: int):
+def test_a5_routed_situ_mx_quant_vllm_shapes_single_op(phase: str, rows: int):
     """A5 routed-expert shape is TP-invariant."""
-    if not _is_ascend_950() or not hasattr(torch.ops._C_ascend, "situ_mx_quant"):
-        pytest.skip("requires an Ascend 950 device and SituMxQuant")
+    if not _is_ascend_950() or not hasattr(torch.ops._C_ascend, "situ_mx_quant_vllm"):
+        pytest.skip("requires an Ascend 950 device and SituMxQuantVllm")
 
     assert phase in {"decode_max_local", "prefill_max_local"}
     x = _routed_input(rows)
-    y, mxscale = torch.ops._C_ascend.situ_mx_quant(
+    y, mxscale = torch.ops._C_ascend.situ_mx_quant_vllm(
         x.npu(),
         beta=K3_BETA,
         linear_beta=K3_LINEAR_BETA,

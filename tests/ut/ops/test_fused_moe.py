@@ -1271,7 +1271,7 @@ def test_fused_routed_backend_without_stage_events_runs_shared_mlp(monkeypatch):
     main_stream.wait_stream.assert_called_once_with(auxiliary_stream)
 
 
-def test_w8a8_shared_situ_uses_dequant_situ_quant(monkeypatch):
+def test_w8a8_shared_situ_uses_dequant_situ_quant_vllm(monkeypatch):
     gate_up_proj = SimpleNamespace(
         weight=torch.ones(4, 4, dtype=torch.int8),
         weight_scale=torch.ones(4),
@@ -1289,7 +1289,7 @@ def test_w8a8_shared_situ_uses_dequant_situ_quant(monkeypatch):
     quantized_situ = torch.ones(2, 2, dtype=torch.int8)
     situ_scale = torch.ones(2)
     expected = torch.randn(2, 2, dtype=torch.bfloat16)
-    dequant_situ_quant = MagicMock(return_value=(quantized_situ, situ_scale))
+    dequant_situ_quant_vllm = MagicMock(return_value=(quantized_situ, situ_scale))
 
     monkeypatch.setattr(shared_experts_module, "has_lora", lambda _: False)
     monkeypatch.setattr(shared_experts_module, "npu_stream_switch", lambda *_args, **_kwargs: nullcontext())
@@ -1309,7 +1309,7 @@ def test_w8a8_shared_situ_uses_dequant_situ_quant(monkeypatch):
     monkeypatch.setattr(
         shared_experts_module.torch.ops,
         "_C_ascend",
-        SimpleNamespace(dequant_situ_quant=dequant_situ_quant),
+        SimpleNamespace(dequant_situ_quant_vllm=dequant_situ_quant_vllm),
     )
 
     output = shared_experts.forward(
@@ -1318,13 +1318,13 @@ def test_w8a8_shared_situ_uses_dequant_situ_quant(monkeypatch):
     )
 
     assert output is expected
-    situ_kwargs = dequant_situ_quant.call_args.kwargs
+    situ_kwargs = dequant_situ_quant_vllm.call_args.kwargs
     assert situ_kwargs["x"] is gate_up_out
     assert situ_kwargs["beta"] == 4.0
     assert situ_kwargs["linear_beta"] == 25.0
 
 
-def test_w4a8_mxfp_shared_situ_uses_situ_mx_quant(monkeypatch):
+def test_w4a8_mxfp_shared_situ_uses_situ_mx_quant_vllm(monkeypatch):
     quantized_input = torch.ones(2, 4, dtype=torch.float8_e4m3fn)
     input_scale = torch.ones(2, 1)
     gate_up_out = torch.randn(2, 4, dtype=torch.bfloat16)
@@ -1336,7 +1336,7 @@ def test_w4a8_mxfp_shared_situ_uses_situ_mx_quant(monkeypatch):
     down_proj = MagicMock(return_value=(expected, None))
     down_proj.weight_scale = torch.ones(1)
     shared_experts = _make_quantized_situ_shared_experts(QuantType.W4A8MXFP, gate_up_proj, down_proj)
-    situ_mx_quant = MagicMock(return_value=(quantized_situ, situ_scale))
+    situ_mx_quant_vllm = MagicMock(return_value=(quantized_situ, situ_scale))
 
     monkeypatch.setattr(shared_experts_module, "has_lora", lambda _: False)
     monkeypatch.setattr(shared_experts_module, "npu_stream_switch", lambda *_args, **_kwargs: nullcontext())
@@ -1351,7 +1351,7 @@ def test_w4a8_mxfp_shared_situ_uses_situ_mx_quant(monkeypatch):
     monkeypatch.setattr(
         shared_experts_module.torch.ops,
         "_C_ascend",
-        SimpleNamespace(situ_mx_quant=situ_mx_quant),
+        SimpleNamespace(situ_mx_quant_vllm=situ_mx_quant_vllm),
     )
 
     output = shared_experts.forward(
@@ -1360,7 +1360,7 @@ def test_w4a8_mxfp_shared_situ_uses_situ_mx_quant(monkeypatch):
     )
 
     assert output is expected
-    situ_kwargs = situ_mx_quant.call_args.kwargs
+    situ_kwargs = situ_mx_quant_vllm.call_args.kwargs
     assert situ_kwargs["x"] is gate_up_out
     assert situ_kwargs["beta"] == 4.0
     assert situ_kwargs["linear_beta"] == 25.0
@@ -1402,7 +1402,7 @@ def test_w4a8_mxfp_gate_up_waits_for_router_output(monkeypatch):
     monkeypatch.setattr(
         shared_experts_module.torch.ops,
         "_C_ascend",
-        SimpleNamespace(situ_mx_quant=MagicMock(return_value=(quantized_act, act_scale))),
+        SimpleNamespace(situ_mx_quant_vllm=MagicMock(return_value=(quantized_act, act_scale))),
     )
 
     output = shared_experts.forward(
@@ -1726,7 +1726,7 @@ def test_k3_w4a8_mxfp_multistream_schedule_on_a3_and_a5(monkeypatch, device_type
     monkeypatch.setattr(
         shared_experts_module.torch.ops,
         "_C_ascend",
-        SimpleNamespace(situ_mx_quant=MagicMock(side_effect=activation)),
+        SimpleNamespace(situ_mx_quant_vllm=MagicMock(side_effect=activation)),
     )
 
     result = shared_experts.forward(

@@ -184,7 +184,7 @@ def main():
             output_dtype=torch.bfloat16,
         )[0]
         if a.activation == "situ":
-            activated, act_scale = torch.ops._C_ascend.situ_mx_quant(
+            activated, act_scale = torch.ops._C_ascend.situ_mx_quant_vllm(
                 x=mm1, beta=4.0, linear_beta=25.0, activate_left=True, dst_type=36
             )
         else:

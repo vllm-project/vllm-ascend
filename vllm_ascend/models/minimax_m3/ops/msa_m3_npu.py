@@ -88,7 +88,7 @@ def _as_ascendc_index_kv_cache(
 
     The model runner binds this K-only cache as a one-element tuple whose
     tensor is shaped ``[num_blocks, 128, head_dim]``. Direct calls may pass
-    that tensor without the tuple. MsaIndexScore expects the BBND shape
+    that tensor without the tuple. MsaIndexScoreVllm expects the BBND shape
     ``[num_blocks, 128, 1, head_dim]`` instead.
     """
     if isinstance(index_kv_cache, tuple):
@@ -168,7 +168,7 @@ def _minimax_m3_index_score(
     index_kv_cache = _as_ascendc_index_kv_cache(index_kv_cache)
     if index_kv_cache.dtype == torch.float8_e4m3fn and idx_q.dtype != index_kv_cache.dtype:
         idx_q = _to_fp8_e4m3(idx_q)
-    return torch.ops._C_ascend.npu_msa_index_score(
+    return torch.ops._C_ascend.npu_msa_index_score_vllm(
         idx_q,
         index_kv_cache,
         block_table,

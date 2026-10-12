@@ -408,7 +408,7 @@ __aicore__ inline void GMMSQ_SITU_VEC_COMPUTE_CLASS::CopyWeightHighBitForAligned
  * Relay layout (per basic block, written by AIC fixpipe NoQuant F32):
  *   row-major [mL1Size x nL1Size] f32, row stride nL1Size;
  *   cols [0, nHalf) = gate half, cols [nHalf, nL1) = up half.
- * Numerics contract (bit-exact vs golden npu_grouped_matmul+situ_mx_quant):
+ * Numerics contract (bit-exact vs golden npu_grouped_matmul+situ_mx_quant_vllm):
  *   bf16_gate/up = CastRINT(relay_f32 * 64.0f)   (== fixpipe QF322BF16_PRE
  *   deqScalar=64, production-precedent: grouped_matmul_swiglu_quant_v2
  *   GmmSwigluVf applies the same vector-side x64), then the verbatim
