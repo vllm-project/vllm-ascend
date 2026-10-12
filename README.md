@@ -15,6 +15,8 @@ Fork note: this banner is added only on green-hand-shandong's fork.
 > | COCO real-image ↔ caption cross-modal retrieval | — | 3/3, 15/15 | 3/3, 15/15 | 3/3, 15/15 |
 >
 > ZH semantics and cross-modal retrieval: WeMM wins across the board; EN STS-B slightly behind the distilled retrieval specialist (expected).
+> - ✅ **[EmbeddingGemma2](https://huggingface.co/google/embeddinggemma-2) (Google, 740M) verified on Atlas 300I Duo (310P3, FP16)** — text / image / video / audio embeddings in one 768-dim space, MRL 768/512/256/128; STS-B EN 0.862 / ZH 0.785, COCO retrieval 67% / 86%. Upstream: PR [#18335](https://github.com/vllm-project/vllm-ascend/pull/18335), issue [#18337](https://github.com/vllm-project/vllm-ascend/issues/18337)
+>
 > - 🛠 **`v0.26.0rc2-310p` release image is missing the `vllm_ascend_C` extension** (all Qwen3.5-based models crash on 310P): reported in [#17713](https://github.com/vllm-project/vllm-ascend/issues/17713) with an in-container rebuild workaround; fail-fast fix in PR [#17714](https://github.com/vllm-project/vllm-ascend/pull/17714)
 >
 > Everything below is the upstream README.
