@@ -173,7 +173,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 === "950DT Products"
 
-    - Quantized model `GLM-5.3-Flash-w8a8-mxfp8` can be deployed on 1 950DT Products (96GB × 8) .
+    - Quantized model `GLM-5.3-Flash-w8a8-mxfp8` can be deployed on 1 950DT Products (96GB × 8).
 
     Run the following script to execute online inference.
 
@@ -191,6 +191,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
       --enable-expert-parallel \
       --seed 1024 \
       --quantization ascend \
+      --kv-cache-dtype fp8 \
       --served-model-name glm \
       --max-num-seqs 32 \
       --max-model-len 132096 \
@@ -249,6 +250,11 @@ Only the key parameters specific to this model/scenario are described below. `ma
 - `--data-parallel-size 1`: Runs a single DP rank. `--tensor-parallel-size` is 8 on 950DT Products and 16 on Atlas 800I A3. This layout is recommended to balance memory capacity and compute efficiency for the w8a8 weights.
 - `--enable-expert-parallel`: Must be enabled for the MoE architecture of GLM-5.3-Flash.
 - `--quantization ascend`: Enables Ascend quantization for the w8a8 quantized weights.
+- `--kv-cache-dtype`: Enables 8-bit KV cache quantization (C8) for Sparse Flash Attention (SFA).
+  Use C8 when long contexts or concurrent requests are limited by KV cache memory.
+  The complete single-node commands above use `fp8` on 950DT Products and `int8` on Atlas 800I A3.
+  KV cache quantization is independent of weight quantization: enabling C8 does not require W8A8 weights or a separate C8 checkpoint.
+  The examples use W8A8-MXFP8 weights on 950DT Products and W8A8 weights on Atlas 800I A3, as listed in Section 3.1.
 - `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'`: Enables graph capture for the decode phase only, improving decode performance by reducing kernel launch overhead.
 - `--limit-mm-per-prompt '{"image":1,"video":0}'`: Allows at most one image per prompt and disables video input in all deployment examples.
 - `--speculative-config`: Enables Multi-Token Prediction (MTP) speculative decoding with the DeepSeek-style MTP draft head of GLM-5.3-Flash. The single-node examples use three speculative tokens on 950DT Products and five on Atlas 800I A3. `enforce_eager: true` keeps the MTP draft model in eager mode on 950DT Products, while `enforce_eager: false` enables graph mode for the draft model on Atlas 800I A3. GLM-5.3-Flash supports MTP draft graph execution in v0.30.0RC1; the forced-eager restriction for other GLM models does not apply to this model.
