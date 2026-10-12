@@ -1256,6 +1256,52 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
 
         self.assertIsInstance(missing_flashmla_ops, tuple)
 
+        # MooncakeV2 transfers raw physical slots without layout metadata, so
+        # every PD endpoint uses the common component-major wire layout even
+        # when local FlashMLA support would otherwise select token-fused.
+        spec = replace(spec, num_heads=64)
+        runner.vllm_config.kv_transfer_config = SimpleNamespace(
+            kv_connector="MooncakeConnectorV2",
+            kv_connector_module_path=None,
+            kv_connector_extra_config={
+                "prefill": {"tp_size": 2},
+                "decode": {"tp_size": 1},
+            },
+        )
+        with (
+            patch(
+                "vllm_ascend.worker.model_runner_v1.get_current_hardware_profile",
+                return_value=flash_profile,
+            ),
+            patch(
+                "vllm_ascend.worker.model_runner_v1.get_flashmla_ops",
+                return_value=(MagicMock(), MagicMock()),
+            ),
+        ):
+            unequal_pd_cache = runner._reshape_kv_cache_tensors(kv_cache_config, {layer_name: (raw,)})[layer_name]
+
+        self.assertIsInstance(unequal_pd_cache, tuple)
+        unequal_pd_nope, unequal_pd_rope = unequal_pd_cache
+        self.assertEqual(unequal_pd_nope.shape, (6, 128, 1, 512))
+        self.assertEqual(unequal_pd_nope.stride(), (81408, 512, 512, 1))
+        self.assertEqual(unequal_pd_rope.storage_offset() - unequal_pd_nope.storage_offset(), 65536)
+
+        runner.vllm_config.kv_transfer_config.kv_connector_extra_config["decode"]["tp_size"] = 2
+        with (
+            patch(
+                "vllm_ascend.worker.model_runner_v1.get_current_hardware_profile",
+                return_value=flash_profile,
+            ),
+            patch(
+                "vllm_ascend.worker.model_runner_v1.get_flashmla_ops",
+                return_value=(MagicMock(), MagicMock()),
+            ),
+        ):
+            equal_pd_cache = runner._reshape_kv_cache_tensors(kv_cache_config, {layer_name: (raw,)})[layer_name]
+
+        self.assertIsInstance(equal_pd_cache, tuple)
+        runner.vllm_config.kv_transfer_config = None
+
         with patch(
             "vllm_ascend.worker.model_runner_v1.get_current_hardware_profile",
             return_value=SimpleNamespace(supports=lambda capability: False),
@@ -1268,6 +1314,82 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         self.assertEqual(rope.stride(), (81408, 64, 64, 1))
         self.assertEqual(rope.storage_offset() - nope.storage_offset(), 65536)
         self.assertIs(nope.untyped_storage(), rope.untyped_storage())
+
+    def test_mla_single_raw_backing_excludes_unsupported_prolog_quantization(self):
+        runner = self._build_runner()
+        layer_name = "model.layers.0.self_attn.attn"
+        spec = AscendMLAAttentionSpec(
+            block_size=384,
+            num_heads=64,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.bfloat16,
+        )
+        attn_module = MLAAttention.__new__(MLAAttention)
+        torch.nn.Module.__init__(attn_module)
+        attn_module.impl = SimpleNamespace(
+            fa_quant_layer=False,
+            enable_kv_nz=True,
+            dcp_enabled=False,
+            pcp_enabled=False,
+            is_pcp_decode_sharded=False,
+            supports_prolog_v3_quantization=lambda: False,
+            q_proj=SimpleNamespace(_chunk_size=0),
+        )
+        runner.compilation_config = SimpleNamespace(static_forward_context={layer_name: attn_module})
+
+        with patch(
+            "vllm_ascend.worker.model_runner_v1.supports_component_major_mla_pd",
+            return_value=True,
+        ):
+            self.assertFalse(runner._uses_single_raw_mla_cache(layer_name, spec, attn_module))
+
+        attn_module.impl.enable_kv_nz = False
+        with patch(
+            "vllm_ascend.worker.model_runner_v1.supports_component_major_mla_pd",
+            return_value=True,
+        ):
+            self.assertFalse(runner._uses_single_raw_mla_cache(layer_name, spec, attn_module))
+
+        attn_module.impl.pcp_enabled = True
+        with patch(
+            "vllm_ascend.worker.model_runner_v1.supports_component_major_mla_pd",
+            return_value=True,
+        ):
+            self.assertFalse(runner._uses_single_raw_mla_cache(layer_name, spec, attn_module))
+        attn_module.impl.pcp_enabled = False
+
+        attn_module.impl.is_pcp_decode_sharded = True
+        with patch(
+            "vllm_ascend.worker.model_runner_v1.supports_component_major_mla_pd",
+            return_value=True,
+        ):
+            self.assertFalse(runner._uses_single_raw_mla_cache(layer_name, spec, attn_module))
+        attn_module.impl.is_pcp_decode_sharded = False
+
+        attn_module.impl.dcp_enabled = True
+        with patch(
+            "vllm_ascend.worker.model_runner_v1.supports_component_major_mla_pd",
+            return_value=True,
+        ):
+            self.assertFalse(runner._uses_single_raw_mla_cache(layer_name, spec, attn_module))
+        attn_module.impl.dcp_enabled = False
+
+        attn_module.impl.supports_prolog_v3_quantization = lambda: True
+        with patch(
+            "vllm_ascend.worker.model_runner_v1.supports_component_major_mla_pd",
+            return_value=True,
+        ):
+            self.assertTrue(runner._uses_single_raw_mla_cache(layer_name, spec, attn_module))
+
+        self.assertFalse(runner._uses_single_raw_mla_cache(layer_name, spec, SimpleNamespace()))
+
+        attn_module.impl.q_proj._chunk_size = 2
+        with patch(
+            "vllm_ascend.worker.model_runner_v1.supports_component_major_mla_pd",
+            return_value=True,
+        ):
+            self.assertFalse(runner._uses_single_raw_mla_cache(layer_name, spec, attn_module))
 
     def test_kvpp_allocate_and_reshape_views(self):
         from tests.ut.kvpp_utils import assert_attention_cache_views, make_attention_cache_case, make_cache_config
@@ -1322,15 +1444,11 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         )
         attention_backend = MagicMock()
         attention_backend.is_sparse.return_value = False
-        attention_backend.get_kv_cache_shape.side_effect = (
-            lambda num_blocks, block_size, num_kv_heads, head_size, **_: (
-                2,
-                num_blocks,
-                block_size,
-                num_kv_heads,
-                head_size,
-            )
-        )
+
+        def attention_cache_shape(num_blocks, block_size, num_kv_heads, head_size, **_kwargs):
+            return (2, num_blocks, block_size, num_kv_heads, head_size)
+
+        attention_backend.get_kv_cache_shape.side_effect = attention_cache_shape
         groups = [
             SimpleNamespace(
                 kv_cache_group_id=0,

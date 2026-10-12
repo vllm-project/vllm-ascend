@@ -596,6 +596,30 @@ def test_v2_mla_single_raw_backing_selects_layout_by_hardware_and_local_q_heads(
     missing_flashmla_ops = reshape()
     assert isinstance(missing_flashmla_ops, tuple)
 
+    # Raw MooncakeV2 slots carry no physical-layout metadata. All PD endpoints
+    # therefore use component-major storage, even when local FlashMLA support
+    # would otherwise select token-fused.
+    monkeypatch.setattr(attn_utils, "get_flashmla_ops", lambda: (MagicMock(), MagicMock()))
+    vllm_config.kv_transfer_config = SimpleNamespace(
+        kv_connector="MooncakeConnectorV2",
+        kv_connector_module_path=None,
+        kv_connector_extra_config={
+            "prefill": {"tp_size": 2},
+            "decode": {"tp_size": 1},
+        },
+    )
+    unequal_pd_cache = reshape()
+    assert isinstance(unequal_pd_cache, tuple)
+    unequal_pd_nope, unequal_pd_rope = unequal_pd_cache
+    assert unequal_pd_nope.shape == (6, 128, 1, 512)
+    assert unequal_pd_nope.stride() == (81408, 512, 512, 1)
+    assert unequal_pd_rope.storage_offset() - unequal_pd_nope.storage_offset() == 65536
+
+    vllm_config.kv_transfer_config.kv_connector_extra_config["decode"]["tp_size"] = 2
+    equal_pd_cache = reshape()
+    assert isinstance(equal_pd_cache, tuple)
+    vllm_config.kv_transfer_config = None
+
     monkeypatch.setattr(attn_utils, "get_current_hardware_profile", lambda: component_profile)
     cache = reshape()
     nope, rope = cache
@@ -640,6 +664,39 @@ def test_v2_single_raw_mla_path_excludes_unsupported_modes(monkeypatch):
     attn_module.impl.fa_quant_layer = True
     assert not attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
     attn_module.impl.fa_quant_layer = False
+
+    attn_module.impl.pcp_enabled = True
+    assert not attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
+    attn_module.impl.pcp_enabled = False
+
+    attn_module.impl.is_pcp_decode_sharded = True
+    assert not attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
+    attn_module.impl.is_pcp_decode_sharded = False
+
+    attn_module.impl.dcp_enabled = True
+    assert not attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
+    attn_module.impl.dcp_enabled = False
+
+    attn_module.impl.enable_kv_nz = True
+    assert not attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
+    attn_module.impl.enable_kv_nz = False
+
+    attn_module.impl.supports_prolog_v3_quantization = lambda: False
+    assert not attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
+    attn_module.impl.supports_prolog_v3_quantization = lambda: True
+    assert attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
+
+    attn_module.impl.q_proj = SimpleNamespace(_chunk_size=2)
+    assert not attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
+    attn_module.impl.q_proj._chunk_size = 0
+    assert attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
+
+    monkeypatch.setattr(
+        attn_utils,
+        "get_layers_from_vllm_config",
+        lambda *_args, **_kwargs: {layer_name: SimpleNamespace()},
+    )
+    assert not attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
 
     blocked_spec = replace(spec, indexes_kv_by_block_stride=True)
     assert not blocked_spec.supports_single_raw_backing

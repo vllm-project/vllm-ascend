@@ -20,6 +20,7 @@ from vllm_ascend.core.kv_cache_interface import (
     declared_kwarg,
     get_kv_cache_compression_ratio,
     get_storage_block_size,
+    pd_uses_component_major_mla_wire_layout,
     register_ascend_kv_cache_specs,
     resolve_bounded_replay,
     supports_bounded_replay,
@@ -138,6 +139,23 @@ def test_component_major_mla_pd_gate():
         )
     )
     assert not supports_component_major_mla_pd(config)
+
+
+def test_pd_uses_component_major_mla_wire_layout():
+    assert not pd_uses_component_major_mla_wire_layout(SimpleNamespace(kv_transfer_config=None))
+
+    def connector_config(connector):
+        return SimpleNamespace(
+            kv_transfer_config=SimpleNamespace(
+                kv_connector=connector,
+                kv_connector_module_path=None,
+                kv_connector_extra_config={},
+            )
+        )
+
+    for connector in ("MooncakeConnectorV2", "MooncakePullConnector"):
+        assert pd_uses_component_major_mla_wire_layout(connector_config(connector))
+    assert not pd_uses_component_major_mla_wire_layout(connector_config("MooncakeConnectorV1"))
 
 
 # --- the fields a hand-rebuilt spec has to carry -----------------------------

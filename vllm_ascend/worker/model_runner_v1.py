@@ -282,6 +282,7 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendSlidingWindowMLASpec,
     get_kv_cache_compression_ratio,
     get_storage_block_size,
+    pd_uses_component_major_mla_wire_layout,
     requires_padded_page_layout,
     supports_component_major_mla_pd,
 )
@@ -4955,11 +4956,33 @@ class NPUModelRunner(GPUModelRunner):
             return False
         if attn_module is None:
             attn_module = self.compilation_config.static_forward_context.get(layer_name)
-        return (
-            isinstance(attn_module, MLAAttention)
-            and getattr(attn_module, "indexer", None) is None
-            and not getattr(attn_module.impl, "fa_quant_layer", False)
-        )
+            if attn_module is None:
+                return False
+        if not isinstance(attn_module, MLAAttention):
+            return False
+        if getattr(attn_module, "indexer", None) is not None:
+            return False
+        impl = getattr(attn_module, "impl", None)
+        if getattr(impl, "pcp_enabled", False) or getattr(impl, "is_pcp_decode_sharded", False):
+            # PCP gathers and sharded-decode writes still use the legacy
+            # preprocessing contract. Keep their allocation compatible with it.
+            return False
+        if getattr(impl, "dcp_enabled", False):
+            # DCP split attention and prefill need nonlocal current KV and
+            # gathered query heads. Keep them on the legacy allocation and
+            # preprocessing contract until PROLOG_V3 implements that contract.
+            return False
+        if getattr(impl, "fa_quant_layer", False):
+            return False
+        if getattr(impl, "enable_kv_nz", False):
+            # NZ decode reshapes each component with .view(). A5 token-fused
+            # NoPE/RoPE slices are separated by the other component's lanes,
+            # so keep the legacy component-dense allocation for this mode.
+            return False
+        supports_prolog_quantization = getattr(impl, "supports_prolog_v3_quantization", None)
+        if supports_prolog_quantization is not None and not supports_prolog_quantization():
+            return False
+        return not getattr(getattr(impl, "q_proj", None), "_chunk_size", 0)
 
     def _get_attention_kv_cache_dims(self, layer_name: str, kv_cache_spec: AttentionSpec) -> tuple[int, int]:
         if isinstance(kv_cache_spec, AscendMLAAttentionSpec):
@@ -5811,6 +5834,7 @@ class NPUModelRunner(GPUModelRunner):
                             get_current_hardware_profile().supports(HardwareCapability.MLA_FLASH)
                             and current_kv_cache_spec.num_heads in MLA_FLASH_SUPPORTED_Q_HEADS
                             and get_flashmla_ops() is not None
+                            and not pd_uses_component_major_mla_wire_layout(self.vllm_config)
                         ):
                             # A5 interleaves [NoPE | RoPE] per token in every
                             # kernel slot: token0[NoPE|RoPE], token1[...], ...
