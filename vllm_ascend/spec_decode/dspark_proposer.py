@@ -37,6 +37,15 @@ class AscendDSparkProposer(AscendDflashProposer):
         runner=None,
     ):
         assert vllm_config.speculative_config is not None
+        additional_config = getattr(vllm_config, "additional_config", None) or {}
+        if additional_config.get("enable_reduce_sample", False):
+            raise ValueError(
+                "DSpark on the v1 model runner does not support "
+                "enable_reduce_sample: the reduced sampling path bypasses the "
+                "DSpark Markov-head correction. Set "
+                "additional_config.enable_reduce_sample=false."
+            )
+        super().__init__(vllm_config, device, runner=runner)
         self.sample_from_anchor = getattr(self.draft_model_config.hf_config, "sample_from_anchor", True)
         if self.sample_from_anchor:
             self.num_query_per_req = self.num_speculative_tokens

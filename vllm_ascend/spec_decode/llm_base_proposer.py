@@ -1467,19 +1467,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         sample_hidden_states = last_hidden_states[token_indices_to_sample]
 
         draft_probs_step0: torch.Tensor | None = None
-        if getattr(self, "use_dflash2_selector", False):
-            # DFlash2 always drafts greedily (probabilistic is rejected in
-            # its __init__), so draft_probs_step0 is always None here.
-            draft_token_ids, draft_probs_step0 = self.compute_draft_token_ids(sample_hidden_states, sampling_metadata)
-            if lmhead_tp_enable():
-                draft_token_ids, token_indices_to_sample = self._align_tensor_and_indices(
-                    draft_token_ids,
-                    num_indices,
-                    token_indices_to_sample,
-                    ori_token_indices_to_sample,
-                    is_logits=False,
-                )
-        elif get_ascend_config().enable_reduce_sample:
+        if get_ascend_config().enable_reduce_sample:
             if self.method in ("eagle3", "dflash", "mtp"):
                 draft_token_ids, draft_probs_step0 = self.compute_draft_token_ids(
                     sample_hidden_states, sampling_metadata
@@ -1533,41 +1521,33 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         "are in draft-vocab space and incompatible with target-space "
                         "rejection sampling. Falling back to greedy."
                     )
-                raw_logits = self.model.compute_logits(sample_hidden_states)
-                logits = raw_logits.view(-1, self.num_speculative_tokens, raw_logits.shape[-1])
-                num_blk = logits.shape[0]
-                draft_token_ids = self._dspark_draft_buffer[:num_blk]
-                draft_token_ids[:, 0].copy_(self._dspark_seed_buffer[:num_blk])
-                dspark_probs_list: list[torch.Tensor] = []
-                for idx in range(self.num_speculative_tokens):
-                    markov_emb = self.model.markov_embed(draft_token_ids[:, idx])
-                    logits_bias = self.model.markov_bias(markov_emb)
-                    logits[:, idx].add_(logits_bias)
-                    if use_probabilistic:
-                        # Use probabilistic sampling instead of argmax.
-                        # logits[:, idx] is [num_blk, V], matching
-                        # batch_size for per-request temperature.
-                        token_ids, probs = self._sample_draft_from_logits(logits[:, idx], sampling_metadata)
-                        draft_token_ids[:, idx + 1].copy_(token_ids)
-                        if probs is not None:
-                            dspark_probs_list.append(probs)
-                    else:
-                        draft_token_ids[:, idx + 1].copy_(logits[:, idx].argmax(dim=-1))
+                # Keep FlashComm disabled so the Markov embedding stays whole.
+                with _disable_flash_comm_v1_context():
+                    raw_logits = self.model.compute_logits(sample_hidden_states)
+                    if lmhead_tp_enable():
+                        # Remove dummy sampling rows before grouping by request.
+                        raw_logits = raw_logits[:num_indices]
+                    logits = raw_logits.view(-1, self.num_speculative_tokens, raw_logits.shape[-1])
+                    num_blk = logits.shape[0]
+                    draft_token_ids = self._dspark_draft_buffer[:num_blk]
+                    draft_token_ids[:, 0].copy_(self._dspark_seed_buffer[:num_blk])
+                    dspark_probs_list: list[torch.Tensor] = []
+                    for idx in range(self.num_speculative_tokens):
+                        markov_emb = self.model.markov_embed(draft_token_ids[:, idx])
+                        logits_bias = self.model.markov_bias(markov_emb)
+                        logits[:, idx].add_(logits_bias)
+                        if use_probabilistic:
+                            token_ids, probs = self._sample_draft_from_logits(logits[:, idx], sampling_metadata)
+                            draft_token_ids[:, idx + 1].copy_(token_ids)
+                            if probs is not None:
+                                dspark_probs_list.append(probs)
+                        else:
+                            draft_token_ids[:, idx + 1].copy_(logits[:, idx].argmax(dim=-1))
                 if use_probabilistic and dspark_probs_list:
                     # Stack [K x [num_blk, V]] -> [num_blk, K, V] ->
                     # [num_blk * K, V] to match early_exit view logic.
                     draft_probs_step0 = torch.stack(dspark_probs_list, dim=1).view(-1, logits.shape[-1]).contiguous()
 
-                # Dynamic verify-length path, implemented in DynamicSpecScheduler
-                # Only the dspark method is handled here since it relies on
-                # the DSpark confidence head.
-                if self.dynamic_spec is not None:
-                    self.dynamic_spec.update(
-                        model=self.model,
-                        last_hidden_states=last_hidden_states,
-                        draft_token_ids=draft_token_ids,
-                        num_reqs=num_blk,
-                    )
             else:
                 logits = self.model.compute_logits(sample_hidden_states)
                 if lmhead_tp_enable():

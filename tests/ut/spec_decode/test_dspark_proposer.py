@@ -526,36 +526,13 @@ class TestPadDraftBuffersBeforeBuild(_DSparkProposerTestBase):
 class TestDSparkInitialization(_DSparkProposerTestBase):
     """Tests for DSpark initialization configuration."""
 
-    @pytest.mark.parametrize(
-        ("additional_config", "draft_sample_method", "message"),
-        [
-            pytest.param(
-                {"enable_reduce_sample": True},
-                "greedy",
-                "does not support enable_reduce_sample",
-                id="reduce-sample-bypasses-markov-head",
-            ),
-            pytest.param(
-                {},
-                "probabilistic",
-                "probabilistic draft sampling is not supported",
-                id="probabilistic-draft-sampling",
-            ),
-        ],
-    )
-    def test_rejects_invalid_config_before_parent_initialization(
-        self,
-        additional_config: dict,
-        draft_sample_method: str,
-        message: str,
-    ) -> None:
+    def test_rejects_reduce_sample_before_parent_initialization(self) -> None:
         vllm_config = self._make_vllm_config(SimpleNamespace())
-        vllm_config.additional_config = additional_config
-        vllm_config.speculative_config.draft_sample_method = draft_sample_method
+        vllm_config.additional_config = {"enable_reduce_sample": True}
         parent_init = MagicMock()
 
         with (
-            pytest.raises(ValueError, match=message),
+            pytest.raises(ValueError, match="does not support enable_reduce_sample"),
             patch.object(
                 AscendDSparkProposer.__base__,
                 "__init__",
