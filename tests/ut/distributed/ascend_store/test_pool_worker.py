@@ -1619,6 +1619,9 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
                 grouped_block_size=worker.grouped_block_size,
             )
         worker.m_store = MagicMock()
+        # Default save-path exists behavior: every key is missing from the
+        # pool, so all candidate blocks are allocated and transferred.
+        worker.m_store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
         return worker
 
     @staticmethod
@@ -2130,7 +2133,6 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         worker.hash_block_size = 16
         worker.page_size_bytes = 64
         worker.head_or_tp_rank = 0
-        worker._allocated_gvas = {}
         worker.m_store = MagicMock()
         worker.m_store.batch_alloc.return_value = [101]
 
@@ -2191,7 +2193,6 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
 
         queried_keys = worker.m_store.batch_get_key_info.call_args.args[0]
         self.assertIn(partial_key, queried_keys)
-        self.assertNotIn(partial_key, worker._allocated_gvas)
         self.assertEqual(load_request.partial_load_gva_per_group, [202])
         self.assertEqual(worker.layer_load_tasks[0], [])
         block_range = worker.layer_load_tasks[1][0].block_ranges[0]
@@ -2311,23 +2312,119 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
             worker.num_layers,
         )
 
-    def test_evicted_allocated_gva_is_reallocated(self):
+    def test_committed_blocks_are_skipped_and_missing_blocks_allocated(self):
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import (
             LAYERWISE_READ_LEASE_TTL_MS,
         )
 
         worker = self._make_gva_worker()
-        key = worker._make_layerwise_full_key(0, "h0")
-        worker._allocated_gvas[key] = 101
-        worker.m_store.batch_is_exist.return_value = [0]
+        fresh_key = worker._make_layerwise_full_key(0, "h0")
+        committed_key = worker._make_layerwise_full_key(0, "h1")
+        worker.m_store.batch_is_exist.side_effect = lambda keys: [0 if key == fresh_key else 1 for key in keys]
         worker.m_store.batch_alloc.return_value = [202]
-        request = self._make_gva_request(can_save=True)
+        request = ReqMeta(
+            req_id="r1",
+            token_len_chunk=32,
+            save_start_token=0,
+            save_end_token=32,
+            target_token_len=32,
+            num_prompt_tokens=32,
+            block_ids=[7, 8],
+            block_ids_by_group=[[7, 8]],
+            block_hashes=["h0", "h1"],
+            can_save=True,
+            block_ids_np=np.asarray([7, 8], dtype=np.int64),
+            block_ids_by_group_np=[np.asarray([7, 8], dtype=np.int64)],
+        )
 
         worker._alloc_gvas_for_save([request])
 
-        worker.m_store.batch_alloc.assert_called_once_with([key], [64], LAYERWISE_READ_LEASE_TTL_MS)
-        self.assertEqual(worker._allocated_gvas[key], 202)
-        self.assertEqual(request.block_gvas_by_group_np[0].tolist(), [202])
+        # The committed block is skipped regardless of medium; only the
+        # missing block is allocated fresh within this step and transferred.
+        worker.m_store.batch_alloc.assert_called_once_with([fresh_key], [64], LAYERWISE_READ_LEASE_TTL_MS)
+        self.assertEqual(request.save_keys, [fresh_key])
+        self.assertNotIn(committed_key, request.save_keys)
+        self.assertEqual(request.block_gvas_by_group_np[0].tolist(), [202, 0])
+
+    def test_exists_check_failure_fails_open_and_transfers_all(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import (
+            LAYERWISE_READ_LEASE_TTL_MS,
+        )
+
+        worker = self._make_gva_worker()
+        key0 = worker._make_layerwise_full_key(0, "h0")
+        key1 = worker._make_layerwise_full_key(0, "h1")
+        worker.m_store.batch_is_exist.side_effect = RuntimeError("store unreachable")
+        worker.m_store.batch_alloc.return_value = [202, 203]
+        request = ReqMeta(
+            req_id="r1",
+            token_len_chunk=32,
+            save_start_token=0,
+            save_end_token=32,
+            target_token_len=32,
+            num_prompt_tokens=32,
+            block_ids=[7, 8],
+            block_ids_by_group=[[7, 8]],
+            block_hashes=["h0", "h1"],
+            can_save=True,
+            block_ids_np=np.asarray([7, 8], dtype=np.int64),
+            block_ids_by_group_np=[np.asarray([7, 8], dtype=np.int64)],
+        )
+
+        worker._alloc_gvas_for_save([request])
+
+        # Fail open: an unreadable pool costs bandwidth, never the blocks.
+        worker.m_store.batch_alloc.assert_called_once_with([key0, key1], [64, 64], LAYERWISE_READ_LEASE_TTL_MS)
+        self.assertEqual(request.block_gvas_by_group_np[0].tolist(), [202, 203])
+
+    def test_failed_allocations_are_clamped_to_zero(self):
+        worker = self._make_gva_worker()
+        worker.m_store.batch_alloc.return_value = [-3102, 0]
+        request = ReqMeta(
+            req_id="r1",
+            token_len_chunk=32,
+            save_start_token=0,
+            save_end_token=32,
+            target_token_len=32,
+            num_prompt_tokens=32,
+            block_ids=[7, 8],
+            block_ids_by_group=[[7, 8]],
+            block_hashes=["h0", "h1"],
+            can_save=True,
+            block_ids_np=np.asarray([7, 8], dtype=np.int64),
+            block_ids_by_group_np=[np.asarray([7, 8], dtype=np.int64)],
+        )
+
+        worker._alloc_gvas_for_save([request])
+
+        # Failed allocations (negative error codes / zero) surface as 0, the
+        # same "invalid GVA" representation as skipped blocks; only positive
+        # GVAs enter save_keys.
+        self.assertEqual(request.block_gvas_by_group_np[0].tolist(), [0, 0])
+        self.assertEqual(request.save_keys, [])
+
+    def test_failed_partial_allocation_is_clamped_to_zero(self):
+        worker = self._make_gva_worker()
+        worker.m_store.batch_alloc.return_value = [-3102]
+        request = ReqMeta(
+            req_id="r1",
+            token_len_chunk=16,
+            save_start_token=16,
+            save_end_token=16,
+            target_token_len=20,
+            num_prompt_tokens=32,
+            block_ids=[0, 1],
+            block_ids_by_group=[[0, 1]],
+            block_hashes=["h0"],
+            can_save=True,
+            block_ids_np=np.asarray([0, 1], dtype=np.int64),
+            block_ids_by_group_np=[np.asarray([0, 1], dtype=np.int64)],
+        )
+
+        worker._alloc_gvas_for_save([request])
+
+        self.assertEqual(request.partial_save_gva_per_group, [0])
+        self.assertEqual(request.save_keys, [])
 
     def test_partial_decode_is_saved_and_loaded_for_reused_layer(self):
         worker = self._make_worker()
@@ -2726,8 +2823,8 @@ class TestKVPoolWorkerReachableMasks(unittest.TestCase):
         worker.hash_block_size = 16
         worker.page_size_bytes = 64
         worker.head_or_tp_rank = 0
-        worker._allocated_gvas = {}
         worker.m_store = MagicMock()
+        worker.m_store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
         return worker
 
     @staticmethod
