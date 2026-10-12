@@ -99,10 +99,10 @@ The details of each configuration option are as follows:
 
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
-| `lmhead_tensor_parallel_size`    | int  | `0` | The custom tensor parallel size of `lm_head`.    |
 | `oproj_tensor_parallel_size`     | int  | `0` | The custom tensor parallel size of `o_proj`.     |
-| `embedding_tensor_parallel_size` | int  | `0` | The custom tensor parallel size of `embedding`. |
 | `mlp_tensor_parallel_size`       | int  | `0` | The custom tensor parallel size of `mlp`.       |
+| `lmhead_tensor_parallel_size`    | int  | `0` | The custom tensor parallel size of `lm_head`.    |
+| `embedding_tensor_parallel_size` | int  | `0` | The custom tensor parallel size of `embedding`. |
 
 **ascend_compilation_config**
 
@@ -319,8 +319,10 @@ An example of additional configuration is as follows:
 ```python
 {
     "finegrained_tp_config": {
-        "embedding_tensor_parallel_size": 8,
+        "oproj_tensor_parallel_size": 8,
+        "mlp_tensor_parallel_size": 8,
         "lmhead_tensor_parallel_size": 8,
+        "embedding_tensor_parallel_size": 8,
     },
     "enable_kv_nz": False,
     "multistream_overlap_shared_expert": True,
