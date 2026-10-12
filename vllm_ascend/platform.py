@@ -354,6 +354,13 @@ class NPUPlatform(Platform):
     def apply_config_platform_defaults(cls, vllm_config: VllmConfig) -> None:
         """Apply Ascend-specific defaults."""
 
+        # Upstream derives this threshold only for CUDA/XPU. Without an Ascend
+        # default, an explicit SP/MMRS request is disabled during VllmConfig
+        # validation before the graph fusion pass can observe it.
+        pass_config = vllm_config.compilation_config.pass_config
+        if (pass_config.enable_sp or pass_config.fuse_gemm_comms) and pass_config.sp_min_token_num is None:
+            pass_config.sp_min_token_num = 1
+
         # TODO: Remove this memory-saving capture-size override and its ceiling
         # restoration once MC2 is no longer used.
         reduced_cg_cap = _get_reduced_cg_cap(vllm_config)
