@@ -51,6 +51,9 @@ except Exception:  # pragma: no cover - CPU-only runners take the stub path
         "AttnDSA": _AttnKind.DSA,
         "AttnMeta": type("AttnMeta", (), {}),
         "AttnMetaV2": type("AttnMetaV2", (), {}),
+        # required by vllm_ascend/xlite/utils.py
+        "Model": type("Model", (), {}),
+        "ModelConfig": type("ModelConfig", (), {}),
         "Runtime": MagicMock,
         "ScoringFuncSoftmax": 0,
         "ScoringFuncSigmoid": 1,
