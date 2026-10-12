@@ -60,9 +60,17 @@ setup_coverage() {
   test_basename="${test_basename//\//__}"
   test_basename="${test_basename//::/--}"
   local covdata_dir="${project_root}/tests/outputs/${test_basename}/covdata"
+  local coverage_startup_dir="${project_root}/.github/workflows/scripts/coverage_startup"
   mkdir -p "${covdata_dir}"
   export COVERAGE_FILE="${covdata_dir}/coverage"
+  export COVERAGE_PROCESS_START="${project_root}/tests/coveragerc"
+  # Prepend so spawn workers import this sitecustomize.py at interpreter start.
+  case ":${PYTHONPATH:-}:" in
+    *":${coverage_startup_dir}:"*) ;;
+    *) export PYTHONPATH="${coverage_startup_dir}${PYTHONPATH:+:${PYTHONPATH}}" ;;
+  esac
   echo -e "  \033[33mCOVERAGE_FILE:\033[0m ${COVERAGE_FILE}"
+  echo -e "  \033[33mCOVERAGE_PROCESS_START:\033[0m ${COVERAGE_PROCESS_START}"
 }
 
 setup_vllm_cache_root() {
@@ -89,7 +97,13 @@ terminate_process_group() {
 
   echo "Cleaning up processes left by pytest (process group ${process_group})"
   kill -TERM -- "-${process_group}" 2>/dev/null || true
-  for _ in {1..10}; do
+  # Coverage workers need extra time to write coverage.<pid> after SIGTERM.
+  local wait_rounds=10
+  if [ "${enable_coverage}" = "true" ]; then
+    wait_rounds=20
+  fi
+  local round
+  for ((round = 1; round <= wait_rounds; round++)); do
     if ! kill -0 -- "-${process_group}" 2>/dev/null; then
       return
     fi

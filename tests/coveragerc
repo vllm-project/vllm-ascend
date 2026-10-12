@@ -7,7 +7,9 @@ data_file = /tests/outputs/covdata/coverage
 # Adding identifiers such as the process ID to the coverage data file.
 parallel = True
 concurrency = thread,multiprocessing
-sigterm = False
+# Spawn EngineCore/NPU workers must flush coverage on SIGTERM. The test runner
+# sends TERM (then KILL) to the pytest process group after each target.
+sigterm = True
 # Debugging configuration, which helps locate possible exceptions. Enable it as required.
 # debug=pid,dataio,dataop
 # debug_file=/opt/coveragepy_debug.out
