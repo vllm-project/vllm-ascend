@@ -27,7 +27,8 @@ def install_rejection_sampler_patch(runner_cls: type[Any]) -> None:
     @wraps(original_load_model)
     def load_model(self, load_dummy_weights: bool = False, *args, **kwargs) -> None:
         original_load_model(self, load_dummy_weights, *args, **kwargs)
-        sampler = self.rejection_sampler
+        # Partial runners may omit this attribute when the parent loader is mocked.
+        sampler = getattr(self, "rejection_sampler", None)
         if sampler is None:
             return
         inner_sampler = sampler._sampler if isinstance(sampler, RecomputeAwareRejectionSampler) else sampler

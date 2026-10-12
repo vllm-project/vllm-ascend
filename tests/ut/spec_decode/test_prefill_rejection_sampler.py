@@ -315,6 +315,23 @@ def test_load_model_keeps_missing_and_unrelated_custom_sampler(enabled, monkeypa
     assert not hasattr(custom, "_verify_in_chunks")
 
 
+@pytest.mark.parametrize("enabled", [False, True])
+def test_load_model_without_sampler_attribute_preserves_original_loading(enabled, monkeypatch):
+    config = SimpleNamespace(scheduler_config=SimpleNamespace(recompute_scheduler_enable=enabled))
+    runner = _load_runner_boundary(config, monkeypatch)
+    runner.vllm_config = SimpleNamespace(kv_transfer_config=SimpleNamespace(is_kv_consumer=True, is_kv_producer=False))
+    assert not hasattr(runner, "rejection_sampler")
+    gate = Mock(side_effect=AssertionError("No sampler exists to adapt"))
+    monkeypatch.setattr(sampler_patch, "is_pd_decode_recompute_scheduler_enabled", gate)
+
+    # DSpark loading UTs construct a partial runner and mock the parent loader.
+    runner.load_model(True)
+
+    assert runner.pd_dspark_aux_layer_ids == [1, 3]
+    assert not hasattr(runner, "rejection_sampler")
+    gate.assert_not_called()
+
+
 def test_worker_patch_targets_only_ascend_v2_and_is_idempotent(monkeypatch):
     events: list[Any] = []
 
