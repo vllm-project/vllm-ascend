@@ -1575,8 +1575,11 @@ class TestMemcacheBackendMethods(unittest.TestCase):
     def test_put(self):
         b = self._make_backend()
         b.store.batch_put_from_layers.return_value = [0]
-        b.put(["k1"], [[100]], [[10]])
-        b.store.batch_put_from_layers.assert_called_once()
+        addrs, sizes = [[100]], [[10]]
+        b.put(["k1"], addrs, sizes)
+        b.store.batch_put_from_layers.assert_called_once_with(["k1"], addrs, sizes, MmcDirect.COPY_L2G.value)
+        self.assertIs(b.store.batch_put_from_layers.call_args.args[1], addrs)
+        self.assertIs(b.store.batch_put_from_layers.call_args.args[2], sizes)
 
     def test_put_error(self):
         b = self._make_backend()

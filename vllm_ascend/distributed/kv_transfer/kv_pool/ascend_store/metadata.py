@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from itertools import compress
 from typing import Any, cast
 
 import numpy as np
@@ -15,6 +16,8 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec, UniformTypeKVCacheSpec
 
 from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import AttentionComputeStartGate
+
+SMALL_SAVE_BATCH_BLOCKS = 4
 
 
 def is_kv_save_role(kv_role: str, consumer_is_to_put: bool) -> bool:
@@ -532,6 +535,92 @@ class ChunkedTokenDatabase:
             size_list.append(size)
         return addr_list, size_list, block_id
 
+    def prepare_values(
+        self,
+        starts: Sequence[int],
+        ends: Sequence[int],
+        block_ids: Sequence[int],
+        kv_cache_group_id: int = 0,
+        cache_role: str = "kv",
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Prepare one address/size row per block, without Python row conversion."""
+        if not (len(starts) == len(ends) == len(block_ids)):
+            raise ValueError("starts, ends and block_ids must have the same length")
+        group_addrs, group_block_len, group_block_stride = self._get_group_buffers(kv_cache_group_id, cache_role)
+        if not group_block_len or len(block_ids) == 0:
+            shape = (len(block_ids), len(group_addrs) if group_block_len else 0)
+            return np.empty(shape, dtype=np.int64), np.empty(shape, dtype=np.int64)
+        entry_indices = np.arange(len(group_addrs)) % len(group_block_len)
+        block_lens = np.asarray(group_block_len, dtype=np.int64)[entry_indices]
+        block_strides = (
+            np.asarray(group_block_stride, dtype=np.int64)[entry_indices] if group_block_stride else block_lens
+        )
+        ids = np.asarray(block_ids, dtype=np.int64)
+        spans = np.asarray(ends, dtype=np.int64) - np.asarray(starts, dtype=np.int64)
+        addrs = np.asarray(group_addrs, dtype=np.int64)[None, :] + ids[:, None] * block_strides[None, :]
+        # Keep scalar prepare_value's floating-point division and truncation order.
+        sizes = (block_lens[None, :] / self.get_block_size(kv_cache_group_id) * spans[:, None]).astype(np.int64)
+        return addrs, sizes
+
+    def prepare_save_batch(
+        self,
+        token_len: int,
+        block_hashes: BlockHashList | list[str],
+        block_ids: list[int],
+        kv_cache_group_id: int = 0,
+        skip_null_blocks: bool = False,
+        chunk_mask: Sequence[bool] | None = None,
+        skip_start: int = 0,
+        skip_end: int = 0,
+        shard_rank: int | None = None,
+        shard_size: int | None = None,
+    ) -> tuple[Sequence[int], list[str], Sequence[int]]:
+        """Select save chunks in bulk; shard only after mask, skip and NULL filters."""
+        if self.cache_coordinator is not None and kv_cache_group_id not in self.cache_coordinator.cacheable_group_ids:
+            return np.empty(0, dtype=np.int64), [], np.empty(0, dtype=np.int64)
+        block_size = self.get_block_size(kv_cache_group_id)
+        # Tiny tails avoid array setup; larger batches keep filtering in NumPy.
+        if len(block_ids) <= SMALL_SAVE_BATCH_BLOCKS:
+            selected_chunks, keys, selected_ids = [], [], []
+            for start, _, key, _, block_id in self.process_token_key_strings_with_block_ids(
+                token_len,
+                block_hashes,
+                block_ids,
+                kv_cache_group_id=kv_cache_group_id,
+                skip_null_blocks=skip_null_blocks,
+                chunk_filter=lambda start: (
+                    not (skip_end > skip_start and start >= skip_start and start + block_size <= skip_end)
+                ),
+                shard_rank=shard_rank,
+                shard_size=shard_size,
+                chunk_mask=chunk_mask,
+            ):
+                selected_chunks.append(start // block_size)
+                keys.append(key)
+                selected_ids.append(block_id)
+            return selected_chunks, keys, selected_ids
+        hashes = get_block_hashes(block_hashes, block_size, self.hash_block_size)
+        count = min(len(hashes), cdiv(token_len, block_size)) if token_len > 0 else 0
+        offset = max(count - len(block_ids), 0)
+        stop = min(count, len(chunk_mask)) if chunk_mask is not None else count
+        chunks = np.arange(offset, stop, dtype=np.int64)
+        if chunk_mask is not None:
+            chunks = chunks[np.asarray(chunk_mask[offset:stop], dtype=bool)]
+        if skip_end > skip_start:
+            chunks = chunks[(chunks < cdiv(skip_start, block_size)) | (chunks >= skip_end // block_size)]
+        if chunks.size == 0:
+            return chunks, [], np.empty(0, dtype=np.int64)
+        ids = np.asarray(block_ids, dtype=np.int64)[chunks - offset]
+        if skip_null_blocks:
+            valid = ids > 0
+            chunks, ids = chunks[valid], ids[valid]
+        if shard_rank is not None and shard_size is not None and shard_size > 1:
+            selection = slice(shard_rank, None, shard_size) if 0 <= shard_rank < shard_size else slice(0, 0)
+            chunks, ids = chunks[selection], ids[selection]
+        prefix = self._get_key_prefix(kv_cache_group_id)
+        keys = [prefix + block_hash_to_str(hashes[int(chunk)]) for chunk in chunks]
+        return chunks, keys, ids
+
     def _iter_token_chunks(
         self,
         token_len: int,
@@ -545,6 +634,7 @@ class ChunkedTokenDatabase:
         chunk_filter: Callable[[int], bool] | None = None,
         shard_rank: int | None = None,
         shard_size: int | None = None,
+        chunk_mask: Sequence[bool] | None = None,
     ) -> Iterable[tuple[int, int, BlockHash | str, int | None]]:
         # Private circular state has no prefix key, even when its block size
         # happens to be divisible by the request's hashing unit.
@@ -558,13 +648,17 @@ class ChunkedTokenDatabase:
             return
         num_logical_blocks = min(len(grouped_hashes), cdiv(token_len, logical_block_size)) if token_len > 0 else 0
         block_id_offset = max(num_logical_blocks - len(block_ids), 0) if block_ids is not None else 0
+        first_chunk = max(0, cdiv(mask_num, logical_block_size), block_id_offset)
+        chunk_ids: Iterable[int] = range(first_chunk, num_logical_blocks)
+        if chunk_mask is not None:
+            # Unlike transfer-range masks, a short lookup/store mask excludes
+            # chunks beyond its end. compress stops at the shorter iterator.
+            chunk_ids = compress(chunk_ids, chunk_mask[first_chunk:num_logical_blocks])
         candidate_index = 0
 
-        for chunk_id in range(num_logical_blocks):
+        for chunk_id in chunk_ids:
             start_idx = chunk_id * logical_block_size
             end_idx = min(start_idx + logical_block_size, token_len)
-            if start_idx < mask_num:
-                continue
             if end_idx <= start_idx:
                 continue
             if chunk_filter is not None and not chunk_filter(start_idx):
@@ -624,6 +718,7 @@ class ChunkedTokenDatabase:
         mask_num: int = 0,
         kv_cache_group_id: int = 0,
         chunk_filter: Callable[[int], bool] | None = None,
+        chunk_mask: Sequence[bool] | None = None,
     ) -> Iterable[tuple[int, int, str, BlockHash | str]]:
         """Yield cache key strings directly without materializing PoolKey objects."""
         prefix = self._get_key_prefix(kv_cache_group_id)
@@ -633,6 +728,7 @@ class ChunkedTokenDatabase:
             mask_num,
             kv_cache_group_id,
             chunk_filter=chunk_filter,
+            chunk_mask=chunk_mask,
         ):
             yield start, end, prefix + block_hash_to_str(hash_val), hash_val
 
@@ -647,6 +743,7 @@ class ChunkedTokenDatabase:
         chunk_filter: Callable[[int], bool] | None = None,
         shard_rank: int | None = None,
         shard_size: int | None = None,
+        chunk_mask: Sequence[bool] | None = None,
     ) -> Iterable[tuple[int, int, str, BlockHash | str, int]]:
         """Yield cache key strings and resolved block ids without PoolKey allocation."""
         prefix = self._get_key_prefix(kv_cache_group_id)
@@ -660,6 +757,7 @@ class ChunkedTokenDatabase:
             chunk_filter=chunk_filter,
             shard_rank=shard_rank,
             shard_size=shard_size,
+            chunk_mask=chunk_mask,
         ):
             assert block_id is not None
             yield start, end, prefix + block_hash_to_str(hash_val), hash_val, block_id
