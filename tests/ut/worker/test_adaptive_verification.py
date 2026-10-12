@@ -1,20 +1,27 @@
 import importlib
+from collections import namedtuple
+from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
+import numpy as np
 import pytest
 import torch
 from vllm.config import CUDAGraphMode
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
+import vllm_ascend.worker.v2.spec_decode.dspark.speculator as speculator_module
 from vllm_ascend.ascend_forward_context import get_mrv2_in_profile_run
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.indexer import AscendSFAIndexerMetadataBuilder
 from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.device.device_op import BaseDeviceAdaptor
 from vllm_ascend.worker.v2.aclgraph_utils import ModelWithContext
+from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
+from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
 
 _NATIVE_TORCH_SUM = torch.sum
 
@@ -133,3 +140,110 @@ def test_index_fill_mode_can_reenter_native_device_adaptor(monkeypatch):
 
     assert result is tensor
     torch.testing.assert_close(result, torch.tensor([0, 2, 0, 2, 0], dtype=result.dtype))
+
+
+@pytest.mark.parametrize("adaptive", [False, True])
+@pytest.mark.parametrize("is_profile", [False, True])
+@pytest.mark.parametrize("dummy_run", [False, True])
+def test_propose_adaptive_draft_negotiates_its_own_dp_shape(monkeypatch, adaptive, is_profile, dummy_run):
+    spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
+    spec.use_dcp = False
+    spec.replicated_pcp = False
+    spec.input_buffers = SimpleNamespace(positions=torch.arange(20))
+    spec.vllm_config = SimpleNamespace(parallel_config=object())
+    spec.enable_adaptive_verification = adaptive
+    spec.max_num_tokens = 20
+    monkeypatch.setattr(AscendDSparkSpeculator, "attn_vllm_config", property(lambda self: self.vllm_config))
+    batch = SimpleNamespace(num_reqs=1, is_prefilling_np=np.array([False]))
+    # Target graph capacity must not become the draft's logical request count.
+    target_sync = SimpleNamespace(num_reqs=32, num_tokens=256)
+    parent = MagicMock(return_value="draft")
+    monkeypatch.setattr(speculator_module, "build_attn_metadata_wrapper", nullcontext)
+    monkeypatch.setattr(speculator_module, "build_attn_metadata_factory", lambda *args, **kwargs: nullcontext())
+    monkeypatch.setattr(DSparkSpeculator, "propose", parent)
+
+    result = spec.propose(
+        input_batch=batch,
+        attn_metadata=None,
+        slot_mappings=None,
+        last_hidden_states=None,
+        aux_hidden_states=None,
+        num_sampled=None,
+        num_rejected=None,
+        last_sampled=None,
+        next_prefill_tokens=None,
+        temperature=None,
+        seeds=None,
+        dp_sync=target_sync,
+        dummy_run=dummy_run,
+        is_profile=is_profile,
+    )
+
+    assert result == "draft"
+    assert parent.call_args.args[0] is batch
+    assert batch.num_reqs == 1
+    assert parent.call_args.args[11] is (None if adaptive and not is_profile else target_sync)
+    assert parent.call_args.kwargs["is_profile"] is is_profile
+
+
+@pytest.mark.parametrize(
+    "adaptive,dummy,profile,context_len,scheduled_reqs,has_state,expected_reqs",
+    [
+        (True, True, False, 0, 1, True, 1),
+        (True, True, False, 0, 3, True, 3),
+        (False, True, False, 0, 1, True, 16),
+        (True, False, False, 0, 1, True, 16),
+        (True, True, True, 0, 1, True, 16),
+        (True, True, False, 8192, 1, True, 16),
+        (True, True, False, 0, 1, False, None),
+    ],
+)
+def test_adaptive_idle_dp_restores_request_count_after_target_forward(
+    monkeypatch, adaptive, dummy, profile, context_len, scheduled_reqs, has_state, expected_reqs
+):
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.ascend_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(profiling_chunk_config=SimpleNamespace(need_timing=False))
+    )
+    runner.vllm_config = SimpleNamespace()
+    runner.kvpp = SimpleNamespace(complete_forward=Mock())
+    runner.model_state = SimpleNamespace(kvpp_is_dummy_run=False, finish_execution=Mock())
+    runner.adaptive_verification = object() if adaptive else None
+    buffers = AscendInputBuffers(16, 64, torch.device("cpu"))
+    with patch("vllm_ascend.worker.v2.input_batch.update_cos_sin"):
+        padded_batch = AscendInputBatch.make_dummy(16, 32, buffers)
+    ExecutionState = namedtuple("ExecutionState", "input_batch hidden_states dp_sync")
+    state = ExecutionState(padded_batch, object(), object())
+    scheduler = SimpleNamespace(num_scheduled_tokens={f"dummy-{i}": 1 for i in range(scheduled_reqs)})
+    module = "vllm_ascend.worker.v2.model_runner."
+    monkeypatch.setattr(module + "has_kv_transfer_group", lambda: False)
+    monkeypatch.setattr(module + "should_skip_allreduce_across_dp_group", lambda _config: False)
+    monkeypatch.setattr(module + "lmhead_tp_enable", lambda: False)
+    monkeypatch.setattr(runner, "_maybe_send_draft_kv", Mock())
+
+    def target_forward(_self, _scheduler, **kwargs):
+        # Upstream publishes the target's graph-padded dummy batch.
+        assert padded_batch.num_reqs == 16
+        runner.execute_model_state = state if has_state else None
+        return "target-output"
+
+    monkeypatch.setattr(GPUModelRunner, "execute_model", target_forward)
+    output = runner.execute_model(scheduler, dummy_run=dummy, is_profile=profile, context_len=context_len)
+    assert output == "target-output"
+    if not has_state:
+        assert runner.execute_model_state is None
+        return
+    restored = runner.execute_model_state
+    assert restored is not None
+    assert restored.input_batch.num_reqs == expected_reqs
+    assert restored.hidden_states is state.hidden_states
+    assert restored.dp_sync is state.dp_sync
+    assert padded_batch.num_reqs == 16
+    if expected_reqs == 16:
+        assert restored is state
+    else:
+        assert restored is not state
+        # Only the logical count changes; target graph buffers retain their shape.
+        for name, value in vars(padded_batch).items():
+            if name != "num_reqs":
+                assert getattr(restored.input_batch, name) is value
