@@ -7,8 +7,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+import torch_npu
 
 import vllm_ascend.attention.mla_v1 as mla_v1
+from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPImpl
 from vllm_ascend.attention.mla_v1 import AscendMLAImpl
 from vllm_ascend.quantization.methods import (
     AscendW8A8DynamicLinearMethod,
@@ -307,6 +309,65 @@ def test_mla_without_q_lora_keeps_legacy_writer():
     assert not impl._cache_requires_prolog_v3_writer((nope, rope))
 
 
+def test_prolog_v3_writer_requires_rope_and_operator(monkeypatch):
+    impl = _make_impl()
+    nope, rope = _component_major_cache()
+
+    assert impl.supports_prolog_v3_writer()
+    assert impl._cache_requires_prolog_v3_writer((nope, rope))
+
+    impl.use_mla_rope = False
+    assert not impl.supports_prolog_v3_writer()
+    assert not impl._cache_requires_prolog_v3_writer((nope, rope))
+    impl.use_mla_rope = True
+
+    monkeypatch.delattr(torch_npu, "npu_mla_prolog_v3")
+    assert not impl.supports_prolog_v3_writer()
+    assert not impl._cache_requires_prolog_v3_writer((nope, rope))
+
+
+def test_dcp_current_kv_capacity_uses_decode_query_len():
+    impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
+    impl.vllm_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_seqs=32, max_num_batched_tokens=16384),
+    )
+    impl.speculative_config = SimpleNamespace(num_speculative_tokens=3)
+
+    assert impl._required_dcp_current_kv_capacity() == 128
+
+    impl.vllm_config.scheduler_config.max_num_batched_tokens = 96
+    assert impl._required_dcp_current_kv_capacity() == 96
+
+
+def test_dcp_current_kv_buffers_survive_reloads():
+    impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
+    impl.vllm_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=256, max_num_seqs=256),
+        cache_config=SimpleNamespace(block_size=128),
+    )
+    impl.speculative_config = None
+    impl.num_kv_heads = 1
+    impl.kv_lora_rank = NOPE_DIM
+    impl.qk_rope_head_dim = ROPE_DIM
+    impl.dtype = torch.float32
+    impl.fused_qkv_a_proj = SimpleNamespace(weight=torch.empty(1))
+    impl._dcp_current_kv_buffers = None
+
+    impl._prepare_dcp_current_kv_buffers()
+    first_buffers = impl._dcp_current_kv_buffers
+    assert first_buffers is not None
+    assert first_buffers[0].shape == (2, 128, 1, NOPE_DIM)
+    assert first_buffers[1].shape == (2, 128, 1, ROPE_DIM)
+    assert first_buffers[2].tolist() == list(range(256))
+
+    impl._prepare_dcp_current_kv_buffers()
+    assert impl._dcp_current_kv_buffers is first_buffers
+    assert all(
+        first.data_ptr() == second.data_ptr()
+        for first, second in zip(first_buffers, impl._dcp_current_kv_buffers, strict=True)
+    )
+
+
 def test_mla_preprocess_prolog_v3_replaces_rmsnorm_rope_cache_writer():
     impl = _make_impl()
     total_tokens = 5
@@ -367,17 +428,27 @@ def test_mla_preprocess_prolog_v3_replaces_rmsnorm_rope_cache_writer():
 
 
 @pytest.mark.parametrize(
-    ("dcp_enabled", "pcp_enabled", "is_pcp_decode_sharded", "requires_current_kv", "expects_prolog"),
+    (
+        "dcp_enabled",
+        "has_dcp_buffers",
+        "pcp_enabled",
+        "is_pcp_decode_sharded",
+        "requires_current_kv",
+        "expects_prolog",
+    ),
     [
-        (False, False, False, False, True),
-        (True, False, False, False, False),
-        (False, False, False, True, False),
-        (False, True, False, False, False),
-        (False, False, True, False, False),
+        (False, False, False, False, False, True),
+        (True, True, False, False, False, True),
+        (True, True, False, False, True, True),
+        (True, False, False, False, False, False),
+        (False, False, False, False, True, False),
+        (False, False, True, False, False, False),
+        (False, False, False, True, False, False),
     ],
 )
 def test_forward_routes_strided_cache_with_runtime_exclusions(
     dcp_enabled,
+    has_dcp_buffers,
     pcp_enabled,
     is_pcp_decode_sharded,
     requires_current_kv,
@@ -387,6 +458,12 @@ def test_forward_routes_strided_cache_with_runtime_exclusions(
     impl.use_output_gate = False
     impl.enable_mlapo = False
     impl.dcp_enabled = dcp_enabled
+    if has_dcp_buffers:
+        impl._dcp_current_kv_buffers = (
+            torch.empty(1, BLOCK_SIZE, 1, NOPE_DIM),
+            torch.empty(1, BLOCK_SIZE, 1, ROPE_DIM),
+            torch.arange(BLOCK_SIZE),
+        )
     impl.pcp_enabled = pcp_enabled
     impl.is_pcp_decode_sharded = is_pcp_decode_sharded
     impl._decode_requires_current_kv = MagicMock(return_value=requires_current_kv)
@@ -418,6 +495,102 @@ def test_forward_routes_strided_cache_with_runtime_exclusions(
     else:
         impl.mla_preprocess_prolog_v3.assert_not_called()
         impl._mla_preprocess.assert_called_once()
+
+
+def test_forward_falls_back_when_dcp_current_buffer_is_too_small():
+    impl = _make_impl()
+    impl.use_output_gate = False
+    impl.enable_mlapo = False
+    impl.dcp_enabled = True
+    impl.pcp_enabled = False
+    impl.is_pcp_decode_sharded = False
+    impl._dcp_current_kv_buffers = (
+        torch.empty(1, 1, 1, NOPE_DIM),
+        torch.empty(1, 1, 1, ROPE_DIM),
+        torch.arange(1),
+    )
+    impl._decode_requires_current_kv = MagicMock(return_value=True)
+    impl._cache_requires_prolog_v3_writer = MagicMock(return_value=True)
+    impl.mla_preprocess_prolog_v3 = MagicMock(return_value=(None, None))
+    impl._mla_preprocess = MagicMock(return_value=(None, None))
+    impl.o_proj = MagicMock(side_effect=lambda tensor, **_kwargs: (tensor,))
+
+    hidden = torch.zeros(2, 128)
+    output = torch.empty(2, impl.num_heads * impl.v_head_dim)
+    metadata = SimpleNamespace(
+        num_actual_tokens=2,
+        num_decodes=2,
+        num_prefills=0,
+        num_decode_tokens=2,
+    )
+
+    with (
+        patch.object(mla_v1, "_EXTRA_CTX", SimpleNamespace(num_tokens=2)),
+        patch.object(mla_v1, "maybe_save_kv_layer_to_connector"),
+    ):
+        assert impl.forward("layer", hidden, _component_major_cache(), metadata, output) is output
+
+    impl.mla_preprocess_prolog_v3.assert_not_called()
+    impl._mla_preprocess.assert_called_once()
+
+
+def test_mla_preprocess_prolog_v3_supports_dcp_current_kv_split(monkeypatch):
+    impl = _make_impl()
+    num_decode_tokens = 1
+    current_nope_cache = torch.zeros(1, BLOCK_SIZE, 1, NOPE_DIM)
+    current_pe_cache = torch.zeros(1, BLOCK_SIZE, 1, ROPE_DIM)
+    current_indices = torch.arange(BLOCK_SIZE)
+    impl._dcp_current_kv_buffers = (current_nope_cache, current_pe_cache, current_indices)
+    impl._decode_requires_current_kv = MagicMock(return_value=True)
+    impl._prepare_prolog_v3_weights = lambda: impl._prolog_v3_weights
+    impl.reorg_decode_q = MagicMock(side_effect=lambda q_nope, q_pe: (q_nope, q_pe))
+
+    nope, rope = _component_major_cache()
+    hidden = torch.randn(num_decode_tokens, 128)
+    metadata = SimpleNamespace(
+        num_decode_tokens=num_decode_tokens,
+        num_actual_tokens=num_decode_tokens,
+        slot_mapping=torch.tensor([10]),
+        decode=SimpleNamespace(
+            cos=torch.randn(num_decode_tokens, ROPE_DIM),
+            sin=torch.randn(num_decode_tokens, ROPE_DIM),
+        ),
+    )
+
+    def fake_prolog(**kwargs):
+        kwargs["kv_cache"].fill_(3.0)
+        kwargs["kr_cache"].fill_(4.0)
+        return (
+            torch.zeros(num_decode_tokens, impl.num_heads * NOPE_DIM),
+            torch.zeros(num_decode_tokens, impl.num_heads * ROPE_DIM),
+            None,
+            None,
+            None,
+        )
+
+    with (
+        patch("torch_npu.npu_mla_prolog_v3", side_effect=fake_prolog) as mock_prolog,
+        patch("torch_npu.npu_kv_rmsnorm_rope_cache") as mock_legacy,
+        patch.object(mla_v1.DeviceOperator, "reshape_and_cache") as mock_scatter,
+    ):
+        decode, prefill = impl.mla_preprocess_prolog_v3(hidden, (nope, rope), metadata)
+
+    assert prefill is None
+    prolog_kwargs = mock_prolog.call_args.kwargs
+    assert prolog_kwargs["kv_cache"].untyped_storage() is current_nope_cache.untyped_storage()
+    assert prolog_kwargs["kr_cache"].untyped_storage() is current_pe_cache.untyped_storage()
+    assert torch.equal(prolog_kwargs["cache_index"], current_indices[:num_decode_tokens])
+    mock_legacy.assert_not_called()
+    impl.reorg_decode_q.assert_called_once()
+
+    assert decode is not None
+    assert decode.current_k_nope is not None
+    assert decode.current_k_pe is not None
+    assert torch.all(decode.current_k_nope == 3.0)
+    assert torch.all(decode.current_k_pe == 4.0)
+    assert mock_scatter.call_args.kwargs["key_cache"] is nope
+    assert mock_scatter.call_args.kwargs["value_cache"] is rope
+    assert torch.equal(mock_scatter.call_args.kwargs["slot_mapping"], torch.tensor([10]))
 
 
 def test_mla_preprocess_prolog_v3_keeps_prefill_query_unquantized_for_fa_quant():

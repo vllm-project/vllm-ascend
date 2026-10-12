@@ -1632,6 +1632,24 @@ class AscendMLAImpl(MLAAttentionImpl):
             and self.kv_a_layernorm is not None
         )
 
+    def supports_prolog_v3_writer(self) -> bool:
+        """Whether this layer can use PROLOG_V3 for a strided MLA cache.
+
+        This checks the static writer contract only.  Cache geometry and stride
+        validation remain in :meth:`_cache_requires_prolog_v3_writer` because a
+        concrete cache is needed for those checks.
+        """
+        return (
+            self.use_mla_rope
+            and self.qk_rope_head_dim > 0
+            and not self.fa_quant_layer
+            and not self.enable_kv_nz
+            and hasattr(torch_npu, "npu_mla_prolog_v3")
+            and self.supports_prolog_v3_projection()
+            and self.supports_prolog_v3_quantization()
+            and not getattr(self.q_proj, "_chunk_size", 0)
+        )
+
     def _prepare_prolog_v3_weights(self) -> dict[str, Any]:
         """Return the cached private PROLOG_V3 projection weights.
 
@@ -1905,17 +1923,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         PROLOG_V3 marks the same references ``IgnoreContiguous`` and is the
         supported writer on A2/A3/A5.
         """
-        if not self.use_mla_rope or self.qk_rope_head_dim == 0 or self.enable_kv_nz:
-            return False
-        if not self.supports_prolog_v3_quantization():
+        if not self.supports_prolog_v3_writer():
             return False
         if not isinstance(kv_cache, tuple) or len(kv_cache) != 2:
-            return False
-        if not hasattr(torch_npu, "npu_mla_prolog_v3"):
-            return False
-        if not self.supports_prolog_v3_projection():
-            return False
-        if getattr(self.q_proj, "_chunk_size", 0):
             return False
         nope_cache, rope_cache = kv_cache
         if nope_cache.is_contiguous() and rope_cache.is_contiguous():
@@ -2053,13 +2063,34 @@ class AscendMLAImpl(MLAAttentionImpl):
             self.layerwise_kv_cache_hook.wait_for_layer(self.layer_name)
 
         if num_decode_tokens > 0:
-            decode_slots = attn_metadata.slot_mapping[:num_decode_tokens]
+            history_slots = attn_metadata.slot_mapping[:num_decode_tokens]
+            current_k_nope = current_k_pe = None
+            requires_current_kv = self._decode_requires_current_kv(attn_metadata)
+            if requires_current_kv:
+                # DCP split attention needs the complete current chunk while the
+                # paged cache keeps only this rank's history rows. Write the
+                # current chunk to stable private buffers first, then scatter the
+                # rank-owned rows into the strided history cache.
+                dcp_current_kv_buffers = getattr(self, "_dcp_current_kv_buffers", None)
+                assert dcp_current_kv_buffers is not None
+                current_nope_cache, current_pe_cache, current_indices = dcp_current_kv_buffers
+                assert num_decode_tokens <= current_indices.numel()
+                block_size = kv_cache[0].shape[1]
+                num_current_blocks = cdiv(num_decode_tokens, block_size)
+                current_nope_cache = current_nope_cache[:num_current_blocks]
+                current_pe_cache = current_pe_cache[:num_current_blocks]
+                prolog_cache = (current_nope_cache, current_pe_cache)
+                prolog_slots = current_indices[:num_decode_tokens]
+            else:
+                prolog_cache = kv_cache
+                prolog_slots = history_slots
+
             prolog_outputs = self._run_prolog_v3(
                 hidden_states[:num_decode_tokens],
                 attn_metadata.decode.cos,
                 attn_metadata.decode.sin,
-                kv_cache,
-                decode_slots,
+                prolog_cache,
+                prolog_slots,
                 quantize_query=True,
             )
             decode_q_nope, decode_q_pe, decode_dequant_scale = prolog_outputs[:3]
@@ -2069,12 +2100,25 @@ class AscendMLAImpl(MLAAttentionImpl):
             if prolog_num_heads > self.num_heads:
                 decode_q_nope = decode_q_nope[:, : self.num_heads]
                 decode_q_pe = decode_q_pe[:, : self.num_heads]
+            decode_q_nope, decode_q_pe = self.reorg_decode_q(decode_q_nope, decode_q_pe)
+            if requires_current_kv:
+                current_k_nope = current_nope_cache.flatten(0, 1)[:num_decode_tokens]
+                current_k_pe = current_pe_cache.flatten(0, 1)[:num_decode_tokens]
+                DeviceOperator.reshape_and_cache(
+                    key=current_k_nope,
+                    value=current_k_pe,
+                    key_cache=kv_cache[0],
+                    value_cache=kv_cache[1],
+                    slot_mapping=history_slots,
+                )
             decode_result = DecodeMLAPreprocessResult(
                 decode_q_nope,
                 decode_q_pe,
                 kv_cache[0],
                 kv_cache[1],
                 dequant_scale_q_nope=decode_dequant_scale,
+                current_k_nope=current_k_nope,
+                current_k_pe=current_k_pe,
             )
 
         if num_actual_tokens > num_decode_tokens:
@@ -2880,12 +2924,16 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         # MLA Preprocess
         requires_current_kv = self._decode_requires_current_kv(attn_metadata)
+        dcp_current_kv_buffers = getattr(self, "_dcp_current_kv_buffers", None)
         use_prolog_v3_strided_cache = (
             self._cache_requires_prolog_v3_writer(kv_cache)
             and not self.pcp_enabled
             and not self.is_pcp_decode_sharded
-            and not self.dcp_enabled
-            and not requires_current_kv
+            and (not requires_current_kv or self.dcp_enabled)
+            and (
+                not self.dcp_enabled
+                or (dcp_current_kv_buffers is not None and num_decode_tokens <= dcp_current_kv_buffers[2].numel())
+            )
         )
         can_use_dcp_prolog = (
             self.enable_mlapo

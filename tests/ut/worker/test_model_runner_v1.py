@@ -1198,7 +1198,10 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         )
         attn_module = MLAAttention.__new__(MLAAttention)
         torch.nn.Module.__init__(attn_module)
-        attn_module.impl = SimpleNamespace(fa_quant_layer=False)
+        attn_module.impl = SimpleNamespace(
+            fa_quant_layer=False,
+            supports_prolog_v3_writer=lambda: True,
+        )
         runner.compilation_config = SimpleNamespace(static_forward_context={layer_name: attn_module})
         runner.kernel_block_sizes = [128]
         runner._get_layer_kv_cache_specs = lambda config: {layer_name: spec}
@@ -1333,9 +1336,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             dcp_enabled=False,
             pcp_enabled=False,
             is_pcp_decode_sharded=False,
-            supports_prolog_v3_quantization=lambda: False,
-            supports_prolog_v3_projection=lambda: False,
-            q_proj=SimpleNamespace(_chunk_size=0),
+            supports_prolog_v3_writer=lambda: False,
         )
         runner.compilation_config = SimpleNamespace(static_forward_context={layer_name: attn_module})
 
@@ -1346,7 +1347,6 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             self.assertFalse(runner._uses_single_raw_mla_cache(layer_name, spec, attn_module))
 
         attn_module.impl.enable_kv_nz = False
-        attn_module.impl.supports_prolog_v3_projection = lambda: True
         with patch(
             "vllm_ascend.worker.model_runner_v1.supports_component_major_mla_pd",
             return_value=True,
@@ -1370,14 +1370,28 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         attn_module.impl.is_pcp_decode_sharded = False
 
         attn_module.impl.dcp_enabled = True
+        attn_module.impl.supports_prolog_v3_writer = lambda: True
+        runner.vllm_config.scheduler_config.max_num_batched_tokens = 16384
+        attn_module.impl._required_dcp_current_kv_capacity = lambda: 384
         with patch(
             "vllm_ascend.worker.model_runner_v1.supports_component_major_mla_pd",
             return_value=True,
         ):
             self.assertFalse(runner._uses_single_raw_mla_cache(layer_name, spec, attn_module))
-        attn_module.impl.dcp_enabled = False
 
-        attn_module.impl.supports_prolog_v3_quantization = lambda: True
+        attn_module.impl._dcp_current_kv_buffers = (
+            torch.empty(1, 384, 1, 512),
+            torch.empty(1, 384, 1, 64),
+            torch.arange(384),
+        )
+        with patch(
+            "vllm_ascend.worker.model_runner_v1.supports_component_major_mla_pd",
+            return_value=True,
+        ):
+            self.assertTrue(runner._uses_single_raw_mla_cache(layer_name, spec, attn_module))
+        attn_module.impl._dcp_current_kv_buffers = None
+        attn_module.impl.dcp_enabled = False
+        attn_module.impl.supports_prolog_v3_writer = lambda: True
         with patch(
             "vllm_ascend.worker.model_runner_v1.supports_component_major_mla_pd",
             return_value=True,
@@ -1385,13 +1399,6 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             self.assertTrue(runner._uses_single_raw_mla_cache(layer_name, spec, attn_module))
 
         self.assertFalse(runner._uses_single_raw_mla_cache(layer_name, spec, SimpleNamespace()))
-
-        attn_module.impl.q_proj._chunk_size = 2
-        with patch(
-            "vllm_ascend.worker.model_runner_v1.supports_component_major_mla_pd",
-            return_value=True,
-        ):
-            self.assertFalse(runner._uses_single_raw_mla_cache(layer_name, spec, attn_module))
 
     def test_kvpp_allocate_and_reshape_views(self):
         from tests.ut.kvpp_utils import assert_attention_cache_views, make_attention_cache_case, make_cache_config

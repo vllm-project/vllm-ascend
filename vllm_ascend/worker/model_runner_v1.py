@@ -4968,10 +4968,19 @@ class NPUModelRunner(GPUModelRunner):
             # preprocessing contract. Keep their allocation compatible with it.
             return False
         if getattr(impl, "dcp_enabled", False):
-            # DCP split attention and prefill need nonlocal current KV and
-            # gathered query heads. Keep them on the legacy allocation and
-            # preprocessing contract until PROLOG_V3 implements that contract.
-            return False
+            dcp_current_kv_buffers = getattr(impl, "_dcp_current_kv_buffers", None)
+            required_capacity_getter = getattr(impl, "_required_dcp_current_kv_capacity", None)
+            if required_capacity_getter is None:
+                return False
+            required_capacity = required_capacity_getter()
+            if (
+                dcp_current_kv_buffers is None
+                or required_capacity > dcp_current_kv_buffers[2].numel()
+            ):
+                # DCP split attention needs stable private current-KV buffers
+                # for every possible decode/draft-prefill graph. Keep larger
+                # batches on the legacy allocation and preprocessing path.
+                return False
         if getattr(impl, "fa_quant_layer", False):
             return False
         if getattr(impl, "enable_kv_nz", False):
@@ -4979,15 +4988,13 @@ class NPUModelRunner(GPUModelRunner):
             # NoPE/RoPE slices are separated by the other component's lanes,
             # so keep the legacy component-dense allocation for this mode.
             return False
-        supports_prolog_projection = getattr(impl, "supports_prolog_v3_projection", None)
-        if supports_prolog_projection is not None and not supports_prolog_projection():
-            # q_lora_rank=None MLA has no fused W_DQ / W_UQ contract and cannot
-            # use PROLOG_V3. Keep its cache in the legacy writer layout.
+        supports_prolog_writer = getattr(impl, "supports_prolog_v3_writer", None)
+        if supports_prolog_writer is None:
             return False
-        supports_prolog_quantization = getattr(impl, "supports_prolog_v3_quantization", None)
-        if supports_prolog_quantization is not None and not supports_prolog_quantization():
-            return False
-        return not getattr(getattr(impl, "q_proj", None), "_chunk_size", 0)
+        # The strided writer needs MLAPrologV3, RoPE MLA, and a supported
+        # projection/quantization contract. Keep incompatible layers on the
+        # legacy writer layout instead of allocating a cache they cannot use.
+        return supports_prolog_writer()
 
     def _get_attention_kv_cache_dims(self, layer_name: str, kv_cache_spec: AttentionSpec) -> tuple[int, int]:
         if isinstance(kv_cache_spec, AscendMLAAttentionSpec):
