@@ -179,6 +179,8 @@ class HardwareCapability(Enum):
     QWEN4EXP_HC_GATE_MIX_ROW_BLOCK = auto()
     # Inspect PCIe topology to distinguish 310P Root-Complex and endpoint deployments.
     RC_DEVICE_DISCOVERY = auto()
+    # Run BF16 DeepSeek router GEMM with FP32 output.
+    BF16_ROUTER_FP32_OUTPUT = auto()
     # Fused RMSNorm+cast is available for the A2/A3 (CANN 9.1) path.
     RMS_NORM_CAST = auto()
     # Fused RMSNorm and dynamic per-token INT8 quantization on A3.
@@ -498,6 +500,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             capabilities=frozenset(
                 {
                     HardwareCapability.AUTO_ENABLE_CUSTOM_OPS,
+                    HardwareCapability.BF16_ROUTER_FP32_OUTPUT,
                     HardwareCapability.SCATTER_ND_CACHE_STORE,
                     HardwareCapability.SCATTER_ND_FP8_CACHE_STORE,
                     HardwareCapability.CANN_MEGAMOE,
