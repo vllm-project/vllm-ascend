@@ -380,9 +380,18 @@ def apply_layerwise_kv_cache_plan(
     for tensor in old_tensors:
         for layer_idx, layer_name in enumerate(get_kv_cache_tensor_layers(tensor)):
             spec = layer_specs[layer_name]
-            layer_size = kv_cache_config.num_blocks * spec.page_size_bytes
+            descriptor_page_size = spec.page_size_bytes
+            if isinstance(spec, AscendSFAIndexerCacheSpec):
+                # Generic descriptors describe the inherited MLA content width,
+                # without Ascend's separate scales or replicated indexer data.
+                # Validate that logical region before replacing it; the new
+                # reuse slots below use the full physical page_size_bytes.
+                logical_page_size = spec.num_heads * spec.num_states * spec.state_content_size_bytes
+                if tensor.block_stride == logical_page_size:
+                    descriptor_page_size = logical_page_size
+            layer_size = kv_cache_config.num_blocks * descriptor_page_size
             start = tensor.offset + layer_idx * tensor.layer_stride
-            if tensor.block_stride != spec.page_size_bytes:
+            if tensor.block_stride != descriptor_page_size:
                 raise NotImplementedError("Layerwise KV cache reuse requires contiguous per-layer pages.")
             if start < 0 or start + layer_size > tensor.size:
                 raise ValueError(f"Layerwise KV cache descriptor for {layer_name} exceeds its backing allocation.")
