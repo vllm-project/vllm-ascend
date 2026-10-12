@@ -139,6 +139,7 @@ def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
         SimpleNamespace(speculative_config=SimpleNamespace(method="suffix")),
         SimpleNamespace(speculative_config=SimpleNamespace(method="ngram")),
         SimpleNamespace(speculative_config=SimpleNamespace(method="ngram_gpu")),
+        SimpleNamespace(speculative_config=SimpleNamespace(method="draft_model", parallel_drafting=True)),
     ],
     ids=[
         "hy3-preview",
@@ -163,6 +164,7 @@ def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
         "suffix-speculative-decoding",
         "ngram-speculative-decoding",
         "ngram-gpu-speculative-decoding",
+        "draft-model-speculative-decoding",
     ],
 )
 def test_blacklisted_features_default_to_v1(monkeypatch, config):
