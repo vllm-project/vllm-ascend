@@ -87,6 +87,15 @@ env_variables: dict[str, Callable[[], Any]] = {
     # (safe for Ascend 910B/A3). Set to a positive value to override when
     # auto-detection is unavailable or for debugging UB overflow issues.
     "VLLM_ASCEND_ROPE_UB_SIZE_KB": lambda: int(os.getenv("VLLM_ASCEND_ROPE_UB_SIZE_KB") or 0),
+    # Whether to force `mamba_ssm_cache_dtype=bfloat16` when the xlite graph
+    # mode is enabled. xlite owns the GDN states in bf16 buffers, so fp32
+    # accounting only inflates the mamba page. Enabled unless set to "0".
+    # Not sensitive.
+    "XLITE_MAMBA_SSM_BF16": lambda: os.getenv("XLITE_MAMBA_SSM_BF16", "1") != "0",
+    # EXPERIMENTAL: run hybrid (MHA+GDN) prefill on the native runnable and
+    # only decode steps on the xlite graph, bridging the GDN states at the
+    # prefill->decode handoff. Enabled when set to "1". Not sensitive.
+    "XLITE_DECODE_ONLY_HYBRID": lambda: os.getenv("XLITE_DECODE_ONLY_HYBRID", "0") == "1",
 }
 
 # end-env-vars-definition

@@ -70,9 +70,43 @@ def verify_and_update_config(cls, vllm_config) -> None:
         vllm_config
     )
     logger.debug("Using kv store: %s", using_kv_store_with_hybrid)
+    cache_config = vllm_config.cache_config
+    # xlite graph mode manages GDN states itself (slot-major bf16 buffers in
+    # the xlite adapter, see xlite.py _adapt_hybrid_kv_caches) and never reads
+    # the vllm-side mamba pages. The model card's mamba_ssm_dtype=float32 then
+    # only inflates the mamba page for zero benefit. Keep the accounting
+    # consistent by declaring the ssm state bf16 while xlite owns the states.
+    # Must run before MambaModelConfig.verify_and_update_config consumes the
+    # dtype. `mamba_ssm_cache_dtype` is read defensively: config stubs in
+    # tests may not carry it.
+    if getattr(cache_config, "mamba_ssm_cache_dtype", "bfloat16") != "bfloat16":
+        from vllm_ascend import envs
+
+        xlite_owns_gdn_states = False
+        if envs.XLITE_MAMBA_SSM_BF16:
+            try:
+                from vllm_ascend.ascend_config import get_ascend_config
+
+                xlite_graph = getattr(get_ascend_config(), "xlite_graph_config", None)
+                xlite_owns_gdn_states = bool(xlite_graph and getattr(xlite_graph, "enabled", False))
+            except Exception:
+                xlite_owns_gdn_states = False
+            if not xlite_owns_gdn_states:
+                additional_config = getattr(vllm_config, "additional_config", None) or {}
+                xlite_entry = (
+                    additional_config.get("xlite_graph_config") if isinstance(additional_config, dict) else None
+                )
+                xlite_owns_gdn_states = bool(xlite_entry and xlite_entry.get("enabled", False))
+        if xlite_owns_gdn_states:
+            logger.info(
+                "xlite graph mode owns GDN states in bf16; overriding "
+                "mamba_ssm_cache_dtype %s -> bfloat16 to halve the mamba "
+                "page and relax the block_size inflation.",
+                cache_config.mamba_ssm_cache_dtype,
+            )
+            cache_config.mamba_ssm_cache_dtype = "bfloat16"
     MambaModelConfig.verify_and_update_config(vllm_config)
 
-    cache_config = vllm_config.cache_config
     model_config = vllm_config.model_config
     index_kpool = _get_sparse_index_kpool(model_config)
     if index_kpool is not None:
