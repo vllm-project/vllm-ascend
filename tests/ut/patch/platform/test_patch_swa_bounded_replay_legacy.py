@@ -74,7 +74,13 @@ def test_replay_installation_is_opt_in_and_idempotent_in_fresh_process(enabled):
     # pytest process cannot observe. Exercise the worker wire schema as well.
     script = """
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 import msgspec
+from vllm.triton_utils import HAS_TRITON, triton
+# The fresh interpreter does not inherit conftest's CPU driver mock.
+if HAS_TRITON:
+    triton.runtime.driver.active = MagicMock()
+    triton.runtime.driver.active.get_current_target.return_value = SimpleNamespace(backend="cpu")
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
