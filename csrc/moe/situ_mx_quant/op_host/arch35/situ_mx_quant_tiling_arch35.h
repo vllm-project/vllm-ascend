@@ -41,6 +41,8 @@ struct SituMxQuantInputInfo {
     int64_t inputDim0{1};   // batch dim (collapsed)
     int64_t inputDim1{1};   // row dim (collapsed)
     int64_t inputDim2{0};   // 2H (input last dim)
+    int64_t groupListSize{0};
+    bool hasGroupList{false};
 };
 
 // ==================== Output Info ====================

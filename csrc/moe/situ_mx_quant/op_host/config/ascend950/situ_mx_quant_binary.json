@@ -12,6 +12,15 @@
           "paramType": "required",
           "shape": [-2],
           "format_match_mode": "FormatAgnostic"
+        },
+        {
+          "name": "group_list",
+          "index": 1,
+          "dtype": "int64",
+          "format": "ND",
+          "paramType": "optional",
+          "shape": [-2],
+          "format_match_mode": "FormatAgnostic"
         }
       ],
       "outputs": [
@@ -51,6 +60,15 @@
           "dtype": "bfloat16",
           "format": "ND",
           "paramType": "required",
+          "shape": [-2],
+          "format_match_mode": "FormatAgnostic"
+        },
+        {
+          "name": "group_list",
+          "index": 1,
+          "dtype": "int64",
+          "format": "ND",
+          "paramType": "optional",
           "shape": [-2],
           "format_match_mode": "FormatAgnostic"
         }
