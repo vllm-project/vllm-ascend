@@ -937,7 +937,7 @@ the launcher, PP placement, and proxy routing from Section 5.2.
 
 #### 5.3.1 Prepare MemCache
 
-Complete [MemCache backend setup](../../user_guide/feature_guide/kv_pool.md#scenario-2-memcache-backend),
+Complete [MemCache backend setup](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend),
 including the hardware/CANN prerequisites, `memfabric-hybrid` and
 `memcache-hybrid` installation, configuration files, and metadata service.
 All P/D instances must access the same pool; connector arguments do not
