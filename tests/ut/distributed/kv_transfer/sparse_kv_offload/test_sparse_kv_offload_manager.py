@@ -28,6 +28,8 @@ class _FakeKVCacheSpec:
         self.max_blocks_per_request = max_blocks_per_request
         self.store_on_host = store_on_host
         self.block_size = block_size
+        # vLLM main's UniformTypeKVCacheSpecs reads this from each member spec.
+        self.dcp_sharded = False
 
     def max_memory_usage_bytes(self, _vllm_config):
         return self.max_blocks_per_request * self.page_size_bytes

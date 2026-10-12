@@ -143,6 +143,7 @@ extra_css:
 extra_javascript:
   - javascripts/mathjax.js
   - javascripts/tabbed-toc.js
+  - javascripts/table-fullscreen.js
   - https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js
 
 extra:
