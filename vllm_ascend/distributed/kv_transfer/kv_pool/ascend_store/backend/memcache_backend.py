@@ -20,6 +20,115 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.layerwise_keys import LayerwiseKeyBuilder
 
+#诊断函数
+def _log_ascend_driver_diagnostics() -> None:
+    """Log Ascend driver/HDK version info to diagnose hybm_init failures.
+
+    hybm reads the driver version via an internal API that differs from
+    torch_npu's. When the version string comes back empty, hybm refuses
+    to initialise memory fabric.  This function dumps everything that
+    could affect that read so the operator can diff P vs D nodes.
+    """
+    import subprocess
+
+    logger.info("=" * 60)
+    logger.info("[HDK Diagnostics] Begin ascend driver/HDK version dump")
+
+    # 1. driver version.info file
+    for path in (
+        "/usr/local/Ascend/driver/version.info",
+        "/usr/local/Ascend/driver/../driver/version.info",
+    ):
+        if os.path.isfile(path):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    content = f.read().strip()
+                logger.info("[HDK] driver version.info (%s):\n%s", path, content)
+            except Exception as e:
+                logger.warning("[HDK] Failed to read %s: %s", path, e)
+        else:
+            logger.warning("[HDK] driver version.info not found: %s", path)
+
+    # 2. CANN / toolkit version.info
+    cann_paths = [
+        "/usr/local/Ascend/ascend-toolkit/latest/version.info",
+        "/usr/local/Ascend/ascend-toolkit/version.info",
+    ]
+    for path in cann_paths:
+        if os.path.isfile(path):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    content = f.read().strip()
+                logger.info("[HDK] CANN version.info (%s):\n%s", path, content)
+            except Exception as e:
+                logger.warning("[HDK] Failed to read %s: %s", path, e)
+
+    # 3. torch_npu version
+    try:
+        import torch_npu
+        logger.info("[HDK] torch_npu version: %s", torch_npu.__version__)
+    except Exception:
+        logger.warning("[HDK] torch_npu not importable")
+
+    # 4. Key env vars
+    for var in ("LD_LIBRARY_PATH", "ASCEND_HOME_PATH", "ASCEND_OPP_PATH",
+                "ASCEND_AICPU_OPP_PATH", "HCCL_CONNECT_TIMEOUT",
+                "ASCEND_RT_VISIBLE_DEVICES", "MMC_LOCAL_CONFIG_PATH"):
+        val = os.environ.get(var, "<unset>")
+        logger.info("[HDK] ENV %s=%s", var, val)
+
+    # 5. Check driver lib files
+    for lib_path in (
+        "/usr/local/Ascend/driver/lib64/libascendcl.so",
+        "/usr/local/Ascend/driver/lib64/libruntime.so",
+        "/usr/local/Ascend/driver/lib64",
+    ):
+        if os.path.exists(lib_path):
+            logger.info("[HDK] FOUND: %s", lib_path)
+        else:
+            logger.warning("[HDK] MISSING: %s", lib_path)
+
+    # 6. npu-smi (best-effort, may not be in PATH)
+    try:
+        result = subprocess.run(
+            ["npu-smi", "info", "-t", "board"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0:
+            for line in result.stdout.strip().splitlines():
+                logger.info("[HDK] npu-smi: %s", line)
+        else:
+            logger.warning("[HDK] npu-smi returned %d: %s",
+                           result.returncode, result.stderr.strip())
+    except FileNotFoundError:
+        logger.warning("[HDK] npu-smi not found in PATH")
+    except Exception as e:
+        logger.warning("[HDK] npu-smi failed: %s", e)
+
+    # 7. ldd on the hybm lib (if findable) to check driver linkage
+    try:
+        import memcache_hybrid
+        pkg_dir = os.path.dirname(memcache_hybrid.__file__)
+        logger.info("[HDK] memcache_hybrid package dir: %s", pkg_dir)
+        for root, _dirs, files in os.walk(pkg_dir):
+            for fname in files:
+                if "hybm" in fname.lower() and fname.endswith(".so"):
+                    full = os.path.join(root, fname)
+                    logger.info("[HDK] Found hybm lib: %s", full)
+                    ldd = subprocess.run(
+                        ["ldd", full],
+                        capture_output=True, text=True, timeout=10,
+                    )
+                    if ldd.returncode == 0:
+                        for line in ldd.stdout.strip().splitlines():
+                            if "ascend" in line.lower() or "driver" in line.lower() or "not found" in line.lower():
+                                logger.info("[HDK] ldd %s: %s", fname, line)
+    except Exception:
+        pass
+
+    logger.info("[HDK Diagnostics] End ascend driver/HDK version dump")
+    logger.info("=" * 60)
+
 
 def _is_device_sdma() -> bool:
     config_path = os.getenv("MMC_LOCAL_CONFIG_PATH")
