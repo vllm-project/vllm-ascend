@@ -317,11 +317,17 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         self.reorder_batch_threshold = self.decode_threshold
 
         scheduler_config = vllm_config.scheduler_config
-        # Draft verification expands each request into K+1 query rows, so this
-        # buffer must be sized by the token budget rather than max_num_seqs.
-        # The allocation stays fixed so graph replay never observes a new address.
-        self._seq_lens_device_buffer = torch.empty(
-            scheduler_config.max_num_batched_tokens + 1, dtype=torch.int32, device=self.device
+        # Only the large-head (512-dim) graph verification path reads a device
+        # copy of seq_lens. Draft verification expands each request into K+1
+        # query rows, so the buffer must be sized by the token budget rather
+        # than max_num_seqs, and it stays at a fixed address so graph replay
+        # never observes a new one. Every other head size gets ``None`` so its
+        # metadata builder does not pay for a buffer it never reads.
+        seq_lens_head_size = getattr(kv_cache_spec, "head_size", None)
+        self._seq_lens_device_buffer = (
+            None
+            if seq_lens_head_size is not None and seq_lens_head_size != FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
+            else torch.empty(scheduler_config.max_num_batched_tokens + 1, dtype=torch.int32, device=self.device)
         )
         self.chunked_prefill_enabled = scheduler_config.enable_chunked_prefill
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
@@ -441,9 +447,11 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
                 dim=0,
             )
 
-        seq_lens_device = self._seq_lens_device_buffer[: len(seq_lens)]
-        # Copy before entering the compiled model; graph replay reuses this address.
-        seq_lens_device.copy_(seq_lens, non_blocking=True)
+        seq_lens_device = None
+        if self._seq_lens_device_buffer is not None:
+            seq_lens_device = self._seq_lens_device_buffer[: len(seq_lens)]
+            # Copy before entering the compiled model; graph replay reuses this address.
+            seq_lens_device.copy_(seq_lens, non_blocking=True)
 
         backend_metadata = self._build_backend_metadata(
             common_attn_metadata,
@@ -1516,13 +1524,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
     ):
         with attention_transfer_window():
             num_tokens = query.shape[0]
-            single_token_per_request = num_tokens == attn_metadata.seq_lens.shape[0]
 
             if (
-                attn_metadata.attn_state in (AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding)
+                attn_metadata.attn_state == AscendAttentionState.DecodeOnly
                 and self.sliding_window is None
                 and using_paged_attention(num_tokens, self.vllm_config, self.head_size)
-                and (attn_metadata.attn_state != AscendAttentionState.SpecDecoding or single_token_per_request)
             ):
                 output = self.forward_paged_attention(query, attn_metadata, output)
             else:
@@ -1597,8 +1603,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             attn_output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output_padded)
         else:
             attn_output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output)
-        if attn_output is not output:
-            output[:num_tokens] = attn_output[:num_tokens]
+        output[:num_tokens] = attn_output[:num_tokens]
         return output
 
 
