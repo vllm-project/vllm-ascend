@@ -431,6 +431,28 @@ class TestW4A8SituPath(unittest.TestCase):
             ):
                 self.assertFalse(w4a8_module._gmm_dequant_situ_quant_fusion_supported(**common_kwargs))
 
+    def test_a3_gmm_dequant_situ_quant_falls_back_at_capacity_limit(self):
+        # For two experts, 32641 rows need 256 padded M-blocks; 32642 need 257.
+        common_kwargs = {
+            "w1": torch.ones(2, 64, 32, dtype=torch.int32),
+            "w1_scale": torch.ones(2, 256, dtype=torch.int64),
+            "group_list_type": 1,
+            "group_list": torch.tensor([1, 1]),
+        }
+        with patch.object(
+            w4a8_module, "get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A3)
+        ):
+            for capacity, expected in ((32641, True), (32642, False)):
+                with self.subTest(capacity=capacity):
+                    self.assertEqual(
+                        w4a8_module._gmm_dequant_situ_quant_fusion_supported(
+                            **common_kwargs,
+                            hidden_states=torch.empty(capacity, 64, dtype=torch.int8),
+                            x_scale=torch.empty(capacity),
+                        ),
+                        expected,
+                    )
+
     def test_gmm_dequant_situ_quant_weight_normalization_preserves_storage(self):
         weights = torch.ones(2, 64, 32, dtype=torch.int32)
         normalized = w4a8_module._as_gmm_dequant_situ_quant_expert_weights([weights])

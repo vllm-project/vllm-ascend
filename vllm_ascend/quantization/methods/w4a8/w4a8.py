@@ -41,6 +41,10 @@ from vllm_ascend.utils import (
 from ..base import AscendMoEScheme, QuantType
 from ..registry import register_scheme
 
+# Keep these limits in sync with gmm_dequant_situ_quant_torch_adpt.h.
+_GMM_DEQUANT_SITU_QUANT_M_BLOCK_SIZE = 128
+_GMM_DEQUANT_SITU_QUANT_MAX_M_BLOCKS = 256
+
 
 def _as_gmm_dequant_situ_quant_expert_weights(tensor_or_list: list[torch.Tensor] | torch.Tensor) -> list[torch.Tensor]:
     """Normalize W4A8 weights into one packed tensor per expert."""
@@ -95,6 +99,13 @@ def _gmm_dequant_situ_quant_fusion_supported(
     expert_weights = _as_gmm_dequant_situ_quant_expert_weights(w1)
     num_experts = len(expert_weights)
     if not expert_weights or group_list.numel() < num_experts:
+        return False
+    capacity = hidden_states.shape[0]
+    active_upper_bound = min(num_experts, capacity)
+    padded_block_upper_bound = (
+        active_upper_bound + (capacity - active_upper_bound) // _GMM_DEQUANT_SITU_QUANT_M_BLOCK_SIZE
+    )
+    if padded_block_upper_bound > _GMM_DEQUANT_SITU_QUANT_MAX_M_BLOCKS:
         return False
     expert_scales = w1_scale if isinstance(w1_scale, list) else [w1_scale]
     if len(expert_scales) == 1 and expert_scales[0].dim() >= 2 and expert_scales[0].shape[0] == num_experts:
