@@ -299,7 +299,9 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
                 self.assertEqual(len(experts), self.num_experts)
                 if name.endswith("scale"):
                     groups, channels, scale_size = original.shape
-                    expected_tensor = original.reshape(groups, channels, scale_size // 2, 2)
+                    expected_tensor = original.reshape(groups, channels, scale_size // 2, 2).view(
+                        torch.float8_e8m0fnu
+                    )
                 else:
                     expected_tensor = original
                 for expert, expected in zip(experts, expected_tensor.unbind(0)):
@@ -307,7 +309,9 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
                         self.assertEqual(expert.shape[-1], 2)
                     self.assertEqual(expert.dtype, expected.dtype)
                     self.assertTrue(expert.is_contiguous())
-                    torch.testing.assert_close(expert.float(), expected.float(), rtol=0, atol=0)
+                    actual = expert.view(torch.uint8) if name.endswith("scale") else expert.float()
+                    expected = expected.view(torch.uint8) if name.endswith("scale") else expected.float()
+                    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
         self.scheme.process_weights_after_loading(layer)
         self.assertIs(layer.cann_mega_moe_w13_weight_list, weights.w1)
         self.assertIs(weight_views[0], weights.w1)
