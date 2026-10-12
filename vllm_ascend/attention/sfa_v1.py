@@ -429,9 +429,6 @@ class AscendSFAMetadata:
     num_decode_tokens: int = 0
     num_prefills: int = 0
     block_size: int = 0
-    group_len: torch.Tensor | None = None
-    group_key_idx: torch.Tensor | None = None
-    group_key_cache_idx: torch.Tensor | None = None
     # Request identity for the Sparse KV offload resident LRU; only populated
     # by AscendSFAKVOffloadMetadataBuilder.
     req_ids_tensor: torch.Tensor | None = None
@@ -1068,6 +1065,13 @@ class AscendSFAImpl(MLAAttentionImpl):
         quant_method = self._get_layer_quant_method(self.fused_qkv_a_proj)
         qt = type(quant_method) if quant_method is not None else None
         if pp_type is PreprocessType.PROLOG_V3:
+            # Prolog's indexer query can carry quantization scales independently
+            # of the MLA weight type. Preserve the native query for an
+            # unquantized indexer, including layers that later toggle skip_topk.
+            if self.has_indexer:
+                wq_b = getattr(self.indexer, "wq_b", None)
+                if not hasattr(wq_b, "weight_scale"):
+                    reasons.append("PROLOG_V3 requires a quantized indexer query projection.")
             if self.enable_sparse_sfa_turboquant:
                 reasons.append("PROLOG_V3 does not support the TurboQuant 4-bit latent cache.")
             if qt is None and self.enable_sparse_sfa_c8:

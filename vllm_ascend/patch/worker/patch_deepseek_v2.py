@@ -411,7 +411,11 @@ def _patched_forward(
     if not pp_group.is_last_rank:
         pp_output = IntermediateTensors({"hidden_states": hidden_states, "residual": residual})
         if self._use_upstream_aux_relay:
-            pp_output.tensors.update(self.pack_local_aux_hidden_states(aux_hidden_states))
+            # vLLM's buffer-mutation check also sees names in traced-out branches.
+            # Avoid leaving "update" in the forward's co_names for PP=1.
+            pp_output = IntermediateTensors(
+                {**pp_output.tensors, **self.pack_local_aux_hidden_states(aux_hidden_states)}
+            )
         else:
             pp_transport.add_pp_transport_tensors(
                 pp_output,

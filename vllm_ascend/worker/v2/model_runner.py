@@ -19,6 +19,7 @@
 
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import deepcopy
+from dataclasses import replace
 from typing import Any
 
 import numpy as np
@@ -88,7 +89,6 @@ from vllm_ascend.models.deepseek_v41.cache_config import uses_a5_packed_cache
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import (
     is_deepseek_v41,
-    is_pd_decode_recompute_scheduler_enabled,
     lmhead_tp_enable,
     lmhead_tp_max_num_logits,
     lmhead_tp_pad_rows,
@@ -550,6 +550,20 @@ class NPUModelRunner(GPUModelRunner):
             profiling_config,
             execution_start_time,
         )
+
+        # In adaptive verification, idle DP ranks dummy-run at target graph capacity.
+        # Restore their request counts before draft DP sync to avoid inflating all ranks.
+        if (
+            dummy_run
+            and not is_profile
+            and context_len == 0
+            and self.adaptive_verification is not None
+            and self.execute_model_state is not None
+        ):
+            state = self.execute_model_state
+            self.execute_model_state = state._replace(
+                input_batch=replace(state.input_batch, num_reqs=len(scheduler_output.num_scheduled_tokens))
+            )
         return output
 
     def _maybe_send_draft_kv(self, scheduler_output: SchedulerOutput) -> None:
@@ -591,21 +605,32 @@ class NPUModelRunner(GPUModelRunner):
         if sparse_cfg.enabled:
             allocate_kv_offload_topk_profile_buffers(self.get_kv_cache_spec(), self.vllm_config, sparse_cfg)
         mc2_tokens_capacity = get_mc2_tokens_capacity()
+        # The initial dummy profile bypasses PCP batch partitioning. Profile
+        # rank-local tokens; the existing MoE preparation still handles TP.
+        pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
+        global_max_num_tokens: int = self.max_num_tokens
+        profile_max_num_tokens = (global_max_num_tokens + pcp_size - 1) // pcp_size
         with override_mrv2_in_profile_run(True):
             if (
                 mc2_tokens_capacity is not None
-                and self.max_num_tokens > mc2_tokens_capacity
+                and profile_max_num_tokens > mc2_tokens_capacity
                 and select_moe_comm_method(mc2_tokens_capacity, self.vllm_config)
                 in {MoECommType.MC2, MoECommType.FUSED_MC2}
             ):
                 # Use a call-scoped bypass because skip_compiled would require runner-specific ForwardContext plumbing.
                 with disable_compilation(self.get_model()):
                     self._dummy_run(mc2_tokens_capacity, skip_attn=True, skip_eplb=True, is_profile=True)
-            super().profile_run()
+            self.max_num_tokens: int = profile_max_num_tokens
+            try:
+                super().profile_run()
+            finally:
+                self.max_num_tokens = global_max_num_tokens
 
     def gather_batch_req_state(self, scheduler_output: SchedulerOutput, dummy_run: bool):
         batch_state, uniform_token_count = super().gather_batch_req_state(scheduler_output, dummy_run)
-        if batch_state is not None and is_pd_decode_recompute_scheduler_enabled(self.vllm_config):
+        kv_cfg = self.vllm_config.kv_transfer_config
+        is_pd_decode_node = kv_cfg is not None and kv_cfg.is_kv_consumer and not kv_cfg.is_kv_producer
+        if batch_state is not None and is_pd_decode_node:
             pd_decode_recompute = (
                 batch_state.is_prefilling_np
                 & (batch_state.num_computed_prefill_tokens_np > 0)

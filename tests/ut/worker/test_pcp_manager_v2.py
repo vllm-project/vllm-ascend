@@ -88,10 +88,11 @@ def _make_pcp_config(
     "cudagraph_mode,speculative,pcp_size,dcp_size,expected_sharding",
     [
         (CUDAGraphMode.NONE, False, 2, 1, True),
-        (CUDAGraphMode.NONE, True, 2, 1, False),
+        (CUDAGraphMode.NONE, True, 2, 1, True),
         (CUDAGraphMode.NONE, False, 1, 1, False),
         (CUDAGraphMode.NONE, False, 2, 2, False),
         (CUDAGraphMode.FULL_DECODE_ONLY, False, 2, 1, True),
+        (CUDAGraphMode.FULL_DECODE_ONLY, True, 2, 1, True),
     ],
 )
 def test_decode_sharding_uses_parallel_config(cudagraph_mode, speculative, pcp_size, dcp_size, expected_sharding):
@@ -138,7 +139,7 @@ def test_decode_sharding_does_not_add_a_parallel_config_field():
 
     assert not hasattr(parallel_config, "pcp_shard_decode_requests")
     replace(parallel_config)
-    assert is_pcp_decode_sharding_enabled(config) is False
+    assert is_pcp_decode_sharding_enabled(config) is True
 
 
 def test_validate_config_allows_sparse_mla_full_decode_only():
@@ -171,18 +172,21 @@ def test_validate_config_allows_pipeline_parallelism():
     AscendPCPManager.validate_config(vllm_config, supports_mm_inputs=False)
 
 
-@pytest.mark.parametrize("cudagraph_mode", [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL])
-def test_validate_config_rejects_unsupported_sparse_mla_graph_modes(cudagraph_mode):
+@pytest.mark.parametrize(
+    "cudagraph_mode",
+    [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL_AND_PIECEWISE],
+)
+def test_validate_config_allows_sparse_mla_piecewise_graph_modes(cudagraph_mode):
     vllm_config = _make_pcp_config(cudagraph_mode)
 
-    with pytest.raises(NotImplementedError, match="sparse MLA PCP supports"):
-        AscendPCPManager.validate_config(vllm_config, supports_mm_inputs=False)
+    AscendPCPManager.validate_config(vllm_config, supports_mm_inputs=False)
 
 
-def test_validate_config_rejects_full_graph_for_non_sparse_mla():
-    vllm_config = _make_pcp_config(CUDAGraphMode.FULL, sparse_mla=False)
+@pytest.mark.parametrize("sparse_mla", [True, False])
+def test_validate_config_rejects_full_graph(sparse_mla):
+    vllm_config = _make_pcp_config(CUDAGraphMode.FULL, sparse_mla=sparse_mla)
 
-    with pytest.raises(NotImplementedError, match="FULL_DECODE_ONLY"):
+    with pytest.raises(NotImplementedError, match="does not support FULL CUDA graphs"):
         AscendPCPManager.validate_config(vllm_config, supports_mm_inputs=False)
 
 
@@ -362,9 +366,16 @@ def test_full_decode_request_layout_is_token_sized_only_without_drafts():
     assert manager._full_decode_requests_are_token_sized(decode_batch) is False
 
 
+class _ReplicatedPCPManager(AscendPCPManager):
+    """Exercise replicated layouts explicitly, independently of speculation."""
+
+    @property
+    def is_decode_sharded(self):
+        return False
+
+
 def _make_replicated_pcp_manager():
-    manager = AscendPCPManager(2, 0, torch.device("cpu"), max_num_reqs=8, max_num_tokens=32)
-    # Graph execution with speculation stays replicated.
+    manager = _ReplicatedPCPManager(2, 0, torch.device("cpu"), max_num_reqs=8, max_num_tokens=32)
     manager.vllm_config = _make_pcp_config(
         CUDAGraphMode.FULL_DECODE_ONLY,
         speculative_config=SimpleNamespace(num_speculative_tokens=3),
@@ -627,7 +638,7 @@ def test_partition_batch_preserves_fia_dummy_layout() -> None:
         prefill_len=SimpleNamespace(gpu=torch.zeros(2, dtype=torch.int32)),
         draft_tokens=torch.empty((2, 0), dtype=torch.int64),
     )
-    manager = AscendPCPManager(
+    manager = _ReplicatedPCPManager(
         pcp_world_size=2,
         pcp_rank=0,
         device=torch.device("cpu"),
@@ -718,7 +729,7 @@ def test_partition_batch_preserves_speculative_target_inputs(pcp_rank) -> None:
     global_batch.attn_state = build_attn_state(
         config, global_batch.seq_lens_np, 2, global_batch.num_scheduled_tokens, np.ones(2, dtype=np.int32)
     )
-    manager = AscendPCPManager(2, pcp_rank, torch.device("cpu"), max_num_reqs=2, max_num_tokens=5)
+    manager = _ReplicatedPCPManager(2, pcp_rank, torch.device("cpu"), max_num_reqs=2, max_num_tokens=5)
     manager.vllm_config = config
 
     with (
@@ -775,6 +786,29 @@ def test_request_state_cpu_and_numpy_tokens_share_storage() -> None:
     assert state.num_computed_tokens_np[1] == 23
 
 
+def test_sampling_restore_exposes_unpadded_global_view() -> None:
+    manager = AscendPCPManager.__new__(AscendPCPManager)
+    batch = _make_global_pcp_batch()
+    batch.is_dummy = False
+    batch.num_tokens = 12
+    batch.num_tokens_after_padding = 16
+    batch.query_start_loc_np = np.array([0, 12, 16], dtype=np.int32)
+    batch.query_start_loc = torch.tensor([0, 12, 16], dtype=torch.int32)
+    manager._global_batch = batch
+    manager._sampling_hidden_restored = True
+    hidden_states = torch.arange(32).reshape(16, 2)
+    with patch.object(AscendPCPManager, "_restore_unpadded_global_batch", return_value=True):
+        restored_hidden, restored_batch = manager.restore_for_sampling(hidden_states)
+    assert restored_batch is not batch
+    assert restored_batch.num_tokens_after_padding == 12
+    assert restored_batch.query_start_loc.tolist() == [0, 12]
+    assert restored_batch.query_start_loc_np.tolist() == [0, 12]
+    assert restored_hidden.shape == (12, 2)
+    assert restored_hidden.data_ptr() == hidden_states.data_ptr()
+    assert batch.num_tokens_after_padding == 16
+    assert batch.query_start_loc.tolist() == [0, 12, 16]
+
+
 def test_pcp_manager_restores_model_owned_hidden_buffer() -> None:
     hidden_states = torch.tensor([[1.0, 2.0], [3.0, 4.0], [-1.0, -1.0], [-1.0, -1.0]])
     restored = torch.tensor([[1.0, 2.0], [5.0, 6.0], [3.0, 4.0], [9.0, 9.0]])
@@ -812,6 +846,45 @@ def test_pcp_manager_restores_model_owned_hidden_buffer() -> None:
     )
     torch.testing.assert_close(hidden_states[:3], restored[:3])
     torch.testing.assert_close(hidden_states[3], torch.zeros(2))
+
+
+@pytest.mark.parametrize("num_tokens", [3, 6], ids=["padded", "unpadded"])
+@pytest.mark.parametrize(
+    "parent_rows",
+    [3, 5, 7],
+    ids=["compact_parent_output", "unexpected_short_output", "unexpected_long_output"],
+)
+def test_pcp_manager_rejects_mismatched_restored_hidden_states(parent_rows: int, num_tokens: int) -> None:
+    """Parent output must match the global layout with or without padding."""
+    manager = AscendPCPManager.__new__(AscendPCPManager)
+    manager._global_batch = SimpleNamespace(num_tokens=num_tokens, num_tokens_after_padding=6)
+
+    with (
+        patch(
+            "vllm_ascend.worker.v2.pcp_manager.get_pp_group",
+            return_value=SimpleNamespace(is_last_rank=True),
+        ),
+        patch.object(PCPManager, "restore_hidden_states", return_value=torch.randn(parent_rows, 2)),
+        pytest.raises(RuntimeError, match="does not match the global graph layout"),
+    ):
+        manager.restore_hidden_states(torch.randn(num_tokens, 2))
+
+
+def test_pcp_manager_preserves_unpadded_restored_hidden_states() -> None:
+    manager = AscendPCPManager.__new__(AscendPCPManager)
+    manager._global_batch = SimpleNamespace(num_tokens=6, num_tokens_after_padding=6)
+    restored_hidden_states = torch.randn(6, 2)
+
+    with (
+        patch(
+            "vllm_ascend.worker.v2.pcp_manager.get_pp_group",
+            return_value=SimpleNamespace(is_last_rank=True),
+        ),
+        patch.object(PCPManager, "restore_hidden_states", return_value=restored_hidden_states),
+    ):
+        result = manager.restore_hidden_states(torch.randn(3, 2))
+
+    assert result is restored_hidden_states
 
 
 def test_pcp_manager_skips_hidden_restore_before_last_pp_rank() -> None:
@@ -1081,28 +1154,25 @@ def test_partition_batch_clears_padded_dcp_local_seq_lens() -> None:
 
 
 @pytest.mark.parametrize(
-    "dp_size,cudagraph_mode,allowed",
+    "dp_size,cudagraph_mode",
     [
-        (2, CUDAGraphMode.NONE, True),
-        (2, CUDAGraphMode.FULL_DECODE_ONLY, True),
-        (2, CUDAGraphMode.PIECEWISE, False),
-        (1, CUDAGraphMode.PIECEWISE, True),
+        (2, CUDAGraphMode.NONE),
+        (2, CUDAGraphMode.FULL_DECODE_ONLY),
+        (2, CUDAGraphMode.PIECEWISE),
+        (2, CUDAGraphMode.FULL_AND_PIECEWISE),
+        (1, CUDAGraphMode.PIECEWISE),
     ],
 )
-def test_validate_config_pcp_dp_graph_modes(dp_size, cudagraph_mode, allowed):
+def test_validate_config_pcp_dp_graph_modes(dp_size, cudagraph_mode):
     config = _make_pcp_config(cudagraph_mode, sparse_mla=False, data_parallel_size=dp_size)
-    if allowed:
-        AscendPCPManager.validate_config(config, supports_mm_inputs=False)
-    else:
-        with pytest.raises(NotImplementedError, match=r"PCP\+DP supports eager mode or FULL_DECODE_ONLY"):
-            AscendPCPManager.validate_config(config, supports_mm_inputs=False)
+    AscendPCPManager.validate_config(config, supports_mm_inputs=False)
 
 
 @pytest.mark.parametrize("pcp_rank", [0, 1])
 @pytest.mark.parametrize("has_stale_batch", [False, True])
 def test_dummy_attention_context_uses_current_batch(pcp_rank, has_stale_batch):
-    manager = AscendPCPManager(2, pcp_rank, torch.device("cpu"))
-    # Speculative decoding keeps the dummy batch on the replicated path.
+    manager = _ReplicatedPCPManager(2, pcp_rank, torch.device("cpu"))
+    # Exercise the replicated dummy layout explicitly.
     manager.vllm_config = _make_pcp_config(
         CUDAGraphMode.NONE,
         speculative_config=SimpleNamespace(num_speculative_tokens=3),
@@ -1197,7 +1267,7 @@ def test_speculative_decode_keeps_draft_tokens_on_pcp_ranks(pcp_rank):
     batch.is_padding = torch.zeros(4, dtype=torch.bool)
     batch.num_draft_tokens = 3
     batch.num_draft_tokens_per_req = np.array([3], dtype=np.int32)
-    manager = AscendPCPManager(8, pcp_rank, torch.device("cpu"), max_num_reqs=1, max_num_tokens=32)
+    manager = _ReplicatedPCPManager(8, pcp_rank, torch.device("cpu"), max_num_reqs=1, max_num_tokens=32)
     manager.vllm_config = _make_pcp_config(CUDAGraphMode.FULL_DECODE_ONLY)
     manager.vllm_config.speculative_config = SimpleNamespace(num_speculative_tokens=3)
     with (
@@ -1206,7 +1276,7 @@ def test_speculative_decode_keeps_draft_tokens_on_pcp_ranks(pcp_rank):
     ):
         local = manager.partition_batch(batch)
     assert manager.get_num_tokens_for_dispatch(batch.num_scheduled_tokens, batch.is_prefilling_np) == 4
-    # FULL_DECODE_ONLY with speculation stays replicated, so every rank keeps the tokens.
+    # Replicated layouts keep the target verification tokens on every rank.
     assert local.num_tokens == 4
     assert local.req_ids == batch.req_ids
     assert batch.num_draft_tokens_per_req.tolist() == [3]

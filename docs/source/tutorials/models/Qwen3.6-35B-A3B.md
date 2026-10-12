@@ -177,7 +177,6 @@ Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-3
     export VLLM_USE_MODELSCOPE=True
     export HCCL_BUFFSIZE=1024
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     # Reduce memory fragmentation and avoid out-of-memory errors.

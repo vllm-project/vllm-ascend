@@ -131,10 +131,6 @@ Startup Command:
 
 ```shell
 #!/bin/sh
-# [Optional] jemalloc
-# jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
-export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-
 echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
 sysctl -w vm.swappiness=0
 sysctl -w kernel.numa_balancing=0
@@ -258,10 +254,6 @@ Run the following scripts on two nodes respectively.
     export HCCL_INTRA_PCIE_ENABLE=1
     export HCCL_INTRA_ROCE_ENABLE=0
 
-    # [Optional] jemalloc
-    # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
-    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-
     echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
     sysctl -w vm.swappiness=0
     sysctl -w kernel.numa_balancing=0
@@ -322,10 +314,6 @@ Run the following scripts on two nodes respectively.
     export HCCL_SOCKET_IFNAME=$nic_name
     export HCCL_INTRA_PCIE_ENABLE=1
     export HCCL_INTRA_ROCE_ENABLE=0
-
-    # [Optional] jemalloc
-    # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
-    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 
     echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
     sysctl -w vm.swappiness=0
@@ -454,9 +442,6 @@ Parameter descriptions:
         export TP_SOCKET_IFNAME=$nic_name
         export HCCL_SOCKET_IFNAME=$nic_name
 
-        # [Optional] jemalloc
-        # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
-        export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
         echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
         sysctl -w vm.swappiness=0
         sysctl -w kernel.numa_balancing=0
@@ -534,9 +519,6 @@ Parameter descriptions:
         export TP_SOCKET_IFNAME=$nic_name
         export HCCL_SOCKET_IFNAME=$nic_name
 
-        # [Optional] jemalloc
-        # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
-        export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
         echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
         sysctl -w vm.swappiness=0
         sysctl -w kernel.numa_balancing=0
@@ -614,9 +596,6 @@ Parameter descriptions:
         export TP_SOCKET_IFNAME=$nic_name
         export HCCL_SOCKET_IFNAME=$nic_name
 
-        # [Optional] jemalloc
-        # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
-        export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
         echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
         sysctl -w vm.swappiness=0
         sysctl -w kernel.numa_balancing=0
@@ -693,9 +672,6 @@ Parameter descriptions:
         export TP_SOCKET_IFNAME=$nic_name
         export HCCL_SOCKET_IFNAME=$nic_name
 
-        # [Optional] jemalloc
-        # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
-        export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
         echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
         sysctl -w vm.swappiness=0
         sysctl -w kernel.numa_balancing=0

@@ -130,8 +130,10 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
 
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
-        assert all(isinstance(spec, MLAAttentionSpec) for spec in specs), (
-            "All attention layers in the same KV cache group must be MLAAttentionSpec."
+        # Uniformity probes may include indexer specs, which share the upstream
+        # MLA base class but do not have the main cache's layout metadata.
+        assert all(isinstance(spec, AscendMLAAttentionSpec) for spec in specs), (
+            "All attention layers in the same KV cache group must be AscendMLAAttentionSpec."
         )
         ascend_layouts = {
             (

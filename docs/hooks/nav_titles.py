@@ -126,11 +126,8 @@ TITLES = {
     "tutorials/models/Gemma4.md": {"en": "Gemma4", "zh": "Gemma4"},
     "tutorials/models/GLM4.x.md": {"en": "GLM-4.x(4.5/4.6/4.7)", "zh": "GLM-4.x(4.5/4.6/4.7)"},
     "tutorials/models/GLM5.2.md": {"en": "GLM-5.2", "zh": "GLM-5.2"},
-    "tutorials/models/GLM5.3.md": {"en": "GLM-5.3 (Experimental)", "zh": "GLM-5.3 (Experimental)"},
-    "tutorials/models/GLM5.3-Flash.md": {
-        "en": "GLM-5.3-Flash (Experimental)",
-        "zh": "GLM-5.3-Flash (Experimental)",
-    },
+    "tutorials/models/GLM5.3.md": {"en": "GLM-5.3", "zh": "GLM-5.3"},
+    "tutorials/models/GLM5.3-Flash.md": {"en": "GLM-5.3-Flash", "zh": "GLM-5.3-Flash"},
     "tutorials/models/GLM5.md": {"en": "GLM-5 & GLM-5.1", "zh": "GLM-5 & GLM-5.1"},
     "tutorials/models/Hunyuan-A13B-Instruct.md": {"en": "Hunyuan-A13B-Instruct", "zh": "Hunyuan-A13B-Instruct"},
     "tutorials/models/Hy3-preview.md": {"en": "Hy3-preview", "zh": "Hy3-preview"},
@@ -220,7 +217,10 @@ TITLES = {
     "user_guide/feature_guide/flash_attention.md": {"en": "Flash Attention", "zh": "Flash 注意力"},
     "user_guide/feature_guide/graph_mode.md": {"en": "Graph Mode", "zh": "图模式"},
     "user_guide/feature_guide/kv_cache_cpu_offload.md": {"en": "KV Cache CPU Offload", "zh": "KV Cache CPU 卸载"},
-    "user_guide/feature_guide/kv_pool.md": {"en": "KV Pool", "zh": "KV 池"},
+    "user_guide/feature_guide/kv_cache_pool_ascend_store.md": {
+        "en": "KV Cache Pool (Ascend Store)",
+        "zh": "KV 缓存池（昇腾存储）",
+    },
     "user_guide/feature_guide/mooncake_layerwise_adaptation_and_optimization.md": {
         "en": "Mooncake Layerwise Adaptation and Optimization",
         "zh": "Mooncake Layerwise 适配与优化",
