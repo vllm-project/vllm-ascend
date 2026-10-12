@@ -124,6 +124,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         initial_state: torch.Tensor,
         cu_seqlens: tuple[int, ...],
         scale: float,
+        keep_meta: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Adapt packed vLLM inputs to FLA NPU, returning cache-layout states.
 
@@ -135,13 +136,18 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         """
         from fla_npu.ops.ascendc import chunk_gated_delta_rule_fwd
 
+        # The builder supplies compact cu_seqlens when zero-token rows exist.
+        # Match the state rows to that metadata, then restore the cache layout.
+        if q.shape[1] == 0:
+            return torch.empty_like(v), initial_state.clone()
+        initial_state_kern = initial_state if keep_meta is None else initial_state[keep_meta]
         result = chunk_gated_delta_rule_fwd(
             l2norm_fwd(q).contiguous(),
             l2norm_fwd(k).contiguous(),
             v.contiguous(),
             g.to(torch.float32).contiguous(),
             beta.to(v.dtype).contiguous(),
-            initial_state=initial_state.transpose(-1, -2).to(torch.bfloat16).contiguous(),
+            initial_state=initial_state_kern.transpose(-1, -2).to(torch.bfloat16).contiguous(),
             cu_seqlens=cu_seqlens,
             chunk_indices=_fla_chunk_indices_host(cu_seqlens),
             scale=scale,
@@ -153,7 +159,12 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         )
         # Remaining tuple entries are optional backward intermediates.
         output, final_state = result[:2]
-        return output, final_state.transpose(-1, -2).contiguous()
+        final_state = final_state.transpose(-1, -2).contiguous()
+        if keep_meta is not None:
+            full_state = initial_state.clone()
+            full_state[keep_meta] = final_state.to(full_state.dtype)
+            final_state = full_state
+        return output, final_state
 
     # Cached fused-op availability probe result, shared across all layers so the
     # smoke call runs at most once per process.
@@ -652,6 +663,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 initial_state = ssm_state[prefill_state_indices]
                 clear_ssm_states(initial_state, prefill_has_initial_state)
                 if use_fla:
+                    chunk_meta = attn_metadata.non_spec_prefill_metadata.chunk
                     core_attn_out_non_spec, last_recurrent_state = (
                         AscendGatedDeltaNetAttention._chunk_gated_delta_rule_fused(
                             q=query_non_spec,
@@ -660,8 +672,13 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                             g=g_non_spec,
                             beta=beta_non_spec,
                             initial_state=initial_state,
-                            cu_seqlens=attn_metadata.non_spec_prefill_metadata.chunk.cu_seqlens_host,
+                            cu_seqlens=(
+                                chunk_meta.cu_seqlens_host
+                                if chunk_meta.cu_seqlens_kern is None
+                                else chunk_meta.cu_seqlens_kern
+                            ),
                             scale=key_non_spec.shape[-1] ** -0.5,
+                            keep_meta=chunk_meta.keep_meta,
                         )
                     )
                 else:
