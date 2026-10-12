@@ -114,7 +114,7 @@ public:
 
         scheduler_.Init(tiling_->batch, tiling_->numQHeads, tiling_->maxBlocksPerBatch, tiling_->scoreBlockStride,
                         tiling_->sparseMode, tiling_->initBlocks, tiling_->localBlocks, tiling_->keyLayout,
-                        gActualSeqQlen_, gActualSeqKlen_, gStartLoc_);
+                        tiling_->kvChunks, gActualSeqQlen_, gActualSeqKlen_, gStartLoc_);
     }
 
     __aicore__ inline void Process()
@@ -154,7 +154,7 @@ private:
         for (uint32_t taskIdx = coreIdx; taskIdx < totalTasks; taskIdx += coreNum) {
             scheduler_.Decode(taskIdx, task);
             bool needLoadQ = true;
-            for (uint32_t st = 0; st < task.numComputeSTiles; ++st) {
+            for (uint32_t st = task.sStileBegin; st < task.sStileEnd; ++st) {
                 const bool needKScratch = StileNeedsKScratch(task, st * MSA_BLOCKS_PER_STILE);
                 if (needKScratch) {
                     Catlass::Arch::CrossCoreWaitFlag(flagKReady);
@@ -178,9 +178,12 @@ private:
         MsaTask task;
         for (uint32_t taskIdx = coreIdx; taskIdx < totalTasks; taskIdx += coreNum) {
             scheduler_.Decode(taskIdx, task);
+            if (task.sBlkBegin >= task.sBlkEnd) {
+                continue;
+            }
             bool needLoadQ = true;
             uint32_t pageSeq = 0;
-            for (uint32_t blk = 0; blk < task.visibleEndBlk; ++blk) {
+            for (uint32_t blk = task.sBlkBegin; blk < task.sBlkEnd; ++blk) {
                 const uint32_t ping = pageSeq % MSA_A5_S_STAGES;
                 if (KeyBlockNeedsScratch(task, blk)) {
                     AscendC::CrossCoreWaitFlag<MSA_A5_SYNC_MODE4, PIPE_FIX>(MSA_A5_FLAG_K);
@@ -455,7 +458,7 @@ private:
         for (uint32_t taskIdx = coreIdx; taskIdx < totalTasks; taskIdx += coreNum) {
             scheduler_.Decode(taskIdx, task);
             epilogue.BeginTask(task, subIdx, subBlockNum);
-            for (uint32_t st = 0; st < task.numComputeSTiles; ++st) {
+            for (uint32_t st = task.sStileBegin; st < task.sStileEnd; ++st) {
                 if (StileNeedsKScratch(task, st * MSA_BLOCKS_PER_STILE)) {
                     if (subIdx == 0) {
                         GatherKeySTileToScratch(resource, task, st * MSA_BLOCKS_PER_STILE, coreKScratch);
@@ -469,8 +472,10 @@ private:
                 epilogue.ProcessSTile(gWorkspace_[sBase], task, st * MSA_BLOCKS_PER_STILE);
                 ++tileSeq;
             }
-            for (uint32_t st = task.numComputeSTiles; st < task.numSTiles; ++st) {
-                epilogue.ProcessSTile(gWorkspace_[0], task, st * MSA_BLOCKS_PER_STILE);
+            if (task.writeTailFill) {
+                for (uint32_t st = task.numComputeSTiles; st < task.numSTiles; ++st) {
+                    epilogue.ProcessSTile(gWorkspace_[0], task, st * MSA_BLOCKS_PER_STILE);
+                }
             }
             epilogue.EndTask();
         }
@@ -487,9 +492,12 @@ private:
         MsaTask task;
         for (uint32_t taskIdx = coreIdx; taskIdx < totalTasks; taskIdx += coreNum) {
             scheduler_.Decode(taskIdx, task);
+            if (task.sBlkBegin >= task.sBlkEnd && !task.writeTailFill) {
+                continue;
+            }
             epilogue.BeginTask(task, subIdx, subBlockNum);
             uint32_t pageSeq = 0;
-            for (uint32_t blk = 0; blk < task.visibleEndBlk; ++blk) {
+            for (uint32_t blk = task.sBlkBegin; blk < task.sBlkEnd; ++blk) {
                 const uint32_t ping = pageSeq % MSA_A5_S_STAGES;
                 if (KeyBlockNeedsScratch(task, blk)) {
                     if (subIdx == 0) {

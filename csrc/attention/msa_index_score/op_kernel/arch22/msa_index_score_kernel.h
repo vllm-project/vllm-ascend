@@ -104,7 +104,7 @@ public:
 
         scheduler_.Init(tiling_->batch, tiling_->numQHeads, tiling_->maxBlocksPerBatch, tiling_->scoreBlockStride,
                         tiling_->sparseMode, tiling_->initBlocks, tiling_->localBlocks, tiling_->keyLayout,
-                        gActualSeqQlen_, gActualSeqKlen_, gStartLoc_);
+                        tiling_->kvChunks, gActualSeqQlen_, gActualSeqKlen_, gStartLoc_);
     }
 
     __aicore__ inline void Process()
@@ -141,7 +141,7 @@ private:
             scheduler_.Decode(taskIdx, task);
             // 只对可见 S-tile 做 QKᵀ + 握手；因果不可见尾由 AIV 直接写 -inf，避免空转同步。
             bool needLoadQ = true;
-            for (uint32_t st = 0; st < task.numComputeSTiles; ++st) {
+            for (uint32_t st = task.sStileBegin; st < task.sStileEnd; ++st) {
                 const bool needKScratch = StileNeedsKScratch(task, st * MSA_BLOCKS_PER_STILE);
                 if (needKScratch) {
                     // MIX 1AIC:2AIV：AIV→AIC 的 0x2 flag 需两个 AIV 都 Set 后才放行。
@@ -503,7 +503,7 @@ private:
                     ++tileSeq;
                 }
             } else {
-                for (uint32_t st = 0; st < task.numComputeSTiles; ++st) {
+                for (uint32_t st = task.sStileBegin; st < task.sStileEnd; ++st) {
                     if (StileNeedsKScratch(task, st * MSA_BLOCKS_PER_STILE)) {
                         IssueKGatherAndNotify(resource, task, st, coreKScratch, subIdx, subBlockNum, flagK0, flagK1,
                                               flagK2, flagK3);
@@ -516,8 +516,10 @@ private:
                 }
             }
             // 因果不可见尾：不握手，直接写 -inf（与 AIC 跳过这些 tile 对齐）。
-            for (uint32_t st = task.numComputeSTiles; st < task.numSTiles; ++st) {
-                epilogue.ProcessSTile(gWorkspace_[0], task, st * MSA_BLOCKS_PER_STILE);
+            if (task.writeTailFill) {
+                for (uint32_t st = task.numComputeSTiles; st < task.numSTiles; ++st) {
+                    epilogue.ProcessSTile(gWorkspace_[0], task, st * MSA_BLOCKS_PER_STILE);
+                }
             }
             epilogue.EndTask();
         }
