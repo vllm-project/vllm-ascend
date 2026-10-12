@@ -159,6 +159,24 @@ the published BF16 GPU numbers, with absolute cosine deviations up to ~0.09
 on the matching pairs (expected for FP16 vs BF16 plus template surface-form
 differences).
 
+### 6.1 Quality Benchmarks on 300I Duo
+
+Reference measurements on public benchmarks (Atlas 300I Duo 310P3, FP16,
+single NPU, served embeddings used as-is):
+
+| Benchmark | Measure | 2B | 4B | 9B |
+| --------- | ------- | -- | -- | -- |
+| [MTEB STSBenchmark](https://huggingface.co/datasets/mteb/stsbenchmark) test (EN, 1379 pairs) | Spearman vs gold | 0.836 | 0.847 | 0.848 |
+| [C-MTEB STSB](https://huggingface.co/datasets/C-MTEB/STSB) test (ZH, 1361 pairs) | Spearman vs gold | 0.793 | 0.802 | 0.813 |
+| [coco-captions](https://huggingface.co/datasets/sentence-transformers/coco-captions) (100 pairs) | caption→caption Hit@1 / Hit@5 | 71% / 92% | 76% / 93% | 75% / 92% |
+| COCO val2014 images ↔ own captions (3 images × 5 captions, +7 distractor images) | image→captions top-5 / caption→image Hit@1 | 3/3, 15/15 | 3/3, 15/15 | 3/3, 15/15 |
+
+Method: cosine similarity over served embeddings; STS-B pairs are scored with
+Spearman correlation against the gold labels; caption retrieval excludes the
+query itself. Datasets were sampled from their official test splits (downloaded
+via the ModelScope mirrors of MTEB/STSBenchmark, C-MTEB/STSB and
+sentence-transformers/coco-captions).
+
 ## 7 Performance Reference
 
 Atlas 300I Duo, single NPU, FP16, 2B model, eager mode: batch of 32 short
