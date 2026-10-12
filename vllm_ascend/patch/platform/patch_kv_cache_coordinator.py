@@ -33,8 +33,10 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.request import Request
 
 from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
+from vllm_ascend.patch.platform.patch_prefix_cache_write_policy import configure_prefix_cache_write_policy
 
 _orig_get_kv_cache_coordinator = vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator
 
@@ -59,6 +61,11 @@ def _skips_eagle_block_drop(kv_transfer_config) -> bool:
         getattr(kv_transfer_config, "is_kv_producer", False)
         and not getattr(kv_transfer_config, "is_kv_consumer", False)
     )
+
+
+def _effective_eagle_block_drop(use_eagle: bool, kv_transfer_config) -> bool:
+    """Resolve the replay policy without changing speculative model metadata."""
+    return use_eagle and not _skips_eagle_block_drop(kv_transfer_config)
 
 
 def _select_kv_token_budget(max_model_len: int, max_in_flight_tokens: int | None) -> int:
@@ -127,6 +134,8 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         self.dcp_world_size = dcp_world_size
         self.scheduler_block_size = scheduler_block_size
         self.kv_cache_config = kv_cache_config
+        kv_transfer_config = getattr(kv_cache_config, "kv_transfer_config", None)
+        self.skips_eagle_block_drop = _skips_eagle_block_drop(kv_transfer_config)
         self.max_model_len = max_model_len
         self.enable_caching = enable_caching
         # vLLM main (#54736) added allow_partial_hash_hits to the upstream
@@ -188,11 +197,12 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             )
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )
-        # vLLM #53614 aligns exported Mamba checkpoints with EAGLE replay.
-        if use_eagle:
-            for manager in self.single_type_managers:
-                if isinstance(manager, MambaManager):
-                    manager.drop_eagle_checkpoint_block = True
+        # State materialization and registration must follow the same effective
+        # replay policy as lookup, including standalone / pure-producer roles.
+        for manager in self.single_type_managers:
+            if isinstance(manager, MambaManager):
+                manager.drop_eagle_checkpoint_block = _effective_eagle_block_drop(use_eagle, kv_transfer_config)
+                manager.skips_eagle_block_drop = self.skips_eagle_block_drop
 
         # Upstream KVCacheCoordinator.__init__ exposes the per-group resolved
         # block sizes; SimpleCPUOffloadScheduler reads them. This subclass
@@ -231,25 +241,41 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             # Both supported versions use a separate write-mask alignment.
             # Match the lookup boundary, including the raw-tail pool alignment.
             mgr.cache_hit_alignment_tokens = self._cache_hit_alignment_tokens
+            if self.skips_eagle_block_drop:
+                configure_prefix_cache_write_policy(mgr, False)
 
         self.use_eagle = use_eagle
-        # Roles are derived here, where they are used, from the kv-transfer
-        # config attached by the ``get_kv_cache_config_from_groups`` builder
-        # in ``patch_kv_cache_utils`` (``KVCacheConfig`` has no native field;
-        # the attach survives the scheduler-side deepcopy and is dropped by
-        # worker pickle IPC, which never reads it). Configs built without it
-        # (e.g. unit tests) read as standalone (``kv_transfer_config is
-        # None``).
-        #
-        # A PD prefill producer only schedules fresh-request prefills;
-        # every content-hash block it can match is a verified prompt block
-        # (draft/lookahead tokens live in the request-private tail, whose
-        # hash can never match another request). The EAGLE last-block drop
-        # is therefore never needed on the producer, and with hybrid
-        # mamba-align pages (1536 tokens) it erases the whole shared prefix
-        # of typical ~2K prompts, pinning P-side prefix hits to 0.
-        kv_transfer_config = getattr(kv_cache_config, "kv_transfer_config", None)
-        self.skips_eagle_block_drop = _skips_eagle_block_drop(kv_transfer_config)
+
+    def get_replay_boundaries(self, request: Request) -> tuple[int, ...]:
+        """Retain states at the positions this process can actually reuse."""
+        if self.skips_eagle_block_drop:
+            # Identical resends leave a token for logits. Longer siblings can
+            # reuse the entire prompt; retain both when they align differently.
+            return (request.num_prompt_tokens - 1, request.num_prompt_tokens)
+        replay_boundaries = getattr(vllm_kv_cache_coordinator, "replay_boundaries", None)
+        if replay_boundaries is not None:
+            return replay_boundaries(
+                request.num_prompt_tokens,
+                self.scheduler_block_size,
+                use_eagle=bool(self.eagle_group_ids),
+            )
+        return super().get_replay_boundaries(request)
+
+    def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
+        # The declared main2main pair dispatches through get_replay_boundaries.
+        # Newer vLLM calls a module helper directly; keep the role policy on that
+        # entry point too while reusing its finalized-token calculation.
+        if not hasattr(vllm_kv_cache_coordinator, "replay_boundaries"):
+            return super().cache_blocks(request, num_computed_tokens)
+        boundaries = self.get_replay_boundaries(request)
+        for group_id, manager in enumerate(self.single_type_managers):
+            if manager.enable_caching:
+                manager.cache_blocks(
+                    request,
+                    self.get_num_cacheable_tokens(num_computed_tokens, group_id),
+                    retention_interval=self.retention_interval,
+                    replay_boundaries=boundaries,
+                )
 
     @property
     def _cache_hit_alignment_tokens(self) -> int:

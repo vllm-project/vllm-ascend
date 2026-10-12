@@ -410,6 +410,23 @@
 #    Future Plan:
 #       Remove this patch once upstream supports 310P-aligned mamba block sizing.
 #
+# ** 12a. File: platform/patch_prefix_cache_write_policy.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. Local SWA retention masks and full-attention partial-tail publication
+#    Why:
+#       Standalone and pure-producer lookups suppress EAGLE's block drop.
+#       Retention tails and partial hash keys must cover those same reuse points.
+#    How:
+#       Bind the write policy only to affected local manager instances, preserve
+#       model grouping, and publish extension keys before resend aliases so
+#       promotion cannot discard the shorter key. Mamba tail/checkpoint
+#       registration and scheduler stops use the same role policy.
+#    Related PR (if no, explain why):
+#       Upstream #60533 / #61012 do not cover Ascend's role-specific exemption.
+#    Future Plan:
+#       Remove this adaptation when upstream exposes a shared effective-drop
+#       policy to lookup, retention, state materialization and registration.
+#
 # ** 13. File: platform/patch_mamba_manager.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.single_type_kv_cache_manager.MambaManager`
@@ -1064,6 +1081,24 @@
 #       and use get_rope_shape to handle the rope shape interpolation.
 #    Future Plan:
 #       Remove this patch when vLLM aligns with the latest main.
+#
+# ** 8a. File: worker/patch_mamba_checkpoint.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `MambaPrefillCheckpointBuilder.build`
+#    Why:
+#       Ascend standalone and pure PD producer processes suppress EAGLE's
+#       replay block drop. Worker checkpoint exports must use the same boundary
+#       as scheduler allocation and cache registration.
+#    How:
+#       Derive the effective drop from the worker's VllmConfig role, then
+#       delegate to the upstream builder with a private read-only config view.
+#       Consumers and kv_both keep the upstream drop. The shared speculative
+#       configuration and actual MTP execution are unchanged.
+#    Related PR (if no, explain why):
+#       No upstream extension point for the effective checkpoint drop policy.
+#    Future Plan:
+#       Remove this patch when upstream exposes a role-aware replay policy
+#       shared by scheduler, cache manager and checkpoint exporters.
 #
 # ** 9. File: worker/patch_mamba_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

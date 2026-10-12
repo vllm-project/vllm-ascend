@@ -4,9 +4,11 @@
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 # This file is a part of the vllm-ascend project.
 #
+import inspect
 from collections.abc import Sequence
 
 import vllm.v1.core.single_type_kv_cache_manager as single_type_kv_cache_manager
+from vllm.v1.core.kv_cache_utils import BlockHashWithGroupId
 from vllm.v1.core.single_type_kv_cache_manager import (
     BlockHashList,
     BlockPool,
@@ -15,6 +17,10 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     MambaManager,
     MambaSpec,
 )
+from vllm.v1.kv_cache_interface import get_mamba_prefill_checkpoint_position
+from vllm.v1.request import Request
+
+_SUPPORTS_PREFILL_END = "prefill_end" in inspect.signature(MambaManager.get_num_blocks_to_allocate).parameters
 
 
 class AscendMambaManager(MambaManager):
@@ -59,11 +65,17 @@ class AscendMambaManager(MambaManager):
         num_local_computed_tokens: int | None = None,
         num_tokens_main_model: int | None = None,
         apply_admission_cap: bool = False,
+        prefill_end: int = 0,
     ) -> int:
         if num_tokens_main_model is None:
             assert num_local_computed_tokens is not None
             num_tokens_main_model = num_local_computed_tokens
         local_hit_tokens = len(new_computed_blocks) * self.block_size
+        admission_kwargs: dict[str, int | bool] = {"apply_admission_cap": apply_admission_cap}
+        if _SUPPORTS_PREFILL_END:
+            # Newer sparse-checkpoint admission uses the same prefill end as
+            # the scheduler to avoid reserving transient mid-prompt exports.
+            admission_kwargs["prefill_end"] = prefill_end
         num_new_blocks = super().get_num_blocks_to_allocate(
             request_id,
             num_tokens,
@@ -71,7 +83,7 @@ class AscendMambaManager(MambaManager):
             total_computed_tokens,
             num_local_computed_tokens,
             num_tokens_main_model,
-            apply_admission_cap=apply_admission_cap,
+            **admission_kwargs,
         )
         # When external KV cache is loaded synchronously with new
         # tokens, allocate_new_computed_blocks() allocates one
@@ -86,6 +98,66 @@ class AscendMambaManager(MambaManager):
             # one more block for external computed tokens
             num_new_blocks += 1
         return num_new_blocks
+
+    def _cache_partial_tail_block(
+        self,
+        request: Request,
+        num_tokens: int,
+        retention_interval: int | None,
+    ) -> BlockHashWithGroupId | None:
+        if not getattr(self, "skips_eagle_block_drop", False):
+            return super()._cache_partial_tail_block(request, num_tokens, retention_interval)
+
+        hash_block_size = self.block_pool.hash_block_size
+        checkpoint = self._checkpoints.get(request.request_id)
+        if checkpoint is not None:
+            # This reserved block holds the worker's separately exported state,
+            # not the running tail at ``num_tokens``. Preserve the prompt's
+            # resend checkpoint even when the coordinator rounds num_tokens
+            # below P; sparse retention should discard only transient snapshots.
+            prompt_checkpoint = get_mamba_prefill_checkpoint_position(
+                request.num_prompt_tokens,
+                hash_block_size,
+                drop_eagle_block=False,
+            )
+            if checkpoint[0] == prompt_checkpoint:
+                retention_interval = None
+            return super()._cache_partial_tail_block(request, num_tokens, retention_interval)
+
+        if self.block_size == hash_block_size or num_tokens % self.block_size == 0:
+            return None
+        if num_tokens % hash_block_size != 0:
+            return None
+
+        alignment = self.cache_hit_alignment_tokens or hash_block_size
+        resend_boundary = max(request.num_prompt_tokens - 1, 0) // alignment * alignment
+        extension_boundary = request.num_prompt_tokens // hash_block_size * hash_block_size
+        if num_tokens not in (resend_boundary, extension_boundary) and not (
+            self.shared_prefix_checkpoint
+            and num_tokens == request.shared_prefix_boundary
+            and request.num_computed_tokens < num_tokens <= request.num_prompt_tokens
+        ):
+            return None
+
+        blocks = self.req_to_blocks[request.request_id]
+        block_idx = num_tokens // self.block_size
+        if block_idx >= len(blocks) or blocks[block_idx].is_null:
+            return None
+        source_block = blocks[block_idx]
+        # Recurrent state is not append-only. Only key the actual chunk-end
+        # state; never alias a later P state under the earlier resend boundary.
+        partial_hash = self.block_pool.cache_partial_block(
+            request=request,
+            block=source_block,
+            num_tokens=num_tokens,
+            kv_cache_group_id=self.kv_cache_group_id,
+            block_size=self.block_size,
+        )
+        if partial_hash is not None:
+            self._partial_hit_reqs[request.request_id] = (block_idx, source_block)
+            self.num_cached_block[request.request_id] = block_idx
+            self._producer_partial_tail_reqs[request.request_id] = (source_block, num_tokens)
+        return partial_hash
 
 
 single_type_kv_cache_manager.MambaManager = AscendMambaManager
