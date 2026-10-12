@@ -30,7 +30,6 @@ else:
     VllmConfig = None
 
 _NGRAM_SPEC_METHODS = frozenset({"ngram", "ngram_gpu"})
-_DFLASH2_ARCHITECTURES = frozenset({"DFlash2DraftModel"})
 _TRUTHY_STRINGS = frozenset({"1", "true", "yes"})
 # First matching prefix wins, so keep Hy3 ahead of Gemma4.
 _ARCH_PREFIXES = (("HYV3", "Hy3-preview"), ("Gemma4", "Gemma4"))
@@ -80,13 +79,6 @@ def _blacklisted_architecture(model_config: object) -> str | None:
     return None
 
 
-def _is_dflash2_graph(speculative_config: object) -> bool:
-    if getattr(speculative_config, "enforce_eager", False) is True:
-        return False
-    draft = getattr(speculative_config, "draft_model_config", None)
-    return any(name in _DFLASH2_ARCHITECTURES for name in _architectures(draft))
-
-
 def _v2_blacklist(vllm_config: VllmConfig) -> list[str]:
     """Reasons this config is not V2-ready and should default to V1."""
     reasons: list[str] = []
@@ -95,8 +87,6 @@ def _v2_blacklist(vllm_config: VllmConfig) -> list[str]:
 
     if is_310p():
         reasons.append("310P")
-    if _is_configured(getattr(vllm_config, "lora_config", None)):
-        reasons.append("LoRA")
 
     if _is_configured(model_config):
         if architecture := _blacklisted_architecture(model_config):
@@ -134,10 +124,6 @@ def _v2_blacklist(vllm_config: VllmConfig) -> list[str]:
             reasons.append("suffix speculative decoding")
         if method in _NGRAM_SPEC_METHODS:
             reasons.append("ngram speculative decoding")
-        if getattr(spec_config, "parallel_drafting", False) is True:
-            reasons.append("parallel_drafting")
-        if _is_dflash2_graph(spec_config):
-            reasons.append("dflash2 graph")
 
     return reasons
 
@@ -151,7 +137,6 @@ def use_v2_model_runner(vllm_config: VllmConfig) -> bool:
     * 310P
     * Hy3-preview (``HYV3*``)
     * Gemma4 (``Gemma4*``)
-    * LoRA
     * pooling KV (``runner_type="pooling"``)
     * encoder-decoder (Whisper)
     * VL encoder disaggregation (``ec_transfer_config`` / encoder-only)
@@ -161,8 +146,6 @@ def use_v2_model_runner(vllm_config: VllmConfig) -> bool:
     * enable_dsa_cp
     * suffix speculative decoding
     * ngram speculative decoding (``ngram`` / ``ngram_gpu``)
-    * parallel_drafting
-    * dflash2 graph (DFlash2 drafts without ``enforce_eager``)
 
     Set ``VLLM_USE_V2_MODEL_RUNNER=0`` to force V1.
     """
