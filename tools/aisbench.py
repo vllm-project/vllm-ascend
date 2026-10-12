@@ -141,7 +141,6 @@ class AisbenchRunner:
             self.input_throughput_baseline = aisbench_config.get("input_throughput_baseline", 1)
             if self.task_type == "accuracy":
                 self.threshold = aisbench_config.get("threshold", 1)
-                self._accuracy_verify()
                 self.verify_mode = aisbench_config.get("verify_mode", "range")
                 if self.verify_mode == "ge":
                     self._accuracy_verify_ge()
