@@ -42,6 +42,7 @@ _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
 _F_PROJ_SHARD_ID = 1
 _KDA_BFG_STREAM_PRIORITY = -1
 _KDA_BFG_STREAM: torch.npu.Stream | None = None
+_KDA_BFG_POSTPROCESS_STREAM: torch.npu.Stream | None = None
 
 
 def _kda_bfg_stream() -> torch.npu.Stream:
@@ -52,6 +53,13 @@ def _kda_bfg_stream() -> torch.npu.Stream:
         # the main stream so the two streams overlap as early as possible.
         _KDA_BFG_STREAM = torch_npu.npu.Stream(priority=_KDA_BFG_STREAM_PRIORITY)
     return _KDA_BFG_STREAM
+
+
+def _kda_bfg_postprocess_stream() -> torch.npu.Stream:
+    global _KDA_BFG_POSTPROCESS_STREAM
+    if _KDA_BFG_POSTPROCESS_STREAM is None:
+        _KDA_BFG_POSTPROCESS_STREAM = torch_npu.npu.Stream()
+    return _KDA_BFG_POSTPROCESS_STREAM
 
 
 class _KDAFusedBFGLinear(MergedColumnParallelLinear):
@@ -309,14 +317,19 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         main_stream.wait_event(bfg_projection_ready)
         mixed_qkv = self._matmul_fused_qkv(quantized_qkv)
 
-        with npu_stream_switch(bfg_stream):
+        postprocess_stream = _kda_bfg_postprocess_stream()
+        with npu_stream_switch(postprocess_stream):
             # Stage 2: after both first-stage branches complete, overlap the
             # QKV Cube matmul with beta's FP32 conversion and sigmoid vector
             # work. Split and reshape the F/output gates here as well so all
             # BFG output handling occurs after the QKV matmul is enqueued.
-            bfg_stream.wait_event(quant_ready)
+            # Keep this on a separate default-priority stream: the QKV
+            # MatMul is submitted on main_stream first, while these three
+            # short vector operations remain eligible to overlap afterward.
+            postprocess_stream.wait_event(bfg_projection_ready)
+            postprocess_stream.wait_event(quant_ready)
             beta, g1, g2 = self._postprocess_bfg(fused_bfg)
-            bfg_ready = bfg_stream.record_event()
+            bfg_ready = postprocess_stream.record_event()
 
         for tensor in (beta, g1, g2):
             tensor.record_stream(main_stream)

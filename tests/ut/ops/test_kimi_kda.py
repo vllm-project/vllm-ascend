@@ -282,7 +282,8 @@ def test_overlapped_qkv_bfg_keeps_two_stage_vector_cube_overlap():
     nn.Module.__init__(attention)
     trace: list[str] = []
     main_stream = _RecordingStream("main", ["hidden_ready", "quant_ready"], trace)
-    bfg_stream = _RecordingStream("bfg", ["bfg_projection_ready", "bfg_ready"], trace)
+    bfg_stream = _RecordingStream("bfg", ["bfg_projection_ready"], trace)
+    postprocess_stream = _RecordingStream("postprocess", ["bfg_ready"], trace)
     hidden_states = _RecordingTensor("hidden", trace)
     fused_bfg = _RecordingTensor("fused_bfg", trace)
     processed_bfg = tuple(_RecordingTensor(name, trace) for name in ("beta", "raw_gate", "output_gate"))
@@ -313,6 +314,7 @@ def test_overlapped_qkv_bfg_keeps_two_stage_vector_cube_overlap():
     with (
         patch("vllm_ascend.ops.kimi_kda.torch.npu.current_stream", return_value=main_stream),
         patch("vllm_ascend.ops.kimi_kda._kda_bfg_stream", return_value=bfg_stream),
+        patch("vllm_ascend.ops.kimi_kda._kda_bfg_postprocess_stream", return_value=postprocess_stream),
         patch(
             "vllm_ascend.ops.kimi_kda.npu_stream_switch",
             side_effect=lambda stream: _RecordingStreamSwitch(stream, trace),
@@ -333,11 +335,12 @@ def test_overlapped_qkv_bfg_keeps_two_stage_vector_cube_overlap():
         "main.record:quant_ready",
         "main.wait:bfg_projection_ready",
         "qkv_matmul",
-        "enter:bfg",
-        "bfg.wait:quant_ready",
+        "enter:postprocess",
+        "postprocess.wait:bfg_projection_ready",
+        "postprocess.wait:quant_ready",
         "postprocess_bfg",
-        "bfg.record:bfg_ready",
-        "exit:bfg",
+        "postprocess.record:bfg_ready",
+        "exit:postprocess",
         "beta.record_stream:main",
         "raw_gate.record_stream:main",
         "output_gate.record_stream:main",
