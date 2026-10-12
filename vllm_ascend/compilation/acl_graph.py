@@ -154,7 +154,15 @@ class ACLGraphWrapper:
         return self.runnable
 
     def __call__(self, *args, **kwargs):
-        forward_context = get_forward_context()
+        try:
+            forward_context = get_forward_context()
+        except AssertionError as exc:
+            # DFlash2 candidate_selector is compiled and profile_run's dummy
+            # propose calls it before the runner publishes a forward context.
+            # Treat that the same as CUDAGraphMode.NONE and run eager.
+            if "Forward context is not set" not in str(exc):
+                raise
+            return self.runnable(*args, **kwargs)
         batch_descriptor = forward_context.batch_descriptor
         aclgraph_runtime_mode = forward_context.cudagraph_runtime_mode
 
