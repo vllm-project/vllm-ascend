@@ -32,6 +32,7 @@ from vllm.model_executor.models.qwen3_next import Qwen3NextAttention
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
+from vllm_ascend.patch.worker.mrope_utils import get_rotary_inv_freq
 from vllm_ascend.utils import is_310p, vllm_version_is
 
 _IS_VLLM_RELEASE = vllm_version_is("0.25.1")
@@ -67,16 +68,22 @@ class AscendQwen3NextAttention(Qwen3NextAttention):
     def forward(self, positions: torch.Tensor, hidden_states: torch.Tensor, output: torch.Tensor = None):
         qkv, _ = self.qkv_proj(hidden_states)
         if "qwen3_5" in self.config.model_type:
-            cos_sin = self.rotary_emb.cos_sin_cache[positions]
-            if cos_sin.device != qkv.device:
-                cos_sin = cos_sin.to(qkv.device)
-            if cos_sin.dtype != qkv.dtype:
-                cos_sin = cos_sin.to(qkv.dtype)
+            inline_cos_sin = positions.ndim == 2
+            cos_sin = None
+            inv_freq = None
+            if inline_cos_sin:
+                inv_freq = get_rotary_inv_freq(self.rotary_emb, qkv.device)
+            else:
+                cos_sin = self.rotary_emb.cos_sin_cache[positions]
+                if cos_sin.device != qkv.device:
+                    cos_sin = cos_sin.to(qkv.device)
+                if cos_sin.dtype != qkv.dtype:
+                    cos_sin = cos_sin.to(qkv.dtype)
 
             q, k, v, gate = torch.ops.vllm.triton_split_qkv_rmsnorm_mrope(
                 qkv=qkv,
-                q_weight=1.0 + self.q_norm.weight,
-                k_weight=1.0 + self.k_norm.weight,
+                q_weight=self.q_norm.weight,
+                k_weight=self.k_norm.weight,
                 cos_sin=cos_sin,
                 num_q_heads=self.num_heads,
                 num_kv_heads=self.num_kv_heads,
@@ -86,6 +93,9 @@ class AscendQwen3NextAttention(Qwen3NextAttention):
                 is_interleaved=self.rotary_emb.mrope_interleaved,
                 rope_dim=self.rotary_emb.rotary_dim,
                 has_gate=self.attn_output_gate,
+                positions=positions if inline_cos_sin else None,
+                inv_freq=inv_freq,
+                rms_weight_offset=1.0,
             )
         else:
             if self.attn_output_gate:
