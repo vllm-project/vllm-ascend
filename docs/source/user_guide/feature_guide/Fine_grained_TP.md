@@ -15,7 +15,7 @@ All four knobs shard weights over a process group built along the DP axis, and e
 
 ### Usage Scenarios
 
-The four knobs are freely combinable — on a PD decode node all four can be enabled together (this is the configuration measured in [Experimental Results](#experimental-results)); each knob only needs to satisfy its own family's constraints.
+Fine-grained TP is designed for the **decode instance** of PD separation, where models are typically deployed in all-DP mode. The four knobs are freely combinable — on a PD decode node all four can be enabled together (this is the configuration measured in [Experimental Results](#experimental-results)); each knob only needs to satisfy its own family's constraints.
 
 | Scenario | Components that can be enabled | Applicable Conditions |
 |----------|-------------------------------|------------------------|
@@ -235,10 +235,6 @@ To evaluate the effectiveness of fine-grained TP in large-scale serving, we depl
 | **Total**        | **9.72 GB**    | —                         |
 
 - Memory savings per card are the primary gain; TPOT sees a small net improvement.
-
-## Deployment Recommendations
-
-Fine-grained TP is designed for the **decode instance** of PD separation, where models are typically deployed in all-DP mode. In this setup, sharding weight-heavy layers reduces redundant storage and memory pressure. For where each knob can run, see [Usage Scenarios](#usage-scenarios) and [Preconditions for o_proj / MLP TP](#preconditions-for-o_proj--mlp-tp).
 
 ## FAQs
 
