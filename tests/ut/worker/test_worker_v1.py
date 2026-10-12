@@ -1729,9 +1729,11 @@ class TestNPUWorker(TestBase):
         with (
             patch.object(NPUWorker, "__init__", lambda x, **kwargs: None),
             patch.object(kw_module, "kernel_warmup") as mock_kernel_warmup,
+            patch("vllm_ascend.worker.worker.warmup_kernels") as mock_v2_warmup,
         ):
             worker = NPUWorker()
             worker.model_runner = MagicMock()
+            worker.use_v2_model_runner = False
             worker.vllm_config = MagicMock()
             worker.model_config = MagicMock()
             worker.model_config.enforce_eager = True
@@ -1765,6 +1767,7 @@ class TestNPUWorker(TestBase):
             # Verify atb warm up
             mock_warm_up_atb.assert_called_once()
             mock_kernel_warmup.assert_called_once_with(worker)
+            mock_v2_warmup.assert_not_called()
 
     @patch("vllm_ascend.worker.worker.set_random_seed")
     @patch("vllm_ascend.worker.worker.get_current_hardware_profile")
@@ -1795,9 +1798,11 @@ class TestNPUWorker(TestBase):
         with (
             patch.object(NPUWorker, "__init__", lambda x, **kwargs: None),
             patch.object(kw_module, "kernel_warmup") as mock_kernel_warmup,
+            patch("vllm_ascend.worker.worker.warmup_kernels") as mock_v2_warmup,
         ):
             worker = NPUWorker()
             worker.model_runner = MagicMock()
+            worker.use_v2_model_runner = True
             worker.vllm_config = MagicMock()
             worker.model_config = MagicMock()
             worker.model_config.enforce_eager = False  # Enable graph capture
@@ -1812,6 +1817,11 @@ class TestNPUWorker(TestBase):
             worker.vllm_config.compilation_config.cudagraph_mode = mock_cudagraph_mode.FULL
             worker.vllm_config.compilation_config.get_compile_ranges.return_value = []
 
+            warmup_order = MagicMock()
+            warmup_order.attach_mock(mock_kernel_warmup, "legacy")
+            warmup_order.attach_mock(mock_v2_warmup, "v2")
+            warmup_order.attach_mock(worker.model_runner.capture_model, "capture")
+
             # Test compile_or_warm_up_model
             worker.compile_or_warm_up_model()
 
@@ -1821,10 +1831,55 @@ class TestNPUWorker(TestBase):
 
             # Should call capture_model in non-eager mode
             worker.model_runner.capture_model.assert_called_once()
+            mock_v2_warmup.assert_called_once_with(worker.model_runner, worker.execute_model, worker.sample_tokens)
+            self.assertEqual(
+                warmup_order.mock_calls,
+                [
+                    unittest.mock.call.legacy(worker),
+                    unittest.mock.call.v2(worker.model_runner, worker.execute_model, worker.sample_tokens),
+                    unittest.mock.call.capture(),
+                ],
+            )
 
             # Verify atb warm up
             mock_warm_up_atb.assert_called_once()
             mock_kernel_warmup.assert_called_once_with(worker)
+
+    def test_compile_or_warm_up_model_v2_with_eager_mode(self):
+        """V2 scheduler warmup is needed even without graph capture."""
+        from vllm_ascend.worker.worker import NPUWorker
+
+        with (
+            patch.object(NPUWorker, "__init__", lambda x, **kwargs: None),
+            patch.object(kw_module, "kernel_warmup") as mock_kernel_warmup,
+            patch("vllm_ascend.worker.worker.warmup_kernels") as mock_v2_warmup,
+            patch("vllm_ascend.worker.worker.get_ascend_config") as mock_get_ascend_config,
+            patch("vllm_ascend.worker.worker.get_current_hardware_profile") as mock_get_hardware_profile,
+            patch("vllm_ascend.worker.worker.set_random_seed"),
+        ):
+            mock_get_ascend_config.return_value.enable_cpu_binding = False
+            mock_get_hardware_profile.return_value.supports.return_value = False
+            worker = NPUWorker()
+            worker.use_v2_model_runner = True
+            worker.model_runner = MagicMock()
+            worker.model_config = SimpleNamespace(enforce_eager=True, seed=1234)
+            worker.cache_config = SimpleNamespace(kv_cache_memory_bytes=1024)
+            worker.vllm_config = MagicMock()
+            worker.vllm_config.compilation_config.compile_sizes = []
+
+            warmup_order = MagicMock()
+            warmup_order.attach_mock(mock_kernel_warmup, "legacy")
+            warmup_order.attach_mock(mock_v2_warmup, "v2")
+            worker.compile_or_warm_up_model()
+
+            self.assertEqual(
+                warmup_order.mock_calls,
+                [
+                    unittest.mock.call.legacy(worker),
+                    unittest.mock.call.v2(worker.model_runner, worker.execute_model, worker.sample_tokens),
+                ],
+            )
+            worker.model_runner.capture_model.assert_not_called()
 
     def test_compile_or_warm_up_model_saves_startup_plan_after_graph_capture(self):
         """The persisted budget must include the measured NPU graph memory."""
@@ -1858,6 +1913,7 @@ class TestNPUWorker(TestBase):
 
             worker = NPUWorker()
             worker.model_runner = MagicMock()
+            worker.use_v2_model_runner = False
             worker.model_runner.model_memory_usage = model_memory
             worker.model_runner.capture_model.return_value = npugraph_memory
             worker.vllm_config = MagicMock()
