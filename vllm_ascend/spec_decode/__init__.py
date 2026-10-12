@@ -21,7 +21,10 @@
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
 from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
 from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
-from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
+from vllm_ascend.spec_decode.eagle_proposer import (
+    AscendEagleProposer,
+    AscendQwen4ExpMTPProposer,
+)
 from vllm_ascend.spec_decode.extract_hidden_states_proposer import (
     AscendExtractHiddenStatesProposer,
 )
@@ -30,6 +33,20 @@ from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.spec_decode.ngram_proposer_npu import AscendNgramProposerNPU
 from vllm_ascend.spec_decode.step3p5 import AscendStep3p5MTPProposer
 from vllm_ascend.spec_decode.suffix_proposer import AscendSuffixDecodingProposer
+
+
+def _use_qwen4_exp_mtp(speculative_config) -> bool:
+    checker = getattr(speculative_config, "use_qwen4_exp_mtp", None)
+    if checker is not None and checker():
+        return True
+    draft_model_config = getattr(speculative_config, "draft_model_config", None)
+    text_config = getattr(draft_model_config, "hf_text_config", None)
+    if text_config is None:
+        return False
+    architectures = getattr(text_config, "architectures", ()) or ()
+    return getattr(text_config, "model_type", None) == "qwen4_exp_mtp" or (
+        "Qwen4ExpMTP" in architectures
+    )
 
 
 def get_spec_decode_method(method, vllm_config, device, runner):
@@ -47,6 +64,10 @@ def get_spec_decode_method(method, vllm_config, device, runner):
         speculative_config = vllm_config.speculative_config
         if speculative_config is not None and speculative_config.use_step3p5_mtp():
             return AscendStep3p5MTPProposer(vllm_config, device, runner)
+        if speculative_config is not None and _use_qwen4_exp_mtp(
+            speculative_config
+        ):
+            return AscendQwen4ExpMTPProposer(vllm_config, device, runner)
         return AscendEagleProposer(vllm_config, device, runner)
     elif method == "dflash":
         return AscendDflashProposer(vllm_config, device, runner)
