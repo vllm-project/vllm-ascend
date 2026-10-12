@@ -2019,8 +2019,9 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 ## 9 Performance Tuning
 
 The following A3 W8A8C8 settings summarize the deployment scripts in
-Sections 5.1.2, 5.1.3 and 5.2.1. Global DP includes all nodes of one role; local DP is the
-number of ranks on one node. Each role uses 32 logical NPU devices.
+Sections 5.1.2, 5.1.3 and 5.2.1. Global DP includes all nodes of one role;
+local DP is the number of ranks on one node. Each role uses 32 logical
+NPU devices.
 
 ### 9.1 Detailed Node Configuration
 
