@@ -43,7 +43,6 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
     | GLM-5/5.1           |   🔵    |      |  ✅ |       A2/A3        | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 200k | [GLM-5](../../tutorials/models/GLM5.md) |
     | GLM-5.2             |   🔵    |      |  ✅ |       A2/A3        | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 200k | [GLM-5.2](../../tutorials/models/GLM5.2.md) |
     | GLM-5.3             |   ✅    |      |  ✅ |       A2/A3        | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 200k (A2) / 1M (A3) | [GLM-5.3](../../tutorials/models/GLM5.3.md) |
-    | GLM-5.3-Flash             |   🔵    |      |  ✅ |  A2/A3/950DT Products   | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 200k | [GLM-5.3-Flash](../../tutorials/models/GLM5.3-Flash.md) |
     | Gemma4              |   🔵    |      |  ✅ |   A2/A3/950PR&950DT Products  |     | ✅ | ✅ |  |  | ✅ | ✅ |  |  | ✅ |  | ✅ | ✅ |  | [Gemma4](../../tutorials/models/Gemma4.md) |
     | Kimi-K2-Thinking    |   🔴     |      |      |       A2/A3       |      |  |  |  |  |  |  |  |  |  |  |  |  |  | [Kimi-K2-Thinking](../../tutorials/models/Kimi-K2-Thinking.md) |
     | DeepSeekOCR2        |   ✅    |      |  ✅ |       A2/A3        |     | ✅ |  |  |  | ✅ |  |  |  |  |  |  |  |  | [DeepSeekOCR2](../../tutorials/models/DeepSeekOCR2.md) |
@@ -132,6 +131,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 
     | Model           | Support  | Note   | BF16 | Supported Hardware | W8A8 | Chunked Prefill | Automatic Prefix Cache | LoRA | Speculative Decoding | Async Scheduling | Tensor Parallel | Pipeline Parallel | Expert Parallel | Data Parallel | Prefill-decode Disaggregation | Piecewise AclGraph | Fullgraph AclGraph | max-model-len | MLP Weight Prefetch | Doc |
     |-----------------|----------|--------|------|------|------|---------|-------|------|------|--------|-------|--------|--------|-------|-------|--------|----------|---------|----------|-----|
+    | GLM-5.3-Flash | 🔵 | Experimental | ✅ | 950DT Products | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 200k |  | [GLM-5.3-Flash](../../tutorials/models/GLM5.3-Flash.md) |
     |Qwen3.5-397B-A17B|✅        |       |✅    | 950DT Products |✅|✅|✅||✅|✅|✅||✅|✅|✅|✅|✅|1010000|| [Qwen3.5-397B-A17B](../../tutorials/models/Qwen3.5-397B-A17B.md) |
     |Qwen3.6-27B      |✅        |       |✅    | 950DT Products |✅|✅|✅||✅|✅|✅||✅|✅|✅|✅|✅|262144|| [Qwen3.5-27B / Qwen3.6-27B](../../tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md) |
     |MiniMax-M3       |✅        |MXFP8; text/image/video||950DT Products||✅|✅||✅|✅|✅|✅|✅|✅|✅|🟡|✅|1M|| [MiniMax-M3](../../tutorials/models/MiniMax-M3.md) |
@@ -140,6 +140,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 
     |                Model                | Support | Note | BF16 | Supported Hardware | W8A8 | Chunked Prefill | Automatic Prefix Cache | LoRA | Speculative Decoding | Async Scheduling | Tensor Parallel | Pipeline Parallel | Expert Parallel | Data Parallel | Prefill-decode Disaggregation | Piecewise AclGraph | Fullgraph AclGraph | max-model-len | Doc |
     | ----------------------------------- | ------- | ---- | ---- | ------------------ | ---- | --------------- | ---------------------- | ---- | -------------------- | ---------------- | --------------- | ----------------- | --------------- | ------------- | ----------------------------- | ------------------ | ------------------ | ------------- | --- |
+    | GLM-5.3-Flash | ✅ | 1M context on Atlas 800I A3 | ✅ | Atlas 800I A2 / Atlas 800I A3 | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 1048576 | [GLM-5.3-Flash](../../tutorials/models/GLM5.3-Flash.md) |
     | Qwen3-VL                            | ✅      |      |      | A2/A3              |  |  |  |  |  |  | ✅ |  |  |  |  | ✅ | ✅ |  | [Qwen-VL-Dense](../../tutorials/models/Qwen-VL-Dense.md) |
     | Qwen3-VL-30B-A3B | ✅      |      | ✅  | A2/A3              | ✅ | ✅ | ✅ |  |  | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | 262144 | [Qwen3-VL-30B-A3B](../../tutorials/models/Qwen3-VL-30B-A3B-Instruct.md) |
     | Qwen3-VL-235B-A22B | 🔴      |      | ✅  | A2/A3              | ✅ | ✅ | ✅ |  |  | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | 262144 | [Qwen3-VL-235B-A22B](../../tutorials/models/Qwen3-VL-235B-A22B-Instruct.md) |
