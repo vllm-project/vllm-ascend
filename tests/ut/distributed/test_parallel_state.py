@@ -2,21 +2,26 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+import torch
 from vllm.config import ParallelConfig
 
 from vllm_ascend.distributed.parallel_state import (
     _LMTP,
     _MC2,
+    _MEGA_MOE,
     _OTP,
     _P_TP,
+    _initialize_mega_moe_communicator,
     destroy_ascend_model_parallel,
     get_global_rank,
     get_lmhead_tp_group,
     get_mc2_group,
+    get_mega_moe_group,
     get_otp_group,
     get_p_tp_group,
     init_ascend_model_parallel,
 )
+from vllm_ascend.utils import AscendDeviceType
 
 
 @pytest.fixture
@@ -51,6 +56,7 @@ def test_init_ascend_model_parallel(mock_distributed, parallel_config):
     mock_ascend_config.num_head_replica = 0
     mock_ascend_config.pd_head_ratio = 2
     mock_ascend_config.enable_context_parallel = False
+    mock_ascend_config.enable_fused_mc2 = 0
     mock_vllm_config = MagicMock()
     mock_vllm_config.kv_transfer_config.is_kv_producer = True
     with (
@@ -76,6 +82,70 @@ def test_init_ascend_model_parallel(mock_distributed, parallel_config):
         assert _LMTP is None
         assert _OTP is None
         assert _P_TP is None
+
+
+def test_a5_initializes_and_destroys_dedicated_mega_moe_group(mock_distributed, parallel_config):
+    parallel_config.enable_expert_parallel = True
+    mock_ascend_config = MagicMock()
+    mock_ascend_config.finegrained_tp_config.lmhead_tensor_parallel_size = 0
+    mock_ascend_config.finegrained_tp_config.oproj_tensor_parallel_size = 0
+    mock_ascend_config.finegrained_tp_config.embedding_tensor_parallel_size = 0
+    mock_ascend_config.finegrained_tp_config.mlp_tensor_parallel_size = 0
+    mock_ascend_config.pd_tp_ratio = 1
+    mock_ascend_config.pd_head_ratio = 1
+    mock_ascend_config.enable_fused_mc2 = 1
+    mock_ascend_config.eplb_config.dynamic_eplb = False
+    mock_vllm_config = MagicMock()
+    mock_vllm_config.kv_transfer_config = None
+    groups = {}
+
+    def make_group(*_args, group_name, **_kwargs):
+        groups[group_name] = MagicMock()
+        return groups[group_name]
+
+    with (
+        patch("vllm_ascend.distributed.parallel_state.model_parallel_initialized", return_value=False),
+        patch(
+            "vllm_ascend.distributed.parallel_state.init_model_parallel_group",
+            side_effect=make_group,
+        ),
+        patch(
+            "vllm_ascend.distributed.parallel_state.get_current_vllm_config",
+            return_value=mock_vllm_config,
+        ),
+        patch(
+            "vllm_ascend.distributed.parallel_state.get_ascend_config",
+            return_value=mock_ascend_config,
+        ),
+        patch(
+            "vllm_ascend.distributed.parallel_state.get_ascend_device_type",
+            return_value=AscendDeviceType.A5,
+        ),
+        patch("vllm_ascend.distributed.parallel_state._initialize_mega_moe_communicator") as initialize_communicator,
+    ):
+        init_ascend_model_parallel(parallel_config)
+        mega_moe_group = get_mega_moe_group()
+
+        assert mega_moe_group is groups["mega_moe"]
+        assert mega_moe_group is not groups["mc2"]
+        initialize_communicator.assert_called_once_with(mega_moe_group)
+
+        destroy_ascend_model_parallel()
+
+    groups["mega_moe"].destroy.assert_called_once()
+    assert _MEGA_MOE is None
+
+
+def test_initialize_mega_moe_communicator_uses_dedicated_hccl_name():
+    group = MagicMock()
+    backend = group.device_group._get_backend.return_value
+    backend.get_hccl_comm_name.return_value = "mega-moe-hccl"
+
+    with patch("torch.distributed.get_rank", return_value=3):
+        _initialize_mega_moe_communicator(group)
+
+    group.device_group._get_backend.assert_called_once_with(torch.device("npu"))
+    backend.get_hccl_comm_name.assert_called_once_with(3)
 
 
 def _build_parallel_config(
