@@ -39,6 +39,7 @@
 #include "mc2/dispatch_ffn_combine/dispatch_ffn_combine_torch_adpt.h"
 #include "gmm/grouped_matmul_swiglu_quant_weight_nz_tensor_list/grouped_matmul_swiglu_quant_torch_adpt.h"
 #include "gmm/grouped_matmul_swiglu_quant_v2/grouped_matmul_swiglu_quant_v2_torch_adpt.h"
+#include "moe/moe_gating_top_k/moe_gating_top_k_torch_adpt.h"
 #include "attention/sparse_flash_attention/sparse_flash_attention_torch_adpt.h"
 #include "attention/sparse_flash_mla/sparse_flash_mla_torch_adpt.h"
 #include "attention/kv_compress_epilog_v2/kv_compress_epilog_v2_torch_adpt.h"
@@ -3225,6 +3226,24 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                     int max_output_size, Tensor! out, Tensor! expert_token_nums, Tensor? x_active_mask=None, float swiglu_limit=1000000.0, int world_size=0) -> (Tensor out, Tensor expert_token_nums)"
     );
     ops.impl("dispatch_ffn_combine", torch::kPrivateUse1, &vllm_ascend::dispatch_ffn_combine);
+
+    // vLLM-Ascend custom ops
+    ops.def(
+        "moe_gating_top_k(Tensor x, "
+                            "int k, "
+                            "int k_group, "
+                            "int group_count, "
+                            "int group_select_mode, "
+                            "int renorm, "
+                            "int norm_type, "
+                            "bool out_flag, "
+                            "float routed_scaling_factor, "
+                            "float eps,"
+                            "Tensor? bias_opt=None)"
+
+        "-> (Tensor y ,Tensor expert_idx, Tensor out)"
+        );
+    ops.impl("moe_gating_top_k", torch::kPrivateUse1,&vllm_ascend::moe_gating_top_k);
 
     ops.def(
         "npu_add_rms_norm_bias(Tensor x1, "

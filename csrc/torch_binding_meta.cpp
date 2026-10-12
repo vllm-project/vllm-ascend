@@ -534,6 +534,41 @@ void npu_fused_scatter_copy_sparse_flash_attention_meta(
 {
 }
 
+std::tuple<at::Tensor,at::Tensor, at::Tensor> moe_gating_top_k_meta(
+    const at::Tensor& x,
+    int64_t k,
+    int64_t k_group,
+    int64_t group_count,
+    int64_t group_select_mode,
+    int64_t renorm,
+    int64_t norm_type,
+    bool out_flag,
+    double routed_scaling_factor,
+    double eps,
+    const c10::optional<at::Tensor>& bias_opt
+
+    )
+{
+    TORCH_CHECK(x.dim() == 2, "The x should be 2D");
+    TORCH_CHECK(
+        x.scalar_type() == at::kHalf || x.scalar_type() == at::kFloat || x.scalar_type() == at::kBFloat16,
+        "float16、float32 or bfloat16 tensor expected but got a tensor with dtype: ",
+        x.scalar_type());
+
+    auto rows = x.sym_size(0);
+    auto expert_num = x.sym_size(1);
+    const at::Tensor &bias = c10::value_or_else(bias_opt, [] { return at::Tensor(); });
+    if (bias.defined()) {
+        TORCH_CHECK(x.scalar_type() == bias.scalar_type(), "The dtype of x and bias should be same");
+        TORCH_CHECK(bias.dim() == 1, "The bias should be 1D");
+    }
+    at::Tensor y = at::empty_symint(c10::SymDimVector{rows, c10::SymInt(k)}, x.options());
+    at::Tensor expert_idx = at::empty_symint(c10::SymDimVector{rows, c10::SymInt(k)}, x.options().dtype(at::kInt));
+    at::Tensor out = at::empty_symint(c10::SymDimVector{rows, expert_num}, x.options().dtype(at::kFloat));
+
+    return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y,expert_idx,out);
+}
+
 std::tuple<at::Tensor,at::Tensor, at::Tensor> npu_add_rms_norm_bias_meta(
     const at::Tensor& x1,
     const at::Tensor& x2,
@@ -1832,6 +1867,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
              &vllm_ascend::meta::npu_fused_scatter_copy_sparse_flash_attention_meta);
     // MoE dispatch-ffn-combine
     ops.impl("dispatch_ffn_combine", &vllm_ascend::meta::dispatch_ffn_combine_meta);
+    // Moe_gating_top_k
+    ops.impl("moe_gating_top_k", &vllm_ascend::meta::moe_gating_top_k_meta);
     // Add_Rms_Norm_Bias
     ops.impl("npu_add_rms_norm_bias", &vllm_ascend::meta::npu_add_rms_norm_bias_meta);
     ops.impl("npu_rms_norm_cast", &vllm_ascend::meta::npu_rms_norm_cast_meta);
