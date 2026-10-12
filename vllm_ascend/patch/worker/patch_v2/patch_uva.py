@@ -120,6 +120,18 @@ class MonitoredTorchTensor:
         return getattr(self._tensor, name)
 
 
+def _zeros_on_npu(cpu: torch.Tensor) -> torch.Tensor:
+    """Zero an NPU buffer matching ``cpu``.
+
+    ``aclnnInplaceZero`` rejects ``DT_UINT64``. Prompt-embeds UVA buffers use
+    that dtype, so zero an int64 allocation and view it back. The zero bit
+    pattern is identical.
+    """
+    if cpu.dtype == torch.uint64:
+        return torch.zeros(cpu.shape, dtype=torch.int64, device="npu").view(torch.uint64)
+    return torch.zeros_like(cpu, device="npu")
+
+
 class UvaBufferWrapper:
     """
     Ascend NPU doesn't support UVA tensors directly.
@@ -140,7 +152,7 @@ class UvaBufferWrapper:
         self._use_real_uva = view is not None
         if requested_real_uva and not self._use_real_uva:
             logger.warning_once("Pinned CPU memory is not mapped for NPU UVA; using the async H2D fallback")
-        self._uva: torch.Tensor = view if view is not None else torch.zeros_like(self._cpu, device="npu")
+        self._uva: torch.Tensor = view if view is not None else _zeros_on_npu(self._cpu)
 
     def _mark_cpu_modified(self, key: int):
         self._modified_indices.add(key)
