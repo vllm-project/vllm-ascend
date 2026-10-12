@@ -32,3 +32,7 @@ def register_model():
         "K3DSparkModel",
         "vllm_ascend.models.kimi_k3_dspark:K3DSparkForCausalLM",
     )
+    ModelRegistry.register_model(
+        "LayaForDecision",
+        "vllm_ascend.models.laya:LayaForDecision",
+    )

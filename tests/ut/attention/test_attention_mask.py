@@ -46,3 +46,54 @@ class TestAttentionMaskBuilder(TestBase):
         attention_mask_builder = AttentionMaskBuilder(torch.device("cpu"))
         attn_mask = attention_mask_builder.get_splitfuse_attn_mask()
         self.assertEqual(attn_mask.shape, (2048, 2048))
+
+
+class TestEncoderBandMask(TestBase):
+    """The band mask that honours ``sliding_window`` in encoder-only attention."""
+
+    def setUp(self):
+        super().setUp()
+        self.device = torch.device("cpu")
+        self.builder = AttentionMaskBuilder(self.device)
+
+    def test_band_is_inclusive_and_blocks_beyond_the_window(self):
+        window = 65
+        num_tokens = 200
+        mask = self.builder.get_encoder_band_mask(num_tokens, window, self.device)
+
+        self.assertEqual(mask.shape, (num_tokens, num_tokens))
+        self.assertEqual(mask.dtype, torch.bool)
+        # A token sees itself and its whole window: |i - j| <= window - 1.
+        self.assertFalse(mask[100, 100])
+        self.assertFalse(mask[100, 100 + window - 1])
+        self.assertFalse(mask[100 + window - 1, 100])
+        # One step further out is blocked.
+        self.assertTrue(mask[100, 100 + window])
+        self.assertTrue(mask[100 + window, 100])
+
+    def test_band_is_mirrored_because_encoder_attention_is_bidirectional(self):
+        num_tokens = 96
+        mask = self.builder.get_encoder_band_mask(num_tokens, 17, self.device)
+        self.assertTrue(torch.equal(mask, mask.T))
+
+    def test_shorter_batch_reuses_the_cached_square(self):
+        window = 33
+        # 2048 is the rounded-up side, so this call hands back the cached square.
+        cached = self.builder.get_encoder_band_mask(2048, window, self.device)
+        self.assertIs(cached, self.builder.encoder_band_mask)
+        sliced = self.builder.get_encoder_band_mask(1000, window, self.device)
+
+        self.assertEqual(sliced.shape, (1000, 1000))
+        self.assertTrue(torch.equal(sliced, cached[:1000, :1000]))
+        # Same window, smaller batch: the cached square is not rebuilt.
+        self.assertIs(self.builder.encoder_band_mask, cached)
+
+    def test_larger_batch_rebuilds_and_new_window_rebuilds(self):
+        narrow = self.builder.get_encoder_band_mask(1024, 17, self.device)
+        self.assertTrue(narrow[0, 40])  # 40 >= 17 -> blocked
+        grown = self.builder.get_encoder_band_mask(4096, 17, self.device)
+        self.assertEqual(grown.shape, (4096, 4096))
+        self.assertIsNot(grown, narrow)
+
+        wide = self.builder.get_encoder_band_mask(1024, 65, self.device)
+        self.assertFalse(wide[0, 40])  # 40 < 65 -> visible
