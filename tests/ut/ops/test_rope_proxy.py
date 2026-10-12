@@ -2,9 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import pytest
 import torch
 
-from vllm_ascend.ops.rope_dsv4 import RopeDataProxy
+from vllm_ascend.ops.rope_dsv4 import _ROPE_STATE, RopeDataProxy, get_cos_and_sin_dsa
 
 # ──────────────────────────────────────────────
 # Equivalence: pad_to + slice  vs  pad-positions + gather + slice
@@ -42,6 +43,50 @@ def _tp_params(num_input_tokens: int, tp_size: int):
         local_start = tp_rank * tokens_per_rank
         local_end = local_start + tokens_per_rank
         yield tp_rank, local_start, local_end, num_tokens_pad
+
+
+def test_get_cos_and_sin_filters_configs_by_consuming_layer(monkeypatch):
+    regular_cos = torch.arange(32, dtype=torch.float32).view(8, 1, 1, 4)
+    regular_sin = regular_cos + 100
+    compressed_cos = regular_cos + 200
+    compressed_sin = regular_cos + 300
+    monkeypatch.setattr(
+        _ROPE_STATE,
+        "full_rope_cache",
+        {
+            "regular": (regular_cos, regular_sin),
+            "compressed": (compressed_cos, compressed_sin),
+        },
+    )
+    monkeypatch.setattr(
+        _ROPE_STATE,
+        "registry_summary",
+        {
+            "regular": {"default"},
+            "compressed": {"default", "c4"},
+        },
+    )
+    monkeypatch.setattr(
+        _ROPE_STATE,
+        "layer_info",
+        {
+            "mtp.0.attn": ("regular", ["default"]),
+            "model.layers.3.attn": ("compressed", ["default", "c4"]),
+        },
+    )
+
+    positions = torch.tensor([1, 4, 7])
+    cos, sin = get_cos_and_sin_dsa(positions, layer_names="mtp.0.attn")
+
+    assert set(cos._data) == {"regular"}
+    assert set(sin._data) == {"regular"}
+    assert torch.equal(cos["mtp.0.attn"], regular_cos[positions])
+    assert torch.equal(sin["mtp.0.attn"], regular_sin[positions])
+
+
+def test_get_cos_and_sin_rejects_unknown_layer():
+    with pytest.raises(KeyError, match="missing.attn"):
+        get_cos_and_sin_dsa(torch.tensor([0]), layer_names="missing.attn")
 
 
 class TestEquivalenceWithGatherSemantics:
