@@ -102,7 +102,7 @@ This is vLLM Ascend v0.30.0rc1, a model-focused release built on the v0.29 relea
 
 - vLLM: v0.30.0
 - CANN: 9.2.0
-- Ascend HDK: 26.0.RC1
+- Ascend HDK: 26.1.1
 - PyTorch / torch_npu: 2.10.0 / 2.10.0.post4
 - Triton Ascend: 3.2.2
 - mooncake-transfer-engine-npu: 0.3.11.post1
