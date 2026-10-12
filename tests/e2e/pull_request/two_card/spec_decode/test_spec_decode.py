@@ -179,7 +179,7 @@ def test_p_eagle_acceptance(
     Test acceptance rate for parallel drafting speculative decoding
     using a smaller draft model with parallel_drafting enabled.
     """
-    # parallel_drafting defaults to Model Runner V2.
+    # p-eagle stays on Model Runner V1 via the V2 blacklist.
     main_model_name = P_EAGLE_MODELS[method]["main"]
     spec_model_name = P_EAGLE_MODELS[method]["spec"]
 

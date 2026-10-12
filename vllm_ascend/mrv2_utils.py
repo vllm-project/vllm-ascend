@@ -30,6 +30,7 @@ else:
     VllmConfig = None
 
 _NGRAM_SPEC_METHODS = frozenset({"ngram", "ngram_gpu"})
+_P_EAGLE_SPEC_METHODS = frozenset({"eagle", "eagle3"})
 _TRUTHY_STRINGS = frozenset({"1", "true", "yes"})
 # First matching prefix wins, so keep Hy3 ahead of Gemma4.
 _ARCH_PREFIXES = (("HYV3", "Hy3-preview"), ("Gemma4", "Gemma4"))
@@ -128,6 +129,10 @@ def _v2_blacklist(vllm_config: VllmConfig) -> list[str]:
         # a separate draft model still runs on the V1 proposer.
         if method == "draft_model":
             reasons.append("draft_model speculative decoding")
+        # V2 FULL capture builds attention metadata inside ACL graph GLOBAL
+        # capture. p-eagle reads NPU seq_lens there, and that copy is rejected.
+        if method in _P_EAGLE_SPEC_METHODS and getattr(spec_config, "parallel_drafting", False) is True:
+            reasons.append("p-eagle")
 
     return reasons
 
@@ -151,6 +156,7 @@ def use_v2_model_runner(vllm_config: VllmConfig) -> bool:
     * suffix speculative decoding
     * ngram speculative decoding (``ngram`` / ``ngram_gpu``)
     * draft_model speculative decoding
+    * p-eagle (``eagle`` / ``eagle3`` with ``parallel_drafting``)
 
     Set ``VLLM_USE_V2_MODEL_RUNNER=0`` to force V1.
     """

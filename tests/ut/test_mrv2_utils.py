@@ -52,6 +52,7 @@ def test_environment_override_wins(monkeypatch, env_value):
         ),
         SimpleNamespace(lora_config=object()),
         SimpleNamespace(speculative_config=SimpleNamespace(parallel_drafting=True)),
+        SimpleNamespace(speculative_config=SimpleNamespace(method="eagle3", parallel_drafting=False)),
         SimpleNamespace(
             speculative_config=SimpleNamespace(
                 method="dflash",
@@ -90,6 +91,7 @@ def test_environment_override_wins(monkeypatch, env_value):
         "dynamic-unsupported-speculation",
         "lora",
         "parallel-drafting",
+        "eagle3-without-parallel-drafting",
         "dflash2-eager",
         "dflash2-graph",
         "mooncake-pd",
@@ -140,6 +142,8 @@ def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
         SimpleNamespace(speculative_config=SimpleNamespace(method="ngram")),
         SimpleNamespace(speculative_config=SimpleNamespace(method="ngram_gpu")),
         SimpleNamespace(speculative_config=SimpleNamespace(method="draft_model", parallel_drafting=True)),
+        SimpleNamespace(speculative_config=SimpleNamespace(method="eagle3", parallel_drafting=True)),
+        SimpleNamespace(speculative_config=SimpleNamespace(method="eagle", parallel_drafting=True)),
     ],
     ids=[
         "hy3-preview",
@@ -165,6 +169,8 @@ def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
         "ngram-speculative-decoding",
         "ngram-gpu-speculative-decoding",
         "draft-model-speculative-decoding",
+        "p-eagle",
+        "p-eagle-method-eagle",
     ],
 )
 def test_blacklisted_features_default_to_v1(monkeypatch, config):
