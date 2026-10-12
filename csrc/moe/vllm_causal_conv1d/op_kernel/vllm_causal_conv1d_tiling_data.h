@@ -10,11 +10,11 @@
  */
 
 /*!
- * \file causal_conv1d_tiling_data.h
+ * \file vllm_causal_conv1d_tiling_data.h
  */
 
-#ifndef CAUSAL_CONV1D_TILING_DATA_H_
-#define CAUSAL_CONV1D_TILING_DATA_H_
+#ifndef VLLM_CAUSAL_CONV1D_TILING_DATA_H_
+#define VLLM_CAUSAL_CONV1D_TILING_DATA_H_
 
 #include <cstdint>
 
@@ -32,7 +32,7 @@ inline constexpr int64_t ResolveFnExecutionPlan(int64_t baseDimCnt)
 }
 
 
-struct CausalConv1dTilingData {
+struct VllmCausalConv1dTilingData {
     int64_t dim;
     int64_t cuSeqlen;
     int64_t seqLen;
@@ -65,4 +65,4 @@ struct CausalConv1dTilingData {
     int64_t tokenTileEndSeq[128];
     int64_t hasInitStateWorkspace;
 };
-#endif // CAUSAL_CONV1D_TILING_DATA_H_
+#endif // VLLM_CAUSAL_CONV1D_TILING_DATA_H_
