@@ -63,7 +63,12 @@ def copy_kv_cache_blocks_inplace(
         # Page-strided MLA views are non-contiguous, so a flat ``view`` would
         # either fail or materialize a copy. Split only dim 0 to preserve the
         # original strided storage while copying every kernel block in a page.
-        blocks = tensor.unflatten(0, (num_blocks, kernel_blocks_per_block))
+        blocks = torch.as_strided(
+            tensor,
+            size=(num_blocks, kernel_blocks_per_block, *tensor.shape[1:]),
+            stride=(tensor.stride(0) * kernel_blocks_per_block, tensor.stride(0), *tensor.stride()[1:]),
+            storage_offset=tensor.storage_offset(),
+        )
         source_blocks = torch.stack([blocks[copy.src_block_id] for copy in kv_cache_block_copies])
         for index, copy in enumerate(kv_cache_block_copies):
             blocks[copy.dst_block_id].copy_(source_blocks[index])

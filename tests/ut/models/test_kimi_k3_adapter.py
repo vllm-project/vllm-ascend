@@ -121,16 +121,16 @@ def test_k3_dspark_context_writer_splits_fused_mla_cache(monkeypatch):
         fused_qkv_a_proj=MagicMock(return_value=(torch.randn(3, 8),)),
         q_lora_rank=2,
         kv_cache=fused_cache,
-        impl=SimpleNamespace(kv_lora_rank=4, exec_kv_prefill=MagicMock()),
+        impl=SimpleNamespace(
+            kv_lora_rank=4,
+            _cache_requires_prolog_v3_writer=MagicMock(return_value=False),
+            exec_kv_prefill=MagicMock(),
+        ),
     )
     model.layers = [SimpleNamespace(self_attn=attn)]
     monkeypatch.setattr(
         "vllm_ascend.models.kimi_k3_dspark.get_cos_and_sin_mla",
         lambda positions: (torch.ones(3, 2), torch.zeros(3, 2)),
-    )
-    monkeypatch.setattr(
-        "vllm_ascend.models.kimi_k3_dspark._uses_prolog_v3_context_writer",
-        lambda _cache: False,
     )
 
     model.precompute_and_store_context_kv(
@@ -167,12 +167,14 @@ def test_k3_dspark_context_writer_routes_strided_caches_to_prolog_v3(monkeypatch
     original_cache = cache_factory()
     prolog = MagicMock()
     fused_qkv_a_proj = MagicMock()
+    route_gate = MagicMock(return_value=True)
     attn = SimpleNamespace(
         fused_qkv_a_proj=fused_qkv_a_proj,
         q_lora_rank=2,
         kv_cache=original_cache,
         impl=SimpleNamespace(
             kv_lora_rank=2,
+            _cache_requires_prolog_v3_writer=route_gate,
             exec_context_kv_prolog_v3=prolog,
             exec_kv_prefill=MagicMock(),
         ),
@@ -190,17 +192,16 @@ def test_k3_dspark_context_writer_routes_strided_caches_to_prolog_v3(monkeypatch
         context_slot_mapping=torch.tensor([0, 1, 2, 3], dtype=torch.int32),
     )
 
+    normalized_cache = route_gate.call_args.args[0]
+    assert isinstance(normalized_cache, tuple)
     if isinstance(original_cache, torch.Tensor):
-        normalized_cache = (original_cache[..., :2], original_cache[..., 2:])
-    else:
-        normalized_cache = original_cache
-    assert kimi_k3_dspark._uses_prolog_v3_context_writer(normalized_cache)
+        torch.testing.assert_close(normalized_cache[0], original_cache[..., :2])
+        torch.testing.assert_close(normalized_cache[1], original_cache[..., 2:])
+        assert normalized_cache[0].untyped_storage() is original_cache.untyped_storage()
+        assert normalized_cache[1].untyped_storage() is original_cache.untyped_storage()
     assert prolog.call_count == 1
     assert prolog.call_args.args[0] is context_states
-    torch.testing.assert_close(prolog.call_args.args[3][0], normalized_cache[0])
-    torch.testing.assert_close(prolog.call_args.args[3][1], normalized_cache[1])
-    assert prolog.call_args.args[3][0].untyped_storage() is normalized_cache[0].untyped_storage()
-    assert prolog.call_args.args[3][1].untyped_storage() is normalized_cache[1].untyped_storage()
+    assert prolog.call_args.args[3] is normalized_cache
     assert prolog.call_args.args[4].dtype is torch.int32
     assert fused_qkv_a_proj.call_count == 0
     attn.impl.exec_kv_prefill.assert_not_called()
@@ -223,11 +224,12 @@ def test_k3_dspark_prolog_v3_context_writer_uses_pa_bsnd_and_strided_caches(monk
         weight=torch.ones(2),
         variance_epsilon=1e-6,
     )
-    impl._prepare_context_prolog_v3_weights = lambda: {
+    impl._prepare_prolog_v3_weights = lambda: {
         "quant_type": None,
         "weight_dq": object(),
         "weight_dkv_kr": object(),
         "weight_uq_qr": object(),
+        "weight_uk": object(),
     }
     cache = cache_factory()
     if isinstance(cache, torch.Tensor):
@@ -237,7 +239,9 @@ def test_k3_dspark_prolog_v3_context_writer_uses_pa_bsnd_and_strided_caches(monk
     def fake_prolog(**kwargs):
         calls.append(kwargs)
 
+    legacy = MagicMock()
     monkeypatch.setattr(mla_v1.torch_npu, "npu_mla_prolog_v3", fake_prolog)
+    monkeypatch.setattr(mla_v1.torch_npu, "npu_kv_rmsnorm_rope_cache", legacy)
     context_states = torch.randn(4, 8)
     cos = torch.ones(4, 1, 1, 1)
     sin = torch.zeros(4, 1, 1, 1)
@@ -251,6 +255,7 @@ def test_k3_dspark_prolog_v3_context_writer_uses_pa_bsnd_and_strided_caches(monk
     )
 
     assert len(calls) == 1
+    legacy.assert_not_called()
     assert calls[0]["cache_mode"] == "PA_BSND"
     assert calls[0]["kv_cache"] is cache[0]
     assert calls[0]["kr_cache"] is cache[1]
@@ -274,9 +279,10 @@ def test_k3_dspark_prolog_v3_prepares_native_weights_without_mutating_source(mon
     q_proj.weight = nn.Parameter(torch.arange(6, dtype=torch.float32).reshape(3, 2), False)
     impl.fused_qkv_a_proj = fused
     impl.q_proj = q_proj
+    impl.mlapo_W_UK_T = torch.empty(1, 2, 2)
     monkeypatch.setattr(mla_v1.torch_npu, "npu_format_cast", lambda tensor, _: tensor)
 
-    prepared = impl._prepare_context_prolog_v3_weights()
+    prepared = impl._prepare_prolog_v3_weights()
 
     assert prepared["quant_type"] is None
     assert prepared["weight_dq"].shape == (4, 2)

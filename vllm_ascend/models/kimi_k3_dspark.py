@@ -53,53 +53,13 @@ def _normalize_dspark_mla_cache(
     kv_cache: object,
     kv_lora_rank: int,
 ) -> tuple[torch.Tensor, ...] | object:
-    """Expose NoPE/RoPE logical views for DSpark context writes."""
+    """Expose the NoPE/RoPE logical views consumed by MLA writers."""
     if isinstance(kv_cache, torch.Tensor):
         return (
             kv_cache[..., :kv_lora_rank],
             kv_cache[..., kv_lora_rank:],
         )
     return kv_cache
-
-
-def _uses_prolog_v3_context_writer(kv_cache: object) -> bool:
-    """Whether a strided MLA cache needs the PROLOG_V3 context writer."""
-    if not isinstance(kv_cache, tuple) or len(kv_cache) != 2:
-        return False
-    if not all(isinstance(cache, torch.Tensor) for cache in kv_cache):
-        return False
-    nope_cache, rope_cache = kv_cache
-
-    def token_interleaved() -> bool:
-        if nope_cache.dim() != 4 or rope_cache.dim() != 4:
-            return False
-        if nope_cache.shape[:2] != rope_cache.shape[:2] or nope_cache.stride(0) != rope_cache.stride(0):
-            return False
-        fused_dim = nope_cache.shape[-1] + rope_cache.shape[-1]
-        return (
-            nope_cache.untyped_storage().data_ptr() == rope_cache.untyped_storage().data_ptr()
-            and rope_cache.storage_offset() - nope_cache.storage_offset() == nope_cache.shape[-1]
-            and nope_cache.stride(3) == rope_cache.stride(3) == 1
-            and nope_cache.stride(2) == rope_cache.stride(2) == fused_dim
-            and nope_cache.stride(1) == rope_cache.stride(1) == fused_dim
-        )
-
-    if token_interleaved():
-        return True
-
-    def first_axis_strided(cache: torch.Tensor) -> bool:
-        if cache.dim() != 4 or cache.is_contiguous():
-            return False
-        # Component-major views keep each component internally dense; only
-        # the first axis carries the physical page stride.
-        return (
-            cache.stride(3) == 1
-            and cache.stride(2) == cache.shape[3]
-            and cache.stride(1) == cache.shape[2] * cache.stride(2)
-            and cache.stride(0) != cache.shape[1] * cache.stride(1)
-        )
-
-    return all(first_axis_strided(cache) for cache in kv_cache)
 
 
 def _log_dspark_mla_cache_diagnostic(
@@ -337,7 +297,7 @@ class AscendK3DSparkModel(UpstreamK3DSparkModel):
             kv_cache = attn.kv_cache
             assert attn.impl.kv_lora_rank is not None
             normalized_cache = _normalize_dspark_mla_cache(kv_cache, attn.impl.kv_lora_rank)
-            if _uses_prolog_v3_context_writer(normalized_cache):
+            if attn.impl._cache_requires_prolog_v3_writer(normalized_cache):
                 _log_dspark_mla_cache_diagnostic(layer_idx, kv_cache, normalized_cache, slots)
                 attn.impl.exec_context_kv_prolog_v3(
                     context_states,

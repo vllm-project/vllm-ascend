@@ -197,6 +197,17 @@ def supports_component_major_mla_pd(vllm_config: VllmConfig) -> bool:
     }
 
 
+def pd_uses_component_major_mla_wire_layout(vllm_config: VllmConfig) -> bool:
+    """Whether raw PD transfer must use the component-major MLA wire layout.
+
+    MooncakeV2/Pull move raw physical slots and carry no metadata describing
+    whether an MLA page is token-fused or component-major.  Since either
+    endpoint can otherwise make a local hardware/query-head-dependent choice,
+    all such transfers use the universally consumable component-major layout.
+    """
+    return vllm_config.kv_transfer_config is not None and supports_component_major_mla_pd(vllm_config)
+
+
 @dataclass(frozen=True, kw_only=True)
 class AscendMLAAttentionSpec(MLAAttentionSpec):
     """MLA cache spec with Ascend-specific layout metadata.
