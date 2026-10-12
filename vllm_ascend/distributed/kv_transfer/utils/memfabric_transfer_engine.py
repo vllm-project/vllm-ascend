@@ -16,7 +16,52 @@ from vllm.logger import logger
 BACKEND_MEMFABRIC = "memfabric"
 MEMFABRIC_ROLE_PREFILL = "Prefill"
 MEMFABRIC_ROLE_DECODE = "Decode"
+MEMFABRIC_REGISTRATION_GRANULARITY = 4 * 1024 * 1024
 _VALID_MEMFABRIC_ROLES = (MEMFABRIC_ROLE_PREFILL, MEMFABRIC_ROLE_DECODE)
+
+
+def coalesce_registration_regions(
+    ptrs: list[int],
+    sizes: list[int],
+    *,
+    granularity: int = MEMFABRIC_REGISTRATION_GRANULARITY,
+) -> tuple[list[int], list[int]]:
+    """Merge regions that overlap the same MemFabric registration window.
+
+    MemFabric tracks registrations at a coarser granularity than Torch storage.
+    Two independent allocations can therefore conflict even when their exact
+    byte ranges do not overlap.  Keep the actual registration range limited to
+    the first allocation start and last allocation end, but merge ranges whose
+    granularity windows overlap.
+    """
+    if len(ptrs) != len(sizes):
+        raise ValueError(f"MemFabric registration pointer/size counts differ: {len(ptrs)} != {len(sizes)}")
+    if granularity <= 0:
+        raise ValueError(f"MemFabric registration granularity must be positive: {granularity}")
+
+    regions: list[tuple[int, int]] = []
+    for ptr, size in zip(ptrs, sizes):
+        if ptr <= 0 or size <= 0:
+            raise ValueError(f"MemFabric registration requires positive pointer and size, got ptr={ptr}, size={size}")
+        regions.append((ptr, ptr + size))
+    if not regions:
+        return [], []
+
+    regions.sort()
+    merged: list[list[int]] = []
+    for start, end in regions:
+        if not merged:
+            merged.append([start, end])
+            continue
+        previous = merged[-1]
+        previous_window_end = ((previous[1] - 1) // granularity) * granularity
+        current_window_start = (start // granularity) * granularity
+        if start <= previous[1] or current_window_start <= previous_window_end:
+            previous[1] = max(previous[1], end)
+        else:
+            merged.append([start, end])
+
+    return [start for start, _ in merged], [end - start for start, end in merged]
 
 
 class MemfabricBackend:
@@ -148,13 +193,16 @@ class GlobalMemfabricTE:
         return MemfabricBackend(raw_engine, advertised_rpc_port)
 
     def register_buffer(self, ptrs: list[int], sizes: list[int]) -> None:
-        if len(ptrs) != len(sizes):
-            raise ValueError(f"MemFabric registration pointer/size counts differ: {len(ptrs)} != {len(sizes)}")
+        ptrs, sizes = coalesce_registration_regions(ptrs, sizes)
         with self._register_buffer_lock:
             if self._engine is None:
                 raise RuntimeError("MemFabric transfer engine must be initialized")
             if self._is_buffer_registered:
                 return
+            logger.info(
+                "MemFabric registering %d coalesced memory region(s)",
+                len(ptrs),
+            )
             for ptr, size in zip(ptrs, sizes):
                 ret = self._engine.register_memory(ptr, size)
                 if ret != 0:
