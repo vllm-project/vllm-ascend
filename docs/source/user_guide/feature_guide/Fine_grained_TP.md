@@ -107,7 +107,7 @@ Fine-grained TP shards the configured layer **across the data-parallel (DP) dime
 ```bash
 vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
     --quantization ascend \
-    --data-parallel-size 32 \
+    --data-parallel-size 16 \
     --tensor-parallel-size 1 \
     --enable-expert-parallel \
     --additional-config '{
@@ -123,7 +123,7 @@ vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
 ```bash
 vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
     --quantization ascend \
-    --data-parallel-size 32 \
+    --data-parallel-size 16 \
     --tensor-parallel-size 1 \
     --enable-expert-parallel \
     --additional-config '{
@@ -148,7 +148,7 @@ vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
                     "kv_port": "28000",
                     "kv_connector_extra_config": {
                         "prefill": {"dp_size": 1, "tp_size": 1},
-                        "decode": {"dp_size": 32, "tp_size": 1}
+                        "decode": {"dp_size": 16, "tp_size": 1}
                     }
                 },
                 {
