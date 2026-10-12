@@ -132,7 +132,8 @@ asynchronous communicator interface:
   expert weights and receive buffers from all models are registered as aligned,
   merged live tensor ranges. One state-owned HIXL session holds their underlying
   storage until deregistration succeeds. Unrelated allocator growth does not
-  change these registrations.
+  change these registrations. Each session supports up to 4000 merged regions
+  across all participating models; larger sets fail before backend registration.
 - `AscendGlooEplbCommunicator` (fallback): CPU-staged P2P over Gloo with
   pinned staging buffers.
 

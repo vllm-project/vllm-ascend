@@ -24,6 +24,7 @@ from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.network_utils import get_ip, get_open_port, join_host_port
 
 _HIXL_MEMORY_ALIGNMENT = 2 * 1024 * 1024
+_HIXL_MAX_REGISTERED_REGIONS = 4000
 _TRANSFER_TIMEOUT_SECONDS = 300
 _STATUS_POLL_SECONDS = 0.0005
 
@@ -267,6 +268,11 @@ class _HixlSession:
             else:
                 merged.append((start, end))
         ordered_regions = [(start, end - start) for start, end in merged]
+        if len(ordered_regions) > _HIXL_MAX_REGISTERED_REGIONS:
+            raise ValueError(
+                f"HIXL EPLB requires {len(ordered_regions)} registered memory regions after merging; "
+                f"the maximum is {_HIXL_MAX_REGISTERED_REGIONS}"
+            )
         if self._rank == 0:
             registered_bytes = sum(size for _, size in ordered_regions)
             logger.info(

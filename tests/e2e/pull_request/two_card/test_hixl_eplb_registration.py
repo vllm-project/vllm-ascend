@@ -73,9 +73,9 @@ def _registration_worker(rank: int, port: int, binding: str) -> None:
         assert not session._storage_refs
         del session, communicator, buffers, weights, allocation
         torch.npu.empty_cache()
-    # Validate the increased region count against the real backend rather
-    # than imposing the old, unverified 256-region limit.
-    region_count = 320
+    # Exercise the 4000-region boundary on the real backend, including one
+    # additional region for the receive buffer.
+    region_count = 3999
     # A small allocator prefix can make a 2 MiB view cover two aligned
     # pages; leave another page between views so merging keeps them apart.
     region_spacing = 6 * _MIB
@@ -88,7 +88,7 @@ def _registration_worker(rank: int, port: int, binding: str) -> None:
     communicator = eplb_communicator.AscendHixlEplbCommunicator(dist.group.WORLD, weights, buffers)
     session = eplb_communicator._HixlSession(dist.group.WORLD)
     session.initialize({"model": communicator})
-    assert len(session._registered_handles) > 256
+    assert len(session._registered_handles) == 4000
     session.close()
     del session, communicator, buffers, weights, allocation
     torch.npu.empty_cache()
