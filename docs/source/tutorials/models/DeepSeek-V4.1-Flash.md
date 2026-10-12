@@ -651,7 +651,7 @@ CED hybrid-attention model structure is incompatible with layer-by-layer KV
 save and load. Keep `use_layerwise` set to `false` on both Prefill and Decode.
 
 Before starting vLLM, follow the
-[Memcache backend guide](../../user_guide/feature_guide/kv_pool.md#scenario-2-memcache-backend)
+[Memcache backend guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend)
 to install `memfabric-hybrid` and `memcache-hybrid`, configure
 `meta.conf`, `mmc-local.conf`, and `mmc-local-standalone.conf`, and start the
 Memcache MetaService. The
@@ -745,7 +745,7 @@ python3 memcache_standalone.py
 ```
 
 For additional parameters and capacity constraints, refer to
-[Memcache and vLLM separated deployment](../../user_guide/feature_guide/kv_pool.md#step-7-memcache-and-vllm-separated-deployment).
+[Memcache and vLLM separated deployment](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#Memcache-and-vLLM-Separated-Deployment).
 
 Reuse `launch_online_dp.py` from Section 5.2.1. Set `MEMCACHE_INSTALL_PATH` to
 the `Location` reported by `pip show memcache_hybrid`, and set
@@ -984,7 +984,7 @@ Key pooling parameters:
   is not supported by the layerwise path.
 
 For Memcache configuration, capacity tuning, and troubleshooting, refer to the
-[KV Cache Pool guide](../../user_guide/feature_guide/kv_pool.md#scenario-2-memcache-backend).
+[KV Cache Pool guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend).
 
 ### 5.4 Multi-Node Colocated Deployment
 
