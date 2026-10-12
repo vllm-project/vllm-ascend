@@ -26,14 +26,13 @@ from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.moe_utils import cumsum_group_list, maybe_normalize_mxfp_scale_layout
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
 from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
-from vllm_ascend.utils import FP8_METHOD, dispose_tensor, maybe_trans_nz
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, FP8_METHOD, dispose_tensor, maybe_trans_nz
 
 from ..base import (
     AscendLinearScheme,
@@ -356,6 +355,15 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         )
 
     def get_fused_mc2_weights(self, layer: torch.nn.Module) -> MoEWeights:
+        if hasattr(layer, "cann_mega_moe_w13_weight_list"):
+            return MoEWeights(
+                w1=layer.cann_mega_moe_w13_weight_list,
+                w2=layer.cann_mega_moe_w2_weight_list,
+                w1_scale=layer.cann_mega_moe_w13_weight_scale_list,
+                w2_scale=layer.cann_mega_moe_w2_weight_scale_list,
+                w1_scale_bias=None,
+                w2_scale_bias=None,
+            )
         return MoEWeights(
             w1=layer.w13_weight_list,
             w2=layer.w2_weight_list,
@@ -367,6 +375,13 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
 
     @staticmethod
     def get_eplb_weight_views(layer: torch.nn.Module) -> list:
+        if hasattr(layer, "cann_mega_moe_w13_weight_list"):
+            return [
+                layer.cann_mega_moe_w13_weight_list,
+                layer.cann_mega_moe_w2_weight_list,
+                layer.cann_mega_moe_w13_weight_scale_list,
+                layer.cann_mega_moe_w2_weight_scale_list,
+            ]
         return [
             layer.w13_weight_list,
             layer.w2_weight_list,
@@ -423,29 +438,35 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
                 )
             }
 
+        use_mega_moe = use_cann_megamoe(get_current_vllm_config())
         for weight_name in ("w13_weight", "w2_weight"):
             scale_name = f"{weight_name}_scale"
             weight = getattr(layer, weight_name)
             scale = getattr(layer, scale_name)
             g_num, n_size, k_size = scale.shape
-            weight_nd = weight.data.transpose(1, 2).contiguous()
-            scale_nd = scale.data.reshape(g_num, n_size, k_size // 2, 2).transpose(1, 2).contiguous()
-
-            weight_list = []
-            for expert in weight_nd.unbind(dim=0):
-                expert = expert.clone()
-                if expert.device.type == "npu":
-                    torch_npu.npu_format_cast_(
-                        expert,
-                        ACL_FORMAT_FRACTAL_NZ,
-                        customize_dtype=torch.float8_e4m3fn,
-                    )
-                weight_list.append(expert)
+            scale_nd = scale.data.reshape(g_num, n_size, k_size // 2, 2)
+            if use_mega_moe:
+                weight_list = [expert.clone() for expert in weight.data.unbind(dim=0)]
+                list_prefix = "cann_mega_moe_"
+            else:
+                weight_nd = weight.data.transpose(1, 2).contiguous()
+                scale_nd = scale_nd.transpose(1, 2).contiguous()
+                weight_list = []
+                for expert in weight_nd.unbind(dim=0):
+                    expert = expert.clone()
+                    if expert.device.type == "npu":
+                        torch_npu.npu_format_cast_(
+                            expert,
+                            ACL_FORMAT_FRACTAL_NZ,
+                            customize_dtype=torch.float8_e4m3fn,
+                        )
+                    weight_list.append(expert)
+                list_prefix = ""
             # Checkpoint E8M0 scales are stored as bytes; CANN requires their semantic dtype.
             scale_list = [expert.clone().view(torch.float8_e8m0fnu) for expert in scale_nd.unbind(dim=0)]
 
-            self._update_expert_list(layer, f"{weight_name}_list", weight_list)
-            self._update_expert_list(layer, f"{scale_name}_list", scale_list)
+            self._update_expert_list(layer, f"{list_prefix}{weight_name}_list", weight_list)
+            self._update_expert_list(layer, f"{list_prefix}{scale_name}_list", scale_list)
 
         for tensor_name, parameter in layer._mxfp8_moe_parameters.items():
             dispose_tensor(parameter)
@@ -510,24 +531,26 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         orig_shapes = layer._mxfp8_original_shapes
         parameters = layer._mxfp8_moe_parameters
 
+        use_mega_moe = hasattr(layer, "cann_mega_moe_w13_weight_list")
+        list_prefix = "cann_mega_moe_" if use_mega_moe else ""
         for weight_name in ("w13_weight", "w2_weight"):
             scale_name = f"{weight_name}_scale"
-            weight_list = getattr(layer, f"{weight_name}_list")
-            scale_list = getattr(layer, f"{scale_name}_list")
+            weight_list = getattr(layer, f"{list_prefix}{weight_name}_list")
+            scale_list = getattr(layer, f"{list_prefix}{scale_name}_list")
 
             weight_nd = [
-                torch_npu.npu_format_cast(weight, torch_npu.Format.ND)
-                if weight.device.type == "npu"
-                else weight
+                torch_npu.npu_format_cast(weight, torch_npu.Format.ND) if weight.device.type == "npu" else weight
                 for weight in weight_list
             ]
-            restored_weight = torch.stack(weight_nd).transpose(1, 2).contiguous()
-            restored_scale = (
-                torch.stack(scale_list).transpose(1, 2).reshape(orig_shapes[scale_name]).contiguous()
-            )
-
+            restored_weight = torch.stack(weight_nd)
+            restored_scale = torch.stack(scale_list)
+            if not use_mega_moe:
+                restored_weight = restored_weight.transpose(1, 2)
+                restored_scale = restored_scale.transpose(1, 2)
             weight_parameter = parameters[weight_name]
             scale_parameter = parameters[scale_name]
+            restored_weight = restored_weight.contiguous()
+            restored_scale = restored_scale.reshape(orig_shapes[scale_name]).contiguous().view(scale_parameter.dtype)
             weight_parameter.data = restored_weight
             scale_parameter.data = restored_scale
             setattr(layer, weight_name, weight_parameter)

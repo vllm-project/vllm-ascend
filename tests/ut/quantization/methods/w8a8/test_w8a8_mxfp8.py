@@ -251,6 +251,9 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
         format_cast = patch("torch_npu.npu_format_cast", side_effect=lambda weight, fmt, **kwargs: weight.clone())
         self.addCleanup(format_cast.stop)
         format_cast.start()
+        mega_moe = patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.use_cann_megamoe", return_value=False)
+        self.addCleanup(mega_moe.stop)
+        mega_moe.start()
 
     def test_modelopt_config_defaults_group_size(self):
         vllm_config = create_mock_vllm_config()
@@ -271,7 +274,7 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
         self.assertEqual(scheme.group_size, 32)
 
     @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_current_vllm_config")
-    def test_all_moe_paths_share_per_expert_payload(self, mock_vllm):
+    def test_mega_moe_uses_non_transposed_per_expert_payload(self, mock_vllm):
         mock_vllm.return_value = create_mock_vllm_config()
         layer = create_mxfp_moe_layer(
             num_experts=self.num_experts,
@@ -280,10 +283,14 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
         )
         names = ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale")
         originals = [getattr(layer, name).detach().clone() for name in names]
-        self.scheme.process_weights_after_loading(layer)
-        with patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8._EXTRA_CTX") as context:
+        with (
+            patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.use_cann_megamoe", return_value=True),
+            patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8._EXTRA_CTX") as context,
+        ):
+            self.scheme.process_weights_after_loading(layer)
             context.use_mega_moe = True
             weights = self.scheme.get_fused_mc2_weights(layer)
+            weight_views = self.scheme.get_eplb_weight_views(layer)
         for name, original, experts in zip(
             names, originals, (weights.w1, weights.w2, weights.w1_scale, weights.w2_scale)
         ):
@@ -292,9 +299,9 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
                 self.assertEqual(len(experts), self.num_experts)
                 if name.endswith("scale"):
                     groups, channels, scale_size = original.shape
-                    expected_tensor = original.reshape(groups, channels, scale_size // 2, 2).transpose(1, 2)
+                    expected_tensor = original.reshape(groups, channels, scale_size // 2, 2)
                 else:
-                    expected_tensor = original.transpose(1, 2)
+                    expected_tensor = original
                 for expert, expected in zip(experts, expected_tensor.unbind(0)):
                     if name.endswith("scale"):
                         expected = expected.reshape(expected.shape[0], -1, 2).view(torch.float8_e8m0fnu)
@@ -306,7 +313,9 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
                     else:
                         torch.testing.assert_close(expert.float(), expected.float(), rtol=0, atol=0)
         self.scheme.process_weights_after_loading(layer)
-        self.assertIs(layer.w13_weight_list, weights.w1)
+        self.assertIs(layer.cann_mega_moe_w13_weight_list, weights.w1)
+        self.assertIs(weight_views[0], weights.w1)
+        self.assertIs(weight_views[2], weights.w1_scale)
 
     def test_get_weight_various_expert_counts(self):
         for num_experts in [4, 8, 16]:
@@ -364,10 +373,7 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
         names = ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale")
         loaded = {name: getattr(layer, name).data.clone() for name in names}
         self.scheme.process_weights_after_loading(layer)
-        captured = {
-            name: list(getattr(layer, f"{name}_list"))
-            for name in names
-        }
+        captured = {name: list(getattr(layer, f"{name}_list")) for name in names}
         pointers = {name: [tensor.data_ptr() for tensor in tensors] for name, tensors in captured.items()}
         for _ in range(3):
             self.scheme.restore_weights_for_rl_loading(layer)
@@ -388,8 +394,16 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
                     expected = expected.reshape(groups, channels, scale_size // 2, 2)
                 expected = expected.transpose(1, 2)
                 for tensor, expected_expert, captured_tensor in zip(tensors, expected, captured[name]):
-                    torch.testing.assert_close(tensor.float(), expected_expert.float(), rtol=0, atol=0)
-                    torch.testing.assert_close(captured_tensor.float(), expected_expert.float(), rtol=0, atol=0)
+                    if name.endswith("_scale"):
+                        torch.testing.assert_close(
+                            tensor.view(torch.uint8), expected_expert.view(torch.uint8), rtol=0, atol=0
+                        )
+                        torch.testing.assert_close(
+                            captured_tensor.view(torch.uint8), expected_expert.view(torch.uint8), rtol=0, atol=0
+                        )
+                    else:
+                        torch.testing.assert_close(tensor.float(), expected_expert.float(), rtol=0, atol=0)
+                        torch.testing.assert_close(captured_tensor.float(), expected_expert.float(), rtol=0, atol=0)
 
     @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_current_vllm_config")
     def test_restore_weights_for_rl_loading(self, mock_vllm):
