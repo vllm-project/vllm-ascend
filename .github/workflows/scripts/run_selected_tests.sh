@@ -49,10 +49,23 @@ failed_logs=()
 timing_entries=()
 test_index=0
 overall_status=0
+# True only for the in-flight pytest target that enables spawn-worker coverage.
+spawn_coverage=false
 pytest_log_dir="${RUNNER_TEMP:-/tmp}/selected-tests-${npu_type}-${num_npus}card"
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 
 mkdir -p "${pytest_log_dir}"
+
+# Worker-side tracing is limited to tests whose draft/model code runs in spawn
+# EngineCore processes. Enabling it for every e2e target makes vllm serve miss
+# /health (pause_resume 180s, Qwen3.5 PP+MTP 600s).
+wants_spawn_coverage() {
+  local target="${1,,}"
+  case "${target}" in
+    *spec_decode*|*dspark*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 
 setup_coverage() {
   local target="$1"
@@ -63,14 +76,21 @@ setup_coverage() {
   local coverage_startup_dir="${project_root}/.github/workflows/scripts/coverage_startup"
   mkdir -p "${covdata_dir}"
   export COVERAGE_FILE="${covdata_dir}/coverage"
-  export COVERAGE_PROCESS_START="${project_root}/tests/coveragerc"
-  # Prepend so spawn workers import this sitecustomize.py at interpreter start.
-  case ":${PYTHONPATH:-}:" in
-    *":${coverage_startup_dir}:"*) ;;
-    *) export PYTHONPATH="${coverage_startup_dir}${PYTHONPATH:+:${PYTHONPATH}}" ;;
-  esac
+  # Unset first: PYTHONPATH/sitecustomize persist across targets, and a leftover
+  # COVERAGE_PROCESS_START would keep tracing workers for the next file.
+  unset COVERAGE_PROCESS_START
+  spawn_coverage=false
+  if wants_spawn_coverage "${target}"; then
+    spawn_coverage=true
+    export COVERAGE_PROCESS_START="${project_root}/tests/coveragerc"
+    case ":${PYTHONPATH:-}:" in
+      *":${coverage_startup_dir}:"*) ;;
+      *) export PYTHONPATH="${coverage_startup_dir}${PYTHONPATH:+:${PYTHONPATH}}" ;;
+    esac
+  fi
   echo -e "  \033[33mCOVERAGE_FILE:\033[0m ${COVERAGE_FILE}"
-  echo -e "  \033[33mCOVERAGE_PROCESS_START:\033[0m ${COVERAGE_PROCESS_START}"
+  echo -e "  \033[33mCOVERAGE_PROCESS_START:\033[0m ${COVERAGE_PROCESS_START:-<unset>}"
+  echo -e "  \033[33mSpawn worker coverage:\033[0m ${spawn_coverage}"
 }
 
 setup_vllm_cache_root() {
@@ -97,9 +117,9 @@ terminate_process_group() {
 
   echo "Cleaning up processes left by pytest (process group ${process_group})"
   kill -TERM -- "-${process_group}" 2>/dev/null || true
-  # Coverage workers need extra time to write coverage.<pid> after SIGTERM.
+  # Spawn-coverage workers need extra time to write coverage.<pid> after SIGTERM.
   local wait_rounds=10
-  if [ "${enable_coverage}" = "true" ]; then
+  if [ "${spawn_coverage}" = "true" ]; then
     wait_rounds=20
   fi
   local round
