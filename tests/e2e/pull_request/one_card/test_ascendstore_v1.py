@@ -101,7 +101,7 @@ def _exercise_connector(
     sampling_params = SamplingParams(temperature=0, max_tokens=OUTPUT_TOKEN_COUNT, ignore_eos=True)
 
     # Keep this optional integration dependency local to the v1 E2E execution.
-    pool_runtime = import_module("tests.e2e.nightly.single_node.models.scripts.kv_pool_runtime")
+    pool_runtime = import_module("tests.e2e.common.single_node.kv_pool_runtime")
     with pool_runtime.SingleNodeMooncakeManager(pool_config, f"{tmp_path.name}-{implementation}") as pool:
         for name, value in pool.server_envs.items():
             monkeypatch.setenv(name, value)
