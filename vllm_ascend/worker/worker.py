@@ -1265,10 +1265,7 @@ class NPUWorker(WorkerBase):
         self.model_runner.reset_encoder_cache()
 
     def synchronize_device(self) -> None:
-        if torch.accelerator.is_available():
-            torch.accelerator.synchronize()
-        else:
-            torch.npu.synchronize()
+        torch.npu.synchronize()
 
     def execute_dummy_batch(self) -> None:
         self.log_memory_stats()
