@@ -2,19 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, create_autospec, patch
 
 import pytest
 import torch
 from torch import nn
+from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 from vllm_ascend.ops.kimi_kda import (
     _PACKED_CONV_WEIGHT_NAME,
     AscendKimiK3DeltaAttention,
     _KDAFusedBFGLinear,
     _prepare_beta,
-    _zero_padded_output,
-    _zero_padded_recurrent_output,
 )
 from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import (
     AscendW4A8MXFPDynamicLinearMethod,
@@ -69,29 +68,24 @@ class _RecordingStreamSwitch:
         self.trace.append(f"exit:{self.stream.name}")
 
 
-def test_zero_padded_recurrent_output_clears_uncovered_tail():
-    output = torch.randn(1, 8, 2, 3)
-    expected = output[:, :5].clone()
-    output[:, 5:] = torch.nan
+def test_python_live_slice_index_copy_hits_graph_padded_garbage_indices():
+    """Capture-time Python slices read the static index buffer's dirty tail.
 
-    actual = _zero_padded_recurrent_output(
-        output,
-        torch.tensor([0, 3, 5, 5], dtype=torch.int32),
-    )
+    FULL ACLGraph inlines ``_forward``, so ``spec_token_indices[:spec_live]``
+    keeps the capture length. Replay still uses that length; DSpark's seven
+    speculative slots can hold uninitialized values such as float32 1.0
+    (``0x3F800001``) interpreted as int64, which is the CANN IndexCheck
+    ``1065369473..1065369479`` crash.
+    """
+    capture_tokens = 8
+    dest = torch.empty(1, capture_tokens, 2, 3)
+    source = torch.ones(1, capture_tokens, 2, 3)
+    spec_token_indices = torch.empty(capture_tokens, dtype=torch.long)
+    spec_token_indices[0] = 0
+    spec_token_indices[1:] = torch.arange(1065369473, 1065369480)
 
-    torch.testing.assert_close(actual[:, :5], expected)
-    assert torch.equal(actual[:, 5:], torch.zeros_like(actual[:, 5:]))
-    assert torch.isfinite(actual).all()
-
-
-def test_zero_padded_output_uses_combined_live_token_count():
-    output = torch.full((1, 8, 1, 1), torch.nan)
-    output[:, :6] = torch.arange(6).view(1, 6, 1, 1)
-
-    actual = _zero_padded_output(output, torch.tensor(6, dtype=torch.int32))
-
-    torch.testing.assert_close(actual[:, :6], output[:, :6])
-    assert torch.equal(actual[:, 6:], torch.zeros_like(actual[:, 6:]))
+    with pytest.raises((IndexError, RuntimeError)):
+        dest.index_copy_(1, spec_token_indices[:capture_tokens], source)
 
 
 def test_kda_output_norm_uses_checkpoint_epsilon():
@@ -450,7 +444,7 @@ def test_prefill_fuses_raw_gate_and_updates_v_first_state():
     torch.testing.assert_close(recurrent_state[state_indices], final_state)
 
 
-def test_kda_empty_forward_context_clears_preallocated_output():
+def test_kda_empty_forward_context_leaves_output_untouched():
     attention = AscendKimiK3DeltaAttention.__new__(AscendKimiK3DeltaAttention)
     core_attn_out = torch.full((1, 4, 2, 3), torch.nan)
 
@@ -466,7 +460,304 @@ def test_kda_empty_forward_context_clears_preallocated_output():
             core_attn_out=core_attn_out,
         )
 
-    assert torch.equal(core_attn_out, torch.zeros_like(core_attn_out))
+    assert torch.isnan(core_attn_out).all()
+
+
+def _decode_graph_metadata(*, num_actual_tokens: int, num_decode_tokens: int, num_decodes: int):
+    query_start_loc = torch.zeros(num_decodes + 1, dtype=torch.int32)
+    query_start_loc[1 : num_decode_tokens + 1] = torch.arange(1, num_decode_tokens + 1)
+    query_start_loc[num_decode_tokens + 1 :] = num_decode_tokens
+    state_indices = torch.full((num_decodes,), -1, dtype=torch.int32)
+    state_indices[:num_decode_tokens] = torch.arange(num_decode_tokens)
+
+    conv1d_meta = SimpleNamespace(
+        query_start_loc=query_start_loc,
+        cache_indices=state_indices,
+        initial_state_mode=None,
+        num_accepted_tokens=None,
+    )
+    metadata = create_autospec(GDNAttentionMetadata, instance=True)
+    metadata.num_actual_tokens = num_actual_tokens
+    metadata.num_prefills = 0
+    metadata.num_prefill_tokens = 0
+    metadata.num_decodes = num_decodes
+    metadata.num_decode_tokens = num_decode_tokens
+    metadata.num_spec_decodes = 0
+    metadata.num_spec_decode_tokens = 0
+    metadata.spec_sequence_masks = None
+    metadata.spec_token_indx = None
+    metadata.non_spec_token_indx = None
+    metadata.spec_query_start_loc = None
+    metadata.non_spec_query_start_loc = query_start_loc
+    metadata.spec_state_indices_tensor = None
+    metadata.non_spec_state_indices_tensor = state_indices
+    metadata.spec_decode_metadata = None
+    metadata.non_spec_prefill_metadata = None
+    metadata.non_spec_decode_metadata = SimpleNamespace(causal_conv1d=conv1d_meta)
+    return metadata
+
+
+def _spec_graph_metadata(*, num_actual_tokens: int, num_spec_decode_tokens: int, num_spec_decodes: int):
+    query_start_loc = torch.zeros(num_spec_decodes + 1, dtype=torch.int32)
+    query_start_loc[1 : num_spec_decode_tokens + 1] = torch.arange(1, num_spec_decode_tokens + 1)
+    query_start_loc[num_spec_decode_tokens + 1 :] = num_spec_decode_tokens
+    state_indices = torch.full((num_spec_decodes,), -1, dtype=torch.int32)
+    state_indices[:num_spec_decode_tokens] = torch.arange(num_spec_decode_tokens)
+
+    conv1d_meta = SimpleNamespace(
+        query_start_loc=query_start_loc,
+        cache_indices=state_indices,
+        initial_state_mode=None,
+        num_accepted_tokens=torch.ones(num_spec_decodes, dtype=torch.int32),
+    )
+    metadata = create_autospec(GDNAttentionMetadata, instance=True)
+    metadata.num_actual_tokens = num_actual_tokens
+    metadata.num_prefills = 0
+    metadata.num_prefill_tokens = 0
+    metadata.num_decodes = 0
+    metadata.num_decode_tokens = 0
+    metadata.num_spec_decodes = num_spec_decodes
+    metadata.num_spec_decode_tokens = num_spec_decode_tokens
+    metadata.spec_sequence_masks = torch.tensor(
+        [True] * num_spec_decode_tokens + [False] * (num_spec_decodes - num_spec_decode_tokens)
+    )
+    metadata.spec_token_indx = None
+    metadata.non_spec_token_indx = None
+    metadata.spec_query_start_loc = query_start_loc
+    metadata.non_spec_query_start_loc = None
+    metadata.spec_state_indices_tensor = state_indices
+    metadata.non_spec_state_indices_tensor = None
+    metadata.spec_decode_metadata = SimpleNamespace(spec_causal_conv1d=conv1d_meta)
+    metadata.non_spec_prefill_metadata = None
+    metadata.non_spec_decode_metadata = None
+    return metadata
+
+
+def _mixed_spec_prefill_metadata():
+    spec_token_indx = torch.tensor([0, 2], dtype=torch.long)
+    non_spec_token_indx = torch.tensor([1], dtype=torch.long)
+    spec_query_start_loc = torch.tensor([0, 1, 2], dtype=torch.int32)
+    prefill_query_start_loc = torch.tensor([0, 1], dtype=torch.int32)
+    spec_state_indices = torch.tensor([0, 1], dtype=torch.int32)
+    prefill_state_indices = torch.tensor([2], dtype=torch.int32)
+    spec_conv1d_meta = SimpleNamespace(
+        query_start_loc=spec_query_start_loc,
+        cache_indices=spec_state_indices,
+        initial_state_mode=None,
+        num_accepted_tokens=torch.ones(2, dtype=torch.int32),
+    )
+    prefill_conv1d_meta = SimpleNamespace(
+        query_start_loc=prefill_query_start_loc,
+        cache_indices=prefill_state_indices,
+        initial_state_mode=torch.zeros(1, dtype=torch.int32),
+        num_accepted_tokens=None,
+    )
+    metadata = create_autospec(GDNAttentionMetadata, instance=True)
+    metadata.num_actual_tokens = 4
+    metadata.num_prefills = 1
+    metadata.num_prefill_tokens = 1
+    metadata.num_decodes = 0
+    metadata.num_decode_tokens = 0
+    metadata.num_spec_decodes = 2
+    metadata.num_spec_decode_tokens = 2
+    metadata.spec_sequence_masks = torch.tensor([True, False, True, False])
+    metadata.spec_token_indx = spec_token_indx
+    metadata.non_spec_token_indx = non_spec_token_indx
+    metadata.spec_query_start_loc = spec_query_start_loc
+    metadata.non_spec_query_start_loc = prefill_query_start_loc
+    metadata.spec_state_indices_tensor = spec_state_indices
+    metadata.non_spec_state_indices_tensor = prefill_state_indices
+    metadata.prefill_state_indices = prefill_state_indices
+    metadata.prefill_has_initial_state = torch.tensor([False])
+    metadata.spec_decode_metadata = SimpleNamespace(spec_causal_conv1d=spec_conv1d_meta)
+    metadata.non_spec_prefill_metadata = SimpleNamespace(
+        causal_conv1d=prefill_conv1d_meta,
+        chunk=SimpleNamespace(),
+    )
+    metadata.non_spec_decode_metadata = None
+    return metadata
+
+
+def _new_kda_attention():
+    attention = AscendKimiK3DeltaAttention.__new__(AscendKimiK3DeltaAttention)
+    attention.prefix = "layers.0.self_attn"
+    attention.head_dim = 3
+    attention.kv_cache = (torch.zeros(1), torch.zeros(1))
+    attention.get_parameter = lambda _name: torch.zeros(2, 6)
+    return attention
+
+
+def test_kda_forward_overwrites_live_decode_tokens():
+    attention = _new_kda_attention()
+    captured = {}
+
+    def fake_norm(core, gate):
+        captured["tokens"] = core.shape[1]
+        captured["gate_nan"] = bool(torch.isnan(gate).any())
+        return core
+
+    attention.o_norm = fake_norm
+    metadata = _decode_graph_metadata(num_actual_tokens=4, num_decode_tokens=2, num_decodes=4)
+    core_attn_out = torch.full((1, 6, 2, 3), torch.nan)
+    g2 = torch.full((4, 2, 3), torch.nan)
+    g2[:2] = 0.5
+    mixed_qkv = torch.ones(4, 18)
+    g1 = torch.ones(1, 4, 2, 3)
+    beta = torch.ones(1, 4, 2)
+
+    def fake_conv(mixed, *args, **kwargs):
+        captured["conv_tokens"] = mixed.shape[0]
+        return mixed
+
+    def fake_recurrent(q, *args, **kwargs):
+        captured["recurrent_tokens"] = q.shape[1]
+        # Simulate a kernel that skips padded sequences and leaves the tail dirty.
+        out = torch.ones_like(q)
+        out[:, 2:] = torch.nan
+        return out
+
+    with (
+        patch(
+            "vllm_ascend.ops.kimi_kda.get_forward_context",
+            return_value=SimpleNamespace(attn_metadata={attention.prefix: metadata}),
+        ),
+        patch.object(attention, "_run_causal_conv1d", side_effect=fake_conv),
+        patch.object(attention, "_run_recurrent", side_effect=fake_recurrent),
+    ):
+        attention._forward(
+            mixed_qkv=mixed_qkv,
+            g1=g1,
+            g2=g2,
+            beta=beta,
+            core_attn_out=core_attn_out,
+        )
+
+    assert captured["conv_tokens"] == 4
+    assert captured["recurrent_tokens"] == 4
+    assert captured["tokens"] == 4
+    assert captured["gate_nan"] is True
+    torch.testing.assert_close(core_attn_out[:, :2], torch.ones(1, 2, 2, 3))
+    assert torch.isnan(core_attn_out[:, 2:]).all()
+
+
+def test_kda_forward_overwrites_live_spec_tokens():
+    attention = _new_kda_attention()
+    captured = {}
+
+    def fake_norm(core, gate):
+        captured["tokens"] = core.shape[1]
+        captured["gate_nan"] = bool(torch.isnan(gate).any())
+        return core
+
+    attention.o_norm = fake_norm
+    metadata = _spec_graph_metadata(num_actual_tokens=4, num_spec_decode_tokens=2, num_spec_decodes=4)
+    core_attn_out = torch.full((1, 6, 2, 3), torch.nan)
+    g2 = torch.full((4, 2, 3), torch.nan)
+    g2[:2] = 0.5
+
+    def fake_conv(mixed, *args, **kwargs):
+        captured["conv_tokens"] = mixed.shape[0]
+        return mixed
+
+    def fake_recurrent(q, *args, **kwargs):
+        captured["recurrent_tokens"] = q.shape[1]
+        out = torch.ones_like(q)
+        out[:, 2:] = torch.nan
+        return out
+
+    with (
+        patch(
+            "vllm_ascend.ops.kimi_kda.get_forward_context",
+            return_value=SimpleNamespace(attn_metadata={attention.prefix: metadata}),
+        ),
+        patch.object(attention, "_run_causal_conv1d", side_effect=fake_conv),
+        patch.object(attention, "_run_recurrent", side_effect=fake_recurrent),
+    ):
+        attention._forward(
+            mixed_qkv=torch.ones(4, 18),
+            g1=torch.ones(1, 4, 2, 3),
+            g2=g2,
+            beta=torch.ones(1, 4, 2),
+            core_attn_out=core_attn_out,
+        )
+
+    assert captured["conv_tokens"] == 4
+    assert captured["recurrent_tokens"] == 4
+    assert captured["tokens"] == 4
+    assert captured["gate_nan"] is True
+    torch.testing.assert_close(core_attn_out[:, :2], torch.ones(1, 2, 2, 3))
+    assert torch.isnan(core_attn_out[:, 2:]).all()
+
+
+def test_kda_forward_scatters_mixed_tokens():
+    attention = _new_kda_attention()
+    captured = {"conv_tokens": []}
+
+    def fake_norm(core, gate):
+        captured["tokens"] = core.shape[1]
+        captured["gate"] = gate.clone()
+        captured["core"] = core.clone()
+        captured["gate_nan"] = bool(torch.isnan(gate).any())
+        return core
+
+    attention.o_norm = fake_norm
+    metadata = _mixed_spec_prefill_metadata()
+    core_attn_out = torch.full((1, 6, 2, 3), torch.nan)
+    g2 = torch.stack(
+        [
+            torch.full((2, 3), 10.0),
+            torch.full((2, 3), 20.0),
+            torch.full((2, 3), 30.0),
+            torch.full((2, 3), torch.nan),
+        ]
+    )
+
+    def fake_conv(mixed, *args, **kwargs):
+        captured["conv_tokens"].append(mixed.shape[0])
+        return mixed
+
+    def fake_recurrent(q, *args, **kwargs):
+        captured["recurrent_tokens"] = q.shape[1]
+        return torch.ones_like(q)
+
+    def fake_prefill(q, *args, **kwargs):
+        captured["prefill_tokens"] = q.shape[1]
+        return torch.full_like(q, 2.0)
+
+    with (
+        patch(
+            "vllm_ascend.ops.kimi_kda.get_forward_context",
+            return_value=SimpleNamespace(attn_metadata={attention.prefix: metadata}),
+        ),
+        patch.object(attention, "_run_causal_conv1d", side_effect=fake_conv),
+        patch.object(attention, "_run_recurrent", side_effect=fake_recurrent),
+        patch.object(attention, "_run_prefill", side_effect=fake_prefill),
+    ):
+        attention._forward(
+            mixed_qkv=torch.ones(4, 18),
+            g1=torch.ones(1, 4, 2, 3),
+            g2=g2,
+            beta=torch.ones(1, 4, 2),
+            core_attn_out=core_attn_out,
+        )
+
+    assert captured["conv_tokens"] == [2, 1]
+    assert captured["recurrent_tokens"] == 2
+    assert captured["prefill_tokens"] == 1
+    assert captured["tokens"] == 4
+    assert captured["gate_nan"] is True
+    torch.testing.assert_close(captured["core"][0, 0], torch.ones(2, 3))
+    torch.testing.assert_close(captured["core"][0, 1], torch.full((2, 3), 2.0))
+    torch.testing.assert_close(captured["core"][0, 2], torch.ones(2, 3))
+    assert torch.isnan(captured["core"][0, 3]).all()
+    torch.testing.assert_close(captured["gate"][0], torch.full((2, 3), 10.0))
+    torch.testing.assert_close(captured["gate"][1], torch.full((2, 3), 20.0))
+    torch.testing.assert_close(captured["gate"][2], torch.full((2, 3), 30.0))
+    assert torch.isnan(captured["gate"][3]).all()
+    torch.testing.assert_close(core_attn_out[:, 0], torch.ones(1, 2, 3))
+    torch.testing.assert_close(core_attn_out[:, 1], torch.full((1, 2, 3), 2.0))
+    torch.testing.assert_close(core_attn_out[:, 2], torch.ones(1, 2, 3))
+    assert torch.isnan(core_attn_out[:, 3:]).all()
 
 
 def test_kda_conv_weight_is_packed_once_in_kernel_layout():
