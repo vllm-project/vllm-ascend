@@ -26,6 +26,7 @@ import dataclasses
 import functools
 import inspect
 import textwrap
+from typing import Any
 
 import pydantic.dataclasses
 from vllm.config import CacheConfig
@@ -39,11 +40,11 @@ from vllm.v1.kv_cache_interface import KVCacheSpec, UniformTypeKVCacheSpecs
 from vllm.v1.request import Request
 
 
-def _declare_bool(cls: type, name: str) -> None:
+def _declare_bool(cls: Any, name: str) -> None:
     """Add a real dataclass field, including its serialization metadata."""
     if name in cls.__dataclass_fields__:
         return
-    prototype = dataclasses.make_dataclass("ReplayConfigField", [(name, bool, False)])
+    prototype: Any = dataclasses.make_dataclass("ReplayConfigField", [(name, bool, False)])
     cls.__annotations__[name] = bool
     cls.__dataclass_fields__ = dict(cls.__dataclass_fields__)
     cls.__dataclass_fields__[name] = prototype.__dataclass_fields__[name]
@@ -104,7 +105,7 @@ def _rewrite_method(cls, name: str, replacements: tuple[tuple[str, str], ...], *
         if source.count(before) != 1:
             raise RuntimeError(f"Cannot backport SWA replay: unexpected {cls.__name__}.{name} body")
         source = source.replace(before, after)
-    namespace = {}
+    namespace: dict[str, Any] = {}
     exec(compile(source, inspect.getfile(original), "exec"), original.__globals__, namespace)
     patched = namespace[name]
     functools.update_wrapper(patched, original)
@@ -228,7 +229,7 @@ def _patch_scheduler() -> None:
 
 def _patch_payload() -> None:
     # Declare the field before msgspec first inspects NewRequestData.
-    prototype = dataclasses.make_dataclass("ReplayPayloadField", [("replay_start", int, 0)])
+    prototype: Any = dataclasses.make_dataclass("ReplayPayloadField", [("replay_start", int, 0)])
     NewRequestData.__annotations__["replay_start"] = int
     NewRequestData.__dataclass_fields__["replay_start"] = prototype.__dataclass_fields__["replay_start"]
     NewRequestData.replay_start = 0
@@ -236,14 +237,13 @@ def _patch_payload() -> None:
     dataclasses.dataclass(NewRequestData)
     original_from_request = NewRequestData.from_request.__func__
 
-    @classmethod
     @functools.wraps(original_from_request)
     def from_request(cls, request, *args, **kwargs):
         result = original_from_request(cls, request, *args, **kwargs)
         result.replay_start = request.replay_start
         return result
 
-    NewRequestData.from_request = from_request
+    NewRequestData.from_request = classmethod(from_request)
     # Do not import the resume patch here: it must capture the scheduler after
     # BalanceScheduler and PP/MTP have installed their wrappers.
     if "replay_start" not in CachedRequestData.__dataclass_fields__:
