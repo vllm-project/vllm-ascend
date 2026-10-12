@@ -33,6 +33,8 @@ _server_cmd: &server_cmd
   - '{"cudagraph_mode": "FULL_AND_PIECEWISE"}'
   - "--speculative-config"
   - '{"method": "eagle3", "model": "/root/.cache/modelscope/hub/models/RedHatAI/Qwen3-32B-speculator.eagle3", "num_speculative_tokens": 3}'
+  - "--additional-config"
+  - '{"ascend_compilation_config":{"enable_static_kernel": true}}'
 
 _benchmarks_gpqa: &benchmarks_gpqa
   acc:
