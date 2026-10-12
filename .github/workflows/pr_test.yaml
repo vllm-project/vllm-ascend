@@ -462,6 +462,7 @@ jobs:
         env:
           BASE_REF: ${{ github.base_ref }}
           EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          ASCENDSTORE_V1_ONLY: ${{ needs.pre-commit.outputs.ascendstore_v1_only }}
         run: |
           # Resolve the moving base branch once so test selection, cache
           # production, and cache consumption all receive one immutable SHA.
@@ -486,7 +487,20 @@ jobs:
             exit 1
           fi
 
-          git rebase "$BASE_SHA"
+          if [ "$ASCENDSTORE_V1_ONLY" = "true" ]; then
+            # Preserve the demo branch's merge resolutions instead of replaying
+            # old commits. Require upstream to be integrated before testing.
+            if ! git merge-base --is-ancestor "$BASE_SHA" HEAD; then
+              echo "::error::Merge $BASE_REF into the AscendStore v1 demo branch and push again."
+              exit 1
+            fi
+            # Cache preparation and E2E rebase onto this same source commit,
+            # making those operations no-ops without changing shared workflows.
+            BASE_SHA=$(git rev-parse HEAD)
+            echo "::notice::AscendStore v1 demo preserves the pushed source snapshot: $BASE_SHA"
+          else
+            git rebase "$BASE_SHA"
+          fi
           echo "base_sha=$BASE_SHA" >> "$GITHUB_OUTPUT"
 
       - name: Validate test coverage config
