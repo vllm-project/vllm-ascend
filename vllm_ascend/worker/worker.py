@@ -126,15 +126,16 @@ def validate_profile_memory_shrink(init_free_memory: int, after_profile_free_mem
     (e.g. HAMi vNPU quotas), so only a *larger* post-profile free memory —
     external memory released while vLLM was profiling — is an error.
     """
-    assert init_free_memory >= after_profile_free_memory, (
-        "Error in memory profiling. "
-        f"Initial free memory {round(init_free_memory / GiB_bytes, 2)} GiB, "
-        f"current free memory {round(after_profile_free_memory / GiB_bytes, 2)} GiB. "
-        "This happens when other processes sharing the same container "
-        "release GPU memory while vLLM is profiling during initialization. "
-        "To fix this, ensure consistent GPU memory allocation or "
-        "isolate vLLM in its own container."
-    )
+    if init_free_memory < after_profile_free_memory:
+        raise ValueError(
+            "Error in memory profiling. "
+            f"Initial free memory {round(init_free_memory / GiB_bytes, 2)} GiB, "
+            f"current free memory {round(after_profile_free_memory / GiB_bytes, 2)} GiB. "
+            "This happens when other processes sharing the same container "
+            "release GPU memory while vLLM is profiling during initialization. "
+            "To fix this, ensure consistent GPU memory allocation or "
+            "isolate vLLM in its own container."
+        )
 
 
 class NPUWorker(WorkerBase):

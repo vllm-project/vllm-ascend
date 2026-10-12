@@ -18,5 +18,5 @@ class TestValidateProfileMemoryShrink(TestBase):
     def test_grown_memory_still_raises(self):
         # A *larger* post-profile free memory still indicates unstable
         # external memory changes and must keep raising.
-        with self.assertRaises(AssertionError, msg="Error in memory profiling"):
+        with self.assertRaises(ValueError, msg="Error in memory profiling"):
             validate_profile_memory_shrink(10 * 1024**3, 20 * 1024**3)
