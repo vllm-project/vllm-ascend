@@ -18,7 +18,7 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 |  Weight Version          | Hardware Requirements                                         | Download Links |
 |--------------------------|---------------------------------------------------------------|----------------|
-|  `GLM-5.3-w8a8c8`        | 2 Atlas 800 A3 (128GB × 8) node or 4 Atlas 800 A2 (64GB × 8) | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-w8a8c8) |
+|  `GLM-5.3-w8a8c8`        | 2 Atlas 800I A3 (128GB × 8) node or 4 Atlas 800I A2 (64GB × 8) | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-w8a8c8) |
 
 - You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to quantize the model directly.
 
@@ -131,7 +131,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md).
 
 === "A3 series"
-    -  `GLM-5.3-w8a8c8`: can be deployed on 2 Atlas 800 A3 (64GB × 16).
+    -  `GLM-5.3-w8a8c8`: can be deployed on 2 Atlas 800I A3 (64GB × 16).
 
     Run the following scripts on two nodes respectively.
 
@@ -251,7 +251,7 @@ Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md
 
 === "A2 series"
 
-    - `GLM-5.3-w8a8c8`: can be deployed on 4 Atlas 800 A2 (64GB × 8).
+    - `GLM-5.3-w8a8c8`: can be deployed on 4 Atlas 800I A2 (64GB × 8).
 
     Run the following scripts on four nodes respectively.
 
@@ -1449,11 +1449,11 @@ cache.  These references do not
 establish A2, 1M-context, or other parallel-layout support, and do not add
 accuracy or performance claims for the 198K workload.
 
-### 5.2 1M Context Configuration (A3)
+### 5.2 1M Context Configuration
 
 #### 5.2.1 1M Prefill-Decode Disaggregation (DCP)
 
-This configuration uses GLM-5.3 W8A8C8 weights on four Atlas 800 A3
+This configuration uses GLM-5.3 W8A8C8 weights on four Atlas 800I A3
 nodes, with 16 logical NPU devices per node. Use the A3 image from
 [Docker Image Installation](#41-docker-image-installation) on all nodes.
 The maximum context length is 1,048,576 tokens, including input and output.
