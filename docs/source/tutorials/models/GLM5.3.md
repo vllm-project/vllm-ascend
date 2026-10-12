@@ -462,9 +462,8 @@ single-node-group guides:
   the GLM-5.3-Flash PD guide.
 - **No pipeline parallelism.** TP16 spans two nodes directly over the
   node-to-node interconnect, so no PP partition is configured.
-- **MooncakeConnectorV1** with `engine_id` `"0"` (Prefill) and `"1"`
-  (Decode). If your build ships `MooncakeConnectorV2`, keep the topology
-  declaration but check the connector availability first.
+- **MooncakeConnectorV2** with `engine_id` `"0"` (Prefill) and `"1"`
+  (Decode).
 
 !!! warning "Version requirements"
 
@@ -608,7 +607,7 @@ vllm serve "$MODEL_PATH" \
   '{"enable_dsa_cp": true, "enable_fused_mc2": 1, "enable_flashcomm1": true, "ascend_compilation_config": {"fuse_muls_add": true}}' \
   --kv-transfer-config \
   '{
-    "kv_connector": "MooncakeConnectorV1",
+    "kv_connector": "MooncakeConnectorV2",
     "kv_role": "kv_producer",
     "kv_port": "30000",
     "engine_id": "0",
@@ -705,7 +704,7 @@ vllm serve "$MODEL_PATH" \
   '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
   --kv-transfer-config \
   '{
-    "kv_connector": "MooncakeConnectorV1",
+    "kv_connector": "MooncakeConnectorV2",
     "kv_role": "kv_consumer",
     "kv_port": "30100",
     "engine_id": "1",
