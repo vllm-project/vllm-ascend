@@ -19,7 +19,7 @@ def _assert_close(name, actual, expected, rtol=5e-2, atol=5e-2):
 
 def _gate_cumsum_reference(g, chunk_size, cu_seqlens=None):
     g_cpu = g.detach().cpu().to(torch.float32)
-    ref = torch.empty_like(g_cpu)
+    ref = torch.zeros_like(g_cpu)
     rcp_ln2 = 1.4426950408889634
     if cu_seqlens is None:
         cu_seqlens = [0, g_cpu.shape[1]]
