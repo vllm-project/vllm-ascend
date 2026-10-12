@@ -94,6 +94,9 @@ a2:
 a3:
   multi_node:
     test_config:
+      - name: kimi-k3-w4a8-a3
+        config_file_path: Kimi-K3-W4A8-A3.yaml
+        size: 4
       - name: multi-node-deepseek-v3.2-W8A8-EP
         config_file_path: DeepSeek-V3_2-W8A8-EP.yaml
         config_base_path: tests/e2e/nightly/multi_node/internal_dp/config
@@ -214,9 +217,6 @@ a3:
       - name: deepseek-r1-0528-w8a8-prefix-cache
         os: linux-aarch64-nightly-a3-16
         config_file_path: Prefix-Cache-DeepSeek-R1-0528-W8A8.yaml
-      - name: glm-4.7-w8a8
-        os: linux-aarch64-nightly-a3-16
-        config_file_path: GLM-4.7.yaml
       - name: qwen3-vl-235b-a22b-instruct-w8a8
         os: linux-aarch64-nightly-a3-16
         config_file_path: Qwen3-VL-235B-A22B-Instruct-W8A8.yaml
@@ -327,9 +327,6 @@ a3-560t:
       - name: deepseek-r1-0528-w8a8-prefix-cache
         os: linux-aarch64-a3-16-cn12-001
         config_file_path: Prefix-Cache-DeepSeek-R1-0528-W8A8.yaml
-      - name: glm-4.7-w8a8
-        os: linux-aarch64-a3-16-cn12-001
-        config_file_path: GLM-4.7.yaml
       - name: qwen3-vl-235b-a22b-instruct-w8a8
         os: linux-aarch64-a3-16-cn12-001
         config_file_path: Qwen3-VL-235B-A22B-Instruct-W8A8.yaml
