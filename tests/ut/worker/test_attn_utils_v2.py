@@ -681,6 +681,10 @@ def test_v2_single_raw_mla_path_excludes_unsupported_modes(monkeypatch):
     assert not attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
     attn_module.impl.enable_kv_nz = False
 
+    attn_module.impl.supports_prolog_v3_projection = lambda: False
+    assert not attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
+    attn_module.impl.supports_prolog_v3_projection = lambda: True
+
     attn_module.impl.supports_prolog_v3_quantization = lambda: False
     assert not attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
     attn_module.impl.supports_prolog_v3_quantization = lambda: True

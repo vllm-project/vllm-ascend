@@ -4979,6 +4979,11 @@ class NPUModelRunner(GPUModelRunner):
             # NoPE/RoPE slices are separated by the other component's lanes,
             # so keep the legacy component-dense allocation for this mode.
             return False
+        supports_prolog_projection = getattr(impl, "supports_prolog_v3_projection", None)
+        if supports_prolog_projection is not None and not supports_prolog_projection():
+            # q_lora_rank=None MLA has no fused W_DQ / W_UQ contract and cannot
+            # use PROLOG_V3. Keep its cache in the legacy writer layout.
+            return False
         supports_prolog_quantization = getattr(impl, "supports_prolog_v3_quantization", None)
         if supports_prolog_quantization is not None and not supports_prolog_quantization():
             return False

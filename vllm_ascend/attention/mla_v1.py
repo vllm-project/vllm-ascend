@@ -1622,6 +1622,16 @@ class AscendMLAImpl(MLAAttentionImpl):
             AscendW8A8MXFP8DynamicLinearMethod,
         )
 
+    def supports_prolog_v3_projection(self) -> bool:
+        """Whether this MLA layer has the compressed-query ProLog contract."""
+        return (
+            self.fused_qkv_a_proj is not None
+            and self.q_proj is not None
+            and self.q_lora_rank is not None
+            and self.q_a_layernorm is not None
+            and self.kv_a_layernorm is not None
+        )
+
     def _prepare_prolog_v3_weights(self) -> dict[str, Any]:
         """Return the cached private PROLOG_V3 projection weights.
 
@@ -1903,7 +1913,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             return False
         if not hasattr(torch_npu, "npu_mla_prolog_v3"):
             return False
-        if self.fused_qkv_a_proj is None or self.q_proj is None or self.q_lora_rank is None:
+        if not self.supports_prolog_v3_projection():
             return False
         if getattr(self.q_proj, "_chunk_size", 0):
             return False
