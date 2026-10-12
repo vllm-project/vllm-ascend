@@ -19,7 +19,7 @@ The four knobs are freely combinable — on a PD decode node all four can be ena
 
 | Scenario | Components that can be enabled | Applicable Conditions |
 |----------|-------------------------------|------------------------|
-| All-DP MoE serving — standalone, or a PD decode node using embedding / LM head TP only | embedding / LM head | MoE model, `tensor_parallel_size == 1` (see [Standard Tensor Parallelism Requirement](#standard-tensor-parallelism-requirement)), sizes evenly divide `data_parallel_size` |
+| MoE serving with embedding / LM head TP — a standalone instance (optionally stacked with standard TP) or a PD decode node | embedding / LM head | MoE model, sizes evenly divide `data_parallel_size` |
 | P/D-disaggregated decode (D) node with all four knobs | o_proj / MLP / embedding / LM head | The o_proj / MLP knobs require the full [preconditions for o_proj / MLP TP](#preconditions-for-o_proj--mlp-tp) |
 
 #### Component & Execution Mode Support
@@ -32,7 +32,7 @@ The four knobs are freely combinable — on a PD decode node all four can be ena
 | **LM head**   | ✅     | ✅     | ✅       | ✅      |
 
 ```{note}
-- Both `o_proj` TP and MLP TP additionally require `tensor_parallel_size == 1` (enforced at config load); see [Standard Tensor Parallelism Requirement](#standard-tensor-parallelism-requirement).
+- o_proj / MLP TP cannot be combined with standard TP and require `tensor_parallel_size == 1` (enforced at config load); embedding / LM head TP can be combined with standard TP. See [Standard Tensor Parallelism Requirement](#standard-tensor-parallelism-requirement).
 - LM head TP can be combined with speculative decoding (EAGLE, DFlash, and DSpark draft models); see [LM Head TP and Speculative Decoding](#lm-head-tp-and-speculative-decoding).
 ```
 
@@ -41,8 +41,8 @@ The four knobs are freely combinable — on a PD decode node all four can be ena
 | Category | Description |
 |----------|-------------|
 | Model | MoE models only — see [Models](#models) for how to check a checkpoint |
-| Deployment Scenario | embedding / LM head TP: all-DP MoE serving or PD decode nodes; o_proj / MLP TP: P/D-disaggregated decode nodes only |
-| Standard TP | o_proj / MLP TP require `tensor_parallel_size == 1` (enforced at config load); embedding / LM head TP are validated only under `tensor_parallel_size == 1` — under `tp > 1` their fine-grained sharding replaces the standard TP sharding of these modules; see [Standard Tensor Parallelism Requirement](#standard-tensor-parallelism-requirement) |
+| Deployment Scenario | embedding / LM head TP: standalone MoE serving (optionally stacked with standard TP) or PD decode nodes; o_proj / MLP TP: P/D-disaggregated decode nodes only |
+| Standard TP | o_proj / MLP TP cannot be combined with standard TP (`tensor_parallel_size == 1` required, enforced at config load); embedding / LM head TP can be combined with standard TP; see [Standard Tensor Parallelism Requirement](#standard-tensor-parallelism-requirement) |
 | Feature Mutual Exclusion | Pipeline parallelism (`pipeline_parallel_size > 1`) cannot be combined with any of the four knobs; `prefill_context_parallel_size > 1` cannot be combined with o_proj / MLP TP; PCP embedding / LM-head weight sharding (`enable_pcp_embedding_lmhead_weight_sharding`, on by default when PCP > 1) cannot be combined with embedding / LM head TP |
 | Hardware | No config-enforced hardware restriction; the performance data in this guide was measured on Atlas A2 (see [Experimental Results](#experimental-results)) |
 
@@ -91,32 +91,34 @@ Violating these constraints fails at configuration load with `finegrained tp siz
 
 #### Standard Tensor Parallelism Requirement
 
-Fine-grained TP shards the configured layer **across the data-parallel (DP) dimension**, not the standard tensor-parallel (TP) dimension. Its interplay with the standard `tensor_parallel_size` therefore differs per component:
+Fine-grained TP shards the configured layer **across the data-parallel (DP) dimension**, not the standard tensor-parallel (TP) dimension. Whether a knob can be combined with standard TP therefore differs per component:
 
 | Component | Behavior with `tensor_parallel_size > 1` |
 |-----------|------------------------------------------|
-| `o_proj` / `mlp` | **Rejected at config load.** For `o_proj`, the DSA attention output is reshaped with `n_local_groups = n_groups // tp_size` (standard TP), while the wo_a/wo_b weights are sharded by the OTP group (DP dimension); the two axes no longer align (for MLP, the combination is simply untested). Both knobs require `tensor_parallel_size == 1`. |
-| `embedding` / LM head | **Validated for `tensor_parallel_size == 1` only.** With a knob enabled, these modules always resolve to the fine-grained plan: their weights are sharded by the fine-grained (DP-axis, fixed `tp_idx`) group — `vocab / fine_grained_size` per rank — which **replaces** the standard TP sharding of these modules instead of composing with it. There is no config-time gate on `tensor_parallel_size`, and the fine-grained groups remain valid under `tp > 1`, but that combination is not validated — keep `tensor_parallel_size == 1` when enabling these knobs. |
+| `o_proj` / `mlp` | **Cannot be combined — rejected at config load.** For `o_proj`, the DSA attention output is reshaped with `n_local_groups = n_groups // tp_size` (standard TP), while the wo_a/wo_b weights are sharded by the OTP group (DP dimension); the two axes no longer align (for MLP, the combination is simply untested). Both knobs require `tensor_parallel_size == 1`. |
+| `embedding` / LM head | **Can be combined.** With a knob enabled, these modules always resolve to the fine-grained plan: their weights are sharded by the fine-grained (DP-axis, fixed `tp_idx`) group — `vocab / fine_grained_size` per rank — replacing the standard TP sharding of these modules instead of composing with it. Scenario 1 shows a stacked example. |
 
 ## Feature Usage
 
 ### Usage Example
 
-#### Scenario 1 — embedding + LM head TP (all-DP MoE serving)
+#### Scenario 1 — embedding + LM head TP, stacked with standard TP (standalone MoE serving)
 
 ```bash
 vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
     --quantization ascend \
-    --data-parallel-size 16 \
-    --tensor-parallel-size 1 \
+    --data-parallel-size 4 \
+    --tensor-parallel-size 4 \
     --enable-expert-parallel \
     --additional-config '{
         "finegrained_tp_config": {
-            "embedding_tensor_parallel_size": 8,
-            "lmhead_tensor_parallel_size": 8
+            "embedding_tensor_parallel_size": 4,
+            "lmhead_tensor_parallel_size": 4
         }
     }'
 ```
+
+embedding / LM head TP are the two knobs that can be combined with standard `tensor_parallel_size` (o_proj / MLP TP cannot — see [Standard Tensor Parallelism Requirement](#standard-tensor-parallelism-requirement)); stacking them with standard TP splits the dense weights across TP ranks as usual, giving a standalone instance more KV headroom per card. For decode-throughput production deployments, the recommended topology is still the P/D-disaggregated decode node shown in Scenario 2.
 
 #### Scenario 2 — all four knobs on a P/D-disaggregated decode node
 
@@ -180,7 +182,7 @@ After the instance starts, check which knobs passed startup validation:
    Expected output (Scenario 1):
 
    ```text
-   finegrained_tp_config enabled: lmhead_tensor_parallel_size=8, embedding_tensor_parallel_size=8
+   finegrained_tp_config enabled: lmhead_tensor_parallel_size=4, embedding_tensor_parallel_size=4
    ```
 
    Expected output (Scenario 2):
@@ -236,7 +238,7 @@ To evaluate the effectiveness of fine-grained TP in large-scale serving, we depl
 
 ## Deployment Recommendations
 
-Fine-grained TP is designed for the **decode instance** of PD separation, where models are typically deployed in all-DP mode. In this setup, sharding weight-heavy layers reduces redundant storage and memory pressure. Accordingly, `o_proj` TP and MLP TP are validated for — and limited to — P/D-disaggregated decode nodes (see [Preconditions for o_proj / MLP TP](#preconditions-for-o_proj--mlp-tp)), while embedding and LM head TP are also applicable to all-DP deployments without PD.
+Fine-grained TP is designed for the **decode instance** of PD separation, where models are typically deployed in all-DP mode. In this setup, sharding weight-heavy layers reduces redundant storage and memory pressure. Accordingly, `o_proj` TP and MLP TP are validated for — and limited to — P/D-disaggregated decode nodes (see [Preconditions for o_proj / MLP TP](#preconditions-for-o_proj--mlp-tp)), while embedding and LM head TP are also usable outside PD deployments, including stacked with standard TP (Scenario 1).
 
 ## FAQs
 
