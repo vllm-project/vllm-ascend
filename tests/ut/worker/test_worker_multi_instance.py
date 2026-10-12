@@ -291,6 +291,27 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
 
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.logger")
+    def test_unchanged_free_memory_after_profile_is_allowed(self, mock_logger, mock_get_ascend_config):
+        """An unchanged free-memory snapshot is valid for virtualized devices."""
+        mock_get_ascend_config.return_value.sparse_kv_offload_config.enabled = False
+        total = int(64 * GiB_bytes)
+        requested_memory = int(total * 0.9)
+        init_free = int(60 * GiB_bytes)
+        non_kv_cache = int(0.5 * GiB_bytes)
+
+        worker = self._make_worker(requested_memory, init_free, total)
+        profile_result = self._make_profile_result(
+            free_memory_after=init_free,
+            non_kv_cache_memory=non_kv_cache,
+        )
+
+        with self._patch_memory_profiling(profile_result):
+            result = worker.determine_available_memory()
+
+        self.assertEqual(result, requested_memory - non_kv_cache)
+
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    @patch("vllm_ascend.worker.worker.logger")
     def test_second_instance_tight_memory_still_positive(self, mock_logger, mock_get_ascend_config):
         """
         Edge case: card is almost full when second instance starts.
