@@ -3,13 +3,16 @@
 """Kimi K3 MLA DSpark draft model for Ascend."""
 
 from collections.abc import Iterable
+from dataclasses import replace
 
 import torch
 from torch import nn
 from vllm.config import VllmConfig
+from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.qwen3_dspark import DSparkMarkovHead
 from vllm.model_executor.models.utils import (
@@ -139,6 +142,16 @@ class AscendK3DSparkModel(UpstreamK3DSparkModel):
         self.config = draft_model_config.hf_config
         self.quant_config = get_draft_quant_config(vllm_config)
         self.embed_tokens: nn.Module | None = None
+        # The draft config used for construction reports PP=1; query the real
+        # PP group, the same signal maybe_share_target_embed uses.
+        if get_pp_group().world_size > 1:
+            # PP stages after the first cannot alias the target's stage-0
+            # embedding; own the frozen copy shipped in the draft checkpoint.
+            self.embed_tokens = VocabParallelEmbedding(
+                self.config.vocab_size,
+                self.config.target_hidden_size,
+                prefix=maybe_prefix(prefix, "embed_tokens"),
+            )
 
         self.context_proj = ColumnParallelLinear(
             self.config.target_hidden_size * self.config.num_target_layers,
@@ -240,6 +253,12 @@ class AscendK3DSparkForCausalLM(UpstreamK3DSparkForCausalLM):
             prefix=maybe_prefix(prefix, "model"),
         )
         self.lm_head: nn.Module | None = None
+        self._owns_embed_tokens = get_pp_group().world_size > 1
+        if self._owns_embed_tokens:
+            # The draft runs on the last PP stage, where the target embedding
+            # (stage 0) cannot be aliased. Declare ownership so the loader's
+            # share check keeps the checkpoint copy instead of raising.
+            self.has_own_embed_tokens = True
         self.logits_processor = LogitsProcessor(
             self.config.draft_vocab_size,
             scale=getattr(self.config, "logit_scale", 1.0),
@@ -282,7 +301,16 @@ class AscendK3DSparkForCausalLM(UpstreamK3DSparkForCausalLM):
         interface without creating that extra packed parameter.
         """
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        mapper = self.hf_to_vllm_mapper
+        if self._owns_embed_tokens:
+            # Keep the frozen embedding without duplicating upstream mappings.
+            mapper = replace(
+                mapper,
+                orig_to_new_substr={
+                    key: value for key, value in mapper.orig_to_new_substr.items() if key != "embed_tokens"
+                },
+            )
+        return loader.load_weights(weights, mapper=mapper)
 
     def embed_input_ids(
         self,

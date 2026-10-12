@@ -14,6 +14,7 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 import torch
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import LayerBatchBuilder
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import LoadSpec, ReqMeta
@@ -43,8 +44,13 @@ def test_pp_stage_maps_multiple_cache_groups_to_local_layers(pp_rank, is_save):
         [f"model.layers.{layer_offset + i}.attn" for i in [1, 3]],
     ]
     worker = KVPoolWorker.__new__(KVPoolWorker)
-    worker.kv_cache_config = SimpleNamespace(
-        kv_cache_groups=[SimpleNamespace(layer_names=names) for names in group_layer_names]
+    attention_spec = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.uint8)
+    worker.kv_cache_config = KVCacheConfig(
+        num_blocks=2,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(layer_names=names, kv_cache_spec=attention_spec) for names in group_layer_names
+        ],
     )
     worker.hf_config = SimpleNamespace(num_hidden_layers=8)
     worker.pp_size = 2
@@ -53,6 +59,9 @@ def test_pp_stage_maps_multiple_cache_groups_to_local_layers(pp_rank, is_save):
     worker.total_layers = 8
     worker.num_layers = 4
     worker.num_kv_cache_groups = 2
+    # _init_layerwise_config skips non-cacheable groups; both attention
+    # groups here are prefix-cacheable.
+    worker.cacheable_group_ids = [0, 1]
     worker.use_layerwise_transfer = False
     worker.use_layerwise = False
     worker._extra_config = {}
@@ -69,7 +78,9 @@ def test_pp_stage_maps_multiple_cache_groups_to_local_layers(pp_rank, is_save):
 
     worker.num_blocks = 2
     worker.kv_caches = {
-        layer_name: torch.empty((2, 2), dtype=torch.uint8) for names in group_layer_names for layer_name in names
+        layer_name: torch.empty((2, 16, 2, 1, 1), dtype=torch.uint8)
+        for names in group_layer_names
+        for layer_name in names
     }
     worker.group_kv_caches_base_addr = {}
     worker.group_block_len = {}
@@ -86,6 +97,11 @@ def test_pp_stage_maps_multiple_cache_groups_to_local_layers(pp_rank, is_save):
     worker.tp_rank = 0
     worker.dcp_size = 1
     worker.put_step = 1
+    # _is_layerwise_save_owner gates the save path; attention groups never use
+    # align state, and a bare producer owns every save.
+    worker.kv_role = "kv_producer"
+    worker.consumer_is_to_put = False
+    worker.group_uses_align_state = [False, False]
     worker.grouped_block_size = [16, 16]
     worker.hash_block_size = 16
     worker.cache_coordinator = None

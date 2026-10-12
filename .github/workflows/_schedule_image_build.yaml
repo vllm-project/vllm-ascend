@@ -98,12 +98,12 @@ on:
         description: 'Torch NPU version'
         required: false
         type: string
-        default: '26.1.0'
+        default: '26.2.0'
       torch_npu_date:
         description: 'Torch NPU date'
         required: false
         type: string
-        default: '20260725.3'
+        default: '20260926.5'
       cann_swr_url:
         description: 'CANN base image URL (SWR registry)'
         required: false

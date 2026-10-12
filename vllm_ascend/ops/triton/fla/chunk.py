@@ -112,7 +112,7 @@ def chunk_gated_delta_rule_fwd(
     else:
         cu_seqlens_kern, initial_state_kern = cu_seqlens_host, initial_state
         keep_meta = None
-    h, v_new, final_state = torch.ops._C_ascend.chunk_gated_delta_rule_fwd_h(
+    h, v_new, final_state = torch.ops._C_ascend.chunk_gated_delta_rule_fwd_h_vllm(
         k_ascendc,
         w_ascendc,
         u_ascendc,

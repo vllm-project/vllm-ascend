@@ -105,61 +105,16 @@ class TestDetectQuantizationMethod(TestBase):
             result = detect_quantization_method(tmpdir)
             self.assertEqual(result, ASCEND_QUANTIZATION_METHOD)
 
-    def test_detects_compressed_tensors(self):
+    def test_ignores_compressed_tensors_in_config_json(self):
+        """Quantization methods declared in config.json are already
+        auto-detected by upstream vLLM, so they must be ignored here."""
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = os.path.join(tmpdir, "config.json")
             with open(config_path, "w") as f:
                 json.dump({"quantization_config": {"quant_method": "compressed-tensors"}}, f)
 
             result = detect_quantization_method(tmpdir)
-            self.assertEqual(result, COMPRESSED_TENSORS_METHOD)
-
-    def test_returns_none_for_no_quant(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            result = detect_quantization_method(tmpdir)
             self.assertIsNone(result)
-
-    def test_returns_none_for_non_compressed_tensors_quant_method(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            config_path = os.path.join(tmpdir, "config.json")
-            with open(config_path, "w") as f:
-                json.dump({"quantization_config": {"quant_method": "gptq"}}, f)
-
-            result = detect_quantization_method(tmpdir)
-            self.assertIsNone(result)
-
-    def test_returns_none_for_config_without_quant_config(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            config_path = os.path.join(tmpdir, "config.json")
-            with open(config_path, "w") as f:
-                json.dump({"model_type": "llama"}, f)
-
-            result = detect_quantization_method(tmpdir)
-            self.assertIsNone(result)
-
-    def test_returns_none_for_malformed_config_json(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            config_path = os.path.join(tmpdir, "config.json")
-            with open(config_path, "w") as f:
-                f.write("not valid json{{{")
-
-            result = detect_quantization_method(tmpdir)
-            self.assertIsNone(result)
-
-    def test_modelslim_takes_priority_over_compressed_tensors(self):
-        """When both ModelSlim config and compressed-tensors config exist,
-        ModelSlim should take priority."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            modelslim_path = os.path.join(tmpdir, MODELSLIM_CONFIG_FILENAME)
-            with open(modelslim_path, "w") as f:
-                json.dump({"layer.weight": "INT8"}, f)
-
-            config_path = os.path.join(tmpdir, "config.json")
-            with open(config_path, "w") as f:
-                json.dump({"quantization_config": {"quant_method": "compressed-tensors"}}, f)
-
-            result = detect_quantization_method(tmpdir)
-            self.assertEqual(result, ASCEND_QUANTIZATION_METHOD)
 
 
 class TestMaybeAutoDetectQuantization(TestBase):
@@ -171,10 +126,18 @@ class TestMaybeAutoDetectQuantization(TestBase):
         return vllm_config
 
     @patch("vllm_ascend.quantization.utils.detect_quantization_method", return_value=None)
-    def test_no_detection_does_nothing(self, mock_detect):
-        vllm_config = self._make_vllm_config()
-        maybe_auto_detect_quantization(vllm_config)
-        self.assertIsNone(vllm_config.model_config.quantization)
+    def test_no_detection_with_quantization_already_set_stays_silent(self, mock_detect):
+        """When quantization is already set (by the user or resolved from
+        config.json by upstream vLLM) and no ModelSlim signature is found,
+        nothing should be logged or changed."""
+        vllm_config = self._make_vllm_config(quantization=COMPRESSED_TENSORS_METHOD)
+
+        with patch("vllm_ascend.quantization.utils.logger") as mock_logger:
+            maybe_auto_detect_quantization(vllm_config)
+
+        self.assertEqual(vllm_config.model_config.quantization, COMPRESSED_TENSORS_METHOD)
+        mock_logger.info_once.assert_not_called()
+        mock_logger.warning_once.assert_not_called()
 
     @patch("vllm_ascend.quantization.utils.detect_quantization_method", return_value=ASCEND_QUANTIZATION_METHOD)
     def test_user_specified_same_method_no_change(self, mock_detect):
@@ -193,8 +156,8 @@ class TestMaybeAutoDetectQuantization(TestBase):
             maybe_auto_detect_quantization(vllm_config)
 
         self.assertEqual(vllm_config.model_config.quantization, ASCEND_QUANTIZATION_METHOD)
-        mock_logger.info.assert_called_once()
-        call_args = mock_logger.info.call_args[0]
+        mock_logger.info_once.assert_called_once()
+        call_args = mock_logger.info_once.call_args[0]
         self.assertIn("Auto-detected quantization method", call_args[0])
         self.assertIn(ASCEND_QUANTIZATION_METHOD, call_args)
         self.assertIn("/fake/quant_model", call_args)
@@ -209,25 +172,26 @@ class TestMaybeAutoDetectQuantization(TestBase):
             maybe_auto_detect_quantization(vllm_config)
 
         self.assertEqual(vllm_config.model_config.quantization, COMPRESSED_TENSORS_METHOD)
-        mock_logger.warning.assert_called_once()
-        call_args = mock_logger.warning.call_args[0]
+        mock_logger.warning_once.assert_called_once()
+        call_args = mock_logger.warning_once.call_args[0]
         self.assertIn("Auto-detected quantization method", call_args[0])
         self.assertIn(ASCEND_QUANTIZATION_METHOD, call_args)
         self.assertIn(COMPRESSED_TENSORS_METHOD, call_args)
 
     @patch("vllm_ascend.quantization.utils.detect_quantization_method", return_value=None)
     def test_no_detection_emits_info_log(self, mock_detect):
-        """When no quantization is detected, an info log tells the user the model loads as float."""
+        """When no quantization is set and none is detected, an info log
+        hints how to force a quantization method."""
         vllm_config = self._make_vllm_config(quantization=None)
 
         with patch("vllm_ascend.quantization.utils.logger") as mock_logger:
             maybe_auto_detect_quantization(vllm_config)
 
-        mock_logger.info.assert_called_once()
-        call_args = mock_logger.info.call_args[0]
-        self.assertIn("No quantization signature detected", call_args[0])
+        mock_logger.info_once.assert_called_once()
+        call_args = mock_logger.info_once.call_args[0]
+        self.assertIn("No ModelSlim quantization signature detected", call_args[0])
         self.assertIn("/fake/model", call_args)
-        mock_logger.warning.assert_not_called()
+        mock_logger.warning_once.assert_not_called()
         self.assertIsNone(vllm_config.model_config.quantization)
 
     @patch("vllm.config.VllmConfig._get_quantization_config", return_value=MagicMock())

@@ -55,6 +55,9 @@ repos:
 - repo: https://github.com/rhysd/actionlint
   rev: v1.7.7
   hooks:
+  # This hook runs actionlint directly, without tools/actionlint.sh. When
+  # ShellCheck is on PATH, export SHELLCHECK_OPTS=--exclude=SC2046,SC2006,SC2086
+  # before pre-commit run --all-files to use the repository's existing policy.
   - id: actionlint
     exclude: '.*\.github/workflows/(scripts|configs)/.*\.ya?ml$'
         

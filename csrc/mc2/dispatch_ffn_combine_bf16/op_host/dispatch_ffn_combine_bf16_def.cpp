@@ -72,6 +72,7 @@ class DispatchFFNCombineBF16 : public OpDef {
     this->Attr("M").AttrType(OPTIONAL).Int();
     this->Attr("transB").AttrType(OPTIONAL).Bool(false);
     this->Attr("weightNz").AttrType(OPTIONAL).Bool(false);
+    this->Attr("worldSize").AttrType(REQUIRED).Int();
 
     OpAICoreConfig aicore_config;
     aicore_config.DynamicCompileStaticFlag(true)

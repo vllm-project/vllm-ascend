@@ -12,6 +12,7 @@ from vllm.config import EPLBConfig, ParallelConfig, VllmConfig
 from vllm.config import parallel as parallel_module
 from vllm.platforms import current_platform
 
+from vllm_ascend.ascend_config import EplbConfig
 from vllm_ascend.patch.platform import patch_eplb
 
 
@@ -34,12 +35,28 @@ def _npu_parallel_config_platform():
         proxy._platform = original_platform
 
 
+@contextmanager
+def _without_any_hixl_binding():
+    """Make both the official package and the ctypes fallback unavailable."""
+    with (
+        patch.dict("sys.modules", {"hixl": None}),
+        patch(
+            "vllm_ascend.distributed.eplb.hixl_compat.ensure_available",
+            side_effect=RuntimeError("No CANN HIXL libraries found"),
+        ),
+    ):
+        yield
+
+
 def test_parallel_and_vllm_config_keep_upstream_validation():
     with (
         _npu_parallel_config_platform(),
         patch("vllm_ascend.logger.configure_ascend_file_logging"),
         patch("vllm_ascend.logger.configure_ascend_logging"),
         patch("vllm.distributed.nixl_utils.is_nixl_available", return_value=False),
+        # Stub the local probe: whether this container happens to ship a
+        # usable hixl binding must not change the assertion.
+        patch.object(patch_eplb, "_probe_local_hixl_binding", return_value=("none", "stubbed")),
     ):
         parallel_config = ParallelConfig(
             tensor_parallel_size=2,
@@ -50,7 +67,14 @@ def test_parallel_and_vllm_config_keep_upstream_validation():
         vllm_config = VllmConfig(parallel_config=parallel_config)
 
     assert vllm_config.parallel_config.enable_eplb
+    # Provisional auto-selection happens at config stage (no HIXL here);
+    # the worker-stage consensus may still correct it group-wide.
     assert vllm_config.parallel_config.eplb_config.communicator == "torch_gloo"
+    assert getattr(
+        vllm_config.parallel_config.eplb_config,
+        patch_eplb._AUTO_SELECTED_ATTRIBUTE,
+        False,
+    )
 
 
 def test_eplb_policy_config_supports_stair_and_default():
@@ -67,23 +91,143 @@ def test_eplb_policy_config_supports_stair_and_default():
     assert EPLBConfig().policy == "stair"
 
 
-def test_parallel_config_keeps_upstream_nixl_auto_selection():
-    with (
-        _npu_parallel_config_platform(),
-        patch(
-            "vllm.distributed.nixl_utils.is_nixl_available",
-            return_value=True,
-        ) as is_nixl_available,
-    ):
-        parallel_config = ParallelConfig(
-            tensor_parallel_size=2,
-            enable_expert_parallel=True,
-            enable_eplb=True,
-            eplb_config=EPLBConfig(use_async=True),
-        )
+def test_eplb_communicator_config_supports_hixl():
+    assert EPLBConfig().communicator is None
+    assert EPLBConfig(communicator="hixl").communicator == "hixl"
+    assert EPLBConfig(communicator="torch_gloo").communicator == "torch_gloo"
 
-    assert parallel_config.eplb_config.communicator == "nixl"
-    is_nixl_available.assert_called_once_with()
+    patch_eplb._patch_eplb_communicator_config()
+    assert EPLBConfig(communicator="hixl").communicator == "hixl"
+
+
+def _resolver_fixtures(communicator=None, auto_selected=False, additional_config=None):
+    """Build configs for the resolver: provisional decision + parsed ascend config.
+
+    Mirrors production: ``ascend_eplb_config`` is parsed from the raw
+    ``additional_config`` dict, and the provisional communicator (if any) is
+    marked auto-selected so the consensus may correct it.
+    """
+    parallel_config = MagicMock()
+    parallel_config.eplb_config.communicator = communicator
+    vllm_config = MagicMock()
+    vllm_config.additional_config = additional_config or {}
+    raw_eplb_config = vllm_config.additional_config.get("eplb_config", {})
+    ascend_eplb_config = EplbConfig(**raw_eplb_config) if raw_eplb_config else EplbConfig()
+    if auto_selected:
+        patch_eplb._mark_auto_selected(parallel_config.eplb_config)
+    else:
+        # MagicMock auto-creates truthy attributes on getattr; the marker
+        # must be explicitly False to simulate "not auto-selected".
+        setattr(parallel_config.eplb_config, patch_eplb._AUTO_SELECTED_ATTRIBUTE, False)
+    return parallel_config, ascend_eplb_config, vllm_config
+
+
+def test_resolve_ascend_communicator_selects_hixl_when_group_agrees():
+    for binding in ("official", "ctypes"):
+        for provisional in (None, "torch_gloo", "hixl"):
+            parallel_config, ascend_eplb_config, vllm_config = _resolver_fixtures(
+                communicator=provisional, auto_selected=True
+            )
+            with (
+                patch.object(patch_eplb, "_group_hixl_binding_consensus", return_value=binding),
+                patch("vllm_ascend.patch.platform.patch_eplb.get_current_vllm_config", return_value=vllm_config),
+            ):
+                stair_config = patch_eplb.resolve_ascend_eplb_communicator(parallel_config, ascend_eplb_config)
+
+            assert parallel_config.eplb_config.communicator == "hixl"
+            assert stair_config is ascend_eplb_config.stair_config
+            assert vllm_config.additional_config == {}
+
+
+def test_resolve_ascend_communicator_falls_back_to_gloo_and_clamps_unset_limits():
+    parallel_config, ascend_eplb_config, vllm_config = _resolver_fixtures(
+        communicator="hixl",
+        auto_selected=True,
+        additional_config={"eplb_config": {"stair_config": {"load_window_bins": 32}}},
+    )
+    with (
+        patch.object(patch_eplb, "_group_hixl_binding_consensus", return_value="none"),
+        patch("vllm_ascend.patch.platform.patch_eplb.get_current_vllm_config", return_value=vllm_config),
+    ):
+        stair_config = patch_eplb.resolve_ascend_eplb_communicator(parallel_config, ascend_eplb_config)
+
+    assert parallel_config.eplb_config.communicator == "torch_gloo"
+    assert vllm_config.additional_config["eplb_config"]["stair_config"] == {
+        "load_window_bins": 32,
+        "rank_transfer_limit": 1,
+        "cross_node_transfer_limit": 1,
+    }
+    assert (stair_config.rank_transfer_limit, stair_config.cross_node_transfer_limit) == (1, 1)
+    assert stair_config.load_window_bins == 32
+
+
+def test_resolve_ascend_communicator_keeps_explicit_limits_on_gloo_fallback():
+    parallel_config, ascend_eplb_config, vllm_config = _resolver_fixtures(
+        communicator="hixl",
+        auto_selected=True,
+        additional_config={
+            "eplb_config": {"stair_config": {"rank_transfer_limit": -1, "cross_node_transfer_limit": 0}}
+        },
+    )
+    with (
+        patch.object(patch_eplb, "_group_hixl_binding_consensus", return_value="mixed"),
+        patch("vllm_ascend.patch.platform.patch_eplb.get_current_vllm_config", return_value=vllm_config),
+        patch.object(patch_eplb.logger, "warning") as warning,
+    ):
+        stair_config = patch_eplb.resolve_ascend_eplb_communicator(parallel_config, ascend_eplb_config)
+
+    assert parallel_config.eplb_config.communicator == "torch_gloo"
+    assert vllm_config.additional_config["eplb_config"]["stair_config"] == {
+        "rank_transfer_limit": -1,
+        "cross_node_transfer_limit": 0,
+    }
+    assert (stair_config.rank_transfer_limit, stair_config.cross_node_transfer_limit) == (-1, 0)
+    assert any("keeping the explicitly configured" in call.args[0] for call in warning.call_args_list)
+
+
+def test_resolve_ascend_communicator_skips_consensus_for_explicit_communicator():
+    parallel_config, ascend_eplb_config, _ = _resolver_fixtures(communicator="hixl")
+    with patch.object(
+        patch_eplb,
+        "_group_hixl_binding_consensus",
+        side_effect=AssertionError("consensus must not run for an explicit communicator"),
+    ):
+        stair_config = patch_eplb.resolve_ascend_eplb_communicator(parallel_config, ascend_eplb_config)
+
+    assert parallel_config.eplb_config.communicator == "hixl"
+    assert stair_config is ascend_eplb_config.stair_config
+
+
+def test_group_hixl_binding_consensus_combines_rank_bindings(monkeypatch):
+    def consensus_with_rank_bindings(bindings):
+        monkeypatch.setattr(
+            patch_eplb,
+            "_probe_local_hixl_binding",
+            lambda: (bindings[0], None if bindings[0] != "none" else "no hixl here"),
+        )
+        ranks = [patch_eplb._BINDING_CONSENSUS_RANK[binding] for binding in bindings]
+
+        def fake_all_reduce(flag, *, group, op):
+            if op == torch.distributed.ReduceOp.MIN:
+                flag[0] = min(ranks)
+            else:
+                flag[0] = max(ranks)
+
+        monkeypatch.setattr(torch.distributed, "all_reduce", fake_all_reduce)
+        monkeypatch.setattr(patch_eplb, "get_eplb_group", lambda: SimpleNamespace(cpu_group=MagicMock()))
+        return patch_eplb._group_hixl_binding_consensus()
+
+    assert consensus_with_rank_bindings(["official", "official", "official"]) == "official"
+    assert consensus_with_rank_bindings(["ctypes", "ctypes", "ctypes"]) == "ctypes"
+    assert consensus_with_rank_bindings(["official", "ctypes"]) == "mixed"
+    assert consensus_with_rank_bindings(["ctypes", "none"]) == "none"
+
+
+def test_group_hixl_binding_consensus_degrades_when_probe_fails(monkeypatch):
+    with _without_any_hixl_binding():
+        monkeypatch.setattr(patch_eplb, "get_eplb_group", lambda: SimpleNamespace(cpu_group=MagicMock()))
+        monkeypatch.setattr(torch.distributed, "all_reduce", lambda flag, *, group, op: flag.fill_(0))
+        assert patch_eplb._group_hixl_binding_consensus() == "none"
 
 
 def test_parallel_config_platform_patch_is_idempotent():
@@ -109,6 +253,29 @@ def test_communicator_factory_creates_ascend_gloo_communicator(monkeypatch):
 
     assert result is communicator
     gloo_cls.assert_called_once_with(cpu_group=coordinator.cpu_group)
+
+
+def test_communicator_factory_creates_ascend_hixl_communicator(monkeypatch):
+    communicator = object()
+    hixl_cls = MagicMock(return_value=communicator)
+    monkeypatch.setattr(patch_eplb, "AscendHixlEplbCommunicator", hixl_cls)
+    coordinator = MagicMock()
+    weights = [[object()]]
+    buffer = [object()]
+
+    result = patch_eplb._eplb_communicator.create_eplb_communicator(
+        coordinator,
+        "hixl",
+        weights,
+        buffer,
+    )
+
+    assert result is communicator
+    hixl_cls.assert_called_once_with(
+        cpu_group=coordinator.cpu_group,
+        all_expert_weights=weights,
+        expert_buffer=buffer,
+    )
 
 
 def test_communicator_factory_accepts_additive_parameters(monkeypatch):
@@ -322,6 +489,7 @@ def test_async_worker_only_publishes_changed_layers(monkeypatch, changed_layer):
     model_state = SimpleNamespace(
         communicator=MagicMock(),
         physical_to_logical_map=old_mapping,
+        logical_to_physical_map=torch.empty((3, 2, 1), dtype=torch.int32),
         model=SimpleNamespace(expert_weights=[[object()] for _ in range(3)]),
         expert_buffer=[object()],
         rebalanced=True,
@@ -371,7 +539,15 @@ def test_async_noop_result_finishes_without_moving_weights(monkeypatch):
     monkeypatch.setattr(patch_eplb._eplb_state, "move_from_buffer", move_from_buffer)
     consumed_event = MagicMock()
     model_state = SimpleNamespace(
-        pending_result=patch_eplb._AscendAsyncLayerResult(None, None, None, consumed_event, True),
+        pending_result=patch_eplb._AscendAsyncLayerResult(
+            layer_idx=None,
+            new_physical_to_logical_map=None,
+            new_logical_to_physical_map=None,
+            new_logical_replica_count=None,
+            transfer_metadata=None,
+            consumed_event=consumed_event,
+            is_last_result=True,
+        ),
         rebalanced=True,
     )
 
@@ -443,6 +619,69 @@ def test_async_workspace_refreshes_layer_and_clears_target_after_last(monkeypatc
         log_info.assert_not_called()
     assert call_order == ["move", "refresh", "ack"]
     assert hasattr(model_state.communicator, patch_eplb._EXPLICIT_TRANSFER_TARGET_ATTR) == (not is_last_layer)
+
+
+def test_hixl_workspace_logs_background_transfer_span(monkeypatch):
+    call_order: list[str] = []
+    communicator = object.__new__(patch_eplb.AscendHixlEplbCommunicator)
+    communicator._eplb_hixl_phase_timings = [
+        SimpleNamespace(
+            launch_ms=1.0,
+            transfer_ms=2.0,
+            confirmation_ms=3.0,
+            request_count=5,
+            transfer_bytes=6,
+        )
+    ]
+    consumed_event = MagicMock()
+    model_state = SimpleNamespace(
+        pending_result=patch_eplb._AscendAsyncLayerResult(
+            layer_idx=0,
+            new_physical_to_logical_map=torch.tensor([0]),
+            new_logical_to_physical_map=torch.tensor([[0]]),
+            new_logical_replica_count=torch.tensor([1]),
+            transfer_metadata=object(),
+            consumed_event=consumed_event,
+            is_last_result=True,
+        ),
+        rebalanced=True,
+        communicator=communicator,
+        model=SimpleNamespace(num_moe_layers=1, expert_weights=[[object()]]),
+        expert_buffer=[object()],
+        physical_to_logical_map=torch.full((1, 1), -1, dtype=torch.int32),
+        logical_to_physical_map=torch.full((1, 1, 1), -1, dtype=torch.int32),
+        logical_replica_count=torch.zeros((1, 1), dtype=torch.int32),
+        model_name="model",
+        _eplb_migration_span_steps=7,
+        _eplb_migration_deferred_steps=2,
+        _eplb_foreground_wait_ms=0.25,
+    )
+    monkeypatch.setattr(
+        patch_eplb._eplb_state,
+        "move_from_buffer",
+        MagicMock(side_effect=lambda **_kwargs: call_order.append("move")),
+    )
+    monkeypatch.setattr(patch_eplb, "refresh_model_routing_tables", MagicMock())
+    log_info = MagicMock()
+    monkeypatch.setattr(patch_eplb.logger, "info", log_info)
+
+    def original_move(model_state, ep_rank):
+        raise AssertionError("Ascend results must use the patched move path")
+
+    patch_eplb._wrap_move_to_workspace(original_move)(model_state, 0)
+
+    assert call_order == ["move"]
+    assert model_state.physical_to_logical_map.tolist() == [[0]]
+    assert model_state.logical_to_physical_map.tolist() == [[[0]]]
+    assert model_state.logical_replica_count.tolist() == [[1]]
+    consumed_event.record.assert_called_once_with(None)
+    assert "_eplb_hixl_phase_timings" not in communicator.__dict__
+    assert not hasattr(model_state, "_eplb_migration_span_steps")
+    assert not hasattr(model_state, "_eplb_migration_deferred_steps")
+    assert not hasattr(model_state, "_eplb_foreground_wait_ms")
+    hixl_log = next(call for call in log_info.call_args_list if call.args[0].startswith("HIXL EPLB transfer:"))
+    assert hixl_log.args[6] == 0.25
+    assert hixl_log.args[-2:] == (7, 2)
 
 
 def test_async_workspace_refresh_failure_keeps_target_and_defers_ack(monkeypatch):

@@ -297,6 +297,8 @@ def build_layerwise_reuse_layout(
 def apply_layerwise_kv_cache_plan(
     kv_cache_config: KVCacheConfig,
     vllm_config: VllmConfig,
+    *,
+    excluded_layer_names: set[str] | None = None,
 ) -> None:
     """Rewrite logical layer tensors to use shared physical KV buffers."""
     extra_config = get_layerwise_reuse_config(vllm_config.kv_transfer_config)
@@ -309,8 +311,9 @@ def apply_layerwise_kv_cache_plan(
 
     base_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
     layer_specs = get_layerwise_kv_cache_specs(kv_cache_config)
+    excluded_layer_names = (excluded_layer_names or set()) & layer_specs.keys()
     reuse_layout = build_layerwise_reuse_layout(
-        layer_specs,
+        {name: spec for name, spec in layer_specs.items() if name not in excluded_layer_names},
         base_layers,
         extra_config,
     )
@@ -377,6 +380,11 @@ def apply_layerwise_kv_cache_plan(
                 indexer_specs.append(indexer)
         if indexer_specs:
             _merge_specs(indexer_specs)
+    # Draft KV survives between forwards, unlike a layerwise target scratch
+    # slot. Give every resident draft layer its own persistent descriptor.
+    for layer_name in layer_specs:
+        if layer_name in excluded_layer_names:
+            _merge_specs([NamedKVCacheSpec(layer_name, layer_specs[layer_name])])
     kv_cache_config.kv_cache_tensors = new_tensors
     logger.info(
         "Layerwise KV cache reuse merged %d descriptors into %d descriptors using %d buffer assignments.",

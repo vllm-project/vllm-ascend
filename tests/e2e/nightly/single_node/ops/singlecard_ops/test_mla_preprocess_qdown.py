@@ -90,7 +90,6 @@ def test_mla_preprocess_kernel(cache_mode: str, enable_rope: bool):
     sin = torch.randn((token_num, rope_dim), dtype=dtype).npu()
 
     wuk = torch.randn((head_num, qk_nope_head_dim, kv_lora_rank), dtype=dtype).npu()
-    wuk = torch_npu.npu_format_cast(wuk, 29)
     kv_cache, kv_cache_rope = _build_mode_caches(cache_mode, block_num, block_size, kv_lora_rank, rope_dim, dtype)
 
     slotmapping = torch.randint(0, block_size, (token_num,), dtype=torch.int32).npu()

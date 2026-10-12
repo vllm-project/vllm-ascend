@@ -221,6 +221,8 @@ __aicore__ inline bool MoeGatingTopKHashWithoutGroup<T, U1, U2>::IsImageRow(int6
         return false;
     }
     U1 tokenId = inputIdsGm_.GetValue(row);
+    // Draft/padding IDs follow token zero's routing, including sentinel ranges.
+    tokenId = tokenId == static_cast<U1>(-1) ? static_cast<U1>(0) : tokenId;
     return tokenId >= static_cast<U1>(tilingData_->imageSentinelLo) &&
            tokenId < static_cast<U1>(tilingData_->imageSentinelLo + tilingData_->imageSentinelCount);
 }
@@ -327,6 +329,7 @@ __aicore__ inline void MoeGatingTopKHashWithoutGroup<T, U1, U2>::SelectExpertIdx
     LocalTensor<U2> hashExpertId = topKExpertIdBuf_.Get<U2>();
     LocalTensor<int32_t> hashExpertIdInt32 = hashExpertId.template ReinterpretCast<int32_t>();
     U1 key = inputIdsGm_.GetValue(row);
+    key = key == static_cast<U1>(-1) ? static_cast<U1>(0) : key;
     SetWaitFlag<HardEvent::S_MTE2>(HardEvent::S_MTE2);
     DataCopyExtParams dataCopyParams{1, static_cast<uint32_t>(k_ * sizeof(U2)), 0, 0, 0};
     DataCopyPadExtParams dataCopyPadParams{false, 0, 0, static_cast<U2>(0)};

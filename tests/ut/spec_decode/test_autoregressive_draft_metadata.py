@@ -41,6 +41,7 @@ def test_gqa_draft_block_table_matches_padded_batch():
     )
     speculator = SimpleNamespace(
         attn_architecture="GQA",
+        use_dcp=False,
         input_batch=SimpleNamespace(num_reqs=num_reqs, seq_lens_cpu_upper_bound=[14]),
         input_buffers=SimpleNamespace(draft_seq_lens_cpus=[[0] * num_reqs_padded]),
         _build_uniform_attn_metadata=lambda **kwargs: {
