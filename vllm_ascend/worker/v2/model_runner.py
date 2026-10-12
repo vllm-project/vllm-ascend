@@ -19,6 +19,7 @@
 
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import deepcopy
+from dataclasses import replace
 from typing import Any
 
 import numpy as np
@@ -85,6 +86,11 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     init_sparse_kv_offload_manager,
 )
 from vllm_ascend.models.deepseek_v41.cache_config import uses_a5_packed_cache
+from vllm_ascend.observability.runtime_guard.hooks import (
+    runtime_guard_sample_tokens,
+    runtime_guard_step,
+)
+from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import (
     is_deepseek_v41,
@@ -94,6 +100,7 @@ from vllm_ascend.utils import (
     lmhead_tp_pad_rows,
     set_potential_max_tokens,
     should_skip_allreduce_across_dp_group,
+    vllm_version_is,
 )
 from vllm_ascend.worker.device_metadata import TargetDeviceMetadata
 from vllm_ascend.worker.utils import disable_compilation
@@ -262,6 +269,8 @@ class NPUModelRunner(GPUModelRunner):
         set_mc2_mask(vllm_config, self.device)
         set_potential_max_tokens(vllm_config)
 
+        self.runtime_guard = RuntimeGuardProcessor.bind(self)
+
     @property
     def pcp_manager_cls(self) -> type[AscendPCPManager]:
         return AscendPCPManager
@@ -295,11 +304,19 @@ class NPUModelRunner(GPUModelRunner):
 
         # vLLM main captures draft_hidden_states before maybe_restore_pcp_for_sampling,
         # so a replicated draft would read the PCP-local target output. Restore
-        # it to the global layout up front. aux_hidden_states need no handling
-        # here: upstream sample_tokens (#56107) already restores them, per
-        # tensor, before speculator.propose.
+        # it to the global layout up front.
         if state.hidden_states is not None:
-            state = state._replace(hidden_states=pcp_manager.restore_hidden_states(state.hidden_states))
+            replacements: dict[str, Any] = {"hidden_states": pcp_manager.restore_hidden_states(state.hidden_states)}
+            # vLLM main (#57980) folded the aux-hidden restore into
+            # restore_for_sampling. The replicated-PCP fast path below bypasses
+            # that call, so restore aux here too. On v0.30.0 the runner restores
+            # aux outside restore_for_sampling and pre-restoring here would
+            # re-gather them.
+            if not vllm_version_is("0.30.0") and state.aux_hidden_states is not None:
+                replacements["aux_hidden_states"] = [
+                    pcp_manager.restore_hidden_states(aux) for aux in state.aux_hidden_states
+                ]
+            state = state._replace(**replacements)
             # Tell restore_for_sampling to skip its second all-gather for this
             # step. The layout is tracked explicitly because a length match is
             # ambiguous under piecewise/FULL graphs: every rank pads its local
@@ -307,6 +324,7 @@ class NPUModelRunner(GPUModelRunner):
             pcp_manager._sampling_hidden_restored = True
         self.execute_model_state = state
 
+    @runtime_guard_sample_tokens
     def sample_tokens(self, grammar_output):
         if (
             lmhead_tp_enable()
@@ -482,7 +500,10 @@ class NPUModelRunner(GPUModelRunner):
             layer = self.compilation_config.static_forward_context[layer_name]
             layer.impl.bind_copy_sfa_kv_cache(manager, layer_name)
 
+    # runtime_guard_step must stay INNER (below @torch.inference_mode()) so the
+    # wave sync keeps running inside the inference-mode context.
     @torch.inference_mode()
+    @runtime_guard_step
     def execute_model(
         self,
         scheduler_output: SchedulerOutput,
@@ -550,6 +571,20 @@ class NPUModelRunner(GPUModelRunner):
             profiling_config,
             execution_start_time,
         )
+
+        # In adaptive verification, idle DP ranks dummy-run at target graph capacity.
+        # Restore their request counts before draft DP sync to avoid inflating all ranks.
+        if (
+            dummy_run
+            and not is_profile
+            and context_len == 0
+            and self.adaptive_verification is not None
+            and self.execute_model_state is not None
+        ):
+            state = self.execute_model_state
+            self.execute_model_state = state._replace(
+                input_batch=replace(state.input_batch, num_reqs=len(scheduler_output.num_scheduled_tokens))
+            )
         return output
 
     def _maybe_send_draft_kv(self, scheduler_output: SchedulerOutput) -> None:
@@ -645,15 +680,16 @@ class NPUModelRunner(GPUModelRunner):
                 "scheduled locally — a request sent directly to the decode node)."
             )
 
-    def prepare_inputs(  # type: ignore[misc]
+    def _prepare_inputs_impl(
         self,
         scheduler_output: SchedulerOutput,
         batch_req_state: BatchReqState,
         batch_desc: BatchExecutionDescriptor,
     ) -> AscendInputBatch:
-        """Override GPUModelRunner.prepare_inputs for Ascend NPUs.
-        npu attention backends need seq_lens_cpu to work.
-        so we need to prepare seq_lens_cpu here.
+        """Shared implementation for GPUModelRunner.prepare_inputs on Ascend.
+
+        npu attention backends need seq_lens_cpu to work, so we prepare
+        seq_lens_cpu here.
         """
         self._check_finegrained_tp_graph_step(batch_desc.cg_mode)
         num_tokens = batch_req_state.num_tokens
@@ -889,18 +925,44 @@ class NPUModelRunner(GPUModelRunner):
             seq_lens_np=self.input_buffers.seq_lens_np,
             attn_state=attn_state,
         )
-        # vLLM main (#53867) changed maybe_partition_pcp_batch to take the
-        # whole batch descriptor instead of padded_num_tokens.
-        input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(
-            self.pcp_manager,
-            input_batch,
-            batch_desc=batch_desc,
-        )
+        # vLLM main (#57980) dropped the module-level maybe_partition_pcp_batch
+        # helper; PCPManager.partition_batch now takes the batch descriptor.
+        if vllm_version_is("0.30.0"):
+            input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(
+                self.pcp_manager,
+                input_batch,
+                batch_desc=batch_desc,
+            )
+        elif self.pcp_manager is not None:
+            input_batch = self.pcp_manager.partition_batch(input_batch, batch_desc)
 
         # For mla/sfa, update cos/sin. Here is for execute_model.
         update_cos_sin(input_batch.positions)
 
         return input_batch
+
+    if vllm_version_is("0.30.0"):
+
+        def prepare_inputs(  # type: ignore[misc]
+            self,
+            scheduler_output: SchedulerOutput,
+            batch_req_state: BatchReqState,
+            batch_desc: BatchExecutionDescriptor,
+        ) -> AscendInputBatch:
+            return self._prepare_inputs_impl(scheduler_output, batch_req_state, batch_desc)
+
+    else:
+
+        def prepare_inputs(  # type: ignore[misc]
+            self,
+            scheduler_output: SchedulerOutput,
+            batch_req_state: BatchReqState,
+            batch_desc: BatchExecutionDescriptor,
+            num_active_loras: int,  # noqa: ARG002
+        ) -> AscendInputBatch:
+            # vLLM #56456 added num_active_loras to prepare_inputs on main; it
+            # only feeds FastPrefillHelper, which this Ascend path does not use.
+            return self._prepare_inputs_impl(scheduler_output, batch_req_state, batch_desc)
 
     def prepare_dummy_attn(
         self, input_batch: AscendInputBatch, valid_state_slots: bool = False
