@@ -68,6 +68,7 @@ def test_adaptive_tail_dummy_run_balances_moe_routing(adaptive_verification, con
     runner = NPUModelRunner.__new__(NPUModelRunner)
     runner.input_buffers = SimpleNamespace(dummy_num_tokens=None)
     runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE)
+    runner.debugger = None
     runner.max_num_reqs = 32
     runner.max_num_tokens = 256
     runner.speculator = None
@@ -202,6 +203,7 @@ def test_adaptive_idle_dp_restores_request_count_after_target_forward(
     monkeypatch, adaptive, dummy, profile, context_len, scheduled_reqs, has_state, expected_reqs
 ):
     runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.debugger = None
     runner.ascend_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(profiling_chunk_config=SimpleNamespace(need_timing=False))
     )
@@ -214,7 +216,10 @@ def test_adaptive_idle_dp_restores_request_count_after_target_forward(
         padded_batch = AscendInputBatch.make_dummy(16, 32, buffers)
     ExecutionState = namedtuple("ExecutionState", "input_batch hidden_states dp_sync")
     state = ExecutionState(padded_batch, object(), object())
-    scheduler = SimpleNamespace(num_scheduled_tokens={f"dummy-{i}": 1 for i in range(scheduled_reqs)})
+    scheduler = SimpleNamespace(
+        num_scheduled_tokens={f"dummy-{i}": 1 for i in range(scheduled_reqs)},
+        total_num_scheduled_tokens=scheduled_reqs,
+    )
     module = "vllm_ascend.worker.v2.model_runner."
     monkeypatch.setattr(module + "has_kv_transfer_group", lambda: False)
     monkeypatch.setattr(module + "should_skip_allreduce_across_dp_group", lambda _config: False)
