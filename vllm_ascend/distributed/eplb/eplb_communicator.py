@@ -13,6 +13,7 @@ from typing import Any
 import numpy as np
 import torch
 import torch.distributed as dist
+import torch_npu
 from torch.distributed import P2POp, ProcessGroup, batch_isend_irecv
 from vllm.distributed.eplb.eplb_communicator import (
     EplbCommunicator,
@@ -22,6 +23,8 @@ from vllm.distributed.utils import is_weak_contiguous
 from vllm.logger import logger
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.network_utils import get_ip, get_open_port, join_host_port
+
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
 
 _HIXL_MEMORY_ALIGNMENT = 2 * 1024 * 1024
 _HIXL_MAX_REGISTERED_REGIONS = 256
@@ -140,6 +143,11 @@ class AscendGlooEplbCommunicator(TorchDistGlooStagedEplbCommunicator):
 
         with stream if stream is not None else contextlib.nullcontext():
             for dst_tensor, cpu_tensor in recv_staging:
+                if dst_tensor.device.type == "npu" and torch_npu.get_npu_format(dst_tensor) == ACL_FORMAT_FRACTAL_NZ:
+                    # Ascend950 cannot copy CPU tensors directly into NZ storage.
+                    cpu_tensor = torch_npu.npu_format_cast(
+                        cpu_tensor.to(dst_tensor.device, non_blocking=True), ACL_FORMAT_FRACTAL_NZ
+                    )
                 dst_tensor.copy_(cpu_tensor, non_blocking=True)
 
     @property
