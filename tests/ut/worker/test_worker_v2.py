@@ -8,6 +8,69 @@ from tests.ut.base import TestBase
 
 
 class TestNPUWorkerV2(TestBase):
+    @staticmethod
+    def _make_worker_for_lifecycle_test():
+        from vllm_ascend.worker.worker import NPUWorker
+
+        with patch.object(NPUWorker, "__init__", lambda self, **kwargs: None):
+            worker = NPUWorker()
+        worker.use_v2_model_runner = True
+        worker.model_runner = MagicMock()
+        worker.vllm_config = MagicMock()
+        worker.vllm_config.model_config.enable_sleep_mode = False
+        worker.vllm_config.weight_transfer_config = None
+        return worker
+
+    @patch("vllm_ascend.worker.worker.get_ec_transfer")
+    @patch("vllm_ascend.worker.worker.has_ec_transfer", return_value=True)
+    def test_load_model_starts_ec_worker_services(
+        self,
+        mock_has_ec_transfer,
+        mock_get_ec_transfer,
+    ):
+        """Start MRV2 EC services only after model loading completes."""
+        events = []
+        connector = mock_get_ec_transfer.return_value
+        connector.start_worker_services.side_effect = lambda: events.append("ec")
+        worker = self._make_worker_for_lifecycle_test()
+        worker.model_runner.load_model.side_effect = lambda: events.append("model")
+
+        worker.load_model()
+
+        self.assertEqual(events, ["model", "ec"])
+        mock_has_ec_transfer.assert_called_once_with()
+        mock_get_ec_transfer.assert_called_once_with()
+        connector.start_worker_services.assert_called_once_with()
+
+    @patch("vllm_ascend.worker.worker.get_ec_transfer")
+    @patch("vllm_ascend.worker.worker.has_ec_transfer", return_value=False)
+    def test_load_model_skips_ec_worker_services_when_disabled(
+        self,
+        mock_has_ec_transfer,
+        mock_get_ec_transfer,
+    ):
+        worker = self._make_worker_for_lifecycle_test()
+
+        worker.load_model()
+
+        mock_has_ec_transfer.assert_called_once_with()
+        mock_get_ec_transfer.assert_not_called()
+
+    @patch("vllm_ascend.worker.worker.ensure_ec_transfer_shutdown")
+    @patch("vllm_ascend.worker.worker.ensure_kv_transfer_shutdown")
+    def test_shutdown_releases_ec_connector(
+        self,
+        mock_kv_shutdown,
+        mock_ec_shutdown,
+    ):
+        worker = self._make_worker_for_lifecycle_test()
+        worker.profiler = None
+
+        worker.shutdown()
+
+        mock_kv_shutdown.assert_called_once_with()
+        mock_ec_shutdown.assert_called_once_with()
+
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.enable_sp", return_value=False)
     @patch("vllm_ascend.worker.worker.get_pp_group")
