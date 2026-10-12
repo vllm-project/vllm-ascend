@@ -50,10 +50,19 @@ def test_environment_override_wins(monkeypatch, env_value):
                 num_speculative_tokens_per_batch_size=[[1, 256, 4]],
             )
         ),
+        SimpleNamespace(lora_config=object()),
+        SimpleNamespace(speculative_config=SimpleNamespace(parallel_drafting=True)),
         SimpleNamespace(
             speculative_config=SimpleNamespace(
                 method="dflash",
                 enforce_eager=True,
+                draft_model_config=SimpleNamespace(architectures=["DFlash2DraftModel"]),
+            )
+        ),
+        SimpleNamespace(
+            speculative_config=SimpleNamespace(
+                method="dflash",
+                enforce_eager=False,
                 draft_model_config=SimpleNamespace(architectures=["DFlash2DraftModel"]),
             )
         ),
@@ -79,7 +88,10 @@ def test_environment_override_wins(monkeypatch, env_value):
         "no-model",
         "unknown-attention-free-generate",
         "dynamic-unsupported-speculation",
+        "lora",
+        "parallel-drafting",
         "dflash2-eager",
+        "dflash2-graph",
         "mooncake-pd",
         "kvpp",
         "reduce-sample-disabled",
@@ -101,7 +113,6 @@ def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
 @pytest.mark.parametrize(
     "config",
     [
-        SimpleNamespace(lora_config=object()),
         SimpleNamespace(model_config=SimpleNamespace(architectures=["HYV3ForCausalLM"])),
         SimpleNamespace(model_config=SimpleNamespace(architecture="HYV3ForCausalLM")),
         SimpleNamespace(model_config=SimpleNamespace(architectures=["Gemma4ForCausalLM"])),
@@ -128,17 +139,8 @@ def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
         SimpleNamespace(speculative_config=SimpleNamespace(method="suffix")),
         SimpleNamespace(speculative_config=SimpleNamespace(method="ngram")),
         SimpleNamespace(speculative_config=SimpleNamespace(method="ngram_gpu")),
-        SimpleNamespace(speculative_config=SimpleNamespace(parallel_drafting=True)),
-        SimpleNamespace(
-            speculative_config=SimpleNamespace(
-                method="dflash",
-                enforce_eager=False,
-                draft_model_config=SimpleNamespace(architectures=["DFlash2DraftModel"]),
-            )
-        ),
     ],
     ids=[
-        "lora",
         "hy3-preview",
         "hy3-preview-architecture",
         "gemma4-causal",
@@ -161,8 +163,6 @@ def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
         "suffix-speculative-decoding",
         "ngram-speculative-decoding",
         "ngram-gpu-speculative-decoding",
-        "parallel-drafting",
-        "dflash2-graph",
     ],
 )
 def test_blacklisted_features_default_to_v1(monkeypatch, config):
@@ -230,9 +230,9 @@ def test_blacklist_logs_fallback(monkeypatch):
     monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
     monkeypatch.setattr(mrv2_utils.logger, "warning_once", lambda *args, **kwargs: warning_calls.append(args))
 
-    assert use_v2_model_runner(SimpleNamespace(lora_config=object())) is False
+    assert use_v2_model_runner(SimpleNamespace(model_config=SimpleNamespace(architectures=["HYV3ForCausalLM"]))) is False
     assert len(warning_calls) == 1
-    assert "LoRA" in warning_calls[0][1]
+    assert "Hy3-preview" in warning_calls[0][1]
 
 
 def test_validation_is_decoupled_from_upstream():
