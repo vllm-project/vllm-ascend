@@ -1,8 +1,18 @@
+from typing import TYPE_CHECKING
+
 import torch
 from vllm.config import ParallelConfig, get_current_vllm_config
-from vllm.distributed.parallel_state import GroupCoordinator, get_world_group, init_model_parallel_group
+from vllm.distributed import parallel_state as vllm_parallel_state
+from vllm.distributed.parallel_state import (
+    GroupCoordinator,
+    get_world_group,
+    init_model_parallel_group,
+)
 
 from vllm_ascend.ascend_config import get_ascend_config
+
+if TYPE_CHECKING:
+    from vllm.config import EngramConfig
 
 # Currently, mc2 op need their own group coordinator.
 _MC2: GroupCoordinator | None = None
@@ -51,6 +61,7 @@ _REPLICATED = ReplicatedGroup()
 
 def init_ascend_model_parallel(
     parallel_config: ParallelConfig,
+    engram_config: "EngramConfig | None" = None,
 ):
     if model_parallel_initialized():
         return
@@ -72,6 +83,27 @@ def init_ascend_model_parallel(
         global_pcp_size,
         global_tp_size,
     )
+
+    if engram_config is not None and global_pcp_size > 1:
+        # Worker initialization defers the upstream DP-only group so the final
+        # DP x PCP group is created once. Upstream owns its getter and teardown.
+        assert vllm_parallel_state.get_engram_dp_group() is None
+        # Reuse upstream node boundaries and shard-size fallback for DP x PCP.
+        engram_size = vllm_parallel_state._engram_dp_shard_size(
+            world_size,
+            global_dp_size * global_pcp_size,
+            global_tp_size * global_pp_size,
+        )
+        if engram_size > 1:
+            group_ranks = all_ranks.permute(0, 2, 4, 1, 3).reshape(-1, engram_size).unbind(0)
+            shared = engram_config.dp_shared_memory
+            vllm_parallel_state._ENGRAM_DP = init_model_parallel_group(
+                [ranks.tolist() for ranks in group_ranks],
+                get_world_group().local_rank,
+                "gloo" if shared else backend,
+                group_name="edp",
+                use_device_communicator=not shared,
+            )
 
     kvpp_size = get_ascend_config().kvpp_config.size
     global _KVPP

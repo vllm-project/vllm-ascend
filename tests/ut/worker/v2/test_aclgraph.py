@@ -3,13 +3,18 @@
 
 from contextlib import nullcontext
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import SpeculatorCudaGraphManager
 
-from vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph import AutoRegressiveAclGraphManager
+from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph import (
+    AutoRegressiveAclGraphManager,
+)
 
 
 def _parent_init(
@@ -76,7 +81,7 @@ def test_run_fullgraph_uses_updatable_graph():
     draft_attn_metadatas = [{"draft": object()}]
     manager.speculator = SimpleNamespace(
         attn_backend=backend,
-        draft_vllm_config=draft_vllm_config,
+        attn_vllm_config=draft_vllm_config,
         build_draft_attn_metadatas=MagicMock(return_value=draft_attn_metadatas),
     )
     manager._updatable_graph_replay = MagicMock(return_value="result")
@@ -106,7 +111,7 @@ def test_run_fullgraph_uses_legacy_graph():
     draft_attn_metadatas = [{"draft": object()}]
     manager.speculator = SimpleNamespace(
         attn_backend=backend,
-        draft_vllm_config=draft_vllm_config,
+        attn_vllm_config=draft_vllm_config,
         build_draft_attn_metadatas=MagicMock(return_value=draft_attn_metadatas),
     )
     manager._updatable_graph_replay = MagicMock()
@@ -176,7 +181,12 @@ def test_capture_draft_decode_prepares_inputs_and_runs_forward():
     block_tables = object()
     attn_groups = object()
     kv_cache_config = object()
-    desc = SimpleNamespace(num_tokens=4, num_reqs=None, cg_mode=CUDAGraphMode.FULL)
+    desc_fields = {"num_tokens": 4, "num_reqs": None, "cg_mode": CUDAGraphMode.FULL}
+    # vLLM main (#58275) reads max_query_len/uniform_token_count off the
+    # descriptor when preparing capture inputs.
+    if not vllm_version_is("0.30.0"):
+        desc_fields.update(max_query_len=None, uniform_token_count=None)
+    desc = SimpleNamespace(**desc_fields)
 
     def capture_side_effect(manager_arg, create_forward_fn, progress_bar_desc=None):
         """Execute the captured forward function for the test descriptor."""
@@ -200,6 +210,9 @@ def test_capture_draft_decode_prepares_inputs_and_runs_forward():
     ):
         manager.capture(forward_fn, model_state, input_buffers, block_tables, attn_groups, kv_cache_config)
 
+    expected_capture_kwargs: dict[str, Any] = {"full_cudagraph": True}
+    if not vllm_version_is("0.30.0"):
+        expected_capture_kwargs["max_query_len"] = None
     prepare_inputs.assert_called_once_with(
         3,
         4,
@@ -208,7 +221,7 @@ def test_capture_draft_decode_prepares_inputs_and_runs_forward():
         block_tables,
         attn_groups,
         kv_cache_config,
-        full_cudagraph=True,
+        **expected_capture_kwargs,
     )
     args = forward_fn.call_args.args
     assert args[0] == 3
@@ -254,10 +267,6 @@ def test_graph_replay_updates_full_graph_params():
             return_value="result",
         ) as parent_replay,
         patch(
-            "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.set_current_vllm_config",
-            return_value=nullcontext(),
-        ),
-        patch(
             "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.set_forward_context",
             return_value=nullcontext(),
         ),
@@ -295,22 +304,27 @@ def test_graph_replay_updates_full_graph_params():
     )
 
 
-def test_updatable_graph_replay_updates_resolved_tasks():
-    """Verify updatable graph replay resolves and updates graph tasks."""
+@pytest.mark.parametrize("use_dcp,architecture", [(False, "GQA"), (True, "GQA"), (True, "MLA")])
+@pytest.mark.parametrize("is_prefill", [False, True])
+def test_updatable_graph_replay_reuses_shared_source(use_dcp, architecture, is_prefill):
+    """Build every draft step from the first metadata with one shared-source update."""
     manager = AutoRegressiveAclGraphManager.__new__(AutoRegressiveAclGraphManager)
     manager.update_stream = MagicMock()
-    manager.is_draft_model_prefill = False
-    desc = MagicMock()
-    desc.num_reqs = 2
+    manager.is_draft_model_prefill = is_prefill
+    desc = MagicMock(num_reqs=2)
     graph = MagicMock()
     resolved_tasks = object()
     graph.resolve_tasks.return_value = resolved_tasks
     manager.graphs = {desc: graph}
-    fia_params = [{"layer_name": "draft"}]
-    manager.speculator = SimpleNamespace(build_fia_params=MagicMock(return_value=fia_params))
+    steps = [{"draft": object()} for _ in range(1 if is_prefill else 2)]
+    fia_params = [{"layer_name": "draft", "step": i} for i in range(len(steps))]
+    manager.speculator = SimpleNamespace(
+        use_dcp=use_dcp,
+        attn_architecture=architecture,
+        build_fia_params=MagicMock(return_value=fia_params),
+    )
     source = object()
     current_stream = object()
-    draft_attn_metadatas = [{"draft": object()}]
 
     with (
         patch(
@@ -331,18 +345,11 @@ def test_updatable_graph_replay_updates_resolved_tasks():
             return_value="result",
         ) as parent_replay,
     ):
-        result = manager._updatable_graph_replay(
-            desc,
-            draft_attn_metadatas,
-        )
+        result = manager._updatable_graph_replay(desc, steps)
 
-    assert result == "result"
-    manager.speculator.build_fia_params.assert_called_once_with(
-        2,
-        draft_attn_metadatas[0],
-        False,
-    )
+    manager.speculator.build_fia_params.assert_called_once_with(2, steps[0], is_prefill)
     shared_source.assert_called_once_with(fia_params)
+    assert result == "result"
     graph.resolve_tasks.assert_called_once_with(source)
     manager.update_stream.wait_stream.assert_called_once_with(current_stream)
     parent_replay.assert_called_once_with(desc)

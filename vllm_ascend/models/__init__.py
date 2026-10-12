@@ -60,6 +60,7 @@ def register_model():
         "LlamaForCausalLMVwnEagle3", "vllm_ascend.models.llama_eagle3_vwn:Eagle3VwnLlamaForCausalLM"
     )
     ModelRegistry.register_model("Qwen3DSparkModel", "vllm_ascend.models.qwen3_dspark:AscendQwen3DSparkForCausalLM")
+    ModelRegistry.register_model("Glm5DSparkForCausalLM", "vllm_ascend.models.glm5_dspark:Glm5DSparkForCausalLM")
     ModelRegistry.register_model(
         "Qwen3OmniDSparkModel",
         "vllm_ascend.models.qwen3_dspark:AscendQwen3DSparkForCausalLM",

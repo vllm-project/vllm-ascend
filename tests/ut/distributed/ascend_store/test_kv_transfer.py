@@ -16,6 +16,7 @@
 #
 
 import threading
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -595,6 +596,45 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         self.assertEqual(t.stored_requests["r1"], 1)
         t.delete_finished_stored_request("r1")
         self.assertNotIn("r1", t.stored_requests)
+
+    def test_wait_for_requests_saved_returns_immediately_without_released_ids(self):
+        t, _ = self._make_thread()
+        t.wait_for_requests_saved(None)
+        t.wait_for_requests_saved(set())
+
+    def test_wait_for_requests_saved_blocks_until_released_requests_drain(self):
+        t, _ = self._make_thread()
+        t.add_stored_request("r1")
+        t.add_stored_request("r2")
+        entered = threading.Event()
+
+        def wait_released():
+            entered.set()
+            # An unknown id was already drained before this fence started.
+            t.wait_for_requests_saved({"r1", "r2", "ghost"})
+
+        waiter = threading.Thread(target=wait_released)
+        waiter.start()
+        self.assertTrue(entered.wait(timeout=5))
+        time.sleep(0.05)
+        self.assertTrue(waiter.is_alive(), "fence must keep waiting while r1/r2 still have queued saves")
+
+        t.dec_stored_request("r1")
+        t.try_finish_and_delete_stored_request("r1")
+        time.sleep(0.05)
+        self.assertTrue(waiter.is_alive(), "fence must keep waiting until every released request drained")
+
+        t.dec_stored_request("r2")
+        t.try_finish_and_delete_stored_request("r2")
+        waiter.join(timeout=5)
+        self.assertFalse(waiter.is_alive(), "fence must return once all released requests drained")
+
+    def test_wait_for_requests_saved_raises_when_transfer_failed(self):
+        t, _ = self._make_thread()
+        t.add_stored_request("r1")
+        t._fatal_error = RuntimeError("boom")
+        with self.assertRaises(RuntimeError):
+            t.wait_for_requests_saved({"r1"})
 
     def test_handle_request_sync_and_dcp(self):
         t, store = self._make_thread([0])

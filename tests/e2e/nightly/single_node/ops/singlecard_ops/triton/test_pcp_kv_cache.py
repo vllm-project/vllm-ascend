@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from unittest.mock import patch
+
 import pytest
 import torch
 import torch_npu  # noqa: F401
 
-from vllm_ascend.ops.triton.pcp_kv_cache import copy_pcp_kv_cache
+from vllm_ascend.ops.triton.pcp_kv_cache import _copy_pcp_kv_cache_kernel, copy_pcp_kv_cache
 
 
 @pytest.mark.parametrize("dtype", [torch.int8, torch.float8_e4m3fn])
@@ -39,6 +41,36 @@ def test_c8_cache_preserves_packed_bytes(dtype, case, strided):
             expected[row] = raw[slot // 32, slot % 32, 0]
     assert packed.dtype == torch.int8
     assert torch.equal(packed.cpu(), expected)
+
+
+@pytest.mark.parametrize("c8", [False, True])
+@pytest.mark.parametrize("num_slots", [5, 128, 257])
+@pytest.mark.parametrize("slot_dtype", [torch.int32, torch.int64])
+def test_contiguous_slot_slices_reuse_kernel(c8, num_slots, slot_dtype):
+    dtype = torch.int8 if c8 else torch.bfloat16
+    dims = (656,) if c8 else (512, 64)
+    cache = tuple(
+        (torch.arange(20 * 32 * dim, dtype=torch.int32) % 127).to(dtype).reshape(20, 32, 1, dim).to("npu")
+        for dim in dims
+    )
+    gold = torch.cat([tensor.cpu().reshape(-1, dim) for tensor, dim in zip(cache, dims)], dim=-1)
+    indices = torch.arange(num_slots + 4, dtype=slot_dtype) % (20 * 32)
+    indices[1::5] = -1
+    slot_storage = indices.to("npu")
+    device = torch.npu.current_device()
+    # Isolate the in-memory cache so an existing unaligned variant cannot hide
+    # an extra specialization. Compiled disk artifacts can still be reused.
+    with patch.dict(_copy_pcp_kv_cache_kernel.cache, {device: {}}):
+        for offset in range(5):
+            slots = slot_storage[offset : offset + num_slots]
+            assert slots.is_contiguous()
+            assert slots.data_ptr() == slot_storage.data_ptr() + offset * slots.element_size()
+            actual = copy_pcp_kv_cache(cache, slots).cpu()
+            selected = indices[offset : offset + num_slots].long()
+            expected = gold[selected.clamp_min(0)].clone()
+            expected[selected < 0] = 0
+            assert torch.equal(actual, expected)
+            assert len(_copy_pcp_kv_cache_kernel.cache[device]) == 1
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])

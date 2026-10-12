@@ -9,8 +9,11 @@ from vllm_ascend.ops.triton.triton_utils import get_ub_size_bytes, get_vectorcor
 # Tile sizes and RoPE presence change the static IR. Keep default specialization
 # for innermost strides: Ascend needs unit-stride information to lower multi-row
 # loads within UB. Other scalars only affect bounds, masks, or addresses.
+# Replicated decode tokens can leave contiguous slot slices unaligned. Reuse
+# the same kernel for those slices without copying slots to realign them.
 @triton.jit(
     do_not_specialize=[
+        "slots",
         "num_tokens",
         "cache_block_size",
         "k_stride_block",

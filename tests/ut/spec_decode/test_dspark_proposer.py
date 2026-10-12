@@ -145,6 +145,7 @@ def test_dspark_device_metadata_executor_forward_lifecycle(has_task: bool):
     proposer.use_cuda_graph = False
     proposer.dcp_size = 1
     proposer.vllm_config = SimpleNamespace(model_config=SimpleNamespace(use_mla=True))
+    proposer.draft_model_config = SimpleNamespace(use_mla=True)
     proposer.draft_window_size = None
     proposer.supports_mm_inputs = False
     proposer.slot_mapping_group = [torch.zeros(2, dtype=torch.int32)]

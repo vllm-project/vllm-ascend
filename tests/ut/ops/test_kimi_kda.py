@@ -400,15 +400,11 @@ def test_prefill_fuses_raw_gate_and_updates_v_first_state(lower_bound):
         scatter=lambda state, packed, indices: state.__setitem__(indices, packed.to(state.dtype)),
     )
     attention._kda_state_copy_ready = True
+    chunk_kda_fwd = MagicMock(return_value=(output, final_state, *([None] * 10)))
 
     with (
         patch("vllm_ascend.ops.kda.l2norm_fwd", side_effect=lambda x: x),
-        patch.object(
-            torch.ops._C_ascend,
-            "chunk_kda_fwd",
-            return_value=(output, final_state, *([None] * 10)),
-            create=True,
-        ) as chunk_kda_fwd,
+        patch("vllm_ascend.ops.kda.chunk_kda_fwd", new=chunk_kda_fwd),
     ):
         actual = attention._run_prefill(
             q,
@@ -445,7 +441,8 @@ def test_recurrent_preserves_preprocessed_beta_and_mtp_state(lower_bound, qkv_pa
     starts = torch.tensor([0, 4], dtype=torch.int32)
     slots = torch.tensor([[2, 3, 4, 5]], dtype=torch.int32)
     accepted = torch.tensor([2], dtype=torch.int32)
-    with patch.object(torch.ops._C_ascend, "recurrent_kda", return_value=q, create=True) as recurrent:
+    recurrent = MagicMock(return_value=(q, None))
+    with patch("vllm_ascend.ops.kda.recurrent_kda", new=recurrent):
         output = attention._run_recurrent(q, k, v, q, beta, state, starts, slots, num_accepted_tokens=accepted)
     assert output is q
     assert recurrent.call_args.args[0] is q
@@ -453,7 +450,11 @@ def test_recurrent_preserves_preprocessed_beta_and_mtp_state(lower_bound, qkv_pa
     assert recurrent.call_args.args[2] is v
     assert recurrent.call_args.args[4] is beta
     assert recurrent.call_args.args[5] is state
-    assert recurrent.call_args.args[7] is slots
+    assert recurrent.call_args.kwargs["cu_seqlens"] is starts
+    assert recurrent.call_args.kwargs["ssm_state_indices"] is slots
+    assert recurrent.call_args.kwargs["state_v_first"] is True
+    assert recurrent.call_args.kwargs["inplace_final_state"] is True
+    assert recurrent.call_args.kwargs["output_final_state"] is False
     assert recurrent.call_args.kwargs["num_accepted_tokens"] is accepted
     assert recurrent.call_args.kwargs["use_beta_sigmoid_in_kernel"] is False
     assert recurrent.call_args.kwargs["safe_gate"] is (lower_bound is not None)
@@ -536,6 +537,10 @@ def test_kda_forward_preserves_live_rows_with_nan_padding(mode):
         recurrent_state.add_(1)
         return v.clone()
 
+    def norm_into(x, g, *, out):
+        assert out is x
+        out.copy_(x * torch.sigmoid(g))
+
     attention = SimpleNamespace(
         prefix="kda",
         head_dim=2,
@@ -544,7 +549,7 @@ def test_kda_forward_preserves_live_rows_with_nan_padding(mode):
         get_parameter=lambda name: torch.empty(1),
         _run_causal_conv1d=lambda x, *args, **kwargs: x,
         _run_recurrent=recurrent,
-        o_norm=lambda x, g: x * torch.sigmoid(g),
+        o_norm=SimpleNamespace(forward_oot=norm_into),
     )
     output = torch.full((1, 8, 1, 2), torch.nan)
     with (

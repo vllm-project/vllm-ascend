@@ -73,7 +73,10 @@ def _make_config():
             num_gpu_blocks_override=None,
             mamba_cache_mode="none",
             enable_prefix_caching=False,
-            prefix_cache_retention_interval=0,
+            get_resolved_kv_cache_layout=lambda: SimpleNamespace(
+                is_layer_compact=True,
+                is_block_compact=True,
+            ),
         ),
         kv_transfer_config=None,
         compilation_config=SimpleNamespace(static_forward_context={}),
@@ -121,7 +124,11 @@ def _make_runner(config, main_cache_dims=(4, 0)):
     runner = NPUModelRunner.__new__(NPUModelRunner)
     runner.device = torch.device("cpu")
     runner.vllm_config = config
-    runner.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
+    runner.dcp_size = config.parallel_config.decode_context_parallel_size
+    runner.ascend_config = SimpleNamespace(
+        kvpp_config=SimpleNamespace(size=1),
+        xlite_graph_config=SimpleNamespace(enabled=False),
+    )
     runner.compilation_config = config.compilation_config
     runner.runner_only_attn_layers = set()
     runner.shared_kv_cache_layers = {}
@@ -138,7 +145,7 @@ def _make_runner(config, main_cache_dims=(4, 0)):
     runner.kernel_block_sizes = [[8], [2], [0]]
     # The runner gates GLM-Next reshape views on the spec-carried
     # model_version marker, not on model_config.
-    runner.model_config = SimpleNamespace()
+    runner.model_config = SimpleNamespace(hf_text_config=SimpleNamespace(model_type="glm5_next"))
 
     specs = _make_specs()
     attn_groups = [
