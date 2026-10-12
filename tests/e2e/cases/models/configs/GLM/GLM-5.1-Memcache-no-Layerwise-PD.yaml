@@ -91,7 +91,7 @@ env_common: &env_common
   PYTHONHASHSEED: "0"
   VLLM_USE_MODELSCOPE: "true"
   ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
-
+  SERVER_PORT: "${PORT}"
 templates:
   # PP master (node 0)
   - node_index: 0
@@ -103,7 +103,7 @@ templates:
       - --host
       - "0.0.0.0"
       - --port
-      - ${PORT}
+      - $SERVER_PORT
       - --tensor-parallel-size
       - ${TP_SIZE}
       - --enable-expert-parallel
@@ -158,7 +158,7 @@ templates:
       - --host
       - "0.0.0.0"
       - --port
-      - ${PORT}
+      - $SERVER_PORT
       - --tensor-parallel-size
       - ${TP_SIZE}
       - --enable-expert-parallel
@@ -214,7 +214,7 @@ templates:
       - --host
       - "0.0.0.0"
       - --port
-      - ${PORT}
+      - $SERVER_PORT
       - --data-parallel-size
       - ${DP_SIZE}
       - --data-parallel-rank
@@ -266,7 +266,7 @@ templates:
       - --host
       - "0.0.0.0"
       - --port
-      - ${PORT}
+      - $SERVER_PORT
       - --data-parallel-size
       - ${DP_SIZE}
       - --data-parallel-rank
