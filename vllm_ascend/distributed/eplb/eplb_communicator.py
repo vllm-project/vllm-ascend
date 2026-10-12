@@ -13,6 +13,7 @@ from typing import Any
 import numpy as np
 import torch
 import torch.distributed as dist
+import torch_npu
 from torch.distributed import P2POp, ProcessGroup, batch_isend_irecv
 from vllm.distributed.eplb.eplb_communicator import (
     EplbCommunicator,
@@ -94,6 +95,45 @@ class AscendGlooEplbCommunicator(TorchDistGlooStagedEplbCommunicator):
         buffer_indices[key] = buffer_index + 1
         return buffers[buffer_index]
 
+    @staticmethod
+    def _copy_from_cpu(
+        destination: torch.Tensor,
+        source: torch.Tensor,
+    ) -> tuple[torch.Tensor, ...]:
+        """Copy a CPU staging tensor into an NPU tensor.
+
+        Ascend 950 does not support ``copy_`` from CPU directly into an
+        internal-format tensor. Stage the data through an ND device tensor,
+        restore the destination format, and then copy the formatted device
+        memory without performing another format conversion.
+
+        The returned tensors must remain alive until the transfer stream has
+        completed the copy.
+        """
+        destination_format = torch_npu.get_npu_format(destination)
+        if destination_format == int(torch_npu.Format.ND):
+            destination.copy_(source, non_blocking=True)
+            return ()
+
+        device_source = source.to(device=destination.device, non_blocking=True)
+        format_cast_kwargs: dict[str, Any] = {
+            "customize_dtype": destination.dtype,
+        }
+        if destination_format == int(torch_npu.Format.FRACTAL_NZ_C0_16) and destination.dtype == torch.uint8:
+            # Packed MXFP4 weights use uint8 as their physical storage dtype,
+            # but their format-cast semantics are FP4 input packed into FP8.
+            format_cast_kwargs.update(
+                customize_dtype=torch.float8_e4m3fn,
+                input_dtype=torch_npu.float4_e2m1fn_x2,
+            )
+        formatted_source = torch_npu.npu_format_cast(
+            device_source,
+            destination_format,
+            **format_cast_kwargs,
+        )
+        torch_npu.copy_memory_(destination, formatted_source)
+        return device_source, formatted_source
+
     def execute(self) -> None:
         if not self._ops:
             return
@@ -138,9 +178,17 @@ class AscendGlooEplbCommunicator(TorchDistGlooStagedEplbCommunicator):
         for request in batch_isend_irecv(p2p_ops):
             request.wait()
 
+        device_temporaries: list[torch.Tensor] = []
         with stream if stream is not None else contextlib.nullcontext():
             for dst_tensor, cpu_tensor in recv_staging:
-                dst_tensor.copy_(cpu_tensor, non_blocking=True)
+                device_temporaries.extend(self._copy_from_cpu(dst_tensor, cpu_tensor))
+
+        if device_temporaries:
+            with gpu_sync_allowed():
+                if stream is not None:
+                    stream.synchronize()
+                else:
+                    torch.accelerator.current_stream().synchronize()
 
     @property
     def needs_profile_buffer_reservation(self) -> bool:
