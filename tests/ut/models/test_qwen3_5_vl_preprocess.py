@@ -11,6 +11,7 @@ Covers the review-critical configurations:
   never normalizes twice (images and videos).
 """
 
+import importlib
 from types import SimpleNamespace
 
 import pytest
@@ -26,14 +27,24 @@ from vllm_ascend.models.qwen3_5_vl import (
     _AscendVLPreprocessMixin,
 )
 
-try:
-    from vllm.model_executor.layers.fusion.mm_input_norm import FusedMMInputNorm
-except ImportError:
-    # vllm release wheels (<= v0.30.0): FusedInputNorm lives in models/vision.
-    try:
-        from vllm.model_executor.models.vision import FusedInputNorm as FusedMMInputNorm
-    except ImportError:  # pragma: no cover - guard for vllm layout changes
-        FusedMMInputNorm = None
+
+def _resolve_input_norm_cls():
+    """The fused input normalizer moved between vllm versions:
+    layers/fusion/mm_input_norm on main nightlies, models/vision on release
+    wheels (<= v0.30.0). Resolve it dynamically so mypy (which runs against
+    the pinned release vllm) does not flag the missing optional module."""
+    for module_name, attr in (
+        ("vllm.model_executor.layers.fusion.mm_input_norm", "FusedMMInputNorm"),
+        ("vllm.model_executor.models.vision", "FusedInputNorm"),
+    ):
+        try:
+            return getattr(importlib.import_module(module_name), attr)
+        except ImportError:
+            continue
+    return None  # pragma: no cover - guard for vllm layout changes
+
+
+FusedMMInputNorm = _resolve_input_norm_cls()
 
 C, PS, TPS, MS = 3, 14, 2, 2
 PATCH_DIM = C * TPS * PS * PS  # 1176
