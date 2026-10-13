@@ -843,7 +843,15 @@ class NPUWorker(WorkerBase):
         if self.vllm_config.model_config.enable_sleep_mode:
             allocator = CaMemAllocator.get_instance()
             assert allocator.get_current_usage() == 0, "Sleep mode can only be used for one instance per process."
-            context = allocator.use_memory_pool(tag="weights")
+            # Weights must keep their device addresses across sleep/wake: a
+            # captured FULL_DECODE_ONLY ACL graph has the addresses of every
+            # tensor the forward reads baked into it, so offloading and
+            # re-mapping the weight pool (the default "weights" tag) makes an
+            # update-then-replay read freed memory even when the values were
+            # restored correctly.  CaMemAllocator.sleep()/wake_up() already skip
+            # the persistent tag, leaving these allocations mapped for the whole
+            # lifetime of the worker.
+            context = allocator.use_memory_pool(tag=CaMemAllocator.sleep_persistent_tag)
         else:
             from contextlib import nullcontext
 

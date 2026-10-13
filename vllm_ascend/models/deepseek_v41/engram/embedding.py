@@ -154,13 +154,13 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         if self._shared_group is not None:
             # One physical copy of the mapped range, registered by each
             # rank in the sharing group.
-            self._codes_uva = SharedUvaBuffer(codes_shape, self.storage_dtype, device, self._shared_group)
+            self._codes_uva = SharedUvaBuffer(self, "_codes_uva", codes_shape, self.storage_dtype, device, self._shared_group)
             if quantized:
-                self._scales_uva = SharedUvaBuffer(scales_shape, self.scale_dtype, device, self._shared_group)
+                self._scales_uva = SharedUvaBuffer(self, "_scales_uva", scales_shape, self.scale_dtype, device, self._shared_group)
             return self._codes_uva.tensor, self._scales_uva.tensor if self._scales_uva is not None else None
-        self._codes_uva = HostUvaBuffer(codes_shape, self.storage_dtype, device)
+        self._codes_uva = HostUvaBuffer(self, "_codes_uva", codes_shape, self.storage_dtype, device)
         if quantized:
-            self._scales_uva = HostUvaBuffer(scales_shape, self.scale_dtype, device)
+            self._scales_uva = HostUvaBuffer(self, "_scales_uva", scales_shape, self.scale_dtype, device)
             self._scales_uva.tensor.zero_()
         # Same reason as the device path: aclrtMallocHost hands back whatever
         # was in the pages, and the profiling forward looks up before the

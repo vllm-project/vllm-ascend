@@ -236,6 +236,14 @@ class CaMemAllocator:
             len(self.pointer_to_data),
             tags or "all",
         )
+        # Release whatever the reload path allocated while applying the update,
+        # *before* re-mapping.  Those buffers are dead weight now, and holding
+        # them starves this very loop: create_and_map() then dies in
+        # aclrtMallocPhysical with 207001 (OOM).  Keeping the release here
+        # rather than in each transfer engine covers every caller.
+        gc.collect()
+        torch.npu.empty_cache()
+
         for ptr, data in self.pointer_to_data.items():
             if data.tag == CaMemAllocator.sleep_persistent_tag:
                 # It was never released in sleep(), so there is nothing to remap.

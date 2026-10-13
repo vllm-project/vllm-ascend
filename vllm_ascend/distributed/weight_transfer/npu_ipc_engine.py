@@ -169,6 +169,8 @@ class NPUIPCWeightTransferEngine(  # type: ignore[no-redef]
 
         finalize_layerwise_reload(self.model, self.model_config)
 
+
+
     def receive_weights(self, update_info: NPUIPCWeightTransferUpdateInfo) -> None:
         """Receive weights from the trainer via NPU IPC handles.
 
