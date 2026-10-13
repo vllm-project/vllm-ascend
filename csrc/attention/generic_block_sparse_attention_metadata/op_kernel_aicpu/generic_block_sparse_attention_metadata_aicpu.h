@@ -60,6 +60,7 @@ private:
     int64_t isPackedGQA_ = 1;
     int64_t residualBlockMode_ = 0;
     int64_t isConsistentTopk_ = 0;
+    int64_t maskType_ = 1;
     int64_t aicCoreNum_ = 0;
     int64_t sparseHeadNum_ = 0;
     int64_t qBlockStorageNum_ = 0; // QShape nums of SparseBlockCount last dim.

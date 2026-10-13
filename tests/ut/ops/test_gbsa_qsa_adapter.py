@@ -72,3 +72,54 @@ def test_qsa_gbsa_uses_original_paged_cache(dtype, tail_tokens):
     assert calls[0][0] == keys.data_ptr()
     assert calls[0][1] == values.data_ptr()
     torch.testing.assert_close(calls[0][2], block_table)
+
+
+def test_a3_residual_mode_reuses_runtime_kernel_key():
+    root = Path(__file__).resolve().parents[3]
+    tiling_source = (
+        root
+        / "csrc/attention/generic_block_sparse_attention/op_host/"
+        "generic_block_sparse_attention_tiling.cpp"
+    ).read_text()
+    arch22_kernel = (
+        root
+        / "csrc/attention/generic_block_sparse_attention/op_kernel/arch22/"
+        "generic_block_sparse_attention_kernel_arch22.h"
+    ).read_text()
+    tiling_keys = (
+        root
+        / "csrc/attention/generic_block_sparse_attention/op_kernel/"
+        "generic_block_sparse_attention_tilingkey.h"
+    ).read_text()
+
+    assert (
+        "if (isArch35 && residualBlockMode_ == GBSA_RESIDUAL_BLOCK_MODE_FORCE)"
+        in tiling_source
+    )
+    assert "residualBlockMode_ = tilingData->residualBlockMode;" in arch22_kernel
+    assert "GBSA_BF16_TND_PA_BBND_TILING 9200000071023222ULL" in tiling_keys
+    assert (
+        "GBSA_BF16_TND_PA_BBND_FP32SM_TILING_RESIDUAL "
+        "9250001071023222ULL"
+        in tiling_keys
+    )
+
+
+def test_a3_qsa_arch22_maps_logical_blocks_into_paged_kv():
+    root = Path(__file__).resolve().parents[3]
+    arch22_kernel = (
+        root
+        / "csrc/attention/generic_block_sparse_attention/op_kernel/arch22/"
+        "generic_block_sparse_attention_kernel_arch22.h"
+    ).read_text()
+    tiling_source = (
+        root
+        / "csrc/attention/generic_block_sparse_attention/op_host/"
+        "generic_block_sparse_attention_tiling.cpp"
+    ).read_text()
+
+    assert "MAX_SPARSE_BLOCK_CAPACITY = 512" in arch22_kernel
+    assert "logicalTokenOffset / blockSize_" in arch22_kernel
+    assert "logicalTokenOffset % blockSize_" in arch22_kernel
+    assert "tokenOffsetInPage) * strideKVRow" in arch22_kernel
+    assert "blockSize_ % blockShapeY_ != 0U" in tiling_source
