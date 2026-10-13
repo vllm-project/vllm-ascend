@@ -1367,9 +1367,7 @@ DeepSeek-V4.1-Flash does not support layerwise KV Cache Pool access because its
 CED hybrid-attention model structure is incompatible with layer-by-layer KV
 save and load. Keep `use_layerwise` set to `false` on both Prefill and Decode.
 
-Before starting vLLM, follow the
-[Mooncake backend guide](../../user_guide/feature_guide/kv_pool.md)
-configure `mooncake.json`, and start the
+Before starting vLLM, configure `mooncake.json`, and start the
 mooncake_master Service. The Prefill and Decode nodes must export`mooncake.json`.
 
 #### 5.4.1 Prepare the Mooncake Services
