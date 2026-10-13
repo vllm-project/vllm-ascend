@@ -1,0 +1,148 @@
+test_name: "DeepSeek_V4_Flash_A5_PD_Performance_Test_01"
+model: "/root/.cache/modelscope/hub/models/models--deepseek-ai--DeepSeek-V4-Flash"
+num_nodes: 2
+npu_per_node: 8
+
+routing:
+  type: "disaggregated_prefill"
+  groups:
+    prefiller: [ 0 ]
+    decoder: [ 1 ]
+
+config:
+  - node_index: 0
+    port_start: 9123
+    dp_rpc_port: 12321
+    dp_size: 8
+    dp_size_local: 8
+    dp_rank_start: 0
+    tp_size: 1
+    dp_address: "${NODE_0_IP}"
+
+  - node_index: 1
+    port_start: 9123
+    dp_rpc_port: 12321
+    dp_size: 8
+    dp_size_local: 8
+    dp_rank_start: 0
+    tp_size: 1
+    dp_address: "${NODE_1_IP}"
+
+env_common: &env_common
+  HCCL_ALGO: "level0:fullmesh"
+  SERVER_PORT: "${PORT}"
+  VLLM_RPC_TIMEOUT: "3600000"
+  VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "30000"
+  HCCL_EXE_TIMEOUT: "204"
+  HCL_CONNECT_TIMEOUT: "120"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
+
+env_prefill: &env_prefill
+  <<: *env_common
+  HCCL_BUFFSIZE: "512"
+
+env_decode: &env_decode
+  <<: *env_common
+  HCCL_BUFFSIZE: "1024"
+
+templates:
+  - node_index: 0
+    envs:
+      <<: *env_prefill
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - $SERVER_PORT
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --max-model-len
+      - "135000"
+      - --max-num-batched-tokens
+      - "3072"
+      - --gpu-memory-utilization
+      - "0.85"
+      - --enable-expert-parallel
+      - --async-scheduling
+      - --max-num-seqs
+      - "8"
+      - --block-size
+      - "128"
+      - --no-enable-prefix-caching
+      - --no-disable-hybrid-kv-cache-manager
+      - --speculative-config
+      - '{"num_speculative_tokens": 3,"method": "mtp"}'
+      - --profiler-config
+      - '{"profiler":"torch","torch_profiler_dir":"./vllm_profile","torch_profiler_with_stack":false}'
+      - --additional-config
+      - '{"enable_cpu_binding":true,"multistream_overlap_shared_expert":true}'
+      - --kv-transfer-config
+      - '{"kv_connector": "MooncakeHybridConnector", "kv_producer": "kv_consumer", "kv_port": "30100", "engine_id": "1", "kv_connector_extra_config": {"prefill": {"dp_size": 8, "tp_size": 1}, "decode": {"dp_size": 8, "tp_size": 1}},"ascend_local_comm_res_path":"vllm-ascend/hixlep"}'
+
+  - node_index: 1
+    envs:
+      <<: *env_decode
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - $SERVER_PORT
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --max-model-len
+      - "135000"
+      - --max-num-batched-tokens
+      - "256"
+      - --gpu-memory-utilization
+      - "0.92"
+      - --enable-expert-parallel
+      - --async-scheduling
+      - --max-num-seqs
+      - "56"
+      - --block-size
+      - "128"
+      - --no-enable-prefix-caching
+      - --trust-remote-code
+      - --compilation-config
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      - --no-disable-hybrid-kv-cache-manager
+      - --speculative-config
+      - '{"num_speculative_tokens": 3,"method": "mtp","enforce_eager":true}'
+      - --profiler-config
+      - '{"profiler":"torch","torch_profiler_dir":"./vllm_profile","torch_profiler_with_stack":false}'
+      - --additional-config
+      - '{"enable_cpu_binding":true,"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true}'
+      - --kv-transfer-config
+      - '{"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_consumer", "kv_port": "30300", "engine_id": "1", "kv_connector_extra_config": {"prefill": {"dp_size": 8, "tp_size": 1}, "decode": {"dp_size": 8, "tp_size": 1}},"ascend_local_comm_res_path":"vllm-ascend/hixlep"}'
+
+benchmarks:
+  per_TPOT50_128k_1_prefie_warmup:
+    case_type: performance
+    dataset_path: /root/.cache/modelscope/hub/datasets/vllm-ascend/GSM8K-in3500-bs128-dsv4-flash
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    temperature: 1.0
+    num_prompts: 512
+    max_out_len: 128
+    batch_size: 128
+    request_rate: 0
+    baseline: 2073.0287
+    threshold: 0.95
+    ignore_eos: True
