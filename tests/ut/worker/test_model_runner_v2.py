@@ -22,6 +22,7 @@ from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 
 def _make_runner(need_timing: bool = True):
     runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.expert_offload_manager = None
     runner.ascend_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(profiling_chunk_config=SimpleNamespace(need_timing=need_timing)),
         sparse_kv_offload_config=SimpleNamespace(enabled=False),
@@ -933,7 +934,11 @@ def test_init_without_speculation(use_pp):
     vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(enable_eplb=False, pipeline_parallel_size=2 if use_pp else 1)
     )
-    ascend_config = SimpleNamespace(eplb_config=SimpleNamespace(load_collection_phase="all"), dump_config_path=None)
+    ascend_config = SimpleNamespace(
+        eplb_config=SimpleNamespace(load_collection_phase="all"),
+        expert_offload_config=SimpleNamespace(enabled=False),
+        dump_config_path=None,
+    )
 
     # Complete the fake with the fields NPUModelRunner reads (mirrors FinegrainedTPConfig).
     ascend_config.finegrained_tp_config = SimpleNamespace(
@@ -981,7 +986,11 @@ def test_init_without_speculation(use_pp):
 
 def test_init_spec_pp_full_graph_and_speculator():
     vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(enable_eplb=True, pipeline_parallel_size=2))
-    ascend_config = SimpleNamespace(eplb_config=SimpleNamespace(load_collection_phase="decode"), dump_config_path=None)
+    ascend_config = SimpleNamespace(
+        eplb_config=SimpleNamespace(load_collection_phase="decode"),
+        expert_offload_config=SimpleNamespace(enabled=False),
+        dump_config_path=None,
+    )
 
     # Complete the fake with the fields NPUModelRunner reads (mirrors FinegrainedTPConfig).
     ascend_config.finegrained_tp_config = SimpleNamespace(

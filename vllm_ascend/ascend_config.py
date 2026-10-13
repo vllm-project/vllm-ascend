@@ -30,6 +30,7 @@ from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.config_utils import config
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability, get_current_hardware_profile
+from vllm_ascend.expert_offload.config import ExpertOffloadConfig
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -558,8 +559,9 @@ class AscendConfig:
     # FULL graphs wait on descriptor-specific external events at consumers.
     # Default to overlap on A5 only; explicit settings override this policy.
     multistream_engram_overlap: bool = dataclasses.field(
-        default_factory=lambda: get_current_hardware_profile().device_adaptor_family
-        == DeviceAdaptorFamily.FP8_OPTIMIZED
+        default_factory=lambda: (
+            get_current_hardware_profile().device_adaptor_family == DeviceAdaptorFamily.FP8_OPTIMIZED
+        )
     )
     enable_prefill_mc2: bool = False
     multistream_overlap_shared_expert: bool = False
@@ -625,6 +627,7 @@ class AscendConfig:
     # Still factory-injected: construction depends on vllm_config.
     sparse_kv_offload_config: Any = dataclasses.field(kw_only=True)
     kvpp_config: KVPPConfig = dataclasses.field(default_factory=KVPPConfig, kw_only=True)
+    expert_offload_config: ExpertOffloadConfig = dataclasses.field(default_factory=ExpertOffloadConfig)
 
     # ---- derived fields: sentinel default, after-validator overwrites ----
     enable_shared_expert_dp: bool = False
@@ -671,6 +674,7 @@ class AscendConfig:
     # the max_num_batched_tokens that sequence-parallel writeback corrected).
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
         vc = vllm_config
+        self.expert_offload_config.validate(vc, self)
         engram_config = getattr(vc, "engram_config", None)
         if (
             engram_config is not None
