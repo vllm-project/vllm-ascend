@@ -7,6 +7,7 @@ The checksum/reset behavior comes from the paired vLLM's
 only cover the NPUWorker wiring: method presence, rank-key prefixes, model
 access for both runner shapes, and the clear error for an outdated vLLM.
 """
+
 from types import SimpleNamespace
 
 import pytest
