@@ -57,6 +57,57 @@ def _gather_pool_cache(
         )
 
 
+@triton.jit
+def _score_pool_tile(
+    weighted_query,
+    cache,
+    block_table,
+    request,
+    pool_start,
+    visible,
+    max_pool_seq_len,
+    num_cache_blocks,
+    CACHE_SB: tl.constexpr,
+    CACHE_ST: tl.constexpr,
+    CACHE_SD: tl.constexpr,
+    TABLE_SR: tl.constexpr,
+    TABLE_SP: tl.constexpr,
+    CACHE_BLOCK: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    BLOCK_POOL: tl.constexpr,
+    LOWEST: tl.constexpr,
+    INDEX32: tl.constexpr,
+    PACKED_CACHE: tl.constexpr,
+):
+    pools = pool_start + tl.arange(0, BLOCK_POOL)
+    dims = tl.arange(0, HEAD_DIM)
+    valid = (pools < max_pool_seq_len) & (pools < visible)
+    if PACKED_CACHE:
+        k = tl.load(
+            cache + (request * max_pool_seq_len + pools[:, None]) * HEAD_DIM + dims[None, :],
+            valid[:, None],
+            other=0,
+        )
+    elif INDEX32:
+        blocks = tl.load(
+            block_table + request * TABLE_SR + (pools // CACHE_BLOCK) * TABLE_SP,
+            valid,
+            other=0,
+        )
+        blocks = tl.minimum(tl.maximum(blocks, 0), num_cache_blocks - 1)
+        offsets = blocks[:, None] * CACHE_SB + (pools % CACHE_BLOCK)[:, None] * CACHE_ST
+        k = tl.load(cache + offsets + dims[None, :] * CACHE_SD, valid[:, None], other=0)
+    else:
+        # Large caches use a scalar int64 page base and page-local int32 offsets.
+        block = tl.load(block_table + request * TABLE_SR + (pool_start // CACHE_BLOCK) * TABLE_SP)
+        block = tl.minimum(tl.maximum(block, 0), num_cache_blocks - 1).to(tl.int64)
+        page_base = cache + block * CACHE_SB
+        offsets = tl.arange(0, BLOCK_POOL)
+        k = tl.load(page_base + offsets[:, None] * CACHE_ST + dims[None, :] * CACHE_SD, valid[:, None], other=0)
+    scores = tl.sum(k.to(tl.float32) * weighted_query[None, :], axis=1)
+    return tl.where(valid & (scores == scores), tl.minimum(tl.maximum(scores, LOWEST), -LOWEST), LOWEST)
+
+
 @triton.jit(do_not_specialize=["token_offset", "rows", "max_pool_seq_len", "num_reqs", "num_cache_blocks"])
 def _glm5_next_lightning_indexer_score_kernel(
     qbar,
@@ -105,39 +156,27 @@ def _glm5_next_lightning_indexer_score_kernel(
             pools = pool_start + tl.arange(0, BLOCK_POOL)
             scores = tl.full((BLOCK_POOL,), LOWEST, tl.float32)
             if live & (pool_start < visible):
-                valid = (pools < max_pool_seq_len) & (pools < visible)
-                if PACKED_CACHE:
-                    k = tl.load(
-                        cache + (request * max_pool_seq_len + pools[:, None]) * HEAD_DIM + dims[None, :],
-                        valid[:, None],
-                        other=0,
-                    )
-                elif INDEX32:
-                    pages = pools // CACHE_BLOCK
-                    blocks = tl.load(
-                        block_table + request * table_stride_r + pages * table_stride_p,
-                        pools < max_pool_seq_len,
-                        other=0,
-                    )
-                    blocks = tl.minimum(tl.maximum(blocks, 0), num_cache_blocks - 1)
-                    offsets = blocks[:, None] * cache_stride_b + (pools % CACHE_BLOCK)[:, None] * cache_stride_t
-                    k = tl.load(cache + offsets + dims[None, :] * cache_stride_d, valid[:, None], other=0)
-                else:
-                    # Large caches need a scalar int64 page base; vector offsets
-                    # remain within one page to avoid overflowing signed int32.
-                    block = tl.load(
-                        block_table + request * table_stride_r + (pool_start // CACHE_BLOCK) * table_stride_p
-                    )
-                    block = tl.minimum(tl.maximum(block, 0), num_cache_blocks - 1).to(tl.int64)
-                    page_base = cache + block * cache_stride_b
-                    offsets = tl.arange(0, BLOCK_POOL)
-                    k = tl.load(
-                        page_base + offsets[:, None] * cache_stride_t + dims[None, :] * cache_stride_d,
-                        valid[:, None],
-                        other=0,
-                    )
-                scores = tl.sum(k.to(tl.float32) * weighted_query[None, :], axis=1)
-                scores = tl.where(valid & (scores == scores), tl.minimum(tl.maximum(scores, LOWEST), -LOWEST), LOWEST)
+                scores = _score_pool_tile(
+                    weighted_query,
+                    cache,
+                    block_table,
+                    request,
+                    pool_start,
+                    visible,
+                    max_pool_seq_len,
+                    num_cache_blocks,
+                    cache_stride_b,
+                    cache_stride_t,
+                    cache_stride_d,
+                    table_stride_r,
+                    table_stride_p,
+                    CACHE_BLOCK,
+                    HEAD_DIM,
+                    BLOCK_POOL,
+                    LOWEST,
+                    INDEX32,
+                    PACKED_CACHE,
+                )
             tl.store(output + row * max_pool_seq_len + pools, scores, pools < max_pool_seq_len)
 
 
@@ -253,6 +292,7 @@ def glm5_next_lightning_indexer_triton(
         and cum_query_lens.numel() * max_pool_seq_len * head_dim * indexer_cache.element_size()
         <= TRITON_PACKED_CACHE_BYTES
     )
+    block_pool = TRITON_POOL_CHUNK_SIZE if index32 else indexer_cache.shape[1]
     if packed_cache:
         cache = torch.empty(
             (cum_query_lens.numel(), max_pool_seq_len, 1, head_dim),
@@ -291,7 +331,6 @@ def glm5_next_lightning_indexer_triton(
                 .contiguous()
             )
             scores = torch.empty((rows, max_pool_seq_len), dtype=torch.float32, device=query.device)
-            block_pool = TRITON_POOL_CHUNK_SIZE if index32 else indexer_cache.shape[1]
             outer_pool = max(TRITON_PREFILL_POOL_TILE, block_pool) if rows >= TRITON_PREFILL_MIN_TOKENS else block_pool
             chunks = triton.cdiv(max_pool_seq_len, outer_pool)
             _glm5_next_lightning_indexer_score_kernel[(min(rows * chunks, TRITON_MAX_PROGRAMS),)](
@@ -324,7 +363,6 @@ def glm5_next_lightning_indexer_triton(
             )
             topk_scores, pool_ids = torch.topk(scores, selected, dim=1)
             # Ascend scalarizes Triton's int64-to-int32 vector conversion.
-            # Convert once before expanding each selected pool into tokens.
             pool_ids = pool_ids.to(torch.int32)
         else:
             topk_scores = pool_ids = None
