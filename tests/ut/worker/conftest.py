@@ -20,5 +20,6 @@ def _stub_ascend_config(monkeypatch):
             ascend_compilation_config=object(),
             eplb_config=object(),
             draft_window_size=None,
+            enable_dspark_draft_kv_optimistic_bound=False,
         ),
     )
