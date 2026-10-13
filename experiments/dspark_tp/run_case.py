@@ -47,6 +47,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--warmup-prompts", type=int, default=16)
     parser.add_argument("--startup-timeout", type=int, default=900)
+    parser.add_argument("--physical-min-k", type=int)
+    parser.add_argument("--device-offset", type=int, default=0)
     return parser.parse_args()
 
 
@@ -136,11 +138,19 @@ def serve_command(args: argparse.Namespace) -> list[str]:
     if spec is not None:
         command.extend(("--speculative-config", json.dumps(spec, separators=(",", ":"))))
     if args.case == "physical":
+        physical_config = {}
+        if args.physical_min_k is not None:
+            physical_config["min_k"] = args.physical_min_k
         command.extend(
             (
                 "--additional-config",
                 json.dumps(
-                    {"dynamic_spec_config": {"method": "dspark", "physical_k": {}}},
+                    {
+                        "dynamic_spec_config": {
+                            "method": "dspark",
+                            "physical_k": physical_config,
+                        }
+                    },
                     separators=(",", ":"),
                 ),
             )
@@ -197,10 +207,23 @@ def terminate_process_group(process: subprocess.Popen) -> None:
         process.wait(timeout=30)
 
 
+def validate_benchmark(path: Path, expected_prompts: int) -> None:
+    result = json.loads(path.read_text(encoding="utf-8"))
+    completed = int(result.get("completed", -1))
+    failed = int(result.get("failed", -1))
+    if completed != expected_prompts or failed != 0:
+        raise RuntimeError(
+            f"invalid benchmark result {path}: "
+            f"completed={completed}, failed={failed}, expected={expected_prompts}"
+        )
+
+
 def main() -> int:
     args = parse_args()
     if args.tp not in (1, 2, 4, 8, 16):
         raise ValueError("tp must be one of 1, 2, 4, 8, 16")
+    if args.device_offset < 0 or args.device_offset + args.tp > 16:
+        raise ValueError("device-offset must select devices within 0..15")
     ensure_port_free(args.port)
 
     output_dir = Path(args.output_root) / f"tp{args.tp}" / args.case
@@ -209,7 +232,9 @@ def main() -> int:
     source_path = f"{args.ascend_source}:{args.vllm_source}"
     inherited_path = env.get("PYTHONPATH")
     env["PYTHONPATH"] = f"{source_path}:{inherited_path}" if inherited_path else source_path
-    env["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(str(index) for index in range(args.tp))
+    env["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(
+        str(index) for index in range(args.device_offset, args.device_offset + args.tp)
+    )
     env["VLLM_PLUGINS"] = "ascend"
     env["VLLM_USE_V2_MODEL_RUNNER"] = "1"
     inherited_opp_path = env.get("ASCEND_CUSTOM_OPP_PATH")
@@ -227,6 +252,8 @@ def main() -> int:
         "vllm_commit": git_head(args.vllm_source),
         "custom_opp_root": args.custom_opp_root,
         "visible_devices": env["ASCEND_RT_VISIBLE_DEVICES"],
+        "device_offset": args.device_offset,
+        "physical_min_k": args.physical_min_k,
         "serve_command": command,
         "num_prompts": args.num_prompts,
         "runs": args.runs,
@@ -283,6 +310,7 @@ def main() -> int:
                     stderr=subprocess.STDOUT,
                     text=True,
                 )
+            validate_benchmark(output_dir / warmup_name, args.warmup_prompts)
 
             for run_index in range(1, args.runs + 1):
                 filename = f"benchmark-{run_index}.json"
@@ -295,6 +323,7 @@ def main() -> int:
                         stderr=subprocess.STDOUT,
                         text=True,
                     )
+                validate_benchmark(output_dir / filename, args.num_prompts)
             metadata["completed_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
             metadata["status"] = "passed"
             (output_dir / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
