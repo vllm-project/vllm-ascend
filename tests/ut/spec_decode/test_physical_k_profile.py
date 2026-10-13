@@ -56,6 +56,15 @@ def config():
     )
 
 
+def test_high_tp_keeps_upstream_adaptive_manager_unmodified():
+    high_tp_config = config()
+    high_tp_config.parallel_config = SimpleNamespace(tensor_parallel_size=8)
+    manager = FakeManager()
+
+    assert configure_physical_k_profiling(manager, high_tp_config) is manager
+    assert not hasattr(manager, "_physical_k_profile_cases")
+
+
 def profiled_manager(cost_k3: float, cost_k4: float):
     manager = configure_physical_k_profiling(FakeManager(16), config())
     cases = list(manager.batches_to_profile([8, 16]))

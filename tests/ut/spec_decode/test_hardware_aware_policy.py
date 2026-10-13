@@ -8,6 +8,7 @@ from vllm_ascend.dynamic_spec import (
     AdaptiveDraftKController,
     _create_controller,
     _update_controller,
+    physical_k_runtime_enabled,
     resolve_physical_k,
 )
 
@@ -202,6 +203,21 @@ def test_create_controller_and_opt_out():
     assert _create_controller(config).auto_tune
     config.additional_config["dynamic_spec_config"] = compact(min_k=4, auto_tune=False)
     assert not _create_controller(config).auto_tune
+
+
+def test_high_tp_falls_back_to_adaptive_verification():
+    config = SimpleNamespace(
+        use_v2_model_runner=True,
+        parallel_config=SimpleNamespace(tensor_parallel_size=8),
+        additional_config={"dynamic_spec_config": compact()},
+        speculative_config=SimpleNamespace(num_speculative_tokens=5),
+    )
+    assert not physical_k_runtime_enabled(config)
+    assert _create_controller(config) is None
+
+    config.parallel_config.tensor_parallel_size = 4
+    assert physical_k_runtime_enabled(config)
+    assert _create_controller(config) is not None
 
 
 def test_dynamic_spec_config_validates_compact_interface():

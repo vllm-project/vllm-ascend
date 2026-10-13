@@ -16,8 +16,10 @@ import numpy as np
 from vllm.logger import logger
 
 from vllm_ascend.dynamic_spec import (
+    PHYSICAL_K_MAX_TP_SIZE,
     PHYSICAL_K_MIN_TUNED_BATCH_SIZE,
     PHYSICAL_K_RECOMMEND_INTERVAL,
+    physical_k_runtime_enabled,
     resolve_physical_k,
 )
 
@@ -42,6 +44,8 @@ def _batch_bucket(batch_size: int) -> int:
 
 
 def _candidate_k(vllm_config: Any, max_k: int) -> tuple[int, ...]:
+    if not physical_k_runtime_enabled(vllm_config):
+        return ()
     dynamic = (getattr(vllm_config, "additional_config", None) or {}).get("dynamic_spec_config", {})
     params = resolve_physical_k(dynamic) or {}
     if not params.get("auto_tune"):
@@ -110,6 +114,26 @@ def _extend_profile_batches(
 def configure_physical_k_profiling(manager: Any, vllm_config: Any):
     """Add physical-K samples and recommendations to an upstream AV manager."""
 
+    dynamic = (getattr(vllm_config, "additional_config", None) or {}).get(
+        "dynamic_spec_config", {}
+    )
+    if resolve_physical_k(dynamic) is not None and not physical_k_runtime_enabled(
+        vllm_config
+    ):
+        tp_size = int(
+            getattr(
+                getattr(vllm_config, "parallel_config", None),
+                "tensor_parallel_size",
+                1,
+            )
+        )
+        logger.info(
+            "ASCEND_AV_PHYSICAL_K_FALLBACK tensor_parallel_size=%d "
+            "max_supported_tp=%d mode=adaptive_verification",
+            tp_size,
+            PHYSICAL_K_MAX_TP_SIZE,
+        )
+        return manager
     max_k = int(manager.num_speculative_steps)
     candidates = _candidate_k(vllm_config, max_k)
     if not candidates:
