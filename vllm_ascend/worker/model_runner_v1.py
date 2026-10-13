@@ -180,6 +180,7 @@ from vllm_ascend.models.deepseek_v41.cache_config import (
 from vllm_ascend.models.glm5next.cache_views import view_glm5_next_cache
 from vllm_ascend.models.glm5next.kv_cache import is_glm5_next_cache_spec
 from vllm_ascend.ops.fused_moe.force_eplb import build_force_eplb_topk
+from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionMetadataBuilder
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.ops.triton.spec_decode.ngram import triton_ngram_spec_decode
 from vllm_ascend.quantization.utils import enable_fa_quant
@@ -3849,6 +3850,8 @@ class NPUModelRunner(GPUModelRunner):
                         num_accepted_tokens=self.num_accepted_tokens.gpu[:num_reqs_padded],
                         num_decode_draft_tokens_cpu=self.num_decode_draft_tokens.cpu[:num_reqs_padded],
                     )
+                if isinstance(builder, AscendGDNAttentionMetadataBuilder):
+                    extra_attn_metadata_args["common_gdn_batch_metadata"] = common_gdn_batch_metadata
 
             if isinstance(builder, (AscendDSAMetadataBuilder, AscendDSACPMetadataBuilder)):
                 if for_cudagraph_capture:
@@ -3900,6 +3903,9 @@ class NPUModelRunner(GPUModelRunner):
         # in the same group share the same metadata.
         common_ratio_to_sas_metadata: dict[Any, Any] = {}
         common_v41_batch_metadata: dict[str, Any] = {}
+        # One immutable logical batch per call. Never carry this cache into the
+        # drafter or the next iteration, whose CPU input buffers are mutable.
+        common_gdn_batch_metadata: dict[tuple, tuple[int, int] | None] = {}
         spec_decode_common_attn_metadata = None
         for kv_cache_gid, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups):
             # V4.1 cache coordinates are shared only inside one framework KV

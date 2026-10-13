@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, is_dataclass
+from time import perf_counter
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -37,6 +38,229 @@ from vllm_ascend.ops.triton.fla.utils import (
 from vllm_ascend.ops.triton.fla.utils import (
     prepare_update_chunk_offsets as runtime_prepare_update_chunk_offsets,
 )
+
+
+def _assert_metadata_equal(actual, expected):
+    if isinstance(expected, torch.Tensor):
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    elif is_dataclass(expected):
+        for field in fields(expected):
+            _assert_metadata_equal(getattr(actual, field.name), getattr(expected, field.name))
+    else:
+        assert actual == expected
+
+
+@pytest.mark.parametrize("query_lens", [[6], [2], [1], [6, 3], [1, 2, 6]])
+def test_pure_spec_fast_path_matches_general_metadata(query_lens):
+    common = create_common_attn_metadata(
+        BatchSpec([100 + length for length in query_lens], query_lens), 16, torch.device("cpu")
+    )
+    common.block_table_tensor = torch.arange(len(query_lens) * 6, dtype=torch.int32).reshape(-1, 6) + 10
+    accepted = torch.tensor([min(length, 2) for length in query_lens], dtype=torch.int32)
+    drafts = torch.tensor([5] * len(query_lens), dtype=torch.int32)
+    fast = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=5,
+        cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+    )
+    general = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=5,
+        cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+    )
+    with patch.object(general, "_try_build_pure_spec_decode", return_value=None):
+        expected = general.build(0, common, accepted, drafts)
+    with patch.object(fast, "_copy_sequence_indices_to_device", side_effect=AssertionError("unexpected partition")):
+        actual = fast.build(0, common, accepted, drafts)
+    _assert_metadata_equal(actual, expected)
+
+
+def test_pure_spec_fast_path_refreshes_after_general_batch():
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=5,
+        cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+    )
+    common = create_common_attn_metadata(BatchSpec([106], [6]), 16, torch.device("cpu"))
+    common.block_table_tensor = torch.arange(6, dtype=torch.int32).reshape(1, 6) + 10
+    accepted = torch.tensor([2], dtype=torch.int32)
+    first = builder.build(0, common, accepted, torch.tensor([5]))
+    pointers = [first.spec_state_indices_tensor.data_ptr(), first.spec_query_start_loc.data_ptr()]
+    ordinary = create_common_attn_metadata(BatchSpec([101], [1]), 16, torch.device("cpu"))
+    builder.build(0, ordinary, torch.ones(1, dtype=torch.int32), torch.zeros(1, dtype=torch.int32))
+    common.block_table_tensor.add_(20)
+    accepted.fill_(4)
+    current = builder.build(0, common, accepted, torch.tensor([5]))
+    assert [current.spec_state_indices_tensor.data_ptr(), current.spec_query_start_loc.data_ptr()] == pointers
+    assert current.spec_state_indices_tensor.tolist() == [[30, 31, 32, 33, 34, 35]]
+    assert current.num_accepted_tokens.tolist() == [4]
+    assert current.spec_sequence_masks.tolist() == [True]
+    assert current.spec_token_indx.tolist() == list(range(6))
+
+
+def test_pure_spec_fast_path_matches_general_with_fia_padding():
+    common = create_common_attn_metadata(BatchSpec([106, 0, 0], [6, 6, 6]), 16, torch.device("cpu"))
+    common.num_actual_tokens = 6
+    common.block_table_tensor = torch.arange(18, dtype=torch.int32).reshape(3, 6) + 10
+    accepted, drafts = torch.ones(3, dtype=torch.int32), torch.tensor([5, -1, -1])
+    builders = [
+        _make_builder(
+            device=torch.device("cpu"),
+            num_heads=32,
+            num_speculative_tokens=5,
+            cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+        )
+        for _ in range(2)
+    ]
+    with patch.object(builders[0], "_try_build_pure_spec_decode", return_value=None):
+        expected = builders[0].build(0, common, accepted, drafts, num_actual_reqs=1)
+    with patch.object(
+        builders[1], "_copy_sequence_indices_to_device", side_effect=AssertionError("unexpected partition")
+    ):
+        actual = builders[1].build(0, common, accepted, drafts, num_actual_reqs=1)
+    _assert_metadata_equal(actual, expected)
+    assert actual.spec_sequence_masks.tolist() == [True, False, False]
+
+
+def test_pure_spec_fast_path_reuses_views_in_inference_mode():
+    with torch.inference_mode():
+        builder = _make_builder(
+            device=torch.device("cpu"),
+            num_heads=32,
+            num_speculative_tokens=5,
+            cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+        )
+        common = create_common_attn_metadata(BatchSpec([106], [6]), 16, torch.device("cpu"))
+        common.block_table_tensor = torch.arange(6, dtype=torch.int32).reshape(1, 6)
+        for _ in range(3):
+            metadata = builder.build(0, common, torch.ones(1, dtype=torch.int32), torch.tensor([5]))
+        assert len(builder._pure_spec_views) == 1
+        assert metadata.num_spec_decode_tokens == 6
+
+
+def test_pure_spec_fast_path_host_benchmark():
+    common = create_common_attn_metadata(BatchSpec([131078], [6]), 16, torch.device("cpu"))
+    common.block_table_tensor = torch.arange(6, dtype=torch.int32).reshape(1, 6)
+    accepted, drafts = torch.ones(1, dtype=torch.int32), torch.tensor([5], dtype=torch.int32)
+    results = {}
+    for name, enable_fast in [("general", False), ("pure_spec", True)]:
+        builder = _make_builder(
+            device=torch.device("cpu"),
+            num_heads=32,
+            num_speculative_tokens=5,
+            cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+        )
+        if not enable_fast:
+            builder._try_build_pure_spec_decode = lambda *args: None
+        for _ in range(30):
+            builder.build(0, common, accepted, drafts)
+        started = perf_counter()
+        for _ in range(300):
+            builder.build(0, common, accepted, drafts)
+        results[name] = (perf_counter() - started) * 1e6 / 300
+    print(f"GDN metadata CPU-only benchmark, no profiler, microseconds/build: {results}")
+
+
+def _make_concurrent_spec_builder(builder_cls=AscendGDNAttentionMetadataBuilder):
+    config = _make_vllm_config(
+        num_speculative_tokens=5,
+        cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+    )
+    config.compilation_config.max_cudagraph_capture_size = 192
+    spec = MambaSpec(
+        block_size=16,
+        shapes=((1,), (1,)),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="none",
+        num_speculative_blocks=0,
+    )
+    return builder_cls(spec, ["layer0"], config, torch.device("cpu"))
+
+
+@pytest.mark.parametrize("live_reqs", [1, 10, 11, 12, 16])
+@pytest.mark.parametrize("builder_cls", [AscendGDNAttentionMetadataBuilder, GDNAttentionMetadataBuilder310])
+def test_pure_spec_concurrent_padding_matches_general(live_reqs, builder_cls):
+    query_lens = [(i % 6) + 1 for i in range(live_reqs)] + [6] * (16 - live_reqs)
+    common = create_common_attn_metadata(
+        BatchSpec([106] * live_reqs + [0] * (16 - live_reqs), query_lens), 16, torch.device("cpu")
+    )
+    common.num_actual_tokens = sum(query_lens[:live_reqs])
+    common.block_table_tensor = torch.arange(16 * 6, dtype=torch.int32).reshape(16, 6) + 10
+    accepted = torch.arange(16, dtype=torch.int32) % 6 + 1
+    drafts = torch.tensor([5] * live_reqs + [-1] * (16 - live_reqs), dtype=torch.int32)
+    fast, general = [_make_concurrent_spec_builder(builder_cls) for _ in range(2)]
+    with patch.object(general, "_try_build_pure_spec_decode", return_value=None):
+        expected = general.build(0, common, accepted, drafts, num_actual_reqs=live_reqs)
+    with patch.object(fast, "_copy_sequence_indices_to_device", side_effect=AssertionError("unexpected partition")):
+        actual = fast.build(0, common, accepted, drafts, num_actual_reqs=live_reqs)
+    _assert_metadata_equal(actual, expected)
+
+
+def test_pure_spec_batch_classification_shared_but_group_state_independent():
+    common = create_common_attn_metadata(BatchSpec([106, 106, 0], [6, 6, 6]), 16, torch.device("cpu"))
+    common.num_actual_tokens = 12
+    common.block_table_tensor = torch.arange(18, dtype=torch.int32).reshape(3, 6) + 10
+    second = common.replace(block_table_tensor=common.block_table_tensor + 100)
+    accepted = torch.tensor([2, 4, 1], dtype=torch.int32)
+    drafts = torch.tensor([5, 5, -1], dtype=torch.int32)
+    builders = [_make_concurrent_spec_builder() for _ in range(2)]
+    batch_cache = {}
+    with patch.object(
+        ascend_gdn_attn_builder, "_pure_spec_decode_shape", wraps=ascend_gdn_attn_builder._pure_spec_decode_shape
+    ) as classify:
+        first = builders[0].build(0, common, accepted, drafts, num_actual_reqs=2, common_gdn_batch_metadata=batch_cache)
+        other = builders[1].build(0, second, accepted, drafts, num_actual_reqs=2, common_gdn_batch_metadata=batch_cache)
+    assert classify.call_count == 1
+    torch.testing.assert_close(other.spec_state_indices_tensor[:2], first.spec_state_indices_tensor[:2] + 100)
+    assert first.spec_state_indices_tensor.data_ptr() != other.spec_state_indices_tensor.data_ptr()
+    # New iterations have fresh classification caches even when CPU buffers
+    # are updated in place and all tensor addresses remain unchanged.
+    drafts[1] = -1
+    common.query_start_loc_cpu[:] = torch.tensor([0, 6, 7, 7])
+    common.num_actual_tokens = 7
+    accepted[0] = 5
+    general = _make_concurrent_spec_builder()
+    with patch.object(general, "_try_build_pure_spec_decode", return_value=None):
+        expected = general.build(0, common, accepted, drafts, num_actual_reqs=2)
+    current = builders[0].build(0, common, accepted, drafts, num_actual_reqs=2, common_gdn_batch_metadata={})
+    _assert_metadata_equal(current, expected)
+
+
+def test_pure_spec_refreshes_padding_after_batch_shrink_and_growth():
+    builder = _make_concurrent_spec_builder()
+    pointer = builder.spec_state_indices_tensor.data_ptr()
+    for live_reqs in [12, 10, 1, 11, 16, 2]:
+        common = create_common_attn_metadata(
+            BatchSpec([106] * live_reqs + [0] * (16 - live_reqs), [6] * 16), 16, torch.device("cpu")
+        )
+        common.num_actual_tokens = live_reqs * 6
+        common.block_table_tensor = torch.arange(96, dtype=torch.int32).reshape(16, 6) + live_reqs * 100
+        accepted = torch.full((16,), live_reqs % 6 + 1, dtype=torch.int32)
+        drafts = torch.tensor([5] * live_reqs + [-1] * (16 - live_reqs), dtype=torch.int32)
+        reference = _make_concurrent_spec_builder()
+        with patch.object(reference, "_try_build_pure_spec_decode", return_value=None):
+            expected = reference.build(0, common, accepted, drafts, num_actual_reqs=live_reqs)
+        current = builder.build(0, common, accepted, drafts, num_actual_reqs=live_reqs, common_gdn_batch_metadata={})
+        _assert_metadata_equal(current, expected)
+        assert current.spec_state_indices_tensor.data_ptr() == pointer
+
+
+def test_pure_spec_batch_cache_distinguishes_cpu_views():
+    common = create_common_attn_metadata(BatchSpec([106], [6]), 16, torch.device("cpu"))
+    common.block_table_tensor = torch.arange(6, dtype=torch.int32).reshape(1, 6)
+    accepted = torch.ones(1, dtype=torch.int32)
+    all_drafts = torch.tensor([5, -1], dtype=torch.int32)
+    builder = _make_concurrent_spec_builder()
+    batch_cache = {}
+    with patch.object(
+        ascend_gdn_attn_builder, "_pure_spec_decode_shape", wraps=ascend_gdn_attn_builder._pure_spec_decode_shape
+    ) as classify:
+        assert builder._try_build_pure_spec_decode(common, accepted, all_drafts[:1], 1, batch_cache) is not None
+        assert builder._try_build_pure_spec_decode(common, accepted, all_drafts[1:], 1, batch_cache) is None
+    assert classify.call_count == 2
 
 
 @pytest.mark.parametrize(
