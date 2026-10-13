@@ -4,11 +4,15 @@
 
 import asyncio
 import json
+import os
 import shlex
 import shutil
 import time
+from dataclasses import replace
+from hashlib import sha256
 from importlib import import_module
 from pathlib import Path
+from statistics import median
 from typing import Any
 
 import pytest
@@ -28,16 +32,19 @@ MODEL = "Qwen/Qwen3-8B"
 BLOCK_SIZE = 128
 REUSABLE_TOKEN_COUNT = 8192
 PROMPT_TOKEN_COUNT = REUSABLE_TOKEN_COUNT + 1
-OUTPUT_TOKEN_COUNT = 32
+OUTPUT_TOKEN_COUNTS = (1, 8, 32)
+REPEAT_COUNT = 3
 REQUEST_COUNT = 8
 CONCURRENCIES = (1, 8)
-# Sixteen independent 8K prefixes plus warmup occupy about 20 GiB of BF16 KV.
+# Eight independent 8K prefixes occupy about 9 GiB; clear the dedicated pool between rounds.
 POOL_MEMORY_BYTES = 32 << 30
 LOCAL_BUFFER_BYTES = 1 << 30
 HTTP_TIMEOUT_SECONDS = 30
 CONTROL_TIMEOUT_SECONDS = 60
 BENCHMARK_TIMEOUT_SECONDS = 600
 POLL_INTERVAL_SECONDS = 0.1
+SUMMARY_METRICS = ("median_ttft_ms", "median_tpot_ms", "median_e2el_ms", "request_throughput")
+WORKER_EXTENSION = "tests.e2e.pull_request.one_card.ascendstore_v1_performance.AscendStoreBenchmarkWorkerExtension"
 CONNECTORS = (
     (
         "production",
@@ -59,50 +66,107 @@ def test_production_and_v1_serve_cold_and_external_hit_performance(tmp_path: Pat
     assert shutil.which("mooncake_master") is not None, "The serve benchmark requires mooncake_master on PATH"
     model_path = maybe_model_redirect(MODEL)
     tokenizer = get_tokenizer(model_path)
-    inputs = {concurrency: _make_requests(tokenizer, str(concurrency)) for concurrency in CONCURRENCIES}
+    inputs = _make_requests(tokenizer, "benchmark")
     warmup = _make_requests(tokenizer, "warmup", count=1)[0]
     # Distinct first blocks prevent local or external sharing between measured requests and warmup.
-    first_blocks = [tuple(sample.prompt[:BLOCK_SIZE]) for batch in inputs.values() for sample in batch]
+    first_blocks = [tuple(sample.prompt[:BLOCK_SIZE]) for sample in inputs]
     assert len(set(first_blocks + [tuple(warmup.prompt[:BLOCK_SIZE])])) == len(first_blocks) + 1
 
     observations = {
         implementation: _exercise_connector(tmp_path, model_path, tokenizer, inputs, warmup, connector_name, module)
         for implementation, connector_name, module in CONNECTORS
     }
-    comparisons: dict[str, dict[str, dict[str, float]]] = {}
-    for concurrency in CONCURRENCIES:
-        comparisons[str(concurrency)] = {}
-        for phase in ("cold", "external_hit"):
-            production = observations["production"][str(concurrency)][phase]
-            candidate = observations["v1"][str(concurrency)][phase]
-            assert candidate["generated_texts"] == production["generated_texts"], (concurrency, phase)
-            comparisons[str(concurrency)][phase] = {
-                "v1_over_production_median_ttft": candidate["median_ttft_ms"] / production["median_ttft_ms"],
-                "v1_over_production_request_throughput": (
-                    candidate["request_throughput"] / production["request_throughput"]
-                ),
-            }
+    comparisons: dict[str, Any] = {}
+    summaries: dict[str, Any] = {implementation: {} for implementation, _, _ in CONNECTORS}
+    for output_tokens in OUTPUT_TOKEN_COUNTS:
+        output_key = str(output_tokens)
+        comparisons[output_key] = {}
+        for implementation in summaries:
+            summaries[implementation][output_key] = {}
+        for concurrency in CONCURRENCIES:
+            concurrency_key = str(concurrency)
+            production_rounds = observations["production"][output_key][concurrency_key]
+            candidate_rounds = observations["v1"][output_key][concurrency_key]
+            paired_rounds = []
+            for production, candidate in zip(production_rounds, candidate_rounds, strict=True):
+                comparison = {}
+                for phase in ("cold", "external_hit"):
+                    reference, actual = production[phase], candidate[phase]
+                    comparison[phase] = {
+                        "generated_texts_equal": actual["generated_texts"] == reference["generated_texts"],
+                        "different_request_indices": [
+                            index
+                            for index, (reference_text, actual_text) in enumerate(
+                                zip(reference["generated_texts"], actual["generated_texts"], strict=True)
+                            )
+                            if actual_text != reference_text
+                        ],
+                        "v1_over_production_median_ttft": actual["median_ttft_ms"] / reference["median_ttft_ms"],
+                        "v1_over_production_request_throughput": (
+                            actual["request_throughput"] / reference["request_throughput"]
+                        ),
+                    }
+                paired_rounds.append(comparison)
+            comparisons[output_key][concurrency_key] = paired_rounds
+            for implementation in summaries:
+                rounds = observations[implementation][output_key][concurrency_key]
+                summaries[implementation][output_key][concurrency_key] = _summarize_rounds(rounds)
     report = {
         "model": MODEL,
         "prompt_tokens": PROMPT_TOKEN_COUNT,
         "external_hit_tokens_per_request": REUSABLE_TOKEN_COUNT,
-        "output_tokens": OUTPUT_TOKEN_COUNT,
+        "output_tokens": OUTPUT_TOKEN_COUNTS,
+        "rounds_per_scene": REPEAT_COUNT,
+        "concurrencies": CONCURRENCIES,
         "requests_per_phase": REQUEST_COUNT,
         "reset_in_benchmark_timing": False,
+        "same_prompts_across_scenes": True,
+        "prompt_token_id_sha256": [sha256(json.dumps(sample.prompt).encode()).hexdigest() for sample in inputs],
+        "implementation_order": [implementation for implementation, _, _ in CONNECTORS],
+        "post_response_store_drain_in_benchmark_timing": False,
+        "tpot_for_one_output_token": "not applicable",
         "measurements": observations,
+        "round_summaries": summaries,
         "comparisons": comparisons,
     }
     serialized = json.dumps(report, indent=2)
     (tmp_path / "ascendstore-serve-performance.json").write_text(serialized, encoding="utf-8")
     # The existing selected-test log artifact preserves the complete report without CI changes.
     print(f"\nASCENDSTORE_SERVE_PERFORMANCE\n{serialized}")
+    # A wording difference must not discard other scenes or their reset/provenance evidence.
+    for output_key, concurrency_comparisons in comparisons.items():
+        for concurrency_key, rounds in concurrency_comparisons.items():
+            for round_index, comparison in enumerate(rounds, start=1):
+                for phase, result in comparison.items():
+                    assert result["generated_texts_equal"], (
+                        output_key,
+                        concurrency_key,
+                        round_index,
+                        phase,
+                        result["different_request_indices"],
+                    )
+
+
+def _summarize_rounds(rounds: list[dict[str, Any]]) -> dict[str, Any]:
+    """Keep round dispersion per scene, rather than pooling separately reset runs into one throughput."""
+    summary: dict[str, dict[str, Any]] = {}
+    for phase in ("cold", "external_hit"):
+        summary[phase] = {}
+        for metric in SUMMARY_METRICS:
+            values = [observation[phase][metric] for observation in rounds]
+            summary[phase][metric] = (
+                {"median": median(values), "min": min(values), "max": max(values)}
+                if all(value is not None for value in values)
+                else None
+            )
+    return summary
 
 
 def _exercise_connector(
     tmp_path: Path,
     model_path: str,
     tokenizer: TokenizerLike,
-    inputs: dict[int, list[SampleRequest]],
+    inputs: list[SampleRequest],
     warmup: SampleRequest,
     connector_name: str,
     connector_module: str,
@@ -140,13 +204,17 @@ def _exercise_connector(
         --tensor-parallel-size 1 --pipeline-parallel-size 1 --gpu-memory-utilization 0.8
         --enable-prefix-caching --prefix-caching-hash-algo sha256 --no-enable-chunked-prefill
         --enforce-eager --no-async-scheduling --seed 42
-    """) + ["--kv-transfer-config", json.dumps(transfer_config)]
+    """) + ["--kv-transfer-config", json.dumps(transfer_config), "--worker-extension-cls", WORKER_EXTENSION]
     # This optional NPU service dependency is needed only when executing our E2E.
     pool_runtime = import_module("tests.e2e.common.single_node.kv_pool_runtime")
-    observations = {}
+    observations: dict[str, Any] = {}
     with pool_runtime.SingleNodeMooncakeManager(pool_config, f"{tmp_path.name}-{connector_name}") as pool:
+        # The CLI/Worker subprocess does not inherit pytest's sys.path, and installed packages exclude tests.
+        repository_root = str(Path(__file__).resolve().parents[4])
+        worker_pythonpath = os.pathsep.join(filter(None, (repository_root, os.environ.get("PYTHONPATH", ""))))
         server_envs = {
             **pool.server_envs,
+            "PYTHONPATH": worker_pythonpath,
             "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
             "VLLM_USE_V2_MODEL_RUNNER": "1",
             "VLLM_KV_CACHE_LAYOUT": "NHD",
@@ -168,37 +236,61 @@ def _exercise_connector(
                 json={
                     "model": MODEL,
                     "prompt": warmup.prompt,
-                    "max_tokens": OUTPUT_TOKEN_COUNT,
+                    "max_tokens": max(OUTPUT_TOKEN_COUNTS),
                     "temperature": 0,
                     "seed": 42,
                     "ignore_eos": True,
                 },
             )
             response.raise_for_status()
-            assert response.json()["usage"]["completion_tokens"] == OUTPUT_TOKEN_COUNT
+            assert response.json()["usage"]["completion_tokens"] == max(OUTPUT_TOKEN_COUNTS)
             _wait_for_prompt_token_sources(server, baseline, PROMPT_TOKEN_COUNT)
 
-            for concurrency, samples in inputs.items():
-                cold_reset = _reset_local_prefix_cache(server)
-                cold = _run_benchmark(server, tokenizer, samples, concurrency)
-                assert cold["prompt_tokens_by_source"] == {
-                    "local_compute": REQUEST_COUNT * PROMPT_TOKEN_COUNT,
-                    "local_cache_hit": 0,
-                    "external_kv_transfer": 0,
-                }, "Cold requests must not reuse local or external KV"
+            for output_tokens in OUTPUT_TOKEN_COUNTS:
+                observations[str(output_tokens)] = {}
+                samples = [replace(sample, expected_output_len=output_tokens) for sample in inputs]
+                for concurrency in CONCURRENCIES:
+                    rounds = []
+                    for _ in range(REPEAT_COUNT):
+                        # Store must drain before force-removing objects from this test's private Mooncake master.
+                        start = time.perf_counter()
+                        response = requests.post(
+                            server.url_for("collective_rpc"),
+                            json={
+                                "method": "reset_ascendstore_benchmark_pool",
+                                "args": [pool.master_address],
+                                "timeout": CONTROL_TIMEOUT_SECONDS,
+                            },
+                            timeout=CONTROL_TIMEOUT_SECONDS,
+                        )
+                        response.raise_for_status()
+                        results = response.json()["results"]
+                        assert len(results) == 1, "The ordinary benchmark requires exactly one Worker"
+                        pool_reset = {**results[0], "duration_ms": (time.perf_counter() - start) * 1000}
+                        assert pool_reset["removed_objects"] > 0, "The preceding requests did not publish external KV"
+                        cold_reset = _reset_local_prefix_cache(server)
+                        cold = _run_benchmark(server, tokenizer, samples, concurrency)
+                        assert cold["prompt_tokens_by_source"] == {
+                            "local_compute": REQUEST_COUNT * PROMPT_TOKEN_COUNT,
+                            "local_cache_hit": 0,
+                            "external_kv_transfer": 0,
+                        }, "Cold requests must not reuse local or external KV"
 
-                # Reset may wait for retained Store source blocks; neither this wait nor reset is timed by benchmark().
-                external_reset = _reset_local_prefix_cache(server)
-                external = _run_benchmark(server, tokenizer, samples, concurrency)
-                assert external["prompt_tokens_by_source"] == {
-                    "local_compute": REQUEST_COUNT,
-                    "local_cache_hit": 0,
-                    "external_kv_transfer": REQUEST_COUNT * REUSABLE_TOKEN_COUNT,
-                }, "Every reusable prefix must come from External, leaving one token per request to compute"
-                observations[str(concurrency)] = {
-                    "cold": {"reset_before": cold_reset, **cold},
-                    "external_hit": {"reset_before": external_reset, **external},
-                }
+                        # Local reset may wait for retained Store blocks; the benchmark timer excludes that wait.
+                        external_reset = _reset_local_prefix_cache(server)
+                        external = _run_benchmark(server, tokenizer, samples, concurrency)
+                        assert external["prompt_tokens_by_source"] == {
+                            "local_compute": REQUEST_COUNT,
+                            "local_cache_hit": 0,
+                            "external_kv_transfer": REQUEST_COUNT * REUSABLE_TOKEN_COUNT,
+                        }, "Every reusable prefix must come from External, leaving one token per request to compute"
+                        rounds.append(
+                            {
+                                "cold": {"pool_reset_before": pool_reset, "reset_before": cold_reset, **cold},
+                                "external_hit": {"reset_before": external_reset, **external},
+                            }
+                        )
+                    observations[str(output_tokens)][str(concurrency)] = rounds
     return observations
 
 
@@ -217,7 +309,9 @@ def _make_requests(tokenizer: TokenizerLike, scenario: str, count: int = REQUEST
         body = (document * ((remaining + len(document) - 1) // len(document)))[:remaining]
         samples.append(
             SampleRequest(
-                prompt=header + body + question, prompt_len=PROMPT_TOKEN_COUNT, expected_output_len=OUTPUT_TOKEN_COUNT
+                prompt=header + body + question,
+                prompt_len=PROMPT_TOKEN_COUNT,
+                expected_output_len=max(OUTPUT_TOKEN_COUNTS),
             )
         )
     return samples
@@ -252,21 +346,30 @@ def _run_benchmark(
         extra_headers=None,
         extra_body={"temperature": 0, "seed": 42},
         ready_check_timeout_sec=0,
+        probe_request_rate=0,
     )
     result = asyncio.run(asyncio.wait_for(operation, timeout=BENCHMARK_TIMEOUT_SECONDS))
     assert result["completed"] == len(samples) and result["failed"] == 0, result["errors"]
     assert result["input_lens"] == [PROMPT_TOKEN_COUNT] * len(samples)
-    assert result["output_lens"] == [OUTPUT_TOKEN_COUNT] * len(samples)
+    output_tokens = samples[0].expected_output_len
+    assert all(sample.expected_output_len == output_tokens for sample in samples)
+    assert result["output_lens"] == [output_tokens] * len(samples)
     assert result["median_ttft_ms"] > 0 and result["request_throughput"] > 0
     sources = _wait_for_prompt_token_sources(server, baseline, len(samples) * PROMPT_TOKEN_COUNT)
     # Keep scalars, per-request latency and outputs; omit bulky per-token timing arrays from the CI report.
-    return {
+    measurements = {
         **{key: value for key, value in result.items() if isinstance(value, (int, float))},
         "ttfts": result["ttfts"],
         "latencies": result["latencies"],
         "generated_texts": result["generated_texts"],
         "prompt_tokens_by_source": sources,
     }
+    if output_tokens == 1:
+        # No interval after the first token exists; upstream's zero TPOT is not a measured decode speed.
+        for metric in measurements:
+            if "tpot" in metric:
+                measurements[metric] = None
+    return measurements
 
 
 def _reset_local_prefix_cache(server: RemoteOpenAIServer) -> dict[str, float | int]:
