@@ -3,6 +3,7 @@
 """GLM bounded-gate contracts for the AscendC KDA operators."""
 
 import torch
+from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
 
 from vllm_ascend.models.glm5next.ops.state_ops import gather_initial_states, scatter_states
 from vllm_ascend.ops.kda import run_chunk_kda, run_recurrent_kda
@@ -31,9 +32,10 @@ def recurrent_kda(
     state_indices = state_indices[:num_seqs]
     if num_accepted_tokens is not None:
         num_accepted_tokens = num_accepted_tokens[:num_seqs]
+    # Match the BF16 Q/K normalization used by chunk prefill.
     output = run_recurrent_kda(
-        q,
-        k,
+        l2norm_fwd(q.contiguous()),
+        l2norm_fwd(k.contiguous()),
         v,
         raw_gate,
         raw_beta,
@@ -44,6 +46,7 @@ def recurrent_kda(
         dt_bias,
         lower_bound=lower_bound,
         beta_is_preprocessed=False,
+        use_qk_l2norm_in_kernel=False,
         num_accepted_tokens=num_accepted_tokens,
     )
     if output_buffer is not None:

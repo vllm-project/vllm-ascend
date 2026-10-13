@@ -450,6 +450,7 @@ def test_recurrent_preserves_preprocessed_beta_and_mtp_state(lower_bound, qkv_pa
     assert recurrent.call_args.args[2] is v
     assert recurrent.call_args.args[4] is beta
     assert recurrent.call_args.args[5] is state
+    assert recurrent.call_args.kwargs["use_qk_l2norm_in_kernel"]
     assert recurrent.call_args.kwargs["cu_seqlens"] is starts
     assert recurrent.call_args.kwargs["ssm_state_indices"] is slots
     assert recurrent.call_args.kwargs["state_v_first"] is True
