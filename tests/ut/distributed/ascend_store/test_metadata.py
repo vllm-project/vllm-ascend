@@ -34,6 +34,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     get_group_block_size,
     get_group_cache_family,
     infer_cache_transfer_granularity,
+    infer_dcp_mismatch_info,
     infer_group_block_sizes,
     masked_block_runs,
     uses_hybrid_kv_cache,
@@ -545,6 +546,29 @@ class TestReqMeta(unittest.TestCase):
         self.assertEqual(meta.token_len_chunk, 32)
         self.assertIsNone(meta.load_spec)
 
+    def test_from_request_tracker_owns_only_new_token_suffix(self):
+        tracker = RequestTracker(
+            req_id="r1",
+            token_len=48,
+            allocated_block_ids=[0, 1, 2],
+            num_saved_tokens=32,
+            token_ids=list(range(48)),
+        )
+
+        meta = ReqMeta.from_request_tracker(
+            tracker,
+            cache_transfer_granularity=16,
+            block_hashes=[b"h1", b"h2", b"h3"],
+        )
+
+        self.assertIsNotNone(meta)
+        self.assertEqual(meta.save_start_token, 32)
+        self.assertEqual(meta.token_ids, list(range(32, 48)))
+        tracker.token_ids.append(99)
+        self.assertEqual(meta.token_ids, list(range(32, 48)))
+        self.assertEqual(meta.get_event_token_ids(32, 48), list(range(32, 48)))
+        self.assertEqual(meta.get_event_token_ids(0, 16), [])
+
     def test_from_request_tracker_skip_save(self):
         tracker = RequestTracker(
             req_id="r1",
@@ -607,7 +631,9 @@ class TestReqMeta(unittest.TestCase):
             allocated_block_ids=[0, 1],
             num_saved_tokens=0,
         )
-        meta = ReqMeta.from_request_tracker(tracker, cache_transfer_granularity=16, discard_partial_chunks=True)
+        meta = ReqMeta.from_request_tracker(
+            tracker, cache_transfer_granularity=16, discard_partial_chunks=True, block_hashes=[b"h0"]
+        )
         self.assertIsNotNone(meta)
         self.assertEqual(meta.token_len_chunk, 16)
 
@@ -652,6 +678,24 @@ class TestReqMeta(unittest.TestCase):
         self.assertEqual(meta.save_end_token, 32)
         self.assertEqual(meta.target_token_len, 33)
 
+    def test_from_request_tracker_uses_mrv2_reprefill_boundary_for_masks(self):
+        tracker = RequestTracker(
+            req_id="r1",
+            token_len=64,
+            allocated_block_ids=[0, 1, 2, 3],
+            num_prompt_tokens=32,
+            prefill_end_tokens=48,
+        )
+
+        meta = ReqMeta.from_request_tracker(
+            tracker,
+            cache_transfer_granularity=16,
+            block_hashes=[b"h0", b"h1", b"h2", b"h3"],
+        )
+
+        self.assertIsNotNone(meta)
+        self.assertEqual(meta.num_prompt_tokens, 48)
+
     def test_from_request_tracker_defers_c8_boundary_without_hash(self):
         tracker = RequestTracker(
             req_id="r1",
@@ -693,7 +737,9 @@ class TestReqMeta(unittest.TestCase):
             allocated_block_ids=[0, 1],
             num_saved_tokens=0,
         )
-        meta = ReqMeta.from_request_tracker(tracker, cache_transfer_granularity=16, discard_partial_chunks=False)
+        meta = ReqMeta.from_request_tracker(
+            tracker, cache_transfer_granularity=16, discard_partial_chunks=False, block_hashes=[b"h0"]
+        )
         self.assertIsNotNone(meta)
         self.assertEqual(meta.token_len_chunk, 20)
 
@@ -743,6 +789,12 @@ class TestAscendConnectorMetadata(unittest.TestCase):
         self.assertEqual(len(meta.requests), 1)
         self.assertEqual(meta.requests[0].req_id, "r1")
 
+    def test_released_req_ids_seed_from_preempted(self):
+        meta = AscendConnectorMetadata(preempted_req_ids={"p1"})
+        self.assertEqual(meta.released_req_ids, {"p1"})
+        self.assertEqual(AscendConnectorMetadata(preempted_req_ids=None).released_req_ids, set())
+        self.assertEqual(AscendConnectorMetadata(preempted_req_ids=set()).released_req_ids, set())
+
 
 class TestLayerMultiBlockReqMeta(unittest.TestCase):
     def test_fields(self):
@@ -762,3 +814,31 @@ class TestLayerMultiBlockReqMeta(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestInferDcpMismatchInfo(unittest.TestCase):
+    def test_same_dcp_returns_false(self):
+        self.assertFalse(infer_dcp_mismatch_info("kv_consumer", {"prefill_dcp_size": 2}, 2))
+        self.assertFalse(infer_dcp_mismatch_info("kv_producer", {"decode_dcp_size": 8}, 8, 1))
+
+    def test_missing_peer_key_returns_false(self):
+        # single-group path: peer topology absent -> local layout authoritative
+        self.assertFalse(infer_dcp_mismatch_info("kv_consumer", {}, 2, 1))
+
+    def test_consumer_prefill_dcp_mismatch_detected(self):
+        self.assertTrue(infer_dcp_mismatch_info("kv_consumer", {"prefill_dcp_size": 8}, 2))
+
+    def test_producer_decode_dcp_mismatch_detected(self):
+        self.assertTrue(infer_dcp_mismatch_info("kv_producer", {"decode_dcp_size": 2}, 8))
+
+    def test_pcp_mismatch_detected(self):
+        self.assertTrue(infer_dcp_mismatch_info("kv_consumer", {"prefill_dcp_size": 2, "prefill_pcp_size": 4}, 2, 1))
+
+    def test_non_mapping_extra_config_returns_false(self):
+        self.assertFalse(infer_dcp_mismatch_info("kv_consumer", object(), 2, 1))
+
+    def test_kv_both_returns_false(self):
+        self.assertFalse(infer_dcp_mismatch_info("kv_both", {"prefill_dcp_size": 8}, 2, 1))
+
+    def test_invalid_peer_value_treated_as_local(self):
+        self.assertFalse(infer_dcp_mismatch_info("kv_consumer", {"prefill_dcp_size": "bad"}, 2, 1))

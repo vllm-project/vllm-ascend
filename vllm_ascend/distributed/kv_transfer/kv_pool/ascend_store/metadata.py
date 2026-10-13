@@ -13,6 +13,7 @@ from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashList
 from vllm.v1.kv_cache_interface import FullAttentionSpec, UniformTypeKVCacheSpecs
 
+from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import AttentionComputeStartGate
 
 
@@ -36,6 +37,43 @@ def _as_positive_int(value: Any, default: int) -> int:
     except (TypeError, ValueError):
         return default
     return parsed if parsed > 0 else default
+
+
+def infer_dcp_mismatch_info(
+    kv_role: str,
+    extra_config: Mapping[str, Any] | object,
+    local_dcp_size: int | object,
+    local_pcp_size: int | object = 1,
+) -> bool:
+    """Whether the peer P/D stage disagrees with this stage on CP layout.
+
+    Both the layerwise GVA shard stride and the per-shard save-leader rule
+    derive from the local dcp size/rank. In PD-disaggregation the producer
+    and consumer are separate worker groups, so when they are started with
+    unequal decode-context-parallel sizes they compute different shard
+    layouts for the SAME pool region and silently corrupt the KV pool.
+
+    The peer topology is carried through the flat peer keys used by the
+    store connector path (``prefill_dcp_size`` / ``decode_dcp_size``),
+    mirroring the existing ``prefill_tp_size`` / ``decode_tp_size``
+    convention. When the key is absent the single-group path is assumed and
+    the local layout is authoritative.
+    """
+    local_dcp_size = _as_positive_int(local_dcp_size, 1)
+    local_pcp_size = _as_positive_int(local_pcp_size, 1)
+    if not isinstance(extra_config, Mapping):
+        return False
+    if kv_role == "kv_consumer":
+        peer_dcp_key = "prefill_dcp_size"
+        peer_pcp_key = "prefill_pcp_size"
+    elif kv_role == "kv_producer":
+        peer_dcp_key = "decode_dcp_size"
+        peer_pcp_key = "decode_pcp_size"
+    else:
+        return False
+    peer_dcp_size = _as_positive_int(extra_config.get(peer_dcp_key, local_dcp_size), local_dcp_size)
+    peer_pcp_size = _as_positive_int(extra_config.get(peer_pcp_key, local_pcp_size), local_pcp_size)
+    return peer_dcp_size != local_dcp_size or peer_pcp_size != local_pcp_size
 
 
 def infer_tp_mismatch_info(
@@ -265,6 +303,14 @@ def infer_group_block_sizes(
             spec = next(iter(spec.kv_cache_specs.values()))
         block_sizes.append(spec.block_size)
     return block_sizes
+
+
+def infer_cacheable_group_ids(kv_cache_groups: Sequence[Any] | None) -> list[int]:
+    if not kv_cache_groups:
+        return [0]
+    group_ids = [i for i, group in enumerate(kv_cache_groups) if is_prefix_cacheable(group.kv_cache_spec)]
+    assert group_ids, "AscendStore requires at least one prefix-cacheable KV cache group"
+    return group_ids
 
 
 def get_group_block_size(group_block_sizes: Sequence[int], group_id: int) -> int:
@@ -500,6 +546,10 @@ class ChunkedTokenDatabase:
         shard_rank: int | None = None,
         shard_size: int | None = None,
     ) -> Iterable[tuple[int, int, BlockHash | str, int | None]]:
+        # Private circular state has no prefix key, even when its block size
+        # happens to be divisible by the request's hashing unit.
+        if self.cache_coordinator is not None and kv_cache_group_id not in self.cache_coordinator.cacheable_group_ids:
+            return
         if not block_hashes:
             return
         logical_block_size = self.get_block_size(kv_cache_group_id)
@@ -699,18 +749,30 @@ def masked_block_runs(
         return []
     if mask is None:
         return [(start_block, end_block)]
+    mask_len = len(mask)
+    if start_block >= mask_len:
+        return [(start_block, end_block)]
+    scan_end = min(end_block, mask_len)
+    # True/False map to b"\x01"/b"\x00"; bytes.find scans at C speed and
+    # never raises (unlike list.index), so both dense and holey masks skip
+    # the per-block Python loop.
+    bits = bytes(mask[start_block:scan_end])
     runs: list[tuple[int, int]] = []
-    run_start: int | None = None
-    for block_idx in range(start_block, end_block):
-        allowed = block_idx >= len(mask) or mask[block_idx]
-        if allowed and run_start is None:
-            run_start = block_idx
-        elif not allowed and run_start is not None:
-            runs.append((run_start, block_idx))
-            run_start = None
-    if run_start is not None:
-        runs.append((run_start, end_block))
-    return runs
+    pos = 0
+    while True:
+        hole = bits.find(b"\x00", pos)
+        if hole == -1:
+            runs.append((start_block + pos, end_block))
+            return runs
+        if hole > pos:
+            runs.append((start_block + pos, start_block + hole))
+        pos = bits.find(b"\x01", hole + 1)
+        if pos == -1:
+            # Remaining mask blocks are all disallowed, but blocks at or
+            # beyond mask_len stay allowed.
+            if end_block > mask_len:
+                runs.append((mask_len, end_block))
+            return runs
 
 
 class _LazyGroupedBlockHashList(Sequence[BlockHash | str]):
@@ -785,6 +847,11 @@ class RequestTracker:
 
     # Full prompt length before chunk truncation, used by sparse retention masks.
     num_prompt_tokens: int | None = None
+
+    # End of the range being (re)prefilled. For a resumed request this also
+    # includes previously generated tokens, so decode-only offload does not
+    # publish intermediate recomputation state.
+    prefill_end_tokens: int | None = None
     block_gvas: list[int] = field(default_factory=list)
     block_gvas_by_group: list[list[int]] = field(default_factory=list)
     gva_block_offset: int = 0
@@ -804,6 +871,7 @@ class RequestTracker:
         num_saved_tokens: int = 0,
         token_ids: list[int] | None = None,
         num_prompt_tokens: int | None = None,
+        prefill_end_tokens: int | None = None,
         block_gvas: list[int] | None = None,
         block_gvas_by_group: list[list[int]] | None = None,
         gva_block_offset: int = 0,
@@ -821,6 +889,7 @@ class RequestTracker:
         self.num_saved_tokens = num_saved_tokens
         self.token_ids = token_ids
         self.num_prompt_tokens = num_prompt_tokens
+        self.prefill_end_tokens = prefill_end_tokens
         self.block_gvas = [] if block_gvas is None else block_gvas
         self.block_gvas_by_group = block_gvas_by_group if block_gvas_by_group is not None else []
         self.gva_block_offset = gva_block_offset
@@ -914,6 +983,11 @@ class ReqMeta:
     original_block_size: list[int] | int | None = None
 
     event_id: int | None = None
+    # Monotonic identity of one queued store operation. Unlike req_id, this
+    # value is never reused while the engine is alive, so an old asynchronous
+    # operation cannot update the save progress of a new request generation
+    # that happens to reuse the same req_id.
+    store_job_id: int | None = None
 
     def __init__(
         self,
@@ -932,6 +1006,7 @@ class ReqMeta:
         original_block_size: list[int] | int | None = None,
         block_ids: list[int] | list[list[int]] | None = None,
         event_id: int | None = None,
+        store_job_id: int | None = None,
         save_end_token: int | None = None,
         target_token_len: int | None = None,
         save_start_token: int = 0,
@@ -976,6 +1051,7 @@ class ReqMeta:
         self.token_ids = token_ids
         self.original_block_size = original_block_size
         self.event_id = event_id
+        self.store_job_id = store_job_id
         self.last_block_gva = last_block_gva
         self.partial_block_index = partial_block_index
         self.block_ids_np = block_ids_np
@@ -1003,6 +1079,20 @@ class ReqMeta:
     @block_ids.setter
     def block_ids(self, block_ids: list[int] | list[list[int]]) -> None:
         self.block_ids_by_group = normalize_block_ids_by_group(block_ids)
+
+    def get_event_token_ids(self, start: int, end: int) -> list[int] | None:
+        """Return token ids for an absolute request range.
+
+        Metadata carries only the newly savable suffix to avoid repeatedly
+        serializing the full request history during long decode sequences.
+        An empty list means this metadata does not cover the requested range.
+        """
+        if self.token_ids is None:
+            return None
+        token_ids_end = self.save_start_token + len(self.token_ids)
+        if start < self.save_start_token or end > token_ids_end:
+            return []
+        return self.token_ids[start - self.save_start_token : end - self.save_start_token]
 
     last_block_gva: int | None = None
     partial_block_index: int | None = None
@@ -1074,7 +1164,9 @@ class ReqMeta:
             and target_token_len % cache_transfer_granularity == 0
             and full_block_count > available_full_block_count
         )
-        if boundary_without_hash:
+        # Scheduled draft tokens can cross a page before that page has a
+        # committed request hash. Do not mark an unsent page as saved.
+        if boundary_without_hash or (not save_partial_block and full_block_count > available_full_block_count):
             num_tokens_to_save = available_full_block_count * cache_transfer_granularity
         if tracker.last_block_gva is not None and (
             target_token_len % cache_transfer_granularity != 0 or boundary_without_hash
@@ -1107,8 +1199,12 @@ class ReqMeta:
             )
 
         token_ids = None
-        if tracker.token_ids:
-            token_ids = tracker.token_ids
+        if tracker.token_ids and not skip_save:
+            # The worker consumes metadata asynchronously. Own a stable,
+            # bounded snapshot rather than sharing the scheduler's growing
+            # full-history list.
+            token_ids_end = target_token_len if should_save_partial_block else num_tokens_to_save
+            token_ids = tracker.token_ids[previous_saved_tokens:token_ids_end].copy()
 
         if load_spec is not None and load_spec.can_load:
             logger.debug(
@@ -1131,7 +1227,10 @@ class ReqMeta:
             block_hashes=block_hashes,
             is_last_chunk=is_last_chunk,
             token_ids=token_ids,
-            num_prompt_tokens=tracker.num_prompt_tokens or target_token_len,
+            # A resumed MRV2 request re-prefills prompt + previously generated
+            # tokens. Reachability masks must treat that complete range as the
+            # prefill boundary for this generation.
+            num_prompt_tokens=tracker.prefill_end_tokens or tracker.num_prompt_tokens or target_token_len,
             original_block_size=original_block_size,
             last_block_gva=tracker.last_block_gva,
             partial_block_index=partial_block_index,
@@ -1157,6 +1256,9 @@ class AscendConnectorMetadata(KVConnectorMetadata):
         self.requests: list[ReqMeta] = []
         self.preempted_req_ids = preempted_req_ids
         self.loading_req_ids = loading_req_ids or set()
+        # Requests whose blocks became reusable since the previous step
+        # (finished + preempted); the worker fences their in-flight saves.
+        self.released_req_ids: set[str] = set(preempted_req_ids or ())
 
     def add_request(self, req_meta: ReqMeta) -> None:
         """Add a request to the metadata."""

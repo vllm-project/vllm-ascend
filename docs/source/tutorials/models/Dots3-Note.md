@@ -189,7 +189,6 @@ Set the following environment variables inside the container before starting the
 
 ```bash
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
-export LD_PRELOAD=/usr/lib64/libjemalloc.so.2
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export TASK_QUEUE_ENABLE=1
 export CPU_AFFINITY_CONF=1
@@ -199,7 +198,6 @@ export HCCL_OP_EXPANSION_MODE=AIV
 | Variable | Description |
 |---|---|
 | `ASCEND_RT_VISIBLE_DEVICES` | Specifies the NPU device IDs visible to the process (all 16 chips visible) |
-| `LD_PRELOAD` (jemalloc) | Preloads the jemalloc memory allocator to reduce memory fragmentation in multi-threaded scenarios |
 | `PYTORCH_NPU_ALLOC_CONF=expandable_segments:True` | Enables the virtual memory feature to mitigate fragmentation caused by dynamic memory size adjustments during inference (official OOM troubleshooting recommendation) |
 | `TASK_QUEUE_ENABLE=1` | Enables the NPU task queue to dispatch operators asynchronously |
 | `CPU_AFFINITY_CONF=1` | Enables CPU core binding to reduce cross-NUMA access |
@@ -208,11 +206,8 @@ export HCCL_OP_EXPANSION_MODE=AIV
 After setting, first confirm the key variables and the preloaded library:
 
 ```bash
-test -f /usr/lib64/libjemalloc.so.2
 echo "$ASCEND_RT_VISIBLE_DEVICES"
 ```
-
-If the jemalloc path does not exist in the selected image, install it first or change it to the actual path in the image; do not start the service with an invalid `LD_PRELOAD`.
 
 ## 5 Online Service Deployment {: #5-online-service-deployment }
 

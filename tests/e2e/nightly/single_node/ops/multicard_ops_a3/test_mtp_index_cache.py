@@ -12,7 +12,7 @@ from vllm.distributed.parallel_state import (
     init_model_parallel_group,
 )
 
-from vllm_ascend.spec_decode.mtp import compact_mtp_topk_indices
+from vllm_ascend.spec_decode.utils import compact_mtp_topk_indices
 
 
 @torch.inference_mode()

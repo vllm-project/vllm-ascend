@@ -118,14 +118,13 @@ def server(
     import torch
 
     torch.npu.mem_get_info(0)
-    proc = subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    proc = subprocess.Popen(cmd, env=env)
     url = f"http://localhost:{port}"
     try:
         deadline = time.time() + timeout
         while time.time() < deadline:
             if proc.poll() is not None:
-                err = proc.stderr.read(4000).decode(errors="replace") if proc.stderr else ""
-                raise RuntimeError(f"vllm server exited during startup:\n{err}")
+                raise RuntimeError(f"vllm server exited during startup (exit code {proc.returncode}); see server logs")
             with contextlib.suppress(Exception):
                 if requests.get(f"{url}/health", timeout=3).status_code == 200:
                     break

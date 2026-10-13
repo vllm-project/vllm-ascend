@@ -49,6 +49,10 @@ def register_meta_if_necessary(ns: str, op_name: str, fn, overload: str = ""):
     meta_impl_list = torch._C._dispatch_get_registrations_for_dispatch_key("Meta")
     if schema_to_find in meta_impl_list:
         return
+    # The op may not be compiled into the extension for the current SoC
+    # (e.g. direct kernels are excluded on ascend950); skip in that case.
+    if not hasattr(getattr(torch.ops, ns), op_name.split(".")[0]):
+        return
     lib.impl(op_name, fn, "Meta")
 
 

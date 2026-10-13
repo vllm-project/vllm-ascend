@@ -147,6 +147,8 @@ class HCCLWeightTransferEngine(WeightTransferEngine[HCCLWeightTransferInitInfo, 
                       rank offset, and world size
         """
 
+        self.shutdown()
+
         # Calculate the global rank in the trainer-worker process group
         # Must account for data parallel to get unique ranks across all workers
         dp_rank = self.parallel_config.data_parallel_index
@@ -210,7 +212,7 @@ class HCCLWeightTransferEngine(WeightTransferEngine[HCCLWeightTransferInitInfo, 
 
     def shutdown(self) -> None:
         if self.model_update_group is not None:
-            # Clean up the communicator by removing the reference
+            self.model_update_group.close()
             self.model_update_group = None
 
     @staticmethod

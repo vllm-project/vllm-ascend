@@ -121,6 +121,7 @@ def test_deepseek_v4_forward_passes_input_ids_to_layers(monkeypatch):
         start_layer=0,
         end_layer=1,
         aux_hidden_state_layers=set(),
+        _needs_mtp_hidden_states=True,
         _mtp_hidden_buffer=torch.empty(3, 4),
         hc_head=lambda hidden_states, *_: hidden_states.squeeze(1),
         hc_head_fn=None,

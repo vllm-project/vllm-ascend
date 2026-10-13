@@ -2,6 +2,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from torch import Tensor
 from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload import (
@@ -28,6 +29,8 @@ class _FakeKVCacheSpec:
         self.max_blocks_per_request = max_blocks_per_request
         self.store_on_host = store_on_host
         self.block_size = block_size
+        # vLLM main's UniformTypeKVCacheSpecs reads this from each member spec.
+        self.dcp_sharded = False
 
     def max_memory_usage_bytes(self, _vllm_config):
         return self.max_blocks_per_request * self.page_size_bytes
@@ -260,7 +263,7 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
                 get_num_layers=MagicMock(return_value=1),
                 max_model_len=128,
             ),
-            parallel_config=SimpleNamespace(),
+            parallel_config=SimpleNamespace(data_parallel_index=0),
             scheduler_config=SimpleNamespace(
                 max_num_seqs=1,
                 max_num_batched_tokens=1,
@@ -271,6 +274,7 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
             topk_buffer_size=1,
             topk=1,
             use_fused_overlap=False,
+            use_fused_copy_sfa=False,
             dram_size_per_dp_GB=dram_size_per_dp_gb,
         )
         return vllm_config, kv_cache_config, offload_config
@@ -278,8 +282,14 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
     def test_manager_initializes_offload_with_planned_pool_size(self):
         vllm_config, kv_cache_config, offload_config = self._make_manager_init_inputs()
         planned_pool_size = 4096
-        for rank, expected_alloc_size in ((0, planned_pool_size), (1, 0)):
-            with self.subTest(rank=rank):
+        for rank, expected_alloc_size, dp_index in (
+            (0, planned_pool_size, 0),
+            (1, 0, 0),
+            (0, planned_pool_size, 1),
+            (1, 0, 1),
+        ):
+            with self.subTest(rank=rank, dp_index=dp_index):
+                vllm_config.parallel_config.data_parallel_index = dp_index
                 offload_backend = SimpleNamespace(
                     OffloadConfig=lambda: SimpleNamespace(),
                     Scene=SimpleNamespace(SHARED="shared"),
@@ -343,6 +353,10 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
                 )
                 self.assertEqual(initialized_config.world_size, 2)
                 self.assertEqual(initialized_config.rank_id, rank)
+                self.assertEqual(
+                    initialized_config.store_url,
+                    f"tcp://127.0.0.1:{manager_module.OFFLOAD_STORE_PORT_BASE + dp_index}",
+                )
                 tp_group.barrier.assert_called_once_with()
 
     def test_manager_rejects_pool_larger_than_dram_limit(self):
@@ -392,3 +406,65 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestHostKVRegistration(unittest.TestCase):
+    def test_copy_sfa_exports_block_byte_strides_on_all_tp_ranks(self):
+        torch = manager_module.torch
+        original_zeros = torch.zeros
+        original_tensor = torch.tensor
+        broadcasts: list[Tensor] = []
+        for rank in (0, 1):
+            with self.subTest(rank=rank):
+                manager = SparseKVOffloadManager.__new__(SparseKVOffloadManager)
+                manager.tp_rank = rank
+                manager.num_layers = 1
+                manager.offload_layer_names = ["layer.0"]
+                manager.kv_cache_config = SimpleNamespace(num_blocks=3)
+                manager.topk_buffer_size = 256
+                manager.block_size = 128
+                manager.max_num_tokens = 2
+                manager.use_fused_copy_sfa = True
+                manager.use_fused_overlap = False
+                manager._register_offload_layers = MagicMock()
+                manager._bind_copy_sfa_bases = MagicMock()
+                manager._init_fused_overlap_planner = MagicMock()
+                manager._restore_bfloat16_tensor = MagicMock(
+                    side_effect=lambda ptr, shape: torch.empty(shape, dtype=torch.bfloat16)
+                )
+                pending = iter(broadcasts)
+
+                def broadcast(tensor, src, rank=rank, pending=pending):
+                    if rank == 0:
+                        broadcasts.append(tensor.clone())
+                    else:
+                        tensor.copy_(next(pending))
+
+                manager.tp_group = SimpleNamespace(broadcast=broadcast)
+                cache = (
+                    torch.empty(0),
+                    torch.empty(0),
+                    torch.empty((3, 128, 1, 4), dtype=torch.bfloat16),
+                    torch.empty((3, 128, 1, 2), dtype=torch.bfloat16),
+                    torch.empty((2, 256, 1, 4), dtype=torch.bfloat16),
+                    torch.empty((2, 256, 1, 2), dtype=torch.bfloat16),
+                )
+
+                def cpu_zeros(*args, **kwargs):
+                    kwargs["device"] = "cpu"
+                    return original_zeros(*args, **kwargs)
+
+                def cpu_tensor(*args, **kwargs):
+                    kwargs["device"] = "cpu"
+                    return original_tensor(*args, **kwargs)
+
+                with (
+                    patch.object(torch, "zeros", side_effect=cpu_zeros),
+                    patch.object(torch, "tensor", side_effect=cpu_tensor),
+                ):
+                    manager.register_kv_caches({"layer.0": cache})
+
+                # SfaRemoteD2H consumes these strides on every TP rank.
+                self.assertEqual(manager.cpu_block_lens, [(1024, 512)])
+                manager._bind_copy_sfa_bases.assert_called_once()
+                manager._init_fused_overlap_planner.assert_not_called()

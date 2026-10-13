@@ -7,14 +7,15 @@ the platform-independent n-gram hashing and gating, ``npu`` holds the storage
 and lookup the NPU runs.
 """
 
-from .common import PagedNgramHistory, engram_enabled, engram_gate
-from .npu import EngramQueryGroup, NodeShardedEngram, engram_cpu_offload
+from .common import engram_enabled, engram_gate
+from .hash_state import AscendEngramSlotCache, create_engram_hash_state, engram_dead_mask
+from .npu import engram_cpu_offload
 
 __all__ = [
-    "EngramQueryGroup",
-    "NodeShardedEngram",
-    "PagedNgramHistory",
+    "AscendEngramSlotCache",
+    "create_engram_hash_state",
     "engram_cpu_offload",
+    "engram_dead_mask",
     "engram_enabled",
     "engram_gate",
 ]

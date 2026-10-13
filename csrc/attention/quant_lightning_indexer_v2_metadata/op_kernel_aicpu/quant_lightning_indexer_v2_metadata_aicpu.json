@@ -1,5 +1,5 @@
 {
-    "QuantLightningIndexerV2Metadata":{
+    "VllmAscendQuantLightningIndexerV2Metadata":{
         "opInfo":{
             "computeCost":"100",
             "engine":"DNN_VM_AICPU",

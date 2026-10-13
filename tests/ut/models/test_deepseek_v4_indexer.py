@@ -9,12 +9,14 @@ import pytest
 import torch
 
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.hardware_profile import HardwareCapability
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata
 from vllm_ascend.models.deepseek_v4.indexer import (
     AscendIndexerMetadata,
     AscendIndexerOps,
     DeepseekV4Indexer,
     IndexerOverlapPlan,
+    get_indexer_k_dtype,
     hadamard_linear,
     hadamard_scale,
     rotate_activation,
@@ -454,3 +456,73 @@ class TestIndexerOps:
         assert qli_kwargs["layout_k"] == "PA_BBND"
         assert qli_kwargs["mask_mode"] == 3
         assert qli_kwargs["cmp_ratio"] == 4
+
+
+def _make_vllm_config_for_k_dtype(indexer_kv_dtype: str) -> SimpleNamespace:
+    attention_config = SimpleNamespace(indexer_kv_dtype=indexer_kv_dtype)
+    attention_config.resolve_indexer_kv_dtype = lambda default: (
+        default if attention_config.indexer_kv_dtype == "auto" else attention_config.indexer_kv_dtype
+    )
+    return SimpleNamespace(
+        attention_config=attention_config,
+        model_config=SimpleNamespace(dtype=torch.bfloat16),
+    )
+
+
+class TestGetIndexerKDtype:
+    @pytest.mark.parametrize(
+        ("indexer_kv_dtype", "supports_compressed_cache", "expected_dtype"),
+        [
+            ("auto", False, torch.int8),
+            ("int8", False, torch.int8),
+            ("auto", True, torch.float8_e4m3fn),
+            ("fp8", True, torch.float8_e4m3fn),
+        ],
+    )
+    def test_resolves_auto_to_platform_default_and_keeps_explicit_values(
+        self,
+        indexer_kv_dtype: str,
+        supports_compressed_cache: bool,
+        expected_dtype: torch.dtype,
+    ):
+        vllm_config = _make_vllm_config_for_k_dtype(indexer_kv_dtype)
+
+        with patch(
+            "vllm_ascend.models.deepseek_v4.indexer.get_current_hardware_profile",
+            return_value=SimpleNamespace(
+                supports=lambda capability: (
+                    supports_compressed_cache and capability == HardwareCapability.DSV4_COMPRESSED_CACHE
+                )
+            ),
+        ):
+            actual = get_indexer_k_dtype(vllm_config)
+
+        assert actual == expected_dtype
+
+    @pytest.mark.parametrize(
+        ("indexer_kv_dtype", "supports_compressed_cache"),
+        [
+            ("bf16", False),
+            ("fp8", False),
+            ("int8", True),
+        ],
+    )
+    def test_rejects_unsupported_dtype_with_actionable_error(
+        self,
+        indexer_kv_dtype: str,
+        supports_compressed_cache: bool,
+    ):
+        vllm_config = _make_vllm_config_for_k_dtype(indexer_kv_dtype)
+
+        with (
+            patch(
+                "vllm_ascend.models.deepseek_v4.indexer.get_current_hardware_profile",
+                return_value=SimpleNamespace(
+                    supports=lambda capability: (
+                        supports_compressed_cache and capability == HardwareCapability.DSV4_COMPRESSED_CACHE
+                    )
+                ),
+            ),
+            pytest.raises(ValueError, match="is not supported by the DeepSeek V4"),
+        ):
+            get_indexer_k_dtype(vllm_config)

@@ -9,13 +9,14 @@ from torch import nn
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings, SupportsEagle3, SupportsMultiModal, SupportsPP
 from vllm.model_executor.models.utils import maybe_prefix
-from vllm.models.deepseek_v4_1.common.mm_preprocess import (
+
+# Upstream #56741 normalized the V4.1 model package name from deepseek_v4_1
+# to deepseek_v41.
+from vllm.models.deepseek_v41.common.mm_preprocess import (
     IMAGE,
     IMAGE_END,
     IMAGE_NEW_LINE,
-    IMAGE_PAD_ID,
     IMAGE_PLACEHOLDER,
-    IMAGE_SENTINEL_BASE_ID,
     IMAGE_START,
     DeepseekV4VLDummyInputsBuilder,
     DeepseekV4VLMultiModalProcessor,
@@ -68,7 +69,6 @@ class AscendDeepseekV41ForCausalLM(
         if getattr(config, "vision_n_layers", 0) > 0:
             config.is_mm_prefix_lm = True
             config.mm_prefix_clamp_sliding_window = True
-            config.mm_prefix_span_leading_pad_modulus = 2
         self.config = config
         self.multimodal_config = model_config.multimodal_config
 
@@ -96,6 +96,7 @@ class AscendDeepseekV41ForCausalLM(
                 vllm_config=vllm_config,
                 prefix=maybe_prefix(prefix, "language_model"),
             )
+        self.requires_uncompiled_fallback = self.language_model.requires_uncompiled_fallback
         self.make_empty_intermediate_tensors = self.language_model.make_empty_intermediate_tensors
         self.moe_comm_methods = self.language_model.moe_comm_methods
 
@@ -197,9 +198,7 @@ class AscendDeepseekV41ForCausalLM(
             _merge_multimodal_embeddings,
         )
 
-        # The leading alignment row is not an image-feature position. It uses
-        # the checkpoint's ordinary image-token embedding instead.
-        embedding_ids = input_ids.masked_fill(input_ids == IMAGE_PAD_ID, IMAGE_SENTINEL_BASE_ID)
+        embedding_ids = input_ids
         inputs_embeds = self.language_model.embed_input_ids(embedding_ids)
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
             return inputs_embeds
@@ -209,16 +208,60 @@ class AscendDeepseekV41ForCausalLM(
             is_multimodal=is_multimodal,
         )
 
+    def set_embedding_num_tokens_padded(self, num_tokens_padded: int) -> None:
+        # MRV2 model state sees this multimodal wrapper. Forward its batch
+        # length to the vocabulary embedding that performs PCP token exchange.
+        self.language_model.model.embed_tokens.set_embedding_num_tokens_padded(num_tokens_padded)
+
     def prepare_engram_graph_inputs(self, padded_tokens=None):
         return self.language_model.prepare_engram_graph_inputs(padded_tokens)
 
-    def prepare_engram_inputs(self, input_ids, positions, padded_tokens=None, history_inputs=None):
+    def get_model_state_cls(self):
+        # The registry selects this wrapper even for text-only serving.
+        # MRV2 needs the language model's lookback history and graph events.
+        return self.language_model.get_model_state_cls()
+
+    def prime_engram_v2_graph_inputs(self, padded_tokens):
+        return self.language_model.prime_engram_v2_graph_inputs(padded_tokens)
+
+    def retire_engram_lookups(self, *, reset_events=False):
+        self.language_model.retire_engram_lookups(reset_events=reset_events)
+
+    def prepare_engram_inputs(
+        self,
+        input_ids,
+        positions,
+        padded_tokens=None,
+        lookback_token_ids=None,
+        query_start_loc=None,
+        slot_mapping=None,
+        block_table=None,
+        *,
+        token_indices=None,
+        force_dummy=False,
+        cg_mode=None,
+    ):
         return self.language_model.prepare_engram_inputs(
             input_ids,
             positions,
             padded_tokens,
-            history_inputs,
+            lookback_token_ids,
+            query_start_loc,
+            slot_mapping,
+            block_table,
+            token_indices=token_indices,
+            force_dummy=force_dummy,
+            cg_mode=cg_mode,
         )
+
+    @property
+    def token_lookback_depth(self) -> int:
+        """What the runner sizes the prompt lookback buffer from."""
+        return self.language_model.token_lookback_depth
+
+    @property
+    def supports_engram_graph_producer(self) -> bool:
+        return self.language_model.supports_engram_graph_producer
 
     def forward(
         self,
@@ -260,6 +303,12 @@ class AscendDeepseekV41ForCausalLM(
                 vision_name = _vision_parameter_name(name)
                 if vision_name is None:
                     yield name, loaded_weight
+                    continue
+                # Text-only serving intentionally leaves the vision tower
+                # unconstructed, although a multimodal checkpoint still
+                # contains its tensors. Keep loading strict when the tower is
+                # enabled, but do not make disabled modalities loadable state.
+                if vision_name not in params and self.vision is None:
                     continue
                 param = params[vision_name]
                 loader = getattr(param, "weight_loader", default_weight_loader)

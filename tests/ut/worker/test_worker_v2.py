@@ -8,6 +8,41 @@ from tests.ut.base import TestBase
 
 
 class TestNPUWorkerV2(TestBase):
+    def test_get_encoder_cudagraph_stats_is_serializable(self):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        with patch.object(NPUWorker, "__init__", lambda self, **kwargs: None):
+            worker = NPUWorker()
+            manager = MagicMock()
+            manager.is_captured.return_value = True
+            manager.get_cumulative_stats.return_value = {
+                "graph_hits": 4,
+                "graph_misses": 0,
+                "hit_rate": 1.0,
+                "num_budgets": 1,
+                "token_budgets": [2048],
+            }
+            worker.model_runner = SimpleNamespace(
+                model_state=SimpleNamespace(
+                    encoder_runner=SimpleNamespace(cudagraph_manager=manager),
+                ),
+            )
+
+            stats = worker.get_encoder_cudagraph_stats()
+
+        self.assertEqual(
+            stats,
+            {
+                "manager": type(manager).__name__,
+                "captured": True,
+                "graph_hits": 4,
+                "graph_misses": 0,
+                "hit_rate": 1.0,
+                "num_budgets": 1,
+                "token_budgets": [2048],
+            },
+        )
+
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.enable_sp", return_value=False)
     @patch("vllm_ascend.worker.worker.get_pp_group")
@@ -54,6 +89,41 @@ class TestNPUWorkerV2(TestBase):
                 all_gather_group=mock_get_tp_group.return_value,
             )
             self.assertIsNone(result)
+
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    @patch("vllm_ascend.worker.worker.get_pp_group")
+    def test_execute_model_pooling_uses_pool_output(self, mock_get_pp_group, mock_get_ascend_config):
+        """MRV2 pooling must finish in execute_model instead of sampling logits."""
+        from vllm.v1.outputs import ModelRunnerOutput
+
+        from vllm_ascend.worker.worker import NPUWorker
+
+        mock_ascend_config = MagicMock()
+        mock_ascend_config.msmonitor_use_daemon = False
+        mock_get_ascend_config.return_value = mock_ascend_config
+        mock_get_pp_group.return_value.is_first_rank = True
+
+        with patch.object(NPUWorker, "__init__", lambda self, **kwargs: None):
+            worker = NPUWorker()
+            worker.model_runner = MagicMock()
+            worker.model_runner.is_pooling_model = True
+            worker.vllm_config = MagicMock()
+            worker.use_v2_model_runner = True
+            worker.profiler = None
+            worker._pp_send_work = []
+
+            pooling_output = ModelRunnerOutput(req_ids=[], req_id_to_index={})
+            worker.model_runner.execute_model.return_value = None
+            worker.model_runner.pool.return_value = pooling_output
+
+            scheduler_output = MagicMock()
+            scheduler_output.total_num_scheduled_tokens = 1
+
+            result = worker.execute_model(scheduler_output)
+
+        self.assertIs(result, pooling_output)
+        worker.model_runner.execute_model.assert_called_once()
+        worker.model_runner.pool.assert_called_once_with()
 
     @patch("vllm_ascend.worker.worker.torch.npu.synchronize")
     @patch("vllm_ascend.worker.worker.get_pp_group")

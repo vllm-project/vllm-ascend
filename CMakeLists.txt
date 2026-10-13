@@ -56,20 +56,7 @@ ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/*.cpp)
 
 set(VLLM_ASCEND_CUSTOM_OP
     ${KERNEL_FILES}
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/mla_preprocess/op_kernel/mla_preprocess_kernel.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/batch_matmul_transpose/op_kernel/batch_matmul_transpose_kernel.cpp
 )
-
-set(VLLM_ASCEND_CUSTOM_OP_EXCLUDE_ASCEND950
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/mla_preprocess/op_kernel/mla_preprocess_kernel.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/batch_matmul_transpose/op_kernel/batch_matmul_transpose_kernel.cpp
-)
-
-if(SOC_VERSION MATCHES "ascend950")
-    message(STATUS "A5 hardware detected: disabling MLAPO operators")
-    message(STATUS "A5 hardware detected: excluding batch_matmul_transpose operators")
-    list(REMOVE_ITEM VLLM_ASCEND_CUSTOM_OP ${VLLM_ASCEND_CUSTOM_OP_EXCLUDE_ASCEND950})
-endif()
 
 if(SOC_VERSION MATCHES "ascend310p.*|ascend950")
     message(STATUS "Hardware ${SOC_VERSION} detected: skip vllm_ascend_kernels compile")
@@ -88,8 +75,7 @@ if(SOC_VERSION MATCHES "ascend310p.*")
 else()
     file(GLOB VLLM_ASCEND_SRC
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/*.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/aclnn_torch_adapter/*.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/batch_matmul_transpose/op_host/tiling/tiling_data.cpp)
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/aclnn_torch_adapter/*.cpp)
 endif()
 
 # Sparse KV cache offloading is currently supported on Atlas A3 only.
@@ -105,7 +91,6 @@ include_directories(
   # some torch_npu wheels. Feature checks below use ASCEND_HOME_PATH as well.
   ${ASCEND_HOME_PATH}/include
   ${TORCH_NPU_PATH}/include
-  ${CMAKE_CURRENT_SOURCE_DIR}/csrc/batch_matmul_transpose/op_host
 )
 
 set(

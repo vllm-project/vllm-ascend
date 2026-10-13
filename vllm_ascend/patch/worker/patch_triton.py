@@ -3,7 +3,7 @@ import vllm.third_party.flash_linear_attention.ops as fla_ops
 import vllm.third_party.flash_linear_attention.ops.fused_recurrent as fla_fused_recurrent
 import vllm.third_party.flash_linear_attention.ops.layernorm_guard as fla_layernorm_guard
 from vllm.logger import logger
-from vllm.triton_utils import HAS_TRITON, triton
+from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.utils.math_utils import next_power_of_2
 
 from vllm_ascend.ops.causal_conv1d import (
@@ -12,8 +12,21 @@ from vllm_ascend.ops.causal_conv1d import (
 from vllm_ascend.ops.causal_conv1d import causal_conv1d_update as _npu_causal_conv1d_update_impl
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.layernorm_guard import LayerNormFn
+from vllm_ascend.utils import vllm_version_is
 
-triton.next_power_of_2 = next_power_of_2
+if vllm_version_is("0.30.0"):
+    triton.next_power_of_2 = next_power_of_2
+else:
+
+    def _next_power_of_2(n):
+        # vLLM #58651's packed_qk_rope kernel evaluates
+        # triton.next_power_of_2(rotary_dim) with a tl.constexpr argument.
+        # The host helper only understands plain ints, so unwrap first.
+        if isinstance(n, tl.constexpr):
+            n = n.value
+        return next_power_of_2(n)
+
+    triton.next_power_of_2 = _next_power_of_2
 
 
 def _npu_causal_conv1d_update(*args, **kwargs):
@@ -335,40 +348,3 @@ except Exception as _cc1d_err:
         " graph capture at decode-FULL.",
         _cc1d_err,
     )
-
-# npu_mamba_state_ops: gather_initial_states / scatter_states assert
-# state.is_cuda and launch Triton kernels that reference
-# tl.extra.cuda.gdc_wait, neither of which holds on Ascend. Both are
-# plain index ops, so express them in torch and keep them ACL-graph
-# safe (no host sync). A from-import in the already-loaded GLM KDA
-# module needs the same sweep as the vision-tower RMSNorm above.
-try:
-    import sys as _sys_ms
-
-    import torch as _t_ms
-    import vllm.model_executor.layers.mamba.ops.gather_initial_states as _gis_mod
-    import vllm.model_executor.layers.mamba.ops.scatter_states as _scs_mod  # type: ignore[import-not-found]
-
-    def _npu_gather_initial_states(state, indices, has_initial_state):
-        idx = indices.to(_t_ms.int64) * has_initial_state.to(_t_ms.int64)
-        out = state.index_select(0, idx)
-        keep = has_initial_state.view([-1] + [1] * (state.dim() - 1)).to(out.dtype)
-        return out * keep
-
-    def _npu_scatter_states(state, src, indices):
-        state.index_copy_(0, indices.to(_t_ms.int64), src)
-
-    _gis_mod.gather_initial_states = _npu_gather_initial_states
-    _scs_mod.scatter_states = _npu_scatter_states
-    for _m in list(_sys_ms.modules.values()):
-        try:
-            if getattr(_m, "gather_initial_states", None) not in (None, _npu_gather_initial_states):
-                _m.gather_initial_states = _npu_gather_initial_states  # type: ignore[attr-defined]
-            if getattr(_m, "scatter_states", None) not in (None, _npu_scatter_states):
-                _m.scatter_states = _npu_scatter_states  # type: ignore[attr-defined]
-        except Exception:
-            # Same reasoning as the vision-tower sweep above: a module that
-            # rejects attribute access must not stop the remaining rebinds.
-            continue
-except ImportError:
-    pass

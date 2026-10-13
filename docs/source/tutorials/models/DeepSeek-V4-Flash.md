@@ -2,6 +2,12 @@
 
 ## 1 Introduction
 
+!!! note
+
+    The "PD Separation Deployment" mentioned in this document is provided only as an example/reference design to demonstrate the basic process of deploying Prefill and Decode in separated mode. It is not recommended for use in the production environment.
+    
+    **For the production environment on the customer side, [MindIE Motor](https://www.hiascend.com/document/detail/en/mindie/latest/quickstart/docs/en/user_guide/quick_start.md) + vLLM-Ascend is recommended.**
+
 DeepSeek-V4 introduces several key upgrades over DeepSeek-V3:
 
 - The Manifold-Constrained Hyper-Connections (mHC) to strengthen conventional residual connections.
@@ -25,6 +31,9 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 |----------------------------------------------|----------------------------------------------------------------------------|----------------|
 | `DeepSeek-V4-Flash-w8a8-mtp` (Quantized version) | 1 Atlas 800 A3 (128GB × 8) node or 1 Atlas 800 A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp) |
 | `DeepSeek-V4-Flash-0731-w8a8` | | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Flash-0731-w8a8) |
+| `DeepSeek-V4-Flash-0731-w4a4c8` | 950PR&950DT Products | Quantize locally with [msmodelslim](https://gitcode.com/Ascend/msmodelslim/blob/master/lab_practice/deepseek_v4/deepseek_v4_flash_w4a4c8.yaml) |
+
+- `DeepSeek-V4-Flash-0731-w4a4c8` (W4A4 MXFP4 mixed-precision quantization): For how the ultra-low-bit quantization preserves accuracy, see the [W4A4C8 FAQ](#q-how-do-the-w4a4c8-ultra-low-bit-quantized-weights-preserve-accuracy).
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
@@ -152,7 +161,6 @@ Single-node deployment completes both Prefill and Decode within the same node. T
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=10
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     export HCCL_BUFFSIZE=1024
     export TASK_QUEUE_ENABLE=1
     export HCCL_OP_EXPANSION_MODE="AIV"
@@ -196,7 +204,6 @@ Single-node deployment completes both Prefill and Decode within the same node. T
     ```shell
     export OMP_NUM_THREADS=10
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     export HCCL_BUFFSIZE=1024
     export TASK_QUEUE_ENABLE=1
     export HCCL_OP_EXPANSION_MODE=AIV
@@ -234,7 +241,6 @@ Single-node deployment completes both Prefill and Decode within the same node. T
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=10
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     export HCCL_BUFFSIZE=1024
     export TASK_QUEUE_ENABLE=1
     export HCCL_OP_EXPANSION_MODE="AIV"
@@ -279,7 +285,6 @@ Single-node deployment completes both Prefill and Decode within the same node. T
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=10
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     export HCCL_BUFFSIZE=1024
     export TASK_QUEUE_ENABLE=1
     export HCCL_OP_EXPANSION_MODE="AIV"
@@ -513,7 +518,6 @@ Before you start, please:
         export HCCL_BUFFSIZE=2560
         export TASK_QUEUE_ENABLE=1
         export HCCL_OP_EXPANSION_MODE="AIV"
-        export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096
 
@@ -570,7 +574,6 @@ Before you start, please:
         nic_name="xxxx" # change to your own nic name
         local_ip=xx.xx.xx.2 # change to your own ip
 
-        export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
         export HCCL_OP_EXPANSION_MODE="AIV"
         export TASK_QUEUE_ENABLE=1
         export VLLM_RPC_TIMEOUT=3600000
@@ -665,7 +668,6 @@ Before you start, please:
         export HCCL_BUFFSIZE=1800
         export TASK_QUEUE_ENABLE=1
         export HCCL_OP_EXPANSION_MODE="AIV"
-        export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096
@@ -723,7 +725,6 @@ Before you start, please:
         nic_name="xxxx" # change to your own nic name
         local_ip=xx.xx.xx.2 # change to your own ip
 
-        export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
         export HCCL_OP_EXPANSION_MODE="AIV"
         export TASK_QUEUE_ENABLE=1
         export VLLM_RPC_TIMEOUT=3600000
@@ -903,7 +904,6 @@ Before you start, please:
         nic_name="xxxxxx" #eg."enp67s0f0np0"
         local_ip=`hostname -I|awk -F " " '{print$1}'`
 
-        export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
         export HCCL_OP_EXPANSION_MODE="AIV"
         export TASK_QUEUE_ENABLE=1
         export VLLM_RPC_TIMEOUT=3600000
@@ -981,7 +981,6 @@ Before you start, please:
         nic_name="xxxxxx" #eg."enp67s0f0np0"
         local_ip=`hostname -I|awk -F " " '{print$1}'`
 
-        export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
         export HCCL_OP_EXPANSION_MODE="AIV"
         export TASK_QUEUE_ENABLE=1
         export VLLM_RPC_TIMEOUT=3600000
@@ -1145,6 +1144,9 @@ Here is the accuracy evaluation method using AISBench.
 | GSM8K | - | accuracy | gen | 96.30 | 1 Atlas 800 A3 (128GB × 8) |
 | GPQA | v0.25.1rc | accuracy | gen | 90.40 | A3 1P1D DSpark w8a8 |
 | SWE Multilingual | v0.25.1rc | accuracy | gen | 68.33 | A3 1P1D DSpark w8a8 |
+| GPQA | - | accuracy | gen | 90.40 | 950PR&950DT Products, w4a4c8 |
+
+> **Note**: Dataset evaluation results fluctuate between runs due to sampling and runtime non-determinism. When a dataset is evaluated multiple times, the average score is reported.
 
 ## 8 Performance Evaluation
 
@@ -1173,3 +1175,21 @@ Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_mat
 ## 10 FAQ
 
 For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md); this chapter only covers model-specific issues.
+
+### Q: How do the W4A4C8 ultra-low-bit quantized weights preserve accuracy?
+
+A: For 950PR&950DT Products, the W4A4C8 weights of `DeepSeek-V4-Flash-0731` are quantized with [msmodelslim](https://gitcode.com/Ascend/msmodelslim/blob/master/lab_practice/deepseek_v4/deepseek_v4_flash_w4a4c8.yaml). To preserve accuracy at such a low bit-width, a mixed-precision strategy is used: only the modules that dominate the parameter count are quantized to 4 bit, while precision-sensitive modules fall back to higher precision or are not quantized at all.
+
+| Module | Quantization configuration |
+| ------ | -------------------------- |
+| MoE FFN routed experts | W4A4 MXFP4 |
+| Attention linear layers | W8A8 MXFP8 |
+| FFN shared experts | W8A8 MXFP8 |
+| Router gates, compressor projections (`wgate`/`wkv`), indexer projections, and MTP layers | Not quantized (kept in high precision) |
+
+- **Quantization algorithm**: The weights and activations use the MXFP4/MXFP8 microscaling formats. Each tensor is divided into blocks of 32 elements, and each block shares a single scaling factor obtained with symmetric min-max calibration on a mixed calibration dataset. Block-wise scaling adapts to the local dynamic range of each tensor, so the quantization error is far lower than that of uniform INT4 quantization.
+- **C8 (FP8 KV cache)**: C8 is a dynamic quantization applied to the KV cache during inference. On 950PR&950DT Products, the KV cache is quantized to FP8 (not INT8). It is unrelated to the parameters stored in the weight checkpoint and is controlled only by the serving configuration. DeepSeek-V4-Flash and DeepSeek-V4-Pro share exactly the same C8 scheme:
+    - **Attention KV cache** (FP8 by default on 950PR&950DT Products; switch back to BF16 with `--kv-cache-dtype bfloat16`): the compressed KV latent, which serves as both K and V, is dynamically quantized per 64-element tile to FP8 (E4M3) with a shared E8M0 scale per tile; the RoPE part of the KV cache stays in BF16, and Q is not quantized.
+    - **Indexer cache** (enabled with `--attention_config.indexer_kv_dtype fp8`): both indexer Q and K are first rotated by a Hadamard matrix to spread outliers, and then dynamically quantized per token to FP8 (E4M3) with per-token FP32 scales.
+
+For W4A4C8 accuracy scores, see [Accuracy Evaluation](#7-accuracy-evaluation).

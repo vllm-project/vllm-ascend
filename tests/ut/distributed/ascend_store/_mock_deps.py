@@ -44,6 +44,8 @@ if "torch" not in sys.modules and importlib.util.find_spec("torch") is None:
     _torch.bool = "bool"  # type: ignore[attr-defined]
     _torch.float16 = "float16"  # type: ignore[attr-defined]
     _torch.float32 = "float32"  # type: ignore[attr-defined]
+    _torch.int8 = "int8"  # type: ignore[attr-defined]
+    _torch.dtype = str  # type: ignore[attr-defined]
     _torch.zeros = MagicMock(return_value=MagicMock())  # type: ignore[attr-defined]
     _torch.sum = MagicMock(return_value=0)  # type: ignore[attr-defined]
     _torch.device = MagicMock()  # type: ignore[attr-defined]
@@ -92,6 +94,7 @@ _vllm_mock_modules = [
     "vllm.utils",
     "vllm.utils.hashing",
     "vllm.utils.math_utils",
+    "vllm.utils.torch_utils",
     "vllm.utils.network_utils",
     "vllm.v1",
     "vllm.v1.attention",
@@ -124,7 +127,15 @@ if _MOCK_VLLM_DEPS:
 _base_mod: Any = (
     sys.modules["vllm.distributed.kv_transfer.kv_connector.v1.base"] if _MOCK_VLLM_DEPS else types.SimpleNamespace()
 )
-_base_mod.KVConnectorBase_V1 = type("KVConnectorBase_V1", (), {"__init__": lambda self, **kw: None})  # type: ignore[attr-defined]
+_base_mod.KVConnectorBase_V1 = type(  # type: ignore[attr-defined]
+    "KVConnectorBase_V1",
+    (),
+    {
+        "__init__": lambda self, **kw: None,
+        "bind_connector_metadata": lambda self, metadata: setattr(self, "_connector_metadata", metadata),
+        "_get_connector_metadata": lambda self: self._connector_metadata,
+    },
+)
 _base_mod.KVConnectorMetadata = type("KVConnectorMetadata", (), {})  # type: ignore[attr-defined]
 _base_mod.KVConnectorWorkerMetadata = type("KVConnectorWorkerMetadata", (), {})  # type: ignore[attr-defined]
 _base_mod.KVConnectorRole = MagicMock()  # type: ignore[attr-defined]
@@ -335,7 +346,7 @@ class _FakeSingleTypeKVCacheManager:
         if drop_eagle_block and computed and computed[0]:
             for blocks in computed:
                 blocks.pop()
-        return computed
+        return computed, len(computed[0]) * kv_cache_spec.block_size
 
 
 class _FakeSlidingWindowManager(_FakeSingleTypeKVCacheManager):
@@ -373,6 +384,11 @@ _kv_interface_mod: Any = sys.modules["vllm.v1.kv_cache_interface"] if _MOCK_VLLM
 _kv_interface_mod.KVCacheSpec = _FakeKVCacheSpec  # type: ignore[attr-defined]
 _kv_interface_mod.AttentionSpec = _FakeAttentionSpec  # type: ignore[attr-defined]
 _kv_interface_mod.FullAttentionSpec = _FakeFullAttentionSpec  # type: ignore[attr-defined]
+_kv_interface_mod.MLAAttentionSpec = _FakeFullAttentionSpec  # type: ignore[attr-defined]
+_kv_interface_mod.SlidingWindowMLASpec = _FakeSlidingWindowSpec  # type: ignore[attr-defined]
+_kv_interface_mod.CircularBufferSpec = type(  # type: ignore[attr-defined]
+    "CircularBufferSpec", (_FakeKVCacheSpec,), {"prefix_cacheable": False}
+)
 _kv_interface_mod.SlidingWindowSpec = _FakeSlidingWindowSpec  # type: ignore[attr-defined]
 _kv_interface_mod.MambaSpec = _FakeMambaSpec  # type: ignore[attr-defined]
 _kv_interface_mod.UniformTypeKVCacheSpecs = _FakeUniformTypeKVCacheSpecs  # type: ignore[attr-defined]
@@ -412,7 +428,7 @@ for _mod_name in [
     "yr.datasystem.object_client",
     "zmq",
 ]:
-    if _mod_name not in sys.modules:
+    if _mod_name not in sys.modules and (_mod_name != "zmq" or importlib.util.find_spec("zmq") is None):
         sys.modules[_mod_name] = MagicMock()
 
 # ---------------------------------------------------------------------------

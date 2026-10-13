@@ -2,6 +2,12 @@
 
 ## 1 Introduction
 
+!!! note
+
+    The "PD Separation Deployment" mentioned in this document is provided only as an example/reference design to demonstrate the basic process of deploying Prefill and Decode in separated mode. It is not recommended for use in the production environment.
+    
+    **For the production environment on the customer side, [MindIE Motor](https://www.hiascend.com/document/detail/en/mindie/latest/quickstart/docs/en/user_guide/quick_start.md) + vLLM-Ascend is recommended.**
+
 This document applies to both `GLM-5` and `GLM-5.1`. Unless otherwise specified, all descriptions, configurations, and deployment procedures for `GLM-5` in this document also apply to `GLM-5.1`. For brevity, `GLM-5` is used hereafter as a unified reference to both `GLM-5` and `GLM-5.1`.
 
 [GLM-5](https://huggingface.co/zai-org/GLM-5) uses a Mixture-of-Experts (MoE) architecture and targets complex systems engineering and long-horizon agentic tasks.
@@ -223,8 +229,8 @@ If you want to deploy multi-node environment, you need to set up environment on 
     --enable-auto-tool-choice \
     --tool-call-parser glm47 \
     --reasoning-parser glm45 \
-    --kv-cache-dtype int8 \
-    --attention_config.indexer_kv_dtype int8 \
+    --kv-cache-dtype fp8 \
+    --attention_config.indexer_kv_dtype fp8 \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
     --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
@@ -562,7 +568,7 @@ In addition to all single-node parameters described in [Single-Node Online Deplo
 
 We'd like to show the deployment guide of `GLM-5` on multi-node environment with Prefill-Decode (PD) disaggregation for better performance. *Prefill-Decode Disaggregation* refers to the separation of the prefill stage and the decode stage across different nodes to improve throughput and latency.
 
-In the PD disaggregation scenario, Mooncake is used as the KV cache transfer connector between the prefill and decode nodes. Please refer to [KV Cache Pool (Ascend Store) Deployment Guide](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/user_guide/feature_guide/kv_pool.md) for the Mooncake configuration.
+In the PD disaggregation scenario, Mooncake is used as the KV cache transfer connector between the prefill and decode nodes. Please refer to [KV Cache Pool (Ascend Store) Deployment Guide](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/user_guide/feature_guide/kv_cache_pool_ascend_store.md) for the Mooncake configuration.
 
 #### 5.3.1 Prefill-Decode Disaggregation (950DT Products)
 
@@ -707,8 +713,8 @@ if __name__ == "__main__":
             --enable-auto-tool-choice \
             --tool-call-parser glm47 \
             --reasoning-parser glm45 \
-            --kv-cache-dtype int8 \
-            --attention_config.indexer_kv_dtype int8 \
+            --kv-cache-dtype fp8 \
+            --attention_config.indexer_kv_dtype fp8 \
             --speculative-config '{"num_speculative_tokens": 1, "method": "deepseek_mtp", "enforce_eager": true}' \
             --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
             --kv-transfer-config \
@@ -772,8 +778,8 @@ if __name__ == "__main__":
             --enable-auto-tool-choice \
             --tool-call-parser glm47 \
             --reasoning-parser glm45 \
-            --kv-cache-dtype int8 \
-            --attention_config.indexer_kv_dtype int8 \
+            --kv-cache-dtype fp8 \
+            --attention_config.indexer_kv_dtype fp8 \
             --speculative-config '{"num_speculative_tokens": 1, "method": "deepseek_mtp", "enforce_eager": true}' \
             --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
             --kv-transfer-config \
@@ -839,8 +845,8 @@ if __name__ == "__main__":
             --enable-auto-tool-choice \
             --tool-call-parser glm47 \
             --reasoning-parser glm45 \
-            --kv-cache-dtype int8 \
-            --attention_config.indexer_kv_dtype int8 \
+            --kv-cache-dtype fp8 \
+            --attention_config.indexer_kv_dtype fp8 \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
             --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
             --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
@@ -907,8 +913,8 @@ if __name__ == "__main__":
             --enable-auto-tool-choice \
             --tool-call-parser glm47 \
             --reasoning-parser glm45 \
-            --kv-cache-dtype int8 \
-            --attention_config.indexer_kv_dtype int8 \
+            --kv-cache-dtype fp8 \
+            --attention_config.indexer_kv_dtype fp8 \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
             --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
             --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
@@ -1080,7 +1086,7 @@ if __name__ == "__main__":
             --max-model-len 202752 \
             --kv-cache-dtype int8 \
             --attention_config.indexer_kv_dtype int8 \
-            --additional-config '{"fuse_muls_add": true, "recompute_scheduler_enable": false, "multistream_overlap_shared_expert": true, "enable_dsa_cp": true, "c8_enable_reshape_optim": true, "enable_flashcomm1": true, "enable_fused_mc2": true}' \
+            --additional-config '{"fuse_muls_add": true, "recompute_scheduler_enable": false, "multistream_overlap_shared_expert": true, "enable_dsa_cp": true, "enable_flashcomm1": true, "enable_fused_mc2": true}' \
             --max-num-batched-tokens 16384 \
             --trust-remote-code \
             --enable-prefix-caching \
@@ -1142,7 +1148,7 @@ if __name__ == "__main__":
             --max-model-len 202752 \
             --kv-cache-dtype int8 \
             --attention_config.indexer_kv_dtype int8 \
-            --additional-config '{"fuse_muls_add": true, "recompute_scheduler_enable": false, "multistream_overlap_shared_expert": true, "enable_dsa_cp": true, "c8_enable_reshape_optim": true, "enable_flashcomm1": true, "enable_fused_mc2": true}' \
+            --additional-config '{"fuse_muls_add": true, "recompute_scheduler_enable": false, "multistream_overlap_shared_expert": true, "enable_dsa_cp": true, "enable_flashcomm1": true, "enable_fused_mc2": true}' \
             --max-num-batched-tokens 16384 \
             --trust-remote-code \
             --enable-prefix-caching \

@@ -8,9 +8,9 @@ from vllm.config.speculative import SpeculativeConfig
 
 from vllm_ascend.patch.platform import patch_speculative_config
 from vllm_ascend.patch.platform.patch_speculative_config import (
+    _ascend_verify_with_parallel_config,
     _normalize_deepseek_dspark_draft,
 )
-from vllm_ascend.utils import vllm_version_is
 
 
 def test_legacy_qwen3_dspark_config_uses_qwen3_loader():
@@ -178,6 +178,81 @@ def test_non_dcp_dspark_config_is_not_replaced_during_validation(
     assert config.target_parallel_config is original_parallel_config
 
 
+def test_gqa_pcp_dcp_preserves_other_upstream_checks(monkeypatch):
+    model_config = SimpleNamespace(use_mla=False, is_moe=True, runner_type="generate")
+    parallel_config = SimpleNamespace(
+        enable_expert_parallel=True,
+        tensor_parallel_size=8,
+        prefill_context_parallel_size=2,
+        decode_context_parallel_size=2,
+    )
+    validated = []
+
+    def validate_config(model, config):
+        validated.append((model, config))
+        assert config is not parallel_config
+        assert config.enable_expert_parallel is True
+        assert config.decode_context_parallel_size == 1
+
+    monkeypatch.setattr(patch_speculative_config, "_orig_verify_with_parallel_config", validate_config)
+    _ascend_verify_with_parallel_config(model_config, parallel_config)
+    assert len(validated) == 1
+    assert validated[0][0] is model_config
+    assert parallel_config.decode_context_parallel_size == 2
+
+
+def test_non_moe_draft_keeps_original_parallel_validation_bypass(monkeypatch):
+    model_config = SimpleNamespace(use_mla=False, is_moe=False, runner_type="draft")
+    parallel_config = SimpleNamespace(enable_expert_parallel=True)
+    validated = []
+    monkeypatch.setattr(
+        patch_speculative_config, "_orig_verify_with_parallel_config", lambda *args: validated.append(args)
+    )
+    assert _ascend_verify_with_parallel_config(model_config, parallel_config) is None
+    assert not validated
+
+
+def test_ascend_parallel_validation_preserves_original_config_on_error(monkeypatch):
+    model_config = SimpleNamespace(use_mla=False, is_moe=True, runner_type="generate")
+    parallel_config = SimpleNamespace(
+        enable_expert_parallel=True,
+        tensor_parallel_size=8,
+        prefill_context_parallel_size=2,
+        decode_context_parallel_size=2,
+    )
+
+    def fail(model, config):
+        assert config.enable_expert_parallel is True
+        assert config.decode_context_parallel_size == 1
+        raise ValueError("other upstream validation failed")
+
+    monkeypatch.setattr(patch_speculative_config, "_orig_verify_with_parallel_config", fail)
+    with pytest.raises(ValueError, match="other upstream validation failed"):
+        _ascend_verify_with_parallel_config(model_config, parallel_config)
+
+    assert parallel_config.enable_expert_parallel is True
+    assert parallel_config.decode_context_parallel_size == 2
+
+
+def test_gqa_tp_only_dcp_keeps_upstream_validation(monkeypatch):
+    model_config = SimpleNamespace(use_mla=False, is_moe=True, runner_type="generate")
+    parallel_config = SimpleNamespace(
+        enable_expert_parallel=True,
+        tensor_parallel_size=8,
+        prefill_context_parallel_size=1,
+        decode_context_parallel_size=2,
+    )
+    validated = []
+
+    def validate_config(model, config):
+        validated.append((model, config))
+
+    monkeypatch.setattr(patch_speculative_config, "_orig_verify_with_parallel_config", validate_config)
+
+    _ascend_verify_with_parallel_config(model_config, parallel_config)
+    assert validated == [(model_config, parallel_config)]
+
+
 @pytest.mark.parametrize("flattened", [False, True])
 def test_deepseek_v41_dspark_selects_v41_drafter_and_expert_shape(flattened):
     text_config = SimpleNamespace(
@@ -195,8 +270,6 @@ def test_deepseek_v41_dspark_selects_v41_drafter_and_expert_shape(flattened):
     )
     hf_config.update = lambda values: hf_config.__dict__.update(values)
     if flattened:
-        if vllm_version_is("0.29.0"):
-            pytest.skip("DeepSeek V4.1 config is unavailable on vLLM 0.29")
         from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config
 
         hf_config = DeepseekV41Config(

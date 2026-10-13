@@ -49,13 +49,14 @@ from vllm.tasks import SupportedTask
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
-from vllm.v1.core.kv_cache_utils import get_kv_cache_groups
+from vllm.v1.core.kv_cache_utils import get_kv_cache_groups, unify_hybrid_kv_cache_specs
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
     MambaSpec,
+    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
@@ -74,6 +75,7 @@ from vllm_ascend.batch_invariant import init_batch_invariance
 from vllm_ascend.core.kv_cache_placement import (
     KVPPPhysicalCachePlan,
     create_kvpp_cache_allocation_plan,
+    register_kvpp_draft_layers,
 )
 from vllm_ascend.core.profiling_chunk_predictor import (
     _attach_profiling_chunk_execution_time,
@@ -82,6 +84,8 @@ from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.device_allocator.sleep_mem_optimized import SleepWakeupManager
+from vllm_ascend.distributed.eplb.eplb_state import AscendEplbState
+from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import uses_sfa_dspark_kv_transfer
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
     build_layerwise_cache_layout,
     build_layerwise_reuse_layout,
@@ -92,12 +96,15 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     plan_sparse_kv_offload_memory,
 )
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
+from vllm_ascend.observability.runtime_guard.hooks import runtime_guard_idle_step
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
 from vllm_ascend.utils import (
     check_ascend_device_type,
+    enable_custom_op,
     enable_sp,
     register_ascend_customop,
+    register_device_print,
     setup_ascend_local_comm_res,
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
@@ -358,6 +365,9 @@ class NPUWorker(WorkerBase):
         self._weight_update_active = False
 
     def shutdown(self) -> None:
+        state = getattr(getattr(self, "model_runner", None), "eplb_state", None)
+        if isinstance(state, AscendEplbState):
+            state.close()
         if ensure_kv_transfer_shutdown is not None:
             ensure_kv_transfer_shutdown()
 
@@ -427,6 +437,9 @@ class NPUWorker(WorkerBase):
 
         torch.npu.set_device(device)
 
+        if enable_custom_op():
+            register_device_print()
+
         # Import _inductor for graph mode execution with triton
         # This lazy import avoids torch_npu re-initialization in patch
         # Note that this should be imported after torch.npu.set_device
@@ -440,7 +453,7 @@ class NPUWorker(WorkerBase):
         torch.npu.empty_cache()
 
         if get_current_hardware_profile().supports(HardwareCapability.LOCAL_KV_COMM_RESOURCE):
-            setup_ascend_local_comm_res(self.local_rank, self.vllm_config.kv_transfer_config)
+            setup_ascend_local_comm_res(visible_device_index, self.vllm_config.kv_transfer_config)
 
         # take current memory snapshot
         self.init_snapshot = MemorySnapshot(device=device)
@@ -693,13 +706,16 @@ class NPUWorker(WorkerBase):
         has_mamba = any(isinstance(spec, MambaSpec) for spec in per_layer_specs)
         model_runner = getattr(self, "model_runner", None)
         layout = self.vllm_config.cache_config.get_resolved_kv_cache_layout()
+        # TODO: The Step-3.5/3.7 models will be sunset in the future. Once they
+        # are, remove this is_step_model exemption: this line and the
+        # `or is_step_model` budget gate below.
+        is_step_model = self.model_config.hf_text_config.model_type in ("step3p5", "step3p7")
         if (
             has_attention
-            and has_mamba
+            and (has_mamba or is_step_model)
             and layout.is_layer_compact
             and layout.is_block_compact
             and getattr(model_runner, "supports_standardized_shared_kv_backing", False)
-            and getattr(model_runner, "supports_shared_backing_with_kv_transfer", False)
             and not getattr(model_runner, "use_sparse", False)
             and not getattr(model_runner, "use_compress", False)
         ):
@@ -778,6 +794,8 @@ class NPUWorker(WorkerBase):
             self.profiler.step()
 
         output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
+        if self.use_v2_model_runner and self.model_runner.is_pooling_model and output is None:
+            output = self.model_runner.pool()  # type: ignore
         if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
             return output
 
@@ -926,13 +944,16 @@ class NPUWorker(WorkerBase):
         # may cause performance degradation at runtime.
         if get_current_hardware_profile().supports(HardwareCapability.ATB_WARMUP):
             self._warm_up_atb()
-        # Bind after warmup so hot allocations are already materialized on the
-        # worker process before migratepages/taskset run.
+        # Keep thread affinity after warmup and capture. Engram HOST_UVA tables
+        # are already registered here; process-wide migration must not revisit
+        # their pinned backing, which may also be shared across NUMA nodes.
         if get_ascend_config().enable_cpu_binding:
+            engram_config = getattr(self.vllm_config, "engram_config", None)
             try:
                 bind_cpus(
                     self.local_rank,
                     npu_id=current_platform.device_id_to_physical_device_id(self.local_rank),
+                    migrate_memory=not (engram_config is not None and engram_config.cpu_offload),
                 )
             except Exception as e:
                 logger.warning("Bind cpus failed in rank%s: %s Skip binding cpu.", self.local_rank, e)
@@ -1057,16 +1078,22 @@ class NPUWorker(WorkerBase):
         self,
         kv_cache_spec: dict[str, KVCacheSpec],
         extra_config: dict[str, Any],
+        *,
+        excluded_layer_names: set[str] | None = None,
     ) -> tuple[int, int, float]:
         if not kv_cache_spec:
             return 0, 0, 1.0
+        # Match the allocation planner: persistent draft pages are not target
+        # scratch slots and must be counted once each in the physical budget.
+        excluded_layer_names = (excluded_layer_names or set()) & kv_cache_spec.keys()
+        target_specs = {name: spec for name, spec in kv_cache_spec.items() if name not in excluded_layer_names}
         base_layers = self.model_config.get_num_layers(self.parallel_config)
-        physical_layers = {get_layerwise_physical_layer_index(layer_name, base_layers) for layer_name in kv_cache_spec}
+        physical_layers = {get_layerwise_physical_layer_index(layer_name, base_layers) for layer_name in target_specs}
         num_layers = len(physical_layers)
         if num_layers < base_layers:
             return num_layers, num_layers, 1.0
         reuse_layout = build_layerwise_reuse_layout(
-            kv_cache_spec,
+            target_specs,
             base_layers,
             extra_config,
         )
@@ -1075,7 +1102,7 @@ class NPUWorker(WorkerBase):
         num_buffer_assignments = len(reuse_layout.buffer_slots)
 
         logical_page_bytes = sum(spec.page_size_bytes for spec in kv_cache_spec.values())
-        physical_page_bytes = 0
+        physical_page_bytes = sum(kv_cache_spec[name].page_size_bytes for name in excluded_layer_names)
         for slot in reuse_layout.buffer_slots:
             physical_page_bytes += reuse_layout.layer_cache_specs[slot[0]].main.spec.page_size_bytes
             for layer in slot:
@@ -1089,13 +1116,40 @@ class NPUWorker(WorkerBase):
         kv_cache_spec = self.model_runner.get_kv_cache_spec()
         extra_config = get_layerwise_reuse_config(self.vllm_config.kv_transfer_config)
         if extra_config is not None:
+            speculator = getattr(self.model_runner, "speculator", None)
+            speculative = self.vllm_config.speculative_config
+            draft_names = (
+                set(speculator.draft_attn_layer_names)
+                if speculative is not None and speculative.method == "dspark" and speculator is not None
+                else set()
+            )
             self._gva_layerwise_memory_info = self._get_layerwise_kv_cache_memory_info(
                 kv_cache_spec,
                 extra_config,
+                excluded_layer_names=draft_names,
             )
         kvpp_config = KVPPConfig.from_vllm_config(self.vllm_config)
         if kvpp_config.size > 1:
-            kvpp_rank = get_tp_group().rank_in_group % kvpp_config.size
+            register_kvpp_draft_layers(
+                self.vllm_config,
+                self.model_runner,
+                kv_cache_spec,
+                is_last_pp_rank=get_pp_group().is_last_rank,
+            )
+            speculative_config = self.vllm_config.speculative_config
+            if (
+                speculative_config is not None
+                and speculative_config.use_eagle()
+                and any(isinstance(spec, SlidingWindowSpec) for spec in kv_cache_spec.values())
+            ):
+                # Use the same full-allocation specs for KVPP budgeting and
+                # the engine's cache groups. Attention compute stays windowed.
+                kv_cache_spec = dict(kv_cache_spec)
+                unify_hybrid_kv_cache_specs(kv_cache_spec)
+            kvpp_rank = (
+                get_pcp_group().rank_in_group * self.vllm_config.parallel_config.tensor_parallel_size
+                + get_tp_group().rank_in_group
+            )
             self._kvpp_cache_allocation_plan = create_kvpp_cache_allocation_plan(
                 self.vllm_config,
                 kv_cache_spec,
@@ -1128,6 +1182,20 @@ class NPUWorker(WorkerBase):
 
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate NPU KV cache with the specified kv_cache_config."""
+        speculator = getattr(self.model_runner, "speculator", None)
+        speculative = self.vllm_config.speculative_config
+        if (
+            speculative is not None
+            and speculative.method == "dspark"
+            and speculator is not None
+            and (
+                uses_sfa_dspark_kv_transfer(self.vllm_config)
+                or get_layerwise_reuse_config(self.vllm_config.kv_transfer_config) is not None
+            )
+        ):
+            # Connector construction must see loader-owned draft caches before
+            # planning target layerwise scratch buffers or pool transfers.
+            kv_cache_config.dspark_draft_layer_names = tuple(sorted(speculator.draft_attn_layer_names))
         ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
         # Restrict the discardable kv_cache pool to backing cache allocations.
         # Persistent metadata created during initialize_kv_cache must stay
@@ -1202,6 +1270,30 @@ class NPUWorker(WorkerBase):
     def reset_encoder_cache(self) -> None:
         self.model_runner.reset_encoder_cache()
 
+    def get_encoder_cudagraph_stats(self) -> dict[str, Any] | None:
+        """Return serializable encoder graph state for diagnostics.
+
+        Utility RPCs use safe serialization by default, so callers must invoke
+        a worker method by name instead of sending a Python callback. Keep the
+        result limited to primitive containers supported by that serializer.
+        """
+        model_state = getattr(self.model_runner, "model_state", None)
+        encoder_runner = getattr(model_state, "encoder_runner", None)
+        manager = getattr(encoder_runner, "cudagraph_manager", None)
+        if manager is None:
+            # Model Runner V1 owns the manager directly.
+            manager = getattr(self.model_runner, "encoder_cudagraph_manager", None)
+        if manager is None:
+            return None
+        return {
+            "manager": type(manager).__name__,
+            "captured": manager.is_captured(),
+            **manager.get_cumulative_stats(),
+        }
+
+    # Lockstep wave sync for idle DP ranks (never burns manual_dump);
+    # lives in the runtime_guard hook, see runtime_guard_idle_step.
+    @runtime_guard_idle_step
     def execute_dummy_batch(self) -> None:
         self.log_memory_stats()
         num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
@@ -1213,13 +1305,21 @@ class NPUWorker(WorkerBase):
         init_distributed_environment(
             self.parallel_config.world_size, self.rank, self.distributed_init_method, self.local_rank, "hccl"
         )
-        ensure_model_parallel_initialized(
-            self.parallel_config.tensor_parallel_size,
-            self.parallel_config.pipeline_parallel_size,
-            self.parallel_config.prefill_context_parallel_size,
-            self.parallel_config.decode_context_parallel_size,
-        )
-        init_ascend_model_parallel(self.parallel_config)
+        group_config = self.vllm_config
+        if group_config.engram_config is not None and self.parallel_config.prefill_context_parallel_size > 1:
+            # Skip upstream's DP-only Engram group so Ascend can create
+            # _ENGRAM_DP once with DP x PCP ranks. Copy the config to preserve
+            # the original Engram settings for Ascend and model initialization.
+            group_config = copy.copy(group_config)
+            group_config.engram_config = None
+        with set_current_vllm_config(group_config):
+            ensure_model_parallel_initialized(
+                self.parallel_config.tensor_parallel_size,
+                self.parallel_config.pipeline_parallel_size,
+                self.parallel_config.prefill_context_parallel_size,
+                self.parallel_config.decode_context_parallel_size,
+            )
+        init_ascend_model_parallel(self.parallel_config, self.vllm_config.engram_config)
         ensure_ec_transfer_initialized(self.vllm_config)
 
     def get_supported_pooling_tasks(self):
