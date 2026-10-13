@@ -91,9 +91,7 @@ env_variables: dict[str, Callable[[], Any]] = {
     # (Qwen3.5-VL resize/patchify/rescale+normalize on device). "1" (default)
     # enables the offload; "0", "false" or "off" disable it and keep the full
     # stock CPU pipeline. Any other value is treated as enabled.
-    "VLLM_ASCEND_VL_NPU_PREPROCESS": lambda: os.getenv("VLLM_ASCEND_VL_NPU_PREPROCESS", "1")
-    .strip()
-    .lower()
+    "VLLM_ASCEND_VL_NPU_PREPROCESS": lambda: os.getenv("VLLM_ASCEND_VL_NPU_PREPROCESS", "1").strip().lower()
     not in ("0", "false", "off"),
 }
 
