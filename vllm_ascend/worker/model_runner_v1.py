@@ -3758,10 +3758,13 @@ class NPUModelRunner(GPUModelRunner):
                 # tokens at all while GDN rows still carry accepted history
                 # from the previous verify. Keep passing it through.
                 extra_attn_metadata_args.update(
-                    num_accepted_tokens=self.num_accepted_tokens.gpu[:num_reqs_padded],
+                    num_accepted_tokens=(
+                        self.num_accepted_tokens.gpu[:num_reqs_padded]
+                        if self.speculative_config else None
+                    ),
                     num_decode_draft_tokens_cpu=(
                         self.num_decode_draft_tokens.cpu[:num_reqs_padded]
-                        if use_spec_decode else None
+                        if use_spec_decode and self.speculative_config else None
                     ),
                 )
 
