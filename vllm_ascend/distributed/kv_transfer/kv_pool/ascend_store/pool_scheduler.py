@@ -864,6 +864,7 @@ class KVPoolScheduler:
             kv_cache_group_families=self.kv_cache_group_families,
             save_partial_block=self.layerwise_offload,
             hash_block_size=self.hash_block_size,
+            allow_sync_load_save=self.kv_role == "kv_producer" and not self.load_async and not self.layerwise_offload,
         )
 
     def _process_new_request(
@@ -1042,6 +1043,7 @@ class KVPoolScheduler:
             original_block_size=self.original_block_size,
             kv_cache_group_families=self.kv_cache_group_families,
             hash_block_size=self.hash_block_size,
+            allow_sync_load_save=self.kv_role == "kv_producer" and not self.load_async and not self.layerwise_offload,
         )
 
     def build_connector_meta(self, scheduler_output: SchedulerOutput) -> KVConnectorMetadata:

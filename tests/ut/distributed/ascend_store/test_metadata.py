@@ -607,11 +607,8 @@ class TestReqMeta(unittest.TestCase):
         self.assertFalse(meta.can_save)
 
     def test_from_request_tracker_can_load_suppresses_save(self):
-        # Port of vllm-project/vllm#43371: a ReqMeta must never carry both a
-        # save AND a load. When the request can load from the KV pool, force
-        # skip_save so the same req_id is not queued into both the send and
-        # recv threads (which double delayed-free and can crash the scheduler
-        # with `assert req_id in self.requests`).
+        # The default path suppresses save during load. Async send and recv
+        # threads would otherwise double delayed-free the same request.
         tracker = RequestTracker(
             req_id="r1",
             token_len=32,
@@ -623,6 +620,42 @@ class TestReqMeta(unittest.TestCase):
         self.assertIsNotNone(meta)
         self.assertIsNotNone(meta.load_spec)
         self.assertFalse(meta.can_save)
+
+    def test_from_request_tracker_sync_load_saves_new_suffix(self):
+        tracker = RequestTracker(
+            req_id="r1",
+            token_len=48,
+            allocated_block_ids=[0, 1, 2],
+            num_saved_tokens=0,
+        )
+        load_spec = LoadSpec(vllm_cached_tokens=0, kvpool_cached_tokens=32, can_load=True)
+        meta = ReqMeta.from_request_tracker(
+            tracker,
+            cache_transfer_granularity=16,
+            load_spec=load_spec,
+            block_hashes=[b"h1", b"h2", b"h3"],
+            allow_sync_load_save=True,
+        )
+        self.assertIsNotNone(meta)
+        self.assertIs(meta.load_spec, load_spec)
+        self.assertTrue(meta.can_save)
+        self.assertEqual(meta.save_end_token, 48)
+        self.assertEqual(tracker.num_saved_tokens, 48)
+
+    def test_from_request_tracker_sync_load_full_hit_does_not_save(self):
+        tracker = RequestTracker(
+            req_id="r1",
+            token_len=32,
+            allocated_block_ids=[0, 1],
+            num_saved_tokens=0,
+        )
+        load_spec = LoadSpec(vllm_cached_tokens=0, kvpool_cached_tokens=32, can_load=True)
+        meta = ReqMeta.from_request_tracker(
+            tracker, cache_transfer_granularity=16, load_spec=load_spec, allow_sync_load_save=True
+        )
+        self.assertIsNotNone(meta)
+        self.assertFalse(meta.can_save)
+        self.assertEqual(tracker.num_saved_tokens, 0)
 
     def test_from_request_tracker_partial_tokens_discarded(self):
         tracker = RequestTracker(
