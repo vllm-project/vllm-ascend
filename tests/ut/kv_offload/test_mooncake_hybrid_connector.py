@@ -60,6 +60,7 @@ class TestHybridKVCacheRecvingThreadDispatch(unittest.TestCase):
         thread.request_task_counts = defaultdict(int)
         thread.finished_request_markers = set()
         thread.request_task_counts_lock = threading.Lock()
+        thread.packed_cache_layout = ""
         return thread
 
     def test_group_transfer_and_completion(self):

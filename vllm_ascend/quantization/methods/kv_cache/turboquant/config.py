@@ -81,8 +81,16 @@ def _validate_turboquant_dsa(vllm_config) -> None:
         raise ValueError("DeepSeek V4 TurboQuant does not yet support context parallelism")
     if KVPPConfig.from_vllm_config(vllm_config).size > 1:
         raise ValueError("DeepSeek V4 TurboQuant packed cache does not yet support KV layer parallelism")
-    if vllm_config.kv_transfer_config is not None:
-        raise ValueError("DeepSeek V4 TurboQuant packed cache does not yet support KV transfer")
+    transfer = vllm_config.kv_transfer_config
+    if transfer is not None:
+        if transfer.kv_connector != "MooncakeHybridConnector":
+            raise ValueError("DeepSeek V4 TurboQuant KV transfer requires MooncakeHybridConnector")
+        if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
+            raise ValueError("DeepSeek V4 TurboQuant KV transfer requires the hybrid KV cache manager")
+        if parallel.pipeline_parallel_size != 1 or any(
+            transfer.get_from_extra_config(side, {}).get("pp_size", 1) != 1 for side in ("prefill", "decode")
+        ):
+            raise ValueError("DeepSeek V4 TurboQuant KV transfer requires PP=1 on both Prefill and Decode")
     # Packed cache views must reach the fused operator without materializing
     # a full contiguous BF16/uint8 cache on every attention invocation.
     for library in (None, "libnnopbase.so"):

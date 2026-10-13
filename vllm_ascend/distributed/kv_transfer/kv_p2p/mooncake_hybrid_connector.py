@@ -29,6 +29,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
     KVConnectorRole,
+    KVConnectorTransferResults,
     SupportsHMA,
 )
 from vllm.distributed.parallel_state import (
@@ -65,6 +66,8 @@ from vllm_ascend.distributed.kv_transfer.utils.utils import (
     inject_qos,
     validate_register_region_count,
 )
+from vllm_ascend.quantization.methods.kv_cache.turboquant.cache import uses_turboquant_groups
+from vllm_ascend.quantization.methods.kv_cache.turboquant.latent import get_dsv4_encoding_contract
 from vllm_ascend.utils import enable_custom_op, get_kv_cache_tensor_layers, is_vl_model
 
 # isort: off
@@ -99,12 +102,99 @@ class MooncakeAgentMetadata(msgspec.Struct, omit_defaults=True, dict=True):
     block_lens: list[int]
     ssm_sizes: tuple[int, int]
     local_ip: str = ""
+    # Empty for existing layouts. A packed peer must provide a matching
+    # fingerprint before any data can be read, including when only P enables TQ.
+    packed_cache_layout: str = ""
 
 
 @dataclass(frozen=True)
 class _SharedPage:
     placements: tuple[tuple[str, int], ...]
     block_stride: int
+
+
+def _reconstruct_packed_page(kv_cache_config: KVCacheConfig, kv_caches: dict[str, Any]) -> _SharedPage:
+    """Recover one TQ pool page, not a full page starting at each inner view.
+
+    Valid block IDs have exclusive group ownership in the shared block pool.
+    All groups overlay this same page layout, so copying one complete physical
+    block preserves codes, scales, indexer data and compressor state together.
+    """
+    specs = {
+        name: spec
+        for group in kv_cache_config.kv_cache_groups
+        for name, spec in group.kv_cache_spec.kv_cache_specs.items()
+    }
+    placements: dict[str, int] = {}
+    pool_base: int | None = None
+    if not kv_cache_config.kv_cache_tensors:
+        raise ValueError("TurboQuant KV transfer requires packed cache descriptors")
+    stride = kv_cache_config.kv_cache_tensors[0].block_stride
+    size = kv_cache_config.num_blocks * stride
+    if stride <= 0 or kv_cache_config.num_blocks <= 0:
+        raise ValueError("TurboQuant KV transfer requires a nonempty packed pool")
+    for descriptor in kv_cache_config.kv_cache_tensors:
+        if descriptor.layer_stride != 0 or descriptor.block_stride != stride or descriptor.size != size:
+            raise ValueError("TurboQuant KV transfer requires one shared pool with a uniform block stride")
+        for name in get_kv_cache_tensor_layers(descriptor):
+            offset = descriptor.offset
+            if name in placements or offset < 0 or offset + specs[name].page_size_bytes > stride:
+                raise ValueError(f"Invalid TurboQuant packed page placement for {name}")
+            tensors = as_kv_cache_tensors(kv_caches[name])
+            base = min(tensor.data_ptr() for tensor in tensors) - offset
+            if pool_base is not None and pool_base != base:
+                raise ValueError("TurboQuant KV views do not resolve to the same pool base")
+            pool_base = base
+            for tensor in tensors:
+                storage = tensor.untyped_storage()
+                if not storage.data_ptr() <= base < base + size <= storage.data_ptr() + storage.nbytes():
+                    raise ValueError(f"TurboQuant transfer pool exceeds backing storage for {name}")
+                if tensor.shape[0] != kv_cache_config.num_blocks or tensor.stride(0) * tensor.element_size() != stride:
+                    raise ValueError(f"Invalid TurboQuant block stride for {name}")
+                page_end = (
+                    tensor.data_ptr()
+                    - base
+                    + tensor.element_size()
+                    + sum(
+                        (dim - 1) * step * tensor.element_size()
+                        for dim, step in zip(tensor.shape[1:], tensor.stride()[1:])
+                    )
+                )
+                if tensor.data_ptr() < base + offset or page_end > offset + specs[name].page_size_bytes:
+                    raise ValueError(f"TurboQuant view exceeds its layer page for {name}")
+            placements[name] = offset
+    if placements.keys() != specs.keys():
+        raise ValueError("TurboQuant KV transfer is missing cache layer placements")
+    return _SharedPage(tuple(placements.items()), stride)
+
+
+def _packed_cache_layout(kv_cache_config: KVCacheConfig, kv_caches: dict[str, Any]) -> str:
+    """Hash the wire layout once at registration, excluding addresses/capacity."""
+    if not uses_turboquant_groups(kv_cache_config.kv_cache_groups):
+        return ""
+    page = _reconstruct_packed_page(kv_cache_config, kv_caches)
+    offsets = dict(page.placements)
+    groups = []
+    for group in kv_cache_config.kv_cache_groups:
+        layers = []
+        for name in sorted(group.layer_names):
+            spec = group.kv_cache_spec.kv_cache_specs[name]
+            tensors = as_kv_cache_tensors(kv_caches[name])
+            layer_base = min(tensor.data_ptr() for tensor in tensors)
+            layers.append(
+                (
+                    name,
+                    type(spec).__name__,
+                    spec.block_size,
+                    spec.page_size_bytes,
+                    getattr(spec, "sliding_window", None),
+                    offsets[name],
+                    [(str(t.dtype), t.shape[1:], t.stride(), t.data_ptr() - layer_base) for t in tensors],
+                )
+            )
+        groups.append(layers)
+    layout = (*get_dsv4_encoding_contract(), page.block_stride, groups)
+    return hashlib.sha256(msgspec.msgpack.encode(layout)).hexdigest()
 
 
 def _reconstruct_shared_pages(
@@ -120,6 +210,8 @@ def _reconstruct_shared_pages(
     view addresses can still differ because a layer may start at an inner-page
     offset.
     """
+    if uses_turboquant_groups(getattr(kv_cache_config, "kv_cache_groups", ())):
+        return [_reconstruct_packed_page(kv_cache_config, kv_caches)]
     pages_by_key: dict[tuple[str, int, int], list[tuple[str, int]]] = {}
     page_strides: dict[tuple[str, int, int], int] = {}
     for descriptor_idx, descriptor in enumerate(kv_cache_config.kv_cache_tensors):
@@ -212,6 +304,7 @@ class KVCacheTaskTracker:
 
         self.done_task_lock = threading.Lock()
         self.finished_requests: set[str] = set()
+        self.failed_requests: set[str] = set()
         # Only used in prefill node. Tracks requests whose kv blocks freeing is
         # intentionally delayed. Each entry is a tuple of (request_id,
         # timestamp). If a request remains in this queue for too long, it will
@@ -248,12 +341,22 @@ class KVCacheTaskTracker:
         Returns:
             A set of request IDs that have been completed.
         """
+        return self.get_and_clear_finished_results()[0]
+
+    def mark_failed(self, request_id: str) -> None:
+        with self.done_task_lock:
+            self.failed_requests.add(request_id)
+
+    def get_and_clear_finished_results(self) -> tuple[set[str], set[str]]:
+        """Publish failures atomically with completion, after all pulls finish."""
         with self.done_task_lock:
             finished_requests = self.finished_requests.copy()
             expired_requests = self._retrieve_expired_requests()
             finished_requests.update(expired_requests)
             self.finished_requests.clear()
-        return finished_requests
+            failed_requests = self.failed_requests.intersection(finished_requests)
+            self.failed_requests.difference_update(finished_requests)
+        return finished_requests, failed_requests
 
     def add_delayed_request(self, request_id: str, delay_start_time: float):
         """Add a delayed free request."""
@@ -470,6 +573,7 @@ class KVCacheRecvingThread(threading.Thread):
         kv_cache_config: KVCacheConfig,
         kv_caches: dict[str, Any],
         prefill_pp_layer_partition: str | None = None,
+        packed_cache_layout: str = "",
     ):
         super().__init__(daemon=True, name="KVCacheRecvingThread")
         self.tp_rank = tp_rank
@@ -487,6 +591,8 @@ class KVCacheRecvingThread(threading.Thread):
         self.block_len_per_addr = block_len_per_addr
         self.block_stride_per_addr = block_stride_per_addr
         self.addr_group_idx = addr_group_idx
+        self.packed_cache_layout = packed_cache_layout
+        self.remote_num_blocks: dict[str, dict[int, int]] = SizedDict()
         self.hma_group_size = hma_group_size
         self.mamba_ssm_size = mamba_ssm_size
         self.remote_te_port: dict[str, dict[int, int]] = SizedDict()
@@ -689,6 +795,7 @@ class KVCacheRecvingThread(threading.Thread):
                 self._transfer_kv_cache_all_groups(req_meta)
             logger.debug("Finished transferring KV cache for request %s.", remote_request_id)
         except Exception:
+            self.task_tracker.mark_failed(request_id)
             logger.exception("Failed to transfer KV cache for request %s.", remote_request_id)
         finally:
             self._send_done_signal_to_free_remote_port(remote_request_id, remote_host, remote_port_send_num)
@@ -737,6 +844,11 @@ class KVCacheRecvingThread(threading.Thread):
         if num_local_blocks == 0:
             return
 
+        if self.packed_cache_layout and (
+            len(local_block_ids) != self.hma_group_size or len(remote_block_ids) != self.hma_group_size
+        ):
+            raise ValueError("KV transfer block lists do not match the cache groups")
+
         num_remote_blocks = sum(len(group_block_ids) for group_block_ids in remote_block_ids)  # noqa: F841
         # Check if we have the remote metadata cached.
         with self.remote_metadata_lock:
@@ -751,6 +863,15 @@ class KVCacheRecvingThread(threading.Thread):
             local_kv_caches_base_addrs = self.kv_caches_base_addr[self.local_engine_id][self.local_handshake_port]
             remote_transfer_port = self.remote_te_port[remote_engine_id][remote_handshake_port]
         session_id = f"{remote_host}:{remote_transfer_port}"
+
+        if self.packed_cache_layout:
+            remote_capacity = self.remote_num_blocks[remote_engine_id][remote_handshake_port]
+            if any(
+                block < 0 or block >= self.kv_cache_config.num_blocks for group in local_block_ids for block in group
+            ):
+                raise ValueError("Local TurboQuant block ID exceeds the registered pool")
+            if any(block < 0 or block >= remote_capacity for group in remote_block_ids for block in group):
+                raise ValueError("Remote TurboQuant block ID exceeds the registered pool")
 
         # With P-side PP the remote worker only owns its stage's
         # kv_cache_tensors. Offset the local (D) group-major flat addr list to
@@ -790,6 +911,8 @@ class KVCacheRecvingThread(threading.Thread):
         req_start_time = time.perf_counter()
         src_list, dst_list, length_list = [], [], []
         for i in range(self.hma_group_size):
+            if self.packed_cache_layout and local_block_ids[i] and not remote_block_ids[i]:
+                raise ValueError("Prefill is missing blocks required by Decode")
             if not remote_block_ids[i] or not local_block_ids[i]:
                 continue
             cur_remote_block_ids = remote_block_ids[i]
@@ -798,6 +921,8 @@ class KVCacheRecvingThread(threading.Thread):
                 cur_remote_block_ids
             ):
                 cur_remote_block_ids = cur_remote_block_ids[-len(cur_local_block_ids) :]
+            if self.packed_cache_layout and len(cur_remote_block_ids) != len(cur_local_block_ids):
+                raise ValueError("Prefill and Decode KV transfer block counts do not match")
             grouped_remote_block_ids, grouped_local_block_ids = group_concurrent_contiguous(
                 cur_remote_block_ids, cur_local_block_ids
             )
@@ -1087,9 +1212,22 @@ class KVCacheRecvingThread(threading.Thread):
             assert engine_id != self.local_engine_id, (
                 f"Conflict engine id {engine_id} with local engine id {self.local_engine_id}."
             )
+            if self.packed_cache_layout != agent_meta.packed_cache_layout:
+                raise ValueError(
+                    "Prefill and Decode TurboQuant cache layouts differ. Both sides must use "
+                    "the same quantization, cache geometry and compatible framework versions."
+                )
+            if self.packed_cache_layout and (
+                agent_meta.block_size != self.block_size
+                or agent_meta.block_lens != self.block_stride_per_addr
+                or len(agent_meta.kv_caches_base_addr) != 1
+                or agent_meta.num_blocks <= 0
+            ):
+                raise ValueError("Invalid remote TurboQuant packed pool metadata")
             with self.remote_metadata_lock:
                 self.kv_caches_base_addr[engine_id][remote_handshake_port] = agent_meta.kv_caches_base_addr
                 self.remote_te_port[engine_id][remote_handshake_port] = agent_meta.te_rpc_port
+                self.remote_num_blocks[engine_id][remote_handshake_port] = agent_meta.num_blocks
         except Exception:
             if isinstance(sock, zmq.Socket):  # type: ignore
                 sock.close()
@@ -1263,6 +1401,10 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
         return self.connector_worker.get_finished()
+
+    def get_transfer_results(self, finished_req_ids: set[str]) -> KVConnectorTransferResults:
+        assert self.connector_worker is not None
+        return self.connector_worker.get_transfer_results()
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
@@ -1874,6 +2016,7 @@ class MooncakeConnectorWorker:
             block_lens=self.block_len_per_addr,
             ssm_sizes=self._mamba_ssm_size,
             local_ip=get_ip(),
+            packed_cache_layout=_packed_cache_layout(self.kv_cache_config, kv_caches) if self.use_compress else "",
         )
         self.xfer_handshake_metadata = metadata
 
@@ -1914,6 +2057,7 @@ class MooncakeConnectorWorker:
                 self.kv_cache_config,
                 self.kv_caches,
                 self._prefill_pp_layer_partition,
+                packed_cache_layout=metadata.packed_cache_layout,
             )
             self.kv_recv_thread.start()
 
@@ -1928,17 +2072,21 @@ class MooncakeConnectorWorker:
             time.sleep(3)
 
     def get_finished(self) -> tuple[set[str], set[str]]:
+        results = self.get_transfer_results()
+        return results.finished_sending, results.finished_recving
+
+    def get_transfer_results(self) -> KVConnectorTransferResults:
+        """Use the standard completion API so failed loads are never consumed."""
         done_sending = (
             self.kv_send_thread.get_and_clear_finished_requests(  # type: ignore[union-attr]
             )
             if self.kv_role == "kv_producer"
             else set()
         )
-        done_recving = (
-            self.kv_recv_thread.get_and_clear_finished_requests(  # type: ignore[union-attr]
-            )
+        done_recving, failed_recving = (
+            self.kv_recv_thread.task_tracker.get_and_clear_finished_results()  # type: ignore[union-attr]
             if self.kv_role == "kv_consumer"
-            else set()
+            else (set(), set())
         )
         if self.tp_rank == 0:
             logger.debug(
@@ -1946,7 +2094,9 @@ class MooncakeConnectorWorker:
                 len(done_sending),
                 len(done_recving),
             )
-        return done_sending, done_recving
+        return KVConnectorTransferResults(
+            finished_sending=done_sending, finished_recving=done_recving, failed_recving=failed_recving
+        )
 
     def start_load_kv(self, metadata: MooncakeConnectorMetadata):
         """Start loading KV blocks from remote engine."""
