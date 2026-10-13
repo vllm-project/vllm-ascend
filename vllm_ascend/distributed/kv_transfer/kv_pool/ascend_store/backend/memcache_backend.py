@@ -20,6 +20,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.layerwise_keys import LayerwiseKeyBuilder
 
+
 def _is_device_sdma() -> bool:
     config_path = os.getenv("MMC_LOCAL_CONFIG_PATH")
     if not config_path:

@@ -56,12 +56,14 @@ class NodeInfo:
     sp_size: int = 1
     pp_size: int = 1
     pp_layer_partition: str = ""
-    nnodes: int = 1   # PP 跨节点数, P master=2, P worker=2
-    node_rank: int = 0  # PP 组内 rank, P master=0, P worker=1
-    master_addr: str = "" # PP master IP, 用 ${NODE_0_IP} 占位
-    master_port: int = 7060 # 分布式执行 master 端口
+    nnodes: int = 1
+    node_rank: int = 0
+    master_addr: str = ""
+    master_port: int = 7060
     distributed_executor_backend: str = ""
     is_headless: bool = False
+
+
     @property
     def devices_per_rank(self) -> int:
         base = self.tp_size * self.cp_size * self.sp_size
@@ -109,6 +111,7 @@ class RankInfo:
     master_port: int
     distributed_executor_backend: str
     is_headless: bool
+
 
 @dataclass(frozen=True)
 class ExternalDPConfig:
