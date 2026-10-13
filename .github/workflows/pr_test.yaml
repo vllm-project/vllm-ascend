@@ -553,10 +553,10 @@ jobs:
         if: steps.decide.outputs.mode == 'ascendstore-v1'
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          test -f tests/e2e/pull_request/one_card/test_ascendstore_v1.py
+          test -f tests/e2e/pull_request/four_card/test_ascendstore_v1_tp_mismatch.py
           pip install regex pyyaml -q
           python3 .github/workflows/scripts/select_tests.py \
-            --explicit-e2e-tests tests/e2e/pull_request/one_card/test_ascendstore_v1.py \
+            --explicit-e2e-tests tests/e2e/pull_request/four_card/test_ascendstore_v1_tp_mismatch.py \
             --skip-cpu-ut
 
       - name: Select tests from coverage recommendations

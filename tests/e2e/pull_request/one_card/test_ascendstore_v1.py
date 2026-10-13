@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Compare production/v1 serve latency for cold and fully external prefixes."""
 
-import asyncio
 import json
 import os
 import shlex
@@ -17,32 +16,35 @@ from typing import Any
 
 import pytest
 import requests
-from prometheus_client.parser import text_string_to_metric_families
 from vllm.benchmarks.datasets import SampleRequest
-from vllm.benchmarks.serve import TaskType, benchmark
 from vllm.tokenizers import TokenizerLike, get_tokenizer
 from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.network_utils import get_open_ports_list
-from vllm.v1.metrics.stats import PromptTokenStats
 
 from tests.e2e.common.kv_pool.config import MooncakeKVPoolConfig
 from tests.e2e.conftest import RemoteOpenAIServer
+from tests.e2e.pull_request.ascendstore_v1_benchmark import (
+    BENCHMARK_TIMEOUT_SECONDS,
+    BLOCK_SIZE,
+    CONTROL_TIMEOUT_SECONDS,
+    MODEL,
+    PROMPT_TOKEN_COUNT,
+    REQUEST_COUNT,
+    REUSABLE_TOKEN_COUNT,
+    make_requests,
+    read_prompt_token_sources,
+    reset_local_prefix_cache,
+    run_benchmark,
+    wait_for_prompt_token_sources,
+    write_report,
+)
 
-MODEL = "Qwen/Qwen3-8B"
-BLOCK_SIZE = 128
-REUSABLE_TOKEN_COUNT = 8192
-PROMPT_TOKEN_COUNT = REUSABLE_TOKEN_COUNT + 1
 OUTPUT_TOKEN_COUNTS = (1, 8, 32)
 ROUNDS_PER_RUN = 2
-REQUEST_COUNT = 8
 CONCURRENCIES = (1, 8)
 # Eight independent 8K prefixes occupy about 9 GiB; clear the dedicated pool between rounds.
 POOL_MEMORY_BYTES = 32 << 30
 LOCAL_BUFFER_BYTES = 1 << 30
-HTTP_TIMEOUT_SECONDS = 30
-CONTROL_TIMEOUT_SECONDS = 60
-BENCHMARK_TIMEOUT_SECONDS = 600
-POLL_INTERVAL_SECONDS = 0.1
 SUMMARY_METRICS = ("median_ttft_ms", "median_tpot_ms", "median_e2el_ms", "request_throughput")
 WORKER_EXTENSION = "tests.e2e.pull_request.one_card.ascendstore_v1_performance.AscendStoreBenchmarkWorkerExtension"
 TIMING_SCHEDULER = "tests.e2e.pull_request.one_card.ascendstore_v1_scheduler.AscendStoreTimingScheduler"
@@ -71,8 +73,8 @@ def test_production_and_v1_serve_cold_and_external_hit_performance(tmp_path: Pat
     assert shutil.which("mooncake_master") is not None, "The serve benchmark requires mooncake_master on PATH"
     model_path = maybe_model_redirect(MODEL)
     tokenizer = get_tokenizer(model_path)
-    inputs = _make_requests(tokenizer, "benchmark")
-    warmup = _make_requests(tokenizer, "warmup", count=1)[0]
+    inputs = make_requests(tokenizer, "benchmark")
+    warmup = make_requests(tokenizer, "warmup", count=1)[0]
     # Distinct first blocks prevent local or external sharing between measured requests and warmup.
     first_blocks = [tuple(sample.prompt[:BLOCK_SIZE]) for sample in inputs]
     assert len(set(first_blocks + [tuple(warmup.prompt[:BLOCK_SIZE])])) == len(first_blocks) + 1
@@ -179,7 +181,7 @@ def test_production_and_v1_serve_cold_and_external_hit_performance(tmp_path: Pat
         },
     }
     # The existing selected-test log artifact preserves the complete report without CI changes.
-    _write_report(tmp_path / "ascendstore-serve-performance.json", "ASCENDSTORE_SERVE_PERFORMANCE", report)
+    write_report(tmp_path / "ascendstore-serve-performance.json", "ASCENDSTORE_SERVE_PERFORMANCE", report)
     # A wording difference must not discard other scenes or their reset/provenance evidence.
     for output_key, concurrency_comparisons in comparisons.items():
         for concurrency_key, rounds in concurrency_comparisons.items():
@@ -322,7 +324,7 @@ def _exercise_connector(
             env_dict=server_envs,
         ) as server:
             # Warm kernels with an unrelated prefix, then wait for its metric accounting before measurement.
-            baseline = _read_prompt_token_sources(server)
+            baseline = read_prompt_token_sources(server)
             response = requests.post(
                 server.url_for("v1", "completions"),
                 timeout=BENCHMARK_TIMEOUT_SECONDS,
@@ -337,7 +339,7 @@ def _exercise_connector(
             )
             response.raise_for_status()
             assert response.json()["usage"]["completion_tokens"] == max(OUTPUT_TOKEN_COUNTS)
-            _wait_for_prompt_token_sources(server, baseline, PROMPT_TOKEN_COUNT)
+            wait_for_prompt_token_sources(server, baseline, PROMPT_TOKEN_COUNT)
 
             for output_tokens in OUTPUT_TOKEN_COUNTS:
                 observations[str(output_tokens)] = {}
@@ -348,8 +350,8 @@ def _exercise_connector(
                         # Store must drain before force-removing objects from this test's private Mooncake master.
                         pool_reset = _call_worker_rpc(server, "reset_ascendstore_benchmark_pool", [pool.master_address])
                         assert pool_reset["removed_objects"] > 0, "The preceding requests did not publish external KV"
-                        cold_reset = _reset_local_prefix_cache(server)
-                        cold = _run_benchmark(server, tokenizer, samples, concurrency)
+                        cold_reset = reset_local_prefix_cache(server)
+                        cold = run_benchmark(server, tokenizer, samples, concurrency)
                         assert cold["prompt_tokens_by_source"] == {
                             "local_compute": REQUEST_COUNT * PROMPT_TOKEN_COUNT,
                             "local_cache_hit": 0,
@@ -357,8 +359,8 @@ def _exercise_connector(
                         }, "Cold requests must not reuse local or external KV"
 
                         # Local reset may wait for retained Store blocks; the benchmark timer excludes that wait.
-                        external_reset = _reset_local_prefix_cache(server)
-                        external = _run_benchmark(server, tokenizer, samples, concurrency)
+                        external_reset = reset_local_prefix_cache(server)
+                        external = run_benchmark(server, tokenizer, samples, concurrency)
                         assert external["prompt_tokens_by_source"] == {
                             "local_compute": REQUEST_COUNT,
                             "local_cache_hit": 0,
@@ -372,7 +374,7 @@ def _exercise_connector(
                         )
                     observations[str(output_tokens)][str(concurrency)] = rounds
             # Keep completed controls even if the new diagnostic cannot install or collect its hooks.
-            _write_report(
+            write_report(
                 tmp_path / f"{connector_name}-uninstrumented.json",
                 "ASCENDSTORE_UNINSTRUMENTED_CHECKPOINT",
                 {"connector": connector_name, "stage_recording_enabled": False, "measurements": observations},
@@ -404,13 +406,13 @@ def _run_stage_timing_diagnostics(
         ]
         pool_reset = _call_worker_rpc(server, "reset_ascendstore_benchmark_pool", [master_address])
         assert pool_reset["removed_objects"] > 0
-        local_reset = _reset_local_prefix_cache(server)
+        local_reset = reset_local_prefix_cache(server)
         observation = {"pool_reset_before": pool_reset, "reset_before": local_reset, "round": round_index + 1}
         observations.append(observation)
         try:
             _call_worker_rpc(server, "start_ascendstore_stage_timing")
             try:
-                measurements = _run_benchmark(server, tokenizer, samples, DIAGNOSTIC_CONCURRENCY)
+                measurements = run_benchmark(server, tokenizer, samples, DIAGNOSTIC_CONCURRENCY)
                 observation["benchmark"] = measurements
                 assert measurements["prompt_tokens_by_source"] == {
                     "local_compute": REQUEST_COUNT * PROMPT_TOKEN_COUNT,
@@ -421,7 +423,7 @@ def _run_stage_timing_diagnostics(
                 # Resolve deferred events and restore hooks outside benchmark timing, even after failed requests.
                 worker_timings = _call_worker_rpc(server, "stop_ascendstore_stage_timing")
                 observation["worker"] = worker_timings
-                _reset_local_prefix_cache(server)
+                reset_local_prefix_cache(server)
             scheduler_timings = json.loads(scheduler_timing_path.read_text(encoding="utf-8"))
             observation["scheduler"] = scheduler_timings
             for timings in (worker_timings, scheduler_timings):
@@ -437,7 +439,7 @@ def _run_stage_timing_diagnostics(
         except BaseException as error:
             # Emit partial traces only on failure; successful traces appear once in the complete final report.
             observation["error"] = f"{type(error).__name__}: {error}"
-            _write_report(
+            write_report(
                 checkpoint_path, "ASCENDSTORE_DIAGNOSTIC_CHECKPOINT", {"status": "failed", "rounds": observations}
             )
             raise
@@ -483,132 +485,3 @@ def _call_worker_rpc(server: RemoteOpenAIServer, method: str, args: list[str] | 
     results = response.json()["results"]
     assert len(results) == 1 and isinstance(results[0], dict), "The ordinary benchmark requires one Worker result"
     return {**results[0], "duration_ms": (time.perf_counter() - start) * 1000}
-
-
-def _write_report(path: Path, label: str, report: dict[str, Any]) -> None:
-    """Persist evidence locally and in the existing CI log artifact, including partial diagnostic failures."""
-    serialized = json.dumps(report, indent=2)
-    path.write_text(serialized, encoding="utf-8")
-    print(f"\n{label}\n{serialized}")
-
-
-def _make_requests(tokenizer: TokenizerLike, scenario: str, count: int = REQUEST_COUNT) -> list[SampleRequest]:
-    document = tokenizer.encode(
-        "External KV caches retain attention keys and values for previously computed token prefixes. "
-        "A request can restore those values instead of recomputing the same document. ",
-        add_special_tokens=False,
-    )
-    question = tokenizer.encode("\nSummarize the document in one sentence.\n", add_special_tokens=False)
-    samples = []
-    for index in range(count):
-        header = tokenizer.encode(f"Document {scenario}-{index}.\n", add_special_tokens=False)
-        remaining = PROMPT_TOKEN_COUNT - len(header) - len(question)
-        assert document and remaining > 0
-        body = (document * ((remaining + len(document) - 1) // len(document)))[:remaining]
-        samples.append(
-            SampleRequest(
-                prompt=header + body + question,
-                prompt_len=PROMPT_TOKEN_COUNT,
-                expected_output_len=max(OUTPUT_TOKEN_COUNTS),
-            )
-        )
-    return samples
-
-
-def _run_benchmark(
-    server: RemoteOpenAIServer, tokenizer: TokenizerLike, samples: list[SampleRequest], concurrency: int
-) -> dict[str, Any]:
-    baseline = _read_prompt_token_sources(server)
-    # Reuse upstream timing, streaming and concurrency. No readiness or warmup generation may repopulate local KV.
-    operation = benchmark(
-        task_type=TaskType.GENERATION,
-        endpoint_type="openai",
-        api_url=server.url_for("v1", "completions"),
-        base_url=server.url_root,
-        model_id=MODEL,
-        model_name=MODEL,
-        tokenizer=tokenizer,
-        input_requests=samples,
-        logprobs=None,
-        request_rate=float("inf"),
-        burstiness=1.0,
-        disable_tqdm=True,
-        num_warmups=0,
-        profile=False,
-        selected_percentile_metrics=["ttft", "tpot", "e2el"],
-        selected_percentiles=[50.0],
-        ignore_eos=True,
-        goodput_config_dict={},
-        max_concurrency=concurrency,
-        lora_modules=None,
-        extra_headers=None,
-        extra_body={"temperature": 0, "seed": 42},
-        ready_check_timeout_sec=0,
-        probe_request_rate=0,
-    )
-    result = asyncio.run(asyncio.wait_for(operation, timeout=BENCHMARK_TIMEOUT_SECONDS))
-    assert result["completed"] == len(samples) and result["failed"] == 0, result["errors"]
-    assert result["input_lens"] == [PROMPT_TOKEN_COUNT] * len(samples)
-    output_tokens = samples[0].expected_output_len
-    assert all(sample.expected_output_len == output_tokens for sample in samples)
-    assert result["output_lens"] == [output_tokens] * len(samples)
-    assert result["median_ttft_ms"] > 0 and result["request_throughput"] > 0
-    sources = _wait_for_prompt_token_sources(server, baseline, len(samples) * PROMPT_TOKEN_COUNT)
-    # Keep scalars, per-request latency and outputs; omit bulky per-token timing arrays from the CI report.
-    measurements = {
-        **{key: value for key, value in result.items() if isinstance(value, (int, float))},
-        "ttfts": result["ttfts"],
-        "latencies": result["latencies"],
-        "generated_texts": result["generated_texts"],
-        "prompt_tokens_by_source": sources,
-    }
-    if output_tokens == 1:
-        # No interval after the first token exists; upstream's zero TPOT is not a measured decode speed.
-        for metric in measurements:
-            if "tpot" in metric:
-                measurements[metric] = None
-    return measurements
-
-
-def _reset_local_prefix_cache(server: RemoteOpenAIServer) -> dict[str, float | int]:
-    """Record the complete local-only reset, including bounded retries, outside serving benchmark timing."""
-    start = time.perf_counter()
-    attempts = 0
-    while time.perf_counter() - start < CONTROL_TIMEOUT_SECONDS:
-        response = requests.post(
-            server.url_for("reset_prefix_cache"), params={"reset_external": "false"}, timeout=HTTP_TIMEOUT_SECONDS
-        )
-        response.raise_for_status()
-        attempts += 1
-        if response.json().get("success") is True:
-            return {"duration_ms": (time.perf_counter() - start) * 1000, "attempts": attempts}
-        time.sleep(POLL_INTERVAL_SECONDS)
-    raise AssertionError("Local prefix reset did not succeed after waiting for requests and retained Store blocks")
-
-
-def _read_prompt_token_sources(server: RemoteOpenAIServer) -> dict[str, float]:
-    response = requests.get(server.url_for("metrics"), timeout=HTTP_TIMEOUT_SECONDS)
-    response.raise_for_status()
-    sources: dict[str, float] = {}
-    for family in text_string_to_metric_families(response.text):
-        for sample in family.samples:
-            if sample.name == "vllm:prompt_tokens_by_source_total":
-                source = sample.labels["source"]
-                sources[source] = sources.get(source, 0.0) + sample.value
-    assert set(sources) == set(PromptTokenStats.ALL_SOURCES), "Upstream prompt-token provenance metrics are required"
-    return sources
-
-
-def _wait_for_prompt_token_sources(
-    server: RemoteOpenAIServer, baseline: dict[str, float], expected_tokens: int
-) -> dict[str, float]:
-    deadline = time.monotonic() + CONTROL_TIMEOUT_SECONDS
-    while time.monotonic() < deadline:
-        sources = _read_prompt_token_sources(server)
-        delta = {source: sources[source] - baseline[source] for source in baseline}
-        assert all(value >= 0 for value in delta.values()), "Prompt-token counters unexpectedly reset"
-        assert sum(delta.values()) <= expected_tokens, "Unmeasured requests contaminated benchmark provenance"
-        if sum(delta.values()) == expected_tokens:
-            return delta
-        time.sleep(POLL_INTERVAL_SECONDS)
-    raise AssertionError(f"Prompt-token metrics did not account for all {expected_tokens} measured input tokens")
