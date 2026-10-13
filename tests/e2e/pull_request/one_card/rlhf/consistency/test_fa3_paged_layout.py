@@ -1,4 +1,4 @@
-"""Real-NPU regression for FA3 strided paged caches."""
+"""FA3 regressions for paged layouts and mixed speculative batches."""
 
 from types import SimpleNamespace
 
@@ -6,15 +6,20 @@ import pytest
 import torch
 
 
-@pytest.mark.parametrize("page_step", [1, 2, 3])
 @pytest.mark.parametrize(
-    "q_lens,kv_lens,num_decodes",
+    "page_step,q_lens,kv_lens,num_decodes",
     [
-        ([1, 1], [129, 257], 2),
-        ([10], [10], 0),
+        # Dense pages isolate mixed-batch metadata and causal semantics.
+        (1, [3, 5], [5, 133], 1),
+        (1, [3], [5], 1),
+        (1, [1, 129], [129, 257], 1),
+        (1, [3, 1, 7], [129, 257, 133], 2),
+        # Ordinary decode and prefill cover dense/interleaved/padded pages.
+        *[(step, [1, 1], [129, 257], 2) for step in (1, 2, 3)],
+        *[(step, [10], [10], 0) for step in (1, 2, 3)],
     ],
 )
-def test_fa3_strided_paged_attention(page_step, q_lens, kv_lens, num_decodes):
+def test_fa3_paged_attention(page_step, q_lens, kv_lens, num_decodes):
     pytest.importorskip("flash_attn_npu_v3")
     # Import lazily: FA3 is an optional dependency; initialize the ops package
     # before attention modules to avoid their circular import during collection.
@@ -138,3 +143,34 @@ def test_fa3_preserves_page_table_sentinels(monkeypatch, page_step):
     expected = torch.tensor([[0, 3 * page_step, -1, -2]], dtype=torch.int32)
     torch.testing.assert_close(captured["table"].cpu(), expected)
     torch.testing.assert_close(table, original)
+
+
+def test_fa3_pure_prefill_reuses_query_offsets(monkeypatch):
+    pytest.importorskip("flash_attn_npu_v3")
+    import vllm_ascend.ops  # noqa: F401
+    from vllm_ascend.attention.fa3_v1 import AscendFAImpl
+
+    query = torch.zeros(8, 2, 128, device="npu", dtype=torch.bfloat16)
+    offsets = torch.tensor([0, 3, 8], device="npu", dtype=torch.int32)
+    meta = SimpleNamespace(
+        actual_seq_lengths_q=[3, 8],
+        num_decodes=0,
+        num_decode_tokens=0,
+        num_prefills=2,
+        block_tables=torch.zeros(2, 1, device="npu", dtype=torch.int32),
+        query_start_loc=offsets,
+        seq_lens=torch.tensor([3, 5], dtype=torch.int32),
+    )
+    impl = AscendFAImpl.__new__(AscendFAImpl)
+    calls = []
+
+    def capture(query, block_table, actual_seq_lengths, seq_lens, is_causal, max_seq_len):
+        # Pure prefill must reuse offsets, not allocate a subtract-zero result.
+        assert actual_seq_lengths is offsets
+        assert is_causal
+        calls.append(actual_seq_lengths)
+        return query
+
+    monkeypatch.setattr(impl, "_flash_attn_with_kvcache", capture)
+    impl.forward_impl(query, None, None, (), meta, torch.empty_like(query))
+    assert len(calls) == 1
