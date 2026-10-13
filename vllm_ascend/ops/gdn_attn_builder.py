@@ -738,7 +738,9 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             # Grammar can remove every draft while the previous step still
             # has accepted history in a nonzero slot. Keep single-token decode
             # rows on the spec kernels so both conv and recurrent state use it.
-            if m.is_prefilling is not None and num_accepted_tokens is not None:
+            if (m.is_prefilling is not None
+                    and num_accepted_tokens is not None
+                    and m.seq_lens_cpu_upper_bound is not None):
                 query_lens_cpu = torch.diff(query_start_loc_cpu)[:num_reqs]
                 has_history = m.seq_lens_cpu_upper_bound[:num_reqs] > query_lens_cpu
                 spec_sequence_masks_cpu |= ~m.is_prefilling[:num_reqs] & (query_lens_cpu == 1) & has_history
