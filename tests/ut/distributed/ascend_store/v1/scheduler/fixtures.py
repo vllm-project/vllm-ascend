@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import torch
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheSpec, MambaSpec, SlidingWindowSpec
+
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.coordinates import TokenRange
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.lookup import LookupResult, TailKeyBoundary
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.scheduler import (
@@ -58,7 +61,20 @@ def make_config(
     eagle: bool = False,
     private: bool = False,
     workers: int = 1,
+    recycling: bool = False,
 ) -> SchedulerConfig:
+    group_specs = []
+    for group_id in groups:
+        spec: KVCacheSpec
+        if group_id in align_groups:
+            spec = MambaSpec(block_size=granularity, shapes=((1,),), dtypes=(torch.float32,), mamba_cache_mode="align")
+        elif recycling:
+            spec = SlidingWindowSpec(
+                block_size=granularity, num_kv_heads=1, head_size=1, dtype=torch.float32, sliding_window=granularity
+            )
+        else:
+            spec = FullAttentionSpec(block_size=granularity, num_kv_heads=1, head_size=1, dtype=torch.float32)
+        group_specs.append((group_id, spec, False))
     return SchedulerConfig(
         cache_transfer_granularity=granularity,
         hash_block_size=4,
@@ -71,6 +87,7 @@ def make_config(
         use_eagle_block_drop=eagle,
         has_private_state=private,
         expected_worker_count=workers,
+        store_group_specs=tuple(group_specs),
     )
 
 

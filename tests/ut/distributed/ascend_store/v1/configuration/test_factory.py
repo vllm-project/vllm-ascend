@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec, SlidingWindowSpec
 
 from tests.ut.distributed.ascend_store.v1.helpers import (
     FakeBackend,
@@ -151,6 +151,61 @@ def test_factory_binds_role_capabilities(monkeypatch) -> None:
         for command in step.store.commands:
             scheduler.accept_worker_metadata(StoreSourceReleaseMetadata({command.store_job_id: 1}))
         scheduler.close()
+
+
+@pytest.mark.parametrize(
+    "backend,use_layerwise,load_async,spec_kind,extra,pins_source",
+    (
+        ("mooncake", False, False, "full", {}, False),
+        ("mooncake", False, True, "mla", {}, False),
+        ("mooncake", False, False, "full", {"prefill_tp_size": 1, "decode_tp_size": 2}, False),
+        ("mooncake", False, False, "full", {"consumer_is_to_put": True, "prefill_pp_size": 2}, False),
+        ("mooncake", False, False, "window", {}, True),
+        ("mooncake", False, True, "window", {}, True),
+        ("mooncake", True, False, "window", {}, False),
+        ("memcache", True, False, "window", {}, False),
+    ),
+)
+def test_factory_selects_source_protection_by_route(
+    monkeypatch, backend, use_layerwise, load_async, spec_kind, extra, pins_source
+) -> None:
+    monkeypatch.setattr(vllm_adapter, "RemoteLookup", lambda *_args, **_kwargs: FakeRemoteLookup())
+    monkeypatch.setattr(vllm_adapter.kv_cache_utils, "resolve_kv_cache_block_sizes", lambda *_: (4, 4))
+    geometry = dict(block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float32)
+    if spec_kind == "window":
+        spec = SlidingWindowSpec(**geometry, sliding_window=4)
+    elif spec_kind == "mla":
+        spec = MLAAttentionSpec(**geometry)
+    else:
+        spec = FullAttentionSpec(**geometry)
+    cache_config = SimpleNamespace(transfer_group_ids=(0,), kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec)])
+    config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(
+            kv_role="kv_consumer" if "consumer_is_to_put" in extra else "kv_both",
+            kv_connector_extra_config={
+                "backend": backend,
+                "use_layerwise": use_layerwise,
+                "load_async": load_async,
+                **extra,
+            },
+        ),
+        parallel_config=SimpleNamespace(world_size=2),
+        speculative_config=None,
+    )
+    scheduler = vllm_adapter.create_kv_pool_scheduler(config, cache_config, "unused")
+    pool = FakeBlockPool()
+    scheduler.bind_gpu_block_pool(pool)
+    scheduler.confirm_allocation(make_request(), FakeBlocks([1, 2, 3]), 0)
+    step = scheduler.build_step(
+        make_output(new=(new_request_data("request", ([1, 2, 3],), 0),), scheduled_tokens={"request": 8})
+    )
+
+    command = step.store.commands[0]
+    assert pool.touched == ([(1, 2)] if pins_source else [])
+    assert (command.store_job_id is not None) is pins_source
+    if command.store_job_id is not None:
+        scheduler.accept_worker_metadata(StoreSourceReleaseMetadata({command.store_job_id: 2}))
+    scheduler.close()
 
 
 def test_scheduler_factory_honors_configured_load_publication_timing(monkeypatch) -> None:

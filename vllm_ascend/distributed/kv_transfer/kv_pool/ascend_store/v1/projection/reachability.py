@@ -16,7 +16,6 @@ from typing import TypeAlias, cast
 
 import numpy as np
 from numpy.typing import NDArray
-from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
@@ -315,11 +314,19 @@ class HybridReachability:
         self, block_hashes: BlockHashes, store_range: TokenRange, num_prompt_tokens: int
     ) -> ChunkMasks:
         del block_hashes
-        if store_range.end_token % self.lcm_block_size == 0:
-            return self._freeze_masks(self.store_mask(store_range.end_token, num_prompt_tokens))
-        logger.debug("Use unfiltered Store chunks for unaligned end token %d", store_range.end_token)
         return tuple(
-            () if group_index in self.mamba_group_indices else None for group_index in range(len(self.group_ids))
+            store_group_mask(
+                spec,
+                manager_cls,
+                store_range.end_token,
+                num_prompt_tokens,
+                alignment_tokens=self.lcm_block_size,
+                use_eagle=group_index in self.eagle_reachable_group_indices,
+                retention_interval=self.retention_interval,
+            )
+            for group_index, (spec, manager_cls) in enumerate(
+                zip(self.effective_specs, self.manager_classes, strict=True)
+            )
         )
 
     @staticmethod
@@ -532,6 +539,38 @@ def bind_layerwise_reachability(
         use_eagle=use_eagle,
         retention_interval=retention_interval,
     )
+
+
+def store_group_mask(
+    spec: KVCacheSpec,
+    manager_cls: type[SingleTypeKVCacheManager] | None,
+    end_token: int,
+    num_prompt_tokens: int,
+    *,
+    alignment_tokens: int,
+    use_eagle: bool,
+    retention_interval: int | None,
+    start_block: int = 0,
+) -> ChunkMask:
+    """Share upstream Store retention between source leases and Worker selection."""
+
+    if not spec.prefix_cacheable or isinstance(spec, MambaSpec):
+        return ()
+    if end_token % alignment_tokens:
+        return None
+    if manager_cls is None:
+        raise ValueError(f"No vLLM KV cache manager is registered for {type(spec).__name__}")
+    mask = manager_cls.reachable_block_mask(
+        start_block=start_block,
+        end_block=end_token // spec.block_size,
+        alignment_tokens=alignment_tokens,
+        kv_cache_spec=spec,
+        use_eagle=use_eagle,
+        retention_interval=retention_interval,
+        reachable_boundaries=(num_prompt_tokens - 1,),
+        dcp_world_size=1,
+    )
+    return None if mask is None else tuple(mask)
 
 
 def _unwrap_spec(spec: KVCacheSpec) -> KVCacheSpec:
