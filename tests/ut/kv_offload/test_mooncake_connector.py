@@ -888,6 +888,21 @@ class TestCoreFunctionality(unittest.TestCase):
         cast(Any, self.thread.task_tracker).update_done_task_count.assert_called_once_with("req1")
         self.mock_queue.task_done.assert_called_once()
 
+    @patch.object(KVCacheRecvingThread, "_send_done_signal_to_free_remote_port")
+    @patch.object(KVCacheRecvingThread, "_send_done_recv_signal")
+    def test_handle_empty_transfer_sends_done(self, mock_send_done, mock_free_remote_port):
+        req = dict(self.test_req)
+        req["local_block_ids"] = ([],)
+        req["remote_block_ids"] = ([3, 4],)
+
+        self.thread._handle_request(req)
+
+        self.engine.batch_transfer_sync_read.assert_not_called()
+        mock_free_remote_port.assert_called_once_with("req1", "localhost", {6666: 1})
+        mock_send_done.assert_called_once_with("req1", "localhost", 6666, {6666: 1})
+        cast(Any, self.thread.task_tracker).update_done_task_count.assert_called_once_with("req1")
+        self.mock_queue.task_done.assert_called_once()
+
     @patch.object(KVCacheRecvingThread, "_get_remote_metadata")
     def test_transfer_kv_cache(self, mock_get_meta):
         with patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.get_ascend_config") as mock_config:
@@ -1639,6 +1654,33 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
         delay_free, params = self.scheduler.request_finished(request, [1, 2, 3])
         self.assertFalse(delay_free)
         self.assertIsNone(params)
+
+    def test_request_finished_rejected_remote_prefill_enqueues_empty_recv(self):
+        request = MockRequest(
+            "req1",
+            kv_transfer_params={
+                "do_remote_prefill": True,
+                "do_remote_decode": False,
+                "remote_block_ids": ([1, 2, 3],),
+                "remote_engine_id": "remote",
+                "remote_request_id": "remote_req1",
+                "remote_host": "localhost",
+                "remote_port": 5000,
+            },
+            status=RequestStatus.FINISHED_ABORTED,
+        )
+
+        delay_free, params = self.scheduler.request_finished(request, ([],))
+
+        self.assertFalse(delay_free)
+        self.assertIsNone(params)
+        self.assertFalse(request.kv_transfer_params["do_remote_prefill"])
+        self.assertEqual(self.scheduler._reqs_need_recv["req1"], (request, ([],), ([],), 0))
+
+        metadata = self.scheduler.build_connector_meta(MockSchedulerOutput())
+        self.assertEqual(metadata.requests["req1"].local_block_ids, ([],))
+        self.assertEqual(metadata.requests["req1"].num_external_tokens, 0)
+        self.assertEqual(metadata.requests["req1"].remote_request_id, "remote_req1")
 
     def test_get_transfer_block_ids_trims_attention_mtp_blocks(self):
         self.scheduler.group_transfer_info = [
