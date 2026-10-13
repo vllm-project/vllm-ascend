@@ -208,6 +208,8 @@ def _start_server(model_path, connector, devices, port, lookup_port, pool_envs, 
             **pool_envs,
             "PYTHONPATH": os.pathsep.join(filter(None, (repository_root, os.environ.get("PYTHONPATH", "")))),
             "ASCEND_RT_VISIBLE_DEVICES": ",".join(devices),
+            # A2 HCCS needs device staging buffers for remote host pool memory.
+            "ASCEND_BUFFER_POOL": "4:8",
             "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
             "VLLM_USE_V2_MODEL_RUNNER": "1",
             "VLLM_KV_CACHE_LAYOUT": "NHD",
