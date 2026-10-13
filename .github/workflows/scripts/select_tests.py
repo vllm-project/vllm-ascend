@@ -64,6 +64,7 @@ from pathlib import Path
 
 import regex as re
 import yaml
+from collect_merged_new_tests import collect_nodeids
 
 _SCRIPT_DIR = Path(__file__).parent
 _CONFIG_PATH = _SCRIPT_DIR / "test_config.yaml"
@@ -336,6 +337,14 @@ def _route_explicit_test_target(
             file=sys.stderr,
         )
         return
+
+    # Shared recommendations may contain test names from another branch.
+    # Keep valid nodes precise; use the whole file when a node was renamed.
+    if "::" in target and path.is_file():
+        nodeid = target.split("[", 1)[0]
+        if nodeid not in collect_nodeids(file_path, path.read_text(encoding="utf-8")):
+            print(f"Warning: Test node does not exist: {target}; running {file_path} instead.", file=sys.stderr)
+            target = file_path
 
     if _is_ut_path(file_path):
         # All UTs run on CPU, so UT targets always go to the CPU group.

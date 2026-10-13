@@ -97,9 +97,9 @@ def collect_nodeids(file_path: str, source: str) -> set[str]:
             class_id = f"{posix}::{node.name}"
             nodeids.add(class_id)
             for item in node.body:
-                if isinstance(item, ast.FunctionDef) and item.name.startswith("test_"):
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name.startswith("test_"):
                     nodeids.add(f"{class_id}::{item.name}")
-        elif isinstance(node, ast.FunctionDef) and node.name.startswith("test_"):
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_"):
             nodeids.add(f"{posix}::{node.name}")
     return nodeids
 
