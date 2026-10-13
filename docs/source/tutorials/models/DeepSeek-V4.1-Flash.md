@@ -633,7 +633,6 @@ and use the `main` branch with the matching vLLM revision recorded in
       INFO:     Application startup complete.
       ```
 
-
 === "A2 series"
 
     This example uses four Atlas 800 A2 servers. The Prefill role runs four DP
