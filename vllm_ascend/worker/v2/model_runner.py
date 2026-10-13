@@ -1022,6 +1022,22 @@ class NPUModelRunner(GPUModelRunner):
         finally:
             self.input_buffers.dummy_num_tokens = previous_dummy_tokens
 
+    @contextmanager
+    def _cpp_profile_dummy(self, enabled: bool):
+        """Scope the target-only prefill semantics used by CPP profiling."""
+        previous_profile_cpp = self.input_buffers.profile_cpp
+        previous_speculator = self.speculator
+        if enabled:
+            self.input_buffers.profile_cpp = True
+            # CPP profiles the target prefill. This also matches MRV1, where the
+            # drafter dummy run is explicitly skipped for profile_cpp.
+            self.speculator = None
+        try:
+            yield
+        finally:
+            self.input_buffers.profile_cpp = previous_profile_cpp
+            self.speculator = previous_speculator
+
     @step_eplb_after(is_dummy=True)
     def _dummy_run(
         self,
@@ -1032,6 +1048,7 @@ class NPUModelRunner(GPUModelRunner):
         context_len: int = 0,
         skip_eplb: bool = False,
         is_profile: bool = False,
+        profile_cpp: bool = False,
         **kwargs,
     ):
         """Balanced dummy routing for adaptive-verification profiling; EPLB
@@ -1057,6 +1074,7 @@ class NPUModelRunner(GPUModelRunner):
             self._cap_parallel_draft_dummy_reqs(uniform_decode),
             skip_ring_state_update(skip_ring),
             load_balance_ctx,
+            self._cpp_profile_dummy(profile_cpp),
         ):
             return super()._dummy_run(
                 num_tokens,
