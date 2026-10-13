@@ -386,9 +386,9 @@ def glm5_next_lightning_indexer_triton(
     output_buffer: torch.Tensor | None = None,
     pack_tail: bool = False,
     allow_cache_packing: bool = True,
-    use_streaming_topk: bool = True,
+    use_streaming_topk: bool = False,
 ) -> torch.Tensor:
-    """Select pools, expand tokens and optionally write the final SFA buffer."""
+    """Select pools and expand tokens; streaming is opt-in for bounded workloads."""
     num_tokens, _, head_dim = query.shape
     output_width = index_topk + index_kpool - 1
     if output_buffer is None:
@@ -429,6 +429,9 @@ def glm5_next_lightning_indexer_triton(
     block_pool = TRITON_POOL_CHUNK_SIZE if index32 else indexer_cache.shape[1]
     topk_tile = next_power_of_2(selected) if selected else 1
     candidate_width = TRITON_TOPK_PARTITIONS * topk_tile
+    # Capacity alone cannot establish a speedup: repeated local merges regress
+    # at long visible lengths. Graph replay can grow without rerunning dispatch,
+    # so callers must explicitly opt in for a workload with a validated bound.
     streaming_topk = (
         use_streaming_topk
         and not packed_cache
@@ -437,6 +440,11 @@ def glm5_next_lightning_indexer_triton(
         and head_dim <= TRITON_TOPK_MAX_HEAD_DIM
         and max_pool_seq_len > candidate_width
     )
+    if streaming_topk:
+        # A global TopK winner has local rank <= selected in its partition.
+        # Retaining at least selected candidates per partition therefore keeps
+        # every winner, even when all selected pools belong to one partition.
+        assert topk_tile >= selected, "Each partition must retain at least the requested pool TopK."
     if packed_cache:
         cache = torch.empty(
             (cum_query_lens.numel(), max_pool_seq_len, 1, head_dim),
