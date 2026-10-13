@@ -5,9 +5,12 @@ from __future__ import annotations
 import logging
 import threading
 from dataclasses import replace
+from types import ModuleType
+from unittest.mock import Mock
 
 import pytest
 import torch
+from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 
 from tests.ut.distributed.ascend_store.v1.helpers import (
     FakeBackend,
@@ -18,12 +21,17 @@ from tests.ut.distributed.ascend_store.v1.helpers import (
     make_topology,
     make_worker,
 )
-from tests.ut.distributed.ascend_store.v1.worker.bulk_fixtures import make_multi_spec_caches, make_sparse_group_topology
+from tests.ut.distributed.ascend_store.v1.worker.bulk_fixtures import (
+    make_align_state_topology,
+    make_multi_spec_caches,
+    make_sparse_group_topology,
+)
 from tests.ut.distributed.ascend_store.v1.worker.gva_fixtures import (
     FakeGVABackend,
     make_gva_spec,
     make_gva_worker,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import attention_fence
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.coordinates import TokenRange
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.projection import (
     GVALayerwiseProjectionBinder,
@@ -40,6 +48,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.transf
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.topology import resolve_group_layers
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker import base as worker_module
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.io import gva as gva_io
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.io import key_range as key_range_io
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwise import (
     GVALayerwiseWorker,
     KeyRangeLayerwiseWorker,
@@ -48,6 +58,223 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.resource
     GVAObjectLayout,
     KVPoolResources,
 )
+
+
+@pytest.mark.parametrize("use_gva", (False, True), ids=("key_range", "gva"))
+def test_layerwise_load_with_no_selected_objects_does_not_open_sessions(use_gva, monkeypatch) -> None:
+    worker, resources, _ = make_gva_worker() if use_gva else make_worker(layerwise=True)
+
+    def unexpected_session(command):
+        pytest.fail("A Load with no selected objects must not open a Backend session")
+
+    monkeypatch.setattr(worker._layerwise_load_timeline._executor, "submit", unexpected_session)
+    try:
+        command = LoadCommand("request", TokenRange(0, 0), ((),), ())
+        begin_step(worker, load=(command,))
+        worker.start_load()
+        assert not worker.collect_load_result().failed_locations
+        worker.end_step()
+    finally:
+        worker.close()
+    assert resources.closed
+
+
+@pytest.mark.parametrize("use_gva", (False, True), ids=("key_range", "gva"))
+@pytest.mark.parametrize("failure_stage", (None, "prepare", "synchronize"))
+def test_layerwise_store_prepares_before_wait_and_reads_only_ready_sources(use_gva, failure_stage, monkeypatch) -> None:
+    trace = []
+
+    class TraceEvent(FakeEvent):
+        def record(self) -> None:
+            trace.append("record")
+            super().record()
+
+        def synchronize(self) -> None:
+            trace.append("wait")
+            if failure_stage == "synchronize":
+                raise RuntimeError("source readiness failed")
+            super().synchronize()
+
+    event = TraceEvent()
+    topology = make_topology(physical_layers=(0,))
+    module: ModuleType
+    if use_gva:
+        worker, resources, backend = make_gva_worker(topology=topology, source_ready_event_factory=lambda: event)
+        module, materializer = gva_io, "materialize_store_layer_gva"
+        copy_method = "batch_copy"
+    else:
+        worker, resources, backend = make_worker(
+            layerwise=True, topology=topology, source_ready_event_factory=lambda: event
+        )
+        module, materializer = key_range_io, "materialize_store_layer_ranges"
+        copy_method = "batch_copy_put"
+    prepare = getattr(module, materializer)
+    copy = getattr(backend, copy_method)
+
+    def prepare_arguments(*args):
+        trace.append("prepare")
+        assert not event.synchronized
+        if failure_stage == "prepare":
+            raise RuntimeError("argument preparation failed")
+        return prepare(*args)
+
+    def copy_ready_source(*args):
+        assert event.synchronized
+        trace.append("copy")
+        return copy(*args)
+
+    monkeypatch.setattr(module, materializer, prepare_arguments)
+    monkeypatch.setattr(backend, copy_method, copy_ready_source)
+    try:
+        command = RangeStoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4, 17)
+        begin_step(worker, store=(command,))
+        worker.save_layer("layers.0.group.0")
+        worker.finish_step()
+        expected = ["record", "prepare"]
+        if failure_stage != "prepare":
+            expected.append("wait")
+        if failure_stage is None:
+            expected.append("copy")
+        assert trace == expected
+        assert worker.take_released_store_job_ids() == {17}
+        assert any(call[0] in ("publish", "batch_commit") for call in backend.calls) == (failure_stage is None)
+        worker.end_step()
+    finally:
+        worker.close()
+    assert resources.closed
+
+
+@pytest.mark.parametrize("with_load", (False, True), ids=("cold", "external_load"))
+def test_key_range_hybrid_starts_store_before_attention_without_duplicate_saves(with_load, monkeypatch) -> None:
+    monkeypatch.setattr(attention_fence, "_attention_compute_start_gate", None)
+    monkeypatch.setattr(torch.npu, "Event", Mock)
+    topology = make_topology(group_ids=(0, 1))
+    worker, resources, backend = make_worker(layerwise=True, topology=topology)
+    store = RangeStoreCommand("request", TokenRange(0, 4), ((1,), (2,)), (b"b",), 4, 17)
+    load = (LoadCommand("request", TokenRange(0, 4), ((1,), (2,)), (b"a",)),) if with_load else ()
+    try:
+        begin_step(worker, load=load, store=(store,))
+        worker.start_load()
+        assert worker._layerwise_store_timeline is not None
+        for layer_id in (0, 1):
+            layer_name = f"layers.{layer_id}.group.0"
+            worker.wait_for_layer_load(layer_name)
+            gate = attention_fence.get_attention_compute_start_gate()
+            worker.wait_for_layer_load(f"layers.{layer_id}.group.1")
+            assert attention_fence.get_attention_compute_start_gate() is gate
+            assert sum(call[0] == "batch_copy_put" for call in backend.calls) == layer_id
+            with attention_fence.attention_transfer_window():
+                # This point models attention compute: KV is ready, but the post-compute hook has not run.
+                worker._layerwise_store_timeline._executor._queue.join()
+                assert sum(call[0] == "batch_copy_put" for call in backend.calls) == layer_id + 1
+            worker.save_layer(layer_name)
+            worker.save_layer(f"layers.{layer_id}.group.1")
+        worker.finish_step()
+        assert sum(call[0] == "batch_copy_put" for call in backend.calls) == 2
+        assert sum(call[0] == "batch_copy_get" for call in backend.calls) == (2 if with_load else 0)
+        assert sum(call[0] == "batch_commit" for call in backend.calls) == 1
+        assert not worker.collect_load_result().failed_locations
+        assert worker.take_released_store_job_ids() == {17}
+        gate = attention_fence.get_attention_compute_start_gate()
+        worker.end_step()
+        assert gate.on_start is None
+    finally:
+        worker.close()
+    assert resources.closed
+
+
+@pytest.mark.parametrize("uniform_state_group", (False, True), ids=("mamba", "uniform_mamba"))
+def test_hybrid_recurrent_store_remains_after_compute(uniform_state_group, monkeypatch) -> None:
+    monkeypatch.setattr(attention_fence, "_attention_compute_start_gate", None)
+    monkeypatch.setattr(torch.npu, "Event", Mock)
+    topology = make_align_state_topology(attention_block_size=4, state_block_size=4, tp_size=1)
+    group = topology.groups[1]
+    state_spec = replace(group.kv_cache_spec, mamba_cache_mode="all")
+    if uniform_state_group:
+        state_spec = UniformTypeKVCacheSpecs.from_specs({group.layer_names[0]: state_spec})
+    topology = replace(topology, groups=(topology.groups[0], replace(group, kv_cache_spec=state_spec)))
+    source_events = []
+
+    def record_source():
+        event = FakeEvent()
+        source_events.append(event)
+        return event
+
+    worker, resources, backend = make_worker(
+        layerwise=True, topology=topology, source_ready_event_factory=record_source
+    )
+    command = RangeStoreCommand("request", TokenRange(0, 4), ((1,), (2,)), (b"a",), 4, 17)
+    try:
+        begin_step(worker, store=(command,))
+        worker.start_load()
+        assert worker._layerwise_store_timeline is not None
+        for layer_id, name in enumerate(("layers.0.attention", "layers.1.state")):
+            worker.wait_for_layer_load(name)
+            with attention_fence.attention_transfer_window():
+                worker._layerwise_store_timeline._executor._queue.join()
+                assert len(source_events) == 1, "Recurrent KV is not ready at attention entry"
+            worker.save_layer(name)
+            worker._layerwise_store_timeline._executor._queue.join()
+            assert len(source_events) == layer_id + 1
+        worker.finish_step()
+        # Range Store excludes recurrent state; this change must not enable checkpoint transfer.
+        assert sum(call[0] == "batch_copy_put" for call in backend.calls) == 1
+        assert worker.take_released_store_job_ids() == {17}
+        worker.end_step()
+    finally:
+        worker.close()
+    assert resources.closed
+
+
+@pytest.mark.parametrize("use_gva", (False, True), ids=("single_group_key_range", "hybrid_gva"))
+def test_other_layerwise_routes_keep_post_compute_store(use_gva, monkeypatch) -> None:
+    monkeypatch.setattr(attention_fence, "_attention_compute_start_gate", None)
+    topology = make_topology(group_ids=(0, 1) if use_gva else (0,), physical_layers=(0,))
+    if use_gva:
+        worker, resources, backend = make_gva_worker(topology=topology)
+    else:
+        worker, resources, backend = make_worker(layerwise=True, topology=topology)
+    blocks = tuple((index + 1,) for index in range(len(topology.groups)))
+    command = RangeStoreCommand("request", TokenRange(0, 4), blocks, (b"a",), 4, 17)
+    try:
+        begin_step(worker, store=(command,))
+        worker.wait_for_layer_load("layers.0.group.0")
+        with attention_fence.attention_transfer_window():
+            assert not any(call[0] in ("copy", "batch_copy_put") for call in backend.calls)
+        worker.save_layer("layers.0.group.0")
+        worker.finish_step()
+        assert sum(call[0] in ("copy", "batch_copy_put") for call in backend.calls) == 1
+        assert worker.take_released_store_job_ids() == {17}
+        worker.end_step()
+    finally:
+        worker.close()
+    assert resources.closed
+
+
+@pytest.mark.parametrize("finish", ("fallback", "end_step", "close"))
+def test_hybrid_attention_store_callback_cannot_outlive_its_step(finish, monkeypatch) -> None:
+    monkeypatch.setattr(attention_fence, "_attention_compute_start_gate", None)
+    topology = make_topology(group_ids=(0, 1), physical_layers=(0,))
+    worker, resources, backend = make_worker(layerwise=True, topology=topology)
+    command = RangeStoreCommand("request", TokenRange(0, 4), ((1,), (2,)), (b"a",), 4, 17)
+    try:
+        begin_step(worker, store=(command,))
+        worker.wait_for_layer_load("layers.0.group.0")
+        gate = attention_fence.get_attention_compute_start_gate()
+        assert gate.on_start is not None
+        if finish == "fallback":
+            # Some attention implementations do not expose the early window.
+            worker.save_layer("layers.0.group.0")
+            worker.finish_step()
+            assert sum(call[0] == "batch_copy_put" for call in backend.calls) == 1
+        if finish != "close":
+            worker.end_step()
+        else:
+            worker.close()
+        assert gate.on_start is None
+    finally:
+        worker.close()
+    assert resources.closed
 
 
 @pytest.mark.parametrize("use_gva", (False, True), ids=("key_range", "gva"))

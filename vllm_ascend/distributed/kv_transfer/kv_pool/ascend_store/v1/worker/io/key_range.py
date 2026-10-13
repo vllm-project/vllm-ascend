@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from vllm.logger import logger
 
 from ...backend import BackendSpec, KeyRangeBackend
@@ -83,12 +85,14 @@ class KeyRangeBackendIO(BackendIO):
         return self.load_layer(layer_id)
 
     def store_batch(self, batch: KVTransferBatch, layer_id: int | None = None):
+        """Copy already-ready sources directly; Timeline supplies a readiness event to store_layer."""
+
         if layer_id is None:
             raise ValueError("KeyRange Store requires a physical layer")
         if batch.empty:
             return _store_completions(batch, ())
         self.prepare_store_layers(batch)
-        result = self.store_layer(layer_id)
+        result = self.store_layer(None, layer_id)
         groups, keys = self._prepared_store_layer(layer_id)
         del groups
         if isinstance(result.result_codes, tuple):
@@ -108,13 +112,15 @@ class KeyRangeBackendIO(BackendIO):
             )
         return _store_completions(batch, evidence, result.error, force_failed=result.result_codes is None)
 
-    def store_layer(self, layer_id: int) -> LayerStoreResult:
-        """Copy one layer and defer immutable source evidence to session finalization."""
+    def store_layer(self, source_ready_event: Any | None, layer_id: int) -> LayerStoreResult:
+        """Prepare addresses ahead of source readiness, then copy this layer."""
 
         source_handed_off = False
         groups, keys = self._prepared_store_layer(layer_id)
         try:
             addresses, sizes, offsets = materialize_store_layer_ranges(self._bound_projection, groups, layer_id)
+            if source_ready_event is not None:
+                source_ready_event.synchronize()
             source_handed_off = True
             native_result = self._key_range_backend.copy_key_range_store(keys, addresses, sizes, offsets)
         except Exception as error:

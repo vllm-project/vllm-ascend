@@ -12,6 +12,7 @@ from tests.ut.distributed.ascend_store.v1.helpers import (
     begin_step,
     make_worker,
 )
+from tests.ut.distributed.ascend_store.v1.worker.gva_fixtures import make_gva_worker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.coordinates import (
     TokenRange,
 )
@@ -38,6 +39,30 @@ class _BlockingStoreBackend(FakeBackend):
         self.copy_started[index].set()
         assert self.allow_copy[index].wait(timeout=5)
         return super().put(keys, addresses, sizes)
+
+
+@pytest.mark.parametrize("route", ("bulk", "async_bulk", "key_range", "gva"))
+def test_empty_load_does_not_build_batches_or_submit_background_work(route, monkeypatch) -> None:
+    if route == "gva":
+        worker, resources, _ = make_gva_worker()
+    else:
+        worker, resources, _ = make_worker(layerwise=route == "key_range", async_load=route == "async_bulk")
+
+    def unexpected_work(*args, **kwargs):
+        pytest.fail("A step without Load commands must not prepare or submit Load work")
+
+    monkeypatch.setattr(worker, "_build_load_batch", unexpected_work)
+    monkeypatch.setattr(worker._load_timeline, "submit", unexpected_work)
+    try:
+        for _ in range(2):
+            begin_step(worker)
+            worker.start_load()
+            assert not worker.collect_load_result().completed_request_ids
+            worker.finish_step()
+            worker.end_step()
+    finally:
+        worker.close()
+    assert resources.closed
 
 
 def test_asynchronous_bulk_load_returns_before_copy_and_close_drains_completion(monkeypatch) -> None:

@@ -133,6 +133,8 @@ class KVPoolWorker(ABC):
 
     @_with_active_step
     def start_load(self, context: KVPoolStepContext) -> None:
+        if not context.step.load.commands:
+            return
         batch = self._build_load_batch(context.step.load.commands)
         self._before_load_submit(batch)
         try:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from typing import Any
 
 import numpy as np
 from vllm.logger import logger
@@ -168,8 +169,8 @@ class GVABackendIO(BackendIO):
         evidence = tuple(TransferEvidence(source, int(result_code), True) for source in _batch_sources(batch, layer_id))
         return _store_completions(batch, evidence)
 
-    def store_layer(self, layer_id: int) -> LayerStoreResult:
-        """Copy one layer and defer immutable source evidence to session finalization."""
+    def store_layer(self, source_ready_event: Any, layer_id: int) -> LayerStoreResult:
+        """Prepare native arguments ahead of source readiness, then copy this layer."""
 
         source_handed_off = False
         plan = self._prepared_store_plan()
@@ -177,12 +178,12 @@ class GVABackendIO(BackendIO):
             remote_addresses, local_addresses, sizes = materialize_store_layer_gva(
                 self._bound_projection, plan, layer_id
             )
+            remote_buffers = remote_addresses.tolist()
+            local_buffers = local_addresses.tolist()
+            buffer_sizes = sizes.tolist()
+            source_ready_event.synchronize()
             source_handed_off = True
-            result_code = self._gva_backend.copy_to_gva(
-                remote_addresses.tolist(),
-                local_addresses.tolist(),
-                sizes.tolist(),
-            )
+            result_code = self._gva_backend.copy_to_gva(remote_buffers, local_buffers, buffer_sizes)
             if not _is_integer_result(result_code):
                 raise RuntimeError("GVA batch_copy returned a non-integer result")
         except Exception as error:

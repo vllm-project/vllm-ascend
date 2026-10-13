@@ -178,9 +178,9 @@ def make_gva_spec() -> BackendSpec:
     )
 
 
-def make_gva_worker():
+def make_gva_worker(*, topology=None, source_ready_event_factory=FakeEvent):
     backend = FakeGVABackend()
-    topology = make_topology()
+    topology = topology or make_topology()
     backend_spec = make_gva_spec()
     resources = FakeResources(backend, backend_spec, topology)
     projection_binder = GVALayerwiseProjectionBinder(
@@ -192,7 +192,7 @@ def make_gva_worker():
         topology,
         projection_binder,
         resources,  # type: ignore[arg-type]
-        source_ready_event_factory=FakeEvent,
+        source_ready_event_factory=source_ready_event_factory,
     )
     worker.bind_kv_caches({"cache": object()})
     assert backend.native_store is not None
