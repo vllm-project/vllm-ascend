@@ -33,6 +33,11 @@ all decode ranks and support POSIX `flock`. Mount it into each worker container
 when workers have separate filesystem namespaces. Network filesystems are not
 supported. Session IDs are hashed before being used as directory names.
 
+Published ready metadata has mode 0644. Run workers with the same host UID
+(including container user mappings); directory cleanup and lock/ACK creation
+also require compatible ownership and write permissions. Readable metadata
+alone does not make arbitrary mixed-UID deployments supported.
+
 All ranks must run on the same host with compatible monotonic clock namespaces.
 `pcp_size` checks PCP; `nnodes_within_dp` separately checks the single-node
 constraint. A shared mount alone does not make a multi-node deployment supported.
@@ -79,13 +84,17 @@ Contended lock acquisition logs `MLA fanout pin blocked` every five seconds,
 including the key, rank and elapsed wait. This also covers unrelated requests
 sharing a lock stripe. Polling starts at 1 ms and backs off to 10 ms, bounded by
 the remaining ready/ACK deadline; it is still polling, not event notification.
+Reader lock acquisition and early ACK acquisition use the remaining ready
+deadline and fall back on contention. Leader cleanup intentionally has no lock
+timeout: completing it while a reader still holds the pin would free live KV.
 
 `MLAFanout.stats()` returns per-worker cumulative `leader_pull`, `local_read`,
 `fallback`, reason-specific `fallback_*`, `ack_timeout` and `pin_wait_warnings`
 counters. These are process-local diagnostics, not exported Prometheus metrics.
 Successful transfer events appear at DEBUG level; fallback logs include reason
 and a counter snapshot. The fallback reasons are missing attempt, ready timeout,
-expired publication and local read error (including layout/coverage/TE failures).
+expired publication, lock timeout and local read error (including
+layout/coverage/TE failures).
 
 Normal completion removes per-request metadata and ACKs. At most 4096 lock
 files remain per session; they must not be unlinked while workers are alive.

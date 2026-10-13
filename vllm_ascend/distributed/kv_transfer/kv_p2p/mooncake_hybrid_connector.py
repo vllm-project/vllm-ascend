@@ -481,6 +481,7 @@ class KVCacheRecvingThread(threading.Thread):
         self.tp_rank = tp_rank
         self.tp_size = tp_size
         self.fanout = fanout
+        self.local_kv_caches_base_addrs = list(local_kv_caches_base_addr)
         self._prefill_pp_size = _prefill_pp_size
         self.local_engine_id = local_engine_id
         self.local_handshake_port = local_handshake_port
@@ -737,7 +738,7 @@ class KVCacheRecvingThread(threading.Thread):
         metadata = {
             "host": get_ip(),
             "rpc_port": self.engine.get_rpc_port(),
-            "base_addrs": self.kv_caches_base_addr[self.local_engine_id][self.local_handshake_port],
+            "base_addrs": self.local_kv_caches_base_addrs,
             "block_lens": self.block_len_per_addr,
             "block_strides": self.block_stride_per_addr,
             "addr_groups": self.addr_group_idx,
@@ -791,7 +792,7 @@ class KVCacheRecvingThread(threading.Thread):
             # peer into the P metadata cache or call the P-only handshake.
             remote_kv_caches_base_addrs = peer["base_addrs"]
             session_id = f"{peer['host']}:{peer['rpc_port']}"
-        local_kv_caches_base_addrs = self.kv_caches_base_addr[self.local_engine_id][self.local_handshake_port]
+        local_kv_caches_base_addrs = self.local_kv_caches_base_addrs
 
         # With P-side PP the remote worker only owns its stage's
         # kv_cache_tensors. Offset the local (D) group-major flat addr list to
@@ -926,7 +927,7 @@ class KVCacheRecvingThread(threading.Thread):
 
         with self.remote_metadata_lock:
             remote_kv_caches_base_addrs = self.kv_caches_base_addr[remote_engine_id][remote_handshake_port]
-            local_kv_caches_base_addrs_all = self.kv_caches_base_addr[self.local_engine_id][self.local_handshake_port]
+            local_kv_caches_base_addrs_all = self.local_kv_caches_base_addrs
             remote_transfer_port = self.remote_te_port[remote_engine_id][remote_handshake_port]
         first_layer_index, end_layer_index = self.pp_layer_indices[prefill_pp_rank]
         # support MTP layer kv transfer

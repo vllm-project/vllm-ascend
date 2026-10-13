@@ -29,6 +29,10 @@ PIN_WARNING_INTERVAL = 5.0
 LOCK_STRIPES = 4096
 
 
+class _LockTimeout(TimeoutError):
+    """Distinguish rendezvous lock timeouts from TE read timeouts."""
+
+
 def transferred_blocks(req_meta: dict[str, Any]) -> list[list[int]]:
     """Match the suffix trimming used by the hybrid transfer descriptors."""
     return [
@@ -103,13 +107,14 @@ class MLAFanout:
         return hashlib.sha256(json.dumps(identity).encode()).hexdigest()
 
     @contextlib.contextmanager
-    def _lock(self, key: str, exclusive: bool = False) -> Iterator[None]:
+    def _lock(self, key: str, exclusive: bool = False, timeout: float | None = None) -> Iterator[None]:
         # Bounded lock files are never unlinked: unlinking an in-use flock inode
         # permits late readers to lock a different inode and bypass the pin.
         path = self.directory / f"lock-{int(key, 16) % LOCK_STRIPES}"
         with path.open("a+b") as lock:
             operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
             started = time.monotonic()
+            deadline = None if timeout is None else started + max(0, timeout)
             warning_at = started + PIN_WARNING_INTERVAL
             interval = INITIAL_POLL_INTERVAL
             while True:
@@ -118,6 +123,8 @@ class MLAFanout:
                     break
                 except BlockingIOError:
                     now = time.monotonic()
+                    if deadline is not None and now >= deadline:
+                        raise _LockTimeout(f"MLA fanout lock acquisition timed out: key={key} rank={self.rank}")
                     if now >= warning_at:
                         logger.warning(
                             "MLA fanout pin blocked key=%s rank=%d exclusive=%s waited=%.1fs; "
@@ -130,7 +137,7 @@ class MLAFanout:
                         with self._stats_lock:
                             self._stats["pin_wait_warnings"] += 1
                         warning_at = now + PIN_WARNING_INTERVAL
-                    time.sleep(interval)
+                    time.sleep(interval if deadline is None else min(interval, max(0, deadline - now)))
                     interval = min(interval * 2, POLL_INTERVAL)
             try:
                 yield
@@ -142,6 +149,7 @@ class MLAFanout:
         try:
             with os.fdopen(fd, "w") as stream:
                 json.dump(record, stream)
+                os.fchmod(stream.fileno(), 0o644)
             os.replace(temporary, path)
         finally:
             Path(temporary).unlink(missing_ok=True)
@@ -204,7 +212,7 @@ class MLAFanout:
         reason = "ready_timeout"
         while time.monotonic() < deadline:
             try:
-                with self._lock(key):
+                with self._lock(key, timeout=max(0, deadline - time.monotonic())):
                     if ready.exists():
                         try:
                             record = json.loads(ready.read_text())
@@ -221,6 +229,10 @@ class MLAFanout:
                             # coverage and TE errors. ACK before fallback.
                             (self.directory / f"{key}.ack-{self.rank}").touch()
                             ack_sent = True
+            except _LockTimeout:
+                reason = "lock_timeout"
+                logger.warning("MLA reader lock timed out; falling back to P request=%s", req_meta["request_id"])
+                break
             except Exception:
                 reason = "local_read_error"
                 logger.warning("MLA local read failed; falling back to P", exc_info=True)
@@ -231,7 +243,7 @@ class MLAFanout:
         # an early ACK so the leader does not wait for this fallback reader.
         try:
             if not ack_sent:
-                with self._lock(key):
+                with self._lock(key, timeout=max(0, deadline - time.monotonic())):
                     (self.directory / f"{key}.ack-{self.rank}").touch()
         except OSError:
             # The leader's deadline handles a lost ACK. Failure of the local

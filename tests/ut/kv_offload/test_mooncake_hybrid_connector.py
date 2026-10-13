@@ -80,6 +80,7 @@ class TestHybridKVCacheRecvingThreadDispatch(unittest.TestCase):
         thread.side_channel_port = thread.local_handshake_port = 32000
         thread.local_engine_id = "decode"
         thread.remote_metadata_lock = threading.Lock()
+        thread.local_kv_caches_base_addrs = [0x1000]
         thread.kv_caches_base_addr = {
             "decode": {32000: [0x1000, 0x2000, 0x3000]},
             "prefill": {31002: [0x4000, 0x5000, 0x6000]},
@@ -1030,6 +1031,9 @@ class TestMLAFanoutTransferDescriptors(unittest.TestCase):
         thread.local_engine_id = "decode"
         thread.local_handshake_port = 32001
         thread.kv_caches_base_addr = {"decode": {32001: [0x1000]}}
+        thread.local_kv_caches_base_addrs = [0x1000]
+        # Simulate eviction of local entries from the bounded remote cache.
+        thread.kv_caches_base_addr.clear()
         thread.block_len_per_addr = [16]
         thread.block_stride_per_addr = [32]
         thread.addr_group_idx = [[0]]
@@ -1074,6 +1078,8 @@ class TestMLAFanoutTransferDescriptors(unittest.TestCase):
         thread.local_engine_id = "decode"
         thread.local_handshake_port = 32001
         thread.kv_caches_base_addr = {"decode": {32001: [0x1000]}}
+        thread.local_kv_caches_base_addrs = [0x1000]
+        thread.kv_caches_base_addr.clear()
         thread.block_len_per_addr = [32]
         thread.block_stride_per_addr = [32]
         thread.addr_group_idx = [[0]]

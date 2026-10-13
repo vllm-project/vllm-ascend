@@ -143,6 +143,8 @@ mkdir -p /data01/mla-fanout
 
 同一容器内的 TP workers 可以直接使用上述目录。不同容器不能使用各自独立的 `/dev/shm`
 充当共享目录，也不能放在 NFS 上。
+所有 workers 应使用相同的宿主机 UID（包含容器用户映射）。ready 文件权限为 0644，
+但锁、ACK 创建和目录清理还需要一致的目录所有权和写权限。
 
 P/D 都选择 `MooncakeHybridConnector`。仅在 D 的
 `kv_connector_extra_config` 中添加下面对象；现有 prefill/decode 拓扑配置保持不变：
@@ -172,6 +174,8 @@ ready/ACK 文件按 attempt 隔离；缺少 attempt 的旧 metadata 会回退到
 
 排查时关注 `MLA fanout pin blocked`：锁等待每 5 秒告警，KV 仍保持 pin，需检查
 TE 或恢复故障 worker，不能靠超时强行释放正在被读取的 KV。
+reader 等待锁和补发 ACK 受 ready_timeout 的剩余时间限制，超时回退；leader 清理 pin
+不设置强制超时，以免释放活跃 reader 正在访问的 KV。
 `MLAFanout.stats()` 提供每 worker 的 leader_pull、local_read、fallback、分原因 fallback、
 ack_timeout 和 pin_wait_warnings 累计计数；fallback 日志带原因和计数快照。
 这些计数未接入 Prometheus。成功事件可通过 DEBUG 日志观察。

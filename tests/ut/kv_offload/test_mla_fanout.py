@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import json
 import multiprocessing
+import stat
 import sys
 import tempfile
 import threading
@@ -101,6 +102,7 @@ class TestMLAFanout(unittest.TestCase):
     def test_reader_error_or_missing_metadata_acknowledges_then_falls_back(self):
         for error in (
             RuntimeError("TE failed"),
+            TimeoutError("TE timed out"),
             KeyError("rpc_port"),
             ValueError("layout mismatch"),
             AssertionError("reader failed"),
@@ -113,6 +115,7 @@ class TestMLAFanout(unittest.TestCase):
                 reader.transfer(request(), fallback, MagicMock(side_effect=error), {})
                 future.result(timeout=2)
                 fallback.assert_called_once()
+                self.assertEqual(reader.stats()["fallback_local_read_error"], 1)
                 self.assertFalse(list(leader.directory.glob("*.ack-*")))
 
     def test_ready_timeout_sends_early_ack_and_falls_back(self):
@@ -250,6 +253,25 @@ class TestMLAFanout(unittest.TestCase):
                 self.assertFalse(future.done())
                 self.assertGreater(leader.stats().get("pin_wait_warnings", 0), 0)
             future.result(timeout=1)
+
+    def test_reader_lock_contention_does_not_exceed_ready_timeout(self):
+        config = dict(self.config, ready_timeout=0.02)
+        leader = MLAFanout(config, 0, 2)
+        reader = MLAFanout(config, 1, 2)
+        pull, read = MagicMock(), MagicMock()
+        with ThreadPoolExecutor(max_workers=1) as pool, leader._lock(leader._key(request()), exclusive=True):
+            future = pool.submit(reader.transfer, request(), pull, read, {})
+            future.result(timeout=1)
+            pull.assert_called_once()
+            read.assert_not_called()
+            self.assertEqual(reader.stats()["fallback_lock_timeout"], 1)
+
+    def test_ready_metadata_is_readable_by_other_container_users(self):
+        leader = MLAFanout(self.config, 0, 2)
+        path = leader.directory / "ready.json"
+        leader._publish(path, {"transfer_attempt": "attempt-1"})
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o644)
+        self.assertEqual(json.loads(path.read_text()), {"transfer_attempt": "attempt-1"})
 
     def test_leader_transfer_failure_never_publishes_ready(self):
         leader = MLAFanout(self.config, 0, 2)
