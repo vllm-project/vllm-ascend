@@ -21,6 +21,7 @@ from types import SimpleNamespace
 import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
+from vllm.distributed.parallel_state import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
 from vllm.distributed.utils import is_weak_contiguous
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
@@ -28,16 +29,23 @@ from vllm.model_executor.layers.fused_moe import FusedMoERouter, RoutedExperts
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import UnquantizedFusedMoEMethod
 from vllm.model_executor.utils import replace_parameter
+from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
-from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.device.hardware_profile import HardwareCapability, MoECommPolicy, get_current_hardware_profile
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
 from vllm_ascend.lora.fused_moe import sync_lora_context
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.dataclass.shared_experts import RoutedMoEMilestones
+from vllm_ascend.ops.fused_moe.eplb import (
+    build_allgather_routing_table,
+    count_allgather_tokens,
+    make_allgather_mask,
+    use_allgather_eplb,
+)
 from vllm_ascend.ops.fused_moe.force_eplb import get_force_eplb_topk
 from vllm_ascend.ops.fused_moe.moe_comm_method import (
     AllGatherCommImpl,
@@ -45,6 +53,7 @@ from vllm_ascend.ops.fused_moe.moe_comm_method import (
     get_moe_comm_method,
 )
 from vllm_ascend.ops.fused_moe.moe_utils import get_moe_num_logical_experts
+from vllm_ascend.ops.fused_moe.prepare_finalize import PrepareAndFinalizeWithAllGather
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
 
@@ -330,7 +339,9 @@ def make_eplb_placement_config(eplb_config, num_redundant_experts: int) -> Simpl
     )
 
 
-def _record_v2_eplb_load(router: FusedMoERouter, result: FusedExpertsResult) -> None:
+def _record_v2_eplb_load(
+    router: FusedMoERouter, result: FusedExpertsResult, local_load: torch.Tensor | None = None
+) -> None:
     """Record the local expert counts supplied by the MoE operator."""
     eplb_state = router.eplb_state
     if eplb_state is None:
@@ -340,6 +351,10 @@ def _record_v2_eplb_load(router: FusedMoERouter, result: FusedExpertsResult) -> 
         raise RuntimeError("MRV2 EPLB requires operator-provided expert counts")
     expert_load_view = eplb_state.expert_load_view
     record_enabled = eplb_state.should_record_tensor
+    if local_load is not None:
+        expert_tokens = local_load
+        assert eplb_state.allgather_record_tensor is not None
+        record_enabled = eplb_state.allgather_record_tensor > 0
     if expert_load_view is None or record_enabled is None:
         raise RuntimeError("MRV2 EPLB load-recording state is not initialized")
     if expert_tokens.numel() != eplb_state.local_expert_count:
@@ -351,7 +366,7 @@ def _record_v2_eplb_load(router: FusedMoERouter, result: FusedExpertsResult) -> 
         expert_tokens,
         expert_load_view,
         record_enabled,
-        result.group_list_type,
+        result.group_list_type if local_load is None else 1,
         eplb_state.local_expert_start,
     )
 
@@ -544,6 +559,18 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         # which maps logical expert IDs to the local physical slots.
 
         self.dynamic_eplb = eplb_config.dynamic_eplb and (self.log2phy is not None)
+        if (
+            self.log2phy is not None
+            and get_current_hardware_profile().moe_comm_policy is MoECommPolicy.CAPACITY_AND_WORLD_SIZE
+        ):
+            self._allgather_placement = self.global_expert_map.clone()
+            self.allgather_expert_replica_routing_table = build_allgather_routing_table(
+                self.global_expert_map, local_num_experts
+            ).to(self.log2phy.device)
+            # Filled outside graph replay, independently of padded execution size.
+            self.allgather_source_metadata = torch.zeros(2, dtype=torch.int64, device=self.log2phy.device)
+            self._promote_attr_to_buffer("allgather_expert_replica_routing_table")
+            self._promote_attr_to_buffer("allgather_source_metadata")
         self.multi_stage = False
         self.load_counter = None
         self.num_iter = None
@@ -616,6 +643,21 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
     def get_log2phy_map(self) -> torch.Tensor | None:
         return self.log2phy
 
+    def update_allgather_expert_map(self, global_expert_map: torch.Tensor) -> None:
+        if not hasattr(self, "allgather_expert_replica_routing_table"):
+            return
+        if torch.equal(self._allgather_placement, global_expert_map):
+            return
+        self._allgather_placement.copy_(global_expert_map)
+        self.global_expert_map.copy_(global_expert_map)
+        self.allgather_expert_replica_routing_table.copy_(
+            build_allgather_routing_table(global_expert_map, self.moe_config.num_local_experts), non_blocking=True
+        )
+        if self.moe_load is not None:
+            self.moe_load.zero_()
+        if self.load_counter is not None:
+            self.load_counter.zero_()
+
     @property
     def ep_rank(self) -> int:
         return self.moe_config.ep_rank
@@ -649,7 +691,8 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             router_logits=router_logits,
             input_ids=input_ids,
         )
-        if self.log2phy is not None:
+        allgather_eplb = use_allgather_eplb(self.log2phy is not None)
+        if self.log2phy is not None and not allgather_eplb:
             topk_ids = self.log2phy[topk_ids]
 
         num_shared_experts = self.n_shared_experts
@@ -688,6 +731,8 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             )
             topk_ids = torch.argsort(random_matrix, dim=1)[:, : topk_ids.size(1)].to(topk_ids.dtype)
 
+        if allgather_eplb:
+            topk_ids = torch.ops.vllm.ascend_eplb_map_to_physical(topk_ids, self.allgather_expert_replica_routing_table)
         return topk_weights, topk_ids
 
     def forward_impl(
@@ -714,6 +759,26 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         if lora_context is not None:
             sync_lora_context(self.quant_method, lora_context)
 
+        eplb_state = self.router.eplb_state if self._use_v2_model_runner and self.router is not None else None
+        token_mask = None
+        if use_allgather_eplb(eplb_state is not None or self.dynamic_eplb):
+            if eplb_state is not None:
+                assert (
+                    eplb_state.num_unpadded_tokens_tensors is not None and eplb_state.should_record_tensor is not None
+                )
+                num_unpadded_tokens = eplb_state.num_unpadded_tokens_tensors[dbo_current_ubatch_id()]
+                record_enabled = eplb_state.should_record_tensor
+            else:
+                num_unpadded_tokens, record_enabled = self.allgather_source_metadata.unbind()
+            token_mask = make_allgather_mask(
+                hidden_states.shape[0],
+                num_unpadded_tokens,
+                record_enabled,
+                is_padding=getattr(forward_context, "is_padding", None),
+                tp_size=get_tensor_model_parallel_world_size() if self.moe_config.is_sequence_parallel else 1,
+                tp_rank=get_tensor_model_parallel_rank() if self.moe_config.is_sequence_parallel else 0,
+            )
+
         prepare_output = moe_comm_method.prepare(
             hidden_states=hidden_states,
             router_logits=router_logits,
@@ -726,6 +791,9 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         mc2_mask = prepare_output.mc2_mask
         padded_hidden_states_shape = prepare_output.padded_hidden_states_shape
         pertoken_scale = prepare_output.pertoken_scale
+        if token_mask is not None:
+            assert isinstance(moe_comm_method.prepare_finalize, PrepareAndFinalizeWithAllGather)
+            token_mask = moe_comm_method.prepare_finalize.all_gather_eplb_mask(token_mask)
         if self.router is None:
             raise RuntimeError("AscendRoutedExperts requires a router for expert selection.")
         topk_weights, topk_ids = self._select_experts(
@@ -749,19 +817,38 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             self.ascend_pertoken_scale = None
             self.ascend_mc2_mask = None
 
+        local_load = None
+        if token_mask is not None:
+            local_load = count_allgather_tokens(
+                topk_ids,
+                token_mask,
+                self.moe_config.ep_rank * self.moe_config.num_local_experts,
+                self.moe_config.num_local_experts,
+            )
+            if eplb_state is not None:
+                assert eplb_state.allgather_record_tensor is not None
+                torch.maximum(
+                    eplb_state.allgather_record_tensor,
+                    token_mask.any().to(torch.int32),
+                    out=eplb_state.allgather_record_tensor,
+                )
         if self._use_v2_model_runner:
-            _record_v2_eplb_load(self.router, fused_experts_results)
+            _record_v2_eplb_load(self.router, fused_experts_results, local_load)
 
-        if self.dynamic_eplb and _EXTRA_CTX.eplb_heat_collection_status:
+        if self.dynamic_eplb and (token_mask is not None or _EXTRA_CTX.eplb_heat_collection_status):
             expert_tokens = fused_experts_results.expert_tokens
             group_list_type = fused_experts_results.group_list_type
             assert expert_tokens is not None and group_list_type is not None, (
                 "expert_tokens and group_list_type should not be None when dynamic_eplb is enabled."
             )
             local_load = (
-                expert_tokens
-                if group_list_type == 1
-                else torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
+                local_load
+                if local_load is not None
+                else (
+                    expert_tokens
+                    if group_list_type == 1
+                    else torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
+                )
             )
             assert self.moe_load is not None
             if self.multi_stage:
@@ -770,7 +857,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
                 self.moe_load.index_add_(
                     dim=0, index=cur_iter, source=local_load.to(torch.int32, non_blocking=True).view(1, -1)
                 )
-                self.load_counter.add_(1)
+                self.load_counter.add_(1 if token_mask is None else token_mask.any().to(torch.int32))
             else:
                 self.moe_load.add_(local_load)
 

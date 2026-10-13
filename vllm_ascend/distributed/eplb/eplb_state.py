@@ -22,6 +22,7 @@ from vllm.distributed.eplb.policy import AbstractEplbPolicy
 from vllm.distributed.parallel_state import in_the_same_node_as
 from vllm.logger import logger
 
+from vllm_ascend.device.hardware_profile import MoECommPolicy, get_current_hardware_profile
 from vllm_ascend.distributed.eplb.eplb_communicator import AscendHixlEplbCommunicator, _HixlSession
 from vllm_ascend.distributed.eplb.policy import PreparedLoadStats
 from vllm_ascend.ops.fused_moe import eplb as _eplb_ops
@@ -58,6 +59,8 @@ class AscendEplbLayerState(_eplb_state.EplbLayerState):
     def __init__(self) -> None:
         super().__init__()
         self.expert_replica_routing_table: torch.Tensor | None = None
+        self.allgather_expert_replica_routing_table: torch.Tensor | None = None
+        self.allgather_record_tensor: torch.Tensor | None = None
         self.local_expert_start = 0
         self.local_expert_count = 0
 
@@ -118,6 +121,14 @@ class AscendEplbLayerState(_eplb_state.EplbLayerState):
             )
         else:
             self.expert_replica_routing_table = new_routing_table
+        if get_current_hardware_profile().moe_comm_policy is MoECommPolicy.CAPACITY_AND_WORLD_SIZE:
+            common_table = _eplb_ops.build_expert_replica_routing_table(
+                logical_to_physical_map, logical_replica_count, ep_rank=0
+            )
+            if self.allgather_expert_replica_routing_table is None:
+                self.allgather_expert_replica_routing_table = common_table
+            else:
+                self.allgather_expert_replica_routing_table.copy_(common_table, non_blocking=True)
 
 
 def refresh_model_routing_tables(
@@ -131,6 +142,14 @@ def refresh_model_routing_tables(
         layer_state = layer.eplb_state
         if isinstance(layer_state, AscendEplbLayerState):
             layer_state.refresh_expert_replica_routing_table()
+    if hasattr(model_state, "_allgather_physical_map"):
+        current_map = model_state.physical_to_logical_map
+        if not torch.equal(current_map, model_state._allgather_physical_map):
+            model_state._allgather_physical_map.copy_(current_map)
+            model_state.expert_load_pass.zero_()
+            model_state.expert_load_window.zero_()
+            if hasattr(model_state, "_load_mapping_generation"):
+                model_state._load_mapping_generation += 1
 
 
 def _raise_if_async_worker_stopped(state: Any) -> None:
@@ -166,6 +185,8 @@ class AscendEplbState(_eplb_state.EplbState):
         self._has_fresh_recorded_load = False
         self._is_load_sampling_step = False
         self._should_collect_local_load = False
+        self.allgather_record_tensor: torch.Tensor | None = None
+        self._uses_phase_filter = False
         self._stop_async = threading.Event()
         self._suspended = False
         self._close_error: Exception | None = None
@@ -197,8 +218,23 @@ class AscendEplbState(_eplb_state.EplbState):
                 super().add_model(model, model_config)
         finally:
             EXPERT_MAPPING_EP_SIZE.reset(token)
+        if get_current_hardware_profile().moe_comm_policy is MoECommPolicy.CAPACITY_AND_WORLD_SIZE:
+            model_state = self.model_states[model_config.compute_hash()]
+            model_state._allgather_physical_map = model_state.physical_to_logical_map.clone()
         if self.uses_custom_load_stats:
             self._initialize_load_stats_state(self.model_states[model_config.compute_hash()])
+
+    def _propagate_shared_tensors(self, model, num_unpadded_tokens_tensors) -> None:
+        super()._propagate_shared_tensors(model, num_unpadded_tokens_tensors)
+        if get_current_hardware_profile().moe_comm_policy is not MoECommPolicy.CAPACITY_AND_WORLD_SIZE:
+            return
+        if self.should_record_tensor is None:
+            return
+        if self.allgather_record_tensor is None:
+            self.allgather_record_tensor = torch.full((), -1, dtype=torch.int32, device=self.device)
+        for layer in model.moe_layers:
+            if isinstance(layer.eplb_state, AscendEplbLayerState):
+                layer.eplb_state.allgather_record_tensor = self.allgather_record_tensor
 
     def wait_for_rearrangement(self, stream) -> bool:
         """Allow an idle worker to stop without recording a fake device event."""
@@ -355,8 +391,21 @@ class AscendEplbState(_eplb_state.EplbState):
         self.raise_if_close_failed()
         if self._hixl_session is not None:
             _raise_if_async_worker_stopped(self)
-        is_sampling = getattr(self, "_is_load_sampling_step", False) and not is_dummy and not is_profile
+        is_sampling = getattr(self, "_is_load_sampling_step", False) and not is_profile
         should_collect = getattr(self, "_should_collect_local_load", False)
+        allgather_record = getattr(self, "allgather_record_tensor", None)
+        if is_sampling and allgather_record is not None:
+            if is_dummy or getattr(self, "_uses_phase_filter", False):
+                # A source-idle owner can still execute remote tokens. The
+                # device decision also preserves phase filtering under replay.
+                gathered = int(allgather_record.item())
+                if gathered >= 0:
+                    should_collect = gathered != 0
+                    if should_collect:
+                        is_dummy = False
+            if not is_dummy and should_collect:
+                self._has_fresh_recorded_load = True
+        is_sampling = is_sampling and not is_dummy
         self._is_load_sampling_step = False
         self._should_collect_local_load = False
         if self.uses_custom_load_stats:
@@ -610,4 +659,6 @@ class AscendEplbState(_eplb_state.EplbState):
                 state._initialize_load_stats_state(model_state)
         for model_state in state.model_states.values():
             refresh_model_routing_tables(model_state)
+            if get_current_hardware_profile().moe_comm_policy is MoECommPolicy.CAPACITY_AND_WORLD_SIZE:
+                model_state._allgather_physical_map = model_state.physical_to_logical_map.clone()
         return state

@@ -31,7 +31,7 @@ from vllm.distributed.parallel_state import get_ep_group
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import get_mc2_tokens_capacity
 from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.device.hardware_profile import HardwareCapability, MoECommPolicy, get_current_hardware_profile
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.lora.fused_moe import (
     all2all_lora_indices,
@@ -372,6 +372,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
         )
         global_redundant_expert_num = token_dispatch_input.routing.global_redundant_expert_num
         restore_shape = hidden_states.shape
+        uses_physical_range = get_current_hardware_profile().moe_comm_policy is MoECommPolicy.CAPACITY_AND_WORLD_SIZE
         # Fuse the first dynamic quant of moe_mlp into initrouting when
         # dispatch_with_quant is on but got a None dynamic_scale.
         if with_quant and dynamic_scale is None:
@@ -390,11 +391,17 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
             assert topk == 1, "Only support topk=1 when `apply_router_weight_on_input` is True"
             hidden_states = hidden_states * topk_weights.to(hidden_states.dtype)
         if expert_map is not None:
-            global_num_experts = len(expert_map) + global_redundant_expert_num
-            mask = expert_map[topk_ids] != -1
-            topk_weights = topk_weights * mask
             first_expert_idx = get_ep_group().rank_in_group * self.num_experts_local
             last_expert_idx = first_expert_idx + self.num_experts_local
+            if uses_physical_range:
+                # EPLB has already converted routes to global physical IDs.
+                # The legacy expert_map is indexed by logical IDs only.
+                global_num_experts = self.num_experts
+                mask = (topk_ids >= first_expert_idx) & (topk_ids < last_expert_idx)
+            else:
+                global_num_experts = len(expert_map) + global_redundant_expert_num
+                mask = expert_map[topk_ids] != -1
+            topk_weights = topk_weights * mask
         else:
             first_expert_idx = 0
             last_expert_idx = self.num_experts_local
@@ -403,7 +410,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
             hidden_states,
             topk_ids,
             scale=dynamic_scale,
-            active_num=num_tokens * self.top_k,
+            active_num=num_tokens * (topk_ids.shape[-1] if uses_physical_range else self.top_k),
             expert_num=global_num_experts,
             expert_tokens_num_type=1,
             expert_tokens_num_flag=True,

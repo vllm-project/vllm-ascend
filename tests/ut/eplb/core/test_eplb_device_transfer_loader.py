@@ -107,6 +107,26 @@ def test_set_log2phy_map(mock_adaptor):
     assert loader_obj.updated_log2phy_map == {"a": 1}
 
 
+def test_common_table_is_published_after_weights(mock_adaptor):
+    events = []
+    with patch("vllm_ascend.eplb.core.eplb_device_transfer_loader.get_dynamic_eplb_group", return_value=None):
+        loader_obj = loader.D2DExpertWeightLoader()
+    loader_obj.set_adator(mock_adaptor)
+    loader_obj.state = loader.ExpertWeightUpdateState.TRANSFERRING
+    loader_obj.layer_id = 0
+    loader_obj.recv_expert_list = [(0, 0)]
+    loader_obj.updated_global_expert_map = torch.tensor([[0, 1], [1, 0]])
+    mock_adaptor.do_update_expert_weight.side_effect = lambda *_: events.append("weights")
+    layer = MagicMock()
+    layer.update_allgather_expert_map.side_effect = lambda *_: events.append("table")
+    mock_adaptor.moe_layers = [layer]
+    req = MagicMock()
+    req.wait.side_effect = lambda: events.append("wait")
+    loader_obj.update_expert_map_and_weight([req])
+    assert events == ["wait", "weights", "table"]
+    layer.update_allgather_expert_map.assert_called_once_with(loader_obj.updated_global_expert_map)
+
+
 def test_invalid_state_asyn_update(mock_adaptor):
     with patch("vllm_ascend.eplb.core.eplb_device_transfer_loader.get_dynamic_eplb_group", return_value=None):
         loader_obj = loader.D2DExpertWeightLoader()

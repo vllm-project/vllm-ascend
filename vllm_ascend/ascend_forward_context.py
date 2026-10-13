@@ -115,6 +115,8 @@ def set_ascend_forward_context(
     device_metadata_executor=None,
     has_sinks=False,
     eplb_heat_collection_status: bool = False,
+    eplb_num_actual_tokens: int | None = None,
+    eplb_moe_layers: list[torch.nn.Module] | None = None,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -218,6 +220,14 @@ def set_ascend_forward_context(
         )
 
         forward_context.eplb_heat_collection_status = eplb_heat_collection_status
+        # Legacy graph replay must see the current source validity/eligibility.
+        if eplb_moe_layers is not None:
+            for layer in eplb_moe_layers:
+                metadata = getattr(layer, "allgather_source_metadata", None)
+                if isinstance(metadata, torch.Tensor):
+                    actual_tokens = num_actual_tokens if num_actual_tokens is not None else num_tokens
+                    metadata[0].fill_(actual_tokens if eplb_num_actual_tokens is None else eplb_num_actual_tokens)
+                    metadata[1].fill_(eplb_heat_collection_status and not in_profile_run)
 
         if num_tokens is not None:
             if num_actual_tokens is None:

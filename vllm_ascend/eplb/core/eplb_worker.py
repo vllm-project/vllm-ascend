@@ -22,6 +22,7 @@ import torch
 from vllm.distributed import get_ep_group
 from vllm.logger import logger
 
+from vllm_ascend.device.hardware_profile import MoECommPolicy, get_current_hardware_profile
 from vllm_ascend.eplb.core.eplb_utils import generate_log2phy_map
 from vllm_ascend.eplb.core.policy.policy_factory import PolicyFactory
 
@@ -279,6 +280,8 @@ class EplbWorker:
         maps = []
         log2phy_all = []
         layer_ids = []
+        global_maps = []
+        uses_allgather_eplb = get_current_hardware_profile().moe_comm_policy is MoECommPolicy.CAPACITY_AND_WORLD_SIZE
 
         for send_info, recv_info, new_expert_map, layer_id in update_info_generator:
             send_info_this_rank = send_info.get(self.rank_id, [])
@@ -296,7 +299,11 @@ class EplbWorker:
             log2phy_all.append(log2phy_map.numpy().tolist())
 
             layer_ids.append(layer_id)
+            if uses_allgather_eplb:
+                global_maps.append(new_expert_map.numpy().tolist())
 
+        if uses_allgather_eplb:
+            return list(zip(send_all, recv_all, maps, log2phy_all, layer_ids, global_maps))
         return list(zip(send_all, recv_all, maps, log2phy_all, layer_ids))
 
     @staticmethod
