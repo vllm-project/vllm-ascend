@@ -10,11 +10,10 @@ from typing import Any
 from vllm.logger import logger
 
 from ..protocol.transfer import StoreCommand
-from ..topology import KVPoolTopology
 from ..worker.transfer.batch import KVTransferBatch, TransferSource
 from ..worker.transfer.evidence import LayerStoreResult, StoreCompletion, StoreEvidence, TransferEvidence
 from .executor import TimelineExecutor
-from .layerwise_common import collect_object_sizes, compile_layer_ids_by_name
+from .layerwise_common import collect_object_sizes
 from .store_batch import StoreBatch
 
 _TIMELINE_POLL_INTERVAL_S = 1.0
@@ -255,7 +254,6 @@ class LayerwiseStoreTimeline:
 
     def __init__(
         self,
-        topology: KVPoolTopology,
         thread_initializer: Callable[[], None],
         preparation: StorePreparation,
         operation: StoreLayerOperation,
@@ -270,7 +268,6 @@ class LayerwiseStoreTimeline:
         self._prepare_layers = prepare_layers
         self._commit_sessions = commit_sessions
         self._revoke_sessions = revoke_sessions
-        self._layer_ids_by_name = compile_layer_ids_by_name(topology)
         self._lifecycle_lock = threading.Lock()
         self._session: _StoreSession | None = None
         self._pending_batch: StoreBatch | None = None
@@ -291,14 +288,13 @@ class LayerwiseStoreTimeline:
             self._session = session
             self._executor.submit(_OpenStoreSession(session))
 
-    def submit_layer(self, layer_name: str, record_source_ready: Callable[[], Any]) -> None:
+    def submit_layer(self, layer_id: int, record_source_ready: Callable[[], Any]) -> None:
         with self._lifecycle_lock:
             self._raise_if_not_running()
             session = self._session
             if session is None:
                 return
-            layer_id = self._layer_ids_by_name.get(layer_name)
-            if layer_id is None or layer_id in session.submitted_layer_ids:
+            if layer_id in session.submitted_layer_ids:
                 return
             source_ready_event = record_source_ready()
             session.submitted_layer_ids.add(layer_id)

@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from abc import abstractmethod
 from collections.abc import Callable
+from functools import partial
 from typing import Any, TypeAlias
 
 from vllm.logger import logger
+from vllm.v1.kv_cache_interface import MambaSpec, UniformTypeKVCacheSpecs
 
 from ....attention_fence import reset_attention_compute_start_gate
 from ...projection import GVALayerwiseProjection, LayerwiseProjection, LayerwiseProjectionBinder
@@ -14,6 +16,7 @@ from ...projection.layerwise.gva import gva_local_keys, gva_lookup_keys
 from ...projection.layerwise.key_range import key_range_local_keys, key_range_lookup_keys
 from ...protocol.lookup import LookupRequest, LookupResult
 from ...protocol.transfer import CheckpointStoreCommand, LoadCommand, StoreCommand
+from ...timeline.layerwise_common import compile_layer_ids_by_name
 from ...timeline.layerwise_load import LayerwiseLoadTimeline
 from ...timeline.layerwise_store import LayerwiseStoreTimeline
 from ...timeline.store_batch import StoreBatch
@@ -22,7 +25,7 @@ from ..base import KVPoolWorker, _store_command_completions
 from ..io import GVABackendIO, KeyRangeBackendIO
 from ..resources import KVPoolResources
 from ..transfer.batch import KeyAxes, KVGroupBatch, KVTransferBatch
-from ..transfer.evidence import LayerStoreResult, LoadCompletion, StoreCompletion
+from ..transfer.evidence import LoadCompletion, StoreCompletion
 from ..transfer.rows import (
     BlockRows,
     StoreCandidateRows,
@@ -66,11 +69,17 @@ class LayerwiseWorker(KVPoolWorker):
         self._layerwise_projection: LayerwiseProjection | None = None
         self._layerwise_backend_io = backend_io
         self._layerwise_store_leader = _is_store_leader(topology)
+        self._start_gate_factory = start_gate_factory
+        self._layer_ids_by_name = compile_layer_ids_by_name(topology)
+        self._attention_start_gates: dict[int, Any] = {}
+        self._attention_store_layers = (
+            _attention_store_layer_ids(topology)
+            if isinstance(backend_io, KeyRangeBackendIO) and store_enabled
+            else frozenset()
+        )
         load_timeline = LayerwiseLoadTimeline(
-            topology,
             layerwise_prefetch_layers,
             backend_io.initialize_thread,
-            start_gate_factory,
             backend_io.load_layer,
             backend_io.start_load_sessions,
             backend_io.prepare_load_layers,
@@ -78,10 +87,9 @@ class LayerwiseWorker(KVPoolWorker):
         )
         store_timeline = (
             LayerwiseStoreTimeline(
-                topology,
                 backend_io.initialize_thread,
                 self._prepare_layerwise_store,
-                self._store_layer,
+                backend_io.store_layer,
                 backend_io.start_store_sessions,
                 backend_io.prepare_store_layers,
                 backend_io.commit_store_sessions,
@@ -335,18 +343,75 @@ class LayerwiseWorker(KVPoolWorker):
 
     def _submit_store_layer(self, layer_name: str) -> None:
         timeline = self._layerwise_store_timeline
-        if timeline is not None:
-            timeline.submit_layer(layer_name, self._record_source_ready)
+        layer_id = self._layer_ids_by_name.get(layer_name)
+        if timeline is not None and layer_id is not None:
+            timeline.submit_layer(layer_id, self._record_source_ready)
 
     def _wait_for_layer_load(self, layer_name: str) -> tuple[LoadCompletion, ...]:
-        return self._layerwise_load_timeline.wait_for_layer(layer_name)
+        context = self._active_step
+        if context is None:
+            raise RuntimeError("KV Pool step has not begun")
+        layer_id = self._layer_ids_by_name.get(layer_name)
+        if layer_id is None:
+            return ()
+        store_at_attention_entry = (
+            layer_id in self._attention_store_layers
+            and bool(context.step.store.commands)
+            and not context.store_submitted
+        )
+        if not context.step.load.commands and not store_at_attention_entry:
+            return ()
 
-    def _store_layer(self, source_ready_event: Any, layer_id: int) -> LayerStoreResult:
+        # Aliases of one physical layer must keep the gate already held by its prefetched loads.
+        gate = self._attention_start_gates.get(layer_id)
+        if gate is None:
+            gate = self._start_gate_factory()
+            self._attention_start_gates[layer_id] = gate
         try:
-            source_ready_event.synchronize()
-        except Exception as error:
-            return LayerStoreResult(None, True, error)
-        return self._layerwise_backend_io.store_layer(layer_id)
+            completions = self._layerwise_load_timeline.wait_for_layer(layer_id, gate)
+        except BaseException:
+            gate.cancel()
+            raise
+        if store_at_attention_entry:
+            # Production starts non-recurrent Hybrid Store after cache writes, before attention compute.
+            # The post-compute save hook remains the fallback; Timeline submits each physical layer once.
+            gate.on_start = partial(self.save_layer, layer_name)
+        return completions
+
+    def end_step(self) -> None:
+        for gate in self._attention_start_gates.values():
+            gate.on_start = None
+        self._attention_start_gates.clear()
+        super().end_step()
+
+    def close(self) -> None:
+        for gate in self._attention_start_gates.values():
+            gate.on_start = None
+        self._attention_start_gates.clear()
+        super().close()
+
+
+def _attention_store_layer_ids(topology: KVPoolTopology) -> frozenset[int]:
+    """Match production's KeyRange Hybrid boundary, excluding recurrent physical layers."""
+
+    if len(topology.groups) <= 1:
+        return frozenset()
+    recurrent_layers = set()
+    for group in topology.groups:
+        for layer in group.layers:
+            specs = (
+                tuple(group.kv_cache_spec.kv_cache_specs[name] for name in layer.layer_names)
+                if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+                else (group.kv_cache_spec,)
+            )
+            if any(isinstance(spec, MambaSpec) for spec in specs):
+                recurrent_layers.add(layer.physical_layer_id)
+    return frozenset(
+        layer.physical_layer_id
+        for group in topology.transfer_groups
+        for layer in group.layers
+        if layer.physical_layer_id not in recurrent_layers
+    )
 
 
 def _is_store_leader(topology: KVPoolTopology) -> bool:

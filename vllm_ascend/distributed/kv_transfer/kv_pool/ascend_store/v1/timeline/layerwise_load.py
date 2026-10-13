@@ -10,11 +10,10 @@ from typing import TYPE_CHECKING
 import numpy as np
 from vllm.logger import logger
 
-from ..topology import KVPoolTopology
 from ..worker.transfer.batch import KVTransferBatch
 from ..worker.transfer.evidence import LoadCompletion, TransferEvidence
 from .executor import TimelineExecutor
-from .layerwise_common import collect_object_sizes, compile_layer_ids_by_name
+from .layerwise_common import collect_object_sizes
 
 if TYPE_CHECKING:
     from ...attention_fence import AttentionComputeStartGate
@@ -75,10 +74,8 @@ class LayerwiseLoadTimeline:
 
     def __init__(
         self,
-        topology: KVPoolTopology,
         prefetch_layers: int,
         thread_initializer: Callable[[], None],
-        start_gate_factory: Callable[[], AttentionComputeStartGate],
         operation: LoadOperation,
         start_sessions: StartLoadSessions,
         prepare_layers: PrepareLoadLayers,
@@ -90,10 +87,7 @@ class LayerwiseLoadTimeline:
         self._start_sessions = start_sessions
         self._prepare_layers = prepare_layers
         self._finish_sessions = finish_sessions
-        self._layer_ids_by_name = compile_layer_ids_by_name(topology)
-        self._layer_order = tuple(sorted(set(self._layer_ids_by_name.values())))
         self._prefetch_layers = prefetch_layers
-        self._start_gate_factory = start_gate_factory
         self._session: _LoadSession | None = None
         self._lifecycle_lock = threading.Lock()
         self._executor = TimelineExecutor(
@@ -110,6 +104,8 @@ class LayerwiseLoadTimeline:
             if self._session is not None:
                 raise RuntimeError("Previous Layerwise Load session has not completed")
             object_sizes = collect_object_sizes(batch)
+            if not object_sizes:
+                return ()
             command = _OpenLoadSession(batch, tuple(object_sizes), tuple(object_sizes.values()))
             self._executor.submit(command)
         self._wait_for_completion(command.completed)
@@ -117,19 +113,15 @@ class LayerwiseLoadTimeline:
             self._session = command.session
         return command.completions
 
-    def wait_for_layer(self, layer_name: str) -> tuple[LoadCompletion, ...]:
+    def wait_for_layer(self, layer_id: int, start_gate: AttentionComputeStartGate) -> tuple[LoadCompletion, ...]:
         with self._lifecycle_lock:
             self._raise_if_not_running()
             session = self._session
             if session is None:
                 return ()
-            layer_id = self._layer_ids_by_name.get(layer_name)
-            if layer_id is None:
-                return ()
             layer_job = session.layer_jobs.get(layer_id)
             if layer_job is not None and layer_job.consumed:
                 return ()
-            start_gate = self._start_gate_factory()
             self._fill_prefetch_window(session, layer_id, start_gate)
             if layer_job is None:
                 return ()
@@ -221,7 +213,7 @@ class LayerwiseLoadTimeline:
         command.completions = _load_session_failures(command.batch, codes_by_key)
         selected = command.batch.select_keys(set(session_keys))
         keys_by_layer = self._prepare_layers(selected)
-        layer_order = tuple(layer_id for layer_id in self._layer_order if keys_by_layer.get(layer_id))
+        layer_order = tuple(sorted(layer_id for layer_id, keys in keys_by_layer.items() if keys))
         if not layer_order:
             self._finish_sessions(list(session_keys))
             return
