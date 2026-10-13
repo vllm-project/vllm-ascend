@@ -60,8 +60,9 @@ def _using_kv_store(vllm_config) -> bool:
 @classmethod
 def verify_and_update_config(cls, vllm_config) -> None:
     """
-    Update Hybrid Attention/Mamba cache configuration without forcing
-    attention and Mamba cache page sizes to be equal.
+    Restore contiguous caches for ordinary hybrid models by aligning
+    Attention and SSM segments. Preserve the specialized physical-page
+    contracts for sparse index-kpool and MXFP8 caches.
 
     Args:
         vllm_config: vLLM configuration.
@@ -75,7 +76,7 @@ def verify_and_update_config(cls, vllm_config) -> None:
     cache_config = vllm_config.cache_config
     model_config = vllm_config.model_config
     index_kpool = _get_sparse_index_kpool(model_config)
-    if index_kpool is not None:
+    if index_kpool is not None or cache_config.cache_dtype != "mxfp8":
         parallel_config = vllm_config.parallel_config
         if cache_config.cache_dtype == "auto":
             kv_cache_dtype = model_config.dtype
@@ -89,21 +90,23 @@ def verify_and_update_config(cls, vllm_config) -> None:
         )
         mamba_shapes = model_cls.get_mamba_state_shape_from_config(vllm_config)
         mamba_dtypes = model_cls.get_mamba_state_dtype_from_config(vllm_config)
-        mamba_raw_page_size = sum(
-            math.prod(shape) * get_dtype_size(dtype) for shape, dtype in zip(mamba_shapes, mamba_dtypes)
-        )
+        mamba_sizes = [math.prod(shape) * get_dtype_size(dtype) for shape, dtype in zip(mamba_shapes, mamba_dtypes)]
+        mamba_raw_page_size = sum(mamba_sizes)
 
         attn_num_kv_heads = model_config.get_num_kv_heads(parallel_config)
         if model_config.use_mla:
             kv_lora_rank = model_config.hf_text_config.kv_lora_rank
             qk_rope_head_dim = model_config.hf_text_config.qk_rope_head_dim
+            attn_single_token_k_page_size = kv_lora_rank * attn_num_kv_heads * get_dtype_size(kv_cache_dtype)
             attn_token_page_size = (
                 (kv_lora_rank + qk_rope_head_dim) * attn_num_kv_heads * get_dtype_size(kv_cache_dtype)
             )
         else:
             attn_head_size = model_config.get_head_size()
+            attn_single_token_k_page_size = attn_head_size * attn_num_kv_heads * get_dtype_size(kv_cache_dtype)
             attn_token_page_size = 2 * attn_head_size * attn_num_kv_heads * get_dtype_size(kv_cache_dtype)
 
+    if index_kpool is not None:
         sfa_c8_packed = model_config.use_mla and _using_sparse_sfa_c8(vllm_config, model_config)
         if sfa_c8_packed:
             # A C8-packed SFA page holds one token in kv_lora_rank int8 bytes
@@ -152,6 +155,28 @@ def verify_and_update_config(cls, vllm_config) -> None:
                 "Padding mamba page size by %.2f%% to align the sparse indexer and recurrent-state cache pages.",
                 mamba_padding_pct,
             )
+    elif cache_config.cache_dtype != "mxfp8":
+        ssm_page_size = max(mamba_sizes)
+        conv_page_size = min(mamba_sizes)
+        if len(mamba_shapes) == 1 and len(mamba_shapes[0]) == 3:
+            conv_page_size = 0
+        # Align contiguous K and SSM segments so shared block IDs do not
+        # cause cross-group writes to overwrite other blocks.
+        attn_block_size = kernel_block_size * cdiv(ssm_page_size, kernel_block_size * attn_single_token_k_page_size)
+        if attn_block_size * attn_single_token_k_page_size != ssm_page_size:
+            raise ValueError("Cannot align SSM and Attention pages for contiguous hybrid KV cache.")
+        if cache_config.block_size is None or cache_config.block_size < attn_block_size:
+            cache_config.block_size = attn_block_size
+            logger.info("Setting attention block size to %d tokens for contiguous hybrid KV cache.", attn_block_size)
+        if cache_config.block_size != attn_block_size:
+            raise ValueError(
+                f"Contiguous hybrid KV cache requires block_size={attn_block_size} "
+                "to align Attention K and SSM state segments."
+            )
+        target_mamba_page_size = cache_config.block_size * attn_token_page_size + conv_page_size
+        if cache_config.mamba_page_size_padded != target_mamba_page_size:
+            cache_config.mamba_page_size_padded = target_mamba_page_size
+            logger.info("Padding Mamba page size to %d bytes for contiguous hybrid KV cache.", target_mamba_page_size)
     # The extract_hidden_states connector (ExampleHiddenStatesConnector) only
     # manages the dedicated hidden-state cache-only layer; it does not migrate
     # mamba KV blocks across instances, so it does not require the block-aligned
