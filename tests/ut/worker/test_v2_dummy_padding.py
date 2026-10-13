@@ -10,6 +10,7 @@ from vllm.v1.worker.gpu.input_batch import set_dummy_context
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.utils import get_uniform_decode_token_count
 
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
@@ -102,6 +103,24 @@ def test_capture_without_dummy_scope_keeps_existing_layout(buffers):
     assert batch.num_scheduled_tokens.tolist() == [16]
 
 
+def test_cpp_dummy_is_a_fresh_prefill_request(buffers):
+    with (
+        patch.object(buffers, "profile_cpp", True),
+        patch("vllm_ascend.worker.v2.input_batch.update_cos_sin"),
+    ):
+        batch = AscendInputBatch.make_dummy(1, 16, buffers)
+
+    assert batch.is_dummy
+    assert batch.is_cpp_profile
+    assert batch.has_prefill
+    assert batch.attn_state == AscendAttentionState.PrefillNoCache
+    np.testing.assert_array_equal(batch.is_prefilling_np, [True])
+    np.testing.assert_array_equal(batch.prefill_len_np, [16])
+    np.testing.assert_array_equal(batch.num_computed_tokens_np, [0])
+    assert not batch.is_padding.any()
+    torch.testing.assert_close(batch.positions, torch.arange(16, dtype=batch.positions.dtype))
+
+
 @pytest.mark.parametrize("draft_mode", [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL_AND_PIECEWISE])
 @pytest.mark.parametrize("capture_size,uniform", [(16, 1), (16, 2), (16, 4), (32, 2), (32, 4)])
 def test_mixed_dp_dummy_keeps_graphs_and_reuses_sync(buffers, runner, draft_mode, uniform, capture_size):
@@ -185,6 +204,25 @@ def test_dummy_scope_restores_state_on_exception(buffers, runner, kwargs, mode, 
     ):
         runner._dummy_run(1, **kwargs)
     assert buffers.dummy_num_tokens == 7
+
+
+def test_cpp_dummy_scopes_prefill_marker_and_skips_drafter(buffers, runner):
+    speculator = object()
+    runner.speculator = speculator
+
+    def execute_dummy(*args, **kwargs):
+        assert buffers.profile_cpp
+        assert runner.speculator is None
+        raise RuntimeError("test")
+
+    with (
+        patch.object(GPUModelRunner, "_dummy_run", side_effect=execute_dummy),
+        pytest.raises(RuntimeError, match="test"),
+    ):
+        runner._dummy_run(16, profile_cpp=True)
+
+    assert not buffers.profile_cpp
+    assert runner.speculator is speculator
 
 
 @pytest.mark.parametrize("inner_mode,expected", [(CUDAGraphMode.PIECEWISE, 6), (CUDAGraphMode.NONE, None)])
