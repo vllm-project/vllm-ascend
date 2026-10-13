@@ -653,7 +653,17 @@ def test_multi_group_load_failure_reports_original_group_and_block() -> None:
     assert resources.closed
 
 
-def test_bulk_store_orders_source_ready_copy_and_close_fence() -> None:
+@pytest.mark.parametrize(
+    "failure_stage,expected_trace",
+    (
+        (None, ["record", "prepare", "synchronize", "ready", "put"]),
+        ("prepare", ["record", "prepare"]),
+        ("synchronize", ["record", "prepare", "synchronize"]),
+    ),
+)
+def test_bulk_store_prepares_before_source_wait_and_fences_before_close(
+    failure_stage, expected_trace, monkeypatch
+) -> None:
     trace: list[str] = []
 
     class TraceEvent(FakeEvent):
@@ -663,25 +673,41 @@ def test_bulk_store_orders_source_ready_copy_and_close_fence() -> None:
 
         def synchronize(self) -> None:
             trace.append("synchronize")
+            if failure_stage == "synchronize":
+                raise RuntimeError("source readiness failed")
             super().synchronize()
+            trace.append("ready")
 
     class TraceBackend(FakeBackend):
         def put(self, keys, addresses, sizes):
+            assert source_ready_event.synchronized
             trace.append("put")
             return super().put(keys, addresses, sizes)
 
+    source_ready_event = TraceEvent()
     backend = TraceBackend()
     worker, resources, _ = make_worker(
         backend,
-        source_ready_event_factory=TraceEvent,
+        source_ready_event_factory=lambda: source_ready_event,
     )
+    materialize_arguments = worker._materialize_concrete_bulk_arguments
+
+    def prepare_arguments(batch, *, store):
+        arguments = materialize_arguments(batch, store=store)
+        trace.append("prepare")
+        assert not source_ready_event.synchronized
+        if failure_stage == "prepare":
+            raise RuntimeError("argument preparation failed")
+        return arguments
+
+    monkeypatch.setattr(worker, "_materialize_concrete_bulk_arguments", prepare_arguments)
     command = RangeStoreCommand("request", TokenRange(0, 4), ((7,),), (b"a",), 4, 17)
     begin_step(worker, store=(command,))
 
     worker.finish_step()
     worker.close()
 
-    assert trace == ["record", "synchronize", "put"]
+    assert trace == expected_trace
     assert worker.take_released_store_job_ids() == {17}
     assert resources.closed
 

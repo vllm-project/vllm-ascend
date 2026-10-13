@@ -534,7 +534,6 @@ class BulkWorker(KVPoolWorker):
             selected = self._materialize_store_candidates(commands, candidates, selected_objects)
             if selected is None:
                 return _store_command_completions(commands)
-            source_ready_event.synchronize()
         except Exception as error:
             if selected is None:
                 return _store_command_completions(commands, error)
@@ -544,6 +543,8 @@ class BulkWorker(KVPoolWorker):
             raise RuntimeError("Bulk Store requires explicit Bulk projection")
         try:
             arguments = self._materialize_concrete_bulk_arguments(selected, store=True)
+            # Address preparation can overlap NPU writes; only the Backend KV read must wait.
+            source_ready_event.synchronize()
         except Exception as error:
             evidence = tuple(TransferEvidence(source, None, True) for source in _batch_sources(selected, None))
             return _failed_store_completions(selected, evidence, error)
