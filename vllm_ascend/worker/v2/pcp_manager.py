@@ -297,8 +297,8 @@ class AscendPCPManager(PCPManager):
             padded_num_reqs=padded_num_reqs if self.is_decode_sharded else None,
         )
         assert isinstance(local_batch, AscendInputBatch)
-        local_batch.is_dummy = global_batch.is_dummy
-        local_batch.is_cpp_profile = global_batch.is_cpp_profile
+        local_batch.is_dummy = getattr(global_batch, "is_dummy", False)
+        local_batch.is_cpp_profile = getattr(global_batch, "is_cpp_profile", False)
         self._pad_hidden_restore_idx(global_batch)
         if not self.is_decode_sharded:
             local_batch = self._pad_replicated_decode_graph(global_batch, local_batch)
