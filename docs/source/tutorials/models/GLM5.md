@@ -1,4 +1,4 @@
-# GLM-5 & GLM-5.1
+# GLM-5.1
 
 ## 1 Introduction
 
@@ -8,11 +8,9 @@
     
     **For the production environment on the customer side, [MindIE Motor](https://www.hiascend.com/document/detail/en/mindie/latest/quickstart/docs/en/user_guide/quick_start.md) + vLLM-Ascend is recommended.**
 
-This document applies to both `GLM-5` and `GLM-5.1`. Unless otherwise specified, all descriptions, configurations, and deployment procedures for `GLM-5` in this document also apply to `GLM-5.1`. For brevity, `GLM-5` is used hereafter as a unified reference to both `GLM-5` and `GLM-5.1`.
+[GLM-5.1](https://huggingface.co/zai-org/GLM-5.1) uses a Mixture-of-Experts (MoE) architecture and targets complex systems engineering and long-horizon agentic tasks.
 
-[GLM-5](https://huggingface.co/zai-org/GLM-5) uses a Mixture-of-Experts (MoE) architecture and targets complex systems engineering and long-horizon agentic tasks.
-
-The `GLM-5` model is first supported in `vllm-ascend:v0.17.0rc1`(for 950DT Products, the model is supported from `vllm-ascend:v0.23.0rc1`), and all **v0.17.0rc1 and later versions** can run stably. To use the latest features (e.g., PD separation, MTP), it is recommended to use the latest release candidate or official version. The version of transformers need to be upgraded to 5.2.0 or later versions.
+To use the latest features (e.g., PD separation, MTP), use a vLLM-Ascend release that supports GLM-5.1. The version of transformers needs to be 5.2.0 or later.
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
 
@@ -28,8 +26,6 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 |  Weight Version                   | Hardware Requirements      | Download Links |
 |-----------------------------------|----------------------------|----------------|
-| `GLM-5-w4a8`(Quantized version)   | 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5-w4a8) |
-| `GLM-5-w8a8`(Quantized version)   | 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5-w8a8) |
 | `GLM-5.1-w4a8`(Quantized version) | 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node | [Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.1-w4a8) |
 | `GLM-5.1-w8a8`(Quantized version) | 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node | [Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.1-w8a8) |
 |`GLM-5.1-w8a8c8`(Quantized version)| The weights have been verified on Atlas 800 A3 and are recommended for use. |[Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.1-w8a8c8-MTP)|
@@ -47,7 +43,7 @@ If multi-node deployment is required, please follow the [Verify Multi-node Commu
 
 ### 4.1 Docker Image Installation
 
-You can use our official docker image to run GLM-5/5.1 directly.
+You can use our official docker image to run GLM-5.1 directly.
 
 === "950DT Products"
 
@@ -183,7 +179,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 === "950DT Products"
 
-    - Quantized model `glm-5-w4a4` can be deployed on 1 950DT Product (96GB × 8) .
+    - Quantized model `glm-5.1-w4a4` can be deployed on 1 950DT Product (96GB × 8) .
 
     Run the following script to execute online inference.
 
@@ -211,13 +207,13 @@ If you want to deploy multi-node environment, you need to set up environment on 
     export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1
     
     # Ensure the model path matches the directory recorded during download
-    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a4 \
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.1-w4a4 \
     --host 0.0.0.0 \
     --port 8000 \
     --data-parallel-size 1 \
     --tensor-parallel-size 8 \
     --seed 1024 \
-    --served-model-name glm-5 \
+    --served-model-name glm-5.1 \
     --enable-expert-parallel \
     --max-num-seqs 128 \
     --max-model-len 202752 \
@@ -239,7 +235,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 === "A3 series"
 
-    - Quantized model `glm-5-w4a8` and `glm-5.1-w4a8` can be deployed on 1 Atlas 800 A3 (128GB × 8) .
+    - Quantized model `glm-5.1-w4a8` can be deployed on 1 Atlas 800 A3 (128GB × 8) .
 
     Run the following script to execute online inference.
 
@@ -254,14 +250,14 @@ If you want to deploy multi-node environment, you need to set up environment on 
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     # Ensure the model path matches the directory recorded during download
-    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.1-w4a8 \
     --host 0.0.0.0 \
     --port 8000 \
     --data-parallel-size 1 \
     --tensor-parallel-size 16 \
     --enable-expert-parallel \
     --seed 1024 \
-    --served-model-name glm-5 \
+    --served-model-name glm-5.1 \
     --max-num-seqs 16 \
     --max-model-len 200000 \
     --max-num-batched-tokens 4096 \
@@ -278,7 +274,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 === "A2 series"
 
-    - Quantized model `glm-5-w4a8` can be deployed on 1 Atlas 800 A2 (64GB × 8) .
+    - Quantized model `glm-5.1-w4a8` can be deployed on 1 Atlas 800 A2 (64GB × 8) .
 
     Run the following script to execute online inference.
 
@@ -290,14 +286,14 @@ If you want to deploy multi-node environment, you need to set up environment on 
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     
     # Ensure the model path matches the directory recorded during download
-    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.1-w4a8 \
     --host 0.0.0.0 \
     --port 8000 \
     --data-parallel-size 1 \
     --tensor-parallel-size 8 \
     --enable-expert-parallel \
     --seed 1024 \
-    --served-model-name glm-5 \
+    --served-model-name glm-5.1 \
     --max-num-seqs 8 \
     --max-model-len 32768 \
     --max-num-batched-tokens 4096 \
@@ -318,10 +314,10 @@ Only the key parameters specific to this model/scenario are described below. `ma
 
 **Model-specific parameters:**
 
-- `--enable-expert-parallel`: Must be enabled for the MoE architecture of GLM-5.
+- `--enable-expert-parallel`: Must be enabled for the MoE architecture of GLM-5.1.
 - `--tensor-parallel-size 16` / `--tensor-parallel-size 8`: Tensor parallelism within each DP rank. For A3 (16 NPUs), use `tp16`; for A2 (8 NPUs), use `tp8`.
 - `--quantization ascend`: Enables Ascend quantization for w4a8/w8a8 quantized weights.
-- `--speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'`: Enables Multi-Token Prediction (MTP) speculative decoding with GLM-5's DeepSeek-style MTP draft model. `num_speculative_tokens` (3-5) controls how many tokens are speculated per step; `enforce_eager: true` is required because GLM-5 does not support graph-mode speculative decoding.
+- `--speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'`: Enables Multi-Token Prediction (MTP) speculative decoding with GLM-5.1's DeepSeek-style MTP draft model. `num_speculative_tokens` (3-5) controls how many tokens are speculated per step; `enforce_eager: true` is required because GLM-5.1 does not support graph-mode speculative decoding.
 - `--enable-chunked-prefill` / `--enable-prefix-caching`: Recommended for long-context and multi-user scenarios — chunked prefill splits long prompts to improve TTFT, prefix caching reuses KV cache for shared prefixes (e.g., system prompts).
 - `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'`: Enables graph capture for the decode phase only, improving decode performance by reducing kernel launch overhead.
 - `--additional-config '{"multistream_overlap_shared_expert": true}'`: Overlaps shared-expert computation on an additional stream. Note: automatically disabled when `"enable_fused_mc2": true`, as the two optimizations conflict.
@@ -378,7 +374,7 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
     --tensor-parallel-size 4 \
     --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
     --seed 1024 \
-    --served-model-name glm-5 \
+    --served-model-name glm-5.1 \
     --tool-call-parser glm47 \
     --reasoning-parser glm45 \
     --enable-auto-tool-choice \
@@ -425,7 +421,7 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
     --tensor-parallel-size 4 \
     --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
     --seed 1024 \
-    --served-model-name glm-5 \
+    --served-model-name glm-5.1 \
     --tool-call-parser glm47 \
     --reasoning-parser glm45 \
     --enable-auto-tool-choice \
@@ -470,7 +466,7 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     
     # Ensure the model path matches the directory recorded during download
-    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.1-w4a8 \
     --host 0.0.0.0 \
     --port 8000 \
     --data-parallel-size 2 \
@@ -480,7 +476,7 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
     --tensor-parallel-size 8 \
     --quantization ascend \
     --seed 1024 \
-    --served-model-name glm-5 \
+    --served-model-name glm-5.1 \
     --enable-expert-parallel \
     --max-num-seqs 2 \
     --max-model-len 131072 \
@@ -512,7 +508,7 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     
     # Ensure the model path matches the directory recorded during download
-    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.1-w4a8 \
     --host 0.0.0.0 \
     --port 8000 \
     --headless \
@@ -524,7 +520,7 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
     --tensor-parallel-size 8 \
     --quantization ascend \
     --seed 1024 \
-    --served-model-name glm-5 \
+    --served-model-name glm-5.1 \
     --enable-expert-parallel \
     --max-num-seqs 2 \
     --max-model-len 131072 \
@@ -566,7 +562,7 @@ In addition to all single-node parameters described in [Single-Node Online Deplo
 
 ### 5.3 Prefill-Decode Disaggregation
 
-We'd like to show the deployment guide of `GLM-5` on multi-node environment with Prefill-Decode (PD) disaggregation for better performance. *Prefill-Decode Disaggregation* refers to the separation of the prefill stage and the decode stage across different nodes to improve throughput and latency.
+We'd like to show the deployment guide of `GLM-5.1` on multi-node environment with Prefill-Decode (PD) disaggregation for better performance. *Prefill-Decode Disaggregation* refers to the separation of the prefill stage and the decode stage across different nodes to improve throughput and latency.
 
 In the PD disaggregation scenario, Mooncake is used as the KV cache transfer connector between the prefill and decode nodes. Please refer to [KV Cache Pool (Ascend Store) Deployment Guide](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/user_guide/feature_guide/kv_cache_pool_ascend_store.md) for the Mooncake configuration.
 
@@ -695,14 +691,14 @@ if __name__ == "__main__":
         export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
         
         # Ensure the model path matches the directory recorded during download
-        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a4 \
+        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.1-w4a4 \
             --host 0.0.0.0 \
             --port $2 \
             --data-parallel-size $3 \
             --tensor-parallel-size $7 \
             --max-model-len 135000 \
             --max-num-batched-tokens 8192 \
-            --served-model-name glm-5 \
+            --served-model-name glm-5.1 \
             --gpu-memory-utilization 0.95 \
             --enable-expert-parallel \
             --max-num-seqs 8 \
@@ -760,14 +756,14 @@ if __name__ == "__main__":
         export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
         
         # Ensure the model path matches the directory recorded during download
-        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a4 \
+        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.1-w4a4 \
             --host 0.0.0.0 \
             --port $2 \
             --data-parallel-size $3 \
             --tensor-parallel-size $7 \
             --max-model-len 135000 \
             --max-num-batched-tokens 8192 \
-            --served-model-name glm-5 \
+            --served-model-name glm-5.1 \
             --gpu-memory-utilization 0.95 \
             --enable-expert-parallel \
             --max-num-seqs 8 \
@@ -825,7 +821,7 @@ if __name__ == "__main__":
         export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
         
         # Ensure the model path matches the directory recorded during download
-        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a4 \
+        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.1-w4a4 \
             --host 0.0.0.0 \
             --port $2 \
             --data-parallel-size $3 \
@@ -835,7 +831,7 @@ if __name__ == "__main__":
             --tensor-parallel-size $7 \
             --max-model-len 135000 \
             --max-num-batched-tokens 240 \
-            --served-model-name glm-5 \
+            --served-model-name glm-5.1 \
             --gpu-memory-utilization 0.95 \
             --enable-expert-parallel \
             --max-num-seqs 60 \
@@ -893,7 +889,7 @@ if __name__ == "__main__":
         export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
         
         # Ensure the model path matches the directory recorded during download
-        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a4 \
+        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.1-w4a4 \
             --host 0.0.0.0 \
             --port $2 \
             --data-parallel-size $3 \
@@ -903,7 +899,7 @@ if __name__ == "__main__":
             --tensor-parallel-size $7 \
             --max-model-len 202752 \
             --max-num-batched-tokens 240 \
-            --served-model-name glm-5 \
+            --served-model-name glm-5.1 \
             --gpu-memory-utilization 0.95 \
             --enable-expert-parallel \
             --max-num-seqs 60 \
@@ -1082,7 +1078,7 @@ if __name__ == "__main__":
             --enable-expert-parallel \
             --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp","enforce_eager":true}' \
             --seed 1024 \
-            --served-model-name glm-5 \
+            --served-model-name glm-5.1 \
             --max-model-len 202752 \
             --kv-cache-dtype int8 \
             --attention_config.indexer_kv_dtype int8 \
@@ -1144,7 +1140,7 @@ if __name__ == "__main__":
             --enable-expert-parallel \
             --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp","enforce_eager":true}' \
             --seed 1024 \
-            --served-model-name glm-5 \
+            --served-model-name glm-5.1 \
             --max-model-len 202752 \
             --kv-cache-dtype int8 \
             --attention_config.indexer_kv_dtype int8 \
@@ -1207,7 +1203,7 @@ if __name__ == "__main__":
             --enable-expert-parallel \
             --speculative-config '{"num_speculative_tokens": 3,  "method":"deepseek_mtp","enforce_eager":true}' \
             --seed 1024 \
-            --served-model-name glm-5 \
+            --served-model-name glm-5.1 \
             --max-model-len 202752 \
             --max-num-batched-tokens 164 \
             --kv-cache-dtype int8 \
@@ -1270,7 +1266,7 @@ if __name__ == "__main__":
             --enable-expert-parallel \
             --speculative-config '{"num_speculative_tokens": 3,  "method":"deepseek_mtp","enforce_eager":true}' \
             --seed 1024 \
-            --served-model-name glm-5 \
+            --served-model-name glm-5.1 \
             --max-model-len 202752 \
             --max-num-batched-tokens 164 \
             --kv-cache-dtype int8 \
@@ -1443,7 +1439,7 @@ Once your server is started, you can query the model with input prompts:
 curl http://<node0_ip>:<port>/v1/completions \
     -H "Content-Type: application/json" \
     -d '{
-        "model": "glm-5",
+        "model": "glm-5.1",
         "prompt": "The future of AI is",
         "max_completion_tokens": 15,
         "temperature": 0
@@ -1453,7 +1449,7 @@ curl http://<node0_ip>:<port>/v1/completions \
 Expected Result:
 
 ```shell
-{"id": "chatcmlib-bc44ad093dec79a2", "object": "chat.completion", "created": "1770903266", "model": "glm-5", "choices": [{ "index": 0, "message": {"role": "assistant", "content": "The future of AI is not one thing, but a convergence of several powerful trends.", "annotations": "null", "audio": "null", "function_call": "null", "tool_calls": [], "reasoning": "null"}, "logprobs": "null", "finish_reason": "length", "stop_reason": "null", "token_ids": null}], "service_tier": "null", "system fingerprint": "null", "usage": {"prompt_tokens": 5, "total_tokens": 20, "completion_tokens": 15, "prompt_tokens_details": null}, "prompt_logprobs": "null", "prompt_token_ids": "null", "kv_transfer_params": null}
+{"id": "chatcmlib-bc44ad093dec79a2", "object": "chat.completion", "created": "1770903266", "model": "glm-5.1", "choices": [{ "index": 0, "message": {"role": "assistant", "content": "The future of AI is not one thing, but a convergence of several powerful trends.", "annotations": "null", "audio": "null", "function_call": "null", "tool_calls": [], "reasoning": "null"}, "logprobs": "null", "finish_reason": "length", "stop_reason": "null", "token_ids": null}], "service_tier": "null", "system fingerprint": "null", "usage": {"prompt_tokens": 5, "total_tokens": 20, "completion_tokens": 15, "prompt_tokens_details": null}, "prompt_logprobs": "null", "prompt_token_ids": "null", "kv_transfer_params": null}
 ```
 
 ## 7 Accuracy Evaluation
@@ -1552,7 +1548,7 @@ For environment variable descriptions and constraints, refer to [envs.py](https:
 
   A: Please update the version of transformers to 5.2.0
 
-- **Q: How to enable function calling for GLM-5?**
+- **Q: How to enable function calling for GLM-5.1?**
 
   A: Please add following configurations in vLLM startup command
 
