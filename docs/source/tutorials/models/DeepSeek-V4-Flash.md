@@ -326,6 +326,7 @@ Key Parameter Descriptions:
 - `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
 - `--block-size` sets the KV cache block size. To enable the experimental 4k prefix cache hit support, change it from `128` to `32`.
 - `--quantization ascend` enables Ascend quantization for the W8A8 model.
+- `--kv-cache-dtype turboquant_4bit_nc`: Enables 4-bit TurboQuant quantization for DeepSeek-V4's Compress-4 attention KV cache to reduce memory usage. It is especially suitable for ultra-long-context workloads such as AI coding, with greater benefits when KV cache memory limits concurrency. It is configured independently of weight and indexer cache quantization and requires compatible TurboQuant and fused attention operators. Actual benefits depend on the workload and serving configuration.
 - `--speculative-config` configures speculative decoding to accelerate inference. Use `mtp` for Multi-Token Prediction (MTP) and `dspark` for DSpark models. When using DSpark, `num_speculative_tokens` must be at least 5 (check the checkpoint's `config.json`).
 - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` enables full ACL graph execution in the decode phase to reduce scheduling latency.
 - `--additional-config` enables Ascend-specific optimizations. `enable_npugraph_ex` enables enhanced ACL graph execution, `enable_static_kernel: false` keeps static-kernel compilation disabled, `enable_cpu_binding` enables Ascend-native CPU binding, `enable_dsa_cp` enables DSA context parallelism, and `multistream_overlap_shared_expert` overlaps shared expert computation for better MoE throughput.
@@ -1076,6 +1077,7 @@ Before you start, please:
 Key Parameter Descriptions:
 
 - `--no-disable-hybrid-kv-cache-manager` keeps the hybrid KV cache manager enabled. DeepSeek-V4 KV Pool deployments require this flag; otherwise, the service may OOM during startup.
+- `--kv-cache-dtype turboquant_4bit_nc`: Enables 4-bit TurboQuant quantization for DeepSeek-V4's Compress-4 attention KV cache to reduce memory usage. It is especially suitable for ultra-long-context workloads such as AI coding, with greater benefits when KV cache memory limits concurrency. It is configured independently of weight and indexer cache quantization and requires compatible TurboQuant and fused attention operators. Actual benefits depend on the workload and serving configuration. In P/D disaggregated deployments, TurboQuant must be enabled on both Prefill and Decode sides or disabled on both sides.
 - `--enforce-eager` forces eager execution on prefill nodes instead of graph compilation.
 - `kv_connector_extra_config.prefill.dp_size/tp_size` and `decode.dp_size/tp_size` must match the actual global DP and TP layout on the prefill and decode sides.
 - `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the KV Cache of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, enable this configuration only on decode nodes.
