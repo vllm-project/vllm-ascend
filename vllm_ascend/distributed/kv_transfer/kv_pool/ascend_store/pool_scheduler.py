@@ -129,9 +129,10 @@ class KVPoolScheduler:
         if (
             self.use_layerwise
             and self.backend_name != "memcache"
+            and not self.use_block_key_layerwise
             and len(cacheable_block_sizes) != len(self.original_block_size)
         ):
-            raise ValueError("AscendStore private KV state requires non-layerwise transfer")
+            raise ValueError("AscendStore private KV state requires Mooncake block-key or non-layerwise transfer")
         self.grouped_block_size = [block_size * self.dcp_size for block_size in self.original_block_size]
         requested_hash_block_size = vllm_config.cache_config.prefix_match_unit
         if not isinstance(requested_hash_block_size, int):
@@ -1032,7 +1033,6 @@ class KVPoolScheduler:
             self._request_trackers.pop(finished_req_id, None)
             self._unfinished_requests.pop(finished_req_id, None)
             self._preempted_req_ids.discard(finished_req_id)
-            self._loading_req_ids.discard(finished_req_id)
 
         for req_id in scheduler_output.preempted_req_ids:
             self._preempted_req_ids.update(scheduler_output.preempted_req_ids)
@@ -1145,6 +1145,8 @@ class KVPoolScheduler:
         """
         hand the connector_output, free non-null mamba blocks and so on.
         """
+        self.update_finished_recving(connector_output.finished_recving)
+
         meta = connector_output.kv_connector_worker_meta
         if not isinstance(meta, AscendStoreKVConnectorWorkerMetadata) or self._block_pool is None:
             return

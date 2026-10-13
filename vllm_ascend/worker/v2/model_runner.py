@@ -94,7 +94,6 @@ from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProces
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import (
     is_deepseek_v41,
-    is_pd_decode_recompute_scheduler_enabled,
     lmhead_tp_enable,
     lmhead_tp_max_num_logits,
     lmhead_tp_pad_rows,
@@ -626,7 +625,14 @@ class NPUModelRunner(GPUModelRunner):
 
     def gather_batch_req_state(self, scheduler_output: SchedulerOutput, dummy_run: bool):
         batch_state, uniform_token_count = super().gather_batch_req_state(scheduler_output, dummy_run)
-        if batch_state is not None and is_pd_decode_recompute_scheduler_enabled(self.vllm_config):
+        kv_cfg = self.vllm_config.kv_transfer_config
+        is_pd_decode_node = kv_cfg is not None and kv_cfg.is_kv_consumer and not kv_cfg.is_kv_producer
+        # TODO: has_prefill describes prompt progress, not decode-graph eligibility.
+        # Decode-like prompt tails can therefore incorrectly disable FULL graphs
+        # for the entire batch; see https://github.com/vllm-project/vllm/pull/58400.
+        # This PD-only reclassification is a temporary workaround. Replace it with
+        # a dedicated graph-eligibility check once the upstream semantics are aligned.
+        if batch_state is not None and is_pd_decode_node:
             pd_decode_recompute = (
                 batch_state.is_prefilling_np
                 & (batch_state.num_computed_prefill_tokens_np > 0)

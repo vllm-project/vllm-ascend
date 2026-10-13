@@ -25,7 +25,9 @@ def _make_runner(need_timing: bool = True):
         scheduler_config=SimpleNamespace(profiling_chunk_config=SimpleNamespace(need_timing=need_timing)),
         sparse_kv_offload_config=SimpleNamespace(enabled=False),
     )
-    runner.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(prefill_context_parallel_size=1))
+    runner.vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=1), kv_transfer_config=None
+    )
     runner.max_num_tokens = 16
     runner.model_config = SimpleNamespace(hf_config=SimpleNamespace(model_type="other_model"))
     runner.kv_cache_config = KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
@@ -128,18 +130,13 @@ def _make_batch_state(computed: list[int], scheduled: list[int], prefill_lens: l
     )
 
 
-def test_recompute_scheduler_reclassifies_pd_tail_in_mixed_decode_batch():
+def test_pd_decode_reclassifies_pd_tail_in_mixed_decode_batch():
     runner = _make_runner()
     runner.decode_query_len = 1
+    runner.vllm_config.kv_transfer_config = SimpleNamespace(is_kv_consumer=True, is_kv_producer=False)
     batch_state = _make_batch_state([127, 64], [1, 1], [128, 64])
 
-    with (
-        patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(batch_state, None)),
-        patch(
-            "vllm_ascend.worker.v2.model_runner.is_pd_decode_recompute_scheduler_enabled",
-            return_value=True,
-        ),
-    ):
+    with patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(batch_state, None)):
         gathered, uniform = runner.gather_batch_req_state(SimpleNamespace(), False)
 
     np.testing.assert_array_equal(gathered.is_prefilling_np, [False, False])
@@ -148,21 +145,20 @@ def test_recompute_scheduler_reclassifies_pd_tail_in_mixed_decode_batch():
 
 
 @pytest.mark.parametrize(
-    ("computed", "scheduled", "enabled"),
-    [(64, 8, True), (127, 1, False)],
+    ("computed", "scheduled", "kv_role"),
+    [(64, 8, "consumer"), (0, 1, "consumer"), (127, 1, None), (127, 1, "producer"), (127, 1, "both")],
 )
-def test_recompute_scheduler_keeps_non_matching_prefill(computed, scheduled, enabled):
+def test_pd_decode_keeps_non_matching_prefill(computed, scheduled, kv_role):
     runner = _make_runner()
+    if kv_role is not None:
+        runner.vllm_config.kv_transfer_config = SimpleNamespace(
+            is_kv_consumer=kv_role in ("consumer", "both"),
+            is_kv_producer=kv_role in ("producer", "both"),
+        )
     runner.decode_query_len = 1
     batch_state = _make_batch_state([computed, 64], [scheduled, 1], [128, 64])
 
-    with (
-        patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(batch_state, None)),
-        patch(
-            "vllm_ascend.worker.v2.model_runner.is_pd_decode_recompute_scheduler_enabled",
-            return_value=enabled,
-        ),
-    ):
+    with patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(batch_state, None)):
         gathered, uniform = runner.gather_batch_req_state(SimpleNamespace(), False)
 
     np.testing.assert_array_equal(gathered.is_prefilling_np, [True, False])
@@ -170,23 +166,38 @@ def test_recompute_scheduler_keeps_non_matching_prefill(computed, scheduled, ena
     assert uniform is None
 
 
-def test_recompute_scheduler_supports_multi_token_decode_query():
+@pytest.mark.parametrize("query_len", [2, 4])
+def test_pd_decode_supports_multi_token_decode_query(query_len):
     runner = _make_runner()
-    runner.decode_query_len = 2
-    batch_state = _make_batch_state([126, 64], [2, 2], [128, 64])
+    runner.decode_query_len = query_len
+    runner.vllm_config.kv_transfer_config = SimpleNamespace(is_kv_consumer=True, is_kv_producer=False)
+    batch_state = _make_batch_state([128 - query_len, 64], [query_len, query_len], [128, 64])
 
-    with (
-        patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(batch_state, None)),
-        patch(
-            "vllm_ascend.worker.v2.model_runner.is_pd_decode_recompute_scheduler_enabled",
-            return_value=True,
-        ),
-    ):
+    with patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(batch_state, None)):
         gathered, uniform = runner.gather_batch_req_state(SimpleNamespace(), False)
 
     np.testing.assert_array_equal(gathered.is_prefilling_np, [False, False])
     assert gathered.has_prefill is False
-    assert uniform == 2
+    assert uniform == query_len
+
+
+def test_pd_decode_preserves_remaining_prefill():
+    runner = _make_runner()
+    runner.decode_query_len = 4
+    runner.vllm_config.kv_transfer_config = SimpleNamespace(is_kv_consumer=True, is_kv_producer=False)
+    batch_state = _make_batch_state([124, 64], [4, 4], [128, 128])
+    with patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(batch_state, None)):
+        gathered, uniform = runner.gather_batch_req_state(SimpleNamespace(), False)
+    np.testing.assert_array_equal(gathered.is_prefilling_np, [False, True])
+    assert gathered.has_prefill is True
+    assert uniform is None
+
+
+def test_pd_decode_preserves_dummy_batch():
+    runner = _make_runner()
+    runner.vllm_config.kv_transfer_config = SimpleNamespace(is_kv_consumer=True, is_kv_producer=False)
+    with patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(None, 4)):
+        assert runner.gather_batch_req_state(SimpleNamespace(), True) == (None, 4)
 
 
 def test_execute_model_records_profiling_time():
@@ -1144,7 +1155,11 @@ def test_pd_tail_input_survives_decode_reclassification(num_spec_tokens, full_cg
 
     with (
         patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(batch_state, None)),
-        patch("vllm_ascend.worker.v2.model_runner.is_pd_decode_recompute_scheduler_enabled", return_value=True),
+        patch.object(
+            runner.vllm_config,
+            "kv_transfer_config",
+            SimpleNamespace(is_kv_consumer=True, is_kv_producer=False),
+        ),
     ):
         gathered, uniform = runner.gather_batch_req_state(scheduler_output, False)
     assert not gathered.has_prefill
