@@ -145,11 +145,12 @@ class MLAFanout:
                 fcntl.flock(lock, fcntl.LOCK_UN)
 
     def _publish(self, path: Path, record: dict[str, Any]) -> None:
+    def _publish(self, path: Path, record: dict[str, Any]) -> None:
         fd, temporary = tempfile.mkstemp(dir=self.directory)
         try:
+            os.fchmod(fd, 0o644)
             with os.fdopen(fd, "w") as stream:
                 json.dump(record, stream)
-                os.fchmod(stream.fileno(), 0o644)
             os.replace(temporary, path)
         finally:
             Path(temporary).unlink(missing_ok=True)
