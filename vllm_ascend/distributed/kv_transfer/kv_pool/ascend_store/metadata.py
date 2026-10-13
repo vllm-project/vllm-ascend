@@ -39,7 +39,6 @@ def _as_positive_int(value: Any, default: int) -> int:
     return parsed if parsed > 0 else default
 
 
-
 def infer_peer_cp_sizes(
     kv_role: str,
     extra_config: Mapping[str, Any] | object,
@@ -132,6 +131,35 @@ def infer_dcp_mismatch_info(
     local_pcp = _as_positive_int(local_pcp_size, 1)
     peer_dcp, peer_pcp = infer_peer_cp_sizes(kv_role, extra_config, local_dcp, local_pcp)
     return peer_dcp != local_dcp or peer_pcp != local_pcp
+
+
+def layout_independent_block_hashes(
+    prompt_token_ids,
+    block_size: int,
+    caching_hash_fn,
+) -> list:
+    """Chain block hashes over the request's FULL prompt token stream.
+
+    vLLM's own ``Request.block_hashes`` is produced by ``get_request_block_hasher``,
+    which walks ``request.all_token_ids``. Under decode-context parallelism that
+    stream is the **rank-local** (shard-compressed) sequence, so two ranks - or the
+    two P/D stages - running different DCP sizes hash different tokens and can
+    never agree on a pool key. Pool keys must instead be a function of the token
+    content alone, so hash the full prompt in fixed ``block_size`` chunks with the
+    same chaining primitive vLLM uses. Every rank then derives identical hashes.
+    """
+    from vllm.v1.core.kv_cache_utils import hash_block_tokens
+
+    if block_size <= 0:
+        return []
+    hashes: list = []
+    parent = None
+    num_full_blocks = len(prompt_token_ids) // block_size
+    for block_index in range(num_full_blocks):
+        start = block_index * block_size
+        parent = hash_block_tokens(caching_hash_fn, parent, prompt_token_ids[start : start + block_size])
+        hashes.append(parent)
+    return hashes
 
 
 def infer_tp_mismatch_info(

@@ -114,11 +114,18 @@ class LayerBatchBuilder:
         num_layers: int,
         group_id: int = 0,
         layer_byte_offset: int = 0,
+        shard_count: int = 1,
     ) -> None:
         self.page_size_bytes = page_size_bytes
         self.num_layers = num_layers
         self.group_id = group_id
         self.layer_byte_offset = layer_byte_offset
+        # Number of local blocks that make up ONE pool block. It is
+        # ``layout_dcp_size`` on the un-sharded side of a decode-only DCP
+        # deployment (one pool block spans that many local blocks, each owning
+        # one shard slot of the shared GVA region) and 1 everywhere else, so
+        # every symmetric path keeps its current behaviour byte for byte.
+        self.shard_count = max(1, int(shard_count))
         self._block_len_np = np.asarray(token_database.group_block_len[group_id], dtype=np.int64)
         self._kv_caches_base_addr_np = np.asarray(
             token_database.group_kv_caches_base_addr[group_id],
@@ -265,9 +272,10 @@ class LayerBatchBuilder:
         if task.use_key_major_ranges:
             return self._build_key_major_shared(task, is_save)
 
+        fanout = self.shard_count
         total = 0
         for block_range in task.block_ranges:
-            total += block_range.end_block - block_range.start_block
+            total += (block_range.end_block - block_range.start_block) * fanout
             if block_range.partial_block_index is not None:
                 total += 1
 
@@ -292,18 +300,26 @@ class LayerBatchBuilder:
             block_ids_np, block_gvas_np = self._require_request_arrays(block_range, is_save)
             gva_block_offset = request.gva_block_offset if is_save else request.load_gva_block_offset
 
-            num_blocks = block_range.end_block - block_range.start_block
+            # Block ranges are expressed in POOL-block units while the arrays are
+            # indexed by LOCAL block: the un-sharded side of a decode-only DCP
+            # deployment pairs one pool block with ``shard_count`` local blocks
+            # (one per shard slot), so both the counted rows and the slice
+            # bounds are scaled by it. ``shard_count == 1`` reproduces the
+            # previous behaviour exactly.
+            num_blocks = (block_range.end_block - block_range.start_block) * fanout
             if num_blocks > 0:
-                gva_start = block_range.start_block - gva_block_offset
-                gva_end = block_range.end_block - gva_block_offset
+                gva_start = (block_range.start_block - gva_block_offset) * fanout
+                gva_end = (block_range.end_block - gva_block_offset) * fanout
                 if gva_start < 0 or gva_end > len(block_gvas_np):
                     raise RuntimeError(
                         "ReqMeta GVA metadata does not cover requested block "
                         f"range [{block_range.start_block}, {block_range.end_block}) "
-                        f"with offset {gva_block_offset}"
+                        f"with offset {gva_block_offset} and fanout {fanout}"
                     )
                 end = offset + num_blocks
-                block_ids_arr[offset:end] = block_ids_np[block_range.start_block : block_range.end_block]
+                ids_start = block_range.start_block * fanout
+                ids_end = block_range.end_block * fanout
+                block_ids_arr[offset:end] = block_ids_np[ids_start:ids_end]
                 block_gvas_arr[offset:end] = block_gvas_np[gva_start:gva_end]
                 offset = end
 
@@ -317,7 +333,7 @@ class LayerBatchBuilder:
                 if partial_block_gva is None:
                     partial_block_gva = request.last_block_gva
                 assert partial_block_gva is not None
-                block_ids_arr[offset] = block_ids_np[block_range.partial_block_index]
+                block_ids_arr[offset] = block_ids_np[block_range.partial_block_index * fanout]
                 block_gvas_arr[offset] = partial_block_gva
                 offset += 1
 

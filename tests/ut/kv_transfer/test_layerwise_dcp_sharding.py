@@ -213,5 +213,44 @@ class TestDecodeOnlyDcpMetadata:
         assert only_fn(1, 1, 8, 2) is False
 
 
+class TestLayoutIndependentBlockHashes:
+    """Pool keys must not depend on the rank-local (shard-compressed) layout."""
+
+    @staticmethod
+    def _hashes(token_ids, block_size):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
+            layout_independent_block_hashes,
+        )
+
+        def stub_hash_fn(payload):
+            # Deterministic, dependency-free stand-in for vLLM's hash function.
+            return repr(payload).encode()
+
+        return layout_independent_block_hashes(token_ids, block_size, stub_hash_fn)
+
+    def test_chunks_the_full_token_stream(self):
+        tokens = list(range(840))
+        assert len(self._hashes(tokens, 256)) == 3  # 840 // 256
+        assert len(self._hashes(tokens, 128)) == 6  # 840 // 128
+
+    def test_depends_only_on_token_content(self):
+        # Two "ranks" with different local structures but the same prompt must
+        # derive the same chain: that is what makes a dcp==1 producer and a
+        # dcp>1 consumer address the same pool objects.
+        tokens = list(range(1024))
+        assert self._hashes(tokens, 256) == self._hashes(tokens, 256)
+
+    def test_is_a_prefix_chain(self):
+        # The first block's hash must not depend on later tokens.
+        short = self._hashes(list(range(256)), 256)
+        long = self._hashes(list(range(1024)), 256)
+        assert short[0] == long[0]
+
+    def test_ignores_trailing_partial_block(self):
+        # Only full blocks are hashed, matching vLLM's own hasher.
+        assert len(self._hashes(list(range(255)), 256)) == 0
+        assert len(self._hashes(list(range(256)), 256)) == 1
+
+
 if __name__ == "__main__":
     raise SystemExit(__import__("pytest").main([__file__, "-v"]))

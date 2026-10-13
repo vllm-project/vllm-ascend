@@ -742,6 +742,7 @@ class KVPoolWorker:
                     group_num_layers,
                     group_id=group_id,
                     layer_byte_offset=layer_byte_offset,
+                    shard_count=(self.layout_dcp_size if (self.dcp_size == 1 and self.layout_dcp_size > 1) else 1),
                 )
             )
         return builders
@@ -1897,10 +1898,24 @@ class KVPoolWorker:
                     alloc_size,
                 )
 
-                # Pad block_gvas to match block_ids length (fill 0 for non-transferred blocks)
+                # Pad block_gvas to match block_ids length (fill 0 for non-transferred blocks).
+                # Decode-only DCP: on the un-sharded side ONE pool block spans
+                # ``fanout`` local blocks, each owning one shard slot of the shared GVA
+                # region. The pool block's GVA is therefore written to every one of its
+                # local slots, offset by that shard's stride, so the sharded peer finds
+                # its own shard where it expects it. The destination GVA fully determines
+                # where the store writes (keys are only used for commit bookkeeping), so
+                # this is the entire data-plane fan-out.
+                fanout = self.layout_dcp_size if (self.dcp_size == 1 and self.layout_dcp_size > 1) else 1
+                shard_stride = alloc_size // self.layout_dcp_size if self.layout_dcp_size > 0 else 0
                 full_gvas = [0] * len(block_ids_by_group)
                 for blk_idx, gva in zip(transfer_blocks, block_gvas):
-                    if blk_idx < len(full_gvas):
+                    if fanout > 1 and gva > 0:
+                        for shard in range(fanout):
+                            pos = blk_idx * fanout + shard
+                            if pos < len(full_gvas):
+                                full_gvas[pos] = gva + shard * shard_stride
+                    elif blk_idx < len(full_gvas):
                         full_gvas[blk_idx] = gva
 
                 all_group_gvas.append(np.asarray(full_gvas, dtype=np.int64))

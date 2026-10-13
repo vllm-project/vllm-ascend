@@ -57,6 +57,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     infer_group_cache_families,
     infer_peer_cp_sizes,
     infer_tp_mismatch_info,
+    layout_independent_block_hashes,
     normalize_block_ids_by_group,
     resolve_layout_dcp_size,
     uses_hybrid_kv_cache,
@@ -143,6 +144,20 @@ class KVPoolScheduler:
             self.dcp_size, self.pcp_size, self.peer_dcp_size, self.peer_pcp_size
         )
         self.layout_dcp_size = resolve_layout_dcp_size(self.is_decode_only_dcp, self.dcp_size, self.peer_dcp_size)
+        # Decode-only DCP: pool keys must be layout independent. vLLM's block
+        # hashes walk the rank-local token stream, which under DCP is the
+        # shard-compressed sequence, so a dcp==1 producer and a dcp>1 consumer
+        # would never agree on a key. Hash the full prompt stream instead,
+        # identically on every rank. Symmetric topologies keep vLLM's own
+        # hashes untouched, so their keys and behaviour are unchanged.
+        self._pool_hash_fn = None
+        self._pool_block_hashes_cache: dict = {}
+        if self.is_decode_only_dcp:
+            from vllm.utils.hashing import get_hash_fn_by_name
+            from vllm.v1.core.kv_cache_utils import init_none_hash
+
+            self._pool_hash_fn = get_hash_fn_by_name(vllm_config.cache_config.prefix_caching_hash_algo)
+            init_none_hash(self._pool_hash_fn)
 
         speculative_config = getattr(vllm_config, "speculative_config", None)
         use_eagle_fn = getattr(speculative_config, "use_eagle", None)
@@ -360,7 +375,7 @@ class KVPoolScheduler:
         # In layerwise mode, always query from block 0 because the remote
         # pool stores per-layer data that may not match local prefix cache.
         query_start_block = 0 if self.use_layerwise else min(num_computed_tokens // self._block_size, num_blocks)
-        block_hashes_to_query = request.block_hashes[query_start_block:num_blocks]
+        block_hashes_to_query = self._pool_block_hashes(request)[query_start_block:num_blocks]
         if not block_hashes_to_query:
             return 0
 
@@ -405,6 +420,33 @@ class KVPoolScheduler:
             use_eagle=self.use_eagle,
             retention_interval=self.retention_interval,
         )
+
+    def _pool_block_hashes(self, request):
+        """Block-hash basis for pool keys.
+
+        Returns vLLM's own (rank-local) hashes for every symmetric topology, and
+        a layout-independent hash chain over the full prompt for decode-only DCP
+        so that a dcp==1 producer and a dcp>1 consumer address the same objects.
+        """
+        # ``getattr`` guard: several unit tests build a KVPoolScheduler without
+        # running __init__, and those stubs must keep vLLM's own hashes.
+        if getattr(self, "_pool_hash_fn", None) is None:
+            return request.block_hashes
+        return self._layout_block_hashes(request.request_id, request.prompt_token_ids)
+
+    def _layout_block_hashes(self, request_id, prompt_token_ids) -> list:
+        """Cached layout-independent hash chain for one request."""
+        cache = getattr(self, "_pool_block_hashes_cache", None)
+        if cache is None:
+            cache = {}
+            self._pool_block_hashes_cache = cache
+        cached = cache.get(request_id)
+        if cached is None:
+            cached = layout_independent_block_hashes(
+                list(prompt_token_ids or []), self.hash_block_size, self._pool_hash_fn
+            )
+            cache[request_id] = cached
+        return cached
 
     def _make_layerwise_hit_check_keys(self, group_id: int, block_hash_hex: str) -> list[str]:
         """All-rank keys for scheduler-side hit check, built by the
@@ -512,7 +554,7 @@ class KVPoolScheduler:
         # In layerwise mode, always query from block 0 because the remote
         # pool stores per-layer data that may not match local prefix cache.
         num_hash_blocks = token_len // self.hash_block_size
-        block_hashes_to_check = request.block_hashes[:num_hash_blocks]
+        block_hashes_to_check = self._pool_block_hashes(request)[:num_hash_blocks]
         hits_per_group: list[int] = []
 
         for group_id in range(len(self.grouped_block_size)):
@@ -611,7 +653,7 @@ class KVPoolScheduler:
         del num_computed_tokens
         num_hash_blocks = token_len // self.hash_block_size
         block_hashes = get_block_hashes(
-            request.block_hashes[:num_hash_blocks],
+            self._pool_block_hashes(request)[:num_hash_blocks],
             self._block_size,
             self.hash_block_size,
         )
@@ -867,6 +909,11 @@ class KVPoolScheduler:
         skip_save: bool | None,
     ):
         last_chunk_tokens_num = self._get_last_chunk_tokens_num(prompt_token_ids)
+        if getattr(self, "_pool_hash_fn", None) is not None:
+            # Decode-only DCP: the caller-supplied hashes come from vLLM's
+            # rank-local chain, which the peer stage cannot reproduce. The
+            # tracker id + prompt tokens are the authority for pool keys.
+            block_hashes = self._layout_block_hashes(request_tracker.req_id, prompt_token_ids)
         return ReqMeta.from_request_tracker(
             request_tracker,
             self.cache_transfer_granularity,
@@ -1052,7 +1099,7 @@ class KVPoolScheduler:
             self.cache_transfer_granularity,
             load_spec=load_spec,
             skip_save=None,
-            block_hashes=request.block_hashes,
+            block_hashes=self._pool_block_hashes(request),
             discard_partial_chunks=self._discard_partial_chunks,
             original_block_size=self.original_block_size,
             kv_cache_group_families=self.kv_cache_group_families,
