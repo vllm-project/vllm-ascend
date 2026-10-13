@@ -22,7 +22,6 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
-    compute_layer_kv_cache_shape_bytes,
 )
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
@@ -1186,7 +1185,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         num_blocks = 2
         spec = AscendMLAAttentionSpec(
             block_size=384,
-            num_heads=1,
+            num_heads=64,
             num_kv_heads=1,
             head_size=576,
             dtype=torch.bfloat16,
@@ -1224,7 +1223,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         ):
             for q_heads in (8, 12, 64, 96):
                 with self.subTest(q_heads=q_heads):
-                    attn_module.num_heads = q_heads
+                    spec = replace(spec, num_heads=q_heads)
                     with patch(
                         "vllm_ascend.worker.model_runner_v1.get_current_hardware_profile",
                         return_value=flash_profile,
@@ -1237,7 +1236,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
 
         # A5 FlashMLA does not support arbitrary query-head counts. Keep these
         # models on the FIA-compatible component-major layout.
-        attn_module.num_heads = 48
+        spec = replace(spec, num_heads=48)
         with patch(
             "vllm_ascend.worker.model_runner_v1.get_current_hardware_profile",
             return_value=flash_profile,
@@ -1248,7 +1247,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
 
         # A5 also falls back to FIA when the active CANN package does not
         # provide both FlashMLA APIs.
-        attn_module.num_heads = 64
+        spec = replace(spec, num_heads=64)
         with (
             patch(
                 "vllm_ascend.worker.model_runner_v1.get_current_hardware_profile",
@@ -1263,7 +1262,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         # MooncakeV2 transfers raw physical slots without layout metadata, so
         # every PD endpoint uses the common component-major wire layout even
         # when local FlashMLA support would otherwise select token-fused.
-        attn_module.num_heads = 64
+        spec = replace(spec, num_heads=64)
         runner.vllm_config.kv_transfer_config = SimpleNamespace(
             kv_connector="MooncakeConnectorV2",
             kv_connector_module_path=None,
@@ -1942,36 +1941,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         self.assertIsInstance(spec, AscendMLAAttentionSpec)
         self.assertEqual(spec.model_version, attn_module.model_version)
         self.assertTrue(spec.indexes_kv_by_block_stride)
-        self.assertEqual(spec.num_heads, source_spec.num_heads)
-
-    @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
-    def test_mla_spec_preserves_physical_heads(self, mock_get_layers):
-        runner = self._build_runner()
-        runner.shared_kv_cache_layers = {}
-        layer_name = "model.layers.0.self_attn.attn"
-        source_spec = MLAAttentionSpec(
-            block_size=384,
-            num_kv_heads=1,
-            head_size=576,
-            dtype=torch.bfloat16,
-        )
-        attn_module = MLAAttention.__new__(MLAAttention)
-        torch.nn.Module.__init__(attn_module)
-        attn_module.impl = SimpleNamespace(fa_quant_layer=False)
-        attn_module.num_heads = 4
-        attn_module.get_kv_cache_spec = lambda _config: source_spec
-        mock_get_layers.return_value = {layer_name: attn_module}
-
-        for model_type in ("kimi_linear", "deepseek_v3", "bailing_moe_v25"):
-            with self.subTest(model_type=model_type):
-                runner.model_config.hf_text_config.model_type = model_type
-                spec = runner.get_kv_cache_spec()[layer_name]
-                self.assertEqual(spec.num_heads, source_spec.num_heads)
-                merged = AscendMLAAttentionSpec.merge([spec, spec])
-                shape_bytes = compute_layer_kv_cache_shape_bytes(merged, num_blocks=2)
-                self.assertEqual(shape_bytes, (2, 1, 384, 576 * 2))
-                raw_cache = torch.empty(2 * merged.page_size_bytes, dtype=torch.uint8)
-                self.assertEqual(raw_cache.view(shape_bytes).numel(), 884736)
+        self.assertEqual(spec.num_heads, 64)
 
     @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)
     @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")

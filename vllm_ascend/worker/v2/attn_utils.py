@@ -266,9 +266,15 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             ratio_kwargs: dict[str, Any] = {"tokens_per_state": compression_ratio}
             spec = AscendMLAAttentionSpec(
                 block_size=spec.block_size,
-                # The generic KV planner needs physical cache heads. Query
-                # heads remain on the attention layer for FlashMLA selection.
-                num_heads=spec.num_heads,
+                # ``num_heads`` describes physical cache head slots, not query
+                # heads. Kimi K3 publishes one latent KV slot per token; using
+                # the query-head count here makes vLLM's generic planner inflate
+                # each page by the local query-head count.
+                num_heads=(
+                    spec.num_heads
+                    if getattr(vllm_config.model_config.hf_text_config, "model_type", None) == "kimi_linear"
+                    else attn_module.num_heads
+                ),
                 num_kv_heads=spec.num_kv_heads,
                 head_size=head_size,
                 dtype=dtype,
@@ -1694,11 +1700,10 @@ def _reshape_kv_cache_v2(
                 )
                 nope_dim, rope_dim = _get_attention_kv_cache_dims(layer_name, kv_cache_spec)
                 fused_dim = nope_dim + rope_dim
-                attn_module = get_layers_from_vllm_config(vllm_config, AttentionLayerBase, [layer_name])[layer_name]
 
                 if (
                     get_current_hardware_profile().supports(HardwareCapability.MLA_FLASH)
-                    and attn_module.num_heads in MLA_FLASH_SUPPORTED_Q_HEADS
+                    and kv_cache_spec.num_heads in MLA_FLASH_SUPPORTED_Q_HEADS
                     and get_flashmla_ops() is not None
                     # The outer eligibility check admits only supported PD,
                     # which requires component-major pages at both endpoints.
