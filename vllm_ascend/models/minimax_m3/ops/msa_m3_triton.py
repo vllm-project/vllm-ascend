@@ -698,7 +698,7 @@ def _prefill_topk_postprocess_kernel(
         output_block_ids.to(topk_indices_ptr.dtype.element_ty),
         mask=query_mask[:, None] & (topk_lane_offsets[None, :] < topk),
     )
-    valid_counts = tl.sum(valid_selection_mask.to(tl.int32), axis=1)
+    valid_counts = tl.minimum(selected_count, valid_block_counts)
     tl.store(
         select_num_idx_ptr + head_id * select_head_stride + token_indices * select_token_stride,
         valid_counts,
