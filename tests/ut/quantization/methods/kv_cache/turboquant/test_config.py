@@ -71,7 +71,7 @@ def test_missing_hf_config_fails_with_validation_error(runtime):
         ("parallel_config.tensor_parallel_size", 64, "multiple of 4"),
         ("parallel_config.decode_context_parallel_size", 2, "context parallelism"),
         ("parallel_config.prefill_context_parallel_size", 2, "context parallelism"),
-        ("kv_transfer_config", object(), "KV transfer"),
+        ("kv_transfer_config", SimpleNamespace(kv_connector="MooncakeConnector"), "MooncakeHybridConnector"),
     ],
 )
 def test_invalid_configuration_fails_early(runtime, path, value, message):

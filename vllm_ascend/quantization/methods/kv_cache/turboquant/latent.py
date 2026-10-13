@@ -48,6 +48,15 @@ CENTROIDS = (
 )
 
 
+def get_dsv4_encoding_contract() -> tuple[str, tuple[float, ...]]:
+    """Describe the framework encoding for packed-cache compatibility checks.
+
+    Bump the version when the signed-Hadamard, nibble ordering or norm-correction
+    contract changes. This does not verify the installed operator implementation.
+    """
+    return "dsv4-tq4-nc-legacy-hadamard-v1", CENTROIDS
+
+
 class TurboQuantLatent:
     """Initialize before graph capture.
 
