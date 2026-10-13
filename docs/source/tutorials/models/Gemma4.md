@@ -37,13 +37,14 @@ The examples below assume a single node with visible NPUs. The BF16 commands use
 
 ### 4.1 Docker Image Installation
 
-You can use the official all-in-one vLLM Ascend Docker image. Select the image tag for your vLLM Ascend version and hardware by following [Using a prebuilt image](../../getting_started/installation.md#installation-prebuilt-image). For example, pull the selected image with:
+You can use the official all-in-one vLLM Ascend Docker image. For 950DT Products, pull the A5 image that matches the current vLLM Ascend version:
 
 ```shell
-docker pull quay.io/ascend/vllm-ascend:{tag}
+export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5
+docker pull ${IMAGE}
 ```
 
-Follow the hardware-specific `docker run` command in the installation guide and mount the directory containing the Gemma4 weights into the container. The prebuilt image includes the matching CANN user-space environment, PyTorch, TorchNPU, vLLM, and vLLM Ascend versions.
+For other supported hardware and operating systems, select the corresponding image by following [Using a prebuilt image](../../getting_started/installation.md#installation-prebuilt-image). Follow the hardware-specific `docker run` command in the installation guide and mount the directory containing the Gemma4 weights into the container. The prebuilt image includes the matching CANN user-space environment, PyTorch, TorchNPU, vLLM, and vLLM Ascend versions.
 
 After entering the container, verify the environment:
 
@@ -120,7 +121,8 @@ The following commands use TP4DP2 across all 8 NPUs on one 950DT Products node. 
 
     ```shell
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-    export MODEL_PATH=/root/.cache/Eco-Tech/gemma-4-31B-it-w4a4-mxfp4
+    export VLLM_USE_MODELSCOPE=True
+    export MODEL_PATH=Eco-Tech/gemma-4-31B-it-w4a4-mxfp4
 
     vllm serve ${MODEL_PATH} \
       --served-model-name gemma4 \
@@ -136,7 +138,8 @@ The following commands use TP4DP2 across all 8 NPUs on one 950DT Products node. 
 
     ```shell
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-    export MODEL_PATH=/root/.cache/Eco-Tech/gemma-4-26B-A4B-it-w4a4-mxfp4
+    export VLLM_USE_MODELSCOPE=True
+    export MODEL_PATH=Eco-Tech/gemma-4-26B-A4B-it-w4a4-mxfp4
 
     vllm serve ${MODEL_PATH} \
       --served-model-name gemma4 \
@@ -217,7 +220,40 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 Expected result: the request returns HTTP 200, and the JSON response contains a `choices` field with generated text from the model.
 
-### 6.3 Offline Inference
+### 6.3 Multimodal Chat Completions API
+
+Send an image request to verify Gemma4 multimodal inference:
+
+```shell
+curl http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gemma4",
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "https://modelscope.oss-cn-beijing.aliyuncs.com/resource/tiger.jpeg"
+            }
+          },
+          {
+            "type": "text",
+            "text": "Describe this image."
+          }
+        ]
+      }
+    ],
+    "max_tokens": 128,
+    "temperature": 0
+  }'
+```
+
+Expected result: the request returns HTTP 200, and the response describes the image in the `choices` field.
+
+### 6.4 Offline Inference
 
 ```python
 from vllm import LLM, SamplingParams
