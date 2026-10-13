@@ -21,5 +21,6 @@ def _stub_ascend_config(monkeypatch):
             eplb_config=object(),
             draft_window_size=None,
             ascend_warmup_config=SimpleNamespace(enable_early_kernel_warmup=False, enable_early_nz_warmup=False),
+            enable_dspark_draft_kv_optimistic_bound=False,
         ),
     )
