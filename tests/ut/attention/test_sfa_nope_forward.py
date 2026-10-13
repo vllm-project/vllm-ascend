@@ -426,9 +426,9 @@ def test_sparse_mla_full_forward_uses_real_rows_and_latent_values(graph_mode, em
         ) as sparse_attention,
         patch(
             "vllm_ascend.device.device_op.torch_npu.npu_kv_quant_sparse_flash_attention",
-            side_effect=lambda **kwargs: _reference_quantized_sparse_attention(**dict(kwargs, return_softmax_lse=False))[
-                0
-            ],
+            side_effect=lambda **kwargs: _reference_quantized_sparse_attention(
+                **dict(kwargs, return_softmax_lse=False)
+            )[0],
             create=True,
         ) as quantized_sparse_attention,
         patch.object(sparse_mla, "attention_transfer_window"),
