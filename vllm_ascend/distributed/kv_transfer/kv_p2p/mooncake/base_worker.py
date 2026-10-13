@@ -23,6 +23,7 @@ from vllm.distributed.parallel_state import (
 from vllm.logger import logger
 from vllm.utils.network_utils import get_ip
 from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
     KVCacheSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
@@ -55,7 +56,7 @@ from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size,
 )
-from vllm_ascend.utils import get_kv_cache_tensor_layers
+from vllm_ascend.utils import get_kv_cache_tensor_layers, is_c8_mxfp_kv_quant
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -255,6 +256,22 @@ class MooncakeBaseConnectorWorker:
                 spec_index = self.layer_name_to_spec_index[layer_name]
                 spec = self.kv_cache_specs[spec_index]
                 caches = as_kv_cache_tensors(cache_or_caches)
+                if (
+                    type(spec) is FullAttentionSpec
+                    and spec.dtype == torch.float8_e4m3fn
+                    and is_c8_mxfp_kv_quant(self.vllm_config)
+                ):
+                    if len(caches) != 4:
+                        raise ValueError(
+                            f"C8 MXFP8 layer {layer_name!r} requires (K, V, K_scale, V_scale), "
+                            f"got {len(caches)} tensors."
+                        )
+                    # V_scale is a checkpoint constant, restored locally by
+                    # the runner at allocation and physical-page reassignment.
+                    # Publish only request-dependent K/V/K_scale. Keep the
+                    # original four views for attention and backing-storage
+                    # registration; their packet offsets/strides must not change.
+                    caches = caches[:3]
                 shared_page_metadata = (
                     self._get_shared_page_metadata(caches)
                     if isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
