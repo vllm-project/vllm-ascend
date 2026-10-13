@@ -25,6 +25,7 @@ _MIN_K_DWELL_STEPS = 8
 # batch (for example 128) through 64/32/16 down to 8 or fewer requests.
 PHYSICAL_K_MIN_TUNED_BATCH_SIZE = 1
 PHYSICAL_K_RECOMMEND_INTERVAL = 128
+PHYSICAL_K_MAX_TP_SIZE = 4
 _ACCEPTANCE_THRESHOLD = 0.6
 _DOWNSHIFT_STEPS = 3
 _UPSHIFT_STEPS = 2
@@ -49,6 +50,25 @@ def resolve_physical_k(dynamic_config: dict[str, Any]) -> dict[str, Any] | None:
     if not isinstance(auto_tune, bool):
         raise ValueError(f"physical_k.auto_tune has invalid value {auto_tune!r}")
     return {"min_k": min_k, "auto_tune": auto_tune}
+
+
+def physical_k_runtime_enabled(vllm_config: Any) -> bool:
+    """Enable variable physical K only where it beats the adaptive baseline.
+
+    On A3, TP8 and wider drafts pay enough collective and graph-management
+    overhead that even K=max regresses versus ordinary adaptive verification.
+    Keep the user-facing configuration valid, but fall back to that proven
+    adaptive path for high TP instead of enabling a known-slower runtime.
+    """
+
+    dynamic = (getattr(vllm_config, "additional_config", None) or {}).get(
+        "dynamic_spec_config", {}
+    )
+    if not isinstance(dynamic, dict) or resolve_physical_k(dynamic) is None:
+        return False
+    parallel_config = getattr(vllm_config, "parallel_config", None)
+    tensor_parallel_size = int(getattr(parallel_config, "tensor_parallel_size", 1))
+    return tensor_parallel_size <= PHYSICAL_K_MAX_TP_SIZE
 
 
 @dataclass
@@ -262,6 +282,8 @@ class AdaptiveDraftKController:
 
 def _create_controller(vllm_config: Any) -> AdaptiveDraftKController | None:
     if not getattr(vllm_config, "use_v2_model_runner", False):
+        return None
+    if not physical_k_runtime_enabled(vllm_config):
         return None
     dynamic = (getattr(vllm_config, "additional_config", None) or {}).get("dynamic_spec_config", {})
     if not isinstance(dynamic, dict):
