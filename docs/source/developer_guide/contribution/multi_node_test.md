@@ -188,7 +188,7 @@ This section assumes that you already have a [Kubernetes](https://kubernetes.io/
                 volumeMounts:
                   - mountPath: /root/.cache
                     name: shared-volume
-                  - mountPath: /usr/local/Ascend/driver/tools
+                  - mountPath: /usr/local/Ascend/driver
                     name: ascend-driver
                   - mountPath: /dev/shm
                     name: dshm
@@ -202,7 +202,7 @@ This section assumes that you already have a [Kubernetes](https://kubernetes.io/
                   claimName: nv-action-vllm-benchmarks-v2
               - name: ascend-driver
                 hostPath:
-                  path: /usr/local/Ascend/driver/tools
+                  path: /usr/local/Ascend/driver
         workerTemplate:
           spec:
             containers:
@@ -235,7 +235,7 @@ This section assumes that you already have a [Kubernetes](https://kubernetes.io/
                 volumeMounts:
                   - mountPath: /root/.cache
                     name: shared-volume
-                  - mountPath: /usr/local/Ascend/driver/tools
+                  - mountPath: /usr/local/Ascend/driver
                     name: ascend-driver
                   - mountPath: /dev/shm
                     name: dshm
@@ -249,7 +249,7 @@ This section assumes that you already have a [Kubernetes](https://kubernetes.io/
                   claimName: nv-action-vllm-benchmarks-v2
               - name: ascend-driver
                 hostPath:
-                  path: /usr/local/Ascend/driver/tools
+                  path: /usr/local/Ascend/driver
     ---
     apiVersion: v1
     kind: Service
