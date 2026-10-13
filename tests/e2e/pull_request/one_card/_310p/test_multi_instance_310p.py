@@ -17,6 +17,8 @@
 
 """Two 310P EP workers must retain comparable per-instance KV cache budgets."""
 
+from typing import Any
+
 import pytest
 from vllm.transformers_utils.utils import maybe_model_redirect
 
@@ -35,6 +37,8 @@ KV_BUDGET_RELATIVE_TOLERANCE = 0.1
 
 class WorkerMemoryBudgetProbe:
     """Expose the already profiled worker budget through LLM.collective_rpc."""
+
+    available_kv_cache_memory_bytes: int
 
     def get_multi_instance_memory_budget(self) -> int:
         return int(self.available_kv_cache_memory_bytes)
@@ -72,7 +76,7 @@ def test_two_instances_preserve_kv_cache_capacity_310p(monkeypatch) -> None:
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1")
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
     model_name = maybe_model_redirect(MODEL)
-    settings = dict(
+    settings: dict[str, Any] = dict(
         dtype="float16",
         tensor_parallel_size=1,
         gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
