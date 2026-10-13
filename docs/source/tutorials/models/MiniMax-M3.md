@@ -561,13 +561,12 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
 
     This text-only configuration uses one Prefill rank (`DP1 × TP8 × PP2`) and eight Decode ranks (`DP8 × TP4 × PP1`) across two Decode nodes, with four ranks per node. Each node uses all 16 NPU chips. Set `node_p_ip`, `node_d0_ip`, and `node_d1_ip` to the three nodes' communication IP addresses before running the launch and proxy commands.
 
-    Both roles use Model Runner V1, `--max-num-seqs 128`, `--max-num-batched-tokens 2048`, and prefix caching. Prefix caching being enabled does not guarantee a cache hit; reuse warmed prompts when measuring cached-prefix decode performance. For multimodal requests, replace `--language-model-only` with the appropriate `--limit-mm-per-prompt` setting as described in [Section 5.5](#55-multimodal-and-vit-dp-optional).
+    Both roles use the default Model Runner V1 (leave `VLLM_USE_V2_MODEL_RUNNER` unset), `--max-num-seqs 128`, `--max-num-batched-tokens 2048`, and prefix caching. Prefix caching being enabled does not guarantee a cache hit; reuse warmed prompts when measuring cached-prefix decode performance. For multimodal requests, replace `--language-model-only` with the appropriate `--limit-mm-per-prompt` setting as described in [Section 5.5](#55-multimodal-and-vit-dp-optional).
 
     1. Prefill node
 
     ```bash
     unset http_proxy https_proxy ftp_proxy all_proxy HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY
-    export VLLM_USE_V2_MODEL_RUNNER=0
 
     nic_name="xxxx"                 # NIC corresponding to local_ip
     local_ip="xxxx"                 # Prefill node IP
@@ -636,7 +635,6 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
 
     ```bash
     unset http_proxy https_proxy ftp_proxy all_proxy HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY
-    export VLLM_USE_V2_MODEL_RUNNER=0
 
     nic_name="xxxx"                 # NIC corresponding to local_ip
     local_ip="xxxx"                 # Decode node IP
