@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Single-card tests for the optional ``group_index`` input of
-``dequant_situ_quant_vllm`` on the BF16 path.
+``dequant_situ_quant`` on the BF16 path.
 
 The BF16 (already-dequantized) routed path used to reject ``group_index``
 and therefore scanned the whole worst-case-expanded MoE buffer row by row,
@@ -25,7 +25,7 @@ from vllm_ascend.utils import bootstrap_custom_op_env
 bootstrap_custom_op_env(include_vendor_lib=True)
 import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401,E402  (registers torch.ops._C_ascend)
 
-OP = torch.ops._C_ascend.dequant_situ_quant_vllm
+OP = torch.ops._C_ascend.dequant_situ_quant
 
 pytestmark = pytest.mark.skipif(not torch.npu.is_available(), reason="requires an available NPU")
 

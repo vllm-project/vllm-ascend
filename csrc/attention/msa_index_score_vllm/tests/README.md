@@ -84,7 +84,7 @@ score = msa_index_score_vllm_golden(inputs)
 ```
 
 The repository unit test
-`tests/e2e/pull_request/one_card/test_msa_index_score_vllm.py` executes this imported reference
+`tests/e2e/pull_request/one_card/test_msa_index_score.py` executes this imported reference
 for non-quantized PageAttention, INT8 dequantization, and a non-contiguous
 physical-page axis.
 

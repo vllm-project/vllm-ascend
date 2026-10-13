@@ -128,7 +128,7 @@ uses `2e-2`.
 - [aclnn interface documentation](./docs/aclnnMsaIndexScoreVllm.md)
 - [End-to-end example](./examples/test_aclnn_msa_index_score_vllm.cpp)
 - [Test guide](./tests/README.md)
-- [PyTorch adapter](./msa_index_score_vllm_torch_adpt.h): `torch.ops._C_ascend.npu_msa_index_score_vllm`
+- [PyTorch adapter](./msa_index_score_vllm_torch_adpt.h): `torch.ops._C_ascend.npu_msa_index_score`
 
 ## Implementation Notes
 

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Fused TopK helpers around the A2/A3 AscendC MsaIndexScoreVllm operator."""
+"""Fused TopK helpers around the A2/A3 AscendC MsaIndexScore operator."""
 
 from __future__ import annotations
 

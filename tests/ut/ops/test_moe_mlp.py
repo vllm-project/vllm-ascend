@@ -330,7 +330,7 @@ class TestW4A8SituPath(unittest.TestCase):
             ),
             patch("torch.ops._C_ascend.gmm_dequant_situ_quant", new=mock_gmm_dequant_situ_quant, create=True),
             patch("torch_npu.npu_grouped_matmul", create=True) as mock_gmm,
-            patch("torch.ops._C_ascend.dequant_situ_quant_vllm", create=True) as mock_dequant_situ,
+            patch("torch.ops._C_ascend.dequant_situ_quant", create=True) as mock_dequant_situ,
         ):
             out, scale = method.apply_gmm1_act_quant(mlp_compute_input)
 
@@ -376,7 +376,7 @@ class TestW4A8SituPath(unittest.TestCase):
                     patch("torch.ops._C_ascend.gmm_dequant_situ_quant", create=True) as mock_gmm_dequant_situ_quant,
                     patch("torch_npu.npu_grouped_matmul", return_value=["bf16_out"], create=True) as mock_gmm,
                     patch(
-                        "torch.ops._C_ascend.dequant_situ_quant_vllm",
+                        "torch.ops._C_ascend.dequant_situ_quant",
                         return_value=("qout", torch.ones(2, 1)),
                         create=True,
                     ) as mock_situ,
@@ -462,7 +462,7 @@ class TestW4A8SituPath(unittest.TestCase):
             patch("torch_npu.npu_dynamic_quant", return_value=("qx", torch.ones(2)), create=True),
             patch("torch_npu.npu_grouped_matmul", return_value=["bf16_out"], create=True) as mock_gmm,
             patch(
-                "torch.ops._C_ascend.dequant_situ_quant_vllm",
+                "torch.ops._C_ascend.dequant_situ_quant",
                 return_value=("qout", "oscale"),
                 create=True,
             ) as mock_situ,

@@ -95,6 +95,10 @@ void CheckMsaIndexScoreVllmParams(
 
 }  // namespace msa_index_score_vllm_detail
 
+// IMPORTANT: The public Torch name intentionally differs from the CANN name.
+// Keep torch.ops._C_ascend.npu_msa_index_score unchanged for callers.
+// This adapter calls aclnnMsaIndexScoreVllm; the Vllm suffix isolates
+// our CANN operator from other implementations. Do not propagate it to the Torch API.
 at::Tensor npu_msa_index_score_vllm(
     const at::Tensor& query, const at::Tensor& key,
     const at::Tensor& blockTable, const at::Tensor& startLoc,

@@ -321,4 +321,4 @@
 | 调用方式  | 样例代码                                                     | 说明                                                         |
 | --------- | ------------------------------------------------------------ | ------------------------------------------------------------ |
 | aclnn API | [test_aclnnSparseFlashMlaVllm](./examples/test_aclnn_sparse_flash_mla_vllm.cpp) | 通过[aclnnSparseFlashMlaVllm](./docs/aclnnSparseFlashMlaVllm.md)调用SparseFlashMlaVllm算子 |
-| PyTorch API | [npu_sparse_flash_mla_vllm](../../torch_binding.cpp) | 通过`torch.ops._C_ascend.npu_sparse_flash_mla_vllm`调用SparseFlashMlaVllm算子 |
+| PyTorch API | [npu_sparse_flash_mla](../../torch_binding.cpp) | 通过`torch.ops._C_ascend.npu_sparse_flash_mla`调用SparseFlashMlaVllm算子 |

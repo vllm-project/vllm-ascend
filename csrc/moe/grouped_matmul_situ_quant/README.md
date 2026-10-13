@@ -2,7 +2,7 @@
 
 `GroupedMatmul(MXFP8 x MXFP4) + SiTU + dynamic MX quant` single-launch fused
 custom op for **Ascend950PR (arch35) only**, imported from PR #15871.
-Fuses the split chain `npu_grouped_matmul + situ_mx_quant_vllm`.
+Fuses the split chain `npu_grouped_matmul + situ_mx_quant`.
 
 ## Layout
 

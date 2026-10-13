@@ -1621,13 +1621,13 @@ std::tuple<at::Tensor, at::Tensor> dequant_situ_quant_vllm_meta(
     (void)quant_mode;
 
     TORCH_CHECK(x.dim() == 2,
-                "dequant_situ_quant_vllm: x must be 2-dimensional [rows, width], but got rank ",
+                "dequant_situ_quant: x must be 2-dimensional [rows, width], but got rank ",
                 x.dim());
     TORCH_CHECK(x.scalar_type() == at::kInt || x.scalar_type() == at::kBFloat16,
-                "dequant_situ_quant_vllm: x must be int32 or bfloat16, but got ", x.scalar_type());
+                "dequant_situ_quant: x must be int32 or bfloat16, but got ", x.scalar_type());
     const c10::SymInt input_width = x.sym_size(1);
     TORCH_CHECK(input_width % 2 == 0,
-                "dequant_situ_quant_vllm: x last dimension must be even");
+                "dequant_situ_quant: x last dimension must be even");
 
     c10::SymDimVector y_shape(x.sym_sizes().begin(), x.sym_sizes().end());
     y_shape.back() = input_width / 2;
@@ -1651,14 +1651,14 @@ std::tuple<at::Tensor, at::Tensor> situ_mx_quant_vllm_meta(
     constexpr int64_t MX_SCALE_ALIGN = 2;
 
     TORCH_CHECK(x.dim() >= 1,
-                "situ_mx_quant_vllm: x must be at least 1-dimensional, but got ",
+                "situ_mx_quant: x must be at least 1-dimensional, but got ",
                 x.dim());
     TORCH_CHECK(x.scalar_type() == at::kBFloat16,
-                "situ_mx_quant_vllm: x must be bfloat16, but got ", x.scalar_type());
+                "situ_mx_quant: x must be bfloat16, but got ", x.scalar_type());
     TORCH_CHECK(beta > 0.0,
-                "situ_mx_quant_vllm: beta must be greater than 0, but got ", beta);
+                "situ_mx_quant: beta must be greater than 0, but got ", beta);
     TORCH_CHECK(dst_type == DST_TYPE_E4M3FN || dst_type == DST_TYPE_E5M2,
-                "situ_mx_quant_vllm: dst_type must be 36 (E4M3FN) or 35 (E5M2), but got ",
+                "situ_mx_quant: dst_type must be 36 (E4M3FN) or 35 (E5M2), but got ",
                 dst_type);
 
     (void)linear_beta;
@@ -1812,8 +1812,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("get_physical_device_id", &vllm_ascend::meta::get_physical_device_id_meta);
     //Gemma rmsnorm meta implementation
     ops.impl("npu_gemma_rms_norm", &vllm_ascend::meta::npu_gemma_rms_norm_meta);
-    ops.impl("dequant_situ_quant_vllm", &vllm_ascend::meta::dequant_situ_quant_vllm_meta);
-    ops.impl("situ_mx_quant_vllm", &vllm_ascend::meta::situ_mx_quant_vllm_meta);
+    ops.impl("dequant_situ_quant", &vllm_ascend::meta::dequant_situ_quant_vllm_meta);
+    ops.impl("situ_mx_quant", &vllm_ascend::meta::situ_mx_quant_vllm_meta);
     ops.impl("gmm_dequant_situ_quant", &vllm_ascend::meta::gmm_dequant_situ_quant_meta);
 
     ops.impl("grouped_matmul_situ_quant", &vllm_ascend::meta::grouped_matmul_situ_quant_meta);
@@ -1848,13 +1848,13 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("attn_res_fwd", &vllm_ascend::meta::attn_res_fwd_meta);
     // Sparse flash attention
     ops.impl("npu_sparse_flash_attention", &vllm_ascend::meta::npu_sparse_flash_attention_meta);
-    ops.impl("npu_sparse_flash_mla_metadata_vllm", &vllm_ascend::meta::npu_sparse_flash_mla_metadata_vllm_meta);
-    ops.impl("npu_sparse_flash_mla_vllm", &vllm_ascend::meta::npu_sparse_flash_mla_vllm_meta);
+    ops.impl("npu_sparse_flash_mla_metadata", &vllm_ascend::meta::npu_sparse_flash_mla_metadata_vllm_meta);
+    ops.impl("npu_sparse_flash_mla", &vllm_ascend::meta::npu_sparse_flash_mla_vllm_meta);
     ops.impl("npu_sparse_attention_score", &vllm_ascend::meta::npu_sparse_attention_score_meta);
     ops.impl("npu_k2q_csr", &vllm_ascend::meta::npu_k2q_csr_meta);
     ops.impl("npu_sparse_attention_score_prefill",
              &vllm_ascend::meta::npu_sparse_attention_score_prefill_meta);
-    ops.impl("npu_msa_index_score_vllm", &vllm_ascend::meta::npu_msa_index_score_vllm_meta);
+    ops.impl("npu_msa_index_score", &vllm_ascend::meta::npu_msa_index_score_vllm_meta);
     ops.impl("npu_kv_quant_sparse_flash_attention_vllm",
              &vllm_ascend::meta::npu_kv_quant_sparse_flash_attention_vllm_meta);
     // Fused sparse attention overlap

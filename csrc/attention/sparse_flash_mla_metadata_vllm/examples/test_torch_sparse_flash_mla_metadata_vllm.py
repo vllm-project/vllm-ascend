@@ -15,7 +15,7 @@ from vllm_ascend.utils import enable_custom_op
 
 enable_custom_op()
 
-metadata = torch.ops._C_ascend.npu_sparse_flash_mla_metadata_vllm(
+metadata = torch.ops._C_ascend.npu_sparse_flash_mla_metadata(
     cu_seqlens_q=torch.tensor([0, 10], dtype=torch.int32).npu(),
     cu_seqlens_ori_kv=None,
     cu_seqlens_cmp_kv=None,

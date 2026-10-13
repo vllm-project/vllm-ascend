@@ -14,7 +14,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
-"""Kimi K3 W4A8 numerical coverage for DequantSituQuantVllm."""
+"""Kimi K3 W4A8 numerical coverage for DequantSituQuant."""
 
 import pytest
 import torch
@@ -66,14 +66,14 @@ def _kimi_k3_reference(
     return y, scale
 
 
-def _run_dequant_situ_quant_vllm(
+def _run_dequant_situ_quant(
     x: torch.Tensor,
     weight_scale: torch.Tensor | None,
     activation_scale: torch.Tensor | None,
     bias: torch.Tensor | None,
     group_index: torch.Tensor | None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    return torch.ops._C_ascend.dequant_situ_quant_vllm(
+    return torch.ops._C_ascend.dequant_situ_quant(
         x=x.npu(),
         weight_scale=None if weight_scale is None else weight_scale.npu(),
         activation_scale=None if activation_scale is None else activation_scale.npu(),
@@ -113,9 +113,9 @@ def _kimi_k3_predequantized_reference(x: torch.Tensor) -> tuple[torch.Tensor, to
     ids=("decode_t1_topk16", "prefill_t65_topk16"),
 )
 @torch.inference_mode()
-def test_kimi_k3_routed_multi_expert_dequant_situ_quant_vllm(group_counts: tuple[int, ...]):
-    if not hasattr(torch.ops._C_ascend, "dequant_situ_quant_vllm"):
-        pytest.skip("requires the DequantSituQuantVllm custom operator")
+def test_kimi_k3_routed_multi_expert_dequant_situ_quant(group_counts: tuple[int, ...]):
+    if not hasattr(torch.ops._C_ascend, "dequant_situ_quant"):
+        pytest.skip("requires the DequantSituQuant custom operator")
 
     assert len(group_counts) == K3_LOCAL_EXPERTS
     assert sum(group_counts) in (K3_TOP_K, 65 * K3_TOP_K)
@@ -131,7 +131,7 @@ def test_kimi_k3_routed_multi_expert_dequant_situ_quant_vllm(group_counts: tuple
     activation_scale = torch.linspace(0.020, 0.080, rows, dtype=torch.float32)
 
     expected_y, expected_scale = _kimi_k3_reference(x, weight_scale, activation_scale, bias, group_index)
-    actual_y, actual_scale = _run_dequant_situ_quant_vllm(x, weight_scale, activation_scale, bias, group_index)
+    actual_y, actual_scale = _run_dequant_situ_quant(x, weight_scale, activation_scale, bias, group_index)
 
     assert tuple(actual_y.shape) == (rows, K3_ROUTED_INPUT_WIDTH // 2)
     assert tuple(actual_scale.shape) == (rows,)
@@ -143,13 +143,13 @@ def test_kimi_k3_routed_multi_expert_dequant_situ_quant_vllm(group_counts: tuple
 @pytest.mark.parametrize("rows", (1, 16, 1040), ids=("decode_m1", "decode_topk16", "prefill_t65_topk16"))
 @torch.inference_mode()
 def test_kimi_k3_predequantized_bf16_situ_quant(rows: int):
-    if not hasattr(torch.ops._C_ascend, "dequant_situ_quant_vllm"):
-        pytest.skip("requires the DequantSituQuantVllm custom operator")
+    if not hasattr(torch.ops._C_ascend, "dequant_situ_quant"):
+        pytest.skip("requires the DequantSituQuant custom operator")
 
     values = torch.linspace(-32.0, 32.0, rows * K3_ROUTED_INPUT_WIDTH, dtype=torch.float32)
     x = (values + 0.125 * torch.sin(values)).to(torch.bfloat16).reshape(rows, K3_ROUTED_INPUT_WIDTH)
     expected_y, expected_scale = _kimi_k3_predequantized_reference(x)
-    actual_y, actual_scale = _run_dequant_situ_quant_vllm(x, None, None, None, None)
+    actual_y, actual_scale = _run_dequant_situ_quant(x, None, None, None, None)
 
     assert tuple(actual_y.shape) == (rows, K3_ROUTED_INPUT_WIDTH // 2)
     assert tuple(actual_scale.shape) == (rows,)
@@ -166,8 +166,8 @@ def test_kimi_k3_predequantized_bf16_situ_quant(rows: int):
 @pytest.mark.parametrize("rows", (1, 65), ids=("decode_m1", "prefill_m65"))
 @torch.inference_mode()
 def test_kimi_k3_shared_expert_without_bias_or_group_index(tp_size: int, input_width: int, rows: int):
-    if not hasattr(torch.ops._C_ascend, "dequant_situ_quant_vllm"):
-        pytest.skip("requires the DequantSituQuantVllm custom operator")
+    if not hasattr(torch.ops._C_ascend, "dequant_situ_quant"):
+        pytest.skip("requires the DequantSituQuant custom operator")
 
     assert input_width == 12288 // tp_size
     x = (torch.arange(rows * input_width, dtype=torch.int64) * 19) % 30001 - 15000
@@ -176,7 +176,7 @@ def test_kimi_k3_shared_expert_without_bias_or_group_index(tp_size: int, input_w
     activation_scale = torch.linspace(0.025, 0.075, rows, dtype=torch.float32).reshape(rows, 1)
 
     expected_y, expected_scale = _kimi_k3_reference(x, weight_scale, activation_scale, None, None)
-    actual_y, actual_scale = _run_dequant_situ_quant_vllm(x, weight_scale, activation_scale, None, None)
+    actual_y, actual_scale = _run_dequant_situ_quant(x, weight_scale, activation_scale, None, None)
 
     assert tuple(actual_y.shape) == (rows, input_width // 2)
     assert tuple(actual_scale.shape) == (rows,)
@@ -187,15 +187,15 @@ def test_kimi_k3_shared_expert_without_bias_or_group_index(tp_size: int, input_w
 @pytest.mark.skip_global_cleanup
 @torch.inference_mode()
 def test_kimi_k3_zero_routed_rows_return_empty_outputs():
-    if not hasattr(torch.ops._C_ascend, "dequant_situ_quant_vllm"):
-        pytest.skip("requires the DequantSituQuantVllm custom operator")
+    if not hasattr(torch.ops._C_ascend, "dequant_situ_quant"):
+        pytest.skip("requires the DequantSituQuant custom operator")
 
     group_index = torch.zeros(K3_LOCAL_EXPERTS, dtype=torch.int64)
     x = torch.empty((0, K3_ROUTED_INPUT_WIDTH), dtype=torch.int32)
     weight_scale = torch.ones((K3_LOCAL_EXPERTS, K3_ROUTED_INPUT_WIDTH), dtype=torch.float32)
     activation_scale = torch.empty((0,), dtype=torch.float32)
     bias = torch.zeros_like(weight_scale)
-    actual_y, actual_scale = _run_dequant_situ_quant_vllm(x, weight_scale, activation_scale, bias, group_index)
+    actual_y, actual_scale = _run_dequant_situ_quant(x, weight_scale, activation_scale, bias, group_index)
 
     assert tuple(actual_y.shape) == (0, K3_ROUTED_INPUT_WIDTH // 2)
     assert tuple(actual_scale.shape) == (0,)

@@ -639,7 +639,7 @@ def runtime(builders, monkeypatch):
             return q.clone(), None
 
         monkeypatch.setattr(torch.ops._C_ascend, "npu_scatter_nd_update_sk", scatter, raising=False)
-        monkeypatch.setattr(torch.ops._C_ascend, "npu_sparse_flash_mla_vllm", attention, raising=False)
+        monkeypatch.setattr(torch.ops._C_ascend, "npu_sparse_flash_mla", attention, raising=False)
         monkeypatch.setattr(
             torch.ops._C_ascend, "inplace_partial_rotary_mul", lambda *args, **kwargs: None, raising=False
         )
@@ -736,7 +736,7 @@ class TestPCPBatchLifecycle:
 
                 failure.setattr(torch.ops.vllm, "unquantized_gemm", gemm)
             elif stage == "attention":
-                failure.setattr(torch.ops._C_ascend, "npu_sparse_flash_mla_vllm", fail)
+                failure.setattr(torch.ops._C_ascend, "npu_sparse_flash_mla", fail)
             elif stage == "projection":
                 failure.setattr(dsa_cp.torch_npu, "npu_transpose_batchmatmul", fail)
             elif stage == "weight_gather":
@@ -1063,7 +1063,7 @@ class TestSparseLayerReuse:
         attn.uses_a5_packed_cache, attn.window_size = packed, 4
         monkeypatch.setattr(
             torch.ops._C_ascend,
-            "npu_sparse_flash_mla_vllm",
+            "npu_sparse_flash_mla",
             lambda query, **kwargs: (attention(query, kwargs["cmp_sparse_indices"].squeeze(1)[:, :3]), None),
         )
         for scenario in ("prefill", "decode", "dummy", "mixed", "empty", "prefill"):

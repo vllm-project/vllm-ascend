@@ -17,7 +17,7 @@ def test_band_visible_lengths_require_one_row_per_query():
     starts = torch.tensor([0, num_tokens], dtype=torch.int32, device="npu")
     lengths = torch.tensor([num_tokens], dtype=torch.int32, device="npu")
     visible = torch.ones((num_tokens, 1), dtype=torch.int32, device="npu")
-    metadata = torch.ops._C_ascend.npu_sparse_flash_mla_metadata_vllm(
+    metadata = torch.ops._C_ascend.npu_sparse_flash_mla_metadata(
         num_heads,
         1,
         head_dim,
@@ -48,7 +48,7 @@ def test_band_visible_lengths_require_one_row_per_query():
         layout_q="TND",
         layout_kv="PA_BBND",
     )
-    output, _ = torch.ops._C_ascend.npu_sparse_flash_mla_vllm(query, ori_topk_length=visible, **kwargs)
+    output, _ = torch.ops._C_ascend.npu_sparse_flash_mla(query, ori_topk_length=visible, **kwargs)
     torch.npu.synchronize()
     assert output.shape == query.shape
     assert torch.isfinite(output).all()
@@ -58,5 +58,5 @@ def test_band_visible_lengths_require_one_row_per_query():
     torch.testing.assert_close(output, torch.full_like(output, 0.5))
 
     with pytest.raises(RuntimeError, match="TND band ori_topk_length shape must be"):
-        torch.ops._C_ascend.npu_sparse_flash_mla_vllm(query, ori_topk_length=visible[:1], **kwargs)
+        torch.ops._C_ascend.npu_sparse_flash_mla(query, ori_topk_length=visible[:1], **kwargs)
         torch.npu.synchronize()

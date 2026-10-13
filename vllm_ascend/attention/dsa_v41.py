@@ -698,7 +698,7 @@ class AscendDSAV41Impl:
             DeviceMetadataStage.ATTENTION,
             id(op_metadata),
         )
-        output, _ = torch.ops._C_ascend.npu_sparse_flash_mla_vllm(
+        output, _ = torch.ops._C_ascend.npu_sparse_flash_mla(
             q,
             ori_kv=attn.dsa_attn.swa_cache_layer.kv_cache[0],
             cmp_kv=source_cache,
@@ -1260,7 +1260,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                 if num_actual_tokens == 0:
                     self._smla_metadata.zero_()
                     return
-                value = torch.ops._C_ascend.npu_sparse_flash_mla_metadata_vllm(
+                value = torch.ops._C_ascend.npu_sparse_flash_mla_metadata(
                     n_local_heads,
                     1,
                     head_dim,

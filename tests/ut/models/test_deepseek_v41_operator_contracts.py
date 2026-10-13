@@ -15,7 +15,7 @@ def test_deepseek_v41_model_call_sites_use_compiled_operator_layouts():
         for node in ast.walk(source)
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
-        and node.func.attr in ("npu_sparse_flash_mla_vllm", "npu_sparse_flash_mla_metadata_vllm")
+        and node.func.attr in ("npu_sparse_flash_mla", "npu_sparse_flash_mla_metadata")
     ]
     assert len(calls) == 2
     for call in calls:

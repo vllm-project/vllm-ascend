@@ -85,7 +85,7 @@ def test_small_expert_gmm_situ_graph(experts, group_list_type):
             weight_dtype=torch_npu.float4_e2m1fn_x2,
             output_dtype=torch.bfloat16,
         )[0]
-        return torch.ops._C_ascend.situ_mx_quant_vllm(
+        return torch.ops._C_ascend.situ_mx_quant(
             intermediate[:rows], beta=4.0, linear_beta=25.0, activate_left=True, dst_type=36
         )
 

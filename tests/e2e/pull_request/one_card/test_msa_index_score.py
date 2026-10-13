@@ -143,7 +143,7 @@ def _run_case(
         )
     )
 
-    actual = torch.ops._C_ascend.npu_msa_index_score_vllm(
+    actual = torch.ops._C_ascend.npu_msa_index_score(
         query,
         key,
         block_table.npu(),

@@ -1001,7 +1001,7 @@ def test_ascendc_index_score_forwards_metadata_operands() -> None:
     expected = torch.zeros(2, 1, 4)
 
     with patch(
-        "vllm_ascend.models.minimax_m3.ops.msa_m3_npu.torch.ops._C_ascend.npu_msa_index_score_vllm",
+        "vllm_ascend.models.minimax_m3.ops.msa_m3_npu.torch.ops._C_ascend.npu_msa_index_score",
         return_value=expected,
         create=True,
     ) as mock_index_score:
@@ -1036,7 +1036,7 @@ def test_ascendc_index_score_casts_query_to_fp8_cache_dtype() -> None:
     expected = torch.zeros(2, 1, 4)
 
     with patch(
-        "vllm_ascend.models.minimax_m3.ops.msa_m3_npu.torch.ops._C_ascend.npu_msa_index_score_vllm",
+        "vllm_ascend.models.minimax_m3.ops.msa_m3_npu.torch.ops._C_ascend.npu_msa_index_score",
         return_value=expected,
         create=True,
     ) as mock_index_score:
@@ -1092,7 +1092,7 @@ def test_ascendc_index_score_uses_dense_mode_without_mask() -> None:
     start_loc = torch.tensor([1], dtype=torch.int32)
 
     with patch(
-        "vllm_ascend.models.minimax_m3.ops.msa_m3_npu.torch.ops._C_ascend.npu_msa_index_score_vllm",
+        "vllm_ascend.models.minimax_m3.ops.msa_m3_npu.torch.ops._C_ascend.npu_msa_index_score",
         return_value=torch.zeros(2, 1, 4),
         create=True,
     ) as mock_index_score:
