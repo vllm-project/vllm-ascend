@@ -98,18 +98,34 @@ def create_kv_pool_scheduler(
         has_private_state=has_private_state,
     )
 
+    store_enabled = _store_enabled(vllm_config, extra_config)
+    dcp_size = int(getattr(vllm_config.parallel_config, "decode_context_parallel_size", 1))
+    store_group_specs = (
+        tuple(
+            (
+                group_id,
+                resolve_dcp_kv_cache_spec(kv_cache_config.kv_cache_groups[group_id].kv_cache_spec, dcp_size),
+                bool(getattr(kv_cache_config.kv_cache_groups[group_id], "is_eagle_group", False)),
+            )
+            for group_id in transfer_group_ids
+        )
+        if store_enabled and not use_layerwise
+        else ()
+    )
     config = SchedulerConfig(
         cache_transfer_granularity=cache_transfer_granularity,
         hash_block_size=hash_block_size,
         transfer_group_ids=transfer_group_ids,
         align_state_group_ids=align_state_group_ids,
         load_enabled=transfer_config.kv_role != "kv_consumer" or bool(extra_config.get("consumer_is_to_load", False)),
-        store_enabled=_store_enabled(vllm_config, extra_config),
+        store_enabled=store_enabled,
         save_decode_cache=bool(extra_config.get("save_decode_cache", False)),
         discard_partial_chunks=discard_partial_chunks,
         use_eagle_block_drop=_uses_eagle(vllm_config),
         has_private_state=has_private_state,
         expected_worker_count=vllm_config.parallel_config.world_size,
+        store_group_specs=store_group_specs,
+        retention_interval=getattr(kv_cache_config, "prefix_cache_retention_interval", None),
     )
     scheduler_type: type[KVPoolScheduler]
     if use_layerwise:

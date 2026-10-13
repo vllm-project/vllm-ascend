@@ -7,6 +7,7 @@ from dataclasses import replace
 import numpy as np
 import pytest
 from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 
 from tests.ut.distributed.ascend_store.v1.helpers import (
     make_topology,
@@ -352,7 +353,9 @@ def test_step_reports_finished_and_preempted_request_union(scheduler_type) -> No
 
 @pytest.mark.parametrize("terminated_field", ("finished", "preempted"))
 def test_released_request_blocks_remain_leased_until_all_workers_ack(terminated_field: str) -> None:
-    scheduler = SynchronousBulkScheduler(make_config(load=False, store=True, workers=2), FakeRemoteLookup())
+    scheduler = SynchronousBulkScheduler(
+        make_config(load=False, store=True, workers=2, recycling=True), FakeRemoteLookup()
+    )
     pool = _RefCountBlockPool()
     scheduler.bind_gpu_block_pool(pool)
     blocks = [pool.blocks[1], pool.blocks[2]]
@@ -387,7 +390,9 @@ def test_released_request_blocks_remain_leased_until_all_workers_ack(terminated_
 
 
 def test_pending_block_frees_counts_duplicate_job_refs_not_worker_acknowledgements() -> None:
-    scheduler = SynchronousBulkScheduler(make_config(load=False, store=True, workers=2), FakeRemoteLookup())
+    scheduler = SynchronousBulkScheduler(
+        make_config(load=False, store=True, workers=2, recycling=True), FakeRemoteLookup()
+    )
     pool = _RefCountBlockPool()
     scheduler.bind_gpu_block_pool(pool)
     block = pool.blocks[1]
@@ -426,7 +431,7 @@ def test_pending_block_frees_counts_duplicate_job_refs_not_worker_acknowledgemen
 
 
 def test_pending_block_frees_detects_masked_block_without_freeing_active_blocks() -> None:
-    scheduler = SynchronousBulkScheduler(make_config(load=False, store=True), FakeRemoteLookup())
+    scheduler = SynchronousBulkScheduler(make_config(load=False, store=True, recycling=True), FakeRemoteLookup())
     pool = _RefCountBlockPool()
     scheduler.bind_gpu_block_pool(pool)
     active, masked = pool.blocks[1], pool.blocks[2]
@@ -453,11 +458,12 @@ def test_pending_block_frees_is_false_without_bound_pool_or_store_leases() -> No
 
 
 @pytest.mark.skipif(not hasattr(BlockPool, "free_blocks"), reason="Allocator reuse requires the real vLLM BlockPool")
-def test_source_blocks_are_not_allocatable_until_every_worker_acknowledges_release() -> None:
+def test_running_window_sources_are_not_reused_until_every_worker_releases() -> None:
     pool = BlockPool(num_gpu_blocks=6, enable_caching=False, hash_block_size=4)
     sources = pool.get_new_blocks(2)
     source_ids = [block.block_id for block in sources]
-    scheduler = SynchronousBulkScheduler(make_config(load=False, store=True, workers=2), FakeRemoteLookup())
+    config = make_config(load=False, store=True, workers=2, recycling=True)
+    scheduler = SynchronousBulkScheduler(config, FakeRemoteLookup())
     scheduler.bind_gpu_block_pool(pool)
     scheduler.confirm_allocation(make_request(), FakeBlocks(source_ids), 0)
     step = scheduler.build_step(
@@ -465,8 +471,16 @@ def test_source_blocks_are_not_allocatable_until_every_worker_acknowledges_relea
     )
     command = step.store.commands[0]
 
-    pool.free_blocks(sources)
-    scheduler.build_step(make_output(finished=("request",)))
+    manager = SlidingWindowManager(
+        config.store_group_specs[0][1],
+        block_pool=pool,
+        enable_caching=False,
+        kv_cache_group_id=0,
+        scheduler_block_size=4,
+    )
+    manager.req_to_blocks["request"] = list(sources)
+    manager.remove_skipped_blocks("request", 8)
+    assert scheduler.build_step(make_output()).released_request_ids == frozenset()
     assert scheduler.has_pending_block_frees()
     available = pool.get_new_blocks(pool.get_num_free_blocks())
     assert set(source_ids).isdisjoint(block.block_id for block in available)
@@ -476,9 +490,10 @@ def test_source_blocks_are_not_allocatable_until_every_worker_acknowledges_relea
     assert pool.get_num_free_blocks() == 0
     assert scheduler.has_pending_block_frees()
     scheduler.accept_worker_metadata(StoreSourceReleaseMetadata({command.store_job_id: 1}))
-    assert pool.get_num_free_blocks() == len(source_ids)
+    assert pool.get_num_free_blocks() == 1
     assert not scheduler.has_pending_block_frees()
-    assert {block.block_id for block in pool.get_new_blocks(len(source_ids))} == set(source_ids)
+    assert pool.get_new_blocks(1)[0].block_id == source_ids[0]
+    assert sources[1].ref_cnt == 1, "The running request still owns its active window"
 
 
 def test_finished_tail_lease_survives_cleanup_until_every_worker_releases() -> None:
@@ -509,7 +524,7 @@ def test_finished_tail_lease_survives_cleanup_until_every_worker_releases() -> N
         [(1, 11, 8)],
     )
     assert scheduler.has_pending_push_work()
-    assert pool.touched == [(11, 1, 2)]
+    assert pool.touched == [(11,)]
 
     finished = scheduler.build_step(make_output(finished=("request",)))
     assert len(finished.store.source_ready_commands) == 1
@@ -522,7 +537,7 @@ def test_finished_tail_lease_survives_cleanup_until_every_worker_releases() -> N
     assert pool.freed == []
     scheduler.accept_worker_metadata(StoreSourceReleaseMetadata({command.store_job_id: 1}))
     assert not scheduler.has_pending_push_work()
-    assert pool.freed == [(2, 1, 11)]
+    assert pool.freed == [(11,)]
 
 
 @pytest.mark.parametrize("eagle,expected_external_tokens", ((True, 0), (False, 3)))
@@ -683,7 +698,7 @@ def test_worker_lookup_reports_raw_eagle_reachability() -> None:
 def test_scheduler_close_rejects_active_store_source_leases() -> None:
     lookup = FakeRemoteLookup()
     scheduler = SynchronousBulkScheduler(
-        make_config(load=False, store=True),
+        make_config(load=False, store=True, recycling=True),
         lookup,
     )
     scheduler.bind_gpu_block_pool(FakeBlockPool())

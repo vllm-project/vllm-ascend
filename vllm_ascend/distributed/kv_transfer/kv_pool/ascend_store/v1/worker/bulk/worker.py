@@ -42,6 +42,7 @@ from ...projection.bulk.tp_mismatch import (
     tp_mismatch_lookup_keys,
     tp_mismatch_store_keys,
 )
+from ...projection.store import StoreCandidateRows, checkpoint_companion_indices, store_candidate_rows
 from ...protocol.lookup import LookupRequest, LookupResult
 from ...protocol.transfer import CheckpointStoreCommand, LoadCommand, StoreCommand
 from ...timeline.asynchronous_load import AsynchronousLoadTimeline
@@ -57,13 +58,11 @@ from ..transfer.batch import KeyAxes, KVGroupBatch, KVTransferBatch
 from ..transfer.evidence import LoadCompletion, StoreCompletion, TransferEvidence
 from ..transfer.rows import (
     BlockRows,
-    StoreCandidateRows,
     boundary_hash,
     fine_lookup_chunk_rows,
     load_block_rows,
     lookup_chunk_rows,
     select_store_writer_rows,
-    store_candidate_rows,
 )
 from ..transfer.state import (
     KVPoolStepContext,
@@ -442,22 +441,19 @@ class BulkWorker(KVPoolWorker):
         if accepted_state_groups and any(boundary % group.block_size for group in accepted_state_groups):
             for group_id in policy.companion_group_ids:
                 group = projection.group(group_id)
-                last_block_index = (boundary + group.block_size - 1) // group.block_size - 1
-                first_block_index = min(command.published_store_end_token // group.block_size, last_block_index)
                 block_ids = command.block_ids_by_group[group.group_id]
-                logical_count = last_block_index + 1
+                logical_count = (boundary + group.block_size - 1) // group.block_size
                 block_offset = max(logical_count - len(block_ids), 0)
                 counts: list[int] = []
                 hashes = []
                 selected_block_ids: list[int] = []
-                for block_index in range(first_block_index, logical_count):
-                    local_index = block_index - block_offset
-                    if local_index < 0 or local_index >= len(block_ids):
-                        continue
+                for local_index in checkpoint_companion_indices(
+                    boundary, command.published_store_end_token, group.block_size, len(block_ids)
+                ):
                     block_id = block_ids[local_index]
                     if block_id < group.minimum_block_id:
                         continue
-                    block_end = min((block_index + 1) * group.block_size, boundary)
+                    block_end = min((local_index + block_offset + 1) * group.block_size, boundary)
                     counts.append(group.block_size)
                     hashes.append(boundary_hash(block_end, command.block_hashes, group.hash_block_size))
                     selected_block_ids.append(block_id)

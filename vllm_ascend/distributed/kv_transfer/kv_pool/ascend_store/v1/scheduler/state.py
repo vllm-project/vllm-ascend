@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, replace
 
 from vllm.v1.core.kv_cache_utils import BlockHash
+from vllm.v1.kv_cache_interface import KVCacheSpec
 
 from ..coordinates import TokenRange
 from ..protocol.lookup import TailKeyBoundary
@@ -26,6 +27,9 @@ class SchedulerConfig:
     use_eagle_block_drop: bool
     has_private_state: bool
     expected_worker_count: int
+    # Empty for Layerwise and load-only routes. Original group IDs remain intact.
+    store_group_specs: tuple[tuple[int, KVCacheSpec, bool], ...] = ()
+    retention_interval: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

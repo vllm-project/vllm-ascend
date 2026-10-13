@@ -138,11 +138,12 @@ def test_completed_store_without_job_evidence_retains_sources_and_blocks_future_
     assert not resources.closed
 
 
-def test_bulk_decode_and_other_requests_overlap_store_but_shutdown_retains_sources() -> None:
+@pytest.mark.parametrize("leased", (False, True))
+def test_bulk_decode_and_other_requests_overlap_store_but_shutdown_retains_sources(leased) -> None:
     backend = _BlockingStoreBackend()
     worker, resources, _ = make_worker(backend)
-    first = RangeStoreCommand("first", TokenRange(0, 4), ((7,),), (b"a",), 4, 17)
-    second = RangeStoreCommand("second", TokenRange(0, 4), ((9,),), (b"b",), 4, 18)
+    first = RangeStoreCommand("first", TokenRange(0, 4), ((7,),), (b"a",), 4, 17 if leased else None)
+    second = RangeStoreCommand("second", TokenRange(0, 4), ((9,),), (b"b",), 4, 18 if leased else None)
     fenced = threading.Event()
     closed = threading.Event()
     completions = []
@@ -191,7 +192,7 @@ def test_bulk_decode_and_other_requests_overlap_store_but_shutdown_retains_sourc
         assert fenced.wait(timeout=2), "Fencing first must not wait for the later second Store"
         assert not failures
         assert [completion.request_id for completion in completions] == ["first"]
-        assert worker.take_released_store_job_ids() == {17}
+        assert worker.take_released_store_job_ids() == ({17} if leased else set())
         assert worker.fence_previous_store(frozenset()) == ()
         assert worker.take_released_store_job_ids() == set()
 
@@ -203,7 +204,7 @@ def test_bulk_decode_and_other_requests_overlap_store_but_shutdown_retains_sourc
         backend.allow_copy[1].set()
         assert closed.wait(timeout=2)
         assert not failures
-        assert worker.take_released_store_job_ids() == {18}
+        assert worker.take_released_store_job_ids() == ({18} if leased else set())
         assert worker.take_released_store_job_ids() == set()
         assert len(backend.copied_keys) == 2 and backend.copied_keys[0] != backend.copied_keys[1]
         assert worker._pending_store_batch is None

@@ -11,12 +11,12 @@ from vllm.v1.core.kv_cache_utils import BlockHash
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import get_block_hashes
 
+from ...projection.store import StoreCandidateRows
 from ...topology import KVPoolTopology
 
 ByteArray: TypeAlias = NDArray[np.uint64]
 ChunkRows: TypeAlias = tuple[ByteArray, ByteArray, tuple[BlockHash | str, ...]]
 BlockRows: TypeAlias = tuple[ByteArray, tuple[BlockHash | str, ...], ByteArray]
-StoreCandidateRows: TypeAlias = tuple[list[int], list[BlockHash | str], list[int]]
 
 
 def lookup_chunk_rows(
@@ -137,45 +137,6 @@ def load_block_rows(
         counts.append(end - start)
         selected_block_ids.append(block_id)
     return _readonly(counts), tuple(hashes), _readonly(selected_block_ids)
-
-
-def store_candidate_rows(
-    end_token: int,
-    block_hashes: Sequence[BlockHash | str],
-    block_ids: Sequence[int],
-    *,
-    block_size: int,
-    hash_block_size: int,
-    start_token: int = 0,
-    mask: Sequence[bool] | None = None,
-    minimum_block_id: int = 0,
-) -> StoreCandidateRows:
-    """Select Store rows before Backend admission or writer partitioning."""
-
-    if not block_hashes or end_token <= 0:
-        return [], [], []
-    grouped_hashes = get_block_hashes(block_hashes, block_size, hash_block_size)
-    logical_count = min(len(grouped_hashes), _ceil_div(end_token, block_size))
-    block_offset = max(logical_count - len(block_ids), 0)
-    aligned_start_token = start_token // block_size * block_size
-    counts: list[int] = []
-    hashes: list[BlockHash | str] = []
-    selected_block_ids: list[int] = []
-    for block_index in range(logical_count):
-        start = block_index * block_size
-        end = min(start + block_size, end_token)
-        local_index = block_index - block_offset
-        if start < aligned_start_token or end <= start or local_index < 0 or local_index >= len(block_ids):
-            continue
-        if mask is not None and (block_index >= len(mask) or not mask[block_index]):
-            continue
-        block_id = block_ids[local_index]
-        if block_id < minimum_block_id:
-            continue
-        counts.append(end - start)
-        hashes.append(grouped_hashes[block_index])
-        selected_block_ids.append(block_id)
-    return counts, hashes, selected_block_ids
 
 
 def select_store_writer_rows(

@@ -43,11 +43,7 @@ class KVPoolScheduler:
         self._allocations: dict[str, RequestAllocation] = {}
         self._request_progress: dict[str, RequestProgress] = {}
         self._finished_checkpoint_stores: list[CheckpointStoreCommand] = []
-        self._source_leases = StoreSourceLeases(
-            frozenset(config.transfer_group_ids),
-            config.align_state_group_ids,
-            config.expected_worker_count,
-        )
+        self._source_leases = StoreSourceLeases(config)
 
     # ================================
     # Lookup and Allocation
