@@ -29,6 +29,7 @@ from vllm_ascend.utils import (
     COMPRESSED_TENSORS_METHOD,
     AscendDeviceType,
     dsv4_skips_indexer_topk,
+    vllm_version_is,
 )
 
 
@@ -352,7 +353,11 @@ class TestNPUPlatform(TestBase):
         mock_vllm_config.parallel_config.decode_context_parallel_size = 1
         mock_vllm_config.parallel_config.nnodes_within_dp = 1
         mock_vllm_config.use_v2_model_runner = False
+        # vLLM main exposes aux_output_config; the release has no such field.
+        mock_vllm_config.aux_output_config = None if vllm_version_is("0.30.0") else MagicMock(enabled=False)
         mock_vllm_config.parallel_config.enable_eplb = False
+        mock_vllm_config.offload_config.uva.cpu_offload_gb = 0
+        mock_vllm_config.offload_config.prefetch.offload_group_size = 0
         mock_vllm_config.parallel_config.enable_elastic_ep = False
         mock_vllm_config.parallel_config.eplb_config = MagicMock(
             use_async=True,
@@ -435,6 +440,26 @@ class TestNPUPlatform(TestBase):
             "Override cp_kv_cache_interleave_size to 128",
             mock_warning.call_args.args[0],
         )
+
+    def test_validate_eplb_config_rejects_weight_offload(self):
+        for cpu_gb, group_size in ((1, 0), (0, 2)):
+            with self.subTest(cpu_gb=cpu_gb, group_size=group_size):
+                config = self.mock_vllm_config()
+                config.use_v2_model_runner = True
+                config.parallel_config.enable_eplb = True
+                config.offload_config.uva.cpu_offload_gb = cpu_gb
+                config.offload_config.prefetch.offload_group_size = group_size
+                with self.assertRaisesRegex(ValueError, "incompatible with weight offload/prefetch"):
+                    _validate_eplb_config(config)
+
+    def test_weight_offload_allowed_without_eplb(self):
+        config = self.mock_vllm_config()
+        config.use_v2_model_runner = True
+        config.parallel_config.enable_eplb = False
+        config.offload_config.uva.cpu_offload_gb = 1
+        config.offload_config.prefetch.offload_group_size = 2
+        with patch.dict("os.environ", {}, clear=True):
+            _validate_eplb_config(config)
 
     def test_validate_eplb_config_allows_v2_load_collection_phase(self):
         vllm_config = self.mock_vllm_config()
@@ -532,10 +557,7 @@ class TestNPUPlatform(TestBase):
             communicator=None,
         )
 
-        with (
-            patch.dict("os.environ", {}, clear=True),
-            self.assertRaisesRegex(ValueError, "elastic EP"),
-        ):
+        with patch.dict("os.environ", {}, clear=True), self.assertRaisesRegex(ValueError, "elastic EP"):
             _validate_eplb_config(vllm_config)
 
     def test_validate_eplb_config_async_rejects_nccl_communicator(self):
@@ -785,6 +807,28 @@ class TestNPUPlatform(TestBase):
 
         self.assertIsNone(vllm_config.compilation_config.max_cudagraph_capture_size)
         self.assertEqual(vllm_config.compilation_config.cudagraph_capture_sizes, [1, 2, 4])
+
+    def test_apply_config_platform_defaults_sets_sp_threshold(self):
+        for enabled_option in ("enable_sp", "fuse_gemm_comms"):
+            with self.subTest(enabled_option=enabled_option):
+                pass_config = SimpleNamespace(
+                    enable_sp=False,
+                    fuse_gemm_comms=False,
+                    sp_min_token_num=None,
+                )
+                setattr(pass_config, enabled_option, True)
+                vllm_config = SimpleNamespace(compilation_config=SimpleNamespace(pass_config=pass_config))
+
+                with patch("vllm_ascend.platform._get_reduced_cg_cap", return_value=None):
+                    self.platform.apply_config_platform_defaults(vllm_config)
+
+                self.assertEqual(pass_config.sp_min_token_num, 1)
+
+                pass_config.sp_min_token_num = 512
+                with patch("vllm_ascend.platform._get_reduced_cg_cap", return_value=None):
+                    self.platform.apply_config_platform_defaults(vllm_config)
+
+                self.assertEqual(pass_config.sp_min_token_num, 512)
 
     def test_check_ascend_config_oproj_tp_requires_offload_connector(self):
         from vllm_ascend.platform import _check_ascend_config

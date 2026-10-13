@@ -37,6 +37,7 @@ from vllm.v1.worker.gpu.states import RequestState
 
 from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 
@@ -227,9 +228,8 @@ class AscendPCPManager(PCPManager):
         supports_mm_inputs: bool,
     ) -> None:
         """Validate the graph-safe Ascend MRV2 PCP configuration."""
-        parallel_config = vllm_config.parallel_config
         model_config = vllm_config.model_config
-        pcp_size = parallel_config.prefill_context_parallel_size
+        pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
         if pcp_size <= 1:
             return
 
@@ -237,26 +237,17 @@ class AscendPCPManager(PCPManager):
             raise NotImplementedError("MRV2 PCP does not support encoder-decoder models yet.")
         if vllm_config.lora_config is not None:
             raise NotImplementedError("MRV2 PCP does not support LoRA yet.")
+
         speculative_config = vllm_config.speculative_config
         if speculative_config is not None:
             if speculative_config.method not in ("mtp", "eagle3", "dspark"):
                 raise NotImplementedError(
                     "Ascend MRV2 PCP supports speculative decoding only with MTP, Eagle3 and DSpark."
                 )
-        is_sparse_mla = hasattr(model_config.hf_text_config, "index_topk")
+
         cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
-        if parallel_config.data_parallel_size > 1 and cudagraph_mode not in {
-            CUDAGraphMode.NONE,
-            CUDAGraphMode.FULL_DECODE_ONLY,
-        }:
-            raise NotImplementedError("MRV2 PCP+DP supports eager mode or FULL_DECODE_ONLY CUDA graphs only.")
-        if is_sparse_mla and cudagraph_mode not in {
-            CUDAGraphMode.NONE,
-            CUDAGraphMode.FULL_DECODE_ONLY,
-        }:
-            raise NotImplementedError("MRV2 sparse MLA PCP supports eager mode or FULL_DECODE_ONLY CUDA graphs only.")
-        if cudagraph_mode.has_full_cudagraphs() and cudagraph_mode != CUDAGraphMode.FULL_DECODE_ONLY:
-            raise NotImplementedError("MRV2 PCP supports FULL_DECODE_ONLY CUDA graphs only.")
+        if cudagraph_mode == CUDAGraphMode.FULL:
+            raise NotImplementedError("MRV2 PCP does not support FULL CUDA graphs.")
 
     def get_global_graph_num_reqs(self, batch_desc: BatchExecutionDescriptor) -> int | None:
         """Global request capacity of a sharded FULL decode graph, if any.
@@ -266,7 +257,7 @@ class AscendPCPManager(PCPManager):
         """
         if not self.is_decode_sharded or batch_desc.cg_mode != CUDAGraphMode.FULL:
             return None
-        # validate_config only allows FULL_DECODE_ONLY, whose batches are uniform.
+        # FULL graphs are dispatched only for uniform decode batches.
         assert batch_desc.num_reqs is not None and batch_desc.uniform_token_count is not None
         return self._get_global_graph_num_reqs(batch_desc.num_reqs, batch_desc.uniform_token_count)
 
@@ -291,22 +282,47 @@ class AscendPCPManager(PCPManager):
             and global_batch.num_draft_tokens == 0
         )
 
-    def partition_batch(
+    if vllm_version_is("0.30.0"):
+
+        def partition_batch(
+            self,
+            input_batch: AscendInputBatch,
+            padded_num_tokens: int | None = None,
+            padded_num_reqs: int | None = None,
+        ) -> AscendInputBatch:
+            """Partition the batch and update Ascend-specific local metadata."""
+            # A sharded decode graph is sized per rank, so upstream can pad the
+            # local requests. Replicated decode graphs are padded below instead.
+            local_batch = super().partition_batch(
+                input_batch,
+                padded_num_tokens=padded_num_tokens,
+                padded_num_reqs=padded_num_reqs if self.is_decode_sharded else None,
+            )
+            assert isinstance(local_batch, AscendInputBatch)
+            return self._finalize_partition(input_batch, local_batch, padded_num_reqs)
+
+    else:
+
+        def partition_batch(  # type: ignore[misc]
+            self,
+            input_batch: AscendInputBatch,
+            batch_desc: BatchExecutionDescriptor,
+        ) -> AscendInputBatch:
+            """Partition the batch and update Ascend-specific local metadata."""
+            local_batch = super().partition_batch(input_batch, batch_desc)
+            assert isinstance(local_batch, AscendInputBatch)
+            # A sharded decode graph is sized per rank, so upstream can pad the
+            # local requests. Replicated decode graphs are padded below instead.
+            padded_num_reqs = batch_desc.num_reqs if batch_desc.cg_mode == CUDAGraphMode.FULL else None
+            return self._finalize_partition(input_batch, local_batch, padded_num_reqs)
+
+    def _finalize_partition(
         self,
-        input_batch: AscendInputBatch,
-        padded_num_tokens: int | None = None,
-        padded_num_reqs: int | None = None,
+        global_batch: AscendInputBatch,
+        local_batch: AscendInputBatch,
+        padded_num_reqs: int | None,
     ) -> AscendInputBatch:
-        """Partition the batch and update Ascend-specific local metadata."""
-        global_batch = input_batch
-        # A sharded decode graph is sized per rank, so upstream can pad the
-        # local requests. Replicated decode graphs are padded below instead.
-        local_batch = super().partition_batch(
-            global_batch,
-            padded_num_tokens=padded_num_tokens,
-            padded_num_reqs=padded_num_reqs if self.is_decode_sharded else None,
-        )
-        assert isinstance(local_batch, AscendInputBatch)
+        """Refresh Ascend-only local metadata after upstream PCP partitioning."""
         self._pad_hidden_restore_idx(global_batch)
         if not self.is_decode_sharded:
             local_batch = self._pad_replicated_decode_graph(global_batch, local_batch)
@@ -457,15 +473,40 @@ class AscendPCPManager(PCPManager):
         return
 
     def restore_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        """Restore active tokens and zero any fixed-graph padding rows."""
+        """Restore tokens to the global PCP layout, following the batch length.
+
+        Output-length contract: the returned tensor matches the global batch
+        layout, i.e. ``num_tokens_after_padding`` rows when the batch is padded
+        for FULL graph replay and the compact ``num_tokens`` rows otherwise.
+        Downstream consumers (sampling, replicated drafters) index restored
+        states with the global batch layout, so padding rows must be present
+        for padded batches; they read as zeros. ``_pad_hidden_restore_idx``
+        extends the restore indices to the padded extent, so the parent is
+        expected to return exactly that length; anything else raises.
+        Fixed-K speculative decode sharding restores to the unpadded global
+        batch instead, returning the compact ``num_tokens`` rows.
+        """
         if not self.is_last_pp_rank:
             return hidden_states
 
         restored_hidden_states = super().restore_hidden_states(hidden_states)
-        if self._global_batch is not None:
-            restored_hidden_states[self._global_batch.num_tokens :].zero_()
-            if self._restore_unpadded_global_batch():
-                restored_hidden_states = restored_hidden_states[: self._global_batch.num_tokens]
+        if self._global_batch is None:
+            return restored_hidden_states
+
+        num_tokens = self._global_batch.num_tokens
+        num_tokens_after_padding = self._global_batch.num_tokens_after_padding
+        if restored_hidden_states.shape[0] != num_tokens_after_padding:
+            raise RuntimeError(
+                "PCP restored hidden-state length does not match the global "
+                "graph layout: "
+                f"{restored_hidden_states.shape[0]} != {num_tokens_after_padding}."
+            )
+        if num_tokens == num_tokens_after_padding:
+            return restored_hidden_states
+
+        restored_hidden_states[num_tokens:].zero_()
+        if self._restore_unpadded_global_batch():
+            restored_hidden_states = restored_hidden_states[:num_tokens]
         return restored_hidden_states
 
     def _restore_unpadded_global_batch(self) -> bool:
@@ -481,37 +522,72 @@ class AscendPCPManager(PCPManager):
             and not self._global_batch.is_dummy
         )
 
-    def restore_for_sampling(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> tuple[torch.Tensor, InputBatch]:
-        """Return the global batch and, when already global, skip re-gathering.
+    def _expose_unpadded_global_batch(self, global_batch: InputBatch) -> InputBatch:
+        """Expose real request boundaries and token extent at restoration."""
+        # Preserve the target's batch; expose real request boundaries and
+        # token extent at the global restoration boundary.
+        return replace(
+            global_batch,
+            num_tokens_after_padding=global_batch.num_tokens,
+            query_start_loc=global_batch.query_start_loc[: global_batch.num_reqs + 1],
+            query_start_loc_np=global_batch.query_start_loc_np[: global_batch.num_reqs + 1],
+        )
 
-        On vLLM main the Ascend runner restores the target hidden states to the
-        global PCP layout before sampling (draft_hidden_states is captured
-        before the upstream restore), so a second all-gather here would reorder
-        them. Consume the runner's explicit pre-restore marker instead of
-        inferring the layout from the tensor length: under piecewise/FULL
-        graphs each rank pads its local batch to the same global padded length,
-        so a length match does not distinguish local from restored layouts.
-        """
-        assert self._global_batch is not None
-        if self._sampling_hidden_restored:
-            self._sampling_hidden_restored = False
-            global_batch = self._global_batch
-        else:
-            hidden_states, global_batch = super().restore_for_sampling(hidden_states)
-        if self._restore_unpadded_global_batch():
-            # Preserve the target's batch; expose real request boundaries and
-            # token extent at the global restoration boundary.
-            global_batch = replace(
-                global_batch,
-                num_tokens_after_padding=global_batch.num_tokens,
-                query_start_loc=global_batch.query_start_loc[: global_batch.num_reqs + 1],
-                query_start_loc_np=global_batch.query_start_loc_np[: global_batch.num_reqs + 1],
-            )
-            hidden_states = hidden_states[: global_batch.num_tokens]
-        return hidden_states, global_batch
+    if vllm_version_is("0.30.0"):
+
+        def restore_for_sampling(
+            self,
+            hidden_states: torch.Tensor,
+        ) -> tuple[torch.Tensor, InputBatch]:
+            """Return the global batch and, when already global, skip re-gathering.
+
+            On vLLM main the Ascend runner restores the target hidden states to
+            the global PCP layout before sampling (draft_hidden_states is
+            captured before the upstream restore), so a second all-gather here
+            would reorder them. Consume the runner's explicit pre-restore marker
+            instead of inferring the layout from the tensor length: under
+            piecewise/FULL graphs each rank pads its local batch to the same
+            global padded length, so a length match does not distinguish local
+            from restored layouts.
+            """
+            assert self._global_batch is not None
+            if self._sampling_hidden_restored:
+                self._sampling_hidden_restored = False
+                global_batch = self._global_batch
+            else:
+                hidden_states, global_batch = super().restore_for_sampling(hidden_states)
+            if self._restore_unpadded_global_batch():
+                global_batch = self._expose_unpadded_global_batch(global_batch)
+                hidden_states = hidden_states[: global_batch.num_tokens]
+            return hidden_states, global_batch
+
+    else:
+
+        def restore_for_sampling(  # type: ignore[misc]
+            self,
+            hidden_states: torch.Tensor,
+            aux_hidden_states: list[torch.Tensor] | None,
+        ) -> tuple[torch.Tensor, list[torch.Tensor] | None, InputBatch]:
+            """Return the global batch and, when already global, skip re-gathering.
+
+            vLLM main (#57980) threads aux_hidden_states through this hook and
+            returns them alongside the global batch.
+            """
+            assert self._global_batch is not None
+            if self._sampling_hidden_restored:
+                self._sampling_hidden_restored = False
+                global_batch = self._global_batch
+            else:
+                hidden_states, aux_hidden_states, global_batch = super().restore_for_sampling(
+                    hidden_states, aux_hidden_states
+                )
+            if self._restore_unpadded_global_batch():
+                global_batch = self._expose_unpadded_global_batch(global_batch)
+                num_tokens = global_batch.num_tokens
+                hidden_states = hidden_states[:num_tokens]
+                if aux_hidden_states is not None:
+                    aux_hidden_states = [states[:num_tokens] for states in aux_hidden_states]
+            return hidden_states, aux_hidden_states, global_batch
 
     def restore_hidden_state_buffer(self, hidden_states: torch.Tensor) -> None:
         """Restore a model-owned rank-local buffer to the global PCP layout."""

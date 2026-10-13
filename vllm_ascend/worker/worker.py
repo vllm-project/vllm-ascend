@@ -84,6 +84,7 @@ from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.device_allocator.sleep_mem_optimized import SleepWakeupManager
+from vllm_ascend.distributed.eplb.eplb_state import AscendEplbState
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import uses_sfa_dspark_kv_transfer
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
     build_layerwise_cache_layout,
@@ -95,6 +96,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     plan_sparse_kv_offload_memory,
 )
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
+from vllm_ascend.observability.runtime_guard.hooks import runtime_guard_idle_step
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
 from vllm_ascend.utils import (
@@ -363,6 +365,9 @@ class NPUWorker(WorkerBase):
         self._weight_update_active = False
 
     def shutdown(self) -> None:
+        state = getattr(getattr(self, "model_runner", None), "eplb_state", None)
+        if isinstance(state, AscendEplbState):
+            state.close()
         if ensure_kv_transfer_shutdown is not None:
             ensure_kv_transfer_shutdown()
 
@@ -1265,6 +1270,9 @@ class NPUWorker(WorkerBase):
     def reset_encoder_cache(self) -> None:
         self.model_runner.reset_encoder_cache()
 
+    # Lockstep wave sync for idle DP ranks (never burns manual_dump);
+    # lives in the runtime_guard hook, see runtime_guard_idle_step.
+    @runtime_guard_idle_step
     def execute_dummy_batch(self) -> None:
         self.log_memory_stats()
         num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)

@@ -749,18 +749,30 @@ def masked_block_runs(
         return []
     if mask is None:
         return [(start_block, end_block)]
+    mask_len = len(mask)
+    if start_block >= mask_len:
+        return [(start_block, end_block)]
+    scan_end = min(end_block, mask_len)
+    # True/False map to b"\x01"/b"\x00"; bytes.find scans at C speed and
+    # never raises (unlike list.index), so both dense and holey masks skip
+    # the per-block Python loop.
+    bits = bytes(mask[start_block:scan_end])
     runs: list[tuple[int, int]] = []
-    run_start: int | None = None
-    for block_idx in range(start_block, end_block):
-        allowed = block_idx >= len(mask) or mask[block_idx]
-        if allowed and run_start is None:
-            run_start = block_idx
-        elif not allowed and run_start is not None:
-            runs.append((run_start, block_idx))
-            run_start = None
-    if run_start is not None:
-        runs.append((run_start, end_block))
-    return runs
+    pos = 0
+    while True:
+        hole = bits.find(b"\x00", pos)
+        if hole == -1:
+            runs.append((start_block + pos, end_block))
+            return runs
+        if hole > pos:
+            runs.append((start_block + pos, start_block + hole))
+        pos = bits.find(b"\x01", hole + 1)
+        if pos == -1:
+            # Remaining mask blocks are all disallowed, but blocks at or
+            # beyond mask_len stay allowed.
+            if end_block > mask_len:
+                runs.append((mask_len, end_block))
+            return runs
 
 
 class _LazyGroupedBlockHashList(Sequence[BlockHash | str]):
