@@ -657,8 +657,6 @@ Before you start, please:
     1. Prefill node
 
         ```shell
-        #!/usr/bin/env bash
-        set -e
         export LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:/usr/local/lib/"
 
         nic_name="xxxx" # change to your own nic name
@@ -734,8 +732,6 @@ Before you start, please:
     2. Decode node
 
         ```shell
-        #!/usr/bin/env bash
-        set -e
         export LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:/usr/local/lib/"
 
         nic_name="xxxx" # change to your own nic name
