@@ -10,6 +10,7 @@ import vllm_ascend.models.glm5next.kda as model_kda
 
 
 def test_compiled_forward_reads_runtime_metadata_after_profiling(monkeypatch):
+    monkeypatch.setattr(torch.accelerator, "is_available", lambda: False)
     layer = model_kda.Glm5NextLinearAttention.__new__(model_kda.Glm5NextLinearAttention)
     torch.nn.Module.__init__(layer)
     layer.prefix = "layer"
