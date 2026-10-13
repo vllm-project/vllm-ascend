@@ -426,7 +426,7 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
 
 ### 5.3 Prefill-Decode Disaggregation
 
-This section shows MiniMax-M3 PD disaggregation on three Atlas 800 A3 nodes (one Prefill node and two Decode nodes, 1P2D), or two 950DT nodes (1P1D).
+This section shows MiniMax-M3 PD disaggregation on three Atlas 800 A3 nodes (one Prefill node and two Decode nodes, 1P1D), or two 950DT nodes (1P1D).
 
 PD disaggregation separates Prefill and Decode into different service groups. Prefill nodes process large prompt chunks, Decode nodes serve token generation, and a proxy forwards requests between them. Use Mooncake for KV cache transfer. Refer to [Mooncake](../features/pd_disaggregation_mooncake_multi_node.md) for the general PD disaggregation workflow.
 
@@ -557,11 +557,8 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
 
 === "A3 series(W8A8)"
 
-    Prefill-Decode disaggregation can be deployed on 3 Atlas 800 A3 (64GB × 16) for `MiniMax-M3-w8a8` (W8A8) with `MiniMax-M3-EAGLE3-GQA`.
+    Prefill-Decode disaggregation can be deployed on 3 Atlas 800 A3 (64GB × 24) for `MiniMax-M3-w8a8` (W8A8) with `MiniMax-M3-EAGLE3-GQA`.
 
-    This configuration retains the Prefill layout (`DP1 × TP4 × PP4`) on one node and eight Decode ranks (`DP8 × TP4 × PP1`) across two Decode nodes, with four ranks per node. Each node uses all 16 NPU chips. Set `node_p_ip`, `node_d0_ip`, and `node_d1_ip` to the three nodes' communication IP addresses before running the launch and proxy commands.
-
-    The Decode nodes use the default Model Runner V1 (leave `VLLM_USE_V2_MODEL_RUNNER` unset), `--max-num-seqs 128`, `--max-num-batched-tokens 2048`, and prefix caching. Prefix caching being enabled does not guarantee a cache hit; reuse warmed prompts when measuring cached-prefix decode performance. The Prefill settings are unchanged; only their Mooncake metadata describing the Decode group is updated to DP8.
 
     1. Prefill node
 
@@ -640,6 +637,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
     model_path="xxxx"               # MiniMax-M3 model path
     EAGLE3_WEIGHT_PATH="xxxx"       # MiniMax-M3-EAGLE3-GQA path
 
+    export VLLM_USE_V2_MODEL_RUUNER=1
     export HCCL_BUFFSIZE=2048
     export VLLM_HOST_IP=$local_ip
     export HCCL_IF_IP=$local_ip
@@ -720,7 +718,6 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
         --vllm-start-port 31260
     ```
 
-    Wait for rank 0 to print `Started DP Coordinator process`, then launch the second Decode node from another shell; the first node needs the second node to complete initialization.
 
     3. Second Decode node (`node_d1_ip`, global ranks 4–7)
 
@@ -734,7 +731,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
 
     Set `local_ip` and `nic_name` in the Decode template for each node separately. Both Decode nodes use `node_d0_ip` as the DP coordinator address. Each node exposes API ports `31260` through `31263`; wait for all eight Decode ranks to print `Application startup complete`.
 
-    To set up request forwarding, run the following script on a node that can reach every Prefill and Decode API port. You can get the proxy program in the repository's examples: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py). For A3 1P2D, the proxy forwards requests to one Prefill rank and eight Decode ranks across three nodes.
+    To set up request forwarding, run the following script on a node that can reach every Prefill and Decode API port. You can get the proxy program in the repository's examples: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py). For A3 1P1D, the proxy forwards requests to one Prefill rank and eight Decode ranks across three nodes.
 
     ```bash
     unset http_proxy https_proxy ftp_proxy all_proxy HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY
