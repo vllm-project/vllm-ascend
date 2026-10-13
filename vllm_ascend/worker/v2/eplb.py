@@ -12,6 +12,7 @@ from vllm.model_executor.models.interfaces import (
 from vllm.v1.worker.gpu.eplb_utils import EPLBController
 
 from vllm_ascend.ascend_config import EplbConfig
+from vllm_ascend.device.hardware_profile import MoECommPolicy, get_current_hardware_profile
 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbState
 from vllm_ascend.distributed.eplb.policy.factory import create_eplb_policy
 from vllm_ascend.patch.platform.patch_eplb import resolve_ascend_eplb_communicator
@@ -92,17 +93,23 @@ class AscendEPLBController(EPLBController):
         state = self.state
         if state is None or not self.parallel_config.enable_eplb:
             return
-        if not state.uses_custom_load_stats:
+        supports_allgather = get_current_hardware_profile().moe_comm_policy is MoECommPolicy.CAPACITY_AND_WORLD_SIZE
+        if not state.uses_custom_load_stats or supports_allgather:
             state.prepare_forward(model_config, num_unpadded_tokens, ubatch_slices)
-            return
-        # Operator-provided counts make the upstream unpadded-token tensor unused.
+            if not supports_allgather:
+                return
+        if supports_allgather:
+            state._uses_phase_filter = self.load_collection_phase != "all"
+            if state.allgather_record_tensor is not None:
+                state.allgather_record_tensor.fill_(-1)
+        # AllGather needs source validity; other paths use operator counts.
         if state.should_record_tensor is not None:
             is_sampling = state._should_record_current_step(log_stats=self.parallel_config.eplb_config.log_balancedness)
             should_record = is_sampling and self._load_collection_phase_matched
             state.should_record_tensor.fill_(should_record)
             state._is_load_sampling_step = is_sampling
             state._should_collect_local_load = should_record
-            if should_record:
+            if should_record and not supports_allgather:
                 state._has_fresh_recorded_load = True
 
     def setup_from_mapping(

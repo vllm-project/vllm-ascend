@@ -4,7 +4,69 @@
 import torch
 from vllm.utils.torch_utils import direct_register_custom_op
 
+from vllm_ascend.device.hardware_profile import MoECommPolicy, get_current_hardware_profile
+
 EXPERT_REPLICA_ROUTING_TABLE_NUM_ROWS = 1024
+
+
+def use_allgather_eplb(enabled: bool) -> bool:
+    # The forward context imports the MoE implementations during setup.
+    from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
+
+    return (
+        enabled
+        and get_current_hardware_profile().moe_comm_policy is MoECommPolicy.CAPACITY_AND_WORLD_SIZE
+        and _EXTRA_CTX.moe_comm_type is MoECommType.ALLGATHER
+    )
+
+
+def build_allgather_routing_table(global_expert_map: torch.Tensor, num_local_experts: int) -> torch.Tensor:
+    """Build a rank-independent replica table from the legacy logical map."""
+    num_ranks = global_expert_map.shape[0]
+    num_physical_experts = num_ranks * num_local_experts
+    offsets = torch.arange(num_ranks, device=global_expert_map.device) * num_local_experts
+    candidates = torch.where(global_expert_map >= 0, global_expert_map + offsets[:, None], num_physical_experts)
+    logical_map = candidates.T.sort(dim=1).values
+    replica_count = (logical_map < num_physical_experts).sum(dim=1)
+    return build_expert_replica_routing_table(logical_map, replica_count, ep_rank=0)
+
+
+def make_allgather_mask(
+    num_tokens: int,
+    num_unpadded_tokens: torch.Tensor,
+    record_enabled: torch.Tensor,
+    *,
+    is_padding: torch.Tensor | None = None,
+    tp_size: int = 1,
+    tp_rank: int = 0,
+) -> torch.Tensor:
+    """Describe valid source rows before the same gather/unpad as MoE inputs."""
+    start = tp_rank * num_tokens
+    if is_padding is None:
+        rows = torch.arange(start, start + num_tokens, device=num_unpadded_tokens.device)
+        valid = rows < num_unpadded_tokens
+    elif is_padding.numel() == num_tokens:
+        valid = ~is_padding
+    else:
+        padding = max(0, num_tokens * tp_size - is_padding.numel())
+        padded = torch.nn.functional.pad(is_padding, (0, padding), value=True)
+        valid = ~padded[start : start + num_tokens]
+    return valid & record_enabled.to(torch.bool)
+
+
+def count_allgather_tokens(
+    topk_ids: torch.Tensor,
+    token_mask: torch.Tensor,
+    local_expert_start: int,
+    local_expert_count: int,
+) -> torch.Tensor:
+    """Count eligible routes owned locally without changing the GMM counts."""
+    local_ids = topk_ids.to(torch.int64) - local_expert_start
+    eligible = token_mask[:, None] & (local_ids >= 0) & (local_ids < local_expert_count)
+    indices = local_ids.clamp(0, local_expert_count - 1).reshape(-1)
+    counts = torch.zeros(local_expert_count, dtype=torch.int64, device=topk_ids.device)
+    counts.scatter_add_(0, indices, eligible.to(torch.int64).reshape(-1))
+    return counts
 
 
 def build_expert_replica_routing_table(

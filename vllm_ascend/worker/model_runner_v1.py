@@ -568,6 +568,7 @@ class NPUModelRunner(GPUModelRunner):
         self.dynamic_eplb = eplb_config.dynamic_eplb
         self.eplb_enable = self.dynamic_eplb or (eplb_config.expert_map_path is not None)
         if self.dynamic_eplb:
+            self.eplb_adaptor: VllmEplbAdaptor
             self.is_eplb_warmuped = False
             self.policy_type = eplb_config.eplb_policy_type
             self.eplb_loader = D2DExpertWeightLoader()
@@ -2644,6 +2645,7 @@ class NPUModelRunner(GPUModelRunner):
                 aclgraph_runtime_mode=cudagraph_mode,
                 batch_descriptor=batch_desc,
                 num_actual_tokens=scheduler_output.total_num_scheduled_tokens,
+                eplb_moe_layers=self.eplb_adaptor.moe_layers if self.dynamic_eplb else None,
                 model_instance=self.model,
                 device_metadata_executor=active_device_metadata_executor,
                 skip_compiled=has_encoder_input,
@@ -4348,6 +4350,8 @@ class NPUModelRunner(GPUModelRunner):
                 num_tokens_across_dp=num_tokens_across_dp,
                 in_profile_run=is_profile,
                 num_actual_tokens=num_tokens_padded,
+                eplb_num_actual_tokens=0,
+                eplb_moe_layers=self.eplb_adaptor.moe_layers if self.dynamic_eplb else None,
                 aclgraph_runtime_mode=cudagraph_runtime_mode,
                 batch_descriptor=batch_desc,
                 model_instance=self.model,

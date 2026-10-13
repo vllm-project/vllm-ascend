@@ -546,11 +546,25 @@ def test_set_ascend_forward_context_pins_current_vllm_config(monkeypatch, model_
     else:
         monkeypatch.setitem(sys.modules, moe_mod_name, SimpleNamespace(get_moe_comm_method=lambda _t: legacy_method))
 
-    for expected in (target_method, draft_method, target_method):
+    layer = torch.nn.Module()
+    layer.register_buffer("allgather_source_metadata", torch.zeros(2, dtype=torch.int64))
+    metadata = layer.allgather_source_metadata
+    for expected, actual_tokens in zip((target_method, draft_method, target_method), (3, 0, 2)):
         model = SimpleNamespace(moe_comm_methods={None: expected}) if model_owned else None
-        with afc.set_ascend_forward_context(None, vllm_config, num_tokens=4, model_instance=model):
+        with afc.set_ascend_forward_context(
+            None,
+            vllm_config,
+            num_tokens=4,
+            model_instance=model,
+            num_actual_tokens=4,
+            eplb_num_actual_tokens=actual_tokens,
+            eplb_moe_layers=[layer],
+            eplb_heat_collection_status=True,
+        ):
             assert seen["inside"] is True
             assert seen["config"] is vllm_config
             assert forward_context.moe_comm_method is (expected if model_owned else legacy_method)
+            assert layer.allgather_source_metadata is metadata
+            assert metadata.tolist() == [actual_tokens, 1]
 
     assert seen["inside"] is False

@@ -34,6 +34,7 @@ class D2DExpertWeightLoader:
         self.comm_op_list = None
         self.updated_expert_map = None
         self.updated_log2phy_map = None
+        self.updated_global_expert_map = None
         self.layer_id = -1  # layer id to be updated
         self.state = ExpertWeightUpdateState.WAITING
         self.recv_expert_list = []
@@ -119,6 +120,10 @@ class D2DExpertWeightLoader:
         for recv_expert_info in self.recv_expert_list:
             local_expert_to_replace, buffer_tensor_id = recv_expert_info
             self.eplb_adaptor.do_update_expert_weight(self.layer_id, local_expert_to_replace, buffer_tensor_id)
+
+        # Publish the common routing table only after the replacement weights.
+        if self.updated_global_expert_map is not None:
+            self.eplb_adaptor.moe_layers[self.layer_id].update_allgather_expert_map(self.updated_global_expert_map)
 
         logger.debug(
             "[eplb/d2d_loader] Layer %s D2D transfer completed, updated_experts=%s",
